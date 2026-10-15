@@ -119,8 +119,31 @@ pub trait PaintScene {
         self.push_clip_rounded(origin, size, radii.largest());
     }
 
-    /// Pop the most recently pushed clip, rectangular or rounded. Defaulted to
-    /// a no-op; see [`PaintScene::push_clip`].
+    /// Push a clip to an arbitrary closed outline onto the backend clip stack;
+    /// subsequent draws are clipped to `path`'s interior (nonzero winding)
+    /// until the matching [`PaintScene::pop_clip`] — the same pop every other
+    /// clip uses.
+    ///
+    /// `path` is in the widget's local coordinate space and `origin`
+    /// translates it into the parent's, exactly as [`PaintScene::fill_path`]'s
+    /// does. The renderer lowers it to a coverage mask, never a layer page, so
+    /// a [`PaintScene::push_retained`] body under it paints inline rather than
+    /// being retained (see [`frust_scene::Command::PushClipPath`]).
+    ///
+    /// Defaulted to a rectangular [`PaintScene::push_clip`] of the path's
+    /// bounding box rather than to a no-op — like
+    /// [`PaintScene::push_clip_rounded_radii`], a defaulted *push* against an
+    /// implemented *pop* would unbalance a recorder scene's clip stack, and the
+    /// bounding box is the tightest rectangle that never clips away anything
+    /// the path would have kept. The `SceneBuilder` implementation records a
+    /// real [`frust_scene::Command::PushClipPath`].
+    fn push_clip_path(&mut self, origin: Point, path: &BezPath) {
+        let bounds = kurbo::Shape::bounding_box(path);
+        self.push_clip(origin + bounds.origin().to_vec2(), bounds.size());
+    }
+
+    /// Pop the most recently pushed clip, rectangular, rounded or path.
+    /// Defaulted to a no-op; see [`PaintScene::push_clip`].
     fn pop_clip(&mut self) {}
 
     /// Emit a run of *unshaped* text anchored at `origin`.
@@ -454,6 +477,10 @@ impl PaintScene for SceneBuilder<'_> {
 
     fn push_clip_rounded_radii(&mut self, origin: Point, size: Size, radii: CornerRadii) {
         SceneBuilder::push_clip_rounded_radii(self, rect_at(origin, size), radii);
+    }
+
+    fn push_clip_path(&mut self, origin: Point, path: &BezPath) {
+        SceneBuilder::push_clip_path(self, path_at(origin, path));
     }
 
     fn pop_clip(&mut self) {
@@ -5578,6 +5605,71 @@ mod tests {
         assert_eq!(scene.fills, vec![(origin, size, 12.0)]);
         assert_eq!(scene.clips, vec![(origin, size, 12.0)]);
         assert_eq!(scene.pops, 1);
+    }
+
+    /// A recorder that predates path clips: it knows only the rectangular
+    /// push and the shared pop.
+    #[derive(Default)]
+    struct RectClipOnlyScene {
+        clips: Vec<(Point, Size)>,
+        pops: usize,
+    }
+
+    impl PaintScene for RectClipOnlyScene {
+        fn fill_rect(&mut self, _origin: Point, _size: Size, _color: Color) {}
+        fn draw_text(&mut self, _origin: Point, _text: &str) {}
+        fn push_clip(&mut self, origin: Point, size: Size) {
+            self.clips.push((origin, size));
+        }
+        fn pop_clip(&mut self) {
+            self.pops += 1;
+        }
+    }
+
+    fn triangle_probe_path() -> BezPath {
+        let mut path = BezPath::new();
+        path.move_to((4.0, 2.0));
+        path.line_to((14.0, 2.0));
+        path.line_to((9.0, 12.0));
+        path.close_path();
+        path
+    }
+
+    #[test]
+    fn path_clip_default_pushes_the_translated_bounding_box() {
+        // A scene with no path-clip concept still clips — to the path's
+        // bounding box, offset by `origin` — and its clip stack stays balanced
+        // against the shared `pop_clip`.
+        let mut scene = RectClipOnlyScene::default();
+        scene.push_clip_path(Point::new(10.0, 20.0), &triangle_probe_path());
+        scene.pop_clip();
+
+        assert_eq!(
+            scene.clips,
+            vec![(Point::new(14.0, 22.0), Size::new(10.0, 10.0))]
+        );
+        assert_eq!(scene.pops, 1);
+    }
+
+    #[test]
+    fn scene_builder_records_a_path_clip_translated_by_origin() {
+        let mut scene = frust_scene::Scene::new();
+        {
+            let mut builder = frust_scene::SceneBuilder::new(&mut scene);
+            let paint: &mut dyn PaintScene = &mut builder;
+            paint.push_clip_path(Point::new(10.0, 20.0), &triangle_probe_path());
+            paint.pop_clip();
+        }
+
+        match &scene.commands()[0] {
+            frust_scene::Command::PushClipPath { path, transform } => {
+                let expected = Affine::translate((10.0, 20.0)) * triangle_probe_path();
+                assert_eq!(*path, expected);
+                assert_eq!(*transform, Affine::IDENTITY);
+            }
+            other => panic!("expected PushClipPath, got {other:?}"),
+        }
+        assert!(matches!(scene.commands()[1], frust_scene::Command::PopClip));
     }
 
     #[test]

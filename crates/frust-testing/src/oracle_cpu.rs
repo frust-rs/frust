@@ -487,6 +487,17 @@ impl Painter<'_> {
         self.ctx.push_clip_layer(&path);
     }
 
+    fn push_clip_path(&mut self, transform: Affine, path: &BezPath) {
+        // The five-argument `push_layer` with only a clip path — exactly what
+        // `push_clip_layer` forwards to — under the nonzero rule the engine's
+        // coverage mask is generated with (`ClipStack::push_path`). The fill
+        // rule is set explicitly because a clip layer takes whichever rule the
+        // context currently holds.
+        self.ctx.set_transform(transform);
+        self.ctx.set_fill_rule(Fill::NonZero);
+        self.ctx.push_layer(Some(path), None, None, None, None);
+    }
+
     fn pop_clip(&mut self) {
         self.ctx.pop_layer();
     }
@@ -605,6 +616,10 @@ enum Group {
     /// A clip group; `Some(radii)` when the clip has rounded corners, so the
     /// hoist re-pushes it with its corners intact rather than squared.
     Clip(Option<RoundedRectRadii>),
+    /// A path clip group, carrying the outline so the hoist re-pushes the
+    /// path itself rather than its bounding box. Popped by `PopClip` like
+    /// [`Group::Clip`].
+    ClipPath(BezPath),
     /// An opacity group, carrying the alpha to re-push with.
     Layer(f32),
     /// The alpha layer `PushRetained`'s inline emulation pushes when its
@@ -700,6 +715,18 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
                 groups.push((Group::Clip(Some(radii)), transform, *rect));
                 painter.push_clip_rounded(transform, rect, radii);
             }
+            Command::PushClipPath { path, transform } => {
+                // The same clip stack again. The group's rectangle is the
+                // outline's bounding box: it only bounds a hoisted punch, and
+                // the box is what the engine confines one to as well.
+                let transform = combined * *transform;
+                groups.push((
+                    Group::ClipPath(path.clone()),
+                    transform,
+                    path.bounding_box(),
+                ));
+                painter.push_clip_path(transform, path);
+            }
             Command::PopClip => {
                 // Guarded, the same way `frust-engine`'s own `GroupStack::pop`
                 // is (`close_group`, `compile/mod.rs`): a `SceneBuilder`
@@ -783,7 +810,7 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
                 if punch.width() > 0.0 && punch.height() > 0.0 {
                     for (kind, ..) in groups.iter().rev() {
                         match kind {
-                            Group::Clip(_) => painter.pop_clip(),
+                            Group::Clip(_) | Group::ClipPath(_) => painter.pop_clip(),
                             Group::Layer(_) | Group::SnapshotLayer(_) => painter.pop_layer(),
                         }
                     }
@@ -792,6 +819,7 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
                         match kind {
                             Group::Clip(None) => painter.push_clip(*t, r),
                             Group::Clip(Some(radii)) => painter.push_clip_rounded(*t, r, *radii),
+                            Group::ClipPath(path) => painter.push_clip_path(*t, path),
                             Group::Layer(alpha) | Group::SnapshotLayer(alpha) => {
                                 painter.push_layer(*t, r, *alpha)
                             }
@@ -928,7 +956,7 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
     // rasterizer with a pending layer.
     for (kind, ..) in groups.iter().rev() {
         match kind {
-            Group::Clip(_) => painter.pop_clip(),
+            Group::Clip(_) | Group::ClipPath(_) => painter.pop_clip(),
             Group::Layer(_) | Group::SnapshotLayer(_) => painter.pop_layer(),
         }
     }
@@ -1083,6 +1111,7 @@ mod tests {
             Command::GlyphRun(_) => "GlyphRun",
             Command::PushClip { .. } => "PushClip",
             Command::PushClipRounded { .. } => "PushClipRounded",
+            Command::PushClipPath { .. } => "PushClipPath",
             Command::PopClip => "PopClip",
             Command::Image { .. } => "Image",
             Command::BlurredRoundedRect { .. } => "BlurredRoundedRect",
@@ -1102,13 +1131,14 @@ mod tests {
     /// `DrawRetained`: the oracle refuses it (see
     /// `a_draw_retained_is_a_renderer_error_in_the_oracle`), so the coverage
     /// scene, which renders, cannot hold one.
-    const ALL_VARIANTS: [&str; 17] = [
+    const ALL_VARIANTS: [&str; 18] = [
         "FillRect",
         "RoundedRect",
         "Line",
         "GlyphRun",
         "PushClip",
         "PushClipRounded",
+        "PushClipPath",
         "PopClip",
         "Image",
         "BlurredRoundedRect",
@@ -1145,8 +1175,8 @@ mod tests {
         path
     }
 
-    /// A scene holding at least one of every `Command` variant, balanced (two
-    /// clip pushes share the one `PopClip` variant, so it appears twice).
+    /// A scene holding at least one of every `Command` variant, balanced (three
+    /// clip pushes share the one `PopClip` variant, so it appears three times).
     fn every_variant_scene() -> Scene {
         let mut scene = Scene::new();
         {
@@ -1183,6 +1213,9 @@ mod tests {
                 Rect::new(1.0, 1.0, 17.0, 17.0),
                 CornerRadii::new(6.0, 0.0, 3.0, 1.0),
             );
+            // An outline open around the clear below, so the `ClearRect`
+            // hoist pops and re-pushes a path clip as well.
+            builder.push_clip_path(Rect::new(0.0, 0.0, 19.0, 19.0).to_path(FLATTEN_TOLERANCE));
             builder.push_layer(Rect::new(2.0, 2.0, 16.0, 16.0), 0.5);
             builder.push_retained(7, Rect::new(3.0, 3.0, 15.0, 15.0), 0.8, 1.25);
             builder.fill_path(triangle(), Brush::Solid(GREEN));
@@ -1196,6 +1229,7 @@ mod tests {
             builder.scene_texture(1, Rect::new(2.0, 2.0, 12.0, 12.0));
             builder.pop_retained();
             builder.pop_layer();
+            builder.pop_clip();
             builder.pop_clip();
             builder.pop_clip();
         }

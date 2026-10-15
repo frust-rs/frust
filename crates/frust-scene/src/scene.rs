@@ -198,16 +198,34 @@ pub enum Command {
     ///
     /// Carried as a `Rect` + [`CornerRadii`], mirroring
     /// [`Command::RoundedRect`] rather than naming a `kurbo::RoundedRect`; the
-    /// render crate reconstitutes the concrete shape at encode time. An
-    /// arbitrary-path clip is deliberately not modelled yet — extend here (and
-    /// in `frust-render::convert`) if one is ever needed.
+    /// render crate reconstitutes the concrete shape at encode time. A clip
+    /// to an arbitrary outline is [`Command::PushClipPath`].
     PushClipRounded {
         rect: Rect,
         /// Per-corner radii, in the pre-transform coordinate space.
         radii: CornerRadii,
         transform: Affine,
     },
-    /// Pop the most recently pushed clip.
+    /// Push a clip to an arbitrary closed outline onto the render backend's
+    /// clip stack, under a transform. Subsequent draws are clipped to the
+    /// path's interior (nonzero winding rule) until the matching
+    /// [`Command::PopClip`].
+    ///
+    /// Popped by the *same* [`Command::PopClip`] every other clip uses — one
+    /// clip stack. `path` is positioned in the same coordinate space as every
+    /// other command (the caller has translated it to the widget's origin
+    /// before recording), exactly as [`Command::Path`]'s is; open subpaths are
+    /// closed implicitly, as a fill closes them.
+    ///
+    /// Lowered as a **coverage mask, no layer page**: the outline is
+    /// rasterized once into coverage the draws inside it are generated
+    /// against, the way a rounded clip is — never an offscreen layer. Because
+    /// it is a mask, **a retained body under it is never retained**: a
+    /// [`Command::PushRetained`] bracket opened inside a path clip always
+    /// paints inline, as one inside a rounded clip does.
+    PushClipPath { path: BezPath, transform: Affine },
+    /// Pop the most recently pushed clip, whichever of [`Command::PushClip`],
+    /// [`Command::PushClipRounded`] or [`Command::PushClipPath`] pushed it.
     PopClip,
     /// Draw a decoded image (natural pixel size `data.width`x`data.height`),
     /// scaled to fill `dest`, under a transform.

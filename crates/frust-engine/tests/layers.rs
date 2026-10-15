@@ -23,10 +23,10 @@ use core::ops::Range;
 
 use frust_engine::compile::CompiledFrame;
 use frust_engine::schedule::{PageConfig, Round, RoundTarget, Schedule};
-use frust_engine::{EngineError, SceneCompiler};
+use frust_engine::{EngineError, RetainedKind, SceneCompiler};
 use frust_gpu::{DownlevelProfile, TierCaps};
 use frust_scene::{Scene, SceneBuilder};
-use kurbo::{Affine, Rect};
+use kurbo::{Affine, BezPath, Rect};
 use peniko::Brush;
 use peniko::color::palette::css::RED;
 use vello_common::tile::Tile;
@@ -780,6 +780,136 @@ fn a_bracket_a_correction_pushes_off_the_grid_still_balances_its_own_pop() {
         covered_bbox(&coverage(&frame)),
         Some((20, 20, 36, 36)),
         "the stray clip's pop closed the bracket that clip opened, not the frame"
+    );
+}
+
+// ---------------------------------------------------------------------
+// A retained body under a path clip
+// ---------------------------------------------------------------------
+
+/// The body every retained-bracket case below records, in its own space.
+const RETAINED_BODY: Rect = Rect::new(0.0, 0.0, 16.0, 16.0);
+
+/// A star-ish outline covering the whole viewport's middle — wide enough that
+/// a body inside it is never cut by the outline's own edge, so the only thing
+/// that can make it unretainable is that the clip is a mask.
+fn wide_outline() -> BezPath {
+    let mut path = BezPath::new();
+    path.move_to((32.0, -40.0));
+    path.line_to((110.0, 24.0));
+    path.line_to((32.0, 90.0));
+    path.line_to((-46.0, 24.0));
+    path.close_path();
+    path
+}
+
+/// Whether each `PushRetained` the frame recorded may be held by a page.
+fn retainable(frame: &CompiledFrame) -> Vec<bool> {
+    frame
+        .retained
+        .iter()
+        .filter_map(|bracket| match bracket.kind {
+            RetainedKind::Record { retainable, .. } => Some(retainable),
+            RetainedKind::Draw { .. } => None,
+        })
+        .collect()
+}
+
+/// `scene` compiled with retention on — the only compiler that records a
+/// `RetainedBracket` at all.
+fn compile_retained(scene: &Scene) -> CompiledFrame {
+    let mut compiler = SceneCompiler::new(VIEWPORT.0, VIEWPORT.1);
+    compiler.set_retained_layers(true);
+    compiler
+        .compile(scene, Affine::IDENTITY, VIEWPORT)
+        .expect("an in-range scene compiles")
+}
+
+/// A solid [`RETAINED_BODY`] in a `PushRetained` bracket at `(8, 8)`.
+fn record_retained_body(builder: &mut SceneBuilder<'_>) {
+    builder.push_transform(Affine::translate((8.0, 8.0)));
+    builder.push_retained(1, RETAINED_BODY, 1.0, 1.0);
+    builder.fill_rect(RETAINED_BODY, red());
+    builder.pop_retained();
+    builder.pop_transform();
+}
+
+#[test]
+fn a_retained_body_under_a_path_clip_is_marked_unretainable() {
+    let plain = compile_retained(&scene_of(record_retained_body));
+    assert_eq!(
+        retainable(&plain),
+        vec![true],
+        "the control: the same body under no clip is retainable"
+    );
+
+    let under_path = compile_retained(&scene_of(|builder| {
+        builder.push_clip_path(wide_outline());
+        record_retained_body(builder);
+        builder.pop_clip();
+    }));
+    assert_eq!(under_path.mask_clips, 1, "the path clip lowered to a mask");
+    assert_eq!(
+        retainable(&under_path),
+        vec![false],
+        "a page holds only what the body drew, so a body under a path clip's coverage mask is          never retained"
+    );
+
+    // Exactly a rounded clip's terms: the two clips are the same lowering.
+    let under_rounded = compile_retained(&scene_of(|builder| {
+        builder.push_clip_rounded(Rect::new(0.0, 0.0, 64.0, 48.0), 6.0);
+        record_retained_body(builder);
+        builder.pop_clip();
+    }));
+    assert_eq!(retainable(&under_path), retainable(&under_rounded));
+}
+
+#[test]
+fn a_path_clip_opened_inside_a_retained_body_is_judged_like_a_rounded_one() {
+    let with_inner = |clip: &dyn Fn(&mut SceneBuilder<'_>)| {
+        compile_retained(&scene_of(|builder| {
+            builder.push_transform(Affine::translate((8.0, 8.0)));
+            builder.push_retained(1, RETAINED_BODY, 1.0, 1.0);
+            clip(builder);
+            builder.fill_rect(RETAINED_BODY, red());
+            builder.pop_clip();
+            builder.pop_retained();
+            builder.pop_transform();
+        }))
+    };
+    let path = with_inner(&|builder| {
+        let mut triangle = BezPath::new();
+        triangle.move_to((0.0, 0.0));
+        triangle.line_to((16.0, 0.0));
+        triangle.line_to((8.0, 16.0));
+        triangle.close_path();
+        builder.push_clip_path(triangle);
+    });
+    let rounded = with_inner(&|builder| builder.push_clip_rounded(RETAINED_BODY, 4.0));
+
+    assert_eq!(path.mask_clips, 1);
+    assert_eq!(
+        retainable(&path),
+        retainable(&rounded),
+        "a mask the body opens itself is part of what the page holds, on a rounded clip's terms"
+    );
+}
+
+#[test]
+fn a_path_clip_opens_no_layer_and_no_page() {
+    let frame = compile(&scene_of(|builder| {
+        builder.push_clip_path(wide_outline());
+        builder.fill_rect(Rect::new(0.0, 0.0, 64.0, 48.0), red());
+        builder.pop_clip();
+    }));
+
+    assert!(
+        !frame.recorder.has_layers(),
+        "a path clip is a coverage mask, never a recorded layer"
+    );
+    assert!(
+        page_opacities(&rounds(&frame)).is_empty(),
+        "and so it costs the scheduler no page"
     );
 }
 

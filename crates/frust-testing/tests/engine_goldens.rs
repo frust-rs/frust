@@ -30,7 +30,7 @@
 //! # Which cases are in scope
 //!
 //! The engine compiles axis-aligned rectangles, rounded rectangles, lines,
-//! arbitrary filled/stroked paths, rect and rounded clips, opacity layers,
+//! arbitrary filled/stroked paths, rect, rounded and path clips, opacity layers,
 //! snapshot brackets, `ClearRect` hole punches, atlas-resident images,
 //! blurred rounded rects, and glyph runs (incl. COLR colour glyphs and the
 //! atlas-vs-outline route), and resolves solid and gradient paints. One
@@ -79,8 +79,8 @@ use frust_testing::render::{RenderedImage, SceneRenderer};
 use frust_testing::{ENGINE_UNCLASSIFIED_CLASS, engine_golden_class};
 
 /// Every corpus case the engine draws in full — rectangles, rounded
-/// rectangles, lines, arbitrary filled/stroked/dashed paths, rect and rounded
-/// clips, opacity layers, snapshot brackets, `ClearRect` hole punches,
+/// rectangles, lines, arbitrary filled/stroked/dashed paths, rect, rounded and
+/// path clips, opacity layers, snapshot brackets, `ClearRect` hole punches,
 /// atlas-resident images, blurred rounded rects, glyph runs (Latin, RTL,
 /// CJK, combining marks, COLR colour, gradient-brushed, clipped), and the
 /// widget/page/text frames built out of those same commands.
@@ -97,6 +97,9 @@ const PHASE_CASES: &[&str] = &[
     "unit-glyph-run",
     "unit-clip-rect",
     "unit-clip-rounded",
+    // Path clips — a coverage mask on the engine, a clip layer on the CPU arm.
+    "unit-clip-path-star",
+    "unit-clip-path-concave",
     "unit-clip-balance",
     "unit-image",
     "unit-blur-rrect",

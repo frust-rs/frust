@@ -8,6 +8,11 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Added
 
+- Path clips: `frust_scene::Command::PushClipPath`, `SceneBuilder::push_clip_path` and
+  `PaintScene::push_clip_path(origin, path)` clip to an arbitrary outline (nonzero winding), popped
+  by the shared `pop_clip`. The engine lowers it to a coverage mask, never a layer page, so a
+  retained body under one paints inline; a recorder without its own override clips to the path's
+  bounding box.
 - Per-paint-class strip programs: `strip.wgsl` is specialised per `PaintClass` (solid + coverage,
   gradient, image, image-filtered, blurred-rect, layer-composite, and the whole Uber program), the
   variants created lazily against one explicit strip pipeline layout. `FRUST_ENGINE_UBER_PROGRAM=1`
