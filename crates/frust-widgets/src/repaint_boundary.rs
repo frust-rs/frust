@@ -67,9 +67,12 @@
 //! **and** the boundary recorded on the immediately previous paint (so no
 //! scene after the run, which might have committed without the recording,
 //! can be the one the ledger describes). Otherwise it records again: on the
-//! next paint after a dirty one, a clean body continues the run, so a ledger
-//! that lags the paints by a frame or two still lands inside it — the
-//! boundary never records forever behind a renderer that is merely late.
+//! next paint after a dirty one, a clean body that stays put continues the
+//! run, so a ledger that lags the paints by a frame or two still lands inside
+//! it — a resting boundary never records forever behind a renderer that is
+//! merely late. A body its parent moves on every paint restarts its run each
+//! time, so it is confirmed only once the ledger lags by at most one paint;
+//! until then it records every frame (correct pixels, no page reuse).
 //! A context no render root numbered (serial `0`, a widget unit test) skips
 //! the serial check.
 //!
