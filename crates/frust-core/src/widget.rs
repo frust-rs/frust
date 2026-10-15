@@ -369,16 +369,16 @@ pub trait PaintScene {
     /// retained-layer concept, which never receive such a call.
     fn draw_retained(&mut self, _key: u64, _origin: Point, _size: Size, _alpha: f32, _scale: f64) {}
 
-    /// Deprecated name of [`PaintScene::push_retained`].
-    #[deprecated(since = "0.7.0", note = "renamed to `push_retained`")]
-    fn push_snapshot(&mut self, key: u64, origin: Point, size: Size, alpha: f32, scale: f64) {
-        self.push_retained(key, origin, size, alpha, scale);
-    }
-
-    /// Deprecated name of [`PaintScene::pop_retained`].
-    #[deprecated(since = "0.7.0", note = "renamed to `pop_retained`")]
-    fn pop_snapshot(&mut self) {
-        self.pop_retained();
+    /// The transform the next command would be recorded under — every
+    /// [`PaintScene::push_transform`] still open, the shell's device scale
+    /// included — or `None` for a scene that does not track one.
+    ///
+    /// A retained-page boundary reads it to ask the resident-key ledger for the
+    /// page at the scale it is about to be drawn at (a page is reusable only
+    /// under its own linear part). `None` is read as the identity. Defaulted so
+    /// recorder scenes stay valid; [`SceneBuilder`] reports its own.
+    fn current_transform(&self) -> Option<Affine> {
+        None
     }
 }
 
@@ -547,6 +547,10 @@ impl PaintScene for SceneBuilder<'_> {
 
     fn draw_retained(&mut self, key: u64, origin: Point, size: Size, alpha: f32, scale: f64) {
         SceneBuilder::draw_retained(self, key, rect_at(origin, size), alpha, scale);
+    }
+
+    fn current_transform(&self) -> Option<Affine> {
+        Some(SceneBuilder::current_transform(self))
     }
 }
 
@@ -1037,6 +1041,12 @@ pub struct PaintCtx<'a> {
     /// The renderer's resident-key ledger ([`crate::app::RenderRoot::set_retained_ledger`]),
     /// copied down like `paint_epoch`; `None` reads as empty.
     retained_ledger: Option<&'a crate::retained::RetainedLedger>,
+    /// How many paint-time side-channel publications this (sub)paint made — an
+    /// IME surface, a platform view, an input shield, an overlay registration,
+    /// a selection-toolbar request, a hero report — summed up through
+    /// [`ChildPod::paint_child`] like `platform_views`. See
+    /// [`PaintCtx::paint_publications`].
+    paint_publications: u32,
 }
 
 impl<'a> PaintCtx<'a> {
@@ -1073,6 +1083,7 @@ impl<'a> PaintCtx<'a> {
             paint_epoch: 0,
             retained_layers: true,
             retained_ledger: None,
+            paint_publications: 0,
         }
     }
 
@@ -1091,6 +1102,16 @@ impl<'a> PaintCtx<'a> {
     /// [`PaintCtx::is_translucent`]).
     pub fn with_translucent(mut self, translucent: bool) -> Self {
         self.translucent = translucent;
+        self
+    }
+
+    /// Thread a renderer's resident-key ledger into this pass. Chainable
+    /// builder mirroring [`PaintCtx::with_theme`] — used by widget unit tests
+    /// exercising a retained-page boundary, which paints with no bracket at all
+    /// when no ledger is threaded ([`PaintCtx::retained_enabled`]); the render
+    /// root threads the real one ([`crate::app::RenderRoot::set_retained_ledger`]).
+    pub fn with_retained_ledger(mut self, ledger: &'a crate::retained::RetainedLedger) -> Self {
+        self.retained_ledger = Some(ledger);
         self
     }
 
@@ -1573,6 +1594,7 @@ impl<'a> PaintCtx<'a> {
     /// change. Bubbles up through [`ChildPod::paint_child`], mirroring
     /// [`Self::request_frame`].
     pub fn publish_ime_state(&mut self, state: ImeState) {
+        self.note_publication();
         self.ime_state = Some(state);
     }
 
@@ -1591,6 +1613,7 @@ impl<'a> PaintCtx<'a> {
     /// one pass must both survive. [`ChildPod::paint_child`] bubbles this by
     /// `extend`, never overwrite, for exactly that reason.
     pub fn publish_platform_view(&mut self, frame: PlatformViewFrame) {
+        self.note_publication();
         self.platform_views.push(frame);
     }
 
@@ -1616,6 +1639,7 @@ impl<'a> PaintCtx<'a> {
     /// intersection rule that decides which shields belong to which slot.
     /// Pushes (never overwrites) — see the `input_shields` field doc.
     pub fn report_input_shield(&mut self, rect: Rect) {
+        self.note_publication();
         self.input_shields.push(rect);
     }
 
@@ -1655,6 +1679,7 @@ impl<'a> PaintCtx<'a> {
     /// bare [`PaintCtx`]) is harmless: the entry is dropped by the next real
     /// pass's clear rather than leaking into it.
     pub fn register_overlay(&mut self, entry: crate::overlay::OverlayEntry) {
+        self.note_publication();
         crate::overlay::register(entry);
     }
 
@@ -1687,6 +1712,7 @@ impl<'a> PaintCtx<'a> {
         &mut self,
         request: crate::selection_toolbar::SelectionToolbarRequest,
     ) {
+        self.note_publication();
         crate::selection_toolbar::publish(request);
     }
 
@@ -1704,6 +1730,7 @@ impl<'a> PaintCtx<'a> {
     /// [`HeroDirective::Morph`] (repaint under a rect→rect transform to the
     /// morph destination).
     pub fn report_hero(&mut self, tag: &str, bounds: Rect) -> HeroDirective {
+        self.note_publication();
         match self.hero {
             Some(cell) => {
                 let mut frames = cell.borrow_mut();
@@ -1775,8 +1802,12 @@ impl<'a> PaintCtx<'a> {
             paint_epoch: self.paint_epoch,
             retained_layers: self.retained_layers,
             retained_ledger: self.retained_ledger,
+            paint_publications: 0,
         };
         f(&mut child);
+        self.paint_publications = self
+            .paint_publications
+            .saturating_add(child.paint_publications);
         if child.needs_frame {
             self.needs_frame = true;
         }
@@ -1936,6 +1967,36 @@ impl<'a> PaintCtx<'a> {
     /// has never been painted.
     pub fn subtree_clean(&self, pod: &ChildPod) -> bool {
         self.retained_layers && !pod.paint_dirty && pod.painted_epoch == self.paint_epoch
+    }
+
+    /// Whether a boundary widget may bracket its body at all: retained layers
+    /// are switched on ([`crate::app::RenderRoot::set_retained_layers`]) and a
+    /// renderer ledger was threaded down (every [`crate::app::RenderRoot`]
+    /// paint threads one, empty until a shell publishes; a bare
+    /// [`PaintCtx::new`] carries none). When `false` a boundary paints its body
+    /// with no bracket — the renderer would still record a layer for one.
+    pub fn retained_enabled(&self) -> bool {
+        self.retained_layers && self.retained_ledger.is_some()
+    }
+
+    /// How many paint-time side-channel publications this (sub)paint has made
+    /// so far: [`PaintCtx::publish_ime_state`],
+    /// [`PaintCtx::publish_platform_view`], [`PaintCtx::report_input_shield`],
+    /// [`PaintCtx::register_overlay`], [`PaintCtx::publish_selection_toolbar`]
+    /// and [`PaintCtx::report_hero`] calls, including every descendant's.
+    ///
+    /// A boundary widget reads it before and after painting its body: those
+    /// channels are re-published every paint, so a body that used one must be
+    /// painted every frame — drawing its retained page instead would publish
+    /// nothing, and the surface, view or rect would vanish.
+    pub fn paint_publications(&self) -> u32 {
+        self.paint_publications
+    }
+
+    /// Count one paint-time side-channel publication (see
+    /// [`PaintCtx::paint_publications`]).
+    fn note_publication(&mut self) {
+        self.paint_publications = self.paint_publications.saturating_add(1);
     }
 }
 
@@ -3303,6 +3364,9 @@ impl ChildPod {
         child_ctx.set_hover_epoch(ctx.hover_epoch());
         child_ctx.set_hovered(self.hover_epoch == ctx.hover_epoch() && ctx.is_hovered());
         self.widget.paint(&mut child_ctx, scene);
+        ctx.paint_publications = ctx
+            .paint_publications
+            .saturating_add(child_ctx.paint_publications);
         // Bubble the child's continuation-frame request AND its tick class up
         // unchanged: forwarding the aggregate class (rather than always calling
         // `request_frame`, which is Transition) is what lets a purely-cosmetic
@@ -5835,6 +5899,91 @@ mod tests {
             matches!(commands[2], frust_scene::Command::PopRetained),
             "expected PopRetained, got {:?}",
             commands[2]
+        );
+    }
+
+    #[test]
+    fn current_transform_is_the_scene_builders_own_and_none_for_a_recorder() {
+        assert_eq!(
+            MinimalSnapshotRecorder::default().current_transform(),
+            None,
+            "a recorder tracks no transform"
+        );
+        let mut scene = frust_scene::Scene::new();
+        let mut builder = frust_scene::SceneBuilder::new(&mut scene);
+        let paint: &mut dyn PaintScene = &mut builder;
+        assert_eq!(paint.current_transform(), Some(Affine::IDENTITY));
+        paint.push_transform(Affine::scale(2.0));
+        paint.push_transform(Affine::translate((3.0, 4.0)));
+        assert_eq!(
+            paint.current_transform(),
+            Some(Affine::scale(2.0) * Affine::translate((3.0, 4.0))),
+            "every open transform, composed"
+        );
+    }
+
+    #[test]
+    fn retained_enabled_needs_the_switch_and_a_threaded_ledger() {
+        let ledger = crate::retained::RetainedLedger::empty();
+        assert!(
+            !PaintCtx::new(Point::ZERO, Size::ZERO).retained_enabled(),
+            "no ledger threaded"
+        );
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::ZERO).with_retained_ledger(&ledger);
+        assert!(
+            ctx.retained_enabled(),
+            "an empty ledger still enables brackets"
+        );
+        ctx.set_paint_state(0, false, Some(&ledger));
+        assert!(!ctx.retained_enabled(), "the kill switch disables them");
+    }
+
+    /// Publishes on every paint channel a boundary must not skip.
+    struct Publisher;
+
+    impl Widget for Publisher {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.max()
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            ctx.report_input_shield(Rect::new(0.0, 0.0, 1.0, 1.0));
+            ctx.report_hero("tag", Rect::new(0.0, 0.0, 1.0, 1.0));
+        }
+    }
+
+    #[test]
+    fn paint_publications_sum_up_through_paint_child_and_hero_registries() {
+        let mut pod = ChildPod::new(Box::new(Publisher));
+        pod.layout_child(
+            &mut LayoutCtx::new(),
+            &BoxConstraints::tight(Size::new(5.0, 5.0)),
+        );
+        let mut quiet = ChildPod::new(Box::new(FixedBox {
+            intrinsic: Size::new(5.0, 5.0),
+        }));
+        quiet.layout_child(
+            &mut LayoutCtx::new(),
+            &BoxConstraints::tight(Size::new(5.0, 5.0)),
+        );
+
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        quiet.paint_child(&mut ctx, &mut DiscardScene);
+        assert_eq!(
+            ctx.paint_publications(),
+            0,
+            "a plain body publishes nothing"
+        );
+        pod.paint_child(&mut ctx, &mut DiscardScene);
+        assert_eq!(ctx.paint_publications(), 2, "a shield and a hero report");
+
+        let registry = RefCell::new(HeroFrames::new(Point::ZERO, HashMap::new()));
+        ctx.with_hero_registry(&registry, |inner| {
+            pod.paint_child(inner, &mut DiscardScene);
+        });
+        assert_eq!(
+            ctx.paint_publications(),
+            4,
+            "a hero registry's subtree counts too"
         );
     }
 }
