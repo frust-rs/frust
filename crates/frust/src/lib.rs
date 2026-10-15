@@ -410,6 +410,15 @@ pub use frust_widgets::{PlatformViewView, ShieldView, platform_view, shield};
 /// ```
 pub use frust_widgets::{CanvasView, CanvasWidget, canvas};
 
+/// A leaf drawing an externally rendered scene texture — a video frame, a
+/// camera preview, a 3D view — by the id its producer registered it under
+/// (for a frame source, [`texture::TextureRegistration::scene_texture_id`]).
+/// [`texture_view`] places it with a [`TextureFit`] (given the texture's own
+/// extent, `.source_size(..)`), clips it to `.corner_radius(..)`, and takes
+/// an accessible `.label(..)`. A texture view inside a retained subtree keeps
+/// that subtree from being replayed from cache — see the widget's own docs.
+pub use frust_widgets::{TextureFit, TextureView, TextureWidget, texture_view};
+
 /// A pan/zoom viewport over one child — a node-and-edge graph, a map, a large
 /// image — without hand-rolling the gesture math. [`pan_zoom`] lays its child
 /// out at its natural size and places it under a scale-then-translate
@@ -1095,6 +1104,44 @@ pub mod gpu {
     pub fn with_context<R>(f: impl FnOnce(&DeviceHandle) -> R) -> Option<R> {
         frust_shell_common::gpu::gpu_handle::<DeviceHandle>().map(f)
     }
+}
+
+/// Showing frames you produce yourself — decoded video, camera captures,
+/// software-rendered pixels — as a scene texture.
+///
+/// [`register_texture_source`] takes a closure that hands over the newest
+/// frame it has (`Option<`[`SourceFrame`]`>`); the renderer polls it once per
+/// frame, uploads a CPU frame (tightly packed premultiplied RGBA8) into a
+/// texture of its own or imports a [`NativeHandle`] through the
+/// [`NativeImporter`] installed for its kind, and binds the result under the
+/// returned [`TextureRegistration`]'s id. Draw it with
+/// [`texture_view`](crate::texture_view)`(registration.scene_texture_id())`;
+/// drop the registration to stop. Every frame's release callback runs exactly
+/// once, as soon as the renderer is done with the frame.
+///
+/// ```no_run
+/// use std::sync::Arc;
+/// use frust::texture::{SourceFrame, register_texture_source};
+///
+/// let mut tick = 0u8;
+/// let registration = register_texture_source(move || {
+///     tick = tick.wrapping_add(1);
+///     Some(SourceFrame::rgba8(2, 2, Arc::from(vec![tick; 16])))
+/// });
+/// let view = frust::texture_view(registration.scene_texture_id());
+/// # let _ = view;
+/// ```
+///
+/// A plugin that produces frames does not name this module (plugins never
+/// depend on the facade); it pushes into its own frame mailbox, and the
+/// closure above — written by the app, or by the plugin's facade-side half —
+/// moves each frame's fields into a [`SourceFrame`]. Not behind the `gpu`
+/// feature: nothing here needs a device of the app's own.
+pub mod texture {
+    pub use frust_render::texture_bus::{
+        NativeHandle, NativeHandleKind, NativeImporter, SourceFormat, SourceFrame, SourcePayload,
+        TextureRegistration, register_texture_source,
+    };
 }
 
 /// The accessibility vocabulary crate, whole — the long-tail valve behind

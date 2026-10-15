@@ -30,6 +30,12 @@
 //!   every target — even though only a desktop shell (today: macOS) ever
 //!   calls [`desktop::lookup_view_factory`].
 //!
+//! Beside them, [`texture`] is the producer half of the external-texture
+//! frame bus: a [`texture::TextureSink`] latest-frame mailbox a plugin pushes
+//! decoded or captured frames into. std-only and every target, like
+//! [`desktop`]; the consumer side lives in the renderer, and the two meet
+//! only through a closure written by code that depends on both.
+//!
 //! A **platform plugin** (e.g. `frust-shared-preferences`) may depend on this
 //! crate plus `frust-paths` and FFI crates, and must NOT depend on any
 //! `frust-*` framework crate — that keeps plugins tiny and free of framework
@@ -37,6 +43,7 @@
 
 pub mod android;
 pub mod desktop;
+pub mod texture;
 
 /// Failure to obtain a platform handle from the host shell.
 ///
