@@ -15,9 +15,11 @@
 //!   ([`PaintCtx::subtree_clean`]), the boundary recorded its page under the
 //!   linear part (scale/rotation/skew) the scene is at now, the body's last
 //!   paint used no paint-time side channel ([`PaintCtx::paint_publications`]),
-//!   and the ledger reports the key resident at the extent and scale the page
-//!   would be drawn at ([`PaintCtx::retained_available`]). The child is not
-//!   painted; its pod stays clean.
+//!   the ledger reports the key resident at the extent and scale the page
+//!   would be drawn at ([`PaintCtx::retained_available`]), and the ledger
+//!   proves the page holds the boundary's latest recording (see *Which
+//!   recording the page holds* below). The child is not painted; its pod stays
+//!   clean.
 //! - **Record the page** otherwise, when recording can pay off: the body is
 //!   bracketed and painted.
 //! - **Paint the body directly** (a `push_layer` when the composite alpha is
@@ -43,6 +45,30 @@
 //! dirty forgets the recorded page: the next draw must follow a fresh record.
 //! An adopter therefore paints its child only through its boundary
 //! ([`RetainedBoundary::paint`] or [`RetainedBoundary::paint_plain`]).
+//!
+//! # Which recording the page holds
+//!
+//! A resident page is not necessarily the boundary's latest recording: the
+//! scene carrying that recording can be dropped on its way to the renderer
+//! (the render split's scene slot is latest-wins), leaving the previous page
+//! resident under the same key. The ledger's
+//! [`frame`](frust_core::RetainedLedger::frame) — the paint serial
+//! ([`PaintCtx::paint_serial`]) of the last scene the renderer committed — is
+//! what tells them apart, and a boundary keeps a **run**: the serials of the
+//! consecutive paints, starting at `serial`, that each recorded the current
+//! body. Every scene in a run carries the same recording, so a ledger whose
+//! frame falls inside the run proves the page holds it — the page is then
+//! *confirmed* and may be drawn until the body changes.
+//!
+//! Until then the page is drawn only when the ledger covers the run's start
+//! **and** the boundary recorded on the immediately previous paint (so no
+//! scene after the run, which might have committed without the recording,
+//! can be the one the ledger describes). Otherwise it records again: on the
+//! next paint after a dirty one, a clean body continues the run, so a ledger
+//! that lags the paints by a frame or two still lands inside it — the
+//! boundary never records forever behind a renderer that is merely late.
+//! A context no render root numbered (serial `0`, a widget unit test) skips
+//! the serial check.
 //!
 //! See `docs/WIDGETS_ARCHITECTURE.md` for where boundaries sit in the widget set
 //! and the renderer contract in `frust-engine`'s `cache::retained` module docs.
@@ -77,6 +103,23 @@ struct Recorded {
     linear: [f64; 4],
     /// The bracket rectangle's origin (the body's paint origin).
     origin: Point,
+    /// The paint serial the run of recordings of this body started at — the
+    /// first of the consecutive paints that each recorded it (see the
+    /// [module docs](self)).
+    serial: u64,
+    /// The paint serial of the latest recording in the run.
+    last: u64,
+    /// Whether a ledger has proven that the renderer holds this recording.
+    confirmed: bool,
+}
+
+impl Recorded {
+    /// Whether the page may still be vouched for at paint `serial`: confirmed,
+    /// recorded on the immediately previous paint, or painted with no serial
+    /// at all.
+    fn usable_at(&self, serial: u64) -> bool {
+        self.confirmed || serial == 0 || self.last.wrapping_add(1) == serial
+    }
 }
 
 /// The per-owner state of one retained-page boundary: its key, the placement
@@ -138,10 +181,17 @@ impl RetainedBoundary {
         }
         let [a, b, c, d, _, _] = transform.as_coeffs();
         let linear = [a, b, c, d];
+        let serial = ctx.paint_serial();
 
         if let Some(recorded) = self.recorded
             && self.can_draw(pod, ctx, size, linear, recorded)
         {
+            // Drawing proves nothing new once confirmed; the first draw is
+            // the proof (see the module docs).
+            self.recorded = Some(Recorded {
+                confirmed: true,
+                ..recorded
+            });
             // The page sits where the body was recorded; move it to where the
             // body paints now. The renderer reads a composite's position from
             // its transform alone, so the move is a translation, never a new
@@ -162,10 +212,29 @@ impl RetainedBoundary {
             .visible_rect()
             .is_none_or(|v| rect_contains(v, Rect::from_origin_size(origin, size)));
         if may_record && visible {
+            // A clean body recorded again on the paint right after its last
+            // recording, under the same linear part, continues that run: the
+            // two scenes carry the same page.
+            let run_start = self
+                .recorded
+                .filter(|r| {
+                    !r.confirmed
+                        && serial != 0
+                        && r.last.wrapping_add(1) == serial
+                        && same_linear(r.linear, linear)
+                        && ctx.subtree_clean(pod)
+                })
+                .map_or(serial, |r| r.serial);
             scene.push_retained(self.key.get(), origin, size, alpha, 1.0);
             self.paint_body(pod, ctx, scene);
             scene.pop_retained();
-            self.recorded = Some(Recorded { linear, origin });
+            self.recorded = Some(Recorded {
+                linear,
+                origin,
+                serial: run_start,
+                last: serial,
+                confirmed: false,
+            });
             return BoundaryPaint::Recorded;
         }
 
@@ -226,15 +295,11 @@ impl RetainedBoundary {
         linear: [f64; 4],
         recorded: Recorded,
     ) -> bool {
-        if self.publishes || !ctx.subtree_clean(pod) {
-            return false;
-        }
-        let same_linear = recorded
-            .linear
-            .iter()
-            .zip(linear.iter())
-            .all(|(x, y)| (x - y).abs() <= LINEAR_EPSILON);
-        if !same_linear {
+        if self.publishes
+            || !ctx.subtree_clean(pod)
+            || !recorded.usable_at(ctx.paint_serial())
+            || !same_linear(recorded.linear, linear)
+        {
             return false;
         }
         // The extent and scale the renderer reports for a page drawn under
@@ -242,8 +307,15 @@ impl RetainedBoundary {
         let [a, b, c, d] = linear;
         let extent = Size::new(size.width * a.hypot(b), size.height * c.hypot(d));
         let scale = (a * d - b * c).abs().sqrt() as f32;
-        ctx.retained_available(self.key, extent, scale)
+        ctx.retained_available(self.key, extent, scale, recorded.serial)
     }
+}
+
+/// Whether two linear parts are one, to [`LINEAR_EPSILON`].
+fn same_linear(a: [f64; 4], b: [f64; 4]) -> bool {
+    a.iter()
+        .zip(b.iter())
+        .all(|(x, y)| (x - y).abs() <= LINEAR_EPSILON)
 }
 
 /// Whether `inner` lies within `outer`, to a hair of floating-point slack.

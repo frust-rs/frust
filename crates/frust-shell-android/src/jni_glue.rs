@@ -956,6 +956,10 @@ pub(crate) fn render_loop(
                 // frame, gate every `Instant::now()` behind it (inside
                 // `render_scene`).
                 let perf_on = perf::enabled();
+                // The paint serial this scene was painted under, so the ledger
+                // published after submit names the recording it holds (see
+                // `SurfaceRenderer::note_scene_serial`).
+                renderer.note_scene_serial(frame.meta.paint_serial);
                 crate::app::render_scene(
                     &mut renderer,
                     &render_cx,

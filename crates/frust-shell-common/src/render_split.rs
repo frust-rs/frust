@@ -120,7 +120,9 @@ use crate::perf::UiSpans;
 static PUBLISHED_RETAINED_LEDGER: Mutex<Option<Arc<RetainedLedger>>> = Mutex::new(None);
 
 /// Publish the ledger describing the frame the renderer just finished. Called
-/// by the render side (after submit) with the retained pages it holds resident;
+/// by the render side (after submit) with the retained pages it holds resident,
+/// stamped with the paint serial of the last scene it committed
+/// ([`FrameMeta::paint_serial`] as named to the renderer before the encode);
 /// replaces the previous one. May block only for the instant the UI thread
 /// holds the slot to clone an `Arc`.
 pub fn publish_retained_ledger(ledger: RetainedLedger) {
@@ -143,9 +145,11 @@ pub fn publish_empty_retained_ledger() {
 /// `RenderRoot::set_retained_ledger` before painting. **Never blocks on the
 /// render thread**: if the render side is mid-publish (or nothing was ever
 /// published) this returns `None` and the caller keeps the ledger it already
-/// has — a one-frame-stale ledger is the design, and the renderer refuses a
-/// stale `DrawRetained` itself. Empty until the engine's retained-page store
-/// publishes.
+/// has — a one-frame-stale ledger is the design: the renderer refuses a
+/// `DrawRetained` of a page it no longer holds, and the ledger's paint serial
+/// keeps a widget from drawing a page holding an older recording than its
+/// latest (see `frust_core::RetainedLedger::covers`). Empty until the engine's
+/// retained-page store publishes.
 pub fn latest_retained_ledger() -> Option<Arc<RetainedLedger>> {
     match PUBLISHED_RETAINED_LEDGER.try_lock() {
         Ok(slot) => slot.clone(),
@@ -258,6 +262,15 @@ pub struct FrameMeta {
     /// (latest-wins-replaced) frame is observable in diagnostics and so a
     /// render-side report can be paired back to the frame that produced it.
     pub frame_id: u64,
+    /// The paint serial the render root minted for this scene
+    /// (`frust_core::PaintOutcome::paint_serial`). The render thread names it
+    /// to the renderer (`SurfaceRenderer::note_scene_serial`) before encoding
+    /// the scene, so the resident-key ledger it publishes once the scene is
+    /// committed carries it — and a scene this slot drops never does. A
+    /// separate field from `frame_id`: that one counts hand-offs, this one
+    /// counts paints, and only the paint's own number can be compared against
+    /// what a widget recorded during it.
+    pub paint_serial: u64,
 }
 
 /// One frame handed from the UI thread to the render thread across
@@ -1164,6 +1177,7 @@ mod tests {
                 frame_time: FrameTime::from_nanos(u64::from(id)),
                 size: test_size(),
                 frame_id: u64::from(id),
+                paint_serial: u64::from(id),
             },
             ui_spans: UiSpans::default(),
         }

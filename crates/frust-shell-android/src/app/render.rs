@@ -146,6 +146,10 @@ fn publish_retained(renderer: &mut SurfaceRenderer) -> bool {
 /// path (UI thread) and the split path's [`crate::jni_glue::render_loop`] (render
 /// thread) so the per-frame render logic is not forked — the exact pre-split
 /// tail, only relocated.
+///
+/// The caller names the scene's paint serial to `renderer` first
+/// ([`SurfaceRenderer::note_scene_serial`] — `FrameMeta::paint_serial` in the
+/// split), so the ledger published once the scene is committed carries it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_scene(
     renderer: &mut SurfaceRenderer,

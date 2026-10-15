@@ -227,7 +227,10 @@ impl FrameExecutor {
     /// so its buffer is reused rather than reallocated — falling back to
     /// `Scene::new()` only when none is available yet (cold start, or the
     /// render thread hasn't given one back). `frame_time` and `size` populate
-    /// the split's [`FrameMeta`]; inline ignores them.
+    /// the split's [`FrameMeta`]; inline ignores them. `paint_serial` is the
+    /// paint's `PaintOutcome::paint_serial`, named to the renderer before it
+    /// encodes this scene on either path (it rides the split's [`FrameMeta`]).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn submit_frame(
         &mut self,
         window: &WindowHandle,
@@ -236,10 +239,11 @@ impl FrameExecutor {
         ui_spans: UiSpans,
         frame_time: FrameTime,
         size: SurfaceSize,
+        paint_serial: u64,
     ) {
         match self {
             FrameExecutor::Inline(inline) => {
-                inline.submit_frame(window, scene, base_color, ui_spans)
+                inline.submit_frame(window, scene, base_color, ui_spans, paint_serial)
             }
             FrameExecutor::Split(split) => {
                 let replacement = split.take_reusable_scene();
@@ -247,7 +251,7 @@ impl FrameExecutor {
                     scene: std::mem::replace(scene, replacement),
                     base_color,
                 };
-                split.submit_frame(painted, ui_spans, frame_time, size);
+                split.submit_frame(painted, ui_spans, frame_time, size, paint_serial);
             }
         }
     }
@@ -373,12 +377,14 @@ impl InlineExecutor {
         scene: &Scene,
         base_color: peniko::Color,
         ui_spans: UiSpans,
+        paint_serial: u64,
     ) {
         let outcome = render_frame(
             &mut self.renderer,
             &self.render_cx,
             window,
             scene,
+            paint_serial,
             base_color,
             ui_spans,
             &mut self.frame_stats,
@@ -548,6 +554,7 @@ impl SplitExecutor {
         ui_spans: UiSpans,
         frame_time: FrameTime,
         size: SurfaceSize,
+        paint_serial: u64,
     ) {
         self.frame_id += 1;
         if let Some(sender) = self.sender.as_ref() {
@@ -557,6 +564,7 @@ impl SplitExecutor {
                     frame_time,
                     size,
                     frame_id: self.frame_id,
+                    paint_serial,
                 },
                 ui_spans,
             });
@@ -695,6 +703,7 @@ fn render_loop(
                     &render_cx,
                     win,
                     &frame.scene.scene,
+                    frame.meta.paint_serial,
                     frame.scene.base_color,
                     frame.ui_spans,
                     &mut frame_stats,
@@ -894,6 +903,7 @@ fn render_frame(
     render_cx: &RenderContext,
     window: &Window,
     scene: &Scene,
+    paint_serial: u64,
     base_color: peniko::Color,
     ui_spans: UiSpans,
     frame_stats: &mut FrameStats,
@@ -913,6 +923,9 @@ fn render_frame(
     // Encode span (GPU/CPU encode, no swapchain touch). Each span is its own
     // `Instant` read; desktop's frame budget is generous enough not to gate them
     // behind `perf::enabled()` (see docs/CODE_STANDARDS.md Instrumentation).
+    // The paint serial this scene was painted under, so the ledger published
+    // once it is committed names it (see `SurfaceRenderer::note_scene_serial`).
+    renderer.note_scene_serial(paint_serial);
     let encode_start = Instant::now();
     let encode_outcome = renderer.encode(render_cx, scene, base_color);
     let encode_dur = encode_start.elapsed();

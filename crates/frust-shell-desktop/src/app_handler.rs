@@ -3394,6 +3394,7 @@ where
                     ui_spans,
                     frame_time,
                     size,
+                    paint_outcome.paint_serial,
                 );
 
                 // Probe stamp: the UI-thread hand-off of the finished frame, not the GPU
