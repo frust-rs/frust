@@ -163,6 +163,10 @@ pub(crate) fn render_scene(
     // the frame that produced it (the release gate; see `RenderSignals`).
     frame_id: u64,
 ) -> Duration {
+    // Install the platform importers once the device is known to support them;
+    // a no-op on every later frame.
+    frust_render::native_import::install(render_cx);
+
     // Encode span (GPU/CPU encode, no swapchain touch).
     let encode_start = perf_on.then(Instant::now);
     let encode_outcome = renderer.encode(render_cx, scene, base_color);
