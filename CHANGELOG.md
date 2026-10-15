@@ -26,12 +26,11 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   outside the intermediate pool (`FRUST_ENGINE_RETAINED_BUDGET_MB=<n>` overrides the tier budget); a
   page it cannot serve refuses the frame and the shell repaints without pages. Kill switches:
   `FRUST_NO_RETAINED_LAYERS` (widgets) and `FRUST_ENGINE_NO_LAYERS` (engine, now consulted).
+  A page is drawn only when the published ledger covers the paint serial it was recorded under;
+  re-recording a key whose new recording does not reach its page (refused, nested or unrendered)
+  evicts the old page; a hover-link change or focus-epoch advance re-records every boundary once.
   `PaintScene::current_transform()` (default `None`) reports the transform a command would record
   under. Limits are in docs/LIMITATIONS.md (`retained-pages-budget-refusals`).
-- `FRUST_PARTIAL_REPAINT`, a partial-repaint spike (`PaintDamage`, `RenderRoot::damage_rect`,
-  `SurfaceRenderer::set_partial_repaint`), default off and byte-identical off. Measured NO-GO: real
-  scenes damage about 85-100% of the surface, above the roughly 50-60% break-even (see
-  `partial-repaint-outcome` in docs/LIMITATIONS.md).
 - Per-paint-class strip programs: `strip.wgsl` is specialised per `PaintClass` (solid + coverage,
   gradient, image, image-filtered, blurred-rect, layer-composite, and the whole Uber program), the
   variants created lazily against one explicit strip pipeline layout. `FRUST_ENGINE_UBER_PROGRAM=1`
@@ -115,8 +114,10 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   { key, rect, alpha, scale, transform }` / `PopRetained`, plus the new `Command::DrawRetained`;
   `PaintScene::push_snapshot` / `pop_snapshot` are removed in favour of `push_retained` /
   `pop_retained` / `draw_retained` (rename the calls). A renderer that does not retain paints a
-  `PushRetained` body inline exactly as the old snapshot bracket did and treats `DrawRetained` as an
-  error.
+  `PushRetained` body inline exactly as the old snapshot bracket did and is never sent
+  `DrawRetained`; a renderer that publishes a ledger must serve every key it lists or refuse the
+  frame. `PaintCtx::retained_available` takes a fourth `recorded_serial` parameter.
+- `PaintOutcome::paint_serial` reports the monotonic serial `RenderRoot::paint` minted for the pass.
 - Host paint cost with retained layers on versus off (release, i5-12600 Linux, 300 frames, mean
   us; `relayout_cost_bench`): cached opacity 0.11 vs 49.00, navigator push/pop 32.63 vs 111.52,
   navigator page at rest 48.53 vs 48.54. Device legs (Pixel 5, iPhone SE) are owed. A backdrop

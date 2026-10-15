@@ -34,7 +34,6 @@ or runtime; each shell logs one info line `layout skip=.. audit=..` at startup. 
 | `FRUST_NO_LAYOUT_SKIP` | Any value calls `RenderRoot::set_layout_skip(false)`: every pass lays the whole tree out. First A/B valve for a suspected stale-geometry report |
 | `FRUST_LAYOUT_AUDIT` | Any value other than `0` calls `set_layout_audit(true)`: each skipped pass is compared against a forced one and mismatches log `layout-audit:` warnings (debug aid, doubles layout cost) |
 | `FRUST_NO_RETAINED_LAYERS` | Any value calls `RenderRoot::set_retained_layers(false)`: `PaintCtx::subtree_clean` answers `false` everywhere, so `repaint_boundary`, navigator pages and cached opacity paint plain bodies and the scene never carries `PushRetained`/`DrawRetained`. Engine-side counterpart: `FRUST_ENGINE_NO_LAYERS` ([RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md)) |
-| `FRUST_PARTIAL_REPAINT` | Spike, default off and byte-identical off, measured NO-GO: any value publishes per-frame `PaintDamage` and runs `SurfaceRenderer::set_partial_repaint(true)` (desktop, Android, iOS, web shells; macOS shell not wired). Do not enable it for a release build; see `partial-repaint-outcome` in [LIMITATIONS.md](LIMITATIONS.md) |
 
 ## See Also
 

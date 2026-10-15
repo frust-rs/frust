@@ -134,9 +134,13 @@ the facade/plugin boundary described in the index; CORE itself never depends on 
   overlay, selection toolbar, hero) so a boundary can tell its body must repaint every frame.
   `RenderRoot::set_retained_layers` is the kill switch (a shell wires `FRUST_NO_RETAINED_LAYERS`; off,
   every pod is unclean and boundaries paint plain) and `set_retained_ledger` accepts the shell's ledger.
-  A spike on the same bookkeeping, behind `FRUST_PARTIAL_REPAINT` and a NO-GO (see RENDER_ARCHITECTURE.md):
-  `RenderRoot::damage_rect()` returns a `PaintDamage` (`Clean`/`Rect`/`Full`) and the process-wide
-  `app::set_damage_publishing`/`take_published_damage` hand it to the shell.
+  `RenderRoot::paint` mints a monotonic paint serial (1 on first paint, +1 per paint), readable as
+  `PaintCtx::paint_serial()` and reported on `PaintOutcome.paint_serial`. `RetainedLedger.frame` is the
+  serial of the last scene whose retained commit the renderer completed (`RetainedLedger::covers(serial)`);
+  `PaintCtx::retained_available(key, extent, scale, recorded_serial)` answers only when the ledger covers
+  the serial the page was recorded under. A hover-link change (claimant pod) or focus-epoch advance bumps
+  the paint epoch at the start of paint, so every boundary re-records once per transition (same-claimant
+  moves cost nothing).
 - A paint pass also carries a frame-request contract: `PaintCtx::request_frame` (`TickClass::Transition`,
   unpaced) marks the pass every-vsync (a max-lattice — any `Transition` request wins over a concurrent
   `CosmeticLoop` one); `request_frame_paced`/`request_frame_paced_at(interval)` (`TickClass::CosmeticLoop`)
@@ -340,7 +344,8 @@ another event. Repaints split between the two sides: a consumer's own latched ho
 gated on its change, is what produces the frame for hover *gain* and for a claimant-to-claimant
 handoff (the root's mirror is identity-free and cannot see either), while the root manufactures the
 one frame nobody can ask for — a hover ending with no new claimant. See `docs/CODE_STANDARDS.md`'s
-Interaction Semantics for the consumer contract.
+Interaction Semantics for the consumer contract. For retained pages a hover repaint is not global: only a
+claimant change bumps the paint epoch (see Data Flow's paint-dirtiness bullet).
 
 The cursor is hover's sibling channel and deliberately not derived from it: `EventCtx::set_cursor`
 writes a per-pass, thread-local request that `RenderRoot::event` resolves into the cached `cursor`
@@ -460,7 +465,7 @@ one binary cannot fight over it and an app's explicit choice survives a catalog 
 | `OverlayEntry` / `OverlayKey` / `OverlayBand` / `OverlayInput` / `OutsideTap` | One floated surface's registration and the four rules the root reads back from it — owner identity, z-band, whether it hit-tests at all, and what a press outside every surface delivers (see Overlay Portal) |
 | `OverlayEvent` / `OverlayEventKind` | What a routed overlay broadcast carries, always in absolute window space: `Pointer`, `Scroll`, or the positionless `OutsideDown` light-dismiss notification |
 | `SelectionToolbarRequest` / `SelectionToolbarActions` / `SelectionToolbarPolicy` | What a field with a selection publishes each paint (window-space anchor plus the enabled verb set) and who draws the bar for it — a `Framework` pod or the platform's `Native` menu |
-| `PaintCtx` / `PaintScene` / `PaintOutcome` | Paint-pass context and the renderer-agnostic paint target; `PaintCtx::is_hovered` is the authoritative hover read, `PaintCtx::origin` the absolute window-space origin (see Data Flow). `PaintScene` additionally carries `fill_rounded_rect_radii`/`push_clip_rounded_radii`/`stroke_path_dashed` — default, delegating methods, so no third-party sink is forced to implement per-corner rounding or dashing itself. `draw_scene_texture(id, dest)` composites an externally bound texture, `id` a `SceneTextureId::get()` from the `frust::gpu` `ExternalPass` seam (see RENDER_ARCHITECTURE.md); an unbound id draws nothing and is warned once by the engine, the paint is always blended, and the method is itself defaulted to a no-op. The retained and Phase 3 methods default too: `push_retained`/`pop_retained`/`draw_retained` (the default pair emulates a bracket as transform plus layer; `SceneBuilder` records `PushRetained`/`PopRetained`/`DrawRetained`), `current_transform()` (`None` unless the sink tracks one; `SceneBuilder` answers its own), `push_clip_path(origin, &BezPath)` (default: the path's bbox as a rect clip) and `backdrop_blur(origin, size, radius)` (default no-op) |
+| `PaintCtx` / `PaintScene` / `PaintOutcome` | Paint-pass context and the renderer-agnostic paint target; `PaintCtx::is_hovered` is the authoritative hover read, `PaintCtx::origin` the absolute window-space origin (see Data Flow). `PaintScene` additionally carries `fill_rounded_rect_radii`/`push_clip_rounded_radii`/`stroke_path_dashed` — default, delegating methods, so no third-party sink is forced to implement per-corner rounding or dashing itself. `draw_scene_texture(id, dest)` composites an externally bound texture, `id` a `SceneTextureId::get()` from the `frust::gpu` `ExternalPass` seam (see RENDER_ARCHITECTURE.md); an unbound id draws nothing and is warned once by the engine, the paint is always blended, and the method is itself defaulted to a no-op. The retained and Phase 3 methods default too: `push_retained`/`pop_retained`/`draw_retained` (the default pair emulates a bracket as transform plus layer; `SceneBuilder` records `PushRetained`/`PopRetained`/`DrawRetained`), `current_transform()` (`None` unless the sink tracks one; `SceneBuilder` answers its own), `push_clip_path(origin, &BezPath)` (default: the path's bbox as a rect clip) and `backdrop_blur(origin, size, radius)` (default no-op). Contract: a renderer that does not retain and never publishes a ledger paints every `PushRetained` body inline and is never sent `DrawRetained`; a renderer that publishes a ledger must serve every key it lists or refuse the frame |
 | `DiscardScene` | frust-core's all-no-op `PaintScene` sink: runs a subtree's paint pass purely for its side effects (hero-rect capture through `PaintCtx::with_hero_registry`, paint-time widget state) with no scene command emitted — see WIDGETS_ARCHITECTURE.md's "Alpha-zero paint redirect" for the consumer-side detail |
 | `CornerRadii` / `DashPattern` / `TextAlign` / `TextOverflow` | Re-exported through `frust-core` and `frust::authoring`; the per-corner-rounding, dashed-stroke, and text-overflow vocabulary `PaintScene`/`frust-text` consume (see RENDER_ARCHITECTURE.md) |
 | `CursorIcon` | Non-exhaustive pointer-shape request vocabulary (`Default`/`Pointer`/`Text`/`Grab`/`Grabbing`/`ColResize`/`RowResize`/`NotAllowed`) a widget asks for via `EventCtx::set_cursor`, resolved into `RenderRoot::cursor()` |
