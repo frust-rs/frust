@@ -62,6 +62,7 @@ mod context;
 // flat re-export below) so its own docs — the whole contract a pass is written
 // against — are reachable under one heading.
 pub mod external_pass;
+pub mod native_import;
 pub mod overlay;
 pub mod texture_bus;
 // Offscreen (no surface, no swapchain) engine rendering: the harness the
