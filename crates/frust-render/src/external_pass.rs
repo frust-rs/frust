@@ -276,6 +276,19 @@ impl<'a> ExternalFrame<'a> {
         self.engine.bind_texture(self.id, size, view)
     }
 
+    /// Whether the engine this frame is recorded for currently holds a view
+    /// under this pass's own id ([`Self::id`]).
+    ///
+    /// A binding lives in the engine, not in the pass, and a shell builds a
+    /// fresh engine whenever it installs a fresh surface (an Android resume, a
+    /// surface-format change) on the very same device. A pass that binds only
+    /// when its own content changes reads this to notice that the binding it
+    /// made earlier is gone and bind its current view again.
+    #[must_use]
+    pub fn has_binding(&self) -> bool {
+        self.engine.bound_texture(self.id).is_some()
+    }
+
     /// Removes the view bound under this pass's own id ([`Self::id`]),
     /// returning it. A pass tearing its own target down mid-run does this
     /// itself; a pass that simply stops being registered has it done for it
@@ -319,11 +332,14 @@ struct Registry {
     /// `warn!`. If a different Arc binds to the same id, the warn-once flag
     /// is cleared and the new pass's first panic is a fresh `warn!` too.
     reported_panics: BTreeMap<u64, PanicReport>,
-    /// Flag for whether a reserved-namespace registration attempt has already
-    /// been reported at `warn!` level. Warn once process-wide (the refusal
-    /// reason is identical for every id), then report at `debug!` for any
-    /// further attempts.
+    /// Flag for whether a reserved shader-program namespace registration
+    /// attempt has already been reported at `warn!` level. Warn once
+    /// process-wide (the refusal reason is identical for every id), then
+    /// report at `debug!` for any further attempts.
     reported_reserved: bool,
+    /// The same warn-once flag for the texture-source namespace, kept apart so
+    /// a caller tripping one reserved namespace still hears about the other.
+    reported_texture_source: bool,
 }
 
 impl Registry {
@@ -333,6 +349,7 @@ impl Registry {
             pending_unbind: BTreeMap::new(),
             reported_panics: BTreeMap::new(),
             reported_reserved: false,
+            reported_texture_source: false,
         }
     }
 }
@@ -359,14 +376,17 @@ fn registry() -> MutexGuard<'static, Registry> {
 /// component's pass would leave it registered from its own point of view and
 /// never called. Unregister first to hand an id over deliberately.
 ///
-/// Also answers `false` and changes nothing when `id` is inside the reserved
-/// shader-program namespace (`SceneTextureId::is_shader_program`) — that
-/// range belongs to the engine's own offscreen shader-effect targets, and a
-/// caller-registered pass claiming one would silently steal a shader
-/// program's target out from under it. Reported at `warn!` the first time a
-/// given id is refused this way, `debug!` on every later attempt, so a
-/// caller retrying the same doomed registration every frame does not spam
-/// the log.
+/// Also answers `false` and changes nothing when `id` is inside a reserved
+/// namespace: the shader-program one (`SceneTextureId::is_shader_program`) —
+/// that range belongs to the engine's own offscreen shader-effect targets,
+/// and a caller-registered pass claiming one would silently steal a shader
+/// program's target out from under it — or the texture-source one
+/// (`SceneTextureId::is_texture_source`), which belongs to
+/// [`crate::texture_bus`]'s registrations and is reached only through
+/// [`crate::texture_bus::register_texture_source`]. Reported at `warn!` the
+/// first time a namespace is refused this way, `debug!` on every later
+/// attempt, so a caller retrying the same doomed registration every frame
+/// does not spam the log.
 ///
 /// A `register` landing before the drain has flushed the same id's queued
 /// unbind cancels that unbind: the id has an owner again. A successful
@@ -398,6 +418,51 @@ pub fn register_external_pass(id: SceneTextureId, pass: Arc<dyn ExternalPass>) -
         }
         return false;
     }
+    if id.is_texture_source() {
+        let should_warn = {
+            let mut registry = registry();
+            let should_warn = !registry.reported_texture_source;
+            if should_warn {
+                registry.reported_texture_source = true;
+            }
+            should_warn
+        };
+        if should_warn {
+            log::warn!(
+                "external pass registration for scene texture {raw} refused: the id is inside \
+                 the reserved texture-source namespace, which only the texture bus registers \
+                 (further attempts are logged at debug level)"
+            );
+        } else {
+            log::debug!(
+                "external pass registration for scene texture {raw} refused: reserved \
+                 texture-source namespace"
+            );
+        }
+        return false;
+    }
+    insert_pass(id, pass)
+}
+
+/// Registers a texture-bus pass under its own texture-source `id` — the one
+/// route into that reserved namespace, taken only by
+/// [`crate::texture_bus::register_texture_source`]. Same claim semantics as
+/// [`register_external_pass`] otherwise.
+pub(crate) fn register_texture_source_pass(
+    id: SceneTextureId,
+    pass: Arc<dyn ExternalPass>,
+) -> bool {
+    debug_assert!(
+        id.is_texture_source(),
+        "texture-bus ids carry their namespace"
+    );
+    insert_pass(id, pass)
+}
+
+/// The claim itself, past any namespace check: refuses an id that already has
+/// a pass, clears a predecessor's reported panic, and inserts.
+fn insert_pass(id: SceneTextureId, pass: Arc<dyn ExternalPass>) -> bool {
+    let raw = id.get();
     let pass_identity = Arc::as_ptr(&pass) as *const () as usize;
     let should_clear_panic_flag = {
         let registry = registry();
@@ -604,6 +669,30 @@ mod tests {
             (false, true),
             "unregistering queues the engine binding for the next drain"
         );
+    }
+
+    #[test]
+    fn a_texture_source_id_is_refused_to_an_ordinary_pass_but_open_to_the_bus() {
+        let _serial = serial();
+        let id = SceneTextureId::for_texture_source(SceneTextureId::mint().get());
+
+        assert!(
+            !register_external_pass(id, Arc::new(Inert)),
+            "the texture-source namespace belongs to the bus"
+        );
+        assert_eq!(state(id), (false, false));
+        assert!(registry().reported_texture_source);
+
+        assert!(
+            register_texture_source_pass(id, Arc::new(Inert)),
+            "the bus's own route claims the id"
+        );
+        assert!(
+            !register_texture_source_pass(id, Arc::new(Inert)),
+            "a claimed id is still a claim on the bus's route"
+        );
+        assert!(unregister_external_pass(id));
+        registry().pending_unbind.remove(&id.get());
     }
 
     #[test]

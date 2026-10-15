@@ -18,14 +18,35 @@ static NEXT_SCENE_TEXTURE_ID: AtomicU64 = AtomicU64::new(1);
 /// The bit [`SceneTextureId::for_shader_program`] sets so an offscreen shader
 /// effect's target id can never be one [`SceneTextureId::mint`] hands out.
 ///
-/// `mint` counts up from 1 off a single process-wide counter, so an id with
-/// the top bit set is one it would only reach after 2^63 mints — more textures
-/// than a process can create. Reserving that bit makes the two id spaces
-/// disjoint by construction rather than by luck, which is what lets a
-/// fragment program's own ordinal be reused as the id its rendered target is
-/// registered under without ever colliding with a host texture carrying the
-/// same ordinal.
+/// The id space is split three ways by the top two bits, so every space is
+/// disjoint from the others by construction rather than by luck:
+///
+/// - bit 63 set — a shader program's own offscreen target
+///   ([`SceneTextureId::for_shader_program`]);
+/// - bit 62 set, bit 63 clear — a texture-bus frame source
+///   ([`SceneTextureId::for_texture_source`], see
+///   [`TEXTURE_SOURCE_NAMESPACE`]);
+/// - both clear — everything [`SceneTextureId::mint`] hands out.
+///
+/// `mint` counts up from 1 off a single process-wide counter and refuses to
+/// reach bit 62 (2^62 mints — more textures than a process can create), so a
+/// minted id never carries either reserved bit. Reserving the top bit is what
+/// lets a fragment program's own ordinal be reused as the id its rendered
+/// target is registered under without ever colliding with a host texture
+/// carrying the same ordinal; the bit below it does the same for a texture
+/// source's ordinal.
 const SHADER_PROGRAM_NAMESPACE: u64 = 1 << 63;
+
+/// The bit [`SceneTextureId::for_texture_source`] sets: the namespace of the
+/// renderer's external-texture frame bus, whose registrations derive their id
+/// from an ordinal of their own rather than minting one. See
+/// [`SHADER_PROGRAM_NAMESPACE`] for how the three id spaces stay disjoint.
+const TEXTURE_SOURCE_NAMESPACE: u64 = 1 << 62;
+
+/// Both reserved namespace bits — what an ordinal is masked by before a
+/// namespace bit is set on it, so a derived id can only ever carry its own
+/// namespace's bit.
+const RESERVED_BITS: u64 = SHADER_PROGRAM_NAMESPACE | TEXTURE_SOURCE_NAMESPACE;
 
 /// Describes a texture to create: dimensions, format, usage, and an optional
 /// debug label.
@@ -84,12 +105,22 @@ impl SceneTextureId {
     /// whose `wgpu::TextureView` its owner creates, re-creates and binds
     /// itself every frame — still needs one stable id to be named by across
     /// those re-creations, and minting here is what hands it one out of the
-    /// same process-wide counter. The shader-program id space stays reserved
-    /// against every such mint by construction (see
-    /// [`Self::for_shader_program`]).
+    /// same process-wide counter. The shader-program and texture-source id
+    /// spaces stay reserved against every such mint by construction (see
+    /// [`Self::for_shader_program`] and [`Self::for_texture_source`]).
+    ///
+    /// # Panics
+    ///
+    /// After 2^62 - 1 mints, rather than handing out an id inside a reserved
+    /// namespace — a count no process reaches.
     #[must_use]
     pub fn mint() -> Self {
-        Self(NEXT_SCENE_TEXTURE_ID.fetch_add(1, Ordering::Relaxed))
+        let raw = NEXT_SCENE_TEXTURE_ID.fetch_add(1, Ordering::Relaxed);
+        assert!(
+            raw & RESERVED_BITS == 0,
+            "the minted scene-texture id space is exhausted"
+        );
+        Self(raw)
     }
 
     /// The id under which the offscreen target of the fragment program
@@ -103,14 +134,31 @@ impl SceneTextureId {
     /// lets each compute the id the other used, with no shared side table to
     /// keep in step.
     ///
-    /// Disjoint from [`Self::mint`]'s range by construction — see
-    /// [`SHADER_PROGRAM_NAMESPACE`] — so a host texture and a shader target
-    /// can never answer to the same id. A `program_id` large enough to reach
-    /// the reserved bit itself is impossible for the same counting reason its
-    /// minter is.
+    /// Disjoint from [`Self::mint`]'s range and from
+    /// [`Self::for_texture_source`]'s by construction — see
+    /// [`SHADER_PROGRAM_NAMESPACE`] — so a host texture, a texture source and
+    /// a shader target can never answer to the same id. A `program_id` large
+    /// enough to reach a reserved bit itself is impossible for the same
+    /// counting reason its minter is.
     #[must_use]
     pub const fn for_shader_program(program_id: u64) -> Self {
         Self(program_id | SHADER_PROGRAM_NAMESPACE)
+    }
+
+    /// The id under which the external-texture frame bus registers its
+    /// `source`-th frame source.
+    ///
+    /// Derived from an ordinal the bus counts itself rather than minted, for
+    /// the same reason [`Self::for_shader_program`] is: the namespace is the
+    /// bus's own, so an ordinary external pass can be refused an id inside it
+    /// and a bus registration can never displace one a caller minted. The
+    /// ordinal is masked below both reserved bits before the namespace bit is
+    /// set, so the result is never a shader-program id either — disjoint from
+    /// [`Self::mint`] and [`Self::for_shader_program`] by construction (see
+    /// [`SHADER_PROGRAM_NAMESPACE`]).
+    #[must_use]
+    pub const fn for_texture_source(source: u64) -> Self {
+        Self((source & !RESERVED_BITS) | TEXTURE_SOURCE_NAMESPACE)
     }
 
     /// The opaque value this id wraps.
@@ -136,6 +184,18 @@ impl SceneTextureId {
     #[must_use]
     pub const fn is_shader_program(self) -> bool {
         self.0 & SHADER_PROGRAM_NAMESPACE != 0
+    }
+
+    /// Whether `self` names a texture-bus frame source
+    /// ([`Self::for_texture_source`]) rather than something an ordinary
+    /// caller minted or a shader program's target.
+    ///
+    /// The namespace counterpart of [`Self::is_shader_program`], for the same
+    /// reason: a registry that must refuse the bus's ids to anyone but the bus
+    /// tests membership without the reserved bit being exported.
+    #[must_use]
+    pub const fn is_texture_source(self) -> bool {
+        self.0 & RESERVED_BITS == TEXTURE_SOURCE_NAMESPACE
     }
 }
 
@@ -340,6 +400,53 @@ mod tests {
         let shader = SceneTextureId::for_shader_program(minted.get());
         assert!(!minted.is_shader_program());
         assert!(shader.is_shader_program());
+    }
+
+    #[test]
+    fn the_three_id_namespaces_are_disjoint() {
+        // Every minted id carries neither reserved bit; every texture-source
+        // id carries exactly its own; every shader id carries the top bit.
+        // Derived from the same ordinals, so a collision would show here.
+        for _ in 0..64 {
+            let minted = SceneTextureId::mint();
+            let source = SceneTextureId::for_texture_source(minted.get());
+            let shader = SceneTextureId::for_shader_program(minted.get());
+
+            assert_eq!(minted.get() & RESERVED_BITS, 0);
+            assert!(!minted.is_shader_program() && !minted.is_texture_source());
+
+            assert!(source.is_texture_source());
+            assert!(!source.is_shader_program());
+            assert_eq!(source.get() & RESERVED_BITS, TEXTURE_SOURCE_NAMESPACE);
+
+            assert!(shader.is_shader_program());
+            assert!(!shader.is_texture_source());
+
+            assert_ne!(minted, source);
+            assert_ne!(minted, shader);
+            assert_ne!(source, shader);
+        }
+    }
+
+    #[test]
+    fn a_texture_source_id_is_a_pure_function_of_its_ordinal() {
+        assert_eq!(
+            SceneTextureId::for_texture_source(3),
+            SceneTextureId::for_texture_source(3)
+        );
+        assert_ne!(
+            SceneTextureId::for_texture_source(3),
+            SceneTextureId::for_texture_source(4)
+        );
+    }
+
+    #[test]
+    fn a_texture_source_ordinal_carrying_a_reserved_bit_stays_out_of_the_shader_space() {
+        // An ordinal no counter reaches, but the mask must still keep the
+        // result inside the texture-source namespace alone.
+        let id = SceneTextureId::for_texture_source(u64::MAX);
+        assert!(id.is_texture_source());
+        assert!(!id.is_shader_program());
     }
 
     #[test]
