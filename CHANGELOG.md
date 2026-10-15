@@ -8,6 +8,29 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Added
 
+- Backdrop blur: `frust_scene::Command::BackdropBlur`, `SceneBuilder::backdrop_blur` and
+  `PaintScene::backdrop_blur(origin, size, radius)` (a no-op by default) blur whatever is already
+  painted beneath a rectangle, masked by any open clip. The engine cuts the frame there, copies the
+  region into a page, blurs it and draws the panel from it; at most four per frame
+  (`EngineError::TooManyBackdrops`), none inside a translucent layer, never retained. A swapchain
+  frame carrying one renders via an intermediate plus one present copy (`CopyPresentPass`).
+- Path clips: `frust_scene::Command::PushClipPath`, `SceneBuilder::push_clip_path` and
+  `PaintScene::push_clip_path(origin, path)` clip to an arbitrary outline (nonzero winding), popped
+  by the shared `pop_clip`. The engine lowers it to a coverage mask, never a layer page, so a
+  retained body under one paints inline; a recorder without its own override clips to the path's
+  bounding box.
+- Retained layers. `repaint_boundary(child)` (with `.alpha(f32)`) and `AnimatedOpacity::cached(bool)`
+  keep a subtree's rasterized page across frames and composite it while nothing under it changes;
+  navigator pages and `pattern_switcher` children carry a boundary, so transitions composite
+  retained pages while a page at rest paints plain. The engine owns the pages in a budgeted LRU store
+  outside the intermediate pool (`FRUST_ENGINE_RETAINED_BUDGET_MB=<n>` overrides the tier budget); a
+  page it cannot serve refuses the frame and the shell repaints without pages. Kill switches:
+  `FRUST_NO_RETAINED_LAYERS` (widgets) and `FRUST_ENGINE_NO_LAYERS` (engine, now consulted).
+  A page is drawn only when the published ledger covers the paint serial it was recorded under;
+  re-recording a key whose new recording does not reach its page (refused, nested or unrendered)
+  evicts the old page; a hover-link change or focus-epoch advance re-records every boundary once.
+  `PaintScene::current_transform()` (default `None`) reports the transform a command would record
+  under. Limits are in docs/LIMITATIONS.md (`retained-pages-budget-refusals`).
 - Per-paint-class strip programs: `strip.wgsl` is specialised per `PaintClass` (solid + coverage,
   gradient, image, image-filtered, blurred-rect, layer-composite, and the whole Uber program), the
   variants created lazily against one explicit strip pipeline layout. `FRUST_ENGINE_UBER_PROGRAM=1`
@@ -87,6 +110,19 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Changed
 
+- BREAKING: `frust_scene::Command::PushSnapshot` / `PopSnapshot` are replaced by `PushRetained
+  { key, rect, alpha, scale, transform }` / `PopRetained`, plus the new `Command::DrawRetained`;
+  `PaintScene::push_snapshot` / `pop_snapshot` are removed in favour of `push_retained` /
+  `pop_retained` / `draw_retained` (rename the calls). A renderer that does not retain paints a
+  `PushRetained` body inline exactly as the old snapshot bracket did and is never sent
+  `DrawRetained`; a renderer that publishes a ledger must serve every key it lists or refuse the
+  frame. `PaintCtx::retained_available` takes a fourth `recorded_serial` parameter.
+- `PaintOutcome::paint_serial` reports the monotonic serial `RenderRoot::paint` minted for the pass.
+- Host paint cost with retained layers on versus off (release, i5-12600 Linux, 300 frames, mean
+  us; `relayout_cost_bench`): cached opacity 0.11 vs 49.00, navigator push/pop 32.63 vs 111.52,
+  navigator page at rest 48.53 vs 48.54. Device legs (Pixel 5, iPhone SE) are owed. A backdrop
+  frame on the direct present arm pays one present copy, about 0.239 ms at 1080x2400 and 0.189 ms
+  at 1920x1080 (T400).
 - Measured `gpu_main` p50 on the S1 scene, before and after the FAST Phase 1 engine work: Pixel 4a
   32.70 to 12.75 ms, Pixel 4 11.15 to 8.12 ms. Method and the other scenes are in
   [docs/PERFORMANCE_BASELINES.md](docs/PERFORMANCE_BASELINES.md) § After Phase 1.

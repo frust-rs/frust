@@ -13,6 +13,7 @@ use frust_scene::Scene;
 use frust_shell_common::perf::{
     self, FramePasses, FrameStats, GpuPasses, RenderSpans, StartupSpans, UiSpans,
 };
+use frust_shell_common::render_split::{publish_resident_pages, request_retained_repaint};
 
 /// What the render side publishes about the frames it renders, read by the UI
 /// thread — one instance shared by both sides through an `Arc`, the same
@@ -99,6 +100,40 @@ pub(crate) fn gpu_passes(renderer: &SurfaceRenderer) -> Option<GpuPasses> {
     })
 }
 
+/// Publish the renderer's resident-key ledger for the UI thread's next paint
+/// when it changed since the last publish — after a frame, and at a surface
+/// destroy or device-scale change (both of which leave it empty).
+///
+/// The slot is process-global (one renderer per process); see
+/// [`publish_resident_pages`].
+pub(super) fn publish_ledger(renderer: &mut SurfaceRenderer) {
+    if let Some(resident) = renderer.take_retained_ledger() {
+        publish_resident_pages(
+            resident.frame,
+            resident
+                .pages
+                .iter()
+                .map(|page| (page.key, page.extent_px, page.scale)),
+        );
+    }
+}
+
+/// Hand the renderer the (sanitized) device scale a surface create or resize
+/// carries: a changed scale clears the retained store, and its empty ledger is
+/// published at once.
+pub(super) fn note_scale(renderer: &mut SurfaceRenderer, scale: f64) {
+    if renderer.note_device_scale(scale) {
+        publish_ledger(renderer);
+    }
+}
+
+/// [`publish_ledger`] after a frame, answering whether that frame was refused
+/// for drawing a retained page the renderer no longer holds.
+fn publish_retained(renderer: &mut SurfaceRenderer) -> bool {
+    publish_ledger(renderer);
+    renderer.take_retained_refusal()
+}
+
 /// Run the encode→acquire→submit tail for one painted `scene`, timing each span
 /// behind `perf_on` (the FFI-path perf convention: zero clock reads when
 /// disabled), recording the folded [`FramePasses`] through the single emitter
@@ -107,6 +142,10 @@ pub(crate) fn gpu_passes(renderer: &SurfaceRenderer) -> Option<GpuPasses> {
 /// path (UI thread) and the split path's [`crate::jni_glue::render_loop`] (render
 /// thread) so the per-frame render logic is not forked — the exact pre-split
 /// tail, only relocated.
+///
+/// The caller names the scene's paint serial to `renderer` first
+/// ([`SurfaceRenderer::note_scene_serial`] — `FrameMeta::paint_serial` in the
+/// split), so the ledger published once the scene is committed carries it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_scene(
     renderer: &mut SurfaceRenderer,
@@ -178,6 +217,21 @@ pub(crate) fn render_scene(
         Err(err) => Err(err),
     };
     let submit_time = submit_start.map_or(Duration::ZERO, |t| t.elapsed());
+
+    // The resident-key ledger after this frame, for the UI thread's next
+    // paint. A frame the engine refused for drawing a page it no longer holds
+    // presented nothing and emptied the store, so the UI thread owes one more
+    // paint against the empty ledger just published: the process-wide repaint
+    // flag (this may be the render thread, which cannot touch the handle)
+    // forces the next Choreographer tick's gate to run instead of leaving an
+    // idle screen on the frame before the refused one.
+    if publish_retained(renderer) {
+        request_retained_repaint();
+        log::debug!(
+            "frust-shell-android: a frame drew a retained page the renderer no longer holds; \
+             the store was cleared and the next paint repaints every body"
+        );
+    }
 
     match render_result {
         // Stale swapchain (e.g. mid-rotation): reconfigured internally; the next

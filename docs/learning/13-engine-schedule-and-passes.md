@@ -47,6 +47,13 @@ the caller's encoder. Learn both and every pass label in a GPU capture has a lin
    > a filter layer nested inside another recorded layer, a non-default blend mode, a layer mask or
    > layer clip path — is refused with [`EngineError::SchedulerEscalation`].
 
+   Two Phase 3 shapes ride on top of that contract without widening it. A retained body renders into a
+   page the retained-page store owns (`RoundTarget::Retained`, built by `Schedule::build_retained`),
+   outside `MAX_LIVE_PAGES`. A `BackdropBlur` makes `Schedule::build_frame` (which `build_retained`
+   delegates to) cut the surface round at the backdrop, schedule a `RegionCopy` round that fills a
+   pooled page (`FramePass::Copy` in the renderer; the opaque pass stops at the first backdrop), run the
+   blur's passes — the same rounds a filter layer uses — and draw the result in the next root round.
+
    `MAX_CHAIN_DEPTH` is 4; `MAX_LIVE_PAGES` is `PING_PONG_GROUPS + 1` = 3. A refused shape does
    **not** degrade to a simpler render: the next section of the same doc, *A refusal is a skipped
    frame, not a fallback*, says there is no second renderer. `frust-render` drops the frame,

@@ -130,7 +130,6 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, DiscardScene, EditingState, EventCtx,
@@ -139,6 +138,8 @@ use frust_core::{
 };
 use frust_theme::Theme;
 use kurbo::{Affine, Point, Rect, Size, Vec2};
+
+use crate::repaint_boundary::{RetainedBoundary, within};
 
 use super::ambient::{
     ambient_page_reach, ambient_swipe_claim, host_reachable, with_page_reach, with_swipe_claim,
@@ -158,18 +159,6 @@ pub use super::options::{
     ResultCallback, RouteChangeCallback, VisibilityCallback,
 };
 pub use super::view::{NavigatorView, navigator, overlay_host};
-
-/// Process-wide, monotonically increasing source for
-/// [`PageEntry::snapshot_key`] and `motion::switcher`'s per-instance
-/// `snapshot_base` — every [`PaintScene::push_snapshot`] key handed to a
-/// renderer, across every navigator and switcher in the process, is drawn
-/// from this one counter. A renderer caches a snapshot's rasterized body by
-/// key alone, so two unrelated pods that happened to share a key would alias
-/// each other's cached content; per-navigator or per-switcher counters could
-/// collide with each other where this single process-wide one cannot.
-/// `Relaxed` ordering is sufficient: the counter's only job is producing
-/// distinct values, never synchronizing access to anything else.
-pub(crate) static NEXT_SNAPSHOT_KEY: AtomicU64 = AtomicU64::new(0);
 
 /// One retained page in the [`NavigatorWidget`]'s stack: its builder (re-run each
 /// rebuild), the last view it produced (for reconciliation), the retained child
@@ -237,13 +226,13 @@ pub(super) struct PageEntry<State: 'static> {
     /// [`cull_covered_builds`](NavigatorView::cull_covered_builds) still reports
     /// truthfully.
     pub(super) reach: Rc<Cell<bool>>,
-    /// This page's [`PaintScene::push_snapshot`] cache key, drawn once from
-    /// [`NEXT_SNAPSHOT_KEY`] when the page is constructed and stable for its
-    /// whole lifetime — including a pop/replace stash, since the same
-    /// `PageEntry` moves into [`ActiveTransition::stashed`] rather than being
-    /// rebuilt. A key that changed frame to frame (or page to page) would
-    /// give a caching renderer nothing to hit.
-    snapshot_key: u64,
+    /// This page's retained-page boundary: every paint of [`pod`](Self::pod)
+    /// goes through it. Its key is minted once when the page is constructed and
+    /// is stable for the page's whole lifetime — including a pop/replace stash,
+    /// since the same `PageEntry` moves into [`ActiveTransition::stashed`]
+    /// rather than being rebuilt. A key that changed frame to frame (or page to
+    /// page) would give the renderer nothing to hit.
+    pub(super) boundary: RetainedBoundary,
 }
 
 /// The single in-flight page transition a [`NavigatorWidget`] owns (Flutter
@@ -1188,7 +1177,7 @@ impl<State: 'static> NavigatorWidget<State> {
                         route,
                         pop_swipe,
                         reach,
-                        snapshot_key: NEXT_SNAPSHOT_KEY.fetch_add(1, Ordering::Relaxed),
+                        boundary: RetainedBoundary::new(),
                     });
                     // Full gate (`top_pod_focused`): the covered page's own link
                     // ANDed with the rebuild-pass chain down to this navigator.
@@ -1258,7 +1247,7 @@ impl<State: 'static> NavigatorWidget<State> {
                             // page pushed with no override.
                             pop_swipe: None,
                             reach: Rc::clone(&reach),
-                            snapshot_key: NEXT_SNAPSHOT_KEY.fetch_add(1, Ordering::Relaxed),
+                            boundary: RetainedBoundary::new(),
                         };
                         if spec.is_animated() {
                             // Stash the old top and animate the new one in over it
@@ -1287,7 +1276,7 @@ impl<State: 'static> NavigatorWidget<State> {
                             route,
                             pop_swipe: None,
                             reach,
-                            snapshot_key: NEXT_SNAPSHOT_KEY.fetch_add(1, Ordering::Relaxed),
+                            boundary: RetainedBoundary::new(),
                         });
                     }
                     // Full gate (`top_pod_focused`): the replaced page's own link
@@ -1486,13 +1475,14 @@ impl<State: 'static> NavigatorWidget<State> {
     /// Paint the entering page (always the stack top) with `layer`, a hero
     /// reporter installed, returning its captured page-local hero rects.
     ///
-    /// Also decides this page's snapshot-bracket eligibility for
-    /// [`paint_page_layer`]: a *programmatic* transition (never an
+    /// Also decides whether this page may paint through its retained-page
+    /// boundary in [`paint_page_layer`]: a *programmatic* transition (never an
     /// interactive edge-swipe, whose progress is drag-held and whose stack
     /// is provisional) whose `directives` this frame are empty — a hero
     /// morph paints inside the page and must move every frame, so a page
-    /// carrying one is never snapshotted. `alpha > 0.0` is checked inside
-    /// [`paint_page_layer`] itself (its `DiscardScene` branch stays first).
+    /// carrying one is never retained. `alpha > 0.0` and the step's scale are
+    /// checked inside [`paint_page_layer`] itself (its `DiscardScene` branch
+    /// stays first).
     fn paint_entering_heroes(
         &mut self,
         ctx: &mut PaintCtx,
@@ -1502,19 +1492,19 @@ impl<State: 'static> NavigatorWidget<State> {
         nav_origin: Point,
         directives: HashMap<String, HeroDirective>,
     ) -> HashMap<String, Rect> {
-        let snapshot_eligible = self.snapshot_eligible(&directives);
+        let eligible = self.retained_eligible(&directives);
         if let Some(entry) = self.pages.last_mut() {
-            let snapshot = snapshot_eligible.then_some(entry.snapshot_key);
             let reference = nav_origin + Vec2::new(layer.dx, layer.dy);
             paint_page_heroes(
                 &mut entry.pod,
+                &mut entry.boundary,
                 ctx,
                 scene,
                 layer,
                 area,
                 reference,
                 directives,
-                snapshot,
+                eligible,
             )
         } else {
             HashMap::new()
@@ -1526,8 +1516,8 @@ impl<State: 'static> NavigatorWidget<State> {
     /// its captured page-local hero rects.
     ///
     /// See [`paint_entering_heroes`](Self::paint_entering_heroes) for the
-    /// snapshot-bracket eligibility rule this applies identically, including
-    /// to the stashed pod a pop/replace retains.
+    /// boundary eligibility rule this applies identically, including to the
+    /// stashed pod a pop/replace retains.
     #[allow(clippy::too_many_arguments)]
     fn paint_leaving_heroes(
         &mut self,
@@ -1540,37 +1530,38 @@ impl<State: 'static> NavigatorWidget<State> {
         directives: HashMap<String, HeroDirective>,
     ) -> HashMap<String, Rect> {
         let reference = nav_origin + Vec2::new(layer.dx, layer.dy);
-        let snapshot_eligible = self.snapshot_eligible(&directives);
+        let eligible = self.retained_eligible(&directives);
         if has_stashed {
             if let Some(t) = self.transition.as_mut()
                 && let Some(stashed) = t.stashed.as_mut()
             {
-                let snapshot = snapshot_eligible.then_some(stashed.snapshot_key);
                 return paint_page_heroes(
                     &mut stashed.pod,
+                    &mut stashed.boundary,
                     ctx,
                     scene,
                     layer,
                     area,
                     reference,
                     directives,
-                    snapshot,
+                    eligible,
                 );
             }
             HashMap::new()
         } else {
             let n = self.pages.len();
             if n >= 2 {
-                let snapshot = snapshot_eligible.then_some(self.pages[n - 2].snapshot_key);
+                let entry = &mut self.pages[n - 2];
                 paint_page_heroes(
-                    &mut self.pages[n - 2].pod,
+                    &mut entry.pod,
+                    &mut entry.boundary,
                     ctx,
                     scene,
                     layer,
                     area,
                     reference,
                     directives,
-                    snapshot,
+                    eligible,
                 )
             } else {
                 HashMap::new()
@@ -1578,13 +1569,13 @@ impl<State: 'static> NavigatorWidget<State> {
         }
     }
 
-    /// The shared snapshot-bracket eligibility test both
+    /// The shared boundary eligibility test both
     /// [`paint_entering_heroes`](Self::paint_entering_heroes) and
     /// [`paint_leaving_heroes`](Self::paint_leaving_heroes) apply to their
     /// own page this frame: the in-flight transition is programmatic (not an
     /// interactive edge-swipe) and this frame's hero `directives` for the
     /// page are empty.
-    fn snapshot_eligible(&self, directives: &HashMap<String, HeroDirective>) -> bool {
+    fn retained_eligible(&self, directives: &HashMap<String, HeroDirective>) -> bool {
         let programmatic = self.transition.as_ref().is_some_and(|t| !t.interactive);
         programmatic && directives.is_empty()
     }
@@ -1594,23 +1585,24 @@ impl<State: 'static> NavigatorWidget<State> {
 /// returning the page-local rects its tagged descendants captured. `reference`
 /// is the page's absolute top-left this frame (nav origin + the layer's
 /// animated offset), subtracted from each reported rect so captures are stable
-/// across the slide. `snapshot` is this page's resolved snapshot-bracket key
-/// this frame, if eligible — see
+/// across the slide. `eligible` is whether the page may paint through its
+/// retained-page boundary this frame — see
 /// [`paint_entering_heroes`](NavigatorWidget::paint_entering_heroes).
 #[allow(clippy::too_many_arguments)]
 fn paint_page_heroes(
     pod: &mut ChildPod,
+    boundary: &mut RetainedBoundary,
     ctx: &mut PaintCtx,
     scene: &mut dyn PaintScene,
     layer: Layer,
     area: Size,
     reference: Point,
     directives: HashMap<String, HeroDirective>,
-    snapshot: Option<u64>,
+    eligible: bool,
 ) -> HashMap<String, Rect> {
     let registry = RefCell::new(HeroFrames::new(reference, directives));
     ctx.with_hero_registry(&registry, |page_ctx| {
-        paint_page_layer(pod, page_ctx, scene, layer, area, snapshot);
+        paint_page_layer(pod, boundary, page_ctx, scene, layer, area, eligible);
     });
     registry.into_inner().into_captured()
 }
@@ -1625,64 +1617,60 @@ fn scale_about(pivot: Point, scale: f64) -> Affine {
 }
 
 /// Paint one transition page: offset its pod origin by the layer's `dx`/`dy` (so
-/// paint and hit-testing move together), then bracket its paint with either a
-/// snapshot bracket (see below) or, when ineligible, a `push_transform` scale
-/// (about the page's paint-area centre) and a `push_layer` opacity when either
-/// differs from the identity — strict LIFO (transform outer, opacity inner).
-/// The scale realises M3 fade-through's `0.92 → 1.0` incoming scale-up
-/// ([`Layer::scale`](super::transition::Layer::scale)); every other preset
-/// leaves `scale == 1.0`, so the transform is skipped. Mirrors
-/// `motion::switcher`'s `paint_staged_child`.
+/// paint and hit-testing move together), then paint it one of three ways.
 ///
-/// For the split-crossfade presets (M3SharedAxisX, M3FadeThrough, Glyph),
-/// `resolve_layers` leaves at most one page visible at any instant — the
-/// other is `alpha == 0`, and at the exact split instant both are. Rather
-/// than rasterize an alpha-0 page under a zero-opacity layer — real GPU work
-/// multiplied away to nothing — it paints into a [`DiscardScene`] sink
-/// instead. The paint pass still has to run for its side effects (hero
-/// rects reported through `PaintCtx::with_hero_registry`, animating
-/// descendants advancing), so this is a redirect of the *scene*, not a skip of
-/// the pass; no `push_layer`/`push_transform` bracket is needed since nothing
-/// the sink records is ever composited. This DiscardScene check runs first,
-/// ahead of the snapshot bracket below, unconditionally.
-///
-/// When `snapshot` is `Some(key)` (see
-/// [`NavigatorWidget::paint_entering_heroes`] for the eligibility rule), the
-/// alpha-surviving page paints through
-/// [`PaintScene::push_snapshot`]/[`pop_snapshot`] instead, unconditionally —
-/// no `has_scale`/`has_alpha` identity-skip, since the bracket itself is what
-/// tells a caching renderer this body is worth caching, whatever this
-/// particular frame's alpha/scale happen to be. **The bracket rect origin must
-/// follow the pod's absolute paint origin** — `ctx.origin() + (layer.dx,
-/// layer.dy)` — so the painted body lands inside the texture (preventing crops
-/// of the shifted body). The scale pivot still centers on the rect, which now
-/// follows the slid page.
+/// - **Alpha zero:** the split-crossfade presets (M3SharedAxisX, M3FadeThrough,
+///   Glyph) leave at most one page visible at any instant — the other is
+///   `alpha == 0`, and at the exact split instant both are. Rather than
+///   rasterize an alpha-0 page under a zero-opacity layer, it paints into a
+///   [`DiscardScene`] sink. The paint pass still has to run for its side
+///   effects (hero rects reported through `PaintCtx::with_hero_registry`,
+///   animating descendants advancing), so this is a redirect of the *scene*,
+///   not a skip of the pass. Checked first, unconditionally.
+/// - **Through the boundary:** an `eligible` page whose step is alpha and/or
+///   translation only (slide, fade) paints through its [`RetainedBoundary`] at
+///   the slid origin and the layer's alpha: the retained page when the body is
+///   unchanged and still resident, otherwise a recording bracket — but only
+///   while the page lies wholly inside the navigator's area, since a renderer
+///   never retains a body clipped on the way in — otherwise directly under a
+///   `push_layer`. A transition's first frame runs at progress 0, where the
+///   leaving page still sits at rest, so that frame records it and every later
+///   frame can composite it.
+/// - **Inline:** a step with a scale component (M3 fade-through's `0.92 → 1.0`
+///   incoming scale-up, [`Layer::scale`](super::transition::Layer::scale)) or
+///   an ineligible page brackets its paint with a `push_transform` scale (about
+///   the page's paint-area centre) and a `push_layer` opacity when either
+///   differs from the identity — strict LIFO (transform outer, opacity inner).
+///   A page is only ever served at the scale it was recorded at, so a scaled
+///   frame is never routed through the boundary. Mirrors `motion::switcher`'s
+///   `paint_staged_child`.
 fn paint_page_layer(
     pod: &mut ChildPod,
+    boundary: &mut RetainedBoundary,
     ctx: &mut PaintCtx,
     scene: &mut dyn PaintScene,
     layer: Layer,
     area: Size,
-    snapshot: Option<u64>,
+    eligible: bool,
 ) {
     pod.set_origin(Point::new(layer.dx, layer.dy));
     let alpha = layer.alpha.clamp(0.0, 1.0);
 
     if alpha <= 0.0 {
-        let mut sink = DiscardScene;
-        pod.paint_child(ctx, &mut sink);
-        return;
-    }
-
-    if let Some(key) = snapshot {
-        let bracket_origin = ctx.origin() + Vec2::new(layer.dx, layer.dy);
-        scene.push_snapshot(key, bracket_origin, area, alpha, layer.scale);
-        pod.paint_child(ctx, scene);
-        scene.pop_snapshot();
+        boundary.paint_plain(pod, ctx, &mut DiscardScene);
         return;
     }
 
     let has_scale = (layer.scale - 1.0).abs() > f64::EPSILON;
+
+    if eligible && !has_scale {
+        let nav_origin = ctx.origin();
+        let page_origin = nav_origin + Vec2::new(layer.dx, layer.dy);
+        let may_record = within(page_origin, area, nav_origin, area);
+        boundary.paint(pod, ctx, scene, page_origin, area, alpha, may_record);
+        return;
+    }
+
     let has_alpha = alpha < 1.0;
 
     if has_scale {
@@ -1693,7 +1681,7 @@ fn paint_page_layer(
     if has_alpha {
         scene.push_layer(ctx.origin(), area, alpha);
     }
-    pod.paint_child(ctx, scene);
+    boundary.paint_plain(pod, ctx, scene);
     if has_alpha {
         scene.pop_layer();
     }
@@ -1748,7 +1736,7 @@ impl<State: 'static> View<State> for NavigatorView<State> {
                 // navigator's own resolved default.
                 pop_swipe: None,
                 reach: root_reach,
-                snapshot_key: NEXT_SNAPSHOT_KEY.fetch_add(1, Ordering::Relaxed),
+                boundary: RetainedBoundary::new(),
             }],
             pending_results: Vec::new(),
             needs_ime_clear: false,
@@ -1987,9 +1975,13 @@ impl<State: 'static> Widget for NavigatorWidget<State> {
         } else {
             // Paint the visible range bottom-to-top: only the topmost opaque page
             // (and any transparent pages above it) — fully-covered pages are culled.
+            // At rest a page paints with no bracket (a resting page is
+            // recorded by the first frame of the transition that moves it,
+            // which runs at progress 0), but still through its boundary, which
+            // forgets a recorded page the moment the body changes.
             let start = self.base_visible_index();
             for entry in &mut self.pages[start..] {
-                entry.pod.paint_child(ctx, scene);
+                entry.boundary.paint_plain(&mut entry.pod, ctx, scene);
             }
         }
         // Deterministic IME hide after a stack mutation: publish a cleared surface

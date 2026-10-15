@@ -101,17 +101,21 @@ impl InlineExecutor {
         }
     }
 
-    /// Run the encode→acquire→submit tail synchronously for `scene`, recording
-    /// the folded frame and returning the encode span for the UI-side deadline
-    /// estimate.
+    /// Run the encode→acquire→submit tail synchronously for `scene`, painted
+    /// under `paint_serial`, recording the folded frame and returning the encode
+    /// span for the UI-side deadline estimate.
     fn submit_frame(
         &mut self,
         scene: &Scene,
         base_color: peniko::Color,
         ui: UiSpans,
+        paint_serial: u64,
         perf_on: bool,
     ) -> Duration {
         self.frame_id += 1;
+        // Named before the encode, so the ledger published once this scene is
+        // committed carries it.
+        self.renderer.note_scene_serial(paint_serial);
         render_scene(
             &mut self.renderer,
             &self.render_cx,
@@ -255,13 +259,15 @@ impl SplitExecutor {
         Scene::new()
     }
 
-    /// Hand one finished frame to the render thread (latest-wins).
+    /// Hand one finished frame to the render thread (latest-wins), with the
+    /// paint serial it was painted under riding its [`FrameMeta`].
     fn submit_frame(
         &mut self,
         painted: PaintedScene,
         ui: UiSpans,
         frame_time: FrameTime,
         size: SurfaceSize,
+        paint_serial: u64,
     ) {
         self.frame_id += 1;
         if let Some(sender) = self.sender.as_ref() {
@@ -271,6 +277,7 @@ impl SplitExecutor {
                     frame_time,
                     size,
                     frame_id: self.frame_id,
+                    paint_serial,
                 },
                 ui_spans: ui,
             });
@@ -426,6 +433,9 @@ impl FrameExecutor {
     /// buffer is reused rather than reallocated — falling back to `Scene::new()`
     /// only when none is available yet, and returning `Duration::ZERO` (encode
     /// is off-thread, so it does not count against the UI thread's deadline).
+    /// `paint_serial` is the paint's `PaintOutcome::paint_serial`, named to the
+    /// renderer before it encodes the scene on either path.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn submit_frame(
         &mut self,
         scene: &mut Scene,
@@ -433,17 +443,20 @@ impl FrameExecutor {
         ui: UiSpans,
         frame_time: FrameTime,
         size: SurfaceSize,
+        paint_serial: u64,
         perf_on: bool,
     ) -> Duration {
         match self {
-            FrameExecutor::Inline(inline) => inline.submit_frame(scene, base_color, ui, perf_on),
+            FrameExecutor::Inline(inline) => {
+                inline.submit_frame(scene, base_color, ui, paint_serial, perf_on)
+            }
             FrameExecutor::Split(split) => {
                 let replacement = split.take_reusable_scene();
                 let painted = PaintedScene {
                     scene: std::mem::replace(scene, replacement),
                     base_color,
                 };
-                split.submit_frame(painted, ui, frame_time, size);
+                split.submit_frame(painted, ui, frame_time, size, paint_serial);
                 Duration::ZERO
             }
         }

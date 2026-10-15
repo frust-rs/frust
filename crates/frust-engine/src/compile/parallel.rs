@@ -6,14 +6,14 @@
 //! geometry, its composed transform and the viewport. Everything around it is
 //! order-coupled — the depth counter only advances for a draw that produced
 //! coverage, the encoded-paint table and the image residency are appended to
-//! in painter order, the clip, group and snapshot stacks are a function of
+//! in painter order, the clip, group and retained stacks are a function of
 //! every bracket before the command, and a glyph run's atlas route and
 //! resident-run cache are stateful across the whole frame. So the walk splits
 //! in three:
 //!
 //! 1. **Planning**, sequential and cheap ([`plan`]). One pass over the display
 //!    list resolves each drawing command's [`Geometry`] against its composed
-//!    transform — tracking the snapshot correction and whether a coverage mask
+//!    transform — tracking the retained correction and whether a coverage mask
 //!    is open, on the walk's own terms — and lists the ones worth handing to a
 //!    worker as [`Job`]s. A pixel-aligned rectangle is never one (writing its
 //!    coverage costs less than copying it), a command drawn under a mask is
@@ -66,10 +66,10 @@ use vello_common::strip_generator::{GenerationMode, StripGenerator, StripStorage
 
 use super::blur_rrect::inflated_bounds;
 use super::cull::{generate_fill, generate_stroke, rounded_rect_elements};
-use super::layers::SnapshotStack;
+use super::layers::RetainedStack;
 use super::{
-    FLATTEN_TOLERANCE, check_finite, command_on_grid, dash_path, fast_rect, round_stroke,
-    rounded_rect_radii, snapshot_entry,
+    FLATTEN_TOLERANCE, check_finite, command_on_grid, dash_path, fast_rect, retained_entry,
+    round_stroke, rounded_rect_radii,
 };
 
 /// The most threads a frame's strip generation runs on, the calling thread
@@ -219,7 +219,7 @@ impl<'a> Geometry<'a> {
     }
 
     /// The geometry `command` rasterizes under `combined` (the frame root with
-    /// any snapshot correction), or `None` for a command that is not a
+    /// any retained correction), or `None` for a command that is not a
     /// strip-generated shape — a bracket, a glyph run, an external texture.
     pub(crate) fn of(command: &'a Command, combined: Affine) -> Option<Self> {
         let geometry = match command {
@@ -431,7 +431,7 @@ fn control_box(elements: impl Iterator<Item = PathEl>) -> Rect {
 pub(crate) struct Job<'a> {
     /// The command's index in the display list.
     command: usize,
-    /// The frame root with the snapshot correction the planner composed for
+    /// The frame root with the retained correction the planner composed for
     /// this command — compared bit for bit against the walk's own before a
     /// helper's run is taken.
     combined: Affine,
@@ -466,16 +466,35 @@ impl Plan<'_> {
 /// Plan `scene`'s helper work for a `viewport`-sized frame under `root`.
 ///
 /// Mirrors the walk's bracket handling on its exact terms — the same
-/// [`command_on_grid`] check, the same [`snapshot_entry`] substitution, the
-/// same snapshot-layer rule — but tracks only what decides whether a command
-/// is worth offering: the snapshot correction its transform composes with, and
+/// [`command_on_grid`] check, the same [`retained_entry`] substitution, the
+/// same retained-layer rule — but tracks only what decides whether a command
+/// is worth offering: the retained correction its transform composes with, and
 /// whether any open bracket lowered to a coverage mask. An off-grid bracket is
 /// tracked as the scissor that admits nothing it lowers to. The walk re-checks
 /// both before it takes a helper's run, so an approximation here can only
 /// waste work.
+#[cfg(test)]
 pub(crate) fn plan<'a>(scene: &'a Scene, root: Affine, viewport: Rect) -> Plan<'a> {
+    plan_with(scene, root, viewport, false)
+}
+
+/// [`plan`] for a compiler whose retention is `retain`
+/// (`SceneCompiler::set_retained_layers`).
+///
+/// Retention changes one bracket decision the mirror has to make the same way
+/// the walk does: with it on, the outermost `PushRetained` opens a group
+/// whatever its alpha — a clipped layer below full opacity, an unclipped one at
+/// it — so the group count a stray pop inside the body is measured against
+/// agrees with the walk's. A `DrawRetained` stays a zero-strip command either
+/// way: the walk records an empty layer for it, which opens no bracket.
+pub(crate) fn plan_with<'a>(
+    scene: &'a Scene,
+    root: Affine,
+    viewport: Rect,
+    retain: bool,
+) -> Plan<'a> {
     let mut plan = Plan::default();
-    let mut snapshots = SnapshotStack::new();
+    let mut retained_stack = RetainedStack::new();
     // One entry per open bracket: whether its clip lowered to a mask.
     let mut brackets: Vec<bool> = Vec::new();
     let mut masks = 0_usize;
@@ -499,7 +518,15 @@ pub(crate) fn plan<'a>(scene: &'a Scene, root: Affine, viewport: Rect) -> Plan<'
             Command::GlyphRun(_)
             | Command::ClearRect { .. }
             | Command::ShaderQuad { .. }
-            | Command::SceneTexture { .. } => continue,
+            | Command::SceneTexture { .. }
+            // A zero-strip command: the walk records at most an empty layer
+            // for it (and, with retention off, the up-front validation refuses
+            // a frame carrying one).
+            | Command::DrawRetained { .. }
+            // A layer of its own the walk opens and closes around one draw it
+            // generates itself, under whatever mask is open: no bracket stays
+            // open past it, and its coverage is never offered to a helper.
+            | Command::BackdropBlur { .. } => continue,
             Command::FillRect { .. }
             | Command::RoundedRect { .. }
             | Command::Line { .. }
@@ -508,27 +535,29 @@ pub(crate) fn plan<'a>(scene: &'a Scene, root: Affine, viewport: Rect) -> Plan<'
             | Command::Path { .. }
             | Command::PushClip { .. }
             | Command::PushClipRounded { .. }
+            | Command::PushClipPath { .. }
             | Command::PopClip
             | Command::PushLayer { .. }
             | Command::PopLayer
-            | Command::PushSnapshot { .. }
-            | Command::PopSnapshot => {}
+            | Command::PushRetained { .. }
+            | Command::PopRetained => {}
         }
-        let combined = root * snapshots.correction();
+        let combined = root * retained_stack.correction();
         let on_grid = command_on_grid(command, combined);
         if !on_grid {
             match command {
                 Command::PushClip { .. }
                 | Command::PushClipRounded { .. }
+                | Command::PushClipPath { .. }
                 | Command::PushLayer { .. } => push(&mut brackets, &mut masks, false),
-                Command::PushSnapshot {
+                Command::PushRetained {
                     rect,
                     scale,
                     transform,
                     ..
                 } => {
-                    let (scale, transform) = snapshot_entry(on_grid, *scale, *transform);
-                    snapshots.enter(*rect, scale, transform);
+                    let (scale, transform) = retained_entry(on_grid, *scale, *transform);
+                    retained_stack.enter(*rect, scale, transform);
                 }
                 // An off-grid shape is refused by the walk, and a pop carries
                 // no transform to be off the grid with.
@@ -540,11 +569,13 @@ pub(crate) fn plan<'a>(scene: &'a Scene, root: Affine, viewport: Rect) -> Plan<'
                 | Command::Path { .. }
                 | Command::PopClip
                 | Command::PopLayer
-                | Command::PopSnapshot
+                | Command::PopRetained
                 | Command::GlyphRun(_)
                 | Command::ClearRect { .. }
                 | Command::ShaderQuad { .. }
-                | Command::SceneTexture { .. } => {}
+                | Command::SceneTexture { .. }
+                | Command::DrawRetained { .. }
+                | Command::BackdropBlur { .. } => {}
             }
             continue;
         }
@@ -569,25 +600,31 @@ pub(crate) fn plan<'a>(scene: &'a Scene, root: Affine, viewport: Rect) -> Plan<'
                 let mask = !square || fast_rect(*rect, combined * *transform).is_none();
                 push(&mut brackets, &mut masks, mask);
             }
+            // Always a mask (`ClipStack::push_path`): every draw under it is
+            // generated during the walk itself.
+            Command::PushClipPath { .. } => push(&mut brackets, &mut masks, true),
             Command::PopClip | Command::PopLayer => pop(&mut brackets, &mut masks),
-            Command::PushSnapshot {
+            Command::PushRetained {
                 rect,
                 alpha,
                 scale,
                 transform,
                 ..
             } => {
-                if snapshots.enter(*rect, *scale, *transform) {
-                    let corrected = root * snapshots.correction() * *transform;
-                    if *alpha < 1.0 && check_finite(corrected).is_ok() {
-                        let mask = fast_rect(*rect, corrected).is_none();
+                if retained_stack.enter(*rect, *scale, *transform) {
+                    let corrected = root * retained_stack.correction() * *transform;
+                    if (retain || *alpha < 1.0) && check_finite(corrected).is_ok() {
+                        // Below full opacity the walk clips the body to its
+                        // rectangle; at it (retention on) the group clips
+                        // nothing at all.
+                        let mask = *alpha < 1.0 && fast_rect(*rect, corrected).is_none();
                         push(&mut brackets, &mut masks, mask);
-                        snapshots.record_layer(brackets.len());
+                        retained_stack.record_layer(brackets.len());
                     }
                 }
             }
-            Command::PopSnapshot => {
-                if snapshots.leave(brackets.len()) {
+            Command::PopRetained => {
+                if retained_stack.leave(brackets.len()) {
                     pop(&mut brackets, &mut masks);
                 }
             }
@@ -615,7 +652,9 @@ pub(crate) fn plan<'a>(scene: &'a Scene, root: Affine, viewport: Rect) -> Plan<'
             Command::GlyphRun(_)
             | Command::ClearRect { .. }
             | Command::ShaderQuad { .. }
-            | Command::SceneTexture { .. } => {}
+            | Command::SceneTexture { .. }
+            | Command::DrawRetained { .. }
+            | Command::BackdropBlur { .. } => {}
         }
     }
     plan

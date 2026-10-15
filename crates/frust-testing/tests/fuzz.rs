@@ -731,6 +731,7 @@ fn the_generator_only_emits_primitives_the_engine_lowers() {
                 frust_scene::Command::GlyphRun(_) => "GlyphRun",
                 frust_scene::Command::PushClip { .. } => "PushClip",
                 frust_scene::Command::PushClipRounded { .. } => "PushClipRounded",
+                frust_scene::Command::PushClipPath { .. } => "PushClipPath",
                 frust_scene::Command::PopClip => "PopClip",
                 frust_scene::Command::Image { .. } => "Image",
                 frust_scene::Command::BlurredRoundedRect { .. } => "BlurredRoundedRect",
@@ -738,9 +739,11 @@ fn the_generator_only_emits_primitives_the_engine_lowers() {
                 frust_scene::Command::PopLayer => "PopLayer",
                 frust_scene::Command::ClearRect { .. } => "ClearRect",
                 frust_scene::Command::ShaderQuad { .. } => "ShaderQuad",
-                frust_scene::Command::PushSnapshot { .. } => "PushSnapshot",
-                frust_scene::Command::PopSnapshot => "PopSnapshot",
+                frust_scene::Command::PushRetained { .. } => "PushRetained",
+                frust_scene::Command::PopRetained => "PopRetained",
+                frust_scene::Command::DrawRetained { .. } => "DrawRetained",
                 frust_scene::Command::SceneTexture { .. } => "SceneTexture",
+                frust_scene::Command::BackdropBlur { .. } => "BackdropBlur",
             };
             unexpected.push(name);
         }
@@ -1021,6 +1024,66 @@ fn dash_path_lowers_identically_across_both_copies() {
                 "{name} dashed with {dash:?}: dash_path diverged between the engine's copy and \
                  the oracle's"
             );
+        }
+    }
+}
+
+/// A backdrop blur's σ and region are computed twice the same way the dash
+/// lowering is — the engine's `filters::backdrop_sigma`/`backdrop_region`, the
+/// oracle's `backdrop_geometry` — and a drift between them would blur a
+/// different region on each arm, so both copies must agree over a grid of
+/// rectangles, radii, transforms and target sizes, the edge-clamped and the
+/// off-target ones included.
+#[test]
+fn backdrop_geometry_agrees_across_both_copies() {
+    let rects = [
+        Rect::new(8.0, 8.0, 56.0, 56.0),
+        Rect::new(0.5, 3.25, 17.75, 9.0),
+        Rect::new(-40.0, -40.0, 10.0, 10.0),
+        Rect::new(100.0, 100.0, 140.0, 120.0),
+        Rect::new(30.0, 30.0, 30.0, 30.0),
+    ];
+    let radii = [0.0, -2.0, 0.4, 1.5, 6.0, 1e9];
+    let transforms = [
+        Affine::IDENTITY,
+        Affine::translate((3.5, -2.25)),
+        Affine::scale(2.75),
+        Affine::scale_non_uniform(0.5, 3.0),
+        Affine::rotate(0.3).then_translate((20.0, 4.0).into()),
+    ];
+    let sizes = [(64_u16, 64_u16), (13, 200)];
+
+    for rect in rects {
+        for radius in radii {
+            for transform in transforms {
+                for size in sizes {
+                    let engine = frust_engine::filters::backdrop_sigma(radius, transform).and_then(
+                        |sigma| {
+                            frust_engine::filters::backdrop_region(
+                                transform.transform_rect_bbox(rect),
+                                sigma,
+                                size,
+                            )
+                            .map(|region| {
+                                (
+                                    sigma,
+                                    Rect::new(
+                                        f64::from(region.x0),
+                                        f64::from(region.y0),
+                                        f64::from(region.x1),
+                                        f64::from(region.y1),
+                                    ),
+                                )
+                            })
+                        },
+                    );
+                    let oracle = oracle_cpu::backdrop_geometry(&rect, radius, transform, size);
+                    assert_eq!(
+                        engine, oracle,
+                        "{rect:?} at radius {radius} under {transform:?} on {size:?}: the backdrop                          geometry diverged between the engine's copy and the oracle's"
+                    );
+                }
+            }
         }
     }
 }

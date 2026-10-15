@@ -14,7 +14,7 @@
 //!   nested — every `Pop*` matched, no counter driven below zero, the snapshot
 //!   depth back at zero and the transform stack unwound to its base identity.
 //!   An unmatched pop follows the recorded policy exactly: `PopClip`/`PopLayer`
-//!   are *recorded* (a renderer ignores them), `pop_snapshot` records nothing at
+//!   are *recorded* (a renderer ignores them), `pop_retained` records nothing at
 //!   all, and `pop_transform` never pops the base identity.
 //!
 //! Case counts are fixed constants rather than proptest's default, so this suite
@@ -188,6 +188,10 @@ enum Op {
         id: u64,
         dest: Rect,
     },
+    BackdropBlur {
+        rect: Rect,
+        radius: f64,
+    },
     PushClip {
         rect: Rect,
     },
@@ -195,19 +199,28 @@ enum Op {
         rect: Rect,
         radii: CornerRadii,
     },
+    PushClipPath {
+        path: BezPath,
+    },
     PopClip,
     PushLayer {
         rect: Rect,
         alpha: f32,
     },
     PopLayer,
-    PushSnapshot {
+    PushRetained {
         key: u64,
         rect: Rect,
         alpha: f32,
         scale: f64,
     },
-    PopSnapshot,
+    PopRetained,
+    DrawRetained {
+        key: u64,
+        rect: Rect,
+        alpha: f32,
+        scale: f64,
+    },
     PushTransform(Affine),
     PopTransform,
 }
@@ -216,9 +229,11 @@ impl Op {
     /// The stack this op opens, if any.
     fn opens(&self) -> Option<Bracket> {
         match self {
-            Self::PushClip { .. } | Self::PushClipRounded { .. } => Some(Bracket::Clip),
+            Self::PushClip { .. } | Self::PushClipRounded { .. } | Self::PushClipPath { .. } => {
+                Some(Bracket::Clip)
+            }
             Self::PushLayer { .. } => Some(Bracket::Layer),
-            Self::PushSnapshot { .. } => Some(Bracket::Snapshot),
+            Self::PushRetained { .. } => Some(Bracket::Snapshot),
             Self::PushTransform(_) => Some(Bracket::Transform),
             _ => None,
         }
@@ -229,7 +244,7 @@ impl Op {
         match self {
             Self::PopClip => Some(Bracket::Clip),
             Self::PopLayer => Some(Bracket::Layer),
-            Self::PopSnapshot => Some(Bracket::Snapshot),
+            Self::PopRetained => Some(Bracket::Snapshot),
             Self::PopTransform => Some(Bracket::Transform),
             _ => None,
         }
@@ -240,7 +255,7 @@ impl Op {
         match bracket {
             Bracket::Clip => Self::PopClip,
             Bracket::Layer => Self::PopLayer,
-            Bracket::Snapshot => Self::PopSnapshot,
+            Bracket::Snapshot => Self::PopRetained,
             Bracket::Transform => Self::PopTransform,
         }
     }
@@ -330,18 +345,26 @@ fn record(ops: &[Op], builder: &mut SceneBuilder<'_>) {
             },
             Op::ShaderQuad { dest, time } => builder.draw_shader(&shared_shader(), *dest, *time),
             Op::SceneTexture { id, dest } => builder.scene_texture(*id, *dest),
+            Op::BackdropBlur { rect, radius } => builder.backdrop_blur(*rect, *radius),
             Op::PushClip { rect } => builder.push_clip(*rect),
             Op::PushClipRounded { rect, radii } => builder.push_clip_rounded_radii(*rect, *radii),
+            Op::PushClipPath { path } => builder.push_clip_path(path.clone()),
             Op::PopClip => builder.pop_clip(),
             Op::PushLayer { rect, alpha } => builder.push_layer(*rect, *alpha),
             Op::PopLayer => builder.pop_layer(),
-            Op::PushSnapshot {
+            Op::PushRetained {
                 key,
                 rect,
                 alpha,
                 scale,
-            } => builder.push_snapshot(*key, *rect, *alpha, *scale),
-            Op::PopSnapshot => builder.pop_snapshot(),
+            } => builder.push_retained(*key, *rect, *alpha, *scale),
+            Op::PopRetained => builder.pop_retained(),
+            Op::DrawRetained {
+                key,
+                rect,
+                alpha,
+                scale,
+            } => builder.draw_retained(*key, *rect, *alpha, *scale),
             Op::PushTransform(transform) => builder.push_transform(*transform),
             Op::PopTransform => builder.pop_transform(),
         }
@@ -509,20 +532,30 @@ fn op_with_glyph_transform(glyph_transform: BoxedStrategy<Affine>) -> impl Strat
         }),
         (rect(), coord_f32()).prop_map(|(dest, time)| Op::ShaderQuad { dest, time }),
         (any::<u64>(), rect()).prop_map(|(id, dest)| Op::SceneTexture { id, dest }),
+        (rect(), coord()).prop_map(|(rect, radius)| Op::BackdropBlur { rect, radius }),
         rect().prop_map(|rect| Op::PushClip { rect }),
         (rect(), radii()).prop_map(|(rect, radii)| Op::PushClipRounded { rect, radii }),
+        bez_path().prop_map(|path| Op::PushClipPath { path }),
         Just(Op::PopClip),
         (rect(), coord_f32()).prop_map(|(rect, alpha)| Op::PushLayer { rect, alpha }),
         Just(Op::PopLayer),
         (any::<u64>(), rect(), coord_f32(), coord()).prop_map(|(key, rect, alpha, scale)| {
-            Op::PushSnapshot {
+            Op::PushRetained {
                 key,
                 rect,
                 alpha,
                 scale,
             }
         }),
-        Just(Op::PopSnapshot),
+        Just(Op::PopRetained),
+        (any::<u64>(), rect(), coord_f32(), coord()).prop_map(|(key, rect, alpha, scale)| {
+            Op::DrawRetained {
+                key,
+                rect,
+                alpha,
+                scale,
+            }
+        }),
         affine().prop_map(Op::PushTransform),
         Just(Op::PopTransform),
     ]
@@ -555,29 +588,31 @@ struct StreamBalance {
     layers_closed: usize,
     snapshots_open: usize,
     snapshots_closed: usize,
-    /// Set when a `PopSnapshot` appeared with no bracket open — the one pop the
+    /// Set when a `PopRetained` appeared with no bracket open — the one pop the
     /// builder is documented to swallow rather than record.
     snapshot_underflow: bool,
 }
 
 fn walk(commands: &[Command]) -> StreamBalance {
     let mut balance = StreamBalance::default();
-    let mut snapshot_depth = 0_isize;
+    let mut retained_depth = 0_isize;
 
     for command in commands {
         match command {
-            Command::PushClip { .. } | Command::PushClipRounded { .. } => balance.clips_open += 1,
+            Command::PushClip { .. }
+            | Command::PushClipRounded { .. }
+            | Command::PushClipPath { .. } => balance.clips_open += 1,
             Command::PopClip => balance.clips_closed += 1,
             Command::PushLayer { .. } => balance.layers_open += 1,
             Command::PopLayer => balance.layers_closed += 1,
-            Command::PushSnapshot { .. } => {
+            Command::PushRetained { .. } => {
                 balance.snapshots_open += 1;
-                snapshot_depth += 1;
+                retained_depth += 1;
             }
-            Command::PopSnapshot => {
+            Command::PopRetained => {
                 balance.snapshots_closed += 1;
-                snapshot_depth -= 1;
-                if snapshot_depth < 0 {
+                retained_depth -= 1;
+                if retained_depth < 0 {
                     balance.snapshot_underflow = true;
                 }
             }
@@ -617,14 +652,14 @@ proptest! {
     fn a_builder_records_any_program_without_panicking(program in program()) {
         let (scene, _) = record_scene(&program.ops, 0);
 
-        // Every op but an ignored `pop_snapshot` and the two transform-stack ops
+        // Every op but an ignored `pop_retained` and the two transform-stack ops
         // records exactly one command, so the stream can never be shorter than
         // the ops that must reach it nor longer than the ops that could.
         let stack_ops = program
             .ops
             .iter()
             .filter(|op| {
-                matches!(op, Op::PushTransform(_) | Op::PopTransform | Op::PopSnapshot)
+                matches!(op, Op::PushTransform(_) | Op::PopTransform | Op::PopRetained)
             })
             .count();
         prop_assert!(scene.commands().len() >= program.ops.len() - stack_ops);
@@ -645,7 +680,7 @@ proptest! {
         prop_assert_eq!(balance.layers_open, balance.layers_closed);
         prop_assert_eq!(balance.snapshots_open, balance.snapshots_closed);
         prop_assert!(!balance.snapshot_underflow);
-        prop_assert_eq!(scene.snapshot_depth(), 0);
+        prop_assert_eq!(scene.retained_depth(), 0);
         prop_assert_eq!(transform, Affine::IDENTITY);
     }
 
@@ -653,7 +688,7 @@ proptest! {
     ///
     /// The three stacks deliberately differ: an unmatched `PopClip`/`PopLayer`
     /// IS recorded (a renderer ignores it when it unwinds), while an unmatched
-    /// `pop_snapshot` records nothing at all and never drives the depth below
+    /// `pop_retained` records nothing at all and never drives the depth below
     /// zero. `pop_transform` never pops the base identity, so a program with
     /// more pops than pushes ends exactly where it started.
     #[test]
@@ -669,7 +704,7 @@ proptest! {
 
         prop_assert!(!balance.snapshot_underflow);
         prop_assert_eq!(
-            scene.snapshot_depth(),
+            scene.retained_depth(),
             balance.snapshots_open - balance.snapshots_closed
         );
 
@@ -695,7 +730,7 @@ fn the_balance_repair_produces_a_properly_nested_program() {
         },
         // Crosses the nesting: the innermost open bracket is the layer.
         Op::PopClip,
-        Op::PopSnapshot,
+        Op::PopRetained,
     ];
 
     let repaired = balance(crossed);
@@ -765,7 +800,7 @@ fn every_command_variant_is_reachable_from_the_op_set() {
             brush: brush.clone(),
         },
         Op::StrokePath {
-            path,
+            path: path.clone(),
             width: 1.0,
             dash: None,
             brush: brush.clone(),
@@ -775,6 +810,7 @@ fn every_command_variant_is_reachable_from_the_op_set() {
             time: 0.0,
         },
         Op::SceneTexture { id: 1, dest: rect },
+        Op::BackdropBlur { rect, radius: 2.0 },
         Op::PushClip { rect },
         Op::PopClip,
         Op::PushClipRounded {
@@ -782,15 +818,23 @@ fn every_command_variant_is_reachable_from_the_op_set() {
             radii: CornerRadii::uniform(1.0),
         },
         Op::PopClip,
+        Op::PushClipPath { path },
+        Op::PopClip,
         Op::PushLayer { rect, alpha: 0.5 },
         Op::PopLayer,
-        Op::PushSnapshot {
+        Op::PushRetained {
             key: 1,
             rect,
             alpha: 0.5,
             scale: 1.0,
         },
-        Op::PopSnapshot,
+        Op::PopRetained,
+        Op::DrawRetained {
+            key: 1,
+            rect,
+            alpha: 0.5,
+            scale: 1.0,
+        },
     ];
 
     let (scene, _) = record_scene(&ops, 0);
@@ -804,6 +848,7 @@ fn every_command_variant_is_reachable_from_the_op_set() {
             Command::GlyphRun(_) => "GlyphRun",
             Command::PushClip { .. } => "PushClip",
             Command::PushClipRounded { .. } => "PushClipRounded",
+            Command::PushClipPath { .. } => "PushClipPath",
             Command::PopClip => "PopClip",
             Command::Image { .. } => "Image",
             Command::BlurredRoundedRect { .. } => "BlurredRoundedRect",
@@ -812,17 +857,21 @@ fn every_command_variant_is_reachable_from_the_op_set() {
             Command::ClearRect { .. } => "ClearRect",
             Command::Path { .. } => "Path",
             Command::ShaderQuad { .. } => "ShaderQuad",
-            Command::PushSnapshot { .. } => "PushSnapshot",
-            Command::PopSnapshot => "PopSnapshot",
+            Command::PushRetained { .. } => "PushRetained",
+            Command::PopRetained => "PopRetained",
+            Command::DrawRetained { .. } => "DrawRetained",
             Command::SceneTexture { .. } => "SceneTexture",
+            Command::BackdropBlur { .. } => "BackdropBlur",
         })
         .collect();
     seen.sort_unstable();
     seen.dedup();
 
     let mut expected = vec![
+        "BackdropBlur",
         "BlurredRoundedRect",
         "ClearRect",
+        "DrawRetained",
         "FillRect",
         "GlyphRun",
         "Image",
@@ -830,15 +879,16 @@ fn every_command_variant_is_reachable_from_the_op_set() {
         "Path",
         "PopClip",
         "PopLayer",
-        "PopSnapshot",
+        "PopRetained",
         "PushClip",
+        "PushClipPath",
         "PushClipRounded",
         "PushLayer",
-        "PushSnapshot",
+        "PushRetained",
         "RoundedRect",
         "SceneTexture",
         "ShaderQuad",
     ];
     expected.sort_unstable();
-    assert_eq!(seen, expected, "one op set, all seventeen command variants");
+    assert_eq!(seen, expected, "one op set, all twenty command variants");
 }

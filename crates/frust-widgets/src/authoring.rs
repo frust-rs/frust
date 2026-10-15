@@ -416,9 +416,13 @@ fn rebuild_child_tracked<State: 'static, V: View<State>>(
     // `rebuild_child`, both `rebuild_children` paths, and `OverlaySlot` through
     // `rebuild_child` — funnels through here, so this one mark covers them; the
     // pods above are marked by their own rebuild sites from the flags this
-    // returns, which every container folds into its own.
+    // returns, which every container folds into its own. A PAINT-only rebuild
+    // marks just the pod's paint dirtiness (layout stays skippable) so a
+    // retained layer over it is repainted.
     if swapped || flags.contains(ChangeFlags::LAYOUT) {
         pod.mark_layout_dirty();
+    } else if flags.contains(ChangeFlags::PAINT) {
+        pod.mark_paint_dirty();
     }
     (flags, swapped)
 }
@@ -2738,6 +2742,37 @@ mod layout_skip_tests {
         assert!(!pod.is_layout_dirty(), "PAINT alone leaves it clean");
         rebuild_child(&paint, &layout, &mut pod, &mut ctx);
         assert!(pod.is_layout_dirty(), "LAYOUT dirties the pod");
+    }
+
+    #[test]
+    fn rebuild_child_marks_paint_only_on_a_paint_rebuild() {
+        use frust_core::DiscardScene;
+        let mut counter = 0;
+        let mut ctx = BuildCtx::new(&mut counter);
+        let mut pod = build_child(&FlagView(ChangeFlags::NONE), &mut ctx);
+        clean(&mut pod);
+        pod.paint_child(
+            &mut PaintCtx::new(kurbo::Point::ZERO, Size::new(50.0, 50.0)),
+            &mut DiscardScene,
+        );
+        assert!(!pod.is_paint_dirty(), "a painted pod is paint-clean");
+
+        let none = FlagView(ChangeFlags::NONE);
+        let paint = FlagView(ChangeFlags::PAINT);
+        let layout = FlagView(ChangeFlags::LAYOUT);
+        rebuild_child(&none, &none, &mut pod, &mut ctx);
+        assert!(!pod.is_paint_dirty(), "a no-op rebuild leaves paint clean");
+        rebuild_child(&none, &paint, &mut pod, &mut ctx);
+        assert!(pod.is_paint_dirty(), "PAINT dirties paint");
+        assert!(!pod.is_layout_dirty(), "PAINT leaves layout clean");
+
+        clean(&mut pod);
+        pod.paint_child(
+            &mut PaintCtx::new(kurbo::Point::ZERO, Size::new(50.0, 50.0)),
+            &mut DiscardScene,
+        );
+        rebuild_child(&paint, &layout, &mut pod, &mut ctx);
+        assert!(pod.is_layout_dirty() && pod.is_paint_dirty());
     }
 
     #[test]

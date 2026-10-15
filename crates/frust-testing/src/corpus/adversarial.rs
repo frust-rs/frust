@@ -8,7 +8,7 @@
 //! `about` line and doc comment — degenerate geometry, non-finite transform
 //! components, extreme scale/depth/count parameters, and the two documented
 //! "ignored" policies ([`frust_scene::Command::PopClip`]/
-//! [`frust_scene::Command::PopLayer`]/[`frust_scene::Command::PopSnapshot`]'s
+//! [`frust_scene::Command::PopLayer`]/[`frust_scene::Command::PopRetained`]'s
 //! unbalanced-pop contract). A case whose only reasonable assertion is "did
 //! not panic" is marked [`crate::case::CaseSpec::no_ref`] (see each case's own
 //! doc comment for why), the same policy [`super::unit`] uses for a case with
@@ -76,10 +76,10 @@ pub fn adversarial_cases() -> Vec<CorpusCase> {
         huge_image(),
         clip_nest_eight(),
         destout_in_layer(),
-        snapshot_scale_alpha(),
+        retained_scale_alpha(),
         empty_scene(),
         unbalanced_pops(),
-        unbalanced_pop_in_snapshot(),
+        unbalanced_pop_in_retained(),
     ];
     cases.extend(one_px_divider_family());
     cases
@@ -179,9 +179,8 @@ fn degenerate_path() -> CorpusCase {
 /// A rasterizer path that assumes a finite bounding box (to size a tile
 /// buffer, to compute a stroke join) and panics or hangs on `NaN`/`inf`
 /// instead of producing SOME output (garbage is acceptable; a crash is not).
-/// `frust-render`'s own `compositor.rs`/`snapshot.rs` already guard several
-/// `is_finite` boundaries for exactly this reason; this case is the one that
-/// would catch a spot they missed.
+/// The renderers already guard several `is_finite` boundaries for exactly
+/// this reason; this case is the one that would catch a spot they missed.
 fn nan_transform() -> CorpusCase {
     fn record(scene: &mut Scene) {
         let mut cx = TextContext::new();
@@ -568,7 +567,7 @@ fn destout_in_layer() -> CorpusCase {
     }
 }
 
-/// `adv-snapshot-scale-alpha`: an outer `PushSnapshot` bracket combining
+/// `adv-snapshot-scale-alpha`: an outer `PushRetained` bracket combining
 /// `alpha < 1.0` with a non-1.0 `scale`, nested one level deeper by an inner
 /// bracket whose own (different) alpha/scale must be ignored.
 ///
@@ -588,7 +587,7 @@ fn destout_in_layer() -> CorpusCase {
 /// bracket and mishandles the general (scaled) one — e.g. composing the
 /// inner correction on top instead of discarding it once a non-identity
 /// outer correction is already active.
-fn snapshot_scale_alpha() -> CorpusCase {
+fn retained_scale_alpha() -> CorpusCase {
     fn record(scene: &mut Scene) {
         let overlay = Color::from_rgba8(255, 255, 0, 255);
         let bracket = Affine::translate((8.0, 8.0)) * Affine::scale(2.0);
@@ -599,13 +598,13 @@ fn snapshot_scale_alpha() -> CorpusCase {
         builder.fill_rect(Rect::new(52.0, 52.0, 60.0, 60.0), Brush::Solid(BLUE));
         builder.push_transform(bracket);
         // Outer: alpha < 1.0 AND scale != 1.0.
-        builder.push_snapshot(1, rect, 0.6, 1.3);
+        builder.push_retained(1, rect, 0.6, 1.3);
         builder.fill_rect(rect, Brush::Solid(RED));
         // Inner: its own alpha/scale must be ignored entirely.
-        builder.push_snapshot(2, rect, 0.2, 5.0);
+        builder.push_retained(2, rect, 0.2, 5.0);
         builder.fill_rect(Rect::new(5.0, 5.0, 15.0, 15.0), Brush::Solid(GREEN));
-        builder.pop_snapshot();
-        builder.pop_snapshot();
+        builder.pop_retained();
+        builder.pop_retained();
         builder.pop_transform();
         // Recorded after the bracket: must land on top, unaffected by it.
         builder.fill_rect(Rect::new(20.0, 20.0, 30.0, 30.0), Brush::Solid(overlay));
@@ -658,7 +657,7 @@ fn snapshot_scale_alpha() -> CorpusCase {
             },
         ],
         eroded_interior: false,
-        about: "a snapshot bracket combining alpha < 1.0 with a non-1.0 scale at the OUTER \
+        about: "a retained bracket combining alpha < 1.0 with a non-1.0 scale at the OUTER \
                 level, nested — only the outer bracket's parameters apply",
     }
 }
@@ -700,10 +699,10 @@ fn empty_scene() -> CorpusCase {
     }
 }
 
-/// `adv-unbalanced-pops`: one extra `PopClip`, `PopLayer`, and `PopSnapshot`
+/// `adv-unbalanced-pops`: one extra `PopClip`, `PopLayer`, and `PopRetained`
 /// beyond a balanced nest of all three, each individually ignored per
 /// `frust_scene::scene`'s documented policy (`PopClip`: scene.rs:210-211;
-/// `PopLayer`: scene.rs:256-257; the unbalanced-`PopSnapshot` policy:
+/// `PopLayer`: scene.rs:256-257; the unbalanced-`PopRetained` policy:
 /// scene.rs:326-327).
 ///
 /// # Guards against
@@ -711,7 +710,7 @@ fn empty_scene() -> CorpusCase {
 /// [`super::unit`]'s `clip_balance`/`layer_balance` cases each cover one
 /// stack in isolation; this case is the one that would catch a group-stack
 /// implementation that only tracks ONE shared depth counter across
-/// clip/layer/snapshot instead of the three independent ones the spec
+/// clip/layer/retained instead of the three independent ones the spec
 /// requires — a bug that would only surface once more than one kind of
 /// group is open and popped past balance at once.
 fn unbalanced_pops() -> CorpusCase {
@@ -721,13 +720,13 @@ fn unbalanced_pops() -> CorpusCase {
         let rect = Rect::new(8.0, 8.0, 40.0, 40.0);
         builder.push_clip(rect);
         builder.push_layer(rect, 0.5);
-        builder.push_snapshot(1, rect, 0.5, 2.0);
+        builder.push_retained(1, rect, 0.5, 2.0);
         builder.fill_rect(Rect::new(0.0, 0.0, EDGE, EDGE), Brush::Solid(GREEN));
-        builder.pop_snapshot();
+        builder.pop_retained();
         builder.pop_layer();
         builder.pop_clip();
         // One extra, unbalanced pop of each kind: every one must be ignored.
-        builder.pop_snapshot();
+        builder.pop_retained();
         builder.pop_layer();
         builder.pop_clip();
         builder.fill_rect(Rect::new(44.0, 44.0, 60.0, 60.0), Brush::Solid(BLUE));
@@ -739,20 +738,20 @@ fn unbalanced_pops() -> CorpusCase {
             x: 52,
             y: 52,
             expect: Expect::Exact([0, 0, 255, 255]),
-            why: "a draw after one extra PopClip/PopLayer/PopSnapshot each must still land \
+            why: "a draw after one extra PopClip/PopLayer/PopRetained each must still land \
                   fully opaque, unclipped and unscaled at root",
         }],
         eroded_interior: false,
-        about: "one extra PopClip, PopLayer, and PopSnapshot beyond a balanced nest of all \
+        about: "one extra PopClip, PopLayer, and PopRetained beyond a balanced nest of all \
                 three at once, each individually documented as ignored (scene.rs:210-211, \
                 :256-257, :326-327)",
     }
 }
 
 /// `adv-unbalanced-pop-in-snapshot`: an unbalanced `PopClip` and an unbalanced
-/// `PopLayer`, each inside its own `alpha < 1.0` `PushSnapshot` bracket, plus
+/// `PopLayer`, each inside its own `alpha < 1.0` `PushRetained` bracket, plus
 /// the original review counterexample (a `PopClip` immediately followed by
-/// the bracket's own `PopSnapshot`).
+/// the bracket's own `PopRetained`).
 ///
 /// `no_ref`: the malformed content's own pixels are not a stable contract —
 /// see `adv-nan-transform`'s identical rationale — the only portable
@@ -761,20 +760,20 @@ fn unbalanced_pops() -> CorpusCase {
 ///
 /// # Guards against
 ///
-/// [`crate::oracle_cpu::CpuOracle`]'s inline `PushSnapshot`/`PopSnapshot`
-/// emulation tracks its own alpha layer via a `snapshot_layer_pushed` flag
+/// [`crate::oracle_cpu::CpuOracle`]'s inline `PushRetained`/`PopRetained`
+/// emulation tracks its own alpha layer via a `retained_layer_pushed` flag
 /// separate from the shared clip/opacity `groups` stack `PopClip`/`PopLayer`
 /// pop from. Before the fix this guards against, an unbalanced `PopClip` or
 /// `PopLayer` recorded inside the bracket (both individually documented as
 /// ignored-when-unmatched, `scene.rs`'s policy `adv-unbalanced-pops` already
-/// covers standalone) consumed the snapshot's own `groups` entry AND popped
-/// the one backend layer the bracket had pushed, while `snapshot_layer_pushed`
-/// stayed `true` — so the bracket's own `PopSnapshot` popped a SECOND,
+/// covers standalone) consumed the bracket's own `groups` entry AND popped
+/// the one backend layer the bracket had pushed, while `retained_layer_pushed`
+/// stayed `true` — so the bracket's own `PopRetained` popped a SECOND,
 /// already-empty backend layer, underflowing `vello_cpu`'s layer stack and
 /// panicking. The GPU (`vello`) arm survives the identical scene because
 /// vello's resolver tolerates the imbalance the CPU rasterizer does not — an
 /// oracle-only crash on a scene a `SceneBuilder` can actually produce.
-fn unbalanced_pop_in_snapshot() -> CorpusCase {
+fn unbalanced_pop_in_retained() -> CorpusCase {
     fn record(scene: &mut Scene) {
         let mut builder = SceneBuilder::new(scene);
         black_backdrop(&mut builder);
@@ -782,14 +781,14 @@ fn unbalanced_pop_in_snapshot() -> CorpusCase {
 
         // The original review counterexample: an unbalanced PopClip
         // immediately consumes the bracket's own emulated alpha layer.
-        builder.push_snapshot(1, rect, 0.5, 1.0);
+        builder.push_retained(1, rect, 0.5, 1.0);
         builder.pop_clip();
-        builder.pop_snapshot();
+        builder.pop_retained();
 
         // The PopLayer-shaped variant of the same desync.
-        builder.push_snapshot(2, rect, 0.5, 1.0);
+        builder.push_retained(2, rect, 0.5, 1.0);
         builder.pop_layer();
-        builder.pop_snapshot();
+        builder.pop_retained();
 
         // Control, recorded after both malformed brackets: recording and
         // rendering must resume normally.
@@ -803,14 +802,14 @@ fn unbalanced_pop_in_snapshot() -> CorpusCase {
             y: 52,
             expect: Expect::Exact([0, 0, 255, 255]),
             why: "content recorded after an unbalanced PopClip and an unbalanced PopLayer, each \
-                  inside its own alpha < 1.0 snapshot bracket, must still land fully opaque and \
+                  inside its own alpha < 1.0 retained bracket, must still land fully opaque and \
                   unclipped at root",
         }],
         eroded_interior: false,
         about: "an unbalanced PopClip and an unbalanced PopLayer, each inside its own alpha < \
-                1.0 PushSnapshot bracket — guards against the emulated snapshot layer's \
+                1.0 PushRetained bracket — guards against the emulated retained layer's \
                 bookkeeping desyncing from the backend layer stack and panicking on the \
-                bracket's own PopSnapshot",
+                bracket's own PopRetained",
     }
 }
 
@@ -978,7 +977,7 @@ mod tests {
     #[test]
     fn exactly_the_thirteen_documented_families_are_present() {
         // 12 original families plus `adv-unbalanced-pop-in-snapshot`, the
-        // 13th, which guards the snapshot-bracket pop desync. The 1-px-divider
+        // 13th, which guards the retained-bracket pop desync. The 1-px-divider
         // family is 3 CaseSpecs sharing one geometry helper (see
         // `one_px_divider_family`'s docs for why), so the corpus totals 15
         // CaseSpecs across 13 families.
@@ -1011,7 +1010,7 @@ mod tests {
                 "adv-unbalanced-pop-in-snapshot"
             ]),
             "only the malformed-transform, the 5,000-layer depth, and the unbalanced-pop-in- \
-             snapshot cases have no stable baseline to compare against"
+             retained-bracket cases have no stable baseline to compare against"
         );
     }
 

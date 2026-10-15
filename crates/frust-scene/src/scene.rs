@@ -198,16 +198,34 @@ pub enum Command {
     ///
     /// Carried as a `Rect` + [`CornerRadii`], mirroring
     /// [`Command::RoundedRect`] rather than naming a `kurbo::RoundedRect`; the
-    /// render crate reconstitutes the concrete shape at encode time. An
-    /// arbitrary-path clip is deliberately not modelled yet — extend here (and
-    /// in `frust-render::convert`) if one is ever needed.
+    /// render crate reconstitutes the concrete shape at encode time. A clip
+    /// to an arbitrary outline is [`Command::PushClipPath`].
     PushClipRounded {
         rect: Rect,
         /// Per-corner radii, in the pre-transform coordinate space.
         radii: CornerRadii,
         transform: Affine,
     },
-    /// Pop the most recently pushed clip.
+    /// Push a clip to an arbitrary closed outline onto the render backend's
+    /// clip stack, under a transform. Subsequent draws are clipped to the
+    /// path's interior (nonzero winding rule) until the matching
+    /// [`Command::PopClip`].
+    ///
+    /// Popped by the *same* [`Command::PopClip`] every other clip uses — one
+    /// clip stack. `path` is positioned in the same coordinate space as every
+    /// other command (the caller has translated it to the widget's origin
+    /// before recording), exactly as [`Command::Path`]'s is; open subpaths are
+    /// closed implicitly, as a fill closes them.
+    ///
+    /// Lowered as a **coverage mask, no layer page**: the outline is
+    /// rasterized once into coverage the draws inside it are generated
+    /// against, the way a rounded clip is — never an offscreen layer. Because
+    /// it is a mask, **a retained body under it is never retained**: a
+    /// [`Command::PushRetained`] bracket opened inside a path clip always
+    /// paints inline, as one inside a rounded clip does.
+    PushClipPath { path: BezPath, transform: Affine },
+    /// Pop the most recently pushed clip, whichever of [`Command::PushClip`],
+    /// [`Command::PushClipRounded`] or [`Command::PushClipPath`] pushed it.
     PopClip,
     /// Draw a decoded image (natural pixel size `data.width`x`data.height`),
     /// scaled to fill `dest`, under a transform.
@@ -302,9 +320,9 @@ pub enum Command {
         transform: Affine,
         time: f32,
     },
-    /// Marks the start of a cacheable "snapshot" bracket, under a transform.
+    /// Marks the start of a retained-layer bracket, under a transform.
     ///
-    /// The commands between this and the matching [`Command::PopSnapshot`] are
+    /// The commands between this and the matching [`Command::PopRetained`] are
     /// the BODY, recorded in the ordinary composed transform space (i.e. not
     /// pre-multiplied by `scale`). `rect` is the body's bounds in the local
     /// space of `transform` — the same convention [`Command::PushLayer`]'s
@@ -315,20 +333,21 @@ pub enum Command {
     /// NOT baked into the body's own commands, so a renderer can reuse a
     /// rasterized body while they animate.
     ///
-    /// A renderer that implements snapshots MAY rasterize the body once and
-    /// draw it as an image with `transform * scale_about(rect.center(),
-    /// scale)` inside an alpha layer. A renderer that does not MUST paint the
-    /// body inline wrapped exactly as if the recorder had emitted
+    /// A renderer that retains MAY rasterize the body once under `key` and
+    /// later honour a [`Command::DrawRetained`] with the same key from that
+    /// page, drawing it with `transform * scale_about(rect.center(), scale)`
+    /// inside an alpha layer. A renderer that does not MUST paint the body
+    /// inline wrapped exactly as if the recorder had emitted
     /// `push_transform(scale_about(rect.center(), scale))` (when `scale !=
     /// 1.0`) then `push_layer(rect, alpha)` (when `alpha < 1.0`) — pops
     /// reversed (see `frust-render::convert`'s miss path).
     ///
     /// Syntactic nesting is allowed, but only the OUTERMOST bracket needs
     /// honouring — an inner bracket's own `alpha`/`scale` may be ignored by a
-    /// non-implementing renderer. An unbalanced [`Command::PopSnapshot`] is
+    /// non-implementing renderer. An unbalanced [`Command::PopRetained`] is
     /// ignored, the same policy [`Command::PopLayer`] follows.
-    PushSnapshot {
-        /// Cache key identifying this bracket's body across frames.
+    PushRetained {
+        /// Key identifying this bracket's body across frames.
         key: u64,
         rect: Rect,
         alpha: f32,
@@ -336,9 +355,24 @@ pub enum Command {
         scale: f64,
         transform: Affine,
     },
-    /// Pop the most recently pushed snapshot bracket (see
-    /// [`Command::PushSnapshot`]).
-    PopSnapshot,
+    /// Pop the most recently pushed retained bracket (see
+    /// [`Command::PushRetained`]).
+    PopRetained,
+    /// Draw a previously retained body from its cached page, with the same
+    /// `key`, `rect`, `transform`, `alpha` and `scale` meanings as
+    /// [`Command::PushRetained`].
+    ///
+    /// A `DrawRetained` only appears in a scene when the resident-key ledger
+    /// said the key is resident, so a renderer that does not retain never sees
+    /// one: it MUST treat it as a renderer error (the CPU oracle panics in
+    /// tests; the engine logs once, skips the frame and clears its store).
+    DrawRetained {
+        key: u64,
+        rect: Rect,
+        transform: Affine,
+        alpha: f32,
+        scale: f64,
+    },
     /// Draw an externally owned GPU texture scaled to fill `dest` under
     /// `transform`.
     ///
@@ -349,6 +383,33 @@ pub enum Command {
     SceneTexture {
         id: u64,
         dest: Rect,
+        transform: Affine,
+    },
+    /// Blur whatever is already painted beneath `rect`, under a transform —
+    /// a frosted-glass backdrop (CSS `backdrop-filter: blur(radius)`).
+    ///
+    /// Everything the scene recorded *before* this command, in painter order,
+    /// is the backdrop: the pixels under `rect` are replaced by a Gaussian
+    /// blur of standard deviation `radius` (in the pre-transform coordinate
+    /// space, scaled into device space by `transform` the way a blurred
+    /// rounded rect's `std_dev` is) of what was painted there, drawn through
+    /// any clip open around the command — a rounded or path clip masks the
+    /// blurred region exactly as it masks a fill. Commands recorded after
+    /// this one paint over the blurred region as usual. The blur reads
+    /// transparent black past the edge of the frame. A `radius` at or below
+    /// zero blurs nothing and draws nothing.
+    ///
+    /// The backdrop is the *frame's own* target: a backdrop blur recorded
+    /// inside an isolated (translucent) layer has no frame beneath it to
+    /// sample and draws nothing, and a [`Command::PushRetained`] body that
+    /// carries one is never retained — a page rasterized offscreen cannot
+    /// sample what is painted beneath it. A renderer bounds how many it serves
+    /// per frame (`frust-engine` refuses a frame recording more than four).
+    BackdropBlur {
+        rect: Rect,
+        /// The blur's standard deviation, in the pre-transform coordinate
+        /// space.
+        radius: f64,
         transform: Affine,
     },
 }
@@ -368,15 +429,15 @@ pub struct Scene {
     /// to `[Affine::IDENTITY]` on construction, so behavior is unchanged.
     /// Not part of the stable widget-facing API.
     pub(crate) transform_stack: Vec<Affine>,
-    /// Depth counter for open [`Command::PushSnapshot`] brackets, incremented
-    /// by [`crate::SceneBuilder::push_snapshot`] and decremented — only when
-    /// greater than zero — by [`crate::SceneBuilder::pop_snapshot`], the same
+    /// Depth counter for open [`Command::PushRetained`] brackets, incremented
+    /// by [`crate::SceneBuilder::push_retained`] and decremented — only when
+    /// greater than zero — by [`crate::SceneBuilder::pop_retained`], the same
     /// unbalanced-pop policy [`Command::PopClip`]/[`Command::PopLayer`]
     /// follow. Reset alongside `commands` in [`Scene::reset`]; NOT reset by
     /// [`crate::SceneBuilder::new`] (unlike `transform_stack`), since it
     /// tracks bracket balance across the whole scene, not a builder session.
     /// Not part of the stable widget-facing API.
-    pub(crate) snapshot_depth: usize,
+    pub(crate) retained_depth: usize,
 }
 
 impl Scene {
@@ -388,7 +449,7 @@ impl Scene {
     /// Clears all recorded commands so the scene can be reused for the next frame.
     pub fn reset(&mut self) {
         self.commands.clear();
-        self.snapshot_depth = 0;
+        self.retained_depth = 0;
     }
 
     /// The recorded commands for this frame, in paint order.
@@ -402,19 +463,19 @@ impl Scene {
         self.commands.push(command);
     }
 
-    /// How many [`Command::PushSnapshot`] brackets are still open.
+    /// How many [`Command::PushRetained`] brackets are still open.
     ///
     /// `#[doc(hidden)]`, and deliberately not part of the stable widget-facing
     /// API: a widget has no business reading the bracket depth mid-recording,
     /// and nothing in the framework branches on it. It exists so a property
     /// test outside this crate can assert the balance contract the field's own
     /// docs state — that a balanced sequence leaves the depth at zero and an
-    /// unmatched [`crate::SceneBuilder::pop_snapshot`] never drives it below
+    /// unmatched [`crate::SceneBuilder::pop_retained`] never drives it below
     /// zero — which is otherwise unobservable from the command stream alone,
     /// since an ignored pop records nothing to observe.
     #[doc(hidden)]
-    pub fn snapshot_depth(&self) -> usize {
-        self.snapshot_depth
+    pub fn retained_depth(&self) -> usize {
+        self.retained_depth
     }
 }
 
@@ -442,11 +503,11 @@ mod tests {
     }
 
     #[test]
-    fn reset_clears_snapshot_depth() {
+    fn reset_clears_retained_depth() {
         let mut scene = Scene::new();
-        scene.snapshot_depth = 2;
+        scene.retained_depth = 2;
         scene.reset();
-        assert_eq!(scene.snapshot_depth, 0);
+        assert_eq!(scene.retained_depth, 0);
     }
 
     #[test]

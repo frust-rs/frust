@@ -175,6 +175,15 @@ impl IosAppHandle {
         // probe line and marks this frame as the one that stamps `frame`.
         #[cfg(feature = "hotpatch")]
         let signals_dirty = signals_dirty | self.patch_probe.take_request();
+        // A frame the renderer refused for drawing a retained page it no longer
+        // held presented nothing; the render side (possibly the render thread,
+        // which cannot reach this handle) raised the process-wide repaint flag
+        // after publishing the emptied ledger. Taken past the ready/paused gate
+        // like the drains above and ORed into `signals_dirty` like the hot-patch
+        // request, so this tick runs and paints against that ledger instead of
+        // an idle screen keeping the frame before the refused one.
+        let signals_dirty =
+            signals_dirty | frust_shell_common::render_split::take_retained_repaint();
         // The focus/IME session's EDGE input, PEEKED here and committed only
         // past the skip return below (on a frame that actually runs), so
         // `focus_or_ime_changed` reports "the session moved since the last tick
@@ -437,6 +446,13 @@ impl IosAppHandle {
             .set_presented_frames(self.executor.presented_frames());
 
         let paint_start = perf_on.then(Instant::now);
+        // Hand the app the resident-key ledger the render side last published
+        // (with its last completed frame; one frame stale by design). A try-lock
+        // read: the UI thread never waits on the render thread for it.
+        if let Some(ledger) = frust_shell_common::render_split::latest_retained_ledger() {
+            self.app.set_retained_ledger(&ledger);
+        }
+
         self.scene.reset();
         let paint_outcome = {
             let mut builder = SceneBuilder::new(&mut self.scene);
@@ -528,9 +544,15 @@ impl IosAppHandle {
             scale: self.scale as f64,
         };
         let meta_time = FrameTime::from_nanos(timestamp_ns);
-        let encode_time =
-            self.executor
-                .submit_frame(&mut self.scene, base_color, ui, meta_time, size, perf_on);
+        let encode_time = self.executor.submit_frame(
+            &mut self.scene,
+            base_color,
+            ui,
+            meta_time,
+            size,
+            paint_outcome.paint_serial,
+            perf_on,
+        );
 
         // The frame has left the UI thread (either executor arm): release any `apply_patch`
         // answer parked on the devtools frame gate and stamp the `frame` probe line when due. The

@@ -18,6 +18,17 @@
 //! [`EngineSurface`] pairs that with `frust-gpu`'s renderer-agnostic
 //! [`frust_gpu::ConfiguredSurface`].
 //!
+//! One decision is made per *frame* rather than per surface: a frame whose
+//! scene carries a backdrop blur reads a region of its own target back
+//! (`frust_engine::renderer::RegionCopyMode`), which a swapchain —
+//! `RENDER_ATTACHMENT`-only on this tier, and never widened — cannot be read
+//! from. [`frame_renders_via_intermediate`] decides, and on the direct arm such
+//! a frame renders into a surface-owned intermediate of the swapchain's own
+//! format ([`BackdropRoot`]) that one copy pass presents
+//! (`frust_engine::gpu::present::CopyPresentPass`). Every other frame renders
+//! straight into the swapchain exactly as before; the straight-alpha arm
+//! renders every frame into its intermediate already and needs nothing more.
+//!
 //! Surface *lifecycle* is driven from [`crate::SurfaceRenderer`]: the shell
 //! mints an empty `SurfaceRenderer` and drives it with
 //! `on_surface_created`/`on_surface_changed`/`on_surface_destroyed`, each of
@@ -162,6 +173,125 @@ pub(crate) fn choose_engine_render_path(
     }
 }
 
+/// Whether a frame on a surface of arm `path` renders into an intermediate
+/// rather than straight into the acquired swapchain texture, given whether its
+/// scene carries a backdrop blur.
+///
+/// The root-via-intermediate decision, made per frame: only a frame that reads
+/// its own target back needs a readable root, and only the direct arm renders
+/// into something unreadable — so a direct-arm frame carrying a backdrop is
+/// the one case that pays for the extra present pass, and every frame without
+/// one keeps the single-target shape it always had. The straight-alpha arm's
+/// own intermediate is readable already (`TEXTURE_BINDING | COPY_SRC`), so it
+/// never adds a second one. Pure, so the routing is host-testable.
+pub(crate) fn frame_renders_via_intermediate(path: RenderPathKind, carries_backdrop: bool) -> bool {
+    matches!(path, RenderPathKind::EngineDirect) && carries_backdrop
+}
+
+/// Whether `scene` records a backdrop blur — the one command that reads the
+/// frame's own target back. A linear scan of the command list, paid only on
+/// the direct arm.
+pub(crate) fn scene_carries_backdrop(scene: &frust_scene::Scene) -> bool {
+    scene
+        .commands()
+        .iter()
+        .any(|command| matches!(command, frust_scene::Command::BackdropBlur { .. }))
+}
+
+/// The direct arm's root-via-intermediate resources: the intermediate a frame
+/// carrying a backdrop blur renders into, in the swapchain's own format, and
+/// the copy pass presenting it (see the module doc).
+///
+/// Both created lazily, by the first frame that needs them, so a surface whose
+/// app never blurs a backdrop allocates neither; the intermediate is dropped
+/// on resize and recreated at the new extent by the next such frame.
+#[derive(Default)]
+pub(crate) struct BackdropRoot {
+    /// The intermediate, with the extent it was created at.
+    intermediate: Option<((u32, u32), wgpu::TextureView)>,
+    /// The copy into the swapchain, built for its format.
+    present: Option<frust_engine::gpu::present::CopyPresentPass>,
+}
+
+impl BackdropRoot {
+    /// The intermediate a `width` x `height` frame in `format` renders into
+    /// and the pass that presents it, creating either on first use (and the
+    /// intermediate again after a resize). The engine renderer is warmed for
+    /// the swapchain's format, which is the intermediate's too, so the frame's
+    /// pipelines and bind groups are the very ones a direct frame uses.
+    pub(crate) fn prepare(
+        &mut self,
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+    ) -> (
+        &wgpu::TextureView,
+        &frust_engine::gpu::present::CopyPresentPass,
+    ) {
+        if self
+            .intermediate
+            .as_ref()
+            .is_some_and(|(extent, _)| *extent != (width, height))
+        {
+            self.intermediate = None;
+        }
+        if self
+            .present
+            .as_ref()
+            .is_some_and(|present| present.format() != format)
+        {
+            self.present = None;
+        }
+        let (_, view) = self.intermediate.get_or_insert_with(|| {
+            (
+                (width, height),
+                create_readable_root(width, height, format, device),
+            )
+        });
+        let present = self.present.get_or_insert_with(|| {
+            frust_engine::gpu::present::CopyPresentPass::new(device, format, None)
+        });
+        (view, present)
+    }
+
+    /// Drops the intermediate, which a resize leaves at the wrong extent; the
+    /// next frame carrying a backdrop recreates it.
+    pub(crate) fn release(&mut self) {
+        self.intermediate = None;
+    }
+}
+
+/// Creates the readable root a direct-arm frame carrying a backdrop renders
+/// into: `format` (the swapchain's own), `RENDER_ATTACHMENT` for the frame,
+/// `TEXTURE_BINDING` for the present copy and the engine's fragment region
+/// copy, and `COPY_SRC` so a surface already in the engine's own format takes
+/// the texture-copy route instead.
+fn create_readable_root(
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+    device: &wgpu::Device,
+) -> wgpu::TextureView {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("frust-render backdrop root"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
+        format,
+        view_formats: &[],
+    });
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
 /// Refuses an adapter that cannot drive the engine, carrying
 /// [`crate::EngineUnsupported`]'s diagnosis as the error.
 ///
@@ -296,6 +426,11 @@ pub(crate) enum RenderPath {
         /// as `EngineTarget::depth`; the engine clears it each frame (it is
         /// not pre-cleared — nothing else writes it).
         depth: frust_engine::DepthTexture,
+        /// The intermediate and present copy a frame carrying a backdrop blur
+        /// renders through instead of the swapchain
+        /// ([`frame_renders_via_intermediate`]) — empty until the first such
+        /// frame.
+        backdrop: BackdropRoot,
     },
     /// The engine tier's arm for a **straight-alpha translucent** swapchain
     /// (`PostMultiplied`, iOS's translucent mode —
@@ -310,10 +445,11 @@ pub(crate) enum RenderPath {
     ///
     /// The intermediate is `Rgba8Unorm` (`frust_engine`'s own off-screen
     /// format, which is what the renderer's pipelines are warmed for on this
-    /// arm) with `RENDER_ATTACHMENT | TEXTURE_BINDING`: a colour attachment for
-    /// the frame, a sampled source for the pass. Only its view is stored — a
-    /// `TextureView` refcounts its texture alive and nothing here needs the
-    /// texture handle.
+    /// arm) with `RENDER_ATTACHMENT | TEXTURE_BINDING | COPY_SRC`: a colour
+    /// attachment for the frame, a sampled source for the pass, and a copy
+    /// source a backdrop blur reads its region back through. Only its view is
+    /// stored — a `TextureView` refcounts its texture alive, and the engine
+    /// reaches the texture through it.
     EngineDirectUnpremultiply {
         /// The depth attachment, exactly as [`Self::EngineDirect`] carries it —
         /// sized to the swapchain and recreated with it, since the intermediate
@@ -395,7 +531,10 @@ impl EngineSurface {
             // mismatched depth attachment is refused by the engine rather than
             // submitted ([`extent_within_limits`], the same ceiling
             // `create_engine_surface` refuses on).
-            RenderPath::EngineDirect { depth } => {
+            RenderPath::EngineDirect { depth, backdrop } => {
+                // The backdrop root is extent-bound too; dropped rather than
+                // resized, so a surface that stopped blurring holds nothing.
+                backdrop.release();
                 let max_dimension_2d = device.limits().max_texture_dimension_2d;
                 if !extent_within_limits(width, height, max_dimension_2d) {
                     log::warn!(
@@ -443,11 +582,12 @@ impl EngineSurface {
 /// view refcounts the texture alive, and nothing on this arm needs the texture
 /// handle).
 ///
-/// The usage is exactly what the two consumers need — `RENDER_ATTACHMENT` for
-/// the frame's own passes, `TEXTURE_BINDING` for the un-premultiplying pass to
-/// sample it — so the arm asks a downlevel adapter for nothing it lacks (this
-/// tier has neither a compute stage nor a storage texture anywhere in it; its
-/// downlevel design rules refuse both).
+/// The usage is exactly what its consumers need — `RENDER_ATTACHMENT` for the
+/// frame's own passes, `TEXTURE_BINDING` for the un-premultiplying pass to
+/// sample it, `COPY_SRC` for a backdrop blur's region copy to read it back —
+/// so the arm asks a downlevel adapter for nothing it lacks (this tier has
+/// neither a compute stage nor a storage texture anywhere in it; its downlevel
+/// design rules refuse both).
 ///
 /// The format is the engine's own off-screen format rather than the surface's:
 /// the renderer on this arm is warmed for it (`renderer::engine_target_format`),
@@ -463,7 +603,9 @@ fn create_engine_intermediate(width: u32, height: u32, device: &wgpu::Device) ->
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
         format: frust_engine::gpu::pipelines::INTERMEDIATE_FORMAT,
         view_formats: &[],
     });
@@ -541,6 +683,7 @@ pub(crate) async fn create_engine_surface(
         // — see that predicate's doc).
         RenderPathKind::EngineDirect => RenderPath::EngineDirect {
             depth: frust_engine::DepthTexture::new(&handle.device, width, height),
+            backdrop: BackdropRoot::default(),
         },
         // The opposite combination — a swapchain that stores STRAIGHT
         // alpha AND whose compositor genuinely reads it that way (every
@@ -755,6 +898,44 @@ mod tests {
                 "{backend:?} PostMultiplied must keep the unpremultiply conversion"
             );
         }
+    }
+
+    #[test]
+    fn only_a_direct_frame_carrying_a_backdrop_renders_via_an_intermediate() {
+        assert!(frame_renders_via_intermediate(
+            RenderPathKind::EngineDirect,
+            true
+        ));
+        assert!(
+            !frame_renders_via_intermediate(RenderPathKind::EngineDirect, false),
+            "a frame without a backdrop keeps rendering straight into the swapchain"
+        );
+        for carries in [false, true] {
+            assert!(
+                !frame_renders_via_intermediate(RenderPathKind::EngineDirectUnpremultiply, carries),
+                "the straight-alpha arm's own intermediate is readable already"
+            );
+        }
+    }
+
+    #[test]
+    fn a_backdrop_is_found_wherever_the_scene_records_one() {
+        let mut scene = frust_scene::Scene::new();
+        {
+            let mut builder = frust_scene::SceneBuilder::new(&mut scene);
+            builder.fill_rect(
+                kurbo::Rect::new(0.0, 0.0, 4.0, 4.0),
+                peniko::Brush::Solid(peniko::Color::BLACK),
+            );
+        }
+        assert!(!scene_carries_backdrop(&scene));
+        {
+            let mut builder = frust_scene::SceneBuilder::new(&mut scene);
+            builder.push_clip(kurbo::Rect::new(0.0, 0.0, 4.0, 4.0));
+            builder.backdrop_blur(kurbo::Rect::new(0.0, 0.0, 4.0, 4.0), 2.0);
+            builder.pop_clip();
+        }
+        assert!(scene_carries_backdrop(&scene));
     }
 
     #[test]

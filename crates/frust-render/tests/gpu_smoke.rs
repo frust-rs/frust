@@ -143,7 +143,7 @@ async fn run_clear_probe() {
     }
 }
 
-/// The inline lowering of a `Command::PushSnapshot` bracket, pixel for pixel
+/// The inline lowering of a `Command::PushRetained` bracket, pixel for pixel
 /// — the only lowering this crate has for one.
 ///
 /// Reached through the public headless seam alone: the bracket's
@@ -156,14 +156,14 @@ async fn run_clear_probe() {
 /// here is measuring rasterizer subpixel coverage.
 #[test]
 #[ignore = "requires a GPU; run locally with `cargo test -p frust-render -- --ignored`"]
-fn snapshot_bracket_inline_emulation_matches_the_composite_arithmetic() {
-    pollster::block_on(run_snapshot());
+fn retained_bracket_inline_emulation_matches_the_composite_arithmetic() {
+    pollster::block_on(run_retained_bracket());
 }
 
 /// Per-pixel tolerance: an 8-bit rounding step, no more.
-const SNAPSHOT_TOLERANCE: u8 = 3;
+const RETAINED_TOLERANCE: u8 = 3;
 
-async fn run_snapshot() {
+async fn run_retained_bracket() {
     // The bracket: a 20x20 body in local space under a 2x device scale offset
     // by (8, 8) — device (8, 8)..(48, 48) — composited at 75% opacity.
     const ALPHA: f32 = 0.75;
@@ -182,7 +182,7 @@ async fn run_snapshot() {
         );
         builder.fill_rect(kurbo::Rect::new(52.0, 52.0, 60.0, 60.0), Brush::Solid(BLUE));
         builder.push_transform(bracket);
-        builder.push_snapshot(1, rect, ALPHA, 1.0);
+        builder.push_retained(1, rect, ALPHA, 1.0);
         // An opaque red block, a half-alpha green band over NOTHING (so the
         // bracket really carries partial alpha — a double premultiply is
         // invisible where alpha is 1), and a black bar standing in for a line
@@ -193,7 +193,7 @@ async fn run_snapshot() {
             Brush::Solid(GREEN.with_alpha(0.5)),
         );
         builder.fill_rect(kurbo::Rect::new(5.0, 15.0, 15.0, 20.0), Brush::Solid(BLACK));
-        builder.pop_snapshot();
+        builder.pop_retained();
         builder.pop_transform();
         // Recorded AFTER the bracket, so it must land on top of it.
         builder.fill_rect(
@@ -216,12 +216,12 @@ async fn run_snapshot() {
     //    page would halve again.
     let red = image.pixel(40, 12);
     assert!(
-        red[0].abs_diff(191) <= SNAPSHOT_TOLERANCE,
+        red[0].abs_diff(191) <= RETAINED_TOLERANCE,
         "the bracket's opaque block must composite at its alpha, got {red:?}"
     );
     let green = image.pixel(40, 32);
     assert!(
-        green[1].abs_diff(48) <= SNAPSHOT_TOLERANCE,
+        green[1].abs_diff(48) <= RETAINED_TOLERANCE,
         "the bracket's half-alpha band must composite at 128 * 0.5 * 0.75, got {green:?}"
     );
     assert_eq!(
@@ -319,5 +319,239 @@ async fn run_row_padding() {
     assert!(
         r > 200 && g < 64 && b < 64,
         "a reused renderer must still render, got rgb=({r},{g},{b})"
+    );
+}
+
+/// A retained page, on real hardware: frame N records a `PushRetained` body
+/// into a page, frame N+1 draws it back with `DrawRetained` at alpha 0.5 and
+/// presentation scale 0.9, and both frames are pixel-identical to the inline
+/// emulation `frust_scene` defines (the body under the scale correction inside
+/// a 0.5 layer) — the page holds the body exactly as the inline lowering
+/// rasterizes it and is composited 1:1. The ledger lists the key after frame N
+/// at the extent and scale it was rasterized at, and a `DrawRetained` naming a
+/// key the engine does not hold refuses the frame and empties the ledger.
+///
+/// Driven through `frust_engine::EngineRenderer` directly rather than
+/// `HeadlessRenderer`, because the claim spans frames of ONE renderer and
+/// reads that renderer's ledger between them — exactly what
+/// `SurfaceRenderer::submit` does for a surface, minus the swapchain.
+#[test]
+#[ignore = "requires a GPU; run locally with `cargo test -p frust-render -- --ignored`"]
+fn retained_page_redraws_identically_to_the_inline_emulation() {
+    const KEY: u64 = 7;
+    const ALPHA: f32 = 0.5;
+    const SCALE: f64 = 0.9;
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+
+    let (device, queue, caps) = pollster::block_on(async {
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let adapter = wgpu::util::initialize_adapter_from_env_or_default(&instance, None)
+            .await
+            .expect("no compatible GPU adapter");
+        println!("frust gpu_smoke retained adapter: {:?}", adapter.get_info());
+        let caps = frust_gpu::TierCaps::probe(&adapter);
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("frust-render gpu_smoke retained"),
+                required_features: wgpu::Features::empty(),
+                required_limits: frust_gpu::test_device_limits(&adapter, &caps),
+                ..Default::default()
+            })
+            .await
+            .expect("failed to create device");
+        (device, queue, caps)
+    });
+    let target = frust_gpu::HeadlessTarget::new(&device, SIZE, SIZE, format);
+    let mut engine = frust_engine::EngineRenderer::new(&device, &caps, format, None)
+        .expect("failed to create the engine renderer");
+    assert!(engine.retained_layers(), "a renderer retains by default");
+
+    // A 20x20 body in local space under a 2x device scale offset by (8, 8),
+    // with an opaque block, a half-alpha band over nothing and a bar.
+    let bracket = kurbo::Affine::translate((8.0, 8.0)) * kurbo::Affine::scale(2.0);
+    let rect = kurbo::Rect::new(0.0, 0.0, 20.0, 20.0);
+    let body = |builder: &mut SceneBuilder<'_>| {
+        builder.fill_rect(kurbo::Rect::new(0.0, 0.0, 20.0, 10.0), Brush::Solid(RED));
+        builder.fill_rect(
+            kurbo::Rect::new(0.0, 10.0, 20.0, 15.0),
+            Brush::Solid(GREEN.with_alpha(0.5)),
+        );
+        builder.fill_rect(kurbo::Rect::new(5.0, 15.0, 15.0, 20.0), Brush::Solid(BLACK));
+    };
+    let frame = |middle: &dyn Fn(&mut SceneBuilder<'_>)| {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.fill_rect(
+            kurbo::Rect::new(0.0, 0.0, SIZE as f64, SIZE as f64),
+            Brush::Solid(BLUE),
+        );
+        builder.push_transform(bracket);
+        middle(&mut builder);
+        builder.pop_transform();
+        // Recorded after the bracket, so it lands on top of it.
+        builder.fill_rect(
+            kurbo::Rect::new(20.0, 20.0, 30.0, 30.0),
+            Brush::Solid(BLACK),
+        );
+        scene
+    };
+
+    let inline = frame(&|builder| {
+        builder.push_transform(kurbo::Affine::scale_about(SCALE, rect.center()));
+        builder.push_layer(rect, ALPHA);
+        body(builder);
+        builder.pop_layer();
+        builder.pop_transform();
+    });
+    let record = frame(&|builder| {
+        builder.push_retained(KEY, rect, ALPHA, SCALE);
+        body(builder);
+        builder.pop_retained();
+    });
+    let redraw = frame(&|builder| builder.draw_retained(KEY, rect, ALPHA, SCALE));
+    let missing = frame(&|builder| builder.draw_retained(KEY + 1, rect, ALPHA, SCALE));
+
+    let render = |engine: &mut frust_engine::EngineRenderer,
+                  scene: &Scene|
+     -> Result<Vec<u8>, frust_engine::EngineError> {
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let encoded = engine.encode(
+            &device,
+            &queue,
+            &mut encoder,
+            scene,
+            frust_engine::EngineTarget {
+                view: target.view(),
+                format,
+                width: SIZE,
+                height: SIZE,
+                depth: None,
+                output: frust_engine::OutputAlpha::Premultiplied,
+            },
+            peniko::Color::BLACK,
+            kurbo::Affine::IDENTITY,
+        );
+        queue.submit([encoder.finish()]);
+        engine.end_frame(&queue);
+        encoded.map(|()| target.read_back(&device, &queue))
+    };
+
+    let expected = render(&mut engine, &inline).expect("the inline frame renders");
+    let recorded = render(&mut engine, &record).expect("frame N renders");
+    let ledger: Vec<_> = engine.retained_ledger().collect();
+    assert_eq!(ledger.len(), 1, "frame N leaves its page resident");
+    assert_eq!(ledger[0].key, KEY);
+    assert_eq!(ledger[0].extent_px, (36, 36), "20 x 2 x 0.9 on each axis");
+    assert!((ledger[0].scale - 1.8).abs() < 1e-6, "{}", ledger[0].scale);
+
+    let redrawn = render(&mut engine, &redraw).expect("frame N+1 renders");
+    let differing =
+        |a: &[u8], b: &[u8]| a.chunks(4).zip(b.chunks(4)).filter(|(p, q)| p != q).count();
+    assert_eq!(
+        differing(&recorded, &expected),
+        0,
+        "the frame that records the page draws exactly the inline emulation"
+    );
+    assert_eq!(
+        differing(&redrawn, &expected),
+        0,
+        "the frame drawing the page back draws exactly the inline emulation"
+    );
+
+    let refused = render(&mut engine, &missing);
+    assert!(
+        matches!(
+            refused,
+            Err(frust_engine::EngineError::RetainedKeyMissing { key }) if key == KEY + 1
+        ),
+        "a DrawRetained of a key the engine does not hold refuses the frame: {:?}",
+        refused.map(|_| ())
+    );
+    assert_eq!(engine.retained_ledger().count(), 0, "and empties the store");
+    assert!(engine.take_retained_refusal());
+}
+
+/// A frosted-glass backdrop over a gradient, through the same headless seam
+/// every case above takes: the panel's centre is blurred, and every pixel
+/// outside the panel is exactly what the same frame without the backdrop
+/// paints.
+///
+/// The gradient carries a hard stop — red to blue at the frame's middle — so a
+/// blur has something to show: a smooth ramp is its own blur, a step is not.
+/// The headless target is `Rgba8Unorm` and copyable, so the engine reads the
+/// panel's region back by a texture copy; a swapchain frame takes the
+/// root-via-intermediate route instead (`context::frame_renders_via_intermediate`).
+#[test]
+#[ignore = "requires a GPU; run locally with `cargo test -p frust-render -- --ignored`"]
+fn a_backdrop_blur_softens_the_gradient_beneath_it_and_nothing_else() {
+    pollster::block_on(run_backdrop());
+}
+
+async fn run_backdrop() {
+    use peniko::{ColorStop, Gradient};
+
+    const PANEL: kurbo::Rect = kurbo::Rect::new(16.0, 16.0, 48.0, 48.0);
+    let mut headless = headless().await;
+    let scene = |backdrop: bool| {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let step = Gradient::new_linear((0.0, 0.0), (SIZE as f64, 0.0)).with_stops([
+            ColorStop::from((0.0, RED)),
+            ColorStop::from((0.5, RED)),
+            ColorStop::from((0.5, BLUE)),
+            ColorStop::from((1.0, BLUE)),
+        ]);
+        builder.fill_rect(
+            kurbo::Rect::new(0.0, 0.0, SIZE as f64, SIZE as f64),
+            Brush::Gradient(step),
+        );
+        if backdrop {
+            builder.backdrop_blur(PANEL, 3.0);
+        }
+        scene
+    };
+    let spec = HeadlessSpec::new(SIZE, SIZE);
+    let plain = headless
+        .render(&scene(false), &spec)
+        .await
+        .expect("the plain frame renders");
+    let blurred = headless
+        .render(&scene(true), &spec)
+        .await
+        .expect("the backdrop frame renders");
+
+    // Outside the panel: untouched, to the byte.
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let inside = PANEL.contains(kurbo::Point::new(f64::from(x) + 0.5, f64::from(y) + 0.5));
+            if !inside {
+                assert_eq!(
+                    blurred.pixel(x, y),
+                    plain.pixel(x, y),
+                    "pixel ({x}, {y}) outside the panel changed"
+                );
+            }
+        }
+    }
+
+    // At the centre, the step is blurred: the two pixels either side of it mix
+    // red and blue, where the plain frame keeps them pure.
+    let [r_plain, _, b_plain, _] = plain.pixel(SIZE / 2 - 1, SIZE / 2);
+    assert!(r_plain > 200 && b_plain < 20, "the plain step is sharp");
+    for x in [SIZE / 2 - 1, SIZE / 2] {
+        let [r, _, b, a] = blurred.pixel(x, SIZE / 2);
+        assert!(
+            r > 60 && b > 60 && a == 255,
+            "the panel's centre column {x} mixes the two sides of the step: rgb=({r},_,{b}) a={a}"
+        );
+    }
+    // Deep inside the panel, away from the step, the blur of a flat colour is
+    // that colour.
+    let [r, g, b, _] = blurred.pixel(20, SIZE / 2);
+    assert!(
+        r > 200 && g < 20 && b < 60,
+        "flat red stays red: ({r},{g},{b})"
     );
 }

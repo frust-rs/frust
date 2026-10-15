@@ -1,5 +1,5 @@
-//! Clip lowering: what a `PushClip`/`PushClipRounded`/`PopClip` bracket costs,
-//! and what it actually leaves painted.
+//! Clip lowering: what a `PushClip`/`PushClipRounded`/`PushClipPath`/`PopClip`
+//! bracket costs, and what it actually leaves painted.
 //!
 //! Every case drives the public seam — a `frust_scene::Scene` recorded through
 //! `SceneBuilder`, compiled by [`SceneCompiler`] — and reads the result back
@@ -676,4 +676,189 @@ fn an_enormous_clip_rectangle_compiles_and_clips_nothing() {
     })));
 
     assert_eq!(enormous, unclipped);
+}
+
+// ---------------------------------------------------------------------------
+// A path clip: always one coverage mask, never an intermediate
+// ---------------------------------------------------------------------------
+
+/// A concave L on whole pixels: the upright `[8, 24) x [4, 44)` and the foot
+/// `[8, 56) x [30, 44)`. Every edge is axis-aligned and pixel-aligned, so its
+/// coverage is exactly 255 inside and 0 outside — the mask can be checked
+/// pixel for pixel — and the reflex corner at `(24, 30)` is exactly what a
+/// bounding-box shortcut would get wrong.
+fn l_outline() -> BezPath {
+    let mut path = BezPath::new();
+    path.move_to((8.0, 4.0));
+    path.line_to((24.0, 4.0));
+    path.line_to((24.0, 30.0));
+    path.line_to((56.0, 30.0));
+    path.line_to((56.0, 44.0));
+    path.line_to((8.0, 44.0));
+    path.close_path();
+    path
+}
+
+/// Whether the pixel at `(x, y)` is inside [`l_outline`].
+fn inside_l(x: usize, y: usize) -> bool {
+    inside(Rect::new(8.0, 4.0, 24.0, 44.0), x, y) || inside(Rect::new(8.0, 30.0, 56.0, 44.0), x, y)
+}
+
+#[test]
+fn a_path_clip_rasterizes_a_coverage_mask_and_no_intermediate() {
+    let frame = compile(&scene_of(|b| {
+        b.push_clip_path(l_outline());
+        b.fill_rect(Rect::new(0.0, 0.0, 64.0, 48.0), solid(RED));
+        b.pop_clip();
+    }));
+
+    assert_eq!(frame.mask_clips, 1, "a path clip lowers to a coverage mask");
+    assert_eq!(
+        frame.scissor_clips, 0,
+        "a path clip never scissors, even when every edge is pixel-aligned"
+    );
+    assert!(
+        frame.clip_mask_strips > 0,
+        "a path clip has to rasterize its own coverage"
+    );
+    assert!(
+        !frame.recorder.has_layers(),
+        "a path clip must never open an intermediate target"
+    );
+    assert_eq!(frame.draws().len(), 1);
+}
+
+#[test]
+fn a_path_clip_masks_every_draw_outside_the_path() {
+    let fill = Rect::new(0.0, 0.0, 64.0, 48.0);
+    let painted = coverage(&compile(&scene_of(|b| {
+        b.push_clip_path(l_outline());
+        b.fill_rect(fill, solid(RED));
+        b.pop_clip();
+    })));
+
+    let width = usize::from(VIEWPORT.0);
+    for (index, &value) in painted.iter().enumerate() {
+        let (x, y) = (index % width, index / width);
+        let want = if inside_l(x, y) { 255 } else { 0 };
+        assert_eq!(
+            value, want,
+            "pixel ({x}, {y}) is {value}, expected {want} under the L-shaped clip"
+        );
+    }
+    // The notch is inside the outline's bounding box, so a clip that fell back
+    // to its bounds would have painted it.
+    assert_eq!(painted[20 * width + 40], 0, "the reflex notch stays empty");
+}
+
+#[test]
+fn a_path_clip_keeps_the_partial_coverage_of_its_own_diagonal_edges() {
+    let painted = coverage(&compile(&scene_of(|b| {
+        b.push_clip_path(diamond());
+        b.fill_rect(Rect::new(0.0, 0.0, 64.0, 48.0), solid(RED));
+        b.pop_clip();
+    })));
+    let reference = coverage(&compile(&scene_of(|b| {
+        b.fill_path(diamond(), solid(RED));
+    })));
+
+    let width = usize::from(VIEWPORT.0);
+    let at = |grid: &[u8], x: usize, y: usize| grid.get(y * width + x).copied().unwrap_or(0);
+    assert_eq!(at(&painted, 32, 24), 255, "the diamond's centre is painted");
+    assert_eq!(at(&painted, 2, 2), 0, "a corner outside the diamond is not");
+    assert_eq!(at(&painted, 62, 46), 0, "nor the opposite one");
+    assert!(
+        painted.iter().any(|&value| value > 0 && value < 255),
+        "the diagonal edges carry partial coverage under the mask"
+    );
+    // A solid fill clipped to a shape covers exactly what filling the shape
+    // does: the mask is that shape's own coverage.
+    for (index, (&clipped, &filled)) in painted.iter().zip(&reference).enumerate() {
+        let (x, y) = (index % width, index / width);
+        assert!(
+            clipped.abs_diff(filled) <= 1,
+            "pixel ({x}, {y}) is {clipped} under the clip but {filled} filled directly"
+        );
+    }
+}
+
+#[test]
+fn a_path_clip_nests_with_a_rectangular_and_a_rounded_clip() {
+    let rect = Rect::new(12.0, 6.0, 52.0, 40.0);
+    let rounded = Rect::new(4.0, 2.0, 60.0, 46.0);
+    let frame = compile(&scene_of(|b| {
+        b.push_clip(rect);
+        b.push_clip_rounded(rounded, 6.0);
+        b.push_clip_path(l_outline());
+        b.fill_rect(Rect::new(0.0, 0.0, 64.0, 48.0), solid(RED));
+        b.pop_clip();
+        b.pop_clip();
+        b.pop_clip();
+    }));
+
+    assert_eq!(frame.scissor_clips, 1, "the whole-pixel rectangle scissors");
+    assert_eq!(
+        frame.mask_clips, 2,
+        "the rounded and the path clip both mask"
+    );
+    assert!(!frame.recorder.has_layers(), "still no intermediate target");
+
+    // The rounded clip's corners lie outside both the rectangle and the L, so
+    // the intersection is exactly the L inside the rectangle.
+    let painted = coverage(&frame);
+    let width = usize::from(VIEWPORT.0);
+    for (index, &value) in painted.iter().enumerate() {
+        let (x, y) = (index % width, index / width);
+        let want = if inside_l(x, y) && inside(rect, x, y) {
+            255
+        } else {
+            0
+        };
+        assert_eq!(
+            value, want,
+            "pixel ({x}, {y}) is {value}, expected {want} under rect ∩ rounded ∩ L"
+        );
+    }
+}
+
+#[test]
+fn a_path_clip_inside_a_mask_and_popped_restores_the_enclosing_mask() {
+    let rounded = Rect::new(8.0, 8.0, 56.0, 40.0);
+    let fill = Rect::new(0.0, 0.0, 64.0, 48.0);
+    let enclosing_only = coverage(&compile(&scene_of(|b| {
+        b.push_clip_rounded(rounded, 10.0);
+        b.fill_rect(fill, solid(BLUE));
+        b.pop_clip();
+    })));
+    let after_pop = coverage(&compile(&scene_of(|b| {
+        b.push_clip_rounded(rounded, 10.0);
+        b.push_clip_path(diamond());
+        b.pop_clip();
+        b.fill_rect(fill, solid(BLUE));
+        b.pop_clip();
+    })));
+
+    assert_eq!(
+        after_pop, enclosing_only,
+        "popping the path clip must leave exactly the enclosing rounded clip in force"
+    );
+}
+
+#[test]
+fn a_non_finite_clip_path_refuses_the_frame() {
+    let mut path = BezPath::new();
+    path.move_to((4.0, 4.0));
+    path.line_to((f64::NAN, 30.0));
+    path.line_to((30.0, 30.0));
+    path.close_path();
+    let scene = scene_of(|b| {
+        b.push_clip_path(path);
+        b.fill_rect(Rect::new(0.0, 0.0, 16.0, 16.0), solid(RED));
+        b.pop_clip();
+    });
+
+    assert!(matches!(
+        compiler().compile(&scene, Affine::IDENTITY, VIEWPORT),
+        Err(EngineError::InvalidGeometry)
+    ));
 }

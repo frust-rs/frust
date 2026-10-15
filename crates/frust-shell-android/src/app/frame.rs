@@ -199,6 +199,16 @@ impl AndroidAppHandle {
         // stamps the `applied` probe line and marks this frame as the one that stamps `frame`.
         #[cfg(feature = "hotpatch")]
         let signals_dirty = signals_dirty | self.patch_probe.take_request();
+        // A frame the renderer refused for drawing a retained page it no longer
+        // held presented nothing; the render side (possibly the render thread,
+        // which cannot reach this handle) raised the process-wide repaint flag
+        // after publishing the emptied ledger. Taken past the surface-ready gate
+        // like the drains above and ORed into `signals_dirty` like the hot-patch
+        // request, so this tick runs and paints against that ledger — without
+        // forcing a relayout — instead of an idle screen keeping the frame
+        // before the refused one.
+        let signals_dirty =
+            signals_dirty | frust_shell_common::render_split::take_retained_repaint();
 
         // Gather the remaining inputs from the tree's existing accessors and the
         // handle-side latches, then let the gate decide. `mem::take` clears each
@@ -464,9 +474,16 @@ impl AndroidAppHandle {
         self.app
             .set_presented_frames(self.executor.presented_frames());
 
+        // Hand the app the resident-key ledger the render side last published
+        // (with its last completed frame; one frame stale by design). A try-lock
+        // read: the UI thread never waits on the render thread for it.
+        if let Some(ledger) = frust_shell_common::render_split::latest_retained_ledger() {
+            self.app.set_retained_ledger(&ledger);
+        }
+
         self.scene.reset();
         let paint_start = perf_on.then(Instant::now);
-        {
+        let paint_serial = {
             let mut builder = SceneBuilder::new(&mut self.scene);
             // HiDPI: lay out in logical pixels, then scale the
             // whole scene by the device pixel ratio for sharp glyphs.
@@ -490,7 +507,10 @@ impl AndroidAppHandle {
             self.last_needs_frame_paced_only = outcome.needs_frame_paced_only;
             self.last_paced_interval = outcome.paced_interval;
             builder.pop_transform();
-        }
+            // The serial this paint was minted, carried with the scene to the
+            // renderer (see `SurfaceRenderer::note_scene_serial`).
+            outcome.paint_serial
+        };
         let paint_time = paint_start.map_or(Duration::ZERO, |t| t.elapsed());
 
         // Ingest this RUN frame's published platform-view frames into the
@@ -553,9 +573,15 @@ impl AndroidAppHandle {
             scale: self.scale as f64,
         };
         let frame_time = FrameTime::from_nanos(frame_time_nanos);
-        let encode_time =
-            self.executor
-                .submit_frame(&mut self.scene, base_color, ui, frame_time, size, perf_on);
+        let encode_time = self.executor.submit_frame(
+            &mut self.scene,
+            base_color,
+            ui,
+            frame_time,
+            size,
+            paint_serial,
+            perf_on,
+        );
 
         // The frame has left the UI thread (either executor arm): release any `apply_patch` answer parked on
         // the devtools frame gate and stamp the `frame` probe line when due. Both early returns above (surface

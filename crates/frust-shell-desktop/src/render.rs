@@ -59,6 +59,7 @@ use frust_shell_common::perf::{
     SPAN_FIRST_ENCODE_DONE, SPAN_FIRST_FRAME_PRESENTED, SPAN_FIRST_REBUILD_DONE, SPAN_INIT_ENTRY,
     SPAN_PIPELINE_CACHE_RESTORED, SPAN_RENDERER_READY, StartupSpans, UiSpans,
 };
+use frust_shell_common::render_split::publish_resident_pages;
 use frust_shell_common::{
     FrameMeta, RenderCommand, RenderPhase, RenderReceiver, RenderSender, SceneFrame,
     SceneReturnReceiver, SceneReturnSender, SurfaceSize, next_render_phase, render_channel,
@@ -179,7 +180,13 @@ impl FrameExecutor {
     /// until the render thread has released its surface resources.
     pub(crate) fn destroy_surface(&mut self) {
         match self {
-            FrameExecutor::Inline(inline) => inline.renderer.on_surface_destroyed(),
+            FrameExecutor::Inline(inline) => {
+                inline.renderer.on_surface_destroyed();
+                // The torn-down engine held no page the next surface will:
+                // publish the empty ledger now, so the first paint after a
+                // resume names none.
+                publish_ledger(&mut inline.renderer);
+            }
             FrameExecutor::Split(split) => split.destroy_surface(),
         }
     }
@@ -191,7 +198,8 @@ impl FrameExecutor {
             FrameExecutor::Inline(inline) => {
                 inline
                     .renderer
-                    .on_surface_changed(&inline.render_cx, size.width, size.height)
+                    .on_surface_changed(&inline.render_cx, size.width, size.height);
+                note_scale(&mut inline.renderer, size.scale);
             }
             FrameExecutor::Split(split) => split.resize_surface(size),
         }
@@ -218,7 +226,10 @@ impl FrameExecutor {
     /// so its buffer is reused rather than reallocated — falling back to
     /// `Scene::new()` only when none is available yet (cold start, or the
     /// render thread hasn't given one back). `frame_time` and `size` populate
-    /// the split's [`FrameMeta`]; inline ignores them.
+    /// the split's [`FrameMeta`]; inline ignores them. `paint_serial` is the
+    /// paint's `PaintOutcome::paint_serial`, named to the renderer before it
+    /// encodes this scene on either path (it rides the split's [`FrameMeta`]).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn submit_frame(
         &mut self,
         window: &WindowHandle,
@@ -227,10 +238,11 @@ impl FrameExecutor {
         ui_spans: UiSpans,
         frame_time: FrameTime,
         size: SurfaceSize,
+        paint_serial: u64,
     ) {
         match self {
             FrameExecutor::Inline(inline) => {
-                inline.submit_frame(window, scene, base_color, ui_spans)
+                inline.submit_frame(window, scene, base_color, ui_spans, paint_serial)
             }
             FrameExecutor::Split(split) => {
                 let replacement = split.take_reusable_scene();
@@ -238,7 +250,7 @@ impl FrameExecutor {
                     scene: std::mem::replace(scene, replacement),
                     base_color,
                 };
-                split.submit_frame(painted, ui_spans, frame_time, size);
+                split.submit_frame(painted, ui_spans, frame_time, size, paint_serial);
             }
         }
     }
@@ -329,6 +341,7 @@ impl InlineExecutor {
             SurfaceAlphaRequest::Opaque,
         ))
         .context("frust: failed to create render surface")?;
+        note_scale(&mut self.renderer, size.scale);
         persist_and_record(
             &self.renderer,
             &mut self.startup,
@@ -345,12 +358,14 @@ impl InlineExecutor {
         scene: &Scene,
         base_color: peniko::Color,
         ui_spans: UiSpans,
+        paint_serial: u64,
     ) {
         let outcome = render_frame(
             &mut self.renderer,
             &self.render_cx,
             window,
             scene,
+            paint_serial,
             base_color,
             ui_spans,
             &mut self.frame_stats,
@@ -519,6 +534,7 @@ impl SplitExecutor {
         ui_spans: UiSpans,
         frame_time: FrameTime,
         size: SurfaceSize,
+        paint_serial: u64,
     ) {
         self.frame_id += 1;
         if let Some(sender) = self.sender.as_ref() {
@@ -528,6 +544,7 @@ impl SplitExecutor {
                     frame_time,
                     size,
                     frame_id: self.frame_id,
+                    paint_serial,
                 },
                 ui_spans,
             });
@@ -621,13 +638,19 @@ fn render_loop(
                         let _ = proxy.send_event(ShellUserEvent::RenderFatal(err));
                         return;
                     }
+                    note_scale(&mut renderer, size.scale);
                     window = Some(w);
                 }
                 RenderCommand::SurfaceChanged { size } => {
                     renderer.on_surface_changed(&render_cx, size.width, size.height);
+                    note_scale(&mut renderer, size.scale);
                 }
                 RenderCommand::SurfaceDestroyed { ack } => {
                     renderer.on_surface_destroyed();
+                    // The empty ledger is published BEFORE the barrier is
+                    // acknowledged, so the UI thread's first paint after a
+                    // resume already sees it and names no torn-down page.
+                    publish_ledger(&mut renderer);
                     window = None;
                     // Acknowledge only after the surface resources are dropped —
                     // the window-release barrier.
@@ -659,6 +682,7 @@ fn render_loop(
                     &render_cx,
                     win,
                     &frame.scene.scene,
+                    frame.meta.paint_serial,
                     frame.scene.base_color,
                     frame.ui_spans,
                     &mut frame_stats,
@@ -806,6 +830,41 @@ fn gpu_passes(renderer: &SurfaceRenderer) -> Option<GpuPasses> {
     })
 }
 
+/// Publish the renderer's resident-key ledger for the UI thread's next paint
+/// when it changed since the last publish — after a frame, and at a surface
+/// destroy or device-scale change (both of which leave it empty).
+///
+/// The slot is process-global (one renderer per process); see
+/// [`publish_resident_pages`].
+fn publish_ledger(renderer: &mut SurfaceRenderer) {
+    if let Some(resident) = renderer.take_retained_ledger() {
+        publish_resident_pages(
+            resident.frame,
+            resident
+                .pages
+                .iter()
+                .map(|page| (page.key, page.extent_px, page.scale)),
+        );
+    }
+}
+
+/// Hand the renderer the device scale a surface create or resize carries
+/// (winit folds `ScaleFactorChanged` into the `Resized` that reaches
+/// [`FrameExecutor::resize_surface`]): a changed scale clears the retained
+/// store, and its empty ledger is published at once.
+fn note_scale(renderer: &mut SurfaceRenderer, scale: f64) {
+    if renderer.note_device_scale(scale) {
+        publish_ledger(renderer);
+    }
+}
+
+/// [`publish_ledger`] after a frame, answering whether that frame was refused
+/// for drawing a retained page the renderer no longer holds.
+fn publish_retained(renderer: &mut SurfaceRenderer) -> bool {
+    publish_ledger(renderer);
+    renderer.take_retained_refusal()
+}
+
 /// Run the encode→acquire→submit tail for one painted `scene`, timing each span
 /// with its own `Instant`, recording the folded [`FramePasses`] through the
 /// single emitter, and stamping the first-encode/first-frame startup milestones.
@@ -819,6 +878,7 @@ fn render_frame(
     render_cx: &RenderContext,
     window: &Window,
     scene: &Scene,
+    paint_serial: u64,
     base_color: peniko::Color,
     ui_spans: UiSpans,
     frame_stats: &mut FrameStats,
@@ -831,6 +891,9 @@ fn render_frame(
     // Encode span (GPU/CPU encode, no swapchain touch). Each span is its own
     // `Instant` read; desktop's frame budget is generous enough not to gate them
     // behind `perf::enabled()` (see docs/CODE_STANDARDS.md Instrumentation).
+    // The paint serial this scene was painted under, so the ledger published
+    // once it is committed names it (see `SurfaceRenderer::note_scene_serial`).
+    renderer.note_scene_serial(paint_serial);
     let encode_start = Instant::now();
     let encode_outcome = renderer.encode(render_cx, scene, base_color);
     let encode_dur = encode_start.elapsed();
@@ -861,6 +924,18 @@ fn render_frame(
         Err(err) => Err(err),
     };
     let submit_dur = submit_start.elapsed();
+
+    // The resident-key ledger after this frame, for the UI thread's next
+    // paint. A frame the engine refused for drawing a page it no longer holds
+    // presented nothing and emptied the store, so it is reported as owing a
+    // redraw: both callers then ask the UI thread for one more paint, against
+    // the empty ledger just published, instead of leaving an idle window on
+    // the frame before.
+    let refused_retained = publish_retained(renderer);
+    let render_outcome = match render_outcome {
+        Ok(FrameOutcome::Skipped) if refused_retained => Ok(FrameOutcome::Redraw),
+        other => other,
+    };
 
     // One folded frame record through the single emitter:
     // the UI thread's rebuild/layout/paint + this thread's encode/acquire/submit,

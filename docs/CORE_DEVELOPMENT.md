@@ -23,7 +23,7 @@ LAW; re-run the row's tripwire after touching it, and never run a blind `cargo u
 re-declared dependency ([CODE_STANDARDS.md](CODE_STANDARDS.md)'s State & Reactivity
 Conventions); they are pinned once in the root `[workspace.dependencies]`.
 
-## Layout-Skip Knobs
+## Layout-Skip and Retained-Layer Knobs
 
 Read by the mobile/desktop/web shells (`frust-shell-common::frame_gate::LayoutKnobs`), compile-time
 or runtime; each shell logs one info line `layout skip=.. audit=..` at startup. Design:
@@ -33,6 +33,7 @@ or runtime; each shell logs one info line `layout skip=.. audit=..` at startup. 
 |---|---|
 | `FRUST_NO_LAYOUT_SKIP` | Any value calls `RenderRoot::set_layout_skip(false)`: every pass lays the whole tree out. First A/B valve for a suspected stale-geometry report |
 | `FRUST_LAYOUT_AUDIT` | Any value other than `0` calls `set_layout_audit(true)`: each skipped pass is compared against a forced one and mismatches log `layout-audit:` warnings (debug aid, doubles layout cost) |
+| `FRUST_NO_RETAINED_LAYERS` | Any value calls `RenderRoot::set_retained_layers(false)`: `PaintCtx::subtree_clean` answers `false` everywhere, so `repaint_boundary`, navigator pages and cached opacity paint plain bodies and the scene never carries `PushRetained`/`DrawRetained`. Engine-side counterpart: `FRUST_ENGINE_NO_LAYERS` ([RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md)) |
 
 ## See Also
 

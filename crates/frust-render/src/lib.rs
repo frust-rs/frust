@@ -97,7 +97,7 @@ pub use headless::{
 // `DeferredPresent` stays here: it wraps a frame this crate's renderer
 // acquired, submitted and handed back un-presented, which is a renderer
 // concern, not a foundation one.
-pub use renderer::{DeferredPresent, SurfaceRenderer};
+pub use renderer::{DeferredPresent, ResidentPage, ResidentPages, SurfaceRenderer};
 // The adapter-capability gate is all that is left of the tier seam: the
 // renderer itself is no longer a choice, so the tier enum, its selection
 // result types, the selection function, the env-var name and the override

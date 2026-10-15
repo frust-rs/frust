@@ -42,7 +42,7 @@
 //! present are frame-level only: a frame the gate runs always presents.
 //!
 //! Beneath that whole-frame skip, `RenderRoot` skips clean pods per
-//! `ChildPod`; its two env knobs are read by the shells through [`LayoutKnobs`]
+//! `ChildPod`; its env knobs (plus `FRUST_NO_RETAINED_LAYERS`) are read by the shells through [`LayoutKnobs`]
 //! (`frust-core` reads no environment variable).
 //!
 //! # Animation pacing (frame-gate pacing)
@@ -697,7 +697,41 @@ pub const NO_LAYOUT_SKIP_VAR: &str = "FRUST_NO_LAYOUT_SKIP";
 /// per frame.
 pub const LAYOUT_AUDIT_VAR: &str = "FRUST_LAYOUT_AUDIT";
 
-/// The two layout-skip knobs a shell resolves once at startup and applies to
+/// Disables retained layers when set to any value
+/// (`RenderRoot::set_retained_layers(false)`): `PaintCtx::subtree_clean` and
+/// `PaintCtx::retained_available` always answer `false`, so a boundary widget
+/// repaints its body every frame.
+pub const NO_RETAINED_LAYERS_VAR: &str = "FRUST_NO_RETAINED_LAYERS";
+
+/// Where one knob's switch variable was found: the compile-time define
+/// (`option_env!`) and/or the process environment. `Default` is "set nowhere".
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct KnobSource<'a> {
+    /// The compile-time define, if any.
+    pub compile: Option<&'a str>,
+    /// The runtime environment value, if any.
+    pub runtime: Option<&'a str>,
+}
+
+impl<'a> KnobSource<'a> {
+    /// Set only by the compile-time define.
+    pub fn compile(value: &'a str) -> Self {
+        Self {
+            compile: Some(value),
+            runtime: None,
+        }
+    }
+
+    /// Set only by the runtime environment.
+    pub fn runtime(value: &'a str) -> Self {
+        Self {
+            compile: None,
+            runtime: Some(value),
+        }
+    }
+}
+
+/// The layout-skip and retained-layer knobs a shell resolves once at startup and applies to
 /// its `RenderRoot` (directly, or through [`crate::AppTree`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LayoutKnobs {
@@ -707,6 +741,9 @@ pub struct LayoutKnobs {
     /// Value for `RenderRoot::set_layout_audit` (`true` when
     /// [`LAYOUT_AUDIT_VAR`] is set non-`"0"`).
     pub audit: bool,
+    /// Value for `RenderRoot::set_retained_layers` (`false` when
+    /// [`NO_RETAINED_LAYERS_VAR`] is set).
+    pub retained: bool,
 }
 
 impl LayoutKnobs {
@@ -717,25 +754,32 @@ impl LayoutKnobs {
     pub fn from_env() -> Self {
         let skip_var = std::env::var(NO_LAYOUT_SKIP_VAR).ok();
         let audit_var = std::env::var(LAYOUT_AUDIT_VAR).ok();
+        let retained_var = std::env::var(NO_RETAINED_LAYERS_VAR).ok();
         Self::resolve(
-            option_env!("FRUST_NO_LAYOUT_SKIP"),
-            skip_var.as_deref(),
-            option_env!("FRUST_LAYOUT_AUDIT"),
-            audit_var.as_deref(),
+            KnobSource {
+                compile: option_env!("FRUST_NO_LAYOUT_SKIP"),
+                runtime: skip_var.as_deref(),
+            },
+            KnobSource {
+                compile: option_env!("FRUST_LAYOUT_AUDIT"),
+                runtime: audit_var.as_deref(),
+            },
+            KnobSource {
+                compile: option_env!("FRUST_NO_RETAINED_LAYERS"),
+                runtime: retained_var.as_deref(),
+            },
         )
     }
 
     /// The pure resolution [`Self::from_env`] wraps, unit-testable without
-    /// touching the process environment.
-    pub fn resolve(
-        no_skip_compile: Option<&str>,
-        no_skip_runtime: Option<&str>,
-        audit_compile: Option<&str>,
-        audit_runtime: Option<&str>,
-    ) -> Self {
+    /// touching the process environment. Each argument names where one knob's
+    /// switch variable was found: `no_skip` ([`NO_LAYOUT_SKIP_VAR`]), `audit`
+    /// ([`LAYOUT_AUDIT_VAR`]) and `no_retained` ([`NO_RETAINED_LAYERS_VAR`]).
+    pub fn resolve(no_skip: KnobSource, audit: KnobSource, no_retained: KnobSource) -> Self {
         Self {
-            skip: no_skip_compile.is_none() && no_skip_runtime.is_none(),
-            audit: kill_switch(audit_compile, audit_runtime),
+            skip: no_skip.compile.is_none() && no_skip.runtime.is_none(),
+            audit: kill_switch(audit.compile, audit.runtime),
+            retained: no_retained.compile.is_none() && no_retained.runtime.is_none(),
         }
     }
 
@@ -743,12 +787,18 @@ impl LayoutKnobs {
     pub fn apply_to_app(self, app: &mut dyn crate::AppTree) {
         app.set_layout_skip(self.skip);
         app.set_layout_audit(self.audit);
+        app.set_retained_layers(self.retained);
         self.log();
     }
 
     /// Log the resolved knobs at info, once.
     pub fn log(self) {
-        log::info!("layout skip={} audit={}", self.skip, self.audit);
+        log::info!(
+            "layout skip={} audit={} retained={}",
+            self.skip,
+            self.audit,
+            self.retained
+        );
     }
 }
 
@@ -792,12 +842,26 @@ mod tests {
 
     #[test]
     fn layout_knobs_resolve() {
-        let d = LayoutKnobs::resolve(None, None, None, None);
-        assert!(d.skip && !d.audit);
-        assert!(!LayoutKnobs::resolve(None, Some("1"), None, None).skip);
-        assert!(!LayoutKnobs::resolve(Some("0"), None, None, None).skip);
-        assert!(LayoutKnobs::resolve(None, None, None, Some("1")).audit);
-        assert!(!LayoutKnobs::resolve(None, None, None, Some("0")).audit);
+        let unset = KnobSource::default();
+        let d = LayoutKnobs::resolve(unset, unset, unset);
+        assert!(d.skip && !d.audit && d.retained);
+        assert!(!LayoutKnobs::resolve(KnobSource::runtime("1"), unset, unset).skip);
+        assert!(!LayoutKnobs::resolve(KnobSource::compile("0"), unset, unset).skip);
+        assert!(LayoutKnobs::resolve(unset, KnobSource::runtime("1"), unset).audit);
+        assert!(!LayoutKnobs::resolve(unset, KnobSource::runtime("0"), unset).audit);
+    }
+
+    #[test]
+    fn retained_knob_resolves_from_either_source() {
+        let unset = KnobSource::default();
+        // Set to any value (like the layout-skip kill switch) turns it off.
+        assert!(!LayoutKnobs::resolve(unset, unset, KnobSource::runtime("1")).retained);
+        assert!(!LayoutKnobs::resolve(unset, unset, KnobSource::compile("1")).retained);
+        assert!(!LayoutKnobs::resolve(unset, unset, KnobSource::runtime("0")).retained);
+        // The other knobs are independent of it.
+        let k = LayoutKnobs::resolve(unset, unset, KnobSource::runtime("1"));
+        assert!(k.skip && !k.audit);
+        assert!(LayoutKnobs::resolve(KnobSource::runtime("1"), unset, unset).retained);
     }
 
     /// A `FrameInputs` with exactly one field set, by name — the driver for

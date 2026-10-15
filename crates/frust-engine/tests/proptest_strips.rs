@@ -288,13 +288,13 @@ enum Op {
         alpha: f32,
     },
     PopLayer,
-    PushSnapshot {
+    PushRetained {
         key: u64,
         rect: Rect,
         alpha: f32,
         scale: f64,
     },
-    PopSnapshot,
+    PopRetained,
     PushTransform(Affine),
     PopTransform,
 }
@@ -352,13 +352,13 @@ fn scene_of(ops: &[Op]) -> Scene {
             Op::PopClip => builder.pop_clip(),
             Op::PushLayer { rect, alpha } => builder.push_layer(*rect, *alpha),
             Op::PopLayer => builder.pop_layer(),
-            Op::PushSnapshot {
+            Op::PushRetained {
                 key,
                 rect,
                 alpha,
                 scale,
-            } => builder.push_snapshot(*key, *rect, *alpha, *scale),
-            Op::PopSnapshot => builder.pop_snapshot(),
+            } => builder.push_retained(*key, *rect, *alpha, *scale),
+            Op::PopRetained => builder.pop_retained(),
             Op::PushTransform(transform) => builder.push_transform(*transform),
             Op::PopTransform => builder.pop_transform(),
         }
@@ -611,14 +611,14 @@ fn op() -> impl Strategy<Value = Op> {
         (rect(), small_f32()).prop_map(|(rect, alpha)| Op::PushLayer { rect, alpha }),
         Just(Op::PopLayer),
         (any::<u64>(), rect(), small_f32(), coord()).prop_map(|(key, rect, alpha, scale)| {
-            Op::PushSnapshot {
+            Op::PushRetained {
                 key,
                 rect,
                 alpha,
                 scale,
             }
         }),
-        Just(Op::PopSnapshot),
+        Just(Op::PopRetained),
         transform().prop_map(Op::PushTransform),
         Just(Op::PopTransform),
     ]
@@ -947,14 +947,14 @@ fn allocation_stays_inside_the_bound(ops: &[Op], root: Affine) -> Result<(), Tes
     Ok(())
 }
 
-/// A huge-scale snapshot followed by a rounded clip with subnormal and
+/// A huge-scale retained bracket followed by a rounded clip with subnormal and
 /// out-of-range radii compiles within the linear allocation bound. The clip's
 /// curves land far outside the viewport once transformed; flattening them
 /// unsplit allocated without bound.
 #[test]
-fn a_huge_snapshot_scale_under_a_rounded_clip_stays_inside_the_bound() {
+fn a_huge_retained_scale_under_a_rounded_clip_stays_inside_the_bound() {
     let ops = [
-        Op::PushSnapshot {
+        Op::PushRetained {
             key: 8_911_044_492_357_228_835,
             rect: Rect::new(-101.33478495360569, 0.0, -179.3764606917167, -0.0),
             alpha: -220.93674,
@@ -1625,7 +1625,7 @@ fn non_finite_geometry_is_refused_field_by_field() {
 ///
 /// Every command the compiler recognises now carries geometry of its own, so
 /// there is no skipped-command case left to contrast this with; the clip,
-/// layer, snapshot, clear, image and blurred-rounded-rect counterparts are
+/// layer, retained bracket, clear, image and blurred-rounded-rect counterparts are
 /// pinned by `tests/clips.rs`, `tests/layers.rs`, `tests/images.rs` and
 /// `tests/blur_rrect.rs` respectively.
 #[test]
@@ -1687,7 +1687,7 @@ fn a_shader_quad_without_a_rendered_target_skips_its_own_draw_only() {
 ///
 /// The rate falls each time the compiler starts lowering another command,
 /// because a lowered command's own numbers become numbers the frame is refused
-/// for: it was around 97 of 256 while layers, snapshot brackets and clears were
+/// for: it was around 97 of 256 while layers, retained brackets and clears were
 /// still skipped, and each of those three refuses roughly a quarter of the
 /// rectangles this generator hands it. That is the refusal working, not the
 /// generator decaying, so the floor is re-measured rather than the refusal

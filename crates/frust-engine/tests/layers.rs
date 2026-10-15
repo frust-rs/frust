@@ -1,4 +1,4 @@
-//! Group lowering: what an opacity layer, a snapshot bracket and a hole punch
+//! Group lowering: what an opacity layer, a retained bracket and a hole punch
 //! cost, and what each one actually leaves painted.
 //!
 //! Every case drives the public seam — a `frust_scene::Scene` recorded through
@@ -11,7 +11,7 @@
 //!
 //! The claims under test are the ones the lowering exists for: a layer at full
 //! opacity is a clip and nothing more, a translucent one is a page of its own,
-//! a snapshot bracket paints its body exactly as the equivalent
+//! a retained bracket paints its body exactly as the equivalent
 //! transform-and-layer pair would, and a clear is hoisted out of every bracket
 //! around it, lowered to coverage that is exact at a tile-unaligned edge, and
 //! carries a depth that orders it against opaque coverage and nothing else.
@@ -22,11 +22,11 @@
 use core::ops::Range;
 
 use frust_engine::compile::CompiledFrame;
-use frust_engine::schedule::{PageConfig, Round, RoundTarget, Schedule};
-use frust_engine::{EngineError, SceneCompiler};
+use frust_engine::schedule::{PageConfig, RetainedLayers, Round, RoundOp, RoundTarget, Schedule};
+use frust_engine::{EngineError, RetainedKind, SceneCompiler};
 use frust_gpu::{DownlevelProfile, TierCaps};
 use frust_scene::{Scene, SceneBuilder};
-use kurbo::{Affine, Rect};
+use kurbo::{Affine, BezPath, Rect};
 use peniko::Brush;
 use peniko::color::palette::css::RED;
 use vello_common::tile::Tile;
@@ -322,18 +322,18 @@ fn a_layer_left_open_is_closed_at_the_end_of_the_frame() {
 }
 
 // ---------------------------------------------------------------------
-// Snapshot brackets
+// Retained brackets: the inline lowering
 // ---------------------------------------------------------------------
 
 #[test]
-fn a_snapshot_body_lowers_like_the_equivalent_transform_and_layer_pair() {
+fn a_retained_body_lowers_like_the_equivalent_transform_and_layer_pair() {
     let rect = Rect::new(8.0, 8.0, 40.0, 40.0);
     let body = Rect::new(12.0, 12.0, 36.0, 36.0);
 
-    let snapshot = compile(&scene_of(|builder| {
-        builder.push_snapshot(7, rect, HALF, 0.5);
+    let bracketed = compile(&scene_of(|builder| {
+        builder.push_retained(7, rect, HALF, 0.5);
         builder.fill_rect(body, red());
-        builder.pop_snapshot();
+        builder.pop_retained();
     }));
     let equivalent = compile(&scene_of(|builder| {
         builder.push_transform(Affine::scale_about(0.5, rect.center()));
@@ -343,21 +343,21 @@ fn a_snapshot_body_lowers_like_the_equivalent_transform_and_layer_pair() {
         builder.pop_transform();
     }));
 
-    assert_eq!(coverage(&snapshot), coverage(&equivalent));
+    assert_eq!(coverage(&bracketed), coverage(&equivalent));
     assert_eq!(
-        page_opacities(&rounds(&snapshot)),
+        page_opacities(&rounds(&bracketed)),
         page_opacities(&rounds(&equivalent))
     );
 }
 
 #[test]
-fn a_snapshot_scales_its_body_about_the_rectangle_centre() {
+fn a_retained_bracket_scales_its_body_about_the_rectangle_centre() {
     let rect = Rect::new(8.0, 8.0, 40.0, 40.0);
 
     let frame = compile(&scene_of(|builder| {
-        builder.push_snapshot(1, rect, 1.0, 0.5);
+        builder.push_retained(1, rect, 1.0, 0.5);
         builder.fill_rect(rect, red());
-        builder.pop_snapshot();
+        builder.pop_retained();
     }));
 
     // Halved about (24, 24): every edge moves halfway to the centre.
@@ -369,13 +369,13 @@ fn a_snapshot_scales_its_body_about_the_rectangle_centre() {
 }
 
 #[test]
-fn a_snapshot_scales_and_fades_together() {
+fn a_retained_bracket_scales_and_fades_together() {
     let rect = Rect::new(8.0, 8.0, 40.0, 40.0);
 
     let frame = compile(&scene_of(|builder| {
-        builder.push_snapshot(2, rect, 0.25, 0.5);
+        builder.push_retained(2, rect, 0.25, 0.5);
         builder.fill_rect(rect, red());
-        builder.pop_snapshot();
+        builder.pop_retained();
     }));
 
     assert_eq!(covered_bbox(&coverage(&frame)), Some((16, 16, 32, 32)));
@@ -383,21 +383,21 @@ fn a_snapshot_scales_and_fades_together() {
 }
 
 #[test]
-fn only_the_outermost_snapshot_bracket_is_honoured() {
+fn only_the_outermost_retained_bracket_is_honoured() {
     let rect = Rect::new(8.0, 8.0, 40.0, 40.0);
     let inner = Rect::new(12.0, 12.0, 36.0, 36.0);
 
     let nested = compile(&scene_of(|builder| {
-        builder.push_snapshot(1, rect, HALF, 0.5);
-        builder.push_snapshot(2, inner, 0.25, 4.0);
+        builder.push_retained(1, rect, HALF, 0.5);
+        builder.push_retained(2, inner, 0.25, 4.0);
         builder.fill_rect(rect, red());
-        builder.pop_snapshot();
-        builder.pop_snapshot();
+        builder.pop_retained();
+        builder.pop_retained();
     }));
     let outer_only = compile(&scene_of(|builder| {
-        builder.push_snapshot(1, rect, HALF, 0.5);
+        builder.push_retained(1, rect, HALF, 0.5);
         builder.fill_rect(rect, red());
-        builder.pop_snapshot();
+        builder.pop_retained();
     }));
 
     assert_eq!(coverage(&nested), coverage(&outer_only));
@@ -409,14 +409,14 @@ fn only_the_outermost_snapshot_bracket_is_honoured() {
 }
 
 #[test]
-fn an_unbalanced_pop_snapshot_is_ignored() {
+fn an_unbalanced_pop_retained_is_ignored() {
     let rect = Rect::new(8.0, 8.0, 40.0, 40.0);
 
     let frame = compile(&scene_of(|builder| {
-        builder.pop_snapshot();
-        builder.push_snapshot(1, rect, 1.0, 0.5);
-        builder.pop_snapshot();
-        builder.pop_snapshot();
+        builder.pop_retained();
+        builder.push_retained(1, rect, 1.0, 0.5);
+        builder.pop_retained();
+        builder.pop_retained();
         // The stray pops must leave no correction behind, so this paints where
         // it was recorded rather than scaled.
         builder.fill_rect(rect, red());
@@ -427,18 +427,18 @@ fn an_unbalanced_pop_snapshot_is_ignored() {
 }
 
 #[test]
-fn a_snapshot_left_open_stops_correcting_at_the_end_of_the_frame() {
+fn a_retained_bracket_left_open_stops_correcting_at_the_end_of_the_frame() {
     let rect = Rect::new(8.0, 8.0, 40.0, 40.0);
 
     let first = compile(&scene_of(|builder| {
-        builder.push_snapshot(1, rect, HALF, 0.5);
+        builder.push_retained(1, rect, HALF, 0.5);
         builder.fill_rect(rect, red());
     }));
     // The compiler holds no per-frame state between calls, so a second frame
     // through the same compiler must not inherit the first's correction.
     let mut compiler = SceneCompiler::new(VIEWPORT.0, VIEWPORT.1);
     let open = scene_of(|builder| {
-        builder.push_snapshot(1, rect, HALF, 0.5);
+        builder.push_retained(1, rect, HALF, 0.5);
         builder.fill_rect(rect, red());
     });
     let plain = scene_of(|builder| builder.fill_rect(rect, red()));
@@ -699,10 +699,10 @@ fn non_finite_group_geometry_is_refused_before_any_strip_is_generated() {
             scene_of(|builder| builder.clear_rect(Rect::new(0.0, 0.0, f64::INFINITY, 16.0))),
         ),
         (
-            "a snapshot scale",
+            "a retained bracket scale",
             scene_of(|builder| {
-                builder.push_snapshot(1, Rect::new(0.0, 0.0, 16.0, 16.0), 1.0, f64::NAN);
-                builder.pop_snapshot();
+                builder.push_retained(1, Rect::new(0.0, 0.0, 16.0, 16.0), 1.0, f64::NAN);
+                builder.pop_retained();
             }),
         ),
     ];
@@ -716,15 +716,15 @@ fn non_finite_group_geometry_is_refused_before_any_strip_is_generated() {
 }
 
 #[test]
-fn a_singular_snapshot_transform_drops_the_scale_rather_than_the_frame() {
+fn a_singular_retained_transform_drops_the_scale_rather_than_the_frame() {
     let rect = Rect::new(8.0, 8.0, 40.0, 40.0);
 
     let frame = compile(&scene_of(|builder| {
         // A collapsed transform has no usable inverse, so the presentation
         // scale cannot be conjugated through it.
         builder.push_transform(Affine::scale(0.0));
-        builder.push_snapshot(1, rect, 1.0, 0.5);
-        builder.pop_snapshot();
+        builder.push_retained(1, rect, 1.0, 0.5);
+        builder.pop_retained();
         builder.pop_transform();
         builder.fill_rect(rect, red());
     }));
@@ -741,13 +741,13 @@ fn a_command_a_correction_pushes_off_the_grid_is_skipped_not_refused() {
     let rect = Rect::new(0.0, 0.0, 16.0, 16.0);
 
     let frame = compile(&scene_of(|builder| {
-        builder.push_snapshot(1, rect, 1.0, 1e200);
+        builder.push_retained(1, rect, 1.0, 1e200);
         // On its own this transform is finite; composed with the bracket's
         // correction it is not, and no `u16` pixel could hold what it maps to.
         builder.push_transform(Affine::scale(1e200));
         builder.fill_rect(rect, red());
         builder.pop_transform();
-        builder.pop_snapshot();
+        builder.pop_retained();
         builder.fill_rect(Rect::new(4.0, 4.0, 12.0, 12.0), red());
     }));
 
@@ -764,7 +764,7 @@ fn a_bracket_a_correction_pushes_off_the_grid_still_balances_its_own_pop() {
     let outside = Rect::new(20.0, 20.0, 36.0, 36.0);
 
     let frame = compile(&scene_of(|builder| {
-        builder.push_snapshot(1, rect, 1.0, 1e200);
+        builder.push_retained(1, rect, 1.0, 1e200);
         builder.push_transform(Affine::scale(1e200));
         // Composed with the bracket's correction this clip lands nowhere a
         // `u16` pixel could hold, so it admits nothing at all.
@@ -772,7 +772,7 @@ fn a_bracket_a_correction_pushes_off_the_grid_still_balances_its_own_pop() {
         builder.fill_rect(rect, red());
         builder.pop_clip();
         builder.pop_transform();
-        builder.pop_snapshot();
+        builder.pop_retained();
         builder.fill_rect(outside, red());
     }));
 
@@ -780,6 +780,209 @@ fn a_bracket_a_correction_pushes_off_the_grid_still_balances_its_own_pop() {
         covered_bbox(&coverage(&frame)),
         Some((20, 20, 36, 36)),
         "the stray clip's pop closed the bracket that clip opened, not the frame"
+    );
+}
+
+// ---------------------------------------------------------------------
+// A retained body under a path clip
+// ---------------------------------------------------------------------
+
+/// The body every retained-bracket case below records, in its own space.
+const RETAINED_BODY: Rect = Rect::new(0.0, 0.0, 16.0, 16.0);
+
+/// A star-ish outline covering the whole viewport's middle — wide enough that
+/// a body inside it is never cut by the outline's own edge, so the only thing
+/// that can make it unretainable is that the clip is a mask.
+fn wide_outline() -> BezPath {
+    let mut path = BezPath::new();
+    path.move_to((32.0, -40.0));
+    path.line_to((110.0, 24.0));
+    path.line_to((32.0, 90.0));
+    path.line_to((-46.0, 24.0));
+    path.close_path();
+    path
+}
+
+/// Whether each `PushRetained` the frame recorded may be held by a page.
+fn retainable(frame: &CompiledFrame) -> Vec<bool> {
+    frame
+        .retained
+        .iter()
+        .filter_map(|bracket| match bracket.kind {
+            RetainedKind::Record { retainable, .. } => Some(retainable),
+            RetainedKind::Draw { .. } => None,
+        })
+        .collect()
+}
+
+/// `scene` compiled with retention on — the only compiler that records a
+/// `RetainedBracket` at all.
+fn compile_retained(scene: &Scene) -> CompiledFrame {
+    let mut compiler = SceneCompiler::new(VIEWPORT.0, VIEWPORT.1);
+    compiler.set_retained_layers(true);
+    compiler
+        .compile(scene, Affine::IDENTITY, VIEWPORT)
+        .expect("an in-range scene compiles")
+}
+
+/// A solid [`RETAINED_BODY`] in a `PushRetained` bracket at `(8, 8)`.
+fn record_retained_body(builder: &mut SceneBuilder<'_>) {
+    builder.push_transform(Affine::translate((8.0, 8.0)));
+    builder.push_retained(1, RETAINED_BODY, 1.0, 1.0);
+    builder.fill_rect(RETAINED_BODY, red());
+    builder.pop_retained();
+    builder.pop_transform();
+}
+
+#[test]
+fn a_retained_body_under_a_path_clip_is_marked_unretainable() {
+    let plain = compile_retained(&scene_of(record_retained_body));
+    assert_eq!(
+        retainable(&plain),
+        vec![true],
+        "the control: the same body under no clip is retainable"
+    );
+
+    let under_path = compile_retained(&scene_of(|builder| {
+        builder.push_clip_path(wide_outline());
+        record_retained_body(builder);
+        builder.pop_clip();
+    }));
+    assert_eq!(under_path.mask_clips, 1, "the path clip lowered to a mask");
+    assert_eq!(
+        retainable(&under_path),
+        vec![false],
+        "a page holds only what the body drew, so a body under a path clip's coverage mask is          never retained"
+    );
+
+    // Exactly a rounded clip's terms: the two clips are the same lowering.
+    let under_rounded = compile_retained(&scene_of(|builder| {
+        builder.push_clip_rounded(Rect::new(0.0, 0.0, 64.0, 48.0), 6.0);
+        record_retained_body(builder);
+        builder.pop_clip();
+    }));
+    assert_eq!(retainable(&under_path), retainable(&under_rounded));
+}
+
+#[test]
+fn a_path_clip_opened_inside_a_retained_body_is_judged_like_a_rounded_one() {
+    let with_inner = |clip: &dyn Fn(&mut SceneBuilder<'_>)| {
+        compile_retained(&scene_of(|builder| {
+            builder.push_transform(Affine::translate((8.0, 8.0)));
+            builder.push_retained(1, RETAINED_BODY, 1.0, 1.0);
+            clip(builder);
+            builder.fill_rect(RETAINED_BODY, red());
+            builder.pop_clip();
+            builder.pop_retained();
+            builder.pop_transform();
+        }))
+    };
+    let path = with_inner(&|builder| {
+        let mut triangle = BezPath::new();
+        triangle.move_to((0.0, 0.0));
+        triangle.line_to((16.0, 0.0));
+        triangle.line_to((8.0, 16.0));
+        triangle.close_path();
+        builder.push_clip_path(triangle);
+    });
+    let rounded = with_inner(&|builder| builder.push_clip_rounded(RETAINED_BODY, 4.0));
+
+    assert_eq!(path.mask_clips, 1);
+    assert_eq!(
+        retainable(&path),
+        retainable(&rounded),
+        "a mask the body opens itself is part of what the page holds, on a rounded clip's terms"
+    );
+}
+
+#[test]
+fn a_path_clip_opens_no_layer_and_no_page() {
+    let frame = compile(&scene_of(|builder| {
+        builder.push_clip_path(wide_outline());
+        builder.fill_rect(Rect::new(0.0, 0.0, 64.0, 48.0), red());
+        builder.pop_clip();
+    }));
+
+    assert!(
+        !frame.recorder.has_layers(),
+        "a path clip is a coverage mask, never a recorded layer"
+    );
+    assert!(
+        page_opacities(&rounds(&frame)).is_empty(),
+        "and so it costs the scheduler no page"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Nested retained brackets: keys the frame supersedes
+// ---------------------------------------------------------------------
+
+#[test]
+fn a_nested_bracket_lists_its_key_as_superseded_and_records_no_bracket() {
+    let frame = compile_retained(&scene_of(|builder| {
+        builder.push_transform(Affine::translate((8.0, 8.0)));
+        builder.push_retained(1, RETAINED_BODY, HALF, 1.0);
+        builder.push_retained(2, RETAINED_BODY, 1.0, 1.0);
+        builder.push_retained(3, Rect::new(0.0, 0.0, 8.0, 8.0), 0.25, 2.0);
+        builder.fill_rect(RETAINED_BODY, red());
+        builder.pop_retained();
+        builder.pop_retained();
+        builder.pop_retained();
+        builder.pop_transform();
+        // A sibling at the root is outermost again: listed, not superseded.
+        builder.push_retained(4, Rect::new(30.0, 8.0, 46.0, 24.0), 1.0, 1.0);
+        builder.fill_rect(Rect::new(30.0, 8.0, 46.0, 24.0), red());
+        builder.pop_retained();
+    }));
+
+    let listed: Vec<u64> = frame.retained.iter().map(|bracket| bracket.key).collect();
+    assert_eq!(listed, vec![1, 4], "only outermost brackets are recorded");
+    assert_eq!(
+        frame.retained_superseded,
+        vec![2, 3],
+        "every nested key is reported, in recording order, so the store can evict \
+         whatever page it held — the body painted into the outermost one instead"
+    );
+}
+
+#[test]
+fn a_bracket_off_the_grid_is_superseded_too() {
+    let rect = Rect::new(0.0, 0.0, 16.0, 16.0);
+    let frame = compile_retained(&scene_of(|builder| {
+        builder.push_retained(1, rect, 1.0, 1e200);
+        // Composed with the outer bracket's correction, this one's transform
+        // leaves the device grid: it is entered neutrally and never listed.
+        builder.push_transform(Affine::scale(1e200));
+        builder.push_retained(2, rect, 1.0, 1.0);
+        builder.pop_retained();
+        builder.pop_transform();
+        builder.pop_retained();
+    }));
+    let listed: Vec<u64> = frame.retained.iter().map(|bracket| bracket.key).collect();
+    assert_eq!(listed, vec![1]);
+    assert_eq!(frame.retained_superseded, vec![2]);
+}
+
+#[test]
+fn without_retention_no_key_is_superseded() {
+    let frame = compile(&scene_of(|builder| {
+        builder.push_retained(1, RETAINED_BODY, HALF, 1.0);
+        builder.push_retained(2, RETAINED_BODY, HALF, 1.0);
+        builder.fill_rect(RETAINED_BODY, red());
+        builder.pop_retained();
+        builder.pop_retained();
+    }));
+    assert!(frame.retained.is_empty());
+    assert!(
+        frame.retained_superseded.is_empty(),
+        "a compiler with no store behind it has nothing to evict"
+    );
+
+    let flat = compile_retained(&scene_of(record_retained_body));
+    assert_eq!(flat.retained.len(), 1);
+    assert!(
+        flat.retained_superseded.is_empty(),
+        "a lone outermost bracket supersedes nothing"
     );
 }
 
@@ -822,4 +1025,133 @@ fn the_blend_module_carries_the_destination_out_composite() {
         !blend.contains("var<storage") && !blend.contains("@compute"),
         "the module stays inside the downlevel design rules"
     );
+}
+
+// ---------------------------------------------------------------------
+// A backdrop blur: never retained, never inside a page
+// ---------------------------------------------------------------------
+
+/// The rectangle every backdrop case below blurs behind, in its own space.
+const PANEL: Rect = Rect::new(4.0, 4.0, 12.0, 12.0);
+
+/// The rounds `frame` schedules as with its backdrop blurs served — the
+/// scheduler entry `EngineRenderer::encode` takes on a readable target.
+fn backdrop_rounds(frame: &CompiledFrame) -> Vec<Round> {
+    Schedule::build_frame(
+        &frame.recorder,
+        &TierCaps::fake(DownlevelProfile::Full),
+        &PageConfig::default(),
+        &RetainedLayers::new(),
+        &frame.backdrops,
+    )
+    .expect("a frame carrying a backdrop schedules")
+}
+
+/// Every draw index a round of `target`'s kind issues.
+fn drawn_in(rounds: &[Round], pages: bool) -> Vec<u32> {
+    rounds
+        .iter()
+        .filter(|round| !round.is_root() == pages)
+        .flat_map(|round| round.ops.iter())
+        .filter_map(|op| match op {
+            RoundOp::Draws(range) => Some(range.clone()),
+            RoundOp::Composite(_) => None,
+        })
+        .flatten()
+        .collect()
+}
+
+/// Where the backdrop's own draw — its rectangle's coverage — lands, if
+/// anywhere: `(in a surface round, in a page round, copied)`.
+fn backdrop_placement(frame: &CompiledFrame) -> (bool, bool, bool) {
+    let rounds = backdrop_rounds(frame);
+    let Some(backdrop) = frame.backdrops.first() else {
+        return (false, false, false);
+    };
+    let draw = frame
+        .draws()
+        .iter()
+        .position(|draw| draw.depth == backdrop.depth)
+        .and_then(|index| u32::try_from(index).ok())
+        .expect("a recorded backdrop has its draw");
+    (
+        drawn_in(&rounds, false).contains(&draw),
+        drawn_in(&rounds, true).contains(&draw),
+        rounds.iter().any(|round| round.region_copy().is_some()),
+    )
+}
+
+#[test]
+fn a_retained_body_carrying_a_backdrop_blur_is_marked_unretainable() {
+    let plain = compile_retained(&scene_of(record_retained_body));
+    assert_eq!(retainable(&plain), vec![true], "the control");
+
+    let blurring = compile_retained(&scene_of(|builder| {
+        builder.push_transform(Affine::translate((8.0, 8.0)));
+        builder.push_retained(1, RETAINED_BODY, 1.0, 1.0);
+        builder.fill_rect(RETAINED_BODY, red());
+        builder.backdrop_blur(PANEL, 2.0);
+        builder.pop_retained();
+        builder.pop_transform();
+    }));
+    assert_eq!(
+        blurring.backdrops.len(),
+        1,
+        "the backdrop is still recorded"
+    );
+    assert_eq!(
+        retainable(&blurring),
+        vec![false],
+        "a page is rasterized offscreen, where there is no frame beneath the body to sample, \
+         so a body blurring its backdrop is drawn inline every frame"
+    );
+}
+
+#[test]
+fn a_backdrop_at_the_root_is_copied_and_drawn_in_a_surface_round() {
+    let frame = compile(&scene_of(|builder| {
+        builder.fill_rect(Rect::new(0.0, 0.0, 64.0, 48.0), red());
+        builder.backdrop_blur(PANEL, 2.0);
+    }));
+    assert_eq!(backdrop_placement(&frame), (true, false, true));
+}
+
+#[test]
+fn a_backdrop_never_lands_in_a_page_round() {
+    // Inside a translucent layer: an isolated page, with no frame beneath.
+    let in_layer = compile(&scene_of(|builder| {
+        builder.fill_rect(Rect::new(0.0, 0.0, 64.0, 48.0), red());
+        builder.push_layer(Rect::new(0.0, 0.0, 32.0, 32.0), HALF);
+        builder.fill_rect(Rect::new(2.0, 2.0, 20.0, 20.0), red());
+        builder.backdrop_blur(PANEL, 2.0);
+        builder.pop_layer();
+    }));
+    assert_eq!(in_layer.backdrops.len(), 1);
+    assert_eq!(
+        backdrop_placement(&in_layer),
+        (false, false, false),
+        "dropped: no copy, and its rectangle drawn in no round at all"
+    );
+
+    // Inside a translucent retained body the store did not admit: the
+    // ordinary isolated layer the inline lowering describes.
+    let in_body = compile_retained(&scene_of(|builder| {
+        builder.push_retained(1, Rect::new(0.0, 0.0, 32.0, 32.0), HALF, 1.0);
+        builder.fill_rect(Rect::new(2.0, 2.0, 20.0, 20.0), red());
+        builder.backdrop_blur(PANEL, 2.0);
+        builder.pop_retained();
+    }));
+    assert_eq!(retainable(&in_body), vec![false]);
+    assert_eq!(backdrop_placement(&in_body), (false, false, false));
+
+    // A full-opacity unretainable body inlines into the surface, so its
+    // backdrop is the frame's own and is served there — still never in a
+    // page.
+    let inlined = compile_retained(&scene_of(|builder| {
+        builder.fill_rect(Rect::new(0.0, 0.0, 64.0, 48.0), red());
+        builder.push_retained(1, Rect::new(0.0, 0.0, 32.0, 32.0), 1.0, 1.0);
+        builder.backdrop_blur(PANEL, 2.0);
+        builder.pop_retained();
+    }));
+    assert_eq!(backdrop_placement(&inlined), (true, false, true));
 }

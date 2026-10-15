@@ -1,0 +1,14 @@
+{
+  "backend": "vello-cpu-0.2",
+  "adapter": "vello_cpu 0.2.0 (vello_common 0.2.0, glifo 0.3.0)",
+  "driver": "simd=Fallback, threads=0, pipeline=u8",
+  "os": "linux",
+  "frust_commit": "345917b355dd1a6d9535fd22fc0d192ea2f7f772",
+  "case": "unit-clip-path-star",
+  "tolerance": {
+    "channel": 2,
+    "alpha": 2,
+    "diff_pixels": 0
+  },
+  "timestamp": "2026-10-15T05:34:23Z"
+}

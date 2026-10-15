@@ -86,6 +86,30 @@ pub const INTERMEDIATE_USAGE: wgpu::TextureUsages = wgpu::TextureUsages::RENDER_
     .union(wgpu::TextureUsages::TEXTURE_BINDING)
     .union(wgpu::TextureUsages::COPY_SRC);
 
+/// The label every retained page is allocated under.
+pub const RETAINED_PAGE_LABEL: &str = "frust-engine retained page";
+
+/// The descriptor a retained page of `width` x `height` is allocated with.
+///
+/// A retained page is the one off-screen layer target this module does not
+/// hand out: it outlives the frame that rendered it, so it is the retained
+/// store's own allocation (`crate::cache::retained`) rather than a pooled
+/// entry the pool could age out or hand to another layer. It is otherwise a
+/// layer page in every respect — rendered into by a strip pass and sampled by
+/// the composite that draws it — so it takes exactly a pooled page's format
+/// and usage, and the extent is the caller's, unquantized: a retained page is
+/// sized once to its body and reused while the body keeps that size.
+#[must_use]
+pub fn retained_page_descriptor(width: u32, height: u32) -> TextureDesc {
+    TextureDesc {
+        width,
+        height,
+        format: INTERMEDIATE_FORMAT,
+        usage: INTERMEDIATE_USAGE,
+        label: Some(RETAINED_PAGE_LABEL.to_string()),
+    }
+}
+
 /// The largest intermediate extent the engine will request on `caps`' adapter.
 #[must_use]
 pub fn max_texture_size(caps: &TierCaps) -> u32 {

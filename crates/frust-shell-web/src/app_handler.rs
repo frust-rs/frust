@@ -1915,6 +1915,11 @@ mod browser_loop {
             {
                 self.root.set_presented_frames(executor.presented_frames());
             }
+            // Hand the root the resident-key ledger the renderer last published
+            // (one frame stale by design; a try-lock read that never waits).
+            if let Some(ledger) = frust_shell_common::render_split::latest_retained_ledger() {
+                self.root.set_retained_ledger(&ledger);
+            }
             let paint_start = Instant::now();
             let paint_outcome = {
                 let mut builder = SceneBuilder::new(&mut self.scene);
@@ -1976,7 +1981,13 @@ mod browser_loop {
                     // reports 0x0 until its `ResizeObserver` has run. See
                     // `WebFrameExecutor::ensure_size`.
                     executor.ensure_size(physical.width, physical.height);
-                    executor.submit_frame(&self.scene, base_color, ui_spans)
+                    executor.note_device_scale(scale);
+                    executor.submit_frame(
+                        &self.scene,
+                        paint_outcome.paint_serial,
+                        base_color,
+                        ui_spans,
+                    )
                 }),
                 Err(_) => None,
             };
@@ -2140,6 +2151,10 @@ mod browser_loop {
                         && let Some(executor) = slot.as_mut()
                     {
                         executor.resize_surface(size.width, size.height);
+                        // A `devicePixelRatio` change arrives as this
+                        // `Resized`: clear the retained store before the
+                        // repaint it requests.
+                        executor.note_device_scale(window.scale_factor());
                     }
                     super::publish_window_metrics(
                         self.runtime,
@@ -2305,6 +2320,8 @@ mod browser_loop {
                 let mut root = RenderRoot::new();
                 root.set_layout_skip(knobs.skip);
                 root.set_layout_audit(knobs.audit);
+                // `FRUST_NO_RETAINED_LAYERS`, resolved beside the layout knobs.
+                root.set_retained_layers(knobs.retained);
                 knobs.log();
                 root
             },

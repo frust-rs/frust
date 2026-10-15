@@ -20,6 +20,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how WIDGETS relates to the other unit
 | `frust-widgets::authoring` | Public container/callback toolkit every widget in the crate builds from, instead of touching `frust-core` primitives directly — reachable by app code as `frust::authoring` (the facade's re-export, CORE unit); also carries the `VisitPods` trait / `visit_children!` macro, the crate's introspection seam (see *Data Flow*) |
 | `frust-widgets` (baseline) | Baseline layout containers and interactive leaf widgets (text, forms, gestures, scrolling, a virtualized `ListView`, a four-slot `Scaffold`, `IndexedStack`) |
 | `frust-widgets::canvas` | `CanvasView`/`CanvasWidget` — declarative custom painting over `PaintScene`, local-space, no semantics node |
+| `frust-widgets::repaint_boundary` | `repaint_boundary(child)` (`.alpha(f32)`) and the shared `RetainedBoundary`: per frame `DrawRetained` when the subtree is clean, its transform's linear part unchanged, nothing inside published a paint and the ledger holds (key, extent, scale from `PaintScene::current_transform()`) and covers the serial it recorded under (runs of consecutive recordings at one origin, size and linear part; the first draw confirms; it must have recorded on the immediately previous paint; serial 0 = bare ctx skips the check); else `PushRetained`+body+`PopRetained` when recording is allowed and the body is visible, else direct paint (kill switch `FRUST_NO_RETAINED_LAYERS` → plain bodies). `motion::AnimatedOpacity::cached(bool)` opts an opacity animation in (`AnimatedScale` unchanged) |
 | `frust-widgets::pinch` | `PinchRecognizer` — a pure two-contact pinch state machine — and `pinch_detector`, the wrapper view feeding it from a gesture's contacts |
 | `frust-widgets::pan_zoom` | `PanZoomView`/`PanZoomWidget` — one child under a drag-pan/pinch-or-wheel-zoom transform, with inertia and a `PanZoomController` handle |
 | `frust-widgets::motion` | Implicit-animation and transition-pattern vocabulary |
@@ -87,14 +88,13 @@ Contract*). `frust::authoring` is the toolkit both the baseline set and every pl
     paint pass — hero-rect capture and other paint-time state — redirected into
     `frust_core::DiscardScene` so no scene command is emitted, because the engine rasterizes a
     layer in full before applying its alpha and an invisible page is otherwise wasted GPU work.
-  - **Snapshot bracket eligibility:** a page surviving that redirect brackets its paint with
-    `PaintScene::push_snapshot`/`pop_snapshot` when the transition is programmatic (not an
-    interactive edge-swipe) and the frame's hero directives for it are empty — unconditionally then,
-    even at alpha/scale identity, since the bracket itself is what tells a caching renderer the body
-    is worth caching (`push_snapshot`'s default still emulates the transform+layer pair for a plain
-    recorder). Each page and each `motion::switcher` child draws a process-unique snapshot key once
-    for its pod's lifetime, and the bracket rect's origin follows the pod's absolute paint origin,
-    keeping RENDER_ARCHITECTURE.md's frame-relative fingerprint slide-invariant.
+  - **Retained pages:** each page carries a `RetainedBoundary` (`PageEntry.boundary`; the switcher's
+    `child_boundary`/`exiting_boundary`). A page **at rest paints plain**; only a programmatic
+    transition's progress-0 seed frame records the leaving page and the transition frames draw it
+    (`DrawRetained`), the entering page of a slide paints plain. A body that used a paint side channel
+    (IME, platform view, shield, overlay, selection toolbar, hero) paints every frame, and hero pages
+    never draw a page. Fractional slides sit up to half a pixel off; a boundary cannot see a clip from a
+    clipping container above it, so it may record a body the engine then refuses to retain.
   - **Navigator observation seams:** `NavigatorController::transition()` publishes a `Copy` `TransitionState`
     (active, progress, direction, depth pair, generation) on an `Rc<Cell<_>>` so chrome outside the
     subtree can observe transitions; reads during paint from a widget painted *after* the navigator

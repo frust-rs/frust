@@ -991,6 +991,8 @@ where
             let mut root = RenderRoot::new();
             root.set_layout_skip(knobs.skip);
             root.set_layout_audit(knobs.audit);
+            // `FRUST_NO_RETAINED_LAYERS`, resolved beside the layout knobs.
+            root.set_retained_layers(knobs.retained);
             knobs.log();
             root
         },
@@ -3265,6 +3267,13 @@ where
                 // contract notes) would ever feed a frame gate.
                 self.root
                     .set_presented_frames(self.executor.presented_frames());
+                // Hand the root the resident-key ledger the render side last
+                // published (inline or the render thread alike). A try-lock read:
+                // it never waits on the render thread, and a missed publish just
+                // leaves the previous (one-frame-stale) ledger in place.
+                if let Some(ledger) = frust_shell_common::render_split::latest_retained_ledger() {
+                    self.root.set_retained_ledger(&ledger);
+                }
                 let paint_start = Instant::now();
                 let paint_outcome = {
                     let mut builder = SceneBuilder::new(&mut self.scene);
@@ -3385,6 +3394,7 @@ where
                     ui_spans,
                     frame_time,
                     size,
+                    paint_outcome.paint_serial,
                 );
 
                 // Probe stamp: the UI-thread hand-off of the finished frame, not the GPU

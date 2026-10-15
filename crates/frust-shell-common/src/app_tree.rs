@@ -141,7 +141,11 @@ pub trait AppTree {
     /// advanced animation state during paint and wants another frame, the
     /// framework's animation seam. The desktop shell honors it with `window.request_redraw()`;
     /// the mobile shells' continuous Choreographer/`CADisplayLink` loops already
-    /// produce the next frame and may ignore it.
+    /// produce the next frame and may ignore it. Its `paint_serial` is the
+    /// number the root minted for this paint: the shell carries it with the
+    /// painted scene (`FrameMeta::paint_serial` across the split) and names it
+    /// to the renderer before encoding that scene, so the resident-key ledger
+    /// published afterwards says which paint it follows.
     fn paint(&mut self, scene: &mut dyn PaintScene, frame_time: FrameTime) -> PaintOutcome;
     /// Deliver one platform input event to the retained tree.
     ///
@@ -263,6 +267,16 @@ pub trait AppTree {
 
     /// Forward `RenderRoot::set_layout_audit` (`FRUST_LAYOUT_AUDIT`). Default no-op.
     fn set_layout_audit(&mut self, _audit: bool) {}
+
+    /// Forward `RenderRoot::set_retained_layers` (`FRUST_NO_RETAINED_LAYERS`,
+    /// resolved via `frame_gate::LayoutKnobs`). Default no-op.
+    fn set_retained_layers(&mut self, _enabled: bool) {}
+
+    /// Forward `RenderRoot::set_retained_ledger`: the resident-key ledger the
+    /// render side last published, handed over before each paint (one frame
+    /// stale by design; see [`crate::render_split::latest_retained_ledger`]).
+    /// Default no-op.
+    fn set_retained_ledger(&mut self, _ledger: &frust_core::RetainedLedger) {}
 
     /// Store the window's insets ([`WindowInsets`]), threaded into every
     /// subsequent layout/paint pass (delegates to [`RenderRoot::set_insets`]).
@@ -499,6 +513,14 @@ where
 
     fn set_layout_audit(&mut self, audit: bool) {
         self.root.set_layout_audit(audit);
+    }
+
+    fn set_retained_layers(&mut self, enabled: bool) {
+        self.root.set_retained_layers(enabled);
+    }
+
+    fn set_retained_ledger(&mut self, ledger: &frust_core::RetainedLedger) {
+        self.root.set_retained_ledger(ledger);
     }
 
     fn set_theme(&mut self, theme: Box<dyn Any>) {

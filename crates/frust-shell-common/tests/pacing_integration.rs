@@ -143,6 +143,9 @@ fn paint_for(frame: Frame) -> PaintOutcome {
         // The MIN-lattice fold of this pass's paced requests — what the shells
         // latch into `FramePacing::requested_interval` for the next tick.
         paced_interval: ctx.paced_interval(),
+        // The pass's serial, read from the same context (`0`: no root
+        // numbered this bare one); pacing never reads it.
+        paint_serial: ctx.paint_serial(),
     }
 }
 

@@ -51,6 +51,7 @@ use frust_render::{
 };
 use frust_scene::Scene;
 use frust_shell_common::perf::{FramePasses, FrameStats, RenderSpans, UiSpans};
+use frust_shell_common::render_split::publish_resident_pages;
 use web_time::{Duration, Instant};
 use winit::window::Window;
 
@@ -273,9 +274,25 @@ impl WebFrameExecutor {
 
     /// Drop the surface's GPU resources, leaving the executor in
     /// `SurfacePhase::NoSurface`.
+    ///
+    /// Publishes the empty retained ledger before returning, so the next paint
+    /// over a re-created surface names no page the torn-down one held.
     pub fn destroy_surface(&mut self) {
         self.renderer.on_surface_destroyed();
+        publish_ledger(&mut self.renderer);
         self.configured = None;
+    }
+
+    /// Hand the renderer the device scale (`devicePixelRatio`) the frames are
+    /// painted at. A changed scale clears the retained store and publishes its
+    /// empty ledger at once; the same scale is a no-op, so the shell calls
+    /// this on every `Resized` and again beside [`Self::ensure_size`] each
+    /// frame (a `Resized` that lands before the surface exists has no executor
+    /// to reach).
+    pub fn note_device_scale(&mut self, scale: f64) {
+        if self.renderer.note_device_scale(scale) {
+            publish_ledger(&mut self.renderer);
+        }
     }
 
     /// Run one frame's encode → acquire → submit tail for an already painted
@@ -283,10 +300,13 @@ impl WebFrameExecutor {
     /// next.
     ///
     /// A render error is log-and-continue, never fatal: one bad frame must not
-    /// kill a page.
+    /// kill a page. `paint_serial` is the paint's `PaintOutcome::paint_serial`,
+    /// named to the renderer before the encode so the ledger published once
+    /// this scene is committed carries it.
     pub fn submit_frame(
         &mut self,
         scene: &Scene,
+        paint_serial: u64,
         base_color: peniko::Color,
         ui_spans: UiSpans,
     ) -> FrameFollowUp {
@@ -294,6 +314,7 @@ impl WebFrameExecutor {
             &mut self.renderer,
             &self.render_cx,
             scene,
+            paint_serial,
             base_color,
             ui_spans,
             &mut self.frame_stats,
@@ -317,6 +338,31 @@ impl Default for WebFrameExecutor {
     }
 }
 
+/// Publish the renderer's resident-key ledger for the UI thread's next paint
+/// when it changed since the last publish — after a frame, and at a surface
+/// destroy or device-scale change (both of which leave it empty).
+///
+/// The slot is process-global (one renderer per process); see
+/// [`publish_resident_pages`].
+fn publish_ledger(renderer: &mut SurfaceRenderer) {
+    if let Some(resident) = renderer.take_retained_ledger() {
+        publish_resident_pages(
+            resident.frame,
+            resident
+                .pages
+                .iter()
+                .map(|page| (page.key, page.extent_px, page.scale)),
+        );
+    }
+}
+
+/// [`publish_ledger`] after a frame, answering whether that frame was refused
+/// for drawing a retained page the renderer no longer holds.
+fn publish_retained(renderer: &mut SurfaceRenderer) -> bool {
+    publish_ledger(renderer);
+    renderer.take_retained_refusal()
+}
+
 /// Run the encode → acquire → submit tail for one painted `scene`, timing each
 /// span with its own clock read and recording the folded [`FramePasses`]
 /// through the frame-stats emitter.
@@ -335,6 +381,7 @@ fn render_frame(
     renderer: &mut SurfaceRenderer,
     render_cx: &RenderContext,
     scene: &Scene,
+    paint_serial: u64,
     base_color: peniko::Color,
     ui_spans: UiSpans,
     frame_stats: &mut FrameStats,
@@ -344,6 +391,9 @@ fn render_frame(
     // browser's compositor is driven by the `requestAnimationFrame` callback
     // this whole turn already runs inside. winit's web backend implements it
     // as a no-op.
+    // The paint serial this scene was painted under (see
+    // `SurfaceRenderer::note_scene_serial`).
+    renderer.note_scene_serial(paint_serial);
     let encode_start = Instant::now();
     let encode_outcome = renderer.encode(render_cx, scene, base_color);
     let encode = encode_start.elapsed();
@@ -367,6 +417,17 @@ fn render_frame(
         Err(err) => Err(err),
     };
     let submit = submit_start.elapsed();
+
+    // The resident-key ledger after this frame, for the next paint. A frame
+    // the engine refused for drawing a page it no longer holds presented
+    // nothing and emptied the store, so it owes the loop an immediate redraw
+    // against the empty ledger just published — the same follow-up a stale
+    // swapchain gets.
+    let refused_retained = publish_retained(renderer);
+    let render_outcome = match render_outcome {
+        Ok(FrameOutcome::Skipped) if refused_retained => Ok(FrameOutcome::Redraw),
+        other => other,
+    };
 
     frame_stats.record(FramePasses::from_split(
         ui_spans,

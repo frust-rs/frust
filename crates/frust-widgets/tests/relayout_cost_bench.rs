@@ -21,6 +21,8 @@
 //!   Run: `cargo test -p frust-widgets --test relayout_cost_bench -- --ignored --nocapture`.
 //!   Set `FRUST_NO_LAYOUT_SKIP=1` to run the skip-off arm (`set_layout_skip(false)`,
 //!   every pod lays out on every pass); the header prints `arm: skip=on|off`.
+//! - [`retained_layer_cost`] — `#[ignore]`d; the retained-layer scenarios D/E/F with
+//!   a retained on/off arm (`FRUST_NO_RETAINED_LAYERS=1`), see the last section.
 //! - [`scene_builds_with_two_hundred_row_pods`] — always on; asserts the scene
 //!   actually materializes 200 row pods via `RenderRoot::inspect`. No timing.
 //!
@@ -102,18 +104,125 @@
 //! C_scroll_only                layout          75.20        78.99        81.34
 //! C_scroll_only                paint          131.86       154.38       156.65
 //! ```
+//!
+//! # After p3-05..p3-08 (retained layers, host leg; `FRUST_NO_RETAINED_LAYERS` arm)
+//!
+//! Measured at `feature/render-model-p3` @ f83479e3 plus the harness change that
+//! adds these rows (scenarios D/E/F, [`retained_layer_cost`]). Same host class
+//! (Linux workstation, i5-12600, 12 threads); profile is **release**
+//! (`--release`), so the figures are not comparable with the unoptimized
+//! A/B/C sections above. Two runs per arm, run back to back (on, off, on, off);
+//! the second run of each arm is recorded (the steadier: smaller p95 spread).
+//! The 1-minute host load was 3.7-4.4 throughout, so absolute microseconds are
+//! indicative; the command counts are deterministic. Run:
+//! `cargo test -p frust-widgets --test relayout_cost_bench --release -- --ignored --nocapture retained_layer_cost`
+//! (default = retained on; `FRUST_NO_RETAINED_LAYERS=1` = `set_retained_layers(false)`).
+//!
+//! There is no engine on the host, so a counting scene plays its part: it
+//! records every `push_retained` and feeds the resident set (key, page extent
+//! as `round(size * scale)` px, scale 1.0) back as the next frame's ledger via
+//! `set_retained_ledger` (stamped with that frame's `PaintOutcome::paint_serial`,
+//! as a renderer that kept up would publish it), answers `current_transform()`,
+//! and counts body
+//! commands (fill / rounded fill / stroke / text / glyph run / image / path
+//! calls) separately from `push_retained` and `draw_retained`.
+//!
+//! Scenarios (300 frames after 3 warm-up frames, 16.67 ms frame times):
+//! D = `AnimatedOpacity(..).cached(true)` over 200 rows fading 1.0 to 0.0;
+//! E = a navigator over 200-row pages cycling push (120 ms fade), pop,
+//! push (120 ms iOS slide), pop, one command per 10 frames, so a cycle of
+//! 40 frames has 7-8 transition frames and 2-3 rest frames per half; counts
+//! are taken from the third cycle (seed = the frame the push/pop is issued,
+//! mid = 3 frames in, rest = the last frame of the half). Layout mean for E is
+//! dominated by laying out each freshly pushed page (~6 ms, the p99);
+//! F = one navigator page at rest, one leaf text changing every frame (the B
+//! shape), no transition.
+//!
+//! Delta, retained on vs off (paint mean): D 0.11 vs 49.00 us (steady frame:
+//! 0 body commands + 1 DrawRetained vs 600 body commands); E 32.63 vs 111.52 us
+//! (mean 204 body + 1.45 DrawRetained + 0.05 PushRetained per frame vs 1076
+//! body); **F 48.53 vs 48.54 us, identical, 600 body commands and no retained
+//! command in either arm** - a navigator page at rest paints plain, so the
+//! steady-state host cost of the retained model is nil (no regression on the
+//! F row against the plan's "no steady-state regression" bar).
+//!
+//! ```text
+//! arm: retained=on
+//! scenario                     pass          mean_us       p95_us       p99_us
+//! D_cached_opacity             layout           0.04         0.05         0.06
+//! D_cached_opacity             paint            0.11         0.14         0.18
+//! E_navigator_push_pop         layout         298.13         0.16      6220.95
+//! E_navigator_push_pop         paint           32.63        70.35       224.66
+//! F_navigator_rest             layout           0.04         0.05         0.06
+//! F_navigator_rest             paint           48.53        49.89        55.47
+//! scenario                     frame                  body     push     draw
+//! D_cached_opacity             first (warm-up 0)       600        1        0
+//! D_cached_opacity             steady (frame 150)        0        0        1
+//! D_cached_opacity             mean per frame         0.00     0.00     1.00
+//! E_navigator_push_pop         first (warm-up 0)       600        0        0
+//! E_navigator_push_pop         fade_push seed            0        0        1
+//! E_navigator_push_pop         fade_push mid             0        0        2
+//! E_navigator_push_pop         fade_push rest          600        0        0
+//! E_navigator_push_pop         fade_pop seed             0        0        1
+//! E_navigator_push_pop         fade_pop mid              0        0        2
+//! E_navigator_push_pop         fade_pop rest           600        0        0
+//! E_navigator_push_pop         slide_push seed         600        0        1
+//! E_navigator_push_pop         slide_push mid          600        0        1
+//! E_navigator_push_pop         slide_push rest         600        0        0
+//! E_navigator_push_pop         slide_pop seed            0        0        2
+//! E_navigator_push_pop         slide_pop mid             0        0        2
+//! E_navigator_push_pop         slide_pop rest          600        0        0
+//! E_navigator_push_pop         mean per frame       204.00     0.05     1.45
+//! F_navigator_rest             first (warm-up 0)       600        0        0
+//! F_navigator_rest             steady (frame 150)      600        0        0
+//! F_navigator_rest             mean per frame       600.00     0.00     0.00
+//! ```
+//!
+//! ```text
+//! arm: retained=off
+//! scenario                     pass          mean_us       p95_us       p99_us
+//! D_cached_opacity             layout           0.05         0.06         0.07
+//! D_cached_opacity             paint           49.00        52.16        58.31
+//! E_navigator_push_pop         layout         299.89         0.14      6215.24
+//! E_navigator_push_pop         paint          111.52       138.77       283.50
+//! F_navigator_rest             layout           0.04         0.04         0.07
+//! F_navigator_rest             paint           48.54        50.20        55.17
+//! scenario                     frame                  body     push     draw
+//! D_cached_opacity             first (warm-up 0)       600        0        0
+//! D_cached_opacity             steady (frame 150)      600        0        0
+//! D_cached_opacity             mean per frame       600.00     0.00     0.00
+//! E_navigator_push_pop         first (warm-up 0)       600        0        0
+//! E_navigator_push_pop         fade_push seed          600        0        0
+//! E_navigator_push_pop         fade_push mid          1200        0        0
+//! E_navigator_push_pop         fade_push rest          600        0        0
+//! E_navigator_push_pop         fade_pop seed           600        0        0
+//! E_navigator_push_pop         fade_pop mid           1200        0        0
+//! E_navigator_push_pop         fade_pop rest           600        0        0
+//! E_navigator_push_pop         slide_push seed        1200        0        0
+//! E_navigator_push_pop         slide_push mid         1200        0        0
+//! E_navigator_push_pop         slide_push rest         600        0        0
+//! E_navigator_push_pop         slide_pop seed         1200        0        0
+//! E_navigator_push_pop         slide_pop mid          1200        0        0
+//! E_navigator_push_pop         slide_pop rest          600        0        0
+//! E_navigator_push_pop         mean per frame      1076.00     0.00     0.00
+//! F_navigator_rest             first (warm-up 0)       600        0        0
+//! F_navigator_rest             steady (frame 150)      600        0        0
+//! F_navigator_rest             mean per frame       600.00     0.00     0.00
+//! ```
 
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use frust_core::{FrameTime, PaintScene, RenderRoot};
+use frust_core::{Curve, FrameTime, PaintScene, RenderRoot, RetainedLedger, View};
 use frust_text::TextContext;
+use frust_widgets::motion::animated_opacity;
 use frust_widgets::{
-    Column, IconSource, NavigatorController, Row, ScaffoldView, ScrollController, icon, navigator,
-    scaffold, scroll_view, text,
+    Column, IconSource, NavigatorController, PageTransition, Row, ScaffoldView, ScrollController,
+    Timing, TransitionSpec, icon, navigator, scaffold, scroll_view, text,
 };
-use kurbo::{Point, Size};
+use kurbo::{Affine, Point, Rect, Size};
 
 const ROWS: usize = 200;
 const FRAMES: usize = 300;
@@ -279,6 +388,349 @@ fn relayout_and_paint_cost() {
         let (layouts, paints) = run(scenario, no_layout_skip);
         print_row(name, "layout", stats(layouts));
         print_row(name, "paint", stats(paints));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Retained-layer scenarios (D, E, F): a counting scene that plays the engine's
+// part (records every `push_retained`, feeds the resident set back as the next
+// frame's ledger), mirroring `tests/repaint_boundary.rs`.
+// ---------------------------------------------------------------------------
+
+/// Commands one frame emitted, as the counting scene saw them.
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+struct Counts {
+    /// Fill / text / image / path calls (the "body commands").
+    body: usize,
+    push_retained: usize,
+    draw_retained: usize,
+}
+
+/// A counting `PaintScene` that also emulates the renderer's resident-page
+/// ledger: every recorded page stays resident at `round(size * scale)` px.
+struct CountScene {
+    counts: Counts,
+    stack: Vec<Affine>,
+    resident: HashMap<u64, ((u32, u32), f32)>,
+}
+
+impl CountScene {
+    fn new() -> Self {
+        Self {
+            counts: Counts::default(),
+            stack: vec![Affine::scale(1.0)],
+            resident: HashMap::new(),
+        }
+    }
+
+    /// The ledger the renderer would publish after committing the frame just
+    /// painted, whose `PaintOutcome::paint_serial` is `committed`.
+    fn ledger(&self, committed: u64) -> RetainedLedger {
+        RetainedLedger::from_entries(
+            committed,
+            self.resident
+                .iter()
+                .map(|(key, (extent, scale))| (*key, *extent, *scale)),
+        )
+    }
+}
+
+impl PaintScene for CountScene {
+    fn fill_rect(&mut self, _origin: Point, _size: Size, _color: peniko::Color) {
+        self.counts.body += 1;
+    }
+    fn fill_rounded_rect(&mut self, _o: Point, _s: Size, _r: f64, _c: peniko::Color) {
+        self.counts.body += 1;
+    }
+    fn stroke_line(&mut self, _p0: Point, _p1: Point, _w: f64, _c: peniko::Color) {
+        self.counts.body += 1;
+    }
+    fn draw_text(&mut self, _origin: Point, _text: &str) {
+        self.counts.body += 1;
+    }
+    fn draw_glyph_run(&mut self, _run: frust_scene::GlyphRun) {
+        self.counts.body += 1;
+    }
+    fn draw_image(&mut self, _data: &peniko::ImageData, _dest: Rect) {
+        self.counts.body += 1;
+    }
+    fn fill_path(&mut self, _origin: Point, _path: &kurbo::BezPath, _brush: &peniko::Brush) {
+        self.counts.body += 1;
+    }
+    fn stroke_path(
+        &mut self,
+        _origin: Point,
+        _path: &kurbo::BezPath,
+        _width: f64,
+        _brush: &peniko::Brush,
+    ) {
+        self.counts.body += 1;
+    }
+    fn push_transform(&mut self, transform: Affine) {
+        let current = *self.stack.last().expect("root transform");
+        self.stack.push(current * transform);
+    }
+    fn pop_transform(&mut self) {
+        if self.stack.len() > 1 {
+            self.stack.pop();
+        }
+    }
+    fn push_retained(&mut self, key: u64, _origin: Point, size: Size, _alpha: f32, scale: f64) {
+        self.counts.push_retained += 1;
+        let extent = (
+            size.width.round().max(0.0) as u32,
+            size.height.round().max(0.0) as u32,
+        );
+        self.resident.insert(key, (extent, scale as f32));
+    }
+    fn pop_retained(&mut self) {}
+    fn draw_retained(&mut self, _key: u64, _o: Point, _s: Size, _alpha: f32, _scale: f64) {
+        self.counts.draw_retained += 1;
+    }
+    fn current_transform(&self) -> Option<Affine> {
+        self.stack.last().copied()
+    }
+}
+
+/// 200 rows of icon + two texts, the same row shape as the A/B/C scene.
+fn rows_view(tick: u64) -> impl View<()> {
+    let rows: Vec<_> = (0..ROWS)
+        .map(|i| {
+            let label = if i == CHANGING_ROW {
+                format!("changing {tick}")
+            } else {
+                format!("detail {i}")
+            };
+            Row((icon(DOT), text(format!("Row {i}")), text(label)))
+        })
+        .collect();
+    Column(rows)
+}
+
+/// 16.67 ms frame cadence in nanoseconds.
+fn frame_ns(index: usize) -> FrameTime {
+    FrameTime::from_nanos((index as f64 * 16_666_667.0) as u64)
+}
+
+/// Output of one retained-scenario run.
+struct RetainedRun {
+    layouts: Vec<f64>,
+    paints: Vec<f64>,
+    /// Counts per frame, warm-up frames first (`WARMUP` of them).
+    counts: Vec<Counts>,
+}
+
+const WARMUP: usize = 3;
+
+/// Drive `frames` measured frames (after `WARMUP` settle frames) of `logic`.
+/// `before(frame)` runs before each measured frame (state changes, nav calls);
+/// it receives `usize::MAX` for none of the warm-up frames (they never call it).
+fn drive_retained<V: View<()>>(
+    logic: &mut impl FnMut(&mut ()) -> V,
+    retained_on: bool,
+    frames: usize,
+    mut before: impl FnMut(usize),
+) -> RetainedRun {
+    let mut root: RenderRoot<(), V> = RenderRoot::new();
+    if !retained_on {
+        root.set_retained_layers(false);
+    }
+    let mut tcx = TextContext::new();
+    let mut scene = CountScene::new();
+    let mut run = RetainedRun {
+        layouts: Vec::with_capacity(frames),
+        paints: Vec::with_capacity(frames),
+        counts: Vec::with_capacity(frames + WARMUP),
+    };
+    for f in 0..WARMUP + frames {
+        let measured = f >= WARMUP;
+        if measured {
+            before(f - WARMUP);
+        }
+        root.rebuild(logic, &mut ());
+        let t = Instant::now();
+        root.layout_with_text(window(), &mut tcx);
+        let layout = t.elapsed().as_secs_f64() * 1_000_000.0;
+        scene.counts = Counts::default();
+        let t = Instant::now();
+        let committed = root.paint(&mut scene, frame_ns(f)).paint_serial;
+        let paint = t.elapsed().as_secs_f64() * 1_000_000.0;
+        root.set_retained_ledger(&scene.ledger(committed));
+        run.counts.push(scene.counts);
+        if measured {
+            run.layouts.push(layout);
+            run.paints.push(paint);
+        }
+    }
+    run
+}
+
+/// D: `AnimatedOpacity(..).cached(true)` over 200 rows, fading for the whole run.
+fn run_d(retained_on: bool, frames: usize) -> RetainedRun {
+    let target = Rc::new(Cell::new(1.0f64));
+    let t = target.clone();
+    let mut logic = move |_: &mut ()| {
+        animated_opacity(t.get(), rows_view(0))
+            .timing(Timing::Duration(Duration::from_secs(60), Curve::Linear))
+            .cached(true)
+    };
+    let started = Cell::new(false);
+    drive_retained(&mut logic, retained_on, frames, |_| {
+        if !started.replace(true) {
+            target.set(0.0);
+        }
+    })
+}
+
+/// Frames per navigator half-cycle (push or pop): a seed frame, the 120 ms
+/// transition (about 7 frames), then rest frames.
+const HALF: usize = 10;
+
+/// What the navigator is doing on measured frame `f` of scenario E.
+/// Cycle of `4 * HALF`: fade push, fade pop, slide push, slide pop.
+fn e_phase(f: usize) -> (&'static str, usize) {
+    let cycle = f % (4 * HALF);
+    let kind = match cycle / HALF {
+        0 => "fade_push",
+        1 => "fade_pop",
+        2 => "slide_push",
+        _ => "slide_pop",
+    };
+    (kind, cycle % HALF)
+}
+
+fn transition(preset: PageTransition) -> TransitionSpec {
+    TransitionSpec::new(
+        preset,
+        Timing::Duration(Duration::from_millis(120), Curve::Linear),
+    )
+}
+
+/// E: a navigator over 200-row pages cycling push (fade) / pop, push (slide) / pop.
+fn run_e(retained_on: bool, frames: usize) -> RetainedRun {
+    let ctrl: NavigatorController<()> = NavigatorController::new();
+    let c = ctrl.clone();
+    let mut logic = move |_: &mut ()| navigator(&c, || rows_view(0));
+    drive_retained(&mut logic, retained_on, frames, |f| {
+        let (kind, idx) = e_phase(f);
+        if idx != 0 {
+            return;
+        }
+        match kind {
+            "fade_push" => ctrl.push_with(
+                || rows_view(1),
+                transition(PageTransition::ReducedCrossfade),
+            ),
+            "slide_push" => ctrl.push_with(|| rows_view(1), transition(PageTransition::IosPush)),
+            _ => ctrl.pop(),
+        }
+    })
+}
+
+/// F: one navigator page at rest; one leaf changes every frame, no transition.
+fn run_f(retained_on: bool, frames: usize) -> RetainedRun {
+    let ctrl: NavigatorController<()> = NavigatorController::new();
+    let tick = Rc::new(Cell::new(0u64));
+    let (c, t) = (ctrl.clone(), tick.clone());
+    let mut logic = move |_: &mut ()| {
+        let tick = t.get();
+        navigator(&c, move || rows_view(tick))
+    };
+    drive_retained(&mut logic, retained_on, frames, |f| tick.set(f as u64 + 1))
+}
+
+fn mean_counts(counts: &[Counts]) -> (f64, f64, f64) {
+    let n = counts.len().max(1) as f64;
+    (
+        counts.iter().map(|c| c.body).sum::<usize>() as f64 / n,
+        counts.iter().map(|c| c.push_retained).sum::<usize>() as f64 / n,
+        counts.iter().map(|c| c.draw_retained).sum::<usize>() as f64 / n,
+    )
+}
+
+fn print_counts(config: &str, frame: &str, c: Counts) {
+    println!(
+        "{config:<28} {frame:<18} {:>8} {:>8} {:>8}",
+        c.body, c.push_retained, c.draw_retained
+    );
+}
+
+#[test]
+#[ignore = "perf evidence, host-machine dependent (docs/TESTING.md T8): run via \
+            `cargo test -p frust-widgets --test relayout_cost_bench --release -- --ignored --nocapture`"]
+fn retained_layer_cost() {
+    let retained_on = std::env::var_os("FRUST_NO_RETAINED_LAYERS").is_none();
+    println!("\narm: retained={}", if retained_on { "on" } else { "off" });
+    println!(
+        "{:<28} {:<8} {:>12} {:>12} {:>12}",
+        "scenario", "pass", "mean_us", "p95_us", "p99_us"
+    );
+    let runs = [
+        ("D_cached_opacity", run_d(retained_on, FRAMES)),
+        ("E_navigator_push_pop", run_e(retained_on, FRAMES)),
+        ("F_navigator_rest", run_f(retained_on, FRAMES)),
+    ];
+    let mut tables = Vec::new();
+    for (name, run) in runs {
+        print_row(name, "layout", stats(run.layouts.clone()));
+        print_row(name, "paint", stats(run.paints.clone()));
+        tables.push((name, run));
+    }
+    println!(
+        "\n{:<28} {:<18} {:>8} {:>8} {:>8}",
+        "scenario", "frame", "body", "push", "draw"
+    );
+    for (name, run) in &tables {
+        let measured = &run.counts[WARMUP..];
+        print_counts(name, "first (warm-up 0)", run.counts[0]);
+        match *name {
+            "E_navigator_push_pop" => {
+                // The third cycle: caches and ledger warm.
+                let at = |f: usize| measured[2 * 4 * HALF + f];
+                for (label, base) in [
+                    ("fade_push", 0),
+                    ("fade_pop", HALF),
+                    ("slide_push", 2 * HALF),
+                    ("slide_pop", 3 * HALF),
+                ] {
+                    print_counts(name, &format!("{label} seed"), at(base));
+                    print_counts(name, &format!("{label} mid"), at(base + 3));
+                    print_counts(name, &format!("{label} rest"), at(base + HALF - 1));
+                }
+            }
+            _ => print_counts(name, "steady (frame 150)", measured[150]),
+        }
+        let (b, p, d) = mean_counts(measured);
+        println!(
+            "{name:<28} {:<18} {b:>8.2} {p:>8.2} {d:>8.2}",
+            "mean per frame"
+        );
+    }
+}
+
+/// The retained scenarios emit what the plan says, in both arms.
+#[test]
+fn retained_scenarios_emit_the_expected_commands() {
+    // D: retained on, steady frames draw the page with no body commands.
+    let on = run_d(true, 12);
+    let steady = on.counts[WARMUP + 6];
+    assert_eq!(steady.body, 0, "D steady frame paints no body: {steady:?}");
+    assert_eq!(steady.draw_retained, 1, "D steady frame draws the page");
+    assert_eq!(steady.push_retained, 0);
+    assert!(on.counts[..WARMUP + 1].iter().any(|c| c.push_retained == 1));
+    // D: retained off, the full body every frame and no retained commands.
+    let off = run_d(false, 12);
+    for c in &off.counts {
+        assert!(
+            c.body > 0 && c.push_retained == 0 && c.draw_retained == 0,
+            "{c:?}"
+        );
+    }
+    // F: a page at rest paints plain in both arms (no bracket, no page).
+    for retained_on in [true, false] {
+        let f = run_f(retained_on, 12);
+        let c = f.counts[WARMUP + 6];
+        assert!(c.body > 0, "F paints its body: {c:?}");
     }
 }
 

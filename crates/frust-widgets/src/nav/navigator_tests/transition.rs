@@ -17,14 +17,14 @@ use std::time::Duration;
 // Page-transition machinery.
 // ---------------------------------------------------------------------
 
-/// A recording scene that separates the snapshot bracket
-/// (`push_snapshot`/`pop_snapshot`) from the plain `push_layer`/
-/// `push_transform` bracket a snapshot-ineligible page still uses.
-/// `crate::test_support::RecordingScene` doesn't override `push_snapshot`, so
-/// it would fold an eligible page's bracket into [`PaintScene::push_snapshot`]'s
+/// A recording scene that separates the retained bracket
+/// (`push_retained`/`pop_retained`) from the plain `push_layer`/
+/// `push_transform` bracket a retained-ineligible page still uses.
+/// `crate::test_support::RecordingScene` doesn't override `push_retained`, so
+/// it would fold an eligible page's bracket into [`PaintScene::push_retained`]'s
 /// emulating default (a `push_transform` + `push_layer` pair) —
 /// indistinguishable from the plain bracket even at identity alpha/scale,
-/// since the snapshot bracket, unlike the plain one, is never skipped at the
+/// since the retained bracket, unlike the plain one, is never skipped at the
 /// identity value. This scene keeps the two apart — mirroring
 /// `motion::switcher`'s own local test scene for the same reason.
 #[derive(Default)]
@@ -34,8 +34,9 @@ struct PageScene {
     layer_pops: u32,
     transforms: Vec<Affine>,
     transform_pops: u32,
-    snapshots: Vec<(u64, Point, Size, f32, f64)>,
-    snapshot_pops: u32,
+    retained_pushes: Vec<(u64, Point, Size, f32, f64)>,
+    retained_pops: u32,
+    draws: Vec<(u64, Point, Size, f32, f64)>,
 }
 impl PaintScene for PageScene {
     fn fill_rect(&mut self, origin: Point, size: Size, _color: peniko::Color) {
@@ -54,11 +55,14 @@ impl PaintScene for PageScene {
     fn pop_transform(&mut self) {
         self.transform_pops += 1;
     }
-    fn push_snapshot(&mut self, key: u64, origin: Point, size: Size, alpha: f32, scale: f64) {
-        self.snapshots.push((key, origin, size, alpha, scale));
+    fn push_retained(&mut self, key: u64, origin: Point, size: Size, alpha: f32, scale: f64) {
+        self.retained_pushes.push((key, origin, size, alpha, scale));
     }
-    fn pop_snapshot(&mut self) {
-        self.snapshot_pops += 1;
+    fn pop_retained(&mut self) {
+        self.retained_pops += 1;
+    }
+    fn draw_retained(&mut self, key: u64, origin: Point, size: Size, alpha: f32, scale: f64) {
+        self.draws.push((key, origin, size, alpha, scale));
     }
 }
 
@@ -134,8 +138,8 @@ fn push_animates_moving_origins_and_disposes_after_settle() {
 }
 
 // --- Outside a transition (settled culling), a page paints with no bracket
-//     at all — no `push_layer`, no `push_transform`, and no snapshot bracket
-//     either: the snapshot bracket is a transition-time device only. ---
+//     at all — no `push_layer`, no `push_transform`, and no retained bracket
+//     either: the retained bracket is a transition-time device only. ---
 
 #[test]
 fn settled_no_transition_paints_with_no_bracket_at_all() {
@@ -166,21 +170,24 @@ fn settled_no_transition_paints_with_no_bracket_at_all() {
 
     assert_eq!(scene.rects.len(), 1, "only the surviving top page paints");
     assert!(
-        scene.layers.is_empty() && scene.transforms.is_empty() && scene.snapshots.is_empty(),
+        scene.layers.is_empty() && scene.transforms.is_empty() && scene.retained_pushes.is_empty(),
         "no bracket of any kind once culling has resumed: layers={:?} \
-         transforms={:?} snapshots={:?}",
+         transforms={:?} retained_pushes={:?}",
         scene.layers,
         scene.transforms,
-        scene.snapshots
+        scene.retained_pushes
     );
 }
 
-// --- A page's snapshot key is stable across frames (the point of caching)
+// --- A page's retained key is stable across frames (the point of caching)
 //     and distinct from every other page's — drawn once, at construction,
-//     from the process-wide `NEXT_SNAPSHOT_KEY` counter. ---
+//     from the process-wide `RetainedKey::mint` counter. The seed frame
+//     records the outgoing page under it (still at rest), and once the
+//     renderer reports that page resident the next frame composites it,
+//     moved to the slid origin, instead of painting the page again. ---
 
 #[test]
-fn each_pages_snapshot_key_is_stable_across_frames_and_distinct_per_page() {
+fn each_pages_retained_key_is_stable_and_the_outgoing_page_composites_once_resident() {
     let controller: NavigatorController<()> = NavigatorController::new();
     let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
     let mut app = {
@@ -191,7 +198,7 @@ fn each_pages_snapshot_key_is_stable_across_frames_and_distinct_per_page() {
     root.rebuild(&mut app, &mut state);
     root.layout(Size::new(100.0, 100.0));
 
-    let key_a = nav_widget(&root).pages[0].snapshot_key;
+    let key_a = nav_widget(&root).pages[0].boundary.key().get();
 
     let spec = TransitionSpec::new(
         PageTransition::M3SharedAxisX,
@@ -201,33 +208,69 @@ fn each_pages_snapshot_key_is_stable_across_frames_and_distinct_per_page() {
     root.rebuild(&mut app, &mut state);
     root.layout(Size::new(100.0, 100.0));
 
-    let key_b = nav_widget(&root).pages[1].snapshot_key;
+    let key_b = nav_widget(&root).pages[1].boundary.key().get();
     assert_ne!(
         key_a, key_b,
-        "two different pages never share a snapshot key"
+        "two different pages never share a retained key"
     );
 
-    // Two consecutive early frames (both still before the 0.35 split, so A —
-    // the leaving page — stays snapshot-eligible and alpha 1.0 on both):
-    // the key painted into the scene matches A's own `PageEntry` key, and
-    // is identical across the two frames.
+    // Seed frame (progress 0): A — the leaving page — still sits at rest,
+    // fully opaque, so it is recorded under its own key; B is at alpha 0.
     let mut scene1 = PageScene::default();
     root.paint(&mut scene1, ft(0));
+    assert_eq!(
+        scene1.retained_pushes,
+        vec![(key_a, Point::ZERO, Size::new(100.0, 100.0), 1.0, 1.0)],
+        "the leaving page is recorded at rest under its own PageEntry key"
+    );
+    assert_eq!(scene1.retained_pops, 1, "the bracket is balanced");
+    assert_eq!(scene1.rects.len(), 1, "A's body paints inside the bracket");
+
+    // The renderer reports A's page resident (100x100 at scale 1 — what the
+    // boundary asks for under a recorder with no transform). A is unchanged,
+    // so the next early frame (before the 0.35 split, A sliding left by
+    // 0.01 * 30dp) composites the page instead of painting A again.
+    root.set_retained_ledger(&frust_core::RetainedLedger::from_entries(
+        1,
+        [(key_a, (100, 100), 1.0)],
+    ));
     root.rebuild(&mut app, &mut state);
     root.layout(Size::new(100.0, 100.0));
     let mut scene2 = PageScene::default();
     root.paint(&mut scene2, ft(1));
 
-    let key_frame1 = scene1.snapshots.first().map(|(k, ..)| *k);
-    let key_frame2 = scene2.snapshots.first().map(|(k, ..)| *k);
     assert_eq!(
-        key_frame1,
-        Some(key_a),
-        "the leaving page's painted key matches its own PageEntry::snapshot_key"
+        scene2.draws.len(),
+        1,
+        "A's page is composited: {:?}",
+        scene2.draws
+    );
+    let (key, origin, size, alpha, scale) = scene2.draws[0];
+    assert_eq!(key, key_a, "the same page's key, frame after frame");
+    assert_eq!(
+        (origin, size, scale),
+        (Point::ZERO, Size::new(100.0, 100.0), 1.0),
+        "drawn at the rectangle it was recorded at, at scale 1"
+    );
+    assert!(
+        alpha > 0.0 && alpha < 1.0,
+        "at A's fading alpha (was {alpha})"
     );
     assert_eq!(
-        key_frame1, key_frame2,
-        "the same page's key is identical across two consecutive frames"
+        scene2.transforms.len(),
+        1,
+        "one translation: {:?}",
+        scene2.transforms
+    );
+    let shift = scene2.transforms[0].translation();
+    assert!(
+        (shift.x - (-0.3)).abs() < 1e-9 && shift.y == 0.0,
+        "moved to A's slid origin by a translation (was {shift:?})"
+    );
+    assert_eq!(scene2.transform_pops, 1, "the translation is balanced");
+    assert!(
+        scene2.rects.is_empty() && scene2.retained_pushes.is_empty(),
+        "A's body is not painted again (B is still discarded at alpha 0)"
     );
 }
 
@@ -261,9 +304,9 @@ fn shared_axis_x_push_seed_frame_discards_the_alpha_zero_entering_page() {
     // rather than under a zero-opacity `push_layer` bracket, so its fill AND
     // that bracket are both absent from the real scene; the leaving page (A),
     // at rest and fully opaque with the transition programmatic and no hero
-    // in play, is snapshot-eligible — it paints through exactly one
-    // `push_snapshot`/`pop_snapshot` bracket instead of a plain one (the
-    // snapshot bracket, unlike the plain bracket, is never skipped at
+    // in play, is retained-eligible — it paints through exactly one
+    // `push_retained`/`pop_retained` bracket instead of a plain one (the
+    // retained bracket, unlike the plain bracket, is never skipped at
     // alpha/scale identity).
     root.rebuild(&mut app, &mut state);
     root.layout(Size::new(100.0, 100.0));
@@ -283,32 +326,32 @@ fn shared_axis_x_push_seed_frame_discards_the_alpha_zero_entering_page() {
     assert!(
         scene.layers.is_empty() && scene.transforms.is_empty(),
         "no plain push_layer/push_transform bracket at all: A paints through \
-         a snapshot bracket instead, B is alpha 0.0 (discarded)"
+         a retained bracket instead, B is alpha 0.0 (discarded)"
     );
     assert_eq!(
-        scene.snapshots.len(),
+        scene.retained_pushes.len(),
         1,
-        "A paints through exactly one snapshot bracket: {:?}",
-        scene.snapshots
+        "A paints through exactly one retained bracket: {:?}",
+        scene.retained_pushes
     );
-    let (_, snapshot_origin, _, alpha, scale) = scene.snapshots[0];
+    let (_, retained_origin, _, alpha, scale) = scene.retained_pushes[0];
     assert_eq!(alpha, 1.0, "A is at rest, fully opaque");
     assert_eq!(scale, 1.0, "M3SharedAxisX never scales either page");
-    assert_eq!(scene.snapshot_pops, 1, "the bracket is balanced");
+    assert_eq!(scene.retained_pops, 1, "the bracket is balanced");
 
     // The leaving page A has dx=0 at progress 0 (not yet sliding out). The
     // bracket origin must still follow the pod's absolute paint origin, which
     // equals ctx.origin() when dx=0. At the root navigator level, ctx.origin()
     // is (0, 0), so the bracket origin should be (0, 0).
     assert_eq!(
-        snapshot_origin,
+        retained_origin,
         Point::new(0.0, 0.0),
-        "bracket origin follows ctx.origin() when dx=0 (was {snapshot_origin:?})"
+        "bracket origin follows ctx.origin() when dx=0 (was {retained_origin:?})"
     );
 }
 
 #[test]
-fn shared_axis_x_past_the_split_the_visible_page_paints_through_its_snapshot_bracket() {
+fn shared_axis_x_past_the_split_the_slid_page_paints_directly_under_its_fade() {
     let controller: NavigatorController<()> = NavigatorController::new();
     let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
     let mut app = {
@@ -330,9 +373,10 @@ fn shared_axis_x_past_the_split_the_visible_page_paints_through_its_snapshot_bra
     // is a hard split, not an overlapping crossfade, so the leaving page (A)
     // has by now fully faded to alpha 0 and is discarded here exactly like B
     // was at the seed frame above. B, the only page with `0 < alpha < 1`, is
-    // snapshot-eligible (a programmatic transition, no hero in play) and
-    // paints through exactly one `push_snapshot`/`pop_snapshot` bracket
-    // carrying its genuine partial alpha — no plain `push_layer` of its own.
+    // eligible for its boundary (a programmatic transition, no hero in play),
+    // but it has slid 15dp right and overhangs the navigator's area, where a
+    // renderer never retains a body — so it is not bracketed: it paints
+    // directly under one `push_layer` carrying its genuine partial alpha.
     root.rebuild(&mut app, &mut state);
     root.layout(Size::new(100.0, 100.0));
     let mut scene = PageScene::default();
@@ -349,32 +393,38 @@ fn shared_axis_x_past_the_split_the_visible_page_paints_through_its_snapshot_bra
         "the surviving fill is the entering page B"
     );
     assert!(
-        scene.layers.is_empty() && scene.transforms.is_empty(),
-        "no plain bracket of its own: B paints through the snapshot bracket instead"
+        scene.retained_pushes.is_empty() && scene.draws.is_empty(),
+        "an overhanging page is never bracketed: {:?}",
+        scene.retained_pushes
+    );
+    assert!(
+        scene.transforms.is_empty(),
+        "M3SharedAxisX never scales either page"
     );
     assert_eq!(
-        scene.snapshots.len(),
+        scene.layers.len(),
         1,
-        "B paints under exactly one snapshot bracket: {:?}",
-        scene.snapshots
+        "B fades under one layer: {:?}",
+        scene.layers
     );
-    let (_, snapshot_origin, _, alpha, scale) = scene.snapshots[0];
+    let (layer_origin, _, alpha) = scene.layers[0];
     assert!(
         alpha > 0.0 && alpha < 1.0,
-        "the bracket's alpha is a genuine partial value (was {alpha})"
+        "the layer's alpha is a genuine partial value (was {alpha})"
     );
-    assert_eq!(scale, 1.0, "M3SharedAxisX never scales either page");
 
     // The entering page B slides in from the right at progress 0.5, so its dx
-    // is 0.5 * 30dp = 15.0 (M3_SHARED_AXIS_SLIDE_DP = 30). The bracket origin
-    // must follow the pod's absolute paint origin to keep the cached texture
-    // slide-invariant and prevent cropping of the shifted body. At the root
-    // navigator level, ctx.origin() is (0, 0), so the bracket origin should be
-    // (15.0, 0).
+    // is 0.5 * 30dp = 15.0 (M3_SHARED_AXIS_SLIDE_DP = 30); its fill and its
+    // layer both follow the pod's absolute paint origin.
     assert_eq!(
-        snapshot_origin,
+        scene.rects[0].0,
         Point::new(15.0, 0.0),
-        "bracket origin follows the entering page's dx slide (was {snapshot_origin:?})"
+        "B paints at its slid origin"
+    );
+    assert_eq!(
+        layer_origin,
+        Point::new(15.0, 0.0),
+        "the layer follows the entering page's dx slide (was {layer_origin:?})"
     );
 }
 
@@ -400,7 +450,7 @@ fn glyph_push_seed_frame_discards_the_alpha_zero_entering_page() {
     // M3SharedAxisX's 0.35 one — the entering page is exactly alpha 0, so it
     // paints into a `DiscardScene` sink instead of under a zero-opacity
     // layer; the leaving page, at rest and fully opaque, is
-    // snapshot-eligible and paints through a `push_snapshot`/`pop_snapshot`
+    // retained-eligible and paints through a `push_retained`/`pop_retained`
     // bracket instead of plainly.
     root.rebuild(&mut app, &mut state);
     root.layout(Size::new(100.0, 100.0));
@@ -420,15 +470,15 @@ fn glyph_push_seed_frame_discards_the_alpha_zero_entering_page() {
     assert!(
         scene.layers.is_empty() && scene.transforms.is_empty(),
         "no plain push_layer/push_transform bracket at all: leaving paints \
-         through a snapshot bracket, entering is alpha 0.0 (discarded)"
+         through a retained bracket, entering is alpha 0.0 (discarded)"
     );
     assert_eq!(
-        scene.snapshots.len(),
+        scene.retained_pushes.len(),
         1,
-        "the leaving page paints under exactly one snapshot bracket: {:?}",
-        scene.snapshots
+        "the leaving page paints under exactly one retained bracket: {:?}",
+        scene.retained_pushes
     );
-    let (_, _, _, alpha, _) = scene.snapshots[0];
+    let (_, _, _, alpha, _) = scene.retained_pushes[0];
     assert_eq!(alpha, 1.0, "the leaving page is at rest, fully opaque");
 }
 
@@ -659,11 +709,12 @@ fn animated_pop_reverses_and_reveals_below() {
 }
 
 // --- The pop/replace stashed page (retained in `ActiveTransition::stashed`,
-//     no longer in `pages`) still paints through its own snapshot bracket,
-//     same as any other eligible page. ---
+//     no longer in `pages`) still paints through its own boundary, same as
+//     any other eligible page: recorded at rest on the pop's seed frame, then
+//     composited as it slides off. ---
 
 #[test]
-fn pop_stashed_page_paints_through_its_own_snapshot_bracket() {
+fn pop_stashed_page_paints_through_its_own_boundary() {
     let controller: NavigatorController<()> = NavigatorController::new();
     let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
     let mut app = {
@@ -676,7 +727,7 @@ fn pop_stashed_page_paints_through_its_own_snapshot_bracket() {
 
     // Push B instantly, then animate the pop with IosPush, whose entering AND
     // leaving alpha are always exactly 1.0 (parallax + dim, never reaching
-    // 0) — both pages stay snapshot-eligible for the whole pop, with no
+    // 0) — both pages stay retained-eligible for the whole pop, with no
     // alpha-0 discard to complicate the picture.
     controller.push_with(
         || sized_page(100.0, 60.0),
@@ -699,24 +750,41 @@ fn pop_stashed_page_paints_through_its_own_snapshot_bracket() {
         .transition
         .as_ref()
         .and_then(|t| t.stashed.as_ref())
-        .map(|p| p.snapshot_key)
+        .map(|p| p.boundary.key().get())
         .expect("the popped page is stashed");
 
     let mut scene = PageScene::default();
-    root.paint(&mut scene, ft(1000)); // the pop's own fresh-driver seed frame
+    // The pop's own fresh-driver seed frame; its serial is what the ledger
+    // below must cover for the recorded page to be drawable.
+    let seed = root.paint(&mut scene, ft(1000)).paint_serial;
 
+    // At progress 0 the stashed page sits at rest and is recorded; the
+    // revealed page starts parallaxed 30dp left, overhanging the navigator,
+    // and paints directly.
     assert_eq!(
-        scene.snapshots.len(),
-        2,
-        "both the revealed page and the stashed popped page paint through \
-         their own snapshot bracket: {:?}",
-        scene.snapshots
+        scene.retained_pushes,
+        vec![(stashed_key, Point::ZERO, Size::new(100.0, 100.0), 1.0, 1.0)],
+        "only the stashed popped page is recorded, under its own key"
     );
-    let keys: Vec<u64> = scene.snapshots.iter().map(|(k, ..)| *k).collect();
-    assert!(
-        keys.contains(&stashed_key),
-        "the stashed popped page's own key is among the recorded brackets: {keys:?}"
+    assert_eq!(scene.rects.len(), 2, "both pages paint their bodies");
+
+    // Resident and unchanged: the next frame composites the stashed page as it
+    // slides right (IosPush pop: dx = p * w = 0.5 * 100).
+    root.set_retained_ledger(&frust_core::RetainedLedger::from_entries(
+        seed,
+        [(stashed_key, (100, 100), 1.0)],
+    ));
+    root.rebuild(&mut app, &mut state);
+    root.layout(Size::new(100.0, 100.0));
+    let mut scene = PageScene::default();
+    root.paint(&mut scene, ft(1050));
+    assert_eq!(
+        scene.draws,
+        vec![(stashed_key, Point::ZERO, Size::new(100.0, 100.0), 1.0, 1.0)],
+        "the stashed page is composited from its page"
     );
+    assert_eq!(scene.transforms, vec![Affine::translate((50.0, 0.0))]);
+    assert_eq!(scene.rects.len(), 1, "only the revealed page paints a body");
 }
 
 // ---------------------------------------------------------------------
@@ -818,7 +886,7 @@ fn reduce_motion_collapses_glyph_push_to_crossfade() {
     // the fade-through 0.92→1.0 zoom. At p=0.5 (60ms of the 120ms
     // REDUCE_MOTION_DURATION) both pages are genuinely visible at once (a
     // real crossfade, unlike the split presets) and both are
-    // snapshot-eligible — each paints through its own `push_snapshot`
+    // retained-eligible — each paints through its own `push_retained`
     // bracket, never a `push_transform` of its own, and the bracket's own
     // `scale` field is still exactly 1.0.
     root.rebuild(&mut app, &mut state);
@@ -831,12 +899,12 @@ fn reduce_motion_collapses_glyph_push_to_crossfade() {
         "reduced-motion crossfade must not scale either page"
     );
     assert_eq!(
-        scene.snapshots.len(),
+        scene.retained_pushes.len(),
         2,
         "both pages are visible under a genuine crossfade: {:?}",
-        scene.snapshots
+        scene.retained_pushes
     );
-    for (_, _, _, _, scale) in &scene.snapshots {
+    for (_, _, _, _, scale) in &scene.retained_pushes {
         assert_eq!(
             *scale, 1.0,
             "reduced-motion crossfade must not scale either page"
@@ -844,10 +912,11 @@ fn reduce_motion_collapses_glyph_push_to_crossfade() {
     }
 }
 
-// --- A mid-transition M3 fade-through paint brackets the incoming page with
-//     a snapshot bracket carrying scale < 1.0 (the 0.92 → 1.0 scale-up), not
-//     a `push_transform` of its own; the leaving page (discarded, past the
-//     split) records nothing. ---
+// --- A mid-transition M3 fade-through paint scales the incoming page (the
+//     0.92 → 1.0 scale-up) inline under a `push_transform` and a `push_layer`
+//     — a scale step never goes through a retained bracket, since a page is
+//     only served at the scale it was recorded at; the leaving page
+//     (discarded, past the split) records nothing. ---
 
 #[test]
 fn fade_through_paint_scales_incoming_page_below_one() {
@@ -872,8 +941,8 @@ fn fade_through_paint_scales_incoming_page_below_one() {
     // paints into a `DiscardScene` sink instead — NEITHER the scale bracket
     // nor an alpha one reaches the real scene. The outgoing page is still at
     // rest, fully opaque with the transition programmatic and no hero in
-    // play — it is snapshot-eligible and paints through a `push_snapshot`
-    // bracket at scale 1.0, not a `push_transform` of its own.
+    // play — it is eligible for its boundary and is recorded through a
+    // `push_retained` bracket at scale 1.0, not a `push_transform` of its own.
     root.rebuild(&mut app, &mut state);
     root.layout(Size::new(100.0, 100.0));
     let mut scene = PageScene::default();
@@ -881,45 +950,54 @@ fn fade_through_paint_scales_incoming_page_below_one() {
     assert!(
         scene.transforms.is_empty(),
         "the alpha-0 incoming page is discarded before its scale bracket ever runs, \
-         and the outgoing page's own bracket is a snapshot one, never a push_transform"
+         and the outgoing page's own bracket is a retained one, never a push_transform"
     );
     assert_eq!(scene.rects.len(), 1, "only the outgoing page paints at p=0");
     assert_eq!(
-        scene.snapshots.len(),
+        scene.retained_pushes.len(),
         1,
-        "the outgoing page paints through its own snapshot bracket: {:?}",
-        scene.snapshots
+        "the outgoing page paints through its own retained bracket: {:?}",
+        scene.retained_pushes
     );
-    let (_, _, _, alpha0, scale0) = scene.snapshots[0];
+    let (_, _, _, alpha0, scale0) = scene.retained_pushes[0];
     assert_eq!(alpha0, 1.0, "the outgoing page is at rest, fully opaque");
     assert_eq!(scale0, 1.0, "the outgoing page is never scaled");
 
     // Mid frame (50ms → progress 0.5, past the 0.30 split): the incoming page
     // has started fading in and is genuinely scaled below 1.0 (alpha > 0, not
     // discarded); the now fully-faded-out leaving page is discarded in turn.
-    // The incoming page's snapshot bracket carries the sub-unit scale in its
-    // own `scale` field — no `push_transform` of its own either.
+    // The scale step paints inline: a `push_transform` scale about the page's
+    // centre, then a `push_layer` for the fade, and no retained bracket.
     root.rebuild(&mut app, &mut state);
     root.layout(Size::new(100.0, 100.0));
     let mut scene = PageScene::default();
     root.paint(&mut scene, ft(50));
     assert!(
-        scene.transforms.is_empty(),
-        "no push_transform bracket of its own: the scale rides the snapshot bracket"
+        scene.retained_pushes.is_empty() && scene.draws.is_empty(),
+        "a scale step is never bracketed: {:?}",
+        scene.retained_pushes
     );
     assert_eq!(
-        scene.snapshots.len(),
+        scene.transforms.len(),
         1,
-        "only the incoming (scale < 1.0) page paints, under one snapshot bracket: {:?}",
-        scene.snapshots
+        "one scale transform: {:?}",
+        scene.transforms
     );
-    let (_, _, _, alpha1, sx) = scene.snapshots[0];
-    assert!(alpha1 > 0.0, "the incoming page is no longer discarded");
+    let sx = scene.transforms[0].as_coeffs()[0];
     assert!(
         sx < 1.0 && sx > 0.9,
         "the incoming page is scaled below 1.0 (was {sx})"
     );
-    assert_eq!(scene.snapshot_pops, 1, "the snapshot bracket is balanced");
+    assert_eq!(scene.layers.len(), 1, "one fade layer: {:?}", scene.layers);
+    assert!(
+        scene.layers[0].2 > 0.0,
+        "the incoming page is no longer discarded"
+    );
+    assert_eq!(
+        (scene.transform_pops, scene.layer_pops),
+        (1, 1),
+        "both inline brackets are balanced"
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -1138,9 +1216,9 @@ fn transparent_result_slide_up_composed_dialog_usage() {
 /// can assert the morph overlay's interpolated rect and that a suppressed
 /// endpoint painted nothing at its rest position.
 ///
-/// `push_snapshot`/`pop_snapshot` are overridden separately, recording into
-/// their own `snapshots`/`snapshot_pops` fields rather than falling into the
-/// trait's emulating default: a snapshot-eligible page's bracket is entirely
+/// `push_retained`/`pop_retained` are overridden separately, recording into
+/// their own `retained_pushes`/`retained_pops` fields rather than falling into the
+/// trait's emulating default: a retained-eligible page's bracket is entirely
 /// unrelated to the hero morph's own `push_transform` (pushed from inside the
 /// page's subtree by `hero.rs`'s `HeroDirective::Morph` arm), and letting the
 /// default emulation push its own (identity, at `scale == 1.0`) transform
@@ -1150,8 +1228,8 @@ struct HeroScene {
     transforms: Vec<Affine>,
     plain: Vec<(Point, Size)>,
     morphs: Vec<Rect>,
-    snapshots: Vec<(u64, Point, Size, f32, f64)>,
-    snapshot_pops: u32,
+    retained_pushes: Vec<(u64, Point, Size, f32, f64)>,
+    retained_pops: u32,
 }
 impl PaintScene for HeroScene {
     fn fill_rect(&mut self, origin: Point, size: Size, _color: peniko::Color) {
@@ -1161,11 +1239,11 @@ impl PaintScene for HeroScene {
             None => self.plain.push((origin, size)),
         }
     }
-    fn push_snapshot(&mut self, key: u64, origin: Point, size: Size, alpha: f32, scale: f64) {
-        self.snapshots.push((key, origin, size, alpha, scale));
+    fn push_retained(&mut self, key: u64, origin: Point, size: Size, alpha: f32, scale: f64) {
+        self.retained_pushes.push((key, origin, size, alpha, scale));
     }
-    fn pop_snapshot(&mut self) {
-        self.snapshot_pops += 1;
+    fn pop_retained(&mut self) {
+        self.retained_pops += 1;
     }
     fn draw_text(&mut self, _origin: Point, _text: &str) {}
     fn push_transform(&mut self, transform: Affine) {
@@ -1337,13 +1415,13 @@ fn hero_push_morphs_between_pages_and_suppresses_endpoints() {
     }
 }
 
-// --- A hero push never paints either matched page through a snapshot
+// --- A hero push never paints either matched page through a retained
 //     bracket while it carries a hero directive this frame: a morph paints
 //     inside the page and must move every frame, so a page with a hero in
 //     play is never an "ideal cache candidate". ---
 
 #[test]
-fn hero_push_mid_transition_carries_no_snapshot_bracket_on_either_page() {
+fn hero_push_mid_transition_carries_no_retained_bracket_on_either_page() {
     let controller: NavigatorController<()> = NavigatorController::new();
     let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
     let mut app = {
@@ -1368,13 +1446,13 @@ fn hero_push_mid_transition_carries_no_snapshot_bracket_on_either_page() {
 
     // Mid frame (p=0.5): the tag is matched on both pages now, so each
     // carries a hero directive this frame (Morph on the entering side,
-    // Suppress on the leaving one) — neither is snapshot-eligible.
+    // Suppress on the leaving one) — neither is retained-eligible.
     let (f1, _) = hero_frame(&mut root, &mut app, &mut state, ft(50));
     assert!(
-        f1.snapshots.is_empty(),
-        "no page paints through a snapshot bracket while it carries a hero \
+        f1.retained_pushes.is_empty(),
+        "no page paints through a retained bracket while it carries a hero \
          directive: {:?}",
-        f1.snapshots
+        f1.retained_pushes
     );
 }
 

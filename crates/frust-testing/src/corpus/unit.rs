@@ -20,7 +20,7 @@
 //! # Coverage
 //!
 //! `tests::every_command_variant_is_covered` is the guard: it walks every
-//! case's recorded scene and asserts all 16 `Command` variants appear. A new
+//! case's recorded scene and asserts all 18 `Command` variants appear. A new
 //! variant fails that test until a case exists for it.
 //!
 //! # The two promoted cases
@@ -71,7 +71,7 @@ fn black_backdrop(builder: &mut SceneBuilder<'_>) {
 
 /// Every case in the unit corpus, in the order a reviewer reads them: the
 /// paint primitives, then the grouping commands, then the two promoted
-/// pixel-exact cases and the snapshot pair, then the paint-class frames
+/// pixel-exact cases and the retained-bracket pair, then the paint-class frames
 /// (see [`paint_class_cases`]).
 #[must_use]
 pub fn unit_cases() -> Vec<CorpusCase> {
@@ -82,9 +82,12 @@ pub fn unit_cases() -> Vec<CorpusCase> {
         glyph_run(),
         clip_rect(),
         clip_rounded(),
+        clip_path_star(),
+        clip_path_concave(),
         clip_balance(),
         image(),
         blur_rrect(),
+        backdrop_blur(),
         layer_alpha(),
         layer_balance(),
         layer_sibling_fan(),
@@ -94,8 +97,8 @@ pub fn unit_cases() -> Vec<CorpusCase> {
         path_stroke(),
         path_dashed(),
         shader_quad(),
-        snapshot_bracket(),
-        snapshot_balance(),
+        retained_bracket(),
+        retained_balance(),
         paint_class_mix(),
         paint_class_short_run(),
         paint_class_layer_over_gradient(),
@@ -348,6 +351,139 @@ fn clip_rounded() -> CorpusCase {
         ],
         eroded_interior: false,
         about: "per-corner radii on a clip, one corner square",
+    }
+}
+
+/// A five-pointed star's outline: outer radius `outer`, inner radius `inner`,
+/// centred on `(cx, cy)`, its first point straight up.
+fn star_path(cx: f64, cy: f64, outer: f64, inner: f64) -> BezPath {
+    let mut path = BezPath::new();
+    for i in 0..10 {
+        let radius = if i % 2 == 0 { outer } else { inner };
+        let angle = -std::f64::consts::FRAC_PI_2 + f64::from(i) * std::f64::consts::PI / 5.0;
+        let point = (cx + radius * angle.cos(), cy + radius * angle.sin());
+        if i == 0 {
+            path.move_to(point);
+        } else {
+            path.line_to(point);
+        }
+    }
+    path.close_path();
+    path
+}
+
+/// `Command::PushClipPath` with a five-pointed STAR over a four-colour
+/// quadrant fill, popped by the same [`SceneBuilder::pop_clip`] every clip
+/// uses. The star's diagonal edges are antialiased, so the case pins the
+/// coverage mask's edge as well as its inside and outside; the four colours
+/// make an arm drawn in the wrong space read as the wrong colour.
+fn clip_path_star() -> CorpusCase {
+    fn record(scene: &mut Scene) {
+        let mut builder = SceneBuilder::new(scene);
+        builder.push_clip_path(star_path(32.0, 32.0, 28.0, 11.0));
+        builder.fill_rect(Rect::new(0.0, 0.0, 32.0, 32.0), Brush::Solid(RED));
+        builder.fill_rect(Rect::new(32.0, 0.0, EDGE, 32.0), Brush::Solid(GREEN));
+        builder.fill_rect(Rect::new(0.0, 32.0, 32.0, EDGE), Brush::Solid(BLUE));
+        builder.fill_rect(Rect::new(32.0, 32.0, EDGE, EDGE), Brush::Solid(YELLOW));
+        builder.pop_clip();
+    }
+    CorpusCase {
+        spec: case("unit-clip-path-star"),
+        record,
+        probes: &[
+            Probe {
+                x: 30,
+                y: 12,
+                expect: Expect::Exact([255, 0, 0, 255]),
+                why: "inside the star's top point, over the red quadrant",
+            },
+            Probe {
+                x: 22,
+                y: 44,
+                expect: Expect::Exact([0, 0, 255, 255]),
+                why: "inside the lower-left point, over the blue quadrant",
+            },
+            Probe {
+                x: 36,
+                y: 36,
+                expect: Expect::Exact([255, 255, 0, 255]),
+                why: "inside the star's body, over the yellow quadrant",
+            },
+            Probe {
+                x: 50,
+                y: 10,
+                expect: Expect::Exact([0, 0, 0, 0]),
+                why: "between the top and upper-right points — the fill is clipped away",
+            },
+            Probe {
+                x: 2,
+                y: 62,
+                expect: Expect::Exact([0, 0, 0, 0]),
+                why: "a frame corner, outside every point of the star",
+            },
+        ],
+        eroded_interior: false,
+        about: "a five-pointed star path clip over a four-colour quadrant fill",
+    }
+}
+
+/// `Command::PushClipPath` with a CONCAVE outline — an L, whose reflex corner
+/// is exactly the shape a convex-hull or bounding-box shortcut would get
+/// wrong. A full-frame fill plus a stripe crossing the notch: the notch must
+/// stay empty even where the stripe passes through it.
+fn clip_path_concave() -> CorpusCase {
+    fn record(scene: &mut Scene) {
+        let mut builder = SceneBuilder::new(scene);
+        let mut outline = BezPath::new();
+        outline.move_to((8.0, 8.0));
+        outline.line_to((28.0, 8.0));
+        outline.line_to((28.0, 36.0));
+        outline.line_to((56.0, 36.0));
+        outline.line_to((56.0, 56.0));
+        outline.line_to((8.0, 56.0));
+        outline.close_path();
+        builder.push_clip_path(outline);
+        builder.fill_rect(Rect::new(0.0, 0.0, EDGE, EDGE), Brush::Solid(GREEN));
+        builder.fill_rect(Rect::new(0.0, 16.0, EDGE, 24.0), Brush::Solid(RED));
+        builder.pop_clip();
+    }
+    CorpusCase {
+        spec: case("unit-clip-path-concave"),
+        record,
+        probes: &[
+            Probe {
+                x: 16,
+                y: 30,
+                expect: Expect::Exact([0, 128, 0, 255]),
+                why: "inside the L's upright",
+            },
+            Probe {
+                x: 50,
+                y: 46,
+                expect: Expect::Exact([0, 128, 0, 255]),
+                why: "inside the L's foot",
+            },
+            Probe {
+                x: 16,
+                y: 20,
+                expect: Expect::Exact([255, 0, 0, 255]),
+                why: "the stripe survives where it crosses the upright",
+            },
+            Probe {
+                x: 44,
+                y: 20,
+                expect: Expect::Exact([0, 0, 0, 0]),
+                why: "the stripe is clipped away inside the notch — the reflex corner holds",
+            },
+            Probe {
+                x: 44,
+                y: 30,
+                expect: Expect::Exact([0, 0, 0, 0]),
+                why: "the notch stays empty below the stripe too",
+            },
+        ],
+        eroded_interior: false,
+        about: "a concave L-shaped path clip, a stripe crossing its notch",
     }
 }
 
@@ -678,6 +814,79 @@ fn blur_rrect() -> CorpusCase {
         probes: &[],
         eroded_interior: true,
         about: "four std_dev steps, the last with per-corner radii collapsed to the largest",
+    }
+}
+
+/// `Command::BackdropBlur` under a rounded clip, over a backdrop of 4-px
+/// vertical red/blue stripes with a yellow square, then a translucent white
+/// wash painted over the blurred panel — the frosted-glass shape.
+///
+/// Three things are pinned at once: the backdrop under the panel is blurred
+/// (the stripes mix, which an unblurred frame cannot show), everything outside
+/// the panel — including the pixels inside its rectangle but outside the
+/// rounded corner — is untouched, and what is recorded after the backdrop
+/// lands on top of it. The σ (1.5) is one the blur planner convolves directly,
+/// with no decimation, so the engine's filter passes and the CPU oracle's
+/// `vello_cpu` filter run the same discrete kernel (see `oracle_cpu`'s gap
+/// list).
+fn backdrop_blur() -> CorpusCase {
+    fn record(scene: &mut Scene) {
+        let mut builder = SceneBuilder::new(scene);
+        black_backdrop(&mut builder);
+        for stripe in 0..16 {
+            let x = f64::from(stripe) * 4.0;
+            let colour = if stripe % 2 == 0 { RED } else { BLUE };
+            builder.fill_rect(Rect::new(x, 0.0, x + 4.0, EDGE), Brush::Solid(colour));
+        }
+        builder.fill_rect(Rect::new(24.0, 12.0, 40.0, 24.0), Brush::Solid(YELLOW));
+        let panel = Rect::new(8.0, 8.0, 56.0, 56.0);
+        builder.push_clip_rounded(panel, 12.0);
+        builder.backdrop_blur(panel, 1.5);
+        builder.fill_rect(panel, Brush::Solid(WHITE.with_alpha(0.2)));
+        builder.pop_clip();
+    }
+    CorpusCase {
+        spec: case("unit-backdrop-blur"),
+        record,
+        probes: &[
+            Probe {
+                x: 2,
+                y: 32,
+                expect: Expect::Exact([255, 0, 0, 255]),
+                why: "a stripe outside the panel is the backdrop untouched",
+            },
+            Probe {
+                x: 9,
+                y: 9,
+                expect: Expect::Exact([255, 0, 0, 255]),
+                why: "inside the panel's rectangle but outside its rounded corner, the clip masks                       the blur away",
+            },
+            Probe {
+                x: 32,
+                y: 40,
+                expect: Expect::AtLeast {
+                    channel: 2,
+                    min: 90,
+                },
+                why: "the left column of a red stripe takes blue from the stripe beside it once                       blurred (unblurred, the wash alone leaves blue at 51)",
+            },
+            Probe {
+                x: 32,
+                y: 40,
+                expect: Expect::AtLeast {
+                    channel: 0,
+                    min: 140,
+                },
+                why: "and keeps most of its own red",
+            },
+        ],
+        // The rounded clip's antialiased rim is where the panel's blurred
+        // pixels meet the unblurred stripes beside them, so a one-level
+        // coverage rounding difference between two rasterizers' masks reads
+        // as a several-level colour difference there — edge jitter one pixel
+        // wide, which the comparator erodes, never an interior change.
+        eroded_interior: true,
+        about: "a frosted panel: backdrop blur under a rounded clip, a white wash over it",
     }
 }
 
@@ -1188,10 +1397,10 @@ fn shader_quad() -> CorpusCase {
 }
 
 /// PROMOTED from `crates/frust-render/tests/gpu_smoke.rs`'s
-/// `snapshot_bracket_inline_emulation_matches_the_composite_arithmetic`,
+/// `retained_bracket_inline_emulation_matches_the_composite_arithmetic`,
 /// geometry and assertions verbatim.
 ///
-/// A `Command::PushSnapshot` bracket lowered INLINE — the only lowering this
+/// A `Command::PushRetained` bracket lowered INLINE — the only lowering this
 /// framework has for one, on every render path and every tier — and the
 /// absolute arithmetic it must hit:
 ///
@@ -1204,7 +1413,7 @@ fn shader_quad() -> CorpusCase {
 /// The geometry keeps every content edge on a whole device pixel, so nothing
 /// here measures rasterizer subpixel coverage, and the tolerance is the
 /// original's: one 8-bit rounding step, no more.
-fn snapshot_bracket() -> CorpusCase {
+fn retained_bracket() -> CorpusCase {
     fn record(scene: &mut Scene) {
         // A 20x20 body in local space under a 2x device scale offset by
         // (8, 8) — device (8, 8)..(48, 48) — composited at 75% opacity.
@@ -1219,7 +1428,7 @@ fn snapshot_bracket() -> CorpusCase {
         black_backdrop(&mut builder);
         builder.fill_rect(Rect::new(52.0, 52.0, 60.0, 60.0), Brush::Solid(BLUE));
         builder.push_transform(bracket);
-        builder.push_snapshot(1, rect, ALPHA, 1.0);
+        builder.push_retained(1, rect, ALPHA, 1.0);
         // An opaque red block, a half-alpha green band over NOTHING (so the
         // bracket really carries partial alpha — a double premultiply is
         // invisible where alpha is 1), and a black bar standing in for a line
@@ -1230,7 +1439,7 @@ fn snapshot_bracket() -> CorpusCase {
             Brush::Solid(GREEN.with_alpha(0.5)),
         );
         builder.fill_rect(Rect::new(5.0, 15.0, 15.0, 20.0), Brush::Solid(BLACK));
-        builder.pop_snapshot();
+        builder.pop_retained();
         builder.pop_transform();
         // Recorded AFTER the bracket, so it must land on top of it.
         builder.fill_rect(Rect::new(20.0, 20.0, 30.0, 30.0), Brush::Solid(overlay));
@@ -1278,20 +1487,20 @@ fn snapshot_bracket() -> CorpusCase {
             },
         ],
         eroded_interior: false,
-        about: "promoted: the inline lowering of a snapshot bracket, absolute composite \
+        about: "promoted: the inline lowering of a retained bracket, absolute composite \
                 arithmetic",
     }
 }
 
-/// Snapshot NESTING: two brackets, the inner one carrying a different alpha
+/// Retained-bracket NESTING: two brackets, the inner one carrying a different alpha
 /// AND a different scale, both of which must be IGNORED.
 ///
-/// `Command::PushSnapshot`'s contract is that syntactic nesting is allowed
+/// `Command::PushRetained`'s contract is that syntactic nesting is allowed
 /// but only the OUTERMOST bracket needs honouring. The probes are stated as
 /// the outer bracket's 0.5 alone: if the inner bracket's 0.25 were composed
 /// in as well, the green band would land at `128 * 0.5 * 0.25` (16) instead
 /// of `128 * 0.5` (64) — a difference no tolerance absorbs.
-fn snapshot_balance() -> CorpusCase {
+fn retained_balance() -> CorpusCase {
     fn record(scene: &mut Scene) {
         let bracket = kurbo::Affine::translate((8.0, 8.0)) * kurbo::Affine::scale(2.0);
         let rect = Rect::new(0.0, 0.0, 20.0, 20.0);
@@ -1299,13 +1508,13 @@ fn snapshot_balance() -> CorpusCase {
         let mut builder = SceneBuilder::new(scene);
         black_backdrop(&mut builder);
         builder.push_transform(bracket);
-        builder.push_snapshot(1, rect, 0.5, 1.0);
+        builder.push_retained(1, rect, 0.5, 1.0);
         builder.fill_rect(Rect::new(0.0, 0.0, 20.0, 10.0), Brush::Solid(WHITE));
         // Inner bracket: its own alpha and scale must not reach the pixels.
-        builder.push_snapshot(2, rect, 0.25, 2.0);
+        builder.push_retained(2, rect, 0.25, 2.0);
         builder.fill_rect(Rect::new(0.0, 10.0, 20.0, 20.0), Brush::Solid(GREEN));
-        builder.pop_snapshot();
-        builder.pop_snapshot();
+        builder.pop_retained();
+        builder.pop_retained();
         builder.pop_transform();
     }
     CorpusCase {
@@ -1337,7 +1546,7 @@ fn snapshot_balance() -> CorpusCase {
             },
         ],
         eroded_interior: false,
-        about: "nested snapshot brackets, only the outermost honoured",
+        about: "nested retained brackets, only the outermost honoured",
     }
 }
 
@@ -1548,6 +1757,7 @@ mod tests {
             Command::GlyphRun(_) => "GlyphRun",
             Command::PushClip { .. } => "PushClip",
             Command::PushClipRounded { .. } => "PushClipRounded",
+            Command::PushClipPath { .. } => "PushClipPath",
             Command::PopClip => "PopClip",
             Command::Image { .. } => "Image",
             Command::BlurredRoundedRect { .. } => "BlurredRoundedRect",
@@ -1556,13 +1766,21 @@ mod tests {
             Command::ClearRect { .. } => "ClearRect",
             Command::Path { .. } => "Path",
             Command::ShaderQuad { .. } => "ShaderQuad",
-            Command::PushSnapshot { .. } => "PushSnapshot",
-            Command::PopSnapshot => "PopSnapshot",
+            Command::PushRetained { .. } => "PushRetained",
+            Command::PopRetained => "PopRetained",
+            Command::DrawRetained { .. } => "DrawRetained",
             Command::SceneTexture { .. } => "SceneTexture",
+            Command::BackdropBlur { .. } => "BackdropBlur",
         }
     }
 
-    /// Every `Command` variant, as `variant_name` spells them.
+    /// Every `Command` variant a corpus case records, as `variant_name` spells
+    /// them. `DrawRetained` is deliberately absent: a corpus case is one frame,
+    /// so no page can be resident when it is drawn, and the CPU oracle retains
+    /// nothing at all — so a corpus scene never records one (see
+    /// `no_corpus_case_records_a_draw_retained`). The engine's retained pages
+    /// are pinned across frames by `engine_goldens`'s `retained_parity` case
+    /// instead.
     const EVERY_VARIANT: &[&str] = &[
         "FillRect",
         "RoundedRect",
@@ -1570,6 +1788,7 @@ mod tests {
         "GlyphRun",
         "PushClip",
         "PushClipRounded",
+        "PushClipPath",
         "PopClip",
         "Image",
         "BlurredRoundedRect",
@@ -1578,8 +1797,9 @@ mod tests {
         "ClearRect",
         "Path",
         "ShaderQuad",
-        "PushSnapshot",
-        "PopSnapshot",
+        "PushRetained",
+        "PopRetained",
+        "BackdropBlur",
     ];
 
     #[test]
@@ -1603,6 +1823,24 @@ mod tests {
             EVERY_VARIANT.len(),
             "variant_name reported a name outside EVERY_VARIANT: {seen:?}"
         );
+    }
+
+    #[test]
+    fn no_corpus_case_records_a_draw_retained() {
+        for case in unit_cases()
+            .into_iter()
+            .chain(crate::corpus::adversarial::adversarial_cases())
+        {
+            assert!(
+                !case
+                    .scene()
+                    .commands()
+                    .iter()
+                    .any(|command| matches!(command, Command::DrawRetained { .. })),
+                "`{}` records a DrawRetained, which no single-frame case can draw",
+                case.spec.name
+            );
+        }
     }
 
     #[test]
@@ -1671,9 +1909,9 @@ mod tests {
         );
 
         // Promoted verbatim: 191 / 48 at a tolerance of one 8-bit step.
-        let snapshot = find("unit-snapshot-bracket");
-        assert_eq!(snapshot.spec.tolerance.channel, 3);
-        assert!(snapshot.probes.iter().any(|probe| {
+        let bracket = find("unit-snapshot-bracket");
+        assert_eq!(bracket.spec.tolerance.channel, 3);
+        assert!(bracket.probes.iter().any(|probe| {
             probe.expect
                 == Expect::Channel {
                     channel: 0,
@@ -1681,7 +1919,7 @@ mod tests {
                     tolerance: 3,
                 }
         }));
-        assert!(snapshot.probes.iter().any(|probe| {
+        assert!(bracket.probes.iter().any(|probe| {
             probe.expect
                 == Expect::Channel {
                     channel: 1,

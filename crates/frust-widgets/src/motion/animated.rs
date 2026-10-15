@@ -15,6 +15,12 @@
 //! `docs/CODE_STANDARDS.md`'s Theming & Animation Conventions). Layout is a
 //! transparent pass-through: this wrapper reports exactly its child's size.
 //!
+//! [`AnimatedOpacityView::cached`] paints the child through a retained-page
+//! boundary ([`repaint_boundary`](crate::repaint_boundary)) instead, the fade
+//! riding the page's composite alpha, so a fade over an unchanged child does
+//! not repaint it. `AnimatedScale` has no such option: a page is only ever
+//! served at the scale it was recorded at.
+//!
 //! # Retargeting: value continuity, not velocity continuity
 //!
 //! [`ImplicitAnim`] is the shared retarget driver both wrappers use. A
@@ -56,6 +62,7 @@ use frust_theme::{MotionSpring, Theme};
 use kurbo::{Affine, Point, Size};
 
 use crate::nav::transition::{TransitionDriver, make_driver};
+use crate::repaint_boundary::RetainedBoundary;
 use crate::{Alignment, Timing};
 
 // --- Unthemed fallbacks (CODE_STANDARDS' "resolve theme tokens with an
@@ -207,6 +214,7 @@ impl ImplicitAnim {
 pub struct AnimatedOpacityView<State: 'static> {
     target: f64,
     timing: Option<Timing>,
+    cached: bool,
     child: AnyView<State>,
 }
 
@@ -221,6 +229,7 @@ pub fn animated_opacity<State: 'static, V: View<State>>(
     AnimatedOpacityView {
         target: target.clamp(0.0, 1.0),
         timing: None,
+        cached: false,
         child: any(child),
     }
 }
@@ -241,6 +250,17 @@ impl<State: 'static> AnimatedOpacityView<State> {
         self.timing = Some(timing);
         self
     }
+
+    /// Paint the child through a retained-page boundary
+    /// ([`repaint_boundary`](crate::repaint_boundary)) and drive the fade
+    /// through its composite alpha (default `false`): a running fade over an
+    /// unchanged child composites the retained page instead of painting the
+    /// child every frame. Worth it for an expensive child that stays still
+    /// while it fades.
+    pub fn cached(mut self, cached: bool) -> Self {
+        self.cached = cached;
+        self
+    }
 }
 
 /// The retained widget for an [`AnimatedOpacityView`].
@@ -248,6 +268,9 @@ pub struct AnimatedOpacityWidget {
     child: ChildPod,
     explicit_timing: Option<Timing>,
     anim: ImplicitAnim,
+    /// The retained-page boundary the child paints through, when
+    /// [`cached`](AnimatedOpacityView::cached).
+    boundary: Option<RetainedBoundary>,
 }
 
 impl<State: 'static> View<State> for AnimatedOpacityView<State> {
@@ -258,6 +281,7 @@ impl<State: 'static> View<State> for AnimatedOpacityView<State> {
             child: crate::authoring::build_child(&self.child, ctx),
             explicit_timing: self.timing,
             anim: ImplicitAnim::new(self.target),
+            boundary: self.cached.then(RetainedBoundary::new),
         }
     }
 
@@ -274,6 +298,10 @@ impl<State: 'static> View<State> for AnimatedOpacityView<State> {
         }
         if prev.timing != self.timing {
             element.explicit_timing = self.timing;
+            flags |= ChangeFlags::PAINT;
+        }
+        if element.boundary.is_some() != self.cached {
+            element.boundary = self.cached.then(RetainedBoundary::new);
             flags |= ChangeFlags::PAINT;
         }
         flags |= crate::authoring::rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
@@ -306,6 +334,10 @@ impl Widget for AnimatedOpacityWidget {
         let alpha = self.anim.value().clamp(0.0, 1.0) as f32;
         let origin = ctx.origin();
         let size = ctx.size();
+        if let Some(boundary) = &mut self.boundary {
+            boundary.paint(&mut self.child, ctx, scene, origin, size, alpha, true);
+            return;
+        }
         scene.push_layer(origin, size, alpha);
         self.child.paint_child(ctx, scene);
         scene.pop_layer();

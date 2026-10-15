@@ -199,6 +199,46 @@
 //! which would size the parent's page from bounds short of the filter's own
 //! spread on two sides. Neither is a shape frust records: a backdrop blur is a
 //! layer under the surface.
+//!
+//! ## Retained pages
+//!
+//! A layer the renderer's retained-page store admitted
+//! ([`crate::cache::retained`]) is handed to [`Schedule::build_retained`] with
+//! a [`RetainedRole`]. A *recorded* body is walked like an isolated layer — its
+//! own nested translucent layers take pooled pages exactly as they would inside
+//! any layer — but its rounds target the store's page
+//! ([`RoundTarget::Retained`]) rather than a pooled one, it is never inlined at
+//! full opacity or dropped at zero (the page is wanted for later frames
+//! whatever this one composites), and its composite samples that page
+//! ([`Composite::retained`]). A *drawn* one is an empty layer standing at its
+//! painter-order position, which becomes the composite alone. Neither takes a
+//! ping-pong group or the spill page, and neither counts toward
+//! [`MAX_LIVE_PAGES`] or [`MAX_CHAIN_DEPTH`]: the store's page lives outside the
+//! pool for the store's own lifetime, so nothing about it competes for the
+//! frame's live intermediates. A retained round is cut like an isolated
+//! layer's when an ancestor needs room, and continues its own page after the
+//! cut.
+//!
+//! ## Backdrop rounds
+//!
+//! A backdrop blur ([`crate::filters`]' *The backdrop blur*) is handed to
+//! [`Schedule::build_frame`] as a recorded layer holding one draw. Where the
+//! walk is drawing into the frame's own target — the root, or layers inlined
+//! into it — it costs, in order: a **cut** of the surface round open so far
+//! (unconditional, so every op recorded before the backdrop lands before
+//! anything reads the target back, including the composite of a retained page
+//! drawn ahead of it), a **region copy** round ([`RegionCopy`]) seeding a page
+//! with the backdrop's region of the target, the blur's **pass rounds** over
+//! that page exactly as a filter layer's run, and then the backdrop's draw
+//! spliced into the root's next surface round, which samples the blurred page
+//! ([`BackdropSample`]) and releases it when it ends. The page is held across
+//! later ops like a pending composite is: a page-hungry layer recorded after
+//! the backdrop cuts that surface round to get it back.
+//!
+//! Anywhere else — inside an isolated layer, a retained body, or a layer
+//! covering nothing — there is no frame beneath the backdrop to sample, so its
+//! layer is dropped: no round, and no backdrop draw in any page round. A frame
+//! carrying no backdrop schedules exactly as [`Schedule::build_retained`] does.
 
 pub mod pages;
 
@@ -213,7 +253,7 @@ use vello_common::record::{CommandRecorder, Node, RecordedLayer, RecordedLayerKi
 
 use crate::compile::EngineDraw;
 use crate::error::EngineError;
-use crate::filters::{FilterStep, ServedFilter, blur, drop_shadow, served_filter};
+use crate::filters::{Backdrop, FilterStep, ServedFilter, blur, drop_shadow, served_filter};
 
 /// The deepest chain of nested isolated layers this scheduler serves.
 ///
@@ -293,6 +333,9 @@ pub enum RoundTarget {
     Root,
     /// A pooled intermediate page holding one isolated layer.
     Page(PageTarget),
+    /// A retained page holding one recorded body — the store's own texture,
+    /// never a pooled one (see the module header's *Retained pages*).
+    Retained(RetainedTarget),
 }
 
 /// Compositing a finished page onto the round's target.
@@ -311,18 +354,120 @@ pub struct Composite {
     /// Where the layer lands in the round's target, in that target's own
     /// coordinates.
     pub bounds: RectU16,
-    /// Constant alpha applied while compositing, strictly between 0 and 1.
+    /// Constant alpha applied while compositing, strictly between 0 and 1 for
+    /// a pooled page; a retained page's is the bracket's own alpha, which may
+    /// be 1.
     pub opacity: f32,
+    /// The retained page this composite samples instead of a pooled one, or
+    /// `None` for a pooled page. When set, [`parity`](Self::parity) names no
+    /// page and nothing is released for it.
+    pub retained: Option<RetainedSource>,
 }
 
 impl Composite {
     /// The region of the page to sample, in page texels.
     ///
     /// The layer was rendered at the page's origin, so this is
-    /// [`bounds`](Self::bounds) moved there.
+    /// [`bounds`](Self::bounds) moved there — or, for a retained page drawn
+    /// trimmed to its window, moved to the texel its trimmed corner samples.
     #[must_use]
     pub fn source(&self) -> RectU16 {
-        RectU16::new(0, 0, self.bounds.width(), self.bounds.height())
+        let (x, y) = self.retained.map_or((0, 0), |source| source.origin);
+        RectU16::new(
+            x,
+            y,
+            x.saturating_add(self.bounds.width()),
+            y.saturating_add(self.bounds.height()),
+        )
+    }
+}
+
+/// Where a retained composite's page comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetainedSource {
+    /// The retained bracket the page belongs to, indexed into the frame's
+    /// [`CompiledFrame::retained`](crate::compile::CompiledFrame::retained) —
+    /// the renderer resolves it to the store's texture.
+    pub bracket: u32,
+    /// The page texel under the composite's top-left corner.
+    pub origin: (u16, u16),
+}
+
+/// A retained page a round renders a recorded body into (see the module
+/// header's *Retained pages*).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetainedTarget {
+    /// The body's layer, indexed into
+    /// [`CommandRecorder::layers`](vello_common::record::CommandRecorder::layers).
+    pub layer: u32,
+    /// The retained bracket the page belongs to (see
+    /// [`RetainedSource::bracket`]).
+    pub bracket: u32,
+    /// The body's tile-aligned device bounds, held at the page's origin.
+    pub bounds: RectU16,
+    /// Whether an earlier round of this body already rendered into the page
+    /// this frame, so this one loads it instead of clearing it.
+    pub continued: bool,
+}
+
+/// How the retained-page store resolved one recorded layer standing for a
+/// retained bracket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetainedRole {
+    /// A body rendered into its retained page and composited from it.
+    Record {
+        /// The retained bracket (see [`RetainedSource::bracket`]).
+        bracket: u32,
+    },
+    /// A `DrawRetained` composited from a resident page.
+    Draw {
+        /// The retained bracket (see [`RetainedSource::bracket`]).
+        bracket: u32,
+        /// Where the composite lands.
+        dest: RectU16,
+        /// The page texel under `dest`'s top-left corner.
+        origin: (u16, u16),
+    },
+    /// A `DrawRetained` whose composite lands nowhere visible: nothing at all.
+    Hidden,
+}
+
+/// The [`RetainedRole`] of every recorded layer the retained-page store
+/// resolved, indexed by layer id; a layer it did not is scheduled like any
+/// other.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RetainedLayers {
+    roles: Vec<Option<RetainedRole>>,
+}
+
+impl RetainedLayers {
+    /// No layer resolved: [`Schedule::build_retained`] schedules exactly as
+    /// [`Schedule::build`] does.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Forget every role, keeping the allocation.
+    pub fn clear(&mut self) {
+        self.roles.clear();
+    }
+
+    /// Give layer `layer` its role.
+    pub fn set(&mut self, layer: u32, role: RetainedRole) {
+        let index = layer as usize;
+        if self.roles.len() <= index {
+            self.roles.resize(index.saturating_add(1), None);
+        }
+        if let Some(slot) = self.roles.get_mut(index) {
+            *slot = Some(role);
+        }
+    }
+
+    /// Layer `layer`'s role, or `None` for an ordinary layer.
+    #[must_use]
+    pub fn role(&self, layer: u32) -> Option<RetainedRole> {
+        self.roles.get(layer as usize).copied().flatten()
     }
 }
 
@@ -383,15 +528,64 @@ pub struct Round {
     /// path branch on the round before it starts issuing a list, and keeps
     /// [`RoundOp`] exactly the set of things one strip pass can interleave.
     pub filter: Option<FilterPass>,
+    /// The region of the frame's own target this round seeds its page with,
+    /// on a region-copy round (see the module header's *Backdrop rounds*).
+    ///
+    /// A field rather than a [`RoundOp`] for the reason [`Self::filter`] is
+    /// one: a copy round is *only* a copy — it draws nothing, composites
+    /// nothing, and is recorded through no strip pipeline — and its `ops` are
+    /// empty.
+    pub copy: Option<RegionCopy>,
+    /// The pages this round's draws *sample* rather than composite: one per
+    /// backdrop blur whose rectangle this round draws, each holding the
+    /// blurred region (see the module header's *Backdrop rounds*). Every page
+    /// named here is also in [`Self::released`]. Empty on every round of a
+    /// frame with no backdrop, and on every round but a surface one.
+    pub samples: Vec<BackdropSample>,
+}
+
+/// A region of the frame's own target, copied into a round's page at the
+/// page's origin before anything else reads the page.
+///
+/// The reusable half of a backdrop blur: whatever needs to read what the frame
+/// has already painted — a blur of it, and next a blend composite against it —
+/// is handed a page holding exactly that region, made by cutting the surface
+/// round so everything before it in painter order has landed, then copying.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegionCopy {
+    /// The device-space region copied, which is also the page's own
+    /// [`PageTarget::bounds`]: the page holds it at its origin.
+    pub source: RectU16,
+}
+
+/// A finished page a surface round's draws sample at their own position — the
+/// blurred backdrop a backdrop blur's rectangle is painted from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackdropSample {
+    /// The backdrop's recorded layer, indexed into
+    /// [`CommandRecorder::layers`](vello_common::record::CommandRecorder::layers).
+    pub layer: u32,
+    /// The group holding the page.
+    pub parity: PageParity,
 }
 
 impl Round {
-    /// The page this round renders into, or `None` for the surface.
+    /// The pooled page this round renders into, or `None` for the surface
+    /// and for a retained page.
     #[must_use]
     pub fn page(&self) -> Option<&PageTarget> {
         match &self.target {
-            RoundTarget::Root => None,
+            RoundTarget::Root | RoundTarget::Retained(_) => None,
             RoundTarget::Page(page) => Some(page),
+        }
+    }
+
+    /// The retained page this round renders a body into, if it does.
+    #[must_use]
+    pub fn retained(&self) -> Option<&RetainedTarget> {
+        match &self.target {
+            RoundTarget::Retained(target) => Some(target),
+            RoundTarget::Root | RoundTarget::Page(_) => None,
         }
     }
 
@@ -399,6 +593,13 @@ impl Round {
     #[must_use]
     pub fn filter_pass(&self) -> Option<&FilterPass> {
         self.filter.as_ref()
+    }
+
+    /// The region this round copies into its page, or `None` on every round
+    /// but a region-copy one.
+    #[must_use]
+    pub fn region_copy(&self) -> Option<&RegionCopy> {
+        self.copy.as_ref()
     }
 
     /// Whether this round renders into the frame's own surface.
@@ -468,6 +669,44 @@ impl Schedule {
         caps: &TierCaps,
         config: &PageConfig,
     ) -> Result<Vec<Round>, EngineError> {
+        Self::build_retained(recorder, caps, config, &RetainedLayers::new())
+    }
+
+    /// [`Self::build`], with the layers the retained-page store resolved
+    /// served as `retained` says (see the module header's *Retained pages*).
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::build`]'s. A retained body is held to the same layer
+    /// properties every layer is (no blend mode, mask or clip path, a finite
+    /// opacity) and its nested layers to every bound; the body itself takes no
+    /// page group, so it can never be the layer a shortage refuses.
+    pub fn build_retained(
+        recorder: &CommandRecorder<EngineDraw>,
+        caps: &TierCaps,
+        config: &PageConfig,
+        retained: &RetainedLayers,
+    ) -> Result<Vec<Round>, EngineError> {
+        Self::build_frame(recorder, caps, config, retained, &[])
+    }
+
+    /// [`Self::build_retained`], with the frame's backdrop blurs served as the
+    /// module header's *Backdrop rounds* describes. With no backdrop this is
+    /// exactly [`Self::build_retained`]: nothing is cut, copied or sampled.
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::build`]'s. A backdrop's page is sized by
+    /// [`filter_page_size`] like a filter layer's, so a region larger than a
+    /// page can be is refused with
+    /// [`EngineError::IntermediateTextureTooLarge`] on the same terms.
+    pub fn build_frame(
+        recorder: &CommandRecorder<EngineDraw>,
+        caps: &TierCaps,
+        config: &PageConfig,
+        retained: &RetainedLayers,
+        backdrops: &[Backdrop],
+    ) -> Result<Vec<Round>, EngineError> {
         let mut rounds: Vec<Round> = Vec::new();
         let mut pages = LivePages::default();
         // A child layer is always recorded after its parent, so a well-formed
@@ -533,6 +772,66 @@ impl Schedule {
                     // inside one covering no pixels covers none either, however
                     // its own bounds read.
                     let inherited = stack.last().is_some_and(|stream| stream.suppressed);
+
+                    if let Some(backdrop) = backdrops.iter().find(|backdrop| backdrop.layer == id) {
+                        // The layer properties every layer is held to; a
+                        // backdrop's own are always the inlining ones.
+                        layer_role(id, layer)?;
+                        // Served only where the frame's own target is what the
+                        // walk is drawing into — the root, or layers inlined
+                        // into it. Inside an isolated layer (or a retained
+                        // body, or one covering nothing) there is no frame
+                        // beneath to sample: the backdrop and its rectangle
+                        // draw nothing, and never land in a page round.
+                        let at_root = stack
+                            .iter()
+                            .rev()
+                            .find(|stream| !matches!(stream.owner, StreamOwner::Inline))
+                            .is_some_and(|stream| matches!(stream.owner, StreamOwner::Root));
+                        if at_root && !inherited && !layer.bbox.is_empty() {
+                            backdrop_rounds(
+                                backdrop,
+                                &mut stack,
+                                &mut rounds,
+                                &mut pages,
+                                caps,
+                                config,
+                            )?;
+                            stack.push(Stream::inline(layer, depth, false));
+                        }
+                        continue;
+                    }
+
+                    if let Some(role) = retained.role(id) {
+                        // The layer properties every layer is held to; the
+                        // isolation answer is the store's, not opacity's.
+                        layer_role(id, layer)?;
+                        match role {
+                            RetainedRole::Record { bracket } => {
+                                stack.push(Stream::retained(id, layer, bracket, depth, inherited))
+                            }
+                            RetainedRole::Draw {
+                                bracket,
+                                dest,
+                                origin,
+                            } => {
+                                if !inherited
+                                    && layer.props.opacity > 0.0
+                                    && let Some(stream) = stack.last_mut()
+                                {
+                                    stream.ops.push(RoundOp::Composite(Composite {
+                                        layer: id,
+                                        parity: PageParity::Even,
+                                        bounds: dest,
+                                        opacity: layer.props.opacity,
+                                        retained: Some(RetainedSource { bracket, origin }),
+                                    }));
+                                }
+                            }
+                            RetainedRole::Hidden => {}
+                        }
+                        continue;
+                    }
 
                     // Nothing nested inside a dropped layer is rendered, so
                     // nothing inside one is validated either — the walk does
@@ -602,7 +901,8 @@ fn finish<'a>(
     let (id, layer) = match stream.owner {
         StreamOwner::Inline => return Ok(stream.ops),
         StreamOwner::Root => {
-            let released = released_pages(&stream.ops);
+            let mut released = released_pages(&stream.ops);
+            release_samples(&stream.samples, &mut released);
             for parity in &released {
                 pages.release(*parity);
             }
@@ -616,9 +916,14 @@ fn finish<'a>(
                     ops: stream.ops,
                     released,
                     filter: None,
+                    copy: None,
+                    samples: stream.samples,
                 });
             }
             return Ok(Vec::new());
+        }
+        StreamOwner::Retained { id, layer, bracket } => {
+            return Ok(finish_retained(stream, id, layer, bracket, rounds, pages));
         }
         StreamOwner::Isolated { id, layer } => (id, layer),
     };
@@ -705,6 +1010,8 @@ fn finish<'a>(
                     ops: stream.ops,
                     released,
                     filter: None,
+                    copy: None,
+                    samples: Vec::new(),
                 });
             }
             parity
@@ -731,6 +1038,8 @@ fn finish<'a>(
                 ops: stream.ops,
                 released,
                 filter: None,
+                copy: None,
+                samples: Vec::new(),
             });
             parity
         }
@@ -763,7 +1072,66 @@ fn finish<'a>(
         parity: composited,
         bounds,
         opacity: layer.props.opacity,
+        retained: None,
     })])
+}
+
+/// Emits the last round a retained body renders as — into the store's page,
+/// never a pooled one — and returns the composite of that page for the parent
+/// to splice in (nothing at zero opacity: the page is still wanted, but this
+/// frame shows none of it).
+///
+/// A body that renders anything renders at least one round even when it is
+/// empty of ops: that round is what clears the page, and a page the store
+/// believes rendered must hold this frame's body rather than an earlier one.
+/// A body nested inside a layer covering nothing renders no round at all, and
+/// the store, seeing none, leaves its key as it was.
+fn finish_retained(
+    stream: Stream<'_>,
+    id: u32,
+    layer: &RecordedLayer,
+    bracket: u32,
+    rounds: &mut Vec<Round>,
+    pages: &mut LivePages,
+) -> Vec<RoundOp> {
+    if stream.suppressed {
+        return Vec::new();
+    }
+    let released = released_pages(&stream.ops);
+    for parity in &released {
+        pages.release(*parity);
+    }
+    if !stream.ops.is_empty() || !stream.emitted {
+        rounds.push(Round {
+            target: RoundTarget::Retained(RetainedTarget {
+                layer: id,
+                bracket,
+                bounds: layer.bbox,
+                continued: stream.emitted,
+            }),
+            ops: stream.ops,
+            released,
+            filter: None,
+            copy: None,
+            samples: Vec::new(),
+        });
+    }
+
+    let opacity = layer.props.opacity;
+    if opacity > 0.0 {
+        vec![RoundOp::Composite(Composite {
+            layer: id,
+            parity: PageParity::Even,
+            bounds: layer.bbox,
+            opacity,
+            retained: Some(RetainedSource {
+                bracket,
+                origin: (0, 0),
+            }),
+        })]
+    } else {
+        Vec::new()
+    }
 }
 
 /// A filter layer whose contents are rendered, ready for its passes to be
@@ -813,6 +1181,23 @@ fn filter_rounds(
             drop_shadow::drop_shadow_passes(&shadow, SizeU16::from(filtered.bounds))
         }
     };
+    pass_rounds(filtered, &steps, stack, rounds, pages, caps, config)
+}
+
+/// Emits one round per pass of `steps` over `filtered`'s pages, and answers
+/// the group holding the result — [`filter_rounds`]' own sequence, shared with
+/// a backdrop blur's ([`backdrop_rounds`]), whose page is seeded by a region
+/// copy instead of by rendered contents.
+fn pass_rounds(
+    filtered: &FilterLayer<'_>,
+    steps: &[FilterStep],
+    stack: &mut [Stream<'_>],
+    rounds: &mut Vec<Round>,
+    pages: &mut LivePages,
+    caps: &TierCaps,
+    config: &PageConfig,
+) -> Result<PageParity, EngineError> {
+    let id = filtered.id;
     let Some(last) = steps.len().checked_sub(1) else {
         return Ok(filtered.contents);
     };
@@ -873,6 +1258,8 @@ fn filter_rounds(
                 step: *step,
                 source,
             }),
+            copy: None,
+            samples: Vec::new(),
         });
 
         if index < last {
@@ -985,6 +1372,8 @@ fn band_rounds(
             ops: ops.clone(),
             released: Vec::new(),
             filter: None,
+            copy: None,
+            samples: Vec::new(),
         });
 
         // Spliced onto the enclosing stream's own accumulator directly,
@@ -999,6 +1388,7 @@ fn band_rounds(
                 parity,
                 bounds: band.bounds,
                 opacity: banded.layer.props.opacity,
+                retained: None,
             }));
         }
     }
@@ -1098,7 +1488,10 @@ fn cut_at(
         .find(|(_, stream)| !matches!(stream.owner, StreamOwner::Inline))
         .map_or(stack.len(), |(at, _)| at);
     let batch = stack.get(index..end).unwrap_or(&[]);
-    if !batch.iter().any(|stream| holds_composite(&stream.ops)) {
+    if !batch
+        .iter()
+        .any(|stream| holds_composite(&stream.ops) || !stream.samples.is_empty())
+    {
         return Ok(false);
     }
 
@@ -1108,6 +1501,15 @@ fn cut_at(
         // round is built from.
         StreamOwner::Inline => return Ok(false),
         StreamOwner::Root => RoundTarget::Root,
+        // A retained body's page is the store's, so cutting it takes no group:
+        // the cut renders what the body has so far, and its next round loads
+        // it.
+        StreamOwner::Retained { id, layer, bracket } => RoundTarget::Retained(RetainedTarget {
+            layer: id,
+            bracket,
+            bounds: layer.bbox,
+            continued,
+        }),
         StreamOwner::Isolated { id, layer } => {
             let bounds = layer.bbox;
             // A filter layer's stream can itself be cut mid-frame — nothing
@@ -1143,10 +1545,13 @@ fn cut_at(
     };
 
     let mut ops: Vec<RoundOp> = Vec::new();
+    let mut samples: Vec<BackdropSample> = Vec::new();
     for stream in stack.get_mut(index..end).unwrap_or(&mut []) {
         ops.append(&mut stream.ops);
+        samples.append(&mut stream.samples);
     }
-    let released = released_pages(&ops);
+    let mut released = released_pages(&ops);
+    release_samples(&samples, &mut released);
     for parity in &released {
         pages.release(*parity);
     }
@@ -1156,9 +1561,131 @@ fn cut_at(
         ops,
         released,
         filter: None,
+        copy: None,
+        samples,
     });
 
     Ok(true)
+}
+
+/// Emits the rounds a backdrop blur at the frame root costs, leaving the page
+/// holding the blurred region sampled by the root stream (see the module
+/// header's *Backdrop rounds*).
+///
+/// Three steps, in order: the surface round open so far is emitted whatever it
+/// holds, so everything painted before the backdrop has landed before anything
+/// reads it back; a [region-copy](RegionCopy) round seeds a page with the
+/// backdrop's region of the frame's target; and the blur's own pass sequence
+/// runs over that page exactly as a filter layer's does. The result stays held
+/// until the surface round that draws the backdrop's rectangle ends.
+///
+/// `stack` holds the frame root and nothing but inlined layers above it — the
+/// caller serves a backdrop nowhere else — so cutting it leaves no page held
+/// and both groups are free for the copy and the passes.
+fn backdrop_rounds(
+    backdrop: &Backdrop,
+    stack: &mut [Stream<'_>],
+    rounds: &mut Vec<Round>,
+    pages: &mut LivePages,
+    caps: &TierCaps,
+    config: &PageConfig,
+) -> Result<(), EngineError> {
+    flush_surface(stack, rounds, pages);
+
+    let id = backdrop.layer;
+    let region = backdrop.region;
+    let size = filter_page_size(region, config, caps)?;
+    let contents = pages.acquire(PageParity::Even).ok_or_else(|| {
+        escalate(format!(
+            "backdrop layer {id} found no free page group for its region copy after the surface \
+             round ahead of it was cut"
+        ))
+    })?;
+    rounds.push(Round {
+        // Cleared and then written by the copy: the page's previous holder
+        // must not show past the copied region, where the kernels read.
+        target: RoundTarget::Page(PageTarget {
+            layer: id,
+            depth: 1,
+            parity: contents,
+            size,
+            bounds: region,
+            continued: false,
+        }),
+        ops: Vec::new(),
+        released: Vec::new(),
+        filter: None,
+        copy: Some(RegionCopy { source: region }),
+        samples: Vec::new(),
+    });
+
+    let steps = blur::blur_passes(&backdrop.blur(), SizeU16::from(region));
+    let regular = RecordedLayerKind::Regular;
+    let blurred = pass_rounds(
+        &FilterLayer {
+            id,
+            kind: &regular,
+            depth: 1,
+            bounds: region,
+            size,
+            contents,
+        },
+        &steps,
+        stack,
+        rounds,
+        pages,
+        caps,
+        config,
+    )?;
+
+    if let Some(root) = stack.first_mut() {
+        root.samples.push(BackdropSample {
+            layer: id,
+            parity: blurred,
+        });
+    }
+    Ok(())
+}
+
+/// Emits everything the frame root and the inlined layers above it have
+/// accumulated as a surface round of its own — unconditionally, unlike
+/// [`cut_at`], which cuts only to hand a page back — or nothing when nothing
+/// has accumulated since the last one.
+fn flush_surface(stack: &mut [Stream<'_>], rounds: &mut Vec<Round>, pages: &mut LivePages) {
+    let mut ops: Vec<RoundOp> = Vec::new();
+    let mut samples: Vec<BackdropSample> = Vec::new();
+    for stream in stack.iter_mut() {
+        ops.append(&mut stream.ops);
+        samples.append(&mut stream.samples);
+    }
+    if ops.is_empty() && samples.is_empty() {
+        return;
+    }
+    let mut released = released_pages(&ops);
+    release_samples(&samples, &mut released);
+    for parity in &released {
+        pages.release(*parity);
+    }
+    if let Some(root) = stack.first_mut() {
+        root.emitted = true;
+    }
+    rounds.push(Round {
+        target: RoundTarget::Root,
+        ops,
+        released,
+        filter: None,
+        copy: None,
+        samples,
+    });
+}
+
+/// Adds the pages `samples` holds to `released`, each listed once.
+fn release_samples(samples: &[BackdropSample], released: &mut Vec<PageParity>) {
+    for sample in samples {
+        if !released.contains(&sample.parity) {
+            released.push(sample.parity);
+        }
+    }
 }
 
 /// How a recorded layer is served.
@@ -1228,6 +1755,11 @@ struct Stream<'a> {
     /// Whether this stream renders nothing at all: it is a layer covering no
     /// pixels, or nested inside one.
     suppressed: bool,
+    /// The blurred backdrop pages the ops accumulated since this stream's last
+    /// round sample — only ever the frame root's, since a backdrop is served
+    /// nowhere else. They travel with the ops into whichever round emits them,
+    /// which releases them.
+    samples: Vec<BackdropSample>,
 }
 
 impl<'a> Stream<'a> {
@@ -1242,6 +1774,7 @@ impl<'a> Stream<'a> {
             emitted: false,
             page: None,
             suppressed: false,
+            samples: Vec::new(),
         }
     }
 
@@ -1258,6 +1791,7 @@ impl<'a> Stream<'a> {
             emitted: false,
             page: None,
             suppressed,
+            samples: Vec::new(),
         }
     }
 
@@ -1272,6 +1806,30 @@ impl<'a> Stream<'a> {
             emitted: false,
             page: None,
             suppressed,
+            samples: Vec::new(),
+        }
+    }
+
+    /// A retained body's stream, at its parent's depth: the body renders into
+    /// the store's page, not a pooled one, so it consumes no level of the
+    /// chain its nested layers alternate along.
+    fn retained(
+        id: u32,
+        layer: &'a RecordedLayer,
+        bracket: u32,
+        depth: usize,
+        suppressed: bool,
+    ) -> Self {
+        Self {
+            owner: StreamOwner::Retained { id, layer, bracket },
+            nodes: &layer.nodes,
+            index: 0,
+            depth,
+            ops: Vec::new(),
+            emitted: false,
+            page: None,
+            suppressed,
+            samples: Vec::new(),
         }
     }
 
@@ -1300,6 +1858,16 @@ enum StreamOwner<'a> {
         id: u32,
         /// The recorded layer, for its bounds and its opacity.
         layer: &'a RecordedLayer,
+    },
+    /// A retained body, with rounds of its own into the store's page.
+    Retained {
+        /// The layer's index into
+        /// [`CommandRecorder::layers`](vello_common::record::CommandRecorder::layers).
+        id: u32,
+        /// The recorded layer, for its bounds and its opacity.
+        layer: &'a RecordedLayer,
+        /// The retained bracket the page belongs to.
+        bracket: u32,
     },
 }
 
@@ -1462,6 +2030,7 @@ fn released_pages(ops: &[RoundOp]) -> Vec<PageParity> {
 
     for op in ops {
         if let RoundOp::Composite(composite) = op
+            && composite.retained.is_none()
             && !pages.contains(&composite.parity)
         {
             pages.push(composite.parity);

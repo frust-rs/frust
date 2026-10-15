@@ -342,6 +342,10 @@ Store independent baselines for:
 - `engine-metal-macos/`: the Mac M4 rig's engine class — baselines promoted
   across the unit/widget/page/text corpus and, since the p6-d1 verification
   round, the filter family too.
+- Phase 3 cases `unit-clip-path-star`, `unit-clip-path-concave` and `unit-backdrop-blur` have `cpu/`
+  and `engine-vulkan-nvidia-t400/` baselines; `engine-metal-macos/` baselines are owed. The backdrop
+  case compares with the clip rim eroded (the CPU oracle blurs its own canvas, exact for device σ <= 2).
+  `wasm_goldens.rs` carries no row for these three yet — drift deferred, not fixed here.
 - No independent `engine-webgl2-*` golden class exists, but the arm is covered: `crates/frust-testing`'s
   non-default `webgl` feature (`tests/wasm_goldens.rs`, `tests/wasm_binary_invariants.rs`) runs the unit
   corpus through `frust-engine` on a real `wgpu::Backend::Gl` adapter via `wasm-bindgen-test` in headless

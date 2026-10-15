@@ -28,6 +28,19 @@
 //! everything drawn over it); `Straight` describes the *swapchain* this pass
 //! then writes, not the buffer it reads.
 //!
+//! **A plain copy, for a frame that has to read itself back.** A frame carrying
+//! a backdrop blur reads a region of its own target back into a page
+//! ([`crate::renderer::RegionCopyMode`]), which a swapchain — `RENDER_ATTACHMENT`
+//! only, never widened — cannot be read back from. [`CopyPresentPass`] serves
+//! that frame on an opaque or premultiplied surface: the host renders it into
+//! an intermediate of the swapchain's own format and this pass copies it
+//! across, one full-screen quad through the engine's own region-copy program
+//! (`copy.wgsl`), sharing the conversion pass's plumbing — a pass the caller
+//! records into its own encoder, clearing a fresh swapchain image, reading one
+//! sampled texture. It costs one full-screen fragment pass on exactly the
+//! frames that carry a backdrop; a straight-alpha surface already renders
+//! every frame into an intermediate and needs no second pass.
+//!
 //! **The caller owns the encoder.** [`UnpremultiplyPass::record`] records into
 //! a `wgpu::CommandEncoder` it is handed and never submits, the same
 //! single-submit contract `frust_gpu::encoder` states and
@@ -40,7 +53,8 @@ use std::sync::Arc;
 use frust_gpu::lint::PipelineLayoutDesc;
 use frust_gpu::{PipelineCache, RenderPipelineDesc, ShaderId, ShaderLibrary};
 
-use super::pipelines::{FS_MAIN, VS_MAIN};
+use super::pipelines::{FS_MAIN, TOPOLOGY, VS_MAIN, copy_vertex_layout};
+use super::shader_src::{COPY, COPY_NAME};
 use crate::OutputAlpha;
 
 /// The conversion program, loaded from the shader directory like every other
@@ -172,30 +186,18 @@ impl UnpremultiplyPass {
         target_view: &wgpu::TextureView,
         timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
     ) {
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("frust-engine unpremultiply bind group"),
-            layout: &self.bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(source_view),
-            }],
-        });
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("frust-engine unpremultiply pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target_view,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
+        let bind_group = source_bind_group(
+            device,
+            &self.bind_group_layout,
+            source_view,
+            "frust-engine unpremultiply bind group",
+        );
+        let mut pass = begin_present(
+            encoder,
+            target_view,
+            "frust-engine unpremultiply pass",
             timestamp_writes,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
+        );
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
         pass.draw(0..FULLSCREEN_VERTICES, 0..1);
@@ -231,9 +233,209 @@ impl UnpremultiplyPass {
     }
 }
 
+/// Vertices the copy program's one quad draws (`copy.wgsl`'s `quad_corner`,
+/// a triangle strip).
+const COPY_QUAD_VERTICES: u32 = 4;
+
+/// One copy instance: four `u16` pairs ([`copy_vertex_layout`]).
+const COPY_INSTANCE_BYTES: u64 = 16;
+
+/// The plain present pass for one surface: the frame, rendered into an
+/// intermediate of the swapchain's own format, copied into the swapchain
+/// unconverted (see the module doc's *A plain copy*).
+///
+/// Built once per surface configure, like [`UnpremultiplyPass`]: a pipeline
+/// for the swapchain's format, the bind-group layout its program derived, and
+/// the one 16-byte instance the quad is drawn from.
+#[derive(Debug)]
+pub struct CopyPresentPass {
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    instance: wgpu::Buffer,
+    format: wgpu::TextureFormat,
+}
+
+impl CopyPresentPass {
+    /// Builds the pass for a `format` target, through a pipeline cache of its
+    /// own exactly as [`UnpremultiplyPass::new`] does — a surface configure is
+    /// not a frame, so the one pipeline is compiled here.
+    #[must_use]
+    pub fn new(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        driver_cache: Option<&wgpu::PipelineCache>,
+    ) -> Self {
+        let mut library = ShaderLibrary::new();
+        let shader = library.insert_wgsl(device, COPY_NAME, COPY);
+        let mut pipelines = PipelineCache::new(Arc::new(library), driver_cache.cloned());
+        let pipeline = pipelines
+            .get_or_create(device, &Self::desc(shader, format))
+            .clone();
+        let bind_group_layout = pipeline.get_bind_group_layout(0);
+        let instance = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("frust-engine copy present instance"),
+            size: COPY_INSTANCE_BYTES,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self {
+            pipeline,
+            bind_group_layout,
+            instance,
+            format,
+        }
+    }
+
+    /// The target format this pass was built for — the swapchain's own.
+    #[must_use]
+    pub fn format(&self) -> wgpu::TextureFormat {
+        self.format
+    }
+
+    /// Records the copy into `encoder`: reads `source_view` (the intermediate
+    /// the frame was rendered into, `width` x `height` like the swapchain) and
+    /// writes it unconverted over the whole of `target_view` (the acquired
+    /// swapchain texture). The caller submits `encoder`.
+    ///
+    /// The instance is written through `queue` and lands ahead of the command
+    /// buffer the caller submits, so a resize between frames is honoured by
+    /// the very next one. The attachment is cleared rather than loaded, for
+    /// [`UnpremultiplyPass::record`]'s reason. `timestamp_writes` is that
+    /// method's too.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the device, queue and encoder the pass records with, its two views,                   their shared extent and the timestamp sink, each supplied by a                   different owner"
+    )]
+    pub fn record(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        source_view: &wgpu::TextureView,
+        target_view: &wgpu::TextureView,
+        size: (u32, u32),
+        timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
+    ) {
+        let width = u16::try_from(size.0).unwrap_or(u16::MAX);
+        let height = u16::try_from(size.1).unwrap_or(u16::MAX);
+        let extent = u32::from(width) | (u32::from(height) << 16);
+        // Destination origin, source origin, region size, destination size.
+        let instance: [u32; 4] = [0, 0, extent, extent];
+        queue.write_buffer(&self.instance, 0, bytemuck::cast_slice(&instance));
+        let bind_group = source_bind_group(
+            device,
+            &self.bind_group_layout,
+            source_view,
+            "frust-engine copy present bind group",
+        );
+        let mut pass = begin_present(
+            encoder,
+            target_view,
+            "frust-engine copy present pass",
+            timestamp_writes,
+        );
+        pass.set_pipeline(&self.pipeline);
+        pass.set_vertex_buffer(0, self.instance.slice(..));
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..COPY_QUAD_VERTICES, 0..1);
+    }
+
+    /// This pass's shape as the downlevel lint reads it — one bind group, one
+    /// instance buffer of four `u32` attributes, no uniform.
+    #[must_use]
+    pub fn layout_desc() -> PipelineLayoutDesc {
+        let layout = copy_vertex_layout();
+        PipelineLayoutDesc {
+            bind_group_count: 1,
+            max_vertex_buffers: 1,
+            total_vertex_attributes: layout.attributes.len(),
+            max_vertex_buffer_stride: layout.array_stride as usize,
+            sample_count: 1,
+            uniform_buffer_sizes: Vec::new(),
+        }
+    }
+
+    /// The copy program drawn into the swapchain's format: its instance
+    /// layout, the engine's strip topology, no blend (the pass replaces every
+    /// pixel), no depth.
+    fn desc(shader: ShaderId, format: wgpu::TextureFormat) -> RenderPipelineDesc {
+        RenderPipelineDesc {
+            vertex_layouts: vec![copy_vertex_layout()],
+            topology: TOPOLOGY,
+            ..RenderPipelineDesc::new(shader, VS_MAIN, FS_MAIN, format)
+        }
+    }
+}
+
+/// The present passes' one bind group: their source texture, at binding 0.
+fn source_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    source_view: &wgpu::TextureView,
+    label: &str,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::TextureView(source_view),
+        }],
+    })
+}
+
+/// Begins a present pass over `target_view`, clearing it: the destination is a
+/// fresh swapchain image whose prior contents mean nothing.
+fn begin_present<'encoder>(
+    encoder: &'encoder mut wgpu::CommandEncoder,
+    target_view: &wgpu::TextureView,
+    label: &str,
+    timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
+) -> wgpu::RenderPass<'encoder> {
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some(label),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: target_view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_copy_present_layout_passes_the_downlevel_lint() {
+        let violations = frust_gpu::lint_pipeline_layout(&CopyPresentPass::layout_desc());
+        assert!(
+            violations.is_empty(),
+            "the copy present pass violates a downlevel design rule: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn the_copy_present_program_is_the_engines_own_region_copy() {
+        assert!(COPY.contains("fn vs_main"));
+        assert!(COPY.contains("fn fs_main"));
+        assert!(
+            !COPY.contains("@compute"),
+            "the copy is a render pass, never a compute one (E1)"
+        );
+        assert!(
+            !COPY.contains("texture_storage_"),
+            "a swapchain on this tier is RENDER_ATTACHMENT-only (E2)"
+        );
+    }
 
     /// The pass is selected by the swapchain's own alpha convention, and by
     /// nothing else.

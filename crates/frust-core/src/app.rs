@@ -645,6 +645,35 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     /// out under another epoch lays out again, so a bump invalidates every
     /// cached layout at once. Starts at `1`, past a fresh pod's `0`.
     layout_epoch: u64,
+    /// The paint epoch threaded into every paint pass ([`PaintCtx::subtree_clean`]):
+    /// bumped with every layout-epoch bump, by a surface-translucency flip, and
+    /// at the start of a paint that follows a hover-link or focus-session
+    /// change (see `painted_links`), so a pod painted under another epoch is
+    /// never reported clean.
+    paint_epoch: u64,
+    /// The serial of the most recent [`RenderRoot::paint`] (`0` before the
+    /// first): each paint mints the next one, threads it to every pod
+    /// ([`PaintCtx::paint_serial`]) and reports it on
+    /// [`PaintOutcome::paint_serial`].
+    paint_serial: u64,
+    /// The hover link as the last completed hover pass left it: `None` while
+    /// nothing holds hover, otherwise the claimant pod's
+    /// [`ChildPod::inspect_id`](crate::widget::ChildPod::inspect_id) (`0` for a
+    /// claim the root widget made itself). Unlike `hover_epoch`, which advances
+    /// on every hover pass, this moves only when hover begins, moves to another
+    /// claimant, or ends.
+    hover_link: Option<u64>,
+    /// `(hover_link, focus_epoch)` as the last paint saw them. Both are read at
+    /// paint time ([`PaintCtx::is_hovered`], [`PaintCtx::has_focus`]) from links
+    /// the root moves without visiting the pod that loses one, so a paint that
+    /// finds either changed bumps `paint_epoch`: no retained page recorded
+    /// under the old link may be drawn under the new one.
+    painted_links: (Option<u64>, u64),
+    /// Whether retained layers are enabled ([`RenderRoot::set_retained_layers`]).
+    retained_layers: bool,
+    /// The renderer's resident-key ledger as of the previous frame
+    /// ([`RenderRoot::set_retained_ledger`]); empty until a shell sets one.
+    retained_ledger: crate::retained::RetainedLedger,
     /// Whether layout passes may skip clean pods ([`RenderRoot::set_layout_skip`]);
     /// `true` by default. `false` forces every pod to lay out every pass — the
     /// kill switch a shell wires to an environment variable (this crate reads
@@ -715,6 +744,13 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             selection_toolbar: None,
             selection_toolbar_gen: 0,
             layout_epoch: 1,
+            paint_epoch: 1,
+            paint_serial: 0,
+            hover_link: None,
+            // The links a fresh root starts with (no hover, focus epoch `1`).
+            painted_links: (None, 1),
+            retained_layers: true,
+            retained_ledger: crate::retained::RetainedLedger::empty(),
             layout_skip: true,
             layout_audit: LayoutAudit::default(),
             overlay_pods: Vec::new(),
@@ -789,6 +825,30 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// tree.
     fn bump_layout_epoch(&mut self) {
         self.layout_epoch = self.layout_epoch.wrapping_add(1);
+        self.paint_epoch = self.paint_epoch.wrapping_add(1);
+    }
+
+    /// Enable or disable retained layers (default on). When off,
+    /// [`PaintCtx::subtree_clean`] answers `false` for every pod, so a boundary
+    /// widget repaints its child every frame. The core never reads the
+    /// environment: a shell wires `FRUST_NO_RETAINED_LAYERS` to this.
+    pub fn set_retained_layers(&mut self, enabled: bool) {
+        self.retained_layers = enabled;
+    }
+
+    /// Hand the root the renderer's resident-key ledger, as published after the
+    /// previous frame (one frame stale by design). Consulted by
+    /// [`PaintCtx::retained_available`]; defaults to empty (nothing resident).
+    /// Cloned only when it differs from the stored one.
+    pub fn set_retained_ledger(&mut self, ledger: &crate::retained::RetainedLedger) {
+        if self.retained_ledger != *ledger {
+            self.retained_ledger.clone_from(ledger);
+        }
+    }
+
+    /// Whether retained layers are enabled ([`RenderRoot::set_retained_layers`]).
+    pub fn retained_layers(&self) -> bool {
+        self.retained_layers
     }
 
     /// Whether any floated surface the last paint drew is layout-dirty (see
@@ -918,6 +978,9 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             return;
         }
         self.surface_translucent = translucent;
+        // Translucency is read at paint time only: no relayout, but every
+        // retained subtree is stale.
+        self.paint_epoch = self.paint_epoch.wrapping_add(1);
         self.pending |= ChangeFlags::PAINT;
     }
 
@@ -1237,6 +1300,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     fn end_hover_link(&mut self) {
         self.hover_epoch = self.hover_epoch.wrapping_add(1);
         self.hover_active = false;
+        self.hover_link = None;
         crate::event::set_live_hover_link(self.root_identity, 0);
     }
 
@@ -1342,6 +1406,12 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// [`WidgetTree::inspect_layout_dirty`].
     pub fn inspect_layout_dirty(&self) -> Vec<(WidgetId, bool)> {
         self.tree.inspect_layout_dirty()
+    }
+
+    /// Per-node paint-dirty state, read-only — see
+    /// [`WidgetTree::inspect_paint_dirty`].
+    pub fn inspect_paint_dirty(&self) -> Vec<(WidgetId, bool)> {
+        self.tree.inspect_paint_dirty()
     }
 
     /// Run the build closure, then build (first call) or rebuild (subsequent calls)
@@ -1773,8 +1843,20 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // channel mirrors one root, and the pods about to be visited must
         // compare their stamps against *this* root's session.
         self.publish_focus_session();
+        // Number this pass (see `paint_serial`).
+        self.paint_serial = self.paint_serial.wrapping_add(1);
+        // A hover link or focus session that moved since the last paint changes
+        // what pods read at paint time without having dirtied the pod that lost
+        // it, so no subtree painted under the old links is clean (see
+        // `PaintCtx::subtree_clean`).
+        let links = (self.hover_link, self.focus_epoch);
+        if links != self.painted_links {
+            self.painted_links = links;
+            self.paint_epoch = self.paint_epoch.wrapping_add(1);
+        }
 
         let (mut outcome, main_tree_ime) = self.paint_main_tree(scene, frame_time);
+        outcome.paint_serial = self.paint_serial;
 
         // Drain what the main tree registered and paint it above everything.
         // Sorting is stable, so the band decides and registration order breaks
@@ -1890,6 +1972,9 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // Same disjoint `Copy` read: the surface-translucency flag the
         // platform-view hole-punch reads (see `PaintCtx::is_translucent`).
         let surface_translucent = self.surface_translucent;
+        let (paint_epoch, retained_layers) = (self.paint_epoch, self.retained_layers);
+        let paint_serial = self.paint_serial;
+        let retained_ledger = &self.retained_ledger;
         if let Some(pod) = self.tree.pod_mut(root_id) {
             let mut ctx = PaintCtx::new(pod.origin(), pod.size());
             // Seed the shared shell clock so the whole paint pass sees one time.
@@ -1906,6 +1991,12 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             // platform-view hole-punch gates its rect-clear on it — see
             // `PaintCtx::is_translucent`).
             ctx.set_translucent(surface_translucent);
+            ctx.set_paint_state(
+                paint_epoch,
+                retained_layers,
+                Some(retained_ledger),
+                paint_serial,
+            );
             // Seed the root widget's paint-time focus from the session mirror so
             // a leaf-root editable observes its own focus, and thread the live
             // session's identity down beside it: deeper focus is resolved
@@ -2031,6 +2122,8 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                 // resolves it against the live theme's cap — see
                 // `PaintCtx::request_frame_paced_at`.
                 paced_interval: ctx.paced_interval(),
+                // Stamped by `paint` once both halves of the pass have run.
+                paint_serial: 0,
             };
             (outcome, main_tree_ime)
         } else {
@@ -2095,6 +2188,9 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // The same disjoint field borrows the main pass takes, for the same
         // reason: the theme is lent immutably into each context while other
         // fields of `self` are written.
+        let (paint_epoch, retained_layers) = (self.paint_epoch, self.retained_layers);
+        let paint_serial = self.paint_serial;
+        let retained_ledger = &self.retained_ledger;
         let theme = self.theme.as_deref();
         let presented_frames = self.presented_frames;
         let surface_translucent = self.surface_translucent;
@@ -2117,6 +2213,12 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             ctx.set_window_insets(entry.insets);
             ctx.set_presented_frames(presented_frames);
             ctx.set_translucent(surface_translucent);
+            ctx.set_paint_state(
+                paint_epoch,
+                retained_layers,
+                Some(retained_ledger),
+                paint_serial,
+            );
             // Seeded from the root's own mirrors exactly as the root pod's
             // context is, so a focused editable inside a floated pod observes its
             // focus (and a hovered one its hover) through the ordinary
@@ -2613,6 +2715,8 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             && self.contacts_captor_is_root;
         let root_opted_in;
 
+        // The claimant pod this dispatch records, if any (see `hover_link`).
+        crate::widget::clear_hover_claimant();
         let (handled, needs_redraw, captured, hover_claimed, focus_req, focus_rel, ime) = {
             let state_any: &mut dyn Any = state;
             let mut ctx = EventCtx::new(state_any, pod.origin(), pod.size());
@@ -3016,9 +3120,13 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // A claim only counts on a `hover_pass` — an ineligible pass records none
         // anyway, but stating it here keeps the mirror true by construction rather
         // than by the eligibility gate alone.
+        let hover_claimant = crate::widget::take_hover_claimant();
         if hover_pass || hover_ends {
             self.hover_epoch = self.hover_epoch.wrapping_add(1);
             self.hover_active = hover_pass && hover_claimed;
+            // The link's identity, for the paint-epoch fold: the claimant pod,
+            // or `0` for a claim the root widget made with no pod of its own.
+            self.hover_link = self.hover_active.then(|| hover_claimant.unwrap_or(0));
             // Republish the link a dropping pod checks its stamp against, so a
             // rebuild that removes the claimant can report the severance the
             // epoch alone cannot strand (see `ChildPod`'s `Drop`). Epoch `0` while
@@ -3064,7 +3172,9 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // another* is repainted by the new claimant's change-gated
         // `request_redraw`, and because a repaint is global, that one frame is also
         // what lets the widget losing the link drop its overlay from
-        // `PaintCtx::is_hovered`. This mirror is identity-free, so an A→B handoff
+        // `PaintCtx::is_hovered` (a retained page holding the loser's hovered
+        // body is not drawn on it: the moved `hover_link` bumps the paint epoch,
+        // see `painted_links`). This mirror is identity-free, so an A→B handoff
         // is `true`→`true` here and manufactures nothing — which is exactly why the
         // consumer's internal flag is normative (see `EventCtx::claim_hover`).
         let needs_redraw = needs_redraw || (hover_was_active && !self.hover_active);

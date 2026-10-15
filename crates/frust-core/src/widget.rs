@@ -48,6 +48,13 @@ use crate::sliver::{SliverConstraints, SliverGeometry, SliverWidget};
 /// compatibility with existing recorder-style test scenes; real text rendering
 /// goes through [`PaintScene::draw_glyph_run`], which carries shaped glyphs from
 /// `frust-text`.
+///
+/// # Retained-page contract
+///
+/// A renderer that does not retain and never publishes a ledger paints every
+/// [`PaintScene::push_retained`] body inline and is never sent
+/// [`PaintScene::draw_retained`]. A renderer that publishes a ledger must serve
+/// every key that ledger lists or refuse the frame.
 pub trait PaintScene {
     /// Emit a filled axis-aligned rectangle at `origin` with `size`, filled with
     /// the solid `color`.
@@ -119,8 +126,31 @@ pub trait PaintScene {
         self.push_clip_rounded(origin, size, radii.largest());
     }
 
-    /// Pop the most recently pushed clip, rectangular or rounded. Defaulted to
-    /// a no-op; see [`PaintScene::push_clip`].
+    /// Push a clip to an arbitrary closed outline onto the backend clip stack;
+    /// subsequent draws are clipped to `path`'s interior (nonzero winding)
+    /// until the matching [`PaintScene::pop_clip`] — the same pop every other
+    /// clip uses.
+    ///
+    /// `path` is in the widget's local coordinate space and `origin`
+    /// translates it into the parent's, exactly as [`PaintScene::fill_path`]'s
+    /// does. The renderer lowers it to a coverage mask, never a layer page, so
+    /// a [`PaintScene::push_retained`] body under it paints inline rather than
+    /// being retained (see [`frust_scene::Command::PushClipPath`]).
+    ///
+    /// Defaulted to a rectangular [`PaintScene::push_clip`] of the path's
+    /// bounding box rather than to a no-op — like
+    /// [`PaintScene::push_clip_rounded_radii`], a defaulted *push* against an
+    /// implemented *pop* would unbalance a recorder scene's clip stack, and the
+    /// bounding box is the tightest rectangle that never clips away anything
+    /// the path would have kept. The `SceneBuilder` implementation records a
+    /// real [`frust_scene::Command::PushClipPath`].
+    fn push_clip_path(&mut self, origin: Point, path: &BezPath) {
+        let bounds = kurbo::Shape::bounding_box(path);
+        self.push_clip(origin + bounds.origin().to_vec2(), bounds.size());
+    }
+
+    /// Pop the most recently pushed clip, rectangular, rounded or path.
+    /// Defaulted to a no-op; see [`PaintScene::push_clip`].
     fn pop_clip(&mut self) {}
 
     /// Emit a run of *unshaped* text anchored at `origin`.
@@ -334,34 +364,69 @@ pub trait PaintScene {
     /// Defaulted to a no-op; see [`PaintScene::push_transform`].
     fn pop_transform(&mut self) {}
 
-    /// Push a snapshot bracket: the body is rasterizable once and cached by
+    /// Push a retained bracket: the body is rasterizable once and cached by
     /// `key` across frames. The `alpha` and `scale` are presentation parameters
     /// applied to the whole cached body (alpha blending, uniform scale).
     ///
     /// The default implementation emulates the presentation for recorders
-    /// that don't have a snapshot concept: it pushes a transform (scale about
-    /// the rect's center), then a layer (at the rect with the given alpha).
-    /// A renderer may cache and apply both as a whole; a recorder sees the
-    /// component pieces. The matching [`PaintScene::pop_snapshot`] pops both
-    /// in the reverse order.
+    /// that don't have a retained-layer concept: it pushes a transform (scale
+    /// about the rect's center), then a layer (at the rect with the given
+    /// alpha). A renderer may cache and apply both as a whole; a recorder sees
+    /// the component pieces. The matching [`PaintScene::pop_retained`] pops
+    /// both in the reverse order.
     ///
-    /// [`SceneBuilder`] overrides this to call the snapshot-aware builder
-    /// methods directly, which record `Command::PushSnapshot`/`PopSnapshot`
+    /// [`SceneBuilder`] overrides this to call the retained-aware builder
+    /// methods directly, which record `Command::PushRetained`/`PopRetained`
     /// and no extra transform/layer commands.
-    fn push_snapshot(&mut self, _key: u64, origin: Point, size: Size, alpha: f32, scale: f64) {
+    fn push_retained(&mut self, _key: u64, origin: Point, size: Size, alpha: f32, scale: f64) {
         let center = Point::new(origin.x + size.width / 2.0, origin.y + size.height / 2.0);
         self.push_transform(Affine::scale_about(scale, center));
         self.push_layer(origin, size, alpha);
     }
 
-    /// Pop the most recently pushed snapshot bracket. Defaulted to the reverse
-    /// of [`PaintScene::push_snapshot`]'s default: pop layer, then transform.
+    /// Pop the most recently pushed retained bracket. Defaulted to the reverse
+    /// of [`PaintScene::push_retained`]'s default: pop layer, then transform.
     /// Recorders that don't override both may see unbalanced stacks if only one
     /// is overridden; the default pair is provided for source compatibility.
-    fn pop_snapshot(&mut self) {
+    fn pop_retained(&mut self) {
         self.pop_layer();
         self.pop_transform();
     }
+
+    /// Draw the body retained under `key` from its cached page (see
+    /// [`Command::DrawRetained`]). Only valid when the resident-key ledger
+    /// said `key` is resident; the default is a no-op for recorders with no
+    /// retained-layer concept, which never receive such a call.
+    ///
+    /// Contract: a renderer that does not retain and never publishes a ledger
+    /// paints every `push_retained` body inline and is never sent this call; a
+    /// renderer that publishes a ledger must serve every key it lists or refuse
+    /// the frame.
+    fn draw_retained(&mut self, _key: u64, _origin: Point, _size: Size, _alpha: f32, _scale: f64) {}
+
+    /// The transform the next command would be recorded under — every
+    /// [`PaintScene::push_transform`] still open, the shell's device scale
+    /// included — or `None` for a scene that does not track one.
+    ///
+    /// A retained-page boundary reads it to ask the resident-key ledger for the
+    /// page at the scale it is about to be drawn at (a page is reusable only
+    /// under its own linear part). `None` is read as the identity. Defaulted so
+    /// recorder scenes stay valid; [`SceneBuilder`] reports its own.
+    fn current_transform(&self) -> Option<Affine> {
+        None
+    }
+
+    /// Blur whatever is already painted beneath the rectangle at
+    /// `origin`/`size` — a frosted-glass backdrop — with a Gaussian of
+    /// standard deviation `radius` (see
+    /// [`frust_scene::Command::BackdropBlur`]).
+    ///
+    /// Everything painted before this call is the backdrop; whatever the
+    /// widget paints after it lands on top of the blurred region. A clip open
+    /// around the call masks the blurred region like any other paint.
+    /// Defaulted to a no-op so recorder scenes stay valid; the
+    /// [`SceneBuilder`] implementation records the real command.
+    fn backdrop_blur(&mut self, _origin: Point, _size: Size, _radius: f64) {}
 }
 
 /// A [`PaintScene`] sink that accepts every paint command and records
@@ -436,6 +501,10 @@ impl PaintScene for SceneBuilder<'_> {
 
     fn push_clip_rounded_radii(&mut self, origin: Point, size: Size, radii: CornerRadii) {
         SceneBuilder::push_clip_rounded_radii(self, rect_at(origin, size), radii);
+    }
+
+    fn push_clip_path(&mut self, origin: Point, path: &BezPath) {
+        SceneBuilder::push_clip_path(self, path_at(origin, path));
     }
 
     fn pop_clip(&mut self) {
@@ -519,12 +588,24 @@ impl PaintScene for SceneBuilder<'_> {
         SceneBuilder::pop_transform(self);
     }
 
-    fn push_snapshot(&mut self, key: u64, origin: Point, size: Size, alpha: f32, scale: f64) {
-        SceneBuilder::push_snapshot(self, key, rect_at(origin, size), alpha, scale);
+    fn push_retained(&mut self, key: u64, origin: Point, size: Size, alpha: f32, scale: f64) {
+        SceneBuilder::push_retained(self, key, rect_at(origin, size), alpha, scale);
     }
 
-    fn pop_snapshot(&mut self) {
-        SceneBuilder::pop_snapshot(self);
+    fn pop_retained(&mut self) {
+        SceneBuilder::pop_retained(self);
+    }
+
+    fn draw_retained(&mut self, key: u64, origin: Point, size: Size, alpha: f32, scale: f64) {
+        SceneBuilder::draw_retained(self, key, rect_at(origin, size), alpha, scale);
+    }
+
+    fn current_transform(&self) -> Option<Affine> {
+        Some(SceneBuilder::current_transform(self))
+    }
+
+    fn backdrop_blur(&mut self, origin: Point, size: Size, radius: f64) {
+        SceneBuilder::backdrop_blur(self, rect_at(origin, size), radius);
     }
 }
 
@@ -1004,6 +1085,27 @@ pub struct PaintCtx<'a> {
     /// desktop app. Read by the platform-view hole-punch (see
     /// [`PaintCtx::is_translucent`]).
     translucent: bool,
+    /// The root's paint epoch, copied into each child like `translucent`: a
+    /// pod painted under another epoch is not clean ([`PaintCtx::subtree_clean`]).
+    /// Covers the paint-only global inputs the layout epoch does not (surface
+    /// translucency) and every layout-epoch bump (theme, insets, window size).
+    paint_epoch: u64,
+    /// Whether retained layers are enabled ([`crate::app::RenderRoot::set_retained_layers`]);
+    /// `false` makes [`PaintCtx::subtree_clean`] always answer `false`.
+    retained_layers: bool,
+    /// The renderer's resident-key ledger ([`crate::app::RenderRoot::set_retained_ledger`]),
+    /// copied down like `paint_epoch`; `None` reads as empty.
+    retained_ledger: Option<&'a crate::retained::RetainedLedger>,
+    /// The serial the render root minted for this paint pass, copied down like
+    /// `paint_epoch` ([`PaintCtx::paint_serial`]); `0` for a context no root
+    /// numbered.
+    paint_serial: u64,
+    /// How many paint-time side-channel publications this (sub)paint made — an
+    /// IME surface, a platform view, an input shield, an overlay registration,
+    /// a selection-toolbar request, a hero report — summed up through
+    /// [`ChildPod::paint_child`] like `platform_views`. See
+    /// [`PaintCtx::paint_publications`].
+    paint_publications: u32,
 }
 
 impl<'a> PaintCtx<'a> {
@@ -1037,6 +1139,11 @@ impl<'a> PaintCtx<'a> {
             platform_views: Vec::new(),
             input_shields: Vec::new(),
             translucent: false,
+            paint_epoch: 0,
+            retained_layers: true,
+            retained_ledger: None,
+            paint_serial: 0,
+            paint_publications: 0,
         }
     }
 
@@ -1055,6 +1162,16 @@ impl<'a> PaintCtx<'a> {
     /// [`PaintCtx::is_translucent`]).
     pub fn with_translucent(mut self, translucent: bool) -> Self {
         self.translucent = translucent;
+        self
+    }
+
+    /// Thread a renderer's resident-key ledger into this pass. Chainable
+    /// builder mirroring [`PaintCtx::with_theme`] — used by widget unit tests
+    /// exercising a retained-page boundary, which paints with no bracket at all
+    /// when no ledger is threaded ([`PaintCtx::retained_enabled`]); the render
+    /// root threads the real one ([`crate::app::RenderRoot::set_retained_ledger`]).
+    pub fn with_retained_ledger(mut self, ledger: &'a crate::retained::RetainedLedger) -> Self {
+        self.retained_ledger = Some(ledger);
         self
     }
 
@@ -1537,6 +1654,7 @@ impl<'a> PaintCtx<'a> {
     /// change. Bubbles up through [`ChildPod::paint_child`], mirroring
     /// [`Self::request_frame`].
     pub fn publish_ime_state(&mut self, state: ImeState) {
+        self.note_publication();
         self.ime_state = Some(state);
     }
 
@@ -1555,6 +1673,7 @@ impl<'a> PaintCtx<'a> {
     /// one pass must both survive. [`ChildPod::paint_child`] bubbles this by
     /// `extend`, never overwrite, for exactly that reason.
     pub fn publish_platform_view(&mut self, frame: PlatformViewFrame) {
+        self.note_publication();
         self.platform_views.push(frame);
     }
 
@@ -1580,6 +1699,7 @@ impl<'a> PaintCtx<'a> {
     /// intersection rule that decides which shields belong to which slot.
     /// Pushes (never overwrites) — see the `input_shields` field doc.
     pub fn report_input_shield(&mut self, rect: Rect) {
+        self.note_publication();
         self.input_shields.push(rect);
     }
 
@@ -1619,6 +1739,7 @@ impl<'a> PaintCtx<'a> {
     /// bare [`PaintCtx`]) is harmless: the entry is dropped by the next real
     /// pass's clear rather than leaking into it.
     pub fn register_overlay(&mut self, entry: crate::overlay::OverlayEntry) {
+        self.note_publication();
         crate::overlay::register(entry);
     }
 
@@ -1651,6 +1772,7 @@ impl<'a> PaintCtx<'a> {
         &mut self,
         request: crate::selection_toolbar::SelectionToolbarRequest,
     ) {
+        self.note_publication();
         crate::selection_toolbar::publish(request);
     }
 
@@ -1668,6 +1790,7 @@ impl<'a> PaintCtx<'a> {
     /// [`HeroDirective::Morph`] (repaint under a rect→rect transform to the
     /// morph destination).
     pub fn report_hero(&mut self, tag: &str, bounds: Rect) -> HeroDirective {
+        self.note_publication();
         match self.hero {
             Some(cell) => {
                 let mut frames = cell.borrow_mut();
@@ -1736,8 +1859,16 @@ impl<'a> PaintCtx<'a> {
             platform_views: Vec::new(),
             input_shields: Vec::new(),
             translucent: self.translucent,
+            paint_epoch: self.paint_epoch,
+            retained_layers: self.retained_layers,
+            retained_ledger: self.retained_ledger,
+            paint_serial: self.paint_serial,
+            paint_publications: 0,
         };
         f(&mut child);
+        self.paint_publications = self
+            .paint_publications
+            .saturating_add(child.paint_publications);
         if child.needs_frame {
             self.needs_frame = true;
         }
@@ -1844,6 +1975,127 @@ impl<'a> PaintCtx<'a> {
     /// threaded (copied down unchanged).
     pub(crate) fn set_translucent(&mut self, translucent: bool) {
         self.translucent = translucent;
+    }
+
+    /// Seed the root's paint epoch, the retained-layers switch, the renderer's
+    /// ledger and the pass's paint serial. Called by [`crate::app::RenderRoot`]
+    /// at each paint root and by [`ChildPod::paint_child`] for each child
+    /// (copied down unchanged).
+    pub(crate) fn set_paint_state(
+        &mut self,
+        paint_epoch: u64,
+        retained_layers: bool,
+        retained_ledger: Option<&'a crate::retained::RetainedLedger>,
+        paint_serial: u64,
+    ) {
+        self.paint_epoch = paint_epoch;
+        self.retained_layers = retained_layers;
+        self.retained_ledger = retained_ledger;
+        self.paint_serial = paint_serial;
+    }
+
+    /// The serial [`crate::app::RenderRoot::paint`] minted for this pass: `1`
+    /// for a root's first paint, one more for each paint after it, and `0` for
+    /// a context no root numbered ([`PaintCtx::new`], [`PaintCtx::for_test`]).
+    /// The same value leaves the pass on [`PaintOutcome::paint_serial`], rides
+    /// to the renderer with the scene, and comes back as the
+    /// [`frame`](crate::retained::RetainedLedger::frame) of the ledger
+    /// published once that scene was committed.
+    ///
+    /// A boundary widget remembers the serial it recorded its page in and
+    /// hands it to [`PaintCtx::retained_available`]: the ledger vouches for a
+    /// resident page only once it covers the scene that recorded it.
+    pub fn paint_serial(&self) -> u64 {
+        self.paint_serial
+    }
+
+    /// Whether the renderer still holds a retained page for `key` at `rect_px`
+    /// (physical-pixel extent, rounded to whole pixels) and `scale`, **and**
+    /// had committed the scene painted at `recorded_serial` (the
+    /// [`PaintCtx::paint_serial`] of the pass that recorded the page) when it
+    /// said so — the query a boundary widget makes to choose between drawing
+    /// the page (`PaintScene::draw_retained`) and painting its body again.
+    ///
+    /// Answers from the ledger the renderer published after an earlier frame,
+    /// so it can be stale; the serial is what keeps a stale answer from naming
+    /// an older recording than the widget's latest one (a scene dropped on its
+    /// way to the renderer leaves the previous page resident under the same
+    /// key — see [`crate::retained`]). Always `false` when retained layers are
+    /// switched off ([`crate::app::RenderRoot::set_retained_layers`]) or no
+    /// ledger was set.
+    pub fn retained_available(
+        &self,
+        key: crate::retained::RetainedKey,
+        rect_px: kurbo::Size,
+        scale: f32,
+        recorded_serial: u64,
+    ) -> bool {
+        let extent = (
+            rect_px.width.round().max(0.0) as u32,
+            rect_px.height.round().max(0.0) as u32,
+        );
+        self.retained_layers
+            && self
+                .retained_ledger
+                .is_some_and(|l| l.covers(recorded_serial) && l.is_resident(key, extent, scale))
+    }
+
+    /// Whether nothing under `pod` changed since it was last painted — the
+    /// query a boundary widget makes about the child pod it owns **before**
+    /// painting it. The boundary's own pod is dirty whenever anything beneath
+    /// it changed, so ask about the child, not about yourself.
+    ///
+    /// Clean means: no dirty source reached the pod since its last paint (a
+    /// PAINT/LAYOUT rebuild, layout running, a frame or layout request, a
+    /// consumed or redraw-requesting event), and the global paint epoch (theme,
+    /// insets, window size, surface translucency, the hover link, the focus
+    /// session) is unchanged. Always `false` when retained layers are switched
+    /// off ([`crate::app::RenderRoot::set_retained_layers`]), and for a pod
+    /// that has never been painted.
+    ///
+    /// **Hover and focus.** [`PaintCtx::is_hovered`] and
+    /// [`PaintCtx::has_focus`] are read at paint time from links the root moves
+    /// without visiting the pod that loses one (the pointer leaving a claimant
+    /// for a widget elsewhere routes along the new hit path only; a new focus
+    /// session strands the old holder by arithmetic). So the root folds both
+    /// into the paint epoch: a paint that follows a hover-link change (a hover
+    /// beginning, moving to another claimant, or ending) or a focus-session
+    /// change bumps it, and every boundary records its page again on that
+    /// paint. The cost is one re-record per boundary per hover/focus
+    /// transition — a transition already repaints the frame; a pointer move that
+    /// keeps the same claimant, or none, moves nothing.
+    pub fn subtree_clean(&self, pod: &ChildPod) -> bool {
+        self.retained_layers && !pod.paint_dirty && pod.painted_epoch == self.paint_epoch
+    }
+
+    /// Whether a boundary widget may bracket its body at all: retained layers
+    /// are switched on ([`crate::app::RenderRoot::set_retained_layers`]) and a
+    /// renderer ledger was threaded down (every [`crate::app::RenderRoot`]
+    /// paint threads one, empty until a shell publishes; a bare
+    /// [`PaintCtx::new`] carries none). When `false` a boundary paints its body
+    /// with no bracket — the renderer would still record a layer for one.
+    pub fn retained_enabled(&self) -> bool {
+        self.retained_layers && self.retained_ledger.is_some()
+    }
+
+    /// How many paint-time side-channel publications this (sub)paint has made
+    /// so far: [`PaintCtx::publish_ime_state`],
+    /// [`PaintCtx::publish_platform_view`], [`PaintCtx::report_input_shield`],
+    /// [`PaintCtx::register_overlay`], [`PaintCtx::publish_selection_toolbar`]
+    /// and [`PaintCtx::report_hero`] calls, including every descendant's.
+    ///
+    /// A boundary widget reads it before and after painting its body: those
+    /// channels are re-published every paint, so a body that used one must be
+    /// painted every frame — drawing its retained page instead would publish
+    /// nothing, and the surface, view or rect would vanish.
+    pub fn paint_publications(&self) -> u32 {
+        self.paint_publications
+    }
+
+    /// Count one paint-time side-channel publication (see
+    /// [`PaintCtx::paint_publications`]).
+    fn note_publication(&mut self) {
+        self.paint_publications = self.paint_publications.saturating_add(1);
     }
 }
 
@@ -2080,6 +2332,13 @@ pub struct PaintOutcome {
     /// `needs_frame_paced_only`; a shell latches it beside that flag and hands it
     /// to the frame gate, which resolves it against the live theme's cap.
     pub paced_interval: Option<Duration>,
+    /// The serial the render root minted for this paint
+    /// ([`PaintCtx::paint_serial`]): `1` for a root's first paint, one more for
+    /// each paint after it. A shell carries it with the painted scene and hands
+    /// it to the renderer before encoding that scene, so the resident-key
+    /// ledger the renderer publishes names the last scene it committed (see
+    /// [`crate::retained`]). `0` only from a `Default` outcome.
+    pub paint_serial: u64,
 }
 
 /// A retained UI element living in the widget tree.
@@ -2397,6 +2656,15 @@ pub struct ChildPod {
     /// [`ChildPod::mark_layout_dirty`]); cleared only
     /// by a layout that actually ran.
     layout_dirty: bool,
+    /// Whether anything under this pod may have changed since its subtree was
+    /// last painted ([`PaintCtx::subtree_clean`]). `true` for a fresh pod. Set
+    /// by every layout-dirty source (those marks imply it), by
+    /// [`ChildPod::mark_paint_dirty`] (a PAINT-only rebuild), and by this pod's
+    /// own layout actually running; cleared only by a pass whose
+    /// [`ChildPod::paint_child`] painted the child.
+    paint_dirty: bool,
+    /// The paint epoch the last paint that cleared `paint_dirty` ran under.
+    painted_epoch: u64,
     /// The constraints the last layout that ran was handed — `None` until one
     /// has. Half of the skip key: a parent handing different constraints lays
     /// the child out again.
@@ -2432,6 +2700,14 @@ thread_local! {
     /// shape: the widget tree is single-threaded, and an inspect walk runs
     /// behind `&self` with no allocator in scope to thread down.
     static NEXT_INSPECT_ID: Cell<u64> = const { Cell::new(ChildPod::INSPECT_ID_BASE) };
+
+    /// The pod that recorded this dispatch's hover claim — the claimant's own
+    /// pod, the first (deepest) one to stamp the claim on its way back up —
+    /// named by its [`ChildPod::inspect_id`]. Cleared by the render root before
+    /// a dispatch and taken after it ([`take_hover_claimant`]), so the root can
+    /// tell a hover that moved to another claimant from one that stayed: the
+    /// epoch alone advances on every hover pass.
+    static HOVER_CLAIMANT: Cell<Option<u64>> = const { Cell::new(None) };
 
     /// The focus session standing on this thread right now, as `(root identity,
     /// live epoch, claim epoch)` — published by [`crate::app::RenderRoot`] and
@@ -2544,6 +2820,19 @@ impl Drop for ChildPod {
     }
 }
 
+/// Forget any hover claimant recorded on this thread — called by the render root
+/// before a dispatch, so [`take_hover_claimant`] answers for that dispatch alone.
+pub(crate) fn clear_hover_claimant() {
+    HOVER_CLAIMANT.with(|claimant| claimant.set(None));
+}
+
+/// Take the [`ChildPod::inspect_id`] of the pod that recorded the last
+/// dispatch's hover claim (see `HOVER_CLAIMANT`), or `None` when no pod did —
+/// no claim at all, or one the root widget made itself.
+pub(crate) fn take_hover_claimant() -> Option<u64> {
+    HOVER_CLAIMANT.with(Cell::take)
+}
+
 impl ChildPod {
     /// Where [`ChildPod::inspect_id`]'s allocator starts.
     ///
@@ -2576,6 +2865,8 @@ impl ChildPod {
             inspect_id: Cell::new(None),
             // A fresh pod has never been laid out.
             layout_dirty: true,
+            paint_dirty: true,
+            painted_epoch: 0,
             last_constraints: None,
             last_epoch: 0,
             last_insets: WindowInsets::default(),
@@ -2662,6 +2953,7 @@ impl ChildPod {
     /// nothing layout-visible leaves the pod clean.
     pub fn widget_mut(&mut self) -> &mut dyn Widget {
         self.layout_dirty = true;
+        self.paint_dirty = true;
         &mut *self.widget
     }
 
@@ -2683,6 +2975,7 @@ impl ChildPod {
     pub fn set_widget(&mut self, widget: Box<dyn Widget>) {
         self.widget = widget;
         self.layout_dirty = true;
+        self.paint_dirty = true;
     }
 
     /// Whether the next [`ChildPod::layout_child`] must lay the child out even
@@ -2703,6 +2996,24 @@ impl ChildPod {
     /// [`EventCtx::request_layout`]).
     pub fn mark_layout_dirty(&mut self) {
         self.layout_dirty = true;
+        self.paint_dirty = true;
+    }
+
+    /// Whether the pod's subtree must be painted afresh (see
+    /// [`PaintCtx::subtree_clean`]). Read-only; for tooling and tests
+    /// ([`crate::tree::WidgetTree::inspect_paint_dirty`]).
+    pub fn is_paint_dirty(&self) -> bool {
+        self.paint_dirty
+    }
+
+    /// Mark this pod paint-dirty only: layout is untouched. A reconciler calls
+    /// this when a child's rebuild returns
+    /// [`ChangeFlags::PAINT`](crate::view::ChangeFlags::PAINT) (a LAYOUT rebuild
+    /// already implies it through [`ChildPod::mark_layout_dirty`]). Like that
+    /// method it marks this pod only; the pods above are marked by their own
+    /// reconcilers from the same flags.
+    pub fn mark_paint_dirty(&mut self) {
+        self.paint_dirty = true;
     }
 
     /// The child's origin in the container's coordinate space.
@@ -2986,6 +3297,8 @@ impl ChildPod {
         self.last_epoch = ctx.epoch;
         self.last_insets = ctx.window_insets;
         self.layout_dirty = false;
+        // Layout actually ran: geometry may differ, so the painted output is stale.
+        self.paint_dirty = true;
         size
     }
 
@@ -3043,6 +3356,7 @@ impl ChildPod {
         self.last_epoch = ctx.epoch;
         self.last_insets = ctx.window_insets;
         self.layout_dirty = geometry.scroll_offset_correction.is_some();
+        self.paint_dirty = true;
         Some(geometry)
     }
 
@@ -3143,6 +3457,12 @@ impl ChildPod {
         // bool, global and origin-independent), mirroring the theme/insets — the
         // platform-view hole-punch reads it (see `PaintCtx::is_translucent`).
         child_ctx.set_translucent(ctx.is_translucent());
+        child_ctx.set_paint_state(
+            ctx.paint_epoch,
+            ctx.retained_layers,
+            ctx.retained_ledger,
+            ctx.paint_serial,
+        );
         // Thread the live focus epoch down unchanged (global, like the clock),
         // and seed this child's focus from its own recorded link against it —
         // the mirror of how `event_child` seeds the child `EventCtx`, so a
@@ -3176,6 +3496,9 @@ impl ChildPod {
         child_ctx.set_hover_epoch(ctx.hover_epoch());
         child_ctx.set_hovered(self.hover_epoch == ctx.hover_epoch() && ctx.is_hovered());
         self.widget.paint(&mut child_ctx, scene);
+        ctx.paint_publications = ctx
+            .paint_publications
+            .saturating_add(child_ctx.paint_publications);
         // Bubble the child's continuation-frame request AND its tick class up
         // unchanged: forwarding the aggregate class (rather than always calling
         // `request_frame`, which is Transition) is what lets a purely-cosmetic
@@ -3247,9 +3570,16 @@ impl ChildPod {
         // landing paint does, once — `painted_animating` tracks the child's own
         // request, never the path bit, so the paint after it reports nothing.
         let animating = child_ctx.needs_layout() || child_ctx.needs_frame();
-        if animating || self.painted_animating || child_ctx.layout_path_dirty {
+        let dirtied = animating || self.painted_animating || child_ctx.layout_path_dirty;
+        if dirtied {
             self.layout_dirty = true;
         }
+        // The paint-dirty twin of the same channels: the subtree was painted
+        // this pass, so the bit clears unless the paint itself asked for another
+        // frame/layout (the output is still changing), the previous paint did
+        // (the landing paint), or a pod below was dirtied during it.
+        self.paint_dirty = dirtied;
+        self.painted_epoch = ctx.paint_epoch;
         let unpaced = child_ctx.needs_layout()
             || (child_ctx.needs_frame() && !child_ctx.needs_frame_paced_only());
         let landing = self.painted_animating && !animating;
@@ -3507,6 +3837,7 @@ impl ChildPod {
             || matches!(result, EventResult::Handled);
         if path_dirty {
             self.layout_dirty = true;
+            self.paint_dirty = true;
         }
         ctx.absorb_layout(layout_requested, path_dirty);
         if captured {
@@ -3529,6 +3860,13 @@ impl ChildPod {
         if hover_claimed {
             self.hover_epoch = claim_epoch;
             self.hover_root = ctx.hover_root();
+            // The first stamp of the pass is the claimant's own pod (stamps land
+            // bottom-up, as each nested dispatch returns); record which pod it
+            // was for the root's hover-link comparison.
+            if HOVER_CLAIMANT.with(Cell::get).is_none() {
+                let id = self.inspect_id().0;
+                HOVER_CLAIMANT.with(|claimant| claimant.set(Some(id)));
+            }
         }
         // Focus is the second recorded path, maintained exactly like `active`: a
         // `focus_requested` bubble records this child as the focused one; a
@@ -5381,6 +5719,71 @@ mod tests {
         assert_eq!(scene.pops, 1);
     }
 
+    /// A recorder that predates path clips: it knows only the rectangular
+    /// push and the shared pop.
+    #[derive(Default)]
+    struct RectClipOnlyScene {
+        clips: Vec<(Point, Size)>,
+        pops: usize,
+    }
+
+    impl PaintScene for RectClipOnlyScene {
+        fn fill_rect(&mut self, _origin: Point, _size: Size, _color: Color) {}
+        fn draw_text(&mut self, _origin: Point, _text: &str) {}
+        fn push_clip(&mut self, origin: Point, size: Size) {
+            self.clips.push((origin, size));
+        }
+        fn pop_clip(&mut self) {
+            self.pops += 1;
+        }
+    }
+
+    fn triangle_probe_path() -> BezPath {
+        let mut path = BezPath::new();
+        path.move_to((4.0, 2.0));
+        path.line_to((14.0, 2.0));
+        path.line_to((9.0, 12.0));
+        path.close_path();
+        path
+    }
+
+    #[test]
+    fn path_clip_default_pushes_the_translated_bounding_box() {
+        // A scene with no path-clip concept still clips — to the path's
+        // bounding box, offset by `origin` — and its clip stack stays balanced
+        // against the shared `pop_clip`.
+        let mut scene = RectClipOnlyScene::default();
+        scene.push_clip_path(Point::new(10.0, 20.0), &triangle_probe_path());
+        scene.pop_clip();
+
+        assert_eq!(
+            scene.clips,
+            vec![(Point::new(14.0, 22.0), Size::new(10.0, 10.0))]
+        );
+        assert_eq!(scene.pops, 1);
+    }
+
+    #[test]
+    fn scene_builder_records_a_path_clip_translated_by_origin() {
+        let mut scene = frust_scene::Scene::new();
+        {
+            let mut builder = frust_scene::SceneBuilder::new(&mut scene);
+            let paint: &mut dyn PaintScene = &mut builder;
+            paint.push_clip_path(Point::new(10.0, 20.0), &triangle_probe_path());
+            paint.pop_clip();
+        }
+
+        match &scene.commands()[0] {
+            frust_scene::Command::PushClipPath { path, transform } => {
+                let expected = Affine::translate((10.0, 20.0)) * triangle_probe_path();
+                assert_eq!(*path, expected);
+                assert_eq!(*transform, Affine::IDENTITY);
+            }
+            other => panic!("expected PushClipPath, got {other:?}"),
+        }
+        assert!(matches!(scene.commands()[1], frust_scene::Command::PopClip));
+    }
+
     #[test]
     fn dashed_stroke_default_falls_back_to_the_solid_stroke() {
         let mut scene = UniformOnlyScene::default();
@@ -5597,14 +6000,14 @@ mod tests {
     }
 
     /// A minimal recorder that tracks only transform and layer stack operations
-    /// to verify the default [`PaintScene::push_snapshot`]/[`PaintScene::pop_snapshot`]
+    /// to verify the default [`PaintScene::push_retained`]/[`PaintScene::pop_retained`]
     /// implementation emulates the presentation correctly.
     #[derive(Default)]
-    struct MinimalSnapshotRecorder {
+    struct MinimalRetainedRecorder {
         operations: Vec<String>,
     }
 
-    impl PaintScene for MinimalSnapshotRecorder {
+    impl PaintScene for MinimalRetainedRecorder {
         fn fill_rect(&mut self, _origin: Point, _size: Size, _color: Color) {}
         fn draw_text(&mut self, _origin: Point, _text: &str) {}
         fn push_transform(&mut self, _transform: Affine) {
@@ -5622,21 +6025,21 @@ mod tests {
     }
 
     #[test]
-    fn default_push_snapshot_pop_snapshot_emulates_presentation_for_recorders() {
-        // The default `push_snapshot` and `pop_snapshot` implementation
+    fn default_push_retained_pop_retained_emulates_presentation_for_recorders() {
+        // The default `push_retained` and `pop_retained` implementation
         // ensures recorders that override only the transform/layer methods
         // see a consistent sequence: push_transform, push_layer, paint body,
         // pop_layer, pop_transform — the reverse order matching the push ops.
-        let mut recorder = MinimalSnapshotRecorder::default();
+        let mut recorder = MinimalRetainedRecorder::default();
         let origin = Point::new(10.0, 20.0);
         let size = Size::new(100.0, 50.0);
         let alpha = 0.8;
         let scale = 0.9;
 
         // Emulate a body that doesn't call any paint methods (just has side effects).
-        recorder.push_snapshot(1, origin, size, alpha, scale);
+        recorder.push_retained(1, origin, size, alpha, scale);
         // Body paint code would go here
-        recorder.pop_snapshot();
+        recorder.pop_retained();
 
         // Verify the sequence: transform, layer, pop_layer, pop_transform.
         assert_eq!(
@@ -5651,30 +6054,30 @@ mod tests {
     }
 
     #[test]
-    fn scene_builder_records_push_pop_snapshot_commands_directly_without_extra_transforms() {
-        // The `SceneBuilder` impl overrides `push_snapshot`/`pop_snapshot` to
-        // record the snapshot commands directly, without the emulating
-        // transform/layer pairs. It records Command::PushSnapshot with the
+    fn scene_builder_records_push_pop_retained_commands_directly_without_extra_transforms() {
+        // The `SceneBuilder` impl overrides `push_retained`/`pop_retained` to
+        // record the retained commands directly, without the emulating
+        // transform/layer pairs. It records Command::PushRetained with the
         // key, rect (converted from origin/size), alpha, scale, and the current
-        // transform, and Command::PopSnapshot with no extra layer/transform commands.
+        // transform, and Command::PopRetained with no extra layer/transform commands.
         let mut scene = frust_scene::Scene::new();
         {
             let mut builder = frust_scene::SceneBuilder::new(&mut scene);
             let paint: &mut dyn PaintScene = &mut builder;
 
-            paint.push_snapshot(7, Point::new(5.0, 10.0), Size::new(80.0, 40.0), 0.5, 1.2);
-            // Paint some content inside the snapshot.
+            paint.push_retained(7, Point::new(5.0, 10.0), Size::new(80.0, 40.0), 0.5, 1.2);
+            // Paint some content inside the retained bracket.
             paint.fill_rect(Point::new(10.0, 15.0), Size::new(20.0, 25.0), Color::BLACK);
-            paint.pop_snapshot();
+            paint.pop_retained();
         }
 
-        // Verify the command sequence: PushSnapshot, FillRect, PopSnapshot.
+        // Verify the command sequence: PushRetained, FillRect, PopRetained.
         // No PushLayer, PopLayer, PushTransform, or PopTransform commands.
         let commands = scene.commands();
         assert_eq!(commands.len(), 3);
 
         match &commands[0] {
-            frust_scene::Command::PushSnapshot {
+            frust_scene::Command::PushRetained {
                 key,
                 rect,
                 alpha,
@@ -5686,7 +6089,7 @@ mod tests {
                 assert_eq!(*alpha, 0.5);
                 assert_eq!(*scale, 1.2);
             }
-            other => panic!("expected PushSnapshot, got {other:?}"),
+            other => panic!("expected PushRetained, got {other:?}"),
         }
 
         match &commands[1] {
@@ -5697,9 +6100,124 @@ mod tests {
         }
 
         assert!(
-            matches!(commands[2], frust_scene::Command::PopSnapshot),
-            "expected PopSnapshot, got {:?}",
+            matches!(commands[2], frust_scene::Command::PopRetained),
+            "expected PopRetained, got {:?}",
             commands[2]
+        );
+    }
+
+    #[test]
+    fn current_transform_is_the_scene_builders_own_and_none_for_a_recorder() {
+        assert_eq!(
+            MinimalRetainedRecorder::default().current_transform(),
+            None,
+            "a recorder tracks no transform"
+        );
+        let mut scene = frust_scene::Scene::new();
+        let mut builder = frust_scene::SceneBuilder::new(&mut scene);
+        let paint: &mut dyn PaintScene = &mut builder;
+        assert_eq!(paint.current_transform(), Some(Affine::IDENTITY));
+        paint.push_transform(Affine::scale(2.0));
+        paint.push_transform(Affine::translate((3.0, 4.0)));
+        assert_eq!(
+            paint.current_transform(),
+            Some(Affine::scale(2.0) * Affine::translate((3.0, 4.0))),
+            "every open transform, composed"
+        );
+    }
+
+    #[test]
+    fn backdrop_blur_is_a_no_op_by_default_and_recorded_by_the_scene_builder() {
+        // The default body: a recorder scene that never heard of a backdrop
+        // takes the call and records nothing.
+        let mut recorder = MinimalRetainedRecorder::default();
+        recorder.backdrop_blur(Point::new(1.0, 2.0), Size::new(3.0, 4.0), 5.0);
+
+        let mut scene = frust_scene::Scene::new();
+        {
+            let mut builder = frust_scene::SceneBuilder::new(&mut scene);
+            let paint: &mut dyn PaintScene = &mut builder;
+            paint.push_transform(Affine::translate((10.0, 20.0)));
+            paint.backdrop_blur(Point::new(1.0, 2.0), Size::new(3.0, 4.0), 5.0);
+        }
+        match scene.commands() {
+            [
+                frust_scene::Command::BackdropBlur {
+                    rect,
+                    radius,
+                    transform,
+                },
+            ] => {
+                assert_eq!(*rect, Rect::new(1.0, 2.0, 4.0, 6.0));
+                assert_eq!(*radius, 5.0);
+                assert_eq!(*transform, Affine::translate((10.0, 20.0)));
+            }
+            other => panic!("expected one BackdropBlur, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn retained_enabled_needs_the_switch_and_a_threaded_ledger() {
+        let ledger = crate::retained::RetainedLedger::empty();
+        assert!(
+            !PaintCtx::new(Point::ZERO, Size::ZERO).retained_enabled(),
+            "no ledger threaded"
+        );
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::ZERO).with_retained_ledger(&ledger);
+        assert!(
+            ctx.retained_enabled(),
+            "an empty ledger still enables brackets"
+        );
+        ctx.set_paint_state(0, false, Some(&ledger), 0);
+        assert!(!ctx.retained_enabled(), "the kill switch disables them");
+    }
+
+    /// Publishes on every paint channel a boundary must not skip.
+    struct Publisher;
+
+    impl Widget for Publisher {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.max()
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            ctx.report_input_shield(Rect::new(0.0, 0.0, 1.0, 1.0));
+            ctx.report_hero("tag", Rect::new(0.0, 0.0, 1.0, 1.0));
+        }
+    }
+
+    #[test]
+    fn paint_publications_sum_up_through_paint_child_and_hero_registries() {
+        let mut pod = ChildPod::new(Box::new(Publisher));
+        pod.layout_child(
+            &mut LayoutCtx::new(),
+            &BoxConstraints::tight(Size::new(5.0, 5.0)),
+        );
+        let mut quiet = ChildPod::new(Box::new(FixedBox {
+            intrinsic: Size::new(5.0, 5.0),
+        }));
+        quiet.layout_child(
+            &mut LayoutCtx::new(),
+            &BoxConstraints::tight(Size::new(5.0, 5.0)),
+        );
+
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        quiet.paint_child(&mut ctx, &mut DiscardScene);
+        assert_eq!(
+            ctx.paint_publications(),
+            0,
+            "a plain body publishes nothing"
+        );
+        pod.paint_child(&mut ctx, &mut DiscardScene);
+        assert_eq!(ctx.paint_publications(), 2, "a shield and a hero report");
+
+        let registry = RefCell::new(HeroFrames::new(Point::ZERO, HashMap::new()));
+        ctx.with_hero_registry(&registry, |inner| {
+            pod.paint_child(inner, &mut DiscardScene);
+        });
+        assert_eq!(
+            ctx.paint_publications(),
+            4,
+            "a hero registry's subtree counts too"
         );
     }
 }

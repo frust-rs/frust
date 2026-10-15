@@ -16,6 +16,7 @@ use frust_scene::Scene;
 use frust_shell_common::perf::{
     self, FramePasses, FrameStats, GpuPasses, RenderSpans, StartupSpans, UiSpans,
 };
+use frust_shell_common::render_split::{publish_resident_pages, request_retained_repaint};
 use frust_shell_common::{
     FrameMeta, RenderCommand, RenderSender, SceneFrame, SceneReturnReceiver, SurfaceSize,
 };
@@ -444,16 +445,20 @@ impl InlineExecutor {
         }
     }
 
-    /// Run the encode→acquire→submit tail synchronously for `scene`, recording
-    /// the folded frame and returning the encode span for the UI-side deadline
-    /// estimate.
+    /// Run the encode→acquire→submit tail synchronously for `scene`, painted
+    /// under `paint_serial`, recording the folded frame and returning the encode
+    /// span for the UI-side deadline estimate.
     fn submit_frame(
         &mut self,
         scene: &Scene,
         base_color: peniko::Color,
         ui: UiSpans,
+        paint_serial: u64,
         perf_on: bool,
     ) -> Duration {
+        // Named before the encode, so the ledger published once this scene is
+        // committed carries it.
+        self.renderer.note_scene_serial(paint_serial);
         // Owned directly (no lock involved): the inline path never shares
         // `startup_spans` with another thread, unlike the split's
         // `StartupRecorder::Shared` — see that type's docs.
@@ -644,13 +649,15 @@ impl SplitExecutor {
         Scene::new()
     }
 
-    /// Hand one finished frame to the render thread (latest-wins).
+    /// Hand one finished frame to the render thread (latest-wins), with the
+    /// paint serial it was painted under riding its [`FrameMeta`].
     fn submit_frame(
         &mut self,
         painted: PaintedScene,
         ui: UiSpans,
         frame_time: FrameTime,
         size: SurfaceSize,
+        paint_serial: u64,
     ) {
         self.frame_id += 1;
         if let Some(sender) = self.sender.as_ref() {
@@ -660,6 +667,7 @@ impl SplitExecutor {
                     frame_time,
                     size,
                     frame_id: self.frame_id,
+                    paint_serial,
                 },
                 ui_spans: ui,
             });
@@ -822,6 +830,9 @@ impl FrameExecutor {
     /// is reused rather than reallocated — falling back to `Scene::new()` only
     /// when none is available yet, and returning `Duration::ZERO` (encode is
     /// off-thread, so it does not count against the UI thread's deadline).
+    /// `paint_serial` is the paint's `PaintOutcome::paint_serial`, named to the
+    /// renderer before it encodes the scene on either path.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn submit_frame(
         &mut self,
         scene: &mut Scene,
@@ -829,17 +840,20 @@ impl FrameExecutor {
         ui: UiSpans,
         frame_time: FrameTime,
         size: SurfaceSize,
+        paint_serial: u64,
         perf_on: bool,
     ) -> Duration {
         match self {
-            FrameExecutor::Inline(inline) => inline.submit_frame(scene, base_color, ui, perf_on),
+            FrameExecutor::Inline(inline) => {
+                inline.submit_frame(scene, base_color, ui, paint_serial, perf_on)
+            }
             FrameExecutor::Split(split) => {
                 let replacement = split.take_reusable_scene();
                 let painted = PaintedScene {
                     scene: std::mem::replace(scene, replacement),
                     base_color,
                 };
-                split.submit_frame(painted, ui, frame_time, size);
+                split.submit_frame(painted, ui, frame_time, size, paint_serial);
                 Duration::ZERO
             }
         }
@@ -899,6 +913,40 @@ fn pace_record(
 ) {
 }
 
+/// Publish the renderer's resident-key ledger for the UI thread's next paint
+/// when it changed since the last publish — after a frame, and at a surface
+/// (re)install or device-scale change (both of which leave it empty).
+///
+/// The slot is process-global (one renderer per process); see
+/// [`publish_resident_pages`].
+pub(crate) fn publish_ledger(renderer: &mut SurfaceRenderer) {
+    if let Some(resident) = renderer.take_retained_ledger() {
+        publish_resident_pages(
+            resident.frame,
+            resident
+                .pages
+                .iter()
+                .map(|page| (page.key, page.extent_px, page.scale)),
+        );
+    }
+}
+
+/// Hand the renderer the (sanitized) device scale a surface create or resize
+/// carries: a changed scale clears the retained store, and its empty ledger is
+/// published at once.
+pub(crate) fn note_scale(renderer: &mut SurfaceRenderer, scale: f64) {
+    if renderer.note_device_scale(scale) {
+        publish_ledger(renderer);
+    }
+}
+
+/// [`publish_ledger`] after a frame, answering whether that frame was refused
+/// for drawing a retained page the renderer no longer holds.
+fn publish_retained(renderer: &mut SurfaceRenderer) -> bool {
+    publish_ledger(renderer);
+    renderer.take_retained_refusal()
+}
+
 /// This surface's most recent real GPU pass timing, folded into the
 /// [`GpuPasses`] shape [`FramePasses::with_gpu`] takes, or `None` when the
 /// surface produces no such measurement (a device that never offered
@@ -931,6 +979,10 @@ fn gpu_passes(renderer: &SurfaceRenderer) -> Option<GpuPasses> {
 /// keep its lock scoped to each individual record/take call — never held
 /// across this function's own blocking GPU tail (acquire + submit) below. See
 /// that type's docs for the hazard this avoids.
+///
+/// The caller names the scene's paint serial to `renderer` first
+/// ([`SurfaceRenderer::note_scene_serial`] — `FrameMeta::paint_serial` in the
+/// split), so the ledger published once the scene is committed carries it.
 ///
 /// # Autorelease pool
 ///
@@ -1015,6 +1067,21 @@ pub(crate) fn render_scene(
             Err(err) => Err(err),
         };
         let submit_time = submit_start.map_or(Duration::ZERO, |t| t.elapsed());
+
+        // The resident-key ledger after this frame, for the UI thread's next
+        // paint. A frame the engine refused for drawing a page it no longer
+        // holds presented nothing and emptied the store, so the UI thread owes
+        // one more paint against the empty ledger just published: the
+        // process-wide repaint flag (this may be the render thread, which
+        // cannot touch the handle) forces the next `CADisplayLink` tick's gate
+        // to run instead of leaving an idle screen on the frame before.
+        if publish_retained(renderer) {
+            request_retained_repaint();
+            log::debug!(
+                "frust-shell-ios: a frame drew a retained page the renderer no longer holds; \
+                 the store was cleared and the next paint repaints every body"
+            );
+        }
 
         let mut startup_retired = false;
         let mut presented_this_frame = false;

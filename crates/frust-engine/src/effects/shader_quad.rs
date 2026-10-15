@@ -24,7 +24,7 @@
 //!    demand and dropping one whose device rectangle does not intersect the
 //!    frame's own target at all, when that extent is known (see
 //!    [`ShaderQuadPass::set_frame_target_extent`]) — except inside an open
-//!    [`Command::PushSnapshot`] bracket, where the body's rendered pixels are
+//!    [`Command::PushRetained`] bracket, where the body's rendered pixels are
 //!    moved by a presentation transform this walk runs ahead of, so culling
 //!    is skipped there (see [`frame_demands`]'s doc);
 //! 2. compile the program if it is new, size a pooled (quantized) target for
@@ -237,7 +237,7 @@ fn requested_size(dest: Rect, transform: Affine, adapter_max: u32) -> Option<(u3
 /// one decision [`frame_demands`] and [`culled_program_ids`] must agree on,
 /// factored out so the two walks can never drift apart.
 ///
-/// Never culled while `inside_snapshot` (an open [`Command::PushSnapshot`]
+/// Never culled while `inside_retained` (an open [`Command::PushRetained`]
 /// bracket — see [`frame_demands`]'s own doc for why), nor when `target_rect`
 /// is `None` (no culling requested at all), nor for a non-finite `bbox`
 /// (`requested_size`, or the frame's own up-front geometry check, accounts
@@ -245,8 +245,8 @@ fn requested_size(dest: Rect, transform: Affine, adapter_max: u32) -> Option<(u3
 /// because its extent could not be sized). Otherwise culled exactly when
 /// `bbox` does not overlap `target_rect`, inclusive of a shared edge (see
 /// [`kurbo::Rect::overlaps`]).
-fn quad_is_culled(bbox: Rect, target_rect: Option<Rect>, inside_snapshot: bool) -> bool {
-    if inside_snapshot {
+fn quad_is_culled(bbox: Rect, target_rect: Option<Rect>, inside_retained: bool) -> bool {
+    if inside_retained {
         return false;
     }
     let Some(target_rect) = target_rect else {
@@ -264,7 +264,7 @@ fn quad_is_culled(bbox: Rect, target_rect: Option<Rect>, inside_snapshot: bool) 
 /// transform the renderer applies ahead of each command's own, so a quad's
 /// device extent here is the one the frame will actually draw it at.
 ///
-/// A snapshot bracket's presentation scale is deliberately not folded in: it is
+/// A retained bracket's presentation scale is deliberately not folded in: it is
 /// applied to a body's *rendered* pixels, so a quad inside one is rendered at
 /// its own device size and resampled by the bracket, exactly like every other
 /// command in that body.
@@ -285,9 +285,9 @@ fn quad_is_culled(bbox: Rect, target_rect: Option<Rect>, inside_snapshot: bool) 
 /// parameter must be.
 ///
 /// Culling is also skipped for a quad recorded inside an open
-/// [`Command::PushSnapshot`] bracket, however far outside `target_extent` its
+/// [`Command::PushRetained`] bracket, however far outside `target_extent` its
 /// own device rectangle lands: the bracket's presentation `scale`/`alpha` is
-/// applied to the body's *rendered* pixels by whatever draws the snapshot
+/// applied to the body's *rendered* pixels by whatever draws the retained page
 /// (the compiler, or a renderer that rasterizes it), a step this walk runs
 /// ahead of and knows nothing about — a quad this walk sees as entirely
 /// off-target may still be moved onto it by that later transform, so culling
@@ -302,16 +302,16 @@ fn frame_demands(
     let mut order: Vec<u64> = Vec::new();
     let mut demands: HashMap<u64, QuadDemand<'_>> = HashMap::new();
     let target_rect = target_extent.map(|(w, h)| Rect::new(0.0, 0.0, f64::from(w), f64::from(h)));
-    let mut snapshot_depth: u32 = 0;
+    let mut retained_depth: u32 = 0;
 
     for command in scene.commands() {
         match command {
-            Command::PushSnapshot { .. } => {
-                snapshot_depth += 1;
+            Command::PushRetained { .. } => {
+                retained_depth += 1;
                 continue;
             }
-            Command::PopSnapshot => {
-                snapshot_depth = snapshot_depth.saturating_sub(1);
+            Command::PopRetained => {
+                retained_depth = retained_depth.saturating_sub(1);
                 continue;
             }
             _ => {}
@@ -327,7 +327,7 @@ fn frame_demands(
         };
         let device_transform = root * *transform;
         let device_bbox = device_transform.transform_rect_bbox(*dest);
-        if quad_is_culled(device_bbox, target_rect, snapshot_depth > 0) {
+        if quad_is_culled(device_bbox, target_rect, retained_depth > 0) {
             // Entirely outside the frame's own target: no target needed. A
             // non-finite bbox falls through to `requested_size` below, which
             // drops it on its own terms instead — `quad_is_culled` never
@@ -366,7 +366,7 @@ fn frame_demands(
 /// Program ids `scene` draws at least one [`Command::ShaderQuad`] for, every
 /// one of whose quads is culled this frame by the same target-extent check
 /// [`frame_demands`] applies (see [`quad_is_culled`], including its
-/// [`Command::PushSnapshot`] exemption) — an id that therefore appears in
+/// [`Command::PushRetained`] exemption) — an id that therefore appears in
 /// neither `frame_demands`' result nor a live target key this frame.
 ///
 /// [`ShaderQuadPass::prepare`] withdraws each of these ids' registration
@@ -393,18 +393,18 @@ fn culled_program_ids(
         return HashSet::new();
     };
     let target_rect = Some(Rect::new(0.0, 0.0, f64::from(w), f64::from(h)));
-    let mut snapshot_depth: u32 = 0;
+    let mut retained_depth: u32 = 0;
     let mut seen: HashSet<u64> = HashSet::new();
     let mut not_culled: HashSet<u64> = HashSet::new();
 
     for command in scene.commands() {
         match command {
-            Command::PushSnapshot { .. } => {
-                snapshot_depth += 1;
+            Command::PushRetained { .. } => {
+                retained_depth += 1;
                 continue;
             }
-            Command::PopSnapshot => {
-                snapshot_depth = snapshot_depth.saturating_sub(1);
+            Command::PopRetained => {
+                retained_depth = retained_depth.saturating_sub(1);
                 continue;
             }
             _ => {}
@@ -420,7 +420,7 @@ fn culled_program_ids(
         };
         let device_bbox = (root * *transform).transform_rect_bbox(*dest);
         seen.insert(program.id());
-        if !quad_is_culled(device_bbox, target_rect, snapshot_depth > 0) {
+        if !quad_is_culled(device_bbox, target_rect, retained_depth > 0) {
             not_culled.insert(program.id());
         }
     }
@@ -1080,8 +1080,8 @@ mod tests {
     }
 
     #[test]
-    fn quad_is_culled_false_inside_a_snapshot_even_when_far_outside_the_target() {
-        // A snapshot bracket's presentation scale can still move an
+    fn quad_is_culled_false_inside_a_retained_bracket_even_when_far_outside_the_target() {
+        // A retained bracket's presentation scale can still move an
         // off-target body onto the target after this walk runs — see
         // `frame_demands`'s doc.
         let target = Rect::new(0.0, 0.0, 64.0, 64.0);
@@ -1138,18 +1138,18 @@ mod tests {
     }
 
     #[test]
-    fn culled_program_ids_exempts_a_quad_inside_a_snapshot_bracket() {
+    fn culled_program_ids_exempts_a_quad_inside_a_retained_bracket() {
         let program = ShaderProgram::new(SOURCE);
         let far_off_target = Rect::new(10_000.0, 10_000.0, 10_008.0, 10_008.0);
         let scene = scene_of(|builder| {
-            builder.push_snapshot(1, far_off_target, 1.0, 1.0);
+            builder.push_retained(1, far_off_target, 1.0, 1.0);
             builder.draw_shader(&program, far_off_target, 0.0);
-            builder.pop_snapshot();
+            builder.pop_retained();
         });
 
         assert!(
             culled_program_ids(&scene, Affine::IDENTITY, Some((64, 64))).is_empty(),
-            "a quad inside an open PushSnapshot bracket must never be reported culled"
+            "a quad inside an open PushRetained bracket must never be reported culled"
         );
         // And the same exemption applies on the demand side: the program is
         // still demanded, not dropped.
