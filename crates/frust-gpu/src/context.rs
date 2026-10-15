@@ -36,13 +36,30 @@
 //!   (`effective_instance_flags`).
 //! - The iOS **Simulator** misreports its uniform-buffer alignment, so a device
 //!   request made there is forced back up to 256 bytes ([`effective_limits`]).
+//!
+//! # The Android hardware-buffer device
+//!
+//! `wgpu`'s own `request_device` never enables
+//! `VK_ANDROID_external_memory_android_hardware_buffer`, so a device it opens
+//! can never import an `AHardwareBuffer` ([`crate::import`]). On Android, with
+//! the `FRUST_ANDROID_HWBUFFER_IMPORT` knob on (the compile-time or runtime
+//! environment variable, or the `debug.frust.hwbuffer_import` system property,
+//! any value but `0`), a Vulkan device is instead opened by this module itself:
+//! the same features, limits and memory hints `request_device` would have been
+//! given, plus the import extensions (`hwbuffer_import_extensions`), through
+//! `wgpu_hal::vulkan::Adapter::open_with_callback` and
+//! `wgpu::Adapter::create_device_from_hal`. When any extension is missing the
+//! device is opened through `wgpu` as usual, and [`TierCaps::hwbuffer_import`]
+//! records which path produced it. Knob off — and on every other target — the
+//! device request is exactly the plain `request_device` one.
 
+use std::ffi::CStr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{Result, anyhow};
 
-use crate::caps::{DownlevelProfile, TierCaps};
+use crate::caps::{DownlevelProfile, TierCaps, env_flag_enabled};
 use crate::surface::{
     ConfiguredSurface, SurfaceAlphaRequest, SurfaceFactory, resolve_alpha_mode,
     select_surface_format,
@@ -297,9 +314,10 @@ impl RenderContext {
     ///
     /// # Safety
     ///
-    /// This is the sole sanctioned unsafe site in this module, and the
-    /// obligation is the caller's, not something this method can fully close
-    /// on its own: `unframe`'s magic-tag-plus-adapter-fingerprint check proves
+    /// One of this module's two sanctioned unsafe sites (the other is the
+    /// Android hardware-buffer device open, `hwbuffer_device`), and the only
+    /// one whose obligation is the caller's, not something this method can
+    /// fully close on its own: `unframe`'s magic-tag-plus-adapter-fingerprint check proves
     /// only that `blob` was framed by `frust-gpu`'s own framing for *this*
     /// adapter — provenance by convention, not a proof of the actual wgpu
     /// contract on [`wgpu::Device::create_pipeline_cache`], which requires a
@@ -468,15 +486,17 @@ async fn create_device(
     let required_features =
         device_features(adapter.features(), &caps, cfg!(feature = "perf-trace"));
 
-    let (device, queue) = adapter
-        .request_device(&wgpu::DeviceDescriptor {
-            label: Some(&options.device_label),
-            required_features,
-            required_limits,
-            ..Default::default()
-        })
-        .await
-        .map_err(|e| anyhow!("frust-gpu: failed to create GPU device: {e}"))?;
+    let descriptor = wgpu::DeviceDescriptor {
+        label: Some(&options.device_label),
+        required_features,
+        required_limits,
+        ..Default::default()
+    };
+    let (device, queue, hwbuffer_import) = open_device(&adapter, &caps, &descriptor).await?;
+    let caps = TierCaps {
+        hwbuffer_import,
+        ..caps
+    };
 
     // Route wgpu's uncaptured errors to the log and a latch instead of its
     // default handler, which aborts the process by panicking ("handling wgpu
@@ -536,6 +556,202 @@ async fn create_device(
         caps,
         first_uncaptured_error: first_error,
     })
+}
+
+/// Opens the logical device `descriptor` describes on `adapter`, answering
+/// whether it can import Android hardware buffers.
+///
+/// On Android, a Vulkan adapter with the hardware-buffer knob on
+/// (`hwbuffer_import_requested`) is first offered to `hwbuffer_device::open`;
+/// a refusal there (a missing extension, a failed `vkCreateDevice`) is logged
+/// and falls through to the plain `request_device` every other case takes, so
+/// the knob can never turn a working adapter into no device at all.
+#[cfg_attr(not(target_os = "android"), allow(unused_variables))]
+async fn open_device(
+    adapter: &wgpu::Adapter,
+    caps: &TierCaps,
+    descriptor: &wgpu::DeviceDescriptor<'_>,
+) -> Result<(wgpu::Device, wgpu::Queue, bool)> {
+    #[cfg(target_os = "android")]
+    if caps.backend == wgpu::Backend::Vulkan && hwbuffer_import_requested() {
+        match hwbuffer_device::open(adapter, descriptor) {
+            Ok((device, queue)) => {
+                log::info!(
+                    "frust-gpu: Vulkan device opened by frust-gpu with the AHardwareBuffer \
+                     import extensions"
+                );
+                return Ok((device, queue, true));
+            }
+            Err(reason) => log::warn!(
+                "frust-gpu: AHardwareBuffer import unavailable ({reason}); opening the device \
+                 through wgpu, native frames stay on the CPU path"
+            ),
+        }
+    }
+    let (device, queue) = adapter
+        .request_device(descriptor)
+        .await
+        .map_err(|e| anyhow!("frust-gpu: failed to create GPU device: {e}"))?;
+    Ok((device, queue, false))
+}
+
+/// `VK_ANDROID_external_memory_android_hardware_buffer`: import of an
+/// `AHardwareBuffer` as `VkDeviceMemory`.
+const EXT_ANDROID_HARDWARE_BUFFER: &CStr = c"VK_ANDROID_external_memory_android_hardware_buffer";
+/// `VK_EXT_queue_family_foreign`: the ownership transfer that makes a buffer a
+/// foreign producer wrote visible to this device.
+const EXT_QUEUE_FAMILY_FOREIGN: &CStr = c"VK_EXT_queue_family_foreign";
+/// `VK_KHR_external_memory`, core since Vulkan 1.1.
+const EXT_EXTERNAL_MEMORY: &CStr = c"VK_KHR_external_memory";
+/// `VK_KHR_dedicated_allocation`, core since Vulkan 1.1.
+const EXT_DEDICATED_ALLOCATION: &CStr = c"VK_KHR_dedicated_allocation";
+/// `VK_KHR_sampler_ycbcr_conversion`, core since Vulkan 1.1 (an NV12 buffer's
+/// sampler, not needed for the RGBA8 buffers imported today).
+const EXT_SAMPLER_YCBCR_CONVERSION: &CStr = c"VK_KHR_sampler_ycbcr_conversion";
+
+/// `VK_MAKE_API_VERSION(0, 1, 1, 0)`.
+const VULKAN_1_1: u32 = (1 << 22) | (1 << 12);
+
+/// Given the effective Vulkan API version (the lower of the instance's and the
+/// physical device's) and which device extensions the physical device reports,
+/// the extensions a hardware-buffer import device adds to the ones `wgpu`
+/// itself enables — or why such a device cannot be opened.
+///
+/// The import extension's own dependencies are "Vulkan 1.1 and
+/// `VK_EXT_queue_family_foreign`" (or the four pre-1.1 KHR extensions, which
+/// this refuses rather than juggle): so a 1.0 device, or one without either of
+/// the two required names, is refused. The three KHR extensions 1.1 promoted
+/// (external memory, dedicated allocation, sampler Y'CbCr conversion) are core
+/// there and are only *named* when the device also lists them — enabling a
+/// name the device does not list would fail `vkCreateDevice`.
+///
+/// Pure, over plain values: unit-testable on any host, like
+/// [`effective_limits`].
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn hwbuffer_import_extensions(
+    api_version: u32,
+    supports: impl Fn(&CStr) -> bool,
+) -> std::result::Result<Vec<&'static CStr>, String> {
+    if api_version < VULKAN_1_1 {
+        return Err(format!(
+            "the device reports Vulkan {}.{}, and the import needs 1.1",
+            api_version >> 22,
+            (api_version >> 12) & 0x3ff
+        ));
+    }
+    let required = [EXT_ANDROID_HARDWARE_BUFFER, EXT_QUEUE_FAMILY_FOREIGN];
+    let missing: Vec<_> = required.iter().filter(|name| !supports(name)).collect();
+    if !missing.is_empty() {
+        return Err(format!("the device lacks {missing:?}"));
+    }
+    let promoted = [
+        EXT_EXTERNAL_MEMORY,
+        EXT_DEDICATED_ALLOCATION,
+        EXT_SAMPLER_YCBCR_CONVERSION,
+    ];
+    Ok(required
+        .into_iter()
+        .chain(promoted.into_iter().filter(|name| supports(name)))
+        .collect())
+}
+
+/// Whether the hardware-buffer knob is on, given its three halves: the
+/// compile-time and runtime `FRUST_ANDROID_HWBUFFER_IMPORT` environment
+/// variable, and the `debug.frust.hwbuffer_import` system property (the one
+/// an installed APK can be switched by: `adb shell setprop
+/// debug.frust.hwbuffer_import 1`). Any value but `0` (or an empty property,
+/// which is how an unset one can read back) turns it on.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn hwbuffer_import_knob(
+    compile_time: Option<&str>,
+    runtime: Option<String>,
+    property: Option<String>,
+) -> bool {
+    env_flag_enabled(compile_time, runtime)
+        || matches!(property.as_deref(), Some(v) if !v.is_empty() && v != "0")
+}
+
+/// [`hwbuffer_import_knob`] over this process's actual environment. Read at
+/// every device creation rather than cached: it is consulted once per device.
+#[cfg(target_os = "android")]
+fn hwbuffer_import_requested() -> bool {
+    hwbuffer_import_knob(
+        option_env!("FRUST_ANDROID_HWBUFFER_IMPORT"),
+        std::env::var("FRUST_ANDROID_HWBUFFER_IMPORT").ok(),
+        android_system_properties::AndroidSystemProperties::new()
+            .get("debug.frust.hwbuffer_import"),
+    )
+}
+
+/// The hand-opened Vulkan device: the sanctioned unsafe zone behind
+/// [`TierCaps::hwbuffer_import`].
+///
+/// # Invariants
+///
+/// - The device is opened from `adapter`'s own hal adapter with the very
+///   features, limits and memory hints of the `wgpu::DeviceDescriptor` it is
+///   then wrapped with (`create_device_from_hal`), and those were derived from
+///   that adapter's own reports (`device_features`, `base_device_limits`) — so
+///   the descriptor's features are a subset of the hal device's, as the wrap
+///   requires.
+/// - The open callback only *adds* extensions, and only ones
+///   [`hwbuffer_import_extensions`] confirmed the physical device lists; it
+///   never touches features, queues or the `pNext` chain, so it changes nothing
+///   the device does not support (`open_with_callback`'s contract).
+/// - The hal adapter guard is dropped before the wrap, and nothing here keeps a
+///   raw handle past this function: `wgpu` owns the raw device from then on and
+///   destroys it with the `wgpu::Device`.
+#[cfg(target_os = "android")]
+mod hwbuffer_device {
+    use wgpu::hal::api::Vulkan;
+    use wgpu::hal::vulkan::{CreateDeviceCallback, CreateDeviceCallbackArgs};
+
+    /// Opens `descriptor` on `adapter` with the hardware-buffer import
+    /// extensions enabled, or answers why it could not.
+    pub(super) fn open(
+        adapter: &wgpu::Adapter,
+        descriptor: &wgpu::DeviceDescriptor<'_>,
+    ) -> Result<(wgpu::Device, wgpu::Queue), String> {
+        let open_device = {
+            // SAFETY: the guard only borrows the adapter's hal object for this
+            // block; nothing here destroys it (see the module invariants).
+            let hal_adapter = unsafe { adapter.as_hal::<Vulkan>() }
+                .ok_or_else(|| "the adapter is not a Vulkan adapter".to_string())?;
+            let capabilities = hal_adapter.physical_device_capabilities();
+            let api_version = capabilities
+                .properties()
+                .api_version
+                .min(hal_adapter.shared_instance().instance_api_version());
+            let extra = super::hwbuffer_import_extensions(api_version, |name| {
+                capabilities.supports_extension(name)
+            })?;
+            let callback: Box<CreateDeviceCallback<'_>> =
+                Box::new(move |args: CreateDeviceCallbackArgs<'_, '_, '_>| {
+                    for name in extra {
+                        if !args.extensions.contains(&name) {
+                            args.extensions.push(name);
+                        }
+                    }
+                });
+            // SAFETY: features and limits are the adapter's own (the module
+            // invariants), and the callback only adds extensions the physical
+            // device lists.
+            unsafe {
+                hal_adapter.open_with_callback(
+                    descriptor.required_features,
+                    &descriptor.required_limits,
+                    &descriptor.memory_hints,
+                    Some(callback),
+                )
+            }
+            .map_err(|e| format!("vkCreateDevice with the import extensions failed: {e}"))?
+        };
+        // SAFETY: `open_device` was opened from this adapter's hal adapter with
+        // exactly `descriptor.required_features`, so they are a subset of the
+        // hal device's features.
+        unsafe { adapter.create_device_from_hal::<Vulkan>(open_device, descriptor) }
+            .map_err(|e| format!("wrapping the hand-opened device failed: {e}"))
+    }
 }
 
 /// Given the resolved downlevel profile and the adapter's own reported
@@ -996,6 +1212,80 @@ mod tests {
         assert!(limits.max_inter_stage_shader_variables <= 15);
     }
 
+    /// A `supports` predicate over a fixed list of extension names.
+    fn listing(names: &'static [&'static CStr]) -> impl Fn(&CStr) -> bool {
+        move |name| names.contains(&name)
+    }
+
+    #[test]
+    fn a_vulkan_1_1_device_with_both_required_extensions_gets_them() {
+        let extensions = hwbuffer_import_extensions(
+            VULKAN_1_1,
+            listing(&[EXT_ANDROID_HARDWARE_BUFFER, EXT_QUEUE_FAMILY_FOREIGN]),
+        )
+        .expect("both required extensions are listed");
+        assert_eq!(
+            extensions,
+            [EXT_ANDROID_HARDWARE_BUFFER, EXT_QUEUE_FAMILY_FOREIGN],
+            "the promoted names are not enabled when the device does not list them"
+        );
+    }
+
+    #[test]
+    fn listed_promoted_extensions_are_named_too() {
+        let extensions = hwbuffer_import_extensions(
+            VULKAN_1_1 + 5,
+            listing(&[
+                EXT_ANDROID_HARDWARE_BUFFER,
+                EXT_QUEUE_FAMILY_FOREIGN,
+                EXT_EXTERNAL_MEMORY,
+                EXT_DEDICATED_ALLOCATION,
+                EXT_SAMPLER_YCBCR_CONVERSION,
+            ]),
+        )
+        .expect("every extension is listed");
+        assert_eq!(extensions.len(), 5);
+    }
+
+    #[test]
+    fn a_device_without_the_import_extension_is_refused() {
+        let refusal = hwbuffer_import_extensions(VULKAN_1_1, listing(&[EXT_QUEUE_FAMILY_FOREIGN]))
+            .expect_err("the import extension is missing");
+        assert!(refusal.contains("VK_ANDROID_external_memory_android_hardware_buffer"));
+    }
+
+    #[test]
+    fn a_device_without_the_foreign_queue_family_is_refused() {
+        let refusal =
+            hwbuffer_import_extensions(VULKAN_1_1, listing(&[EXT_ANDROID_HARDWARE_BUFFER]))
+                .expect_err("the foreign queue family extension is missing");
+        assert!(refusal.contains("VK_EXT_queue_family_foreign"));
+    }
+
+    #[test]
+    fn a_vulkan_1_0_device_is_refused_even_with_every_extension() {
+        let refusal = hwbuffer_import_extensions(
+            1 << 22,
+            listing(&[EXT_ANDROID_HARDWARE_BUFFER, EXT_QUEUE_FAMILY_FOREIGN]),
+        )
+        .expect_err("1.0 is refused");
+        assert!(refusal.contains("1.0"), "{refusal}");
+    }
+
+    #[test]
+    fn the_hardware_buffer_knob_is_off_unless_one_half_turns_it_on() {
+        assert!(!hwbuffer_import_knob(None, None, None));
+        assert!(!hwbuffer_import_knob(None, None, Some(String::new())));
+        assert!(!hwbuffer_import_knob(
+            Some("0"),
+            Some("0".to_string()),
+            Some("0".to_string())
+        ));
+        assert!(hwbuffer_import_knob(Some("1"), None, None));
+        assert!(hwbuffer_import_knob(None, Some("1".to_string()), None));
+        assert!(hwbuffer_import_knob(None, None, Some("1".to_string())));
+    }
+
     #[test]
     fn default_options_label_the_device_and_leave_backends_to_the_environment() {
         let options = ContextOptions::default();
@@ -1041,6 +1331,11 @@ mod tests {
 
             assert_eq!(handle.caps.adapter_name, info.name);
             assert_eq!(handle.caps.backend, info.backend);
+            // Only an Android device frust-gpu opened itself can import a
+            // hardware buffer; every host device comes from `request_device`.
+            if !cfg!(target_os = "android") {
+                assert!(!handle.caps.hwbuffer_import);
+            }
             assert!(!handle.caps.adapter_name.is_empty());
             assert!(handle.caps.max_texture_dimension_2d > 0);
             assert!(handle.caps.resource_texture_dim > 0);
