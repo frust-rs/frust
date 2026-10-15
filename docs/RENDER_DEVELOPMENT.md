@@ -54,7 +54,7 @@ runtime env var, resolved once and cached.
 
 | Variable | Purpose | Default |
 |---|---|---|
-| GPU timestamps (`gpu_q`, `gpu_prepass_us`/`gpu_main_us`/`gpu_composite_us`/`gpu_blit_us` — `FRUST_TRACE_RAW`'s v4 fields) | Real per-pass GPU time via pass-boundary `timestamp_writes` (`wgpu::Features::TIMESTAMP_QUERY`) (`frust_gpu::diag::TimestampRing`, spans named by `frust_engine::diag::EngineSpan`). `gpu_q=1` only on a `perf-trace` build whose adapter actually offers the feature; every other case — no `perf-trace`, no adapter feature, or a frame ahead of the ring's first completed readback — reports the ordinary `gpu_q=0`, not a failure; a refused frame abandons its ring slot rather than mapping it. Full raw-line field format: `benchmarks/PROTOCOL.md`. | `gpu_q=0` (no reading) |
+| GPU timestamps (`gpu_q`, `gpu_prepass_us`/`gpu_main_us`/`gpu_composite_us`/`gpu_blit_us` — `FRUST_TRACE_RAW`'s v4 fields) | Real per-pass GPU time via pass-boundary `timestamp_writes` (`wgpu::Features::TIMESTAMP_QUERY`) (`frust_gpu::diag::TimestampRing`, spans named by `frust_engine::diag::EngineSpan`). `gpu_q=1` only on a `perf-trace` build whose adapter actually offers the feature; every other case — no `perf-trace`, no adapter feature, or a frame ahead of the ring's first completed readback (readings lag one to two frames; a span whose only pass draws nothing reads unmeasured, `GpuFrameSpans::is_measured`) — reports the ordinary `gpu_q=0`, not a failure; a refused frame abandons its ring slot rather than mapping it. Full raw-line field format: `benchmarks/PROTOCOL.md`. | `gpu_q=0` (no reading) |
 
 **`FRUST_ENGINE_*` knobs (`frust-gpu`/`frust-engine`-owned, distinct from the GPU-timestamps row
 above):**
