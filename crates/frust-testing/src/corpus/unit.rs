@@ -71,7 +71,7 @@ fn black_backdrop(builder: &mut SceneBuilder<'_>) {
 
 /// Every case in the unit corpus, in the order a reviewer reads them: the
 /// paint primitives, then the grouping commands, then the two promoted
-/// pixel-exact cases and the snapshot pair, then the paint-class frames
+/// pixel-exact cases and the retained-bracket pair, then the paint-class frames
 /// (see [`paint_class_cases`]).
 #[must_use]
 pub fn unit_cases() -> Vec<CorpusCase> {
@@ -97,8 +97,8 @@ pub fn unit_cases() -> Vec<CorpusCase> {
         path_stroke(),
         path_dashed(),
         shader_quad(),
-        snapshot_bracket(),
-        snapshot_balance(),
+        retained_bracket(),
+        retained_balance(),
         paint_class_mix(),
         paint_class_short_run(),
         paint_class_layer_over_gradient(),
@@ -1413,7 +1413,7 @@ fn shader_quad() -> CorpusCase {
 /// The geometry keeps every content edge on a whole device pixel, so nothing
 /// here measures rasterizer subpixel coverage, and the tolerance is the
 /// original's: one 8-bit rounding step, no more.
-fn snapshot_bracket() -> CorpusCase {
+fn retained_bracket() -> CorpusCase {
     fn record(scene: &mut Scene) {
         // A 20x20 body in local space under a 2x device scale offset by
         // (8, 8) — device (8, 8)..(48, 48) — composited at 75% opacity.
@@ -1487,12 +1487,12 @@ fn snapshot_bracket() -> CorpusCase {
             },
         ],
         eroded_interior: false,
-        about: "promoted: the inline lowering of a snapshot bracket, absolute composite \
+        about: "promoted: the inline lowering of a retained bracket, absolute composite \
                 arithmetic",
     }
 }
 
-/// Snapshot NESTING: two brackets, the inner one carrying a different alpha
+/// Retained-bracket NESTING: two brackets, the inner one carrying a different alpha
 /// AND a different scale, both of which must be IGNORED.
 ///
 /// `Command::PushRetained`'s contract is that syntactic nesting is allowed
@@ -1500,7 +1500,7 @@ fn snapshot_bracket() -> CorpusCase {
 /// the outer bracket's 0.5 alone: if the inner bracket's 0.25 were composed
 /// in as well, the green band would land at `128 * 0.5 * 0.25` (16) instead
 /// of `128 * 0.5` (64) — a difference no tolerance absorbs.
-fn snapshot_balance() -> CorpusCase {
+fn retained_balance() -> CorpusCase {
     fn record(scene: &mut Scene) {
         let bracket = kurbo::Affine::translate((8.0, 8.0)) * kurbo::Affine::scale(2.0);
         let rect = Rect::new(0.0, 0.0, 20.0, 20.0);
@@ -1546,7 +1546,7 @@ fn snapshot_balance() -> CorpusCase {
             },
         ],
         eroded_interior: false,
-        about: "nested snapshot brackets, only the outermost honoured",
+        about: "nested retained brackets, only the outermost honoured",
     }
 }
 
@@ -1909,9 +1909,9 @@ mod tests {
         );
 
         // Promoted verbatim: 191 / 48 at a tolerance of one 8-bit step.
-        let snapshot = find("unit-snapshot-bracket");
-        assert_eq!(snapshot.spec.tolerance.channel, 3);
-        assert!(snapshot.probes.iter().any(|probe| {
+        let bracket = find("unit-snapshot-bracket");
+        assert_eq!(bracket.spec.tolerance.channel, 3);
+        assert!(bracket.probes.iter().any(|probe| {
             probe.expect
                 == Expect::Channel {
                     channel: 0,
@@ -1919,7 +1919,7 @@ mod tests {
                     tolerance: 3,
                 }
         }));
-        assert!(snapshot.probes.iter().any(|probe| {
+        assert!(bracket.probes.iter().any(|probe| {
             probe.expect
                 == Expect::Channel {
                     channel: 1,
