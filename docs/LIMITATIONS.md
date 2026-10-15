@@ -5889,9 +5889,10 @@ The separate 0 ns readings on drawing frames were a resolve race, fixed:
 `TimestampRing` resolves a slot only after `Queue::on_submitted_work_done`
 reports its frame complete.
 
-**Accepted because**: it degrades to a missing sample, never a wrong number,
-`is_measured` tells it from a real zero duration, and it affects only
-draw-free frames.
+**Accepted because**: it degrades to a missing sample, never a wrong number:
+`is_measured` tells it from a real zero duration in the API, the raw line
+reports a frame with an unmeasured Main span as `gpu_q=0`, and only a span
+whose every pass draws nothing is affected.
 
 ### `engine-punch-straddles-layer-composite` — an isolated layer whose content straddles a `ClearRect` composites whole after the punch
 
