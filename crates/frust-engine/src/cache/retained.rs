@@ -54,6 +54,27 @@
 //! adapter's ceiling on either axis, needs more than the whole budget, or names
 //! a key the same frame already records or draws.
 //!
+//! ## A page holds this frame's recording, or goes
+//!
+//! The ledger is a promise to the widget tree: a key it lists can be drawn
+//! instead of painted. So after any frame carrying a `PushRetained` for a key,
+//! the ledger lists that key only if its page holds *that frame's* recording
+//! of the body — a page holding an older recording would composite stale
+//! pixels on the next frame the widget asks for it. A re-record whose
+//! recording does not reach the page therefore evicts the key's page rather
+//! than keep it:
+//!
+//! - **refused** — any [`RetainedRefusal`], the body rendered inline;
+//! - **nested** — a bracket inside another one, which the compiler folds into
+//!   the outermost body and lists no bracket for
+//!   ([`CompiledFrame::retained_superseded`](crate::compile::CompiledFrame::retained_superseded));
+//! - **unrendered** — an admitted body inside a layer the schedule dropped.
+//!
+//! A key some bracket of the same frame draws, or records into its page and
+//! renders, keeps its page: that page is what the frame composited or
+//! recorded under the key. A key the frame does not name at all is untouched,
+//! and ages out least recently used like any other.
+//!
 //! A `DrawRetained` the store cannot serve is a renderer error the display
 //! list's own contract anticipates: the frame is refused with
 //! [`EngineError::RetainedKeyMissing`] before anything is recorded, and the
@@ -70,10 +91,12 @@
 //! a frame can still be refused after it — by the scheduler, or a capacity
 //! check — and a refused frame must leave every page and every ledger entry as
 //! it was. [`RetainedPages::commit`] applies a plan once nothing can fail any
-//! more: evictions first, then each admitted body's page — reused when the
-//! key's current page is large enough, allocated otherwise — and only for a
-//! body the schedule really rendered (a body inside a dropped layer renders
-//! nothing, and a page claiming its key would composite stale texels).
+//! more: evictions first — the plan's least recently used ones and every
+//! refused, nested or unrendered re-record's key (above) — then each admitted
+//! body's page — reused when the key's current page is large enough, allocated
+//! otherwise — and only for a body the schedule really rendered (a body inside
+//! a dropped layer renders nothing, and a page claiming its key would
+//! composite stale texels).
 //!
 //! Generic over the texture and view types like the intermediate pool, so plan,
 //! eviction and ledger behaviour is exercised against a counting fake
@@ -495,10 +518,19 @@ impl<T, V> RetainedPages<T, V> {
     /// fail any more: evict, then give every admitted body the schedule really
     /// rendered (`rendered`, indexed like `brackets`) its page, then bind each
     /// bracket to the page it uses this frame.
+    ///
+    /// The evictions are the plan's least-recently-used ones plus every key
+    /// the frame re-recorded without its page receiving that recording (see
+    /// the module doc's *A page holds this frame's recording, or goes*): a
+    /// body the plan refused, an admitted body the schedule did not render,
+    /// and every key in `superseded` — the `PushRetained` brackets the compiler
+    /// swallowed into an enclosing one
+    /// ([`CompiledFrame::retained_superseded`](crate::compile::CompiledFrame::retained_superseded)).
     pub fn commit<A>(
         &mut self,
         allocator: &A,
         brackets: &[RetainedBracket],
+        superseded: &[u64],
         plan: &RetainedPlan,
         rendered: &[bool],
     ) where
@@ -507,6 +539,9 @@ impl<T, V> RetainedPages<T, V> {
         let mut changed = false;
         for key in &plan.evictions {
             changed |= self.remove(*key);
+        }
+        for key in stale_keys(brackets, superseded, plan, rendered) {
+            changed |= self.remove(key);
         }
 
         let frame = self.frame;
@@ -708,6 +743,54 @@ impl<T, V> RetainedPages<T, V> {
             None => false,
         }
     }
+}
+
+/// The keys whose resident page committing `plan` must drop because the frame
+/// re-recorded them and the page will not hold that recording: a `Record` the
+/// plan refused ([`RetainedDecision::Inline`]), a `Record` the schedule did not
+/// render, and every `superseded` key (a bracket nested inside another, which
+/// the compiler lists no bracket for).
+///
+/// A key some bracket of the frame draws ([`RetainedDecision::Draw`] or
+/// [`RetainedDecision::Hidden`]), or records into its page and renders, is
+/// spared: the page holds what the frame composited or recorded under that
+/// key, and a drawn page is bound and sampled by this very frame. Two
+/// brackets naming one key in one frame is a key collision the widget tree
+/// is not meant to produce; the bracket the page serves is the one that
+/// stands. Deduplicated, in first-seen order.
+fn stale_keys(
+    brackets: &[RetainedBracket],
+    superseded: &[u64],
+    plan: &RetainedPlan,
+    rendered: &[bool],
+) -> Vec<u64> {
+    // Nothing here allocates on a frame that records no bracket, the common
+    // one.
+    let mut kept: Vec<u64> = Vec::new();
+    let mut stale: Vec<u64> = Vec::new();
+    for (index, (bracket, decision)) in brackets.iter().zip(&plan.decisions).enumerate() {
+        let keeps = match decision {
+            RetainedDecision::Draw { .. } | RetainedDecision::Hidden => true,
+            RetainedDecision::Record { .. } => rendered.get(index).copied().unwrap_or(false),
+            RetainedDecision::Inline(_) => false,
+        };
+        // A draw's decision is always `Draw` or `Hidden` — one the store
+        // cannot serve refuses the frame in `plan` — so only a `Record` ever
+        // lands among the stale.
+        if keeps {
+            kept.push(bracket.key);
+        } else {
+            stale.push(bracket.key);
+        }
+    }
+    stale.extend_from_slice(superseded);
+    let mut keys: Vec<u64> = Vec::new();
+    for key in stale {
+        if !kept.contains(&key) && !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    keys
 }
 
 /// Grow every recorded layer enclosing a served `DrawRetained` to cover the

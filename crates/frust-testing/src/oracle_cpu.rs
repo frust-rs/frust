@@ -25,7 +25,7 @@
 //! ([`frust_engine::SceneCompiler::compile`], `frust-engine/src/compile`) walk
 //! over a [`frust_scene::Scene`]'s commands — the hoisted `ClearRect`, the
 //! per-corner rounded shapes, the pre-flattened dash segments, the
-//! largest-corner shadow downgrade, and the inline snapshot emulation are all
+//! largest-corner shadow downgrade, and the inline retained-bracket emulation are all
 //! reproduced here. They are *reproduced* rather than reused: the engine
 //! compiler only ever produces strip geometry for the GPU raster pipeline to
 //! turn into pixels, which is exactly the GPU dependency this crate's CPU arm
@@ -254,7 +254,7 @@ impl CpuOracle {
     /// How many [`Command`]s the most recent render's walk dispatched.
     ///
     /// Every command the walk sees is counted, including the pops and the
-    /// commands inside a snapshot bracket — so a scene holding one of each
+    /// commands inside a retained bracket — so a scene holding one of each
     /// variant reports its own full length, which is what "every variant is
     /// routed" means operationally.
     pub fn routed_commands(&self) -> usize {
@@ -714,12 +714,12 @@ enum Group {
     /// those with no matching push (`scene.rs`'s documented unbalanced-pop
     /// policy), and since every group lives on one shared stack, such a pop
     /// consumes whatever is innermost — which can be this entry rather than
-    /// its own kind. When that happens, `snapshot_layer_pushed` must be
+    /// its own kind. When that happens, `retained_layer_pushed` must be
     /// cleared so the matching `PopRetained` does not pop the same
     /// already-consumed backend layer a second time (the layer-stack
     /// underflow this variant exists to prevent — `vello_cpu` panics on it,
     /// unlike vello's GPU resolver, which tolerates the imbalance).
-    SnapshotLayer(f32),
+    RetainedLayer(f32),
 }
 
 /// Walks `commands` into `painter` under `root`, pre-multiplied onto every
@@ -729,7 +729,7 @@ enum Group {
 /// This is the oracle's copy of `frust-engine`'s own compiler command walk
 /// (see the module docs for why it is a copy). It always renders the WHOLE scene
 /// from its root: there is no segment/prefix split (that is the GPU path's
-/// snapshot-compositor concern) and no shader-override map or hole set, so
+/// retained-page concern) and no shader-override map or hole set, so
 /// every [`Command::ShaderQuad`] takes its miss path and every
 /// [`Command::PushRetained`] its inline-emulation path.
 fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>) -> usize {
@@ -747,13 +747,13 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
     // its `alpha` an ordinary opacity layer on the same group stack. An
     // unbalanced `PopRetained` is ignored, the policy `PopLayer` follows.
     let mut retained_depth: usize = 0;
-    let mut snapshot_correction = Affine::IDENTITY;
-    let mut snapshot_layer_pushed = false;
+    let mut retained_correction = Affine::IDENTITY;
+    let mut retained_layer_pushed = false;
     let mut routed = 0_usize;
 
     for command in commands {
         routed += 1;
-        let combined = root * snapshot_correction;
+        let combined = root * retained_correction;
         match command {
             Command::FillRect {
                 rect,
@@ -819,18 +819,18 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
                 // panics on a layer-stack underflow. An oracle must not be the
                 // component that dies on a malformed scene.
                 //
-                // The popped entry can be a `Group::SnapshotLayer` rather than
+                // The popped entry can be a `Group::RetainedLayer` rather than
                 // a `Group::Clip` — all three `Group` kinds share one stack,
                 // so an unbalanced pop consumes whichever is innermost. When
-                // it is the snapshot's own emulated layer, `pop_clip`'s
+                // it is the bracket's own emulated layer, `pop_clip`'s
                 // backend call is still correct (it and `pop_layer` both
                 // reduce to the same `ctx.pop_layer()`), but the bookkeeping
                 // must say so or the matching `PopRetained` pops the same
-                // now-empty backend layer again (see `Group::SnapshotLayer`).
+                // now-empty backend layer again (see `Group::RetainedLayer`).
                 if let Some((kind, ..)) = groups.pop() {
                     painter.pop_clip();
-                    if matches!(kind, Group::SnapshotLayer(_)) {
-                        snapshot_layer_pushed = false;
+                    if matches!(kind, Group::RetainedLayer(_)) {
+                        retained_layer_pushed = false;
                     }
                 }
             }
@@ -870,11 +870,11 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
             }
             Command::PopLayer => {
                 // Guarded for the same reason as `PopClip` above, including
-                // the same possibility of consuming a `Group::SnapshotLayer`.
+                // the same possibility of consuming a `Group::RetainedLayer`.
                 if let Some((kind, ..)) = groups.pop() {
                     painter.pop_layer();
-                    if matches!(kind, Group::SnapshotLayer(_)) {
-                        snapshot_layer_pushed = false;
+                    if matches!(kind, Group::RetainedLayer(_)) {
+                        retained_layer_pushed = false;
                     }
                 }
             }
@@ -910,7 +910,7 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
                 // nothing. A group at full opacity composites as its contents
                 // drawn directly, which is what popping it here does.
                 let isolated = groups.iter().any(|(kind, ..)| {
-                    matches!(kind, Group::Layer(alpha) | Group::SnapshotLayer(alpha) if *alpha < 1.0)
+                    matches!(kind, Group::Layer(alpha) | Group::RetainedLayer(alpha) if *alpha < 1.0)
                 });
                 let transform = combined * *transform;
                 let size = (painter.pixmap.width(), painter.pixmap.height());
@@ -989,13 +989,13 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
                         // makes the inserted scale land correctly on a body
                         // command whose transform was recorded as `M * (its own
                         // pushes)`.
-                        snapshot_correction = m * s * m.inverse();
+                        retained_correction = m * s * m.inverse();
                     }
                     if *alpha < 1.0 {
-                        let corrected = root * snapshot_correction * *transform;
-                        groups.push((Group::SnapshotLayer(*alpha), corrected, *rect));
+                        let corrected = root * retained_correction * *transform;
+                        groups.push((Group::RetainedLayer(*alpha), corrected, *rect));
                         painter.push_layer(corrected, rect, *alpha);
-                        snapshot_layer_pushed = true;
+                        retained_layer_pushed = true;
                     }
                 }
                 retained_depth += 1;
@@ -1013,21 +1013,21 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
                 if retained_depth > 0 {
                     retained_depth -= 1;
                     if retained_depth == 0 {
-                        // `snapshot_layer_pushed` is only true here when the
-                        // `Group::SnapshotLayer` this bracket pushed is still
+                        // `retained_layer_pushed` is only true here when the
+                        // `Group::RetainedLayer` this bracket pushed is still
                         // on the stack: `PopClip`/`PopLayer` clear the flag
                         // themselves the moment either one consumes it (see
-                        // `Group::SnapshotLayer`'s docs), so this pop can
+                        // `Group::RetainedLayer`'s docs), so this pop can
                         // never underflow the backend's layer stack a second
                         // time — the review counterexample this guards
                         // against (`push_retained` alpha < 1.0, an unbalanced
                         // `PopClip`/`PopLayer`, then `pop_retained`).
-                        if snapshot_layer_pushed {
+                        if retained_layer_pushed {
                             groups.pop();
                             painter.pop_layer();
-                            snapshot_layer_pushed = false;
+                            retained_layer_pushed = false;
                         }
-                        snapshot_correction = Affine::IDENTITY;
+                        retained_correction = Affine::IDENTITY;
                     }
                 }
             }
@@ -1051,7 +1051,7 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
     for (kind, ..) in groups.iter().rev() {
         match kind {
             Group::Clip(_) | Group::ClipPath(_) => painter.pop_clip(),
-            Group::Layer(_) | Group::SnapshotLayer(_) => painter.pop_layer(),
+            Group::Layer(_) | Group::RetainedLayer(_) => painter.pop_layer(),
         }
     }
 
@@ -1064,7 +1064,7 @@ fn pop_groups(painter: &mut Painter<'_>, groups: &[(Group, Affine, Rect)]) {
     for (kind, ..) in groups.iter().rev() {
         match kind {
             Group::Clip(_) | Group::ClipPath(_) => painter.pop_clip(),
-            Group::Layer(_) | Group::SnapshotLayer(_) => painter.pop_layer(),
+            Group::Layer(_) | Group::RetainedLayer(_) => painter.pop_layer(),
         }
     }
 }
@@ -1076,7 +1076,7 @@ fn push_groups(painter: &mut Painter<'_>, groups: &[(Group, Affine, Rect)]) {
             Group::Clip(None) => painter.push_clip(*t, r),
             Group::Clip(Some(radii)) => painter.push_clip_rounded(*t, r, *radii),
             Group::ClipPath(path) => painter.push_clip_path(*t, path),
-            Group::Layer(alpha) | Group::SnapshotLayer(alpha) => painter.push_layer(*t, r, *alpha),
+            Group::Layer(alpha) | Group::RetainedLayer(alpha) => painter.push_layer(*t, r, *alpha),
         }
     }
 }
@@ -1604,7 +1604,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unbalanced_pop_clip_inside_a_snapshot_layer_does_not_panic() {
+    fn an_unbalanced_pop_clip_inside_a_retained_layer_does_not_panic() {
         // The review counterexample: an alpha < 1.0 `PushRetained` bracket
         // emulates its alpha as a `groups` entry and pushes ONE backend
         // layer; an unbalanced `PopClip` with no matching push then consumes
@@ -1633,7 +1633,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unbalanced_pop_layer_inside_a_snapshot_layer_does_not_panic() {
+    fn an_unbalanced_pop_layer_inside_a_retained_layer_does_not_panic() {
         // Same shape as the `PopClip` counterexample above, exercising the
         // `PopLayer` arm's own guard instead.
         let mut scene = Scene::new();

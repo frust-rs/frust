@@ -1668,10 +1668,18 @@ impl EngineRenderer {
         // Past the last fallible step. The retained store applies its plan
         // first — evictions, then a page for every body a round really renders
         // into — so every retained page the frame's rounds name exists before
-        // they are recorded.
+        // they are recorded. The evictions include every key the frame
+        // re-recorded whose page will not hold that recording (refused,
+        // nested or unrendered), so the ledger published after this frame
+        // never names a stale page.
         let rendered = retained_rendered(&frame, &rounds);
-        self.retained
-            .commit(device, &frame.retained, &retained_plan, &rendered);
+        self.retained.commit(
+            device,
+            &frame.retained,
+            &frame.retained_superseded,
+            &retained_plan,
+            &rendered,
+        );
 
         // The atlas is created or grown first, so
         // the growth copy's own submit precedes the frame's atlas writes below

@@ -127,7 +127,13 @@ fn run(pages: &mut FakePages, allocator: &FakeAllocator, mut frame: CompiledFram
         .plan(&frame.retained, &mut frame.recorder.layers)
         .expect("the frame's draws are all served");
     let rendered = vec![true; frame.retained.len()];
-    pages.commit(allocator, &frame.retained, &plan, &rendered);
+    pages.commit(
+        allocator,
+        &frame.retained,
+        &frame.retained_superseded,
+        &plan,
+        &rendered,
+    );
     plan
 }
 
@@ -456,7 +462,7 @@ fn a_recorded_body_becomes_resident_only_once_committed() {
     );
     let before = pages.generation();
 
-    pages.commit(&allocator, &frame.retained, &plan, &[true]);
+    pages.commit(&allocator, &frame.retained, &[], &plan, &[true]);
     let entries: Vec<_> = pages.entries().collect();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].key, 7);
@@ -481,7 +487,7 @@ fn only_a_body_the_schedule_rendered_is_committed() {
     let plan = pages
         .plan(&frame.retained, &mut frame.recorder.layers)
         .expect("plans");
-    pages.commit(&allocator, &frame.retained, &plan, &[false]);
+    pages.commit(&allocator, &frame.retained, &[], &plan, &[false]);
     assert!(pages.is_empty());
     assert_eq!(allocator.allocated.get(), 0);
 }
@@ -769,6 +775,349 @@ fn a_re_recorded_body_reuses_its_page_while_it_fits() {
     );
     assert_eq!(pages.len(), 1, "and the old one goes");
     assert_eq!(pages.used_bytes(), 64 * 24 * 4);
+}
+
+// ---------------------------------------------------------------------
+// A re-record whose recording does not reach the page evicts it
+// ---------------------------------------------------------------------
+
+/// The key every re-record case below records, then records again.
+const KEY: u64 = 5;
+
+/// Where every re-record case places its body.
+const AT: Affine = Affine::new([1.0, 0.0, 0.0, 1.0, 8.0, 8.0]);
+
+/// `pages` holding [`KEY`]'s page as [`record_body`] at [`AT`] and half
+/// opacity records it — the page a later `DrawRetained` of the same body at
+/// the same placement is served from.
+fn with_key_resident(pages: &mut FakePages, allocator: &FakeAllocator) {
+    run(
+        pages,
+        allocator,
+        compile_retained(&scene_of(|builder| record_body(builder, KEY, AT, HALF))),
+    );
+    assert_eq!(keys(pages), vec![KEY], "precondition: the key is resident");
+}
+
+/// Whether a `DrawRetained` of [`KEY`]'s body at [`AT`] — the request the
+/// page recorded by [`with_key_resident`] serves — is refused for want of the
+/// key, leaving nothing composited.
+fn draw_of_key_is_refused(pages: &mut FakePages) -> bool {
+    let mut frame = compile_retained(&scene_of(|builder| draw_body(builder, KEY, AT, 1.0, 1.0)));
+    matches!(
+        pages.plan(&frame.retained, &mut frame.recorder.layers),
+        Err(EngineError::RetainedKeyMissing { key: KEY })
+    )
+}
+
+#[test]
+fn the_draw_of_a_resident_key_is_served_when_its_bracket_is_simply_absent() {
+    // The control every eviction case below rests on: the page recorded by
+    // `with_key_resident` serves exactly the draw those cases expect refused,
+    // and a frame that does not name the key at all leaves it resident — the
+    // least-recently-used semantics are unchanged.
+    let allocator = FakeAllocator::default();
+    let mut pages = store(1 << 20);
+    with_key_resident(&mut pages, &allocator);
+    let generation = pages.generation();
+
+    let plan = run(
+        &mut pages,
+        &allocator,
+        compile_retained(&scene_of(|builder| record_body(builder, 9, AT, HALF))),
+    );
+    assert!(matches!(plan.decisions[0], RetainedDecision::Record { .. }));
+    assert_eq!(keys(&pages), vec![KEY, 9], "an unnamed key stays resident");
+    let generation_after_new_page = pages.generation();
+    assert_ne!(
+        generation_after_new_page, generation,
+        "the new page is a change"
+    );
+
+    run(
+        &mut pages,
+        &allocator,
+        compile_retained(&scene_of(|builder| {
+            builder.fill_rect(BODY, Brush::Solid(BLUE));
+        })),
+    );
+    assert_eq!(
+        keys(&pages),
+        vec![KEY, 9],
+        "a frame naming no key evicts none"
+    );
+    assert_eq!(pages.generation(), generation_after_new_page);
+
+    let mut frame = compile_retained(&scene_of(|builder| draw_body(builder, KEY, AT, 1.0, 1.0)));
+    let plan = pages
+        .plan(&frame.retained, &mut frame.recorder.layers)
+        .expect("the resident page serves the draw");
+    assert!(matches!(plan.decisions[0], RetainedDecision::Draw { .. }));
+}
+
+#[test]
+fn a_refused_re_record_evicts_the_keys_previous_page() {
+    // Each case: the key's page resident from an earlier frame, then the same
+    // key re-recorded with a body the store refuses. The refused body renders
+    // inline; the page still holding the earlier body would composite stale
+    // pixels on the next frame the widget draws it, so it has to go.
+    type Setup = fn(&mut FakePages);
+    let keep: Setup = |_| {};
+    let squeeze: Setup = |pages| pages.set_budget(RetainedBudget { bytes: BODY_BYTES });
+    let wide = Rect::new(0.0, 0.0, 64.0, 24.0);
+    let cases: Vec<(&str, FakePages, Setup, Scene, RetainedRefusal)> = vec![
+        (
+            "a body that now draws nothing",
+            store(1 << 20),
+            keep,
+            scene_of(|builder| {
+                builder.push_transform(AT);
+                builder.push_retained(KEY, BODY, HALF, 1.0);
+                builder.pop_retained();
+                builder.pop_transform();
+            }),
+            RetainedRefusal::Empty,
+        ),
+        (
+            "a body that now draws outside its rectangle",
+            store(1 << 20),
+            keep,
+            scene_of(|builder| {
+                builder.push_transform(AT);
+                builder.push_retained(KEY, BODY, 1.0, 1.0);
+                builder.fill_rect(Rect::new(0.0, 0.0, 60.0, 24.0), Brush::Solid(RED));
+                builder.pop_retained();
+                builder.pop_transform();
+            }),
+            RetainedRefusal::Overflow,
+        ),
+        (
+            "a body now under a rounded clip",
+            store(1 << 20),
+            keep,
+            scene_of(|builder| {
+                builder.push_clip_rounded(Rect::new(0.0, 0.0, 64.0, 64.0), 6.0);
+                record_body(builder, KEY, AT, HALF);
+                builder.pop_clip();
+            }),
+            RetainedRefusal::NotRetainable,
+        ),
+        (
+            "a body that now punches",
+            store(1 << 20),
+            keep,
+            scene_of(|builder| {
+                builder.push_transform(AT);
+                builder.push_retained(KEY, BODY, HALF, 1.0);
+                builder.fill_rect(BODY, Brush::Solid(RED));
+                builder.clear_rect(Rect::new(2.0, 2.0, 6.0, 6.0));
+                builder.pop_retained();
+                builder.pop_transform();
+            }),
+            RetainedRefusal::NotRetainable,
+        ),
+        (
+            "a body grown past a budget overridden down to the old page",
+            store(1 << 20),
+            squeeze,
+            scene_of(|builder| {
+                builder.push_transform(AT);
+                builder.push_retained(KEY, wide, HALF, 1.0);
+                builder.fill_rect(wide, Brush::Solid(RED));
+                builder.pop_retained();
+                builder.pop_transform();
+            }),
+            RetainedRefusal::OverBudget,
+        ),
+        (
+            "a body grown past the largest page",
+            RetainedPages::new(RetainedBudget { bytes: 1 << 20 }, 40),
+            keep,
+            scene_of(|builder| {
+                builder.push_transform(AT);
+                builder.push_retained(KEY, wide, HALF, 1.0);
+                builder.fill_rect(wide, Brush::Solid(RED));
+                builder.pop_retained();
+                builder.pop_transform();
+            }),
+            RetainedRefusal::TooLarge,
+        ),
+    ];
+
+    for (what, mut pages, setup, scene, reason) in cases {
+        let allocator = FakeAllocator::default();
+        with_key_resident(&mut pages, &allocator);
+        setup(&mut pages);
+        assert_eq!(
+            keys(&pages),
+            vec![KEY],
+            "{what}: precondition, still resident"
+        );
+        let generation = pages.generation();
+
+        let plan = run(&mut pages, &allocator, compile_retained(&scene));
+        assert_eq!(
+            plan.decisions,
+            vec![RetainedDecision::Inline(reason)],
+            "{what}: the re-record is refused"
+        );
+        assert!(
+            !pages.contains(KEY) && keys(&pages).is_empty(),
+            "{what}: the key is absent from the ledger after the refusing frame"
+        );
+        assert_ne!(pages.generation(), generation, "{what}: the ledger changed");
+        assert_eq!(
+            allocator.allocated.get(),
+            1,
+            "{what}: nothing new allocated"
+        );
+        assert!(
+            draw_of_key_is_refused(&mut pages),
+            "{what}: a following DrawRetained is refused, never composited from the old page"
+        );
+    }
+}
+
+#[test]
+fn a_re_record_nested_inside_another_bracket_evicts_the_keys_previous_page() {
+    let allocator = FakeAllocator::default();
+    let mut pages = store(1 << 20);
+    with_key_resident(&mut pages, &allocator);
+
+    // The key's bracket inside an outermost one: its body is painted into the
+    // outer page, and its own page receives nothing.
+    let frame = compile_retained(&scene_of(|builder| {
+        builder.push_transform(AT);
+        builder.push_retained(1, BODY, HALF, 1.0);
+        builder.push_retained(KEY, BODY, HALF, 1.0);
+        builder.fill_rect(BODY, Brush::Solid(BLUE));
+        builder.pop_retained();
+        builder.pop_retained();
+        builder.pop_transform();
+    }));
+    assert_eq!(frame.retained_superseded, vec![KEY]);
+    let generation = pages.generation();
+    let plan = run(&mut pages, &allocator, frame);
+
+    assert!(
+        matches!(plan.decisions[..], [RetainedDecision::Record { .. }]),
+        "the outermost bracket is admitted: {:?}",
+        plan.decisions
+    );
+    assert_eq!(
+        keys(&pages),
+        vec![1],
+        "the outer key is resident, the inner absent"
+    );
+    assert_ne!(pages.generation(), generation);
+    assert!(draw_of_key_is_refused(&mut pages));
+}
+
+#[test]
+fn a_re_record_the_schedule_does_not_render_evicts_the_keys_previous_page() {
+    let allocator = FakeAllocator::default();
+    let mut pages = store(1 << 20);
+    with_key_resident(&mut pages, &allocator);
+
+    // The body admitted, inside a layer that composites nothing: the
+    // scheduler drops the layer and everything in it.
+    let mut frame = compile_retained(&scene_of(|builder| {
+        builder.push_layer(Rect::new(0.0, 0.0, 64.0, 64.0), 0.0);
+        record_body(builder, KEY, AT, HALF);
+        builder.pop_layer();
+    }));
+    let plan = pages
+        .plan(&frame.retained, &mut frame.recorder.layers)
+        .expect("plans");
+    assert!(
+        matches!(plan.decisions[..], [RetainedDecision::Record { .. }]),
+        "precondition: the store admits the body: {:?}",
+        plan.decisions
+    );
+
+    // The renderer's own reading of the schedule: which bracket a round
+    // renders into its retained page.
+    let mut roles = RetainedLayers::new();
+    for (index, (bracket, decision)) in frame.retained.iter().zip(&plan.decisions).enumerate() {
+        if let RetainedDecision::Record { .. } = decision {
+            let id = u32::try_from(index).expect("a handful of brackets");
+            roles.set(bracket.layer, RetainedRole::Record { bracket: id });
+        }
+    }
+    let rounds = Schedule::build_retained(&frame.recorder, &caps(), &PageConfig::default(), &roles)
+        .expect("schedules");
+    let mut rendered = vec![false; frame.retained.len()];
+    for target in rounds.iter().filter_map(Round::retained) {
+        rendered[target.bracket as usize] = true;
+    }
+    assert_eq!(
+        rendered,
+        vec![false],
+        "precondition: the body renders nowhere"
+    );
+
+    let generation = pages.generation();
+    pages.commit(
+        &allocator,
+        &frame.retained,
+        &frame.retained_superseded,
+        &plan,
+        &rendered,
+    );
+    assert!(
+        keys(&pages).is_empty(),
+        "the unrendered body's key is absent"
+    );
+    assert_ne!(pages.generation(), generation);
+    assert!(
+        pages.page_for(0).is_none(),
+        "and its bracket is bound to nothing"
+    );
+    assert!(draw_of_key_is_refused(&mut pages));
+}
+
+#[test]
+fn a_key_the_frame_also_draws_or_records_keeps_its_page() {
+    let allocator = FakeAllocator::default();
+    let mut pages = store(1 << 20);
+    with_key_resident(&mut pages, &allocator);
+
+    // Drawn and nested in one frame: the draw samples the page this frame,
+    // so the page stays — it holds what the frame composited under the key.
+    let frame = compile_retained(&scene_of(|builder| {
+        draw_body(builder, KEY, AT, 1.0, 1.0);
+        builder.push_transform(Affine::translate((48.0, 8.0)));
+        builder.push_retained(1, BODY, HALF, 1.0);
+        builder.push_retained(KEY, BODY, HALF, 1.0);
+        builder.fill_rect(BODY, Brush::Solid(BLUE));
+        builder.pop_retained();
+        builder.pop_retained();
+        builder.pop_transform();
+    }));
+    assert_eq!(frame.retained_superseded, vec![KEY]);
+    let plan = run(&mut pages, &allocator, frame);
+    assert!(matches!(plan.decisions[0], RetainedDecision::Draw { .. }));
+    assert_eq!(keys(&pages), vec![1, KEY]);
+    assert!(
+        pages.page_for(0).is_some(),
+        "the draw is still bound to its page"
+    );
+
+    // Recorded at the root and nested elsewhere: the root body's recording is
+    // this frame's, so its page stands.
+    let frame = compile_retained(&scene_of(|builder| {
+        record_body(builder, KEY, AT, HALF);
+        builder.push_transform(Affine::translate((48.0, 8.0)));
+        builder.push_retained(1, BODY, HALF, 1.0);
+        builder.push_retained(KEY, BODY, HALF, 1.0);
+        builder.fill_rect(BODY, Brush::Solid(BLUE));
+        builder.pop_retained();
+        builder.pop_retained();
+        builder.pop_transform();
+    }));
+    let plan = run(&mut pages, &allocator, frame);
+    assert!(matches!(plan.decisions[0], RetainedDecision::Record { .. }));
+    assert_eq!(keys(&pages), vec![1, KEY]);
 }
 
 #[test]

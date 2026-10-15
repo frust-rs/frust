@@ -1,4 +1,4 @@
-//! Opacity layers, snapshot brackets, and the bracket stack they share with
+//! Opacity layers, retained brackets, and the bracket stack they share with
 //! clips.
 //!
 //! Three of the display list's commands open a *group* — a bracket whose
@@ -27,7 +27,7 @@
 //! refuses a recorded layer carrying a clip path for that exact reason. Setting
 //! both would clip the layer twice.
 //!
-//! ## Snapshot brackets
+//! ## Retained brackets
 //!
 //! `frust_scene` states what a renderer that does not retain must do with a
 //! `PushRetained` bracket: paint the body inline, wrapped exactly as if the
@@ -56,11 +56,15 @@
 //! bracket's presentation parameters are deliberately not baked into it. The
 //! correction that reproduces `push_transform` around a body already carrying
 //! `transform` is `transform * scale_about(..) * transform.inverse()` — see
-//! [`snapshot_correction`].
+//! [`retained_correction`].
 //!
 //! Only the outermost bracket is honoured, which the display list explicitly
 //! permits: an inner bracket's own `alpha` and `scale` are ignored, and its
-//! depth is tracked only so the matching pop can be identified.
+//! depth is tracked only so the matching pop can be identified. With retention
+//! on, an inner bracket's key — and that of any bracket that records no
+//! [`RetainedBracket`] — is listed in `CompiledFrame::retained_superseded`
+//! instead: its body is painted as part of the outermost one, so whatever page
+//! the key held is older than this frame's recording and the store evicts it.
 
 use kurbo::{Affine, Rect};
 use peniko::BlendMode;
@@ -100,7 +104,7 @@ impl Group {
     }
 }
 
-/// The compiler's stack of open clip, layer and snapshot brackets.
+/// The compiler's stack of open clip, layer and retained brackets.
 ///
 /// Retained across frames alongside the clip stack it mirrors —
 /// [`reset`](Self::reset) is what keeps it from carrying state between frames.
@@ -234,7 +238,7 @@ pub fn layer_props(opacity: f32) -> LayerProps {
     }
 }
 
-/// The correction that reproduces a snapshot bracket's presentation scale.
+/// The correction that reproduces a retained bracket's presentation scale.
 ///
 /// The body was recorded under `transform` without the scale baked in, so
 /// scaling it about `rect`'s centre means conjugating the scale by that
@@ -250,7 +254,7 @@ pub fn layer_props(opacity: f32) -> LayerProps {
 /// propagating them would refuse a frame the rest of which is perfectly
 /// drawable.
 #[must_use]
-pub fn snapshot_correction(rect: Rect, scale: f64, transform: Affine) -> Affine {
+pub fn retained_correction(rect: Rect, scale: f64, transform: Affine) -> Affine {
     if scale == 1.0 {
         return Affine::IDENTITY;
     }
@@ -414,7 +418,7 @@ impl RetainedBracket {
     }
 }
 
-/// The snapshot bracket's inline emulation: how deep the walk is inside one,
+/// The retained bracket's inline emulation: how deep the walk is inside one,
 /// and what the outermost bracket installed.
 #[derive(Debug)]
 pub struct RetainedStack {
@@ -467,7 +471,7 @@ impl RetainedStack {
     pub fn enter(&mut self, rect: Rect, scale: f64, transform: Affine) -> bool {
         let outermost = self.depth == 0;
         if outermost {
-            self.correction = snapshot_correction(rect, scale, transform);
+            self.correction = retained_correction(rect, scale, transform);
         }
         self.depth = self.depth.saturating_add(1);
         outermost
@@ -493,7 +497,7 @@ impl RetainedStack {
     /// A pop with no bracket open is ignored, the policy the display list
     /// states for an unbalanced `PopRetained`. `open_brackets` is the group
     /// stack's current depth: when a stray pop inside the bracket's body has
-    /// already closed the group the snapshot opened, the recorded depth is no
+    /// already closed the group the bracket opened, the recorded depth is no
     /// longer reachable and no group is reported — closing one anyway would
     /// lift an ancestor bracket the display list still holds open.
     pub fn leave(&mut self, open_brackets: usize) -> bool {
@@ -579,7 +583,7 @@ mod tests {
     #[test]
     fn the_correction_scales_the_body_about_the_rect_centre() {
         let rect = Rect::new(0.0, 0.0, 20.0, 20.0);
-        let correction = snapshot_correction(rect, 0.5, Affine::IDENTITY);
+        let correction = retained_correction(rect, 0.5, Affine::IDENTITY);
 
         // The centre is the scale's fixed point; a corner moves halfway to it.
         assert_eq!(correction * rect.center(), rect.center());
@@ -590,7 +594,7 @@ mod tests {
     fn the_correction_conjugates_by_the_body_transform() {
         let rect = Rect::new(0.0, 0.0, 20.0, 20.0);
         let transform = Affine::translate((100.0, 0.0));
-        let correction = snapshot_correction(rect, 0.5, transform);
+        let correction = retained_correction(rect, 0.5, transform);
 
         // The centre in the body's own space is what stays put, so under the
         // composed transform the body's centre is still where it was.
@@ -602,11 +606,11 @@ mod tests {
     fn a_scale_of_one_and_a_singular_transform_both_correct_nothing() {
         let rect = Rect::new(0.0, 0.0, 20.0, 20.0);
         assert_eq!(
-            snapshot_correction(rect, 1.0, Affine::translate((3.0, 4.0))),
+            retained_correction(rect, 1.0, Affine::translate((3.0, 4.0))),
             Affine::IDENTITY
         );
         assert_eq!(
-            snapshot_correction(rect, 0.5, Affine::scale(0.0)),
+            retained_correction(rect, 0.5, Affine::scale(0.0)),
             Affine::IDENTITY
         );
     }
@@ -656,15 +660,15 @@ mod tests {
     }
 
     #[test]
-    fn a_stray_pop_inside_a_snapshot_body_does_not_hand_its_group_to_pop_retained() {
+    fn a_stray_pop_inside_a_retained_body_does_not_hand_its_group_to_pop_retained() {
         let rect = Rect::new(0.0, 0.0, 20.0, 20.0);
         let mut stack = RetainedStack::new();
 
         stack.enter(rect, 1.0, Affine::IDENTITY);
         stack.record_layer(2);
 
-        // A stray pop inside the body already closed the snapshot's own group:
-        // the group stack is back below the recorded depth, so the snapshot's
+        // A stray pop inside the body already closed the bracket's own group:
+        // the group stack is back below the recorded depth, so the bracket's
         // pop must not report a group — closing one would lift an ancestor.
         assert!(!stack.leave(1), "a lost bracket reports no group to close");
         assert!(!stack.leave(1), "an unbalanced pop still closes nothing");

@@ -6,14 +6,14 @@
 //! geometry, its composed transform and the viewport. Everything around it is
 //! order-coupled — the depth counter only advances for a draw that produced
 //! coverage, the encoded-paint table and the image residency are appended to
-//! in painter order, the clip, group and snapshot stacks are a function of
+//! in painter order, the clip, group and retained stacks are a function of
 //! every bracket before the command, and a glyph run's atlas route and
 //! resident-run cache are stateful across the whole frame. So the walk splits
 //! in three:
 //!
 //! 1. **Planning**, sequential and cheap ([`plan`]). One pass over the display
 //!    list resolves each drawing command's [`Geometry`] against its composed
-//!    transform — tracking the snapshot correction and whether a coverage mask
+//!    transform — tracking the retained correction and whether a coverage mask
 //!    is open, on the walk's own terms — and lists the ones worth handing to a
 //!    worker as [`Job`]s. A pixel-aligned rectangle is never one (writing its
 //!    coverage costs less than copying it), a command drawn under a mask is
@@ -219,7 +219,7 @@ impl<'a> Geometry<'a> {
     }
 
     /// The geometry `command` rasterizes under `combined` (the frame root with
-    /// any snapshot correction), or `None` for a command that is not a
+    /// any retained correction), or `None` for a command that is not a
     /// strip-generated shape — a bracket, a glyph run, an external texture.
     pub(crate) fn of(command: &'a Command, combined: Affine) -> Option<Self> {
         let geometry = match command {
@@ -431,7 +431,7 @@ fn control_box(elements: impl Iterator<Item = PathEl>) -> Rect {
 pub(crate) struct Job<'a> {
     /// The command's index in the display list.
     command: usize,
-    /// The frame root with the snapshot correction the planner composed for
+    /// The frame root with the retained correction the planner composed for
     /// this command — compared bit for bit against the walk's own before a
     /// helper's run is taken.
     combined: Affine,
@@ -467,8 +467,8 @@ impl Plan<'_> {
 ///
 /// Mirrors the walk's bracket handling on its exact terms — the same
 /// [`command_on_grid`] check, the same [`retained_entry`] substitution, the
-/// same snapshot-layer rule — but tracks only what decides whether a command
-/// is worth offering: the snapshot correction its transform composes with, and
+/// same retained-layer rule — but tracks only what decides whether a command
+/// is worth offering: the retained correction its transform composes with, and
 /// whether any open bracket lowered to a coverage mask. An off-grid bracket is
 /// tracked as the scissor that admits nothing it lowers to. The walk re-checks
 /// both before it takes a helper's run, so an approximation here can only
@@ -494,7 +494,7 @@ pub(crate) fn plan_with<'a>(
     retain: bool,
 ) -> Plan<'a> {
     let mut plan = Plan::default();
-    let mut snapshots = RetainedStack::new();
+    let mut retained_stack = RetainedStack::new();
     // One entry per open bracket: whether its clip lowered to a mask.
     let mut brackets: Vec<bool> = Vec::new();
     let mut masks = 0_usize;
@@ -542,7 +542,7 @@ pub(crate) fn plan_with<'a>(
             | Command::PushRetained { .. }
             | Command::PopRetained => {}
         }
-        let combined = root * snapshots.correction();
+        let combined = root * retained_stack.correction();
         let on_grid = command_on_grid(command, combined);
         if !on_grid {
             match command {
@@ -557,7 +557,7 @@ pub(crate) fn plan_with<'a>(
                     ..
                 } => {
                     let (scale, transform) = retained_entry(on_grid, *scale, *transform);
-                    snapshots.enter(*rect, scale, transform);
+                    retained_stack.enter(*rect, scale, transform);
                 }
                 // An off-grid shape is refused by the walk, and a pop carries
                 // no transform to be off the grid with.
@@ -611,20 +611,20 @@ pub(crate) fn plan_with<'a>(
                 transform,
                 ..
             } => {
-                if snapshots.enter(*rect, *scale, *transform) {
-                    let corrected = root * snapshots.correction() * *transform;
+                if retained_stack.enter(*rect, *scale, *transform) {
+                    let corrected = root * retained_stack.correction() * *transform;
                     if (retain || *alpha < 1.0) && check_finite(corrected).is_ok() {
                         // Below full opacity the walk clips the body to its
                         // rectangle; at it (retention on) the group clips
                         // nothing at all.
                         let mask = *alpha < 1.0 && fast_rect(*rect, corrected).is_none();
                         push(&mut brackets, &mut masks, mask);
-                        snapshots.record_layer(brackets.len());
+                        retained_stack.record_layer(brackets.len());
                     }
                 }
             }
             Command::PopRetained => {
-                if snapshots.leave(brackets.len()) {
+                if retained_stack.leave(brackets.len()) {
                     pop(&mut brackets, &mut masks);
                 }
             }

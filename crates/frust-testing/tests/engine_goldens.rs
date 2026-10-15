@@ -31,7 +31,7 @@
 //!
 //! The engine compiles axis-aligned rectangles, rounded rectangles, lines,
 //! arbitrary filled/stroked paths, rect, rounded and path clips, opacity layers,
-//! snapshot brackets, `ClearRect` hole punches, atlas-resident images,
+//! retained brackets, `ClearRect` hole punches, atlas-resident images,
 //! blurred rounded rects, backdrop blurs, and glyph runs (incl. COLR colour
 //! glyphs and the atlas-vs-outline route), and resolves solid and gradient
 //! paints. One
@@ -81,7 +81,7 @@ use frust_testing::{ENGINE_UNCLASSIFIED_CLASS, engine_golden_class};
 
 /// Every corpus case the engine draws in full — rectangles, rounded
 /// rectangles, lines, arbitrary filled/stroked/dashed paths, rect, rounded and
-/// path clips, opacity layers, snapshot brackets, `ClearRect` hole punches,
+/// path clips, opacity layers, retained brackets, `ClearRect` hole punches,
 /// atlas-resident images, blurred rounded rects, glyph runs (Latin, RTL,
 /// CJK, combining marks, COLR colour, gradient-brushed, clipped), and the
 /// widget/page/text frames built out of those same commands.
@@ -194,7 +194,7 @@ const DEFERRED_CASES: &[(&str, &str)] = &[
     ),
     (
         "adv-unbalanced-pop-in-snapshot",
-        "`no_ref`: an unbalanced pop inside a translucent snapshot bracket, whose recovery \
+        "`no_ref`: an unbalanced pop inside a translucent retained bracket, whose recovery \
          shape is deliberately not pinned to any backend's pixels",
     ),
     (
