@@ -54,6 +54,7 @@ pub mod physics;
 pub mod pinch;
 mod platform_view;
 mod radio;
+mod repaint_boundary;
 mod safe_area;
 mod scaffold;
 mod scroll;
@@ -141,6 +142,7 @@ pub use platform_view::{
     PlatformViewView, PlatformViewWidget, ShieldView, ShieldWidget, platform_view, shield,
 };
 pub use radio::{Radio, RadioView, RadioWidget, radio};
+pub use repaint_boundary::{RepaintBoundaryView, RepaintBoundaryWidget, repaint_boundary};
 pub use safe_area::{SafeAreaView, SafeAreaWidget, safe_area};
 pub use scaffold::{ScaffoldView, ScaffoldWidget, scaffold};
 pub use scroll::{ScrollInfo, ScrollView, ScrollWidget, scroll_view};

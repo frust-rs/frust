@@ -162,20 +162,20 @@ pub use frust_widgets::{
     MainAxisAlignment, NavigatorController, NavigatorId, NavigatorView, NeverScrollable,
     OverlayAlign, OverlayPlacement, OverlayPortalView, OverlaySide, OverscrollEffect, Padding,
     PaddingView, PageBuilder, PageTransition, PageVisibility, PopResult, PushOptions, Radio,
-    RadioView, RadioWidget, ReorderableListView, ResultCallback, Row, RubberBand, SafeAreaView,
-    ScaffoldView, ScrollAxis, ScrollController, ScrollInfo, ScrollMetrics, ScrollPhysics,
-    ScrollSubscription, ScrollView, Simulation, SizedBox, SizedBoxView, Slider, SliderView,
-    SliverBoxView, SliverFillRemainingView, SliverFixedExtentListView, SliverGridDelegate,
-    SliverGridView, SliverListView, SliverPaddingView, SliverPersistentHeaderDelegate,
-    SliverPersistentHeaderView, SourceFeedback, SpringDescription, Stack, StackView, TextInput,
-    TextInputView, TextView, Timing, Tolerance, TransitionSpec, TransitionState,
-    VisibilityCallback, auto_scroll_zone, button, checkbox, colored_box, column, container,
-    custom_scroll_view, divider, drag_target, draggable, flexible, hero, icon, icon_button,
-    indexed_stack, inflexible, keep_alive, keyed, list_view, overlay_portal, radio,
-    reorderable_list, row, safe_area, scaffold, scroll_view, slider, sliver_box,
-    sliver_fill_remaining, sliver_fixed_extent_list, sliver_fixed_extent_list_keyed, sliver_grid,
-    sliver_grid_keyed, sliver_list, sliver_padding, sliver_persistent_header, stack, text,
-    text_input,
+    RadioView, RadioWidget, ReorderableListView, RepaintBoundaryView, ResultCallback, Row,
+    RubberBand, SafeAreaView, ScaffoldView, ScrollAxis, ScrollController, ScrollInfo,
+    ScrollMetrics, ScrollPhysics, ScrollSubscription, ScrollView, Simulation, SizedBox,
+    SizedBoxView, Slider, SliderView, SliverBoxView, SliverFillRemainingView,
+    SliverFixedExtentListView, SliverGridDelegate, SliverGridView, SliverListView,
+    SliverPaddingView, SliverPersistentHeaderDelegate, SliverPersistentHeaderView, SourceFeedback,
+    SpringDescription, Stack, StackView, TextInput, TextInputView, TextView, Timing, Tolerance,
+    TransitionSpec, TransitionState, VisibilityCallback, auto_scroll_zone, button, checkbox,
+    colored_box, column, container, custom_scroll_view, divider, drag_target, draggable, flexible,
+    hero, icon, icon_button, indexed_stack, inflexible, keep_alive, keyed, list_view,
+    overlay_portal, radio, reorderable_list, repaint_boundary, row, safe_area, scaffold,
+    scroll_view, slider, sliver_box, sliver_fill_remaining, sliver_fixed_extent_list,
+    sliver_fixed_extent_list_keyed, sliver_grid, sliver_grid_keyed, sliver_list, sliver_padding,
+    sliver_persistent_header, stack, text, text_input,
 };
 // [`ItemAlignment`] (the alignment `ScrollController::scroll_to_item` lands a
 // row at) is not in `frust_widgets`'s own flat re-export list, so the block
@@ -3140,6 +3140,21 @@ mod scroll_physics_reexport {
         // platform's default — is directly constructible through the facade
         // too, which is the whole point of it staying reachable.
         let _: RubberBand = RubberBand::new();
+    }
+}
+
+/// Facade-level check that the retained-page boundary
+/// ([`repaint_boundary`]/[`RepaintBoundaryView`]) resolves through the `frust`
+/// facade, so an app marks an expensive, often-unchanged subtree without
+/// reaching into `frust_widgets`.
+#[cfg(test)]
+mod repaint_boundary_reexport {
+    use crate::{RepaintBoundaryView, TextView, repaint_boundary, text};
+
+    #[test]
+    fn repaint_boundary_resolves_through_facade() {
+        let view: RepaintBoundaryView<TextView> = repaint_boundary(text("cached")).alpha(0.5);
+        let _ = view;
     }
 }
 

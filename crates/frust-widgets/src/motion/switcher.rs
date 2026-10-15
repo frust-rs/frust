@@ -89,16 +89,17 @@ use std::time::Duration;
 
 use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Curve, DiscardScene, EditingState,
-    EventCtx, EventResult, ImeState, InputEvent, LayoutCtx, PaintCtx, PaintScene, SemanticsCtx,
-    View, Widget, any,
+    EventCtx, EventResult, ImeState, InputEvent, LayoutCtx, PaintCtx, PaintScene, RetainedKey,
+    SemanticsCtx, View, Widget, any,
 };
 use frust_theme::Theme;
-use kurbo::{Point, Size, Vec2};
+use kurbo::{Affine, Point, Size, Vec2};
 
 use crate::ChildKey;
 use crate::Timing;
 use crate::motion::patterns::{FadeThrough, PatternLayer, TransitionPattern};
 use crate::nav::transition::{TransitionDriver, make_driver};
+use crate::repaint_boundary::{RetainedBoundary, within};
 
 /// The unthemed fallback transition duration (the Glyph `base` token, 220ms) —
 /// used when no theme is threaded to resolve a `MotionScheme` from (bare-core
@@ -126,41 +127,61 @@ fn resolve_switch_timing(theme: Option<&Theme>, explicit: Option<Timing>) -> Tim
 }
 
 /// Paint one staged child: offset its pod origin by the layer's `dx`/`dy` (so
-/// paint and hit-testing move together), then bracket its paint with a
-/// snapshot bracket, keyed by `snapshot`, using `layer`'s alpha/scale — no
-/// `push_transform`/`push_layer` of its own. Both the live and frozen exiting
-/// child are static during a switch (only their position/alpha/scale move,
-/// never their content), the same "ideal cache candidate" reasoning
-/// `nav::navigator`'s `paint_page_layer` applies to a static transition page —
-/// see [`PatternSwitcherWidget::snapshot_base`] for the two keys this bracket
-/// draws from.
+/// paint and hit-testing move together), then paint it the way
+/// `nav::navigator`'s `paint_page_layer` paints a transition page.
 ///
 /// When `alpha == 0` the child is fully invisible this frame: rather than
 /// rasterize it under a zero-opacity layer, it paints into a [`DiscardScene`]
-/// sink instead — the pass still has to run for its side effects (animating
-/// descendants advancing), but nothing it records is ever composited, so no
-/// bracket is needed at all. Mirrors `nav::navigator`'s `paint_page_layer`,
-/// whose `DiscardScene` check also runs first, ahead of its own bracket.
+/// sink — the pass still has to run for its side effects (animating
+/// descendants advancing), but nothing it records is ever composited. A step
+/// with no scale component (a slide, a fade) paints through the child's
+/// retained-page `boundary` at the slid origin and the layer's alpha: both the
+/// live and the frozen exiting child are usually static during a switch (only
+/// their position/alpha move), so the first frame — progress 0, the exiting
+/// child still at rest — records the page and later frames composite it. The
+/// boundary only records while the child lies wholly inside the switcher's own
+/// rect. A step with a scale component paints inline under a `push_transform`
+/// scale about the child's centre and a `push_layer` when `alpha < 1`, since a
+/// page is only ever served at the scale it was recorded at.
 fn paint_staged_child(
     pod: &mut ChildPod,
+    boundary: &mut RetainedBoundary,
     ctx: &mut PaintCtx,
     scene: &mut dyn PaintScene,
     layer: PatternLayer,
-    snapshot: u64,
 ) {
     pod.set_origin(Point::new(layer.dx, layer.dy));
     let alpha = layer.alpha.clamp(0.0, 1.0);
 
     if alpha <= 0.0 {
-        let mut sink = DiscardScene;
-        pod.paint_child(ctx, &mut sink);
+        boundary.paint_plain(pod, ctx, &mut DiscardScene);
         return;
     }
 
-    let bracket_origin = ctx.origin() + Vec2::new(layer.dx, layer.dy);
-    scene.push_retained(snapshot, bracket_origin, ctx.size(), alpha, layer.scale);
-    pod.paint_child(ctx, scene);
-    scene.pop_retained();
+    let origin = ctx.origin();
+    let size = ctx.size();
+    let child_origin = origin + Vec2::new(layer.dx, layer.dy);
+
+    if (layer.scale - 1.0).abs() <= f64::EPSILON {
+        let may_record = within(child_origin, size, origin, size);
+        boundary.paint(pod, ctx, scene, child_origin, size, alpha, may_record);
+        return;
+    }
+
+    let center = Point::new(
+        child_origin.x + size.width / 2.0,
+        child_origin.y + size.height / 2.0,
+    );
+    let layered = alpha < 1.0;
+    scene.push_transform(Affine::scale_about(layer.scale, center));
+    if layered {
+        scene.push_layer(child_origin, size, alpha);
+    }
+    boundary.paint_plain(pod, ctx, scene);
+    if layered {
+        scene.pop_layer();
+    }
+    scene.pop_transform();
 }
 
 /// The cleared/inactive IME surface published after a switch so the platform
@@ -275,16 +296,18 @@ pub struct PatternSwitcherWidget<P: TransitionPattern + Clone + 'static> {
     /// A cleared IME surface must be published on the next paint (deterministic
     /// keyboard hide after the switch).
     needs_ime_clear: bool,
-    /// This switcher's pair of [`PaintScene::push_retained`] cache keys,
-    /// reserved once from [`frust_core::RetainedKey::mint_range`] at construction (`fetch_add(2)`)
-    /// and stable for the widget's lifetime, across every switch it ever
-    /// stages: `snapshot_base` for the live (incoming) child,
-    /// `snapshot_base + 1` for the frozen exiting pod. A single-slot container
-    /// has no slot index to key by (unlike the navigator's per-page keys), but
-    /// still needs two distinct keys since both children can be on screen
-    /// staged together — reusing one key for both would alias their cached
-    /// rasters.
-    snapshot_base: u64,
+    /// The retained-page boundary the live child paints through. With
+    /// [`exiting_boundary`](Self::exiting_boundary) it draws on a pair of keys
+    /// reserved once from [`frust_core::RetainedKey::mint_range`] at
+    /// construction and stable for the widget's lifetime. Both children can be
+    /// on screen staged together, so they need distinct keys — one key for both
+    /// would alias their pages. A switch hands the live child's boundary to the
+    /// frozen exiting pod with the pod itself, so a page recorded while the
+    /// child was live still serves it as it leaves.
+    child_boundary: RetainedBoundary,
+    /// The retained-page boundary the frozen exiting child paints through (see
+    /// [`child_boundary`](Self::child_boundary)).
+    exiting_boundary: RetainedBoundary,
 }
 
 impl<State: 'static, P: TransitionPattern + Clone + 'static> View<State>
@@ -293,6 +316,7 @@ impl<State: 'static, P: TransitionPattern + Clone + 'static> View<State>
     type Element = PatternSwitcherWidget<P>;
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> PatternSwitcherWidget<P> {
+        let keys = RetainedKey::mint_range(2);
         PatternSwitcherWidget {
             key: self.key,
             child: crate::authoring::build_child(&self.child, ctx),
@@ -305,7 +329,8 @@ impl<State: 'static, P: TransitionPattern + Clone + 'static> View<State>
             settled: false,
             reduce_motion: false,
             needs_ime_clear: false,
-            snapshot_base: frust_core::RetainedKey::mint_range(2).get(),
+            child_boundary: RetainedBoundary::with_key(keys),
+            exiting_boundary: RetainedBoundary::with_key(RetainedKey(keys.get() + 1)),
         }
     }
 
@@ -397,6 +422,11 @@ impl<State: 'static, P: TransitionPattern + Clone + 'static> View<State>
             crate::authoring::teardown_child(&prev.child, &mut old, ctx);
 
             element.exiting = Some(old);
+            // The frozen pod keeps its boundary (and any page it recorded
+            // while live); the fresh child takes the other key, forgetting
+            // whatever that key last recorded for a previous exiting child.
+            std::mem::swap(&mut element.child_boundary, &mut element.exiting_boundary);
+            element.child_boundary = RetainedBoundary::with_key(element.child_boundary.key());
             element.key = self.key;
             element.pending_start = true;
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
@@ -457,16 +487,21 @@ impl<P: TransitionPattern + Clone + 'static> Widget for PatternSwitcherWidget<P>
             } else {
                 self.pattern.resolve(adv.value, self.reverse, size)
             };
-            // Paint the exiting child (below) then the incoming child (on top).
-            // `snapshot_base` keys the live child; `snapshot_base + 1` the
-            // frozen exiting pod — see `Self::snapshot_base`.
-            paint_staged_child(exiting, ctx, scene, exiting_layer, self.snapshot_base + 1);
+            // Paint the exiting child (below) then the incoming child (on top),
+            // each through its own boundary — see `Self::child_boundary`.
+            paint_staged_child(
+                exiting,
+                &mut self.exiting_boundary,
+                ctx,
+                scene,
+                exiting_layer,
+            );
             paint_staged_child(
                 &mut self.child,
+                &mut self.child_boundary,
                 ctx,
                 scene,
                 incoming_layer,
-                self.snapshot_base,
             );
 
             if adv.animating {
@@ -479,7 +514,7 @@ impl<P: TransitionPattern + Clone + 'static> Widget for PatternSwitcherWidget<P>
                 ctx.request_frame();
             }
         } else {
-            self.child.paint_child(ctx, scene);
+            self.child_boundary.paint_plain(&mut self.child, ctx, scene);
         }
 
         // Deterministic IME hide after a switch (navigator contract). Publishing
@@ -511,7 +546,9 @@ mod tests {
     use crate::motion::patterns::{FadeScale, SharedAxis};
     use crate::test_support::{RecordingScene, leaf_any};
     use crate::{FlexView, column};
-    use frust_core::{FrameTime, PointerButton, PointerEvent, PointerPhase, RenderRoot};
+    use frust_core::{
+        FrameTime, PointerButton, PointerEvent, PointerPhase, RenderRoot, RetainedLedger,
+    };
     use kurbo::Rect;
     use std::cell::Cell;
     use std::rc::Rc;
@@ -551,6 +588,7 @@ mod tests {
         transform_pushes: u32,
         snapshots: Vec<(u64, Point, Size, f32, f64)>,
         snapshot_pops: u32,
+        draws: Vec<(u64, Point, Size, f32, f64)>,
     }
     impl PaintScene for SnapshotRecordingScene {
         fn fill_rect(&mut self, origin: Point, size: Size, _color: peniko::Color) {
@@ -568,6 +606,9 @@ mod tests {
         }
         fn pop_retained(&mut self) {
             self.snapshot_pops += 1;
+        }
+        fn draw_retained(&mut self, key: u64, origin: Point, size: Size, alpha: f32, scale: f64) {
+            self.draws.push((key, origin, size, alpha, scale));
         }
     }
 
@@ -1399,10 +1440,10 @@ mod tests {
         };
         paint_staged_child(
             &mut pod,
+            &mut RetainedBoundary::new(),
             &mut PaintCtx::new(Point::ZERO, size),
             &mut scene,
             layer,
-            1,
         );
 
         assert!(scene.rects.is_empty(), "an alpha-0 child records no fill");
@@ -1412,171 +1453,186 @@ mod tests {
         );
     }
 
-    // --- Snapshot bracket: a staged child paints through push_retained/
-    //     pop_retained keyed by snapshot_base (incoming) / snapshot_base + 1
-    //     (exiting), never a push_layer/push_transform bracket of its own —
-    //     mirrors nav::navigator's paint_page_layer snapshot bracket. ---
+    // --- Retained boundaries: a staged child at a slide/fade step paints
+    //     through its own boundary — a recording bracket on the seed frame
+    //     (the exiting child still at rest), the retained page once it is
+    //     resident — and a scale step paints inline. Mirrors nav::navigator's
+    //     paint_page_layer. ---
 
-    #[test]
-    fn staged_children_paint_through_a_snapshot_bracket_keyed_by_snapshot_base() {
-        // FadeScale (unlike FadeThrough/SharedAxis's hard split) fades both
-        // children simultaneously over its first 30%, so a mid-window frame
-        // has both the incoming and the frozen exiting child at alpha > 0 at
-        // once — the case that proves each gets its OWN key.
+    /// A ledger reporting `keys` resident as 10x10 pages at scale 1 — the
+    /// extent and scale a `leaf_any(10.0, 10.0)` child's boundary asks for
+    /// under a recorder with no transform.
+    fn resident(keys: &[RetainedKey]) -> RetainedLedger {
+        RetainedLedger::from_entries(1, keys.iter().map(|k| (k.get(), (10, 10), 1.0)))
+    }
+
+    /// Switch `v1`'s widget to a second key with the same pattern, returning
+    /// the widget, its size, and the key the child held before the switch.
+    fn switched<P: TransitionPattern + Clone + 'static>(
+        pattern: P,
+    ) -> (PatternSwitcherWidget<P>, Size, RetainedKey) {
         let timing = Timing::Duration(Duration::from_millis(100), Curve::Linear);
         let v1: PatternSwitcherView<(), _> =
-            pattern_switcher(1u32, FadeScale, leaf_any(10.0, 10.0)).timing(timing);
+            pattern_switcher(1u32, pattern.clone(), leaf_any(10.0, 10.0)).timing(timing);
         let mut w = build(&v1);
         let size = w.layout(&mut LayoutCtx::new(), &loose());
-
+        let live_key = w.child_boundary.key();
         let v2: PatternSwitcherView<(), _> =
-            pattern_switcher(2u32, FadeScale, leaf_any(10.0, 10.0)).timing(timing);
+            pattern_switcher(2u32, pattern, leaf_any(10.0, 10.0)).timing(timing);
         let mut counter = 0u64;
         v2.rebuild(&v1, &mut w, &mut BuildCtx::new(&mut counter));
+        w.layout(&mut LayoutCtx::new(), &loose());
+        (w, size, live_key)
+    }
 
-        // Seed frame: the first `advance` only seeds the clock (progress 0).
+    #[test]
+    fn the_seed_frame_records_the_exiting_child_under_the_key_it_held_while_live() {
+        let (mut w, size, live_key) = switched(SharedAxis::X);
+        assert_eq!(
+            w.exiting_boundary.key(),
+            live_key,
+            "the frozen pod keeps the boundary it painted through while live"
+        );
+        assert_ne!(
+            w.child_boundary.key(),
+            live_key,
+            "the fresh child takes the other key"
+        );
+
+        let ledger = RetainedLedger::empty();
+        let mut scene = SnapshotRecordingScene::default();
         w.paint(
-            &mut PaintCtx::for_test(Point::ZERO, size, ft_ms(0.0)),
+            &mut PaintCtx::for_test(Point::ZERO, size, ft_ms(0.0)).with_retained_ledger(&ledger),
+            &mut scene,
+        );
+        // p = 0: the exiting child sits at rest (dx 0, alpha 1); the incoming
+        // one is at alpha 0 (discarded).
+        assert_eq!(
+            scene.snapshots,
+            vec![(live_key.get(), Point::ZERO, size, 1.0, 1.0)],
+            "one recording bracket, keyed by the exiting child's own key, at scale 1"
+        );
+        assert_eq!(scene.snapshot_pops, 1, "the bracket is balanced");
+        assert!(scene.draws.is_empty(), "nothing is resident yet");
+    }
+
+    #[test]
+    fn a_clean_resident_exiting_child_composites_its_page_as_it_fades() {
+        let (mut w, size, live_key) = switched(FadeScale);
+        let empty = RetainedLedger::empty();
+        w.paint(
+            &mut PaintCtx::for_test(Point::ZERO, size, ft_ms(0.0)).with_retained_ledger(&empty),
             &mut SnapshotRecordingScene::default(),
         );
 
         // 15ms into the 100ms linear duration: progress 0.15, inside
-        // FadeScale's [0, 0.30] simultaneous-fade window.
-        let base = w.snapshot_base;
+        // FadeScale's simultaneous-fade window — both children visible.
+        let ledger = resident(&[live_key]);
+        let mut scene = SnapshotRecordingScene::default();
+        w.paint(
+            &mut PaintCtx::for_test(Point::ZERO, size, ft_ms(15.0)).with_retained_ledger(&ledger),
+            &mut scene,
+        );
+        assert_eq!(
+            scene.draws.len(),
+            1,
+            "the exiting page is drawn: {:?}",
+            scene.draws
+        );
+        let (key, origin, draw_size, alpha, scale) = scene.draws[0];
+        assert_eq!(
+            (key, origin, draw_size, scale),
+            (live_key.get(), Point::ZERO, size, 1.0)
+        );
+        assert!(
+            alpha > 0.0 && alpha < 1.0,
+            "at the fade's own alpha (was {alpha})"
+        );
+        assert_eq!(
+            scene.rects.len(),
+            1,
+            "only the incoming child paints a body; the exiting one is composited"
+        );
+        assert!(
+            scene.snapshots.is_empty(),
+            "the incoming child's scale step is never bracketed: {:?}",
+            scene.snapshots
+        );
+        assert_eq!(
+            scene.transform_pushes, 1,
+            "the incoming child's scale step paints inline under a push_transform"
+        );
+    }
+
+    #[test]
+    fn without_a_ledger_staged_children_paint_with_no_bracket() {
+        let (mut w, size, _) = switched(FadeScale);
+        w.paint(
+            &mut PaintCtx::for_test(Point::ZERO, size, ft_ms(0.0)),
+            &mut SnapshotRecordingScene::default(),
+        );
         let mut scene = SnapshotRecordingScene::default();
         w.paint(
             &mut PaintCtx::for_test(Point::ZERO, size, ft_ms(15.0)),
             &mut scene,
         );
-
-        assert_eq!(
-            scene.snapshots.len(),
-            2,
-            "both the incoming and frozen exiting child paint through a \
-             snapshot bracket: {:?}",
-            scene.snapshots
-        );
-        assert_eq!(scene.snapshot_pops, 2, "each bracket pops exactly once");
-        assert!(
-            scene.layers.is_empty(),
-            "no push_layer bracket of its own: {:?}",
-            scene.layers
-        );
-        assert_eq!(
-            scene.transform_pushes, 0,
-            "no push_transform bracket of its own"
-        );
-
-        let keys: Vec<u64> = scene.snapshots.iter().map(|(k, ..)| *k).collect();
-        assert!(
-            keys.contains(&base),
-            "the incoming child is keyed by snapshot_base: {keys:?}"
-        );
-        assert!(
-            keys.contains(&(base + 1)),
-            "the frozen exiting child is keyed by snapshot_base + 1: {keys:?}"
-        );
-        for (_, _, _, alpha, _) in &scene.snapshots {
-            assert!(*alpha > 0.0, "an alpha-0 child never reaches the bracket");
-        }
+        assert!(scene.snapshots.is_empty() && scene.draws.is_empty());
+        assert_eq!(scene.rects.len(), 2, "both children paint their bodies");
+        assert_eq!(scene.layers.len(), 2, "each under its own fade layer");
     }
 
     #[test]
-    fn bracket_origin_follows_the_pod_dx_in_slide_patterns() {
-        // SharedAxis::X slides children by 30dp (incoming from +30, exiting to -30).
-        // The bracket origin must follow the pod's absolute paint origin —
-        // ctx.origin() + (dx, dy) — so the cached texture is slide-invariant and
-        // the body lands inside the texture without cropping. This test verifies
-        // the bracket origin includes the dx offset during a slide transition.
-        let timing = Timing::Duration(Duration::from_millis(100), Curve::Linear);
-        let v1: PatternSwitcherView<(), _> =
-            pattern_switcher(1u32, SharedAxis::X, leaf_any(10.0, 10.0)).timing(timing);
-        let mut w = build(&v1);
-        let size = w.layout(&mut LayoutCtx::new(), &loose());
-
-        let v2: PatternSwitcherView<(), _> =
-            pattern_switcher(2u32, SharedAxis::X, leaf_any(10.0, 10.0)).timing(timing);
-        let mut counter = 0u64;
-        v2.rebuild(&v1, &mut w, &mut BuildCtx::new(&mut counter));
-
-        // Seed frame: the first `advance` only seeds the clock (progress 0).
+    fn a_slid_child_is_never_recorded_while_it_overhangs_the_switcher() {
+        // SharedAxis::X slides children by 30dp. Past the split (p = 0.5) the
+        // incoming child sits at dx = 15: partly outside the switcher's rect,
+        // where a renderer would refuse to retain it, so it paints directly.
+        let (mut w, size, _) = switched(SharedAxis::X);
+        let ledger = RetainedLedger::empty();
         w.paint(
-            &mut PaintCtx::for_test(Point::ZERO, size, ft_ms(0.0)),
+            &mut PaintCtx::for_test(Point::ZERO, size, ft_ms(0.0)).with_retained_ledger(&ledger),
             &mut SnapshotRecordingScene::default(),
         );
-
-        // At p=0 (seed frame), SharedAxis::X has:
-        // - Exiting child: dx=0.0, alpha=1.0 (visible)
-        // - Incoming child: dx=30.0, alpha=0.0 (discarded, not visible)
-        // So only the exiting child paints through a snapshot bracket.
         let mut scene = SnapshotRecordingScene::default();
         w.paint(
-            &mut PaintCtx::for_test(Point::ZERO, size, ft_ms(0.0)),
+            &mut PaintCtx::for_test(Point::ZERO, size, ft_ms(50.0)).with_retained_ledger(&ledger),
             &mut scene,
         );
-
-        assert_eq!(
-            scene.snapshots.len(),
-            1,
-            "only the exiting child is visible at p=0"
+        assert!(
+            scene.snapshots.is_empty(),
+            "no bracket: {:?}",
+            scene.snapshots
         );
-
-        // The exiting child has dx=0.0 at p=0, so its bracket origin should be
-        // at ctx.origin() = (0.0, 0.0).
-        let (_, origin, _, _, _) = scene.snapshots[0];
         assert_eq!(
-            origin,
-            Point::new(0.0, 0.0),
-            "exiting child bracket origin at x=0.0 when dx=0 (was {:?})",
-            origin
-        );
-
-        // At a mid-transition frame like p=0.5 (50ms into 100ms duration),
-        // SharedAxis::X has:
-        // - Exiting child: dx=-15.0 (sliding out), alpha < 1.0
-        // - Incoming child: dx=15.0 (sliding in), alpha > 0.0
-        // Both are potentially visible and should have bracket origins that
-        // include their respective dx values. However, SharedAxis uses a hard
-        // split, so only one is above alpha 0 at any instant. At p=0.5 (past
-        // the ~0.35 split), the incoming child is visible.
-        let mut scene_mid = SnapshotRecordingScene::default();
-        w.paint(
-            &mut PaintCtx::for_test(Point::ZERO, size, ft_ms(50.0)),
-            &mut scene_mid,
-        );
-
-        // At p=0.5, the incoming child has dx = (1.0 - 0.5) * 30 = 15.0 and
-        // is visible (past the split). Its bracket origin should reflect this.
-        assert_eq!(
-            scene_mid.snapshots.len(),
-            1,
-            "at mid-frame (p=0.5), only one child is visible through a snapshot"
-        );
-        let (_, origin_mid, _, _, _) = scene_mid.snapshots[0];
-        assert_eq!(
-            origin_mid,
-            Point::new(15.0, 0.0),
-            "incoming child bracket origin at x=15.0 when dx=15.0 (was {:?})",
-            origin_mid
+            scene.rects,
+            vec![(Point::new(15.0, 0.0), size)],
+            "the incoming child paints at its slid origin"
         );
     }
 
-    // --- snapshot_base is reserved once, at construction, and outlives every
+    // --- The key pair is reserved once, at construction, and outlives every
     //     switch this widget instance stages. ---
 
+    fn key_pair<P: TransitionPattern + Clone + 'static>(w: &PatternSwitcherWidget<P>) -> [u64; 2] {
+        let mut keys = [w.child_boundary.key().get(), w.exiting_boundary.key().get()];
+        keys.sort_unstable();
+        keys
+    }
+
     #[test]
-    fn snapshot_base_is_stable_across_multiple_switches_on_the_same_widget() {
+    fn the_key_pair_is_stable_across_multiple_switches_on_the_same_widget() {
         let v1: PatternSwitcherView<(), _> =
             pattern_switcher(1u32, FadeThrough, leaf_any(10.0, 10.0));
         let mut w = build(&v1);
-        let base = w.snapshot_base;
+        let pair = key_pair(&w);
+        assert_eq!(pair[1], pair[0] + 1, "a reserved consecutive pair");
         let mut counter = 0u64;
 
         let v2: PatternSwitcherView<(), _> =
             pattern_switcher(2u32, FadeThrough, leaf_any(10.0, 10.0));
         v2.rebuild(&v1, &mut w, &mut BuildCtx::new(&mut counter));
         assert_eq!(
-            w.snapshot_base, base,
+            key_pair(&w),
+            pair,
             "a switch does not reassign the key pair"
         );
 
@@ -1584,7 +1640,8 @@ mod tests {
             pattern_switcher(3u32, FadeThrough, leaf_any(10.0, 10.0));
         v3.rebuild(&v2, &mut w, &mut BuildCtx::new(&mut counter));
         assert_eq!(
-            w.snapshot_base, base,
+            key_pair(&w),
+            pair,
             "a second switch on the same widget still keeps the same key pair"
         );
     }
@@ -1592,14 +1649,15 @@ mod tests {
     // --- Two switcher instances never alias each other's cache slot. ---
 
     #[test]
-    fn two_switcher_instances_get_disjoint_snapshot_key_pairs() {
+    fn two_switcher_instances_get_disjoint_key_pairs() {
         let v: PatternSwitcherView<(), _> =
             pattern_switcher(1u32, FadeThrough, leaf_any(10.0, 10.0));
         let w1 = build(&v);
         let w2 = build(&v);
-        assert_ne!(
-            w1.snapshot_base, w2.snapshot_base,
-            "two switcher instances never share a snapshot key pair"
+        let (a, b) = (key_pair(&w1), key_pair(&w2));
+        assert!(
+            a.iter().all(|k| !b.contains(k)),
+            "two switcher instances never share a key: {a:?} vs {b:?}"
         );
     }
 }
