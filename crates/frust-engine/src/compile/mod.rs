@@ -1235,6 +1235,7 @@ impl SceneCompiler {
             match command {
                 Command::PushClip { .. }
                 | Command::PushClipRounded { .. }
+                | Command::PushClipPath { .. }
                 | Command::PushLayer { .. } => self.open_blocked_group(),
                 // The correction is the outermost bracket's, so a bracket
                 // reaching here is a nested one, whose presentation is ignored
@@ -1301,6 +1302,18 @@ impl SceneCompiler {
                     &mut self.generator,
                 );
                 self.groups.push_clip(transform.transform_rect_bbox(*rect));
+            }
+            // An outline is always a coverage mask, never a layer page — so a
+            // `PushRetained` body opened under it finds the mask open and is
+            // marked unretainable on exactly a rounded clip's terms (see
+            // [`Self::open_retained`]). The group is confined to the outline's
+            // device bounding box, which is what a clear hoisted past it is
+            // limited to.
+            Command::PushClipPath { path, transform } => {
+                let transform = combined * *transform;
+                self.clips.push_path(path, transform, &mut self.generator);
+                self.groups
+                    .push_clip(transform.transform_rect_bbox(path.bounding_box()));
             }
             Command::PushLayer {
                 rect,
@@ -2378,6 +2391,7 @@ fn command_transform(command: &Command) -> Option<Affine> {
         | Command::Line { transform, .. }
         | Command::PushClip { transform, .. }
         | Command::PushClipRounded { transform, .. }
+        | Command::PushClipPath { transform, .. }
         | Command::Image { transform, .. }
         | Command::BlurredRoundedRect { transform, .. }
         | Command::PushLayer { transform, .. }
@@ -2522,6 +2536,9 @@ fn check_geometry(command: &Command) -> Result<(), EngineError> {
         Command::PushClipRounded { rect, radii, .. } => {
             rect.is_finite() && radii_are_finite(*radii)
         }
+        // An outline is the mask's geometry outright, so a non-finite point
+        // reaches the flattener exactly as a filled path's would.
+        Command::PushClipPath { path, .. } => path.is_finite(),
         Command::PushLayer { rect, alpha, .. } => rect.is_finite() && alpha.is_finite(),
         Command::ClearRect { rect, .. } => rect.is_finite(),
         Command::PushRetained {

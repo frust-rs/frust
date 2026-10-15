@@ -20,7 +20,7 @@
 //! # Coverage
 //!
 //! `tests::every_command_variant_is_covered` is the guard: it walks every
-//! case's recorded scene and asserts all 16 `Command` variants appear. A new
+//! case's recorded scene and asserts all 17 `Command` variants appear. A new
 //! variant fails that test until a case exists for it.
 //!
 //! # The two promoted cases
@@ -82,6 +82,8 @@ pub fn unit_cases() -> Vec<CorpusCase> {
         glyph_run(),
         clip_rect(),
         clip_rounded(),
+        clip_path_star(),
+        clip_path_concave(),
         clip_balance(),
         image(),
         blur_rrect(),
@@ -348,6 +350,139 @@ fn clip_rounded() -> CorpusCase {
         ],
         eroded_interior: false,
         about: "per-corner radii on a clip, one corner square",
+    }
+}
+
+/// A five-pointed star's outline: outer radius `outer`, inner radius `inner`,
+/// centred on `(cx, cy)`, its first point straight up.
+fn star_path(cx: f64, cy: f64, outer: f64, inner: f64) -> BezPath {
+    let mut path = BezPath::new();
+    for i in 0..10 {
+        let radius = if i % 2 == 0 { outer } else { inner };
+        let angle = -std::f64::consts::FRAC_PI_2 + f64::from(i) * std::f64::consts::PI / 5.0;
+        let point = (cx + radius * angle.cos(), cy + radius * angle.sin());
+        if i == 0 {
+            path.move_to(point);
+        } else {
+            path.line_to(point);
+        }
+    }
+    path.close_path();
+    path
+}
+
+/// `Command::PushClipPath` with a five-pointed STAR over a four-colour
+/// quadrant fill, popped by the same [`SceneBuilder::pop_clip`] every clip
+/// uses. The star's diagonal edges are antialiased, so the case pins the
+/// coverage mask's edge as well as its inside and outside; the four colours
+/// make an arm drawn in the wrong space read as the wrong colour.
+fn clip_path_star() -> CorpusCase {
+    fn record(scene: &mut Scene) {
+        let mut builder = SceneBuilder::new(scene);
+        builder.push_clip_path(star_path(32.0, 32.0, 28.0, 11.0));
+        builder.fill_rect(Rect::new(0.0, 0.0, 32.0, 32.0), Brush::Solid(RED));
+        builder.fill_rect(Rect::new(32.0, 0.0, EDGE, 32.0), Brush::Solid(GREEN));
+        builder.fill_rect(Rect::new(0.0, 32.0, 32.0, EDGE), Brush::Solid(BLUE));
+        builder.fill_rect(Rect::new(32.0, 32.0, EDGE, EDGE), Brush::Solid(YELLOW));
+        builder.pop_clip();
+    }
+    CorpusCase {
+        spec: case("unit-clip-path-star"),
+        record,
+        probes: &[
+            Probe {
+                x: 30,
+                y: 12,
+                expect: Expect::Exact([255, 0, 0, 255]),
+                why: "inside the star's top point, over the red quadrant",
+            },
+            Probe {
+                x: 22,
+                y: 44,
+                expect: Expect::Exact([0, 0, 255, 255]),
+                why: "inside the lower-left point, over the blue quadrant",
+            },
+            Probe {
+                x: 36,
+                y: 36,
+                expect: Expect::Exact([255, 255, 0, 255]),
+                why: "inside the star's body, over the yellow quadrant",
+            },
+            Probe {
+                x: 50,
+                y: 10,
+                expect: Expect::Exact([0, 0, 0, 0]),
+                why: "between the top and upper-right points — the fill is clipped away",
+            },
+            Probe {
+                x: 2,
+                y: 62,
+                expect: Expect::Exact([0, 0, 0, 0]),
+                why: "a frame corner, outside every point of the star",
+            },
+        ],
+        eroded_interior: false,
+        about: "a five-pointed star path clip over a four-colour quadrant fill",
+    }
+}
+
+/// `Command::PushClipPath` with a CONCAVE outline — an L, whose reflex corner
+/// is exactly the shape a convex-hull or bounding-box shortcut would get
+/// wrong. A full-frame fill plus a stripe crossing the notch: the notch must
+/// stay empty even where the stripe passes through it.
+fn clip_path_concave() -> CorpusCase {
+    fn record(scene: &mut Scene) {
+        let mut builder = SceneBuilder::new(scene);
+        let mut outline = BezPath::new();
+        outline.move_to((8.0, 8.0));
+        outline.line_to((28.0, 8.0));
+        outline.line_to((28.0, 36.0));
+        outline.line_to((56.0, 36.0));
+        outline.line_to((56.0, 56.0));
+        outline.line_to((8.0, 56.0));
+        outline.close_path();
+        builder.push_clip_path(outline);
+        builder.fill_rect(Rect::new(0.0, 0.0, EDGE, EDGE), Brush::Solid(GREEN));
+        builder.fill_rect(Rect::new(0.0, 16.0, EDGE, 24.0), Brush::Solid(RED));
+        builder.pop_clip();
+    }
+    CorpusCase {
+        spec: case("unit-clip-path-concave"),
+        record,
+        probes: &[
+            Probe {
+                x: 16,
+                y: 30,
+                expect: Expect::Exact([0, 128, 0, 255]),
+                why: "inside the L's upright",
+            },
+            Probe {
+                x: 50,
+                y: 46,
+                expect: Expect::Exact([0, 128, 0, 255]),
+                why: "inside the L's foot",
+            },
+            Probe {
+                x: 16,
+                y: 20,
+                expect: Expect::Exact([255, 0, 0, 255]),
+                why: "the stripe survives where it crosses the upright",
+            },
+            Probe {
+                x: 44,
+                y: 20,
+                expect: Expect::Exact([0, 0, 0, 0]),
+                why: "the stripe is clipped away inside the notch — the reflex corner holds",
+            },
+            Probe {
+                x: 44,
+                y: 30,
+                expect: Expect::Exact([0, 0, 0, 0]),
+                why: "the notch stays empty below the stripe too",
+            },
+        ],
+        eroded_interior: false,
+        about: "a concave L-shaped path clip, a stripe crossing its notch",
     }
 }
 
@@ -1548,6 +1683,7 @@ mod tests {
             Command::GlyphRun(_) => "GlyphRun",
             Command::PushClip { .. } => "PushClip",
             Command::PushClipRounded { .. } => "PushClipRounded",
+            Command::PushClipPath { .. } => "PushClipPath",
             Command::PopClip => "PopClip",
             Command::Image { .. } => "Image",
             Command::BlurredRoundedRect { .. } => "BlurredRoundedRect",
@@ -1577,6 +1713,7 @@ mod tests {
         "GlyphRun",
         "PushClip",
         "PushClipRounded",
+        "PushClipPath",
         "PopClip",
         "Image",
         "BlurredRoundedRect",

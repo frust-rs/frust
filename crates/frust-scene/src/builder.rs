@@ -141,7 +141,20 @@ impl<'a> SceneBuilder<'a> {
         });
     }
 
-    /// Pops the most recently pushed clip, rectangular or rounded.
+    /// Pushes a clip to an arbitrary closed outline (`path`, nonzero winding,
+    /// positioned in the same space as every other draw) onto the render
+    /// backend's clip stack, recording the current transform.
+    ///
+    /// Popped by the same [`SceneBuilder::pop_clip`] as every other clip. The
+    /// clip lowers to a coverage mask, never a layer page, so a retained body
+    /// recorded under it is painted inline rather than retained (see
+    /// [`Command::PushClipPath`]).
+    pub fn push_clip_path(&mut self, path: BezPath) {
+        let transform = self.current_transform();
+        self.scene.push(Command::PushClipPath { path, transform });
+    }
+
+    /// Pops the most recently pushed clip, rectangular, rounded or path.
     pub fn pop_clip(&mut self) {
         self.scene.push(Command::PopClip);
     }
@@ -659,6 +672,36 @@ mod tests {
         assert!(matches!(commands[2], Command::FillRect { .. }));
         assert!(matches!(commands[3], Command::PopLayer));
         assert!(matches!(commands[4], Command::PopClip));
+    }
+
+    #[test]
+    fn push_clip_path_round_trips_the_path_and_pops_through_the_shared_pop_clip() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let translate = Affine::translate((4.0, 2.0));
+        builder.push_transform(translate);
+
+        let mut path = BezPath::new();
+        path.move_to((0.0, 0.0));
+        path.line_to((10.0, 0.0));
+        path.line_to((5.0, 8.0));
+        path.close_path();
+        builder.push_clip_path(path.clone());
+        builder.pop_clip();
+
+        let commands = scene.commands();
+        assert_eq!(commands.len(), 2);
+        match &commands[0] {
+            Command::PushClipPath {
+                path: got,
+                transform,
+            } => {
+                assert_eq!(*got, path);
+                assert_eq!(*transform, translate);
+            }
+            other => panic!("expected PushClipPath, got {other:?}"),
+        }
+        assert!(matches!(commands[1], Command::PopClip));
     }
 
     fn two_by_two_image() -> ImageData {

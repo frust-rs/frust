@@ -3147,6 +3147,35 @@ mod scroll_physics_reexport {
 /// ([`repaint_boundary`]/[`RepaintBoundaryView`]) resolves through the `frust`
 /// facade, so an app marks an expensive, often-unchanged subtree without
 /// reaching into `frust_widgets`.
+/// Facade-level check that a path clip is reachable from app code through
+/// [`authoring::PaintScene`] alone: an app clipping to an outline names no
+/// `frust_core`/`frust_scene` path, and the facade's own scene module sees the
+/// command it records.
+#[cfg(test)]
+mod path_clip_reexport {
+    use crate::authoring::scene::{Command, Scene, SceneBuilder};
+    use crate::authoring::{BezPath, PaintScene, Point};
+
+    #[test]
+    fn push_clip_path_resolves_through_the_facade() {
+        let mut outline = BezPath::new();
+        outline.move_to((0.0, 0.0));
+        outline.line_to((10.0, 0.0));
+        outline.line_to((5.0, 8.0));
+        outline.close_path();
+
+        let mut scene = Scene::new();
+        {
+            let mut builder = SceneBuilder::new(&mut scene);
+            let paint: &mut dyn PaintScene = &mut builder;
+            paint.push_clip_path(Point::new(2.0, 3.0), &outline);
+            paint.pop_clip();
+        }
+        assert!(matches!(scene.commands()[0], Command::PushClipPath { .. }));
+        assert!(matches!(scene.commands()[1], Command::PopClip));
+    }
+}
+
 #[cfg(test)]
 mod repaint_boundary_reexport {
     use crate::{RepaintBoundaryView, TextView, repaint_boundary, text};

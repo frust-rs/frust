@@ -1,11 +1,11 @@
 //! The compiler's clip stack, and the two shapes a clip lowers to.
 //!
-//! `frust_scene` has one clip stack, not two: `PushClip` and `PushClipRounded`
-//! both push onto it and one `PopClip` pops either. [`ClipStack`] is that stack
-//! inside the compiler, and its whole point is that neither shape ever needs an
-//! intermediate texture — a clip is either a device-space rectangle intersected
-//! into the enclosing one, or a coverage mask the strip generator already knows
-//! how to intersect a draw against.
+//! `frust_scene` has one clip stack, not three: `PushClip`, `PushClipRounded`
+//! and `PushClipPath` all push onto it and one `PopClip` pops any of them.
+//! [`ClipStack`] is that stack inside the compiler, and its whole point is that
+//! no shape ever needs an intermediate texture — a clip is either a
+//! device-space rectangle intersected into the enclosing one, or a coverage
+//! mask the strip generator already knows how to intersect a draw against.
 //!
 //! **Scissor.** A rectangular clip whose composed transform leaves it
 //! axis-aligned and whose edges land on whole device pixels is kept as a plain
@@ -16,12 +16,12 @@
 //! answered by scissoring is exactly the rectangle a fill can be answered by
 //! writing strip coverage directly.
 //!
-//! **Mask.** Every other clip — rounded corners, a rotation or skew in the
-//! transform, an edge on a half pixel — is rasterized once into a coverage mask
-//! held by [`ClipContext`], and subsequent draws are generated with that mask as
-//! their clip path. Nesting is that library's own: a mask pushed inside another
-//! is generated against the enclosing one, so the top of the stack is always the
-//! full intersection.
+//! **Mask.** Every other clip — rounded corners, an arbitrary path outline, a
+//! rotation or skew in the transform, an edge on a half pixel — is rasterized
+//! once into a coverage mask held by [`ClipContext`], and subsequent draws are
+//! generated with that mask as their clip path. Nesting is that library's own:
+//! a mask pushed inside another is generated against the enclosing one, so the
+//! top of the stack is always the full intersection.
 //!
 //! The two compose in either order. A mask is applied by the strip generator
 //! while a draw's coverage is produced; a scissor is applied to the result. A
@@ -44,7 +44,7 @@
 //! falls inside is turned into coverage — so a full-screen fill under a
 //! scrolling clip does not become a full-screen alpha buffer.
 
-use kurbo::{Affine, PathEl, Rect, RoundedRect, RoundedRectRadii, Shape};
+use kurbo::{Affine, BezPath, PathEl, Rect, RoundedRect, RoundedRectRadii, Shape};
 use peniko::Fill;
 
 use vello_common::clip::{ClipContext, PathDataRef};
@@ -216,6 +216,21 @@ impl ClipStack {
         }
         let shape = RoundedRect::from_rect(rect, radii);
         self.push_mask(rounded_rect_elements(&shape), transform, generator);
+    }
+
+    /// Push a clip to an arbitrary closed outline, filled by the nonzero
+    /// winding rule.
+    ///
+    /// Always a coverage mask — rasterized once at this push, under
+    /// `transform`, through the same [`ViewportSplit`] pre-pass and nesting a
+    /// rounded clip's mask takes. An outline is never tested for being a
+    /// rectangle in disguise: a caller with a rectangular clip has
+    /// [`ClipStack::push_rect`], and recognising one here would cost every
+    /// path clip a scan for the rare caller that spelt a rectangle as a path.
+    /// No mask is cached across pushes or frames — neither is a rounded clip's
+    /// — so the same path pushed twice is rasterized twice.
+    pub fn push_path(&mut self, path: &BezPath, transform: Affine, generator: &mut StripGenerator) {
+        self.push_mask(path.iter(), transform, generator);
     }
 
     /// Pop the most recent clip.
@@ -718,6 +733,25 @@ mod tests {
         assert_eq!(stack.scissor_clips(), 1);
         assert_eq!(stack.mask_clips(), 0);
         assert_eq!(stack.mask_strips(), 0);
+    }
+
+    #[test]
+    fn a_path_clip_always_rasterizes_a_mask() {
+        let mut generator = generator();
+        let mut stack = ClipStack::new();
+
+        // Even a pixel-aligned rectangle spelt as a path masks rather than
+        // scissors: the outline is never inspected for being a rectangle.
+        let square = Rect::new(8.0, 8.0, 24.0, 24.0).to_path(FLATTEN_TOLERANCE);
+        stack.push_path(&square, Affine::IDENTITY, &mut generator);
+
+        assert_eq!(stack.scissor_clips(), 0);
+        assert_eq!(stack.mask_clips(), 1);
+        assert!(stack.mask_strips() > 0);
+        assert!(stack.mask().is_some());
+
+        stack.pop();
+        assert!(stack.mask().is_none());
     }
 
     #[test]

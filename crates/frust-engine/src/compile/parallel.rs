@@ -531,6 +531,7 @@ pub(crate) fn plan_with<'a>(
             | Command::Path { .. }
             | Command::PushClip { .. }
             | Command::PushClipRounded { .. }
+            | Command::PushClipPath { .. }
             | Command::PopClip
             | Command::PushLayer { .. }
             | Command::PopLayer
@@ -543,6 +544,7 @@ pub(crate) fn plan_with<'a>(
             match command {
                 Command::PushClip { .. }
                 | Command::PushClipRounded { .. }
+                | Command::PushClipPath { .. }
                 | Command::PushLayer { .. } => push(&mut brackets, &mut masks, false),
                 Command::PushRetained {
                     rect,
@@ -593,6 +595,9 @@ pub(crate) fn plan_with<'a>(
                 let mask = !square || fast_rect(*rect, combined * *transform).is_none();
                 push(&mut brackets, &mut masks, mask);
             }
+            // Always a mask (`ClipStack::push_path`): every draw under it is
+            // generated during the walk itself.
+            Command::PushClipPath { .. } => push(&mut brackets, &mut masks, true),
             Command::PopClip | Command::PopLayer => pop(&mut brackets, &mut masks),
             Command::PushRetained {
                 rect,

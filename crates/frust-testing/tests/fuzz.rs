@@ -731,6 +731,7 @@ fn the_generator_only_emits_primitives_the_engine_lowers() {
                 frust_scene::Command::GlyphRun(_) => "GlyphRun",
                 frust_scene::Command::PushClip { .. } => "PushClip",
                 frust_scene::Command::PushClipRounded { .. } => "PushClipRounded",
+                frust_scene::Command::PushClipPath { .. } => "PushClipPath",
                 frust_scene::Command::PopClip => "PopClip",
                 frust_scene::Command::Image { .. } => "Image",
                 frust_scene::Command::BlurredRoundedRect { .. } => "BlurredRoundedRect",

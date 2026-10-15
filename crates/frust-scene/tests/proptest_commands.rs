@@ -195,6 +195,9 @@ enum Op {
         rect: Rect,
         radii: CornerRadii,
     },
+    PushClipPath {
+        path: BezPath,
+    },
     PopClip,
     PushLayer {
         rect: Rect,
@@ -222,7 +225,9 @@ impl Op {
     /// The stack this op opens, if any.
     fn opens(&self) -> Option<Bracket> {
         match self {
-            Self::PushClip { .. } | Self::PushClipRounded { .. } => Some(Bracket::Clip),
+            Self::PushClip { .. } | Self::PushClipRounded { .. } | Self::PushClipPath { .. } => {
+                Some(Bracket::Clip)
+            }
             Self::PushLayer { .. } => Some(Bracket::Layer),
             Self::PushRetained { .. } => Some(Bracket::Snapshot),
             Self::PushTransform(_) => Some(Bracket::Transform),
@@ -338,6 +343,7 @@ fn record(ops: &[Op], builder: &mut SceneBuilder<'_>) {
             Op::SceneTexture { id, dest } => builder.scene_texture(*id, *dest),
             Op::PushClip { rect } => builder.push_clip(*rect),
             Op::PushClipRounded { rect, radii } => builder.push_clip_rounded_radii(*rect, *radii),
+            Op::PushClipPath { path } => builder.push_clip_path(path.clone()),
             Op::PopClip => builder.pop_clip(),
             Op::PushLayer { rect, alpha } => builder.push_layer(*rect, *alpha),
             Op::PopLayer => builder.pop_layer(),
@@ -523,6 +529,7 @@ fn op_with_glyph_transform(glyph_transform: BoxedStrategy<Affine>) -> impl Strat
         (any::<u64>(), rect()).prop_map(|(id, dest)| Op::SceneTexture { id, dest }),
         rect().prop_map(|rect| Op::PushClip { rect }),
         (rect(), radii()).prop_map(|(rect, radii)| Op::PushClipRounded { rect, radii }),
+        bez_path().prop_map(|path| Op::PushClipPath { path }),
         Just(Op::PopClip),
         (rect(), coord_f32()).prop_map(|(rect, alpha)| Op::PushLayer { rect, alpha }),
         Just(Op::PopLayer),
@@ -586,7 +593,9 @@ fn walk(commands: &[Command]) -> StreamBalance {
 
     for command in commands {
         match command {
-            Command::PushClip { .. } | Command::PushClipRounded { .. } => balance.clips_open += 1,
+            Command::PushClip { .. }
+            | Command::PushClipRounded { .. }
+            | Command::PushClipPath { .. } => balance.clips_open += 1,
             Command::PopClip => balance.clips_closed += 1,
             Command::PushLayer { .. } => balance.layers_open += 1,
             Command::PopLayer => balance.layers_closed += 1,
@@ -785,7 +794,7 @@ fn every_command_variant_is_reachable_from_the_op_set() {
             brush: brush.clone(),
         },
         Op::StrokePath {
-            path,
+            path: path.clone(),
             width: 1.0,
             dash: None,
             brush: brush.clone(),
@@ -801,6 +810,8 @@ fn every_command_variant_is_reachable_from_the_op_set() {
             rect,
             radii: CornerRadii::uniform(1.0),
         },
+        Op::PopClip,
+        Op::PushClipPath { path },
         Op::PopClip,
         Op::PushLayer { rect, alpha: 0.5 },
         Op::PopLayer,
@@ -830,6 +841,7 @@ fn every_command_variant_is_reachable_from_the_op_set() {
             Command::GlyphRun(_) => "GlyphRun",
             Command::PushClip { .. } => "PushClip",
             Command::PushClipRounded { .. } => "PushClipRounded",
+            Command::PushClipPath { .. } => "PushClipPath",
             Command::PopClip => "PopClip",
             Command::Image { .. } => "Image",
             Command::BlurredRoundedRect { .. } => "BlurredRoundedRect",
@@ -860,6 +872,7 @@ fn every_command_variant_is_reachable_from_the_op_set() {
         "PopLayer",
         "PopRetained",
         "PushClip",
+        "PushClipPath",
         "PushClipRounded",
         "PushLayer",
         "PushRetained",
@@ -868,5 +881,5 @@ fn every_command_variant_is_reachable_from_the_op_set() {
         "ShaderQuad",
     ];
     expected.sort_unstable();
-    assert_eq!(seen, expected, "one op set, all eighteen command variants");
+    assert_eq!(seen, expected, "one op set, all nineteen command variants");
 }
