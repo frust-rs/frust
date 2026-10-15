@@ -1607,7 +1607,8 @@ impl SurfaceRenderer {
     /// each overlay that rendered, in cut order (bottom to top).
     ///
     /// The engine records and this crate submits once per frame, per the
-    /// frame-recording invariant — the overlays' engines included. Each target
+    /// frame-recording invariant (its atlas-growth and glyph-replay
+    /// exceptions aside) — the overlays' engines included. Each target
     /// still compiles its own segment: a compiled frame is specific to its
     /// target's size and root, so a segmented frame costs one compile per
     /// target (the main segment's plus one per overlay).

@@ -95,8 +95,9 @@
 //! Each target compiles its own segment: the engine's compiled frame is
 //! specific to its target's size and root, so a segmented frame is one compile
 //! per target — the main segment's plus one per overlay — never one shared
-//! compile. Every engine records and frust-render submits once per frame: the
-//! overlays' passes ride the main frame's command buffer.
+//! compile. Every engine records and frust-render submits once per frame (the
+//! engine's own atlas-growth and glyph-replay submits aside): the overlays'
+//! passes ride the main frame's command buffer.
 //!
 //! # Alpha
 //!
