@@ -1843,10 +1843,12 @@ impl SurfaceRenderer {
                                     .writes(frust_engine::EngineSpan::Blit),
                             );
                         }
-                        // Recorded into the frame's own encoder, after every
-                        // pass that wrote a query and before the one submit —
-                        // a resolve in a second command buffer would race the
-                        // passes it reads.
+                        // `resolve` records the query resolves of EARLIER,
+                        // completed frames' slots into this encoder; this
+                        // frame's own queries are resolved by a later frame,
+                        // once its GPU work has finished. The encoder must be
+                        // submitted, or `abandon_frame` called if it is
+                        // dropped, so no claimed slot is left half-resolved.
                         timestamps.resolve(&mut encoder);
                         probe.queue_begin();
                         device_handle.queue.submit([encoder.finish()]);
