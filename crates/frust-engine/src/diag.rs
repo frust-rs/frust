@@ -249,6 +249,7 @@ mod tests {
                 `cargo test -p frust-engine -- --ignored` (pin the adapter on a \
                 multi-GPU host with WGPU_BACKEND / WGPU_ADAPTER_NAME)"]
     fn a_real_frame_reports_plausible_per_span_gpu_time() {
+        use crate::renderer::FramePass;
         use crate::{EngineRenderer, EngineTarget, OutputAlpha};
         use frust_gpu::{HeadlessTarget, TierCaps};
         use frust_scene::{Scene, SceneBuilder};
@@ -324,7 +325,13 @@ mod tests {
             );
             builder.pop_layer();
 
+            // Every reading is held to the assertions below, not only the
+            // last: a Main span lost on some frames is the regression this
+            // test exists to catch (the ring once resolved in the frame's own
+            // command buffer, and on Metal that read the frame's last pass's
+            // end sample before the GPU wrote it — see `frust_gpu::diag`).
             let mut readings = 0_u64;
+            let mut failures = Vec::new();
             for frame in 0..(frust_gpu::diag::RING_FRAMES * 3) {
                 ring.begin_frame(&device);
                 let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -349,6 +356,19 @@ mod tests {
                         FrameTimestamps::new(&ring),
                     )
                     .expect("the engine must serve this frame");
+                // Every frame of this scene draws onto the surface (the merged
+                // opening, or the opaque and surface passes under
+                // FRUST_ENGINE_NO_PASS_MERGE), so every reading's Main span
+                // covers a drawing pass.
+                let passes = renderer.last_frame_passes();
+                println!("frame {frame}: passes {passes:?}");
+                assert!(
+                    passes.iter().any(|pass| matches!(
+                        pass,
+                        FramePass::Opening | FramePass::Opaque | FramePass::Surface
+                    )),
+                    "frame {frame} recorded no drawing surface pass: {passes:?}"
+                );
                 ring.resolve(&mut encoder);
                 queue.submit([encoder.finish()]);
                 ring.end_frame();
@@ -364,21 +384,36 @@ mod tests {
                         reading.span(EngineSpan::Composite.index()),
                         reading.total()
                     );
+                    for (span, why) in [
+                        (EngineSpan::Main, "the frame's own surface passes drew"),
+                        (
+                            EngineSpan::Composite,
+                            "the sub-unity layer rendered into a page",
+                        ),
+                    ] {
+                        if !reading.is_measured(span.index())
+                            || reading.span(span.index()) == Duration::ZERO
+                        {
+                            failures.push(format!(
+                                "reading at frame {frame}: {} unmeasured or zero, but {why}: \
+                                 {reading:?}",
+                                span.name()
+                            ));
+                        }
+                    }
                 }
             }
 
+            assert!(
+                readings >= frust_gpu::diag::RING_FRAMES as u64,
+                "a test that waits on every frame must harvest a reading per lap slot, \
+                 got {readings}"
+            );
+            assert!(failures.is_empty(), "{failures:#?}");
             let reading = ring
                 .latest()
                 .expect("at least one reading must have landed");
             assert_eq!(reading.len(), EngineSpan::COUNT);
-            assert!(
-                reading.span(EngineSpan::Main.index()) > Duration::ZERO,
-                "the frame's own surface passes drew: {reading:?}"
-            );
-            assert!(
-                reading.span(EngineSpan::Composite.index()) > Duration::ZERO,
-                "the sub-unity layer rendered into a page: {reading:?}"
-            );
             // The two spans this build records; the other two need a pass
             // descriptor seam their own modules do not carry yet.
             assert_eq!(
