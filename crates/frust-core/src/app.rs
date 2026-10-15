@@ -3699,6 +3699,7 @@ mod tests {
                     visible: true,
                     interactive: false,
                     shields: Vec::new(),
+                    command_index: 0,
                 });
                 ctx.report_input_shield(kurbo::Rect::from_origin_size(ctx.origin(), ctx.size()));
             }

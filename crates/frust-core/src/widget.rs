@@ -427,6 +427,19 @@ pub trait PaintScene {
     /// Defaulted to a no-op so recorder scenes stay valid; the
     /// [`SceneBuilder`] implementation records the real command.
     fn backdrop_blur(&mut self, _origin: Point, _size: Size, _radius: f64) {}
+
+    /// How many commands this scene has recorded so far in the current frame —
+    /// the painter-order index the next recorded command will occupy.
+    ///
+    /// A platform-view slot stamps it onto its [`PlatformViewFrame`]
+    /// ([`PlatformViewFrame::command_index`]) so the shell-side differ knows
+    /// which recorded commands paint above which native slot. Defaulted to `0`
+    /// for recorder scenes with no command list (every slot then reads as
+    /// painted first, before any frust content); [`SceneBuilder`] reports its
+    /// scene's live command count.
+    fn command_index(&self) -> usize {
+        0
+    }
 }
 
 /// A [`PaintScene`] sink that accepts every paint command and records
@@ -606,6 +619,10 @@ impl PaintScene for SceneBuilder<'_> {
 
     fn backdrop_blur(&mut self, origin: Point, size: Size, radius: f64) {
         SceneBuilder::backdrop_blur(self, rect_at(origin, size), radius);
+    }
+
+    fn command_index(&self) -> usize {
+        SceneBuilder::command_count(self)
     }
 }
 
@@ -2282,6 +2299,15 @@ pub struct PlatformViewFrame {
     /// emits — so the shipped wire shape is the union of both, assembled one
     /// layer up.
     pub shields: Vec<Rect>,
+    /// The slot's position in painter order: how many commands the scene had
+    /// recorded when the slot published ([`PaintScene::command_index`]),
+    /// taken **before** the slot's own Mode B punch
+    /// ([`PaintScene::clear_rect`]) so the punch never counts as frust content
+    /// painted above the slot. Every command at or past this index paints over
+    /// the native view; the shell-side differ cuts the frame's command list at
+    /// these indices to decide which frust content needs an overlay above
+    /// which slot. `0` under a recorder scene with no command list.
+    pub command_index: usize,
 }
 
 /// The result of a whole [`crate::app::RenderRoot::paint`] pass.
@@ -4520,9 +4546,48 @@ mod tests {
                     visible: true,
                     interactive: false,
                     shields: Vec::new(),
+                    command_index: 0,
                 });
             }
         }
+    }
+
+    #[test]
+    fn scene_builder_command_index_reports_the_live_count() {
+        let mut scene = frust_scene::Scene::new();
+        {
+            let mut builder = frust_scene::SceneBuilder::new(&mut scene);
+            let paint: &mut dyn PaintScene = &mut builder;
+            assert_eq!(paint.command_index(), 0);
+
+            paint.fill_rect(Point::ZERO, Size::new(4.0, 4.0), Color::BLACK);
+            assert_eq!(paint.command_index(), 1);
+
+            // Structural commands count too: the index is a position in the
+            // scene's command list, not a tally of what draws.
+            paint.push_clip(Point::ZERO, Size::new(4.0, 4.0));
+            paint.pop_clip();
+            assert_eq!(paint.command_index(), 3);
+
+            // A transform push records nothing, so the index stays put.
+            paint.push_transform(Affine::translate((1.0, 1.0)));
+            assert_eq!(paint.command_index(), 3);
+            paint.pop_transform();
+        }
+        assert_eq!(scene.commands().len(), 3);
+    }
+
+    #[test]
+    fn default_command_index_is_zero() {
+        // A recorder with no command list keeps the defaulted 0, however much
+        // it is asked to paint.
+        let mut discard = DiscardScene;
+        discard.fill_rect(Point::ZERO, Size::new(4.0, 4.0), Color::BLACK);
+        assert_eq!(discard.command_index(), 0);
+
+        let mut recording = RecordingScene::default();
+        recording.fill_rect(Point::ZERO, Size::new(4.0, 4.0), Color::BLACK);
+        assert_eq!(recording.command_index(), 0);
     }
 
     #[test]
