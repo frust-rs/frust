@@ -5882,17 +5882,18 @@ garbage span. A measurement gap only: the untimed pass still draws (or
 doesn't draw) exactly what it always did. A span of several passes absorbs
 it when another of them draws; a span whose only pass draws nothing cannot —
 the merged surface opening carries the clear with the first drawing surface
-work, so a frame whose surface draws nothing leaves `gpu_main_us` with a
-clear-only single pass and no valid pair, and
-`GpuFrameSpans::is_measured` is false for it (`span` reads zero either way).
+work, so a frame whose surface draws nothing has a clear-only single Main
+pass and no valid pair, and `GpuFrameSpans::is_measured` is false for it
+(`span` reads zero either way).
 The separate 0 ns readings on drawing frames were a resolve race, fixed:
 `TimestampRing` resolves a slot only after `Queue::on_submitted_work_done`
 reports its frame complete.
 
-**Accepted because**: it degrades to a missing sample, never a wrong number:
-`is_measured` tells it from a real zero duration in the API, the raw line
-reports a frame with an unmeasured Main span as `gpu_q=0`, and only a span
-whose every pass draws nothing is affected.
+**Accepted because**: only a span whose every pass draws nothing is affected,
+`is_measured` tells it from a real zero duration in the API, and the raw line
+reports a frame with an unmeasured Main span as `gpu_q=0` (no `gpu_*_us`
+columns). An unmeasured prepass, composite or blit span still prints `0` on
+a `gpu_q=1` line — the raw line judges Main only.
 
 ### `engine-punch-straddles-layer-composite` — an isolated layer whose content straddles a `ClearRect` composites whole after the punch
 
