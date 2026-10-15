@@ -23,6 +23,7 @@ pub mod diag;
 pub mod effects;
 pub mod encoder;
 pub mod headless;
+pub mod import;
 pub mod lifecycle;
 pub mod lint;
 pub mod pipeline;

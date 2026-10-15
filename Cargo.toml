@@ -83,6 +83,9 @@ log = "0.4"
 jni = "0.22"
 ndk = "0.9"
 ndk-sys = "0.6"
+# Vulkan bindings for the Android zero-copy texture import (frust-gpu `import::android`, target-gated):
+# 0.38 is exactly what wgpu-hal 30.0.1 pins, so the lock holds one `ash`.
+ash = "0.38"
 # Default `regex` feature dropped: frust-shell-android never parses a filter spec.
 android_logger = { version = "0.15", default-features = false }
 # Render-thread priority self-boost in the Android/iOS shells (target-gated); deliberately unpinned 0.2.
@@ -97,6 +100,11 @@ ndk-context = "0.1"
 # `default-features = false` + its own minimal features when the workspace entry leaves it unset.
 objc2 = "0.6"
 objc2-foundation = "0.3"
+# Metal + CoreFoundation bindings for the Apple zero-copy texture import (frust-gpu `import::apple`,
+# target-gated): 0.3 is wgpu-hal 30.0.1's objc2-metal line; the 0.2.2 objc2-metal duplicate reached
+# through objc2-core-image is pre-existing and unrelated.
+objc2-metal = "0.3"
+objc2-core-foundation = "0.3"
 # Unifies with arboard's 0.3.2. The 0.2.2 (accesskit_macos/winit) vs 0.3.2 duplicate is a known
 # residual: do not try to fix it here (docs/DEVELOPMENT.md § Version-Pin Policy).
 objc2-app-kit = "0.3"
