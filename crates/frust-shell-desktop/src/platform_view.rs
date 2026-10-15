@@ -247,6 +247,7 @@ mod tests {
             visible: true,
             interactive: false,
             shields: Vec::new(),
+            command_index: 0,
         }
     }
 
@@ -293,6 +294,7 @@ mod tests {
                 // Desktop passes no auto-collected shields, and the frame
                 // declares none of its own.
                 shields: Vec::new(),
+                z_index: 0,
             }
         );
     }
@@ -328,6 +330,7 @@ mod tests {
                 clip: None,
                 visible: true,
                 shields: Vec::new(),
+                z_index: 0,
             }]
         );
     }
@@ -353,6 +356,7 @@ mod tests {
                 clip: None,
                 visible: false,
                 shields: Vec::new(),
+                z_index: 0,
             }],
             "the hide reuses the slot's last known geometry"
         );
@@ -367,6 +371,7 @@ mod tests {
                 clip: None,
                 visible: true,
                 shields: Vec::new(),
+                z_index: 0,
             }]
         );
     }
@@ -425,6 +430,7 @@ mod tests {
                 clip: None,
                 visible: true,
                 shields: Vec::new(),
+                z_index: 0,
             }
         );
         assert!(matches!(&batch[2], ViewCommand::Create { slot_id: 2, .. }));
@@ -436,6 +442,7 @@ mod tests {
                 clip: None,
                 visible: true,
                 shields: Vec::new(),
+                z_index: 1,
             }
         );
     }
@@ -472,6 +479,7 @@ mod tests {
                 // it back.
                 visible: false,
                 shields: Vec::new(),
+                z_index: 0,
             }
         );
     }

@@ -260,12 +260,17 @@ impl<O: NativeViewOps> ViewHost<O> {
                     // only to a host that intercepts events before the native
                     // view, which this one does not.
                     shields: _,
+                    // Stacking among slots is not applied by this host yet.
+                    z_index: _,
                 } => self.update(ops, *slot_id, *rect, *clip, *visible),
                 ViewCommand::UpdateParams {
                     slot_id,
                     params_json,
                 } => self.update_params(ops, *slot_id, params_json),
                 ViewCommand::Dispose { slot_id } => self.dispose(ops, *slot_id),
+                // Overlays have no macOS host yet; the desktop shell's plain
+                // `ingest` never produces them.
+                ViewCommand::Overlay { .. } | ViewCommand::DisposeOverlay { .. } => {}
             }
         }
     }
@@ -895,6 +900,7 @@ mod tests {
             clip: None,
             visible,
             shields: Vec::new(),
+            z_index: 0,
         }
     }
 

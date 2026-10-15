@@ -354,6 +354,9 @@ impl Widget for PlatformViewWidget {
         };
 
         // Publish exactly once per paint — the whole point of this widget.
+        // `command_index` is read here, BEFORE the Mode B punch below records
+        // its `ClearRect`, so the slot's own punch never counts as frust
+        // content painted above the slot.
         ctx.publish_platform_view(PlatformViewFrame {
             slot_id: self.slot_id,
             view_type: self.view_type.clone(),
@@ -368,6 +371,7 @@ impl Widget for PlatformViewWidget {
                 .iter()
                 .map(|r| *r + ctx.origin().to_vec2())
                 .collect(),
+            command_index: scene.command_index(),
         });
 
         // Mode B hole-punch: on a translucent surface,
@@ -826,6 +830,66 @@ mod tests {
             0,
             "an opaque-resolved surface must encode no punch at all (Mode A)"
         );
+    }
+
+    // -- painter-order index ---------------------------------------------
+
+    #[test]
+    fn command_index_counts_the_commands_before_the_slot_and_excludes_its_punch() {
+        let view = platform_view("dev.frust.MapFactory").size(100.0, 80.0);
+        let mut w = build(&view);
+        let mut lctx = LayoutCtx::new();
+        w.layout(&mut lctx, &BoxConstraints::tight(Size::new(100.0, 80.0)));
+
+        let mut scene = frust_scene::Scene::new();
+        let frame = {
+            let mut builder = frust_scene::SceneBuilder::new(&mut scene);
+            // Three commands painted before the slot: a backdrop fill and a
+            // clip bracket (structural commands still occupy an index).
+            PaintScene::fill_rect(
+                &mut builder,
+                Point::ZERO,
+                Size::new(200.0, 200.0),
+                peniko::Color::BLACK,
+            );
+            PaintScene::push_clip(&mut builder, Point::ZERO, Size::new(200.0, 200.0));
+            PaintScene::pop_clip(&mut builder);
+
+            // A translucent surface, so the slot records its punch too.
+            let mut pctx = PaintCtx::new(Point::new(20.0, 30.0), Size::new(100.0, 80.0))
+                .with_translucent(true);
+            w.paint(&mut pctx, &mut builder);
+            let mut frames = pctx.take_platform_views();
+            assert_eq!(frames.len(), 1);
+            frames.remove(0)
+        };
+
+        assert_eq!(
+            frame.command_index, 3,
+            "the index is the count of commands recorded before the slot published"
+        );
+        // The punch landed AT that index — after the publish, so it is not
+        // counted as content before the slot, and it is the slot's own
+        // command rather than frust content painted above it.
+        assert_eq!(scene.commands().len(), 4);
+        assert!(matches!(
+            scene.commands()[frame.command_index],
+            frust_scene::Command::ClearRect { .. }
+        ));
+    }
+
+    #[test]
+    fn command_index_is_zero_under_a_recorder_scene() {
+        let view = platform_view("dev.frust.MapFactory").size(10.0, 10.0);
+        let mut w = build(&view);
+        let mut lctx = LayoutCtx::new();
+        w.layout(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+
+        let mut scene = NullScene::default();
+        scene.fill_rect(Point::ZERO, Size::new(10.0, 10.0), peniko::Color::BLACK);
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        w.paint(&mut pctx, &mut scene);
+        assert_eq!(pctx.take_platform_views()[0].command_index, 0);
     }
 
     #[cfg(debug_assertions)]
