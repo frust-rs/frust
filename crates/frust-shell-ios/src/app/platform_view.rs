@@ -17,7 +17,7 @@ use super::IosAppHandle;
 /// vocabulary into the FFI-boundary-safe plain-`f64` one (see
 /// [`crate::ffi_support::PvRect`]'s doc comment for why `kurbo` can't appear
 /// in `ffi_support` itself).
-fn to_pv_command(cmd: &ViewCommand, scale: f64) -> crate::ffi_support::PlatformViewCommand {
+fn to_pv_command(cmd: &ViewCommand, scale: f64) -> Option<crate::ffi_support::PlatformViewCommand> {
     fn to_pv_rect(rect: kurbo::Rect, scale: f64) -> crate::ffi_support::PvRect {
         crate::ffi_support::PvRect {
             x: rect.x0 * scale,
@@ -26,7 +26,7 @@ fn to_pv_command(cmd: &ViewCommand, scale: f64) -> crate::ffi_support::PlatformV
             h: rect.height() * scale,
         }
     }
-    match cmd {
+    Some(match cmd {
         ViewCommand::Create {
             slot_id,
             view_type,
@@ -44,6 +44,7 @@ fn to_pv_command(cmd: &ViewCommand, scale: f64) -> crate::ffi_support::PlatformV
             clip,
             visible,
             shields,
+            ..
         } => crate::ffi_support::PlatformViewCommand::Update {
             slot_id: *slot_id,
             rect: to_pv_rect(*rect, scale),
@@ -61,7 +62,10 @@ fn to_pv_command(cmd: &ViewCommand, scale: f64) -> crate::ffi_support::PlatformV
         ViewCommand::Dispose { slot_id } => {
             crate::ffi_support::PlatformViewCommand::Dispose { slot_id: *slot_id }
         }
-    }
+        // Overlays have no iOS host yet; the shell's plain `ingest` never
+        // produces them.
+        ViewCommand::Overlay { .. } | ViewCommand::DisposeOverlay { .. } => return None,
+    })
 }
 
 impl IosAppHandle {
@@ -108,7 +112,7 @@ impl IosAppHandle {
         let scale = sanitize_scale(self.scale) as f64;
         let mapped: Vec<crate::ffi_support::PlatformViewCommand> = commands
             .iter()
-            .map(|cmd| to_pv_command(cmd, scale))
+            .filter_map(|cmd| to_pv_command(cmd, scale))
             .collect();
         crate::ffi_support::platform_view_commands_json(generation, ack_generation, &mapped)
     }
