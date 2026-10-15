@@ -29,6 +29,23 @@
 //! straight into the swapchain exactly as before; the straight-alpha arm
 //! renders every frame into its intermediate already and needs nothing more.
 //!
+//! The partial-repaint spike (`FRUST_PARTIAL_REPAINT`, off by default) takes
+//! that intermediate further: with it on, every frame of either arm is
+//! presented from a surface-owned accumulator that persists across frames
+//! ([`PartialRoot`]). A full frame — the first, any after a resize or a scale
+//! change, any whose damage is the whole surface or carries a pixel source no
+//! paint dirtiness tracks — renders straight into it; any other renders into
+//! the arm's own readable root (the [`BackdropRoot`] intermediate, or the
+//! straight-alpha arm's intermediate) with every surface pass scissored to the
+//! frame's damage, and only that rectangle is copied into the accumulator. The
+//! accumulator then presents through the arm's ordinary present pass. The
+//! scissored frame still clears its whole root to the base colour (a clear is
+//! a load operation, which no scissor reaches), which is what makes the
+//! damaged rectangle start from the base colour rather than from stale pixels
+//! — the one thing a load-instead-of-clear opening cannot give without a
+//! constant-colour program of its own. The swapchain itself is never widened
+//! and never read.
+//!
 //! Surface *lifecycle* is driven from [`crate::SurfaceRenderer`]: the shell
 //! mints an empty `SurfaceRenderer` and drives it with
 //! `on_surface_created`/`on_surface_changed`/`on_surface_destroyed`, each of
@@ -78,7 +95,7 @@ fn env_flag_enabled(name_compile_time: Option<&str>, name_runtime: Option<String
 /// counterpart that skips this check entirely, so a build without the feature
 /// contains neither this env read nor the probe bodies it guards.
 #[cfg(feature = "perf-trace")]
-fn perf_tracing_enabled() -> bool {
+pub(crate) fn perf_tracing_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
         env_flag_enabled(
@@ -292,6 +309,174 @@ fn create_readable_root(
     texture.create_view(&wgpu::TextureViewDescriptor::default())
 }
 
+/// The partial-repaint accumulator (see the module doc): the last presented
+/// frame, kept across frames so a frame confined to its damage can be copied
+/// over it and the whole of it presented again.
+///
+/// Created lazily by the first frame rendered with partial repaint on, in the
+/// format the arm's frames render in (the swapchain's on the direct arm, the
+/// engine's off-screen one on the straight-alpha arm); dropped on resize, so
+/// the first frame after one is full. `valid` is whether it holds a whole
+/// presented frame at all.
+#[derive(Default)]
+pub(crate) struct PartialRoot {
+    /// The accumulator, with the extent and format it was created at.
+    accumulator: Option<((u32, u32), wgpu::TextureFormat, wgpu::TextureView)>,
+    /// Whether the accumulator holds a complete presented frame.
+    valid: bool,
+    /// The base colour the accumulator's frame was cleared to: a frame
+    /// clearing to another one changes every pixel no draw covers.
+    base_color: Option<peniko::Color>,
+}
+
+/// What one partial-repaint frame renders into: the accumulator itself (a full
+/// frame, `scissor: None`) or the arm's readable root confined to `scissor`,
+/// whose rectangle is then copied into the accumulator.
+pub(crate) struct PartialFrame<'a> {
+    /// The persistent accumulator the frame is presented from.
+    pub(crate) accumulator: &'a wgpu::TextureView,
+    /// The damage the frame is confined to, or `None` for a full frame.
+    pub(crate) scissor: Option<frust_engine::renderer::ScissorRect>,
+}
+
+impl PartialRoot {
+    /// Plans the next frame: the accumulator for a `width` x `height` frame in
+    /// `format` (created, or recreated after an extent/format change, which
+    /// invalidates it), and whether the frame is full or confined to `damage`.
+    ///
+    /// `damage` is `None` when the frame's damage is unknown or the whole
+    /// surface; a full frame is also forced by an accumulator holding no frame
+    /// yet, a changed base colour, or `damage` covering the whole target.
+    pub(crate) fn plan(
+        &mut self,
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+        damage: Option<frust_engine::renderer::ScissorRect>,
+        base_color: peniko::Color,
+    ) -> PartialFrame<'_> {
+        if self
+            .accumulator
+            .as_ref()
+            .is_some_and(|(extent, existing, _)| *extent != (width, height) || *existing != format)
+        {
+            self.release();
+        }
+        let full = !self.valid
+            || self.base_color != Some(base_color)
+            || damage.is_none_or(|rect| rect.covers(width, height));
+        let (_, _, view) = self.accumulator.get_or_insert_with(|| {
+            (
+                (width, height),
+                format,
+                create_accumulator(width, height, format, device),
+            )
+        });
+        PartialFrame {
+            accumulator: view,
+            scissor: if full { None } else { damage },
+        }
+    }
+
+    /// Records that a frame cleared to `base_color` reached the accumulator
+    /// whole — the next frame may be confined to its damage.
+    pub(crate) fn commit(&mut self, base_color: peniko::Color) {
+        self.valid = self.accumulator.is_some();
+        self.base_color = Some(base_color);
+    }
+
+    /// Drops the accumulator (a resize leaves it at the wrong extent, and a
+    /// switched-off spike holds nothing); the next frame is full.
+    pub(crate) fn release(&mut self) {
+        self.accumulator = None;
+        self.valid = false;
+    }
+
+    /// Forgets the accumulated frame without dropping the texture — a device
+    /// scale change, after which no pixel of it can be trusted.
+    pub(crate) fn invalidate(&mut self) {
+        self.valid = false;
+    }
+}
+
+/// Creates the partial-repaint accumulator: `RENDER_ATTACHMENT` for a full
+/// frame rendered straight into it, `COPY_DST` for a confined frame's
+/// rectangle, `TEXTURE_BINDING` for the present pass (and a backdrop blur's
+/// fragment region copy), `COPY_SRC` for a backdrop blur's texture-copy route.
+fn create_accumulator(
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+    device: &wgpu::Device,
+) -> wgpu::TextureView {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("frust-render partial-repaint accumulator"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::COPY_DST,
+        format,
+        view_formats: &[],
+    });
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+/// Copies `scissor` of the frame's readable root `source` into the same
+/// rectangle of the accumulator `target` — a texture-to-texture copy, both
+/// textures surface-owned and of one format and extent.
+pub(crate) fn copy_damage(
+    encoder: &mut wgpu::CommandEncoder,
+    source: &wgpu::TextureView,
+    target: &wgpu::TextureView,
+    scissor: frust_engine::renderer::ScissorRect,
+) {
+    let origin = wgpu::Origin3d {
+        x: scissor.x,
+        y: scissor.y,
+        z: 0,
+    };
+    encoder.copy_texture_to_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: source.texture(),
+            mip_level: 0,
+            origin,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyTextureInfo {
+            texture: target.texture(),
+            mip_level: 0,
+            origin,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::Extent3d {
+            width: scissor.width,
+            height: scissor.height,
+            depth_or_array_layers: 1,
+        },
+    );
+}
+
+/// Whether `scene` draws a pixel source whose contents change without any
+/// paint dirtiness to report it — a caller-bound texture or a fragment-shader
+/// quad — which forces a partial-repaint frame to be full.
+pub(crate) fn scene_forces_full_frame(scene: &frust_scene::Scene) -> bool {
+    scene.commands().iter().any(|command| {
+        matches!(
+            command,
+            frust_scene::Command::SceneTexture { .. } | frust_scene::Command::ShaderQuad { .. }
+        )
+    })
+}
+
 /// Refuses an adapter that cannot drive the engine, carrying
 /// [`crate::EngineUnsupported`]'s diagnosis as the error.
 ///
@@ -482,6 +667,8 @@ pub(crate) struct EngineSurface {
     pub(crate) gpu: ConfiguredSurface,
     /// The engine resources of this surface's arm.
     pub(crate) path: RenderPath,
+    /// The partial-repaint accumulator — empty unless the spike is on.
+    pub(crate) partial: PartialRoot,
 }
 
 impl EngineSurface {
@@ -517,6 +704,9 @@ impl EngineSurface {
     /// un-premultiplying arm, the intermediate) that has to match the
     /// swapchain's extent. Zero dimensions are rejected upstream.
     pub(crate) fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        // The partial-repaint accumulator is extent-bound too, and a resized
+        // surface owes a full frame either way.
+        self.partial.release();
         match &mut self.path {
             // A depth attachment must match its colour attachment's extent
             // exactly, so the resize recreates it here — in the same step that
@@ -712,6 +902,7 @@ pub(crate) async fn create_engine_surface(
     Ok(EngineSurface {
         gpu: configured,
         path,
+        partial: PartialRoot::default(),
     })
 }
 

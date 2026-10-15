@@ -54,6 +54,7 @@ use frust_render::{
     SurfaceAlphaRequest, SurfaceFactory, SurfacePhase, SurfaceRenderer,
 };
 use frust_scene::Scene;
+use frust_shell_common::frame_gate::DamageFeed;
 use frust_shell_common::perf::{
     FramePasses, FrameStats, GpuPasses, RenderSpans, SPAN_ADAPTER_READY, SPAN_DEVICE_READY,
     SPAN_FIRST_ENCODE_DONE, SPAN_FIRST_FRAME_PRESENTED, SPAN_FIRST_REBUILD_DONE, SPAN_INIT_ENTRY,
@@ -304,6 +305,21 @@ pub(crate) struct InlineExecutor {
     /// shape matches the split's cross-thread counter so `FrameExecutor` reads
     /// both variants uniformly.
     presented: Arc<AtomicU64>,
+    /// The partial-repaint damage feed — `Some` only under
+    /// `FRUST_PARTIAL_REPAINT` (see [`partial_repaint`]).
+    damage_feed: Option<DamageFeed>,
+}
+
+/// Switch `renderer` onto the partial-repaint spike when `FRUST_PARTIAL_REPAINT`
+/// is set, returning the damage feed its frames are then fed from — `split`
+/// says whether this renderer runs on the render thread (see [`DamageFeed`]).
+/// `None`, with the renderer untouched, when the knob is off.
+fn partial_repaint(renderer: &mut SurfaceRenderer, split: bool) -> Option<DamageFeed> {
+    if !frust_shell_common::frame_gate::partial_repaint_enabled() {
+        return None;
+    }
+    renderer.set_partial_repaint(true);
+    Some(DamageFeed::new(split))
 }
 
 impl InlineExecutor {
@@ -312,9 +328,11 @@ impl InlineExecutor {
     pub(crate) fn new() -> Self {
         let mut startup = StartupSpans::begin();
         startup.record(SPAN_INIT_ENTRY);
+        let mut renderer = SurfaceRenderer::new();
+        let damage_feed = partial_repaint(&mut renderer, false);
         Self {
             render_cx: RenderContext::new(),
-            renderer: SurfaceRenderer::new(),
+            renderer,
             startup,
             frame_stats: FrameStats::new(),
             renderer_spans_recorded: false,
@@ -322,6 +340,7 @@ impl InlineExecutor {
             first_encode_recorded: false,
             first_frame_recorded: false,
             presented: Arc::new(AtomicU64::new(0)),
+            damage_feed,
         }
     }
 
@@ -366,6 +385,7 @@ impl InlineExecutor {
             &mut self.startup,
             &mut self.first_encode_recorded,
             &mut self.first_frame_recorded,
+            self.damage_feed.as_mut(),
         );
         match outcome {
             // Stale swapchain (mid-resize): reconfigured internally — redraw
@@ -580,6 +600,7 @@ fn render_loop(
     presented: Arc<AtomicU64>,
 ) {
     let mut renderer = SurfaceRenderer::new();
+    let mut damage_feed = partial_repaint(&mut renderer, true);
     // Kept only for `pre_present_notify` (surface creation/recovery is UI-side).
     // Cleared on `SurfaceDestroyed`.
     let mut window: Option<WindowHandle> = None;
@@ -680,6 +701,7 @@ fn render_loop(
                     &mut startup,
                     &mut first_encode_recorded,
                     &mut first_frame_recorded,
+                    damage_feed.as_mut(),
                 );
                 match outcome {
                     // Stale swapchain: reconfigured internally — ask the UI thread
@@ -878,8 +900,15 @@ fn render_frame(
     startup: &mut StartupSpans,
     first_encode_recorded: &mut bool,
     first_frame_recorded: &mut bool,
+    damage_feed: Option<&mut DamageFeed>,
 ) -> Result<FrameOutcome> {
     window.pre_present_notify();
+
+    // The partial-repaint spike's damage for this frame, drained before the
+    // encode it confines (`None` with the knob off: nothing is read).
+    if let Some(feed) = damage_feed {
+        renderer.set_frame_damage(feed.next_frame());
+    }
 
     // Encode span (GPU/CPU encode, no swapchain touch). Each span is its own
     // `Instant` read; desktop's frame budget is generous enough not to gate them
