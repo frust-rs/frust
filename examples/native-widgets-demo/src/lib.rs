@@ -20,8 +20,18 @@
 //! The section switcher is built from baseline [`button`]s, never the plugin's
 //! native tab bar: the native tab bar is itself one of the demoed controls,
 //! and off iOS/iPadOS it renders as a refusal banner — a shell navigated by it
-//! would be unusable on Android and macOS. Eight sections do not fit one
-//! phone-width row of labelled buttons, so the navigation is two rows of four.
+//! would be unusable on Android and macOS. Nine sections do not fit one
+//! phone-width row of labelled buttons, so the navigation is three rows of
+//! three.
+//!
+//! # The Sandwich page
+//!
+//! The eight [`SECTION_LABELS`] are the native-widget families, each with a
+//! row in every per-family table (`pages::common::AT_REST_SLOTS`, the smoke
+//! test's per-section checks). [`SANDWICH_LABEL`] is a ninth page that is not
+//! a family — it exercises frust paint under and over native views (overlay
+//! surfaces) — so it is navigated and deep-linked like a section, at index
+//! [`SANDWICH_SECTION`], without joining those tables.
 //!
 //! # Deep links
 //!
@@ -74,12 +84,28 @@ pub const SECTION_LABELS: [&str; 8] = [
     "Stress",
 ];
 
-/// Map a section label (case-insensitive) to its index in
-/// [`SECTION_LABELS`] — the deep-link lookup. `None` for an unknown label.
-pub fn section_index_for(label: &str) -> Option<usize> {
+/// The Sandwich page's label and deep-link slug — navigated like a section,
+/// after the eight [`SECTION_LABELS`] (see the module docs' *The Sandwich
+/// page*).
+pub const SANDWICH_LABEL: &str = "Sandwich";
+
+/// The Sandwich page's section index: one past the last of [`SECTION_LABELS`].
+pub const SANDWICH_SECTION: usize = SECTION_LABELS.len();
+
+/// Every page the navigation offers, in order: the [`SECTION_LABELS`], then
+/// [`SANDWICH_LABEL`].
+fn nav_labels() -> impl Iterator<Item = &'static str> {
     SECTION_LABELS
         .iter()
-        .position(|&s| s.eq_ignore_ascii_case(label))
+        .copied()
+        .chain(std::iter::once(SANDWICH_LABEL))
+}
+
+/// Map a section label (case-insensitive) to its index in
+/// [`SECTION_LABELS`] (or [`SANDWICH_SECTION`] for [`SANDWICH_LABEL`]) — the
+/// deep-link lookup. `None` for an unknown label.
+pub fn section_index_for(label: &str) -> Option<usize> {
+    nav_labels().position(|s| s.eq_ignore_ascii_case(label))
 }
 
 /// The debug-only environment variable naming the section to open at launch
@@ -257,7 +283,7 @@ fn deep_link_router(state: &NativeWidgetsDemoState) -> impl View<NativeWidgetsDe
                     state.section.set(index);
                     log::info!(
                         "native-widgets-demo deep-link: section {} -> {}",
-                        SECTION_LABELS[index],
+                        nav_labels().nth(index).unwrap_or("?"),
                         index
                     );
                 }
@@ -458,19 +484,20 @@ fn demo_app_bar(state: &NativeWidgetsDemoState) -> impl View<NativeWidgetsDemoSt
         .actions((brightness_btn,))
 }
 
-/// Sections per navigation row — eight labelled buttons do not fit one
-/// phone-width row, so the navigation is two rows of four.
-const NAV_COLUMNS: usize = 4;
+/// Sections per navigation row — nine labelled buttons do not fit one
+/// phone-width row, so the navigation is three rows of three.
+const NAV_COLUMNS: usize = 3;
 
 /// Gap around each navigation button, logical px.
 const NAV_GAP_PX: f64 = 2.0;
 
 /// The bottom section navigation: one baseline [`button`] per
-/// [`SECTION_LABELS`] entry, the active section [`ButtonStyle::Primary`] and
+/// [`SECTION_LABELS`] entry plus [`SANDWICH_LABEL`], the active section [`ButtonStyle::Primary`] and
 /// the rest [`ButtonStyle::Ghost`], in rows of [`NAV_COLUMNS`]. Frust-drawn on
 /// every platform — see the module docs for why it is not the native tab bar.
 fn section_nav(section: usize) -> impl View<NativeWidgetsDemoState> {
-    let rows = SECTION_LABELS
+    let labels: Vec<&'static str> = nav_labels().collect();
+    let rows = labels
         .chunks(NAV_COLUMNS)
         .enumerate()
         .map(|(row, labels)| {
@@ -614,6 +641,11 @@ mod deep_link_tests {
             );
         }
         assert_eq!(section_index_for("nope"), None);
+        assert_eq!(section_index_for("sandwich"), Some(SANDWICH_SECTION));
+        assert_eq!(
+            plan_deep_link(&link("native-widgets-demo://section/Sandwich", 1), None),
+            Some(DeepLinkAction::GoToSection(SANDWICH_SECTION))
+        );
     }
 
     #[test]

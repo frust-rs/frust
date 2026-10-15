@@ -528,13 +528,33 @@ impl AndroidAppHandle {
         // frame is on screen. Both statements sit behind the
         // gate's early `return`, so a Skip records nothing AND submits nothing:
         // the recorded id can never run ahead of what will actually be sent.
-        if self
-            .platform_view_state
-            .ingest(self.app.platform_view_frames(), self.app.input_shields())
-        {
+        //
+        // With overlay surfaces on (`FRUST_OVERLAYS`) the differ also gets the
+        // painted scene's commands and the logical viewport, so it cuts the
+        // frame at its slots and announces the overlays; the ranges it
+        // computed are then published under this frame's id for the render
+        // thread to draw this very scene with. Off, the plain `ingest` keeps
+        // the command stream exactly as it was.
+        let overlays_on = crate::jni_glue::overlays_enabled();
+        let produced = if overlays_on {
+            let (lw, lh) = logical_size(self.physical.0, self.physical.1, scale);
+            self.platform_view_state.ingest_scene(
+                self.app.platform_view_frames(),
+                self.app.input_shields(),
+                self.scene.commands(),
+                kurbo::Rect::new(0.0, 0.0, lw, lh),
+            )
+        } else {
+            self.platform_view_state
+                .ingest(self.app.platform_view_frames(), self.app.input_shields())
+        };
+        if produced {
             let (generation, _) = self.platform_view_state.commands();
             self.platform_view_due
                 .record(generation, self.executor.submitted_frame_id() + 1);
+        }
+        if overlays_on {
+            self.publish_overlay_frame(self.executor.submitted_frame_id() + 1);
         }
 
         // Hand the finished frame to the render-path executor.

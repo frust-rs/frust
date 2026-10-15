@@ -463,46 +463,50 @@ class FrustSurfaceView(
     // for itself — `Choreographer.postVsyncCallback` is JVM-only, API 33+.
     private external fun nativeSetFrameTimeline(handle: Long, expectedPresentDeltaNanos: Long)
 
-    // Overlay-surface spike (render-model Phase 4, `FRUST_OVERLAY_SPIKE`):
-    // which overlay arrangement [FrustViewHost] builds — 0 none (the spike is
-    // off, the default), 1 a `setZOrderOnTop` overlay, 2 a
-    // `setZOrderMediaOverlay` one (the A/B arm). Process state, no handle.
-    private external fun nativeOverlaySpikeMode(): Int
+    // Overlay surfaces (`FRUST_OVERLAYS`): how [FrustViewHost] builds the
+    // overlay `SurfaceView`s the native differ announces — 0 none (overlays
+    // off, the default), 1 `setZOrderOnTop`, 2 `setZOrderMediaOverlay` (the
+    // A/B arm). Process state, no handle.
+    private external fun nativeOverlayMode(): Int
 
-    // The overlay `SurfaceView`'s surface lifecycle, routed through this
-    // view's own `SurfaceHolder.Callback` (see [attachOverlayHolder]): its
-    // window (physical px) on create/change, and its teardown — the Rust side
-    // drops the overlay surface before releasing the window. No handle: one
-    // overlay per process.
-    private external fun nativeOverlaySurfaceChanged(surface: Surface, width: Int, height: Int)
-    private external fun nativeOverlaySurfaceDestroyed()
+    // One overlay `SurfaceView`'s surface lifecycle, keyed by the differ's
+    // overlay id: its window (physical px) on create/change, and its teardown
+    // — the Rust side drops the overlay's GPU surface before releasing the
+    // window, before returning. No handle: the overlay table is process-wide.
+    private external fun nativeOverlaySurfaceChanged(
+        overlayId: Long,
+        surface: Surface,
+        width: Int,
+        height: Int,
+    )
+    private external fun nativeOverlaySurfaceDestroyed(overlayId: Long)
 
     /** `0` means "no native side yet" — every native call is guarded on this. */
     private var handle: Long = 0
 
     /**
-     * The overlay-surface spike's `SurfaceHolder`, when [FrustViewHost] built
-     * one ([attachOverlayHolder]). Its callbacks land in this view's own
-     * [surfaceCreated]/[surfaceChanged]/[surfaceDestroyed], which tell the two
-     * holders apart and route the overlay's to its own native entries.
-     */
-    private var overlayHolder: SurfaceHolder? = null
-
-    /**
-     * The overlay-surface spike's arrangement (see [nativeOverlaySpikeMode]):
-     * `0` unless `FRUST_OVERLAY_SPIKE` is set. Safe to call any time after
+     * The overlay arrangement (see [nativeOverlayMode]): `0` unless
+     * `FRUST_OVERLAYS` is set. Safe to call any time after
      * [loadNativeLibrary] — it reads process state, not the handle.
      */
-    internal fun overlaySpikeMode(): Int = nativeOverlaySpikeMode()
+    internal fun overlayMode(): Int = nativeOverlayMode()
 
     /**
-     * Route the overlay spike's `SurfaceView` [holder] through this view's
-     * surface callbacks. Called once, by [FrustViewHost], only with the spike
-     * on.
+     * Overlay [overlayId]'s `SurfaceView` delivered [surface] at
+     * [width]x[height] physical px — called by [FrustViewHost]'s per-overlay
+     * `SurfaceHolder.Callback`.
      */
-    internal fun attachOverlayHolder(holder: SurfaceHolder) {
-        overlayHolder = holder
-        holder.addCallback(this)
+    internal fun overlaySurfaceChanged(overlayId: Long, surface: Surface, width: Int, height: Int) {
+        nativeOverlaySurfaceChanged(overlayId, surface, width, height)
+    }
+
+    /**
+     * Overlay [overlayId]'s surface is going away (or the overlay is being
+     * disposed). Synchronous: the native side has dropped the overlay's GPU
+     * surface and released its window when this returns. Idempotent.
+     */
+    internal fun overlaySurfaceDestroyed(overlayId: Long) {
+        nativeOverlaySurfaceDestroyed(overlayId)
     }
 
     /** Whether the Choreographer frame loop should keep re-posting itself. */
@@ -934,11 +938,6 @@ class FrustSurfaceView(
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
-        if (holder === overlayHolder) {
-            val frame = holder.surfaceFrame
-            nativeOverlaySurfaceChanged(holder.surface, frame.width(), frame.height())
-            return
-        }
         setFrameRateHint(holder)
         if (handle == 0L) {
             if (translucentSurface) {
@@ -1007,10 +1006,6 @@ class FrustSurfaceView(
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-        if (holder === overlayHolder) {
-            nativeOverlaySurfaceChanged(holder.surface, width, height)
-            return
-        }
         setFrameRateHint(holder)
         if (handle != 0L) {
             nativeOnSurfaceChanged(handle, holder.surface, width, height, scaleFactor)
@@ -1043,13 +1038,6 @@ class FrustSurfaceView(
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
-        if (holder === overlayHolder) {
-            // Synchronous: the Rust side drops the overlay surface and
-            // releases its window before this returns, as the platform
-            // requires of `surfaceDestroyed`.
-            nativeOverlaySurfaceDestroyed()
-            return
-        }
         // Stop (and forget) any in-flight URI-backed clipboard resolution
         // before anything else here: the render surface going away is one of
         // the points nothing should still land a late paste into.
