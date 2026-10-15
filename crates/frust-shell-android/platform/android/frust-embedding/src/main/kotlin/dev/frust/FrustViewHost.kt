@@ -4,10 +4,12 @@ import android.app.Activity
 import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.graphics.Color
+import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.util.Log
 import android.view.Choreographer
 import android.view.Gravity
+import android.view.SurfaceView
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -85,6 +87,53 @@ class FrustViewHost(
 
     private val translucent: Boolean
         get() = surfaceView.translucentSurface
+
+    /**
+     * The overlay-surface spike's `SurfaceView` (render-model Phase 4,
+     * `FRUST_OVERLAY_SPIKE`), or null — always null with the spike off, the
+     * default, so this host is byte-for-byte its old self.
+     *
+     * A full-size translucent surface added as the root's LAST child, so every
+     * hosted view (inserted next to [surfaceView]) stays below it; frust draws
+     * the commands painted after the first platform view onto it (see
+     * `frust_render::overlay`). Input-transparent: neither focusable nor
+     * clickable, so a touch falls through to whatever is under it exactly as
+     * if it were not there, and hidden from accessibility.
+     *
+     * Z-order is the spike's A/B: `setZOrderOnTop(true)` (the default arm)
+     * puts the surface above the window and so above every hosted `View`;
+     * `setZOrderMediaOverlay(true)` (`FRUST_OVERLAY_SPIKE=media`) puts it above
+     * the main `SurfaceView` but, per the platform docs, still behind the
+     * window — expected to lose to a hosted `View`, which is what the arm
+     * measures.
+     */
+    private val overlaySpike: SurfaceView? = createOverlaySpike(surfaceView.overlaySpikeMode())
+
+    private fun createOverlaySpike(mode: Int): SurfaceView? {
+        if (mode == OVERLAY_SPIKE_OFF) return null
+        val overlay = SurfaceView(activity)
+        overlay.holder.setFormat(PixelFormat.TRANSLUCENT)
+        if (mode == OVERLAY_SPIKE_MEDIA_OVERLAY) {
+            overlay.setZOrderMediaOverlay(true)
+        } else {
+            overlay.setZOrderOnTop(true)
+        }
+        overlay.isFocusable = false
+        overlay.isFocusableInTouchMode = false
+        overlay.isClickable = false
+        overlay.isLongClickable = false
+        overlay.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+        root.addView(
+            overlay,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            ),
+        )
+        surfaceView.attachOverlayHolder(overlay.holder)
+        Log.i(TAG, "frust-overlay-spike: overlay SurfaceView attached (mode=$mode)")
+        return overlay
+    }
 
     /** One live hosted view, its factory, and the reusable per-frame scratch. */
     private class Slot(
@@ -315,6 +364,12 @@ class FrustViewHost(
 
     companion object {
         private const val TAG = "frust"
+
+        /** [FrustSurfaceView.overlaySpikeMode] answers: no overlay (the spike is off). */
+        private const val OVERLAY_SPIKE_OFF = 0
+
+        /** [FrustSurfaceView.overlaySpikeMode] answers: a `setZOrderMediaOverlay` overlay. */
+        private const val OVERLAY_SPIKE_MEDIA_OVERLAY = 2
 
         /** The [dev.frust] package prefix every `viewType` must carry (CODE_STANDARDS LAW). */
         private const val FACTORY_PACKAGE_PREFIX = "dev.frust."

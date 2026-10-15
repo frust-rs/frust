@@ -886,6 +886,9 @@ pub struct EngineRenderer {
     /// The roles the store gave this frame's retained layers, handed to the
     /// scheduler — retained across frames for its allocation alone.
     retained_layers: RetainedLayers,
+    /// The scene [`Self::record_range`] projects a range into, kept for its
+    /// allocation alone; empty until the first range is recorded.
+    range_scene: Scene,
     /// The rolling CPU-phase window `frust-perf enc` lines are emitted from.
     ///
     /// Absent entirely from a build without `perf-trace`, along with the type
@@ -998,6 +1001,7 @@ impl EngineRenderer {
             region_copies: None,
             retained: RetainedPages::for_caps(caps),
             retained_layers: RetainedLayers::new(),
+            range_scene: Scene::new(),
             #[cfg(feature = "perf-trace")]
             encode_trace: EncodeTrace::default(),
         })
@@ -1784,6 +1788,57 @@ impl EngineRenderer {
         });
 
         Ok(())
+    }
+
+    /// [`Self::encode_traced`] over the commands of `scene` in `range` alone,
+    /// cut out by [`project_command_range`] — the overlay spike's way of
+    /// drawing one segment of a frame into a target of its own (render-model
+    /// Phase 4, decision D10).
+    ///
+    /// The range is projected into a scene this renderer keeps for the
+    /// purpose (its allocation reused from call to call), carrying
+    /// `DrawRetained`s only when this renderer retains
+    /// ([`Self::retained_layers`]) — a renderer with retention off refuses a
+    /// frame carrying one. The bracket rule is [`project_command_range`]'s.
+    /// `target`, `base_color` (an overlay passes transparent), `root` and
+    /// `timestamps` mean exactly what they mean to [`Self::encode_traced`].
+    ///
+    /// A range covering the whole scene is still projected (and re-recorded),
+    /// so a caller that draws the whole frame calls [`Self::encode_traced`]
+    /// instead; this method is never on a path that does.
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::encode_traced`]'s, over the projected scene.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "[`Self::encode_traced`]'s argument list plus the range, each \
+                  still supplied by a different owner"
+    )]
+    pub fn record_range(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        scene: &Scene,
+        range: Range<usize>,
+        target: EngineTarget<'_>,
+        base_color: Color,
+        root: Affine,
+        timestamps: FrameTimestamps<'_>,
+    ) -> Result<RangeCut, EngineError> {
+        // Taken out for the call (and always put back): `encode_traced`
+        // borrows the renderer mutably while it reads the scene.
+        let mut projected = std::mem::take(&mut self.range_scene);
+        let options = RangeOptions {
+            keep_draw_retained: self.retained_layers(),
+        };
+        let cut = project_command_range(scene, range, options, &mut projected);
+        let result = self.encode_traced(
+            device, queue, encoder, &projected, target, base_color, root, timestamps,
+        );
+        self.range_scene = projected;
+        result.map(|()| cut)
     }
 
     /// Creates the render-to-atlas pass on first use.
@@ -6480,6 +6535,442 @@ fn resources_bind_group(
             },
         ],
     })
+}
+
+// ---------------------------------------------------------------------------
+// Command ranges (render-model Phase 4 overlay spike)
+// ---------------------------------------------------------------------------
+
+/// How [`project_command_range`] treats the commands it is asked to carry
+/// into a range — the one thing that differs between the renderer a range is
+/// projected for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RangeOptions {
+    /// Keep a `DrawRetained` inside the range. A renderer with a retained
+    /// store behind it keeps them; one without (an overlay renderer built with
+    /// retention off, whose compiler refuses a frame carrying one) has them
+    /// dropped and counted in [`RangeCut::dropped_draw_retained`] instead.
+    pub keep_draw_retained: bool,
+}
+
+/// What cutting a command range out of a scene did — the bracket rule of the
+/// overlay spike, reported so a caller (and a test) can see what a cut cost.
+///
+/// See [`project_command_range`] for the rule itself.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RangeCut {
+    /// The first command index the projection carried, after clamping.
+    pub start: usize,
+    /// One past the last command index the projection carried, after
+    /// clamping.
+    pub end: usize,
+    /// Brackets open at `start` that were reopened ahead of the range.
+    pub reopened: usize,
+    /// Brackets still open at `end` that were closed after the range.
+    pub closed: usize,
+    /// `PushRetained` brackets spanning a cut, painted inline (their
+    /// presentation scale folded into the body's transforms and their alpha
+    /// as a plain layer) rather than recorded as a page.
+    pub demoted_retained: usize,
+    /// `DrawRetained`s dropped under `keep_draw_retained: false`.
+    pub dropped_draw_retained: usize,
+    /// Pops inside the range with no open bracket of their own kind — already
+    /// ignored by every renderer, so dropped rather than carried.
+    pub dropped_pops: usize,
+}
+
+/// The bracket families the display list closes with a pop of their own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BracketKind {
+    Clip,
+    Layer,
+    Retained,
+}
+
+/// The bracket kind `command` opens, if it opens one.
+fn opens(command: &frust_scene::Command) -> Option<BracketKind> {
+    use frust_scene::Command;
+    match command {
+        Command::PushClip { .. }
+        | Command::PushClipRounded { .. }
+        | Command::PushClipPath { .. } => Some(BracketKind::Clip),
+        Command::PushLayer { .. } => Some(BracketKind::Layer),
+        Command::PushRetained { .. } => Some(BracketKind::Retained),
+        _ => None,
+    }
+}
+
+/// The bracket kind `command` closes, if it is a pop.
+fn closes(command: &frust_scene::Command) -> Option<BracketKind> {
+    use frust_scene::Command;
+    match command {
+        Command::PopClip => Some(BracketKind::Clip),
+        Command::PopLayer => Some(BracketKind::Layer),
+        Command::PopRetained => Some(BracketKind::Retained),
+        _ => None,
+    }
+}
+
+/// One bracket the projection holds open, and how it will be closed.
+#[derive(Debug, Clone, Copy)]
+enum OpenBracket {
+    /// A clip or layer carried as recorded; closed with its own pop.
+    Plain(BracketKind),
+    /// A `PushRetained` carried as recorded; closed with `PopRetained`.
+    Retained,
+    /// A `PushRetained` spanning a cut, painted inline. `layer` says whether
+    /// its alpha opened a layer to close; `prefix` is the correction in force
+    /// before it, restored when it closes.
+    Demoted { layer: bool, prefix: Affine },
+    /// A `PushRetained` nested inside a demoted bracket: its presentation is
+    /// ignored (only the outermost bracket's is honoured), so it opened
+    /// nothing and closes nothing.
+    Absorbed,
+}
+
+impl OpenBracket {
+    fn kind(self) -> BracketKind {
+        match self {
+            OpenBracket::Plain(kind) => kind,
+            OpenBracket::Retained | OpenBracket::Demoted { .. } | OpenBracket::Absorbed => {
+                BracketKind::Retained
+            }
+        }
+    }
+}
+
+/// Records `command` into `builder` with `prefix` composed ahead of its own
+/// transform — the identity outside a demoted retained bracket, its
+/// presentation correction inside one.
+///
+/// The builder's own transform stack is left as found: every arm pushes the
+/// command's transform, records, and pops, so the recorded transform is
+/// exactly `prefix * transform`.
+fn replay(builder: &mut SceneBuilder<'_>, prefix: Affine, command: &frust_scene::Command) {
+    use frust_scene::{Command, PathStyle};
+    fn under(
+        builder: &mut SceneBuilder<'_>,
+        transform: Affine,
+        record: impl FnOnce(&mut SceneBuilder<'_>),
+    ) {
+        builder.push_transform(transform);
+        record(builder);
+        builder.pop_transform();
+    }
+    match command {
+        Command::FillRect {
+            rect,
+            brush,
+            transform,
+        } => under(builder, prefix * *transform, |b| {
+            b.fill_rect(*rect, brush.clone())
+        }),
+        Command::RoundedRect {
+            rect,
+            radii,
+            brush,
+            transform,
+        } => under(builder, prefix * *transform, |b| {
+            b.fill_rounded_rect_radii(*rect, *radii, brush.clone());
+        }),
+        Command::Line {
+            p0,
+            p1,
+            width,
+            brush,
+            transform,
+        } => under(builder, prefix * *transform, |b| {
+            b.stroke_line(*p0, *p1, *width, brush.clone());
+        }),
+        // A glyph run composes the builder's transform ahead of its own.
+        Command::GlyphRun(run) => under(builder, prefix, |b| b.draw_glyph_run(run.clone())),
+        Command::PushClip { rect, transform } => {
+            under(builder, prefix * *transform, |b| b.push_clip(*rect));
+        }
+        Command::PushClipRounded {
+            rect,
+            radii,
+            transform,
+        } => under(builder, prefix * *transform, |b| {
+            b.push_clip_rounded_radii(*rect, *radii);
+        }),
+        Command::PushClipPath { path, transform } => {
+            under(builder, prefix * *transform, |b| {
+                b.push_clip_path(path.clone())
+            });
+        }
+        Command::PopClip => builder.pop_clip(),
+        Command::Image {
+            data,
+            dest,
+            transform,
+        } => under(builder, prefix * *transform, |b| b.draw_image(data, *dest)),
+        Command::BlurredRoundedRect {
+            rect,
+            radii,
+            std_dev,
+            color,
+            transform,
+        } => under(builder, prefix * *transform, |b| {
+            b.draw_blurred_rounded_rect_radii(*rect, *radii, *std_dev, *color);
+        }),
+        Command::PushLayer {
+            rect,
+            alpha,
+            transform,
+        } => under(builder, prefix * *transform, |b| {
+            b.push_layer(*rect, *alpha)
+        }),
+        Command::PopLayer => builder.pop_layer(),
+        Command::ClearRect { rect, transform } => {
+            under(builder, prefix * *transform, |b| b.clear_rect(*rect));
+        }
+        Command::Path {
+            path,
+            style,
+            brush,
+            transform,
+        } => under(builder, prefix * *transform, |b| match style {
+            PathStyle::Fill => b.fill_path(path.clone(), brush.clone()),
+            PathStyle::Stroke { width, dash: None } => {
+                b.stroke_path(path.clone(), *width, brush.clone());
+            }
+            PathStyle::Stroke {
+                width,
+                dash: Some(dash),
+            } => b.stroke_path_dashed(path.clone(), *width, *dash, brush.clone()),
+        }),
+        Command::ShaderQuad {
+            program,
+            dest,
+            transform,
+            time,
+        } => under(builder, prefix * *transform, |b| {
+            b.draw_shader(program, *dest, *time);
+        }),
+        Command::PushRetained {
+            key,
+            rect,
+            alpha,
+            scale,
+            transform,
+        } => under(builder, prefix * *transform, |b| {
+            b.push_retained(*key, *rect, *alpha, *scale);
+        }),
+        Command::PopRetained => builder.pop_retained(),
+        Command::DrawRetained {
+            key,
+            rect,
+            transform,
+            alpha,
+            scale,
+        } => under(builder, prefix * *transform, |b| {
+            b.draw_retained(*key, *rect, *alpha, *scale);
+        }),
+        Command::SceneTexture {
+            id,
+            dest,
+            transform,
+        } => {
+            under(builder, prefix * *transform, |b| {
+                b.scene_texture(*id, *dest)
+            });
+        }
+        Command::BackdropBlur {
+            rect,
+            radius,
+            transform,
+        } => under(builder, prefix * *transform, |b| {
+            b.backdrop_blur(*rect, *radius)
+        }),
+    }
+}
+
+/// Writes the commands of `scene` in `range` into `out` (reset first) as a
+/// self-contained display list, and reports what the cut did — the overlay
+/// spike's range projection (render-model Phase 4, decision D10).
+///
+/// `range` is clamped to the scene: an `end` past the last command stops at
+/// it, and a `start` past `end` projects nothing. The projection is a scene,
+/// not a compiled-frame filter: the compiled frame's draws are ordered by
+/// depth and grouped into rounds, while a command index is the one paint-order
+/// position every producer of a cut (a platform view's place in the display
+/// list) can name.
+///
+/// # The bracket rule
+///
+/// A cut can fall inside a bracket. The rule this spike chose:
+///
+/// - **Clips and layers spanning a cut are closed at it and reopened across
+///   it.** Every clip or layer open at `start` is re-recorded, in its original
+///   push order and with its original geometry, ahead of the range; every one
+///   still open at `end` is popped after it, innermost first. Both halves of a
+///   split clip therefore clip to the same shape, and both halves of a split
+///   layer composite at the same alpha — which is exact for a clip, and for a
+///   layer differs from the uncut frame only where content on both sides of
+///   the cut overlaps inside it (each half is composited on its own).
+/// - **A retained bracket spanning a cut is demoted to inline paint on both
+///   sides.** A page recorded from half a body would be a stale page the
+///   ledger then advertises, so neither side records one: the bracket's
+///   presentation scale is folded into every body command's transform (the
+///   same conjugation `crate::compile::layers::retained_correction` composes
+///   ahead of the frame root) and its alpha below one becomes a plain layer —
+///   exactly the lowering `frust_scene` prescribes for a renderer that does
+///   not retain. A retained bracket nested inside a demoted one contributes
+///   nothing, as a nested bracket's presentation never does. A retained
+///   bracket wholly inside the range is carried as recorded.
+/// - **A pop with no open bracket of its kind is dropped** (every renderer
+///   ignores one anyway), and a `DrawRetained` is dropped when
+///   `options.keep_draw_retained` is off.
+///
+/// Pops match the most recently opened bracket of their own kind, which is
+/// the stack discipline of every well-nested display list.
+///
+/// Every carried command is re-recorded through a [`SceneBuilder`] with its
+/// transform composed under the identity (or a demoted bracket's correction),
+/// so geometry and paints are carried verbatim; the cost is one clone of each
+/// carried command's payload, paid only by a caller that projects.
+pub fn project_command_range(
+    scene: &Scene,
+    range: Range<usize>,
+    options: RangeOptions,
+    out: &mut Scene,
+) -> RangeCut {
+    let commands = scene.commands();
+    let len = commands.len();
+    let end = range.end.min(len);
+    let start = range.start.min(end);
+    let mut cut = RangeCut {
+        start,
+        end,
+        ..RangeCut::default()
+    };
+
+    // Pass one, over the whole scene: where each bracket closes, and which
+    // brackets are open at `start` (in push order).
+    let mut closed_at: Vec<Option<usize>> = vec![None; len];
+    let mut stack: Vec<(BracketKind, usize)> = Vec::new();
+    let mut open_at_start: Vec<usize> = Vec::new();
+    for (index, command) in commands.iter().enumerate() {
+        if index == start {
+            open_at_start.extend(stack.iter().map(|&(_, at)| at));
+        }
+        if let Some(kind) = opens(command) {
+            stack.push((kind, index));
+        } else if let Some(kind) = closes(command)
+            && let Some(position) = stack.iter().rposition(|&(open, _)| open == kind)
+        {
+            let (_, at) = stack.remove(position);
+            closed_at[at] = Some(index);
+        }
+    }
+    if start == len {
+        open_at_start.extend(stack.iter().map(|&(_, at)| at));
+    }
+    // A retained bracket spans a cut when it opened before the range, or is
+    // still open where the range ends short of the scene's own end.
+    let spans = |at: usize| at < start || (end < len && closed_at[at].is_none_or(|c| c >= end));
+
+    out.reset();
+    let mut builder = SceneBuilder::new(out);
+    let mut open: Vec<OpenBracket> = Vec::new();
+    let mut prefix = Affine::IDENTITY;
+
+    let push = |at: usize,
+                builder: &mut SceneBuilder<'_>,
+                open: &mut Vec<OpenBracket>,
+                prefix: &mut Affine,
+                cut: &mut RangeCut| {
+        let command = &commands[at];
+        match command {
+            frust_scene::Command::PushRetained {
+                rect,
+                alpha,
+                scale,
+                transform,
+                ..
+            } => {
+                if open
+                    .iter()
+                    .any(|bracket| matches!(bracket, OpenBracket::Demoted { .. }))
+                {
+                    open.push(OpenBracket::Absorbed);
+                } else if spans(at) {
+                    cut.demoted_retained += 1;
+                    let correction =
+                        crate::compile::layers::retained_correction(*rect, *scale, *transform);
+                    let layer = *alpha < 1.0;
+                    if layer {
+                        let corrected = *prefix * correction * *transform;
+                        builder.push_transform(corrected);
+                        builder.push_layer(*rect, *alpha);
+                        builder.pop_transform();
+                    }
+                    open.push(OpenBracket::Demoted {
+                        layer,
+                        prefix: *prefix,
+                    });
+                    *prefix *= correction;
+                } else {
+                    replay(builder, *prefix, command);
+                    open.push(OpenBracket::Retained);
+                }
+            }
+            _ => {
+                if let Some(kind) = opens(command) {
+                    replay(builder, *prefix, command);
+                    open.push(OpenBracket::Plain(kind));
+                }
+            }
+        }
+    };
+    let close =
+        |bracket: OpenBracket, builder: &mut SceneBuilder<'_>, prefix: &mut Affine| match bracket {
+            OpenBracket::Plain(BracketKind::Clip) => builder.pop_clip(),
+            OpenBracket::Plain(BracketKind::Layer) => builder.pop_layer(),
+            OpenBracket::Plain(BracketKind::Retained) | OpenBracket::Retained => {
+                builder.pop_retained();
+            }
+            OpenBracket::Demoted {
+                layer,
+                prefix: before,
+            } => {
+                if layer {
+                    builder.pop_layer();
+                }
+                *prefix = before;
+            }
+            OpenBracket::Absorbed => {}
+        };
+
+    for &at in &open_at_start {
+        cut.reopened += 1;
+        push(at, &mut builder, &mut open, &mut prefix, &mut cut);
+    }
+    for (index, command) in commands.iter().enumerate().take(end).skip(start) {
+        if opens(command).is_some() {
+            push(index, &mut builder, &mut open, &mut prefix, &mut cut);
+        } else if let Some(kind) = closes(command) {
+            match open.iter().rposition(|bracket| bracket.kind() == kind) {
+                Some(position) => {
+                    let bracket = open.remove(position);
+                    close(bracket, &mut builder, &mut prefix);
+                }
+                None => cut.dropped_pops += 1,
+            }
+        } else if matches!(command, frust_scene::Command::DrawRetained { .. })
+            && !options.keep_draw_retained
+        {
+            cut.dropped_draw_retained += 1;
+        } else {
+            replay(&mut builder, prefix, command);
+        }
+    }
+    while let Some(bracket) = open.pop() {
+        cut.closed += 1;
+        close(bracket, &mut builder, &mut prefix);
+    }
+    cut
 }
 
 #[cfg(test)]

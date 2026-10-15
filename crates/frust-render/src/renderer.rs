@@ -210,6 +210,13 @@ impl std::fmt::Debug for DeferredPresent {
 }
 
 impl DeferredPresent {
+    /// Wraps an acquired, submitted, un-presented frame — the overlay spike's
+    /// way of handing its frame out beside the main one
+    /// ([`crate::overlay::OverlaySurface::take_deferred_present`]).
+    pub(crate) fn new(texture: wgpu::SurfaceTexture, queue: wgpu::Queue) -> Self {
+        Self { texture, queue }
+    }
+
     /// Present the deferred frame **on the calling thread**.
     ///
     /// Consumes the handle, so a frame can never be presented twice. With
@@ -306,6 +313,11 @@ pub struct SurfaceRenderer {
     /// comparison. Outlives surface episodes: a recreate at the same scale is
     /// not a scale change (the fresh engine's store is empty anyway).
     device_scale: Option<u64>,
+    /// Whether [`Self::encode`] hands the overlay spike's range to an overlay
+    /// and keeps only the commands before the cut for this surface (see
+    /// [`Self::set_overlay_split`]). Never set unless the spike is on, so off
+    /// it the frame is the scene, copied whole, exactly as before.
+    overlay_split: bool,
 }
 
 /// One retained page the renderer holds resident: the key it was recorded
@@ -483,6 +495,7 @@ impl SurfaceRenderer {
             committed_serial: 0,
             recording_committed: false,
             device_scale: None,
+            overlay_split: false,
         }
     }
 
@@ -759,6 +772,42 @@ impl SurfaceRenderer {
             composite: span(frust_engine::EngineSpan::Composite),
             blit: span(frust_engine::EngineSpan::Blit),
         })
+    }
+
+    /// Arms (or disarms) the overlay spike's split on this surface: while
+    /// armed, [`Self::encode`] keeps only the commands before the scene's
+    /// [`spike_cut`](crate::overlay::spike_cut) for this surface's frame,
+    /// leaving the commands from the cut on to the host's
+    /// [`OverlaySurface`](crate::overlay::OverlaySurface), which draws them
+    /// from the same scene. A scene with no cut is drawn whole.
+    ///
+    /// A host arms it exactly while it has a live overlay to hand the range
+    /// to — armed with none, those commands would be drawn nowhere. Refused
+    /// (a no-op answering `false`) unless the spike is switched on
+    /// ([`crate::overlay::OVERLAY_SPIKE_ENV_VAR`]), so no production path can
+    /// arm it; answers whether the split is now armed.
+    ///
+    /// The surface keeps its single-target shape either way: the cut changes
+    /// which commands this surface's one frame draws, never where it draws.
+    /// The bracket rule a cut obeys is
+    /// [`frust_engine::renderer::project_command_range`]'s.
+    pub fn set_overlay_split(&mut self, armed: bool) -> bool {
+        self.overlay_split = armed && crate::overlay::overlay_spike_enabled();
+        self.overlay_split
+    }
+
+    /// The live surface's persisted driver cache, for an overlay built beside
+    /// it to compile its pipelines through (see
+    /// [`OverlaySurface::new`](crate::overlay::OverlaySurface::new)); `None`
+    /// without a live surface or on an adapter without `PIPELINE_CACHE`.
+    pub(crate) fn shared_pipeline_cache(&self) -> Option<wgpu::PipelineCache> {
+        match &self.state {
+            SurfaceState::Ready(ready) => ready
+                .pipeline_cache
+                .as_ref()
+                .map(|(cache, _)| cache.clone()),
+            SurfaceState::NoSurface | SurfaceState::Lost => None,
+        }
     }
 
     /// The current lifecycle phase.
@@ -1222,7 +1271,29 @@ impl SurfaceRenderer {
         // compiles it itself in `submit`. `clone_from` reuses the buffer's
         // capacity, so a steady-state frame allocates nothing — see the
         // field's measurement note.
-        engine_scene.clone_from(scene);
+        //
+        // The overlay spike's split is the one exception, and only while a
+        // host armed it (`set_overlay_split`, refused with the spike off):
+        // the copy is the commands before the cut alone, cut by the same
+        // projection the overlay draws the rest through.
+        match self
+            .overlay_split
+            .then(|| crate::overlay::spike_cut(scene))
+            .flatten()
+        {
+            Some(cut) => {
+                let TierBackend::Engine { engine, .. } = &ready.backend;
+                frust_engine::renderer::project_command_range(
+                    scene,
+                    0..cut,
+                    frust_engine::renderer::RangeOptions {
+                        keep_draw_retained: engine.retained_layers(),
+                    },
+                    engine_scene,
+                );
+            }
+            None => engine_scene.clone_from(scene),
+        }
         // Carried to `submit`, where the render that consumes it runs.
         *pending_base_color = Some(base_color);
         // The scene's serial, committed by the `submit` that renders it.
