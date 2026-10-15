@@ -282,6 +282,19 @@ pub struct GpuPasses {
 }
 
 impl GpuPasses {
+    /// Whether the `main` span carries a real measurement.
+    ///
+    /// Every submitted frame records its opening surface pass into `main`, and
+    /// a measured timestamp pair is strictly increasing, so a measured `main`
+    /// is never exactly [`Duration::ZERO`]. A zero here therefore means the
+    /// pair was never resolved (a clear-only opening pass that drew nothing has
+    /// no valid pair on Metal), not that the pass took no time. The other
+    /// three spans may legitimately be zero (a frame with no off-screen layer
+    /// does no composite work), so only `main` can be judged this way.
+    pub fn main_is_measured(&self) -> bool {
+        !self.main.is_zero()
+    }
+
     /// The sum of the four spans — the frame's *attributed* GPU pass time.
     ///
     /// Queue and driver gaps between passes belong to no pass and are not
@@ -786,6 +799,11 @@ const RAW_FRAME_PREFIX: &str = "frust-perf raw";
 /// `gpu_main_us`, `gpu_composite_us`, `gpu_blit_us`. Microsecond resolution so
 /// a sub-millisecond pass still shows nonzero.
 ///
+/// **Unmeasured span:** a reading whose `main` span is unmeasured
+/// ([`GpuPasses::main_is_measured`]) is written as `gpu_q=0` with no `gpu_*_us`
+/// columns, never as `gpu_main_us=0`. That is the existing "no GPU reading"
+/// shape every reader already skips, so no field or token is added to the line.
+///
 /// **Format v4 (2026-09-01):** real GPU time per pass ([`GpuPasses`]) is
 /// appended after `skipped`, additively — every v3 field keeps its name,
 /// meaning and position, so a v3 parser reads a v4 line unchanged and a v4
@@ -818,9 +836,9 @@ fn format_raw_frame_line(buf: &mut String, n: u64, passes: &FramePasses) {
         passes.acquire.as_micros(),
         passes.submit.as_micros(),
         u8::from(passes.skipped),
-        u8::from(passes.gpu.is_some()),
+        u8::from(passes.gpu.is_some_and(|gpu| gpu.main_is_measured())),
     );
-    if let Some(gpu) = passes.gpu {
+    if let Some(gpu) = passes.gpu.filter(GpuPasses::main_is_measured) {
         let _ = write!(
             buf,
             " gpu_total_us={} gpu_prepass_us={} gpu_main_us={} gpu_composite_us={} \
@@ -1994,6 +2012,43 @@ mod tests {
         let parsed = parse_raw_frame_line(&buf).expect("line must parse");
         assert!(!parsed.gpu_q);
         assert!(parsed.gpu.is_empty());
+    }
+
+    #[cfg(feature = "perf-trace")]
+    #[test]
+    fn an_unmeasured_main_span_reports_gpu_q_zero_not_a_zero_column() {
+        // A clear-only opening pass resolves no timestamp pair, so `main`
+        // reads zero while other passes of the same frame did measure.
+        let gpu = GpuPasses {
+            prepass: Duration::from_micros(120),
+            main: Duration::ZERO,
+            composite: Duration::ZERO,
+            blit: Duration::from_micros(75),
+        };
+        assert!(!gpu.main_is_measured());
+        let mut buf = String::new();
+        format_raw_frame_line(&mut buf, 5, &passes(4, 1, 1, 2).with_gpu(gpu));
+
+        assert!(buf.contains(" gpu_q=0"), "{buf}");
+        assert!(!buf.contains("gpu_main_us"), "{buf}");
+        assert!(!buf.contains("gpu_total_us"), "{buf}");
+        let parsed = parse_raw_frame_line(&buf).expect("line must parse");
+        assert!(!parsed.gpu_q);
+        assert!(parsed.gpu.is_empty());
+    }
+
+    #[cfg(feature = "perf-trace")]
+    #[test]
+    fn a_nonzero_main_span_with_zero_siblings_stays_a_measurement() {
+        let gpu = GpuPasses {
+            main: Duration::from_nanos(400),
+            ..GpuPasses::default()
+        };
+        assert!(gpu.main_is_measured());
+        let mut buf = String::new();
+        format_raw_frame_line(&mut buf, 6, &passes(4, 1, 1, 2).with_gpu(gpu));
+        assert!(buf.contains(" gpu_q=1"), "{buf}");
+        assert!(buf.contains(" gpu_main_us=0"), "{buf}");
     }
 
     #[cfg(feature = "perf-trace")]
