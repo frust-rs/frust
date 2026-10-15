@@ -12,7 +12,9 @@
 //! the id, a second frame replaces it, an extent change re-creates the
 //! texture, a rebuilt engine gets the current view bound again, every
 //! frame's release callback runs exactly once, and a native frame is refused
-//! (once, released) without an importer and drawn with one:
+//! (once, released) without an importer and drawn with one, its release held
+//! until the imported texture is replaced or unbound and the GPU finished
+//! with it:
 //!
 //! ```text
 //! WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=T400 FRUST_GOLDEN_EXPECT_ADAPTER=T400 \
@@ -719,7 +721,12 @@ fn an_installed_importer_draws_native_frames_and_a_failed_import_keeps_the_last(
     queue.push(solid(FRAME, FRAME, BLUE).on_release(releases.callback(2)));
     let drawn = harness.frame(&scene);
     assert_dest_is(&drawn, BLUE, "a CPU frame replaces an imported one");
-    assert_eq!(releases.counts(), vec![1, 1, 1]);
+    let _ = harness.device.poll(wgpu::PollType::wait_indefinitely());
+    assert_eq!(
+        releases.counts(),
+        vec![1, 1, 1],
+        "the retired native frame's release ran once its fence fired"
+    );
 
     let removed = clear_native_importer(NativeHandleKind::AHardwareBuffer);
     assert!(removed.is_some_and(|removed| Arc::ptr_eq(
@@ -728,4 +735,136 @@ fn an_installed_importer_draws_native_frames_and_a_failed_import_keeps_the_last(
     )));
     drop(registration);
     settle(&mut harness);
+}
+
+/// Polls the device until `done` holds, up to a bounded number of waits.
+fn poll_until(harness: &Harness, done: impl Fn() -> bool) {
+    for _ in 0..16 {
+        if done() {
+            return;
+        }
+        let _ = harness.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+}
+
+fn install_fake_importer() -> Arc<FakeImporter> {
+    let importer = Arc::new(FakeImporter {
+        calls: AtomicUsize::new(0),
+    });
+    let _ = set_native_importer(
+        NativeHandleKind::AHardwareBuffer,
+        Arc::clone(&importer) as Arc<dyn NativeImporter>,
+    );
+    importer
+}
+
+#[test]
+#[ignore = "requires a GPU; run with `cargo test -p frust-render --test texture_bus -- --ignored --test-threads=1`"]
+fn a_native_frames_release_waits_for_its_texture_to_be_replaced_and_fenced() {
+    let _serial = serial();
+    let _importer = install_fake_importer();
+    let mut harness = Harness::new();
+    let queue = Queue::default();
+    let releases = Releases::default();
+    let registration = register_texture_source(queue.source());
+    let scene = scene_drawing(registration.scene_texture_id(), DEST);
+    let mut red = FakeBuffer { rgba: RED };
+    let mut green = FakeBuffer { rgba: GREEN };
+
+    queue.push(native(Some(&mut red)).on_release(releases.callback(0)));
+    let drawn = harness.frame(&scene);
+    assert_dest_is(&drawn, RED, "the imported frame is drawn");
+    let _ = harness.device.poll(wgpu::PollType::wait_indefinitely());
+    assert_eq!(
+        releases.counts(),
+        vec![0],
+        "the frame is still the one shown, so its buffer is not released"
+    );
+    let _ = harness.frame(&scene);
+    assert_eq!(releases.counts(), vec![0], "still shown on an idle frame");
+
+    queue.push(native(Some(&mut green)).on_release(releases.callback(1)));
+    let drawn = harness.frame(&scene);
+    assert_dest_is(&drawn, GREEN, "the newer frame replaces it");
+    poll_until(&harness, || releases.counts()[0] == 1);
+    assert_eq!(
+        releases.counts(),
+        vec![1, 0],
+        "the replaced frame is released after its fence; the shown one is not"
+    );
+
+    drop(registration);
+    settle(&mut harness);
+    poll_until(&harness, || releases.counts()[1] == 1);
+    assert_eq!(
+        releases.counts(),
+        vec![1, 1],
+        "every release ran exactly once"
+    );
+    let _ = clear_native_importer(NativeHandleKind::AHardwareBuffer);
+}
+
+#[test]
+#[ignore = "requires a GPU; run with `cargo test -p frust-render --test texture_bus -- --ignored --test-threads=1`"]
+fn dropping_a_registration_releases_its_shown_native_frame_only_after_the_fence() {
+    let _serial = serial();
+    let _importer = install_fake_importer();
+    let mut harness = Harness::new();
+    let queue = Queue::default();
+    let releases = Releases::default();
+    let registration = register_texture_source(queue.source());
+    let scene = scene_drawing(registration.scene_texture_id(), DEST);
+    let mut red = FakeBuffer { rgba: RED };
+
+    queue.push(native(Some(&mut red)).on_release(releases.callback(0)));
+    let _ = harness.frame(&scene);
+    assert_eq!(releases.counts(), vec![0]);
+
+    drop(registration);
+    assert_eq!(
+        releases.counts(),
+        vec![0],
+        "the drop alone does not release: the fence has not been polled"
+    );
+    poll_until(&harness, || releases.counts()[0] == 1);
+    assert_eq!(releases.counts(), vec![1], "released once the fences fired");
+    settle(&mut harness);
+    let _ = harness.device.poll(wgpu::PollType::wait_indefinitely());
+    assert_eq!(releases.counts(), vec![1]);
+    let _ = clear_native_importer(NativeHandleKind::AHardwareBuffer);
+}
+
+#[test]
+#[ignore = "requires a GPU; run with `cargo test -p frust-render --test texture_bus -- --ignored --test-threads=1`"]
+fn a_refused_native_frame_is_released_at_once_and_the_retire_backlog_is_bounded() {
+    let _serial = serial();
+    let _ = clear_native_importer(NativeHandleKind::AHardwareBuffer);
+    let mut harness = Harness::new();
+    let queue = Queue::default();
+    let releases = Releases::default();
+    let registration = register_texture_source(queue.source());
+    let scene = scene_drawing(registration.scene_texture_id(), DEST);
+    let mut red = FakeBuffer { rgba: RED };
+
+    // No importer: nothing sampled it, so it is released before record returns.
+    queue.push(native(Some(&mut red)).on_release(releases.callback(0)));
+    let _ = harness.frame(&scene);
+    assert_eq!(releases.counts(), vec![1], "released with no fence wait");
+
+    // A long run of native frames never leaves more than the bound pending,
+    // and every frame is released exactly once, imported or refused.
+    let _importer = install_fake_importer();
+    for index in 1..=24 {
+        queue.push(native(Some(&mut red)).on_release(releases.callback(index)));
+        let _ = harness.frame(&scene);
+    }
+    drop(registration);
+    settle(&mut harness);
+    poll_until(&harness, || releases.counts().iter().all(|&n| n == 1));
+    assert!(
+        releases.counts().iter().all(|&n| n == 1),
+        "every frame released exactly once: {:?}",
+        releases.counts()
+    );
+    let _ = clear_native_importer(NativeHandleKind::AHardwareBuffer);
 }

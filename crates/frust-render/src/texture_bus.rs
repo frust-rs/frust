@@ -19,11 +19,41 @@
 //!   with none installed it is refused, warned about once per registration
 //!   and released.
 //!
-//! Every frame's [`SourceFrame::release`] callback runs exactly once, as soon
-//! as the bus is done with the payload: after the upload is enqueued, after
-//! the importer returned, or right away when the frame is refused. An
-//! importer that needs the platform buffer alive for longer than its own call
-//! keeps its own reference (in the imported texture's lifetime, typically).
+//! Every frame's [`SourceFrame::release`] callback runs exactly once, and *when*
+//! depends on what the bus did with the payload:
+//!
+//! - a CPU frame — right after the upload is enqueued (the queue copies the
+//!   pixels into staging synchronously, so nothing reads the payload again);
+//! - a refused frame (malformed, no importer, import error, or the retire
+//!   backlog full) — right away, since nothing ever sampled it;
+//! - an imported native frame — not when the importer returns. The release is
+//!   the producer's signal that it may *reuse* the platform buffer (a camera
+//!   or decoder ring recycles on it), and the GPU samples the imported
+//!   texture until the frame is replaced and the submission that last drew it
+//!   has finished. So the release is held until both hold: the imported
+//!   texture was **retired** (a newer frame replaced it, or the registration
+//!   was dropped / the device changed) and a `Queue::on_submitted_work_done`
+//!   fence taken at that moment has fired. It runs on whichever thread polls
+//!   the device, and the imported texture's view is dropped just before it.
+//!
+//! An importer that needs the platform buffer alive for longer than its own
+//! call keeps its own reference (in the imported texture's lifetime,
+//! typically); the bus never releases that one.
+//!
+//! # Bounded retire backlog
+//!
+//! At most [`MAX_RETIRING`] (4) retired native textures per registration wait
+//! on their fence at once, so a producer with a 3-deep buffer ring never sees
+//! more than its ring in flight. When a native frame arrives with the backlog
+//! full (after a non-blocking `Device::poll` gave the fences a chance), the
+//! *newest* frame is dropped: its release runs at once, nothing was sampled,
+//! and the last good frame stays shown.
+//!
+//! A registration dropped while its imported texture is still shown retires
+//! it through the same fence, one fence further out: the fence is chained
+//! (the second is taken when the first fires), so a drop that lands between a
+//! frame's record and its submit still waits for that submit. The producer's
+//! buffer reuse is delayed by up to one submit as a result.
 //!
 //! The returned [`TextureRegistration`] reports the id to draw by
 //! ([`TextureRegistration::scene_texture_id`], what a widget's
@@ -73,9 +103,10 @@
 //! view bound again on its first frame; a *device* change drops what was
 //! shown until the source yields its next frame.
 
+use std::any::Any;
 use std::ffi::c_void;
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use frust_gpu::SceneTextureId;
@@ -83,6 +114,10 @@ use frust_gpu::SceneTextureId;
 use crate::external_pass::{
     ExternalFrame, ExternalPass, register_texture_source_pass, unregister_external_pass,
 };
+
+/// How many retired native textures one registration lets wait on their fence
+/// at once (see the module docs).
+pub const MAX_RETIRING: usize = 4;
 
 /// The ordinal behind each registration's texture-source id.
 static NEXT_SOURCE: AtomicU64 = AtomicU64::new(1);
@@ -157,7 +192,11 @@ pub struct SourceFrame {
     pub format: SourceFormat,
     /// The pixels, or the platform buffer holding them.
     pub payload: SourcePayload,
-    /// Run exactly once when the bus is done with the frame.
+    /// Run exactly once when the bus is done with the frame: right after the
+    /// upload for a CPU frame, at once for a refused one, and for an imported
+    /// native frame only after its texture was replaced or unbound and the GPU
+    /// work that sampled it finished — the producer may reuse the platform
+    /// buffer from this point on (see the module docs).
     pub release: Option<ReleaseCallback>,
 }
 
@@ -250,10 +289,11 @@ impl std::error::Error for ImportError {}
 /// over the buffer and returns a view of it. `Send + Sync` because the table
 /// it is installed in is process-wide.
 pub trait NativeImporter: Send + Sync {
-    /// Imports `handle` on `device`. The bus runs the frame's release callback
-    /// as soon as this returns, so an importer whose texture aliases the
-    /// platform buffer keeps its own reference to it for the texture's
-    /// lifetime.
+    /// Imports `handle` on `device`. The bus holds the frame's release
+    /// callback until the imported texture is retired and the GPU finished
+    /// with it, but the platform buffer is still the importer's to keep alive:
+    /// an importer whose texture aliases it keeps its own reference for the
+    /// texture's lifetime.
     ///
     /// # Errors
     ///
@@ -364,6 +404,7 @@ pub fn register_texture_source(
         state: Mutex::new(PassState {
             source: Box::new(source),
             shown: None,
+            retiring: Arc::new(AtomicUsize::new(0)),
             warned: Warned::default(),
         }),
         status: Arc::clone(&status),
@@ -408,6 +449,8 @@ struct PassState {
     source: FrameSource,
     /// What is shown now, kept so it can be bound again into a rebuilt engine.
     shown: Option<Shown>,
+    /// Retired native textures still waiting on their fence.
+    retiring: Arc<AtomicUsize>,
     warned: Warned,
 }
 
@@ -422,6 +465,110 @@ struct Shown {
     /// The bus's own upload texture behind `view`, reused by the next CPU
     /// frame of the same extent; `None` for an imported view.
     upload: Option<wgpu::Texture>,
+    /// The imported frame's release, held until the view is retired and
+    /// fenced; `None` for a bus upload.
+    native: Option<NativeHold>,
+}
+
+/// Completion fence: runs the callback once the work submitted so far finished.
+type Fence = Arc<dyn Fn(Box<dyn FnOnce() + Send>) + Send + Sync>;
+
+fn queue_fence(queue: &wgpu::Queue) -> Fence {
+    let queue = queue.clone();
+    Arc::new(move |callback| queue.on_submitted_work_done(callback))
+}
+
+/// A retired native texture on its way out: dropping it (when its fence fires,
+/// or unrun because the device is gone) frees the view and runs the release.
+struct Retiring {
+    keep: Option<Box<dyn Any + Send>>,
+    release: Option<ReleaseCallback>,
+    pending: Arc<AtomicUsize>,
+}
+
+impl Drop for Retiring {
+    fn drop(&mut self) {
+        drop(self.keep.take());
+        self.pending.fetch_sub(1, Ordering::AcqRel);
+        if let Some(release) = self.release.take() {
+            release();
+        }
+    }
+}
+
+/// Starts retiring `keep` and `release` behind `hops` successive fences; the
+/// second and later fences are taken from inside the previous one's callback.
+fn retire(
+    keep: Box<dyn Any + Send>,
+    release: Option<ReleaseCallback>,
+    pending: &Arc<AtomicUsize>,
+    fence: &Fence,
+    hops: u32,
+) {
+    pending.fetch_add(1, Ordering::AcqRel);
+    let token = Retiring {
+        keep: Some(keep),
+        release,
+        pending: Arc::clone(pending),
+    };
+    defer(token, Arc::clone(fence), hops);
+}
+
+fn defer(token: Retiring, fence: Fence, hops: u32) {
+    let next = Arc::clone(&fence);
+    fence(Box::new(move || {
+        if hops > 1 {
+            defer(token, next, hops - 1);
+        } else {
+            drop(token);
+        }
+    }));
+}
+
+/// What an imported view keeps until it is retired.
+struct NativeHold {
+    view: Option<wgpu::TextureView>,
+    release: Option<ReleaseCallback>,
+    queue: wgpu::Queue,
+    pending: Arc<AtomicUsize>,
+}
+
+impl NativeHold {
+    /// Retires on replacement: every submission that sampled the view
+    /// happened before now, so one fence covers them.
+    fn retire_replaced(mut self) {
+        self.retire_with(1);
+    }
+
+    fn retire_with(&mut self, hops: u32) {
+        if let Some(view) = self.view.take() {
+            retire(
+                Box::new(view),
+                self.release.take(),
+                &self.pending,
+                &queue_fence(&self.queue),
+                hops,
+            );
+        }
+    }
+}
+
+impl Drop for NativeHold {
+    /// Unbind (registration dropped, device change): the pass may be dropped
+    /// mid-drain, ahead of the submit that samples the view, so chain two
+    /// fences.
+    fn drop(&mut self) {
+        self.retire_with(2);
+    }
+}
+
+/// Installs `new` as the shown view, retiring a native one it replaces.
+fn replace_shown(state: &mut PassState, new: Shown) {
+    if let Some(mut old) = state.shown.replace(new)
+        && let Some(hold) = old.native.take()
+    {
+        hold.retire_replaced();
+    }
 }
 
 /// Which refusals a registration has already warned about; later ones of the
@@ -431,6 +578,7 @@ struct Warned {
     malformed: bool,
     missing_importer: bool,
     import_failed: bool,
+    backlog: bool,
 }
 
 /// Logs a refusal at `warn!` the first time `flag` sees it, `debug!` after.
@@ -470,14 +618,16 @@ impl ExternalPass for SourcePass {
                 payload,
                 release,
             } = source_frame;
-            rebind = match payload {
+            match payload {
                 SourcePayload::Cpu(pixels) => {
-                    upload(state, frame, (width, height), format, &pixels)
+                    rebind = upload(state, frame, (width, height), format, &pixels);
+                    if let Some(release) = release {
+                        release();
+                    }
                 }
-                SourcePayload::Native(handle) => import(state, frame, &handle),
-            };
-            if let Some(release) = release {
-                release();
+                SourcePayload::Native(handle) => {
+                    rebind = import(state, frame, &handle, release);
+                }
             }
         }
 
@@ -576,22 +726,39 @@ fn upload(
 
     if changed {
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        state.shown = Some(Shown {
-            device: frame.device().clone(),
-            view,
-            size,
-            upload: Some(texture),
-        });
+        replace_shown(
+            state,
+            Shown {
+                device: frame.device().clone(),
+                view,
+                size,
+                upload: Some(texture),
+                native: None,
+            },
+        );
     }
     changed
 }
 
 /// Imports one native frame through the importer installed for its kind,
 /// answering whether the shown view changed. Refused (and warned about once)
-/// when no importer is installed or the import fails; the last good frame
-/// stays shown either way.
-fn import(state: &mut PassState, frame: &mut ExternalFrame<'_>, handle: &NativeHandle) -> bool {
+/// when no importer is installed, the retire backlog is full or the import
+/// fails; the last good frame stays shown and the refused frame is released
+/// at once. An imported frame's `release` is held until its view is retired
+/// and fenced (see the module docs).
+fn import(
+    state: &mut PassState,
+    frame: &mut ExternalFrame<'_>,
+    handle: &NativeHandle,
+    release: Option<ReleaseCallback>,
+) -> bool {
     let id = frame.id().get();
+    let refuse = |release: Option<ReleaseCallback>| {
+        if let Some(release) = release {
+            release();
+        }
+        false
+    };
     let Some(importer) = native_importer(handle.kind) else {
         report(
             &mut state.warned.missing_importer,
@@ -601,16 +768,41 @@ fn import(state: &mut PassState, frame: &mut ExternalFrame<'_>, handle: &NativeH
                 handle.kind
             ),
         );
-        return false;
+        return refuse(release);
     };
+    if state.retiring.load(Ordering::Acquire) >= MAX_RETIRING {
+        // Give completed fences a chance to run before refusing.
+        let _ = frame.device().poll(wgpu::PollType::Poll);
+        if state.retiring.load(Ordering::Acquire) >= MAX_RETIRING {
+            report(
+                &mut state.warned.backlog,
+                id,
+                format_args!(
+                    "refused a {:?} frame: {MAX_RETIRING} retired frames still wait on the GPU",
+                    handle.kind
+                ),
+            );
+            return refuse(release);
+        }
+    }
     match importer.import(handle, frame.device(), frame.queue()) {
         Ok(imported) => {
-            state.shown = Some(Shown {
-                device: frame.device().clone(),
-                view: imported.view,
-                size: imported.size,
-                upload: None,
-            });
+            let hold = NativeHold {
+                view: Some(imported.view.clone()),
+                release,
+                queue: frame.queue().clone(),
+                pending: Arc::clone(&state.retiring),
+            };
+            replace_shown(
+                state,
+                Shown {
+                    device: frame.device().clone(),
+                    view: imported.view,
+                    size: imported.size,
+                    upload: None,
+                    native: Some(hold),
+                },
+            );
             true
         }
         Err(error) => {
@@ -619,7 +811,7 @@ fn import(state: &mut PassState, frame: &mut ExternalFrame<'_>, handle: &NativeH
                 id,
                 format_args!("refused a {:?} frame: {error}", handle.kind),
             );
-            false
+            refuse(release)
         }
     }
 }
@@ -662,5 +854,89 @@ mod tests {
                 .to_string()
                 .contains("bad format")
         );
+    }
+
+    /// A fence that parks its callbacks until the test fires them.
+    type Parked = Vec<Box<dyn FnOnce() + Send>>;
+
+    #[derive(Clone, Default)]
+    struct FakeFence(Arc<Mutex<Parked>>);
+
+    impl FakeFence {
+        fn fence(&self) -> Fence {
+            let parked = Arc::clone(&self.0);
+            Arc::new(move |callback| parked.lock().unwrap().push(callback))
+        }
+
+        /// Fires every callback parked so far (not ones they park in turn).
+        fn fire(&self) {
+            let batch = std::mem::take(&mut *self.0.lock().unwrap());
+            for callback in batch {
+                callback();
+            }
+        }
+    }
+
+    fn retire_counting(
+        fake: &FakeFence,
+        pending: &Arc<AtomicUsize>,
+        released: &Arc<AtomicU64>,
+        hops: u32,
+    ) {
+        let released = Arc::clone(released);
+        retire(
+            Box::new(()),
+            Some(Box::new(move || {
+                released.fetch_add(1, Ordering::SeqCst);
+            })),
+            pending,
+            &fake.fence(),
+            hops,
+        );
+    }
+
+    #[test]
+    fn a_retired_release_waits_for_its_fence_and_runs_once() {
+        let fake = FakeFence::default();
+        let pending = Arc::new(AtomicUsize::new(0));
+        let released = Arc::new(AtomicU64::new(0));
+        retire_counting(&fake, &pending, &released, 1);
+        assert_eq!(pending.load(Ordering::SeqCst), 1);
+        assert_eq!(released.load(Ordering::SeqCst), 0);
+        fake.fire();
+        assert_eq!(released.load(Ordering::SeqCst), 1);
+        assert_eq!(pending.load(Ordering::SeqCst), 0);
+        fake.fire();
+        assert_eq!(released.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_chained_retire_needs_a_fence_per_hop() {
+        let fake = FakeFence::default();
+        let pending = Arc::new(AtomicUsize::new(0));
+        let released = Arc::new(AtomicU64::new(0));
+        retire_counting(&fake, &pending, &released, 2);
+        fake.fire();
+        assert_eq!(
+            released.load(Ordering::SeqCst),
+            0,
+            "one fence is not enough"
+        );
+        assert_eq!(pending.load(Ordering::SeqCst), 1);
+        fake.fire();
+        assert_eq!(released.load(Ordering::SeqCst), 1);
+        assert_eq!(pending.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_fence_dropped_unrun_still_releases() {
+        let fake = FakeFence::default();
+        let pending = Arc::new(AtomicUsize::new(0));
+        let released = Arc::new(AtomicU64::new(0));
+        retire_counting(&fake, &pending, &released, 1);
+        // The parked callbacks are dropped without ever running.
+        fake.0.lock().unwrap().clear();
+        assert_eq!(released.load(Ordering::SeqCst), 1);
+        assert_eq!(pending.load(Ordering::SeqCst), 0);
     }
 }
