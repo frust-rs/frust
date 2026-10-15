@@ -34,7 +34,12 @@
 //! path would be, painted by the run's own brush (see [`crate::text`]).
 //! Shader quads are recognised
 //! and skipped — the engine grows them in a later pass, and skipping is the
-//! conservative behaviour (a frame draws less, never wrong).
+//! conservative behaviour (a frame draws less, never wrong). A backdrop blur
+//! is a layer of its own holding one draw — its rectangle's coverage under
+//! whatever clip is open, painted by nothing the compiler resolves — listed in
+//! [`CompiledFrame::backdrops`] for the scheduler and the renderer to cut the
+//! frame at and to paint from the blurred page (see
+//! [`crate::filters`]' *The backdrop blur*).
 
 pub mod blur_rrect;
 
@@ -98,6 +103,7 @@ use crate::compile::paint::{LutRequest, encode_brush, encode_image_brush, encode
 use crate::compile::parallel::{Claim, Geometry, Merge, Pool};
 use crate::config;
 use crate::error::EngineError;
+use crate::filters::{Backdrop, MAX_BACKDROPS_PER_FRAME, backdrop_region, backdrop_sigma};
 use crate::text::{
     AtlasPolicy, FontFacts, GlyphQuadScratch, GlyphQuadTargets, GlyphRunTargets, RunKey, RunRoute,
     context_paint, glyph_atlas_policy, lower_glyph_run,
@@ -498,6 +504,13 @@ pub struct CompiledFrame {
     /// retained-page store (`crate::cache::retained`) resolves every one to a
     /// page, a composite or the inline lowering before the frame is scheduled.
     pub retained: Vec<RetainedBracket>,
+    /// The frame's backdrop blurs, in recording order — and so in ascending
+    /// [`Backdrop::depth`] — one per `Command::BackdropBlur` whose rectangle
+    /// produced coverage (see [`crate::filters`]' *The backdrop blur*).
+    ///
+    /// Empty on every frame that records none, and then nothing downstream
+    /// plans, cuts or draws anything differently.
+    pub backdrops: Vec<Backdrop>,
     /// What compiling this frame cost, phase by phase — all zero without
     /// `perf-trace` (see [`CompileSpans`]).
     ///
@@ -1008,7 +1021,11 @@ impl SceneCompiler {
 
         // The whole scene is refused up front rather than mid-walk, so a
         // rejected frame never leaves half its draws recorded.
+        let mut backdrops = 0_usize;
         for command in scene.commands() {
+            if matches!(command, Command::BackdropBlur { .. }) {
+                backdrops = backdrops.saturating_add(1);
+            }
             if let Some(transform) = command_transform(command) {
                 check_finite(root * transform)?;
             }
@@ -1024,6 +1041,15 @@ impl SceneCompiler {
                 return Err(EngineError::RetainedKeyMissing { key: *key });
             }
             check_geometry(command)?;
+        }
+        // Counted over the commands the scene records, not over the ones that
+        // end up drawing: the bound is a statement about the display list a
+        // widget tree produced, refused whole before a strip is generated.
+        if backdrops > MAX_BACKDROPS_PER_FRAME {
+            return Err(EngineError::TooManyBackdrops {
+                recorded: backdrops,
+                max: MAX_BACKDROPS_PER_FRAME,
+            });
         }
 
         let validate = clock.lap();
@@ -1100,6 +1126,7 @@ impl SceneCompiler {
             parallel_draws: 0,
             glyph_clears,
             retained: Vec::new(),
+            backdrops: Vec::new(),
             compile_spans: CompileSpans::default(),
         };
         let mut depth = DepthCounter::new();
@@ -1489,6 +1516,71 @@ impl SceneCompiler {
                 self.mark_retained_body_unretainable(frame);
                 self.draw_external_texture(*id, *dest, combined * *transform, frame, depth);
             }
+            Command::BackdropBlur {
+                rect,
+                radius,
+                transform,
+            } => {
+                // A page is rasterized offscreen, where there is no frame
+                // beneath the body to sample, so a body blurring its backdrop
+                // is drawn inline every frame — on exactly a punch's terms.
+                self.mark_retained_body_unretainable(frame);
+                self.record_backdrop(frame, depth, *rect, *radius, combined * *transform);
+            }
+        }
+    }
+
+    /// Record a `Command::BackdropBlur`: a layer of its own holding the
+    /// rectangle's coverage, listed in [`CompiledFrame::backdrops`].
+    ///
+    /// The layer is what places the backdrop at its painter-order position in
+    /// the recording — the node the scheduler cuts the frame's surface round
+    /// at — and it opens no clip and composites at full opacity, so a
+    /// scheduler that served it as an ordinary layer would inline it. Its one
+    /// draw is the rectangle generated under the clip stack exactly like a
+    /// fill's, so a scissor trims it and a coverage mask (a rounded or path
+    /// clip) masks it; it is painted transparent, because what it really
+    /// paints — the blurred page — is the renderer's to bind once the page
+    /// exists. A rectangle producing no coverage records the empty layer and
+    /// no backdrop, which then costs nothing anywhere.
+    fn record_backdrop(
+        &mut self,
+        frame: &mut CompiledFrame,
+        depth: &mut DepthCounter,
+        rect: Rect,
+        radius: f64,
+        transform: Affine,
+    ) {
+        let Some(sigma) = backdrop_sigma(radius, transform) else {
+            return;
+        };
+        let (width, height) = self.frame_extent;
+        let Some(region) =
+            backdrop_region(transform.transform_rect_bbox(rect), sigma, (width, height))
+        else {
+            return;
+        };
+
+        let layer = u32::try_from(frame.recorder.layers.len()).unwrap_or(u32::MAX);
+        frame.recorder.push_layer(layers::layer_props(1.0), None);
+        let transparent = Brush::Solid(Color::TRANSPARENT);
+        let recorded = self.record(
+            frame,
+            depth,
+            PaintSource::Brush(&transparent),
+            transform,
+            Geometry::rect(rect, transform),
+            None,
+        );
+        frame.recorder.pop_layer();
+
+        if recorded && let Some(draw) = frame.draws().last() {
+            frame.backdrops.push(Backdrop {
+                layer,
+                depth: draw.depth,
+                region,
+                sigma,
+            });
         }
     }
 
@@ -2400,7 +2492,8 @@ fn command_transform(command: &Command) -> Option<Affine> {
         | Command::ShaderQuad { transform, .. }
         | Command::SceneTexture { transform, .. }
         | Command::PushRetained { transform, .. }
-        | Command::DrawRetained { transform, .. } => Some(*transform),
+        | Command::DrawRetained { transform, .. }
+        | Command::BackdropBlur { transform, .. } => Some(*transform),
         Command::GlyphRun(run) => Some(run.transform),
         Command::PopClip | Command::PopLayer | Command::PopRetained => None,
     }
@@ -2559,6 +2652,11 @@ fn check_geometry(command: &Command) -> Result<(), EngineError> {
             ..
         } => rect.is_finite() && radii_are_finite(*radii) && std_dev.is_finite(),
         Command::GlyphRun(run) => glyph_run_is_finite(run),
+        // Its rectangle is the coverage the blurred backdrop is drawn through
+        // and the region the blur reads is grown from it, and its radius is
+        // the σ the planner's decimation loop runs over — a non-finite one of
+        // either reaches the flattener or that loop as it was recorded.
+        Command::BackdropBlur { rect, radius, .. } => rect.is_finite() && radius.is_finite(),
         // Carrying no geometry of their own — see above.
         Command::PopClip | Command::PopLayer | Command::PopRetained => true,
     };

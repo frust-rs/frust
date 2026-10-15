@@ -403,6 +403,18 @@ pub trait PaintScene {
     fn current_transform(&self) -> Option<Affine> {
         None
     }
+
+    /// Blur whatever is already painted beneath the rectangle at
+    /// `origin`/`size` — a frosted-glass backdrop — with a Gaussian of
+    /// standard deviation `radius` (see
+    /// [`frust_scene::Command::BackdropBlur`]).
+    ///
+    /// Everything painted before this call is the backdrop; whatever the
+    /// widget paints after it lands on top of the blurred region. A clip open
+    /// around the call masks the blurred region like any other paint.
+    /// Defaulted to a no-op so recorder scenes stay valid; the
+    /// [`SceneBuilder`] implementation records the real command.
+    fn backdrop_blur(&mut self, _origin: Point, _size: Size, _radius: f64) {}
 }
 
 /// A [`PaintScene`] sink that accepts every paint command and records
@@ -578,6 +590,10 @@ impl PaintScene for SceneBuilder<'_> {
 
     fn current_transform(&self) -> Option<Affine> {
         Some(SceneBuilder::current_transform(self))
+    }
+
+    fn backdrop_blur(&mut self, origin: Point, size: Size, radius: f64) {
+        SceneBuilder::backdrop_blur(self, rect_at(origin, size), radius);
     }
 }
 
@@ -6012,6 +6028,36 @@ mod tests {
             Some(Affine::scale(2.0) * Affine::translate((3.0, 4.0))),
             "every open transform, composed"
         );
+    }
+
+    #[test]
+    fn backdrop_blur_is_a_no_op_by_default_and_recorded_by_the_scene_builder() {
+        // The default body: a recorder scene that never heard of a backdrop
+        // takes the call and records nothing.
+        let mut recorder = MinimalSnapshotRecorder::default();
+        recorder.backdrop_blur(Point::new(1.0, 2.0), Size::new(3.0, 4.0), 5.0);
+
+        let mut scene = frust_scene::Scene::new();
+        {
+            let mut builder = frust_scene::SceneBuilder::new(&mut scene);
+            let paint: &mut dyn PaintScene = &mut builder;
+            paint.push_transform(Affine::translate((10.0, 20.0)));
+            paint.backdrop_blur(Point::new(1.0, 2.0), Size::new(3.0, 4.0), 5.0);
+        }
+        match scene.commands() {
+            [
+                frust_scene::Command::BackdropBlur {
+                    rect,
+                    radius,
+                    transform,
+                },
+            ] => {
+                assert_eq!(*rect, Rect::new(1.0, 2.0, 4.0, 6.0));
+                assert_eq!(*radius, 5.0);
+                assert_eq!(*transform, Affine::translate((10.0, 20.0)));
+            }
+            other => panic!("expected one BackdropBlur, got {other:?}"),
+        }
     }
 
     #[test]

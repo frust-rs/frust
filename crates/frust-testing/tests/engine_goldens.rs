@@ -32,8 +32,9 @@
 //! The engine compiles axis-aligned rectangles, rounded rectangles, lines,
 //! arbitrary filled/stroked paths, rect, rounded and path clips, opacity layers,
 //! snapshot brackets, `ClearRect` hole punches, atlas-resident images,
-//! blurred rounded rects, and glyph runs (incl. COLR colour glyphs and the
-//! atlas-vs-outline route), and resolves solid and gradient paints. One
+//! blurred rounded rects, backdrop blurs, and glyph runs (incl. COLR colour
+//! glyphs and the atlas-vs-outline route), and resolves solid and gradient
+//! paints. One
 //! command still draws nothing on these arms — [`Command::ShaderQuad`], whose
 //! pixels come from a fragment-shader pre-pass neither oracle drives — so a
 //! case that draws it would compare an engine frame legitimately missing the
@@ -103,6 +104,9 @@ const PHASE_CASES: &[&str] = &[
     "unit-clip-balance",
     "unit-image",
     "unit-blur-rrect",
+    // A backdrop blur: a region copy of the frame's own target, a blur's
+    // filter passes over it, and the rectangle drawn from the blurred page.
+    "unit-backdrop-blur",
     "unit-layer-alpha",
     "unit-layer-balance",
     "unit-layer-sibling-fan",

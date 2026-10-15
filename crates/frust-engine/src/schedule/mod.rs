@@ -218,6 +218,27 @@
 //! frame's live intermediates. A retained round is cut like an isolated
 //! layer's when an ancestor needs room, and continues its own page after the
 //! cut.
+//!
+//! ## Backdrop rounds
+//!
+//! A backdrop blur ([`crate::filters`]' *The backdrop blur*) is handed to
+//! [`Schedule::build_frame`] as a recorded layer holding one draw. Where the
+//! walk is drawing into the frame's own target — the root, or layers inlined
+//! into it — it costs, in order: a **cut** of the surface round open so far
+//! (unconditional, so every op recorded before the backdrop lands before
+//! anything reads the target back, including the composite of a retained page
+//! drawn ahead of it), a **region copy** round ([`RegionCopy`]) seeding a page
+//! with the backdrop's region of the target, the blur's **pass rounds** over
+//! that page exactly as a filter layer's run, and then the backdrop's draw
+//! spliced into the root's next surface round, which samples the blurred page
+//! ([`BackdropSample`]) and releases it when it ends. The page is held across
+//! later ops like a pending composite is: a page-hungry layer recorded after
+//! the backdrop cuts that surface round to get it back.
+//!
+//! Anywhere else — inside an isolated layer, a retained body, or a layer
+//! covering nothing — there is no frame beneath the backdrop to sample, so its
+//! layer is dropped: no round, and no backdrop draw in any page round. A frame
+//! carrying no backdrop schedules exactly as [`Schedule::build_retained`] does.
 
 pub mod pages;
 
@@ -232,7 +253,7 @@ use vello_common::record::{CommandRecorder, Node, RecordedLayer, RecordedLayerKi
 
 use crate::compile::EngineDraw;
 use crate::error::EngineError;
-use crate::filters::{FilterStep, ServedFilter, blur, drop_shadow, served_filter};
+use crate::filters::{Backdrop, FilterStep, ServedFilter, blur, drop_shadow, served_filter};
 
 /// The deepest chain of nested isolated layers this scheduler serves.
 ///
@@ -507,6 +528,45 @@ pub struct Round {
     /// path branch on the round before it starts issuing a list, and keeps
     /// [`RoundOp`] exactly the set of things one strip pass can interleave.
     pub filter: Option<FilterPass>,
+    /// The region of the frame's own target this round seeds its page with,
+    /// on a region-copy round (see the module header's *Backdrop rounds*).
+    ///
+    /// A field rather than a [`RoundOp`] for the reason [`Self::filter`] is
+    /// one: a copy round is *only* a copy — it draws nothing, composites
+    /// nothing, and is recorded through no strip pipeline — and its `ops` are
+    /// empty.
+    pub copy: Option<RegionCopy>,
+    /// The pages this round's draws *sample* rather than composite: one per
+    /// backdrop blur whose rectangle this round draws, each holding the
+    /// blurred region (see the module header's *Backdrop rounds*). Every page
+    /// named here is also in [`Self::released`]. Empty on every round of a
+    /// frame with no backdrop, and on every round but a surface one.
+    pub samples: Vec<BackdropSample>,
+}
+
+/// A region of the frame's own target, copied into a round's page at the
+/// page's origin before anything else reads the page.
+///
+/// The reusable half of a backdrop blur: whatever needs to read what the frame
+/// has already painted — a blur of it, and next a blend composite against it —
+/// is handed a page holding exactly that region, made by cutting the surface
+/// round so everything before it in painter order has landed, then copying.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegionCopy {
+    /// The device-space region copied, which is also the page's own
+    /// [`PageTarget::bounds`]: the page holds it at its origin.
+    pub source: RectU16,
+}
+
+/// A finished page a surface round's draws sample at their own position — the
+/// blurred backdrop a backdrop blur's rectangle is painted from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackdropSample {
+    /// The backdrop's recorded layer, indexed into
+    /// [`CommandRecorder::layers`](vello_common::record::CommandRecorder::layers).
+    pub layer: u32,
+    /// The group holding the page.
+    pub parity: PageParity,
 }
 
 impl Round {
@@ -533,6 +593,13 @@ impl Round {
     #[must_use]
     pub fn filter_pass(&self) -> Option<&FilterPass> {
         self.filter.as_ref()
+    }
+
+    /// The region this round copies into its page, or `None` on every round
+    /// but a region-copy one.
+    #[must_use]
+    pub fn region_copy(&self) -> Option<&RegionCopy> {
+        self.copy.as_ref()
     }
 
     /// Whether this round renders into the frame's own surface.
@@ -620,6 +687,26 @@ impl Schedule {
         config: &PageConfig,
         retained: &RetainedLayers,
     ) -> Result<Vec<Round>, EngineError> {
+        Self::build_frame(recorder, caps, config, retained, &[])
+    }
+
+    /// [`Self::build_retained`], with the frame's backdrop blurs served as the
+    /// module header's *Backdrop rounds* describes. With no backdrop this is
+    /// exactly [`Self::build_retained`]: nothing is cut, copied or sampled.
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::build`]'s. A backdrop's page is sized by
+    /// [`filter_page_size`] like a filter layer's, so a region larger than a
+    /// page can be is refused with
+    /// [`EngineError::IntermediateTextureTooLarge`] on the same terms.
+    pub fn build_frame(
+        recorder: &CommandRecorder<EngineDraw>,
+        caps: &TierCaps,
+        config: &PageConfig,
+        retained: &RetainedLayers,
+        backdrops: &[Backdrop],
+    ) -> Result<Vec<Round>, EngineError> {
         let mut rounds: Vec<Round> = Vec::new();
         let mut pages = LivePages::default();
         // A child layer is always recorded after its parent, so a well-formed
@@ -685,6 +772,35 @@ impl Schedule {
                     // inside one covering no pixels covers none either, however
                     // its own bounds read.
                     let inherited = stack.last().is_some_and(|stream| stream.suppressed);
+
+                    if let Some(backdrop) = backdrops.iter().find(|backdrop| backdrop.layer == id) {
+                        // The layer properties every layer is held to; a
+                        // backdrop's own are always the inlining ones.
+                        layer_role(id, layer)?;
+                        // Served only where the frame's own target is what the
+                        // walk is drawing into — the root, or layers inlined
+                        // into it. Inside an isolated layer (or a retained
+                        // body, or one covering nothing) there is no frame
+                        // beneath to sample: the backdrop and its rectangle
+                        // draw nothing, and never land in a page round.
+                        let at_root = stack
+                            .iter()
+                            .rev()
+                            .find(|stream| !matches!(stream.owner, StreamOwner::Inline))
+                            .is_some_and(|stream| matches!(stream.owner, StreamOwner::Root));
+                        if at_root && !inherited && !layer.bbox.is_empty() {
+                            backdrop_rounds(
+                                backdrop,
+                                &mut stack,
+                                &mut rounds,
+                                &mut pages,
+                                caps,
+                                config,
+                            )?;
+                            stack.push(Stream::inline(layer, depth, false));
+                        }
+                        continue;
+                    }
 
                     if let Some(role) = retained.role(id) {
                         // The layer properties every layer is held to; the
@@ -785,7 +901,8 @@ fn finish<'a>(
     let (id, layer) = match stream.owner {
         StreamOwner::Inline => return Ok(stream.ops),
         StreamOwner::Root => {
-            let released = released_pages(&stream.ops);
+            let mut released = released_pages(&stream.ops);
+            release_samples(&stream.samples, &mut released);
             for parity in &released {
                 pages.release(*parity);
             }
@@ -799,6 +916,8 @@ fn finish<'a>(
                     ops: stream.ops,
                     released,
                     filter: None,
+                    copy: None,
+                    samples: stream.samples,
                 });
             }
             return Ok(Vec::new());
@@ -891,6 +1010,8 @@ fn finish<'a>(
                     ops: stream.ops,
                     released,
                     filter: None,
+                    copy: None,
+                    samples: Vec::new(),
                 });
             }
             parity
@@ -917,6 +1038,8 @@ fn finish<'a>(
                 ops: stream.ops,
                 released,
                 filter: None,
+                copy: None,
+                samples: Vec::new(),
             });
             parity
         }
@@ -989,6 +1112,8 @@ fn finish_retained(
             ops: stream.ops,
             released,
             filter: None,
+            copy: None,
+            samples: Vec::new(),
         });
     }
 
@@ -1056,6 +1181,23 @@ fn filter_rounds(
             drop_shadow::drop_shadow_passes(&shadow, SizeU16::from(filtered.bounds))
         }
     };
+    pass_rounds(filtered, &steps, stack, rounds, pages, caps, config)
+}
+
+/// Emits one round per pass of `steps` over `filtered`'s pages, and answers
+/// the group holding the result — [`filter_rounds`]' own sequence, shared with
+/// a backdrop blur's ([`backdrop_rounds`]), whose page is seeded by a region
+/// copy instead of by rendered contents.
+fn pass_rounds(
+    filtered: &FilterLayer<'_>,
+    steps: &[FilterStep],
+    stack: &mut [Stream<'_>],
+    rounds: &mut Vec<Round>,
+    pages: &mut LivePages,
+    caps: &TierCaps,
+    config: &PageConfig,
+) -> Result<PageParity, EngineError> {
+    let id = filtered.id;
     let Some(last) = steps.len().checked_sub(1) else {
         return Ok(filtered.contents);
     };
@@ -1116,6 +1258,8 @@ fn filter_rounds(
                 step: *step,
                 source,
             }),
+            copy: None,
+            samples: Vec::new(),
         });
 
         if index < last {
@@ -1228,6 +1372,8 @@ fn band_rounds(
             ops: ops.clone(),
             released: Vec::new(),
             filter: None,
+            copy: None,
+            samples: Vec::new(),
         });
 
         // Spliced onto the enclosing stream's own accumulator directly,
@@ -1342,7 +1488,10 @@ fn cut_at(
         .find(|(_, stream)| !matches!(stream.owner, StreamOwner::Inline))
         .map_or(stack.len(), |(at, _)| at);
     let batch = stack.get(index..end).unwrap_or(&[]);
-    if !batch.iter().any(|stream| holds_composite(&stream.ops)) {
+    if !batch
+        .iter()
+        .any(|stream| holds_composite(&stream.ops) || !stream.samples.is_empty())
+    {
         return Ok(false);
     }
 
@@ -1396,10 +1545,13 @@ fn cut_at(
     };
 
     let mut ops: Vec<RoundOp> = Vec::new();
+    let mut samples: Vec<BackdropSample> = Vec::new();
     for stream in stack.get_mut(index..end).unwrap_or(&mut []) {
         ops.append(&mut stream.ops);
+        samples.append(&mut stream.samples);
     }
-    let released = released_pages(&ops);
+    let mut released = released_pages(&ops);
+    release_samples(&samples, &mut released);
     for parity in &released {
         pages.release(*parity);
     }
@@ -1409,9 +1561,131 @@ fn cut_at(
         ops,
         released,
         filter: None,
+        copy: None,
+        samples,
     });
 
     Ok(true)
+}
+
+/// Emits the rounds a backdrop blur at the frame root costs, leaving the page
+/// holding the blurred region sampled by the root stream (see the module
+/// header's *Backdrop rounds*).
+///
+/// Three steps, in order: the surface round open so far is emitted whatever it
+/// holds, so everything painted before the backdrop has landed before anything
+/// reads it back; a [region-copy](RegionCopy) round seeds a page with the
+/// backdrop's region of the frame's target; and the blur's own pass sequence
+/// runs over that page exactly as a filter layer's does. The result stays held
+/// until the surface round that draws the backdrop's rectangle ends.
+///
+/// `stack` holds the frame root and nothing but inlined layers above it — the
+/// caller serves a backdrop nowhere else — so cutting it leaves no page held
+/// and both groups are free for the copy and the passes.
+fn backdrop_rounds(
+    backdrop: &Backdrop,
+    stack: &mut [Stream<'_>],
+    rounds: &mut Vec<Round>,
+    pages: &mut LivePages,
+    caps: &TierCaps,
+    config: &PageConfig,
+) -> Result<(), EngineError> {
+    flush_surface(stack, rounds, pages);
+
+    let id = backdrop.layer;
+    let region = backdrop.region;
+    let size = filter_page_size(region, config, caps)?;
+    let contents = pages.acquire(PageParity::Even).ok_or_else(|| {
+        escalate(format!(
+            "backdrop layer {id} found no free page group for its region copy after the surface \
+             round ahead of it was cut"
+        ))
+    })?;
+    rounds.push(Round {
+        // Cleared and then written by the copy: the page's previous holder
+        // must not show past the copied region, where the kernels read.
+        target: RoundTarget::Page(PageTarget {
+            layer: id,
+            depth: 1,
+            parity: contents,
+            size,
+            bounds: region,
+            continued: false,
+        }),
+        ops: Vec::new(),
+        released: Vec::new(),
+        filter: None,
+        copy: Some(RegionCopy { source: region }),
+        samples: Vec::new(),
+    });
+
+    let steps = blur::blur_passes(&backdrop.blur(), SizeU16::from(region));
+    let regular = RecordedLayerKind::Regular;
+    let blurred = pass_rounds(
+        &FilterLayer {
+            id,
+            kind: &regular,
+            depth: 1,
+            bounds: region,
+            size,
+            contents,
+        },
+        &steps,
+        stack,
+        rounds,
+        pages,
+        caps,
+        config,
+    )?;
+
+    if let Some(root) = stack.first_mut() {
+        root.samples.push(BackdropSample {
+            layer: id,
+            parity: blurred,
+        });
+    }
+    Ok(())
+}
+
+/// Emits everything the frame root and the inlined layers above it have
+/// accumulated as a surface round of its own — unconditionally, unlike
+/// [`cut_at`], which cuts only to hand a page back — or nothing when nothing
+/// has accumulated since the last one.
+fn flush_surface(stack: &mut [Stream<'_>], rounds: &mut Vec<Round>, pages: &mut LivePages) {
+    let mut ops: Vec<RoundOp> = Vec::new();
+    let mut samples: Vec<BackdropSample> = Vec::new();
+    for stream in stack.iter_mut() {
+        ops.append(&mut stream.ops);
+        samples.append(&mut stream.samples);
+    }
+    if ops.is_empty() && samples.is_empty() {
+        return;
+    }
+    let mut released = released_pages(&ops);
+    release_samples(&samples, &mut released);
+    for parity in &released {
+        pages.release(*parity);
+    }
+    if let Some(root) = stack.first_mut() {
+        root.emitted = true;
+    }
+    rounds.push(Round {
+        target: RoundTarget::Root,
+        ops,
+        released,
+        filter: None,
+        copy: None,
+        samples,
+    });
+}
+
+/// Adds the pages `samples` holds to `released`, each listed once.
+fn release_samples(samples: &[BackdropSample], released: &mut Vec<PageParity>) {
+    for sample in samples {
+        if !released.contains(&sample.parity) {
+            released.push(sample.parity);
+        }
+    }
 }
 
 /// How a recorded layer is served.
@@ -1481,6 +1755,11 @@ struct Stream<'a> {
     /// Whether this stream renders nothing at all: it is a layer covering no
     /// pixels, or nested inside one.
     suppressed: bool,
+    /// The blurred backdrop pages the ops accumulated since this stream's last
+    /// round sample — only ever the frame root's, since a backdrop is served
+    /// nowhere else. They travel with the ops into whichever round emits them,
+    /// which releases them.
+    samples: Vec<BackdropSample>,
 }
 
 impl<'a> Stream<'a> {
@@ -1495,6 +1774,7 @@ impl<'a> Stream<'a> {
             emitted: false,
             page: None,
             suppressed: false,
+            samples: Vec::new(),
         }
     }
 
@@ -1511,6 +1791,7 @@ impl<'a> Stream<'a> {
             emitted: false,
             page: None,
             suppressed,
+            samples: Vec::new(),
         }
     }
 
@@ -1525,6 +1806,7 @@ impl<'a> Stream<'a> {
             emitted: false,
             page: None,
             suppressed,
+            samples: Vec::new(),
         }
     }
 
@@ -1547,6 +1829,7 @@ impl<'a> Stream<'a> {
             emitted: false,
             page: None,
             suppressed,
+            samples: Vec::new(),
         }
     }
 

@@ -188,6 +188,10 @@ enum Op {
         id: u64,
         dest: Rect,
     },
+    BackdropBlur {
+        rect: Rect,
+        radius: f64,
+    },
     PushClip {
         rect: Rect,
     },
@@ -341,6 +345,7 @@ fn record(ops: &[Op], builder: &mut SceneBuilder<'_>) {
             },
             Op::ShaderQuad { dest, time } => builder.draw_shader(&shared_shader(), *dest, *time),
             Op::SceneTexture { id, dest } => builder.scene_texture(*id, *dest),
+            Op::BackdropBlur { rect, radius } => builder.backdrop_blur(*rect, *radius),
             Op::PushClip { rect } => builder.push_clip(*rect),
             Op::PushClipRounded { rect, radii } => builder.push_clip_rounded_radii(*rect, *radii),
             Op::PushClipPath { path } => builder.push_clip_path(path.clone()),
@@ -527,6 +532,7 @@ fn op_with_glyph_transform(glyph_transform: BoxedStrategy<Affine>) -> impl Strat
         }),
         (rect(), coord_f32()).prop_map(|(dest, time)| Op::ShaderQuad { dest, time }),
         (any::<u64>(), rect()).prop_map(|(id, dest)| Op::SceneTexture { id, dest }),
+        (rect(), coord()).prop_map(|(rect, radius)| Op::BackdropBlur { rect, radius }),
         rect().prop_map(|rect| Op::PushClip { rect }),
         (rect(), radii()).prop_map(|(rect, radii)| Op::PushClipRounded { rect, radii }),
         bez_path().prop_map(|path| Op::PushClipPath { path }),
@@ -804,6 +810,7 @@ fn every_command_variant_is_reachable_from_the_op_set() {
             time: 0.0,
         },
         Op::SceneTexture { id: 1, dest: rect },
+        Op::BackdropBlur { rect, radius: 2.0 },
         Op::PushClip { rect },
         Op::PopClip,
         Op::PushClipRounded {
@@ -854,12 +861,14 @@ fn every_command_variant_is_reachable_from_the_op_set() {
             Command::PopRetained => "PopRetained",
             Command::DrawRetained { .. } => "DrawRetained",
             Command::SceneTexture { .. } => "SceneTexture",
+            Command::BackdropBlur { .. } => "BackdropBlur",
         })
         .collect();
     seen.sort_unstable();
     seen.dedup();
 
     let mut expected = vec![
+        "BackdropBlur",
         "BlurredRoundedRect",
         "ClearRect",
         "DrawRetained",
@@ -881,5 +890,5 @@ fn every_command_variant_is_reachable_from_the_op_set() {
         "ShaderQuad",
     ];
     expected.sort_unstable();
-    assert_eq!(seen, expected, "one op set, all nineteen command variants");
+    assert_eq!(seen, expected, "one op set, all twenty command variants");
 }

@@ -358,6 +358,18 @@ impl<'a> SceneBuilder<'a> {
             transform,
         });
     }
+
+    /// Records a frosted-glass backdrop: whatever is already painted beneath
+    /// `rect` is replaced by its Gaussian blur of standard deviation `radius`,
+    /// under the current transform (see [`Command::BackdropBlur`]).
+    pub fn backdrop_blur(&mut self, rect: Rect, radius: f64) {
+        let transform = self.current_transform();
+        self.scene.push(Command::BackdropBlur {
+            rect,
+            radius,
+            transform,
+        });
+    }
 }
 
 #[cfg(test)]
@@ -1147,6 +1159,29 @@ mod tests {
         match &scene.commands()[0] {
             Command::Path { transform, .. } => assert_eq!(*transform, translate),
             other => panic!("expected Path, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn backdrop_blur_records_rect_radius_and_current_transform() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let translate = Affine::translate((8.0, 2.0));
+        builder.push_transform(translate);
+        let rect = Rect::new(0.0, 0.0, 30.0, 12.0);
+        builder.backdrop_blur(rect, 6.0);
+
+        match &scene.commands()[0] {
+            Command::BackdropBlur {
+                rect: got_rect,
+                radius,
+                transform,
+            } => {
+                assert_eq!(*got_rect, rect);
+                assert_eq!(*radius, 6.0);
+                assert_eq!(*transform, translate);
+            }
+            other => panic!("expected BackdropBlur, got {other:?}"),
         }
     }
 }

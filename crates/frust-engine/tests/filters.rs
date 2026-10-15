@@ -10,7 +10,7 @@
 //! claim a host test cannot make and the only place the shader is exercised at
 //! all (see *On real hardware* below).
 //!
-//! Four kinds of claim are made here.
+//! Five kinds of claim are made here.
 //!
 //! - **Parity with the CPU rasterizer.** Both tiers blur with
 //!   `vello_common::filter::gaussian_blur`'s own kernel, so σ 2, 8 and 32 plan
@@ -36,14 +36,17 @@
 //!   `vello_common::filter::gaussian_blur`'s own kernel and decimation plan.
 //!
 //!   Over the test's own pages rather than through
-//!   [`frust_engine::EngineRenderer::encode`], and that is a limitation worth
-//!   naming: `frust_scene` carries no filter command (the scene seam is a later
-//!   plan), so no `Scene` can record a filter layer and no `encode` call can
-//!   reach a filter round. What these cases prove is that the WGSL, the
-//!   pipeline, the bind-group shapes and the wire layouts are right on a
-//!   device; that the *scheduler's* rounds drive them in the right order is
-//!   pinned by the host cases above, and the two meet in the frame path the day
-//!   a scene command exists to enter it.
+//!   [`frust_engine::EngineRenderer::encode`]: `frust_scene` carries no
+//!   *layer*-filter command, so no `Scene` can record a filter layer. What
+//!   these cases prove is that the WGSL, the pipeline, the bind-group shapes
+//!   and the wire layouts are right on a device; that the *scheduler's* rounds
+//!   drive them in the right order is pinned by the host cases above.
+//! - **The backdrop blur.** `Command::BackdropBlur` is the one scene command
+//!   that reaches a filter round, so its section (the `backdrop` module at the
+//!   end) pins the whole frame path: what the compiler records, the surface
+//!   cut, region copy and pass rounds the scheduler plans, the per-frame bound,
+//!   and — on a device, through `encode` itself — the blurred panel by either
+//!   region-copy mode, plus the measured cost of the present copy.
 
 use frust_engine::filters::blur::{
     FILTER_ATLAS_PADDING, FILTER_SIZE_BYTES, FilterInstanceData, GpuFilterData, GpuGaussianBlur,
@@ -3194,4 +3197,617 @@ fn a_blur_at_the_regions_own_origin_still_reads_transparent_past_its_near_edge()
 
     let error = drain_error_scope(&harness.device, scope);
     assert!(error.is_none(), "the filter passes raised {error:?}");
+}
+
+// -----------------------------------------------------------------------------
+// Backdrop blurs: the scene command that reaches a filter round
+// -----------------------------------------------------------------------------
+
+/// `Command::BackdropBlur` end to end: what the compiler records, the rounds
+/// the scheduler cuts the frame into, the per-frame bound, and — on a device —
+/// the region copy, the blur and the sampled rectangle through
+/// [`EngineRenderer::encode`] itself, by either copy mode, plus the measured
+/// cost of the present copy a swapchain frame carrying one pays.
+mod backdrop {
+    use super::{caps, drain_error_scope, render_lock};
+
+    use frust_engine::compile::CompiledFrame;
+    use frust_engine::filters::{
+        Backdrop, MAX_BACKDROPS_PER_FRAME, SERVED_EDGE_MODE, backdrop_region, backdrop_sigma,
+    };
+    use frust_engine::gpu::pipelines::INTERMEDIATE_FORMAT;
+    use frust_engine::gpu::present::CopyPresentPass;
+    use frust_engine::renderer::RegionCopyMode;
+    use frust_engine::schedule::{PageConfig, RetainedLayers, Round, Schedule};
+    use frust_engine::{EngineError, EngineRenderer, EngineTarget, OutputAlpha, SceneCompiler};
+    use frust_gpu::HeadlessTarget;
+    use frust_scene::{Scene, SceneBuilder};
+    use kurbo::{Affine, Rect};
+    use peniko::color::palette::css::{BLUE, RED, WHITE, YELLOW};
+    use peniko::{Brush, Color};
+    use vello_common::filter::gaussian_blur::GaussianBlur;
+    use vello_common::geometry::RectU16;
+
+    /// The viewport the host cases compile against — not square, and not a
+    /// multiple of the tile width on either axis, so a region clamped to it
+    /// ends off the grid.
+    const VIEW: (u16, u16) = (98, 70);
+
+    /// The panel every case blurs behind.
+    const PANEL: Rect = Rect::new(20.0, 16.0, 60.0, 44.0);
+
+    fn scene_of(record: impl FnOnce(&mut SceneBuilder<'_>)) -> Scene {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        record(&mut builder);
+        scene
+    }
+
+    fn compile(scene: &Scene) -> Result<CompiledFrame, EngineError> {
+        SceneCompiler::new(VIEW.0, VIEW.1).compile(scene, Affine::IDENTITY, VIEW)
+    }
+
+    fn rounds(frame: &CompiledFrame) -> Vec<Round> {
+        Schedule::build_frame(
+            &frame.recorder,
+            &caps(),
+            &PageConfig::default(),
+            &RetainedLayers::new(),
+            &frame.backdrops,
+        )
+        .expect("a frame carrying backdrops under the surface schedules")
+    }
+
+    fn field(builder: &mut SceneBuilder<'_>) {
+        builder.fill_rect(
+            Rect::new(0.0, 0.0, f64::from(VIEW.0), f64::from(VIEW.1)),
+            Brush::Solid(BLUE),
+        );
+    }
+
+    #[test]
+    fn a_backdrop_is_recorded_as_a_layer_holding_its_rectangle() {
+        let frame = compile(&scene_of(|builder| {
+            field(builder);
+            builder.backdrop_blur(PANEL, 3.0);
+        }))
+        .expect("compiles");
+        let [backdrop] = frame.backdrops[..] else {
+            panic!("one backdrop recorded: {:?}", frame.backdrops);
+        };
+        assert_eq!(backdrop.sigma, 3.0);
+        // 3σ = 9 around the panel, near edges snapped down to the tile grid.
+        assert_eq!(backdrop.region, RectU16::new(8, 4, 69, 53));
+        let layer = &frame.recorder.layers[backdrop.layer as usize];
+        assert_eq!(
+            layer.props.opacity, 1.0,
+            "a layer the scheduler would inline"
+        );
+        let draws: Vec<u32> = layer
+            .nodes
+            .iter()
+            .flat_map(|node| node.draws.clone())
+            .collect();
+        assert_eq!(draws.len(), 1, "holding exactly the rectangle's coverage");
+        assert_eq!(
+            frame.draws()[draws[0] as usize].depth,
+            backdrop.depth,
+            "the record names that draw by its depth"
+        );
+    }
+
+    #[test]
+    fn a_backdrop_cuts_the_surface_copies_its_region_and_blurs_it() {
+        let frame = compile(&scene_of(|builder| {
+            field(builder);
+            builder.backdrop_blur(PANEL, 2.0);
+            builder.fill_rect(Rect::new(24.0, 20.0, 30.0, 26.0), Brush::Solid(RED));
+        }))
+        .expect("compiles");
+        let backdrop = frame.backdrops[0];
+        let rounds = rounds(&frame);
+        let passes = frust_engine::filters::blur::blur_passes(
+            &backdrop.blur(),
+            vello_common::geometry::SizeU16::from(backdrop.region),
+        )
+        .len();
+        assert_eq!(
+            rounds.len(),
+            passes + 3,
+            "the surface up to the backdrop, the copy, one round per pass, and the surface \
+             after it: {rounds:#?}"
+        );
+
+        assert!(rounds[0].is_root());
+        assert_eq!(rounds[0].draw_count(), 1, "the field lands before the copy");
+        assert!(rounds[0].samples.is_empty());
+
+        let copy = &rounds[1];
+        let page = copy.page().expect("the region lands in a pooled page");
+        assert_eq!(
+            copy.region_copy().map(|copy| copy.source),
+            Some(backdrop.region)
+        );
+        assert_eq!(page.bounds, backdrop.region, "held at the page's origin");
+        assert!(copy.ops.is_empty() && copy.filter_pass().is_none());
+
+        let mut source = page.parity;
+        for round in &rounds[2..2 + passes] {
+            let pass = round.filter_pass().expect("one round per pass");
+            assert_eq!(pass.layer, backdrop.layer);
+            assert_eq!(pass.source, source);
+            source = round.page().expect("a pass writes a page").parity;
+        }
+
+        let last = rounds.last().expect("a root round closes the frame");
+        assert!(last.is_root());
+        assert_eq!(last.draw_count(), 2, "the panel and the chip over it");
+        assert_eq!(last.samples.len(), 1);
+        assert_eq!(last.samples[0].layer, backdrop.layer);
+        assert_eq!(
+            last.samples[0].parity, page.parity,
+            "an even sequence leaves the blur in the page the copy seeded"
+        );
+        assert!(last.released.contains(&page.parity));
+    }
+
+    #[test]
+    fn a_second_backdrop_reads_back_what_the_first_one_drew() {
+        let frame = compile(&scene_of(|builder| {
+            field(builder);
+            builder.backdrop_blur(PANEL, 2.0);
+            builder.backdrop_blur(Rect::new(40.0, 30.0, 90.0, 66.0), 2.0);
+        }))
+        .expect("compiles");
+        assert_eq!(frame.backdrops.len(), 2);
+        let rounds = rounds(&frame);
+        let copies: Vec<usize> = rounds
+            .iter()
+            .enumerate()
+            .filter(|(_, round)| round.region_copy().is_some())
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(copies.len(), 2);
+        let sampled_first = rounds
+            .iter()
+            .position(|round| {
+                round
+                    .samples
+                    .iter()
+                    .any(|sample| sample.layer == frame.backdrops[0].layer)
+            })
+            .expect("the first panel is drawn");
+        assert!(
+            copies[0] < sampled_first && sampled_first < copies[1],
+            "the first panel lands — and its page goes back — before the second copy reads the \
+             surface: {rounds:#?}"
+        );
+    }
+
+    #[test]
+    fn a_page_hungry_layer_after_a_backdrop_cuts_the_surface_to_get_its_page_back() {
+        // The blurred page is held until the panel's surface round ends; a
+        // chain of two translucent layers recorded after it needs both groups.
+        let frame = compile(&scene_of(|builder| {
+            field(builder);
+            builder.backdrop_blur(PANEL, 2.0);
+            builder.push_layer(Rect::new(0.0, 0.0, 60.0, 60.0), 0.5);
+            builder.fill_rect(Rect::new(4.0, 4.0, 30.0, 30.0), Brush::Solid(RED));
+            builder.push_layer(Rect::new(8.0, 8.0, 40.0, 40.0), 0.5);
+            builder.fill_rect(Rect::new(10.0, 10.0, 20.0, 20.0), Brush::Solid(RED));
+            builder.pop_layer();
+            builder.pop_layer();
+        }))
+        .expect("compiles");
+        let rounds = rounds(&frame);
+        let sampling = rounds
+            .iter()
+            .position(|round| !round.samples.is_empty())
+            .expect("the panel is drawn");
+        assert!(rounds[sampling].is_root());
+        assert!(
+            rounds[sampling + 1..]
+                .iter()
+                .any(|round| round.page().is_some()),
+            "the layers render after the cut that handed the page back"
+        );
+    }
+
+    #[test]
+    fn a_frame_past_the_backdrop_bound_is_refused_and_one_at_it_is_not() {
+        let with = |count: usize| {
+            compile(&scene_of(|builder| {
+                field(builder);
+                for index in 0..count {
+                    let x = 4.0 + 18.0 * index as f64;
+                    builder.backdrop_blur(Rect::new(x, 8.0, x + 14.0, 30.0), 1.5);
+                }
+            }))
+        };
+        let at_bound = with(MAX_BACKDROPS_PER_FRAME).expect("the bound itself is served");
+        assert_eq!(at_bound.backdrops.len(), MAX_BACKDROPS_PER_FRAME);
+        assert_eq!(
+            rounds(&at_bound)
+                .iter()
+                .filter(|round| round.region_copy().is_some())
+                .count(),
+            MAX_BACKDROPS_PER_FRAME
+        );
+
+        let refused = with(MAX_BACKDROPS_PER_FRAME + 1);
+        assert!(
+            matches!(
+                refused,
+                Err(EngineError::TooManyBackdrops { recorded, max })
+                    if recorded == MAX_BACKDROPS_PER_FRAME + 1 && max == MAX_BACKDROPS_PER_FRAME
+            ),
+            "refused up front, never drawn with a backdrop missing: {refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_frame_without_a_backdrop_schedules_exactly_as_it_always_did() {
+        let scenes = [
+            scene_of(field),
+            scene_of(|builder| {
+                field(builder);
+                builder.push_layer(Rect::new(0.0, 0.0, 40.0, 40.0), 0.5);
+                builder.fill_rect(Rect::new(4.0, 4.0, 30.0, 30.0), Brush::Solid(RED));
+                builder.pop_layer();
+                builder.clear_rect(Rect::new(50.0, 10.0, 60.0, 20.0));
+                builder.fill_rect(Rect::new(70.0, 10.0, 80.0, 20.0), Brush::Solid(RED));
+            }),
+        ];
+        for scene in &scenes {
+            let frame = compile(scene).expect("compiles");
+            assert!(frame.backdrops.is_empty());
+            let served = rounds(&frame);
+            let plain = Schedule::build(&frame.recorder, &caps(), &PageConfig::default())
+                .expect("schedules");
+            assert_eq!(served, plain, "no cut, no copy, no sample");
+            assert!(
+                served
+                    .iter()
+                    .all(|round| round.copy.is_none() && round.samples.is_empty())
+            );
+        }
+    }
+
+    #[test]
+    fn a_backdrop_that_blurs_nothing_records_nothing() {
+        for radius in [0.0, -3.0] {
+            let frame = compile(&scene_of(|builder| {
+                field(builder);
+                builder.backdrop_blur(PANEL, radius);
+            }))
+            .expect("compiles");
+            assert!(frame.backdrops.is_empty(), "radius {radius}");
+            assert!(
+                frame.recorder.layers.is_empty(),
+                "and opens no layer either"
+            );
+        }
+        // Entirely off the target, and entirely clipped away.
+        let off = compile(&scene_of(|builder| {
+            builder.backdrop_blur(Rect::new(200.0, 200.0, 240.0, 240.0), 2.0);
+            builder.push_clip(Rect::new(0.0, 0.0, 4.0, 4.0));
+            builder.backdrop_blur(Rect::new(40.0, 40.0, 60.0, 60.0), 2.0);
+            builder.pop_clip();
+        }))
+        .expect("compiles");
+        assert!(off.backdrops.is_empty());
+    }
+
+    #[test]
+    fn a_non_finite_backdrop_is_refused_before_any_strip_is_generated() {
+        for (rect, radius) in [
+            (PANEL, f64::NAN),
+            (PANEL, f64::INFINITY),
+            (Rect::new(0.0, 0.0, f64::NAN, 4.0), 2.0),
+        ] {
+            let refused = compile(&scene_of(|builder| builder.backdrop_blur(rect, radius)));
+            assert!(
+                matches!(refused, Err(EngineError::InvalidGeometry)),
+                "{rect:?} at {radius}: {refused:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_backdrop_region_is_the_kernels_reach_snapped_and_clamped() {
+        // σ scales with the transform like a filter layer's does.
+        assert_eq!(backdrop_sigma(2.0, Affine::scale(3.0)), Some(6.0));
+        assert_eq!(backdrop_sigma(0.0, Affine::IDENTITY), None);
+        assert_eq!(backdrop_sigma(-1.0, Affine::IDENTITY), None);
+        assert_eq!(
+            backdrop_sigma(1e9, Affine::IDENTITY),
+            Some(frust_engine::filters::MAX_BLUR_SIGMA),
+            "clamped, so the planner's decimation loop stays bounded"
+        );
+
+        // ceil(3 × 1.5) = 5 of reach.
+        assert_eq!(
+            backdrop_region(Rect::new(10.5, 9.0, 20.0, 30.25), 1.5, VIEW),
+            Some(RectU16::new(4, 4, 25, 36))
+        );
+        // Clamped to the target on every side; the far edges stay off-grid.
+        assert_eq!(
+            backdrop_region(Rect::new(-10.0, -10.0, 200.0, 200.0), 1.0, VIEW),
+            Some(RectU16::new(0, 0, VIEW.0, VIEW.1))
+        );
+        assert_eq!(
+            backdrop_region(Rect::new(300.0, 300.0, 310.0, 310.0), 1.0, VIEW),
+            None
+        );
+    }
+
+    #[test]
+    fn a_backdrops_blur_is_the_shared_planner_at_its_device_sigma() {
+        let backdrop = Backdrop {
+            layer: 0,
+            depth: 0,
+            region: RectU16::new(0, 0, 32, 32),
+            sigma: 12.0,
+        };
+        let blur = backdrop.blur();
+        let reference = GaussianBlur::new(12.0, SERVED_EDGE_MODE);
+        assert_eq!(blur.n_decimations, reference.n_decimations);
+        assert_eq!(blur.kernel, reference.kernel);
+        assert_eq!(blur.kernel_size, reference.kernel_size);
+    }
+
+    // -------------------------------------------------------------------------
+    // On real hardware
+    // -------------------------------------------------------------------------
+
+    /// The device-case frame: stripes, a yellow square, and a panel blurred
+    /// behind under a rounded clip with a chip painted over it.
+    const SIZE: u32 = 96;
+
+    fn device_scene() -> Scene {
+        scene_of(|builder| {
+            for stripe in 0..SIZE / 4 {
+                let x = f64::from(stripe * 4);
+                let colour = if stripe % 2 == 0 { RED } else { BLUE };
+                builder.fill_rect(
+                    Rect::new(x, 0.0, x + 4.0, f64::from(SIZE)),
+                    Brush::Solid(colour),
+                );
+            }
+            builder.fill_rect(Rect::new(36.0, 20.0, 60.0, 36.0), Brush::Solid(YELLOW));
+            let panel = Rect::new(16.0, 16.0, 80.0, 80.0);
+            builder.push_clip_rounded(panel, 10.0);
+            builder.backdrop_blur(panel, 3.0);
+            builder.fill_rect(Rect::new(40.0, 60.0, 56.0, 72.0), Brush::Solid(WHITE));
+            builder.pop_clip();
+        })
+    }
+
+    /// A render target of `format` and `usage`, plus its view.
+    fn target(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        usage: wgpu::TextureUsages,
+    ) -> wgpu::TextureView {
+        device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("frust-engine backdrop test target"),
+                size: wgpu::Extent3d {
+                    width: SIZE,
+                    height: SIZE,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor::default())
+    }
+
+    /// Renders [`device_scene`] into a `format`/`usage` root, then — unless the
+    /// root is the readback target itself — copies it into an `Rgba8Unorm`
+    /// readback target through [`CopyPresentPass`], exactly as `frust-render`
+    /// presents a backdrop frame, and reads the pixels back.
+    fn render(format: wgpu::TextureFormat, usage: Option<wgpu::TextureUsages>) -> Vec<u8> {
+        render_merged(format, usage, true)
+    }
+
+    /// [`render`] with the surface opening merged into one pass or recorded
+    /// apart (`EngineRenderer::set_pass_merge`).
+    fn render_merged(
+        format: wgpu::TextureFormat,
+        usage: Option<wgpu::TextureUsages>,
+        merge: bool,
+    ) -> Vec<u8> {
+        let (device, queue, caps) = super::gpu();
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let readback = HeadlessTarget::new(&device, SIZE, SIZE, INTERMEDIATE_FORMAT);
+        let root = usage.map(|usage| target(&device, format, usage));
+        let view = root.as_ref().unwrap_or(readback.view());
+        assert_eq!(
+            RegionCopyMode::of(view.texture()) == RegionCopyMode::Texture,
+            usage.is_none(),
+            "the readback target alone takes the texture-copy route"
+        );
+
+        let mut renderer =
+            EngineRenderer::new(&device, &caps, format, None).expect("the engine builds");
+        renderer.set_pass_merge(merge);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("frust-engine backdrop frame"),
+        });
+        renderer
+            .encode(
+                &device,
+                &queue,
+                &mut encoder,
+                &device_scene(),
+                EngineTarget {
+                    view,
+                    format,
+                    width: SIZE,
+                    height: SIZE,
+                    depth: None,
+                    output: OutputAlpha::Premultiplied,
+                },
+                Color::BLACK,
+                Affine::IDENTITY,
+            )
+            .expect("a frame with one backdrop encodes");
+        let passes = renderer.last_frame_passes().to_vec();
+        assert!(
+            passes.contains(&frust_engine::renderer::FramePass::Copy),
+            "the frame copied its region: {passes:?}"
+        );
+        if let Some(root) = root.as_ref() {
+            CopyPresentPass::new(&device, INTERMEDIATE_FORMAT, None).record(
+                &device,
+                &queue,
+                &mut encoder,
+                root,
+                readback.view(),
+                (SIZE, SIZE),
+                None,
+            );
+        }
+        queue.submit([encoder.finish()]);
+        renderer.end_frame(&queue);
+        let error = drain_error_scope(&device, scope);
+        assert!(error.is_none(), "the frame raised {error:?}");
+        readback.read_back(&device, &queue)
+    }
+
+    fn pixel(pixels: &[u8], x: u32, y: u32) -> [u8; 4] {
+        let index = ((y * SIZE + x) * 4) as usize;
+        pixels[index..index + 4]
+            .try_into()
+            .expect("four bytes a pixel")
+    }
+
+    #[test]
+    #[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test filters -- --ignored --test-threads=1`"]
+    fn a_backdrop_blurs_what_lies_beneath_it_through_either_copy_mode() {
+        let _serialized = render_lock();
+        let copied = render(INTERMEDIATE_FORMAT, None);
+
+        // Untouched outside the panel, and inside its rectangle past the
+        // rounded corner the clip masks the blur away.
+        assert_eq!(pixel(&copied, 2, 48), [255, 0, 0, 255]);
+        assert_eq!(pixel(&copied, 17, 17), [255, 0, 0, 255]);
+        // Blurred inside: the left column of a red stripe takes blue.
+        let mixed = pixel(&copied, 48, 48);
+        assert!(
+            mixed[0] > 60 && mixed[2] > 60 && mixed[3] == 255,
+            "the stripes mix under the panel: {mixed:?}"
+        );
+        // The chip recorded after the backdrop lands on top of it.
+        assert_eq!(pixel(&copied, 48, 66), [255, 255, 255, 255]);
+
+        // The opening recorded apart draws the same draws in the same order
+        // against the same attachments, the copy still after it: byte for byte
+        // the merged frame.
+        assert_eq!(
+            render_merged(INTERMEDIATE_FORMAT, None, false),
+            copied,
+            "FRUST_ENGINE_NO_PASS_MERGE changes the passes, never the pixels"
+        );
+
+        // The fragment route, in the engine's own format and in a swapchain's
+        // usual BGRA one, read back through the present copy: the same pixels.
+        let sampled = render(
+            INTERMEDIATE_FORMAT,
+            Some(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING),
+        );
+        let bgra = render(
+            wgpu::TextureFormat::Bgra8Unorm,
+            Some(
+                wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
+            ),
+        );
+        for (name, other) in [("sampled", &sampled), ("bgra", &bgra)] {
+            let worst = copied
+                .iter()
+                .zip(other.iter())
+                .map(|(a, b)| a.abs_diff(*b))
+                .max()
+                .unwrap_or(0);
+            assert!(
+                worst <= 1,
+                "the {name} route differs from the texture copy by up to {worst}"
+            );
+        }
+    }
+
+    /// The cost of the one extra pass a swapchain frame carrying a backdrop
+    /// pays: the present copy, at a phone's and a desktop's full-screen
+    /// extent, measured as the wall-clock difference between submitting the
+    /// copy and submitting an empty encoder, each waited on — an upper bound
+    /// on the pass's GPU time, printed for the record rather than asserted.
+    #[test]
+    #[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test filters -- --ignored --test-threads=1 --nocapture`"]
+    fn the_present_copy_costs_one_full_screen_pass() {
+        let _serialized = render_lock();
+        let (device, queue, _) = super::gpu();
+        const FRAMES: u32 = 120;
+        for (width, height) in [(1080_u32, 2400_u32), (1920, 1080)] {
+            let make = |usage| {
+                device
+                    .create_texture(&wgpu::TextureDescriptor {
+                        label: Some("frust-engine present cost"),
+                        size: wgpu::Extent3d {
+                            width,
+                            height,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Bgra8Unorm,
+                        usage,
+                        view_formats: &[],
+                    })
+                    .create_view(&wgpu::TextureViewDescriptor::default())
+            };
+            let source =
+                make(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
+            let swapchain = make(wgpu::TextureUsages::RENDER_ATTACHMENT);
+            let present = CopyPresentPass::new(&device, wgpu::TextureFormat::Bgra8Unorm, None);
+            let run = |copy: bool| {
+                let start = std::time::Instant::now();
+                for _ in 0..FRAMES {
+                    let mut encoder =
+                        device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+                    if copy {
+                        present.record(
+                            &device,
+                            &queue,
+                            &mut encoder,
+                            &source,
+                            &swapchain,
+                            (width, height),
+                            None,
+                        );
+                    }
+                    queue.submit([encoder.finish()]);
+                    let _ = device.poll(wgpu::PollType::wait_indefinitely());
+                }
+                start.elapsed().as_secs_f64() * 1000.0 / f64::from(FRAMES)
+            };
+            // Warm both paths once before timing them.
+            let _ = (run(true), run(false));
+            let copy = run(true);
+            let empty = run(false);
+            println!(
+                "frust-engine present copy {width}x{height}: {copy:.3} ms/frame with the copy, \
+                 {empty:.3} ms/frame without, {:.3} ms the pass",
+                copy - empty
+            );
+            assert!(copy.is_finite() && empty.is_finite());
+        }
+    }
 }

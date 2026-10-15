@@ -63,6 +63,22 @@
 //!   so an unparseable blob would otherwise panic the oracle. The sniff is
 //!   deliberately shallow (see [`looks_like_sfnt`]); a structurally valid but
 //!   internally corrupt font is still `glifo`'s to reject.
+//! - [`frust_scene::Command::BackdropBlur`] has no `vello_cpu` primitive
+//!   (`vello_cpu` filters a *layer's* contents, never what lies beneath one),
+//!   so the oracle builds it from three it does have, in the order the engine
+//!   runs them: the scene so far is rasterized into the target (every open
+//!   group popped first and re-pushed after, exactly as the `ClearRect` hoist
+//!   does), the backdrop's region of that canvas is drawn as an image inside a
+//!   `vello_cpu` Gaussian-blur filter layer — the same `vello_common` blur
+//!   planner and kernel the engine's filter passes run, reading transparent
+//!   black past the region (`EdgeMode::None`) — and the walk restarts on a
+//!   canvas holding the rasterized scene as its first image, then paints the
+//!   rectangle with the blurred image under whatever clip is open. A backdrop
+//!   inside a translucent layer draws nothing, as on the engine. Not a gap,
+//!   so nothing is counted: for a σ the planner convolves directly (device σ
+//!   ≤ 2) the two arms run the same discrete kernel; past it they decimate
+//!   from different region origins, which is why the corpus pins the
+//!   backdrop at a σ inside that bound.
 //! - [`frust_scene::Command::SceneTexture`] has no CPU equivalent — resolving
 //!   an externally owned GPU texture against a registered-texture set is a
 //!   render-backend concern this oracle has no GPU context to perform, and
@@ -95,7 +111,11 @@ use frust_scene::{Command, GlyphRun, PathStyle, Scene};
 use kurbo::{
     Affine, BezPath, Line, PathEl, Point, Rect, RoundedRect, RoundedRectRadii, Shape, Stroke,
 };
-use peniko::{BlendMode, Brush, Color, Compose, Fill, ImageData, Mix};
+use std::sync::Arc;
+
+use peniko::{BlendMode, Brush, Color, Compose, Fill, ImageData, ImageQuality, ImageSampler, Mix};
+use vello_common::filter_effects::{EdgeMode, Filter, FilterPrimitive};
+use vello_common::util::extract_scales;
 use vello_cpu_oracle::{
     Image, ImageSource, Level, PaintType, Pixmap, RenderContext, RenderSettings, Resources,
 };
@@ -374,6 +394,7 @@ impl SceneRenderer for CpuOracle {
             let mut painter = Painter {
                 ctx: &mut self.ctx,
                 resources: &mut self.resources,
+                pixmap: &mut self.pixmap,
                 skips: SkipReport::default(),
             };
             self.routed = encode_commands(scene.commands(), root, &mut painter);
@@ -405,6 +426,9 @@ impl SceneRenderer for CpuOracle {
 struct Painter<'a> {
     ctx: &'a mut RenderContext,
     resources: &'a mut Resources,
+    /// The render target, which a [`Command::BackdropBlur`] rasterizes the
+    /// scene so far into before reading its region back.
+    pixmap: &'a mut Pixmap,
     skips: SkipReport,
 }
 
@@ -593,6 +617,67 @@ impl Painter<'_> {
         self.ctx.set_paint(Color::BLACK);
         self.ctx.fill_rect(rect);
         self.ctx.pop_layer();
+    }
+
+    /// Paints a backdrop blur of device σ `sigma` over `region` (both
+    /// [`backdrop_geometry`]'s), through `rect` under `transform`, with every
+    /// open group already popped — see the module docs' gap list for the
+    /// whole lowering. The caller re-pushes the groups after.
+    fn backdrop_blur(
+        &mut self,
+        transform: Affine,
+        rect: &Rect,
+        sigma: f32,
+        region: Rect,
+        groups: &[(Group, Affine, Rect)],
+    ) {
+        // The scene so far, rasterized: the backdrop.
+        self.ctx.flush();
+        self.ctx.render(&mut *self.pixmap, self.resources);
+        let backdrop = Arc::new(self.pixmap.clone());
+
+        // Its region, blurred, on a canvas of the target's own size, so the
+        // blurred image lands at the device position it was read from.
+        let (width, height) = (self.pixmap.width(), self.pixmap.height());
+        let mut blurred = Pixmap::new(width, height);
+        let mut blur = RenderContext::new_with(width, height, pinned_settings());
+        blur.set_transform(Affine::IDENTITY);
+        blur.push_layer(
+            None,
+            None,
+            None,
+            None,
+            Some(Filter::from_primitive(FilterPrimitive::GaussianBlur {
+                std_deviation: sigma,
+                edge_mode: EdgeMode::None,
+            })),
+        );
+        blur.set_fill_rule(Fill::NonZero);
+        blur.set_paint(PaintType::Image(device_image(backdrop.clone())));
+        blur.fill_rect(&region);
+        blur.pop_layer();
+        blur.flush();
+        blur.render(&mut blurred, self.resources);
+
+        // The walk restarts on a canvas holding the scene so far, drawn back
+        // texel for texel, with the open groups around what comes next.
+        self.ctx.reset();
+        self.ctx.set_transform(Affine::IDENTITY);
+        self.ctx.set_fill_rule(Fill::NonZero);
+        self.ctx.set_paint(PaintType::Image(device_image(backdrop)));
+        self.ctx
+            .fill_rect(&Rect::new(0.0, 0.0, f64::from(width), f64::from(height)));
+        push_groups(self, groups);
+
+        // The rectangle, painted from the blurred canvas at each pixel's own
+        // device position: the paint transform undoes the rectangle's own.
+        self.ctx.set_transform(transform);
+        self.ctx.set_fill_rule(Fill::NonZero);
+        self.ctx
+            .set_paint(PaintType::Image(device_image(Arc::new(blurred))));
+        self.ctx.set_paint_transform(transform.inverse());
+        self.ctx.fill_rect(rect);
+        self.ctx.reset_paint_transform();
     }
 
     fn fill_path(&mut self, transform: Affine, brush: &Brush, path: &BezPath) {
@@ -808,23 +893,32 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
                     punch = punch.intersect(t.transform_rect_bbox(*r));
                 }
                 if punch.width() > 0.0 && punch.height() > 0.0 {
-                    for (kind, ..) in groups.iter().rev() {
-                        match kind {
-                            Group::Clip(_) | Group::ClipPath(_) => painter.pop_clip(),
-                            Group::Layer(_) | Group::SnapshotLayer(_) => painter.pop_layer(),
-                        }
-                    }
+                    pop_groups(painter, &groups);
                     painter.clear_rect(Affine::IDENTITY, &punch);
-                    for (kind, t, r) in &groups {
-                        match kind {
-                            Group::Clip(None) => painter.push_clip(*t, r),
-                            Group::Clip(Some(radii)) => painter.push_clip_rounded(*t, r, *radii),
-                            Group::ClipPath(path) => painter.push_clip_path(*t, path),
-                            Group::Layer(alpha) | Group::SnapshotLayer(alpha) => {
-                                painter.push_layer(*t, r, *alpha)
-                            }
-                        }
-                    }
+                    push_groups(painter, &groups);
+                }
+            }
+            Command::BackdropBlur {
+                rect,
+                radius,
+                transform,
+            } => {
+                // Served only where the walk draws into the frame's own
+                // target, as on the engine (`frust-engine`'s scheduler): a
+                // translucent group isolates what is inside it, so there is no
+                // frame beneath to sample there and the backdrop draws
+                // nothing. A group at full opacity composites as its contents
+                // drawn directly, which is what popping it here does.
+                let isolated = groups.iter().any(|(kind, ..)| {
+                    matches!(kind, Group::Layer(alpha) | Group::SnapshotLayer(alpha) if *alpha < 1.0)
+                });
+                let transform = combined * *transform;
+                let size = (painter.pixmap.width(), painter.pixmap.height());
+                if !isolated
+                    && let Some((sigma, region)) = backdrop_geometry(rect, *radius, transform, size)
+                {
+                    pop_groups(painter, &groups);
+                    painter.backdrop_blur(transform, rect, sigma, region, &groups);
                 }
             }
             Command::Path {
@@ -962,6 +1056,80 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
     }
 
     routed
+}
+
+/// Pops every open group off the backend, innermost first — the half of the
+/// root hoist a `ClearRect` and a `BackdropBlur` share.
+fn pop_groups(painter: &mut Painter<'_>, groups: &[(Group, Affine, Rect)]) {
+    for (kind, ..) in groups.iter().rev() {
+        match kind {
+            Group::Clip(_) | Group::ClipPath(_) => painter.pop_clip(),
+            Group::Layer(_) | Group::SnapshotLayer(_) => painter.pop_layer(),
+        }
+    }
+}
+
+/// Re-pushes every open group, outermost first — the other half.
+fn push_groups(painter: &mut Painter<'_>, groups: &[(Group, Affine, Rect)]) {
+    for (kind, t, r) in groups {
+        match kind {
+            Group::Clip(None) => painter.push_clip(*t, r),
+            Group::Clip(Some(radii)) => painter.push_clip_rounded(*t, r, *radii),
+            Group::ClipPath(path) => painter.push_clip_path(*t, path),
+            Group::Layer(alpha) | Group::SnapshotLayer(alpha) => painter.push_layer(*t, r, *alpha),
+        }
+    }
+}
+
+/// An image paint sampling `pixmap` texel for texel in device space: nearest
+/// sampling, so a pixel centre reads exactly the texel under it.
+fn device_image(pixmap: Arc<Pixmap>) -> Image {
+    Image {
+        image: ImageSource::Pixmap(pixmap),
+        sampler: ImageSampler {
+            quality: ImageQuality::Low,
+            ..ImageSampler::default()
+        },
+    }
+}
+
+/// The device σ and device region a `Command::BackdropBlur` of `radius` over
+/// `rect` under `transform` blurs on a `size` target, or `None` for one that
+/// blurs nothing or lies off the target.
+///
+/// This crate's own copy of `frust-engine`'s `filters::backdrop_sigma` and
+/// `filters::backdrop_region` — σ scaled by the transform's averaged singular
+/// values and clamped to 4096, the bounding box grown by `ceil(3σ)`, clamped
+/// to the target and snapped outward to the 4-pixel tile grid on its near
+/// edges — kept independent for the reason the module docs give, and pinned
+/// against the engine's by `tests/fuzz.rs`.
+#[must_use]
+pub fn backdrop_geometry(
+    rect: &Rect,
+    radius: f64,
+    transform: Affine,
+    size: (u16, u16),
+) -> Option<(f32, Rect)> {
+    let (scale_x, scale_y) = extract_scales(&transform);
+    let sigma = radius as f32 * ((scale_x + scale_y) / 2.0);
+    // `NaN` included: it compares false against zero as well.
+    if sigma.is_nan() || sigma <= 0.0 {
+        return None;
+    }
+    let sigma = sigma.min(4096.0);
+    let reach = f64::from((3.0 * sigma).ceil());
+    let grown = transform.transform_rect_bbox(*rect).inflate(reach, reach);
+    let (width, height) = (f64::from(size.0), f64::from(size.1));
+    let x0 = grown.x0.floor().clamp(0.0, width);
+    let y0 = grown.y0.floor().clamp(0.0, height);
+    let x1 = grown.x1.ceil().clamp(0.0, width);
+    let y1 = grown.y1.ceil().clamp(0.0, height);
+    if !(x0 < x1 && y0 < y1) {
+        return None;
+    }
+    let x0 = (x0 / 4.0).floor() * 4.0;
+    let y0 = (y0 / 4.0).floor() * 4.0;
+    Some((sigma, Rect::new(x0, y0, x1, y1)))
 }
 
 /// `path` expanded into the sub-paths `dash` breaks it into.
@@ -1124,6 +1292,7 @@ mod tests {
             Command::PopRetained => "PopRetained",
             Command::DrawRetained { .. } => "DrawRetained",
             Command::SceneTexture { .. } => "SceneTexture",
+            Command::BackdropBlur { .. } => "BackdropBlur",
         }
     }
 
@@ -1131,7 +1300,7 @@ mod tests {
     /// `DrawRetained`: the oracle refuses it (see
     /// `a_draw_retained_is_a_renderer_error_in_the_oracle`), so the coverage
     /// scene, which renders, cannot hold one.
-    const ALL_VARIANTS: [&str; 18] = [
+    const ALL_VARIANTS: [&str; 19] = [
         "FillRect",
         "RoundedRect",
         "Line",
@@ -1150,6 +1319,7 @@ mod tests {
         "PushRetained",
         "PopRetained",
         "SceneTexture",
+        "BackdropBlur",
     ];
 
     /// A 4x4 opaque-red RGBA8 image, the smallest thing `Command::Image` can
@@ -1208,6 +1378,7 @@ mod tests {
                 Rect::new(10.0, 10.0, 18.0, 18.0),
                 0.25,
             );
+            builder.backdrop_blur(Rect::new(4.0, 4.0, 16.0, 16.0), 1.5);
             builder.push_clip(Rect::new(0.0, 0.0, 18.0, 18.0));
             builder.push_clip_rounded_radii(
                 Rect::new(1.0, 1.0, 17.0, 17.0),

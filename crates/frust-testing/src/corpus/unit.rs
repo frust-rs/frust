@@ -20,7 +20,7 @@
 //! # Coverage
 //!
 //! `tests::every_command_variant_is_covered` is the guard: it walks every
-//! case's recorded scene and asserts all 17 `Command` variants appear. A new
+//! case's recorded scene and asserts all 18 `Command` variants appear. A new
 //! variant fails that test until a case exists for it.
 //!
 //! # The two promoted cases
@@ -87,6 +87,7 @@ pub fn unit_cases() -> Vec<CorpusCase> {
         clip_balance(),
         image(),
         blur_rrect(),
+        backdrop_blur(),
         layer_alpha(),
         layer_balance(),
         layer_sibling_fan(),
@@ -813,6 +814,79 @@ fn blur_rrect() -> CorpusCase {
         probes: &[],
         eroded_interior: true,
         about: "four std_dev steps, the last with per-corner radii collapsed to the largest",
+    }
+}
+
+/// `Command::BackdropBlur` under a rounded clip, over a backdrop of 4-px
+/// vertical red/blue stripes with a yellow square, then a translucent white
+/// wash painted over the blurred panel — the frosted-glass shape.
+///
+/// Three things are pinned at once: the backdrop under the panel is blurred
+/// (the stripes mix, which an unblurred frame cannot show), everything outside
+/// the panel — including the pixels inside its rectangle but outside the
+/// rounded corner — is untouched, and what is recorded after the backdrop
+/// lands on top of it. The σ (1.5) is one the blur planner convolves directly,
+/// with no decimation, so the engine's filter passes and the CPU oracle's
+/// `vello_cpu` filter run the same discrete kernel (see `oracle_cpu`'s gap
+/// list).
+fn backdrop_blur() -> CorpusCase {
+    fn record(scene: &mut Scene) {
+        let mut builder = SceneBuilder::new(scene);
+        black_backdrop(&mut builder);
+        for stripe in 0..16 {
+            let x = f64::from(stripe) * 4.0;
+            let colour = if stripe % 2 == 0 { RED } else { BLUE };
+            builder.fill_rect(Rect::new(x, 0.0, x + 4.0, EDGE), Brush::Solid(colour));
+        }
+        builder.fill_rect(Rect::new(24.0, 12.0, 40.0, 24.0), Brush::Solid(YELLOW));
+        let panel = Rect::new(8.0, 8.0, 56.0, 56.0);
+        builder.push_clip_rounded(panel, 12.0);
+        builder.backdrop_blur(panel, 1.5);
+        builder.fill_rect(panel, Brush::Solid(WHITE.with_alpha(0.2)));
+        builder.pop_clip();
+    }
+    CorpusCase {
+        spec: case("unit-backdrop-blur"),
+        record,
+        probes: &[
+            Probe {
+                x: 2,
+                y: 32,
+                expect: Expect::Exact([255, 0, 0, 255]),
+                why: "a stripe outside the panel is the backdrop untouched",
+            },
+            Probe {
+                x: 9,
+                y: 9,
+                expect: Expect::Exact([255, 0, 0, 255]),
+                why: "inside the panel's rectangle but outside its rounded corner, the clip masks                       the blur away",
+            },
+            Probe {
+                x: 32,
+                y: 40,
+                expect: Expect::AtLeast {
+                    channel: 2,
+                    min: 90,
+                },
+                why: "the left column of a red stripe takes blue from the stripe beside it once                       blurred (unblurred, the wash alone leaves blue at 51)",
+            },
+            Probe {
+                x: 32,
+                y: 40,
+                expect: Expect::AtLeast {
+                    channel: 0,
+                    min: 140,
+                },
+                why: "and keeps most of its own red",
+            },
+        ],
+        // The rounded clip's antialiased rim is where the panel's blurred
+        // pixels meet the unblurred stripes beside them, so a one-level
+        // coverage rounding difference between two rasterizers' masks reads
+        // as a several-level colour difference there — edge jitter one pixel
+        // wide, which the comparator erodes, never an interior change.
+        eroded_interior: true,
+        about: "a frosted panel: backdrop blur under a rounded clip, a white wash over it",
     }
 }
 
@@ -1696,6 +1770,7 @@ mod tests {
             Command::PopRetained => "PopRetained",
             Command::DrawRetained { .. } => "DrawRetained",
             Command::SceneTexture { .. } => "SceneTexture",
+            Command::BackdropBlur { .. } => "BackdropBlur",
         }
     }
 
@@ -1724,6 +1799,7 @@ mod tests {
         "ShaderQuad",
         "PushRetained",
         "PopRetained",
+        "BackdropBlur",
     ];
 
     #[test]

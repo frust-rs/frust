@@ -385,6 +385,33 @@ pub enum Command {
         dest: Rect,
         transform: Affine,
     },
+    /// Blur whatever is already painted beneath `rect`, under a transform —
+    /// a frosted-glass backdrop (CSS `backdrop-filter: blur(radius)`).
+    ///
+    /// Everything the scene recorded *before* this command, in painter order,
+    /// is the backdrop: the pixels under `rect` are replaced by a Gaussian
+    /// blur of standard deviation `radius` (in the pre-transform coordinate
+    /// space, scaled into device space by `transform` the way a blurred
+    /// rounded rect's `std_dev` is) of what was painted there, drawn through
+    /// any clip open around the command — a rounded or path clip masks the
+    /// blurred region exactly as it masks a fill. Commands recorded after
+    /// this one paint over the blurred region as usual. The blur reads
+    /// transparent black past the edge of the frame. A `radius` at or below
+    /// zero blurs nothing and draws nothing.
+    ///
+    /// The backdrop is the *frame's own* target: a backdrop blur recorded
+    /// inside an isolated (translucent) layer has no frame beneath it to
+    /// sample and draws nothing, and a [`Command::PushRetained`] body that
+    /// carries one is never retained — a page rasterized offscreen cannot
+    /// sample what is painted beneath it. A renderer bounds how many it serves
+    /// per frame (`frust-engine` refuses a frame recording more than four).
+    BackdropBlur {
+        rect: Rect,
+        /// The blur's standard deviation, in the pre-transform coordinate
+        /// space.
+        radius: f64,
+        transform: Affine,
+    },
 }
 
 /// Renderer-agnostic, immediate-mode display list.

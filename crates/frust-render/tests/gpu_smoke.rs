@@ -472,3 +472,86 @@ fn retained_page_redraws_identically_to_the_inline_emulation() {
     assert_eq!(engine.retained_ledger().count(), 0, "and empties the store");
     assert!(engine.take_retained_refusal());
 }
+
+/// A frosted-glass backdrop over a gradient, through the same headless seam
+/// every case above takes: the panel's centre is blurred, and every pixel
+/// outside the panel is exactly what the same frame without the backdrop
+/// paints.
+///
+/// The gradient carries a hard stop — red to blue at the frame's middle — so a
+/// blur has something to show: a smooth ramp is its own blur, a step is not.
+/// The headless target is `Rgba8Unorm` and copyable, so the engine reads the
+/// panel's region back by a texture copy; a swapchain frame takes the
+/// root-via-intermediate route instead (`context::frame_renders_via_intermediate`).
+#[test]
+#[ignore = "requires a GPU; run locally with `cargo test -p frust-render -- --ignored`"]
+fn a_backdrop_blur_softens_the_gradient_beneath_it_and_nothing_else() {
+    pollster::block_on(run_backdrop());
+}
+
+async fn run_backdrop() {
+    use peniko::{ColorStop, Gradient};
+
+    const PANEL: kurbo::Rect = kurbo::Rect::new(16.0, 16.0, 48.0, 48.0);
+    let mut headless = headless().await;
+    let scene = |backdrop: bool| {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let step = Gradient::new_linear((0.0, 0.0), (SIZE as f64, 0.0)).with_stops([
+            ColorStop::from((0.0, RED)),
+            ColorStop::from((0.5, RED)),
+            ColorStop::from((0.5, BLUE)),
+            ColorStop::from((1.0, BLUE)),
+        ]);
+        builder.fill_rect(
+            kurbo::Rect::new(0.0, 0.0, SIZE as f64, SIZE as f64),
+            Brush::Gradient(step),
+        );
+        if backdrop {
+            builder.backdrop_blur(PANEL, 3.0);
+        }
+        scene
+    };
+    let spec = HeadlessSpec::new(SIZE, SIZE);
+    let plain = headless
+        .render(&scene(false), &spec)
+        .await
+        .expect("the plain frame renders");
+    let blurred = headless
+        .render(&scene(true), &spec)
+        .await
+        .expect("the backdrop frame renders");
+
+    // Outside the panel: untouched, to the byte.
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let inside = PANEL.contains(kurbo::Point::new(f64::from(x) + 0.5, f64::from(y) + 0.5));
+            if !inside {
+                assert_eq!(
+                    blurred.pixel(x, y),
+                    plain.pixel(x, y),
+                    "pixel ({x}, {y}) outside the panel changed"
+                );
+            }
+        }
+    }
+
+    // At the centre, the step is blurred: the two pixels either side of it mix
+    // red and blue, where the plain frame keeps them pure.
+    let [r_plain, _, b_plain, _] = plain.pixel(SIZE / 2 - 1, SIZE / 2);
+    assert!(r_plain > 200 && b_plain < 20, "the plain step is sharp");
+    for x in [SIZE / 2 - 1, SIZE / 2] {
+        let [r, _, b, a] = blurred.pixel(x, SIZE / 2);
+        assert!(
+            r > 60 && b > 60 && a == 255,
+            "the panel's centre column {x} mixes the two sides of the step: rgb=({r},_,{b}) a={a}"
+        );
+    }
+    // Deep inside the panel, away from the step, the blur of a flat colour is
+    // that colour.
+    let [r, g, b, _] = blurred.pixel(20, SIZE / 2);
+    assert!(
+        r > 200 && g < 20 && b < 60,
+        "flat red stays red: ({r},{g},{b})"
+    );
+}

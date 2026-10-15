@@ -522,7 +522,11 @@ pub(crate) fn plan_with<'a>(
             // A zero-strip command: the walk records at most an empty layer
             // for it (and, with retention off, the up-front validation refuses
             // a frame carrying one).
-            | Command::DrawRetained { .. } => continue,
+            | Command::DrawRetained { .. }
+            // A layer of its own the walk opens and closes around one draw it
+            // generates itself, under whatever mask is open: no bracket stays
+            // open past it, and its coverage is never offered to a helper.
+            | Command::BackdropBlur { .. } => continue,
             Command::FillRect { .. }
             | Command::RoundedRect { .. }
             | Command::Line { .. }
@@ -570,7 +574,8 @@ pub(crate) fn plan_with<'a>(
                 | Command::ClearRect { .. }
                 | Command::ShaderQuad { .. }
                 | Command::SceneTexture { .. }
-                | Command::DrawRetained { .. } => {}
+                | Command::DrawRetained { .. }
+                | Command::BackdropBlur { .. } => {}
             }
             continue;
         }
@@ -648,7 +653,8 @@ pub(crate) fn plan_with<'a>(
             | Command::ClearRect { .. }
             | Command::ShaderQuad { .. }
             | Command::SceneTexture { .. }
-            | Command::DrawRetained { .. } => {}
+            | Command::DrawRetained { .. }
+            | Command::BackdropBlur { .. } => {}
         }
     }
     plan
