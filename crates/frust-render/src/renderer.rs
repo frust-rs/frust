@@ -289,6 +289,117 @@ pub struct SurfaceRenderer {
     /// comparison. Outlives surface episodes: a recreate at the same scale is
     /// not a scale change (the fresh engine's store is empty anyway).
     device_scale: Option<u64>,
+    /// Whether frames render through the partial-repaint accumulator
+    /// ([`Self::set_partial_repaint`]) — off by default.
+    partial_repaint: bool,
+    /// The damage stated since the last frame the accumulator presented
+    /// ([`Self::set_frame_damage`]), carried across a frame that was refused
+    /// or never presented so the next one repaints it too.
+    owed_damage: OwedDamage,
+    /// Full/confined frame counts and confined area, for the
+    /// `frust-perf partial` trace line.
+    #[cfg(feature = "perf-trace")]
+    partial_trace: PartialTrace,
+}
+
+/// What a partial-repaint frame owes the accumulator (see
+/// [`SurfaceRenderer::set_frame_damage`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OwedDamage {
+    /// Nothing stated since the last presented frame: the frame is full,
+    /// since nothing says what changed.
+    Unstated,
+    /// The whole surface.
+    Full,
+    /// This rectangle, in device pixels — empty when nothing changed.
+    Rect(frust_engine::renderer::ScissorRect),
+}
+
+impl OwedDamage {
+    /// The damage after `damage` is also owed.
+    fn with(self, damage: Option<frust_engine::renderer::ScissorRect>) -> Self {
+        match (self, damage) {
+            (OwedDamage::Full, _) | (_, None) => OwedDamage::Full,
+            (OwedDamage::Unstated, Some(rect)) => OwedDamage::Rect(rect),
+            (OwedDamage::Rect(owed), Some(rect)) if owed.width == 0 || owed.height == 0 => {
+                OwedDamage::Rect(rect)
+            }
+            (OwedDamage::Rect(owed), Some(rect)) if rect.width == 0 || rect.height == 0 => {
+                OwedDamage::Rect(owed)
+            }
+            (OwedDamage::Rect(owed), Some(rect)) => {
+                OwedDamage::Rect(frust_engine::renderer::ScissorRect::from_corners(
+                    owed.x.min(rect.x),
+                    owed.y.min(rect.y),
+                    owed.x1().max(rect.x1()),
+                    owed.y1().max(rect.y1()),
+                ))
+            }
+        }
+    }
+
+    /// The scissor a frame owing this confines itself to — `None` for a full
+    /// frame. `forced_full` is a scene drawing a pixel source no paint
+    /// dirtiness tracks (`context::scene_forces_full_frame`).
+    fn scissor(self, forced_full: bool) -> Option<frust_engine::renderer::ScissorRect> {
+        match self {
+            OwedDamage::Rect(rect) if !forced_full => Some(rect),
+            _ => None,
+        }
+    }
+}
+
+/// The `frust-perf partial` counters: how many partial-repaint frames were
+/// full, how many were confined, and the confined frames' summed share of
+/// the surface, emitted once per [`PARTIAL_TRACE_WINDOW`] frames.
+#[cfg(feature = "perf-trace")]
+#[derive(Debug, Default)]
+struct PartialTrace {
+    full: u32,
+    confined: u32,
+    /// Summed confined area as a fraction of the surface, in parts per million.
+    area_ppm: u64,
+}
+
+/// Frames per `frust-perf partial` line.
+#[cfg(feature = "perf-trace")]
+const PARTIAL_TRACE_WINDOW: u32 = 120;
+
+#[cfg(feature = "perf-trace")]
+impl PartialTrace {
+    /// Counts one presented partial-repaint frame of a `width` x `height`
+    /// surface, confined to `scissor` or full, and logs the window when it
+    /// fills (only under `FRUST_TRACE`).
+    fn record(
+        &mut self,
+        scissor: Option<frust_engine::renderer::ScissorRect>,
+        width: u32,
+        height: u32,
+    ) {
+        match scissor {
+            Some(rect) => {
+                self.confined += 1;
+                let surface = u64::from(width.max(1)) * u64::from(height.max(1));
+                let area = u64::from(rect.width) * u64::from(rect.height);
+                self.area_ppm += area * 1_000_000 / surface;
+            }
+            None => self.full += 1,
+        }
+        if self.full + self.confined >= PARTIAL_TRACE_WINDOW {
+            if crate::context::perf_tracing_enabled() {
+                let mean_ppm = self.area_ppm / u64::from(self.confined.max(1));
+                log::info!(
+                    "frust-perf partial frames={} full={} confined={} confined_area_pct={}.{:02}",
+                    self.full + self.confined,
+                    self.full,
+                    self.confined,
+                    mean_ppm / 10_000,
+                    (mean_ppm % 10_000) / 100
+                );
+            }
+            *self = Self::default();
+        }
+    }
 }
 
 /// One retained page the renderer holds resident: the key it was recorded
@@ -447,7 +558,64 @@ impl SurfaceRenderer {
             first_submit_seen: false,
             retained_published: None,
             device_scale: None,
+            partial_repaint: false,
+            owed_damage: OwedDamage::Unstated,
+            #[cfg(feature = "perf-trace")]
+            partial_trace: PartialTrace::default(),
         }
+    }
+
+    /// Switches the partial-repaint spike on or off (`FRUST_PARTIAL_REPAINT`,
+    /// read by the shells; off by default, and off leaves every frame exactly
+    /// as it was).
+    ///
+    /// On, every frame is presented from a persistent surface-owned
+    /// accumulator: a frame confined to its damage
+    /// ([`Self::set_frame_damage`]) renders into the arm's readable root with
+    /// every surface pass scissored to it and copies that rectangle across,
+    /// and any other frame renders straight into the accumulator — then the
+    /// whole accumulator is presented through the arm's present pass. A frame
+    /// is full when no damage was stated for it, when its damage is the whole
+    /// surface, after a resize, a scale change or a surface recreate, when its
+    /// base colour changed, and when its scene draws a caller-bound texture or
+    /// a fragment-shader quad (pixel sources no paint dirtiness tracks).
+    pub fn set_partial_repaint(&mut self, on: bool) {
+        self.partial_repaint = on;
+        if !on {
+            self.owed_damage = OwedDamage::Unstated;
+            if let SurfaceState::Ready(ready) = &mut self.state {
+                ready.surface.partial.release();
+            }
+        }
+    }
+
+    /// Whether frames render through the partial-repaint accumulator.
+    pub fn partial_repaint(&self) -> bool {
+        self.partial_repaint
+    }
+
+    /// States the next frame's damage — what changed since the last frame
+    /// this renderer presented — in the surface's device pixels: `None` for
+    /// the whole surface, an empty rectangle for nothing. Rounded out to whole
+    /// pixels and grown by one on every side, for anti-aliased edges.
+    ///
+    /// Owed until a frame is presented: damage stated for a frame that was
+    /// refused or never reached the screen is repainted by the next one. Only
+    /// read with [`Self::set_partial_repaint`] on.
+    pub fn set_frame_damage(&mut self, damage: Option<kurbo::Rect>) {
+        let rect = damage.map(|rect| {
+            if rect.is_zero_area() || !rect.is_finite() {
+                return frust_engine::renderer::ScissorRect::from_corners(0, 0, 0, 0);
+            }
+            let to_px = |value: f64| value.clamp(0.0, f64::from(u32::MAX)) as u32;
+            frust_engine::renderer::ScissorRect::from_corners(
+                to_px(rect.x0.floor() - 1.0),
+                to_px(rect.y0.floor() - 1.0),
+                to_px(rect.x1.ceil() + 1.0),
+                to_px(rect.y1.ceil() + 1.0),
+            )
+        });
+        self.owed_damage = self.owed_damage.with(rect);
     }
 
     /// Takes the first rendered frame's submit decomposition, once.
@@ -640,6 +808,12 @@ impl SurfaceRenderer {
         self.device_scale = Some(bits);
         self.clear_retained();
         self.retained_published = None;
+        // Every pixel the partial-repaint accumulator holds was drawn at the
+        // old scale.
+        self.owed_damage = OwedDamage::Full;
+        if let SurfaceState::Ready(ready) = &mut self.state {
+            ready.surface.partial.invalidate();
+        }
         true
     }
 
@@ -1401,6 +1575,10 @@ impl SurfaceRenderer {
             state,
             pending_base_color,
             engine_scene,
+            partial_repaint,
+            owed_damage,
+            #[cfg(feature = "perf-trace")]
+            partial_trace,
             ..
         } = self;
         let SurfaceState::Ready(ready) = state else {
@@ -1409,6 +1587,13 @@ impl SurfaceRenderer {
         let ReadySurface {
             surface, backend, ..
         } = &mut **ready;
+        // The partial-repaint plan (`Self::set_partial_repaint`): `None` with
+        // the spike off — every frame below is then exactly what it always
+        // was — otherwise the scissor the frame owes, `None` for a full one.
+        let partial_damage = partial_repaint
+            .then(|| owed_damage.scissor(crate::context::scene_forces_full_frame(engine_scene)));
+        // Peeked, not taken: each arm takes it where it always has.
+        let partial_base = pending_base_color.unwrap_or(peniko::Color::BLACK);
         let device_handle = ctx.device_handle();
         let swapchain_view = surface_texture
             .texture
@@ -1419,6 +1604,7 @@ impl SurfaceRenderer {
         let (surface_width, surface_height) = (surface.config().width, surface.config().height);
         let engine_format = engine_target_format(&surface.path, surface_format);
 
+        let partial_root = &mut surface.partial;
         match &mut surface.path {
             // The engine tier's whole frame: one encoder, one
             // `EngineRenderer::encode` into the acquired swapchain view and
@@ -1443,10 +1629,25 @@ impl SurfaceRenderer {
                     shader_quads,
                     timestamps,
                 } = backend;
-                let root = crate::context::frame_renders_via_intermediate(
-                    crate::context::RenderPathKind::EngineDirect,
-                    crate::context::scene_carries_backdrop(engine_scene),
-                )
+                // With partial repaint on, every frame is presented from the
+                // surface's accumulator: a full frame renders straight into
+                // it, a confined one into the backdrop root (whose present
+                // pass the accumulator is presented through either way).
+                let partial = partial_damage.map(|damage| {
+                    partial_root.plan(
+                        &device_handle.device,
+                        surface_format,
+                        surface_width,
+                        surface_height,
+                        damage,
+                        partial_base,
+                    )
+                });
+                let root = (partial.is_some()
+                    || crate::context::frame_renders_via_intermediate(
+                        crate::context::RenderPathKind::EngineDirect,
+                        crate::context::scene_carries_backdrop(engine_scene),
+                    ))
                 .then(|| {
                     backdrop.prepare(
                         &device_handle.device,
@@ -1455,7 +1656,14 @@ impl SurfaceRenderer {
                         surface_height,
                     )
                 });
-                let engine_view = root.map_or(&swapchain_view, |(view, _)| view);
+                let engine_view = match (&partial, root) {
+                    (Some(frame), _) if frame.scissor.is_none() => frame.accumulator,
+                    (_, Some((view, _))) => view,
+                    _ => &swapchain_view,
+                };
+                if partial.is_some() || engine.frame_scissor().is_some() {
+                    engine.set_frame_scissor(partial.as_ref().and_then(|frame| frame.scissor));
+                }
                 // Set in `encode`; a well-formed frame always encoded first —
                 // the same fallback every other arm takes.
                 let base_color = pending_base_color.take().unwrap_or(peniko::Color::BLACK);
@@ -1534,10 +1742,37 @@ impl SurfaceRenderer {
                 probe.encode_end(engine);
                 match result {
                     Ok(()) => {
+                        // A partial-repaint frame: the confined rectangle
+                        // (as the engine applied it) copied into the
+                        // accumulator, then the whole accumulator presented.
+                        if let Some(frame) = partial.as_ref() {
+                            if let (Some(scissor), Some((view, _))) =
+                                (engine.last_frame_scissor(), root)
+                            {
+                                crate::context::copy_damage(
+                                    &mut encoder,
+                                    view,
+                                    frame.accumulator,
+                                    scissor,
+                                );
+                            }
+                            if let Some((_, present)) = root {
+                                present.record(
+                                    &device_handle.device,
+                                    &device_handle.queue,
+                                    &mut encoder,
+                                    frame.accumulator,
+                                    &swapchain_view,
+                                    (surface_width, surface_height),
+                                    frust_engine::FrameTimestamps::new(timestamps)
+                                        .writes(frust_engine::EngineSpan::Blit),
+                                );
+                            }
+                        }
                         // The backdrop root's copy into the swapchain, in the
                         // frame's own encoder after every engine pass, charged
                         // to `blit` like the straight-alpha arm's conversion.
-                        if let Some((view, present)) = root {
+                        else if let Some((view, present)) = root {
                             present.record(
                                 &device_handle.device,
                                 &device_handle.queue,
@@ -1559,6 +1794,18 @@ impl SurfaceRenderer {
                         probe.queue_end();
                         timestamps.end_frame();
                         engine.end_frame(&device_handle.queue);
+                        if partial.is_some() {
+                            // The accumulator holds this frame whole now; the
+                            // damage it owed is paid.
+                            #[cfg(feature = "perf-trace")]
+                            partial_trace.record(
+                                engine.last_frame_scissor(),
+                                surface_width,
+                                surface_height,
+                            );
+                            partial_root.commit(base_color);
+                            *owed_damage = OwedDamage::Unstated;
+                        }
                     }
                     Err(error) => {
                         // A refused frame left the encoder exactly as it was
@@ -1606,6 +1853,26 @@ impl SurfaceRenderer {
                     shader_quads,
                     timestamps,
                 } = backend;
+                // With partial repaint on, the frame is presented from the
+                // accumulator: a full frame renders straight into it, a
+                // confined one into this arm's own intermediate.
+                let partial = partial_damage.map(|damage| {
+                    partial_root.plan(
+                        &device_handle.device,
+                        engine_format,
+                        surface_width,
+                        surface_height,
+                        damage,
+                        partial_base,
+                    )
+                });
+                let engine_view = match &partial {
+                    Some(frame) if frame.scissor.is_none() => frame.accumulator,
+                    _ => &*intermediate_view,
+                };
+                if partial.is_some() || engine.frame_scissor().is_some() {
+                    engine.set_frame_scissor(partial.as_ref().and_then(|frame| frame.scissor));
+                }
                 let base_color = pending_base_color.take().unwrap_or(peniko::Color::BLACK);
                 let mut encoder =
                     device_handle
@@ -1649,7 +1916,7 @@ impl SurfaceRenderer {
                         // The frame lands in the intermediate, never in the
                         // swapchain: what the swapchain receives is the
                         // conversion's output.
-                        view: intermediate_view,
+                        view: engine_view,
                         format: engine_format,
                         width: surface_width,
                         height: surface_height,
@@ -1676,10 +1943,26 @@ impl SurfaceRenderer {
                         // recorded the frame's other spans into — `None` on an
                         // inert ring (no `perf-trace`, or the device never got
                         // `TIMESTAMP_QUERY`), exactly like every other pass.
+                        // A partial-repaint frame converts the accumulator,
+                        // after the confined rectangle was copied into it.
+                        let source = match partial.as_ref() {
+                            Some(frame) => {
+                                if let Some(scissor) = engine.last_frame_scissor() {
+                                    crate::context::copy_damage(
+                                        &mut encoder,
+                                        intermediate_view,
+                                        frame.accumulator,
+                                        scissor,
+                                    );
+                                }
+                                frame.accumulator
+                            }
+                            None => &*intermediate_view,
+                        };
                         present.record(
                             &device_handle.device,
                             &mut encoder,
-                            intermediate_view,
+                            source,
                             &swapchain_view,
                             frust_engine::FrameTimestamps::new(timestamps)
                                 .writes(frust_engine::EngineSpan::Blit),
@@ -1690,6 +1973,18 @@ impl SurfaceRenderer {
                         probe.queue_end();
                         timestamps.end_frame();
                         engine.end_frame(&device_handle.queue);
+                        if partial.is_some() {
+                            // The accumulator holds this frame whole now; the
+                            // damage it owed is paid.
+                            #[cfg(feature = "perf-trace")]
+                            partial_trace.record(
+                                engine.last_frame_scissor(),
+                                surface_width,
+                                surface_height,
+                            );
+                            partial_root.commit(base_color);
+                            *owed_damage = OwedDamage::Unstated;
+                        }
                     }
                     Err(error) => {
                         // Identical to the direct arm's refusal, and for the
@@ -1826,6 +2121,137 @@ mod tests {
                 .expect("failed to create device");
             (device, queue, caps)
         })
+    }
+
+    use frust_engine::renderer::ScissorRect;
+
+    #[test]
+    fn partial_repaint_is_off_until_asked_and_owes_a_full_frame_when_nothing_was_stated() {
+        let mut renderer = SurfaceRenderer::new();
+        assert!(!renderer.partial_repaint(), "off by default");
+        assert_eq!(renderer.owed_damage, OwedDamage::Unstated);
+        assert_eq!(
+            renderer.owed_damage.scissor(false),
+            None,
+            "unstated is full"
+        );
+        renderer.set_partial_repaint(true);
+        assert!(renderer.partial_repaint());
+        renderer.set_partial_repaint(false);
+        assert!(!renderer.partial_repaint());
+    }
+
+    #[test]
+    fn stated_damage_is_rounded_out_grown_by_a_pixel_and_owed_until_presented() {
+        let mut renderer = SurfaceRenderer::new();
+        renderer.set_frame_damage(Some(kurbo::Rect::new(10.2, 20.7, 30.5, 40.0)));
+        assert_eq!(
+            renderer.owed_damage.scissor(false),
+            Some(ScissorRect::from_corners(9, 19, 32, 41))
+        );
+        // A second frame's damage before anything was presented: both owed.
+        renderer.set_frame_damage(Some(kurbo::Rect::new(50.0, 50.0, 60.0, 60.0)));
+        assert_eq!(
+            renderer.owed_damage.scissor(false),
+            Some(ScissorRect::from_corners(9, 19, 61, 61))
+        );
+        // A scene drawing an untracked pixel source forces the frame full.
+        assert_eq!(renderer.owed_damage.scissor(true), None);
+        // The whole surface absorbs everything.
+        renderer.set_frame_damage(None);
+        assert_eq!(renderer.owed_damage, OwedDamage::Full);
+        renderer.set_frame_damage(Some(kurbo::Rect::new(0.0, 0.0, 1.0, 1.0)));
+        assert_eq!(renderer.owed_damage, OwedDamage::Full);
+    }
+
+    #[test]
+    fn nothing_changed_is_an_empty_scissor_that_any_real_damage_replaces() {
+        let empty = OwedDamage::Unstated.with(Some(ScissorRect::from_corners(0, 0, 0, 0)));
+        assert_eq!(
+            empty.scissor(false),
+            Some(ScissorRect::from_corners(0, 0, 0, 0))
+        );
+        let rect = ScissorRect::from_corners(4, 4, 8, 8);
+        assert_eq!(empty.with(Some(rect)), OwedDamage::Rect(rect));
+        assert_eq!(
+            OwedDamage::Rect(rect).with(Some(ScissorRect::from_corners(0, 0, 0, 0))),
+            OwedDamage::Rect(rect)
+        );
+    }
+
+    #[test]
+    fn a_device_scale_change_owes_a_full_frame() {
+        let mut renderer = SurfaceRenderer::new();
+        renderer.set_frame_damage(Some(kurbo::Rect::new(0.0, 0.0, 4.0, 4.0)));
+        assert!(renderer.note_device_scale(2.0));
+        assert_eq!(renderer.owed_damage, OwedDamage::Full);
+    }
+
+    /// The accumulator's frame plan on a real device: full until it holds a
+    /// whole frame, confined after, full again for a changed base colour, a
+    /// damage covering the target, an invalidation or a new extent.
+    #[test]
+    #[ignore = "requires a GPU; run locally with `cargo test -p frust-render -- --ignored`"]
+    fn the_partial_root_plans_full_frames_until_it_holds_one() {
+        let _serialized = RENDER_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (device, _queue, _caps) = test_device();
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let black = peniko::Color::BLACK;
+        let rect = ScissorRect::from_corners(4, 4, 8, 8);
+        let mut root = crate::context::PartialRoot::default();
+
+        assert_eq!(
+            root.plan(&device, format, 64, 64, Some(rect), black)
+                .scissor,
+            None,
+            "an accumulator holding no frame takes a full one"
+        );
+        root.commit(black);
+        assert_eq!(
+            root.plan(&device, format, 64, 64, Some(rect), black)
+                .scissor,
+            Some(rect),
+            "then frames are confined to their damage"
+        );
+        assert_eq!(
+            root.plan(&device, format, 64, 64, Some(rect), peniko::Color::WHITE)
+                .scissor,
+            None,
+            "a changed base colour repaints everything"
+        );
+        assert_eq!(
+            root.plan(
+                &device,
+                format,
+                64,
+                64,
+                Some(ScissorRect::from_corners(0, 0, 64, 64)),
+                black
+            )
+            .scissor,
+            None,
+            "damage covering the target is a full frame"
+        );
+        assert_eq!(
+            root.plan(&device, format, 64, 64, None, black).scissor,
+            None
+        );
+        root.invalidate();
+        assert_eq!(
+            root.plan(&device, format, 64, 64, Some(rect), black)
+                .scissor,
+            None,
+            "an invalidated accumulator takes a full frame"
+        );
+        root.commit(black);
+        assert_eq!(
+            root.plan(&device, format, 32, 64, Some(rect), black)
+                .scissor,
+            None,
+            "a new extent is a new accumulator"
+        );
     }
 
     #[test]

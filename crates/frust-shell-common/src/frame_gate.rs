@@ -773,6 +773,123 @@ impl LayoutKnobs {
     }
 }
 
+/// Turns the partial-repaint spike on when set to a value other than `"0"`:
+/// the shell switches damage publishing on in `frust-core`
+/// (`frust_core::app::set_damage_publishing`), feeds each frame's damage to
+/// its renderer through a [`DamageFeed`], and runs the renderer with
+/// `SurfaceRenderer::set_partial_repaint(true)`. Off by default, and off
+/// leaves every frame exactly as it was.
+pub const PARTIAL_REPAINT_VAR: &str = "FRUST_PARTIAL_REPAINT";
+
+/// Whether [`PARTIAL_REPAINT_VAR`] is set, from the compile-time define or the
+/// process environment — the same `option_env!` + runtime-env pair the layout
+/// knobs above read, resolved once per process.
+pub fn partial_repaint_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        let enabled = kill_switch(
+            option_env!("FRUST_PARTIAL_REPAINT"),
+            std::env::var(PARTIAL_REPAINT_VAR).ok().as_deref(),
+        );
+        if enabled {
+            log::info!("partial repaint=on (FRUST_PARTIAL_REPAINT)");
+        }
+        enabled
+    })
+}
+
+/// The shell-side damage feed of the partial-repaint spike: drains what
+/// `frust-core`'s paint passes published (`frust_core::app::take_published_damage`)
+/// once per rendered frame and turns it into the damage the renderer's
+/// `SurfaceRenderer::set_frame_damage` takes — `None` for the whole surface,
+/// an empty rectangle for nothing, otherwise device pixels.
+///
+/// **Inline vs split.** On the inline path the paint and the render of a
+/// frame run back to back on one thread, so one drain is exactly that frame's
+/// damage. On the render-thread split the render thread takes the newest scene
+/// off a latest-wins channel and cannot tell which scene a drain belongs to:
+/// a scene's damage is published before the scene is sent, but a drain can
+/// also catch scenes painted after the one being rendered — so a later scene's
+/// damage may already have been drained by an earlier frame. Every scene newer
+/// than the previously rendered one was painted after the drain two renders
+/// back began, so the union of this drain and the two before it covers every
+/// change since the last presented frame; that is what the split feed hands
+/// over, at the price of over-repainting by up to two frames' damage.
+#[derive(Debug)]
+pub struct DamageFeed {
+    /// The previous drains, newest first — how many are unioned in is `carry`.
+    previous: [frust_core::widget::PaintDamage; 2],
+    /// `0` inline, `2` on the split (see the type doc).
+    carry: usize,
+}
+
+impl DamageFeed {
+    /// A feed for a shell rendering inline (`split: false`) or on its own
+    /// render thread (`split: true`). Switches `frust-core`'s damage
+    /// publishing on for the process.
+    pub fn new(split: bool) -> Self {
+        frust_core::app::set_damage_publishing(true);
+        Self {
+            previous: [frust_core::widget::PaintDamage::Full; 2],
+            carry: if split { 2 } else { 0 },
+        }
+    }
+
+    /// The damage to hand the renderer for the frame about to be encoded.
+    pub fn next_frame(&mut self) -> Option<kurbo::Rect> {
+        let drained = frust_core::app::take_published_damage()
+            .unwrap_or(frust_core::widget::PaintDamage::Clean);
+        self.fold(drained)
+    }
+
+    /// [`Self::next_frame`] for an already drained union — the pure half,
+    /// unit-testable without the process-wide slot.
+    fn fold(&mut self, drained: frust_core::widget::PaintDamage) -> Option<kurbo::Rect> {
+        use frust_core::widget::PaintDamage;
+        let damage = self
+            .previous
+            .iter()
+            .take(self.carry)
+            .fold(drained, |damage, previous| damage.union(*previous));
+        self.previous = [drained, self.previous[0]];
+        match damage {
+            PaintDamage::Clean => Some(kurbo::Rect::ZERO),
+            PaintDamage::Rect(rect) => Some(rect),
+            PaintDamage::Full => None,
+        }
+    }
+}
+
+/// The partial-repaint damage for the frame about to be encoded on this
+/// thread, or `None` when [`PARTIAL_REPAINT_VAR`] is off (nothing is read or
+/// drained then).
+///
+/// For a shell whose render tail is a free function shared by its inline and
+/// render-thread paths: the [`DamageFeed`] lives in a thread-local on the
+/// thread that renders, built on first use for the path
+/// [`crate::render_split::render_thread_enabled`] selects (the web shell,
+/// which has no render thread, is always inline). A shell hands the
+/// answer to `SurfaceRenderer::set_frame_damage` after switching the renderer
+/// onto the spike with `set_partial_repaint(true)`.
+pub fn partial_repaint_damage() -> Option<Option<kurbo::Rect>> {
+    thread_local! {
+        static FEED: std::cell::RefCell<Option<DamageFeed>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    if !partial_repaint_enabled() {
+        return None;
+    }
+    Some(FEED.with(|feed| {
+        feed.borrow_mut()
+            .get_or_insert_with(|| {
+                DamageFeed::new(
+                    !cfg!(target_arch = "wasm32") && crate::render_split::render_thread_enabled(),
+                )
+            })
+            .next_frame()
+    }))
+}
+
 /// Reads the [`NO_FRAME_GATE_VAR`] kill switch from the compile-time define
 /// and the process environment, mirroring [`crate::perf::enabled`]'s
 /// `option_env!` + runtime-env pattern: either source set to a non-`"0"`
@@ -805,6 +922,47 @@ fn kill_switch(compile_time: Option<&str>, runtime: Option<&str>) -> bool {
         matches!(value, Some(v) if v != "0")
     }
     is_set_non_zero(compile_time) || is_set_non_zero(runtime)
+}
+
+#[cfg(test)]
+mod damage_feed_tests {
+    use super::DamageFeed;
+    use frust_core::widget::PaintDamage;
+    use kurbo::Rect;
+
+    /// A feed built without touching the process-wide publishing switch.
+    fn feed(carry: usize) -> DamageFeed {
+        DamageFeed {
+            previous: [PaintDamage::Full; 2],
+            carry,
+        }
+    }
+
+    #[test]
+    fn an_inline_feed_hands_over_exactly_each_drain() {
+        let mut feed = feed(0);
+        let a = Rect::new(0.0, 0.0, 10.0, 10.0);
+        assert_eq!(feed.fold(PaintDamage::Rect(a)), Some(a));
+        assert_eq!(feed.fold(PaintDamage::Clean), Some(Rect::ZERO));
+        assert_eq!(feed.fold(PaintDamage::Full), None);
+    }
+
+    #[test]
+    fn a_split_feed_unions_each_drain_with_the_two_before_it() {
+        let mut feed = feed(2);
+        let (a, b, c) = (
+            Rect::new(0.0, 0.0, 10.0, 10.0),
+            Rect::new(20.0, 0.0, 30.0, 10.0),
+            Rect::new(40.0, 0.0, 50.0, 10.0),
+        );
+        // A fresh feed owes full frames until two drains have been seen.
+        assert_eq!(feed.fold(PaintDamage::Rect(a)), None);
+        assert_eq!(feed.fold(PaintDamage::Rect(b)), None);
+        assert_eq!(feed.fold(PaintDamage::Rect(c)), Some(a.union(b).union(c)));
+        assert_eq!(feed.fold(PaintDamage::Clean), Some(b.union(c)));
+        assert_eq!(feed.fold(PaintDamage::Clean), Some(c));
+        assert_eq!(feed.fold(PaintDamage::Clean), Some(Rect::ZERO));
+    }
 }
 
 #[cfg(test)]

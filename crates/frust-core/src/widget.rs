@@ -1090,6 +1090,11 @@ pub struct PaintCtx<'a> {
     /// [`ChildPod::paint_child`] like `platform_views`. See
     /// [`PaintCtx::paint_publications`].
     paint_publications: u32,
+    /// The device-space damage the pods painted through this context reported
+    /// this pass — the union [`ChildPod::paint_child`] folds up the paint path
+    /// and [`crate::app::RenderRoot::damage_rect`] reads at the root (see
+    /// [`PaintDamage`]). `None` while nothing below has reported any.
+    damage: Option<Rect>,
 }
 
 impl<'a> PaintCtx<'a> {
@@ -1127,6 +1132,7 @@ impl<'a> PaintCtx<'a> {
             retained_layers: true,
             retained_ledger: None,
             paint_publications: 0,
+            damage: None,
         }
     }
 
@@ -1846,11 +1852,15 @@ impl<'a> PaintCtx<'a> {
             retained_layers: self.retained_layers,
             retained_ledger: self.retained_ledger,
             paint_publications: 0,
+            damage: None,
         };
         f(&mut child);
         self.paint_publications = self
             .paint_publications
             .saturating_add(child.paint_publications);
+        // The pods painted inside the closure reported their damage into the
+        // child context; it is this context's damage as much as theirs.
+        self.add_damage(child.damage);
         if child.needs_frame {
             self.needs_frame = true;
         }
@@ -1971,6 +1981,19 @@ impl<'a> PaintCtx<'a> {
         self.paint_epoch = paint_epoch;
         self.retained_layers = retained_layers;
         self.retained_ledger = retained_ledger;
+    }
+
+    /// Fold `rect` (device space) into the damage this context reports.
+    pub(crate) fn add_damage(&mut self, rect: Option<Rect>) {
+        self.damage = match (self.damage, rect) {
+            (Some(standing), Some(rect)) => Some(standing.union(rect)),
+            (standing, rect) => standing.or(rect),
+        };
+    }
+
+    /// Take the damage the pods painted through this context reported.
+    pub(crate) fn take_damage(&mut self) -> Option<Rect> {
+        self.damage.take()
     }
 
     /// Whether the renderer still holds a retained page for `key` at `rect_px`
@@ -2276,6 +2299,55 @@ pub struct PaintOutcome {
     /// `needs_frame_paced_only`; a shell latches it beside that flag and hands it
     /// to the frame gate, which resolves it against the live theme's cap.
     pub paced_interval: Option<Duration>,
+}
+
+/// What one [`crate::app::RenderRoot::paint`] pass painted differently from
+/// the pass before it, in device space — the damage a renderer may confine
+/// its next frame to ([`crate::app::RenderRoot::damage_rect`]).
+///
+/// Derived from the per-pod paint dirtiness ([`PaintCtx::subtree_clean`]'s
+/// bookkeeping) as the pass goes past, with no second walk: a dirty pod
+/// reports its device bounds when it is the deepest dirty pod on its path
+/// (dirtiness marks the whole path from a change to the root, so an ancestor
+/// whose dirt is explained by a dirty descendant reports nothing of its own),
+/// when its own layout ran since it was last painted, or when it is painted
+/// somewhere else than last time — each time the union of where it was and
+/// where it is now. Bounds are read through the scene's current transform
+/// ([`PaintScene::current_transform`]), so the shell's device scale and every
+/// transform an ancestor pushed are already applied; a scene that tracks none
+/// reports them untransformed.
+///
+/// **What it does not see.** A container whose own drawing changed in the
+/// same pass as a dirty descendant's reports only the descendant (the
+/// dirtiness bit cannot tell its own change from the path mark); a pod's ink
+/// outside its own bounds (a shadow, an overflowing child) is not covered;
+/// and a frame whose pixels change without any paint dirtiness (a scene
+/// texture, a shader quad's clock) reports nothing for them — a renderer
+/// confining a frame to this rectangle owns those cases.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum PaintDamage {
+    /// Nothing reported damage: the pass painted what the last one did.
+    #[default]
+    Clean,
+    /// The union of every reported rectangle, in device space.
+    Rect(Rect),
+    /// The whole surface: the first pass, a moved paint epoch (theme, insets,
+    /// window size, surface translucency), or a root whose own widget changed
+    /// with nothing below it to account for the change.
+    Full,
+}
+
+impl PaintDamage {
+    /// The union of `self` and `other`: `Full` absorbs everything, `Clean` is
+    /// the identity.
+    #[must_use]
+    pub fn union(self, other: PaintDamage) -> PaintDamage {
+        match (self, other) {
+            (PaintDamage::Full, _) | (_, PaintDamage::Full) => PaintDamage::Full,
+            (PaintDamage::Clean, other) | (other, PaintDamage::Clean) => other,
+            (PaintDamage::Rect(a), PaintDamage::Rect(b)) => PaintDamage::Rect(a.union(b)),
+        }
+    }
 }
 
 /// A retained UI element living in the widget tree.
@@ -2602,6 +2674,15 @@ pub struct ChildPod {
     paint_dirty: bool,
     /// The paint epoch the last paint that cleared `paint_dirty` ran under.
     painted_epoch: u64,
+    /// Whether this pod's own layout ran since its subtree was last painted —
+    /// its geometry, and so anything it draws around its children, may have
+    /// moved, which is what widens its damage past its dirty descendants'
+    /// (see [`PaintDamage`]).
+    laid_out_since_paint: bool,
+    /// The device-space bounds this pod was last painted at — `None` until it
+    /// has been. A pod painted somewhere else this pass damages both the old
+    /// and the new bounds (see [`PaintDamage`]).
+    painted_rect: Option<Rect>,
     /// The constraints the last layout that ran was handed — `None` until one
     /// has. Half of the skip key: a parent handing different constraints lays
     /// the child out again.
@@ -2783,6 +2864,8 @@ impl ChildPod {
             layout_dirty: true,
             paint_dirty: true,
             painted_epoch: 0,
+            laid_out_since_paint: true,
+            painted_rect: None,
             last_constraints: None,
             last_epoch: 0,
             last_insets: WindowInsets::default(),
@@ -3215,6 +3298,7 @@ impl ChildPod {
         self.layout_dirty = false;
         // Layout actually ran: geometry may differ, so the painted output is stale.
         self.paint_dirty = true;
+        self.laid_out_since_paint = true;
         size
     }
 
@@ -3273,6 +3357,7 @@ impl ChildPod {
         self.last_insets = ctx.window_insets;
         self.layout_dirty = geometry.scroll_offset_correction.is_some();
         self.paint_dirty = true;
+        self.laid_out_since_paint = true;
         Some(geometry)
     }
 
@@ -3346,6 +3431,16 @@ impl ChildPod {
         visible_rect: Option<Rect>,
     ) {
         let child_origin = ctx.origin() + self.origin.to_vec2();
+        // The damage half of the pass (see `PaintDamage`), settled before the
+        // child paints anything: where this pod lands on the device now — the
+        // scene's own transform, the shell's device scale and every transform
+        // an ancestor pushed included — and whether its subtree entered the
+        // pass dirty.
+        let device_rect = scene
+            .current_transform()
+            .unwrap_or(Affine::IDENTITY)
+            .transform_rect_bbox(Rect::from_origin_size(child_origin, self.size));
+        let entered_dirty = self.paint_dirty || self.painted_epoch != ctx.paint_epoch;
         let mut child_ctx = PaintCtx::new(child_origin, self.size);
         // Thread the shared shell clock down unchanged so every widget in the
         // frame advances animations against one consistent timestamp.
@@ -3491,6 +3586,21 @@ impl ChildPod {
         // (the landing paint), or a pod below was dirtied during it.
         self.paint_dirty = dirtied;
         self.painted_epoch = ctx.paint_epoch;
+        // Damage: the descendants' own, plus this pod's bounds (old and new)
+        // when it is the deepest dirty pod on its path, when its own layout ran
+        // since it was last painted, or when it is painted somewhere else.
+        let below = child_ctx.take_damage();
+        let moved = self.painted_rect != Some(device_rect);
+        let own = (entered_dirty && (below.is_none() || self.laid_out_since_paint)) || moved;
+        ctx.add_damage(below);
+        if own {
+            ctx.add_damage(Some(
+                self.painted_rect
+                    .map_or(device_rect, |old| old.union(device_rect)),
+            ));
+        }
+        self.painted_rect = Some(device_rect);
+        self.laid_out_since_paint = false;
         let unpaced = child_ctx.needs_layout()
             || (child_ctx.needs_frame() && !child_ctx.needs_frame_paced_only());
         let landing = self.painted_animating && !animating;
