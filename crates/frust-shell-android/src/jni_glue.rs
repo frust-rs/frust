@@ -2148,41 +2148,45 @@ fn platform_view_commands_to_json(
 ) -> Vec<PlatformViewCommandJson> {
     commands
         .iter()
-        .map(|cmd| match cmd {
+        .filter_map(|cmd| match cmd {
             ViewCommand::Create {
                 slot_id,
                 view_type,
                 params_json,
                 interactive,
-            } => PlatformViewCommandJson::Create {
+            } => Some(PlatformViewCommandJson::Create {
                 slot_id: *slot_id,
                 view_type: view_type.clone(),
                 params_json: params_json.clone(),
                 interactive: *interactive,
-            },
+            }),
             ViewCommand::Update {
                 slot_id,
                 rect,
                 clip,
                 visible,
                 shields,
-            } => PlatformViewCommandJson::Update {
+                ..
+            } => Some(PlatformViewCommandJson::Update {
                 slot_id: *slot_id,
                 rect: scale_rect(*rect, scale),
                 clip: clip.map(|c| scale_rect(c, scale)),
                 visible: *visible,
                 shields: shields.iter().map(|s| scale_rect(*s, scale)).collect(),
-            },
+            }),
             ViewCommand::UpdateParams {
                 slot_id,
                 params_json,
-            } => PlatformViewCommandJson::UpdateParams {
+            } => Some(PlatformViewCommandJson::UpdateParams {
                 slot_id: *slot_id,
                 params_json: params_json.clone(),
-            },
+            }),
             ViewCommand::Dispose { slot_id } => {
-                PlatformViewCommandJson::Dispose { slot_id: *slot_id }
+                Some(PlatformViewCommandJson::Dispose { slot_id: *slot_id })
             }
+            // Overlays have no Android host yet; the shell's plain `ingest`
+            // never produces them.
+            ViewCommand::Overlay { .. } | ViewCommand::DisposeOverlay { .. } => None,
         })
         .collect()
 }
