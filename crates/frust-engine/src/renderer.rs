@@ -6836,25 +6836,67 @@ pub fn project_command_range(
     options: RangeOptions,
     out: &mut Scene,
 ) -> RangeCut {
+    project_command_ranges(scene, std::slice::from_ref(&range), options, out)
+}
+
+/// [`project_command_range`] over several ranges at once: writes the
+/// projection of each range of `ranges`, in the order given, one after the
+/// other into `out` (reset first), and reports the cuts summed — the segmented
+/// frame's way of drawing the commands *between* overlay cuts on the main
+/// surface (render-model Phase 4, decision D10).
+///
+/// Each range is projected exactly as [`project_command_range`] projects it
+/// alone — clamped to the scene, its open clips and layers reopened ahead of
+/// it and closed after it, a retained bracket spanning either of its ends
+/// demoted to inline paint — so every range is self-contained and the bracket
+/// rule holds per range. A clip open across the gap between two ranges is
+/// therefore closed at the end of the first and reopened at the start of the
+/// second, never left open over the commands the gap removed.
+///
+/// The caller passes the ranges ascending and disjoint (the complement of a
+/// frame's overlay cuts is); overlapping ranges are projected as given, each
+/// command carried once per range it falls in. An empty range still reopens
+/// and closes the brackets open at its start (drawing nothing), so a caller
+/// that wants no trace of it leaves it out.
+///
+/// The returned [`RangeCut`]'s `start` is the first range's clamped start and
+/// its `end` the last range's clamped end (both `0` for no range at all); its
+/// counters are the sums over every range.
+pub fn project_command_ranges(
+    scene: &Scene,
+    ranges: &[Range<usize>],
+    options: RangeOptions,
+    out: &mut Scene,
+) -> RangeCut {
     let commands = scene.commands();
     let len = commands.len();
-    let end = range.end.min(len);
-    let start = range.start.min(end);
+    let clamped: Vec<(usize, usize)> = ranges
+        .iter()
+        .map(|range| {
+            let end = range.end.min(len);
+            (range.start.min(end), end)
+        })
+        .collect();
     let mut cut = RangeCut {
-        start,
-        end,
+        start: clamped.first().map_or(0, |&(start, _)| start),
+        end: clamped.last().map_or(0, |&(_, end)| end),
         ..RangeCut::default()
     };
 
     // Pass one, over the whole scene: where each bracket closes, and which
-    // brackets are open at `start` (in push order).
+    // brackets are open at each range's start (in push order).
     let mut closed_at: Vec<Option<usize>> = vec![None; len];
     let mut stack: Vec<(BracketKind, usize)> = Vec::new();
-    let mut open_at_start: Vec<usize> = Vec::new();
-    for (index, command) in commands.iter().enumerate() {
-        if index == start {
-            open_at_start.extend(stack.iter().map(|&(_, at)| at));
+    let mut open_at_start: Vec<Vec<usize>> = vec![Vec::new(); clamped.len()];
+    let snapshot = |index: usize, stack: &[(BracketKind, usize)], open: &mut [Vec<usize>]| {
+        for (slot, &(start, _)) in open.iter_mut().zip(&clamped) {
+            if start == index {
+                slot.extend(stack.iter().map(|&(_, at)| at));
+            }
         }
+    };
+    for (index, command) in commands.iter().enumerate() {
+        snapshot(index, &stack, &mut open_at_start);
         if let Some(kind) = opens(command) {
             stack.push((kind, index));
         } else if let Some(kind) = closes(command)
@@ -6864,19 +6906,19 @@ pub fn project_command_range(
             closed_at[at] = Some(index);
         }
     }
-    if start == len {
-        open_at_start.extend(stack.iter().map(|&(_, at)| at));
-    }
-    // A retained bracket spans a cut when it opened before the range, or is
-    // still open where the range ends short of the scene's own end.
-    let spans = |at: usize| at < start || (end < len && closed_at[at].is_none_or(|c| c >= end));
+    snapshot(len, &stack, &mut open_at_start);
+    // A retained bracket spans a cut of the range `start..end` when it opened
+    // before the range, or is still open where the range ends short of the
+    // scene's own end.
+    let spans = |at: usize, start: usize, end: usize| {
+        at < start || (end < len && closed_at[at].is_none_or(|c| c >= end))
+    };
 
     out.reset();
     let mut builder = SceneBuilder::new(out);
-    let mut open: Vec<OpenBracket> = Vec::new();
-    let mut prefix = Affine::IDENTITY;
 
     let push = |at: usize,
+                (start, end): (usize, usize),
                 builder: &mut SceneBuilder<'_>,
                 open: &mut Vec<OpenBracket>,
                 prefix: &mut Affine,
@@ -6895,7 +6937,7 @@ pub fn project_command_range(
                     .any(|bracket| matches!(bracket, OpenBracket::Demoted { .. }))
                 {
                     open.push(OpenBracket::Absorbed);
-                } else if spans(at) {
+                } else if spans(at, start, end) {
                     cut.demoted_retained += 1;
                     let correction =
                         crate::compile::layers::retained_correction(*rect, *scale, *transform);
@@ -6943,32 +6985,46 @@ pub fn project_command_range(
             OpenBracket::Absorbed => {}
         };
 
-    for &at in &open_at_start {
-        cut.reopened += 1;
-        push(at, &mut builder, &mut open, &mut prefix, &mut cut);
-    }
-    for (index, command) in commands.iter().enumerate().take(end).skip(start) {
-        if opens(command).is_some() {
-            push(index, &mut builder, &mut open, &mut prefix, &mut cut);
-        } else if let Some(kind) = closes(command) {
-            match open.iter().rposition(|bracket| bracket.kind() == kind) {
-                Some(position) => {
-                    let bracket = open.remove(position);
-                    close(bracket, &mut builder, &mut prefix);
-                }
-                None => cut.dropped_pops += 1,
-            }
-        } else if matches!(command, frust_scene::Command::DrawRetained { .. })
-            && !options.keep_draw_retained
-        {
-            cut.dropped_draw_retained += 1;
-        } else {
-            replay(&mut builder, prefix, command);
+    let mut open: Vec<OpenBracket> = Vec::new();
+    for (&bounds, reopen) in clamped.iter().zip(&open_at_start) {
+        let (start, end) = bounds;
+        // Every range starts from the identity with nothing open: the one
+        // before it closed everything it opened.
+        let mut prefix = Affine::IDENTITY;
+        for &at in reopen {
+            cut.reopened += 1;
+            push(at, bounds, &mut builder, &mut open, &mut prefix, &mut cut);
         }
-    }
-    while let Some(bracket) = open.pop() {
-        cut.closed += 1;
-        close(bracket, &mut builder, &mut prefix);
+        for (index, command) in commands.iter().enumerate().take(end).skip(start) {
+            if opens(command).is_some() {
+                push(
+                    index,
+                    bounds,
+                    &mut builder,
+                    &mut open,
+                    &mut prefix,
+                    &mut cut,
+                );
+            } else if let Some(kind) = closes(command) {
+                match open.iter().rposition(|bracket| bracket.kind() == kind) {
+                    Some(position) => {
+                        let bracket = open.remove(position);
+                        close(bracket, &mut builder, &mut prefix);
+                    }
+                    None => cut.dropped_pops += 1,
+                }
+            } else if matches!(command, frust_scene::Command::DrawRetained { .. })
+                && !options.keep_draw_retained
+            {
+                cut.dropped_draw_retained += 1;
+            } else {
+                replay(&mut builder, prefix, command);
+            }
+        }
+        while let Some(bracket) = open.pop() {
+            cut.closed += 1;
+            close(bracket, &mut builder, &mut prefix);
+        }
     }
     cut
 }
