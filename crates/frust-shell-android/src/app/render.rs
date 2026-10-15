@@ -167,16 +167,6 @@ pub(crate) fn render_scene(
     // the frame that produced it (the release gate; see `RenderSignals`).
     frame_id: u64,
 ) -> Duration {
-    // The partial-repaint spike (`FRUST_PARTIAL_REPAINT`): this frame's
-    // damage, handed over before the encode it confines. `None` — nothing
-    // read, the renderer untouched — with the knob off.
-    if let Some(damage) = frust_shell_common::frame_gate::partial_repaint_damage() {
-        if !renderer.partial_repaint() {
-            renderer.set_partial_repaint(true);
-        }
-        renderer.set_frame_damage(damage);
-    }
-
     // Encode span (GPU/CPU encode, no swapchain touch).
     let encode_start = perf_on.then(Instant::now);
     let encode_outcome = renderer.encode(render_cx, scene, base_color);

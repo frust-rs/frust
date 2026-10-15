@@ -40,9 +40,7 @@ use crate::selection_toolbar::{
 use crate::semantics::{ROOT_NODE_ID, SemanticsCtx, SemanticsUpdate};
 use crate::tree::{InspectNode, WidgetPod, WidgetTree};
 use crate::view::{BuildCtx, ChangeFlags, View, WidgetId};
-use crate::widget::{
-    ChildPod, LayoutCtx, PaintCtx, PaintDamage, PaintOutcome, PaintScene, PlatformViewFrame,
-};
+use crate::widget::{ChildPod, LayoutCtx, PaintCtx, PaintOutcome, PaintScene, PlatformViewFrame};
 
 /// The window's shape and platform-occlusion state, delivered to app code as a
 /// plain [`provide_context`](reactive_graph::owner::provide_context)-carried
@@ -700,61 +698,7 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     /// upgrade. The check borrows each pod only for the length of one flag read,
     /// at the start of a layout pass, when no pass holds a borrow.
     overlay_pods: Vec<Weak<RefCell<ChildPod>>>,
-    /// What the last paint pass painted differently ([`RenderRoot::damage_rect`]).
-    paint_damage: PaintDamage,
-    /// The paint epoch the last paint ran under — `None` before the first, so
-    /// the first pass, and any pass after an epoch bump, damages everything.
-    damage_epoch: Option<u64>,
-    /// The device bounds of the floated surfaces the last paint drew, in paint
-    /// order: a surface that appears, moves or goes away damages where it was
-    /// and where it is, which no pod in the tree reports for it.
-    overlay_painted: Vec<Rect>,
     _state: core::marker::PhantomData<fn(&mut State)>,
-}
-
-/// Whether [`RenderRoot::paint`] publishes its damage into the process-wide
-/// slot [`take_published_damage`] drains — off until a shell running a partial
-/// repaint switches it on ([`set_damage_publishing`]), so a process that never
-/// asks pays one relaxed load per paint and nothing else.
-static DAMAGE_PUBLISHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// The union of every damage published since the last
-/// [`take_published_damage`] — `None` when nothing was.
-static PUBLISHED_DAMAGE: std::sync::Mutex<Option<PaintDamage>> = std::sync::Mutex::new(None);
-
-/// Switch damage publishing on or off for the whole process (see
-/// [`take_published_damage`]).
-///
-/// The shell-side half of the partial-repaint spike (`FRUST_PARTIAL_REPAINT`):
-/// the paint site and the renderer are joined by no value a shell owns on every
-/// platform (the paint outcome is latched by the platform loop, the scene
-/// crosses to the render thread on its own), so the damage crosses through
-/// this slot instead, the same process-global shape the retained ledger's
-/// publish takes the other way. Sound for the one render root a process runs;
-/// a second root publishing beside it would only widen the union.
-pub fn set_damage_publishing(on: bool) {
-    DAMAGE_PUBLISHING.store(on, Ordering::Relaxed);
-    if !on {
-        *PUBLISHED_DAMAGE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-    }
-}
-
-/// Drain the damage every [`RenderRoot::paint`] published since the last call
-/// (their union), or `None` when no paint published any — publishing is off,
-/// or no pass ran in between.
-///
-/// A consumer on another thread than the painter (a render thread taking the
-/// newest scene off a latest-wins channel) cannot tell which scene a drained
-/// union belongs to, only that every scene painted before the take is in it or
-/// in an earlier take; such a consumer unions a few consecutive takes (see
-/// `frust-shell-common`'s `frame_gate::DamageFeed`).
-pub fn take_published_damage() -> Option<PaintDamage> {
-    PUBLISHED_DAMAGE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take()
 }
 
 impl<State: 'static, V: View<State>> RenderRoot<State, V> {
@@ -810,9 +754,6 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             layout_skip: true,
             layout_audit: LayoutAudit::default(),
             overlay_pods: Vec::new(),
-            paint_damage: PaintDamage::Full,
-            damage_epoch: None,
-            overlay_painted: Vec::new(),
             _state: core::marker::PhantomData,
         }
     }
@@ -1473,13 +1414,6 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         self.tree.inspect_paint_dirty()
     }
 
-    /// What the last [`RenderRoot::paint`] pass painted differently from the
-    /// one before it, in device space (see [`PaintDamage`] for the rule and
-    /// what it does not see). [`PaintDamage::Full`] before the first pass.
-    pub fn damage_rect(&self) -> PaintDamage {
-        self.paint_damage
-    }
-
     /// Run the build closure, then build (first call) or rebuild (subsequent calls)
     /// the root widget, returning what changed.
     ///
@@ -1938,29 +1872,9 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             .map(|entry| Rc::downgrade(&entry.pod))
             .collect();
         let (holder, holder_ime) = self.paint_overlays(&entries, scene, frame_time, &mut outcome);
-        // A floated surface that appeared, moved or went away damages where it
-        // was and where it is; the pods inside it reported their own changes
-        // through `paint_overlays` already.
-        let to_device = scene.current_transform().unwrap_or(kurbo::Affine::IDENTITY);
-        let overlay_rects: Vec<Rect> = entries
-            .iter()
-            .map(|entry| to_device.transform_rect_bbox(entry.window_rect))
-            .collect();
-        if overlay_rects != self.overlay_painted {
-            for rect in self.overlay_painted.iter().chain(&overlay_rects) {
-                self.paint_damage = self.paint_damage.union(PaintDamage::Rect(*rect));
-            }
-            self.overlay_painted = overlay_rects;
-        }
         // Release the owners' pod clones before the pass ends: the root holds no
         // overlay pod at rest, so a pod's lifetime stays exactly its owner's.
         drop(entries);
-        if DAMAGE_PUBLISHING.load(Ordering::Relaxed) {
-            let mut slot = PUBLISHED_DAMAGE
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *slot = Some(slot.unwrap_or_default().union(self.paint_damage));
-        }
 
         // Both halves have now spoken, so the one question neither of them can
         // answer alone — whose surface the shell is configured with — is settled
@@ -2111,19 +2025,8 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             // against this epoch.
             ctx.set_hovered(self.hover_active);
             ctx.set_hover_epoch(self.hover_epoch);
-            // Read before the flags are cleared: a root whose own widget
-            // changed damages everything unless a pod below accounts for it.
-            let root_dirty = !pod.flags().is_empty();
             pod.widget_mut().paint(&mut ctx, scene);
             pod.clear_flags();
-            let below = ctx.take_damage();
-            self.paint_damage =
-                if self.damage_epoch != Some(paint_epoch) || (root_dirty && below.is_none()) {
-                    PaintDamage::Full
-                } else {
-                    below.map_or(PaintDamage::Clean, PaintDamage::Rect)
-                };
-            self.damage_epoch = Some(paint_epoch);
             // A focused editable republishes its IME surface during paint (which
             // runs after every rebuild), so a controlled change applied by the
             // rebuild — e.g. a submit clearing the field — refreshes the
@@ -2339,9 +2242,6 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                 pod.paint_child(&mut ctx, scene);
                 holds
             };
-            if let Some(rect) = ctx.take_damage() {
-                self.paint_damage = self.paint_damage.union(PaintDamage::Rect(rect));
-            }
 
             // Fold this pod's continuation-frame request into the frame's outcome
             // on the two lattices the tree's own aggregation uses: `needs_frame`

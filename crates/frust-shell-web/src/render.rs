@@ -395,16 +395,6 @@ fn render_frame(
     // browser's compositor is driven by the `requestAnimationFrame` callback
     // this whole turn already runs inside. winit's web backend implements it
     // as a no-op.
-    //
-    // The partial-repaint spike (`FRUST_PARTIAL_REPAINT`): this frame's
-    // damage, handed over before the encode it confines. `None` — nothing
-    // read, the renderer untouched — with the knob off.
-    if let Some(damage) = frust_shell_common::frame_gate::partial_repaint_damage() {
-        if !renderer.partial_repaint() {
-            renderer.set_partial_repaint(true);
-        }
-        renderer.set_frame_damage(damage);
-    }
     // The paint serial this scene was painted under (see
     // `SurfaceRenderer::note_scene_serial`).
     renderer.note_scene_serial(paint_serial);

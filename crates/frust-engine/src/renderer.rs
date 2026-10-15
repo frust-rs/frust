@@ -841,13 +841,6 @@ pub struct EngineRenderer {
     /// `FRUST_ENGINE_NO_PASS_MERGE` and overridable per renderer (see
     /// [`Self::set_pass_merge`]).
     pass_merge: bool,
-    /// The rectangle a caller confines the frame's surface passes to
-    /// ([`Self::set_frame_scissor`]) — `None`, the default, scissors nothing.
-    frame_scissor: Option<ScissorRect>,
-    /// The scissor the last encoded frame really applied: the requested one
-    /// clamped to the target and grown over every backdrop it touches
-    /// ([`Self::last_frame_scissor`]).
-    applied_scissor: Option<ScissorRect>,
     /// The passes the last encoded frame recorded into the caller's encoder,
     /// in order; refilled every frame, so its allocation is reused.
     frame_passes: Vec<FramePass>,
@@ -996,8 +989,6 @@ impl EngineRenderer {
             scratch: Scratch::default(),
             routing,
             pass_merge: !config::pass_merge_disabled(),
-            frame_scissor: None,
-            applied_scissor: None,
             frame_passes: Vec::new(),
             resolved: ResolvedPipelines::default(),
             atlas_glyphs: None,
@@ -1184,40 +1175,6 @@ impl EngineRenderer {
     #[must_use]
     pub fn pass_merge(&self) -> bool {
         self.pass_merge
-    }
-
-    /// Confines every pass the frame records into its own target — the
-    /// opening, each surface round, the unmerged opaque pass and the hole
-    /// punch — to `scissor`, from the next frame on; `None` (the default)
-    /// confines nothing and records exactly what an unscissored frame always
-    /// has. Passes into pooled or retained pages are never scissored.
-    ///
-    /// The engine half of a host's partial repaint: the frame still clears
-    /// its whole target (a clear is a load operation, which no scissor
-    /// reaches) and still draws every command, but only the pixels inside the
-    /// rectangle are shaded, so a host keeping the frame's previous pixels
-    /// elsewhere copies exactly [`Self::last_frame_scissor`] across. A
-    /// backdrop blur reads its region of the target back, so a scissor
-    /// touching one is grown over that region (repeatedly, until no backdrop
-    /// it touches reaches past it): everything the blur reads is then redrawn
-    /// this frame.
-    pub fn set_frame_scissor(&mut self, scissor: Option<ScissorRect>) {
-        self.frame_scissor = scissor;
-    }
-
-    /// The scissor [`Self::set_frame_scissor`] asked for.
-    #[must_use]
-    pub fn frame_scissor(&self) -> Option<ScissorRect> {
-        self.frame_scissor
-    }
-
-    /// The scissor the last encoded frame applied — the requested one clamped
-    /// to the target and grown over the backdrops it touches — or `None` for
-    /// an unscissored frame and after a refused one. What a host keeping the
-    /// previous frame's pixels must copy across.
-    #[must_use]
-    pub fn last_frame_scissor(&self) -> Option<ScissorRect> {
-        self.applied_scissor
     }
 
     /// The passes the last [`Self::encode`] recorded into the caller's
@@ -1530,7 +1487,6 @@ impl EngineRenderer {
         // Emptied first, so a frame refused below reports the nothing it
         // recorded rather than the last frame's passes.
         self.frame_passes.clear();
-        self.applied_scissor = None;
         let size = grid_size(target.width, target.height)?;
         let mut frame = self.compiler.compile(scene, root, size)?;
         let compile_total = clock.lap();
@@ -1566,12 +1522,6 @@ impl EngineRenderer {
         } else {
             &[]
         };
-        // The frame's scissor, settled against the target and the backdrops it
-        // touches; `None` — every frame of a host that never asks — records
-        // no scissor command at all.
-        let applied_scissor = self
-            .frame_scissor
-            .map(|scissor| scissor_for_frame(scissor, target.width, target.height, backdrops));
         // The largest region a texture-mode frame transfers, which the
         // staging texture is grown to before the first pass is recorded.
         let staging_extent = backdrops.iter().fold((0_u32, 0_u32), |(w, h), backdrop| {
@@ -1787,10 +1737,6 @@ impl EngineRenderer {
         }
 
         let pipelines_span = clock.lap();
-
-        // Applied only now, past the last fallible step: a refused frame
-        // reports no scissor.
-        self.applied_scissor = applied_scissor;
 
         self.record_frame(
             device, queue, encoder, &target, depth_view, base_color, &pipelines, copy_mode,
@@ -2205,7 +2151,6 @@ impl EngineRenderer {
         timestamps: FrameTimestamps<'_>,
     ) {
         let merge = self.pass_merge;
-        let scissor = self.applied_scissor;
         let clear = clear_color(base_color, target.output);
         let depth_load = self.depth.load_op(target.depth.is_some());
 
@@ -2247,7 +2192,6 @@ impl EngineRenderer {
                     clear,
                     depth_load,
                     opaque: None,
-                    scissor,
                 }
                 .record(
                     encoder,
@@ -2288,7 +2232,6 @@ impl EngineRenderer {
                 view: target.view,
                 load: wgpu::LoadOp::Load,
                 depth: depth_view,
-                scissor,
                 state: EnginePipeline::StripOpaque,
                 pipelines: opaque,
                 groups: opaque_groups,
@@ -2330,7 +2273,6 @@ impl EngineRenderer {
                 clear,
                 depth_load,
                 opaque,
-                scissor,
             })
         } else {
             if let Some(opaque) = opaque.as_ref() {
@@ -2351,7 +2293,6 @@ impl EngineRenderer {
             Some(PunchPass {
                 view: target.view,
                 depth: depth_view,
-                scissor,
                 state: *variant,
                 pipelines: punch,
                 class: self.routing.punch_class(),
@@ -2652,9 +2593,6 @@ impl EngineRenderer {
                     view,
                     load,
                     depth,
-                    // Only a round drawing into the frame's own target is
-                    // scissored; a page round renders a whole layer.
-                    scissor: if offscreen.is_none() { scissor } else { None },
                     state: variant,
                     pipelines: class_pipelines,
                     groups,
@@ -2814,113 +2752,6 @@ impl FramePass {
     pub const fn targets_surface(self) -> bool {
         !matches!(self, FramePass::Page | FramePass::Filter | FramePass::Copy)
     }
-}
-
-/// A rectangle of a frame's target in device pixels — what
-/// [`EngineRenderer::set_frame_scissor`] confines the frame's surface passes
-/// to, and what [`EngineRenderer::last_frame_scissor`] reports it applied.
-///
-/// Plain data, so a host crate can carry it with no `wgpu` type in its own
-/// signature.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ScissorRect {
-    /// Left edge.
-    pub x: u32,
-    /// Top edge.
-    pub y: u32,
-    /// Width; at least one pixel once applied.
-    pub width: u32,
-    /// Height; at least one pixel once applied.
-    pub height: u32,
-}
-
-impl ScissorRect {
-    /// The rectangle from its exclusive corner coordinates.
-    #[must_use]
-    pub const fn from_corners(x0: u32, y0: u32, x1: u32, y1: u32) -> Self {
-        Self {
-            x: x0,
-            y: y0,
-            width: x1.saturating_sub(x0),
-            height: y1.saturating_sub(y0),
-        }
-    }
-
-    /// The right edge, exclusive.
-    #[must_use]
-    pub const fn x1(self) -> u32 {
-        self.x.saturating_add(self.width)
-    }
-
-    /// The bottom edge, exclusive.
-    #[must_use]
-    pub const fn y1(self) -> u32 {
-        self.y.saturating_add(self.height)
-    }
-
-    /// Whether the rectangle covers the whole of a `width` x `height` target.
-    #[must_use]
-    pub const fn covers(self, width: u32, height: u32) -> bool {
-        self.x == 0 && self.y == 0 && self.x1() >= width && self.y1() >= height
-    }
-
-    /// Confines `pass` to this rectangle.
-    fn apply(self, pass: &mut wgpu::RenderPass<'_>) {
-        pass.set_scissor_rect(self.x, self.y, self.width, self.height);
-    }
-}
-
-/// The scissor a frame of a `width` x `height` target really applies for a
-/// requested `scissor`: clamped to the target (an empty result keeps one pixel
-/// at its clamped origin, since a scissor confines and never removes a pass),
-/// then grown over every backdrop region it touches until none it touches
-/// reaches past it — a backdrop blur reads its region of the target back, so
-/// all of that region must be redrawn by the same frame.
-fn scissor_for_frame(
-    scissor: ScissorRect,
-    width: u32,
-    height: u32,
-    backdrops: &[Backdrop],
-) -> ScissorRect {
-    let (width, height) = (width.max(1), height.max(1));
-    let x0 = scissor.x.min(width - 1);
-    let y0 = scissor.y.min(height - 1);
-    let mut rect = (
-        x0,
-        y0,
-        scissor.x1().min(width).max(x0 + 1),
-        scissor.y1().min(height).max(y0 + 1),
-    );
-    loop {
-        let mut grew = false;
-        for backdrop in backdrops {
-            let region = (
-                u32::from(backdrop.region.x0),
-                u32::from(backdrop.region.y0),
-                u32::from(backdrop.region.x1),
-                u32::from(backdrop.region.y1),
-            );
-            let touches =
-                region.0 < rect.2 && rect.0 < region.2 && region.1 < rect.3 && rect.1 < region.3;
-            if touches {
-                let grown = (
-                    rect.0.min(region.0),
-                    rect.1.min(region.1),
-                    rect.2.max(region.2).min(width),
-                    rect.3.max(region.3).min(height),
-                );
-                // Only ever grows, inside a bounded target: the walk ends.
-                if grown != rect {
-                    rect = grown;
-                    grew = true;
-                }
-            }
-        }
-        if !grew {
-            break;
-        }
-    }
-    ScissorRect::from_corners(rect.0, rect.1, rect.2, rect.3)
 }
 
 /// What a frame's pass list depends on beyond its plan, as
@@ -3093,10 +2924,6 @@ struct PassPlan<'a> {
     view: &'a wgpu::TextureView,
     load: wgpu::LoadOp<wgpu::Color>,
     depth: Option<&'a wgpu::TextureView>,
-    /// The scissor the pass is confined to when recorded on its own — the
-    /// frame's ([`EngineRenderer::set_frame_scissor`]) for a pass into the
-    /// frame's own target, `None` for a page.
-    scissor: Option<ScissorRect>,
     /// The render state the pass draws with, which folds each run's class to
     /// one it serves.
     state: EnginePipeline,
@@ -3147,9 +2974,6 @@ fn record_pass(
         multiview_mask: None,
     });
     log.push(plan.pass);
-    if let Some(scissor) = plan.scissor {
-        scissor.apply(&mut pass);
-    }
     draw_segments(&mut pass, plan);
 }
 
@@ -3287,9 +3111,6 @@ struct SurfaceOpening<'a> {
     depth_load: wgpu::LoadOp<f32>,
     /// The opaque strips, when the frame has any to draw.
     opaque: Option<PassPlan<'a>>,
-    /// The frame's scissor ([`EngineRenderer::set_frame_scissor`]), applied
-    /// after the clear — which no scissor reaches — and before the first draw.
-    scissor: Option<ScissorRect>,
 }
 
 impl SurfaceOpening<'_> {
@@ -3316,9 +3137,6 @@ impl SurfaceOpening<'_> {
             multiview_mask: None,
         });
         log.push(FramePass::Opening);
-        if let Some(scissor) = self.scissor {
-            scissor.apply(&mut pass);
-        }
         if let Some(opaque) = self.opaque.as_ref() {
             draw_segments(&mut pass, opaque);
         }
@@ -3354,8 +3172,6 @@ fn record_owed_opening(
 struct PunchPass<'a> {
     view: &'a wgpu::TextureView,
     depth: Option<&'a wgpu::TextureView>,
-    /// The frame's scissor — the punch erases the frame's own target.
-    scissor: Option<ScissorRect>,
     /// Which destination-out state the punch draws with.
     state: EnginePipeline,
     /// That state's pipelines, holding at least [`Self::class`].
@@ -3393,7 +3209,6 @@ impl PunchPass<'_> {
                 view: self.view,
                 load: wgpu::LoadOp::Load,
                 depth: self.depth,
-                scissor: self.scissor,
                 state: self.state,
                 pipelines: self.pipelines,
                 groups: self.groups,
@@ -6671,60 +6486,6 @@ fn resources_bind_group(
 mod tests {
     use super::*;
     use frust_gpu::DownlevelProfile;
-
-    /// A backdrop reading `region`, the only field the scissor reads.
-    fn backdrop_over(x0: u16, y0: u16, x1: u16, y1: u16) -> Backdrop {
-        Backdrop {
-            layer: 0,
-            depth: 0,
-            region: RectU16::new(x0, y0, x1, y1),
-            sigma: 2.0,
-        }
-    }
-
-    #[test]
-    fn a_frame_scissor_is_clamped_to_its_target_and_never_empty() {
-        let rect = ScissorRect::from_corners(10, 20, 30, 40);
-        assert_eq!(scissor_for_frame(rect, 64, 64, &[]), rect);
-        assert_eq!(
-            scissor_for_frame(ScissorRect::from_corners(50, 50, 90, 90), 64, 64, &[]),
-            ScissorRect::from_corners(50, 50, 64, 64),
-            "clamped to the target"
-        );
-        assert_eq!(
-            scissor_for_frame(ScissorRect::from_corners(80, 80, 90, 90), 64, 64, &[]),
-            ScissorRect::from_corners(63, 63, 64, 64),
-            "an off-target rectangle keeps one pixel at its clamped origin"
-        );
-        assert!(ScissorRect::from_corners(0, 0, 64, 64).covers(64, 64));
-        assert!(!rect.covers(64, 64));
-    }
-
-    #[test]
-    fn a_frame_scissor_grows_over_every_backdrop_it_touches_and_no_other() {
-        let rect = ScissorRect::from_corners(10, 10, 20, 20);
-        // Untouched: a backdrop elsewhere leaves the scissor alone.
-        assert_eq!(
-            scissor_for_frame(rect, 64, 64, &[backdrop_over(40, 40, 50, 50)]),
-            rect
-        );
-        // Touched: grown over the region, then over a second backdrop the
-        // grown rectangle now reaches — the walk runs to a fixed point.
-        assert_eq!(
-            scissor_for_frame(
-                rect,
-                64,
-                64,
-                &[backdrop_over(25, 25, 40, 40), backdrop_over(15, 15, 30, 30)]
-            ),
-            ScissorRect::from_corners(10, 10, 40, 40)
-        );
-        // A region past the target is clamped, and the walk still ends.
-        assert_eq!(
-            scissor_for_frame(rect, 32, 32, &[backdrop_over(15, 15, 90, 90)]),
-            ScissorRect::from_corners(10, 10, 32, 32)
-        );
-    }
     use kurbo::Rect;
     use peniko::color::palette::css::{BLUE, RED};
     use std::collections::BTreeMap;
