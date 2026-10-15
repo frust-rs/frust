@@ -156,17 +156,13 @@ same APK recipe otherwise; before-row `gpu_main` p50 in the last column):
 | Pixel 4 S1 | 14.01 / 16.04 | 13.56 | 10.70 / 10.93 | - | 11.15 |
 | Pixel 4 S5 | 12.02 / 12.86 | 4.76 | 8.55 / 8.83 | - | 8.54 |
 
-The off-arm reproduces the Pixel 4 before-rows within noise (S1 10.70 vs 11.15, both warm: runs 1-4 sat at
-9.16-9.18 before the throttle from run 5; S5 8.55 vs 8.54) but not the Pixel 4a ones: 27.10 vs 32.70 and
-21.97 vs 26.27 (16-17 % below) with the governor at 700 MHz and 100 % busy. The three switches account for
-27.10 to 12.75 and 21.97 to 13.30; the unswitched atlas tier rule + clear skip, and the unsampled before-clock,
-are the candidates for the rest. Acceptance: Pixel 4a S1 `gpu_main` <= 16 ms MET at 12.75 (before 32.70; S1 total
-p50 16.61 sits at the 60 Hz budget, p95 18.39 still over it); Pixel 4 S1 `gpu_main` <= 5.0 ms NOT MET at 8.12 (before
-11.15) — that frame is CPU-bound, `submit` p50 10.66 ms with walk 8.2 ms against the 11.1 ms 90 Hz budget, and the
-Pixel 4's kgsl is not
-readable, so the only clock evidence is the Pixel 4a's 347 vs 698 Mcyc/s; no S4 / S6 regression MET (Pixel 4a S4
-7.21 to 2.69, S6 13.02 to 8.79; Pixel 4 S4 2.02 to 0.90, S6 7.32 to 3.65). S1 atlas counters moved with the
-frame rate: Pixel 4a replays 50 / misses 126 / evictions 133 per window (before 37 / 66 / 69), Pixel 4 41 / 86 / 97.
+The off-arm reproduces the Pixel 4 before-rows within noise (S1 10.70 vs 11.15, warm; S5 8.55 vs 8.54) but sits
+16-17 % below the Pixel 4a ones (27.10 vs 32.70, 21.97 vs 26.27; governor 700 MHz, 100 % busy): the unswitched atlas
+tier rule + clear skip and the unsampled before-clock are the candidates. Acceptance: Pixel 4a S1 `gpu_main` <= 16 ms
+MET at 12.75 (before 32.70; total p95 18.39 still over 60 Hz); Pixel 4 S1 `gpu_main` <= 5.0 ms NOT MET at 8.12 (before
+11.15) — CPU-bound (`submit` 10.66 ms, walk 8.2 ms; the Pixel 4's kgsl is unreadable); no S4 / S6 regression MET (Pixel
+4a S4 7.21 to 2.69, S6 13.02 to 8.79; Pixel 4 S4 2.02 to 0.90, S6 7.32 to 3.65). S1 atlas counters per window: Pixel 4a
+replays 50 / misses 126 / evictions 133 (before 37 / 66 / 69), Pixel 4 41 / 86 / 97.
 
 ### After Phase 2
 
@@ -186,6 +182,14 @@ S3 180 / 37, S6 180 / 58; every quads-off arm ran S1 at 430 / 347.
 | Pixel 4 S2 | 5.01 / 6.80 | 2.98 | 2.69 / 2.75 | 814 / 287 / 330 / 0.3 / 80 | 796 / 2,446 / 72,144 |
 | Pixel 4 S3 | 4.40 / 11.90 | 3.35 | 1.09 / 1.18 | 543 / 231 / 279 / 0.4 / 73 | 355 / 384 / 11,136 |
 | Pixel 4 S6 | 5.01 / 5.70 | 3.73 | 1.48 / 1.51 | 728 / 386 / 319 / 0.4 / 97 | 508 / 384 / 11,136 |
+| iPhone SE S1 † | 5.21 / 6.89 | 4.84 | 1.97 / 2.01 | 1869 / 269 / 832 / 628 / 204 | 497 / 5,020 / 200,560 |
+| iPhone SE S2 † | 6.00 / 6.95 | 2.60 | 1.02 / 1.04 | 712 / 314 / 608 / 0.3 / 111 | 657 / 1,550 / 43,936 |
+| iPhone SE S3 † | 3.81 / 7.94 | 3.30 | 0.31 / 0.32 | 702 / 288 / 912 / 0.6 / 104 | 294 / 296 / 9,792 |
+| iPhone SE S6 † | 5.26 / 6.64 | 4.25 | 0.46 / 0.47 | 982 / 510 / 1231 / 0.6 / 155 | 507 / 296 / 9,792 |
+| OnePlus 9 S1 | 8.18 / 9.34 | 5.99 | 3.46 / 3.49 | 2389 / 228 / 364 / 1270 / 173 | 547 / 9,142 / 366,752 |
+| OnePlus 9 S2 | 6.41 / 9.52 | 3.68 | 1.34 / 1.38 | 998 / 374 / 287 / 0.4 / 146 | 797 / 2,554 / 72,144 |
+| OnePlus 9 S3 | 4.28 / 12.19 | 3.49 | 0.53 / 0.57 | 478 / 157 / 261 / 0.4 / 52 | 355 / 408 / 13,648 |
+| OnePlus 9 S6 | 4.96 / 5.80 | 4.02 | 0.60 / 0.62 | 789 / 440 / 280 / 0.5 / 88 | 508 / 408 / 13,648 |
 
 Kill switches (all three off as the all-off arm at the full matrix, then one at a time at S1 / S6 6x20; `glyphs` is a subset of `walk`):
 
@@ -197,21 +201,19 @@ Kill switches (all three off as the all-off arm at the full matrix, then one at 
 | off-run-cache S1 | 4592 / 3277 / 8,687 | 11.90 | 430 / 318 | 6849 / 6196 / 8,272 | 7.33 | 9.63 |
 | off-parallel S1 | 4000 / 413 / 8,686 | 11.75 | 430 / 321 | 3290 / 253 / 8,273 | 7.37 | 7.46 |
 
-(*) cool runs 3-5 of the two Pixel 4 all-off S1 captures, which throttled from run 6 (34.0 to 37.3-38.1 C, frames/run 2640
-to 2040; their 12-run walk / glyphs 10928 / 8750 and 9732 / 7788 are the p0-03 warm row). Acceptance: Pixel 4a S1 walk 2111
-<= 3000 and glyphs 373 <= 1200 MET (after Phase 1: 6813 / 3899); Pixel 4a S6 enc `total_us` 1870 <= 2000 MET (span sum 1423;
-the harness `encode_us` 0.18 is the shell step, the engine encode sits inside `submit`); Pixel 4 S1 enc `total_us` 3798 <= 3000
-NOT MET (walk 1862, replay 1193, upload 428, instances 136; all-off 9750; frame p50 5.87); S2 / S3 not worse MET (`gpu_main`
-Pixel 4a 17.00 to 10.61 and 10.35 to 3.10, Pixel 4 8.00 to 2.69 and 5.02 to 1.09). The all-off arm reproduces After Phase 1
-within 1-4 % (4a S1 12.76 / 6858 / 3940 vs 12.75 / 6813 / 3899; Pixel 4 cool S1 11.03 / 8255 / 6612 vs 11.15 / 8238 / 6593)
-and each switch moves only its own span (off-quads / off-run-cache raise `glyphs` and `walk` with it, off-parallel raises
-`walk` alone and leaves S6 at 867 vs 885, below the helper threshold). Pixel 4a S1 sits at 355 MHz with `gpu_main` 13.89
-against 430 MHz and 12.76 in every quads-off arm while frame p50 fell 16.64 to 11.98 (as p2-04 saw); Pixel 4 S1 `upload` 428
-and `replay` 1193 follow the run cache's quad emission (293 / 903 cache off, 314 / 919 quads off, 431 / 1257 parallel off).
-Tails of the parallel walk (per-run p95, off-parallel to default): `submit` Pixel 4a 9.8 to 7.4 ms, Pixel 4 7.7 to 6.2;
-`total` Pixel 4a 17.2 to 13.4-13.9 in six runs but 17.0-18.4 in four whose swapchain `acquire` p95 reached 11.4-12.5 ms
-(pooled p95 17.15 vs 17.23), Pixel 4 8.7 to 7.0 (one run display-paced at 11.6); no power arm was run — see
-`engine-parallel-walk-power-unmeasured` in LIMITATIONS.md.
+(*) cool runs 3-5; both Pixel 4 all-off S1 captures throttled from run 6. Acceptance: Pixel 4a S1 walk 2111 <= 3000 and glyphs
+373 <= 1200 MET; Pixel 4a S6 enc `total_us` 1870 <= 2000 MET (the harness `encode_us` is the shell step, the engine encode sits
+inside `submit`); Pixel 4 S1 enc `total_us` 3798 <= 3000 NOT MET, carried to Phase 3; S2 / S3 not worse MET. The all-off arm
+reproduces After Phase 1 within 1-4 % and each switch moves only its own span. Pixel 4a S1 drops to 355 MHz once the CPU stops
+pacing it; Pixel 4 S1 `upload` / `replay` follow the run cache's quad emission. Parallel-walk tails and the unmeasured power
+cost: `engine-parallel-walk-power-unmeasured` in LIMITATIONS.md.
+
+iPhone SE and OnePlus 9 rows: 2026-10-15 from main 74123842, same protocol, OnePlus 9 pinned at 120 Hz; † iPhone total = CPU work
+(`total − acquire`), and iOS GPU columns stay provisional until the Metal Main-span timestamp fix. The iPhone all-off arm matches
+the 2026-09-06 pass within 0-1 % (S1 work / gpu / enc 5.79 / 4.34 / 4735, S6 5.57 / 1.66 / 4010); every iPhone target misses —
+S1 / S6 enc `total_us` 3732 / 2844 <= 1500, S6 work 5.26 <= 4.3, S2 work 6.00 <= 5.0 (layout 3.29) — and is carried to Phase 3,
+`upload` (832 / 1231) being the dominant span. OnePlus 9 all-off enc S1 / S6 4983 / 3818: S6 falls 59 % (frame 7.90 to 4.96),
+S1 only 13 % with `upload` +101 and `replay` +235 over all-off, the Pixel 4 mechanism.
 
 ## Dev loop
 
