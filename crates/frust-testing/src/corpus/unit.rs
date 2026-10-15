@@ -1397,7 +1397,7 @@ fn shader_quad() -> CorpusCase {
 }
 
 /// PROMOTED from `crates/frust-render/tests/gpu_smoke.rs`'s
-/// `snapshot_bracket_inline_emulation_matches_the_composite_arithmetic`,
+/// `retained_bracket_inline_emulation_matches_the_composite_arithmetic`,
 /// geometry and assertions verbatim.
 ///
 /// A `Command::PushRetained` bracket lowered INLINE — the only lowering this

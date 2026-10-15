@@ -12,7 +12,7 @@
 //! A punch confined to the group it was recorded in would only erase that
 //! group's own accumulated content — an app-root backdrop painted outside a
 //! scroll view's clip survives the group composite and seals the hole again.
-//! So the punch is hoisted past every enclosing clip, layer and snapshot
+//! So the punch is hoisted past every enclosing clip, layer and retained bracket
 //! bracket to the frame root, bounded by the intersection of those brackets'
 //! device-space bounds so a partially scrolled slot still clips to its
 //! viewport ([`punch_rect`]). At the root there is nothing left to hoist past,

@@ -48,7 +48,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use frust_core::{FrameTime, RetainedLedger};
+use frust_core::FrameTime;
 use frust_render::{
     AcquireOutcome, DetachedSurface, EncodeOutcome, FrameOutcome, RenderContext,
     SurfaceAlphaRequest, SurfaceFactory, SurfacePhase, SurfaceRenderer,
@@ -59,7 +59,7 @@ use frust_shell_common::perf::{
     SPAN_FIRST_ENCODE_DONE, SPAN_FIRST_FRAME_PRESENTED, SPAN_FIRST_REBUILD_DONE, SPAN_INIT_ENTRY,
     SPAN_PIPELINE_CACHE_RESTORED, SPAN_RENDERER_READY, StartupSpans, UiSpans,
 };
-use frust_shell_common::render_split::publish_retained_ledger;
+use frust_shell_common::render_split::publish_resident_pages;
 use frust_shell_common::{
     FrameMeta, RenderCommand, RenderPhase, RenderReceiver, RenderSender, SceneFrame,
     SceneReturnReceiver, SceneReturnSender, SurfaceSize, next_render_phase, render_channel,
@@ -834,20 +834,17 @@ fn gpu_passes(renderer: &SurfaceRenderer) -> Option<GpuPasses> {
 /// when it changed since the last publish — after a frame, and at a surface
 /// destroy or device-scale change (both of which leave it empty).
 ///
-/// The slot behind `publish_retained_ledger` is process-global, which is sound
-/// only because a process runs ONE renderer: a second surface would publish
-/// over the first's ledger. The publish takes the slot's lock for an `Arc`
-/// swap and nothing else, and the UI thread only ever `try_lock`s it, so the
-/// UI thread never waits on this.
+/// The slot is process-global (one renderer per process); see
+/// [`publish_resident_pages`].
 fn publish_ledger(renderer: &mut SurfaceRenderer) {
     if let Some(resident) = renderer.take_retained_ledger() {
-        publish_retained_ledger(RetainedLedger::from_entries(
+        publish_resident_pages(
             resident.frame,
             resident
                 .pages
                 .iter()
                 .map(|page| (page.key, page.extent_px, page.scale)),
-        ));
+        );
     }
 }
 

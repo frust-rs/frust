@@ -577,20 +577,20 @@ mod tests {
     /// A recording scene that separates `push_retained`/`pop_retained` calls
     /// from `push_layer`/`push_transform` ones. `crate::test_support`'s shared
     /// `RecordingScene` doesn't override `push_retained`, so it would fold a
-    /// snapshot bracket into the trait's emulating default — a `push_transform`
+    /// retained bracket into the trait's emulating default — a `push_transform`
     /// and `push_layer` pair — indistinguishable from a plain bracket. This one
     /// keeps them apart so a test can assert a staged child painted through
-    /// the snapshot bracket specifically, and through no other bracket.
+    /// the retained bracket specifically, and through no other bracket.
     #[derive(Default)]
-    struct SnapshotRecordingScene {
+    struct RetainedRecordingScene {
         rects: Vec<(Point, Size)>,
         layers: Vec<(Point, Size, f32)>,
         transform_pushes: u32,
-        snapshots: Vec<(u64, Point, Size, f32, f64)>,
-        snapshot_pops: u32,
+        retained_pushes: Vec<(u64, Point, Size, f32, f64)>,
+        retained_pops: u32,
         draws: Vec<(u64, Point, Size, f32, f64)>,
     }
-    impl PaintScene for SnapshotRecordingScene {
+    impl PaintScene for RetainedRecordingScene {
         fn fill_rect(&mut self, origin: Point, size: Size, _color: peniko::Color) {
             self.rects.push((origin, size));
         }
@@ -602,10 +602,10 @@ mod tests {
             self.transform_pushes += 1;
         }
         fn push_retained(&mut self, key: u64, origin: Point, size: Size, alpha: f32, scale: f64) {
-            self.snapshots.push((key, origin, size, alpha, scale));
+            self.retained_pushes.push((key, origin, size, alpha, scale));
         }
         fn pop_retained(&mut self) {
-            self.snapshot_pops += 1;
+            self.retained_pops += 1;
         }
         fn draw_retained(&mut self, key: u64, origin: Point, size: Size, alpha: f32, scale: f64) {
             self.draws.push((key, origin, size, alpha, scale));
@@ -1500,7 +1500,7 @@ mod tests {
         );
 
         let ledger = RetainedLedger::empty();
-        let mut scene = SnapshotRecordingScene::default();
+        let mut scene = RetainedRecordingScene::default();
         w.paint(
             &mut PaintCtx::for_test(Point::ZERO, size, ft_ms(0.0)).with_retained_ledger(&ledger),
             &mut scene,
@@ -1508,11 +1508,11 @@ mod tests {
         // p = 0: the exiting child sits at rest (dx 0, alpha 1); the incoming
         // one is at alpha 0 (discarded).
         assert_eq!(
-            scene.snapshots,
+            scene.retained_pushes,
             vec![(live_key.get(), Point::ZERO, size, 1.0, 1.0)],
             "one recording bracket, keyed by the exiting child's own key, at scale 1"
         );
-        assert_eq!(scene.snapshot_pops, 1, "the bracket is balanced");
+        assert_eq!(scene.retained_pops, 1, "the bracket is balanced");
         assert!(scene.draws.is_empty(), "nothing is resident yet");
     }
 
@@ -1522,13 +1522,13 @@ mod tests {
         let empty = RetainedLedger::empty();
         w.paint(
             &mut PaintCtx::for_test(Point::ZERO, size, ft_ms(0.0)).with_retained_ledger(&empty),
-            &mut SnapshotRecordingScene::default(),
+            &mut RetainedRecordingScene::default(),
         );
 
         // 15ms into the 100ms linear duration: progress 0.15, inside
         // FadeScale's simultaneous-fade window — both children visible.
         let ledger = resident(&[live_key]);
-        let mut scene = SnapshotRecordingScene::default();
+        let mut scene = RetainedRecordingScene::default();
         w.paint(
             &mut PaintCtx::for_test(Point::ZERO, size, ft_ms(15.0)).with_retained_ledger(&ledger),
             &mut scene,
@@ -1554,9 +1554,9 @@ mod tests {
             "only the incoming child paints a body; the exiting one is composited"
         );
         assert!(
-            scene.snapshots.is_empty(),
+            scene.retained_pushes.is_empty(),
             "the incoming child's scale step is never bracketed: {:?}",
-            scene.snapshots
+            scene.retained_pushes
         );
         assert_eq!(
             scene.transform_pushes, 1,
@@ -1569,14 +1569,14 @@ mod tests {
         let (mut w, size, _) = switched(FadeScale);
         w.paint(
             &mut PaintCtx::for_test(Point::ZERO, size, ft_ms(0.0)),
-            &mut SnapshotRecordingScene::default(),
+            &mut RetainedRecordingScene::default(),
         );
-        let mut scene = SnapshotRecordingScene::default();
+        let mut scene = RetainedRecordingScene::default();
         w.paint(
             &mut PaintCtx::for_test(Point::ZERO, size, ft_ms(15.0)),
             &mut scene,
         );
-        assert!(scene.snapshots.is_empty() && scene.draws.is_empty());
+        assert!(scene.retained_pushes.is_empty() && scene.draws.is_empty());
         assert_eq!(scene.rects.len(), 2, "both children paint their bodies");
         assert_eq!(scene.layers.len(), 2, "each under its own fade layer");
     }
@@ -1590,17 +1590,17 @@ mod tests {
         let ledger = RetainedLedger::empty();
         w.paint(
             &mut PaintCtx::for_test(Point::ZERO, size, ft_ms(0.0)).with_retained_ledger(&ledger),
-            &mut SnapshotRecordingScene::default(),
+            &mut RetainedRecordingScene::default(),
         );
-        let mut scene = SnapshotRecordingScene::default();
+        let mut scene = RetainedRecordingScene::default();
         w.paint(
             &mut PaintCtx::for_test(Point::ZERO, size, ft_ms(50.0)).with_retained_ledger(&ledger),
             &mut scene,
         );
         assert!(
-            scene.snapshots.is_empty(),
+            scene.retained_pushes.is_empty(),
             "no bracket: {:?}",
-            scene.snapshots
+            scene.retained_pushes
         );
         assert_eq!(
             scene.rects,

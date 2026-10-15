@@ -150,7 +150,7 @@ fn star(center: Point, outer: f64) -> BezPath {
 }
 
 /// Every shape command kind, inside and outside every bracket kind: scissor
-/// clips, rounded (mask) clips, isolated layers, a scaled snapshot, nesting,
+/// clips, rounded (mask) clips, isolated layers, a scaled retained bracket, nesting,
 /// an unbalanced pop, and a hole punch.
 fn brackets(step: u32) -> Scene {
     let shift = f64::from(step % 13) * 0.75;

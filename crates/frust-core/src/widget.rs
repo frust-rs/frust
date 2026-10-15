@@ -48,6 +48,13 @@ use crate::sliver::{SliverConstraints, SliverGeometry, SliverWidget};
 /// compatibility with existing recorder-style test scenes; real text rendering
 /// goes through [`PaintScene::draw_glyph_run`], which carries shaped glyphs from
 /// `frust-text`.
+///
+/// # Retained-page contract
+///
+/// A renderer that does not retain and never publishes a ledger paints every
+/// [`PaintScene::push_retained`] body inline and is never sent
+/// [`PaintScene::draw_retained`]. A renderer that publishes a ledger must serve
+/// every key that ledger lists or refuse the frame.
 pub trait PaintScene {
     /// Emit a filled axis-aligned rectangle at `origin` with `size`, filled with
     /// the solid `color`.
@@ -390,6 +397,11 @@ pub trait PaintScene {
     /// [`Command::DrawRetained`]). Only valid when the resident-key ledger
     /// said `key` is resident; the default is a no-op for recorders with no
     /// retained-layer concept, which never receive such a call.
+    ///
+    /// Contract: a renderer that does not retain and never publishes a ledger
+    /// paints every `push_retained` body inline and is never sent this call; a
+    /// renderer that publishes a ledger must serve every key it lists or refuse
+    /// the frame.
     fn draw_retained(&mut self, _key: u64, _origin: Point, _size: Size, _alpha: f32, _scale: f64) {}
 
     /// The transform the next command would be recorded under — every
@@ -5991,11 +6003,11 @@ mod tests {
     /// to verify the default [`PaintScene::push_retained`]/[`PaintScene::pop_retained`]
     /// implementation emulates the presentation correctly.
     #[derive(Default)]
-    struct MinimalSnapshotRecorder {
+    struct MinimalRetainedRecorder {
         operations: Vec<String>,
     }
 
-    impl PaintScene for MinimalSnapshotRecorder {
+    impl PaintScene for MinimalRetainedRecorder {
         fn fill_rect(&mut self, _origin: Point, _size: Size, _color: Color) {}
         fn draw_text(&mut self, _origin: Point, _text: &str) {}
         fn push_transform(&mut self, _transform: Affine) {
@@ -6018,7 +6030,7 @@ mod tests {
         // ensures recorders that override only the transform/layer methods
         // see a consistent sequence: push_transform, push_layer, paint body,
         // pop_layer, pop_transform — the reverse order matching the push ops.
-        let mut recorder = MinimalSnapshotRecorder::default();
+        let mut recorder = MinimalRetainedRecorder::default();
         let origin = Point::new(10.0, 20.0);
         let size = Size::new(100.0, 50.0);
         let alpha = 0.8;
@@ -6097,7 +6109,7 @@ mod tests {
     #[test]
     fn current_transform_is_the_scene_builders_own_and_none_for_a_recorder() {
         assert_eq!(
-            MinimalSnapshotRecorder::default().current_transform(),
+            MinimalRetainedRecorder::default().current_transform(),
             None,
             "a recorder tracks no transform"
         );
@@ -6118,7 +6130,7 @@ mod tests {
     fn backdrop_blur_is_a_no_op_by_default_and_recorded_by_the_scene_builder() {
         // The default body: a recorder scene that never heard of a backdrop
         // takes the call and records nothing.
-        let mut recorder = MinimalSnapshotRecorder::default();
+        let mut recorder = MinimalRetainedRecorder::default();
         recorder.backdrop_blur(Point::new(1.0, 2.0), Size::new(3.0, 4.0), 5.0);
 
         let mut scene = frust_scene::Scene::new();

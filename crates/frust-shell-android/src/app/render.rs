@@ -8,13 +8,12 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use frust_core::RetainedLedger;
 use frust_render::{AcquireOutcome, EncodeOutcome, FrameOutcome, RenderContext, SurfaceRenderer};
 use frust_scene::Scene;
 use frust_shell_common::perf::{
     self, FramePasses, FrameStats, GpuPasses, RenderSpans, StartupSpans, UiSpans,
 };
-use frust_shell_common::render_split::{publish_retained_ledger, request_retained_repaint};
+use frust_shell_common::render_split::{publish_resident_pages, request_retained_repaint};
 
 /// What the render side publishes about the frames it renders, read by the UI
 /// thread — one instance shared by both sides through an `Arc`, the same
@@ -105,20 +104,17 @@ pub(crate) fn gpu_passes(renderer: &SurfaceRenderer) -> Option<GpuPasses> {
 /// when it changed since the last publish — after a frame, and at a surface
 /// destroy or device-scale change (both of which leave it empty).
 ///
-/// The slot behind `publish_retained_ledger` is process-global, which is sound
-/// only because a process runs ONE renderer: a second surface would publish
-/// over the first's ledger. The publish takes the slot's lock for an `Arc`
-/// swap and nothing else, and the UI thread only ever `try_lock`s it, so the
-/// UI thread never waits on this.
+/// The slot is process-global (one renderer per process); see
+/// [`publish_resident_pages`].
 pub(super) fn publish_ledger(renderer: &mut SurfaceRenderer) {
     if let Some(resident) = renderer.take_retained_ledger() {
-        publish_retained_ledger(RetainedLedger::from_entries(
+        publish_resident_pages(
             resident.frame,
             resident
                 .pages
                 .iter()
                 .map(|page| (page.key, page.extent_px, page.scale)),
-        ));
+        );
     }
 }
 

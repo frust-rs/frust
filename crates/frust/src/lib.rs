@@ -3143,10 +3143,6 @@ mod scroll_physics_reexport {
     }
 }
 
-/// Facade-level check that the retained-page boundary
-/// ([`repaint_boundary`]/[`RepaintBoundaryView`]) resolves through the `frust`
-/// facade, so an app marks an expensive, often-unchanged subtree without
-/// reaching into `frust_widgets`.
 /// Facade-level check that a path clip is reachable from app code through
 /// [`authoring::PaintScene`] alone: an app clipping to an outline names no
 /// `frust_core`/`frust_scene` path, and the facade's own scene module sees the
@@ -3200,6 +3196,10 @@ mod backdrop_blur_reexport {
     }
 }
 
+/// Facade-level check that the retained-page boundary
+/// ([`repaint_boundary`]/[`RepaintBoundaryView`]) resolves through the `frust`
+/// facade, so an app marks an expensive, often-unchanged subtree without
+/// reaching into `frust_widgets`.
 #[cfg(test)]
 mod repaint_boundary_reexport {
     use crate::{RepaintBoundaryView, TextView, repaint_boundary, text};

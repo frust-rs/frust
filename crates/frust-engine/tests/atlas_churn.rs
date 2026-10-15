@@ -2209,7 +2209,7 @@ fn an_animating_size_never_reaches_the_atlas_through_the_compiler() {
     );
 }
 
-/// A run inside a snapshot bracket is routed against the transform it is drawn
+/// A run inside a retained bracket is routed against the transform it is drawn
 /// through, so a genuinely skewed one cannot reach the atlas by way of the
 /// bracket's presentation scale.
 ///
@@ -2223,7 +2223,7 @@ fn an_animating_size_never_reaches_the_atlas_through_the_compiler() {
 /// full transform while still probing its cache with the unabsorbed size, and a
 /// hit there paints an unrotated bitmap.
 #[test]
-fn a_skewed_run_inside_a_snapshot_bracket_never_routes_to_the_atlas() {
+fn a_skewed_run_inside_a_retained_bracket_never_routes_to_the_atlas() {
     let bracket = Rect::new(0.0, 0.0, 128.0, 64.0);
     // A skew well past the 1/4096 tolerance at either magnitude, so the answer
     // is "uncacheable" and not a rounding accident.
@@ -2232,7 +2232,7 @@ fn a_skewed_run_inside_a_snapshot_bracket_never_routes_to_the_atlas() {
     let mut scene = Scene::new();
     let mut builder = SceneBuilder::new(&mut scene);
     // A presentation scale, so the bracket really does install a correction —
-    // without one `snapshot_correction` is the identity and the case would pass
+    // without one `retained_correction` is the identity and the case would pass
     // for the wrong reason.
     builder.push_retained(1, bracket, 1.0, 1.5);
     builder.draw_glyph_run(GlyphRun {
