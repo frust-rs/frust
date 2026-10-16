@@ -19,8 +19,12 @@
 //!   with none installed it is refused, warned about once per registration
 //!   and released.
 //!
-//! Every frame's [`SourceFrame::release`] callback runs exactly once, and *when*
-//! depends on what the bus did with the payload:
+//! Every frame's [`SourceFrame::release`] callback runs exactly once, on every
+//! path — including a panic unwinding through the pass (a [`SourceFrame`]
+//! dropped still holding its callback runs it) and a device lost before a
+//! retire fence fired (the unrun fence callback is dropped, and the retiring
+//! frame it owned releases as it goes). *When* depends on what the bus did
+//! with the payload:
 //!
 //! - a CPU frame — right after the upload is enqueued (the queue copies the
 //!   pixels into staging synchronously, so nothing reads the payload again);
@@ -33,12 +37,19 @@
 //!   has finished. So the release is held until both hold: the imported
 //!   texture was **retired** (a newer frame replaced it, or the registration
 //!   was dropped / the device changed) and a `Queue::on_submitted_work_done`
-//!   fence taken at that moment has fired. It runs on whichever thread polls
-//!   the device, and the imported texture's view is dropped just before it.
+//!   fence taken at that moment has fired (two chained fences for a dropped
+//!   registration — what those cover, and what they do not, is under "A
+//!   registration dropped mid-drain" below). It runs on whichever thread
+//!   polls the device, and the imported texture's view is dropped just
+//!   before it.
 //!
 //! An importer that needs the platform buffer alive for longer than its own
 //! call keeps its own reference (in the imported texture's lifetime,
 //! typically); the bus never releases that one.
+//!
+//! The returned [`TextureRegistration`] reports the id to draw by
+//! ([`TextureRegistration::scene_texture_id`], what a widget's
+//! `draw_scene_texture` names) and unregisters on drop.
 //!
 //! # Bounded retire backlog
 //!
@@ -49,15 +60,26 @@
 //! *newest* frame is dropped: its release runs at once, nothing was sampled,
 //! and the last good frame stays shown.
 //!
-//! A registration dropped while its imported texture is still shown retires
-//! it through the same fence, one fence further out: the fence is chained
-//! (the second is taken when the first fires), so a drop that lands between a
-//! frame's record and its submit still waits for that submit. The producer's
-//! buffer reuse is delayed by up to one submit as a result.
+//! # A registration dropped mid-drain
 //!
-//! The returned [`TextureRegistration`] reports the id to draw by
-//! ([`TextureRegistration::scene_texture_id`], what a widget's
-//! `draw_scene_texture` names) and unregisters on drop.
+//! A registration dropped (or a device changed) while its imported texture is
+//! still shown retires it through two chained fences: the second
+//! `on_submitted_work_done` is taken when the first fires. What the two hops
+//! guarantee is narrower than "the frame that sampled it finished": a fence
+//! fires once every submission made *before it was taken* has completed, and
+//! one taken with no work in flight fires at the next device poll. So the
+//! release waits for every submission made before the drop, plus a second
+//! completion point after that, and nothing more. A registration dropped
+//! mid-drain — between a frame's record, which bound the view, and that
+//! frame's submit — may release its last native frame while the frame that
+//! sampled it is still executing (or not yet submitted): an interim submit
+//! (atlas growth, another registration's backlog poll) can satisfy both hops
+//! first. The producer may then overwrite its buffer and that one frame
+//! tear. It is not a memory-safety hole — the importer holds its own
+//! reference to the platform buffer for the imported texture's lifetime, and
+//! `wgpu` keeps the texture alive for every submission that uses it — only a
+//! possible visual glitch on the last frame of a dropped registration. Tying
+//! the release to the dropping frame's own submission is follow-up work.
 //!
 //! # Why a closure, not a plugin type
 //!
@@ -70,21 +92,25 @@
 //!
 //! ```ignore
 //! let registration = register_texture_source(move || {
-//!     sink.take_latest().map(|f| SourceFrame {
+//!     sink.take_latest().map(|mut f| SourceFrame {
 //!         width: f.width,
 //!         height: f.height,
 //!         format: SourceFormat::Rgba8,
-//!         payload: match f.payload {
-//!             FramePayload::Cpu(pixels) => SourcePayload::Cpu(pixels),
-//!             FramePayload::Native(h) => SourcePayload::Native(NativeHandle {
-//!                 kind: /* the matching NativeHandleKind */,
-//!                 ptr: h.ptr,
+//!         payload: match &f.payload {
+//!             FramePayload::Cpu(pixels) => SourcePayload::Cpu(Arc::clone(pixels)),
+//!             // SAFETY: forwards the producer's own `NativeHandle::new`
+//!             // contract — same pointer, same kind, same release callback.
+//!             FramePayload::Native(h) => SourcePayload::Native(unsafe {
+//!                 NativeHandle::new(/* the matching NativeHandleKind */, h.ptr())
 //!             }),
 //!         },
-//!         release: f.release,
+//!         release: f.release.take(),
 //!     })
 //! });
 //! ```
+//!
+//! Both frame types release on drop, so the bridge borrows the payload
+//! (`match &f.payload`) and moves only the callback, with `Option::take`.
 //!
 //! # Pixels and compositing
 //!
@@ -145,15 +171,53 @@ pub enum NativeHandleKind {
 
 /// An opaque platform GPU buffer a [`NativeImporter`] turns into a texture.
 ///
-/// The bus never dereferences `ptr`; only the importer installed for `kind`
-/// does. The frame's producer owns the buffer's lifetime and drops its own
-/// reference in the frame's release callback.
+/// The bus never dereferences the pointer; only the importer installed for
+/// its kind does. The frame's producer owns the buffer's lifetime and drops
+/// its own reference in the frame's release callback.
+///
+/// The fields are private and the only constructor is the `unsafe`
+/// [`Self::new`]: an importer dereferences the pointer on that constructor's
+/// contract alone, so safe code cannot hand the bus a forged one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NativeHandle {
     /// The platform object `ptr` points at.
-    pub kind: NativeHandleKind,
+    kind: NativeHandleKind,
     /// The platform object itself.
-    pub ptr: *mut c_void,
+    ptr: *mut c_void,
+}
+
+impl NativeHandle {
+    /// Wraps `ptr`, a platform object of `kind`, for a
+    /// [`SourcePayload::Native`] frame.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` is a live platform object of exactly `kind` — a
+    /// `CVPixelBufferRef` for [`NativeHandleKind::CvPixelBuffer`], an
+    /// `AHardwareBuffer*` for [`NativeHandleKind::AHardwareBuffer`] — on which
+    /// the producer holds a retained reference of its own (`CFRetain`,
+    /// `AHardwareBuffer_acquire`), kept until the release callback of the
+    /// frame carrying this handle has run. The [`NativeImporter`] installed
+    /// for `kind` dereferences the pointer (describes, imports and retains the
+    /// object) on this promise alone, so a dangling, foreign or mistyped
+    /// pointer is undefined behaviour there. A bridge from the plugin
+    /// substrate's own handle forwards that handle's identical contract.
+    #[must_use]
+    pub unsafe fn new(kind: NativeHandleKind, ptr: *mut c_void) -> Self {
+        Self { kind, ptr }
+    }
+
+    /// The platform object [`Self::ptr`] points at.
+    #[must_use]
+    pub fn kind(&self) -> NativeHandleKind {
+        self.kind
+    }
+
+    /// The platform object itself, as handed to [`Self::new`].
+    #[must_use]
+    pub fn ptr(&self) -> *mut c_void {
+        self.ptr
+    }
 }
 
 // SAFETY: an inert address plus a tag — moving it between threads moves only
@@ -179,10 +243,17 @@ pub type ReleaseCallback = Box<dyn FnOnce() + Send>;
 /// One frame a source hands the bus.
 ///
 /// Plain public fields with the same names as the producer-side frame type,
-/// so a bridge moves them across one for one. Dropping a frame does not run
-/// `release`: the bus runs it for every frame it is handed (see the module
-/// docs), and a holder that drops a frame without passing it on calls
-/// [`Self::release`].
+/// so a bridge carries them across one for one (`release` by
+/// `Option::take`).
+///
+/// Dropping a frame that still holds its `release` callback runs it: the bus
+/// runs it for every frame it is handed (see the module docs), and a frame
+/// nobody released — dropped by a holder that never passed it on, or lost to
+/// a panic in the source or the pass — still releases, exactly once. Because
+/// the type implements `Drop`, its fields cannot be moved out by
+/// destructuring; borrow or clone the payload instead. A release callback
+/// must not panic: run from a drop during an unwind, a panic aborts the
+/// process.
 pub struct SourceFrame {
     /// Width in pixels.
     pub width: u32,
@@ -196,7 +267,8 @@ pub struct SourceFrame {
     /// upload for a CPU frame, at once for a refused one, and for an imported
     /// native frame only after its texture was replaced or unbound and the GPU
     /// work that sampled it finished — the producer may reuse the platform
-    /// buffer from this point on (see the module docs).
+    /// buffer from this point on (see the module docs). A frame dropped while
+    /// still holding it runs it then.
     pub release: Option<ReleaseCallback>,
 }
 
@@ -222,8 +294,20 @@ impl SourceFrame {
         self
     }
 
-    /// Runs the release callback, if any, consuming the frame.
+    /// Runs the release callback, if any, consuming the frame — the same as
+    /// dropping it, spelled out.
     pub fn release(mut self) {
+        if let Some(release) = self.release.take() {
+            release();
+        }
+    }
+}
+
+impl Drop for SourceFrame {
+    /// A frame dropped still holding its callback was released by no one, so
+    /// it releases itself; one whose callback already ran or was taken on
+    /// (into a held import) is `None` here.
+    fn drop(&mut self) {
         if let Some(release) = self.release.take() {
             release();
         }
@@ -405,8 +489,10 @@ impl fmt::Debug for TextureRegistration {
 ///
 /// `source` runs on the render thread with the frame's external-pass drain in
 /// progress: it should only hand over a frame it already has (take from a
-/// mailbox), never block for one. A source that panics is retired like any
-/// panicking external pass; the frame it was producing is dropped unreleased.
+/// mailbox), never block for one. A source — or an importer — that panics is
+/// retired like any panicking external pass, and the frame in flight is not
+/// leaked: a [`SourceFrame`] (like the plugin substrate's twin) dropped while
+/// still holding its release callback runs it during the unwind.
 pub fn register_texture_source(
     source: impl FnMut() -> Option<SourceFrame> + Send + 'static,
 ) -> TextureRegistration {
@@ -566,9 +652,11 @@ impl NativeHold {
 }
 
 impl Drop for NativeHold {
-    /// Unbind (registration dropped, device change): the pass may be dropped
-    /// mid-drain, ahead of the submit that samples the view, so chain two
-    /// fences.
+    /// Unbind (registration dropped, device change): chains two fences. They
+    /// cover every submission made before the drop, not a frame recorded
+    /// before it and submitted after — a drop mid-drain may release the
+    /// producer's buffer while that last frame still samples it (the module
+    /// docs' "A registration dropped mid-drain").
     fn drop(&mut self) {
         self.retire_with(2);
     }
@@ -621,26 +709,24 @@ impl ExternalPass for SourcePass {
             state.shown = None;
         }
 
+        // The frame keeps its release callback until the bus is done with
+        // it, so a panic anywhere below still releases it (on drop).
         let mut rebind = false;
         if let Some(source_frame) = (state.source)() {
-            let SourceFrame {
-                width,
-                height,
-                format,
-                payload,
-                release,
-            } = source_frame;
-            match payload {
+            rebind = match &source_frame.payload {
                 SourcePayload::Cpu(pixels) => {
-                    rebind = upload(state, frame, (width, height), format, &pixels);
-                    if let Some(release) = release {
-                        release();
-                    }
+                    let size = (source_frame.width, source_frame.height);
+                    let changed = upload(state, frame, size, source_frame.format, pixels);
+                    // The queue copied the pixels into staging: nothing reads
+                    // the payload again.
+                    source_frame.release();
+                    changed
                 }
                 SourcePayload::Native(handle) => {
-                    rebind = import(state, frame, &handle, release);
+                    let handle = *handle;
+                    import(state, frame, handle, source_frame)
                 }
-            }
+            };
         }
 
         if let Some(shown) = &state.shown {
@@ -752,6 +838,46 @@ fn upload(
     changed
 }
 
+/// Refuses `source`: nothing sampled it, so it is released at once. Answers
+/// "the shown view did not change".
+fn refuse(source: SourceFrame) -> bool {
+    source.release();
+    false
+}
+
+/// Whether a native frame finds the retire backlog full: `pending` is at
+/// [`MAX_RETIRING`] even after `poll` — a non-blocking device poll, run only
+/// when the backlog looks full — gave completed fences their chance to run.
+fn backlog_full(pending: &AtomicUsize, poll: impl FnOnce()) -> bool {
+    if pending.load(Ordering::Acquire) < MAX_RETIRING {
+        return false;
+    }
+    poll();
+    pending.load(Ordering::Acquire) >= MAX_RETIRING
+}
+
+/// Whether the retire backlog refuses a native frame of `kind` now (see
+/// [`backlog_full`]), reporting the refusal — at `warn!` once per
+/// registration. Touches nothing else: the shown view stays as it is.
+fn backlog_refuses(
+    state: &mut PassState,
+    id: u64,
+    kind: NativeHandleKind,
+    poll: impl FnOnce(),
+) -> bool {
+    if !backlog_full(&state.retiring, poll) {
+        return false;
+    }
+    report(
+        &mut state.warned.backlog,
+        id,
+        format_args!(
+            "refused a {kind:?} frame: {MAX_RETIRING} retired frames still wait on the GPU"
+        ),
+    );
+    true
+}
+
 /// Imports one native frame through the importer installed for its kind,
 /// answering whether the shown view changed. Refused (and warned about once)
 /// when no importer is installed, the retire backlog is full or the import
@@ -761,47 +887,31 @@ fn upload(
 fn import(
     state: &mut PassState,
     frame: &mut ExternalFrame<'_>,
-    handle: &NativeHandle,
-    release: Option<ReleaseCallback>,
+    handle: NativeHandle,
+    mut source: SourceFrame,
 ) -> bool {
     let id = frame.id().get();
-    let refuse = |release: Option<ReleaseCallback>| {
-        if let Some(release) = release {
-            release();
-        }
-        false
-    };
-    let Some(importer) = native_importer(handle.kind) else {
+    let Some(importer) = native_importer(handle.kind()) else {
         report(
             &mut state.warned.missing_importer,
             id,
             format_args!(
                 "refused a {:?} frame: no native importer is installed for that kind",
-                handle.kind
+                handle.kind()
             ),
         );
-        return refuse(release);
+        return refuse(source);
     };
-    if state.retiring.load(Ordering::Acquire) >= MAX_RETIRING {
-        // Give completed fences a chance to run before refusing.
+    if backlog_refuses(state, id, handle.kind(), || {
         let _ = frame.device().poll(wgpu::PollType::Poll);
-        if state.retiring.load(Ordering::Acquire) >= MAX_RETIRING {
-            report(
-                &mut state.warned.backlog,
-                id,
-                format_args!(
-                    "refused a {:?} frame: {MAX_RETIRING} retired frames still wait on the GPU",
-                    handle.kind
-                ),
-            );
-            return refuse(release);
-        }
+    }) {
+        return refuse(source);
     }
-    match importer.import(handle, frame.device(), frame.queue()) {
+    match importer.import(&handle, frame.device(), frame.queue()) {
         Ok(imported) => {
             let hold = NativeHold {
                 view: Some(imported.view.clone()),
-                release,
+                release: source.release.take(),
                 queue: frame.queue().clone(),
                 pending: Arc::clone(&state.retiring),
             };
@@ -821,9 +931,9 @@ fn import(
             report(
                 &mut state.warned.import_failed,
                 id,
-                format_args!("refused a {:?} frame: {error}", handle.kind),
+                format_args!("refused a {:?} frame: {error}", handle.kind()),
             );
-            refuse(release)
+            refuse(source)
         }
     }
 }
@@ -966,6 +1076,164 @@ mod tests {
         fake.fire();
         assert_eq!(released.load(Ordering::SeqCst), 1);
         assert_eq!(pending.load(Ordering::SeqCst), 0);
+    }
+
+    /// A frame source standing in for a registration's, never polled here.
+    fn idle_state() -> PassState {
+        PassState {
+            source: Box::new(|| None),
+            shown: None,
+            retiring: Arc::new(AtomicUsize::new(0)),
+            warned: Warned::default(),
+        }
+    }
+
+    fn counted_frame(released: &Arc<AtomicU64>) -> SourceFrame {
+        let released = Arc::clone(released);
+        SourceFrame::rgba8(1, 1, Arc::from(vec![0u8; 4])).on_release(move || {
+            released.fetch_add(1, Ordering::SeqCst);
+        })
+    }
+
+    #[test]
+    fn a_native_handle_round_trips_its_kind_and_pointer() {
+        let mut byte = 0u8;
+        let ptr: *mut c_void = (&raw mut byte).cast();
+        for kind in [
+            NativeHandleKind::CvPixelBuffer,
+            NativeHandleKind::AHardwareBuffer,
+        ] {
+            // SAFETY: never handed to an importer; only the accessors read it.
+            let handle = unsafe { NativeHandle::new(kind, ptr) };
+            assert_eq!(handle.kind(), kind);
+            assert_eq!(handle.ptr(), ptr);
+            assert_eq!(SourcePayload::Native(handle), SourcePayload::Native(handle));
+        }
+    }
+
+    #[test]
+    fn a_source_frame_dropped_unconsumed_releases_once() {
+        let released = Arc::new(AtomicU64::new(0));
+        drop(counted_frame(&released));
+        assert_eq!(released.load(Ordering::SeqCst), 1);
+
+        // A callback taken on (as an import holds it) is not run by the drop.
+        let mut frame = counted_frame(&released);
+        let held = frame.release.take().expect("a callback is attached");
+        drop(frame);
+        assert_eq!(released.load(Ordering::SeqCst), 1);
+        held();
+        assert_eq!(released.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_source_frame_lost_to_a_panicking_pass_releases_once() {
+        let released = Arc::new(AtomicU64::new(0));
+        let mut source: FrameSource = {
+            let released = Arc::clone(&released);
+            Box::new(move || Some(counted_frame(&released)))
+        };
+        // The pass's shape: take a frame from the source, then fail before
+        // the bus is done with it.
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _frame = source().expect("the source hands a frame over");
+            panic!("the pass panics while it holds the frame");
+        }));
+        assert!(unwound.is_err());
+        assert_eq!(released.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn the_retire_backlog_tolerates_four_and_refuses_the_fifth_once_warned() {
+        let fake = FakeFence::default();
+        let mut state = idle_state();
+        let retired = Arc::new(AtomicU64::new(0));
+        let polls = AtomicUsize::new(0);
+        let poll = || {
+            polls.fetch_add(1, Ordering::SeqCst);
+        };
+
+        // Four frames are admitted, each retired (still fenced) by the next.
+        for _ in 0..MAX_RETIRING {
+            assert!(!backlog_refuses(
+                &mut state,
+                7,
+                NativeHandleKind::AHardwareBuffer,
+                poll
+            ));
+            retire_counting(&fake, &state.retiring, &retired, 1);
+        }
+        assert_eq!(state.retiring.load(Ordering::SeqCst), MAX_RETIRING);
+        assert_eq!(polls.load(Ordering::SeqCst), 0, "no poll below the bound");
+        assert!(!state.warned.backlog);
+
+        // The fifth is refused after one poll, and released at once.
+        let released = Arc::new(AtomicU64::new(0));
+        let fifth = counted_frame(&released);
+        assert!(backlog_refuses(
+            &mut state,
+            7,
+            NativeHandleKind::AHardwareBuffer,
+            poll
+        ));
+        assert!(!refuse(fifth), "a refusal never changes the shown view");
+        assert_eq!(released.load(Ordering::SeqCst), 1, "released at once");
+        assert_eq!(polls.load(Ordering::SeqCst), 1, "fences got one poll");
+        assert!(state.warned.backlog, "the first refusal is the warning");
+        assert!(state.shown.is_none(), "the shown view is untouched");
+        assert_eq!(retired.load(Ordering::SeqCst), 0);
+
+        // A sixth is refused too; the warning flag was already spent, so it
+        // is logged at debug level only.
+        assert!(backlog_refuses(
+            &mut state,
+            7,
+            NativeHandleKind::AHardwareBuffer,
+            poll
+        ));
+        assert!(state.warned.backlog);
+
+        // Once the fences fire the backlog drains and frames are admitted.
+        fake.fire();
+        assert_eq!(retired.load(Ordering::SeqCst), MAX_RETIRING as u64);
+        assert!(!backlog_refuses(
+            &mut state,
+            7,
+            NativeHandleKind::AHardwareBuffer,
+            poll
+        ));
+    }
+
+    #[test]
+    fn a_poll_that_fires_a_fence_admits_the_frame() {
+        let fake = FakeFence::default();
+        let pending = Arc::new(AtomicUsize::new(0));
+        let retired = Arc::new(AtomicU64::new(0));
+        for _ in 0..MAX_RETIRING {
+            retire_counting(&fake, &pending, &retired, 1);
+        }
+        assert!(backlog_full(&pending, || {}));
+        assert!(
+            !backlog_full(&pending, || fake.fire()),
+            "the poll ran the completed fences, so there is room again"
+        );
+        assert_eq!(pending.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_device_lost_mid_chain_still_releases_once() {
+        let fake = FakeFence::default();
+        let pending = Arc::new(AtomicUsize::new(0));
+        let released = Arc::new(AtomicU64::new(0));
+        retire_counting(&fake, &pending, &released, 2);
+        fake.fire();
+        assert_eq!(released.load(Ordering::SeqCst), 0, "one hop of two fired");
+        // The device is lost: the second hop's callback is dropped unrun.
+        fake.0.lock().unwrap().clear();
+        assert_eq!(released.load(Ordering::SeqCst), 1);
+        assert_eq!(pending.load(Ordering::SeqCst), 0);
+        fake.fire();
+        assert_eq!(released.load(Ordering::SeqCst), 1);
     }
 
     #[test]

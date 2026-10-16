@@ -5,11 +5,13 @@
 //!
 //! The renderer and the plugin substrate never name each other, so the bridge
 //! is a closure written here, where both are in reach: each frame the
-//! renderer polls it, it takes the newest frame out of the sink and moves its
-//! fields into the renderer's own twin type (`frust::texture::SourceFrame`).
+//! renderer polls it, it takes the newest frame out of the sink and carries
+//! its fields into the renderer's own twin type (`frust::texture::SourceFrame`).
 //! The frame's release callback travels with it, so the producer learns when
 //! the renderer is done with each frame — see `frust::texture`'s module doc
 //! for when that is.
+
+use std::sync::Arc;
 
 use frust::texture::{
     NativeHandle, NativeHandleKind, SourceFormat, SourceFrame, SourcePayload, TextureRegistration,
@@ -51,10 +53,11 @@ fn register_sink(sink: TextureSink) -> TextureRegistration {
     register_texture_source(move || sink.take_latest().and_then(source_frame))
 }
 
-/// Moves a producer-side frame into the renderer's twin type, field for
-/// field. A frame in a pixel format the renderer does not know is released
-/// and skipped (the last good frame stays shown).
-fn source_frame(frame: TextureFrame) -> Option<SourceFrame> {
+/// Carries a producer-side frame into the renderer's twin type, field for
+/// field, its release callback moved across. A frame in a pixel format the
+/// renderer does not know is released and skipped (the last good frame stays
+/// shown).
+fn source_frame(mut frame: TextureFrame) -> Option<SourceFrame> {
     let format = match frame.format {
         TextureFormat::Rgba8 => SourceFormat::Rgba8,
         // `TextureFormat` is non-exhaustive; a layout added there before the
@@ -64,22 +67,27 @@ fn source_frame(frame: TextureFrame) -> Option<SourceFrame> {
             return None;
         }
     };
-    let payload = match frame.payload {
-        FramePayload::Cpu(pixels) => SourcePayload::Cpu(pixels),
-        FramePayload::Native(handle) => SourcePayload::Native(NativeHandle {
-            kind: match handle.kind {
+    let payload = match &frame.payload {
+        FramePayload::Cpu(pixels) => SourcePayload::Cpu(Arc::clone(pixels)),
+        FramePayload::Native(handle) => {
+            let kind = match handle.kind() {
                 FrameHandleKind::CvPixelBuffer => NativeHandleKind::CvPixelBuffer,
                 FrameHandleKind::AHardwareBuffer => NativeHandleKind::AHardwareBuffer,
-            },
-            ptr: handle.ptr,
-        }),
+            };
+            // SAFETY: forwards the producer's guarantee. The substrate's
+            // handle exists only through its own `unsafe` constructor, whose
+            // contract is this one's word for word: a live object of this
+            // kind, retained by the producer until the release callback —
+            // which moves across with the frame below — has run.
+            SourcePayload::Native(unsafe { NativeHandle::new(kind, handle.ptr()) })
+        }
     };
     Some(SourceFrame {
         width: frame.width,
         height: frame.height,
         format,
         payload,
-        release: frame.release,
+        release: frame.release.take(),
     })
 }
 
@@ -93,7 +101,6 @@ pub(crate) fn hardware_buffer_import_installed() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
@@ -158,24 +165,40 @@ mod tests {
     fn a_native_frame_keeps_its_handle_kind_and_pointer() {
         let mut marker = 0u8;
         let ptr = std::ptr::from_mut(&mut marker).cast();
+        // SAFETY: the converted handle is compared, never imported.
+        let handle = unsafe {
+            frust_plugin::texture::NativeHandle::new(FrameHandleKind::AHardwareBuffer, ptr)
+        };
         let frame = TextureFrame {
             width: 8,
             height: 8,
             format: TextureFormat::Rgba8,
-            payload: FramePayload::Native(frust_plugin::texture::NativeHandle {
-                kind: FrameHandleKind::AHardwareBuffer,
-                ptr,
-            }),
+            payload: FramePayload::Native(handle),
             release: None,
         };
 
         let converted = source_frame(frame).expect("a native frame converts");
+        let SourcePayload::Native(converted) = &converted.payload else {
+            panic!("a native frame stays native");
+        };
+        assert_eq!(converted.kind(), NativeHandleKind::AHardwareBuffer);
+        assert_eq!(converted.ptr(), ptr);
+    }
+
+    #[test]
+    fn a_converted_frame_releases_once_through_the_renderer_twin() {
+        let released = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&released);
+        let frame = TextureFrame::rgba8(1, 1, Arc::from(vec![0u8; 4])).on_release(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+        let converted = source_frame(frame).expect("an RGBA frame converts");
         assert_eq!(
-            converted.payload,
-            SourcePayload::Native(NativeHandle {
-                kind: NativeHandleKind::AHardwareBuffer,
-                ptr,
-            })
+            released.load(Ordering::SeqCst),
+            0,
+            "the callback moved across; the emptied producer frame released nothing"
         );
+        drop(converted);
+        assert_eq!(released.load(Ordering::SeqCst), 1);
     }
 }

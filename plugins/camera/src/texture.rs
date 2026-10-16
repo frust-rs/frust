@@ -6,11 +6,11 @@
 //!
 //! The renderer and the plugin substrate never name each other, so the bridge
 //! is a closure written here, where both are in reach: each frame the renderer
-//! polls it, it takes the newest frame out of the sink and moves its fields
+//! polls it, it takes the newest frame out of the sink and carries its fields
 //! into the renderer's own twin type (`frust::texture::SourceFrame`), release
 //! callback included.
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use frust::texture::{
     NativeHandle, NativeHandleKind, SourceFormat, SourceFrame, SourcePayload, TextureRegistration,
@@ -50,10 +50,11 @@ fn register_sink(sink: TextureSink) -> TextureRegistration {
     register_texture_source(move || sink.take_latest().and_then(source_frame))
 }
 
-/// Moves a producer-side frame into the renderer's twin type, field for
-/// field. A frame in a pixel format the renderer does not know is released
-/// and skipped (the last good frame stays shown).
-fn source_frame(frame: TextureFrame) -> Option<SourceFrame> {
+/// Carries a producer-side frame into the renderer's twin type, field for
+/// field, its release callback moved across. A frame in a pixel format the
+/// renderer does not know is released and skipped (the last good frame stays
+/// shown).
+fn source_frame(mut frame: TextureFrame) -> Option<SourceFrame> {
     let format = match frame.format {
         TextureFormat::Rgba8 => SourceFormat::Rgba8,
         // `TextureFormat` is non-exhaustive; a layout added there before the
@@ -63,28 +64,32 @@ fn source_frame(frame: TextureFrame) -> Option<SourceFrame> {
             return None;
         }
     };
-    let payload = match frame.payload {
-        FramePayload::Cpu(pixels) => SourcePayload::Cpu(pixels),
-        FramePayload::Native(handle) => SourcePayload::Native(NativeHandle {
-            kind: match handle.kind {
+    let payload = match &frame.payload {
+        FramePayload::Cpu(pixels) => SourcePayload::Cpu(Arc::clone(pixels)),
+        FramePayload::Native(handle) => {
+            let kind = match handle.kind() {
                 FrameHandleKind::CvPixelBuffer => NativeHandleKind::CvPixelBuffer,
                 FrameHandleKind::AHardwareBuffer => NativeHandleKind::AHardwareBuffer,
-            },
-            ptr: handle.ptr,
-        }),
+            };
+            // SAFETY: forwards the producer's guarantee. The substrate's
+            // handle exists only through its own `unsafe` constructor, whose
+            // contract is this one's word for word: a live object of this
+            // kind, retained by the producer until the release callback —
+            // which moves across with the frame below — has run.
+            SourcePayload::Native(unsafe { NativeHandle::new(kind, handle.ptr()) })
+        }
     };
     Some(SourceFrame {
         width: frame.width,
         height: frame.height,
         format,
         payload,
-        release: frame.release,
+        release: frame.release.take(),
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
@@ -98,6 +103,11 @@ mod tests {
         });
 
         let converted = source_frame(frame).expect("an RGBA frame converts");
+        assert_eq!(
+            released.load(Ordering::SeqCst),
+            0,
+            "the callback moved across; the emptied producer frame released nothing"
+        );
         assert_eq!((converted.width, converted.height), (4, 3));
         assert_eq!(converted.format, SourceFormat::Rgba8);
         assert!(matches!(&converted.payload, SourcePayload::Cpu(p) if p.len() == 48));
