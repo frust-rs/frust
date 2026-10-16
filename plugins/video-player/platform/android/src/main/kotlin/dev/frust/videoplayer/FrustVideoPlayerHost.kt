@@ -5,10 +5,25 @@ import android.content.ContentProvider
 import android.content.ContentValues
 import android.content.Context
 import android.database.Cursor
+import android.graphics.PixelFormat
+import android.graphics.SurfaceTexture
+import android.hardware.HardwareBuffer
+import android.media.Image
+import android.media.ImageReader
 import android.net.Uri
+import android.opengl.EGL14
+import android.opengl.EGLConfig
+import android.opengl.EGLContext
+import android.opengl.EGLDisplay
+import android.opengl.EGLSurface
+import android.opengl.GLES11Ext
+import android.opengl.GLES20
+import android.os.Build
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
 import android.util.Log
+import android.view.Surface
 import androidx.annotation.OptIn
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -19,8 +34,12 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import java.io.File
 import java.io.IOException
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.nio.FloatBuffer
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * The `frust-video-player` plugin's ExoPlayer session owner — the Kotlin half
@@ -77,6 +96,33 @@ import java.util.concurrent.atomic.AtomicInteger
  * | [nativeOnPosition] | `(int session, long positionMs, long durationMs)` |
  * | [nativeOnVideoSize] | `(int session, int width, int height)` |
  * | [nativeOnError] | `(int session, int code, String message)` |
+ *
+ * ### Additive entries: texture output
+ *
+ * Added after the tables above were frozen, as additional statics (never a
+ * changed row); `plugins/video-player/src/android.rs`'s module doc carries the
+ * mirror.
+ *
+ * | Rust → Kotlin | Signature | Returns |
+ * |---|---|---|
+ * | [attachTextureOutput] | `(int session, boolean hardwareBuffers) -> int` | [OK] / [ERROR_UNKNOWN_SESSION] |
+ * | [releaseTextureFrame] | `(int session, long token) -> void` | |
+ *
+ * | Kotlin → Rust | Signature |
+ * |---|---|
+ * | [nativeOnTextureFrame] | `(int session, HardwareBuffer? buffer, ByteBuffer? pixels, int width, int height, int rowStride, long token) -> boolean` |
+ *
+ * A texture-output session's picture goes through a [TexturePipeline] instead
+ * of a `SurfaceView`: the player renders into a `SurfaceTexture`, a GLES blit
+ * draws each frame into an `RGBA_8888` [ImageReader] (a hardware decoder's
+ * buffers are YUV, so it cannot fill an RGBA reader itself), and every image
+ * the reader produces is handed to Rust. With `hardwareBuffers` (API 29+) the
+ * reader's buffers are GPU-sampleable and each image travels as its
+ * `HardwareBuffer`; Rust answers `true`, keeps the image open, and calls
+ * [releaseTextureFrame] once the renderer may no longer sample it. Otherwise
+ * the image's plane is copied on the Rust side and closed right after the
+ * call. An image the reader cannot hand out (every one of its images still
+ * held) is skipped, never waited for.
  *
  * The package is baked into those exports' mangled names
  * (`Java_dev_frust_videoplayer_FrustVideoPlayerHost_native*`), so **this class
@@ -415,11 +461,60 @@ object FrustVideoPlayerHost {
             } catch (e: Throwable) {
                 Log.w(TAG, "frust-video-player: release($session) failed", e)
             }
+            // After the player let go of its input surface.
+            entry.texture?.release()
+            entry.texture = null
             // Unconditional, not routed through `publishState`: the session is
             // out of the registry and this is the contract's final report.
             notifyState(session, STATE_IDLE)
         }
         return OK
+    }
+
+    /**
+     * `attachTextureOutput(int session, boolean hardwareBuffers) -> int` (class
+     * doc's *Additive entries*). [OK] / [ERROR_UNKNOWN_SESSION].
+     *
+     * Builds the session's [TexturePipeline] on the main Looper and points the
+     * player at its input surface; from then on a picture slot attaching to
+     * the session is ignored (the picture belongs to the texture).
+     * `hardwareBuffers` is honoured from API 29 (`ImageReader` usage flags);
+     * below that the pipeline copies.
+     */
+    @JvmStatic
+    fun attachTextureOutput(session: Int, hardwareBuffers: Boolean): Int {
+        val entry = sessions[session] ?: return ERROR_UNKNOWN_SESSION
+        onMain {
+            if (entry.closed || entry.texture != null) return@onMain
+            val pipeline = try {
+                TexturePipeline(
+                    entry.id,
+                    hardwareBuffers && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q,
+                )
+            } catch (e: Throwable) {
+                Log.w(TAG, "frust-video-player: texture output for session $session failed", e)
+                return@onMain
+            }
+            entry.texture = pipeline
+            if (entry.videoWidth > 0 && entry.videoHeight > 0) {
+                pipeline.setOutputSize(entry.videoWidth, entry.videoHeight)
+            }
+            withPlayer(entry) { it.setVideoSurface(pipeline.inputSurface) }
+        }
+        return OK
+    }
+
+    /**
+     * `releaseTextureFrame(int session, long token) -> void` (class doc's
+     * *Additive entries*). Closes the image a [nativeOnTextureFrame] call
+     * answered `true` for, so its reader may reuse the buffer. Called from
+     * whichever Rust thread the renderer releases frames on; an unknown
+     * session or token (the session closed, which closed its images) is a
+     * no-op.
+     */
+    @JvmStatic
+    fun releaseTextureFrame(session: Int, token: Long) {
+        sessions[session]?.texture?.releaseFrame(token)
     }
 
     // --- Kotlin -> Rust: the frozen exports --------------------------------
@@ -455,6 +550,23 @@ object FrustVideoPlayerHost {
     @JvmStatic
     external fun nativeOnError(session: Int, code: Int, message: String)
 
+    /**
+     * Hands one image of a texture-output session to Rust (class doc's
+     * *Additive entries*), on the pipeline's frame thread. `true`: Rust took
+     * [buffer] and the image must stay open until [releaseTextureFrame] with
+     * [token]; `false`: close it now.
+     */
+    @JvmStatic
+    external fun nativeOnTextureFrame(
+        session: Int,
+        buffer: HardwareBuffer?,
+        pixels: ByteBuffer?,
+        width: Int,
+        height: Int,
+        rowStride: Int,
+        token: Long,
+    ): Boolean
+
     // --- Module-internal seam (NOT part of the JNI contract) ---------------
 
     /**
@@ -486,6 +598,9 @@ object FrustVideoPlayerHost {
      */
     internal fun attachSurface(sessionId: Int, view: VideoPlayerView): Boolean {
         val session = sessions[sessionId] ?: return false
+        // A texture-output session's picture goes to its pipeline; a slot
+        // naming it stays empty rather than stealing the player's surface.
+        if (session.texture != null) return true
         session.view = view
         if (session.videoWidth > 0 && session.videoHeight > 0) {
             view.onVideoSize(session.videoWidth, session.videoHeight)
@@ -501,7 +616,7 @@ object FrustVideoPlayerHost {
      */
     internal fun detachSurface(sessionId: Int, view: VideoPlayerView) {
         val session = sessions[sessionId] ?: return
-        if (session.view !== view) return
+        if (session.texture != null || session.view !== view) return
         session.view = null
         withPlayer(session) { it.clearVideoSurfaceView(view.videoSurface) }
     }
@@ -553,6 +668,13 @@ object FrustVideoPlayerHost {
 
         /** Height half of [videoWidth]'s pair; the two are always set together. */
         var videoHeight: Int = 0
+
+        /**
+         * The texture pipeline of a texture-output session, else null. Set on
+         * the main Looper; read from a Rust thread by [releaseTextureFrame].
+         */
+        @Volatile
+        var texture: TexturePipeline? = null
     }
 
     /**
@@ -689,6 +811,7 @@ object FrustVideoPlayerHost {
             session.videoWidth = width
             session.videoHeight = height
             session.view?.onVideoSize(width, height)
+            session.texture?.setOutputSize(width, height)
             notifyVideoSize(session.id, width, height)
         }
 
@@ -892,6 +1015,383 @@ object FrustVideoPlayerHost {
             nativeOnError(session, code, message)
         } catch (e: Throwable) {
             Log.w(TAG, "frust-video-player: nativeOnError unavailable", e)
+        }
+    }
+
+    /**
+     * Latched once [nativeOnTextureFrame] has proven unavailable, so the
+     * frame-rate guard below logs once rather than per frame.
+     */
+    @Volatile
+    private var textureNativeMissing: Boolean = false
+
+    /** The frame-rate guard for [nativeOnTextureFrame]; `false` = close now. */
+    private fun notifyTextureFrame(
+        session: Int,
+        buffer: HardwareBuffer?,
+        pixels: ByteBuffer?,
+        width: Int,
+        height: Int,
+        rowStride: Int,
+        token: Long,
+    ): Boolean {
+        if (textureNativeMissing) return false
+        return try {
+            nativeOnTextureFrame(session, buffer, pixels, width, height, rowStride, token)
+        } catch (e: UnsatisfiedLinkError) {
+            textureNativeMissing = true
+            Log.w(TAG, "frust-video-player: nativeOnTextureFrame unavailable — frames dropped", e)
+            false
+        } catch (e: Throwable) {
+            Log.w(TAG, "frust-video-player: nativeOnTextureFrame($session) failed", e)
+            false
+        }
+    }
+
+    /**
+     * One texture-output session's picture path (class doc's *Additive
+     * entries*): the player renders into [inputSurface] (a detached
+     * `SurfaceTexture`), [glThread] blits each frame into an `RGBA_8888`
+     * [ImageReader] sized to the video, and [frameThread] hands each image to
+     * Rust.
+     *
+     * Two threads, not one: with every reader image held (the renderer keeps
+     * up to six — one shown, four retiring, one pending), the blit's
+     * `eglSwapBuffers` waits for a free buffer, and the thread that would free
+     * it by delivering and releasing must not be the one waiting.
+     *
+     * Built and released on the main Looper; every GL and reader object is
+     * touched only on [glThread], every delivery only on [frameThread].
+     */
+    internal class TexturePipeline(private val sessionId: Int, private val hardwareBuffers: Boolean) {
+        private val glThread = HandlerThread("frust-video-gl").apply { start() }
+        private val glHandler = Handler(glThread.looper)
+        private val frameThread = HandlerThread("frust-video-frames").apply { start() }
+        private val frameHandler = Handler(frameThread.looper)
+
+        /** Detached until [initGl] attaches it to the blit's GL context. */
+        private val surfaceTexture = SurfaceTexture(false)
+
+        /** What the player renders into. */
+        val inputSurface = Surface(surfaceTexture)
+
+        /** Images Rust kept open (`nativeOnTextureFrame` answered `true`). */
+        private val retained = ConcurrentHashMap<Long, Image>()
+        private val nextToken = AtomicLong(1)
+
+        @Volatile
+        private var released = false
+
+        // GL thread only.
+        private var display: EGLDisplay = EGL14.EGL_NO_DISPLAY
+        private var context: EGLContext = EGL14.EGL_NO_CONTEXT
+        private var config: EGLConfig? = null
+        private var idleSurface: EGLSurface = EGL14.EGL_NO_SURFACE
+        private var outputSurface: EGLSurface = EGL14.EGL_NO_SURFACE
+        private var reader: ImageReader? = null
+        private var outputWidth = 0
+        private var outputHeight = 0
+        private var program = 0
+        private var oesTexture = 0
+        private val texMatrix = FloatArray(16)
+
+        init {
+            glHandler.post { initGl() }
+            // Posted after `initGl`, so a frame is never drawn before the GL
+            // context exists.
+            surfaceTexture.setOnFrameAvailableListener({ drawFrame() }, glHandler)
+        }
+
+        /** Main Looper. (Re)size the output to the video's decoded size. */
+        fun setOutputSize(width: Int, height: Int) {
+            surfaceTexture.setDefaultBufferSize(width, height)
+            glHandler.post { createOutput(width, height) }
+        }
+
+        /** Any thread. Close the image behind [token], if still held. */
+        fun releaseFrame(token: Long) {
+            val image = retained.remove(token) ?: return
+            try {
+                image.close()
+            } catch (e: Throwable) {
+                Log.w(TAG, "frust-video-player: closing texture frame $token failed", e)
+            }
+        }
+
+        /** Main Looper, after the player let go of [inputSurface]. */
+        fun release() {
+            released = true
+            surfaceTexture.setOnFrameAvailableListener(null)
+            glHandler.post {
+                destroyOutput()
+                releaseGl()
+                try {
+                    surfaceTexture.release()
+                } catch (e: Throwable) {
+                    Log.w(TAG, "frust-video-player: releasing the texture input failed", e)
+                }
+                inputSurface.release()
+                glThread.quitSafely()
+            }
+            frameThread.quitSafely()
+        }
+
+        private fun initGl() {
+            if (released) return
+            try {
+                display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
+                val version = IntArray(2)
+                check(EGL14.eglInitialize(display, version, 0, version, 1)) { "eglInitialize" }
+                val attributes = intArrayOf(
+                    EGL14.EGL_RED_SIZE, 8,
+                    EGL14.EGL_GREEN_SIZE, 8,
+                    EGL14.EGL_BLUE_SIZE, 8,
+                    EGL14.EGL_ALPHA_SIZE, 8,
+                    EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+                    EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT or EGL14.EGL_PBUFFER_BIT,
+                    EGL14.EGL_NONE,
+                )
+                val configs = arrayOfNulls<EGLConfig>(1)
+                val count = IntArray(1)
+                check(EGL14.eglChooseConfig(display, attributes, 0, configs, 0, 1, count, 0) && count[0] > 0) {
+                    "eglChooseConfig"
+                }
+                config = configs[0]
+                context = EGL14.eglCreateContext(
+                    display,
+                    config,
+                    EGL14.EGL_NO_CONTEXT,
+                    intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE),
+                    0,
+                )
+                check(context != EGL14.EGL_NO_CONTEXT) { "eglCreateContext" }
+                // A 1x1 pbuffer keeps the context current while no output
+                // exists yet, so frames can still be latched (and dropped).
+                idleSurface = EGL14.eglCreatePbufferSurface(
+                    display,
+                    config,
+                    intArrayOf(EGL14.EGL_WIDTH, 1, EGL14.EGL_HEIGHT, 1, EGL14.EGL_NONE),
+                    0,
+                )
+                check(EGL14.eglMakeCurrent(display, idleSurface, idleSurface, context)) { "eglMakeCurrent" }
+
+                val textures = IntArray(1)
+                GLES20.glGenTextures(1, textures, 0)
+                oesTexture = textures[0]
+                GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, oesTexture)
+                GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+                GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+                GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+                GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+                surfaceTexture.attachToGLContext(oesTexture)
+                program = buildProgram()
+            } catch (e: Throwable) {
+                Log.w(TAG, "frust-video-player: texture pipeline GL setup failed (session $sessionId)", e)
+                releaseGl()
+            }
+        }
+
+        private fun createOutput(width: Int, height: Int) {
+            if (released || context == EGL14.EGL_NO_CONTEXT) return
+            if (width == outputWidth && height == outputHeight && reader != null) return
+            destroyOutput()
+            try {
+                val next = if (hardwareBuffers && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    ImageReader.newInstance(
+                        width,
+                        height,
+                        PixelFormat.RGBA_8888,
+                        HARDWARE_MAX_IMAGES,
+                        HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE or HardwareBuffer.USAGE_GPU_COLOR_OUTPUT,
+                    )
+                } else {
+                    ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, CPU_MAX_IMAGES)
+                }
+                next.setOnImageAvailableListener({ deliverLatest(it) }, frameHandler)
+                outputSurface = EGL14.eglCreateWindowSurface(
+                    display,
+                    config,
+                    next.surface,
+                    intArrayOf(EGL14.EGL_NONE),
+                    0,
+                )
+                check(outputSurface != EGL14.EGL_NO_SURFACE) { "eglCreateWindowSurface" }
+                reader = next
+                outputWidth = width
+                outputHeight = height
+            } catch (e: Throwable) {
+                Log.w(TAG, "frust-video-player: texture output ${width}x$height failed (session $sessionId)", e)
+                destroyOutput()
+            }
+        }
+
+        private fun destroyOutput() {
+            if (outputSurface != EGL14.EGL_NO_SURFACE) {
+                EGL14.eglMakeCurrent(display, idleSurface, idleSurface, context)
+                EGL14.eglDestroySurface(display, outputSurface)
+                outputSurface = EGL14.EGL_NO_SURFACE
+            }
+            // Closing the reader closes every image it handed out; Rust's own
+            // buffer references keep the memory alive until it releases them.
+            reader?.close()
+            reader = null
+            retained.clear()
+            outputWidth = 0
+            outputHeight = 0
+        }
+
+        private fun drawFrame() {
+            if (released || context == EGL14.EGL_NO_CONTEXT) return
+            try {
+                // Latched even with no output, so the decoder's buffer frees.
+                surfaceTexture.updateTexImage()
+                val surface = outputSurface
+                if (surface == EGL14.EGL_NO_SURFACE) return
+                surfaceTexture.getTransformMatrix(texMatrix)
+                EGL14.eglMakeCurrent(display, surface, surface, context)
+                GLES20.glViewport(0, 0, outputWidth, outputHeight)
+                GLES20.glUseProgram(program)
+                GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+                GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, oesTexture)
+                GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(program, "uTexMatrix"), 1, false, texMatrix, 0)
+                val position = GLES20.glGetAttribLocation(program, "aPosition")
+                val coord = GLES20.glGetAttribLocation(program, "aTexCoord")
+                GLES20.glEnableVertexAttribArray(position)
+                GLES20.glVertexAttribPointer(position, 2, GLES20.GL_FLOAT, false, 0, QUAD_POSITIONS)
+                GLES20.glEnableVertexAttribArray(coord)
+                GLES20.glVertexAttribPointer(coord, 2, GLES20.GL_FLOAT, false, 0, QUAD_COORDS)
+                GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+                GLES20.glDisableVertexAttribArray(position)
+                GLES20.glDisableVertexAttribArray(coord)
+                EGL14.eglSwapBuffers(display, surface)
+            } catch (e: Throwable) {
+                Log.w(TAG, "frust-video-player: texture blit failed (session $sessionId)", e)
+            }
+        }
+
+        /** Frame thread. Hand the newest image to Rust; skip when none is free. */
+        private fun deliverLatest(source: ImageReader) {
+            if (released) return
+            val image = try {
+                source.acquireLatestImage()
+            } catch (e: IllegalStateException) {
+                // Every image is still held (or the reader closed): skip this
+                // one rather than wait, the next frame tries again.
+                null
+            } ?: return
+            try {
+                if (hardwareBuffers && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    val buffer = image.hardwareBuffer
+                    if (buffer != null) {
+                        val token = nextToken.getAndIncrement()
+                        retained[token] = image
+                        val kept = notifyTextureFrame(sessionId, buffer, null, image.width, image.height, 0, token)
+                        buffer.close()
+                        if (!kept) releaseFrame(token)
+                        return
+                    }
+                }
+                val plane = image.planes[0]
+                notifyTextureFrame(sessionId, null, plane.buffer, image.width, image.height, plane.rowStride, 0L)
+                image.close()
+            } catch (e: Throwable) {
+                Log.w(TAG, "frust-video-player: texture delivery failed (session $sessionId)", e)
+                try {
+                    image.close()
+                } catch (_: Throwable) {
+                }
+            }
+        }
+
+        private fun releaseGl() {
+            if (display == EGL14.EGL_NO_DISPLAY) return
+            try {
+                surfaceTexture.detachFromGLContext()
+            } catch (_: Throwable) {
+            }
+            EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
+            if (idleSurface != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(display, idleSurface)
+            if (context != EGL14.EGL_NO_CONTEXT) EGL14.eglDestroyContext(display, context)
+            EGL14.eglTerminate(display)
+            idleSurface = EGL14.EGL_NO_SURFACE
+            context = EGL14.EGL_NO_CONTEXT
+            display = EGL14.EGL_NO_DISPLAY
+        }
+
+        private fun buildProgram(): Int {
+            val vertex = compileShader(GLES20.GL_VERTEX_SHADER, VERTEX_SHADER)
+            val fragment = compileShader(GLES20.GL_FRAGMENT_SHADER, FRAGMENT_SHADER)
+            val program = GLES20.glCreateProgram()
+            GLES20.glAttachShader(program, vertex)
+            GLES20.glAttachShader(program, fragment)
+            GLES20.glLinkProgram(program)
+            val linked = IntArray(1)
+            GLES20.glGetProgramiv(program, GLES20.GL_LINK_STATUS, linked, 0)
+            check(linked[0] == GLES20.GL_TRUE) { "link: ${GLES20.glGetProgramInfoLog(program)}" }
+            return program
+        }
+
+        private fun compileShader(type: Int, source: String): Int {
+            val shader = GLES20.glCreateShader(type)
+            GLES20.glShaderSource(shader, source)
+            GLES20.glCompileShader(shader)
+            val compiled = IntArray(1)
+            GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, compiled, 0)
+            check(compiled[0] == GLES20.GL_TRUE) { "compile: ${GLES20.glGetShaderInfoLog(shader)}" }
+            return shader
+        }
+
+        companion object {
+            /**
+             * Reader depth with zero-copy frames: the renderer may hold six at
+             * once (one shown, four retiring behind their GPU fence, one
+             * pending in the mailbox) and `acquireLatestImage` needs one more
+             * to look past the newest.
+             */
+            private const val HARDWARE_MAX_IMAGES = 7
+
+            /** Reader depth when copying: each image closes right after the copy. */
+            private const val CPU_MAX_IMAGES = 3
+
+            /** Full-viewport quad as a triangle strip, in clip space. */
+            private val QUAD_POSITIONS: FloatBuffer =
+                floatBuffer(floatArrayOf(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f))
+
+            /** The quad's texture coordinates, before the stream's own transform. */
+            private val QUAD_COORDS: FloatBuffer =
+                floatBuffer(floatArrayOf(0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f))
+
+            private const val VERTEX_SHADER = """
+                uniform mat4 uTexMatrix;
+                attribute vec4 aPosition;
+                attribute vec4 aTexCoord;
+                varying vec2 vTexCoord;
+                void main() {
+                    gl_Position = aPosition;
+                    vTexCoord = (uTexMatrix * aTexCoord).xy;
+                }
+            """
+
+            // Opaque output: video carries no alpha, and an opaque pixel reads
+            // the same premultiplied or straight.
+            private const val FRAGMENT_SHADER = """
+                #extension GL_OES_EGL_image_external : require
+                precision mediump float;
+                varying vec2 vTexCoord;
+                uniform samplerExternalOES sTexture;
+                void main() {
+                    gl_FragColor = vec4(texture2D(sTexture, vTexCoord).rgb, 1.0);
+                }
+            """
+
+            private fun floatBuffer(values: FloatArray): FloatBuffer =
+                ByteBuffer.allocateDirect(values.size * 4)
+                    .order(ByteOrder.nativeOrder())
+                    .asFloatBuffer()
+                    .apply {
+                        put(values)
+                        position(0)
+                    }
         }
     }
 }

@@ -39,6 +39,18 @@
 //! component's owner and runs it — **never a `Drop` impl**
 //! (`docs/CODE_STANDARDS.md`'s State & Reactivity Conventions).
 //!
+//! # Preview as a texture
+//!
+//! The **Preview** toggle swaps the platform-view slot for
+//! [`CameraSession::preview_texture_output`]'s scene texture: preview frames
+//! pushed through the renderer's texture bus and drawn as ordinary frust
+//! paint by [`texture_preview_block`] — rounded corners, scrolling with the
+//! list, and a frust badge painted over the frames on every platform. With no
+//! session (no camera backend on desktop, permission not granted yet) or no
+//! texture producer for it, a synthetic pattern goes through the same bus
+//! instead, captioned as such. [`FrameTicker`] keeps the page painting while
+//! the toggle is on, since new frames land behind the display list's back.
+//!
 //! # Image-stream readout
 //!
 //! [`CameraSession::start_image_stream`]'s callback runs on a plugin-owned
@@ -93,10 +105,12 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use frust::texture::{SourceFrame, TextureRegistration, register_texture_source};
 use frust::{
-    AsyncValue, Axis, ButtonStyle, Color, Component, EdgeInsets, FlexChild, FlexView, Get, Padding,
-    PlatformViewView, SizedBox, Theme, UseTask, button, component, inflexible, on_cleanup,
-    platform_view, spawn_blocking, text, use_context, use_task,
+    Align, Alignment, AsyncValue, Axis, ButtonStyle, Color, Component, EdgeInsets, FlexChild,
+    FlexView, Get, Padding, PlatformViewView, SizedBox, TextureFit, Theme, UseTask, button,
+    component, container, inflexible, on_cleanup, platform_view, spawn_blocking, stack, text,
+    texture_view, use_context, use_task,
 };
 use frust_camera::barcode::{Barcode, BarcodeFormat, decode_frame};
 use frust_camera::{
@@ -124,7 +138,13 @@ const PREVIEW_H: f64 = 240.0;
 /// to read — it only mounts [`CameraPage`]'s own retained local state (the
 /// [module docs](self)'s Session lifecycle section).
 pub fn page(_state: &PlaygroundState) -> impl View<PlaygroundState> {
-    component(CameraPage)
+    component(CameraPage { texture: false })
+}
+
+/// [`page`], mounted with the **Preview** toggle already on texture — the
+/// entry the headless smoke test drives to cover the texture path.
+pub fn texture_page(_state: &PlaygroundState) -> impl View<PlaygroundState> {
+    component(CameraPage { texture: true })
 }
 
 // ---------------------------------------------------------------------------
@@ -216,10 +236,19 @@ struct CameraPageState {
     torch_on: bool,
     /// The last `set_torch` error, if any.
     torch_error: Option<String>,
+    /// Whether the preview shows as an in-scene texture rather than the
+    /// platform-view slot — the [module docs](self)'s Preview as a texture.
+    texture: bool,
+    /// The synthetic pattern shown in texture mode when there are no camera
+    /// frames — registered on first use, unregistered with the page.
+    pattern: Option<TextureRegistration>,
 }
 
 /// The camera page's own [`Component`] (see the [module docs](self)).
-struct CameraPage;
+struct CameraPage {
+    /// The initial **Preview** mode.
+    texture: bool,
+}
 
 impl Component for CameraPage {
     type State = CameraPageState;
@@ -303,6 +332,8 @@ impl Component for CameraPage {
             timing_stats: Arc::new(TimingStats::default()),
             torch_on: false,
             torch_error: None,
+            texture: self.texture,
+            pattern: None,
         }
     }
 
@@ -355,20 +386,33 @@ impl Component for CameraPage {
             ]),
             permission_block(&permission, state.open_error.as_deref()),
             lens_block(state, has_session),
+            preview_mode_block(state),
         ];
 
+        if state.texture {
+            children.push(texture_preview_block(state));
+        }
+
         if has_session {
-            children.push(preview_block(state));
+            if !state.texture {
+                children.push(preview_block(state));
+            }
             children.push(capture_block(state));
             children.push(stream_block(state));
             children.push(scan_block(state, torch_available));
-            if state.streaming || state.scanning {
+            if (state.streaming || state.scanning) && !state.texture {
                 // Keeps this Component's `build` re-invoked every frame while
                 // a stream is (believed) running, so the frames/sec and scan
                 // readouts stay live — see the [module docs](self)'s readout
                 // sections.
                 children.push(frame_ticker());
             }
+        }
+
+        if state.texture {
+            // Keeps frames showing in the texture preview (and doubles as the
+            // stream readouts' ticker while it is mounted).
+            children.push(frame_ticker());
         }
 
         children.push(gap(12.0));
@@ -672,6 +716,130 @@ fn preview_block(state: &CameraPageState) -> FlexChild<CameraPageState> {
         inflexible(label("Preview")),
         gap(6.0),
         inflexible(slot),
+    ])
+}
+
+// ---------------------------------------------------------------------------
+// Preview as a texture
+// ---------------------------------------------------------------------------
+
+/// The synthetic pattern's frame size — small on purpose: it only proves
+/// the in-scene path, so the upload stays trivial.
+const PATTERN_W: u32 = 48;
+const PATTERN_H: u32 = 36;
+
+fn preview_mode_toggle_handler(state: &mut CameraPageState) {
+    state.texture = !state.texture;
+}
+
+fn preview_mode_block(state: &CameraPageState) -> FlexChild<CameraPageState> {
+    block(vec![
+        inflexible(label("Preview mode")),
+        gap(6.0),
+        inflexible(
+            button(
+                if state.texture {
+                    "Preview: texture"
+                } else {
+                    "Preview: platform view"
+                },
+                preview_mode_toggle_handler,
+            )
+            .style(ButtonStyle::Secondary)
+            .small(),
+        ),
+    ])
+}
+
+/// Registers a frame source producing a moving test pattern (a vertical
+/// gradient with a sweeping white row), one new frame per renderer poll —
+/// the stand-in of the [module docs](self)'s Preview as a texture section.
+fn pattern_source() -> TextureRegistration {
+    let mut tick: u32 = 0;
+    register_texture_source(move || {
+        tick = tick.wrapping_add(1);
+        let sweep = tick % PATTERN_H;
+        let mut pixels = Vec::with_capacity((PATTERN_W * PATTERN_H * 4) as usize);
+        for y in 0..PATTERN_H {
+            let shade = (y * 255 / PATTERN_H) as u8;
+            for _x in 0..PATTERN_W {
+                let rgba = if y == sweep {
+                    [0xFF, 0xFF, 0xFF, 0xFF]
+                } else {
+                    [0x20, shade, 0xFF - shade, 0xFF]
+                };
+                pixels.extend_from_slice(&rgba);
+            }
+        }
+        Some(SourceFrame::rgba8(PATTERN_W, PATTERN_H, Arc::from(pixels)))
+    })
+}
+
+/// The frust badge drawn over the in-scene preview — ordinary frust paint
+/// over the texture, with rounded corners a native slot cannot take.
+fn frust_badge() -> impl View<CameraPageState> {
+    Align(
+        Alignment::TOP_RIGHT,
+        Padding(
+            EdgeInsets::all(8.0),
+            container(Padding(
+                EdgeInsets::symmetric(3.0, 8.0),
+                text("frust")
+                    .size(11.0)
+                    .color(Color::from_rgb8(0xFF, 0xFF, 0xFF)),
+            ))
+            .fill(Color::new([0.0, 0.0, 0.0, 0.55]))
+            .radius(8.0),
+        ),
+    )
+}
+
+/// The texture-mode preview: the session's preview texture in-scene, or the
+/// synthetic pattern when there is none (the [module docs](self)'s Preview as
+/// a texture section).
+fn texture_preview_block(state: &mut CameraPageState) -> FlexChild<CameraPageState> {
+    let session = state
+        .session_cell
+        .lock()
+        .expect("session cell poisoned")
+        .clone();
+    let from_camera = session.as_ref().and_then(|session| {
+        session.preview_texture_output().map(|registration| {
+            let view = texture_view(registration.scene_texture_id()).fit(TextureFit::Cover);
+            match registration.frame_size() {
+                Some((w, h)) => view.source_size(Size::new(f64::from(w), f64::from(h))),
+                None => view,
+            }
+        })
+    });
+    let (picture, note) = match from_camera {
+        Some(view) => (
+            view,
+            "Camera frames drawn in-scene through the texture bus \u{2014} rounded, scrolling \
+             with the page, the badge painted over them.",
+        ),
+        None => {
+            let pattern = state.pattern.get_or_insert_with(pattern_source);
+            (
+                texture_view(pattern.scene_texture_id())
+                    .fit(TextureFit::Cover)
+                    .source_size(Size::new(f64::from(PATTERN_W), f64::from(PATTERN_H))),
+                "No camera frames here (no session, or no texture producer on this target) \
+                 \u{2014} a synthetic pattern through the same texture bus.",
+            )
+        }
+    };
+    let picture = picture
+        .size(Size::new(PREVIEW_W, PREVIEW_H))
+        .corner_radius(16.0)
+        .label("Live camera preview");
+
+    block(vec![
+        inflexible(label("Preview (texture)")),
+        gap(6.0),
+        inflexible(stack().child(picture).child(frust_badge())),
+        gap(6.0),
+        inflexible(caption(note)),
     ])
 }
 

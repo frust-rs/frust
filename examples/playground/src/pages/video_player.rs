@@ -61,6 +61,21 @@
 //! this only adds intermediate seeks during the drag itself, not a missing
 //! one at its end).
 //!
+//! # Texture output
+//!
+//! The **Output** toggle reopens the current source with
+//! [`VideoOutput::Texture`]: the player's frames then go through the
+//! renderer's texture bus and [`video_texture_view`] draws them as ordinary
+//! frust paint — rounded corners, clipped `Cover`, scrolling with the list,
+//! and the frust badge in [`texture_block`] painted over the picture on every
+//! platform (no Mode A/Mode B caveat). A target or backend with no frame
+//! producer for the session (no player at all on Linux/Windows; Apple until
+//! its producer lands) shows a synthetic pattern through the same bus
+//! instead, captioned as such, so the in-scene path itself is still visible.
+//! While texture output is on, [`FrameTicker`] keeps the page painting every
+//! frame — new frames land behind the display list's back, so something has
+//! to ask for the frames that show them.
+//!
 //! # Desktop-only note
 //!
 //! On macOS (the one desktop target this crate's `apple` backend actually
@@ -73,18 +88,21 @@
 
 #[cfg(target_os = "macos")]
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
-use frust::{Align, Alignment, container, stack};
-use frust::{
-    Axis, ButtonStyle, Color, Component, EdgeInsets, FlexChild, FlexView, Get, GetUntracked,
-    Padding, PlatformViewView, SizedBox, Theme, View, button, component, inflexible, row, slider,
-    text, use_context,
+use frust::authoring::{
+    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Size, Widget,
 };
-use frust_video_player::api::{VideoPlayerHandle, video_view};
+use frust::texture::{SourceFrame, TextureRegistration, register_texture_source};
+use frust::{
+    Align, Alignment, Axis, ButtonStyle, Color, Component, EdgeInsets, FlexChild, FlexView, Get,
+    GetUntracked, Padding, PlatformViewView, SizedBox, TextureFit, Theme, View, button, component,
+    container, inflexible, row, slider, stack, text, texture_view, use_context,
+};
+use frust_video_player::api::{VideoPlayerHandle, video_texture_view, video_view};
 use frust_video_player::{
-    PlaybackState, PlayerOptions, VideoError, VideoFit, VideoPlayer, VideoSource,
+    PlaybackState, PlayerOptions, VideoError, VideoFit, VideoOutput, VideoPlayer, VideoSource,
 };
 
 use crate::PlaygroundState;
@@ -119,7 +137,17 @@ const VOLUME_STEP: f32 = 0.25;
 /// to read — it only mounts [`VideoPlayerPage`]'s own retained local
 /// state.
 pub fn page(_state: &PlaygroundState) -> impl View<PlaygroundState> {
-    component(VideoPlayerPage)
+    component(VideoPlayerPage {
+        output: VideoOutput::NativeView,
+    })
+}
+
+/// [`page`], mounted with the **Output** toggle already on texture — the
+/// entry the headless smoke test drives to cover the texture path.
+pub fn texture_page(_state: &PlaygroundState) -> impl View<PlaygroundState> {
+    component(VideoPlayerPage {
+        output: VideoOutput::Texture,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -191,10 +219,22 @@ struct VideoPageState {
     /// The last looping flag this page requested — optimistic, same
     /// reason.
     looping: bool,
+    /// Where the next opened session's picture goes — the **Output** toggle
+    /// (see the [module docs](self)'s Texture output section).
+    output: VideoOutput,
+    /// The source the current session was opened from, so the **Output**
+    /// toggle can reopen it in the other mode.
+    source: Option<VideoSource>,
+    /// The synthetic pattern shown in texture mode when no player frames are
+    /// available — registered on first use, unregistered with the page.
+    pattern: Option<TextureRegistration>,
 }
 
 /// The video page's own [`Component`] (see the [module docs](self)).
-struct VideoPlayerPage;
+struct VideoPlayerPage {
+    /// The initial **Output** mode.
+    output: VideoOutput,
+}
 
 impl Component for VideoPlayerPage {
     type State = VideoPageState;
@@ -208,6 +248,9 @@ impl Component for VideoPlayerPage {
             rate: 1.0,
             volume: 1.0,
             looping: false,
+            output: self.output,
+            source: None,
+            pattern: None,
         }
     }
 
@@ -225,6 +268,11 @@ impl Component for VideoPlayerPage {
             source_picker_block(state),
         ];
 
+        if state.output == VideoOutput::Texture {
+            children.push(texture_block(state));
+            children.push(inflexible(FrameTicker));
+        }
+
         if let Some(handle) = state.handle.as_ref() {
             let playback_state = handle.state.get();
             let position = handle.position.get();
@@ -232,7 +280,9 @@ impl Component for VideoPlayerPage {
             let video_size = handle.video_size.get();
             let error = handle.error.get();
 
-            children.push(slot_block(handle, state.fit, playback_state));
+            if state.output == VideoOutput::NativeView {
+                children.push(slot_block(handle, state.fit, playback_state));
+            }
             children.push(transport_block(state, playback_state));
             children.push(scrubber_block(position, duration));
             children.push(state_chip_block(
@@ -344,10 +394,27 @@ fn open_with(state: &mut VideoPageState, source: VideoSource) {
     state.rate = 1.0;
     state.volume = 1.0;
     state.looping = false;
+    state.source = Some(source.clone());
 
-    match VideoPlayer::open(source, PlayerOptions::default()) {
+    let options = PlayerOptions {
+        output: state.output,
+        ..PlayerOptions::default()
+    };
+    match VideoPlayer::open(source, options) {
         Ok(session) => state.handle = Some(VideoPlayerHandle::new(session)),
         Err(err) => state.open_error = Some(err.to_string()),
+    }
+}
+
+/// Flips the **Output** mode and reopens the current source in it (the mode
+/// is fixed when a session opens).
+fn output_toggle_handler(state: &mut VideoPageState) {
+    state.output = match state.output {
+        VideoOutput::NativeView => VideoOutput::Texture,
+        VideoOutput::Texture => VideoOutput::NativeView,
+    };
+    if let Some(source) = state.source.clone() {
+        open_with(state, source);
     }
 }
 
@@ -391,6 +458,18 @@ fn source_picker_block(state: &VideoPageState) -> FlexChild<VideoPageState> {
                         .style(ButtonStyle::Secondary)
                         .small(),
                 ),
+        ),
+        gap(6.0),
+        inflexible(
+            button(
+                match state.output {
+                    VideoOutput::NativeView => "Output: native view",
+                    VideoOutput::Texture => "Output: texture",
+                },
+                output_toggle_handler,
+            )
+            .style(ButtonStyle::Secondary)
+            .small(),
         ),
     ];
 
@@ -475,6 +554,143 @@ fn slot_block(
         gap(6.0),
         inflexible(slot_view),
     ])
+}
+
+// ---------------------------------------------------------------------------
+// Texture output
+// ---------------------------------------------------------------------------
+
+/// The synthetic pattern's frame size — small on purpose: it only proves
+/// the in-scene path, so the upload stays trivial.
+const PATTERN_W: u32 = 64;
+const PATTERN_H: u32 = 36;
+
+/// Registers a frame source producing a moving test pattern (colour bars
+/// with a sweeping white column), one new frame per renderer poll — the
+/// stand-in picture of the [module docs](self)'s Texture output section.
+fn pattern_source() -> TextureRegistration {
+    let mut tick: u32 = 0;
+    register_texture_source(move || {
+        tick = tick.wrapping_add(1);
+        let sweep = tick % PATTERN_W;
+        let mut pixels = Vec::with_capacity((PATTERN_W * PATTERN_H * 4) as usize);
+        for _y in 0..PATTERN_H {
+            for x in 0..PATTERN_W {
+                let rgba = if x == sweep {
+                    [0xFF, 0xFF, 0xFF, 0xFF]
+                } else {
+                    match x * 6 / PATTERN_W {
+                        0 => [0xE5, 0x39, 0x35, 0xFF],
+                        1 => [0xFB, 0x8C, 0x00, 0xFF],
+                        2 => [0xFD, 0xD8, 0x35, 0xFF],
+                        3 => [0x43, 0xA0, 0x47, 0xFF],
+                        4 => [0x1E, 0x88, 0xE5, 0xFF],
+                        _ => [0x8E, 0x24, 0xAA, 0xFF],
+                    }
+                };
+                pixels.extend_from_slice(&rgba);
+            }
+        }
+        Some(SourceFrame::rgba8(PATTERN_W, PATTERN_H, Arc::from(pixels)))
+    })
+}
+
+/// The frust badge drawn over the in-scene picture — ordinary frust paint
+/// over the texture, with the rounded corners a native slot cannot take.
+fn frust_badge() -> impl View<VideoPageState> {
+    Align(
+        Alignment::TOP_RIGHT,
+        Padding(
+            EdgeInsets::all(8.0),
+            container(Padding(
+                EdgeInsets::symmetric(3.0, 8.0),
+                text("frust")
+                    .size(11.0)
+                    .color(Color::from_rgb8(0xFF, 0xFF, 0xFF)),
+            ))
+            .fill(Color::new([0.0, 0.0, 0.0, 0.55]))
+            .radius(8.0),
+        ),
+    )
+}
+
+/// The texture-mode picture: the session's frames in-scene via
+/// [`video_texture_view`], or the synthetic pattern when there are none
+/// (see the [module docs](self)'s Texture output section).
+fn texture_block(state: &mut VideoPageState) -> FlexChild<VideoPageState> {
+    let from_player = state
+        .handle
+        .as_ref()
+        .and_then(|handle| video_texture_view(handle, state.fit));
+    let (picture, note) = match from_player {
+        Some(view) => (
+            view,
+            "Player frames drawn in-scene through the texture bus \u{2014} rounded, clipped, \
+             scrolling with the page, the badge painted over them.",
+        ),
+        None => {
+            let pattern = state.pattern.get_or_insert_with(pattern_source);
+            let fit = match state.fit {
+                VideoFit::Contain => TextureFit::Contain,
+                VideoFit::Cover => TextureFit::Cover,
+            };
+            (
+                texture_view(pattern.scene_texture_id())
+                    .fit(fit)
+                    .source_size(Size::new(f64::from(PATTERN_W), f64::from(PATTERN_H))),
+                "No player frames for this session on this target \u{2014} a synthetic pattern \
+                 through the same texture bus.",
+            )
+        }
+    };
+    let picture = picture
+        .size(Size::new(VIDEO_W, VIDEO_H))
+        .corner_radius(16.0)
+        .label("Video picture");
+
+    block(vec![
+        inflexible(label("Picture (texture)")),
+        gap(6.0),
+        inflexible(stack().child(picture).child(frust_badge())),
+        gap(6.0),
+        inflexible(caption(note)),
+    ])
+}
+
+/// A zero-size sentinel whose `paint` asks for the next frame, mounted while
+/// texture output is on — see the [module docs](self)'s Texture output
+/// section (`pages::camera`'s `FrameTicker` is the same pair, duplicated per
+/// module by convention).
+struct FrameTicker;
+
+impl<State: 'static> View<State> for FrameTicker {
+    type Element = FrameTickerWidget;
+
+    fn build(&self, _ctx: &mut BuildCtx<'_>) -> FrameTickerWidget {
+        FrameTickerWidget
+    }
+
+    fn rebuild(
+        &self,
+        _prev: &Self,
+        _element: &mut FrameTickerWidget,
+        _ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        ChangeFlags::PAINT
+    }
+}
+
+/// The retained widget for a [`FrameTicker`].
+struct FrameTickerWidget;
+
+impl Widget for FrameTickerWidget {
+    fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        bc.constrain(Size::ZERO)
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+        ctx.request_frame();
+    }
 }
 
 // ---------------------------------------------------------------------------

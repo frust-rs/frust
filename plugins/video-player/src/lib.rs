@@ -15,9 +15,23 @@
 //! this crate to its own `Cargo.toml` alongside `frust`; the facade does not
 //! depend on or re-export it.
 //!
-//! # The picture is a platform view, not a widget
+//! # Two ways to show the picture
 //!
-//! This crate never paints a frame itself. [`PlayerSession::view_type`]
+//! [`VideoOutput::NativeView`] (the default) hosts the picture in a native
+//! platform-view slot, described below. [`VideoOutput::Texture`] instead has
+//! the backend push decoded frames into a [`TextureSink`]
+//! ([`PlayerSession::texture_sink`]) that the frust renderer draws inside the
+//! scene, so clipping, transforms, scrolling and overlays apply to the
+//! picture like any other paint. The `frust-api` half bridges that sink to a
+//! scene texture (`api::VideoPlayerHandle::texture_output`,
+//! `api::video_texture_view`). A backend that has no frame producer yet
+//! answers `None` from [`PlayerSession::texture_sink`] and the session plays
+//! with no picture at all.
+//!
+//! # The native-view picture is a platform view, not a widget
+//!
+//! In [`VideoOutput::NativeView`] mode this crate never paints a frame
+//! itself. [`PlayerSession::view_type`]
 //! returns the `viewType` string an app feeds straight into
 //! `frust::platform_view`, and [`PlayerSession::params_json`] the params
 //! payload that names *which* session the native view should attach to. The
@@ -102,6 +116,7 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use backend::{BackendSession, PlayerBackend};
+pub use frust_plugin::texture::TextureSink;
 
 /// The platform-view spellings this crate publishes — **all** of them, on
 /// every target, so the host-side test suite can assert each one wherever it
@@ -187,10 +202,23 @@ impl VideoFit {
     }
 }
 
+/// Where a session's decoded picture goes, fixed at [`VideoPlayer::open`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum VideoOutput {
+    /// A native platform-view slot ([`PlayerSession::view_type`] /
+    /// [`PlayerSession::params_json`]). The default.
+    #[default]
+    NativeView,
+    /// Frames pushed into the session's [`TextureSink`]
+    /// ([`PlayerSession::texture_sink`]) for the renderer to draw in-scene.
+    /// The native-view slot of such a session shows nothing.
+    Texture,
+}
+
 /// How a session starts out, fixed at [`VideoPlayer::open`].
 ///
-/// Everything here except [`Self::mix_with_others`] is also settable later
-/// through [`PlayerSession`]; these are the values the platform player is
+/// Everything here except [`Self::mix_with_others`] and [`Self::output`] is
+/// also settable later through [`PlayerSession`]; these are the values the platform player is
 /// configured with before the first frame, so an autoplaying session never
 /// flashes a paused frame first.
 #[derive(Clone, Debug)]
@@ -210,6 +238,8 @@ pub struct PlayerOptions {
     /// capability gap is recorded per-platform, never emulated onto the
     /// platform that doesn't have it. Default `false`.
     pub mix_with_others: bool,
+    /// Where the picture goes. Default [`VideoOutput::NativeView`].
+    pub output: VideoOutput,
 }
 
 impl Default for PlayerOptions {
@@ -219,6 +249,7 @@ impl Default for PlayerOptions {
             looping: false,
             volume: 1.0,
             mix_with_others: false,
+            output: VideoOutput::NativeView,
         }
     }
 }
@@ -515,6 +546,10 @@ impl PlayerSession {
     /// its own close does, so a closed session reads the same way regardless
     /// of platform.
     ///
+    /// A [`VideoOutput::Texture`] session stops pushing frames, and the frame
+    /// still pending in its [`TextureSink`] (if any) is released here rather
+    /// than shown.
+    ///
     /// Unlike the control methods this is *not* refused from inside a
     /// listener: it returns nothing, so it could not report a refusal, and
     /// closing a failed session from its own error callback is the obvious
@@ -572,6 +607,19 @@ impl PlayerSession {
         params_json_with(SESSION_KEY, self.session.id(), fit)
     }
 
+    /// The frame mailbox this session's backend pushes decoded frames into,
+    /// when it was opened with [`VideoOutput::Texture`] and the backend has a
+    /// frame producer on this target; `None` otherwise (a
+    /// [`VideoOutput::NativeView`] session, or a backend without one).
+    ///
+    /// A clone of the backend's own handle: take frames from it (one consumer
+    /// per session — two would split the frames between them). Frames keep
+    /// arriving while the session plays; after [`Self::close`] none do, and
+    /// the backend's own handle is dropped with the session.
+    pub fn texture_sink(&self) -> Option<TextureSink> {
+        self.session.texture_sink().cloned()
+    }
+
     /// The guard every control method runs first: refuse a re-entrant call,
     /// then a call on a closed session.
     fn guard(&self) -> Result<(), VideoError> {
@@ -596,6 +644,41 @@ impl Drop for PlayerSession {
         // that dropped the session still releases the platform player.
         self.close();
     }
+}
+
+/// Copies an RGBA8 image whose rows are `row_stride` bytes apart into a
+/// tightly packed buffer (`width * 4` bytes per row, top row first) — the
+/// layout a CPU texture frame carries. The last row may stop at its pixels
+/// rather than run out to a full stride, as platform image planes do.
+///
+/// `None` when the stride is shorter than a row or `src` cannot hold
+/// `height` rows.
+// The Android texture path's copy; host builds reach it from the tests only.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) fn pack_rgba_rows(
+    src: &[u8],
+    width: u32,
+    height: u32,
+    row_stride: usize,
+) -> Option<Arc<[u8]>> {
+    let row = usize::try_from(width).ok()?.checked_mul(4)?;
+    let rows = usize::try_from(height).ok()?;
+    if row == 0 || rows == 0 || row_stride < row {
+        return None;
+    }
+    let needed = row_stride.checked_mul(rows - 1)?.checked_add(row)?;
+    if src.len() < needed {
+        return None;
+    }
+    // One allocation, written in place: `repeat_n` is a trusted-length
+    // iterator, so the `Arc` is allocated at its final size (a `Vec` turned
+    // into an `Arc` afterwards would copy the whole frame a second time).
+    let mut packed: Arc<[u8]> = std::iter::repeat_n(0u8, row.checked_mul(rows)?).collect();
+    let dst = Arc::get_mut(&mut packed)?;
+    for (out, line) in dst.chunks_exact_mut(row).zip(src.chunks(row_stride)) {
+        out.copy_from_slice(&line[..row]);
+    }
+    Some(packed)
 }
 
 /// Build a params payload with an explicit key spelling — the seam that lets
@@ -639,5 +722,34 @@ impl Drop for ListenerHandle {
         if let Some(shared) = self.shared.upgrade() {
             shared.remove_listener(self.generation);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pack_rgba_rows;
+
+    #[test]
+    fn packed_rows_pass_through_unchanged() {
+        let src: Vec<u8> = (0..16).collect();
+        assert_eq!(pack_rgba_rows(&src, 2, 2, 8).as_deref(), Some(&src[..]));
+    }
+
+    #[test]
+    fn padded_rows_are_compacted_and_a_short_last_row_is_fine() {
+        // 1x3 image, 4 bytes of pixels per row, rows 6 bytes apart, the last
+        // row ending at its pixels.
+        let src = [1, 1, 1, 1, 0, 0, 2, 2, 2, 2, 0, 0, 3, 3, 3, 3];
+        assert_eq!(
+            pack_rgba_rows(&src, 1, 3, 6).as_deref(),
+            Some(&[1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3][..])
+        );
+    }
+
+    #[test]
+    fn a_stride_or_buffer_too_small_is_refused() {
+        assert_eq!(pack_rgba_rows(&[0; 16], 2, 2, 4), None, "stride < row");
+        assert_eq!(pack_rgba_rows(&[0; 15], 2, 2, 8), None, "buffer short");
+        assert_eq!(pack_rgba_rows(&[0; 16], 0, 2, 8), None, "empty image");
     }
 }

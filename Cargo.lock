@@ -2162,6 +2162,7 @@ dependencies = [
  "block2 0.6.2",
  "dispatch2",
  "frust-plugin",
+ "frust-ui",
  "jni 0.22.4",
  "log",
  "objc2 0.6.4",
