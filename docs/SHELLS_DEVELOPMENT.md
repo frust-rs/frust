@@ -56,7 +56,34 @@ adb shell am start -a android.intent.action.VIEW -d native-widgets-demo://sectio
 Run it with `false` (Mode A: overlays show the popover and badge over the native views) and, after a
 force-stop, with `true` (Mode B: the overlay ops are ignored and the main surface shows the same
 content). The "Interleaved" checkbox shows the known limit (`android-overlays-cover-later-slots`).
-Device outcome: pending.
+Device outcome (Pixel 5): the overlay, rotation and Mode B legs pass; a newly attached or recreated
+overlay surface gets no frame while the app is idle (`android-overlays-opt-in-pending-device-leg`).
+
+## Apple overlay manual test (macOS + iOS)
+
+The Apple overlay hosts ([SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md) § Native-view hosting) on
+`examples/native-widgets-demo`'s `sandwich` page, behind `FRUST_OVERLAYS` (default off). Perf lines
+below need a `perf-trace` build plus `FRUST_TRACE=1`.
+
+```bash
+# macOS (run inside examples/native-widgets-demo):
+env -u DYLD_LIBRARY_PATH FRUST_OVERLAYS=1 FRUST_DEMO_SECTION=sandwich cargo run
+# iPhone: build with the knob, launch with FRUST_DEMO_OPAQUE=1, open the page by deep link:
+frust build ios --profile --define FRUST_OVERLAYS=1
+#   native-widgets-demo://section/sandwich
+# Simulator: set the knobs through simctl's child environment:
+SIMCTL_CHILD_FRUST_DEMO_OPAQUE=1 SIMCTL_CHILD_FRUST_OVERLAYS=1
+```
+
+Overlays are Mode A only; the demo's `FRUST_DEMO_OPAQUE` selects the opaque surface on iOS. The
+frust card must sit above the native controls it overlaps and, under "Interleaved", below the later
+native slider. Toggling it, backgrounding and returning, and rotating must all settle with no
+further input. The proving log lines: `overlay surfaces on (one per differ cut, Mode A)`,
+`overlay N view above slot S`, `first segmented frame submitted/presented: main + K overlay(s)`,
+`frust-overlay skew frames=120 … armed=`, `frust-overlay cost overlay=N gpu_main_us=…`,
+`overlay N refused …` and `content kept on main …`. Outcome: iPhone SE and iOS Simulator pass with
+0 uncaptured wgpu errors in Mode A and Mode B; macOS is log-proven and its visual check: device
+leg pending.
 
 ## Migrating an already-scaffolded app to edge-to-edge
 
@@ -100,8 +127,8 @@ is a person-driven check:
   in either orientation — `scripts/testing/android-smoke.sh` is the automated equivalent of this
   leg (see [TESTING.md](TESTING.md) § Android Emulator GPU Lab).
 - **iPad (iPadOS 26+):** run the playground on the iOS 27.0 iPad Simulator with a local, uncommitted
-  opaque-surface flip (translucent Mode B has rendered black on the Simulator — consistently on iOS
-  26.2, intermittently on 27.0 — so the opaque flip is the deterministic recipe): set
+  opaque-surface flip (translucent Mode B rendered black on earlier Simulator runs and no longer
+  reproduces; the opaque flip stays the deterministic recipe): set
   `translucentSurface` to `false` in `examples/playground/ios/Runner/SceneDelegate.swift`. Open
   Responsive: in a windowed scene the corner-insets line shows a non-zero TL (TR under RTL) and the
   home bar's brand slot sits clear of the window control; full screen reads zeros.

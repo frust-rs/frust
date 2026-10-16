@@ -17,11 +17,10 @@ platform-view differ, and a handful of signal-poll seams. Above it sit four host
 - **Web** — `frust-shell-web` (`crates/frust-shell-web`) is a winit host like Desktop, but not a
   *desktop* host, so it sits directly on `frust-shell-common` — the way the two mobile shells do —
   rather than depending on `frust-shell-desktop`, whose core is entangled with `accesskit_winit`,
-  `pollster::block_on` surface bring-up, a render thread and `frust-paths` cache I/O, none of which
-  exist on `wasm32-unknown-unknown`. It carries its own copy of that core's winit-*generic* halves
-  — input mapping, the reactive-owner event wrap (`event_under_owner`), the change-guarded
-  `WindowMetrics` publish, and brightness-follow — under a documented must-not-diverge contract
-  (`crates/frust-shell-web/src/app_handler.rs`'s header).
+  `pollster::block_on` bring-up, a render thread and `frust-paths` cache I/O, none of which exist on
+  `wasm32-unknown-unknown`. It carries its own copy of that core's winit-*generic* halves (input
+  mapping, the reactive-owner event wrap, the `WindowMetrics` publish, brightness-follow) under a
+  must-not-diverge contract (`crates/frust-shell-web/src/app_handler.rs`'s header).
 
 Every concrete shell drives rebuild → layout → paint → encode → present and translates
 platform-native input/lifecycle/theme/insets/IME/deep-link/back/platform-view signals into the
@@ -139,13 +138,13 @@ builder parses the target triple, and the web shell at compile time (`frust-hotp
 
 Each concrete shell confines all unsafe/FFI code to one named module — `jni_glue` on Android,
 `ffi_glue` on iOS, `appkit_glue` on macOS, `win32_glue` on Windows — so each platform boundary is
-auditable as a single surface. `frust-shell-common`, `frust-shell-desktop` and
-`frust-shell-linux` hold no `unsafe` at all, hot-patch code included: the patch loader's `unsafe`
-lives in `frust-hotpatch`, and the Android/iOS hot-patch arms add none beyond their zones. The
+auditable as a single surface. `frust-shell-common` and `frust-shell-linux` hold no `unsafe` at
+all, hot-patch code included (the patch loader's `unsafe` lives in `frust-hotpatch`);
+`frust-shell-desktop` holds exactly one macOS-only block, `render.rs`'s `build_overlay_surface`. The
 register of what each zone is permitted to do, and the `# Safety`/no-unwind rules that govern
 it, live in [CODE_STANDARDS.md](CODE_STANDARDS.md) § Language Idioms.
-Android's zone also holds the one `OverlaySurface::new` call in `prepare_overlays` (an overlay
-`ANativeWindow` to a `wgpu::Surface`, built and dropped under the overlay host's lock).
+Android's zone also holds the one `OverlaySurface::new` call in `prepare_overlays`, iOS's the one in
+`take_frame_overlays` plus the overlay exports.
 
 `surface_mode`'s writer set is pinned by a source-scan conformance test: exactly one call site per
 platform may publish a resolved surface mode, a single-writer contract that keeps the signal-poll
@@ -192,16 +191,14 @@ never the reverse; the facade **re-exports** them instead, exactly as it re-expo
 seams it likewise cannot own. `IconData` is re-exported *renamed* as `DesktopIconData`, because
 the facade already carries `frust-widgets`' `IconData` (an in-UI vector icon).
 
-The shared core itself consumes exactly one field, the window title. Everything else is carried
-for the per-OS shells. `DesktopConfig::default()` reproduces the zero-config preview window
-exactly, so an app that configures nothing is unaffected by the seam's existence. The preview
-window's initial logical size and maximized state are a separate, `DesktopConfig`-independent pair
-of measurement knobs (`FRUST_WINDOW_SIZE`/`FRUST_WINDOW_MAXIMIZED`, applied by `app_handler`'s
-`apply_window_size`) — see [DEVELOPMENT.md](DEVELOPMENT.md) § Instrumentation.
+The shared core itself consumes exactly one field, the window title; the rest is carried for the
+per-OS shells, and `DesktopConfig::default()` reproduces the zero-config preview window exactly.
+The preview window's initial size and maximized state are a separate pair of measurement knobs
+(`FRUST_WINDOW_SIZE`/`FRUST_WINDOW_MAXIMIZED`) — see [DEVELOPMENT.md](DEVELOPMENT.md) §
+Instrumentation.
 
-An icon is a decoded, tightly-packed RGBA8 buffer whose dimensions are an invariant checked at
-construction — this tier carries no image decoder, and an inconsistent icon would reach a platform
-API as a buffer overrun rather than a wrong picture. Decoding is the tooling tier's job (see
+An icon is a decoded, tightly-packed RGBA8 buffer whose dimensions are checked at construction —
+this tier carries no image decoder (decoding is the tooling tier's job, see
 [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md)).
 
 ### Menu activations
@@ -209,21 +206,18 @@ API as a buffer overrun rather than a wrong picture. Decoding is the tooling tie
 Menus are built with `muda` — an `NSMenu` tree on macOS, an `HMENU` on Windows — and activations
 travel a **push bridge**, not a poll. The shared core is dirty-driven (`ControlFlow::Wait`) and
 calls `pump` only from a redraw, so draining muda's process-global channel alone would leave an
-activation sitting until some unrelated event produced a frame; Windows accelerators are the sharp
-case, since the message hook reports the keystroke as handled and winit never sees an event to
-wake on. So each per-OS crate installs muda's handler, filters the activation against the ids its
-own spec declared, queues it in a bounded (oldest-dropped) queue, and requests a redraw through a
-`MenuWaker` over the retained window.
+activation sitting until an unrelated event produced a frame (Windows accelerators are the sharp
+case: winit never sees an event to wake on). Each per-OS crate installs muda's handler, filters
+the activation against the ids its own spec declared, queues it in a bounded (oldest-dropped)
+queue, and requests a redraw through a `MenuWaker` over the retained window.
 
-`pump` then hands **exactly one** activation per frame to `frust_reactive::push_menu_event` and
-re-wakes while more remain: the reactive menu source is a single-slot signal a frame reads once,
-so a batch pushed between two frames would coalesce to its last entry. The queue also keeps the
-push on the UI thread, which `push_menu_event` requires while muda's handler thread is the
-platform's business. App code reads the other end through the facade's `menu_events()`, whose
-`MenuEvent` carries the app's own item id plus a monotonic sequence so choosing the same item
-twice reads as two activations. That read side compiles on **every** target (nothing pushes on
-mobile), unlike the desktop-only spec vocabulary. See [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md)
-for the reactive source itself.
+`pump` hands **exactly one** activation per frame to `frust_reactive::push_menu_event` and
+re-wakes while more remain: the reactive menu source is a single-slot signal, so a batch would
+coalesce to its last entry. The queue also keeps the push on the UI thread, which
+`push_menu_event` requires. App code reads the other end through the facade's `menu_events()`,
+whose `MenuEvent` carries the app's item id plus a monotonic sequence so choosing the same item
+twice reads as two activations; that read side compiles on **every** target. See
+[CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md) for the reactive source.
 
 macOS and Windows keep separate copies of this strategy — each owns its own platform's menu
 vocabulary — and must not diverge in behavior.
@@ -262,19 +256,15 @@ logs and leaves the app running without that one integration.
 
 winit events drive `AppTree`'s rebuild → layout → paint, then hand the scene across the
 render-split channel for the render thread to encode and present (or run the tail inline, under
-the `FRUST_NO_RENDER_THREAD` kill switch). The loop is dirty-driven rather than continuous: a
-frame runs when something asks for one, and a paced request resolves its next wake straight from
-that paint's outcome.
+the `FRUST_NO_RENDER_THREAD` kill switch). The loop is dirty-driven, not continuous: a frame runs
+when something asks for one, and a paced request resolves its next wake from that paint's outcome.
 
-The desktop shell persists a pipeline cache through `frust-paths`, so second-and-later launches
-skip pipeline compilation on adapters that advertise `PIPELINE_CACHE` — in wgpu 30.0.1 that is any
-Vulkan adapter (Linux, and Windows when the selected backend is Vulkan; verified in wgpu-hal
-30.0.1's unconditional Vulkan feature set), never Metal or DX12 — so macOS never writes a cache.
+The desktop shell persists a pipeline cache through `frust-paths`, so later launches skip pipeline
+compilation on adapters that advertise `PIPELINE_CACHE` — in wgpu 30.0.1 any Vulkan adapter
+(Linux, and Windows on the Vulkan backend), never Metal or DX12, so macOS never writes a cache.
 Loading is unconditional file I/O at startup on every desktop OS and reads through to a legacy
-macOS cache base when the current-location file is absent, migrating nothing — inert by
-construction, since the legacy base is `Some` only on macOS, where a save never fires. The whole
-path is best-effort: startup never fails on cache I/O. See
-[CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md) for `frust-paths` itself.
+macOS cache base when the current file is absent (inert: no save ever fires there). The whole
+path is best-effort: startup never fails on cache I/O. See [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md).
 
 ### Mobile frame path
 
@@ -284,9 +274,8 @@ rebuild → layout → paint → present. Android drives it from a Choreographer
 CADisplayLink tick. Every shell gates layout on the drained change flags or a force (first layout,
 surface size/scale change, iOS surface reinstall); the frame gate alone decides whether a frame runs.
 
-With overlays on (Android), the UI thread ingests through `ingest_scene` and each frame carries its
-cut ranges (`frame_overlays`) to the render thread, whose tail adds the `prepare_overlays` step and a
-segmented submit; see Native-view hosting.
+With overlays on (Android, iOS), the UI thread ingests through `ingest_scene` and each frame carries its
+cut ranges to the render thread, whose tail adds a segmented submit; see Native-view hosting.
 
 `focus_or_ime_changed` is an *edge* (from a focus/IME generation counter, cached per handle,
 committed only on a frame that actually runs), not a level: a steady focus session neither forces
@@ -365,13 +354,12 @@ view); Mode B is a translucent surface with the views below, hole-punched.
 
 | Platform | Mode | Overlays (frust paint above a Mode A view) |
 |----------|------|--------------------------------------------|
-| macOS | A: plugin `NSView` above winit's content view, nothing forwarded into it, the frust slot behind it covered | pending (Apple overlay hosts) |
-| iOS | A or B per the host's `translucentSurface`; a refused translucent surface degrades to A | pending (Apple overlay hosts) |
-| Android | A by default, B on host opt-in; a refused translucent surface degrades to A | shipped behind `FRUST_OVERLAYS` (default off; device leg pending) |
+| macOS | A: plugin `NSView` above winit's content view, nothing forwarded into it, the frust slot behind it covered | shipped behind `FRUST_OVERLAYS` (default off; log-proven, visual check pending) |
+| iOS | A or B per the host's `translucentSurface`; a refused translucent surface degrades to A | shipped behind `FRUST_OVERLAYS` (default off), Mode A only; device-verified |
+| Android | A by default, B on host opt-in; a refused translucent surface degrades to A | shipped behind `FRUST_OVERLAYS` (default off: a new overlay surface gets no frame while the app is idle) |
 | Windows, Linux, web | none | none |
 
-**Android overlay host.** `ingest_scene` (the UI thread's call in `app/frame.rs`; iOS and desktop
-still call plain `ingest`, which never emits overlays) cuts the frame's command list at the visible
+**Android overlay host.** `ingest_scene` (the UI thread's call in `app/frame.rs`) cuts the frame's command list at the visible
 slots; each cut is an overlay, announced by two JSON ops additive to the frozen
 create/update/updateParams/dispose set: `overlay` {overlay, aboveSlot, rect `[x,y,w,h]` physical
 px, rangeStart, rangeEnd} and `disposeOverlay` {overlay}. Kotlin `FrustViewHost` stacks one
@@ -389,6 +377,32 @@ lock is held across the main-surface acquire. A cut the overlay cannot serve sta
 `SurfaceRenderer::encode_segmented` → acquire → `submit_segmented_deferred` → present main, then
 overlays: one compiled frame, one submit; a `frust-overlay skew` line logs every 120 frames. On-top overlays sit above every native view, so frust content interleaved between
 two slots covers the later one (`android-overlays-cover-later-slots`).
+
+**Apple overlay hosts.** The differ, the `overlay`/`disposeOverlay` ops (byte-identical to
+Android's) and the `FRUST_OVERLAYS` resolution are shared; Android's `media` value means plain
+on. Ranges travel in the frame (`PaintedScene.overlay_cuts`), which is encoded segmented and
+submitted once (`submit_segmented_deferred`); main presents first, then overlays bottom to top.
+Each overlay view sits directly above its own slot's view, so interleaved content stays under a
+later native control.
+- **iOS:** one `FrustOverlayView` per overlay (own non-opaque `CAMetalLayer`, user interaction
+  off, `presentsWithTransaction` mirroring the main layer), Mode A only (Mode B logs and ignores
+  the ops), on the render-thread split. Three additive C exports (`frust_overlay_mode`,
+  `frust_overlay_attach`, `frust_overlay_detach`, emitted by `ios_app!`, declared in
+  `frust_ffi.h`) hand layers across. With present-sync armed the UI thread presents the parked
+  frame, main then overlays, inside one `CATransaction` (present before poll); otherwise the
+  render thread presents them back to back. The handoff waits up to 50 ms for the UI thread, then
+  drops the parked frame before any acquire or resize; surface change/create/destroy, self-heal,
+  pause and detach clear it first. An attached or resized overlay layer requests a frame.
+- **macOS:** `FrustOverlaySurfaceView` (non-opaque `CAMetalLayer`, `hitTest` nil) is added above
+  its slot's view at the command's rect. The seam is `extensions::overlays_enabled()` (macOS only)
+  plus the `#[doc(hidden)]` `publish_overlay_layer(id, layer, w, h) -> bool` and
+  `withdraw_overlay_layer(id)` (waits out a drawing frame, then drops the surface). The core's
+  `after_paint` runs `ingest_scene`; `render.rs` encodes segmented, submits once and presents main
+  then overlays. The main layer is a sublayer of winit's view, so hosted views and overlays sit
+  above it.
+
+Apple limits (full-window overlay per cut, creation-order stacking, a transparent overlay above a
+hidden slot) are in [LIMITATIONS.md](LIMITATIONS.md) § `apple-overlay-limits`.
 
 ### Cross-cutting host signals
 
@@ -411,8 +425,7 @@ two slots covers the later one (`android-overlays-cover-later-slots`).
   (`(JIIFF)V`), called once per changed pointer for `ACTION_DOWN`/`POINTER_DOWN`/`UP`/`POINTER_UP`,
   once per down pointer for `ACTION_MOVE` and `ACTION_CANCEL`. iOS's C-ABI entry is
   `frust_dispatch_touch(handle, phase, pointer_id, x, y)`; `FrustView` keys each `UITouch`'s slot by
-  `ObjectIdentifier` and sets `isMultipleTouchEnabled`. The web `TouchTracker` is the browser-side
-  equivalent, with no resampler.
+  `ObjectIdentifier` and sets `isMultipleTouchEnabled`. The web `TouchTracker` has no resampler.
 - **Desktop scale gestures:** ctrl+wheel (Linux/Windows) or ⌘+wheel (macOS) maps to
   `InputEvent::Scale` at the cursor position, `scale_delta = exp(WHEEL_SCALE_RATE_PER_LINE ×
   lines)` (`WHEEL_SCALE_RATE_PER_LINE = 0.1`, ~10% per notch) — a plain wheel stays `Scroll`.
@@ -424,12 +437,11 @@ two slots covers the later one (`android-overlays-cover-later-slots`).
   "that's everything" signal, so only a hover's first arrival dispatches (`Hover`, empty `paths`),
   and a `FileDropAccumulator` batches one drop's files into a single `Drop`, flushed at the next
   other window event or `about_to_wait`. `position` is the last known in-window cursor position
-  (none of the three events carries one): a `FileHoverLatch` re-dispatches `Hover` on each
-  `CursorMoved`, but where a platform sends none during an OS drag, `Hover` and `Drop` resolve at
-  the last seen cursor, not the release point. `HoveredFileCancelled`, `CursorLeft` and any real
-  mouse button event each unlatch and, if the latch stood, dispatch one `Cancel` (a button event's
-  ahead of its own `Down`/`Up`); a later `HoveredFileCancelled` sends nothing. Core follows every
-  `Drop`/`Cancel` with its `FileDropPhase::Ended` broadcast (CORE_ARCHITECTURE.md's Data Flow).
+  (no event carries one): a `FileHoverLatch` re-dispatches `Hover` on each `CursorMoved`, but where
+  a platform sends none during an OS drag, `Hover` and `Drop` resolve at the last seen cursor.
+  `HoveredFileCancelled`, `CursorLeft` and any real mouse button event each unlatch and, if the
+  latch stood, dispatch one `Cancel`. Core follows every `Drop`/`Cancel` with its
+  `FileDropPhase::Ended` broadcast (CORE_ARCHITECTURE.md's Data Flow).
 - **Window metrics** (logical size, scale, derived orientation, insets snapshot) are published
   from the points where the window's shape changes, guarded by `WindowMetricsPublisher` against
   per-frame churn (see [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md)). Desktop seeds insets as the
@@ -437,31 +449,28 @@ two slots covers the later one (`android-overlays-cover-later-slots`).
   `FrustViewController` also reads the corner-adapted safe-area regions, subtracts
   `safeAreaInsets` per edge, and pushes four **physical** window-control corner sizes through
   `frust_set_corner_insets` (beside `frust_set_insets`) from `pushInsets` and
-  `viewDidLayoutSubviews`; the Rust handle merges both calls into one `WindowInsets` (zero on
-  Android, desktop, web and below iOS 26). An app's `FrustSceneDelegate` subclass owns
-  `preferredWindowingControlStyle(for:)` and `windowScene.sizeRestrictions` itself.
+  `viewDidLayoutSubviews`; the Rust handle merges both calls into one `WindowInsets` (zero
+  elsewhere and below iOS 26). An app's `FrustSceneDelegate` subclass owns
+  `preferredWindowingControlStyle(for:)` and `windowScene.sizeRestrictions`.
 - **Android edge-to-edge:** `FrustActivity`, not the manifest theme, owns edge-to-edge — `onCreate`
   calls androidx `enableEdgeToEdge` with transparent `SystemBarStyle`s, then on API < 35 adds
   `FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS` and (API 29+) clears the bar contrast scrim, so transparent
   bars and real insets arrive regardless of the manifest theme; API 35+ enforces it platform-side.
   A legacy theme (missing `windowDrawsSystemBarBackgrounds`) keeps working but logs one warning
-  naming the migration recipe ([SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md)). Every real inset change logs `frust-insets
-  view_padding l=… t=… r=… b=… view_insets l=… t=… r=… b=… scale=…`
-  (`crates/frust-shell-android/src/app/surface.rs`), debug builds only (`cfg!(debug_assertions)`:
-  the Android logger is capped at Info). The iOS counterpart is `frust-corner-insets tl=… tr=…
-  bl=… br=…` (`crates/frust-shell-ios/src/app/surface.rs`), also debug builds only (`FRUST_LOG`
-  overrides the iOS Info default).
+  naming the migration recipe ([SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md)). Every real inset
+  change logs a debug-only `frust-insets view_padding … view_insets … scale=…` line
+  (`crates/frust-shell-android/src/app/surface.rs`); the iOS counterpart is `frust-corner-insets
+  tl=… tr=… bl=… br=…` (`crates/frust-shell-ios/src/app/surface.rs`), also debug-only.
 - **Theme and brightness** reach widgets through `RenderRoot::set_theme` and app code through a
   re-provide under the root owner; on desktop a third path fires the per-OS brightness hook, gated
   on the resolved brightness actually moving so an override swapping one dark theme for another
-  fires nothing. Android additionally reads the app's resolved brightness back over JNI — after
-  every appearance change and once per frame — so a theme forced from Rust reaches the status bar
-  without waiting for a platform event.
+  fires nothing. Android also reads the resolved brightness back over JNI after every appearance
+  change and once per frame, so a Rust-forced theme reaches the status bar.
 - **Accessibility:** `frust-core`'s semantics pass reports `bounds` in logical pixels while accesskit
   expects physical ones, so the desktop shell's `build_tree_update` stamps a root
   `Affine::scale(window.scale_factor())` transform onto the `TreeUpdate` (left `None` at scale 1.0),
   converting the tree through accesskit's ancestor-transform rule. The mobile shells own their own
-  bridges (`accesskit_android`, `accesskit_ios`) rather than sharing this path.
+  bridges (`accesskit_android`, `accesskit_ios`).
 - **Reduced motion** is the one host signal whose sensor is not the appearance sensor: Android
   watches the animator duration scale (`ContentObserver` plus an `onResume` re-read), iOS the UIKit
   notification plus an activation re-read, desktop has no source (winit exposes nothing). Delivery
@@ -485,7 +494,7 @@ two slots covers the later one (`android-overlays-cover-later-slots`).
   shell never reads the resolved value. Web carries the identical request/resolve contract and a
   real implementation (winit's web backend writes the canvas's CSS `cursor` property), unlike its
   semantics/devtools seams below. See [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md)'s Hover
-  and Cursor section for the request/resolve contract.
+  and Cursor section.
 - **Clipboard:** the framework side is two one-shot slots plus one inbound verb —
   `AppTree::take_clipboard_write`/`take_paste_request`, drained after a dispatch, and
   `InputEvent::EditCommand`, dispatched back. [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md) owns
@@ -499,49 +508,38 @@ two slots covers the later one (`android-overlays-cover-later-slots`).
   cannot run on the event loop. A finished read returns through the event-loop proxy as a fresh
   top-level dispatch; an outstanding read absorbs a later request rather than queuing a second,
   re-pointed at the most recent asker.
-  **Web** cannot go through winit here either, because a browser hands clipboard access only to the
-  focused editable: the hidden IME overlay below (see Web IME bridge) carries the `copy`/`cut`/
-  `paste` listeners, reading `clipboardData` on a paste and writing with `setData` on a copy or cut.
-  An app- or toolbar-driven access instead uses `navigator.clipboard`, undefined outside a secure
-  context (an `http://` page loses it, warning once; the keyboard path is unaffected).
-  **Android** owns the clipboard on the JVM side (`ClipboardManager` has no Rust-reachable binding),
-  so the channel is a JNI trio: the Kotlin view drains the write/paste slots once per frame and
-  pushes verbs back through two host routes — the IME's context-menu action and hardware
-  `Ctrl+C`/`X`/`V`/`A` — both gated on a focused editable. A clip needing coercion resolves off the
-  view's thread under a time-bounded session guard, one resolution outstanding at a time. See
-  [LIMITATIONS.md](LIMITATIONS.md) for the `getPrimaryClip`/`hasPrimaryClip` focus and toast quirks
-  this route works around.
+  **Web** cannot go through winit, because a browser grants clipboard access only to the focused
+  editable: the hidden IME overlay (see Web IME bridge) carries the `copy`/`cut`/`paste`
+  listeners. An app- or toolbar-driven access uses `navigator.clipboard`, undefined outside a
+  secure context (warns once; the keyboard path is unaffected).
+  **Android** owns the clipboard on the JVM side, so the channel is a JNI trio: the Kotlin view
+  drains the write/paste slots once per frame and pushes verbs back through two host routes (the
+  IME's context-menu action and hardware `Ctrl+C`/`X`/`V`/`A`), both gated on a focused editable.
+  A clip needing coercion resolves off the view's thread under a time-bounded session guard. See
+  [LIMITATIONS.md](LIMITATIONS.md) for the focus and toast quirks this route works around.
   **iOS** locks the `Native` toolbar policy at start-up (a later `set_selection_toolbar_policy` is
   refused) because `UIPasteboard.general.string`'s paste-notice exemption applies only to a
   system-initiated read, which only UIKit's own edit menu (`UIEditMenuInteraction`/
   `UIMenuController`) provides; the framework's view is the app's single responder for that menu and
   for hardware `Cmd+C`/`X`/`V`/`A`, and its read runs synchronously inside `paste(_:)` with no
   in-flight window to guard. Both mobile clipboard paths are device-unverified.
-- **Web IME bridge:** winit's web backend never emits `WindowEvent::Ime` (its `web_sys` backend
-  implements none of the IME setters — upstream issue 4424 is open with no timeline), so
-  `frust-shell-web::ime` bypasses it with one hidden `<input id="frust-ime-overlay">` under
-  `document.body` (`opacity: 0`, `pointer-events: none`), opened when the focused widget publishes
-  an active `ImeState` (`focus_ime_generation`) and removed when it stops. Its attributes come from
-  the focused field's `ImeContentType`: a secret field gets `type="password"` plus
-  `autocomplete="new-password"`, a suggestion-refusing field adds `inputmode="text"`, and a hint
-  that moves tears the element down and rebuilds it rather than mutating it, since a browser only
-  reads `type` when it classifies an element it has not seen before — checked from a dispatched
-  event and from the frame loop alike, so a focus move a signal drove (no input event behind it) is
-  answered on the next frame: the replacement inherits the DOM focus the old element held, an
-  element that had lost focus is closed instead (a frame never takes focus for the user), and the
-  element's value is cleared on every pass no composition owns. Composition tracking is an explicit
-  three-state session, because an *empty* `compositionend` is not reliably a cancel: several
-  browsers end a composition that way and deliver its text on the `input` behind it, so the preedit
-  is held one signal longer and resolved as that commit when one arrives, as a clear otherwise.
-  winit's own `keydown`/`keyup` listeners stay on the canvas rather than `document`, so the overlay
-  re-dispatches each plain keystroke onto the canvas as a copy — except a `keydown` the browser
-  reports as `Unidentified` (what a mobile soft keyboard sends for most of its keys), whose edit is
-  taken from the `input` signal behind it and delivered once as a key event instead. A soft
-  keyboard's Backspace is the known gap: the element is emptied every frame, so the deletion
-  raises no `input`. Removing the element mid-composition retracts the preedit, as a blur does. The
-  same element is the page's clipboard surface (the Clipboard bullet above). Not yet wired: the
-  mobile visual-viewport jump when a soft keyboard opens, and multiple simultaneous editables. The
-  bridge is compile- and unit-tested but device-unverified (no browser rig) — see
+- **Web IME bridge:** winit's web backend never emits `WindowEvent::Ime` (upstream issue 4424 is
+  open), so `frust-shell-web::ime` bypasses it with one hidden `<input id="frust-ime-overlay">`
+  under `document.body` (`opacity: 0`, `pointer-events: none`), opened when the focused widget
+  publishes an active `ImeState` and removed when it stops. Its attributes come from the field's
+  `ImeContentType` (a secret field gets `type="password"` plus `autocomplete="new-password"`); a
+  hint that moves rebuilds the element rather than mutating it, since a browser reads `type` only
+  when it first classifies an element. The check runs from a dispatched event and from the frame
+  loop, so a signal-driven focus move is answered next frame: the replacement inherits DOM focus,
+  an element that had lost focus is closed instead, and the value is cleared on every pass no
+  composition owns. Composition is an explicit three-state session, because an *empty*
+  `compositionend` is not reliably a cancel: the preedit is held one signal longer and resolved as
+  a commit when an `input` follows, as a clear otherwise. winit's `keydown`/`keyup` listeners stay
+  on the canvas, so the overlay re-dispatches each plain keystroke there — except an `Unidentified`
+  `keydown` (a mobile soft keyboard), whose edit is taken from the `input` behind it. A soft
+  keyboard's Backspace is the known gap (the element is emptied every frame, so no `input`
+  fires). The same element is the page's clipboard surface. Not wired: the mobile visual-viewport
+  jump when a keyboard opens, and multiple simultaneous editables. Device-unverified — see
   [LIMITATIONS.md](LIMITATIONS.md) `web-ime-residual-gaps`.
 - **Web host signals with no browser counterpart:** accessibility (AccessKit ships no web
   adapter) and the in-app devtools UI-thread hop (a `wasm32` build has no sockets, so
