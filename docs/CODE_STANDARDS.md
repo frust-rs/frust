@@ -57,7 +57,8 @@ off this index — read this plus the one that covers what you are touching:
     the default-off `FRUST_ANDROID_HWBUFFER_IMPORT` knob, plus a debug thread check; Apple pending.
     `frust-render`'s `native_import::android` makes the one call into it (`NativeHandle::new` contract).
   - `frust-plugin`'s `NativeHandle::new` and `TextureFrame::into_parts`, `frust-render`'s
-    `SourceFrame::into_parts` (all `unsafe fn`, no block). The camera and video-player bridges each
+    `SourceFrame::into_parts` (`unsafe fn`s; the bus's own call site is the SAFETY-noted block in
+    `SourcePass::record`). The camera and video-player bridges each
     hold two `SAFETY`-noted sites: the split and the renderer-twin `NativeHandle::new`.
     `frust-video-player`'s Android backend: its constructor call, the `AHardwareBuffer_*` NDK calls and a direct-buffer plane read.
   - `frust-gpu`'s `RenderContext::create_pipeline_cache` — one call building a `wgpu::PipelineCache`

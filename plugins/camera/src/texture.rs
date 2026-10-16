@@ -82,7 +82,7 @@ fn source_frame(frame: TextureFrame) -> Option<SourceFrame> {
             // contract is this one's word for word: a live object of this
             // kind, retained by the producer until the release callback of
             // the one frame carrying it has run. That handle is move-only and
-            // was consumed by value above, so no other copy of the address
+            // was consumed by value above, so no other `NativeHandle` for the buffer
             // exists, and the callback moves across with it below.
             SourcePayload::Native(unsafe { NativeHandle::new(kind, handle.ptr()) })
         }

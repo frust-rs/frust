@@ -238,7 +238,9 @@ impl NativeHandle {
         self.kind
     }
 
-    /// The platform object itself, as handed to [`Self::new`].
+    /// The platform object itself, as handed to [`Self::new`]. Only the handle
+    /// is move-only: an address copied out of it carries no lifetime guarantee
+    /// past the frame's release, and using it needs the caller's own `unsafe`.
     #[must_use]
     pub fn ptr(&self) -> *mut c_void {
         self.ptr
@@ -343,11 +345,14 @@ impl SourceFrame {
         )
     }
 
-    /// Attaches the callback run once the bus is done with the frame,
-    /// replacing any callback already attached (which is dropped unrun).
+    /// Attaches the callback run once the bus is done with the frame. A
+    /// callback already attached runs first (through the same guard as every
+    /// other release), so no callback is ever dropped unrun.
     #[must_use]
     pub fn on_release(mut self, release: impl FnOnce() + Send + 'static) -> Self {
-        self.release = Some(Box::new(release));
+        if let Some(displaced) = self.release.replace(Box::new(release)) {
+            run_release(displaced);
+        }
         self
     }
 
@@ -1504,5 +1509,42 @@ mod tests {
         fake.0.lock().unwrap().clear();
         assert_eq!(released.load(Ordering::SeqCst), 1);
         assert_eq!(pending.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[cfg(test)]
+mod on_release_displacement {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn on_release_runs_the_callback_it_displaces_exactly_once() {
+        let first = Arc::new(AtomicUsize::new(0));
+        let second = Arc::new(AtomicUsize::new(0));
+        let frame = SourceFrame::rgba8(1, 1, Arc::from([0u8; 4])).on_release({
+            let first = Arc::clone(&first);
+            move || {
+                first.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let frame = frame.on_release({
+            let second = Arc::clone(&second);
+            move || {
+                second.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        assert_eq!(
+            first.load(Ordering::SeqCst),
+            1,
+            "the displaced callback ran at once"
+        );
+        assert_eq!(second.load(Ordering::SeqCst), 0);
+        drop(frame);
+        assert_eq!(first.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            second.load(Ordering::SeqCst),
+            1,
+            "the attached callback ran on drop"
+        );
     }
 }
