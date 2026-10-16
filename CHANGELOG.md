@@ -158,6 +158,8 @@ limits are in [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
 
 ### Changed
 
+- Android video/camera texture output logs the path frames take (AHardwareBuffer zero-copy or CPU
+  copy) once per session at Info.
 - `NativeHandle` is move-only (no `Clone`/`Copy`) and `FramePayload`/`SourcePayload` are no longer
   `Clone`, so a handle cannot be copied. `TextureFrame` and `SourceFrame` keep their payload and
   release callback private (`new`, `payload()`, `meta()`, `has_release()`), so outside `unsafe` a
@@ -209,6 +211,8 @@ limits are in [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
 
 ### Fixed
 
+- Android overlay host: a new, resized or withdrawn overlay surface requests a frame, so an idle app
+  no longer keeps frust content under a native view until an unrelated repaint.
 - Overlay cuts: content the overlay engine cannot draw (retained pages, external-texture frames,
   backdrop blurs) stays on the main surface under the native view instead of vanishing; plain
   hosting emits no rank-only updates; a cut no longer swallows a slot's hole-punch.
