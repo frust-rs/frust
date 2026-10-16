@@ -577,7 +577,7 @@ impl NativeImporter for FakeImporter {
         // the case keeps alive across the frame that imports it.
         let buffer = unsafe { &*handle.ptr().cast::<FakeBuffer>() };
         let frame = solid(8, 8, buffer.rgba);
-        let SourcePayload::Cpu(pixels) = &frame.payload else {
+        let SourcePayload::Cpu(pixels) = frame.payload() else {
             unreachable!("solid frames are CPU frames")
         };
         let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -626,13 +626,7 @@ fn native(buffer: Option<&mut FakeBuffer>) -> SourceFrame {
     // `FakeImporter` (or none), which reads only a live `FakeBuffer` the case
     // keeps alive across the frame, and refuses a null pointer.
     let handle = unsafe { NativeHandle::new(NativeHandleKind::AHardwareBuffer, ptr) };
-    SourceFrame {
-        width: 8,
-        height: 8,
-        format: SourceFormat::Rgba8,
-        payload: SourcePayload::Native(handle),
-        release: None,
-    }
+    SourceFrame::new(8, 8, SourceFormat::Rgba8, SourcePayload::Native(handle))
 }
 
 #[test]
