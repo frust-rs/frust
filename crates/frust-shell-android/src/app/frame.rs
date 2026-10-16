@@ -297,7 +297,8 @@ impl AndroidAppHandle {
 
         // Perf instrumentation: the process-wide
         // switch is one cached bool read (`perf::enabled`'s `OnceLock`), not a
-        // clock read — every `Instant::now()` below is gated behind it via
+        // clock read — every `Instant::now()` below is gated behind it (or the
+        // armed performance hint's equally cheap read, `span_clock`) via
         // `bool::then`, so a disabled build/run never reads a timer on this
         // hot path (guard first, per this module's perf convention).
         let perf_on = perf::enabled();
@@ -328,7 +329,14 @@ impl AndroidAppHandle {
             requested_interval: self.last_paced_interval,
         };
 
-        if self.frame_gate.decide_paced(inputs, pacing).is_skip() {
+        let decision = self.frame_gate.decide_paced(inputs, pacing);
+        // Publish the gate's regime every tick, skips included, so the render
+        // thread's performance-hint session (`crate::adpf`) reports only while
+        // an animation keeps the loop continuous and goes quiet the tick it
+        // stops. One relaxed atomic store.
+        crate::adpf::publish_frame_loop(self.frame_gate.is_continuous());
+
+        if decision.is_skip() {
             // Skip path: nothing changed — return before rebuild, so
             // CPU/GPU stay near idle. Inline records a `skipped` FramePasses
             // (all-zero pass durations) so the skip counter accumulates in the
@@ -362,6 +370,12 @@ impl AndroidAppHandle {
         // re-anchors only on a Run too, so a persisting edge simply accumulates
         // wait against the same anchor; it can never double-fire.
         self.last_focus_ime_gen = focus_generation;
+
+        // Span clocks: on under tracing, and on a continuous loop while the
+        // performance-hint session is armed — it reports these same spans as
+        // the frame's UI work, tracing on or off. Off otherwise, so an idle or
+        // un-hinted frame still reads no timer.
+        let span_clock = perf_on || crate::adpf::measures_frame_work();
 
         // ---------------------------------------------------------------
         // Run path: rebuild -> (layout iff needed) -> paint -> encode/present,
@@ -412,7 +426,7 @@ impl AndroidAppHandle {
         // captures only what the rebuild needs, not all of `self`. Degrade
         // gracefully to an unwrapped rebuild if the runtime is somehow absent —
         // the frame path must never panic across the JNI boundary.
-        let rebuild_start = perf_on.then(Instant::now);
+        let rebuild_start = span_clock.then(Instant::now);
         match ReactiveRuntime::get() {
             Some(rt) => {
                 let scope = &self.scope;
@@ -450,7 +464,7 @@ impl AndroidAppHandle {
         // consume this identical value (an untrusted JNI `jfloat` density
         // must never let the two passes disagree — see `sanitize_scale`).
         let scale = sanitize_scale(self.scale);
-        let layout_start = perf_on.then(Instant::now);
+        let layout_start = span_clock.then(Instant::now);
         if needs_layout || force_layout {
             if !self.first_layout_done {
                 // Resolve `FRUST_NO_LAYOUT_SKIP` / `FRUST_LAYOUT_AUDIT` once,
@@ -488,7 +502,7 @@ impl AndroidAppHandle {
         }
 
         self.scene.reset();
-        let paint_start = perf_on.then(Instant::now);
+        let paint_start = span_clock.then(Instant::now);
         let paint_serial = {
             let mut builder = SceneBuilder::new(&mut self.scene);
             // HiDPI: lay out in logical pixels, then scale the

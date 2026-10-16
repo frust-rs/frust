@@ -1349,6 +1349,9 @@ pub(crate) fn render_loop(
                 // frame, gate every `Instant::now()` behind it (inside
                 // `render_scene`).
                 let perf_on = perf::enabled();
+                // A continuous loop with the hint armed times the render spans
+                // too (tracing off included): the hint session reports them.
+                let hint_frame = frame_hint.is_some() && crate::adpf::measures_frame_work();
                 // The paint serial this scene was painted under, so the ledger
                 // published after submit names the recording it holds (see
                 // `SurfaceRenderer::note_scene_serial`).
@@ -1357,7 +1360,7 @@ pub(crate) fn render_loop(
                 // cached-bool read with overlays off); `render_scene` cuts
                 // their ranges out of the frame and presents them with it.
                 prepare_overlays(&renderer, &mut render_cx);
-                crate::app::render_scene(
+                let encode_time = crate::app::render_scene(
                     &mut renderer,
                     &render_cx,
                     &frame.scene.scene,
@@ -1365,7 +1368,7 @@ pub(crate) fn render_loop(
                     frame.ui_spans,
                     &mut frame_stats,
                     &mut startup_spans,
-                    perf_on,
+                    perf_on || hint_frame,
                     &signals,
                     // Which frame this scene is — the UI thread stamped it into
                     // `FrameMeta` at submission; `render_scene` publishes it back
@@ -1373,6 +1376,18 @@ pub(crate) fn render_loop(
                     // gate to pair a geometry batch against.
                     frame.meta.frame_id,
                 );
+                // One report per frame: the UI thread's rebuild/layout/paint
+                // (carried with the scene) plus this thread's encode. A frame
+                // whose UI spans were not timed reports nothing.
+                if let Some(hint) = frame_hint.as_mut() {
+                    let ui = frame.ui_spans;
+                    hint.frame(
+                        hint_frame,
+                        frame.meta.frame_time.as_nanos(),
+                        ui.rebuild + ui.layout + ui.paint,
+                        encode_time,
+                    );
+                }
             }
             // Give the drained scene back for the UI thread to reclaim —
             // whether it was actually rendered above or
