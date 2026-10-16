@@ -1289,7 +1289,7 @@ impl ImageResidency {
     /// plan — so the clear is pure cost, a rectangle's worth of zeroes per
     /// churned image. Dropped from the plan rather than from `evictions`, so
     /// the pending set and its acknowledgement are unchanged; a consumer
-    /// forgetting the evicted tenant by rectangle (the renderer's registry) is
+    /// forgetting the evicted tenant by rectangle (the renderer's registry)
     /// still needs the full eviction set: [`evictions`](Self::evictions) names
     /// every rectangle to forget, whether or not its clear was skipped.
     #[must_use]
