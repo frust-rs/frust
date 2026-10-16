@@ -584,5 +584,18 @@ macro_rules! android_app {
         ) {
             $crate::jni_glue::native_set_frame_timeline(handle, expected_present_delta_nanos)
         }
+
+        /// JNI `nativePerfTrace`: whether this build's `perf-trace`
+        /// instrumentation is live, so Kotlin arms its per-frame poll timers
+        /// (the `frust-perf jni` line) only when someone can read them.
+        /// Additive and read once per process; a build without `perf-trace`
+        /// answers `false` as a compile-time constant.
+        #[unsafe(no_mangle)]
+        pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativePerfTrace<'local>(
+            _env: $crate::__jni::EnvUnowned<'local>,
+            _class: $crate::__jni::JClass<'local>,
+        ) -> $crate::__jni::jboolean {
+            $crate::jni_glue::native_perf_trace()
+        }
     };
 }

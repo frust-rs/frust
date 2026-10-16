@@ -2564,6 +2564,12 @@ pub fn native_set_frame_timeline(handle: jlong, expected_present_delta_nanos: jl
     })
 }
 
+/// `nativePerfTrace`: whether `perf-trace` instrumentation is live in this
+/// process (see [`perf::enabled`]). Read-only, takes no handle.
+pub fn native_perf_trace() -> jboolean {
+    perf::enabled()
+}
+
 /// Map the differ's [`ViewCommand`] backlog onto the host-testable
 /// [`PlatformViewCommandJson`] the JSON builder consumes, converting each
 /// rect/clip from the differ's logical px to **physical** px at this FFI

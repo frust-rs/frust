@@ -208,6 +208,9 @@ class FrustSurfaceView(
         /** logcat tag for this view's best-effort clipboard diagnostics. */
         private const val TAG = "frust"
 
+        /** Ticks averaged into one `frust-perf jni` line. */
+        private const val PERF_JNI_WINDOW = 120
+
         /**
          * Decode the low byte of `nativeSystemUiState`'s packed `u64` (task
          * 03's `system_ui::encoded_state()` doc comment:
@@ -462,6 +465,14 @@ class FrustSurfaceView(
     // gate-only (its shipped behaviour). This is the one signal Rust cannot read
     // for itself — `Choreographer.postVsyncCallback` is JVM-only, API 33+.
     private external fun nativeSetFrameTimeline(handle: Long, expectedPresentDeltaNanos: Long)
+
+    /**
+     * Whether this build carries the `perf-trace` instrumentation (and the
+     * runtime `FRUST_TRACE` switch is on). Read once, on the first native
+     * frame, to arm the per-frame crossing timer in [doFrame]; `false` leaves
+     * every timer branch a single `Boolean` test.
+     */
+    private external fun nativePerfTrace(): Boolean
 
     // Overlay surfaces (`FRUST_OVERLAYS`): how [FrustViewHost] builds the
     // overlay `SurfaceView`s the native differ announces — 0 none (overlays
@@ -1804,6 +1815,17 @@ class FrustSurfaceView(
         val suppressSoftKeyboard: Boolean,
     )
 
+    /** Armed on the first native frame from [nativePerfTrace]; gates the poll timers. */
+    private var perfJni = false
+    private var perfJniProbed = false
+    private var perfTicks = 0
+    private var perfImeNanos = 0L
+    private var perfClipboardNanos = 0L
+    private var perfSystemUiNanos = 0L
+    private var perfDarkNanos = 0L
+    private var perfViewCommandsNanos = 0L
+    private var perfTimerNanos = 0L
+
     override fun doFrame(frameTimeNanos: Long) {
         if (!running) {
             return
@@ -1820,6 +1842,15 @@ class FrustSurfaceView(
             // this tick's frame-timeline sample BEFORE `nativeOnFrame`, which is
             // where the scroll-sync tail advances. Inert (one `Long` field
             // compare) unless a native sibling is actually on screen.
+            if (!perfJniProbed) {
+                perfJniProbed = true
+                perfJni = nativePerfTrace()
+                if (perfJni) {
+                    val a = System.nanoTime()
+                    val b = System.nanoTime()
+                    perfTimerNanos = b - a
+                }
+            }
             sampleFrameTimeline()
             // A `false` return is a FATAL, unrecoverable render-thread failure
             // (first-surface install could not succeed) — stop the loop rather
@@ -1830,44 +1861,100 @@ class FrustSurfaceView(
                 running = false
                 return
             }
-            // Per-frame IME reconcile: pick up caret moves, field switches, and
-            // submit-clears that no InputConnection callback originated.
-            // `pollImeAfterDispatch` reconciles the live mirror to the focused
-            // field's published state; a no-op when they already match, so normal
-            // typing never triggers a spurious restart.
-            pollImeAfterDispatch()
-            // Per-frame clipboard drain: the framework's copy/paste
-            // intent is a one-shot edge, so a frame that skipped this would
-            // drop a copy outright. Two cheap JNI reads on an idle frame (the
-            // `pollSystemUiState` cost bar below); `ClipboardManager` is
-            // touched only when a drain actually reports something. Placed
-            // after the IME reconcile so a paste dispatched here still sees the
-            // mirror the poll just settled.
-            syncClipboard()
-            // Per-frame system-UI poll: cheap generation-gated
-            // JNI read, applied only on an actual `set_system_ui_mode` change.
-            pollSystemUiState()
-            // Per-frame app-brightness poll: cheap `Boolean`-gated
-            // JNI read, applied only on an actual change — this is what picks
-            // up a runtime `frust::set_app_theme`/`clear_app_theme` call
-            // (see [pollAppBrightness]'s doc for why that needs a per-frame
-            // poll rather than riding on `onConfigurationChanged`).
-            pollAppBrightness()
-            // Per-frame platform-view command poll:
-            // the null-return fast path keeps a no-change frame allocation-free
-            // (a null string means "nothing to do" — no JSON parse); only a
-            // non-null batch reaches the host applier. An app with no platform
-            // views still wires the host, so this runs every frame — but it's
-            // just one cheap JNI call returning null (the `nativeSystemUiState`
-            // cost bar above).
-            platformViewHost?.let { host ->
-                val commands = nativePlatformViewCommands(handle, host.ackedGeneration)
-                if (commands != null) {
-                    host.applyCommands(commands)
-                }
+            if (perfJni) {
+                runTimedPolls()
+            } else {
+                runPolls()
             }
         }
         Choreographer.getInstance().postFrameCallback(this)
+    }
+
+    private fun runPolls() {
+        // Per-frame IME reconcile: pick up caret moves, field switches, and
+        // submit-clears that no InputConnection callback originated.
+        // `pollImeAfterDispatch` reconciles the live mirror to the focused
+        // field's published state; a no-op when they already match, so normal
+        // typing never triggers a spurious restart.
+        pollImeAfterDispatch()
+        // Per-frame clipboard drain: the framework's copy/paste
+        // intent is a one-shot edge, so a frame that skipped this would
+        // drop a copy outright. Two cheap JNI reads on an idle frame (the
+        // `pollSystemUiState` cost bar below); `ClipboardManager` is
+        // touched only when a drain actually reports something. Placed
+        // after the IME reconcile so a paste dispatched here still sees the
+        // mirror the poll just settled.
+        syncClipboard()
+        // Per-frame system-UI poll: cheap generation-gated
+        // JNI read, applied only on an actual `set_system_ui_mode` change.
+        pollSystemUiState()
+        // Per-frame app-brightness poll: cheap `Boolean`-gated
+        // JNI read, applied only on an actual change — this is what picks
+        // up a runtime `frust::set_app_theme`/`clear_app_theme` call
+        // (see [pollAppBrightness]'s doc for why that needs a per-frame
+        // poll rather than riding on `onConfigurationChanged`).
+        pollAppBrightness()
+        // Per-frame platform-view command poll:
+        // the null-return fast path keeps a no-change frame allocation-free
+        // (a null string means "nothing to do" — no JSON parse); only a
+        // non-null batch reaches the host applier. An app with no platform
+        // views still wires the host, so this runs every frame — but it's
+        // just one cheap JNI call returning null (the `nativeSystemUiState`
+        // cost bar above).
+        platformViewHost?.let { host ->
+            val commands = nativePlatformViewCommands(handle, host.ackedGeneration)
+            if (commands != null) {
+                host.applyCommands(commands)
+            }
+        }
+    }
+
+    /**
+     * [runPolls] with each poll timed, for the `frust-perf jni` line: one
+     * line per [PERF_JNI_WINDOW] ticks carrying the mean per-frame cost of
+     * each UI-thread poll (JNI crossing plus its Kotlin-side decode), in
+     * microseconds. Only reached when [perfJni] armed it.
+     */
+    private fun runTimedPolls() {
+        val t0 = System.nanoTime()
+        pollImeAfterDispatch()
+        val t1 = System.nanoTime()
+        syncClipboard()
+        val t2 = System.nanoTime()
+        pollSystemUiState()
+        val t3 = System.nanoTime()
+        pollAppBrightness()
+        val t4 = System.nanoTime()
+        platformViewHost?.let { host ->
+            val commands = nativePlatformViewCommands(handle, host.ackedGeneration)
+            if (commands != null) {
+                host.applyCommands(commands)
+            }
+        }
+        val t5 = System.nanoTime()
+        perfImeNanos += t1 - t0
+        perfClipboardNanos += t2 - t1
+        perfSystemUiNanos += t3 - t2
+        perfDarkNanos += t4 - t3
+        perfViewCommandsNanos += t5 - t4
+        perfTicks++
+        if (perfTicks >= PERF_JNI_WINDOW) {
+            val n = perfTicks * 1000L
+            Log.i(
+                "frust",
+                "frust-perf jni ticks=$perfTicks sum_us=${
+                    (perfImeNanos + perfClipboardNanos + perfSystemUiNanos + perfDarkNanos + perfViewCommandsNanos) / n
+                } ime_us=${perfImeNanos / n} clipboard_us=${perfClipboardNanos / n} " +
+                    "system_ui_us=${perfSystemUiNanos / n} dark_us=${perfDarkNanos / n} " +
+                    "view_commands_us=${perfViewCommandsNanos / n} timer_overhead_ns=$perfTimerNanos",
+            )
+            perfImeNanos = 0L
+            perfClipboardNanos = 0L
+            perfSystemUiNanos = 0L
+            perfDarkNanos = 0L
+            perfViewCommandsNanos = 0L
+            perfTicks = 0
+        }
     }
 
     /**
