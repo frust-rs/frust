@@ -73,11 +73,14 @@ use crate::app::{
     AndroidAppHandle, FrameExecutor, InlineExecutor, PaintedScene, RenderSignals, SplitExecutor,
 };
 use crate::ffi_support::{
-    EditCommandWire, ImeJsonState, OVERLAYS_ENV_VAR, OverlayCutSpec, OverlayLedger, OverlayMode,
-    OverlaySkew, OverlayTable, PlatformViewCommandJson, assemble_overlay_cuts,
-    build_ime_state_json, build_platform_view_commands_json, edit_command_from_code,
-    load_pipeline_cache, normalize_ime_indices, pipeline_cache_differs, pipeline_cache_path,
+    EditCommandWire, ImeJsonState, PlatformViewCommandJson, build_ime_state_json,
+    build_platform_view_commands_json, edit_command_from_code, load_pipeline_cache,
+    normalize_ime_indices, pipeline_cache_differs, pipeline_cache_path,
     platform_view_commands_up_to_date, publish_resolved_translucency, write_pipeline_cache_atomic,
+};
+use crate::overlay_state::{
+    OVERLAYS_ENV_VAR, OverlayCutSpec, OverlayLedger, OverlayMode, OverlaySkew, OverlayTable,
+    assemble_overlay_cuts,
 };
 
 /// Startup-span name: the persisted pipeline-cache blob has been read
@@ -649,7 +652,7 @@ impl FrameOverlays {
     /// Fold one frame's present timestamps — the main surface's, and the last
     /// of `overlays` overlay presents — into the skew log: a
     /// `frust-overlay skew` line every
-    /// [`OVERLAY_SKEW_EVERY`](crate::ffi_support::OVERLAY_SKEW_EVERY) frames.
+    /// [`OVERLAY_SKEW_EVERY`](crate::overlay_state::OVERLAY_SKEW_EVERY) frames.
     pub(crate) fn record_presents(
         &mut self,
         main: std::time::SystemTime,
