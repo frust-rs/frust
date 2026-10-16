@@ -11,6 +11,7 @@
 //! | Sheet | [`sheet`] | the native page sheet: detents, grabber, non-dismissible, programmatic control |
 //! | Composite | [`composite`] | the plugin's `DemoCard` composite and its events, behind a toggle |
 //! | Stress | [`stress`] | the live-slot readout, mount/unmount cycler and 50-slot stress toggle |
+//! | Sandwich | [`sandwich`] | frust paint under and over native views (overlay surfaces); outside [`SECTION_LABELS`] — see the crate docs' *The Sandwich page* |
 //!
 //! Each page states its documented at-rest native-slot count in its header
 //! ([`common::AT_REST_SLOTS`]).
@@ -45,6 +46,7 @@ pub mod composite;
 pub mod controls;
 pub mod macos;
 pub mod new_controls;
+pub mod sandwich;
 pub mod sheet;
 pub mod stress;
 pub mod tab_bar;
@@ -81,6 +83,7 @@ pub fn current(section: usize, state: &NativeWidgetsDemoState) -> AnyView<Native
         5 => sheet::page(state),
         6 => composite::page(state),
         7 => stress::page(state),
+        crate::SANDWICH_SECTION => sandwich::page(state),
         _ => controls::page(state),
     }
 }

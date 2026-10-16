@@ -182,6 +182,7 @@ impl AndroidAppHandle {
         // frames those batches were paired with belong to the surface that just
         // went away — so the pairing goes with it.
         self.platform_view_state.reset_for_surface_recreate();
+        self.fold_overlay_commands();
         self.platform_view_due.clear();
         // ...and with it the tail's hold: neither stage may outlive the
         // frames it refers to (mirroring the pairing above).
@@ -229,6 +230,7 @@ impl AndroidAppHandle {
         // window-shape context (self-guarded, so a same-size recreate is silent).
         self.push_window_metrics();
         self.platform_view_state.reset_for_surface_recreate();
+        self.fold_overlay_commands();
         self.platform_view_due.clear();
         // ...and with it the tail's hold: neither stage may outlive the
         // frames it refers to (mirroring the pairing above).
