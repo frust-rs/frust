@@ -27,6 +27,17 @@
 //!   (`define_class!`, [`AnyThread`](objc2::AnyThread) — same shape as the
 //!   photo delegate) delivering `CVPixelBuffer` planes zero-copy on its own
 //!   serial queue.
+//! - **The preview texture** ([`SessionInner::start_preview_texture`]): a
+//!   second `AVCaptureVideoDataOutput`, pinned to `32BGRA` and rotated upright
+//!   on iOS, whose [`TextureDelegate`] pushes every capture buffer into the
+//!   session's [`TextureSink`] — the buffer itself when the renderer has a
+//!   `CVPixelBuffer` importer installed (zero-copy; the frame's release
+//!   callback drops the reference the frame holds), a swizzled RGBA copy
+//!   otherwise. The path is logged at `info!` whenever it changes, with a
+//!   periodic frame-rate and buffer-pool line. The capture pipeline recycles
+//!   its buffers itself and drops frames rather than wait when every buffer is
+//!   in flight, so the frame bus's bounded hold (a shown frame, the retire
+//!   backlog, the pending one) never blocks capture.
 //!
 //! # Threading
 //!
@@ -92,17 +103,21 @@
 //! lives above the plugin charter line).
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{SyncSender, sync_channel};
-use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
-use std::time::Duration;
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchQueueAttr, DispatchRetained};
+use frust_plugin::texture::{
+    FrameMeta, FramePayload, NativeHandle, NativeHandleKind, TextureFormat, TextureFrame,
+    TextureSink,
+};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, NSObject, ProtocolObject};
 use objc2::{AnyThread, DefinedClass, MainThreadMarker, define_class, msg_send, sel};
@@ -122,9 +137,9 @@ use objc2_core_media::{
 use objc2_core_video::{
     CVPixelBuffer, CVPixelBufferGetBaseAddress, CVPixelBufferGetBaseAddressOfPlane,
     CVPixelBufferGetBytesPerRow, CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferGetHeight,
-    CVPixelBufferGetHeightOfPlane, CVPixelBufferGetPlaneCount, CVPixelBufferGetWidth,
-    CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
-    kCVPixelBufferPixelFormatTypeKey, kCVPixelFormatType_32BGRA,
+    CVPixelBufferGetHeightOfPlane, CVPixelBufferGetPixelFormatType, CVPixelBufferGetPlaneCount,
+    CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
+    CVPixelBufferUnlockBaseAddress, kCVPixelBufferPixelFormatTypeKey, kCVPixelFormatType_32BGRA,
     kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
 };
 use objc2_foundation::{NSDictionary, NSError, NSNumber, NSObjectProtocol, NSString};
@@ -152,6 +167,27 @@ const SESSION_QUEUE_LABEL: &str = "dev.frust.camera.session";
 /// *Threading*) — one per stream, deliberately separate from
 /// [`SESSION_QUEUE_LABEL`]'s session queue.
 const FRAMES_QUEUE_LABEL: &str = "dev.frust.camera.frames";
+
+/// The label of the preview texture's sample-buffer queue — its own, so a
+/// slow image-stream callback never delays the preview, nor the reverse.
+const TEXTURE_QUEUE_LABEL: &str = "dev.frust.camera.texture";
+
+/// The delivered-frame count of the preview texture's first rate/pool log
+/// line.
+const TEXTURE_STATS_FIRST_AT: u64 = 240;
+/// Delivered frames between the preview texture's later rate/pool lines.
+const TEXTURE_STATS_EVERY: u64 = 3600;
+/// The most distinct backing surfaces the pool statistic tracks — far above
+/// a steady capture pool, so reaching it reads as "the pool keeps growing".
+const MAX_TRACKED_BUFFERS: usize = 64;
+
+// The one CoreVideo call this crate needs that its `objc2-core-video` feature
+// list does not expose: the IOSurface behind a pixel buffer (Get rule — not
+// retained), read only as an address for the preview texture's pool statistic.
+#[link(name = "CoreVideo", kind = "framework")]
+unsafe extern "C" {
+    fn CVPixelBufferGetIOSurface(buffer: *const CVPixelBuffer) -> *const c_void;
+}
 
 /// The clockwise rotation [`crate::ImageFrame::rotation_degrees`] reports for
 /// every streamed frame.
@@ -307,6 +343,21 @@ struct AvObjects {
     /// and a lock here would only hide a threading mistake instead of the
     /// `RefCell` panicking on it.
     stream: RefCell<Option<VideoStream>>,
+    /// The preview texture's output, or `None` — queue-confined like
+    /// [`Self::stream`], for the same reason.
+    texture: RefCell<Option<TextureStream>>,
+}
+
+/// The preview texture's AVFoundation graph, owned by [`AvObjects`] and
+/// queue-confined like the rest of it.
+struct TextureStream {
+    /// The output added to the session; removed again by [`detach_texture`].
+    output: Retained<AVCaptureVideoDataOutput>,
+    /// The delegate the output calls, held for the same reason as
+    /// [`VideoStream::delegate`].
+    delegate: Retained<TextureDelegate>,
+    /// The serial queue frames are delivered on.
+    queue: DispatchRetained<DispatchQueue>,
 }
 
 /// One running image stream's AVFoundation graph, owned by [`AvObjects`] and
@@ -364,6 +415,10 @@ struct SessionInner {
     /// Set by [`Self::close`]; every subsequent operation reports
     /// [`CameraError::SessionClosed`].
     closed: AtomicBool,
+    /// Set by [`Self::close`] before the preview texture's output is detached;
+    /// its [`TextureDelegate`] checks it so no frame stays pending past the
+    /// close. An `Arc` because the delegate reads it from its own queue.
+    texture_stopped: Arc<AtomicBool>,
 }
 
 impl SessionInner {
@@ -576,6 +631,47 @@ impl SessionInner {
             .exec_async(move || detach_stream(session.objects.get()));
     }
 
+    /// See [`crate::CameraSession::preview_texture`]: attach the preview
+    /// texture's output (module doc's *The preview texture*) and start pushing
+    /// frames into `sink`.
+    ///
+    /// Non-blocking like [`Self::start_image_stream`], and for the same
+    /// reason: only the closed check and the allocation run on the calling
+    /// thread, and the attach is queued behind [`Self::start`]. `Ok(())` means
+    /// accepted; the one failure the queue can still find — the session
+    /// refusing a second video data output, which a device may do while an
+    /// image stream holds one — is logged and leaves the mailbox empty.
+    ///
+    /// # Errors
+    /// [`CameraError::SessionClosed`] after [`Self::close`].
+    fn start_preview_texture(self: &Arc<Self>, sink: TextureSink) -> Result<(), CameraError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(CameraError::SessionClosed);
+        }
+
+        // SAFETY: an argument-free constructor returning a fresh, owned
+        // instance.
+        let output = unsafe { AVCaptureVideoDataOutput::new() };
+        let queue = DispatchQueue::new(TEXTURE_QUEUE_LABEL, DispatchQueueAttr::SERIAL);
+        let delegate = TextureDelegate::new(self.id, sink, Arc::clone(&self.texture_stopped));
+        let staged = QueueBound::new((output, delegate, queue));
+
+        let session = Arc::clone(self);
+        self.queue.exec_async(move || {
+            if session.closed.load(Ordering::Acquire) {
+                return;
+            }
+            let (output, delegate, queue) = staged.into_inner();
+            if let Err(message) = attach_texture(session.objects.get(), output, delegate, queue) {
+                log::warn!(
+                    "frust-camera: session {} has no preview texture: {message}",
+                    session.id
+                );
+            }
+        });
+        Ok(())
+    }
+
     /// See [`crate::CameraSession::set_torch`].
     ///
     /// **Genuinely non-blocking, unconditionally.** Unlike [`Self::on_queue`]
@@ -685,11 +781,13 @@ impl SessionInner {
             return;
         }
         self.stream_epoch.fetch_add(1, Ordering::Relaxed);
+        self.texture_stopped.store(true, Ordering::Release);
         sessions().remove(&self.id);
         self.on_queue(|objects| {
             // Drop any running stream first: its delegate owns the app's frame
             // callback, which must not outlive the session that fed it.
             detach_stream(objects);
+            detach_texture(objects);
             // SAFETY: `stopRunning` is a plain session-lifecycle message on a
             // live session, sent from the session's own serial queue (the
             // module doc's threading rule).
@@ -818,6 +916,7 @@ impl AppleSession {
             input,
             photo_output,
             stream: RefCell::new(None),
+            texture: RefCell::new(None),
         });
         let queue = DispatchQueue::new(SESSION_QUEUE_LABEL, DispatchQueueAttr::SERIAL);
 
@@ -858,6 +957,7 @@ impl AppleSession {
             aspect_ratio: AtomicU32::new(aspect.to_bits()),
             torch_available: AtomicBool::new(torch_available.into_inner()),
             closed: AtomicBool::new(false),
+            texture_stopped: Arc::new(AtomicBool::new(false)),
         });
         sessions().insert(id, Arc::clone(&inner));
         inner.start();
@@ -930,6 +1030,10 @@ impl SessionBackend for AppleSession {
 
     fn close(&self) {
         self.inner.close();
+    }
+
+    fn start_preview_texture(&self, sink: TextureSink) -> Result<(), CameraError> {
+        self.inner.start_preview_texture(sink)
     }
 }
 
@@ -1511,6 +1615,417 @@ fn plane_pixel_stride(format: ImageFormat, plane: usize) -> usize {
     }
 }
 
+// --- The preview texture ---------------------------------------------------
+
+/// Wire the preview texture's `output` into the session and start delivering
+/// frames to `delegate` on `queue` (module doc's *The preview texture*). Runs
+/// on the session's serial queue; replaces a texture output already attached.
+///
+/// Returns the reason on failure, in which case nothing was left attached.
+fn attach_texture(
+    objects: &AvObjects,
+    output: Retained<AVCaptureVideoDataOutput>,
+    delegate: Retained<TextureDelegate>,
+    queue: DispatchRetained<DispatchQueue>,
+) -> Result<(), String> {
+    detach_texture(objects);
+
+    let session = &objects.session;
+    // SAFETY: plain message sends on live, correctly typed objects, from the
+    // session's own serial queue; `addOutput` is guarded by `canAddOutput`,
+    // which is what keeps it from throwing.
+    let added = unsafe {
+        session.beginConfiguration();
+        let added = session.canAddOutput(&output);
+        if added {
+            session.addOutput(&output);
+        }
+        session.commitConfiguration();
+        added
+    };
+    if !added {
+        return Err(
+            "the session rejected a second video data output (a running image stream may hold \
+             the only one this device allows)"
+                .to_string(),
+        );
+    }
+
+    // SAFETY: as `attach_stream`'s identical block: `videoSettings` is set
+    // after the output joined the session, `32BGRA` is a stock capture format
+    // every Apple camera advertises, the delegate conforms to
+    // `AVCaptureVideoDataOutputSampleBufferDelegate` (its `define_class!`
+    // block below implements the protocol), and `queue` is a live serial
+    // queue.
+    unsafe {
+        output.setAlwaysDiscardsLateVideoFrames(true);
+        output.setVideoSettings(Some(&video_settings(kCVPixelFormatType_32BGRA)));
+    }
+    // Upright and mirrored like the photo output: the frames are drawn as
+    // they arrive, with no rotation of their own. macOS cameras are already
+    // landscape-upright, so the connection is left alone there.
+    #[cfg(target_os = "ios")]
+    match video_media_type() {
+        // SAFETY: `connectionWithMediaType:` returns the video connection this
+        // output just gained (or nil); `configure_connection` guards each
+        // setter by its own support predicate.
+        Ok(media_type) => match unsafe { output.connectionWithMediaType(media_type) } {
+            Some(connection) => configure_connection(&connection, session_lens(objects)),
+            None => log::warn!("frust-camera: preview texture output has no video connection"),
+        },
+        Err(error) => log::warn!("frust-camera: preview texture left unrotated: {error}"),
+    }
+    // SAFETY: as above.
+    unsafe {
+        let protocol = ProtocolObject::from_ref(&*delegate);
+        output.setSampleBufferDelegate_queue(Some(protocol), Some(&queue));
+    }
+
+    objects.texture.replace(Some(TextureStream {
+        output,
+        delegate,
+        queue,
+    }));
+    log::info!("frust-camera: preview texture attached (AVCaptureVideoDataOutput, 32BGRA)");
+    Ok(())
+}
+
+/// Remove the preview texture's output, if any — [`detach_stream`]'s twin,
+/// on the session's serial queue.
+fn detach_texture(objects: &AvObjects) {
+    let Some(texture) = objects.texture.borrow_mut().take() else {
+        return;
+    };
+    // SAFETY: as `detach_stream`'s identical block: a nil delegate with a nil
+    // queue, then the output's removal, from the session's serial queue.
+    unsafe {
+        texture.output.setSampleBufferDelegate_queue(None, None);
+        objects.session.beginConfiguration();
+        objects.session.removeOutput(&texture.output);
+        objects.session.commitConfiguration();
+    }
+    drop(texture.output);
+    drop(texture.delegate);
+    drop(texture.queue);
+}
+
+/// The lens this session streams, read back off its device.
+#[cfg(target_os = "ios")]
+fn session_lens(objects: &AvObjects) -> Lens {
+    // SAFETY: read-only property reads on the session's own device, from its
+    // serial queue (the `configure` precedent).
+    let position = unsafe { objects.input.device().position() };
+    if position == AVCaptureDevicePosition::Front {
+        Lens::Front
+    } else {
+        Lens::Back
+    }
+}
+
+/// Which way a preview frame reached the mailbox — logged whenever it
+/// changes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum TexturePath {
+    /// No frame delivered yet.
+    None = 0,
+    /// The capture buffer itself, imported by the renderer without a copy.
+    ZeroCopy = 1,
+    /// The buffer's rows copied into an RGBA frame.
+    CpuCopy = 2,
+    /// A buffer that could not be delivered at all.
+    Refused = 3,
+}
+
+/// Delivery statistics behind the preview texture's periodic log line.
+struct TextureStats {
+    /// Frames delivered since the first.
+    frames: u64,
+    /// When the current statistics window started, and its first frame count.
+    window: Option<(Instant, u64)>,
+    /// Distinct IOSurfaces seen behind the buffers in the current window, up
+    /// to [`MAX_TRACKED_BUFFERS`]: capture cycles through a fixed pool, so
+    /// this reads as the pool's size.
+    surfaces: HashSet<usize>,
+}
+
+/// [`TextureDelegate`]'s instance state.
+struct TextureDelegateIvars {
+    /// The session the frames belong to, for log lines.
+    session: i32,
+    /// The mailbox the frames go into.
+    sink: TextureSink,
+    /// [`SessionInner::texture_stopped`].
+    stopped: Arc<AtomicBool>,
+    /// The [`TexturePath`] the last frame took.
+    path: AtomicU8,
+    /// Touched only from the serial texture queue, so never contended.
+    stats: Mutex<TextureStats>,
+}
+
+define_class!(
+    // SAFETY:
+    // - `NSObject` has no subclassing requirements.
+    // - This class implements `Drop` only through its ivars (no manual impl),
+    //   so the macro's generated `dealloc` has nothing extra to uphold.
+    #[unsafe(super(NSObject))]
+    // Delivered on this plugin's own texture queue, never the main one.
+    #[thread_kind = AnyThread]
+    #[ivars = TextureDelegateIvars]
+    struct TextureDelegate;
+
+    unsafe impl NSObjectProtocol for TextureDelegate {}
+
+    // SAFETY: the one method implemented below is the protocol's own
+    // `captureOutput:didOutputSampleBuffer:fromConnection:`, with the signature
+    // the binding declares. Every member of the protocol is `@optional`.
+    unsafe impl AVCaptureVideoDataOutputSampleBufferDelegate for TextureDelegate {
+        #[unsafe(method(captureOutput:didOutputSampleBuffer:fromConnection:))]
+        fn did_output_sample_buffer(
+            &self,
+            _output: &AVCaptureOutput,
+            sample_buffer: &CMSampleBuffer,
+            _connection: &AVCaptureConnection,
+        ) {
+            // Called from an Objective-C frame: nothing may unwind into it.
+            let delivered = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                self.deliver(sample_buffer);
+            }));
+            if delivered.is_err() {
+                log::error!("frust-camera: panic in the preview texture producer — frame lost");
+            }
+        }
+    }
+);
+
+/// A capture buffer reference carried by a zero-copy frame's release
+/// callback, which drops it.
+struct HeldBuffer<B>(B);
+
+// SAFETY: only ever built by `TextureDelegate::deliver`, around the
+// `CFRetained` reference to the `CVPixelBuffer` its frame owns. CoreFoundation
+// reference counting is atomic and a pixel buffer is not bound to the thread
+// that retained it, so dropping that reference on whichever thread releases
+// the frame is sound; nothing reads the buffer through this wrapper.
+unsafe impl<B> Send for HeldBuffer<B> {}
+
+impl TextureDelegate {
+    /// A delegate pushing preview frames into `sink` until `stopped` is set.
+    fn new(session: i32, sink: TextureSink, stopped: Arc<AtomicBool>) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(TextureDelegateIvars {
+            session,
+            sink,
+            stopped,
+            path: AtomicU8::new(TexturePath::None as u8),
+            stats: Mutex::new(TextureStats {
+                frames: 0,
+                window: None,
+                surfaces: HashSet::new(),
+            }),
+        });
+        // SAFETY: `NSObject`'s designated initializer, called on a freshly
+        // allocated instance whose ivars are already set.
+        unsafe { msg_send![super(this), init] }
+    }
+
+    /// Push one capture buffer into the mailbox: the buffer itself when the
+    /// renderer can import it, an RGBA copy otherwise.
+    fn deliver(&self, sample_buffer: &CMSampleBuffer) {
+        let ivars = self.ivars();
+        if ivars.stopped.load(Ordering::Acquire) {
+            return;
+        }
+        // SAFETY: `sample_buffer` is the live buffer AVFoundation just handed
+        // this delegate; `image_buffer` answers a +1 reference, or `None` for
+        // a non-video sample.
+        let Some(buffer) = (unsafe { sample_buffer.image_buffer() }) else {
+            return;
+        };
+        let format = CVPixelBufferGetPixelFormatType(&buffer);
+        let extent = u32::try_from(CVPixelBufferGetWidth(&buffer))
+            .ok()
+            .zip(u32::try_from(CVPixelBufferGetHeight(&buffer)).ok());
+        let Some((width, height)) = extent.filter(|(w, h)| *w > 0 && *h > 0) else {
+            return;
+        };
+        if format != kCVPixelFormatType_32BGRA {
+            self.note_path(TexturePath::Refused, width, height, format);
+            return;
+        }
+
+        let pointer = std::ptr::from_ref::<CVPixelBuffer>(&buffer);
+        // SAFETY: `pointer` is the live buffer held just above; the answer is
+        // only an address for the pool statistic, never dereferenced.
+        let surface = unsafe { CVPixelBufferGetIOSurface(pointer) } as usize;
+        let path = if zero_copy_available() {
+            let held = HeldBuffer(buffer);
+            // SAFETY: `pointer` is the live `CVPixelBuffer` whose +1 reference
+            // `held` carries; only the release callback attached below drops
+            // `held`, and a frame's release runs exactly once — so the buffer
+            // stays alive until then.
+            let handle = unsafe {
+                NativeHandle::new(
+                    NativeHandleKind::CvPixelBuffer,
+                    pointer.cast_mut().cast::<c_void>(),
+                )
+            };
+            let meta = FrameMeta {
+                width,
+                height,
+                format: TextureFormat::Rgba8,
+            };
+            self.push(
+                TextureFrame::new(meta, FramePayload::Native(handle))
+                    .on_release(move || drop(held)),
+            );
+            TexturePath::ZeroCopy
+        } else {
+            match copy_bgra_pixel_buffer(&buffer, width, height) {
+                Some(pixels) => {
+                    self.push(TextureFrame::rgba8(width, height, pixels));
+                    TexturePath::CpuCopy
+                }
+                None => TexturePath::Refused,
+            }
+        };
+        self.note_path(path, width, height, format);
+        self.record(surface);
+    }
+
+    /// Push `frame` — and if the session closed while it was being pushed,
+    /// take it straight back out, so either this check or the close's own
+    /// drain releases it and no frame stays pending past a close.
+    fn push(&self, frame: TextureFrame) {
+        let ivars = self.ivars();
+        ivars.sink.push(frame);
+        if ivars.stopped.load(Ordering::Acquire)
+            && let Some(frame) = ivars.sink.take_latest()
+        {
+            frame.release();
+        }
+    }
+
+    /// Log the delivery path whenever it changes — the line a device run
+    /// reads to tell the zero-copy path from the copy.
+    fn note_path(&self, path: TexturePath, width: u32, height: u32, format: u32) {
+        let ivars = self.ivars();
+        if ivars.path.swap(path as u8, Ordering::Relaxed) == path as u8 {
+            return;
+        }
+        let session = ivars.session;
+        match path {
+            TexturePath::ZeroCopy => log::info!(
+                "frust-camera: session {session} preview texture via CVPixelBuffer (zero-copy \
+                 importer installed), {width}x{height} 32BGRA"
+            ),
+            TexturePath::CpuCopy => log::info!(
+                "frust-camera: session {session} preview texture via CPU copy (no CVPixelBuffer \
+                 importer installed), {width}x{height}"
+            ),
+            TexturePath::Refused => log::warn!(
+                "frust-camera: session {session} preview texture dropped a {width}x{height} \
+                 buffer of pixel format {format:#010x} (32BGRA expected, or it could not be read)"
+            ),
+            TexturePath::None => {}
+        }
+    }
+
+    /// Count one delivered frame and log the rate and pool size every so
+    /// often (module doc's *The preview texture*).
+    fn record(&self, surface: usize) {
+        let ivars = self.ivars();
+        let mut stats = ivars.stats.lock().unwrap_or_else(PoisonError::into_inner);
+        let now = Instant::now();
+        stats.frames += 1;
+        let frames = stats.frames;
+        let (window_start, window_first) = *stats.window.get_or_insert((now, frames));
+        if surface != 0 && stats.surfaces.len() < MAX_TRACKED_BUFFERS {
+            stats.surfaces.insert(surface);
+        }
+        let due = frames == TEXTURE_STATS_FIRST_AT
+            || (frames > TEXTURE_STATS_FIRST_AT
+                && (frames - TEXTURE_STATS_FIRST_AT).is_multiple_of(TEXTURE_STATS_EVERY));
+        if !due {
+            return;
+        }
+        let secs = now.duration_since(window_start).as_secs_f64();
+        let fps = if secs > 0.0 {
+            (frames - window_first) as f64 / secs
+        } else {
+            0.0
+        };
+        let path = match ivars.path.load(Ordering::Relaxed) {
+            1 => "zero-copy",
+            2 => "CPU copy",
+            _ => "mixed",
+        };
+        log::info!(
+            "frust-camera: session {} preview texture: {frames} frames, {fps:.1} fps over the last \
+             {secs:.1}s, {} distinct IOSurfaces in that window, {path}",
+            ivars.session,
+            stats.surfaces.len()
+        );
+        stats.window = Some((now, frames));
+        stats.surfaces.clear();
+    }
+}
+
+/// Whether the renderer can import `CVPixelBuffer`s right now. A native frame
+/// of a kind with no importer installed is refused by the frame bus, so
+/// without one (or without the `frust-api` half, which has no renderer to ask)
+/// frames are copied.
+fn zero_copy_available() -> bool {
+    #[cfg(feature = "frust-api")]
+    {
+        crate::texture::cv_pixel_buffer_import_installed()
+    }
+    #[cfg(not(feature = "frust-api"))]
+    {
+        false
+    }
+}
+
+/// The CPU path's copy: lock `buffer` read-only and swizzle its `32BGRA` rows
+/// into tightly packed RGBA. `None` when it cannot be locked or read.
+fn copy_bgra_pixel_buffer(buffer: &CVPixelBuffer, width: u32, height: u32) -> Option<Arc<[u8]>> {
+    // SAFETY: a read-only lock on a live buffer, released by the guard below.
+    let status = unsafe { CVPixelBufferLockBaseAddress(buffer, CVPixelBufferLockFlags::ReadOnly) };
+    if status != 0 {
+        return None;
+    }
+    let _guard = PixelBufferLock { buffer };
+    let base = CVPixelBufferGetBaseAddress(buffer);
+    let stride = CVPixelBufferGetBytesPerRow(buffer);
+    let len = stride.checked_mul(height as usize)?;
+    if base.is_null() {
+        return None;
+    }
+    // SAFETY: the buffer is locked until `_guard` drops, so its base address
+    // and row stride are valid and `stride * height` bytes from that address
+    // are readable; the slice does not outlive the lock.
+    let bytes = unsafe { std::slice::from_raw_parts(base.cast::<u8>().cast_const(), len) };
+    bgra_rows_to_rgba(bytes, width, height, stride)
+}
+
+/// Swizzles `height` rows of `32BGRA` pixels, `stride` bytes apart, into a
+/// tightly packed RGBA buffer. `None` when a row cannot hold `width` pixels or
+/// `src` cannot hold `height` rows. Capture frames are opaque, so the result
+/// is premultiplied as it stands.
+fn bgra_rows_to_rgba(src: &[u8], width: u32, height: u32, stride: usize) -> Option<Arc<[u8]>> {
+    let row = (width as usize).checked_mul(4)?;
+    let rows = height as usize;
+    if stride < row || rows == 0 || src.len() < stride.checked_mul(rows - 1)?.checked_add(row)? {
+        return None;
+    }
+    let mut out = Vec::with_capacity(row * rows);
+    for line in src.chunks(stride).take(rows) {
+        for &[b, g, r, a] in line[..row].as_chunks::<4>().0 {
+            out.extend_from_slice(&[r, g, b, a]);
+        }
+    }
+    Some(Arc::from(out))
+}
+
 // --- Session configuration -------------------------------------------------
 
 /// The `beginConfiguration`/`commitConfiguration` transaction, run on the
@@ -1944,6 +2459,23 @@ mod tests {
         })
         .join()
         .expect("worker thread panicked");
+    }
+
+    /// A padded `32BGRA` capture image swizzles into tightly packed RGBA, row
+    /// padding dropped; a malformed one is refused.
+    #[test]
+    fn preview_texture_copies_swizzle_bgra_rows() {
+        let src = [
+            1, 2, 3, 4, 5, 6, 7, 8, 0xEE, 0xEE, 0xEE, 0xEE, //
+            9, 10, 11, 12, 13, 14, 15, 16,
+        ];
+        let rgba = super::bgra_rows_to_rgba(&src, 2, 2, 12).expect("a well-formed image");
+        assert_eq!(
+            &rgba[..],
+            &[3, 2, 1, 4, 7, 6, 5, 8, 11, 10, 9, 12, 15, 14, 13, 16]
+        );
+        assert!(super::bgra_rows_to_rgba(&src, 2, 2, 4).is_none());
+        assert!(super::bgra_rows_to_rgba(&src[..15], 2, 2, 8).is_none());
     }
 
     /// The preview `viewType` is the bare iOS runtime name — never Android's

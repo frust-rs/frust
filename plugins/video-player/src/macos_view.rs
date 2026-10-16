@@ -275,6 +275,9 @@ impl VideoPlayerNSView {
         // `NSView.layer` docs specify), then forbid AppKit from ever
         // redrawing over it.
         let layer_ref: &CALayer = &this.ivars().layer;
+        // A `cover` fit's `resizeAspectFill` draws past the layer's edges
+        // unless the layer clips to its bounds.
+        layer_ref.setMasksToBounds(true);
         this.setLayer(Some(layer_ref));
         this.setWantsLayer(true);
         this.setLayerContentsRedrawPolicy(NSViewLayerContentsRedrawPolicy::Never);
