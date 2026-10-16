@@ -598,4 +598,83 @@ mod tests {
             "worker nice {worker} must be higher than the UI thread's {ui}"
         );
     }
+
+    /// The runtime-side probe behind
+    /// [`the_kill_switch_leaves_every_pool_thread_at_the_inherited_nice`]:
+    /// run in a child process whose environment engages the kill switch, it
+    /// builds the runtime and checks that a blocking-pool thread and an async
+    /// worker both report the nice value the UI (builder) thread has, i.e.
+    /// that nothing was written over the inherited priority. Ignored in the
+    /// parent run, where the switch is off.
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[test]
+    #[ignore = "driven by the_kill_switch_leaves_every_pool_thread_at_the_inherited_nice"]
+    fn kill_switch_probe_pool_threads_keep_the_inherited_nice() {
+        assert!(
+            !thread_policy::thread_tuning_enabled(),
+            "this probe only means something with {} engaged",
+            thread_policy::NO_THREAD_TUNING_VAR
+        );
+        let _guard = crate::WAKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        ReactiveRuntime::init(noop_waker());
+
+        let ui = thread_policy::current_thread_nice().expect("nice is readable on Linux");
+        let blocking = ReactiveRuntime::get()
+            .expect("runtime was just initialized")
+            .handle()
+            .block_on(spawn_blocking(thread_policy::current_thread_nice))
+            .expect("blocking probe must not panic")
+            .expect("nice is readable on a pool thread");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        Executor::spawn(async move {
+            tx.send(thread_policy::current_thread_nice())
+                .expect("test receiver must still be alive");
+        });
+        let worker = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a spawned task must run within 5s")
+            .expect("nice is readable on a worker thread");
+
+        assert_eq!(
+            (blocking, worker),
+            (ui, ui),
+            "with the kill switch engaged every pool thread keeps the UI thread's nice {ui} \
+             (blocking {blocking}, worker {worker})"
+        );
+    }
+
+    /// With `FRUST_NO_THREAD_TUNING` engaged the runtime is built with tokio's
+    /// defaults and no thread's priority is touched. The switch is read from
+    /// the process environment when the runtime is built, so the check runs
+    /// in a child process: this test binary re-executed with the variable set,
+    /// running only the ignored probe above.
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[test]
+    fn the_kill_switch_leaves_every_pool_thread_at_the_inherited_nice() {
+        if !thread_policy::thread_tuning_enabled() {
+            // Already engaged (compile-time define or the environment): the
+            // probe is this process's own run, nothing to drive.
+            return;
+        }
+        let exe = std::env::current_exe().expect("test binary path is known");
+        let output = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "runtime::tests::kill_switch_probe_pool_threads_keep_the_inherited_nice",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env(thread_policy::NO_THREAD_TUNING_VAR, "1")
+            .output()
+            .expect("the test binary re-executes");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "kill-switch probe failed in the child process:\n{stdout}\n{stderr}"
+        );
+    }
 }
