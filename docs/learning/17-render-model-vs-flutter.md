@@ -43,7 +43,7 @@ docs.flutter.dev page. Frust paths are in this repository.
 | `BackdropBlur` has five limits; `PushClipPath` re-rasterizes its mask per push | `backdrop-blur-bound`, `path-clip-mask-rerasterized` |
 | No `NestedScrollView`, no reverse growth, no snapping or stretching headers | `sliver-v1-scope` |
 | `ScrollView` and `ListView` are not built on the sliver viewport | `scroll-view-list-view-not-viewport-based` |
-| Overlays are off by default on Android until the device leg runs | `android-overlays-opt-in-pending-device-leg` |
+| Overlays are off by default on Android although the host passes its device leg | `android-overlays-opt-in-pending-device-leg` |
 | An Android overlay covers every native view, including later slots | `android-overlays-cover-later-slots` |
 | Content an overlay cannot draw (retained pages, scene textures, backdrop blur) stays under the native view | `overlay-unservable-content-stays-on-main` |
 | Desktop hosts a native view in Mode A only | `desktop-platform-view-mode-a-only` |
@@ -126,5 +126,5 @@ Then write down what you would need to add for a `NestedScrollView` (`sliver-v1-
 - Frust's answer to "layers" is a cache in the renderer plus an explicit boundary widget, not a
   second tree in the framework. Every refusal falls back to plain painting.
 - The sliver protocol rides beside the box protocol through one defaulted method.
-- Both claims about platform views and textures stop at Android behind default-off knobs; the Apple
-  half is pending and the Android device legs have not run.
+- Both claims about platform views and textures hold on Android and Apple behind default-off knobs;
+  the Android device legs ran on a OnePlus 9 and the Apple legs on an iPhone SE and macOS.
