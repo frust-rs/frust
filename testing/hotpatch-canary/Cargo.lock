@@ -208,7 +208,7 @@ checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
 name = "frust-devtools"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "frust-devtools-protocol",
  "log",
@@ -217,7 +217,7 @@ dependencies = [
 
 [[package]]
 name = "frust-devtools-protocol"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -225,7 +225,7 @@ dependencies = [
 
 [[package]]
 name = "frust-drive"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "ar",
@@ -249,7 +249,7 @@ dependencies = [
 
 [[package]]
 name = "frust-hotpatch"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "libc",
  "libloading",

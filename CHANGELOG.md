@@ -6,6 +6,13 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ## Unreleased
 
+## 0.6.2 — 2026-10-16
+
+A patch release (the 0.6.x line continues) that carries source changes for code that implements
+`PaintScene`, builds or matches `frust_scene::Command`, or constructs `frust-gpu` pipeline descriptors
+directly (the Changed list marks them), and two behaviour changes every widget author should read:
+layout skipping is on by default and `pattern_switcher` tears its outgoing child down at the switch.
+
 The render model gained the pieces a mobile-first framework needs to keep frames cheap and to mix
 native content with its own paint. Layout now skips pods whose constraints are unchanged and can
 audit itself (`FRUST_LAYOUT_AUDIT`); slivers (`custom_scroll_view`, `sliver_list`,
