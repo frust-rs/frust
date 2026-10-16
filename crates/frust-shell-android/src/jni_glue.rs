@@ -23,10 +23,13 @@
 //! `SurfaceView`'s `ANativeWindow*` ([`prepare_overlays`], reached only
 //! under `FRUST_OVERLAYS`), the `unsafe impl Send` for
 //! [`SendableWindowPtr`] — the raw window pointer that crosses the UI→render
-//! channel in the split — and the render-thread priority
-//! self-boost `libc::setpriority(PRIO_PROCESS, gettid(), THREAD_PRIORITY_DISPLAY)`
-//! at the top of [`render_loop`] (a bare libc syscall scoping
-//! itself to the calling thread, best-effort and non-fatal).
+//! channel in the split — and, under the `FRUST_NO_THREAD_TUNING` off-arm only,
+//! the render-thread priority self-boost
+//! `libc::setpriority(PRIO_PROCESS, gettid(), THREAD_PRIORITY_DISPLAY)` in
+//! [`schedule_render_thread`] (a bare libc syscall scoping itself to the
+//! calling thread, best-effort and non-fatal). The default path schedules the
+//! render thread through `frust_reactive::thread_policy`'s safe API, whose own
+//! `unsafe` lives in that crate.
 //!
 //! # Render-thread split
 //!
@@ -58,6 +61,9 @@ use jni::{Env, jni_sig, jni_str};
 use ndk::native_window::NativeWindow;
 
 use frust_core::event::{EditCommand, EditingState, ImeContentType, ImeState};
+use frust_reactive::thread_policy::{
+    self, ThreadClass, ThreadClassOutcome, set_current_thread_class,
+};
 use frust_reactive::{ReactiveRuntime, handles_back, push_back_press, push_deep_link};
 use frust_scene::Scene;
 use frust_shell_common::perf::{self, FrameStats, StartupSpans};
@@ -1075,11 +1081,74 @@ fn install_surface(
 /// UI/display pipeline threads run at, one band above the default (`0`) and below
 /// `THREAD_PRIORITY_URGENT_DISPLAY` (`-8`)
 /// (developer.android.com/reference/android/os/Process#THREAD_PRIORITY_DISPLAY,
-/// retrieved 2026-07-22). [`render_loop`] self-boosts to it via
-/// `setpriority(PRIO_PROCESS, gettid(), ..)` so a busy UI thread can't starve the
-/// GPU submit path; a backgrounded cpuset can legitimately refuse it, so a failure
-/// is logged, never fatal.
+/// retrieved 2026-07-22). Under `FRUST_NO_THREAD_TUNING`, [`render_loop`]
+/// self-boosts to it via `setpriority(PRIO_PROCESS, gettid(), ..)`; a
+/// backgrounded cpuset can legitimately refuse it, so a failure is logged, never
+/// fatal. By default the frame class uses the same value as its floor and keeps
+/// a better inherited one (see [`schedule_render_thread`]).
 const THREAD_PRIORITY_DISPLAY: libc::c_int = -4;
+
+/// Schedule the calling (render) thread for the frame. Called once, as the
+/// first statement of [`render_loop`].
+///
+/// Default: `frust_reactive::thread_policy`'s frame class. The thread was
+/// spawned from the UI thread and inherited its nice value — `-10` for a
+/// top-app UI thread — so the class keeps that and asks for
+/// [`THREAD_PRIORITY_DISPLAY`] only when the inherited value is worse; it never
+/// writes a weaker value over a better one. A refusal leaves the inherited
+/// value in place and is logged.
+///
+/// `FRUST_NO_THREAD_TUNING` (`thread_tuning_enabled`) restores the previous
+/// fixed self-boost to [`THREAD_PRIORITY_DISPLAY`], which overwrites whatever
+/// the thread inherited, as the measurement off-arm.
+fn schedule_render_thread() {
+    if frust_shell_common::render_split::thread_tuning_enabled() {
+        match set_current_thread_class(ThreadClass::Frame) {
+            ThreadClassOutcome::Changed { from, to } => log::info!(
+                "frust-shell-android: render thread nice {from} -> {to} (frame class; \
+                 blocking pool cap {})",
+                thread_policy::blocking_pool_cap()
+            ),
+            ThreadClassOutcome::Kept { nice } => log::info!(
+                "frust-shell-android: render thread keeps inherited nice {nice} (frame class; \
+                 blocking pool cap {})",
+                thread_policy::blocking_pool_cap()
+            ),
+            ThreadClassOutcome::Refused { error } => log::warn!(
+                "frust-shell-android: render thread frame class refused ({}); keeping the \
+                 inherited priority",
+                std::io::Error::from_raw_os_error(error)
+            ),
+            other => log::warn!(
+                "frust-shell-android: render thread frame class had no effect ({other:?})"
+            ),
+        }
+        return;
+    }
+
+    log::info!(
+        "frust-shell-android: thread tuning off (FRUST_NO_THREAD_TUNING); render thread \
+         fixed at THREAD_PRIORITY_DISPLAY"
+    );
+    // SAFETY: `setpriority`/`gettid` are plain libc syscalls with no
+    // memory-safety preconditions; `gettid()` returns this very thread's kernel
+    // id and `PRIO_PROCESS` scopes the call to it alone. A sanctioned-unsafe FFI
+    // call confined to this module (see the module docs).
+    unsafe {
+        if libc::setpriority(
+            libc::PRIO_PROCESS,
+            libc::gettid() as libc::id_t,
+            THREAD_PRIORITY_DISPLAY,
+        ) != 0
+        {
+            log::warn!(
+                "frust-shell-android: render-thread setpriority(THREAD_PRIORITY_DISPLAY) failed \
+                 ({}); continuing at default priority",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+}
 
 /// Publish the EMPTY retained ledger for a renderer that just lost its store —
 /// a surface destroyed or (re)installed, or a device-scale change — when it
@@ -1134,29 +1203,8 @@ pub(crate) fn render_loop(
     signals: Arc<RenderSignals>,
     translucent_resolved: Arc<AtomicBool>,
 ) {
-    // Render-thread priority self-boost: raise this dedicated
-    // render thread to the display band so a busy UI thread can't starve the GPU
-    // submit path. Best-effort — a backgrounded cpuset can refuse it, so a
-    // non-zero return is logged, never fatal (this loop never panics).
-    //
-    // SAFETY: `setpriority`/`gettid` are plain libc syscalls with no
-    // memory-safety preconditions; `gettid()` returns this very thread's kernel
-    // id and `PRIO_PROCESS` scopes the call to it alone. A sanctioned-unsafe FFI
-    // call confined to this module (see the module docs).
-    unsafe {
-        if libc::setpriority(
-            libc::PRIO_PROCESS,
-            libc::gettid() as libc::id_t,
-            THREAD_PRIORITY_DISPLAY,
-        ) != 0
-        {
-            log::warn!(
-                "frust-shell-android: render-thread setpriority(THREAD_PRIORITY_DISPLAY) failed \
-                 ({}); continuing at default priority",
-                std::io::Error::last_os_error()
-            );
-        }
-    }
+    // Render-thread scheduling, before any frame work.
+    schedule_render_thread();
 
     let cache_path = cache_dir.as_deref().map(pipeline_cache_path);
     let mut startup_spans = Some(startup_spans);

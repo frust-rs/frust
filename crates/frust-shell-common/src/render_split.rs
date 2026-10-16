@@ -51,6 +51,10 @@
 //!   value). When engaged, a shell keeps the pre-split single-thread path (kept
 //!   as an escape hatch until the split's on-device throughput is fully
 //!   validated).
+//! - [`thread_tuning_enabled`] / [`NO_THREAD_TUNING_VAR`] — the render
+//!   thread's scheduling switch, parsed the same way: on (the default), a
+//!   shell's render thread takes `frust_reactive::thread_policy`'s frame class;
+//!   engaged, it keeps its previous fixed priority.
 //!
 //! # Benchmark scenario markers
 //!
@@ -237,6 +241,30 @@ fn render_thread_kill_switch(compile_time: Option<&str>, runtime: Option<&str>) 
         matches!(value, Some(v) if v != "0")
     }
     is_set_non_zero(compile_time) || is_set_non_zero(runtime)
+}
+
+/// The thread-tuning kill-switch environment/compile-time variable: when set to
+/// any non-`"0"` value, [`thread_tuning_enabled`] is `false` and a shell's
+/// render thread keeps its previous fixed priority (Android's
+/// `THREAD_PRIORITY_DISPLAY` nice value, iOS's user-interactive QoS) instead of
+/// the frame scheduling class.
+///
+/// The same variable turns off the reactive runtime's background-pool policy;
+/// `frust-reactive` reads it there itself (its `thread_policy` module), since
+/// this crate stays reactive-free. Both sides parse it like
+/// [`NO_RENDER_THREAD_VAR`].
+pub const NO_THREAD_TUNING_VAR: &str = "FRUST_NO_THREAD_TUNING";
+
+/// Whether a shell should schedule its render thread through the frame class —
+/// `true` unless the [`NO_THREAD_TUNING_VAR`] kill switch is engaged
+/// (compile-time define or runtime env, any non-`"0"` value), parsed exactly
+/// like [`render_thread_enabled`]. Read once, on the render thread, before its
+/// loop starts.
+pub fn thread_tuning_enabled() -> bool {
+    !render_thread_kill_switch(
+        option_env!("FRUST_NO_THREAD_TUNING"),
+        std::env::var(NO_THREAD_TUNING_VAR).ok().as_deref(),
+    )
 }
 
 // ---------------------------------------------------------------------
@@ -1037,6 +1065,15 @@ mod tests {
     fn render_thread_kill_switch_off_when_either_is_literal_zero_and_other_unset() {
         assert!(!render_thread_kill_switch(Some("0"), None));
         assert!(!render_thread_kill_switch(None, Some("0")));
+    }
+
+    #[test]
+    fn thread_tuning_switch_names_the_variable_the_reactive_pool_reads() {
+        assert_eq!(
+            NO_THREAD_TUNING_VAR,
+            frust_reactive::thread_policy::NO_THREAD_TUNING_VAR,
+            "the render thread and the background pool must answer to one switch"
+        );
     }
 
     #[test]
