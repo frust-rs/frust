@@ -914,6 +914,11 @@ fn render_frame(
     first_encode_recorded: &mut bool,
     first_frame_recorded: &mut bool,
 ) -> Result<FrameOutcome> {
+    // Install the platform importers once the device exists; a no-op on every
+    // later frame.
+    #[cfg(target_os = "macos")]
+    frust_render::native_import::install(render_cx);
+
     window.pre_present_notify();
 
     // Encode span (GPU/CPU encode, no swapchain touch). Each span is its own
