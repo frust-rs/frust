@@ -133,6 +133,9 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Changed
 
+- `NativeHandle` (in `frust-render` and `frust-plugin`) keeps its fields private: build one
+  through the unsafe `NativeHandle::new(kind, ptr)` and read it with `kind()`/`ptr()`. Texture
+  frames run their release callback on drop, so it runs exactly once on every path.
 - BREAKING: `frust_scene::Command::PushSnapshot` / `PopSnapshot` are replaced by `PushRetained
   { key, rect, alpha, scale, transform }` / `PopRetained`, plus the new `Command::DrawRetained`;
   `PaintScene::push_snapshot` / `pop_snapshot` are removed in favour of `push_retained` /
@@ -174,6 +177,9 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Fixed
 
+- Overlay cuts: content the overlay engine cannot draw (retained pages, external-texture frames,
+  backdrop blurs) stays on the main surface under the native view instead of vanishing; plain
+  hosting emits no rank-only updates; a cut no longer swallows a slot's hole-punch.
 - `frust-shell-ios`: the AccessKit tree is published in the view's physical pixels through a root
   transform equal to the display scale, so VoiceOver frames and hit-tests land on the drawn
   elements on 2x/3x devices (they were half-scale before).

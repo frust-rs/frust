@@ -52,13 +52,13 @@ off this index — read this plus the one that covers what you are touching:
   - `frust-haptics`'s `apple` backend — one `MainThreadMarker::new_unchecked()` in a main-queue
     callback (the `UI*FeedbackGenerator` calls are safe); its other backends hold no `unsafe`.
   - `frust-gpu`'s Android `import` zone — the hand-opened Vulkan device (`open_with_callback` +
-    `create_device_from_hal`, `context.rs`), `import_hardware_buffer` (`texture_from_raw`,
-    `create_texture_from_hal`, raw `ash` calls) and the `dlsym`-resolved `AHardwareBuffer_*`
-    entries (cargo-ndk links API-21 stubs), each `# Safety`-noted, behind the default-off
-    `FRUST_ANDROID_HWBUFFER_IMPORT` knob; its Apple half is pending. `frust-render`'s
-    `native_import::android` makes the one call into it (render thread only).
-  - `frust-video-player`'s Android backend — two `# Safety`-noted texture-path sites: the
-    `AHardwareBuffer_*` NDK calls and a direct-buffer plane read.
+    `create_device_from_hal`, `context.rs`), `import_hardware_buffer` (`create_texture_from_hal`,
+    raw `ash`) and the `dlsym`-resolved `AHardwareBuffer_*` entries, each `# Safety`-noted, behind
+    the default-off `FRUST_ANDROID_HWBUFFER_IMPORT` knob, plus a debug thread check; Apple pending.
+    `frust-render`'s `native_import::android` makes the one call into it (`NativeHandle::new` contract).
+  - `frust-plugin`'s `NativeHandle::new` (`unsafe fn`, no block); the camera and video-player
+    bridges each hold one `SAFETY`-noted call to it. `frust-video-player`'s Android backend: the
+    constructor, the `AHardwareBuffer_*` NDK calls and a direct-buffer plane read.
   - `frust-gpu`'s `RenderContext::create_pipeline_cache` — one call building a `wgpu::PipelineCache`
     from a shell-persisted, adapter-fingerprint-validated blob (see RENDER_ARCHITECTURE.md).
   - `frust-drive`'s `process` module — a `kill(2)` shim (std has no `killpg`) group-killing a child.

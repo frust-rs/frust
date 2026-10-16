@@ -4757,9 +4757,12 @@ popovers and badges, video or camera controls over the picture).
 
 **Why accepted**: the Pixel 5 device legs (`device-leg-pixel5-overlay-spike`,
 `phase-4-android-overlays`) have not run, so the present pairing and the two z-order arms are
-unproven on hardware. Device outcome: pending.
+unproven on hardware. Device outcome: pending. The overlay lock is held across the main-surface
+acquire, so an overlay's `surfaceDestroyed` on the UI thread can wait up to one acquire timeout;
+the opt-in knob is the mitigation.
 
-**Trigger for removal**: the device leg passes and the default flips (or the knob is retired).
+**Trigger for removal**: the device leg passes and the default flips (or the knob is retired), and
+before any default flip the lock wait is bounded or replaced by an ack-barrier.
 
 **Evidence**: `crates/frust-shell-android/src/app/frame.rs`, `ffi_support.rs`; SHELLS_ARCHITECTURE.md
 § Native-view hosting.
@@ -4792,7 +4795,10 @@ compositing path that does not need a surface per cut.
 created only when `FRUST_ANDROID_HWBUFFER_IMPORT=1` or sysprop `debug.frust.hwbuffer_import` is set
 (`TierCaps::hwbuffer_import`). It imports RGBA8 buffers only and needs API 29 or later; with the
 knob off, no importer is installed and a native frame is refused, so producers fall back to a CPU
-copy.
+copy. The `debug.frust.hwbuffer_import` property is honoured in release builds too, because the
+device legs run release builds; setting it needs adb or root and is device-wide. While the knob is
+on, other threads submitting wgpu work are unsupported (debug builds assert that imports stay on
+the first importing thread).
 
 **Applies to**: Android texture-bus producers (video player, any plugin pushing native frames).
 
@@ -4852,7 +4858,11 @@ without stalling.
 `Queue::on_submitted_work_done` fence fired; a registration dropped while a frame is shown chains a
 second fence, delaying the producer's buffer reuse by up to one extra submit. At most
 `MAX_RETIRING` (4) retired textures wait per registration; a native frame arriving beyond that is
-refused and released at once, so the last good frame stays shown.
+refused and released at once, so the last good frame stays shown. The two chained fences cover
+every submission made before the drop plus one more completion point, not a frame recorded before
+the drop and submitted after it: a registration dropped mid-drain may release its last native frame
+while the frame that sampled it is still executing, and that one frame may tear. This is not a
+memory-safety issue (the importer holds its own reference and wgpu keeps the texture alive).
 
 **Applies to**: producers with a buffer ring shallower than the retire backlog plus one shown frame.
 
@@ -4860,7 +4870,7 @@ refused and released at once, so the last good frame stays shown.
 sampling.
 
 **Trigger for removal**: a different ownership scheme (producer-side fences) that makes retirement
-explicit.
+explicit, or tying the release to the frame's own submission.
 
 **Evidence**: `crates/frust-render/src/texture_bus.rs` module docs.
 
@@ -7716,3 +7726,28 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 **Trigger for removal**: a pure-Rust TLS provider, or an NDK-configured environment in the plain gate.
 
 **Evidence**: [DEVELOPMENT.md](DEVELOPMENT.md) § Test (compile gates); `plugins/network-image/Cargo.toml`.
+
+---
+
+### `overlay-unservable-content-stays-on-main` — content the overlay engine cannot draw stays under the native view
+
+**Observed**: with overlays on, a cut whose range holds retained content (a `DrawRetained`
+composite, a `PushRetained` recording, or a retained bracket crossing the cut), an external-texture
+frame (`SceneTexture`) or a `BackdropBlur` is not drawn on its overlay (`cut_is_servable` returns
+`CutServiceability::Unservable` with an `UnservableReason`). The range stays in the main segment,
+so that content draws under the native view, and the overlay records a transparent clear
+(`OverlayCutOutcome.serviceability` reports each cut). Navigator transitions wrap pages in a
+retained bracket, so any cut they cross stays on main for the transition.
+
+**Applies to**: Android apps with `FRUST_OVERLAYS` on that paint such content above a native view;
+Apple hosts are pending.
+
+**Why accepted**: the overlay path projects a command range without the retained-page store, the
+external-texture bindings or the backdrop copy; dropping the content would make it vanish, and
+drawing it under the view keeps it visible.
+
+**Trigger for removal**: an overlay engine that can serve retained pages and external textures.
+
+**Evidence**: `crates/frust-render/src/overlay.rs` (`cut_is_servable`, `UnservableReason`),
+`crates/frust-render/src/renderer.rs` (`encode_segmented`),
+`frust_engine::renderer::open_retained_bracket`; `crates/frust-render/tests/segmented.rs`.
