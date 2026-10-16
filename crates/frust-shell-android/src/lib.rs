@@ -45,7 +45,10 @@
 //! handle, and reconstituting it as a `&mut` — each with a safety comment, plus
 //! the `#[unsafe(no_mangle)]` attributes the [`android_app!`] macro emits on its
 //! generated `extern "system"` exports (edition 2024 spells `no_mangle` as an
-//! unsafe attribute).
+//! unsafe attribute). The performance-hint module (`adpf`) holds the one other
+//! FFI surface: the `dlsym`-resolved `APerformanceHint_*`/`AWorkDuration_*`
+//! entry points, the calls through them, a `gettid`, and the `unsafe impl
+//! Send` for its NDK object pointers, each `SAFETY`-noted.
 
 // The one Android-specific pure helper (the opaque-handle liveness check),
 // consumed by the (Android-only) FFI layer and by host unit tests. In a non-test
@@ -69,6 +72,13 @@ mod overlay_state;
 // [`ffi_support`].
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod sync_tail;
+
+// The performance-hint (ADPF) session: its lifecycle policy is pure and
+// host-tested (`tests/adpf.rs`); the NDK binding inside it is Android-only.
+// Driven only by the (Android-only) frame loop, hence the same dead-code shape
+// as [`ffi_support`].
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod adpf;
 
 #[cfg(target_os = "android")]
 mod app;
