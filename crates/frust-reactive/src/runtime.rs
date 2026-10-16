@@ -36,6 +36,8 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(not(target_family = "wasm"))]
+use std::time::Duration;
 
 use any_spawner::Executor;
 #[cfg(target_family = "wasm")]
@@ -46,6 +48,8 @@ use tokio::runtime::{Builder, Handle, Runtime};
 use crate::executor;
 #[cfg(not(target_family = "wasm"))]
 use crate::executor::ForgeExecutor;
+#[cfg(not(target_family = "wasm"))]
+use crate::thread_policy::{self, ThreadClass};
 
 /// The wasm [`any_spawner`] executor (see the module docs for why it exists
 /// instead of `any_spawner::Executor::init_wasm_bindgen()` and instead of the
@@ -86,20 +90,46 @@ impl CustomExecutor for WasmExecutor {
 /// fires it and background tasks may drive signal writes.
 pub type FrameWaker = Arc<dyn Fn() + Send + Sync>;
 
+/// How long an idle blocking-pool thread lingers before it exits under the
+/// thread policy — tokio's own default, set explicitly so the policy's pool
+/// shape is stated in one place.
+#[cfg(not(target_family = "wasm"))]
+const BLOCKING_KEEP_ALIVE: Duration = Duration::from_secs(10);
+
 /// Builds the one background runtime [`ReactiveRuntime::init`] installs.
 ///
 /// Native: the real multi-thread worker pool with the time + IO drivers
-/// enabled — this arm is byte-identical to the pre-wasm code, `cfg`'d only by
-/// which arm compiles for a given target.
+/// enabled. Unless `FRUST_NO_THREAD_TUNING` is set
+/// ([`thread_policy::thread_tuning_enabled`]) the pool also follows the
+/// thread policy: the blocking pool is capped at
+/// [`thread_policy::blocking_pool_cap`] (every core but two, at least two)
+/// instead of tokio's 512, and every thread the runtime starts — the two async
+/// workers and each blocking thread — runs [`ThreadClass::Background`] first,
+/// measured from the calling (UI) thread, which is recorded here as the
+/// reference. With the switch set the builder is exactly tokio's defaults plus
+/// the worker count, drivers and name.
 #[cfg(not(target_family = "wasm"))]
 fn build_background_runtime() -> Runtime {
-    Builder::new_multi_thread()
+    let mut builder = Builder::new_multi_thread();
+    builder
         .worker_threads(2)
         .enable_time()
         // IO driver: `frust::spawn`'s background tasks (tonic/hyper socket
         // work) need a live reactor, not just the timer driver above.
         .enable_io()
-        .thread_name("frust-reactive")
+        .thread_name("frust-reactive");
+    if thread_policy::thread_tuning_enabled() {
+        thread_policy::record_reference_thread();
+        builder
+            .max_blocking_threads(thread_policy::blocking_pool_cap())
+            .thread_keep_alive(BLOCKING_KEEP_ALIVE)
+            .on_thread_start(|| {
+                // Best-effort: a pool thread the OS refuses to lower simply
+                // keeps the priority it inherited.
+                let _ = thread_policy::set_current_thread_class(ThreadClass::Background);
+            });
+    }
+    builder
         .build()
         .expect("frust-reactive: failed to build the background tokio runtime")
 }
@@ -518,6 +548,54 @@ mod tests {
         rx.recv_timeout(std::time::Duration::from_secs(5)).expect(
             "a spawned task must complete an accept/connect round-trip \
              through the IO driver within 5s",
+        );
+    }
+
+    /// Under the thread policy every thread the background runtime starts —
+    /// an async worker and a blocking-pool thread alike — runs at a higher
+    /// nice value than the UI thread that built it (Linux kernels; the test
+    /// threads all share the process's nice value, so the runner thread
+    /// stands in for the UI thread whichever test built the runtime).
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    #[test]
+    fn pool_threads_run_below_the_thread_that_built_the_runtime() {
+        if !thread_policy::thread_tuning_enabled() {
+            return;
+        }
+        let _guard = crate::WAKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        ReactiveRuntime::init(noop_waker());
+
+        let ui = thread_policy::current_thread_nice().expect("nice is readable on Linux");
+        let blocking = ReactiveRuntime::get()
+            .expect("runtime was just initialized")
+            .handle()
+            .block_on(spawn_blocking(thread_policy::current_thread_nice))
+            .expect("blocking probe must not panic")
+            .expect("nice is readable on a pool thread");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        Executor::spawn(async move {
+            tx.send(thread_policy::current_thread_nice())
+                .expect("test receiver must still be alive");
+        });
+        let worker = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a spawned task must run within 5s")
+            .expect("nice is readable on a worker thread");
+
+        if ui >= 19 {
+            assert_eq!((blocking, worker), (19, 19));
+            return;
+        }
+        assert!(
+            blocking > ui,
+            "blocking-pool nice {blocking} must be higher than the UI thread's {ui}"
+        );
+        assert!(
+            worker > ui,
+            "worker nice {worker} must be higher than the UI thread's {ui}"
         );
     }
 }
