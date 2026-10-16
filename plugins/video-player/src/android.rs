@@ -262,6 +262,11 @@ static TEXTURE_SINKS: LazyLock<Mutex<HashMap<i32, TextureSink>>> =
 static RELEASE_FAILURES_LOGGED: LazyLock<Mutex<HashSet<i32>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
+/// The sessions whose texture path (hardware buffer or CPU copy) has already
+/// been logged at `info!` (see [`first_texture_frame`]).
+static TEXTURE_PATH_LOGGED: LazyLock<Mutex<HashSet<i32>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
 /// Opens Android player sessions.
 pub(crate) struct AndroidBackend;
 
@@ -362,6 +367,12 @@ fn attach_texture(id: i32) -> TextureSink {
     .and_then(|code| command_result("FrustVideoPlayerHost.attachTextureOutput", code));
     if let Err(err) = attached {
         log::warn!("frust-video-player: session {id} has no texture output: {err}");
+    } else {
+        log::info!(
+            "frust-video-player: session {id} texture output attached (hardware buffers \
+             requested: {})",
+            hardware_buffers
+        );
     }
     sink
 }
@@ -527,6 +538,8 @@ impl BackendSession for AndroidSession {
             // does not grow by one id per closed session and a reused id
             // warns afresh.
             forget_release_failures(self.id);
+            // Likewise the once-per-session texture path line.
+            lock(&TEXTURE_PATH_LOGGED).remove(&self.id);
         }
 
         if let Err(err) = self.command("FrustVideoPlayerHost.close", |env, class, session| {
@@ -1097,6 +1110,14 @@ fn forget_release_failures(session: i32) {
     lock(&RELEASE_FAILURES_LOGGED).remove(&session);
 }
 
+/// Whether `session` has not yet had its texture path logged — the first
+/// delivered frame of a session says at `info!` whether it took the
+/// hardware-buffer path or the CPU copy; later frames stay quiet. Pruned on
+/// close, so [`TEXTURE_PATH_LOGGED`] holds only open sessions.
+fn first_texture_frame(session: i32) -> bool {
+    lock(&TEXTURE_PATH_LOGGED).insert(session)
+}
+
 /// A native frame's release: drops the reference [`hardware_buffer`]
 /// acquired, then tells the host it may close the image (and so let its
 /// reader reuse the buffer). Runs once, on whichever thread the renderer
@@ -1246,6 +1267,12 @@ fn deliver_texture_frame(env: &Env<'_>, args: TextureFrameArgs<'_, '_>) -> bool 
         // `AHardwareBuffer_acquire` reference; only the frame's release
         // callback below (`release_native_frame`, run exactly once) drops it.
         let handle = unsafe { NativeHandle::new(NativeHandleKind::AHardwareBuffer, raw) };
+        if first_texture_frame(session) {
+            log::info!(
+                "frust-video-player: session {session} texture output via AHardwareBuffer \
+                 (zero-copy importer installed), {width}x{height} RGBA8"
+            );
+        }
         sink.push(
             TextureFrame::new(
                 FrameMeta {
@@ -1282,6 +1309,13 @@ fn deliver_texture_frame(env: &Env<'_>, args: TextureFrameArgs<'_, '_>) -> bool 
         );
         return false;
     };
+    if first_texture_frame(session) {
+        log::info!(
+            "frust-video-player: session {session} texture output via CPU copy ({width}x{height} \
+             RGBA8, row stride {row_stride}; no hardware-buffer importer or the host chose the \
+             copy)"
+        );
+    }
     sink.push(TextureFrame::rgba8(width, height, packed));
     record_copy(started, width, height);
     false
