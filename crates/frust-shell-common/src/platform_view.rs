@@ -148,8 +148,10 @@
 //! the frame's scene had recorded when the slot published — so the frame's
 //! slots have a painter order. [`ViewCommand::Update`]'s `z_index` is the
 //! slot's rank in that order among the pass's slots (ties keep publication
-//! order), so a host can stack its native views; a change of rank alone emits
-//! an `Update`.
+//! order), so a host can stack its native views; on the overlay-aware path
+//! ([`PlatformViewState::ingest_scene`]) a change of rank alone emits an
+//! `Update`. Plain [`PlatformViewState::ingest`] leaves rank out of the change
+//! test, so its stream is the pre-overlay stream.
 //!
 //! Every command recorded at or past a slot's index paints **over** that
 //! slot's native view, which a host compositing the native view above or
@@ -159,10 +161,11 @@
 //! `s_i.command_index..s_{i+1}.command_index` (the last one runs to the end of
 //! the list), and exists only while that range holds at least one **drawing**
 //! command ([`frust_scene::Command::is_drawing`]) — a range of clip/layer
-//! brackets alone puts no pixels above the slot, and neither does the slot's
-//! own Mode B hole-punch (the `ClearRect` recorded right after it publishes,
-//! so at its own index: the punch still opens the range, but never makes the
-//! overlay exist). Content painted before the
+//! brackets alone puts no pixels above the slot. The slot's own Mode B
+//! hole-punch (the `ClearRect` recorded right after it publishes, so at its
+//! own index) stays on the main surface: a leading punch is not part of the
+//! range, which opens one command later, so it never makes the overlay exist
+//! and never moves into it. Content painted before the
 //! first visible slot stays on the main surface. Each live overlay is keyed by
 //! the slot it sits above and announced with [`ViewCommand::Overlay`]
 //! (its id, the slot, its rect — v1: the whole window — and its range), re-sent
@@ -414,11 +417,12 @@ impl PlatformViewState {
     /// Do not call this on a gate-skipped frame — see the module docs'
     /// Skip-safety section.
     ///
-    /// Knows nothing of the frame's commands, so it computes no overlays: it
-    /// is [`ingest_scene`](Self::ingest_scene) with an empty command list, and
-    /// any overlay a previous `ingest_scene` created lapses as content-less.
+    /// Knows nothing of the frame's commands, so it computes no overlays, and
+    /// a change of rank alone emits no `Update`: its stream is the pre-overlay
+    /// stream, which a host ignoring `z_index` relies on. Any overlay a
+    /// previous `ingest_scene` created lapses as content-less.
     pub fn ingest(&mut self, frames: &[PlatformViewFrame], input_shields: &[Rect]) -> bool {
-        self.ingest_scene(frames, input_shields, &[], Rect::ZERO)
+        self.ingest_pass(frames, input_shields, &[], Rect::ZERO, false)
     }
 
     /// [`ingest`](Self::ingest) plus the overlay pass (module docs' Z-order and
@@ -436,6 +440,22 @@ impl PlatformViewState {
         input_shields: &[Rect],
         commands: &[Command],
         viewport: Rect,
+    ) -> bool {
+        self.ingest_pass(frames, input_shields, commands, viewport, true)
+    }
+
+    /// The pass behind [`ingest`](Self::ingest) and
+    /// [`ingest_scene`](Self::ingest_scene). `overlay_aware` gates the rank
+    /// comparison in the change test: only the overlay-aware path announces a
+    /// rank-only change. Either way `last_z_index` tracks the current rank, so
+    /// an `Update` emitted for any other reason carries it.
+    fn ingest_pass(
+        &mut self,
+        frames: &[PlatformViewFrame],
+        input_shields: &[Rect],
+        commands: &[Command],
+        viewport: Rect,
+        overlay_aware: bool,
     ) -> bool {
         let mut batch = Vec::new();
         let mut seen = std::collections::BTreeSet::new();
@@ -508,7 +528,7 @@ impl PlatformViewState {
                         || rect_changed(entry.last_rect, frame.rect)
                         || clip_changed(entry.last_clip, frame.clip)
                         || shields_changed(&entry.last_shields, &shields)
-                        || entry.last_z_index != z_index
+                        || (overlay_aware && entry.last_z_index != z_index)
                     {
                         batch.push(ViewCommand::Update {
                             slot_id: frame.slot_id,
@@ -522,8 +542,8 @@ impl PlatformViewState {
                         entry.last_clip = frame.clip;
                         entry.last_visible = frame.visible;
                         entry.last_shields = shields;
-                        entry.last_z_index = z_index;
                     }
+                    entry.last_z_index = z_index;
                     if entry.params_generation != frame.params_generation {
                         batch.push(ViewCommand::UpdateParams {
                             slot_id: frame.slot_id,
@@ -598,7 +618,9 @@ impl PlatformViewState {
             // A Mode B slot's own hole-punch is recorded right after it
             // publishes, so it sits AT the slot's index (a `ClearRect` has no
             // other producer). It erases what is beneath the slot rather than
-            // painting over it, so it never makes an overlay exist on its own.
+            // painting over it, so it never makes an overlay exist on its own,
+            // and the range opens after it: the punch stays in the main
+            // segment, where it erases what the main surface painted there.
             let content_from = match commands.get(start) {
                 Some(Command::ClearRect { .. }) => (start + 1).min(end),
                 _ => start,
@@ -606,7 +628,7 @@ impl PlatformViewState {
             if !commands[content_from..end].iter().any(Command::is_drawing) {
                 continue;
             }
-            let range = start..end;
+            let range = content_from..end;
             with_content.insert(slot.slot_id);
             match self.overlays.get_mut(&slot.slot_id) {
                 Some(entry) => {
@@ -2347,8 +2369,8 @@ mod tests {
         state.ingest_scene(&[frame_at(1, 1)], &[], &[draw(), punch()], VIEWPORT);
         assert!(overlay_commands(&state).is_empty());
 
-        // Real content after the punch does; the range still opens at the
-        // slot's index, so the partition of the command list stays contiguous.
+        // Real content after the punch does; the range opens one past the
+        // punch, which stays on the main surface.
         let mut state = PlatformViewState::new();
         state.ingest_scene(
             &[frame_at(1, 1)],
@@ -2362,7 +2384,7 @@ mod tests {
                 overlay_id: 1,
                 above_slot_id: 1,
                 rect: VIEWPORT,
-                command_range: 1..5,
+                command_range: 2..5,
             }]
         );
     }
@@ -2569,6 +2591,56 @@ mod tests {
     }
 
     #[test]
+    fn plain_ingest_rank_only_change_emits_nothing() {
+        let mut state = PlatformViewState::new();
+        state.ingest(&[frame_at(1, 0), frame_at(2, 1)], &[]);
+        state.acknowledge(state.commands().0);
+
+        // Swapped painter order with the same geometry: no Update on the
+        // plain stream.
+        assert!(!state.ingest(&[frame_at(1, 1), frame_at(2, 0)], &[]));
+        assert!(state.commands().1.is_empty());
+    }
+
+    #[test]
+    fn plain_ingest_culled_sibling_keeps_survivor_quiet() {
+        let mut state = PlatformViewState::new();
+        state.ingest(&[frame_at(1, 0), frame_at(2, 1), frame_at(3, 2)], &[]);
+        state.acknowledge(state.commands().0);
+
+        // Slot 2 is culled: slot 3 drops from rank 2 to rank 1 with nothing
+        // else changed, so the plain stream stays silent for it.
+        assert!(!state.ingest(&[frame_at(1, 0), frame_at(3, 2)], &[]));
+        assert!(update_z_indices(&state).is_empty());
+    }
+
+    #[test]
+    fn plain_ingest_update_for_another_reason_carries_the_current_rank() {
+        let mut state = PlatformViewState::new();
+        state.ingest(&[frame_at(1, 0), frame_at(2, 1)], &[]);
+        state.acknowledge(state.commands().0);
+
+        // Slot 1 moves and its rank flips to 1; slot 2's rank flips to 0 and
+        // stays quiet. Slot 1's Update carries the rank it now has.
+        let moved = PlatformViewFrame {
+            rect: r(10.0, 0.0, 110.0, 100.0),
+            ..frame_at(1, 1)
+        };
+        assert!(state.ingest(&[moved, frame_at(2, 0)], &[]));
+        assert_eq!(update_z_indices(&state), vec![(1, 1)]);
+    }
+
+    #[test]
+    fn overlay_aware_rank_change_is_announced_with_the_current_rank() {
+        let mut state = PlatformViewState::new();
+        state.ingest_scene(&[frame_at(1, 0), frame_at(2, 1)], &[], &[], VIEWPORT);
+        state.acknowledge(state.commands().0);
+
+        assert!(state.ingest_scene(&[frame_at(1, 1), frame_at(2, 0)], &[], &[], VIEWPORT));
+        assert_eq!(update_z_indices(&state), vec![(1, 1), (2, 0)]);
+    }
+
+    #[test]
     fn plain_ingest_never_emits_overlays() {
         let mut state = PlatformViewState::new();
         state.ingest(&[frame_at(1, 1)], &[]);
@@ -2579,11 +2651,11 @@ mod tests {
     #[test]
     fn a_z_order_change_alone_emits_an_update() {
         let mut state = PlatformViewState::new();
-        state.ingest(&[frame_at(1, 0), frame_at(2, 1)], &[]);
+        state.ingest_scene(&[frame_at(1, 0), frame_at(2, 1)], &[], &[], VIEWPORT);
         state.acknowledge(state.commands().0);
 
-        // Same geometry, swapped painter order.
-        assert!(state.ingest(&[frame_at(1, 1), frame_at(2, 0)], &[]));
+        // Same geometry, swapped painter order, on the overlay-aware path.
+        assert!(state.ingest_scene(&[frame_at(1, 1), frame_at(2, 0)], &[], &[], VIEWPORT));
         assert_eq!(update_z_indices(&state), vec![(1, 1), (2, 0)]);
     }
 
