@@ -2,7 +2,8 @@
 //! `extern "system" fn`s delegate to, and where this crate's `unsafe` is
 //! confined.
 //!
-//! The crate's `unsafe` surface is this module plus the
+//! The crate's `unsafe` surface is this module, the performance-hint binding in
+//! `crate::adpf` (its own `SAFETY`-noted NDK calls), and the
 //! `#[unsafe(no_mangle)]` attributes the [`crate::android_app!`] macro emits on
 //! its generated exports (edition-2024 spells `no_mangle` as an unsafe
 //! attribute). Every entry point here is wrapped in
@@ -1193,7 +1194,15 @@ fn publish_cleared_ledger(renderer: &mut frust_render::SurfaceRenderer) {
 /// [`spawn_split_executor`], so the common (capable) case is Mode B from frame
 /// 1 and only a real resolution can downgrade it.
 ///
+/// `ui_tid` is the UI thread's kernel thread id, captured by
+/// [`spawn_split_executor`] on that thread: the performance-hint session
+/// (`crate::adpf`) groups it with this thread. The hint is armed right after
+/// the scheduling call; its session opens on the first frame of a continuous
+/// loop, closes on surface destroy (and on pause, from the UI thread), and
+/// each continuous frame reports its UI spans plus its encode span.
+///
 /// [`UiSpans`]: frust_shell_common::perf::UiSpans
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_loop(
     receiver: RenderReceiver<PaintedScene, SendableWindowPtr>,
     startup_spans: StartupSpans,
@@ -1202,9 +1211,14 @@ pub(crate) fn render_loop(
     scene_return: SceneReturnSender<Scene>,
     signals: Arc<RenderSignals>,
     translucent_resolved: Arc<AtomicBool>,
+    ui_tid: i32,
 ) {
     // Render-thread scheduling, before any frame work.
     schedule_render_thread();
+    // The performance-hint session, after the scheduling call so the thread
+    // it names already runs at its frame priority. `None` under
+    // `FRUST_NO_ADPF` or below API 33.
+    let mut frame_hint = crate::adpf::RenderHint::open(ui_tid);
 
     let cache_path = cache_dir.as_deref().map(pipeline_cache_path);
     let mut startup_spans = Some(startup_spans);
@@ -1248,6 +1262,9 @@ pub(crate) fn render_loop(
                     ) {
                         Ok(()) => {
                             first_install_done = true;
+                            if let Some(hint) = frame_hint.as_mut() {
+                                hint.surface_installed();
+                            }
                             // A (re)created engine starts with an empty
                             // retained store; publish it now, and note the
                             // density so a later change is recognised.
@@ -1298,6 +1315,11 @@ pub(crate) fn render_loop(
                     // names no page the torn-down engine held.
                     publish_cleared_ledger(&mut renderer);
                     ack.acknowledge();
+                    // The hint session goes with the surface; closed after the
+                    // ack so the UI thread's barrier does not wait on it.
+                    if let Some(hint) = frame_hint.as_mut() {
+                        hint.surface_destroyed();
+                    }
                 }
                 RenderCommand::Pause { ack } => {
                     // Android v1 never sends `Pause` (Kotlin owns start/stop of the
@@ -1685,6 +1707,9 @@ fn spawn_split_executor(
 
     let (sender, receiver) = render_channel::<PaintedScene, SendableWindowPtr>();
     let (scene_return_tx, scene_return_rx) = scene_return_channel::<Scene>();
+    // This (UI) thread's id, for the render thread's performance-hint session:
+    // the thread that runs every Choreographer frame.
+    let ui_tid = crate::adpf::current_tid();
     let window_ptr = window.ptr().as_ptr().cast::<c_void>();
     let size = SurfaceSize {
         width: physical.0,
@@ -1722,6 +1747,7 @@ fn spawn_split_executor(
                     scene_return_tx,
                     signals_render,
                     translucent_resolved,
+                    ui_tid,
                 )
             })
         })
@@ -1956,12 +1982,14 @@ pub fn native_on_touch(handle: jlong, action: jint, pointer_id: jint, x: jfloat,
 }
 
 /// `nativeOnResume`: activity resumed. Bookkeeping only in v0 — the Choreographer
-/// loop is started/stopped in Kotlin.
+/// loop is started/stopped in Kotlin — plus re-allowing the performance-hint
+/// session [`native_on_pause`] closed (it reopens on the next continuous frame).
 pub fn native_on_resume(handle: jlong) {
     guard("nativeOnResume", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if unsafe { handle_mut(handle) }.is_some() {
             log::debug!("frust-shell-android: onResume");
+            crate::adpf::resume();
         }
     });
 }
@@ -1971,12 +1999,15 @@ pub fn native_on_resume(handle: jlong) {
 /// currently-visible platform-view slot: a backgrounded app's native
 /// sibling views should disappear with it rather than linger on top of
 /// whatever now shows behind the (possibly composited-away) frust surface.
+/// It also closes the performance-hint session: a paused activity runs no
+/// frame loop to hint for.
 pub fn native_on_pause(handle: jlong) {
     guard("nativeOnPause", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
             log::debug!("frust-shell-android: onPause");
             app.suspend_platform_views();
+            crate::adpf::suspend();
         }
     });
 }
