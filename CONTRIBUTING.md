@@ -46,7 +46,9 @@ See [docs/RELEASING.md](docs/RELEASING.md) for the release process.
 
 ## Pull request expectations
 
-- One topic per pull request.
+- One topic per pull request. A pull request that changes only Markdown files or `docs/` runs the
+  short documentation workflow (commit hygiene, no build); mixing a doc fix into a code pull request
+  is fine, mixing code into a doc pull request runs the full build.
 - Tests for behaviour changes.
 - Update docs in the same pull request. [docs/DOC_POLICY.md](docs/DOC_POLICY.md) lists the managed
   docs and their size budgets; a new platform gap gets an entry in
