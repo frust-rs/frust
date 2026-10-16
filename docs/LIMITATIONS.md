@@ -6309,6 +6309,8 @@ what lies beneath it. Sampling is also unconditionally bilinear
 (`ImageQuality::Medium`): the whole-pixel-translation nearest downgrade
 `Command::Image` gets from `compile::paint` is not shared with the external
 path; at a 1:1 pixel-aligned mapping the difference rounds away in `u8`.
+The texture bus's `texture_view` frames (`frust_render::texture_bus`, a video or camera
+frame drawn in-scene) take this same path, so they are always blended.
 
 **Accepted because**: claiming opacity the engine cannot verify would let a
 translucent texture occlude what it should have blended over; drawing
@@ -6549,7 +6551,7 @@ one of them compiles into any one linked test binary.
 
 **Observed**: `WindowInsets::corner_insets` is non-zero only on iPadOS 26+ under the system window control. Android, desktop, web, and iOS < 26 always report zero (by construction: no other shell reads a corner region), so the Glyph and Material app bar shifts never fire there. Bars do not consume the horizontal safe-area insets; corner widths are measured from the safe-area edge, so a hypothetical control on a notched horizontal edge would under-shift (no platform draws one there). Additionally, a bar hosted in a detail pane, sheet, dialog, or below other content cannot detect its window-space origin and still receives the window-wide corner values, causing over-shift; `corner_shift(false)` is exposed as the author's opt-out. Several bars do not honour corner insets at all: the `frust_cupertino::navbar`, `frust_material::selection_app_bar`'s contextual face, and shadcn/beUI header components.
 
-**Applies to**: Android, desktop, web, and iOS < 26; the `frust_glyph::app_bar` and `frust_material::{app_bar, search_app_bar, sliver_app_bar}` widget implementations; also `frust_cupertino::navbar`, `frust_material::selection_app_bar`, and shadcn/beUI headers. The texture bus's `texture_view` frames (`frust_render::texture_bus`, a video or camera frame drawn in-scene) take this same path, so they are always blended.
+**Applies to**: Android, desktop, web, and iOS < 26; the `frust_glyph::app_bar` and `frust_material::{app_bar, search_app_bar, sliver_app_bar}` widget implementations; also `frust_cupertino::navbar`, `frust_material::selection_app_bar`, and shadcn/beUI headers.
 
 **Why not fixed**: nothing to report elsewhere. The notched-edge case has no producer. Android's edge-to-edge model has no corner control. Automatic placement detection to disable shifting would require a scoped context cleared by split views and sheets — a design change deferred to a follow-up plan.
 
