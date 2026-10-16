@@ -3332,8 +3332,17 @@ where
                 // diff is not charged to paint time. The returned "anything
                 // changed" flag is deliberately not consulted — the drain below
                 // runs unconditionally because a backlog can also come from a
-                // surface-recreate replay that no ingest produced.
-                self.platform_views.after_paint(&mut self.root);
+                // surface-recreate replay that no ingest produced. With overlay
+                // surfaces on (`FRUST_OVERLAYS`, macOS) the differ also reads
+                // the scene just painted and the logical viewport, to cut the
+                // frame at its slots; the cuts then ride this scene to the
+                // render side.
+                self.platform_views.after_paint(
+                    &mut self.root,
+                    self.scene.commands(),
+                    kurbo::Rect::new(0.0, 0.0, logical.width, logical.height),
+                );
+                let overlay_cuts = self.platform_views.overlay_cuts();
 
                 // Animation driver (spec v1 seam): if paint advanced animation
                 // state (e.g. a scroll fling) it asks for another frame here.
@@ -3435,6 +3444,7 @@ where
                     frame_time,
                     size,
                     paint_outcome.paint_serial,
+                    overlay_cuts,
                 );
                 // Inline reports a transient-acquire skip synchronously; the
                 // split reports it later as `ShellUserEvent::RenderRetry`.
