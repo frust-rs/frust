@@ -997,6 +997,19 @@ fn submit_with_overlays(
         renderer.submit_segmented_deferred(render_cx, &mut cuts)?
     };
     overlays.note_outcomes(&outcome.overlays);
+    if !presents.overlays.is_empty() {
+        static FIRST: std::sync::Once = std::sync::Once::new();
+        FIRST.call_once(|| {
+            log::info!(
+                "frust-overlay: first segmented frame submitted: main + {} overlay(s), cuts \
+                 {:?}, {} submit(s), present-sync {}",
+                presents.overlays.len(),
+                overlays.ranges(),
+                outcome.submits,
+                if armed.is_some() { "armed" } else { "off" },
+            );
+        });
+    }
     match armed {
         Some((handoff, frame_id)) => {
             if !presents.is_empty() {

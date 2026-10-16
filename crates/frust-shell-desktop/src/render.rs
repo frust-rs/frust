@@ -1130,15 +1130,11 @@ pub(crate) fn overlays_enabled() -> bool {
         }
         let runtime = std::env::var(OVERLAYS_ENV_VAR).ok();
         let alias = frust_render::overlay::overlay_spike_value();
-        let on = overlay_switch_from([
+        overlay_switch_from([
             runtime.as_deref(),
             option_env!("FRUST_OVERLAYS"),
             alias.as_deref(),
-        ]);
-        if on {
-            log::info!("frust-overlay: overlay surfaces on (one per differ cut, Mode A)");
-        }
-        on
+        ])
     })
 }
 
@@ -1677,6 +1673,15 @@ fn submit_with_overlays(
     if let Some(main_at) = main_at
         && count > 0
     {
+        static FIRST: std::sync::Once = std::sync::Once::new();
+        FIRST.call_once(|| {
+            log::info!(
+                "frust-overlay: first segmented frame presented: main + {count} overlay(s), \
+                 cuts {:?}, {} submit(s)",
+                overlays.cuts,
+                outcome.submits
+            );
+        });
         record_overlay_presents(main_at.elapsed(), count);
     }
     Ok(outcome.frame)

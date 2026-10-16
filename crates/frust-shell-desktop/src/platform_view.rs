@@ -205,6 +205,12 @@ impl DesktopPlatformViews {
     {
         let retired = root.take_retired_platform_views();
         if crate::extensions::overlays_enabled() {
+            // Announced from the first frame rather than where the switch is
+            // first read, which can run before the logger exists.
+            static ANNOUNCED: std::sync::Once = std::sync::Once::new();
+            ANNOUNCED.call_once(|| {
+                log::info!("frust-overlay: overlay surfaces on (one per differ cut, Mode A)");
+            });
             self.ingest_scene(&retired, root.platform_view_frames(), commands, viewport)
         } else {
             self.ingest(&retired, root.platform_view_frames())
