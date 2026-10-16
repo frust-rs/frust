@@ -749,6 +749,144 @@ pub(crate) fn base_clear_color<C>(
     }
 }
 
+// ---------------------------------------------------------------------
+// Per-frame state sync: one packed word instead of five polls.
+// ---------------------------------------------------------------------
+
+/// The IME surface published since the last sync differs from the one the
+/// previous sync saw (or an IME-side input arrived in between, or this is the
+/// first sync of a handle). Gates Kotlin's `nativeImeState` read.
+pub(crate) const FRAME_SYNC_IME_CHANGED: i64 = 1 << 0;
+/// A clipboard write is waiting; the text is held for `nativeTakeClipboardWrite`.
+pub(crate) const FRAME_SYNC_CLIPBOARD_WRITE: i64 = 1 << 1;
+/// A paste request is waiting; held for `nativeTakePasteRequest`.
+pub(crate) const FRAME_SYNC_PASTE_REQUEST: i64 = 1 << 2;
+/// The system-UI override generation advanced (or this is the first sync of a
+/// handle). Gates Kotlin's `nativeSystemUiState` read.
+pub(crate) const FRAME_SYNC_SYSTEM_UI_CHANGED: i64 = 1 << 3;
+/// The app's resolved brightness flipped (or this is the first sync of a
+/// handle). Gates Kotlin's `nativeAppIsDark` read.
+pub(crate) const FRAME_SYNC_DARK_CHANGED: i64 = 1 << 4;
+// Bit 5 is deliberately unassigned: the platform-view command poll stays
+// per-frame, because its peek records each poll in the scroll-sync tail and
+// so is not a side-effect-free read to gate on.
+
+/// What one per-frame sync observed, handed to [`FrameSyncLatch::sync`].
+pub(crate) struct FrameObservation<'a> {
+    /// The IME surface JSON `nativeImeState` would serve right now.
+    pub(crate) ime_json: &'a str,
+    /// A freshly drained clipboard write, if the slot held one.
+    pub(crate) clipboard_write: Option<String>,
+    /// Whether the paste-request slot was set when drained.
+    pub(crate) paste_request: bool,
+    /// The packed `(generation, mode)` word of the system-UI slot.
+    pub(crate) system_ui_encoded: u64,
+    /// The app's resolved brightness.
+    pub(crate) dark: bool,
+}
+
+/// What the previous sync reported, so the next one can say what moved.
+///
+/// The clipboard slots are one-shot edges that only the app can drain, so a
+/// drain done to learn "something is pending" must not lose the value: it is
+/// held here until the existing `nativeTakeClipboardWrite` /
+/// `nativeTakePasteRequest` calls hand it to Kotlin.
+#[derive(Debug, Default)]
+pub(crate) struct FrameSyncLatch {
+    handle: i64,
+    ime_json: Option<String>,
+    ime_dirty: bool,
+    system_ui_generation: Option<u64>,
+    dark: Option<bool>,
+    clipboard_write: Option<String>,
+    paste_request: bool,
+}
+
+impl FrameSyncLatch {
+    pub(crate) const fn new() -> Self {
+        Self {
+            handle: 0,
+            ime_json: None,
+            ime_dirty: false,
+            system_ui_generation: None,
+            dark: None,
+            clipboard_write: None,
+            paste_request: false,
+        }
+    }
+
+    /// Forget everything: the next sync reports every state bit.
+    pub(crate) fn reset(&mut self) {
+        *self = Self::new();
+    }
+
+    /// Note an input that Kotlin's IME mirror may need to reconcile against
+    /// even if the published state does not move (a rejected edit): the next
+    /// sync reports the IME bit once.
+    pub(crate) fn mark_ime_dirty(&mut self) {
+        self.ime_dirty = true;
+    }
+
+    /// Whether a drained clipboard write is still waiting to be taken.
+    pub(crate) fn clipboard_write_held(&self) -> bool {
+        self.clipboard_write.is_some()
+    }
+
+    /// Hand over the held clipboard write, if any.
+    pub(crate) fn take_clipboard_write(&mut self) -> Option<String> {
+        self.clipboard_write.take()
+    }
+
+    /// Hand over (and clear) the held paste request.
+    pub(crate) fn take_paste_request(&mut self) -> bool {
+        std::mem::take(&mut self.paste_request)
+    }
+
+    /// Fold one observation into the latch and return the packed state word.
+    pub(crate) fn sync(&mut self, handle: i64, observed: FrameObservation<'_>) -> i64 {
+        if self.handle != handle {
+            self.reset();
+            self.handle = handle;
+        }
+        let mut bits = 0;
+
+        let ime_moved = self.ime_dirty || self.ime_json.as_deref() != Some(observed.ime_json);
+        if ime_moved {
+            bits |= FRAME_SYNC_IME_CHANGED;
+            match &mut self.ime_json {
+                Some(held) => {
+                    held.clear();
+                    held.push_str(observed.ime_json);
+                }
+                None => self.ime_json = Some(observed.ime_json.to_owned()),
+            }
+        }
+        self.ime_dirty = false;
+
+        if let Some(text) = observed.clipboard_write {
+            self.clipboard_write = Some(text);
+        }
+        if self.clipboard_write.is_some() {
+            bits |= FRAME_SYNC_CLIPBOARD_WRITE;
+        }
+        self.paste_request |= observed.paste_request;
+        if self.paste_request {
+            bits |= FRAME_SYNC_PASTE_REQUEST;
+        }
+
+        let generation = observed.system_ui_encoded >> 8;
+        if self.system_ui_generation != Some(generation) {
+            self.system_ui_generation = Some(generation);
+            bits |= FRAME_SYNC_SYSTEM_UI_CHANGED;
+        }
+        if self.dark != Some(observed.dark) {
+            self.dark = Some(observed.dark);
+            bits |= FRAME_SYNC_DARK_CHANGED;
+        }
+        bits
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1529,5 +1667,95 @@ mod tests {
             .join("frust")
             .join(format!("pipeline_cache.tmp.{}", std::process::id()));
         assert!(!leftover.exists(), "temp file should be renamed away");
+    }
+
+    fn observation(json: &str) -> FrameObservation<'_> {
+        FrameObservation {
+            ime_json: json,
+            clipboard_write: None,
+            paste_request: false,
+            system_ui_encoded: 0,
+            dark: false,
+        }
+    }
+
+    #[test]
+    fn frame_sync_first_sync_reports_every_state_bit() {
+        let mut latch = FrameSyncLatch::new();
+        let bits = latch.sync(7, observation("{}"));
+        assert_eq!(
+            bits,
+            FRAME_SYNC_IME_CHANGED | FRAME_SYNC_SYSTEM_UI_CHANGED | FRAME_SYNC_DARK_CHANGED
+        );
+    }
+
+    #[test]
+    fn frame_sync_idle_frame_is_zero() {
+        let mut latch = FrameSyncLatch::new();
+        latch.sync(7, observation("{}"));
+        assert_eq!(latch.sync(7, observation("{}")), 0);
+        assert_eq!(latch.sync(7, observation("{}")), 0);
+    }
+
+    #[test]
+    fn frame_sync_ime_bit_follows_the_published_json_and_dirty_marks() {
+        let mut latch = FrameSyncLatch::new();
+        latch.sync(7, observation("a"));
+        assert_eq!(latch.sync(7, observation("b")), FRAME_SYNC_IME_CHANGED);
+        assert_eq!(latch.sync(7, observation("b")), 0);
+        latch.mark_ime_dirty();
+        assert_eq!(latch.sync(7, observation("b")), FRAME_SYNC_IME_CHANGED);
+        assert_eq!(latch.sync(7, observation("b")), 0);
+    }
+
+    #[test]
+    fn frame_sync_system_ui_and_dark_bits_fire_on_change_only() {
+        let mut latch = FrameSyncLatch::new();
+        latch.sync(7, observation("{}"));
+        let mut next = observation("{}");
+        next.system_ui_encoded = (3 << 8) | 1;
+        assert_eq!(latch.sync(7, next), FRAME_SYNC_SYSTEM_UI_CHANGED);
+        let mut same_generation_other_mode = observation("{}");
+        same_generation_other_mode.system_ui_encoded = (3 << 8) | 2;
+        assert_eq!(latch.sync(7, same_generation_other_mode), 0);
+        let mut flipped = observation("{}");
+        flipped.system_ui_encoded = 3 << 8;
+        flipped.dark = true;
+        assert_eq!(latch.sync(7, flipped), FRAME_SYNC_DARK_CHANGED);
+    }
+
+    #[test]
+    fn frame_sync_holds_drained_clipboard_values_until_taken() {
+        let mut latch = FrameSyncLatch::new();
+        latch.sync(7, observation("{}"));
+        let mut copy = observation("{}");
+        copy.clipboard_write = Some("hello".to_string());
+        copy.paste_request = true;
+        assert_eq!(
+            latch.sync(7, copy),
+            FRAME_SYNC_CLIPBOARD_WRITE | FRAME_SYNC_PASTE_REQUEST
+        );
+        // Still pending on the next sync until Kotlin takes them.
+        assert!(latch.clipboard_write_held());
+        assert_eq!(
+            latch.sync(7, observation("{}")),
+            FRAME_SYNC_CLIPBOARD_WRITE | FRAME_SYNC_PASTE_REQUEST
+        );
+        assert_eq!(latch.take_clipboard_write().as_deref(), Some("hello"));
+        assert!(latch.take_paste_request());
+        assert!(!latch.take_paste_request());
+        assert_eq!(latch.sync(7, observation("{}")), 0);
+    }
+
+    #[test]
+    fn frame_sync_a_new_handle_starts_over() {
+        let mut latch = FrameSyncLatch::new();
+        latch.sync(7, observation("{}"));
+        assert_eq!(latch.sync(7, observation("{}")), 0);
+        let bits = latch.sync(8, observation("{}"));
+        assert_eq!(
+            bits,
+            FRAME_SYNC_IME_CHANGED | FRAME_SYNC_SYSTEM_UI_CHANGED | FRAME_SYNC_DARK_CHANGED
+        );
     }
 }

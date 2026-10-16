@@ -80,9 +80,9 @@ use crate::app::{
     AndroidAppHandle, FrameExecutor, InlineExecutor, PaintedScene, RenderSignals, SplitExecutor,
 };
 use crate::ffi_support::{
-    EditCommandWire, ImeJsonState, PlatformViewCommandJson, build_ime_state_json,
-    build_platform_view_commands_json, edit_command_from_code, load_pipeline_cache,
-    normalize_ime_indices, pipeline_cache_differs, pipeline_cache_path,
+    EditCommandWire, FrameObservation, FrameSyncLatch, ImeJsonState, PlatformViewCommandJson,
+    build_ime_state_json, build_platform_view_commands_json, edit_command_from_code,
+    load_pipeline_cache, normalize_ime_indices, pipeline_cache_differs, pipeline_cache_path,
     platform_view_commands_up_to_date, publish_resolved_translucency, write_pipeline_cache_atomic,
 };
 use crate::overlay_state::{
@@ -2038,6 +2038,7 @@ pub fn native_on_destroy(handle: jlong) {
         // is reclaimed exactly once here; the JVM zeroes its copy afterwards so it
         // is never passed back in.
         drop(unsafe { Box::from_raw(handle as *mut AndroidAppHandle) });
+        frame_sync_latch().reset();
         // The renderer is gone with the handle (the split's render thread was
         // joined by the drop), so nothing can publish after this: leave the
         // process-wide slot EMPTY, or a handle created later in this process (an
@@ -2067,6 +2068,7 @@ pub fn native_ime_apply(
 ) {
     guard("nativeImeApply", (), || {
         pump_reactive_runtime();
+        frame_sync_latch().mark_ime_dirty();
         // Read the Java string first (releases the `env` borrow before we touch
         // the handle); an unreadable/`null` string falls back to empty.
         let text = env
@@ -2122,6 +2124,7 @@ pub fn native_ime_state(mut env: EnvUnowned, handle: jlong) -> jstring {
 pub fn native_ime_action(handle: jlong, action: jint) {
     guard("nativeImeAction", (), || {
         pump_reactive_runtime();
+        frame_sync_latch().mark_ime_dirty();
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
             app.ime_action(action);
@@ -2176,7 +2179,9 @@ fn native_take_clipboard_write(mut env: EnvUnowned, handle: jlong) -> jstring {
         let Some(app) = (unsafe { handle_mut(handle) }) else {
             return std::ptr::null_mut();
         };
-        let Some(text) = app.take_clipboard_write() else {
+        // A value `nativeFrameSync` already drained is served first.
+        let held = frame_sync_latch().take_clipboard_write();
+        let Some(text) = held.or_else(|| app.take_clipboard_write()) else {
             return std::ptr::null_mut();
         };
         env.with_env(|env| Ok::<JObject, jni::errors::Error>(JString::new(env, &text)?.into()))
@@ -2210,7 +2215,7 @@ fn native_take_paste_request(handle: jlong) -> jboolean {
         pump_reactive_runtime();
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         match unsafe { handle_mut(handle) } {
-            Some(app) => app.take_paste_request(),
+            Some(app) => frame_sync_latch().take_paste_request() | app.take_paste_request(),
             None => false,
         }
     })
@@ -2254,6 +2259,7 @@ pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeEditCommand<'local>
 fn native_edit_command(mut env: EnvUnowned, handle: jlong, cmd: jint, text: JString) {
     guard("nativeEditCommand", (), || {
         pump_reactive_runtime();
+        frame_sync_latch().mark_ime_dirty();
         let Some(wire) = edit_command_from_code(cmd) else {
             log::warn!("frust-shell-android: nativeEditCommand dropped unknown command code {cmd}");
             return;
@@ -2561,6 +2567,53 @@ pub fn native_set_frame_timeline(handle: jlong, expected_present_delta_nanos: jl
         if let Some(app) = unsafe { handle_mut(handle) } {
             app.set_frame_timeline(expected_present_delta_nanos);
         }
+    })
+}
+
+/// The per-frame sync latch (see [`FrameSyncLatch`]). Every caller is on the
+/// JVM UI thread, so the lock is never contended; it exists because a `static`
+/// must be `Sync`.
+static FRAME_SYNC: Mutex<FrameSyncLatch> = Mutex::new(FrameSyncLatch::new());
+
+fn frame_sync_latch() -> std::sync::MutexGuard<'static, FrameSyncLatch> {
+    FRAME_SYNC
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// `nativeFrameSync`: one crossing per `doFrame` that says which of Kotlin's
+/// per-frame polls have anything to report.
+///
+/// Returns a packed word (the `FRAME_SYNC_*` bits in [`crate::ffi_support`]):
+/// IME surface changed, clipboard write pending, paste request pending,
+/// system-UI generation advanced, app brightness flipped. Kotlin then makes
+/// the existing `nativeImeState` / `nativeTakeClipboardWrite` /
+/// `nativeTakePasteRequest` / `nativeSystemUiState` / `nativeAppIsDark` call
+/// only for the bits that are set; those exports are unchanged. The
+/// clipboard slots are one-shot edges, so a value drained here is held and
+/// served by the matching `nativeTake*` call. A missing handle answers `0`.
+pub fn native_frame_sync(handle: jlong) -> jlong {
+    guard("nativeFrameSync", 0, || {
+        pump_reactive_runtime();
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        let Some(app) = (unsafe { handle_mut(handle) }) else {
+            return 0;
+        };
+        let ime_json = build_ime_state_json(&ime_state_to_json(app.ime_state()));
+        let mut latch = frame_sync_latch();
+        let clipboard_write = if latch.clipboard_write_held() {
+            None
+        } else {
+            app.take_clipboard_write()
+        };
+        let observation = FrameObservation {
+            ime_json: &ime_json,
+            clipboard_write,
+            paste_request: app.take_paste_request(),
+            system_ui_encoded: frust_shell_common::encoded_state(),
+            dark: app.is_dark_theme(),
+        };
+        latch.sync(handle, observation)
     })
 }
 

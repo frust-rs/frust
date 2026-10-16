@@ -585,6 +585,20 @@ macro_rules! android_app {
             $crate::jni_glue::native_set_frame_timeline(handle, expected_present_delta_nanos)
         }
 
+        /// JNI `nativeFrameSync`: one crossing per frame that packs which of
+        /// the per-frame polls (IME state, clipboard write/paste, system-UI
+        /// generation, app brightness) have anything to report. Additive: the
+        /// five exports it gates are unchanged and Kotlin still calls them
+        /// for the bits that are set.
+        #[unsafe(no_mangle)]
+        pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeFrameSync<'local>(
+            _env: $crate::__jni::EnvUnowned<'local>,
+            _class: $crate::__jni::JClass<'local>,
+            handle: $crate::__jni::jlong,
+        ) -> $crate::__jni::jlong {
+            $crate::jni_glue::native_frame_sync(handle)
+        }
+
         /// JNI `nativePerfTrace`: whether this build's `perf-trace`
         /// instrumentation is live, so Kotlin arms its per-frame poll timers
         /// (the `frust-perf jni` line) only when someone can read them.
