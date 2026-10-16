@@ -4728,13 +4728,15 @@ named per line. Every line below says where its limits live:
   follow-up-see-`path-clip-mask-rerasterized`. `BlendMode` on `PushLayer` is still refused by the
   engine (`blend.wgsl` serves only `COMPOSE_DEST_OUT`): follow-up, awaiting a ruling.
 - Phase 3, partial repaint: NO-GO-see-`partial-repaint-outcome`.
-- Phase 3 device legs (Pixel 5, iPhone SE, kill-switch rows): device leg pending.
+- Phase 3 device legs: iPhone SE passed; Android ran on a OnePlus 9 (Android 15, 120 Hz) instead of
+  the Pixel 5: navigator push/pop p50 7.42-7.53 ms with retained layers vs 7.74-7.75 ms with them
+  off (p95 0.4-1.9 ms worse, all of it in swapchain acquire), S1/S6 identical in both arms.
 - Phase 4, z-order differ, segmented rendering and the overlay hosts: shipped behind
   `FRUST_OVERLAYS` (default off). iOS passed on an iPhone SE and the iOS Simulator (0 uncaptured
   wgpu errors in Mode A and Mode B). macOS passed too (both paint orders; a withdraw can stall the UI thread).
   The Android overlay spike passed (GO); the Android host's one failure (a new overlay surface got
-  no frame while the app was idle) is fixed in code, with the Pixel 5 re-run pending
-  (`android-overlays-opt-in-pending-device-leg`). Limits: follow-up-see-
+  no frame while the app was idle) is fixed and confirmed on a OnePlus 9; the default stays off
+  until the overlay hardening work flips it (`android-overlays-opt-in-pending-device-leg`). Limits: follow-up-see-
   `android-overlays-cover-later-slots`, follow-up-see-`apple-overlay-limits` and
   follow-up-see-`overlay-unservable-content-stays-on-main`.
 - Phase 4, texture bus (`frust::texture`, `texture_view`, `TextureSink`): shipped-in-Phase-4;
@@ -4743,8 +4745,8 @@ named per line. Every line below says where its limits live:
 - Phase 4, zero-copy import: Apple `MetalImporter` passed on macOS (M4, debug build: first import
   79-184 us; steady 300 imports at 30 fps mean 24.6-50.5 us, p95 45-76 us; 0 cache misses after
   warm-up); NV12 stays on the CPU path (`nv12-import-unsupported`). Android hardware-buffer import
-  is shipped behind `FRUST_ANDROID_HWBUFFER_IMPORT` (default off); its device leg is pending
-  (`android-hwbuffer-import-opt-in`).
+  is shipped behind `FRUST_ANDROID_HWBUFFER_IMPORT` (default off); its device leg passed on a
+  OnePlus 9 (`android-hwbuffer-import-opt-in`).
 - Phase 4, plugin texture modes (video-player `VideoOutput::Texture`, camera `preview_texture`):
   Android video passed (plays in-scene at the 90 Hz display rate with and without the importer) and
   the Android camera runs on the CPU path (p50 13 ms; 94 of 120 frames over 16.7 ms), see
@@ -4761,8 +4763,8 @@ anyone reading the plan's outcome.
 **Why accepted**: each shipped line is bounded by the entries it names; the remaining legs are
 marked device leg pending.
 
-**Trigger for removal**: the entry is deleted when the pending device legs (macOS overlay visual
-check, Android hardware-buffer import, the Phase 3 rows) have run and the entries it names are
+**Trigger for removal**: the entry is deleted when the remaining Apple texture-mode measurements
+have run and the entries it names are
 retired or kept on their own.
 
 **Evidence**: research `rsa_000001a13475eca03WGtt6CU`; plan `fplan_000001a1347808dayUwoSOyz`;
@@ -4770,7 +4772,7 @@ retired or kept on their own.
 
 ---
 
-### `android-overlays-opt-in-pending-device-leg` — Android overlays are off by default until the idle-frame fix is confirmed on a device
+### `android-overlays-opt-in-pending-device-leg` — Android overlays are off by default although the host passes its device leg
 
 **Observed**: the Android overlay host (frust paint above a native view on an opaque surface) runs
 only when `FRUST_OVERLAYS` is set (runtime env, compile-time `--define`, or the
@@ -4781,21 +4783,22 @@ premultiplied alpha correct, skew avg 0.53 ms / max 3.9 ms; rotation, Mode B and
 covers-later-slots behaviour confirmed). One issue was found: a newly attached or recreated overlay
 surface (slot remount, background to foreground) got no frame while the app was idle, so the
 over-paint stayed under the native view until an unrelated repaint. An overlay window that arrives,
-resizes or is withdrawn now requests a frame; the fix is not yet confirmed on the Pixel 5 (device
-leg pending).
+resizes or is withdrawn now requests a frame; confirmed on a OnePlus 9 (Android 15): the over-paint
+is drawn or restored within one frame after a slot remount or background-to-foreground with no
+further input, drags through an overlay still reach the native control, present skew avg 0.43 ms /
+max 0.77 ms with two overlays, 0 wgpu errors.
 
 **Applies to**: Android apps that composite frust content over a native view (native-widgets
 popovers and badges, video or camera controls over the picture) with the knob on.
 
-**Why accepted**: the default stays off until the Pixel 5 leg confirms the idle-frame fix (the
-Apple hosts request a frame when an overlay layer is attached or resized, and Android now does the
-same for its overlay windows). The overlay
+**Why accepted**: the default stays off until the overlay hardening work (one shared overlay table,
+non-blocking withdraw) lands and decides the flip; every host now requests a frame when an overlay
+layer or window is attached, resized or withdrawn. The overlay
 lock is held across the main-surface acquire, so an overlay's `surfaceDestroyed` on the UI thread
 can wait up to one acquire timeout; the opt-in knob is the mitigation.
 
-**Trigger for removal**: the Pixel 5 leg confirms an attached, recreated or withdrawn overlay
-surface draws or restores content on an idle app, and the default flips (or the knob is retired); before any default flip the lock wait is bounded or replaced by an
-ack-barrier.
+**Trigger for removal**: the default flips (or the knob is retired); before any default flip the
+lock wait is bounded or replaced by an ack-barrier.
 
 **Evidence**: `crates/frust-shell-android/src/app/frame.rs`, `jni_glue.rs`, `overlay_state.rs`; SHELLS_ARCHITECTURE.md
 § Native-view hosting.
@@ -4836,13 +4839,14 @@ the first importing thread).
 **Applies to**: Android texture-bus producers (video player, any plugin pushing native frames).
 
 **Why accepted**: the hand-opened device is a deliberate deviation from wgpu's own device creation.
-On a Pixel 5 the importer's Vulkan device opens and video texture output plays correctly both with
-and without it, and the first delivered frame per session now logs its path at Info (frust-video-player: session N
-texture output via AHardwareBuffer … / via CPU copy …); the hardware-buffer leg is device leg
-pending.
+On a Pixel 5 and a OnePlus 9 the importer's Vulkan device opens and video texture output plays
+correctly both with and without it; the first delivered frame per session logs its path at Info,
+and on the OnePlus 9 (Android 15) that line reads `texture output via AHardwareBuffer (zero-copy
+importer installed)` with the knob on and `via CPU copy` with it off, the picture identical in
+both. The default stays off because the hand-opened device is still a deviation.
 
-**Trigger for removal**: the device leg passes and the knob default flips, plus a YUV import path
-if decoders are to be sampled directly.
+**Trigger for removal**: the knob default flips, plus a YUV import path if decoders are to be
+sampled directly.
 
 **Evidence**: `crates/frust-gpu/src/import/android.rs`, `context.rs`;
 `crates/frust-render/src/native_import/android.rs`.
