@@ -142,6 +142,34 @@ A remote `http://` URL additionally needs your own
 `NSAppTransportSecurity` exception — App Transport Security refuses plain
 `http` by default. `https` needs nothing.
 
+### 2c. Texture output (opt-in)
+
+The native view is the default (`VideoOutput::NativeView`). Set `PlayerOptions.output` to
+`VideoOutput::Texture` to get decoded frames as ordinary scene content instead:
+
+```rust
+let handle = /* your VideoPlayerHandle, opened with output: VideoOutput::Texture */;
+if let Some(view) = frust_video_player::video_texture_view(&handle, VideoFit::Cover) {
+    // `view` is a frust widget: clips to its box and corner radius, scrolls and
+    // transforms with its parent, and frust content over it draws over it.
+}
+```
+
+`PlayerSession::texture_sink()` exposes the raw `TextureSink` (also re-exported as
+`frust_video_player::TextureSink`); with the default `frust-api` feature,
+`VideoPlayerHandle::texture_sink()` / `texture_output()` give the sink and its registered
+`TextureRegistration`, and `video_texture_view` builds the widget.
+
+- **Android:** a GLES2 copy on the player's own GL thread writes each decoded frame (hardware
+  decoders emit YUV; the importer is RGBA8-only) into an RGBA_8888 `ImageReader`. When the
+  hardware-buffer importer is installed (`FRUST_ANDROID_HWBUFFER_IMPORT=1` or
+  `debug.frust.hwbuffer_import`, default off) and the device runs API 29 or later, frames travel
+  as zero-copy `AHardwareBuffer`s; otherwise as a CPU copy. Device outcome: pending.
+- **iOS and macOS:** pending the Apple producers. **Windows, Linux, web:** no producer.
+- **`VideoFit::Cover` crops inside the box** in texture mode — it does not spill the way the
+  native slot's Cover does on Android.
+- **Gestures:** the platform-view gesture lead does not apply; the frames are scene content.
+
 ---
 
 ## 3. Threading & events

@@ -140,17 +140,6 @@ app code stays on the builders.
   carries only slot id, kind and a primitive detail — never which child fired
   ([LIMITATIONS.md](LIMITATIONS.md)'s `native-widgets-component-same-kind-children-indistinguishable`).
   `DemoCard` proves the path on all three arms, plus a recording host arm on Linux/Windows/web.
-- **Mode B (Android/iOS)**: a slot is only visible if the frust surface above it actually resolves
-  translucent. The engine never refuses a translucent surface itself (see
-  [RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md)), but a platform compositor with no translucent
-  alpha mode surfaces as `frust::resolved_surface_mode() == ResolvedSurfaceMode::RefusedTranslucent`,
-  on which every builder renders a frust-drawn placeholder instead of an invisible, untappable slot.
-- **Mode A (macOS)**: the hosted view is opaque and above the surface, so there is no translucency
-  concern — and the consequences run the other way: frust content under a slot is covered, never
-  blended, so frust chrome cannot draw over a hosted control; the host ignores a slot's
-  `interactive` flag, because AppKit's responder chain delivers pointer, wheel and scroll input
-  inside a hosted control's bounds to that control directly
-  ([LIMITATIONS.md](LIMITATIONS.md)'s `desktop-platform-view-mode-a-only`).
 - **Native presentations** (`present/`): submit → validate the spec → claim the process-wide Busy
   slot and stamp a fresh, never-zero generation → on its main thread (the Apple arms hop there, the
   Android runtime is already confined to it), the platform host discovers its presenting host and
@@ -189,6 +178,38 @@ app code stays on the builders.
   diff-gated, but each platform half latches its first published pair until relaunch
   ([LIMITATIONS.md](LIMITATIONS.md)'s `native-typeface-first-publish-latch`); the two Apple halves
   share `coretext.rs`.
+
+## Composition
+
+The shell composites hosted views in one of two modes; the table in
+[SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md) § Native-view hosting is canonical for which
+platform runs which.
+
+- **Mode B** (translucent surface, views below it; Android/iOS on host opt-in): a slot is only
+  visible if the frust surface above it actually resolves translucent. The engine never refuses a
+  translucent surface itself (see [RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md)), but a platform
+  compositor with no translucent alpha mode surfaces as
+  `frust::resolved_surface_mode() == ResolvedSurfaceMode::RefusedTranslucent`, on which every
+  builder renders a frust-drawn placeholder (`placeholder` in `api/builders.rs`) instead of an
+  invisible, untappable slot.
+- **Mode A** (opaque surface, views above it; macOS always, Android by default): there is no
+  translucency concern, but frust content under a slot is covered, never blended. The macOS host
+  ignores a slot's `interactive` flag, because AppKit's responder chain delivers pointer, wheel and
+  scroll input inside a hosted control's bounds to that control directly
+  ([LIMITATIONS.md](LIMITATIONS.md)'s `desktop-platform-view-mode-a-only`).
+- **Overlays:** frust paint recorded *after* a slot's view (a popover, a badge over a native
+  slider) cannot show on a Mode A surface, so the differ cuts the frame's commands at each visible
+  slot and the host draws each cut onto a translucent surface stacked above that slot's view. The
+  differ computes them for every host; Android realises them behind `FRUST_OVERLAYS` (default off,
+  device leg pending) and Mode B hosts already show that content; macOS and iOS are pending. The
+  Android host's mechanics are in SHELLS_ARCHITECTURE.md; one limit is visible here: an on-top
+  overlay sits above every native view, so frust content interleaved *between* two slots covers the
+  later slot (`android-overlays-cover-later-slots`).
+- **Shields are input-only:** a slot's `shields` list marks where frust content painted over the
+  slot keeps winning pointer input; since overlays carry the visual half, shields no longer imply
+  anything about paint.
+- **The `sandwich` demo page** (deep link `native-widgets-demo://section/sandwich`) puts frust paint
+  under and over native views, with an "Interleaved" checkbox that shows the limit above.
 
 ## Key Types
 
