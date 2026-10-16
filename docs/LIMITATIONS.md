@@ -4711,8 +4711,8 @@ act_000001a10d6c24eeK3GHlKbH.
 
 ### `render-model-gaps` — render-model plan close-out: what shipped, what is NO-GO, what is pending
 
-**Observed**: the render-model plan is closed out for Linux and Android; the Apple half of Phase 4
-is pending. Every line below says where its limits live:
+**Observed**: the render-model work shipped on Linux, Android, iOS and macOS; the open items are
+named per line. Every line below says where its limits live:
 
 - Phase 1, layout audit (`FRUST_LAYOUT_AUDIT`) and per-pod constraint-equality relayout skipping:
   shipped-in-Phase-1. Residual: a parent on a dirty path still runs its own layout and there are no
@@ -4728,60 +4728,71 @@ is pending. Every line below says where its limits live:
   follow-up-see-`path-clip-mask-rerasterized`. `BlendMode` on `PushLayer` is still refused by the
   engine (`blend.wgsl` serves only `COMPOSE_DEST_OUT`): follow-up, awaiting a ruling.
 - Phase 3, partial repaint: NO-GO-see-`partial-repaint-outcome`.
-- Phase 3 device legs (Pixel 5, iPhone SE, kill-switch rows): device-leg-pending-see-
-  `android-overlays-opt-in-pending-device-leg` for the Android side; iOS is pending-Apple-see-the
-  Apple docs.
-- Phase 4, z-order differ, segmented rendering and the Android overlay host: shipped-in-Phase-4
-  behind `FRUST_OVERLAYS` (default off); device-leg-pending-see-
-  `android-overlays-opt-in-pending-device-leg`; follow-up-see-`android-overlays-cover-later-slots`
-  and follow-up-see-`overlay-unservable-content-stays-on-main`.
+- Phase 3 device legs (Pixel 5, iPhone SE, kill-switch rows): device leg pending.
+- Phase 4, z-order differ, segmented rendering and the overlay hosts: shipped behind
+  `FRUST_OVERLAYS` (default off). iOS passed on an iPhone SE and the iOS Simulator (0 uncaptured
+  wgpu errors in Mode A and Mode B). macOS passed too (both paint orders; a withdraw can stall the UI thread).
+  The Android overlay spike passed (GO), but the Android host failed on one issue: a new overlay
+  surface gets no frame while the app is idle
+  (`android-overlays-opt-in-pending-device-leg`). Limits: follow-up-see-
+  `android-overlays-cover-later-slots`, follow-up-see-`apple-overlay-limits` and
+  follow-up-see-`overlay-unservable-content-stays-on-main`.
 - Phase 4, texture bus (`frust::texture`, `texture_view`, `TextureSink`): shipped-in-Phase-4;
-  follow-up-see-`texture-bus-native-release-delay`. Phase 5 made `NativeHandle` move-only and
-  frames consumed by value.
-- Phase 4, Android hardware-buffer import: shipped-in-Phase-4 behind
-  `FRUST_ANDROID_HWBUFFER_IMPORT` (default off); device-leg-pending-see-
-  `android-hwbuffer-import-opt-in`.
+  follow-up-see-`texture-bus-native-release-delay` and follow-up-see-`texture-bus-no-wake-on-push`.
+  Phase 5 made `NativeHandle` move-only and frames consumed by value.
+- Phase 4, zero-copy import: Apple `MetalImporter` passed on macOS (M4, debug build: first import
+  79-184 us; steady 300 imports at 30 fps mean 24.6-50.5 us, p95 45-76 us; 0 cache misses after
+  warm-up); NV12 stays on the CPU path (`nv12-import-unsupported`). Android hardware-buffer import
+  is shipped behind `FRUST_ANDROID_HWBUFFER_IMPORT` (default off); its device leg is pending
+  (`android-hwbuffer-import-opt-in`).
 - Phase 4, plugin texture modes (video-player `VideoOutput::Texture`, camera `preview_texture`):
-  shipped-in-Phase-4 for Android; follow-up-see-`video-texture-android-gles-copy` and
-  follow-up-see-`camera-texture-cpu-copy-only`; device-leg-pending-see-
-  `android-hwbuffer-import-opt-in`.
-- Phase 4, Apple overlay hosts, Metal import and Apple producers: pending-Apple-see-the Apple
-  docs; the desktop and macOS platform-view limit stays until the macOS overlay host lands
-  (pending-Apple-see-`desktop-platform-view-mode-a-only`).
+  Android video passed (plays in-scene at the 90 Hz display rate with and without the importer) and
+  the Android camera runs on the CPU path (p50 13 ms; 94 of 120 frames over 16.7 ms), see
+  `video-texture-android-gles-copy` and `camera-texture-cpu-copy-only`. Apple: iPhone SE video
+  in-scene zero-copy and camera 20-24 fps zero-copy; macOS HLS 1920x1080 at about 58 fps zero-copy
+  (import avg 111 us). Allocation flatness and a 1080p native-rate figure on the phone were not
+  cleanly measured: device leg pending.
+- Phase 4, macOS platform-view limit: narrowed, frust paint above a native view is possible on macOS
+  behind the knob (`desktop-platform-view-mode-a-only`).
 
 **Applies to**: apps that place a platform view or video/camera texture between scene slots, and
 anyone reading the plan's outcome.
 
-**Why accepted**: each shipped line is bounded by the entries it names; the Apple half needs
-hardware and toolchains this phase did not have.
+**Why accepted**: each shipped line is bounded by the entries it names; the remaining legs are
+marked device leg pending.
 
-**Trigger for removal**: the entry is deleted when the Apple half of Phase 4 lands and the entries
-it names are retired or kept on their own.
+**Trigger for removal**: the entry is deleted when the pending device legs (macOS overlay visual
+check, Android hardware-buffer import, the Phase 3 rows) have run and the entries it names are
+retired or kept on their own.
 
 **Evidence**: research `rsa_000001a13475eca03WGtt6CU`; plan `fplan_000001a1347808dayUwoSOyz`;
 `docs/learning/17-render-model-vs-flutter.md`.
 
 ---
 
-### `android-overlays-opt-in-pending-device-leg` — Android overlays are off by default until the device leg runs
+### `android-overlays-opt-in-pending-device-leg` — Android overlays are off by default: an idle app gives a new overlay surface no frame
 
 **Observed**: the Android overlay host (frust paint above a native view on an opaque surface) runs
 only when `FRUST_OVERLAYS` is set (runtime env, compile-time `--define`, or the
 `FRUST_OVERLAY_SPIKE` alias; `media` selects the `setZOrderMediaOverlay` arm). With it unset the
 shell calls plain `ingest`, which never emits overlays, and the frame path is byte-identical to a
-build without them.
+build without them. On a Pixel 5 the overlay itself works (spike: overlay above the native view,
+premultiplied alpha correct, skew avg 0.53 ms / max 3.9 ms; rotation, Mode B and the
+covers-later-slots behaviour confirmed). One issue remains: a newly attached or recreated overlay
+surface (slot remount, background to foreground) gets no frame while the app is idle, so the
+over-paint stays under the native view until an unrelated repaint.
 
 **Applies to**: Android apps that composite frust content over a native view (native-widgets
-popovers and badges, video or camera controls over the picture).
+popovers and badges, video or camera controls over the picture) with the knob on.
 
-**Why accepted**: the Pixel 5 device legs (`device-leg-pixel5-overlay-spike`,
-`phase-4-android-overlays`) have not run, so the present pairing and the two z-order arms are
-unproven on hardware. Device outcome: pending. The overlay lock is held across the main-surface
-acquire, so an overlay's `surfaceDestroyed` on the UI thread can wait up to one acquire timeout;
-the opt-in knob is the mitigation.
+**Why accepted**: the default stays off because of the idle-frame issue; the Apple hosts request a
+frame when an overlay layer is attached or resized, and Android has no equivalent yet. The overlay
+lock is held across the main-surface acquire, so an overlay's `surfaceDestroyed` on the UI thread
+can wait up to one acquire timeout; the opt-in knob is the mitigation.
 
-**Trigger for removal**: the device leg passes and the default flips (or the knob is retired), and
-before any default flip the lock wait is bounded or replaced by an ack-barrier.
+**Trigger for removal**: an attached or recreated overlay surface requests a frame and the default
+flips (or the knob is retired); before any default flip the lock wait is bounded or replaced by an
+ack-barrier.
 
 **Evidence**: `crates/frust-shell-android/src/app/frame.rs`, `ffi_support.rs`; SHELLS_ARCHITECTURE.md
 § Native-view hosting.
@@ -4821,9 +4832,10 @@ the first importing thread).
 
 **Applies to**: Android texture-bus producers (video player, any plugin pushing native frames).
 
-**Why accepted**: the hand-opened device is a deliberate deviation from wgpu's own device creation
-and the Pixel 5 leg (`device-leg-pixel5-hwbuffer-import`, `phase-4-textures-android`) has not run.
-Device outcome: pending.
+**Why accepted**: the hand-opened device is a deliberate deviation from wgpu's own device creation.
+On a Pixel 5 the importer's Vulkan device opens and video texture output plays correctly both with
+and without it, but whether frames took the `AHardwareBuffer` path is not observable at Info log
+level, so the hardware-buffer leg: device leg pending.
 
 **Trigger for removal**: the device leg passes and the knob default flips, plus a YUV import path
 if decoders are to be sampled directly.
@@ -4856,11 +4868,14 @@ have; the copy keeps the importer simple.
 ### `camera-texture-cpu-copy-only` — camera preview textures are CPU-copied
 
 **Observed**: `preview_texture` on Android runs a second RGBA_8888 `ImageAnalysis` and copies each
-frame to the CPU; there is no zero-copy path. Holding analysis images while the bus retires them
-would stall the analysis, so the zero-copy hand-off is not used.
+frame to the CPU; there is no zero-copy path (Pixel 5: p50 13 ms, 94 of 120 frames over 16.7 ms).
+Holding analysis images while the bus retires them would stall the analysis, so the zero-copy
+hand-off is not used. The Apple producer is zero-copy (a second 32BGRA video data output, 20-24 fps
+on an iPhone SE); a device may refuse that second output while an image stream runs, which is
+logged and leaves the mailbox empty.
 
-**Applies to**: apps opting into the camera's texture preview; the native preview (default) is
-unaffected. Apple producers are pending.
+**Applies to**: Android apps opting into the camera's texture preview; the native preview (default)
+is unaffected.
 
 **Why accepted**: the CPU copy is the safe producer until the analysis pipeline can lend images
 without stalling.
@@ -7118,7 +7133,10 @@ over a video does not scroll the page.
 
 **Applies to**: every desktop host. macOS is the only one with an
 implementation at all; Windows and Linux have no platform-view host, so a
-slot there hosts nothing. Does not apply in texture mode, where frames are scene content frust draws and layers freely.
+slot there hosts nothing. On macOS, frust paint above a hosted view is possible
+behind `FRUST_OVERLAYS` (default off): an overlay `CAMetalLayer` view sits above
+its slot (both paint orders verified on macOS), while input stays with
+the native view. Does not apply in texture mode, where frames are scene content frust draws and layers freely.
 
 **Why accepted**: Mode A (composite an opaque native sibling above the
 surface) is the whole desktop v1 contract — no translucent window, no
@@ -7126,9 +7144,9 @@ punched hole, no input forwarding. Mode B on the desktop would need a
 translucent swapchain plus per-host z-order and hit-test plumbing, which is
 a future plan rather than a missing line: the shield-rect channel the differ
 already carries is passed empty here, and that is the single place input
-forwarding would attach. Until then the rule for callers is the one the
-plugin READMEs state — put controls **beside** the picture, never on top of
-it (`docs/CODE_STANDARDS.md`'s Platform-View Conventions).
+forwarding would attach. With the macOS overlay knob off the rule for callers
+is the one the plugin READMEs state — put controls **beside** the picture,
+never on top of it (`docs/CODE_STANDARDS.md`'s Platform-View Conventions).
 
 **Evidence**: the macOS host's own z-order strategy (`addSubview:positioned:
 relativeTo:` above winit's content view, nothing made translucent anywhere)
@@ -7765,8 +7783,9 @@ so that content draws under the native view, and the overlay records a transpare
 (`OverlayCutOutcome.serviceability` reports each cut). Navigator transitions wrap pages in a
 retained bracket, so any cut they cross stays on main for the transition. Servability is decided per frame from the cut's commands, so a retained widget above a native view moves between the overlay (clean frames composite its page: unservable, under the view) and the main surface the same way; content that alternates can therefore change z-order against the native view from frame to frame.
 
-**Applies to**: Android apps with `FRUST_OVERLAYS` on that paint such content above a native view;
-Apple hosts are pending.
+**Applies to**: apps with `FRUST_OVERLAYS` on (Android, iOS, macOS) that paint such content above a
+native view. On the iOS Simulator a navigation transient logs `content kept on main: retained
+content (a bracket crossing the cut)` once.
 
 **Why accepted**: the overlay path projects a command range without the retained-page store, the
 external-texture bindings or the backdrop copy; dropping the content would make it vanish, and
@@ -7777,3 +7796,62 @@ drawing it under the view keeps it visible.
 **Evidence**: `crates/frust-render/src/overlay.rs` (`cut_is_servable`, `UnservableReason`),
 `crates/frust-render/src/renderer.rs` (`encode_segmented`),
 `frust_engine::renderer::open_retained_bracket`; `crates/frust-render/tests/segmented.rs`.
+
+---
+
+### `apple-overlay-limits` — Apple overlays cost a full-window layer per cut and stack in creation order
+
+**Observed**: with `FRUST_OVERLAYS` on (iOS Mode A; macOS), each differ cut gets its own overlay
+layer the size of the whole window, so cost scales with the number of cuts (the native-widgets
+demo's Controls page with overlays on can reach 7; iPhone SE, 750x1334: per-overlay GPU cost
+1.3-2.1 ms). Mode A slot views stack in creation order (`z_index` is unused), and a
+transparent overlay stays above a hidden slot. Unservable content stays on the main surface
+(`overlay-unservable-content-stays-on-main`). iOS overlays need the render-thread split, and Mode B
+logs `overlays are Mode A only; a translucent surface ignores them`. With present-sync armed the
+main/overlay skew measured avg 296-360 us, max 457-521 us.
+
+**Applies to**: iOS and macOS apps with the knob on that cut a frame around native views many times.
+
+**Why accepted**: the knob is off by default and the common case is one or two cuts. The Apple hosts insert each overlay directly above its own slot's
+view, so interleaved content stays under a later native control, unlike
+`android-overlays-cover-later-slots`.
+
+**Trigger for removal**: overlay layers sized to their cut, and a `z_index`-aware slot stacking.
+
+**Evidence**: `crates/frust-shell-ios/platform/ios/FrustEmbedding/Sources/FrustEmbedding/FrustViewHost.swift`;
+`crates/frust-shell-macos/src/platform_view.rs`; SHELLS_ARCHITECTURE.md § Native-view hosting.
+
+---
+
+### `nv12-import-unsupported` — the Apple importer takes 32BGRA only
+
+**Observed**: `MetalImporter::import` accepts 32BGRA IOSurface-backed `CVPixelBuffer`s only. NV12
+(`420v`/`420f`) buffers answer `MetalImportError::Unsupported`, and a null, non-IOSurface or
+wrong-type buffer answers `Failed`. Producers keep NV12 on their CPU path.
+
+**Applies to**: texture-bus producers on iOS and macOS that would hand a decoder's native YUV buffer
+straight on. The video-player and camera producers request 32BGRA, so they are unaffected.
+
+**Why accepted**: sampling YUV needs a two-plane import plus a conversion pass the bus does not have.
+
+**Trigger for removal**: a YUV (multi-plane) import path, shared with the Android YUV need in
+`video-texture-android-gles-copy`.
+
+**Evidence**: `crates/frust-gpu/src/import/apple.rs`.
+
+---
+
+### `texture-bus-no-wake-on-push` — a new texture frame does not wake the frame gate
+
+**Observed**: the texture bus is pull-only: a producer pushing a frame never requests a frame, so a
+page that shows a `texture_view` needs a painted frame requester of its own. In the playground a
+ticker culled below the fold froze the camera preview until the ticker sat next to the picture.
+
+**Applies to**: apps showing a `texture_view` on any host that gates frames on dirty state.
+
+**Why accepted**: the structural fix (a push-driven wake from the sink) crosses the frame-gate seam
+in every shell and is future work.
+
+**Trigger for removal**: a producer push that wakes the frame gate without a requester.
+
+**Evidence**: `examples/playground` camera page; `crates/frust-render/src/texture_bus.rs`.

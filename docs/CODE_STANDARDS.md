@@ -13,8 +13,8 @@ off this index — read this plus the one that covers what you are touching:
 
 - **`unsafe` is confined to a small set of sanctioned platform-FFI boundaries.** Every other
   crate (`frust-core`, `frust-scene`, `frust-text`, `frust-widgets`, `frust-shell-common`,
-  `frust-shell-desktop`, `frust-shell-linux`, `frust-shell-web`, `frust`) stays `unsafe`-free —
-  where Masonry/xilem-style code would reach for `unsafe` downcasting, bound a trait on `Any`
+  `frust-shell-linux`, `frust-shell-web`, `frust`) stays `unsafe`-free, bar `frust-shell-desktop`'s
+  one macOS-only block (listed below) — where Masonry/xilem-style code would reach for `unsafe` downcasting, bound a trait on `Any`
   (e.g. `Widget: Any`) and downcast through `&mut dyn Any`; the web shell's frame waker is a
   capture-nothing closure over a `thread_local` `EventLoopProxy` slot (`WAKE_PROXY`). The
   sanctioned zones are raw-pointer boundaries a GPU/platform shell or loader cannot avoid, each
@@ -27,7 +27,12 @@ off this index — read this plus the one that covers what you are touching:
     exports, and the render-thread split's `unsafe impl Send` for `SendableWindowPtr`/
     `SendableMetalLayer` plus a bare `libc` priority/QoS self-boost. Android's zone also holds
     `prepare_overlays`'s one `OverlaySurface::new` call (an overlay `ANativeWindow` to a
-    `wgpu::Surface`, dropped before the window), which replaces the earlier spike path.
+    `wgpu::Surface`, dropped before the window); iOS's holds `take_frame_overlays`'s
+    `OverlaySurface::new` (an overlay `CAMetalLayer`) and the `ios_app!`-emitted
+    `frust_overlay_*` exports.
+  - `frust-shell-desktop`'s `render.rs` (macOS only) — `build_overlay_surface`, one
+    `OverlaySurface::new(.., OverlayTarget::CoreAnimationLayer(ptr), ..)` block; the layer crosses
+    threads as an exposed-provenance `usize`, so there is no `unsafe impl Send`.
   - `frust-shell-macos`'s `appkit_glue` module — four `SAFETY`-noted sites: the reopen-observer
     `define_class!` block, `msg_send![super(this), init]`, `addObserver_selector_name_object`
     (plus its notification `extern` static) and `removeObserver` in `Drop`.
@@ -41,32 +46,36 @@ off this index — read this plus the one that covers what you are touching:
   - `frust-clipboard`'s `apple` backend — `UIPasteboard`'s `string`/`setString:`/`setItems_options:`
     calls plus one `extern` static read (`UIPasteboardOptionLocalOnly`), each `# Safety`-noted; its
     other backends hold no `unsafe`.
-  - `frust-share`'s `apple` backend — three `SAFETY`-noted sites (`apple.rs`):
-    `MainThreadMarker::new_unchecked()` in the main-queue closure,
-    `UIActivityViewController::initWithActivityItems_applicationActivities`, and the subject
-    `setValue_forKey` guarded by `respondsToSelector(setSubject:)`; its `android`/`desktop`
-    backends hold no `unsafe`.
+  - `frust-share`'s `apple` backend — three `SAFETY`-noted sites: `MainThreadMarker::new_unchecked()`
+    in the main-queue closure, `UIActivityViewController::initWithActivityItems_applicationActivities`,
+    and the subject `setValue_forKey` guarded by `respondsToSelector(setSubject:)`.
   - `frust-url-launcher`'s `apple` backend — `MainThreadMarker::new_unchecked()` in the main-queue
     hop and the one `openURL:options:completionHandler:` call objc2-ui-kit marks unsafe; its
     `desktop` backend — the Windows `ShellExecuteW` call (`SAFETY`-noted).
   - `frust-haptics`'s `apple` backend — one `MainThreadMarker::new_unchecked()` in a main-queue
-    callback (the `UI*FeedbackGenerator` calls are safe); its other backends hold no `unsafe`.
+    callback; its other backends hold no `unsafe`.
   - `frust-gpu`'s Android `import` zone — the hand-opened Vulkan device (`open_with_callback` +
     `create_device_from_hal`, `context.rs`), `import_hardware_buffer` (`create_texture_from_hal`,
     raw `ash`) and the `dlsym`-resolved `AHardwareBuffer_*` entries, each `# Safety`-noted, behind
-    the default-off `FRUST_ANDROID_HWBUFFER_IMPORT` knob, plus a debug thread check; Apple pending.
+    the default-off `FRUST_ANDROID_HWBUFFER_IMPORT` knob, plus a debug thread check.
     `frust-render`'s `native_import::android` makes the one call into it (`NativeHandle::new` contract).
+  - `frust-gpu`'s Apple `import::apple` zone — `Device::as_hal::<Metal>`, the `CVMetalTextureCache`
+    create and `create_texture_from_image`, `CFRetained::from_raw`/`retain`,
+    `wgpu::hal::metal::Device::texture_from_raw` and `Device::create_texture_from_hal`, plus
+    `unsafe impl Send for MetalImporter` and `unsafe impl Send + Sync for HeldFrame`.
+    `frust-render`'s `native_import::apple` makes one forwarding call (`NativeHandle::new` contract).
   - `frust-plugin`'s `NativeHandle::new` and `TextureFrame::into_parts`, `frust-render`'s
     `SourceFrame::into_parts` (`unsafe fn`s; the bus's own call site is the SAFETY-noted block in
     `SourcePass::record`). The camera and video-player bridges each
-    hold two `SAFETY`-noted sites: the split and the renderer-twin `NativeHandle::new`.
+    hold two `SAFETY`-noted sites: the split and the renderer-twin `NativeHandle::new`. Their
+    Apple producers build `NativeHandle::new(CvPixelBuffer, ptr)` owning a +1 reference released in
+    a single-call release callback.
     `frust-video-player`'s Android backend: its constructor call, the `AHardwareBuffer_*` NDK calls and a direct-buffer plane read.
   - `frust-gpu`'s `RenderContext::create_pipeline_cache` — one call building a `wgpu::PipelineCache`
-    from a shell-persisted, adapter-fingerprint-validated blob (see RENDER_ARCHITECTURE.md).
+    from a shell-persisted, fingerprint-validated blob.
   - `frust-drive`'s `process` module — a `kill(2)` shim (std has no `killpg`) group-killing a child.
-  - `frust-devtools`'s `token::os_random_bytes` (Windows only) — one `BCryptGenRandom` call (null
-    handle + `BCRYPT_USE_SYSTEM_PREFERRED_RNG`, local buffer); a non-zero status yields
-    `TokenSource::Fallback`, which the hot-patch gate refuses.
+  - `frust-devtools`'s `token::os_random_bytes` (Windows only) — one `BCryptGenRandom` call; a
+    non-zero status yields `TokenSource::Fallback`, which the hot-patch gate refuses.
   - `frust-camera`'s `apple` backend — AVFoundation message sends behind one `QueueBound<T>`
     `unsafe impl Send/Sync` (serial-queue confinement, one `# Safety` note), and
     `frust_camera_session_handle`'s raw-pointer C export (retain contract **+1**); its Android
@@ -93,10 +102,9 @@ off this index — read this plus the one that covers what you are touching:
     library built for this process), `apply_patch` (a table for this exact executable, anchored on
     `__frust_hotpatch_anchor`; the builder's L3 gate checks cross-image layouts) and
     `get_jump_table` (the leaked, Release-published table, used within one call); `hot_fn.rs`:
-    casting a table address to the hot function's signature; `anchor.rs`: image lookup
-    (`dl_iterate_phdr`, dyld, `GetModuleHandleExW`); `android.rs`: memfd + `android_dlopen_ext`.
-    `frust-shell-common` calls the safe `apply_from_devtools`; `frust::app!` emits only the
-    anchor's `#[unsafe(no_mangle)]`.
+    casting a table address to the hot function's signature; `anchor.rs`: image lookup;
+    `android.rs`: memfd + `android_dlopen_ext`. `frust-shell-common` calls the safe
+    `apply_from_devtools`; `frust::app!` emits only the anchor's `#[unsafe(no_mangle)]`.
 - **No unwind across FFI.** Every platform export routes through `frust-shell-common`'s
   `guard` helper (`catch_unwind` + log, returning a benign default) rather than unwinding
   into JVM-/Swift-owned stack frames — a panic crossing the FFI boundary is undefined
@@ -107,9 +115,8 @@ off this index — read this plus the one that covers what you are touching:
   native-callback boundaries can't route through `guard`; each applies the same contract
   locally instead — `appkit_glue`'s AppKit notification callback hand-rolls its own
   `catch_unwind` around the observer body. The one exception is muda's menu-event handler
-  (shared by both crates' `menu` modules): it is a native-dispatch boundary held panic-free
-  by construction rather than by `catch_unwind` — the callback body is an infallible
-  mutex-guarded queue push plus a redraw request, nothing that can panic.
+  (both crates' `menu` modules), panic-free by construction: an infallible mutex-guarded queue
+  push plus a redraw request.
   Texture release callbacks (`TextureFrame`/`SourceFrame`, run from `Drop`) must not panic: the
   `catch_unwind` in `run_release` is a last line of defence in unwinding builds only.
 - **State-sync, not op-forwarding, across a mobile IME bridge.** Android/iOS platform text
@@ -171,8 +178,7 @@ means matching a spec or adjusting a guess.
 
 - **`anyhow::Result` in binaries and integration-facing library code** (`frust-cli`
   commands, `frust-render`'s public API, `frust-shell-desktop`/`frust`'s `run`), with
-  `.context()` / `.with_context()` at each fallible step so the error chain names what was
-  being attempted (e.g. `"failed to spawn `{cmd}`"`, `"reading `{path}`"`).
+  `.context()` / `.with_context()` at each fallible step so the chain names what was attempted.
 - **`thiserror`-derived enums for errors callers match on**, i.e. where the error is part of
   a library's API contract rather than a leaf failure report:
 
@@ -199,13 +205,11 @@ means matching a spec or adjusting a guess.
 
 JNI export names are LAW: the package/class (`dev.frust.FrustSurfaceView`) is fixed across
 every generated app, so the mangled symbol stays stable regardless of the app's own package.
-A `platform_view` factory's `viewType` naming is LAW too, widened from
-`dev.frust.<Name>Factory`: **any fully-qualified class under `dev.frust.*`** via the app
-classloader (Android; `dev.frust.camera.CameraPreviewFactory` is the precedent) or the bare
-`@objc(<Name>)` name via `NSClassFromString` (iOS). Both hosts check in the same order —
-**prefix (Android) then interface/protocol assignability, before instantiation** — never the
-reverse; constructing an untrusted class before the check passes runs its side effects
-unchecked.
+A `platform_view` factory's `viewType` naming is LAW too: **any fully-qualified class under
+`dev.frust.*`** via the app classloader (Android) or the bare `@objc(<Name>)` name via
+`NSClassFromString` (iOS). Both hosts check **prefix (Android) then interface/protocol
+assignability, before instantiation** — constructing an untrusted class first runs its side
+effects unchecked.
 
 ## Plugin Conventions
 
@@ -218,9 +222,9 @@ Both plugin tiers under `plugins/` carry additional conventions of their own —
   embedding module's overridable `translucentSurface` seam (Android: `FrustSurfaceView`'s constructor
   parameter, fed by `FrustActivity`'s `open val`; iOS: `FrustViewController`'s `open var` — per-platform
   mechanisms, not a symmetric API) must drive the window pixel format, the host's native-sibling z-order
-  and the `declare_host_translucent_surface` call *together*, in the same branch — splitting them is the
-  exact defect that once shipped black rectangles. App Rust has no matching call; only the two mobile
-  shells' own FFI glue may declare it (see `docs/ARCHITECTURE.md`'s Platform-view flow).
+  and the `declare_host_translucent_surface` call *together*, in the same branch — splitting them ships
+  black rectangles. App Rust has no matching call; only the two mobile shells' own FFI glue may declare
+  it (see `docs/ARCHITECTURE.md`'s Platform-view flow).
 - **A desktop host is Mode A: `DesktopExtensions`' platform-view hooks, never an FFI poller.** It
   resolves a slot's `view_type` through `frust_plugin::desktop` rather than naming a plugin crate, leaves
   rects and clips in **logical points** (no physical conversion, unlike the mobile FFI boundary), and
@@ -287,9 +291,8 @@ Every external tool invocation (`rustc`, `adb`, `xcrun`, `cargo ndk`, …) goes 
 the GPU backend be swapped later without touching widget or text code.
 
 **The one named exception:** `frust-render::DetachedSurface` is a deliberate **opaque**
-escape valve, not a leak — its only accessor, `into_surface`, is crate-private, so the
-wrapped `wgpu::Surface` is never nameable outside `frust-render`; follow the same pattern
-for any future value crossing this boundary.
+escape valve — its only accessor, `into_surface`, is crate-private, so the wrapped
+`wgpu::Surface` is never nameable outside `frust-render`; follow it for any future crossing.
 
 ### Reaching into a design-system plugin's internals from a design-system crate
 
@@ -309,10 +312,9 @@ gate (see [DEVELOPMENT.md](DEVELOPMENT.md)) proves out-of-tree resolution realis
 reaches the caller's stdout unconditionally, garbling a TUI session's raw-mode terminal with
 raw pipeline output.
 
-**GOOD:** thread an `on_line: &mut dyn FnMut(&str)` sink through the core instead — the CLI
-passes `&mut |line| println!("{line}")`, the TUI routes it into a session's log tab.
-`frust-drive/tests/print_free_cores.rs` (a source-scan conformance test) enforces this
-against every drive core outside a small CLI-entry allowlist.
+**GOOD:** thread an `on_line: &mut dyn FnMut(&str)` sink through the core — the CLI prints it,
+the TUI routes it into a session's log tab. `frust-drive/tests/print_free_cores.rs` (a
+source-scan test) enforces this outside a small CLI-entry allowlist.
 
 ## Interaction Semantics
 
@@ -535,16 +537,15 @@ Conventions for `Widget::semantics` (see `docs/CORE_ARCHITECTURE.md`'s `semantic
   `build` return depends on.
 - **An app authors a custom `View`/`Widget` pair through `frust::authoring`, never a direct
   `frust-core`/`frust-scene`/`frust-text`/`accesskit`/`kurbo`/`peniko` dependency.**
-  `frust::authoring` (plus its `text`/`scene` submodules) re-exports the full trait
-  lifecycle, child/event/callback plumbing, semantics, and geometry/paint types a custom
-  widget needs, so an `examples/*`/app crate's `Cargo.toml` depends on `frust` plus plugin
-  crates only. For the long tail, reach through the whole-crate valves `frust::kurbo`,
-  `frust::peniko`, `frust::accesskit` rather than re-declaring the dependency — each of
-  those crates is version-pinned in exactly one place (`docs/DEVELOPMENT.md` §
-  Version-Pin Policy). Mechanically enforced across `benchmarks/frust_bench` and the five
-  in-repo example apps — `huddle`, `shadertoy`, `glyph-catalog`, `playground`, and
-  `examples/native-widgets-demo` — by `crates/frust/tests/authoring_seam_conformance.rs`;
-  the plugin tier is exempt ([PLUGINS_CODE_STANDARDS.md](PLUGINS_CODE_STANDARDS.md)).
+  `frust::authoring` (plus its `text`/`scene` submodules) re-exports the trait lifecycle,
+  child/event/callback plumbing, semantics, and geometry/paint types a custom widget needs, so
+  an app crate's `Cargo.toml` depends on `frust` plus plugin crates only. For the long tail use
+  the whole-crate valves `frust::kurbo`, `frust::peniko`, `frust::accesskit` — each is
+  version-pinned in one place (`docs/DEVELOPMENT.md` § Version-Pin Policy). Enforced across
+  `benchmarks/frust_bench` and the five in-repo example apps (`huddle`, `shadertoy`,
+  `glyph-catalog`, `playground`, `native-widgets-demo`) by
+  `crates/frust/tests/authoring_seam_conformance.rs`; the plugin tier is exempt
+  ([PLUGINS_CODE_STANDARDS.md](PLUGINS_CODE_STANDARDS.md)).
 
 ## Theming & Animation Conventions
 
@@ -553,8 +554,8 @@ design-system installation are the WIDGETS unit's rules — [WIDGETS_CODE_STANDA
 
 ## Testing Patterns
 
-- **Fixture-driven tests for parsers/validators**: register canned
-  `ProcessRunner`/`EnvLookup` responses keyed by the exact invocation, then assert the result.
+- **Fixture-driven tests for parsers/validators**: canned `ProcessRunner`/`EnvLookup` responses
+  keyed by the exact invocation.
 - **Injectable hook seams for process-global side effects**: a function installing a real
   handler (`ctrlc::set_handler`, a filesystem watcher) takes a `Hooks` struct defaulted to the
   real installers, with a `#[cfg(test)]` `::fake()` no-op pair a test injects instead.
@@ -574,8 +575,7 @@ design-system installation are the WIDGETS unit's rules — [WIDGETS_CODE_STANDA
   development process that produced it.** Banned: plan/phase references (`Phase 9.B step 1`,
   `(phase 5.5)`), plan-task references (`task-12`), findings-ledger numbers (`FINDINGS #43`),
   review/fix-round references (`re-review round 1`, `cfix-2`), plan requirement numbers
-  (`req 4`), and internal PR numbers. Git history and the private workflow ledger own that
-  context; a ledger number dangles for readers without that repo.
+  (`req 4`), and internal PR numbers; a ledger number dangles for readers without that repo.
 - **Sanctioned citations** stay fine: `docs/LIMITATIONS.md` stable ids (e.g.
   `` `engine-metal-postmultiplied-truth-bug` ``), named semantic rules (`R23`, `R44-back`),
   doc-section pointers, and commit SHAs/version pins of *external* repos. Keep a ledger entry's
@@ -587,9 +587,8 @@ design-system installation are the WIDGETS unit's rules — [WIDGETS_CODE_STANDA
 - **These conventions apply to TOML manifests too** (`Cargo.toml`, scaffold `*.tmpl`,
   `frust.toml`, `.cargo/config.toml`). A manifest comment states only what the TOML cannot
   show — an exact/LAW pin and its lockstep site, a must-not-re-add feature, a non-obvious
-  cfg/exclusion reason — in at most 3 lines, pointing to the owning doc (e.g.
-  `docs/DEVELOPMENT.md` § Version-Pin Policy). Pin and constraint comments are the last to cut;
-  commented-out scaffold option keys are documentation.
+  cfg/exclusion reason — in at most 3 lines, pointing to the owning doc. Pin and constraint
+  comments are the last to cut; commented-out scaffold option keys are documentation.
 - **Mechanically checked.** `crates/frust/tests/comment_residue_conformance.rs` scans source and
   manifest `#` comments for the banned plan/phase, plan-task, findings-ledger, review-round,
   plan-document, `req N` and `review finding <id>` refs; sanctioned citations exempt only
