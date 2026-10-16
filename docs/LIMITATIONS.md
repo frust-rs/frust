@@ -25,7 +25,7 @@ effect.
 
 **Applies to**: Android, a platform view hosted inside a scrolling container
 (e.g. the camera preview inside playground's `ScrollView`); measured on
-cupid.
+cupid. Does not apply in texture mode: the camera's texture preview is scene content, not a hosted view.
 
 **Why not fixed**: the shape-aware sync tail's regime detector keys off an
 acquire-wait EWMA that cannot rise until the GPU queue actually builds under
@@ -4724,7 +4724,12 @@ act_000001a10d6c24eeK3GHlKbH.
   (`partial-repaint-outcome`). Still open: `BlendMode` on `PushLayer` — the engine's `layer_role`
   refuses a non-default blend and `blend.wgsl` serves only `COMPOSE_DEST_OUT`; card p3-06b awaits a
   ruling. Phase 3's device legs (Pixel 5, iPhone SE, S1/S6 kill-switch rows) are owed;
-- no per-slot platform-view interleaving, no in-scene video/camera textures — Phase 4.
+- per-slot platform-view interleaving and in-scene video/camera textures — Phase 4: shipped on
+  Android behind default-off knobs (overlays `FRUST_OVERLAYS`, hardware-buffer import
+  `FRUST_ANDROID_HWBUFFER_IMPORT`; the texture bus itself is always available), with the Pixel 5
+  device legs pending (`android-overlays-opt-in-pending-device-leg`,
+  `android-hwbuffer-import-opt-in`); the Apple half (overlay hosts, Metal import, Apple producers)
+  is pending.
 
 **Applies to**: apps whose layout or paint cost scales with the whole tree, or that need layered
 blending, or a platform view or video texture interleaved between scene slots.
@@ -4736,6 +4741,128 @@ phase lands.
 last line is retired.
 
 **Evidence**: research `rsa_000001a13475eca03WGtt6CU`; plan `fplan_000001a1347808dayUwoSOyz`.
+
+---
+
+### `android-overlays-opt-in-pending-device-leg` — Android overlays are off by default until the device leg runs
+
+**Observed**: the Android overlay host (frust paint above a native view on an opaque surface) runs
+only when `FRUST_OVERLAYS` is set (runtime env, compile-time `--define`, or the
+`FRUST_OVERLAY_SPIKE` alias; `media` selects the `setZOrderMediaOverlay` arm). With it unset the
+shell calls plain `ingest`, which never emits overlays, and the frame path is byte-identical to a
+build without them.
+
+**Applies to**: Android apps that composite frust content over a native view (native-widgets
+popovers and badges, video or camera controls over the picture).
+
+**Why accepted**: the Pixel 5 device legs (`device-leg-pixel5-overlay-spike`,
+`phase-4-android-overlays`) have not run, so the present pairing and the two z-order arms are
+unproven on hardware. Device outcome: pending.
+
+**Trigger for removal**: the device leg passes and the default flips (or the knob is retired).
+
+**Evidence**: `crates/frust-shell-android/src/app/frame.rs`, `ffi_support.rs`; SHELLS_ARCHITECTURE.md
+§ Native-view hosting.
+
+---
+
+### `android-overlays-cover-later-slots` — an on-top overlay covers every native view, including later slots
+
+**Observed**: an Android overlay `SurfaceView` stacks above every native view, so frust content
+interleaved *between* two slots (A, frust card, B) is drawn over B as well. The native-widgets demo's
+`sandwich` page shows it with its "Interleaved" checkbox.
+
+**Applies to**: Android apps with frust content painted between two hosted native views while
+`FRUST_OVERLAYS` is on. One cut around a single view is unaffected.
+
+**Why accepted**: `setZOrderOnTop` places a `SurfaceView` above the whole view hierarchy, not just
+above one sibling, and the `media` arm is a different trade-off rather than a fix. The common case
+(everything under the views, then both views, then everything over them) is one cut and unaffected.
+
+**Trigger for removal**: a z-order scheme that places each overlay between its two slots, or a
+compositing path that does not need a surface per cut.
+
+**Evidence**: `examples/native-widgets-demo/src/pages/sandwich.rs`; `FrustViewHost.kt`.
+
+---
+
+### `android-hwbuffer-import-opt-in` — Android zero-copy import is off by default and RGBA8-only
+
+**Observed**: importing an `AHardwareBuffer` as a `wgpu::Texture` needs a hand-opened Vulkan device,
+created only when `FRUST_ANDROID_HWBUFFER_IMPORT=1` or sysprop `debug.frust.hwbuffer_import` is set
+(`TierCaps::hwbuffer_import`). It imports RGBA8 buffers only and needs API 29 or later; with the
+knob off, no importer is installed and a native frame is refused, so producers fall back to a CPU
+copy.
+
+**Applies to**: Android texture-bus producers (video player, any plugin pushing native frames).
+
+**Why accepted**: the hand-opened device is a deliberate deviation from wgpu's own device creation
+and the Pixel 5 leg (`device-leg-pixel5-hwbuffer-import`, `phase-4-textures-android`) has not run.
+Device outcome: pending.
+
+**Trigger for removal**: the device leg passes and the knob default flips, plus a YUV import path
+if decoders are to be sampled directly.
+
+**Evidence**: `crates/frust-gpu/src/import/android.rs`, `context.rs`;
+`crates/frust-render/src/native_import/android.rs`.
+
+---
+
+### `video-texture-android-gles-copy` — Android video texture mode copies through GLES
+
+**Observed**: hardware decoders emit YUV and the importer is RGBA8-only, so a `VideoOutput::Texture`
+session renders into a `SurfaceTexture` and a GLES2 copy on its own GL thread writes each frame into
+an RGBA_8888 `ImageReader` (about 1.05 ms per 1080p frame measured on the host; device unmeasured).
+The frame then travels as a zero-copy `AHardwareBuffer` when the importer is installed and API is 29
+or later, else as a CPU copy.
+
+**Applies to**: Android apps opting into `VideoOutput::Texture`; the native-view output (the
+default) is unaffected.
+
+**Why accepted**: sampling the decoder's YUV buffer directly needs a YUV import path the bus does not
+have; the copy keeps the importer simple.
+
+**Trigger for removal**: a YUV (external-format) import path.
+
+**Evidence**: `plugins/video-player/src/android.rs`; `plugins/video-player/README.md`.
+
+---
+
+### `camera-texture-cpu-copy-only` — camera preview textures are CPU-copied
+
+**Observed**: `preview_texture` on Android runs a second RGBA_8888 `ImageAnalysis` and copies each
+frame to the CPU; there is no zero-copy path. Holding analysis images while the bus retires them
+would stall the analysis, so the zero-copy hand-off is not used.
+
+**Applies to**: apps opting into the camera's texture preview; the native preview (default) is
+unaffected. Apple producers are pending.
+
+**Why accepted**: the CPU copy is the safe producer until the analysis pipeline can lend images
+without stalling.
+
+**Trigger for removal**: a camera producer that lends hardware buffers without stalling analysis.
+
+**Evidence**: `plugins/camera/src/android.rs`, `texture.rs`.
+
+---
+
+### `texture-bus-native-release-delay` — a native frame's release can lag by a submit, and a full backlog drops the newest frame
+
+**Observed**: a native frame's release runs only after its texture is retired and a
+`Queue::on_submitted_work_done` fence fired; a registration dropped while a frame is shown chains a
+second fence, delaying the producer's buffer reuse by up to one extra submit. At most
+`MAX_RETIRING` (4) retired textures wait per registration; a native frame arriving beyond that is
+refused and released at once, so the last good frame stays shown.
+
+**Applies to**: producers with a buffer ring shallower than the retire backlog plus one shown frame.
+
+**Why accepted**: releasing earlier would let a producer overwrite a buffer the GPU is still
+sampling.
+
+**Trigger for removal**: a different ownership scheme (producer-side fences) that makes retirement
+explicit.
+
+**Evidence**: `crates/frust-render/src/texture_bus.rs` module docs.
 
 ---
 
@@ -6422,7 +6549,7 @@ one of them compiles into any one linked test binary.
 
 **Observed**: `WindowInsets::corner_insets` is non-zero only on iPadOS 26+ under the system window control. Android, desktop, web, and iOS < 26 always report zero (by construction: no other shell reads a corner region), so the Glyph and Material app bar shifts never fire there. Bars do not consume the horizontal safe-area insets; corner widths are measured from the safe-area edge, so a hypothetical control on a notched horizontal edge would under-shift (no platform draws one there). Additionally, a bar hosted in a detail pane, sheet, dialog, or below other content cannot detect its window-space origin and still receives the window-wide corner values, causing over-shift; `corner_shift(false)` is exposed as the author's opt-out. Several bars do not honour corner insets at all: the `frust_cupertino::navbar`, `frust_material::selection_app_bar`'s contextual face, and shadcn/beUI header components.
 
-**Applies to**: Android, desktop, web, and iOS < 26; the `frust_glyph::app_bar` and `frust_material::{app_bar, search_app_bar, sliver_app_bar}` widget implementations; also `frust_cupertino::navbar`, `frust_material::selection_app_bar`, and shadcn/beUI headers.
+**Applies to**: Android, desktop, web, and iOS < 26; the `frust_glyph::app_bar` and `frust_material::{app_bar, search_app_bar, sliver_app_bar}` widget implementations; also `frust_cupertino::navbar`, `frust_material::selection_app_bar`, and shadcn/beUI headers. The texture bus's `texture_view` frames (`frust_render::texture_bus`, a video or camera frame drawn in-scene) take this same path, so they are always blended.
 
 **Why not fixed**: nothing to report elsewhere. The notched-edge case has no producer. Android's edge-to-edge model has no corner control. Automatic placement detection to disable shifting would require a scoped context cleared by split views and sheets — a design change deferred to a follow-up plan.
 
@@ -6902,7 +7029,7 @@ scope, the shape `iap-desktop-unavailable-v1` records. The browser is a
 different gap entirely — the whole platform-view mechanism is absent there
 (`web-no-plugins-native-widgets-platform-views-v1`), so a web backend would
 need a `<video>` element composited against the canvas, not just a session
-backend.
+backend. Texture mode has no desktop or web producer either.
 
 **Why accepted**: mobile-first v1 scope plus one real desktop host (macOS)
 to prove the desktop platform-view path. The unsupported arm is a
@@ -6953,7 +7080,7 @@ over a video does not scroll the page.
 
 **Applies to**: every desktop host. macOS is the only one with an
 implementation at all; Windows and Linux have no platform-view host, so a
-slot there hosts nothing.
+slot there hosts nothing. Does not apply in texture mode, where frames are scene content frust draws and layers freely.
 
 **Why accepted**: Mode A (composite an opaque native sibling above the
 surface) is the whole desktop v1 contract — no translucent window, no
@@ -6986,7 +7113,7 @@ and invisible while it is static.
 
 **Applies to**: macOS (the only desktop host with a platform-view
 implementation). Both mobile shells are unaffected: they gate their release
-on a presented frame id through `FramePairing`.
+on a presented frame id through `FramePairing`. Does not apply in texture mode: texture frames are scene content and have no platform-view lead.
 
 **Why accepted**: the lead is bounded at ≤1 frame by construction — the
 batch always describes the very scene being submitted, never an older one —

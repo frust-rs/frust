@@ -183,6 +183,24 @@ have drawn — `ResolvedSurfaceMode::RefusedTranslucent` from `resolved_surface_
 labelled frust-drawn `placeholder` rather than an invisible, untappable slot; the refusal is
 logged **once**, crate-wide.
 
+#### Overlays: frust paint above a Mode A view
+
+Mode A has one gap: the native view sits above the whole surface, so frust content painted *after*
+the slot in the same frame (a popover, a badge over a native slider) is hidden behind it. The
+differ closes it. Every command recorded at or past a slot's `command_index` paints over that
+slot, so `PlatformViewState::ingest_scene` cuts the frame's command list at the visible slots; a
+cut holding at least one drawing command (`Command::is_drawing`) becomes an overlay, announced with
+`ViewCommand::Overlay` (its slot, rect and command range) and disposed with `DisposeOverlay`. The
+renderer then compiles the frame once, draws the main segment (everything outside the cuts) to the
+base surface and each cut onto its own translucent surface (`SurfaceRenderer::encode_segmented`),
+with one submit per frame.
+
+Android realises these today: the Kotlin host stacks a translucent, input-transparent `SurfaceView`
+above each slot's view, behind the default-off `FRUST_OVERLAYS` knob, and only on an opaque
+surface (a Mode B host already shows that content). The limit to know: an on-top overlay covers
+*every* native view, so frust content between two slots covers the later one. The device outcome is
+pending, and the Apple hosts are pending.
+
 ### 6. Events-as-signals
 
 The platform listener (Android's one `FrustNativeListener`, iOS's target-action)
@@ -234,6 +252,18 @@ capability gap is recorded per-platform, never "corrected" onto the platform
 that doesn't have it.* Mirroring one platform's constraint onto the other
 already caused a real device defect — a recreated `UISwitch` pinned to a stale
 brightness among its peers.
+
+### Textures instead of views
+
+A native *view* is the wrong tool when the app wants the picture inside the scene (rounded
+corners, an overlay of frust chrome, no gesture lead). A plugin can instead push frames onto the
+texture bus: it owns a `TextureSink` (`frust-plugin`'s leaf mailbox), a facade-side bridge
+registers a source with `frust::texture::register_texture_source`, and the widget `texture_view`
+draws the registered id as ordinary scene content. A CPU frame is uploaded; a native frame (an
+`AHardwareBuffer` on Android, imported behind `FRUST_ANDROID_HWBUFFER_IMPORT`) is wrapped without
+a copy and its release waits until the GPU is done with it. The video player's
+`VideoOutput::Texture` and the camera's `preview_texture` are the two producers; Apple producers
+are pending.
 
 ## How the other two frameworks solve this
 
@@ -354,6 +384,13 @@ you drew over a control vanishes behind it. While you're there, read
 `gate_harness_block`'s live `live_slot_count()`: six at rest, **seven** with
 the composite `NativeComponent` toggled on — one slot for a whole native card,
 however many native children it owns.
+
+**Overlays on Android:** with the demo in Mode A, build with `frust run --define FRUST_OVERLAYS=1`
+and open the `sandwich` page (`native-widgets-demo://section/sandwich`): the popover and badge now
+show over the native views, and the "Interleaved" checkbox shows the cover-later-slots limit. A
+debuggable build can force the mode per launch with the intent extra
+`--ez dev.frust.translucentSurface false` (force-stop between modes; SHELLS_DEVELOPMENT.md has the
+`adb` line). Device outcome: pending.
 
 **Desktop note:** platform views are mobile-only. On the desktop preview
 (`cargo run` in the same directory) there is no host and no factory: the slot
