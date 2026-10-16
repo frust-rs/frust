@@ -118,6 +118,7 @@ First time through: UI track, then Engine, then Platform.
 | [14](14-engine-paints-images-filters.md) | Paints, images & filters | Trace a gradient, image or filter from its indexed-paint record through cache/atlas residency to the GPU |
 | [15](15-engine-text.md) | Text inside the engine | Follow a `GlyphRun` through glifo's atlas-vs-outline routing policy and the engine's own strip generator |
 | [16](16-gpu-substrate.md) | The GPU substrate | Probe `TierCaps`, the surface lifecycle, and the shader/pipeline/texture pools that sit under `frust-engine`, GPU-free where possible |
+| [17](17-render-model-vs-flutter.md) | The render model vs Flutter's | Map layers, repaint boundaries, relayout skipping, slivers, platform views and textures onto Flutter's counterparts; read the still-missing list; run three labs (retained layers on/off, the layout audit, a sliver) |
 
 ## Mapping to the external roadmap (when you want the theory)
 

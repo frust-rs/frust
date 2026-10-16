@@ -117,12 +117,13 @@ Pre-1.0. APIs are unstable and may change without notice between commits.
 > Frust can currently be considered in an alpha state. In particular, we're
 > still working on the following:
 >
-> - **No partial repaint / damage regions** — every rendered frame
->   re-rasterizes the full surface (tracked as `render-model-gaps` in
->   `docs/LIMITATIONS.md`), a whole-stack gap shared with the wider
->   ecosystem today ([wgpu#2869](https://github.com/gfx-rs/wgpu/issues/2869),
->   [xilem#789](https://github.com/linebender/xilem/issues/789)). The mobile
->   frame gate, cosmetic-loop pacing, and viewport culling bound *how many*
+> - **No partial repaint / damage regions** — built, measured, lost, and removed
+>   (`partial-repaint-outcome` in `docs/LIMITATIONS.md`): every rendered
+>   frame re-rasterizes the full surface. The rest of the render model (retained layers,
+>   repaint boundaries, slivers, platform-view overlays, texture widgets) and what is still
+>   missing against Flutter's are mapped in
+>   [docs/learning/17-render-model-vs-flutter.md](docs/learning/17-render-model-vs-flutter.md).
+>   The mobile frame gate, cosmetic-loop pacing, and viewport culling bound *how many*
 >   frames render (a static screen renders none; a decorative loop is capped
 >   at the theme's cosmetic rate), not what each one costs.
 > - **Back handling is single-window** — the Android back press is routed
