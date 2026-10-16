@@ -2,7 +2,7 @@
 //!
 //! `src/adpf.rs` keeps its policy platform-free: the session lifecycle
 //! (`HintSession`), the target estimate (`TargetPeriod`) and the
-//! `FRUST_NO_ADPF` parsing compile on every target, and only the NDK binding
+//! `FRUST_ADPF` opt-in parsing compile on every target, and only the NDK binding
 //! is Android-only. The file is included here as a module (precedent:
 //! `crates/frust-engine/tests/atlas_churn.rs`), so the lifecycle runs against
 //! a recording fake backend instead of the platform.
@@ -24,7 +24,7 @@ mod adpf;
 
 use adpf::{
     DEFAULT_TARGET_NANOS, FrameHint, HintBackend, HintSession, PERIOD_WINDOW, TargetPeriod,
-    WorkSample, adpf_kill_switch, target_moved,
+    WorkSample, adpf_opt_in, target_moved,
 };
 
 const UI_TID: i32 = 4100;
@@ -346,17 +346,17 @@ fn choreographer_jitter_does_not_retarget() {
 }
 
 // ---------------------------------------------------------------------
-// Kill switch
+// Opt-in switch
 // ---------------------------------------------------------------------
 
 #[test]
-fn frust_no_adpf_engages_from_either_source() {
-    assert!(!adpf_kill_switch(None, None));
-    assert!(!adpf_kill_switch(Some("0"), Some("0")));
-    assert!(!adpf_kill_switch(Some(""), None));
-    assert!(adpf_kill_switch(Some("1"), None));
-    assert!(adpf_kill_switch(None, Some("1")));
-    assert!(adpf_kill_switch(Some("0"), Some("yes")));
+fn frust_adpf_opts_in_from_either_source() {
+    assert!(!adpf_opt_in(None, None));
+    assert!(!adpf_opt_in(Some("0"), Some("0")));
+    assert!(!adpf_opt_in(Some(""), None));
+    assert!(adpf_opt_in(Some("1"), None));
+    assert!(adpf_opt_in(None, Some("1")));
+    assert!(adpf_opt_in(Some("0"), Some("yes")));
 }
 
 // ---------------------------------------------------------------------

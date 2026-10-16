@@ -1216,8 +1216,8 @@ pub(crate) fn render_loop(
     // Render-thread scheduling, before any frame work.
     schedule_render_thread();
     // The performance-hint session, after the scheduling call so the thread
-    // it names already runs at its frame priority. `None` under
-    // `FRUST_NO_ADPF` or below API 33.
+    // it names already runs at its frame priority. `None` unless `FRUST_ADPF`
+    // opts in (off by default), or below API 33.
     let mut frame_hint = crate::adpf::RenderHint::open(ui_tid);
 
     let cache_path = cache_dir.as_deref().map(pipeline_cache_path);

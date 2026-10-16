@@ -33,8 +33,8 @@
 //!   receives the UI half with the scene. API 35+ reports through
 //!   `AWorkDuration` (with the frame's Choreographer timestamp as the work
 //!   period start); 33–34 through the basic call.
-//! - **`FRUST_NO_ADPF`** (compile-time `--define` or runtime env, any non-`"0"`
-//!   value) disables all of it.
+//! - **`FRUST_ADPF`** (compile-time `--define` or runtime env, any non-`"0"`
+//!   value) opts in. Off by default: no session is created unless it is set.
 //!
 //! # Binding
 //!
@@ -48,24 +48,24 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-/// The ADPF kill-switch environment/compile-time variable: when set to any
-/// non-`"0"` value no hint session is ever created.
-pub(crate) const NO_ADPF_VAR: &str = "FRUST_NO_ADPF";
+/// The ADPF opt-in environment/compile-time variable: the hint session runs
+/// only when it is set to a non-`"0"` value.
+pub(crate) const ADPF_VAR: &str = "FRUST_ADPF";
 
-/// Whether the hint session may run: `true` unless [`NO_ADPF_VAR`] is engaged
-/// by the compile-time define or the runtime environment. Read once, when the
-/// render thread starts.
+/// Whether the hint session may run: `true` only when [`ADPF_VAR`] is engaged
+/// by the compile-time define or the runtime environment. Off by default.
+/// Read once, when the render thread starts.
 pub(crate) fn adpf_enabled() -> bool {
-    !adpf_kill_switch(
-        option_env!("FRUST_NO_ADPF"),
-        std::env::var(NO_ADPF_VAR).ok().as_deref(),
+    adpf_opt_in(
+        option_env!("FRUST_ADPF"),
+        std::env::var(ADPF_VAR).ok().as_deref(),
     )
 }
 
-/// The pure decision [`adpf_enabled`] negates: a non-empty, non-`"0"` value
-/// from either source engages the switch — the same parsing as
+/// The pure decision [`adpf_enabled`] returns: a non-empty, non-`"0"` value
+/// from either source opts in — the same parsing as
 /// `frust_shell_common::render_split::thread_tuning_enabled`.
-pub(crate) fn adpf_kill_switch(compile_time: Option<&str>, runtime: Option<&str>) -> bool {
+pub(crate) fn adpf_opt_in(compile_time: Option<&str>, runtime: Option<&str>) -> bool {
     fn is_set_non_zero(value: Option<&str>) -> bool {
         matches!(value, Some(v) if !v.is_empty() && v != "0")
     }
@@ -669,11 +669,11 @@ mod platform {
     impl RenderHint {
         /// Arm the hint for this (render) thread, with `ui_tid` as the other
         /// session thread. `None` — and a log line saying why — when
-        /// `FRUST_NO_ADPF` is set, the platform lacks the API, or another
+        /// `FRUST_ADPF` is not set, the platform lacks the API, or another
         /// render thread already holds the slot. Opens no session yet.
         pub(crate) fn open(ui_tid: i32) -> Option<Self> {
             if !adpf_enabled() {
-                log::info!("frust-shell-android: ADPF off ({})", super::NO_ADPF_VAR);
+                log::info!("frust-shell-android: ADPF off (default; set FRUST_ADPF=1 to opt in)");
                 return None;
             }
             let Some(api) = hint_api() else {
