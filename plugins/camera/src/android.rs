@@ -1355,7 +1355,14 @@ impl AndroidSession {
             })
         });
         match code {
-            Ok(PREVIEW_TEXTURE_STARTED) => Ok(()),
+            Ok(PREVIEW_TEXTURE_STARTED) => {
+                log::info!(
+                    "frust-camera: session {} preview texture via CPU copy (RGBA_8888 \
+                     ImageAnalysis; no hardware-buffer path on Android)",
+                    self.session_id
+                );
+                Ok(())
+            }
             Ok(other) => {
                 lock(&TEXTURES).remove(&self.session_id);
                 Err(CameraError::Platform(format!(
