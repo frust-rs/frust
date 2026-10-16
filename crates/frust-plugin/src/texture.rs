@@ -9,10 +9,11 @@
 //! the renderer never names it. So the sink is the whole of what a plugin
 //! sees — plain data in, plain data out — and the consumer is a closure
 //! written by whoever depends on *both* sides (a plugin's own facade-feature
-//! half, or app code): it takes [`TextureSink::take_latest`]'s frame, moves
-//! its fields into the renderer's own twin frame type (the field names match
-//! one for one), and returns it to the renderer's frame source. Neither side
-//! ever names the other.
+//! half, or app code): it takes [`TextureSink::take_latest`]'s frame, carries
+//! its fields across into the renderer's own twin frame type (the field names
+//! match one for one; the release callback moves with `Option::take`), and
+//! returns it to the renderer's frame source. Neither side ever names the
+//! other.
 //!
 //! # Latest frame wins
 //!
@@ -22,8 +23,9 @@
 //! and memory: [`TextureSink::push`] replaces whatever was pending, and the
 //! displaced frame's [`TextureFrame::release`] callback runs right there, on
 //! the pushing thread. Every frame's callback therefore runs exactly once —
-//! when it is displaced, when the consumer is done with it, or when the last
-//! sink handle drops with it still pending.
+//! when it is displaced, when the consumer is done with it, when the last
+//! sink handle drops with it still pending, or when a frame still holding its
+//! callback is dropped (a taker that forgot it, a panic unwinding past it).
 //!
 //! # Pixel contract
 //!
@@ -70,12 +72,50 @@ pub enum NativeHandleKind {
 /// (`CFRetain`, `AHardwareBuffer_acquire`) for as long as the frame is in
 /// flight and drops that reference in the frame's [`TextureFrame::release`]
 /// callback.
+///
+/// The fields are private and the only constructor is the `unsafe`
+/// [`Self::new`]: the importer that eventually dereferences the pointer
+/// relies on nothing but that constructor's contract, so safe code cannot
+/// forge a handle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NativeHandle {
     /// The platform object `ptr` points at.
-    pub kind: NativeHandleKind,
+    kind: NativeHandleKind,
     /// The platform object itself (`CVPixelBufferRef`, `AHardwareBuffer*`).
-    pub ptr: *mut c_void,
+    ptr: *mut c_void,
+}
+
+impl NativeHandle {
+    /// Wraps `ptr`, a platform object of `kind`, for a
+    /// [`FramePayload::Native`] frame.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` is a live platform object of exactly `kind` — a
+    /// `CVPixelBufferRef` for [`NativeHandleKind::CvPixelBuffer`], an
+    /// `AHardwareBuffer*` for [`NativeHandleKind::AHardwareBuffer`] — on which
+    /// the caller holds a retained reference of its own (`CFRetain`,
+    /// `AHardwareBuffer_acquire`), and the caller keeps that reference until
+    /// the release callback of the frame carrying this handle has run. The
+    /// consumer-side importer for `kind` dereferences the pointer (describes,
+    /// imports and retains the object) on this promise alone, so a dangling,
+    /// foreign or mistyped pointer is undefined behaviour there.
+    #[must_use]
+    pub unsafe fn new(kind: NativeHandleKind, ptr: *mut c_void) -> Self {
+        Self { kind, ptr }
+    }
+
+    /// The platform object [`Self::ptr`] points at.
+    #[must_use]
+    pub fn kind(&self) -> NativeHandleKind {
+        self.kind
+    }
+
+    /// The platform object itself, as handed to [`Self::new`].
+    #[must_use]
+    pub fn ptr(&self) -> *mut c_void {
+        self.ptr
+    }
 }
 
 // SAFETY: a `NativeHandle` is an inert address plus a tag — nothing here
@@ -106,9 +146,18 @@ pub type ReleaseCallback = Box<dyn FnOnce() + Send>;
 /// One frame pushed through a [`TextureSink`].
 ///
 /// Plain public fields, so the consumer-side conversion is a field-for-field
-/// move into the renderer's own frame type. `release` is not run by dropping
-/// the frame: whoever ends up holding a frame either moves the callback on or
-/// calls [`Self::release`].
+/// copy into the renderer's own frame type, with `release` moved across by
+/// `Option::take`.
+///
+/// Dropping a frame that still holds its `release` callback runs it: a frame
+/// nobody released — dropped by [`TextureSink::take_latest`]'s caller, or
+/// lost to a panic unwinding past it — still tells its producer, exactly
+/// once. Whoever ends up holding a frame either takes the callback on or lets
+/// the frame go ([`Self::release`] or a plain drop). Because the type
+/// implements `Drop`, its fields cannot be moved out by destructuring; borrow
+/// or clone the payload instead (a CPU payload is an `Arc`). A release
+/// callback must not panic: run from a drop during an unwind, a panic aborts
+/// the process.
 pub struct TextureFrame {
     /// Width in pixels.
     pub width: u32,
@@ -119,8 +168,8 @@ pub struct TextureFrame {
     /// The pixels, or the platform buffer holding them.
     pub payload: FramePayload,
     /// Run exactly once when the frame is no longer needed — displaced in the
-    /// mailbox, consumed, or dropped with the last sink handle. `None` for a
-    /// producer that needs no signal.
+    /// mailbox, consumed, dropped with the last sink handle, or dropped while
+    /// still holding it. `None` for a producer that needs no signal.
     pub release: Option<ReleaseCallback>,
 }
 
@@ -147,8 +196,20 @@ impl TextureFrame {
     }
 
     /// Runs the release callback, if any, consuming the frame — what a holder
-    /// that is done with a frame without passing it on calls.
+    /// that is done with a frame without passing it on calls. The same as
+    /// dropping it, spelled out.
     pub fn release(mut self) {
+        if let Some(release) = self.release.take() {
+            release();
+        }
+    }
+}
+
+impl Drop for TextureFrame {
+    /// A frame dropped still holding its callback has not been released by
+    /// anyone, so it releases itself; a callback already run or taken on is
+    /// `None` here.
+    fn drop(&mut self) {
         if let Some(release) = self.release.take() {
             release();
         }
@@ -437,14 +498,14 @@ mod tests {
         let mut byte = 0u8;
         let ptr: *mut c_void = (&raw mut byte).cast();
         let sink = TextureSink::new();
+        // SAFETY: the handle never reaches an importer — this case only
+        // carries the address across the mailbox and compares it.
+        let handle = unsafe { NativeHandle::new(NativeHandleKind::AHardwareBuffer, ptr) };
         sink.push(TextureFrame {
             width: 4,
             height: 4,
             format: TextureFormat::Rgba8,
-            payload: FramePayload::Native(NativeHandle {
-                kind: NativeHandleKind::AHardwareBuffer,
-                ptr,
-            }),
+            payload: FramePayload::Native(handle),
             release: None,
         });
 
@@ -453,13 +514,94 @@ mod tests {
             .join()
             .unwrap()
             .expect("the native frame is pending");
-        match frame.payload {
+        match &frame.payload {
             FramePayload::Native(handle) => {
-                assert_eq!(handle.kind, NativeHandleKind::AHardwareBuffer);
-                assert_eq!(handle.ptr, ptr, "the address is carried, never touched");
+                assert_eq!(handle.kind(), NativeHandleKind::AHardwareBuffer);
+                assert_eq!(handle.ptr(), ptr, "the address is carried, never touched");
             }
             FramePayload::Cpu(_) => panic!("a native frame was pushed"),
         }
+    }
+
+    #[test]
+    fn a_native_handle_round_trips_its_kind_and_pointer() {
+        let mut byte = 0u8;
+        let ptr: *mut c_void = (&raw mut byte).cast();
+        for kind in [
+            NativeHandleKind::CvPixelBuffer,
+            NativeHandleKind::AHardwareBuffer,
+        ] {
+            // SAFETY: never handed to an importer; only the accessors read it.
+            let handle = unsafe { NativeHandle::new(kind, ptr) };
+            assert_eq!(handle.kind(), kind);
+            assert_eq!(handle.ptr(), ptr);
+            let copy = handle;
+            assert_eq!(copy, handle, "a handle is a plain copyable value");
+        }
+    }
+
+    #[test]
+    fn a_frame_dropped_unreleased_releases_itself_once() {
+        let released = Arc::new(AtomicUsize::new(0));
+        drop(counted(&released, 0));
+        assert_eq!(
+            released.load(Ordering::SeqCst),
+            1,
+            "a dropped frame still tells its producer"
+        );
+
+        // A callback taken on before the drop is the taker's, not the frame's.
+        let mut frame = counted(&released, 0);
+        let taken = frame.release.take().expect("a callback is attached");
+        drop(frame);
+        assert_eq!(released.load(Ordering::SeqCst), 1, "the drop ran nothing");
+        taken();
+        assert_eq!(released.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_taken_frame_dropped_by_its_taker_releases_once() {
+        let released = Arc::new(AtomicUsize::new(0));
+        let sink = TextureSink::new();
+        sink.push(counted(&released, 1));
+        let frame = sink.take_latest().expect("a frame is pending");
+        assert_eq!(released.load(Ordering::SeqCst), 0);
+        drop(frame);
+        assert_eq!(released.load(Ordering::SeqCst), 1);
+        drop(sink);
+        assert_eq!(
+            released.load(Ordering::SeqCst),
+            1,
+            "the empty mailbox releases nothing more"
+        );
+    }
+
+    #[test]
+    fn a_frame_lost_to_a_panic_releases_once() {
+        let released = Arc::new(AtomicUsize::new(0));
+        let frame = counted(&released, 2);
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _held = frame;
+            panic!("the holder panics before releasing");
+        }));
+        assert!(unwound.is_err());
+        assert_eq!(released.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_replaced_mailbox_frame_releases_once_and_the_newest_on_teardown() {
+        let released = Arc::new(AtomicUsize::new(0));
+        let sink = TextureSink::new();
+        sink.push(counted(&released, 1));
+        sink.push(counted(&released, 2));
+        sink.push(counted(&released, 3));
+        assert_eq!(
+            released.load(Ordering::SeqCst),
+            2,
+            "each replaced frame released as it was displaced"
+        );
+        drop(sink);
+        assert_eq!(released.load(Ordering::SeqCst), 3);
     }
 
     #[test]

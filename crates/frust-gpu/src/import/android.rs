@@ -50,7 +50,18 @@
 //!   queue `wgpu` also submits and presents on, so the call must not overlap a
 //!   `wgpu` submit or present on another thread. The frame bus calls importers
 //!   inside the external-pass drain on the thread that records, submits and
-//!   presents the frame, which satisfies it.
+//!   presents the frame, which satisfies it — as long as that thread is the
+//!   device's only `wgpu` submitter. Nothing in `wgpu` can enforce that, so
+//!   while `FRUST_ANDROID_HWBUFFER_IMPORT` is on, another thread submitting on
+//!   the same device (a plugin's `queue.write_texture` from its own thread, a
+//!   second surface presented elsewhere) is **unsupported**. Debug builds
+//!   check the half they can see: every import on one device must run on the
+//!   thread that made the first import on it, or the call panics naming the
+//!   two threads (`check_import_thread`).
+//! - **A slow acquire is a device-health signal.** The acquire's fence wait is
+//!   bounded at one second; past it, or on a failed submit, the import waits
+//!   the queue idle (a pending command buffer must not be freed), logs a
+//!   device-health warning, and answers `Failed`.
 //! - **No link-time `AHardwareBuffer` symbol.** The three buffer entry points
 //!   used here are resolved from `libandroid.so` at run time (`BufferApi`), not
 //!   linked: they exist only from API 26, while Android libraries are linked
@@ -63,7 +74,9 @@
 
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::fmt;
-use std::sync::OnceLock;
+use std::hash::{BuildHasher, RandomState};
+use std::sync::{Mutex, OnceLock, PoisonError};
+use std::thread::ThreadId;
 
 use ash::vk;
 use wgpu::hal::api::Vulkan;
@@ -167,6 +180,42 @@ fn buffer_api() -> Option<&'static BufferApi> {
     .as_ref()
 }
 
+/// The device the last import ran on (a hash of its `wgpu` identity, whose
+/// id carries an epoch, so a later device never repeats it) and the thread
+/// that made the first
+/// import on it — debug builds only (see [`check_import_thread`]).
+static IMPORT_THREAD: Mutex<Option<(u64, ThreadId)>> = Mutex::new(None);
+
+/// Debug builds: asserts that every import on `device` runs on the thread
+/// that made the first import on it — the render thread, which the queue
+/// invariant (module docs) assumes is the device's only submitter. An import
+/// on a different device records afresh, so a device reopened on a new
+/// render thread starts over. Release builds check nothing.
+fn check_import_thread(device: &wgpu::Device) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    static HASHER: OnceLock<RandomState> = OnceLock::new();
+    let identity = HASHER.get_or_init(RandomState::new).hash_one(device);
+    let current = std::thread::current().id();
+    let first = {
+        let mut recorded = IMPORT_THREAD.lock().unwrap_or_else(PoisonError::into_inner);
+        match *recorded {
+            Some((recorded_device, thread)) if recorded_device == identity => thread,
+            _ => {
+                *recorded = Some((identity, current));
+                current
+            }
+        }
+    };
+    debug_assert_eq!(
+        first, current,
+        "import_hardware_buffer ran on {current:?}, but the first import on this device ran on \
+         {first:?}: the import submits on the raw queue wgpu uses, so every import must run on \
+         the device's one submitting (render) thread (frust-gpu import::android module docs)"
+    );
+}
+
 fn failed(step: &str, result: vk::Result) -> HardwareBufferImportError {
     HardwareBufferImportError::Failed(format!("{step}: {result}"))
 }
@@ -192,7 +241,8 @@ fn failed(step: &str, result: vk::Result) -> HardwareBufferImportError {
 /// - `buffer` is null or a valid `AHardwareBuffer*` the caller holds a
 ///   reference to for the duration of the call.
 /// - No other thread submits to or presents on `device`'s queue during the
-///   call (the module's queue invariant).
+///   call (the module's queue invariant). Debug builds assert that every
+///   import on one device runs on one thread.
 /// - The buffer's contents are complete — any producer fence has signalled —
 ///   and the producer does not write it again while the returned texture is
 ///   alive.
@@ -238,6 +288,7 @@ pub unsafe fn import_hardware_buffer(
             )));
         }
     }
+    check_import_thread(device);
     let raw = hal_device.raw_device().clone();
     let instance = hal_device.shared_instance().raw_instance();
     let extension =
@@ -545,11 +596,16 @@ unsafe fn record_and_submit(
             unsafe { device.wait_for_fences(&[fence], true, ACQUIRE_TIMEOUT_NS) }
                 .map_err(|e| failed("vkWaitForFences (ownership acquire)", e))
         });
-    if result.is_err() {
+    if let Err(error) = &result {
         // A submitted command buffer must not be freed while pending: wait it
         // out before the caller destroys the pool. Best effort — a lost
         // device has nothing pending.
-        let _ = unsafe { device.queue_wait_idle(queue) };
+        let idle = unsafe { device.queue_wait_idle(queue) };
+        log::warn!(
+            "frust-gpu: device health: the AHardwareBuffer ownership acquire did not complete \
+             ({error}); waited the queue idle ({idle:?}). A wedged or lost queue, or a wgpu \
+             submit on another thread, which the import does not support"
+        );
     }
     unsafe { device.destroy_fence(fence, None) };
     result

@@ -1145,20 +1145,37 @@ fn record_copy(started: Instant, width: u32, height: u32) {
     }
 }
 
+/// The arguments of one `nativeOnTextureFrame` delivery, as the export
+/// received them.
+struct TextureFrameArgs<'call, 'local> {
+    /// The texture-output session the image belongs to.
+    session: i32,
+    /// The image's `HardwareBuffer`, or a null reference on the CPU path.
+    buffer: &'call JObject<'local>,
+    /// The image's direct pixel buffer (the CPU path).
+    pixels: &'call JByteBuffer<'local>,
+    /// The image's extent, as the host reported it.
+    width: i32,
+    height: i32,
+    /// Bytes per row of `pixels`, padding included.
+    row_stride: i32,
+    /// The host's handle on the image, passed back to `releaseTextureFrame`.
+    token: i64,
+}
+
 /// One `nativeOnTextureFrame` delivery; the return is the export's answer
 /// (module doc): `true` when a hardware-buffer frame was taken and the host
 /// must keep its image open until `releaseTextureFrame`.
-#[allow(clippy::too_many_arguments)]
-fn deliver_texture_frame(
-    env: &Env<'_>,
-    session: i32,
-    buffer: &JObject<'_>,
-    pixels: &JByteBuffer<'_>,
-    width: i32,
-    height: i32,
-    row_stride: i32,
-    token: i64,
-) -> bool {
+fn deliver_texture_frame(env: &Env<'_>, args: TextureFrameArgs<'_, '_>) -> bool {
+    let TextureFrameArgs {
+        session,
+        buffer,
+        pixels,
+        width,
+        height,
+        row_stride,
+        token,
+    } = args;
     let Some(sink) = lock(&TEXTURE_SINKS).get(&session).cloned() else {
         log::trace!("frust-video-player: texture frame for unknown session {session} — dropped");
         return false;
@@ -1178,14 +1195,16 @@ fn deliver_texture_frame(
             return false;
         }
         let address = raw as usize;
+        // SAFETY: `raw` is a live `AHardwareBuffer*` on which
+        // `hardware_buffer` just took this frame's own
+        // `AHardwareBuffer_acquire` reference; only the frame's release
+        // callback below (`release_native_frame`, run exactly once) drops it.
+        let handle = unsafe { NativeHandle::new(NativeHandleKind::AHardwareBuffer, raw) };
         sink.push(TextureFrame {
             width,
             height,
             format: TextureFormat::Rgba8,
-            payload: FramePayload::Native(NativeHandle {
-                kind: NativeHandleKind::AHardwareBuffer,
-                ptr: raw,
-            }),
+            payload: FramePayload::Native(handle),
             release: Some(Box::new(move || {
                 release_native_frame(session, address, token);
             })),
@@ -1221,6 +1240,7 @@ fn deliver_texture_frame(
 /// `Java_dev_frust_videoplayer_FrustVideoPlayerHost_nativeOnTextureFrame` —
 /// one image of a texture-output session (module doc's Kotlin → Rust list),
 /// on the host's frame thread.
+// The parameter list is the JNI signature the Kotlin host declares.
 #[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_frust_videoplayer_FrustVideoPlayerHost_nativeOnTextureFrame<
@@ -1238,7 +1258,16 @@ pub extern "system" fn Java_dev_frust_videoplayer_FrustVideoPlayerHost_nativeOnT
 ) -> jboolean {
     env.with_env(|env| {
         Ok::<bool, jni::errors::Error>(deliver_texture_frame(
-            env, session, &buffer, &pixels, width, height, row_stride, token,
+            env,
+            TextureFrameArgs {
+                session,
+                buffer: &buffer,
+                pixels: &pixels,
+                width,
+                height,
+                row_stride,
+                token,
+            },
         ))
     })
     .resolve::<LogErrorAndDefault>()

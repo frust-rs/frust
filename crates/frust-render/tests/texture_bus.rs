@@ -14,7 +14,8 @@
 //! frame's release callback runs exactly once, and a native frame is refused
 //! (once, released) without an importer and drawn with one, its release held
 //! until the imported texture is replaced or unbound and the GPU finished
-//! with it:
+//! with it, and a frame the pass holds when its importer panics is still
+//! released, once:
 //!
 //! ```text
 //! WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=T400 FRUST_GOLDEN_EXPECT_ADAPTER=T400 \
@@ -569,14 +570,14 @@ impl NativeImporter for FakeImporter {
         queue: &wgpu::Queue,
     ) -> Result<ImportedTexture, ImportError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        if handle.ptr.is_null() {
+        if handle.ptr().is_null() {
             return Err(ImportError::Failed("null buffer".into()));
         }
         // SAFETY: every non-null handle in this file points at a `FakeBuffer`
         // the case keeps alive across the frame that imports it.
-        let buffer = unsafe { &*handle.ptr.cast::<FakeBuffer>() };
+        let buffer = unsafe { &*handle.ptr().cast::<FakeBuffer>() };
         let frame = solid(8, 8, buffer.rgba);
-        let SourcePayload::Cpu(pixels) = frame.payload else {
+        let SourcePayload::Cpu(pixels) = &frame.payload else {
             unreachable!("solid frames are CPU frames")
         };
         let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -600,7 +601,7 @@ impl NativeImporter for FakeImporter {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &pixels,
+            pixels,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(8 * 4),
@@ -621,14 +622,15 @@ impl NativeImporter for FakeImporter {
 
 fn native(buffer: Option<&mut FakeBuffer>) -> SourceFrame {
     let ptr: *mut c_void = buffer.map_or(std::ptr::null_mut(), |b| (b as *mut FakeBuffer).cast());
+    // SAFETY: the importer every case installs for this kind is
+    // `FakeImporter` (or none), which reads only a live `FakeBuffer` the case
+    // keeps alive across the frame, and refuses a null pointer.
+    let handle = unsafe { NativeHandle::new(NativeHandleKind::AHardwareBuffer, ptr) };
     SourceFrame {
         width: 8,
         height: 8,
         format: SourceFormat::Rgba8,
-        payload: SourcePayload::Native(NativeHandle {
-            kind: NativeHandleKind::AHardwareBuffer,
-            ptr,
-        }),
+        payload: SourcePayload::Native(handle),
         release: None,
     }
 }
@@ -865,6 +867,69 @@ fn a_refused_native_frame_is_released_at_once_and_the_retire_backlog_is_bounded(
         releases.counts().iter().all(|&n| n == 1),
         "every frame released exactly once: {:?}",
         releases.counts()
+    );
+    let _ = clear_native_importer(NativeHandleKind::AHardwareBuffer);
+}
+
+/// An importer that panics mid-import, as a driver binding might.
+struct PanickingImporter;
+
+impl NativeImporter for PanickingImporter {
+    fn import(
+        &self,
+        _handle: &NativeHandle,
+        _device: &wgpu::Device,
+        _queue: &wgpu::Queue,
+    ) -> Result<ImportedTexture, ImportError> {
+        panic!("the importer panics");
+    }
+}
+
+#[test]
+#[ignore = "requires a GPU; run with `cargo test -p frust-render --test texture_bus -- --ignored --test-threads=1`"]
+fn a_frame_in_flight_when_the_pass_panics_is_still_released_once() {
+    let _serial = serial();
+    let _ = set_native_importer(
+        NativeHandleKind::AHardwareBuffer,
+        Arc::new(PanickingImporter) as Arc<dyn NativeImporter>,
+    );
+    let mut harness = Harness::new();
+    let queue = Queue::default();
+    let releases = Releases::default();
+    let registration = register_texture_source(queue.source());
+    let scene = scene_drawing(registration.scene_texture_id(), DEST);
+    let mut red = FakeBuffer { rgba: RED };
+    let _ = take_log();
+
+    queue.push(native(Some(&mut red)).on_release(releases.callback(0)));
+    let drawn = harness.frame(&scene);
+    assert_dest_is(&drawn, BASE, "the panicking pass drew nothing");
+    assert_eq!(
+        releases.counts(),
+        vec![1],
+        "the frame the pass held when it panicked was released during the unwind"
+    );
+    assert!(
+        take_log().iter().any(|record| record.contains("panicked")),
+        "the panic is reported"
+    );
+
+    // The pass was retired: a later frame is never taken, and the
+    // registration's drop finds nothing more to release.
+    queue.push(solid(FRAME, FRAME, GREEN).on_release(releases.callback(1)));
+    let _ = harness.frame(&scene);
+    assert_eq!(
+        releases.counts(),
+        vec![1, 0],
+        "a retired pass takes nothing"
+    );
+    drop(registration);
+    settle(&mut harness);
+    drop(queue);
+    assert_eq!(
+        releases.counts(),
+        vec![1, 1],
+        "the untaken frame releases when its queue is dropped"
     );
     let _ = clear_native_importer(NativeHandleKind::AHardwareBuffer);
 }

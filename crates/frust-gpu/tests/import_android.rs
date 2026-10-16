@@ -12,6 +12,9 @@
 //! adb shell 'cd /data/local/tmp && FRUST_ANDROID_HWBUFFER_IMPORT=1 \
 //!     ./import_android --ignored --test-threads=1 --nocapture'
 //! ```
+//!
+//! A debug build also checks that an import from a second thread on the same
+//! device trips the import's render-thread assertion.
 #![cfg(target_os = "android")]
 
 use std::ffi::{CStr, c_char, c_int, c_void};
@@ -377,4 +380,55 @@ fn hardware_buffer_import_survives_three_hundred_frames() {
         latencies[latencies.len() * 95 / 100],
         latencies[latencies.len() - 1],
     );
+}
+
+/// A buffer address moved to another thread for the assertion case below.
+struct SendBuffer(*mut ndk_sys::AHardwareBuffer);
+
+// SAFETY: an `AHardwareBuffer` may be used from any thread; the case keeps
+// the `Buffer` that owns the reference alive until the thread is joined.
+unsafe impl Send for SendBuffer {}
+
+#[test]
+#[cfg(debug_assertions)]
+#[ignore = "needs an Android Vulkan device with FRUST_ANDROID_HWBUFFER_IMPORT=1 (see the module docs)"]
+fn an_import_from_a_second_thread_trips_the_render_thread_assertion() {
+    let mut context = RenderContext::new();
+    let handle = hardware_buffer_device(&mut context);
+    let buffer = Buffer::allocate();
+    buffer.fill(5);
+
+    // The first import on this device records this thread as its importer.
+    let (texture, _) = import(&handle, &buffer);
+    drop(texture);
+    handle
+        .device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("device poll");
+
+    let device = handle.device.clone();
+    let raw = SendBuffer(buffer.0);
+    let joined = std::thread::spawn(move || {
+        let raw = raw;
+        // SAFETY: the buffer is live (the case joins before dropping it) and
+        // complete; nothing else submits on the device while this runs, and
+        // the assertion fires before the import touches the queue.
+        let _ = unsafe { import_hardware_buffer(&device, raw.0) };
+    })
+    .join();
+    let panic = joined.expect_err("a debug build refuses an import from a second thread");
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .unwrap_or_default();
+    assert!(
+        message.contains("submitting (render) thread"),
+        "the panic names the rule: {message}"
+    );
+
+    // The recording thread may still import.
+    let (texture, _) = import(&handle, &buffer);
+    drop(texture);
+    assert_eq!(handle.first_uncaptured_error(), None);
 }

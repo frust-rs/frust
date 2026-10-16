@@ -21,13 +21,21 @@ impl NativeImporter for AndroidImporter {
         device: &wgpu::Device,
         _queue: &wgpu::Queue,
     ) -> Result<ImportedTexture, ImportError> {
-        // SAFETY: the bus calls `import` from `record()` on the render thread,
-        // which owns the queue and is the only thread that submits or presents
-        // on it, so the importer's queue submission cannot overlap a `wgpu`
-        // submit. The importer takes its own buffer reference, so the producer
-        // may release its reference as soon as this call returns.
+        // SAFETY: the pointer — `NativeHandle::new`'s contract, the only way
+        // to build a handle: a live `AHardwareBuffer*` (this importer is
+        // installed for that kind alone, and the handle's kind was matched to
+        // it) on which the producer holds a reference until the frame's
+        // release callback runs, which the bus does only after this call
+        // returns — so the buffer is live for the whole call. The queue: the
+        // bus calls `import` from `record()` on the render thread, which
+        // records, submits and presents the frame, so the importer's queue
+        // submission cannot overlap a `wgpu` submit from that thread; a
+        // `wgpu` submitter on another thread is unsupported while the import
+        // is on (frust-gpu's module docs; a debug build asserts the importing
+        // thread). The importer takes its own buffer reference, so the
+        // producer may release its own as soon as this call returns.
         let imported = unsafe {
-            frust_gpu::import::android::import_hardware_buffer(device, handle.ptr.cast())
+            frust_gpu::import::android::import_hardware_buffer(device, handle.ptr().cast())
         };
         let texture = imported.map_err(|error| match error {
             frust_gpu::import::android::HardwareBufferImportError::Unsupported(reason) => {
