@@ -520,9 +520,53 @@ impl OverlaySkew {
     }
 }
 
+/// The overlay host's request for one frame: raised on the UI thread when an
+/// overlay window arrives, changes size, is replaced or is withdrawn; consumed
+/// by the frame gate on the same thread. The overlay surface is built by the
+/// render thread ahead of its next frame, so without a frame an idle app keeps
+/// the content on the main surface under the native view (or a hole where the
+/// withdrawn overlay's content was cut).
+#[derive(Debug, Default)]
+pub(crate) struct FrameRequest(std::sync::atomic::AtomicBool);
+
+impl FrameRequest {
+    /// A latch with no request pending (`const`, for a process-global).
+    pub(crate) const fn new() -> Self {
+        Self(std::sync::atomic::AtomicBool::new(false))
+    }
+
+    /// Ask for one frame.
+    pub(crate) fn request(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Whether a frame was requested since the last take; clears the request.
+    pub(crate) fn take(&self) -> bool {
+        self.0.swap(false, std::sync::atomic::Ordering::AcqRel)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_request_latches_once() {
+        let latch = FrameRequest::new();
+        assert!(!latch.take());
+        latch.request();
+        assert!(latch.take());
+        assert!(!latch.take());
+    }
+
+    #[test]
+    fn frame_requests_collapse_into_one_take() {
+        let latch = FrameRequest::new();
+        latch.request();
+        latch.request();
+        assert!(latch.take());
+        assert!(!latch.take());
+    }
 
     #[test]
     fn overlay_mode_reads_the_switch_value() {

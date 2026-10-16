@@ -79,8 +79,8 @@ use crate::ffi_support::{
     platform_view_commands_up_to_date, publish_resolved_translucency, write_pipeline_cache_atomic,
 };
 use crate::overlay_state::{
-    OVERLAYS_ENV_VAR, OverlayCutSpec, OverlayLedger, OverlayMode, OverlaySkew, OverlayTable,
-    assemble_overlay_cuts,
+    FrameRequest, OVERLAYS_ENV_VAR, OverlayCutSpec, OverlayLedger, OverlayMode, OverlaySkew,
+    OverlayTable, WindowChange, assemble_overlay_cuts,
 };
 
 /// Startup-span name: the persisted pipeline-cache blob has been read
@@ -428,7 +428,9 @@ const OVERLAY_ERRORS_LOGGED: u32 = 3;
 /// without an ack barrier: a withdrawn window's surface is dropped, then the
 /// window released, both under the lock, and no frame of that surface can be
 /// in flight meanwhile. The render thread holds it for up to a frame; the UI
-/// thread takes it only on an overlay's own surface callbacks.
+/// thread takes it only on an overlay's own surface callbacks. Each of those
+/// callbacks that changes what the render thread must build or draw also
+/// raises [`OVERLAY_FRAME_REQUEST`], so the frame gate runs one frame for it.
 ///
 /// Lock order: this lock before [`OVERLAY_LEDGER`], never the reverse.
 struct OverlayHost {
@@ -440,6 +442,16 @@ static OVERLAY_HOST: Mutex<OverlayHost> = Mutex::new(OverlayHost {
     table: OverlayTable::new(),
     skew: OverlaySkew::new(),
 });
+
+/// The overlay host's request for one frame, raised by the overlay surface
+/// callbacks and consumed by the frame gate ([`take_overlay_frame_request`]).
+static OVERLAY_FRAME_REQUEST: FrameRequest = FrameRequest::new();
+
+/// Whether an overlay window arrived, changed or was withdrawn since the last
+/// call (clears the request). One cached-bool read, `false`, with overlays off.
+pub(crate) fn take_overlay_frame_request() -> bool {
+    overlays_enabled() && OVERLAY_FRAME_REQUEST.take()
+}
 
 fn overlay_host() -> std::sync::MutexGuard<'static, OverlayHost> {
     OVERLAY_HOST
@@ -502,7 +514,14 @@ pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeOverlaySurfaceChang
                 .window_changed(overlay_id as u64, window, size, |held, new| {
                     held.ptr() == new.ptr()
                 });
-        log::debug!("frust-overlay: overlay {overlay_id} window {change:?} at {size:?}");
+        // Adopted (new or replaced) or Resized: the render thread builds or
+        // resizes the surface ahead of its next frame, which must run.
+        match change {
+            WindowChange::Adopted | WindowChange::Resized => OVERLAY_FRAME_REQUEST.request(),
+        }
+        log::debug!(
+            "frust-overlay: overlay {overlay_id} window {change:?} at {size:?} - frame requested"
+        );
     });
 }
 
@@ -518,7 +537,8 @@ pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeOverlaySurfaceDestr
 ) {
     guard("nativeOverlaySurfaceDestroyed", (), || {
         if overlay_host().table.window_destroyed(overlay_id as u64) {
-            log::debug!("frust-overlay: overlay {overlay_id} window released");
+            OVERLAY_FRAME_REQUEST.request();
+            log::debug!("frust-overlay: overlay {overlay_id} window released - frame requested");
         }
     });
 }
