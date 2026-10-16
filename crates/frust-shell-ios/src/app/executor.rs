@@ -1021,6 +1021,10 @@ pub(crate) fn render_scene(
     presented: &AtomicU64,
     present: Option<(&PresentHandoff, u64)>,
 ) -> (Duration, bool) {
+    // Install the platform importers once the device exists; a no-op on every
+    // later frame.
+    frust_render::native_import::install(render_cx);
+
     autoreleasepool(|_pool| {
         // Encode span (GPU/CPU encode, no swapchain touch).
         let encode_start = perf_on.then(Instant::now);
