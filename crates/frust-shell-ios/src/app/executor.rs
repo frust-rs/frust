@@ -23,6 +23,8 @@ use frust_shell_common::{
 use objc2::rc::autoreleasepool;
 
 use super::present_sync::PresentHandoff;
+use crate::ffi_glue::FrameOverlays;
+use crate::ffi_support::OverlayCutSpec;
 
 /// The render thread's **pacing trace**: one diagnostic line per rendered
 /// frame decomposing where that frame's wall clock went between two presents,
@@ -384,6 +386,11 @@ mod pace_trace {
 pub(crate) struct PaintedScene {
     pub(crate) scene: Scene,
     pub(crate) base_color: peniko::Color,
+    /// The overlays' command ranges this very scene was cut at
+    /// (`FRUST_OVERLAYS`; empty with the switch off) — carried with the scene
+    /// so the render thread never pairs one frame's ranges with another
+    /// frame's commands.
+    pub(crate) overlay_cuts: Vec<OverlayCutSpec>,
 }
 
 /// The render-path half of the iOS frame loop: either the
@@ -477,6 +484,8 @@ impl InlineExecutor {
             // is *already* issued on the transaction-committing thread — fully
             // in sync with no deferral needed. Deferring it a tick here would
             // only add latency.
+            None,
+            // Overlays need the split (`frust_overlay_mode` answers 0 inline).
             None,
         );
         encode_time
@@ -831,7 +840,9 @@ impl FrameExecutor {
     /// when none is available yet, and returning `Duration::ZERO` (encode is
     /// off-thread, so it does not count against the UI thread's deadline).
     /// `paint_serial` is the paint's `PaintOutcome::paint_serial`, named to the
-    /// renderer before it encodes the scene on either path.
+    /// renderer before it encodes the scene on either path. `overlay_cuts` are
+    /// the overlays' ranges in this scene, carried to the split's render
+    /// thread with it; the inline path has no overlay tail and drops them.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn submit_frame(
         &mut self,
@@ -842,6 +853,7 @@ impl FrameExecutor {
         size: SurfaceSize,
         paint_serial: u64,
         perf_on: bool,
+        overlay_cuts: Vec<OverlayCutSpec>,
     ) -> Duration {
         match self {
             FrameExecutor::Inline(inline) => {
@@ -852,6 +864,7 @@ impl FrameExecutor {
                 let painted = PaintedScene {
                     scene: std::mem::replace(scene, replacement),
                     base_color,
+                    overlay_cuts,
                 };
                 split.submit_frame(painted, ui, frame_time, size, paint_serial);
                 Duration::ZERO
@@ -963,6 +976,69 @@ fn gpu_passes(renderer: &SurfaceRenderer) -> Option<GpuPasses> {
     })
 }
 
+/// The submit of a segmented frame: the main segment and every overlay's range
+/// recorded into one encoder and submitted once
+/// ([`SurfaceRenderer::submit_segmented_deferred`]), then the presents —
+/// parked together for the UI thread's transaction under present-sync
+/// (`armed`), otherwise issued here, main surface first, the overlays after
+/// it in cut order (bottom to top), with the main-to-last-overlay gap folded
+/// into the `frust-overlay skew` log. Answers the main surface's outcome,
+/// exactly what [`SurfaceRenderer::submit`] would have; an overlay the engine
+/// refused presents nothing (logged when the overlays land) while the rest of
+/// the frame does.
+fn submit_with_overlays(
+    renderer: &mut SurfaceRenderer,
+    render_cx: &RenderContext,
+    overlays: &mut FrameOverlays,
+    armed: Option<(&PresentHandoff, u64)>,
+) -> anyhow::Result<FrameOutcome> {
+    let (outcome, presents) = {
+        let mut cuts = overlays.overlay_cuts();
+        renderer.submit_segmented_deferred(render_cx, &mut cuts)?
+    };
+    overlays.note_outcomes(&outcome.overlays);
+    if !presents.overlays.is_empty() {
+        static FIRST: std::sync::Once = std::sync::Once::new();
+        FIRST.call_once(|| {
+            log::info!(
+                "frust-overlay: first segmented frame submitted: main + {} overlay(s), cuts \
+                 {:?}, {} submit(s), present-sync {}",
+                presents.overlays.len(),
+                overlays.ranges(),
+                outcome.submits,
+                if armed.is_some() { "armed" } else { "off" },
+            );
+        });
+    }
+    match armed {
+        Some((handoff, frame_id)) => {
+            if !presents.is_empty() {
+                handoff.store(frame_id, presents);
+            }
+        }
+        None => {
+            let frust_render::overlay::SegmentedPresents {
+                main,
+                overlays: overlay_frames,
+            } = presents;
+            let main_at = main.map(|frame| {
+                frame.present();
+                Instant::now()
+            });
+            let count = overlay_frames.len();
+            for (_, frame) in overlay_frames {
+                frame.present();
+            }
+            if let Some(main_at) = main_at
+                && count > 0
+            {
+                crate::ffi_glue::record_overlay_presents(main_at.elapsed(), count);
+            }
+        }
+    }
+    Ok(outcome.frame)
+}
+
 /// Run the encode→acquire→submit tail for one painted `scene`, timing each span
 /// behind `perf_on` (the FFI-path perf convention: zero clock reads when
 /// disabled), recording the folded [`FramePasses`] through the single emitter
@@ -1008,6 +1084,17 @@ fn gpu_passes(renderer: &SurfaceRenderer) -> Option<GpuPasses> {
 /// the actual present — a constant offset that leaves the *rate* those values
 /// report unchanged (iOS uses the counter for FPS reporting only; the frame-id
 /// gate that needs a true presented count is Android-only).
+///
+/// # Overlays
+///
+/// `overlays` is this frame's overlay surfaces and the cut each draws
+/// ([`crate::ffi_glue::take_frame_overlays`]; `None` with `FRUST_OVERLAYS`
+/// off or no overlay surface live, which keeps the single-surface tail exactly
+/// as it was). `Some` makes the frame segmented: one compiled frame, the main
+/// segment and every overlay's range recorded into one encoder and submitted
+/// once (`encode_segmented` → acquire → `submit_segmented_deferred`), then
+/// the presents — parked together under present-sync, otherwise issued here,
+/// main surface first and the overlays after it, bottom to top.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_scene(
     renderer: &mut SurfaceRenderer,
@@ -1020,11 +1107,21 @@ pub(crate) fn render_scene(
     perf_on: bool,
     presented: &AtomicU64,
     present: Option<(&PresentHandoff, u64)>,
+    mut overlays: Option<&mut FrameOverlays>,
 ) -> (Duration, bool) {
+    // Install the platform importers once the device exists; a no-op on every
+    // later frame.
+    frust_render::native_import::install(render_cx);
+
     autoreleasepool(|_pool| {
         // Encode span (GPU/CPU encode, no swapchain touch).
         let encode_start = perf_on.then(Instant::now);
-        let encode_outcome = renderer.encode(render_cx, scene, base_color);
+        let encode_outcome = match overlays.as_deref() {
+            None => renderer.encode(render_cx, scene, base_color),
+            Some(overlays) => {
+                renderer.encode_segmented(render_cx, scene, base_color, &overlays.ranges())
+            }
+        };
         let encode_time = encode_start.map_or(Duration::ZERO, |t| t.elapsed());
 
         // First-frame decomposition: stamp the first encode-complete boundary
@@ -1049,16 +1146,20 @@ pub(crate) fn render_scene(
         let submit_start = perf_on.then(Instant::now);
         let render_result = match acquire_result {
             Ok(AcquireOutcome::Acquired) => {
-                match present.filter(|(handoff, _)| handoff.is_armed()) {
-                    Some((handoff, frame_id)) => {
+                let armed = present.filter(|(handoff, _)| handoff.is_armed());
+                match (overlays.as_mut(), armed) {
+                    (None, Some((handoff, frame_id))) => {
                         renderer.submit_deferred(render_cx).map(|(outcome, frame)| {
                             if let Some(frame) = frame {
-                                handoff.store(frame_id, frame);
+                                handoff.store_main(frame_id, frame);
                             }
                             outcome
                         })
                     }
-                    None => renderer.submit(render_cx),
+                    (None, None) => renderer.submit(render_cx),
+                    (Some(overlays), armed) => {
+                        submit_with_overlays(renderer, render_cx, overlays, armed)
+                    }
                 }
             }
             Ok(AcquireOutcome::Reconfigured) => Ok(FrameOutcome::Redraw),

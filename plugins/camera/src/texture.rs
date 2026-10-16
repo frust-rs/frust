@@ -44,6 +44,14 @@ impl CameraSession {
     }
 }
 
+/// Whether the renderer can import `CVPixelBuffer`s right now — what the Apple
+/// backend asks for each preview frame, to choose between handing the capture
+/// buffer over and copying it into CPU memory.
+#[cfg(target_vendor = "apple")]
+pub(crate) fn cv_pixel_buffer_import_installed() -> bool {
+    frust::texture::native_importer_installed(NativeHandleKind::CvPixelBuffer)
+}
+
 /// Registers `sink` as a renderer frame source: each poll takes its newest
 /// frame and converts it with [`source_frame`].
 fn register_sink(sink: TextureSink) -> TextureRegistration {

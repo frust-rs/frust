@@ -63,24 +63,20 @@
 //! brightness it was created under (a documented approximation); on macOS
 //! every control's `NSAppearance` follows the app theme, not the Mac.
 //!
-//! # Overlay-surface spike (render-model Phase 4)
+//! # Overlay surfaces
 //!
 //! The last block's checkbox mounts a SEVENTH slot — a native label standing
 //! in for a text field — with a frust-drawn tooltip painted over its lower
-//! half ([`overlay_spike_field`]). It is off by default, so the at-rest count
-//! above stays six and the header's live readout reads 7 while it is on.
-//! Today's Mode A surface cannot show frust paint over a native view; under
-//! `FRUST_OVERLAY_SPIKE=1` the shell stacks a translucent overlay surface above
-//! the native views and draws everything painted after the first `ClearRect`
-//! onto it. An opaque surface records no platform-view punch, so the field is
-//! followed by a zero-area `ClearRect` ([`OverlayCutMarker`]) — erasing
-//! nothing — as the cut marker. The block is the page's LAST, so the overlay's
-//! range is the tooltip (plus whatever paints after the page) rather than the
-//! rest of the page, whose native rows it would otherwise cover.
+//! half ([`overlay_field`]). It is off by default, so the at-rest count above
+//! stays six and the header's live readout reads 7 while it is on. An opaque
+//! surface (Mode A: macOS always, Android's default, iOS with
+//! `FRUST_DEMO_OPAQUE=1`) cannot show frust paint over a native view; with
+//! `FRUST_OVERLAYS=1` the shell cuts the frame at each native view and draws
+//! what is painted after it onto a translucent overlay surface stacked above
+//! it, so the tooltip shows. The block is the page's LAST, so the field's
+//! overlay carries the tooltip (plus whatever paints after the page) rather
+//! than the rest of the page. The Sandwich page is the fuller check.
 
-use frust::authoring::{
-    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Size, Widget,
-};
 use frust::{
     AnyView, Brightness, Color, EdgeInsets, Get, GetUntracked, Image, ImageFit, Padding, Set,
     SizedBox, Stack, View, button, checkbox, container, inflexible, slider, text,
@@ -111,8 +107,8 @@ local_sig!(drawn_tap_count_sig, u32, 0);
 local_sig!(reject_writeback_sig, bool, false);
 local_sig!(switch_refused_sig, u32, 0);
 local_sig!(slider_refused_sig, u32, 0);
-// The overlay-spike block's toggle — off, so the page rests at six slots.
-local_sig!(overlay_spike_sig, bool, false);
+// The overlay block's toggle — off, so the page rests at six slots.
+local_sig!(overlay_field_sig, bool, false);
 
 /// Per-control cell heights — the box BOTH columns of a row get, so a pair
 /// reads as one control shown twice. The playground page's heights, kept so
@@ -273,53 +269,18 @@ fn image_drawn() -> impl View<S> {
 }
 
 // ---------------------------------------------------------------------------
-// Overlay-surface spike
+// Overlay surfaces
 // ---------------------------------------------------------------------------
 
-/// The spike field's height — a single-line text field's.
-const SPIKE_FIELD_H: f64 = 40.0;
+/// The overlay field's height — a single-line text field's.
+const OVERLAY_FIELD_H: f64 = 40.0;
 
-/// A zero-area `ClearRect`: the overlay spike's cut marker on a surface that
-/// records no platform-view punch of its own (module doc's *Overlay-surface
-/// spike*). It erases nothing on any surface and lays out to nothing.
-pub struct OverlayCutMarker;
-
-/// [`OverlayCutMarker`]'s element.
-pub struct OverlayCutMarkerWidget;
-
-impl View<S> for OverlayCutMarker {
-    type Element = OverlayCutMarkerWidget;
-
-    fn build(&self, _ctx: &mut BuildCtx<'_>) -> OverlayCutMarkerWidget {
-        OverlayCutMarkerWidget
-    }
-
-    fn rebuild(
-        &self,
-        _prev: &Self,
-        _element: &mut OverlayCutMarkerWidget,
-        _ctx: &mut BuildCtx<'_>,
-    ) -> ChangeFlags {
-        ChangeFlags::NONE
-    }
-}
-
-impl Widget for OverlayCutMarkerWidget {
-    fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
-        bc.constrain(Size::ZERO)
-    }
-
-    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
-        scene.clear_rect(ctx.origin(), Size::ZERO);
-    }
-}
-
-/// The spike's subject: a native label standing in for a text field (the
-/// plugin ships no native text input), the cut marker, and a translucent
-/// frust tooltip overlapping the field's lower half and running past it — so
-/// one capture shows the tooltip over the native view, over frust's own
-/// background, and the alpha of both.
-fn overlay_spike_field() -> impl View<S> {
+/// The overlay block's subject: a native label standing in for a text field
+/// (the plugin ships no native text input) and a translucent frust tooltip
+/// overlapping the field's lower half and running past it — so one capture
+/// shows the tooltip over the native view, over frust's own background, and
+/// the alpha of both.
+fn overlay_field() -> impl View<S> {
     let tooltip = container(Padding(
         EdgeInsets::symmetric(10.0, 6.0),
         text("frust tooltip, drawn over the native field")
@@ -330,13 +291,12 @@ fn overlay_spike_field() -> impl View<S> {
     .radius(6.0);
     Stack((
         native_label("Native field \u{2014} the tooltip paints over me")
-            .content_description("Native field under a frust tooltip (overlay spike)")
-            .size(2.0 * PAIR_CELL_W, SPIKE_FIELD_H),
-        OverlayCutMarker,
+            .content_description("Native field under a frust tooltip (overlay surfaces)")
+            .size(2.0 * PAIR_CELL_W, OVERLAY_FIELD_H),
         Padding(
             EdgeInsets {
                 left: 24.0,
-                top: SPIKE_FIELD_H / 2.0,
+                top: OVERLAY_FIELD_H / 2.0,
                 right: 0.0,
                 bottom: 0.0,
             },
@@ -378,7 +338,7 @@ pub fn page(state: &S) -> AnyView<S> {
     let rejecting = reject_writeback_sig().get();
     let switch_refused = switch_refused_sig().get();
     let slider_refused = slider_refused_sig().get();
-    let overlay_spike = overlay_spike_sig().get();
+    let overlay_field_on = overlay_field_sig().get();
 
     let intro = block(vec![
         inflexible(caption(
@@ -548,34 +508,35 @@ pub fn page(state: &S) -> AnyView<S> {
         )),
     ]);
 
-    let mut spike_rows = vec![
-        inflexible(label("Overlay-surface spike (FRUST_OVERLAY_SPIKE)")),
+    let mut overlay_rows = vec![
+        inflexible(label("Overlay surfaces (FRUST_OVERLAYS)")),
         gap(6.0),
         inflexible(caption(
             "Mounts a native field with a frust tooltip over it. On an opaque surface the \
              native view covers frust paint, so the tooltip hides behind it \u{2014} unless \
-             the app runs with FRUST_OVERLAY_SPIKE=1, where a translucent overlay surface \
-             above the native views draws it. Adds a seventh slot while on.",
+             the app runs with FRUST_OVERLAYS=1, where a translucent overlay surface stacked \
+             above the field draws it (iOS: Mode A, FRUST_DEMO_OPAQUE=1). Adds a seventh slot \
+             while on.",
         )),
         gap(6.0),
         inflexible(checkbox(
-            overlay_spike,
+            overlay_field_on,
             "Native field + frust tooltip",
-            |_: &mut S, on: bool| overlay_spike_sig().set(on),
+            |_: &mut S, on: bool| overlay_field_sig().set(on),
         )),
     ];
-    if overlay_spike {
-        spike_rows.push(gap(8.0));
-        spike_rows.push(inflexible(overlay_spike_field()));
+    if overlay_field_on {
+        overlay_rows.push(gap(8.0));
+        overlay_rows.push(inflexible(overlay_field()));
         // Room for the tooltip's overhang below the field.
-        spike_rows.push(gap(32.0));
+        overlay_rows.push(gap(32.0));
     }
 
     let mut children = vec![page_header(SECTION), intro, theme_block, writeback_block];
     children.extend(pairs);
     children.push(readout_block);
-    // LAST on the page: the overlay's range runs from the marker to the end
-    // of the frame (module doc's *Overlay-surface spike*).
-    children.push(block(spike_rows));
+    // LAST on the page: the field's overlay range runs from the field to the
+    // end of the frame (module doc's *Overlay surfaces*).
+    children.push(block(overlay_rows));
     page_column(children)
 }

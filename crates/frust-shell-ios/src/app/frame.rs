@@ -232,7 +232,13 @@ impl IosAppHandle {
             // `resume`), so it needs no per-frame latch. What DOES need one is
             // the split's render-side self-heal, which never passes through a
             // UI-thread entry point at all (see the self-heal handling above).
-            surface_changed_or_resized: surface_reinstalled,
+            // An overlay layer that just arrived or changed size
+            // (`frust_overlay_attach`, `FRUST_OVERLAYS`) is the same kind of
+            // signal: a new surface to draw onto, owed a frame now rather than
+            // on the next unrelated repaint — or an idle screen keeps the
+            // over-paint on the main surface, under the native view.
+            surface_changed_or_resized: surface_reinstalled
+                || crate::ffi_glue::take_overlay_frame_request(),
             a11y_action_performed,
             // Driven by the gate's own warmup countdown (`note_resumed`).
             resumed_recently: false,
@@ -483,14 +489,36 @@ impl IosAppHandle {
         // behind the gate's early `return`, so a Skip records nothing AND
         // submits nothing: the recorded id can never run ahead of what will
         // actually be sent.
-        let produced = self
-            .platform_views
-            .ingest(self.app.platform_view_frames(), self.app.input_shields());
+        //
+        // With overlay surfaces on (`FRUST_OVERLAYS`, render-thread split
+        // only) the differ also gets the painted scene's commands and the
+        // logical viewport, so it cuts the frame at its slots and announces
+        // the overlays (their ops ride the same backlog and release gate); the
+        // ranges are then snapshotted into this very frame for the render
+        // thread to draw its scene with. Off, the plain `ingest` keeps the
+        // command stream exactly as it was and no cut travels.
+        let overlays_on = crate::ffi_glue::overlays_enabled() && self.executor_is_split();
+        let produced = if overlays_on {
+            self.platform_views.ingest_scene(
+                self.app.platform_view_frames(),
+                self.app.input_shields(),
+                self.scene.commands(),
+                kurbo::Rect::new(0.0, 0.0, lw, lh),
+            )
+        } else {
+            self.platform_views
+                .ingest(self.app.platform_view_frames(), self.app.input_shields())
+        };
         if produced && self.present_sync {
             let (generation, _) = self.platform_views.commands();
             self.platform_view_due
                 .record(generation, self.executor.submitted_frame_id() + 1);
         }
+        let overlay_cuts = if overlays_on {
+            self.overlay_frame_cuts()
+        } else {
+            Vec::new()
+        };
 
         // Latch this paint's `needs_frame` continuation signal (the v1
         // animation seam) for the NEXT frame's gate: unlike before — when
@@ -552,6 +580,7 @@ impl IosAppHandle {
             size,
             paint_outcome.paint_serial,
             perf_on,
+            overlay_cuts,
         );
 
         // The frame has left the UI thread (either executor arm): release any `apply_patch`

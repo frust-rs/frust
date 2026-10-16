@@ -399,14 +399,17 @@ impl VideoPlayerView {
     /// Black rather than the default nil background so the letterbox bars of a
     /// `contain` fit — and the gap before the first decoded frame — read as
     /// part of the picture instead of showing whatever the host's wrapper is
-    /// over. The frame is never set here: the host owns slot geometry (the
-    /// factory protocol's contract).
+    /// over. Clipped to its bounds, because a `cover` fit's
+    /// `resizeAspectFill` draws the picture past the layer's edges otherwise.
+    /// The frame is never set here: the host owns slot geometry (the factory
+    /// protocol's contract).
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
         // SAFETY: `-[UIView init]` (the superclass's initializer, which forwards
         // to `-initWithFrame:` with a zero rect) on a freshly allocated instance
         // of a class that declares no ivars needing initialization first.
         let this: Retained<Self> = unsafe { msg_send![Self::alloc(mtm), init] };
         this.setBackgroundColor(Some(&UIColor::blackColor()));
+        this.setClipsToBounds(true);
         this
     }
 

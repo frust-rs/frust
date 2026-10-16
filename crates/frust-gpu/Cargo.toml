@@ -36,12 +36,13 @@ ndk-sys.workspace = true
 [target.'cfg(target_vendor = "apple")'.dependencies]
 wgpu = { workspace = true, features = ["metal"] }
 # Zero-copy CVPixelBuffer import (`src/import/apple.rs`): CVMetalTextureCache -> MTLTexture -> wgpu. Minimal
-# feature lists; the import card may widen them (feature changes do not touch the lockfiles).
+# feature lists; a feature that turns on optional deps adds lockfile edges wherever this crate resolves.
 objc2.workspace = true
 objc2-core-foundation = { workspace = true }
 # Direct `version` rows (like plugins/camera): Cargo refuses `default-features = false` on a workspace-inherited objc2* row.
 objc2-core-video = { version = "0.3", default-features = false, features = [
     "std",
+    "objc2",
     "CVBase",
     "CVBuffer",
     "CVImageBuffer",

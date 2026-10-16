@@ -80,6 +80,26 @@
 //! including through [`AppKitViewHost::suspend`], which disposes every live
 //! slot rather than merely hiding it.
 //!
+//! # Overlay surfaces (`FRUST_OVERLAYS`, default off)
+//!
+//! A Mode A window cannot show frust paint above a hosted view. With the
+//! switch on ([`frust_shell_desktop::extensions::overlays_enabled`] — the same
+//! knob the Android and iOS hosts read) the desktop core cuts each frame at its
+//! slots and the batch carries `ViewCommand::Overlay`/`DisposeOverlay`. For
+//! each overlay this host stacks an `NSView` subclass hosting a non-opaque
+//! `CAMetalLayer`, whose `hitTest:` answers nil so every click still reaches
+//! the hosted view or winit's content view under it, **directly above the
+//! overlay's own slot view** (`addSubview:positioned:Above relativeTo:`), at
+//! the command's rect — the whole window. A slot view hosted later is added at
+//! the top, so it covers the overlays of the slots painted before it: frust
+//! paint recorded between two native views stays between them. The layer is
+//! published to the core's render side
+//! ([`frust_shell_desktop::extensions::publish_overlay_layer`], which builds a
+//! surface on it and draws the overlay's command range there), a frame is
+//! requested so that happens at once, and on dispose or suspend the layer is
+//! withdrawn — which waits until the render side dropped the surface — before
+//! the view is removed. Off, nothing here runs.
+//!
 //! # Why an OS-neutral core behind a seam
 //!
 //! The slot bookkeeping, the warn-once miss log, the geometry mapping and the
@@ -197,6 +217,40 @@ pub(crate) trait NativeViewOps {
 
     /// Unparent the view and hand its +1 back, for return to the factory.
     fn detach(&self, view: Self::View) -> NonNull<c_void>;
+
+    /// One overlay view, as the host holds it while it is stacked —
+    /// the view plus its `CAMetalLayer` on macOS.
+    type Overlay;
+
+    /// Create an overlay view (input-transparent, hosting a non-opaque
+    /// `CAMetalLayer`) placed at `frame`, directly above `above` — its slot's
+    /// view — in the content view's subviews. `None` when it cannot be built —
+    /// no content view, or no `CAMetalLayer` class.
+    fn attach_overlay(&self, above: &Self::View, frame: Frame) -> Option<Self::Overlay>;
+
+    /// Move and resize an overlay view to `frame`.
+    fn place_overlay(&self, overlay: &Self::Overlay, frame: Frame);
+
+    /// The overlay's `CAMetalLayer*`, borrowed (the overlay keeps it alive),
+    /// and the drawable size its current frame needs, physical px.
+    fn overlay_layer(&self, overlay: &Self::Overlay) -> (NonNull<c_void>, (u32, u32));
+
+    /// Hand the render side overlay `overlay_id`'s layer at `size` physical
+    /// px; answers whether something changed (a frame is then owed).
+    fn publish_overlay(&self, overlay_id: u64, layer: NonNull<c_void>, size: (u32, u32)) -> bool;
+
+    /// Take overlay `overlay_id`'s layer back from the render side; returns
+    /// once the surface built on it is dropped.
+    fn withdraw_overlay(&self, overlay_id: u64);
+
+    /// Ask for a frame now — a newly published or resized overlay layer is
+    /// drawn on the next frame, which an idle window would otherwise not
+    /// produce.
+    fn request_frame(&self);
+
+    /// Unparent and release an overlay view. The surface built on its layer
+    /// must already be gone ([`Self::withdraw_overlay`]).
+    fn detach_overlay(&self, overlay: Self::Overlay);
 }
 
 /// One live slot: the native view this host owns a retain of, and the
@@ -212,7 +266,14 @@ struct Slot<V> {
     factory: Arc<dyn DesktopViewFactory>,
 }
 
-/// The OS-neutral platform-view host: live slots, plus the set of
+/// One stacked overlay: its view, the slot it sits above, and the frame it was
+/// last placed at.
+struct OverlayView<O> {
+    overlay: O,
+    frame: Frame,
+}
+
+/// The OS-neutral platform-view host: live slots and overlays, plus the set of
 /// `view_type`s already reported as unresolvable.
 ///
 /// Idempotent by construction, as the hook's contract requires: a `Create`
@@ -223,18 +284,35 @@ struct Slot<V> {
 pub(crate) struct ViewHost<O: NativeViewOps> {
     slots: HashMap<u64, Slot<O::View>>,
     missing: HashSet<String>,
+    /// Whether this host builds overlay views for the `Overlay` commands
+    /// (module docs' *Overlay surfaces*).
+    overlays_enabled: bool,
+    /// The stacked overlays by the differ's overlay id.
+    overlays: HashMap<u64, OverlayView<O::Overlay>>,
+    /// Overlays that could not be stacked (no slot view, or no view could be
+    /// built), remembered so each is logged once.
+    unstacked: HashSet<u64>,
 }
 
 impl<O: NativeViewOps> Default for ViewHost<O> {
     fn default() -> Self {
-        Self {
-            slots: HashMap::new(),
-            missing: HashSet::new(),
-        }
+        Self::with_overlays(frust_shell_desktop::extensions::overlays_enabled())
     }
 }
 
 impl<O: NativeViewOps> ViewHost<O> {
+    /// A host that builds overlay views (`overlays_enabled`) or ignores the
+    /// overlay commands.
+    pub(crate) fn with_overlays(overlays_enabled: bool) -> Self {
+        Self {
+            slots: HashMap::new(),
+            missing: HashSet::new(),
+            overlays_enabled,
+            overlays: HashMap::new(),
+            unstacked: HashSet::new(),
+        }
+    }
+
     /// Apply one command batch in order.
     pub(crate) fn apply(&mut self, ops: &O, commands: &[ViewCommand]) {
         for command in commands {
@@ -260,7 +338,8 @@ impl<O: NativeViewOps> ViewHost<O> {
                     // only to a host that intercepts events before the native
                     // view, which this one does not.
                     shields: _,
-                    // Stacking among slots is not applied by this host yet.
+                    // Stacking among slots is creation order (a new view goes
+                    // to the top), not the rank.
                     z_index: _,
                 } => self.update(ops, *slot_id, *rect, *clip, *visible),
                 ViewCommand::UpdateParams {
@@ -268,11 +347,100 @@ impl<O: NativeViewOps> ViewHost<O> {
                     params_json,
                 } => self.update_params(ops, *slot_id, params_json),
                 ViewCommand::Dispose { slot_id } => self.dispose(ops, *slot_id),
-                // Overlays have no macOS host yet; the desktop shell's plain
-                // `ingest` never produces them.
-                ViewCommand::Overlay { .. } | ViewCommand::DisposeOverlay { .. } => {}
+                ViewCommand::Overlay {
+                    overlay_id,
+                    above_slot_id,
+                    rect,
+                    // Informational: the render side draws each frame with the
+                    // ranges cut from that frame's own scene.
+                    command_range: _,
+                } => self.overlay(ops, *overlay_id, *above_slot_id, *rect),
+                ViewCommand::DisposeOverlay { overlay_id } => {
+                    self.dispose_overlay(ops, *overlay_id);
+                }
             }
         }
+    }
+
+    /// Create or re-place overlay `overlay_id`: a new one is stacked directly
+    /// above its slot's view at `rect` and its layer published; a known one
+    /// adopts a changed rect, re-publishing the layer at its new drawable
+    /// size. Either change asks for a frame. Ignored with overlays off; an
+    /// overlay over a slot this host has no view for (a dead slot) is skipped
+    /// — its content stays on the main surface.
+    fn overlay(&mut self, ops: &O, overlay_id: u64, above_slot_id: u64, rect: Rect) {
+        if !self.overlays_enabled {
+            return;
+        }
+        let frame = fit_frame(rect, None);
+        if let Some(stacked) = self.overlays.get_mut(&overlay_id) {
+            if stacked.frame == frame {
+                return;
+            }
+            ops.place_overlay(&stacked.overlay, frame);
+            stacked.frame = frame;
+            let (layer, size) = ops.overlay_layer(&stacked.overlay);
+            if ops.publish_overlay(overlay_id, layer, size) {
+                ops.request_frame();
+            }
+            return;
+        }
+        let Some(slot) = self.slots.get(&above_slot_id) else {
+            if self.unstacked.insert(overlay_id) {
+                log::warn!(
+                    "frust-overlay: overlay {overlay_id} has no hosted view for slot \
+                     {above_slot_id} to sit above; its content stays under the native views"
+                );
+            }
+            return;
+        };
+        let Some(overlay) = ops.attach_overlay(&slot.view, frame) else {
+            if self.unstacked.insert(overlay_id) {
+                log::warn!(
+                    "frust-overlay: overlay view {overlay_id} could not be built; frust paint \
+                     stays under the hosted views"
+                );
+            }
+            return;
+        };
+        let (layer, (width, height)) = ops.overlay_layer(&overlay);
+        log::info!(
+            "frust-overlay: overlay {overlay_id} view stacked above slot {above_slot_id} \
+             (CAMetalLayer {layer:p}, {width}x{height} px)"
+        );
+        self.overlays
+            .insert(overlay_id, OverlayView { overlay, frame });
+        if ops.publish_overlay(overlay_id, layer, (width, height)) {
+            ops.request_frame();
+        }
+    }
+
+    /// Tear overlay `overlay_id` down: withdraw its layer from the render side
+    /// (which drops the surface on it) **before** removing the view.
+    fn dispose_overlay(&mut self, ops: &O, overlay_id: u64) {
+        self.unstacked.remove(&overlay_id);
+        let Some(stacked) = self.overlays.remove(&overlay_id) else {
+            return;
+        };
+        ops.withdraw_overlay(overlay_id);
+        ops.detach_overlay(stacked.overlay);
+        log::info!("frust-overlay: overlay {overlay_id} view removed");
+    }
+
+    /// Every stacked overlay's id, `CAMetalLayer*` and drawable size in
+    /// physical px, ascending id.
+    #[cfg(test)]
+    pub(crate) fn overlay_layers(&self, ops: &O) -> Vec<(u64, NonNull<c_void>, (u32, u32))> {
+        let mut layers: Vec<_> = self
+            .overlays
+            .iter()
+            .map(|(&overlay_id, stacked)| {
+                let (layer, size) = ops.overlay_layer(&stacked.overlay);
+                (overlay_id, layer, size)
+            })
+            .collect();
+        layers.sort_by_key(|(overlay_id, _, _)| *overlay_id);
+        layers
     }
 
     /// Dispose every live slot, returning each view to its factory.
@@ -288,6 +456,13 @@ impl<O: NativeViewOps> ViewHost<O> {
     /// re-warning on every surface recreation would turn a one-line
     /// diagnostic into a per-event repeat.
     pub(crate) fn suspend(&mut self, ops: &O) {
+        // Overlays first: each layer is withdrawn (its surface dropped) before
+        // its view goes, and before the slot view under it.
+        let overlay_ids: Vec<u64> = self.overlays.keys().copied().collect();
+        for overlay_id in overlay_ids {
+            self.dispose_overlay(ops, overlay_id);
+        }
+        self.unstacked.clear();
         let slot_ids: Vec<u64> = self.slots.keys().copied().collect();
         for slot_id in slot_ids {
             self.dispose(ops, slot_id);
@@ -414,14 +589,103 @@ mod appkit {
 
     use frust_plugin::desktop::DesktopViewFactory;
     use frust_shell_common::platform_view::ViewCommand;
-    use objc2::MainThreadMarker;
     use objc2::rc::Retained;
-    use objc2_app_kit::{NSView, NSWindowOrderingMode};
-    use objc2_foundation::{NSPoint, NSRect, NSSize};
+    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send};
+    use objc2_app_kit::{NSAutoresizingMaskOptions, NSResponder, NSView, NSWindowOrderingMode};
+    use objc2_foundation::{NSObject, NSPoint, NSRect, NSSize};
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use winit::window::Window;
 
     use super::{Frame, NativeViewOps, ViewHost};
+
+    define_class!(
+        // SAFETY:
+        // - `NSView` imposes no subclassing requirement beyond main-thread
+        //   use, which `MainThreadOnly` enforces.
+        // - `FrustOverlaySurfaceView` holds no ivars and implements no
+        //   `Drop`.
+        // - The two overrides keep `NSView`'s own signatures (`hitTest:`
+        //   takes an `NSPoint` and answers an `NSView *`; `isOpaque` a
+        //   `BOOL`).
+        #[unsafe(super(NSView, NSResponder, NSObject))]
+        #[thread_kind = MainThreadOnly]
+        struct FrustOverlaySurfaceView;
+
+        impl FrustOverlaySurfaceView {
+            /// Input-transparent: no point is ever inside the overlay, so a
+            /// click falls through to the hosted view or winit's content
+            /// view under it, exactly as without the overlay.
+            #[unsafe(method(hitTest:))]
+            fn hit_test(&self, _point: NSPoint) -> *mut NSView {
+                std::ptr::null_mut()
+            }
+
+            /// Never opaque: AppKit must composite what lies under it.
+            #[unsafe(method(isOpaque))]
+            fn is_opaque(&self) -> bool {
+                false
+            }
+        }
+    );
+
+    /// One stacked overlay: the view, and the `CAMetalLayer` it hosts (also
+    /// retained by the view; held here so its pointer is stable to hand out —
+    /// and alive until the host has withdrawn it from the render side).
+    pub(crate) struct AppKitOverlay {
+        view: Retained<NSView>,
+        layer: Retained<AnyObject>,
+    }
+
+    /// Build an overlay view at `frame` (logical points) hosting a non-opaque
+    /// `CAMetalLayer` at `scale`, or `None` when the runtime has no
+    /// `CAMetalLayer` class.
+    fn overlay_view(mtm: MainThreadMarker, frame: NSRect, scale: f64) -> Option<AppKitOverlay> {
+        let class = AnyClass::get(c"CAMetalLayer")?;
+        // SAFETY: `+[CAMetalLayer layer]` is the class's autoreleased
+        // convenience constructor (no arguments; `msg_send!` retains the
+        // `none`-family result into the `Retained`).
+        let layer: Retained<AnyObject> = unsafe { msg_send![class, layer] };
+        // SAFETY: `setOpaque:` (`BOOL`) and `setContentsScale:` (`CGFloat`)
+        // are `CALayer` setters, sent on the main thread to a layer no other
+        // code holds yet.
+        unsafe {
+            let _: () = msg_send![&*layer, setOpaque: false];
+            let _: () = msg_send![&*layer, setContentsScale: scale];
+        }
+        let allocated = FrustOverlaySurfaceView::alloc(mtm).set_ivars(());
+        // SAFETY: `initWithFrame:` is `NSView`'s designated initializer, sent
+        // once to a freshly allocated instance.
+        let view: Retained<FrustOverlaySurfaceView> =
+            unsafe { msg_send![super(allocated), initWithFrame: frame] };
+        let view = Retained::into_super(view);
+        // A layer-hosting view: the layer is set before `wantsLayer`, so
+        // AppKit hosts it rather than replacing it with a backing layer of its
+        // own.
+        // SAFETY: `setLayer:` takes a `CALayer *`, and `layer` is one (a
+        // `CAMetalLayer`); the view retains it.
+        unsafe {
+            let _: () = msg_send![&*view, setLayer: &*layer];
+        }
+        view.setWantsLayer(true);
+        // The overlay covers the whole window (the differ's rect): it follows
+        // the content view's live resizes between the re-placements each
+        // changed rect brings.
+        view.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
+        Some(AppKitOverlay { view, layer })
+    }
+
+    /// `frame` as an `NSRect` — logical points, top-left origin (the content
+    /// view is flipped; module docs' *Geometry*).
+    fn ns_rect(frame: Frame) -> NSRect {
+        NSRect::new(
+            NSPoint::new(frame.x, frame.y),
+            NSSize::new(frame.width, frame.height),
+        )
+    }
 
     /// The macOS platform-view host: the OS-neutral [`ViewHost`] plus the
     /// once-only diagnostics for the two ways a batch can be skipped whole.
@@ -455,6 +719,9 @@ mod appkit {
             self.host.apply(
                 &AppKitOps {
                     content: Some(content),
+                    mtm,
+                    scale: window.scale_factor(),
+                    window: Some(Arc::clone(window)),
                 },
                 commands,
             );
@@ -468,10 +735,15 @@ mod appkit {
         /// superview). So the content view is deliberately left unresolved
         /// here — see [`AppKitOps::content`].
         pub(crate) fn suspend(&mut self) {
-            if self.main_thread().is_none() {
+            let Some(mtm) = self.main_thread() else {
                 return;
-            }
-            self.host.suspend(&AppKitOps { content: None });
+            };
+            self.host.suspend(&AppKitOps {
+                content: None,
+                mtm,
+                scale: 1.0,
+                window: None,
+            });
         }
 
         /// How many native views this host currently has parented — for the
@@ -526,10 +798,20 @@ mod appkit {
         /// unparent) is sent to the hosted view itself and needs no
         /// superview handle.
         content: Option<Retained<NSView>>,
+        /// The main-thread proof the overlay views' allocation needs.
+        mtm: MainThreadMarker,
+        /// The window's backing scale, for the overlay layers' contents
+        /// scale and drawable size (unused on the teardown path).
+        scale: f64,
+        /// The window a frame is requested from when an overlay layer is
+        /// published or resized (`None` on the teardown path, which publishes
+        /// nothing).
+        window: Option<Arc<Window>>,
     }
 
     impl NativeViewOps for AppKitOps {
         type View = Retained<NSView>;
+        type Overlay = AppKitOverlay;
 
         fn lookup_factory(&self, view_type: &str) -> Option<Arc<dyn DesktopViewFactory>> {
             frust_plugin::desktop::lookup_view_factory(view_type)
@@ -580,6 +862,55 @@ mod appkit {
             NonNull::new(Retained::into_raw(view))
                 .expect("Retained::into_raw never answers null")
                 .cast()
+        }
+
+        fn attach_overlay(&self, above: &Retained<NSView>, frame: Frame) -> Option<AppKitOverlay> {
+            let content = self.content.as_ref()?;
+            let overlay = overlay_view(self.mtm, ns_rect(frame), self.scale)?;
+            // Directly above its slot's view, not at the top: a slot view
+            // hosted after this one (painted later) stays above it.
+            content.addSubview_positioned_relativeTo(
+                &overlay.view,
+                NSWindowOrderingMode::Above,
+                Some(above),
+            );
+            Some(overlay)
+        }
+
+        fn place_overlay(&self, overlay: &AppKitOverlay, frame: Frame) {
+            overlay.view.setFrame(ns_rect(frame));
+        }
+
+        fn overlay_layer(&self, overlay: &AppKitOverlay) -> (NonNull<c_void>, (u32, u32)) {
+            let size = overlay.view.frame().size;
+            let pixels = (
+                (size.width * self.scale).round().max(1.0) as u32,
+                (size.height * self.scale).round().max(1.0) as u32,
+            );
+            (NonNull::from(&*overlay.layer).cast(), pixels)
+        }
+
+        fn publish_overlay(
+            &self,
+            overlay_id: u64,
+            layer: NonNull<c_void>,
+            (width, height): (u32, u32),
+        ) -> bool {
+            frust_shell_desktop::extensions::publish_overlay_layer(overlay_id, layer, width, height)
+        }
+
+        fn withdraw_overlay(&self, overlay_id: u64) {
+            frust_shell_desktop::extensions::withdraw_overlay_layer(overlay_id);
+        }
+
+        fn request_frame(&self) {
+            if let Some(window) = self.window.as_ref() {
+                window.request_redraw();
+            }
+        }
+
+        fn detach_overlay(&self, overlay: AppKitOverlay) {
+            overlay.view.removeFromSuperview();
         }
     }
 }
@@ -674,6 +1005,9 @@ mod tests {
         params: HashMap<usize, Vec<String>>,
         /// Next address to hand out — never null, never dereferenced.
         next_address: usize,
+        /// The render-side seam's calls, in order: `publish N WxH`,
+        /// `withdraw N`, `frame`, `detach N`.
+        overlay_events: Vec<String>,
     }
 
     impl RetainLedger {
@@ -823,6 +1157,10 @@ mod tests {
         factories: HashMap<String, Arc<dyn DesktopViewFactory>>,
         /// When set, `attach` refuses the pointer (the null-view path).
         refuse_attach: bool,
+        /// When set, `attach_overlay` cannot build an overlay.
+        refuse_overlay: bool,
+        /// The backing scale the fake reports drawable sizes at.
+        scale: f64,
     }
 
     impl FakeOps {
@@ -831,6 +1169,8 @@ mod tests {
                 ledger: Rc::clone(ledger),
                 factories: HashMap::new(),
                 refuse_attach: false,
+                refuse_overlay: false,
+                scale: 2.0,
             }
         }
 
@@ -880,6 +1220,86 @@ mod tests {
                 .retain(|attached| *attached != address(view));
             view
         }
+
+        /// The overlay's stand-in address (its place in the ledger's
+        /// `attached` stack) and its current frame.
+        type Overlay = (usize, std::cell::Cell<Frame>);
+
+        fn attach_overlay(
+            &self,
+            above: &NonNull<c_void>,
+            frame: Frame,
+        ) -> Option<(usize, std::cell::Cell<Frame>)> {
+            if self.refuse_overlay {
+                return None;
+            }
+            let mut ledger = self.ledger.borrow_mut();
+            ledger.next_address += 0x10;
+            let overlay = 0x9000 + ledger.next_address;
+            // Directly above its slot's view, like `addSubview:positioned:
+            // Above relativeTo:`.
+            let at = ledger
+                .attached
+                .iter()
+                .position(|attached| *attached == address(*above))
+                .map_or(ledger.attached.len(), |slot| slot + 1);
+            ledger.attached.insert(at, overlay);
+            Some((overlay, std::cell::Cell::new(frame)))
+        }
+
+        fn place_overlay(&self, overlay: &(usize, std::cell::Cell<Frame>), frame: Frame) {
+            overlay.1.set(frame);
+        }
+
+        fn overlay_layer(
+            &self,
+            overlay: &(usize, std::cell::Cell<Frame>),
+        ) -> (NonNull<c_void>, (u32, u32)) {
+            let frame = overlay.1.get();
+            (
+                NonNull::new(std::ptr::without_provenance_mut(overlay.0))
+                    .expect("a nonzero address is never null"),
+                (
+                    (frame.width * self.scale) as u32,
+                    (frame.height * self.scale) as u32,
+                ),
+            )
+        }
+
+        fn publish_overlay(
+            &self,
+            overlay_id: u64,
+            _layer: NonNull<c_void>,
+            size: (u32, u32),
+        ) -> bool {
+            self.ledger
+                .borrow_mut()
+                .overlay_events
+                .push(format!("publish {overlay_id} {}x{}", size.0, size.1));
+            true
+        }
+
+        fn withdraw_overlay(&self, overlay_id: u64) {
+            self.ledger
+                .borrow_mut()
+                .overlay_events
+                .push(format!("withdraw {overlay_id}"));
+        }
+
+        fn request_frame(&self) {
+            self.ledger
+                .borrow_mut()
+                .overlay_events
+                .push("frame".to_string());
+        }
+
+        fn detach_overlay(&self, overlay: (usize, std::cell::Cell<Frame>)) {
+            let mut ledger = self.ledger.borrow_mut();
+            ledger.attached.retain(|attached| *attached != overlay.0);
+            ledger
+                .overlay_events
+                .push(format!("detach {:#x}", overlay.0));
+        }
     }
 
     const VIDEO: &str = "dev.frust.test.Video";
@@ -911,7 +1331,7 @@ mod tests {
         let ledger = RetainLedger::new();
         let factory = FakeFactory::new(&ledger);
         let ops = FakeOps::new(&ledger).with(VIDEO, factory.clone());
-        let mut host = ViewHost::<FakeOps>::default();
+        let mut host = ViewHost::<FakeOps>::with_overlays(false);
 
         host.apply(
             &ops,
@@ -942,7 +1362,7 @@ mod tests {
         let ledger = RetainLedger::new();
         let factory = FakeFactory::new(&ledger);
         let ops = FakeOps::new(&ledger).with(VIDEO, factory.clone());
-        let mut host = ViewHost::<FakeOps>::default();
+        let mut host = ViewHost::<FakeOps>::with_overlays(false);
 
         host.apply(&ops, &[create(1)]);
         let view = ledger.borrow().live()[0];
@@ -977,7 +1397,7 @@ mod tests {
         let ledger = RetainLedger::new();
         let factory = FakeFactory::new(&ledger);
         let ops = FakeOps::new(&ledger).with(VIDEO, factory.clone());
-        let mut host = ViewHost::<FakeOps>::default();
+        let mut host = ViewHost::<FakeOps>::with_overlays(false);
 
         host.apply(&ops, &[create(1), create(2), create(3)]);
         assert_eq!(host.slot_count(), 3);
@@ -1002,7 +1422,7 @@ mod tests {
         let factory = FakeFactory::new(&ledger);
         let mut ops = FakeOps::new(&ledger).with(VIDEO, factory.clone());
         ops.refuse_attach = true;
-        let mut host = ViewHost::<FakeOps>::default();
+        let mut host = ViewHost::<FakeOps>::with_overlays(false);
 
         host.apply(
             &ops,
@@ -1020,7 +1440,7 @@ mod tests {
         let ledger = RetainLedger::new();
         let factory = FakeFactory::new(&ledger);
         let ops = FakeOps::new(&ledger).with(VIDEO, factory.clone());
-        let mut host = ViewHost::<FakeOps>::default();
+        let mut host = ViewHost::<FakeOps>::with_overlays(false);
 
         host.apply(&ops, &[create(4)]);
         host.apply(&ops, &[create(4)]);
@@ -1038,7 +1458,7 @@ mod tests {
         let ledger = RetainLedger::new();
         let factory = FakeFactory::new(&ledger);
         let ops = FakeOps::new(&ledger).with(VIDEO, factory.clone());
-        let mut host = ViewHost::<FakeOps>::default();
+        let mut host = ViewHost::<FakeOps>::with_overlays(false);
 
         host.apply(&ops, &[update(9, rect(0.0, 0.0, 10.0, 10.0), true)]);
         host.apply(
@@ -1058,7 +1478,7 @@ mod tests {
         let ledger = RetainLedger::new();
         let factory = FakeFactory::new(&ledger);
         let ops = FakeOps::new(&ledger).with(VIDEO, factory.clone());
-        let mut host = ViewHost::<FakeOps>::default();
+        let mut host = ViewHost::<FakeOps>::with_overlays(false);
 
         host.apply(&ops, &[create(2)]);
         host.apply(&ops, &[ViewCommand::Dispose { slot_id: 2 }]);
@@ -1079,7 +1499,7 @@ mod tests {
         let ledger = RetainLedger::new();
         let factory = FakeFactory::new(&ledger);
         let ops = FakeOps::new(&ledger).with(VIDEO, factory.clone());
-        let mut host = ViewHost::<FakeOps>::default();
+        let mut host = ViewHost::<FakeOps>::with_overlays(false);
 
         host.apply(&ops, &[create(1)]);
         let view = ledger.borrow().live()[0];
@@ -1107,7 +1527,7 @@ mod tests {
         let ledger = RetainLedger::new();
         let factory = FakeFactory::new(&ledger);
         let ops = FakeOps::new(&ledger).with(VIDEO, factory.clone());
-        let mut host = ViewHost::<FakeOps>::default();
+        let mut host = ViewHost::<FakeOps>::with_overlays(false);
 
         host.apply(
             &ops,
@@ -1129,7 +1549,7 @@ mod tests {
         // Nothing registered at all — the shape the demo view types on a
         // sample app's platform page produce.
         let ops = FakeOps::new(&ledger);
-        let mut host = ViewHost::<FakeOps>::default();
+        let mut host = ViewHost::<FakeOps>::with_overlays(false);
 
         host.apply(&ops, &[create(1)]);
         assert!(host.missing.contains(VIDEO), "the miss is recorded");
@@ -1158,7 +1578,7 @@ mod tests {
     fn a_miss_survives_a_suspend_so_a_surface_recreate_does_not_re_report_it() {
         let ledger = RetainLedger::new();
         let ops = FakeOps::new(&ledger);
-        let mut host = ViewHost::<FakeOps>::default();
+        let mut host = ViewHost::<FakeOps>::with_overlays(false);
 
         host.apply(&ops, &[create(1)]);
         host.suspend(&ops);
@@ -1180,7 +1600,7 @@ mod tests {
         let ledger = RetainLedger::new();
         let factory = FakeFactory::declining(&ledger);
         let ops = FakeOps::new(&ledger).with(VIDEO, factory.clone());
-        let mut host = ViewHost::<FakeOps>::default();
+        let mut host = ViewHost::<FakeOps>::with_overlays(false);
 
         host.apply(&ops, &[create(1)]);
         host.apply(&ops, &[create(2)]);
@@ -1195,7 +1615,7 @@ mod tests {
         let ledger = RetainLedger::new();
         let factory = FakeFactory::panicking(&ledger);
         let ops = FakeOps::new(&ledger).with(VIDEO, factory.clone());
-        let mut host = ViewHost::<FakeOps>::default();
+        let mut host = ViewHost::<FakeOps>::with_overlays(false);
 
         // Would unwind into the caller — AppKit, in the real host — without
         // the catch.
@@ -1206,5 +1626,180 @@ mod tests {
 
         assert_eq!(host.slot_count(), 0);
         assert_eq!(ledger.borrow().live(), Vec::<usize>::new());
+    }
+
+    // --- Overlay surfaces ----------------------------------------------
+
+    fn overlay(overlay_id: u64, above_slot_id: u64, viewport: Rect) -> ViewCommand {
+        ViewCommand::Overlay {
+            overlay_id,
+            above_slot_id,
+            rect: viewport,
+            command_range: 3..9,
+        }
+    }
+
+    fn events(ledger: &Rc<RefCell<RetainLedger>>) -> Vec<String> {
+        std::mem::take(&mut ledger.borrow_mut().overlay_events)
+    }
+
+    #[test]
+    fn the_switch_off_ignores_the_overlay_commands() {
+        let ledger = RetainLedger::new();
+        let factory = FakeFactory::new(&ledger);
+        let ops = FakeOps::new(&ledger).with(VIDEO, factory);
+        let mut host = ViewHost::<FakeOps>::with_overlays(false);
+
+        host.apply(
+            &ops,
+            &[
+                create(1),
+                update(1, rect(0.0, 0.0, 10.0, 10.0), true),
+                overlay(1, 1, rect(0.0, 0.0, 800.0, 600.0)),
+                ViewCommand::DisposeOverlay { overlay_id: 1 },
+            ],
+        );
+
+        assert_eq!(ledger.borrow().attached.len(), 1, "the hosted view alone");
+        assert!(host.overlay_layers(&ops).is_empty());
+        assert!(events(&ledger).is_empty());
+    }
+
+    #[test]
+    fn an_overlay_stacks_directly_above_its_slot_and_publishes_its_layer() {
+        let ledger = RetainLedger::new();
+        let factory = FakeFactory::new(&ledger);
+        let ops = FakeOps::new(&ledger).with(VIDEO, factory);
+        let mut host = ViewHost::<FakeOps>::with_overlays(true);
+
+        host.apply(
+            &ops,
+            &[
+                create(1),
+                update(1, rect(0.0, 0.0, 10.0, 10.0), true),
+                create(2),
+                update(2, rect(0.0, 20.0, 10.0, 30.0), true),
+                // Content painted between the two views, and content painted
+                // over the second one.
+                overlay(1, 1, rect(0.0, 0.0, 800.0, 600.0)),
+                overlay(2, 2, rect(0.0, 0.0, 800.0, 600.0)),
+            ],
+        );
+        let layers = host.overlay_layers(&ops);
+        let [(1, first, _), (2, second, (1600, 1200))] = layers.as_slice() else {
+            panic!("two overlays at the window's drawable size: {layers:?}");
+        };
+        let views = ledger.borrow().live();
+        // Bottom to top: slot 1, its overlay, slot 2, its overlay — the
+        // between-content stays under the later view.
+        assert_eq!(
+            ledger.borrow().attached,
+            vec![views[0], address(*first), views[1], address(*second)]
+        );
+        assert_eq!(
+            events(&ledger),
+            [
+                "publish 1 1600x1200",
+                "frame",
+                "publish 2 1600x1200",
+                "frame"
+            ]
+        );
+
+        // A view hosted later goes to the top, above every overlay.
+        host.apply(&ops, &[create(3)]);
+        assert_eq!(ledger.borrow().attached.len(), 5);
+        assert_eq!(
+            ledger.borrow().attached.last().copied(),
+            ledger.borrow().live().last().copied()
+        );
+    }
+
+    #[test]
+    fn a_resized_viewport_re_places_and_re_publishes_the_overlay() {
+        let ledger = RetainLedger::new();
+        let factory = FakeFactory::new(&ledger);
+        let ops = FakeOps::new(&ledger).with(VIDEO, factory);
+        let mut host = ViewHost::<FakeOps>::with_overlays(true);
+        host.apply(
+            &ops,
+            &[create(1), overlay(1, 1, rect(0.0, 0.0, 800.0, 600.0))],
+        );
+        events(&ledger);
+
+        // The same rect again (a range change) touches nothing.
+        host.apply(&ops, &[overlay(1, 1, rect(0.0, 0.0, 800.0, 600.0))]);
+        assert!(events(&ledger).is_empty());
+
+        host.apply(&ops, &[overlay(1, 1, rect(0.0, 0.0, 1000.0, 700.0))]);
+        assert_eq!(events(&ledger), ["publish 1 2000x1400", "frame"]);
+    }
+
+    #[test]
+    fn a_disposed_overlay_is_withdrawn_before_its_view_goes() {
+        let ledger = RetainLedger::new();
+        let factory = FakeFactory::new(&ledger);
+        let ops = FakeOps::new(&ledger).with(VIDEO, factory);
+        let mut host = ViewHost::<FakeOps>::with_overlays(true);
+        host.apply(&ops, &[create(1), overlay(4, 1, rect(0.0, 0.0, 8.0, 6.0))]);
+        let (_, layer, _) = host.overlay_layers(&ops)[0];
+        events(&ledger);
+
+        host.apply(
+            &ops,
+            &[
+                ViewCommand::DisposeOverlay { overlay_id: 4 },
+                ViewCommand::Dispose { slot_id: 1 },
+            ],
+        );
+        assert_eq!(
+            events(&ledger),
+            [
+                "withdraw 4".to_string(),
+                format!("detach {:#x}", address(layer))
+            ]
+        );
+        assert!(ledger.borrow().attached.is_empty());
+        assert!(host.overlay_layers(&ops).is_empty());
+    }
+
+    #[test]
+    fn a_suspend_withdraws_every_overlay_before_removing_the_views() {
+        let ledger = RetainLedger::new();
+        let factory = FakeFactory::new(&ledger);
+        let ops = FakeOps::new(&ledger).with(VIDEO, factory);
+        let mut host = ViewHost::<FakeOps>::with_overlays(true);
+        host.apply(&ops, &[create(1), overlay(1, 1, rect(0.0, 0.0, 8.0, 6.0))]);
+        events(&ledger);
+
+        host.suspend(&ops);
+        let suspended = events(&ledger);
+        assert_eq!(suspended.first().map(String::as_str), Some("withdraw 1"));
+        assert!(suspended[1].starts_with("detach"));
+        assert!(ledger.borrow().attached.is_empty());
+        assert!(ledger.borrow().over_released().is_empty());
+
+        // The replay after the surface returns stacks it again.
+        host.apply(&ops, &[create(1), overlay(1, 1, rect(0.0, 0.0, 8.0, 6.0))]);
+        assert_eq!(host.overlay_layers(&ops).len(), 1);
+    }
+
+    #[test]
+    fn an_overlay_without_a_slot_view_or_a_view_of_its_own_is_skipped() {
+        let ledger = RetainLedger::new();
+        let factory = FakeFactory::new(&ledger);
+        let mut ops = FakeOps::new(&ledger).with(VIDEO, factory);
+        let mut host = ViewHost::<FakeOps>::with_overlays(true);
+
+        // A dead slot: nothing to sit above.
+        host.apply(&ops, &[overlay(1, 9, rect(0.0, 0.0, 8.0, 6.0))]);
+        assert!(host.overlay_layers(&ops).is_empty());
+
+        ops.refuse_overlay = true;
+        host.apply(&ops, &[create(1), overlay(2, 1, rect(0.0, 0.0, 8.0, 6.0))]);
+        assert_eq!(host.slot_count(), 1);
+        assert_eq!(ledger.borrow().attached.len(), 1);
+        assert!(host.overlay_layers(&ops).is_empty());
+        assert!(events(&ledger).is_empty());
     }
 }

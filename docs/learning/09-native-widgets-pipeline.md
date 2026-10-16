@@ -195,11 +195,16 @@ renderer then compiles the frame once, draws the main segment (everything outsid
 base surface and each cut onto its own translucent surface (`SurfaceRenderer::encode_segmented`),
 with one submit per frame.
 
-Android realises these today: the Kotlin host stacks a translucent, input-transparent `SurfaceView`
-above each slot's view, behind the default-off `FRUST_OVERLAYS` knob, and only on an opaque
-surface (a Mode B host already shows that content). The limit to know: an on-top overlay covers
-*every* native view, so frust content between two slots covers the later one. The device outcome is
-pending, and the Apple hosts are pending.
+Android, iOS and macOS realise these behind the default-off `FRUST_OVERLAYS` knob, and only on an
+opaque surface (a Mode B host already shows that content). Android's Kotlin host stacks a
+translucent, input-transparent `SurfaceView` above each slot's view; the limit to know is that an
+on-top overlay covers *every* native view, so frust content between two slots covers the later one.
+The Apple hosts add a non-opaque `CAMetalLayer` view directly above each slot's own view
+(`FrustOverlayView` on iOS, `FrustOverlaySurfaceView` on macOS), so the same content stays under the
+later native control; the frame is still one submit, with main presented first and the overlays
+after it. On iOS with present-sync armed the UI thread presents them together inside one
+`CATransaction`. Device outcomes: Android's overlay works but a new surface gets no frame while the
+app is idle; iOS passes on a phone and the Simulator; macOS passes in both paint orders.
 
 ### 6. Events-as-signals
 
@@ -261,9 +266,12 @@ texture bus: it owns a `TextureSink` (`frust-plugin`'s leaf mailbox), a facade-s
 registers a source with `frust::texture::register_texture_source`, and the widget `texture_view`
 draws the registered id as ordinary scene content. A CPU frame is uploaded; a native frame (an
 `AHardwareBuffer` on Android, imported behind `FRUST_ANDROID_HWBUFFER_IMPORT`) is wrapped without
-a copy and its release waits until the GPU is done with it. The video player's
-`VideoOutput::Texture` and the camera's `preview_texture` are the two producers; Apple producers
-are pending.
+a copy and its release waits until the GPU is done with it. On Apple a native frame is a
+32BGRA IOSurface-backed `CVPixelBuffer` that `MetalImporter` wraps through a `CVMetalTextureCache`
+(NV12 stays on the CPU path). The video player's `VideoOutput::Texture` and the camera's
+`preview_texture` are the two producers; both hand frames on zero-copy on iOS and macOS when the
+importer is installed. The bus is pull-only: a new frame never wakes the frame gate, so a page
+showing a `texture_view` needs a painted frame requester (`texture-bus-no-wake-on-push`).
 
 ## How the other two frameworks solve this
 
@@ -385,12 +393,18 @@ you drew over a control vanishes behind it. While you're there, read
 the composite `NativeComponent` toggled on — one slot for a whole native card,
 however many native children it owns.
 
+**Overlays on Apple:** on macOS run the demo with `FRUST_OVERLAYS=1`; on iOS build with
+`--define FRUST_OVERLAYS=1` and launch with `FRUST_DEMO_OPAQUE=1` (SHELLS_DEVELOPMENT.md has the
+recipe and the proving log lines). Open the `sandwich` page; the card stays under the native
+slider even with "Interleaved" on.
+
 **Overlays on Android:** with the demo in Mode A, build with `frust run --define FRUST_OVERLAYS=1`
 and open the `sandwich` page (`native-widgets-demo://section/sandwich`): the popover and badge now
 show over the native views, and the "Interleaved" checkbox shows the cover-later-slots limit. A
 debuggable build can force the mode per launch with the intent extra
 `--ez dev.frust.translucentSurface false` (force-stop between modes; SHELLS_DEVELOPMENT.md has the
-`adb` line). Device outcome: pending.
+`adb` line). Device outcome: the overlay itself works; a new overlay surface gets no frame while
+the app is idle.
 
 **Desktop note:** platform views are mobile-only. On the desktop preview
 (`cargo run` in the same directory) there is no host and no factory: the slot

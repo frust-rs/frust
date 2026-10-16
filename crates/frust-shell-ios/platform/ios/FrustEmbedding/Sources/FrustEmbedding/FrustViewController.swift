@@ -560,8 +560,15 @@ open class FrustViewController: UIViewController {
             // Stand up the platform-view host now that a handle exists:
             // it hosts native sibling views and is
             // polled from `renderFrame` after each `frust_render_frame`.
+            // Under the overlay switch (`FRUST_OVERLAYS`, Mode A only) it also
+            // stacks one overlay surface directly above each hosted view that
+            // frust paints over (the differ's `overlay` ops); their layers
+            // present inside the same transaction as `forgeView`'s when
+            // present-sync is armed — `frust_present_frame` presents the main
+            // frame and then its overlays, bottom to top.
             platformViewHost = FrustViewHost(
-                containerView: forgeView, translucent: translucentSurface)
+                containerView: forgeView, translucent: translucentSurface, handle: handle,
+                presentsWithTransaction: presentSyncArmed)
             // Mode B input forwarding: let the
             // surface's hitTest consult the host's interactive-slot rects.
             forgeView.interactiveSlotHitTest = { [weak self] point in

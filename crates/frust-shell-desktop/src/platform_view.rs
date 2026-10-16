@@ -66,16 +66,90 @@
 //! up again, and every surface bring-up calls
 //! [`DesktopPlatformViews::on_surface_recreated`], whose replay re-creates each
 //! live slot before the next ingest can emit a bare `Update` for it.
+//!
+//! # Overlays
+//!
+//! With overlay surfaces on (`FRUST_OVERLAYS`, macOS only — see
+//! [`crate::extensions::overlays_enabled`]) the ingest is the overlay-aware
+//! one: the differ also gets the painted scene's commands and the logical
+//! viewport, cuts the frame at its visible slots and announces one
+//! `ViewCommand::Overlay` per cut in the same batch the host receives. The
+//! ranges are folded here as they are pushed ([`DesktopPlatformViews::overlay_cuts`])
+//! and travel with the very scene they were cut from to the render side, so a
+//! frame's ranges are never paired with another frame's commands. Off, the
+//! plain ingest keeps the command stream exactly as it was.
 
+use std::collections::BTreeMap;
+use std::ops::Range;
 use std::sync::Arc;
 
 use frust_core::RenderRoot;
 use frust_core::view::View;
 use frust_core::widget::PlatformViewFrame;
+use frust_scene::Command;
 use frust_shell_common::platform_view::{PlatformViewState, ViewCommand};
+use kurbo::Rect;
 use winit::window::Window;
 
 use crate::extensions::DesktopExtensions;
+
+/// One overlay's cut for one frame: its id and the half-open command range of
+/// that frame's scene it draws.
+pub(crate) type OverlayCutSpec = (u64, Range<usize>);
+
+/// The overlays' current command ranges, folded from the differ's
+/// `Overlay`/`DisposeOverlay` commands as they are pushed — the differ
+/// announces a range only when it changes, so each painted frame snapshots
+/// the fold.
+#[derive(Debug, Default)]
+struct OverlayRanges {
+    ranges: BTreeMap<u64, Range<usize>>,
+    /// The differ generation folded through.
+    folded_generation: u64,
+}
+
+impl OverlayRanges {
+    /// Fold every command `state` pushed since the last fold. Everything at or
+    /// below the folded generation is already in; a generation older than it
+    /// (a fresh differ) restarts the fold.
+    fn fold(&mut self, state: &PlatformViewState) {
+        let (generation, backlog) = state.commands();
+        if generation < self.folded_generation {
+            *self = Self::default();
+        }
+        if generation == self.folded_generation {
+            return;
+        }
+        let (_, seen) = state.commands_up_to(self.folded_generation);
+        for command in &backlog[seen.len()..] {
+            match command {
+                ViewCommand::Overlay {
+                    overlay_id,
+                    command_range,
+                    ..
+                } => {
+                    self.ranges.insert(*overlay_id, command_range.clone());
+                }
+                ViewCommand::DisposeOverlay { overlay_id } => {
+                    self.ranges.remove(overlay_id);
+                }
+                _ => {}
+            }
+        }
+        self.folded_generation = generation;
+    }
+
+    /// The ranges as they stand, ordered by range (then id).
+    fn cuts(&self) -> Vec<OverlayCutSpec> {
+        let mut cuts: Vec<OverlayCutSpec> = self
+            .ranges
+            .iter()
+            .map(|(&id, range)| (id, range.clone()))
+            .collect();
+        cuts.sort_by_key(|(id, range)| (range.start, range.end, *id));
+        cuts
+    }
+}
 
 /// The desktop shell's platform-view host: the shared differ plus the frame-loop
 /// sequencing around it (ingest after paint, push after submit, acknowledge, and
@@ -87,6 +161,9 @@ use crate::extensions::DesktopExtensions;
 #[derive(Debug, Default)]
 pub(crate) struct DesktopPlatformViews {
     state: PlatformViewState,
+    /// The overlays' folded ranges (module docs' *Overlays*); stays empty with
+    /// overlays off.
+    overlays: OverlayRanges,
 }
 
 impl DesktopPlatformViews {
@@ -94,6 +171,7 @@ impl DesktopPlatformViews {
     pub(crate) fn new() -> Self {
         Self {
             state: PlatformViewState::new(),
+            overlays: OverlayRanges::default(),
         }
     }
 
@@ -110,13 +188,58 @@ impl DesktopPlatformViews {
     /// Retire runs first so a slot that was torn down and a *new* slot that
     /// reused nothing of it cannot interleave: the `Dispose` is already in the
     /// batch before the ingest that might re-create the same id.
-    pub(crate) fn after_paint<State, V>(&mut self, root: &mut RenderRoot<State, V>) -> bool
+    ///
+    /// `commands` is the scene that paint just recorded and `viewport` the
+    /// window's logical bounds — read only with overlays on, where the ingest
+    /// cuts the frame at its slots (module docs' *Overlays*); the cuts are
+    /// then [`Self::overlay_cuts`].
+    pub(crate) fn after_paint<State, V>(
+        &mut self,
+        root: &mut RenderRoot<State, V>,
+        commands: &[Command],
+        viewport: Rect,
+    ) -> bool
     where
         State: 'static,
         V: View<State>,
     {
         let retired = root.take_retired_platform_views();
-        self.ingest(&retired, root.platform_view_frames())
+        if crate::extensions::overlays_enabled() {
+            // Announced from the first frame rather than where the switch is
+            // first read, which can run before the logger exists.
+            static ANNOUNCED: std::sync::Once = std::sync::Once::new();
+            ANNOUNCED.call_once(|| {
+                log::info!("frust-overlay: overlay surfaces on (one per differ cut, Mode A)");
+            });
+            self.ingest_scene(&retired, root.platform_view_frames(), commands, viewport)
+        } else {
+            self.ingest(&retired, root.platform_view_frames())
+        }
+    }
+
+    /// [`Self::ingest`]'s overlay-aware twin: the same retire-then-ingest,
+    /// through the differ's `ingest_scene`, then the overlay ranges folded.
+    fn ingest_scene(
+        &mut self,
+        retired: &[u64],
+        frames: &[PlatformViewFrame],
+        commands: &[Command],
+        viewport: Rect,
+    ) -> bool {
+        let mut produced = false;
+        for &slot_id in retired {
+            produced |= self.state.retire(slot_id);
+        }
+        produced |= self.state.ingest_scene(frames, &[], commands, viewport);
+        self.overlays.fold(&self.state);
+        produced
+    }
+
+    /// The cuts the frame just ingested is drawn with — every live overlay's
+    /// current range, ascending — to travel with its scene to the render side.
+    /// Empty with overlays off.
+    pub(crate) fn overlay_cuts(&self) -> Vec<OverlayCutSpec> {
+        self.overlays.cuts()
     }
 
     /// The window-free core of [`Self::after_paint`], split out so the command
@@ -205,6 +328,8 @@ impl DesktopPlatformViews {
     /// that follows a resume then flips `visible` back on with a single
     /// `Update`.
     pub(crate) fn suspend<E: DesktopExtensions>(&mut self, ext: &mut E) {
+        // Nothing the acknowledgement below compacts may go unfolded.
+        self.overlays.fold(&self.state);
         self.state.suspend_all();
         ext.on_platform_views_suspended();
         let (generation, _) = self.state.commands();
@@ -513,5 +638,67 @@ mod tests {
         host.ingest(&[], &[frame(1, Rect::new(0.0, 10.0, 100.0, 110.0))]);
         assert_eq!(pending(&host), pending(&host));
         assert_eq!(pending(&host).len(), 1);
+    }
+
+    // --- Overlays ------------------------------------------------------
+
+    /// A painted scene of `drawing` fills ([`slot_at`] places a slot between
+    /// them by command index).
+    fn scene_with_slot(drawing: usize) -> frust_scene::Scene {
+        let mut scene = frust_scene::Scene::new();
+        let mut builder = frust_scene::SceneBuilder::new(&mut scene);
+        for _ in 0..drawing {
+            builder.fill_rect(
+                Rect::new(0.0, 0.0, 10.0, 10.0),
+                peniko::Brush::Solid(peniko::Color::BLACK),
+            );
+        }
+        scene
+    }
+
+    fn slot_at(slot_id: u64, command_index: usize) -> PlatformViewFrame {
+        PlatformViewFrame {
+            command_index,
+            ..frame(slot_id, Rect::new(0.0, 0.0, 100.0, 100.0))
+        }
+    }
+
+    #[test]
+    fn an_overlay_aware_ingest_announces_the_overlay_and_folds_its_range() {
+        let mut host = DesktopPlatformViews::new();
+        let scene = scene_with_slot(5);
+        let viewport = Rect::new(0.0, 0.0, 800.0, 600.0);
+        assert!(host.ingest_scene(&[], &[slot_at(1, 2)], scene.commands(), viewport));
+        assert!(
+            pending(&host)
+                .iter()
+                .any(|command| matches!(command, ViewCommand::Overlay { overlay_id: 1, .. })),
+            "the batch the host receives carries the overlay"
+        );
+        assert_eq!(host.overlay_cuts(), vec![(1, 2..5)]);
+        // Delivered and acknowledged: the fold keeps the range.
+        drain(&mut host);
+        assert!(!host.ingest_scene(&[], &[slot_at(1, 2)], scene.commands(), viewport));
+        assert_eq!(host.overlay_cuts(), vec![(1, 2..5)]);
+
+        // The slot torn down: its overlay goes first, and with it the cut.
+        assert!(host.ingest_scene(&[1], &[], scene.commands(), viewport));
+        assert!(host.overlay_cuts().is_empty());
+        assert!(matches!(
+            pending(&host).first(),
+            Some(ViewCommand::DisposeOverlay { overlay_id: 1 })
+        ));
+    }
+
+    #[test]
+    fn the_plain_ingest_folds_no_overlay() {
+        let mut host = DesktopPlatformViews::new();
+        host.ingest(&[], &[slot_at(1, 2)]);
+        assert!(host.overlay_cuts().is_empty());
+        assert!(
+            !pending(&host)
+                .iter()
+                .any(|command| matches!(command, ViewCommand::Overlay { .. }))
+        );
     }
 }

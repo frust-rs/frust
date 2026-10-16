@@ -200,11 +200,12 @@ platform runs which.
 - **Overlays:** frust paint recorded *after* a slot's view (a popover, a badge over a native
   slider) cannot show on a Mode A surface, so the differ cuts the frame's commands at each visible
   slot and the host draws each cut onto a translucent surface stacked above that slot's view. The
-  differ computes them for every host; Android realises them behind `FRUST_OVERLAYS` (default off,
-  device leg pending) and Mode B hosts already show that content; macOS and iOS are pending. The
-  Android host's mechanics are in SHELLS_ARCHITECTURE.md; one limit is visible here: an on-top
-  overlay sits above every native view, so frust content interleaved *between* two slots covers the
-  later slot (`android-overlays-cover-later-slots`). A cut starts one command after a leading Mode B
+  differ computes them for every host; Android, iOS and macOS realise them behind `FRUST_OVERLAYS`
+  (default off) and Mode B hosts already show that content. The host mechanics are in
+  SHELLS_ARCHITECTURE.md; one limit is visible here: an Android on-top overlay sits above every
+  native view, so frust content interleaved *between* two slots covers the later slot
+  (`android-overlays-cover-later-slots`). The Apple hosts insert each overlay directly above its own
+  slot's view, so the same content stays under the later native control. A cut starts one command after a leading Mode B
   hole-punch at the slot's index, so the punch stays on the main surface; plain hosting (knob off)
   emits no rank-only updates; and content an overlay cannot serve (retained, external-texture,
   backdrop blur) stays under the native view (`overlay-unservable-content-stays-on-main`).

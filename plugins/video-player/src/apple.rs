@@ -88,6 +88,42 @@
 //! [`player_for`] and both view factories are unaffected — and is the remedy
 //! if the device gate hears a gap.
 //!
+//! # Texture output
+//!
+//! A session opened with [`crate::VideoOutput::Texture`] gets a
+//! [`TextureSink`] at open ([`AppleSession::texture_sink`]) and, once
+//! [`construct`] has built the item, an `AVPlayerItemVideoOutput` attached to
+//! it — asked for `32BGRA`, IOSurface-backed, Metal-compatible pixel buffers,
+//! the one layout the renderer's `CVPixelBuffer` importer takes. No
+//! `AVPlayerLayer` is involved: the output decodes for itself, on macOS and
+//! iOS alike, with or without a view.
+//!
+//! A [`FrameClock`] — a `libdispatch` timer on the session's own serial frame
+//! queue, never the main thread — polls `hasNewPixelBufferForItemTime:` at
+//! twice a 60 Hz display rate while frames keep coming, and backs off to a
+//! slow poll once the picture has been still for half a second (paused,
+//! stalled, ended). Every state edge that can bring a new frame (ready to
+//! play, playing, a seek landing) kicks it back to the fast rate. Each new
+//! buffer is pushed into the sink:
+//!
+//! - **zero-copy** when the renderer has a `CVPixelBuffer` importer
+//!   installed: a [`FramePayload::Native`] frame over the buffer itself, whose
+//!   release callback drops the reference `copyPixelBufferForItemTime:` handed
+//!   over (the importer takes its own for the texture's lifetime);
+//! - **CPU copy** otherwise (no importer, or a build without the `frust-api`
+//!   half): the buffer's rows swizzled into a tightly packed RGBA frame, the
+//!   buffer released at once.
+//!
+//! The path is decided per frame and logged at `info!` whenever it changes,
+//! together with a periodic frame-rate and buffer-pool line, so a profile
+//! build's log shows which one ran. The output's own buffer pool sizes itself
+//! to what is in flight (the bus holds at most a shown frame, the retire
+//! backlog and the mailbox's pending one); nothing here ever waits on it.
+//!
+//! [`crate::PlayerSession::close`] marks the target closed and releases the
+//! frame still pending; the teardown then cancels the clock and removes the
+//! output from the item before the item itself is let go.
+//!
 //! # iOS audio-session policy
 //!
 //! On iOS **only** (macOS has no `AVAudioSession`; the asymmetry is the
@@ -118,7 +154,10 @@
 //! sanctioned zones): `objc2` marks every AVFoundation message send `unsafe`,
 //! edition-2024 marks reading an `extern` constant static `unsafe`, and
 //! [`MainThreadBound`] carries one thread-safety assertion the compiler cannot
-//! check.
+//! check. The texture output adds the `CoreVideo` calls on the pixel buffers
+//! it is handed, the `unsafe` [`NativeHandle::new`] it builds frames with, the
+//! dispatch timer behind [`FrameClock`], and one more thread-safety assertion
+//! ([`PixelOutput`]).
 //!
 //! Nothing here unwinds into the Objective-C runtime: [`on_main`] wraps every
 //! body it runs in `catch_unwind`, and the two blocks handed to AVFoundation
@@ -133,18 +172,26 @@
 // `crate::backend::Active`'s own doc).
 #![cfg_attr(test, allow(dead_code))]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Component, Path, PathBuf};
 use std::ptr;
-use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError, Weak};
+use std::time::{Duration, Instant};
 
 use block2::RcBlock;
-use dispatch2::DispatchQueue;
-use objc2::rc::Retained;
+use dispatch2::{
+    _dispatch_source_type_timer, DispatchObject, DispatchQueue, DispatchQueueAttr,
+    DispatchRetained, DispatchSource, DispatchTime,
+};
+use frust_plugin::texture::{
+    FrameMeta, FramePayload, NativeHandle, NativeHandleKind, TextureFormat, TextureFrame,
+    TextureSink,
+};
+use objc2::encode::{Encoding, RefEncode};
+use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyClass, AnyObject, Bool, NSObject, NSObjectProtocol};
 use objc2::{AnyThread, DefinedClass, MainThreadMarker, define_class, msg_send, sel};
 use objc2_av_foundation::{
@@ -154,12 +201,12 @@ use objc2_av_foundation::{
 use objc2_core_media::{CMTime, CMTimeFlags};
 use objc2_foundation::{
     NSDictionary, NSError, NSKeyValueChangeKey, NSKeyValueObservingOptions, NSNotification,
-    NSNotificationCenter, NSObjectNSKeyValueObserverRegistration, NSString, NSURL,
+    NSNotificationCenter, NSNumber, NSObjectNSKeyValueObserverRegistration, NSString, NSURL,
 };
 
 use crate::backend::{BackendSession, PlayerBackend};
 use crate::snapshot::Shared;
-use crate::{PlaybackState, PlayerEvent, PlayerOptions, VideoError, VideoSource};
+use crate::{PlaybackState, PlayerEvent, PlayerOptions, VideoError, VideoOutput, VideoSource};
 
 /// The key path the item-readiness observer registers for (module doc's
 /// observation table). Rooted at the **player**, not the item, so one
@@ -323,6 +370,9 @@ struct Session {
     /// main-queue body checks it so a late observer cannot resurrect a closed
     /// session.
     closed: bool,
+    /// Where a [`VideoOutput::Texture`] session's frames go — handed to the
+    /// [`FrameClock`] [`construct`] starts (module doc's *Texture output*).
+    texture: Option<Arc<TextureTarget>>,
     /// The player graph, or `None` until [`construct`] has built it (module
     /// doc's *Threading*).
     objc: MainThreadBound<Option<AvObjects>>,
@@ -347,6 +397,10 @@ struct AvObjects {
     /// module doc's registry rule asks for (an observer must never be able to
     /// fire for a session the registry does not know yet).
     time_observer: Option<Retained<AnyObject>>,
+    /// The texture output's frame clock (and through it the
+    /// `AVPlayerItemVideoOutput` attached to `item`), for a
+    /// [`VideoOutput::Texture`] session whose output could be built.
+    frame_clock: Option<Arc<FrameClock>>,
 }
 
 /// A source resolved to something an `NSURL` can be built from, on the calling
@@ -403,6 +457,13 @@ impl PlayerBackend for AppleBackend {
 
         let resolved = resolve_source(source)?;
         let id = next_session_id()?;
+        let texture = (options.output == VideoOutput::Texture).then(|| {
+            Arc::new(TextureTarget {
+                session: id,
+                sink: TextureSink::new(),
+                closed: AtomicBool::new(false),
+            })
+        });
 
         // Registered before the construction hop, so an observer attached by
         // `construct` always finds its entry, and a control call issued while
@@ -417,6 +478,7 @@ impl PlayerBackend for AppleBackend {
                 volume: options.volume,
                 want_play: options.autoplay,
                 closed: false,
+                texture: texture.clone(),
                 objc: MainThreadBound::new(None),
             },
         );
@@ -433,19 +495,22 @@ impl PlayerBackend for AppleBackend {
         let mix_with_others = options.mix_with_others;
         on_main(move |mtm| construct(id, &resolved, mix_with_others, mtm));
 
-        Ok(AppleSession { id })
+        Ok(AppleSession { id, texture })
     }
 }
 
 /// One AVFoundation player session.
 ///
-/// Holds only its id: everything else lives in [`SESSIONS`], because an
-/// observer, a block, and [`player_for`] all reach the same state from a bare
-/// integer and none of them has a handle to this struct. That is also what
-/// makes the type trivially `Send + Sync`, as [`BackendSession`] requires.
+/// Holds its id, plus the frame target of a texture session: everything else
+/// lives in [`SESSIONS`], because an observer, a block, and [`player_for`] all
+/// reach the same state from a bare integer and none of them has a handle to
+/// this struct. Both fields are `Send + Sync`, as [`BackendSession`] requires.
 pub(crate) struct AppleSession {
     /// The id the params payload carries and [`player_for`] resolves.
     id: i32,
+    /// The mailbox and closed flag of a [`VideoOutput::Texture`] session
+    /// (module doc's *Texture output*); `None` for a native-view session.
+    texture: Option<Arc<TextureTarget>>,
 }
 
 impl BackendSession for AppleSession {
@@ -590,7 +655,14 @@ impl BackendSession for AppleSession {
     /// its own session from inside an event, and a second teardown for an id
     /// whose entry is gone is a no-op rather than an unbalanced
     /// `removeObserver:` (which Objective-C answers with an exception).
+    ///
+    /// A texture session stops pushing here, on the calling thread, and the
+    /// frame still pending in its mailbox is released rather than shown; the
+    /// clock and the output themselves go with the main-thread teardown.
     fn close(&self) {
+        if let Some(target) = &self.texture {
+            target.close();
+        }
         let id = self.id;
         on_main(move |mtm| teardown(id, mtm));
     }
@@ -599,6 +671,10 @@ impl BackendSession for AppleSession {
         // Ids are minted positive by `next_session_id`, which refuses to hand
         // out anything else, so this conversion never loses one.
         u32::try_from(self.id).unwrap_or(0)
+    }
+
+    fn texture_sink(&self) -> Option<&TextureSink> {
+        self.texture.as_deref().map(|target| &target.sink)
     }
 }
 
@@ -685,6 +761,9 @@ struct Live {
     player: Retained<AVPlayer>,
     item: Retained<AVPlayerItem>,
     shared: Arc<Shared>,
+    /// A texture session's frame clock, kicked back to its fast rate by every
+    /// edge that can bring a new frame (module doc's *Texture output*).
+    frame_clock: Option<Arc<FrameClock>>,
 }
 
 /// The live graph plus snapshot handle for `session`, or `None` when the
@@ -700,6 +779,7 @@ fn live(session: i32, mtm: MainThreadMarker) -> Option<Live> {
         player: objects.player.clone(),
         item: objects.item.clone(),
         shared: Arc::clone(&entry.shared),
+        frame_clock: objects.frame_clock.clone(),
     })
 }
 
@@ -782,11 +862,22 @@ fn construct(session: i32, source: &ResolvedSource, mix_with_others: bool, mtm: 
     let item = unsafe { AVPlayerItem::playerItemWithURL(&url, mtm) };
     let player = unsafe { AVPlayer::playerWithPlayerItem(Some(&item), mtm) };
 
-    let Some((volume, looping, want_play, rate)) = update_session(session, |entry| {
-        (entry.volume, entry.looping, entry.want_play, entry.rate)
+    let Some((volume, looping, want_play, rate, texture)) = update_session(session, |entry| {
+        (
+            entry.volume,
+            entry.looping,
+            entry.want_play,
+            entry.rate,
+            entry.texture.clone(),
+        )
     }) else {
         return;
     };
+
+    // Attached as soon as the item exists, so the output is in place before
+    // the item can become ready and decode its first frame (module doc's
+    // *Texture output*).
+    let frame_clock = texture.and_then(|target| attach_texture_output(&item, target));
 
     // SAFETY: property writes on the player just constructed above, on the main
     // thread. AVFoundation clamps the volume itself.
@@ -804,11 +895,16 @@ fn construct(session: i32, source: &ResolvedSource, mix_with_others: bool, mtm: 
             item: item.clone(),
             observer: observer.clone(),
             time_observer: None,
+            frame_clock: frame_clock.clone(),
         });
     });
     if registered.is_none() {
-        // Closed while the graph was being built: nothing is attached yet, so
-        // dropping the locals here is the whole teardown.
+        // Closed while the graph was being built: no observer is attached
+        // yet, so stopping the frame clock (if one started) and dropping the
+        // locals here is the whole teardown.
+        if let Some(clock) = frame_clock {
+            detach_texture_output(&item, &clock);
+        }
         return;
     }
 
@@ -986,6 +1082,12 @@ fn teardown(session: i32, mtm: MainThreadMarker) {
 /// paths, and a callback arriving mid-teardown would be looking up a session
 /// that has already left the registry.
 fn detach(objects: &AvObjects) {
+    // The frame clock first: it polls the item's output from its own queue,
+    // and must be cancelled before the output leaves the item.
+    if let Some(clock) = objects.frame_clock.as_ref() {
+        detach_texture_output(&objects.item, clock);
+    }
+
     if let Some(token) = objects.time_observer.as_ref() {
         // SAFETY: `token` is what this same player's
         // `addPeriodicTimeObserverForInterval:` returned, which is the one
@@ -1040,6 +1142,9 @@ fn handle_item_status(session: i32, mtm: MainThreadMarker) {
     let status = unsafe { live.item.status() };
 
     if status == AVPlayerItemStatus::ReadyToPlay {
+        // A paused item shows its first frame now, so a texture session's
+        // clock polls for it at the fast rate.
+        kick_frame_clock(&live);
         // The duration is knowable from here on, so the position event that
         // carries it is published before the state that says "ready".
         live.shared
@@ -1084,6 +1189,9 @@ fn handle_time_control_status(session: i32, mtm: MainThreadMarker) {
     };
     // SAFETY: a property read on a live player, on the main thread.
     let state = state_for(unsafe { live.player.timeControlStatus() });
+    if state == PlaybackState::Playing {
+        kick_frame_clock(&live);
+    }
 
     // A finished item drops to `paused`, and a failed one may too, but neither
     // is news: reporting it would overwrite `Ended`/`Error` with a state that
@@ -1143,8 +1251,18 @@ fn publish_current_position(session: i32, mtm: MainThreadMarker) {
     let Some(live) = live(session, mtm) else {
         return;
     };
+    // A seek lands on a new frame even while paused.
+    kick_frame_clock(&live);
     live.shared
         .publish(position_event(&live.player, &live.item));
+}
+
+/// Return a texture session's frame clock to its fast rate (module doc's
+/// *Texture output*); nothing for a native-view session.
+fn kick_frame_clock(live: &Live) {
+    if let Some(clock) = &live.frame_clock {
+        clock.kick();
+    }
 }
 
 /// Publish one [`PlayerEvent::Position`] at `time` — the periodic observer's
@@ -1255,6 +1373,634 @@ impl PlayerObserver {
         // `plugins/camera/src/apple.rs` `PhotoCaptureDelegate::new` idiom).
         unsafe { msg_send![super(this), init] }
     }
+}
+
+// --- Texture output ---------------------------------------------------------------
+
+/// The label of a texture session's frame queue (module doc's *Texture
+/// output*) — one per session, never the main queue.
+const FRAMES_QUEUE_LABEL: &str = "dev.frust.videoplayer.frames";
+
+/// `kCVPixelFormatType_32BGRA` (`'BGRA'`): the layout the output is asked for,
+/// and the one the renderer's `CVPixelBuffer` importer takes.
+const PIXEL_FORMAT_32BGRA: u32 = u32::from_be_bytes(*b"BGRA");
+
+/// `kCVPixelBufferLock_ReadOnly`, the CPU-copy path's lock flag.
+const PIXEL_BUFFER_LOCK_READ_ONLY: u64 = 1;
+
+/// The fast poll: twice a 60 Hz display rate, so a 60 fps clip never loses a
+/// frame to beating between its cadence and the poll's.
+const FAST_POLL: Duration = Duration::from_nanos(8_333_333);
+/// The fast poll's leeway: tight, so frames are not bunched.
+const FAST_LEEWAY: Duration = Duration::from_millis(1);
+/// The poll once the picture has been still for a while: a frame no state
+/// edge announced (a stall clearing) still shows within a fifteenth of a
+/// second, and then the fast poll resumes.
+const SLOW_POLL: Duration = Duration::from_nanos(66_666_667);
+/// The slow poll's leeway.
+const SLOW_LEEWAY: Duration = Duration::from_millis(10);
+/// Fast polls in a row without a new frame before the clock backs off to
+/// [`SLOW_POLL`] — half a second.
+const IDLE_POLLS_BEFORE_BACKOFF: u32 = 60;
+/// How far past "now" a poll asks for a frame: one 60 Hz display frame, the
+/// earliest the renderer presents a frame it takes now.
+const DISPLAY_LOOKAHEAD_SECS: f64 = 1.0 / 60.0;
+/// The delivered-frame count of the first rate/pool log line.
+const STATS_FIRST_AT: u64 = 240;
+/// Delivered frames between later rate/pool log lines.
+const STATS_EVERY: u64 = 3600;
+/// The most distinct backing surfaces the pool statistic tracks — far above a
+/// steady pool, so reaching it reads as "the pool keeps growing".
+const MAX_TRACKED_BUFFERS: usize = 64;
+
+/// The `__CVBuffer` a `CVPixelBufferRef` points at, declared here because this
+/// crate does not depend on `objc2-core-video`. Never constructed or
+/// dereferenced on this side — only its address travels.
+#[repr(C)]
+struct CVBufferOpaque {
+    _private: [u8; 0],
+}
+
+// SAFETY: `__CVBuffer` is the struct CoreVideo's headers (and
+// `objc2-core-video`'s own binding) declare a `CVPixelBufferRef` to point at,
+// so a pointer to this type encodes exactly as the runtime's method
+// signatures name the buffer.
+unsafe impl RefEncode for CVBufferOpaque {
+    const ENCODING_REF: Encoding = Encoding::Pointer(&Encoding::Struct("__CVBuffer", &[]));
+}
+
+/// A `CVPixelBufferRef`.
+type CVPixelBufferRef = *mut CVBufferOpaque;
+
+// The CoreVideo pixel-buffer calls and attribute keys the texture output
+// uses; the keys are `CFStringRef`s.
+#[allow(non_upper_case_globals)]
+#[link(name = "CoreVideo", kind = "framework")]
+unsafe extern "C" {
+    static kCVPixelBufferPixelFormatTypeKey: *const c_void;
+    static kCVPixelBufferIOSurfacePropertiesKey: *const c_void;
+    static kCVPixelBufferMetalCompatibilityKey: *const c_void;
+    fn CVPixelBufferRelease(buffer: CVPixelBufferRef);
+    fn CVPixelBufferGetWidth(buffer: CVPixelBufferRef) -> usize;
+    fn CVPixelBufferGetHeight(buffer: CVPixelBufferRef) -> usize;
+    fn CVPixelBufferGetPixelFormatType(buffer: CVPixelBufferRef) -> u32;
+    fn CVPixelBufferGetIOSurface(buffer: CVPixelBufferRef) -> *const c_void;
+    fn CVPixelBufferGetBytesPerRow(buffer: CVPixelBufferRef) -> usize;
+    fn CVPixelBufferGetBaseAddress(buffer: CVPixelBufferRef) -> *mut c_void;
+    fn CVPixelBufferLockBaseAddress(buffer: CVPixelBufferRef, flags: u64) -> i32;
+    fn CVPixelBufferUnlockBaseAddress(buffer: CVPixelBufferRef, flags: u64) -> i32;
+}
+
+// The host clock `itemTimeForHostTime:` is expressed in.
+#[link(name = "QuartzCore", kind = "framework")]
+unsafe extern "C" {
+    fn CACurrentMediaTime() -> f64;
+}
+
+/// The frame side of one [`VideoOutput::Texture`] session, shared by
+/// [`AppleSession`] (which hands the mailbox out and closes it) and the
+/// session's [`FrameClock`] (which pushes into it).
+struct TextureTarget {
+    /// The session the frames belong to, for log lines.
+    session: i32,
+    /// The mailbox [`AppleSession::texture_sink`] hands out.
+    sink: TextureSink,
+    /// Set by [`AppleSession::close`]; no frame stays pending after it.
+    closed: AtomicBool,
+}
+
+impl TextureTarget {
+    /// Stop accepting frames and release the one still pending, if any.
+    fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        if let Some(frame) = self.sink.take_latest() {
+            frame.release();
+        }
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
+    /// Push `frame`, unless the session closed. A close landing while the push
+    /// runs is caught by the second check, which takes the frame straight back
+    /// out: either that check or [`Self::close`]'s own drain releases it, so no
+    /// frame stays pending past a close.
+    fn push(&self, frame: TextureFrame) {
+        if self.is_closed() {
+            frame.release();
+            return;
+        }
+        self.sink.push(frame);
+        if self.is_closed()
+            && let Some(frame) = self.sink.take_latest()
+        {
+            frame.release();
+        }
+    }
+}
+
+/// A session's `AVPlayerItemVideoOutput`, reached by message send: this crate
+/// does not enable `objc2-av-foundation`'s `AVPlayerItemOutput` feature, and
+/// the four messages the texture output needs are spelled out here instead.
+struct PixelOutput {
+    output: Retained<AnyObject>,
+}
+
+// SAFETY: `AVPlayerItemVideoOutput` is not main-thread-only (its binding
+// carries no `MainThreadOnly` kind, unlike `AVPlayer`), and polling it —
+// `hasNewPixelBufferForItemTime:`/`copyPixelBufferForItemTime:` — from a
+// display-link or render thread is its documented use (Apple's own samples
+// poll it from a `CVDisplayLink` thread). Here the main thread only adds it to
+// and removes it from its item, and the session's serial frame queue only
+// polls it; retain/release is thread-safe on any Objective-C object.
+unsafe impl Send for PixelOutput {}
+// SAFETY: as above — a shared `&PixelOutput` only ever polls.
+unsafe impl Sync for PixelOutput {}
+
+impl PixelOutput {
+    /// An output producing `32BGRA`, IOSurface-backed, Metal-compatible pixel
+    /// buffers, or `None` if the class or its initializer answered nil.
+    fn new() -> Option<Self> {
+        let class = AnyClass::get(c"AVPlayerItemVideoOutput")?;
+        let attributes = pixel_buffer_attributes();
+        // SAFETY: `+alloc` on a live class, then its designated initializer
+        // with an `NSDictionary<NSString *, id>` of CoreVideo attribute keys —
+        // the argument type `-initWithPixelBufferAttributes:` declares.
+        let output: Option<Retained<AnyObject>> = unsafe {
+            let allocated: Allocated<AnyObject> = msg_send![class, alloc];
+            msg_send![allocated, initWithPixelBufferAttributes: &*attributes]
+        };
+        output.map(|output| Self { output })
+    }
+
+    /// The item time of the frame the renderer would present next: now plus
+    /// one display frame.
+    fn item_time_for_display(&self) -> CMTime {
+        // SAFETY: `CACurrentMediaTime` is a plain clock read, and
+        // `itemTimeForHostTime:` takes a `CFTimeInterval` in that clock's
+        // timebase and returns a `CMTime` by value.
+        unsafe {
+            let host = CACurrentMediaTime() + DISPLAY_LOOKAHEAD_SECS;
+            msg_send![&*self.output, itemTimeForHostTime: host]
+        }
+    }
+
+    /// Whether a frame for `time` arrived since the last copy.
+    fn has_new_buffer(&self, time: CMTime) -> bool {
+        // SAFETY: a query taking a `CMTime` by value and returning a `BOOL`.
+        unsafe { msg_send![&*self.output, hasNewPixelBufferForItemTime: time] }
+    }
+
+    /// The buffer for `time`, at +1 (the method is in the `copy` family): the
+    /// caller owns one reference and gives it back with
+    /// `CVPixelBufferRelease`. Null when there is none.
+    fn copy_buffer(&self, time: CMTime) -> CVPixelBufferRef {
+        // SAFETY: takes a `CMTime` by value and an optional `CMTime *` out
+        // parameter (null: the display time is not wanted), and returns a
+        // `CVPixelBufferRef` the caller owns.
+        unsafe {
+            msg_send![
+                &*self.output,
+                copyPixelBufferForItemTime: time,
+                itemTimeForDisplay: ptr::null_mut::<CMTime>()
+            ]
+        }
+    }
+}
+
+/// `{ PixelFormatType: 32BGRA, IOSurfaceProperties: {}, MetalCompatibility:
+/// YES }` — what the renderer's importer needs: an IOSurface-backed `32BGRA`
+/// buffer can alias a Metal texture.
+fn pixel_buffer_attributes() -> Retained<NSDictionary<NSString, AnyObject>> {
+    // SAFETY: reading `extern` CoreVideo constant statics (edition-2024
+    // unsafe). Each is a linker-provided, non-null `CFStringRef` that lives
+    // for the whole process, and a `CFString` is toll-free bridged to
+    // `NSString`, so viewing it as one is sound.
+    let (format_key, surface_key, metal_key) = unsafe {
+        (
+            &*kCVPixelBufferPixelFormatTypeKey.cast::<NSString>(),
+            &*kCVPixelBufferIOSurfacePropertiesKey.cast::<NSString>(),
+            &*kCVPixelBufferMetalCompatibilityKey.cast::<NSString>(),
+        )
+    };
+    let format = NSNumber::numberWithUnsignedInt(PIXEL_FORMAT_32BGRA);
+    let surface = NSDictionary::<NSString, AnyObject>::new();
+    let metal = NSNumber::numberWithBool(true);
+    let (format, surface, metal): (&AnyObject, &AnyObject, &AnyObject) =
+        (&format, &surface, &metal);
+    NSDictionary::from_slices(
+        &[format_key, surface_key, metal_key],
+        &[format, surface, metal],
+    )
+}
+
+/// Which way a frame reached the mailbox — logged whenever it changes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum FramePath {
+    /// No frame delivered yet.
+    None = 0,
+    /// The buffer itself, imported by the renderer without a copy.
+    ZeroCopy = 1,
+    /// The buffer's rows copied into an RGBA frame.
+    CpuCopy = 2,
+    /// A buffer that could not be delivered at all.
+    Refused = 3,
+}
+
+/// Delivery statistics behind the periodic log line.
+struct FrameStats {
+    /// Frames delivered since the session's first.
+    frames: u64,
+    /// When the current statistics window started, and its first frame count.
+    window: Option<(Instant, u64)>,
+    /// Distinct IOSurfaces seen behind the buffers in the current window, up
+    /// to [`MAX_TRACKED_BUFFERS`]: the output may wrap each frame in a fresh
+    /// `CVPixelBuffer` (it does on macOS), but during steady playback the
+    /// surfaces holding the pixels cycle through a fixed pool, so this reads
+    /// as the pool's size. A seek (a loop restart included) may bring fresh
+    /// surfaces.
+    surfaces: HashSet<usize>,
+}
+
+/// The texture output's poll (module doc's *Texture output*): a dispatch
+/// timer on the session's own serial frame queue.
+struct FrameClock {
+    /// The timer. Its handler holds only a weak reference to this clock, so
+    /// the two never keep each other alive; [`Self::stop`] (and the drop)
+    /// cancel it.
+    source: DispatchRetained<DispatchSource>,
+    /// The output it polls.
+    output: PixelOutput,
+    /// Where the frames go.
+    target: Arc<TextureTarget>,
+    /// Whether the timer runs at [`FAST_POLL`] rather than [`SLOW_POLL`].
+    fast: AtomicBool,
+    /// Fast polls in a row that found no new frame.
+    idle_polls: AtomicU32,
+    /// The [`FramePath`] the last frame took.
+    path: AtomicU8,
+    /// Touched only from the serial frame queue, so never contended.
+    stats: Mutex<FrameStats>,
+}
+
+impl FrameClock {
+    /// Start polling `output` for `target`, at the fast rate.
+    fn start(output: PixelOutput, target: Arc<TextureTarget>) -> Arc<Self> {
+        let queue = DispatchQueue::new(FRAMES_QUEUE_LABEL, DispatchQueueAttr::SERIAL);
+        // SAFETY: the timer source type with the handle and mask a timer
+        // takes (both zero), targeting a live serial queue; the source
+        // retains the queue.
+        let source = unsafe {
+            DispatchSource::new(
+                (&raw const _dispatch_source_type_timer).cast_mut(),
+                0,
+                0,
+                Some(&queue),
+            )
+        };
+        let clock = Arc::new_cyclic(|weak: &Weak<Self>| {
+            let weak = weak.clone();
+            let handler = RcBlock::new(move || {
+                // Called from a dispatch frame: nothing may unwind into it.
+                let Some(clock) = weak.upgrade() else {
+                    return;
+                };
+                if catch_unwind(AssertUnwindSafe(|| clock.tick())).is_err() {
+                    log::error!("frust-video-player: panic caught in the texture frame clock");
+                }
+            });
+            // SAFETY: a live block of dispatch's `void (^)(void)` handler
+            // shape; dispatch copies it, so its lifetime past this call is the
+            // source's business.
+            unsafe { source.set_event_handler_with_block(RcBlock::as_ptr(&handler)) };
+            Self {
+                source,
+                output,
+                target,
+                fast: AtomicBool::new(true),
+                idle_polls: AtomicU32::new(0),
+                path: AtomicU8::new(FramePath::None as u8),
+                stats: Mutex::new(FrameStats {
+                    frames: 0,
+                    window: None,
+                    surfaces: HashSet::new(),
+                }),
+            }
+        });
+        clock
+            .source
+            .set_timer(DispatchTime::NOW, nanos(FAST_POLL), nanos(FAST_LEEWAY));
+        clock.source.resume();
+        clock
+    }
+
+    /// Back to the fast rate — an edge that can bring a new frame happened.
+    fn kick(&self) {
+        self.idle_polls.store(0, Ordering::Relaxed);
+        self.set_fast(true);
+    }
+
+    /// Stop polling. Idempotent; a handler already running finishes, but
+    /// pushes nothing once the session's target is closed.
+    fn stop(&self) {
+        self.source.cancel();
+    }
+
+    fn set_fast(&self, fast: bool) {
+        if self.fast.swap(fast, Ordering::AcqRel) == fast {
+            return;
+        }
+        let (interval, leeway) = if fast {
+            (FAST_POLL, FAST_LEEWAY)
+        } else {
+            (SLOW_POLL, SLOW_LEEWAY)
+        };
+        self.source
+            .set_timer(DispatchTime::NOW, nanos(interval), nanos(leeway));
+    }
+
+    /// One poll: copy the frame due next, if a new one arrived, and push it.
+    fn tick(&self) {
+        if self.target.is_closed() {
+            return;
+        }
+        let time = self.output.item_time_for_display();
+        if !self.output.has_new_buffer(time) {
+            let idle = self
+                .idle_polls
+                .fetch_add(1, Ordering::Relaxed)
+                .saturating_add(1);
+            if idle == IDLE_POLLS_BEFORE_BACKOFF {
+                self.set_fast(false);
+            }
+            return;
+        }
+        self.idle_polls.store(0, Ordering::Relaxed);
+        self.set_fast(true);
+        let buffer = self.output.copy_buffer(time);
+        if !buffer.is_null() {
+            self.deliver(buffer);
+        }
+    }
+
+    /// Push `buffer` — owned at +1 — into the mailbox, zero-copy when the
+    /// renderer can import it, as an RGBA copy otherwise.
+    fn deliver(&self, buffer: CVPixelBufferRef) {
+        // SAFETY: `buffer` is the live, non-null pixel buffer `copy_buffer`
+        // just returned, on which this call owns one reference. The surface
+        // is only an address for the pool statistic (a Get-rule answer, never
+        // dereferenced or released here).
+        let (width, height, format, surface) = unsafe {
+            (
+                CVPixelBufferGetWidth(buffer),
+                CVPixelBufferGetHeight(buffer),
+                CVPixelBufferGetPixelFormatType(buffer),
+                CVPixelBufferGetIOSurface(buffer) as usize,
+            )
+        };
+        let address = buffer as usize;
+        let extent = u32::try_from(width).ok().zip(u32::try_from(height).ok());
+        let Some((width, height)) = extent.filter(|(w, h)| *w > 0 && *h > 0) else {
+            release_pixel_buffer(address);
+            return;
+        };
+        if format != PIXEL_FORMAT_32BGRA {
+            self.note_path(FramePath::Refused, width, height, format);
+            release_pixel_buffer(address);
+            return;
+        }
+
+        let path = if zero_copy_available() {
+            // SAFETY: `buffer` is a live `CVPixelBufferRef` on which this
+            // frame owns the reference `copyPixelBufferForItemTime:` handed
+            // over; only the release callback attached below drops it, and a
+            // frame's release runs exactly once.
+            let handle =
+                unsafe { NativeHandle::new(NativeHandleKind::CvPixelBuffer, buffer.cast()) };
+            let meta = FrameMeta {
+                width,
+                height,
+                format: TextureFormat::Rgba8,
+            };
+            self.target.push(
+                TextureFrame::new(meta, FramePayload::Native(handle))
+                    .on_release(move || release_pixel_buffer(address)),
+            );
+            FramePath::ZeroCopy
+        } else {
+            let pixels = copy_bgra_buffer(buffer, width, height);
+            release_pixel_buffer(address);
+            match pixels {
+                Some(pixels) => {
+                    self.target.push(TextureFrame::rgba8(width, height, pixels));
+                    FramePath::CpuCopy
+                }
+                None => FramePath::Refused,
+            }
+        };
+        self.note_path(path, width, height, format);
+        self.record(surface);
+    }
+
+    /// Log the delivery path whenever it changes — the line a device run
+    /// reads to tell the zero-copy path from the copy.
+    fn note_path(&self, path: FramePath, width: u32, height: u32, format: u32) {
+        if self.path.swap(path as u8, Ordering::Relaxed) == path as u8 {
+            return;
+        }
+        let session = self.target.session;
+        match path {
+            FramePath::ZeroCopy => log::info!(
+                "frust-video-player: session {session} texture output via CVPixelBuffer \
+                 (zero-copy importer installed), {width}x{height} 32BGRA"
+            ),
+            FramePath::CpuCopy => log::info!(
+                "frust-video-player: session {session} texture output via CPU copy (no \
+                 CVPixelBuffer importer installed), {width}x{height}"
+            ),
+            FramePath::Refused => log::warn!(
+                "frust-video-player: session {session} texture output dropped a {width}x{height} \
+                 buffer of pixel format {} (32BGRA expected, or it could not be read)",
+                fourcc(format)
+            ),
+            FramePath::None => {}
+        }
+    }
+
+    /// Count one delivered frame and log the rate and pool size every so
+    /// often (module doc's *Texture output*).
+    fn record(&self, surface: usize) {
+        let mut stats = self.stats.lock().unwrap_or_else(PoisonError::into_inner);
+        let now = Instant::now();
+        stats.frames += 1;
+        let frames = stats.frames;
+        let (window_start, window_first) = *stats.window.get_or_insert((now, frames));
+        if surface != 0 && stats.surfaces.len() < MAX_TRACKED_BUFFERS {
+            stats.surfaces.insert(surface);
+        }
+        let due = frames == STATS_FIRST_AT
+            || (frames > STATS_FIRST_AT && (frames - STATS_FIRST_AT).is_multiple_of(STATS_EVERY));
+        if !due {
+            return;
+        }
+        let window_frames = frames - window_first;
+        let secs = now.duration_since(window_start).as_secs_f64();
+        let fps = if secs > 0.0 {
+            window_frames as f64 / secs
+        } else {
+            0.0
+        };
+        let path = match self.path.load(Ordering::Relaxed) {
+            1 => "zero-copy",
+            2 => "CPU copy",
+            _ => "mixed",
+        };
+        log::info!(
+            "frust-video-player: session {} texture output: {frames} frames, {fps:.1} fps over the \
+             last {secs:.1}s, {} distinct IOSurfaces in that window, {path}",
+            self.target.session,
+            stats.surfaces.len()
+        );
+        stats.window = Some((now, frames));
+        stats.surfaces.clear();
+    }
+}
+
+impl Drop for FrameClock {
+    /// A clock dropped without [`Self::stop`] still stops its timer, which
+    /// would otherwise keep firing at a clock that is gone.
+    fn drop(&mut self) {
+        self.source.cancel();
+    }
+}
+
+/// Attach a texture output to `item` and start its clock — [`construct`]'s
+/// texture half, on the main thread. `None` (logged) when the output could
+/// not be built; the session then plays with an empty mailbox.
+fn attach_texture_output(
+    item: &AVPlayerItem,
+    target: Arc<TextureTarget>,
+) -> Option<Arc<FrameClock>> {
+    let session = target.session;
+    let Some(output) = PixelOutput::new() else {
+        log::warn!(
+            "frust-video-player: session {session} could not create an AVPlayerItemVideoOutput \
+             — no texture frames"
+        );
+        return None;
+    };
+    // SAFETY: `addOutput:` on a live item, on the main thread, with a freshly
+    // built `AVPlayerItemVideoOutput` — an `AVPlayerItemOutput`, the argument
+    // type it declares. Balanced by `removeOutput:` in
+    // `detach_texture_output`.
+    unsafe {
+        let _: () = msg_send![item, addOutput: &*output.output];
+    }
+    log::info!(
+        "frust-video-player: session {session} texture output attached \
+         (AVPlayerItemVideoOutput, 32BGRA, IOSurface-backed)"
+    );
+    Some(FrameClock::start(output, target))
+}
+
+/// Stop `clock` and take its output back off `item`, on the main thread.
+fn detach_texture_output(item: &AVPlayerItem, clock: &FrameClock) {
+    clock.stop();
+    // SAFETY: `removeOutput:` on a live item, on the main thread, with the
+    // output `attach_texture_output` added to that same item.
+    unsafe {
+        let _: () = msg_send![item, removeOutput: &*clock.output.output];
+    }
+}
+
+/// Whether the renderer can import `CVPixelBuffer`s right now. A native frame
+/// of a kind with no importer installed is refused by the frame bus, so
+/// without one (or without the `frust-api` half, which has no renderer to ask)
+/// frames are copied.
+fn zero_copy_available() -> bool {
+    #[cfg(feature = "frust-api")]
+    {
+        frust::texture::native_importer_installed(frust::texture::NativeHandleKind::CvPixelBuffer)
+    }
+    #[cfg(not(feature = "frust-api"))]
+    {
+        false
+    }
+}
+
+/// Drops one reference to a pixel buffer. A zero-copy frame's release
+/// callback, so it must not panic: a single CoreVideo call.
+fn release_pixel_buffer(address: usize) {
+    // SAFETY: `address` is a `CVPixelBufferRef` carrying one reference owned
+    // by its caller — a frame's, released exactly once by its callback, or
+    // `deliver`'s own on a path that hands no frame out.
+    // `CVPixelBufferRelease` is thread-safe.
+    unsafe { CVPixelBufferRelease(address as CVPixelBufferRef) };
+}
+
+/// The CPU path's copy: lock `buffer` read-only and swizzle its `32BGRA` rows
+/// into tightly packed RGBA. `None` when it cannot be locked or read.
+fn copy_bgra_buffer(buffer: CVPixelBufferRef, width: u32, height: u32) -> Option<Arc<[u8]>> {
+    // SAFETY: a read-only lock on a live buffer this call holds a reference
+    // to, unlocked below on every path.
+    if unsafe { CVPixelBufferLockBaseAddress(buffer, PIXEL_BUFFER_LOCK_READ_ONLY) } != 0 {
+        return None;
+    }
+    // SAFETY: the buffer is locked, so its base address and row stride are
+    // valid, and `stride * height` bytes from that address are readable until
+    // the unlock below; the slice does not outlive it.
+    let pixels = unsafe {
+        let base = CVPixelBufferGetBaseAddress(buffer);
+        let stride = CVPixelBufferGetBytesPerRow(buffer);
+        let len = stride.checked_mul(height as usize);
+        match (base.is_null(), len) {
+            (false, Some(len)) => {
+                let bytes = std::slice::from_raw_parts(base.cast::<u8>().cast_const(), len);
+                bgra_rows_to_rgba(bytes, width, height, stride)
+            }
+            _ => None,
+        }
+    };
+    // SAFETY: the matching unlock, with the flags the lock took.
+    unsafe { CVPixelBufferUnlockBaseAddress(buffer, PIXEL_BUFFER_LOCK_READ_ONLY) };
+    pixels
+}
+
+/// Swizzles `height` rows of `32BGRA` pixels, `stride` bytes apart, into a
+/// tightly packed RGBA buffer. `None` when a row cannot hold `width` pixels or
+/// `src` cannot hold `height` rows. The output's frames are opaque, so the
+/// result is premultiplied as it stands.
+fn bgra_rows_to_rgba(src: &[u8], width: u32, height: u32, stride: usize) -> Option<Arc<[u8]>> {
+    let row = (width as usize).checked_mul(4)?;
+    let rows = height as usize;
+    if stride < row || rows == 0 || src.len() < stride.checked_mul(rows - 1)?.checked_add(row)? {
+        return None;
+    }
+    let mut out = Vec::with_capacity(row * rows);
+    for line in src.chunks(stride).take(rows) {
+        for &[b, g, r, a] in line[..row].as_chunks::<4>().0 {
+            out.extend_from_slice(&[r, g, b, a]);
+        }
+    }
+    Some(Arc::from(out))
+}
+
+/// A CoreVideo pixel-format code as its four characters (`'420v'`), or hex
+/// when they are not printable.
+fn fourcc(code: u32) -> String {
+    let bytes = code.to_be_bytes();
+    if bytes.iter().all(|b| b.is_ascii_graphic() || *b == b' ') {
+        format!("'{}'", String::from_utf8_lossy(&bytes))
+    } else {
+        format!("{code:#010x}")
+    }
+}
+
+/// A [`Duration`] in whole nanoseconds, as `libdispatch` takes it.
+fn nanos(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
 
 // --- iOS audio session -------------------------------------------------------------
@@ -1843,5 +2589,45 @@ mod tests {
                 .join("clips")
                 .join("intro.mp4")
         );
+    }
+
+    /// A padded `32BGRA` image swizzles into tightly packed RGBA, row padding
+    /// dropped.
+    #[test]
+    fn bgra_rows_swizzle_into_packed_rgba() {
+        // 2x2 pixels, 12-byte stride (4 bytes of padding per row).
+        let src = [
+            1, 2, 3, 4, 5, 6, 7, 8, 0xEE, 0xEE, 0xEE, 0xEE, //
+            9, 10, 11, 12, 13, 14, 15, 16,
+        ];
+        let rgba = super::bgra_rows_to_rgba(&src, 2, 2, 12).expect("a well-formed image");
+        assert_eq!(
+            &rgba[..],
+            &[3, 2, 1, 4, 7, 6, 5, 8, 11, 10, 9, 12, 15, 14, 13, 16]
+        );
+    }
+
+    /// A stride shorter than a row, or a source short of the last row, is
+    /// refused rather than read past.
+    #[test]
+    fn malformed_bgra_images_are_refused() {
+        assert!(super::bgra_rows_to_rgba(&[0; 16], 2, 2, 4).is_none());
+        assert!(super::bgra_rows_to_rgba(&[0; 15], 2, 2, 8).is_none());
+        assert!(super::bgra_rows_to_rgba(&[0; 16], 2, 0, 8).is_none());
+    }
+
+    /// Pixel-format codes read as their four characters, hex otherwise.
+    #[test]
+    fn pixel_formats_render_as_four_character_codes() {
+        assert_eq!(super::fourcc(super::PIXEL_FORMAT_32BGRA), "'BGRA'");
+        assert_eq!(super::fourcc(u32::from_be_bytes(*b"420v")), "'420v'");
+        assert_eq!(super::fourcc(0x0000_0001), "0x00000001");
+    }
+
+    /// The poll intervals stay ordered and in nanoseconds.
+    #[test]
+    fn the_frame_clock_polls_faster_than_it_backs_off() {
+        assert!(super::nanos(super::FAST_POLL) < super::nanos(super::SLOW_POLL));
+        assert_eq!(super::nanos(Duration::from_millis(1)), 1_000_000);
     }
 }

@@ -12,12 +12,11 @@ audit itself (`FRUST_LAYOUT_AUDIT`); slivers (`custom_scroll_view`, `sliver_list
 `sliver_persistent_header`) give scrolling a lazy, composable shape; retained layers
 (`repaint_boundary`, `AnimatedOpacity::cached`) keep rasterized pages across frames, with path
 clips and backdrop blur as engine primitives. Partial repaint was measured and rejected, and was
-removed. On Linux and Android, platform views can sit between scene slots through an overlay host
-(`FRUST_OVERLAYS`, default off), and video and camera frames can enter the scene as textures
-through `frust::texture` and `texture_view`, with Android hardware-buffer import behind
-`FRUST_ANDROID_HWBUFFER_IMPORT` (default off). The Apple half of that work (overlay hosts, Metal
-import, Apple producers) is not part of this release, and the Android device legs are still to be
-run. Gates passed: workspace tests, clippy, the five engine golden arms byte-unchanged, and both
+removed. Platform views can sit between scene slots through an overlay host on Android, iOS and
+macOS (`FRUST_OVERLAYS`, default off), and video and camera frames can enter the scene as textures
+through `frust::texture` and `texture_view`, with zero-copy import on Apple and, behind
+`FRUST_ANDROID_HWBUFFER_IMPORT` (default off), on Android. The Android hardware-buffer device leg
+and the macOS overlay visual check are still to be run. Gates passed: workspace tests, clippy, the five engine golden arms byte-unchanged, and both
 Android app Kotlin compiles. How the model maps onto Flutter's is in
 [docs/learning/17-render-model-vs-flutter.md](docs/learning/17-render-model-vs-flutter.md); the
 limits are in [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
@@ -144,8 +143,18 @@ limits are in [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
 - `frust-video-player`: `VideoOutput::Texture` with `video_texture_view`, `texture_sink` and
   `texture_output`. `frust-camera`: `CameraSession::preview_texture` and `preview_texture_output`,
   and a default-on `frust-api` feature. Both keep the native view as the default; the playground
-  gains Texture toggles. Apple producers and the Apple overlay hosts are pending, and the Android
-  device legs are pending.
+  gains Texture toggles.
+- Apple overlay hosts behind `FRUST_OVERLAYS` (default off): iOS `FrustOverlayView` per cut (Mode A
+  only; additive `frust_overlay_mode`/`frust_overlay_attach`/`frust_overlay_detach` exports) and
+  macOS `FrustOverlaySurfaceView`, presenting main then overlays from one segmented submit. Each
+  overlay sits directly above its own slot, so interleaved content stays under a later native
+  control. Limits: `apple-overlay-limits`.
+- Apple zero-copy import: `frust_gpu::import::apple::MetalImporter` wraps a 32BGRA IOSurface-backed
+  `CVPixelBuffer` as a texture (NV12 stays on the CPU path), installed by
+  `frust_render::native_import::install` on iOS and macOS.
+- Apple texture producers: `VideoOutput::Texture` (an `AVPlayerItemVideoOutput`) and the camera's
+  `preview_texture` (a second 32BGRA data output) hand frames on zero-copy when the importer is
+  installed.
 
 ### Changed
 
@@ -213,7 +222,11 @@ limits are in [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
 - A `scroll_to_item` request that moves nothing (unknown key, or `Nearest` on a fully visible row)
   now supersedes an in-flight controller tween instead of leaving it running.
 - `VideoFit::Cover` no longer spills outside its box on Android in texture mode, where the frames
-  are scene content and crop inside the box (Android half; the Apple producers are pending).
+  are scene content and crop inside the box, and the native player view now clips on Apple too.
+- iOS: with present-sync armed, the 6 wgpu validation errors per launch are gone, and the
+  present-sync black screen on a phone and the Simulator Mode B black screen no longer reproduce.
+- The playground's camera texture preview no longer freezes when its frame requester is culled
+  below the fold; the ticker now sits under the picture (`texture-bus-no-wake-on-push`).
 
 ## 0.6.1 — 2026-10-12
 

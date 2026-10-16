@@ -232,6 +232,59 @@ pub trait DesktopExtensions {
     }
 }
 
+/// Whether overlay surfaces are on: `FRUST_OVERLAYS` (runtime env, then a
+/// compile-time `--define`, then the `FRUST_OVERLAY_SPIKE` alias; `0`, `off`
+/// or `false` is off, any other value on) — and only on macOS, the one desktop
+/// host with an overlay view. Read once per process.
+///
+/// On, the core feeds the platform-view differ each painted scene, so a batch
+/// handed to [`DesktopExtensions::on_platform_view_commands`] also carries
+/// `ViewCommand::Overlay`/`DisposeOverlay`: frust paint recorded above a hosted
+/// view, for the host to give a surface stacked directly above that view —
+/// see [`publish_overlay_layer`]. Off (the default), no overlay command is
+/// ever produced and the frame path is the single-surface one.
+pub fn overlays_enabled() -> bool {
+    crate::render::overlays_enabled()
+}
+
+/// Hand the render side overlay `overlay_id`'s `CAMetalLayer*` at
+/// `width` x `height` physical px — a new layer, or the same one resized —
+/// from inside [`DesktopExtensions::on_platform_view_commands`] (the platform
+/// main thread). The render side builds an overlay surface on it before its
+/// next frame and draws the overlay's command range there. Answers whether
+/// something changed, in which case the host requests a frame
+/// (`Window::request_redraw`) so the surface is drawn at once rather than on
+/// the next unrelated repaint.
+///
+/// The host must keep `layer` alive until [`withdraw_overlay_layer`] for the
+/// same id has returned.
+#[doc(hidden)]
+pub fn publish_overlay_layer(
+    overlay_id: u64,
+    layer: std::ptr::NonNull<std::ffi::c_void>,
+    width: u32,
+    height: u32,
+) -> bool {
+    if !overlays_enabled() {
+        return false;
+    }
+    crate::render::publish_overlay_layer(
+        overlay_id,
+        layer.as_ptr().expose_provenance(),
+        (width, height),
+    )
+}
+
+/// Withdraw overlay `overlay_id`'s layer **before** the host releases it:
+/// waits out a frame that is drawing the overlay's surface, then drops the
+/// surface. On return the layer may go. A no-op for an id never published.
+#[doc(hidden)]
+pub fn withdraw_overlay_layer(overlay_id: u64) {
+    if overlays_enabled() {
+        crate::render::withdraw_overlay_layer(overlay_id);
+    }
+}
+
 /// The no-op extension set: every hook keeps this core's own behavior.
 ///
 /// Installed by [`run_desktop`](crate::run_desktop), so the zero-config dev
