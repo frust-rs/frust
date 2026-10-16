@@ -15,6 +15,11 @@
 //! once per frame "did any tracked signal change since I last asked" — the
 //! reactive input to the mobile frame gate.
 //!
+//! The [`thread_policy`] module is the shells' scheduling shim: it states
+//! which side of the frame a framework thread is on (the render thread, or
+//! this crate's background pool, which it applies to every pool thread it
+//! starts) and translates that into the platform's nice value or QoS class.
+//!
 //! It is a leaf substrate: no `winit`, no `vello`/`wgpu`, no `frust-core`
 //! dependency. Shells own the wake-up wiring and call [`ReactiveRuntime::init`]
 //! (once, on the UI thread) and [`ReactiveRuntime::pump_local`] each frame.
@@ -25,6 +30,7 @@ mod executor;
 mod menu;
 mod runtime;
 mod task;
+pub mod thread_policy;
 mod tracked;
 
 pub use back::{
