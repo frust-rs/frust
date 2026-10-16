@@ -6,6 +6,22 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ## Unreleased
 
+The render model gained the pieces a mobile-first framework needs to keep frames cheap and to mix
+native content with its own paint. Layout now skips pods whose constraints are unchanged and can
+audit itself (`FRUST_LAYOUT_AUDIT`); slivers (`custom_scroll_view`, `sliver_list`,
+`sliver_persistent_header`) give scrolling a lazy, composable shape; retained layers
+(`repaint_boundary`, `AnimatedOpacity::cached`) keep rasterized pages across frames, with path
+clips and backdrop blur as engine primitives. Partial repaint was measured and rejected, and was
+removed. On Linux and Android, platform views can sit between scene slots through an overlay host
+(`FRUST_OVERLAYS`, default off), and video and camera frames can enter the scene as textures
+through `frust::texture` and `texture_view`, with Android hardware-buffer import behind
+`FRUST_ANDROID_HWBUFFER_IMPORT` (default off). The Apple half of that work (overlay hosts, Metal
+import, Apple producers) is not part of this release, and the Android device legs are still to be
+run. Gates passed: workspace tests, clippy, the five engine golden arms byte-unchanged, and both
+Android app Kotlin compiles. How the model maps onto Flutter's is in
+[docs/learning/17-render-model-vs-flutter.md](docs/learning/17-render-model-vs-flutter.md); the
+limits are in [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
+
 ### Added
 
 - Backdrop blur: `frust_scene::Command::BackdropBlur`, `SceneBuilder::backdrop_blur` and
@@ -133,6 +149,13 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Changed
 
+- `NativeHandle` is move-only (no `Clone`/`Copy`) and `FramePayload`/`SourcePayload` are no longer
+  `Clone`, so a handle cannot be copied. `TextureFrame` and `SourceFrame` keep their payload and
+  release callback private (`new`, `payload()`, `meta()`, `has_release()`), so outside `unsafe` a
+  handle cannot leave the frame that carries its release; the `unsafe` `into_parts`
+  (`FrameMeta`/`SourceMeta`) makes its caller run the returned callback exactly once. Release
+  callbacks run under `catch_unwind` in panic=unwind builds (dev and test); the shipped release
+  profile sets `panic = "abort"`, where a panicking callback aborts and callbacks must not panic.
 - `NativeHandle` (in `frust-render` and `frust-plugin`) keeps its fields private: build one
   through the unsafe `NativeHandle::new(kind, ptr)` and read it with `kind()`/`ptr()`. Texture
   frames run their release callback on drop, so it runs exactly once on every path.

@@ -4709,38 +4709,57 @@ act_000001a10d6c24eeK3GHlKbH.
 
 ---
 
-### `render-model-gaps` — render-model gaps, each retired by a named phase of the render-model plan
+### `render-model-gaps` — render-model plan close-out: what shipped, what is NO-GO, what is pending
 
-**Observed**: the render model has these gaps, each listed with the phase of plan
-`fplan_000001a1347808dayUwoSOyz` that retires it:
+**Observed**: the render-model plan is closed out for Linux and Android; the Apple half of Phase 4
+is pending. Every line below says where its limits live:
 
-- ~~no per-subtree layout skipping — Phase 1~~ closed at `feature/render-model-p1` @ 39c07d78
-  (checkpoint R2). Residual: a parent on a dirty path still runs its own layout, and there are no
+- Phase 1, layout audit (`FRUST_LAYOUT_AUDIT`) and per-pod constraint-equality relayout skipping:
+  shipped-in-Phase-1. Residual: a parent on a dirty path still runs its own layout and there are no
   parent-pointer relayout boundaries; material `NavigationBarWidget::selected_indicator_rect`
-  calls `widget_mut()` inside layout and so relays out the selected item every pass (a known cost);
-- ~~no retained layers, no repaint boundaries, no clip-path/backdrop primitives, no partial repaint
-  — Phase 3~~ landed on `feature/render-model-p3` (p3-01..p3-09): retained layers and
-  `repaint_boundary`, `PushClipPath`, `BackdropBlur`; partial repaint was measured NO-GO
-  (`partial-repaint-outcome`). Still open: `BlendMode` on `PushLayer` — the engine's `layer_role`
-  refuses a non-default blend and `blend.wgsl` serves only `COMPOSE_DEST_OUT`; card p3-06b awaits a
-  ruling. Phase 3's device legs (Pixel 5, iPhone SE, S1/S6 kill-switch rows) are owed;
-- per-slot platform-view interleaving and in-scene video/camera textures — Phase 4: shipped on
-  Android behind default-off knobs (overlays `FRUST_OVERLAYS`, hardware-buffer import
-  `FRUST_ANDROID_HWBUFFER_IMPORT`; the texture bus itself is always available), with the Pixel 5
-  device legs pending (`android-overlays-opt-in-pending-device-leg`,
-  `android-hwbuffer-import-opt-in`); the Apple half (overlay hosts, Metal import, Apple producers)
-  is pending.
+  calls `widget_mut()` inside layout and so relays out the selected item every pass.
+- Phase 2, slivers (`SliverWidget`, `custom_scroll_view`, `sliver_list`,
+  `sliver_persistent_header`): shipped-in-Phase-2; follow-up-see-`sliver-v1-scope` and
+  follow-up-see-`scroll-view-list-view-not-viewport-based`.
+- Phase 3, retained layers, `repaint_boundary`, `AnimatedOpacity::cached`, `PushClipPath`,
+  `BackdropBlur`: shipped-in-Phase-3; limits follow-up-see-`retained-pages-budget-refusals`,
+  follow-up-see-`retained-ledger-single-renderer`,
+  follow-up-see-`retained-stale-ledger-eviction-thrash`, follow-up-see-`backdrop-blur-bound`,
+  follow-up-see-`path-clip-mask-rerasterized`. `BlendMode` on `PushLayer` is still refused by the
+  engine (`blend.wgsl` serves only `COMPOSE_DEST_OUT`): follow-up, awaiting a ruling.
+- Phase 3, partial repaint: NO-GO-see-`partial-repaint-outcome`.
+- Phase 3 device legs (Pixel 5, iPhone SE, kill-switch rows): device-leg-pending-see-
+  `android-overlays-opt-in-pending-device-leg` for the Android side; iOS is pending-Apple-see-the
+  Apple docs.
+- Phase 4, z-order differ, segmented rendering and the Android overlay host: shipped-in-Phase-4
+  behind `FRUST_OVERLAYS` (default off); device-leg-pending-see-
+  `android-overlays-opt-in-pending-device-leg`; follow-up-see-`android-overlays-cover-later-slots`
+  and follow-up-see-`overlay-unservable-content-stays-on-main`.
+- Phase 4, texture bus (`frust::texture`, `texture_view`, `TextureSink`): shipped-in-Phase-4;
+  follow-up-see-`texture-bus-native-release-delay`. Phase 5 made `NativeHandle` move-only and
+  frames consumed by value.
+- Phase 4, Android hardware-buffer import: shipped-in-Phase-4 behind
+  `FRUST_ANDROID_HWBUFFER_IMPORT` (default off); device-leg-pending-see-
+  `android-hwbuffer-import-opt-in`.
+- Phase 4, plugin texture modes (video-player `VideoOutput::Texture`, camera `preview_texture`):
+  shipped-in-Phase-4 for Android; follow-up-see-`video-texture-android-gles-copy` and
+  follow-up-see-`camera-texture-cpu-copy-only`; device-leg-pending-see-
+  `android-hwbuffer-import-opt-in`.
+- Phase 4, Apple overlay hosts, Metal import and Apple producers: pending-Apple-see-the Apple
+  docs; the desktop and macOS platform-view limit stays until the macOS overlay host lands
+  (pending-Apple-see-`desktop-platform-view-mode-a-only`).
 
-**Applies to**: apps whose layout or paint cost scales with the whole tree, or that need layered
-blending, or a platform view or video texture interleaved between scene slots.
+**Applies to**: apps that place a platform view or video/camera texture between scene slots, and
+anyone reading the plan's outcome.
 
-**Why accepted**: each gap is sequenced in the render-model plan and is retired piecewise as its
-phase lands.
+**Why accepted**: each shipped line is bounded by the entries it names; the Apple half needs
+hardware and toolchains this phase did not have.
 
-**Trigger for removal**: each line is deleted when its phase lands; the entry is deleted when its
-last line is retired.
+**Trigger for removal**: the entry is deleted when the Apple half of Phase 4 lands and the entries
+it names are retired or kept on their own.
 
-**Evidence**: research `rsa_000001a13475eca03WGtt6CU`; plan `fplan_000001a1347808dayUwoSOyz`.
+**Evidence**: research `rsa_000001a13475eca03WGtt6CU`; plan `fplan_000001a1347808dayUwoSOyz`;
+`docs/learning/17-render-model-vs-flutter.md`.
 
 ---
 
@@ -4863,6 +4882,10 @@ every submission made before the drop plus one more completion point, not a fram
 the drop and submitted after it: a registration dropped mid-drain may release its last native frame
 while the frame that sampled it is still executing, and that one frame may tear. This is not a
 memory-safety issue (the importer holds its own reference and wgpu keeps the texture alive).
+
+A release callback that panics is contained in unwinding builds (dev and test) without a log line
+on the producer side (the renderer side logs); under the shipped `panic = "abort"` profile it
+aborts the process, so callbacks must not panic.
 
 **Applies to**: producers with a buffer ring shallower than the retire backlog plus one shown frame.
 

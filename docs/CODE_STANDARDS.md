@@ -56,9 +56,11 @@ off this index — read this plus the one that covers what you are touching:
     raw `ash`) and the `dlsym`-resolved `AHardwareBuffer_*` entries, each `# Safety`-noted, behind
     the default-off `FRUST_ANDROID_HWBUFFER_IMPORT` knob, plus a debug thread check; Apple pending.
     `frust-render`'s `native_import::android` makes the one call into it (`NativeHandle::new` contract).
-  - `frust-plugin`'s `NativeHandle::new` (`unsafe fn`, no block); the camera and video-player
-    bridges each hold one `SAFETY`-noted call to it. `frust-video-player`'s Android backend: the
-    constructor, the `AHardwareBuffer_*` NDK calls and a direct-buffer plane read.
+  - `frust-plugin`'s `NativeHandle::new` and `TextureFrame::into_parts`, `frust-render`'s
+    `SourceFrame::into_parts` (`unsafe fn`s; the bus's own call site is the SAFETY-noted block in
+    `SourcePass::record`). The camera and video-player bridges each
+    hold two `SAFETY`-noted sites: the split and the renderer-twin `NativeHandle::new`.
+    `frust-video-player`'s Android backend: its constructor call, the `AHardwareBuffer_*` NDK calls and a direct-buffer plane read.
   - `frust-gpu`'s `RenderContext::create_pipeline_cache` — one call building a `wgpu::PipelineCache`
     from a shell-persisted, adapter-fingerprint-validated blob (see RENDER_ARCHITECTURE.md).
   - `frust-drive`'s `process` module — a `kill(2)` shim (std has no `killpg`) group-killing a child.
@@ -70,34 +72,31 @@ off this index — read this plus the one that covers what you are touching:
     `frust_camera_session_handle`'s raw-pointer C export (retain contract **+1**); its Android
     backend keeps its single `plane_data` direct-buffer block, texture preview included.
   - `frust-native-widgets`'s Android backend — cached `JMethodID` + `call_method_unchecked` for hot
-    per-frame property setters, confined to one `# Safety`-documented helper (`call_void_cached`,
-    `plugins/native-widgets/src/controls/mod.rs`'s `platform` submodule); cold setters use the
-    checked, `jni_sig!`-typed `NativeCtx::call_void` path. Its Apple backend closes objc2's
-    nullability-unannotated `unsafe` behind **safe** property wrappers, each `// SAFETY:`-noted; the
-    `define_class!`/`extern_protocol!` registration and `addTarget:action:` attach/detach are its
-    other sites. Its presentation arms add `apple_host::on_main`'s `MainThreadMarker::new_unchecked()`
-    and the `define_class!` controllers and `block2` handlers of `apple_alert`/`apple_sheet`/
-    `appkit_alert` — each `SAFETY`-noted.
+    per-frame setters, confined to one `# Safety` helper (`call_void_cached`, `controls/mod.rs`'s
+    `platform` submodule); cold setters use the checked `NativeCtx::call_void`. Its Apple backend
+    closes objc2's nullability-unannotated `unsafe` behind **safe** property wrappers, each
+    `// SAFETY:`-noted, plus the `define_class!`/`extern_protocol!` registrations, `addTarget:action:`
+    attach/detach, `apple_host::on_main`'s `MainThreadMarker::new_unchecked()`, and the
+    `apple_alert`/`apple_sheet`/`appkit_alert` controllers and `block2` handlers — each `SAFETY`-noted.
   - `frust-iap`'s `apple` backend — one untyped `msg_send![class, shared]` resolving the Swift
     glue's singleton by runtime-only class name, plus two `RcBlock` completion blocks receiving raw
     `NSString` pointers whose validity only the glue's contract establishes; each site is
     `SAFETY`-noted and `catch_unwind`-wrapped. Its `android` backend holds only its two JNI exports'
     `#[unsafe(no_mangle)]` attributes.
-  - `frust-auth-session`'s `apple` backend — the `objc2-authentication-services` calls (the
-    deprecated `ASWebAuthenticationSession` initializer, its context/ephemeral setters, `-start`);
-    the completion handler's raw `NSURL`/`NSError` derefs plus the error-domain `extern` static; the
-    `define_class!` presentation-anchor class (attributes and two `unsafe impl` conformances as one
-    zone, plus its `msg_send![super(this), init]`); one `MainThreadMarker::new_unchecked()`. Each is
-    `SAFETY`-noted, the completion body under `catch_unwind`; its `android` backend, like
-    `frust-iap`'s, holds only a JNI export's `#[unsafe(no_mangle)]`.
+  - `frust-auth-session`'s `apple` backend — the `objc2-authentication-services` calls (the deprecated
+    `ASWebAuthenticationSession` initializer, its setters, `-start`), the completion handler's raw
+    `NSURL`/`NSError` derefs and error-domain `extern` static, the `define_class!` presentation-anchor
+    class (with its `msg_send![super(this), init]`), one `MainThreadMarker::new_unchecked()`; each is
+    `SAFETY`-noted, the completion body under `catch_unwind`. Its `android` backend, like `frust-iap`'s,
+    holds only a JNI export's `#[unsafe(no_mangle)]`.
   - `frust-hotpatch` — `patch.rs`: `load_patch_library` (`libloading`; initialisers run, so only a
-    library built for this process), `apply_patch` (a table from the patch builder for this exact
-    executable, anchored on `__frust_hotpatch_anchor`, cross-image layouts unchanged — the builder's
-    L3 gate checks that) and `get_jump_table` (the leaked, Release-published table, used within one
-    call); `hot_fn.rs`: casting a table address to the hot function's signature; `anchor.rs`: image
-    lookup (`dl_iterate_phdr`, dyld, `GetModuleHandleExW`); `android.rs`: memfd +
-    `android_dlopen_ext`. `frust-shell-common` calls the safe `apply_from_devtools`; `frust::app!`
-    emits only the anchor's `#[unsafe(no_mangle)]`.
+    library built for this process), `apply_patch` (a table for this exact executable, anchored on
+    `__frust_hotpatch_anchor`; the builder's L3 gate checks cross-image layouts) and
+    `get_jump_table` (the leaked, Release-published table, used within one call); `hot_fn.rs`:
+    casting a table address to the hot function's signature; `anchor.rs`: image lookup
+    (`dl_iterate_phdr`, dyld, `GetModuleHandleExW`); `android.rs`: memfd + `android_dlopen_ext`.
+    `frust-shell-common` calls the safe `apply_from_devtools`; `frust::app!` emits only the
+    anchor's `#[unsafe(no_mangle)]`.
 - **No unwind across FFI.** Every platform export routes through `frust-shell-common`'s
   `guard` helper (`catch_unwind` + log, returning a benign default) rather than unwinding
   into JVM-/Swift-owned stack frames — a panic crossing the FFI boundary is undefined
@@ -111,6 +110,8 @@ off this index — read this plus the one that covers what you are touching:
   (shared by both crates' `menu` modules): it is a native-dispatch boundary held panic-free
   by construction rather than by `catch_unwind` — the callback body is an infallible
   mutex-guarded queue push plus a redraw request, nothing that can panic.
+  Texture release callbacks (`TextureFrame`/`SourceFrame`, run from `Drop`) must not panic: the
+  `catch_unwind` in `run_release` is a last line of defence in unwinding builds only.
 - **State-sync, not op-forwarding, across a mobile IME bridge.** Android/iOS platform text
   input doesn't send individual keystrokes across the FFI boundary — the platform owns
   composition (Gboard, CJK marked text) against a local mirror, then hands the framework a
@@ -141,9 +142,8 @@ off this index — read this plus the one that covers what you are touching:
   `// erasure: keep <why>` (`scripts/ci/erasure-check.sh`, rules T1-T7); a driver closure erases
   `Component::build`: `move |s| AnyView::new(root.build(s))`. No `#[allow(refining_impl_trait)]`.
 - **Edition-2024 `-> impl Trait` return types capture all in-scope lifetimes by default.**
-  When a function returning `impl View<State>` must not be tied to a parameter borrow (the
-  result is stored, or returned from a navigator/`RenderRoot` closure that needs one type for
-  every lifetime), opt out explicitly — the compiler says so; otherwise the default is fine:
+  When a returned `impl View<State>` must not borrow a parameter (stored, or returned from a
+  navigator/`RenderRoot` closure), opt out explicitly — the compiler says so; otherwise the default is fine:
 
   ```rust
   fn greeting(state: &AppState) -> impl frust::View<AppState> + use<> {

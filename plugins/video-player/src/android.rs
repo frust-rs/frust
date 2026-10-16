@@ -185,14 +185,15 @@
 // `crate::backend::Active`'s own doc).
 #![cfg_attr(test, allow(dead_code))]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use frust_plugin::texture::{
-    FramePayload, NativeHandle, NativeHandleKind, TextureFormat, TextureFrame, TextureSink,
+    FrameMeta, FramePayload, NativeHandle, NativeHandleKind, TextureFormat, TextureFrame,
+    TextureSink,
 };
 use jni::errors::LogErrorAndDefault;
 use jni::objects::{JByteBuffer, JClass, JObject, JString, JValue};
@@ -255,6 +256,11 @@ static SESSIONS: LazyLock<Mutex<HashMap<i32, Arc<Shared>>>> =
 /// so a frame push never holds the state registry's lock.
 static TEXTURE_SINKS: LazyLock<Mutex<HashMap<i32, TextureSink>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The sessions whose `releaseTextureFrame` failure has already been logged
+/// at `warn!` (see [`first_release_failure`]).
+static RELEASE_FAILURES_LOGGED: LazyLock<Mutex<HashSet<i32>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
 
 /// Opens Android player sessions.
 pub(crate) struct AndroidBackend;
@@ -516,6 +522,11 @@ impl BackendSession for AndroidSession {
             if is_this_session {
                 sinks.remove(&self.id);
             }
+            drop(sinks);
+            // The session's once-only failure gate goes with it, so the set
+            // does not grow by one id per closed session and a reused id
+            // warns afresh.
+            forget_release_failures(self.id);
         }
 
         if let Err(err) = self.command("FrustVideoPlayerHost.close", |env, class, session| {
@@ -1073,28 +1084,63 @@ unsafe fn hardware_buffer(env: &Env<'_>, buffer: &JObject<'_>) -> *mut c_void {
     }
 }
 
+/// Whether `session` has not yet had a `releaseTextureFrame` failure logged —
+/// the first one of a session is worth a `warn!`, the rest `debug!`. A
+/// session that fails on every frame would otherwise flood the log.
+fn first_release_failure(session: i32) -> bool {
+    lock(&RELEASE_FAILURES_LOGGED).insert(session)
+}
+
+/// Forgets that `session` ever had a release failure logged — called when the
+/// session closes, so [`RELEASE_FAILURES_LOGGED`] holds only open sessions.
+fn forget_release_failures(session: i32) {
+    lock(&RELEASE_FAILURES_LOGGED).remove(&session);
+}
+
 /// A native frame's release: drops the reference [`hardware_buffer`]
 /// acquired, then tells the host it may close the image (and so let its
 /// reader reuse the buffer). Runs once, on whichever thread the renderer
 /// releases the frame from.
+///
+/// The release runs from a frame's `Drop`, possibly during an unwind, so it
+/// must not panic: the buffer reference is given back first (a plain FFI call,
+/// so it happens whatever follows), then the host is told inside a scoped JNI
+/// attachment ([`with_host`]) under `catch_unwind`. That guard only applies to
+/// panic=unwind builds (dev and test); the shipped release profile sets
+/// `panic = "abort"`, where a panic here aborts the process and the
+/// must-not-panic rule is the only protection. A failure, or a caught panic,
+/// is logged — once per session at `warn!` — and dropped; the host's image
+/// then stays open until its own close, which is the only cost.
 fn release_native_frame(session: i32, buffer: usize, token: i64) {
     // SAFETY: `buffer` is the address `hardware_buffer` returned non-null,
     // carrying exactly one reference acquired there and released only here
     // (a frame's release runs once).
     unsafe { AHardwareBuffer_release(buffer as *mut c_void) };
-    let released = with_host(|env, class| {
-        run_jni(env, "FrustVideoPlayerHost.releaseTextureFrame", |env| {
-            env.call_static_method(
-                class,
-                jni_str!("releaseTextureFrame"),
-                jni_sig!("(IJ)V"),
-                &[JValue::Int(session), JValue::Long(token)],
-            )?
-            .v()
+    let released = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        with_host(|env, class| {
+            run_jni(env, "FrustVideoPlayerHost.releaseTextureFrame", |env| {
+                env.call_static_method(
+                    class,
+                    jni_str!("releaseTextureFrame"),
+                    jni_sig!("(IJ)V"),
+                    &[JValue::Int(session), JValue::Long(token)],
+                )?
+                .v()
+            })
         })
-    });
-    if let Err(err) = released {
-        log::debug!("frust-video-player: releasing frame {token} of session {session}: {err}");
+    }));
+    let failure = match released {
+        Ok(Ok(())) => return,
+        Ok(Err(err)) => err.to_string(),
+        Err(_) => "the release panicked and was caught".to_owned(),
+    };
+    if first_release_failure(session) {
+        log::warn!(
+            "frust-video-player: releasing frame {token} of session {session}: {failure} \
+             (further release failures of this session are logged at debug level)"
+        );
+    } else {
+        log::debug!("frust-video-player: releasing frame {token} of session {session}: {failure}");
     }
 }
 
@@ -1200,15 +1246,19 @@ fn deliver_texture_frame(env: &Env<'_>, args: TextureFrameArgs<'_, '_>) -> bool 
         // `AHardwareBuffer_acquire` reference; only the frame's release
         // callback below (`release_native_frame`, run exactly once) drops it.
         let handle = unsafe { NativeHandle::new(NativeHandleKind::AHardwareBuffer, raw) };
-        sink.push(TextureFrame {
-            width,
-            height,
-            format: TextureFormat::Rgba8,
-            payload: FramePayload::Native(handle),
-            release: Some(Box::new(move || {
+        sink.push(
+            TextureFrame::new(
+                FrameMeta {
+                    width,
+                    height,
+                    format: TextureFormat::Rgba8,
+                },
+                FramePayload::Native(handle),
+            )
+            .on_release(move || {
                 release_native_frame(session, address, token);
-            })),
-        });
+            }),
+        );
         return true;
     }
 
@@ -1541,5 +1591,20 @@ mod tests {
             PlaybackState::Playing,
             PlaybackState::Idle
         ));
+    }
+
+    /// The once-per-session gate behind the release-failure log: the first
+    /// failure of a session is reported, later ones of that session are not.
+    #[test]
+    fn release_failures_are_reported_once_per_session() {
+        assert!(super::first_release_failure(7_000_001));
+        assert!(!super::first_release_failure(7_000_001));
+        assert!(super::first_release_failure(7_000_002));
+
+        // Closing a session forgets it, so the set does not grow and a
+        // reused id warns again; other sessions are untouched.
+        super::forget_release_failures(7_000_001);
+        assert!(super::first_release_failure(7_000_001));
+        assert!(!super::first_release_failure(7_000_002));
     }
 }

@@ -10,10 +10,10 @@
 //! sees — plain data in, plain data out — and the consumer is a closure
 //! written by whoever depends on *both* sides (a plugin's own facade-feature
 //! half, or app code): it takes [`TextureSink::take_latest`]'s frame, carries
-//! its fields across into the renderer's own twin frame type (the field names
-//! match one for one; the release callback moves with `Option::take`), and
-//! returns it to the renderer's frame source. Neither side ever names the
-//! other.
+//! its parts across into the renderer's own twin frame type (the extent and
+//! format match one for one; the payload and release callback travel together
+//! through [`TextureFrame::into_parts`]), and returns it to the renderer's
+//! frame source. Neither side ever names the other.
 //!
 //! # Latest frame wins
 //!
@@ -37,7 +37,7 @@
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 
 /// Process-unique counter behind [`TextureSink::id`].
 static NEXT_SINK_ID: AtomicU64 = AtomicU64::new(1);
@@ -77,7 +77,15 @@ pub enum NativeHandleKind {
 /// [`Self::new`]: the importer that eventually dereferences the pointer
 /// relies on nothing but that constructor's contract, so safe code cannot
 /// forge a handle.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// A handle is move-only — neither `Clone` nor `Copy` — so it cannot be
+/// copied, and a frame's payload and release callback are private to the
+/// frame: outside `unsafe`, a handle cannot leave the frame that carries its
+/// release. Reading it in place goes through [`TextureFrame::payload`]; the one
+/// way to take it out is the `unsafe` [`TextureFrame::into_parts`], whose
+/// caller promises to run the returned callback once, after the handle's last
+/// use.
+#[derive(Debug, PartialEq, Eq)]
 pub struct NativeHandle {
     /// The platform object `ptr` points at.
     kind: NativeHandleKind,
@@ -96,7 +104,10 @@ impl NativeHandle {
     /// `AHardwareBuffer*` for [`NativeHandleKind::AHardwareBuffer`] — on which
     /// the caller holds a retained reference of its own (`CFRetain`,
     /// `AHardwareBuffer_acquire`), and the caller keeps that reference until
-    /// the release callback of the frame carrying this handle has run. The
+    /// the release callback of the one frame this handle is placed in has run.
+    /// The handle is move-only, so it cannot be copied, and outside `unsafe`
+    /// it cannot leave the frame that carries it with that callback
+    /// ([`TextureFrame::into_parts`] is `unsafe` for exactly that reason). The
     /// consumer-side importer for `kind` dereferences the pointer (describes,
     /// imports and retains the object) on this promise alone, so a dangling,
     /// foreign or mistyped pointer is undefined behaviour there.
@@ -111,7 +122,9 @@ impl NativeHandle {
         self.kind
     }
 
-    /// The platform object itself, as handed to [`Self::new`].
+    /// The platform object itself, as handed to [`Self::new`]. Only the handle
+    /// is move-only: an address copied out of it carries no lifetime guarantee
+    /// past the frame's release, and using it needs the caller's own `unsafe`.
     #[must_use]
     pub fn ptr(&self) -> *mut c_void {
         self.ptr
@@ -129,7 +142,9 @@ impl NativeHandle {
 unsafe impl Send for NativeHandle {}
 
 /// Where a [`TextureFrame`]'s pixels live.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Not `Clone`: a native payload holds a move-only [`NativeHandle`].
+#[derive(Debug, PartialEq, Eq)]
 pub enum FramePayload {
     /// Pixels in CPU memory, laid out per the frame's [`TextureFormat`].
     /// Shared rather than owned, so a producer that keeps the buffer can hand
@@ -140,59 +155,158 @@ pub enum FramePayload {
 }
 
 /// The callback a frame carries to tell its producer the consumer is done
-/// with it.
+/// with it. It runs from a `Drop` and must not panic; see [`run_release`] for
+/// what happens if it does anyway.
 pub type ReleaseCallback = Box<dyn FnOnce() + Send>;
+
+/// Runs a frame's release callback behind `catch_unwind`, the last line of
+/// defence for a callback that panics anyway.
+///
+/// Releases run from `Drop` impls, sometimes while another panic unwinds, and
+/// a panic escaping a `Drop` during an unwind aborts the process. The guard
+/// only works in panic=unwind builds (dev and test): the shipped release
+/// profile sets `panic = "abort"`, where a panicking callback aborts the
+/// process and the must-not-panic rule is the only protection. The panic hook
+/// has already reported the message by the time it is caught here, so the
+/// payload is discarded and nothing more is logged on this side (this crate
+/// has no logging dependency).
+///
+/// # Panics
+///
+/// Never in an unwinding build; a callback must still not panic, since a
+/// caught one is a bug in the producer.
+fn run_release(release: ReleaseCallback) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(release));
+}
+
+/// The extent and pixel format of a [`TextureFrame`], as returned by
+/// [`TextureFrame::into_parts`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameMeta {
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+    /// How the payload's pixels are laid out.
+    pub format: TextureFormat,
+}
 
 /// One frame pushed through a [`TextureSink`].
 ///
-/// Plain public fields, so the consumer-side conversion is a field-for-field
-/// copy into the renderer's own frame type, with `release` moved across by
-/// `Option::take`.
+/// The extent and format are plain public fields; the payload and the release
+/// callback are private, so they stay together. Build a frame with
+/// [`Self::new`] or [`Self::rgba8`] and attach a callback with
+/// [`Self::on_release`]; read the payload in place with [`Self::payload`].
 ///
-/// Dropping a frame that still holds its `release` callback runs it: a frame
+/// Dropping a frame that still holds its release callback runs it: a frame
 /// nobody released — dropped by [`TextureSink::take_latest`]'s caller, or
 /// lost to a panic unwinding past it — still tells its producer, exactly
-/// once. Whoever ends up holding a frame either takes the callback on or lets
-/// the frame go ([`Self::release`] or a plain drop). Because the type
-/// implements `Drop`, its fields cannot be moved out by destructuring; borrow
-/// or clone the payload instead (a CPU payload is an `Arc`). A release
-/// callback must not panic: run from a drop during an unwind, a panic aborts
-/// the process.
+/// once. Whoever ends up holding a frame either lets it go ([`Self::release`]
+/// or a plain drop) or, in a bridge, splits it with the `unsafe`
+/// [`Self::into_parts`]. Because the type implements `Drop`, it cannot be
+/// destructured. A release callback must not panic: the guard around it only
+/// applies to panic=unwind builds (see [`run_release`]).
 pub struct TextureFrame {
     /// Width in pixels.
     pub width: u32,
     /// Height in pixels.
     pub height: u32,
-    /// How `payload`'s pixels are laid out.
+    /// How the payload's pixels are laid out.
     pub format: TextureFormat,
     /// The pixels, or the platform buffer holding them.
-    pub payload: FramePayload,
+    payload: FramePayload,
     /// Run exactly once when the frame is no longer needed — displaced in the
     /// mailbox, consumed, dropped with the last sink handle, or dropped while
     /// still holding it. `None` for a producer that needs no signal.
-    pub release: Option<ReleaseCallback>,
+    release: Option<ReleaseCallback>,
 }
 
+/// The stand-in payload left behind by [`TextureFrame::into_parts`]. It is
+/// never read — the frame is dropped right after — and shared so splitting a
+/// frame allocates nothing.
+static EMPTY_PIXELS: LazyLock<Arc<[u8]>> = LazyLock::new(|| Arc::from([]));
+
 impl TextureFrame {
-    /// A CPU frame of tightly packed premultiplied RGBA8 with no release
+    /// A frame of `meta`'s extent and format over `payload`, with no release
     /// callback.
     #[must_use]
-    pub fn rgba8(width: u32, height: u32, pixels: Arc<[u8]>) -> Self {
+    pub fn new(meta: FrameMeta, payload: FramePayload) -> Self {
         Self {
-            width,
-            height,
-            format: TextureFormat::Rgba8,
-            payload: FramePayload::Cpu(pixels),
+            width: meta.width,
+            height: meta.height,
+            format: meta.format,
+            payload,
             release: None,
         }
     }
 
-    /// Attaches the callback run once the frame is no longer needed,
-    /// replacing any callback already attached (which is dropped unrun).
+    /// A CPU frame of tightly packed premultiplied RGBA8 with no release
+    /// callback.
+    #[must_use]
+    pub fn rgba8(width: u32, height: u32, pixels: Arc<[u8]>) -> Self {
+        Self::new(
+            FrameMeta {
+                width,
+                height,
+                format: TextureFormat::Rgba8,
+            },
+            FramePayload::Cpu(pixels),
+        )
+    }
+
+    /// Attaches the callback run once the frame is no longer needed. A
+    /// callback already attached runs first (through the same guard as every
+    /// other release), so no callback is ever dropped unrun.
     #[must_use]
     pub fn on_release(mut self, release: impl FnOnce() + Send + 'static) -> Self {
-        self.release = Some(Box::new(release));
+        if let Some(displaced) = self.release.replace(Box::new(release)) {
+            run_release(displaced);
+        }
         self
+    }
+
+    /// The extent and format.
+    #[must_use]
+    pub fn meta(&self) -> FrameMeta {
+        FrameMeta {
+            width: self.width,
+            height: self.height,
+            format: self.format,
+        }
+    }
+
+    /// The pixels, or the platform buffer holding them, borrowed in place. The
+    /// frame still owns the payload and its release callback.
+    #[must_use]
+    pub fn payload(&self) -> &FramePayload {
+        &self.payload
+    }
+
+    /// Whether a release callback is attached.
+    #[must_use]
+    pub fn has_release(&self) -> bool {
+        self.release.is_some()
+    }
+
+    /// Consumes the frame, handing over its extent and format, its payload and
+    /// its release callback, and disarms the drop guard — the one way to move
+    /// a native handle out of a frame. A caller that only needs to read the
+    /// frame uses [`Self::meta`] and [`Self::payload`] instead.
+    ///
+    /// # Safety
+    ///
+    /// The caller must run the returned release callback exactly once, after
+    /// the last use of the payload's native handle (or move it, with the
+    /// handle, into a holder that does), and must not place that handle into
+    /// another frame without it. The callback gives the producer's reference
+    /// to the buffer back; a handle used after it ran points at a buffer the
+    /// producer no longer keeps alive.
+    #[must_use]
+    pub unsafe fn into_parts(mut self) -> (FrameMeta, FramePayload, Option<ReleaseCallback>) {
+        let meta = self.meta();
+        let release = self.release.take();
+        let payload = std::mem::replace(&mut self.payload, FramePayload::Cpu(EMPTY_PIXELS.clone()));
+        (meta, payload, release)
     }
 
     /// Runs the release callback, if any, consuming the frame — what a holder
@@ -200,7 +314,7 @@ impl TextureFrame {
     /// dropping it, spelled out.
     pub fn release(mut self) {
         if let Some(release) = self.release.take() {
-            release();
+            run_release(release);
         }
     }
 }
@@ -211,7 +325,7 @@ impl Drop for TextureFrame {
     /// `None` here.
     fn drop(&mut self) {
         if let Some(release) = self.release.take() {
-            release();
+            run_release(release);
         }
     }
 }
@@ -344,8 +458,19 @@ mod tests {
         })
     }
 
+    /// A 1x1 frame whose release bumps the returned counter, then panics.
+    fn panicking_frame() -> (TextureFrame, Arc<AtomicUsize>) {
+        let ran = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&ran);
+        let frame = TextureFrame::rgba8(1, 1, Arc::from(vec![0u8; 4])).on_release(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+            panic!("the release callback panics");
+        });
+        (frame, ran)
+    }
+
     fn first_byte(frame: &TextureFrame) -> u8 {
-        match &frame.payload {
+        match frame.payload() {
             FramePayload::Cpu(pixels) => pixels[0],
             FramePayload::Native(_) => panic!("a CPU frame was pushed"),
         }
@@ -501,20 +626,21 @@ mod tests {
         // SAFETY: the handle never reaches an importer — this case only
         // carries the address across the mailbox and compares it.
         let handle = unsafe { NativeHandle::new(NativeHandleKind::AHardwareBuffer, ptr) };
-        sink.push(TextureFrame {
-            width: 4,
-            height: 4,
-            format: TextureFormat::Rgba8,
-            payload: FramePayload::Native(handle),
-            release: None,
-        });
+        sink.push(TextureFrame::new(
+            FrameMeta {
+                width: 4,
+                height: 4,
+                format: TextureFormat::Rgba8,
+            },
+            FramePayload::Native(handle),
+        ));
 
         // Taken on another thread, as a render thread would.
         let frame = std::thread::spawn(move || sink.take_latest())
             .join()
             .unwrap()
             .expect("the native frame is pending");
-        match &frame.payload {
+        match frame.payload() {
             FramePayload::Native(handle) => {
                 assert_eq!(handle.kind(), NativeHandleKind::AHardwareBuffer);
                 assert_eq!(handle.ptr(), ptr, "the address is carried, never touched");
@@ -535,9 +661,42 @@ mod tests {
             let handle = unsafe { NativeHandle::new(kind, ptr) };
             assert_eq!(handle.kind(), kind);
             assert_eq!(handle.ptr(), ptr);
-            let copy = handle;
-            assert_eq!(copy, handle, "a handle is a plain copyable value");
         }
+    }
+
+    #[test]
+    fn a_native_handle_is_move_only() {
+        // Method resolution picks the `Clone` inherent-less fallback only when
+        // the type is `Clone`: the blanket impl is the sole candidate for a
+        // non-`Clone` type, so the two probes differ exactly then.
+        trait Probe {
+            fn is_clone(&self) -> bool {
+                false
+            }
+        }
+        impl<T> Probe for T {}
+        struct Wrap<T>(std::marker::PhantomData<T>);
+        impl<T: Clone> Wrap<T> {
+            fn is_clone(&self) -> bool {
+                true
+            }
+        }
+        assert!(!Wrap::<NativeHandle>(std::marker::PhantomData).is_clone());
+        assert!(!Wrap::<FramePayload>(std::marker::PhantomData).is_clone());
+        assert!(Wrap::<Arc<[u8]>>(std::marker::PhantomData).is_clone());
+    }
+
+    #[test]
+    fn into_parts_hands_over_the_callback_and_disarms_the_drop() {
+        let released = Arc::new(AtomicUsize::new(0));
+        // SAFETY: the callback is run below, once, and no native handle is
+        // involved.
+        let (meta, payload, release) = unsafe { counted(&released, 7).into_parts() };
+        assert_eq!((meta.width, meta.height), (1, 1));
+        assert!(matches!(&payload, FramePayload::Cpu(p) if p[0] == 7));
+        assert_eq!(released.load(Ordering::SeqCst), 0, "consuming ran nothing");
+        release.expect("the callback moved out")();
+        assert_eq!(released.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -550,12 +709,15 @@ mod tests {
             "a dropped frame still tells its producer"
         );
 
-        // A callback taken on before the drop is the taker's, not the frame's.
-        let mut frame = counted(&released, 0);
-        let taken = frame.release.take().expect("a callback is attached");
-        drop(frame);
-        assert_eq!(released.load(Ordering::SeqCst), 1, "the drop ran nothing");
-        taken();
+        // A callback taken on by `into_parts` is the taker's, not the
+        // frame's.
+        let frame = counted(&released, 0);
+        assert!(frame.has_release());
+        // SAFETY: the callback is run below, once, and no native handle is
+        // involved.
+        let (_, _, taken) = unsafe { frame.into_parts() };
+        assert_eq!(released.load(Ordering::SeqCst), 1, "splitting ran nothing");
+        taken.expect("a callback is attached")();
         assert_eq!(released.load(Ordering::SeqCst), 2);
     }
 
@@ -605,9 +767,81 @@ mod tests {
     }
 
     #[test]
+    fn a_panicking_release_does_not_unwind_out_of_a_drop() {
+        let (frame, ran) = panicking_frame();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(frame)));
+        assert!(outcome.is_ok(), "the panic was caught inside the drop");
+        assert_eq!(ran.load(Ordering::SeqCst), 1, "the callback ran once");
+    }
+
+    #[test]
+    fn a_panicking_explicit_release_does_not_propagate() {
+        let (frame, ran) = panicking_frame();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            frame.release();
+        }));
+        assert!(outcome.is_ok());
+        assert_eq!(ran.load(Ordering::SeqCst), 1, "the callback ran once");
+    }
+
+    #[test]
+    fn a_panicking_displaced_release_leaves_the_mailbox_usable() {
+        let released = Arc::new(AtomicUsize::new(0));
+        let sink = TextureSink::new();
+        let (displaced, ran) = panicking_frame();
+        sink.push(displaced);
+
+        // The displacing push runs the panicking callback on this thread.
+        sink.push(counted(&released, 2));
+        assert_eq!(ran.load(Ordering::SeqCst), 1, "the callback ran once");
+        assert_eq!(released.load(Ordering::SeqCst), 0);
+        let frame = sink.take_latest().expect("the newest frame is pending");
+        assert_eq!(first_byte(&frame), 2, "the mailbox still accepts frames");
+        frame.release();
+        assert_eq!(released.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn a_frame_debug_reports_whether_a_release_is_attached() {
         let frame = TextureFrame::rgba8(1, 1, Arc::from(vec![0u8; 4])).on_release(|| {});
         let text = format!("{frame:?}");
         assert!(text.contains("release: true"), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod on_release_displacement {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn on_release_runs_the_callback_it_displaces_exactly_once() {
+        let first = Arc::new(AtomicUsize::new(0));
+        let second = Arc::new(AtomicUsize::new(0));
+        let frame = TextureFrame::rgba8(1, 1, Arc::from([0u8; 4])).on_release({
+            let first = Arc::clone(&first);
+            move || {
+                first.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let frame = frame.on_release({
+            let second = Arc::clone(&second);
+            move || {
+                second.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        assert_eq!(
+            first.load(Ordering::SeqCst),
+            1,
+            "the displaced callback ran at once"
+        );
+        assert_eq!(second.load(Ordering::SeqCst), 0);
+        drop(frame);
+        assert_eq!(first.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            second.load(Ordering::SeqCst),
+            1,
+            "the attached callback ran on drop"
+        );
     }
 }
