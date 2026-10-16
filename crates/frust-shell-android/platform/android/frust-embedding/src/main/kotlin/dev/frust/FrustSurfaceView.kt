@@ -211,6 +211,21 @@ class FrustSurfaceView(
         /** Ticks averaged into one `frust-perf jni` line. */
         private const val PERF_JNI_WINDOW = 120
 
+        /** `nativeFrameSync` bit 0: the published IME surface moved. */
+        private const val FRAME_SYNC_IME_CHANGED = 1L shl 0
+
+        /** Bit 1: a clipboard write is waiting. */
+        private const val FRAME_SYNC_CLIPBOARD_WRITE = 1L shl 1
+
+        /** Bit 2: a paste request is waiting. */
+        private const val FRAME_SYNC_PASTE_REQUEST = 1L shl 2
+
+        /** Bit 3: the system-UI override generation advanced. */
+        private const val FRAME_SYNC_SYSTEM_UI_CHANGED = 1L shl 3
+
+        /** Bit 4: the app's resolved brightness flipped. */
+        private const val FRAME_SYNC_DARK_CHANGED = 1L shl 4
+
         /**
          * Decode the low byte of `nativeSystemUiState`'s packed `u64` (task
          * 03's `system_ui::encoded_state()` doc comment:
@@ -473,6 +488,17 @@ class FrustSurfaceView(
      * every timer branch a single `Boolean` test.
      */
     private external fun nativePerfTrace(): Boolean
+
+    /**
+     * One crossing per frame returning a packed word of which per-frame polls
+     * have something to report: bit 0 IME surface changed, bit 1 clipboard
+     * write pending, bit 2 paste request pending, bit 3 system-UI generation
+     * advanced, bit 4 app brightness flipped (the `FRAME_SYNC_*` constants).
+     * [doFrame] makes the [nativeImeState] / [nativeTakeClipboardWrite] /
+     * [nativeTakePasteRequest] / [nativeSystemUiState] / [nativeAppIsDark]
+     * calls only for the bits set; those natives are unchanged.
+     */
+    private external fun nativeFrameSync(handle: Long): Long
 
     // Overlay surfaces (`FRUST_OVERLAYS`): how [FrustViewHost] builds the
     // overlay `SurfaceView`s the native differ announces — 0 none (overlays
@@ -1374,11 +1400,11 @@ class FrustSurfaceView(
      * of the clipboard channel, called once per frame from [doFrame] directly
      * after the post-dispatch IME reconcile.
      *
-     * Both drains are one-shot edges on the Rust side, so a frame that skips
-     * this would lose a copy outright; both are also plain JNI reads that
-     * answer null/false on an idle frame, the same cost bar
-     * [pollSystemUiState] already sets. `ClipboardManager` itself is only
-     * touched when a drain actually reports something.
+     * Both slots are one-shot edges on the Rust side. `nativeFrameSync`
+     * drains them to learn that one is pending and holds the value until the
+     * matching `nativeTake*` call here hands it over, so a frame whose [sync]
+     * bit is clear has nothing to drop and makes no crossing. `ClipboardManager`
+     * itself is only touched when a drain actually reports something.
      *
      * The paste direction is deliberately a *second* dispatch rather than a
      * return value: the framework asks ([nativeTakePasteRequest]), this side
@@ -1397,9 +1423,11 @@ class FrustSurfaceView(
      * they would present a *second*, competing toolbar over the framework's own
      * and steal the gesture that raises it.
      */
-    private fun syncClipboard() {
-        nativeTakeClipboardWrite(handle)?.let { writeClipboardText(it) }
-        if (nativeTakePasteRequest(handle)) {
+    private fun syncClipboard(sync: Long) {
+        if (sync and FRAME_SYNC_CLIPBOARD_WRITE != 0L) {
+            nativeTakeClipboardWrite(handle)?.let { writeClipboardText(it) }
+        }
+        if (sync and FRAME_SYNC_PASTE_REQUEST != 0L && nativeTakePasteRequest(handle)) {
             // The same body the hardware Ctrl+V and the IME's own paste action
             // take: read here, dispatch only when there is something to insert,
             // then reconcile the mirror in this pass.
@@ -1819,11 +1847,8 @@ class FrustSurfaceView(
     private var perfJni = false
     private var perfJniProbed = false
     private var perfTicks = 0
-    private var perfImeNanos = 0L
-    private var perfClipboardNanos = 0L
-    private var perfSystemUiNanos = 0L
-    private var perfDarkNanos = 0L
-    private var perfViewCommandsNanos = 0L
+    private var perfSyncNanos = 0L
+    private var perfPollNanos = 0L
     private var perfTimerNanos = 0L
 
     override fun doFrame(frameTimeNanos: Long) {
@@ -1871,36 +1896,45 @@ class FrustSurfaceView(
     }
 
     private fun runPolls() {
+        val sync = nativeFrameSync(handle)
+        pollsDue(sync)
+    }
+
+    /**
+     * The per-frame polls, each made only when [sync] (the word `nativeFrameSync`
+     * returned for this tick) says it has something to report. Order is the
+     * order the polls always ran in: the IME reconcile first so a paste
+     * dispatched by the clipboard drain still sees the mirror it settled.
+     */
+    private fun pollsDue(sync: Long) {
         // Per-frame IME reconcile: pick up caret moves, field switches, and
         // submit-clears that no InputConnection callback originated.
         // `pollImeAfterDispatch` reconciles the live mirror to the focused
         // field's published state; a no-op when they already match, so normal
-        // typing never triggers a spurious restart.
-        pollImeAfterDispatch()
-        // Per-frame clipboard drain: the framework's copy/paste
-        // intent is a one-shot edge, so a frame that skipped this would
-        // drop a copy outright. Two cheap JNI reads on an idle frame (the
-        // `pollSystemUiState` cost bar below); `ClipboardManager` is
-        // touched only when a drain actually reports something. Placed
-        // after the IME reconcile so a paste dispatched here still sees the
-        // mirror the poll just settled.
-        syncClipboard()
-        // Per-frame system-UI poll: cheap generation-gated
-        // JNI read, applied only on an actual `set_system_ui_mode` change.
-        pollSystemUiState()
-        // Per-frame app-brightness poll: cheap `Boolean`-gated
-        // JNI read, applied only on an actual change — this is what picks
-        // up a runtime `frust::set_app_theme`/`clear_app_theme` call
-        // (see [pollAppBrightness]'s doc for why that needs a per-frame
-        // poll rather than riding on `onConfigurationChanged`).
-        pollAppBrightness()
-        // Per-frame platform-view command poll:
-        // the null-return fast path keeps a no-change frame allocation-free
-        // (a null string means "nothing to do" — no JSON parse); only a
-        // non-null batch reaches the host applier. An app with no platform
-        // views still wires the host, so this runs every frame — but it's
-        // just one cheap JNI call returning null (the `nativeSystemUiState`
-        // cost bar above).
+        // typing never triggers a spurious restart. The native side reports
+        // the bit when the published state moved or an IME-side input arrived.
+        if (sync and FRAME_SYNC_IME_CHANGED != 0L) {
+            pollImeAfterDispatch()
+        }
+        // Clipboard drain: the framework's copy/paste intent is a one-shot
+        // edge held natively until these calls take it, so a frame that skips
+        // them for a clear bit loses nothing.
+        if (sync and (FRAME_SYNC_CLIPBOARD_WRITE or FRAME_SYNC_PASTE_REQUEST) != 0L) {
+            syncClipboard(sync)
+        }
+        // System-UI override and app brightness: applied only on an actual
+        // change, which is exactly what the bits report (a runtime
+        // `frust::set_app_theme`/`clear_app_theme` flips the brightness bit).
+        if (sync and FRAME_SYNC_SYSTEM_UI_CHANGED != 0L) {
+            pollSystemUiState()
+        }
+        if (sync and FRAME_SYNC_DARK_CHANGED != 0L) {
+            pollAppBrightness()
+        }
+        // Platform-view command poll: not gated by the sync word. Its native
+        // peek acknowledges the previous batch and records the poll for the
+        // scroll-sync tail, so it keeps its own per-frame call; a null return
+        // keeps a no-change frame allocation-free.
         platformViewHost?.let { host ->
             val commands = nativePlatformViewCommands(handle, host.ackedGeneration)
             if (commands != null) {
@@ -1910,49 +1944,30 @@ class FrustSurfaceView(
     }
 
     /**
-     * [runPolls] with each poll timed, for the `frust-perf jni` line: one
-     * line per [PERF_JNI_WINDOW] ticks carrying the mean per-frame cost of
-     * each UI-thread poll (JNI crossing plus its Kotlin-side decode), in
-     * microseconds. Only reached when [perfJni] armed it.
+     * [runPolls] with the sync crossing and the polls timed, for the
+     * `frust-perf jni` line: one line per [PERF_JNI_WINDOW] ticks carrying
+     * the mean per-frame cost in microseconds. Only reached when [perfJni]
+     * armed it.
      */
     private fun runTimedPolls() {
         val t0 = System.nanoTime()
-        pollImeAfterDispatch()
+        val sync = nativeFrameSync(handle)
         val t1 = System.nanoTime()
-        syncClipboard()
+        pollsDue(sync)
         val t2 = System.nanoTime()
-        pollSystemUiState()
-        val t3 = System.nanoTime()
-        pollAppBrightness()
-        val t4 = System.nanoTime()
-        platformViewHost?.let { host ->
-            val commands = nativePlatformViewCommands(handle, host.ackedGeneration)
-            if (commands != null) {
-                host.applyCommands(commands)
-            }
-        }
-        val t5 = System.nanoTime()
-        perfImeNanos += t1 - t0
-        perfClipboardNanos += t2 - t1
-        perfSystemUiNanos += t3 - t2
-        perfDarkNanos += t4 - t3
-        perfViewCommandsNanos += t5 - t4
+        perfSyncNanos += t1 - t0
+        perfPollNanos += t2 - t1
         perfTicks++
         if (perfTicks >= PERF_JNI_WINDOW) {
             val n = perfTicks * 1000L
             Log.i(
                 "frust",
-                "frust-perf jni ticks=$perfTicks sum_us=${
-                    (perfImeNanos + perfClipboardNanos + perfSystemUiNanos + perfDarkNanos + perfViewCommandsNanos) / n
-                } ime_us=${perfImeNanos / n} clipboard_us=${perfClipboardNanos / n} " +
-                    "system_ui_us=${perfSystemUiNanos / n} dark_us=${perfDarkNanos / n} " +
-                    "view_commands_us=${perfViewCommandsNanos / n} timer_overhead_ns=$perfTimerNanos",
+                "frust-perf jni ticks=$perfTicks sum_us=${(perfSyncNanos + perfPollNanos) / n} " +
+                    "sync_us=${perfSyncNanos / n} polls_us=${perfPollNanos / n} " +
+                    "timer_overhead_ns=$perfTimerNanos",
             )
-            perfImeNanos = 0L
-            perfClipboardNanos = 0L
-            perfSystemUiNanos = 0L
-            perfDarkNanos = 0L
-            perfViewCommandsNanos = 0L
+            perfSyncNanos = 0L
+            perfPollNanos = 0L
             perfTicks = 0
         }
     }
