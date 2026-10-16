@@ -111,8 +111,12 @@ Known gaps are tracked by the comprehensive-testing feature plan:
   `hotpatch-feature-gate` and macOS/Linux `hotpatch-canary` jobs (the Linux one covers the ELF
   cross-unit DWARF reader), and the Windows
   `hotpatch-windows` job under § Required Host Gate; aggregate `ci-ok` is the required
-  check). `.github/workflows/android-smoke.yml` runs on a schedule or manual dispatch and is not
-  part of the required check.
+  check). A change that touches only Markdown files or `docs/` skips that workflow:
+  `.github/workflows/docs.yml` runs the commit-hygiene guard alone and reports the same `ci-ok`, so
+  tests that read a Markdown file (template packaging, plugin package conformance, doc-heading
+  checks) run on the next code change; run `cargo test --workspace` locally before editing a file
+  one of them reads. `.github/workflows/android-smoke.yml` runs on a schedule or manual dispatch
+  and is not part of the required check.
 - Accessibility and several platform plugin paths remain manual physical-device
   gates.
 

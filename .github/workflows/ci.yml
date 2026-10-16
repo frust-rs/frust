@@ -5,13 +5,24 @@
 # .github/rulesets/main.json requires, so a job added here only gates merges once
 # it is listed in `ci-ok`'s `needs`. No secrets are used and nothing runs on
 # `pull_request_target`.
+#
+# A change that touches only Markdown files or docs/ does not run this workflow:
+# docs.yml runs the commit-hygiene guard for it and reports the same `ci-ok`
+# check, so a documentation pull request merges without a build. The two path
+# lists must stay identical.
 
 name: CI
 
 on:
   pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
   push:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
 
 permissions:
   contents: read

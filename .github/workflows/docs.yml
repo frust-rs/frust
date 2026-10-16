@@ -1,0 +1,65 @@
+# The documentation lane: a change that touches only Markdown files or docs/
+# skips ci.yml (its `paths-ignore` list mirrors the `paths` list below) and runs
+# this workflow instead, so a documentation pull request costs one short job
+# instead of a build on three operating systems. It reports the same `ci-ok`
+# check that .github/rulesets/main.json requires. A pull request that mixes
+# documentation and code runs both workflows; both must pass.
+#
+# Only the commit-hygiene guard runs here. Tests that read a Markdown file
+# (template packaging, plugin package conformance, the doc-heading checks) run
+# on the next change that reaches ci.yml; run `cargo test --workspace` locally
+# before changing a file one of them reads (docs/TESTING.md § Gaps).
+
+name: Docs
+
+on:
+  pull_request:
+    paths:
+      - '**.md'
+      - 'docs/**'
+  push:
+    branches: [main]
+    paths:
+      - '**.md'
+      - 'docs/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  hygiene:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Commit-hygiene guard self-test
+        run: scripts/ci/commit-hygiene.sh --self-test
+      - name: Check this pull request's commits
+        if: ${{ github.event_name == 'pull_request' }}
+        run: scripts/ci/commit-hygiene.sh origin/${{ github.base_ref }}..HEAD
+
+  ci-ok:
+    # The one required status check (.github/rulesets/main.json), reported for
+    # a documentation-only change so the merge rule is satisfied without ci.yml.
+    if: always()
+    needs: [hygiene]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every needed job to have succeeded
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "needed job results: $RESULTS"
+          for r in $RESULTS; do
+            if [ "$r" != "success" ]; then
+              echo "a required job did not succeed" >&2
+              exit 1
+            fi
+          done
