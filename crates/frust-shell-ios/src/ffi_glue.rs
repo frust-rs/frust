@@ -20,7 +20,12 @@
 //! that crosses the UI→render channel in the split — and the
 //! render-thread QoS self-boost `libc::pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0)`
 //! at the top of [`render_loop`] (a bare libc call operating on
-//! the calling thread only, best-effort and non-fatal).
+//! the calling thread only, best-effort and non-fatal). Under the default-off
+//! overlay switch (`FRUST_OVERLAYS`) it also holds the one
+//! `OverlaySurface::new` call (an overlay view's `CAMetalLayer*` to a
+//! `wgpu::Surface`, dropped under the overlay lock before Swift may release
+//! the layer) and the three `#[unsafe(no_mangle)]` overlay exports
+//! (`frust_overlay_mode`/`_attach`/`_detach`).
 //!
 //! # Render-thread split
 //!
@@ -610,6 +615,9 @@ pub(crate) fn render_loop(
                     // rather than let the next tick present a frame from a dead
                     // surface.
                     present.clear();
+                    // The overlays share the main surface's device: rebuilt
+                    // on the next frame, against the installed surface.
+                    drop_overlay_surfaces();
                     match install_surface(
                         &mut renderer,
                         &mut render_cx,
@@ -664,6 +672,7 @@ pub(crate) fn render_loop(
                     // permanent, so there is no UI-side destroy path); honor the
                     // barrier defensively so a stray one can never deadlock the UI
                     // thread. Its empty ledger still goes out before the ack.
+                    drop_overlay_surfaces();
                     renderer.on_surface_destroyed();
                     publish_ledger(&mut renderer);
                     ack.acknowledge();
@@ -674,7 +683,11 @@ pub(crate) fn render_loop(
                     // scene handed off from here on is submitted. Acknowledge only
                     // now — so `frust_pause` returns (and the app may background)
                     // strictly AFTER the render thread has quiesced. No Metal
-                    // submission from a suspended app.
+                    // submission from a suspended app — nor a present of an
+                    // overlay frame parked before it.
+                    if overlay_count() > 0 {
+                        overlay_host().parked.clear();
+                    }
                     ack.acknowledge();
                 }
                 RenderCommand::Resume => {}
@@ -715,6 +728,20 @@ pub(crate) fn render_loop(
                 // published after submit names the recording it holds (see
                 // `SurfaceRenderer::note_scene_serial`).
                 renderer.note_scene_serial(frame.meta.paint_serial);
+                // Overlay surfaces (`FRUST_OVERLAYS`): drawn ahead of the main
+                // frame, which the split then leaves the overlays' commands
+                // to. Off, this is one cached read.
+                let overlays_on = overlay_count() > 0;
+                let presented_before = presented.load(Ordering::Relaxed);
+                if overlays_on {
+                    render_overlays_ahead(
+                        &mut renderer,
+                        &mut render_cx,
+                        &frame.scene.scene,
+                        frame.meta.frame_id,
+                        present.is_armed(),
+                    );
+                }
                 let (_, just_retired) = render_scene(
                     &mut renderer,
                     &render_cx,
@@ -733,6 +760,13 @@ pub(crate) fn render_loop(
                 if just_retired {
                     startup_retired = true;
                 }
+                // Off present-sync the main frame presented inline above;
+                // its overlays follow it, or are dropped with a frame that
+                // did not present. Under present-sync they are parked for the
+                // UI thread's `frust_present_frame`.
+                if overlays_on && !present.is_armed() {
+                    present_overlays_after(presented.load(Ordering::Relaxed) != presented_before);
+                }
 
                 // iOS self-heals a lost surface from the retained layer (nothing
                 // external re-drives creation), bounded by the failure budget so
@@ -745,6 +779,7 @@ pub(crate) fn render_loop(
                     // parked for the old (lost) swapchain may survive into the
                     // new one.
                     present.clear();
+                    drop_overlay_surfaces();
                     // Tell the UI thread a self-heal happened
                     // — set for the ATTEMPT, not just a success: either way
                     // the frame that was in flight never presented, and the next
@@ -2045,8 +2080,560 @@ pub fn present_frame(handle: *mut c_void) {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
             app.present_pending_frame();
+            // The overlays' frames of the frame just presented land in the
+            // same transaction, after the main surface's (bottom to top).
+            if overlay_count() > 0 {
+                present_parked_overlays(app.presented_frame_id());
+            }
         }
     });
+}
+
+// ---------------------------------------------------------------------
+// Overlay surfaces — the Apple half of the render-model overlay spike
+// ---------------------------------------------------------------------
+//
+// A Mode A (opaque) surface sits under every hosted native view, so nothing
+// frust paints can land above one. Under the knob, `FrustViewHost` stacks
+// input-transparent `CAMetalLayer` views above the topmost hosted view and
+// hands each layer here (`frust_overlay_attach`); the render thread builds an
+// `OverlaySurface` on it and draws the commands from the spike's cut
+// (`frust_render::overlay::spike_cut`) to the end of the frame there, while
+// the main surface, armed with `set_overlay_split`, draws the commands before
+// the cut. This is the spike's single-cut path (one extra submit per overlay):
+// the production segmented frame needs the render tail in `crate::app`, which
+// the Apple production host (p4-04) owns.
+//
+// Off by default; off, the frame path pays one cached read per frame.
+
+/// The overlay switch's production name, shared with the Android host.
+const OVERLAYS_ENV_VAR: &str = "FRUST_OVERLAYS";
+
+/// The most overlays one host stacks: the spike measures the per-surface
+/// cost of up to this many full-window swapchains.
+const MAX_OVERLAYS: u32 = 4;
+
+/// Engine refusals logged per overlay before its log goes quiet.
+const OVERLAY_ERRORS_LOGGED: u32 = 3;
+
+/// Frames between two `frust-overlay frames` summary lines.
+const OVERLAY_LOG_EVERY: u64 = 120;
+
+/// How many overlays a host stacks for the first non-empty value of
+/// `sources`: `0`/`off`/`false` (or nothing set) is none, a number is that
+/// many (clamped to `1..=MAX_OVERLAYS`), any other value one.
+fn overlay_count_from<'a>(sources: impl IntoIterator<Item = Option<&'a str>>) -> u32 {
+    let Some(value) = sources
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+    else {
+        return 0;
+    };
+    if ["0", "off", "false"]
+        .iter()
+        .any(|off| value.eq_ignore_ascii_case(off))
+    {
+        return 0;
+    }
+    value
+        .parse::<u32>()
+        .map_or(1, |count| count.clamp(1, MAX_OVERLAYS))
+}
+
+/// How many overlays the host stacks — `0` when the switch is off. Read once
+/// per process and cached, like every `FRUST_*` knob: `FRUST_OVERLAYS` at
+/// runtime, then as a compile-time `--define`, then the
+/// `FRUST_OVERLAY_SPIKE` alias (the Android host's resolution order).
+pub(crate) fn overlay_count() -> u32 {
+    static COUNT: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *COUNT.get_or_init(|| {
+        let runtime = std::env::var(OVERLAYS_ENV_VAR).ok();
+        let alias = frust_render::overlay::overlay_spike_value();
+        let count = overlay_count_from([
+            runtime.as_deref(),
+            option_env!("FRUST_OVERLAYS"),
+            alias.as_deref(),
+        ]);
+        if count > 0 {
+            log::info!(
+                "frust-overlay: overlay surfaces on ({count} per host, spike path; split {})",
+                if frust_render::overlay::overlay_spike_enabled() {
+                    "armed by FRUST_OVERLAY_SPIKE"
+                } else {
+                    "OFF: FRUST_OVERLAY_SPIKE is unset, so every overlay clears to transparent \
+                     and the main surface keeps drawing everything"
+                }
+            );
+        }
+        count
+    })
+}
+
+/// One overlay: the Swift-owned layer it presents into, and the surface the
+/// render thread built on it.
+struct OverlayEntry {
+    /// Declared before `layer`: fields drop in order, so even an implicit
+    /// drop releases the surface before the layer pointer is forgotten.
+    surface: Option<frust_render::overlay::OverlaySurface>,
+    /// The overlay view's `CAMetalLayer*`, alive until `frust_overlay_detach`
+    /// (or `frust_destroy`) returns.
+    layer: SendableMetalLayer,
+    /// The layer's drawable size, physical px.
+    size: (u32, u32),
+    /// Building a surface on this layer was refused (logged once); retried
+    /// only for a new layer.
+    refused: bool,
+    /// The render thread has taken `surface` out to draw it, outside the
+    /// lock; it hands it back within the frame.
+    in_flight: bool,
+    /// Frames this overlay's engine refused, for the latched log.
+    errors: u32,
+    /// Frames presented and dropped since the last summary line.
+    presented: u64,
+    dropped: u64,
+}
+
+/// Every overlay of the process (one render surface per process, like the
+/// present-sync slot), keyed by the host's overlay id (`1..=count`, bottom to
+/// top), plus the present-sync parking lot.
+///
+/// The lock (with each entry's `in_flight` mark) is what keeps each
+/// surface's life inside its layer's: the UI thread takes it to attach,
+/// detach (dropping the surface before Swift may release the layer, after any
+/// in-flight draw of it landed) and present parked frames; the render thread
+/// takes it to build, resize, park and present — briefly — and draws the
+/// surfaces it took out outside it.
+struct OverlayHost {
+    entries: std::collections::BTreeMap<u64, OverlayEntry>,
+    /// Present-sync: `(frame_id, overlay_id, frame)` waiting for the UI
+    /// thread to present beside the main frame `frame_id`, one per overlay
+    /// (latest wins).
+    parked: Vec<(u64, u64, frust_render::DeferredPresent)>,
+    /// Frames the overlays drew since the overlay host came up.
+    frames: u64,
+    /// The cut range the drawing overlay took on the last frame.
+    last_range: Option<std::ops::Range<usize>>,
+}
+
+static OVERLAY_HOST: Mutex<OverlayHost> = Mutex::new(OverlayHost {
+    entries: std::collections::BTreeMap::new(),
+    parked: Vec::new(),
+    frames: 0,
+    last_range: None,
+});
+
+/// The overlay host, locked (poison-tolerant: nothing in it can be left
+/// half-updated by a panic that matters more than a lost frame).
+fn overlay_host() -> std::sync::MutexGuard<'static, OverlayHost> {
+    OVERLAY_HOST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// `frust_overlay_mode`: how many overlays `FrustViewHost` stacks above its
+/// hosted views — `0` with the switch off, on the inline render path (which
+/// has no overlay tail), or for a dead handle.
+pub fn overlay_mode(handle: *mut c_void) -> u32 {
+    guard("frust_overlay_mode", 0, || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        let Some(app) = (unsafe { handle_mut(handle) }) else {
+            return 0;
+        };
+        let count = overlay_count();
+        if count > 0 && !app.executor_is_split() {
+            log::warn!(
+                "frust-overlay: overlays need the render-thread split (FRUST_NO_RENDER_THREAD is \
+                 set); none stacked"
+            );
+            return 0;
+        }
+        count
+    })
+}
+
+/// `frust_overlay_attach`: overlay `overlay_id`'s view delivered its
+/// `CAMetalLayer*` at `width` x `height` physical px. The same layer again is
+/// a resize; a new one replaces the old, dropping the old layer's surface
+/// first. The render thread builds (or resizes) the surface before its next
+/// frame. Swift keeps the layer alive until `frust_overlay_detach` or
+/// `frust_destroy` returns.
+pub fn overlay_attach(
+    handle: *mut c_void,
+    overlay_id: u64,
+    layer: *mut c_void,
+    width: u32,
+    height: u32,
+) {
+    guard("frust_overlay_attach", (), || {
+        if overlay_count() == 0 || layer.is_null() || crate::ffi_support::handle_is_null(handle) {
+            return;
+        }
+        let size = (width.max(1), height.max(1));
+        let mut host = overlay_host();
+        if let Some(entry) = host.entries.get_mut(&overlay_id)
+            && entry.layer.as_ptr() == layer
+        {
+            if entry.size != size {
+                entry.size = size;
+                log::debug!("frust-overlay: overlay {overlay_id} resized to {size:?}");
+            }
+            return;
+        }
+        // A replaced layer's surface may be drawing: let it land first. Then
+        // a frame parked for that layer goes before its surface does.
+        let mut host = wait_overlay_landed(host, overlay_id);
+        host.parked.retain(|(_, id, _)| *id != overlay_id);
+        host.entries.insert(
+            overlay_id,
+            OverlayEntry {
+                surface: None,
+                layer: SendableMetalLayer::new(layer),
+                size,
+                refused: false,
+                in_flight: false,
+                errors: 0,
+                presented: 0,
+                dropped: 0,
+            },
+        );
+        log::info!(
+            "frust-overlay: overlay {overlay_id} attached (CAMetalLayer {layer:p}, {}x{} px)",
+            size.0,
+            size.1
+        );
+    });
+}
+
+/// `frust_overlay_detach`: overlay `overlay_id`'s view is going away — drop
+/// its parked frame and its surface before returning, so Swift may release
+/// the layer afterwards. Waits out a render-thread frame that is drawing it.
+/// A no-op for an unknown id.
+pub fn overlay_detach(handle: *mut c_void, overlay_id: u64) {
+    guard("frust_overlay_detach", (), || {
+        let _ = handle;
+        let mut host = wait_overlay_landed(overlay_host(), overlay_id);
+        host.parked.retain(|(_, id, _)| *id != overlay_id);
+        if host.entries.remove(&overlay_id).is_some() {
+            log::info!("frust-overlay: overlay {overlay_id} detached");
+        }
+    });
+}
+
+/// Drop every overlay surface and parked frame, keeping the layers — the main
+/// surface is being (re)installed or destroyed, and the overlays share its
+/// device. Rebuilt by the next frame's [`render_overlays_ahead`]. One cached
+/// read with the switch off.
+pub(crate) fn drop_overlay_surfaces() {
+    if overlay_count() == 0 {
+        return;
+    }
+    let mut host = overlay_host();
+    host.parked.clear();
+    let mut dropped = 0;
+    for entry in host.entries.values_mut() {
+        if entry.surface.take().is_some() {
+            dropped += 1;
+        }
+    }
+    if dropped > 0 {
+        log::debug!("frust-overlay: dropped {dropped} overlay surface(s) with the main surface");
+    }
+}
+
+/// Forget every overlay — `frust_destroy`, after the render thread that drew
+/// them was joined.
+fn clear_overlays() {
+    if overlay_count() == 0 {
+        return;
+    }
+    let mut host = overlay_host();
+    host.parked.clear();
+    host.entries.clear();
+}
+
+/// The render thread's overlay work for one frame, **ahead of** the main
+/// frame: build a surface on every attached layer that has none (a refusal is
+/// logged once per layer and that overlay skipped), resize the rest, then draw
+/// every live overlay — the lowest id draws the spike's cut
+/// `spike_cut(scene)..len`, every other one a transparent clear (the surface-
+/// count arm) — and arm the main surface's split exactly when the drawing
+/// overlay rendered its range. Under present-sync (`park`) each overlay frame
+/// is parked under `frame_id` for [`present_parked_overlays`]; otherwise it
+/// waits inside its surface for [`present_overlays_after`].
+///
+/// The surfaces are drawn **outside** the overlay lock (their drawable
+/// acquire can wait out a vsync), marked in flight meanwhile: the UI thread's
+/// detach waits for them to come back before Swift may release a layer
+/// ([`wait_overlay_landed`]), and its per-tick present never waits behind a
+/// draw.
+///
+/// Disarms the split and does nothing else while no overlay is attached.
+fn render_overlays_ahead(
+    renderer: &mut SurfaceRenderer,
+    render_cx: &mut RenderContext,
+    scene: &Scene,
+    frame_id: u64,
+    park: bool,
+) {
+    let mut flying = Vec::new();
+    {
+        let mut guard = overlay_host();
+        let host = &mut *guard;
+        if host.entries.is_empty() {
+            renderer.set_overlay_split(false);
+            return;
+        }
+        for (overlay_id, entry) in &mut host.entries {
+            let (width, height) = entry.size;
+            match entry.surface.as_mut() {
+                Some(surface) => surface.resize(width, height),
+                None if !entry.refused => {
+                    let layer = entry.layer.as_ptr();
+                    // SAFETY: `layer` is the Swift-owned `CAMetalLayer*` of an
+                    // overlay view `FrustViewHost` keeps alive until
+                    // `frust_overlay_detach` (or `frust_destroy`) has
+                    // returned. Detach drops this surface under the overlay
+                    // lock — held here — and first waits for a surface this
+                    // thread has in flight to come back
+                    // (`wait_overlay_landed`); destroy runs after this thread
+                    // is joined. So the layer outlives the surface and every
+                    // frame acquired from it. The main surface (and its
+                    // device) is installed: this runs only for a renderable
+                    // phase.
+                    let built = unsafe {
+                        frust_render::overlay::OverlaySurface::new(
+                            render_cx,
+                            Some(renderer),
+                            frust_render::overlay::OverlayTarget::CoreAnimationLayer(layer),
+                            width,
+                            height,
+                        )
+                    };
+                    match built {
+                        Ok(surface) => {
+                            log::info!(
+                                "frust-overlay: overlay {overlay_id} surface up \
+                                 ({width}x{height} px)"
+                            );
+                            entry.surface = Some(surface);
+                        }
+                        Err(error) => {
+                            entry.refused = true;
+                            log::warn!(
+                                "frust-overlay: overlay {overlay_id} refused ({error}); its \
+                                 content stays on the main surface"
+                            );
+                        }
+                    }
+                }
+                None => {}
+            }
+            if let Some(surface) = entry.surface.take() {
+                entry.in_flight = true;
+                flying.push((*overlay_id, surface));
+            }
+        }
+    }
+
+    let len = scene.commands().len();
+    let cut = frust_render::overlay::spike_cut(scene)
+        .filter(|_| frust_render::overlay::overlay_spike_enabled())
+        .map(|cut| cut..len);
+    let mut drew_range = false;
+    let mut refusals = Vec::new();
+    for (index, (overlay_id, surface)) in flying.iter_mut().enumerate() {
+        // The lowest live id (the first in flight) draws the cut.
+        let range = match &cut {
+            Some(cut) if index == 0 => cut.clone(),
+            _ => 0..0,
+        };
+        let drawing = !range.is_empty();
+        match surface.render(scene, range) {
+            Ok(frust_render::overlay::OverlayFrame::Rendered(_)) => drew_range |= drawing,
+            Ok(_) => {}
+            Err(error) => refusals.push((*overlay_id, error)),
+        }
+    }
+    renderer.set_overlay_split(drew_range);
+
+    let mut guard = overlay_host();
+    let host = &mut *guard;
+    for (overlay_id, mut surface) in flying {
+        let Some(entry) = host.entries.get_mut(&overlay_id) else {
+            // Unreachable while detach waits for in-flight surfaces; dropped
+            // here, still before its layer (detach has not returned).
+            continue;
+        };
+        if park && let Some(frame) = surface.take_deferred_present() {
+            if let Some(stale) = host.parked.iter().position(|(_, id, _)| *id == overlay_id) {
+                drop(host.parked.swap_remove(stale));
+                entry.dropped += 1;
+            }
+            host.parked.push((frame_id, overlay_id, frame));
+        }
+        entry.surface = Some(surface);
+        entry.in_flight = false;
+    }
+    OVERLAY_LANDED.notify_all();
+    for (overlay_id, error) in refusals {
+        if let Some(entry) = host.entries.get_mut(&overlay_id) {
+            entry.errors = entry.errors.saturating_add(1);
+            if entry.errors <= OVERLAY_ERRORS_LOGGED {
+                log::warn!("frust-overlay: overlay {overlay_id} frame refused ({error})");
+            }
+        }
+    }
+    host.last_range = cut.filter(|_| drew_range);
+    host.frames += 1;
+    if host.frames % OVERLAY_LOG_EVERY == 1 {
+        log_overlay_summary(host);
+    }
+}
+
+/// Signalled whenever the render thread hands its in-flight overlay surfaces
+/// back ([`render_overlays_ahead`]).
+static OVERLAY_LANDED: std::sync::Condvar = std::sync::Condvar::new();
+
+/// How long the UI thread waits for an in-flight overlay surface before
+/// giving up on it: two of `nextDrawable`'s one-second timeouts. Reached only
+/// if the render thread died mid-frame (its in-flight surfaces were dropped
+/// with it) — a live one hands them back within a frame.
+const OVERLAY_LANDING_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Wait (UI thread) until overlay `overlay_id` is not in flight on the render
+/// thread, so its surface can be dropped before its layer goes away.
+fn wait_overlay_landed(
+    mut host: std::sync::MutexGuard<'static, OverlayHost>,
+    overlay_id: u64,
+) -> std::sync::MutexGuard<'static, OverlayHost> {
+    let deadline = std::time::Instant::now() + OVERLAY_LANDING_WAIT;
+    while host
+        .entries
+        .get(&overlay_id)
+        .is_some_and(|entry| entry.in_flight)
+    {
+        let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) else {
+            log::error!(
+                "frust-overlay: overlay {overlay_id} still in flight after \
+                 {OVERLAY_LANDING_WAIT:?}; detaching anyway"
+            );
+            break;
+        };
+        host = OVERLAY_LANDED
+            .wait_timeout(host, left)
+            .map(|(guard, _)| guard)
+            .unwrap_or_else(|poisoned| poisoned.into_inner().0);
+    }
+    host
+}
+
+/// The render thread's overlay work right **after** the main frame, off
+/// present-sync: present every overlay's frame when the main surface
+/// presented this frame (so the overlays never lead it), else drop them.
+fn present_overlays_after(main_presented: bool) {
+    let mut host = overlay_host();
+    for entry in host.entries.values_mut() {
+        let Some(surface) = entry.surface.as_mut() else {
+            continue;
+        };
+        if main_presented {
+            if surface.present() {
+                entry.presented += 1;
+            }
+        } else if surface.take_deferred_present().is_some() {
+            entry.dropped += 1;
+        }
+    }
+}
+
+/// The UI thread's half under present-sync, inside the display-link tick's
+/// `CATransaction` right after the main frame's present: present the
+/// overlays' frames of main frame `presented_frame_id`, keep any of a later
+/// frame for a later tick, and drop older ones. The lock is short on both
+/// sides (the render thread draws outside it), so this never waits out a
+/// draw.
+fn present_parked_overlays(presented_frame_id: u64) {
+    let mut guard = overlay_host();
+    let host = &mut *guard;
+    if host.parked.is_empty() {
+        return;
+    }
+    for (frame_id, overlay_id, frame) in std::mem::take(&mut host.parked) {
+        let entry = host.entries.get_mut(&overlay_id);
+        if frame_id == presented_frame_id {
+            frame.present();
+            if let Some(entry) = entry {
+                entry.presented += 1;
+            }
+        } else if frame_id > presented_frame_id {
+            host.parked.push((frame_id, overlay_id, frame));
+        } else if let Some(entry) = entry {
+            entry.dropped += 1;
+        }
+    }
+}
+
+/// The periodic `frust-overlay frames` line: per overlay, frames presented and
+/// dropped since the last line, the drawing overlay's last range and its GPU
+/// pass times (a `perf-trace` build on a device with timestamp queries).
+fn log_overlay_summary(host: &mut OverlayHost) {
+    let mut line = format!(
+        "frust-overlay frames: {} drawn, range {:?}",
+        host.frames, host.last_range
+    );
+    for (overlay_id, entry) in &mut host.entries {
+        let state = match &entry.surface {
+            Some(surface) => {
+                let gpu = surface
+                    .renderer()
+                    .gpu_pass_timings()
+                    .map(|t| format!(" gpu main {:?}", t.main))
+                    .unwrap_or_default();
+                format!(
+                    "up {:?} presented {} dropped {}{gpu}",
+                    surface.size(),
+                    entry.presented,
+                    entry.dropped
+                )
+            }
+            None if entry.refused => "refused".to_string(),
+            None => "pending".to_string(),
+        };
+        line.push_str(&format!("; overlay {overlay_id} {state}"));
+        entry.presented = 0;
+        entry.dropped = 0;
+    }
+    log::info!("{line}");
+}
+
+/// The C exports of the overlay spike. Additive symbols, emitted here rather
+/// than by [`crate::ios_app!`] because the spike's write scope stops at this
+/// module: they are declared to Swift by `@_silgen_name` in
+/// `FrustViewHost.swift` (not yet in `frust_ffi.h`). Both moves — into the
+/// macro and the header — belong to the production Apple overlay host.
+#[unsafe(no_mangle)]
+pub extern "C" fn frust_overlay_mode(handle: *mut c_void) -> u32 {
+    overlay_mode(handle)
+}
+
+/// See [`overlay_attach`].
+#[unsafe(no_mangle)]
+pub extern "C" fn frust_overlay_attach(
+    handle: *mut c_void,
+    overlay_id: u64,
+    layer: *mut c_void,
+    width: u32,
+    height: u32,
+) {
+    overlay_attach(handle, overlay_id, layer, width, height);
+}
+
+/// See [`overlay_detach`].
+#[unsafe(no_mangle)]
+pub extern "C" fn frust_overlay_detach(handle: *mut c_void, overlay_id: u64) {
+    overlay_detach(handle, overlay_id);
 }
 
 /// `frust_platform_view_commands_json`: the platform-view command backlog
@@ -2098,6 +2685,9 @@ pub fn destroy(handle: *mut c_void) {
         // is reclaimed exactly once here; the Swift side nulls its copy afterwards
         // so it is never passed back in.
         drop(unsafe { Box::from_raw(handle as *mut IosAppHandle) });
+        // The render thread that drew the overlays is joined: forget their
+        // surfaces and layers before Swift releases the overlay views.
+        clear_overlays();
         // The renderer is gone with the handle (the split's render thread was
         // joined by the drop), so nothing can publish after this: leave the
         // process-wide slot EMPTY, or a handle created later in this process
@@ -2278,5 +2868,41 @@ mod ime_content_type_wire {
         };
         let json = ime_state_to_json(Some(state));
         assert!(json.contains(r#""contentType":"terminal""#));
+    }
+}
+
+/// The overlay switch's resolution ([`overlay_count_from`]). Like
+/// [`ime_content_type_wire`], compiled only for an iOS target (checked by
+/// `cargo check --all-targets --target aarch64-apple-ios-sim`).
+#[cfg(test)]
+mod overlay_knob {
+    use super::{MAX_OVERLAYS, overlay_count_from};
+
+    #[test]
+    fn nothing_set_is_off() {
+        assert_eq!(overlay_count_from([None, None, None]), 0);
+        assert_eq!(overlay_count_from([Some("  "), None, Some("")]), 0);
+    }
+
+    #[test]
+    fn the_first_non_empty_source_wins() {
+        assert_eq!(overlay_count_from([Some("0"), Some("3"), Some("1")]), 0);
+        assert_eq!(overlay_count_from([None, Some("2"), Some("off")]), 2);
+        assert_eq!(overlay_count_from([Some(""), None, Some("1")]), 1);
+    }
+
+    #[test]
+    fn off_values_disable_and_other_words_mean_one() {
+        for off in ["0", "off", "OFF", "false", " False "] {
+            assert_eq!(overlay_count_from([Some(off)]), 0, "{off:?}");
+        }
+        assert_eq!(overlay_count_from([Some("on")]), 1);
+        assert_eq!(overlay_count_from([Some("media")]), 1);
+    }
+
+    #[test]
+    fn a_count_is_clamped() {
+        assert_eq!(overlay_count_from([Some("3")]), 3);
+        assert_eq!(overlay_count_from([Some("99")]), MAX_OVERLAYS);
     }
 }
