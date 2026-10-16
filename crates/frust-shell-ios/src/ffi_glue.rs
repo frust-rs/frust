@@ -2517,6 +2517,30 @@ pub(crate) fn take_frame_overlays(
     })
 }
 
+/// Every [`OVERLAY_SKEW_EVERY`](crate::ffi_support::OVERLAY_SKEW_EVERY)
+/// segmented frames, one `frust-overlay cost` line: each overlay's most recent
+/// GPU pass times (a `perf-trace` build on a device with timestamp queries;
+/// nothing is logged without a reading).
+fn log_overlay_cost(surfaces: &[(u64, frust_render::overlay::OverlaySurface)]) {
+    static FRAMES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let frame = FRAMES.fetch_add(1, Ordering::Relaxed) + 1;
+    if !frame.is_multiple_of(crate::ffi_support::OVERLAY_SKEW_EVERY) {
+        return;
+    }
+    for (overlay_id, surface) in surfaces {
+        if let Some(gpu) = surface.renderer().gpu_pass_timings() {
+            log::info!(
+                "frust-overlay cost overlay={overlay_id} gpu_prepass_us={} gpu_main_us={} \
+                 gpu_composite_us={} size={:?}",
+                gpu.prepass.as_micros(),
+                gpu.main.as_micros(),
+                gpu.composite.as_micros(),
+                surface.size(),
+            );
+        }
+    }
+}
+
 /// Hand a frame's overlay surfaces back once its presents are issued or
 /// parked, waking a UI-thread detach waiting on one, and log what the frame
 /// noted (latched per overlay).
@@ -2527,6 +2551,7 @@ pub(crate) fn land_frame_overlays(overlays: FrameOverlays) {
         unservable,
         ..
     } = overlays;
+    log_overlay_cost(&surfaces);
     let mut table = overlay_table();
     table.land(surfaces);
     for (overlay_id, error) in refused {
