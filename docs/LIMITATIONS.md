@@ -4732,8 +4732,8 @@ named per line. Every line below says where its limits live:
 - Phase 4, z-order differ, segmented rendering and the overlay hosts: shipped behind
   `FRUST_OVERLAYS` (default off). iOS passed on an iPhone SE and the iOS Simulator (0 uncaptured
   wgpu errors in Mode A and Mode B). macOS passed too (both paint orders; a withdraw can stall the UI thread).
-  The Android overlay spike passed (GO), but the Android host failed on one issue: a new overlay
-  surface gets no frame while the app is idle
+  The Android overlay spike passed (GO); the Android host's one failure (a new overlay surface got
+  no frame while the app was idle) is fixed in code, with the Pixel 5 re-run pending
   (`android-overlays-opt-in-pending-device-leg`). Limits: follow-up-see-
   `android-overlays-cover-later-slots`, follow-up-see-`apple-overlay-limits` and
   follow-up-see-`overlay-unservable-content-stays-on-main`.
@@ -4770,7 +4770,7 @@ retired or kept on their own.
 
 ---
 
-### `android-overlays-opt-in-pending-device-leg` — Android overlays are off by default: an idle app gives a new overlay surface no frame
+### `android-overlays-opt-in-pending-device-leg` — Android overlays are off by default until the idle-frame fix is confirmed on a device
 
 **Observed**: the Android overlay host (frust paint above a native view on an opaque surface) runs
 only when `FRUST_OVERLAYS` is set (runtime env, compile-time `--define`, or the
@@ -4778,23 +4778,26 @@ only when `FRUST_OVERLAYS` is set (runtime env, compile-time `--define`, or the
 shell calls plain `ingest`, which never emits overlays, and the frame path is byte-identical to a
 build without them. On a Pixel 5 the overlay itself works (spike: overlay above the native view,
 premultiplied alpha correct, skew avg 0.53 ms / max 3.9 ms; rotation, Mode B and the
-covers-later-slots behaviour confirmed). One issue remains: a newly attached or recreated overlay
-surface (slot remount, background to foreground) gets no frame while the app is idle, so the
-over-paint stays under the native view until an unrelated repaint.
+covers-later-slots behaviour confirmed). One issue was found: a newly attached or recreated overlay
+surface (slot remount, background to foreground) got no frame while the app was idle, so the
+over-paint stayed under the native view until an unrelated repaint. An overlay window that arrives,
+resizes or is withdrawn now requests a frame; the fix is not yet confirmed on the Pixel 5 (device
+leg pending).
 
 **Applies to**: Android apps that composite frust content over a native view (native-widgets
 popovers and badges, video or camera controls over the picture) with the knob on.
 
-**Why accepted**: the default stays off because of the idle-frame issue; the Apple hosts request a
-frame when an overlay layer is attached or resized, and Android has no equivalent yet. The overlay
+**Why accepted**: the default stays off until the Pixel 5 leg confirms the idle-frame fix (the
+Apple hosts request a frame when an overlay layer is attached or resized, and Android now does the
+same for its overlay windows). The overlay
 lock is held across the main-surface acquire, so an overlay's `surfaceDestroyed` on the UI thread
 can wait up to one acquire timeout; the opt-in knob is the mitigation.
 
-**Trigger for removal**: an attached or recreated overlay surface requests a frame and the default
-flips (or the knob is retired); before any default flip the lock wait is bounded or replaced by an
+**Trigger for removal**: the Pixel 5 leg confirms an attached, recreated or withdrawn overlay
+surface draws or restores content on an idle app, and the default flips (or the knob is retired); before any default flip the lock wait is bounded or replaced by an
 ack-barrier.
 
-**Evidence**: `crates/frust-shell-android/src/app/frame.rs`, `ffi_support.rs`; SHELLS_ARCHITECTURE.md
+**Evidence**: `crates/frust-shell-android/src/app/frame.rs`, `jni_glue.rs`, `overlay_state.rs`; SHELLS_ARCHITECTURE.md
 § Native-view hosting.
 
 ---
@@ -4834,8 +4837,9 @@ the first importing thread).
 
 **Why accepted**: the hand-opened device is a deliberate deviation from wgpu's own device creation.
 On a Pixel 5 the importer's Vulkan device opens and video texture output plays correctly both with
-and without it, but whether frames took the `AHardwareBuffer` path is not observable at Info log
-level, so the hardware-buffer leg: device leg pending.
+and without it, and the first delivered frame per session now logs its path at Info (frust-video-player: session N
+texture output via AHardwareBuffer … / via CPU copy …); the hardware-buffer leg is device leg
+pending.
 
 **Trigger for removal**: the device leg passes and the knob default flips, plus a YUV import path
 if decoders are to be sampled directly.

@@ -254,8 +254,14 @@ impl AndroidAppHandle {
             // instant) must keep frames running until drained — the resampler's
             // pending signal ORs into the events input (the
             // "never starves the gate" contract; default-to-run rule).
+            // An overlay window that arrived, resized or was withdrawn also
+            // runs a frame: the render thread builds the overlay surface
+            // ahead of its next frame, so one Run draws the overlay or
+            // restores the content that was cut around it. Taken here, past
+            // the early returns, so the request is never lost to a skip.
             events_since_last_frame: std::mem::take(&mut self.events_since_last_frame)
-                || self.resampler.has_pending(),
+                || self.resampler.has_pending()
+                || crate::jni_glue::take_overlay_frame_request(),
             pointer_capture_active: self.app.is_pointer_captured(),
             // The focus/IME edge peeked above (committed past the skip return).
             focus_or_ime_changed,
