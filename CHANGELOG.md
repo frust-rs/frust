@@ -15,8 +15,9 @@ clips and backdrop blur as engine primitives. Partial repaint was measured and r
 removed. Platform views can sit between scene slots through an overlay host on Android, iOS and
 macOS (`FRUST_OVERLAYS`, default off), and video and camera frames can enter the scene as textures
 through `frust::texture` and `texture_view`, with zero-copy import on Apple and, behind
-`FRUST_ANDROID_HWBUFFER_IMPORT` (default off), on Android. The Android hardware-buffer device leg
-and the macOS overlay visual check are still to be run. Gates passed: workspace tests, clippy, the five engine golden arms byte-unchanged, and both
+`FRUST_ANDROID_HWBUFFER_IMPORT` (default off), on Android. Every device leg has run: iPhone SE, iOS
+Simulator and macOS for the Apple half, a OnePlus 9 for the Android overlays, the hardware-buffer import and the
+Phase 3 retained-layer numbers. Gates passed: workspace tests, clippy, the five engine golden arms byte-unchanged, and both
 Android app Kotlin compiles. How the model maps onto Flutter's is in
 [docs/learning/17-render-model-vs-flutter.md](docs/learning/17-render-model-vs-flutter.md); the
 limits are in [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
