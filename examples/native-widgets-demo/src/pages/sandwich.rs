@@ -283,19 +283,11 @@ pub fn page(_state: &S) -> AnyView<S> {
     page_column(vec![block(header), modes, stack])
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_geometry_sandwiches_each_view() {
-        // The toolbar straddles the field's top edge, the popover overlaps its
-        // lower part, and the badge overlaps the slider: each over-paint
-        // actually covers its view.
-        assert!(TOOLBAR_H > FIELD_TOP);
-        assert!(POPOVER_TOP < FIELD_TOP + FRAME + FIELD_H);
-        // The card encloses the slider, and the two groups do not overlap.
-        assert!(SLIDER_TOP + SLIDER_H < CARD_TOP + CARD_H);
-        assert!(POPOVER_TOP + 40.0 < CARD_TOP);
-    }
-}
+// The geometry sandwiches each view, checked at compile time: the toolbar
+// straddles the field's top edge, the popover overlaps its lower part, and the
+// badge overlaps the slider, so each over-paint actually covers its view; the
+// card encloses the slider, and the two groups do not overlap.
+const _: () = assert!(TOOLBAR_H > FIELD_TOP);
+const _: () = assert!(POPOVER_TOP < FIELD_TOP + FRAME + FIELD_H);
+const _: () = assert!(SLIDER_TOP + SLIDER_H < CARD_TOP + CARD_H);
+const _: () = assert!(POPOVER_TOP + 40.0 < CARD_TOP);
