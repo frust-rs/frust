@@ -36,8 +36,8 @@
 //! Two native slots on every target, whichever paint order is on.
 
 use frust::{
-    AnyView, ButtonStyle, EdgeInsets, FlexChild, Get, Padding, Set, SizedBox, Stack, View, either,
-    button, checkbox, container, inflexible, text,
+    AnyView, ButtonStyle, EdgeInsets, FlexChild, Get, Padding, Set, SizedBox, Stack, View, button,
+    checkbox, container, either, inflexible, text,
 };
 use frust_native_widgets::{live_slot_count, native_label, native_slider};
 
@@ -186,27 +186,31 @@ fn sandwich(value: i32, interleaved: bool) -> impl View<S> {
     either(
         interleaved,
         // Field group, then card group: the card is painted between the views.
-        || Stack((
-            at(0.0, FIELD_TOP, field_frame()),
-            at(FRAME, FIELD_TOP + FRAME, field()),
-            at(24.0, 0.0, selection_toolbar()),
-            at(40.0, POPOVER_TOP, popover()),
-            at(0.0, CARD_TOP, slider_card()),
-            at(SLIDER_LEFT, CARD_TOP + 12.0, card_title(value)),
-            at(SLIDER_LEFT, SLIDER_TOP, slider(value)),
-            badge_at(badge(value)),
-        )),
+        || {
+            Stack((
+                at(0.0, FIELD_TOP, field_frame()),
+                at(FRAME, FIELD_TOP + FRAME, field()),
+                at(24.0, 0.0, selection_toolbar()),
+                at(40.0, POPOVER_TOP, popover()),
+                at(0.0, CARD_TOP, slider_card()),
+                at(SLIDER_LEFT, CARD_TOP + 12.0, card_title(value)),
+                at(SLIDER_LEFT, SLIDER_TOP, slider(value)),
+                badge_at(badge(value)),
+            ))
+        },
         // Everything under, both views, everything over.
-        || Stack((
-            at(0.0, FIELD_TOP, field_frame()),
-            at(0.0, CARD_TOP, slider_card()),
-            at(SLIDER_LEFT, CARD_TOP + 12.0, card_title(value)),
-            at(FRAME, FIELD_TOP + FRAME, field()),
-            at(SLIDER_LEFT, SLIDER_TOP, slider(value)),
-            at(24.0, 0.0, selection_toolbar()),
-            at(40.0, POPOVER_TOP, popover()),
-            badge_at(badge(value)),
-        )),
+        || {
+            Stack((
+                at(0.0, FIELD_TOP, field_frame()),
+                at(0.0, CARD_TOP, slider_card()),
+                at(SLIDER_LEFT, CARD_TOP + 12.0, card_title(value)),
+                at(FRAME, FIELD_TOP + FRAME, field()),
+                at(SLIDER_LEFT, SLIDER_TOP, slider(value)),
+                at(24.0, 0.0, selection_toolbar()),
+                at(40.0, POPOVER_TOP, popover()),
+                badge_at(badge(value)),
+            ))
+        },
     )
 }
 
