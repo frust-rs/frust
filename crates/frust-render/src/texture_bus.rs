@@ -138,6 +138,7 @@
 use std::any::Any;
 use std::ffi::c_void;
 use std::fmt;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -340,7 +341,7 @@ impl SourceFrame {
     /// dropping it, spelled out.
     pub fn release(mut self) {
         if let Some(release) = self.release.take() {
-            release();
+            run_release(release);
         }
     }
 }
@@ -351,7 +352,7 @@ impl Drop for SourceFrame {
     /// (into a held import) is `None` here.
     fn drop(&mut self) {
         if let Some(release) = self.release.take() {
-            release();
+            run_release(release);
         }
     }
 }
@@ -631,8 +632,19 @@ impl Drop for Retiring {
         drop(self.keep.take());
         self.pending.fetch_sub(1, Ordering::AcqRel);
         if let Some(release) = self.release.take() {
-            release();
+            run_release(release);
         }
+    }
+}
+
+/// Runs a frame's release callback behind `catch_unwind`, the last line of
+/// defence for a callback that panics anyway. Releases run from `Drop` impls
+/// (a retired texture's fence, a frame dropped unrun), sometimes during an
+/// unwind, and a panic escaping one there aborts the process. A caught panic
+/// is logged; a callback must still not panic (see [`SourceFrame`]).
+fn run_release(release: ReleaseCallback) {
+    if std::panic::catch_unwind(AssertUnwindSafe(release)).is_err() {
+        log::error!("texture source: a frame release callback panicked and was caught");
     }
 }
 
@@ -900,7 +912,7 @@ impl ReleaseGuard {
     /// Runs the callback now.
     fn release(mut self) {
         if let Some(release) = self.0.take() {
-            release();
+            run_release(release);
         }
     }
 
@@ -913,7 +925,7 @@ impl ReleaseGuard {
 impl Drop for ReleaseGuard {
     fn drop(&mut self) {
         if let Some(release) = self.0.take() {
-            release();
+            run_release(release);
         }
     }
 }
@@ -1235,6 +1247,27 @@ mod tests {
         assert_eq!(released.load(Ordering::SeqCst), 1);
         held();
         assert_eq!(released.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_panicking_source_frame_release_does_not_unwind_out_of_a_drop() {
+        let frame = SourceFrame::rgba8(1, 1, Arc::from(vec![0u8; 4]))
+            .on_release(|| panic!("the release callback panics"));
+        let outcome = std::panic::catch_unwind(AssertUnwindSafe(move || drop(frame)));
+        assert!(outcome.is_ok(), "the panic was caught inside the drop");
+    }
+
+    #[test]
+    fn a_panicking_bus_guard_release_does_not_propagate() {
+        let guard = ReleaseGuard(Some(Box::new(|| panic!("the release callback panics"))));
+        let outcome = std::panic::catch_unwind(AssertUnwindSafe(move || guard.release()));
+        assert!(outcome.is_ok());
+
+        // A guard dropped unreleased (a panic between taking a frame apart
+        // and handing its callback on) is the same path through `Drop`.
+        let guard = ReleaseGuard(Some(Box::new(|| panic!("the release callback panics"))));
+        let outcome = std::panic::catch_unwind(AssertUnwindSafe(move || drop(guard)));
+        assert!(outcome.is_ok());
     }
 
     #[test]

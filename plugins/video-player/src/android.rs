@@ -185,7 +185,7 @@
 // `crate::backend::Active`'s own doc).
 #![cfg_attr(test, allow(dead_code))]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock, PoisonError};
@@ -255,6 +255,11 @@ static SESSIONS: LazyLock<Mutex<HashMap<i32, Arc<Shared>>>> =
 /// so a frame push never holds the state registry's lock.
 static TEXTURE_SINKS: LazyLock<Mutex<HashMap<i32, TextureSink>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The sessions whose `releaseTextureFrame` failure has already been logged
+/// at `warn!` (see [`first_release_failure`]).
+static RELEASE_FAILURES_LOGGED: LazyLock<Mutex<HashSet<i32>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
 
 /// Opens Android player sessions.
 pub(crate) struct AndroidBackend;
@@ -1073,28 +1078,54 @@ unsafe fn hardware_buffer(env: &Env<'_>, buffer: &JObject<'_>) -> *mut c_void {
     }
 }
 
+/// Whether `session` has not yet had a `releaseTextureFrame` failure logged —
+/// the first one of a session is worth a `warn!`, the rest `debug!`. A
+/// session that fails on every frame would otherwise flood the log.
+fn first_release_failure(session: i32) -> bool {
+    lock(&RELEASE_FAILURES_LOGGED).insert(session)
+}
+
 /// A native frame's release: drops the reference [`hardware_buffer`]
 /// acquired, then tells the host it may close the image (and so let its
 /// reader reuse the buffer). Runs once, on whichever thread the renderer
 /// releases the frame from.
+///
+/// The release runs from a frame's `Drop`, possibly during an unwind, so it
+/// never panics: the buffer reference is given back first (a plain FFI call),
+/// then the host is told inside a scoped JNI attachment ([`with_host`]) under
+/// `catch_unwind`. A failure, or a caught panic, is logged — once per session
+/// at `warn!` — and dropped; the host's image then stays open until its own
+/// close, which is the only cost.
 fn release_native_frame(session: i32, buffer: usize, token: i64) {
     // SAFETY: `buffer` is the address `hardware_buffer` returned non-null,
     // carrying exactly one reference acquired there and released only here
     // (a frame's release runs once).
     unsafe { AHardwareBuffer_release(buffer as *mut c_void) };
-    let released = with_host(|env, class| {
-        run_jni(env, "FrustVideoPlayerHost.releaseTextureFrame", |env| {
-            env.call_static_method(
-                class,
-                jni_str!("releaseTextureFrame"),
-                jni_sig!("(IJ)V"),
-                &[JValue::Int(session), JValue::Long(token)],
-            )?
-            .v()
+    let released = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        with_host(|env, class| {
+            run_jni(env, "FrustVideoPlayerHost.releaseTextureFrame", |env| {
+                env.call_static_method(
+                    class,
+                    jni_str!("releaseTextureFrame"),
+                    jni_sig!("(IJ)V"),
+                    &[JValue::Int(session), JValue::Long(token)],
+                )?
+                .v()
+            })
         })
-    });
-    if let Err(err) = released {
-        log::debug!("frust-video-player: releasing frame {token} of session {session}: {err}");
+    }));
+    let failure = match released {
+        Ok(Ok(())) => return,
+        Ok(Err(err)) => err.to_string(),
+        Err(_) => "the release panicked and was caught".to_owned(),
+    };
+    if first_release_failure(session) {
+        log::warn!(
+            "frust-video-player: releasing frame {token} of session {session}: {failure} \
+             (further release failures of this session are logged at debug level)"
+        );
+    } else {
+        log::debug!("frust-video-player: releasing frame {token} of session {session}: {failure}");
     }
 }
 
@@ -1541,5 +1572,14 @@ mod tests {
             PlaybackState::Playing,
             PlaybackState::Idle
         ));
+    }
+
+    /// The once-per-session gate behind the release-failure log: the first
+    /// failure of a session is reported, later ones of that session are not.
+    #[test]
+    fn release_failures_are_reported_once_per_session() {
+        assert!(super::first_release_failure(7_000_001));
+        assert!(!super::first_release_failure(7_000_001));
+        assert!(super::first_release_failure(7_000_002));
     }
 }

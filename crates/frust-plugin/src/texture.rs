@@ -152,8 +152,21 @@ pub enum FramePayload {
 }
 
 /// The callback a frame carries to tell its producer the consumer is done
-/// with it.
+/// with it. It runs from a `Drop` and must not panic; see [`run_release`] for
+/// what happens if it does anyway.
 pub type ReleaseCallback = Box<dyn FnOnce() + Send>;
+
+/// Runs a frame's release callback behind `catch_unwind`, the last line of
+/// defence for a callback that panics anyway.
+///
+/// Releases run from `Drop` impls, sometimes while another panic unwinds, and
+/// a panic escaping a `Drop` during an unwind aborts the process. The panic
+/// hook has already reported the message by the time it is caught here, so the
+/// payload is discarded. A callback must still not panic: a caught one is a
+/// bug in the producer, and its frame is released all the same.
+fn run_release(release: ReleaseCallback) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(release));
+}
 
 /// The extent and pixel format of a [`TextureFrame`], as returned by
 /// [`TextureFrame::into_parts`].
@@ -240,7 +253,7 @@ impl TextureFrame {
     /// dropping it, spelled out.
     pub fn release(mut self) {
         if let Some(release) = self.release.take() {
-            release();
+            run_release(release);
         }
     }
 }
@@ -251,7 +264,7 @@ impl Drop for TextureFrame {
     /// `None` here.
     fn drop(&mut self) {
         if let Some(release) = self.release.take() {
-            release();
+            run_release(release);
         }
     }
 }
@@ -673,6 +686,42 @@ mod tests {
         );
         drop(sink);
         assert_eq!(released.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn a_panicking_release_does_not_unwind_out_of_a_drop() {
+        let frame = TextureFrame::rgba8(1, 1, Arc::from(vec![0u8; 4]))
+            .on_release(|| panic!("the release callback panics"));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(frame)));
+        assert!(outcome.is_ok(), "the panic was caught inside the drop");
+    }
+
+    #[test]
+    fn a_panicking_explicit_release_does_not_propagate() {
+        let frame = TextureFrame::rgba8(1, 1, Arc::from(vec![0u8; 4]))
+            .on_release(|| panic!("the release callback panics"));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            frame.release();
+        }));
+        assert!(outcome.is_ok());
+    }
+
+    #[test]
+    fn a_panicking_displaced_release_leaves_the_mailbox_usable() {
+        let released = Arc::new(AtomicUsize::new(0));
+        let sink = TextureSink::new();
+        sink.push(
+            TextureFrame::rgba8(1, 1, Arc::from(vec![1u8; 4]))
+                .on_release(|| panic!("the displaced release panics")),
+        );
+
+        // The displacing push runs the panicking callback on this thread.
+        sink.push(counted(&released, 2));
+        assert_eq!(released.load(Ordering::SeqCst), 0);
+        let frame = sink.take_latest().expect("the newest frame is pending");
+        assert_eq!(first_byte(&frame), 2, "the mailbox still accepts frames");
+        frame.release();
+        assert_eq!(released.load(Ordering::SeqCst), 1);
     }
 
     #[test]
