@@ -103,9 +103,10 @@
 //! main segment excludes it, the overlay cannot draw it), or a retained page
 //! would be repainted on the overlay while the main store kept advertising
 //! the old one.
-//! A differ cut starts AT its slot's index, so a Mode B slot's own hole-punch
-//! (`ClearRect`) is the overlay's first command — drawn over the overlay's
-//! transparent clear, where it erases nothing.
+//! A differ cut opens one command past a leading Mode B hole-punch (the
+//! `ClearRect` recorded at the slot's own index), so the punch stays in the
+//! main segment, where it keeps erasing what lies under the native view; the
+//! overlay's range holds only the content painted above the slot.
 //!
 //! Each target compiles its own segment: the engine's compiled frame is
 //! specific to its target's size and root, so a segmented frame is one compile
@@ -1110,6 +1111,11 @@ fn note_dropped_composites(cut: &RangeCut) {
     debug_assert_eq!(
         cut.dropped_draw_retained, 0,
         "an overlay dropped a retained composite of a served cut"
+    );
+    debug_assert_eq!(
+        cut.demoted_retained, 0,
+        "an overlay demoted a retained bracket of a served cut: the classifier \
+         and the projection disagree on where the bracket closes"
     );
     if cut.dropped_draw_retained > 0 && !LOGGED.swap(true, Ordering::Relaxed) {
         log::error!(

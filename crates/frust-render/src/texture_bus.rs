@@ -21,10 +21,12 @@
 //!
 //! Every frame's [`SourceFrame::release`] callback runs exactly once, on every
 //! path — including a panic unwinding through the pass (a [`SourceFrame`]
-//! dropped still holding its callback runs it) and a device lost before a
-//! retire fence fired (the unrun fence callback is dropped, and the retiring
-//! frame it owned releases as it goes). *When* depends on what the bus did
-//! with the payload:
+//! dropped still holding its callback runs it) and a device replaced by a
+//! newer one (the bus polls the old device until its retire fences fired
+//! before it lets go of it). A retire fence's callback holds its queue alive
+//! until it fires, so a device that is never polled again keeps its retiring
+//! frames' releases pending; a device lost outright releases them on its
+//! next poll. *When* depends on what the bus did with the payload:
 //!
 //! - a CPU frame — right after the upload is enqueued (the queue copies the
 //!   pixels into staging synchronously, so nothing reads the payload again);
@@ -706,7 +708,16 @@ impl ExternalPass for SourcePass {
             .as_ref()
             .is_some_and(|shown| shown.device != *frame.device())
         {
+            let old_device = state.shown.as_ref().map(|shown| shown.device.clone());
             state.shown = None;
+            // Dropping the view retired it on the OLD queue, whose fences fire
+            // only when that device is polled; nothing else will poll it again,
+            // so drain both hops here before the device is let go of.
+            if let Some(old_device) = old_device {
+                for _ in 0..2 {
+                    let _ = old_device.poll(wgpu::PollType::wait_indefinitely());
+                }
+            }
         }
 
         // The frame keeps its release callback until the bus is done with

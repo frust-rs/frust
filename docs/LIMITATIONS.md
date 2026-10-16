@@ -4870,7 +4870,10 @@ memory-safety issue (the importer holds its own reference and wgpu keeps the tex
 sampling.
 
 **Trigger for removal**: a different ownership scheme (producer-side fences) that makes retirement
-explicit, or tying the release to the frame's own submission.
+explicit, or tying the release to the frame's own submission — owed before the hardware-buffer
+import knob ever defaults on. A device replaced by a newer one is polled until its retire fences
+fired before the bus lets go of it; a device that is never polled again (lost outright) releases
+its retiring frames only on its next poll.
 
 **Evidence**: `crates/frust-render/src/texture_bus.rs` module docs.
 
@@ -7737,7 +7740,7 @@ frame (`SceneTexture`) or a `BackdropBlur` is not drawn on its overlay (`cut_is_
 `CutServiceability::Unservable` with an `UnservableReason`). The range stays in the main segment,
 so that content draws under the native view, and the overlay records a transparent clear
 (`OverlayCutOutcome.serviceability` reports each cut). Navigator transitions wrap pages in a
-retained bracket, so any cut they cross stays on main for the transition.
+retained bracket, so any cut they cross stays on main for the transition. Servability is decided per frame from the cut's commands, so a retained widget above a native view moves between the overlay (clean frames composite its page: unservable, under the view) and the main surface the same way; content that alternates can therefore change z-order against the native view from frame to frame.
 
 **Applies to**: Android apps with `FRUST_OVERLAYS` on that paint such content above a native view;
 Apple hosts are pending.
