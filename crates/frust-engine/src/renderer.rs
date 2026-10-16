@@ -1580,8 +1580,11 @@ impl EngineRenderer {
         // `perf-trace` — no clock is read at all.
         let mut clock = PhaseClock::start();
         // Emptied first, so a frame refused below reports the nothing it
-        // recorded rather than the last frame's passes.
+        // recorded rather than the last frame's passes. The atlas report is
+        // the same kind of record: a frame that errors before its replay
+        // would otherwise carry the last replay's numbers forward.
         self.frame_passes.clear();
+        self.atlas_report = AtlasRenderReport::default();
         let size = grid_size(target.width, target.height)?;
         let mut frame = self.compiler.compile(scene, root, size)?;
         let compile_total = clock.lap();
@@ -1797,9 +1800,6 @@ impl EngineRenderer {
         // above are: acknowledging is what lifts the eviction deferral, so an
         // acknowledgement for a replay that returned early would let `glifo`
         // free and re-let the very rectangles those commands still name.
-        // The report describes only a frame whose replay ran: a frame that
-        // skipped it must not carry the last replay's numbers forward.
-        self.atlas_report = AtlasRenderReport::default();
         #[cfg(feature = "perf-trace")]
         let mut replayed = false;
         if self.compiler.glyph_replay_pending()

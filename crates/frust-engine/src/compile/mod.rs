@@ -105,8 +105,8 @@ use crate::config;
 use crate::error::EngineError;
 use crate::filters::{Backdrop, MAX_BACKDROPS_PER_FRAME, backdrop_region, backdrop_sigma};
 use crate::text::{
-    AtlasPolicy, FontFacts, GlyphQuadScratch, GlyphQuadTargets, GlyphRunTargets, RunKey, RunRoute,
-    context_paint, glyph_atlas_policy, lower_glyph_run,
+    AtlasPolicy, FontFacts, GlyphQuadScratch, GlyphQuadTargets, GlyphRunRouting, GlyphRunTargets,
+    RunKey, RunRoute, context_paint, glyph_atlas_policy, lower_glyph_run,
 };
 
 /// Curve-flattening tolerance, in device pixels.
@@ -1837,15 +1837,17 @@ impl SceneCompiler {
             paint,
             &run.brush,
             hint_text,
-            atlas,
-            glyph_run_cache,
+            GlyphRunRouting {
+                atlas,
+                resident: glyph_run_cache,
+                quads,
+            },
             GlyphRunTargets {
                 generator,
                 clips,
                 prep: glyphs,
                 frame,
                 depth,
-                quads,
             },
         );
 
