@@ -62,8 +62,10 @@ fn to_pv_command(cmd: &ViewCommand, scale: f64) -> Option<crate::ffi_support::Pl
         ViewCommand::Dispose { slot_id } => {
             crate::ffi_support::PlatformViewCommand::Dispose { slot_id: *slot_id }
         }
-        // Overlays have no iOS host yet; the shell's plain `ingest` never
-        // produces them.
+        // The differ's per-slot overlays have no iOS host yet (the shell's
+        // plain `ingest` never produces them); the overlay spike's surfaces
+        // are announced by `FrustViewHost` itself, through
+        // `frust_overlay_attach` (see `crate::ffi_glue`).
         ViewCommand::Overlay { .. } | ViewCommand::DisposeOverlay { .. } => return None,
     })
 }
@@ -79,6 +81,17 @@ impl IosAppHandle {
         // were paired with belong to the surface that just went away — so the
         // pairing goes with it.
         self.platform_view_due.clear();
+        // Overlay surfaces share the recreated surface's device: dropped here,
+        // rebuilt on their layers by the next frame that draws them.
+        crate::ffi_glue::drop_overlay_surfaces();
+    }
+
+    /// The id of the frust frame the UI thread last presented under
+    /// present-sync (`0` before the first) — what `frust_present_frame`
+    /// pairs the overlays' parked frames against, so an overlay frame lands in
+    /// the same `CATransaction` as the main frame it was cut from.
+    pub(crate) fn presented_frame_id(&self) -> u64 {
+        self.presented_frame_id
     }
 
     /// `frust_platform_view_commands_json`'s core: acknowledge `ack_generation`

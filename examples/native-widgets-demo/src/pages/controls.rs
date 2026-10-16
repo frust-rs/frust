@@ -77,6 +77,14 @@
 //! nothing — as the cut marker. The block is the page's LAST, so the overlay's
 //! range is the tooltip (plus whatever paints after the page) rather than the
 //! rest of the page, whose native rows it would otherwise cover.
+//!
+//! The Apple hosts read the same switch (`FRUST_OVERLAYS`, with
+//! `FRUST_OVERLAY_SPIKE` as its alias — the spike's split needs the alias
+//! set) and stack their overlays above the topmost native view, so the cut
+//! must be this marker: run iOS in Mode A (`FRUST_DEMO_OPAQUE=1`), where no
+//! slot records a punch of its own ahead of it. macOS is always Mode A.
+//! `FRUST_OVERLAY_SPIKE=3` stacks three overlays (the extra two clear to
+//! transparent) to measure the per-surface cost.
 
 use frust::authoring::{
     BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Size, Widget,
@@ -555,7 +563,8 @@ pub fn page(state: &S) -> AnyView<S> {
             "Mounts a native field with a frust tooltip over it. On an opaque surface the \
              native view covers frust paint, so the tooltip hides behind it \u{2014} unless \
              the app runs with FRUST_OVERLAY_SPIKE=1, where a translucent overlay surface \
-             above the native views draws it. Adds a seventh slot while on.",
+             above the native views draws it (iOS: Mode A, FRUST_DEMO_OPAQUE=1). Adds a \
+             seventh slot while on.",
         )),
         gap(6.0),
         inflexible(checkbox(

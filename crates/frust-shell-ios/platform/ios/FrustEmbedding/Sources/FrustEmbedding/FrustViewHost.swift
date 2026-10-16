@@ -25,6 +25,53 @@ import CFrustFFI
 // (Mode A) apps they sit ABOVE it. The choice is fixed per-app by the
 // controller's `translucentSurface` const in v1 (per-slot z policy is
 // future work).
+//
+// Overlay surfaces (render-model spike, `FRUST_OVERLAYS` / its
+// `FRUST_OVERLAY_SPIKE` alias, default off, Mode A only): while any slot is
+// live, the host stacks `frust_overlay_mode` input-transparent, non-opaque
+// `CAMetalLayer` views directly above the topmost slot wrapper, full-window
+// (the same extent as the Frust surface), and hands each layer to Rust
+// (`frust_overlay_attach`); Frust draws the commands painted after the native
+// view onto the lowest one, so its paint lands above the native views. A layer
+// is detached (`frust_overlay_detach`, which drops its surface) before its
+// view is released.
+
+// The overlay spike's three additive C exports (`frust-shell-ios`'s
+// `ffi_glue`). Declared here rather than in `frust_ffi.h` while the spike's
+// scope stops at this file; the production host moves them into the header.
+@_silgen_name("frust_overlay_mode")
+private func frust_overlay_mode(_ handle: UnsafeMutableRawPointer) -> UInt32
+@_silgen_name("frust_overlay_attach")
+private func frust_overlay_attach(
+    _ handle: UnsafeMutableRawPointer, _ overlayId: UInt64, _ layer: UnsafeMutableRawPointer,
+    _ width: UInt32, _ height: UInt32)
+@_silgen_name("frust_overlay_detach")
+private func frust_overlay_detach(_ handle: UnsafeMutableRawPointer, _ overlayId: UInt64)
+
+/// An overlay surface's view: a non-opaque `CAMetalLayer` Frust presents
+/// into, invisible to touches (`hitTest` answers nil and user interaction is
+/// off), so the native view under it and the Frust surface keep today's
+/// input rules.
+final class FrustOverlayView: UIView {
+    override class var layerClass: AnyClass { CAMetalLayer.self }
+
+    var metalLayer: CAMetalLayer { layer as! CAMetalLayer }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isOpaque = false
+        backgroundColor = .clear
+        isUserInteractionEnabled = false
+        metalLayer.isOpaque = false
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? { nil }
+}
+
 final class FrustViewHost {
     /// A live slot: the `wrapper` is the sibling added to the hierarchy (it
     /// carries position + clip), `content` is the factory-produced view
@@ -82,9 +129,31 @@ final class FrustViewHost {
     /// the cheap null "no change" fast path when nothing new has happened.
     private(set) var ackedGeneration: UInt64 = 0
 
-    init(containerView: UIView, translucent: Bool) {
+    /// How many overlay views to stack while a slot is live — `0` unless the
+    /// overlay switch is on, and always `0` in Mode B (the translucent
+    /// surface already paints above its native views).
+    private let overlayCount: Int
+    /// Whether overlay layers present inside the display-link tick's
+    /// `CATransaction`, like the Frust surface's own layer under present-sync.
+    private let overlaysPresentWithTransaction: Bool
+    /// The live overlay views, bottom (id 1) to top.
+    private var overlays: [FrustOverlayView] = []
+    /// The handle of the poll in progress — the overlay calls need it.
+    private var handle: UnsafeMutableRawPointer?
+
+    init(
+        containerView: UIView, translucent: Bool, handle: UnsafeMutableRawPointer? = nil,
+        presentsWithTransaction: Bool = false
+    ) {
         self.containerView = containerView
         self.translucent = translucent
+        self.handle = handle
+        self.overlaysPresentWithTransaction = presentsWithTransaction
+        let requested = handle.map { Int(frust_overlay_mode($0)) } ?? 0
+        if requested > 0 && translucent {
+            NSLog("frust-overlay: overlays are Mode A only; none stacked on a translucent surface")
+        }
+        self.overlayCount = translucent ? 0 : requested
     }
 
     /// Pull and apply this frame's platform-view command batch. Cheap when
@@ -92,6 +161,10 @@ final class FrustViewHost {
     /// common case and does no work. Called on the main thread (the
     /// `CADisplayLink` callback), so all UIKit mutation below is main-thread.
     func poll(handle: UnsafeMutableRawPointer) {
+        self.handle = handle
+        // Overlays follow the Frust surface's extent on every tick, not only
+        // when a batch arrives (a rotation resizes the surface, not a slot).
+        if !overlays.isEmpty { syncOverlayGeometry() }
         guard let raw = frust_platform_view_commands_json(handle, ackedGeneration) else { return }
         defer { frust_string_free(raw) }
         let data = Data(bytes: raw, count: strlen(raw))
@@ -106,21 +179,27 @@ final class FrustViewHost {
         // (frust owns all motion; a UIKit auto-animation would fight it).
         CATransaction.begin()
         CATransaction.setDisableActions(true)
+        var created = false
         for command in commands {
-            apply(command)
+            created = apply(command) || created
         }
+        if overlayCount > 0 { reconcileOverlays(restack: created) }
         CATransaction.commit()
 
         ackedGeneration = generation
     }
 
-    private func apply(_ command: [String: Any]) {
+    /// Apply one command; answers whether it parented a new wrapper (which
+    /// may now sit above the overlays).
+    private func apply(_ command: [String: Any]) -> Bool {
         guard let op = command["op"] as? String,
             let slotId = (command["slot"] as? NSNumber)?.uint64Value
-        else { return }
+        else { return false }
         switch op {
         case "create":
+            let before = slots.count
             applyCreate(slotId: slotId, command: command)
+            return slots.count > before
         case "update":
             applyUpdate(slotId: slotId, command: command)
         case "updateParams":
@@ -129,6 +208,104 @@ final class FrustViewHost {
             applyDispose(slotId: slotId)
         default:
             break  // Unknown op (forward-compat): ignore rather than crash.
+        }
+        return false
+    }
+
+    // MARK: - Overlay surfaces (spike)
+
+    /// Stack the overlays while any slot is live and tear them down with the
+    /// last one; after a new wrapper was parented (`restack`), lift them back
+    /// above it.
+    private func reconcileOverlays(restack: Bool) {
+        if slots.isEmpty {
+            detachOverlays()
+        } else if overlays.isEmpty {
+            attachOverlays()
+        } else if restack {
+            stackOverlays()
+        }
+    }
+
+    /// The drawable size an overlay needs: the Frust surface's, physical px.
+    private func overlayPixelSize() -> (CGSize, UInt32, UInt32) {
+        let scale = containerView.contentScaleFactor
+        let size = CGSize(
+            width: containerView.bounds.width * scale,
+            height: containerView.bounds.height * scale)
+        return (size, UInt32(max(size.width, 1)), UInt32(max(size.height, 1)))
+    }
+
+    private func attachOverlays() {
+        guard let handle, let superview = containerView.superview else { return }
+        let (pixels, width, height) = overlayPixelSize()
+        for index in 0..<overlayCount {
+            let overlay = FrustOverlayView(frame: containerView.frame)
+            overlay.contentScaleFactor = containerView.contentScaleFactor
+            let layer = overlay.metalLayer
+            layer.contentsScale = containerView.contentScaleFactor
+            layer.drawableSize = pixels
+            layer.presentsWithTransaction = overlaysPresentWithTransaction
+            superview.addSubview(overlay)
+            overlays.append(overlay)
+            let id = UInt64(index + 1)
+            frust_overlay_attach(
+                handle, id, Unmanaged.passUnretained(layer).toOpaque(), width, height)
+            NSLog("frust-overlay: overlay \(id) view stacked (\(width)x\(height) px)")
+        }
+        stackOverlays()
+    }
+
+    /// Detach every overlay from Rust (dropping its surface) BEFORE its view
+    /// and layer go away.
+    private func detachOverlays() {
+        guard !overlays.isEmpty else { return }
+        for (index, overlay) in overlays.enumerated() {
+            if let handle { frust_overlay_detach(handle, UInt64(index + 1)) }
+            overlay.removeFromSuperview()
+        }
+        NSLog("frust-overlay: \(overlays.count) overlay view(s) removed")
+        overlays.removeAll()
+    }
+
+    /// Place the overlays directly above the topmost slot wrapper, bottom
+    /// (id 1) to top, so everything frust draws on them is above every hosted
+    /// view.
+    private func stackOverlays() {
+        guard let superview = containerView.superview else { return }
+        let wrappers = slots.values.map(\.wrapper)
+        var anchor: UIView? = superview.subviews.last { view in
+            wrappers.contains { $0 === view }
+        }
+        for overlay in overlays {
+            if let anchor {
+                superview.insertSubview(overlay, aboveSubview: anchor)
+            } else {
+                superview.insertSubview(overlay, aboveSubview: containerView)
+            }
+            anchor = overlay
+        }
+    }
+
+    /// Keep each overlay at the Frust surface's frame and drawable size,
+    /// re-announcing a changed size to Rust (a resize of the same layer).
+    private func syncOverlayGeometry() {
+        guard let handle else { return }
+        let (pixels, width, height) = overlayPixelSize()
+        for (index, overlay) in overlays.enumerated() {
+            let layer = overlay.metalLayer
+            guard overlay.frame != containerView.frame || layer.drawableSize != pixels else {
+                continue
+            }
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            overlay.frame = containerView.frame
+            layer.contentsScale = containerView.contentScaleFactor
+            layer.drawableSize = pixels
+            CATransaction.commit()
+            frust_overlay_attach(
+                handle, UInt64(index + 1), Unmanaged.passUnretained(layer).toOpaque(), width,
+                height)
         }
     }
 
