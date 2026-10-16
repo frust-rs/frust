@@ -155,9 +155,12 @@ hosting `UIView` and the playback audio-session category) and `objc2-app-kit` on
 `frust-plugin` plus FFI only). Both bridge the texture bus in that facade half: the plugin owns a
 `TextureSink`, registers a source through `frust::texture` (which re-exports `frust-render` items
 only), and pulls from the sink — `frust-plugin` stays a leaf and the facade never names a plugin. A
-producer builds a `NativeHandle` through its unsafe constructor and keeps its own reference until
-the release callback runs; the bridge takes the callback with `Option::take`, clones the payload,
-and frames release on drop.
+producer builds its frames through `TextureFrame::new`/`rgba8` and `on_release`, and its handles
+through the unsafe `NativeHandle::new`, keeping its own reference until the release callback runs.
+Only the bridge's one unsafe block splits a frame (`into_parts`), after checking the format and
+running the guarded `release` on a mismatch; a producer never splits its own frame. Release
+callbacks must not panic and must not assume an attached JVM thread: a Java-touching release uses
+the scoped attach (`frust_plugin::android::with_jni_env`).
 
 `network-image` is a facade-tier plugin like `clean-signals-frust`, with one sanctioned extra edge:
 it depends on `frust` (default features off) and on the `frust-paths` leaf for its cache
