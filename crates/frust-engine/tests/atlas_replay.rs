@@ -60,12 +60,24 @@ struct Device {
 
 /// A 1080 x 2340 phone at 2.75x.
 fn tall_phone() -> Device {
-    Device { scale: 2.75, width: 1080.0 / 2.75, height: 2340.0 / 2.75, top: 24.0, bottom: 48.0 }
+    Device {
+        scale: 2.75,
+        width: 1080.0 / 2.75,
+        height: 2340.0 / 2.75,
+        top: 24.0,
+        bottom: 48.0,
+    }
 }
 
 /// A 750 x 1334 phone at 2x.
 fn small_phone() -> Device {
-    Device { scale: 2.0, width: 375.0, height: 667.0, top: 20.0, bottom: 0.0 }
+    Device {
+        scale: 2.0,
+        width: 375.0,
+        height: 667.0,
+        top: 20.0,
+        bottom: 0.0,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -120,12 +132,24 @@ impl Field {
             .map(|_| {
                 let _performance = rng.next_f64();
                 let radius = (RADIUS_MIN_FRAC + rng.next_f64() * RADIUS_SPAN_FRAC) * s;
-                let x = width / 2.0 + (rng.next_f64() * CLUSTER_SPAN_FRAC - CLUSTER_SPAN_FRAC / 2.0) * s;
-                let y = height / 2.0 + (rng.next_f64() * CLUSTER_SPAN_FRAC - CLUSTER_SPAN_FRAC / 2.0) * s;
-                Bubble { x, y, vx: 0.0, vy: 0.0, radius }
+                let x = width / 2.0
+                    + (rng.next_f64() * CLUSTER_SPAN_FRAC - CLUSTER_SPAN_FRAC / 2.0) * s;
+                let y = height / 2.0
+                    + (rng.next_f64() * CLUSTER_SPAN_FRAC - CLUSTER_SPAN_FRAC / 2.0) * s;
+                Bubble {
+                    x,
+                    y,
+                    vx: 0.0,
+                    vy: 0.0,
+                    radius,
+                }
             })
             .collect();
-        Self { bubbles, width, height }
+        Self {
+            bubbles,
+            width,
+            height,
+        }
     }
 
     /// One frame's step: centre pull, pairwise collisions, friction, walls,
@@ -213,7 +237,11 @@ fn label(ids: &[u32], size: f32, origin: (f64, f64), color: Color) -> GlyphRun {
         glyphs: ids
             .iter()
             .enumerate()
-            .map(|(index, id)| Glyph { id: *id, x: index as f32 * advance, y: 0.0 })
+            .map(|(index, id)| Glyph {
+                id: *id,
+                x: index as f32 * advance,
+                y: 0.0,
+            })
             .collect(),
     }
 }
@@ -227,14 +255,14 @@ struct Report {
 }
 
 /// Drive the field for [`FRAMES`] frames through the real compiler.
-fn drive(device: &Device) -> Report {
+fn drive(device: &Device, budget: AtlasBudget) -> Report {
     let play_height = device.height - device.top - device.bottom;
     let mut field = Field::new(device.width, play_height, SEED);
     let dims = (
         (device.width * device.scale).round() as u16,
         (device.height * device.scale).round() as u16,
     );
-    let mut compiler = SceneCompiler::with_atlas_budget(dims.0, dims.1, AtlasBudget::MOBILE);
+    let mut compiler = SceneCompiler::with_atlas_budget(dims.0, dims.1, budget);
     compiler.set_hint_text(false);
     compiler.set_glyph_quads(true);
     let root = Affine::scale(device.scale);
@@ -271,7 +299,9 @@ fn drive(device: &Device) -> Report {
                 ));
             }
         }
-        let compiled = compiler.compile(&scene, root, dims).expect("an in-range scene compiles");
+        let compiled = compiler
+            .compile(&scene, root, dims)
+            .expect("an in-range scene compiles");
         let rasterized = compiler.glyph_replay_pending();
         compiler.acknowledge_glyph_clears();
         compiler.acknowledge_glyph_replay();
@@ -284,11 +314,14 @@ fn drive(device: &Device) -> Report {
             }
         }
     }
-    Report { replays, glyph_draws }
+    Report {
+        replays,
+        glyph_draws,
+    }
 }
 
-fn assert_quiet(name: &str, device: &Device) {
-    let report = drive(device);
+fn assert_quiet(name: &str, device: &Device, budget: AtlasBudget) {
+    let report = drive(device, budget);
     let total: usize = report.replays.iter().sum();
     let worst = report.replays.iter().copied().max().unwrap_or(0);
     eprintln!(
@@ -307,10 +340,59 @@ fn assert_quiet(name: &str, device: &Device) {
 
 #[test]
 fn a_drifting_bubble_field_stops_replaying_on_a_tall_phone() {
-    assert_quiet("tall phone", &tall_phone());
+    assert_quiet("tall phone", &tall_phone(), AtlasBudget::MOBILE_LARGE_WIDE);
 }
 
 #[test]
 fn a_drifting_bubble_field_stops_replaying_on_a_small_phone() {
-    assert_quiet("small phone", &small_phone());
+    assert_quiet(
+        "small phone",
+        &small_phone(),
+        AtlasBudget::MOBILE_LARGE_WIDE,
+    );
+}
+
+/// A label that settles into one subpixel bucket for far longer than the age
+/// horizon still has the other bucket it was drawn in when it drifts back.
+#[test]
+fn a_label_dwelling_in_one_bucket_keeps_the_bucket_it_left() {
+    let mut compiler = SceneCompiler::new(256, 256);
+    compiler.set_hint_text(false);
+    compiler.set_glyph_quads(true);
+    let mut draw = |x: f64| {
+        let mut scene = Scene::new();
+        {
+            let mut builder = SceneBuilder::new(&mut scene);
+            builder.fill_rect(
+                Rect::new(0.0, 0.0, 256.0, 256.0),
+                Brush::Solid(Color::BLACK),
+            );
+            builder.draw_glyph_run(label(&HELLO, 18.0, (x, 40.0), Color::WHITE));
+        }
+        compiler
+            .compile(&scene, Affine::IDENTITY, (256, 256))
+            .expect("an in-range scene compiles");
+        let rasterized = compiler.glyph_replay_pending();
+        compiler.acknowledge_glyph_clears();
+        compiler.acknowledge_glyph_replay();
+        compiler.acknowledge_image_plan();
+        rasterized
+    };
+    // Past the size-change guard, in the bucket at one half and then the one at
+    // none, so both are resident.
+    for _ in 0..16 {
+        draw(10.5);
+    }
+    for _ in 0..16 {
+        draw(10.0);
+    }
+    // Far longer than the age horizon, drawn in the first bucket only.
+    for frame in 0..400 {
+        let rasterized = draw(10.5);
+        assert!(
+            !rasterized,
+            "frame {frame}: a settled label rasterizes nothing"
+        );
+    }
+    assert!(!draw(10.0), "the bucket the label left is still resident");
 }

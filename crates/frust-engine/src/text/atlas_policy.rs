@@ -2090,8 +2090,20 @@ fn outline_key(
 /// would have left it, while a bucket drawn longer ago than that is forgotten,
 /// since the pass may reap it. A run in use is therefore never reaped and a
 /// stale one is reaped on the very pass it would have been without this cache.
-/// The ages are not merely kept *as* fresh: a slot not drawn within the window
-/// is not touched, so a stale entry ages out exactly as it always did.
+///
+/// # What keeps the sibling buckets
+///
+/// A glyph at one position is keyed once per subpixel bucket, and a label that
+/// creeps by a fraction of a pixel stays in one bucket for longer than the age
+/// horizon while the other three go unused, age out, and are rasterized again
+/// the moment the label drifts back — a miss, and so a replay, on a frame that
+/// draws nothing new. So the pass is also given the glyph: while a position was
+/// drawn in *any* bucket within the window, every bucket of it that is resident
+/// is probed and so kept, drawn or not. The cost is bounded by what is already
+/// in use — at most the four buckets of the glyphs on screen — and a glyph
+/// nothing draws any more still ages out after the window, together with its
+/// siblings. Only a position the record remembers is covered; a run the record
+/// does not hold (refused, over the bound, forgotten) is `glifo`'s to age.
 ///
 /// A map that loses entries any other way — a reap the mirror did not predict,
 /// a map smaller at the start of a frame than at the end of the last — forgets
@@ -2236,14 +2248,19 @@ impl ResidentRuns {
                 return false;
             }
             for (id, glyph) in run.ids.iter().zip(run.glyphs.iter_mut()) {
+                // A position drawn in any bucket within the window keeps every
+                // bucket of it that is resident alive, drawn or not (see this
+                // type's doc); the siblings' own `used` stays as it was, so
+                // they cannot keep each other alive once nothing draws it.
+                let in_use = glyph.used.iter().any(|used| fresh(*used));
                 for bucket in 0..SUBPIXEL_BUCKETS {
                     let index = usize::from(bucket);
-                    if glyph.slots[index].is_none() {
+                    if !in_use && glyph.slots[index].is_none() {
                         continue;
                     }
                     // A probe stamps the entry with the serial a per-frame
                     // probe at `serial` would have left on it.
-                    let current = if fresh(glyph.used[index]) {
+                    let current = if in_use || fresh(glyph.used[index]) {
                         atlas.get(&outline_key(&run.identity, *id, bucket, black))
                     } else {
                         None
