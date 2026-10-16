@@ -198,8 +198,8 @@ fn every_page_mounts_and_paints() {
 /// in-scene picture, fed here by the pages' synthetic pattern since no player
 /// or camera exists headless), over two frames each.
 #[test]
+// erasure: keep the page table holds four different view types behind one fn pointer
 fn texture_pages_mount_in_both_modes() {
-    // erasure: keep the page table holds four different view types behind one fn pointer
     type PageFn = fn(&PlaygroundState) -> AnyView<PlaygroundState>;
     let pages: [(&str, PageFn, bool); 4] = [
         ("video/native", |s| any(pages::video_player::page(s)), false),
