@@ -7029,6 +7029,32 @@ pub fn project_command_ranges(
     cut
 }
 
+/// The outermost `PushRetained` bracket still open just before command
+/// `index` of `commands` — its command index — or `None` when no retained
+/// bracket is open there.
+///
+/// Pops are matched the way [`project_command_range`] matches them: a
+/// `PopRetained` closes the most recently opened retained bracket, whatever
+/// clips or layers were opened in between, and one with no retained bracket
+/// open is ignored. An `index` past the end asks about the end of the list,
+/// so a bracket never closed is open there. A range starting at `index`
+/// splits the bracket answered here: [`project_command_range`] demotes it to
+/// inline paint on both sides of the cut. Read-only and one pass over
+/// `commands[..index]`.
+pub fn open_retained_bracket(commands: &[frust_scene::Command], index: usize) -> Option<usize> {
+    let mut open: Vec<usize> = Vec::new();
+    for (at, command) in commands.iter().enumerate().take(index) {
+        match command {
+            frust_scene::Command::PushRetained { .. } => open.push(at),
+            frust_scene::Command::PopRetained => {
+                open.pop();
+            }
+            _ => {}
+        }
+    }
+    open.first().copied()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -9,15 +9,23 @@
 //! segment is bracket-balanced, and a cut starting at a slot's own punch keeps
 //! the punch in the overlay's segment (the differ's ranges start AT the
 //! slot's index). They also pin the surface-free answers of
-//! `SurfaceRenderer::encode_segmented`/`submit_segmented`. They run
-//! everywhere.
+//! `SurfaceRenderer::encode_segmented`/`submit_segmented`, and the cut
+//! servability rule ([`cut_is_servable`]): a cut holding retained content
+//! (a page composite or recording, or a retained bracket crossing its
+//! boundary), an external texture or a backdrop blur is kept on the main
+//! surface — the main segment draws it, the overlay's range is empty — while
+//! a plain cut is still served. They run everywhere.
 //!
 //! The `#[ignore]`d cases need a GPU: the main segment and each overlay's
-//! range recorded into ONE encoder against offscreen targets — the shape
-//! `SurfaceRenderer::submit_segmented` records against swapchains — land each
-//! command on its own target pixel-correctly, a clip spanning a cut still
-//! clips on both sides, and the targets composited bottom to top reproduce the
-//! uncut frame within 1/255.
+//! served range recorded into ONE encoder against offscreen targets — the
+//! shape `SurfaceRenderer::submit_segmented` records against swapchains —
+//! land each command on its own target pixel-correctly, a clip spanning a cut
+//! still clips on both sides, and the targets composited bottom to top
+//! reproduce the uncut frame within 1/255. A cut kept on main draws its
+//! retained page (recorded, then composited on a later frame while the ledger
+//! keeps naming it), its texture-bus frame and its backdrop blur on the main
+//! target and nothing on its overlay, and no served cut's overlay drops a
+//! retained composite.
 //!
 //! ```text
 //! WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=T400 FRUST_GOLDEN_EXPECT_ADAPTER=T400 \
@@ -33,10 +41,13 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use frust_engine::renderer::{RangeOptions, project_command_range};
+use frust_engine::renderer::{RangeCut, RangeOptions, project_command_range};
 use frust_engine::{EngineRenderer, EngineTarget, OutputAlpha};
 use frust_gpu::{HeadlessTarget, TierCaps};
-use frust_render::overlay::{OverlayRenderer, main_segment_ranges, project_main_segment};
+use frust_render::overlay::{
+    CutServiceability, OverlayRenderer, UnservableReason, cut_is_servable, main_segment_ranges,
+    project_main_segment,
+};
 use frust_render::{
     EncodeOutcome, FrameOutcome, GOLDEN_EXPECT_ADAPTER_ENV_VAR, RenderContext, SurfaceRenderer,
 };
@@ -130,18 +141,107 @@ fn listing<'a>(commands: impl IntoIterator<Item = &'a Command>) -> Vec<String> {
     out
 }
 
-/// Every segment of `scene` under `cuts`: the main segment first, then each
-/// overlay's projected range.
-fn segments(scene: &Scene, cuts: &[Range<usize>]) -> Vec<Scene> {
+/// Each cut's classification, in order — what `encode_segmented` decides.
+fn service(scene: &Scene, cuts: &[Range<usize>]) -> Vec<CutServiceability> {
+    cuts.iter()
+        .map(|cut| cut_is_servable(scene.commands(), cut.clone()))
+        .collect()
+}
+
+/// The range each overlay records, and the main segment excludes: a cut
+/// itself when servable, empty when kept on main.
+fn served(scene: &Scene, cuts: &[Range<usize>]) -> Vec<Range<usize>> {
+    cuts.iter()
+        .zip(service(scene, cuts))
+        .map(|(cut, service)| service.served_range(cut))
+        .collect()
+}
+
+/// Every segment of `scene` under `cuts`, cut the way `encode_segmented` and
+/// `submit_segmented` cut them: the main segment first (the complement of the
+/// served ranges), then each overlay's served range — the main segment
+/// projected for a retaining main renderer, each overlay's range for a
+/// retention-off one, with what that projection cut.
+fn segments_with_cuts(scene: &Scene, cuts: &[Range<usize>]) -> (Vec<Scene>, Vec<RangeCut>) {
+    let served = served(scene, cuts);
     let mut main = Scene::new();
-    project_main_segment(scene, cuts, keep(), &mut main);
+    let main_cut = project_main_segment(scene, &served, keep(), &mut main);
     let mut all = vec![main];
-    for cut in cuts {
+    let mut range_cuts = vec![main_cut];
+    for range in served {
         let mut overlay = Scene::new();
-        project_command_range(scene, cut.clone(), keep(), &mut overlay);
+        range_cuts.push(project_command_range(
+            scene,
+            range,
+            RangeOptions {
+                keep_draw_retained: false,
+            },
+            &mut overlay,
+        ));
         all.push(overlay);
     }
-    all
+    (all, range_cuts)
+}
+
+/// [`segments_with_cuts`]'s segments alone.
+fn segments(scene: &Scene, cuts: &[Range<usize>]) -> Vec<Scene> {
+    segments_with_cuts(scene, cuts).0
+}
+
+/// The retained page's key and body rectangle in the retained scenes.
+const KEY: u64 = 0x5e9;
+const BODY: Rect = Rect::new(8.0, 24.0, 56.0, 40.0);
+
+/// A clean frame's widget recorded above a slot: `[0 fill red band, 1
+/// clear(slot), 2 push_retained(KEY), 3 fill green body, 4 pop_retained]`,
+/// its cut `1..5`.
+fn retained_record_scene() -> (Scene, Vec<Range<usize>>) {
+    let mut scene = Scene::new();
+    let mut b = SceneBuilder::new(&mut scene);
+    b.fill_rect(rect(0.0, 0.0, 64.0, 16.0), Brush::Solid(RED));
+    b.clear_rect(Rect::ZERO);
+    b.push_retained(KEY, BODY, 1.0, 1.0);
+    b.fill_rect(BODY, Brush::Solid(GREEN));
+    b.pop_retained();
+    (scene, vec![1..5])
+}
+
+/// The same widget on a later, clean frame, drawn from its page: `[0 fill red
+/// band, 1 clear(slot), 2 draw_retained(KEY)]`, its cut `1..3`.
+fn retained_draw_scene() -> (Scene, Vec<Range<usize>>) {
+    let mut scene = Scene::new();
+    let mut b = SceneBuilder::new(&mut scene);
+    b.fill_rect(rect(0.0, 0.0, 64.0, 16.0), Brush::Solid(RED));
+    b.clear_rect(Rect::ZERO);
+    b.draw_retained(KEY, BODY, 1.0, 1.0);
+    (scene, vec![1..3])
+}
+
+/// `[0 fill red band, 1 clear(slot), 2 backdrop_blur, 3 fill blue square]`,
+/// its cut `1..4`: a frosted panel above the slot.
+fn backdrop_scene() -> (Scene, Vec<Range<usize>>) {
+    let mut scene = Scene::new();
+    let mut b = SceneBuilder::new(&mut scene);
+    b.fill_rect(rect(0.0, 0.0, 64.0, 16.0), Brush::Solid(RED));
+    b.clear_rect(Rect::ZERO);
+    b.backdrop_blur(rect(0.0, 0.0, 64.0, 32.0), 4.0);
+    b.fill_rect(rect(52.0, 52.0, 60.0, 60.0), Brush::Solid(BLUE));
+    (scene, vec![1..4])
+}
+
+/// `[0 fill red band, 1 clear(slot A), 2 text, 3 clear(slot B), 4
+/// draw_retained(KEY), 5 fill blue square]`, cut at A's `1..3` (plain) and
+/// B's `3..6` (retained content).
+fn mixed_scene() -> (Scene, Vec<Range<usize>>) {
+    let mut scene = Scene::new();
+    let mut b = SceneBuilder::new(&mut scene);
+    b.fill_rect(rect(0.0, 0.0, 64.0, 16.0), Brush::Solid(RED));
+    b.clear_rect(Rect::ZERO);
+    b.draw_glyph_run(hello());
+    b.clear_rect(Rect::ZERO);
+    b.draw_retained(KEY, BODY, 1.0, 1.0);
+    b.fill_rect(rect(52.0, 52.0, 60.0, 60.0), Brush::Solid(BLUE));
+    (scene, vec![1..3, 3..6])
 }
 
 /// Asserts `scene`'s brackets are balanced: no pop without its push, nothing
@@ -191,12 +291,18 @@ fn the_main_segment_is_the_complement_of_the_cuts() {
 fn every_drawing_command_lands_in_exactly_one_segment() {
     let (one, one_cuts) = one_slot_scene();
     let (two, two_cuts) = two_slot_scene();
+    let (mixed, mixed_cuts) = mixed_scene();
+    let (record, record_cuts) = retained_record_scene();
+    let (backdrop, backdrop_cuts) = backdrop_scene();
     for (scene, cuts) in [
         (&one, Vec::new()),
         (&one, one_cuts),
         (&two, Vec::new()),
         (&two, vec![two_cuts[0].clone()]),
         (&two, two_cuts),
+        (&mixed, mixed_cuts),
+        (&record, record_cuts),
+        (&backdrop, backdrop_cuts),
     ] {
         let parts = segments(scene, &cuts);
         assert_eq!(parts.len(), cuts.len() + 1);
@@ -249,6 +355,190 @@ fn the_main_segment_with_no_cut_is_the_scene_itself() {
     let unsorted =
         |s: &Scene| -> Vec<String> { s.commands().iter().map(|c| format!("{c:?}")).collect() };
     assert_eq!(unsorted(&main), unsorted(&scene));
+}
+
+#[test]
+fn a_plain_cut_is_served_and_the_main_segment_excludes_it() {
+    let (one, one_cuts) = one_slot_scene();
+    let (two, two_cuts) = two_slot_scene();
+    for (scene, cuts) in [(&one, one_cuts), (&two, two_cuts)] {
+        assert!(
+            service(scene, &cuts)
+                .iter()
+                .all(|service| service.is_servable()),
+            "fills, text, punches and clips are servable: {cuts:?}"
+        );
+        assert_eq!(served(scene, &cuts), cuts, "a served cut is drawn whole");
+    }
+    // An empty cut is servable: there is nothing to draw on either surface.
+    let (scene, _) = retained_draw_scene();
+    assert_eq!(
+        cut_is_servable(scene.commands(), 2..2),
+        CutServiceability::Servable
+    );
+}
+
+#[test]
+fn a_cut_holding_a_retained_composite_is_kept_on_main_and_its_overlay_is_empty() {
+    let (scene, cuts) = retained_draw_scene();
+    assert_eq!(
+        service(&scene, &cuts),
+        [CutServiceability::Unservable {
+            reason: UnservableReason::RetainedComposite,
+            at: 2,
+        }]
+    );
+    assert_eq!(served(&scene, &cuts), [0..0]);
+    let (parts, range_cuts) = segments_with_cuts(&scene, &cuts);
+    // The main segment is the uncut frame, the page's composite included.
+    let unsorted =
+        |s: &Scene| -> Vec<String> { s.commands().iter().map(|c| format!("{c:?}")).collect() };
+    assert_eq!(unsorted(&parts[0]), unsorted(&scene));
+    // The overlay's range is empty: nothing reopened, nothing dropped.
+    assert!(parts[1].commands().is_empty());
+    assert_eq!(range_cuts[1], RangeCut::default());
+}
+
+#[test]
+fn a_cut_holding_a_retained_recording_is_kept_on_main() {
+    let (scene, cuts) = retained_record_scene();
+    assert_eq!(
+        service(&scene, &cuts),
+        [CutServiceability::Unservable {
+            reason: UnservableReason::RetainedRecording,
+            at: 2,
+        }]
+    );
+    let (parts, range_cuts) = segments_with_cuts(&scene, &cuts);
+    // The main surface records the page itself, bracket intact.
+    assert!(
+        parts[0]
+            .commands()
+            .iter()
+            .any(|c| matches!(c, Command::PushRetained { key: KEY, .. }))
+    );
+    assert_eq!(range_cuts[0].demoted_retained, 0);
+    assert!(parts[1].commands().is_empty());
+}
+
+#[test]
+fn a_cut_holding_an_external_texture_or_a_backdrop_blur_is_kept_on_main() {
+    let mut scene = Scene::new();
+    let mut b = SceneBuilder::new(&mut scene);
+    b.fill_rect(rect(0.0, 0.0, 64.0, 16.0), Brush::Solid(RED));
+    b.clear_rect(Rect::ZERO);
+    b.scene_texture(7, rect(0.0, 0.0, 32.0, 32.0));
+    assert_eq!(
+        cut_is_servable(scene.commands(), 1..3),
+        CutServiceability::Unservable {
+            reason: UnservableReason::SceneTexture,
+            at: 2,
+        }
+    );
+    // The command before the texture is still servable on its own.
+    assert!(cut_is_servable(scene.commands(), 1..2).is_servable());
+
+    let (scene, cuts) = backdrop_scene();
+    assert_eq!(
+        service(&scene, &cuts),
+        [CutServiceability::Unservable {
+            reason: UnservableReason::BackdropBlur,
+            at: 2,
+        }]
+    );
+    let parts = segments(&scene, &cuts);
+    assert!(
+        parts[0]
+            .commands()
+            .iter()
+            .any(|c| matches!(c, Command::BackdropBlur { .. }))
+    );
+    assert!(parts[1].commands().is_empty());
+}
+
+#[test]
+fn a_retained_bracket_crossing_a_cut_boundary_makes_the_cut_unservable() {
+    // `[0 fill, 1 clear(A), 2 push_retained, 3 fill, 4 clear(B), 5 fill, 6
+    // pop_retained, 7 fill]`.
+    let mut scene = Scene::new();
+    let mut b = SceneBuilder::new(&mut scene);
+    b.fill_rect(rect(0.0, 0.0, 64.0, 16.0), Brush::Solid(RED));
+    b.clear_rect(Rect::ZERO);
+    b.push_retained(KEY, BODY, 0.5, 1.0);
+    b.fill_rect(BODY, Brush::Solid(GREEN));
+    b.clear_rect(Rect::ZERO);
+    b.fill_rect(BODY, Brush::Solid(BLUE));
+    b.pop_retained();
+    b.fill_rect(rect(52.0, 52.0, 60.0, 60.0), Brush::Solid(BLUE));
+    let commands = scene.commands();
+    let crossing = CutServiceability::Unservable {
+        reason: UnservableReason::RetainedBracketCrossing,
+        at: 2,
+    };
+    // Opened inside the cut and still open past its end.
+    assert_eq!(cut_is_servable(commands, 1..4), crossing);
+    // Opened before the cut and still open at its start.
+    assert_eq!(cut_is_servable(commands, 4..8), crossing);
+    assert_eq!(cut_is_servable(commands, 3..5), crossing);
+    // Wholly inside: a recording, still kept on main.
+    assert_eq!(
+        cut_is_servable(commands, 1..7),
+        CutServiceability::Unservable {
+            reason: UnservableReason::RetainedRecording,
+            at: 2,
+        }
+    );
+    // Closed before the cut: servable.
+    assert!(cut_is_servable(commands, 7..8).is_servable());
+
+    // Kept on main, the bracket is no longer split: the main segment records
+    // it whole.
+    let (parts, range_cuts) = segments_with_cuts(&scene, &[4..8]);
+    assert_eq!(range_cuts[0].demoted_retained, 0);
+    assert!(parts[1].commands().is_empty());
+    // Served, the same bracket would have been demoted on both surfaces.
+    let mut main = Scene::new();
+    let demoted = project_main_segment(&scene, &[4..8], keep(), &mut main);
+    assert_eq!(demoted.demoted_retained, 1);
+}
+
+#[test]
+fn served_cuts_never_drop_a_retained_composite_and_kept_cuts_stay_on_main() {
+    let (scene, cuts) = mixed_scene();
+    assert_eq!(
+        service(&scene, &cuts),
+        [
+            CutServiceability::Servable,
+            CutServiceability::Unservable {
+                reason: UnservableReason::RetainedComposite,
+                at: 4,
+            },
+        ]
+    );
+    let (parts, range_cuts) = segments_with_cuts(&scene, &cuts);
+    for (index, cut) in range_cuts.iter().enumerate().skip(1) {
+        assert_eq!(cut.dropped_draw_retained, 0, "overlay {index}");
+    }
+    // Overlay A draws the text; overlay B nothing; the main segment the band,
+    // the composite and the square.
+    assert!(matches!(parts[1].commands()[1], Command::GlyphRun(_)));
+    assert!(parts[2].commands().is_empty());
+    assert!(
+        parts[0]
+            .commands()
+            .iter()
+            .any(|c| matches!(c, Command::DrawRetained { key: KEY, .. }))
+    );
+    assert!(
+        parts[0]
+            .commands()
+            .iter()
+            .all(|c| !matches!(c, Command::GlyphRun(_)))
+    );
+    assert_eq!(
+        format!("{}", service(&scene, &cuts)[1]),
+        "kept on main: retained content (a page composite) at command 4"
+    );
 }
 
 #[test]
@@ -356,6 +646,8 @@ struct Rig {
 struct Frame {
     main: Vec<u8>,
     overlays: Vec<Vec<u8>>,
+    /// Each cut's classification, in order.
+    service: Vec<CutServiceability>,
 }
 
 impl Rig {
@@ -396,14 +688,17 @@ impl Rig {
         }
     }
 
-    /// One segmented frame, recorded the way `submit_segmented` records it:
-    /// the main segment, then every overlay's range, into ONE encoder, then
-    /// ONE submit.
+    /// One segmented frame, cut the way `encode_segmented` cuts it (the main
+    /// segment excludes only the served ranges) and recorded the way
+    /// `submit_segmented` records it: the external passes, the main segment,
+    /// then every overlay's served range, into ONE encoder, then ONE submit.
     fn segmented(&mut self, scene: &Scene, cuts: &[Range<usize>]) -> Frame {
         assert_eq!(cuts.len(), self.overlays.len());
+        let service = service(scene, cuts);
+        let served = served(scene, cuts);
         project_main_segment(
             scene,
-            cuts,
+            &served,
             RangeOptions {
                 keep_draw_retained: self.main.retained_layers(),
             },
@@ -414,6 +709,12 @@ impl Rig {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         self.encoders += 1;
+        frust_render::external_pass::run_external_passes(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            &mut self.main,
+        );
         self.main
             .encode(
                 &self.device,
@@ -425,17 +726,21 @@ impl Rig {
                 Affine::IDENTITY,
             )
             .expect("the main segment encodes");
-        for ((overlay, target), cut) in self.overlays.iter_mut().zip(cuts) {
-            overlay
+        for ((overlay, target), range) in self.overlays.iter_mut().zip(served) {
+            let cut = overlay
                 .record(
                     &self.device,
                     &self.queue,
                     &mut encoder,
                     scene,
-                    cut.clone(),
+                    range,
                     Self::target(target.view()),
                 )
                 .expect("the overlay range encodes");
+            assert_eq!(
+                cut.dropped_draw_retained, 0,
+                "no overlay drops a retained composite"
+            );
         }
         self.queue.submit([encoder.finish()]);
         self.submits += 1;
@@ -452,7 +757,15 @@ impl Rig {
                 .iter()
                 .map(|(_, target)| target.read_back(&self.device, &self.queue))
                 .collect(),
+            service,
         }
+    }
+
+    /// The keys the main engine's retained store holds, sorted.
+    fn ledger(&self) -> Vec<u64> {
+        let mut keys: Vec<u64> = self.main.retained_ledger().map(|entry| entry.key).collect();
+        keys.sort_unstable();
+        keys
     }
 
     /// The uncut frame on the main engine, for the composite comparison.
@@ -475,6 +788,11 @@ impl Rig {
         self.main.end_frame(&self.queue);
         self.main_target.read_back(&self.device, &self.queue)
     }
+}
+
+/// Whether every pixel of `frame` is transparent.
+fn all_clear(frame: &[u8]) -> bool {
+    frame.chunks(4).all(|px| px == CLEAR_PX)
 }
 
 fn pixel(frame: &[u8], x: u32, y: u32) -> [u8; 4] {
@@ -622,6 +940,111 @@ fn two_cuts_land_each_range_on_its_own_target() {
     assert_eq!((rig.encoders, rig.submits), (2, 2));
     assert_eq!(again.main, frame.main);
     assert_eq!(again.overlays, frame.overlays);
+}
+
+#[test]
+#[ignore = "requires a GPU; run with `cargo test -p frust-render --test segmented -- --ignored`"]
+fn a_retained_widget_above_a_slot_composites_on_the_main_target_across_frames() {
+    let mut rig = Rig::new(1);
+    assert!(rig.main.retained_layers(), "the main engine retains");
+
+    // A dirty frame records the page: kept on main, so the main store records
+    // it and the ledger names it.
+    let (record, record_cuts) = retained_record_scene();
+    let recorded = rig.segmented(&record, &record_cuts);
+    assert!(!recorded.service[0].is_servable());
+    assert_eq!(rig.ledger(), [KEY], "the main store recorded the page");
+    assert_eq!(pixel(&recorded.main, 8, 8), RED_PX);
+    assert_eq!(pixel(&recorded.main, 32, 32), GREEN_PX, "the body on main");
+    assert!(
+        all_clear(&recorded.overlays[0]),
+        "the overlay draws nothing"
+    );
+
+    // Two clean frames composite it from the page, still on main, and the
+    // ledger keeps naming it.
+    let (draw, draw_cuts) = retained_draw_scene();
+    for frame in 0..2 {
+        let drawn = rig.segmented(&draw, &draw_cuts);
+        assert_eq!(
+            drawn.service[0],
+            CutServiceability::Unservable {
+                reason: UnservableReason::RetainedComposite,
+                at: 2,
+            }
+        );
+        assert_eq!(rig.ledger(), [KEY], "frame {frame}");
+        assert_eq!(
+            drawn.main, recorded.main,
+            "frame {frame}: the composite draws exactly the recorded body"
+        );
+        assert!(all_clear(&drawn.overlays[0]), "frame {frame}");
+    }
+}
+
+#[test]
+#[ignore = "requires a GPU; run with `cargo test -p frust-render --test segmented -- --ignored`"]
+fn a_texture_bus_frame_above_a_slot_draws_on_the_main_target() {
+    const TEXTURE_PX: [u8; 4] = [0, 255, 0, 255];
+    let pixels: Vec<u8> = TEXTURE_PX
+        .iter()
+        .copied()
+        .cycle()
+        .take((SIZE * SIZE * 4) as usize)
+        .collect();
+    let pixels: Arc<[u8]> = Arc::from(pixels);
+    let registration = frust_render::texture_bus::register_texture_source(move || {
+        Some(frust_render::texture_bus::SourceFrame::rgba8(
+            SIZE,
+            SIZE,
+            Arc::clone(&pixels),
+        ))
+    });
+    let mut scene = Scene::new();
+    let mut b = SceneBuilder::new(&mut scene);
+    b.fill_rect(rect(0.0, 0.0, 64.0, 16.0), Brush::Solid(RED));
+    b.clear_rect(Rect::ZERO);
+    b.scene_texture(
+        registration.scene_texture_id(),
+        rect(16.0, 24.0, 48.0, 56.0),
+    );
+    let cuts = vec![1..3];
+
+    let mut rig = Rig::new(1);
+    let frame = rig.segmented(&scene, &cuts);
+    assert_eq!(
+        frame.service[0],
+        CutServiceability::Unservable {
+            reason: UnservableReason::SceneTexture,
+            at: 2,
+        }
+    );
+    assert_eq!(pixel(&frame.main, 32, 40), TEXTURE_PX, "the frame on main");
+    assert_eq!(pixel(&frame.main, 8, 8), RED_PX);
+    assert_eq!(pixel(&frame.main, 4, 40), WHITE_PX, "nothing past the dest");
+    assert!(all_clear(&frame.overlays[0]), "the overlay draws nothing");
+
+    // Unregistered, and the queued unbind drained, as the bus's own tests
+    // leave the process-wide registry.
+    drop(registration);
+    let _ = rig.segmented(&Scene::new(), &[0..0]);
+}
+
+#[test]
+#[ignore = "requires a GPU; run with `cargo test -p frust-render --test segmented -- --ignored`"]
+fn a_backdrop_blur_above_a_slot_stays_on_the_main_target() {
+    let mut rig = Rig::new(1);
+    let (scene, cuts) = backdrop_scene();
+    let frame = rig.segmented(&scene, &cuts);
+    assert!(!frame.service[0].is_servable());
+    assert!(all_clear(&frame.overlays[0]), "the overlay draws nothing");
+    let uncut = rig.uncut(&scene);
+    assert_eq!(
+        frame.main, uncut,
+        "the main target draws the uncut frame, blur included"
+    );
+    // The blur did run: the red band's edge is softened below it.
+    assert_ne!(pixel(&uncut, 32, 18), WHITE_PX);
 }
 
 /// A busier frame — a grid of rects and rows of text with two cuts — timed

@@ -8,7 +8,7 @@
 //! reads the projected scene's commands back.
 
 use frust_engine::renderer::{
-    RangeCut, RangeOptions, project_command_range, project_command_ranges,
+    RangeCut, RangeOptions, open_retained_bracket, project_command_range, project_command_ranges,
 };
 use frust_scene::{Command, Scene, SceneBuilder};
 use kurbo::{Affine, Rect};
@@ -198,4 +198,72 @@ fn draw_retained_is_dropped_per_range_without_a_store() {
 
     let (kept, _) = project(&scene, &[0..1, 2..3]);
     assert_eq!(kinds(&kept), ["draw_retained", "draw_retained"]);
+}
+
+/// `[0 push_retained(1), 1 fill, 2 push_clip, 3 push_retained(2), 4 fill,
+/// 5 pop_clip, 6 pop_retained, 7 fill, 8 pop_retained, 9 fill, 10
+/// push_retained(3), 11 fill]` — two nested retained brackets interleaved
+/// with a clip, and a bracket never closed.
+fn nested_retained_scene() -> Scene {
+    let mut scene = Scene::new();
+    let mut b = SceneBuilder::new(&mut scene);
+    b.push_retained(1, rect(0.0, 0.0, 32.0, 32.0), 1.0, 1.0);
+    b.fill_rect(rect(0.0, 0.0, 8.0, 8.0), Brush::Solid(RED));
+    b.push_clip(rect(0.0, 0.0, 16.0, 16.0));
+    b.push_retained(2, rect(0.0, 0.0, 16.0, 16.0), 0.5, 1.0);
+    b.fill_rect(rect(4.0, 4.0, 12.0, 12.0), Brush::Solid(BLUE));
+    b.pop_clip();
+    b.pop_retained();
+    b.fill_rect(rect(8.0, 8.0, 16.0, 16.0), Brush::Solid(GREEN));
+    b.pop_retained();
+    b.fill_rect(rect(16.0, 16.0, 24.0, 24.0), Brush::Solid(RED));
+    b.push_retained(3, rect(0.0, 0.0, 8.0, 8.0), 1.0, 1.0);
+    b.fill_rect(rect(0.0, 0.0, 8.0, 8.0), Brush::Solid(BLUE));
+    scene
+}
+
+#[test]
+fn the_open_retained_bracket_is_the_outermost_one_still_open() {
+    let scene = nested_retained_scene();
+    let commands = scene.commands();
+    let answers: Vec<Option<usize>> = (0..=commands.len() + 1)
+        .map(|index| open_retained_bracket(commands, index))
+        .collect();
+    assert_eq!(
+        answers,
+        [
+            None,    // 0: nothing opened yet
+            Some(0), // 1..=8: bracket 0 is open, bracket 3 nested inside it
+            Some(0),
+            Some(0),
+            Some(0),
+            Some(0),
+            Some(0),
+            Some(0),
+            Some(0),
+            None,     // 9: bracket 0 closed at 8
+            None,     // 10: the push itself has not run yet
+            Some(10), // 11, the end and past it: never closed
+            Some(10),
+            Some(10),
+        ]
+    );
+}
+
+#[test]
+fn a_range_starting_where_a_retained_bracket_is_open_demotes_it() {
+    // The helper answers exactly the brackets the projection demotes at a
+    // range's start: a range running to the end of the scene can only split a
+    // bracket open where it starts.
+    let scene = nested_retained_scene();
+    let commands = scene.commands();
+    for start in 0..=commands.len() {
+        let mut out = Scene::new();
+        let cut = project_command_range(&scene, start..commands.len(), keep(), &mut out);
+        assert_eq!(
+            cut.demoted_retained > 0,
+            open_retained_bracket(commands, start).is_some(),
+            "start {start}"
+        );
+    }
 }
