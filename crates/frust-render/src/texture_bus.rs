@@ -94,25 +94,29 @@
 //!
 //! ```ignore
 //! let registration = register_texture_source(move || {
-//!     sink.take_latest().map(|mut f| SourceFrame {
-//!         width: f.width,
-//!         height: f.height,
+//!     let (meta, payload, release) = sink.take_latest()?.into_parts();
+//!     Some(SourceFrame {
+//!         width: meta.width,
+//!         height: meta.height,
 //!         format: SourceFormat::Rgba8,
-//!         payload: match &f.payload {
-//!             FramePayload::Cpu(pixels) => SourcePayload::Cpu(Arc::clone(pixels)),
+//!         payload: match payload {
+//!             FramePayload::Cpu(pixels) => SourcePayload::Cpu(pixels),
 //!             // SAFETY: forwards the producer's own `NativeHandle::new`
-//!             // contract — same pointer, same kind, same release callback.
+//!             // contract. The producer-side handle was consumed by value, so
+//!             // this one is the only handle for the buffer, and it travels
+//!             // with the release callback moved across below.
 //!             FramePayload::Native(h) => SourcePayload::Native(unsafe {
 //!                 NativeHandle::new(/* the matching NativeHandleKind */, h.ptr())
 //!             }),
 //!         },
-//!         release: f.release.take(),
+//!         release,
 //!     })
 //! });
 //! ```
 //!
-//! Both frame types release on drop, so the bridge borrows the payload
-//! (`match &f.payload`) and moves only the callback, with `Option::take`.
+//! Both frame types release on drop, so the bridge consumes the producer
+//! frame by value (`into_parts`) and moves its payload and callback across
+//! together; the handle is move-only, so it exists in exactly one frame.
 //!
 //! # Pixels and compositing
 //!
@@ -180,7 +184,11 @@ pub enum NativeHandleKind {
 /// The fields are private and the only constructor is the `unsafe`
 /// [`Self::new`]: an importer dereferences the pointer on that constructor's
 /// contract alone, so safe code cannot hand the bus a forged one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// A handle is move-only — neither `Clone` nor `Copy` — and lives inside
+/// exactly one frame, moving with it, so it cannot outlive the release
+/// callback of the frame that carried it by being copied out.
+#[derive(Debug, PartialEq, Eq)]
 pub struct NativeHandle {
     /// The platform object `ptr` points at.
     kind: NativeHandleKind,
@@ -198,8 +206,9 @@ impl NativeHandle {
     /// `CVPixelBufferRef` for [`NativeHandleKind::CvPixelBuffer`], an
     /// `AHardwareBuffer*` for [`NativeHandleKind::AHardwareBuffer`] — on which
     /// the producer holds a retained reference of its own (`CFRetain`,
-    /// `AHardwareBuffer_acquire`), kept until the release callback of the
-    /// frame carrying this handle has run. The [`NativeImporter`] installed
+    /// `AHardwareBuffer_acquire`), kept until the release callback of the one
+    /// frame this handle is placed in has run (the handle is move-only, so it
+    /// cannot be copied into a second frame). The [`NativeImporter`] installed
     /// for `kind` dereferences the pointer (describes, imports and retains the
     /// object) on this promise alone, so a dangling, foreign or mistyped
     /// pointer is undefined behaviour there. A bridge from the plugin
@@ -231,7 +240,9 @@ impl NativeHandle {
 unsafe impl Send for NativeHandle {}
 
 /// Where a [`SourceFrame`]'s pixels live.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Not `Clone`: a native payload holds a move-only [`NativeHandle`].
+#[derive(Debug, PartialEq, Eq)]
 pub enum SourcePayload {
     /// Pixels in CPU memory, laid out per the frame's [`SourceFormat`].
     Cpu(Arc<[u8]>),
@@ -241,6 +252,18 @@ pub enum SourcePayload {
 
 /// The callback a frame carries to tell its producer the bus is done with it.
 pub type ReleaseCallback = Box<dyn FnOnce() + Send>;
+
+/// The extent and pixel format of a [`SourceFrame`], as returned by
+/// [`SourceFrame::into_parts`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceMeta {
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+    /// How the payload's pixels are laid out.
+    pub format: SourceFormat,
+}
 
 /// One frame a source hands the bus.
 ///
@@ -253,7 +276,8 @@ pub type ReleaseCallback = Box<dyn FnOnce() + Send>;
 /// nobody released — dropped by a holder that never passed it on, or lost to
 /// a panic in the source or the pass — still releases, exactly once. Because
 /// the type implements `Drop`, its fields cannot be moved out by
-/// destructuring; borrow or clone the payload instead. A release callback
+/// destructuring; borrow its fields, or consume the frame whole with
+/// [`Self::into_parts`]. A release callback
 /// must not panic: run from a drop during an unwind, a panic aborts the
 /// process.
 pub struct SourceFrame {
@@ -294,6 +318,22 @@ impl SourceFrame {
     pub fn on_release(mut self, release: impl FnOnce() + Send + 'static) -> Self {
         self.release = Some(Box::new(release));
         self
+    }
+
+    /// Consumes the frame, handing over its extent and format, its payload and
+    /// its release callback — the one way to move a native handle out of a
+    /// frame. The drop guard is disarmed: the callback is now the caller's to
+    /// run (or to carry on), exactly once.
+    #[must_use]
+    pub fn into_parts(mut self) -> (SourceMeta, SourcePayload, Option<ReleaseCallback>) {
+        let meta = SourceMeta {
+            width: self.width,
+            height: self.height,
+            format: self.format,
+        };
+        let release = self.release.take();
+        let payload = std::mem::replace(&mut self.payload, SourcePayload::Cpu(Arc::from([])));
+        (meta, payload, release)
     }
 
     /// Runs the release callback, if any, consuming the frame — the same as
@@ -724,19 +764,20 @@ impl ExternalPass for SourcePass {
         // it, so a panic anywhere below still releases it (on drop).
         let mut rebind = false;
         if let Some(source_frame) = (state.source)() {
-            rebind = match &source_frame.payload {
+            let (meta, payload, release) = source_frame.into_parts();
+            // Until the release callback is handed on, a panic below drops it
+            // with this frame's locals and so still runs it.
+            let release = ReleaseGuard(release);
+            rebind = match payload {
                 SourcePayload::Cpu(pixels) => {
-                    let size = (source_frame.width, source_frame.height);
-                    let changed = upload(state, frame, size, source_frame.format, pixels);
+                    let size = (meta.width, meta.height);
+                    let changed = upload(state, frame, size, meta.format, &pixels);
                     // The queue copied the pixels into staging: nothing reads
                     // the payload again.
-                    source_frame.release();
+                    release.release();
                     changed
                 }
-                SourcePayload::Native(handle) => {
-                    let handle = *handle;
-                    import(state, frame, handle, source_frame)
-                }
+                SourcePayload::Native(handle) => import(state, frame, handle, release),
             };
         }
 
@@ -849,10 +890,38 @@ fn upload(
     changed
 }
 
-/// Refuses `source`: nothing sampled it, so it is released at once. Answers
+/// A frame's release callback, held between taking a frame apart and the
+/// point where the bus either runs it or moves it into an import. Dropped
+/// still holding the callback (a panic in between) it runs it, so the
+/// exactly-once promise of [`SourceFrame`] survives consuming the frame.
+struct ReleaseGuard(Option<ReleaseCallback>);
+
+impl ReleaseGuard {
+    /// Runs the callback now.
+    fn release(mut self) {
+        if let Some(release) = self.0.take() {
+            release();
+        }
+    }
+
+    /// Hands the callback on to a new holder, which now owes the call.
+    fn take(mut self) -> Option<ReleaseCallback> {
+        self.0.take()
+    }
+}
+
+impl Drop for ReleaseGuard {
+    fn drop(&mut self) {
+        if let Some(release) = self.0.take() {
+            release();
+        }
+    }
+}
+
+/// Refuses a frame: nothing sampled it, so it is released at once. Answers
 /// "the shown view did not change".
-fn refuse(source: SourceFrame) -> bool {
-    source.release();
+fn refuse(release: ReleaseGuard) -> bool {
+    release.release();
     false
 }
 
@@ -899,7 +968,7 @@ fn import(
     state: &mut PassState,
     frame: &mut ExternalFrame<'_>,
     handle: NativeHandle,
-    mut source: SourceFrame,
+    release: ReleaseGuard,
 ) -> bool {
     let id = frame.id().get();
     let Some(importer) = native_importer(handle.kind()) else {
@@ -911,18 +980,18 @@ fn import(
                 handle.kind()
             ),
         );
-        return refuse(source);
+        return refuse(release);
     };
     if backlog_refuses(state, id, handle.kind(), || {
         let _ = frame.device().poll(wgpu::PollType::Poll);
     }) {
-        return refuse(source);
+        return refuse(release);
     }
     match importer.import(&handle, frame.device(), frame.queue()) {
         Ok(imported) => {
             let hold = NativeHold {
                 view: Some(imported.view.clone()),
-                release: source.release.take(),
+                release: release.take(),
                 queue: frame.queue().clone(),
                 pending: Arc::clone(&state.retiring),
             };
@@ -944,7 +1013,7 @@ fn import(
                 id,
                 format_args!("refused a {:?} frame: {error}", handle.kind()),
             );
-            refuse(source)
+            refuse(release)
         }
     }
 }
@@ -1118,8 +1187,39 @@ mod tests {
             let handle = unsafe { NativeHandle::new(kind, ptr) };
             assert_eq!(handle.kind(), kind);
             assert_eq!(handle.ptr(), ptr);
-            assert_eq!(SourcePayload::Native(handle), SourcePayload::Native(handle));
         }
+    }
+
+    #[test]
+    fn a_native_handle_and_payload_are_move_only() {
+        // The blanket-trait probe: the `Clone`-bounded inherent method wins
+        // method resolution only for a type that is `Clone`.
+        trait Probe {
+            fn is_clone(&self) -> bool {
+                false
+            }
+        }
+        impl<T> Probe for T {}
+        struct Wrap<T>(std::marker::PhantomData<T>);
+        impl<T: Clone> Wrap<T> {
+            fn is_clone(&self) -> bool {
+                true
+            }
+        }
+        assert!(!Wrap::<NativeHandle>(std::marker::PhantomData).is_clone());
+        assert!(!Wrap::<SourcePayload>(std::marker::PhantomData).is_clone());
+        assert!(Wrap::<Arc<[u8]>>(std::marker::PhantomData).is_clone());
+    }
+
+    #[test]
+    fn into_parts_hands_over_the_callback_and_disarms_the_drop() {
+        let released = Arc::new(AtomicU64::new(0));
+        let (meta, payload, release) = counted_frame(&released).into_parts();
+        assert_eq!((meta.width, meta.height), (1, 1));
+        assert!(matches!(&payload, SourcePayload::Cpu(p) if p.len() == 4));
+        assert_eq!(released.load(Ordering::SeqCst), 0, "consuming ran nothing");
+        release.expect("the callback moved out")();
+        assert_eq!(released.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -1187,7 +1287,10 @@ mod tests {
             NativeHandleKind::AHardwareBuffer,
             poll
         ));
-        assert!(!refuse(fifth), "a refusal never changes the shown view");
+        assert!(
+            !refuse(ReleaseGuard(fifth.into_parts().2)),
+            "a refusal never changes the shown view"
+        );
         assert_eq!(released.load(Ordering::SeqCst), 1, "released at once");
         assert_eq!(polls.load(Ordering::SeqCst), 1, "fences got one poll");
         assert!(state.warned.backlog, "the first refusal is the warning");

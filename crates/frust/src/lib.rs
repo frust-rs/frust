@@ -1135,9 +1135,10 @@ pub mod gpu {
 /// A plugin that produces frames does not name this module (plugins never
 /// depend on the facade); it pushes into its own frame mailbox, and the
 /// closure above — written by the app, or by the plugin's facade-side half —
-/// takes each frame's release callback, clones its payload into a
-/// [`SourceFrame`], and builds native handles through the unsafe
-/// [`NativeHandle::new`]. Not behind the `gpu`
+/// consumes each frame by value (`TextureFrame::into_parts`), moves its
+/// payload and release callback into a [`SourceFrame`], and builds native
+/// handles through the unsafe [`NativeHandle::new`] — a handle is move-only,
+/// so it lives inside exactly one frame. Not behind the `gpu`
 /// feature: nothing here needs a device of the app's own.
 pub mod texture {
     pub use frust_render::texture_bus::{

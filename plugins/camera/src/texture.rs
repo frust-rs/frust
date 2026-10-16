@@ -10,7 +10,7 @@
 //! into the renderer's own twin type (`frust::texture::SourceFrame`), release
 //! callback included.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
 use frust::texture::{
     NativeHandle, NativeHandleKind, SourceFormat, SourceFrame, SourcePayload, TextureRegistration,
@@ -54,18 +54,23 @@ fn register_sink(sink: TextureSink) -> TextureRegistration {
 /// field, its release callback moved across. A frame in a pixel format the
 /// renderer does not know is released and skipped (the last good frame stays
 /// shown).
-fn source_frame(mut frame: TextureFrame) -> Option<SourceFrame> {
-    let format = match frame.format {
+fn source_frame(frame: TextureFrame) -> Option<SourceFrame> {
+    // Consumed by value: the producer-side handle moves into the one renderer
+    // frame built below, and the drop guard of `frame` is disarmed.
+    let (meta, payload, release) = frame.into_parts();
+    let format = match meta.format {
         TextureFormat::Rgba8 => SourceFormat::Rgba8,
         // `TextureFormat` is non-exhaustive; a layout added there before the
         // renderer can show it is handed straight back.
         _ => {
-            frame.release();
+            if let Some(release) = release {
+                release();
+            }
             return None;
         }
     };
-    let payload = match &frame.payload {
-        FramePayload::Cpu(pixels) => SourcePayload::Cpu(Arc::clone(pixels)),
+    let payload = match payload {
+        FramePayload::Cpu(pixels) => SourcePayload::Cpu(pixels),
         FramePayload::Native(handle) => {
             let kind = match handle.kind() {
                 FrameHandleKind::CvPixelBuffer => NativeHandleKind::CvPixelBuffer,
@@ -74,22 +79,25 @@ fn source_frame(mut frame: TextureFrame) -> Option<SourceFrame> {
             // SAFETY: forwards the producer's guarantee. The substrate's
             // handle exists only through its own `unsafe` constructor, whose
             // contract is this one's word for word: a live object of this
-            // kind, retained by the producer until the release callback —
-            // which moves across with the frame below — has run.
+            // kind, retained by the producer until the release callback of
+            // the one frame carrying it has run. That handle is move-only and
+            // was consumed by value above, so no other copy of the address
+            // exists, and the callback moves across with it below.
             SourcePayload::Native(unsafe { NativeHandle::new(kind, handle.ptr()) })
         }
     };
     Some(SourceFrame {
-        width: frame.width,
-        height: frame.height,
+        width: meta.width,
+        height: meta.height,
         format,
         payload,
-        release: frame.release.take(),
+        release,
     })
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;

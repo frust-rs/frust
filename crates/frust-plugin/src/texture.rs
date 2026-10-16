@@ -77,7 +77,14 @@ pub enum NativeHandleKind {
 /// [`Self::new`]: the importer that eventually dereferences the pointer
 /// relies on nothing but that constructor's contract, so safe code cannot
 /// forge a handle.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// A handle is move-only — neither `Clone` nor `Copy` — and lives inside
+/// exactly one frame, moving with it. Copying the address out of a frame that
+/// is then dropped (running its release callback) would leave a handle to a
+/// buffer the producer already gave back, so safe code has no way to make
+/// one: take the handle out of a frame with [`TextureFrame::into_parts`],
+/// which hands over the payload and the release callback together.
+#[derive(Debug, PartialEq, Eq)]
 pub struct NativeHandle {
     /// The platform object `ptr` points at.
     kind: NativeHandleKind,
@@ -96,7 +103,10 @@ impl NativeHandle {
     /// `AHardwareBuffer*` for [`NativeHandleKind::AHardwareBuffer`] — on which
     /// the caller holds a retained reference of its own (`CFRetain`,
     /// `AHardwareBuffer_acquire`), and the caller keeps that reference until
-    /// the release callback of the frame carrying this handle has run. The
+    /// the release callback of the one frame this handle is placed in has run.
+    /// The handle is move-only, so it stays inside that frame (or whatever
+    /// the frame's parts are moved into) and cannot outlive the callback by
+    /// being copied. The
     /// consumer-side importer for `kind` dereferences the pointer (describes,
     /// imports and retains the object) on this promise alone, so a dangling,
     /// foreign or mistyped pointer is undefined behaviour there.
@@ -129,7 +139,9 @@ impl NativeHandle {
 unsafe impl Send for NativeHandle {}
 
 /// Where a [`TextureFrame`]'s pixels live.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Not `Clone`: a native payload holds a move-only [`NativeHandle`].
+#[derive(Debug, PartialEq, Eq)]
 pub enum FramePayload {
     /// Pixels in CPU memory, laid out per the frame's [`TextureFormat`].
     /// Shared rather than owned, so a producer that keeps the buffer can hand
@@ -143,6 +155,18 @@ pub enum FramePayload {
 /// with it.
 pub type ReleaseCallback = Box<dyn FnOnce() + Send>;
 
+/// The extent and pixel format of a [`TextureFrame`], as returned by
+/// [`TextureFrame::into_parts`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameMeta {
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+    /// How the payload's pixels are laid out.
+    pub format: TextureFormat,
+}
+
 /// One frame pushed through a [`TextureSink`].
 ///
 /// Plain public fields, so the consumer-side conversion is a field-for-field
@@ -155,7 +179,7 @@ pub type ReleaseCallback = Box<dyn FnOnce() + Send>;
 /// once. Whoever ends up holding a frame either takes the callback on or lets
 /// the frame go ([`Self::release`] or a plain drop). Because the type
 /// implements `Drop`, its fields cannot be moved out by destructuring; borrow
-/// or clone the payload instead (a CPU payload is an `Arc`). A release
+/// them, or consume the frame whole with [`Self::into_parts`]. A release
 /// callback must not panic: run from a drop during an unwind, a panic aborts
 /// the process.
 pub struct TextureFrame {
@@ -193,6 +217,22 @@ impl TextureFrame {
     pub fn on_release(mut self, release: impl FnOnce() + Send + 'static) -> Self {
         self.release = Some(Box::new(release));
         self
+    }
+
+    /// Consumes the frame, handing over its extent and format, its payload and
+    /// its release callback — the one way to move a native handle out of a
+    /// frame. The frame's drop guard is disarmed: the callback is now the
+    /// caller's to run (or to carry on), exactly once.
+    #[must_use]
+    pub fn into_parts(mut self) -> (FrameMeta, FramePayload, Option<ReleaseCallback>) {
+        let meta = FrameMeta {
+            width: self.width,
+            height: self.height,
+            format: self.format,
+        };
+        let release = self.release.take();
+        let payload = std::mem::replace(&mut self.payload, FramePayload::Cpu(Arc::from([])));
+        (meta, payload, release)
     }
 
     /// Runs the release callback, if any, consuming the frame — what a holder
@@ -535,9 +575,40 @@ mod tests {
             let handle = unsafe { NativeHandle::new(kind, ptr) };
             assert_eq!(handle.kind(), kind);
             assert_eq!(handle.ptr(), ptr);
-            let copy = handle;
-            assert_eq!(copy, handle, "a handle is a plain copyable value");
         }
+    }
+
+    #[test]
+    fn a_native_handle_is_move_only() {
+        // Method resolution picks the `Clone` inherent-less fallback only when
+        // the type is `Clone`: the blanket impl is the sole candidate for a
+        // non-`Clone` type, so the two probes differ exactly then.
+        trait Probe {
+            fn is_clone(&self) -> bool {
+                false
+            }
+        }
+        impl<T> Probe for T {}
+        struct Wrap<T>(std::marker::PhantomData<T>);
+        impl<T: Clone> Wrap<T> {
+            fn is_clone(&self) -> bool {
+                true
+            }
+        }
+        assert!(!Wrap::<NativeHandle>(std::marker::PhantomData).is_clone());
+        assert!(!Wrap::<FramePayload>(std::marker::PhantomData).is_clone());
+        assert!(Wrap::<Arc<[u8]>>(std::marker::PhantomData).is_clone());
+    }
+
+    #[test]
+    fn into_parts_hands_over_the_callback_and_disarms_the_drop() {
+        let released = Arc::new(AtomicUsize::new(0));
+        let (meta, payload, release) = counted(&released, 7).into_parts();
+        assert_eq!((meta.width, meta.height), (1, 1));
+        assert!(matches!(&payload, FramePayload::Cpu(p) if p[0] == 7));
+        assert_eq!(released.load(Ordering::SeqCst), 0, "consuming ran nothing");
+        release.expect("the callback moved out")();
+        assert_eq!(released.load(Ordering::SeqCst), 1);
     }
 
     #[test]
