@@ -300,7 +300,8 @@ use crate::gpu::atlas::{
     AtlasPageBuffers, AtlasRenderReport, AtlasRenderer, lower_encoded_image, push_solid_strips,
 };
 use crate::gpu::bindings::{
-    ATLAS_SAMPLER_BINDING, ExternalRuns, ExternalTextures, lower_encoded_external,
+    ATLAS_SAMPLER_BINDING, ExternalRuns, ExternalTextures, GroupKind, GroupSource,
+    SourceGroupCache, SourceGroupKey, lower_encoded_external,
 };
 use crate::gpu::config::resource_widths_agree;
 use crate::gpu::depth::DepthAttachment;
@@ -891,6 +892,11 @@ pub struct EngineRenderer {
     /// ([`RegionCopyMode::Fragment`]). Lazy for [`Self::filters`]' reason: a
     /// renderer whose frames never copy a region owns none.
     region_copies: Option<RegionCopyResources>,
+    /// The composite and backdrop groups of the round being recorded, kept
+    /// here so the buffer is reused; emptied at the end of every round.
+    composite_groups: Vec<wgpu::BindGroup>,
+    /// Bind groups the region copy passes built outside the cache.
+    region_copy_groups: u64,
     /// The retained pages `PushRetained` bodies render into and
     /// `DrawRetained`s composite from, kept across frames (see
     /// [`crate::cache::retained`]).
@@ -1019,6 +1025,8 @@ impl EngineRenderer {
             atlas_report: AtlasRenderReport::default(),
             filters: None,
             region_copies: None,
+            composite_groups: Vec::new(),
+            region_copy_groups: 0,
             retained: RetainedPages::for_caps(caps),
             retained_layers: RetainedLayers::new(),
             range_scene: Scene::new(),
@@ -1243,6 +1251,24 @@ impl EngineRenderer {
         self.staging.as_ref().map(StagingRing::stats)
     }
 
+    /// How many bind groups this renderer's frame path has created so far —
+    /// the strip, external, page-round, composite, backdrop, filter and
+    /// region-copy groups. A steady frame over unchanged pages creates none, so
+    /// a test diffs this across two frames to pin that. The glyph-atlas
+    /// replay's own groups are not counted.
+    #[must_use]
+    pub fn bind_groups_created(&self) -> u64 {
+        self.resources
+            .groups_created
+            .saturating_add(self.resources.source_groups.created())
+            .saturating_add(self.region_copy_groups)
+            .saturating_add(
+                self.filters
+                    .as_ref()
+                    .map_or(0, |filters| filters.groups_created),
+            )
+    }
+
     /// The passes the last [`Self::encode`] recorded into the caller's
     /// encoder, in recording order.
     ///
@@ -1355,6 +1381,8 @@ impl EngineRenderer {
     /// re-recorded) at the new one.
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         self.targets.drop_parked();
+        // A cached group would otherwise keep a dropped page's texture alive.
+        self.resources.source_groups.clear();
         self.depth.resize(device, width, height);
         self.retained.clear();
     }
@@ -1458,6 +1486,7 @@ impl EngineRenderer {
     pub fn end_frame(&mut self, _queue: &wgpu::Queue) {
         self.targets.end_frame();
         self.gradients.maintain();
+        self.resources.source_groups.sweep();
     }
 
     /// Compiles `scene` and records the frame's passes into `encoder`.
@@ -2142,6 +2171,7 @@ impl EngineRenderer {
                 format: Some(format),
                 ..ResolvedPipelines::default()
             };
+            self.resources.source_groups.clear();
         }
 
         // The surface's own pass is unconditional — it is what the frame's
@@ -2533,7 +2563,19 @@ impl EngineRenderer {
             if let Some(source) = plan.copy {
                 if let Some((_, pooled)) = own.as_ref() {
                     record_owed_opening(&mut opening, encoder, timestamps, &mut self.frame_passes);
-                    RegionCopyPass {
+                    // The staging texture's group is stable until the texture
+                    // grows, so a texture-mode copy builds it once.
+                    if copy_mode == RegionCopyMode::Texture
+                        && let (Some(copies), Some(pipeline)) =
+                            (self.region_copies.as_mut(), pipelines.copy.as_ref())
+                        && copies.staging_group.is_none()
+                        && let Some(staging) = copies.staging.as_ref()
+                    {
+                        let group = copy_source_group(device, pipeline, &staging.view);
+                        copies.staging_group = Some(group);
+                        self.region_copy_groups = self.region_copy_groups.saturating_add(1);
+                    }
+                    let built = RegionCopyPass {
                         mode: copy_mode,
                         target: target.view,
                         page: pooled,
@@ -2548,6 +2590,7 @@ impl EngineRenderer {
                         encoder,
                         timestamps.writes(EngineSpan::Composite),
                     );
+                    self.region_copy_groups = self.region_copy_groups.saturating_add(built);
                     copy_slot = copy_slot.saturating_add(1);
                     self.frame_passes.push(FramePass::Copy);
                 }
@@ -2589,11 +2632,21 @@ impl EngineRenderer {
                     // Unreachable: the round that wrote this pass's source is
                     // the one before it, and nothing between the two releases
                     // that group.
-                    let source = live[filter.source.index()].as_ref().map_or(
-                        &self.resources.placeholders.layer_input,
-                        PooledTexture::view,
+                    let (source, key) = match live[filter.source.index()].as_ref() {
+                        Some(pooled) => (pooled.view(), pooled_source(pooled)),
+                        None => (
+                            &self.resources.placeholders.layer_input,
+                            GroupSource::Placeholder,
+                        ),
+                    };
+                    let source_group = self.resources.source_groups.get_or_build(
+                        SourceGroupKey {
+                            kind: GroupKind::FilterSource,
+                            source: key,
+                        },
+                        || filters.source_group(device, pipeline, source),
                     );
-                    filters.record_pass_timed(
+                    filters.record_pass_with(
                         device,
                         encoder,
                         &FilterPassPlan {
@@ -2604,6 +2657,7 @@ impl EngineRenderer {
                             instance: filter.instance,
                         },
                         timestamps.writes(EngineSpan::Composite),
+                        Some(&source_group),
                     );
                     self.frame_passes.push(FramePass::Filter);
                 }
@@ -2639,6 +2693,11 @@ impl EngineRenderer {
             // write ordering against the frame's own config never matters.
             // Staged, its copy lands in the encoder here — between passes,
             // immediately ahead of the one round that reads it.
+            // The page-config buffer this round binds; the surface's own
+            // config has no slot and is named by the maximum.
+            let config_slot = offscreen.map_or(u32::MAX, |_| {
+                u32::try_from(page_slot).unwrap_or(u32::MAX - 1)
+            });
             let config = match offscreen {
                 None => &self.resources.config,
                 Some((_, (width, height))) => {
@@ -2677,14 +2736,24 @@ impl EngineRenderer {
             };
 
             // A page round binds its own viewport uniform; the root round's is
-            // already the one the shared set carries.
+            // already the one the shared set carries. Cached by the config
+            // slot: the buffers are grown-only, so the group stays valid until
+            // the coverage view it also names is recreated.
             let page_resources = offscreen.map(|_| {
-                resources_bind_group(
-                    device,
-                    pipeline,
-                    &self.resources.alphas.view,
-                    config,
-                    &self.resources.placeholders.layer_input,
+                self.resources.source_groups.get_or_build(
+                    SourceGroupKey {
+                        kind: GroupKind::Resources { slot: config_slot },
+                        source: GroupSource::Placeholder,
+                    },
+                    || {
+                        resources_bind_group(
+                            device,
+                            pipeline,
+                            &self.resources.alphas.view,
+                            config,
+                            &self.resources.placeholders.layer_input,
+                        )
+                    },
                 )
             });
             let resources = page_resources.as_ref().unwrap_or(&groups.resources);
@@ -2694,23 +2763,35 @@ impl EngineRenderer {
                 .segments
                 .get(plan.segments.clone())
                 .unwrap_or(&[]);
-            let mut composites: Vec<wgpu::BindGroup> = Vec::new();
+            let mut composites = std::mem::take(&mut self.composite_groups);
+            composites.clear();
             for segment in segments {
                 // A backdrop's draws sample the page holding its blurred
                 // region through the same group-0 layer input a composite
                 // reads, so its group is built here, in segment order, beside
                 // the composites' own.
                 if let Segment::Backdrop(_, _, parity) = *segment {
-                    let view = live[parity.index()].as_ref().map_or(
-                        &self.resources.placeholders.layer_input,
-                        PooledTexture::view,
-                    );
-                    composites.push(resources_bind_group(
-                        device,
-                        pipeline,
-                        &self.resources.alphas.view,
-                        config,
-                        view,
+                    let (view, source) = match live[parity.index()].as_ref() {
+                        Some(pooled) => (pooled.view(), pooled_source(pooled)),
+                        None => (
+                            &self.resources.placeholders.layer_input,
+                            GroupSource::Placeholder,
+                        ),
+                    };
+                    composites.push(self.resources.source_groups.get_or_build(
+                        SourceGroupKey {
+                            kind: GroupKind::Resources { slot: config_slot },
+                            source,
+                        },
+                        || {
+                            resources_bind_group(
+                                device,
+                                pipeline,
+                                &self.resources.alphas.view,
+                                config,
+                                view,
+                            )
+                        },
                     ));
                 }
                 if let Segment::Composite(_, source) = *segment {
@@ -2718,22 +2799,42 @@ impl EngineRenderer {
                     // page bound — samples the transparent placeholder, which
                     // composites nothing: the same "draw less, never wrong"
                     // answer an unresolvable paint gets.
-                    let view = match source {
-                        CompositeSource::Page(parity) => live[parity.index()].as_ref().map_or(
-                            &self.resources.placeholders.layer_input,
-                            PooledTexture::view,
-                        ),
+                    let placeholder = (
+                        &self.resources.placeholders.layer_input,
+                        GroupSource::Placeholder,
+                    );
+                    let (view, source) = match source {
+                        CompositeSource::Page(parity) => live[parity.index()]
+                            .as_ref()
+                            .map_or(placeholder, |pooled| (pooled.view(), pooled_source(pooled))),
                         CompositeSource::Retained(bracket) => self
                             .retained
                             .page_for(bracket)
-                            .map_or(&self.resources.placeholders.layer_input, |(view, _)| view),
+                            .map_or(placeholder, |(view, size)| {
+                                (
+                                    view,
+                                    GroupSource::Retained {
+                                        view: std::ptr::from_ref(view) as usize,
+                                        generation: self.retained.generation(),
+                                        size,
+                                    },
+                                )
+                            }),
                     };
-                    composites.push(resources_bind_group(
-                        device,
-                        pipeline,
-                        &self.resources.alphas.view,
-                        config,
-                        view,
+                    composites.push(self.resources.source_groups.get_or_build(
+                        SourceGroupKey {
+                            kind: GroupKind::Resources { slot: config_slot },
+                            source,
+                        },
+                        || {
+                            resources_bind_group(
+                                device,
+                                pipeline,
+                                &self.resources.alphas.view,
+                                config,
+                                view,
+                            )
+                        },
                     ));
                 }
             }
@@ -2821,6 +2922,11 @@ impl EngineRenderer {
                 }
             }
 
+            // Handed back empty so the buffer is reused and no cached group is
+            // held past the round.
+            composites.clear();
+            self.composite_groups = composites;
+
             settle_pages(&mut self.targets, &mut live, plan.released, own);
 
             // The cut this plan ends at, erased once the ops before it have
@@ -2884,6 +2990,11 @@ impl EngineRenderer {
             "the recorded pass list disagrees with the planned one"
         );
     }
+}
+
+/// The cache key naming `pooled`'s texture as a group's layer input.
+fn pooled_source(pooled: &PooledTexture) -> GroupSource {
+    GroupSource::Pooled(pooled.texture().as_scene_texture())
 }
 
 /// One render pass a frame recorded into the caller's encoder — what
@@ -3077,6 +3188,11 @@ struct ResolvedPipelines {
     format: Option<wgpu::TextureFormat>,
     /// Indexed by [`Self::slot`].
     entries: [Option<wgpu::RenderPipeline>; RESOLVED_SLOTS],
+    /// The filter pass's pipeline; its description is pinned to one format, so
+    /// it is built once per renderer rather than once per filtering frame.
+    filter: Option<wgpu::RenderPipeline>,
+    /// The fragment region copy's pipeline, memoised on the same terms.
+    copy: Option<wgpu::RenderPipeline>,
 }
 
 /// One [`ResolvedPipelines`] entry per render state and paint class.
@@ -3087,6 +3203,8 @@ impl Default for ResolvedPipelines {
         Self {
             format: None,
             entries: [const { None }; RESOLVED_SLOTS],
+            filter: None,
+            copy: None,
         }
     }
 }
@@ -3188,11 +3306,6 @@ fn record_pass(
 /// plan under the Uber kill switch) sets its pipeline exactly once. A segment
 /// whose class has no resolved pipeline draws nothing, for the same reason; it
 /// cannot occur, since the frame resolves every class its segments name before
-    /// The filter pass's pipeline; its description is pinned to one format, so
-    /// it is built once per renderer rather than once per filtering frame.
-    filter: Option<wgpu::RenderPipeline>,
-    /// The fragment region copy's pipeline, memoised on the same terms.
-    copy: Option<wgpu::RenderPipeline>,
 /// recording.
 ///
 /// Everything a plan draws with is set here, its first pipeline included, so
@@ -3203,8 +3316,6 @@ fn draw_segments(pass: &mut wgpu::RenderPass<'_>, plan: &PassPlan<'_>) {
     pass.set_vertex_buffer(0, plan.instances.slice(..));
 
     let mut composite = 0_usize;
-            filter: None,
-            copy: None,
     let mut bound: Option<PaintClass> = None;
     for segment in plan.segments {
         // Claimed before the class lookup, so a composite whose pipeline is
@@ -3495,6 +3606,8 @@ pub struct FilterResources {
     /// Reusable staging for the parameter-block upload, padded to the
     /// texture's own footprint.
     staging: Vec<u8>,
+    /// Bind groups [`Self::prepare`] has built, over this value's life.
+    groups_created: u64,
 }
 
 impl FilterResources {
@@ -3511,6 +3624,7 @@ impl FilterResources {
             instances: None,
             instance_capacity: 0,
             staging: Vec::new(),
+            groups_created: 0,
         }
     }
 
@@ -3545,6 +3659,7 @@ impl FilterResources {
             self.data_group = None;
         }
         if self.data_group.is_none() {
+            self.groups_created = self.groups_created.saturating_add(1);
             self.data_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("frust-engine filter data"),
                 layout: &pipeline.get_bind_group_layout(0),
@@ -3660,6 +3775,45 @@ impl FilterResources {
         plan: &FilterPassPlan<'_>,
         timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
     ) {
+        self.record_pass_with(device, encoder, plan, timestamps, None);
+    }
+
+    /// The group 1 a pass samples `source` through: the page and this
+    /// resource's sampler. Built against `pipeline`'s layout, which every
+    /// filter pass shares.
+    fn source_group(
+        &self,
+        device: &wgpu::Device,
+        pipeline: &wgpu::RenderPipeline,
+        source: &wgpu::TextureView,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("frust-engine filter source"),
+            layout: &pipeline.get_bind_group_layout(1),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(source),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        })
+    }
+
+    /// [`Self::record_pass_timed`] over a source group the caller already
+    /// holds (`Some`, built by [`Self::source_group`] for `plan.source`), or one
+    /// built here (`None`).
+    fn record_pass_with(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        plan: &FilterPassPlan<'_>,
+        timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
+        source: Option<&wgpu::BindGroup>,
+    ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some(plan.label),
             color_attachments: &[Some(color_attachment(
@@ -3680,25 +3834,19 @@ impl FilterResources {
             return;
         };
 
-        let source = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("frust-engine filter source"),
-            layout: &plan.pipeline.get_bind_group_layout(1),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(plan.source),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-            ],
-        });
+        let built;
+        let source = match source {
+            Some(source) => source,
+            None => {
+                built = self.source_group(device, plan.pipeline, plan.source);
+                &built
+            }
+        };
 
         pass.set_pipeline(plan.pipeline);
         pass.set_vertex_buffer(0, instances.slice(..));
         pass.set_bind_group(0, data_group, &[]);
-        pass.set_bind_group(1, &source, &[]);
+        pass.set_bind_group(1, source, &[]);
         pass.draw(
             0..FILTER_QUAD_VERTICES,
             plan.instance..plan.instance.saturating_add(1),
@@ -5379,6 +5527,14 @@ struct FrameResources {
     /// kept in step with residency across frames without reaching into the
     /// compiler's own cache.
     image_registry: HashMap<ImageId, ResidentImage>,
+    /// Reused zero fill for the atlas eviction clears.
+    clear_zeros: Vec<u8>,
+    /// Group-0 and filter-source bind groups naming a page, kept across frames
+    /// and swept at every frame's end (see [`SourceGroupCache`]). Cleared with
+    /// the coverage texture they all name.
+    source_groups: SourceGroupCache,
+    /// Strip, external and image bind groups built by the group-set paths.
+    groups_created: u64,
     /// How many atlas regions have been declined — a write or clear the array
     /// refused, or one the budget says the array could not hold. Counted rather
     /// than dropped silently, because each one is a region the frame believed
@@ -5411,6 +5567,9 @@ impl FrameResources {
             bind_group_format: None,
             atlas: None,
             image_registry: HashMap::new(),
+            clear_zeros: Vec::new(),
+            source_groups: SourceGroupCache::default(),
+            groups_created: 0,
             refused_regions: 0,
         }
     }
@@ -5540,14 +5699,6 @@ impl FrameResources {
                     },
                 };
                 texel_offset += record.texel_len();
-    /// Reused zero fill for the atlas eviction clears.
-    clear_zeros: Vec<u8>,
-    /// Group-0 and filter-source bind groups naming a page, kept across frames
-    /// and swept at every frame's end (see [`SourceGroupCache`]). Cleared with
-    /// the coverage texture they all name.
-    source_groups: SourceGroupCache,
-    /// Strip, external and image bind groups built by the group-set paths.
-    groups_created: u64,
                 self.paints_data.push(record);
                 resolved
             });
@@ -5580,9 +5731,6 @@ impl FrameResources {
     ///
     /// A region the atlas array could not hold at `budget`'s geometry and this
     /// frame's depth is counted and left unregistered instead. Its draws are
-            clear_zeros: Vec::new(),
-            source_groups: SourceGroupCache::default(),
-            groups_created: 0,
     /// then skipped, which is the whole point: a registered rectangle nothing
     /// wrote would be sampled as whatever the texture happened to contain.
     fn update_image_registry(&mut self, frame: &CompiledFrame, budget: AtlasBudget) {
@@ -5771,6 +5919,8 @@ impl FrameResources {
                 &gpu::alpha_texture_descriptor(self.alphas.width, height),
             );
             self.bind_groups.clear();
+            // Every page group names the old coverage view.
+            self.source_groups.clear();
         }
     }
 
@@ -6021,6 +6171,7 @@ impl FrameResources {
             &self.gradients.view,
         );
         self.bind_groups.insert(variant, groups);
+        self.groups_created = self.groups_created.saturating_add(4);
     }
 
     /// Builds `variant`'s group 1 for every external texture this frame draws
@@ -6054,6 +6205,7 @@ impl FrameResources {
             atlas,
             placeholders,
             atlas_sampler,
+            groups_created,
             ..
         } = self;
         let atlas_view = atlas
@@ -6074,6 +6226,7 @@ impl FrameResources {
                 *key,
                 images_bind_group(device, pipeline, atlas_view, view, atlas_sampler.as_ref()),
             );
+            *groups_created = groups_created.saturating_add(1);
         }
     }
 
@@ -6593,6 +6746,9 @@ struct RegionCopyResources {
     /// textures, for the renderer's life. Created by the first texture-mode
     /// frame.
     staging: Option<ResourceTexture>,
+    /// Group 0 of the copy pass naming [`Self::staging`]'s view, built on the
+    /// first texture-mode copy after the staging texture was (re)created.
+    staging_group: Option<wgpu::BindGroup>,
 }
 
 impl RegionCopyResources {
@@ -6606,6 +6762,7 @@ impl RegionCopyResources {
                 mapped_at_creation: false,
             }),
             staging: None,
+            staging_group: None,
         }
     }
 
@@ -6622,6 +6779,7 @@ impl RegionCopyResources {
         if held_width >= width && held_height >= height {
             return;
         }
+        self.staging_group = None;
         self.staging = Some(ResourceTexture::new(
             device,
             &wgpu::TextureDescriptor {
@@ -6677,7 +6835,7 @@ impl RegionCopyPass<'_> {
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
-    ) {
+    ) -> u64 {
         let width = self.source.width();
         let height = self.source.height();
         // The texture the pass reads, and where in it the region starts.
@@ -6728,11 +6886,11 @@ impl RegionCopyPass<'_> {
         let (Some((view, origin)), Some(pipeline), Some(resources)) =
             (source, self.pipeline, self.resources)
         else {
-            return;
+            return 0;
         };
         let offset = u64::from(self.slot).saturating_mul(COPY_INSTANCE_BYTES);
         if offset.saturating_add(COPY_INSTANCE_BYTES) > resources.instances.size() {
-            return;
+            return 0;
         }
         let (page_width, page_height) = self.page.size();
         let instance = [
@@ -6749,22 +6907,42 @@ impl RegionCopyPass<'_> {
             offset,
             bytemuck::cast_slice(&instance),
         );
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("frust-engine region copy source"),
-            layout: &pipeline.get_bind_group_layout(0),
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(view),
-            }],
-        });
+        // The staging texture's group is cached; the frame's own target is
+        // the caller's and changes with the swapchain image, so a fragment-mode
+        // copy builds its group per copy.
+        let built;
+        let (bind_group, created) = match (self.mode, resources.staging_group.as_ref()) {
+            (RegionCopyMode::Texture, Some(group)) => (group, 0),
+            _ => {
+                built = copy_source_group(device, pipeline, view);
+                (&built, 1)
+            }
+        };
         pass.set_pipeline(pipeline);
         pass.set_vertex_buffer(0, resources.instances.slice(..));
-        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_bind_group(0, bind_group, &[]);
         pass.draw(
             0..COPY_QUAD_VERTICES,
             self.slot..self.slot.saturating_add(1),
         );
+        created
     }
+}
+
+/// Group 0 of the region copy pass: the texture it reads the region from.
+fn copy_source_group(
+    device: &wgpu::Device,
+    pipeline: &wgpu::RenderPipeline,
+    view: &wgpu::TextureView,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("frust-engine region copy source"),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::TextureView(view),
+        }],
+    })
 }
 
 /// Group 0 of a strip pass: the frame's coverage, the pass's own viewport

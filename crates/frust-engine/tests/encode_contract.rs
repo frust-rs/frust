@@ -1696,3 +1696,152 @@ fn a_frame_finding_every_slot_in_flight_falls_back_to_queue_writes() {
     assert!(error.is_none(), "the held frames raised {error:?}");
     warm_up_ran(&renderer);
 }
+
+/// Two sibling layers over an opaque backdrop, the second holding a nested
+/// layer: three page rounds across both ping-pong groups, each composited.
+fn two_page_scene() -> Scene {
+    let mut scene = Scene::new();
+    let mut builder = SceneBuilder::new(&mut scene);
+    builder.fill_rect(
+        Rect::new(0.0, 0.0, f64::from(SIZE), f64::from(SIZE)),
+        Brush::Solid(BLACK),
+    );
+    builder.push_layer(Rect::new(16.0, 16.0, 112.0, 112.0), 0.5);
+    builder.fill_rect(Rect::new(16.0, 16.0, 112.0, 112.0), Brush::Solid(WHITE));
+    builder.pop_layer();
+    builder.push_layer(Rect::new(128.0, 128.0, 240.0, 240.0), 0.5);
+    builder.fill_rect(Rect::new(128.0, 128.0, 240.0, 240.0), Brush::Solid(RED));
+    builder.push_layer(Rect::new(144.0, 144.0, 224.0, 224.0), 0.5);
+    builder.fill_rect(Rect::new(144.0, 144.0, 224.0, 224.0), Brush::Solid(BLUE));
+    builder.pop_layer();
+    builder.pop_layer();
+    scene
+}
+
+/// Encodes `scene` into `target` and returns how many bind groups the frame
+/// path created doing it.
+fn groups_created_by(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    renderer: &mut EngineRenderer,
+    scene: &Scene,
+    target: &HeadlessTarget,
+) -> u64 {
+    let before = renderer.bind_groups_created();
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("frust-engine bind group count frame"),
+    });
+    renderer
+        .encode(
+            device,
+            queue,
+            &mut encoder,
+            scene,
+            EngineTarget {
+                view: target.view(),
+                format: FORMAT,
+                width: SIZE,
+                height: SIZE,
+                depth: None,
+                output: OutputAlpha::Premultiplied,
+            },
+            Color::TRANSPARENT,
+            Affine::IDENTITY,
+        )
+        .expect("a well-formed frame encodes");
+    queue.submit([encoder.finish()]);
+    renderer.end_frame(queue);
+    renderer.bind_groups_created() - before
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn a_steady_two_page_frame_creates_no_bind_group() {
+    let _serialized = render_lock();
+    let (device, queue, caps) = gpu();
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut renderer = EngineRenderer::new(&device, &caps, FORMAT, None)
+        .expect("the engine builds on this device");
+    let scene = two_page_scene();
+    let target = HeadlessTarget::new(&device, SIZE, SIZE, FORMAT);
+
+    let first = groups_created_by(&device, &queue, &mut renderer, &scene, &target);
+    assert!(first > 0, "the first frame builds its groups");
+    let reference = target.read_back(&device, &queue);
+    // The pool settles after a frame or two; once it has, nothing is built.
+    let _ = groups_created_by(&device, &queue, &mut renderer, &scene, &target);
+    for frame in 0..6 {
+        let created = groups_created_by(&device, &queue, &mut renderer, &scene, &target);
+        assert_eq!(created, 0, "steady frame {frame} built {created} groups");
+        assert_eq!(
+            target.read_back(&device, &queue),
+            reference,
+            "a cached group draws the same pixels (frame {frame})"
+        );
+    }
+
+    let error = drain_error_scope(&device, scope);
+    assert!(error.is_none(), "the frames raised {error:?}");
+    warm_up_ran(&renderer);
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn a_steady_frame_compositing_a_retained_page_creates_no_bind_group() {
+    let _serialized = render_lock();
+    let (device, queue, caps) = gpu();
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut renderer = EngineRenderer::new(&device, &caps, FORMAT, None)
+        .expect("the engine builds on this device");
+    let target = HeadlessTarget::new(&device, SIZE, SIZE, FORMAT);
+    let rect = Rect::new(32.0, 32.0, 160.0, 160.0);
+
+    // The body is recorded once, into a retained page.
+    let mut record = Scene::new();
+    {
+        let mut builder = SceneBuilder::new(&mut record);
+        builder.fill_rect(
+            Rect::new(0.0, 0.0, f64::from(SIZE), f64::from(SIZE)),
+            Brush::Solid(BLACK),
+        );
+        builder.push_retained(5, rect, 1.0, 1.0);
+        builder.fill_rect(rect, Brush::Solid(GREEN));
+        builder.pop_retained();
+    }
+    let recorded = groups_created_by(&device, &queue, &mut renderer, &record, &target);
+    assert!(recorded > 0, "the recording frame builds its groups");
+    assert!(
+        renderer.retained_ledger().any(|entry| entry.key == 5),
+        "the body is resident after its recording frame"
+    );
+
+    // Then composited from that page, frame after frame.
+    let mut draw = Scene::new();
+    {
+        let mut builder = SceneBuilder::new(&mut draw);
+        builder.fill_rect(
+            Rect::new(0.0, 0.0, f64::from(SIZE), f64::from(SIZE)),
+            Brush::Solid(BLACK),
+        );
+        builder.draw_retained(5, rect, 0.75, 1.0);
+    }
+    // The recording frame already composited the same page, so its group is
+    // cached and this frame — a different scene over the same page — finds it.
+    let first = groups_created_by(&device, &queue, &mut renderer, &draw, &target);
+    assert_eq!(first, 0, "the composite reuses the recording frame's group");
+    let reference = target.read_back(&device, &queue);
+    assert_ne!(
+        pixel(&reference, 96, 96),
+        [0, 0, 0, 255],
+        "the page composited"
+    );
+    for frame in 0..6 {
+        let created = groups_created_by(&device, &queue, &mut renderer, &draw, &target);
+        assert_eq!(created, 0, "steady frame {frame} built {created} groups");
+        assert_eq!(target.read_back(&device, &queue), reference);
+    }
+
+    let error = drain_error_scope(&device, scope);
+    assert!(error.is_none(), "the frames raised {error:?}");
+    warm_up_ran(&renderer);
+}
