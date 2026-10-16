@@ -204,7 +204,10 @@ platform runs which.
   device leg pending) and Mode B hosts already show that content; macOS and iOS are pending. The
   Android host's mechanics are in SHELLS_ARCHITECTURE.md; one limit is visible here: an on-top
   overlay sits above every native view, so frust content interleaved *between* two slots covers the
-  later slot (`android-overlays-cover-later-slots`).
+  later slot (`android-overlays-cover-later-slots`). A cut starts one command after a leading Mode B
+  hole-punch at the slot's index, so the punch stays on the main surface; plain hosting (knob off)
+  emits no rank-only updates; and content an overlay cannot serve (retained, external-texture,
+  backdrop blur) stays under the native view (`overlay-unservable-content-stays-on-main`).
 - **Shields are input-only:** a slot's `shields` list marks where frust content painted over the
   slot keeps winning pointer input; since overlays carry the visual half, shields no longer imply
   anything about paint.

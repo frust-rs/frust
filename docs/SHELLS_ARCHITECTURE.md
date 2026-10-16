@@ -47,7 +47,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how SHELLS relates to the other units
 | `frust-shell-macos::platform_view` | The AppKit (Mode A) native-view host: resolves a slot's `view_type` to a plugin factory, parents the returned `NSView` above winit's content view, and places/shows/disposes it from every later command. Its slot bookkeeping, geometry mapping and retain accounting sit behind a `NativeViewOps` seam and compile on every host; only the AppKit implementation is `cfg(target_os = "macos")` |
 | `frust-shell-windows` | Win32 integration: taskbar identity, window/taskbar icons, an `HMENU` menu bar with keyboard accelerators, and titlebar brightness — every `unsafe` and every `windows-sys` call confined to `win32_glue` |
 | `frust-shell-linux` | Wayland `app_id`/X11 `WM_CLASS` plus the X11 window icon, through winit's own cross-platform API. Deliberately thin: no GTK/X11 binding, no native menu (the menu is widget-drawn), no `unsafe`, one hook implemented |
-| `frust-shell-android` | Sanctioned-unsafe JNI FFI boundary, app-binding macro, and Choreographer-synced frame pipeline; carries the theme precedence ladder and the conformance-pinned resolved-surface-mode publish site; hosts the overlay table/ledger and segmented render tail (see Native-view hosting) and calls `frust_render::native_import::install` first in `render_scene` |
+| `frust-shell-android` | Sanctioned-unsafe JNI FFI boundary, app-binding macro, and Choreographer-synced frame pipeline; carries the theme precedence ladder and the conformance-pinned resolved-surface-mode publish site; hosts the host-testable `overlay_state` (table, ledger, cut assembly, skew report) and segmented render tail (see Native-view hosting) and calls `frust_render::native_import::install` first in `render_scene` |
 | `frust-shell-ios` | Sanctioned-unsafe C-ABI FFI boundary, app-binding macro, and CADisplayLink-driven frame pipeline, with optional present-sync gating against platform-view geometry |
 | `frust-shell-web::app_handler` | Winit-generic host-signal translation ported from `frust-shell-desktop` (input mapping, the reactive-owner event wrap, theme delivery, window-metrics publish) plus, gated to `wasm32`, the `browser_loop` submodule owning the canvas-bound event loop and frame turn (`spawn_app`/`run_app`) |
 | `frust-shell-web::pacing` | Pure paced-wake decision logic composing the browser's two wake mechanisms (`requestAnimationFrame` redraws, `ControlFlow::WaitUntil` deadlines) |
@@ -145,8 +145,7 @@ lives in `frust-hotpatch`, and the Android/iOS hot-patch arms add none beyond th
 register of what each zone is permitted to do, and the `# Safety`/no-unwind rules that govern
 it, live in [CODE_STANDARDS.md](CODE_STANDARDS.md) § Language Idioms.
 Android's zone also holds the one `OverlaySurface::new` call in `prepare_overlays` (an overlay
-`ANativeWindow` to a `wgpu::Surface`, built and dropped under the overlay host's lock); the earlier
-spike path and its JNI symbols are removed.
+`ANativeWindow` to a `wgpu::Surface`, built and dropped under the overlay host's lock).
 
 `surface_mode`'s writer set is pinned by a source-scan conformance test: exactly one call site per
 platform may publish a resolved surface mode, a single-writer contract that keeps the signal-poll
@@ -382,12 +381,13 @@ only; Mode B acknowledges and ignores the ops. Each view reports through
 and `nativeOverlayMode` reads the knob. `FRUST_OVERLAYS` resolves runtime env, then compile-time
 `--define`, then the `FRUST_OVERLAY_SPIKE` alias; `0`/`off`/`false` disable, `media` selects
 `setZOrderMediaOverlay` (an A/B arm), anything else on-top. It is **off by default** and the frame
-path is then byte-identical. Rust side, in `ffi_support`: `OverlayTable` (per overlay id a window plus
-its `OverlaySurface`, the surface dropped before the window) and `OverlayLedger` (pairs each frame's
-cut ranges with the frame id the render thread draws; 16 frames kept). The render tail runs
-`prepare_overlays` → `SurfaceRenderer::encode_segmented` → acquire → `submit_segmented_deferred` →
-present main, then overlays: one compiled frame, one submit. A `frust-overlay skew` log line appears
-every 120 frames. On-top overlays sit above every native view, so frust content interleaved between
+path is then byte-identical. Rust side, in host-testable `overlay_state` (wire helpers stay in
+`ffi_support`): `OverlayTable` (per overlay id a window plus its `OverlaySurface`, dropped before
+the window) and `OverlayLedger` (pairs cut ranges with the drawn frame id; 16 kept). The overlay
+lock is held across the main-surface acquire. A cut the overlay cannot serve stays on main
+(`overlay-unservable-content-stays-on-main`). The render tail runs `prepare_overlays` →
+`SurfaceRenderer::encode_segmented` → acquire → `submit_segmented_deferred` → present main, then
+overlays: one compiled frame, one submit; a `frust-overlay skew` line logs every 120 frames. On-top overlays sit above every native view, so frust content interleaved between
 two slots covers the later one (`android-overlays-cover-later-slots`).
 
 ### Cross-cutting host signals

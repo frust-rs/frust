@@ -154,7 +154,10 @@ hosting `UIView` and the playback audio-session category) and `objc2-app-kit` on
 `camera` now does too (gating its optional facade dependency; `--no-default-features` still builds on
 `frust-plugin` plus FFI only). Both bridge the texture bus in that facade half: the plugin owns a
 `TextureSink`, registers a source through `frust::texture` (which re-exports `frust-render` items
-only), and pulls from the sink — `frust-plugin` stays a leaf and the facade never names a plugin.
+only), and pulls from the sink — `frust-plugin` stays a leaf and the facade never names a plugin. A
+producer builds a `NativeHandle` through its unsafe constructor and keeps its own reference until
+the release callback runs; the bridge takes the callback with `Option::take`, clones the payload,
+and frames release on drop.
 
 `network-image` is a facade-tier plugin like `clean-signals-frust`, with one sanctioned extra edge:
 it depends on `frust` (default features off) and on the `frust-paths` leaf for its cache
