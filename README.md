@@ -117,8 +117,8 @@ Pre-1.0. APIs are unstable and may change without notice between commits.
 > Frust can currently be considered in an alpha state. In particular, we're
 > still working on the following:
 >
-> - **No partial repaint / damage regions** — measured, rejected, and removed (a
->   rejected experiment, `partial-repaint-outcome` in `docs/LIMITATIONS.md`): every rendered
+> - **No partial repaint / damage regions** — built, measured, lost, and removed
+>   (`partial-repaint-outcome` in `docs/LIMITATIONS.md`): every rendered
 >   frame re-rasterizes the full surface. The rest of the render model (retained layers,
 >   repaint boundaries, slivers, platform-view overlays, texture widgets) and what is still
 >   missing against Flutter's are mapped in
