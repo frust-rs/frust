@@ -391,6 +391,12 @@ impl Component for CameraPage {
 
         if state.texture {
             children.push(texture_preview_block(state));
+            // Keeps frames showing in the texture preview (and doubles as the
+            // stream readouts' ticker while it is mounted). It sits right
+            // under the picture: Flex skips painting children far outside the
+            // visible rect, and a ticker that is never painted never asks for
+            // the next frame, so one below the fold would freeze the preview.
+            children.push(frame_ticker());
         }
 
         if has_session {
@@ -407,12 +413,6 @@ impl Component for CameraPage {
                 // sections.
                 children.push(frame_ticker());
             }
-        }
-
-        if state.texture {
-            // Keeps frames showing in the texture preview (and doubles as the
-            // stream readouts' ticker while it is mounted).
-            children.push(frame_ticker());
         }
 
         children.push(gap(12.0));
