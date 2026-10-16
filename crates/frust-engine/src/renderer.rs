@@ -2202,22 +2202,28 @@ impl EngineRenderer {
             // description is pinned to `INTERMEDIATE_FORMAT`. One filter
             // pipeline therefore serves a renderer for its whole life,
             // whatever its surface is reconfigured to.
-            frame.filter = Some(
-                self.pipelines
-                    .get_or_create(device, &EnginePipeline::Filter.desc(&self.shaders, format))
-                    .clone(),
-            );
+            if self.resolved.filter.is_none() {
+                self.resolved.filter = Some(
+                    self.pipelines
+                        .get_or_create(device, &EnginePipeline::Filter.desc(&self.shaders, format))
+                        .clone(),
+                );
+            }
+            frame.filter.clone_from(&self.resolved.filter);
         }
 
         if self.scratch.copies > 0 && copy_mode != RegionCopyMode::Unavailable {
             // Pinned to `INTERMEDIATE_FORMAT` like the filter pipeline — a copy
             // only ever writes a pooled page — so one serves the renderer for
             // its whole life whatever the frame's own format.
-            frame.copy = Some(
-                self.pipelines
-                    .get_or_create(device, &EnginePipeline::Copy.desc(&self.shaders, format))
-                    .clone(),
-            );
+            if self.resolved.copy.is_none() {
+                self.resolved.copy = Some(
+                    self.pipelines
+                        .get_or_create(device, &EnginePipeline::Copy.desc(&self.shaders, format))
+                        .clone(),
+                );
+            }
+            frame.copy.clone_from(&self.resolved.copy);
         }
 
         if let Some(pipeline) = frame.alpha.1.any() {
@@ -3182,6 +3188,11 @@ fn record_pass(
 /// plan under the Uber kill switch) sets its pipeline exactly once. A segment
 /// whose class has no resolved pipeline draws nothing, for the same reason; it
 /// cannot occur, since the frame resolves every class its segments name before
+    /// The filter pass's pipeline; its description is pinned to one format, so
+    /// it is built once per renderer rather than once per filtering frame.
+    filter: Option<wgpu::RenderPipeline>,
+    /// The fragment region copy's pipeline, memoised on the same terms.
+    copy: Option<wgpu::RenderPipeline>,
 /// recording.
 ///
 /// Everything a plan draws with is set here, its first pipeline included, so
@@ -3192,6 +3203,8 @@ fn draw_segments(pass: &mut wgpu::RenderPass<'_>, plan: &PassPlan<'_>) {
     pass.set_vertex_buffer(0, plan.instances.slice(..));
 
     let mut composite = 0_usize;
+            filter: None,
+            copy: None,
     let mut bound: Option<PaintClass> = None;
     for segment in plan.segments {
         // Claimed before the class lookup, so a composite whose pipeline is
