@@ -144,6 +144,17 @@ impl FrameExecutor {
         }
     }
 
+    /// Whether the inline executor's last frame was dropped on a transient
+    /// acquire with the surface still ready, cleared by the read. The split
+    /// reports the same thing asynchronously as [`ShellUserEvent::RenderRetry`],
+    /// so this is always `false` there.
+    pub(crate) fn take_present_retry(&mut self) -> bool {
+        match self {
+            FrameExecutor::Inline(inline) => std::mem::take(&mut inline.present_retry),
+            FrameExecutor::Split(_) => false,
+        }
+    }
+
     /// Bring the surface online for `window` at `size` (`resumed`). Inline
     /// creates + installs it synchronously; the split creates the
     /// [`DetachedSurface`] here on the UI thread (the window-handle step winit
@@ -308,6 +319,9 @@ pub(crate) struct InlineExecutor {
     /// shape matches the split's cross-thread counter so `FrameExecutor` reads
     /// both variants uniformly.
     presented: Arc<AtomicU64>,
+    /// Set when the last frame was skipped on a transient acquire while the
+    /// surface was ready; [`FrameExecutor::take_present_retry`] reads and clears it.
+    present_retry: bool,
 }
 
 impl InlineExecutor {
@@ -326,6 +340,7 @@ impl InlineExecutor {
             first_encode_recorded: false,
             first_frame_recorded: false,
             presented: Arc::new(AtomicU64::new(0)),
+            present_retry: false,
         }
     }
 
@@ -398,7 +413,11 @@ impl InlineExecutor {
             Ok(FrameOutcome::Rendered) => {
                 self.presented.fetch_add(1, Ordering::Relaxed);
             }
-            Ok(FrameOutcome::Skipped) => {}
+            // With a ready surface, a skip is a transient acquire (`Timeout`/
+            // `Occluded`): the frame is gone, so the shell owes a retry.
+            Ok(FrameOutcome::Skipped) => {
+                self.present_retry = self.renderer.phase() == SurfacePhase::SurfaceReady;
+            }
             Err(err) => eprintln!("frust: render error: {err}"),
         }
     }
@@ -710,7 +729,16 @@ fn render_loop(
                     Ok(FrameOutcome::Rendered) => {
                         presented.fetch_add(1, Ordering::Relaxed);
                     }
-                    Ok(FrameOutcome::Skipped) => {}
+                    // A transient acquire (`Timeout`/`Occluded`, e.g. for the
+                    // length of macOS's fullscreen-exit animation) dropped this
+                    // frame with the surface still ready. Nothing else will
+                    // replace it on an idle screen, so ask the UI thread for a
+                    // backed-off retry.
+                    Ok(FrameOutcome::Skipped) => {
+                        if renderer.phase() == SurfacePhase::SurfaceReady {
+                            let _ = proxy.send_event(ShellUserEvent::RenderRetry);
+                        }
+                    }
                     Err(err) => log::error!("frust: render error: {err}"),
                 }
             }

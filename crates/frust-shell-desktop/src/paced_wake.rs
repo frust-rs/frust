@@ -193,6 +193,39 @@ pub fn paced_wake_action(paced_wake: Option<Instant>, now: Instant) -> PacedDeci
     }
 }
 
+/// The first retry delay after the render side dropped a frame on a transient
+/// acquire (`Timeout`/`Occluded`) with its surface still ready. macOS returns
+/// those for the length of the fullscreen-exit animation; the frame that
+/// carried the new window size is dropped, and with `ControlFlow::Wait` and
+/// nothing dirty no later frame replaces the stale contents.
+pub const PRESENT_RETRY_BASE: Duration = Duration::from_millis(33);
+
+/// The longest retry delay. A window that stays hidden (minimised, or behind
+/// another app's fullscreen space) keeps skipping, so the retries back off to
+/// one wake a second instead of spinning at the display rate.
+pub const PRESENT_RETRY_MAX: Duration = Duration::from_secs(1);
+
+/// The delay before the `streak`-th consecutive present retry:
+/// [`PRESENT_RETRY_BASE`] doubled per earlier retry, capped at
+/// [`PRESENT_RETRY_MAX`]. The caller resets `streak` once a frame presents.
+pub fn present_retry_delay(streak: u32) -> Duration {
+    PRESENT_RETRY_BASE
+        .saturating_mul(1u32 << streak.min(16))
+        .min(PRESENT_RETRY_MAX)
+}
+
+/// The `paced_wake` value after scheduling a present retry: the earlier of the
+/// pending paced deadline and `now + present_retry_delay(streak)`. Reusing the
+/// paced wake means `about_to_wait` parks on it and fires the redraw exactly as
+/// it does for a paced loop, and a paced loop already due sooner is not delayed.
+pub fn schedule_present_retry(paced_wake: Option<Instant>, now: Instant, streak: u32) -> Instant {
+    let retry = now + present_retry_delay(streak);
+    match paced_wake {
+        Some(deadline) => deadline.min(retry),
+        None => retry,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,5 +474,51 @@ mod tests {
                 control_flow: ControlFlowIntent::Wait,
             }
         );
+    }
+
+    // --- present retry ---
+
+    #[test]
+    fn present_retry_doubles_from_the_base_and_caps() {
+        assert_eq!(present_retry_delay(0), PRESENT_RETRY_BASE);
+        assert_eq!(present_retry_delay(1), PRESENT_RETRY_BASE * 2);
+        assert_eq!(present_retry_delay(4), PRESENT_RETRY_BASE * 16);
+        assert_eq!(present_retry_delay(5), PRESENT_RETRY_MAX);
+        // A window hidden for hours never overflows the shift or the multiply.
+        assert_eq!(present_retry_delay(u32::MAX), PRESENT_RETRY_MAX);
+    }
+
+    #[test]
+    fn present_retry_schedules_from_now_when_nothing_is_pending() {
+        let now = base();
+        assert_eq!(
+            schedule_present_retry(None, now, 0),
+            now + PRESENT_RETRY_BASE
+        );
+    }
+
+    #[test]
+    fn present_retry_never_delays_an_earlier_paced_deadline() {
+        let now = base();
+        let paced = now + Duration::from_millis(5);
+        assert_eq!(schedule_present_retry(Some(paced), now, 0), paced);
+        let later = now + Duration::from_secs(5);
+        assert_eq!(
+            schedule_present_retry(Some(later), now, 2),
+            now + PRESENT_RETRY_BASE * 4
+        );
+    }
+
+    #[test]
+    fn a_scheduled_retry_parks_then_fires_through_the_paced_wake() {
+        // The retry rides `paced_wake`, so `about_to_wait` handles it like any
+        // paced deadline: park until it, then fire one redraw and return to Wait.
+        let now = base();
+        let deadline = schedule_present_retry(None, now, 0);
+        assert_eq!(
+            paced_wake_action(Some(deadline), now).control_flow,
+            ControlFlowIntent::WaitUntil(deadline)
+        );
+        assert!(paced_wake_action(Some(deadline), deadline).request_redraw);
     }
 }

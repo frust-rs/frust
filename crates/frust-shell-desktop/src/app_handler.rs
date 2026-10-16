@@ -82,7 +82,9 @@ use winit::window::{
 
 use crate::config::DesktopConfig;
 use crate::extensions::{CloseAction, DesktopExtensions, NoExtensions};
-use crate::paced_wake::{ControlFlowIntent, next_paced_wake, paced_wake_action};
+use crate::paced_wake::{
+    ControlFlowIntent, next_paced_wake, paced_wake_action, schedule_present_retry,
+};
 use crate::platform_view::DesktopPlatformViews;
 use crate::render::FrameExecutor;
 
@@ -322,6 +324,13 @@ pub enum ShellUserEvent {
     /// direct `request_redraw` from the render thread) so winit's dirty-driven
     /// `ControlFlow::Wait` model is preserved.
     RenderNeedsRedraw,
+    /// The render thread dropped a frame on a transient acquire (`Timeout`/
+    /// `Occluded`) with its surface still ready (split path). The UI thread
+    /// schedules a backed-off redraw through the paced wake
+    /// ([`crate::paced_wake::schedule_present_retry`]), so an idle screen is
+    /// not left showing stale contents — macOS's fullscreen-exit animation is
+    /// the case that needs it.
+    RenderRetry,
     /// A `dx` hot patch was applied (`hotpatch` feature): the patch listener runs on the
     /// patching thread and routes here so the UI thread logs the probe line and requests a
     /// redraw, which re-runs the (now patched) `build` via the unconditional root rebuild.
@@ -1040,6 +1049,8 @@ where
         theme_override_active: false,
         font_registry: FontRegistryWatcher::new(),
         paced_wake: None,
+        present_retry_streak: 0,
+        present_retry_mark: 0,
         anim_pacing: !frust_shell_common::anim_pacing_kill_switch_engaged(),
         window_metrics: WindowMetricsPublisher::new(),
         // Spawned lazily on the first clipboard action — see the `clipboard`
@@ -1979,6 +1990,13 @@ struct ShellHandler<State: 'static, Build, V: View<State>, E> {
     /// the loop on `ControlFlow::WaitUntil(that)` and fires the redraw when it
     /// elapses. `None` when no paced redraw is pending.
     paced_wake: Option<Instant>,
+    /// Consecutive present retries since a frame last presented — the backoff
+    /// exponent for [`crate::paced_wake::present_retry_delay`].
+    present_retry_streak: u32,
+    /// The presented-frame count at the last present retry. A count that has
+    /// moved on since then means a frame presented in between, so the backoff
+    /// starts over.
+    present_retry_mark: u64,
     /// Whether animation pacing is enabled (the [`FRUST_NO_ANIM_PACING`] kill
     /// switch, resolved once at construction). When `false` a paced-only frame
     /// falls back to the immediate `request_redraw` every-vsync path.
@@ -2364,6 +2382,27 @@ where
         window.request_redraw();
     }
 
+    /// Owe a redraw for a frame the render side dropped on a transient acquire
+    /// with its surface still ready. The deadline rides `paced_wake`, so
+    /// `about_to_wait` parks on it and fires the redraw as it would a paced
+    /// loop's. The delay doubles per consecutive retry up to
+    /// [`PRESENT_RETRY_MAX`](crate::paced_wake::PRESENT_RETRY_MAX) — a window
+    /// that stays hidden wakes once a second, not every vsync — and starts over
+    /// once the presented-frame count shows a frame got through.
+    fn schedule_present_retry(&mut self) {
+        let presented = self.executor.presented_frames();
+        if presented != self.present_retry_mark {
+            self.present_retry_mark = presented;
+            self.present_retry_streak = 0;
+        }
+        self.paced_wake = Some(schedule_present_retry(
+            self.paced_wake,
+            Instant::now(),
+            self.present_retry_streak,
+        ));
+        self.present_retry_streak = self.present_retry_streak.saturating_add(1);
+    }
+
     /// `provide_context` the window's [`WindowMetrics`](frust_core::WindowMetrics)
     /// under the reactive root owner — **only when it actually changed**
     /// ([`WindowMetricsPublisher::poll`] returns `None` otherwise) — so a
@@ -2598,6 +2637,7 @@ where
                     window.request_redraw();
                 }
             }
+            ShellUserEvent::RenderRetry => self.schedule_present_retry(),
             #[cfg(feature = "hotpatch")]
             ShellUserEvent::HotPatched => {
                 // A timing instrument: save->applied timestamp for latency measurement.
@@ -3396,6 +3436,11 @@ where
                     size,
                     paint_outcome.paint_serial,
                 );
+                // Inline reports a transient-acquire skip synchronously; the
+                // split reports it later as `ShellUserEvent::RenderRetry`.
+                if self.executor.take_present_retry() {
+                    self.schedule_present_retry();
+                }
 
                 // Probe stamp: the UI-thread hand-off of the finished frame, not the GPU
                 // present. Once after startup and once per applied patch, never every frame;
