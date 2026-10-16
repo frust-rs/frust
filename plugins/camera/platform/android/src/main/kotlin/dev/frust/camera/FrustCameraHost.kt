@@ -64,10 +64,11 @@ import java.util.concurrent.atomic.AtomicInteger
  * |---|---|---|
  * | [setTorch] | `(int session, boolean on) -> int` | [TORCH_SET] accepted (`enableTorch`'s `ListenableFuture` is deliberately **not** waited on) / [ERROR_UNKNOWN_SESSION] / [ERROR_NO_CAMERA] nothing bound yet / [ERROR_TORCH_FAILED] |
  * | [torchAvailable] | `(int session) -> int` | [TORCH_AVAILABLE] / [TORCH_UNAVAILABLE] / [ERROR_UNKNOWN_SESSION] / [ERROR_NO_CAMERA] |
+ * | [startPreviewTexture] | `(int session) -> int` | [PREVIEW_TEXTURE_STARTED] accepted / [ERROR_UNKNOWN_SESSION]; frames arrive through [nativeOnPreviewTextureFrame] until [closeCamera] |
  *
  * Kotlin → Rust ([nativeOnPermissionResult], [nativeOnCameraState],
- * [nativeOnPictureTaken], [nativeOnImageFrame] — the last one was added
- * after this contract was originally frozen; [nativeOnPictureTaken]'s
+ * [nativeOnPictureTaken], [nativeOnImageFrame], [nativeOnPreviewTextureFrame]
+ * — the last two were added after this contract was originally frozen; [nativeOnPictureTaken]'s
  * `requestId` is the one field widening since then — see *Correlating a
  * capture completion* below). The package is
  * baked into those symbols' mangled names
@@ -220,6 +221,9 @@ object FrustCameraHost {
     /** [startImageStream]: the stream request was accepted. */
     private const val IMAGE_STREAM_STARTED = 0
 
+    /** [startPreviewTexture]: the request was accepted. */
+    private const val PREVIEW_TEXTURE_STARTED = 0
+
     /**
      * [setTorch]: the request was handed to `CameraControl.enableTorch`.
      *
@@ -325,6 +329,22 @@ object FrustCameraHost {
             Thread(runnable, "frust-camera-analysis").apply { isDaemon = true }
         }
     }
+
+    /**
+     * The thread the preview-texture analyzer runs on — its own, so a slow
+     * image-stream callback on [analysisExecutor] never holds the preview
+     * texture back (and the reverse). Same shape: lazy, single-threaded,
+     * daemon.
+     */
+    private val textureExecutor: ExecutorService by lazy {
+        Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "frust-camera-texture").apply { isDaemon = true }
+        }
+    }
+
+    /** Latched once [nativeOnPreviewTextureFrame] has proven unavailable. */
+    @Volatile
+    private var textureFrameNativeMissing: Boolean = false
 
     /**
      * Set once [nativeOnImageFrame] has proven unavailable (an app taking this
@@ -457,10 +477,12 @@ object FrustCameraHost {
         val entry = sessions.remove(session) ?: return
         entry.closed = true
         entry.streamFormat = null
+        entry.textureWanted = false
         mainExecutor.execute {
             try {
                 entry.preview.setSurfaceProvider(null)
                 unbindImageAnalysis(entry)
+                unbindTextureAnalysis(entry)
                 // `unbind(useCases)`, never `unbindAll()`: another session may
                 // be bound to the same process-wide provider.
                 entry.provider?.unbind(entry.preview, entry.imageCapture)
@@ -573,6 +595,31 @@ object FrustCameraHost {
         val entry = sessions[session] ?: return
         entry.streamFormat = null
         mainExecutor.execute { unbindImageAnalysis(entry) }
+    }
+
+    /**
+     * `startPreviewTexture(int session) -> int` (class doc's *Additive
+     * entries*). Binds a second [ImageAnalysis] beside the preview — output
+     * `RGBA_8888`, rotated upright by CameraX itself, latest-only — whose
+     * frames go to [nativeOnPreviewTextureFrame] for the session's texture
+     * mailbox. Returns [PREVIEW_TEXTURE_STARTED] once accepted; the bind
+     * happens on the main thread (or in [configure] for a session still
+     * configuring). A second call is a no-op.
+     *
+     * Each frame is copied on the Rust side and the [ImageProxy] closed right
+     * after: an analysis image must close before the analyzer receives the
+     * next one, so it cannot be lent to the renderer, which keeps a frame
+     * until a newer one replaces it.
+     */
+    @JvmStatic
+    fun startPreviewTexture(session: Int): Int {
+        val entry = sessions[session] ?: return ERROR_UNKNOWN_SESSION
+        if (entry.textureWanted) return PREVIEW_TEXTURE_STARTED
+        entry.textureWanted = true
+        mainExecutor.execute {
+            if (entry.provider != null) bindTextureAnalysis(entry)
+        }
+        return PREVIEW_TEXTURE_STARTED
     }
 
     /**
@@ -692,6 +739,21 @@ object FrustCameraHost {
         plane2: ByteBuffer?,
         rowStride2: Int,
         pixelStride2: Int,
+    )
+
+    /**
+     * Delivers one preview-texture frame (class doc's *Additive entries*), on
+     * [textureExecutor]: an upright `RGBA_8888` plane, `rowStride` bytes per
+     * row. Called with the [ImageProxy] still open; the Rust side copies the
+     * plane before returning, and the proxy is closed right after.
+     */
+    @JvmStatic
+    external fun nativeOnPreviewTextureFrame(
+        session: Int,
+        width: Int,
+        height: Int,
+        pixels: ByteBuffer?,
+        rowStride: Int,
     )
 
     // --- Module-internal seam (NOT part of the JNI contract) ---------------
@@ -823,6 +885,8 @@ object FrustCameraHost {
         // A running analyzer's frames carry `rotationDegrees` derived from this,
         // so the stream tracks the display exactly like the preview does.
         entry.imageAnalysis?.targetRotation = rotation
+        // The preview texture is rotated upright against the same rotation.
+        entry.textureAnalysis?.targetRotation = rotation
     }
 
     // --- Internals ---------------------------------------------------------
@@ -881,6 +945,19 @@ object FrustCameraHost {
         var streamFormat: Int? = null
 
         /**
+         * The bound preview-texture `ImageAnalysis`, else null. Main thread
+         * only.
+         */
+        var textureAnalysis: ImageAnalysis? = null
+
+        /**
+         * Whether `startPreviewTexture` asked for the preview texture. Read on
+         * the main thread by [configure] (a request made while configuring).
+         */
+        @Volatile
+        var textureWanted: Boolean = false
+
+        /**
          * The last display rotation `setTargetRotation` reported, replayed onto
          * an analyzer bound after that call. `ROTATION_0` until a preview slot
          * exists — the same default CameraX's use cases start at.
@@ -927,6 +1004,7 @@ object FrustCameraHost {
                     // A stream requested while this session was still
                     // configuring binds now, as part of the same bring-up.
                     session.streamFormat?.let { bindImageAnalysis(session, it) }
+                    if (session.textureWanted) bindTextureAnalysis(session)
                     notifyCameraState(session.id, STATE_RUNNING)
                 } catch (e: Throwable) {
                     Log.w(TAG, "frust-camera: session ${session.id} failed to configure", e)
@@ -1009,6 +1087,66 @@ object FrustCameraHost {
             entry.provider?.unbind(analysis)
         } catch (e: Throwable) {
             Log.w(TAG, "frust-camera: stopImageStream(${entry.id}) failed to unbind", e)
+        }
+    }
+
+    /**
+     * Main thread. Bind session [entry]'s preview-texture analyzer
+     * ([startPreviewTexture]). A device whose stream combinations cannot hold
+     * it beside the already-bound use cases refuses the bind; that is logged
+     * and the texture stays empty, the rest of the session unaffected.
+     */
+    private fun bindTextureAnalysis(entry: Session) {
+        if (entry.closed || entry.isDestroyed() || entry.textureAnalysis != null) return
+        val provider = entry.provider ?: return
+        try {
+            val analysis = ImageAnalysis.Builder()
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                .setOutputImageRotationEnabled(true)
+                .build()
+            analysis.targetRotation = entry.targetRotation
+            analysis.setAnalyzer(textureExecutor) { proxy ->
+                try {
+                    deliverTextureFrame(entry.id, proxy)
+                } finally {
+                    proxy.close()
+                }
+            }
+            entry.camera = provider.bindToLifecycle(
+                entry,
+                selectorFor(entry.lensFacing),
+                analysis,
+            )
+            entry.textureAnalysis = analysis
+        } catch (e: Throwable) {
+            Log.w(TAG, "frust-camera: startPreviewTexture(${entry.id}) failed to bind", e)
+        }
+    }
+
+    /** Main thread. Drop session [entry]'s preview-texture analyzer. */
+    private fun unbindTextureAnalysis(entry: Session) {
+        val analysis = entry.textureAnalysis ?: return
+        entry.textureAnalysis = null
+        try {
+            analysis.clearAnalyzer()
+            entry.provider?.unbind(analysis)
+        } catch (e: Throwable) {
+            Log.w(TAG, "frust-camera: preview texture of session ${entry.id} failed to unbind", e)
+        }
+    }
+
+    /** [textureExecutor]. Hand one open RGBA [ImageProxy]'s plane to Rust. */
+    private fun deliverTextureFrame(session: Int, proxy: ImageProxy) {
+        if (textureFrameNativeMissing) return
+        val plane = proxy.planes.firstOrNull() ?: return
+        try {
+            nativeOnPreviewTextureFrame(session, proxy.width, proxy.height, plane.buffer, plane.rowStride)
+        } catch (e: UnsatisfiedLinkError) {
+            textureFrameNativeMissing = true
+            Log.w(TAG, "frust-camera: nativeOnPreviewTextureFrame unavailable — frames dropped", e)
+        } catch (e: Throwable) {
+            Log.w(TAG, "frust-camera: nativeOnPreviewTextureFrame($session) failed", e)
         }
     }
 

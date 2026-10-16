@@ -30,12 +30,14 @@ vt100 = "=0.16.2"
 log = "0.4"
 
 # Plugins under device test, one `src/pages/` section each, hand-added as path deps on this checkout.
+# Default features required: the `frust-api` preview-texture bridge (`preview_texture_output`).
 frust-camera = { path = "../../plugins/camera" }
 
 # Default features required: the `frust-api` hooks and the ICU4X `formatting` that `locales/*/main.ftl` uses.
 frust-i18n = { path = "../../plugins/i18n" }
 
-# Default features required: the `frust-api` builders (`use_video_player`, `video_view`).
+# Default features required: the `frust-api` builders (`use_video_player`, `video_view`,
+# `video_texture_view`).
 frust-video-player = { path = "../../plugins/video-player" }
 
 frust-url-launcher = { path = "../../plugins/url-launcher" }

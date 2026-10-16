@@ -1139,8 +1139,8 @@ pub mod gpu {
 /// feature: nothing here needs a device of the app's own.
 pub mod texture {
     pub use frust_render::texture_bus::{
-        NativeHandle, NativeHandleKind, NativeImporter, SourceFormat, SourceFrame, SourcePayload,
-        TextureRegistration, register_texture_source,
+        MAX_RETIRING, NativeHandle, NativeHandleKind, NativeImporter, SourceFormat, SourceFrame,
+        SourcePayload, TextureRegistration, native_importer_installed, register_texture_source,
     };
 }
 

@@ -7,8 +7,8 @@
 //!
 //! This is what makes the crate's `--no-default-features` build the real
 //! platform-plugin charter line rather than an aspirational one (crate root
-//! doc's *Charter* section): the [`handle`]/[`view`] modules below are the
-//! *only* place in this crate that names `frust`, so disabling `frust-api`
+//! doc's *Charter* section): the [`handle`]/[`texture`]/[`view`] modules
+//! below are the *only* place in this crate that names `frust`, so disabling `frust-api`
 //! genuinely drops the facade dependency from the graph, and enabling it
 //! genuinely adds it back — there is nothing else here riding on the
 //! feature for show.
@@ -21,10 +21,15 @@
 //! `docs/CODE_STANDARDS.md`'s State & Reactivity Conventions' "build reads,
 //! handlers write" rule, applied to a platform callback instead of a
 //! `Widget::event` handler. [`video_view`] ([`view`]) is the one-line
-//! `frust::platform_view` builder over a handle's session.
+//! `frust::platform_view` builder over a handle's session; for a session
+//! opened with [`crate::VideoOutput::Texture`],
+//! [`VideoPlayerHandle::texture_output`] ([`texture`]) bridges its frame
+//! mailbox to a renderer scene texture and [`video_texture_view`] draws it
+//! in-scene.
 
 mod handle;
+pub(crate) mod texture;
 mod view;
 
 pub use handle::{VideoPlayerHandle, use_video_player};
-pub use view::video_view;
+pub use view::{video_texture_view, video_view};

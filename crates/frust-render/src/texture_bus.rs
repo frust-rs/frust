@@ -339,6 +339,18 @@ pub fn clear_native_importer(kind: NativeHandleKind) -> Option<Arc<dyn NativeImp
     Some(importers.remove(index).1)
 }
 
+/// Whether an importer is installed for `kind` right now.
+///
+/// What a producer asks before choosing a payload: a [`SourcePayload::Native`]
+/// frame of a kind with no importer is refused, so a producer that can also
+/// copy into CPU memory sends [`SourcePayload::Cpu`] frames instead. The
+/// answer can change when an importer is installed or cleared later, so a
+/// producer asks once per session it opens rather than once per process.
+#[must_use]
+pub fn native_importer_installed(kind: NativeHandleKind) -> bool {
+    native_importer(kind).is_some()
+}
+
 fn native_importer(kind: NativeHandleKind) -> Option<Arc<dyn NativeImporter>> {
     importers()
         .iter()
@@ -854,6 +866,34 @@ mod tests {
                 .to_string()
                 .contains("bad format")
         );
+    }
+
+    struct NoImport;
+
+    impl NativeImporter for NoImport {
+        fn import(
+            &self,
+            _handle: &NativeHandle,
+            _device: &wgpu::Device,
+            _queue: &wgpu::Queue,
+        ) -> Result<ImportedTexture, ImportError> {
+            Err(ImportError::Unsupported("test importer".into()))
+        }
+    }
+
+    #[test]
+    fn the_installed_query_follows_set_and_clear_per_kind() {
+        // The only unit test in this binary that touches the process-wide
+        // table, and it uses the Apple kind the host never installs.
+        let kind = NativeHandleKind::CvPixelBuffer;
+        assert!(!native_importer_installed(kind));
+        assert!(set_native_importer(kind, Arc::new(NoImport)).is_none());
+        assert!(native_importer_installed(kind));
+        assert!(!native_importer_installed(
+            NativeHandleKind::AHardwareBuffer
+        ));
+        assert!(clear_native_importer(kind).is_some());
+        assert!(!native_importer_installed(kind));
     }
 
     /// A fence that parks its callbacks until the test fires them.
