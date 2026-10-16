@@ -13,7 +13,7 @@ readme = "README.md"
 
 [dependencies]
 # Facade-tier plugin (no OS arm). Published as frust-ui, imported as frust (crates.io `frust` is taken).
-frust = { package = "frust-ui", path = "../../crates/frust", version = "0.6.1", default-features = false }
+frust = { package = "frust-ui", path = "../../crates/frust", version = "0.6.2", default-features = false }
 # Encoder only: the workspace row drops qrcode's image/svg renderers.
 qrcode = { workspace = true }
 thiserror = { workspace = true }

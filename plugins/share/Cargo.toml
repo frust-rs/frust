@@ -16,7 +16,7 @@ thiserror = { workspace = true }
 # Geometry type of `ShareAnchor` (the iOS popover rect, used from sh-02 on).
 kurbo = { workspace = true }
 # Only `frust-*` dependency a platform plugin may carry (docs/ARCHITECTURE.md).
-frust-plugin = { path = "../../crates/frust-plugin", version = "0.6.1" }
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.6.2" }
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { workspace = true }
@@ -53,4 +53,4 @@ dispatch2 = { version = "0.3", default-features = false, features = ["std", "blo
 # Plugin->plugin edge (docs/PLUGINS_CODE_STANDARDS.md): desktop has no share sheet,
 # so the fallback is the clipboard and reimplementing that would duplicate arboard.
 [target.'cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))'.dependencies]
-frust-clipboard = { path = "../clipboard", version = "0.6.1" }
+frust-clipboard = { path = "../clipboard", version = "0.6.2" }

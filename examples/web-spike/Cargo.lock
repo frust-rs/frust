@@ -562,7 +562,7 @@ checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
 
 [[package]]
 name = "frust-engine"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "bytemuck",
  "frust-gpu",
@@ -578,7 +578,7 @@ dependencies = [
 
 [[package]]
 name = "frust-gpu"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "android_system_properties",
  "anyhow",
@@ -597,7 +597,7 @@ dependencies = [
 
 [[package]]
 name = "frust-reactive"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "any_spawner",
  "futures",
@@ -608,7 +608,7 @@ dependencies = [
 
 [[package]]
 name = "frust-render"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "android_system_properties",
  "anyhow",
@@ -623,7 +623,7 @@ dependencies = [
 
 [[package]]
 name = "frust-scene"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "kurbo",
  "peniko",
@@ -631,7 +631,7 @@ dependencies = [
 
 [[package]]
 name = "frust-text"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "frust-scene",
  "kurbo",
