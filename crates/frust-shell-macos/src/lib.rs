@@ -39,8 +39,11 @@
 //! Neither route calls `std::process::exit`.
 //!
 //! - **native platform views**: a plugin's `NSView` hosted above the wgpu
-//!   surface and placed from the desktop core's per-frame command batch (the
-//!   `platform_view` module).
+//!   surface and placed from the desktop core's per-frame command batch, and —
+//!   under the default-off `FRUST_OVERLAYS` switch — an input-transparent
+//!   `CAMetalLayer` overlay view stacked directly above each hosted view frust
+//!   paints over, whose layer the core's render side draws that paint onto
+//!   (the `platform_view` module).
 //!
 //! # Inert off macOS
 //!
@@ -194,6 +197,9 @@ impl DesktopExtensions for MacosExtensions {
         // off-macOS build, where the body below does not exist, reads them
         // too.
         let _ = (scale, window, commands);
+        // Overlay views size their drawables from the window's own backing
+        // scale, read inside the host; publishing or resizing one requests a
+        // frame on `window`.
         #[cfg(target_os = "macos")]
         self.view_host.apply(window, commands);
     }

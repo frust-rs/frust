@@ -16,10 +16,10 @@
 //! each slot's hole punch erases the frust paint under the view at the view's
 //! own paint position, and everything painted after it lands on top — the
 //! sandwich holds with one surface. On an opaque surface (Mode A — Android's
-//! default, macOS always) the native views sit *above* frust, so the toolbar,
-//! popover and badge hide behind them unless the shell draws the content
-//! painted after a view onto an overlay surface stacked above it
-//! (`FRUST_OVERLAYS=1` on Android).
+//! default, macOS always, iOS with `FRUST_DEMO_OPAQUE=1`) the native views sit
+//! *above* frust, so the toolbar, popover and badge hide behind them unless the
+//! shell draws the content painted after a view onto an overlay surface
+//! stacked above it (`FRUST_OVERLAYS=1`, on Android, iOS and macOS).
 //!
 //! # Paint order
 //!
@@ -29,7 +29,9 @@
 //! *between* the two views instead — two overlays, the first carrying the
 //! card. An Android overlay `SurfaceView` stacks above every native view
 //! (`setZOrderOnTop`), so there the card's overlay covers the slider: the
-//! documented limit of on-top overlays, shown on purpose.
+//! documented limit of on-top overlays, shown on purpose. The Apple hosts
+//! stack each overlay view directly above its own native view, under every
+//! view painted later, so there the card stays under the slider.
 //!
 //! # At rest
 //!
@@ -261,8 +263,8 @@ pub fn page(_state: &S) -> AnyView<S> {
             "The accent frame and the card are frust paint UNDER the native views; the \
              toolbar, the popover and the badge are frust paint OVER them. On a translucent \
              surface all of it shows with one surface. On an opaque surface (Android's \
-             default) the over-paint hides behind the native views unless overlay surfaces \
-             are on (FRUST_OVERLAYS=1).",
+             default, macOS, iOS with FRUST_DEMO_OPAQUE=1) the over-paint hides behind the \
+             native views unless overlay surfaces are on (FRUST_OVERLAYS=1).",
         )),
         gap(6.0),
         inflexible(checkbox(
@@ -273,7 +275,8 @@ pub fn page(_state: &S) -> AnyView<S> {
         gap(4.0),
         inflexible(caption(
             "Interleaved paints the card between the two views. Android stacks every overlay \
-             above every native view, so there the card's overlay covers the slider.",
+             above every native view, so there the card's overlay covers the slider; iOS and \
+             macOS stack each overlay directly above its own view, so the card stays under it.",
         )),
     ]);
 

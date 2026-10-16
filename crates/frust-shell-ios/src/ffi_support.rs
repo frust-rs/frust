@@ -583,6 +583,19 @@ pub(crate) enum PlatformViewCommand {
     UpdateParams { slot_id: u64, params_json: String },
     /// Tear down a slot's native view entirely.
     Dispose { slot_id: u64 },
+    /// Create or re-place overlay `overlay_id` directly above slot
+    /// `above_slot_id`, covering `rect`; the render side draws the frame's
+    /// commands `range_start..range_end` onto it (informational for the host,
+    /// which pairs nothing — see [`platform_view_commands_json`]).
+    Overlay {
+        overlay_id: u64,
+        above_slot_id: u64,
+        rect: PvRect,
+        range_start: u64,
+        range_end: u64,
+    },
+    /// Tear overlay `overlay_id` down.
+    DisposeOverlay { overlay_id: u64 },
 }
 
 /// Serialize the platform-view command backlog into the wire JSON
@@ -596,6 +609,15 @@ pub(crate) enum PlatformViewCommand {
 ///  {"op":"update","slot":3,"rect":[x,y,w,h],"clip":[x,y,w,h]|null,"visible":true},
 ///  {"op":"updateParams","slot":3,"params":"{...}"},
 ///  {"op":"dispose","slot":3}]}
+/// ```
+///
+/// Two overlay ops extend the vocabulary additively, byte-identical to the
+/// Android shell's (a host that does not know them skips them like any unknown
+/// op), and are emitted only with the overlay switch on (`FRUST_OVERLAYS`):
+///
+/// ```text
+///  {"op":"overlay","overlay":1,"aboveSlot":3,"rect":[x,y,w,h],"rangeStart":12,"rangeEnd":40}
+///  {"op":"disposeOverlay","overlay":1}
 /// ```
 ///
 /// `rect`/`clip` are `[x,y,w,h]` arrays — origin then size, already physical
@@ -686,6 +708,29 @@ fn push_command_json(out: &mut String, cmd: &PlatformViewCommand) {
             out.push_str("{\"op\":\"dispose\",\"slot\":");
             let _ = write!(out, "{slot_id}");
             out.push('}');
+        }
+        PlatformViewCommand::Overlay {
+            overlay_id,
+            above_slot_id,
+            rect,
+            range_start,
+            range_end,
+        } => {
+            let _ = write!(
+                out,
+                "{{\"op\":\"overlay\",\"overlay\":{overlay_id},\"aboveSlot\":{above_slot_id},\"rect\":"
+            );
+            push_rect_json(out, *rect);
+            let _ = write!(
+                out,
+                ",\"rangeStart\":{range_start},\"rangeEnd\":{range_end}}}"
+            );
+        }
+        PlatformViewCommand::DisposeOverlay { overlay_id } => {
+            let _ = write!(
+                out,
+                "{{\"op\":\"disposeOverlay\",\"overlay\":{overlay_id}}}"
+            );
         }
     }
 }
@@ -779,6 +824,547 @@ pub(crate) fn base_clear_color<C>(
         transparent
     } else {
         opaque_surface
+    }
+}
+
+// ---------------------------------------------------------------------
+// Overlay surfaces: the host-testable halves of `crate::ffi_glue`'s overlay
+// host — the switch, the per-overlay layer/surface table, the fold of the
+// differ's overlay ranges, the cut assembly, the present skew window and the
+// present parking slot. Generic over the layer, surface and present types, so
+// their ordering contracts are tested here with no GPU and no UIKit.
+// ---------------------------------------------------------------------
+
+/// The overlay switch's name, shared with the Android and macOS hosts.
+pub(crate) const OVERLAYS_ENV_VAR: &str = "FRUST_OVERLAYS";
+
+/// Whether one value of the overlay switch turns overlays on: blank, `0`,
+/// `off` or `false` (case-insensitive, surrounding whitespace ignored) is
+/// off, anything else on — Android's `media` arm included, which selects a
+/// `SurfaceView` z-order there and means nothing more than "on" here.
+pub(crate) fn overlay_switch_value_on(value: &str) -> bool {
+    let value = value.trim();
+    !(value.is_empty()
+        || value == "0"
+        || value.eq_ignore_ascii_case("off")
+        || value.eq_ignore_ascii_case("false"))
+}
+
+/// Resolve the switch from its sources in priority order — the first one
+/// carrying a non-blank value decides, so a runtime `0` switches off a
+/// baked-in value; none set is off.
+pub(crate) fn overlay_switch_from<'a>(sources: impl IntoIterator<Item = Option<&'a str>>) -> bool {
+    sources
+        .into_iter()
+        .flatten()
+        .find(|value| !value.trim().is_empty())
+        .is_some_and(overlay_switch_value_on)
+}
+
+/// One overlay's native half: the layer its view delivered and the surface
+/// the render thread built on it.
+#[derive(Debug)]
+struct OverlayEntry<L, S> {
+    /// Declared before `layer`: fields drop in declaration order, so even an
+    /// implicit drop releases the surface before the layer is forgotten.
+    surface: Option<S>,
+    layer: L,
+    /// The layer's drawable size, physical px.
+    size: (u32, u32),
+    /// Building a surface on this layer was refused (logged once by the
+    /// caller); retried only for a new layer or a new main surface.
+    refused: bool,
+    /// The render thread took `surface` out to draw it outside the lock and
+    /// owes it back ([`OverlayTable::land`]).
+    in_flight: bool,
+    /// Frames this overlay's engine refused, for the latched log.
+    errors: u32,
+    /// Whether this overlay's first kept-on-main cut was logged.
+    unservable_logged: bool,
+}
+
+/// What [`OverlayTable::take_for_frame`] answers: the surfaces taken out for
+/// the frame (ascending id) and the refusals that call made.
+pub(crate) type FrameTake<S, E> = (Vec<(u64, S)>, Vec<(u64, E)>);
+
+/// What [`OverlayTable::attach`] did with a delivered layer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LayerChange {
+    /// A layer the overlay did not hold: any surface on the previous one was
+    /// dropped first, and the render thread builds a fresh one.
+    Adopted,
+    /// The layer it holds, at a new size; the render thread resizes.
+    Resized,
+    /// The layer it holds, at the size it has.
+    Unchanged,
+    /// A different layer while the old one's surface is in flight on the
+    /// render thread: nothing changed — wait for it to land, then retry.
+    Busy,
+}
+
+/// What [`OverlayTable::detach`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LayerDetach {
+    /// The surface was dropped, then the layer forgotten.
+    Removed,
+    /// No such overlay.
+    Unknown,
+    /// Its surface is in flight on the render thread: nothing changed — wait
+    /// for it to land, then retry.
+    Busy,
+}
+
+/// The live overlays by the differ's overlay id: each one's layer and the
+/// surface built on it.
+///
+/// Shared by the UI thread, which owns the layers (attach, resize, detach),
+/// and the render thread, which builds, resizes and draws the surfaces —
+/// taking the live ones **out** of the table for the length of a frame
+/// ([`Self::take_for_frame`]) and handing them back ([`Self::land`]), so the
+/// table's lock is never held across a drawable acquire. The one invariant
+/// every method keeps: **a surface is dropped before the layer it was built
+/// on is let go** — a replaced or detached layer drops its surface first and
+/// refuses ([`LayerChange::Busy`]/[`LayerDetach::Busy`]) while that surface
+/// is in flight, and [`Self::drop_surfaces`] (the main surface going away)
+/// drops every surface and keeps the layers.
+#[derive(Debug)]
+pub(crate) struct OverlayTable<L, S> {
+    entries: std::collections::BTreeMap<u64, OverlayEntry<L, S>>,
+}
+
+impl<L, S> Default for OverlayTable<L, S> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<L, S> OverlayTable<L, S> {
+    /// An empty table (`const`, for a process-global).
+    pub(crate) const fn new() -> Self {
+        Self {
+            entries: std::collections::BTreeMap::new(),
+        }
+    }
+}
+
+impl<L: Copy + PartialEq, S> OverlayTable<L, S> {
+    /// Overlay `id`'s view delivered `layer` at `size` physical px.
+    pub(crate) fn attach(&mut self, id: u64, layer: L, size: (u32, u32)) -> LayerChange {
+        if let Some(entry) = self.entries.get_mut(&id) {
+            if entry.layer == layer {
+                if entry.size == size {
+                    return LayerChange::Unchanged;
+                }
+                entry.size = size;
+                return LayerChange::Resized;
+            }
+            if entry.in_flight {
+                return LayerChange::Busy;
+            }
+            // Surface first, then the layer it was built on.
+            entry.surface = None;
+        }
+        self.entries.insert(
+            id,
+            OverlayEntry {
+                surface: None,
+                layer,
+                size,
+                refused: false,
+                in_flight: false,
+                errors: 0,
+                unservable_logged: false,
+            },
+        );
+        LayerChange::Adopted
+    }
+
+    /// Overlay `id`'s view is going away: drop its surface, then forget the
+    /// layer.
+    pub(crate) fn detach(&mut self, id: u64) -> LayerDetach {
+        match self.entries.get(&id) {
+            None => LayerDetach::Unknown,
+            Some(entry) if entry.in_flight => LayerDetach::Busy,
+            Some(_) => {
+                if let Some(mut entry) = self.entries.remove(&id) {
+                    entry.surface = None;
+                }
+                LayerDetach::Removed
+            }
+        }
+    }
+
+    /// Whether overlay `id`'s surface is out on the render thread.
+    pub(crate) fn is_in_flight(&self, id: u64) -> bool {
+        self.entries.get(&id).is_some_and(|entry| entry.in_flight)
+    }
+
+    /// The main surface went away: drop every surface held here (they share
+    /// its device and must not outlive its teardown) and keep the layers, so
+    /// the next frame after the main surface returns rebuilds them — and
+    /// retries a layer refused on the old one. Answers how many were dropped.
+    pub(crate) fn drop_surfaces(&mut self) -> usize {
+        let mut dropped = 0;
+        for entry in self.entries.values_mut() {
+            if entry.surface.take().is_some() {
+                dropped += 1;
+            }
+            entry.refused = false;
+        }
+        dropped
+    }
+
+    /// Forget every overlay (teardown, once nothing can be in flight).
+    pub(crate) fn clear(&mut self) {
+        for entry in self.entries.values_mut() {
+            entry.surface = None;
+        }
+        self.entries.clear();
+    }
+
+    /// The render thread's half ahead of a frame: `resize` every live
+    /// surface to its layer's size, `build` one where a layer has none (and
+    /// was not refused), then take every live surface out, marked in flight,
+    /// in ascending id order. Answers them and each refusal this call made
+    /// (the caller logs those; the overlay then stays without a surface — its
+    /// content on the main surface — until a new layer or main surface).
+    pub(crate) fn take_for_frame<E>(
+        &mut self,
+        mut build: impl FnMut(L, (u32, u32)) -> Result<S, E>,
+        mut resize: impl FnMut(&mut S, (u32, u32)),
+    ) -> FrameTake<S, E> {
+        let mut flying = Vec::new();
+        let mut refusals = Vec::new();
+        for (&id, entry) in &mut self.entries {
+            if entry.in_flight {
+                continue;
+            }
+            match entry.surface.as_mut() {
+                Some(surface) => resize(surface, entry.size),
+                None if !entry.refused => match build(entry.layer, entry.size) {
+                    Ok(surface) => entry.surface = Some(surface),
+                    Err(error) => {
+                        entry.refused = true;
+                        refusals.push((id, error));
+                    }
+                },
+                None => {}
+            }
+            if let Some(surface) = entry.surface.take() {
+                entry.in_flight = true;
+                flying.push((id, surface));
+            }
+        }
+        (flying, refusals)
+    }
+
+    /// Hand the surfaces [`Self::take_for_frame`] took back. A surface whose
+    /// overlay is gone meanwhile (unreachable while detach waits for it) is
+    /// dropped here; answers how many were.
+    pub(crate) fn land(&mut self, flying: Vec<(u64, S)>) -> usize {
+        let mut orphaned = 0;
+        for (id, surface) in flying {
+            match self.entries.get_mut(&id) {
+                Some(entry) => {
+                    entry.surface = Some(surface);
+                    entry.in_flight = false;
+                }
+                None => {
+                    drop(surface);
+                    orphaned += 1;
+                }
+            }
+        }
+        orphaned
+    }
+
+    /// Count one engine refusal on overlay `id`; answers the running count
+    /// while it is at most `log_limit` (the caller logs then), `None` past it
+    /// or for an unknown overlay.
+    pub(crate) fn note_error(&mut self, id: u64, log_limit: u32) -> Option<u32> {
+        let entry = self.entries.get_mut(&id)?;
+        entry.errors = entry.errors.saturating_add(1);
+        (entry.errors <= log_limit).then_some(entry.errors)
+    }
+
+    /// Whether overlay `id`'s first kept-on-main cut is still unlogged —
+    /// `true` exactly once per overlay.
+    pub(crate) fn note_unservable(&mut self, id: u64) -> bool {
+        self.entries
+            .get_mut(&id)
+            .is_some_and(|entry| !std::mem::replace(&mut entry.unservable_logged, true))
+    }
+
+    /// The layer and size overlay `id` holds, if any.
+    #[cfg(test)]
+    pub(crate) fn layer(&self, id: u64) -> Option<(L, (u32, u32))> {
+        self.entries.get(&id).map(|entry| (entry.layer, entry.size))
+    }
+
+    /// How many overlays the table tracks (with or without a surface).
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the table tracks no overlay.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+/// One overlay's cut for one frame: its id and the half-open command range of
+/// that frame's scene it draws.
+pub(crate) type OverlayCutSpec = (u64, std::ops::Range<usize>);
+
+/// The overlays' current command ranges, folded on the UI thread from the
+/// differ's `Overlay`/`DisposeOverlay` commands as they are pushed — the
+/// differ announces a range only when it changes, so each painted frame
+/// snapshots the fold ([`Self::cuts`]) and carries it with its scene to the
+/// render thread, which therefore never pairs one frame's ranges with another
+/// frame's commands.
+#[derive(Debug, Default)]
+pub(crate) struct OverlayRanges {
+    ranges: std::collections::BTreeMap<u64, std::ops::Range<usize>>,
+    folded_generation: u64,
+}
+
+impl OverlayRanges {
+    /// An empty fold (`const`, for a process-global).
+    pub(crate) const fn new() -> Self {
+        Self {
+            ranges: std::collections::BTreeMap::new(),
+            folded_generation: 0,
+        }
+    }
+
+    /// Forget everything — a new differ starts its generations and overlay
+    /// ids over.
+    pub(crate) fn reset(&mut self) {
+        self.ranges.clear();
+        self.folded_generation = 0;
+    }
+
+    /// Start folding the differ's backlog at its current `generation`:
+    /// `Some(g)` — fold every command pushed after generation `g` (the
+    /// backlog's `commands_up_to(g)` prefix is already folded), then call
+    /// [`Self::finish_fold`] — or `None` when nothing new was pushed. A
+    /// generation older than the folded one means a new differ, and restarts
+    /// the fold.
+    pub(crate) fn begin_fold(&mut self, generation: u64) -> Option<u64> {
+        if generation < self.folded_generation {
+            self.reset();
+        }
+        (generation != self.folded_generation).then_some(self.folded_generation)
+    }
+
+    /// Fold one `Overlay` command: overlay `id` now draws `range`.
+    pub(crate) fn set(&mut self, id: u64, range: std::ops::Range<usize>) {
+        self.ranges.insert(id, range);
+    }
+
+    /// Fold one `DisposeOverlay` command.
+    pub(crate) fn dispose(&mut self, id: u64) {
+        self.ranges.remove(&id);
+    }
+
+    /// Close a fold [`Self::begin_fold`] opened at `generation`.
+    pub(crate) fn finish_fold(&mut self, generation: u64) {
+        self.folded_generation = generation;
+    }
+
+    /// The ranges as they stand, ordered by range (then id) — what the frame
+    /// painted just now draws.
+    pub(crate) fn cuts(&self) -> Vec<OverlayCutSpec> {
+        let mut cuts: Vec<OverlayCutSpec> = self
+            .ranges
+            .iter()
+            .map(|(&id, range)| (id, range.clone()))
+            .collect();
+        cuts.sort_by_key(|(id, range)| (range.start, range.end, *id));
+        cuts
+    }
+}
+
+/// The cuts one segmented frame draws: one per overlay with a live surface
+/// (`live`), carrying the range its frame carried (`frame`, clamped to the
+/// scene's `len` commands) — or an empty range at the scene's end when the
+/// frame carried none for it (not announced yet, or disposed), which draws a
+/// transparent clear and nothing else. Ordered by range, so the list is the
+/// ascending, disjoint cut list `SurfaceRenderer::encode_segmented` takes. An
+/// overlay the frame names that has no live surface gets no cut: its commands
+/// stay on the main surface, under the native view (the graceful
+/// degradation).
+pub(crate) fn assemble_overlay_cuts(
+    frame: &[OverlayCutSpec],
+    live: impl IntoIterator<Item = u64>,
+    len: usize,
+) -> Vec<OverlayCutSpec> {
+    let mut cuts: Vec<OverlayCutSpec> = live
+        .into_iter()
+        .map(|id| {
+            let range = frame
+                .iter()
+                .find(|(cut, _)| *cut == id)
+                .map(|(_, range)| range.start.min(len)..range.end.min(len))
+                .filter(|range| range.start < range.end)
+                .unwrap_or(len..len);
+            (id, range)
+        })
+        .collect();
+    cuts.sort_by_key(|(id, range)| (range.start, range.end, *id));
+    cuts
+}
+
+/// Rendered overlay frames between two `frust-overlay skew` lines.
+pub(crate) const OVERLAY_SKEW_EVERY: u32 = 120;
+
+/// One `frust-overlay skew` line's worth of numbers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OverlaySkewReport {
+    /// Frames folded into this report.
+    pub(crate) frames: u32,
+    /// Mean main-present → last-overlay-present delta, µs.
+    pub(crate) avg_us: u64,
+    /// Largest delta in the window, µs.
+    pub(crate) max_us: u64,
+    /// Overlays presented in the window's last frame.
+    pub(crate) overlays: usize,
+}
+
+/// Main-versus-overlay present skew, folded per frame and reported every
+/// [`OVERLAY_SKEW_EVERY`] frames — the gap between the main surface's present
+/// call and the last overlay's, read off the log on a device.
+#[derive(Debug, Default)]
+pub(crate) struct OverlaySkew {
+    frames: u32,
+    sum_us: u64,
+    max_us: u64,
+}
+
+impl OverlaySkew {
+    /// An empty window (`const`, for a process-global).
+    pub(crate) const fn new() -> Self {
+        Self {
+            frames: 0,
+            sum_us: 0,
+            max_us: 0,
+        }
+    }
+
+    /// Fold one frame whose last overlay (of `overlays`) presented `delta`
+    /// after its main surface; answers a report every
+    /// [`OVERLAY_SKEW_EVERY`] frames, then starts a new window.
+    pub(crate) fn record(
+        &mut self,
+        delta: std::time::Duration,
+        overlays: usize,
+    ) -> Option<OverlaySkewReport> {
+        let delta = u64::try_from(delta.as_micros()).unwrap_or(u64::MAX);
+        self.frames += 1;
+        self.sum_us = self.sum_us.saturating_add(delta);
+        self.max_us = self.max_us.max(delta);
+        if self.frames < OVERLAY_SKEW_EVERY {
+            return None;
+        }
+        let report = OverlaySkewReport {
+            frames: self.frames,
+            avg_us: self.sum_us / u64::from(self.frames),
+            max_us: self.max_us,
+            overlays,
+        };
+        *self = Self::new();
+        Some(report)
+    }
+}
+
+/// The present parking slot behind present-sync: at most one submitted frame
+/// (its main present and every overlay's) waiting for the UI thread to present
+/// inside its `CATransaction` — `crate::app::PresentHandoff`'s storage, generic
+/// over the parked value so its discipline is host-tested.
+///
+/// The discipline is the fix for a swapchain held across an acquire or a
+/// configure (wgpu reports both as validation errors): the render thread
+/// **waits for the slot to drain** ([`Self::wait_drained`]) before it acquires
+/// or reconfigures anything, dropping a leftover only once a bounded wait has
+/// expired; the UI thread **presents while holding the slot**
+/// ([`Self::take_with`]), so a frame it took can never still be in its hands
+/// when the render thread next touches a swapchain; and every lifecycle door
+/// clears it ([`Self::clear`]).
+#[derive(Debug, Default)]
+pub(crate) struct PresentSlot<T> {
+    slot: std::sync::Mutex<Option<T>>,
+    drained: std::sync::Condvar,
+}
+
+impl<T> PresentSlot<T> {
+    /// An empty slot.
+    pub(crate) fn new() -> Self {
+        Self {
+            slot: std::sync::Mutex::new(None),
+            drained: std::sync::Condvar::new(),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<T>> {
+        // Poisoning needs a panic while the slot is held — a take/store of an
+        // `Option` or a present — which leaves no invariant to corrupt.
+        self.slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Park `value` (render side), answering the value it displaced — a frame
+    /// the UI thread never presented, which the caller drops. Empty after a
+    /// [`Self::wait_drained`], so `None` in practice.
+    pub(crate) fn store(&self, value: T) -> Option<T> {
+        self.lock().replace(value)
+    }
+
+    /// Take the parked value and consume it with `present` **while still
+    /// holding the slot** (UI side), then wake a render thread waiting for
+    /// the slot to drain. `None` when nothing was parked.
+    pub(crate) fn take_with<R>(&self, present: impl FnOnce(T) -> R) -> Option<R> {
+        let mut slot = self.lock();
+        let answer = slot.take().map(present);
+        drop(slot);
+        self.drained.notify_all();
+        answer
+    }
+
+    /// Wait up to `timeout` for the UI thread to take the parked value
+    /// (render side, before an acquire or a configure), then answer whatever
+    /// is still parked — taken out of the slot, for the caller to drop: a
+    /// frame the UI thread did not present in time. `None` when the slot was
+    /// or became empty.
+    pub(crate) fn wait_drained(&self, timeout: std::time::Duration) -> Option<T> {
+        let slot = self.lock();
+        let (mut slot, _) = self
+            .drained
+            .wait_timeout_while(slot, timeout, |parked| parked.is_some())
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        slot.take()
+    }
+
+    /// Take whatever is parked without presenting it (a lifecycle door), and
+    /// wake a waiter.
+    pub(crate) fn clear(&self) -> Option<T> {
+        let taken = self.lock().take();
+        self.drained.notify_all();
+        taken
+    }
+
+    /// Edit the parked value in place (dropping one overlay's present).
+    pub(crate) fn with_parked(&self, edit: impl FnOnce(&mut T)) {
+        if let Some(parked) = self.lock().as_mut() {
+            edit(parked);
+        }
+    }
+
+    /// Whether a value is parked.
+    #[cfg(test)]
+    pub(crate) fn is_parked(&self) -> bool {
+        self.lock().is_some()
     }
 }
 
@@ -1411,5 +1997,382 @@ mod tests {
         // (if commands-empty) JSON object, not the None fast path.
         let json = platform_view_commands_json(2, 1, &[]).unwrap();
         assert_eq!(json, r#"{"generation":2,"commands":[]}"#);
+    }
+
+    // --- Overlay ops (JSON), byte-identical to the Android shell's --------
+
+    fn overlay(
+        overlay_id: u64,
+        above_slot_id: u64,
+        rect: PvRect,
+        range: std::ops::Range<u64>,
+    ) -> PlatformViewCommand {
+        PlatformViewCommand::Overlay {
+            overlay_id,
+            above_slot_id,
+            rect,
+            range_start: range.start,
+            range_end: range.end,
+        }
+    }
+
+    #[test]
+    fn platform_view_json_overlay_golden() {
+        let json = platform_view_commands_json(
+            8,
+            0,
+            &[overlay(2, 7, rect(0.0, 0.0, 1080.0, 2340.0), 41..96)],
+        )
+        .unwrap();
+        assert_eq!(
+            json,
+            "{\"generation\":8,\"commands\":[{\"op\":\"overlay\",\"overlay\":2,\"aboveSlot\":7,\"rect\":[0,0,1080,2340],\"rangeStart\":41,\"rangeEnd\":96}]}"
+        );
+    }
+
+    #[test]
+    fn platform_view_json_dispose_overlay_golden() {
+        let json = platform_view_commands_json(
+            9,
+            0,
+            &[PlatformViewCommand::DisposeOverlay { overlay_id: 2 }],
+        )
+        .unwrap();
+        assert_eq!(
+            json,
+            "{\"generation\":9,\"commands\":[{\"op\":\"disposeOverlay\",\"overlay\":2}]}"
+        );
+    }
+
+    #[test]
+    fn platform_view_json_overlay_ops_serialise_to_exact_strings() {
+        let cases = [
+            (
+                overlay(1, 3, rect(0.0, 0.0, 720.5, 1600.0), 12..12),
+                "{\"op\":\"overlay\",\"overlay\":1,\"aboveSlot\":3,\"rect\":[0,0,720.5,1600],\"rangeStart\":12,\"rangeEnd\":12}",
+            ),
+            (
+                overlay(
+                    u64::from(u32::MAX) + 5,
+                    42,
+                    rect(10.0, 20.0, 30.0, 40.0),
+                    0..9000,
+                ),
+                "{\"op\":\"overlay\",\"overlay\":4294967300,\"aboveSlot\":42,\"rect\":[10,20,30,40],\"rangeStart\":0,\"rangeEnd\":9000}",
+            ),
+            (
+                PlatformViewCommand::DisposeOverlay { overlay_id: 17 },
+                "{\"op\":\"disposeOverlay\",\"overlay\":17}",
+            ),
+        ];
+        for (op, expected) in cases {
+            let json = platform_view_commands_json(1, 0, std::slice::from_ref(&op)).unwrap();
+            assert_eq!(
+                json,
+                format!("{{\"generation\":1,\"commands\":[{expected}]}}")
+            );
+        }
+    }
+
+    /// The overlay ops are additive: a batch carrying them serialises the
+    /// four frozen ops exactly as before, in order, around them — the same
+    /// golden string the Android shell pins.
+    #[test]
+    fn platform_view_json_overlay_ops_leave_the_frozen_ops_unchanged() {
+        let frozen = [
+            PlatformViewCommand::Create {
+                slot_id: 3,
+                view_type: "dev.frust.XFactory".to_string(),
+                params_json: String::new(),
+                interactive: true,
+            },
+            PlatformViewCommand::Update {
+                slot_id: 3,
+                rect: rect(0.0, 0.0, 10.0, 10.0),
+                clip: None,
+                visible: true,
+                shields: vec![rect(1.0, 2.0, 3.0, 4.0)],
+            },
+            PlatformViewCommand::UpdateParams {
+                slot_id: 3,
+                params_json: "{}".to_string(),
+            },
+            PlatformViewCommand::Dispose { slot_id: 3 },
+        ];
+        let alone = platform_view_commands_json(4, 0, &frozen).unwrap();
+        let mut mixed = frozen.to_vec();
+        mixed.insert(2, overlay(1, 3, rect(0.0, 0.0, 10.0, 10.0), 5..8));
+        mixed.push(PlatformViewCommand::DisposeOverlay { overlay_id: 1 });
+        let with_overlays = platform_view_commands_json(4, 0, &mixed).unwrap();
+        let overlay_op = "{\"op\":\"overlay\",\"overlay\":1,\"aboveSlot\":3,\"rect\":[0,0,10,10],\"rangeStart\":5,\"rangeEnd\":8},";
+        let dispose_op = ",{\"op\":\"disposeOverlay\",\"overlay\":1}";
+        assert_eq!(
+            with_overlays
+                .replacen(overlay_op, "", 1)
+                .replacen(dispose_op, "", 1),
+            alone
+        );
+        assert_eq!(
+            alone,
+            "{\"generation\":4,\"commands\":[{\"op\":\"create\",\"slot\":3,\"viewType\":\"dev.frust.XFactory\",\"params\":\"\",\"interactive\":true},{\"op\":\"update\",\"slot\":3,\"rect\":[0,0,10,10],\"clip\":null,\"visible\":true,\"shields\":[[1,2,3,4]]},{\"op\":\"updateParams\",\"slot\":3,\"params\":\"{}\"},{\"op\":\"dispose\",\"slot\":3}]}"
+        );
+    }
+
+    #[test]
+    fn overlay_rect_json_sanitizes_non_finite_components() {
+        let json = platform_view_commands_json(
+            1,
+            0,
+            &[overlay(1, 2, rect(f64::NAN, 0.0, f64::INFINITY, 4.0), 0..1)],
+        )
+        .unwrap();
+        assert!(json.contains("\"rect\":[0,0,0,4]"), "{json}");
+    }
+
+    // --- Overlay switch ------------------------------------------------
+
+    #[test]
+    fn overlay_switch_reads_the_value() {
+        for off in ["", "  ", "0", "off", "OFF", "false", " False "] {
+            assert!(!overlay_switch_value_on(off), "{off:?}");
+        }
+        for on in ["1", "on", "yes", "3", "media", " Media "] {
+            assert!(overlay_switch_value_on(on), "{on:?}");
+        }
+    }
+
+    #[test]
+    fn overlay_switch_first_set_source_decides() {
+        assert!(!overlay_switch_from([None, None, None]));
+        // A runtime `0` outranks a baked-in value.
+        assert!(!overlay_switch_from([Some("0"), Some("1"), None]));
+        assert!(overlay_switch_from([None, Some("1"), Some("0")]));
+        // A blank source is not set; the spike alias answers last.
+        assert!(overlay_switch_from([Some(" "), None, Some("1")]));
+    }
+
+    // --- Overlay table -------------------------------------------------
+
+    /// A surface double that logs its own drop, so the table's
+    /// surface-before-layer ordering is observable.
+    struct Tracked {
+        name: String,
+        log: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+        size: (u32, u32),
+    }
+
+    impl Drop for Tracked {
+        fn drop(&mut self) {
+            self.log.borrow_mut().push(format!("drop {}", self.name));
+        }
+    }
+
+    type Log = std::rc::Rc<std::cell::RefCell<Vec<String>>>;
+
+    fn build_on(log: &Log) -> impl FnMut(u32, (u32, u32)) -> Result<Tracked, String> + '_ {
+        move |layer, size| {
+            if layer == 0 {
+                return Err("refused".to_string());
+            }
+            log.borrow_mut().push(format!("build {layer}"));
+            Ok(Tracked {
+                name: format!("surface@{layer}"),
+                log: log.clone(),
+                size,
+            })
+        }
+    }
+
+    fn resize(surface: &mut Tracked, size: (u32, u32)) {
+        surface.size = size;
+    }
+
+    #[test]
+    fn overlay_table_attach_builds_on_the_render_thread_and_resizes_in_place() {
+        let log = Log::default();
+        let mut table: OverlayTable<u32, Tracked> = OverlayTable::new();
+        assert_eq!(table.attach(1, 10, (100, 200)), LayerChange::Adopted);
+        assert_eq!(table.attach(1, 10, (100, 200)), LayerChange::Unchanged);
+        let (flying, refusals) = table.take_for_frame(build_on(&log), resize);
+        assert!(refusals.is_empty());
+        assert_eq!(flying.len(), 1);
+        assert!(table.is_in_flight(1));
+        // The same layer at a new size is a resize, even mid-frame.
+        assert_eq!(table.attach(1, 10, (300, 400)), LayerChange::Resized);
+        assert_eq!(table.land(flying), 0);
+        let (flying, _) = table.take_for_frame(build_on(&log), resize);
+        assert_eq!(flying[0].1.size, (300, 400));
+        table.land(flying);
+        assert_eq!(log.borrow().as_slice(), ["build 10"]);
+    }
+
+    #[test]
+    fn overlay_table_drops_the_surface_before_the_layer_goes() {
+        let log = Log::default();
+        let mut table: OverlayTable<u32, Tracked> = OverlayTable::new();
+        table.attach(1, 10, (1, 1));
+        let (flying, _) = table.take_for_frame(build_on(&log), resize);
+        // In flight: neither a replacement layer nor a detach may proceed.
+        assert_eq!(table.attach(1, 11, (1, 1)), LayerChange::Busy);
+        assert_eq!(table.detach(1), LayerDetach::Busy);
+        assert_eq!(table.layer(1), Some((10, (1, 1))));
+        table.land(flying);
+        // Landed: the replacement drops the old surface first.
+        assert_eq!(table.attach(1, 11, (1, 1)), LayerChange::Adopted);
+        assert_eq!(
+            log.borrow().last().map(String::as_str),
+            Some("drop surface@10")
+        );
+        let (flying, _) = table.take_for_frame(build_on(&log), resize);
+        table.land(flying);
+        assert_eq!(table.detach(1), LayerDetach::Removed);
+        assert_eq!(
+            log.borrow().last().map(String::as_str),
+            Some("drop surface@11")
+        );
+        assert_eq!(table.detach(1), LayerDetach::Unknown);
+        assert!(table.is_empty());
+    }
+
+    #[test]
+    fn overlay_table_follows_the_main_surface_and_refuses_once_per_layer() {
+        let log = Log::default();
+        let mut table: OverlayTable<u32, Tracked> = OverlayTable::new();
+        table.attach(1, 10, (1, 1));
+        table.attach(2, 0, (1, 1));
+        let (flying, refusals) = table.take_for_frame(build_on(&log), resize);
+        assert_eq!(refusals, vec![(2, "refused".to_string())]);
+        assert_eq!(flying.iter().map(|(id, _)| *id).collect::<Vec<_>>(), [1]);
+        table.land(flying);
+        // A refused layer is not retried frame after frame...
+        let (flying, refusals) = table.take_for_frame(build_on(&log), resize);
+        assert!(refusals.is_empty());
+        table.land(flying);
+        // ...but the main surface going away drops the built surfaces, keeps
+        // the layers, and retries the refusal on the next main surface.
+        assert_eq!(table.drop_surfaces(), 1);
+        assert_eq!(table.len(), 2);
+        let (flying, refusals) = table.take_for_frame(build_on(&log), resize);
+        assert_eq!(refusals.len(), 1);
+        table.land(flying);
+        assert_eq!(
+            log.borrow().as_slice(),
+            ["build 10", "drop surface@10", "build 10"]
+        );
+    }
+
+    #[test]
+    fn overlay_table_latches_error_and_unservable_logging() {
+        let mut table: OverlayTable<u32, Tracked> = OverlayTable::new();
+        table.attach(1, 10, (1, 1));
+        assert_eq!(table.note_error(1, 2), Some(1));
+        assert_eq!(table.note_error(1, 2), Some(2));
+        assert_eq!(table.note_error(1, 2), None);
+        assert_eq!(table.note_error(9, 2), None);
+        assert!(table.note_unservable(1));
+        assert!(!table.note_unservable(1));
+        assert!(!table.note_unservable(9));
+    }
+
+    // --- Range fold and cut assembly ----------------------------------
+
+    #[test]
+    fn overlay_ranges_fold_only_what_is_new_and_restart_for_a_new_differ() {
+        let mut ranges = OverlayRanges::new();
+        assert_eq!(ranges.begin_fold(0), None);
+        assert_eq!(ranges.begin_fold(3), Some(0));
+        ranges.set(2, 40..50);
+        ranges.set(1, 10..20);
+        ranges.finish_fold(3);
+        assert_eq!(ranges.cuts(), vec![(1, 10..20), (2, 40..50)]);
+        assert_eq!(ranges.begin_fold(3), None);
+        assert_eq!(ranges.begin_fold(5), Some(3));
+        ranges.dispose(1);
+        ranges.finish_fold(5);
+        assert_eq!(ranges.cuts(), vec![(2, 40..50)]);
+        // An older generation is a fresh differ: start over.
+        assert_eq!(ranges.begin_fold(1), Some(0));
+        assert!(ranges.cuts().is_empty());
+    }
+
+    #[test]
+    fn overlay_cuts_pair_live_surfaces_with_their_frame() {
+        let frame = [(1, 10..20), (2, 30..90), (3, 5..8)];
+        // Overlay 3 has no live surface: no cut, its content stays on main.
+        // Overlay 4 is live but not in the frame: a transparent clear at the
+        // end. Overlay 2 is clamped to the scene.
+        assert_eq!(
+            assemble_overlay_cuts(&frame, [1, 2, 4], 60),
+            vec![(1, 10..20), (2, 30..60), (4, 60..60)]
+        );
+        assert!(assemble_overlay_cuts(&frame, [], 60).is_empty());
+    }
+
+    #[test]
+    fn overlay_skew_reports_every_window() {
+        let mut skew = OverlaySkew::new();
+        for _ in 1..OVERLAY_SKEW_EVERY {
+            assert_eq!(skew.record(std::time::Duration::from_micros(100), 2), None);
+        }
+        assert_eq!(
+            skew.record(std::time::Duration::from_micros(220), 2),
+            Some(OverlaySkewReport {
+                frames: OVERLAY_SKEW_EVERY,
+                avg_us: (100 * u64::from(OVERLAY_SKEW_EVERY - 1) + 220)
+                    / u64::from(OVERLAY_SKEW_EVERY),
+                max_us: 220,
+                overlays: 2,
+            })
+        );
+        // A new window starts empty.
+        assert_eq!(skew.record(std::time::Duration::ZERO, 1), None);
+    }
+
+    // --- Present parking slot ------------------------------------------
+
+    #[test]
+    fn present_slot_presents_under_the_slot_and_drains_for_the_render_side() {
+        let slot: PresentSlot<u64> = PresentSlot::new();
+        assert_eq!(slot.wait_drained(std::time::Duration::ZERO), None);
+        assert_eq!(slot.store(7), None);
+        assert!(slot.is_parked());
+        assert_eq!(slot.take_with(|frame| frame * 2), Some(14));
+        assert!(!slot.is_parked());
+        assert_eq!(slot.take_with(|frame| frame), None);
+    }
+
+    #[test]
+    fn present_slot_waits_for_the_ui_thread_before_an_acquire() {
+        let slot = std::sync::Arc::new(PresentSlot::<u64>::new());
+        slot.store(1);
+        let ui = {
+            let slot = std::sync::Arc::clone(&slot);
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                slot.take_with(|frame| frame)
+            })
+        };
+        // The render side waits for the present instead of acquiring over a
+        // parked frame: the UI thread presented it, nothing is left to drop.
+        assert_eq!(slot.wait_drained(std::time::Duration::from_secs(5)), None);
+        assert_eq!(ui.join().unwrap(), Some(1));
+    }
+
+    #[test]
+    fn present_slot_drops_a_frame_the_ui_thread_never_took() {
+        let slot: PresentSlot<u64> = PresentSlot::new();
+        slot.store(3);
+        // Bounded: past the wait, the leftover comes out for the caller to
+        // drop, so the render side never acquires with it parked.
+        assert_eq!(
+            slot.wait_drained(std::time::Duration::from_millis(5)),
+            Some(3)
+        );
+        assert!(!slot.is_parked());
+        slot.store(4);
+        assert_eq!(slot.store(5), Some(4));
+        slot.with_parked(|frame| *frame += 1);
+        assert_eq!(slot.clear(), Some(6));
+        assert_eq!(slot.clear(), None);
     }
 }

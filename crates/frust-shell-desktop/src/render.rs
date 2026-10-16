@@ -41,6 +41,14 @@
 //! ([`ShellUserEvent::RenderRecreateSurface`]) and the UI thread re-runs the
 //! detached creation — keeping winit's dirty-driven `ControlFlow::Wait` model
 //! (idle CPU near zero).
+//!
+//! # Overlay surfaces (macOS, `FRUST_OVERLAYS`)
+//!
+//! With the switch on, each frame carries the overlay cuts its scene was cut
+//! at, and the render side draws it segmented onto the main surface plus one
+//! `OverlaySurface` per published overlay layer (see the *Overlay surfaces*
+//! section below). Building that surface from the `CAMetalLayer*` is this
+//! crate's one `unsafe` block, confined to [`build_overlay_surface`].
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -69,6 +77,7 @@ use winit::event_loop::EventLoopProxy;
 use winit::window::Window;
 
 use crate::app_handler::ShellUserEvent;
+use crate::platform_view::OverlayCutSpec;
 
 /// A shared [`Window`] handle.
 type WindowHandle = Arc<Window>;
@@ -93,6 +102,10 @@ const DESTROY_SURFACE_BARRIER_DEADLINE: Duration = Duration::from_secs(5);
 pub(crate) struct PaintedScene {
     scene: Scene,
     base_color: peniko::Color,
+    /// The overlay cuts this very scene was cut at (empty with overlays off),
+    /// so the render side never pairs one frame's ranges with another's
+    /// commands.
+    overlay_cuts: Vec<OverlayCutSpec>,
 }
 
 /// The `SurfaceCreated` payload the UI thread hands the render thread — the `W`
@@ -192,6 +205,7 @@ impl FrameExecutor {
     pub(crate) fn destroy_surface(&mut self) {
         match self {
             FrameExecutor::Inline(inline) => {
+                drop_overlay_surfaces();
                 inline.renderer.on_surface_destroyed();
                 // The torn-down engine held no page the next surface will:
                 // publish the empty ledger now, so the first paint after a
@@ -240,6 +254,9 @@ impl FrameExecutor {
     /// the split's [`FrameMeta`]; inline ignores them. `paint_serial` is the
     /// paint's `PaintOutcome::paint_serial`, named to the renderer before it
     /// encodes this scene on either path (it rides the split's [`FrameMeta`]).
+    /// `overlay_cuts` are the overlays' ranges in this scene
+    /// (`crate::platform_view::DesktopPlatformViews::overlay_cuts`), empty with
+    /// overlays off.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn submit_frame(
         &mut self,
@@ -250,16 +267,23 @@ impl FrameExecutor {
         frame_time: FrameTime,
         size: SurfaceSize,
         paint_serial: u64,
+        overlay_cuts: Vec<OverlayCutSpec>,
     ) {
         match self {
-            FrameExecutor::Inline(inline) => {
-                inline.submit_frame(window, scene, base_color, ui_spans, paint_serial)
-            }
+            FrameExecutor::Inline(inline) => inline.submit_frame(
+                window,
+                scene,
+                base_color,
+                ui_spans,
+                paint_serial,
+                &overlay_cuts,
+            ),
             FrameExecutor::Split(split) => {
                 let replacement = split.take_reusable_scene();
                 let painted = PaintedScene {
                     scene: std::mem::replace(scene, replacement),
                     base_color,
+                    overlay_cuts,
                 };
                 split.submit_frame(painted, ui_spans, frame_time, size, paint_serial);
             }
@@ -347,6 +371,8 @@ impl InlineExecutor {
     fn ensure_surface(&mut self, window: &WindowHandle, size: SurfaceSize) -> Result<()> {
         // Inline runs on the UI thread, so the combined create-and-configure
         // `on_surface_created` (which reads the window handle) is fine here.
+        // Overlay surfaces share the device the new surface may replace.
+        drop_overlay_surfaces();
         let hit = load_pipeline_cache(&mut self.renderer);
         pollster::block_on(self.renderer.on_surface_created(
             &mut self.render_cx,
@@ -374,7 +400,14 @@ impl InlineExecutor {
         base_color: peniko::Color,
         ui_spans: UiSpans,
         paint_serial: u64,
+        overlay_cuts: &[OverlayCutSpec],
     ) {
+        let mut overlays = take_frame_overlays(
+            &self.renderer,
+            &mut self.render_cx,
+            overlay_cuts,
+            scene.commands().len(),
+        );
         let outcome = render_frame(
             &mut self.renderer,
             &self.render_cx,
@@ -387,7 +420,11 @@ impl InlineExecutor {
             &mut self.startup,
             &mut self.first_encode_recorded,
             &mut self.first_frame_recorded,
+            overlays.as_mut(),
         );
+        if let Some(overlays) = overlays {
+            land_frame_overlays(overlays);
+        }
         match outcome {
             // Stale swapchain (mid-resize): reconfigured internally — redraw
             // against the fresh configuration.
@@ -397,6 +434,7 @@ impl InlineExecutor {
             // Inline is on the UI thread, so `on_surface_created` works here.
             Ok(FrameOutcome::SurfaceLost) => {
                 let size = window.inner_size();
+                drop_overlay_surfaces();
                 match pollster::block_on(self.renderer.on_surface_created(
                     &mut self.render_cx,
                     window.clone(),
@@ -641,6 +679,9 @@ fn render_loop(
                         detached,
                         window: w,
                     } = surface;
+                    // The overlays share the device the new surface may
+                    // replace: rebuilt on their layers by the next frame.
+                    drop_overlay_surfaces();
                     if let Err(err) = install_detached(
                         &mut renderer,
                         &mut render_cx,
@@ -665,6 +706,7 @@ fn render_loop(
                     note_scale(&mut renderer, size.scale);
                 }
                 RenderCommand::SurfaceDestroyed { ack } => {
+                    drop_overlay_surfaces();
                     renderer.on_surface_destroyed();
                     // The empty ledger is published BEFORE the barrier is
                     // acknowledged, so the UI thread's first paint after a
@@ -696,6 +738,15 @@ fn render_loop(
                     startup.record(SPAN_FIRST_REBUILD_DONE);
                     first_rebuild_recorded = true;
                 }
+                // Overlay surfaces (`FRUST_OVERLAYS`, macOS): built/resized
+                // and taken out for this frame, which then renders segmented.
+                // `None` keeps the single-surface tail unchanged.
+                let mut overlays = take_frame_overlays(
+                    &renderer,
+                    &mut render_cx,
+                    &frame.scene.overlay_cuts,
+                    frame.scene.scene.commands().len(),
+                );
                 let outcome = render_frame(
                     &mut renderer,
                     &render_cx,
@@ -708,7 +759,13 @@ fn render_loop(
                     &mut startup,
                     &mut first_encode_recorded,
                     &mut first_frame_recorded,
+                    overlays.as_mut(),
                 );
+                // Presented: hand the overlay surfaces back (a withdraw
+                // waiting on one proceeds).
+                if let Some(overlays) = overlays {
+                    land_frame_overlays(overlays);
+                }
                 match outcome {
                     // Stale swapchain: reconfigured internally — ask the UI thread
                     // (via the proxy) to repaint so a fresh scene is handed off,
@@ -900,6 +957,10 @@ fn publish_retained(renderer: &mut SurfaceRenderer) -> bool {
 /// nothing) — the caller differs only in *how* it requests the follow-up redraw
 /// (UI-side `request_redraw` inline; the proxy in the split). Shared by both
 /// paths so the frame-pipeline logic is not forked.
+///
+/// `overlays` (macOS, `FRUST_OVERLAYS`) makes the frame segmented — encoded
+/// with the overlays' cuts, submitted once for every target, presented main
+/// first — and `None` keeps the single-surface tail exactly as it was.
 #[allow(clippy::too_many_arguments)]
 fn render_frame(
     renderer: &mut SurfaceRenderer,
@@ -913,6 +974,7 @@ fn render_frame(
     startup: &mut StartupSpans,
     first_encode_recorded: &mut bool,
     first_frame_recorded: &mut bool,
+    mut overlays: Option<&mut FrameOverlays>,
 ) -> Result<FrameOutcome> {
     // Install the platform importers once the device exists; a no-op on every
     // later frame.
@@ -928,7 +990,12 @@ fn render_frame(
     // once it is committed names it (see `SurfaceRenderer::note_scene_serial`).
     renderer.note_scene_serial(paint_serial);
     let encode_start = Instant::now();
-    let encode_outcome = renderer.encode(render_cx, scene, base_color);
+    let encode_outcome = match overlays.as_deref() {
+        None => renderer.encode(render_cx, scene, base_color),
+        Some(overlays) => {
+            renderer.encode_segmented(render_cx, scene, base_color, &overlays.ranges())
+        }
+    };
     let encode_dur = encode_start.elapsed();
 
     if matches!(encode_outcome, Ok(EncodeOutcome::Encoded)) && !*first_encode_recorded {
@@ -950,7 +1017,10 @@ fn render_frame(
     // Submit span (blit + queue-submit + present).
     let submit_start = Instant::now();
     let render_outcome = match acquire_outcome {
-        Ok(AcquireOutcome::Acquired) => renderer.submit(render_cx),
+        Ok(AcquireOutcome::Acquired) => match overlays.as_mut() {
+            None => renderer.submit(render_cx),
+            Some(overlays) => submit_with_overlays(renderer, render_cx, overlays),
+        },
         Ok(AcquireOutcome::Reconfigured) => Ok(FrameOutcome::Redraw),
         Ok(AcquireOutcome::Lost) => Ok(FrameOutcome::SurfaceLost),
         Ok(AcquireOutcome::Skipped) => Ok(FrameOutcome::Skipped),
@@ -997,4 +1067,743 @@ fn render_frame(
     }
 
     render_outcome
+}
+
+// ---------------------------------------------------------------------------
+// Overlay surfaces (`FRUST_OVERLAYS`, macOS only, default off)
+// ---------------------------------------------------------------------------
+//
+// A macOS window is Mode A: its hosted `NSView`s sit above the wgpu surface,
+// so frust paint recorded after a slot hides behind it. With the switch on the
+// UI thread cuts each frame at its slots (`crate::platform_view`), the macOS
+// host stacks an input-transparent `CAMetalLayer` view directly above each
+// overlay's slot and publishes its layer here
+// (`crate::extensions::publish_overlay_layer`), and the render side builds an
+// `OverlaySurface` on it and draws the frame segmented — one compiled frame,
+// one submit — presenting main, then the overlays bottom to top.
+
+/// The overlay switch's name, shared with the mobile hosts.
+const OVERLAYS_ENV_VAR: &str = "FRUST_OVERLAYS";
+
+/// Engine refusals logged per overlay before its log goes quiet.
+const OVERLAY_ERRORS_LOGGED: u32 = 3;
+
+/// Rendered overlay frames between two `frust-overlay skew` lines.
+const OVERLAY_SKEW_EVERY: u32 = 120;
+
+/// How long the UI thread waits for an in-flight overlay surface before
+/// withdrawing its layer anyway: two of `nextDrawable`'s one-second timeouts.
+/// Reached only if the render thread died mid-frame — a live one hands its
+/// surfaces back within a frame.
+const OVERLAY_LANDING_WAIT: Duration = Duration::from_secs(2);
+
+/// Whether one value of the switch turns overlays on: blank, `0`, `off` or
+/// `false` (case-insensitive, whitespace ignored) is off, anything else on —
+/// Android's `media` arm included, which means nothing more than "on" here.
+pub(crate) fn overlay_switch_value_on(value: &str) -> bool {
+    let value = value.trim();
+    !(value.is_empty()
+        || value == "0"
+        || value.eq_ignore_ascii_case("off")
+        || value.eq_ignore_ascii_case("false"))
+}
+
+/// Resolve the switch from its sources in priority order — the first
+/// non-blank one decides (a runtime `0` switches a baked-in value off); none
+/// set is off.
+pub(crate) fn overlay_switch_from<'a>(sources: impl IntoIterator<Item = Option<&'a str>>) -> bool {
+    sources
+        .into_iter()
+        .flatten()
+        .find(|value| !value.trim().is_empty())
+        .is_some_and(overlay_switch_value_on)
+}
+
+/// Whether overlay surfaces are on — macOS only (the one desktop host with an
+/// overlay view), `FRUST_OVERLAYS` at runtime, then as a compile-time
+/// `--define`, then the `FRUST_OVERLAY_SPIKE` alias. Read once and cached.
+pub(crate) fn overlays_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        if !cfg!(target_os = "macos") {
+            return false;
+        }
+        let runtime = std::env::var(OVERLAYS_ENV_VAR).ok();
+        let alias = frust_render::overlay::overlay_spike_value();
+        overlay_switch_from([
+            runtime.as_deref(),
+            option_env!("FRUST_OVERLAYS"),
+            alias.as_deref(),
+        ])
+    })
+}
+
+/// One overlay's two halves: the layer the macOS host published and the
+/// surface the render side built on it.
+#[derive(Debug)]
+struct OverlayEntry<S> {
+    /// Declared before `layer`: fields drop in order, so even an implicit drop
+    /// releases the surface before the layer is forgotten.
+    surface: Option<S>,
+    /// The `CAMetalLayer*`'s address (an exposed-provenance integer, so the
+    /// table needs no `Send` claim of its own).
+    layer: usize,
+    /// The layer's drawable size, physical px.
+    size: (u32, u32),
+    /// Building on this layer was refused (logged once); retried only for a
+    /// new layer or a new main surface.
+    refused: bool,
+    /// Taken out by the render side for the length of a frame.
+    in_flight: bool,
+    /// Engine refusals, for the latched log.
+    errors: u32,
+    /// Whether the first kept-on-main cut was logged.
+    unservable_logged: bool,
+}
+
+/// What [`OverlayTable::publish`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LayerChange {
+    /// A new layer: any surface on the previous one was dropped first.
+    Adopted,
+    /// The layer held, at a new size.
+    Resized,
+    /// The layer held, at its size.
+    Unchanged,
+    /// A different layer while the old one's surface is in flight: nothing
+    /// changed — wait for it to land, then retry.
+    Busy,
+}
+
+/// The published overlay layers by the differ's overlay id, with the surface
+/// built on each — shared by the UI thread (publish/withdraw) and the render
+/// side (build, resize, draw). The render side takes the live surfaces **out**
+/// for the length of a frame ([`Self::take_for_frame`]) and hands them back
+/// ([`Self::land`]), so the lock is never held across a drawable acquire; a
+/// withdraw waits for its surface to land, then drops it before the layer may
+/// go. The invariant every method keeps: a surface is dropped before its layer
+/// is let go.
+#[derive(Debug)]
+pub(crate) struct OverlayTable<S> {
+    entries: std::collections::BTreeMap<u64, OverlayEntry<S>>,
+}
+
+impl<S> OverlayTable<S> {
+    /// An empty table (`const`, for the process-global).
+    pub(crate) const fn new() -> Self {
+        Self {
+            entries: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Overlay `id`'s layer at `size` physical px.
+    pub(crate) fn publish(&mut self, id: u64, layer: usize, size: (u32, u32)) -> LayerChange {
+        if let Some(entry) = self.entries.get_mut(&id) {
+            if entry.layer == layer {
+                if entry.size == size {
+                    return LayerChange::Unchanged;
+                }
+                entry.size = size;
+                return LayerChange::Resized;
+            }
+            if entry.in_flight {
+                return LayerChange::Busy;
+            }
+            entry.surface = None;
+        }
+        self.entries.insert(
+            id,
+            OverlayEntry {
+                surface: None,
+                layer,
+                size,
+                refused: false,
+                in_flight: false,
+                errors: 0,
+                unservable_logged: false,
+            },
+        );
+        LayerChange::Adopted
+    }
+
+    /// Whether overlay `id`'s surface is out on the render side.
+    pub(crate) fn is_in_flight(&self, id: u64) -> bool {
+        self.entries.get(&id).is_some_and(|entry| entry.in_flight)
+    }
+
+    /// Drop overlay `id`'s surface, then forget its layer; `false` for an
+    /// unknown overlay or one in flight (wait, then retry).
+    pub(crate) fn withdraw(&mut self, id: u64) -> bool {
+        if self.is_in_flight(id) {
+            return false;
+        }
+        match self.entries.remove(&id) {
+            Some(mut entry) => {
+                entry.surface = None;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The main surface went away: drop every surface held here and keep the
+    /// layers, so the next frame rebuilds them (retrying a refusal).
+    pub(crate) fn drop_surfaces(&mut self) -> usize {
+        let mut dropped = 0;
+        for entry in self.entries.values_mut() {
+            if entry.surface.take().is_some() {
+                dropped += 1;
+            }
+            entry.refused = false;
+        }
+        dropped
+    }
+
+    /// Ahead of a frame: resize every live surface, build one where a layer
+    /// has none (and was not refused), then take the live ones out, marked in
+    /// flight, ascending id. Answers them and this call's refusals.
+    pub(crate) fn take_for_frame<E>(
+        &mut self,
+        mut build: impl FnMut(usize, (u32, u32)) -> Result<S, E>,
+        mut resize: impl FnMut(&mut S, (u32, u32)),
+    ) -> OverlayTake<S, E> {
+        let mut flying = Vec::new();
+        let mut refusals = Vec::new();
+        for (&id, entry) in &mut self.entries {
+            if entry.in_flight {
+                continue;
+            }
+            match entry.surface.as_mut() {
+                Some(surface) => resize(surface, entry.size),
+                None if !entry.refused => match build(entry.layer, entry.size) {
+                    Ok(surface) => entry.surface = Some(surface),
+                    Err(error) => {
+                        entry.refused = true;
+                        refusals.push((id, error));
+                    }
+                },
+                None => {}
+            }
+            if let Some(surface) = entry.surface.take() {
+                entry.in_flight = true;
+                flying.push((id, surface));
+            }
+        }
+        (flying, refusals)
+    }
+
+    /// Hand the surfaces [`Self::take_for_frame`] took back; one whose overlay
+    /// is gone meanwhile is dropped (answers how many).
+    pub(crate) fn land(&mut self, flying: Vec<(u64, S)>) -> usize {
+        let mut orphaned = 0;
+        for (id, surface) in flying {
+            match self.entries.get_mut(&id) {
+                Some(entry) => {
+                    entry.surface = Some(surface);
+                    entry.in_flight = false;
+                }
+                None => {
+                    drop(surface);
+                    orphaned += 1;
+                }
+            }
+        }
+        orphaned
+    }
+
+    /// Count an engine refusal; the running count while within `log_limit`.
+    pub(crate) fn note_error(&mut self, id: u64, log_limit: u32) -> Option<u32> {
+        let entry = self.entries.get_mut(&id)?;
+        entry.errors = entry.errors.saturating_add(1);
+        (entry.errors <= log_limit).then_some(entry.errors)
+    }
+
+    /// `true` exactly once per overlay: its first kept-on-main cut.
+    pub(crate) fn note_unservable(&mut self, id: u64) -> bool {
+        self.entries
+            .get_mut(&id)
+            .is_some_and(|entry| !std::mem::replace(&mut entry.unservable_logged, true))
+    }
+
+    /// Whether no overlay is published.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+/// [`OverlayTable::take_for_frame`]'s answer: the surfaces taken out and the
+/// refusals made.
+pub(crate) type OverlayTake<S, E> = (Vec<(u64, S)>, Vec<(u64, E)>);
+
+/// The process-wide overlay table (one window, one render surface).
+static OVERLAY_TABLE: std::sync::Mutex<OverlayTable<frust_render::overlay::OverlaySurface>> =
+    std::sync::Mutex::new(OverlayTable::new());
+
+/// Signalled whenever the render side hands its in-flight surfaces back.
+static OVERLAY_LANDED: std::sync::Condvar = std::sync::Condvar::new();
+
+/// The main-to-last-overlay present gap, folded per frame.
+static OVERLAY_SKEW: std::sync::Mutex<(u32, u64, u64)> = std::sync::Mutex::new((0, 0, 0));
+
+fn overlay_table()
+-> std::sync::MutexGuard<'static, OverlayTable<frust_render::overlay::OverlaySurface>> {
+    OVERLAY_TABLE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Publish overlay `id`'s layer (UI thread) — see
+/// [`crate::extensions::publish_overlay_layer`]. Answers whether the render
+/// side has something new to build or resize (a frame is owed).
+pub(crate) fn publish_overlay_layer(id: u64, layer: usize, size: (u32, u32)) -> bool {
+    let size = (size.0.max(1), size.1.max(1));
+    let mut table = overlay_table();
+    let mut change = table.publish(id, layer, size);
+    if change == LayerChange::Busy {
+        table = wait_overlay_landed(table, id);
+        change = table.publish(id, layer, size);
+    }
+    match change {
+        LayerChange::Adopted => {
+            log::info!(
+                "frust-overlay: overlay {id} layer published ({}x{} px)",
+                size.0,
+                size.1
+            );
+            true
+        }
+        LayerChange::Resized => true,
+        LayerChange::Unchanged => false,
+        LayerChange::Busy => {
+            log::error!("frust-overlay: overlay {id} could not replace its layer");
+            false
+        }
+    }
+}
+
+/// Withdraw overlay `id`'s layer (UI thread) — see
+/// [`crate::extensions::withdraw_overlay_layer`]: wait out a frame drawing it,
+/// then drop its surface; on return the layer may be released.
+pub(crate) fn withdraw_overlay_layer(id: u64) {
+    let mut table = wait_overlay_landed(overlay_table(), id);
+    if table.withdraw(id) {
+        log::info!("frust-overlay: overlay {id} layer withdrawn");
+    }
+}
+
+fn wait_overlay_landed(
+    mut table: std::sync::MutexGuard<'static, OverlayTable<frust_render::overlay::OverlaySurface>>,
+    id: u64,
+) -> std::sync::MutexGuard<'static, OverlayTable<frust_render::overlay::OverlaySurface>> {
+    let deadline = Instant::now() + OVERLAY_LANDING_WAIT;
+    while table.is_in_flight(id) {
+        let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+            log::error!(
+                "frust-overlay: overlay {id} still in flight after {OVERLAY_LANDING_WAIT:?}; \
+                 proceeding without it"
+            );
+            break;
+        };
+        table = OVERLAY_LANDED
+            .wait_timeout(table, left)
+            .map(|(guard, _)| guard)
+            .unwrap_or_else(|poisoned| poisoned.into_inner().0);
+    }
+    table
+}
+
+/// Drop every overlay surface, keeping the layers — the main surface is being
+/// (re)installed or torn down, and the overlays share its device.
+fn drop_overlay_surfaces() {
+    if !overlays_enabled() {
+        return;
+    }
+    let dropped = overlay_table().drop_surfaces();
+    if dropped > 0 {
+        log::debug!("frust-overlay: dropped {dropped} overlay surface(s) with the main surface");
+    }
+}
+
+/// One frame's overlays, taken out of the table for the length of the frame:
+/// the live surfaces and the cut each draws of this frame's scene.
+struct FrameOverlays {
+    surfaces: Vec<(u64, frust_render::overlay::OverlaySurface)>,
+    cuts: Vec<OverlayCutSpec>,
+    refused: Vec<(u64, String)>,
+    unservable: Vec<(u64, String)>,
+}
+
+impl FrameOverlays {
+    /// The cut ranges, in order — `encode_segmented`'s cuts.
+    fn ranges(&self) -> Vec<std::ops::Range<usize>> {
+        self.cuts.iter().map(|(_, range)| range.clone()).collect()
+    }
+
+    /// One `OverlayCut` per cut, in [`Self::ranges`]' order.
+    fn overlay_cuts(&mut self) -> Vec<frust_render::overlay::OverlayCut<'_>> {
+        let mut live: std::collections::BTreeMap<u64, &mut frust_render::overlay::OverlaySurface> =
+            self.surfaces
+                .iter_mut()
+                .map(|(id, surface)| (*id, surface))
+                .collect();
+        self.cuts
+            .iter()
+            .filter_map(|(overlay_id, range)| {
+                live.remove(overlay_id)
+                    .map(|overlay| frust_render::overlay::OverlayCut {
+                        overlay,
+                        range: range.clone(),
+                        overlay_id: *overlay_id,
+                    })
+            })
+            .collect()
+    }
+
+    /// Note each cut's engine refusal or kept-on-main classification.
+    fn note_outcomes(&mut self, outcomes: &[frust_render::overlay::OverlayCutOutcome]) {
+        for outcome in outcomes {
+            if let Err(error) = &outcome.result {
+                self.refused.push((outcome.overlay_id, error.to_string()));
+            }
+            if !outcome.serviceability.is_servable() {
+                self.unservable
+                    .push((outcome.overlay_id, outcome.serviceability.to_string()));
+            }
+        }
+    }
+}
+
+/// The cuts one segmented frame draws: one per overlay with a live surface,
+/// carrying the range the frame carried (clamped to its `len` commands) — or
+/// an empty range at the end (a transparent clear) when it carried none. An
+/// overlay the frame names without a live surface gets no cut: its content
+/// stays on the main surface. Ascending by range.
+fn assemble_overlay_cuts(
+    frame: &[OverlayCutSpec],
+    live: impl IntoIterator<Item = u64>,
+    len: usize,
+) -> Vec<OverlayCutSpec> {
+    let mut cuts: Vec<OverlayCutSpec> = live
+        .into_iter()
+        .map(|id| {
+            let range = frame
+                .iter()
+                .find(|(cut, _)| *cut == id)
+                .map(|(_, range)| range.start.min(len)..range.end.min(len))
+                .filter(|range| range.start < range.end)
+                .unwrap_or(len..len);
+            (id, range)
+        })
+        .collect();
+    cuts.sort_by_key(|(id, range)| (range.start, range.end, *id));
+    cuts
+}
+
+/// Ahead of a frame of `len` commands cut at `frame_cuts`: build or resize
+/// each published layer's surface and take the live ones out. `None` — one
+/// cached read with overlays off — when none is live; the frame then takes the
+/// single-surface path unchanged.
+fn take_frame_overlays(
+    renderer: &SurfaceRenderer,
+    render_cx: &mut RenderContext,
+    frame_cuts: &[OverlayCutSpec],
+    len: usize,
+) -> Option<FrameOverlays> {
+    if !overlays_enabled() {
+        return None;
+    }
+    let mut table = overlay_table();
+    if table.is_empty() {
+        return None;
+    }
+    let (surfaces, refusals) = table.take_for_frame(
+        |layer, size| build_overlay_surface(render_cx, renderer, layer, size),
+        |surface, (width, height)| surface.resize(width, height),
+    );
+    drop(table);
+    for (overlay_id, error) in refusals {
+        log::warn!(
+            "frust-overlay: overlay {overlay_id} refused ({error}); its content stays on the main \
+             surface"
+        );
+    }
+    if surfaces.is_empty() {
+        return None;
+    }
+    let cuts = assemble_overlay_cuts(frame_cuts, surfaces.iter().map(|(id, _)| *id), len);
+    Some(FrameOverlays {
+        surfaces,
+        cuts,
+        refused: Vec::new(),
+        unservable: Vec::new(),
+    })
+}
+
+/// Every [`OVERLAY_SKEW_EVERY`] segmented frames, one `frust-overlay cost`
+/// line per overlay: its most recent GPU pass times (a `perf-trace` build on
+/// an adapter with timestamp queries; nothing is logged without a reading).
+fn log_overlay_cost(surfaces: &[(u64, frust_render::overlay::OverlaySurface)]) {
+    static FRAMES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let frame = FRAMES.fetch_add(1, Ordering::Relaxed) + 1;
+    if !frame.is_multiple_of(OVERLAY_SKEW_EVERY) {
+        return;
+    }
+    for (overlay_id, surface) in surfaces {
+        if let Some(gpu) = surface.renderer().gpu_pass_timings() {
+            log::info!(
+                "frust-overlay cost overlay={overlay_id} gpu_prepass_us={} gpu_main_us={} \
+                 gpu_composite_us={} size={:?}",
+                gpu.prepass.as_micros(),
+                gpu.main.as_micros(),
+                gpu.composite.as_micros(),
+                surface.size(),
+            );
+        }
+    }
+}
+
+/// Hand a frame's overlay surfaces back once presented, waking a waiting
+/// withdraw, and log what the frame noted (latched per overlay).
+fn land_frame_overlays(overlays: FrameOverlays) {
+    let FrameOverlays {
+        surfaces,
+        refused,
+        unservable,
+        ..
+    } = overlays;
+    log_overlay_cost(&surfaces);
+    let mut table = overlay_table();
+    table.land(surfaces);
+    for (overlay_id, error) in refused {
+        if let Some(count) = table.note_error(overlay_id, OVERLAY_ERRORS_LOGGED) {
+            log::warn!("frust-overlay: overlay {overlay_id} frame refused ({count}): {error}");
+        }
+    }
+    for (overlay_id, reason) in unservable {
+        if table.note_unservable(overlay_id) {
+            log::info!(
+                "frust-overlay: overlay {overlay_id} content {reason}; it draws under the native \
+                 view while that lasts (logged once)"
+            );
+        }
+    }
+    drop(table);
+    OVERLAY_LANDED.notify_all();
+}
+
+/// Fold one frame's main-to-last-overlay present gap; a `frust-overlay skew`
+/// line every [`OVERLAY_SKEW_EVERY`] frames.
+fn record_overlay_presents(delta: Duration, overlays: usize) {
+    let delta = u64::try_from(delta.as_micros()).unwrap_or(u64::MAX);
+    let mut window = OVERLAY_SKEW
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (frames, sum, max) = &mut *window;
+    *frames += 1;
+    *sum = sum.saturating_add(delta);
+    *max = (*max).max(delta);
+    if *frames >= OVERLAY_SKEW_EVERY {
+        log::info!(
+            "frust-overlay skew frames={} avg_us={} max_us={} overlays={overlays}",
+            *frames,
+            *sum / u64::from(*frames),
+            *max,
+        );
+        *window = (0, 0, 0);
+    }
+}
+
+/// Build an overlay surface on the `CAMetalLayer*` at `layer` (an
+/// exposed-provenance address the macOS host published), `size` physical px,
+/// sharing the main surface's device.
+///
+/// **This crate's one `unsafe` block** — the sanctioned zone where the
+/// `CALayer` pointer crosses into a `wgpu::Surface`
+/// (`OverlaySurface::new`); nothing else in `frust-shell-desktop` holds any.
+///
+/// # Safety
+///
+/// Upheld by the publish/withdraw protocol, not by the caller of this safe
+/// function: the macOS host publishes a layer its overlay view retains, and
+/// before it releases that view it calls `withdraw_overlay_layer`, which waits
+/// out a frame drawing the surface and drops the surface under the table's
+/// lock. So the layer outlives the surface built here and every frame acquired
+/// from it.
+#[cfg(target_os = "macos")]
+fn build_overlay_surface(
+    render_cx: &mut RenderContext,
+    renderer: &SurfaceRenderer,
+    layer: usize,
+    (width, height): (u32, u32),
+) -> Result<frust_render::overlay::OverlaySurface, frust_render::overlay::OverlayError> {
+    let layer = std::ptr::with_exposed_provenance_mut::<std::ffi::c_void>(layer);
+    // SAFETY: see this function's `# Safety` — the published layer is alive
+    // until its withdraw has dropped this surface.
+    let surface = unsafe {
+        frust_render::overlay::OverlaySurface::new(
+            render_cx,
+            Some(renderer),
+            frust_render::overlay::OverlayTarget::CoreAnimationLayer(layer),
+            width,
+            height,
+        )
+    };
+    if surface.is_ok() {
+        log::info!(
+            "frust-overlay: overlay surface up on CAMetalLayer {layer:p} ({width}x{height} px)"
+        );
+    }
+    surface
+}
+
+/// Off macOS no host publishes a layer (`overlays_enabled` is `false`), so
+/// nothing is ever built.
+#[cfg(not(target_os = "macos"))]
+fn build_overlay_surface(
+    _render_cx: &mut RenderContext,
+    _renderer: &SurfaceRenderer,
+    _layer: usize,
+    _size: (u32, u32),
+) -> Result<frust_render::overlay::OverlaySurface, frust_render::overlay::OverlayError> {
+    Err(frust_render::overlay::OverlayError::UnsupportedSurface)
+}
+
+/// The submit of a segmented frame: one encoder, one queue submit for the main
+/// segment and every overlay's range, then the presents on this thread — main
+/// first, then the overlays in cut order (bottom to top), the gap folded into
+/// the skew log. Answers the main surface's outcome.
+fn submit_with_overlays(
+    renderer: &mut SurfaceRenderer,
+    render_cx: &RenderContext,
+    overlays: &mut FrameOverlays,
+) -> Result<FrameOutcome> {
+    let (outcome, presents) = {
+        let mut cuts = overlays.overlay_cuts();
+        renderer.submit_segmented_deferred(render_cx, &mut cuts)?
+    };
+    overlays.note_outcomes(&outcome.overlays);
+    let frust_render::overlay::SegmentedPresents {
+        main,
+        overlays: overlay_frames,
+    } = presents;
+    let main_at = main.map(|frame| {
+        frame.present();
+        Instant::now()
+    });
+    let count = overlay_frames.len();
+    for (_, frame) in overlay_frames {
+        frame.present();
+    }
+    if let Some(main_at) = main_at
+        && count > 0
+    {
+        static FIRST: std::sync::Once = std::sync::Once::new();
+        FIRST.call_once(|| {
+            log::info!(
+                "frust-overlay: first segmented frame presented: main + {count} overlay(s), \
+                 cuts {:?}, {} submit(s)",
+                overlays.cuts,
+                outcome.submits
+            );
+        });
+        record_overlay_presents(main_at.elapsed(), count);
+    }
+    Ok(outcome.frame)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_overlay_switch_reads_the_first_non_empty_source() {
+        assert!(!overlay_switch_from([None, None, None]));
+        assert!(!overlay_switch_from([Some("0"), Some("1"), None]));
+        assert!(overlay_switch_from([Some(" "), None, Some("1")]));
+        for off in ["off", "OFF", "false", " False ", "0"] {
+            assert!(!overlay_switch_value_on(off), "{off:?}");
+        }
+        for on in ["1", "on", "media", "3"] {
+            assert!(overlay_switch_value_on(on), "{on:?}");
+        }
+    }
+
+    #[test]
+    fn overlays_stay_off_without_a_macos_host() {
+        if !cfg!(target_os = "macos") {
+            assert!(!overlays_enabled());
+        }
+    }
+
+    /// A surface double logging its own drop.
+    struct Tracked(String, std::rc::Rc<std::cell::RefCell<Vec<String>>>);
+
+    impl Drop for Tracked {
+        fn drop(&mut self) {
+            self.1.borrow_mut().push(format!("drop {}", self.0));
+        }
+    }
+
+    type Log = std::rc::Rc<std::cell::RefCell<Vec<String>>>;
+
+    fn build(log: &Log) -> impl FnMut(usize, (u32, u32)) -> Result<Tracked, String> + '_ {
+        move |layer, _| {
+            if layer == 0 {
+                return Err("refused".to_string());
+            }
+            Ok(Tracked(format!("{layer:#x}"), log.clone()))
+        }
+    }
+
+    #[test]
+    fn a_withdraw_waits_for_the_frame_then_drops_the_surface_first() {
+        let log = Log::default();
+        let mut table: OverlayTable<Tracked> = OverlayTable::new();
+        assert_eq!(table.publish(1, 0x10, (8, 6)), LayerChange::Adopted);
+        assert_eq!(table.publish(1, 0x10, (8, 6)), LayerChange::Unchanged);
+        let (flying, refusals) = table.take_for_frame(build(&log), |_, _| {});
+        assert!(refusals.is_empty());
+        // Mid-frame: a resize of the same layer lands, a replacement or a
+        // withdraw waits.
+        assert_eq!(table.publish(1, 0x10, (16, 12)), LayerChange::Resized);
+        assert_eq!(table.publish(1, 0x20, (8, 6)), LayerChange::Busy);
+        assert!(!table.withdraw(1));
+        assert!(log.borrow().is_empty());
+        assert_eq!(table.land(flying), 0);
+        assert!(table.withdraw(1));
+        assert_eq!(log.borrow().as_slice(), ["drop 0x10"]);
+        assert!(table.is_empty());
+    }
+
+    #[test]
+    fn the_main_surface_going_away_keeps_the_layers_and_retries_refusals() {
+        let log = Log::default();
+        let mut table: OverlayTable<Tracked> = OverlayTable::new();
+        table.publish(1, 0x10, (1, 1));
+        table.publish(2, 0, (1, 1));
+        let (flying, refusals) = table.take_for_frame(build(&log), |_, _| {});
+        assert_eq!(refusals.len(), 1);
+        table.land(flying);
+        let (flying, refusals) = table.take_for_frame(build(&log), |_, _| {});
+        assert!(refusals.is_empty(), "a refusal is not retried every frame");
+        table.land(flying);
+        assert_eq!(table.drop_surfaces(), 1);
+        assert_eq!(log.borrow().as_slice(), ["drop 0x10"]);
+        let (flying, refusals) = table.take_for_frame(build(&log), |_, _| {});
+        assert_eq!((flying.len(), refusals.len()), (1, 1));
+        table.land(flying);
+        assert_eq!(table.note_error(1, 1), Some(1));
+        assert_eq!(table.note_error(1, 1), None);
+        assert!(table.note_unservable(1));
+        assert!(!table.note_unservable(1));
+    }
+
+    #[test]
+    fn a_frame_cuts_only_live_surfaces_with_its_own_ranges() {
+        let frame = [(1, 10..20), (2, 30..90), (3, 5..8)];
+        assert_eq!(
+            assemble_overlay_cuts(&frame, [1, 2, 4], 60),
+            vec![(1, 10..20), (2, 30..60), (4, 60..60)]
+        );
+    }
 }
