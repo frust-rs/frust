@@ -1,6 +1,7 @@
 //! Platform-view command publication: the differ's backlog mapped into the
 //! FFI-boundary shape ([`to_pv_command`]) and served as wire JSON, plus the
-//! live-slot replay a surface recreate needs.
+//! live-slot replay a surface recreate needs and the overlay range fold each
+//! painted frame snapshots (`FRUST_OVERLAYS`).
 //!
 //! The present-sync release gate this consults lives in
 //! [`super::present_sync`]; the differ itself is `frust_shell_common`'s.
@@ -62,11 +63,28 @@ fn to_pv_command(cmd: &ViewCommand, scale: f64) -> Option<crate::ffi_support::Pl
         ViewCommand::Dispose { slot_id } => {
             crate::ffi_support::PlatformViewCommand::Dispose { slot_id: *slot_id }
         }
-        // The differ's per-slot overlays have no iOS host yet (the shell's
-        // plain `ingest` never produces them); the overlay spike's surfaces
-        // are announced by `FrustViewHost` itself, through
-        // `frust_overlay_attach` (see `crate::ffi_glue`).
-        ViewCommand::Overlay { .. } | ViewCommand::DisposeOverlay { .. } => return None,
+        // The overlay ops (`FRUST_OVERLAYS` only — plain `ingest` never
+        // produces them): `FrustViewHost` stacks one overlay view directly
+        // above the slot's wrapper and hands its layer back through
+        // `frust_overlay_attach`. The range is informational for the host; the
+        // render thread pairs ranges with frames itself.
+        ViewCommand::Overlay {
+            overlay_id,
+            above_slot_id,
+            rect,
+            command_range,
+        } => crate::ffi_support::PlatformViewCommand::Overlay {
+            overlay_id: *overlay_id,
+            above_slot_id: *above_slot_id,
+            rect: to_pv_rect(*rect, scale),
+            range_start: command_range.start as u64,
+            range_end: command_range.end as u64,
+        },
+        ViewCommand::DisposeOverlay { overlay_id } => {
+            crate::ffi_support::PlatformViewCommand::DisposeOverlay {
+                overlay_id: *overlay_id,
+            }
+        }
     })
 }
 
@@ -79,19 +97,51 @@ impl IosAppHandle {
         self.platform_views.reset_for_surface_recreate();
         // The replay supersedes every held batch, and the frames those batches
         // were paired with belong to the surface that just went away — so the
-        // pairing goes with it.
+        // pairing goes with it. (Overlay surfaces are dropped and rebuilt by
+        // the render side, which owns them, around its own surface reinstall.)
         self.platform_view_due.clear();
-        // Overlay surfaces share the recreated surface's device: dropped here,
-        // rebuilt on their layers by the next frame that draws them.
-        crate::ffi_glue::drop_overlay_surfaces();
+        self.fold_overlay_commands();
     }
 
-    /// The id of the frust frame the UI thread last presented under
-    /// present-sync (`0` before the first) — what `frust_present_frame`
-    /// pairs the overlays' parked frames against, so an overlay frame lands in
-    /// the same `CATransaction` as the main frame it was cut from.
-    pub(crate) fn presented_frame_id(&self) -> u64 {
-        self.presented_frame_id
+    /// Fold every differ command pushed since the last fold into the overlay
+    /// ranges (`Overlay` sets one, `DisposeOverlay` drops one) — run after
+    /// each call that can push one and before Swift's next poll acknowledges
+    /// (compacts) it. A no-op with overlays off.
+    pub(crate) fn fold_overlay_commands(&mut self) {
+        if !crate::ffi_glue::overlays_enabled() {
+            return;
+        }
+        let mut ranges = crate::ffi_glue::overlay_ranges();
+        let (generation, backlog) = self.platform_views.commands();
+        let Some(folded) = ranges.begin_fold(generation) else {
+            return;
+        };
+        // Everything at or below the folded generation is already in the
+        // fold; the rest of the backlog is new.
+        let (_, seen) = self.platform_views.commands_up_to(folded);
+        for command in &backlog[seen.len()..] {
+            match command {
+                ViewCommand::Overlay {
+                    overlay_id,
+                    command_range,
+                    ..
+                } => ranges.set(*overlay_id, command_range.clone()),
+                ViewCommand::DisposeOverlay { overlay_id } => ranges.dispose(*overlay_id),
+                _ => {}
+            }
+        }
+        ranges.finish_fold(generation);
+    }
+
+    /// Fold, then snapshot the overlays' current ranges — the cuts the frame
+    /// painted just now is drawn with, carried to the render thread beside its
+    /// scene. Empty with overlays off.
+    pub(crate) fn overlay_frame_cuts(&mut self) -> Vec<crate::ffi_support::OverlayCutSpec> {
+        if !crate::ffi_glue::overlays_enabled() {
+            return Vec::new();
+        }
+        self.fold_overlay_commands();
+        crate::ffi_glue::overlay_ranges().cuts()
     }
 
     /// `frust_platform_view_commands_json`'s core: acknowledge `ack_generation`
@@ -106,6 +156,8 @@ impl IosAppHandle {
     /// physical-at-FFI/logical-inside rule, applied outbound (matches every
     /// other outbound-geometry seam in this shell).
     pub(crate) fn platform_view_commands_json(&mut self, ack_generation: u64) -> Option<String> {
+        // Nothing the acknowledgement compacts may go unfolded.
+        self.fold_overlay_commands();
         self.platform_views.acknowledge(ack_generation);
         // Keep the gate's bookkeeping in step with the differ's: a batch
         // the host has applied needs no pairing.

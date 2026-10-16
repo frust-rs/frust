@@ -231,6 +231,10 @@ void  frust_set_surface_mode(uint8_t translucent);
 //     {"op":"update","slot":n,"rect":[x,y,w,h],"clip":[x,y,w,h]|null,"visible":bool},
 //     {"op":"updateParams","slot":n,"params":"..."},
 //     {"op":"dispose","slot":n}]}
+// plus, only with overlay surfaces on (FRUST_OVERLAYS), two additive ops
+// byte-identical to Android's (an unknown op is skipped):
+//     {"op":"overlay","overlay":n,"aboveSlot":n,"rect":[x,y,w,h],"rangeStart":n,"rangeEnd":n}
+//     {"op":"disposeOverlay","overlay":n}
 // FrustViewHost parses and applies each batch (see FrustViewController's
 // renderFrame, which polls it after frust_render_frame).
 char *frust_platform_view_commands_json(void *handle, uint64_t ack_generation);
@@ -262,5 +266,26 @@ void  frust_set_present_sync(uint8_t enabled);
 // (FRUST_NO_RENDER_THREAD), on a frame-gate-skipped tick, or with no live
 // handle — safe to call unconditionally.
 void  frust_present_frame(void *handle);
+
+// Overlay surfaces (FRUST_OVERLAYS, default off, Mode A only). Each "overlay"
+// op names a translucent surface frust draws the commands painted ABOVE a
+// hosted native view onto; FrustViewHost backs it with an input-transparent,
+// non-opaque CAMetalLayer view stacked directly above that slot's wrapper.
+//
+// frust_overlay_mode answers 1 when the host should build overlay views for
+// the "overlay" ops (switch on, render-thread split), else 0.
+uint32_t frust_overlay_mode(void *handle);
+// frust_overlay_attach hands overlay `overlay_id`'s CAMetalLayer* (unretained)
+// over at width x height PHYSICAL px: a new layer, or the same one resized.
+// Rust builds the overlay surface on it on the render thread and requests a
+// frame. The layer must stay alive until frust_overlay_detach (or
+// frust_destroy) returns.
+void  frust_overlay_attach(
+    void *handle, uint64_t overlay_id, void *layer, uint32_t width, uint32_t height
+);
+// frust_overlay_detach: the overlay's view is going away. Returns once the
+// surface on its layer (and any frame of it parked for frust_present_frame)
+// is dropped; only then may the view and layer be released.
+void  frust_overlay_detach(void *handle, uint64_t overlay_id);
 
 #endif /* FRUST_FFI_H */

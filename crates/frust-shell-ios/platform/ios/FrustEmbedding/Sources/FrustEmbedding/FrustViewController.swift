@@ -561,10 +561,11 @@ open class FrustViewController: UIViewController {
             // it hosts native sibling views and is
             // polled from `renderFrame` after each `frust_render_frame`.
             // Under the overlay switch (`FRUST_OVERLAYS`, Mode A only) it also
-            // stacks overlay surfaces above those views; their layers present
-            // inside the same transaction as `forgeView`'s when present-sync
-            // is armed, and `frust_present_frame` presents them right after
-            // the main frame.
+            // stacks one overlay surface directly above each hosted view that
+            // frust paints over (the differ's `overlay` ops); their layers
+            // present inside the same transaction as `forgeView`'s when
+            // present-sync is armed — `frust_present_frame` presents the main
+            // frame and then its overlays, bottom to top.
             platformViewHost = FrustViewHost(
                 containerView: forgeView, translucent: translucentSurface, handle: handle,
                 presentsWithTransaction: presentSyncArmed)

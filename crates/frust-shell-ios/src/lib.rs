@@ -43,8 +43,10 @@
 //! `accessibility::IosA11yAdapter::new` construction (a sanctioned raw-`UIView*`
 //! constructor, analogous to `frust-render`'s surface constructors — declared
 //! `unsafe fn` in [`accessibility`] but *called* only from `ffi_glue`),
-//! `Box::into_raw`/`from_raw` for the opaque handle, and reconstituting it as a
-//! `&mut` — each with a safety comment, plus the `#[unsafe(no_mangle)]`
+//! `Box::into_raw`/`from_raw` for the opaque handle, reconstituting it as a
+//! `&mut`, and — under the default-off `FRUST_OVERLAYS` switch — the one
+//! `OverlaySurface::new` over an overlay view's `CAMetalLayer*` — each with a
+//! safety comment, plus the `#[unsafe(no_mangle)]`
 //! attributes the [`ios_app!`] macro emits on its generated `extern "C"` exports
 //! (edition 2024 spells `no_mangle` as an unsafe attribute). The `app` module —
 //! the frame/lifecycle runtime — contains no `unsafe`; the only `unsafe fn`
@@ -475,14 +477,50 @@ macro_rules! ios_app {
         }
 
         /// `frust_present_frame`: present the frame the render thread parked
-        /// for the UI thread. Called once per
-        /// `CADisplayLink` tick, right after `FrustViewHost.poll`. A no-op
-        /// when present-sync is unarmed, on the inline render path, or on a
+        /// for the UI thread — the main surface's present, then every
+        /// overlay's. Called once per `CADisplayLink` tick inside the
+        /// transaction, right before `FrustViewHost.poll`. A no-op when
+        /// present-sync is unarmed, on the inline render path, or on a
         /// gate-skipped tick (see `ffi_glue::present_frame`).
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         pub extern "C" fn frust_present_frame(handle: *mut ::core::ffi::c_void) {
             $crate::ffi_glue::present_frame(handle)
+        }
+
+        /// `frust_overlay_mode`: `1` when `FrustViewHost` builds overlay views
+        /// for the differ's `overlay` ops (`FRUST_OVERLAYS` on, render-thread
+        /// split), else `0` (see `ffi_glue::overlay_mode`).
+        #[cfg(target_os = "ios")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn frust_overlay_mode(handle: *mut ::core::ffi::c_void) -> u32 {
+            $crate::ffi_glue::overlay_mode(handle)
+        }
+
+        /// `frust_overlay_attach`: overlay `overlay_id`'s view hands over its
+        /// `CAMetalLayer*` at `width` x `height` physical px — a new layer, or
+        /// the same one resized. Swift keeps the layer alive until
+        /// `frust_overlay_detach` (or `frust_destroy`) returns (see
+        /// `ffi_glue::overlay_attach`).
+        #[cfg(target_os = "ios")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn frust_overlay_attach(
+            handle: *mut ::core::ffi::c_void,
+            overlay_id: u64,
+            layer: *mut ::core::ffi::c_void,
+            width: u32,
+            height: u32,
+        ) {
+            $crate::ffi_glue::overlay_attach(handle, overlay_id, layer, width, height)
+        }
+
+        /// `frust_overlay_detach`: overlay `overlay_id`'s view is going away;
+        /// returns once the surface on its layer is dropped, so Swift may then
+        /// release the layer (see `ffi_glue::overlay_detach`).
+        #[cfg(target_os = "ios")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn frust_overlay_detach(handle: *mut ::core::ffi::c_void, overlay_id: u64) {
+            $crate::ffi_glue::overlay_detach(handle, overlay_id)
         }
     };
 }
