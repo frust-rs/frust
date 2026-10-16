@@ -36,7 +36,7 @@
 //! Two native slots on every target, whichever paint order is on.
 
 use frust::{
-    AnyView, ButtonStyle, EdgeInsets, FlexChild, Get, Padding, Set, SizedBox, Stack, View, any,
+    AnyView, ButtonStyle, EdgeInsets, FlexChild, Get, Padding, Set, SizedBox, Stack, View, either,
     button, checkbox, container, inflexible, text,
 };
 use frust_native_widgets::{live_slot_count, native_label, native_slider};
@@ -181,11 +181,12 @@ fn badge(value: i32) -> impl View<S> {
 
 /// The sandwich: one stack, absolutely placed, whose child ORDER is the paint
 /// order — see the module docs' *Paint order*.
-fn sandwich(value: i32, interleaved: bool) -> AnyView<S> {
+fn sandwich(value: i32, interleaved: bool) -> impl View<S> {
     let badge_at = |child| at(CARD_W - 72.0, SLIDER_TOP - 8.0, child);
-    if interleaved {
+    either(
+        interleaved,
         // Field group, then card group: the card is painted between the views.
-        any(Stack((
+        || Stack((
             at(0.0, FIELD_TOP, field_frame()),
             at(FRAME, FIELD_TOP + FRAME, field()),
             at(24.0, 0.0, selection_toolbar()),
@@ -194,10 +195,9 @@ fn sandwich(value: i32, interleaved: bool) -> AnyView<S> {
             at(SLIDER_LEFT, CARD_TOP + 12.0, card_title(value)),
             at(SLIDER_LEFT, SLIDER_TOP, slider(value)),
             badge_at(badge(value)),
-        )))
-    } else {
+        )),
         // Everything under, both views, everything over.
-        any(Stack((
+        || Stack((
             at(0.0, FIELD_TOP, field_frame()),
             at(0.0, CARD_TOP, slider_card()),
             at(SLIDER_LEFT, CARD_TOP + 12.0, card_title(value)),
@@ -206,8 +206,8 @@ fn sandwich(value: i32, interleaved: bool) -> AnyView<S> {
             at(24.0, 0.0, selection_toolbar()),
             at(40.0, POPOVER_TOP, popover()),
             badge_at(badge(value)),
-        )))
-    }
+        )),
+    )
 }
 
 /// The live slot count against [`SANDWICH_AT_REST_SLOTS`] — only on a target
