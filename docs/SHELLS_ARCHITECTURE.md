@@ -354,7 +354,7 @@ view); Mode B is a translucent surface with the views below, hole-punched.
 
 | Platform | Mode | Overlays (frust paint above a Mode A view) |
 |----------|------|--------------------------------------------|
-| macOS | A: plugin `NSView` above winit's content view, nothing forwarded into it, the frust slot behind it covered | shipped behind `FRUST_OVERLAYS` (default off; log-proven, visual check pending) |
+| macOS | A: plugin `NSView` above winit's content view, nothing forwarded into it, the frust slot behind it covered | shipped behind `FRUST_OVERLAYS` (default off; verified in both paint orders) |
 | iOS | A or B per the host's `translucentSurface`; a refused translucent surface degrades to A | shipped behind `FRUST_OVERLAYS` (default off), Mode A only; device-verified |
 | Android | A by default, B on host opt-in; a refused translucent surface degrades to A | shipped behind `FRUST_OVERLAYS` (default off: a new overlay surface gets no frame while the app is idle) |
 | Windows, Linux, web | none | none |

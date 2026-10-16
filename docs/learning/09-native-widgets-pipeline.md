@@ -204,7 +204,7 @@ The Apple hosts add a non-opaque `CAMetalLayer` view directly above each slot's 
 later native control; the frame is still one submit, with main presented first and the overlays
 after it. On iOS with present-sync armed the UI thread presents them together inside one
 `CATransaction`. Device outcomes: Android's overlay works but a new surface gets no frame while the
-app is idle; iOS passes on a phone and the Simulator; the macOS visual check is pending.
+app is idle; iOS passes on a phone and the Simulator; macOS passes in both paint orders.
 
 ### 6. Events-as-signals
 

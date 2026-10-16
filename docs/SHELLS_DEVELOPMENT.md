@@ -82,8 +82,8 @@ further input. The proving log lines: `overlay surfaces on (one per differ cut, 
 `overlay N view above slot S`, `first segmented frame submitted/presented: main + K overlay(s)`,
 `frust-overlay skew frames=120 … armed=`, `frust-overlay cost overlay=N gpu_main_us=…`,
 `overlay N refused …` and `content kept on main …`. Outcome: iPhone SE and iOS Simulator pass with
-0 uncaptured wgpu errors in Mode A and Mode B; macOS is log-proven and its visual check: device
-leg pending.
+0 uncaptured wgpu errors in Mode A and Mode B; macOS passes in both paint orders (a withdraw can
+stall the UI thread up to 2 s).
 
 ## Migrating an already-scaffolded app to edge-to-edge
 

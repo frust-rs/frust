@@ -4731,7 +4731,7 @@ named per line. Every line below says where its limits live:
 - Phase 3 device legs (Pixel 5, iPhone SE, kill-switch rows): device leg pending.
 - Phase 4, z-order differ, segmented rendering and the overlay hosts: shipped behind
   `FRUST_OVERLAYS` (default off). iOS passed on an iPhone SE and the iOS Simulator (0 uncaptured
-  wgpu errors in Mode A and Mode B). macOS is log-proven; its visual check: device leg pending.
+  wgpu errors in Mode A and Mode B). macOS passed too (both paint orders; a withdraw can stall the UI thread).
   The Android overlay spike passed (GO), but the Android host failed on one issue: a new overlay
   surface gets no frame while the app is idle
   (`android-overlays-opt-in-pending-device-leg`). Limits: follow-up-see-
@@ -7135,7 +7135,7 @@ over a video does not scroll the page.
 implementation at all; Windows and Linux have no platform-view host, so a
 slot there hosts nothing. On macOS, frust paint above a hosted view is possible
 behind `FRUST_OVERLAYS` (default off): an overlay `CAMetalLayer` view sits above
-its slot (log-proven; visual check: device leg pending), while input stays with
+its slot (both paint orders verified on macOS), while input stays with
 the native view. Does not apply in texture mode, where frames are scene content frust draws and layers freely.
 
 **Why accepted**: Mode A (composite an opaque native sibling above the
