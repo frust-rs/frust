@@ -1388,3 +1388,269 @@ fn a_punch_cut_frame_records_two_passes_fewer() {
     assert_ne!(pixel(&merged.pixels, 64, 64)[3], 0);
     assert_eq!(pixel(&merged.pixels, 200, 32), [255, 0, 0, 255]);
 }
+
+// ---------------------------------------------------------------------
+// The staging ring: the frame's per-frame uploads (coverage, encoded paints,
+// instances, viewport and page uniforms) written into a mapped staging slot
+// and copied into their destinations inside the caller's encoder, ahead of the
+// passes that read them (`frust_gpu::staging`). Every case below checks
+// pixels, since the copies themselves are invisible to any other probe.
+// ---------------------------------------------------------------------
+
+/// The scenes the two-route case renders, frame after frame on one renderer:
+/// every upload the ring carries (coverage, an encoded gradient paint, a page
+/// round's uniform, image residency beside it).
+fn staging_scenes() -> Vec<Scene> {
+    vec![
+        scene(),
+        layer_scene(),
+        gradient_scene(),
+        image_scene(),
+        scene(),
+    ]
+}
+
+/// One frame of `scene` on `renderer` into a fresh target, submitted alone.
+fn staged_frame(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    renderer: &mut EngineRenderer,
+    scene: &Scene,
+) -> Vec<u8> {
+    let target = HeadlessTarget::new(device, SIZE, SIZE, FORMAT);
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("frust-engine staging frame"),
+    });
+    renderer
+        .encode(
+            device,
+            queue,
+            &mut encoder,
+            scene,
+            EngineTarget {
+                view: target.view(),
+                format: FORMAT,
+                width: SIZE,
+                height: SIZE,
+                depth: None,
+                output: OutputAlpha::Premultiplied,
+            },
+            Color::TRANSPARENT,
+            Affine::IDENTITY,
+        )
+        .expect("a well-formed frame encodes");
+    queue.submit([encoder.finish()]);
+    renderer.end_frame(queue);
+    target.read_back(device, queue)
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn staged_and_queued_uploads_draw_the_same_pixels_frame_after_frame() {
+    let _serialized = render_lock();
+    let (device, queue, caps) = gpu();
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+
+    let mut staged = EngineRenderer::new(&device, &caps, FORMAT, None)
+        .expect("the engine builds on this device");
+    staged.set_staging_ring(true);
+    let mut queued = EngineRenderer::new(&device, &caps, FORMAT, None)
+        .expect("the engine builds on this device");
+    queued.set_staging_ring(false);
+    assert!(staged.staging_ring() && !queued.staging_ring());
+
+    for (index, scene) in staging_scenes().iter().enumerate() {
+        let through_ring = staged_frame(&device, &queue, &mut staged, scene);
+        assert!(
+            staged.last_frame_staged_bytes() > 0,
+            "frame {index} took the ring"
+        );
+        let through_queue = staged_frame(&device, &queue, &mut queued, scene);
+        assert_eq!(
+            queued.last_frame_staged_bytes(),
+            0,
+            "frame {index} took queue writes"
+        );
+        assert!(
+            through_ring == through_queue,
+            "frame {index}: the staged route drew different pixels from queue writes"
+        );
+    }
+    let stats = staged.staging_stats().expect("the ring is on");
+    assert_eq!(stats.frames, staging_scenes().len() as u64);
+    assert_eq!(stats.busy, 0, "paced frames never find the ring busy");
+    assert!(queued.staging_stats().is_none());
+
+    let error = drain_error_scope(&device, scope);
+    assert!(error.is_none(), "a staged frame raised {error:?}");
+    warm_up_ran(&staged);
+}
+
+/// Two frames of one renderer, then a frame of a second renderer, all into ONE
+/// encoder and one submit — the shape a segmented frame takes, its overlays'
+/// renderers recording after the main segment's passes.
+///
+/// Every frame rewrites the same uniforms, instances and coverage texture of
+/// its renderer. Queue writes would all land ahead of the one command buffer,
+/// so every pass in it would read the LAST frame's bytes; each staged frame's
+/// copies are recorded into the encoder immediately ahead of its own passes,
+/// so each target must show its own scene — which is the ordering this pins.
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn each_frames_staged_copies_precede_its_own_passes_in_a_shared_encoder() {
+    let _serialized = render_lock();
+    let (device, queue, caps) = gpu();
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+
+    let mut main = EngineRenderer::new(&device, &caps, FORMAT, None)
+        .expect("the engine builds on this device");
+    main.set_staging_ring(true);
+    let mut overlay = EngineRenderer::new(&device, &caps, FORMAT, None)
+        .expect("the engine builds on this device");
+    overlay.set_staging_ring(true);
+
+    let targets: Vec<HeadlessTarget> = (0..3)
+        .map(|_| HeadlessTarget::new(&device, SIZE, SIZE, FORMAT))
+        .collect();
+    let scenes = [scene(), layer_scene(), scene()];
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("frust-engine shared staging encoder"),
+    });
+    for (index, (scene, target)) in scenes.iter().zip(&targets).enumerate() {
+        let renderer = if index < 2 { &mut main } else { &mut overlay };
+        renderer
+            .encode(
+                &device,
+                &queue,
+                &mut encoder,
+                scene,
+                EngineTarget {
+                    view: target.view(),
+                    format: FORMAT,
+                    width: SIZE,
+                    height: SIZE,
+                    depth: None,
+                    output: OutputAlpha::Premultiplied,
+                },
+                Color::TRANSPARENT,
+                Affine::IDENTITY,
+            )
+            .expect("a well-formed frame encodes");
+        assert!(
+            renderer.last_frame_staged_bytes() > 0,
+            "frame {index} took the ring"
+        );
+    }
+    queue.submit([encoder.finish()]);
+    main.end_frame(&queue);
+    overlay.end_frame(&queue);
+
+    let error = drain_error_scope(&device, scope);
+    assert!(error.is_none(), "the shared encoder raised {error:?}");
+
+    // The first frame: `scene()` exactly as the single-frame case draws it,
+    // not the layer scene recorded after it into the same encoder.
+    let first = targets[0].read_back(&device, &queue);
+    assert_eq!(pixel(&first, 64, 64), [255, 0, 0, 255]);
+    assert_eq!(pixel(&first, 176, 176), [0, 0, 255, 255]);
+    assert_eq!(pixel(&first, 56, 200), [0, 128, 0, 255]);
+    assert_eq!(pixel(&first, 4, 4), [0, 0, 0, 0]);
+
+    // The second: the layer scene, its page round's uniform staged mid-frame.
+    let second = targets[1].read_back(&device, &queue);
+    assert_eq!(pixel(&second, 8, 8), [0, 0, 0, 255]);
+    let inside = pixel(&second, 128, 128);
+    for channel in 0..3 {
+        assert!(
+            (i32::from(inside[channel]) - 128).abs() <= 1,
+            "the second frame composites its own layer, got {inside:?}"
+        );
+    }
+
+    // The second renderer's frame, recorded after both: its own resources.
+    let third = targets[2].read_back(&device, &queue);
+    assert!(third == first, "the second renderer drew its own scene");
+
+    warm_up_ran(&main);
+    warm_up_ran(&overlay);
+}
+
+/// Frames encoded but not yet submitted hold their slots; one more frame finds
+/// every slot in flight and takes queue writes instead — same pixels — and
+/// the ring serves frames again once those submissions retire.
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn a_frame_finding_every_slot_in_flight_falls_back_to_queue_writes() {
+    let _serialized = render_lock();
+    let (device, queue, caps) = gpu();
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+
+    let mut renderer = EngineRenderer::new(&device, &caps, FORMAT, None)
+        .expect("the engine builds on this device");
+    renderer.set_staging_ring(true);
+    let scene = scene();
+
+    let targets: Vec<HeadlessTarget> = (0..4)
+        .map(|_| HeadlessTarget::new(&device, SIZE, SIZE, FORMAT))
+        .collect();
+    let mut staged_bytes = Vec::new();
+    let encoders: Vec<wgpu::CommandBuffer> = targets
+        .iter()
+        .map(|target| {
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("frust-engine held frame"),
+            });
+            renderer
+                .encode(
+                    &device,
+                    &queue,
+                    &mut encoder,
+                    &scene,
+                    EngineTarget {
+                        view: target.view(),
+                        format: FORMAT,
+                        width: SIZE,
+                        height: SIZE,
+                        depth: None,
+                        output: OutputAlpha::Premultiplied,
+                    },
+                    Color::TRANSPARENT,
+                    Affine::IDENTITY,
+                )
+                .expect("a well-formed frame encodes");
+            staged_bytes.push(renderer.last_frame_staged_bytes());
+            encoder.finish()
+        })
+        .collect();
+    assert!(
+        staged_bytes[..3].iter().all(|bytes| *bytes > 0),
+        "one slot per held frame: {staged_bytes:?}"
+    );
+    assert_eq!(staged_bytes[3], 0, "no slot was free for the fourth frame");
+    let stats = renderer.staging_stats().expect("the ring is on");
+    assert_eq!(stats.busy, 1, "{stats:?}");
+
+    queue.submit(encoders);
+    renderer.end_frame(&queue);
+    for target in &targets {
+        let pixels = target.read_back(&device, &queue);
+        assert_eq!(pixel(&pixels, 64, 64), [255, 0, 0, 255]);
+        assert_eq!(pixel(&pixels, 176, 176), [0, 0, 255, 255]);
+        assert_eq!(pixel(&pixels, 4, 4), [0, 0, 0, 0]);
+    }
+
+    // Retired: the slots are mapped again and the next frame takes one.
+    let _ = device.poll(wgpu::PollType::wait_indefinitely());
+    let pixels = staged_frame(&device, &queue, &mut renderer, &scene);
+    assert!(renderer.last_frame_staged_bytes() > 0);
+    assert_eq!(pixel(&pixels, 64, 64), [255, 0, 0, 255]);
+    assert_eq!(
+        renderer.staging_stats().map(|stats| stats.buffers_created),
+        Some(3),
+        "the recovered slot is reused, not replaced"
+    );
+
+    let error = drain_error_scope(&device, scope);
+    assert!(error.is_none(), "the held frames raised {error:?}");
+    warm_up_ran(&renderer);
+}
