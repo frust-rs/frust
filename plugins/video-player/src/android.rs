@@ -192,7 +192,8 @@ use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use frust_plugin::texture::{
-    FramePayload, NativeHandle, NativeHandleKind, TextureFormat, TextureFrame, TextureSink,
+    FrameMeta, FramePayload, NativeHandle, NativeHandleKind, TextureFormat, TextureFrame,
+    TextureSink,
 };
 use jni::errors::LogErrorAndDefault;
 use jni::objects::{JByteBuffer, JClass, JObject, JString, JValue};
@@ -521,6 +522,11 @@ impl BackendSession for AndroidSession {
             if is_this_session {
                 sinks.remove(&self.id);
             }
+            drop(sinks);
+            // The session's once-only failure gate goes with it, so the set
+            // does not grow by one id per closed session and a reused id
+            // warns afresh.
+            forget_release_failures(self.id);
         }
 
         if let Err(err) = self.command("FrustVideoPlayerHost.close", |env, class, session| {
@@ -1085,17 +1091,26 @@ fn first_release_failure(session: i32) -> bool {
     lock(&RELEASE_FAILURES_LOGGED).insert(session)
 }
 
+/// Forgets that `session` ever had a release failure logged — called when the
+/// session closes, so [`RELEASE_FAILURES_LOGGED`] holds only open sessions.
+fn forget_release_failures(session: i32) {
+    lock(&RELEASE_FAILURES_LOGGED).remove(&session);
+}
+
 /// A native frame's release: drops the reference [`hardware_buffer`]
 /// acquired, then tells the host it may close the image (and so let its
 /// reader reuse the buffer). Runs once, on whichever thread the renderer
 /// releases the frame from.
 ///
 /// The release runs from a frame's `Drop`, possibly during an unwind, so it
-/// never panics: the buffer reference is given back first (a plain FFI call),
-/// then the host is told inside a scoped JNI attachment ([`with_host`]) under
-/// `catch_unwind`. A failure, or a caught panic, is logged — once per session
-/// at `warn!` — and dropped; the host's image then stays open until its own
-/// close, which is the only cost.
+/// must not panic: the buffer reference is given back first (a plain FFI call,
+/// so it happens whatever follows), then the host is told inside a scoped JNI
+/// attachment ([`with_host`]) under `catch_unwind`. That guard only applies to
+/// panic=unwind builds (dev and test); the shipped release profile sets
+/// `panic = "abort"`, where a panic here aborts the process and the
+/// must-not-panic rule is the only protection. A failure, or a caught panic,
+/// is logged — once per session at `warn!` — and dropped; the host's image
+/// then stays open until its own close, which is the only cost.
 fn release_native_frame(session: i32, buffer: usize, token: i64) {
     // SAFETY: `buffer` is the address `hardware_buffer` returned non-null,
     // carrying exactly one reference acquired there and released only here
@@ -1231,15 +1246,19 @@ fn deliver_texture_frame(env: &Env<'_>, args: TextureFrameArgs<'_, '_>) -> bool 
         // `AHardwareBuffer_acquire` reference; only the frame's release
         // callback below (`release_native_frame`, run exactly once) drops it.
         let handle = unsafe { NativeHandle::new(NativeHandleKind::AHardwareBuffer, raw) };
-        sink.push(TextureFrame {
-            width,
-            height,
-            format: TextureFormat::Rgba8,
-            payload: FramePayload::Native(handle),
-            release: Some(Box::new(move || {
+        sink.push(
+            TextureFrame::new(
+                FrameMeta {
+                    width,
+                    height,
+                    format: TextureFormat::Rgba8,
+                },
+                FramePayload::Native(handle),
+            )
+            .on_release(move || {
                 release_native_frame(session, address, token);
-            })),
-        });
+            }),
+        );
         return true;
     }
 
@@ -1581,5 +1600,11 @@ mod tests {
         assert!(super::first_release_failure(7_000_001));
         assert!(!super::first_release_failure(7_000_001));
         assert!(super::first_release_failure(7_000_002));
+
+        // Closing a session forgets it, so the set does not grow and a
+        // reused id warns again; other sessions are untouched.
+        super::forget_release_failures(7_000_001);
+        assert!(super::first_release_failure(7_000_001));
+        assert!(!super::first_release_failure(7_000_002));
     }
 }

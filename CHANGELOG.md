@@ -149,10 +149,13 @@ limits are in [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
 
 ### Changed
 
-- `NativeHandle` is move-only (no `Clone`/`Copy`), `FramePayload`/`SourcePayload` are no longer
-  `Clone`, frames are consumed by value through `TextureFrame::into_parts` /
-  `SourceFrame::into_parts` (`FrameMeta`/`SourceMeta`); release callbacks run under `catch_unwind`
-  and must not panic.
+- `NativeHandle` is move-only (no `Clone`/`Copy`) and `FramePayload`/`SourcePayload` are no longer
+  `Clone`, so a handle cannot be copied. `TextureFrame` and `SourceFrame` keep their payload and
+  release callback private (`new`, `payload()`, `meta()`, `has_release()`), so outside `unsafe` a
+  handle cannot leave the frame that carries its release; the `unsafe` `into_parts`
+  (`FrameMeta`/`SourceMeta`) makes its caller run the returned callback exactly once. Release
+  callbacks run under `catch_unwind` in panic=unwind builds (dev and test); the shipped release
+  profile sets `panic = "abort"`, where a panicking callback aborts and callbacks must not panic.
 - `NativeHandle` (in `frust-render` and `frust-plugin`) keeps its fields private: build one
   through the unsafe `NativeHandle::new(kind, ptr)` and read it with `kind()`/`ptr()`. Texture
   frames run their release callback on drop, so it runs exactly once on every path.

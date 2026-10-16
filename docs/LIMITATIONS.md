@@ -4883,6 +4883,10 @@ the drop and submitted after it: a registration dropped mid-drain may release it
 while the frame that sampled it is still executing, and that one frame may tear. This is not a
 memory-safety issue (the importer holds its own reference and wgpu keeps the texture alive).
 
+A release callback that panics is contained in unwinding builds (dev and test) without a log line
+on the producer side (the renderer side logs); under the shipped `panic = "abort"` profile it
+aborts the process, so callbacks must not panic.
+
 **Applies to**: producers with a buffer ring shallower than the retire backlog plus one shown frame.
 
 **Why accepted**: releasing earlier would let a producer overwrite a buffer the GPU is still

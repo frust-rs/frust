@@ -56,20 +56,21 @@ fn register_sink(sink: TextureSink) -> TextureRegistration {
 /// renderer does not know is released and skipped (the last good frame stays
 /// shown).
 fn source_frame(frame: TextureFrame) -> Option<SourceFrame> {
-    // Consumed by value: the producer-side handle moves into the one renderer
-    // frame built below, and the drop guard of `frame` is disarmed.
-    let (meta, payload, release) = frame.into_parts();
-    let format = match meta.format {
+    // Check what can be refused while `frame` still guards its own release, so
+    // a refusal runs the guarded callback and no split frame is left behind.
+    let format = match frame.meta().format {
         TextureFormat::Rgba8 => SourceFormat::Rgba8,
         // `TextureFormat` is non-exhaustive; a layout added there before the
         // renderer can show it is handed straight back.
         _ => {
-            if let Some(release) = release {
-                release();
-            }
+            frame.release();
             return None;
         }
     };
+    // SAFETY: the callback is attached to the renderer frame built below,
+    // together with the handle it protects, and nothing fallible runs in
+    // between (`NativeHandle::new` cannot panic).
+    let (meta, payload, release) = unsafe { frame.into_parts() };
     let payload = match payload {
         FramePayload::Cpu(pixels) => SourcePayload::Cpu(pixels),
         FramePayload::Native(handle) => {
@@ -87,12 +88,10 @@ fn source_frame(frame: TextureFrame) -> Option<SourceFrame> {
             SourcePayload::Native(unsafe { NativeHandle::new(kind, handle.ptr()) })
         }
     };
-    Some(SourceFrame {
-        width: meta.width,
-        height: meta.height,
-        format,
-        payload,
-        release,
+    let frame = SourceFrame::new(meta.width, meta.height, format, payload);
+    Some(match release {
+        Some(release) => frame.on_release(release),
+        None => frame,
     })
 }
 
@@ -108,6 +107,8 @@ pub(crate) fn hardware_buffer_import_installed() -> bool {
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use frust_plugin::texture::FrameMeta;
 
     use super::*;
     use crate::{PlayerOptions, VideoOutput, VideoPlayer, VideoSource};
@@ -161,7 +162,7 @@ mod tests {
         let converted = source_frame(frame).expect("an RGBA frame converts");
         assert_eq!((converted.width, converted.height), (3, 2));
         assert_eq!(converted.format, SourceFormat::Rgba8);
-        assert!(matches!(&converted.payload, SourcePayload::Cpu(p) if p.len() == 24));
+        assert!(matches!(converted.payload(), SourcePayload::Cpu(p) if p.len() == 24));
         assert_eq!(released.load(Ordering::SeqCst), 0);
         converted.release();
         assert_eq!(released.load(Ordering::SeqCst), 1);
@@ -175,16 +176,17 @@ mod tests {
         let handle = unsafe {
             frust_plugin::texture::NativeHandle::new(FrameHandleKind::AHardwareBuffer, ptr)
         };
-        let frame = TextureFrame {
-            width: 8,
-            height: 8,
-            format: TextureFormat::Rgba8,
-            payload: FramePayload::Native(handle),
-            release: None,
-        };
+        let frame = TextureFrame::new(
+            FrameMeta {
+                width: 8,
+                height: 8,
+                format: TextureFormat::Rgba8,
+            },
+            FramePayload::Native(handle),
+        );
 
         let converted = source_frame(frame).expect("a native frame converts");
-        let SourcePayload::Native(converted) = &converted.payload else {
+        let SourcePayload::Native(converted) = converted.payload() else {
             panic!("a native frame stays native");
         };
         assert_eq!(converted.kind(), NativeHandleKind::AHardwareBuffer);

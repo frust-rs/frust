@@ -620,7 +620,7 @@ fn emitted_frames_reach_the_sink_and_the_newest_wins() {
 
     let frame = sink.take_latest().expect("a frame is pending");
     assert_eq!((frame.width, frame.height), (4, 2));
-    match &frame.payload {
+    match frame.payload() {
         FramePayload::Cpu(pixels) => assert_eq!(pixels[0], 2),
         FramePayload::Native(_) => panic!("the mock pushes CPU frames"),
     }
