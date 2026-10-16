@@ -5233,6 +5233,17 @@ struct ResourceTexture {
     view: wgpu::TextureView,
     width: u32,
     height: u32,
+    /// The rows, counted from the top, that may differ from what a
+    /// full-footprint upload of the next frame would leave there.
+    ///
+    /// A queue upload writes the whole texture every frame: the frame's bytes,
+    /// then the upload buffer's tail — zeroes for coverage, the reused staging
+    /// vector's earlier records for encoded paints. A staged upload writes only
+    /// the rows the frame fills plus every row the last frame left live, and
+    /// so leaves the texture byte-for-byte as the full upload would: the rows
+    /// below this mark already hold exactly that tail. A new texture is live
+    /// throughout, so its first upload is a full one.
+    live_rows: u32,
 }
 
 impl ResourceTexture {
@@ -5244,6 +5255,23 @@ impl ResourceTexture {
             view,
             width: descriptor.size.width,
             height: descriptor.size.height,
+            live_rows: descriptor.size.height,
+        }
+    }
+
+    /// The rows a frame whose bytes fill `filled_rows` rows uploads through a
+    /// stage: those, and every row the last upload left live (see
+    /// [`Self::live_rows`]), never past the texture's height.
+    fn staged_rows(&self, filled_rows: u32) -> u32 {
+        staged_rows(filled_rows, self.live_rows, self.height)
+    }
+
+    /// The extent of an upload of the texture's top `rows` rows.
+    fn rows_extent(&self, rows: u32) -> wgpu::Extent3d {
+        wgpu::Extent3d {
+            width: self.width,
+            height: rows,
+            depth_or_array_layers: 1,
         }
     }
 
@@ -5770,15 +5798,21 @@ impl FrameResources {
         let alphas = &self.alphas;
         let bytes_per_row = gpu::resource_bytes_per_row(alphas.width);
         let coverage = &frame.strips.alphas;
+        // Staged, only the rows this frame's coverage fills and the rows the
+        // last frame left live are written — the rest of the texture already
+        // holds the zeroes a full upload would put there.
+        let filled = rows_filled(coverage.len(), bytes_per_row).min(alphas.height);
+        let rows = alphas.staged_rows(filled);
         let staged = stage.as_deref_mut().is_some_and(|stage| {
-            stage.copy_to_texture(
-                encoder,
-                alphas.copy_target(),
-                bytes_per_row,
-                alphas.height,
-                alphas.extent(),
-                |dst| gpu::write_zero_padded(dst, coverage),
-            )
+            rows == 0
+                || stage.copy_to_texture(
+                    encoder,
+                    alphas.copy_target(),
+                    bytes_per_row,
+                    rows,
+                    alphas.rows_extent(rows),
+                    |dst| gpu::write_zero_padded(dst, coverage),
+                )
         });
         if !staged {
             gpu::with_padded_alphas(
@@ -5795,6 +5829,7 @@ impl FrameResources {
                 },
             );
         }
+        self.alphas.live_rows = filled;
 
         if !self.paints_data.is_empty() {
             let footprint = gpu::resource_texture_bytes(self.paints.width, self.paints.height);
@@ -5803,21 +5838,26 @@ impl FrameResources {
             // The height was checked to fit before any pass was recorded, so a
             // buffer too short for the records is unreachable; skipping the
             // upload rather than unwrapping keeps the frame path total anyway.
-            if GpuEncodedPaint::serialize_to_buffer(&self.paints_data, &mut self.paint_staging)
-                .is_ok()
+            if let Ok(len) =
+                GpuEncodedPaint::serialize_to_buffer(&self.paints_data, &mut self.paint_staging)
             {
                 let paints = &self.paints;
                 let staging = &self.paint_staging;
                 let bytes_per_row = gpu::resource_bytes_per_row(paints.width);
+                // The rows below the live mark already hold the staging
+                // vector's own tail, which is what a full upload rewrites.
+                let filled = rows_filled(len, bytes_per_row).min(paints.height);
+                let rows = paints.staged_rows(filled);
                 let staged = stage.as_deref_mut().is_some_and(|stage| {
-                    stage.copy_to_texture(
-                        encoder,
-                        paints.copy_target(),
-                        bytes_per_row,
-                        paints.height,
-                        paints.extent(),
-                        |dst| gpu::write_zero_padded(dst, staging),
-                    )
+                    rows == 0
+                        || stage.copy_to_texture(
+                            encoder,
+                            paints.copy_target(),
+                            bytes_per_row,
+                            rows,
+                            paints.rows_extent(rows),
+                            |dst| gpu::write_zero_padded(dst, staging),
+                        )
                 });
                 if !staged {
                     queue.write_texture(
@@ -5827,6 +5867,7 @@ impl FrameResources {
                         paints.extent(),
                     );
                 }
+                self.paints.live_rows = filled;
             }
         }
 
@@ -6158,6 +6199,19 @@ fn config_descriptor(label: &str) -> wgpu::BufferDescriptor<'_> {
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     }
+}
+
+/// The rows a staged upload writes: the `filled` rows the frame's bytes take
+/// and every row the last upload left `live`, never past `height` — see
+/// [`ResourceTexture::live_rows`].
+fn staged_rows(filled: u32, live: u32, height: u32) -> u32 {
+    filled.max(live).min(height)
+}
+
+/// The rows of a resource texture `len` bytes fill, the last one partly.
+fn rows_filled(len: usize, bytes_per_row: u32) -> u32 {
+    let rows = (len as u64).div_ceil(u64::from(bytes_per_row.max(1)));
+    u32::try_from(rows).unwrap_or(u32::MAX)
 }
 
 /// The texel copy layout of a full resource-texture upload.
@@ -7352,6 +7406,28 @@ mod tests {
         assert_eq!(format_us(0), "0.0");
         assert_eq!(format_us(1), "0.1");
         assert_eq!(format_us(4_170_000), "4170.0");
+    }
+
+    /// A staged upload covers the rows the frame fills and every row the last
+    /// upload left live — so a frame whose coverage shrank re-zeroes the rows
+    /// it gave up exactly once — and nothing past the texture.
+    #[test]
+    fn a_staged_upload_covers_filled_and_previously_live_rows() {
+        assert_eq!(rows_filled(0, 32_768), 0);
+        assert_eq!(rows_filled(1, 32_768), 1);
+        assert_eq!(rows_filled(32_768, 32_768), 1);
+        assert_eq!(rows_filled(32_769, 32_768), 2);
+        // A new texture is live throughout: its first upload is a full one.
+        assert_eq!(staged_rows(1, 8, 8), 8);
+        // Shrinking: the rows the last frame filled are rewritten once...
+        assert_eq!(staged_rows(2, 5, 8), 5);
+        // ...and after that only the frame's own.
+        assert_eq!(staged_rows(2, 2, 8), 2);
+        // Growing past the live mark, never past the texture.
+        assert_eq!(staged_rows(6, 2, 8), 6);
+        assert_eq!(staged_rows(9, 2, 8), 8);
+        // Nothing filled and nothing live: nothing to write.
+        assert_eq!(staged_rows(0, 0, 8), 0);
     }
 
     /// The compile phases partition the compile they sit inside, so their sum

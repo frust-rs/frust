@@ -1403,11 +1403,34 @@ fn a_punch_cut_frame_records_two_passes_fewer() {
 fn staging_scenes() -> Vec<Scene> {
     vec![
         scene(),
+        dense_coverage_scene(),
         layer_scene(),
         gradient_scene(),
         image_scene(),
         scene(),
     ]
+}
+
+/// Hundreds of anti-aliased diamonds over the whole target: coverage several
+/// alpha-texture rows deep, so the frames after it, whose coverage fits in
+/// one row, upload fewer rows than it left live.
+fn dense_coverage_scene() -> Scene {
+    let mut scene = Scene::new();
+    let mut builder = SceneBuilder::new(&mut scene);
+    for row in 0..24 {
+        for column in 0..24 {
+            let (x, y) = (f64::from(column) * 10.7 + 3.3, f64::from(row) * 10.7 + 3.3);
+            let mut path = BezPath::new();
+            path.move_to((x + 4.5, y));
+            path.line_to((x + 9.0, y + 4.5));
+            path.line_to((x + 4.5, y + 9.0));
+            path.line_to((x, y + 4.5));
+            path.close_path();
+            let colour = if (row + column) % 2 == 0 { RED } else { BLUE };
+            builder.fill_path(path, Brush::Solid(colour));
+        }
+    }
+    scene
 }
 
 /// One frame of `scene` on `renderer` into a fresh target, submitted alone.
@@ -1459,12 +1482,14 @@ fn staged_and_queued_uploads_draw_the_same_pixels_frame_after_frame() {
     queued.set_staging_ring(false);
     assert!(staged.staging_ring() && !queued.staging_ring());
 
+    let mut staged_bytes = Vec::new();
     for (index, scene) in staging_scenes().iter().enumerate() {
         let through_ring = staged_frame(&device, &queue, &mut staged, scene);
         assert!(
             staged.last_frame_staged_bytes() > 0,
             "frame {index} took the ring"
         );
+        staged_bytes.push(staged.last_frame_staged_bytes());
         let through_queue = staged_frame(&device, &queue, &mut queued, scene);
         assert_eq!(
             queued.last_frame_staged_bytes(),
@@ -1476,6 +1501,23 @@ fn staged_and_queued_uploads_draw_the_same_pixels_frame_after_frame() {
             "frame {index}: the staged route drew different pixels from queue writes"
         );
     }
+    // The dense frame's coverage takes more alpha rows than the first frame's;
+    // the frame after it fills one, yet still rewrites (re-zeroes) every row
+    // the dense frame left live, and once that is done the last frame — the
+    // first frame's scene again — uploads only its own rows.
+    let row = u64::from(caps.resource_texture_dim) * 16;
+    assert!(
+        staged_bytes[1] >= staged_bytes[0] + row,
+        "the dense frame spans more alpha rows: {staged_bytes:?}"
+    );
+    assert!(
+        staged_bytes[2] >= 2 * row,
+        "the frame after it rewrites the rows it left live: {staged_bytes:?}"
+    );
+    assert_eq!(
+        staged_bytes[5], staged_bytes[0],
+        "once re-zeroed, those rows are not uploaded again: {staged_bytes:?}"
+    );
     let stats = staged.staging_stats().expect("the ring is on");
     assert_eq!(stats.frames, staging_scenes().len() as u64);
     assert_eq!(stats.busy, 0, "paced frames never find the ring busy");
