@@ -88,6 +88,21 @@
 //! [`frust_engine::renderer::project_command_ranges`]'s bracket rule, so every
 //! segment is a well-nested display list: a clip a cut falls inside clips both
 //! sides, and every drawing command of the frame lands in exactly one segment.
+//!
+//! Only a **servable** cut is taken ([`cut_is_servable`]): one whose range
+//! the overlay's engine draws exactly as the main surface would. A range
+//! holding a `DrawRetained`, a `PushRetained` bracket, a `SceneTexture` or a
+//! `BackdropBlur`, or one a retained bracket is open across (opened before
+//! the range and still open at its start, or opened inside it and still open
+//! past its end), is **kept on the main surface**: the main segment draws it
+//! exactly as an uncut frame would, under the native view, and that overlay is
+//! handed an empty range ([`CutServiceability::served_range`]) and clears to
+//! transparent — the same degrade a host whose overlay was refused already
+//! has. [`OverlayCutOutcome::serviceability`] says which cuts were kept and
+//! why. Without the rule such content would draw on no surface at all (the
+//! main segment excludes it, the overlay cannot draw it), or a retained page
+//! would be repainted on the overlay while the main store kept advertising
+//! the old one.
 //! A differ cut starts AT its slot's index, so a Mode B slot's own hole-punch
 //! (`ClearRect`) is the overlay's first command — drawn over the overlay's
 //! transparent clear, where it erases nothing.
@@ -118,17 +133,21 @@
 //! Its own [`frust_engine::EngineRenderer`] on the main surface's device and
 //! queue ([`OverlayRenderer`]), warmed for the overlay's format and built with
 //! **retention off**: a retained page belongs to the main surface's store, so
-//! a `DrawRetained` in the overlay's range is dropped (counted in
+//! a `DrawRetained` handed to the overlay is dropped (counted in
 //! [`RangeCut::dropped_draw_retained`]) and a `PushRetained` body is painted
 //! inline. The range is cut by [`frust_engine::renderer::project_command_range`]
 //! — read its *bracket rule* for what happens to a clip, layer or retained
-//! bracket a cut falls inside. A backdrop blur in the overlay's range draws
+//! bracket a cut falls inside. A backdrop blur handed to the overlay draws
 //! nothing (its swapchain cannot be read back), and an external-pass texture
 //! (`SceneTexture`) is bound in the main renderer's registry only, so it draws
-//! nothing on the overlay either. Shader quads are prepared over the whole
-//! scene by every overlay (the pre-pass is per scene), so a quad outside an
-//! overlay's range is rendered and never sampled there. Each overlay engine
-//! schedules its own budget.
+//! nothing on the overlay either — which is why the segmented frame never
+//! hands an overlay any of them (the servability rule above) and a served
+//! cut's [`RangeCut::dropped_draw_retained`] is always zero. The spike's
+//! single fixed cut ([`OverlaySurface::render`]) applies no such rule.
+//! Shader quads are prepared over the whole scene by every overlay (the
+//! pre-pass is per scene, on the overlay's own engine), so the overlay serves
+//! a quad in its range, and one outside it is rendered and never sampled
+//! there. Each overlay engine schedules its own budget.
 //!
 //! # The sanctioned `unsafe` zone
 //!
@@ -142,9 +161,11 @@ use core::ffi::c_void;
 use core::ops::Range;
 use core::ptr::NonNull;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use frust_engine::renderer::RangeCut;
+use frust_engine::renderer::{RangeCut, open_retained_bracket};
 use frust_gpu::{RenderContext, SurfaceAlphaRequest};
+use frust_scene::Command;
 use kurbo::Affine;
 
 use crate::context::{EngineSurface, RenderPath};
@@ -776,6 +797,158 @@ pub struct OverlayCutOutcome {
     /// [`OverlayFrame::Skipped`] for every cut of a frame whose main segment
     /// was not rendered (nothing was recorded for any overlay then).
     pub result: Result<OverlayFrame, OverlayError>,
+    /// Whether the cut's range was served on the overlay or kept on the main
+    /// surface, and why ([`cut_is_servable`]): a kept cut's overlay recorded
+    /// an empty range, so its `result` is a transparent frame. The
+    /// classification [`SurfaceRenderer::encode_segmented`] made for the
+    /// frame — [`CutServiceability::Servable`] for a cut the frame's encode
+    /// never classified (a plain [`SurfaceRenderer::encode`]).
+    pub serviceability: CutServiceability,
+}
+
+/// Why a cut's range cannot be drawn on an overlay and stays on the main
+/// surface — [`CutServiceability::Unservable`]'s reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum UnservableReason {
+    /// A `DrawRetained`: the page lives in the main surface's retained store,
+    /// which the overlay's engine cannot read.
+    RetainedComposite,
+    /// A `PushRetained` bracket inside the range: painted inline on the
+    /// overlay, it would never record the page the main surface's store then
+    /// keeps advertising, and the same content would move between surfaces
+    /// as the widget turns clean (drawn from its page) and dirty again.
+    RetainedRecording,
+    /// A retained bracket open across one of the range's ends: the projection
+    /// would demote it to inline paint on both sides of the cut.
+    RetainedBracketCrossing,
+    /// A `SceneTexture`: external textures are bound in the main renderer's
+    /// registry only.
+    SceneTexture,
+    /// A `BackdropBlur`: it reads back what is painted beneath it, which an
+    /// overlay's swapchain does not hold.
+    BackdropBlur,
+}
+
+impl std::fmt::Display for UnservableReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::RetainedComposite => "retained content (a page composite)",
+            Self::RetainedRecording => "retained content (a page recording)",
+            Self::RetainedBracketCrossing => "retained content (a bracket crossing the cut)",
+            Self::SceneTexture => "an external texture",
+            Self::BackdropBlur => "a backdrop blur",
+        })
+    }
+}
+
+/// Whether an overlay can draw a cut's range exactly as the main surface
+/// would — [`cut_is_servable`]'s answer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CutServiceability {
+    /// The overlay draws the range; the main segment excludes it.
+    #[default]
+    Servable,
+    /// The range stays on the main surface and the overlay draws nothing.
+    Unservable {
+        /// Why.
+        reason: UnservableReason,
+        /// The command index that decided it: the offending command, or the
+        /// `PushRetained` opening the crossing bracket.
+        at: usize,
+    },
+}
+
+impl CutServiceability {
+    /// Whether the overlay serves the cut.
+    pub fn is_servable(self) -> bool {
+        matches!(self, Self::Servable)
+    }
+
+    /// The range the overlay records for `cut`, and the main segment
+    /// excludes: `cut` itself when servable, otherwise the empty range `0..0`
+    /// — nothing reopened, nothing drawn, the overlay cleared to transparent.
+    pub fn served_range(self, cut: &Range<usize>) -> Range<usize> {
+        match self {
+            Self::Servable => cut.clone(),
+            Self::Unservable { .. } => 0..0,
+        }
+    }
+}
+
+impl std::fmt::Display for CutServiceability {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Servable => f.write_str("served on the overlay"),
+            Self::Unservable { reason, at } => {
+                write!(f, "kept on main: {reason} at command {at}")
+            }
+        }
+    }
+}
+
+/// Classifies the cut `range` of `commands`: whether an overlay can draw it
+/// exactly as the main surface would (see the module docs' *Segments*).
+///
+/// Unservable, at the first offending command in display-list order: a
+/// retained bracket open at the range's start
+/// ([`frust_engine::renderer::open_retained_bracket`]); then, inside the
+/// range, a `DrawRetained`, a `PushRetained` (whose bracket crosses the
+/// range's end when it is still open there short of the scene's end), a
+/// `SceneTexture` or a `BackdropBlur`. Everything else — fills, paths, text,
+/// images, blurred rects, hole punches, clips, layers and shader quads (the
+/// overlay prepares its own) — is servable. `range` is clamped to the list
+/// the way the projection clamps it, and an empty range is servable (there is
+/// nothing to draw on either surface). Pure and read-only: one pass over the
+/// commands up to the range's end.
+pub fn cut_is_servable(commands: &[Command], range: Range<usize>) -> CutServiceability {
+    let len = commands.len();
+    let end = range.end.min(len);
+    let start = range.start.min(end);
+    if start == end {
+        return CutServiceability::Servable;
+    }
+    let unservable = |reason, at| CutServiceability::Unservable { reason, at };
+    if let Some(at) = open_retained_bracket(commands, start) {
+        return unservable(UnservableReason::RetainedBracketCrossing, at);
+    }
+    for (at, command) in commands.iter().enumerate().take(end).skip(start) {
+        let reason = match command {
+            Command::DrawRetained { .. } => UnservableReason::RetainedComposite,
+            Command::PushRetained { .. } => {
+                if end < len && !retained_closes_before(commands, at, end) {
+                    UnservableReason::RetainedBracketCrossing
+                } else {
+                    UnservableReason::RetainedRecording
+                }
+            }
+            Command::SceneTexture { .. } => UnservableReason::SceneTexture,
+            Command::BackdropBlur { .. } => UnservableReason::BackdropBlur,
+            _ => continue,
+        };
+        return unservable(reason, at);
+    }
+    CutServiceability::Servable
+}
+
+/// Whether the retained bracket `commands[push]` opens is closed before
+/// `end` — pops matched to the most recent retained push, as the projection
+/// matches them.
+fn retained_closes_before(commands: &[Command], push: usize, end: usize) -> bool {
+    let mut depth = 0_usize;
+    for command in commands.iter().take(end).skip(push) {
+        match command {
+            Command::PushRetained { .. } => depth += 1,
+            Command::PopRetained => {
+                depth -= 1;
+                if depth == 0 {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// What [`SurfaceRenderer::submit_segmented`] did with one frame.
@@ -892,29 +1065,77 @@ pub fn project_main_segment(
     frust_engine::renderer::project_command_ranges(scene, &ranges, options, out)
 }
 
-/// Records every cut's range of `scene` into `encoder` — the overlay half of
-/// [`SurfaceRenderer::submit_segmented`], after the main segment's passes and
-/// before the one submit.
+/// Records every cut's served range of `scene` into `encoder` — the overlay
+/// half of [`SurfaceRenderer::submit_segmented`], after the main segment's
+/// passes and before the one submit.
+///
+/// `service` is the frame's classification, one per cut in order, as the
+/// encode cut the main segment by; a cut past its end is classified here.
+/// A kept cut's overlay records the empty range
+/// ([`CutServiceability::served_range`]).
 pub(crate) fn record_cuts(
     encoder: &mut wgpu::CommandEncoder,
     scene: &frust_scene::Scene,
     cuts: &mut [OverlayCut<'_>],
+    service: &[CutServiceability],
 ) -> Vec<OverlayCutOutcome> {
     cuts.iter_mut()
-        .map(|cut| OverlayCutOutcome {
-            overlay_id: cut.overlay_id,
-            result: cut.overlay.record(encoder, scene, cut.range.clone()),
+        .enumerate()
+        .map(|(index, cut)| {
+            let serviceability = service
+                .get(index)
+                .copied()
+                .unwrap_or_else(|| cut_is_servable(scene.commands(), cut.range.clone()));
+            let result =
+                cut.overlay
+                    .record(encoder, scene, serviceability.served_range(&cut.range));
+            if let Ok(OverlayFrame::Rendered(range_cut)) = &result {
+                note_dropped_composites(range_cut);
+            }
+            OverlayCutOutcome {
+                overlay_id: cut.overlay_id,
+                result,
+                serviceability,
+            }
         })
         .collect()
 }
 
+/// A served cut never hands the overlay a `DrawRetained` ([`cut_is_servable`]
+/// keeps such a range on the main surface), so the overlay's projection drops
+/// none: asserted in a debug build, logged once otherwise — a dropped one is
+/// content drawn on no surface.
+fn note_dropped_composites(cut: &RangeCut) {
+    static LOGGED: AtomicBool = AtomicBool::new(false);
+    debug_assert_eq!(
+        cut.dropped_draw_retained, 0,
+        "an overlay dropped a retained composite of a served cut"
+    );
+    if cut.dropped_draw_retained > 0 && !LOGGED.swap(true, Ordering::Relaxed) {
+        log::error!(
+            "frust-render overlay: a served cut dropped {} retained composite(s) \
+             (commands {}..{}); that content drew on no surface (logged once)",
+            cut.dropped_draw_retained,
+            cut.start,
+            cut.end
+        );
+    }
+}
+
 /// One [`OverlayFrame::Skipped`] per cut — the overlays of a frame whose main
-/// segment did not render.
-pub(crate) fn skipped_cuts(cuts: &[OverlayCut<'_>]) -> Vec<OverlayCutOutcome> {
+/// segment did not render — each carrying the frame's classification of it
+/// (`service`, one per cut in order; [`CutServiceability::Servable`] past its
+/// end).
+pub(crate) fn skipped_cuts(
+    cuts: &[OverlayCut<'_>],
+    service: &[CutServiceability],
+) -> Vec<OverlayCutOutcome> {
     cuts.iter()
-        .map(|cut| OverlayCutOutcome {
+        .enumerate()
+        .map(|(index, cut)| OverlayCutOutcome {
             overlay_id: cut.overlay_id,
             result: Ok(OverlayFrame::Skipped),
+            serviceability: service.get(index).copied().unwrap_or_default(),
         })
         .collect()
 }
