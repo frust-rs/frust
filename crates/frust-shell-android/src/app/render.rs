@@ -6,8 +6,9 @@
 //! thread, so the per-frame render logic is never forked.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
+use frust_render::overlay::SegmentedPresents;
 use frust_render::{AcquireOutcome, EncodeOutcome, FrameOutcome, RenderContext, SurfaceRenderer};
 use frust_scene::Scene;
 use frust_shell_common::perf::{
@@ -134,6 +135,48 @@ fn publish_retained(renderer: &mut SurfaceRenderer) -> bool {
     renderer.take_retained_refusal()
 }
 
+/// The submit of a frame with overlays: the main segment and every overlay's
+/// range recorded into one encoder and submitted once
+/// ([`SurfaceRenderer::submit_segmented_deferred`]), then the presents on this
+/// thread — the main surface first, the overlays after it in cut order
+/// (bottom to top) — each stamped with the wall clock for the
+/// `frust-overlay skew` log. Answers the main surface's outcome, exactly what
+/// [`SurfaceRenderer::submit`] would have; an overlay the engine refused is
+/// logged and presents nothing while the rest of the frame lands.
+fn submit_with_overlays(
+    renderer: &mut SurfaceRenderer,
+    render_cx: &RenderContext,
+    overlays: &mut crate::jni_glue::FrameOverlays,
+) -> anyhow::Result<FrameOutcome> {
+    let (outcome, presents) = {
+        let mut cuts = overlays.overlay_cuts();
+        renderer.submit_segmented_deferred(render_cx, &mut cuts)?
+    };
+    let SegmentedPresents {
+        main,
+        overlays: overlay_frames,
+    } = presents;
+    let main_presented = main.map(|frame| {
+        frame.present();
+        SystemTime::now()
+    });
+    let presented = overlay_frames.len();
+    for (_, frame) in overlay_frames {
+        frame.present();
+    }
+    if let Some(main_at) = main_presented
+        && presented > 0
+    {
+        overlays.record_presents(main_at, SystemTime::now(), presented);
+    }
+    for cut in &outcome.overlays {
+        if let Err(error) = &cut.result {
+            overlays.note_refusal(cut.overlay_id, error);
+        }
+    }
+    Ok(outcome.frame)
+}
+
 /// Run the encode→acquire→submit tail for one painted `scene`, timing each span
 /// behind `perf_on` (the FFI-path perf convention: zero clock reads when
 /// disabled), recording the folded [`FramePasses`] through the single emitter
@@ -163,9 +206,25 @@ pub(crate) fn render_scene(
     // the frame that produced it (the release gate; see `RenderSignals`).
     frame_id: u64,
 ) -> Duration {
+    // Install the platform importers once the device is known to support them;
+    // a no-op on every later frame.
+    frust_render::native_import::install(render_cx);
+
+    // The overlay surfaces this frame draws (`crate::jni_glue::frame_overlays`):
+    // `None` — one cached-bool read with overlays off, or no overlay surface
+    // live — keeps the single-surface encode/submit below exactly as it is.
+    // `Some` cuts each overlay's command range out of the main surface's
+    // frame and holds the overlays until they are presented.
+    let mut overlays = crate::jni_glue::frame_overlays(frame_id, scene.commands().len());
+
     // Encode span (GPU/CPU encode, no swapchain touch).
     let encode_start = perf_on.then(Instant::now);
-    let encode_outcome = renderer.encode(render_cx, scene, base_color);
+    let encode_outcome = match overlays.as_ref() {
+        None => renderer.encode(render_cx, scene, base_color),
+        Some(overlays) => {
+            renderer.encode_segmented(render_cx, scene, base_color, &overlays.ranges())
+        }
+    };
     let encode_time = encode_start.map_or(Duration::ZERO, |t| t.elapsed());
 
     // First-frame decomposition: stamp the first encode-complete
@@ -210,13 +269,18 @@ pub(crate) fn render_scene(
     // Submit span (blit + queue-submit + present).
     let submit_start = perf_on.then(Instant::now);
     let render_result = match acquire_result {
-        Ok(AcquireOutcome::Acquired) => renderer.submit(render_cx),
+        Ok(AcquireOutcome::Acquired) => match overlays.as_mut() {
+            None => renderer.submit(render_cx),
+            Some(overlays) => submit_with_overlays(renderer, render_cx, overlays),
+        },
         Ok(AcquireOutcome::Reconfigured) => Ok(FrameOutcome::Redraw),
         Ok(AcquireOutcome::Lost) => Ok(FrameOutcome::SurfaceLost),
         Ok(AcquireOutcome::Skipped) => Ok(FrameOutcome::Skipped),
         Err(err) => Err(err),
     };
     let submit_time = submit_start.map_or(Duration::ZERO, |t| t.elapsed());
+    // Every overlay frame is presented (or dropped): release them.
+    drop(overlays);
 
     // The resident-key ledger after this frame, for the UI thread's next
     // paint. A frame the engine refused for drawing a page it no longer holds

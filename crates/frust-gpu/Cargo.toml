@@ -27,11 +27,37 @@ perf-trace = []
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_system_properties.workspace = true
+# Zero-copy AHardwareBuffer import (`src/import/android.rs`): raw Vulkan through the same `ash` wgpu-hal uses.
+ash.workspace = true
+ndk-sys.workspace = true
 
 # --- Per-target wgpu backends (why per-target, size effect: docs/RENDER_DEVELOPMENT.md) ---
 # `gles` is in no row: no shipping shell surfaces a GLES-only device.
 [target.'cfg(target_vendor = "apple")'.dependencies]
 wgpu = { workspace = true, features = ["metal"] }
+# Zero-copy CVPixelBuffer import (`src/import/apple.rs`): CVMetalTextureCache -> MTLTexture -> wgpu. Minimal
+# feature lists; the import card may widen them (feature changes do not touch the lockfiles).
+objc2.workspace = true
+objc2-core-foundation = { workspace = true }
+# Direct `version` rows (like plugins/camera): Cargo refuses `default-features = false` on a workspace-inherited objc2* row.
+objc2-core-video = { version = "0.3", default-features = false, features = [
+    "std",
+    "CVBase",
+    "CVBuffer",
+    "CVImageBuffer",
+    "CVPixelBuffer",
+    "CVReturn",
+    "CVMetalTexture",
+    "CVMetalTextureCache",
+    "objc2-metal",
+] }
+objc2-metal = { version = "0.3", default-features = false, features = [
+    "std",
+    "MTLDevice",
+    "MTLResource",
+    "MTLTexture",
+    "MTLPixelFormat",
+] }
 
 # Linux, Android -> vulkan. wasm32-unknown-emscripten is both `unix` and `wasm32`, so Cargo would union
 # this row with the wasm one, but the wasm row excludes emscripten: only the inert vulkan feature applies.

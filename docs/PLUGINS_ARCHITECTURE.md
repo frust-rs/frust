@@ -60,14 +60,14 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how PLUGINS relates to the other unit
 
 | Module | Responsibility |
 |--------|-----------------|
-| `crates/frust-plugin` | Android platform-handle substrate (JavaVM/Context) plus a scoped JNI-attach helper, and the process-global desktop view-factory registry a plugin publishes a native-view factory into and a desktop shell resolves a `view_type` through. The registry half is std-only and compiles on every target; the Android half is inert off Android, and there is no Apple-specific surface at all |
+| `crates/frust-plugin` | Android platform-handle substrate (JavaVM/Context) plus a scoped JNI-attach helper, and the process-global desktop view-factory registry a plugin publishes a native-view factory into and a desktop shell resolves a `view_type` through. The registry half is std-only and compiles on every target; the Android half is inert off Android, and there is no Apple-specific surface at all. Its leaf `texture` mailbox (`TextureSink`, `TextureFrame`, `TextureFormat::Rgba8`, `FramePayload::{Cpu, Native}`, `NativeHandle`) is the plugin-side half of the texture bus: a producer pushes frames, the facade's source side takes the latest |
 | `plugins/shared-preferences` | Synchronous KV store routed to NSUserDefaults, Android SharedPreferences, or a JSON file backend |
 | `plugins/secure-storage` | Synchronous, named-store secure string storage with an optional biometric gate, routed to Keychain, Android Keystore, or keyring-core; a debug-only, desktop-only `insecure_file` fallback stores plaintext JSON instead |
-| `plugins/camera` | Camera capability (permission, still capture, image stream, barcode/QR decode, torch) over CameraX (Android) or AVFoundation (Apple); preview surfaces as a native platform-view slot |
+| `plugins/camera` | Camera capability (permission, still capture, image stream, barcode/QR decode, torch) over CameraX (Android) or AVFoundation (Apple); preview surfaces as a native platform-view slot, or opt-in as a texture (`preview_texture`; Android producer = a second RGBA_8888 `ImageAnalysis`, CPU copy only; Apple pending the Apple producers) |
 | `plugins/clipboard` | Synchronous plain-text clipboard over Android `ClipboardManager` (10+ returns nothing to an unfocused reader), iOS `UIPasteboard` (14+ shows a one-time paste banner), or desktop `arboard` (X11 clipboard content dies with the owning process unless a clipboard manager adopts it) |
 | `plugins/haptics` | Fire-and-forget haptic effects over Android `Vibrator`/`VibrationEffect` or iOS `UI*FeedbackGenerator`; desktop is unavailable by design (no first-class API to route to) |
 | `plugins/iap` | In-app purchases and subscriptions (products, purchases, restore, deep-link to subscription management) over Play Billing (`openiap-google`) or StoreKit 2 (`FrustIap` Swift glue), both speaking OpenIAP 3.0.1; desktop is a v1 deferral, not a capability gap |
-| `plugins/video-player` | Video playback (file, bundled-asset, `http(s)` and HLS sources; play/pause/seek/rate/volume/loop; lifecycle state and events) over Media3 ExoPlayer on Android or AVPlayer on iOS and macOS; the picture is a native platform-view slot, never a frame this crate paints |
+| `plugins/video-player` | Video playback (file, bundled-asset, `http(s)` and HLS sources; play/pause/seek/rate/volume/loop; lifecycle state and events) over Media3 ExoPlayer on Android or AVPlayer on iOS and macOS; the picture is a native platform-view slot (`VideoOutput::NativeView`, the default) or opt-in `VideoOutput::Texture` frames the scene paints: on Android a GLES copy on its own GL thread writes each decoded frame into an RGBA_8888 `ImageReader`, handed on as a zero-copy `AHardwareBuffer` when the importer is installed and API ≥ 29, else a CPU copy; Apple pending the Apple producers; desktop and web have no texture producer |
 | `plugins/url-launcher` | Fire-and-forget launch of an absolute http/https URL in the platform's default external browser over Android `ACTION_VIEW` (application-`Context` + `NEW_TASK`), iOS `openURL:options:completionHandler:` (async main-queue bounce), or desktop `xdg-open` / `open` / `ShellExecuteW`; the launch half of an RFC 8252 OAuth round trip — completion returns through `frust::deep_links()`; `Maps` builds Apple/Google Maps https URLs and `open_maps_native` opens an allowlisted `geo:`/`maps:`/`comgooglemaps:`/`google.navigation:` URL |
 | `plugins/share` | Share sheet for text or a URL (`Share::text` / `text_anchored` / `url`, `ShareOutcome`) over Android `ACTION_SEND` chooser (plain JNI), iOS `UIActivityViewController` (main queue, iPad popover anchored to an optional `ShareAnchor` rect or centred), or a desktop clipboard copy |
 | `plugins/qr` | Facade-tier QR code view (`qr_code(payload)`, ECC level, quiet zone, colours) over `qrcode`, painted on a canvas; also `encode`/`QrMatrix` for the raw module matrix |
@@ -95,11 +95,11 @@ preview or a `frust build macos|windows|linux`. See
 |--------|-----------------|--------|
 | `shared-preferences` | generic-desktop, macOS-native on macOS | NSUserDefaults (macOS, sharing the Apple arm with iOS) / a JSON file backend (Linux, Windows) |
 | `secure-storage` | generic-desktop, macOS-native on macOS | Keychain (macOS, sharing the Apple arm with iOS) / `keyring-core` + secret-service or Credential Manager (Linux, Windows); debug builds may opt into a plaintext JSON file under `data_dir()` instead, refused in release |
-| `camera` | macOS-native only | AVFoundation (macOS, sharing the Apple arm with iOS); no backend at all on Linux/Windows |
+| `camera` | macOS-native only | AVFoundation (macOS, sharing the Apple arm with iOS); no backend at all on Linux/Windows; no texture mode on desktop |
 | `clipboard` | generic-desktop | `arboard` on macOS, Linux, and Windows alike — macOS shares this arm rather than its own Apple `UIPasteboard` one (UIKit-only) |
 | `haptics` | unavailable-by-design | no first-class OS API to route to, on macOS, Linux, or Windows |
 | `iap` | deferred (v1) | dependency-free, always-erroring stub on macOS, Linux, and Windows — mobile-first scope, not a capability gap (`iap-desktop-unavailable-v1` in [LIMITATIONS.md](LIMITATIONS.md)) |
-| `video-player` | macOS-native (Mode A) via the desktop platform-view host | AVPlayer (macOS, sharing the Apple arm with iOS), its `NSView` hosted above the window's content view by the desktop shell; Windows and Linux have no backend at all (`video-web-windows-linux-unavailable-v1` in [LIMITATIONS.md](LIMITATIONS.md)) |
+| `video-player` | macOS-native (Mode A) via the desktop platform-view host | AVPlayer (macOS, sharing the Apple arm with iOS), its `NSView` hosted above the window's content view by the desktop shell; Windows and Linux have no backend at all (`video-web-windows-linux-unavailable-v1` in [LIMITATIONS.md](LIMITATIONS.md)); texture mode has no desktop producer |
 | `url-launcher` | generic-desktop | `xdg-open` (Linux), `open` (macOS), `ShellExecuteW` (Windows); desktop receives no deep links, so an OAuth round trip needs a typed-code fallback; native map schemes: `NoHandler` on desktop, `Maps::directions` is the https path |
 | `share` | generic-desktop | clipboard copy through `frust-clipboard` (`CopiedToClipboard`), no sheet |
 | `qr` | platform-free | pure encode plus canvas paint over the facade; no OS integration |
@@ -150,7 +150,14 @@ feature layers ICU4X's `icu_decimal`/`icu_datetime`/`icu_plurals`/`icu_experimen
 `jni` on Android; on `target_vendor = "apple"` the `objc2` family serving one AVFoundation session
 on iOS and macOS alike, narrowed per OS by `objc2-ui-kit` plus `objc2-avf-audio` on iOS (the
 hosting `UIView` and the playback audio-session category) and `objc2-app-kit` on macOS (the hosting
-`NSView`). Its app-facing half rides the same default-on `frust-api` feature `i18n` uses.
+`NSView`). Its app-facing half rides the same default-on `frust-api` feature `i18n` uses, and
+`camera` now does too (gating its optional facade dependency; `--no-default-features` still builds on
+`frust-plugin` plus FFI only). Both bridge the texture bus in that facade half: the plugin owns a
+`TextureSink`, registers a source through `frust::texture` (which re-exports `frust-render` items
+only), and pulls from the sink — `frust-plugin` stays a leaf and the facade never names a plugin. A
+producer builds a `NativeHandle` through its unsafe constructor and keeps its own reference until
+the release callback runs; the bridge takes the callback with `Option::take`, clones the payload,
+and frames release on drop.
 
 `network-image` is a facade-tier plugin like `clean-signals-frust`, with one sanctioned extra edge:
 it depends on `frust` (default features off) and on the `frust-paths` leaf for its cache

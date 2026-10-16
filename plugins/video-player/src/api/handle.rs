@@ -20,9 +20,10 @@
 //! [`VideoError::Reentrant`] rather than re-entering the backend
 //! mid-callback (see [`crate::PlayerSession::set_listener`]).
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use frust::texture::TextureRegistration;
 use frust::{RwSignal, Set, on_cleanup};
 
 use crate::{
@@ -67,6 +68,10 @@ pub struct VideoPlayerHandle {
     // last strong reference in ordinary use — closes the backend and
     // publishes its final `Idle`.
     listener: Arc<ListenerHandle>,
+    /// The scene texture registered by `texture_output` (`api/texture.rs`)
+    /// on first use. Declared before `session` so the renderer stops polling
+    /// the session's frame mailbox before the session closes.
+    texture: OnceLock<Option<TextureRegistration>>,
     session: Arc<PlayerSession>,
     /// The session's lifecycle state, seeded from [`PlayerSnapshot::state`]
     /// and updated on every [`PlayerEvent::StateChanged`] — also written to
@@ -136,6 +141,7 @@ impl VideoPlayerHandle {
         }));
 
         Self {
+            texture: OnceLock::new(),
             session,
             state,
             position,
@@ -144,6 +150,12 @@ impl VideoPlayerHandle {
             error,
             listener: Arc::new(listener),
         }
+    }
+
+    /// The lazily registered scene texture slot `texture_output`
+    /// (`api/texture.rs`) fills.
+    pub(super) fn texture_registration(&self) -> &OnceLock<Option<TextureRegistration>> {
+        &self.texture
     }
 
     /// The wrapped session — for reading [`crate::PlayerSession::view_type`]/

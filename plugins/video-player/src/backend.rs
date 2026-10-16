@@ -15,6 +15,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use frust_plugin::texture::TextureSink;
+
 use crate::snapshot::Shared;
 use crate::{PlayerOptions, VideoError, VideoSource};
 
@@ -67,6 +69,13 @@ pub(crate) trait BackendSession: Send + Sync {
     /// native factory can find the player to attach (see
     /// [`crate::PlayerSession::params_json`]).
     fn id(&self) -> u32;
+    /// The mailbox this session pushes decoded frames into — `Some` only for
+    /// a session opened with [`crate::VideoOutput::Texture`] on a backend
+    /// with a frame producer. The default answers `None`, which is what a
+    /// backend without one (yet) reports.
+    fn texture_sink(&self) -> Option<&TextureSink> {
+        None
+    }
 }
 
 /// The backend compiled into this build.

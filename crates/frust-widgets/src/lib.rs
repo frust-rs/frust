@@ -67,6 +67,7 @@ mod slivers;
 mod stack;
 mod text;
 mod textinput;
+mod texture_view;
 mod viewport;
 
 use std::hash::{Hash, Hasher};
@@ -163,6 +164,7 @@ pub use slivers::{
 pub use stack::{Stack, StackView, StackWidget, stack};
 pub use text::{TextView, TextWidget, text};
 pub use textinput::{TextInput, TextInputView, TextInputWidget, text_input};
+pub use texture_view::{TextureFit, TextureView, TextureWidget, texture_fit_rect, texture_view};
 pub use viewport::{CustomScrollView, DEFAULT_CACHE_EXTENT, ViewportWidget, custom_scroll_view};
 
 /// A stable identity for a list child, so a container's reconciliation can match

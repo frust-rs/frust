@@ -18,7 +18,10 @@
 //! [`native_init_platform`]), the `on_surface_created_from_android_window`
 //! calls that build a `wgpu::Surface` from a raw `ANativeWindow*` (the inline
 //! path's [`build_inline_executor`]/[`native_on_surface_changed`], and the
-//! render-thread split's [`install_surface`]), the `unsafe impl Send` for
+//! render-thread split's [`install_surface`]), the overlay surfaces'
+//! `frust_render::overlay::OverlaySurface::new` over each overlay
+//! `SurfaceView`'s `ANativeWindow*` ([`prepare_overlays`], reached only
+//! under `FRUST_OVERLAYS`), the `unsafe impl Send` for
 //! [`SendableWindowPtr`] — the raw window pointer that crosses the UI→render
 //! channel in the split — and the render-thread priority
 //! self-boost `libc::setpriority(PRIO_PROCESS, gettid(), THREAD_PRIORITY_DISPLAY)`
@@ -74,6 +77,10 @@ use crate::ffi_support::{
     build_platform_view_commands_json, edit_command_from_code, load_pipeline_cache,
     normalize_ime_indices, pipeline_cache_differs, pipeline_cache_path,
     platform_view_commands_up_to_date, publish_resolved_translucency, write_pipeline_cache_atomic,
+};
+use crate::overlay_state::{
+    OVERLAYS_ENV_VAR, OverlayCutSpec, OverlayLedger, OverlayMode, OverlaySkew, OverlayTable,
+    assemble_overlay_cuts,
 };
 
 /// Startup-span name: the persisted pipeline-cache blob has been read
@@ -373,6 +380,299 @@ fn native_init_platform(mut env: EnvUnowned, context: JObject) {
             log::debug!("frust-shell-android: plugin platform handles installed");
         });
     });
+}
+
+// ---------------------------------------------------------------------
+// Overlay surfaces
+// ---------------------------------------------------------------------
+
+/// The overlay switch (`FRUST_OVERLAYS`; see [`OverlayMode`]), read once per
+/// process and cached like every `FRUST_*` knob: the runtime value first,
+/// then a compile-time `--define`, then the `FRUST_OVERLAY_SPIKE` alias.
+/// Off — the default — the whole overlay path is this one cached read.
+pub(crate) fn overlay_mode() -> OverlayMode {
+    static MODE: OnceLock<OverlayMode> = OnceLock::new();
+    *MODE.get_or_init(|| {
+        let runtime = std::env::var(OVERLAYS_ENV_VAR).ok();
+        let spike_alias = frust_render::overlay::overlay_spike_value();
+        let mode = OverlayMode::resolve([
+            runtime.as_deref(),
+            option_env!("FRUST_OVERLAYS"),
+            spike_alias.as_deref(),
+        ]);
+        if mode.is_on() {
+            log::info!("frust-overlay: overlay surfaces on ({mode:?})");
+        }
+        mode
+    })
+}
+
+/// Whether overlay surfaces are switched on ([`overlay_mode`]).
+pub(crate) fn overlays_enabled() -> bool {
+    overlay_mode().is_on()
+}
+
+/// Engine refusals logged per overlay window before the log goes quiet.
+const OVERLAY_ERRORS_LOGGED: u32 = 3;
+
+/// The native half of every overlay, process-wide (one render surface per
+/// process, like the retained-ledger slot): the [`OverlayTable`] of windows and
+/// surfaces, plus the present-skew accumulator.
+///
+/// One lock guards both the UI thread's half — the overlay `SurfaceView`
+/// callbacks deliver and withdraw windows ([`Java_dev_frust_FrustSurfaceView_nativeOverlaySurfaceChanged`],
+/// [`Java_dev_frust_FrustSurfaceView_nativeOverlaySurfaceDestroyed`]) — and the
+/// render thread's, which builds the surfaces ([`prepare_overlays`]) and holds
+/// the lock from acquire through present of every frame that draws them
+/// ([`frame_overlays`]). That is what keeps the surface-before-window order
+/// without an ack barrier: a withdrawn window's surface is dropped, then the
+/// window released, both under the lock, and no frame of that surface can be
+/// in flight meanwhile. The render thread holds it for up to a frame; the UI
+/// thread takes it only on an overlay's own surface callbacks.
+///
+/// Lock order: this lock before [`OVERLAY_LEDGER`], never the reverse.
+struct OverlayHost {
+    table: OverlayTable<NativeWindow, frust_render::overlay::OverlaySurface>,
+    skew: OverlaySkew,
+}
+
+static OVERLAY_HOST: Mutex<OverlayHost> = Mutex::new(OverlayHost {
+    table: OverlayTable::new(),
+    skew: OverlaySkew::new(),
+});
+
+fn overlay_host() -> std::sync::MutexGuard<'static, OverlayHost> {
+    OVERLAY_HOST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The overlays' per-frame command ranges ([`OverlayLedger`]): folded and
+/// published by the UI thread after every paint, read by the render thread for
+/// the frame it draws. Short critical sections on both sides.
+static OVERLAY_LEDGER: Mutex<OverlayLedger> = Mutex::new(OverlayLedger::new());
+
+/// The overlay ledger, locked.
+pub(crate) fn overlay_ledger() -> std::sync::MutexGuard<'static, OverlayLedger> {
+    OVERLAY_LEDGER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// `nativeOverlayMode`: the [`OverlayMode::code`] Kotlin's `FrustViewHost`
+/// builds overlay `SurfaceView`s by — `0` (none) unless `FRUST_OVERLAYS` is
+/// on. Process state, no handle; guarded like every export.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeOverlayMode<'local>(
+    _env: EnvUnowned<'local>,
+    _this: JObject<'local>,
+) -> jint {
+    guard("nativeOverlayMode", OverlayMode::Off.code(), || {
+        overlay_mode().code()
+    })
+}
+
+/// `nativeOverlaySurfaceChanged`: overlay `overlay_id`'s `SurfaceView`
+/// delivered its window (`surfaceCreated`/`surfaceChanged`, physical px).
+/// The same window is a resize; a new one replaces the old, dropping the old
+/// window's surface before the old window is released. The render thread
+/// builds or resizes the surface before its next frame.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeOverlaySurfaceChanged<'local>(
+    env: EnvUnowned<'local>,
+    _this: JObject<'local>,
+    overlay_id: jlong,
+    surface: JObject<'local>,
+    width: jint,
+    height: jint,
+) {
+    guard("nativeOverlaySurfaceChanged", (), || {
+        if !overlays_enabled() {
+            return;
+        }
+        // SAFETY: `env`/`surface` are the live JVM handles for this call.
+        let Some(window) = (unsafe { native_window_from_surface(&env, &surface) }) else {
+            log::warn!("frust-overlay: overlay {overlay_id} delivered a null window");
+            return;
+        };
+        let size = (width.max(1) as u32, height.max(1) as u32);
+        let change =
+            overlay_host()
+                .table
+                .window_changed(overlay_id as u64, window, size, |held, new| {
+                    held.ptr() == new.ptr()
+                });
+        log::debug!("frust-overlay: overlay {overlay_id} window {change:?} at {size:?}");
+    });
+}
+
+/// `nativeOverlaySurfaceDestroyed`: overlay `overlay_id`'s `SurfaceView`
+/// withdrew its window (`surfaceDestroyed`, or the overlay was disposed) —
+/// drop its surface, then release the window, before returning (the platform
+/// requires both of `surfaceDestroyed`). A no-op for an overlay holding none.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeOverlaySurfaceDestroyed<'local>(
+    _env: EnvUnowned<'local>,
+    _this: JObject<'local>,
+    overlay_id: jlong,
+) {
+    guard("nativeOverlaySurfaceDestroyed", (), || {
+        if overlay_host().table.window_destroyed(overlay_id as u64) {
+            log::debug!("frust-overlay: overlay {overlay_id} window released");
+        }
+    });
+}
+
+/// The render thread's overlay bookkeeping ahead of a frame: build a surface
+/// on every overlay window that has none, resize the rest to their windows.
+/// A refused surface (no translucent composite mode, an unsupported surface)
+/// is logged once per window and its overlay skipped — its content stays on
+/// the main surface, under the native view on an opaque one.
+///
+/// Split path only, after the main surface is installed (an overlay shares its
+/// device); with overlays off this is one cached-bool read.
+fn prepare_overlays(
+    renderer: &frust_render::SurfaceRenderer,
+    render_cx: &mut frust_render::RenderContext,
+) {
+    if !overlays_enabled() {
+        return;
+    }
+    let mut host = overlay_host();
+    let refusals = host.table.prepare(
+        |window, (width, height)| {
+            let window = window.ptr().cast::<c_void>();
+            // SAFETY: the table holds this `ANativeWindow` acquired, and drops
+            // the surface built here before it releases that window — both
+            // under `OVERLAY_HOST`'s lock (see `OverlayHost`), which this
+            // thread holds — so the window outlives the surface.
+            unsafe {
+                frust_render::overlay::OverlaySurface::new(
+                    render_cx,
+                    Some(renderer),
+                    frust_render::overlay::OverlayTarget::android_ndk_window(window),
+                    width,
+                    height,
+                )
+            }
+        },
+        |surface, (width, height)| surface.resize(width, height),
+    );
+    for (overlay_id, error) in refusals {
+        log::warn!(
+            "frust-overlay: overlay {overlay_id} refused ({error}); its content stays on the \
+             main surface"
+        );
+    }
+}
+
+/// Drop every overlay's surface, keeping the windows — the main surface is
+/// going away (destroyed, or the render thread is exiting), and the overlays
+/// share its device. Rebuilt by [`prepare_overlays`] once it is back.
+fn drop_overlay_surfaces() {
+    if !overlays_enabled() {
+        return;
+    }
+    let dropped = overlay_host().table.drop_surfaces();
+    if dropped > 0 {
+        log::debug!("frust-overlay: dropped {dropped} overlay surface(s) with the main surface");
+    }
+}
+
+/// One frame's overlays, held for the whole frame (the host lock stays taken
+/// from encode through present — see [`OverlayHost`]): the live surfaces and
+/// the cut each one draws of this frame's scene. Built by [`frame_overlays`]
+/// for [`render_scene`](crate::app::render_scene).
+pub(crate) struct FrameOverlays {
+    host: std::sync::MutexGuard<'static, OverlayHost>,
+    cuts: Vec<OverlayCutSpec>,
+}
+
+/// The overlays frame `frame_id` (a scene of `len` commands) draws, or `None`
+/// when there is nothing to cut — overlays off (one cached read), or no
+/// overlay has a live surface — and the frame takes the single-surface path
+/// unchanged. Each live overlay gets the range its frame published, or a
+/// transparent clear ([`assemble_overlay_cuts`]).
+pub(crate) fn frame_overlays(frame_id: u64, len: usize) -> Option<FrameOverlays> {
+    if !overlays_enabled() {
+        return None;
+    }
+    let host = overlay_host();
+    if !host.table.has_live() {
+        return None;
+    }
+    let cuts = assemble_overlay_cuts(
+        overlay_ledger().frame_cuts(frame_id),
+        host.table.live_ids(),
+        len,
+    );
+    Some(FrameOverlays { host, cuts })
+}
+
+impl FrameOverlays {
+    /// The cut ranges, in order — `SurfaceRenderer::encode_segmented`'s
+    /// `cuts`.
+    pub(crate) fn ranges(&self) -> Vec<std::ops::Range<usize>> {
+        self.cuts.iter().map(|(_, range)| range.clone()).collect()
+    }
+
+    /// One [`OverlayCut`](frust_render::overlay::OverlayCut) per cut, in the
+    /// same order as [`Self::ranges`] — `SurfaceRenderer::submit_segmented`'s
+    /// overlays.
+    pub(crate) fn overlay_cuts(&mut self) -> Vec<frust_render::overlay::OverlayCut<'_>> {
+        let Self { host, cuts } = self;
+        host.table
+            .cut_surfaces(cuts)
+            .into_iter()
+            .map(
+                |(overlay_id, range, overlay)| frust_render::overlay::OverlayCut {
+                    overlay,
+                    range,
+                    overlay_id,
+                },
+            )
+            .collect()
+    }
+
+    /// Log an overlay's engine refusal (latched per window).
+    pub(crate) fn note_refusal(
+        &mut self,
+        overlay_id: u64,
+        error: &frust_render::overlay::OverlayError,
+    ) {
+        if let Some(count) = self
+            .host
+            .table
+            .note_error(overlay_id, OVERLAY_ERRORS_LOGGED)
+        {
+            log::warn!("frust-overlay: overlay {overlay_id} frame refused ({count}): {error}");
+        }
+    }
+
+    /// Fold one frame's present timestamps — the main surface's, and the last
+    /// of `overlays` overlay presents — into the skew log: a
+    /// `frust-overlay skew` line every
+    /// [`OVERLAY_SKEW_EVERY`](crate::overlay_state::OVERLAY_SKEW_EVERY) frames.
+    pub(crate) fn record_presents(
+        &mut self,
+        main: std::time::SystemTime,
+        last_overlay: std::time::SystemTime,
+        overlays: usize,
+    ) {
+        if let Some(report) = self.host.skew.record(main, last_overlay, overlays) {
+            log::info!(
+                "frust-overlay skew frames={} avg_us={} max_us={} overlays={} live={} \
+                 main_present_unix_us={} overlay_present_unix_us={}",
+                report.frames,
+                report.avg_us,
+                report.max_us,
+                report.overlays,
+                self.host.table.len(),
+                report.main_unix_us,
+                report.overlay_unix_us,
+            );
+        }
+    }
 }
 
 /// Resolve `Context.getFilesDir()`/`Context.getCacheDir()` into the
@@ -921,6 +1221,9 @@ pub(crate) fn render_loop(
                     // thread blocks on this ack before releasing the
                     // `ANativeWindow`, so the window is never touched after
                     // release (a known Android surface-lifecycle-race hazard).
+                    // The overlays share the surface's device and go first;
+                    // their windows stay, for a rebuild once it is back.
+                    drop_overlay_surfaces();
                     renderer.on_surface_destroyed();
                     // The empty ledger goes out BEFORE the ack, so the UI
                     // thread's first paint after the surface comes back already
@@ -960,6 +1263,10 @@ pub(crate) fn render_loop(
                 // published after submit names the recording it holds (see
                 // `SurfaceRenderer::note_scene_serial`).
                 renderer.note_scene_serial(frame.meta.paint_serial);
+                // Overlay surfaces built or resized for this frame (one
+                // cached-bool read with overlays off); `render_scene` cuts
+                // their ranges out of the frame and presents them with it.
+                prepare_overlays(&renderer, &mut render_cx);
                 crate::app::render_scene(
                     &mut renderer,
                     &render_cx,
@@ -989,6 +1296,8 @@ pub(crate) fn render_loop(
             break;
         }
     }
+    // The renderer goes with this thread; no overlay surface may outlive it.
+    drop_overlay_surfaces();
 }
 
 /// Borrow the boxed [`AndroidAppHandle`] behind a `jlong`, or `None` if the JVM
@@ -1081,6 +1390,9 @@ fn create_handle(
     // unconditionally here, before the fallible steps below, since the latch
     // contract only cares "was init attempted", not whether it succeeded.
     ANY_SURFACE_CREATED.store(true, Ordering::Release);
+    // A new handle brings a new differ, whose generations and overlay ids
+    // start over: the previous handle's overlay ranges mean nothing to it.
+    overlay_ledger().reset();
 
     // Cold-start span recorder. `begin()` marks
     // the epoch; every span below is a delta from here, closed out by the first
@@ -2166,6 +2478,7 @@ fn platform_view_commands_to_json(
                 clip,
                 visible,
                 shields,
+                ..
             } => PlatformViewCommandJson::Update {
                 slot_id: *slot_id,
                 rect: scale_rect(*rect, scale),
@@ -2183,6 +2496,23 @@ fn platform_view_commands_to_json(
             ViewCommand::Dispose { slot_id } => {
                 PlatformViewCommandJson::Dispose { slot_id: *slot_id }
             }
+            // Produced only with overlays on (the frame feeds the differ its
+            // commands then); the range is informational for Kotlin.
+            ViewCommand::Overlay {
+                overlay_id,
+                above_slot_id,
+                rect,
+                command_range,
+            } => PlatformViewCommandJson::Overlay {
+                overlay_id: *overlay_id,
+                above_slot_id: *above_slot_id,
+                rect: scale_rect(*rect, scale),
+                range_start: command_range.start as u64,
+                range_end: command_range.end as u64,
+            },
+            ViewCommand::DisposeOverlay { overlay_id } => PlatformViewCommandJson::DisposeOverlay {
+                overlay_id: *overlay_id,
+            },
         })
         .collect()
 }

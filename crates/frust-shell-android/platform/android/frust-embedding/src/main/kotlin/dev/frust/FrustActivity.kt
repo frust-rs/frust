@@ -1,6 +1,7 @@
 package dev.frust
 
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.os.Build
@@ -116,6 +117,27 @@ open class FrustActivity : ComponentActivity() {
     open val translucentSurface: Boolean
         get() = false
 
+    /**
+     * The surface mode this launch actually uses: [translucentSurface],
+     * unless a **debuggable** build was launched with the boolean intent
+     * extra [TRANSLUCENT_SURFACE_EXTRA], which wins — so a device gate can
+     * run one APK in both modes
+     * (`adb shell am start -n <pkg>/.MainActivity --ez dev.frust.translucentSurface false`).
+     * The mode is latched process-wide on the native side at the first
+     * surface, so force-stop the app before relaunching it in the other mode.
+     * A release build never reads the extra.
+     */
+    private fun resolvedTranslucentSurface(): Boolean {
+        val debuggable = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        val extras = intent?.extras
+        if (debuggable && extras != null && extras.containsKey(TRANSLUCENT_SURFACE_EXTRA)) {
+            val forced = extras.getBoolean(TRANSLUCENT_SURFACE_EXTRA, translucentSurface)
+            Log.i("frust", "Frust: surface mode forced by $TRANSLUCENT_SURFACE_EXTRA=$forced")
+            return forced
+        }
+        return translucentSurface
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // This activity owns edge-to-edge rather than leaning on the
@@ -156,7 +178,7 @@ open class FrustActivity : ComponentActivity() {
         // from a static initializer inside FrustSurfaceView — strictly before
         // the view, whose construction can reach a native method.
         FrustSurfaceView.loadNativeLibrary(nativeLibraryName)
-        surfaceView = FrustSurfaceView(this, translucentSurface)
+        surfaceView = FrustSurfaceView(this, resolvedTranslucentSurface())
         surfaceView.onSystemUiModeChanged = ::applySystemUiMode
         // FrameLayout root: the render surface fills it, and FrustViewHost adds
         // native sibling views (platform-views feature) above (opaque/Mode A) or
@@ -311,6 +333,14 @@ open class FrustActivity : ComponentActivity() {
          * it back. Do not rename on one side only.
          */
         const val NATIVE_LIBRARY_META_DATA = "dev.frust.nativeLibrary"
+
+        /**
+         * The debuggable-build intent extra that overrides
+         * [translucentSurface] for one launch (see
+         * [resolvedTranslucentSurface]) — `true` forces Mode B, `false`
+         * Mode A.
+         */
+        const val TRANSLUCENT_SURFACE_EXTRA = "dev.frust.translucentSurface"
 
         /**
          * Where the migration recipe for a legacy-theme app lives. Named in

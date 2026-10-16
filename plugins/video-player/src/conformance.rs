@@ -17,8 +17,9 @@ use std::time::Duration;
 use crate::mock::Command;
 use crate::{
     PlaybackState, PlayerEvent, PlayerOptions, PlayerSession, PlayerSnapshot, VIEW_TYPE,
-    VideoError, VideoFit, VideoPlayer, VideoSource, contract, params_json_with,
+    VideoError, VideoFit, VideoOutput, VideoPlayer, VideoSource, contract, params_json_with,
 };
+use frust_plugin::texture::FramePayload;
 
 /// A session over an ordinary remote source, with default options.
 fn open() -> PlayerSession {
@@ -65,6 +66,7 @@ fn open_hands_the_source_and_options_to_the_backend() {
         looping: true,
         volume: 0.25,
         mix_with_others: true,
+        output: VideoOutput::NativeView,
     };
     let session = VideoPlayer::open(VideoSource::Asset("clip.mp4".to_owned()), options)
         .expect("an asset source opens");
@@ -557,6 +559,90 @@ fn the_view_type_is_target_gated_never_one_shared_literal() {
 
     let session = open();
     assert_eq!(session.view_type(), VIEW_TYPE);
+}
+
+/// A session over an ordinary remote source whose picture goes to a texture.
+fn open_texture() -> PlayerSession {
+    VideoPlayer::open(
+        VideoSource::Url("https://example.invalid/clip.mp4".to_owned()),
+        PlayerOptions {
+            output: VideoOutput::Texture,
+            ..PlayerOptions::default()
+        },
+    )
+    .expect("the mock backend opens an ordinary source")
+}
+
+#[test]
+fn the_default_output_is_the_native_view() {
+    assert_eq!(PlayerOptions::default().output, VideoOutput::NativeView);
+    assert_eq!(VideoOutput::default(), VideoOutput::NativeView);
+}
+
+#[test]
+fn a_native_view_session_has_no_texture_sink() {
+    let session = open();
+
+    assert!(session.texture_sink().is_none());
+    // Nothing to push into: a frame the host emits goes nowhere.
+    session.mock_host().emit_frame(2, 2, &[0; 16]);
+    assert_eq!(session.mock_host().frames_released(), 0);
+}
+
+#[test]
+fn a_texture_session_yields_a_sink() {
+    let session = open_texture();
+    let sink = session
+        .texture_sink()
+        .expect("a texture session has a sink");
+
+    assert!(!sink.has_pending());
+    // Every call hands out the same mailbox.
+    let again = session.texture_sink().expect("still there");
+    assert_eq!(sink.id(), again.id());
+}
+
+#[test]
+fn emitted_frames_reach_the_sink_and_the_newest_wins() {
+    let session = open_texture();
+    let host = session.mock_host();
+    let sink = session
+        .texture_sink()
+        .expect("a texture session has a sink");
+
+    host.emit_frame(2, 1, &[1; 8]);
+    host.emit_frame(4, 2, &[2; 32]);
+    assert_eq!(
+        host.frames_released(),
+        1,
+        "the displaced frame was released"
+    );
+
+    let frame = sink.take_latest().expect("a frame is pending");
+    assert_eq!((frame.width, frame.height), (4, 2));
+    match &frame.payload {
+        FramePayload::Cpu(pixels) => assert_eq!(pixels[0], 2),
+        FramePayload::Native(_) => panic!("the mock pushes CPU frames"),
+    }
+    frame.release();
+    assert_eq!(host.frames_released(), 2);
+    assert!(sink.take_latest().is_none());
+}
+
+#[test]
+fn closing_a_texture_session_releases_its_pending_frame() {
+    let session = open_texture();
+    let host = session.mock_host();
+    let sink = session
+        .texture_sink()
+        .expect("a texture session has a sink");
+
+    host.emit_frame(2, 2, &[7; 16]);
+    assert!(sink.has_pending());
+    session.close();
+
+    assert!(!sink.has_pending(), "close hands the pending frame back");
+    assert_eq!(host.frames_released(), 1);
 }
 
 /// Compiled only where there is no backend at all — i.e. neither the Android

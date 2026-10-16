@@ -142,6 +142,53 @@
 //! enough behind — counted in submissions while frames flow and in idle display
 //! ticks ([`FramePairing::note_idle_tick`]) once they stop.
 //!
+//! # Z-order and overlays
+//!
+//! Every [`PlatformViewFrame`] carries its `command_index` — how many commands
+//! the frame's scene had recorded when the slot published — so the frame's
+//! slots have a painter order. [`ViewCommand::Update`]'s `z_index` is the
+//! slot's rank in that order among the pass's slots (ties keep publication
+//! order), so a host can stack its native views; on the overlay-aware path
+//! ([`PlatformViewState::ingest_scene`]) a change of rank alone emits an
+//! `Update`. Plain [`PlatformViewState::ingest`] leaves rank out of the change
+//! test, so its stream is the pre-overlay stream.
+//!
+//! Every command recorded at or past a slot's index paints **over** that
+//! slot's native view, which a host compositing the native view above or
+//! below the one frust surface cannot show. [`PlatformViewState::ingest_scene`]
+//! therefore cuts the frame's command list at its *visible* slots' indices,
+//! ordered `s0..sn`: overlay `i` covers the half-open range
+//! `s_i.command_index..s_{i+1}.command_index` (the last one runs to the end of
+//! the list), and exists only while that range holds at least one **drawing**
+//! command ([`frust_scene::Command::is_drawing`]) — a range of clip/layer
+//! brackets alone puts no pixels above the slot. The slot's own Mode B
+//! hole-punch (the `ClearRect` recorded right after it publishes, so at its
+//! own index) stays on the main surface: a leading punch is not part of the
+//! range, which opens one command later, so it never makes the overlay exist
+//! and never moves into it. Content painted before the
+//! first visible slot stays on the main surface. Each live overlay is keyed by
+//! the slot it sits above and announced with [`ViewCommand::Overlay`]
+//! (its id, the slot, its rect — v1: the whole window — and its range), re-sent
+//! whenever its range or rect changes. A hidden slot is not a cut: nothing
+//! native shows there, so the content after it belongs to the overlay below it.
+//!
+//! Overlays share the slots' backlog, generation and acknowledgement, so the
+//! release gate ([`FramePairing`]) pairs them with their frame exactly as it
+//! does slot geometry. An overlay whose content disappears is re-sent once
+//! with an **empty** range (draw nothing — its range must never point at a
+//! later frame's unrelated commands) and is disposed
+//! ([`ViewCommand::DisposeOverlay`]) after [`DISPOSE_AFTER_MISSING_FRAMES`]
+//! consecutive ingests without content, or at once when the slot under it is
+//! disposed. A frame with no platform views, or a shell calling plain
+//! [`PlatformViewState::ingest`] (no command list), produces no overlays at all.
+//!
+//! A Mode B host (translucent main surface, native views composited *below*
+//! frust) already shows frust content over a slot; it needs an overlay only for
+//! the sandwich case — native view A above frust content X **and** frust
+//! content Y above A. The differ computes overlays the same way regardless of
+//! mode; the host decides which to realise. Input is unaffected: the z-shields
+//! above already express "frust content above a slot" for hit-testing.
+//!
 //! # Skip-safety
 //!
 //! Nothing here special-cases a gate-skipped frame
@@ -151,8 +198,10 @@
 //! (`PaintCtx::visible_rect`/scroll state can't have changed).
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::ops::Range;
 
 use frust_core::widget::PlatformViewFrame;
+use frust_scene::Command;
 use kurbo::Rect;
 
 /// Below this many logical px of difference on every edge, a rect/clip change
@@ -234,6 +283,11 @@ pub enum ViewCommand {
         /// regions where frust content over the slot keeps winning input.
         /// Meaningful only for an interactive slot; empty otherwise.
         shields: Vec<Rect>,
+        /// The slot's rank in painter order among the pass's slots (by
+        /// `PlatformViewFrame::command_index`, ties in publication order):
+        /// `0` is painted first, so a host stacks a higher `z_index` above a
+        /// lower one. See the module docs' Z-order and overlays.
+        z_index: u32,
     },
     /// `params_json` changed (`params_generation` advanced) with no
     /// necessary rect/clip/visible change — a separate command so a shell
@@ -251,6 +305,33 @@ pub enum ViewCommand {
         /// Which slot to tear down.
         slot_id: u64,
     },
+    /// Create or re-place the overlay carrying the frust content painted above
+    /// `above_slot_id` — see the module docs' Z-order and overlays. A host
+    /// that has no overlay `overlay_id` yet creates one; otherwise it adopts
+    /// the new rect and range. An overlay stacks directly above its slot's
+    /// native view and below any slot with a higher `z_index`.
+    Overlay {
+        /// Stable id for this overlay, allocated by the differ; never reused
+        /// within one [`PlatformViewState`].
+        overlay_id: u64,
+        /// The slot this overlay sits directly above.
+        above_slot_id: u64,
+        /// Where the overlay covers, logical px, absolute window coordinates.
+        /// v1: the whole window (the viewport the shell passed to
+        /// [`PlatformViewState::ingest_scene`]).
+        rect: Rect,
+        /// The half-open range of the frame's command list (the slice passed
+        /// to [`PlatformViewState::ingest_scene`]) the overlay renders, in
+        /// painter order. Empty when the overlay's content has disappeared —
+        /// it then draws nothing until it is re-sent or disposed.
+        command_range: Range<usize>,
+    },
+    /// Tear an overlay down. A `Dispose`-style no-op for an id the host does
+    /// not have.
+    DisposeOverlay {
+        /// Which overlay to tear down.
+        overlay_id: u64,
+    },
 }
 
 /// Per-slot last-emitted state the differ compares each `ingest` call
@@ -265,8 +346,20 @@ struct SlotEntry {
     last_clip: Option<Rect>,
     last_visible: bool,
     last_shields: Vec<Rect>,
+    last_z_index: u32,
     /// Consecutive `ingest` calls this slot has been absent from `frames`.
     /// Reset to `0` the instant it reappears.
+    missing_streak: u32,
+}
+
+/// Per-overlay last-emitted state, keyed in [`PlatformViewState`] by the slot
+/// the overlay sits above.
+#[derive(Clone, Debug)]
+struct OverlayEntry {
+    overlay_id: u64,
+    last_rect: Rect,
+    last_range: Range<usize>,
+    /// Consecutive ingests this overlay has had no drawing content.
     missing_streak: u32,
 }
 
@@ -281,6 +374,11 @@ struct SlotEntry {
 #[derive(Debug, Default)]
 pub struct PlatformViewState {
     live: BTreeMap<u64, SlotEntry>,
+    /// Live overlays keyed by the slot they sit above (a `BTreeMap` for the
+    /// same determinism `live` needs).
+    overlays: BTreeMap<u64, OverlayEntry>,
+    /// The last overlay id handed out; ids start at `1`.
+    last_overlay_id: u64,
     /// Flat, contiguous command backlog — kept flat (rather than one `Vec`
     /// per generation) so [`commands`](Self::commands) can return a zero-copy
     /// `&[ViewCommand]` slice.
@@ -318,11 +416,57 @@ impl PlatformViewState {
     ///
     /// Do not call this on a gate-skipped frame — see the module docs'
     /// Skip-safety section.
+    ///
+    /// Knows nothing of the frame's commands, so it computes no overlays, and
+    /// a change of rank alone emits no `Update`: its stream is the pre-overlay
+    /// stream, which a host ignoring `z_index` relies on. Any overlay a
+    /// previous `ingest_scene` created lapses as content-less.
     pub fn ingest(&mut self, frames: &[PlatformViewFrame], input_shields: &[Rect]) -> bool {
+        self.ingest_pass(frames, input_shields, &[], Rect::ZERO, false)
+    }
+
+    /// [`ingest`](Self::ingest) plus the overlay pass (module docs' Z-order and
+    /// overlays): `commands` is the painted scene's command list
+    /// (`Scene::commands()`, the same frame `frames` came from) and `viewport`
+    /// the window's logical bounds, which every v1 overlay covers.
+    ///
+    /// The command slice is borrowed, not copied: the overlay pass scans only
+    /// the ranges past the first visible slot, stopping at each range's first
+    /// drawing command, so no per-frame classification buffer is built. A
+    /// frame without platform views scans nothing.
+    pub fn ingest_scene(
+        &mut self,
+        frames: &[PlatformViewFrame],
+        input_shields: &[Rect],
+        commands: &[Command],
+        viewport: Rect,
+    ) -> bool {
+        self.ingest_pass(frames, input_shields, commands, viewport, true)
+    }
+
+    /// The pass behind [`ingest`](Self::ingest) and
+    /// [`ingest_scene`](Self::ingest_scene). `overlay_aware` gates the rank
+    /// comparison in the change test: only the overlay-aware path announces a
+    /// rank-only change. Either way `last_z_index` tracks the current rank, so
+    /// an `Update` emitted for any other reason carries it.
+    fn ingest_pass(
+        &mut self,
+        frames: &[PlatformViewFrame],
+        input_shields: &[Rect],
+        commands: &[Command],
+        viewport: Rect,
+        overlay_aware: bool,
+    ) -> bool {
         let mut batch = Vec::new();
         let mut seen = std::collections::BTreeSet::new();
+        let order = paint_order(frames);
+        let mut z_of = vec![0u32; frames.len()];
+        for (rank, &i) in order.iter().enumerate() {
+            z_of[i] = u32::try_from(rank).unwrap_or(u32::MAX);
+        }
 
-        for frame in frames {
+        for (i, frame) in frames.iter().enumerate() {
+            let z_index = z_of[i];
             seen.insert(frame.slot_id);
             // The shields this slot actually ships this pass (module docs'
             // Z-shields): its own manual rects plus the auto-collected ones
@@ -337,6 +481,10 @@ impl PlatformViewState {
             if let Some(entry) = self.live.get(&frame.slot_id)
                 && entry.view_type != frame.view_type
             {
+                // The overlay above the old view goes with it; the overlay
+                // pass below re-creates one (fresh id) if content still sits
+                // above the new view.
+                dispose_overlay_above(&mut self.overlays, frame.slot_id, &mut batch);
                 batch.push(ViewCommand::Dispose {
                     slot_id: frame.slot_id,
                 });
@@ -356,6 +504,7 @@ impl PlatformViewState {
                         clip: frame.clip,
                         visible: frame.visible,
                         shields: shields.clone(),
+                        z_index,
                     });
                     self.live.insert(
                         frame.slot_id,
@@ -368,6 +517,7 @@ impl PlatformViewState {
                             last_clip: frame.clip,
                             last_visible: frame.visible,
                             last_shields: shields,
+                            last_z_index: z_index,
                             missing_streak: 0,
                         },
                     );
@@ -378,6 +528,7 @@ impl PlatformViewState {
                         || rect_changed(entry.last_rect, frame.rect)
                         || clip_changed(entry.last_clip, frame.clip)
                         || shields_changed(&entry.last_shields, &shields)
+                        || (overlay_aware && entry.last_z_index != z_index)
                     {
                         batch.push(ViewCommand::Update {
                             slot_id: frame.slot_id,
@@ -385,12 +536,14 @@ impl PlatformViewState {
                             clip: frame.clip,
                             visible: frame.visible,
                             shields: shields.clone(),
+                            z_index,
                         });
                         entry.last_rect = frame.rect;
                         entry.last_clip = frame.clip;
                         entry.last_visible = frame.visible;
                         entry.last_shields = shields;
                     }
+                    entry.last_z_index = z_index;
                     if entry.params_generation != frame.params_generation {
                         batch.push(ViewCommand::UpdateParams {
                             slot_id: frame.slot_id,
@@ -419,10 +572,12 @@ impl PlatformViewState {
                     clip: entry.last_clip,
                     visible: false,
                     shields: entry.last_shields.clone(),
+                    z_index: entry.last_z_index,
                 });
                 entry.last_visible = false;
             }
             if entry.missing_streak >= DISPOSE_AFTER_MISSING_FRAMES {
+                dispose_overlay_above(&mut self.overlays, slot_id, &mut batch);
                 batch.push(ViewCommand::Dispose { slot_id });
                 disposed.push(slot_id);
             }
@@ -431,7 +586,113 @@ impl PlatformViewState {
             self.live.remove(&slot_id);
         }
 
+        self.ingest_overlays(frames, &order, commands, viewport, &mut batch);
+
         self.push_batch(batch)
+    }
+
+    /// The overlay pass (module docs' Z-order and overlays): cut `commands` at
+    /// the visible slots' indices in painter order, (re)announce every overlay
+    /// whose range holds a drawing command, and age the rest toward disposal.
+    fn ingest_overlays(
+        &mut self,
+        frames: &[PlatformViewFrame],
+        order: &[usize],
+        commands: &[Command],
+        viewport: Rect,
+        batch: &mut Vec<ViewCommand>,
+    ) {
+        let total = commands.len();
+        let mut cuts = order
+            .iter()
+            .map(|&i| &frames[i])
+            .filter(|frame| frame.visible)
+            .peekable();
+        let mut with_content = BTreeSet::new();
+        while let Some(slot) = cuts.next() {
+            let start = slot.command_index.min(total);
+            let end = cuts
+                .peek()
+                .map_or(total, |next| next.command_index.min(total))
+                .max(start);
+            // A Mode B slot's own hole-punch is recorded right after it
+            // publishes, so it sits AT the slot's index (a `ClearRect` has no
+            // other producer). It erases what is beneath the slot rather than
+            // painting over it, so it never makes an overlay exist on its own,
+            // and the range opens after it: the punch stays in the main
+            // segment, where it erases what the main surface painted there.
+            let content_from = match commands.get(start) {
+                Some(Command::ClearRect { .. }) => (start + 1).min(end),
+                _ => start,
+            };
+            if !commands[content_from..end].iter().any(Command::is_drawing) {
+                continue;
+            }
+            let range = content_from..end;
+            with_content.insert(slot.slot_id);
+            match self.overlays.get_mut(&slot.slot_id) {
+                Some(entry) => {
+                    entry.missing_streak = 0;
+                    if entry.last_range != range || rect_changed(entry.last_rect, viewport) {
+                        batch.push(ViewCommand::Overlay {
+                            overlay_id: entry.overlay_id,
+                            above_slot_id: slot.slot_id,
+                            rect: viewport,
+                            command_range: range.clone(),
+                        });
+                        entry.last_range = range;
+                        entry.last_rect = viewport;
+                    }
+                }
+                None => {
+                    self.last_overlay_id += 1;
+                    let overlay_id = self.last_overlay_id;
+                    batch.push(ViewCommand::Overlay {
+                        overlay_id,
+                        above_slot_id: slot.slot_id,
+                        rect: viewport,
+                        command_range: range.clone(),
+                    });
+                    self.overlays.insert(
+                        slot.slot_id,
+                        OverlayEntry {
+                            overlay_id,
+                            last_rect: viewport,
+                            last_range: range,
+                            missing_streak: 0,
+                        },
+                    );
+                }
+            }
+        }
+
+        let mut disposed = Vec::new();
+        for (&slot_id, entry) in self.overlays.iter_mut() {
+            if with_content.contains(&slot_id) {
+                continue;
+            }
+            entry.missing_streak += 1;
+            if entry.missing_streak >= DISPOSE_AFTER_MISSING_FRAMES {
+                batch.push(ViewCommand::DisposeOverlay {
+                    overlay_id: entry.overlay_id,
+                });
+                disposed.push(slot_id);
+            } else if !entry.last_range.is_empty() {
+                // Content gone: empty the range at once so the overlay never
+                // renders a later frame's unrelated commands at stale indices.
+                let empty = entry.last_range.start..entry.last_range.start;
+                batch.push(ViewCommand::Overlay {
+                    overlay_id: entry.overlay_id,
+                    above_slot_id: slot_id,
+                    rect: entry.last_rect,
+                    command_range: empty.clone(),
+                });
+                entry.last_range = empty;
+            }
+        }
+        for slot_id in disposed {
+            self.overlays.remove(&slot_id);
+        }
     }
 
     /// Backgrounding path: synthesize
@@ -459,6 +720,7 @@ impl PlatformViewState {
                     clip: entry.last_clip,
                     visible: false,
                     shields: entry.last_shields.clone(),
+                    z_index: entry.last_z_index,
                 });
                 entry.last_visible = false;
             }
@@ -470,9 +732,13 @@ impl PlatformViewState {
     /// streak, for a shell with a real teardown signal (see the module docs'
     /// Widget teardown detection). A no-op (returns `false`) if
     /// `slot_id` isn't currently live (already disposed, or never created).
+    /// The overlay above the slot, if any, is disposed with it, first.
     pub fn retire(&mut self, slot_id: u64) -> bool {
         if self.live.remove(&slot_id).is_some() {
-            self.push_batch(vec![ViewCommand::Dispose { slot_id }])
+            let mut batch = Vec::new();
+            dispose_overlay_above(&mut self.overlays, slot_id, &mut batch);
+            batch.push(ViewCommand::Dispose { slot_id });
+            self.push_batch(batch)
         } else {
             false
         }
@@ -491,7 +757,8 @@ impl PlatformViewState {
     }
 
     /// Append a full `Create` + `Update` replay of every live slot (ascending
-    /// `slot_id`, each preserving its last-known rect/clip/visibility) — the
+    /// `slot_id`, each preserving its last-known rect/clip/visibility), then an
+    /// `Overlay` for every live overlay (ascending above-slot id) — the
     /// shared body of [`reset_for_surface_recreate`](Self::reset_for_surface_recreate)
     /// and the backlog-cap compaction (module docs' Backlog cap), which are the
     /// same "rebuild everything from this batch alone" statement.
@@ -509,6 +776,15 @@ impl PlatformViewState {
                 clip: entry.last_clip,
                 visible: entry.last_visible,
                 shields: entry.last_shields.clone(),
+                z_index: entry.last_z_index,
+            });
+        }
+        for (&above_slot_id, entry) in self.overlays.iter() {
+            batch.push(ViewCommand::Overlay {
+                overlay_id: entry.overlay_id,
+                above_slot_id,
+                rect: entry.last_rect,
+                command_range: entry.last_range.clone(),
             });
         }
     }
@@ -586,8 +862,9 @@ impl PlatformViewState {
 
     /// Backlog-cap overflow (module docs' Backlog cap): replace the whole
     /// not-yet-acknowledged backlog with the net effect of applying it — one
+    /// `DisposeOverlay` per overlay the backlog tore down (ascending id), one
     /// `Dispose` per slot the backlog tore down (ascending `slot_id`), then a
-    /// full replay of every live slot.
+    /// full replay of every live slot and overlay.
     ///
     /// The `Dispose`s must survive: a slot created *before* the un-acked window
     /// and disposed inside it is a native view the host already built and would
@@ -609,7 +886,20 @@ impl PlatformViewState {
                 _ => None,
             })
             .collect();
-        let mut compacted = Vec::with_capacity(disposed.len() + self.live.len() * 2);
+        let disposed_overlays: BTreeSet<u64> = self
+            .pending
+            .iter()
+            .filter_map(|cmd| match cmd {
+                ViewCommand::DisposeOverlay { overlay_id } => Some(*overlay_id),
+                _ => None,
+            })
+            .collect();
+        let mut compacted = Vec::with_capacity(
+            disposed_overlays.len() + disposed.len() + self.live.len() * 2 + self.overlays.len(),
+        );
+        for overlay_id in disposed_overlays {
+            compacted.push(ViewCommand::DisposeOverlay { overlay_id });
+        }
         for slot_id in disposed {
             compacted.push(ViewCommand::Dispose { slot_id });
         }
@@ -801,6 +1091,29 @@ impl FramePairing {
     }
 }
 
+/// Indices into `frames` in painter order: ascending `command_index`, ties in
+/// publication order (a stable sort). Allocates nothing for an empty pass.
+fn paint_order(frames: &[PlatformViewFrame]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..frames.len()).collect();
+    order.sort_by_key(|&i| frames[i].command_index);
+    order
+}
+
+/// Drop the overlay sitting above `slot_id`, if any, queueing its
+/// `DisposeOverlay` — the overlay half of a slot disposal (module docs'
+/// Z-order and overlays).
+fn dispose_overlay_above(
+    overlays: &mut BTreeMap<u64, OverlayEntry>,
+    slot_id: u64,
+    batch: &mut Vec<ViewCommand>,
+) {
+    if let Some(entry) = overlays.remove(&slot_id) {
+        batch.push(ViewCommand::DisposeOverlay {
+            overlay_id: entry.overlay_id,
+        });
+    }
+}
+
 /// The shield list a slot ships this pass (module docs' Z-shields): nothing at
 /// all for a non-interactive slot, else its own manually declared rects
 /// (`PlatformViewView::shield_local`, already absolute) plus every
@@ -861,6 +1174,7 @@ mod tests {
             visible,
             interactive: false,
             shields: Vec::new(),
+            command_index: 0,
         }
     }
 
@@ -913,6 +1227,7 @@ mod tests {
                     clip: None,
                     visible: true,
                     shields: Vec::new(),
+                    z_index: 0,
                 },
             ]
         );
@@ -950,6 +1265,7 @@ mod tests {
                 clip: None,
                 visible: true,
                 shields: Vec::new(),
+                z_index: 0,
             }]
         );
     }
@@ -976,6 +1292,7 @@ mod tests {
                 clip: None,
                 visible: false,
                 shields: Vec::new(),
+                z_index: 0,
             }]
         );
 
@@ -1023,6 +1340,7 @@ mod tests {
                 clip: None,
                 visible: true,
                 shields: Vec::new(),
+                z_index: 0,
             }]
         );
         assert!(!cmds.iter().any(|c| matches!(c, ViewCommand::Create { .. })));
@@ -1055,6 +1373,7 @@ mod tests {
                     clip: None,
                     visible: true,
                     shields: Vec::new(),
+                    z_index: 0,
                 },
             ]
         );
@@ -1111,6 +1430,7 @@ mod tests {
                     clip: None,
                     visible: true,
                     shields: Vec::new(),
+                    z_index: 0,
                 },
                 ViewCommand::Create {
                     slot_id: 2,
@@ -1124,6 +1444,7 @@ mod tests {
                     clip: None,
                     visible: false,
                     shields: Vec::new(),
+                    z_index: 1,
                 },
             ]
         );
@@ -1162,6 +1483,7 @@ mod tests {
                     clip: None,
                     visible: true,
                     shields: Vec::new(),
+                    z_index: 1,
                 },
             ]
         );
@@ -1179,6 +1501,7 @@ mod tests {
                 clip: None,
                 visible: true,
                 shields: Vec::new(),
+                z_index: 0,
             }]
         );
     }
@@ -1231,6 +1554,7 @@ mod tests {
                     clip: None,
                     visible: false,
                     shields: Vec::new(),
+                    z_index: 0,
                 },
                 ViewCommand::Update {
                     slot_id: 2,
@@ -1238,6 +1562,7 @@ mod tests {
                     clip: None,
                     visible: false,
                     shields: Vec::new(),
+                    z_index: 1,
                 },
             ]
         );
@@ -1283,6 +1608,7 @@ mod tests {
                 clip: None,
                 visible: true,
                 shields: Vec::new(),
+                z_index: 0,
             }]
         );
         assert!(!cmds.iter().any(|c| matches!(c, ViewCommand::Create { .. })));
@@ -1330,6 +1656,7 @@ mod tests {
                     clip: None,
                     visible: true,
                     shields: Vec::new(),
+                    z_index: 0,
                 },
             ]
         );
@@ -1356,6 +1683,7 @@ mod tests {
             | ViewCommand::Update { slot_id, .. }
             | ViewCommand::UpdateParams { slot_id, .. }
             | ViewCommand::Dispose { slot_id } => *slot_id == 2,
+            ViewCommand::Overlay { .. } | ViewCommand::DisposeOverlay { .. } => false,
         }));
     }
 
@@ -1426,6 +1754,7 @@ mod tests {
                     clip: None,
                     visible: true,
                     shields: Vec::new(),
+                    z_index: 0,
                 },
                 ViewCommand::Create {
                     slot_id: 2,
@@ -1439,6 +1768,7 @@ mod tests {
                     clip: None,
                     visible: true,
                     shields: Vec::new(),
+                    z_index: 1,
                 },
             ]
         );
@@ -1798,6 +2128,7 @@ mod tests {
                 clip: None,
                 visible: true,
                 shields: vec![moved],
+                z_index: 0,
             }]
         );
     }
@@ -1934,5 +2265,493 @@ mod tests {
         };
 
         assert_eq!(run(&sequence), run(&sequence));
+    }
+
+    // ---- z-order and overlays ---------------------------------------------
+
+    /// The whole-window viewport every v1 overlay covers in these tests.
+    const VIEWPORT: Rect = Rect::new(0.0, 0.0, 400.0, 800.0);
+
+    /// A drawing command (a backdrop blur needs no brush, so the tests stay
+    /// free of a `peniko` dependency).
+    fn draw() -> Command {
+        Command::BackdropBlur {
+            rect: r(0.0, 0.0, 10.0, 10.0),
+            radius: 4.0,
+            transform: kurbo::Affine::IDENTITY,
+        }
+    }
+
+    /// A Mode B slot's hole-punch, as `PaintScene::clear_rect` records it.
+    fn punch() -> Command {
+        Command::ClearRect {
+            rect: r(0.0, 0.0, 100.0, 100.0),
+            transform: kurbo::Affine::IDENTITY,
+        }
+    }
+
+    fn push_clip() -> Command {
+        Command::PushClip {
+            rect: r(0.0, 0.0, 10.0, 10.0),
+            transform: kurbo::Affine::IDENTITY,
+        }
+    }
+
+    /// A slot frame published at painter-order index `command_index`.
+    fn frame_at(slot_id: u64, command_index: usize) -> PlatformViewFrame {
+        PlatformViewFrame {
+            command_index,
+            ..frame(slot_id, r(0.0, 0.0, 100.0, 100.0), true)
+        }
+    }
+
+    /// Every `Overlay`/`DisposeOverlay` in the backlog, in order.
+    fn overlay_commands(state: &PlatformViewState) -> Vec<ViewCommand> {
+        state
+            .commands()
+            .1
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    ViewCommand::Overlay { .. } | ViewCommand::DisposeOverlay { .. }
+                )
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// `(slot_id, z_index)` of every `Update` in the backlog, in order.
+    fn update_z_indices(state: &PlatformViewState) -> Vec<(u64, u32)> {
+        state
+            .commands()
+            .1
+            .iter()
+            .filter_map(|c| match c {
+                ViewCommand::Update {
+                    slot_id, z_index, ..
+                } => Some((*slot_id, *z_index)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn one_slot_with_drawing_content_after_it_gets_one_overlay() {
+        let mut state = PlatformViewState::new();
+        // Backdrop, then the slot at index 1, then two drawn commands over it
+        // (wrapped in a clip bracket).
+        let commands = [draw(), push_clip(), draw(), draw(), Command::PopClip];
+        assert!(state.ingest_scene(&[frame_at(1, 1)], &[], &commands, VIEWPORT));
+
+        assert_eq!(
+            overlay_commands(&state),
+            vec![ViewCommand::Overlay {
+                overlay_id: 1,
+                above_slot_id: 1,
+                rect: VIEWPORT,
+                command_range: 1..5,
+            }]
+        );
+        assert_eq!(update_z_indices(&state), vec![(1, 0)]);
+        // The overlay follows the slot's own Create + Update.
+        assert!(matches!(
+            state.commands().1.last(),
+            Some(ViewCommand::Overlay { .. })
+        ));
+    }
+
+    #[test]
+    fn a_slots_own_punch_is_not_content_above_it() {
+        // Mode B: the slot's punch is recorded at its own index. Alone, it
+        // makes no overlay.
+        let mut state = PlatformViewState::new();
+        state.ingest_scene(&[frame_at(1, 1)], &[], &[draw(), punch()], VIEWPORT);
+        assert!(overlay_commands(&state).is_empty());
+
+        // Real content after the punch does; the range opens one past the
+        // punch, which stays on the main surface.
+        let mut state = PlatformViewState::new();
+        state.ingest_scene(
+            &[frame_at(1, 1)],
+            &[],
+            &[draw(), punch(), push_clip(), draw(), Command::PopClip],
+            VIEWPORT,
+        );
+        assert_eq!(
+            overlay_commands(&state),
+            vec![ViewCommand::Overlay {
+                overlay_id: 1,
+                above_slot_id: 1,
+                rect: VIEWPORT,
+                command_range: 2..5,
+            }]
+        );
+    }
+
+    #[test]
+    fn structural_only_content_after_a_slot_gets_no_overlay() {
+        let mut state = PlatformViewState::new();
+        let commands = [
+            draw(),
+            push_clip(),
+            Command::PopClip,
+            Command::PushLayer {
+                rect: r(0.0, 0.0, 10.0, 10.0),
+                alpha: 0.5,
+                transform: kurbo::Affine::IDENTITY,
+            },
+            Command::PopLayer,
+        ];
+        state.ingest_scene(&[frame_at(1, 1)], &[], &commands, VIEWPORT);
+        assert!(overlay_commands(&state).is_empty());
+
+        // Content painted only BEFORE the slot stays on the main surface.
+        let mut state = PlatformViewState::new();
+        state.ingest_scene(&[frame_at(1, 3)], &[], &[draw(), draw(), draw()], VIEWPORT);
+        assert!(overlay_commands(&state).is_empty());
+    }
+
+    #[test]
+    fn two_slots_get_two_overlays_with_ranges_and_z_order() {
+        let mut state = PlatformViewState::new();
+        // draw | slot 1 @1 | draw draw | slot 2 @3 | push_clip draw pop
+        let commands = [
+            draw(),
+            draw(),
+            draw(),
+            push_clip(),
+            draw(),
+            Command::PopClip,
+        ];
+        // Frames handed over out of painter order: z order follows
+        // `command_index`, not the slice order.
+        state.ingest_scene(&[frame_at(2, 3), frame_at(1, 1)], &[], &commands, VIEWPORT);
+
+        assert_eq!(update_z_indices(&state), vec![(2, 1), (1, 0)]);
+        assert_eq!(
+            overlay_commands(&state),
+            vec![
+                ViewCommand::Overlay {
+                    overlay_id: 1,
+                    above_slot_id: 1,
+                    rect: VIEWPORT,
+                    command_range: 1..3,
+                },
+                ViewCommand::Overlay {
+                    overlay_id: 2,
+                    above_slot_id: 2,
+                    rect: VIEWPORT,
+                    command_range: 3..6,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn content_only_between_two_slots_overlays_the_lower_one() {
+        let mut state = PlatformViewState::new();
+        // slot 1 @0 | draw | slot 2 @1 | (structural only) push_clip pop
+        let commands = [draw(), push_clip(), Command::PopClip];
+        state.ingest_scene(&[frame_at(1, 0), frame_at(2, 1)], &[], &commands, VIEWPORT);
+        assert_eq!(
+            overlay_commands(&state),
+            vec![ViewCommand::Overlay {
+                overlay_id: 1,
+                above_slot_id: 1,
+                rect: VIEWPORT,
+                command_range: 0..1,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_hidden_slot_is_not_a_cut() {
+        let mut state = PlatformViewState::new();
+        // slot 1 @0 | draw | hidden slot 2 @1 | draw
+        let mut hidden = frame_at(2, 1);
+        hidden.visible = false;
+        state.ingest_scene(&[frame_at(1, 0), hidden], &[], &[draw(), draw()], VIEWPORT);
+        assert_eq!(
+            overlay_commands(&state),
+            vec![ViewCommand::Overlay {
+                overlay_id: 1,
+                above_slot_id: 1,
+                rect: VIEWPORT,
+                command_range: 0..2,
+            }]
+        );
+    }
+
+    #[test]
+    fn an_unchanged_overlay_emits_nothing_and_a_moved_range_is_resent() {
+        let mut state = PlatformViewState::new();
+        let commands = [draw(), draw(), draw()];
+        state.ingest_scene(&[frame_at(1, 1)], &[], &commands, VIEWPORT);
+        state.acknowledge(state.commands().0);
+
+        assert!(!state.ingest_scene(&[frame_at(1, 1)], &[], &commands, VIEWPORT));
+        assert!(state.commands().1.is_empty());
+
+        // One more command before the slot shifts its cut: same overlay id,
+        // new range.
+        let commands = [draw(), draw(), draw(), draw()];
+        assert!(state.ingest_scene(&[frame_at(1, 2)], &[], &commands, VIEWPORT));
+        assert_eq!(
+            overlay_commands(&state),
+            vec![ViewCommand::Overlay {
+                overlay_id: 1,
+                above_slot_id: 1,
+                rect: VIEWPORT,
+                command_range: 2..4,
+            }]
+        );
+    }
+
+    #[test]
+    fn overlay_is_disposed_after_its_content_is_gone_for_the_dispose_streak() {
+        let mut state = PlatformViewState::new();
+        state.ingest_scene(&[frame_at(1, 1)], &[], &[draw(), draw()], VIEWPORT);
+        state.acknowledge(state.commands().0);
+
+        // The content above the slot disappears: the overlay is emptied at
+        // once (it must not render stale indices) but kept alive.
+        state.ingest_scene(&[frame_at(1, 1)], &[], &[draw()], VIEWPORT);
+        assert_eq!(
+            overlay_commands(&state),
+            vec![ViewCommand::Overlay {
+                overlay_id: 1,
+                above_slot_id: 1,
+                rect: VIEWPORT,
+                command_range: 1..1,
+            }]
+        );
+        state.acknowledge(state.commands().0);
+
+        for _ in 1..(DISPOSE_AFTER_MISSING_FRAMES - 1) {
+            state.ingest_scene(&[frame_at(1, 1)], &[], &[draw()], VIEWPORT);
+        }
+        assert!(
+            overlay_commands(&state).is_empty(),
+            "nothing more until the dispose streak is reached"
+        );
+
+        assert!(state.ingest_scene(&[frame_at(1, 1)], &[], &[draw()], VIEWPORT));
+        assert_eq!(
+            overlay_commands(&state),
+            vec![ViewCommand::DisposeOverlay { overlay_id: 1 }]
+        );
+        // The slot itself is untouched — it kept publishing all along.
+        assert!(
+            !state
+                .commands()
+                .1
+                .iter()
+                .any(|c| matches!(c, ViewCommand::Dispose { .. }))
+        );
+
+        // Content returning later gets a fresh overlay id.
+        state.acknowledge(state.commands().0);
+        state.ingest_scene(&[frame_at(1, 1)], &[], &[draw(), draw()], VIEWPORT);
+        assert_eq!(
+            overlay_commands(&state),
+            vec![ViewCommand::Overlay {
+                overlay_id: 2,
+                above_slot_id: 1,
+                rect: VIEWPORT,
+                command_range: 1..2,
+            }]
+        );
+    }
+
+    #[test]
+    fn content_returning_before_disposal_reuses_the_overlay() {
+        let mut state = PlatformViewState::new();
+        state.ingest_scene(&[frame_at(1, 1)], &[], &[draw(), draw()], VIEWPORT);
+        state.ingest_scene(&[frame_at(1, 1)], &[], &[draw()], VIEWPORT);
+        state.acknowledge(state.commands().0);
+
+        state.ingest_scene(&[frame_at(1, 1)], &[], &[draw(), draw()], VIEWPORT);
+        assert_eq!(
+            overlay_commands(&state),
+            vec![ViewCommand::Overlay {
+                overlay_id: 1,
+                above_slot_id: 1,
+                rect: VIEWPORT,
+                command_range: 1..2,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_frame_without_platform_views_emits_no_overlays() {
+        let mut state = PlatformViewState::new();
+        assert!(!state.ingest_scene(&[], &[], &[draw(), draw()], VIEWPORT));
+        assert_eq!(state.commands(), (0, &[][..]));
+    }
+
+    #[test]
+    fn plain_ingest_rank_only_change_emits_nothing() {
+        let mut state = PlatformViewState::new();
+        state.ingest(&[frame_at(1, 0), frame_at(2, 1)], &[]);
+        state.acknowledge(state.commands().0);
+
+        // Swapped painter order with the same geometry: no Update on the
+        // plain stream.
+        assert!(!state.ingest(&[frame_at(1, 1), frame_at(2, 0)], &[]));
+        assert!(state.commands().1.is_empty());
+    }
+
+    #[test]
+    fn plain_ingest_culled_sibling_keeps_survivor_quiet() {
+        let mut state = PlatformViewState::new();
+        state.ingest(&[frame_at(1, 0), frame_at(2, 1), frame_at(3, 2)], &[]);
+        state.acknowledge(state.commands().0);
+
+        // Slot 2 is culled: slot 3 drops from rank 2 to rank 1 with nothing
+        // else changed, so the plain stream stays silent for it.
+        assert!(!state.ingest(&[frame_at(1, 0), frame_at(3, 2)], &[]));
+        assert!(update_z_indices(&state).is_empty());
+    }
+
+    #[test]
+    fn plain_ingest_update_for_another_reason_carries_the_current_rank() {
+        let mut state = PlatformViewState::new();
+        state.ingest(&[frame_at(1, 0), frame_at(2, 1)], &[]);
+        state.acknowledge(state.commands().0);
+
+        // Slot 1 moves and its rank flips to 1; slot 2's rank flips to 0 and
+        // stays quiet. Slot 1's Update carries the rank it now has.
+        let moved = PlatformViewFrame {
+            rect: r(10.0, 0.0, 110.0, 100.0),
+            ..frame_at(1, 1)
+        };
+        assert!(state.ingest(&[moved, frame_at(2, 0)], &[]));
+        assert_eq!(update_z_indices(&state), vec![(1, 1)]);
+    }
+
+    #[test]
+    fn overlay_aware_rank_change_is_announced_with_the_current_rank() {
+        let mut state = PlatformViewState::new();
+        state.ingest_scene(&[frame_at(1, 0), frame_at(2, 1)], &[], &[], VIEWPORT);
+        state.acknowledge(state.commands().0);
+
+        assert!(state.ingest_scene(&[frame_at(1, 1), frame_at(2, 0)], &[], &[], VIEWPORT));
+        assert_eq!(update_z_indices(&state), vec![(1, 1), (2, 0)]);
+    }
+
+    #[test]
+    fn plain_ingest_never_emits_overlays() {
+        let mut state = PlatformViewState::new();
+        state.ingest(&[frame_at(1, 1)], &[]);
+        assert!(overlay_commands(&state).is_empty());
+        assert_eq!(update_z_indices(&state), vec![(1, 0)]);
+    }
+
+    #[test]
+    fn a_z_order_change_alone_emits_an_update() {
+        let mut state = PlatformViewState::new();
+        state.ingest_scene(&[frame_at(1, 0), frame_at(2, 1)], &[], &[], VIEWPORT);
+        state.acknowledge(state.commands().0);
+
+        // Same geometry, swapped painter order, on the overlay-aware path.
+        assert!(state.ingest_scene(&[frame_at(1, 1), frame_at(2, 0)], &[], &[], VIEWPORT));
+        assert_eq!(update_z_indices(&state), vec![(1, 1), (2, 0)]);
+    }
+
+    #[test]
+    fn retiring_a_slot_disposes_its_overlay_first() {
+        let mut state = PlatformViewState::new();
+        state.ingest_scene(&[frame_at(1, 1)], &[], &[draw(), draw()], VIEWPORT);
+        state.acknowledge(state.commands().0);
+
+        assert!(state.retire(1));
+        assert_eq!(
+            state.commands().1,
+            &[
+                ViewCommand::DisposeOverlay { overlay_id: 1 },
+                ViewCommand::Dispose { slot_id: 1 },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_slot_disposed_by_its_missing_streak_takes_its_overlay_with_it() {
+        let mut state = PlatformViewState::new();
+        state.ingest_scene(&[frame_at(1, 1)], &[], &[draw(), draw()], VIEWPORT);
+        for _ in 0..DISPOSE_AFTER_MISSING_FRAMES {
+            state.ingest_scene(&[], &[], &[draw()], VIEWPORT);
+        }
+        let cmds = state.commands().1;
+        let dispose_overlay = cmds
+            .iter()
+            .position(|c| *c == ViewCommand::DisposeOverlay { overlay_id: 1 })
+            .expect("the overlay is disposed");
+        let dispose_slot = cmds
+            .iter()
+            .position(|c| *c == ViewCommand::Dispose { slot_id: 1 })
+            .expect("the slot is disposed");
+        assert!(dispose_overlay < dispose_slot);
+        assert_eq!(
+            cmds.iter()
+                .filter(|c| matches!(c, ViewCommand::DisposeOverlay { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn surface_recreate_replays_live_overlays_after_the_slots() {
+        let mut state = PlatformViewState::new();
+        state.ingest_scene(&[frame_at(1, 1)], &[], &[draw(), draw()], VIEWPORT);
+        state.acknowledge(state.commands().0);
+
+        assert!(state.reset_for_surface_recreate());
+        let cmds = state.commands().1;
+        assert_eq!(cmds.len(), 3);
+        assert!(matches!(cmds[0], ViewCommand::Create { slot_id: 1, .. }));
+        assert!(matches!(
+            cmds[1],
+            ViewCommand::Update {
+                slot_id: 1,
+                z_index: 0,
+                ..
+            }
+        ));
+        assert_eq!(
+            cmds[2],
+            ViewCommand::Overlay {
+                overlay_id: 1,
+                above_slot_id: 1,
+                rect: VIEWPORT,
+                command_range: 1..2,
+            }
+        );
+    }
+
+    #[test]
+    fn overlays_ride_the_frame_pairing_release_gate() {
+        let mut state = PlatformViewState::new();
+        let mut pairing = FramePairing::new();
+        state.ingest_scene(&[frame_at(1, 1)], &[], &[draw()], VIEWPORT);
+        pairing.record(state.commands().0, 1);
+        // Frame 2 adds content above the slot: its overlay is a new batch.
+        state.ingest_scene(&[frame_at(1, 1)], &[], &[draw(), draw()], VIEWPORT);
+        pairing.record(state.commands().0, 2);
+
+        // Only frame 1 is on screen: the overlay is held with its frame.
+        let (_, released) = state.commands_up_to(pairing.releasable_generation(1, 2));
+        assert!(
+            !released
+                .iter()
+                .any(|c| matches!(c, ViewCommand::Overlay { .. }))
+        );
+        // Frame 2 presents: the overlay goes out.
+        let (_, released) = state.commands_up_to(pairing.releasable_generation(2, 2));
+        assert!(
+            released
+                .iter()
+                .any(|c| matches!(c, ViewCommand::Overlay { .. }))
+        );
     }
 }

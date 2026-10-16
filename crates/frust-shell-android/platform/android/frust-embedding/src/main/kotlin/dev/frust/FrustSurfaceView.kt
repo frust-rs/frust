@@ -463,8 +463,51 @@ class FrustSurfaceView(
     // for itself — `Choreographer.postVsyncCallback` is JVM-only, API 33+.
     private external fun nativeSetFrameTimeline(handle: Long, expectedPresentDeltaNanos: Long)
 
+    // Overlay surfaces (`FRUST_OVERLAYS`): how [FrustViewHost] builds the
+    // overlay `SurfaceView`s the native differ announces — 0 none (overlays
+    // off, the default), 1 `setZOrderOnTop`, 2 `setZOrderMediaOverlay` (the
+    // A/B arm). Process state, no handle.
+    private external fun nativeOverlayMode(): Int
+
+    // One overlay `SurfaceView`'s surface lifecycle, keyed by the differ's
+    // overlay id: its window (physical px) on create/change, and its teardown
+    // — the Rust side drops the overlay's GPU surface before releasing the
+    // window, before returning. No handle: the overlay table is process-wide.
+    private external fun nativeOverlaySurfaceChanged(
+        overlayId: Long,
+        surface: Surface,
+        width: Int,
+        height: Int,
+    )
+    private external fun nativeOverlaySurfaceDestroyed(overlayId: Long)
+
     /** `0` means "no native side yet" — every native call is guarded on this. */
     private var handle: Long = 0
+
+    /**
+     * The overlay arrangement (see [nativeOverlayMode]): `0` unless
+     * `FRUST_OVERLAYS` is set. Safe to call any time after
+     * [loadNativeLibrary] — it reads process state, not the handle.
+     */
+    internal fun overlayMode(): Int = nativeOverlayMode()
+
+    /**
+     * Overlay [overlayId]'s `SurfaceView` delivered [surface] at
+     * [width]x[height] physical px — called by [FrustViewHost]'s per-overlay
+     * `SurfaceHolder.Callback`.
+     */
+    internal fun overlaySurfaceChanged(overlayId: Long, surface: Surface, width: Int, height: Int) {
+        nativeOverlaySurfaceChanged(overlayId, surface, width, height)
+    }
+
+    /**
+     * Overlay [overlayId]'s surface is going away (or the overlay is being
+     * disposed). Synchronous: the native side has dropped the overlay's GPU
+     * surface and released its window when this returns. Idempotent.
+     */
+    internal fun overlaySurfaceDestroyed(overlayId: Long) {
+        nativeOverlaySurfaceDestroyed(overlayId)
+    }
 
     /** Whether the Choreographer frame loop should keep re-posting itself. */
     private var running = false

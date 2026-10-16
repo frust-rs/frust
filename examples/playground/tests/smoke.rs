@@ -16,8 +16,8 @@ use std::sync::Mutex;
 
 use frust::authoring::WindowInsets;
 use frust::{
-    AnyView, Brightness, Component, GetUntracked, Set, Theme, Update, WindowMetrics, component,
-    handles_back, provide_context, push_back_press, text,
+    AnyView, Brightness, Component, GetUntracked, Set, Theme, Update, WindowMetrics, any,
+    component, handles_back, provide_context, push_back_press, text,
 };
 use frust_core::FrameTime;
 use frust_core::{PaintOutcome, PaintScene, RenderRoot, View};
@@ -73,6 +73,8 @@ struct RecScene {
     /// (x, y) is the two-line-wrap tripwire
     /// `full_shell_nav_labels_fit_single_line_at_phone_width` checks for.
     text_run_origins: Vec<Point>,
+    /// `draw_scene_texture` commands — an in-scene texture (`texture_view`).
+    scene_textures: usize,
 }
 
 impl PaintScene for RecScene {
@@ -107,6 +109,9 @@ impl PaintScene for RecScene {
     fn stroke_path(&mut self, _origin: Point, _path: &BezPath, _width: f64, _brush: &Brush) {}
     fn stroke_line(&mut self, _p0: Point, _p1: Point, _width: f64, _color: Color) {
         self.lines += 1;
+    }
+    fn draw_scene_texture(&mut self, _id: u64, _dest: Rect) {
+        self.scene_textures += 1;
     }
 }
 
@@ -184,6 +189,53 @@ fn every_page_mounts_and_paints() {
             scene.text_runs > 0,
             "section {section} ({label}) must paint some text",
         );
+    }
+}
+
+/// The Video and Camera pages' texture modes: each page mounts and paints with
+/// its toggle off (no scene texture — no session exists on this host, and the
+/// native slot is a platform view) and on (a `SceneTexture` command: the
+/// in-scene picture, fed here by the pages' synthetic pattern since no player
+/// or camera exists headless), over two frames each.
+#[test]
+// erasure: keep the page table holds four different view types behind one fn pointer
+fn texture_pages_mount_in_both_modes() {
+    type PageFn = fn(&PlaygroundState) -> AnyView<PlaygroundState>;
+    let pages: [(&str, PageFn, bool); 4] = [
+        ("video/native", |s| any(pages::video_player::page(s)), false),
+        (
+            "video/texture",
+            |s| any(pages::video_player::texture_page(s)),
+            true,
+        ),
+        ("camera/native", |s| any(pages::camera::page(s)), false),
+        (
+            "camera/texture",
+            |s| any(pages::camera::texture_page(s)),
+            true,
+        ),
+    ];
+    for (name, page, texture) in pages {
+        let _owner = setup();
+        let mut tcx = TextContext::new();
+        let mut root: RenderRoot<PlaygroundState, AnyView<PlaygroundState>> = RenderRoot::new();
+        let mut state = PlaygroundState::new();
+        let mut logic = |s: &mut PlaygroundState| page(s);
+        for t_ms in [0, 16] {
+            let (scene, _outcome) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, t_ms);
+            assert!(scene.text_runs > 0, "{name} must paint text at {t_ms} ms");
+            if texture {
+                assert!(
+                    scene.scene_textures > 0,
+                    "{name} must draw its picture as a scene texture at {t_ms} ms"
+                );
+            } else {
+                assert_eq!(
+                    scene.scene_textures, 0,
+                    "{name} draws no scene texture with the toggle off"
+                );
+            }
+        }
     }
 }
 

@@ -54,6 +54,12 @@
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod ffi_support;
 
+// The overlay switch, per-overlay table and frame ledger: pure state machines
+// the (Android-only) JNI glue drives, host-tested with stand-in window and
+// surface types.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod overlay_state;
+
 // The shape-aware scroll-sync tail: pure logic — two scalars
 // per display frame in, a hold depth out — deliberately kept out of the
 // Android-only modules below so its regime state machine and hold aging are

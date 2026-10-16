@@ -33,6 +33,27 @@
 //! | `setLooping` | `(int session, boolean looping)` | `(IZ)I` | as `play` |
 //! | `close` | `(int session)` | `(I)I` | as `play`; a repeat close answers [`COMMAND_UNKNOWN_SESSION`] |
 //!
+//! ### Additive entries: texture output
+//!
+//! Added after the table above was frozen, as additional statics (never a
+//! changed row), for a session opened with [`crate::VideoOutput::Texture`]:
+//!
+//! | Method | Parameters (Java) | JNI descriptor | Returns |
+//! |---|---|---|---|
+//! | `attachTextureOutput` | `(int session, boolean hardwareBuffers)` | `(IZ)I` | [`COMMAND_OK`] / [`COMMAND_UNKNOWN_SESSION`] |
+//! | `releaseTextureFrame` | `(int session, long token)` | `(IJ)V` | — |
+//!
+//! `attachTextureOutput` routes the player's picture through the host's
+//! texture pipeline instead of a `SurfaceView`: decoded frames are drawn by a
+//! GLES blit into an `RGBA_8888` `ImageReader` (a decoder cannot write RGBA
+//! into a reader itself — its buffers are YUV), and each image the reader
+//! produces arrives as `nativeOnTextureFrame` below. `hardwareBuffers` asks
+//! for images backed by GPU-sampleable `AHardwareBuffer`s handed over without
+//! a copy; Rust passes `true` only while the renderer has an
+//! `AHardwareBuffer` importer installed (and the host falls back to the CPU
+//! path below API 29). `releaseTextureFrame` closes a retained image (see
+//! `nativeOnTextureFrame`).
+//!
 //! `sourceKind` is [`SOURCE_KIND_FILE`] `0` (an **absolute** filesystem
 //! path), [`SOURCE_KIND_ASSET`] `1` (a path relative to the app's `assets/`
 //! directory, not a filesystem path), or [`SOURCE_KIND_URL`] `2`.
@@ -71,14 +92,32 @@
 //! - [`Java_dev_frust_videoplayer_FrustVideoPlayerHost_nativeOnError`]`(env, class, session: jint, code: jint, message: JString)`
 //!   — `code` is the same host-error table `openPlayer` reports, this time
 //!   with the host's own message.
+//! - [`Java_dev_frust_videoplayer_FrustVideoPlayerHost_nativeOnTextureFrame`]`(env, class, session: jint, buffer: HardwareBuffer?, pixels: ByteBuffer?, width: jint, height: jint, rowStride: jint, token: jlong) -> jboolean`
+//!   (additive) — one RGBA image of a texture-output session, called on the
+//!   host's frame thread. With `buffer` non-null it is pushed as a
+//!   zero-copy `AHardwareBuffer` frame and the answer is `true`: the host
+//!   keeps the image open until `releaseTextureFrame(session, token)`, which
+//!   this side calls from the frame's release callback (the renderer's
+//!   "buffer may be reused" signal). Otherwise `pixels` is the image's
+//!   direct plane buffer, copied here into a tightly packed CPU frame, and
+//!   the answer is `false`: the host closes the image as soon as this
+//!   returns. `false` is also the answer for a frame nobody takes (no
+//!   texture session under that id).
 //!
-//! All four are called on the **main thread** and carry a live JNI frame, so
-//! none of them attaches: each upgrades its [`jni::EnvUnowned`] via
-//! [`jni::EnvUnowned::with_env`], which wraps the body in `catch_unwind` —
-//! the crate's own no-unwind-across-FFI guarantee
-//! (`docs/CODE_STANDARDS.md`'s Language Idioms). This module holds **no
-//! `unsafe` block at all**; its only `unsafe` tokens are the four exports'
-//! `#[unsafe(no_mangle)]` attributes.
+//! The first four are called on the **main thread**; all of them carry a
+//! live JNI frame, so none of them attaches: each upgrades its
+//! [`jni::EnvUnowned`] via [`jni::EnvUnowned::with_env`], which wraps the
+//! body in `catch_unwind` — the crate's own no-unwind-across-FFI guarantee
+//! (`docs/CODE_STANDARDS.md`'s Language Idioms).
+//!
+//! # `unsafe` in this module
+//!
+//! Besides the exports' `#[unsafe(no_mangle)]` attributes, exactly two
+//! confined sites, both on the texture path and each `# Safety`-noted:
+//! [`pixel_data`]'s `GetDirectBufferAddress` view of a plane buffer (the
+//! sanctioned `frust-camera` pattern), and [`hardware_buffer`]'s NDK calls
+//! (`AHardwareBuffer_fromHardwareBuffer` + `AHardwareBuffer_acquire`, and the
+//! matching `AHardwareBuffer_release` in [`release_native_frame`]).
 //!
 //! # The platform-view spellings
 //!
@@ -147,18 +186,25 @@
 #![cfg_attr(test, allow(dead_code))]
 
 use std::collections::HashMap;
+use std::ffi::c_void;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use frust_plugin::texture::{
+    FramePayload, NativeHandle, NativeHandleKind, TextureFormat, TextureFrame, TextureSink,
+};
 use jni::errors::LogErrorAndDefault;
-use jni::objects::{JClass, JObject, JString, JValue};
+use jni::objects::{JByteBuffer, JClass, JObject, JString, JValue};
 use jni::refs::Global;
 use jni::sys::{jboolean, jfloat, jint, jlong};
 use jni::{Env, EnvUnowned, jni_sig, jni_str};
 
 use crate::backend::{BackendSession, PlayerBackend};
 use crate::snapshot::Shared;
-use crate::{PlaybackState, PlayerEvent, PlayerOptions, VideoError, VideoSource};
+use crate::{
+    PlaybackState, PlayerEvent, PlayerOptions, VideoError, VideoOutput, VideoSource, pack_rgba_rows,
+};
 
 /// The Kotlin host's fully-qualified class name in **binary/dotted** form, as
 /// `ClassLoader.loadClass` expects (**not** the slash form `FindClass` wants)
@@ -201,6 +247,13 @@ static HOST_CLASS: OnceLock<Global<JClass<'static>>> = OnceLock::new();
 /// `HashMap::new` is not `const`, so this is a [`LazyLock`] rather than a
 /// bare `static`.
 static SESSIONS: LazyLock<Mutex<HashMap<i32, Arc<Shared>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The frame mailbox of every open texture-output session, keyed like
+/// [`SESSIONS`]: written by [`AndroidBackend::open`] and
+/// [`AndroidSession::close`], read by `nativeOnTextureFrame`. A separate map
+/// so a frame push never holds the state registry's lock.
+static TEXTURE_SINKS: LazyLock<Mutex<HashMap<i32, TextureSink>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Opens Android player sessions.
@@ -269,7 +322,56 @@ impl PlayerBackend for AndroidBackend {
         // duplicate ([`should_publish_state`]).
         shared.publish(PlayerEvent::StateChanged(PlaybackState::Loading));
 
-        Ok(AndroidSession { id: code, shared })
+        let texture = (options.output == VideoOutput::Texture).then(|| attach_texture(code));
+
+        Ok(AndroidSession {
+            id: code,
+            shared,
+            texture,
+        })
+    }
+}
+
+/// Registers a fresh frame mailbox for session `id` and asks the host to
+/// route the player's picture into it (`attachTextureOutput`, module doc's
+/// additive table). A refusal is logged, not reported: the session itself
+/// opened fine, it simply shows no picture — the same outcome as a native
+/// view nobody mounted.
+fn attach_texture(id: i32) -> TextureSink {
+    let sink = TextureSink::new();
+    // Registered before the host is asked, so its first frame has a mailbox.
+    lock(&TEXTURE_SINKS).insert(id, sink.clone());
+    let hardware_buffers = jboolean::from(hardware_buffers_wanted());
+    let attached = with_host(|env, class| {
+        run_jni(env, "FrustVideoPlayerHost.attachTextureOutput", |env| {
+            env.call_static_method(
+                class,
+                jni_str!("attachTextureOutput"),
+                jni_sig!("(IZ)I"),
+                &[JValue::Int(id), JValue::Bool(hardware_buffers)],
+            )?
+            .i()
+        })
+    })
+    .and_then(|code| command_result("FrustVideoPlayerHost.attachTextureOutput", code));
+    if let Err(err) = attached {
+        log::warn!("frust-video-player: session {id} has no texture output: {err}");
+    }
+    sink
+}
+
+/// Whether to ask the host for zero-copy hardware-buffer frames: only while
+/// the renderer can import them — a native frame of a kind with no importer
+/// installed is refused by the frame bus. Without the `frust-api` half there
+/// is no renderer to ask, so frames are copied.
+fn hardware_buffers_wanted() -> bool {
+    #[cfg(feature = "frust-api")]
+    {
+        crate::api::texture::hardware_buffer_import_installed()
+    }
+    #[cfg(not(feature = "frust-api"))]
+    {
+        false
     }
 }
 
@@ -283,6 +385,9 @@ pub(crate) struct AndroidSession {
     /// This session's registry entry, kept so [`Self::close`] removes
     /// exactly its own — see that method.
     shared: Arc<Shared>,
+    /// The frame mailbox of a [`VideoOutput::Texture`] session, also
+    /// registered in [`TEXTURE_SINKS`] under [`Self::id`].
+    texture: Option<TextureSink>,
 }
 
 impl AndroidSession {
@@ -400,6 +505,19 @@ impl BackendSession for AndroidSession {
     /// also keeps a reused id's newer session from having its own state
     /// overwritten by an older close.
     fn close(&self) {
+        // No frame pushed after this point reaches the mailbox.
+        if self.texture.is_some() {
+            let mut sinks = lock(&TEXTURE_SINKS);
+            let is_this_session = sinks.get(&self.id).is_some_and(|registered| {
+                self.texture
+                    .as_ref()
+                    .is_some_and(|own| own.id() == registered.id())
+            });
+            if is_this_session {
+                sinks.remove(&self.id);
+            }
+        }
+
         if let Err(err) = self.command("FrustVideoPlayerHost.close", |env, class, session| {
             env.call_static_method(
                 class,
@@ -429,6 +547,15 @@ impl BackendSession for AndroidSession {
             self.shared
                 .publish(PlayerEvent::StateChanged(PlaybackState::Idle));
         }
+
+        // The pending frame will never be shown; hand it back now.
+        if let Some(frame) = self.texture.as_ref().and_then(TextureSink::take_latest) {
+            frame.release();
+        }
+    }
+
+    fn texture_sink(&self) -> Option<&TextureSink> {
+        self.texture.as_ref()
     }
 
     fn id(&self) -> u32 {
@@ -907,6 +1034,243 @@ pub extern "system" fn Java_dev_frust_videoplayer_FrustVideoPlayerHost_nativeOnE
         Ok::<(), jni::errors::Error>(())
     })
     .resolve::<LogErrorAndDefault>();
+}
+
+// --- Texture output ---------------------------------------------------------
+
+// The NDK's `HardwareBuffer` <-> `AHardwareBuffer` bridge (API 26, below the
+// host's minSdk), linked from `libandroid`.
+#[link(name = "android")]
+unsafe extern "C" {
+    fn AHardwareBuffer_fromHardwareBuffer(
+        env: *mut jni::sys::JNIEnv,
+        hardware_buffer: jni::sys::jobject,
+    ) -> *mut c_void;
+    fn AHardwareBuffer_acquire(buffer: *mut c_void);
+    fn AHardwareBuffer_release(buffer: *mut c_void);
+}
+
+/// The `AHardwareBuffer*` behind a Java `HardwareBuffer`, with one reference
+/// of its own acquired — released by [`release_native_frame`]. Null when the
+/// NDK hands none back.
+///
+/// # Safety
+///
+/// `buffer` must be a live, non-null `android.hardware.HardwareBuffer`
+/// reference valid in `env`'s frame (the export's own argument).
+unsafe fn hardware_buffer(env: &Env<'_>, buffer: &JObject<'_>) -> *mut c_void {
+    // SAFETY: `env` is the export's live `JNIEnv` and `buffer` a valid
+    // `HardwareBuffer` reference in its frame (this fn's contract). The NDK
+    // returns the wrapped buffer without a reference of its own, so one is
+    // acquired before the Java object can be closed; a null return is passed
+    // through untouched.
+    unsafe {
+        let raw = AHardwareBuffer_fromHardwareBuffer(env.get_raw(), buffer.as_raw());
+        if !raw.is_null() {
+            AHardwareBuffer_acquire(raw);
+        }
+        raw
+    }
+}
+
+/// A native frame's release: drops the reference [`hardware_buffer`]
+/// acquired, then tells the host it may close the image (and so let its
+/// reader reuse the buffer). Runs once, on whichever thread the renderer
+/// releases the frame from.
+fn release_native_frame(session: i32, buffer: usize, token: i64) {
+    // SAFETY: `buffer` is the address `hardware_buffer` returned non-null,
+    // carrying exactly one reference acquired there and released only here
+    // (a frame's release runs once).
+    unsafe { AHardwareBuffer_release(buffer as *mut c_void) };
+    let released = with_host(|env, class| {
+        run_jni(env, "FrustVideoPlayerHost.releaseTextureFrame", |env| {
+            env.call_static_method(
+                class,
+                jni_str!("releaseTextureFrame"),
+                jni_sig!("(IJ)V"),
+                &[JValue::Int(session), JValue::Long(token)],
+            )?
+            .v()
+        })
+    });
+    if let Err(err) = released {
+        log::debug!("frust-video-player: releasing frame {token} of session {session}: {err}");
+    }
+}
+
+/// The byte view of a direct `ByteBuffer`, or `None` for a null or
+/// non-direct one.
+///
+/// # Safety
+///
+/// The slice is valid only while the image behind the buffer stays open,
+/// which the host guarantees until `nativeOnTextureFrame` returns; the
+/// caller copies out of it before then and keeps no reference.
+unsafe fn pixel_data<'frame>(env: &Env<'_>, buffer: &JByteBuffer<'_>) -> Option<&'frame [u8]> {
+    if buffer.is_null() {
+        return None;
+    }
+    let address = env.get_direct_buffer_address(buffer).ok()?;
+    let capacity = env.get_direct_buffer_capacity(buffer).ok()?;
+    if address.is_null() {
+        return None;
+    }
+    // SAFETY: `address`/`capacity` describe the direct buffer's own memory,
+    // kept alive by the still-open image per this fn's contract; it is only
+    // read.
+    Some(unsafe { std::slice::from_raw_parts(address.cast_const(), capacity) })
+}
+
+/// Copy-cost bookkeeping for the CPU path, logged every [`COPY_LOG_EVERY`]
+/// frames so a device run can read the cost off logcat.
+static COPY_MICROS: AtomicU64 = AtomicU64::new(0);
+/// See [`COPY_MICROS`].
+static COPY_FRAMES: AtomicU64 = AtomicU64::new(0);
+/// How many CPU frames one copy-cost log line averages over.
+const COPY_LOG_EVERY: u64 = 120;
+
+fn record_copy(started: Instant, width: u32, height: u32) {
+    let micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+    let total = COPY_MICROS
+        .fetch_add(micros, Ordering::Relaxed)
+        .saturating_add(micros);
+    let frames = COPY_FRAMES.fetch_add(1, Ordering::Relaxed) + 1;
+    if frames.is_multiple_of(COPY_LOG_EVERY) {
+        COPY_MICROS.store(0, Ordering::Relaxed);
+        log::debug!(
+            "frust-video-player: CPU texture copy {width}x{height}: {} us/frame over the last \
+             {COPY_LOG_EVERY} frames",
+            total / COPY_LOG_EVERY
+        );
+    }
+}
+
+/// The arguments of one `nativeOnTextureFrame` delivery, as the export
+/// received them.
+struct TextureFrameArgs<'call, 'local> {
+    /// The texture-output session the image belongs to.
+    session: i32,
+    /// The image's `HardwareBuffer`, or a null reference on the CPU path.
+    buffer: &'call JObject<'local>,
+    /// The image's direct pixel buffer (the CPU path).
+    pixels: &'call JByteBuffer<'local>,
+    /// The image's extent, as the host reported it.
+    width: i32,
+    height: i32,
+    /// Bytes per row of `pixels`, padding included.
+    row_stride: i32,
+    /// The host's handle on the image, passed back to `releaseTextureFrame`.
+    token: i64,
+}
+
+/// One `nativeOnTextureFrame` delivery; the return is the export's answer
+/// (module doc): `true` when a hardware-buffer frame was taken and the host
+/// must keep its image open until `releaseTextureFrame`.
+fn deliver_texture_frame(env: &Env<'_>, args: TextureFrameArgs<'_, '_>) -> bool {
+    let TextureFrameArgs {
+        session,
+        buffer,
+        pixels,
+        width,
+        height,
+        row_stride,
+        token,
+    } = args;
+    let Some(sink) = lock(&TEXTURE_SINKS).get(&session).cloned() else {
+        log::trace!("frust-video-player: texture frame for unknown session {session} — dropped");
+        return false;
+    };
+    let (Some(width), Some(height)) = (
+        u32::try_from(width).ok().filter(|w| *w > 0),
+        u32::try_from(height).ok().filter(|h| *h > 0),
+    ) else {
+        return false;
+    };
+
+    if !buffer.is_null() {
+        // SAFETY: `buffer` is the export's own non-null `HardwareBuffer`
+        // argument, live in `env`'s frame.
+        let raw = unsafe { hardware_buffer(env, buffer) };
+        if raw.is_null() {
+            return false;
+        }
+        let address = raw as usize;
+        // SAFETY: `raw` is a live `AHardwareBuffer*` on which
+        // `hardware_buffer` just took this frame's own
+        // `AHardwareBuffer_acquire` reference; only the frame's release
+        // callback below (`release_native_frame`, run exactly once) drops it.
+        let handle = unsafe { NativeHandle::new(NativeHandleKind::AHardwareBuffer, raw) };
+        sink.push(TextureFrame {
+            width,
+            height,
+            format: TextureFormat::Rgba8,
+            payload: FramePayload::Native(handle),
+            release: Some(Box::new(move || {
+                release_native_frame(session, address, token);
+            })),
+        });
+        return true;
+    }
+
+    let started = Instant::now();
+    // SAFETY: the host keeps the image open until this export returns, and
+    // the bytes are copied out below before then.
+    let Some(bytes) = (unsafe { pixel_data(env, pixels) }) else {
+        log::warn!("frust-video-player: texture frame of session {session} had no pixels");
+        return false;
+    };
+    let Some(packed) = pack_rgba_rows(
+        bytes,
+        width,
+        height,
+        usize::try_from(row_stride).unwrap_or(0),
+    ) else {
+        log::warn!(
+            "frust-video-player: texture frame of session {session} ({width}x{height}, stride \
+             {row_stride}, {} bytes) is malformed — dropped",
+            bytes.len()
+        );
+        return false;
+    };
+    sink.push(TextureFrame::rgba8(width, height, packed));
+    record_copy(started, width, height);
+    false
+}
+
+/// `Java_dev_frust_videoplayer_FrustVideoPlayerHost_nativeOnTextureFrame` —
+/// one image of a texture-output session (module doc's Kotlin → Rust list),
+/// on the host's frame thread.
+// The parameter list is the JNI signature the Kotlin host declares.
+#[allow(clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_frust_videoplayer_FrustVideoPlayerHost_nativeOnTextureFrame<
+    'local,
+>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    session: jint,
+    buffer: JObject<'local>,
+    pixels: JByteBuffer<'local>,
+    width: jint,
+    height: jint,
+    row_stride: jint,
+    token: jlong,
+) -> jboolean {
+    env.with_env(|env| {
+        Ok::<bool, jni::errors::Error>(deliver_texture_frame(
+            env,
+            TextureFrameArgs {
+                session,
+                buffer: &buffer,
+                pixels: &pixels,
+                width,
+                height,
+                row_stride,
+                token,
+            },
+        ))
+    })
+    .resolve::<LogErrorAndDefault>()
 }
 
 #[cfg(test)]

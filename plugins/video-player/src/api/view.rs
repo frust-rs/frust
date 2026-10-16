@@ -6,7 +6,8 @@
 //! `examples/playground/src/pages/camera.rs`'s `preview_block`, this
 //! crate's closest in-tree precedent for the same composition).
 
-use frust::{PlatformViewView, platform_view};
+use frust::kurbo::Size;
+use frust::{Get, PlatformViewView, TextureFit, TextureView, platform_view, texture_view};
 
 use crate::VideoFit;
 
@@ -72,10 +73,44 @@ pub fn video_view(handle: &VideoPlayerHandle, fit: VideoFit) -> PlatformViewView
     platform_view(session.view_type()).params_json(session.params_json(fit))
 }
 
+/// Build the in-scene picture of a [`crate::VideoOutput::Texture`] session:
+/// a `frust::texture_view` over [`VideoPlayerHandle::texture_output`]'s scene
+/// texture, `fit` mapped onto [`TextureFit`], filling its container by
+/// default (`.size(..)`, `.corner_radius(..)` and the other `TextureView`
+/// builders apply as usual). `None` when the session has no texture output —
+/// a native-view session, or a backend without a frame producer on this
+/// target.
+///
+/// The picture's aspect comes from the frame currently shown
+/// ([`frust::texture::TextureRegistration::frame_size`]), or before the first
+/// frame from the size the platform reported ([`VideoPlayerHandle::video_size`],
+/// a tracked read, so a `build` calling this re-runs once it is known); with
+/// neither the texture fills the box.
+///
+/// Unlike [`video_view`]'s native slot, this is ordinary frust paint: it
+/// clips to its box and to a `corner_radius`, scrolls and transforms with its
+/// parent, and frust content stacked over it is drawn over it on every
+/// platform — `VideoFit::Cover` crops inside the box rather than spilling.
+pub fn video_texture_view(handle: &VideoPlayerHandle, fit: VideoFit) -> Option<TextureView> {
+    let registration = handle.texture_output()?;
+    let fit = match fit {
+        VideoFit::Contain => TextureFit::Contain,
+        VideoFit::Cover => TextureFit::Cover,
+    };
+    let view = texture_view(registration.scene_texture_id()).fit(fit);
+    let natural = registration
+        .frame_size()
+        .or_else(|| handle.video_size.get());
+    Some(match natural {
+        Some((width, height)) => view.source_size(Size::new(f64::from(width), f64::from(height))),
+        None => view,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PlayerOptions, VideoPlayer, VideoSource};
+    use crate::{PlayerOptions, VideoOutput, VideoPlayer, VideoSource};
 
     fn open() -> VideoPlayerHandle {
         let session = VideoPlayer::open(
@@ -109,5 +144,25 @@ mod tests {
                 VideoFit::Cover,
             )
         );
+    }
+
+    #[test]
+    fn video_texture_view_needs_a_texture_session() {
+        let native = open();
+        assert!(video_texture_view(&native, VideoFit::Contain).is_none());
+
+        let session = VideoPlayer::open(
+            VideoSource::Url("https://example.invalid/clip.mp4".to_owned()),
+            PlayerOptions {
+                output: VideoOutput::Texture,
+                ..PlayerOptions::default()
+            },
+        )
+        .expect("the mock backend opens an ordinary source");
+        let handle = VideoPlayerHandle::new(session);
+        assert!(video_texture_view(&handle, VideoFit::Cover).is_some());
+        // The reported size feeds the aspect before any frame was shown.
+        handle.session().mock_host().emit_video_size(1_280, 720);
+        assert!(video_texture_view(&handle, VideoFit::Contain).is_some());
     }
 }

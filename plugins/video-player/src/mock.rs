@@ -23,13 +23,15 @@
 //! the platform callback, emitting on the calling thread exactly as a
 //! platform callback does on the main one.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use frust_plugin::texture::{TextureFrame, TextureSink};
+
 use crate::backend::{BackendSession, PlayerBackend};
 use crate::snapshot::Shared;
-use crate::{PlaybackState, PlayerEvent, PlayerOptions, VideoError, VideoSource};
+use crate::{PlaybackState, PlayerEvent, PlayerOptions, VideoError, VideoOutput, VideoSource};
 
 /// One command the public API dispatched into the backend.
 #[derive(Clone, Debug, PartialEq)]
@@ -58,6 +60,11 @@ struct MockState {
     /// [`MockHost::refuse_next`] — how a test drives the
     /// platform-refused-the-command path.
     refusal: Mutex<Option<VideoError>>,
+    /// The frame mailbox, created at open for a [`VideoOutput::Texture`]
+    /// session — the producer half a real backend's decoder pushes into.
+    sink: Option<TextureSink>,
+    /// How many frames [`MockHost::emit_frame`] pushed have been released.
+    released: Arc<AtomicUsize>,
 }
 
 /// Opens mock sessions.
@@ -89,6 +96,8 @@ impl PlayerBackend for MockBackend {
                 options: options.clone(),
                 commands: Mutex::new(Vec::new()),
                 refusal: Mutex::new(None),
+                sink: (options.output == VideoOutput::Texture).then(TextureSink::new),
+                released: Arc::new(AtomicUsize::new(0)),
             }),
         })
     }
@@ -159,6 +168,12 @@ impl BackendSession for MockSession {
     /// no idempotence of its own.
     fn close(&self) {
         lock(&self.state.commands).push(Command::Close);
+        // A real backend stops its producer here; the frame still pending in
+        // the mailbox will never be shown, so it is handed back now rather
+        // than when the last sink clone happens to drop.
+        if let Some(frame) = self.state.sink.as_ref().and_then(TextureSink::take_latest) {
+            frame.release();
+        }
         self.state
             .shared
             .publish(PlayerEvent::StateChanged(PlaybackState::Idle));
@@ -166,6 +181,10 @@ impl BackendSession for MockSession {
 
     fn id(&self) -> u32 {
         self.state.id
+    }
+
+    fn texture_sink(&self) -> Option<&TextureSink> {
+        self.state.sink.as_ref()
     }
 }
 
@@ -207,6 +226,29 @@ impl MockHost {
             .publish(PlayerEvent::Error(VideoError::from_host_code(
                 code, message,
             )));
+    }
+
+    /// Push one synthetic RGBA frame into the session's mailbox, as a real
+    /// backend's frame producer would; its release bumps
+    /// [`Self::frames_released`]. A no-op for a session with no mailbox (one
+    /// opened with [`VideoOutput::NativeView`]).
+    pub(crate) fn emit_frame(&self, width: u32, height: u32, rgba: &[u8]) {
+        let Some(sink) = self.state.sink.as_ref() else {
+            return;
+        };
+        let released = Arc::clone(&self.state.released);
+        sink.push(
+            TextureFrame::rgba8(width, height, Arc::from(rgba)).on_release(move || {
+                released.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+    }
+
+    /// How many frames pushed by [`Self::emit_frame`] have been released so
+    /// far — displaced by a newer one, consumed and released, or released by
+    /// the close.
+    pub(crate) fn frames_released(&self) -> usize {
+        self.state.released.load(Ordering::SeqCst)
     }
 
     /// Arm the next control call to be refused with `error`.

@@ -107,9 +107,35 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   playground gains a Slivers page.
 - `ScrollSurfaceCore` and the `ScrollSurface` trait: one shared scroll core under `ScrollView`,
   `ListView` and the viewport.
+- Native-view z-order and overlays: `Command::is_drawing`, `PlatformViewFrame::command_index`,
+  `ViewCommand::Update.z_index` and the `ViewCommand::{Overlay, DisposeOverlay}` commands, emitted
+  by `PlatformViewState::ingest_scene(frames, shields, commands, viewport)` (plain `ingest` never
+  emits overlays). Z-shields are now input-only.
+- Segmented rendering: `frust_render::overlay::OverlaySurface` and `SurfaceRenderer::encode_segmented`,
+  `submit_segmented` and `submit_segmented_deferred` draw one compiled frame as a main segment plus
+  one segment per cut with a single submit.
+- Android overlay host behind `FRUST_OVERLAYS` (default off; frust paint above a native view on an
+  opaque surface; `media` selects the `setZOrderMediaOverlay` arm). Two additive JSON ops,
+  `overlay` and `disposeOverlay`, and a debuggable-build intent extra `dev.frust.translucentSurface`
+  to force the surface mode for one launch. The native-widgets demo gains a `sandwich` page.
+  Interleaved content covers later slots (`android-overlays-cover-later-slots`).
+- Texture bus: `frust::texture` (`register_texture_source`, `NativeImporter`), the leaf
+  `frust_plugin::texture::TextureSink` mailbox and the `texture_view` widget put plugin-produced
+  frames in the scene as ordinary paint.
+- Android hardware-buffer import behind `FRUST_ANDROID_HWBUFFER_IMPORT` (or
+  `debug.frust.hwbuffer_import`; default off): `frust_gpu::import::android::import_hardware_buffer`
+  and `frust_render::native_import::install`.
+- `frust-video-player`: `VideoOutput::Texture` with `video_texture_view`, `texture_sink` and
+  `texture_output`. `frust-camera`: `CameraSession::preview_texture` and `preview_texture_output`,
+  and a default-on `frust-api` feature. Both keep the native view as the default; the playground
+  gains Texture toggles. Apple producers and the Apple overlay hosts are pending, and the Android
+  device legs are pending.
 
 ### Changed
 
+- `NativeHandle` (in `frust-render` and `frust-plugin`) keeps its fields private: build one
+  through the unsafe `NativeHandle::new(kind, ptr)` and read it with `kind()`/`ptr()`. Texture
+  frames run their release callback on drop, so it runs exactly once on every path.
 - BREAKING: `frust_scene::Command::PushSnapshot` / `PopSnapshot` are replaced by `PushRetained
   { key, rect, alpha, scale, transform }` / `PopRetained`, plus the new `Command::DrawRetained`;
   `PaintScene::push_snapshot` / `pop_snapshot` are removed in favour of `push_retained` /
@@ -146,9 +172,14 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   exactly `Vec::new()`, `Vec::with_capacity(..)` or `vec![]` and later pushed or inserted a direct
   `any(..)` in the same fn, so idiomatic accumulators no longer need a `: Vec<AnyView<_>>`
   annotation for rule U.
+- The Android overlay spike's JNI symbols and single-overlay path are removed; the overlay host
+  uses `nativeOverlayMode`, `nativeOverlaySurfaceChanged` and `nativeOverlaySurfaceDestroyed`.
 
 ### Fixed
 
+- Overlay cuts: content the overlay engine cannot draw (retained pages, external-texture frames,
+  backdrop blurs) stays on the main surface under the native view instead of vanishing; plain
+  hosting emits no rank-only updates; a cut no longer swallows a slot's hole-punch.
 - `frust-shell-ios`: the AccessKit tree is published in the view's physical pixels through a root
   transform equal to the display scale, so VoiceOver frames and hit-tests land on the drawn
   elements on 2x/3x devices (they were half-scale before).
@@ -158,6 +189,8 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   every frame the tween moves and the frame it lands on, with no input event needed.
 - A `scroll_to_item` request that moves nothing (unknown key, or `Nearest` on a fully visible row)
   now supersedes an in-flight controller tween instead of leaving it running.
+- `VideoFit::Cover` no longer spills outside its box on Android in texture mode, where the frames
+  are scene content and crop inside the box (Android half; the Apple producers are pending).
 
 ## 0.6.1 — 2026-10-12
 

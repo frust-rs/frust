@@ -33,6 +33,7 @@
 //! [`SurfaceRenderer::submit`].
 
 use core::ffi::c_void;
+use core::ops::Range;
 
 use anyhow::{Result, anyhow};
 
@@ -42,6 +43,9 @@ use std::time::Duration;
 use kurbo::Affine;
 
 use crate::context::{EngineSurface, RenderPath};
+use crate::overlay::{
+    CutServiceability, OverlayCut, OverlayCutOutcome, SegmentedOutcome, SegmentedPresents,
+};
 use frust_gpu::lifecycle::{
     AcquireAction, AcquireOutcome, AcquireStatus, EncodeOutcome, FrameOutcome, SurfaceEvent,
     SurfacePhase, decide_acquire, next_invalid_streak, next_phase,
@@ -210,6 +214,13 @@ impl std::fmt::Debug for DeferredPresent {
 }
 
 impl DeferredPresent {
+    /// Wraps an acquired, submitted, un-presented frame — the overlay spike's
+    /// way of handing its frame out beside the main one
+    /// ([`crate::overlay::OverlaySurface::take_deferred_present`]).
+    pub(crate) fn new(texture: wgpu::SurfaceTexture, queue: wgpu::Queue) -> Self {
+        Self { texture, queue }
+    }
+
     /// Present the deferred frame **on the calling thread**.
     ///
     /// Consumes the handle, so a frame can never be presented twice. With
@@ -306,6 +317,25 @@ pub struct SurfaceRenderer {
     /// comparison. Outlives surface episodes: a recreate at the same scale is
     /// not a scale change (the fresh engine's store is empty anyway).
     device_scale: Option<u64>,
+    /// Whether [`Self::encode`] hands the overlay spike's range to an overlay
+    /// and keeps only the commands before the cut for this surface (see
+    /// [`Self::set_overlay_split`]). Never set unless the spike is on, so off
+    /// it the frame is the scene, copied whole, exactly as before.
+    overlay_split: bool,
+    /// The whole scene a segmented encode ([`Self::encode_segmented`] with at
+    /// least one cut) was handed, kept for [`Self::submit_segmented`] to cut
+    /// each overlay's range from — `engine_scene` holds only the main
+    /// segment then. Reused across frames like `engine_scene`.
+    segment_scene: frust_scene::Scene,
+    /// Whether `segment_scene` holds the in-flight frame's scene: set by a
+    /// segmented encode, cleared by every other encode and by the submit that
+    /// consumes it.
+    segment_pending: bool,
+    /// The segmented encode's classification of each cut, in cut order
+    /// ([`crate::overlay::cut_is_servable`]): which ranges the main segment
+    /// excluded and the overlays draw, and which it kept. Valid exactly while
+    /// `segment_pending` is; reused across frames.
+    segment_service: Vec<CutServiceability>,
 }
 
 /// One retained page the renderer holds resident: the key it was recorded
@@ -483,6 +513,10 @@ impl SurfaceRenderer {
             committed_serial: 0,
             recording_committed: false,
             device_scale: None,
+            overlay_split: false,
+            segment_scene: frust_scene::Scene::default(),
+            segment_pending: false,
+            segment_service: Vec::new(),
         }
     }
 
@@ -505,6 +539,7 @@ impl SurfaceRenderer {
     fn clear_pending_frame(&mut self) {
         self.pending_base_color = None;
         self.pending_serial = None;
+        self.segment_pending = false;
     }
 
     /// Adopt `state` and reset everything else scoped to ONE surface: the
@@ -759,6 +794,42 @@ impl SurfaceRenderer {
             composite: span(frust_engine::EngineSpan::Composite),
             blit: span(frust_engine::EngineSpan::Blit),
         })
+    }
+
+    /// Arms (or disarms) the overlay spike's split on this surface: while
+    /// armed, [`Self::encode`] keeps only the commands before the scene's
+    /// [`spike_cut`](crate::overlay::spike_cut) for this surface's frame,
+    /// leaving the commands from the cut on to the host's
+    /// [`OverlaySurface`](crate::overlay::OverlaySurface), which draws them
+    /// from the same scene. A scene with no cut is drawn whole.
+    ///
+    /// A host arms it exactly while it has a live overlay to hand the range
+    /// to — armed with none, those commands would be drawn nowhere. Refused
+    /// (a no-op answering `false`) unless the spike is switched on
+    /// ([`crate::overlay::OVERLAY_SPIKE_ENV_VAR`]), so no production path can
+    /// arm it; answers whether the split is now armed.
+    ///
+    /// The surface keeps its single-target shape either way: the cut changes
+    /// which commands this surface's one frame draws, never where it draws.
+    /// The bracket rule a cut obeys is
+    /// [`frust_engine::renderer::project_command_range`]'s.
+    pub fn set_overlay_split(&mut self, armed: bool) -> bool {
+        self.overlay_split = armed && crate::overlay::overlay_spike_enabled();
+        self.overlay_split
+    }
+
+    /// The live surface's persisted driver cache, for an overlay built beside
+    /// it to compile its pipelines through (see
+    /// [`OverlaySurface::new`](crate::overlay::OverlaySurface::new)); `None`
+    /// without a live surface or on an adapter without `PIPELINE_CACHE`.
+    pub(crate) fn shared_pipeline_cache(&self) -> Option<wgpu::PipelineCache> {
+        match &self.state {
+            SurfaceState::Ready(ready) => ready
+                .pipeline_cache
+                .as_ref()
+                .map(|(cache, _)| cache.clone()),
+            SurfaceState::NoSurface | SurfaceState::Lost => None,
+        }
     }
 
     /// The current lifecycle phase.
@@ -1222,12 +1293,124 @@ impl SurfaceRenderer {
         // compiles it itself in `submit`. `clone_from` reuses the buffer's
         // capacity, so a steady-state frame allocates nothing — see the
         // field's measurement note.
-        engine_scene.clone_from(scene);
+        //
+        // The overlay spike's split is the one exception, and only while a
+        // host armed it (`set_overlay_split`, refused with the spike off):
+        // the copy is the commands before the cut alone, cut by the same
+        // projection the overlay draws the rest through.
+        match self
+            .overlay_split
+            .then(|| crate::overlay::spike_cut(scene))
+            .flatten()
+        {
+            Some(cut) => {
+                let TierBackend::Engine { engine, .. } = &ready.backend;
+                frust_engine::renderer::project_command_range(
+                    scene,
+                    0..cut,
+                    frust_engine::renderer::RangeOptions {
+                        keep_draw_retained: engine.retained_layers(),
+                    },
+                    engine_scene,
+                );
+            }
+            None => engine_scene.clone_from(scene),
+        }
         // Carried to `submit`, where the render that consumes it runs.
         *pending_base_color = Some(base_color);
         // The scene's serial, committed by the `submit` that renders it.
         self.pending_serial = Some((self.scene_serial, scene_records_retained(scene)));
+        // A whole-frame encode: no overlay draws any of it.
+        self.segment_pending = false;
 
+        Ok(EncodeOutcome::Encoded)
+    }
+
+    /// [`Self::encode`] for a **segmented** frame (render-model Phase 4,
+    /// decision D10): the overlays above hosted native views draw the command
+    /// ranges `cuts` of `scene` — the differ's
+    /// `ViewCommand::Overlay.command_range`s, ascending and disjoint — and
+    /// this surface draws everything else.
+    ///
+    /// **The main segment** is the complement of the cuts
+    /// ([`crate::overlay::main_segment_ranges`]): `0..first.start`, every gap
+    /// between two cuts, and whatever follows the last one, each gap projected
+    /// on its own through [`frust_engine::renderer::project_command_ranges`]
+    /// so its clips and layers are closed and reopened around the cuts (the
+    /// bracket rule of [`frust_engine::renderer::project_command_range`]).
+    /// The differ's cuts tile the tail from the first cut whenever every
+    /// visible slot after it has content above it, so the main segment is
+    /// usually `0..first.start`; a slot with nothing above it leaves a gap
+    /// (its hole-punch, say) that the main surface keeps drawing.
+    ///
+    /// **Only servable cuts are taken** ([`crate::overlay::cut_is_servable`]):
+    /// a cut whose range holds content an overlay cannot draw — a retained
+    /// page's composite or recording, a retained bracket open across the cut,
+    /// an external texture, a backdrop blur — stays in the main segment,
+    /// drawn exactly as an uncut frame draws it, and its overlay records an
+    /// empty range. [`Self::submit_segmented`] reports the classification per
+    /// cut ([`OverlayCutOutcome::serviceability`]).
+    ///
+    /// The whole scene is copied once more, for [`Self::submit_segmented`] to
+    /// cut each overlay's range from — `ctx` stays unused, as in `encode`.
+    /// With no cut this is exactly [`Self::encode`] (the whole frame, copied
+    /// whole), and so is a frame the overlay spike's split
+    /// ([`Self::set_overlay_split`]) is armed on: explicit cuts replace the
+    /// spike's fixed one here, never combine with it.
+    ///
+    /// Follow with [`Self::acquire`] and [`Self::submit_segmented`] (or
+    /// [`Self::submit_segmented_deferred`]) with an [`OverlayCut`] per cut, in
+    /// the same order. A plain [`Self::submit`] after a segmented encode draws
+    /// the main segment alone.
+    pub fn encode_segmented(
+        &mut self,
+        ctx: &RenderContext,
+        scene: &frust_scene::Scene,
+        base_color: peniko::Color,
+        cuts: &[Range<usize>],
+    ) -> Result<EncodeOutcome> {
+        if cuts.is_empty() {
+            return self.encode(ctx, scene, base_color);
+        }
+        if !self.phase().can_render() {
+            return Ok(EncodeOutcome::Skipped);
+        }
+        let Self {
+            state,
+            pending_base_color,
+            engine_scene,
+            segment_scene,
+            segment_service,
+            ..
+        } = self;
+        let SurfaceState::Ready(ready) = state else {
+            return Ok(EncodeOutcome::Skipped);
+        };
+        let TierBackend::Engine { engine, .. } = &ready.backend;
+        segment_service.clear();
+        segment_service.extend(
+            cuts.iter()
+                .map(|cut| crate::overlay::cut_is_servable(scene.commands(), cut.clone())),
+        );
+        // A kept cut's served range is empty, so it removes nothing from the
+        // main segment.
+        let served: Vec<Range<usize>> = cuts
+            .iter()
+            .zip(segment_service.iter())
+            .map(|(cut, service)| service.served_range(cut))
+            .collect();
+        crate::overlay::project_main_segment(
+            scene,
+            &served,
+            frust_engine::renderer::RangeOptions {
+                keep_draw_retained: engine.retained_layers(),
+            },
+            engine_scene,
+        );
+        segment_scene.clone_from(scene);
+        *pending_base_color = Some(base_color);
+        self.pending_serial = Some((self.scene_serial, scene_records_retained(scene)));
+        self.segment_pending = true;
         Ok(EncodeOutcome::Encoded)
     }
 
@@ -1392,7 +1575,11 @@ impl SurfaceRenderer {
     pub fn submit(&mut self, ctx: &RenderContext) -> Result<FrameOutcome> {
         #[cfg(feature = "perf-trace")]
         let measuring = !self.first_submit_seen;
-        let (outcome, presentable) = self.submit_impl(ctx)?;
+        let SubmitParts {
+            outcome,
+            texture: presentable,
+            ..
+        } = self.submit_impl(ctx, &mut [])?;
         if let Some(surface_texture) = presentable {
             #[cfg(feature = "perf-trace")]
             let present_start =
@@ -1422,7 +1609,11 @@ impl SurfaceRenderer {
         &mut self,
         ctx: &RenderContext,
     ) -> Result<(FrameOutcome, Option<DeferredPresent>)> {
-        let (outcome, presentable) = self.submit_impl(ctx)?;
+        let SubmitParts {
+            outcome,
+            texture: presentable,
+            ..
+        } = self.submit_impl(ctx, &mut [])?;
         Ok((
             outcome,
             // The queue is read INSIDE the map, never before it: `ctx`'s device
@@ -1435,16 +1626,121 @@ impl SurfaceRenderer {
         ))
     }
 
-    /// Shared body of [`Self::submit`]/[`Self::submit_deferred`]: everything up
-    /// to (but not including) `Queue::present`, handing the acquired frame
-    /// back so each wrapper decides where the present happens.
+    /// [`Self::submit`] for a frame [`Self::encode_segmented`] cut: the main
+    /// segment AND every overlay's range recorded into **one** encoder — the
+    /// external passes, the main segment's passes, then each [`OverlayCut`]'s
+    /// [`OverlaySurface::record`](crate::overlay::OverlaySurface::record) in
+    /// the order given — and **one** `Queue::submit`, so the GPU runs every
+    /// target's work in order and no overlay waits on a submit of its own.
+    /// Then the presents, on the calling thread: the main surface first, then
+    /// each overlay that rendered, in cut order (bottom to top).
+    ///
+    /// The engine records and this crate submits once per frame, per the
+    /// frame-recording invariant (its atlas-growth and glyph-replay
+    /// exceptions aside) — the overlays' engines included. Each target
+    /// still compiles its own segment: a compiled frame is specific to its
+    /// target's size and root, so a segmented frame costs one compile per
+    /// target (the main segment's plus one per overlay).
+    ///
+    /// The overlays share nothing with the main surface but its device and
+    /// queue: their engines keep retention off, which is why a cut holding
+    /// retained content (or an external texture, or a backdrop blur) was kept
+    /// on the main surface by the encode — its overlay records an empty range
+    /// and draws nothing, see [`crate::overlay::cut_is_servable`] — and each
+    /// schedules its own budget.
+    ///
+    /// When the main frame does not render (nothing acquired, a surface gone,
+    /// or an engine refusal) no overlay records either: every
+    /// [`OverlayCutOutcome`] is [`OverlayFrame::Skipped`](crate::overlay::OverlayFrame::Skipped),
+    /// nothing is submitted, and every overlay keeps its previous frame on
+    /// screen. An overlay the engine refuses on its own is reported in its
+    /// outcome and presents nothing, while the main frame and the other
+    /// overlays still land. After a plain [`Self::encode`] the overlays are
+    /// skipped the same way — there is no cut scene to draw them from.
+    pub fn submit_segmented(
+        &mut self,
+        ctx: &RenderContext,
+        overlays: &mut [OverlayCut<'_>],
+    ) -> Result<SegmentedOutcome> {
+        let parts = self.submit_impl(ctx, overlays)?;
+        if let Some(texture) = parts.texture {
+            ctx.device_handle().queue.present(texture);
+        }
+        for (cut, outcome) in overlays.iter_mut().zip(&parts.overlays) {
+            if matches!(
+                outcome.result,
+                Ok(crate::overlay::OverlayFrame::Rendered(_))
+            ) {
+                cut.overlay.present();
+            }
+        }
+        Ok(SegmentedOutcome {
+            frame: parts.outcome,
+            overlays: parts.overlays,
+            encoders: parts.encoders,
+            submits: parts.submits,
+        })
+    }
+
+    /// [`Self::submit_segmented`] with every present handed back instead of
+    /// issued: identical GPU work, and the main frame plus each rendered
+    /// overlay's frame returned as a [`SegmentedPresents`] for a host that
+    /// lands them together itself — on Apple, inside the one `CATransaction`
+    /// that also carries the native views' geometry
+    /// ([`SegmentedPresents::present_all`] on the transaction's thread; see
+    /// [`DeferredPresent`] for why the thread matters).
+    pub fn submit_segmented_deferred(
+        &mut self,
+        ctx: &RenderContext,
+        overlays: &mut [OverlayCut<'_>],
+    ) -> Result<(SegmentedOutcome, SegmentedPresents)> {
+        let parts = self.submit_impl(ctx, overlays)?;
+        let mut presents = SegmentedPresents {
+            main: parts.texture.map(|texture| DeferredPresent {
+                texture,
+                queue: ctx.device_handle().queue.clone(),
+            }),
+            overlays: Vec::new(),
+        };
+        for (cut, outcome) in overlays.iter_mut().zip(&parts.overlays) {
+            if matches!(
+                outcome.result,
+                Ok(crate::overlay::OverlayFrame::Rendered(_))
+            ) && let Some(present) = cut.overlay.take_deferred_present()
+            {
+                presents.overlays.push((cut.overlay_id, present));
+            }
+        }
+        Ok((
+            SegmentedOutcome {
+                frame: parts.outcome,
+                overlays: parts.overlays,
+                encoders: parts.encoders,
+                submits: parts.submits,
+            },
+            presents,
+        ))
+    }
+
+    /// Shared body of [`Self::submit`]/[`Self::submit_deferred`] and the
+    /// segmented pair: everything up to (but not including) `Queue::present`,
+    /// handing the acquired frame back so each wrapper decides where the
+    /// present happens. `cuts` is empty on the single-target path, which then
+    /// records and submits exactly what it always did.
     fn submit_impl(
         &mut self,
         ctx: &RenderContext,
-    ) -> Result<(FrameOutcome, Option<wgpu::SurfaceTexture>)> {
+        cuts: &mut [OverlayCut<'_>],
+    ) -> Result<SubmitParts> {
+        // Whether this frame's encode left a cut scene for the overlays;
+        // consumed by this submit whatever it does.
+        let segmented = std::mem::take(&mut self.segment_pending);
         // Nothing acquired this frame (no prior `Acquired`): nothing to present.
         let Some(surface_texture) = self.pending_present.take() else {
-            return Ok((FrameOutcome::Skipped, None));
+            return Ok(SubmitParts::skipped(
+                cuts,
+                frame_service(segmented, &self.segment_service),
+            ));
         };
         // The stashed texture is owned, but the encoded frame (the engine's
         // copied scene) lives on `self` — if the surface vanished between
@@ -1460,11 +1756,18 @@ impl SurfaceRenderer {
             state,
             pending_base_color,
             engine_scene,
+            segment_scene,
+            segment_service,
             ..
         } = self;
+        let service = frame_service(segmented, segment_service);
         let SurfaceState::Ready(ready) = state else {
-            return Ok((FrameOutcome::Skipped, None));
+            return Ok(SubmitParts::skipped(cuts, service));
         };
+        // The overlays' outcomes and the frame's encoder/submit counts.
+        let overlays;
+        let mut encoders = 0_u32;
+        let mut submits = 0_u32;
         let ReadySurface {
             surface, backend, ..
         } = &mut **ready;
@@ -1524,6 +1827,7 @@ impl SurfaceRenderer {
                         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                             label: Some("frust-render engine"),
                         });
+                encoders += 1;
                 // Whatever the process registered ahead of the scene:
                 // caller-supplied passes recorded into this SAME encoder and
                 // binding their own targets into the engine's external-texture
@@ -1608,6 +1912,12 @@ impl SurfaceRenderer {
                                     .writes(frust_engine::EngineSpan::Blit),
                             );
                         }
+                        // A segmented frame's overlays, into this SAME encoder
+                        // after every pass of the main segment: one submit
+                        // carries every target's work, in order. Empty on the
+                        // single-target path.
+                        overlays =
+                            record_overlays(&mut encoder, segmented, segment_scene, cuts, service);
                         // `resolve` records the query resolves of EARLIER,
                         // completed frames' slots into this encoder; this
                         // frame's own queries are resolved by a later frame,
@@ -1617,9 +1927,11 @@ impl SurfaceRenderer {
                         timestamps.resolve(&mut encoder);
                         probe.queue_begin();
                         device_handle.queue.submit([encoder.finish()]);
+                        submits += 1;
                         probe.queue_end();
                         timestamps.end_frame();
                         engine.end_frame(&device_handle.queue);
+                        crate::overlay::end_cuts(cuts, true);
                     }
                     Err(error) => {
                         // A refused frame left the encoder exactly as it was
@@ -1635,7 +1947,10 @@ impl SurfaceRenderer {
                         *refused_frames = refused_frames.saturating_add(1);
                         log_engine_refusal(*refused_frames, &error);
                         engine.end_frame(&device_handle.queue);
-                        return Ok((FrameOutcome::Skipped, None));
+                        return Ok(SubmitParts {
+                            encoders,
+                            ..SubmitParts::skipped(cuts, service)
+                        });
                     }
                 }
             }
@@ -1674,6 +1989,7 @@ impl SurfaceRenderer {
                         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                             label: Some("frust-render engine unpremultiply"),
                         });
+                encoders += 1;
                 // Whatever the process registered ahead of the scene:
                 // caller-supplied passes recorded into this SAME encoder and
                 // binding their own targets into the engine's external-texture
@@ -1745,12 +2061,18 @@ impl SurfaceRenderer {
                             frust_engine::FrameTimestamps::new(timestamps)
                                 .writes(frust_engine::EngineSpan::Blit),
                         );
+                        // The overlays after the conversion, as on the direct
+                        // arm: one encoder, one submit.
+                        overlays =
+                            record_overlays(&mut encoder, segmented, segment_scene, cuts, service);
                         timestamps.resolve(&mut encoder);
                         probe.queue_begin();
                         device_handle.queue.submit([encoder.finish()]);
+                        submits += 1;
                         probe.queue_end();
                         timestamps.end_frame();
                         engine.end_frame(&device_handle.queue);
+                        crate::overlay::end_cuts(cuts, true);
                     }
                     Err(error) => {
                         // Identical to the direct arm's refusal, and for the
@@ -1764,7 +2086,10 @@ impl SurfaceRenderer {
                         *refused_frames = refused_frames.saturating_add(1);
                         log_engine_refusal(*refused_frames, &error);
                         engine.end_frame(&device_handle.queue);
-                        return Ok((FrameOutcome::Skipped, None));
+                        return Ok(SubmitParts {
+                            encoders,
+                            ..SubmitParts::skipped(cuts, service)
+                        });
                     }
                 }
             }
@@ -1780,8 +2105,64 @@ impl SurfaceRenderer {
             self.committed_serial = serial;
             self.recording_committed |= records;
         }
-        Ok((FrameOutcome::Rendered, Some(surface_texture)))
+        Ok(SubmitParts {
+            outcome: FrameOutcome::Rendered,
+            texture: Some(surface_texture),
+            overlays,
+            encoders,
+            submits,
+        })
     }
+}
+
+/// What [`SurfaceRenderer::submit_impl`] hands its wrappers: the main frame's
+/// outcome and un-presented texture, the overlays' outcomes, and the frame's
+/// encoder and submit counts ([`SegmentedOutcome`]'s).
+struct SubmitParts {
+    outcome: FrameOutcome,
+    texture: Option<wgpu::SurfaceTexture>,
+    overlays: Vec<OverlayCutOutcome>,
+    encoders: u32,
+    submits: u32,
+}
+
+impl SubmitParts {
+    /// A frame that did not render: nothing to present, every overlay
+    /// skipped (carrying the frame's classification of its cut, `service`),
+    /// nothing submitted.
+    fn skipped(cuts: &[OverlayCut<'_>], service: &[CutServiceability]) -> Self {
+        Self {
+            outcome: FrameOutcome::Skipped,
+            texture: None,
+            overlays: crate::overlay::skipped_cuts(cuts, service),
+            encoders: 0,
+            submits: 0,
+        }
+    }
+}
+
+/// The overlay half of a segmented frame's encoder: every cut's served range
+/// of the frame's whole scene (`service`, the encode's classification), when
+/// the frame's encode was segmented; every cut skipped otherwise (a plain
+/// `encode` left no whole scene to cut).
+fn record_overlays(
+    encoder: &mut wgpu::CommandEncoder,
+    segmented: bool,
+    scene: &frust_scene::Scene,
+    cuts: &mut [OverlayCut<'_>],
+    service: &[CutServiceability],
+) -> Vec<OverlayCutOutcome> {
+    if segmented {
+        crate::overlay::record_cuts(encoder, scene, cuts, service)
+    } else {
+        crate::overlay::skipped_cuts(cuts, service)
+    }
+}
+
+/// The in-flight frame's cut classification: the segmented encode's, or none
+/// after a plain encode.
+fn frame_service(segmented: bool, service: &[CutServiceability]) -> &[CutServiceability] {
+    if segmented { service } else { &[] }
 }
 
 /// The target format a surface's [`frust_engine::EngineRenderer`] must be

@@ -9,11 +9,24 @@
 //! Like [`frust-shared-preferences`](../frust_shared_preferences/index.html)
 //! and
 //! [`frust-secure-storage`](../frust_secure_storage/index.html), this is a
-//! **platform plugin** (see `docs/ARCHITECTURE.md`'s Module Structure): it
-//! depends on `frust-plugin` plus FFI crates only, and carries **no other
-//! `frust-*` framework dependency**. An app adds this crate to its own
-//! `Cargo.toml` alongside `frust`; the facade does not depend on or
-//! re-export it.
+//! **platform plugin** (see `docs/ARCHITECTURE.md`'s Module Structure): its
+//! default build depends on `frust-plugin` plus FFI crates only, and carries
+//! **no other `frust-*` framework dependency** beyond the app-facing half
+//! behind the default-on `frust-api` feature (`texture`'s preview-texture
+//! bridge, the only place this crate names `frust`), so
+//! `--no-default-features` still resolves to that charter line. An app adds
+//! this crate to its own `Cargo.toml` alongside `frust`; the facade does not
+//! depend on or re-export it.
+//!
+//! # Preview as a texture
+//!
+//! Besides the platform-view slot below, [`CameraSession::preview_texture`]
+//! starts a second output: preview frames pushed as RGBA into a
+//! [`TextureSink`] the frust renderer draws in-scene (the `frust-api` half's
+//! `CameraSession::preview_texture_output` bridges it to a scene texture),
+//! so clipping, transforms, scrolling and overlays apply to the preview like
+//! any other paint. The platform-view preview stays the default; a backend
+//! without a texture producer yet answers `None`.
 //!
 //! # Preview is a platform view, not a widget
 //!
@@ -145,10 +158,15 @@ mod unsupported;
 // — no `cfg` of its own (see the module doc), unlike the backends above.
 pub mod barcode;
 
+// The preview-texture bridge to the renderer — the only module naming `frust`.
+#[cfg(feature = "frust-api")]
+mod texture;
+
 pub use barcode::{BarcodeStreamOptions, DetectionPolicy};
+pub use frust_plugin::texture::TextureSink;
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use barcode::Barcode;
 
@@ -452,6 +470,16 @@ pub(crate) trait SessionBackend: Send + Sync {
     fn torch_available(&self) -> bool;
     /// See [`CameraSession::close`].
     fn close(&self);
+    /// See [`CameraSession::preview_texture`]: start pushing preview frames
+    /// into `sink` until the session closes. Accepted-not-confirmed like a
+    /// stream start. The default refuses — what a backend without a texture
+    /// producer (yet) answers.
+    fn start_preview_texture(&self, sink: TextureSink) -> Result<(), CameraError> {
+        drop(sink);
+        Err(CameraError::Platform(
+            "preview-as-texture is not available on this platform".to_string(),
+        ))
+    }
 }
 
 /// The camera entry point — no instance, just [`Self::request_permission`]
@@ -521,6 +549,9 @@ impl Camera {
             backend,
             stream_claim: Arc::default(),
             stream_error: Arc::default(),
+            preview_texture: Mutex::new(None),
+            #[cfg(feature = "frust-api")]
+            texture_output: texture::OutputSlot::new(),
         })
     }
 
@@ -548,6 +579,13 @@ pub struct CameraSession {
     /// Where a deferred stream-start failure lands until
     /// [`Self::take_stream_error`] takes it. Shared for the same reason.
     stream_error: Arc<StreamErrorSlot>,
+    /// The preview-texture mailbox once [`Self::preview_texture`] started it.
+    preview_texture: Mutex<Option<TextureSink>>,
+    /// The scene texture `preview_texture_output` (`texture.rs`) registers
+    /// on first use; dropping it unregisters the renderer's poll of the
+    /// mailbox.
+    #[cfg(feature = "frust-api")]
+    texture_output: texture::OutputSlot,
 }
 
 impl CameraSession {
@@ -870,7 +908,92 @@ impl CameraSession {
     pub fn close(&self) {
         self.stream_claim.clear();
         self.backend.close();
+        // The preview texture stopped with the device; a frame still pending
+        // in its mailbox will never be shown, so it is handed back now.
+        let pending = self
+            .preview_texture
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .and_then(TextureSink::take_latest);
+        if let Some(frame) = pending {
+            frame.release();
+        }
     }
+
+    /// The live preview as a frame mailbox: on the first call, starts a
+    /// second preview output pushing upright, tightly packed premultiplied
+    /// RGBA frames into a [`TextureSink`] and returns a handle to it; later
+    /// calls return the same mailbox. `None` when the backend has no texture
+    /// producer on this target (logged), or after a refused start.
+    ///
+    /// The platform-view preview ([`Self::preview_view_type`]) is unaffected
+    /// and stays the default; both can run at once. Frames keep arriving
+    /// until [`Self::close`], which also hands back the frame still pending.
+    /// Non-blocking and callable from any thread, like a stream start.
+    ///
+    /// Android delivers through a CameraX `ImageAnalysis` configured for
+    /// `RGBA_8888` output with CameraX's own output rotation, bound beside
+    /// the preview; each frame is copied into CPU memory (an analysis image
+    /// cannot outlive its callback, so it cannot be lent to the renderer).
+    /// Whether a device can bind it beside a running
+    /// [`Self::start_image_stream`] analysis depends on its supported stream
+    /// combinations; a refused bind is logged and the mailbox stays empty.
+    pub fn preview_texture(&self) -> Option<TextureSink> {
+        let mut slot = self
+            .preview_texture
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(sink) = slot.as_ref() {
+            return Some(sink.clone());
+        }
+        let sink = TextureSink::new();
+        match self.backend.start_preview_texture(sink.clone()) {
+            Ok(()) => {
+                *slot = Some(sink.clone());
+                Some(sink)
+            }
+            Err(err) => {
+                log::warn!("frust-camera: no preview texture: {err}");
+                None
+            }
+        }
+    }
+}
+
+/// Copies an RGBA8 image whose rows are `row_stride` bytes apart into a
+/// tightly packed buffer (`width * 4` bytes per row, top row first) — the
+/// layout a CPU texture frame carries. The last row may stop at its pixels
+/// rather than run out to a full stride, as platform image planes do.
+///
+/// `None` when the stride is shorter than a row or `src` cannot hold
+/// `height` rows.
+// The Android preview-texture copy; host builds reach it from the tests only.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) fn pack_rgba_rows(
+    src: &[u8],
+    width: u32,
+    height: u32,
+    row_stride: usize,
+) -> Option<Arc<[u8]>> {
+    let row = usize::try_from(width).ok()?.checked_mul(4)?;
+    let rows = usize::try_from(height).ok()?;
+    if row == 0 || rows == 0 || row_stride < row {
+        return None;
+    }
+    let needed = row_stride.checked_mul(rows - 1)?.checked_add(row)?;
+    if src.len() < needed {
+        return None;
+    }
+    // One allocation, written in place: `repeat_n` is a trusted-length
+    // iterator, so the `Arc` is allocated at its final size (a `Vec` turned
+    // into an `Arc` afterwards would copy the whole frame a second time).
+    let mut packed: Arc<[u8]> = std::iter::repeat_n(0u8, row.checked_mul(rows)?).collect();
+    let dst = Arc::get_mut(&mut packed)?;
+    for (out, line) in dst.chunks_exact_mut(row).zip(src.chunks(row_stride)) {
+        out.copy_from_slice(&line[..row]);
+    }
+    Some(packed)
 }
 
 // --- Stream occupancy --------------------------------------------------------
@@ -1567,6 +1690,29 @@ mod capture {
 #[cfg(test)]
 mod tests {
     use super::capture::CaptureSlot;
+    use super::pack_rgba_rows;
+
+    #[test]
+    fn packed_rows_pass_through_unchanged() {
+        let src: Vec<u8> = (0..16).collect();
+        assert_eq!(pack_rgba_rows(&src, 2, 2, 8).as_deref(), Some(&src[..]));
+    }
+
+    #[test]
+    fn padded_rows_are_compacted_and_a_short_last_row_is_fine() {
+        let src = [1, 1, 1, 1, 0, 0, 2, 2, 2, 2, 0, 0, 3, 3, 3, 3];
+        assert_eq!(
+            pack_rgba_rows(&src, 1, 3, 6).as_deref(),
+            Some(&[1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3][..])
+        );
+    }
+
+    #[test]
+    fn a_stride_or_buffer_too_small_is_refused() {
+        assert_eq!(pack_rgba_rows(&[0; 16], 2, 2, 4), None, "stride < row");
+        assert_eq!(pack_rgba_rows(&[0; 15], 2, 2, 8), None, "buffer short");
+        assert_eq!(pack_rgba_rows(&[0; 16], 0, 2, 8), None, "empty image");
+    }
 
     #[test]
     fn a_completion_resolves_its_own_request() {

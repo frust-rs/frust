@@ -414,6 +414,53 @@ pub enum Command {
     },
 }
 
+impl Command {
+    /// Whether this command puts pixels on the target (a *drawing* command)
+    /// rather than only opening or closing a group around other commands (a
+    /// *structural* one).
+    ///
+    /// Drawing: [`Command::FillRect`], [`Command::RoundedRect`],
+    /// [`Command::Line`], [`Command::GlyphRun`], [`Command::Image`],
+    /// [`Command::BlurredRoundedRect`], [`Command::ClearRect`],
+    /// [`Command::Path`], [`Command::ShaderQuad`], [`Command::DrawRetained`],
+    /// [`Command::SceneTexture`] and [`Command::BackdropBlur`]. Structural:
+    /// the clip pushes ([`Command::PushClip`], [`Command::PushClipRounded`],
+    /// [`Command::PushClipPath`]) and [`Command::PopClip`], the layer bracket
+    /// ([`Command::PushLayer`]/[`Command::PopLayer`]) and the retained bracket
+    /// ([`Command::PushRetained`]/[`Command::PopRetained`]) — the same split
+    /// the render backend's compile step applies implicitly (pushes open
+    /// groups, pops close them, everything else draws).
+    ///
+    /// The platform-view differ uses it to decide whether a run of commands
+    /// painted above a native slot carries any frust content worth an
+    /// overlay. The match is exhaustive on purpose: a new variant must be
+    /// classified here before it compiles.
+    pub fn is_drawing(&self) -> bool {
+        match self {
+            Command::FillRect { .. }
+            | Command::RoundedRect { .. }
+            | Command::Line { .. }
+            | Command::GlyphRun(_)
+            | Command::Image { .. }
+            | Command::BlurredRoundedRect { .. }
+            | Command::ClearRect { .. }
+            | Command::Path { .. }
+            | Command::ShaderQuad { .. }
+            | Command::DrawRetained { .. }
+            | Command::SceneTexture { .. }
+            | Command::BackdropBlur { .. } => true,
+            Command::PushClip { .. }
+            | Command::PushClipRounded { .. }
+            | Command::PushClipPath { .. }
+            | Command::PopClip
+            | Command::PushLayer { .. }
+            | Command::PopLayer
+            | Command::PushRetained { .. }
+            | Command::PopRetained => false,
+        }
+    }
+}
+
 /// Renderer-agnostic, immediate-mode display list.
 ///
 /// Widgets paint into a `Scene` (via [`crate::SceneBuilder`]) each frame; the
@@ -508,6 +555,130 @@ mod tests {
         scene.retained_depth = 2;
         scene.reset();
         assert_eq!(scene.retained_depth, 0);
+    }
+
+    #[test]
+    fn is_drawing_classifies_every_variant() {
+        use crate::glyph::FontHandle;
+        use peniko::FontData;
+
+        let rect = Rect::new(0.0, 0.0, 4.0, 4.0);
+        let t = Affine::IDENTITY;
+        let brush = Brush::Solid(Color::from_rgba8(1, 2, 3, 255));
+        let mut path = BezPath::new();
+        path.move_to((0.0, 0.0));
+        path.line_to((4.0, 4.0));
+        let image = ImageData {
+            data: peniko::Blob::from(vec![0u8; 4]),
+            format: peniko::ImageFormat::Rgba8,
+            alpha_type: peniko::ImageAlphaType::Alpha,
+            width: 1,
+            height: 1,
+        };
+        let glyphs = GlyphRun {
+            font: FontHandle::new(FontData::new(peniko::Blob::from(Vec::<u8>::new()), 0)),
+            font_size: 12.0,
+            brush: brush.clone(),
+            transform: t,
+            glyphs: Vec::new(),
+        };
+
+        let drawing = [
+            Command::FillRect {
+                rect,
+                brush: brush.clone(),
+                transform: t,
+            },
+            Command::RoundedRect {
+                rect,
+                radii: CornerRadii::uniform(2.0),
+                brush: brush.clone(),
+                transform: t,
+            },
+            Command::Line {
+                p0: Point::ORIGIN,
+                p1: Point::new(4.0, 4.0),
+                width: 1.0,
+                brush: brush.clone(),
+                transform: t,
+            },
+            Command::GlyphRun(glyphs),
+            Command::Image {
+                data: image,
+                dest: rect,
+                transform: t,
+            },
+            Command::BlurredRoundedRect {
+                rect,
+                radii: CornerRadii::uniform(2.0),
+                std_dev: 3.0,
+                color: Color::from_rgba8(0, 0, 0, 255),
+                transform: t,
+            },
+            Command::ClearRect { rect, transform: t },
+            Command::Path {
+                path: path.clone(),
+                style: PathStyle::Fill,
+                brush: brush.clone(),
+                transform: t,
+            },
+            Command::ShaderQuad {
+                program: ShaderProgram::new("// test"),
+                dest: rect,
+                transform: t,
+                time: 0.0,
+            },
+            Command::DrawRetained {
+                key: 1,
+                rect,
+                transform: t,
+                alpha: 1.0,
+                scale: 1.0,
+            },
+            Command::SceneTexture {
+                id: 7,
+                dest: rect,
+                transform: t,
+            },
+            Command::BackdropBlur {
+                rect,
+                radius: 4.0,
+                transform: t,
+            },
+        ];
+        let structural = [
+            Command::PushClip { rect, transform: t },
+            Command::PushClipRounded {
+                rect,
+                radii: CornerRadii::uniform(2.0),
+                transform: t,
+            },
+            Command::PushClipPath { path, transform: t },
+            Command::PopClip,
+            Command::PushLayer {
+                rect,
+                alpha: 0.5,
+                transform: t,
+            },
+            Command::PopLayer,
+            Command::PushRetained {
+                key: 1,
+                rect,
+                alpha: 1.0,
+                scale: 1.0,
+                transform: t,
+            },
+            Command::PopRetained,
+        ];
+
+        // 12 drawing + 8 structural = all 20 variants.
+        assert_eq!(drawing.len() + structural.len(), 20);
+        for command in &drawing {
+            assert!(command.is_drawing(), "{command:?} should be drawing");
+        }
+        for command in &structural {
+            assert!(!command.is_drawing(), "{command:?} should be structural");
+        }
     }
 
     #[test]

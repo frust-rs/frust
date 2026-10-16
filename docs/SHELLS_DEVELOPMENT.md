@@ -38,6 +38,26 @@ physical device has none — tap a registered `CFBundleURLSchemes` link instead.
 `frust.toml`'s `[deeplink]` section is informational only, so use `--overwrite` or edit
 the platform files directly to change the scheme.
 
+## Overlay and surface-mode manual test (Android)
+
+A device gate for the overlay host ([SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md) § Native-view
+hosting) on `examples/native-widgets-demo`'s `sandwich` page. Overlays need the opaque (Mode A)
+surface and `FRUST_OVERLAYS` (default off; knob table in [DEVELOPMENT.md](DEVELOPMENT.md)): build
+with `frust run -d <device> --define FRUST_OVERLAYS=1`, then open the page. A **debuggable** build
+accepts the boolean intent extra `dev.frust.translucentSurface` to force the surface mode for one
+launch; the mode latches process-wide at the first surface, so force-stop between modes:
+
+```bash
+adb shell am force-stop it.f0x.native_widgets_demo
+adb shell am start -a android.intent.action.VIEW -d native-widgets-demo://section/sandwich \
+  --ez dev.frust.translucentSurface false it.f0x.native_widgets_demo
+```
+
+Run it with `false` (Mode A: overlays show the popover and badge over the native views) and, after a
+force-stop, with `true` (Mode B: the overlay ops are ignored and the main surface shows the same
+content). The "Interleaved" checkbox shows the known limit (`android-overlays-cover-later-slots`).
+Device outcome: pending.
+
 ## Migrating an already-scaffolded app to edge-to-edge
 
 **Symptom:** black bands behind the status bar and gesture/nav bar, and `frust-insets` reporting a

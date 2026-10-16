@@ -5,10 +5,8 @@ still capture, and a YUV/BGRA image stream — CameraX on Android
 (`dev.frust.camera.FrustCameraHost`, driven over this plugin's own JNI
 surface) and AVFoundation on iOS (driven straight from Rust via
 `objc2-av-foundation`, no Swift camera glue). It is the first frust plugin
-whose preview renders as a **platform view** rather than anything frust
-paints itself — Flutter's `camera` plugin is the API model, but its
-external-texture preview mechanism has no equivalent on our stack (see
-`docs/ARCHITECTURE.md`'s Module Structure / Platform-view flow).
+whose preview renders as a **platform view** by default — Flutter's `camera`
+plugin is the API model; an opt-in texture preview (§2c) draws it as scene content.
 
 **Platform support:** Android (CameraX) and Apple targets (AVFoundation; the Apple module is compiled for iOS and macOS, and the preview is documented for iOS). On any other target, including Linux, Windows and web, calls fail with `CameraError::PlatformNotInitialized`.
 
@@ -138,6 +136,23 @@ No other iOS wiring is needed: `plugins/camera/src/apple.rs` drives
 AVFoundation directly from Rust (permission, session config, capture,
 stream) — the Swift package contributes only the preview-layer factory,
 no capture/permission code of its own.
+
+### 2c. Texture preview (opt-in)
+
+The native preview stays the default. `CameraSession::preview_texture()` instead starts RGBA preview
+frames flowing into a `TextureSink`, and with the default-on `frust-api` feature
+`CameraSession::preview_texture_output()` returns the registered `TextureRegistration` a
+`frust::texture_view(...)` draws as ordinary scene content (clipping, transforms, scrolling and
+overlays apply). Without `frust-api` the crate depends on `frust-plugin` and FFI only
+(`--no-default-features`).
+
+- **Android:** a second `RGBA_8888` CameraX `ImageAnalysis` bound beside the preview, copied to CPU
+  memory per frame (no zero-copy path: an analysis image cannot outlive its callback). A device
+  that cannot bind it beside a running image stream logs the refusal and delivers no frames.
+  Device outcome: pending.
+- **iOS and macOS:** pending the Apple producers (`preview_texture()` answers `None`).
+  **Windows, Linux, web:** no camera backend.
+- **Gestures:** the platform-view gesture lead does not apply to a texture preview.
 
 ---
 

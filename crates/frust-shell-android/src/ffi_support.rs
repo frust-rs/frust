@@ -1,9 +1,21 @@
-//! Android-specific FFI helper: the opaque-handle liveness check.
+//! Android-specific FFI helpers, pure and host-testable.
 //!
 //! The platform-agnostic plumbing (`guard`, `sanitize_scale`, `logical_size`,
 //! the `AppTree` erasure) lives in `frust-shell-common` and is imported at
-//! its call sites. What remains here is JNI-handle specific: the sentinel check
-//! for the `jlong` the JVM passes back into every native call.
+//! its call sites. What remains here is the JNI-boundary data handling:
+//!
+//! - handle liveness: the sentinel check for the `jlong` the JVM passes back
+//!   into every native call;
+//! - touch: action-code mapping and the pointer-id to slot map;
+//! - IME: edit-command codes, index normalisation and the state JSON;
+//! - the platform-view wire: the command JSON the embedding consumes and its
+//!   generation acknowledgement check;
+//! - pipeline-cache IO: the on-disk path, the diff check and atomic
+//!   read/write;
+//! - pre-init helpers: the GPU pre-init join, the resolved-translucency
+//!   handoff and the base clear colour.
+//!
+//! The overlay switch, table and ledger live in [`crate::overlay_state`].
 //!
 //! This carries no `jni`/`ndk`/GPU dependency so it compiles and is unit-tested
 //! on the host (`cargo test --workspace`), even though the code that calls it
@@ -456,6 +468,18 @@ pub(crate) enum PlatformViewCommandJson {
     UpdateParams { slot_id: u64, params_json: String },
     /// Mirrors `frust_shell_common::ViewCommand::Dispose`.
     Dispose { slot_id: u64 },
+    /// Mirrors `frust_shell_common::ViewCommand::Overlay`: create or re-place
+    /// overlay `overlay_id` directly above slot `above_slot_id`, covering
+    /// `rect`, drawing the frame's commands `range_start..range_end`.
+    Overlay {
+        overlay_id: u64,
+        above_slot_id: u64,
+        rect: (f32, f32, f32, f32),
+        range_start: u64,
+        range_end: u64,
+    },
+    /// Mirrors `frust_shell_common::ViewCommand::DisposeOverlay`.
+    DisposeOverlay { overlay_id: u64 },
 }
 
 /// Whether `nativePlatformViewCommands`'s no-change fast path applies:
@@ -527,6 +551,19 @@ fn platform_view_command_json(cmd: &PlatformViewCommandJson) -> String {
         PlatformViewCommandJson::Dispose { slot_id } => {
             format!("{{\"op\":\"dispose\",\"slot\":{slot_id}}}")
         }
+        PlatformViewCommandJson::Overlay {
+            overlay_id,
+            above_slot_id,
+            rect,
+            range_start,
+            range_end,
+        } => format!(
+            "{{\"op\":\"overlay\",\"overlay\":{overlay_id},\"aboveSlot\":{above_slot_id},\"rect\":{},\"rangeStart\":{range_start},\"rangeEnd\":{range_end}}}",
+            platform_view_rect_json(*rect),
+        ),
+        PlatformViewCommandJson::DisposeOverlay { overlay_id } => {
+            format!("{{\"op\":\"disposeOverlay\",\"overlay\":{overlay_id}}}")
+        }
     }
 }
 
@@ -537,6 +574,17 @@ fn platform_view_command_json(cmd: &PlatformViewCommandJson) -> String {
 /// `{"generation":N,"commands":[{"op":"create","slot":N,"viewType":"...","params":"..."},`
 /// `{"op":"update","slot":N,"rect":[x,y,w,h],"clip":[x,y,w,h]|null,"visible":bool},`
 /// `{"op":"updateParams","slot":N,"params":"..."},{"op":"dispose","slot":N}]}`.
+///
+/// Two overlay ops extend the vocabulary additively — the iOS shell mirrors
+/// them byte-for-byte, and a host that does not know them logs and skips them
+/// like any unknown op:
+///
+/// `{"op":"overlay","overlay":N,"aboveSlot":N,"rect":[x,y,w,h],"rangeStart":N,"rangeEnd":N}`
+/// (create or re-place the overlay surface above slot `aboveSlot`; the range
+/// is the frame's command range it draws, informational for the host — the
+/// render side pairs ranges with frames itself) and
+/// `{"op":"disposeOverlay","overlay":N}` (tear it down). Neither op is emitted
+/// unless overlays are switched on (`FRUST_OVERLAYS`).
 ///
 /// An empty `commands` slice still yields a valid (if pointless — the caller
 /// should have taken the [`platform_view_commands_up_to_date`] fast path
@@ -1285,6 +1333,129 @@ mod tests {
         // at the JNI layer, tested here as the boolean the export branches
         // on).
         assert!(platform_view_commands_up_to_date(generation, generation));
+    }
+
+    // -----------------------------------------------------------------
+    // Overlay ops (JSON) and the overlay state machines
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn platform_view_json_overlay_golden() {
+        let json = build_platform_view_commands_json(
+            8,
+            &[PlatformViewCommandJson::Overlay {
+                overlay_id: 2,
+                above_slot_id: 7,
+                rect: (0.0, 0.0, 1080.0, 2340.0),
+                range_start: 41,
+                range_end: 96,
+            }],
+        );
+        assert_eq!(
+            json,
+            "{\"generation\":8,\"commands\":[{\"op\":\"overlay\",\"overlay\":2,\"aboveSlot\":7,\"rect\":[0,0,1080,2340],\"rangeStart\":41,\"rangeEnd\":96}]}"
+        );
+    }
+
+    #[test]
+    fn platform_view_json_dispose_overlay_golden() {
+        let json = build_platform_view_commands_json(
+            9,
+            &[PlatformViewCommandJson::DisposeOverlay { overlay_id: 2 }],
+        );
+        assert_eq!(
+            json,
+            "{\"generation\":9,\"commands\":[{\"op\":\"disposeOverlay\",\"overlay\":2}]}"
+        );
+    }
+
+    #[test]
+    fn platform_view_json_overlay_ops_serialise_to_exact_strings() {
+        let cases = [
+            (
+                PlatformViewCommandJson::Overlay {
+                    overlay_id: 1,
+                    above_slot_id: 3,
+                    rect: (0.0, 0.0, 720.5, 1600.0),
+                    range_start: 12,
+                    range_end: 12,
+                },
+                "{\"op\":\"overlay\",\"overlay\":1,\"aboveSlot\":3,\"rect\":[0,0,720.5,1600],\"rangeStart\":12,\"rangeEnd\":12}",
+            ),
+            (
+                PlatformViewCommandJson::Overlay {
+                    overlay_id: u64::from(u32::MAX) + 5,
+                    above_slot_id: 42,
+                    rect: (10.0, 20.0, 30.0, 40.0),
+                    range_start: 0,
+                    range_end: 9000,
+                },
+                "{\"op\":\"overlay\",\"overlay\":4294967300,\"aboveSlot\":42,\"rect\":[10,20,30,40],\"rangeStart\":0,\"rangeEnd\":9000}",
+            ),
+            (
+                PlatformViewCommandJson::DisposeOverlay { overlay_id: 17 },
+                "{\"op\":\"disposeOverlay\",\"overlay\":17}",
+            ),
+        ];
+        for (op, expected) in cases {
+            let json = build_platform_view_commands_json(1, std::slice::from_ref(&op));
+            assert_eq!(
+                json,
+                format!("{{\"generation\":1,\"commands\":[{expected}]}}")
+            );
+        }
+    }
+
+    /// The overlay ops are additive: a batch carrying them serialises the
+    /// four frozen ops exactly as before, in order, around them.
+    #[test]
+    fn platform_view_json_overlay_ops_leave_the_frozen_ops_unchanged() {
+        let frozen = [
+            PlatformViewCommandJson::Create {
+                slot_id: 3,
+                view_type: "dev.frust.XFactory".to_string(),
+                params_json: String::new(),
+                interactive: true,
+            },
+            PlatformViewCommandJson::Update {
+                slot_id: 3,
+                rect: (0.0, 0.0, 10.0, 10.0),
+                clip: None,
+                visible: true,
+                shields: vec![(1.0, 2.0, 3.0, 4.0)],
+            },
+            PlatformViewCommandJson::UpdateParams {
+                slot_id: 3,
+                params_json: "{}".to_string(),
+            },
+            PlatformViewCommandJson::Dispose { slot_id: 3 },
+        ];
+        let alone = build_platform_view_commands_json(4, &frozen);
+        let mut mixed = frozen.to_vec();
+        mixed.insert(
+            2,
+            PlatformViewCommandJson::Overlay {
+                overlay_id: 1,
+                above_slot_id: 3,
+                rect: (0.0, 0.0, 10.0, 10.0),
+                range_start: 5,
+                range_end: 8,
+            },
+        );
+        mixed.push(PlatformViewCommandJson::DisposeOverlay { overlay_id: 1 });
+        let with_overlays = build_platform_view_commands_json(4, &mixed);
+        let overlay = "{\"op\":\"overlay\",\"overlay\":1,\"aboveSlot\":3,\"rect\":[0,0,10,10],\"rangeStart\":5,\"rangeEnd\":8},";
+        let dispose = ",{\"op\":\"disposeOverlay\",\"overlay\":1}";
+        assert_eq!(
+            with_overlays
+                .replacen(overlay, "", 1)
+                .replacen(dispose, "", 1),
+            alone
+        );
+        assert_eq!(
+            alone,
+            "{\"generation\":4,\"commands\":[{\"op\":\"create\",\"slot\":3,\"viewType\":\"dev.frust.XFactory\",\"params\":\"\",\"interactive\":true},{\"op\":\"update\",\"slot\":3,\"rect\":[0,0,10,10],\"clip\":null,\"visible\":true,\"shields\":[[1,2,3,4]]},{\"op\":\"updateParams\",\"slot\":3,\"params\":\"{}\"},{\"op\":\"dispose\",\"slot\":3}]}"
+        );
     }
 
     // -----------------------------------------------------------------

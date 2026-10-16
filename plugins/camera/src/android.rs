@@ -41,6 +41,7 @@
 //! |---|---|---|
 //! | `setTorch` | `(int session, boolean on) -> int` | [`TORCH_SET`] accepted (the host does **not** wait on `enableTorch`'s `ListenableFuture` — see [`AndroidSession::set_torch`]) / [`TORCH_ERROR_UNKNOWN_SESSION`] unknown or closed session → [`CameraError::SessionClosed`] / [`TORCH_ERROR_NO_CAMERA`] no `Camera` bound yet → [`CameraError::Platform`] / [`TORCH_ERROR_FAILED`] the camera control refused |
 //! | `torchAvailable` | `(int session) -> int` | Tri-state: [`TORCH_AVAILABLE`] `hasFlashUnit()` / [`TORCH_UNAVAILABLE`] no flash unit / a negative code (unknown session, nothing bound yet), all of which report `false` |
+//! | `startPreviewTexture` | `(int session) -> int` | [`PREVIEW_TEXTURE_STARTED`] accepted (the `RGBA_8888` `ImageAnalysis` binds on the main thread, beside the preview) / a negative code (unknown session). Frames arrive via [`Java_dev_frust_camera_FrustCameraHost_nativeOnPreviewTextureFrame`] until `closeCamera` |
 //!
 //! ## Kotlin → Rust (this crate's own `#[unsafe(no_mangle)]` JNI exports —
 //! package baked into the symbol names, so `dev.frust.camera.FrustCameraHost`
@@ -50,15 +51,23 @@
 //! - [`Java_dev_frust_camera_FrustCameraHost_nativeOnCameraState`]`(env, class, session: jint, state: jint)` — `0` Configuring / `1` Running / `2` Closed / `3` Error
 //! - [`Java_dev_frust_camera_FrustCameraHost_nativeOnPictureTaken`]`(env, class, session: jint, request_id: jlong, ok: jboolean, path: JString)` — `request_id` is the value the matching `takePicture` was given, echoed back unchanged (*Correlating a completion* below)
 //! - [`Java_dev_frust_camera_FrustCameraHost_nativeOnImageFrame`]`(env, class, session: jint, format: jint, width: jint, height: jint, rotationDegrees: jint, planeCount: jint, plane0: JByteBuffer, rowStride0: jint, pixelStride0: jint, plane1: …, plane2: …)` — three fixed plane slots (never an array: an array would allocate on the Kotlin side once per frame at camera rate); slots past `planeCount` are null. Called on the host's own analyzer executor, and `ImageProxy.close()` runs only after it returns — see [`AndroidSession::start_image_stream`]'s close-deadline contract.
+//! - [`Java_dev_frust_camera_FrustCameraHost_nativeOnPreviewTextureFrame`]`(env, class, session: jint, width: jint, height: jint, pixels: JByteBuffer, rowStride: jint)`
+//!   (additive) — one upright `RGBA_8888` preview frame for the session's
+//!   texture mailbox, on the host's texture executor; the plane is copied into
+//!   a tightly packed CPU frame here and the host closes the `ImageProxy`
+//!   once this returns. Never lent as a hardware buffer: an analysis image
+//!   must close before the analyzer gets the next one, while the renderer
+//!   releases a frame only once a newer one replaced it.
 //!
 //! Each export upgrades its [`jni::EnvUnowned`] via
 //! [`jni::EnvUnowned::with_env`], which wraps the body in `catch_unwind` — the
 //! crate's own no-unwind-across-FFI guarantee (`docs/CODE_STANDARDS.md`'s
 //! Language Idioms), matching the pattern `frust-shell-android`'s own JNI
-//! exports use. The **one** `unsafe` block in this module is the image
-//! stream's zero-copy plane view ([`plane_data`]) — the sanctioned
-//! `GetDirectBufferAddress` pattern, `# Safety`-noted there; every other
-//! `unsafe` token is an export's `#[unsafe(no_mangle)]` attribute.
+//! exports use. The **one** `unsafe` block in this module is the zero-copy
+//! plane view ([`plane_data`], used by the image stream and the preview
+//! texture's copy) — the sanctioned `GetDirectBufferAddress` pattern,
+//! `# Safety`-noted there; every other `unsafe` token is an export's
+//! `#[unsafe(no_mangle)]` attribute.
 //!
 //! # Which calls block, and on what
 //!
@@ -158,10 +167,12 @@ use jni::refs::Global;
 use jni::sys::{jboolean, jint, jlong};
 use jni::{Env, EnvUnowned, jni_sig, jni_str};
 
+use frust_plugin::texture::{TextureFrame, TextureSink};
+
 use crate::capture::CaptureSlot;
 use crate::{
     CameraError, ImageFormat, ImageFrame, ImageFrameCallback, ImagePlane, Lens, PermissionStatus,
-    Resolution, SessionBackend, StreamErrorSink,
+    Resolution, SessionBackend, StreamErrorSink, pack_rgba_rows,
 };
 
 /// The `viewType` this crate's Android preview slot resolves to — the
@@ -249,6 +260,10 @@ const TORCH_ERROR_NO_CAMERA: i32 = -3;
 /// `setTorch`: the camera control itself refused the request (an exception out
 /// of `enableTorch`) → [`CameraError::Platform`].
 const TORCH_ERROR_FAILED: i32 = -5;
+
+/// `startPreviewTexture`'s "accepted" return code (module doc's
+/// additive-entries table).
+const PREVIEW_TEXTURE_STARTED: i32 = 0;
 
 /// `torchAvailable`: the active lens reports `CameraInfo.hasFlashUnit()`.
 const TORCH_AVAILABLE: i32 = 1;
@@ -383,6 +398,12 @@ struct StreamSlot {
 /// (removing the entry) cannot deadlock — the in-flight frame simply finishes
 /// against the `Arc` it already holds, and the callback drops afterwards.
 static STREAMS: LazyLock<Mutex<HashMap<i32, Arc<StreamSlot>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Every session's preview-texture mailbox, keyed by session id — written by
+/// [`AndroidSession::start_preview_texture`] and [`AndroidSession::close`],
+/// read by `nativeOnPreviewTextureFrame`.
+static TEXTURES: LazyLock<Mutex<HashMap<i32, TextureSink>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Lock a module-global mutex, recovering from poisoning instead of
@@ -1268,6 +1289,10 @@ impl SessionBackend for AndroidSession {
         }
     }
 
+    fn start_preview_texture(&self, sink: TextureSink) -> Result<(), CameraError> {
+        self.start_texture(sink)
+    }
+
     fn close(&self) {
         // First close wins; a second (including the `Drop` safety net) is a
         // no-op, per `CameraSession::close`'s documented contract.
@@ -1277,8 +1302,10 @@ impl SessionBackend for AndroidSession {
 
         // Drop any running stream's callback first — `closeCamera` unbinds the
         // analyzer host-side, and a frame already queued for delivery must not
-        // reach a callback the app considers dead.
+        // reach a callback the app considers dead. The preview texture's
+        // mailbox goes the same way.
         lock(&STREAMS).remove(&self.session_id);
+        lock(&TEXTURES).remove(&self.session_id);
 
         let closed = with_host(|env, class| {
             run_jni(env, "FrustCameraHost.closeCamera", |env| {
@@ -1302,6 +1329,45 @@ impl SessionBackend for AndroidSession {
 
         lock(&SESSIONS).remove(&self.session_id);
         SESSIONS_UPDATED.notify_all();
+    }
+}
+
+impl AndroidSession {
+    /// `FrustCameraHost.startPreviewTexture` — see
+    /// [`crate::CameraSession::preview_texture`]. Registers `sink` first, so
+    /// the first frame has somewhere to go.
+    ///
+    /// # Errors
+    /// [`CameraError::SessionClosed`] after [`SessionBackend::close`];
+    /// [`CameraError::Platform`] for a host refusal or a JNI failure.
+    fn start_texture(&self, sink: TextureSink) -> Result<(), CameraError> {
+        self.ensure_open()?;
+        lock(&TEXTURES).insert(self.session_id, sink);
+        let code = with_host(|env, class| {
+            run_jni(env, "FrustCameraHost.startPreviewTexture", |env| {
+                env.call_static_method(
+                    class,
+                    jni_str!("startPreviewTexture"),
+                    jni_sig!("(I)I"),
+                    &[JValue::Int(self.session_id)],
+                )?
+                .i()
+            })
+        });
+        match code {
+            Ok(PREVIEW_TEXTURE_STARTED) => Ok(()),
+            Ok(other) => {
+                lock(&TEXTURES).remove(&self.session_id);
+                Err(CameraError::Platform(format!(
+                    "android camera backend: FrustCameraHost.startPreviewTexture refused the \
+                     request (code {other})"
+                )))
+            }
+            Err(err) => {
+                lock(&TEXTURES).remove(&self.session_id);
+                Err(err)
+            }
+        }
     }
 }
 
@@ -1517,7 +1583,71 @@ fn deliver_image_frame(
     (lock(&slot.on_frame))(&frame);
 }
 
+/// Copy one preview-texture frame's plane into a packed RGBA frame and push
+/// it. A frame for a session with no mailbox (closed, or never started) is
+/// dropped.
+fn deliver_preview_texture_frame(
+    env: &mut Env<'_>,
+    session: i32,
+    width: i32,
+    height: i32,
+    pixels: &JByteBuffer<'_>,
+    row_stride: i32,
+) {
+    let Some(sink) = lock(&TEXTURES).get(&session).cloned() else {
+        return;
+    };
+    let (Some(width), Some(height)) = (
+        u32::try_from(width).ok().filter(|w| *w > 0),
+        u32::try_from(height).ok().filter(|h| *h > 0),
+    ) else {
+        return;
+    };
+    if pixels.is_null() {
+        return;
+    }
+    // SAFETY: the host closes the `ImageProxy` only after the export returns,
+    // and the bytes are copied out below before then — see `plane_data`.
+    let Some(bytes) = (unsafe { plane_data(env, pixels) }) else {
+        log::warn!("frust-camera: preview texture frame of session {session} is not direct");
+        return;
+    };
+    match pack_rgba_rows(
+        bytes,
+        width,
+        height,
+        usize::try_from(row_stride).unwrap_or(0),
+    ) {
+        Some(packed) => sink.push(TextureFrame::rgba8(width, height, packed)),
+        None => log::warn!(
+            "frust-camera: preview texture frame of session {session} ({width}x{height}, stride \
+             {row_stride}, {} bytes) is malformed — dropped",
+            bytes.len()
+        ),
+    }
+}
+
 // --- Kotlin -> Rust JNI exports (contract table above) ---------------------
+
+/// `Java_dev_frust_camera_FrustCameraHost_nativeOnPreviewTextureFrame` — one
+/// upright `RGBA_8888` preview frame for the session's texture mailbox
+/// (module doc's Kotlin → Rust list), on the host's texture executor.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_frust_camera_FrustCameraHost_nativeOnPreviewTextureFrame<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    session: jint,
+    width: jint,
+    height: jint,
+    pixels: JByteBuffer<'local>,
+    row_stride: jint,
+) {
+    env.with_env(|env| {
+        deliver_preview_texture_frame(env, session, width, height, &pixels, row_stride);
+        Ok::<(), jni::errors::Error>(())
+    })
+    .resolve::<LogErrorAndDefault>();
+}
 
 /// `Java_dev_frust_camera_FrustCameraHost_nativeOnPermissionResult` — fires
 /// once the system permission dialog resolves

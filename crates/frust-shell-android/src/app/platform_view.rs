@@ -25,6 +25,7 @@ impl AndroidAppHandle {
     /// `PlatformViewState::suspend_all`.
     pub(crate) fn suspend_platform_views(&mut self) {
         self.platform_view_state.suspend_all();
+        self.fold_overlay_commands();
         // While backgrounded no further frame is painted or presented, so a
         // pairing recorded before the pause would hold this hide behind a frame
         // that never lands. The gate is a smoothing device, not a correctness
@@ -81,6 +82,49 @@ impl AndroidAppHandle {
     /// implausible one is rejected downstream by the tail itself.
     pub(crate) fn set_frame_timeline(&mut self, expected_present_delta_nanos: i64) {
         self.frame_timeline_delta_nanos = expected_present_delta_nanos.max(0) as u64;
+    }
+
+    /// Fold every differ command pushed since the last fold into the overlay
+    /// ledger's ranges (`Overlay` sets one, `DisposeOverlay` drops one) — run
+    /// right after each call that can push one, so an acknowledgement never
+    /// compacts a command away before it was folded. A no-op with overlays
+    /// off.
+    pub(crate) fn fold_overlay_commands(&mut self) {
+        if !crate::jni_glue::overlays_enabled() {
+            return;
+        }
+        let mut ledger = crate::jni_glue::overlay_ledger();
+        let (generation, backlog) = self.platform_view_state.commands();
+        let Some(folded) = ledger.begin_fold(generation) else {
+            return;
+        };
+        // Everything at or below the folded generation is already in the
+        // ledger; the rest of the backlog is new.
+        let (_, seen) = self.platform_view_state.commands_up_to(folded);
+        for command in &backlog[seen.len()..] {
+            match command {
+                ViewCommand::Overlay {
+                    overlay_id,
+                    command_range,
+                    ..
+                } => ledger.set(*overlay_id, command_range.clone()),
+                ViewCommand::DisposeOverlay { overlay_id } => ledger.dispose(*overlay_id),
+                _ => {}
+            }
+        }
+        ledger.finish_fold(generation);
+    }
+
+    /// Fold, then publish the overlays' current ranges as frame `frame_id`'s
+    /// cuts — called once per painted frame, with the id the frame is about
+    /// to be submitted under, so the render thread draws that scene with the
+    /// ranges the differ computed from it.
+    pub(crate) fn publish_overlay_frame(&mut self, frame_id: u64) {
+        if !crate::jni_glue::overlays_enabled() {
+            return;
+        }
+        self.fold_overlay_commands();
+        crate::jni_glue::overlay_ledger().publish_frame(frame_id);
     }
 
     /// Tell the differ the native side has finished applying everything
