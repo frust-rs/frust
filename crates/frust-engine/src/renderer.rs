@@ -5527,6 +5527,14 @@ impl FrameResources {
                     },
                 };
                 texel_offset += record.texel_len();
+    /// Reused zero fill for the atlas eviction clears.
+    clear_zeros: Vec<u8>,
+    /// Group-0 and filter-source bind groups naming a page, kept across frames
+    /// and swept at every frame's end (see [`SourceGroupCache`]). Cleared with
+    /// the coverage texture they all name.
+    source_groups: SourceGroupCache,
+    /// Strip, external and image bind groups built by the group-set paths.
+    groups_created: u64,
                 self.paints_data.push(record);
                 resolved
             });
@@ -5542,7 +5550,7 @@ impl FrameResources {
     ///
     /// Two passes, and each reads the frame's plan directly rather than
     /// inferring anything from draw order. First, every region this frame's
-    /// residency reaped is forgotten — `frame.image_evictions` names it by
+    /// residency reaped is forgotten — `frame.image_forgets` names it by
     /// rectangle, and a rectangle uniquely identifies the one image that held it
     /// (padding is always zero in this engine, so the reported and the stored
     /// rectangle are the same value; see [`crate::cache::images`]'s module doc).
@@ -5559,15 +5567,18 @@ impl FrameResources {
     ///
     /// A region the atlas array could not hold at `budget`'s geometry and this
     /// frame's depth is counted and left unregistered instead. Its draws are
+            clear_zeros: Vec::new(),
+            source_groups: SourceGroupCache::default(),
+            groups_created: 0,
     /// then skipped, which is the whole point: a registered rectangle nothing
     /// wrote would be sampled as whatever the texture happened to contain.
     fn update_image_registry(&mut self, frame: &CompiledFrame, budget: AtlasBudget) {
-        if !frame.image_evictions.is_empty() {
+        if !frame.image_forgets.is_empty() {
             // A set rather than `Vec::contains`: both sides of this scan scale
             // with content — the registry with how many images and glyph slots
             // are resident, the plan with how hard the atlas is churning — and
             // their product is the frame path's, not a report's.
-            let cleared: HashSet<AtlasRegion> = frame.image_evictions.iter().copied().collect();
+            let cleared: HashSet<AtlasRegion> = frame.image_forgets.iter().copied().collect();
             self.image_registry
                 .retain(|_, resident| !cleared.contains(&resident.region));
         }
@@ -5682,7 +5693,7 @@ impl FrameResources {
             Some(atlas) => {
                 let mut refused = 0_u64;
                 for region in &frame.image_evictions {
-                    if !atlas.clear_region(queue, *region) {
+                    if !atlas.clear_region_with(queue, *region, &mut self.clear_zeros) {
                         refused = refused.saturating_add(1);
                     }
                 }

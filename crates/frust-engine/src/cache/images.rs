@@ -208,6 +208,14 @@ pub const MAX_UNSEEN_FRAMES: u64 = 60;
 /// and cost atlas space that a mobile budget does not have.
 pub const ATLAS_PADDING: u16 = 0;
 
+// The clear skip in `uncovered_clears` compares reported (padded) eviction
+// rectangles with raw upload rectangles; a non-zero padding would make them
+// differ and silently turn the skip off, or worse, mis-pair rectangles.
+const _: () = assert!(
+    ATLAS_PADDING == 0,
+    "uncovered_clears matches padded evictions against raw uploads, which only holds with zero padding"
+);
+
 /// The largest image edge that can be made resident at all.
 ///
 /// `vello_common`'s image cache addresses an offset and an extent in `u16`, and
@@ -551,6 +559,11 @@ pub const ATLAS_FORMAT_BYTES: u64 = 4;
 /// its clear: whatever texels no upload reaches must still read as zero to the
 /// next tenant. Order is preserved, so the clears stay in the order the
 /// residency reported them.
+///
+/// The exact-cover match compares the reported eviction rectangle with the
+/// upload's allocated rectangle. Evictions are reported padded by
+/// [`ATLAS_PADDING`] while uploads carry the raw allocation, so the two only
+/// agree while the padding is zero; the assertion below ties the skip to that.
 #[must_use]
 pub fn uncovered_clears(evictions: &[AtlasRegion], uploads: &[ImageUpload]) -> Vec<AtlasRegion> {
     if evictions.is_empty() || uploads.is_empty() {
@@ -1277,10 +1290,8 @@ impl ImageResidency {
     /// churned image. Dropped from the plan rather than from `evictions`, so
     /// the pending set and its acknowledgement are unchanged; a consumer
     /// forgetting the evicted tenant by rectangle (the renderer's registry) is
-    /// left holding the old handle on that rectangle beside the new one, which
-    /// nothing reads — a handle is only looked up for a draw this frame
-    /// resolved, and a resolved handle is re-registered by its own upload — and
-    /// which the rectangle's next reported eviction removes with the new one.
+    /// still needs the full eviction set: [`evictions`](Self::evictions) names
+    /// every rectangle to forget, whether or not its clear was skipped.
     #[must_use]
     pub fn plan(&self) -> (Vec<AtlasRegion>, Vec<ImageUpload>) {
         (
@@ -2679,6 +2690,18 @@ mod tests {
         );
         assert_eq!(uncovered_clears(&evictions, &[]), evictions.to_vec());
         assert!(uncovered_clears(&[], &uploads).is_empty());
+    }
+
+    #[test]
+    fn the_clear_skip_is_tied_to_zero_padding() {
+        // Evictions are reported as `padded(region, ATLAS_PADDING)`, uploads
+        // carry the raw allocation; the exact-cover match needs them equal.
+        let raw = AtlasRegion {
+            layer: 0,
+            offset: [4, 8],
+            size: [16, 16],
+        };
+        assert_eq!(padded(raw, ATLAS_PADDING), raw);
     }
 
     #[test]
