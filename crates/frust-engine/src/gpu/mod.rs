@@ -241,3 +241,20 @@ pub fn with_padded_alphas<R>(
     alphas.truncate(original_len);
     result
 }
+
+/// Writes `src` into the front of `dst` and zeroes the rest of it — the bytes
+/// [`with_padded_alphas`] hands a queue write, laid straight into a staging
+/// mapping instead (see `frust_gpu::staging`).
+///
+/// A `src` longer than `dst` is cut at `dst`'s length; the caller sizes `dst`
+/// to the texture's whole footprint, which every frame's coverage was checked
+/// to fit before anything was recorded.
+pub fn write_zero_padded(dst: wgpu::WriteOnly<'_, [u8]>, src: &[u8]) {
+    let head_len = src.len().min(dst.len());
+    if let (Ok((mut head, mut tail)), Some(src)) =
+        (dst.split_at_checked(head_len), src.get(..head_len))
+    {
+        head.copy_from_slice(src);
+        tail.fill(0);
+    }
+}

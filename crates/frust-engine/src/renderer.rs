@@ -13,10 +13,19 @@
 //!
 //! - every pass the engine begins is ended before `encode` returns, so the
 //!   caller's next `begin_render_pass` on the same encoder is legal; and
-//! - the engine issues no `queue.submit` for scene work. It does issue
-//!   `queue.write_texture`/`write_buffer` uploads, which are ordered ahead of
-//!   the command buffers submitted after them and so land before the passes
-//!   that read them.
+//! - the engine issues no `queue.submit` for scene work. Its per-frame
+//!   uploads — coverage, encoded paints, instances, the viewport uniform and
+//!   each page round's — are written into a mapped staging slot and moved into
+//!   place by copy commands recorded into the caller's encoder, ahead of the
+//!   passes that read them (see [`frust_gpu::staging`]). The slot's re-mapping
+//!   rides the same encoder (`map_buffer_on_submit`), so the caller's one
+//!   submit is also what returns the slot to the engine; an encoder dropped
+//!   unsubmitted just costs the engine that slot. Its on-change uploads
+//!   (colour ramps, atlas regions) — and every upload under
+//!   `FRUST_ENGINE_NO_STAGING_RING`, or on a frame the ring has no free slot
+//!   for — are `queue.write_texture`/`write_buffer` calls, which are ordered
+//!   ahead of the command buffers submitted after them and so land before the
+//!   passes that read them.
 //!
 //! One thing the engine *does* submit, and it is worth naming precisely because
 //! the rule above is otherwise absolute: growing the image atlas array submits a
@@ -255,6 +264,9 @@ use std::sync::{Arc, Once};
 #[cfg(any(test, feature = "perf-trace"))]
 use std::time::Duration;
 
+use frust_gpu::staging::{
+    BUFFER_COPY_ALIGNMENT, StagingFrame, StagingRing, TEXTURE_COPY_ALIGNMENT,
+};
 use frust_gpu::{PipelineCache, PooledTexture, SceneTextureId, ShaderLibrary, TierCaps};
 use frust_scene::{Scene, SceneBuilder};
 use glifo::{AtlasCommand, AtlasCommandRecorder, AtlasPaint};
@@ -889,6 +901,14 @@ pub struct EngineRenderer {
     /// The scene [`Self::record_range`] projects a range into, kept for its
     /// allocation alone; empty until the first range is recorded.
     range_scene: Scene,
+    /// The mapped staging slots a frame's per-frame uploads are written into
+    /// and copied out of inside the caller's encoder (see
+    /// [`frust_gpu::staging`]); `None` under `FRUST_ENGINE_NO_STAGING_RING`,
+    /// which sends every one of them through queue writes instead.
+    staging: Option<StagingRing>,
+    /// Bytes the last encoded frame placed in its staging slot — zero when it
+    /// took the queue-write route.
+    last_staged: u64,
     /// The rolling CPU-phase window `frust-perf enc` lines are emitted from.
     ///
     /// Absent entirely from a build without `perf-trace`, along with the type
@@ -1002,6 +1022,8 @@ impl EngineRenderer {
             retained: RetainedPages::for_caps(caps),
             retained_layers: RetainedLayers::new(),
             range_scene: Scene::new(),
+            staging: (!config::staging_ring_disabled()).then(StagingRing::new),
+            last_staged: 0,
             #[cfg(feature = "perf-trace")]
             encode_trace: EncodeTrace::default(),
         })
@@ -1179,6 +1201,46 @@ impl EngineRenderer {
     #[must_use]
     pub fn pass_merge(&self) -> bool {
         self.pass_merge
+    }
+
+    /// Routes the frame's per-frame uploads through the staging ring, or
+    /// through queue writes — the programmatic counterpart of
+    /// `FRUST_ENGINE_NO_STAGING_RING`, which only sets the value a renderer
+    /// starts with.
+    ///
+    /// Takes effect from the next frame. Both routes upload the same bytes to
+    /// the same resources, so both draw the same pixels, which is what a caller
+    /// comparing the two arms in one process checks. Turning the ring off
+    /// drops its slots; a slot still in flight is kept alive by `wgpu` until
+    /// its submission retires.
+    pub fn set_staging_ring(&mut self, enabled: bool) {
+        match (enabled, self.staging.is_some()) {
+            (true, false) => self.staging = Some(StagingRing::new()),
+            (false, true) => self.staging = None,
+            _ => {}
+        }
+    }
+
+    /// Whether the frame's per-frame uploads go through the staging ring.
+    #[must_use]
+    pub fn staging_ring(&self) -> bool {
+        self.staging.is_some()
+    }
+
+    /// Bytes the last [`Self::encode`] placed in its staging slot, alignment
+    /// padding included — zero when the frame's uploads took the queue-write
+    /// route (the ring off, every slot still in flight, or a frame larger than
+    /// a slot may hold). A diagnostic: what a test pins to tell the two routes
+    /// apart.
+    #[must_use]
+    pub fn last_frame_staged_bytes(&self) -> u64 {
+        self.last_staged
+    }
+
+    /// What the staging ring has done so far, or `None` with the ring off.
+    #[must_use]
+    pub fn staging_stats(&self) -> Option<frust_gpu::staging::StagingStats> {
+        self.staging.as_ref().map(StagingRing::stats)
     }
 
     /// The passes the last [`Self::encode`] recorded into the caller's
@@ -1659,11 +1721,23 @@ impl EngineRenderer {
         self.resources.resize_paints(device, paints_grown);
         self.resources.resize_gradients(device, gradients_grown);
         let resize_span = clock.lap();
-        let atlas_serviced =
-            self.resources
-                .upload(queue, &mut frame, &mut self.gradients, size, dim);
+        // The frame's staging slot, opened only now that nothing can refuse
+        // the frame: the per-frame uploads below — and each page round's
+        // viewport uniform in `record_frame` — are written into it and copied
+        // out of it into `encoder`, ahead of every pass this frame records
+        // that reads them. `None` sends them through queue writes instead.
+        let mut stage = self.begin_staging(device);
+        let atlas_serviced = self.resources.upload(
+            queue,
+            encoder,
+            stage.as_mut(),
+            &mut frame,
+            &mut self.gradients,
+            size,
+            dim,
+        );
         self.resources
-            .upload_instances(device, queue, &self.scratch);
+            .upload_instances(device, queue, encoder, stage.as_mut(), &self.scratch);
 
         // Residency is committed exactly here: the frame passed every fallible
         // step and its evictions and uploads have reached the array, so the
@@ -1743,9 +1817,23 @@ impl EngineRenderer {
         let pipelines_span = clock.lap();
 
         self.record_frame(
-            device, queue, encoder, &target, depth_view, base_color, &pipelines, copy_mode,
+            device,
+            queue,
+            encoder,
+            stage.as_mut(),
+            &target,
+            depth_view,
+            base_color,
+            &pipelines,
+            copy_mode,
             timestamps,
         );
+        // Unmapped and fenced on `encoder`: the slot is handed out again only
+        // once the submission carrying this frame has finished on the GPU.
+        self.last_staged = stage.as_ref().map_or(0, StagingFrame::used);
+        if let Some(stage) = stage {
+            stage.finish(encoder);
+        }
 
         // The laps above still run without `perf-trace` — `PhaseClock` reads
         // no clock there, so each one is `Duration::ZERO` — but nothing records
@@ -1839,6 +1927,42 @@ impl EngineRenderer {
         );
         self.range_scene = projected;
         result.map(|()| cut)
+    }
+
+    /// Opens this frame's staging slot, sized for every upload the frame routes
+    /// through it, or `None` when the ring is off or refuses the frame (every
+    /// slot still in flight, or more bytes than a slot may hold) — in which
+    /// case each of those uploads is a queue write, as without the ring.
+    fn begin_staging(&mut self, device: &wgpu::Device) -> Option<StagingFrame> {
+        let bytes = self.staging_bytes();
+        self.staging.as_mut()?.begin(device, bytes)
+    }
+
+    /// An upper bound on the bytes this frame stages, alignment padding
+    /// included: the whole alpha texture, the whole encoded-paint texture
+    /// when the frame has paints, the viewport uniform, the instances, and
+    /// one viewport uniform per scheduled round (more than the page rounds
+    /// that take one, which is all an upper bound needs).
+    fn staging_bytes(&self) -> u64 {
+        let resources = &self.resources;
+        let texture = |texture: &ResourceTexture| {
+            gpu::resource_texture_bytes(texture.width, texture.height)
+                .saturating_add(TEXTURE_COPY_ALIGNMENT)
+        };
+        let buffer = |len: u64| len.saturating_add(BUFFER_COPY_ALIGNMENT);
+        let config = buffer(size_of::<GpuConfig>() as u64);
+        let (opaque, alpha) = self.scratch.instance_bytes();
+        let paints = if resources.paints_data.is_empty() {
+            0
+        } else {
+            texture(&resources.paints)
+        };
+        let rounds = self.scratch.rounds.len() as u64;
+        texture(&resources.alphas)
+            .saturating_add(paints)
+            .saturating_add(config)
+            .saturating_add(buffer((opaque.len() + alpha.len()) as u64))
+            .saturating_add(config.saturating_mul(rounds))
     }
 
     /// Creates the render-to-atlas pass on first use.
@@ -2198,6 +2322,7 @@ impl EngineRenderer {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
+        mut stage: Option<&mut StagingFrame>,
         target: &EngineTarget<'_>,
         depth_view: Option<&wgpu::TextureView>,
         base_color: Color,
@@ -2506,17 +2631,22 @@ impl EngineRenderer {
             // the extent it quantized the request up to, and NDC is computed
             // against the attachment's real extent. Distinct buffers, so the
             // write ordering against the frame's own config never matters.
+            // Staged, its copy lands in the encoder here — between passes,
+            // immediately ahead of the one round that reads it.
             let config = match offscreen {
                 None => &self.resources.config,
                 Some((_, (width, height))) => {
                     let Some(config) = self.resources.page_configs.get(page_slot) else {
                         continue;
                     };
-                    queue.write_buffer(
-                        config,
-                        0,
-                        bytemuck::bytes_of(&GpuConfig::new(width, height, dim, dim)),
-                    );
+                    let bytes = GpuConfig::new(width, height, dim, dim);
+                    let bytes = bytemuck::bytes_of(&bytes);
+                    let staged = stage
+                        .as_deref_mut()
+                        .is_some_and(|stage| stage.copy_to_buffer(encoder, bytes, config, 0));
+                    if !staged {
+                        queue.write_buffer(config, 0, bytes);
+                    }
                     page_slot = page_slot.saturating_add(1);
                     config
                 }
@@ -5615,9 +5745,21 @@ impl FrameResources {
     /// Uploads the frame's coverage, paint records, colour ramps, atlas
     /// evictions/uploads and config, answering whether the atlas plan was
     /// serviced in full (see [`Self::upload_atlas`]).
+    ///
+    /// The per-frame uploads — coverage, paint records, config — go through
+    /// `stage` when the frame has one, as copies recorded into `encoder` ahead
+    /// of every pass; the on-change ones (colour ramps, atlas regions) stay
+    /// queue writes, which is also what every one of them is without a stage.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the upload's two routes (queue, encoder + stage) beside the \
+                  frame, the ramp cache and the extents it uploads against"
+    )]
     fn upload(
         &mut self,
         queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        mut stage: Option<&mut StagingFrame>,
         frame: &mut CompiledFrame,
         cache: &mut GradientCache,
         size: (u16, u16),
@@ -5626,19 +5768,33 @@ impl FrameResources {
         let atlas_serviced = self.upload_atlas(queue, frame);
 
         let alphas = &self.alphas;
-        gpu::with_padded_alphas(
-            &mut frame.strips.alphas,
-            alphas.width,
-            alphas.height,
-            |bytes| {
-                queue.write_texture(
-                    alphas.copy_target(),
-                    bytes,
-                    resource_layout(gpu::resource_bytes_per_row(alphas.width), alphas.height),
-                    alphas.extent(),
-                );
-            },
-        );
+        let bytes_per_row = gpu::resource_bytes_per_row(alphas.width);
+        let coverage = &frame.strips.alphas;
+        let staged = stage.as_deref_mut().is_some_and(|stage| {
+            stage.copy_to_texture(
+                encoder,
+                alphas.copy_target(),
+                bytes_per_row,
+                alphas.height,
+                alphas.extent(),
+                |dst| gpu::write_zero_padded(dst, coverage),
+            )
+        });
+        if !staged {
+            gpu::with_padded_alphas(
+                &mut frame.strips.alphas,
+                alphas.width,
+                alphas.height,
+                |bytes| {
+                    queue.write_texture(
+                        alphas.copy_target(),
+                        bytes,
+                        resource_layout(bytes_per_row, alphas.height),
+                        alphas.extent(),
+                    );
+                },
+            );
+        }
 
         if !self.paints_data.is_empty() {
             let footprint = gpu::resource_texture_bytes(self.paints.width, self.paints.height);
@@ -5650,15 +5806,27 @@ impl FrameResources {
             if GpuEncodedPaint::serialize_to_buffer(&self.paints_data, &mut self.paint_staging)
                 .is_ok()
             {
-                queue.write_texture(
-                    self.paints.copy_target(),
-                    &self.paint_staging,
-                    resource_layout(
-                        gpu::resource_bytes_per_row(self.paints.width),
-                        self.paints.height,
-                    ),
-                    self.paints.extent(),
-                );
+                let paints = &self.paints;
+                let staging = &self.paint_staging;
+                let bytes_per_row = gpu::resource_bytes_per_row(paints.width);
+                let staged = stage.as_deref_mut().is_some_and(|stage| {
+                    stage.copy_to_texture(
+                        encoder,
+                        paints.copy_target(),
+                        bytes_per_row,
+                        paints.height,
+                        paints.extent(),
+                        |dst| gpu::write_zero_padded(dst, staging),
+                    )
+                });
+                if !staged {
+                    queue.write_texture(
+                        paints.copy_target(),
+                        staging,
+                        resource_layout(bytes_per_row, paints.height),
+                        paints.extent(),
+                    );
+                }
             }
         }
 
@@ -5698,14 +5866,27 @@ impl FrameResources {
             self.gradients.width,
         );
         let config = GpuConfig::new(u32::from(size.0), u32::from(size.1), dim, dim);
-        queue.write_buffer(&self.config, 0, bytemuck::bytes_of(&config));
+        let config = bytemuck::bytes_of(&config);
+        let staged =
+            stage.is_some_and(|stage| stage.copy_to_buffer(encoder, config, &self.config, 0));
+        if !staged {
+            queue.write_buffer(&self.config, 0, config);
+        }
 
         atlas_serviced
     }
 
     /// Grows the instance buffer if this frame outgrew it, then uploads the
-    /// opaque and alpha instances back to back.
-    fn upload_instances(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, scratch: &Scratch) {
+    /// opaque and alpha instances back to back — as one staged copy when the
+    /// frame has a stage, two queue writes otherwise.
+    fn upload_instances(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        stage: Option<&mut StagingFrame>,
+        scratch: &Scratch,
+    ) {
         let (opaque, alpha) = scratch.instance_bytes();
         let required = (opaque.len() + alpha.len()) as u64;
         if required == 0 {
@@ -5729,6 +5910,11 @@ impl FrameResources {
                 }))
             }
         };
+        if let Some(stage) = stage
+            && stage.copy_parts_to_buffer(encoder, &[opaque, alpha], buffer, 0)
+        {
+            return;
+        }
         if !opaque.is_empty() {
             queue.write_buffer(buffer, 0, opaque);
         }
