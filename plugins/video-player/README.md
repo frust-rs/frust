@@ -149,7 +149,7 @@ The native view is the default (`VideoOutput::NativeView`). Set `PlayerOptions.o
 
 ```rust
 let handle = /* your VideoPlayerHandle, opened with output: VideoOutput::Texture */;
-if let Some(view) = frust_video_player::video_texture_view(&handle, VideoFit::Cover) {
+if let Some(view) = frust_video_player::api::video_texture_view(&handle, VideoFit::Cover) {
     // `view` is a frust widget: clips to its box and corner radius, scrolls and
     // transforms with its parent, and frust content over it draws over it.
 }

@@ -111,7 +111,7 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `ViewCommand::Update.z_index` and the `ViewCommand::{Overlay, DisposeOverlay}` commands, emitted
   by `PlatformViewState::ingest_scene(frames, shields, commands, viewport)` (plain `ingest` never
   emits overlays). Z-shields are now input-only.
-- Segmented rendering: `frust_render::OverlaySurface` and `SurfaceRenderer::encode_segmented`,
+- Segmented rendering: `frust_render::overlay::OverlaySurface` and `SurfaceRenderer::encode_segmented`,
   `submit_segmented` and `submit_segmented_deferred` draw one compiled frame as a main segment plus
   one segment per cut with a single submit.
 - Android overlay host behind `FRUST_OVERLAYS` (default off; frust paint above a native view on an
@@ -184,7 +184,7 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 - A `scroll_to_item` request that moves nothing (unknown key, or `Nearest` on a fully visible row)
   now supersedes an in-flight controller tween instead of leaving it running.
 - `VideoFit::Cover` no longer spills outside its box on Android in texture mode, where the frames
-  are scene content and crop inside the box (act_000001a092461e09gnxOMe0U, Android half).
+  are scene content and crop inside the box (Android half; the Apple producers are pending).
 
 ## 0.6.1 — 2026-10-12
 
