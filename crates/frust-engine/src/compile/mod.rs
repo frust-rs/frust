@@ -105,8 +105,8 @@ use crate::config;
 use crate::error::EngineError;
 use crate::filters::{Backdrop, MAX_BACKDROPS_PER_FRAME, backdrop_region, backdrop_sigma};
 use crate::text::{
-    AtlasPolicy, FontFacts, GlyphQuadScratch, GlyphQuadTargets, GlyphRunTargets, RunKey, RunRoute,
-    context_paint, glyph_atlas_policy, lower_glyph_run,
+    AtlasPolicy, FontFacts, GlyphQuadScratch, GlyphQuadTargets, GlyphRunRouting, GlyphRunTargets,
+    RunKey, RunRoute, context_paint, glyph_atlas_policy, lower_glyph_run,
 };
 
 /// Curve-flattening tolerance, in device pixels.
@@ -372,12 +372,22 @@ pub struct CompiledFrame {
     /// How many of this frame's clips lowered to a coverage mask.
     pub mask_clips: u32,
     /// Atlas regions whose texels must be cleared before this frame draws,
-    /// freed by the residency reap at the head of the frame.
+    /// freed by the residency reap at the head of the frame — less every
+    /// rectangle an upload of the same plan rewrites in full (see
+    /// [`image_forgets`](Self::image_forgets) for the unfiltered set).
     ///
     /// Serviced **before** [`image_uploads`](Self::image_uploads): a rectangle
     /// freed this frame can be re-allocated in the same frame, so clearing
     /// after writing would erase the image that just moved in.
     pub image_evictions: Vec<AtlasRegion>,
+    /// Every atlas rectangle whose resident image was reaped, for the
+    /// consumer's registry to forget.
+    ///
+    /// A superset of [`image_evictions`](Self::image_evictions): a clear is
+    /// skipped when an upload in the same plan rewrites the identical
+    /// rectangle, but the evicted tenant is gone either way and must stop
+    /// resolving. Same pending-until-acknowledged lifetime.
+    pub image_forgets: Vec<AtlasRegion>,
     /// Atlas regions whose texels must be written before this frame draws, one
     /// per image that became resident during it.
     ///
@@ -1122,6 +1132,7 @@ impl SceneCompiler {
             mask_clips: 0,
             clip_mask_strips: 0,
             image_evictions: Vec::new(),
+            image_forgets: Vec::new(),
             image_uploads: Vec::new(),
             atlas_layers: 0,
             image_draws: 0,
@@ -1203,6 +1214,7 @@ impl SceneCompiler {
         // [`acknowledge_image_plan`](SceneCompiler::acknowledge_image_plan).
         let (evictions, uploads) = self.images.plan();
         frame.image_evictions = evictions;
+        frame.image_forgets = self.images.evictions().to_vec();
         frame.image_uploads = uploads;
         frame.atlas_layers = self.images.layers();
 
@@ -1825,15 +1837,17 @@ impl SceneCompiler {
             paint,
             &run.brush,
             hint_text,
-            atlas,
-            glyph_run_cache,
+            GlyphRunRouting {
+                atlas,
+                resident: glyph_run_cache,
+                quads,
+            },
             GlyphRunTargets {
                 generator,
                 clips,
                 prep: glyphs,
                 frame,
                 depth,
-                quads,
             },
         );
 

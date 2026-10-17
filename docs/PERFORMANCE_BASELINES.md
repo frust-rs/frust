@@ -122,47 +122,16 @@ evicted earlier while its glyph kept being drawn — before it is treated as the
 ### After Phase 1
 
 Re-captured 2026-10-14 from `feature/frust-fast-p1` (2acaf544: paint-class programs, one-pass opening, atlas
-tier rule + clear skip, hardware image sampler) with the same protocol (default build, 12x30 s, first two runs
-discarded, same fairness warnings, clocks unpinned); every scenario started below 34.0 C (Pixel 4 S1 / S5 / S6 /
-S4 at 31.5 / 33.8 / 34.0 / 33.8 C, the Pixel 4a within 31.5-34.0 C). Pixel 4a `kgsl-3d0` sampled at 1 Hz,
-median governor clock / busy Mcyc/s: S1 430 MHz / 347 (81 % busy), S4 180 / 34, S5 355 / 295, S6 267 / 150.
-
-Pixel 4a:
-
-| Scenario | total p50 / p95 | submit p50 | gpu_main p50 / p95 | walk / glyphs / upload / replay / instances | draws / strips / alphas |
-|---|---|---|---|---|---|
-| S1 | 16.61 / 18.39 | 10.60 | 12.75 / 12.99 | 6813 / 3899 / 585 / 1233 / 234 | 536 / 14,783 / 494,208 |
-| S4 | 11.97 / 12.79 | 4.25 | 2.69 / 2.75 | 697 / 318 / 313 / 0.8 / 52 | 46 / 1,056 / 26,832 |
-| S5 | 14.19 / 18.48 | 6.15 | 13.30 / 13.71 | 2459 / 167 / 732 / 1.0 / 97 | 31 / 3,050 / 84,512 |
-| S6 | 13.78 / 15.23 | 6.55 | 8.79 / 10.75 | 2972 / 2704 / 446 / 0.8 / 249 | 512 / 8,925 / 216,336 |
-
-Pixel 4 (S1 `gpu_main` held at 8.11-8.12 in every captured run, discarded ones included, while `submit`
-drifted 10.5 to 14.1 ms as the phone reached 36.5 C from run 9):
-
-| Scenario | total p50 / p95 | submit p50 | gpu_main p50 / p95 | walk / glyphs / upload / replay / instances | draws / strips / alphas |
-|---|---|---|---|---|---|
-| S1 | 11.15 / 14.70 | 10.66 | 8.12 / 8.40 | 8238 / 6593 / 315 / 864 / 139 | 525 / 14,077 / 474,272 |
-| S4 | 3.78 / 4.33 | 3.25 | 0.90 / 0.93 | 654 / 320 / 248 / 0.4 / 46 | 45 / 1,025 / 27,696 |
-| S5 | 6.41 / 7.17 | 4.78 | 5.52 / 5.59 | 1849 / 140 / 510 / 0.4 / 85 | 30 / 3,001 / 92,448 |
-| S6 | 6.90 / 7.52 | 5.61 | 3.65 / 3.69 | 2642 / 2444 / 348 / 0.3 / 211 | 508 / 8,918 / 224,184 |
-
-Kill-switch off-arm (`FRUST_ENGINE_UBER_PROGRAM=1 FRUST_ENGINE_NO_PASS_MERGE=1 FRUST_ENGINE_IMAGE_SAMPLER=0`,
-same APK recipe otherwise; before-row `gpu_main` p50 in the last column):
-
-| Phone / scenario | total p50 / p95 | submit p50 | gpu_main p50 / p95 | 4a clock / busy | before |
-|---|---|---|---|---|---|
-| Pixel 4a S1 | 32.57 / 35.99 | 14.10 | 27.10 / 27.50 | 700 MHz / 698 (100 %) | 32.70 |
-| Pixel 4a S5 | 17.84 / 37.02 | 5.68 | 21.97 / 22.42 | 700 MHz / 699 (100 %) | 26.27 |
-| Pixel 4 S1 | 14.01 / 16.04 | 13.56 | 10.70 / 10.93 | - | 11.15 |
-| Pixel 4 S5 | 12.02 / 12.86 | 4.76 | 8.55 / 8.83 | - | 8.54 |
-
-The off-arm reproduces the Pixel 4 before-rows within noise (S1 10.70 vs 11.15, warm; S5 8.55 vs 8.54) but sits
-16-17 % below the Pixel 4a ones (27.10 vs 32.70, 21.97 vs 26.27; governor 700 MHz, 100 % busy): the unswitched atlas
-tier rule + clear skip and the unsampled before-clock are the candidates. Acceptance: Pixel 4a S1 `gpu_main` <= 16 ms
-MET at 12.75 (before 32.70; total p95 18.39 still over 60 Hz); Pixel 4 S1 `gpu_main` <= 5.0 ms NOT MET at 8.12 (before
-11.15) — CPU-bound (`submit` 10.66 ms, walk 8.2 ms; the Pixel 4's kgsl is unreadable); no S4 / S6 regression MET (Pixel
-4a S4 7.21 to 2.69, S6 13.02 to 8.79; Pixel 4 S4 2.02 to 0.90, S6 7.32 to 3.65). S1 atlas counters per window: Pixel 4a
-replays 50 / misses 126 / evictions 133 (before 37 / 66 / 69), Pixel 4 41 / 86 / 97.
+tier rule + clear skip, hardware image sampler), same protocol, every scenario started below 34.0 C. Summary rows
+(total p50 / p95, `gpu_main` p50, ms; the full tables, the kill-switch off-arm and the atlas counters stay in the
+Phase 1 gate records): Pixel 4a S1 16.61 / 18.39 / 12.75 (before 33.52 / 35.04 / 32.70), S4 11.97 / 12.79 / 2.69,
+S5 14.19 / 18.48 / 13.30, S6 13.78 / 15.23 / 8.79; Pixel 4 S1 11.15 / 14.70 / 8.12 (before 14.18 / 16.52 / 11.15),
+S4 3.78 / 4.33 / 0.90, S5 6.41 / 7.17 / 5.52, S6 6.90 / 7.52 / 3.65. Acceptance: Pixel 4a S1 `gpu_main` <= 16 ms
+MET; Pixel 4 S1 `gpu_main` <= 5.0 ms NOT MET (CPU-bound: `submit` 10.66 ms, walk 8.2 ms); no S4 / S6 regression
+MET. The off-arm (`FRUST_ENGINE_UBER_PROGRAM=1 FRUST_ENGINE_NO_PASS_MERGE=1 FRUST_ENGINE_IMAGE_SAMPLER=0`)
+reproduced the Pixel 4 before-rows within noise and sat 16-17 % below the Pixel 4a ones (unswitched atlas tier
+rule + clear skip, unsampled before-clock). S1 atlas counters per window: Pixel 4a replays 50 / misses 126 /
+evictions 133, Pixel 4 41 / 86 / 97.
 
 ### After Phase 2
 
@@ -214,6 +183,32 @@ re-run 12x30 on 2b4b9640 (Metal timestamp fix): run medians 4125-4269 us vs 2979
 4.34 / 4735 vs 5.79 / 4.38 / 4713, S6 5.57 / 1.66 / 4010 vs 5.57 / 1.64 / 3988. Every iPhone target in the plan's success criteria misses, carried
 to Phase 3: S1 / S6 enc `total_us` 4196 / 2844 vs <= 1500, S6 work 5.26 vs <= 4.3, S2 work 6.00 vs <= 5.0 (layout 3.29); `upload` (864 / 1231)
 dominates. OnePlus 9 vs its all-off arm: S6 enc 3818 to 1548 (-59 %; frame p50 7.90 to 4.96, -37 %), S1 enc 4983 to 4355 (-13 %) with `upload` +101 and `replay` +235 us, the Pixel 4 mechanism.
+
+### After Phase 3
+
+Captured 2026-10-16 from `feature/frust-fast-p3` (b6e5a665: Phase 2 + staging ring, bind-group cache, glyph-atlas
+replay fix) with the inline-path protocol profile APK (`FRUST_TRACE_RAW=1 FRUST_NO_RENDER_THREAD=1`, 12x30 s, first
+two runs discarded, clocks unpinned, charging over USB); the "before" rows are the same protocol on v0.6.2 (ad0c82b6).
+OnePlus 9 at 120 Hz; the Pixel 4 was not attached and its rows stay owed.
+
+| Phone / scenario | total p50 / p95 | submit p50 | gpu_main p50 / p95 | walk / glyphs / upload / replay / instances | enc total (before) | replays / misses / evicted |
+|---|---|---|---|---|---|---|
+| Pixel 4a S1 | 5.33 / 12.44 | 4.77 | 13.97 / 14.27 | 2063 / 186 / 216 / 0.3 / 256 | 2797 (4523) | 0 / 0 / 0 (51 / 124 / 132) |
+| Pixel 4a S4 | 4.12 / 4.37 | 3.72 | 2.33 / 2.36 | 439 / 55 / 55 / 0.6 / 44 | 683 | 0 / 0 / 0 |
+| Pixel 4a S6 | 5.30 / 5.67 | 4.31 | 4.86 / 4.93 | 835 / 420 / 62 / 0.6 / 112 | 1408 (1714) | 0 / 0 / 0 |
+| OnePlus 9 S1 | 5.81 / 6.44 | 5.44 | 3.49 / 3.54 | 2664 / 155 / 121 / 0.3 / 302 | 3350 (4103) | 0 / 0 / 0 (49 / 109 / 127) |
+| OnePlus 9 S4 | 4.31 / 5.18 | 3.96 | 0.46 / 0.47 | 582 / 66 / 53 / 0.4 / 68 | 853 | 0 / 0 / 0 |
+| OnePlus 9 S6 | 4.51 / 5.29 | 3.71 | 0.60 / 0.63 | 739 / 402 / 47 / 0.4 / 94 | 1252 (1489) | 0 / 0 / 0 |
+
+Before-rows (v0.6.2, same protocol): Pixel 4a S1 6.62 / 11.73, submit 6.13, upload 571, replay 1283; S6 5.32 / 5.84,
+upload 381; OnePlus 9 S1 5.96 / 7.57, upload 358, replay 1184; S6 4.76 / 5.47, upload 260. The
+`FRUST_ENGINE_NO_STAGING_RING=1` arm reproduces the before `upload` (Pixel 4a 565 / 382, OnePlus 9 382 / 262) with
+everything else unmoved, so the ring owns the upload gain and the replay fix (no switch) owns the replay one.
+Acceptance: `replay_us` <= 0.1 ms on S1 / S6 MET on both phones; `upload_us` <= 0.2 ms MET except Pixel 4a S1 at 216
+(the staging-ring target miss, from 571); S1 / S6 totals not worse MET on p50 and enc total (Pixel 4a S1 p95 12.44 sits inside the
+10.27-12.59 spread of the GPU-bound captures at 355 MHz); S4 `submit - gpu_main` <= 1.0 ms was a Pixel 4 target — the
+Pixel 4a gives 1.39 and the OnePlus 9 3.50 (its inline-path `submit` holds the present block), both recorded as not
+met. Pixel 4a S1 `gpu_main` sits at 13.9-14.0 in every Phase 3 capture (Phase 2: 13.89). iPhone SE rows: Mac leg owed.
 
 ## Dev loop
 

@@ -405,11 +405,28 @@ impl AtlasArray {
     /// that strays into the unwritten remainder reads transparent black rather
     /// than the previous tenant's pixels.
     pub fn clear_region(&self, queue: &wgpu::Queue, region: AtlasRegion) -> bool {
+        self.clear_region_with(queue, region, &mut Vec::new())
+    }
+
+    /// [`clear_region`](Self::clear_region) over a caller-owned zero buffer.
+    ///
+    /// `zeros` only ever grows and is only ever zero-filled, so a caller
+    /// clearing many rectangles per frame pays for the largest one once
+    /// instead of one allocation per rectangle.
+    pub fn clear_region_with(
+        &self,
+        queue: &wgpu::Queue,
+        region: AtlasRegion,
+        zeros: &mut Vec<u8>,
+    ) -> bool {
         if !self.contains(region) {
             return false;
         }
-        let zeros = vec![0_u8; region.byte_len()];
-        self.write_region(queue, region, &zeros)
+        let len = region.byte_len();
+        if zeros.len() < len {
+            zeros.resize(len, 0);
+        }
+        self.write_region(queue, region, &zeros[..len])
     }
 
     /// Whether `region` lies wholly inside this array.

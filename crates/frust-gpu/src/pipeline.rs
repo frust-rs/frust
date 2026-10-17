@@ -1080,6 +1080,30 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+    /// The layout axis holds `1 << LAYOUT_BITS` distinct layouts and no more:
+    /// the next one is refused rather than aliasing an index, a layout already
+    /// interned keeps answering, and a refusal leaves the table unchanged.
+    #[test]
+    fn the_layout_axis_refuses_a_layout_past_its_bit_field() {
+        let mut layouts: AxisTable<u32> = AxisTable::new(LAYOUT_BITS);
+        let capacity = 1_u32 << LAYOUT_BITS;
+        for layout in 0..capacity {
+            assert_eq!(layouts.intern(&layout), Some(u64::from(layout)));
+        }
+        assert_eq!(layouts.intern(&capacity), None, "the table is full");
+        assert_eq!(layouts.intern(&(capacity + 1)), None);
+        assert_eq!(
+            layouts.index.len(),
+            capacity as usize,
+            "a refusal adds nothing"
+        );
+        assert_eq!(
+            layouts.intern(&7),
+            Some(7),
+            "an interned layout still answers"
+        );
+    }
+
     /// Stands in for a `wgpu::RenderPipeline` so the queue/steal policy runs
     /// with no device: it records which variant it was built from.
     #[derive(Debug, PartialEq, Eq)]

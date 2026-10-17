@@ -121,6 +121,37 @@ pub fn pass_merge_disabled() -> bool {
     })
 }
 
+/// Whether the engine's per-frame uploads skip the staging ring via
+/// `FRUST_ENGINE_NO_STAGING_RING`. Cached: read once per process.
+///
+/// The kill switch over the staging ring ([`frust_gpu::staging`]): by default
+/// a frame writes its coverage, encoded paints, instances, viewport uniform
+/// and page uniforms into one reused, mapped staging slot and copies them out
+/// inside the caller's own encoder, ahead of the passes that read them. When
+/// set, every one of those uploads goes through `queue.write_buffer` /
+/// `queue.write_texture` again, exactly as before the ring existed — the same
+/// bytes by the other route, which is the off-arm of every before/after
+/// measurement of it and the escape hatch for a driver that mishandles the
+/// copies. `EngineRenderer::set_staging_ring` is its programmatic counterpart.
+pub fn staging_ring_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| {
+        let disabled = env_flag_enabled(
+            option_env!("FRUST_ENGINE_NO_STAGING_RING"),
+            std::env::var("FRUST_ENGINE_NO_STAGING_RING").ok(),
+        );
+        log::info!(
+            "frust-engine staging ring: {}",
+            if disabled {
+                "off (FRUST_ENGINE_NO_STAGING_RING)"
+            } else {
+                "on"
+            }
+        );
+        disabled
+    })
+}
+
 /// Whether Medium-quality atlas images are filtered through the hardware
 /// sampler — on unless `FRUST_ENGINE_IMAGE_SAMPLER=0` (or `false`) says
 /// otherwise. Cached: read once per process.
@@ -522,7 +553,7 @@ mod tests {
 
     // The `OnceLock` getters (`uber_program_forced`, `pass_merge_disabled`,
     // `image_sampler_enabled`, `run_split_min`, `glyph_quads_disabled`,
-    // `glyph_run_cache_disabled`) are
+    // `glyph_run_cache_disabled`, `staging_ring_disabled`) are
     // deliberately not asserted here: they read the process environment, and
     // a machine running the off-arm captures exports exactly these knobs. The
     // pure parsers above and below are the contract.
