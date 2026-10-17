@@ -27,10 +27,11 @@
 //! # Focus and precedence
 //!
 //! A row of baseline controls (Button, Checkbox, Radio, Slider, TextInput) is
-//! the first run of Tab stops on the page, so Tab / Shift+Tab walk it with the
-//! focus ring. A focused text input consumes typed text and every chorded
-//! character (so `Mod+K` and `Mod+B` do nothing while it has focus), declines
-//! Tab, and consumes Escape to blur itself. Bare `1`/`2`/`3` and typed text
+//! the first run of Tab stops on the page, so Tab / Shift+Tab walk it (the
+//! baseline controls paint no focus cue; the field's border is the visible
+//! stop). A focused text input consumes typed text, declines Tab and every
+//! chord it does not decode (so `Mod+K` and `Mod+B` still fire while it has
+//! focus), and consumes Escape to blur itself. Bare `1`/`2`/`3` and typed text
 //! reach the registry only when no focused widget takes them. The readout line
 //! names the last consumer; `tests/shortcuts.rs` pins the whole matrix.
 

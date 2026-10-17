@@ -251,8 +251,10 @@ Semantics.
   takes focus.
 - **A design system's focus visual is the consumer's call.** `frust_shadcn::button` is the
   reference keyboard-only consumer: its ring and ring-coloured border read
-  `PaintCtx::is_focused_for_ring`, like upstream's `focus-visible:`. `frust_shadcn::input` keeps
-  `has_focus`, because the browser shows `:focus-visible` on a text field focused by a click too.
+  `PaintCtx::is_focused_for_ring`, like upstream's `focus-visible:` — true under the root's
+  `FocusRingPolicy` (`KeyboardOnly` by default: focus came from Tab and no pointer press has landed
+  since; `Always`; never under `Never`). `frust_shadcn::input` keeps `has_focus`, because the
+  browser shows `:focus-visible` on a text field focused by a click too.
 
 ## See Also
 
