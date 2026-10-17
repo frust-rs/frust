@@ -317,9 +317,11 @@ silently. (2026-09-13)
 **Why accepted**: `EditCommand::Paste` is focus-routed and carries no identity
 of its own, so a late answer has to be checked against something, and a paste
 landing in the wrong field cannot be taken back. What it is checked against is
-the framework's focus *session identity* (`RenderRoot::focus_epoch`, advanced
-once per honoured focus claim and once per session release), so the check is
-an identity rather than a proxy for one: focus cannot move from one field to
+the framework's focus *session identity* (`RenderRoot::focus_epoch`, which
+moves on every honoured focus claim and every session release, by no fixed
+step: a claim moves it one step, a session ending inside a dispatch two, and
+a Tab traversal grant, which releases and then claims, two),
+so the check is an identity rather than a proxy for one: focus cannot move from one field to
 another without moving it, whether or not the field taking focus publishes an
 IME surface, and whether or not two fields publish structurally identical
 state.
@@ -3322,11 +3324,18 @@ the cursor API (merged 2026-08-17, `49bc7657`) listed this among its limitations
 whole app — owner-hosted, root-painted after the main tree, root-routed ahead of it — and the v1
 seam declines six things, each named in its own source:
 
-1. **No focus trap.** Focus inside a pod behaves exactly like focus anywhere else; nothing confines
-   traversal to the pod or restores it on dismiss.
-2. **No declined-key forwarding.** Key, IME and edit-command events stay focus-routed and are never
-   re-offered to an overlay owner that did not take focus, so a pod cannot hand a key it declined
-   to a sibling panel that would have taken it.
+1. **No focus trap.** A modal pod (`OverlayKeys::Modal`, or a consuming outside tap) masks
+   main-tree shortcuts and confines Tab traversal to itself, but focus is neither trapped nor
+   restored: a main-tree widget that held focus when the pod opened keeps it and still sees every
+   key first, nothing returns focus to the opener on dismiss, and the pod's first focusable is not
+   auto-focused (`overlay-no-auto-focus-on-appear`). Traversal also never stops in a Transparent
+   pod, a non-Current navigator page, an unselected `IndexedStack` child, or a non-modal floated pod
+   (`OverlaySlot` does not visit its pod for traversal).
+2. **Declined-key forwarding carries keys only, on request.** Key, IME and edit-command events
+   stay focus-routed (`InputEvent::is_focus_routed`). A declined `Key` reaches a pod only when its
+   owner asked for the focus session's declined keys (`EventCtx::forward_declined_keys_to`) or, for
+   an Escape, when the pod is modal; IME and edit commands are never re-offered, and PageUp/PageDown
+   cannot be forwarded at all because `NamedKey` has no such keys.
 3. **The catalogs' own hosts are not on it.** All six `overlay::anchored`/`overlay::modal` hosts
    across `frust_shadcn`, `frust_material` and `frust_beui` still place and paint their surfaces
    in-tree; `frust_shadcn::tooltip`/`hover_card`, `frust_beui::tooltip`, and
@@ -3358,7 +3367,8 @@ seam declines six things, each named in its own source:
 5. **Every overlay pointer event walks the whole tree.** A hit on a registered rect dispatches
    `InputEvent::Overlay` as a broadcast, and a broadcast is forwarded to every child
    unconditionally — no hit test, no capture fast path, no focus gate — so one press inside a
-   floated surface costs a full tree walk.
+   floated surface costs a full tree walk. The key side shares the cost: every declined-key offer
+   and every `InputEvent::Shortcut` candidate is a broadcast pass of its own.
 6. **An owner torn down by a structural rebuild cannot animate out.** The registry is per paint
    pass, so a surface lives exactly as long as its owner keeps registering it, and an exit ramp is
    "keep registering while it runs" — which an owner the rebuild has unmounted cannot do. This is
@@ -3381,8 +3391,9 @@ behaviour riding on it — the catalog hosts work, and moving them is a port rat
 (5) is a real cost rather than a correctness gap: the walk happens per overlay pointer event, not
 per frame, and the broadcast is the only route that reaches an owner without knowing where it sits.
 
-**Evidence**: `crates/frust-core/src/overlay.rs`'s "Not in v1" section (focus trap, declined keys,
-inspection, nesting) and its per-pass registry contract; `crates/frust-widgets/src/overlay.rs`'s
+**Evidence**: `crates/frust-core/src/overlay.rs`'s "Not in v1" section (focus trap, inspection,
+nesting), its declined-key paragraph and its per-pass registry contract;
+`crates/frust-core/src/app/dispatch.rs`'s `dispatch_declined_key` and `focus_stops`; `crates/frust-widgets/src/overlay.rs`'s
 own "Not in v1" section (semantics, hover, IME); `crates/frust-core/src/event/input.rs`'s
 `InputEvent::Overlay` routing contract (the broadcast); `plugins/shadcn/src/components/tooltip.rs`,
 `plugins/beui/src/components/tooltip.rs`, and `plugins/material/src/tooltip.rs` module docs (all
@@ -3391,7 +3402,8 @@ titled "Riding the framework portal") against the six unported
 `plugins/material/src/tooltip.rs`'s `TooltipWidget`/`RichTooltipWidget` `semantics` methods and
 their pre-port use of `crate::overlay::anchored` (for item (4)'s regression above).
 
-**Trigger for removal**: per item — a focus-trap seam, a declined-key route, the catalog hosts
+**Trigger for removal**: per item — a focus trap with restore and auto-focus, forwarding for IME,
+edit commands and the missing named keys, the catalog hosts
 ported onto `OverlaySlot`, an overlay-aware semantics and inspection path, and a keyed dispatch
 that reaches an owner without a full walk.
 
@@ -4340,9 +4352,9 @@ section documenting `tooltip`'s move off this host onto the framework overlay po
 
 ---
 
-### `beui-focus-and-keys` — four named focus/keyboard gaps across the catalog
+### `beui-focus-and-keys` — five named focus/keyboard gaps across the catalog
 
-**Observed**: four related gaps, each named in its component's own source:
+**Observed**: five related gaps, the first four named in their components' own source:
 
 1. **No type-ahead or keyboard list navigation.** `select`, `combobox`, and `multi_select` ship none
    of Radix's jump-to-typed-match or arrow-key row traversal — a wrapped editable owns the focus
@@ -4367,14 +4379,20 @@ section documenting `tooltip`'s move off this host onto the framework overlay po
 4. **No widget-side auto-dismiss timer.** `animated_toast_stack` ports no timer at all — upstream's
    lives in a React hook, and a widget-side timer could only fire on the user's next input event,
    which is not what auto-dismiss means; the app owns the dismiss schedule instead.
+5. **No Tab stops.** The framework's root Tab/Shift+Tab traversal exists, but no beUI control
+   answers `Widget::is_focusable`, so Tab never stops anywhere in the catalog and no control
+   activates from the keyboard through it.
 
 **Applies to**: `frust_beui::components::select`/`combobox`/`multi_select`,
 `frust_beui::blocks::feedback_widget`, `frust_beui::components::expanding_arrow_button` (both
-`hold_action_button` and `slide_action_button`), `frust_beui::components::animated_toast_stack`.
+`hold_action_button` and `slide_action_button`), `frust_beui::components::animated_toast_stack`;
+(5) every interactive `frust_beui` control.
 
 **Why accepted**: (1) mirrors an already-accepted shadcn boundary; (2) and (3) are framework-level
 gaps with no plugin-tier fix available, already accepted for their originating catalogs/entries;
-(4) is a correct reading of what a widget can own versus what only the app's own clock can drive.
+(4) is a correct reading of what a widget can own versus what only the app's own clock can drive;
+(5) is per-control opt-in work (`is_focusable`, Space/Enter activation, a ring read through
+`PaintCtx::is_focused_for_ring`) not yet done for this catalog.
 
 **Evidence**: `plugins/beui/src/components/select.rs`, `combobox.rs`, `multi_select.rs` module docs
 ("No type-ahead"/"No type-ahead, and no keyboard list navigation");
@@ -4382,7 +4400,7 @@ gaps with no plugin-tier fix available, already accepted for their originating c
 field", "It reserves its open box and paints inside it" — the morph is pure paint, no rebuild);
 `plugins/beui/src/components/expanding_arrow_button.rs` module docs ("fires on the next
 event pass", "Keyboard activation is not ported"); `plugins/beui/src/components/animated_toast_stack.rs`
-module docs ("No timer").
+module docs ("No timer"); no `is_focusable` implementation under `plugins/beui/src` (for item 5).
 
 ---
 
@@ -5689,24 +5707,26 @@ not modelled at all"); the Material 3 Expressive scope decision to leave dynamic
 
 ---
 
-### `material-no-focus-traversal` — no keyboard tab-order/traversal between controls; overlays claim focus only on first interaction
+### `material-no-focus-traversal` — no material control is a Tab stop; overlays claim focus only on first interaction
 
 **Observed**: the catalog ports per-widget focus **visuals** throughout (state-layer focus rings
-and outlines, gated on `PaintCtx::has_focus`), but the framework underneath has no keyboard
-focus-**traversal** system — no Tab ring, no `autofocus`, no `FocusNode` equivalent — because the
-baseline focus model is per-widget claim-based (a widget claims focus itself, from its own event
-pass, in response to a `Down`) with no orchestration moving focus between controls or on mount.
-`button/mod.rs` and `split_button.rs` each record it verbatim as an "Honest limitation" ("frust has
-no keyboard focus traversal … no autofocus, no `FocusNode`, no Tab-ring"); `slider/mod.rs`'s thumb
-ring is ported and painted, but "[n]othing focuses a slider today" for the same reason.
+and outlines, gated on `PaintCtx::has_focus`). The framework now has root Tab/Shift+Tab traversal
+over `Widget::is_focusable` stops ([CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md)'s Keyboard
+Shortcuts and Traversal), but no `frust_material` control opts in — none answers `is_focusable` —
+so Tab never stops on a material control and focus still arrives only through a widget's own
+claim from a `Down`; there is still no `autofocus` or claim-on-mount. `button/mod.rs` and
+`split_button.rs` record the gap as an "Honest limitation" ("frust has no keyboard focus traversal
+… no autofocus, no `FocusNode`, no Tab-ring" — wording that predates the root walk; the catalog's
+missing opt-ins are what keep it true here); `slider/mod.rs`'s thumb ring is ported and painted,
+but "[n]othing focuses a slider today" for the same reason.
 `dropdown/mod.rs`'s Up/Down/Enter/Escape panel handling is gated on the identical claim-based
 model — the panel only sees key events once it holds focus, which it claims on a press inside
 itself, so a caller must complete one pointer interaction with the panel before the arrows do
 anything; the module doc names this "no auto-focus-on-appear hook and no focus-traversal seam in
 the framework."
 
-**Applies to**: every interactive `frust_material` component — the underlying claim-based focus
-model is framework-wide, not a per-widget choice. Module docs call the gap out explicitly for
+**Applies to**: every interactive `frust_material` component — none of them is a Tab stop, so each
+rides the claim-on-press model alone. Module docs call the gap out explicitly for
 buttons, split button, sliders, and the dropdown panel; every other focus-visual seam in the
 catalog (menus, dialogs, text fields) rides the identical model without its own restatement. See
 `overlay-no-auto-focus-on-appear` for the sibling gap this entry does not re-cover: no widget
@@ -5714,11 +5734,11 @@ catalog (menus, dialogs, text fields) rides the identical model without its own 
 that entry is the register's existing home for the on-appear half; this entry covers the
 between-controls traversal half.
 
-**Why accepted / fix direction**: framework-level work — a real fix is a `frust-widgets`
-Tab-ring/traversal primitive (focus order, Tab/Shift-Tab movement) plus a claim-on-mount hook,
-neither of which exists yet. Every current design-system component ports its focus **geometry**
-ahead of that primitive so it activates for free the day traversal lands, rather than blocking the
-port on it.
+**Why accepted / fix direction**: the traversal half is now per-control catalog work — each
+control answers `is_focusable`, activates on a bare Space/Enter while focused, and reads its ring
+through `PaintCtx::is_focused_for_ring` for keyboard-only display — while the claim-on-mount hook
+is still framework work that does not exist. The ported focus **geometry** is what those opt-ins
+will light up.
 
 **Evidence**: `plugins/material/src/button/mod.rs` module doc's "Focus ring" section ("Honest
 limitation"); `plugins/material/src/split_button.rs` module doc ("Honest limitation, the same one
@@ -8104,3 +8124,54 @@ in every shell and is future work.
 **Trigger for removal**: a producer push that wakes the frame gate without a requester.
 
 **Evidence**: `examples/playground` camera page; `crates/frust-render/src/texture_bus.rs`.
+
+---
+
+### `shortcuts-v1-scope` — `Mod` is fixed at compile time, no function-key chords, and a focused field inside a modal takes the first Escape
+
+**Observed**: three edges of the keyboard-shortcut registry. (1) `Mod` resolves at compile time —
+Command on macOS/iOS, Ctrl everywhere else, `wasm32` included — so a web build running in a browser
+on a Mac binds and labels Ctrl (`Ctrl+K`, not `⌘K`). (2) No function-key chords: `NamedKey` has no
+F1-F24 and the shells drop them, so `Chord::parse("F2")` returns `ChordParseError::UnsupportedKey`.
+(3) The focus path sees every key before a modal pod's Escape, so a palette whose filter field holds
+focus spends the first Escape blurring the field and closes on the second.
+
+**Applies to**: apps binding chords through `shortcuts(..)` or `PaintCtx::register_shortcut`; (1) web
+builds on macOS only; (3) any modal overlay holding a focused text field, such as the playground's
+Shortcuts palette.
+
+**Why accepted**: (1) a runtime platform probe on web is a separate seam no caller has needed yet;
+(2) needs function keys in the shared key vocabulary and in every shell's key mapping; (3) follows
+from the chain's order — the focused widget always sees a key first, and a field's Escape-to-blur is
+its keyboard way out.
+
+**Trigger for removal**: (1) a runtime `Mod` resolution on web; (2) function keys in `NamedKey`;
+(3) a modal Escape that runs ahead of the focus path.
+
+**Evidence**: `crates/frust-core/src/shortcuts.rs` (`Chord::parse`, `Chord::display`);
+`crates/frust-core/src/event/key.rs` (`NamedKey`); `crates/frust-shell-desktop/src/app_handler.rs`
+(`map_named_key` drops F1); `crates/frust-core/src/app/dispatch.rs` (`dispatch_declined_key`);
+`examples/playground/src/pages/shortcuts.rs`.
+
+---
+
+### `baseline-controls-no-focus-visual` — baseline controls paint no keyboard-focus cue, and a click drops their keyboard focus
+
+**Observed**: the baseline `Button`, `Checkbox`, `Radio` and `Slider` are Tab stops and answer the
+keyboard while focused, but none paints a ring or any other keyboard-focus cue, so tabbing across a
+row of them shows nothing moving (a focused `TextInput`'s own border is the only visible stop). They
+take focus from traversal only, never from a press, so clicking one that holds keyboard focus
+releases the session and the next Tab starts again from the first stop.
+
+**Applies to**: `frust_widgets`' baseline `Button`, `Checkbox`, `Radio` and `Slider`; design-system
+controls paint their own (`frust_shadcn::button` reads `PaintCtx::is_focused_for_ring`).
+
+**Why accepted**: the baseline set carries no design language to draw a ring in, and not claiming
+focus on a press keeps touch and mouse behaviour unchanged; `PaintCtx::is_focused_for_ring` is the
+hook a catalog reads today.
+
+**Trigger for removal**: a baseline keyboard-focus visual read through `is_focused_for_ring`.
+
+**Evidence**: `crates/frust-widgets/src/{button,checkbox,radio,slider}.rs` module docs ("focus
+arrives through traversal only"); the Shortcuts gate row in `examples/playground/README.md` ("the
+baseline controls paint no keyboard-focus ring").
