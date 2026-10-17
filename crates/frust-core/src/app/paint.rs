@@ -119,64 +119,48 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         let (paint_epoch, retained_layers) = (self.paint_epoch, self.retained_layers);
         let paint_serial = self.paint_serial;
         let retained_ledger = &self.retained_ledger;
-        if let Some(pod) = self.tree.pod_mut(root_id) {
-            let mut ctx = PaintCtx::new(pod.origin(), pod.size());
-            // The pass's global inputs (clock, theme, insets, frame count, translucency, retain).
-            ctx.set_frame_time(frame_time);
-            ctx.set_theme(theme);
-            ctx.set_window_insets(insets);
-            ctx.set_presented_frames(presented_frames);
-            ctx.set_translucent(surface_translucent);
-            ctx.set_paint_state(
-                paint_epoch,
-                retained_layers,
-                Some(retained_ledger),
-                paint_serial,
-            );
-            // Seed focus/hover from the root's mirrors and live epochs; `ChildPod::paint_child`
-            // counts a deeper link only while its stamp names the live session.
-            ctx.set_has_focus(self.focus_active);
-            ctx.set_focus_epoch(self.focus_epoch);
-            ctx.set_hovered(self.hover_active);
-            ctx.set_hover_epoch(self.hover_epoch);
-            pod.widget_mut().paint(&mut ctx, scene);
-            pod.clear_flags();
-            // Collected for `resolve_session_surface`, and only while a session is live,
-            // so a lagging widget cannot resurrect the surface a blur dropped.
-            let main_tree_ime = if self.focus_active {
-                ctx.take_ime_state()
-            } else {
-                None
-            };
-            // Replaced every pass, so a stale platform-view frame or input shield
-            // never outlives the paint that stopped publishing it.
-            self.platform_view_frames = ctx.take_platform_views();
-            self.input_shields = ctx.take_input_shields();
-            // Fold paint-time layout dirtying into `pending` (`request_layout`, an unpaced
-            // frame, the path bit, the root's landing paint); a paced-only frame folds
-            // nothing, or the frame gate would run it every vsync.
-            let needs_layout = ctx.needs_layout();
-            let animating = needs_layout || ctx.needs_frame();
-            let unpaced = needs_layout || (ctx.needs_frame() && !ctx.needs_frame_paced_only());
-            let landing = self.painted_animating && !animating;
-            if unpaced || landing || ctx.is_layout_path_dirty() {
-                self.pending |= ChangeFlags::LAYOUT;
-            }
-            self.painted_animating = animating;
-            // A rebuild that ran out of flush passes owes one more frame.
-            let deferred_frame = std::mem::take(&mut self.deferred_frame);
-            let outcome = PaintOutcome {
-                needs_frame: ctx.needs_frame() || deferred_frame,
-                needs_layout,
-                needs_frame_paced_only: ctx.needs_frame_paced_only(),
-                paced_interval: ctx.paced_interval(),
-                // Stamped by `paint` once both halves of the pass have run.
-                paint_serial: 0,
-            };
-            (outcome, main_tree_ime)
+        let Some(pod) = self.tree.pod_mut(root_id) else {
+            return (PaintOutcome::default(), None);
+        };
+        let mut ctx = PaintCtx::new(pod.origin(), pod.size());
+        // The pass's global inputs (clock, theme, insets, frame count, translucency, retain).
+        ctx.set_frame_time(frame_time);
+        ctx.set_theme(theme);
+        ctx.set_window_insets(insets);
+        ctx.set_presented_frames(presented_frames);
+        ctx.set_translucent(surface_translucent);
+        ctx.set_paint_state(
+            paint_epoch,
+            retained_layers,
+            Some(retained_ledger),
+            paint_serial,
+        );
+        // Seed focus/hover from the root's mirrors and live epochs; `ChildPod::paint_child`
+        // counts a deeper link only while its stamp names the live session.
+        ctx.set_has_focus(self.focus_active);
+        ctx.set_focus_epoch(self.focus_epoch);
+        ctx.set_hovered(self.hover_active);
+        ctx.set_hover_epoch(self.hover_epoch);
+        pod.widget_mut().paint(&mut ctx, scene);
+        pod.clear_flags();
+        // Collected for `resolve_session_surface`, and only while a session is live,
+        // so a lagging widget cannot resurrect the surface a blur dropped.
+        let main_tree_ime = if self.focus_active {
+            ctx.take_ime_state()
         } else {
-            (PaintOutcome::default(), None)
-        }
+            None
+        };
+        // Replaced every pass, so a stale platform-view frame or input shield
+        // never outlives the paint that stopped publishing it.
+        self.platform_view_frames = ctx.take_platform_views();
+        self.input_shields = ctx.take_input_shields();
+        let outcome = fold_main_tree_outcome(
+            &ctx,
+            &mut self.pending,
+            &mut self.painted_animating,
+            &mut self.deferred_frame,
+        );
+        (outcome, main_tree_ime)
     }
 
     /// Paint this pass's floated pods above the main tree, each at its own
@@ -236,24 +220,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                 holds
             };
 
-            // Fold the frame request: OR, max-lattice class, MIN-lattice paced interval.
-            let stood_unpaced = outcome.needs_frame && !outcome.needs_frame_paced_only;
-            let entry_unpaced = ctx.needs_frame() && !ctx.needs_frame_paced_only();
-            outcome.needs_frame |= ctx.needs_frame();
-            outcome.needs_frame_paced_only =
-                outcome.needs_frame && !(stood_unpaced || entry_unpaced);
-            outcome.paced_interval = match (outcome.paced_interval, ctx.paced_interval()) {
-                (Some(standing), Some(asked)) => Some(standing.min(asked)),
-                (standing, asked) => standing.or(asked),
-            };
-            // As in the tree; the pod's own mark makes the next pass a full one.
-            if ctx.needs_layout() {
-                outcome.needs_layout = true;
-                self.pending |= ChangeFlags::LAYOUT;
-            }
-            if ctx.is_layout_path_dirty() {
-                self.pending |= ChangeFlags::LAYOUT;
-            }
+            fold_overlay_outcome(&ctx, outcome, &mut self.pending);
             // Taken unconditionally and kept only from the live holder; an inactive
             // publish from any other pod is refused too, not read as a release.
             let published = ctx.take_ime_state();
@@ -308,5 +275,56 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// caching this value like [`RenderRoot::focus_ime_generation`].
     pub fn selection_toolbar_generation(&self) -> u64 {
         self.selection_toolbar_gen
+    }
+}
+
+/// Fold the main tree's paint-time layout dirtying into `pending` (`request_layout`, an unpaced
+/// frame, the path bit, the root's landing paint) and build its outcome. A paced-only frame folds
+/// nothing, or the frame gate would run it every vsync. Writes `painted_animating`, drains
+/// `deferred_frame`.
+fn fold_main_tree_outcome(
+    ctx: &PaintCtx<'_>,
+    pending: &mut ChangeFlags,
+    painted_animating: &mut bool,
+    deferred_frame: &mut bool,
+) -> PaintOutcome {
+    let needs_layout = ctx.needs_layout();
+    let animating = needs_layout || ctx.needs_frame();
+    let unpaced = needs_layout || (ctx.needs_frame() && !ctx.needs_frame_paced_only());
+    let landing = *painted_animating && !animating;
+    if unpaced || landing || ctx.is_layout_path_dirty() {
+        *pending |= ChangeFlags::LAYOUT;
+    }
+    *painted_animating = animating;
+    // A rebuild that ran out of flush passes owes one more frame.
+    let deferred_frame = std::mem::take(deferred_frame);
+    PaintOutcome {
+        needs_frame: ctx.needs_frame() || deferred_frame,
+        needs_layout,
+        needs_frame_paced_only: ctx.needs_frame_paced_only(),
+        paced_interval: ctx.paced_interval(),
+        // Stamped by `paint` once both halves of the pass have run.
+        paint_serial: 0,
+    }
+}
+
+/// Fold one floated pod's paint into `outcome`: the frame request ORed, its class on the max
+/// lattice, the paced interval on the MIN lattice; layout dirtying as in the tree, into `pending`
+/// too (the pod's own mark makes the next pass a full one).
+fn fold_overlay_outcome(ctx: &PaintCtx<'_>, outcome: &mut PaintOutcome, pending: &mut ChangeFlags) {
+    let stood_unpaced = outcome.needs_frame && !outcome.needs_frame_paced_only;
+    let entry_unpaced = ctx.needs_frame() && !ctx.needs_frame_paced_only();
+    outcome.needs_frame |= ctx.needs_frame();
+    outcome.needs_frame_paced_only = outcome.needs_frame && !(stood_unpaced || entry_unpaced);
+    outcome.paced_interval = match (outcome.paced_interval, ctx.paced_interval()) {
+        (Some(standing), Some(asked)) => Some(standing.min(asked)),
+        (standing, asked) => standing.or(asked),
+    };
+    if ctx.needs_layout() {
+        outcome.needs_layout = true;
+        *pending |= ChangeFlags::LAYOUT;
+    }
+    if ctx.is_layout_path_dirty() {
+        *pending |= ChangeFlags::LAYOUT;
     }
 }
