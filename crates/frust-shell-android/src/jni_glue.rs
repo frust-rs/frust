@@ -81,10 +81,11 @@ use crate::app::{
 };
 use crate::ffi_support::{
     EditCommandWire, FRAME_SYNC_ALL_BITS, FrameObservation, FrameSyncLatch, ImeJsonState,
-    PlatformViewCommandJson, build_ime_state_json, build_platform_view_commands_json,
-    edit_command_from_code, frame_sync_gating_enabled, load_pipeline_cache, normalize_ime_indices,
-    pipeline_cache_differs, pipeline_cache_path, platform_view_commands_up_to_date,
-    publish_resolved_translucency, write_pipeline_cache_atomic,
+    OnDiskCache, PlatformViewCommandJson, build_ime_state_json, build_platform_view_commands_json,
+    differs_from_on_disk, edit_command_from_code, frame_sync_gating_enabled, load_pipeline_cache,
+    next_pipeline_cache_generation, normalize_ime_indices, on_disk_cache, pipeline_cache_differs,
+    pipeline_cache_path, platform_view_commands_up_to_date, publish_resolved_translucency,
+    spawn_pipeline_cache_writer, write_pipeline_cache_in_order, write_pipeline_cache_recording,
 };
 use crate::overlay_state::{
     FrameRequest, OVERLAYS_ENV_VAR, OverlayCutSpec, OverlayLedger, OverlayMode, OverlaySkew,
@@ -989,7 +990,9 @@ impl SendableWindowPtr {
 
 /// Install (or reinstall) a `wgpu::Surface` on `renderer` from the raw
 /// `ANativeWindow*` `window_ptr`, on the render thread. On the
-/// **first** install it also seeds + persists the pipeline cache and records the
+/// **first** install it also loads + seeds the pipeline cache — handing the
+/// loaded blob to a fresh [`CachePersistence`] in `persistence`, which writes
+/// it back once the warm-up has built it out — and records the
 /// cache/adapter/device/renderer startup spans, mirroring the pre-split
 /// [`create_handle`] flow (which now happens render-side in the split).
 ///
@@ -1004,6 +1007,7 @@ fn install_surface(
     width: u32,
     height: u32,
     cache_path: Option<&Path>,
+    persistence: &mut Option<CachePersistence>,
     startup_spans: &mut Option<StartupSpans>,
     first_install: bool,
     translucent_resolved: &AtomicBool,
@@ -1066,13 +1070,11 @@ fn install_surface(
             spans.record(perf::SPAN_DEVICE_READY);
             spans.record(perf::SPAN_RENDERER_READY);
         }
-        if let Some(path) = cache_path {
-            persist_pipeline_cache_if_changed(
-                path.to_path_buf(),
-                loaded_cache.as_deref(),
-                renderer,
-            );
-        }
+        // Nothing is written here: the engine has only just queued its
+        // warm-up, so the blob would hold none of its pipelines yet. The
+        // persistence writes it once the warm-up is done.
+        *persistence =
+            cache_path.map(|path| CachePersistence::new(path.to_path_buf(), loaded_cache));
     }
     Ok(())
 }
@@ -1236,6 +1238,7 @@ pub(crate) fn render_loop(
     let mut renderer = frust_render::SurfaceRenderer::new();
     let mut frame_stats = FrameStats::new();
     let mut phase = RenderPhase::NoSurface;
+    let mut cache_persistence: Option<CachePersistence> = None;
     let mut first_install_done = false;
     let mut first_rebuild_recorded = false;
 
@@ -1255,6 +1258,7 @@ pub(crate) fn render_loop(
                         size.width,
                         size.height,
                         cache_path.as_deref(),
+                        &mut cache_persistence,
                         &mut startup_spans,
                         first_install,
                         &translucent_resolved,
@@ -1263,6 +1267,11 @@ pub(crate) fn render_loop(
                             first_install_done = true;
                             if let Some(hint) = frame_hint.as_mut() {
                                 hint.surface_installed();
+                            }
+                            // A fresh engine runs a fresh warm-up, owed its
+                            // own persist once it is done.
+                            if let Some(persistence) = cache_persistence.as_mut() {
+                                persistence.surface_installed();
                             }
                             // A (re)created engine starts with an empty
                             // retained store; publish it now, and note the
@@ -1301,6 +1310,9 @@ pub(crate) fn render_loop(
                     }
                 }
                 RenderCommand::SurfaceDestroyed { ack } => {
+                    // Read while the engine is still here, for the persist
+                    // below: one counter read, nothing held across the ack.
+                    let compiled = renderer.compiled_pipelines();
                     // Drop the surface resources FIRST, then acknowledge — the UI
                     // thread blocks on this ack before releasing the
                     // `ANativeWindow`, so the window is never touched after
@@ -1319,12 +1331,29 @@ pub(crate) fn render_loop(
                     if let Some(hint) = frame_hint.as_mut() {
                         hint.surface_destroyed();
                     }
+                    // The pause-time persist: a backgrounding app loses its
+                    // surface here, and its process may not see another frame.
+                    // After the ack, off the UI thread's barrier, from the cache
+                    // the destroyed surface left behind (everything its engine
+                    // built); rewritten only when it changed.
+                    if let Some(persistence) = cache_persistence.as_mut() {
+                        persistence.persist(
+                            &mut renderer,
+                            PersistMoment::SurfaceDestroyed,
+                            compiled,
+                        );
+                    }
                 }
                 RenderCommand::Pause { ack } => {
                     // Android v1 never sends `Pause` (Kotlin owns start/stop of the
                     // Choreographer loop); honor the barrier defensively so a stray
                     // one can never deadlock the UI thread.
                     ack.acknowledge();
+                    // A stray one still persists, after the barrier.
+                    if let Some(persistence) = cache_persistence.as_mut() {
+                        let compiled = renderer.compiled_pipelines();
+                        persistence.persist(&mut renderer, PersistMoment::Pause, compiled);
+                    }
                 }
                 RenderCommand::Resume => {}
             }
@@ -1386,6 +1415,12 @@ pub(crate) fn render_loop(
                         ui.rebuild + ui.layout + ui.paint,
                         encode_time,
                     );
+                }
+                // Once the warm-up has built every pipeline on its list, the
+                // blob that holds them goes to disk — once per surface, after
+                // the frame, so it never delays the frame that finished it.
+                if let Some(persistence) = cache_persistence.as_mut() {
+                    persistence.after_frame(&mut renderer);
                 }
             }
             // Give the drained scene back for the UI thread to reclaim —
@@ -1787,8 +1822,140 @@ fn spawn_split_executor(
     )
 }
 
+/// When a [`CachePersistence`] write happens, named in its log line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PersistMoment {
+    /// The surface's warm-up has built every pipeline on its list.
+    AfterWarmUp,
+    /// The surface was destroyed — how a backgrounding app's pause reaches the
+    /// render thread.
+    SurfaceDestroyed,
+    /// A `RenderCommand::Pause` barrier.
+    Pause,
+}
+
+impl PersistMoment {
+    fn describe(self) -> &'static str {
+        match self {
+            Self::AfterWarmUp => "after warm-up",
+            Self::SurfaceDestroyed => "on surface destroy",
+            Self::Pause => "on pause",
+        }
+    }
+}
+
+/// The split render thread's pipeline-cache persistence: where the blob lives,
+/// the bytes the file is known to hold, and whether the
+/// current surface's warm-up has been persisted yet.
+///
+/// A blob is written at most once per moment that can change it — once the
+/// warm-up is done, then whenever the surface goes — and only when it differs
+/// from what the file already holds. Every write runs on a detached thread
+/// (see [`Self::persist`]), so no frame and no lifecycle barrier waits on disk.
+struct CachePersistence {
+    path: PathBuf,
+    /// What the file holds: the bytes loaded at startup, replaced by a writer
+    /// only after its write succeeded.
+    on_disk: OnDiskCache,
+    warm_up_persisted: bool,
+}
+
+impl CachePersistence {
+    /// Persistence for `path`, whose file held `loaded` at startup.
+    fn new(path: PathBuf, loaded: Option<Vec<u8>>) -> Self {
+        Self {
+            path,
+            on_disk: on_disk_cache(loaded),
+            warm_up_persisted: false,
+        }
+    }
+
+    /// A (re)installed surface: its fresh warm-up is owed a persist.
+    fn surface_installed(&mut self) {
+        self.warm_up_persisted = false;
+    }
+
+    /// After a frame: persists once the current surface's warm-up is done,
+    /// and from then on costs one flag read a frame.
+    fn after_frame(&mut self, renderer: &mut frust_render::SurfaceRenderer) {
+        if self.warm_up_persisted || renderer.pipeline_warm_up_done() != Some(true) {
+            return;
+        }
+        self.warm_up_persisted = true;
+        let compiled = renderer.compiled_pipelines();
+        // A writer the OS refused leaves the warm-up owed: the next frame retries.
+        if !self.persist(renderer, PersistMoment::AfterWarmUp, compiled) {
+            self.warm_up_persisted = false;
+        }
+    }
+
+    /// Reads the blob and, when it differs from the file, hands it to a
+    /// detached writer and seeds the renderer's next install with it — so a
+    /// surface recreated later in this process warms up against what this
+    /// one built. `compiled` is the engine's pipeline count, for the log.
+    ///
+    /// The blob is [`frust_render::SurfaceRenderer::pipeline_cache_data`]'s,
+    /// which is what makes it a valid seed: bytes that renderer produced.
+    ///
+    /// Returns `false` only when the writer thread could not start, so the
+    /// write was not dispatched.
+    fn persist(
+        &mut self,
+        renderer: &mut frust_render::SurfaceRenderer,
+        moment: PersistMoment,
+        compiled: Option<u64>,
+    ) -> bool {
+        let when = moment.describe();
+        let pipelines = compiled.map_or_else(|| "unknown".to_string(), |n| n.to_string());
+        let Some(data) = renderer.pipeline_cache_data() else {
+            log::info!(
+                "frust-shell-android: pipeline cache persisted 0 B {when} (no blob; {pipelines} \
+                 pipelines)"
+            );
+            return true;
+        };
+        if !differs_from_on_disk(&self.on_disk, &data) {
+            log::info!(
+                "frust-shell-android: pipeline cache persisted {} B {when} (unchanged, not \
+                 rewritten; {pipelines} pipelines)",
+                data.len()
+            );
+            return true;
+        }
+        log::info!(
+            "frust-shell-android: pipeline cache persisting {} B {when} ({pipelines} pipelines)",
+            data.len()
+        );
+        renderer.set_initial_pipeline_cache_data(Some(data.clone()));
+        let data: Arc<[u8]> = Arc::from(data);
+        let path = self.path.clone();
+        let on_disk = Arc::clone(&self.on_disk);
+        let generation = next_pipeline_cache_generation();
+        spawn_pipeline_cache_writer(move || {
+            match write_pipeline_cache_recording(&path, &data, generation, &on_disk) {
+                Ok(true) => log::info!(
+                    "frust-shell-android: pipeline cache written {} B {when} to {}",
+                    data.len(),
+                    path.display()
+                ),
+                Ok(false) => log::debug!(
+                    "frust-shell-android: a newer pipeline cache was written first; this one \
+                     was dropped"
+                ),
+                Err(err) => log::warn!(
+                    "frust-shell-android: failed to persist pipeline cache to {}: {err}",
+                    path.display()
+                ),
+            }
+        })
+    }
+}
+
 /// Persist the current pipeline-cache blob to `path` on a background thread if it
-/// differs from `loaded`.
+/// differs from `loaded` — the inline executor's one persist, right after its
+/// surface install. The split render thread persists through
+/// [`CachePersistence`] instead, once the warm-up is done and again when the
+/// surface goes.
 ///
 /// Reads [`SurfaceRenderer::pipeline_cache_data`](frust_render::SurfaceRenderer::pipeline_cache_data)
 /// (framed + adapter-fingerprinted; `None` without Vulkan `PIPELINE_CACHE`), and
@@ -1809,8 +1976,7 @@ fn persist_pipeline_cache_if_changed(
         );
         return; // no cache to persist (Metal/desktop, or nothing compiled)
     };
-    let cache_changed = pipeline_cache_differs(loaded, &data);
-    if !cache_changed {
+    if !pipeline_cache_differs(loaded, &data) {
         log::info!(
             "frust-shell-android: pipeline cache persisted {} B (unchanged, not rewritten; \
              {warmed} warm-up pipelines finished)",
@@ -1820,30 +1986,22 @@ fn persist_pipeline_cache_if_changed(
     }
     let data_len = data.len();
     log::info!(
-        "frust-shell-android: pipeline cache persisted {data_len} B ({warmed} warm-up \
-         pipelines finished)"
+        "frust-shell-android: pipeline cache persisting {data_len} B at install \
+         ({warmed} warm-up pipelines finished)"
     );
-    let perf_enabled = perf::enabled();
-    std::thread::spawn(move || match write_pipeline_cache_atomic(&path, &data) {
-        Ok(()) => {
-            log::debug!(
-                "frust-shell-android: persisted pipeline cache ({} bytes) to {}",
-                data_len,
+    let generation = next_pipeline_cache_generation();
+    spawn_pipeline_cache_writer(move || {
+        match write_pipeline_cache_in_order(&path, &data, generation) {
+            Ok(false) => {}
+            Ok(true) => log::info!(
+                "frust-shell-android: pipeline cache written {data_len} B at install to {}",
                 path.display()
-            );
-            // Log persisted size + whether it changed (perf-gated).
-            if perf_enabled {
-                log::info!(
-                    "frust-shell-android: persisted pipeline cache ({} bytes, changed: {})",
-                    data_len,
-                    cache_changed
-                );
-            }
+            ),
+            Err(err) => log::warn!(
+                "frust-shell-android: failed to persist pipeline cache to {}: {err}",
+                path.display()
+            ),
         }
-        Err(err) => log::warn!(
-            "frust-shell-android: failed to persist pipeline cache to {}: {err}",
-            path.display()
-        ),
     });
 }
 

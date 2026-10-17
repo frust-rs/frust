@@ -22,6 +22,8 @@
 //! ([`crate::jni_glue`]) is `#[cfg(target_os = "android")]`.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 /// Whether an opaque handle from the JVM points at a live native side.
 ///
@@ -652,6 +654,115 @@ pub(crate) fn load_pipeline_cache(path: &Path) -> Option<Vec<u8>> {
 /// cost again.
 pub(crate) fn write_pipeline_cache_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
     frust_paths::atomic_write(path, data)
+}
+
+/// The generation of the newest pipeline-cache blob this process has written.
+static PIPELINE_CACHE_WRITTEN: Mutex<u64> = Mutex::new(0);
+
+/// The last generation [`next_pipeline_cache_generation`] handed out.
+static PIPELINE_CACHE_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// A ticket for one blob about to be persisted, taken on the thread that read
+/// the blob — so tickets follow the order the blobs were read in, whatever
+/// order their detached writers later run in.
+pub(crate) fn next_pipeline_cache_generation() -> u64 {
+    PIPELINE_CACHE_GENERATION.fetch_add(1, Ordering::Relaxed) + 1
+}
+
+/// [`write_pipeline_cache_atomic`] for a blob read under ticket `generation`,
+/// skipped (`Ok(false)`) when a blob read later has already been written.
+///
+/// A launch can persist more than once — after the warm-up, then on surface
+/// destroy — each from its own detached writer thread. Serializing the writes
+/// keeps two of them off the shared temp file, and the generation check keeps
+/// an older blob from landing over a newer one.
+pub(crate) fn write_pipeline_cache_in_order(
+    path: &Path,
+    data: &[u8],
+    generation: u64,
+) -> std::io::Result<bool> {
+    write_in_order(&PIPELINE_CACHE_WRITTEN, generation, || {
+        write_pipeline_cache_atomic(path, data)
+    })
+}
+
+/// The bytes the pipeline-cache file is known to hold, shared with the
+/// detached writers that update it.
+///
+/// A writer replaces the slot only once its write has succeeded, so a failed
+/// write leaves the old bytes standing and the next persist tries again.
+pub(crate) type OnDiskCache = Arc<Mutex<Option<Arc<[u8]>>>>;
+
+/// A slot holding `loaded`, the file's contents at startup.
+pub(crate) fn on_disk_cache(loaded: Option<Vec<u8>>) -> OnDiskCache {
+    Arc::new(Mutex::new(loaded.map(Arc::from)))
+}
+
+/// [`pipeline_cache_differs`] against the slot's bytes.
+pub(crate) fn differs_from_on_disk(slot: &OnDiskCache, new: &[u8]) -> bool {
+    let held = slot.lock().unwrap_or_else(PoisonError::into_inner);
+    pipeline_cache_differs(held.as_deref(), new)
+}
+
+/// [`write_pipeline_cache_in_order`] for a blob that, once it has landed,
+/// becomes the bytes `on_disk` reports.
+pub(crate) fn write_pipeline_cache_recording(
+    path: &Path,
+    data: &Arc<[u8]>,
+    generation: u64,
+    on_disk: &OnDiskCache,
+) -> std::io::Result<bool> {
+    write_in_order(&PIPELINE_CACHE_WRITTEN, generation, || {
+        record_after_write(on_disk, data, || write_pipeline_cache_atomic(path, data))
+    })
+}
+
+/// Runs `write` and, only when it succeeds, makes `data` the slot's bytes.
+/// Called under [`write_in_order`]'s lock, so slot updates follow the order
+/// the blobs were read in.
+fn record_after_write(
+    on_disk: &OnDiskCache,
+    data: &Arc<[u8]>,
+    write: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    write()?;
+    *on_disk.lock().unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(data));
+    Ok(())
+}
+
+/// Runs `job` on a detached thread named for the pipeline-cache writer.
+///
+/// Returns `false` when the OS refuses the thread: the job is dropped and
+/// nothing is written, so a caller that has already marked the write done must
+/// unmark it to retry.
+pub(crate) fn spawn_pipeline_cache_writer(job: impl FnOnce() + Send + 'static) -> bool {
+    match std::thread::Builder::new()
+        .name("frust pipeline-cache writer".into())
+        .spawn(job)
+    {
+        Ok(_) => true,
+        Err(err) => {
+            log::warn!("frust-shell-android: could not start the pipeline-cache writer: {err}");
+            false
+        }
+    }
+}
+
+/// The ordering half of [`write_pipeline_cache_in_order`], over an injectable
+/// `written` slot: runs `write` under the slot's lock only for a generation
+/// newer than the slot holds, and records it only once the write succeeded.
+fn write_in_order(
+    written: &Mutex<u64>,
+    generation: u64,
+    write: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<bool> {
+    let mut newest = written.lock().unwrap_or_else(PoisonError::into_inner);
+    if generation <= *newest {
+        return Ok(false);
+    }
+    write()?;
+    *newest = generation;
+    Ok(true)
 }
 
 // ---------------------------------------------------------------------
@@ -1705,6 +1816,76 @@ mod tests {
         write_pipeline_cache_atomic(&path, &blob).unwrap();
         assert!(path.exists(), "atomic write must create the target file");
         assert_eq!(load_pipeline_cache(&path), Some(blob));
+    }
+
+    #[test]
+    fn an_older_blob_never_lands_over_a_newer_one() {
+        let written = Mutex::new(0);
+        let landed = std::cell::RefCell::new(Vec::new());
+        let write = |blob: &'static str| {
+            let landed = &landed;
+            move || {
+                landed.borrow_mut().push(blob);
+                Ok(())
+            }
+        };
+        assert!(write_in_order(&written, 2, write("second")).unwrap());
+        // The blob read first reaches its writer last: it is dropped.
+        assert!(!write_in_order(&written, 1, write("first")).unwrap());
+        assert!(!write_in_order(&written, 2, write("second again")).unwrap());
+        assert!(write_in_order(&written, 3, write("third")).unwrap());
+        assert_eq!(*landed.borrow(), ["second", "third"]);
+    }
+
+    #[test]
+    fn a_failed_write_does_not_count_as_written() {
+        let written = Mutex::new(0);
+        let failed = write_in_order(&written, 1, || Err(std::io::Error::other("disk full")));
+        assert!(failed.is_err());
+        assert!(write_in_order(&written, 1, || Ok(())).unwrap());
+    }
+
+    #[test]
+    fn the_on_disk_slot_changes_only_after_a_successful_write() {
+        let slot = on_disk_cache(Some(b"old".to_vec()));
+        let new: Arc<[u8]> = Arc::from(&b"new"[..]);
+        assert!(differs_from_on_disk(&slot, b"new"));
+        assert!(!differs_from_on_disk(&slot, b"old"));
+
+        let failed = record_after_write(&slot, &new, || Err(std::io::Error::other("disk full")));
+        assert!(failed.is_err());
+        assert!(
+            differs_from_on_disk(&slot, b"new"),
+            "a failed write is retried"
+        );
+
+        record_after_write(&slot, &new, || Ok(())).unwrap();
+        assert!(!differs_from_on_disk(&slot, b"new"));
+        assert!(differs_from_on_disk(&slot, b"old"));
+        assert!(differs_from_on_disk(&on_disk_cache(None), b""));
+    }
+
+    #[test]
+    fn generations_increase_and_the_in_order_write_round_trips() {
+        let first = next_pipeline_cache_generation();
+        let second = next_pipeline_cache_generation();
+        assert!(second > first);
+        let dir = unique_temp_dir();
+        let path = dir.join("frust").join("pipeline_cache.bin");
+        assert!(
+            write_pipeline_cache_in_order(&path, b"blob", next_pipeline_cache_generation())
+                .unwrap()
+        );
+        assert_eq!(load_pipeline_cache(&path), Some(b"blob".to_vec()));
+
+        let slot = on_disk_cache(None);
+        let next: Arc<[u8]> = Arc::from(&b"next"[..]);
+        assert!(
+            write_pipeline_cache_recording(&path, &next, next_pipeline_cache_generation(), &slot)
+                .unwrap()
+        );
+        assert_eq!(load_pipeline_cache(&path), Some(b"next".to_vec()));
+        assert!(!differs_from_on_disk(&slot, b"next"));
     }
 
     #[test]

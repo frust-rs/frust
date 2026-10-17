@@ -259,9 +259,6 @@
 use core::ops::Range;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Once};
-// Durations and the compile's own phase record are read by the `perf-trace`
-// encode window and by the tests that pin its arithmetic, and by nothing else.
-#[cfg(any(test, feature = "perf-trace"))]
 use std::time::Duration;
 
 use frust_gpu::staging::{
@@ -307,7 +304,7 @@ use crate::gpu::config::resource_widths_agree;
 use crate::gpu::depth::DepthAttachment;
 use crate::gpu::paint_texture::lower_encoded_paint;
 use crate::gpu::pipelines::{
-    EnginePipeline, EngineShaders, INTERMEDIATE_FORMAT, atlas_strip_desc, warm_up_descs_for,
+    EnginePipeline, EngineShaders, INTERMEDIATE_FORMAT, atlas_strip_desc, warm_up_plan,
 };
 use crate::gpu::strips::{
     ClassRun, ClassSet, PaintClass, PaintType, merge_class_runs, pack_paint_descriptor,
@@ -1002,6 +999,65 @@ pub struct EngineRenderer {
     encode_trace: EncodeTrace,
 }
 
+/// Every pipeline a renderer warms up, in the order its background worker
+/// builds them.
+///
+/// [`warm_up_descs_for`](crate::gpu::pipelines::warm_up_descs_for)'s list, reordered and extended for the frames that
+/// follow an install: the worker opens with what an ordinary first frame draws
+/// (the atlas page pass, the depth-tested surface pass's glyph and solid
+/// programs, the opaque pass's solid one, then the surface pass's Uber
+/// program) because that frame waits behind whatever the worker is building,
+/// and it ends with the surface's layer composite, which only a later
+/// transition needs.
+///
+/// A variant listed twice is queued once, so the reordering needs no
+/// de-duplication. With the Uber program forced the list is the Uber states
+/// alone, exactly as [`warm_up_descs_for`](crate::gpu::pipelines::warm_up_descs_for) gives them.
+fn warm_up_list(
+    shaders: &EngineShaders,
+    format: wgpu::TextureFormat,
+    uber_only: bool,
+) -> Vec<frust_gpu::RenderPipelineDesc> {
+    ordered_warm_up(
+        shaders.image_sampler,
+        uber_only,
+        |state, class| state.class_desc(shaders, format, class),
+        || atlas_strip_desc(shaders),
+    )
+}
+
+/// [`warm_up_list`]'s order and membership over any description type, so it
+/// can be checked without a device (see [`warm_up_plan`]).
+fn ordered_warm_up<D>(
+    image_sampler: bool,
+    uber_only: bool,
+    describe: impl Fn(EnginePipeline, PaintClass) -> D,
+    atlas: impl Fn() -> D,
+) -> Vec<D> {
+    let full = warm_up_plan(image_sampler, uber_only, &describe, &atlas);
+    if uber_only {
+        return full;
+    }
+    let mut descs = Vec::with_capacity(full.len() + 6);
+    descs.push(atlas());
+    descs.push(describe(EnginePipeline::StripDepthAlpha, PaintClass::Glyph));
+    descs.push(describe(
+        EnginePipeline::StripDepthAlpha,
+        PaintClass::SolidCoverage,
+    ));
+    descs.push(describe(
+        EnginePipeline::StripOpaque,
+        PaintClass::SolidCoverage,
+    ));
+    descs.push(describe(EnginePipeline::StripDepthAlpha, PaintClass::Uber));
+    descs.extend(full);
+    descs.push(describe(
+        EnginePipeline::StripDepthAlpha,
+        PaintClass::LayerComposite,
+    ));
+    descs
+}
+
 impl EngineRenderer {
     /// Builds a renderer for `format` targets on `caps`' adapter, warming
     /// every engine pipeline in the background.
@@ -1063,7 +1119,7 @@ impl EngineRenderer {
         let mut library = ShaderLibrary::new();
         let shaders = EngineShaders::register_family(&mut library, device, image_sampler);
         let mut pipelines = PipelineCache::new(Arc::new(library), pipeline_cache.cloned());
-        pipelines.warm_up(device, &warm_up_descs_for(&shaders, format, routing.uber));
+        pipelines.warm_up(device, &warm_up_list(&shaders, format, routing.uber));
 
         let level = Level::try_detect().unwrap_or(Level::baseline());
         let gradients = GradientCache::for_texture(GradientTextureLayout::square(dim), level);
@@ -1212,12 +1268,37 @@ impl EngineRenderer {
     /// compiled twice and nothing is left for the worker to claim afterwards.
     ///
     /// "Every" is the warm-up list: the nine Uber states, plus — unless the
-    /// Uber program is forced — the warmed paint classes. A class variant
-    /// outside that list is created on the first frame that draws a run of it.
+    /// Uber program is forced — the warmed paint classes and the surface's
+    /// layer-composite program (see [`warm_up_list`]). A class variant outside
+    /// that list is created on the first frame that draws a run of it.
+    ///
+    /// Idempotent: once the list is built every request is a cache hit, so a
+    /// second call compiles nothing. It encodes and submits nothing either —
+    /// the first frame afterwards is still the first frame.
     pub fn finish_warm_up(&mut self, device: &wgpu::Device) {
-        for desc in warm_up_descs_for(&self.shaders, self.format, self.routing.uber) {
+        for desc in warm_up_list(&self.shaders, self.format, self.routing.uber) {
             let _ = self.pipelines.get_or_create(device, &desc);
         }
+    }
+
+    /// Waits up to `timeout` for the background warm-up [`Self::new`] started
+    /// to build every pipeline on its list, and returns whether it did.
+    ///
+    /// The counterpart of [`Self::finish_warm_up`] that compiles nothing on
+    /// the calling thread: the worker keeps building at its own pace and this
+    /// only parks until it is done, so a thread that must not spend its own
+    /// time compiling can still keep the first frame from being the one that
+    /// waits on a pipeline. Encodes and submits nothing. Returns at once when
+    /// the warm-up is already done ([`Self::warm_up_done`]).
+    pub fn wait_warm_up(&mut self, timeout: Duration) -> bool {
+        self.pipelines.wait_warm_up(timeout)
+    }
+
+    /// Whether every pipeline on the warm-up list has been built (or failed
+    /// and been left to its first request), by whichever thread built it.
+    #[must_use]
+    pub fn warm_up_done(&self) -> bool {
+        self.pipelines.warm_up_done()
     }
 
     /// Forces every strip run through the whole (Uber) strip program, or
@@ -1553,7 +1634,8 @@ impl EngineRenderer {
     /// in-flight build, or building one inline) since the last call.
     ///
     /// `perf-trace`-only: it feeds the first frame's
-    /// `first_submit_pipeline_wait` startup span.
+    /// `first_submit_pipeline_wait` startup span. Time spent in
+    /// [`Self::wait_warm_up`] counts too.
     #[cfg(feature = "perf-trace")]
     pub fn take_pipeline_wait(&mut self) -> Duration {
         self.pipelines.take_resolve_wait()
@@ -7616,6 +7698,139 @@ mod tests {
     use std::collections::BTreeMap;
     use vello_common::geometry::RectU16;
     use vello_common::paint::IndexedPaint;
+
+    /// Polls `future` to completion on the calling thread — device creation
+    /// is the only future this module's GPU tests await.
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        use std::task::{Context, Poll, Waker};
+
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut future = std::pin::pin!(future);
+        loop {
+            match future.as_mut().poll(&mut cx) {
+                Poll::Ready(value) => return value,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
+
+    /// Finishing the warm-up builds the whole (de-duplicated) list exactly
+    /// once however often it is called, waiting on a finished warm-up returns
+    /// at once, and neither encodes a frame: the staging ring hands out no
+    /// slot and creates no buffer.
+    #[test]
+    #[ignore = "needs a real GPU adapter; run with `cargo test -p frust-engine --lib -- --ignored \
+                --test-threads=1` (pin the adapter with WGPU_BACKEND / WGPU_ADAPTER_NAME)"]
+    fn finishing_the_warm_up_is_idempotent_and_encodes_nothing() {
+        let mut context = frust_gpu::RenderContext::new();
+        let handle = block_on(context.device()).expect("device creation");
+        let caps = handle.caps.clone();
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let mut renderer = EngineRenderer::new(&handle.device, &caps, format, None)
+            .expect("the engine builds on this device");
+        let mut listed = Vec::new();
+        for desc in warm_up_list(&renderer.shaders, format, renderer.routing.uber) {
+            if !listed.contains(&desc) {
+                listed.push(desc);
+            }
+        }
+
+        renderer.finish_warm_up(&handle.device);
+        assert!(renderer.warm_up_done());
+        assert_eq!(
+            renderer.compiled_pipelines(),
+            listed.len() as u64,
+            "the first call builds every listed variant once"
+        );
+        for _ in 0..3 {
+            renderer.finish_warm_up(&handle.device);
+            assert!(renderer.wait_warm_up(Duration::ZERO));
+        }
+        assert_eq!(
+            renderer.compiled_pipelines(),
+            listed.len() as u64,
+            "a finished warm-up compiles nothing more"
+        );
+        assert_eq!(
+            renderer.staging_stats().unwrap_or_default(),
+            frust_gpu::staging::StagingStats::default(),
+            "the warm-up records no frame: the staging ring was never used"
+        );
+    }
+
+    /// The warm-up list is [`warm_up_descs_for`](crate::gpu::pipelines::warm_up_descs_for)'s list plus the first-frame
+    /// openers and the layer-composite tail: a superset of it, opening with
+    /// the atlas pass and ending with the depth-alpha layer composite, whose
+    /// distinct entries are exactly the base list and that tail — and under
+    /// the Uber kill switch it is the base list unchanged. Checked over
+    /// variant keys, which is all a device-free test can build.
+    #[test]
+    fn the_warm_up_list_extends_the_base_list_in_order() {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        enum Key {
+            Atlas,
+            State(EnginePipeline, PaintClass),
+        }
+        let describe = Key::State;
+        let tail = Key::State(EnginePipeline::StripDepthAlpha, PaintClass::LayerComposite);
+
+        for image_sampler in [false, true] {
+            // The manual family's atlas pass IS the intermediate state's Uber
+            // variant; the sampler family's is a variant of its own.
+            let atlas = move || {
+                if image_sampler {
+                    Key::Atlas
+                } else {
+                    Key::State(
+                        crate::gpu::pipelines::ATLAS_STRIP_PIPELINE,
+                        PaintClass::Uber,
+                    )
+                }
+            };
+            let base = warm_up_plan(image_sampler, false, describe, atlas);
+            let list = ordered_warm_up(image_sampler, false, describe, atlas);
+
+            let listed: std::collections::HashSet<_> = list.iter().copied().collect();
+            for key in &base {
+                assert!(listed.contains(key), "{key:?} is missing from the list");
+            }
+
+            // The first-frame openers, in the order an ordinary first frame
+            // draws them. Pinned exactly: a reorder changes which pipeline
+            // the frame waits behind.
+            let openers = [
+                atlas(),
+                describe(EnginePipeline::StripDepthAlpha, PaintClass::Glyph),
+                describe(EnginePipeline::StripDepthAlpha, PaintClass::SolidCoverage),
+                describe(EnginePipeline::StripOpaque, PaintClass::SolidCoverage),
+                describe(EnginePipeline::StripDepthAlpha, PaintClass::Uber),
+            ];
+            assert_eq!(
+                &list[..5],
+                &openers[..],
+                "opens with the first frame's pipelines"
+            );
+            // The base list follows the openers in its own order, unchanged.
+            assert_eq!(
+                &list[5..list.len() - 1],
+                &base[..],
+                "the base list follows the openers in warm_up_descs_for's order"
+            );
+            assert_eq!(list.last(), Some(&tail), "ends with the layer composite");
+
+            // De-duplicated by first occurrence, as the queue does: the
+            // distinct entries are the base list and the tail, nothing else.
+            let mut seen = std::collections::HashSet::new();
+            let distinct: Vec<_> = list.iter().filter(|key| seen.insert(**key)).collect();
+            let mut expected: std::collections::HashSet<_> = base.iter().copied().collect();
+            expected.insert(tail);
+            assert_eq!(distinct.len(), expected.len());
+            assert!(distinct.iter().all(|key| expected.contains(*key)));
+
+            let forced = ordered_warm_up(image_sampler, true, describe, atlas);
+            assert_eq!(forced, warm_up_plan(image_sampler, true, describe, atlas));
+        }
+    }
 
     /// The `frust-perf enc` line is a contract: a capture is graded by
     /// grepping its fields, so the field order and the names are pinned here

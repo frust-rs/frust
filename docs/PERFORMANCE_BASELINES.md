@@ -107,7 +107,7 @@ Pixel 4 class (Adreno 640, 1080x2280 @ 90 Hz; S1 ran warm — the phone sat at 3
 Cold start (S7, `first_frame_presented` medians): Pixel 4a 211 ms of which `first_submit_pipeline_wait` 118,
 encode 6, queue 3; Pixel 4 172 ms of which pipeline wait 92, encode 5, queue 2. On both phones the pipeline
 cache is persisted 328 B about 70 ms after surface install with zero warm-up pipelines finished, and the second
-launch loads that same 328 B. S1's atlas on both phones (re-captured at 9e510235 with `glyph_misses` on the
+launch loads that same 328 B (changed in Phase 5, see below). S1's atlas on both phones (re-captured at 9e510235 with `glyph_misses` on the
 production path, 6x30 s, first two runs discarded): every drawn glyph is atlas-resident (`glyph_draws ==
 atlas_glyphs`: 466 on the Pixel 4a, 458 on the Pixel 4), yet per 60-frame window the Pixel 4a replays on 37
 frames with 66 misses and 69 evictions and the Pixel 4 on 40 frames with 81 misses and 93 evictions, and nothing
@@ -128,10 +128,8 @@ Phase 1 gate records): Pixel 4a S1 16.61 / 18.39 / 12.75 (before 33.52 / 35.04 /
 S5 14.19 / 18.48 / 13.30, S6 13.78 / 15.23 / 8.79; Pixel 4 S1 11.15 / 14.70 / 8.12 (before 14.18 / 16.52 / 11.15),
 S4 3.78 / 4.33 / 0.90, S5 6.41 / 7.17 / 5.52, S6 6.90 / 7.52 / 3.65. Acceptance: Pixel 4a S1 `gpu_main` <= 16 ms
 MET; Pixel 4 S1 `gpu_main` <= 5.0 ms NOT MET (CPU-bound: `submit` 10.66 ms, walk 8.2 ms); no S4 / S6 regression
-MET. The off-arm (`FRUST_ENGINE_UBER_PROGRAM=1 FRUST_ENGINE_NO_PASS_MERGE=1 FRUST_ENGINE_IMAGE_SAMPLER=0`)
-reproduced the Pixel 4 before-rows within noise and sat 16-17 % below the Pixel 4a ones (unswitched atlas tier
-rule + clear skip, unsampled before-clock). S1 atlas counters per window: Pixel 4a replays 50 / misses 126 /
-evictions 133, Pixel 4 41 / 86 / 97.
+MET. The all-off arm reproduced the Pixel 4 before-rows within noise (Pixel 4a 16-17 % below: unswitched atlas tier
+rule + clear skip); the S1 atlas counters stay in the gate records.
 
 ### After Phase 2
 
@@ -195,6 +193,27 @@ fell from 166 to 36 us (Pixel 4a) and 140 to 30 us (OnePlus 9) with the gated po
 A/B that ruled it out is in the Phase 4 gate records. Acceptance: Pixel 4a S4 p95 <= 12 NOT MET (12.42); OnePlus 9 S4 p50
 <= 4.3 / p95 <= 5.0 NOT MET (an earlier 5.44 capture did not reproduce; the tail is bimodal across sessions); S1 / S5 not
 worse MET; the off-arm reproduces the before rows. Pixel 4 rows owed.
+
+### After Phase 5
+
+Captured 2026-10-17 from `feature/frust-fast-p5` (3708c199: first-frame strategy `steal`, the warm-up list opened by
+the first frame's programs and closed by the surface LayerComposite, pipeline-cache persistence after the warm-up and
+on surface destroy) with the split-path profile APK (`FRUST_TRACE_RAW=1`): S7 `run.sh s7 --runs 12 --duration 20` with
+the blob present; cold = `pm clear` then launch 1, launch 2 next (3 trials); before -> after, before = a7a5b074.
+
+| Phone | enc -> presented warm median [min-max] | pipeline wait warm | first_frame_presented warm | cold launch 1 enc -> presented / wait | launch 2 | blob (pipelines) | `am start -W` TotalTime |
+|---|---|---|---|---|---|---|---|
+| Pixel 4a | 194 [191-200] -> 24 [14-28] | 183.5 -> 12.5 | 396 -> 219 | 193 / 182 -> 177 / 166 | 14 / 4 | 328 B (0) -> 117143 B (18) | 134 (133/134/144; no prior row) |
+| OnePlus 9 | 74 [73-96] -> 11 [10-13] | 66 -> 3 | 180.5 -> 118 | 73 / 66 -> 77 / 69 | 11 / 3 | 314 B (0) -> 116758 B (18) | 131 (138/131/130; 2026-09-06: 128) |
+
+`await` and `finish` make the first frame pay the whole list one pipeline at a time (Pixel 4a 86 / 85 ms warm, ~425
+cold; OnePlus 9 43 / 42.5 warm, ~187 cold), so `steal` stays the default and `FRUST_FIRST_FRAME_WARM_UP=await|finish`
+are diagnostics; the depth-alpha LayerComposite variant (+32 / +5 ms Pixel 4a cold / seeded, +10 / +2 OnePlus 9) is
+warmed last. The blob is written once after the warm-up or on the first surface destroy, never rewritten when unchanged
+(launch 2 loads the same 117 KB, so the launch-2-larger criterion is moot). Acceptance: warm enc -> presented <= 25 ms
+median MET on both phones (Pixel 4a 24, bimodal 13-17 / 25-28); `am start -W` not worse than the OnePlus 9 reference
+MET within noise (131 vs 128, inside that pass's 126-141 spread); S1 12x30 steady state unchanged (Pixel 4a 11.24 /
+13.56 vs 11.29 / 14.59, OnePlus 9 8.02 / 8.87 vs 7.94 / 8.77). Pixel 4 not attached; Pixel 5 / Xiaomi 12 / iPhone owed.
 
 ## Dev loop
 
