@@ -182,7 +182,8 @@ pub use input::{
 pub use insets::{CornerInset, CornerInsets, EdgeInsets as WindowEdgeInsets, WindowInsets};
 pub use layout::BoxConstraints;
 pub use overlay::{
-    OutsideTap, OverlayBand, OverlayEntry, OverlayHit, OverlayInput, OverlayKey, OverlayPod,
+    OutsideTap, OverlayBand, OverlayEntry, OverlayHit, OverlayInput, OverlayKey, OverlayKeys,
+    OverlayPod,
 };
 pub use retained::{RetainedEntry, RetainedKey, RetainedLedger};
 pub use selection_toolbar::{
@@ -192,7 +193,9 @@ pub use selection_toolbar::{
     set_selection_toolbar_builder, set_selection_toolbar_policy,
 };
 pub use semantics::{SemanticsCtx, SemanticsUpdate};
-pub use shortcuts::{Chord, ChordParseError, ShortcutDecl, ShortcutId, ShortcutScope};
+pub use shortcuts::{
+    Chord, ChordParseError, ShortcutDecl, ShortcutHint, ShortcutId, ShortcutScope,
+};
 pub use sliver::{
     GrowthDirection, ScrollAxis, ScrollDirection, SliverConstraints, SliverGeometry, SliverWidget,
 };

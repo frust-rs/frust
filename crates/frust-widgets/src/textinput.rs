@@ -46,6 +46,9 @@
 //! edit the widget fires `on_change`, resets the caret to visible, and
 //! republishes the IME surface.
 //!
+//! An enabled field (read-only included) is also a Tab stop: root traversal can
+//! focus it, and it declines Tab so traversal can move on.
+//!
 //! The caret blinks while focused, its phase measured in `paint` from the shell
 //! frame clock ([`PaintCtx::frame_time`] — no wall-clock reads in widget code).
 //! Its continuation frame is a paced (`CosmeticLoop`) request at the blink's own
@@ -3037,6 +3040,11 @@ impl Widget for TextInputWidget {
         if self.focused {
             ctx.set_focused(id);
         }
+    }
+
+    /// A Tab stop exactly when it may take focus at all (enabled; read-only passes).
+    fn is_focusable(&self) -> bool {
+        self.focusable()
     }
 }
 
@@ -7923,5 +7931,49 @@ mod tests {
         assert!(widget(&root).hold.is_none(), "and the hold timer with it");
         assert_eq!(widget(&root).gesture, Gesture::None);
         assert!(widget(&root).tap_in_selection.is_none());
+    }
+}
+
+#[cfg(test)]
+mod focus_traversal_tests {
+    use super::*;
+    use frust_core::{KeyEvent, Modifiers, RenderRoot};
+
+    fn key(key: Key) -> InputEvent {
+        InputEvent::Key(KeyEvent {
+            key,
+            modifiers: Modifiers::default(),
+            repeat: false,
+        })
+    }
+
+    fn root(enabled: bool) -> RenderRoot<String, crate::FlexView<String>> {
+        let mut root = RenderRoot::new();
+        let mut logic = move |s: &mut String| {
+            let field = text_input(s.clone(), |s: &mut String, v: String| *s = v);
+            crate::column().child(field.enabled(enabled))
+        };
+        root.rebuild(&mut logic, &mut String::new());
+        root.layout(Size::new(300.0, 200.0));
+        root
+    }
+
+    #[test]
+    fn tab_focuses_an_enabled_field_which_then_takes_typing() {
+        let mut root = root(true);
+        let mut value = String::new();
+        root.event(&mut value, &key(Key::Character("a".to_string())));
+        assert!(value.is_empty(), "nothing focused yet");
+        root.event(&mut value, &key(Key::Named(NamedKey::Tab)));
+        assert!(root.is_focus_active());
+        root.event(&mut value, &key(Key::Character("a".to_string())));
+        assert_eq!(value, "a");
+    }
+
+    #[test]
+    fn a_disabled_field_is_no_stop() {
+        let mut root = root(false);
+        root.event(&mut String::new(), &key(Key::Named(NamedKey::Tab)));
+        assert!(!root.is_focus_active());
     }
 }

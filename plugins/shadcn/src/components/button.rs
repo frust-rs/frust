@@ -23,6 +23,15 @@
 //! The outer focus ring ([`crate::style::draw_focus_ring`]) is independent of
 //! this and paints for every variant.
 //!
+//! # Focus is `:focus-visible`
+//!
+//! Both focus treatments read [`PaintCtx::is_focused_for_ring`], not
+//! `has_focus`: a click still focuses the button, but only keyboard focus (Tab
+//! traversal, under the root's default `FocusRingPolicy::KeyboardOnly`) paints
+//! the ring and the ring-coloured border, as upstream's `focus-visible:` does.
+//! An enabled button is a Tab stop, and a focused one presses on a bare Space
+//! or Enter like a click.
+//!
 //! # `disabled` bakes into the shaped label
 //!
 //! [`ButtonView::disabled`] dims fill/border/ink alike via
@@ -37,8 +46,9 @@ use frust::Theme;
 use frust::authoring::text::{FontWeight, TextStyle};
 use frust::authoring::{
     Action, BoxConstraints, Brush, BuildCtx, ChangeFlags, Color, ErasedCallback, EventCtx,
-    EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerPhase, Role, RoundedRect,
-    SemanticsCtx, Shape, Size, ThemeTextType, Vec2, View, Widget, erase_callback,
+    EventResult, InputEvent, Key, KeyEvent, LayoutCtx, Modifiers, NamedKey, PaintCtx, PaintScene,
+    PointerPhase, Role, RoundedRect, SemanticsCtx, Shape, Size, ThemeTextType, Vec2, View, Widget,
+    erase_callback,
 };
 
 use crate::hit::{inside, presses};
@@ -371,7 +381,7 @@ impl Widget for ButtonWidget {
             scene.fill_rounded_rect(origin, size, radius, fill);
         }
 
-        let focused = !self.disabled && ctx.has_focus();
+        let focused = !self.disabled && ctx.is_focused_for_ring();
         if let Some(base_border) = border {
             let resolved = if focused {
                 focus_border(base_border, true, theme)
@@ -410,6 +420,14 @@ impl Widget for ButtonWidget {
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         if self.disabled {
             return EventResult::Ignored;
+        }
+        if let InputEvent::Key(key) = event {
+            if !(ctx.has_focus() && activates(key)) {
+                return EventResult::Ignored;
+            }
+            (self.on_press)(ctx);
+            ctx.request_redraw();
+            return EventResult::Handled;
         }
         let InputEvent::Pointer(p) = event else {
             return EventResult::Ignored;
@@ -479,6 +497,20 @@ impl Widget for ButtonWidget {
             }
         });
     }
+
+    /// A Tab stop unless disabled (`disabled:pointer-events-none` takes it out).
+    fn is_focusable(&self) -> bool {
+        !self.disabled
+    }
+}
+
+/// Whether `key` is a bare, fresh Space or Enter: a native `<button>`'s activation keys.
+fn activates(key: &KeyEvent) -> bool {
+    let pressed = match &key.key {
+        Key::Named(named) => *named == NamedKey::Enter,
+        Key::Character(text) => text == " ",
+    };
+    pressed && !key.repeat && key.modifiers == Modifiers::default()
 }
 
 #[cfg(test)]
@@ -486,6 +518,7 @@ mod tests {
     use super::*;
     use frust::authoring::Point;
     use frust::authoring::text::TextContext;
+    use frust_core::RenderRoot;
     use std::any::Any;
 
     #[derive(Default)]
@@ -756,6 +789,118 @@ mod tests {
         let size = layout(&mut w, Some(&theme));
         let rec = paint(&mut w, size, Some(&theme));
         assert_eq!(rec.rrects[0].3, disabled_tint(theme.scheme().primary, true));
+    }
+
+    // ---- Focus: keyboard-only visual, keyboard activation -----------------
+
+    /// An outline button in a column under a real `RenderRoot`, which is what
+    /// seeds `PaintCtx::is_focused_for_ring` (the root's keyboard-focus flag).
+    struct FocusHarness {
+        root: RenderRoot<Counter, frust::FlexView<Counter>>,
+        state: Counter,
+    }
+
+    impl FocusHarness {
+        fn new() -> Self {
+            let mut h = FocusHarness {
+                root: RenderRoot::new(),
+                state: Counter::default(),
+            };
+            h.root.set_theme(Box::new(crate::tokens::theme()));
+            let mut logic = |_: &mut Counter| {
+                let go = button::<Counter>("Go", |s| s.presses += 1);
+                frust::column().child(go.variant(ButtonVariant::Outline))
+            };
+            h.root.rebuild(&mut logic, &mut h.state);
+            let mut tcx = TextContext::new();
+            h.root
+                .layout_with_text(Size::new(300.0, 100.0), &mut tcx as &mut dyn Any);
+            h
+        }
+
+        fn paint(&mut self) -> Recorder {
+            let mut rec = Recorder::default();
+            self.root.paint(&mut rec, frust::FrameTime::ZERO);
+            rec
+        }
+
+        fn send(&mut self, event: InputEvent) {
+            self.root.event(&mut self.state, &event);
+        }
+    }
+
+    fn key(key: Key) -> InputEvent {
+        InputEvent::Key(KeyEvent {
+            key,
+            modifiers: Modifiers::default(),
+            repeat: false,
+        })
+    }
+
+    fn ring_strokes(rec: &Recorder, theme: &Theme) -> usize {
+        let ring = ring_color(None, Some(theme));
+        let halo = with_alpha(ring, crate::style::FOCUS_RING_OPACITY);
+        rec.strokes
+            .iter()
+            .filter(|c| **c == ring || **c == halo)
+            .count()
+    }
+
+    #[test]
+    fn a_click_focus_paints_no_focus_visual() {
+        let theme = crate::tokens::theme();
+        let mut h = FocusHarness::new();
+        let rest = h.paint();
+        assert_eq!(
+            rest.strokes,
+            vec![theme.scheme().outline],
+            "border-input at rest"
+        );
+        h.send(ev(PointerPhase::Down, 5.0, 5.0));
+        h.send(ev(PointerPhase::Up, 5.0, 5.0));
+        assert_eq!(h.state.presses, 1);
+        assert!(h.root.is_focus_active(), "a click still focuses the button");
+        let clicked = h.paint();
+        assert_eq!(
+            ring_strokes(&clicked, &theme),
+            0,
+            "no ring for pointer focus"
+        );
+        assert_eq!(clicked.strokes, rest.strokes);
+    }
+
+    #[test]
+    fn keyboard_focus_paints_the_ring_border_and_the_ring() {
+        let theme = crate::tokens::theme();
+        let mut h = FocusHarness::new();
+        h.paint();
+        h.send(key(Key::Named(NamedKey::Tab)));
+        assert!(h.root.is_focus_active());
+        let rec = h.paint();
+        let ring = ring_color(None, Some(&theme));
+        assert_eq!(rec.strokes[0], ring, "focus-visible:border-ring");
+        assert_eq!(
+            rec.strokes[1],
+            with_alpha(ring, crate::style::FOCUS_RING_OPACITY),
+            "focus-visible:ring-ring/50"
+        );
+        h.send(key(Key::Character(" ".to_string())));
+        h.send(key(Key::Named(NamedKey::Enter)));
+        assert_eq!(h.state.presses, 2, "Space and Enter press a focused button");
+        h.send(ev(PointerPhase::Down, 5.0, 5.0));
+        h.send(ev(PointerPhase::Up, 5.0, 5.0));
+        assert_eq!(
+            ring_strokes(&h.paint(), &theme),
+            0,
+            "a click ends keyboard focus"
+        );
+    }
+
+    #[test]
+    fn a_disabled_button_is_no_tab_stop() {
+        let view = button::<Counter>("Go", |_| {});
+        assert!(build(&view).is_focusable());
+        assert!(!build(&view.disabled(true)).is_focusable());
     }
 
     // ---- Typeface: the label follows the live theme ----------------------

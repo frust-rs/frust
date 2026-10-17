@@ -62,6 +62,7 @@ pub mod scroll_controller;
 mod scroll_core;
 mod scrollbar;
 mod selection_toolbar;
+mod shortcuts;
 mod sized;
 mod slider;
 mod slivers;
@@ -96,6 +97,9 @@ pub use flex::{
     Axis, Column, CrossAxisAlignment, FlexChild, FlexView, FlexWidget, MainAxisAlignment, Row,
     column, flexible, inflexible, keyed, row,
 };
+/// Whether a floated surface claims keys as a modal, re-exported for
+/// [`OverlaySlot::set_keys`] and [`OverlayPortalView::keys`].
+pub use frust_core::OverlayKeys;
 /// The axis a [`CustomScrollView`] scrolls along, re-exported so its
 /// [`axis`](CustomScrollView::axis) builder needs no direct `frust-core` import.
 pub use frust_core::ScrollAxis;
@@ -151,6 +155,7 @@ pub use scroll::{ScrollInfo, ScrollView, ScrollWidget, scroll_view};
 pub use scroll_controller::{AnimateTo, ScrollController, ScrollSubscription};
 pub use scrollbar::{ScrollbarShow, ScrollbarStyle};
 pub use selection_toolbar::selection_toolbar;
+pub use shortcuts::{ShortcutsView, ShortcutsWidget, shortcuts};
 pub use sized::{SizedBox, SizedBoxView, SizedBoxWidget};
 pub use slider::{Slider, SliderView, SliderWidget, slider};
 pub use slivers::{

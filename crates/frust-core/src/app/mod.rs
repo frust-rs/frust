@@ -29,7 +29,7 @@ use crate::event::{CursorIcon, EventOutcome, ImeState, PointerId};
 use crate::insets::WindowInsets;
 use crate::overlay::{OverlayHit, OverlayKey};
 use crate::selection_toolbar::SelectionToolbarRequest;
-use crate::shortcuts::{ShortcutId, ShortcutTable};
+use crate::shortcuts::{ShortcutHint, ShortcutId, ShortcutTable};
 use crate::tree::WidgetTree;
 use crate::view::{ChangeFlags, View, WidgetId};
 use crate::widget::{ChildPod, PlatformViewFrame};
@@ -208,6 +208,11 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             overlay_pods: Vec::new(),
             _state: core::marker::PhantomData,
         }
+    }
+
+    /// The last paint's shortcut declarations `filter` keeps, in paint order: a palette's list.
+    pub fn shortcut_hints(&self, filter: impl FnMut(&ShortcutHint) -> bool) -> Vec<ShortcutHint> {
+        self.shortcuts.hints(filter)
     }
 }
 

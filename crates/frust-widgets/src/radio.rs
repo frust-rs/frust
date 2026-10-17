@@ -12,6 +12,10 @@
 //! rebuild feeds the confirmed selection back in (the masonry rule:
 //! application state is the source of truth).
 //!
+//! A radio is a Tab stop; while focused, a bare Space or Enter fires `on_select` exactly as a
+//! click does. A pointer press claims no focus, so focus arrives through traversal only. There
+//! is no arrow-key movement within a group (there is no group widget, below).
+//!
 //! **No group container in v1.** A radio group is app-level: a column of
 //! [`radio`] views sharing one piece of app state that records which is
 //! selected (see the module doc example above).
@@ -32,6 +36,7 @@ use kurbo::{Point, Size};
 use peniko::{Brush, Color};
 
 use crate::authoring::presses;
+use crate::shortcuts::is_activation;
 use crate::text;
 
 /// Outer diameter of the radio ring, in logical px (matches
@@ -220,6 +225,16 @@ impl Widget for RadioWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        if let InputEvent::Key(key) = event {
+            if !(ctx.has_focus() && is_activation(key)) {
+                return EventResult::Ignored;
+            }
+            if let Some(on_select) = self.on_select.as_mut() {
+                (on_select)(ctx);
+            }
+            ctx.request_redraw();
+            return EventResult::Handled;
+        }
         let InputEvent::Pointer(p) = event else {
             return EventResult::Ignored;
         };
@@ -280,6 +295,11 @@ impl Widget for RadioWidget {
             node.set_selected(self.selected);
             node.add_action(Action::Click);
         });
+    }
+
+    /// Always a Tab stop; a pointer press never claims focus (see the module docs).
+    fn is_focusable(&self) -> bool {
+        true
     }
 
     crate::authoring::visit_children!(label);
@@ -481,5 +501,61 @@ mod tests {
         assert_eq!(node.is_selected(), Some(true));
         let bounds = node.bounds().expect("radio node has bounds");
         assert_eq!((bounds.x0, bounds.y0), (0.0, 0.0));
+    }
+
+    mod keyboard {
+        use super::*;
+        use frust_core::{
+            DiscardScene, FrameTime, Key, KeyEvent, Modifiers, NamedKey, PointerButton,
+            PointerEvent, RenderRoot,
+        };
+
+        fn key(key: Key, repeat: bool) -> InputEvent {
+            InputEvent::Key(KeyEvent {
+                key,
+                modifiers: Modifiers::default(),
+                repeat,
+            })
+        }
+
+        fn pointer(phase: PointerPhase) -> InputEvent {
+            InputEvent::Pointer(PointerEvent {
+                phase,
+                position: Point::new(5.0, 10.0),
+                button: PointerButton::Primary,
+            })
+        }
+
+        #[test]
+        fn tab_focuses_the_radio_then_space_or_enter_selects_it() {
+            let mut logic = |_: &mut SelectState| {
+                let daily = radio(false, "daily").on_select(|s: &mut SelectState| s.selects += 1);
+                crate::column().child(daily)
+            };
+            let mut root: RenderRoot<SelectState, crate::FlexView<SelectState>> = RenderRoot::new();
+            let mut state = SelectState::default();
+            let mut tcx = frust_text::TextContext::new();
+            root.rebuild(&mut logic, &mut state);
+            root.layout_with_text(Size::new(200.0, 200.0), &mut tcx as &mut dyn Any);
+            root.paint(&mut DiscardScene, FrameTime::ZERO);
+            root.event(&mut state, &key(Key::Named(NamedKey::Enter), false));
+            assert_eq!(state.selects, 0, "an unfocused radio takes no keys");
+            root.event(&mut state, &pointer(PointerPhase::Down));
+            root.event(&mut state, &pointer(PointerPhase::Up));
+            assert_eq!(state.selects, 1);
+            assert!(!root.is_focus_active(), "a click claims no focus");
+
+            root.event(&mut state, &key(Key::Named(NamedKey::Tab), false));
+            assert!(root.is_focus_active());
+            assert!(
+                root.event(&mut state, &key(Key::Character(" ".into()), false))
+                    .handled
+            );
+            root.event(&mut state, &key(Key::Named(NamedKey::Enter), false));
+            assert_eq!(state.selects, 3);
+            root.event(&mut state, &key(Key::Named(NamedKey::Enter), true));
+            assert_eq!(state.selects, 3, "an auto-repeat does not select again");
+            assert!(widget(true).is_focusable());
+        }
     }
 }

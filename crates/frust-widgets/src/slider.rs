@@ -8,6 +8,10 @@
 //! its own source of truth — it fires `on_change` and the next rebuild feeds the
 //! new value back in. Horizontal only for v1.
 //!
+//! A slider is a Tab stop; while focused, a bare Left/Down arrow requests the value `0.05`
+//! lower, Right/Up `0.05` higher, Home `0.0` and End `1.0` (auto-repeat included). A pointer
+//! press claims no focus, so focus arrives through traversal only.
+//!
 //! # Design-language branch
 //!
 //! `paint` reads [`Theme::design_language`] and re-skins the knob only when it
@@ -37,8 +41,8 @@ use std::rc::Rc;
 
 use frust_core::accesskit::Role;
 use frust_core::{
-    BoxConstraints, BuildCtx, ChangeFlags, EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx,
-    PaintScene, PointerPhase, SemanticsCtx, View, Widget,
+    BoxConstraints, BuildCtx, ChangeFlags, EventCtx, EventResult, InputEvent, Key, KeyEvent,
+    LayoutCtx, Modifiers, NamedKey, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, View, Widget,
 };
 use frust_theme::{DesignLanguage, GlassMaterial, GlassScale, Theme};
 use kurbo::{Point, Size};
@@ -46,6 +50,8 @@ use peniko::{Brush, Color, Gradient};
 
 use crate::authoring::presses;
 
+/// How far one arrow key moves a focused slider: twenty steps across the track.
+const KEY_STEP: f64 = 0.05;
 /// Slider control height, in logical px.
 const HEIGHT: f64 = 24.0;
 /// Default track width when the incoming constraints are unbounded.
@@ -174,6 +180,24 @@ pub struct SliderWidget {
     on_change: crate::authoring::ErasedArgCallback<f64>,
 }
 
+/// The value a bare navigation `key` asks for from `value`, or `None` for any other key.
+fn value_from_key(key: &KeyEvent, value: f64) -> Option<f64> {
+    if key.modifiers != Modifiers::default() {
+        return None;
+    }
+    let Key::Named(named) = &key.key else {
+        return None;
+    };
+    let next = match named {
+        NamedKey::ArrowLeft | NamedKey::ArrowDown => value - KEY_STEP,
+        NamedKey::ArrowRight | NamedKey::ArrowUp => value + KEY_STEP,
+        NamedKey::Home => 0.0,
+        NamedKey::End => 1.0,
+        _ => return None,
+    };
+    Some(next.clamp(0.0, 1.0))
+}
+
 /// Map a widget-local x (in `0..=width`) to a `0.0..=1.0` value, clamped.
 fn value_from_x(x: f64, width: f64) -> f64 {
     if width <= 0.0 {
@@ -286,6 +310,17 @@ impl Widget for SliderWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        if let InputEvent::Key(key) = event {
+            let Some(v) = value_from_key(key, self.value).filter(|_| ctx.has_focus()) else {
+                return EventResult::Ignored;
+            };
+            // An arrow at either end is still answered, so it never scrolls an ancestor.
+            if v != self.value {
+                (self.on_change)(ctx, v);
+                ctx.request_redraw();
+            }
+            return EventResult::Handled;
+        }
         let InputEvent::Pointer(p) = event else {
             return EventResult::Ignored;
         };
@@ -329,6 +364,11 @@ impl Widget for SliderWidget {
             node.set_min_numeric_value(0.0);
             node.set_max_numeric_value(1.0);
         });
+    }
+
+    /// Always a Tab stop; a pointer press never claims focus (see the module docs).
+    fn is_focusable(&self) -> bool {
+        true
     }
 }
 
@@ -607,5 +647,97 @@ mod tests {
         let next = slider::<Val, _>(0.8, |_s, _v| {});
         View::<Val>::rebuild(&next, &prev, &mut w, &mut BuildCtx::new(&mut counter));
         assert_eq!(w.value, 0.8);
+    }
+
+    mod keyboard {
+        use super::*;
+        use frust_core::{DiscardScene, FrameTime, RenderRoot};
+
+        fn key(named: NamedKey, repeat: bool) -> InputEvent {
+            InputEvent::Key(KeyEvent {
+                key: Key::Named(named),
+                modifiers: Modifiers::default(),
+                repeat,
+            })
+        }
+
+        #[test]
+        fn tab_focuses_the_slider_then_arrows_step_it() {
+            assert!(widget(0.5).is_focusable());
+            let mut logic = |s: &mut Val| {
+                crate::column().child(slider(s.value, |s: &mut Val, v: f64| {
+                    s.value = v;
+                    s.changes += 1;
+                }))
+            };
+            let mut root: RenderRoot<Val, crate::FlexView<Val>> = RenderRoot::new();
+            let mut state = Val {
+                value: 0.5,
+                changes: 0,
+            };
+            let mut frame = |root: &mut RenderRoot<Val, _>, state: &mut Val| {
+                root.rebuild(&mut logic, state);
+                root.layout(Size::new(200.0, 100.0));
+                root.paint(&mut DiscardScene, FrameTime::ZERO);
+            };
+            frame(&mut root, &mut state);
+            root.event(&mut state, &key(NamedKey::ArrowRight, false));
+            assert_eq!(state.changes, 0, "an unfocused slider takes no keys");
+
+            root.event(&mut state, &key(NamedKey::Tab, false));
+            assert!(root.is_focus_active());
+            assert!(
+                root.event(&mut state, &key(NamedKey::ArrowRight, false))
+                    .handled
+            );
+            assert!((state.value - 0.55).abs() < 1e-9);
+            frame(&mut root, &mut state);
+            root.event(&mut state, &key(NamedKey::ArrowDown, true));
+            assert!((state.value - 0.5).abs() < 1e-9, "auto-repeat steps too");
+            frame(&mut root, &mut state);
+            root.event(&mut state, &key(NamedKey::End, false));
+            assert_eq!(state.value, 1.0);
+            frame(&mut root, &mut state);
+            let changes = state.changes;
+            assert!(
+                root.event(&mut state, &key(NamedKey::ArrowUp, false))
+                    .handled
+            );
+            assert_eq!(
+                state.changes, changes,
+                "the end of the track reports nothing"
+            );
+            root.event(&mut state, &key(NamedKey::Home, false));
+            assert_eq!(state.value, 0.0);
+        }
+
+        #[test]
+        fn chorded_and_other_keys_are_not_navigation() {
+            let shift = Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            };
+            let chorded = KeyEvent {
+                key: Key::Named(NamedKey::ArrowLeft),
+                modifiers: shift,
+                repeat: false,
+            };
+            assert_eq!(value_from_key(&chorded, 0.5), None);
+            let enter = KeyEvent {
+                key: Key::Named(NamedKey::Enter),
+                modifiers: Modifiers::default(),
+                repeat: false,
+            };
+            assert_eq!(value_from_key(&enter, 0.5), None);
+            let left = KeyEvent {
+                key: Key::Named(NamedKey::ArrowLeft),
+                ..enter
+            };
+            assert_eq!(
+                value_from_key(&left, 0.02),
+                Some(0.0),
+                "clamped at the start"
+            );
+        }
     }
 }
