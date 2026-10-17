@@ -891,6 +891,11 @@ impl<PodState: 'static> OverlaySlot<PodState> {
                     // it, so nothing is forwarded — the owner reads the
                     // notification and decides whether to close.
                     OverlayEventKind::OutsideDown => self.outside_down_pending = true,
+                    // A shortcut a widget inside the pod declared: delivered there as the
+                    // plain broadcast its declarer recognises.
+                    OverlayEventKind::Shortcut(id) => {
+                        self.forward(ctx, &InputEvent::Shortcut(*id), substitute);
+                    }
                 }
                 // A broadcast is never consumed, whatever the pod returned.
                 Some(EventResult::Ignored)
@@ -2472,6 +2477,32 @@ mod tests {
         // Two slots never share an identity, which is the whole addressing rule.
         let other: OverlaySlot<()> = OverlaySlot::default();
         assert_ne!(slot.key(), other.key());
+    }
+
+    #[test]
+    fn a_shortcut_quoting_the_slots_key_reaches_the_pod_as_a_plain_shortcut() {
+        let mut slot: OverlaySlot<Vec<u32>> = OverlaySlot::new();
+        let mut counter = 0u64;
+        let view = any(crate::test_support::probe(7));
+        slot.rebuild(None, Some(&view), &mut BuildCtx::new(&mut counter));
+        let mut log: Vec<u32> = Vec::new();
+        let mut ctx = EventCtx::new(&mut log, Point::ZERO, Size::new(100.0, 100.0));
+        let id = frust_core::ShortcutId::next();
+        let bare = InputEvent::Shortcut(id);
+        assert_eq!(
+            slot.event_ambient(&mut ctx, &bare),
+            None,
+            "never a bare broadcast"
+        );
+        let routed = InputEvent::Overlay(frust_core::OverlayEvent {
+            key: slot.key(),
+            kind: OverlayEventKind::Shortcut(id),
+        });
+        assert_eq!(
+            slot.event_ambient(&mut ctx, &routed),
+            Some(EventResult::Ignored)
+        );
+        assert_eq!(log, vec![7], "the pod heard it");
     }
 
     // -----------------------------------------------------------------------

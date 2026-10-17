@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use kurbo::{Affine, Point, Vec2};
 
 use crate::overlay::OverlayKey;
+use crate::shortcuts::ShortcutId;
 
 use super::ime::ImeEvent;
 use super::key::{EditCommand, KeyEvent};
@@ -17,8 +18,7 @@ pub struct OverlayEvent {
     pub kind: OverlayEventKind,
 }
 
-/// The input an [`OverlayEvent`] delivers, in absolute logical window space: the owner subtracts
-/// its registered window-rect origin itself, so [`InputEvent::translated`] leaves it unchanged.
+/// An [`OverlayEvent`]'s input, in window space (the owner subtracts its rect origin itself).
 #[derive(Clone, Debug, PartialEq)]
 pub enum OverlayEventKind {
     Pointer(PointerEvent),
@@ -34,6 +34,8 @@ pub enum OverlayEventKind {
     },
     /// A primary press outside every surface (light dismiss), sent only to `Notify` entries.
     OutsideDown,
+    /// A shortcut the pod declared; the owner forwards it as [`InputEvent::Shortcut`].
+    Shortcut(ShortcutId),
 }
 
 /// The phase of a desktop OS file drag over the window. A shell publishes `Hover`, `Drop` and
@@ -111,6 +113,8 @@ pub enum InputEvent {
     Overlay(OverlayEvent),
     /// A desktop OS file drag; see [`FileDropEvent`]. Not routed through the overlay pre-pass.
     FileDrop(FileDropEvent),
+    /// A broadcast naming the shortcut a key pressed (`crate::shortcuts`); the declarer answers.
+    Shortcut(ShortcutId),
 }
 
 impl InputEvent {
@@ -127,7 +131,8 @@ impl InputEvent {
             | InputEvent::Ime(_)
             | InputEvent::EditCommand(_)
             | InputEvent::Housekeeping
-            | InputEvent::Overlay(_) => Point::ZERO,
+            | InputEvent::Overlay(_)
+            | InputEvent::Shortcut(_) => Point::ZERO,
         }
     }
 
@@ -164,7 +169,8 @@ impl InputEvent {
             | InputEvent::Ime(_)
             | InputEvent::EditCommand(_)
             | InputEvent::Housekeeping
-            | InputEvent::Overlay(_) => self.clone(),
+            | InputEvent::Overlay(_)
+            | InputEvent::Shortcut(_) => self.clone(),
         }
     }
 
@@ -201,7 +207,8 @@ impl InputEvent {
             | InputEvent::Ime(_)
             | InputEvent::EditCommand(_)
             | InputEvent::Housekeeping
-            | InputEvent::Overlay(_) => self.clone(),
+            | InputEvent::Overlay(_)
+            | InputEvent::Shortcut(_) => self.clone(),
         }
     }
 
@@ -213,13 +220,14 @@ impl InputEvent {
         )
     }
 
-    /// Whether this event is a broadcast — `Housekeeping`, `Overlay`, or a file drop's `Ended` —
-    /// which a routing helper forwards to every child before any capture/focus/hit-test branch.
+    /// Whether this event is a broadcast — `Housekeeping`, `Overlay`, `Shortcut`, or a file drop's
+    /// `Ended` — forwarded to every child before any capture/focus/hit-test branch.
     pub fn is_broadcast(&self) -> bool {
         matches!(
             self,
             InputEvent::Housekeeping
                 | InputEvent::Overlay(_)
+                | InputEvent::Shortcut(_)
                 | InputEvent::FileDrop(FileDropEvent {
                     phase: FileDropPhase::Ended,
                     ..

@@ -13,6 +13,7 @@ use crate::event::{
     RequestPass,
 };
 use crate::overlay::{OutsideTap, OverlayInput};
+use crate::shortcuts::DeliveryProbe;
 use crate::tree::WidgetPod;
 use crate::view::{ChangeFlags, View};
 
@@ -76,7 +77,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// pointer `Move`), the clipboard write and paste request (every pass), the
     /// IME state and the focus epoch. A [`FileDropPhase::Drop`] or `Cancel` is
     /// followed in the same call by a [`FileDropPhase::Ended`] broadcast to the
-    /// whole tree; the outcome folds both.
+    /// whole tree; an unhandled `Key` is offered to the shortcut table; the outcome folds all.
     pub fn event(&mut self, state: &mut State, event: &InputEvent) -> EventOutcome {
         let Some(root_id) = self.root_id else {
             return EventOutcome::default();
@@ -111,6 +112,11 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         self.resolve_focus_session(&frame, focus_claim_honoured);
         self.resolve_hover(&frame, root.hover_claimed);
         self.resolve_requests(request_slot, frame.cursor_pass);
+        let carried = if root.handled {
+            carried
+        } else {
+            self.dispatch_shortcut(state, event, carried)
+        };
         let mut outcome = self.build_outcome(&frame, &root, carried);
         self.file_drop_follow_up(state, event, &mut outcome);
         outcome
@@ -268,13 +274,15 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                 focus_claim_honoured =
                     self.commit_pointer(pointer.phase, frame.pointer_id, root, contact_pass);
             }
-            // Hit-tested and focus-routed input, plus the file-drop `Ended` broadcast.
+            // Hit-tested and focus-routed input, the file-drop `Ended` broadcast, and a
+            // shortcut (a key press: its declarer may move focus, e.g. to a search field).
             InputEvent::Scroll { .. }
             | InputEvent::Scale(_)
             | InputEvent::FileDrop(_)
             | InputEvent::Key(_)
             | InputEvent::Ime(_)
-            | InputEvent::EditCommand(_) => {
+            | InputEvent::EditCommand(_)
+            | InputEvent::Shortcut(_) => {
                 focus_claim_honoured = self.commit_focus_request(root);
             }
             // A broadcast opens no gesture, claims no focus and blurs nothing; only
@@ -447,6 +455,45 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         self.pending_paste_request |= requested.paste_request;
     }
 
+    /// Offer a `Key` the tree left unhandled to the last paint's shortcut declarations, in tier
+    /// order (`ShortcutTable::candidates`), each delivery a full pass of its own; the first one
+    /// a widget answers ends the walk. Folds every delivery's outcome into `carried`.
+    fn dispatch_shortcut(
+        &mut self,
+        state: &mut State,
+        event: &InputEvent,
+        mut carried: EventOutcome,
+    ) -> EventOutcome {
+        let InputEvent::Key(key) = event else {
+            return carried;
+        };
+        let top_overlay = self
+            .overlay_hits
+            .iter()
+            .rev()
+            .find(|hit| hit.input == OverlayInput::Interactive)
+            .map(|hit| hit.key);
+        for (id, overlay) in self.shortcuts.candidates(key, top_overlay) {
+            // A floated pod is reached only through its owner's slot, never by a bare broadcast.
+            let delivery = match overlay {
+                None => InputEvent::Shortcut(id),
+                Some(key) => InputEvent::Overlay(OverlayEvent {
+                    key,
+                    kind: OverlayEventKind::Shortcut(id),
+                }),
+            };
+            let probe = DeliveryProbe::enter();
+            let outcome = self.event(state, &delivery);
+            let answered = probe.handled() || outcome.handled;
+            carried.needs_redraw |= outcome.needs_redraw || answered;
+            if answered {
+                carried.handled = true;
+                break;
+            }
+        }
+        carried
+    }
+
     /// The pass's outcome, folding in the overlay route's `carried` outside-tap outcome. A hover
     /// that ended with nothing taking it is the one repaint no widget can request.
     fn build_outcome(
@@ -536,7 +583,8 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             | InputEvent::Ime(_)
             | InputEvent::EditCommand(_)
             | InputEvent::Housekeeping
-            | InputEvent::Overlay(_) => {
+            | InputEvent::Overlay(_)
+            | InputEvent::Shortcut(_) => {
                 return OverlayRoute::Continue(EventOutcome::default());
             }
         };

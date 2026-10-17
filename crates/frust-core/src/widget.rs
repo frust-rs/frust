@@ -880,6 +880,14 @@ impl<'a> PaintCtx<'a> {
         crate::overlay::register(entry);
     }
 
+    /// Declare a keyboard shortcut for this frame (see [`crate::shortcuts`]). The table clears
+    /// each paint, so the declarer re-declares every paint; it answers its own
+    /// `InputEvent::Shortcut` with `Handled`.
+    pub fn register_shortcut(&mut self, decl: crate::shortcuts::ShortcutDecl) {
+        self.note_publication();
+        crate::shortcuts::register(decl);
+    }
+
     /// Publish this frame's focused-field verbs and menu anchor for the
     /// platform edit menu. A focused field publishes every paint, so hardware
     /// shortcuts stay answerable; no publish means nothing is focused.
@@ -1906,6 +1914,9 @@ impl ChildPod {
             // Attributes a `capture_contacts` call to this child or below.
             let frame = crate::event::ContactFrame::enter(self.active && self.contacts_captor);
             let result = self.widget.event(&mut child_ctx, local);
+            if matches!(local, InputEvent::Shortcut(_)) && result == EventResult::Handled {
+                crate::shortcuts::note_handled();
+            }
             let (opted_in, opted_in_at_or_below) = frame.close();
             (
                 (opted_in, opted_in_at_or_below),
