@@ -262,6 +262,10 @@ enum Press {
 }
 
 /// The paint/fade schedule [`ScrollbarState::visibility`] asks for.
+/// Longest single hold wake: a far-off fade re-arms after this instead of
+/// overflowing `Duration`.
+const MAX_HOLD_SECS: f64 = 3600.0;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Wake {
     Idle,
@@ -428,13 +432,19 @@ impl ScrollbarState {
         };
         let elapsed = now.saturating_sub(active).as_secs_f64() * 1000.0;
         let delay = self.style.fade_delay_ms.max(0.0);
+        if !delay.is_finite() {
+            return (1.0, Wake::Idle); // never fades: nothing to wake for
+        }
         if elapsed < delay {
-            let remaining = Duration::from_secs_f64((delay - elapsed) / 1000.0);
-            return (1.0, Wake::Hold(remaining));
+            let remaining = ((delay - elapsed) / 1000.0).min(MAX_HOLD_SECS);
+            return (1.0, Wake::Hold(Duration::from_secs_f64(remaining)));
         }
         let duration = self.style.fade_duration_ms;
         if reduce_motion || duration.is_nan() || duration <= 0.0 {
             return (0.0, Wake::Idle);
+        }
+        if !duration.is_finite() {
+            return (1.0, Wake::Idle); // an endless fade stays opaque, no frame loop
         }
         let t = (elapsed - delay) / duration;
         if t >= 1.0 {
@@ -740,6 +750,37 @@ pub(crate) mod tests {
             (0, false)
         );
         assert_eq!(state.opacity(), 0.0);
+    }
+
+    #[test]
+    fn non_finite_fade_values_neither_panic_nor_spin() {
+        let hold = ScrollbarStyle::default().fade_delay_ms(f64::INFINITY);
+        let mut state = ScrollbarState::new(hold);
+        paint(&mut state, 0, info(0.0, 900.0), false);
+        assert_eq!(
+            paint(&mut state, 16, info(40.0, 900.0), false),
+            (1, false),
+            "an infinite delay holds the bar with no wake"
+        );
+        paint(&mut state, 16 + 100_000, info(40.0, 900.0), false);
+        assert_eq!(state.opacity(), 1.0);
+
+        let huge = ScrollbarStyle::default().fade_delay_ms(1e30);
+        let mut state = ScrollbarState::new(huge);
+        paint(&mut state, 0, info(0.0, 900.0), false);
+        let (drawn, _) = paint(&mut state, 16, info(40.0, 900.0), false);
+        assert_eq!(drawn, 1, "a huge delay holds without overflowing the wake");
+
+        let forever = ScrollbarStyle::default().fade_duration_ms(f64::INFINITY);
+        let mut state = ScrollbarState::new(forever);
+        paint(&mut state, 0, info(0.0, 900.0), false);
+        paint(&mut state, 16, info(40.0, 900.0), false);
+        assert_eq!(
+            paint(&mut state, 16 + 800 + 500, info(40.0, 900.0), false),
+            (1, false),
+            "an endless fade stays opaque and asks for no frame"
+        );
+        assert_eq!(state.opacity(), 1.0);
     }
 
     #[test]
