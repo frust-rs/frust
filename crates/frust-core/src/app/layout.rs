@@ -1,3 +1,6 @@
+//! `RenderRoot`'s layout pass: lays the root out against the window and runs
+//! the optional layout audit.
+
 use std::any::Any;
 use std::collections::HashMap;
 
@@ -8,7 +11,10 @@ use crate::layout::BoxConstraints;
 use crate::view::{View, WidgetId};
 use crate::widget::LayoutCtx;
 
-/// Layout-audit bookkeeping ([`RenderRoot::set_layout_audit`]).
+/// Layout-audit bookkeeping ([`RenderRoot::set_layout_audit`]): an audited
+/// layout runs the skipping pass, then a forced full pass over the same inputs;
+/// each pod whose geometry differs bumps `mismatches` and logs a `layout-audit:`
+/// warning (once per 60 audited frames per widget type and label).
 #[derive(Default)]
 pub(super) struct LayoutAudit {
     pub(super) enabled: bool,
@@ -31,10 +37,8 @@ struct AuditGeom {
 impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// Lay out the root widget against `window_size` and record its geometry.
     ///
-    /// The root receives loose constraints (zero up to the window size) and is
-    /// placed at the origin. Returns the size the root chose. No text context is
-    /// threaded in (use [`RenderRoot::layout_with_text`] when the tree contains
-    /// text widgets); the stored theme, if any, is still threaded down.
+    /// The root gets loose constraints and sits at the origin; returns its size.
+    /// No text context is threaded (use [`RenderRoot::layout_with_text`]).
     pub fn layout(&mut self, window_size: Size) -> Size {
         self.layout_inner(window_size, None)
     }
@@ -42,21 +46,17 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// Lay out the root widget, threading a shared text-shaping context down to
     /// text widgets.
     ///
-    /// `text_ctx` is the shell-owned `frust_text::TextContext`, passed
-    /// type-erased so this crate needs no `frust-text` dependency. Text
-    /// widgets recover it via [`crate::widget::LayoutCtx::text_context`]. The
-    /// stored theme, if any, is threaded down alongside it.
+    /// `text_ctx` is the shell-owned `frust_text::TextContext`, type-erased so
+    /// this crate needs no `frust-text` dependency; widgets recover it via
+    /// [`crate::widget::LayoutCtx::text_context`].
     pub fn layout_with_text(&mut self, window_size: Size, text_ctx: &mut dyn Any) -> Size {
         self.layout_inner(window_size, Some(text_ctx))
     }
 
-    /// Shared layout body: hands the root loose window constraints, lends the
-    /// optional text context and the stored theme into a [`LayoutCtx`], and
-    /// records the size the root returns.
+    /// Shared body of [`RenderRoot::layout`] and [`RenderRoot::layout_with_text`].
     fn layout_inner(&mut self, window_size: Size, text_ctx: Option<&mut dyn Any>) -> Size {
-        // The window size is a global layout input (an overlay pod is laid out
-        // against it, not against its owner's constraints): a change invalidates
-        // every cached layout. Compared against what the last pass stored.
+        // The window size is a global layout input (overlay pods lay out
+        // against it), so a change invalidates every cached layout.
         if self.window_size != window_size {
             self.bump_layout_epoch();
         }
@@ -72,8 +72,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         if !(self.layout_audit.enabled && self.layout_skip) {
             return self.layout_pass(window_size, text_ctx, !self.layout_skip);
         }
-        // Audit: the normal (skipping) pass, then a forced one over the same
-        // constraints and epoch; the forced geometry is what stays.
+        // Audit: the forced pass runs last, so its geometry is what stays.
         let mut text_ctx = text_ctx;
         self.layout_pass(window_size, text_ctx.as_deref_mut(), false);
         let before = self.audit_snapshot();
@@ -157,28 +156,18 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             return Size::ZERO;
         };
         let bc = BoxConstraints::loose(window_size);
-        // Disjoint field borrows: the theme (immut) and the tree (mut) are
-        // different fields of `self`, so both borrows coexist through the layout.
         let theme = self.theme.as_deref();
-        // Copied out before the `&mut self.tree` borrow below (a disjoint,
-        // `Copy` field read).
         let insets = self.insets;
         let layout_epoch = self.layout_epoch;
         let Some(pod) = self.tree.pod_mut(root_id) else {
             return Size::ZERO;
         };
         let mut ctx = LayoutCtx::with_resources(text_ctx, theme);
-        // Thread the window insets down; one layout context reaches the whole
-        // tree, so the global insets are set once here (see `crate::insets`).
+        // One context reaches the whole tree, so the global inputs (insets,
+        // window size, layout epoch, force switch) are set once here. The root
+        // sits in no `ChildPod`, so it is always laid out.
         ctx.set_window_insets(insets);
-        // Thread the window's own size down the same way — global and
-        // origin-independent like the insets. A widget floating an overlay pod
-        // lays it out against this rather than against its own constraints (see
-        // `LayoutCtx::window_size`).
         ctx.set_window_size(window_size);
-        // The layout skip's two global inputs: the epoch every pod compares its
-        // own against, and the kill switch (see `ChildPod::layout_child`). The
-        // root widget itself sits in no `ChildPod` and is always laid out.
         ctx.set_layout_epoch(layout_epoch);
         ctx.set_layout_force(force);
         let size = pod.widget_mut().layout(&mut ctx, &bc);
