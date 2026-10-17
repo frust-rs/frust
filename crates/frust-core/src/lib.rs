@@ -15,6 +15,7 @@
 //! * [`retained`] — retained-page keys and the renderer's resident-key ledger.
 //! * [`selection_toolbar`] — a text field's toolbar request and the policy/builder slots.
 //! * [`semantics`] — the accessibility tree pass behind [`SemanticsUpdate`].
+//! * [`shortcuts`] — the [`Chord`] spec and the per-paint keyboard-shortcut declarations.
 //! * [`sliver`] — the sliver protocol a scrolling viewport lays children out with.
 //! * [`tree`] — the [`WidgetTree`] arena and the read-only [`InspectNode`] walk.
 //! * [`view`] — the [`View`] trait, [`ChangeFlags`], [`BuildCtx`] and [`ViewSeq`].
@@ -33,6 +34,7 @@ pub mod overlay;
 pub mod retained;
 pub mod selection_toolbar;
 pub mod semantics;
+pub mod shortcuts;
 pub mod sliver;
 pub mod tree;
 pub mod view;
@@ -190,6 +192,7 @@ pub use selection_toolbar::{
     set_selection_toolbar_builder, set_selection_toolbar_policy,
 };
 pub use semantics::{SemanticsCtx, SemanticsUpdate};
+pub use shortcuts::{Chord, ChordParseError, ShortcutDecl, ShortcutId, ShortcutScope};
 pub use sliver::{
     GrowthDirection, ScrollAxis, ScrollDirection, SliverConstraints, SliverGeometry, SliverWidget,
 };

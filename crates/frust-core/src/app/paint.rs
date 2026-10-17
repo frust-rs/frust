@@ -12,6 +12,7 @@ use crate::overlay::{
 use crate::selection_toolbar::{
     SelectionToolbarActions, SelectionToolbarPass, SelectionToolbarRequest,
 };
+use crate::shortcuts::{OverlayStamp, ShortcutPaintPass, ShortcutTable};
 use crate::view::{ChangeFlags, View};
 use crate::widget::{PaintCtx, PaintOutcome, PaintScene};
 
@@ -32,6 +33,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // Entering clears each channel, so the registries start every paint empty.
         let overlay_pass = OverlayPaintPass::enter();
         let toolbar_pass = SelectionToolbarPass::enter();
+        let shortcut_pass = ShortcutPaintPass::enter();
         // The pods compare their stamps against this root's session.
         self.publish_focus_session();
         // Number this pass (see `paint_serial`).
@@ -58,6 +60,8 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         let (holder, holder_ime) = self.paint_overlays(&entries, scene, frame_time, &mut outcome);
         // The root holds no overlay pod at rest.
         drop(entries);
+        // After the pods, so their (stamped) declarations are in the snapshot too.
+        self.shortcuts = ShortcutTable::new(shortcut_pass.take());
 
         self.resolve_session_surface(main_tree_ime, holder, holder_ime);
 
@@ -213,6 +217,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             ctx.set_hovered(hover_active);
             ctx.set_hover_epoch(hover_epoch);
             let pod_holds_focus = {
+                let _stamp = OverlayStamp::enter(entry.key);
                 let mut pod = entry.pod.borrow_mut();
                 pod.retire_stale_focus_link();
                 let holds = pod.holds_live_focus();

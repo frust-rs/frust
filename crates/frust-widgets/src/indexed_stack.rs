@@ -56,7 +56,10 @@ pub struct IndexedStackView<State: 'static> {
 /// Broadcast events (housekeeping, overlay and drop-end notifications) are not
 /// user input and go to every child, as they do for the navigator's pages: a
 /// navigator in an unselected tab may hold a queued pop result that must still
-/// flush on the frame that produced it.
+/// flush on the frame that produced it. The one exception is
+/// [`InputEvent::Shortcut`]: it reaches the selected child only, so a shortcut
+/// an unselected child declared is never answered and the root falls through
+/// to its next candidate.
 ///
 /// # Page-switch contract
 ///
@@ -336,6 +339,13 @@ impl Widget for IndexedStackWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        // A shortcut is the carve-out: only the selected child may answer one.
+        if matches!(event, InputEvent::Shortcut(_)) {
+            if let Some(pod) = self.selected_mut() {
+                crate::authoring::route_event_single(pod, ctx, event);
+            }
+            return EventResult::Ignored;
+        }
         if event.is_broadcast() {
             // Not user input: every child gets it, nothing consumes it (see
             // the `IndexedStack` docs).
@@ -498,6 +508,21 @@ mod tests {
             vec![0, 1],
             "housekeeping is not input: every tab gets it"
         );
+    }
+
+    #[test]
+    fn a_shortcut_reaches_only_the_selected_child() {
+        let view: IndexedStackView<Vec<u32>> = IndexedStack(Some(1), (probe(0), probe(1)));
+        let mut w = build(&view);
+        w.layout(
+            &mut LayoutCtx::new(),
+            &BoxConstraints::tight(Size::new(100.0, 100.0)),
+        );
+        let mut log: Vec<u32> = Vec::new();
+        let mut ectx = EventCtx::new(&mut log, Point::ZERO, Size::new(100.0, 100.0));
+        let shortcut = InputEvent::Shortcut(frust_core::ShortcutId::next());
+        assert_eq!(w.event(&mut ectx, &shortcut), EventResult::Ignored);
+        assert_eq!(log, vec![1], "an unselected tab never answers a shortcut");
     }
 
     // --- (c) semantics: only the selected child ---

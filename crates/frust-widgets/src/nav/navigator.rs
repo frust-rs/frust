@@ -309,6 +309,10 @@ impl<State: 'static> crate::authoring::VisitPods for ActiveTransition<State> {
 
 /// The retained widget for a [`NavigatorView`]: owns the page stack and applies
 /// the [`NavigatorController`]'s queued ops at rebuild. See the [module docs](self).
+///
+/// Broadcasts reach every page, except [`InputEvent::Shortcut`], which reaches
+/// only the input-routed page(s): a covered page still paints and declares its
+/// shortcuts, but never answers one, so the root falls through past it.
 pub struct NavigatorWidget<State: 'static> {
     pub(super) pages: Vec<PageEntry<State>>,
     /// Pop-result callbacks awaiting `&mut State` — flushed at the start of the
@@ -2007,6 +2011,14 @@ impl<State: 'static> Widget for NavigatorWidget<State> {
                 callback(state, result);
             }
         }
+        // The one broadcast narrowed to `input_routed_pages`: a covered page still paints and
+        // declares its shortcuts, but must not answer one, so the root falls through past it.
+        if matches!(event, InputEvent::Shortcut(_)) {
+            for i in self.input_routed_pages() {
+                crate::authoring::route_event_single(&mut self.pages[i].pod, ctx, event);
+            }
+            return EventResult::Ignored;
+        }
         if event.is_broadcast() {
             // A broadcast is not user input, so none of `event_at`'s machinery
             // applies: it must not drive an in-flight edge swipe, must not be
@@ -2134,3 +2146,69 @@ fn cleared_ime_state() -> ImeState {
 #[cfg(test)]
 #[path = "navigator_tests/mod.rs"]
 mod tests;
+
+#[cfg(test)]
+mod shortcut_reach_tests {
+    use crate::{NavigatorController, NavigatorView, navigator};
+    use frust_core::{
+        BoxConstraints, BuildCtx, ChangeFlags, EventCtx, EventResult, InputEvent, LayoutCtx,
+        PaintCtx, PaintScene, RenderRoot, ShortcutId, View, Widget,
+    };
+    use kurbo::Size;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    type Log = Rc<RefCell<Vec<&'static str>>>;
+
+    /// A page that logs every broadcast it receives.
+    struct Page(&'static str, Log);
+    struct PageWidget(&'static str, Log);
+    impl View<()> for Page {
+        type Element = PageWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> PageWidget {
+            PageWidget(self.0, Rc::clone(&self.1))
+        }
+        fn rebuild(&self, _: &Self, _: &mut PageWidget, _: &mut BuildCtx<'_>) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+    impl Widget for PageWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.max()
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, _ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if event.is_broadcast() {
+                self.1.borrow_mut().push(self.0);
+            }
+            EventResult::Ignored
+        }
+    }
+
+    #[test]
+    fn a_shortcut_reaches_only_the_top_page_while_housekeeping_reaches_all() {
+        let log: Log = Rc::default();
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let (ctrl, log) = (controller.clone(), Rc::clone(&log));
+            move |_: &mut ()| {
+                let log = Rc::clone(&log);
+                navigator(&ctrl, move || Page("covered", Rc::clone(&log)))
+            }
+        };
+        root.rebuild(&mut app, &mut ());
+        let top_log = Rc::clone(&log);
+        controller.push(move || Page("top", Rc::clone(&top_log)));
+        root.rebuild(&mut app, &mut ());
+        root.layout(Size::new(100.0, 100.0));
+
+        log.borrow_mut().clear();
+        root.event(&mut (), &InputEvent::Housekeeping);
+        assert_eq!(*log.borrow(), vec!["covered", "top"]);
+
+        log.borrow_mut().clear();
+        root.event(&mut (), &InputEvent::Shortcut(ShortcutId::next()));
+        assert_eq!(*log.borrow(), vec!["top"], "a covered page never answers");
+    }
+}

@@ -29,6 +29,7 @@ use crate::event::{CursorIcon, EventOutcome, ImeState, PointerId};
 use crate::insets::WindowInsets;
 use crate::overlay::{OverlayHit, OverlayKey};
 use crate::selection_toolbar::SelectionToolbarRequest;
+use crate::shortcuts::ShortcutTable;
 use crate::tree::WidgetTree;
 use crate::view::{ChangeFlags, View, WidgetId};
 use crate::widget::{ChildPod, PlatformViewFrame};
@@ -117,6 +118,8 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     painted_animating: bool,
     /// Routing half of the overlay entries the last paint registered, in paint order; no pods.
     overlay_hits: Vec<OverlayHit>,
+    /// The shortcut declarations the last paint made, matched against unhandled keys.
+    shortcuts: ShortcutTable,
     /// The focused field's selection-toolbar request from the last paint; a release clears it.
     selection_toolbar: Option<SelectionToolbarRequest>,
     /// Bumped on every actual change of `selection_toolbar`, a clear included.
@@ -178,6 +181,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             deferred_frame: false,
             painted_animating: false,
             overlay_hits: Vec::new(),
+            shortcuts: ShortcutTable::default(),
             selection_toolbar: None,
             selection_toolbar_gen: 0,
             layout_epoch: 1,
