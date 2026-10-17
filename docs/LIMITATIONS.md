@@ -4722,6 +4722,20 @@ act_000001a10d6c24eeK3GHlKbH.
 
 ---
 
+### `scrollbar-vertical-pointer-only` — the baseline scrollbar is vertical, pointer-driven and invisible to semantics
+
+**Observed**: `.scrollbar(ScrollbarStyle)` exists only on the vertical `ScrollView` and `ListView`; horizontal surfaces and `CustomScrollView` take no bar. The bar is reached by pointer alone — no keyboard focus or keys — and contributes no semantics node of its own. A `ListView` can show one blank frame after a large thumb jump, as after any controller jump applied at paint, before the next rebuild re-windows its rows. Wheel scrolling with a bar shown is unexercised on the Linux rig (its synthetic wheel events never reach the window); macOS and Windows are unverified until their gates run.
+
+**Applies to**: apps opting into the baseline scrollbar on any platform.
+
+**Why accepted**: the bar is an opt-in visual indicator and pointer affordance over surfaces that already scroll by touch, wheel and `ScrollController`; a horizontal or sliver bar and keyboard/semantics exposure are separate work.
+
+**Trigger for removal**: a horizontal or `CustomScrollView` bar, a keyboard or semantics surface for the bar, or a `ListView` that re-windows within the jump's frame.
+
+**Evidence**: `crates/frust-widgets/src/scrollbar.rs` (module doc); `crates/frust-widgets/src/scroll_core.rs` (`route_pointer`); `examples/playground/README.md` (scrollbar gate row).
+
+---
+
 ### `render-model-gaps` — render-model plan close-out: what shipped, what is NO-GO, what is pending
 
 **Observed**: the render-model work shipped on Linux, Android, iOS and macOS; the open items are
@@ -7583,6 +7597,62 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 **Trigger for removal**: a desktop native-maps route, and a device run confirming `geo:` resolves under Android 11+ package visibility.
 
 **Evidence**: `plugins/url-launcher/src/deeplink.rs`; `plugins/url-launcher/src/maps.rs`.
+
+---
+
+### `url-launcher-mailto-not-launchable` — `mailto:` (and every other non-web scheme) is refused
+
+**Observed**: `UrlLauncher::open_external` runs every URL through `url.rs`'s validator, which accepts only an `http`/`https` scheme immediately followed by `//`. A `mailto:` link — like `tel:`, `sms:` or any custom scheme — returns `UrlLauncherError::InvalidUrl` before any backend runs, and `open_maps_native`'s allowlist covers map schemes only.
+
+**Applies to**: every platform; any app wanting to open a mail composer through the plugin.
+
+**Why accepted**: a security posture, not an omission. The narrow allow-list is what keeps an advisory "open this in the browser" call from ever reaching a script, intent or file handler; widening it is a per-scheme decision with its own validation rules.
+
+**Trigger for removal**: an explicitly allowlisted `mailto:` arm with its own validator, in the shape of `open_maps_native`.
+
+**Evidence**: `plugins/url-launcher/src/url.rs` (rule table and the scheme check); `plugins/url-launcher/src/deeplink.rs`.
+
+---
+
+### `file-dialogs-mobile-web-unsupported` — `frust-file-dialogs` has no Android, iOS or web backend
+
+**Observed**: on Android, iOS and web every terminal call (`open_file`, `open_files`, `save_file`) returns `Err(FileDialogError::Unsupported)`; `rfd` is not compiled for those targets.
+
+**Applies to**: Android, iOS and web; every `FileDialog` call.
+
+**Why accepted**: scope. The plugin is a desktop capability returning file-system paths; the mobile and browser pickers hand back content URIs, security-scoped URLs or file handles instead and need their own API shape.
+
+**Trigger for removal**: a mobile or web document-picker backend ships.
+
+**Evidence**: `plugins/file-dialogs/src/lib.rs` (the non-desktop `run` arm); `plugins/file-dialogs/Cargo.toml` (the desktop-only `rfd` target table).
+
+---
+
+### `file-dialogs-windows-app-modal` — the dialog has no owner window
+
+**Observed**: the plugin never gives `rfd` a parent window, so on Windows `rfd` shows the `IFileOpenDialog`/`IFileSaveDialog` with a null owner. The dialog is not modal to the app's window: the window stays interactive (the call runs off the UI thread under `spawn_blocking`) and the dialog can fall behind it. The Linux portal request likewise carries no parent-window identifier. Unverified on a Windows desktop until the plugin's Windows manual gate runs.
+
+**Applies to**: Windows (observably); every `FileDialog` call.
+
+**Why accepted**: the plugin depends on no `frust-*` crate and has no handle to the shell's window, and the facade exposes no window-handle seam to pass one through. The round trip itself is unaffected.
+
+**Trigger for removal**: a shell-provided window-handle seam the plugin can hand to `rfd::FileDialog::set_parent`.
+
+**Evidence**: `plugins/file-dialogs/src/desktop.rs` (`build` sets title, directory, file name and filters, no parent); `rfd` 0.17's Windows backend passes a null owner to `IFileDialog::Show` when no parent is set.
+
+---
+
+### `file-dialogs-linux-runtime-deps` — Linux dialogs need a portal or `zenity` at runtime
+
+**Observed**: on Linux `rfd` asks xdg-desktop-portal's file chooser over D-Bus (libdbus is loaded at runtime, nothing links at build time) and falls back to `zenity`. With neither present, `rfd` logs an error and returns no selection: the call yields `Ok(None)` or an empty `Vec`, indistinguishable from a user cancel.
+
+**Applies to**: Linux desktops without a running xdg-desktop-portal file-chooser backend (GTK, KDE, …) and without `zenity`.
+
+**Why accepted**: `rfd`'s synchronous API cannot report a backend failure, and the default features (`xdg-portal`, not `gtk3`) are what keep GTK out of the build. An app that must tell the two apart has to check for a portal itself.
+
+**Trigger for removal**: `rfd` surfaces backend failures through its synchronous API, or the plugin probes for a backend before showing the dialog.
+
+**Evidence**: `plugins/file-dialogs/src/lib.rs` (*Cancellation and failure*); `plugins/file-dialogs/README.md` (*Linux runtime requirements*).
 
 ---
 

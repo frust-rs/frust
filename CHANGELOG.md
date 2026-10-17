@@ -44,6 +44,11 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   with no public path changed; `RenderRoot::event` is decomposed into named steps; the crate's
   comments are cut to the contracts they state (at most 25 % of any region); and the
   `comment_density_budget` test in `frust-ui` keeps them there.
+- Desktop window sizing. `DesktopConfig` derives `PartialEq` but no longer `Eq` (its new size
+  fields are `f64`-backed). An unset or invalid `FRUST_WINDOW_SIZE` now leaves the size to the saved
+  window state, then `DesktopConfig::initial_size`, then 800×600; a set `FRUST_WINDOW_MAXIMIZED`
+  other than `1`/`true` un-maximizes a saved maximized window. The one-time window log line prints
+  `unset` for an unset knob.
 
 ### Added
 
@@ -55,6 +60,17 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `runtime_policy_summary`, `thread_tuning_enabled`); `frust-reactive` now depends on `libc`.
 - Android: the additive `nativeFrameSync` and `nativePerfTrace` JNI exports, and a `frust-perf jni`
   line per 120 frames on a `perf-trace` build.
+- `frust-file-dialogs` (`plugins/file-dialogs`): native open, open-multiple and save-as dialogs on
+  Linux (xdg-desktop-portal, `zenity` fallback), macOS and Windows through `rfd` 0.17; blocking
+  calls meant for `frust::spawn_blocking`; Android, iOS and web report `Unsupported`. Listed in the
+  Add Plugin picker.
+- `DesktopConfig::{with_initial_size, with_min_size, with_max_size, with_persist_window_state}`:
+  initial and min/max window sizes, and opt-in persistence of window size, position and maximized
+  state under the data directory, fitted to the connected monitors on restore (see
+  docs/SHELLS_DEVELOPMENT.md § Desktop window geometry).
+- An opt-in baseline scrollbar: `ScrollView::scrollbar` and `ListView::scrollbar` take a
+  `ScrollbarStyle` (`ScrollbarShow::{Never, WhileScrolling, Hover, Always}`), re-exported from the
+  facade; an overlay bar with hover widening, an idle fade, thumb drag and track paging.
 
 ## 0.6.2 — 2026-10-16
 
