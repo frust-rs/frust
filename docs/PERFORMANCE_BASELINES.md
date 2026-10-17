@@ -136,53 +136,16 @@ evictions 133, Pixel 4 41 / 86 / 97.
 ### After Phase 2
 
 Re-captured 2026-10-14 from `feature/frust-fast-p2` (c61ee81a: Phase 1 + glyph quads, resident glyph-run cache, parallel
-strip walk), same protocol (default build, S1 / S2 / S6 12x30 s, S3 4x20, first two runs discarded — one for S3 — same
-fairness warnings, clocks unpinned); every scenario started at 32.5-34.0 C except the Pixel 4 default S2 (34.2 C after the
-gate's 10-minute wait). Pixel 4a `kgsl-3d0` at 1 Hz, median clock / busy Mcyc/s: S1 355 MHz / 311 (86 % busy), S2 180 / 106,
-S3 180 / 37, S6 180 / 58; every quads-off arm ran S1 at 430 / 347.
-
-| Phone / scenario | total p50 / p95 | submit p50 | gpu_main p50 / p95 | walk / glyphs / upload / replay / instances | draws / strips / alphas |
-|---|---|---|---|---|---|
-| Pixel 4a S1 | 11.98 / 17.15 | 5.88 | 13.89 / 14.17 | 2111 / 373 / 554 / 1244 / 156 | 536 / 8,699 / 349,296 |
-| Pixel 4a S2 | 9.95 / 12.47 | 3.43 | 10.61 / 11.03 | 870 / 303 / 401 / 0.6 / 102 | 797 / 2,492 / 67,904 |
-| Pixel 4a S3 | 11.68 / 16.20 | 4.41 | 3.10 / 3.40 | 640 / 274 / 401 / 0.9 / 82 | 356 / 424 / 11,392 |
-| Pixel 4a S6 | 12.63 / 17.89 | 4.83 | 4.90 / 5.33 | 885 / 459 / 429 / 0.9 / 108 | 512 / 424 / 11,424 |
-| Pixel 4 S1 | 5.87 / 11.67 | 4.93 | 7.34 / 7.67 | 1862 / 254 / 428 / 1193 / 136 | 525 / 8,284 / 338,240 |
-| Pixel 4 S2 | 5.01 / 6.80 | 2.98 | 2.69 / 2.75 | 814 / 287 / 330 / 0.3 / 80 | 796 / 2,446 / 72,144 |
-| Pixel 4 S3 | 4.40 / 11.90 | 3.35 | 1.09 / 1.18 | 543 / 231 / 279 / 0.4 / 73 | 355 / 384 / 11,136 |
-| Pixel 4 S6 | 5.01 / 5.70 | 3.73 | 1.48 / 1.51 | 728 / 386 / 319 / 0.4 / 97 | 508 / 384 / 11,136 |
-| iPhone SE S1 † ‡ | 5.63 / 6.53 | 5.32 | 1.94 / 1.96 | 2382 / 297 / 864 / 628 / 303 | 497 / 5,020 / 200,560 |
-| iPhone SE S2 † | 6.00 / 6.95 | 2.60 | 1.02 / 1.04 | 712 / 314 / 608 / 0.3 / 111 | 657 / 1,550 / 43,936 |
-| iPhone SE S3 † | 3.81 / 7.94 | 3.30 | 0.31 / 0.32 | 702 / 288 / 912 / 0.6 / 104 | 294 / 296 / 9,792 |
-| iPhone SE S6 † | 5.26 / 6.64 | 4.25 | 0.46 / 0.47 | 982 / 510 / 1231 / 0.6 / 155 | 507 / 296 / 9,792 |
-| OnePlus 9 S1 | 8.18 / 9.34 | 5.99 | 3.46 / 3.49 | 2389 / 228 / 364 / 1270 / 173 | 547 / 9,142 / 366,752 |
-| OnePlus 9 S2 | 6.41 / 9.52 | 3.68 | 1.34 / 1.38 | 998 / 374 / 287 / 0.4 / 146 | 797 / 2,554 / 72,144 |
-| OnePlus 9 S3 | 4.28 / 12.19 | 3.49 | 0.53 / 0.57 | 478 / 157 / 261 / 0.4 / 52 | 355 / 408 / 13,648 |
-| OnePlus 9 S6 | 4.96 / 5.80 | 4.02 | 0.60 / 0.62 | 789 / 440 / 280 / 0.5 / 88 | 508 / 408 / 13,648 |
-
-Kill switches (all three off as the all-off arm at the full matrix, then one at a time at S1 / S6 6x20; `glyphs` is a subset of `walk`):
-
-| Arm / scenario | 4a walk / glyphs / strips | 4a gpu_main | 4a clock / busy | P4 walk / glyphs / strips | P4 gpu_main | P4 total p50 |
-|---|---|---|---|---|---|---|
-| all-off S1 | 6858 / 3940 / 14,783 | 12.76 | 430 / 347 | 8255 / 6612 / 14,077 (*) | 8.12 | 11.03 (*) |
-| all-off S6 | 3048 / 2779 / 8,926 | 9.11 | 267 / 150 | 2691 / 2489 / 8,919 | 3.65 | 6.90 |
-| off-quads S1 | 5164 / 3899 / 14,790 | 12.76 | 430 / 347 | 7280 / 6632 / 14,081 | 8.12 | 10.09 |
-| off-run-cache S1 | 4592 / 3277 / 8,687 | 11.90 | 430 / 318 | 6849 / 6196 / 8,272 | 7.33 | 9.63 |
-| off-parallel S1 | 4000 / 413 / 8,686 | 11.75 | 430 / 321 | 3290 / 253 / 8,273 | 7.37 | 7.46 |
-
-(*) cool runs 3-5; both Pixel 4 all-off S1 captures throttled from run 6. Acceptance: Pixel 4a S1 walk 2111 <= 3000 and glyphs
-373 <= 1200 MET; Pixel 4a S6 enc `total_us` 1870 <= 2000 MET (the harness `encode_us` is the shell step, the engine encode sits
-inside `submit`); Pixel 4 S1 enc `total_us` 3798 <= 3000 NOT MET, carried to Phase 3; S2 / S3 not worse MET. The all-off arm
-reproduces After Phase 1 within 1-4 % and each switch moves only its own span. Pixel 4a S1 drops to 355 MHz once the CPU stops
-pacing it; Pixel 4 S1 `upload` / `replay` follow the run cache's quad emission. Parallel-walk tails and the unmeasured power
-cost: `engine-parallel-walk-power-unmeasured` in LIMITATIONS.md.
-
-iPhone SE / OnePlus 9 rows: 2026-10-15, main 74123842, same protocol, OnePlus 9 at 120 Hz; † iPhone total = CPU work (`total − acquire`); ‡ S1
-re-run 12x30 on 2b4b9640 (Metal timestamp fix): run medians 4125-4269 us vs 2979-4341 in the first pass (median 3732); GPU columns confirmed
-(S1 1.94 vs 1.97, S6 0.46 vs 0.46 ms). iPhone all-off vs the 2026-09-06 pass (RESULTS.md, raw/iphone_se) (work / GPU total / enc): S1 5.79 /
-4.34 / 4735 vs 5.79 / 4.38 / 4713, S6 5.57 / 1.66 / 4010 vs 5.57 / 1.64 / 3988. Every iPhone target in the plan's success criteria misses, carried
-to Phase 3: S1 / S6 enc `total_us` 4196 / 2844 vs <= 1500, S6 work 5.26 vs <= 4.3, S2 work 6.00 vs <= 5.0 (layout 3.29); `upload` (864 / 1231)
-dominates. OnePlus 9 vs its all-off arm: S6 enc 3818 to 1548 (-59 %; frame p50 7.90 to 4.96, -37 %), S1 enc 4983 to 4355 (-13 %) with `upload` +101 and `replay` +235 us, the Pixel 4 mechanism.
+strip walk), same protocol (S1 / S2 / S6 12x30 s, S3 4x20); summary rows (total p50 / p95, `gpu_main` p50, enc `total_us`;
+the full tables, the kill-switch arms and the atlas counters stay in the Phase 2 gate records): Pixel 4a S1 11.98 / 17.15 /
+13.89 / 4523, S2 9.95 / 12.47 / 10.61, S3 11.68 / 16.20 / 3.10, S6 12.63 / 17.89 / 4.90 / 1870; Pixel 4 S1 5.87 / 11.67 /
+7.34 / 3798, S2 5.01 / 6.80 / 2.69, S3 4.40 / 11.90 / 1.09, S6 5.01 / 5.70 / 1.48; OnePlus 9 (2026-10-15, 120 Hz) S1 8.18 /
+9.34 / 3.46 / 4355, S2 6.41 / 9.52 / 1.34, S3 4.28 / 12.19 / 0.53, S6 4.96 / 5.80 / 0.60 / 1548; iPhone SE (CPU work =
+total − acquire) S1 5.63 / 6.53 / 1.94 / 4196, S2 6.00 / 6.95 / 1.02, S3 3.81 / 7.94 / 0.31, S6 5.26 / 6.64 / 0.46 / 2844.
+Acceptance: Pixel 4a S1 walk 2111 <= 3000 and glyphs 373 <= 1200 MET, Pixel 4a S6 enc 1870 <= 2000 MET, Pixel 4 S1 enc
+3798 <= 3000 NOT MET (carried), S2 / S3 not worse MET; every iPhone target missed and carried (`upload` dominates); the
+all-off arm reproduced After Phase 1 within 1-4 % and each switch moved only its own span. Parallel-walk power cost:
+`engine-parallel-walk-power-unmeasured` in LIMITATIONS.md.
 
 ### After Phase 3
 
@@ -209,6 +172,29 @@ Acceptance: `replay_us` <= 0.1 ms on S1 / S6 MET on both phones; `upload_us` <= 
 10.27-12.59 spread of the GPU-bound captures at 355 MHz); S4 `submit - gpu_main` <= 1.0 ms was a Pixel 4 target — the
 Pixel 4a gives 1.39 and the OnePlus 9 3.50 (its inline-path `submit` holds the present block), both recorded as not
 met. Pixel 4a S1 `gpu_main` sits at 13.9-14.0 in every Phase 3 capture (Phase 2: 13.89). iPhone SE rows: Mac leg owed.
+
+### After Phase 4
+
+Captured 2026-10-17 from `feature/frust-fast-sched` (78fb0a4d: thread policy, opt-in ADPF, one `nativeFrameSync` crossing
+per frame) with the split-path protocol profile APK (render thread on, `FRUST_TRACE_RAW=1`, 12x30 s, first two runs
+discarded, clocks unpinned); the "before" rows are the same protocol on v0.6.2. The policy is measurably neutral on every
+S-row: the UI thread already runs at nice -10 and the render thread inherits it.
+
+| Phone / scenario | total p50 / p95 | submit p50 / p95 | gpu_main p50 / p95 | before total p50 / p95 | `FRUST_NO_THREAD_TUNING=1` |
+|---|---|---|---|---|---|
+| Pixel 4a S4 | 11.68 / 12.42 | 4.01 / 4.22 | 2.35 / 2.39 | 11.50 / 12.34 | 11.77 / 12.53 |
+| Pixel 4a S1 | 11.97 / 16.18 | 6.03 / 7.76 | 13.89 / 14.17 | 12.09 / 16.70 | 11.97 / 15.41 |
+| Pixel 4a S5 | 13.07 / 14.61 | 6.06 / 7.00 | 13.25 / 13.66 | 13.07 / 14.54 | 13.22 / 17.63 |
+| OnePlus 9 S4 | 4.36 / 6.19 | 3.87 / 5.16 | 0.46 / 0.47 | 4.37 / 6.20 | 4.35 / 6.17 |
+| OnePlus 9 S1 | 8.20 / 9.38 | 5.99 / 7.12 | 3.47 / 3.50 | 8.22 / 9.40 | 8.21 / 9.38 |
+| OnePlus 9 S5 | 6.25 / 7.01 | 5.28 / 5.99 | 2.93 / 2.97 | 6.27 / 6.99 | 6.24 / 6.97 |
+
+Thread sample during S4 (both phones, `/proc/<pid>/task/*/stat`: UI thread nice -10, `frust-render` -10 (inherited, never lowered), the two `frust-reactive` workers -10 (inherited); blocking-pool threads take the Background class, reference +10, on their first job (host-tested); `FRUST_NO_THREAD_TUNING=1` restores the old shape: `frust-render` -4 fixed boost, workers -10). Per-frame JNI polls on an idle playground page
+fell from 166 to 36 us (Pixel 4a) and 140 to 30 us (OnePlus 9) with the gated polls. `FRUST_ADPF=1` on the OnePlus 9
+(API 35, session confirmed in `dumpsys performance_hint`): S4 4.22 / 5.91, S1 8.14 / 9.36 — within noise; the inline-path
+A/B that ruled it out is in the Phase 4 gate records. Acceptance: Pixel 4a S4 p95 <= 12 NOT MET (12.42); OnePlus 9 S4 p50
+<= 4.3 / p95 <= 5.0 NOT MET (an earlier 5.44 capture did not reproduce; the tail is bimodal across sessions); S1 / S5 not
+worse MET; the off-arm reproduces the before rows. Pixel 4 rows owed.
 
 ## Dev loop
 
