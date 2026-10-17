@@ -69,6 +69,122 @@ struct ReadySurface {
     /// `PIPELINE_CACHE` (Metal/DX12) — see
     /// [`frust_gpu::RenderContext::create_pipeline_cache`].
     pipeline_cache: Option<(wgpu::PipelineCache, String)>,
+    /// Whether this surface's first frame has yet to meet the engine's
+    /// pipeline warm-up through [`SurfaceRenderer`]'s [`FirstFrameWarmUp`]
+    /// strategy. Set by every install — each one builds a fresh engine and
+    /// starts a fresh warm-up — and cleared by the first encode of that frame.
+    warm_up_pending: bool,
+}
+
+/// How the first frame after a surface install meets the pipeline warm-up the
+/// install started, chosen by [`FIRST_FRAME_WARM_UP_VAR`].
+///
+/// The install queues every warm-up variant on the engine's background worker
+/// and returns at once, so the first frame usually arrives while that worker
+/// is still compiling. Whatever the strategy, nothing is compiled twice and no
+/// frame is encoded or submitted for the warm-up's sake: the strategies differ
+/// only in how much of the list must exist before the first frame records, and
+/// on which thread the rest is built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FirstFrameWarmUp {
+    /// Settle nothing up front: the frame requests the variants it draws,
+    /// stealing a queued one and waiting for one in flight, and the worker
+    /// builds the rest after it.
+    Steal,
+    /// Wait — up to [`FIRST_FRAME_WARM_UP_TIMEOUT`] — for the worker to build
+    /// the whole list, compiling nothing on the render thread.
+    Await,
+    /// Request the whole list on the render thread
+    /// (`frust_engine::EngineRenderer::finish_warm_up`): queued variants are
+    /// built here while the worker builds others, in-flight ones are awaited.
+    Finish,
+}
+
+/// Selects the [`FirstFrameWarmUp`] strategy: `steal`, `await` or `finish`
+/// (any case), from the compile-time `--define` or the runtime environment —
+/// a non-empty runtime value wins. Unset, empty or unrecognised means
+/// [`FirstFrameWarmUp::DEFAULT`].
+pub(crate) const FIRST_FRAME_WARM_UP_VAR: &str = "FRUST_FIRST_FRAME_WARM_UP";
+
+/// The longest [`FirstFrameWarmUp::Await`] holds the first frame back. Far
+/// above any healthy device's whole warm-up; a driver that has not finished by
+/// then lets the frame steal what it still needs instead of stalling it.
+pub(crate) const FIRST_FRAME_WARM_UP_TIMEOUT: Duration = Duration::from_secs(1);
+
+impl FirstFrameWarmUp {
+    /// The strategy a build without [`FIRST_FRAME_WARM_UP_VAR`] runs.
+    pub(crate) const DEFAULT: Self = Self::Finish;
+
+    /// The strategy the process configuration selects.
+    pub(crate) fn from_config() -> Self {
+        Self::parse(
+            option_env!("FRUST_FIRST_FRAME_WARM_UP"),
+            std::env::var(FIRST_FRAME_WARM_UP_VAR).ok().as_deref(),
+        )
+    }
+
+    /// The pure decision [`Self::from_config`] makes from the compile-time and
+    /// runtime values.
+    pub(crate) fn parse(compile_time: Option<&str>, runtime: Option<&str>) -> Self {
+        let chosen = runtime
+            .filter(|value| !value.is_empty())
+            .or(compile_time.filter(|value| !value.is_empty()));
+        match chosen {
+            None => Self::DEFAULT,
+            Some(value) if value.eq_ignore_ascii_case("steal") => Self::Steal,
+            Some(value) if value.eq_ignore_ascii_case("await") => Self::Await,
+            Some(value) if value.eq_ignore_ascii_case("finish") => Self::Finish,
+            Some(value) => {
+                log::warn!(
+                    "frust-render: unknown {FIRST_FRAME_WARM_UP_VAR}={value:?} (expected steal, \
+                     await or finish); using {}",
+                    Self::DEFAULT.name()
+                );
+                Self::DEFAULT
+            }
+        }
+    }
+
+    /// The value [`FIRST_FRAME_WARM_UP_VAR`] names this strategy by.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Steal => "steal",
+            Self::Await => "await",
+            Self::Finish => "finish",
+        }
+    }
+}
+
+/// Applies `strategy` to `engine` before the first frame after an install
+/// records, once per surface: `pending` is that surface's
+/// [`ReadySurface::warm_up_pending`], cleared here. Encodes and submits
+/// nothing. The strategy is logged once per process, with what it left.
+fn settle_first_frame_warm_up(
+    pending: &mut bool,
+    strategy: FirstFrameWarmUp,
+    engine: &mut frust_engine::EngineRenderer,
+    device: &wgpu::Device,
+) {
+    if !std::mem::take(pending) {
+        return;
+    }
+    let done = match strategy {
+        FirstFrameWarmUp::Steal => engine.warm_up_done(),
+        FirstFrameWarmUp::Await => engine.wait_warm_up(FIRST_FRAME_WARM_UP_TIMEOUT),
+        FirstFrameWarmUp::Finish => {
+            engine.finish_warm_up(device);
+            engine.warm_up_done()
+        }
+    };
+    static STRATEGY_LOGGED: OnceLock<()> = OnceLock::new();
+    STRATEGY_LOGGED.get_or_init(|| {
+        log::info!(
+            "frust-render first-frame warm-up: strategy={} (warm-up done before the first \
+             frame: {done}, {} pipelines compiled)",
+            strategy.name(),
+            engine.compiled_pipelines()
+        );
+    });
 }
 
 /// The per-surface renderer.
@@ -336,6 +452,14 @@ pub struct SurfaceRenderer {
     /// excluded and the overlays draw, and which it kept. Valid exactly while
     /// `segment_pending` is; reused across frames.
     segment_service: Vec<CutServiceability>,
+    /// How each surface's first frame meets the engine's pipeline warm-up,
+    /// read from the process configuration once, here.
+    first_frame_warm_up: FirstFrameWarmUp,
+    /// The driver pipeline cache of the last surface episode, paired with its
+    /// adapter fingerprint, kept from that episode's end until the next one
+    /// begins so [`Self::pipeline_cache_data`] can still be read once the
+    /// surface is gone — the moment a backgrounding app persists it.
+    retired_pipeline_cache: Option<(wgpu::PipelineCache, String)>,
 }
 
 /// One retained page the renderer holds resident: the key it was recorded
@@ -517,6 +641,8 @@ impl SurfaceRenderer {
             segment_scene: frust_scene::Scene::default(),
             segment_pending: false,
             segment_service: Vec::new(),
+            first_frame_warm_up: FirstFrameWarmUp::from_config(),
+            retired_pipeline_cache: None,
         }
     }
 
@@ -559,7 +685,22 @@ impl SurfaceRenderer {
     /// engine starts with an empty store and an ended one has none, so the
     /// next [`Self::take_retained_ledger`] publishes (the empty ledger, either
     /// way) whatever generation the old engine had reached.
+    ///
+    /// An episode that ends hands its driver pipeline cache to
+    /// [`Self::retired_pipeline_cache`] after the rest of it is dropped — so the
+    /// engine's warm-up worker has been joined and everything it built is in
+    /// the cache — and one that begins drops whatever was retired there.
     fn adopt_surface_state(&mut self, state: SurfaceState) {
+        let previous = std::mem::replace(&mut self.state, SurfaceState::NoSurface);
+        if let SurfaceState::Ready(ready) = previous {
+            let ReadySurface { pipeline_cache, .. } = *ready;
+            if pipeline_cache.is_some() {
+                self.retired_pipeline_cache = pipeline_cache;
+            }
+        }
+        if matches!(state, SurfaceState::Ready(_)) {
+            self.retired_pipeline_cache = None;
+        }
         self.state = state;
         self.consecutive_invalid = 0;
         self.clear_pending_frame();
@@ -599,17 +740,19 @@ impl SurfaceRenderer {
     /// fingerprint so a later launch can validate it before reuse (see
     /// [`frust_gpu::pipeline_cache`]).
     ///
-    /// `None` when there is no live cache to read — no surface installed, or an
-    /// adapter without `PIPELINE_CACHE` (Metal/DX12) — or when the driver has
-    /// produced nothing to hand back yet. The shell (tasks 13/14) writes the
-    /// returned bytes to disk and feeds them back via
+    /// Read from the live surface's cache, or — between a surface's destroy
+    /// and the next install — from the cache that surface left behind, which
+    /// then holds everything its engine built. `None` when there is neither —
+    /// nothing installed yet, or an adapter without `PIPELINE_CACHE`
+    /// (Metal/DX12) — or when the driver has produced nothing to hand back
+    /// yet. The shell writes the returned bytes to disk and feeds them back via
     /// [`set_initial_pipeline_cache_data`](Self::set_initial_pipeline_cache_data)
     /// on the next launch.
     pub fn pipeline_cache_data(&self) -> Option<Vec<u8>> {
-        let SurfaceState::Ready(ready) = &self.state else {
-            return None;
+        let (cache, key) = match &self.state {
+            SurfaceState::Ready(ready) => ready.pipeline_cache.as_ref()?,
+            SurfaceState::NoSurface | SurfaceState::Lost => self.retired_pipeline_cache.as_ref()?,
         };
-        let (cache, key) = ready.pipeline_cache.as_ref()?;
         let data = cache.get_data()?;
         Some(frust_gpu::pipeline_cache::frame(key, &data))
     }
@@ -625,6 +768,31 @@ impl SurfaceRenderer {
         };
         let TierBackend::Engine { engine, .. } = &ready.backend;
         Some(engine.warm_up_finished())
+    }
+
+    /// Whether the engine's warm-up has built every pipeline on its list, by
+    /// whichever thread built it, or `None` outside
+    /// [`SurfacePhase::SurfaceReady`].
+    ///
+    /// A shell reads it to time a [`Self::pipeline_cache_data`] persist: the
+    /// blob read once this is `true` holds the whole warm-up list.
+    pub fn pipeline_warm_up_done(&self) -> Option<bool> {
+        let SurfaceState::Ready(ready) = &self.state else {
+            return None;
+        };
+        let TierBackend::Engine { engine, .. } = &ready.backend;
+        Some(engine.warm_up_done())
+    }
+
+    /// How many render pipelines the engine has compiled so far, or `None`
+    /// outside [`SurfacePhase::SurfaceReady`]. Diagnostic, beside the
+    /// persisted pipeline-cache size.
+    pub fn compiled_pipelines(&self) -> Option<u64> {
+        let SurfaceState::Ready(ready) = &self.state else {
+            return None;
+        };
+        let TierBackend::Engine { engine, .. } = &ready.backend;
+        Some(engine.compiled_pipelines())
     }
 
     /// The retained pages the renderer holds resident after its last frame (see
@@ -1115,6 +1283,7 @@ impl SurfaceRenderer {
             surface,
             backend,
             pipeline_cache,
+            warm_up_pending: true,
         })));
         Ok(())
     }
@@ -1758,6 +1927,7 @@ impl SurfaceRenderer {
             engine_scene,
             segment_scene,
             segment_service,
+            first_frame_warm_up,
             ..
         } = self;
         let service = frame_service(segmented, segment_service);
@@ -1769,7 +1939,10 @@ impl SurfaceRenderer {
         let mut encoders = 0_u32;
         let mut submits = 0_u32;
         let ReadySurface {
-            surface, backend, ..
+            surface,
+            backend,
+            warm_up_pending,
+            ..
         } = &mut **ready;
         let device_handle = ctx.device_handle();
         let swapchain_view = surface_texture
@@ -1861,6 +2034,12 @@ impl SurfaceRenderer {
                 // visible to `gpu_pass_timings`. A no-op on an inert ring.
                 timestamps.begin_frame(&device_handle.device);
                 probe.encode_begin(engine);
+                settle_first_frame_warm_up(
+                    warm_up_pending,
+                    *first_frame_warm_up,
+                    engine,
+                    &device_handle.device,
+                );
                 let result = engine.encode_traced(
                     &device_handle.device,
                     &device_handle.queue,
@@ -2017,6 +2196,12 @@ impl SurfaceRenderer {
                 );
                 timestamps.begin_frame(&device_handle.device);
                 probe.encode_begin(engine);
+                settle_first_frame_warm_up(
+                    warm_up_pending,
+                    *first_frame_warm_up,
+                    engine,
+                    &device_handle.device,
+                );
                 let result = engine.encode_traced(
                     &device_handle.device,
                     &device_handle.queue,
@@ -2232,6 +2417,38 @@ fn log_engine_refusal(count: u32, error: &frust_engine::EngineError) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_first_frame_warm_up_strategy_parses_from_either_source() {
+        use FirstFrameWarmUp::{Await, Finish, Steal};
+        assert_eq!(
+            FirstFrameWarmUp::parse(None, None),
+            FirstFrameWarmUp::DEFAULT
+        );
+        assert_eq!(FirstFrameWarmUp::parse(Some("steal"), None), Steal);
+        assert_eq!(FirstFrameWarmUp::parse(None, Some("AWAIT")), Await);
+        assert_eq!(
+            FirstFrameWarmUp::parse(Some("await"), Some("Finish")),
+            Finish
+        );
+        // An empty runtime value falls through to the compile-time one.
+        assert_eq!(FirstFrameWarmUp::parse(Some("steal"), Some("")), Steal);
+        assert_eq!(
+            FirstFrameWarmUp::parse(Some(""), Some("")),
+            FirstFrameWarmUp::DEFAULT
+        );
+        assert_eq!(
+            FirstFrameWarmUp::parse(None, Some("eager")),
+            FirstFrameWarmUp::DEFAULT,
+            "an unknown value keeps the default rather than guessing"
+        );
+        for strategy in [Steal, Await, Finish] {
+            assert_eq!(
+                FirstFrameWarmUp::parse(None, Some(strategy.name())),
+                strategy
+            );
+        }
+    }
 
     /// Serializes every test in this binary that creates a GPU device, the
     /// same guard the workspace's other GPU suites take: the NVIDIA Vulkan

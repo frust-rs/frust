@@ -259,9 +259,6 @@
 use core::ops::Range;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Once};
-// Durations and the compile's own phase record are read by the `perf-trace`
-// encode window and by the tests that pin its arithmetic, and by nothing else.
-#[cfg(any(test, feature = "perf-trace"))]
 use std::time::Duration;
 
 use frust_gpu::staging::{
@@ -1214,10 +1211,34 @@ impl EngineRenderer {
     /// "Every" is the warm-up list: the nine Uber states, plus — unless the
     /// Uber program is forced — the warmed paint classes. A class variant
     /// outside that list is created on the first frame that draws a run of it.
+    ///
+    /// Idempotent: once the list is built every request is a cache hit, so a
+    /// second call compiles nothing. It encodes and submits nothing either —
+    /// the first frame afterwards is still the first frame.
     pub fn finish_warm_up(&mut self, device: &wgpu::Device) {
         for desc in warm_up_descs_for(&self.shaders, self.format, self.routing.uber) {
             let _ = self.pipelines.get_or_create(device, &desc);
         }
+    }
+
+    /// Waits up to `timeout` for the background warm-up [`Self::new`] started
+    /// to build every pipeline on its list, and returns whether it did.
+    ///
+    /// The counterpart of [`Self::finish_warm_up`] that compiles nothing on
+    /// the calling thread: the worker keeps building at its own pace and this
+    /// only parks until it is done, so a thread that must not spend its own
+    /// time compiling can still keep the first frame from being the one that
+    /// waits on a pipeline. Encodes and submits nothing. Returns at once when
+    /// the warm-up is already done ([`Self::warm_up_done`]).
+    pub fn wait_warm_up(&mut self, timeout: Duration) -> bool {
+        self.pipelines.wait_warm_up(timeout)
+    }
+
+    /// Whether every pipeline on the warm-up list has been built (or failed
+    /// and been left to its first request), by whichever thread built it.
+    #[must_use]
+    pub fn warm_up_done(&self) -> bool {
+        self.pipelines.warm_up_done()
     }
 
     /// Forces every strip run through the whole (Uber) strip program, or
@@ -1553,7 +1574,8 @@ impl EngineRenderer {
     /// in-flight build, or building one inline) since the last call.
     ///
     /// `perf-trace`-only: it feeds the first frame's
-    /// `first_submit_pipeline_wait` startup span.
+    /// `first_submit_pipeline_wait` startup span. Time spent in
+    /// [`Self::wait_warm_up`] counts too.
     #[cfg(feature = "perf-trace")]
     pub fn take_pipeline_wait(&mut self) -> Duration {
         self.pipelines.take_resolve_wait()
