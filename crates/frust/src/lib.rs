@@ -164,8 +164,8 @@ pub use frust_widgets::{
     PaddingView, PageBuilder, PageTransition, PageVisibility, PopResult, PushOptions, Radio,
     RadioView, RadioWidget, ReorderableListView, RepaintBoundaryView, ResultCallback, Row,
     RubberBand, SafeAreaView, ScaffoldView, ScrollAxis, ScrollController, ScrollInfo,
-    ScrollMetrics, ScrollPhysics, ScrollSubscription, ScrollView, Simulation, SizedBox,
-    SizedBoxView, Slider, SliderView, SliverBoxView, SliverFillRemainingView,
+    ScrollMetrics, ScrollPhysics, ScrollSubscription, ScrollView, ScrollbarShow, ScrollbarStyle,
+    Simulation, SizedBox, SizedBoxView, Slider, SliderView, SliverBoxView, SliverFillRemainingView,
     SliverFixedExtentListView, SliverGridDelegate, SliverGridView, SliverListView,
     SliverPaddingView, SliverPersistentHeaderDelegate, SliverPersistentHeaderView, SourceFeedback,
     SpringDescription, Stack, StackView, TextInput, TextInputView, TextView, Timing, Tolerance,
@@ -3283,6 +3283,30 @@ mod custom_scroll_view_reexport {
             .overscroll_effect(OverscrollEffect::None)
             .controller(ScrollController::new());
         let _ = view;
+    }
+}
+
+/// Facade-level check that the opt-in scrollbar vocabulary
+/// ([`ScrollbarStyle`]/[`ScrollbarShow`]) resolves through the `frust` facade
+/// for both [`ScrollView::scrollbar`] and [`ListView::scrollbar`].
+#[cfg(test)]
+mod scrollbar_reexport {
+    use crate::{
+        ListView, ScrollView, ScrollbarShow, ScrollbarStyle, list_view, scroll_view, text,
+    };
+
+    #[test]
+    fn scrollbar_style_resolves_through_facade() {
+        let style = ScrollbarStyle::new(ScrollbarShow::Hover)
+            .thickness(4.0)
+            .hover_thickness(8.0)
+            .min_thumb(20.0)
+            .inset(1.0)
+            .fade_delay_ms(500.0)
+            .fade_duration_ms(150.0);
+        let scroll: ScrollView<()> = scroll_view(text("body")).scrollbar(style);
+        let list: ListView<()> = list_view(10, 40.0, |i| text(i.to_string())).scrollbar(style);
+        let _ = (scroll, list);
     }
 }
 

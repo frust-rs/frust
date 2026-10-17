@@ -50,8 +50,8 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use frust_core::{
-    EventCtx, EventResult, FLING_STOP, FrameTime, InputEvent, PaintCtx, PointerEvent, PointerPhase,
-    ScrollAxis, ScrollDelta, TOUCH_SLOP, VelocityTracker, WHEEL_LINE_PX, fling_decay,
+    EventCtx, EventResult, FLING_STOP, FrameTime, InputEvent, PaintCtx, PaintScene, PointerEvent,
+    PointerPhase, ScrollAxis, ScrollDelta, TOUCH_SLOP, VelocityTracker, WHEEL_LINE_PX, fling_decay,
     fling_displacement,
 };
 use kurbo::{Affine, Point, Size};
@@ -71,6 +71,7 @@ use crate::scroll::{
 use crate::scroll_controller::{
     AnimateTo, ControllerCommand, ScrollBinding, ScrollCommand, ScrollController, ScrollToItem,
 };
+use crate::scrollbar::{BarEvent, ScrollbarShow, ScrollbarState, ScrollbarStyle};
 
 /// A running [`Simulation`] and the frame clock it is measured from — the
 /// state behind the generic ballistic driver ([`ScrollSurface::drive_ballistic`])
@@ -250,6 +251,12 @@ pub struct ScrollSurfaceCore {
     /// site ([`ScrollSurfaceCore::stop_ballistic`]) so the controller is told
     /// the instant it actually ends.
     pub(crate) controller_animating: bool,
+    /// The opt-in scrollbar (`crate::scrollbar`), or `None` — always `None`
+    /// unless the view called `.scrollbar(..)` with a visible style.
+    pub(crate) scrollbar: Option<ScrollbarState>,
+    /// The handle the scrollbar drives when the view attached none; exists
+    /// only while a scrollbar is enabled (see [`Self::attach_controller`]).
+    implicit_controller: Option<ScrollController>,
 }
 
 impl Default for ScrollSurfaceCore {
@@ -281,6 +288,8 @@ impl Default for ScrollSurfaceCore {
             laid_out: false,
             scroll_notify_owed: false,
             controller_animating: false,
+            scrollbar: None,
+            implicit_controller: None,
         }
     }
 }
@@ -489,8 +498,17 @@ impl ScrollSurfaceCore {
     /// `false`; a tween that is genuinely still running
     /// (`controller_animating`) belongs to this surface, not the handle, so it
     /// is republished onto the new binding right after binding rather than
-    /// stopped.
+    /// stopped. With no handle named and a scrollbar enabled, an internal
+    /// handle is bound instead, dropped once either changes.
     pub(crate) fn attach_controller(&mut self, requested: Option<&ScrollController>) -> bool {
+        if requested.is_none() && self.scrollbar.is_some() {
+            self.implicit_controller
+                .get_or_insert_with(ScrollController::new);
+        } else {
+            self.implicit_controller = None;
+        }
+        let implicit = self.implicit_controller.clone();
+        let requested = requested.or(implicit.as_ref());
         match (requested, self.controller.as_ref()) {
             (None, None) => false,
             (None, Some(_)) => {
@@ -511,6 +529,25 @@ impl ScrollSurfaceCore {
                 let binding = handle.bind();
                 binding.set_animating(self.controller_animating);
                 self.controller = Some(binding);
+                true
+            }
+        }
+    }
+
+    /// Carry a view's scrollbar style down, returning whether the bar changed.
+    /// [`ScrollbarShow::Never`] is no bar at all. Runs before
+    /// [`Self::attach_controller`], which reads the result.
+    pub(crate) fn install_scrollbar(&mut self, style: Option<ScrollbarStyle>) -> bool {
+        let style = style.filter(|style| style.show != ScrollbarShow::Never);
+        match (style, self.scrollbar.as_mut()) {
+            (None, None) => false,
+            (None, Some(_)) => {
+                self.scrollbar = None;
+                true
+            }
+            (Some(style), Some(bar)) => bar.set_style(style),
+            (Some(style), None) => {
+                self.scrollbar = Some(ScrollbarState::new(style));
                 true
             }
         }
@@ -1093,6 +1130,63 @@ pub(crate) trait ScrollSurface {
         self.after_input_scroll(ctx);
         ctx.request_redraw();
         EventResult::Handled
+    }
+
+    /// The pointer entry both owners route through: an enabled scrollbar sees
+    /// the event first (a press on it writes through the bound handle's
+    /// `jump_to`), then the gesture machinery, then the bar latches hover from
+    /// an uncaptured `Move`. Without a scrollbar this is
+    /// [`ScrollSurface::handle_pointer`] alone.
+    fn route_pointer(
+        &mut self,
+        ctx: &mut EventCtx,
+        event: &InputEvent,
+        p: &PointerEvent,
+        t_ms: f64,
+    ) -> EventResult {
+        if self.core().scrollbar.is_none() {
+            return self.handle_pointer(ctx, event, p, t_ms);
+        }
+        let info = self.scroll_info();
+        let handle = self
+            .core()
+            .controller
+            .as_ref()
+            .filter(|binding| binding.is_current())
+            .map(|binding| binding.controller().clone());
+        if let Some(bar) = self.core_mut().scrollbar.as_mut() {
+            match bar.pointer(ctx, p, info, handle.is_some()) {
+                BarEvent::Pass => {}
+                BarEvent::Handled => return EventResult::Handled,
+                BarEvent::JumpTo(target) => {
+                    if let Some(handle) = handle {
+                        handle.jump_to(target);
+                    }
+                    return EventResult::Handled;
+                }
+            }
+        }
+        let result = self.handle_pointer(ctx, event, p, t_ms);
+        if p.phase == PointerPhase::Move && !self.core().down_active {
+            let info = self.scroll_info();
+            if let Some(bar) = self.core_mut().scrollbar.as_mut() {
+                bar.hover(ctx, p.position, info);
+            }
+        }
+        result
+    }
+
+    /// Paint an enabled scrollbar over the content (a no-op without one).
+    fn paint_scrollbar(
+        &mut self,
+        ctx: &mut PaintCtx,
+        scene: &mut dyn PaintScene,
+        reduce_motion: bool,
+    ) {
+        let info = self.scroll_info();
+        if let Some(bar) = self.core_mut().scrollbar.as_mut() {
+            bar.paint(ctx, scene, info, reduce_motion);
+        }
     }
 
     /// The pointer gesture machinery: a primary `Down` arms a gesture (and
