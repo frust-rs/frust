@@ -1,54 +1,54 @@
 Applications Memory Usage (in Kilobytes):
-Uptime: 481903332 Realtime: 2189418122
+Uptime: 81645077 Realtime: 811404720
 
-** MEMINFO in pid 14452 [it.f0x.flutter_bench] **
+** MEMINFO in pid 15645 [it.f0x.flutter_bench] **
                    Pss  Private  Private  SwapPss      Rss     Heap     Heap     Heap
                  Total    Dirty    Clean    Dirty    Total     Size    Alloc     Free
                 ------   ------   ------   ------   ------   ------   ------   ------
-  Native Heap    20998    20912       48      101    22156    29968    22298     3525
-  Dalvik Heap     2096     2056        8     1773     2708    26959     2383    24576
- Dalvik Other     7660     2024        0       89    13504                           
-        Stack     1092     1092        0        0     1100                           
-       Ashmem       16        0        0        0      760                           
-      Gfx dev     1688     1688        0        0     1692                           
-    Other dev      169        0       20        0      920                           
-     .so mmap     9645      232     5732        8    41496                           
-    .jar mmap     3221        0     1312        0    45760                           
-    .apk mmap    13904      408    13304        0    15080                           
-    .ttf mmap     5199        0     3944        0     6680                           
-    .dex mmap    10773    10716       40        0    11584                           
-    .oat mmap       59        0       40        0     1596                           
-    .art mmap    10936     8888     1592      107    24544                           
-   Other mmap     3684        4     3060        0     5136                           
-      Unknown    35762    35652       52        9    36400                           
-        TOTAL   128989    83672    29152     2087   231116    56927    24681    28101
+  Native Heap    21293    21228       48       50    22404    29456    22114     3539
+  Dalvik Heap     2071     2052        8      757     2768    26967     2391    24576
+ Dalvik Other     7648     2032        0       13    13392                           
+        Stack     1140     1140        0        0     1148                           
+       Ashmem        9        0        0        0      756                           
+      Gfx dev     1660     1660        0        0     1664                           
+    Other dev      176        0       20        0      920                           
+     .so mmap     6985      232     3132        4    40492                           
+    .jar mmap     2322        0      844        0    45216                           
+    .apk mmap    14024      408    13380        0    15232                           
+    .ttf mmap     1805        0      524        0     4572                           
+    .dex mmap    10725    10716        0        0    11612                           
+    .oat mmap       19        0        0        0     1644                           
+    .art mmap    11255     8820     1908       71    24576                           
+   Other mmap     1549        4      332        0     4232                           
+      Unknown    35339    35232       48        6    36008                           
+        TOTAL   118921    83524    20244      901   226636    56423    24505    28115
  
  App Summary
                        Pss(KB)                        Rss(KB)
                         ------                         ------
-           Java Heap:    12536                          27252
-         Native Heap:    20912                          22156
-                Code:    35872                         133612
-               Stack:     1092                           1100
-            Graphics:     1688                           1692
-       Private Other:    40724
-              System:    16165
-             Unknown:                                   45304
+           Java Heap:    12780                          27344
+         Native Heap:    21228                          22404
+                Code:    29388                         130152
+               Stack:     1140                           1148
+            Graphics:     1660                           1664
+       Private Other:    37572
+              System:    15153
+             Unknown:                                   43924
  
-           TOTAL PSS:   128989            TOTAL RSS:   231116       TOTAL SWAP PSS:     2087
+           TOTAL PSS:   118921            TOTAL RSS:   226636       TOTAL SWAP PSS:      901
  
  Objects
                Views:        6         ViewRootImpl:        1
          AppContexts:        5           Activities:        1
               Assets:       35        AssetManagers:        0
-       Local Binders:       20        Proxy Binders:       58
-       Parcel memory:        5         Parcel count:       22
+       Local Binders:       19        Proxy Binders:       58
+       Parcel memory:        6         Parcel count:       28
     Death Recipients:        0             WebViews:        0
  
  Native Allocations
                          Count                       Total(kB)
                         ------                         ------
-    Other (malloced):      360                             32
+    Other (malloced):      363                             33
  Other (nonmalloced):       83                             61
  
  SQL
