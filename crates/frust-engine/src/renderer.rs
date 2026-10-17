@@ -1512,6 +1512,8 @@ impl EngineRenderer {
     /// Drop every retained page — what a surface recreate or a device-scale
     /// change calls for. The next ledger read reports the empty store.
     pub fn clear_retained(&mut self) {
+        // A cached group would otherwise keep a dropped page's texture alive.
+        self.resources.source_groups.clear();
         self.retained.clear();
     }
 
@@ -1524,6 +1526,8 @@ impl EngineRenderer {
     /// Re-budget the retained store, evicting least recently used pages until
     /// what it holds fits.
     pub fn set_retained_budget(&mut self, budget: RetainedBudget) {
+        // A cached group would otherwise keep an evicted page's texture alive.
+        self.resources.source_groups.clear();
         self.retained.set_budget(budget);
     }
 
@@ -2270,6 +2274,10 @@ impl EngineRenderer {
                 ..ResolvedPipelines::default()
             };
             self.resources.source_groups.clear();
+            // Derived from the copy pipeline built for the old format.
+            if let Some(copies) = self.region_copies.as_mut() {
+                copies.staging_group = None;
+            }
         }
 
         // The surface's own pass is unconditional — it is what the frame's

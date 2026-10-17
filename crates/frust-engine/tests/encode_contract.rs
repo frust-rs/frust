@@ -1846,6 +1846,47 @@ fn a_steady_frame_compositing_a_retained_page_creates_no_bind_group() {
     warm_up_ran(&renderer);
 }
 
+/// Dropping the retained store empties the group cache with it: a steady frame
+/// whose groups were all cached builds again on the frame after the clear, and
+/// settles back to none on the one after.
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn clearing_the_retained_store_empties_the_group_cache() {
+    let _serialized = render_lock();
+    let (device, queue, caps) = gpu();
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut renderer = EngineRenderer::new(&device, &caps, FORMAT, None)
+        .expect("the engine builds on this device");
+    let scene = two_page_scene();
+    let target = HeadlessTarget::new(&device, SIZE, SIZE, FORMAT);
+
+    let _ = groups_created_by(&device, &queue, &mut renderer, &scene, &target);
+    let _ = groups_created_by(&device, &queue, &mut renderer, &scene, &target);
+    let reference = target.read_back(&device, &queue);
+    for frame in 0..3 {
+        let created = groups_created_by(&device, &queue, &mut renderer, &scene, &target);
+        assert_eq!(created, 0, "steady frame {frame} built {created} groups");
+    }
+
+    renderer.clear_retained();
+    let rebuilt = groups_created_by(&device, &queue, &mut renderer, &scene, &target);
+    assert!(
+        rebuilt > 0,
+        "the frame after clear_retained reused groups cached before the clear"
+    );
+    assert_eq!(
+        target.read_back(&device, &queue),
+        reference,
+        "the rebuilt groups draw the same pixels"
+    );
+    let settled = groups_created_by(&device, &queue, &mut renderer, &scene, &target);
+    assert_eq!(settled, 0, "the rebuilt groups are cached again");
+
+    let error = drain_error_scope(&device, scope);
+    assert!(error.is_none(), "the frames raised {error:?}");
+    warm_up_ran(&renderer);
+}
+
 /// Collects the `frust-perf enc` lines the engine logs.
 #[cfg(feature = "perf-trace")]
 struct EncLines;
