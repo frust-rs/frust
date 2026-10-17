@@ -29,11 +29,12 @@ use crate::event::{CursorIcon, EventOutcome, ImeState, PointerId};
 use crate::insets::WindowInsets;
 use crate::overlay::{OverlayHit, OverlayKey};
 use crate::selection_toolbar::SelectionToolbarRequest;
-use crate::shortcuts::ShortcutTable;
+use crate::shortcuts::{ShortcutId, ShortcutTable};
 use crate::tree::WidgetTree;
 use crate::view::{ChangeFlags, View, WidgetId};
 use crate::widget::{ChildPod, PlatformViewFrame};
 
+pub use config::FocusRingPolicy;
 use layout::LayoutAudit;
 pub use metrics::{Orientation, WindowMetrics};
 
@@ -82,6 +83,11 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     focus_epoch: u64,
     /// The pod declined keys are forwarded to, with the `focus_epoch` it was recorded under.
     key_forward: Option<(OverlayKey, u64)>,
+    /// The carrier id of this root's traversal grants (`widget::FocusGrant`); declared by no one.
+    focus_grant: ShortcutId,
+    /// Whether traversal granted the live focus; a pointer `Down` clears it.
+    keyboard_focus: bool,
+    focus_ring_policy: FocusRingPolicy,
     hover_active: bool,
     /// Identity of the latest hover pass; a pod's hover stamp counts only while it equals this.
     hover_epoch: u64,
@@ -163,6 +169,9 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             focus_surface: None,
             focus_epoch: 1,
             key_forward: None,
+            focus_grant: ShortcutId::next(),
+            keyboard_focus: false,
+            focus_ring_policy: FocusRingPolicy::KeyboardOnly,
             hover_active: false,
             hover_epoch: 1,
             root_identity: NEXT_ROOT_IDENTITY.fetch_add(1, Ordering::Relaxed),

@@ -122,6 +122,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         let surface_translucent = self.surface_translucent;
         let (paint_epoch, retained_layers) = (self.paint_epoch, self.retained_layers);
         let paint_serial = self.paint_serial;
+        let focus_ring = self.focus_ring_visible();
         let retained_ledger = &self.retained_ledger;
         let Some(pod) = self.tree.pod_mut(root_id) else {
             return (PaintOutcome::default(), None);
@@ -142,6 +143,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // Seed focus/hover from the root's mirrors and live epochs; `ChildPod::paint_child`
         // counts a deeper link only while its stamp names the live session.
         ctx.set_has_focus(self.focus_active);
+        ctx.set_focus_ring(focus_ring);
         ctx.set_focus_epoch(self.focus_epoch);
         ctx.set_hovered(self.hover_active);
         ctx.set_hover_epoch(self.hover_epoch);
@@ -193,6 +195,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         let hover_epoch = self.hover_epoch;
         let focus_active = self.focus_active;
         let focus_epoch = self.focus_epoch;
+        let focus_ring = self.focus_ring_visible();
 
         // One pair, so a publish is never attributed to an entry that did not make it.
         let mut holder: Option<(OverlayKey, Option<ImeState>)> = None;
@@ -213,6 +216,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             );
             // The pod's own link is ANDed onto the mirror inside `paint_child`.
             ctx.set_has_focus(focus_active);
+            ctx.set_focus_ring(focus_ring);
             ctx.set_focus_epoch(focus_epoch);
             ctx.set_hovered(hover_active);
             ctx.set_hover_epoch(hover_epoch);
