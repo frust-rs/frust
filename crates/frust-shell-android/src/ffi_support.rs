@@ -767,6 +767,41 @@ pub(crate) const FRAME_SYNC_SYSTEM_UI_CHANGED: i64 = 1 << 3;
 /// The app's resolved brightness flipped (or this is the first sync of a
 /// handle). Gates Kotlin's `nativeAppIsDark` read.
 pub(crate) const FRAME_SYNC_DARK_CHANGED: i64 = 1 << 4;
+/// Every defined `FRAME_SYNC_*` bit (bits 0-4): what `nativeFrameSync` answers
+/// when gating is off, so Kotlin makes every poll every frame.
+pub(crate) const FRAME_SYNC_ALL_BITS: i64 = FRAME_SYNC_IME_CHANGED
+    | FRAME_SYNC_CLIPBOARD_WRITE
+    | FRAME_SYNC_PASTE_REQUEST
+    | FRAME_SYNC_SYSTEM_UI_CHANGED
+    | FRAME_SYNC_DARK_CHANGED;
+
+/// The frame-sync rollback environment/compile-time variable: when set to any
+/// non-`"0"` value, `nativeFrameSync` stops gating and answers every bit, so
+/// Kotlin polls each export every frame as it did before the gate existed.
+pub(crate) const NO_FRAME_SYNC_VAR: &str = "FRUST_NO_FRAME_SYNC";
+
+/// The pure decision [`frame_sync_gating_enabled`] negates, parsed like
+/// `FRUST_NO_RENDER_THREAD`: a non-`"0"` value from either the compile-time
+/// or runtime source engages the rollback.
+pub(crate) fn frame_sync_rollback(compile_time: Option<&str>, runtime: Option<&str>) -> bool {
+    fn is_set_non_zero(value: Option<&str>) -> bool {
+        matches!(value, Some(v) if v != "0")
+    }
+    is_set_non_zero(compile_time) || is_set_non_zero(runtime)
+}
+
+/// Whether `nativeFrameSync` gates Kotlin's polls: `true` unless
+/// [`NO_FRAME_SYNC_VAR`] is engaged. Read once and cached.
+pub(crate) fn frame_sync_gating_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !frame_sync_rollback(
+            option_env!("FRUST_NO_FRAME_SYNC"),
+            std::env::var(NO_FRAME_SYNC_VAR).ok().as_deref(),
+        )
+    })
+}
+
 // Bit 5 is deliberately unassigned: the platform-view command poll stays
 // per-frame, because its peek records each poll in the scroll-sync tail and
 // so is not a side-effect-free read to gate on.
@@ -785,7 +820,13 @@ pub(crate) struct FrameObservation<'a> {
     pub(crate) dark: bool,
 }
 
-/// What the previous sync reported, so the next one can say what moved.
+/// What Kotlin last consumed, so the next sync can say what moved.
+///
+/// The IME and brightness baselines are the values Kotlin last *read* — set
+/// by a sync that reports the bit (Kotlin reads next) and by
+/// [`FrameSyncLatch::note_ime_consumed`] / [`FrameSyncLatch::note_dark_consumed`]
+/// when an export serves them outside a sync — so a state that reverts after
+/// an out-of-band read still reports the bit.
 ///
 /// The clipboard slots are one-shot edges that only the app can drain, so a
 /// drain done to learn "something is pending" must not lose the value: it is
@@ -827,6 +868,24 @@ impl FrameSyncLatch {
         self.ime_dirty = true;
     }
 
+    /// Record the IME JSON `nativeImeState` just handed to Kotlin as the
+    /// consumed baseline.
+    pub(crate) fn note_ime_consumed(&mut self, json: &str) {
+        match &mut self.ime_json {
+            Some(held) => {
+                held.clear();
+                held.push_str(json);
+            }
+            None => self.ime_json = Some(json.to_owned()),
+        }
+    }
+
+    /// Record the brightness `nativeAppIsDark` just handed to Kotlin as the
+    /// consumed baseline.
+    pub(crate) fn note_dark_consumed(&mut self, dark: bool) {
+        self.dark = Some(dark);
+    }
+
     /// Whether a drained clipboard write is still waiting to be taken.
     pub(crate) fn clipboard_write_held(&self) -> bool {
         self.clipboard_write.is_some()
@@ -853,13 +912,7 @@ impl FrameSyncLatch {
         let ime_moved = self.ime_dirty || self.ime_json.as_deref() != Some(observed.ime_json);
         if ime_moved {
             bits |= FRAME_SYNC_IME_CHANGED;
-            match &mut self.ime_json {
-                Some(held) => {
-                    held.clear();
-                    held.push_str(observed.ime_json);
-                }
-                None => self.ime_json = Some(observed.ime_json.to_owned()),
-            }
+            self.note_ime_consumed(observed.ime_json);
         }
         self.ime_dirty = false;
 
@@ -1745,6 +1798,33 @@ mod tests {
         assert!(latch.take_paste_request());
         assert!(!latch.take_paste_request());
         assert_eq!(latch.sync(7, observation("{}")), 0);
+    }
+
+    #[test]
+    fn frame_sync_ime_bit_fires_when_state_reverts_after_an_out_of_band_read() {
+        let mut latch = FrameSyncLatch::new();
+        assert_ne!(latch.sync(7, observation("A")) & FRAME_SYNC_IME_CHANGED, 0);
+        latch.note_ime_consumed("B");
+        assert_eq!(latch.sync(7, observation("A")), FRAME_SYNC_IME_CHANGED);
+        assert_eq!(latch.sync(7, observation("A")), 0);
+    }
+
+    #[test]
+    fn frame_sync_dark_bit_fires_when_state_reverts_after_an_out_of_band_read() {
+        let mut latch = FrameSyncLatch::new();
+        latch.sync(7, observation("{}"));
+        latch.note_dark_consumed(true);
+        assert_eq!(latch.sync(7, observation("{}")), FRAME_SYNC_DARK_CHANGED);
+        assert_eq!(latch.sync(7, observation("{}")), 0);
+    }
+
+    #[test]
+    fn frame_sync_rollback_parses_like_the_render_thread_switch() {
+        assert!(!frame_sync_rollback(None, None));
+        assert!(frame_sync_rollback(Some("1"), None));
+        assert!(frame_sync_rollback(None, Some("1")));
+        assert!(!frame_sync_rollback(Some("0"), Some("0")));
+        assert_eq!(FRAME_SYNC_ALL_BITS, 0x1F);
     }
 
     #[test]

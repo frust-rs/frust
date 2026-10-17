@@ -63,8 +63,9 @@ pub(crate) fn adpf_enabled() -> bool {
 }
 
 /// The pure decision [`adpf_enabled`] returns: a non-empty, non-`"0"` value
-/// from either source opts in — the same parsing as
-/// `frust_shell_common::render_split::thread_tuning_enabled`.
+/// from either source opts in. Unlike the kill switches
+/// (`frust_shell_common::render_split::thread_tuning_enabled` and friends,
+/// where an empty value still engages), an empty value here means off.
 pub(crate) fn adpf_opt_in(compile_time: Option<&str>, runtime: Option<&str>) -> bool {
     fn is_set_non_zero(value: Option<&str>) -> bool {
         matches!(value, Some(v) if !v.is_empty() && v != "0")

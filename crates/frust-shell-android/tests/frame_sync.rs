@@ -198,3 +198,34 @@ fn clipboard_natives_are_called_only_for_their_bits() {
     let paste_call = body.find("nativeTakePasteRequest(handle)").unwrap();
     assert!(paste_gate < paste_call);
 }
+
+#[test]
+fn the_export_consults_the_rollback_knob() {
+    let glue = code(GLUE);
+    let body = block(&glue, "pub fn native_frame_sync(handle: jlong) -> jlong {");
+    assert!(
+        body.contains("frame_sync_gating_enabled()"),
+        "the export must consult the FRUST_NO_FRAME_SYNC knob"
+    );
+    assert!(
+        body.contains("FRAME_SYNC_ALL_BITS"),
+        "with gating off the export answers every defined bit"
+    );
+    assert!(
+        code(SUPPORT).contains("\"FRUST_NO_FRAME_SYNC\""),
+        "the knob variable is named in ffi_support"
+    );
+}
+
+#[test]
+fn the_consuming_exports_record_their_baselines() {
+    let glue = code(GLUE);
+    assert!(
+        block(&glue, "pub fn native_ime_state(").contains("note_ime_consumed("),
+        "nativeImeState records the JSON it served"
+    );
+    assert!(
+        block(&glue, "pub fn native_app_is_dark(").contains("note_dark_consumed("),
+        "nativeAppIsDark records the value it served"
+    );
+}

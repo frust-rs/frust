@@ -80,10 +80,11 @@ use crate::app::{
     AndroidAppHandle, FrameExecutor, InlineExecutor, PaintedScene, RenderSignals, SplitExecutor,
 };
 use crate::ffi_support::{
-    EditCommandWire, FrameObservation, FrameSyncLatch, ImeJsonState, PlatformViewCommandJson,
-    build_ime_state_json, build_platform_view_commands_json, edit_command_from_code,
-    load_pipeline_cache, normalize_ime_indices, pipeline_cache_differs, pipeline_cache_path,
-    platform_view_commands_up_to_date, publish_resolved_translucency, write_pipeline_cache_atomic,
+    EditCommandWire, FRAME_SYNC_ALL_BITS, FrameObservation, FrameSyncLatch, ImeJsonState,
+    PlatformViewCommandJson, build_ime_state_json, build_platform_view_commands_json,
+    edit_command_from_code, frame_sync_gating_enabled, load_pipeline_cache, normalize_ime_indices,
+    pipeline_cache_differs, pipeline_cache_path, platform_view_commands_up_to_date,
+    publish_resolved_translucency, write_pipeline_cache_atomic,
 };
 use crate::overlay_state::{
     FrameRequest, OVERLAYS_ENV_VAR, OverlayCutSpec, OverlayLedger, OverlayMode, OverlaySkew,
@@ -1106,14 +1107,12 @@ fn schedule_render_thread() {
     if frust_shell_common::render_split::thread_tuning_enabled() {
         match set_current_thread_class(ThreadClass::Frame) {
             ThreadClassOutcome::Changed { from, to } => log::info!(
-                "frust-shell-android: render thread nice {from} -> {to} (frame class; \
-                 blocking pool cap {})",
-                thread_policy::blocking_pool_cap()
+                "frust-shell-android: render thread nice {from} -> {to} (frame class; {})",
+                thread_policy::runtime_policy_summary()
             ),
             ThreadClassOutcome::Kept { nice } => log::info!(
-                "frust-shell-android: render thread keeps inherited nice {nice} (frame class; \
-                 blocking pool cap {})",
-                thread_policy::blocking_pool_cap()
+                "frust-shell-android: render thread keeps inherited nice {nice} (frame class; {})",
+                thread_policy::runtime_policy_summary()
             ),
             ThreadClassOutcome::Refused { error } => log::warn!(
                 "frust-shell-android: render thread frame class refused ({}); keeping the \
@@ -2108,6 +2107,7 @@ pub fn native_ime_state(mut env: EnvUnowned, handle: jlong) -> jstring {
             return std::ptr::null_mut();
         };
         let json = build_ime_state_json(&ime_state_to_json(app.ime_state()));
+        frame_sync_latch().note_ime_consumed(&json);
         env.with_env(|env| Ok::<JObject, jni::errors::Error>(JString::new(env, &json)?.into()))
             .resolve::<LogErrorAndDefault>()
             .into_raw()
@@ -2322,7 +2322,11 @@ pub fn native_app_is_dark(handle: jlong) -> jboolean {
     guard("nativeAppIsDark", false, || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         match unsafe { handle_mut(handle) } {
-            Some(app) => app.is_dark_theme(),
+            Some(app) => {
+                let dark = app.is_dark_theme();
+                frame_sync_latch().note_dark_consumed(dark);
+                dark
+            }
             None => false,
         }
     })
@@ -2592,9 +2596,25 @@ fn frame_sync_latch() -> std::sync::MutexGuard<'static, FrameSyncLatch> {
 /// only for the bits that are set; those exports are unchanged. The
 /// clipboard slots are one-shot edges, so a value drained here is held and
 /// served by the matching `nativeTake*` call. A missing handle answers `0`.
+///
+/// `FRUST_NO_FRAME_SYNC` (any non-`"0"` value) turns the gating off: the
+/// export answers every defined bit without running the sync, so Kotlin polls
+/// everything each frame and the `nativeTake*` calls drain the app's slots
+/// directly (the latch never holds a value in that mode). The first call logs
+/// one info line.
 pub fn native_frame_sync(handle: jlong) -> jlong {
     guard("nativeFrameSync", 0, || {
         pump_reactive_runtime();
+        if !frame_sync_gating_enabled() {
+            static LOGGED: std::sync::Once = std::sync::Once::new();
+            LOGGED.call_once(|| log::info!("frame sync gating off (FRUST_NO_FRAME_SYNC)"));
+            // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+            return if unsafe { handle_mut(handle) }.is_some() {
+                FRAME_SYNC_ALL_BITS
+            } else {
+                0
+            };
+        }
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         let Some(app) = (unsafe { handle_mut(handle) }) else {
             return 0;

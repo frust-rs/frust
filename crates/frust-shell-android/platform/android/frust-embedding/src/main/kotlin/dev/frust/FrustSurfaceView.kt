@@ -1863,10 +1863,6 @@ class FrustSurfaceView(
         // Once the surface is lost the handle stays valid and the native frame
         // is a cheap no-op, so re-posting is always correct while `running`.
         if (handle != 0L) {
-            // Platform-view scroll sync: hand the native side
-            // this tick's frame-timeline sample BEFORE `nativeOnFrame`, which is
-            // where the scroll-sync tail advances. Inert (one `Long` field
-            // compare) unless a native sibling is actually on screen.
             if (!perfJniProbed) {
                 perfJniProbed = true
                 perfJni = nativePerfTrace()
@@ -1876,6 +1872,10 @@ class FrustSurfaceView(
                     perfTimerNanos = b - a
                 }
             }
+            // Platform-view scroll sync: hand the native side
+            // this tick's frame-timeline sample BEFORE `nativeOnFrame`, which is
+            // where the scroll-sync tail advances. Inert (one `Long` field
+            // compare) unless a native sibling is actually on screen.
             sampleFrameTimeline()
             // A `false` return is a FATAL, unrecoverable render-thread failure
             // (first-surface install could not succeed) — stop the loop rather
@@ -2266,9 +2266,11 @@ class FrustSurfaceView(
          * A *controlled* field's clear-on-submit is instead a signal write whose
          * new value only reaches the widget's own editable buffer (and therefore
          * its next `publish_ime_state`) on the *next rebuild* — the synchronous
-         * poll above can still observe stale text in that case. [doFrame]'s own
-         * **unconditional** per-frame [pollImeAfterDispatch] call is what
-         * actually closes it, on whichever frame the rebuild lands.
+         * poll above can still observe stale text in that case. That gap is
+         * closed by `nativeImeAction`'s dirty mark: it makes the next
+         * `nativeFrameSync` report the IME bit once even if the published state
+         * did not move, and [doFrame]'s bit-0 gate then runs the poll on
+         * whichever frame the rebuild lands.
          */
         override fun performEditorAction(actionCode: Int): Boolean {
             if (handle != 0L) {
