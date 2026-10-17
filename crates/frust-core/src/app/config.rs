@@ -1,5 +1,5 @@
 //! Configuration knobs and shell-pushed inputs on [`RenderRoot`]: layout skip and audit,
-//! retained layers, theme, insets, presented frames and surface translucency.
+//! retained layers, focus ring, theme, insets, presented frames and surface translucency.
 
 use std::any::Any;
 
@@ -7,7 +7,56 @@ use super::RenderRoot;
 use crate::insets::WindowInsets;
 use crate::view::{ChangeFlags, View};
 
+/// When [`PaintCtx::is_focused_for_ring`](crate::widget::PaintCtx::is_focused_for_ring) reports
+/// a ring on the focused widget ([`RenderRoot::set_focus_ring_policy`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum FocusRingPolicy {
+    /// No ring, whatever focused the widget.
+    Never,
+    /// While the focus came from keyboard traversal and no pointer `Down` has landed since.
+    #[default]
+    KeyboardOnly,
+    /// A ring whenever the widget holds focus.
+    Always,
+}
+
 impl<State: 'static, V: View<State>> RenderRoot<State, V> {
+    /// Choose when the focused widget draws a ring (default [`FocusRingPolicy::KeyboardOnly`]).
+    pub fn set_focus_ring_policy(&mut self, policy: FocusRingPolicy) {
+        let visible = self.focus_ring_visible();
+        self.focus_ring_policy = policy;
+        self.repaint_if_ring_moved(visible);
+    }
+
+    /// The policy [`RenderRoot::set_focus_ring_policy`] last set.
+    pub fn focus_ring_policy(&self) -> FocusRingPolicy {
+        self.focus_ring_policy
+    }
+
+    /// Whether the policy shows a ring now, before ANDing a pod's own focus path.
+    pub(super) fn focus_ring_visible(&self) -> bool {
+        match self.focus_ring_policy {
+            FocusRingPolicy::Never => false,
+            FocusRingPolicy::KeyboardOnly => self.keyboard_focus,
+            FocusRingPolicy::Always => true,
+        }
+    }
+
+    /// Record whether the live focus came from the keyboard (traversal sets it, a `Down` clears it).
+    pub(super) fn set_keyboard_focus(&mut self, keyboard: bool) {
+        let visible = self.focus_ring_visible();
+        self.keyboard_focus = keyboard;
+        self.repaint_if_ring_moved(visible);
+    }
+
+    /// A moved ring changes pod reads without dirtying them, so no retained subtree stays clean.
+    fn repaint_if_ring_moved(&mut self, was_visible: bool) {
+        if self.focus_ring_visible() != was_visible {
+            self.paint_epoch = self.paint_epoch.wrapping_add(1);
+            self.pending |= ChangeFlags::PAINT;
+        }
+    }
+
     /// Switch the layout skip on (the default) or off; `false` lays out every pod every pass.
     pub fn set_layout_skip(&mut self, skip: bool) {
         self.layout_skip = skip;

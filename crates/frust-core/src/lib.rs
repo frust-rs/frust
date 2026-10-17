@@ -15,6 +15,7 @@
 //! * [`retained`] — retained-page keys and the renderer's resident-key ledger.
 //! * [`selection_toolbar`] — a text field's toolbar request and the policy/builder slots.
 //! * [`semantics`] — the accessibility tree pass behind [`SemanticsUpdate`].
+//! * [`shortcuts`] — the [`Chord`] spec and the per-paint keyboard-shortcut declarations.
 //! * [`sliver`] — the sliver protocol a scrolling viewport lays children out with.
 //! * [`tree`] — the [`WidgetTree`] arena and the read-only [`InspectNode`] walk.
 //! * [`view`] — the [`View`] trait, [`ChangeFlags`], [`BuildCtx`] and [`ViewSeq`].
@@ -33,6 +34,7 @@ pub mod overlay;
 pub mod retained;
 pub mod selection_toolbar;
 pub mod semantics;
+pub mod shortcuts;
 pub mod sliver;
 pub mod tree;
 pub mod view;
@@ -162,7 +164,7 @@ pub use accesskit;
 pub use anim::{
     AnimationController, AnimationStatus, Curve, FrameTime, Lerp, Spring, SpringDesc, Tween,
 };
-pub use app::{Orientation, RenderRoot, WindowMetrics};
+pub use app::{FocusRingPolicy, Orientation, RenderRoot, WindowMetrics};
 pub use component::{Component, ComponentView, ComponentWidget, component};
 pub use event::{
     CursorIcon, EditCommand, EditingState, EventCtx, EventOutcome, EventResult, ImeContentType,
@@ -180,7 +182,8 @@ pub use input::{
 pub use insets::{CornerInset, CornerInsets, EdgeInsets as WindowEdgeInsets, WindowInsets};
 pub use layout::BoxConstraints;
 pub use overlay::{
-    OutsideTap, OverlayBand, OverlayEntry, OverlayHit, OverlayInput, OverlayKey, OverlayPod,
+    OutsideTap, OverlayBand, OverlayEntry, OverlayHit, OverlayInput, OverlayKey, OverlayKeys,
+    OverlayPod,
 };
 pub use retained::{RetainedEntry, RetainedKey, RetainedLedger};
 pub use selection_toolbar::{
@@ -190,6 +193,9 @@ pub use selection_toolbar::{
     set_selection_toolbar_builder, set_selection_toolbar_policy,
 };
 pub use semantics::{SemanticsCtx, SemanticsUpdate};
+pub use shortcuts::{
+    Chord, ChordParseError, ShortcutDecl, ShortcutHint, ShortcutId, ShortcutScope,
+};
 pub use sliver::{
     GrowthDirection, ScrollAxis, ScrollDirection, SliverConstraints, SliverGeometry, SliverWidget,
 };

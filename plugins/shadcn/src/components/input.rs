@@ -690,6 +690,27 @@ mod tests {
     }
 
     #[test]
+    fn tab_focus_paints_the_same_ring_as_a_click() {
+        use frust::authoring::{Key, KeyEvent, Modifiers, NamedKey};
+        let mut h = Harness::new();
+        h.theme(Brightness::Light);
+        assert!(h.paint().ring().is_none());
+        let tab = InputEvent::Key(KeyEvent {
+            key: Key::Named(NamedKey::Tab),
+            modifiers: Modifiers::default(),
+            repeat: false,
+        });
+        h.root.event(&mut h.state, &tab);
+        let keyboard = h.paint();
+        h.pointer(PointerPhase::Down, 40.0, 18.0);
+        h.pointer(PointerPhase::Up, 40.0, 18.0);
+        let clicked = h.paint();
+        assert_eq!(keyboard.border(), clicked.border());
+        assert_eq!(keyboard.ring(), clicked.ring());
+        assert!(keyboard.ring().is_some(), "a field rings for either focus");
+    }
+
+    #[test]
     fn invalid_paints_a_destructive_border_and_only_rings_while_focused() {
         let mut h = Harness::with(true, false);
         h.theme(Brightness::Light);

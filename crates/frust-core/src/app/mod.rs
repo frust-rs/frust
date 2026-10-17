@@ -29,10 +29,12 @@ use crate::event::{CursorIcon, EventOutcome, ImeState, PointerId};
 use crate::insets::WindowInsets;
 use crate::overlay::{OverlayHit, OverlayKey};
 use crate::selection_toolbar::SelectionToolbarRequest;
+use crate::shortcuts::{ShortcutHint, ShortcutId, ShortcutTable};
 use crate::tree::WidgetTree;
 use crate::view::{ChangeFlags, View, WidgetId};
 use crate::widget::{ChildPod, PlatformViewFrame};
 
+pub use config::FocusRingPolicy;
 use layout::LayoutAudit;
 pub use metrics::{Orientation, WindowMetrics};
 
@@ -79,6 +81,13 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     focus_surface: Option<OverlayKey>,
     /// The live focus session's identity, stamped beside each pod's focus link; never `0`.
     focus_epoch: u64,
+    /// The pod declined keys are forwarded to, with the `focus_epoch` it was recorded under.
+    key_forward: Option<(OverlayKey, u64)>,
+    /// The carrier id of this root's traversal grants (`widget::FocusGrant`); declared by no one.
+    focus_grant: ShortcutId,
+    /// Whether traversal granted the live focus; a pointer `Down` clears it.
+    keyboard_focus: bool,
+    focus_ring_policy: FocusRingPolicy,
     hover_active: bool,
     /// Identity of the latest hover pass; a pod's hover stamp counts only while it equals this.
     hover_epoch: u64,
@@ -117,6 +126,8 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     painted_animating: bool,
     /// Routing half of the overlay entries the last paint registered, in paint order; no pods.
     overlay_hits: Vec<OverlayHit>,
+    /// The shortcut declarations the last paint made, matched against unhandled keys.
+    shortcuts: ShortcutTable,
     /// The focused field's selection-toolbar request from the last paint; a release clears it.
     selection_toolbar: Option<SelectionToolbarRequest>,
     /// Bumped on every actual change of `selection_toolbar`, a clear included.
@@ -157,6 +168,10 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             focus_active: false,
             focus_surface: None,
             focus_epoch: 1,
+            key_forward: None,
+            focus_grant: ShortcutId::next(),
+            keyboard_focus: false,
+            focus_ring_policy: FocusRingPolicy::KeyboardOnly,
             hover_active: false,
             hover_epoch: 1,
             root_identity: NEXT_ROOT_IDENTITY.fetch_add(1, Ordering::Relaxed),
@@ -178,6 +193,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             deferred_frame: false,
             painted_animating: false,
             overlay_hits: Vec::new(),
+            shortcuts: ShortcutTable::default(),
             selection_toolbar: None,
             selection_toolbar_gen: 0,
             layout_epoch: 1,
@@ -192,6 +208,11 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             overlay_pods: Vec::new(),
             _state: core::marker::PhantomData,
         }
+    }
+
+    /// The last paint's shortcut declarations `filter` keeps, in paint order: a palette's list.
+    pub fn shortcut_hints(&self, filter: impl FnMut(&ShortcutHint) -> bool) -> Vec<ShortcutHint> {
+        self.shortcuts.hints(filter)
     }
 }
 

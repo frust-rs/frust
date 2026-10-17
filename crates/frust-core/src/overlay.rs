@@ -9,10 +9,13 @@
 //! first; a hit is an [`InputEvent::Overlay`](crate::event::InputEvent::Overlay)
 //! broadcast that only the owner holding the key acts on.
 //!
+//! A key the focus path declines goes to the focus session's forward pod, then (an Escape) to
+//! the topmost [`OverlayKeys::Modal`] pod, both as `OverlayEventKind::Key`, then to the shortcut
+//! table, masked to that modal pod's own declarations while one is registered.
+//!
 //! # Not in v1
 //!
-//! * No focus trap: focus inside a pod is neither confined nor restored on dismiss.
-//! * No declined-key forwarding: key/IME/edit-command events stay focus-routed.
+//! * No focus trap: a modal pod masks shortcuts only; focus is neither confined nor restored.
 //! * Not seen by [`inspect`](crate::app::RenderRoot::inspect) unless the owner visits the pod.
 //! * No nesting: a registration made from inside a floated pod's paint is dropped;
 //!   register a submenu from the same owner, in the main tree's paint.
@@ -87,6 +90,15 @@ pub enum OutsideTap {
     },
 }
 
+/// Whether a registered surface claims the keys the focus path declines.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum OverlayKeys {
+    #[default]
+    Pass,
+    /// Masks main-tree shortcuts and takes a declined Escape (implied by a consuming `Notify`).
+    Modal,
+}
+
 /// The shared handle the owner and the root reach one floated pod through.
 pub type OverlayPod = Rc<RefCell<ChildPod>>;
 
@@ -97,6 +109,7 @@ pub struct OverlayEntry {
     pub band: OverlayBand,
     pub input: OverlayInput,
     pub outside_tap: OutsideTap,
+    pub keys: OverlayKeys,
     /// Absolute logical window rect (from `PaintCtx::origin`): where the pod
     /// paints and what routing hit-tests.
     pub window_rect: Rect,
@@ -113,6 +126,7 @@ impl fmt::Debug for OverlayEntry {
             .field("band", &self.band)
             .field("input", &self.input)
             .field("outside_tap", &self.outside_tap)
+            .field("keys", &self.keys)
             .field("window_rect", &self.window_rect)
             .field("insets", &self.insets)
             .field("pod", &"<pod>")
@@ -127,6 +141,7 @@ pub struct OverlayHit {
     pub band: OverlayBand,
     pub input: OverlayInput,
     pub outside_tap: OutsideTap,
+    pub keys: OverlayKeys,
     pub window_rect: Rect,
 }
 
@@ -137,8 +152,16 @@ impl OverlayHit {
             band: entry.band,
             input: entry.input,
             outside_tap: entry.outside_tap,
+            keys: entry.keys,
             window_rect: entry.window_rect,
         }
+    }
+
+    /// Interactive and [`OverlayKeys::Modal`], or consuming outside taps.
+    pub(crate) fn is_modal(&self) -> bool {
+        self.input == OverlayInput::Interactive
+            && (self.keys == OverlayKeys::Modal
+                || self.outside_tap == OutsideTap::Notify { consume: true })
     }
 
     /// Half-open on the far edges, so surfaces sharing an edge never both hit.
@@ -199,6 +222,7 @@ mod tests {
             band,
             input: OverlayInput::Interactive,
             outside_tap: OutsideTap::Ignore,
+            keys: OverlayKeys::Pass,
             window_rect: rect,
             pod: Rc::new(RefCell::new(ChildPod::new(Box::new(StubWidget)))),
             insets: WindowInsets::default(),
@@ -276,6 +300,22 @@ mod tests {
         // The pod stayed with its owner: the entry still holds the only two
         // clones (the owner's and this local one), never a third in the root.
         assert_eq!(Rc::strong_count(&source.pod), 1);
+    }
+
+    #[test]
+    fn a_hit_is_modal_when_interactive_and_modal_or_consuming_outside_taps() {
+        let mut source = entry(OverlayKey::next(), OverlayBand::Floating, Rect::ZERO);
+        assert!(!OverlayHit::of(&source).is_modal());
+        source.keys = OverlayKeys::Modal;
+        assert!(OverlayHit::of(&source).is_modal());
+        source.keys = OverlayKeys::Pass;
+        source.outside_tap = OutsideTap::Notify { consume: true };
+        assert!(OverlayHit::of(&source).is_modal());
+        source.input = OverlayInput::Transparent;
+        assert!(
+            !OverlayHit::of(&source).is_modal(),
+            "a transparent pod never takes keys"
+        );
     }
 
     #[test]

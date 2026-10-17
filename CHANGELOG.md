@@ -49,6 +49,13 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   window state, then `DesktopConfig::initial_size`, then 800×600; a set `FRUST_WINDOW_MAXIMIZED`
   other than `1`/`true` un-maximizes a saved maximized window. The one-time window log line prints
   `unset` for an unset knob.
+- Keyboard input (breaking for exhaustive matches). `InputEvent::Shortcut` and
+  `OverlayEventKind::{Shortcut, Key}` are new variants, so a downstream exhaustive `match` on either
+  enum needs an arm; `OverlayEntry` and `OverlayHit` gained a `keys` field, so a struct literal needs
+  it (`OverlayKeys::Pass` keeps the old behaviour). The new `Widget::is_focusable` and
+  `Widget::visit_focus_children` are defaulted. `TextInput` now declines a chord it does not decode
+  instead of consuming it, so app shortcuts reach the registry while a field has focus; it still
+  decodes Ctrl/Meta+C/X/V/A and the legacy Insert/Delete chords.
 
 ### Added
 
@@ -71,6 +78,28 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 - An opt-in baseline scrollbar: `ScrollView::scrollbar` and `ListView::scrollbar` take a
   `ScrollbarStyle` (`ScrollbarShow::{Never, WhileScrolling, Hover, Always}`), re-exported from the
   facade; an overlay bar with hover widening, an idle fade, thumb drag and track paging.
+- Keyboard shortcuts: `Chord` (`Chord::parse("Mod+K")`, `Mod` is Command on macOS/iOS and Ctrl
+  elsewhere; `Chord::display`), `ShortcutDecl`/`ShortcutId`/`ShortcutScope`/`ShortcutHint`, and a
+  per-paint registry declared through `PaintCtx::register_shortcut`; a key the focus path declines
+  is matched topmost-overlay, then `Local`, then `AppGlobal`. App code binds chords with the
+  `shortcuts(child).on(..)`/`.global(..)`/`.bind(..)` wrapper (`ShortcutsView`), and
+  `RenderRoot::shortcut_hints`, `BuildCtx::shortcut_hints` and `PaintCtx::shortcut_hints` list the
+  previous frame's declarations for a palette.
+- Modal key scoping and declined-key forwarding: `OverlayKeys::{Pass, Modal}` on a floated surface
+  (`OverlaySlot::set_keys`/`take_escape`, `OverlayPortalView::keys`/`on_escape`) masks main-tree
+  shortcuts and takes a declined Escape; `EventCtx::forward_declined_keys_to` and
+  `consume_overlay_key` hand an editable's declined keys to its owner's floated pod.
+- Tab / Shift+Tab focus traversal at the root over `Widget::is_focusable` stops, confined to an open
+  modal surface, and `FocusRingPolicy::{Never, KeyboardOnly, Always}` with
+  `RenderRoot::set_focus_ring_policy` and `PaintCtx::is_focused_for_ring` for a keyboard-only focus
+  ring. The baseline `Button`, `Checkbox`, `Radio`, `Slider` and `TextInput` are Tab stops; the
+  first three activate on Space/Enter and `Slider` steps on the arrow keys and jumps on Home/End.
+  shadcn's button draws its focus ring for keyboard focus only.
+- Facade: `Chord`, `FocusRingPolicy`, `OverlayKeys`, `ShortcutHint`, `ShortcutScope`, `shortcuts`
+  and `ShortcutsView` at the top level, and the full shortcut vocabulary under `frust::authoring`.
+- The playground's Shortcuts section: a Mod+K command palette listing the live hints, a Mod+B
+  pane, 1/2/3 tab chords, a row of focusable controls, a readout naming each key's consumer, and a
+  precedence-matrix test suite.
 
 ## 0.6.2 — 2026-10-16
 

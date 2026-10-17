@@ -124,6 +124,12 @@ impl<'a> BuildCtx<'a> {
         self.has_focus
     }
 
+    /// The previous paint's shortcut declarations in paint order, unreachable ones
+    /// included; label each chord with `Chord::display`. They lag this build by a frame.
+    pub fn shortcut_hints(&self) -> std::rc::Rc<[crate::shortcuts::ShortcutHint]> {
+        crate::shortcuts::last_hints()
+    }
+
     /// Seed the focus chain for a seam that starts one (`RenderRoot`'s view diff, or a
     /// component carrying its outer chain across an inner `BuildCtx`). A container
     /// descending into a pod uses [`BuildCtx::with_focus_link`], which can only narrow.

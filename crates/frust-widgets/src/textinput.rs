@@ -46,6 +46,9 @@
 //! edit the widget fires `on_change`, resets the caret to visible, and
 //! republishes the IME surface.
 //!
+//! An enabled field (read-only included) is also a Tab stop: root traversal can
+//! focus it, and it declines Tab so traversal can move on.
+//!
 //! The caret blinks while focused, its phase measured in `paint` from the shell
 //! frame clock ([`PaintCtx::frame_time`] — no wall-clock reads in widget code).
 //! Its continuation frame is a paced (`CosmeticLoop`) request at the blink's own
@@ -81,8 +84,9 @@
 //!   an [`EditCommand`] instead. [`NamedKey::Copy`]/[`Cut`](NamedKey::Cut)/
 //!   [`Paste`](NamedKey::Paste), `Ctrl+Insert`, `Shift+Insert` and
 //!   `Shift+Delete` are the legacy spellings of the same three verbs; `alt` is
-//!   never a chord modifier, and any other chorded character is consumed rather
-//!   than typed.
+//!   never a chord modifier. An undecoded chord is declined, never typed, so
+//!   the root's shortcut registry can still match it (for example a
+//!   `Mod+K` palette opener while the field has focus).
 //!
 //! **The clipboard itself lives in the shell**, so the two directions are
 //! asymmetric (see [`EditCommand`]): a copy/cut answers by writing into the
@@ -1770,11 +1774,10 @@ impl TextInputWidget {
                     if s.eq_ignore_ascii_case("a") {
                         return self.handle_command(ctx, &EditCommand::SelectAll);
                     }
-                    // Every other chorded character (Cmd+Z, Ctrl+B, …) stays
-                    // consumed rather than typed: a chord is never literal text,
-                    // and swallowing it here keeps an unimplemented verb from
-                    // inserting a stray letter.
-                    return EventResult::Handled;
+                    // Every other chorded character (Cmd+Z, Ctrl+B, …) is
+                    // declined, never typed: a chord is never literal text. The
+                    // root's shortcut registry gets the chance to match it.
+                    return EventResult::Ignored;
                 }
                 if !self.editable() {
                     // Focusable but not editable: a read-only field takes no
@@ -3037,6 +3040,11 @@ impl Widget for TextInputWidget {
         if self.focused {
             ctx.set_focused(id);
         }
+    }
+
+    /// A Tab stop exactly when it may take focus at all (enabled; read-only passes).
+    fn is_focusable(&self) -> bool {
+        self.focusable()
     }
 }
 
@@ -6996,7 +7004,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unrecognized_chord_is_still_consumed_and_never_typed() {
+    fn an_unrecognized_chord_is_declined_and_never_typed() {
         let mut state = AppState::default();
         let mut root = harness(&mut state);
         root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
@@ -7006,13 +7014,48 @@ mod tests {
         let outcome = root.event(&mut state, &chord("z", meta()));
 
         assert!(
-            outcome.handled,
-            "an undecoded chord is swallowed, not typed"
+            !outcome.handled,
+            "an undecoded chord is declined so the registry can match it"
         );
         assert_eq!(widget(&root).editor.text(), "a", "no 'z' was inserted");
         assert_eq!(state.changes, changes);
         assert!(root.take_clipboard_write().is_none());
         assert!(!root.take_paste_request());
+    }
+
+    #[test]
+    fn ctrl_and_meta_k_are_declined_and_insert_nothing() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut state, &ch("a"));
+        let changes = state.changes;
+
+        for modifiers in [ctrl(), meta()] {
+            let outcome = root.event(&mut state, &chord("k", modifiers));
+            assert!(!outcome.handled, "Mod+K is declined, not consumed");
+        }
+
+        assert_eq!(widget(&root).editor.text(), "a", "no 'k' was inserted");
+        assert_eq!(state.changes, changes);
+    }
+
+    #[test]
+    fn ctrl_a_still_selects_all_after_the_decline_change() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut state, &ch("a"));
+        root.event(&mut state, &ch("b"));
+
+        let outcome = root.event(&mut state, &chord("a", ctrl()));
+
+        assert!(outcome.handled, "the decoded select-all chord is consumed");
+        assert_eq!(
+            widget(&root).editor.text(),
+            "ab",
+            "select-all types nothing"
+        );
     }
 
     #[test]
@@ -7923,5 +7966,49 @@ mod tests {
         assert!(widget(&root).hold.is_none(), "and the hold timer with it");
         assert_eq!(widget(&root).gesture, Gesture::None);
         assert!(widget(&root).tap_in_selection.is_none());
+    }
+}
+
+#[cfg(test)]
+mod focus_traversal_tests {
+    use super::*;
+    use frust_core::{KeyEvent, Modifiers, RenderRoot};
+
+    fn key(key: Key) -> InputEvent {
+        InputEvent::Key(KeyEvent {
+            key,
+            modifiers: Modifiers::default(),
+            repeat: false,
+        })
+    }
+
+    fn root(enabled: bool) -> RenderRoot<String, crate::FlexView<String>> {
+        let mut root = RenderRoot::new();
+        let mut logic = move |s: &mut String| {
+            let field = text_input(s.clone(), |s: &mut String, v: String| *s = v);
+            crate::column().child(field.enabled(enabled))
+        };
+        root.rebuild(&mut logic, &mut String::new());
+        root.layout(Size::new(300.0, 200.0));
+        root
+    }
+
+    #[test]
+    fn tab_focuses_an_enabled_field_which_then_takes_typing() {
+        let mut root = root(true);
+        let mut value = String::new();
+        root.event(&mut value, &key(Key::Character("a".to_string())));
+        assert!(value.is_empty(), "nothing focused yet");
+        root.event(&mut value, &key(Key::Named(NamedKey::Tab)));
+        assert!(root.is_focus_active());
+        root.event(&mut value, &key(Key::Character("a".to_string())));
+        assert_eq!(value, "a");
+    }
+
+    #[test]
+    fn a_disabled_field_is_no_stop() {
+        let mut root = root(false);
+        root.event(&mut String::new(), &key(Key::Named(NamedKey::Tab)));
+        assert!(!root.is_focus_active());
     }
 }

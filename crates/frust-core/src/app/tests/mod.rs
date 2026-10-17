@@ -10,6 +10,7 @@ mod cursor;
 /// handled or not, is followed by an `Ended` broadcast.
 mod file_drop;
 mod focus_ime;
+mod focus_traversal;
 mod hover;
 mod lifecycle;
 mod overlay;
@@ -20,6 +21,7 @@ mod platform_views;
 mod scale;
 mod selection_toolbar;
 mod semantics;
+mod shortcuts;
 
 use super::*;
 use std::cell::{Cell, RefCell};
@@ -348,6 +350,7 @@ impl crate::widget::Widget for OverlayOwnerWidget {
                 band: surface.spec.band,
                 input: surface.spec.input,
                 outside_tap: surface.spec.outside_tap,
+                keys: crate::overlay::OverlayKeys::Pass,
                 window_rect: surface.spec.rect,
                 pod: std::rc::Rc::clone(&surface.pod),
                 insets: ctx.window_insets(),
@@ -409,6 +412,18 @@ impl crate::widget::Widget for OverlayOwnerWidget {
                 surface.pod.borrow_mut().event_child(ctx, &local);
             }
             OverlayEventKind::OutsideDown => {}
+            OverlayEventKind::Shortcut(id) => {
+                surface
+                    .pod
+                    .borrow_mut()
+                    .event_child(ctx, &InputEvent::Shortcut(*id));
+            }
+            OverlayEventKind::Key(key) => {
+                surface
+                    .pod
+                    .borrow_mut()
+                    .event_child(ctx, &InputEvent::Key(key.clone()));
+            }
         }
         // A broadcast is never consumed, whatever the pod returned.
         EventResult::Ignored

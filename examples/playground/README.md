@@ -14,7 +14,7 @@ neutral backdrop for the capabilities under test.
 
 A Material `app_bar` (a plug brand mark, the title, and the
 brightness / reduce-motion / animations toggles) sits above the
-`pattern_switcher`-hosted section body, selecting between seventeen sections
+`pattern_switcher`-hosted section body, selecting between eighteen sections
 through one of two responsive navigation shapes (`use_context::<WindowMetrics>()`
 against a 600px width breakpoint — `pages::responsive`'s own named-breakpoint
 convention, applied to the shell itself):
@@ -22,7 +22,7 @@ convention, applied to the shell itself):
 - **Narrow** (< 600px, e.g. a phone): a bottom `navigation_bar` shows the
   first five sections directly, plus a trailing "More" destination that opens
   an overlay listing every section.
-- **Wide** (≥ 600px, e.g. a desktop window): a side rail lists all seventeen
+- **Wide** (≥ 600px, e.g. a desktop window): a side rail lists all eighteen
   sections directly, in a column beside the page body — nothing is ever
   behind an overflow menu at this width.
 
@@ -154,6 +154,21 @@ The sections, in order:
     (`lib.rs`) persists window geometry and enforces a 480 x 320 minimum size.
     The Scroll page also carries the opt-in baseline scrollbar (default and
     `Always` variants).
+18. **Shortcuts** — the keyboard-shortcut registry, modal key scoping and Tab
+    traversal. An app-global `Mod+K` opens a command palette (a modal
+    `overlay_portal` with a filter input over the live shortcut hints, each
+    labelled with `Chord::display`; `Escape` closes it); a local `Mod+B` toggles
+    a side pane; local `1`/`2`/`3` select one of three tabs (`Mod` is ⌘ on
+    macOS/iOS, Ctrl elsewhere; function keys are not in the key vocabulary).
+    A row of focusable baseline controls (Button, Checkbox, Radio, Slider,
+    TextInput) takes Tab / Shift+Tab with the focus ring, and a readout line
+    names the last consumer of a key. `tests/shortcuts.rs` pins the precedence
+    matrix (input focused or not, palette open or closed, against Mod+K, Mod+B,
+    `1`, Escape, Tab and a typed letter). A focused text input declines the
+    chords it does not decode, so `Mod+K` and `Mod+B` still reach the registry
+    while one has focus; an open palette masks them, filter focused or not, and
+    the palette's focused filter takes the first `Escape` (blur) before the
+    modal's close hook.
 
 The Terminal fixtures live in [`fixtures/terminal/`](fixtures/terminal/README.md)
 (bytes + the deterministic generator that produced them, embedded with
@@ -221,6 +236,9 @@ trackpad, or touchscreen. Rows marked OWED have not been run:
 | Scroll: scrollbar fade-out, thumb drag, track click, `Always` variant | Linux (conductor, linux-native rig) | PASSED 2026-10-18 (bar visible during an animated move and gone after the delay; thumb drag and track paging on the `Always` box; hover widens 6 → 10 px; wheel scrolling was not exercised — the rig's synthetic wheel events never reach the window) |
 | Desktop + Scroll scrollbar: dialogs, window-state restore, min size, scrollbar | macOS (e-g1) | OWED |
 | Desktop + Scroll scrollbar: dialogs, window-state restore + off-screen clamp, min size, scrollbar | Windows (e-g2) | OWED |
+| Shortcuts: Mod+K palette (Escape closes), Mod+B pane, 1/2/3 tabs, Tab / Shift+Tab ring over the control row | Linux (conductor, linux-native rig via xdotool) | PASSED 2026-10-18 (linux-native rig via xdotool: Ctrl+K opens the modal palette listing the live hints with Chord::display labels and Escape closes it; Ctrl+B toggles the pane; 1/2/3 select tabs; Tab/Shift+Tab move focus across the row — observed through where typed keys land and Enter activating the next stop; with the field focused Ctrl+K and Ctrl+B still fire after the text input learned to decline undecoded chords. Not visible: the baseline controls paint no keyboard-focus ring, so the Tab ring can only be seen on the text field's border) |
+| Shortcuts: the same chords with ⌘ in place of Ctrl, ⌘K / ⌘B hint labels | macOS (e-g1) | OWED |
+| Shortcuts: the same chords with Ctrl, Tab ring | Windows (e-g2) | OWED |
 | Drag: desktop pointer drag (kanban card between columns, edge auto-scroll, highlight) | Linux desktop (X11, NVIDIA T400), 2026-10-06 | PASS (card lands in Doing/Done incl. a drag with a vertical leg; ghost, source dim, column highlight; edge auto-scroll not exercisable — the demo columns never overflow) |
 | Drag: Escape cancels a live pointer drag | Linux desktop (X11, NVIDIA T400), 2026-10-06 | PASS (ghost + highlight clear with the button still held) |
 | Drag: keyboard reorder (lift/cycle/drop) on the reorderable list | Linux desktop (X11, NVIDIA T400), 2026-10-06 | PASS (Enter / ArrowDown ×4 / Enter → "Last move: 0 → 2") |

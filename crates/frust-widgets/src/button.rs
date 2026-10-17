@@ -9,6 +9,12 @@
 //! *only if the release lands inside*. A `Cancel` (platform gesture steal) just
 //! clears the pressed state.
 //!
+//! # Keyboard
+//!
+//! An enabled button is a Tab stop ([`Widget::is_focusable`]); while focused, a bare Space or
+//! Enter fires `on_press` exactly as a click does. A pointer press claims no focus, so touch and
+//! mouse behaviour are unchanged: focus arrives through traversal only.
+//!
 //! # Style variants
 //!
 //! [`ButtonStyle`] (`.style(...)`) adds four variants beside the default
@@ -87,6 +93,7 @@ use peniko::{Brush, Color};
 
 use crate::authoring::presses;
 use crate::nav::transition::{TransitionDriver, make_driver};
+use crate::shortcuts::is_activation;
 use crate::text;
 use crate::text::ThemeTextColor;
 use crate::{Alignment, Timing, authoring::PRESSED_OPACITY};
@@ -865,6 +872,14 @@ impl Widget for ButtonWidget {
         if self.loading || self.disabled {
             return EventResult::Ignored;
         }
+        if let InputEvent::Key(key) = event {
+            if !(ctx.has_focus() && is_activation(key)) {
+                return EventResult::Ignored;
+            }
+            (self.on_press)(ctx);
+            ctx.request_redraw();
+            return EventResult::Handled;
+        }
         let InputEvent::Pointer(p) = event else {
             return EventResult::Ignored;
         };
@@ -932,6 +947,12 @@ impl Widget for ButtonWidget {
                 node.add_action(Action::Click);
             }
         });
+    }
+
+    /// A Tab stop unless disabled (a loading button keeps its focus). A pointer press never
+    /// claims focus — see the module docs' Keyboard section.
+    fn is_focusable(&self) -> bool {
+        !self.disabled
     }
 
     crate::authoring::visit_children!(label);
@@ -1591,5 +1612,95 @@ mod tests {
         dispatch(&mut w, &mut state, &ev(PointerPhase::Cancel, 10.0, 10.0));
         assert_eq!(state.presses, 1, "Cancel must not fire");
         assert_eq!(w.press.target, REST_SCALE, "Cancel retargets to rest");
+    }
+
+    mod keyboard {
+        use super::*;
+        use frust_core::{DiscardScene, Key, KeyEvent, Modifiers, NamedKey, RenderRoot};
+
+        fn key(key: Key, modifiers: Modifiers) -> InputEvent {
+            InputEvent::Key(KeyEvent {
+                key,
+                modifiers,
+                repeat: false,
+            })
+        }
+
+        fn space() -> InputEvent {
+            key(Key::Character(" ".to_string()), Modifiers::default())
+        }
+
+        fn root(disabled: bool) -> RenderRoot<Counter, crate::FlexView<Counter>> {
+            let mut root = RenderRoot::new();
+            let mut logic = move |_: &mut Counter| {
+                let go = button::<Counter, _>("go", |s: &mut Counter| s.presses += 1);
+                crate::column().child(go.disabled(disabled))
+            };
+            root.rebuild(&mut logic, &mut Counter::default());
+            let mut tcx = frust_text::TextContext::new();
+            root.layout_with_text(Size::new(200.0, 200.0), &mut tcx as &mut dyn Any);
+            root.paint(&mut DiscardScene, FrameTime::ZERO);
+            root
+        }
+
+        #[test]
+        fn an_enabled_button_is_focusable_and_a_disabled_one_is_not() {
+            assert!(widget().is_focusable());
+            let view = button::<Counter, _>("go", |_| {}).disabled(true);
+            let w = View::<Counter>::build(&view, &mut BuildCtx::new(&mut 0u64));
+            assert!(!w.is_focusable());
+        }
+
+        #[test]
+        fn tab_focuses_the_button_then_space_or_enter_presses_it() {
+            let mut root = root(false);
+            let mut state = Counter::default();
+            root.event(&mut state, &space());
+            assert_eq!(state.presses, 0, "an unfocused button takes no keys");
+            root.event(
+                &mut state,
+                &key(Key::Named(NamedKey::Tab), Modifiers::default()),
+            );
+            assert!(root.is_focus_active());
+            assert!(root.event(&mut state, &space()).handled);
+            let enter = key(Key::Named(NamedKey::Enter), Modifiers::default());
+            assert!(root.event(&mut state, &enter).handled);
+            assert_eq!(state.presses, 2);
+            let ctrl = Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            };
+            root.event(&mut state, &key(Key::Named(NamedKey::Enter), ctrl));
+            assert_eq!(state.presses, 2, "a chorded Enter is left for shortcuts");
+        }
+
+        #[test]
+        fn a_click_claims_no_focus_and_a_disabled_button_is_skipped() {
+            let mut root = root(false);
+            let mut state = Counter::default();
+            root.event(&mut state, &ev(PointerPhase::Down, 5.0, 5.0));
+            root.event(&mut state, &ev(PointerPhase::Up, 5.0, 5.0));
+            assert_eq!(state.presses, 1);
+            assert!(
+                !root.is_focus_active(),
+                "focus arrives through traversal only"
+            );
+
+            let mut root = self::root(true);
+            root.event(
+                &mut state,
+                &key(Key::Named(NamedKey::Tab), Modifiers::default()),
+            );
+            assert!(!root.is_focus_active(), "no stop to land on");
+        }
+
+        #[test]
+        fn an_unfocused_key_event_is_ignored() {
+            let mut w = widget();
+            let mut state = Counter::default();
+            let state_any: &mut dyn Any = &mut state;
+            let mut ctx = EventCtx::new(state_any, Point::ZERO, Size::new(100.0, 40.0));
+            assert_eq!(w.event(&mut ctx, &space()), EventResult::Ignored);
+        }
     }
 }

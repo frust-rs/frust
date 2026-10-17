@@ -221,6 +221,41 @@ strings. The canonical example is `crates/frust-drive/templates/app/src/lib.rs.t
   [NATIVE_WIDGETS_ARCHITECTURE.md](NATIVE_WIDGETS_ARCHITECTURE.md)'s typeface ladder for the
   shipped instance.
 
+## Keyboard Focus and Shortcuts
+
+The routing (declined-key chain, traversal, focus ring) is CORE's — see
+[CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md)'s Keyboard Shortcuts and Traversal; the shared
+activation and focus-look rules are in [CODE_STANDARDS.md](CODE_STANDARDS.md)'s Interaction
+Semantics.
+
+- **App code binds chords with `shortcuts(child)`.** `.on(spec, label, handler)` binds in the
+  `Local` tier, `.global(..)` in `AppGlobal`, and `.bind(Chord, label, scope, handler)` takes a
+  built `Chord`; the result, `ShortcutsView`, holds its child inline, so it is transparent to
+  layout, hit testing, traversal and slivers. Bindings declare before the child paints, so a nested
+  wrapper's binding for the same chord wins; ids are allocated at build and kept by position.
+  `.on`/`.global` panic on a spec that does not parse — use `.bind` for a spec read at runtime. A
+  palette lists `BuildCtx::shortcut_hints()` (the previous frame's declarations) with
+  `Chord::display` labels.
+- **Baseline Tab stops.** `Button` (unless disabled), `Checkbox`, `Radio`, `Slider` and `TextInput`
+  (when enabled) answer `is_focusable`. While focused, `Button`/`Checkbox`/`Radio` activate on a bare,
+  non-repeat Space or Enter, `Slider` steps 0.05 on the arrows and jumps on Home/End, and
+  `TextInput` declines Tab plus every chord it does not decode (it still decodes Ctrl/Meta +
+  c/x/v/a and the legacy Insert/Delete chords; Alt is never a chord modifier), so app chords reach
+  the registry while a field has focus. The four non-text controls take focus from traversal only,
+  never from a press, so clicking one that holds keyboard focus drops it, and none of the baseline
+  controls paints a keyboard-focus visual (`baseline-controls-no-focus-visual` in
+  [LIMITATIONS.md](LIMITATIONS.md)).
+- **A container that shows only some children narrows `visit_focus_children` and `Shortcut`
+  delivery to the same set.** `NavigatorWidget` visits its Current page and `IndexedStackWidget` its
+  selected child; a covered page or hidden tab still paints and declares, but never answers or
+  takes focus.
+- **A design system's focus visual is the consumer's call.** `frust_shadcn::button` is the
+  reference keyboard-only consumer: its ring and ring-coloured border read
+  `PaintCtx::is_focused_for_ring`, like upstream's `focus-visible:` — true under the root's
+  `FocusRingPolicy` (`KeyboardOnly` by default: focus came from Tab and no pointer press has landed
+  since; `Always`; never under `Never`). `frust_shadcn::input` keeps `has_focus`, because the
+  browser shows `:focus-visible` on a text field focused by a click too.
+
 ## See Also
 
 - [CODE_STANDARDS.md](CODE_STANDARDS.md) — the shared conventions every widget also follows,

@@ -24,6 +24,7 @@ use crate::event::{EventCtx, EventResult, ImeState, InputEvent};
 use crate::insets::WindowInsets;
 use crate::layout::BoxConstraints;
 use crate::semantics::SemanticsCtx;
+use crate::shortcuts::ShortcutId;
 use crate::sliver::{SliverConstraints, SliverGeometry, SliverWidget};
 
 /// The renderer-agnostic paint target a widget draws into; `SceneBuilder`
@@ -532,6 +533,8 @@ pub struct PaintCtx<'a> {
     ime_state: Option<ImeState>,
     /// Whether this widget holds the focus path on the live session.
     has_focus: bool,
+    /// Whether the root's [`FocusRingPolicy`](crate::app::FocusRingPolicy) shows a ring now.
+    focus_ring: bool,
     /// Whether this widget is on the recorded hover path.
     hovered: bool,
     hover_epoch: u64,
@@ -577,6 +580,7 @@ impl<'a> PaintCtx<'a> {
             paced_interval: None,
             ime_state: None,
             has_focus: false,
+            focus_ring: false,
             hovered: false,
             hover_epoch: 0,
             focus_epoch: 0,
@@ -698,6 +702,21 @@ impl<'a> PaintCtx<'a> {
     /// Seed whether the widget being painted holds focus.
     pub(crate) fn set_has_focus(&mut self, has_focus: bool) {
         self.has_focus = has_focus;
+    }
+
+    /// The previous paint's shortcut declarations, as `BuildCtx::shortcut_hints` returns them.
+    pub fn shortcut_hints(&self) -> std::rc::Rc<[crate::shortcuts::ShortcutHint]> {
+        crate::shortcuts::last_hints()
+    }
+
+    /// Whether to draw a focus ring: [`PaintCtx::has_focus`] and the root's
+    /// [`FocusRingPolicy`](crate::app::FocusRingPolicy) allowing one right now.
+    pub fn is_focused_for_ring(&self) -> bool {
+        self.has_focus && self.focus_ring
+    }
+
+    pub(crate) fn set_focus_ring(&mut self, visible: bool) {
+        self.focus_ring = visible;
     }
 
     /// Whether this widget or a descendant is on the hover path (CSS `:hover`).
@@ -880,6 +899,14 @@ impl<'a> PaintCtx<'a> {
         crate::overlay::register(entry);
     }
 
+    /// Declare a keyboard shortcut for this frame (see [`crate::shortcuts`]). The table clears
+    /// each paint, so the declarer re-declares every paint; it answers its own
+    /// `InputEvent::Shortcut` with `Handled`.
+    pub fn register_shortcut(&mut self, decl: crate::shortcuts::ShortcutDecl) {
+        self.note_publication();
+        crate::shortcuts::register(decl);
+    }
+
     /// Publish this frame's focused-field verbs and menu anchor for the
     /// platform edit menu. A focused field publishes every paint, so hardware
     /// shortcuts stay answerable; no publish means nothing is focused.
@@ -935,6 +962,7 @@ impl<'a> PaintCtx<'a> {
             paced_interval: None,
             ime_state: None,
             has_focus: self.has_focus,
+            focus_ring: self.focus_ring,
             hovered: self.hovered,
             hover_epoch: self.hover_epoch,
             focus_epoch: self.focus_epoch,
@@ -1242,6 +1270,17 @@ pub trait Widget: Any {
     /// tooling; defaults to none and must not mutate pass state.
     fn visit_children(&self, _visitor: &mut dyn FnMut(&ChildPod)) {}
 
+    /// Whether keyboard traversal (Tab / Shift+Tab at the root) may stop on this widget's pod.
+    fn is_focusable(&self) -> bool {
+        false
+    }
+
+    /// Visit the children traversal may enter, in focus order; defaults to
+    /// [`Widget::visit_children`]. A container showing only some children narrows it.
+    fn visit_focus_children(&self, visitor: &mut dyn FnMut(&ChildPod)) {
+        self.visit_children(visitor);
+    }
+
     /// This widget as a sliver ([`crate::sliver`]), if it speaks that protocol.
     /// Defaults to `None`; transparent wrappers forward it.
     fn as_sliver(&mut self) -> Option<&mut dyn SliverWidget> {
@@ -1278,6 +1317,14 @@ impl Widget for Box<dyn Widget> {
 
     fn visit_children(&self, visitor: &mut dyn FnMut(&ChildPod)) {
         (**self).visit_children(visitor);
+    }
+
+    fn is_focusable(&self) -> bool {
+        (**self).is_focusable()
+    }
+
+    fn visit_focus_children(&self, visitor: &mut dyn FnMut(&ChildPod)) {
+        (**self).visit_focus_children(visitor);
     }
 
     /// Forward the boxed widget's sliver face, so erasure never hides a sliver.
@@ -1353,6 +1400,28 @@ thread_local! {
     /// claim epoch is a dispatch's candidate session. `(0, 0, 0)` until a root
     /// publishes, which a real root never does.
     static LIVE_FOCUS_SESSION: Cell<(u64, u64, u64)> = const { Cell::new((0, 0, 0)) };
+
+    /// The open root→pod focus grant as `(carrier, target inspect id, landed)`; lands once.
+    static FOCUS_GRANT: Cell<Option<(ShortcutId, u64, bool)>> = const { Cell::new(None) };
+}
+
+/// A root→pod focus grant ([`RenderRoot`](crate::app::RenderRoot)'s Tab traversal), open for one
+/// delivery of `InputEvent::Shortcut(carrier)`: the pod whose [`ChildPod::inspect_id`] is the
+/// target turns it into the state [`EventCtx::request_focus`] produces, so its own pod and every
+/// ancestor's record the link as for a claim. Closed on drop.
+pub(crate) struct FocusGrant;
+
+impl FocusGrant {
+    pub(crate) fn enter(carrier: ShortcutId, target: u64) -> Self {
+        FOCUS_GRANT.with(|grant| grant.set(Some((carrier, target, false))));
+        FocusGrant
+    }
+}
+
+impl Drop for FocusGrant {
+    fn drop(&mut self) {
+        FOCUS_GRANT.with(|grant| grant.set(None));
+    }
 }
 
 /// Publish the focus session standing on this thread: `live` is the session a
@@ -1751,6 +1820,7 @@ impl ChildPod {
         child_ctx.set_has_focus(
             self.focused && self.focus_epoch == ctx.focus_epoch() && ctx.has_focus(),
         );
+        child_ctx.set_focus_ring(ctx.focus_ring);
         // Hover likewise; the chain keeps a bare context's `0` from matching.
         child_ctx.set_hover_epoch(ctx.hover_epoch());
         child_ctx.set_hovered(self.hover_epoch == ctx.hover_epoch() && ctx.is_hovered());
@@ -1903,9 +1973,17 @@ impl ChildPod {
                 hovered,
                 hover_eligible,
             );
+            if let InputEvent::Shortcut(id) = local
+                && self.takes_focus_grant(*id)
+            {
+                child_ctx.request_focus();
+            }
             // Attributes a `capture_contacts` call to this child or below.
             let frame = crate::event::ContactFrame::enter(self.active && self.contacts_captor);
             let result = self.widget.event(&mut child_ctx, local);
+            if matches!(local, InputEvent::Shortcut(_)) && result == EventResult::Handled {
+                crate::shortcuts::note_handled();
+            }
             let (opted_in, opted_in_at_or_below) = frame.close();
             (
                 (opted_in, opted_in_at_or_below),
@@ -1957,6 +2035,20 @@ impl ChildPod {
         }
         ctx.absorb_child(fold);
         result
+    }
+
+    /// Whether this pod is the open [`FocusGrant`]'s target for `carrier`; marks it landed.
+    fn takes_focus_grant(&self, carrier: ShortcutId) -> bool {
+        let Some(id) = self.inspect_id.get() else {
+            return false;
+        };
+        FOCUS_GRANT.with(|grant| match grant.get() {
+            Some((open, target, false)) if open == carrier && target == id.get() => {
+                grant.set(Some((open, target, true)));
+                true
+            }
+            _ => false,
+        })
     }
 
     /// Whether `point` (container space) lies in this child's bounds, half-open

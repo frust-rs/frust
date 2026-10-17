@@ -351,31 +351,33 @@ Conventions for `Widget::event` implementations in every interactive `frust-widg
   value win next frame.
 
 - **A container checks `InputEvent::is_broadcast()` before anything else.** A broadcast
-  (`InputEvent::Housekeeping`, `InputEvent::Overlay`) is not user input: every routing helper
-  forwards it to *every* child unconditionally, ahead of the capture/focus/hit-test branches below,
-  and always reports `Ignored` whatever children returned — it is never consumed and never
-  short-circuited by a captured or focused child, and only the owner whose `OverlayKey` an `Overlay`
-  quotes acts on it (`docs/CORE_ARCHITECTURE.md`'s event-routing data flow).
+  (`Housekeeping`, `Overlay`, `Shortcut`, a file drop's `Ended`) is not user input: routing helpers
+  forward it ahead of the capture/focus/hit-test branches below, never consume or short-circuit it,
+  and report `Ignored` whatever children returned. It reaches *every* child except a `Shortcut`,
+  which a hidden or covered child must not receive; only the owner an `Overlay` quotes acts on it,
+  and a declarer answers only its own `ShortcutId` `Handled`, never a blanket `Handled`
+  (`docs/CORE_ARCHITECTURE.md`'s event-routing data flow).
 
 - **Focus routes by recorded path, like capture; `Key`/`Ime`/`EditCommand` events never hit-test.**
-  A container simply forwards them to its focused child; a `Down` that doesn't (re)claim focus on
-  the child it hits blurs the chain. **A structural container rebuild clears capture and focus only
-  where identity is actually lost** — stable-prefix/key-matched, not a blanket clear. A reconciler
-  that tears down (or type-swaps) a focused pod cannot reach `RenderRoot` itself (no handle inside a
-  `BuildCtx` pass), so it marks the pod orphaned instead, but only *on the live focus chain* — gate
-  the mark on `ctx.has_focus() && pod.is_focused()`, never on the recorded `focused` flag alone,
-  since a hand-rolled container's own teardown/type-swap path can hit a stale flag under an
-  already-blurred ancestor; `RenderRoot`'s cached `focus_active`/`ime_state` release on the same
-  rebuild that raised the mark, not merely "eventually" on a later event pass
-  (`docs/CORE_ARCHITECTURE.md`'s Focus/IME Lifecycle). **The same gate binds a container that
-  publishes a cleared IME surface** (the navigator's `needs_ime_clear` producers,
-  `PatternSwitcher`'s): an inactive publish *is* a session release, so raise it only for an
-  outgoing/covered subtree that was itself on the live chain — on a push the outgoing pod is the
-  page being **covered**. Two severing paths are known to be **uncovered** and are registered rather
-  than fixed: a type swap inside a wrapper view that re-boxes an `AnyView` under its own
-  `Box<dyn Widget>` element, which no reconciler can observe (`focus-wrapper-erasure-swap-blind`),
-  and the hand-rolled navbar/tabbar item lists, which never clear or mark a truncated item's own
-  focus link (`focus-navbar-item-truncation-unmarked`). See `docs/LIMITATIONS.md`.
+  A container forwards them to its focused child; a `Down` that doesn't (re)claim focus on the child
+  it hits blurs the chain. **A structural container rebuild clears capture and focus only where
+  identity is actually lost** — stable-prefix/key-matched, not a blanket clear. A reconciler that
+  tears down (or type-swaps) a focused pod has no `RenderRoot` handle inside a `BuildCtx` pass, so it
+  marks the pod orphaned instead, gated on the *live* focus chain — `ctx.has_focus() &&
+  pod.is_focused()`, never the recorded `focused` flag alone, which a hand-rolled container's
+  teardown can hit stale under an already-blurred ancestor; the root's cached focus/IME state
+  releases on the same rebuild (`docs/CORE_ARCHITECTURE.md`'s Focus/IME Lifecycle). **The same gate
+  binds a container that publishes a cleared IME surface** (the navigator's `needs_ime_clear`
+  producers, `PatternSwitcher`'s): an inactive publish *is* a session release, so raise it only for
+  an outgoing/covered subtree that was itself on the live chain — on a push, the page being
+  **covered**. Two severing paths are registered rather than fixed: a type swap inside a wrapper view
+  re-boxing an `AnyView` under its own `Box<dyn Widget>` (`focus-wrapper-erasure-swap-blind`) and
+  the hand-rolled navbar/tabbar item lists, which never clear or mark a truncated item's focus link
+  (`focus-navbar-item-truncation-unmarked`). See `docs/LIMITATIONS.md`.
+
+- **A focusable control answers `Widget::is_focusable` and activates only on a bare, non-repeat
+  Space/Enter while focused;** its keyboard-focus look reads `PaintCtx::is_focused_for_ring`, while
+  a text field keeps `has_focus` (WIDGETS_CODE_STANDARDS.md's Keyboard Focus and Shortcuts).
 
 - **Input constants have one source.** Gesture thresholds (`TOUCH_SLOP`, `MOUSE_SLOP`),
   scroll/fling tuning (`WHEEL_LINE_PX`, `FLING_DECAY`, `FLING_STOP`, `VELOCITY_WINDOW_MS`),
@@ -443,12 +445,10 @@ Conventions for `Widget::event` implementations in every interactive `frust-widg
   claiming child still gets its own chrome.
 
 - **Ask for a cursor on every qualifying `Move`, never on `Down`.** `EventCtx::set_cursor` is
-  stateless like `request_redraw`: a widget re-asks each move rather than latching a shape, and
-  a captured drag re-asks from its own captured `Move` arm to keep its cursor outside its
-  bounds. A press-specific cursor keys off the widget's own pressed state read in the `Move`
-  arm, not off `Down` — no pass other than `Move` resolves or resets the cursor, so a `Down`
-  handler that sets one would leave it standing for the length of a click with no chance to
-  restate it.
+  stateless like `request_redraw`: re-ask each move (a captured drag from its captured `Move` arm,
+  keeping its cursor outside its bounds) rather than latching a shape. A press-specific cursor keys
+  off the widget's pressed state read in the `Move` arm — only `Move` resolves or resets the cursor,
+  so a shape set on `Down` would stand for the whole click with no chance to restate it.
 
 ## Semantics Conventions
 

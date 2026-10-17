@@ -724,3 +724,461 @@ fn an_overlay_press_leaves_the_main_trees_hover_standing() {
          tree is not stranded by a press on a floated surface"
     );
 }
+
+// Declined keys: a modal pod's shortcut mask and Escape, and the editable owner's forward.
+
+use crate::overlay::{OverlayBand, OverlayKeys, OverlayPod};
+use crate::shortcuts::{Chord, ShortcutDecl, ShortcutId, ShortcutScope};
+
+#[derive(Default)]
+struct KeyLog {
+    shortcuts: Vec<&'static str>,
+    keys: Vec<(&'static str, Key)>,
+    overlay_keys: Vec<Key>,
+}
+
+type KeyShared = Rc<RefCell<KeyLog>>;
+
+/// Declares its chord every paint; an editable claims focus on `Down` and eats plain typing.
+struct KeyLeaf {
+    name: &'static str,
+    chord: Option<(&'static str, ShortcutScope)>,
+    id: ShortcutId,
+    editable: bool,
+    log: KeyShared,
+}
+
+impl KeyLeaf {
+    fn pod(
+        name: &'static str,
+        chord: Option<(&'static str, ShortcutScope)>,
+        editable: bool,
+        log: &KeyShared,
+    ) -> crate::widget::ChildPod {
+        crate::widget::ChildPod::new(Box::new(KeyLeaf {
+            name,
+            chord,
+            id: ShortcutId::next(),
+            editable,
+            log: Rc::clone(log),
+        }))
+    }
+}
+
+impl crate::widget::Widget for KeyLeaf {
+    fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        bc.constrain(Size::new(80.0, 40.0))
+    }
+    fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+        if let Some((chord, scope)) = self.chord {
+            ctx.register_shortcut(ShortcutDecl {
+                id: self.id,
+                chord: Chord::parse(chord).unwrap(),
+                label: self.name.to_string(),
+                scope,
+            });
+        }
+    }
+    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        match event {
+            InputEvent::Shortcut(id) if *id == self.id => {
+                self.log.borrow_mut().shortcuts.push(self.name);
+                EventResult::Handled
+            }
+            InputEvent::Key(key) => {
+                self.log
+                    .borrow_mut()
+                    .keys
+                    .push((self.name, key.key.clone()));
+                let typed = matches!(key.key, Key::Character(_)) && !key.modifiers.ctrl;
+                if self.editable && typed {
+                    EventResult::Handled
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            InputEvent::Pointer(p) if p.phase == PointerPhase::Down => {
+                if self.editable {
+                    ctx.request_focus();
+                }
+                EventResult::Handled
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct KeySpec {
+    input: OverlayInput,
+    keys: OverlayKeys,
+    outside_tap: OutsideTap,
+    /// Whether the owner forwards its field's declined keys to its pod.
+    forward: bool,
+    /// Whether the owner consumes an `OverlayEventKind::Key`.
+    pod_eats: bool,
+}
+
+const POD_RECT: Rect = Rect::new(120.0, 0.0, 200.0, 40.0);
+
+/// A combobox/modal-shaped owner: an editable field in place and a floated `KeyLeaf` pod.
+struct KeyOwner {
+    key: OverlayKey,
+    spec: KeySpec,
+    field: crate::widget::ChildPod,
+    pod: OverlayPod,
+    log: KeyShared,
+}
+
+impl crate::widget::Widget for KeyOwner {
+    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        self.field.layout_child(ctx, bc);
+        let window = BoxConstraints::loose(ctx.window_size());
+        self.pod.borrow_mut().layout_child(ctx, &window);
+        bc.constrain(Size::new(80.0, 40.0))
+    }
+    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        self.field.paint_child(ctx, scene);
+        ctx.register_overlay(OverlayEntry {
+            key: self.key,
+            band: OverlayBand::Floating,
+            input: self.spec.input,
+            outside_tap: self.spec.outside_tap,
+            keys: self.spec.keys,
+            window_rect: POD_RECT,
+            pod: Rc::clone(&self.pod),
+            insets: ctx.window_insets(),
+        });
+    }
+    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        if let InputEvent::Overlay(overlay) = event
+            && overlay.key == self.key
+        {
+            let mut pod = self.pod.borrow_mut();
+            match &overlay.kind {
+                OverlayEventKind::Key(key) => {
+                    self.log.borrow_mut().overlay_keys.push(key.key.clone());
+                    if self.spec.pod_eats {
+                        ctx.consume_overlay_key();
+                    }
+                }
+                OverlayEventKind::Shortcut(id) => {
+                    pod.event_child(ctx, &InputEvent::Shortcut(*id));
+                }
+                OverlayEventKind::Pointer(p) => {
+                    let position = p.position - POD_RECT.origin().to_vec2();
+                    pod.event_child(ctx, &InputEvent::Pointer(PointerEvent { position, ..*p }));
+                }
+                _ => {}
+            }
+            return EventResult::Ignored;
+        }
+        if event.is_broadcast() {
+            self.field.event_child(ctx, event);
+            return EventResult::Ignored;
+        }
+        if event.is_focus_routed() {
+            if self.pod.borrow().holds_live_focus() {
+                return self.pod.borrow_mut().event_child(ctx, event);
+            }
+            if self.field.holds_live_focus() {
+                return self.field.event_child(ctx, event);
+            }
+            return EventResult::Ignored;
+        }
+        if !self.field.contains(event.position()) {
+            return EventResult::Ignored;
+        }
+        let result = self.field.event_child(ctx, event);
+        if self.spec.forward {
+            ctx.forward_declined_keys_to(self.key);
+        }
+        result
+    }
+}
+
+/// A column: the owner, then main-tree leaves declaring `Ctrl+K` (Local), `Ctrl+J`
+/// (AppGlobal) and `Down` (Local).
+struct KeyRoot {
+    children: Vec<crate::widget::ChildPod>,
+}
+
+impl crate::widget::Widget for KeyRoot {
+    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        for (row, pod) in self.children.iter_mut().enumerate() {
+            pod.layout_child(ctx, &BoxConstraints::loose(Size::new(80.0, 40.0)));
+            pod.set_origin(Point::new(0.0, row as f64 * 40.0));
+        }
+        bc.constrain(Size::new(200.0, 200.0))
+    }
+    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        for pod in &mut self.children {
+            pod.paint_child(ctx, scene);
+        }
+    }
+    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        if event.is_broadcast() {
+            for pod in &mut self.children {
+                pod.event_child(ctx, event);
+            }
+            return EventResult::Ignored;
+        }
+        let focus_routed = event.is_focus_routed();
+        for pod in &mut self.children {
+            let reached = if focus_routed {
+                pod.holds_live_focus()
+            } else {
+                pod.contains(event.position())
+            };
+            if reached {
+                return pod.event_child(ctx, event);
+            }
+        }
+        EventResult::Ignored
+    }
+}
+
+struct KeyView {
+    spec: KeySpec,
+    log: KeyShared,
+}
+
+impl View<()> for KeyView {
+    type Element = KeyRoot;
+    fn build(&self, _ctx: &mut BuildCtx<'_>) -> KeyRoot {
+        let log = &self.log;
+        let owner = KeyOwner {
+            key: OverlayKey::next(),
+            spec: self.spec,
+            field: KeyLeaf::pod("field", None, true, log),
+            pod: Rc::new(RefCell::new(KeyLeaf::pod(
+                "pod",
+                Some(("Ctrl+K", ShortcutScope::Local)),
+                true,
+                log,
+            ))),
+            log: Rc::clone(log),
+        };
+        KeyRoot {
+            children: vec![
+                crate::widget::ChildPod::new(Box::new(owner)),
+                KeyLeaf::pod("local", Some(("Ctrl+K", ShortcutScope::Local)), false, log),
+                KeyLeaf::pod(
+                    "global",
+                    Some(("Ctrl+J", ShortcutScope::AppGlobal)),
+                    false,
+                    log,
+                ),
+                KeyLeaf::pod("nav", Some(("Down", ShortcutScope::Local)), false, log),
+            ],
+        }
+    }
+    fn rebuild(
+        &self,
+        _prev: &Self,
+        _element: &mut KeyRoot,
+        _ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        ChangeFlags::NONE
+    }
+}
+
+struct KeyHarness {
+    root: RenderRoot<(), KeyView>,
+    log: KeyShared,
+}
+
+impl KeyHarness {
+    fn new(spec: KeySpec) -> Self {
+        let log = KeyShared::default();
+        let mut h = Self {
+            root: RenderRoot::new(),
+            log: Rc::clone(&log),
+        };
+        let mut build = move |_: &mut ()| KeyView {
+            spec,
+            log: Rc::clone(&log),
+        };
+        h.root.rebuild(&mut build, &mut ());
+        h.root.layout(Size::new(200.0, 200.0));
+        h.root
+            .paint(&mut RecordingScene::default(), FrameTime::ZERO);
+        h
+    }
+
+    fn press(&mut self, key: Key, ctrl: bool) -> EventOutcome {
+        let modifiers = Modifiers {
+            ctrl,
+            ..Modifiers::default()
+        };
+        let event = KeyEvent {
+            key,
+            modifiers,
+            repeat: false,
+        };
+        self.root.event(&mut (), &InputEvent::Key(event))
+    }
+
+    fn down(&mut self, x: f64, y: f64) {
+        self.root.event(&mut (), &pointer(PointerPhase::Down, x, y));
+    }
+
+    fn shortcuts(&self) -> Vec<&'static str> {
+        self.log.borrow().shortcuts.clone()
+    }
+
+    fn overlay_keys(&self) -> Vec<Key> {
+        self.log.borrow().overlay_keys.clone()
+    }
+}
+
+fn char_key(text: &str) -> Key {
+    Key::Character(text.to_string())
+}
+
+const ESCAPE: Key = Key::Named(NamedKey::Escape);
+const DOWN: Key = Key::Named(NamedKey::ArrowDown);
+
+fn spec() -> KeySpec {
+    KeySpec {
+        input: OverlayInput::Interactive,
+        keys: OverlayKeys::Pass,
+        outside_tap: OutsideTap::Ignore,
+        forward: false,
+        pod_eats: false,
+    }
+}
+
+fn modal_specs() -> [KeySpec; 2] {
+    let consuming = OutsideTap::Notify { consume: true };
+    [
+        KeySpec {
+            keys: OverlayKeys::Modal,
+            ..spec()
+        },
+        KeySpec {
+            outside_tap: consuming,
+            ..spec()
+        },
+    ]
+}
+
+#[test]
+fn a_modal_pod_masks_main_tree_shortcuts_and_its_own_declaration_fires() {
+    for modal in modal_specs() {
+        let mut h = KeyHarness::new(modal);
+        assert!(h.press(char_key("k"), true).handled);
+        assert_eq!(h.shortcuts(), vec!["pod"], "the pod's own tier answers");
+        assert!(!h.press(char_key("j"), true).handled, "AppGlobal is masked");
+        assert_eq!(h.shortcuts(), vec!["pod"]);
+        h.press(DOWN, false);
+        assert_eq!(h.shortcuts(), vec!["pod"], "and so is main-tree Local");
+    }
+    let mut h = KeyHarness::new(spec());
+    h.press(char_key("j"), true);
+    assert_eq!(
+        h.shortcuts(),
+        vec!["global"],
+        "a non-modal pod masks nothing"
+    );
+}
+
+#[test]
+fn escape_with_a_modal_pod_open_and_nothing_focused_reaches_the_pod() {
+    for modal in modal_specs() {
+        let mut h = KeyHarness::new(KeySpec {
+            pod_eats: true,
+            ..modal
+        });
+        assert!(!h.root.is_focus_active());
+        assert!(h.press(ESCAPE, false).handled, "the owner consumed it");
+        assert_eq!(h.overlay_keys(), vec![ESCAPE]);
+    }
+    let mut h = KeyHarness::new(spec());
+    h.press(ESCAPE, false);
+    assert!(h.overlay_keys().is_empty(), "only a modal pod takes Escape");
+}
+
+#[test]
+fn a_focused_editable_inside_the_modal_still_consumes_typed_keys() {
+    let [modal, _] = modal_specs();
+    let mut h = KeyHarness::new(modal);
+    h.down(150.0, 20.0);
+    assert!(h.root.is_focus_active(), "the pod's editable took focus");
+    assert!(h.press(char_key("a"), false).handled);
+    assert_eq!(h.log.borrow().keys, vec![("pod", char_key("a"))]);
+    assert!(h.overlay_keys().is_empty() && h.shortcuts().is_empty());
+    h.press(ESCAPE, false);
+    assert_eq!(
+        h.overlay_keys(),
+        vec![ESCAPE],
+        "an Escape the focused consumer ignored still reaches its modal pod"
+    );
+}
+
+#[test]
+fn a_declined_arrow_from_a_focused_editable_reaches_the_forwarded_pod() {
+    let mut h = KeyHarness::new(KeySpec {
+        forward: true,
+        pod_eats: true,
+        ..spec()
+    });
+    h.down(40.0, 20.0);
+    assert!(
+        h.press(char_key("a"), false).handled,
+        "the field eats typing"
+    );
+    assert!(h.overlay_keys().is_empty());
+    assert!(h.press(DOWN, false).handled);
+    assert_eq!(h.overlay_keys(), vec![DOWN]);
+    assert!(h.shortcuts().is_empty(), "consumed before the registry");
+
+    h.down(40.0, 140.0);
+    assert!(!h.root.is_focus_active(), "a press on the nav leaf blurs");
+    h.press(DOWN, false);
+    assert_eq!(
+        h.overlay_keys(),
+        vec![DOWN],
+        "the forward ended with the session"
+    );
+    assert_eq!(h.shortcuts(), vec!["nav"]);
+}
+
+#[test]
+fn a_forwarded_key_the_pod_ignores_continues_to_the_registry() {
+    let mut h = KeyHarness::new(KeySpec {
+        forward: true,
+        ..spec()
+    });
+    h.down(40.0, 20.0);
+    h.press(DOWN, false);
+    assert_eq!(h.overlay_keys(), vec![DOWN]);
+    assert_eq!(h.shortcuts(), vec!["nav"]);
+}
+
+#[test]
+fn without_the_forward_setting_a_declined_arrow_falls_to_the_registry() {
+    let mut h = KeyHarness::new(spec());
+    h.down(40.0, 20.0);
+    assert!(h.root.is_focus_active());
+    assert!(h.press(DOWN, false).handled);
+    assert!(h.overlay_keys().is_empty());
+    assert_eq!(h.shortcuts(), vec!["nav"]);
+}
+
+#[test]
+fn a_transparent_pod_never_takes_keys() {
+    let mut h = KeyHarness::new(KeySpec {
+        input: OverlayInput::Transparent,
+        keys: OverlayKeys::Modal,
+        forward: true,
+        pod_eats: true,
+        ..spec()
+    });
+    h.down(40.0, 20.0);
+    h.press(DOWN, false);
+    h.press(ESCAPE, false);
+    assert!(h.overlay_keys().is_empty(), "neither forwarded nor modal");
+    h.press(char_key("j"), true);
+    assert_eq!(h.shortcuts(), vec!["nav", "global"], "and it masks nothing");
+}

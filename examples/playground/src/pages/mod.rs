@@ -1,7 +1,7 @@
-//! The seventeen playground sections, one module per section: `platform_views`,
+//! The eighteen playground sections, one module per section: `platform_views`,
 //! `camera`, `responsive`, `terminal`, `keys`, `i18n`, `video_player`,
 //! `url_launcher`, `auth_session`, `database`, `graph_canvas`,
-//! `scroll_control`, `drag_drop`, `tabs`, `images`, `slivers`, and `desktop_services` — each one an
+//! `scroll_control`, `drag_drop`, `tabs`, `images`, `slivers`, `desktop_services`, and `shortcuts` — each one an
 //! OS-facing capability (or, for `graph_canvas`/`scroll_control`/`drag_drop`/
 //! `slivers`, a widget demo: `CanvasView`/`PanZoomView` for the first, a keyed
 //! `ListView` bound to a `ScrollController` for the second,
@@ -52,6 +52,7 @@ pub mod keys;
 pub mod platform_views;
 pub mod responsive;
 pub mod scroll_control;
+pub mod shortcuts;
 pub mod slivers;
 pub mod tabs;
 pub mod terminal;
@@ -62,7 +63,7 @@ use frust::{AnyView, any};
 
 use crate::PlaygroundState;
 
-/// The seventeen section labels, in order. Indexed by `PlaygroundState::section`
+/// The eighteen section labels, in order. Indexed by `PlaygroundState::section`
 /// and dispatched by [`current`].
 ///
 /// Kept short on purpose: at phone width the shell's narrow-width bottom nav
@@ -76,9 +77,25 @@ use crate::PlaygroundState;
 /// single line at that width. A page wanting a longer heading for itself
 /// (e.g. `platform_views`'s own on-page title) uses its own string literal
 /// rather than this array — see `pages/platform_views.rs`.
-pub const SECTION_LABELS: [&str; 17] = [
-    "Platform", "Camera", "Layout", "Terminal", "Keys", "i18n", "Video", "URL", "Auth", "DB",
-    "Graph", "Scroll", "Drag", "Tabs", "Images", "Slivers", "Desktop",
+pub const SECTION_LABELS: [&str; 18] = [
+    "Platform",
+    "Camera",
+    "Layout",
+    "Terminal",
+    "Keys",
+    "i18n",
+    "Video",
+    "URL",
+    "Auth",
+    "DB",
+    "Graph",
+    "Scroll",
+    "Drag",
+    "Tabs",
+    "Images",
+    "Slivers",
+    "Desktop",
+    "Shortcuts",
 ];
 
 /// How many of [`SECTION_LABELS`], in order, count as "primary" — shown
@@ -91,10 +108,10 @@ pub const SECTION_LABELS: [&str; 17] = [
 /// section off the shell, only off the bar's own direct row.
 pub const PRIMARY_NAV_COUNT: usize = 5;
 
-/// Dispatch to the section page for `section` (0..17), falling back to
+/// Dispatch to the section page for `section` (0..18), falling back to
 /// platform views for any out-of-range index (defensive — the navigation bar
 /// and side rail only ever yield a valid index).
-// erasure: keep the 17-arm section dispatch erases each page at this one boundary
+// erasure: keep the 18-arm section dispatch erases each page at this one boundary
 pub fn current(section: usize, state: &PlaygroundState) -> AnyView<PlaygroundState> {
     match section {
         0 => any(platform_views::page(state)),
@@ -114,6 +131,7 @@ pub fn current(section: usize, state: &PlaygroundState) -> AnyView<PlaygroundSta
         14 => any(images::page(state)),
         15 => any(slivers::page(state)),
         16 => any(desktop_services::page(state)),
+        17 => any(shortcuts::page(state)),
         _ => any(platform_views::page(state)),
     }
 }

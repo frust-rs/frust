@@ -113,10 +113,11 @@ use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::rc::Rc;
 
+use frust_core::overlay::OverlayKeys;
 use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, OutsideTap, OverlayBand, OverlayEntry, OverlayEventKind, OverlayInput, OverlayKey,
-    PaintCtx, PaintScene, PointerEvent, SemanticsCtx, View, Widget, any,
+    Key, LayoutCtx, NamedKey, OutsideTap, OverlayBand, OverlayEntry, OverlayEventKind,
+    OverlayInput, OverlayKey, PaintCtx, PaintScene, PointerEvent, SemanticsCtx, View, Widget, any,
 };
 use kurbo::{Point, Rect, Size, Vec2};
 
@@ -458,6 +459,7 @@ pub struct OverlaySlot<PodState: 'static> {
     band: OverlayBand,
     input: OverlayInput,
     outside_tap: OutsideTap,
+    keys: OverlayKeys,
     placement: OverlayPlacement,
     anchor: OverlayAnchor,
     /// Whether an [`OverlayAnchor::Window`] rect is clamped back inside the
@@ -488,6 +490,9 @@ pub struct OverlaySlot<PodState: 'static> {
     /// A press landed outside every floated surface and this one asked to hear
     /// about it; drained by [`take_outside_down`](Self::take_outside_down).
     outside_down_pending: bool,
+    /// A declined Escape reached the surface and the pod did not consume it; drained by
+    /// [`take_escape`](Self::take_escape).
+    escape_pending: bool,
     _state: PhantomData<fn(&mut PodState)>,
 }
 
@@ -510,6 +515,7 @@ impl<PodState: 'static> OverlaySlot<PodState> {
             band: OverlayBand::Floating,
             input: OverlayInput::Interactive,
             outside_tap: OutsideTap::Ignore,
+            keys: OverlayKeys::Pass,
             placement: OverlayPlacement::default(),
             anchor: OverlayAnchor::Owner,
             clamp_to_window: false,
@@ -518,6 +524,7 @@ impl<PodState: 'static> OverlaySlot<PodState> {
             owner_origin: Point::ZERO,
             captured: false,
             outside_down_pending: false,
+            escape_pending: false,
             _state: PhantomData,
         }
     }
@@ -577,6 +584,17 @@ impl<PodState: 'static> OverlaySlot<PodState> {
         std::mem::take(&mut self.outside_down_pending)
     }
 
+    /// Take the pending Escape notification, clearing it.
+    ///
+    /// `true` once per declined Escape the root delivered here as
+    /// [`OverlayEventKind::Key`] (a [modal](OverlayKeys::Modal) surface, or the
+    /// forward target of a focused editable) that the pod itself did not consume
+    /// — the close signal. An owner that acts on it calls
+    /// [`EventCtx::consume_overlay_key`] so the key stops there.
+    pub fn take_escape(&mut self) -> bool {
+        std::mem::take(&mut self.escape_pending)
+    }
+
     /// Which z-band the surface paints and hit-tests in.
     pub fn set_band(&mut self, band: OverlayBand) {
         self.band = band;
@@ -590,6 +608,12 @@ impl<PodState: 'static> OverlaySlot<PodState> {
     /// What a press outside every floated surface delivers here.
     pub fn set_outside_tap(&mut self, outside_tap: OutsideTap) {
         self.outside_tap = outside_tap;
+    }
+
+    /// Whether the surface claims declined keys: [`OverlayKeys::Modal`] masks
+    /// main-tree shortcuts and takes a declined Escape (see [`frust_core::overlay`]).
+    pub fn set_keys(&mut self, keys: OverlayKeys) {
+        self.keys = keys;
     }
 
     /// Where the surface sits relative to its anchor.
@@ -779,6 +803,7 @@ impl<PodState: 'static> OverlaySlot<PodState> {
             band: self.band,
             input: self.input,
             outside_tap: self.outside_tap,
+            keys: self.keys,
             window_rect: self.window_rect,
             pod: Rc::clone(pod),
             insets: ctx.window_insets(),
@@ -891,6 +916,23 @@ impl<PodState: 'static> OverlaySlot<PodState> {
                     // it, so nothing is forwarded — the owner reads the
                     // notification and decides whether to close.
                     OverlayEventKind::OutsideDown => self.outside_down_pending = true,
+                    // A shortcut a widget inside the pod declared: delivered there as the
+                    // plain broadcast its declarer recognises.
+                    OverlayEventKind::Shortcut(id) => {
+                        self.forward(ctx, &InputEvent::Shortcut(*id), substitute);
+                    }
+                    // A key the focus path declined: offered to the pod first; an
+                    // unconsumed Escape is left for the owner to close on.
+                    OverlayEventKind::Key(key) => {
+                        let local = InputEvent::Key(key.clone());
+                        if self.forward(ctx, &local, substitute) == EventResult::Handled {
+                            ctx.consume_overlay_key();
+                        } else if key.key == Key::Named(NamedKey::Escape)
+                            && key.modifiers == frust_core::Modifiers::default()
+                        {
+                            self.escape_pending = true;
+                        }
+                    }
                 }
                 // A broadcast is never consumed, whatever the pod returned.
                 Some(EventResult::Ignored)
@@ -1021,7 +1063,9 @@ pub fn overlay_portal<State: 'static, V: View<State>>(child: V) -> OverlayPortal
         band: OverlayBand::Floating,
         input: OverlayInput::Interactive,
         outside_tap: OutsideTap::Ignore,
+        keys: OverlayKeys::Pass,
         on_outside_tap: None,
+        on_escape: None,
         preserve_focus: false,
     }
 }
@@ -1037,7 +1081,9 @@ pub struct OverlayPortalView<State: 'static> {
     band: OverlayBand,
     input: OverlayInput,
     outside_tap: OutsideTap,
+    keys: OverlayKeys,
     on_outside_tap: Option<OnOutsideTap<State>>,
+    on_escape: Option<OnOutsideTap<State>>,
     preserve_focus: bool,
 }
 
@@ -1103,6 +1149,21 @@ impl<State: 'static> OverlayPortalView<State> {
         self
     }
 
+    /// Whether the surface claims declined keys (default [`OverlayKeys::Pass`];
+    /// see [`OverlaySlot::set_keys`]).
+    pub fn keys(mut self, keys: OverlayKeys) -> Self {
+        self.keys = keys;
+        self
+    }
+
+    /// Run `callback` when a declined Escape reaches the surface (see
+    /// [`OverlaySlot::take_escape`]) — the close hook of a modal surface, which
+    /// then consumes the key.
+    pub fn on_escape(mut self, callback: impl Fn(&mut State) + 'static) -> Self {
+        self.on_escape = Some(Rc::new(callback));
+        self
+    }
+
     /// Keep the child's focus session when the surface claims focus (default
     /// `false`).
     ///
@@ -1125,6 +1186,7 @@ pub struct OverlayPortalWidget<State: 'static> {
     child: ChildPod,
     slot: OverlaySlot<State>,
     on_outside_tap: Option<ErasedCallback>,
+    on_escape: Option<ErasedCallback>,
     preserve_focus: bool,
 }
 
@@ -1136,6 +1198,7 @@ impl<State: 'static> OverlayPortalView<State> {
         slot.set_band(self.band);
         slot.set_input(self.input);
         slot.set_outside_tap(self.outside_tap);
+        slot.set_keys(self.keys);
     }
 }
 
@@ -1150,6 +1213,7 @@ impl<State: 'static> View<State> for OverlayPortalView<State> {
             child: crate::authoring::build_child(&self.child, ctx),
             slot,
             on_outside_tap: self.on_outside_tap.as_ref().map(erase_callback),
+            on_escape: self.on_escape.as_ref().map(erase_callback),
             preserve_focus: self.preserve_focus,
         }
     }
@@ -1165,6 +1229,7 @@ impl<State: 'static> View<State> for OverlayPortalView<State> {
             || prev.band != self.band
             || prev.input != self.input
             || prev.outside_tap != self.outside_tap
+            || prev.keys != self.keys
         {
             // Placement and the routing fields are re-read from the slot on the
             // next paint, which is also when the new rect is registered.
@@ -1175,6 +1240,7 @@ impl<State: 'static> View<State> for OverlayPortalView<State> {
         // Closures are not comparable, so the adapter is reinstalled
         // unconditionally — it is cheap.
         element.on_outside_tap = self.on_outside_tap.as_ref().map(erase_callback);
+        element.on_escape = self.on_escape.as_ref().map(erase_callback);
         flags |= element
             .slot
             .rebuild(prev.overlay.as_ref(), self.overlay.as_ref(), ctx);
@@ -1222,6 +1288,13 @@ impl<State: 'static> Widget for OverlayPortalWidget<State> {
                     && let Some(callback) = &mut self.on_outside_tap
                 {
                     callback(ctx);
+                    ctx.request_redraw();
+                }
+                if self.slot.take_escape()
+                    && let Some(callback) = &mut self.on_escape
+                {
+                    callback(ctx);
+                    ctx.consume_overlay_key();
                     ctx.request_redraw();
                 }
                 if !pod_focused_before && self.slot.pod_has_focus() {
@@ -1523,6 +1596,7 @@ mod tests {
         input: OverlayInput,
         /// `None` leaves the policy to `on_outside_tap`'s own default.
         outside_tap: Option<OutsideTap>,
+        keys: OverlayKeys,
         preserve_focus: bool,
         reaction: Reaction,
         placement: OverlayPlacement,
@@ -1544,6 +1618,7 @@ mod tests {
                 band: OverlayBand::Floating,
                 input: OverlayInput::Interactive,
                 outside_tap: Some(OutsideTap::Ignore),
+                keys: OverlayKeys::Pass,
                 preserve_focus: false,
                 reaction: Reaction::Nothing,
                 placement: corner(),
@@ -1556,6 +1631,7 @@ mod tests {
         log: Log,
         presses: u32,
         outside_taps: u32,
+        escapes: u32,
     }
 
     /// A recording leaf: paints one rect at its own absolute origin, records
@@ -1642,7 +1718,11 @@ mod tests {
                         self.tag,
                         ctx.has_focus()
                     ));
-                    EventResult::Handled
+                    if ctx.has_focus() {
+                        EventResult::Handled
+                    } else {
+                        EventResult::Ignored
+                    }
                 }
                 _ => EventResult::Ignored,
             }
@@ -1682,6 +1762,8 @@ mod tests {
             .band(cfg.band)
             .input(cfg.input)
             .preserve_focus(cfg.preserve_focus)
+            .keys(cfg.keys)
+            .on_escape(|state: &mut App| state.escapes += 1)
             .on_outside_tap(|state: &mut App| state.outside_taps += 1);
         if let Some(policy) = cfg.outside_tap {
             portal = portal.outside_tap(policy);
@@ -1736,6 +1818,7 @@ mod tests {
                     log: Rc::new(RefCell::new(Vec::new())),
                     presses: 0,
                     outside_taps: 0,
+                    escapes: 0,
                 },
                 clock_ms: 0.0,
             }
@@ -1780,6 +1863,15 @@ mod tests {
                     repeat: false,
                 }),
             );
+        }
+
+        fn press(&mut self, key: NamedKey) -> frust_core::EventOutcome {
+            let event = KeyEvent {
+                key: Key::Named(key),
+                modifiers: Modifiers::default(),
+                repeat: false,
+            };
+            self.root.event(&mut self.state, &InputEvent::Key(event))
         }
 
         fn log(&self) -> Vec<String> {
@@ -2020,6 +2112,24 @@ mod tests {
                 "child:Down@200,400".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn a_declined_escape_reaches_a_modal_surfaces_on_escape_and_stops_there() {
+        let mut h = Harness::new(Cfg {
+            keys: OverlayKeys::Modal,
+            ..Cfg::default()
+        });
+        h.frame();
+        assert!(h.press(NamedKey::Escape).handled, "on_escape consumed it");
+        assert_eq!(h.state.escapes, 1);
+        assert!(!h.press(NamedKey::ArrowLeft).handled, "only Escape closes");
+        assert_eq!(h.state.escapes, 1);
+
+        let mut h = Harness::new(Cfg::default());
+        h.frame();
+        assert!(!h.press(NamedKey::Escape).handled);
+        assert_eq!(h.state.escapes, 0, "a non-modal surface hears nothing");
     }
 
     #[test]
@@ -2472,6 +2582,32 @@ mod tests {
         // Two slots never share an identity, which is the whole addressing rule.
         let other: OverlaySlot<()> = OverlaySlot::default();
         assert_ne!(slot.key(), other.key());
+    }
+
+    #[test]
+    fn a_shortcut_quoting_the_slots_key_reaches_the_pod_as_a_plain_shortcut() {
+        let mut slot: OverlaySlot<Vec<u32>> = OverlaySlot::new();
+        let mut counter = 0u64;
+        let view = any(crate::test_support::probe(7));
+        slot.rebuild(None, Some(&view), &mut BuildCtx::new(&mut counter));
+        let mut log: Vec<u32> = Vec::new();
+        let mut ctx = EventCtx::new(&mut log, Point::ZERO, Size::new(100.0, 100.0));
+        let id = frust_core::ShortcutId::next();
+        let bare = InputEvent::Shortcut(id);
+        assert_eq!(
+            slot.event_ambient(&mut ctx, &bare),
+            None,
+            "never a bare broadcast"
+        );
+        let routed = InputEvent::Overlay(frust_core::OverlayEvent {
+            key: slot.key(),
+            kind: OverlayEventKind::Shortcut(id),
+        });
+        assert_eq!(
+            slot.event_ambient(&mut ctx, &routed),
+            Some(EventResult::Ignored)
+        );
+        assert_eq!(log, vec![7], "the pod heard it");
     }
 
     // -----------------------------------------------------------------------

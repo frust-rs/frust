@@ -12,6 +12,7 @@ use super::ime::ImeState;
 use super::key::EditCommand;
 use super::pass::{CLIPBOARD_WRITE, CURSOR_REQUEST, EDIT_COMMAND_QUEUE, PASTE_REQUEST};
 use super::pointer::{CursorIcon, PointerId};
+use crate::overlay::OverlayKey;
 
 /// What a widget did with an event: `Handled` stops the container offering it to further
 /// siblings and marks the frame dirty; `Ignored` lets routing continue.
@@ -217,6 +218,19 @@ impl<'a> EventCtx<'a> {
     /// Whether the receiving widget holds the focus path (always, for a focus-routed event).
     pub fn has_focus(&self) -> bool {
         self.has_focus
+    }
+
+    /// From an editable's owner: forward the keys the focused editable declines to the floated
+    /// pod `key`, as `OverlayEventKind::Key`, before the shortcut table sees them. Recorded on
+    /// the focus session live at the end of this pass; a new claim or a release ends it.
+    pub fn forward_declined_keys_to(&mut self, key: OverlayKey) {
+        crate::shortcuts::request_key_forward(key);
+    }
+
+    /// Consume an `OverlayEventKind::Key` delivery, which stops its walk to the shortcut table:
+    /// the delivery is a broadcast, whose `Handled` no container carries back.
+    pub fn consume_overlay_key(&mut self) {
+        crate::shortcuts::note_handled();
     }
 
     /// Claim the hover link for this widget and, via the recorded path, its ancestors; the next

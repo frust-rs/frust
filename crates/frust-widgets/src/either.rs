@@ -144,6 +144,23 @@ impl<L: Widget, R: Widget> Widget for EitherWidget<L, R> {
             Self::Right(w) => w.as_sliver(),
         }
     }
+
+    /// The live arm's answer: the enum's pod is the arm's Tab stop.
+    fn is_focusable(&self) -> bool {
+        match self {
+            Self::Left(w) => w.is_focusable(),
+            Self::Right(w) => w.is_focusable(),
+        }
+    }
+
+    /// The live arm's traversal children, so a narrowing arm (a navigator, an
+    /// `IndexedStack`) stays narrowed through the enum.
+    fn visit_focus_children(&self, visitor: &mut dyn FnMut(&ChildPod)) {
+        match self {
+            Self::Left(w) => w.visit_focus_children(visitor),
+            Self::Right(w) => w.visit_focus_children(visitor),
+        }
+    }
 }
 
 impl<State: 'static, L: View<State>, R: View<State>> View<State> for Either<L, R> {
@@ -255,6 +272,16 @@ macro_rules! either_of {
             fn as_sliver(&mut self) -> Option<&mut dyn SliverWidget> {
                 match self { $(Self::$V(w) => w.as_sliver(),)+ }
             }
+
+            /// The live arm's answer, forwarded as for [`EitherWidget`].
+            fn is_focusable(&self) -> bool {
+                match self { $(Self::$V(w) => w.is_focusable(),)+ }
+            }
+
+            /// The live arm's traversal children, forwarded as for [`EitherWidget`].
+            fn visit_focus_children(&self, visitor: &mut dyn FnMut(&ChildPod)) {
+                match self { $(Self::$V(w) => w.visit_focus_children(visitor),)+ }
+            }
         }
 
         impl<State: 'static, $($V: View<State>),+> View<State> for $E<$($V),+> {
@@ -350,7 +377,7 @@ mod tests {
     use frust_text::TextContext;
 
     use super::*;
-    use crate::{ButtonView, CheckboxView, button, checkbox};
+    use crate::{ButtonView, CheckboxView, button, checkbox, text};
 
     type Log = Rc<RefCell<Vec<String>>>;
 
@@ -670,6 +697,107 @@ mod tests {
             ButtonView<()>,
         >
     );
+
+    /// A leaf that is a Tab stop when `focusable`, owning two pods of which
+    /// traversal may enter only the first.
+    struct FocusProbe {
+        focusable: bool,
+        pods: [ChildPod; 2],
+    }
+
+    impl Widget for FocusProbe {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.min()
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn visit_children(&self, visitor: &mut dyn FnMut(&ChildPod)) {
+            for pod in &self.pods {
+                visitor(pod);
+            }
+        }
+        fn is_focusable(&self) -> bool {
+            self.focusable
+        }
+        fn visit_focus_children(&self, visitor: &mut dyn FnMut(&ChildPod)) {
+            visitor(&self.pods[0]);
+        }
+    }
+
+    fn probe(focusable: bool) -> FocusProbe {
+        let log = new_log();
+        let leaf = |tag| {
+            let widget = arm(tag, 1.0, 1.0, &log).build(&mut BuildCtx::new(&mut 0u64));
+            ChildPod::new(Box::new(widget))
+        };
+        FocusProbe {
+            focusable,
+            pods: [leaf("x"), leaf("y")],
+        }
+    }
+
+    /// `(is_focusable, children visited, focus children visited)` for `widget`.
+    fn focus_face(widget: &dyn Widget) -> (bool, usize, usize) {
+        let (mut all, mut focus) = (0, 0);
+        widget.visit_children(&mut |_| all += 1);
+        widget.visit_focus_children(&mut |_| focus += 1);
+        (widget.is_focusable(), all, focus)
+    }
+
+    #[test]
+    fn focus_queries_forward_to_the_live_arm() {
+        type Two = EitherWidget<FocusProbe, FocusProbe>;
+        assert_eq!(focus_face(&Two::Left(probe(true))), (true, 2, 1));
+        assert_eq!(focus_face(&Two::Right(probe(false))), (false, 2, 1));
+        type Three = EitherOf3Widget<FocusProbe, FocusProbe, FocusProbe>;
+        assert_eq!(focus_face(&Three::C(probe(true))), (true, 2, 1));
+        assert_eq!(focus_face(&Three::A(probe(false))), (false, 2, 1));
+        type Eight = EitherOf8Widget<
+            ArmWidget,
+            ArmWidget,
+            ArmWidget,
+            ArmWidget,
+            ArmWidget,
+            ArmWidget,
+            ArmWidget,
+            FocusProbe,
+        >;
+        assert_eq!(focus_face(&Eight::H(probe(true))), (true, 2, 1));
+    }
+
+    #[test]
+    fn tab_reaches_a_control_behind_either() {
+        let mut root: RenderRoot<u32, crate::FlexView<u32>> = RenderRoot::new();
+        let mut logic = |_: &mut u32| {
+            let arm = either(
+                true,
+                || button::<u32, _>("Go", |n: &mut u32| *n += 1),
+                || text("idle"),
+            );
+            crate::column().child(arm)
+        };
+        let mut presses = 0u32;
+        let mut tcx = TextContext::new();
+        root.rebuild(&mut logic, &mut presses);
+        root.layout_with_text(Size::new(200.0, 200.0), &mut tcx as &mut dyn std::any::Any);
+        root.paint(&mut DiscardScene, FrameTime::from_nanos(0));
+        let key = |key| {
+            InputEvent::Key(frust_core::KeyEvent {
+                key,
+                modifiers: frust_core::Modifiers::default(),
+                repeat: false,
+            })
+        };
+        root.event(
+            &mut presses,
+            &key(frust_core::Key::Named(frust_core::NamedKey::Tab)),
+        );
+        assert!(
+            root.is_focus_active(),
+            "the enum's pod is the button's stop"
+        );
+        root.event(&mut presses, &key(frust_core::Key::Character(" ".into())));
+        assert_eq!(presses, 1);
+    }
 
     #[test]
     fn eight_variant_instance_swaps_a_to_h() {
