@@ -188,19 +188,22 @@ steady state at 3708c199 is unchanged (Pixel 4a 11.24 / 13.56 vs 11.29 / 14.59, 
 8.87 vs 7.94 / 8.77).
 
 Targets. Met: Pixel 4a S1 `gpu_main` <= 16 ms (12.75 at 2acaf544, the paint-class programs alone,
-which also took Pixel 4 S1 `gpu_main` from 11.15 to 8.12 — the pair the 0.6.2 entry cites), walk
+which also took Pixel 4 S1 `gpu_main` from 11.15 to 8.12 — the pair the 0.6.2 entry cites; the
+13.89 of the after row is the kgsl governor settling at 355 MHz instead of 430 once the walk
+shortened), walk
 <= 3000 and glyphs <= 1200 us, S6 enc <= 2000 us; `replay_us` <= 0.1 ms on S1 / S6; `upload_us` <=
 0.2 ms except Pixel 4a S1 (216); warm `first_encode_done` to `first_frame_presented` <= 25 ms median
 on both phones; `am start -W` not worse within noise (131 vs 128, inside that pass's 126-141
 spread); no scene worse on p50 and enc total where a not-worse bar was set (p95 moved within its
-spread on Pixel 4a S6 and Pixel 4 S3). Not met: Pixel 4 S1 `gpu_main` <= 5.0 ms (CPU-bound) and enc
-<= 3000 us; every iPhone SE target (`upload` dominates there); S4 `submit - gpu_main` <= 1.0 ms (a
-Pixel 4 target, unmeasured there; inline path at b6e5a665 Pixel 4a 1.39 / OnePlus 9 3.50, split path
-at 78fb0a4d 1.66 / 3.41); Pixel 4a S4 p95 <= 12 (12.42); OnePlus 9 S4 p50 <= 4.3 / p95 <= 5.0. Every kill
+spread on Pixel 4a S6 and Pixel 4 S3, and the two S5 rows that sit beside their befores — Pixel 4
+p50 6.32 to 6.41, OnePlus 9 p95 7.01 against 6.99 — are within noise). Not met: Pixel 4 S1 `gpu_main` <= 5.0 ms (CPU-bound) and enc
+<= 3000 us; every iPhone SE target (`upload` dominates there); S4 `submit - gpu_main` <= 1.0 ms (set for the Pixel 4
+and not evaluated there after 2acaf544; on the phones that were measured: inline path at b6e5a665
+Pixel 4a 1.39 / OnePlus 9 3.50, split path at 78fb0a4d 1.66 / 3.41); Pixel 4a S4 p95 <= 12 (12.42); OnePlus 9 S4 p50 <= 4.3 / p95 <= 5.0. Every kill
 switch's off-arm reproduced its before rows within noise, except the paint-class all-off arm on the
 Pixel 4a (16-17 % below: the atlas tier rule and the clear skip have no switch). Owed: Pixel 4 rows
-after c61ee81a (S4 / S5 after 2acaf544), iPhone SE rows after c61ee81a, and the Pixel 5 / Xiaomi 12
-matrix.
+after c61ee81a (S4 / S5 after 2acaf544), iPhone SE rows after c61ee81a, split-path S2 / S3 / S6
+re-captures on the Pixel 4a and OnePlus 9 after c61ee81a, and the Pixel 5 / Xiaomi 12 matrix.
 
 ## Dev loop
 
