@@ -47,6 +47,10 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how SHELLS relates to the other units
 | `frust-shell-windows` | Win32 integration: taskbar identity, window/taskbar icons, an `HMENU` menu bar with keyboard accelerators, and titlebar brightness — every `unsafe` and every `windows-sys` call confined to `win32_glue` |
 | `frust-shell-linux` | Wayland `app_id`/X11 `WM_CLASS` plus the X11 window icon, through winit's own cross-platform API. Deliberately thin: no GTK/X11 binding, no native menu (the menu is widget-drawn), no `unsafe`, one hook implemented |
 | `frust-shell-android` | Sanctioned-unsafe JNI FFI boundary, app-binding macro, and Choreographer-synced frame pipeline; carries the theme precedence ladder and the conformance-pinned resolved-surface-mode publish site; hosts the host-testable `overlay_state` (table, ledger, cut assembly, skew report) and segmented render tail (see Native-view hosting) and calls `frust_render::native_import::install` first in `render_scene` |
+| Render-thread scheduling (`schedule_render_thread`, Android and iOS) | Each mobile `render_loop` starts by putting its thread in `frust_reactive::thread_policy`'s `Frame` class (Android: nice `min(inherited, -4)`, so the UI thread's inherited -10 is kept; iOS: `QOS_CLASS_USER_INTERACTIVE`); Android logs `thread_policy::runtime_policy_summary()` there. The background runtime keeps tokio's blocking-pool size (no cap, no thread-start hook) and lowers only blocking-pool threads, once each on their first job, inside the `spawn_blocking` facade (`Background`: nice reference + 10 / `QOS_CLASS_UTILITY`; idle keep-alive `BLOCKING_KEEP_ALIVE`, 10 s); its async workers keep what they inherit. `FRUST_NO_THREAD_TUNING` restores the fixed render-thread priority (Android's -4 written over the inherited value) and tokio's defaults; desktop and web schedule nothing |
+| `frust-shell-android` pipeline-cache persistence (`jni_glue::CachePersistence`) | The split render thread persists the Vulkan pipeline-cache blob once per surface after the warm-up is done (checked after each frame), again on `SurfaceDestroyed` after the ack and on a stray `Pause`, only when it differs from the bytes the file holds — a slot a writer updates only after its write succeeded. Writers run detached (`frust pipeline-cache writer`) with a generation ticket taken on the reading thread, so writes serialize and an older blob never lands over a newer one; a persisted blob also seeds the process's next install, and a writer thread the OS refuses is retried on the next frame. Log lines: `pipeline cache persisting N B <after warm-up\|on surface destroy\|on pause> (<n> pipelines)`, then `pipeline cache written N B <moment> to <path>`, or `… (unchanged, not rewritten; …)`. The inline `FRUST_NO_RENDER_THREAD` path persists once at install (`… at install`); iOS has no blob (Metal lacks `PIPELINE_CACHE`) |
+| `frust-shell-android::adpf` | The opt-in performance-hint (ADPF) session, off unless `FRUST_ADPF` is set to a non-`"0"` value (otherwise the render thread logs `ADPF off (default; set FRUST_ADPF=1 to opt in)`): one session per process over the UI and render threads, owned by the render thread's `RenderHint` (`RenderHint::open(ui_tid)` in `render_loop`) and parked in a process-wide slot; opened on the first rendered frame of a continuous loop while a surface is installed and the activity resumed, closed on pause (`suspend`, from the UI thread, until `resume`), on surface destroy and when the render thread exits; target = the display period from recent Choreographer deltas, actual = the frame's UI spans plus its encode span, one report per frame (API 35+ through `AWorkDuration`, 33-34 the basic call). Its NDK entry points are `dlsym`-resolved from `libandroid.so` in the Android-only `platform` submodule, so a missing symbol (below API 33) leaves it off; the session logic is host-tested in `tests/adpf.rs`. Measured and kept opt-in (`android-adpf-opt-in-measured` in LIMITATIONS.md) |
+| `frust-shell-android` frame sync (`ffi_support::FrameSyncLatch`) | One JNI crossing per `doFrame`, `nativeFrameSync(handle) -> Long`, answers which of Kotlin's polls have anything to report: bit 0 IME surface changed (or an IME-side input arrived), 1 clipboard write pending, 2 paste request pending, 3 system-UI generation advanced, 4 app brightness flipped; Kotlin then makes only the `nativeImeState`/`nativeTakeClipboardWrite`/`nativeTakePasteRequest`/`nativeSystemUiState`/`nativeAppIsDark` calls whose bit is set, while the platform-view command poll stays per frame by design (its peek acknowledges the last batch). The latch holds a drained clipboard value until the matching `nativeTake*` call and records the IME and brightness baselines Kotlin last read, including reads outside a sync (`native_ime_state`, `native_app_is_dark`); it is one latch per process, reset when a different handle syncs. `FRUST_NO_FRAME_SYNC` (any non-`"0"` value) answers `FRAME_SYNC_ALL_BITS` (`0x1F`) without syncing, so every poll runs. A `perf-trace` build arms Kotlin's poll timers through the additive `nativePerfTrace` export and logs one `frust-perf jni ticks= sum_us= sync_us= polls_us= timer_overhead_ns=` line per 120 frames; `tests/frame_sync.rs` covers the latch |
 | `frust-shell-ios` | Sanctioned-unsafe C-ABI FFI boundary, app-binding macro, and CADisplayLink-driven frame pipeline, with optional present-sync gating against platform-view geometry |
 | `frust-shell-web::app_handler` | Winit-generic host-signal translation ported from `frust-shell-desktop` (input mapping, the reactive-owner event wrap, theme delivery, window-metrics publish) plus, gated to `wasm32`, the `browser_loop` submodule owning the canvas-bound event loop and frame turn (`spawn_app`/`run_app`) |
 | `frust-shell-web::pacing` | Pure paced-wake decision logic composing the browser's two wake mechanisms (`requestAnimationFrame` redraws, `ControlFlow::WaitUntil` deadlines) |
@@ -144,7 +148,9 @@ all, hot-patch code included (the patch loader's `unsafe` lives in `frust-hotpat
 register of what each zone is permitted to do, and the `# Safety`/no-unwind rules that govern
 it, live in [CODE_STANDARDS.md](CODE_STANDARDS.md) § Language Idioms.
 Android's zone also holds the one `OverlaySurface::new` call in `prepare_overlays`, iOS's the one in
-`take_frame_overlays` plus the overlay exports.
+`take_frame_overlays` plus the overlay exports. Android's one `unsafe` module outside `jni_glue` is
+`adpf::platform` (the `dlsym` binding and `gettid`); render-thread scheduling goes through `frust-reactive::thread_policy`
+(its `unsafe` is that crate's `sys` module), a bare `libc` call left only for `FRUST_NO_THREAD_TUNING`.
 
 `surface_mode`'s writer set is pinned by a source-scan conformance test: exactly one call site per
 platform may publish a resolved surface mode, a single-writer contract that keeps the signal-poll
@@ -192,13 +198,11 @@ seams it likewise cannot own. `IconData` is re-exported *renamed* as `DesktopIco
 the facade already carries `frust-widgets`' `IconData` (an in-UI vector icon).
 
 The shared core itself consumes exactly one field, the window title; the rest is carried for the
-per-OS shells, and `DesktopConfig::default()` reproduces the zero-config preview window exactly.
-The preview window's initial size and maximized state are a separate pair of measurement knobs
+per-OS shells, and `DesktopConfig::default()` reproduces the zero-config preview window exactly. The
+preview window's initial size and maximized state are a separate pair of measurement knobs
 (`FRUST_WINDOW_SIZE`/`FRUST_WINDOW_MAXIMIZED`) — see [DEVELOPMENT.md](DEVELOPMENT.md) §
-Instrumentation.
-
-An icon is a decoded, tightly-packed RGBA8 buffer whose dimensions are checked at construction —
-this tier carries no image decoder (decoding is the tooling tier's job, see
+Instrumentation. An icon is a decoded, tightly-packed RGBA8 buffer whose dimensions are checked at
+construction — this tier carries no image decoder (decoding is the tooling tier's job, see
 [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md)).
 
 ### Menu activations
@@ -211,16 +215,14 @@ case: winit never sees an event to wake on). Each per-OS crate installs muda's h
 the activation against the ids its own spec declared, queues it in a bounded (oldest-dropped)
 queue, and requests a redraw through a `MenuWaker` over the retained window.
 
-`pump` hands **exactly one** activation per frame to `frust_reactive::push_menu_event` and
-re-wakes while more remain: the reactive menu source is a single-slot signal, so a batch would
-coalesce to its last entry. The queue also keeps the push on the UI thread, which
-`push_menu_event` requires. App code reads the other end through the facade's `menu_events()`,
-whose `MenuEvent` carries the app's item id plus a monotonic sequence so choosing the same item
-twice reads as two activations; that read side compiles on **every** target. See
-[CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md) for the reactive source.
-
-macOS and Windows keep separate copies of this strategy — each owns its own platform's menu
-vocabulary — and must not diverge in behavior.
+`pump` hands **exactly one** activation per frame to `frust_reactive::push_menu_event` and re-wakes
+while more remain: the reactive menu source is a single-slot signal, so a batch would coalesce to
+its last entry. The queue also keeps the push on the UI thread, which `push_menu_event` requires.
+App code reads the other end through the facade's `menu_events()`, whose `MenuEvent` carries the
+app's item id plus a monotonic sequence so choosing the same item twice reads as two activations;
+that read side compiles on **every** target. See [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md) for
+the reactive source. macOS and Windows keep separate copies of this strategy — each owns its own
+platform's menu vocabulary — and must not diverge in behavior.
 
 ### Per-OS desktop integration
 
@@ -265,6 +267,8 @@ compilation on adapters that advertise `PIPELINE_CACHE` — in wgpu 30.0.1 any V
 Loading is unconditional file I/O at startup on every desktop OS and reads through to a legacy
 macOS cache base when the current file is absent (inert: no save ever fires there). The whole
 path is best-effort: startup never fails on cache I/O. See [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md).
+It persists right after each surface install; every shell's first frame meets the engine's warm-up
+through `FRUST_FIRST_FRAME_WARM_UP` (default `steal`; RENDER_ARCHITECTURE.md's `frust-render::renderer`).
 
 ### Mobile frame path
 
@@ -465,7 +469,8 @@ hidden slot) are in [LIMITATIONS.md](LIMITATIONS.md) § `apple-overlay-limits`.
   re-provide under the root owner; on desktop a third path fires the per-OS brightness hook, gated
   on the resolved brightness actually moving so an override swapping one dark theme for another
   fires nothing. Android also reads the resolved brightness back over JNI after every appearance
-  change and once per frame, so a Rust-forced theme reaches the status bar.
+  change and on any frame whose `nativeFrameSync` word reports a flip, so a Rust-forced theme reaches
+  the status bar.
 - **Accessibility:** `frust-core`'s semantics pass reports `bounds` in logical pixels while accesskit
   expects physical ones, so the desktop shell's `build_tree_update` stamps a root
   `Affine::scale(window.scale_factor())` transform onto the `TreeUpdate` (left `None` at scale 1.0),
@@ -513,10 +518,11 @@ hidden slot) are in [LIMITATIONS.md](LIMITATIONS.md) § `apple-overlay-limits`.
   listeners. An app- or toolbar-driven access uses `navigator.clipboard`, undefined outside a
   secure context (warns once; the keyboard path is unaffected).
   **Android** owns the clipboard on the JVM side, so the channel is a JNI trio: the Kotlin view
-  drains the write/paste slots once per frame and pushes verbs back through two host routes (the
-  IME's context-menu action and hardware `Ctrl+C`/`X`/`V`/`A`), both gated on a focused editable.
-  A clip needing coercion resolves off the view's thread under a time-bounded session guard. See
-  [LIMITATIONS.md](LIMITATIONS.md) for the focus and toast quirks this route works around.
+  drains the write/paste slots on frames `nativeFrameSync` flags and pushes verbs back through two
+  host routes (the IME's context-menu action and hardware `Ctrl+C`/`X`/`V`/`A`), both gated on a
+  focused editable. A clip needing coercion resolves off the view's thread under a time-bounded
+  session guard. See [LIMITATIONS.md](LIMITATIONS.md) for the focus and toast quirks this route
+  works around.
   **iOS** locks the `Native` toolbar policy at start-up (a later `set_selection_toolbar_policy` is
   refused) because `UIPasteboard.general.string`'s paste-notice exemption applies only to a
   system-initiated read, which only UIKit's own edit menu (`UIEditMenuInteraction`/
@@ -577,16 +583,11 @@ hidden slot) are in [LIMITATIONS.md](LIMITATIONS.md) § `apple-overlay-limits`.
 
 The desktop tier is unevenly proven, and the gap is tracked rather than assumed closed:
 
-- **macOS** — runtime-verified on hardware: real windows, the app-named menu bar, ⌘Q by both menu
-  and accelerator, Hide/Show All, and close-then-Dock-click reopen.
-- **Windows** — runtime-verified on hardware: titlebar/taskbar icon, AppUserModelID identity,
-  titlebar theming, menu-bar activation delivery, accelerators, and quit. Two Win32 menu rules are
-  documented at their `menu.rs` sites: muda's predefined quit dead-ends under winit's pump, and an
-  accelerator enters the `HACCEL` only if its submenu is attached before the item is appended.
-- **Linux** — proven by cross-target compilation only, plus every native call site read against
-  its vendored source. Owed: a non-headless `app_id`/icon pass. See
-  [LIMITATIONS.md](LIMITATIONS.md) `desktop-shells-runtime-unverified` and
-  `desktop-windows-titlebar-theme-revert`.
+| OS | Proven |
+|---|---|
+| **macOS** | Runtime-verified on hardware: real windows, the app-named menu bar, ⌘Q by both menu and accelerator, Hide/Show All, and close-then-Dock-click reopen |
+| **Windows** | Runtime-verified on hardware: titlebar/taskbar icon, AppUserModelID identity, titlebar theming, menu-bar activation delivery, accelerators, and quit. Two Win32 menu rules are documented at their `menu.rs` sites: muda's predefined quit dead-ends under winit's pump, and an accelerator enters the `HACCEL` only if its submenu is attached before the item is appended |
+| **Linux** | Proven by cross-target compilation only, plus every native call site read against its vendored source. Owed: a non-headless `app_id`/icon pass. See [LIMITATIONS.md](LIMITATIONS.md) `desktop-shells-runtime-unverified` and `desktop-windows-titlebar-theme-revert` |
 
 Multi-window is out of scope at this tier — every desktop shell manages exactly one window
 (`desktop-single-window`).

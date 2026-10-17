@@ -44,7 +44,11 @@ texture, an offscreen shader target). This lab reads each resource and runs its 
    (`lower_encoded_paint` for gradients and blurred rects, `lower_encoded_image` for atlas images,
    `lower_encoded_external` for external textures), each 16-byte aligned with a compile-time size
    assert, serialized back to back into one `Rgba32Uint` texture. How the strip shader decodes
-   the flag is lab 13's story.
+   the flag is lab 13's story. A cached atlas glyph is the exception to one record per draw: a
+   run whose every glyph hit the atlas draws each glyph as one rect-strip instance with
+   `PaintType::Glyph` (6, valid only with `RECT_STRIP_FLAG`) and one record per run and atlas
+   layer, which the `Glyph` paint-class program reads with one nearest load
+   (`FRUST_ENGINE_NO_GLYPH_QUADS=1` restores an image record per glyph).
 2. **A gradient ramp is keyed by colour, not geometry.** `GradientCache` stores ramps under
    `vello_common`'s `GradientCacheKey` — stops, interpolation colour space, hue direction. Start/end
    points, radii and the paint transform are absent from the key, so the same gradient under two
@@ -204,8 +208,10 @@ packs layer, offset, size, quality and extends into a `GpuEncodedImage` → `pac
 `PaintType::Image` + texel offset into `paint_and_rect_flag` → in
 `crates/frust-engine/shaders/strip.wgsl` the `PAINT_TYPE_IMAGE` branch reads three texels with
 `load_encoded_paint_texel`, applies the extend modes, and samples `atlas_texture_array` at the
-record's layer (`textureLoad` for Low, `bilinear_sample` for Medium, `bicubic_sample` for High) —
-or the external binding when the source-kind bit is set.
+record's layer (`textureLoad` for Low; for Medium one `textureSampleLevel` through the hardware
+sampler by default, `bilinear_sample`'s four taps under `FRUST_ENGINE_IMAGE_SAMPLER=0`;
+`bicubic_sample` for High, which only the `ImageFiltered` class carries) — or the external binding
+when the source-kind bit is set.
 
 ## What to notice before moving on
 

@@ -6,6 +6,49 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ## Unreleased
 
+### Performance
+
+- Engine uploads and glyph replay. The engine's per-frame uploads (coverage, encoded paints,
+  instances, viewport and page uniforms) are written into a reused, mapped staging ring and copied
+  inside the frame's own encoder instead of one queue write each (`frust_gpu::staging`;
+  `FRUST_ENGINE_NO_STAGING_RING=1` or `EngineRenderer::set_staging_ring(false)` restores queue
+  writes). Bind groups naming a pooled or retained page are kept across frames. The resident
+  glyph-run cache now keeps every subpixel sibling of the glyphs on screen, so slowly moving text
+  stops re-rasterising. Inline-path protocol against 0.6.2, S1: `upload_us` Pixel 4a 571 to 216,
+  OnePlus 9 358 to 121; `replay_us` 1283 to 0.3 and 1184 to 0.3; enc total 4523 to 2797 and 4103 to
+  3350. The `frust-perf enc` line appends `staged_bytes`, `staging_busy`, `staging_too_large`,
+  `staging_buffers` and `bind_groups`.
+- Thread scheduling and Android polls. The mobile render thread joins a frame thread class that
+  keeps the UI thread's inherited priority instead of Android's fixed nice -4, and blocking-pool
+  threads drop to a background class (ten steps below the UI thread on Android and Linux,
+  `QOS_CLASS_UTILITY` on Apple) on their first job (`frust_reactive::thread_policy`;
+  `FRUST_NO_THREAD_TUNING=1` restores the old shape). Kotlin's per-frame polls are gated by one
+  `nativeFrameSync` crossing (`FRUST_NO_FRAME_SYNC=1` polls everything): per-frame JNI cost on an
+  idle page 166 to 36 us (Pixel 4a) and 140 to 30 us (OnePlus 9); S1, S4 and S5 frame times
+  unchanged within noise. An Android performance-hint (ADPF) session over the UI and render threads
+  is available with `FRUST_ADPF=1`, default off: it measured no better as a default
+  (`android-adpf-opt-in-measured` in docs/LIMITATIONS.md).
+- First frame and pipeline cache. The warm-up list opens with the programs a first frame draws and
+  ends with the surface layer composite, and the first frame after each surface install takes only
+  what it needs from it (`FRUST_FIRST_FRAME_WARM_UP=steal`, the default; `await` and `finish` are
+  diagnostics). Android's split render thread persists the pipeline cache once the warm-up is done
+  and again on surface destroy. Split path, warm launches: `first_encode_done` to
+  `first_frame_presented` median Pixel 4a 194 to 24 ms (pipeline wait 183.5 to 12.5), OnePlus 9 74
+  to 11 ms (66 to 3); the persisted blob grows from 328 B (0 pipelines) to 117,143 B (18) and from
+  314 B to 116,758 B; S1 steady state unchanged. Method and every row:
+  [docs/PERFORMANCE_BASELINES.md](docs/PERFORMANCE_BASELINES.md) § Engine close-out per device.
+
+### Added
+
+- `frust_gpu::staging` (`StagingRing`, `StagingFrame`, `StagingStats`) and
+  `PipelineCache::{warm_up_done, wait_warm_up}`; `EngineRenderer::{set_staging_ring, staging_ring,
+  last_frame_staged_bytes, staging_stats, bind_groups_created, warm_up_done, wait_warm_up}`;
+  `SurfaceRenderer::{pipeline_warm_up_done, compiled_pipelines}`.
+- `frust_reactive::thread_policy` (`ThreadClass`, `set_current_thread_class`,
+  `runtime_policy_summary`, `thread_tuning_enabled`); `frust-reactive` now depends on `libc`.
+- Android: the additive `nativeFrameSync` and `nativePerfTrace` JNI exports, and a `frust-perf jni`
+  line per 120 frames on a `perf-trace` build.
+
 ## 0.6.2 — 2026-10-16
 
 A patch release (the 0.6.x line continues) that carries source changes for code that implements
@@ -193,7 +236,7 @@ limits are in [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
   at 1920x1080 (T400).
 - Measured `gpu_main` p50 on the S1 scene, before and after the FAST Phase 1 engine work: Pixel 4a
   32.70 to 12.75 ms, Pixel 4 11.15 to 8.12 ms. Method and the other scenes are in
-  [docs/PERFORMANCE_BASELINES.md](docs/PERFORMANCE_BASELINES.md) § After Phase 1.
+  [docs/PERFORMANCE_BASELINES.md](docs/PERFORMANCE_BASELINES.md) § Engine close-out per device.
 - Layout is skipped per pod by default: a pod laid out before returns its recorded size unless it
   is dirty, its constraints, the window insets or the root layout epoch changed (theme, insets,
   window size, a dirty floated overlay). Widgets must signal layout-affecting changes through

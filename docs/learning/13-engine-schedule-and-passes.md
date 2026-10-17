@@ -82,7 +82,10 @@ the caller's encoder. Learn both and every pass label in a GPU capture has a lin
    (`UnpremultiplyPass`, `unpremultiply.wgsl`) is **not** recorded here: `frust-render` records it
    after `encode_traced` succeeds, on its `EngineDirectUnpremultiply` arm (lab 16). `EngineTarget`
    (view, format, extent, optional caller depth, `OutputAlpha`) is all the walk knows about its
-   destination.
+   destination. The frame's per-frame uploads (coverage, encoded paints, instances, the viewport
+   and page uniforms) reach their textures and buffers as copy commands in the same encoder, out of
+   one reused staging slot, ahead of the passes that read them (`frust_gpu::staging`;
+   `FRUST_ENGINE_NO_STAGING_RING=1` makes them queue writes again).
 
 3. **Depth is how painter order survives two passes.** The opaque pass draws only fully covered
    interior spans of surface draws, depth write on; the alpha passes test against it without
@@ -118,7 +121,13 @@ the caller's encoder. Learn both and every pass label in a GPU capture has a lin
    `strip.wgsl` header's "four variants" is stale — `EnginePipeline::ALL` has **nine** pipelines:
    six strip variants (`StripIntermediate`, `StripAlpha`, `StripDepthAlpha`, `StripOpaque`,
    `StripDestOut`, `StripDepthDestOut`) plus `Clear`, `Copy`, `Filter`. `Clear` and `Copy` are
-   warmed up but `record_frame` never binds them — the clear is a load op. The rest of
+   warmed up but `record_frame` never binds them — the clear is a load op. Those nine are render
+   *states*: each strip state is a family of paint-class variants (`PaintClass`: `SolidCoverage`,
+   `Gradient`, `Image`, `ImageFiltered`, `BlurredRect`, `LayerComposite`, `Glyph`, `Uber`) that
+   `shader_src::strip_class_source` cuts out of the one `strip.wgsl` by its `//#if` blocks, at most
+   `VARIANT_COUNT` (37) per target format, built lazily; a pass sets one pipeline per class run, a
+   run shorter than `strips::RUN_SPLIT_MIN` (16) is drawn with Uber, and
+   `FRUST_ENGINE_UBER_PROGRAM=1` puts every run back on the whole program. The rest of
    `crates/frust-engine/src/gpu/` in one line each: `targets.rs` pools intermediates under
    `MAX_INTERMEDIATE_DIMENSION` (8192), answering an over-ceiling request with a value;
    `bindings.rs` holds `ExternalTextures`, the host-owned textures (video frames, imports) drawn in

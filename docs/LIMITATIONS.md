@@ -6092,6 +6092,12 @@ outline path — a correct, slower, tested fallback. A 200-frame scale-animated
 wired-path test bounds resident entries and keeps images resident, and the
 atlas-drawn and outline paths are byte-identical for a whole-pixel-placed run
 on the T400 reference adapter.
+The resident glyph-run cache (`ResidentRuns`) goes further than the policy: it restates glifo
+0.3.0's private placement arithmetic (transform composition, `quantize_subpixel`, the black
+outline-key colour) and mirrors `maintain`'s eviction schedule, which is part of why glifo is
+exact-pinned — a bump must re-run the bucket unit test, `tests/glyph_run_cache.rs` and the
+`tests/glyph_quads.rs` GPU byte-identity suite. A mispredicted eviction makes the cache forget every
+record, which costs one frame of probes, never a pixel.
 
 **Accepted because**: the outline fallback is always live (animating sizes,
 oversized glyphs, refused allocations, the kill switch all take it), so an
@@ -6637,8 +6643,8 @@ forwards an off-thread marker onto the next frame some other way.
 
 ### `engine-parallel-walk-power-unmeasured` — the parallel strip walk spawns helper threads per frame; its tails are measured, its power cost is not
 
-**Observed** (evidence: `docs/PERFORMANCE_BASELINES.md` § After Phase 2, the
-Phase 2 gate's run logs): `frust-engine::compile::parallel` spawns up to two
+**Observed** (evidence: `docs/PERFORMANCE_BASELINES.md` § Engine close-out per device,
+the parallel-walk gate's run logs): `frust-engine::compile::parallel` spawns up to two
 scoped helper threads inside every frame whose planned shape work reaches
 `DEFAULT_PARALLEL_MIN_COST` (8000; a spawn+join costs 127-135 us on the
 Pixel 4a), with no persistent pool. The threshold and the three-thread default
@@ -6662,10 +6668,162 @@ alike), the median and the CPU-side tails improve on both phones, and
 `FRUST_ENGINE_NO_PARALLEL` is a one-variable revert documented in
 `RENDER_DEVELOPMENT.md`.
 
-**Trigger for removal**: a power/thermal A/B of the on and off arms (the FAST
-plan's thread-policy and ADPF cards own the governor interaction), or a parked
-persistent helper that removes the per-frame spawn, whichever lands first; the
-`acquire` tail on the Pixel 4a is re-checked by the Phase 3 gate.
+**Trigger for removal**: a power/thermal A/B of the on and off arms (the thread
+policy measured neutral and the ADPF session ships opt-in, `android-adpf-opt-in-measured`, so
+neither settled the governor interaction), or a parked persistent helper that removes the
+per-frame spawn, whichever lands first; the Pixel 4a `acquire` tail is still owed a re-check.
+
+### `engine-analytic-coverage-measured-and-kept-out` — rounded rectangles and circles keep strip coverage; an analytic distance-field route was measured and not shipped
+
+**Observed** (evidence: the analytic-coverage go/no-go measurement of 2026-10-14 on its unmerged
+branch, Pixel 4a S1 at 6x20 s, whose
+code was not merged): recognising axis-aligned rounded
+rectangles and kurbo circle and ellipse fills and drawing each from one rect instance with an
+analytic distance-field coverage cut the walk by 12 % (its non-glyph part by 28 %) and the alpha
+bytes from 349 to 231 KB, but `gpu_main` rose 1 % with an 8-row band lowering and 24 % with a
+single bounding-box instance — the Adreno 618 pays for every fragment of the box. Against the CPU
+oracle the curved edges moved 25-63 levels, because the oracle flattens at 0.25 px: the analytic
+image is within 0.9-5.3 levels of the exact shape while the strips are 33-70 off (see
+`engine-strip-curve-flattening-accuracy`), so shipping it would also have meant re-baselining every
+curved golden. No `FRUST_ENGINE_*ANALYTIC*` knob exists.
+
+**Accepted because**: the CPU saving is smaller than the GPU cost on the phone class the engine is
+tuned for, and the strip path keeps every golden byte-stable.
+
+**Trigger for removal**: a GPU on which the bounding-box instance is not fragment-bound, or a golden
+re-baseline done for another reason that removes the second cost.
+
+### `engine-path-cache-measured-and-kept-out` — flattened paths are not cached across frames; the cache was measured and not shipped
+
+**Observed** (evidence: the path-cache go/no-go measurement of 2026-10-14 on its unmerged branch,
+Pixel 4a S1, whose code was not
+merged): a content-keyed cross-frame cache of
+flattened lines and captured strips (unclipped draws inside the viewport, admitted on the second
+sighting) moved the non-glyph walk by about 0 % in its byte-identical exact-position mode and by
+-4 % when re-basing a cached shape under any translation — which is not byte-identical, because
+`vello_common` flattens in `f32` at the absolute device position (at most 1/255 on 0.05-0.12 % of
+edge pixels). For a moving shape flattening is the small part of the cost and tiling plus strip
+rendering the large one. A static shape does compile 96 % cheaper, a case the S1-S6 scenes never
+exercise; 1000 distinct paths cost 1-4 % more. No `FRUST_ENGINE_*PATH_CACHE*` knob exists.
+
+**Accepted because**: the measured scenes gain nothing in the exact mode, and the only mode that
+gains breaks byte identity.
+
+**Trigger for removal**: a workload dominated by static, repeatedly drawn complex paths, measured.
+
+### `engine-strip-curve-flattening-accuracy` — curved strip edges are accurate to the rasteriser's 0.25 px flattening
+
+**Observed** (evidence: the analytic-coverage measurement above): the strip rasteriser flattens
+curves at 0.25 px, so on small circles a strip edge sits 33-70 levels (of 255) off the exact
+shape's coverage, where an analytic distance field lands within 0.9-5.3. The CPU oracle flattens at
+the same tolerance, so the goldens agree with the strips, not with the exact shape.
+
+**Accepted because**: the error is confined to the anti-aliased edge pixels of small curves, it is
+the same accuracy the reference renderer ships, and tightening it costs flattening work on every
+curve.
+
+**Trigger for removal**: a flattening tolerance change or an analytic edge path that ships.
+
+### `engine-staging-ring-web-unmeasured` — the staging ring runs on the web backends but its cost there is unmeasured
+
+**Observed** (evidence: `crates/frust-gpu/src/staging.rs` has no per-backend path;
+`docs/PERFORMANCE_BASELINES.md` § Engine close-out per device has Android rows only): the ring that
+moves the engine's per-frame uploads into mapped staging slots (`frust_gpu::staging`) is
+backend-agnostic, so WebGPU and WebGL2 builds use it too, but no browser capture compares it with
+queue writes. Measured gains so far are Android Vulkan's (Pixel 4a S1 `upload_us` 571 to 216, OnePlus
+9 358 to 121).
+
+**Accepted because**: both routes upload the same bytes, so the web risk is speed, not pixels, and
+`FRUST_ENGINE_NO_STAGING_RING=1` is a one-variable revert.
+
+**Trigger for removal**: a WebGPU and WebGL2 on/off capture.
+
+### `engine-first-frame-steal-later-frames-unmeasured` — under the default `steal` first-frame strategy, frames 2-5 and the first layer-composite transition are unmeasured
+
+**Observed** (evidence: `docs/PERFORMANCE_BASELINES.md` § Engine close-out per device; the
+`FirstFrameWarmUp` doc in `crates/frust-render/src/renderer.rs`): `steal` makes the first frame
+request only what it draws while the warm-up worker builds the rest, which brought the warm
+first-encode-to-present median to 24 ms (Pixel 4a) and 11 ms (OnePlus 9). The captures time the
+first frame only: frames 2-5, which can still meet variants the worker has not reached, and the
+first transition that needs the depth-tested `LayerComposite` variant (warmed last; 32 / 5 ms cold
+/ seeded on the Pixel 4a, 10 / 2 on the OnePlus 9 when built on demand) are not measured.
+
+**Accepted because**: the first frame is the measured win, every later stall is bounded by one
+pipeline build, and `FRUST_FIRST_FRAME_WARM_UP=await` or `finish` makes the first frame pay the
+whole list instead for a host that needs it.
+
+**Trigger for removal**: a capture of frames 2-5 and of the first transition after a cold launch.
+
+### `android-pipeline-cache-persist-gaps` — the moments Android's split path persists the pipeline cache leave four known gaps
+
+**Observed** (evidence: `crates/frust-shell-android/src/jni_glue.rs`'s `CachePersistence` and
+`persist_pipeline_cache_if_changed`): the split render thread persists the Vulkan blob once after
+the surface's warm-up is done (checked after each frame), on `SurfaceDestroyed` and on a stray
+`Pause`. (1) A static first screen killed in the foreground before any later frame or surface
+destroy leaves no blob, so the next launch is cold again. (2) The inline `FRUST_NO_RENDER_THREAD`
+path and the desktop shell persist once, right after the surface install, when the warm-up has
+barely started (the install-time write, measured on the split path before it moved, held 328 B and
+zero pipelines on the Pixel 4a, against about 117 KB and 18 pipelines after the warm-up). (3) Writes are ordered by a per-process generation, so
+a second `FrustSurfaceView` can land a smaller blob over a fuller one. (4) A writer thread the OS
+refuses is retried on the next frame with no bound, so sustained refusal costs one attempt and one
+warning per frame.
+
+**Accepted because**: each gap costs a later launch its cold compile, never a wrong pixel, and the
+common launch-use-background cycle persists the full list.
+
+**Trigger for removal**: a persist on the first idle frame, the inline and desktop paths moved to
+the after-warm-up moment, per-surface ordering, or a bounded retry.
+
+### `android-adpf-opt-in-measured` — the Android performance-hint session ships opt-in because it measured no better as a default
+
+**Observed** (evidence: the opt-in decision's OnePlus 9 captures — the inline-path A/B at 0d5c7cb3,
+12x30, hints on against off — and the split-path arm in `docs/PERFORMANCE_BASELINES.md` § Engine
+close-out per device; `crates/frust-shell-android/src/adpf.rs`): an ADPF session over the UI and
+render threads, reporting each frame's work against the display period, was measured on a OnePlus 9
+(API 35, session confirmed in `dumpsys performance_hint`): on the inline path its S4 p95 rose 4 %
+and its p99 12 % with hints on; on the split path S4 4.22 / 5.91 ms and S1 8.14 / 9.36 ms sat within
+noise of the policy-only rows. The Pixel 4a reports no hint manager, so the session cannot open there. The session ships
+behind `FRUST_ADPF=1`, default off; with it on there is one session per process, so a second
+`FrustSurfaceView`'s render thread is never in a session.
+
+**Accepted because**: no captured scene improved, one regressed, and the opt-in keeps the code
+measurable on future devices.
+
+**Trigger for removal**: a device and scene where the session measurably helps (it becomes the
+default there), or a decision to remove the opt-in code.
+
+### `android-frame-sync-latch-per-process` — the per-frame JNI sync keeps one latch per process, and the soft-keyboard typing check has not run with gated IME polls
+
+**Observed** (evidence: `crates/frust-shell-android/src/ffi_support.rs`'s `FrameSyncLatch`;
+`docs/PERFORMANCE_BASELINES.md` § Engine close-out per device): `nativeFrameSync` cut the per-frame
+JNI poll cost on an idle page from 166 to 36 us (Pixel 4a) and 140 to 30 us (OnePlus 9) by telling
+Kotlin which polls have anything to report. Its latch is process-wide and remembers one handle: a
+sync from a second `FrustSurfaceView` resets it, so two views alternating report every bit each
+frame (the gate stops saving anything), and a clipboard value one view drained but had not yet
+taken is dropped by that reset. A manual soft-keyboard typing pass (IME composition, caret moves
+and field switches arriving only through the gated IME poll) has not been run on a device since the
+polls were gated.
+
+**Accepted because**: the shell drives one `FrustSurfaceView` per process today, the IME bit is
+also raised on every IME-side input and on any published-state change, and `FRUST_NO_FRAME_SYNC=1`
+restores the ungated polls.
+
+**Trigger for removal**: a per-handle latch, and a recorded soft-keyboard typing pass with the gate
+on.
+
+### `shell-apple-utility-qos-unmeasured` — blocking-pool threads take `QOS_CLASS_UTILITY` on Apple, unmeasured
+
+**Observed** (evidence: `crates/frust-reactive/src/thread_policy.rs`'s platform table;
+`docs/PERFORMANCE_BASELINES.md` § Engine close-out per device has Android thread samples only): the
+background class lowers each blocking-pool thread on its first job — nice reference + 10 on
+Android and Linux, `QOS_CLASS_UTILITY` on iOS and macOS. The Android shape was sampled on two phones
+and measured neutral; no iPhone or Mac capture compares decode-heavy scenes with and without the
+Apple class.
+
+**Accepted because**: the class only lowers work that is off the frame by construction, and
+`FRUST_NO_THREAD_TUNING=1` restores the previous scheduling.
+
+**Trigger for removal**: an iPhone S4/S5 capture with and without the policy.
 
 ### `cli-build-no-default-features-gap` — `frust build` forwards cargo `--features` only, never `--no-default-features`
 

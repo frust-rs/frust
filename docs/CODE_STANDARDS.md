@@ -21,15 +21,16 @@ off this index — read this plus the one that covers what you are touching:
   isolated in one function/module with a `# Safety` doc comment:
   - `frust-gpu`'s `create_android_surface`/`create_metal_surface` (`lifecycle.rs`) — turn a raw
     `ANativeWindow*`/`CAMetalLayer*` into a `wgpu::Surface`; `frust-render` only forwards it.
-  - `frust-shell-android`'s `jni_glue` and `frust-shell-ios`'s `ffi_glue` modules — the FFI
-    boundary (`extern "system"`/`extern "C"` exports, `Box::into_raw`/`from_raw`, the surface
-    hand-off, `nativeInitPlatform`'s `JavaVM` stash), the `android_app!`/`ios_app!` generated
-    exports, and the render-thread split's `unsafe impl Send` for `SendableWindowPtr`/
-    `SendableMetalLayer` plus a bare `libc` priority/QoS self-boost. Android's zone also holds
-    `prepare_overlays`'s one `OverlaySurface::new` call (an overlay `ANativeWindow` to a
+  - `frust-shell-android`'s `jni_glue` and `frust-shell-ios`'s `ffi_glue` modules — the FFI boundary
+    (`extern "system"`/`extern "C"` exports, `Box::into_raw`/`from_raw`, the surface hand-off,
+    `nativeInitPlatform`'s `JavaVM` stash), the `android_app!`/`ios_app!` generated exports, and the
+    render-thread split's `unsafe impl Send` for `SendableWindowPtr`/`SendableMetalLayer` plus the
+    bare `libc` priority/QoS call kept for the `FRUST_NO_THREAD_TUNING` arm. Android's zone also
+    holds `prepare_overlays`'s one `OverlaySurface::new` call (an overlay `ANativeWindow` to a
     `wgpu::Surface`, dropped before the window); iOS's holds `take_frame_overlays`'s
-    `OverlaySurface::new` (an overlay `CAMetalLayer`) and the `ios_app!`-emitted
-    `frust_overlay_*` exports.
+    `OverlaySurface::new` (an overlay `CAMetalLayer`) and the `ios_app!`-emitted `frust_overlay_*`
+    exports. Android's `adpf::platform` holds the opt-in performance-hint `dlsym` binding
+    (`libandroid.so`).
   - `frust-shell-desktop`'s `render.rs` (macOS only) — `build_overlay_surface`, one
     `OverlaySurface::new(.., OverlayTarget::CoreAnimationLayer(ptr), ..)` block; the layer crosses
     threads as an exposed-provenance `usize`, so there is no `unsafe impl Send`.
@@ -73,6 +74,8 @@ off this index — read this plus the one that covers what you are touching:
     `frust-video-player`'s Android backend: its constructor call, the `AHardwareBuffer_*` NDK calls and a direct-buffer plane read.
   - `frust-gpu`'s `RenderContext::create_pipeline_cache` — one call building a `wgpu::PipelineCache`
     from a shell-persisted, fingerprint-validated blob.
+  - `frust-reactive`'s private `thread_policy::sys` — `gettid`/`getpriority`/`setpriority` (Linux)
+    and `pthread_set_qos_class_self_np` (Apple), calling thread only, over the unpinned `libc` 0.2.
   - `frust-drive`'s `process` module — a `kill(2)` shim (std has no `killpg`) group-killing a child.
   - `frust-devtools`'s `token::os_random_bytes` (Windows only) — one `BCryptGenRandom` call; a
     non-zero status yields `TokenSource::Fallback`, which the hot-patch gate refuses.
@@ -105,20 +108,19 @@ off this index — read this plus the one that covers what you are touching:
     casting a table address to the hot function's signature; `anchor.rs`: image lookup;
     `android.rs`: memfd + `android_dlopen_ext`. `frust-shell-common` calls the safe
     `apply_from_devtools`; `frust::app!` emits only the anchor's `#[unsafe(no_mangle)]`.
-- **No unwind across FFI.** Every platform export routes through `frust-shell-common`'s
-  `guard` helper (`catch_unwind` + log, returning a benign default) rather than unwinding
-  into JVM-/Swift-owned stack frames — a panic crossing the FFI boundary is undefined
-  behavior, not a bug. `run_guarded_thread` is `guard`'s whole-thread-body counterpart:
-  every render-thread `spawn` closure routes through it, so a caught panic exits cleanly and
-  drains any orphaned `Ack` instead of poisoning shared state. `frust-shell-macos` and
-  `frust-shell-windows` depend on neither `frust-shell-common` nor each other, so their
-  native-callback boundaries can't route through `guard`; each applies the same contract
-  locally instead — `appkit_glue`'s AppKit notification callback hand-rolls its own
-  `catch_unwind` around the observer body. The one exception is muda's menu-event handler
-  (both crates' `menu` modules), panic-free by construction: an infallible mutex-guarded queue
-  push plus a redraw request.
-  Texture release callbacks (`TextureFrame`/`SourceFrame`, run from `Drop`) must not panic: the
-  `catch_unwind` in `run_release` is a last line of defence in unwinding builds only.
+- **No unwind across FFI.** Every platform export routes through `frust-shell-common`'s `guard`
+  helper (`catch_unwind` + log, returning a benign default) rather than unwinding into
+  JVM-/Swift-owned stack frames — a panic crossing the FFI boundary is undefined behavior, not a
+  bug. `run_guarded_thread` is `guard`'s whole-thread-body counterpart: every render-thread `spawn`
+  closure routes through it, so a caught panic exits cleanly and drains any orphaned `Ack` instead
+  of poisoning shared state. `frust-shell-macos` and `frust-shell-windows` depend on neither
+  `frust-shell-common` nor each other, so their native-callback boundaries can't route through
+  `guard`; each applies the same contract locally instead — `appkit_glue`'s AppKit notification
+  callback hand-rolls its own `catch_unwind` around the observer body. The one exception is muda's
+  menu-event handler (both crates' `menu` modules), panic-free by construction: an infallible
+  mutex-guarded queue push plus a redraw request. Texture release callbacks
+  (`TextureFrame`/`SourceFrame`, run from `Drop`) must not panic: the `catch_unwind` in
+  `run_release` is a last line of defence in unwinding builds only.
 - **State-sync, not op-forwarding, across a mobile IME bridge.** Android/iOS platform text
   input doesn't send individual keystrokes across the FFI boundary — the platform owns
   composition (Gboard, CJK marked text) against a local mirror, then hands the framework a
@@ -287,12 +289,11 @@ Every external tool invocation (`rustc`, `adb`, `xcrun`, `cargo ndk`, …) goes 
 
 **BAD:** a `frust-scene` or `frust-text` public function taking or returning a `wgpu::*` type.
 
-**GOOD:** public APIs above `frust-render` speak only `kurbo`/`peniko`; this is what lets
-the GPU backend be swapped later without touching widget or text code.
-
-**The one named exception:** `frust-render::DetachedSurface` is a deliberate **opaque**
-escape valve — its only accessor, `into_surface`, is crate-private, so the wrapped
-`wgpu::Surface` is never nameable outside `frust-render`; follow it for any future crossing.
+**GOOD:** public APIs above `frust-render` speak only `kurbo`/`peniko`; this is what lets the
+GPU backend be swapped later without touching widget or text code. **The one named exception:**
+`frust-render::DetachedSurface` is a deliberate **opaque** escape valve — its only accessor,
+`into_surface`, is crate-private, so the wrapped `wgpu::Surface` is never nameable outside
+`frust-render`; follow it for any future crossing.
 
 ### Reaching into a design-system plugin's internals from a design-system crate
 
