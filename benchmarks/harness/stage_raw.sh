@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # benchmarks/harness/stage_raw.sh — stage a matrix.sh out tree's sanitized raws AFTER the fact
 # (e.g. a run that was interrupted before its own staging step). Same rules as matrix.sh's
-# staging block: copies run-NN.log / run-NN.pss_*.txt / stats.txt / coldstart.txt / cpuinfo.txt
+# staging block: copies run-NN.log / run-NN.pss_*.txt / run-NN.sysmon.txt / stats.txt / coldstart.txt / cpuinfo.txt
 # of every block whose blocks.tsv verdict is `ok` (attempt 1 preferred, else attempt 2) into
 # <out>/raw/<device-name>/{frust_profile,flutter}/<sN>/ and runs the .gitignore whitelist checks.
 # Usage: stage_raw.sh <out-dir> <device-name> <runs> [scenario ...]   (default: all scenarios seen)
@@ -20,10 +20,16 @@ for s in "$@"; do for app in frust flutter; do
   rm -rf "$dst"; mkdir -p "$dst"
   cp "$src"/run-[0-9][0-9].log "$dst"/ || ok=0
   ls "$src"/run-[0-9][0-9].pss_*.txt >/dev/null 2>&1 && cp "$src"/run-[0-9][0-9].pss_*.txt "$dst"/
+  ls "$src"/run-[0-9][0-9].sysmon.txt >/dev/null 2>&1 && cp "$src"/run-[0-9][0-9].sysmon.txt "$dst"/
   for f in stats.txt coldstart.txt cpuinfo.txt; do [ -f "$src/$f" ] && cp "$src/$f" "$dst/$f"; done
   n="$(ls "$dst"/run-[0-9][0-9].log 2>/dev/null | wc -l | tr -d ' ')"; [ "$n" -eq "$RUNS" ] || { echo "$dst has $n logs, expected $RUNS"; ok=0; }
   echo "staged $app/$s -> $dst ($n logs)"
 done; done
 if grep -rlvE 'frust-perf|flutter-perf|bench-scenario|^[[:space:]]*$' "$STAGE" --include='*.log' | grep -q .; then echo "UNSANITIZED .log lines"; ok=0; fi
 if grep -rlvE '^-- stats\.py( --dclass)? \(discarding first [0-9]+ runs?, per protocol convention\) --$|^== [A-Za-z0-9_. ()-]+ ==$|^frames: [0-9]+ total, [0-9]+ active, [0-9]+ skipped$|^p50=[0-9.]+ms[[:space:]]+p95=[0-9.]+ms[[:space:]]+p99=[0-9.]+ms[[:space:]]+worst=[0-9.]+ms$|^missed_60hz=[0-9]+ \(budget [0-9.]+ms\)[[:space:]]+missed_120hz=[0-9]+ \(budget [0-9.]+ms\)$|^[[:space:]]*$' "$STAGE" --include='stats.txt' | grep -q .; then echo "stats.txt outside whitelist"; ok=0; fi
+# The two S7 side-file expressions are matrix.sh's SYSMON_WHITELIST_RE / COLDSTART_WHITELIST_RE verbatim.
+SYSMON_WHITELIST_RE='^t_s=[0-9]+\.[0-9]{3} cpu_pct=([0-9]+\.[0-9]{2}|na) cpu_ns=[0-9]+ footprint_bytes=[0-9]+ rss_bytes=[0-9]+$|^[[:space:]]*$'
+COLDSTART_WHITELIST_RE='^== launch [0-9]+ [0-9TZ:-]+( \(ios: FrontBoard bootstrap -> scene content ready\))?$|^Starting: Intent \{ act=android\.intent\.action\.VIEW dat=(frust|flutter)bench://s7/\.\.\. pkg=it\.f0x\.(frustbench|flutter_bench) \}$|^Status: ok$|^LaunchState: (COLD|WARM|HOT)$|^Activity: it\.f0x\.(frustbench|flutter_bench)/\.MainActivity$|^TotalTime: [0-9]+$|^WaitTime: [0-9]+$|^Complete$|^[A-Z][a-z]{2} +[0-9]+ [0-9:.]+ SpringBoard\(FrontBoard\)\[[0-9]+\] <Notice>: Bootstrapping app<it\.f0x\.(frustbench|flutterBench)> with intent foreground-interactive$|^[A-Z][a-z]{2} +[0-9]+ [0-9:.]+ SpringBoard\(FrontBoard\)\[[0-9]+\] <Notice>: \[\(FBSceneManager\):sceneID:it\.f0x\.(frustbench|flutterBench)-default\] scene content state changed: ready$|^[[:space:]]*$'
+if grep -rlvE "$SYSMON_WHITELIST_RE" "$STAGE" --include='*.sysmon.txt' | grep -q .; then echo "sysmon.txt outside whitelist"; ok=0; fi
+if grep -rlvE "$COLDSTART_WHITELIST_RE" "$STAGE" --include='coldstart.txt' | grep -q .; then echo "coldstart.txt outside whitelist"; ok=0; fi
 if [ "$ok" = 1 ]; then touch "$OUT/RAW_OK"; echo "RAW_OK"; else rm -f "$OUT/RAW_OK"; touch "$OUT/RAW_CHECK_FAILED"; echo "RAW_CHECK_FAILED"; exit 1; fi

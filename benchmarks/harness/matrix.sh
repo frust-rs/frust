@@ -18,15 +18,29 @@
 #                left untouched (toggling them would cut the link) — record it as a deviation.
 #   matrix.sh --platform ios --device <udid> --device-name <slug> --out <dir>
 #             --frust-app <Runner.app> --flutter-apps-dir <dir with flutter_sN.app>
-#             [--scenarios ...] [--runs 12] [--duration 30] [--s7-duration 30]
-#             [--cooldown 60] [--skip-install] [--dry-run]
+#             [--scenarios ...] [--runs 12] [--duration 30] [--s7-duration 60]
+#             [--cooldown 60] [--max-temp-c 38] [--skip-install] [--dry-run]
+#   iOS captures (ios_device.sh; each verified on the iPhone SE / iOS 26.7 / Xcode 27):
+#     per block   battery level + temperature (`ideviceinfo` / `idevicediagnostics`,
+#                 USB lockdown) into blocks.tsv, a thermal gate on that temperature
+#                 (--max-temp-c, 120 s timeout) after the fixed --cooldown, and one
+#                 `devicectl device capture screenshot` ~8 s into run 1 (the content gate)
+#     S7          `run.sh --sysmon`: an Instruments Activity Monitor recording over the
+#                 tail of every other kept run → run-NN.sysmon.txt (idle CPU + phys_footprint).
+#                 Instruments only sees the device while Xcode.app is running: the
+#                 preflight opens it in the background and records the outcome.
+#     post-matrix external cold start: 4 launches per app under `idevicesyslog`,
+#                 FrontBoard's `Bootstrapping app<bundle> … foreground-interactive`
+#                 → `scene content state changed: ready` per launch → coldstart.txt
+#     still uncontrolled: brightness, airplane/Wi-Fi/Bluetooth, charger (devicectl
+#                 needs the USB link) — record them as deviations.
 #
 # Output tree (`<out>`):
 #   progress.log            one line per event (tail this)
 #   blocks.tsv              block, app, scenario, attempt, rc, wall_s, temp_before, temp_after, level, min/max lines, verdict
 #   device.txt              device facts + settings read-back before/after
-#   <app>/<sN>/             run.sh's own out dir: run-NN.log, run-NN.pss_*.txt, run.log (run.sh stdout), stats.txt, screencap.png, cpuinfo.txt, coldstart.txt
-#   raw/<device-name>/{frust_profile,flutter}/<sN>/   sanitized copies (run-NN.log, run-NN.pss_*.txt, stats.txt)
+#   <app>/<sN>/             run.sh's own out dir: run-NN.log, run-NN.pss_*.txt (Android) / run-NN.sysmon.txt (iOS S7), run.log (run.sh stdout), stats.txt, screencap.png, cpuinfo.txt, coldstart.txt
+#   raw/<device-name>/{frust_profile,flutter}/<sN>/   sanitized copies (run-NN.log, run-NN.pss_*.txt, run-NN.sysmon.txt, stats.txt, coldstart.txt, cpuinfo.txt)
 #   RAW_OK | RAW_CHECK_FAILED, DONE | ABORTED, status.json
 set -uo pipefail
 
@@ -34,8 +48,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 PLATFORM=android; DEVICE=""; DEVICE_NAME=""; OUT=""
 FRUST_APK=""; FLUTTER_APK=""; FRUST_APP=""; FLUTTER_APPS_DIR=""
 SCENARIOS="s1,s2,s3,s4,s5,s6,s7,s8"; RUNS=12; DURATION=30; S7_DURATION=""
-PIN_REFRESH=""; MIN_LEVEL=0; CHARGE_WAIT_MAX=5400; COOLDOWN=60
-SKIP_INSTALL=0; DRY_RUN=0; WIRELESS=0
+PIN_REFRESH=""; MIN_LEVEL=0; CHARGE_WAIT_MAX=5400; COOLDOWN=60; MAX_TEMP_C=38
+SKIP_INSTALL=0; DRY_RUN=0; WIRELESS=0; SYSMON=0
 FRUST_PKG=it.f0x.frustbench; FLUTTER_PKG=it.f0x.flutter_bench
 FRUST_SCHEME=frustbench; FLUTTER_SCHEME=flutterbench
 FRUST_BUNDLE=it.f0x.frustbench; FLUTTER_BUNDLE=it.f0x.flutterBench
@@ -59,17 +73,20 @@ while [ $# -gt 0 ]; do
     --min-level) MIN_LEVEL="$2"; shift 2;;
     --charge-wait-max) CHARGE_WAIT_MAX="$2"; shift 2;;
     --cooldown) COOLDOWN="$2"; shift 2;;
+    --max-temp-c) MAX_TEMP_C="$2"; shift 2;;
     --wireless) WIRELESS=1; shift;;
     --skip-install) SKIP_INSTALL=1; shift;;
     --dry-run) DRY_RUN=1; shift;;
-    -h|--help) sed -n '2,30p' "$0"; exit 0;;
+    -h|--help) sed -n '2,44p' "$0"; exit 0;;
     *) echo "error: unknown argument $1" >&2; exit 2;;
   esac
 done
 [ -n "$DEVICE" ] && [ -n "$DEVICE_NAME" ] && [ -n "$OUT" ] || { echo "error: --device, --device-name and --out are required" >&2; exit 2; }
 [[ "$DEVICE_NAME" =~ ^[a-z0-9_]+$ ]] || { echo "error: --device-name must match [a-z0-9_]+" >&2; exit 2; }
 case "$PLATFORM" in android|ios) ;; *) echo "error: --platform android|ios" >&2; exit 2;; esac
-if [ -z "$S7_DURATION" ]; then if [ "$PLATFORM" = android ]; then S7_DURATION=60; else S7_DURATION=30; fi; fi
+# PROTOCOL §8's idle window is 60 s on both platforms (the iOS default was 30 s
+# while no idle axis could be sampled there).
+if [ -z "$S7_DURATION" ]; then S7_DURATION=60; fi
 if [ "$PLATFORM" = android ] && [ "$SKIP_INSTALL" = 0 ]; then
   [ -f "$FRUST_APK" ] && [ -f "$FLUTTER_APK" ] || { echo "error: --frust-apk/--flutter-apk must exist (or pass --skip-install)" >&2; exit 2; }
 fi
@@ -199,8 +216,110 @@ android_coldstart() { # $1 app
 }
 
 # ---------------------------------------------------------------- ios helpers
+# shellcheck source=ios_device.sh
+. "$SCRIPT_DIR/ios_device.sh"
+# Device facts from devicectl's JSON (the plain listing's labels changed between
+# Xcode 26 and 27); only the named fields are printed — the JSON also carries
+# the UDID and serial, which never reach device.txt.
 ios_record_device() {
-  { echo "== device facts $(ts) =="; xcrun devicectl device info details --device "$DEVICE" 2>/dev/null | grep -E 'marketingName|osVersionNumber|productType|name:|developerModeStatus|cpuType' ; } >>"$DEVFILE"
+  local j; j="$(mktemp)"
+  xcrun devicectl device info details --device "$DEVICE" --json-output "$j" >/dev/null 2>&1 || true
+  {
+    echo "== device facts $(ts) =="
+    python3 - "$j" <<'PY' 2>/dev/null
+import json, sys
+r = json.load(open(sys.argv[1]))["result"]
+h, d = r.get("hardwareProperties", {}), r.get("deviceProperties", {})
+print(f"model={h.get('marketingName')} ({h.get('productType')}, {h.get('cpuType', {}).get('name')}) os={d.get('osVersionNumber')} build={d.get('osBuildUpdate')} developer_mode={d.get('developerModeStatus')}")
+PY
+    echo "battery: level=$(ios_battery_level || echo n/a) state=$(ios_battery_state || echo n/a) temp_c=$(ios_battery_temp_c || echo n/a)"
+    echo "host: $(xcodebuild -version 2>/dev/null | tr '\n' ' ')devicectl=$(xcrun devicectl --version 2>/dev/null | head -1) xctrace_online=$(ios_xctrace_online && echo yes || echo no) xcode_running=$(pgrep -x Xcode >/dev/null && echo yes || echo no)"
+    echo "apps: $(xcrun devicectl device info apps --device "$DEVICE" 2>/dev/null | grep -oE 'it\.f0x\.(frustbench|flutterBench)[[:space:]]+[0-9.]+' | tr -s ' ' '=' | tr '\n' ' ')"
+  } >>"$DEVFILE"
+  rm -f "$j"
+}
+# Thermal gate on the battery temperature (the one sensor the Mac can read):
+# same ceiling/timeout/poll as device_state.sh's Android gate. No reading at
+# all (tool missing) is a logged pass, never a stall.
+ios_thermal_gate() {
+  [ "$DRY_RUN" = 1 ] && return 0
+  local waited=0 t
+  t="$(ios_battery_temp_c)" || { log "thermal gate: no temperature reading (idevicediagnostics) — proceeding"; return 0; }
+  while [ "$(printf '%s\n' "$t" | awk -v m="$MAX_TEMP_C" '{print ($1 > m) ? 1 : 0}')" = 1 ]; do
+    if [ "$waited" -ge 120 ]; then log "thermal gate: ${t} C still > ${MAX_TEMP_C} C after ${waited}s — proceeding anyway (TIMEOUT)"; return 0; fi
+    log "thermal gate: ${t} C > ${MAX_TEMP_C} C — waiting 5s (${waited}/120s)"
+    sleep 5; waited=$((waited+5))
+    t="$(ios_battery_temp_c)" || return 0
+  done
+}
+# External cold start on iOS: four launches per app with the device syslog
+# relay running; each launch is FrontBoard's `Bootstrapping app<bundle> with
+# intent foreground-interactive` (the launch request) to its `[(FBSceneManager):
+# sceneID:<bundle>-default] scene content state changed: ready` (the first
+# content commit reaching the system compositor) — the one tool both apps share,
+# stamped by the OS, the counterpart of Android's `am start -W` TotalTime. The
+# raw relay capture carries every process's log lines and never persists; only
+# the two anchor lines per launch and the derived millisecond figure are kept.
+ios_coldstart() { # $1 app
+  local app="$1" bundle out syslog n sp stamps=()
+  if [ "$app" = frust ]; then bundle=$FRUST_BUNDLE; else bundle=$FLUTTER_BUNDLE; fi
+  out="$OUT/$app/s7/coldstart.txt"; mkdir -p "$OUT/$app/s7"; syslog="$OUT/$app/s7/coldstart.syslog.txt"
+  command -v idevicesyslog >/dev/null 2>&1 || { log "cold start $app: idevicesyslog not installed — skipped"; return 0; }
+  rm -f "$out" "$syslog"
+  idevicesyslog -u "$DEVICE" >"$syslog" 2>/dev/null & sp=$!
+  sleep 2
+  for n in 1 2 3 4; do
+    ios_terminate "$bundle"; sleep 3
+    stamps+=("$(ts)")
+    if [ "$app" = frust ]; then
+      xcrun devicectl device process launch --device "$DEVICE" -e '{"FRUST_BENCH_SCENARIO":"s7"}' "$bundle" >/dev/null 2>&1
+    else
+      xcrun devicectl device process launch --device "$DEVICE" "$bundle" >/dev/null 2>&1
+    fi
+    sleep 6
+  done
+  ios_terminate "$bundle"
+  kill "$sp" 2>/dev/null; wait "$sp" 2>/dev/null
+  python3 - "$syslog" "$bundle" "$out" "${stamps[@]}" <<'PY'
+import re, sys
+from datetime import datetime, timedelta
+syslog, bundle, out, *stamps = sys.argv[1:]
+b = re.escape(bundle)
+TS = r"([A-Z][a-z]{2} +\d+ \d\d:\d\d:\d\d\.\d+)"
+boot_re = re.compile(rf"^{TS} SpringBoard\(FrontBoard\)\[\d+\] <Notice>: Bootstrapping app<{b}> with intent foreground-interactive$")
+ready_re = re.compile(rf"^{TS} SpringBoard\(FrontBoard\)\[\d+\] <Notice>: \[\(FBSceneManager\):sceneID:{b}-default\] scene content state changed: ready$")
+def when(stamp):
+    return datetime.strptime(f"{datetime.now().year} {stamp}", "%Y %b %d %H:%M:%S.%f")
+launches = []  # [boot_line, ready_line | None, ms | None] per bootstrap
+pending = None
+with open(syslog, errors="replace") as f:
+    for raw in f:
+        line = raw.rstrip("\n")
+        m = boot_re.match(line)
+        if m:
+            pending = (line, when(m.group(1)))
+            launches.append([line, None, None])
+            continue
+        m = ready_re.match(line)
+        if m and pending is not None:
+            t_ready = when(m.group(1))
+            if t_ready < pending[1]:
+                t_ready += timedelta(days=1)
+            launches[-1][1] = line
+            launches[-1][2] = round((t_ready - pending[1]).total_seconds() * 1000)
+            pending = None
+with open(out, "w") as o:
+    for i, stamp in enumerate(stamps, 1):
+        o.write(f"== launch {i} {stamp} (ios: FrontBoard bootstrap -> scene content ready)\n")
+        if i - 1 < len(launches):
+            boot, ready, ms = launches[i - 1]
+            o.write(boot + "\n")
+            if ready is not None:
+                o.write(ready + "\n")
+                o.write(f"TotalTime: {ms}\n")
+PY
+  rm -f "$syslog"
+  log "cold start $app: $(grep -oE 'TotalTime: [0-9]+' "$out" | tr '\n' ' ')"
 }
 
 # ---------------------------------------------------------------- block runner
@@ -239,9 +358,12 @@ run_block() { # $1 app, $2 scenario, $3 attempt -> rc
     [ "$DRY_RUN" = 1 ] || android_screencap_bg "$pkg" "$dir/screencap.png"
     if [ "$s" = s7 ] && [ "$DRY_RUN" = 0 ]; then android_cpu_sampler_bg "$pkg" "$dir/cpuinfo.txt"; sampler="$SAMPLER_PID"; fi
   else
-    extra=(--platform ios)
+    ios_thermal_gate
+    [ "$DRY_RUN" = 1 ] || { tb="$(ios_battery_temp_c || true)"; lvl="$(ios_battery_level || true)"; }
+    extra=(--platform ios --screencap "$dir/screencap.png")
     if [ "$app" = frust ] && [ "$FRUST_INSTALLED" = 0 ] && [ "$SKIP_INSTALL" = 0 ]; then extra+=(--install "$FRUST_APP"); FRUST_INSTALLED=1; fi
     if [ "$app" = flutter ] && [ "$SKIP_INSTALL" = 0 ]; then extra+=(--install "$FLUTTER_APPS_DIR/flutter_$s.app"); fi
+    if [ "$s" = s7 ] && [ "$SYSMON" = 1 ]; then extra+=(--sysmon); fi
   fi
   log "BLOCK START app=$app scenario=$s attempt=$attempt runs=$RUNS duration=${dur}s temp=${tb:-n/a} level=${lvl:-n/a}"
   t0=$(date +%s)
@@ -253,7 +375,7 @@ run_block() { # $1 app, $2 scenario, $3 attempt -> rc
   fi
   t1=$(date +%s)
   [ -n "$sampler" ] && kill "$sampler" 2>/dev/null
-  if [ "$PLATFORM" = android ] && [ "$DRY_RUN" = 0 ]; then ta="$(a_temp)"; fi
+  if [ "$DRY_RUN" = 0 ]; then if [ "$PLATFORM" = android ]; then ta="$(a_temp)"; else ta="$(ios_battery_temp_c || true)"; fi; fi
   lines="n/a"; verdict="ok"
   if [ "$DRY_RUN" = 0 ]; then
     if lines="$(block_sanity "$s" "$dir")"; then verdict="ok"; else verdict="DEGENERATE"; fi
@@ -274,7 +396,12 @@ if [ "$PLATFORM" = android ]; then
   android_record_device; android_setup; android_install
 else
   xcrun devicectl device info details --device "$DEVICE" >/dev/null 2>&1 || { log "FATAL: iOS device $DEVICE unreachable"; exit 1; }
+  if echo ",$SCENARIOS," | grep -q ',s7,' && [ "$DRY_RUN" = 0 ]; then
+    # Instruments (the S7 idle axis) sees the device only while Xcode.app runs.
+    if [ "$(ios_xctrace_ensure 60)" = online ]; then SYSMON=1; log "sysmon: Instruments online for $DEVICE (Xcode.app running) — S7 runs sample idle CPU/footprint"; else log "sysmon: Instruments reports $DEVICE OFFLINE after opening Xcode — S7 idle CPU/memory NOT sampled (deviation)"; fi
+  fi
   ios_record_device
+  log "ios facts: $(tail -4 "$DEVFILE" | tr '\n' ' ')"
 fi
 FAILED_BLOCKS=""
 first=1
@@ -289,12 +416,26 @@ for s in $(echo "$SCENARIOS" | tr ',' ' '); do
     fi
   done
 done
-if [ "$PLATFORM" = android ] && [ "$DRY_RUN" = 0 ] && echo ",$SCENARIOS," | grep -q ',s7,'; then
-  ash dumpsys battery unplug >/dev/null
-  android_coldstart frust; android_coldstart flutter
+if [ "$DRY_RUN" = 0 ] && echo ",$SCENARIOS," | grep -q ',s7,'; then
+  if [ "$PLATFORM" = android ]; then
+    ash dumpsys battery unplug >/dev/null
+    android_coldstart frust; android_coldstart flutter
+  else
+    ios_coldstart frust; ios_coldstart flutter
+    ios_record_device
+  fi
 fi
 
 # ---------------------------------------------------------------- raw staging (sanitized copies only)
+# Line shapes the committed S7 side files may carry (benchmarks/.gitignore's
+# pre-commit block and stage_raw.sh cite these two expressions verbatim; keep
+# the three identical):
+#   run-NN.sysmon.txt — sysmon_export.py's one line shape;
+#   coldstart.txt     — Android's `am start -W` block, or the iOS header + the
+#                       two FrontBoard anchor lines (our bundle ids only) +
+#                       the derived TotalTime.
+SYSMON_WHITELIST_RE='^t_s=[0-9]+\.[0-9]{3} cpu_pct=([0-9]+\.[0-9]{2}|na) cpu_ns=[0-9]+ footprint_bytes=[0-9]+ rss_bytes=[0-9]+$|^[[:space:]]*$'
+COLDSTART_WHITELIST_RE='^== launch [0-9]+ [0-9TZ:-]+( \(ios: FrontBoard bootstrap -> scene content ready\))?$|^Starting: Intent \{ act=android\.intent\.action\.VIEW dat=(frust|flutter)bench://s7/\.\.\. pkg=it\.f0x\.(frustbench|flutter_bench) \}$|^Status: ok$|^LaunchState: (COLD|WARM|HOT)$|^Activity: it\.f0x\.(frustbench|flutter_bench)/\.MainActivity$|^TotalTime: [0-9]+$|^WaitTime: [0-9]+$|^Complete$|^[A-Z][a-z]{2} +[0-9]+ [0-9:.]+ SpringBoard\(FrontBoard\)\[[0-9]+\] <Notice>: Bootstrapping app<it\.f0x\.(frustbench|flutterBench)> with intent foreground-interactive$|^[A-Z][a-z]{2} +[0-9]+ [0-9:.]+ SpringBoard\(FrontBoard\)\[[0-9]+\] <Notice>: \[\(FBSceneManager\):sceneID:it\.f0x\.(frustbench|flutterBench)-default\] scene content state changed: ready$|^[[:space:]]*$'
 pick_src() { # $1 app, $2 scenario -> the attempt dir whose block verdict was ok (prefer attempt 1), else attempt 1
   local v1 v2
   v1="$(awk -F'\t' -v a="$1" -v s="$2" '$2==a && $3==s && $4=="1" {print $NF}' "$BLOCKS" | tail -1)"
@@ -312,6 +453,7 @@ if [ "$DRY_RUN" = 0 ]; then
       mkdir -p "$dst"
       cp "$src"/run-[0-9][0-9].log "$dst"/ || stage_ok=0
       ls "$src"/run-[0-9][0-9].pss_*.txt >/dev/null 2>&1 && cp "$src"/run-[0-9][0-9].pss_*.txt "$dst"/
+      ls "$src"/run-[0-9][0-9].sysmon.txt >/dev/null 2>&1 && cp "$src"/run-[0-9][0-9].sysmon.txt "$dst"/
       [ -f "$src/stats.txt" ] && cp "$src/stats.txt" "$dst/stats.txt"
       [ -f "$src/coldstart.txt" ] && cp "$src/coldstart.txt" "$dst/coldstart.txt"
       [ -f "$src/cpuinfo.txt" ] && cp "$src/cpuinfo.txt" "$dst/cpuinfo.txt"
@@ -322,6 +464,8 @@ if [ "$DRY_RUN" = 0 ]; then
   if grep -rlvE 'frust-perf|flutter-perf|bench-scenario|^[[:space:]]*$' "$STAGE_RAW" --include='*.log' | grep -q .; then log "stage: UNSANITIZED .log lines found"; stage_ok=0; fi
   if grep -rlE 'package|Application' "$STAGE_RAW" --include='*.pss_*.txt' | xargs -I{} grep -HoE '\b[a-z]+(\.[a-z_]+){2,}\b' {} 2>/dev/null | grep -vE 'it\.f0x\.[a-z_]*bench|android\.(app|os|view)|java\.' | grep -q .; then log "stage: PSS snapshot names a foreign package (inspect before committing)"; fi
   if grep -rlvE '^-- stats\.py( --dclass)? \(discarding first [0-9]+ runs?, per protocol convention\) --$|^== [A-Za-z0-9_. ()-]+ ==$|^frames: [0-9]+ total, [0-9]+ active, [0-9]+ skipped$|^p50=[0-9.]+ms[[:space:]]+p95=[0-9.]+ms[[:space:]]+p99=[0-9.]+ms[[:space:]]+worst=[0-9.]+ms$|^missed_60hz=[0-9]+ \(budget [0-9.]+ms\)[[:space:]]+missed_120hz=[0-9]+ \(budget [0-9.]+ms\)$|^[[:space:]]*$' "$STAGE_RAW" --include='stats.txt' | grep -q .; then log "stage: stats.txt outside whitelist"; stage_ok=0; fi
+  if grep -rlvE "$SYSMON_WHITELIST_RE" "$STAGE_RAW" --include='*.sysmon.txt' | grep -q .; then log "stage: sysmon.txt outside whitelist"; stage_ok=0; fi
+  if grep -rlvE "$COLDSTART_WHITELIST_RE" "$STAGE_RAW" --include='coldstart.txt' | grep -q .; then log "stage: coldstart.txt outside whitelist"; stage_ok=0; fi
   if [ "$stage_ok" = 1 ]; then touch "$OUT/RAW_OK"; log "raw staged + self-check passed: $STAGE_RAW"; else touch "$OUT/RAW_CHECK_FAILED"; log "raw staged with CHECK FAILURES: $STAGE_RAW"; fi
 fi
 printf '{"platform":"%s","device":"%s","device_name":"%s","runs":%s,"duration":%s,"s7_duration":%s,"failed_blocks":"%s","raw_ok":%s,"finished":"%s"}\n' "$PLATFORM" "$DEVICE" "$DEVICE_NAME" "$RUNS" "$DURATION" "$S7_DURATION" "${FAILED_BLOCKS# }" "$stage_ok" "$(ts)" >"$OUT/status.json"

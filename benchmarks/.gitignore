@@ -12,6 +12,17 @@
 #   cpuinfo.txt     — S7 only: `dumpsys cpuinfo` lines grep-filtered to our
 #                     own bench package + the TOTAL line, sampled every 30s
 #                     during the S7 blocks by matrix.sh.
+#   *.sysmon.txt    — iOS S7 only: the bench pid's Instruments `sysmon-process`
+#                     rows (`t_s= cpu_pct= cpu_ns= footprint_bytes= rss_bytes=`)
+#                     over the tail of every other kept run, written by run.sh
+#                     --sysmon via sysmon_export.py; the all-process trace and
+#                     XML it comes from never persist.
+#   coldstart.txt (iOS) — matrix.sh's FrontBoard cold-start loop: per launch a
+#                     `== launch N <ts> (ios: FrontBoard bootstrap -> scene
+#                     content ready)` header, the two SpringBoard(FrontBoard)
+#                     anchor lines naming only our bundle id, and the derived
+#                     `TotalTime: <ms>`; the device syslog capture it is cut
+#                     from never persists.
 #   stats.txt       — the run.sh stdout tail from its `-- stats.py` banner
 #                     onward (the stats.py p50=/p95=/frames:/missed_* table
 #                     for that scenario's kept runs); whitelist-checked
@@ -22,6 +33,9 @@
 # STATS_WHITELIST_RE verbatim, keep the two identical):
 #   grep -rlvE 'frust-perf|flutter-perf|bench-scenario|^[[:space:]]*$' raw/ --include='*.log'   (expect no output)
 #   scan *.pss_*.txt for any package identifier other than it.f0x.*bench     (expect none)
+#   every *.sysmon.txt line matches matrix.sh's SYSMON_WHITELIST_RE and every coldstart.txt
+#     line matches its COLDSTART_WHITELIST_RE (stage_raw.sh carries both verbatim; run it over
+#     a staged tree, or grep -rlvE with the expression)                      (expect no output)
 #   grep -rlvE '^-- stats\.py( --dclass)? \(discarding first [0-9]+ runs?, per protocol convention\) --$|^== [A-Za-z0-9_. ()-]+ ==$|^frames: [0-9]+ total, [0-9]+ active, [0-9]+ skipped$|^p50=[0-9.]+ms[[:space:]]+p95=[0-9.]+ms[[:space:]]+p99=[0-9.]+ms[[:space:]]+worst=[0-9.]+ms$|^missed_60hz=[0-9]+ \(budget [0-9.]+ms\)[[:space:]]+missed_120hz=[0-9]+ \(budget [0-9.]+ms\)$|^[[:space:]]*$' raw/ --include='stats.txt'   (expect no output)
 # Transient capture scratch (pre-sanitize) — never committed:
 *.unfiltered

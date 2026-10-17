@@ -154,5 +154,117 @@ class S7TableRendersMibTests(unittest.TestCase):
         self.assertEqual(f"{pss[0]:.2f}", "113.60")
 
 
+IOS_COLDSTART = """== launch 1 2026-10-17T15:36:34Z (ios: FrontBoard bootstrap -> scene content ready)
+Oct 17 22:36:34.445051 SpringBoard(FrontBoard)[35] <Notice>: Bootstrapping app<it.f0x.frustbench> with intent foreground-interactive
+Oct 17 22:36:35.001877 SpringBoard(FrontBoard)[35] <Notice>: [(FBSceneManager):sceneID:it.f0x.frustbench-default] scene content state changed: ready
+TotalTime: 557
+== launch 2 2026-10-17T15:36:46Z (ios: FrontBoard bootstrap -> scene content ready)
+Oct 17 22:36:46.100000 SpringBoard(FrontBoard)[35] <Notice>: Bootstrapping app<it.f0x.frustbench> with intent foreground-interactive
+Oct 17 22:36:46.400000 SpringBoard(FrontBoard)[35] <Notice>: [(FBSceneManager):sceneID:it.f0x.frustbench-default] scene content state changed: ready
+TotalTime: 300
+== launch 3 2026-10-17T15:36:58Z (ios: FrontBoard bootstrap -> scene content ready)
+Oct 17 22:36:58.100000 SpringBoard(FrontBoard)[35] <Notice>: Bootstrapping app<it.f0x.frustbench> with intent foreground-interactive
+Oct 17 22:36:58.420000 SpringBoard(FrontBoard)[35] <Notice>: [(FBSceneManager):sceneID:it.f0x.frustbench-default] scene content state changed: ready
+TotalTime: 320
+"""
+
+ANDROID_COLDSTART = """== launch 1 2026-10-17T11:03:42Z
+Starting: Intent { act=android.intent.action.VIEW dat=frustbench://s7/... pkg=it.f0x.frustbench }
+Status: ok
+LaunchState: COLD
+Activity: it.f0x.frustbench/.MainActivity
+TotalTime: 127
+WaitTime: 130
+Complete
+== launch 2 2026-10-17T11:03:50Z
+Starting: Intent { act=android.intent.action.VIEW dat=frustbench://s7/... pkg=it.f0x.frustbench }
+Status: ok
+LaunchState: COLD
+Activity: it.f0x.frustbench/.MainActivity
+TotalTime: 141
+WaitTime: 143
+Complete
+"""
+
+# Three ~1 s sysmon samples of one run: 100 ms of core time over 2.0 s = 5 %.
+SYSMON_RUN = """t_s=41.000 cpu_pct=na cpu_ns=1000000000 footprint_bytes=41943040 rss_bytes=40000000
+t_s=42.000 cpu_pct=4.90 cpu_ns=1050000000 footprint_bytes=42991616 rss_bytes=40000000
+t_s=43.000 cpu_pct=5.10 cpu_ns=1100000000 footprint_bytes=44040192 rss_bytes=40000000
+"""
+
+
+class S7IosRowsTests(unittest.TestCase):
+    """The iOS S7 side files (matrix.sh's FrontBoard coldstart.txt, run.sh's
+    run-NN.sysmon.txt) relabel the S7 rows to name their instrument; an
+    Android tree keeps its labels and JSON shape untouched."""
+
+    def _args(self, frust_dir: str, discard: int = 0) -> argparse.Namespace:
+        return argparse.Namespace(
+            frust=frust_dir, flutter=None, duration=30, s7_duration=60, discard_first=discard,
+            frust_label="Frust (profile)", flutter_label="Flutter (profile)",
+            flutter_work_sum=False, frust_work_row=False,
+        )
+
+    def test_frontboard_coldstart_is_parsed_like_am_start_and_relabels_the_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            s7 = Path(tmp) / "s7"
+            s7.mkdir()
+            (s7 / "run-00.log").write_text("")
+            (s7 / "coldstart.txt").write_text(IOS_COLDSTART)
+            md, js = summarize.build(self._args(tmp))
+        cold = js["scenarios"]["s7"]["frust"]["coldstart"]
+        self.assertEqual(cold["source"], "frontboard")
+        self.assertEqual(cold["launches"], [557, 300, 320])
+        self.assertEqual(cold["kept"], [300, 320])   # first launch discarded, as on Android
+        self.assertEqual(cold["median"], 310)
+        self.assertIn("| External cold start (FrontBoard bootstrap → scene content ready, median of kept launches) | ~310 ms (300/320; first of 3 discarded) |", md)
+        self.assertNotIn("`am start -W`", md)
+
+    def test_android_coldstart_keeps_its_label_and_json_shape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            s7 = Path(tmp) / "s7"
+            s7.mkdir()
+            (s7 / "run-00.log").write_text("")
+            (s7 / "coldstart.txt").write_text(ANDROID_COLDSTART)
+            md, js = summarize.build(self._args(tmp))
+        cold = js["scenarios"]["s7"]["frust"]["coldstart"]
+        self.assertNotIn("source", cold)
+        self.assertEqual(cold["median"], 141)
+        self.assertIn("| External cold start (`am start -W` TotalTime, median of kept launches) | ~141 ms (141; first of 2 discarded) |", md)
+        self.assertIn("| Idle CPU during the S7 blocks (`dumpsys cpuinfo`) | n/a |", md)
+        self.assertIn("| Idle memory (TOTAL PSS, mean over kept runs' post-run snapshots) | n/a |", md)
+
+    def test_sysmon_files_give_the_instruments_idle_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            s7 = Path(tmp) / "s7"
+            s7.mkdir()
+            for i in range(3):
+                (s7 / f"run-0{i}.log").write_text("")
+            # run-00 is a warm-up without samples; runs 01/02 carry the window.
+            (s7 / "run-01.sysmon.txt").write_text(SYSMON_RUN)
+            (s7 / "run-02.sysmon.txt").write_text(SYSMON_RUN.replace("44040192", "46137344"))
+            md, js = summarize.build(self._args(tmp, discard=1))
+        entry = js["scenarios"]["s7"]["frust"]
+        mean, lo, hi, n = entry["idle_footprint_mib"]
+        self.assertEqual((f"{mean:.1f}", f"{lo:.1f}", f"{hi:.1f}", n), ("43.0", "42.0", "44.0", 2))
+        self.assertEqual(entry["idle_cpu"]["source"], "sysmon")
+        self.assertEqual(entry["idle_cpu"]["runs"], 2)
+        self.assertAlmostEqual(entry["idle_cpu"]["avg_pct"], 5.0, places=6)
+        self.assertEqual(entry["idle_cpu"]["samples"], 6)
+        self.assertIn("| Idle CPU over each sampled S7 run's recorded window (Instruments sysmon, Δ time on core / Δt) | ~5.0% avg (max 5.0%, 2 sampled runs, 6 samples) |", md)
+        self.assertIn("| Idle memory (phys_footprint, mean over the sampled runs' last sample) | ~43.0 MiB (42.0–44.0, 2 sampled runs) |", md)
+        self.assertNotIn("TOTAL PSS", md)
+
+    def test_sysmon_discard_skips_the_warmup_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            s7 = Path(tmp) / "s7"
+            s7.mkdir()
+            (s7 / "run-00.log").write_text("")
+            (s7 / "run-00.sysmon.txt").write_text(SYSMON_RUN)
+            mean, lo, hi, n = summarize.sysmon_idle(s7, discard=0)["footprint_mib"]
+            self.assertEqual(n, 1)
+            self.assertIsNone(summarize.sysmon_idle(s7, discard=1))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -7,7 +7,7 @@
 #                [--duration <secs>] [--out <dir>] [--pkg <package>]
 #                [--scheme <uri-scheme>] [--platform android|ios]
 #                [--install <app-path>] [--bundle-id <id>] [--adapter <name>]
-#                [--skip-device-state] [--skip-stats]
+#                [--screencap <png>] [--sysmon] [--skip-device-state] [--skip-stats]
 #
 #   <scenario>              scenario id — the frame-class table `s1..s8`
 #                           (benchmarks/PROTOCOL.md §8) or the op-latency-only
@@ -30,6 +30,18 @@
 #                           (omit if already installed).
 #   --bundle-id <id>        iOS only: bundle id override (default
 #                           it.f0x.frustbench / it.f0x.flutterBench).
+#   --screencap <png>       iOS only: one `devicectl device capture screenshot`
+#                           ~8 s into run 1 (the discarded warm-up run, where
+#                           Android's matrix.sh takes its screencap) — the
+#                           visual content gate (PROTOCOL §7).
+#   --sysmon                iOS only, S7: record an Instruments `Activity
+#                           Monitor` trace over each run and keep the bench
+#                           process's sysmon rows as `run-NN.sysmon.txt` (the
+#                           idle CPU/memory axis — see the iOS automation
+#                           block). Needs Xcode.app running: the script opens
+#                           it in the background when Instruments reports the
+#                           device offline, and skips the sampling (a logged
+#                           note, not a failed run) if it stays offline.
 #   --adapter <name>        flutter d-class runs only: which DB adapter this
 #                           run's already-installed build was compiled against
 #                           — `ffi` (package:sqlite3, the engine-parity
@@ -65,6 +77,29 @@
 #            in its `tmp/` container (see flutter_bench/lib/bench/perf.dart)
 #            that this script pulls with `devicectl device copy from
 #            --domain-type appDataContainer` after each run.
+#   --sysmon  (S7) on every OTHER kept run (runs 3, 5, 7, … — the first
+#            SYSMON_SKIP=2 warm-up runs are discarded by PROTOCOL §4 anyway)
+#            the bench pid is resolved and an all-process `xcrun xctrace
+#            record --template 'Activity Monitor'` is started
+#            SYSMON_WINDOW+SYSMON_LEAD (15+10) s before the end of the window
+#            with a 15 s time limit — xctrace needs 5–15 s to set up before
+#            its clock starts, so the samples land in the window's last ~15 s
+#            (xctrace cannot `--attach` a process on this device, only
+#            records while Xcode.app is open, and its Mac-side save step after
+#            the time limit takes anywhere from one to ten minutes). A save
+#            still in flight when the next sampled run is due cuts that run's
+#            recording short (observed twice), so the save is left to overlap
+#            the unsampled run in between and a sampled run's LAUNCH waits
+#            for every save to finish; after the last run every trace is
+#            collected: the
+#            `sysmon-process` table exported and filtered to the bench pid by
+#            `sysmon_export.py` into `run-NN.sysmon.txt` (`t_s= cpu_pct=
+#            cpu_ns= footprint_bytes= rss_bytes=` per ~1 s sample); the trace
+#            and the all-process XML are deleted. summarize.py's iOS idle rows
+#            read those files.
+#   --screencap  run 1 only: `devicectl device capture screenshot` at ~8 s.
+#   Shared device helpers (pid lookup, terminate, battery, screenshot,
+#   xctrace) live in ios_device.sh, sourced below.
 #
 # Both captures are grep-filtered to `*-perf`/`bench-scenario` lines only
 # before landing in the run log (privacy: device console captures never enter
@@ -177,9 +212,16 @@ PLATFORM="android"
 INSTALL_PATH=""
 BUNDLE_OVERRIDE=""
 ADAPTER=""
+SCREENCAP=""
+SYSMON=0
+SYSMON_SKIP=2
+SYSMON_WINDOW=15
+SYSMON_EVERY=2
+SYSMON_LEAD=10
+RUN_INDEX=0
 
 usage() {
-  sed -n '2,159p' "$0"
+  sed -n '2,191p' "$0"
 }
 
 # --- Arg parsing ------------------------------------------------------
@@ -294,6 +336,19 @@ while [ $# -gt 0 ]; do
       ;;
     --adapter=*)
       ADAPTER="${1#--adapter=}"
+      shift
+      ;;
+    --screencap)
+      [ $# -ge 2 ] || { echo "error: --screencap requires a png path" >&2; exit 2; }
+      SCREENCAP="$2"
+      shift 2
+      ;;
+    --screencap=*)
+      SCREENCAP="${1#--screencap=}"
+      shift
+      ;;
+    --sysmon)
+      SYSMON=1
       shift
       ;;
     --skip-device-state)
@@ -421,38 +476,102 @@ ios_default_bundle() {
   fi
 }
 
-# Terminate any running instance of the app (best-effort — a not-running app
-# is not an error). Xcode 26's devicectl dropped `terminate --pid-of <bundle>`
-# (it now requires `--pid <pid>`), so resolve the app's pid by matching the
-# running process's executable URL against the bundle's installation URL
-# (`device info apps` / `device info processes` JSON output).
-ios_terminate() {
-  local bundle="$1" apps_json procs_json pid
-  apps_json="$(mktemp)"
-  procs_json="$(mktemp)"
-  xcrun devicectl device info apps --device "${DEVICE}" \
-    --bundle-id "${bundle}" --json-output "${apps_json}" >/dev/null 2>&1 || true
-  xcrun devicectl device info processes --device "${DEVICE}" \
-    --json-output "${procs_json}" >/dev/null 2>&1 || true
-  pid="$(python3 - "${apps_json}" "${procs_json}" <<'PY' 2>/dev/null
-import json, sys
-try:
-    apps = json.load(open(sys.argv[1]))["result"]["apps"]
-    procs = json.load(open(sys.argv[2]))["result"]["runningProcesses"]
-    url = apps[0]["url"]  # file:///private/var/containers/Bundle/Application/<UUID>/X.app/
-    for p in procs:
-        if p.get("executable", "").startswith(url):
-            print(p["processIdentifier"])
-            break
-except Exception:
-    pass
-PY
-)"
-  if [ -n "${pid}" ]; then
-    xcrun devicectl device process terminate --device "${DEVICE}" \
-      --pid "${pid}" >/dev/null 2>&1 || true
+# Device helpers shared with matrix.sh: ios_pid / ios_terminate (pid resolved
+# by matching the process's executable URL against the bundle's install URL —
+# Xcode 26's devicectl dropped `terminate --pid-of <bundle>`), the battery and
+# screenshot reads, and the Instruments (xctrace) recording/export pair.
+# shellcheck source=ios_device.sh
+. "${SCRIPT_DIR}/ios_device.sh"
+
+# One entry per started recording, collected after the run loop.
+SYSMON_XPIDS=(); SYSMON_PIDS=(); SYSMON_TRACES=(); SYSMON_RUNLOGS=(); SYSMON_STARTS=()
+
+# Recordings whose xctrace process is still alive (recording or saving).
+# (The count guard keeps bash 3.2 happy: expanding an empty array under
+# `set -u` is fatal there.)
+ios_sysmon_inflight() {
+  local n=0 x
+  [ "${#SYSMON_XPIDS[@]}" -gt 0 ] || { echo 0; return 0; }
+  for x in "${SYSMON_XPIDS[@]}"; do kill -0 "${x}" 2>/dev/null && n=$((n + 1)); done
+  echo "${n}"
+}
+
+# Whether run ${RUN_INDEX} is one the sampler records (every SYSMON_EVERY-th
+# kept run, starting with the first kept one).
+ios_sysmon_due() {
+  [ "${SYSMON}" -eq 1 ] || return 1
+  [ "${RUN_INDEX}" -gt "${SYSMON_SKIP}" ] || return 1
+  [ "${DURATION}" -ge $((SYSMON_WINDOW + 5)) ] || return 1
+  [ $(( (RUN_INDEX - SYSMON_SKIP - 1) % SYSMON_EVERY )) -eq 0 ]
+}
+
+# Before launching a sampled run: let every Mac-side save finish first (a
+# save in flight while a recording starts has cut the recording to a sample).
+ios_sysmon_quiesce() {
+  local x n
+  ios_sysmon_due || return 0
+  n="$(ios_sysmon_inflight)"
+  [ "${n}" -gt 0 ] || return 0
+  echo "  sysmon: waiting for ${n} Instruments save(s) before run ${RUN_INDEX}"
+  for x in "${SYSMON_XPIDS[@]}"; do wait "${x}" 2>/dev/null || true; done
+}
+
+# Hold one run's capture window open for ${DURATION}s. Inside it: the run-1
+# screenshot (--screencap) at ~8 s, and for --sysmon (kept runs only) the
+# Instruments recording over the window's last SYSMON_WINDOW seconds, started
+# SYSMON_LEAD seconds earlier than that (xctrace's own setup time) once the
+# bench pid is known. Must run in the caller's shell (never in `$(...)`): the
+# xctrace pids it queues are `wait`ed on by ios_sysmon_collect.
+ios_run_window() {
+  local bundle="$1" run_log="$2" elapsed=0 pid start_at
+  if [ -n "${SCREENCAP}" ] && [ "${RUN_INDEX}" -eq 1 ] && [ "${DURATION}" -gt 8 ]; then
+    sleep 8; elapsed=8
+    ios_screenshot "${SCREENCAP}" || echo "note: screenshot failed (${SCREENCAP}) — non-fatal" >&2
   fi
-  rm -f "${apps_json}" "${procs_json}"
+  if ios_sysmon_due; then
+    start_at=$((DURATION - SYSMON_WINDOW - SYSMON_LEAD)); [ "${start_at}" -lt 2 ] && start_at=2
+    if [ "${elapsed}" -lt "${start_at}" ]; then sleep $((start_at - elapsed)); elapsed="${start_at}"; fi
+    pid="$(ios_pid "${bundle}")"
+    if [ -n "${pid}" ]; then
+      ios_sysmon_record "${run_log%.log}.trace" "${SYSMON_WINDOW}"
+      SYSMON_XPIDS+=("${IOS_SYSMON_XPID}"); SYSMON_PIDS+=("${pid}")
+      SYSMON_TRACES+=("${run_log%.log}.trace"); SYSMON_RUNLOGS+=("${run_log}"); SYSMON_STARTS+=("$(date +%s)")
+    else
+      echo "note: sysmon: could not resolve the ${bundle} pid — no sysmon rows for ${run_log}" >&2
+    fi
+  fi
+  sleep $((DURATION - elapsed))
+}
+
+# After the run loop: wait for every recording's save step (oldest first),
+# then keep only the bench pid's rows (sysmon_export.py). A recording that
+# produced no trace or no rows for the pid is a note, never a failed run.
+ios_sysmon_collect() {
+  local i out rc run_log
+  [ "${#SYSMON_XPIDS[@]}" -gt 0 ] || return 0
+  echo "sysmon: collecting ${#SYSMON_XPIDS[@]} Instruments recording(s) ($(ios_sysmon_inflight) still saving)"
+  for i in "${!SYSMON_XPIDS[@]}"; do
+    run_log="${SYSMON_RUNLOGS[$i]}"
+    wait "${SYSMON_XPIDS[$i]}" 2>/dev/null || true
+    out="${run_log%.log}.sysmon.txt"
+    if [ -d "${SYSMON_TRACES[$i]}" ]; then
+      ios_sysmon_export "${SYSMON_TRACES[$i]}" "${SYSMON_PIDS[$i]}" "${out}"; rc=$?
+      if [ "${rc}" -eq 0 ]; then
+        echo "  sysmon ${out} ($(wc -l <"${out}" | tr -d ' ') samples, pid ${SYSMON_PIDS[$i]}, collected $(( $(date +%s) - SYSMON_STARTS[$i] ))s after the recording started)"
+        if [ "$(wc -l <"${out}" | tr -d ' ')" -lt 5 ]; then
+          echo "note: sysmon: only $(wc -l <"${out}" | tr -d ' ') sample(s) for ${run_log} — the recording started late (see ${SYSMON_TRACES[$i]%.trace}.xctrace.log)" >&2
+        else
+          rm -f "${SYSMON_TRACES[$i]%.trace}.xctrace.log"
+        fi
+      else
+        echo "note: sysmon export failed (rc ${rc}) for ${run_log} — no sysmon rows" >&2
+        rm -f "${out}"
+      fi
+    else
+      echo "note: sysmon: xctrace produced no trace for ${run_log}" >&2
+    fi
+  done
+  SYSMON_XPIDS=(); SYSMON_PIDS=(); SYSMON_TRACES=(); SYSMON_RUNLOGS=(); SYSMON_STARTS=()
 }
 
 # frust capture: launch with the scenario+trace env dict delivered to the
@@ -466,7 +585,7 @@ ios_capture_frust() {
   xcrun devicectl device process launch --device "${DEVICE}" --console \
     --terminate-existing -e "${env_json}" "${bundle}" >"${raw}" 2>&1 &
   launch_pid=$!
-  sleep "${DURATION}"
+  ios_run_window "${bundle}" "${run_log}"
   ios_terminate "${bundle}"
   # Give the `--console` stream time to drain its buffered tail and exit
   # naturally once the app dies (an immediate kill truncates the capture);
@@ -491,7 +610,7 @@ ios_capture_flutter() {
   raw="${run_log%.log}.container.txt"
   xcrun devicectl device process launch --device "${DEVICE}" \
     --terminate-existing "${bundle}" >/dev/null 2>&1
-  sleep "${DURATION}"
+  ios_run_window "${bundle}" "${run_log}"
   ios_terminate "${bundle}"
   # Let the bench app's ~1s-cadence flush land before pulling the file.
   sleep 2
@@ -544,9 +663,21 @@ ios_run_matrix() {
   echo "Output directory: ${OUT_DIR}"
 
   if [ "${SKIP_DEVICE_STATE}" -eq 0 ]; then
-    echo "note: iOS has no CLI brightness/battery/thermal gate (device_state.sh" >&2
-    echo "      is Android-only) — those controls are uncontrolled on this run;" >&2
-    echo "      cooldown is a fixed inter-block wait. See RESULTS.md deviations." >&2
+    echo "note: iOS has no CLI brightness/radio control (device_state.sh is" >&2
+    echo "      Android-only) — those stay uncontrolled on this run; matrix.sh" >&2
+    echo "      records battery level/temperature and gates on the temperature." >&2
+  fi
+
+  if [ "${SYSMON}" -eq 1 ]; then
+    if ! command -v xcrun >/dev/null 2>&1 || ! xcrun xctrace version >/dev/null 2>&1; then
+      echo "note: --sysmon: xctrace not available — idle sampling skipped" >&2
+      SYSMON=0
+    elif [ "$(ios_xctrace_ensure 60)" != online ]; then
+      echo "note: --sysmon: Instruments reports ${DEVICE} offline even with Xcode open — idle sampling skipped" >&2
+      SYSMON=0
+    else
+      echo "sysmon: Instruments online for ${DEVICE} (Xcode.app running); one Activity Monitor trace per run"
+    fi
   fi
 
   for i in $(seq 1 "${RUNS}"); do
@@ -555,6 +686,8 @@ ios_run_matrix() {
     # limitation — OUT_DIR already scopes uniqueness per invocation).
     run_log="${OUT_DIR}/run-$(printf '%02d' "${i}").log"
     RUN_LOGS+=("${run_log}")
+    RUN_INDEX="${i}"
+    ios_sysmon_quiesce
     if [ "${APP}" = "frust" ]; then
       ios_capture_frust "${bundle}" "${run_log}"
     else
@@ -574,6 +707,7 @@ ios_run_matrix() {
     fi
   done
 
+  ios_sysmon_collect
   echo
   echo "Captured ${RUNS} runs for ${APP}/${SCENARIO} in ${OUT_DIR}"
   if [ -n "${ADAPTER}" ]; then

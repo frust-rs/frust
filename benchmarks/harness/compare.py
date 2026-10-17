@@ -112,6 +112,11 @@ def main(argv=None) -> int:
             out.append(f"| idle TOTAL PSS mean (MiB) | {po[0]:.1f} | {pn[0]:.1f} | {pct(po[0], pn[0])} |")
             if abs(float(pct(po[0], pn[0]).rstrip('%'))) > a.flag_pct:
                 flags.append(f"S7 idle PSS {pct(po[0], pn[0])} ({po[0]:.1f}→{pn[0]:.1f} MiB)")
+        fo, fn = o7.get("idle_footprint_mib"), n7.get("idle_footprint_mib")
+        if fo and fn and fo[0] and fn[0]:
+            out.append(f"| idle phys_footprint mean (MiB) | {fo[0]:.1f} | {fn[0]:.1f} | {pct(fo[0], fn[0])} |")
+            if abs(float(pct(fo[0], fn[0]).rstrip('%'))) > a.flag_pct:
+                flags.append(f"S7 idle footprint {pct(fo[0], fn[0])} ({fo[0]:.1f}→{fn[0]:.1f} MiB)")
         co, cn = o7.get("coldstart"), n7.get("coldstart")
         if co and cn:
             out.append(f"| external cold start median (ms) | {co['median']} | {cn['median']} | {pct(co['median'], cn['median'])} |")
