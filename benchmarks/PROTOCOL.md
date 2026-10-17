@@ -58,10 +58,29 @@ Two metric caveats are iOS-specific and recorded per-run in `RESULTS.md`:
 Flutter's `FrameTiming.totalSpan` is unreliable (negative under load) on iOS,
 so its frame total is reported as the `build+raster` work-sum; and Frust's
 `total_us` folds in the CADisplayLink present-to-vsync idle wait, so its
-per-frame percentiles are a cadence wall-time, not a pure render cost. iOS
-also exposes no brightness/battery/thermal or external-cold-start/CPU/RSS CLI,
-so those environmental controls and S7 metrics are uncontrolled/unavailable
-(cooldown is a fixed inter-scenario wait).
+per-frame percentiles are a cadence wall-time, not a pure render cost.
+
+The Mac rig's iOS controls and S7 instruments (`matrix.sh --platform ios`,
+`harness/ios_device.sh`; each verified on the iPhone SE / iOS 26.7 / Xcode
+27): battery level and temperature are read per block over the USB lockdown
+link (`ideviceinfo`, `idevicediagnostics`) and the temperature gates each
+block (38 °C ceiling, 120 s timeout) on top of the fixed `--cooldown`; the
+visual content gate is one `devicectl device capture screenshot` ~8 s into
+run 1; the external cold start is FrontBoard's own launch lifecycle in the
+device syslog (`idevicesyslog`): `Bootstrapping app<bundle> with intent
+foreground-interactive` → `scene content state changed: ready`, four launches
+per app, first discarded — the same OS-stamped instrument for both apps and
+the counterpart of `am start -W` TotalTime; idle CPU and memory are
+Instruments `sysmon` rows (`xcrun xctrace record --template 'Activity
+Monitor' --all-processes`) over the last 15 s of every other kept S7 run
+(a Mac-side trace save still in flight cuts the next recording short, so
+the saves overlap the unsampled runs in between), kept only for the bench
+pid (`run-NN.sysmon.txt`): CPU is Δ(time on core)/Δt, memory the last
+`phys_footprint` sample. Instruments reaches the device only while
+Xcode.app is running — the driver opens it in the background and records
+whether sampling happened. Brightness, airplane/Wi-Fi/Bluetooth and the
+charger (devicectl needs the USB link) remain uncontrolled and are declared
+as deviations.
 
 ## 2. Framework build-config asymmetry (declared and justified)
 
@@ -800,17 +819,17 @@ whole matrix):
   `adapter_ready`, `device_ready`, `renderer_ready`, `first_rebuild_done`,
   `first_frame_presented` — `frust-perf startup ...`, ms resolution) are
   reported alongside the platform-external `am start -W`
-  ("TotalTime"/"WaitTime") figure for Android, and the equivalent
-  external cold-start measurement for iOS. Flutter reports its own
-  framework-level first-frame timeline event plus the same external
-  `am start -W` figure, so at least one measurement (the external one) is
-  taken with an identical tool on both sides.
+  ("TotalTime"/"WaitTime") figure for Android, and on iOS the FrontBoard
+  bootstrap → scene-content-ready span from the device syslog (§1). Flutter
+  reports its own framework-level first-frame timeline event plus the same
+  external figure, so at least one measurement (the external one) is taken
+  with an identical tool on both sides.
 - Idle CPU/memory: 60 seconds with no input after first frame, sampled via
   the platform's own tools (`adb shell dumpsys cpuinfo`/`meminfo` on
-  Android; Instruments or `xcrun` equivalents on iOS). Memory deltas are
-  compared **within a platform only** (Android PSS vs iOS RSS are not
-  directly comparable units) — no cross-platform memory
-  column is published.
+  Android; Instruments `sysmon` rows on iOS — §1). Memory deltas are
+  compared **within a platform only** (Android TOTAL PSS vs iOS
+  `phys_footprint` are not directly comparable units) — no cross-platform
+  memory column is published.
 
 ### S8-specific fairness rules
 

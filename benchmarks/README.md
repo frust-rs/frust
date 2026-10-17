@@ -20,7 +20,7 @@ contract belong in `examples/playground`, not here.
 | `frust_bench/` | The Frust bench app — a standalone Cargo package (own workspace, path-deps into `crates/*`), one binary implementing all eight scenarios behind a scenario driver, selected via launch arg/deep link. |
 | `flutter_bench/` | The Flutter bench app — idiomatic Flutter implementing the same eight scenarios, source published for scrutiny (see `PROTOCOL.md` §6's fairness gates). |
 | `harness/` | Shell/Python scripts: `matrix.sh` runs the whole S1–S8 matrix on one device unattended (device state, installs, interleaved `run.sh` blocks, sanity/retry, S7 extras, sanitized raw staging); `run.sh` drives one scenario N times on one app; `device_state.sh` is the Android fairness gate; `stats.py` is the ONE shared statistics script; `summarize.py` turns a raw tree into the `RESULTS.md` tables (+ JSON); `app_size.sh` measures release artifacts; `ab_matrix.sh` is the frust-only render-arm gate driver. |
-| `raw/` | Committed, sanitized raw per-run series backing every number in `RESULTS.md`: `raw/<device>/{frust_profile,flutter}/<sN>/run-NN.log` (+ Android `run-NN.pss_*.txt` meminfo snapshots, `stats.txt`, S7 `coldstart.txt`/`cpuinfo.txt`). |
+| `raw/` | Committed, sanitized raw per-run series backing every number in `RESULTS.md`: `raw/<device>/{frust_profile,flutter}/<sN>/run-NN.log` (+ Android `run-NN.pss_*.txt` meminfo snapshots, iOS S7 `run-NN.sysmon.txt` Instruments rows, `stats.txt`, S7 `coldstart.txt`/`cpuinfo.txt`). |
 
 ## Why this exists
 

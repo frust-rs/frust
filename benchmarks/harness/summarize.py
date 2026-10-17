@@ -12,9 +12,19 @@ diffed by `compare.py` without re-reading Markdown.
         [--frust-label "Frust (profile)"] [--flutter-label "Flutter (profile)"]
 
 `<dir>` holds `s1/ … s8/`, each with `run-NN.log` (plus, on Android,
-`run-NN.pss_after.txt`; optionally `coldstart.txt` and `cpuinfo.txt` written by
-`matrix.sh`). A missing scenario directory is skipped, not faked (RESULTS.md's
-own rule: no placeholder numbers).
+`run-NN.pss_after.txt`; on iOS S7, `run-NN.sysmon.txt` from `run.sh --sysmon`;
+optionally `coldstart.txt` and `cpuinfo.txt` written by `matrix.sh`). A
+missing scenario directory is skipped, not faked (RESULTS.md's own rule: no
+placeholder numbers).
+
+The S7 table names its instrument per platform. Android: `am start -W`
+TotalTime, `dumpsys cpuinfo` samples, `TOTAL PSS` from `dumpsys meminfo`. iOS:
+FrontBoard's bootstrap → scene-content-ready span out of the device syslog
+(`coldstart.txt`'s `(ios: …)` header marks it), and Instruments `sysmon`
+rows — idle CPU is Δ(time on core)/Δt over each sampled run's recorded
+window, idle memory the mean over the sampled runs of each run's last
+`phys_footprint` sample (every other kept run carries a recording). The
+Android rows and labels are unchanged by the iOS additions.
 
 Conventions (PROTOCOL §4/§5): the first `--discard-first` runs are warm-up and
 excluded from every statistic; percentiles are `stats.py`'s nearest-rank over
@@ -210,15 +220,74 @@ def startup_spans(scn_dir: Path) -> dict:
     return out
 
 
+COLDSTART_IOS_MARK = "(ios: FrontBoard bootstrap -> scene content ready)"
+
+
 def coldstart(scn_dir: Path) -> dict | None:
+    """External cold-start launches: `am start -W` TotalTime lines on Android,
+    or matrix.sh's iOS FrontBoard bootstrap → scene-content-ready deltas (same
+    `TotalTime: <ms>` line, header marked by COLDSTART_IOS_MARK). `source`
+    says which."""
     f = scn_dir / "coldstart.txt"
     if not f.exists():
         return None
-    vals = [int(m.group(1)) for m in re.finditer(r"TotalTime:\s+(\d+)", f.read_text(errors="replace"))]
+    text = f.read_text(errors="replace")
+    vals = [int(m.group(1)) for m in re.finditer(r"TotalTime:\s+(\d+)", text)]
     if len(vals) < 2:
         return None
     kept = vals[1:]  # first launch discarded (matches every published pass)
-    return {"launches": vals, "kept": kept, "median": int(statistics.median(kept))}
+    out = {"launches": vals, "kept": kept, "median": int(statistics.median(kept))}
+    if COLDSTART_IOS_MARK in text:
+        out["source"] = "frontboard"  # absent on Android: the committed JSON dumps stay byte-identical
+    return out
+
+
+SYSMON_LINE_RE = re.compile(
+    r"^t_s=(?P<t>[0-9.]+) cpu_pct=(?P<pct>[0-9.]+|na) cpu_ns=(?P<cpu>\d+) footprint_bytes=(?P<fp>\d+) rss_bytes=(?P<rss>\d+)$"
+)
+
+
+def sysmon_samples(path: Path) -> list[dict]:
+    out = []
+    for line in path.read_text(errors="replace").splitlines():
+        m = SYSMON_LINE_RE.match(line.strip())
+        if m:
+            out.append({"t": float(m["t"]), "cpu_ns": int(m["cpu"]), "footprint": int(m["fp"]), "rss": int(m["rss"])})
+    return out
+
+
+def sysmon_idle(scn_dir: Path, discard: int) -> dict | None:
+    """iOS S7 idle axes from the kept runs' `run-NN.sysmon.txt` (Instruments
+    sysmon rows of the bench pid over each run's recorded window). CPU per run
+    is Δ(time on core)/Δt between the first and last sample — the counter, not
+    Instruments' smoothed percentage; memory per run is the LAST
+    `phys_footprint` sample (the run's post-idle snapshot, the counterpart of
+    Android's post-run PSS). `None` when no run carries samples."""
+    # Warm-ups are the first `discard` RUNS (by run log), not the first
+    # sysmon files: run.sh records no sysmon on the warm-up runs, so slicing
+    # the files would drop kept runs instead.
+    kept = {p.name[: -len(".log")] for p in run_logs(scn_dir)[discard:]}
+    files = [f for f in sorted(scn_dir.glob("run-[0-9][0-9].sysmon.txt")) if f.name[: -len(".sysmon.txt")] in kept]
+    cpu_pcts, footprints, n_samples = [], [], 0
+    for f in files:
+        samples = sysmon_samples(f)
+        if not samples:
+            continue
+        n_samples += len(samples)
+        footprints.append(samples[-1]["footprint"] / (1024.0 * 1024.0))
+        if len(samples) >= 2 and samples[-1]["t"] > samples[0]["t"]:
+            dt_ns = (samples[-1]["t"] - samples[0]["t"]) * 1e9
+            cpu_pcts.append(100.0 * (samples[-1]["cpu_ns"] - samples[0]["cpu_ns"]) / dt_ns)
+    if not footprints:
+        return None
+    out = {
+        "runs": len(footprints),
+        "samples": n_samples,
+        "footprint_mib": (statistics.fmean(footprints), min(footprints), max(footprints), len(footprints)),
+    }
+    if cpu_pcts:
+        out["cpu"] = {"runs": len(cpu_pcts), "avg_pct": statistics.fmean(cpu_pcts), "max_pct": max(cpu_pcts)}
+    return out
 
 
 def idle_cpu(scn_dir: Path, pkg_hint: str) -> dict | None:
@@ -352,6 +421,7 @@ def build(args: argparse.Namespace) -> tuple[str, dict]:
         spans = {}
         pss = {}
         cpu = {}
+        sysmon = {}
         for side, key, pkg in ((frust, "frust", "frustbench"), (flutter, "flutter", "flutter_bench")):
             if not have(side, "s7"):
                 continue
@@ -359,7 +429,15 @@ def build(args: argparse.Namespace) -> tuple[str, dict]:
             cold[key] = coldstart(side / "s7")
             pss[key] = total_pss_mib(side / "s7", D)
             cpu[key] = idle_cpu(side / "s7", pkg)
+            sysmon[key] = sysmon_idle(side / "s7", D)
             entry[key] = {"startup": spans[key], "coldstart": cold[key], "idle_pss_mib": pss[key], "idle_cpu": cpu[key]}
+            if sysmon[key]:
+                entry[key]["idle_footprint_mib"] = sysmon[key]["footprint_mib"]
+                entry[key]["idle_cpu"] = {"source": "sysmon", "samples": sysmon[key]["samples"], **sysmon[key].get("cpu", {})}
+        # The row labels name the instrument: iOS trees (FrontBoard cold start,
+        # Instruments sysmon) relabel; an Android tree keeps its labels verbatim.
+        ios_cold = any(c and c.get("source") == "frontboard" for c in cold.values())
+        ios_idle = any(sysmon.values())
 
         def cell_cold(k):
             c = cold.get(k)
@@ -378,10 +456,22 @@ def build(args: argparse.Namespace) -> tuple[str, dict]:
             return f"~{f['median']} ms median ({name}, {f['min']}–{f['max']} across {f['n']} launches{extra})"
 
         def cell_pss(k):
+            if ios_idle:
+                sm = sysmon.get(k)
+                if not sm:
+                    return "n/a"
+                fp = sm["footprint_mib"]
+                return f"~{fp[0]:.1f} MiB ({fp[1]:.1f}–{fp[2]:.1f}, {fp[3]} sampled runs)"
             p = pss.get(k)
             return f"~{p[0]:.1f} MiB ({p[1]:.1f}–{p[2]:.1f}, {p[3]} kept snapshots)" if p and p[0] is not None else "n/a"
 
         def cell_cpu(k):
+            if ios_idle:
+                sm = sysmon.get(k)
+                if not sm or "cpu" not in sm:
+                    return "n/a"
+                c = sm["cpu"]
+                return f"~{c['avg_pct']:.1f}% avg (max {c['max_pct']:.1f}%, {c['runs']} sampled runs, {sm['samples']} samples)"
             c = cpu.get(k)
             if not c:
                 return "n/a"
@@ -389,10 +479,13 @@ def build(args: argparse.Namespace) -> tuple[str, dict]:
                 return "0 samples"
             return f"~{c['avg_pct']:.1f}% avg (max {c['max_pct']:.1f}%, {c['samples']} samples)"
 
-        md.append(f"| External cold start (`am start -W` TotalTime, median of kept launches) | {cell_cold('frust')} | {cell_cold('flutter')} |")
+        cold_label = "External cold start (FrontBoard bootstrap → scene content ready, median of kept launches)" if ios_cold else "External cold start (`am start -W` TotalTime, median of kept launches)"
+        cpu_label = "Idle CPU over each sampled S7 run's recorded window (Instruments sysmon, Δ time on core / Δt)" if ios_idle else "Idle CPU during the S7 blocks (`dumpsys cpuinfo`)"
+        mem_label = "Idle memory (phys_footprint, mean over the sampled runs' last sample)" if ios_idle else "Idle memory (TOTAL PSS, mean over kept runs' post-run snapshots)"
+        md.append(f"| {cold_label} | {cell_cold('frust')} | {cell_cold('flutter')} |")
         md.append(f"| Framework-reported first-frame span | {cell_span('frust')} | {cell_span('flutter')} |")
-        md.append(f"| Idle CPU during the S7 blocks (`dumpsys cpuinfo`) | {cell_cpu('frust')} | {cell_cpu('flutter')} |")
-        md.append(f"| Idle memory (TOTAL PSS, mean over kept runs' post-run snapshots) | {cell_pss('frust')} | {cell_pss('flutter')} |")
+        md.append(f"| {cpu_label} | {cell_cpu('frust')} | {cell_cpu('flutter')} |")
+        md.append(f"| {mem_label} | {cell_pss('frust')} | {cell_pss('flutter')} |")
         md.append("")
         js["scenarios"]["s7"] = entry
 
