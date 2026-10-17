@@ -62,6 +62,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         drop(entries);
         // After the pods, so their (stamped) declarations are in the snapshot too.
         self.shortcuts = ShortcutTable::new(shortcut_pass.take());
+        self.shortcuts.publish();
 
         self.resolve_session_surface(main_tree_ime, holder, holder_ime);
 
