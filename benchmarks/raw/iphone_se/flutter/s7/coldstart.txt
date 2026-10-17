@@ -1,0 +1,16 @@
+== launch 1 2026-10-17T19:21:17Z (ios: FrontBoard bootstrap -> scene content ready)
+Oct 18 02:21:18.204798 SpringBoard(FrontBoard)[35] <Notice>: Bootstrapping app<it.f0x.flutterBench> with intent foreground-interactive
+Oct 18 02:21:18.388932 SpringBoard(FrontBoard)[35] <Notice>: [(FBSceneManager):sceneID:it.f0x.flutterBench-default] scene content state changed: ready
+TotalTime: 184
+== launch 2 2026-10-17T19:21:28Z (ios: FrontBoard bootstrap -> scene content ready)
+Oct 18 02:21:28.301973 SpringBoard(FrontBoard)[35] <Notice>: Bootstrapping app<it.f0x.flutterBench> with intent foreground-interactive
+Oct 18 02:21:28.472690 SpringBoard(FrontBoard)[35] <Notice>: [(FBSceneManager):sceneID:it.f0x.flutterBench-default] scene content state changed: ready
+TotalTime: 171
+== launch 3 2026-10-17T19:21:38Z (ios: FrontBoard bootstrap -> scene content ready)
+Oct 18 02:21:38.378541 SpringBoard(FrontBoard)[35] <Notice>: Bootstrapping app<it.f0x.flutterBench> with intent foreground-interactive
+Oct 18 02:21:38.550194 SpringBoard(FrontBoard)[35] <Notice>: [(FBSceneManager):sceneID:it.f0x.flutterBench-default] scene content state changed: ready
+TotalTime: 172
+== launch 4 2026-10-17T19:21:48Z (ios: FrontBoard bootstrap -> scene content ready)
+Oct 18 02:21:48.460743 SpringBoard(FrontBoard)[35] <Notice>: Bootstrapping app<it.f0x.flutterBench> with intent foreground-interactive
+Oct 18 02:21:48.621943 SpringBoard(FrontBoard)[35] <Notice>: [(FBSceneManager):sceneID:it.f0x.flutterBench-default] scene content state changed: ready
+TotalTime: 161
