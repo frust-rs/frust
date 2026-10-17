@@ -10,7 +10,7 @@
 //! On a multi-adapter host, pin the adapter the same way any other headless
 //! run does (`WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=T400`). The blob test needs
 //! a Vulkan adapter (the only backend wgpu implements `PIPELINE_CACHE` on) and
-//! reports itself skipped elsewhere.
+//! fails on any other.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -135,10 +135,10 @@ fn the_driver_cache_blob_holds_the_pipelines_once_the_warm_up_has_drained() {
     pollster::block_on(async {
         let mut context = RenderContext::new();
         context.device().await.expect("device creation");
-        if !context.pipeline_cache_supported() {
-            println!("skipped: this adapter has no PIPELINE_CACHE (Vulkan only)");
-            return;
-        }
+        assert!(
+            context.pipeline_cache_supported(),
+            "this test needs a Vulkan adapter with PIPELINE_CACHE (WGPU_BACKEND=vulkan)"
+        );
         // SAFETY: no seed — a cold cache carries no foreign data, which is
         // the only thing `create_pipeline_cache`'s contract constrains.
         let driver_cache =
@@ -165,7 +165,6 @@ fn the_driver_cache_blob_holds_the_pipelines_once_the_warm_up_has_drained() {
             "the blob read after the warm-up must hold the compiled pipelines"
         );
         cache.shutdown();
-        drop(cache);
 
         // The framed blob seeds a second cache, which warms up against it.
         let framed = frust_gpu::pipeline_cache::frame(&context.adapter_cache_key(), &warmed);

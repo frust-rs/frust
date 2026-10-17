@@ -876,8 +876,6 @@ impl<P> VariantCache<P> {
     /// built on request instead.
     fn shutdown(&mut self) {
         lock(&self.shared.inner).shutdown = true;
-        // A warm-up waiter re-checks whether it can still be satisfied.
-        self.shared.built.notify_all();
         self.join_worker();
     }
 
@@ -911,7 +909,9 @@ impl<P> VariantCache<P> {
     /// request already compiling inline, publish the variants it waits for.
     ///
     /// Returns at once when the warm-up can no longer settle (a shutdown with
-    /// jobs still pending), and immediately with a zero `timeout`.
+    /// jobs still pending) as of the call, and immediately with a zero
+    /// `timeout`. Takes `&mut self` only to account the wait under
+    /// `perf-trace`; a shutdown cannot overlap a wait on the same cache.
     fn wait_warm_up(&mut self, timeout: Duration) -> bool {
         #[cfg(feature = "perf-trace")]
         let started = std::time::Instant::now();
@@ -1746,20 +1746,27 @@ mod tests {
         let mut cache = VariantCache::<FakePipeline>::default();
         let counter = Arc::new(Counter::default());
         let latch = Arc::new(Latch::default());
+        let entered = Arc::new(Latch::default());
         let listed = shader_variants(5);
 
-        // The worker parks on its first variant until the latch opens.
+        // The worker signals that it is inside its first compile, then parks
+        // there until the latch opens.
         cache.warm_up(&listed, || {
             let counter = Arc::clone(&counter);
             let latch = Arc::clone(&latch);
+            let entered = Arc::clone(&entered);
             move |d: &RenderPipelineDesc| {
+                entered.open();
                 latch.wait();
                 counter.compile(d)
             }
         });
 
+        // Once the worker holds its first job, the rest are still queued.
+        entered.wait();
+
         // Held: a bounded wait times out, and the waiter compiled nothing and
-        // stole nothing — every job is still the worker's.
+        // stole nothing — every other job is still the worker's.
         assert!(!cache.wait_warm_up(Duration::from_millis(20)));
         assert!(!cache.warm_up_done());
         assert_eq!(counter.count(), 0);
@@ -1783,14 +1790,14 @@ mod tests {
     }
 
     #[test]
-    fn a_wait_wakes_when_the_render_thread_builds_the_last_pending_variant() {
+    fn a_wait_returns_at_once_when_the_render_thread_already_built_every_listed_variant() {
         let mut cache = VariantCache::<FakePipeline>::default();
         let counter = Arc::new(Counter::default());
         let listed = shader_variants(2);
         cache.enqueue(&listed);
 
-        // No worker: the render thread steals both, and the warm-up settles
-        // with them.
+        // No worker: the render thread steals both, and the warm-up has
+        // settled by the time the wait is made.
         for desc in &listed {
             cache.get_or_create(desc, |d| counter.compile(d));
         }
@@ -1810,8 +1817,12 @@ mod tests {
         });
 
         // Nothing will ever build the queued jobs: the wait reports the
-        // unfinished warm-up rather than sitting out an hour.
-        assert!(!cache.wait_warm_up(Duration::from_secs(3600)));
+        // unfinished warm-up rather than sitting out the timeout. The bound
+        // is generous for a loaded machine and short enough to fail a
+        // regression that waits it out.
+        let started = std::time::Instant::now();
+        assert!(!cache.wait_warm_up(Duration::from_secs(5)));
+        assert!(started.elapsed() < Duration::from_secs(4));
         assert!(!cache.warm_up_done());
     }
 

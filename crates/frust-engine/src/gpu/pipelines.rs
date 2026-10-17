@@ -792,9 +792,9 @@ pub const ATLAS_STRIP_PIPELINE: EnginePipeline = EnginePipeline::StripIntermedia
 ///
 /// Takes no target format: the atlas array's format is fixed by the array
 /// itself, so unlike a pass over the frame's own target there is nothing here
-/// to negotiate. Already covered by [`warm_up_descs`] — an atlas pass is
-/// therefore never the first place a pipeline is compiled, on the frames that
-/// have one.
+/// to negotiate. Every list built from [`warm_up_descs_for`] carries it, in the
+/// sampler family as the one entry the family adds, so an atlas pass is never
+/// the first place a pipeline is compiled.
 ///
 /// In the manual program family this IS the intermediate state's Uber
 /// description. In the sampler family it is the same render state over the
@@ -836,17 +836,35 @@ pub fn warm_up_descs_for(
     target_format: wgpu::TextureFormat,
     uber_only: bool,
 ) -> Vec<RenderPipelineDesc> {
+    warm_up_plan(
+        shaders.image_sampler,
+        uber_only,
+        |state, class| state.class_desc(shaders, target_format, class),
+        || atlas_strip_desc(shaders),
+    )
+}
+
+/// The shape of [`warm_up_descs_for`] over any description type `D`:
+/// `describe(state, class)` yields one state's variant and `atlas()` the
+/// atlas pass's own description. Kept apart from the descriptions themselves
+/// so the list's order and membership can be checked without a device.
+pub(crate) fn warm_up_plan<D>(
+    image_sampler: bool,
+    uber_only: bool,
+    describe: impl Fn(EnginePipeline, PaintClass) -> D,
+    atlas: impl Fn() -> D,
+) -> Vec<D> {
     let mut descs: Vec<_> = EnginePipeline::ALL
         .iter()
-        .map(|pipeline| pipeline.desc(shaders, target_format))
+        .map(|pipeline| describe(*pipeline, PaintClass::Uber))
         .collect();
-    if shaders.image_sampler {
-        descs.push(atlas_strip_desc(shaders));
+    if image_sampler {
+        descs.push(atlas());
     }
     if !uber_only {
         for state in WARM_CLASS_STATES {
             for class in WARM_CLASSES {
-                descs.push(state.class_desc(shaders, target_format, class));
+                descs.push(describe(state, class));
             }
         }
     }

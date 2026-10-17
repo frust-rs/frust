@@ -304,7 +304,7 @@ use crate::gpu::config::resource_widths_agree;
 use crate::gpu::depth::DepthAttachment;
 use crate::gpu::paint_texture::lower_encoded_paint;
 use crate::gpu::pipelines::{
-    EnginePipeline, EngineShaders, INTERMEDIATE_FORMAT, atlas_strip_desc, warm_up_descs_for,
+    EnginePipeline, EngineShaders, INTERMEDIATE_FORMAT, atlas_strip_desc, warm_up_plan,
 };
 use crate::gpu::strips::{
     ClassRun, ClassSet, PaintClass, PaintType, merge_class_runs, pack_paint_descriptor,
@@ -1002,51 +1002,57 @@ pub struct EngineRenderer {
 /// Every pipeline a renderer warms up, in the order its background worker
 /// builds them.
 ///
-/// [`warm_up_descs_for`]'s list, reordered and extended for the frames that
-/// follow an install:
-///
-/// - **First-frame programs first.** The worker starts only moments before
-///   the first frame asks for its pipelines, and two pipelines built at once
-///   measured no faster than one after the other, so that frame effectively
-///   waits behind whatever the worker is building. The worker therefore opens
-///   with what an ordinary first frame draws — the atlas page pass its glyphs
-///   are rendered with, the depth-tested surface pass's glyph and solid
-///   programs and the opaque pass's solid one, then the surface pass's Uber
-///   program — and that frame steals the rest of what it needs. On a Pixel 4a
-///   with its driver cache seeded this halved the first frame's pipeline wait
-///   (16 ms to 8 ms, median of twelve launches).
-/// - **The surface's layer composite last.** No first frame needs it, but the
-///   first transition that composites a page or an opacity layer does, and
-///   building it there costs that frame a whole compile. Measured on an
-///   Adreno 618 (Pixel 4a) it adds 32 ms to a warm-up without a driver cache
-///   and 5 ms with one — paid by the worker, after everything else.
+/// [`warm_up_descs_for`](crate::gpu::pipelines::warm_up_descs_for)'s list, reordered and extended for the frames that
+/// follow an install: the worker opens with what an ordinary first frame draws
+/// (the atlas page pass, the depth-tested surface pass's glyph and solid
+/// programs, the opaque pass's solid one, then the surface pass's Uber
+/// program) because that frame waits behind whatever the worker is building,
+/// and it ends with the surface's layer composite, which only a later
+/// transition needs.
 ///
 /// A variant listed twice is queued once, so the reordering needs no
 /// de-duplication. With the Uber program forced the list is the Uber states
-/// alone, exactly as [`warm_up_descs_for`] gives them.
+/// alone, exactly as [`warm_up_descs_for`](crate::gpu::pipelines::warm_up_descs_for) gives them.
 fn warm_up_list(
     shaders: &EngineShaders,
     format: wgpu::TextureFormat,
     uber_only: bool,
 ) -> Vec<frust_gpu::RenderPipelineDesc> {
-    let full = warm_up_descs_for(shaders, format, uber_only);
+    ordered_warm_up(
+        shaders.image_sampler,
+        uber_only,
+        |state, class| state.class_desc(shaders, format, class),
+        || atlas_strip_desc(shaders),
+    )
+}
+
+/// [`warm_up_list`]'s order and membership over any description type, so it
+/// can be checked without a device (see [`warm_up_plan`]).
+fn ordered_warm_up<D>(
+    image_sampler: bool,
+    uber_only: bool,
+    describe: impl Fn(EnginePipeline, PaintClass) -> D,
+    atlas: impl Fn() -> D,
+) -> Vec<D> {
+    let full = warm_up_plan(image_sampler, uber_only, &describe, &atlas);
     if uber_only {
         return full;
     }
     let mut descs = Vec::with_capacity(full.len() + 6);
-    descs.push(atlas_strip_desc(shaders));
-    descs.push(EnginePipeline::StripDepthAlpha.class_desc(shaders, format, PaintClass::Glyph));
-    descs.push(EnginePipeline::StripDepthAlpha.class_desc(
-        shaders,
-        format,
+    descs.push(atlas());
+    descs.push(describe(EnginePipeline::StripDepthAlpha, PaintClass::Glyph));
+    descs.push(describe(
+        EnginePipeline::StripDepthAlpha,
         PaintClass::SolidCoverage,
     ));
-    descs.push(EnginePipeline::StripOpaque.class_desc(shaders, format, PaintClass::SolidCoverage));
-    descs.push(EnginePipeline::StripDepthAlpha.desc(shaders, format));
+    descs.push(describe(
+        EnginePipeline::StripOpaque,
+        PaintClass::SolidCoverage,
+    ));
+    descs.push(describe(EnginePipeline::StripDepthAlpha, PaintClass::Uber));
     descs.extend(full);
-    descs.push(EnginePipeline::StripDepthAlpha.class_desc(
-        shaders,
-        format,
+    descs.push(describe(
+        EnginePipeline::StripDepthAlpha,
         PaintClass::LayerComposite,
     ));
     descs
@@ -7708,9 +7714,10 @@ mod tests {
         }
     }
 
-    /// Finishing the warm-up builds the whole list exactly once however often
-    /// it is called, waiting on a finished warm-up returns at once, and
-    /// neither encodes a frame: the staging ring still holds no slot.
+    /// Finishing the warm-up builds the whole (de-duplicated) list exactly
+    /// once however often it is called, waiting on a finished warm-up returns
+    /// at once, and neither encodes a frame: the staging ring hands out no
+    /// slot and creates no buffer.
     #[test]
     #[ignore = "needs a real GPU adapter; run with `cargo test -p frust-engine --lib -- --ignored \
                 --test-threads=1` (pin the adapter with WGPU_BACKEND / WGPU_ADAPTER_NAME)"]
@@ -7721,24 +7728,87 @@ mod tests {
         let format = wgpu::TextureFormat::Rgba8Unorm;
         let mut renderer = EngineRenderer::new(&handle.device, &caps, format, None)
             .expect("the engine builds on this device");
+        let mut listed = Vec::new();
+        for desc in warm_up_list(&renderer.shaders, format, renderer.routing.uber) {
+            if !listed.contains(&desc) {
+                listed.push(desc);
+            }
+        }
 
         renderer.finish_warm_up(&handle.device);
         assert!(renderer.warm_up_done());
-        let compiled = renderer.compiled_pipelines();
-        assert!(compiled > 0);
+        assert_eq!(
+            renderer.compiled_pipelines(),
+            listed.len() as u64,
+            "the first call builds every listed variant once"
+        );
         for _ in 0..3 {
             renderer.finish_warm_up(&handle.device);
             assert!(renderer.wait_warm_up(Duration::ZERO));
         }
         assert_eq!(
             renderer.compiled_pipelines(),
-            compiled,
+            listed.len() as u64,
             "a finished warm-up compiles nothing more"
         );
-        assert!(
-            renderer.last_frame_passes().is_empty(),
-            "the warm-up records no frame"
+        assert_eq!(
+            renderer.staging_stats().unwrap_or_default(),
+            frust_gpu::staging::StagingStats::default(),
+            "the warm-up records no frame: the staging ring was never used"
         );
+    }
+
+    /// The warm-up list is [`warm_up_descs_for`](crate::gpu::pipelines::warm_up_descs_for)'s list plus the first-frame
+    /// openers and the layer-composite tail: a superset of it, opening with
+    /// the atlas pass and ending with the depth-alpha layer composite, whose
+    /// distinct entries are exactly the base list and that tail — and under
+    /// the Uber kill switch it is the base list unchanged. Checked over
+    /// variant keys, which is all a device-free test can build.
+    #[test]
+    fn the_warm_up_list_extends_the_base_list_in_order() {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        enum Key {
+            Atlas,
+            State(EnginePipeline, PaintClass),
+        }
+        let describe = Key::State;
+        let tail = Key::State(EnginePipeline::StripDepthAlpha, PaintClass::LayerComposite);
+
+        for image_sampler in [false, true] {
+            // The manual family's atlas pass IS the intermediate state's Uber
+            // variant; the sampler family's is a variant of its own.
+            let atlas = move || {
+                if image_sampler {
+                    Key::Atlas
+                } else {
+                    Key::State(
+                        crate::gpu::pipelines::ATLAS_STRIP_PIPELINE,
+                        PaintClass::Uber,
+                    )
+                }
+            };
+            let base = warm_up_plan(image_sampler, false, describe, atlas);
+            let list = ordered_warm_up(image_sampler, false, describe, atlas);
+
+            let listed: std::collections::HashSet<_> = list.iter().copied().collect();
+            for key in &base {
+                assert!(listed.contains(key), "{key:?} is missing from the list");
+            }
+            assert_eq!(list.first(), Some(&atlas()), "opens with the atlas pass");
+            assert_eq!(list.last(), Some(&tail), "ends with the layer composite");
+
+            // De-duplicated by first occurrence, as the queue does: the
+            // distinct entries are the base list and the tail, nothing else.
+            let mut seen = std::collections::HashSet::new();
+            let distinct: Vec<_> = list.iter().filter(|key| seen.insert(**key)).collect();
+            let mut expected: std::collections::HashSet<_> = base.iter().copied().collect();
+            expected.insert(tail);
+            assert_eq!(distinct.len(), expected.len());
+            assert!(distinct.iter().all(|key| expected.contains(*key)));
+
+            let forced = ordered_warm_up(image_sampler, true, describe, atlas);
+            assert_eq!(forced, warm_up_plan(image_sampler, true, describe, atlas));
+        }
     }
 
     /// The `frust-perf enc` line is a contract: a capture is graded by
