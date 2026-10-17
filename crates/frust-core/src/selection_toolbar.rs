@@ -1,41 +1,11 @@
-//! The selection-toolbar seam: what a text field asks for when it has a
-//! selection, and who draws it.
+//! The selection-toolbar seam: what a focused text field publishes about its
+//! selection, and who draws the copy/cut/paste/select-all bar over it.
 //!
-//! # Two routes, one request
-//!
-//! A "copy / cut / paste / select all" bar over a selection is drawn by the
-//! *platform* on iOS (`UIEditMenuInteraction` — the system owns its look, its
-//! placement and its animation) and by the *framework* everywhere else. Both
-//! routes need the same facts — where the selection is, which verbs apply, and
-//! whether a menu is wanted right now — so a focused field publishes one
-//! [`SelectionToolbarRequest`] per paint and the two routes diverge downstream
-//! of it:
-//!
-//! * [`SelectionToolbarPolicy::Native`]: the request surfaces on
-//!   [`RenderRoot::selection_toolbar`](crate::app::RenderRoot::selection_toolbar)
-//!   with a generation a shell diffs, and the shell asks the platform to present
-//!   its own menu.
-//! * [`SelectionToolbarPolicy::Framework`]: the field hosts its own toolbar pod
-//!   through the overlay portal (see [`crate::overlay`]) — and still publishes
-//!   the request, which costs a pointer-sized write and keeps one code path
-//!   rather than two.
-//!
-//! # Process-global slots
-//!
-//! The policy and the builder are process-global `Mutex` slots, mirroring
-//! `frust_shell_common::theme_override`'s contract exactly: callable from any
-//! thread (documented, not enforced), read on the UI thread by whoever needs
-//! them, and last-writer-wins. They live in `frust-core` rather than beside
-//! their nearest neighbours in the shells because
-//! [`RenderRoot`](crate::app::RenderRoot) itself is a reader — a slot a shell
-//! owned would be unreachable from here without inverting the layer
-//! dependencies.
-//!
-//! The builder is what a design system installs so a text field can float
-//! *someone's* toolbar without `frust-core` knowing a single widget type: it
-//! returns an [`AnyView`] over `()` (the pod's own state; see [`crate::overlay`]
-//! for why an overlay pod is state-independent of the app), so the catalog that
-//! installs it decides the whole look.
+//! A focused field publishes one [`SelectionToolbarRequest`] per paint. Under
+//! [`SelectionToolbarPolicy::Native`] a shell reads it from `RenderRoot::selection_toolbar`
+//! and presents the platform menu; under [`SelectionToolbarPolicy::Framework`] the
+//! field floats the installed builder's view through [`crate::overlay`]. The policy
+//! and builder are process-global `Mutex` slots, callable from any thread.
 
 use std::cell::Cell;
 use std::sync::{Arc, Mutex};
@@ -46,133 +16,60 @@ use crate::event::PassBracket;
 use crate::view::AnyView;
 
 thread_local! {
-    /// The selection-toolbar request published during the paint pass currently
-    /// running on this thread — written by
-    /// [`PaintCtx::publish_selection_toolbar`](crate::widget::PaintCtx::publish_selection_toolbar)
-    /// and resolved by [`RenderRoot::paint`](crate::app::RenderRoot::paint).
-    ///
-    /// Last writer wins, for
-    /// [`EventCtx::set_cursor`](crate::event::EventCtx::set_cursor)'s reason: at
-    /// most one field holds the focus a selection belongs to, so "who asked"
-    /// adds nothing, and no container between the field and the root reads the
-    /// value.
-    ///
-    /// **Pass-scoped**, so a pass in which nobody published resolves to `None`
-    /// rather than to whatever the previous pass left — which is what makes a
-    /// blurred field put the toolbar away with no widget having to retract
-    /// anything. A field that merely lost its selection keeps publishing: it is
-    /// still focused, and its verbs are still the answer the platform asks for.
+    /// This paint pass's request, last writer wins; pass-scoped, so a pass with
+    /// no publish (a blurred field) resolves to `None`.
     static PUBLISHED: Cell<Option<SelectionToolbarRequest>> = const { Cell::new(None) };
 
-    /// Whether a selection-toolbar publish pass is open on this thread — owned
-    /// by [`SelectionToolbarPass`] alone (see [`PassBracket`]).
     static PASS_OPEN: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Which clipboard verbs apply to the current selection — the enabled set, not a
+/// Which clipboard verbs apply to the current selection: the enabled set, not a
 /// menu layout.
-///
-/// A field computes these from its own state (an empty selection has nothing to
-/// copy; a read-only field cannot cut or paste; a field whose whole content is
-/// already selected offers no select-all), and whoever draws the menu decides
-/// how to present a disabled verb — by omitting it, greying it, or ignoring the
-/// distinction.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct SelectionToolbarActions {
-    /// Copy the selection to the host clipboard.
     pub copy: bool,
-    /// Cut the selection to the host clipboard.
     pub cut: bool,
-    /// Replace the selection with the host clipboard's contents.
     pub paste: bool,
-    /// Select the field's whole content.
     pub select_all: bool,
 }
 
-/// One focused field's published "here is my selection, these verbs apply to
-/// it, and this is whether a menu is wanted over it right now".
-///
-/// Published per paint pass by every **focused** field, with or without a
-/// selection; a pass without one means no field holds the focus. Two facts of
-/// different shapes travel together here: [`anchor`](Self::anchor) and
-/// [`actions`](Self::actions) are a **level** — the state of the field as it
-/// stands this frame, which a platform responder chain must be able to read at
-/// any moment — while [`present_menu`](Self::present_menu) is the **edge** that
-/// asks for a menu to go up.
+/// One focused field's selection, its applicable verbs, and whether it wants a
+/// menu now. Published every paint while focused, with or without a selection.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SelectionToolbarRequest {
-    /// The selection's bounding rect in **absolute logical window space** — the
-    /// same space an [`OverlayEntry::window_rect`](crate::overlay::OverlayEntry::window_rect)
-    /// uses, so a framework toolbar can be placed against it directly and a
-    /// native menu can be anchored to it after the shell's own scale conversion.
-    ///
-    /// Falls back to the caret rect while the selection is collapsed, which is
-    /// the right anchor for a paste-only menu.
+    /// The selection's bounds (the caret rect when collapsed), in absolute
+    /// logical window space.
     pub anchor: Rect,
-    /// Which verbs apply. A **level**: computed from the field's own state, not
-    /// from whether any bar is up, so a hardware Cmd+C arriving with nothing on
-    /// screen still finds an answer here.
+    /// A level from the field's own state, so a hardware Cmd+C finds an answer.
     pub actions: SelectionToolbarActions,
-    /// Whether the field wants a menu **presented now** — the one edge in an
-    /// otherwise level-shaped request.
-    ///
-    /// A field raises this when a gesture asks for the bar (a long press, a
-    /// secondary press) and drops it again when the bar is dismissed, while it
-    /// keeps republishing the same anchor and verbs either way. It is what
-    /// [`RenderRoot::selection_toolbar_generation`](crate::app::RenderRoot::selection_toolbar_generation)
-    /// moves on, together with `actions` — an anchor that merely follows a
-    /// growing selection must not ask a platform to re-present its menu.
+    /// The one edge: a gesture asked for the bar and it has not been dismissed.
     pub present_menu: bool,
 }
 
 /// Who draws the selection toolbar.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum SelectionToolbarPolicy {
-    /// The framework draws it: the field floats a toolbar pod through the
-    /// overlay portal ([`crate::overlay`]). The default, and the only route on a
-    /// platform with no system edit menu.
+    /// The field floats a toolbar pod through the overlay portal. The default.
     #[default]
     Framework,
-    /// The platform draws it: the field publishes the request and nothing else,
-    /// and the shell presents the host's own menu.
+    /// The field only publishes the request; the shell presents the host menu.
     Native,
 }
 
-/// The process-wide toolbar policy, plus whether a shell has locked it.
-///
-/// Value and lock share one `Mutex` rather than two separate slots, so a
-/// concurrent lock claim and set can never interleave into a state neither
-/// caller asked for.
+/// Value and lock share one `Mutex`, so a lock claim and a set never interleave.
 #[derive(Clone, Copy, Debug)]
 struct PolicyState {
     value: SelectionToolbarPolicy,
-    /// Set once by [`lock_selection_toolbar_policy`]; while `true`,
-    /// [`set_selection_toolbar_policy`] is a refused no-op.
     locked: bool,
 }
 
-/// The process-wide toolbar policy. A plain value rather than a generation-
-/// carrying slot like [`BUILDER`]: it is read directly at the point of decision
-/// (there is nothing to diff), and the default is the Framework route.
 static POLICY: Mutex<PolicyState> = Mutex::new(PolicyState {
     value: SelectionToolbarPolicy::Framework,
     locked: false,
 });
 
-/// Choose who draws the selection toolbar, process-wide.
-///
-/// Callable from any thread; the slot is a plain `Mutex`, and each reader
-/// observes it on its own thread when it next asks (see the module docs' thread
-/// contract). A shell whose platform REQUIRES a given route should call
-/// [`lock_selection_toolbar_policy`] instead — this setter is a refused no-op
-/// once a shell has done that, so an app that calls it after start-up cannot
-/// silently undo the platform's own requirement.
-///
-/// The refusal is silent to this function's own `()` return (unchanged, so no
-/// existing caller need change), but not silent to the process: a debug build
-/// logs it once, mirroring `TextInputWidget::sync_toolbar`'s wiring-gap
-/// diagnostic — a wrongly-timed app override is a wiring gap worth hearing
-/// about in development, not an error a release build can act on.
+/// Choose who draws the selection toolbar, process-wide. A no-op once a shell
+/// has called [`lock_selection_toolbar_policy`]; a debug build logs each refusal.
 pub fn set_selection_toolbar_policy(policy: SelectionToolbarPolicy) {
     let mut state = POLICY.lock().unwrap_or_else(|e| e.into_inner());
     if state.locked {
@@ -188,28 +85,13 @@ pub fn set_selection_toolbar_policy(policy: SelectionToolbarPolicy) {
     state.value = policy;
 }
 
-/// The process-wide toolbar policy, [`SelectionToolbarPolicy::Framework`] until
-/// something sets otherwise.
+/// The process-wide toolbar policy; [`SelectionToolbarPolicy::Framework`] until set.
 pub fn selection_toolbar_policy() -> SelectionToolbarPolicy {
     POLICY.lock().unwrap_or_else(|e| e.into_inner()).value
 }
 
-/// Declare the policy a shell's platform REQUIRES, locking the slot so a
-/// later [`set_selection_toolbar_policy`] call cannot silently override it.
-///
-/// Reads like the other override/cooperative pair below
-/// ([`set_selection_toolbar_builder`]/[`install_selection_toolbar_builder_if_unset`]):
-/// unconditional for the first caller, the way `set_selection_toolbar_builder`
-/// is — but unlike that pair, only the FIRST claim ever wins here, since the
-/// whole point of a lock is that one declaration sticks against every later
-/// call, an app's included. Returns whether this call actually claimed the
-/// lock: `false` means the slot was already locked (most likely a repeated
-/// shell start-up), and the value is left exactly as the earlier claim left
-/// it.
-///
-/// A platform shell calls this once, at start-up, before any app code has had
-/// a chance to run — see `frust-shell-ios`'s `frust_init` for why iOS in
-/// particular cannot leave this choice to an app.
+/// Set and lock the policy a shell's platform requires; only the first claim
+/// wins. Returns `false`, leaving the value alone, when already locked.
 pub fn lock_selection_toolbar_policy(policy: SelectionToolbarPolicy) -> bool {
     let mut state = POLICY.lock().unwrap_or_else(|e| e.into_inner());
     if state.locked {
@@ -220,40 +102,22 @@ pub fn lock_selection_toolbar_policy(policy: SelectionToolbarPolicy) -> bool {
     true
 }
 
-/// Builds the view a framework-drawn selection toolbar floats.
-///
-/// Called with the request the field published and the logical window size (so
-/// the toolbar can size or clamp itself against the window it will float in),
-/// and returns the pod's view over `()` — an overlay pod carries no application
-/// state, so a toolbar built here is usable from a field hosted under any app
-/// state at all.
-///
-/// `Arc<dyn Fn ... + Send + Sync>` because the slot is process-global: the
-/// closure is shared by every root in the process and may be installed from any
-/// thread.
+/// Builds the toolbar view from the request and the logical window size. The
+/// view is over `()`, so one builder serves fields under any app state.
 pub type SelectionToolbarBuilder =
     Arc<dyn Fn(&SelectionToolbarRequest, Size) -> AnyView<()> + Send + Sync>;
 
-/// The process-wide builder slot; `None` until a design system installs one, in
-/// which case a field under the Framework policy floats nothing and the platform
-/// route is the only one available.
+/// `None` until something installs a builder; until then a Framework-policy
+/// field has nothing to float.
 static BUILDER: Mutex<Option<SelectionToolbarBuilder>> = Mutex::new(None);
 
-/// Install the selection-toolbar builder, **replacing** whatever was there.
-///
-/// The explicit-override half of the pair: an app that wants its own toolbar
-/// over the catalog's calls this. Callable from any thread (see the module docs).
+/// Install the builder, replacing any already installed (the app override).
 pub fn set_selection_toolbar_builder(builder: SelectionToolbarBuilder) {
     *BUILDER.lock().unwrap_or_else(|e| e.into_inner()) = Some(builder);
 }
 
-/// Install the builder only if none is installed, reporting whether it took.
-///
-/// The cooperative half of the pair, and what a design system's own
-/// initialisation should call: two catalogs linked into one binary must not
-/// fight over the slot, and an app's explicit
-/// [`set_selection_toolbar_builder`] must not be undone by a catalog
-/// initialising later.
+/// Install the builder only if none is installed, returning whether it took;
+/// what a design system calls, so it never undoes an app's override.
 pub fn install_selection_toolbar_builder_if_unset(builder: SelectionToolbarBuilder) -> bool {
     let mut slot = BUILDER.lock().unwrap_or_else(|e| e.into_inner());
     if slot.is_some() {
@@ -263,10 +127,7 @@ pub fn install_selection_toolbar_builder_if_unset(builder: SelectionToolbarBuild
     true
 }
 
-/// The installed builder, or `None` when nothing has installed one.
-///
-/// Returns a clone of the `Arc` rather than lending the slot, so a caller never
-/// holds the process-global lock while building a view.
+/// A clone of the installed builder, so no caller builds a view under the lock.
 pub fn selection_toolbar_builder() -> Option<SelectionToolbarBuilder> {
     BUILDER
         .lock()
@@ -275,33 +136,20 @@ pub fn selection_toolbar_builder() -> Option<SelectionToolbarBuilder> {
         .map(Arc::clone)
 }
 
-/// The open/close bracket around one selection-toolbar publish pass — the
-/// [`crate::overlay::OverlayPaintPass`] shape, one channel over.
-///
-/// [`RenderRoot::paint`](crate::app::RenderRoot::paint) holds one for the length
-/// of the pass, so a publish made by a widget painted with no root above it (a
-/// leaf unit test) is dropped by the next pass's clear rather than leaking into
-/// it.
+/// The [`PassBracket`] around one publish pass, the `OverlayPaintPass` shape.
 pub(crate) struct SelectionToolbarPass(PassBracket<Option<SelectionToolbarRequest>>);
 
 impl SelectionToolbarPass {
-    /// Open a publish pass, starting from "nobody has published anything".
     pub(crate) fn enter() -> Self {
         SelectionToolbarPass(PassBracket::enter(&PUBLISHED, &PASS_OPEN))
     }
 
-    /// Take what *this* pass published, leaving the slot empty.
     pub(crate) fn take(&self) -> Option<SelectionToolbarRequest> {
         self.0.take()
     }
 }
 
-/// Record `request` in the pass currently painting on this thread.
-///
-/// The implementation behind
-/// [`PaintCtx::publish_selection_toolbar`](crate::widget::PaintCtx::publish_selection_toolbar),
-/// which is the API a field calls; this is the module-private half so the slot
-/// stays owned here.
+/// Record `request` in this thread's open pass (behind `PaintCtx::publish_selection_toolbar`).
 pub(crate) fn publish(request: SelectionToolbarRequest) {
     PUBLISHED.with(|slot| slot.set(Some(request)));
 }

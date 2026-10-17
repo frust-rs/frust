@@ -1,86 +1,59 @@
-//! Pure input/gesture helpers: slop/wheel constants, a trailing-window
-//! [`VelocityTracker`], and the fling-decay math (numbers cross-checked
-//! against masonry's implementation).
-//!
-//! Everything here is deterministic and dependency-free so it is exercised
-//! entirely by unit tests — the interactive widgets layer their
-//! event/paint behaviour on top of these primitives. Times are **logical
-//! milliseconds** and positions/velocities are **logical pixels** (px, px/s) to
-//! match the density-independent coordinate space events arrive in.
+//! Pure, deterministic gesture helpers: slop/wheel constants, a trailing-window
+//! [`VelocityTracker`] and fling-decay math (cross-checked against masonry's).
+//! Times are logical ms; positions and velocities are logical px and px/s.
 
 use std::collections::VecDeque;
 
-/// Touch drag threshold: how far a contact may move before a press becomes a
-/// drag/scroll (Flutter's tap-vs-drag slop, 18 logical px).
+/// Press-to-drag threshold for touch (Flutter's tap-vs-drag slop, 18 px).
 pub const TOUCH_SLOP: f64 = 18.0;
 
-/// Mouse drag threshold (kept smaller than [`TOUCH_SLOP`] because a mouse is far
-/// more precise). Reserved for when events carry an input-kind flag; v1 widgets
-/// use [`TOUCH_SLOP`] uniformly.
+/// Mouse drag threshold; unused until events carry an input kind, so widgets
+/// use [`TOUCH_SLOP`] for every pointer.
 pub const MOUSE_SLOP: f64 = 3.0;
 
-/// Logical pixels per wheel *line* — the constant a `LineDelta` wheel notch is
-/// multiplied by to get a pixel scroll amount (a sane cross-toolkit value).
+/// Logical px per wheel `LineDelta` line (a common cross-toolkit value).
 pub const WHEEL_LINE_PX: f64 = 40.0;
 
-/// Per-millisecond exponential fling decay factor (iOS "normal" deceleration):
-/// `v(t) = v0 · FLING_DECAY.powf(t_ms)`.
+/// Per-ms fling decay (iOS "normal" deceleration): `v(t) = v0 · FLING_DECAY^t`.
 pub const FLING_DECAY: f64 = 0.998;
 
-/// Fling stop threshold, in px/s (~0.5 px/frame at 60 Hz): below this speed a
-/// fling is finished and the animation stops requesting frames.
+/// Speed in px/s (~0.5 px/frame at 60 Hz) below which a fling stops.
 pub const FLING_STOP: f64 = 30.0;
 
-/// Trailing window, in milliseconds, over which [`VelocityTracker`] estimates
-/// velocity — older samples are pruned.
+/// The trailing window [`VelocityTracker`] keeps samples for.
 pub const VELOCITY_WINDOW_MS: f64 = 100.0;
 
-/// Velocity of `v0` after `elapsed_ms` of exponential fling decay.
-///
-/// `v(t) = v0 · FLING_DECAY^t` with `t` in milliseconds. Halves in ≈347 ms
-/// (`ln 0.5 / ln 0.998`).
+/// `v0` after `elapsed_ms` of decay; halves in ≈347 ms.
 pub fn fling_decay(v0: f64, elapsed_ms: f64) -> f64 {
     v0 * FLING_DECAY.powf(elapsed_ms)
 }
 
-/// Closed-form displacement (in px) travelled by a fling of initial velocity
-/// `v0` (px/s) over `elapsed_ms` milliseconds.
-///
-/// This is the exact integral of [`fling_decay`] over `[0, elapsed_ms]`:
-/// `x(T) = (v0/1000) · (FLING_DECAY^T − 1) / ln(FLING_DECAY)`. The `/1000`
-/// converts the px/s velocity into px given the millisecond time base; the
-/// result matches a numeric integration of [`fling_decay`] to well within 1%.
+/// Distance in px a fling of `v0` px/s covers in `elapsed_ms`: the exact
+/// integral of [`fling_decay`], `(v0/1000) · (FLING_DECAY^T − 1) / ln(FLING_DECAY)`.
 pub fn fling_displacement(v0: f64, elapsed_ms: f64) -> f64 {
     (v0 / 1000.0) * (FLING_DECAY.powf(elapsed_ms) - 1.0) / FLING_DECAY.ln()
 }
 
-/// A ring of recent `(time_ms, position)` samples used to estimate the release
-/// velocity of a drag for flinging.
-///
-/// Samples older than [`VELOCITY_WINDOW_MS`] (relative to the newest) are
-/// pruned on [`record`](Self::record); [`velocity`](Self::velocity) is a simple
-/// delta-over-window estimate (px/s) — enough for v1 fling, without Flutter's
-/// least-squares regression.
+/// Recent `(time_ms, position)` samples for a drag's release velocity: a
+/// delta-over-window estimate, not Flutter's least-squares fit.
 #[derive(Clone, Debug, Default)]
 pub struct VelocityTracker {
     samples: VecDeque<(f64, f64)>,
 }
 
 impl VelocityTracker {
-    /// An empty tracker.
     pub fn new() -> Self {
         Self {
             samples: VecDeque::new(),
         }
     }
 
-    /// Drop all samples (call on the `Down` that begins a fresh gesture).
+    /// Drop all samples; call on the `Down` that starts a gesture.
     pub fn clear(&mut self) {
         self.samples.clear();
     }
 
-    /// Record a `(time_ms, position)` sample, pruning any now older than the
-    /// trailing window.
+    /// Record a sample, pruning those older than the window.
     pub fn record(&mut self, time_ms: f64, position: f64) {
         self.samples.push_back((time_ms, position));
         let cutoff = time_ms - VELOCITY_WINDOW_MS;
@@ -93,8 +66,7 @@ impl VelocityTracker {
         }
     }
 
-    /// Estimate the current velocity in px/s from the delta across the retained
-    /// window. Returns `0.0` with fewer than two samples or a zero time span.
+    /// Velocity in px/s across the window; `0.0` with under two samples or no span.
     pub fn velocity(&self) -> f64 {
         if self.samples.len() < 2 {
             return 0.0;
@@ -108,12 +80,10 @@ impl VelocityTracker {
         (p1 - p0) / dt * 1000.0
     }
 
-    /// The number of retained samples (for tests/introspection).
     pub fn len(&self) -> usize {
         self.samples.len()
     }
 
-    /// Whether the tracker holds no samples.
     pub fn is_empty(&self) -> bool {
         self.samples.is_empty()
     }
