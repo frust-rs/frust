@@ -18,7 +18,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how WIDGETS relates to the other unit
 | Module | Responsibility |
 |--------|-----------------|
 | `frust-widgets::authoring` | Public container/callback toolkit every widget in the crate builds from, instead of touching `frust-core` primitives directly — reachable by app code as `frust::authoring` (the facade's re-export, CORE unit); also carries the `VisitPods` trait / `visit_children!` macro, the crate's introspection seam (see *Data Flow*) |
-| `frust-widgets` (baseline) | Baseline layout containers and interactive leaf widgets (text, forms, gestures, scrolling, a virtualized `ListView`, a four-slot `Scaffold`, `IndexedStack`) |
+| `frust-widgets` (baseline) | Baseline layout containers and interactive leaf widgets (text, forms, gestures, scrolling, a virtualized `ListView`, a four-slot `Scaffold`, `IndexedStack`, `container`/`colored_box`, `divider`, `icon_button`) |
 | `frust-widgets::canvas` | `CanvasView`/`CanvasWidget` — declarative custom painting over `PaintScene`, local-space, no semantics node |
 | `frust-widgets::repaint_boundary` | `repaint_boundary(child)` (`.alpha(f32)`) and the shared `RetainedBoundary`: per frame `DrawRetained` when the subtree is clean, its transform's linear part unchanged, nothing inside published a paint and the ledger holds (key, extent, scale from `PaintScene::current_transform()`) and covers the serial it recorded under (runs of consecutive recordings at one origin, size and linear part; the first draw confirms; it must have recorded on the immediately previous paint; serial 0 = bare ctx skips the check); else `PushRetained`+body+`PopRetained` when recording is allowed and the body is visible, else direct paint (kill switch `FRUST_NO_RETAINED_LAYERS` → plain bodies). `motion::AnimatedOpacity::cached(bool)` opts an opacity animation in (`AnimatedScale` unchanged) |
 | `frust-widgets::pinch` | `PinchRecognizer` — a pure two-contact pinch state machine — and `pinch_detector`, the wrapper view feeding it from a gesture's contacts |
@@ -28,6 +28,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how WIDGETS relates to the other unit
 | `frust-widgets::physics` | Pluggable scroll-motion strategy (`ScrollPhysics`, `OverscrollEffect`, `Simulation` ports, platform-adaptive defaults) the scroll surfaces consult — see *Scroll Physics* |
 | `frust-widgets::viewport` / `slivers` | `CustomScrollView`/`ViewportWidget` (the sliver viewport) and the sliver family (`slivers::adapter` holds `sliver_box`); `scroll_core` holds the shared `ScrollSurfaceCore` — see *Slivers and the viewport* |
 | `frust-widgets::scroll_controller` | `ScrollController` — a cloneable, reactive-free handle onto a `ScrollView` or `ListView`'s offset/item position — see *Scroll Physics* and *Virtualized ListView* below |
+| `frust-widgets::scrollbar` | The opt-in overlay scrollbar for the vertical `ScrollView`/`ListView` (`.scrollbar(ScrollbarStyle)`; no horizontal or `CustomScrollView` bar): thumb geometry, hover widening, a paint-clock fade (`reduce_motion` snaps it), thumb drag and track paging written through the bound `ScrollController`'s `jump_to`; its state lives on `ScrollSurfaceCore`, and without the call nothing paints, hit-tests or binds |
 | `frust-widgets::overlay` | The widget-author face of CORE's overlay portal: anchored placement geometry (`place`/`OverlayPlacement`), the `OverlaySlot` a widget hosting its own floated pod keeps, and the declarative `overlay_portal` wrapper |
 | `frust-widgets::drag` | Drag-and-drop session model: `DragCoordinator`, `draggable()` source, `drag_target()` target, `auto_scroll_zone()`, `reorderable_list()` — single public path `drag`, re-exported flat from the crate root and the `frust` facade |
 | `frust-widgets::platform_view` | Native-sibling compositing slot and input-shield wrapper for translucent surfaces |
@@ -289,7 +290,7 @@ Contract*). `frust::authoring` is the toolkit both the baseline set and every pl
 | `NativeTypefaces` / `FontFace` | A `ThemeExtensions` payload carrying a design system's own native-control font bytes (button/body face pair); no baseline `frust-theme` value attaches it — `frust-glyph::baseline()`, `frust-material::baseline()`, `frust-shadcn::theme()`, and `frust-beui::theme()` all do — see NATIVE_WIDGETS_ARCHITECTURE.md's theme ladder |
 | authoring module (`build_child`/`rebuild_child`/`teardown_child` generic over the child view, `rebuild_children`, `route_event`, `VisitPods`/`visit_children!`) | The sanctioned seam for authoring any widget against `frust-core`, including child-introspection |
 | `Navigator` / `Router` / `hero()` | Page-stack and declarative routing plus shared-element transitions |
-| `ButtonStyle`, `ScrollInfo`, `IconData`/`IconSource`, `ImageSource`/`ImageFit` | Small per-widget config/state types shared across the baseline widget set |
+| `ButtonStyle`, `ScrollInfo`, `ScrollbarStyle`/`ScrollbarShow`, `IconData`/`IconSource`, `ImageSource`/`ImageFit` | Small per-widget config/state types shared across the baseline widget set (`ScrollbarShow`: `Never`, `WhileScrolling` — the default — `Hover`, `Always`) |
 | `ScrollController` / `ScrollSubscription` / `AnimateTo` / `ItemAlignment` | Programmatic-scroll handle for `ScrollView`/`ListView`, its `on_change` guard, the animate-to duration/curve, and the keyed-row landing alignment — see *Scroll Physics* and *Virtualized ListView* |
 | `ListView` / `ListViewWidget` | Baseline virtualized list: windowed rebuild-time materialization, positional or keyed (`ChildKey`) row identity, optional variable extents, refresh/overscroll parity with `ScrollView` |
 | `CustomScrollView` / `ViewportWidget` / `SliverBoxView` / `ScrollAxis` | Sliver viewport and its box adapter (`ViewportWidget`, `SliverBoxWidget` are frust-widgets-only); `ScrollAxis` is re-exported flat from frust-widgets and the facade |
@@ -368,7 +369,7 @@ reusable; nav/navigator state is held in plain `Rc<Cell<_>>`/`Arc<Mutex<_>>`.
 ### Text Widget Alignment
 `TextInput`'s live-edited text is always start-aligned regardless of `TextStyle::align`: parley's
 `PlainEditor` exposes no alignment hook (a parley limitation, no per-field workaround).
-`TextView` honors `align`.
+`TextView` honors `align`, `.max_lines` and `.overflow(TextOverflow)`.
 
 ### Text Selection and the Clipboard
 Four gestures reach a `TextInput`'s selection and only two raise the toolbar: a **stationary
@@ -474,7 +475,9 @@ other axis.
 **Programmatic scroll (`scroll_controller.rs`).** `ScrollController` is a cloneable, reactive-free
 handle that `ScrollView`/`ListView`/`CustomScrollView::controller` attaches (facade:
 `ScrollController`, `ScrollSubscription`, `AnimateTo`, `ItemAlignment`). One surface holds a handle
-at a time (the latest attach wins) and dropping the widget detaches it.
+at a time (the latest attach wins) and dropping the widget detaches it. With `.scrollbar(..)` and no
+app handle, a surface binds an internal controller only while the bar is enabled; bar writes are
+plain `jump_to`s, so `on_scroll` hears them.
 Writes (`jump_to`/`animate_to`, plus `scroll_to_item` on a keyed list) are recorded, not applied;
 the surface drains them at its next layout or paint (a `ListView` also at rebuild), so the clamp
 lands against fresh extents. The queue is bounded by superseding within a segment (the offset
@@ -591,10 +594,3 @@ as a geometry core, as Material's `sliver_app_bar` does.
 and zero layout-audit mismatches. v1 scope limits are registered as
 `sliver-v1-scope`; `ScrollView`/`ListView` are not yet viewport-based
 (`scroll-view-list-view-not-viewport-based`).
-
-### Recent Additions
-`overlay` and `TextInput`'s hosted `selection_toolbar()` (*Overlay flow*, *Text Selection and the
-Clipboard*); the `drag` module (*Drag-and-drop flow*); `TransitionState`/`PageVisibility`,
-`overlay_host()`, `RouteNavigator`; `TextInput` read-only mode and `content_type` IME hints;
-`TextView` alignment, `.max_lines`, `.overflow(TextOverflow)`; `container()`/`colored_box()`,
-`divider()`, `icon_button()`; `column()`/`row()`/`stack()` builders (*Erasure at the API Boundary*).

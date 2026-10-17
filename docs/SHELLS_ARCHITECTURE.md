@@ -40,7 +40,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how SHELLS relates to the other units
 | `frust-shell-common` (signal-poll seams) | Small process-global slot-plus-poll seams (surface mode, theme override, fonts, system UI) drained once per frame — surface mode and system UI on mobile only; theme override and fonts on every shell, desktop included. Also the process-global retained-ledger slot (`publish_retained_ledger`/`latest_retained_ledger`: `try_lock`, never blocks the UI thread, one-frame-stale by design) and the repaint-owed flag (`request_retained_repaint`/`take_retained_repaint`; Android/iOS frame gates OR it in, desktop/web redraw instead) |
 | `frust-shell-common::devtools` (feature `devtools`) | Shell-side `DevtoolsBackend` implementation plus the per-frame UI-thread hop and pump each shell drives; see [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md) |
 | `frust-shell-common::gpu` (feature `gpu`) | Process-wide install-once slot (`install_gpu_handle`/`gpu_handle`) a shell publishes its live GPU device handle into, read back through `frust::gpu::with_context` (see [RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md)'s GPU Seam). `frust-shell-desktop` publishes at both device-creation sites; Android and iOS forward the feature but install no handle yet, so `with_context` answers `None` there |
-| `frust-shell-desktop` | The shared winit core: event loop, UI-thread/render-thread surface split, accessibility adapter, paced wake, pipeline-cache persistence — plus the `DesktopExtensions` seam and the `DesktopConfig`/`MenuSpec` vocabulary the per-OS crates read. Also the zero-config dev-preview entry point |
+| `frust-shell-desktop` | The shared winit core: event loop, UI-thread/render-thread surface split, accessibility adapter, paced wake, pipeline-cache and window-state persistence — plus the `DesktopExtensions` seam and the `DesktopConfig`/`MenuSpec` vocabulary the per-OS crates read. Also the zero-config dev-preview entry point |
 | `frust-shell-desktop::platform_view` | The OS-neutral desktop platform-view host: owns the shared differ, ingesting each paint's frames right after `RenderRoot::paint` and draining the batch to the per-OS hook right after the frame is submitted, then acknowledging it; plus the two lifecycle resets (replay on surface re-create, drop-everything on suspend) |
 | `frust-shell-macos` | AppKit integration: the native menu bar (a standard application menu plus the app's own spec), hide-on-close and Dock-reopen lifecycle, the reopen observer in its `appkit_glue` unsafe zone, and the platform-view host below |
 | `frust-shell-macos::platform_view` | The AppKit (Mode A) native-view host: resolves a slot's `view_type` to a plugin factory, parents the returned `NSView` above winit's content view, and places/shows/disposes it from every later command. Its slot bookkeeping, geometry mapping and retain accounting sit behind a `NativeViewOps` seam and compile on every host; only the AppKit implementation is `cfg(target_os = "macos")` |
@@ -189,21 +189,21 @@ nothing in the core will call `exit()` on its behalf.
 
 ### Configuration vocabulary
 
-`DesktopConfig` (app name, reverse-DNS id, window icon, menu spec, last-window-close policy) and
-the `MenuSpec`/`MenuItemSpec`/`MenuRole` tree are plain data defined in `frust-shell-desktop` —
-the lowest crate both the core (which carries the spec) and the per-OS shells (which build a
-native menu from it) share. They cannot live in the facade, which depends on the shell crates and
-never the reverse; the facade **re-exports** them instead, exactly as it re-exports the reactive
-seams it likewise cannot own. `IconData` is re-exported *renamed* as `DesktopIconData`, because
-the facade already carries `frust-widgets`' `IconData` (an in-UI vector icon).
+`DesktopConfig` (app name, reverse-DNS id, window icon, menu spec, last-window-close policy,
+initial/min/max window size, opt-in window-state persistence) and the
+`MenuSpec`/`MenuItemSpec`/`MenuRole` tree are plain data defined in `frust-shell-desktop` — the
+lowest crate both the core (which carries the spec) and the per-OS shells (which build a native menu
+from it) share. They cannot live in the facade, which depends on the shell crates and never the
+reverse; the facade **re-exports** them instead, exactly as it re-exports the reactive seams it
+likewise cannot own. `IconData` is re-exported *renamed* as `DesktopIconData`, because the facade
+already carries `frust-widgets`' `IconData` (an in-UI vector icon).
 
-The shared core itself consumes exactly one field, the window title; the rest is carried for the
-per-OS shells, and `DesktopConfig::default()` reproduces the zero-config preview window exactly. The
-preview window's initial size and maximized state are a separate pair of measurement knobs
-(`FRUST_WINDOW_SIZE`/`FRUST_WINDOW_MAXIMIZED`) — see [DEVELOPMENT.md](DEVELOPMENT.md) §
-Instrumentation. An icon is a decoded, tightly-packed RGBA8 buffer whose dimensions are checked at
-construction — this tier carries no image decoder (decoding is the tooling tier's job, see
-[CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md)).
+The core consumes the title and geometry fields (`window_state` persists size, position and
+maximized state; precedence, file and clamp: [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md) §
+Desktop window geometry); the rest is carried for the per-OS shells, and `DesktopConfig::default()`
+reproduces the zero-config preview window exactly. An icon is a decoded, tightly-packed RGBA8 buffer
+whose dimensions are checked at construction — this tier carries no image decoder (decoding is the
+tooling tier's job, see [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md)).
 
 ### Menu activations
 
