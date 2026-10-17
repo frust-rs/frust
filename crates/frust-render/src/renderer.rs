@@ -85,6 +85,16 @@ struct ReadySurface {
 /// frame is encoded or submitted for the warm-up's sake: the strategies differ
 /// only in how much of the list must exist before the first frame records, and
 /// on which thread the rest is built.
+///
+/// [`Self::Steal`] is the default because it is the fastest first frame by a
+/// wide margin: the other two make the first frame pay for the whole list,
+/// and building it on two threads ([`Self::Finish`]) measured no faster than
+/// on the worker alone ([`Self::Await`]) — every build goes through the one
+/// driver pipeline cache. On a Pixel 4a (Adreno 618) the first frame's
+/// pipeline wait was about 15 ms stealing against 75 ms for either of the
+/// other two with the driver cache seeded, and about 180 ms against 410 ms
+/// without one. The other two remain for a host whose first frame is followed
+/// at once by frames that need the whole list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FirstFrameWarmUp {
     /// Settle nothing up front: the frame requests the variants it draws,
@@ -113,7 +123,7 @@ pub(crate) const FIRST_FRAME_WARM_UP_TIMEOUT: Duration = Duration::from_secs(1);
 
 impl FirstFrameWarmUp {
     /// The strategy a build without [`FIRST_FRAME_WARM_UP_VAR`] runs.
-    pub(crate) const DEFAULT: Self = Self::Finish;
+    pub(crate) const DEFAULT: Self = Self::Steal;
 
     /// The strategy the process configuration selects.
     pub(crate) fn from_config() -> Self {

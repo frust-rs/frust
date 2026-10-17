@@ -999,6 +999,59 @@ pub struct EngineRenderer {
     encode_trace: EncodeTrace,
 }
 
+/// Every pipeline a renderer warms up, in the order its background worker
+/// builds them.
+///
+/// [`warm_up_descs_for`]'s list, reordered and extended for the frames that
+/// follow an install:
+///
+/// - **First-frame programs first.** The worker starts only moments before
+///   the first frame asks for its pipelines, and two pipelines built at once
+///   measured no faster than one after the other, so that frame effectively
+///   waits behind whatever the worker is building. The worker therefore opens
+///   with what an ordinary first frame draws — the atlas page pass its glyphs
+///   are rendered with, the depth-tested surface pass's glyph and solid
+///   programs and the opaque pass's solid one, then the surface pass's Uber
+///   program — and that frame steals the rest of what it needs. On a Pixel 4a
+///   with its driver cache seeded this halved the first frame's pipeline wait
+///   (16 ms to 8 ms, median of twelve launches).
+/// - **The surface's layer composite last.** No first frame needs it, but the
+///   first transition that composites a page or an opacity layer does, and
+///   building it there costs that frame a whole compile. Measured on an
+///   Adreno 618 (Pixel 4a) it adds 32 ms to a warm-up without a driver cache
+///   and 5 ms with one — paid by the worker, after everything else.
+///
+/// A variant listed twice is queued once, so the reordering needs no
+/// de-duplication. With the Uber program forced the list is the Uber states
+/// alone, exactly as [`warm_up_descs_for`] gives them.
+fn warm_up_list(
+    shaders: &EngineShaders,
+    format: wgpu::TextureFormat,
+    uber_only: bool,
+) -> Vec<frust_gpu::RenderPipelineDesc> {
+    let full = warm_up_descs_for(shaders, format, uber_only);
+    if uber_only {
+        return full;
+    }
+    let mut descs = Vec::with_capacity(full.len() + 6);
+    descs.push(atlas_strip_desc(shaders));
+    descs.push(EnginePipeline::StripDepthAlpha.class_desc(shaders, format, PaintClass::Glyph));
+    descs.push(EnginePipeline::StripDepthAlpha.class_desc(
+        shaders,
+        format,
+        PaintClass::SolidCoverage,
+    ));
+    descs.push(EnginePipeline::StripOpaque.class_desc(shaders, format, PaintClass::SolidCoverage));
+    descs.push(EnginePipeline::StripDepthAlpha.desc(shaders, format));
+    descs.extend(full);
+    descs.push(EnginePipeline::StripDepthAlpha.class_desc(
+        shaders,
+        format,
+        PaintClass::LayerComposite,
+    ));
+    descs
+}
+
 impl EngineRenderer {
     /// Builds a renderer for `format` targets on `caps`' adapter, warming
     /// every engine pipeline in the background.
@@ -1060,7 +1113,7 @@ impl EngineRenderer {
         let mut library = ShaderLibrary::new();
         let shaders = EngineShaders::register_family(&mut library, device, image_sampler);
         let mut pipelines = PipelineCache::new(Arc::new(library), pipeline_cache.cloned());
-        pipelines.warm_up(device, &warm_up_descs_for(&shaders, format, routing.uber));
+        pipelines.warm_up(device, &warm_up_list(&shaders, format, routing.uber));
 
         let level = Level::try_detect().unwrap_or(Level::baseline());
         let gradients = GradientCache::for_texture(GradientTextureLayout::square(dim), level);
@@ -1209,14 +1262,15 @@ impl EngineRenderer {
     /// compiled twice and nothing is left for the worker to claim afterwards.
     ///
     /// "Every" is the warm-up list: the nine Uber states, plus — unless the
-    /// Uber program is forced — the warmed paint classes. A class variant
-    /// outside that list is created on the first frame that draws a run of it.
+    /// Uber program is forced — the warmed paint classes and the surface's
+    /// layer-composite program (see [`warm_up_list`]). A class variant outside
+    /// that list is created on the first frame that draws a run of it.
     ///
     /// Idempotent: once the list is built every request is a cache hit, so a
     /// second call compiles nothing. It encodes and submits nothing either —
     /// the first frame afterwards is still the first frame.
     pub fn finish_warm_up(&mut self, device: &wgpu::Device) {
-        for desc in warm_up_descs_for(&self.shaders, self.format, self.routing.uber) {
+        for desc in warm_up_list(&self.shaders, self.format, self.routing.uber) {
             let _ = self.pipelines.get_or_create(device, &desc);
         }
     }
