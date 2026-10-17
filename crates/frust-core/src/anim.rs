@@ -1,20 +1,15 @@
 //! Animation vocabulary: the shared frame clock ([`FrameTime`]) plus the pure
-//! math widgets consume it through — easing [`Curve`]s, [`Tween`] interpolation,
-//! analytic [`Spring`] dynamics, and the duration-/spring-driven
-//! [`AnimationController`].
+//! math widgets consume it through: easing [`Curve`]s, [`Tween`] interpolation,
+//! analytic [`Spring`] dynamics, and the [`AnimationController`].
 //!
-//! # Contract: this module is plain data + math, never a scheduler
+//! # Contract: plain data + math, never a scheduler
 //!
-//! Nothing here reads a clock, spawns a task, or registers a callback.
-//! [`FrameTime`] *enters from the shell* (no `Instant::now()` inside
-//! `frust-core`) and is threaded to widgets during paint as
-//! [`crate::widget::PaintCtx::frame_time`]. A widget that animates does so
-//! **during its own paint**: it calls [`AnimationController::advance`] with the
-//! frame's time, reads [`AnimationController::value`], and — if `advance`
-//! returned `true` (still animating) — calls
-//! [`crate::widget::PaintCtx::request_frame`] so the shell schedules another
-//! frame. There is no ambient tick; a controller that is never `advance`d never
-//! moves.
+//! Nothing here reads a clock or registers a callback. [`FrameTime`] enters from
+//! the shell and reaches widgets as [`crate::widget::PaintCtx::frame_time`]. A
+//! widget animates during its own paint: it calls [`AnimationController::advance`],
+//! reads [`AnimationController::value`], and while `advance` returns `true` calls
+//! [`crate::widget::PaintCtx::request_frame`]. A controller never `advance`d
+//! never moves.
 
 use std::time::Duration;
 
@@ -23,20 +18,14 @@ use peniko::Color;
 
 /// A point in time supplied by the shell, in monotonic nanoseconds.
 ///
-/// The origin is **arbitrary and shell-specific** (desktop: nanos since a
-/// shell-owned epoch; Android: a `Choreographer` frame nanos value; iOS: a
-/// `CADisplayLink` timestamp). Widgets may therefore only *difference* two
-/// `FrameTime`s (via [`FrameTime::saturating_sub`]) — never interpret one
-/// absolutely, and never compare `FrameTime`s produced by different shells.
-///
-/// [`FrameTime::ZERO`] is the documented "no time available" fallback used by
-/// legacy/test paint paths that don't thread a real clock.
+/// The origin is arbitrary and shell-specific, so widgets may only *difference*
+/// two `FrameTime`s (via [`FrameTime::saturating_sub`]), never interpret one
+/// absolutely or compare times from different shells.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FrameTime(u64);
 
 impl FrameTime {
-    /// The zero instant — also the "no time available" fallback (see the type
-    /// docs). Differencing against it yields the raw nanosecond value.
+    /// The zero instant, also the "no time available" fallback for legacy/test paint paths.
     pub const ZERO: FrameTime = FrameTime(0);
 
     /// Build a `FrameTime` from a raw monotonic-nanosecond count.
@@ -44,35 +33,28 @@ impl FrameTime {
         FrameTime(nanos)
     }
 
-    /// The raw monotonic-nanosecond count. Meaningful only relative to another
-    /// `FrameTime` from the same shell (see the type docs).
+    /// The raw monotonic-nanosecond count.
     pub const fn as_nanos(self) -> u64 {
         self.0
     }
 
-    /// This instant as fractional seconds from the (arbitrary) origin. Only
-    /// differences of two such values carry meaning.
+    /// This instant as fractional seconds from the (arbitrary) origin.
     pub fn as_secs_f64(self) -> f64 {
         self.0 as f64 / 1_000_000_000.0
     }
 
-    /// The non-negative [`Duration`] elapsed from `earlier` to `self`.
-    ///
-    /// Saturates at zero when `self < earlier` (a non-monotonic or reordered
-    /// clock), so a widget differencing two frame times can never observe a
-    /// negative delta — the basis of [`AnimationController::advance`]'s
-    /// clamp-and-never-panic guarantee.
+    /// The non-negative [`Duration`] elapsed from `earlier` to `self`, saturating at
+    /// zero for a non-monotonic clock (the basis of [`AnimationController::advance`]'s
+    /// never-negative delta).
     pub fn saturating_sub(self, earlier: FrameTime) -> Duration {
         Duration::from_nanos(self.0.saturating_sub(earlier.0))
     }
 }
 
-/// An easing curve mapping a normalized time `t ∈ [0, 1]` to an eased progress
-/// `∈ [0, 1]`.
+/// An easing curve mapping normalized time `t ∈ [0, 1]` to eased progress `∈ [0, 1]`.
 ///
-/// The named variants are the standard CSS timing functions plus Material 3's
-/// `Emphasized` easing; [`Curve::Cubic`] is a general cubic-Bézier for anything
-/// else. Evaluation clamps `t` to `[0, 1]` first.
+/// The named variants are the CSS timing functions plus Material 3's
+/// `Emphasized`; [`Curve::Cubic`] is a general cubic-Bézier. `t` is clamped first.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Curve {
     /// `t` unchanged.
@@ -85,9 +67,8 @@ pub enum Curve {
     EaseInOut,
     /// Material 3 emphasized easing — `cubic-bezier(0.2, 0.0, 0.0, 1.0)`.
     Emphasized,
-    /// A general cubic-Bézier timing function with control points
-    /// `(x1, y1)` and `(x2, y2)` (endpoints fixed at `(0, 0)`/`(1, 1)`), the
-    /// same parameterization CSS `cubic-bezier()` uses.
+    /// A cubic-Bézier with control points `(x1, y1)`, `(x2, y2)` (endpoints fixed at
+    /// `(0, 0)`/`(1, 1)`), as CSS `cubic-bezier()`.
     Cubic(f64, f64, f64, f64),
 }
 
@@ -105,27 +86,14 @@ impl Curve {
         }
     }
 
-    /// Confine this curve to the `[start, end]` fraction of the timeline
-    /// (Flutter's `Interval`, TweenSequence-style curve segmentation):
-    /// before `start` the result is `0.0`, at/after `end` it's `1.0`, and in
-    /// between it re-evaluates `self` at the rescaled local time
-    /// `(t - start) / (end - start)`.
+    /// Confine this curve to the `[start, end]` fraction of the timeline (Flutter's
+    /// `Interval`): `0.0` before `start`, `1.0` from `end`, and `self` re-evaluated
+    /// at the rescaled local time between. An interval with `end <= start` is an
+    /// instantaneous step at `start`.
     ///
-    /// This is what lets two widgets fade through each other on one shared
-    /// controller — e.g. an outgoing element on `curve.interval(0.0, 0.3)`
-    /// and an incoming one on `curve.interval(0.3, 1.0)`.
-    ///
-    /// `start`/`end` aren't required to be `[0, 1]`-clamped or ordered here;
-    /// a degenerate or inverted interval (`end <= start`) is defined as an
-    /// instantaneous step at `start`: strictly before it the result is
-    /// `0.0`, at or after it's `1.0` (see [`SegmentedCurve::transform`]).
-    ///
-    /// Returns a [`SegmentedCurve`] rather than `Curve` itself: `Curve` is
-    /// `Copy` (relied on by [`AnimationController`], which derives `Copy`
-    /// over its own `curve: Curve` field), and an `Interval` variant holding
-    /// another `Curve` by value would make the enum infinitely-sized without
-    /// indirection (`Box`), which would forfeit that `Copy` bound — so the
-    /// segment lives in its own small `Copy` struct instead.
+    /// Returns a [`SegmentedCurve`] rather than `Curve` because an `Interval`
+    /// variant holding a `Curve` by value would be infinitely sized, and
+    /// [`AnimationController`] relies on `Curve: Copy`.
     pub fn interval(self, start: f64, end: f64) -> SegmentedCurve {
         SegmentedCurve {
             start,
@@ -135,9 +103,7 @@ impl Curve {
     }
 }
 
-/// A [`Curve`] confined to a `[start, end]` sub-interval of the timeline —
-/// the result of [`Curve::interval`]. See that method's docs for the full
-/// contract (including the degenerate `end <= start` case).
+/// A [`Curve`] confined to a `[start, end]` sub-interval; see [`Curve::interval`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SegmentedCurve {
     start: f64,
@@ -146,8 +112,7 @@ pub struct SegmentedCurve {
 }
 
 impl SegmentedCurve {
-    /// Evaluate the eased progress at normalized time `t` (clamped to
-    /// `[0, 1]`) — see [`Curve::interval`] for the full contract.
+    /// Evaluate at normalized time `t` (clamped to `[0, 1]`); see [`Curve::interval`].
     pub fn transform(self, t: f64) -> f64 {
         let t = t.clamp(0.0, 1.0);
         if self.end <= self.start {
@@ -165,12 +130,9 @@ impl SegmentedCurve {
     }
 }
 
-/// Evaluate a cubic-Bézier timing function at input `x ∈ [0, 1]`.
-///
-/// Control points are `(0, 0)`, `(x1, y1)`, `(x2, y2)`, `(1, 1)` — the CSS
-/// `cubic-bezier()` parameterization. The curve is defined parametrically in
-/// `s`; this solves `X(s) = x` for `s` (Newton's method, then a bisection
-/// fallback if Newton leaves the valid interval) and returns `Y(s)`.
+/// Evaluate a cubic-Bézier timing function (control points `(0, 0)`, `(x1, y1)`,
+/// `(x2, y2)`, `(1, 1)`) at `x ∈ [0, 1]`: solve `X(s) = x` by Newton's method
+/// with a bisection fallback, and return `Y(s)`.
 fn cubic_bezier(x1: f64, y1: f64, x2: f64, y2: f64, x: f64) -> f64 {
     // Polynomial coefficients of X(s) and Y(s) = ((a·s + b)·s + c)·s.
     let cx = 3.0 * x1;
@@ -184,8 +146,7 @@ fn cubic_bezier(x1: f64, y1: f64, x2: f64, y2: f64, x: f64) -> f64 {
     let sample_y = |s: f64| ((ay * s + by) * s + cy) * s;
     let sample_dx = |s: f64| (3.0 * ax * s + 2.0 * bx) * s + cx;
 
-    // Newton–Raphson from x as the initial guess (X is close to identity for
-    // well-behaved timing functions).
+    // Newton–Raphson from `x` (X is near identity for sane timing functions).
     let mut s = x;
     for _ in 0..8 {
         let err = sample_x(s) - x;
@@ -199,8 +160,7 @@ fn cubic_bezier(x1: f64, y1: f64, x2: f64, y2: f64, x: f64) -> f64 {
         s -= err / d;
     }
 
-    // Bisection fallback (guaranteed to converge on the monotone `X` a valid
-    // timing function has).
+    // Bisection fallback (converges on the monotone `X` of a valid timing function).
     let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
     let mut s = x.clamp(lo, hi);
     for _ in 0..32 {
@@ -218,15 +178,11 @@ fn cubic_bezier(x1: f64, y1: f64, x2: f64, y2: f64, x: f64) -> f64 {
     sample_y(s)
 }
 
-/// Per-item timing for a staggered reveal (Flutter's staggered-animation
-/// idiom): item `i`'s sub-animation starts at `i * per_item_delay` and runs
-/// for `item_duration`, all driven off one shared `0.0..=1.0` controller
-/// value — no per-item controller needed.
+/// Per-item timing for a staggered reveal: item `i` starts at `i * per_item_delay`
+/// and runs for `item_duration`, all off one shared `0.0..=1.0` controller value.
 ///
-/// `per_item_delay`/`item_duration` share whatever time unit the caller
-/// picks (seconds, milliseconds, …) as long as it's consistent between the
-/// two fields and [`total_duration`](Self::total_duration)'s consumer (e.g.
-/// seeding an [`AnimationController`]'s `Duration` in the same unit).
+/// The two fields share whatever time unit the caller picks, consistently with
+/// the `Duration` of the controller sized from [`total_duration`](Self::total_duration).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StaggerSpec {
     /// Time between the start of consecutive items' sub-animations.
@@ -238,12 +194,8 @@ pub struct StaggerSpec {
 }
 
 impl StaggerSpec {
-    /// The total timeline length spanning all `n` items' sub-animations —
-    /// the last item starts at `(n - 1) * per_item_delay` and runs
-    /// `item_duration`, so the total is `(n - 1) * per_item_delay +
-    /// item_duration`. Use this to size an [`AnimationController`]'s
-    /// `forward` duration so one controller value drives every item.
-    /// `n == 0` has no timeline: `0.0`.
+    /// The timeline length spanning all `n` items, `(n - 1) * per_item_delay +
+    /// item_duration` (`0.0` for `n == 0`); size the controller's duration from it.
     pub fn total_duration(&self, n: usize) -> f64 {
         if n == 0 {
             return 0.0;
@@ -251,18 +203,12 @@ impl StaggerSpec {
         (n as f64 - 1.0) * self.per_item_delay + self.item_duration
     }
 
-    /// Item `i`'s eased progress in `[0, 1]`, given the overall controller
-    /// value `overall` (clamped to `[0, 1]`, linear across
-    /// [`total_duration`](Self::total_duration)`(n)`) and the total item
-    /// count `n`.
+    /// Item `i`'s eased progress in `[0, 1]` for the overall controller value
+    /// `overall` (clamped, linear across [`total_duration`](Self::total_duration)`(n)`).
     ///
-    /// Before item `i`'s local window starts, this is `0.0`; after it ends,
-    /// `1.0`; in between it re-evaluates `item_curve` at the item's local
-    /// `[0, 1]` sub-progress. A zero-length `item_duration` degenerates to
-    /// an instantaneous step at the item's start time, mirroring
-    /// [`Curve::interval`]'s degenerate case. `n == 0` (no timeline) and
-    /// `i >= n` both have no defined window, so this returns `1.0` (nothing
-    /// left to reveal).
+    /// `0.0` before the item's window, `1.0` after, `item_curve` within. A zero
+    /// `item_duration` is a step at the item's start; `n == 0` or `i >= n` returns
+    /// `1.0` (nothing left to reveal).
     pub fn item_progress(&self, overall: f64, i: usize, n: usize) -> f64 {
         let total = self.total_duration(n);
         if total <= 0.0 || i >= n {
@@ -288,10 +234,8 @@ impl StaggerSpec {
 
 /// Component-wise linear interpolation between two values of the same type.
 ///
-/// Implemented for the value types animations move: `f64`, `peniko::Color`
-/// (component lerp in sRGB — an acceptable v1 approximation, not a
-/// perceptual/linear-light blend), and the `kurbo` geometry types
-/// [`Point`]/[`Size`]/[`Rect`].
+/// Implemented for `f64`, `peniko::Color` (sRGB component lerp, a v1
+/// approximation rather than a linear-light blend) and [`Point`]/[`Size`]/[`Rect`].
 pub trait Lerp {
     /// Interpolate from `self` (at `t = 0`) to `other` (at `t = 1`).
     fn lerp(&self, other: &Self, t: f64) -> Self;
@@ -330,11 +274,7 @@ impl Lerp for Rect {
 }
 
 impl Lerp for Color {
-    /// Straight (non-premultiplied) per-component lerp in the sRGB encoding.
-    ///
-    /// This blends the encoded sRGB components directly, which is cheap and
-    /// visually acceptable for v1 but is *not* a linear-light or perceptual
-    /// interpolation — a future revision may move to linear-light blending.
+    /// Straight (non-premultiplied) per-component lerp of the encoded sRGB values.
     fn lerp(&self, other: &Self, t: f64) -> Self {
         let a = self.components;
         let b = other.components;
@@ -363,38 +303,33 @@ impl<T: Lerp> Tween<T> {
         Tween { begin, end }
     }
 
-    /// The interpolated value at `t` (typically the eased progress from a
-    /// [`Curve`] or an [`AnimationController::value`]). `t` is not clamped here;
-    /// clamp upstream (a [`Curve`] already does) if extrapolation is unwanted.
+    /// The interpolated value at `t`. Not clamped; clamp upstream (a [`Curve`] does)
+    /// if extrapolation is unwanted.
     pub fn lerp(&self, t: f64) -> T {
         self.begin.lerp(&self.end, t)
     }
 }
 
-/// Physical parameters of a damped spring (a mass on a spring with a damper).
+/// Physical parameters of a damped spring.
 ///
-/// `damping_ratio` is the dimensionless ζ: `< 1` under-damped (overshoots and
-/// oscillates), `== 1` critically damped (fastest non-overshooting settle),
-/// `> 1` over-damped (slow, no overshoot). M3's standard spring presets (which
-/// live in `frust-theme`, not here) are expressed in these terms.
+/// `damping_ratio` is ζ: `< 1` under-damped (overshoots), `== 1` critically
+/// damped (fastest settle without overshoot), `> 1` over-damped.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SpringDesc {
     /// Mass of the moving body (`> 0`).
     pub mass: f64,
     /// Spring stiffness `k` (`> 0`); higher is snappier.
     pub stiffness: f64,
-    /// Damping ratio ζ (`> 0`); see the type docs.
+    /// Damping ratio ζ (`> 0`).
     pub damping_ratio: f64,
 }
 
-/// The analytic response of a [`SpringDesc`] released from an initial
-/// displacement + velocity toward equilibrium at `0`.
+/// The analytic response of a [`SpringDesc`] released from an initial displacement
+/// and velocity toward equilibrium at `0`.
 ///
-/// Positions returned by [`Spring::position`] are **displacements from
-/// equilibrium** (the target), so equilibrium is always `0`. The closed-form
-/// solution branches on the damping regime; all three are exact (no numerical
-/// integration), which is what lets a fling be evaluated at an arbitrary frame
-/// time without accumulating step error.
+/// [`Spring::position`] returns displacements from the target. The closed-form
+/// solution is exact in all three damping regimes, so a fling can be evaluated
+/// at any frame time without accumulating step error.
 #[derive(Clone, Copy, Debug)]
 pub struct Spring {
     kind: SpringKind,
@@ -417,11 +352,10 @@ enum SpringKind {
 }
 
 impl Spring {
-    /// Solve the spring released from displacement `x0` (relative to
-    /// equilibrium) with initial velocity `v0`.
+    /// Solve the spring released from displacement `x0` with initial velocity `v0`.
     ///
-    /// Degenerate parameters (non-positive mass/stiffness) fall back to a
-    /// critically-damped unit spring so the constructor never produces `NaN`.
+    /// Non-positive mass/stiffness fall back to a critically damped unit spring, so
+    /// the constructor never produces `NaN`.
     pub fn new(desc: SpringDesc, x0: f64, v0: f64) -> Self {
         let mass = if desc.mass > 0.0 { desc.mass } else { 1.0 };
         let stiffness = if desc.stiffness > 0.0 {
@@ -433,18 +367,15 @@ impl Spring {
         let w0 = (stiffness / mass).sqrt();
 
         let kind = if (zeta - 1.0).abs() < 1e-6 {
-            // Critically damped.
             let a = x0;
             let b = v0 + w0 * x0;
             SpringKind::Critical { w0, a, b }
         } else if zeta < 1.0 {
-            // Under-damped.
             let wd = w0 * (1.0 - zeta * zeta).sqrt();
             let a = x0;
             let b = (v0 + zeta * w0 * x0) / wd;
             SpringKind::Under { w0, wd, zeta, a, b }
         } else {
-            // Over-damped.
             let s = (zeta * zeta - 1.0).sqrt();
             let r1 = -w0 * (zeta - s);
             let r2 = -w0 * (zeta + s);
@@ -493,8 +424,7 @@ impl Spring {
         }
     }
 
-    /// Whether the spring has effectively settled at equilibrium by time `t`:
-    /// both `|position|` and `|velocity|` are below `epsilon`.
+    /// Whether both `|position|` and `|velocity|` are below `epsilon` at time `t`.
     pub fn is_at_rest(&self, t: f64, epsilon: f64) -> bool {
         self.position(t).abs() < epsilon && self.velocity(t).abs() < epsilon
     }
@@ -515,54 +445,21 @@ pub enum AnimationStatus {
     Dismissed,
 }
 
-/// The rest threshold (in value- and velocity-units) a spring fling must fall
-/// below before the controller snaps to its target and reports `Completed`/
-/// `Dismissed`.
+/// Value/velocity threshold below which a fling snaps to its target and settles.
 const SPRING_REST_EPSILON: f64 = 1e-3;
 
-/// A `0.0..=1.0` animation value driven either by a duration + [`Curve`] or by
-/// a [`Spring`] fling.
+/// A `0.0..=1.0` value driven by a duration + [`Curve`] or a [`Spring`] fling.
 ///
-/// It is **plain data + math** (see the module docs' contract): it holds no
-/// clock and no scheduler. A widget advances it during paint with the frame's
-/// [`FrameTime`], reads [`value`](Self::value), and re-requests a frame while
-/// [`advance`](Self::advance) keeps returning `true`.
-///
-/// # Status semantics
-///
-/// [`forward`](Self::forward)/[`reverse`](Self::reverse) drive to the `1.0`/
-/// `0.0` bounds and settle as `Completed`/`Dismissed`. [`animate_to`](Self::animate_to)
-/// settles as `Completed` when it moved forward (target ≥ start) and `Dismissed`
-/// when it moved reverse. [`repeat`](Self::repeat) never completes ([`advance`](Self::advance)
-/// always returns `true`). A [`fling`](Self::fling) settles at `1.0` (positive
-/// velocity) or `0.0` (negative) as `Completed`/`Dismissed`.
+/// Plain data + math (see the module contract): a widget advances it during
+/// paint and re-requests a frame while [`advance`](Self::advance) returns `true`.
+/// `forward`/`reverse`/`animate_to` settle as `Completed`/`Dismissed`; `repeat`
+/// never completes; a `fling` settles at `1.0` (non-negative velocity) or `0.0`.
 ///
 /// # Overshoot (spring-driven only)
 ///
-/// Duration+[`Curve`] motion ([`forward`]/[`reverse`]/[`animate_to`]/[`repeat`])
-/// always keeps [`value`](Self::value) in `0.0..=1.0` — unchanged from before
-/// this contract existed. A [`fling`](Self::fling), by contrast, is **not**
-/// clamped while in flight: an under-damped [`SpringDesc`] (M3's spatial
-/// presets use `damping_ratio: 0.9`) genuinely overshoots its target before
-/// settling, and that overshoot is the whole visual point of a "bouncy"
-/// spring — clamping it away would hide it. `value()` may therefore transiently
-/// read outside `[0, 1]` mid-fling; it always lands exactly on the target
-/// (`0.0`/`1.0`) once [`advance`](Self::advance) reports settled (`status()`
-/// becomes `Completed`/`Dismissed`). A consumer that needs the value
-/// pinned to `[0, 1]` at every frame (e.g. to feed a `Lerp`/`Tween` that
-/// assumes bounded input) should use [`value_clamped`](Self::value_clamped)
-/// instead. A critically-/over-damped spring (`damping_ratio >= 1.0`, e.g.
-/// M3's "effects" presets) released with zero velocity (the common
-/// "settle to target" fling usage) never overshoots in the first place, so
-/// `value()`/`value_clamped()` agree for that case; a large enough release
-/// velocity can still carry even a critically-/over-damped spring past its
-/// target before it settles back — damping ratio bounds *oscillation*
-/// (repeated overshoot), not a single one.
-///
-/// [`forward`]: Self::forward
-/// [`reverse`]: Self::reverse
-/// [`animate_to`]: Self::animate_to
-/// [`repeat`]: Self::repeat
+/// A fling is not clamped in flight: an under-damped [`SpringDesc`] (M3's spatial
+/// presets use `damping_ratio: 0.9`) overshoots on purpose, then lands exactly on
+/// the target. Use [`value_clamped`](Self::value_clamped) for a bounded read.
 #[derive(Clone, Copy, Debug)]
 pub struct AnimationController {
     value: f64,
@@ -578,8 +475,7 @@ pub struct AnimationController {
 enum Drive {
     /// Not animating.
     Idle,
-    /// Duration-driven interpolation from `start` to `target` over `duration`
-    /// seconds, `elapsed` so far, eased by the controller's [`Curve`].
+    /// Duration-driven `start`→`target` over `duration` seconds, eased by the controller's [`Curve`].
     Duration {
         start: f64,
         target: f64,
@@ -597,8 +493,7 @@ enum Drive {
 }
 
 impl AnimationController {
-    /// Create an idle controller at value `0.0` with the given default duration
-    /// and a [`Curve::Linear`] easing.
+    /// Create an idle controller at `0.0` with the given default duration and [`Curve::Linear`].
     pub fn new(duration: Duration) -> Self {
         AnimationController {
             value: 0.0,
@@ -610,33 +505,21 @@ impl AnimationController {
         }
     }
 
-    /// Set the easing curve applied to duration-driven motion (returns `self`
-    /// for builder-style construction).
+    /// Set the easing curve applied to duration-driven motion (builder-style).
     pub fn with_curve(mut self, curve: Curve) -> Self {
         self.curve = curve;
         self
     }
 
-    /// The current value.
-    ///
-    /// For duration+[`Curve`] motion this is always in `0.0..=1.0`. For a
-    /// spring [`fling`](Self::fling) it may transiently read outside that
-    /// range — an under-damped spring's overshoot is real motion, not a bug
-    /// (see the type docs' Overshoot section) — but always lands exactly on
-    /// the target once the fling settles. Use
-    /// [`value_clamped`](Self::value_clamped) if a bounded `[0, 1]` read is
-    /// required instead.
+    /// The current value: within `0.0..=1.0` for duration motion, but a spring
+    /// [`fling`](Self::fling) may transiently leave that range (see the type docs'
+    /// Overshoot section); see [`value_clamped`](Self::value_clamped).
     pub fn value(&self) -> f64 {
         self.value
     }
 
-    /// [`value`](Self::value), clamped to `0.0..=1.0`.
-    ///
-    /// Identical to `value()` for duration+[`Curve`] motion (already
-    /// bounded); for a spring [`fling`](Self::fling) mid-overshoot this
-    /// clips the transient excursion past the target — for consumers (e.g. a
-    /// `Lerp`/`Tween` feed) that need a bounded value and don't want the
-    /// bounce visually represented.
+    /// [`value`](Self::value) clamped to `0.0..=1.0`; differs from it only while a
+    /// fling overshoots.
     pub fn value_clamped(&self) -> f64 {
         self.value.clamp(0.0, 1.0)
     }
@@ -646,8 +529,7 @@ impl AnimationController {
         self.status
     }
 
-    /// Whether a motion is currently in progress (the next [`advance`](Self::advance)
-    /// will make progress).
+    /// Whether a motion is in progress (the next [`advance`](Self::advance) makes progress).
     pub fn is_animating(&self) -> bool {
         !matches!(self.drive, Drive::Idle)
     }
@@ -692,14 +574,9 @@ impl AnimationController {
         };
     }
 
-    /// Start a spring fling from the current value with initial `velocity` (in
-    /// value-units per second). It settles toward `1.0` for a non-negative
-    /// velocity, `0.0` otherwise.
-    ///
-    /// Unlike duration+[`Curve`] motion, the value driven by a fling is
-    /// **not clamped to `[0, 1]` while in flight** — see the type docs'
-    /// Overshoot section and [`value`](Self::value)/
-    /// [`value_clamped`](Self::value_clamped).
+    /// Start a spring fling from the current value with initial `velocity` (value
+    /// units per second), settling at `1.0` for a non-negative velocity, else `0.0`.
+    /// The value is not clamped in flight (see the type docs' Overshoot section).
     pub fn fling(&mut self, velocity: f64, spring: SpringDesc) {
         let target = if velocity >= 0.0 { 1.0 } else { 0.0 };
         let x0 = self.value - target;
@@ -724,22 +601,19 @@ impl AnimationController {
         self.last_time = None;
     }
 
-    /// Advance the animation to frame time `now`, returning whether it is still
-    /// animating (in which case the caller must request another frame).
+    /// Advance to frame time `now`, returning whether it is still animating (the
+    /// caller must then request another frame).
     ///
-    /// The delta from the previous `advance` is derived via
-    /// [`FrameTime::saturating_sub`], so a repeated or out-of-order timestamp
-    /// yields a zero (never negative) delta: safe, no panic, no `NaN`. The first
-    /// `advance` after starting a motion only seeds the clock (zero delta); the
-    /// next one makes progress.
+    /// The delta uses [`FrameTime::saturating_sub`], so a repeated or out-of-order
+    /// timestamp yields a zero delta, never a panic or `NaN`. The first `advance`
+    /// after starting a motion only seeds the clock.
     pub fn advance(&mut self, now: FrameTime) -> bool {
         let dt = match self.last_time {
             Some(last) => now.saturating_sub(last).as_secs_f64(),
             None => 0.0,
         };
         self.last_time = Some(now);
-        // `saturating_sub` already guarantees `dt >= 0`; guard against a
-        // non-finite value defensively so a downstream `value` is never `NaN`.
+        // Defensive: a non-finite delta must never reach `value`.
         let dt = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
 
         match &mut self.drive {
@@ -799,11 +673,7 @@ impl AnimationController {
                     self.drive = Drive::Idle;
                     false
                 } else {
-                    // Deliberately unclamped: an under-damped spring's
-                    // overshoot past the target is real, intended motion
-                    // (see the type docs' Overshoot section), and clamping
-                    // it here would hide it. `value_clamped()` is the
-                    // bounded-read escape hatch for consumers that need one.
+                    // Deliberately unclamped: overshoot is intended motion (see `value_clamped`).
                     self.value = target + spring.position(elapsed);
                     true
                 }

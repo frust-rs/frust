@@ -1,40 +1,18 @@
 //! Component: Flutter's `StatefulWidget` analog.
 //!
-//! A [`Component`] is a piece of UI with *retained local state* that lives in
-//! the widget tree, a per-component reactive [`Owner`] (context scoping +
-//! `on_cleanup`), and a state boundary the surrounding view tree never sees. It
-//! is the seam that lets a subtree own state independent of the ambient
-//! application state: a [`ComponentView`] implements `View<Outer>` for **any**
-//! outer state, and the subtree it hosts is diffed against the component's own
-//! `State` instead.
+//! A [`Component`] is UI with retained local state that lives in the widget
+//! tree, a per-component reactive [`Owner`] (context scoping + `on_cleanup`), and
+//! a state boundary the surrounding view tree never sees: [`ComponentView`]
+//! implements `View<Outer>` for any `Outer`, and its subtree is diffed against
+//! the component's own `State`.
 //!
-//! # The state boundary
-//!
-//! [`ComponentWidget`] builds an inner [`EventCtx`] over its own
-//! `C::State` and dispatches events to its child through the same
-//! capture/focus/IME routing contract single-child containers use (mirroring
-//! `frust-widgets`' `route_event_single`), then mirrors the inner results
-//! (redraw / capture / focus request-release / IME publish) back onto the
-//! *outer* context. The subtree therefore mutates the component's local state
-//! while the outer tree only observes the effects (a redraw, a capture, a focus
-//! change) — exactly as a container observes them from a leaf.
-//!
-//! # Reactive ownership
-//!
-//! Each component owns a child [`Owner`] created under the ambient owner (the
-//! root `Owner` a shell wraps its rebuild in; a nested component inherits its
-//! parent component's owner because build/rebuild run under `owner.with`). The
-//! owner scopes `provide_context`/`use_context` and `on_cleanup`, and is
-//! disposed explicitly at teardown (and defensively on `Drop`).
-//!
-//! # What `Component` does NOT do (yet)
-//!
-//! Per-component tracked/reactive scopes and rebuild skipping are not
-//! implemented: a component **always** re-runs `build` on rebuild because its
-//! local state may have changed even when the component value compares equal.
-//! Root-level components are never torn down (the root widget lives for the
-//! app's life), so a root component's `on_cleanup`/owner disposal never runs —
-//! a known, accepted limitation.
+//! [`ComponentWidget`] builds an inner [`EventCtx`] over `C::State`, dispatches
+//! through the single-child routing contract, and mirrors the inner results
+//! (redraw, capture, focus, IME) onto the outer context. Each component owns a
+//! child [`Owner`], disposed at teardown and defensively on `Drop`. `build`
+//! always re-runs on rebuild; tracked scopes and rebuild skipping are not
+//! implemented. A root component is never torn down, so its `on_cleanup` never
+//! runs (accepted limitation).
 
 use std::any::Any;
 
@@ -51,133 +29,82 @@ use crate::widget::{ChildPod, LayoutCtx, PaintCtx, PaintScene, Widget};
 
 /// A piece of UI with retained local state (Flutter's `StatefulWidget` analog).
 ///
-/// A `Component` declares an associated [`Component::State`] type, seeds it once
-/// with [`Component::init`], and produces its subtree with [`Component::build`],
-/// which receives `&mut State` so the build can read (and the subtree's events
-/// can mutate) the retained state. The subtree is any `impl View` over the
-/// component's own `State` — the outer state type never appears. Erasure
-/// happens at the API boundary: [`ComponentWidget`] wraps whatever `build`
-/// returns in an [`AnyView`] before storing it, and because [`AnyView::new`] is
-/// idempotent a body that already returns an `AnyView` (e.g. `any(..)`) is not
-/// boxed a second time.
+/// Seeds `State` once with [`Component::init`] and produces the subtree with
+/// [`Component::build`] over `&mut State`. The subtree is any `impl View` over
+/// the component's own `State`; [`ComponentWidget`] erases it into an
+/// [`AnyView`] (idempotent, so an `any(..)` body is not boxed twice).
 pub trait Component: 'static {
-    /// The retained local state this component owns across rebuilds.
+    /// The retained local state across rebuilds.
     type State: 'static;
 
-    /// Create the component's initial local state. Runs exactly once, when the
-    /// [`ComponentWidget`] is first built, under the component's [`Owner`] (so
-    /// `on_cleanup`/`provide_context` registered here bind to that owner).
+    /// Create the initial local state. Runs once, when the [`ComponentWidget`] is
+    /// first built, under the component's [`Owner`].
     ///
-    /// A *root* component (the one an entry macro or `frust::run` drives) has
-    /// no enclosing [`ComponentWidget`] and so no per-component owner of its
-    /// own: the shell instead runs its `init`/`build` under the shell's **root**
-    /// [`Owner`], which lives for the whole process and is never disposed. Its
-    /// `on_cleanup`/`provide_context` therefore bind to that root owner — the
-    /// context is visible to the entire tree, and cleanups run at process exit
-    /// rather than on teardown (there is no teardown for the root).
+    /// A *root* component has no enclosing widget, so the shell runs its
+    /// `init`/`build` under the process-lifetime root [`Owner`]: its context is
+    /// visible to the whole tree and its cleanups run at process exit.
     fn init(&self) -> Self::State;
 
-    /// Produce the component's subtree from its current local state.
+    /// Produce the subtree from the current local state.
     ///
-    /// Re-run on every rebuild (local state may have changed even when the
-    /// component value is equal). The returned view is erased into an
-    /// [`AnyView`] by the hosting [`ComponentWidget`] and diffed against the
-    /// previous one exactly like `RenderRoot`'s root view is. Implementations
-    /// declare the return type as `impl View<Self::State>`; returning a concrete
-    /// view type or an `any(..)` value both satisfy it.
-    ///
-    /// The opaque return type captures the `&self` and `&mut State` borrows, so
-    /// a caller that hands the result out of a closure (a root driver's
-    /// `move |state| ..` build closure) erases it first with
-    /// `AnyView::new(root.build(state))`.
+    /// Re-run on every rebuild and diffed against the previous view. The opaque
+    /// return type captures the `&self` and `&mut State` borrows, so a caller that
+    /// hands it out of a closure erases it first with `AnyView::new(root.build(state))`.
     fn build(&self, state: &mut Self::State) -> impl View<Self::State>;
 }
 
 /// The `View` adapter that hosts a [`Component`] in any surrounding view tree.
 ///
-/// `ComponentView<C>` implements `View<Outer>` for **every** `Outer` state:
-/// the hosted subtree is bound to `C::State`, not `Outer`, so a component can
-/// be dropped anywhere regardless of the ambient application state. Build it
-/// with the [`component`] free function.
+/// Implements `View<Outer>` for every `Outer`: the subtree is bound to
+/// `C::State`. Build it with [`component`].
 pub struct ComponentView<C: Component> {
     component: C,
 }
 
-/// Host a [`Component`] as a [`View`] — the view-fn spelling of
-/// [`ComponentView`], mirroring the `text(..)`/`button(..)` vocabulary.
+/// Host a [`Component`] as a [`View`] (the view-fn spelling of [`ComponentView`]).
 pub fn component<C: Component>(c: C) -> ComponentView<C> {
     ComponentView { component: c }
 }
 
 /// The retained widget behind a [`ComponentView`].
 ///
-/// Owns the component's local `State`, the previous child [`AnyView`] (diffed
-/// each rebuild), the child element wrapped in a [`ChildPod`], the component's
-/// reactive [`Owner`], and a component-local [`BuildCtx`] id counter.
+/// The child element is double-boxed inside the pod (`ChildPod::new(Box::new(element))`)
+/// so a rebuild can recover the `&mut Box<dyn Widget>` that [`AnyView::rebuild`]
+/// needs to swap the widget on a concrete-type change.
 ///
-/// The child element is stored **double-boxed** inside the pod (`ChildPod::new(
-/// Box::new(element))`, where `element: Box<dyn Widget>` is the [`AnyView`]'s
-/// element): the extra box lets a rebuild recover the child as
-/// `&mut Box<dyn Widget>`, the exact type [`AnyView::rebuild`] needs to swap the
-/// widget on a concrete-type change. This mirrors `frust-widgets`'
-/// `build_child`/`rebuild_child` pod convention.
-///
-/// # Under the `hotpatch` feature
-///
-/// The struct is `repr(C)`, starts with the [`SeamWitness`] the creating image
-/// wrote, and holds the state boxed, so every field sits at the same offset in
-/// every image whatever `C::State` looks like there. `rebuild`, `teardown` and
-/// `Drop` check the witness first; on a mismatch nothing `C`-generic touches the
-/// state, and `Drop` leaks the state box (`mem::forget`) rather than let another
-/// image's layout drop or free it, while still disposing the owner.
+/// Under `hotpatch` the struct is `repr(C)`, starts with the [`SeamWitness`] of
+/// the creating image and boxes the state, so field offsets are image-independent.
+/// `rebuild`, `teardown` and `Drop` check the witness first; on a mismatch `Drop`
+/// leaks the state box rather than let another image's layout free it, and still
+/// disposes the owner.
 #[cfg_attr(feature = "hotpatch", repr(C))]
 pub struct ComponentWidget<C: Component> {
     /// The layout of `C` and `C::State` in the image that built this widget.
     #[cfg(feature = "hotpatch")]
     witness: SeamWitness,
-    /// The component's retained local state; the inner [`EventCtx`] is built
-    /// over this, so the subtree's event handlers mutate it via `state_mut`.
-    /// Always `Some` while the widget is live; `Drop` takes it to leak it on a
-    /// layout mismatch.
+    /// The retained local state; `None` only while `Drop` leaks it on a layout mismatch.
     #[cfg(feature = "hotpatch")]
     state: Option<Box<C::State>>,
-    /// The component's retained local state; the inner [`EventCtx`] is built
-    /// over this, so the subtree's event handlers mutate it via `state_mut`.
+    /// The retained local state; the inner [`EventCtx`] is built over it.
     #[cfg(not(feature = "hotpatch"))]
     state: C::State,
-    /// The previous child view, diffed against the freshly built one each
-    /// rebuild (the same reconcile `RenderRoot::rebuild_view` performs).
     prev: AnyView<C::State>,
-    /// The child element (a double-boxed [`AnyView`] element) plus its geometry
-    /// and capture/focus bookkeeping.
     child: ChildPod,
-    /// The component's reactive owner — child of the ambient owner, scoping
-    /// context and `on_cleanup`. Disposed explicitly at teardown / drop.
     owner: Owner,
-    /// Component-local widget-id counter for the child's [`BuildCtx`] (decoupled
-    /// from the arena's monotonic ids because pod-owned children never enter the
-    /// arena).
+    /// Component-local id counter for the child's [`BuildCtx`] (pod children never enter the arena).
     next_id: u64,
-    /// Whether the owner has already been disposed, so teardown + `Drop` never
-    /// run cleanups twice.
     disposed: bool,
 }
 
 impl<C: Component> ComponentWidget<C> {
-    /// Dispose the component's owner exactly once, running its `on_cleanup`s and
-    /// dropping any arena-allocated reactive values. Idempotent: teardown and a
-    /// later defensive `Drop` both call this, but the cleanups fire once.
+    /// Dispose the owner once, running its `on_cleanup`s; idempotent.
     fn dispose(&mut self) {
         if !self.disposed {
-            // `Owner::cleanup` runs this owner's (and its children's) registered
-            // `on_cleanup`s and drops its arena nodes; it drains those lists, so
-            // a second call — including the `Drop` fallback below — is a no-op.
             self.owner.cleanup();
             self.disposed = true;
         }
     }
 
-    /// The retained local state.
     #[cfg(feature = "hotpatch")]
     fn state_mut(&mut self) -> &mut C::State {
         self.state
@@ -185,13 +112,11 @@ impl<C: Component> ComponentWidget<C> {
             .expect("component state is present while the widget is live")
     }
 
-    /// The retained local state.
     #[cfg(not(feature = "hotpatch"))]
     fn state_mut(&mut self) -> &mut C::State {
         &mut self.state
     }
 
-    /// The retained local state, read-only.
     #[cfg(all(test, feature = "hotpatch"))]
     fn state(&self) -> &C::State {
         self.state
@@ -199,7 +124,6 @@ impl<C: Component> ComponentWidget<C> {
             .expect("component state is present while the widget is live")
     }
 
-    /// The retained local state, read-only.
     #[cfg(all(test, not(feature = "hotpatch")))]
     fn state(&self) -> &C::State {
         &self.state
@@ -216,15 +140,12 @@ impl<C: Component> ComponentWidget<C> {
 impl<C: Component> Drop for ComponentWidget<C> {
     fn drop(&mut self) {
         // A mismatched witness means this drop glue belongs to an image whose
-        // `C::State` layout differs from the creator's: leak the state box
-        // without dropping or freeing it. `take` reads and clears only the
-        // pointer, whose layout does not depend on `C::State`.
+        // `C::State` layout differs: leak the state box without dropping or freeing it.
         #[cfg(feature = "hotpatch")]
         if crate::hotpatch::verify_witness::<C>(self.witness).is_err() {
             std::mem::forget(self.state.take());
         }
-        // Defensive: a component removed by a path that did not route through
-        // `View::teardown` (or a panic mid-teardown) still disposes its owner.
+        // Defensive: a removal that skipped `View::teardown` still disposes the owner.
         self.dispose();
     }
 }
@@ -233,10 +154,7 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
     type Element = ComponentWidget<C>;
 
     fn build(&self, _ctx: &mut BuildCtx<'_>) -> Self::Element {
-        // A child of the ambient owner: the root owner a shell installs, or the
-        // enclosing component's owner (we build under `owner.with`, below).
         let owner = Owner::new();
-        // This image runs `init`, so its layout is the creator's.
         #[cfg(feature = "hotpatch")]
         let witness = SeamWitness::of::<C>();
         let (state, prev, child, next_id) = owner.with(|| {
@@ -244,9 +162,8 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
             let mut state = Box::new(self.component.init());
             #[cfg(not(feature = "hotpatch"))]
             let mut state = self.component.init();
-            // Erase at the boundary; idempotent, so an `AnyView` body is not
-            // re-boxed. The seam erases inside the hot function; a patch that
-            // already changed `C`'s layout yields an inert child instead.
+            // Erase at the boundary; under hotpatch the seam erases inside the hot
+            // function and a patch that already changed `C`'s layout yields an inert child.
             #[cfg(feature = "hotpatch")]
             let view = crate::hotpatch::built_or_inert(crate::hotpatch::build_erased(
                 &self.component,
@@ -255,16 +172,12 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
             ));
             #[cfg(not(feature = "hotpatch"))]
             let view = AnyView::new(self.component.build(&mut state));
-            // A component-local build counter; the child never enters the arena.
             let mut next_id = 0u64;
             let mut inner = BuildCtx::new(&mut next_id);
-            // A freshly built child pod holds no focus link (`ChildPod::new`
-            // starts unfocused), so the chain across this boundary is closed —
-            // and a build tears nothing down, so nothing under it can orphan a
-            // session (see `BuildCtx::has_focus`).
+            // A fresh pod holds no focus link, and a build tears nothing down, so no
+            // session can be orphaned (see `BuildCtx::has_focus`).
             inner.set_has_focus(false);
             let element: Box<dyn Widget> = view.build(&mut inner);
-            // Double-box so a later rebuild can recover `&mut Box<dyn Widget>`.
             (state, view, ChildPod::new(Box::new(element)), next_id)
         });
         ComponentWidget {
@@ -288,44 +201,30 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
         element: &mut Self::Element,
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
-        // Before anything forms `&mut C::State` or reads `prev`/`child`: a
-        // widget another image built with a different layout is left exactly as
-        // it is (the stale subtree stays until the session restarts).
+        // Before anything forms `&mut C::State`: a widget another image built with a
+        // different layout is left as it is.
         #[cfg(feature = "hotpatch")]
         if crate::hotpatch::verify_witness::<C>(element.witness).is_err() {
             return ChangeFlags::NONE;
         }
-        // The outer `_prev` ComponentView is intentionally unused: the component
-        // always re-runs `build` because its retained local state may have
-        // changed even when the component value is equal (tracked-scope skipping
-        // is not implemented).
-        //
-        // The outer `ctx`, by contrast, is read for exactly one thing: the
-        // effective focus chain, which must cross this state boundary or every
-        // reconciler under a component would start a fresh (assumed-live) chain.
-        // Read here because the inner context is built inside the `owner.with`
-        // closure below, which cannot also borrow `ctx`.
+        // `_prev` is unused: `build` always re-runs because retained state may have
+        // changed. The outer `ctx` is read only for the focus chain, which must cross
+        // this boundary (read before `owner.with`, which cannot also borrow `ctx`).
         let outer_has_focus = ctx.has_focus();
         let owner = element.owner.clone();
         owner.with(|| {
-            // The seam passes the stored witness, so a patched hot function
-            // compares the creator's layout with its own.
             #[cfg(feature = "hotpatch")]
             let new_view = {
                 let witness = element.witness;
                 match crate::hotpatch::build_erased(&self.component, element.state_mut(), witness) {
                     Ok(view) => view,
-                    // Reported by the seam; nothing below has been touched.
                     Err(_) => return ChangeFlags::NONE,
                 }
             };
             #[cfg(not(feature = "hotpatch"))]
             let new_view = AnyView::new(self.component.build(element.state_mut()));
-            // Read before the `widget_mut` borrow below.
             let child_focused = element.child.is_focused();
             let (flags, swapped) = {
-                // The non-marking accessor: the pod is marked below from the
-                // rebuild's own flags (see `ChildPod::widget_mut_for_rebuild`).
                 let boxed = element
                     .child
                     .widget_mut_for_rebuild()
@@ -336,18 +235,12 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
                     any.type_id()
                 };
                 let mut inner = BuildCtx::new(&mut element.next_id);
-                // Extend the chain by this component's own child link — the
-                // `ChildPod::paint_child` composition, spelled by hand because
-                // the component descends into its pod through a fresh inner
-                // context rather than through the pod plumbing.
+                // Extend the focus chain by this component's child link (the
+                // `ChildPod::paint_child` composition, spelled by hand).
                 inner.set_has_focus(outer_has_focus && child_focused);
-                // Run the child rebuild as an element-replaced tracking scope: a
-                // body that is an enum view (`Either`, `EitherOfN`) keeps its
-                // concrete type across an arm swap, so the type-id comparison
-                // below cannot see it, and the enum reports it instead
-                // (`BuildCtx::mark_element_replaced`). A pod inside the body
-                // consumes its own signal, so only a swap of *this* child's
-                // widget reaches here.
+                // An enum body (`Either`, `EitherOfN`) keeps its concrete type across an arm
+                // swap, so the type-id check below cannot see it; the enum reports it via
+                // `BuildCtx::mark_element_replaced`.
                 let (flags, replaced) = inner
                     .track_element_replaced(|inner| new_view.rebuild(&element.prev, boxed, inner));
                 let after = {
@@ -357,30 +250,19 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
                 (flags, before != after || replaced)
             };
             if swapped {
-                // The child AnyView swapped concrete type (or its enum body
-                // switched arms): the old widget was torn down inside the
-                // child's `rebuild`, so any capture/focus path it recorded is
-                // stale — drop it (mirrors `rebuild_child`).
                 element.child.set_active(false);
                 element.child.set_focused(false);
-                // Dropping the flag is not the load-bearing part: the focused
-                // widget just stopped existing, so a LIVE session died with it
-                // and the root must release it before the frame ends. Gated on
-                // the whole chain — `outer_has_focus && child_focused` is the
-                // same composition `teardown` spells below and the same one
-                // `frust-widgets`' `mark_orphan_if_live` applies at its own
-                // marking sites (this crate sits below that one, so the gate is
-                // spelled by hand rather than shared).
+                // A focused widget that just stopped existing killed a LIVE session, so the
+                // root must release it. Gated on the whole chain, as `teardown` and
+                // `frust-widgets`' `mark_orphan_if_live` do (this crate sits below that one,
+                // so the gate is spelled by hand).
                 if outer_has_focus && child_focused {
                     crate::event::mark_focus_orphaned();
                 }
             }
-            // The layout-skip dirty source for the component's own child pod: it
-            // is rebuilt here rather than through a reconciler, so the mark the
-            // reconcilers apply is spelled by hand. The component's *own* pod is
-            // marked by whoever rebuilt it, from the same `flags` returned below.
-            // A LAYOUT rebuild dirties layout (which implies paint); a PAINT-only
-            // rebuild dirties just paint, so a retained layer is not reused stale.
+            // Layout-skip dirty source for the child pod, rebuilt here rather than via a
+            // reconciler. LAYOUT dirties layout (implying paint); PAINT-only dirties just
+            // paint, so a retained layer is not reused stale.
             if swapped || flags.contains(ChangeFlags::LAYOUT) {
                 element.child.mark_layout_dirty();
             } else if flags.contains(ChangeFlags::PAINT) {
@@ -392,20 +274,12 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
     }
 
     fn teardown(&self, element: &mut Self::Element, ctx: &mut BuildCtx<'_>) {
-        // A widget another image built with a different layout is not torn
-        // down: neither the child teardown through `prev` nor the dispose runs
-        // here (`Drop` disposes the owner and leaks the state).
         #[cfg(feature = "hotpatch")]
         if crate::hotpatch::verify_witness::<C>(element.witness).is_err() {
             return;
         }
-        // Forward teardown to the child view/element under the component owner,
-        // then dispose the owner (runs `on_cleanup`s) and let the state drop.
-        //
-        // The outer focus chain crosses the boundary here exactly as it does in
-        // `rebuild`: a component torn down *inside a live focus chain* must let
-        // the reconcilers below it mark the orphan, and one torn down under a
-        // cleared link must not (see `BuildCtx::has_focus`).
+        // Forward teardown to the child under the owner, then dispose it. The focus
+        // chain crosses the boundary as in `rebuild` (see `BuildCtx::has_focus`).
         let inner_has_focus = ctx.has_focus() && element.child.is_focused();
         element.owner.clone().with(|| {
             let mut next_id = element.next_id;
@@ -421,40 +295,25 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
 
 impl<C: Component> Widget for ComponentWidget<C> {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
-        // Pass-through: the component contributes no chrome of its own. The
-        // child sits at the component's origin (ZERO in the component's local
-        // space) and receives the incoming constraints unchanged.
         self.child.set_origin(Point::ZERO);
         self.child.layout_child(ctx, bc)
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
-        // Pass-through to the pod at origin ZERO: `paint_child` offsets by the
-        // incoming `ctx.origin()`, bubbles `needs_frame`, republishes a focused
-        // editable's IME surface, and composes `has_focus` — exactly like a
-        // single-child container.
         self.child.paint_child(ctx, scene);
     }
 
     fn semantics(&self, ctx: &mut crate::semantics::SemanticsCtx) {
-        // A component contributes no node of its own (the state boundary is
-        // invisible to accessibility); forward to the child pod, exactly like a
-        // transparent single-child container.
         self.child.semantics_child(ctx);
     }
 
     fn visit_children(&self, visitor: &mut dyn FnMut(&ChildPod)) {
-        // The component boundary is invisible to tooling for the same reason it
-        // is invisible to accessibility: it contributes no element of its own,
-        // only the child it wraps.
         visitor(&self.child);
     }
 
-    /// A component is a sliver exactly when its child is: the boundary is as
-    /// transparent to the sliver protocol as it is to box layout. The sliver
-    /// face is the component itself rather than the child widget, so the
-    /// layout runs through the child pod and leaves it sized and recorded for
-    /// this component's own paint, hit test and semantics.
+    /// A component is a sliver exactly when its child is. The sliver face is the
+    /// component itself, so layout runs through the child pod and leaves it sized
+    /// for this component's paint, hit test and semantics.
     fn as_sliver(&mut self) -> Option<&mut dyn SliverWidget> {
         if self.child.is_sliver() {
             Some(self)
@@ -464,33 +323,20 @@ impl<C: Component> Widget for ComponentWidget<C> {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        // The state boundary: build an inner context over the component's *own*
-        // local state, seeded with the outer focus flag, dispatch through the
-        // pod with the single-child routing contract, then mirror the inner
-        // results back onto the outer context.
-        //
-        // A synthesized `Cancel` (from an outer structural rebuild) arrives over
-        // throwaway `()` outer state, but this handler never touches outer state
-        // — it forwards to the subtree over the component's real state, safe
-        // under the Cancel-never-reads-state contract (which binds the subtree's
-        // handlers, not this carrier).
+        // The state boundary: dispatch over an inner context on the component's own
+        // state, then mirror the results onto the outer one. A synthesized `Cancel`
+        // arrives over throwaway outer `()` state, but this handler never touches outer
+        // state (the Cancel-never-reads-state contract binds the subtree's handlers).
         let size = ctx.size();
         let has_focus = ctx.has_focus();
-        // The hover link, its live epoch, and this pass's claim eligibility all
-        // cross the state boundary unchanged — a component is transparent to hover
-        // exactly as it is to focus, so a claim made below it still reaches the root
-        // and stamps the pod chain on the way (mirrored back through `claim_hover`).
+        // Hover link, epoch and claim eligibility cross the boundary unchanged, as
+        // focus does; a claim below it still reaches the root via `claim_hover`.
         let hovered = ctx.is_hovered();
         let hover_epoch = ctx.hover_epoch();
         let hover_eligible = ctx.is_hover_eligible();
-        // A cursor request needs no threading here at all, unlike every other
-        // channel this carrier mirrors: it rides one pass-scoped slot rather than a
-        // per-context field (see `crate::event`'s `CURSOR_REQUEST`), so a
-        // `set_cursor` below this boundary already reaches the root, and the
-        // component boundary is transparent to it by construction.
+        // A cursor request needs no threading: it rides a pass-scoped slot (see
+        // `crate::event`'s `CURSOR_REQUEST`).
         let (result, needs_redraw, layout, captured, hover_claimed, focus_req, focus_rel, ime) = {
-            // Spelled per field (not through `state_mut`) so the borrow stays
-            // disjoint from `self.child` below.
             #[cfg(feature = "hotpatch")]
             let state_any: &mut dyn Any = self
                 .state
@@ -518,9 +364,6 @@ impl<C: Component> Widget for ComponentWidget<C> {
         if needs_redraw {
             ctx.request_redraw();
         }
-        // The layout request and the layout-dirty path bit cross the state
-        // boundary like the redraw: the inner pod marked itself, and the pods
-        // above this component must mark themselves too.
         ctx.absorb_layout(layout.0, layout.1);
         if captured {
             ctx.capture_pointer();
@@ -542,15 +385,12 @@ impl<C: Component> Widget for ComponentWidget<C> {
 }
 
 impl<C: Component> SliverWidget for ComponentWidget<C> {
-    /// Pass-through, like [`Widget::layout`]: the child sits at the component's
-    /// origin and receives `sc` unchanged, under the child pod's layout skip.
+    /// Pass-through, like [`Widget::layout`]: `sc` reaches the child unchanged.
     fn layout_sliver(&mut self, ctx: &mut LayoutCtx, sc: &SliverConstraints) -> SliverGeometry {
         self.child.set_origin(Point::ZERO);
-        // A viewport reaches this only through `ChildPod::layout_sliver_child`,
-        // which asks `as_sliver` first, so `None` here means a caller invoked
-        // `layout_sliver` on a wrapper whose `as_sliver` answered `None`: a
-        // contract breach that fails in debug builds; release builds fall back
-        // to an empty sliver.
+        // Reached only via `ChildPod::layout_sliver_child`, which asks `as_sliver`
+        // first; `None` means a contract breach (debug_assert; release falls back to
+        // an empty sliver).
         self.child.layout_sliver_child(ctx, sc).unwrap_or_else(|| {
             debug_assert!(
                 false,
@@ -561,23 +401,17 @@ impl<C: Component> SliverWidget for ComponentWidget<C> {
     }
 }
 
-/// Route an event to the component's single child pod with the recorded-path
-/// semantics single-child containers use (the in-crate mirror of
-/// `frust-widgets`' `route_event_single`).
+/// Route an event to the single child pod with the recorded-path semantics of
+/// single-child containers (the in-crate mirror of `frust-widgets`'
+/// `route_event_single`).
 ///
-/// A broadcast ([`InputEvent::is_broadcast`]) reaches the child unconditionally,
-/// checked **first** so no capture/focus/hit-test branch below can swallow it —
-/// a component sitting between the root and a navigator is the ordinary shape,
-/// so this arm is what lets a deferred pop-result flush reach that navigator at
-/// all. A focus-routed event goes to the child only if it holds the recorded
-/// focus path; a captured (active) child receives pointer events unconditionally
-/// (capture auto-releasing on `Up`/`Cancel`), otherwise the child receives the
-/// event only if it contains the point, and a `Down` that misses a focused
-/// child blurs it.
+/// A broadcast is checked first so no capture/focus/hit-test branch can swallow
+/// it (a deferred pop-result flush must reach a navigator below a component). A
+/// focus-routed event needs the recorded focus path; a captured child gets
+/// pointer events unconditionally (released on `Up`/`Cancel`); otherwise the
+/// child needs to contain the point, and a missed `Down` blurs a focused child.
 fn route_child(pod: &mut ChildPod, ctx: &mut EventCtx<'_>, event: &InputEvent) -> EventResult {
     if event.is_broadcast() {
-        // Never consumed: forward, discard the result (see the variant's
-        // routing contract).
         pod.event_child(ctx, event);
         return EventResult::Ignored;
     }

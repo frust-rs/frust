@@ -1,39 +1,23 @@
 //! The retained widget tree, backed by `tree_arena`.
 //!
-//! `tree_arena` gives O(1) access to any node with *simultaneous* mutable
-//! access to a node's value and its children — the proven answer to the
-//! borrow-checker fights a widget tree otherwise causes. All direct use of the
-//! arena is confined to this module; the rest of the crate speaks in
-//! [`WidgetId`]/[`WidgetPod`] terms.
-//!
-//! v0 is single-root (the app has one root widget), but the API is written in
-//! terms of insert-into-list / find so container support drops in
-//! without reshaping this layer.
+//! `tree_arena` gives O(1) node access with simultaneous mutable access to a
+//! node's value and its children. All direct use of the arena is confined to
+//! this module; the rest of the crate speaks in [`WidgetId`]/[`WidgetPod`] terms.
 //!
 //! # Introspection
 //!
 //! [`WidgetTree::roots`] / [`WidgetTree::children`] / [`WidgetTree::inspect`]
-//! make the arena enumerable for read-only tooling. `tree_arena` 0.2 does expose
-//! `root_ids`/`child_ids`, but both iterate a `HashMap` in **arbitrary** order,
-//! which is useless for an inspector that has to show siblings the way the app
-//! declared them. The tree therefore keeps a parallel insertion-order index
-//! (`root_order`/`child_order`) updated at the two mutation points that exist
-//! ([`WidgetTree::insert_root`] and [`WidgetTree::insert_child`]) and uses it
-//! only to *order* what the arena reports — the arena stays the single source of
-//! truth for membership, so a stale index entry can never surface a dangling id.
+//! make the tree enumerable for read-only tooling. `tree_arena` 0.2's
+//! `root_ids`/`child_ids` iterate a `HashMap` in arbitrary order, so the tree
+//! keeps a parallel insertion-order index (`root_order`/`child_order`) updated
+//! at [`WidgetTree::insert_root`] and [`WidgetTree::insert_child`], used only to
+//! order what the arena reports: the arena stays the source of truth for
+//! membership, so a stale index entry never surfaces a dangling id.
 //!
-//! Containers own their children as [`ChildPod`]s rather than as arena nodes
-//! (see that type's docs), so the arena itself holds little more than the root
-//! pod. [`WidgetTree::inspect`] therefore walks *both*: a node's arena children
-//! first, then the pods its widget hands to
-//! [`Widget::visit_children`] — so the snapshot is the real retained hierarchy
-//! rather than the arena's contents. Only `inspect` descends that way;
-//! [`WidgetTree::children`] stays strictly arena-scoped, since it answers "what
-//! does the arena hold under this id".
-//!
-//! The descent needs no cycle check: a pod owns its widget, ownership is a tree,
-//! and the visitor only ever hands out `&ChildPod`s the widget itself owns (see
-//! [`Widget::visit_children`]).
+//! Containers own children as [`ChildPod`]s, not arena nodes, so
+//! [`WidgetTree::inspect`] walks a node's arena children, then the pods its
+//! widget hands to [`Widget::visit_children`]; [`WidgetTree::children`] stays
+//! arena-scoped. No cycle check is needed: ownership is a tree.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -44,49 +28,38 @@ use tree_arena::{ArenaMut, ArenaRef, TreeArena};
 use crate::view::{ChangeFlags, WidgetId};
 use crate::widget::{ChildPod, Widget};
 
-/// A retained widget plus its layout results and dirty state.
-///
-/// The "pod" wraps the boxed widget with the bookkeeping the framework owns:
-/// where the widget was placed (`origin`), how big it is (`size`), and which
-/// passes are pending (`flags`).
+/// A retained widget plus its layout results and dirty state: where it was placed
+/// (`origin`), how big it is (`size`), and which passes are pending (`flags`).
 pub struct WidgetPod {
     id: WidgetId,
     widget: Box<dyn Widget>,
     origin: Point,
     size: Size,
     flags: ChangeFlags,
-    /// The concrete widget type's [`core::any::type_name`], captured once at
-    /// construction — a `&'static str` copy, so no per-frame cost.
+    /// The concrete widget type's [`core::any::type_name`], captured once at construction.
     type_name: &'static str,
-    /// An optional human name for tooling, `None` unless something calls
-    /// [`WidgetPod::set_debug_label`].
+    /// An optional human name for tooling, set via [`WidgetPod::set_debug_label`].
     debug_label: Option<Cow<'static, str>>,
 }
 
 impl WidgetPod {
-    /// The `type_name` recorded for a pod built from an already type-erased
-    /// widget, where the concrete type is no longer nameable.
+    /// The `type_name` recorded for a pod built from an already type-erased widget.
     pub const ERASED_TYPE_NAME: &'static str = "<erased dyn Widget>";
 
-    /// Wrap a freshly built, already type-erased widget. It starts dirty for
-    /// layout and paint.
-    ///
-    /// The concrete type is gone by the time the box arrives, so
-    /// [`type_name`](WidgetPod::type_name) reports
-    /// [`ERASED_TYPE_NAME`](WidgetPod::ERASED_TYPE_NAME). Prefer
-    /// [`WidgetPod::new_typed`] where the concrete type is still in scope.
+    /// Wrap a freshly built, already type-erased widget; it starts dirty for layout
+    /// and paint. [`type_name`](WidgetPod::type_name) reports
+    /// [`ERASED_TYPE_NAME`](WidgetPod::ERASED_TYPE_NAME); prefer [`WidgetPod::new_typed`]
+    /// where the concrete type is in scope.
     pub fn new(id: WidgetId, widget: Box<dyn Widget>) -> Self {
         Self::with_type_name(id, widget, Self::ERASED_TYPE_NAME)
     }
 
-    /// Wrap a freshly built widget whose concrete type is still in scope,
-    /// recording its [`core::any::type_name`] for introspection.
+    /// Wrap a freshly built widget whose concrete type is in scope, recording its
+    /// [`core::any::type_name`].
     ///
-    /// Pass the widget itself, never an already-boxed `Box<dyn Widget>`: the
-    /// blanket `Widget for Box<dyn Widget>` impl would make that compile while
-    /// recording the box's own type name and double-boxing the widget (which
-    /// breaks the downcast back to the originating view's element type). Use
-    /// [`WidgetPod::new`] for the erased case.
+    /// Pass the widget itself, never a `Box<dyn Widget>`: the blanket
+    /// `Widget for Box<dyn Widget>` impl would compile but record the box's type name
+    /// and double-box the widget, breaking the downcast to the view's element type.
     pub fn new_typed<W: Widget>(id: WidgetId, widget: W) -> Self {
         Self::with_type_name(id, Box::new(widget), core::any::type_name::<W>())
     }
@@ -108,17 +81,11 @@ impl WidgetPod {
         self.id
     }
 
-    /// The concrete widget type's name, or
-    /// [`ERASED_TYPE_NAME`](WidgetPod::ERASED_TYPE_NAME) when the pod was built
-    /// from an already-erased box.
+    /// The concrete widget type's name, or [`ERASED_TYPE_NAME`](WidgetPod::ERASED_TYPE_NAME).
     ///
-    /// Recorded at construction, which is sound here because a root pod's
-    /// element type is fixed by `RenderRoot<State, V>`'s `V` and cannot swap
-    /// under it. A [`ChildPod`], whose widget *can* be swapped by a rebuild,
-    /// asks the live widget instead ([`Widget::type_name`]).
-    ///
-    /// Diagnostic only: `type_name`'s output is not a stable contract across
-    /// compiler versions, so never parse or match on it.
+    /// Recorded at construction, sound because a root pod's element type is fixed by
+    /// `RenderRoot<State, V>`; a swappable [`ChildPod`] asks the live widget
+    /// ([`Widget::type_name`]). Diagnostic only: never parse or match on it.
     pub fn type_name(&self) -> &'static str {
         self.type_name
     }
@@ -128,9 +95,7 @@ impl WidgetPod {
         self.debug_label.as_deref()
     }
 
-    /// Attach a human name for tooling (an inspector shows it beside the type
-    /// name). Purely descriptive — nothing in the build/layout/paint path reads
-    /// it.
+    /// Attach a human name for tooling; nothing in build/layout/paint reads it.
     pub fn set_debug_label(&mut self, label: impl Into<Cow<'static, str>>) {
         self.debug_label = Some(label.into());
     }
@@ -182,13 +147,10 @@ impl WidgetPod {
     }
 }
 
-/// One node of a read-only widget-tree snapshot, as produced by
-/// [`WidgetTree::inspect`].
+/// One node of a read-only widget-tree snapshot, from [`WidgetTree::inspect`].
 ///
-/// Plain owned data with no borrow of the tree, so a caller (a devtools service,
-/// a test) can hold or forward it freely. Deliberately renderer-agnostic and
-/// serialization-agnostic: geometry is `kurbo`, and any wire format belongs to
-/// the consumer, not to this crate.
+/// Plain owned data with no borrow of the tree; geometry is `kurbo` and any wire
+/// format belongs to the consumer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InspectNode {
     /// The node's stable [`WidgetId`].
@@ -199,12 +161,10 @@ pub struct InspectNode {
     pub type_name: &'static str,
     /// The pod's optional debug label — see [`WidgetPod::set_debug_label`].
     pub debug_label: Option<Cow<'static, str>>,
-    /// The widget's border box in **absolute** window coordinates, logical px:
-    /// the pod's recorded layout origin accumulated down from the root, plus its
-    /// recorded size. `Rect::ZERO`-sized until a layout pass has run.
+    /// The border box in absolute window coordinates (logical px), accumulated from
+    /// the root; zero-sized until a layout pass has run.
     pub bounds: Rect,
-    /// This node's children: the arena's own children first (insertion order),
-    /// then the widget's owned [`ChildPod`]s in declaration order.
+    /// This node's children: arena children first, then the widget's owned [`ChildPod`]s.
     pub children: Vec<WidgetId>,
     /// Distance from the root (roots are `0`).
     pub depth: usize,
@@ -232,18 +192,12 @@ impl WidgetTree {
     /// Insert `pod` as a root of the tree, returning its id.
     pub fn insert_root(&mut self, pod: WidgetPod) -> WidgetId {
         let id = pod.id();
-        // `ArenaMutList::insert` takes `impl Into<NodeId>`; `WidgetId -> u64`.
         self.arena.roots_mut().insert(id.0, pod);
         self.root_order.push(id);
         id
     }
 
-    /// Insert `pod` as a child of `parent`. Returns the child id, or `None` if
-    /// `parent` is not in the tree.
-    ///
-    /// Exercises the tree_arena 0.2.0 `ArenaMut` / `ArenaMutList` handles: a
-    /// node's value and its child list are borrowed disjointly, so this stays
-    /// borrow-checker-clean.
+    /// Insert `pod` as a child of `parent`; `None` if `parent` is not in the tree.
     pub fn insert_child(&mut self, parent: WidgetId, pod: WidgetPod) -> Option<WidgetId> {
         let id = pod.id();
         let mut parent_mut: ArenaMut<'_, WidgetPod> = self.arena.find_mut(parent.0)?;
@@ -263,18 +217,12 @@ impl WidgetTree {
     }
 
     /// The tree's root ids, in insertion order.
-    ///
-    /// O(roots). Read-only; nothing here mutates the arena.
     pub fn roots(&self) -> Vec<WidgetId> {
         let live: HashSet<u64> = self.arena.root_ids().collect();
         order_against(&self.root_order, &live)
     }
 
-    /// The children of `id`, in insertion order — empty if `id` has no children
-    /// or is not in the tree.
-    ///
-    /// O(depth) to find the parent, then O(children). Every id returned is live
-    /// in the arena at call time.
+    /// The children of `id` in insertion order; empty if `id` is absent or childless.
     pub fn children(&self, id: WidgetId) -> Vec<WidgetId> {
         match self.arena.find(id.0) {
             Some(node) => self.ordered_children(id, node),
@@ -282,21 +230,13 @@ impl WidgetTree {
         }
     }
 
-    /// A read-only snapshot of the whole retained tree in pre-order (a node
-    /// precedes its descendants; siblings follow declaration order).
+    /// A read-only pre-order snapshot of the whole retained tree (siblings in
+    /// declaration order).
     ///
-    /// The walk covers **both** child mechanisms: the arena's own children, then
-    /// the [`ChildPod`]s a widget publishes through [`Widget::visit_children`] —
-    /// which is where nearly the whole hierarchy actually lives. A container
-    /// that does not override that seam reads as a leaf.
-    ///
-    /// O(nodes) — one pass, one `HashSet` of sibling ids per arena parent, no
-    /// arena mutation and no bookkeeping left behind (a pod's tooling id is
-    /// assigned once, on its first visit, and reused). Bounds come from what the
-    /// last layout pass recorded on each pod ([`WidgetPod::origin`] /
-    /// [`WidgetPod::size`], [`ChildPod::origin`] / [`ChildPod::size`]),
-    /// accumulated into absolute window coordinates on the way down; call it
-    /// after a layout pass or the rects are all zero-sized.
+    /// Covers both child mechanisms: arena children, then the [`ChildPod`]s a widget
+    /// publishes through [`Widget::visit_children`] (a container that does not
+    /// override it reads as a leaf). Bounds come from the last layout pass, so call
+    /// it after one or the rects are zero-sized.
     pub fn inspect(&self) -> Vec<InspectNode> {
         let mut out = Vec::new();
         let roots = self.arena.roots();
@@ -308,17 +248,12 @@ impl WidgetTree {
         out
     }
 
-    /// Per-node layout-dirty state for tooling and tests, read-only: one
-    /// `(id, layout_dirty)` pair for every node [`WidgetTree::inspect`] reports,
-    /// in exactly its pre-order and with exactly its ids, so the two zip.
+    /// Per-node layout-dirty state for tooling and tests: one `(id, layout_dirty)`
+    /// pair per node [`WidgetTree::inspect`] reports, in its order, so the two zip.
     ///
-    /// A [`ChildPod`] reports [`ChildPod::is_layout_dirty`] — whether its next
-    /// [`ChildPod::layout_child`] must lay it out whatever its constraints. An
-    /// arena [`WidgetPod`] always reports `false`: it sits in no `ChildPod`, and
-    /// the root lays it out on every pass unconditionally, so there is no skip
-    /// state to report. Kept beside `inspect` rather than inside
-    /// [`InspectNode`] so that plain struct's shape — which consumers construct
-    /// literally — does not change.
+    /// A [`ChildPod`] reports [`ChildPod::is_layout_dirty`]; an arena [`WidgetPod`]
+    /// always reports `false` (the root lays it out unconditionally). Kept beside
+    /// `inspect` so the plain [`InspectNode`] shape does not change.
     pub fn inspect_layout_dirty(&self) -> Vec<(WidgetId, bool)> {
         let mut out = Vec::new();
         let roots = self.arena.roots();
@@ -330,9 +265,8 @@ impl WidgetTree {
         out
     }
 
-    /// Per-node paint-dirty state for tooling and tests: the exact twin of
-    /// [`WidgetTree::inspect_layout_dirty`] (same order, same ids) reporting
-    /// [`ChildPod::is_paint_dirty`]. An arena [`WidgetPod`] reports `false`.
+    /// Per-node paint-dirty state: the twin of [`WidgetTree::inspect_layout_dirty`]
+    /// reporting [`ChildPod::is_paint_dirty`]; an arena [`WidgetPod`] reports `false`.
     pub fn inspect_paint_dirty(&self) -> Vec<(WidgetId, bool)> {
         let mut out = Vec::new();
         let roots = self.arena.roots();
@@ -373,9 +307,7 @@ impl WidgetTree {
         });
     }
 
-    /// [`WidgetTree::inspect_layout_dirty`]'s arena step, mirroring
-    /// [`WidgetTree::inspect_node`]'s order: the node, its arena children, then
-    /// its widget's owned pods.
+    /// [`WidgetTree::inspect_layout_dirty`]'s arena step, in [`WidgetTree::inspect_node`]'s order.
     fn layout_dirty_node(
         &self,
         node: ArenaRef<'_, WidgetPod>,
@@ -391,8 +323,7 @@ impl WidgetTree {
         Self::layout_dirty_pods(node.item.widget(), out);
     }
 
-    /// [`WidgetTree::inspect_layout_dirty`]'s pod step, mirroring
-    /// [`WidgetTree::inspect_pods`]/[`WidgetTree::inspect_child`].
+    /// [`WidgetTree::inspect_layout_dirty`]'s pod step.
     fn layout_dirty_pods(widget: &dyn Widget, out: &mut Vec<(WidgetId, bool)>) {
         widget.visit_children(&mut |child| {
             out.push((child.inspect_id(), child.is_layout_dirty()));
@@ -400,9 +331,8 @@ impl WidgetTree {
         });
     }
 
-    /// Push `node`'s snapshot, then recurse into its arena children and its
-    /// widget's owned pods. `parent_origin` is the parent's absolute origin; a
-    /// pod's own origin is relative to it.
+    /// Push `node`'s snapshot, then recurse into its arena children and its widget's
+    /// owned pods. `parent_origin` is the parent's absolute origin.
     fn inspect_node(
         &self,
         node: ArenaRef<'_, WidgetPod>,
@@ -415,8 +345,7 @@ impl WidgetTree {
         let pod = node.item;
         let origin = parent_origin + pod.origin().to_vec2();
         let arena_children = self.ordered_children(id, node);
-        // Reserve this node's slot before descending, so pre-order holds and the
-        // `children` list can be filled in from the descent itself.
+        // Reserve this node's slot before descending, so pre-order holds.
         let slot = out.len();
         out.push(InspectNode {
             id,
@@ -438,8 +367,7 @@ impl WidgetTree {
         out[slot].children = children;
     }
 
-    /// Push a snapshot for each of `widget`'s owned [`ChildPod`]s (and, through
-    /// them, the whole subtree below), recording their ids into `children`.
+    /// Push a snapshot for each of `widget`'s owned [`ChildPod`]s and their subtrees.
     fn inspect_pods(
         widget: &dyn Widget,
         parent: WidgetId,
@@ -462,8 +390,7 @@ impl WidgetTree {
         });
     }
 
-    /// The [`ChildPod`] mirror of [`WidgetTree::inspect_node`]: emit `child`'s
-    /// own node, then descend into whatever it owns.
+    /// The [`ChildPod`] mirror of [`WidgetTree::inspect_node`].
     fn inspect_child(
         child: &ChildPod,
         id: WidgetId,
@@ -497,12 +424,9 @@ impl WidgetTree {
 }
 
 /// Order `live` (the arena's authoritative id set) by `recorded` (the insertion
-/// index).
-///
-/// The arena wins on membership: a recorded id the arena no longer holds is
-/// dropped, and a live id the index never saw is appended in id order rather
-/// than lost. That keeps traversal truthful even if a future mutation path
-/// forgets to update the index.
+/// index). A recorded id the arena dropped is skipped and an unrecorded live id is
+/// appended in id order, so traversal stays truthful if a mutation path forgets
+/// the index.
 fn order_against(recorded: &[WidgetId], live: &HashSet<u64>) -> Vec<WidgetId> {
     let mut ordered: Vec<WidgetId> = recorded
         .iter()
