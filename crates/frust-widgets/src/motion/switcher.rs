@@ -525,6 +525,12 @@ impl<P: TransitionPattern + Clone + 'static> Widget for PatternSwitcherWidget<P>
         }
     }
 
+    /// Only the incoming child is a traversal stop: the frozen exiting pod is
+    /// inert and takes no input, so Tab never lands there.
+    fn visit_focus_children(&self, visitor: &mut dyn FnMut(&ChildPod)) {
+        visitor(&self.child);
+    }
+
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         // Route only to the incoming child; the frozen exiting child left the
         // event path at transition start (synthetically cancelled) — module docs.

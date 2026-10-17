@@ -10,8 +10,8 @@ use kurbo::Point;
 use super::{OverlayRoute, RenderRoot, advance_focus_epoch};
 use crate::event::{
     ContactFrame, ContactPass, EventCtx, EventOutcome, EventResult, FileDropEvent, FileDropPhase,
-    ImeState, InputEvent, Key, KeyEvent, NamedKey, OverlayEvent, OverlayEventKind, PointerButton,
-    PointerId, PointerPhase, RequestPass,
+    ImeState, InputEvent, Key, KeyEvent, Modifiers, NamedKey, OverlayEvent, OverlayEventKind,
+    PointerButton, PointerId, PointerPhase, RequestPass,
 };
 use crate::overlay::{OutsideTap, OverlayHit, OverlayInput, OverlayKey, OverlayPod};
 use crate::shortcuts::{DeliveryProbe, KeyForwardPass};
@@ -98,6 +98,11 @@ impl FocusWalk<'_> {
 }
 
 /// `Some(backward)` for a bare Tab or Shift+Tab, the keys focus traversal answers.
+/// A plain Escape closes a modal pod; one with a modifier is a chord for the table.
+fn is_bare_escape(key: &KeyEvent) -> bool {
+    key.key == Key::Named(NamedKey::Escape) && key.modifiers == Modifiers::default()
+}
+
 fn traversal_direction(key: &KeyEvent) -> Option<bool> {
     let mods = key.modifiers;
     let bare = !(mods.ctrl || mods.alt || mods.meta);
@@ -551,8 +556,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                 .filter(interactive)
                 .any(|hit| hit.key == *pod)
         });
-        let escape =
-            modal.filter(|pod| key.key == Key::Named(NamedKey::Escape) && forward != Some(*pod));
+        let escape = modal.filter(|pod| is_bare_escape(key) && forward != Some(*pod));
         for pod in forward.into_iter().chain(escape) {
             let kind = OverlayEventKind::Key(key.clone());
             let delivery = InputEvent::Overlay(OverlayEvent { key: pod, kind });

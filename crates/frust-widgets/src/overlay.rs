@@ -927,7 +927,9 @@ impl<PodState: 'static> OverlaySlot<PodState> {
                         let local = InputEvent::Key(key.clone());
                         if self.forward(ctx, &local, substitute) == EventResult::Handled {
                             ctx.consume_overlay_key();
-                        } else if key.key == Key::Named(NamedKey::Escape) {
+                        } else if key.key == Key::Named(NamedKey::Escape)
+                            && key.modifiers == frust_core::Modifiers::default()
+                        {
                             self.escape_pending = true;
                         }
                     }
