@@ -261,11 +261,11 @@ enum Press {
     Track,
 }
 
-/// The paint/fade schedule [`ScrollbarState::visibility`] asks for.
 /// Longest single hold wake: a far-off fade re-arms after this instead of
 /// overflowing `Duration`.
 const MAX_HOLD_SECS: f64 = 3600.0;
 
+/// The paint/fade schedule [`ScrollbarState::visibility`] asks for.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Wake {
     Idle,
