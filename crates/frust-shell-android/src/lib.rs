@@ -45,7 +45,10 @@
 //! handle, and reconstituting it as a `&mut` — each with a safety comment, plus
 //! the `#[unsafe(no_mangle)]` attributes the [`android_app!`] macro emits on its
 //! generated `extern "system"` exports (edition 2024 spells `no_mangle` as an
-//! unsafe attribute).
+//! unsafe attribute). The performance-hint module (`adpf`) holds the one other
+//! FFI surface: the `dlsym`-resolved `APerformanceHint_*`/`AWorkDuration_*`
+//! entry points, the calls through them, a `gettid`, and the `unsafe impl
+//! Send` for its NDK object pointers, each `SAFETY`-noted.
 
 // The one Android-specific pure helper (the opaque-handle liveness check),
 // consumed by the (Android-only) FFI layer and by host unit tests. In a non-test
@@ -69,6 +72,13 @@ mod overlay_state;
 // [`ffi_support`].
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod sync_tail;
+
+// The performance-hint (ADPF) session: its lifecycle policy is pure and
+// host-tested (`tests/adpf.rs`); the NDK binding inside it is Android-only.
+// Driven only by the (Android-only) frame loop, hence the same dead-code shape
+// as [`ffi_support`].
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod adpf;
 
 #[cfg(target_os = "android")]
 mod app;
@@ -573,6 +583,33 @@ macro_rules! android_app {
             expected_present_delta_nanos: $crate::__jni::jlong,
         ) {
             $crate::jni_glue::native_set_frame_timeline(handle, expected_present_delta_nanos)
+        }
+
+        /// JNI `nativeFrameSync`: one crossing per frame that packs which of
+        /// the per-frame polls (IME state, clipboard write/paste, system-UI
+        /// generation, app brightness) have anything to report. Additive: the
+        /// five exports it gates are unchanged and Kotlin still calls them
+        /// for the bits that are set.
+        #[unsafe(no_mangle)]
+        pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeFrameSync<'local>(
+            _env: $crate::__jni::EnvUnowned<'local>,
+            _class: $crate::__jni::JClass<'local>,
+            handle: $crate::__jni::jlong,
+        ) -> $crate::__jni::jlong {
+            $crate::jni_glue::native_frame_sync(handle)
+        }
+
+        /// JNI `nativePerfTrace`: whether this build's `perf-trace`
+        /// instrumentation is live, so Kotlin arms its per-frame poll timers
+        /// (the `frust-perf jni` line) only when someone can read them.
+        /// Additive and read once per process; a build without `perf-trace`
+        /// answers `false` as a compile-time constant.
+        #[unsafe(no_mangle)]
+        pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativePerfTrace<'local>(
+            _env: $crate::__jni::EnvUnowned<'local>,
+            _class: $crate::__jni::JClass<'local>,
+        ) -> $crate::__jni::jboolean {
+            $crate::jni_glue::native_perf_trace()
         }
     };
 }

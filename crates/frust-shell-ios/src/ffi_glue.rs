@@ -17,10 +17,13 @@
 //! `IosAppHandle::attach_accessibility`), `Box::into_raw`/`from_raw` for the
 //! opaque handle's lifetime, reconstituting the raw handle pointer as a `&mut`,
 //! the `unsafe impl Send` for [`SendableMetalLayer`] — the raw `CAMetalLayer*`
-//! that crosses the UI→render channel in the split — and the
-//! render-thread QoS self-boost `libc::pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0)`
-//! at the top of [`render_loop`] (a bare libc call operating on
-//! the calling thread only, best-effort and non-fatal). Under the default-off
+//! that crosses the UI→render channel in the split — and, under the
+//! `FRUST_NO_THREAD_TUNING` off-arm only, the render-thread QoS self-boost
+//! `libc::pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0)` in
+//! [`schedule_render_thread`] (a bare libc call operating on the calling thread
+//! only, best-effort and non-fatal). The default path applies the same class
+//! through `frust_reactive::thread_policy`'s safe API, whose own `unsafe` lives
+//! in that crate. Under the default-off
 //! overlay switch (`FRUST_OVERLAYS`) it also holds the one
 //! `OverlaySurface::new` call ([`take_frame_overlays`]: an overlay view's
 //! `CAMetalLayer*` to a `wgpu::Surface`, dropped under the overlay lock before
@@ -63,6 +66,7 @@ use anyhow::{Context, Result, bail};
 
 use frust_core::event::{EditCommand, EditingState, ImeContentType, ImeState};
 use frust_core::selection_toolbar::{SelectionToolbarPolicy, lock_selection_toolbar_policy};
+use frust_reactive::thread_policy::{ThreadClass, ThreadClassOutcome, set_current_thread_class};
 use frust_reactive::{ReactiveRuntime, push_deep_link};
 use frust_render::{RenderContext, SurfaceAlphaRequest, SurfacePhase, SurfaceRenderer};
 use frust_scene::Scene;
@@ -506,6 +510,48 @@ fn install_surface(
     Ok(())
 }
 
+/// Schedule the calling (render) thread for the frame. Called once, as the
+/// first statement of [`render_loop`].
+///
+/// Default: `frust_reactive::thread_policy`'s frame class, which on iOS is
+/// `QOS_CLASS_USER_INTERACTIVE` — the same tier as the UI thread, so the
+/// scheduler treats the GPU submit work like the UI work (a plain
+/// `std::thread` starts at a lower, utility-ish QoS). A refusal is logged,
+/// never fatal (the render loop never panics).
+///
+/// `FRUST_NO_THREAD_TUNING` (`thread_tuning_enabled`) keeps the previous direct
+/// `pthread_set_qos_class_self_np` call — the same class, so the off-arm differs
+/// from the default only in the background pool's policy.
+fn schedule_render_thread() {
+    if frust_shell_common::render_split::thread_tuning_enabled() {
+        match set_current_thread_class(ThreadClass::Frame) {
+            ThreadClassOutcome::QosApplied => {}
+            ThreadClassOutcome::Refused { error } => log::warn!(
+                "frust-shell-ios: render thread frame class refused (rc {error}); continuing \
+                 at default QoS"
+            ),
+            other => {
+                log::warn!("frust-shell-ios: render thread frame class had no effect ({other:?})")
+            }
+        }
+        return;
+    }
+
+    // SAFETY: `pthread_set_qos_class_self_np` is a plain libc call operating on
+    // the calling thread only, with no memory-safety preconditions. A
+    // sanctioned-unsafe FFI call confined to this module (see the module docs).
+    unsafe {
+        let rc =
+            libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0);
+        if rc != 0 {
+            log::warn!(
+                "frust-shell-ios: render-thread pthread_set_qos_class_self_np(USER_INTERACTIVE) \
+                 failed (rc {rc}); continuing at default QoS"
+            );
+        }
+    }
+}
+
 /// The dedicated render thread's loop: create + own the
 /// `RenderContext`/`SurfaceRenderer` + surface wholesale, drain lifecycle commands
 /// and the freshest handed-off scene from the channel, and run
@@ -570,25 +616,8 @@ pub(crate) fn render_loop(
     present: Arc<PresentHandoff>,
     surface_reinstalled: Arc<AtomicBool>,
 ) {
-    // Render-thread QoS self-boost: tag this dedicated render
-    // thread as user-interactive so the scheduler treats its GPU submit work at
-    // the same tier as the UI thread (a plain `std::thread` starts at a lower,
-    // utility-ish QoS). Best-effort — a non-zero return is logged, never fatal
-    // (this loop never panics).
-    //
-    // SAFETY: `pthread_set_qos_class_self_np` is a plain libc call operating on
-    // the calling thread only, with no memory-safety preconditions. A
-    // sanctioned-unsafe FFI call confined to this module (see the module docs).
-    unsafe {
-        let rc =
-            libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0);
-        if rc != 0 {
-            log::warn!(
-                "frust-shell-ios: render-thread pthread_set_qos_class_self_np(USER_INTERACTIVE) \
-                 failed (rc {rc}); continuing at default QoS"
-            );
-        }
-    }
+    // Render-thread scheduling, before any frame work.
+    schedule_render_thread();
 
     let mut render_cx = RenderContext::new();
     let mut renderer = SurfaceRenderer::new();

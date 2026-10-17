@@ -8,7 +8,9 @@
 //!   naming the shell-side source).
 //! - [`FrameGate`] — a plain struct owning the resume-warmup counter and the
 //!   kill-switch flag; [`FrameGate::decide`] folds [`FrameInputs`] plus the
-//!   warmup into one [`FrameDecision`] (`Run`/`Skip`).
+//!   warmup into one [`FrameDecision`] (`Run`/`Skip`). It also reports, without
+//!   acting on it, whether the loop is *continuous* — a run of produced frames
+//!   an animation asked for ([`FrameGate::is_continuous`]).
 //!
 //! # Layering choice
 //!
@@ -88,6 +90,17 @@ use frust_core::anim::FrameTime;
 /// It is not a published platform constant — it is a Frust tuning choice
 /// (the "correctness beats savings" default: when in doubt, run).
 pub const WARMUP_FRAMES: u8 = 3;
+
+/// How many back-to-back produced frames carrying an animation continuation
+/// make the frame loop *continuous* ([`FrameGate::is_continuous`]).
+///
+/// A continuation is a `Run` whose [`FrameInputs::last_needs_frame`] is set
+/// with [`FrameInputs::last_needs_frame_paced_only`] clear: the previous paint
+/// asked for this frame for a transition-class reason, not only a paced
+/// cosmetic loop. Three in a row separates a running animation from a one-off
+/// settle frame or two; it is a Frust tuning choice, not a platform constant.
+/// The count only *reports* the regime — it never changes a decision.
+pub const CONTINUOUS_RUN_FRAMES: u32 = 3;
 
 /// The kill-switch environment/compile-time variable: when set to any
 /// non-`"0"` value, [`FrameGate::new`] yields a gate that always [`Run`]s,
@@ -434,6 +447,11 @@ pub struct FrameGate {
     /// to `now` instead — "the anchor adopts the interval in force at the last
     /// Run". `None` until the first pacing-aware decision.
     last_paced_interval: Option<std::time::Duration>,
+    /// Consecutive decisions that produced a frame carrying a transition-class
+    /// continuation — see [`CONTINUOUS_RUN_FRAMES`]. Any `Skip`, or a `Run`
+    /// without that continuation, resets it to zero. Bookkeeping only: no
+    /// decision reads it.
+    continuation_streak: u32,
 }
 
 impl FrameGate {
@@ -472,6 +490,7 @@ impl FrameGate {
             warmup_remaining: 0,
             last_paced_run: None,
             last_paced_interval: None,
+            continuation_streak: 0,
         }
     }
 
@@ -515,7 +534,9 @@ impl FrameGate {
     /// [`decide_paced`](Self::decide_paced) to honor the theme's cosmetic-loop
     /// cadence.
     pub fn decide(&mut self, inputs: FrameInputs) -> FrameDecision {
-        self.decide_impl(inputs, None)
+        let decision = self.decide_impl(inputs, None);
+        self.note_continuation(&inputs, decision);
+        decision
     }
 
     /// Decide whether this frame runs, honoring animation pacing.
@@ -562,7 +583,38 @@ impl FrameGate {
     /// [`Skip`]: FrameDecision::Skip
     /// [`is_paced_only_frame`]: FrameInputs::is_paced_only_frame
     pub fn decide_paced(&mut self, inputs: FrameInputs, pacing: FramePacing) -> FrameDecision {
-        self.decide_impl(inputs, Some(pacing))
+        let decision = self.decide_impl(inputs, Some(pacing));
+        self.note_continuation(&inputs, decision);
+        decision
+    }
+
+    /// Whether the frame loop is *continuous*: the last
+    /// [`CONTINUOUS_RUN_FRAMES`] decisions all produced a frame that an
+    /// in-flight transition-class animation asked for (see that constant).
+    ///
+    /// A report about the decisions already made, for a shell that scales
+    /// something to a running animation — the Android shell's performance-hint
+    /// session opens on it. It never feeds back into [`decide`](Self::decide).
+    pub fn is_continuous(&self) -> bool {
+        self.continuation_streak >= CONTINUOUS_RUN_FRAMES
+    }
+
+    /// The current run of continuation-carrying produced frames behind
+    /// [`is_continuous`](Self::is_continuous). Exposed for tests/diagnostics.
+    pub fn continuation_streak(&self) -> u32 {
+        self.continuation_streak
+    }
+
+    /// Advance or reset [`continuation_streak`](Self::continuation_streak)
+    /// after a decision: a `Run` whose inputs carry a transition-class
+    /// continuation extends it, anything else ends it.
+    fn note_continuation(&mut self, inputs: &FrameInputs, decision: FrameDecision) {
+        let continuation = inputs.last_needs_frame && !inputs.last_needs_frame_paced_only;
+        self.continuation_streak = if decision.is_run() && continuation {
+            self.continuation_streak.saturating_add(1)
+        } else {
+            0
+        };
     }
 
     /// The shared decision body behind [`decide`](Self::decide) (no pacing) and
@@ -1977,5 +2029,116 @@ mod tests {
             gate.decide_paced(paced_only(), caret(at(560))),
             FrameDecision::Run
         );
+    }
+
+    /// A transition-class continuation: the previous paint asked for this
+    /// frame, not only for a paced cosmetic loop.
+    fn continuation() -> FrameInputs {
+        FrameInputs {
+            last_needs_frame: true,
+            ..FrameInputs::default()
+        }
+    }
+
+    #[test]
+    fn continuous_after_the_threshold_of_continuation_runs() {
+        let mut gate = FrameGate::with_enabled(true);
+        assert!(!gate.is_continuous(), "a fresh gate reports no regime");
+        for run in 1..CONTINUOUS_RUN_FRAMES {
+            assert_eq!(gate.decide(continuation()), FrameDecision::Run);
+            assert_eq!(gate.continuation_streak(), run);
+            assert!(!gate.is_continuous(), "{run} runs are below the threshold");
+        }
+        assert_eq!(gate.decide(continuation()), FrameDecision::Run);
+        assert!(gate.is_continuous());
+        // It stays continuous for as long as the animation keeps asking.
+        assert_eq!(gate.decide(continuation()), FrameDecision::Run);
+        assert!(gate.is_continuous());
+    }
+
+    #[test]
+    fn a_skip_or_a_run_without_a_continuation_ends_the_regime() {
+        let mut gate = FrameGate::with_enabled(true);
+        for _ in 0..CONTINUOUS_RUN_FRAMES {
+            gate.decide(continuation());
+        }
+        assert!(gate.is_continuous());
+        assert_eq!(gate.decide(FrameInputs::default()), FrameDecision::Skip);
+        assert!(!gate.is_continuous(), "a skipped tick ends the regime");
+        assert_eq!(gate.continuation_streak(), 0);
+
+        for _ in 0..CONTINUOUS_RUN_FRAMES {
+            gate.decide(continuation());
+        }
+        assert!(gate.is_continuous());
+        // A frame forced by an event alone is produced, but no animation asked
+        // for it.
+        assert_eq!(
+            gate.decide(only("events_since_last_frame")),
+            FrameDecision::Run
+        );
+        assert!(
+            !gate.is_continuous(),
+            "a run without a continuation ends it"
+        );
+    }
+
+    #[test]
+    fn a_paced_only_loop_is_never_continuous() {
+        // Pacing off, so every paced-only tick runs: still not continuous —
+        // only a transition-class request counts.
+        let mut gate = FrameGate::with_flags(true, false);
+        let interval = interval_30hz();
+        for tick in 0..(CONTINUOUS_RUN_FRAMES as u64 * 4) {
+            let now = FrameTime::from_nanos(tick * step_nanos(120.0));
+            assert_eq!(
+                gate.decide_paced(paced_only(), pacing(now, interval)),
+                FrameDecision::Run
+            );
+            assert!(!gate.is_continuous());
+        }
+    }
+
+    #[test]
+    fn continuity_is_reported_through_decide_paced_and_never_changes_a_decision() {
+        let interval = interval_30hz();
+        let mut reporting = FrameGate::with_flags(true, true);
+        let mut reference = FrameGate::with_flags(true, true);
+        let script = [
+            continuation(),
+            continuation(),
+            FrameInputs::default(),
+            paced_only(),
+            continuation(),
+            continuation(),
+            continuation(),
+            continuation(),
+            only("signals_dirty"),
+            paced_only(),
+        ];
+        for (tick, inputs) in script.into_iter().enumerate() {
+            let now = FrameTime::from_nanos(tick as u64 * step_nanos(60.0));
+            let decision = reporting.decide_paced(inputs, pacing(now, interval));
+            // The reference gate never has its streak read: same decisions.
+            assert_eq!(
+                decision,
+                reference.decide_paced(inputs, pacing(now, interval))
+            );
+        }
+        // The streak was ended by the last two (non-continuation) ticks.
+        assert!(!reporting.is_continuous());
+    }
+
+    #[test]
+    fn a_disabled_gate_still_reports_the_regime() {
+        // The kill switch makes every tick run; the regime still follows the
+        // inputs, so a shell's dependent behaviour does not flip with it.
+        let mut gate = FrameGate::disabled();
+        for _ in 0..CONTINUOUS_RUN_FRAMES {
+            assert_eq!(gate.decide(continuation()), FrameDecision::Run);
+        }
+        assert!(gate.is_continuous());
+        assert_eq!(gate.decide(FrameInputs::default()), FrameDecision::Run);
+        assert!(!gate.is_continuous());
     }
 }

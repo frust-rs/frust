@@ -24,6 +24,11 @@ futures = "0.3"
 # `net` is the smallest feature satisfying `enable_io()`, the IO driver `frust::spawn`'s tasks need.
 tokio = { workspace = true, features = ["rt-multi-thread", "time", "net"] }
 
+# `thread_policy`'s nice-value and QoS calls (`setpriority`/`getpriority`/`gettid`,
+# `pthread_set_qos_class_self_np`) on the targets that have them; every other target is a no-op.
+[target.'cfg(any(target_os = "android", target_os = "linux", target_vendor = "apple"))'.dependencies]
+libc = { workspace = true }
+
 [target.'cfg(target_family = "wasm")'.dependencies]
 # `rt` alone is the only set that compiles for wasm32; `executor.rs`/`task.rs` name its handle types.
 tokio = { workspace = true, features = ["rt"] }
