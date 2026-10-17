@@ -11,7 +11,7 @@
 //! mark, the "playground" title, and the brightness/reduce-motion/animations
 //! toggles folded into its trailing actions — over a
 //! [`pattern_switcher`](frust::motion::switcher::pattern_switcher) hosting one
-//! of seventeen section pages in a [`scroll_view`], the whole column inside one
+//! of eighteen section pages in a [`scroll_view`], the whole column inside one
 //! [`safe_area`] and under a toast overlay), and the [`frust::app!`] entry
 //! binding all three platforms. The section pages themselves live in
 //! [`pages`] — each a `page(&PlaygroundState) -> impl View<PlaygroundState>`
@@ -19,7 +19,7 @@
 //!
 //! # Responsive navigation
 //!
-//! [`pages::SECTION_LABELS`] carries seventeen destinations now — too many for a
+//! [`pages::SECTION_LABELS`] carries eighteen destinations now — too many for a
 //! single bottom nav bar to divide evenly without its labels wrapping (see
 //! that constant's own doc). [`home_page`] picks between two shapes, the same
 //! `use_context::<WindowMetrics>()` / named-breakpoint idiom
@@ -39,11 +39,11 @@
 //!
 //! [`bottom_nav_bar`] still rides the existing
 //! [`navigation_bar`](frust_material::navigation_bar)/[`nav_item`](frust_material::nav_item)
-//! chrome (neither needs an icon, so growing to 17 labels costs nothing
+//! chrome (neither needs an icon, so growing to 18 labels costs nothing
 //! there); [`side_rail`] and [`more_overlay`] are hand-rolled from baseline
 //! [`button`]s instead of `frust_material::navigation_rail`/
 //! `navigation_drawer` — those destinations carry a *mandatory* icon per
-//! entry, and playground names no icon set for its seventeen sections (the
+//! entry, and playground names no icon set for its eighteen sections (the
 //! module docs' design-neutral charter: "Nothing in this app demonstrates a
 //! design language"). [`pages::SECTION_LABELS`] stays the single source of
 //! truth every shape reads from.
@@ -418,6 +418,10 @@ pub struct PlaygroundState {
     /// fallback (`pages::tabs`) — clone-shares-one-handle like the controllers
     /// above, so the fallback built once here stays the one the page wraps.
     pub tabs: pages::tabs::TabsState,
+    /// The "Shortcuts" section's palette, pane, tab and focus-row state
+    /// (`pages::shortcuts`) — `Copy` signal handles, so the page and a headless
+    /// test read and drive the same values.
+    pub shortcuts: pages::shortcuts::ShortcutsState,
 }
 
 impl PlaygroundState {
@@ -455,6 +459,7 @@ impl PlaygroundState {
             ],
             slivers_controller: ScrollController::new(),
             tabs: pages::tabs::TabsState::new(),
+            shortcuts: pages::shortcuts::ShortcutsState::new(),
         }
     }
 }
