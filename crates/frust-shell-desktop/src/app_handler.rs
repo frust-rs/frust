@@ -71,7 +71,7 @@ use frust_text::TextContext;
 use frust_theme::{Brightness, Theme};
 use kurbo::{Affine, Point, Size};
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalPosition, LogicalSize};
+use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key as WinitKey, ModifiersState, NamedKey as WinitNamedKey};
@@ -87,13 +87,17 @@ use crate::paced_wake::{
 };
 use crate::platform_view::DesktopPlatformViews;
 use crate::render::FrameExecutor;
+use crate::window_state::{
+    MonitorRect, WindowSnapshot, WindowState, WindowStateSaver, clamp_restored, initial_geometry,
+    merge_wake,
+};
 
 /// Initial preview-window size, in logical pixels.
 const INITIAL_SIZE: LogicalSize<u32> = LogicalSize::new(800, 600);
 
 /// The env/compile-time var overriding [`INITIAL_SIZE`]: `<width>x<height>` in
 /// logical pixels (e.g. `2560x1440`). Measurement knob — see
-/// [`parse_window_size`] and [`window_size_config`]. Same
+/// [`window_size_knob`] and [`window_size_config`]. Same
 /// compile-time-`option_env!`-or-runtime-`std::env::var` shape as
 /// `FRUST_TRACE`/`FRUST_NO_RENDER_THREAD`, runtime winning: it exists so a
 /// large-surface device/desktop gate (a macOS 5K display, say) can be measured
@@ -177,31 +181,27 @@ fn parse_window_dimension(raw: &str) -> Option<u32> {
 /// whitespace inside either component, no sign, no decimal point, exactly one
 /// `x` separator (surrounding whitespace on the whole value is trimmed first,
 /// matching every other `FRUST_*` string knob's parser). An unset or empty
-/// value falls back to [`INITIAL_SIZE`] silently — that is simply "the knob
-/// wasn't touched". Any other value (missing/extra `x`, non-digit characters,
-/// a zero component, a component too large for `u32`) also falls back to
-/// `INITIAL_SIZE`, but logs one `log::warn!` naming the offending value, since
-/// that case is far more likely a typo than a deliberate default.
-fn parse_window_size(raw: Option<&str>) -> LogicalSize<u32> {
-    let Some(trimmed) = raw.map(str::trim).filter(|v| !v.is_empty()) else {
-        return INITIAL_SIZE;
-    };
+/// value is `None` silently — that is simply "the knob wasn't touched". Any
+/// other value (missing/extra `x`, non-digit characters, a zero component, a
+/// component too large for `u32`) is also `None`, but logs one `log::warn!`
+/// naming the offending value, since that case is far more likely a typo.
+/// `None` leaves the size to the lower geometry sources (persisted state,
+/// config, [`INITIAL_SIZE`]).
+fn window_size_knob(raw: Option<&str>) -> Option<LogicalSize<u32>> {
+    let trimmed = raw.map(str::trim).filter(|v| !v.is_empty())?;
     if let Some((width_raw, height_raw)) = trimmed.split_once('x')
         && let (Some(width), Some(height)) = (
             parse_window_dimension(width_raw),
             parse_window_dimension(height_raw),
         )
     {
-        return LogicalSize::new(width, height);
+        return Some(LogicalSize::new(width, height));
     }
     log::warn!(
         "frust-shell-desktop: invalid {WINDOW_SIZE_VAR} value {trimmed:?}, expected \
-         <width>x<height> in logical pixels (e.g. 1280x720) with both at least 1, falling back \
-         to {}x{}",
-        INITIAL_SIZE.width,
-        INITIAL_SIZE.height
+         <width>x<height> in logical pixels (e.g. 1280x720) with both at least 1, ignoring it"
     );
-    INITIAL_SIZE
+    None
 }
 
 /// Parses a raw [`WINDOW_MAXIMIZED_VAR`] value (already resolved by
@@ -211,22 +211,30 @@ fn parse_window_size(raw: Option<&str>) -> LogicalSize<u32> {
 /// `1` and `true` (case-insensitive, surrounding whitespace trimmed) enable
 /// it; every other value, including unset, leaves the window un-maximized.
 /// Deliberately no warn-on-unrecognised arm: unlike
-/// [`parse_window_size`]'s strict grammar this is a plain flag, and the
+/// [`window_size_knob`]'s strict grammar this is a plain flag, and the
 /// effective value is logged either way by [`window_size_config`].
 fn parse_window_maximized(raw: Option<&str>) -> bool {
     raw.map(str::trim)
         .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true"))
 }
 
-/// The process-wide effective preview-window size/maximized configuration,
-/// resolved once from [`WINDOW_SIZE_VAR`]/[`WINDOW_MAXIMIZED_VAR`]
+/// The effective measurement knobs; each is `None` when its var is unset (the
+/// size also when invalid), leaving that field to the lower geometry sources.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct WindowKnobs {
+    size: Option<LogicalSize<u32>>,
+    maximized: Option<bool>,
+}
+
+/// The process-wide effective preview-window size/maximized knobs, resolved
+/// once from [`WINDOW_SIZE_VAR`]/[`WINDOW_MAXIMIZED_VAR`]
 /// (compile-time-or-runtime, see [`resolved_window_knob`]) and cached — a
 /// knob change requires a fresh process, matching every other `FRUST_*` knob.
 /// Logs the effective choice exactly once — a captured log proves which
 /// configuration a run used, the same evidentiary role `frust-render`'s own
 /// `tier=engine`/render-path/surface-caps log lines carry.
-fn window_size_config() -> (LogicalSize<u32>, bool, WindowKnobSource) {
-    static CONFIG: OnceLock<(LogicalSize<u32>, bool, WindowKnobSource)> = OnceLock::new();
+fn window_size_config() -> WindowKnobs {
+    static CONFIG: OnceLock<WindowKnobs> = OnceLock::new();
     *CONFIG.get_or_init(|| {
         let (size_raw, size_source) = resolved_window_knob(
             option_env!("FRUST_WINDOW_SIZE"),
@@ -236,19 +244,22 @@ fn window_size_config() -> (LogicalSize<u32>, bool, WindowKnobSource) {
             option_env!("FRUST_WINDOW_MAXIMIZED"),
             std::env::var(WINDOW_MAXIMIZED_VAR).ok(),
         );
-        let size = parse_window_size(size_raw.as_deref());
-        let maximized = parse_window_maximized(maximized_raw.as_deref());
+        let size = window_size_knob(size_raw.as_deref());
+        let maximized = maximized_raw
+            .as_deref()
+            .map(|raw| parse_window_maximized(Some(raw)));
         // Whichever of the two independent knobs was set from the
         // higher-precedence half decides the reported source (`Env` >
         // `Define` > `Default`) — a single log line describes the whole
         // window configuration, not each knob separately.
         let source = size_source.max(maximized_source);
+        let size_text = size.map_or("unset".to_string(), |s| format!("{}x{}", s.width, s.height));
+        let maximized_text = maximized.map_or("unset".to_string(), |m| m.to_string());
         log::info!(
-            "frust-shell-desktop window size={}x{} logical maximized={maximized} source={source}",
-            size.width,
-            size.height
+            "frust-shell-desktop window size={size_text} logical maximized={maximized_text} \
+             source={source}"
         );
-        (size, maximized, source)
+        WindowKnobs { size, maximized }
     })
 }
 
@@ -1049,6 +1060,7 @@ where
         theme_override_active: false,
         font_registry: FontRegistryWatcher::new(),
         paced_wake: None,
+        window_state: None,
         present_retry_streak: 0,
         present_retry_mark: 0,
         anim_pacing: !frust_shell_common::anim_pacing_kill_switch_engaged(),
@@ -1170,7 +1182,7 @@ fn follow_platform_brightness(theme: &mut Theme, override_active: bool, platform
 /// touching the process environment.
 fn apply_window_size(
     attributes: WindowAttributes,
-    size: LogicalSize<u32>,
+    size: impl Into<winit::dpi::Size>,
     maximized: bool,
 ) -> WindowAttributes {
     let attributes = attributes.with_inner_size(size);
@@ -1188,9 +1200,12 @@ fn apply_window_size(
 /// them:
 /// * the title, from [`DesktopConfig::window_title`] (the configured
 ///   `app_name`, else the `"Frust"` fallback this shell used to hardcode);
-/// * the initial logical size — [`INITIAL_SIZE`] by default, overridable via
-///   the [`WINDOW_SIZE_VAR`]/[`WINDOW_MAXIMIZED_VAR`] measurement knobs (see
-///   [`window_size_config`]);
+/// * the initial geometry, lowest precedence first: [`INITIAL_SIZE`] →
+///   [`DesktopConfig::initial_size`] → the `persisted` window state (passed
+///   only when persistence is on and the file loaded; already clamped) → the
+///   [`WINDOW_SIZE_VAR`]/[`WINDOW_MAXIMIZED_VAR`] measurement knobs, each
+///   overriding only its own field (see `window_state::initial_geometry`);
+/// * the config's min/max inner size, logical pixels;
 /// * `visible(false)` — the accessibility adapter must be constructed before
 ///   the window is ever shown (see [`Adapter::with_event_loop_proxy`]'s
 ///   contract), so `resumed` makes it visible itself once that is done.
@@ -1200,14 +1215,84 @@ fn apply_window_size(
 /// a live event loop.
 fn window_attributes(
     config: &DesktopConfig,
+    persisted: Option<&WindowState>,
     extensions: &mut impl DesktopExtensions,
 ) -> WindowAttributes {
-    let (size, maximized, _source) = window_size_config();
-    let attributes = WindowAttributes::default()
+    let knobs = window_size_config();
+    let default = Size::new(
+        f64::from(INITIAL_SIZE.width),
+        f64::from(INITIAL_SIZE.height),
+    );
+    let env_size = knobs
+        .size
+        .map(|s| Size::new(f64::from(s.width), f64::from(s.height)));
+    let geometry = initial_geometry(
+        default,
+        config.initial_size,
+        persisted,
+        env_size,
+        knobs.maximized,
+    );
+    let mut attributes = WindowAttributes::default()
         .with_title(config.window_title())
         .with_visible(false);
-    let attributes = apply_window_size(attributes, size, maximized);
+    attributes = apply_window_size(
+        attributes,
+        LogicalSize::new(geometry.size.width, geometry.size.height),
+        geometry.maximized,
+    );
+    if let Some((x, y)) = geometry.position {
+        attributes = attributes.with_position(PhysicalPosition::new(x, y));
+    }
+    let valid = |size: &Size| crate::window_state::valid_size(*size);
+    if let Some(min) = config.min_size.filter(valid) {
+        attributes = attributes.with_min_inner_size(LogicalSize::new(min.width, min.height));
+    }
+    if let Some(max) = config.max_size.filter(valid) {
+        attributes = attributes.with_max_inner_size(LogicalSize::new(max.width, max.height));
+    }
     extensions.on_window_attributes(attributes)
+}
+
+/// Load the persisted window state and fit it to the monitors connected now
+/// (`window_state::clamp_restored`), before the window exists. Returns the
+/// file's raw contents alongside the clamped state the window is created with.
+fn restore_window_state(
+    event_loop: &ActiveEventLoop,
+    config: &DesktopConfig,
+) -> (Option<WindowState>, Option<WindowState>) {
+    let Some(loaded) = crate::window_state::load() else {
+        return (None, None);
+    };
+    let rect = |m: winit::monitor::MonitorHandle| MonitorRect {
+        name: m.name(),
+        position: (m.position().x, m.position().y),
+        size: (m.size().width, m.size().height),
+        scale: m.scale_factor(),
+    };
+    let monitors: Vec<MonitorRect> = event_loop.available_monitors().map(rect).collect();
+    let primary = event_loop.primary_monitor().map(rect);
+    let restored = clamp_restored(
+        loaded.clone(),
+        &monitors,
+        primary.as_ref(),
+        config.min_size,
+        config.max_size,
+    );
+    (Some(loaded), Some(restored))
+}
+
+/// The live window's geometry for the window-state saver: logical inner size,
+/// physical outer position (absent on Wayland), and the current monitor's name.
+fn window_snapshot(window: &Window) -> WindowSnapshot {
+    let inner = window.inner_size().to_logical::<f64>(window.scale_factor());
+    WindowSnapshot {
+        size: Size::new(inner.width, inner.height),
+        position: window.outer_position().ok().map(|p| (p.x, p.y)),
+        maximized: window.is_maximized(),
+        minimized: window.is_minimized().unwrap_or(false),
+        monitor: window.current_monitor().and_then(|m| m.name()),
+    }
 }
 
 /// The brightness (if any) to report through
@@ -1834,8 +1919,9 @@ struct ShellHandler<State: 'static, Build, V: View<State>, E> {
     state: State,
     build: Build,
     /// The app's desktop identity, threaded in from [`run_desktop_with`]. Read
-    /// by this core only for the window title (see [`window_attributes`]); the
-    /// rest of it is the per-OS shells' business, and they hold their own copy.
+    /// by this core only for the window title and geometry (see
+    /// [`window_attributes`]); the rest of it is the per-OS shells' business,
+    /// and they hold their own copy.
     config: DesktopConfig,
     /// The per-OS extension set — [`NoExtensions`] for the zero-config preview.
     /// Static, not boxed (see [`crate::extensions`]'s module docs), so a hook
@@ -1990,6 +2076,11 @@ struct ShellHandler<State: 'static, Build, V: View<State>, E> {
     /// the loop on `ControlFlow::WaitUntil(that)` and fires the redraw when it
     /// elapses. `None` when no paced redraw is pending.
     paced_wake: Option<Instant>,
+    /// The debounced window-state saver, `Some` only when the app opted in via
+    /// [`DesktopConfig::persist_window_state`]. Resizes and moves mark it
+    /// dirty; `about_to_wait` saves once it falls due and parks the loop until
+    /// then, and a close request or exit saves at once.
+    window_state: Option<WindowStateSaver>,
     /// Consecutive present retries since a frame last presented — the backoff
     /// exponent for [`crate::paced_wake::present_retry_delay`].
     present_retry_streak: u32,
@@ -2430,6 +2521,32 @@ where
     /// sites already do (`resumed`'s theme seed, `Resized`'s own
     /// `request_redraw`), and a metrics publish that forced a frame on its own
     /// would defeat the guard's purpose.
+    /// A resize or move: restart the window-state saver's quiet period (a
+    /// no-op unless the app opted in to persistence).
+    fn note_window_geometry_change(&mut self) {
+        if let Some(saver) = self.window_state.as_mut() {
+            saver.note_change(Instant::now());
+        }
+    }
+
+    /// Write the window state when it is due: `Some(now)` is the debounced
+    /// poll, `None` the final save on close/exit. Synchronous on this thread —
+    /// the file is a few dozen bytes written by `frust_paths::atomic_write`.
+    fn save_window_state(&mut self, now: Option<Instant>) {
+        let Some(saver) = self.window_state.as_mut() else {
+            return;
+        };
+        let window = self.window.as_deref();
+        let snapshot = || window.map(window_snapshot);
+        let state = match now {
+            Some(now) => saver.poll(now, snapshot),
+            None => saver.flush(snapshot),
+        };
+        if let Some(state) = state {
+            crate::window_state::save(&state);
+        }
+    }
+
     fn push_window_metrics(&mut self, physical: (u32, u32), scale: f64) {
         let Some(metrics) = self
             .window_metrics
@@ -2718,8 +2835,18 @@ where
             // Title/size/hidden from the app's `DesktopConfig`, then through the
             // extension's pre-create hook (`window_attributes`) — the only
             // chance a per-OS shell gets at attributes winit refuses to change
-            // after creation (Wayland `app_id`, X11 icon).
-            let attrs = window_attributes(&self.config, &mut self.extensions);
+            // after creation (Wayland `app_id`, X11 icon). An opted-in app's
+            // persisted geometry is loaded and fitted to today's monitors first.
+            let restored = if self.config.persist_window_state {
+                let (loaded, restored) = restore_window_state(event_loop, &self.config);
+                let mut saver = WindowStateSaver::default();
+                saver.seed(loaded, restored.as_ref());
+                self.window_state = Some(saver);
+                restored
+            } else {
+                None
+            };
+            let attrs = window_attributes(&self.config, restored.as_ref(), &mut self.extensions);
             match event_loop.create_window(attrs) {
                 Ok(window) => {
                     self.adapter = Some(Adapter::with_event_loop_proxy(
@@ -2853,14 +2980,28 @@ where
         // winit-free `paced_wake` module (see its docs) — this applies its
         // result wholesale (field, redraw, control flow are one value, so the
         // field can never be updated without also deciding the control flow).
-        let decision = paced_wake_action(self.paced_wake, Instant::now());
+        let now = Instant::now();
+        let decision = paced_wake_action(self.paced_wake, now);
         self.paced_wake = decision.paced_wake;
         if decision.request_redraw
             && let Some(window) = self.window.as_ref()
         {
             window.request_redraw();
         }
-        apply_control_flow(event_loop, decision.control_flow);
+        // A debounced window-state save falls due here, and a still-pending one
+        // must wake the parked loop when it does.
+        self.save_window_state(Some(now));
+        let save_due = self
+            .window_state
+            .as_ref()
+            .and_then(WindowStateSaver::deadline);
+        apply_control_flow(event_loop, merge_wake(decision.control_flow, save_due));
+    }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // Covers an exit that bypassed `CloseRequested` (a menu Quit, an
+        // extension-owned exit); a no-op when nothing changed since that save.
+        self.save_window_state(None);
     }
 
     fn window_event(
@@ -2907,20 +3048,26 @@ where
             // pipeline-cache persistence path is unaffected either way — it
             // hangs off the frame executor's drop once `run_app` returns, not
             // off this event.
-            WindowEvent::CloseRequested => match self.extensions.on_close_requested() {
-                CloseAction::Exit => {
-                    // The window is about to be destroyed: let the host tear its
-                    // hosted views out of a hierarchy that still exists, rather
-                    // than leaving them to be dropped with it.
-                    self.platform_views.suspend(&mut self.extensions);
-                    event_loop.exit();
+            WindowEvent::CloseRequested => {
+                // The final window-state save runs before the extension decides,
+                // while the window still reports its real geometry.
+                self.save_window_state(None);
+                match self.extensions.on_close_requested() {
+                    CloseAction::Exit => {
+                        // The window is about to be destroyed: let the host tear
+                        // its hosted views out of a hierarchy that still exists,
+                        // rather than leaving them to be dropped with it.
+                        self.platform_views.suspend(&mut self.extensions);
+                        event_loop.exit();
+                    }
+                    // Not a teardown — a macOS shell is only hiding its retained
+                    // window, and the hosted views hide with it. Removing them
+                    // here would strand the host with nothing to restore on
+                    // reopen, since no surface is re-created on that path to
+                    // replay them.
+                    CloseAction::KeepRunning => {}
                 }
-                // Not a teardown — a macOS shell is only hiding its retained
-                // window, and the hosted views hide with it. Removing them here
-                // would strand the host with nothing to restore on reopen, since
-                // no surface is re-created on that path to replay them.
-                CloseAction::KeepRunning => {}
-            },
+            }
 
             WindowEvent::Resized(size) => {
                 // A resize with no live surface is dropped by the machine
@@ -2938,8 +3085,13 @@ where
                 // of its own. Self-guarded, so a resize that reports unchanged
                 // dimensions publishes nothing.
                 self.push_window_metrics((size.width, size.height), window.scale_factor());
+                self.note_window_geometry_change();
                 window.request_redraw();
             }
+
+            // Only the window-state saver cares about a move; the accesskit
+            // adapter already saw it above.
+            WindowEvent::Moved(_) => self.note_window_geometry_change(),
 
             // Live dark-mode toggle: flip the theme's brightness and re-push it
             // to both delivery paths (`apply_theme` requests the repaint). The
@@ -3508,6 +3660,7 @@ mod tests {
         );
     }
 
+    use super::WindowState;
     use super::{
         ClipboardAccess, ClipboardError, ClipboardFailure, ClipboardRequest, ClipboardWarnings,
         ComposeLatch, DesktopConfig, DesktopExtensions, ElementState, FileDropAccumulator,
@@ -3518,9 +3671,9 @@ mod tests {
         clipboard_warning, cursor_change_to_apply, default_theme, finish,
         follow_platform_brightness, ime_purpose_for, map_gesture_phase, map_key_event,
         map_modifiers, map_mouse_button, map_named_key, map_scroll_delta, map_wheel_scale_delta,
-        mouse_button_should_dispatch, parse_window_maximized, parse_window_size,
-        paste_answer_dispatch, paste_input_event, physical_to_logical, resolved_window_knob,
-        theme_after_override_poll, wheel_zoom_chord_held, window_attributes, winit_cursor_for,
+        mouse_button_should_dispatch, parse_window_maximized, paste_answer_dispatch,
+        paste_input_event, physical_to_logical, resolved_window_knob, theme_after_override_poll,
+        wheel_zoom_chord_held, window_attributes, winit_cursor_for,
     };
     use frust_core::SemanticsUpdate;
     use frust_core::accesskit::{
@@ -5489,7 +5642,7 @@ mod tests {
     fn window_attributes_default_to_the_historical_preview_window() {
         // The `WINDOW_TITLE` const this shell used to hardcode now arrives via
         // the default config, so the zero-config preview is unchanged.
-        let attributes = window_attributes(&DesktopConfig::default(), &mut NoExtensions);
+        let attributes = window_attributes(&DesktopConfig::default(), None, &mut NoExtensions);
         assert_eq!(attributes.title, "Frust");
         assert_eq!(attributes.inner_size, Some(super::INITIAL_SIZE.into()));
         assert!(
@@ -5502,7 +5655,7 @@ mod tests {
     #[test]
     fn window_attributes_take_the_title_from_the_config() {
         let config = DesktopConfig::new().with_app_name("Huddle");
-        let attributes = window_attributes(&config, &mut NoExtensions);
+        let attributes = window_attributes(&config, None, &mut NoExtensions);
         assert_eq!(attributes.title, "Huddle");
     }
 
@@ -5513,7 +5666,7 @@ mod tests {
             ..SpyExtensions::default()
         };
         let config = DesktopConfig::new().with_app_name("Huddle");
-        let attributes = window_attributes(&config, &mut extensions);
+        let attributes = window_attributes(&config, None, &mut extensions);
 
         assert_eq!(extensions.attributes_calls, 1);
         assert_eq!(
@@ -5523,12 +5676,74 @@ mod tests {
         );
     }
 
+    #[test]
+    fn window_attributes_carry_the_configured_geometry_in_logical_pixels() {
+        let config = DesktopConfig::new()
+            .with_initial_size((1024.0, 768.0))
+            .with_min_size((400.0, 300.0))
+            .with_max_size((1600.0, 1200.0));
+        let attributes = window_attributes(&config, None, &mut NoExtensions);
+        assert_eq!(
+            attributes.inner_size,
+            Some(LogicalSize::new(1024.0, 768.0).into())
+        );
+        assert_eq!(
+            attributes.min_inner_size,
+            Some(LogicalSize::new(400.0, 300.0).into())
+        );
+        assert_eq!(
+            attributes.max_inner_size,
+            Some(LogicalSize::new(1600.0, 1200.0).into())
+        );
+        assert_eq!(
+            attributes.position, None,
+            "no persisted state: the OS places it"
+        );
+    }
+
+    #[test]
+    fn window_attributes_prefer_a_persisted_state_over_the_config_size() {
+        let config = DesktopConfig::new().with_initial_size((1024.0, 768.0));
+        let persisted = WindowState {
+            size: Size::new(1100.0, 650.0),
+            position: Some((40, 50)),
+            maximized: true,
+            monitor: None,
+        };
+        let attributes = window_attributes(&config, Some(&persisted), &mut NoExtensions);
+        assert_eq!(
+            attributes.inner_size,
+            Some(LogicalSize::new(1100.0, 650.0).into())
+        );
+        assert_eq!(
+            attributes.position,
+            Some(PhysicalPosition::new(40, 50).into())
+        );
+        assert!(attributes.maximized);
+    }
+
+    #[test]
+    fn an_invalid_size_knob_yields_to_the_lower_geometry_sources() {
+        assert_eq!(super::window_size_knob(None), None);
+        assert_eq!(super::window_size_knob(Some("wide")), None);
+        assert_eq!(
+            super::window_size_knob(Some("640x480")),
+            Some(LogicalSize::new(640, 480))
+        );
+    }
+
     // --- the FRUST_WINDOW_SIZE / FRUST_WINDOW_MAXIMIZED measurement knobs ---
     //
     // The parsers take explicit `Option<&str>` rather than touching the
     // process environment (the `render_thread_kill_switch`/`frame_gate`
     // precedent) — env-var tests that mutated `std::env` would race every
     // other test in this binary sharing the same process.
+
+    /// The knob with the shell default filled in, as the zero-config window
+    /// sees it.
+    fn parse_window_size(raw: Option<&str>) -> LogicalSize<u32> {
+        super::window_size_knob(raw).unwrap_or(super::INITIAL_SIZE)
+    }
 
     #[test]
     fn parse_window_size_valid() {
