@@ -426,8 +426,8 @@ table at the top of this guide routes them); none rides the gate chain above.
 
 `FRUST_TRACE=1 (cd examples/huddle && cargo run)` prints a `frust-perf startup ...` line, then
 periodic `frust-perf frame ...` summaries; on a platform-view page it also emits a rate-limited
-`frust-perf platform-view tail depth=...` line from the Android scroll-sync tail, and the Android view
-one `frust-perf jni` line per 120 frames (mean `nativeFrameSync` and poll cost). `frust-camera`'s
+`frust-perf platform-view tail depth=...` line from the Android scroll-sync tail, and one `frust-perf
+jni` line per 120 frames on Android (mean `nativeFrameSync` and poll cost). `frust-camera`'s
 backends separately `log::debug!` the platform's expected frame-rate range (`FRUST_LOG=debug`). `scripts/size-report.sh` size baselines: [PERFORMANCE_BASELINES.md](PERFORMANCE_BASELINES.md) § Measuring.
 
 ## Version-Pin Policy

@@ -6675,7 +6675,8 @@ per-frame spawn, whichever lands first; the Pixel 4a `acquire` tail is still owe
 
 ### `engine-analytic-coverage-measured-and-kept-out` — rounded rectangles and circles keep strip coverage; an analytic distance-field route was measured and not shipped
 
-**Observed** (evidence: the analytic-coverage go/no-go measurement, Pixel 4a S1 at 6x20 s, whose
+**Observed** (evidence: the analytic-coverage go/no-go measurement of 2026-10-14 on its unmerged
+branch, Pixel 4a S1 at 6x20 s, whose
 code was not merged): recognising axis-aligned rounded
 rectangles and kurbo circle and ellipse fills and drawing each from one rect instance with an
 analytic distance-field coverage cut the walk by 12 % (its non-glyph part by 28 %) and the alpha
@@ -6694,7 +6695,8 @@ re-baseline done for another reason that removes the second cost.
 
 ### `engine-path-cache-measured-and-kept-out` — flattened paths are not cached across frames; the cache was measured and not shipped
 
-**Observed** (evidence: the path-cache go/no-go measurement, Pixel 4a S1, whose code was not
+**Observed** (evidence: the path-cache go/no-go measurement of 2026-10-14 on its unmerged branch,
+Pixel 4a S1, whose code was not
 merged): a content-keyed cross-frame cache of
 flattened lines and captured strips (unclipped draws inside the viewport, admitted on the second
 sighting) moved the non-glyph walk by about 0 % in its byte-identical exact-position mode and by
@@ -6760,8 +6762,8 @@ the surface's warm-up is done (checked after each frame), on `SurfaceDestroyed` 
 `Pause`. (1) A static first screen killed in the foreground before any later frame or surface
 destroy leaves no blob, so the next launch is cold again. (2) The inline `FRUST_NO_RENDER_THREAD`
 path and the desktop shell persist once, right after the surface install, when the warm-up has
-barely started (an install-time blob measured 328 B and zero pipelines on the Pixel 4a, against
-about 117 KB and 18 pipelines after the warm-up). (3) Writes are ordered by a per-process generation, so
+barely started (the install-time write, measured on the split path before it moved, held 328 B and
+zero pipelines on the Pixel 4a, against about 117 KB and 18 pipelines after the warm-up). (3) Writes are ordered by a per-process generation, so
 a second `FrustSurfaceView` can land a smaller blob over a fuller one. (4) A writer thread the OS
 refuses is retried on the next frame with no bound, so sustained refusal costs one attempt and one
 warning per frame.
@@ -6774,12 +6776,13 @@ the after-warm-up moment, per-surface ordering, or a bounded retry.
 
 ### `android-adpf-opt-in-measured` — the Android performance-hint session ships opt-in because it measured no better as a default
 
-**Observed** (evidence: `docs/PERFORMANCE_BASELINES.md` § Engine close-out per device;
-`crates/frust-shell-android/src/adpf.rs`): an ADPF session over the UI and render threads, reporting
-each frame's work against the display period, was measured on a OnePlus 9 (API 35, session confirmed
-in `dumpsys performance_hint`): on the inline path its S4 p95 rose 12 % and its p99 worsened with
-hints on; on the split path S4 4.22 / 5.91 ms and S1 8.14 / 9.36 ms sat within noise of the
-policy-only rows. The Pixel 4a has no hint HAL, so the session cannot open there. The session ships
+**Observed** (evidence: the opt-in decision's OnePlus 9 captures — the inline-path A/B at 0d5c7cb3,
+12x30, hints on against off — and the split-path arm in `docs/PERFORMANCE_BASELINES.md` § Engine
+close-out per device; `crates/frust-shell-android/src/adpf.rs`): an ADPF session over the UI and
+render threads, reporting each frame's work against the display period, was measured on a OnePlus 9
+(API 35, session confirmed in `dumpsys performance_hint`): on the inline path its S4 p95 rose 4 %
+and its p99 12 % with hints on; on the split path S4 4.22 / 5.91 ms and S1 8.14 / 9.36 ms sat within
+noise of the policy-only rows. The Pixel 4a reports no hint manager, so the session cannot open there. The session ships
 behind `FRUST_ADPF=1`, default off; with it on there is one session per process, so a second
 `FrustSurfaceView`'s render thread is never in a session.
 
