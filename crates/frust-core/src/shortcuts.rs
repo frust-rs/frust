@@ -167,6 +167,61 @@ impl Chord {
             _ => false,
         }
     }
+
+    /// The chord as a hint surface shows it, by `Mod`'s compile-time rule: `"⌘K"`, `"⇧⌘P"` on
+    /// macOS/iOS (symbols in ⌃⌥⇧⌘ order, unseparated), `"Ctrl+K"`, `"Ctrl+Shift+P"` elsewhere.
+    pub fn display(&self) -> String {
+        self.display_for(MOD_IS_META)
+    }
+
+    fn display_for(&self, apple: bool) -> String {
+        let m = self.mods;
+        let key = key_label(&self.key, apple);
+        let held = if apple {
+            [(m.ctrl, "⌃"), (m.alt, "⌥"), (m.shift, "⇧"), (m.meta, "⌘")]
+        } else {
+            [
+                (m.ctrl, "Ctrl"),
+                (m.alt, "Alt"),
+                (m.shift, "Shift"),
+                (m.meta, "Super"),
+            ]
+        };
+        let mut parts: Vec<&str> = held.iter().filter(|(on, _)| *on).map(|(_, n)| *n).collect();
+        parts.push(&key);
+        parts.join(if apple { "" } else { "+" })
+    }
+}
+
+/// How [`Chord::display`] names `key`: characters uppercased, Apple's key symbols when `apple`.
+fn key_label(key: &Key, apple: bool) -> String {
+    let named = match key {
+        Key::Character(text) if text == " " => "Space",
+        Key::Character(text) => return text.to_uppercase(),
+        Key::Named(named) => match (named, apple) {
+            (NamedKey::Enter, true) => "↩",
+            (NamedKey::Enter, false) => "Enter",
+            (NamedKey::Backspace, true) => "⌫",
+            (NamedKey::Backspace, false) => "Backspace",
+            (NamedKey::Delete, true) => "⌦",
+            (NamedKey::Delete, false) => "Delete",
+            (NamedKey::Escape, true) => "⎋",
+            (NamedKey::Escape, false) => "Esc",
+            (NamedKey::Tab, true) => "⇥",
+            (NamedKey::Tab, false) => "Tab",
+            (NamedKey::ArrowLeft, _) => "←",
+            (NamedKey::ArrowRight, _) => "→",
+            (NamedKey::ArrowUp, _) => "↑",
+            (NamedKey::ArrowDown, _) => "↓",
+            (NamedKey::Home, _) => "Home",
+            (NamedKey::End, _) => "End",
+            (NamedKey::Insert, _) => "Insert",
+            (NamedKey::Copy, _) => "Copy",
+            (NamedKey::Cut, _) => "Cut",
+            (NamedKey::Paste, _) => "Paste",
+        },
+    };
+    named.to_string()
 }
 
 /// Set the modifier `token` names and return `true`, or `false` when it names none.
@@ -228,6 +283,15 @@ pub struct ShortcutDecl {
     pub id: ShortcutId,
     pub chord: Chord,
     /// What a hint surface shows for it.
+    pub label: String,
+    pub scope: ShortcutScope,
+}
+
+/// One declaration as a palette or help overlay lists it
+/// ([`RenderRoot::shortcut_hints`](crate::app::RenderRoot::shortcut_hints)).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShortcutHint {
+    pub chord: Chord,
     pub label: String,
     pub scope: ShortcutScope,
 }
@@ -334,6 +398,16 @@ impl ShortcutTable {
     #[cfg(test)]
     pub(crate) fn entries(&self) -> &[ShortcutEntry] {
         &self.entries
+    }
+
+    /// Every declaration `filter` keeps, reachable or not, as hints in paint order.
+    pub(crate) fn hints(&self, mut filter: impl FnMut(&ShortcutHint) -> bool) -> Vec<ShortcutHint> {
+        let hints = self.entries.iter().map(|e| ShortcutHint {
+            chord: e.decl.chord.clone(),
+            label: e.decl.label.clone(),
+            scope: e.decl.scope,
+        });
+        hints.filter(|hint| filter(hint)).collect()
     }
 
     /// The declarations `event` presses, as `(id, overlay stamp)` in delivery order: the
@@ -477,6 +551,62 @@ mod tests {
         assert!(!chord.matches(&press(character("k"), mods(true, true, false, false))));
         assert!(!chord.matches(&press(character("j"), ctrl)));
         assert!(!chord.matches(&press(Key::Named(NamedKey::Tab), ctrl)));
+    }
+
+    #[test]
+    fn display_follows_the_platform_rule() {
+        let chord = |spec: &str| Chord::parse(spec).unwrap();
+        assert_eq!(chord("Ctrl+K").display_for(false), "Ctrl+K");
+        assert_eq!(chord("Ctrl+K").display_for(true), "⌃K");
+        assert_eq!(chord("Meta+Shift+P").display_for(true), "⇧⌘P");
+        assert_eq!(chord("Meta+Shift+P").display_for(false), "Shift+Super+P");
+        assert_eq!(chord("Alt+Ctrl+Space").display_for(false), "Ctrl+Alt+Space");
+        assert_eq!(chord("Shift+Tab").display_for(false), "Shift+Tab");
+        assert_eq!(chord("Shift+Tab").display_for(true), "⇧⇥");
+        assert_eq!(chord("Esc").display_for(false), "Esc");
+        assert_eq!(chord("Cmd+Enter").display_for(true), "⌘↩");
+        assert_eq!(chord("Cmd+Enter").display_for(false), "Super+Enter");
+        assert_eq!(chord("1").display(), "1");
+        let apple = cfg!(any(target_os = "macos", target_os = "ios"));
+        let expected = if apple { "⌘K" } else { "Ctrl+K" };
+        assert_eq!(chord("Mod+K").display(), expected);
+    }
+
+    #[test]
+    fn hints_list_every_declaration_in_paint_order_through_the_filter() {
+        let (global, local, floated) = (
+            decl("Mod+K", ShortcutScope::AppGlobal),
+            decl("Mod+B", ShortcutScope::Local),
+            decl("Esc", ShortcutScope::Local),
+        );
+        let table = ShortcutTable::new(vec![
+            ShortcutEntry {
+                decl: global.clone(),
+                overlay: None,
+            },
+            ShortcutEntry {
+                decl: local.clone(),
+                overlay: None,
+            },
+            ShortcutEntry {
+                decl: floated.clone(),
+                overlay: Some(OverlayKey::next()),
+            },
+        ]);
+        let all = table.hints(|_| true);
+        let labels: Vec<_> = all.iter().map(|h| h.label.as_str()).collect();
+        assert_eq!(labels, ["Mod+K", "Mod+B", "Esc"]);
+        assert_eq!(
+            all[0],
+            ShortcutHint {
+                chord: global.chord,
+                label: global.label,
+                scope: ShortcutScope::AppGlobal,
+            }
+        );
+        let local_only = table.hints(|h| h.scope == ShortcutScope::Local);
+        assert_eq!(local_only.len(), 2);
+        assert!(ShortcutTable::default().hints(|_| true).is_empty());
     }
 
     #[test]

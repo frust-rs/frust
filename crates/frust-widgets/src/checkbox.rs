@@ -6,6 +6,9 @@
 //! `on_toggle(state, !checked)` — it does **not** flip its own `checked` field.
 //! The app mutates its state in the callback and the next rebuild feeds the new
 //! value back in (the masonry rule: application state is the source of truth).
+//!
+//! A checkbox is a Tab stop; while focused, a bare Space or Enter requests the toggle exactly as
+//! a click does. A pointer press claims no focus, so focus arrives through traversal only.
 
 use std::rc::Rc;
 
@@ -19,6 +22,7 @@ use kurbo::{Point, Size};
 use peniko::Color;
 
 use crate::authoring::presses;
+use crate::shortcuts::is_activation;
 use crate::text;
 
 /// Side length of the check box, in logical px.
@@ -182,6 +186,14 @@ impl Widget for CheckboxWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        if let InputEvent::Key(key) = event {
+            if !(ctx.has_focus() && is_activation(key)) {
+                return EventResult::Ignored;
+            }
+            (self.on_toggle)(ctx, !self.checked);
+            ctx.request_redraw();
+            return EventResult::Handled;
+        }
         let InputEvent::Pointer(p) = event else {
             return EventResult::Ignored;
         };
@@ -240,6 +252,11 @@ impl Widget for CheckboxWidget {
             node.set_toggled(Toggled::from(self.checked));
             node.add_action(Action::Click);
         });
+    }
+
+    /// Always a Tab stop; a pointer press never claims focus (see the module docs).
+    fn is_focusable(&self) -> bool {
+        true
     }
 
     crate::authoring::visit_children!(label);
@@ -449,5 +466,58 @@ mod tests {
             View::<ToggleState>::rebuild(&next, &prev, &mut w, &mut BuildCtx::new(&mut counter));
         assert!(w.checked);
         assert!(flags.needs_paint());
+    }
+
+    mod keyboard {
+        use super::*;
+        use frust_core::{DiscardScene, FrameTime, Key, KeyEvent, Modifiers, NamedKey, RenderRoot};
+
+        fn key(key: Key) -> InputEvent {
+            InputEvent::Key(KeyEvent {
+                key,
+                modifiers: Modifiers::default(),
+                repeat: false,
+            })
+        }
+
+        #[test]
+        fn tab_focuses_the_checkbox_then_space_or_enter_requests_the_toggle() {
+            assert!(widget(false).is_focusable());
+            let mut logic = |s: &mut ToggleState| {
+                let checked = s.last.unwrap_or(false);
+                crate::column().child(checkbox(checked, "on", |s: &mut ToggleState, v| {
+                    s.last = Some(v);
+                    s.toggles += 1;
+                }))
+            };
+            let mut root: RenderRoot<ToggleState, crate::FlexView<ToggleState>> = RenderRoot::new();
+            let mut state = ToggleState::default();
+            let mut tcx = frust_text::TextContext::new();
+            root.rebuild(&mut logic, &mut state);
+            root.layout_with_text(Size::new(200.0, 200.0), &mut tcx as &mut dyn Any);
+            root.paint(&mut DiscardScene, FrameTime::ZERO);
+            root.event(&mut state, &key(Key::Character(" ".to_string())));
+            assert_eq!(state.toggles, 0, "an unfocused checkbox takes no keys");
+            root.event(&mut state, &ev(PointerPhase::Down, 5.0, 10.0));
+            root.event(&mut state, &ev(PointerPhase::Up, 5.0, 10.0));
+            assert_eq!(state.toggles, 1);
+            assert!(!root.is_focus_active(), "a click claims no focus");
+            root.rebuild(&mut logic, &mut state);
+
+            root.event(&mut state, &key(Key::Named(NamedKey::Tab)));
+            assert!(root.is_focus_active());
+            assert!(
+                root.event(&mut state, &key(Key::Character(" ".to_string())))
+                    .handled
+            );
+            assert_eq!(
+                (state.last, state.toggles),
+                (Some(false), 2),
+                "requests !checked"
+            );
+            root.rebuild(&mut logic, &mut state);
+            root.event(&mut state, &key(Key::Named(NamedKey::Enter)));
+            assert_eq!((state.last, state.toggles), (Some(true), 3));
+        }
     }
 }

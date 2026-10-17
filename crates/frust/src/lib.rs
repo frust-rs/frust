@@ -165,15 +165,15 @@ pub use frust_widgets::{
     RadioView, RadioWidget, ReorderableListView, RepaintBoundaryView, ResultCallback, Row,
     RubberBand, SafeAreaView, ScaffoldView, ScrollAxis, ScrollController, ScrollInfo,
     ScrollMetrics, ScrollPhysics, ScrollSubscription, ScrollView, ScrollbarShow, ScrollbarStyle,
-    Simulation, SizedBox, SizedBoxView, Slider, SliderView, SliverBoxView, SliverFillRemainingView,
-    SliverFixedExtentListView, SliverGridDelegate, SliverGridView, SliverListView,
-    SliverPaddingView, SliverPersistentHeaderDelegate, SliverPersistentHeaderView, SourceFeedback,
-    SpringDescription, Stack, StackView, TextInput, TextInputView, TextView, Timing, Tolerance,
-    TransitionSpec, TransitionState, VisibilityCallback, auto_scroll_zone, button, checkbox,
-    colored_box, column, container, custom_scroll_view, divider, drag_target, draggable, flexible,
-    hero, icon, icon_button, indexed_stack, inflexible, keep_alive, keyed, list_view,
-    overlay_portal, radio, reorderable_list, repaint_boundary, row, safe_area, scaffold,
-    scroll_view, slider, sliver_box, sliver_fill_remaining, sliver_fixed_extent_list,
+    ShortcutsView, Simulation, SizedBox, SizedBoxView, Slider, SliderView, SliverBoxView,
+    SliverFillRemainingView, SliverFixedExtentListView, SliverGridDelegate, SliverGridView,
+    SliverListView, SliverPaddingView, SliverPersistentHeaderDelegate, SliverPersistentHeaderView,
+    SourceFeedback, SpringDescription, Stack, StackView, TextInput, TextInputView, TextView,
+    Timing, Tolerance, TransitionSpec, TransitionState, VisibilityCallback, auto_scroll_zone,
+    button, checkbox, colored_box, column, container, custom_scroll_view, divider, drag_target,
+    draggable, flexible, hero, icon, icon_button, indexed_stack, inflexible, keep_alive, keyed,
+    list_view, overlay_portal, radio, reorderable_list, repaint_boundary, row, safe_area, scaffold,
+    scroll_view, shortcuts, slider, sliver_box, sliver_fill_remaining, sliver_fixed_extent_list,
     sliver_fixed_extent_list_keyed, sliver_grid, sliver_grid_keyed, sliver_list, sliver_padding,
     sliver_persistent_header, stack, text, text_input,
 };
@@ -251,6 +251,14 @@ pub use frust_core::EditCommand;
 /// an app's file-drop handler names these types in its public API without being
 /// a widget author.
 pub use frust_core::event::{FileDropEvent, FileDropPhase};
+
+/// The keyboard vocabulary app code names: a [`Chord`] bound with [`shortcuts`]
+/// in a [`ShortcutScope`], the [`ShortcutHint`] a palette lists
+/// (`RenderRoot::shortcut_hints`, labels rendered with [`Chord::display`]), the
+/// [`FocusRingPolicy`] deciding when a Tab-focused control shows its ring, and
+/// the [`OverlayKeys`] class that makes a floated surface modal for keys. Lifted
+/// flat for [`EditCommand`]'s reason.
+pub use frust_core::{Chord, FocusRingPolicy, OverlayKeys, ShortcutHint, ShortcutScope};
 
 /// The selection-toolbar seam: the request a text field publishes when it
 /// has a selection ([`SelectionToolbarRequest`]/[`SelectionToolbarActions`]),
@@ -775,6 +783,17 @@ pub mod authoring {
     /// [`InputEvent::Scroll`]. Also re-exported flat as [`frust::FileDropEvent`]
     /// and [`frust::FileDropPhase`].
     pub use frust_core::event::{FileDropEvent, FileDropPhase};
+
+    /// The shortcut and focus vocabulary a widget author needs:
+    /// [`PaintCtx::register_shortcut`] takes a [`ShortcutDecl`] carrying a
+    /// [`ShortcutId`], answered as [`InputEvent::Shortcut`]; [`OverlayKeys`] marks
+    /// a floated surface modal for keys; [`FocusRingPolicy`] governs
+    /// [`PaintCtx::is_focused_for_ring`]. Also re-exported flat where app code
+    /// names them ([`frust::Chord`](crate::Chord) and its neighbours).
+    pub use frust_core::{
+        Chord, ChordParseError, FocusRingPolicy, OverlayKeys, ShortcutDecl, ShortcutHint,
+        ShortcutId, ShortcutScope,
+    };
 
     /// The paint vocabulary [`PaintScene`]'s per-corner and dashed methods name
     /// — `fill_rounded_rect_radii`/`push_clip_rounded_radii` take a
