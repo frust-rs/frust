@@ -1,3 +1,5 @@
+//! Unit tests for the event module.
+
 use std::path::PathBuf;
 
 use kurbo::{Affine, Point, Rect, Size, Vec2};
@@ -302,9 +304,8 @@ fn content_type_defaults_to_no_hint() {
 
 #[test]
 fn content_type_predicates_classify_every_variant() {
-    // `is_secret` gates secure entry; `suppresses_suggestions` gates the
-    // suggestion strip + personalized learning. A shell branches on these,
-    // never on a `_` arm (the enum is `#[non_exhaustive]`).
+    // `is_secret` gates secure entry; `suppresses_suggestions` gates the suggestion strip and
+    // learning. A shell branches on these, never on a `_` arm (the enum is non-exhaustive).
     assert!(ImeContentType::Password.is_secret());
     assert!(ImeContentType::Password.suppresses_suggestions());
 
@@ -360,9 +361,8 @@ fn publish_ime_state_round_trips_the_content_type() {
     let taken = ctx.take_ime_state().expect("published state");
     assert_eq!(taken, published);
     assert_eq!(taken.content_type, ImeContentType::Password);
-    // The secret's text is published verbatim — the platform IME mirror
-    // needs it (see `ImeState`'s docs); the hint, not redaction, is what
-    // tells the shell to lock the keyboard down.
+    // The secret's text is published verbatim (the platform IME mirror needs it); the hint,
+    // not redaction, tells the shell to lock the keyboard down.
     assert_eq!(taken.editing.text, "hunter2");
 }
 
@@ -384,9 +384,8 @@ fn content_type_bubbles_up_the_focus_chain() {
     assert_eq!(ctx.take_ime_state(), Some(published));
 }
 
-/// The keyboard-suppression hint is carried, not interpreted: core passes
-/// it through untouched, and it prints plainly (it is a routing hint, not a
-/// secret) so a trace shows why no keyboard came up.
+/// The keyboard-suppression hint is carried, not interpreted, and prints plainly (a routing
+/// hint, not a secret) so a trace shows why no keyboard came up.
 #[test]
 fn suppress_soft_keyboard_defaults_off_round_trips_and_prints_plainly() {
     assert!(
@@ -453,15 +452,8 @@ fn key_and_ime_events_are_focus_routed_with_zero_position() {
 
 #[test]
 fn pending_result_flush_peek_observes_the_mark_without_draining_it() {
-    // The peek is what a mobile shell reads while gathering its frame-gate
-    // inputs, BEFORE deciding whether the frame runs — so it must be
-    // non-destructive: draining stays `RenderRoot::rebuild`'s job on a frame
-    // that actually runs. A peek that consumed the mark would leave the
-    // rebuild with nothing to flush, which is worse than never peeking.
-    //
-    // Thread-affine like mark/take, and libtest gives each test its own
-    // thread, so this needs no cross-test lock — but drain first anyway so
-    // it never inherits a mark from earlier work on this thread.
+    // A frame gate peeks before deciding whether the frame runs, so the peek must not consume
+    // the mark the rebuild drains. Drain first so no earlier mark on this thread leaks in.
     let _ = take_pending_result_flush();
     assert!(!has_pending_result_flush(), "starts clear");
 
@@ -481,12 +473,8 @@ fn pending_result_flush_peek_observes_the_mark_without_draining_it() {
 
 #[test]
 fn a_hover_mark_belongs_to_the_root_whose_link_it_names() {
-    // Two roots on one thread hold colliding epoch integers by construction
-    // (every root's counter starts at 1 and advances per hover pass), so the
-    // published link and the mark are both qualified by the root's identity.
-    // Simulated here with two ids rather than two `RenderRoot`s: this is the
-    // channel's own contract, and the pods on either side of it only ever
-    // reach it through these four functions.
+    // Two roots on one thread share epoch integers (each counter starts at 1), so the link and
+    // the mark are qualified by root identity; two ids stand in for two `RenderRoot`s.
     const ROOT_A: u64 = 11;
     const ROOT_B: u64 = 22;
     const EPOCH: u64 = 7;
@@ -527,9 +515,8 @@ fn a_hover_mark_belongs_to_the_root_whose_link_it_names() {
 
 #[test]
 fn a_cursor_request_is_one_slot_the_last_writer_owns() {
-    // Thread-affine like the two flags above, and libtest gives each test its
-    // own thread — but clear first anyway so nothing earlier on this thread
-    // leaks in (which is exactly what `RenderRoot::event` does per pass).
+    // Clear first so nothing earlier on this thread leaks in, as `RenderRoot::event` does per
+    // pass.
     clear_cursor_request();
     assert_eq!(take_cursor_request(), None, "absence means Default");
 
@@ -556,12 +543,8 @@ fn a_cursor_request_is_one_slot_the_last_writer_owns() {
 
 #[test]
 fn a_nested_request_pass_resolves_its_own_and_hands_the_slot_back() {
-    // The reentrancy guard on the pass-scoped slot. `RenderRoot::event`
-    // forbids re-entering itself, so this shape is not reachable today —
-    // which is the point: the failure it would produce (an inner dispatch
-    // silently eating the request the outer pass had already collected, or
-    // draining one the outer pass was still owed) is invisible, so the
-    // bracket enforces the scoping rather than the convention doing it.
+    // A nested pass must neither eat the request the outer pass collected nor drain one the
+    // outer pass is still owed; the bracket enforces that rather than a convention.
     let outer = RequestPass::enter();
     let mut count = 0u32;
     {
@@ -586,9 +569,8 @@ fn a_nested_request_pass_resolves_its_own_and_hands_the_slot_back() {
             "and resolves exactly what was asked inside it"
         );
     }
-    // `take` consumes the guard, so the outermost pass ends here: the slot is
-    // cleared rather than restored, and a `set_cursor` made outside any pass
-    // (a reconciler's synthesized `Cancel`) still cannot leak into the next.
+    // `take` ends the outermost pass: the slot is cleared, not restored, so a `set_cursor` made
+    // outside any pass cannot leak into the next.
     assert_eq!(
         outer.take().cursor,
         Some(CursorIcon::Grab),
@@ -615,10 +597,8 @@ fn the_default_cursor_is_the_platform_arrow() {
 
 #[test]
 fn a_nested_request_pass_hands_the_clipboard_slots_back_too() {
-    // The cursor's reentrancy proof above, for the two channels sharing its
-    // bracket: one flag guards all three slots, so a nested pass must return
-    // an enclosing pass's *undrained copy* and *unanswered paste request*
-    // exactly as it returns its cursor.
+    // The cursor's reentrancy proof for the two channels sharing its bracket: a nested pass
+    // returns the enclosing pass's undrained copy and unanswered paste request.
     let outer = RequestPass::enter();
     let mut count = 0u32;
     {
@@ -770,9 +750,8 @@ fn an_overlay_event_carries_no_local_position_and_is_never_translated() {
         Point::ZERO,
         "a broadcast is never hit-tested, so it reports no position to hit-test on"
     );
-    // The payload's own position is WINDOW space, and the container chain the
-    // broadcast travels describes where the *owner* sits — not where the
-    // floated surface does — so translating it would corrupt it.
+    // The payload is in window space and the container chain describes where the owner sits,
+    // so translating it would corrupt it.
     assert_eq!(
         routed.translated(Vec2::new(-10.0, -20.0)),
         routed,
@@ -821,10 +800,8 @@ fn a_leaked_edit_command_is_cleared_with_the_pass_and_never_reaches_the_next() {
         let pass = RequestPass::enter();
         let mut count = 0u32;
         let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
-        // Dispatched, and nobody drains it: a wiring bug in the dispatching
-        // widget. The pass resolving is what reports (debug builds) and clears
-        // it — a `Cut` surviving into a later pass would apply to whatever is
-        // selected by then, which is how text gets destroyed silently.
+        // Dispatched and never drained: resolving the pass clears it, so a stale `Cut` cannot
+        // apply to whatever is selected later.
         ctx.dispatch_edit_command(EditCommand::Cut);
         drop(ctx);
         drop(pass.take());
@@ -850,9 +827,8 @@ fn a_nested_pass_hands_the_enclosing_passs_edit_commands_back() {
         ctx.dispatch_edit_command(EditCommand::Copy);
     }
     {
-        // A nested dispatch (the overlay pre-pass re-entering `RenderRoot::event`
-        // is the shipped case) starts from an empty queue and must not eat the
-        // enclosing pass's undrained command.
+        // A nested dispatch (the overlay pre-pass) starts from an empty queue and must not eat
+        // the enclosing pass's undrained command.
         let inner = RequestPass::enter();
         let mut inner_state = 0u32;
         let mut ctx = EventCtx::new(&mut inner_state, Point::ZERO, Size::ZERO);

@@ -1,74 +1,25 @@
-//! Layer 2 input: pointer/scroll events and the [`EventCtx`] a widget mutates
-//! while handling them.
+//! Layer 2 input: the [`InputEvent`] vocabulary and the [`EventCtx`] a widget mutates handling it.
 //!
-//! The pipeline mirrors Masonry's corrected pointer model: an [`InputEvent`]
-//! enters the tree at the root ([`crate::app::RenderRoot::event`]) and is routed
-//! down through container [`ChildPod`](crate::widget::ChildPod)s, each of which
-//! translates the event into its child's local coordinate space before
-//! forwarding. A widget reports what it did through [`EventResult`] and can, via
-//! [`EventCtx`], mutate application state, request a redraw, or *capture* the
-//! pointer so subsequent moves/releases route straight back to it.
-//!
-//! Capture here is **by recorded path**, not a global registry: on
-//! [`PointerPhase::Down`] a widget calls [`EventCtx::capture_pointer`]; the
-//! enclosing container reads the flag ([`EventCtx::is_pointer_captured`]) and
-//! records which child was active so it can route later moves/releases directly.
-//! Capture auto-releases on [`PointerPhase::Up`]/[`PointerPhase::Cancel`] (never
-//! on window-leave) — the claimant's own, when more than one contact is down:
-//! [`InputEvent::PointerContact`] states the multi-contact contract, and
-//! [`EventCtx::pointer_id`]/[`EventCtx::capture_contacts`] are a widget's side of it.
+//! An event enters at [`crate::app::RenderRoot::event`] and is routed down through each
+//! [`ChildPod`](crate::widget::ChildPod), translated into the child's local space. A widget reports
+//! an [`EventResult`] and, through [`EventCtx`], mutates state, requests a redraw, or captures the
+//! pointer — by recorded path, released by the claimant's `Up`/`Cancel`, never by window-leave.
 //!
 //! # Hover is a claim, not a phase
 //!
-//! There is no Enter/Leave phase, and [`PointerPhase`] deliberately gains none:
-//! hover is an **opt-in claim** a widget makes from its ordinary uncaptured
-//! [`PointerPhase::Move`] arm ([`EventCtx::claim_hover`]), recorded as a path
-//! through the pod chain the same way focus is. The claim's identity is an
-//! *epoch*: [`crate::app::RenderRoot`] advances one hover epoch per hover pass
-//! (an uncaptured `Move`, or the `Down`/`Up`/`Cancel` that ends a hover
-//! outright), a claim stamps that epoch onto every
-//! [`ChildPod`](crate::widget::ChildPod) from the claimant up to the root, and a
-//! link only counts as hovered while its stamp still matches the live epoch. So
-//! the previous claimant needs no explicit clearing — the pointer moving anywhere
-//! else advances the epoch and its stamp goes stale by construction, which is why
-//! a container that never hears about the move cannot leave a stale path standing.
+//! There is no Enter/Leave: a widget calls [`EventCtx::claim_hover`] from an uncaptured
+//! [`PointerPhase::Move`]. The root advances one hover epoch per hover pass and a claim stamps it
+//! on every pod up to the root, so an unclaimed link lapses by construction. The claimant and every
+//! ancestor read hovered (CSS `:hover`); the first claim recorded in a pass wins, so a container
+//! claims after routing. A rebuild that drops the live claimant ends the hover.
 //!
-//! Stranding needs a hover pass, and there is exactly one way for a link to lose
-//! its owner without one: a rebuild that *removes* the claimant, which will never
-//! see another `Move`. A dropped [`ChildPod`](crate::widget::ChildPod) holding the
-//! live link therefore reports itself, and
-//! [`RenderRoot::rebuild`](crate::app::RenderRoot::rebuild) ends the hover before
-//! the frame does — the hover twin of the focus-orphan release.
+//! # The cursor is a per-pass request
 //!
-//! The recorded thing is a **path**, exactly like focus, and both hover reads
-//! report membership of it: the claimant *and* every ancestor enclosing it read
-//! hovered, the way CSS `:hover` applies to an element while the pointer is over
-//! one of its descendants. Nothing off the path does — a sibling, or a widget
-//! whose descendant did not claim, reads `false`.
+//! [`EventCtx::set_cursor`] fills one slot per pass, last writer wins; only a pointer `Move`
+//! (captured included) re-resolves [`crate::app::RenderRoot::cursor`], and an empty slot resolves
+//! to [`CursorIcon::Default`].
 //!
-//! Only an **uncaptured** `Move` may claim: the root marks a captured pass
-//! ineligible outright, and [`ChildPod::event_child`](crate::widget::ChildPod::event_child)
-//! additionally refuses a claim from inside a pod that itself holds the capture
-//! path, so a drag can never paint hover under the finger. At most one claim per
-//! pass is recorded — the **first one recorded wins**, and every later claim in
-//! that pass is ineligible — so at most one path is hovered and two *stacked*
-//! widgets cannot each hold their own link. First-recorded is the topmost
-//! (deepest) claimant only while every container claims **after** routing the
-//! move to its children, which is what [`EventCtx::claim_hover`]'s contract
-//! requires of one: an ancestor that claims *before* it forwards is recorded
-//! first instead, and starves its whole subtree for the pass.
-//!
-//! # The cursor is a per-pass request, on its own channel
-//!
-//! [`EventCtx::set_cursor`] is hover's sibling and deliberately **not** derived
-//! from it: the root's hover mirror is identity-free (it knows *that* something
-//! is hovered, not which widget or what shape that widget wants), so the cursor
-//! gets its own channel — one slot per pass, last writer wins, resolved by
-//! [`crate::app::RenderRoot::event`] into [`crate::app::RenderRoot::cursor`] for
-//! a desktop shell to apply. Absence resolves to [`CursorIcon::Default`], so a
-//! widget that stops asking needs no clearing, and only a pointer
-//! [`PointerPhase::Move`] re-resolves — a captured `Move` included, which is what
-//! lets a drag keep its own cursor outside its bounds.
+//! See `docs/CORE_ARCHITECTURE.md` § Data Flow.
 
 mod contact;
 mod ctx;
