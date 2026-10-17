@@ -6,6 +6,7 @@ use kurbo::{Affine, Point, Rect, Size, Vec2};
 
 use crate::overlay::OverlayKey;
 
+use super::ctx::ChildFold;
 use super::*;
 
 fn down(x: f64, y: f64) -> InputEvent {
@@ -193,7 +194,11 @@ fn absorb_child_folds_flags_upward() {
         child.request_redraw();
         child.capture_pointer();
         let (redraw, cap) = (child.needs_redraw(), child.is_pointer_captured());
-        ctx.absorb_child(redraw, cap, false, false, false, false, false, None);
+        ctx.absorb_child(ChildFold {
+            needs_redraw: redraw,
+            captured: cap,
+            ..ChildFold::default()
+        });
     }
     assert!(ctx.needs_redraw());
     assert!(ctx.is_pointer_captured());
@@ -248,7 +253,12 @@ fn absorb_child_folds_focus_and_ime_upward() {
             child.is_focus_released(),
             child.take_ime_state(),
         );
-        ctx.absorb_child(false, false, false, false, false, fr, frl, ime);
+        ctx.absorb_child(ChildFold {
+            focus_requested: fr,
+            focus_released: frl,
+            ime_state: ime,
+            ..ChildFold::default()
+        });
     }
     assert!(ctx.is_focus_requested());
     assert!(!ctx.is_focus_released());
@@ -290,7 +300,10 @@ fn child_ctx_seeds_hover_and_absorb_bubbles_a_claim() {
         assert_eq!(child.hover_claim_epoch(), 8, "a claim takes the next epoch");
         child.claim_hover();
         let claimed = child.is_hover_claimed();
-        ctx.absorb_child(false, false, false, false, claimed, false, false, None);
+        ctx.absorb_child(ChildFold {
+            hover_claimed: claimed,
+            ..ChildFold::default()
+        });
     }
     assert!(ctx.is_hover_claimed());
 }
@@ -379,7 +392,10 @@ fn content_type_bubbles_up_the_focus_chain() {
         let mut child = ctx.child_ctx(Point::ZERO, Size::ZERO, true, false, false);
         child.publish_ime_state(published.clone());
         let ime = child.take_ime_state();
-        ctx.absorb_child(false, false, false, false, false, false, false, ime);
+        ctx.absorb_child(ChildFold {
+            ime_state: ime,
+            ..ChildFold::default()
+        });
     }
     assert_eq!(ctx.take_ime_state(), Some(published));
 }
@@ -946,7 +962,10 @@ fn a_contact_pass_seeds_every_context_and_collects_the_opt_in() {
             (child.is_contact_capture_requested(), id)
         };
         assert_eq!(id, PointerId::touch(1));
-        ctx.absorb_child(false, false, contacts, false, false, false, false, None);
+        ctx.absorb_child(ChildFold {
+            contacts_requested: contacts,
+            ..ChildFold::default()
+        });
         assert!(ctx.is_contact_capture_requested(), "the opt-in bubbles");
     }
     assert!(outer.contacts_requested(), "and is recorded in the pass");

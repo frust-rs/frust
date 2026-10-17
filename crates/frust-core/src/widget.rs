@@ -1895,19 +1895,7 @@ impl ChildPod {
         // claim recorded (the topmost claimant's) closes the pass.
         let hover_eligible = ctx.is_hover_eligible() && !ctx.is_hover_claimed() && !self.active;
         let claim_epoch = ctx.hover_claim_epoch();
-        let (
-            (opted_in, opted_in_at_or_below),
-            captured,
-            contacts,
-            released,
-            hover_claimed,
-            focus_req,
-            focus_rel,
-            redraw,
-            (layout_requested, layout_path_dirty),
-            ime,
-            result,
-        ) = {
+        let ((opted_in, opted_in_at_or_below), fold, (layout_requested, layout_path_dirty), result) = {
             let mut child_ctx = ctx.child_ctx(
                 self.origin,
                 self.size,
@@ -1921,18 +1909,14 @@ impl ChildPod {
             let (opted_in, opted_in_at_or_below) = frame.close();
             (
                 (opted_in, opted_in_at_or_below),
-                child_ctx.is_pointer_captured(),
-                child_ctx.is_contact_capture_requested(),
-                child_ctx.is_capture_released(),
-                child_ctx.is_hover_claimed(),
-                child_ctx.is_focus_requested(),
-                child_ctx.is_focus_released(),
-                child_ctx.needs_redraw(),
+                child_ctx.fold(),
                 (child_ctx.needs_layout(), child_ctx.is_layout_path_dirty()),
-                child_ctx.take_ime_state(),
                 result,
             )
         };
+        let (captured, hover_claimed) = (fold.captured, fold.hover_claimed);
+        let (focus_req, focus_rel, redraw) =
+            (fold.focus_requested, fold.focus_released, fold.needs_redraw);
         // The event pass's layout-skip source, folded into `ctx` as the path
         // bit: a broadcast container returns `Ignored` whatever its child did.
         let path_dirty = layout_path_dirty
@@ -1971,16 +1955,7 @@ impl ChildPod {
         if focus_req {
             self.set_focused(true);
         }
-        ctx.absorb_child(
-            redraw,
-            captured,
-            contacts,
-            released,
-            hover_claimed,
-            focus_req,
-            focus_rel,
-            ime,
-        );
+        ctx.absorb_child(fold);
         result
     }
 

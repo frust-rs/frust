@@ -29,6 +29,20 @@ pub struct EventOutcome {
     pub needs_redraw: bool,
 }
 
+/// A child dispatch's request flags and published IME surface, folded into its parent by
+/// [`EventCtx::absorb_child`].
+#[derive(Debug, Default)]
+pub(crate) struct ChildFold {
+    pub(crate) needs_redraw: bool,
+    pub(crate) captured: bool,
+    pub(crate) contacts_requested: bool,
+    pub(crate) capture_released: bool,
+    pub(crate) hover_claimed: bool,
+    pub(crate) focus_requested: bool,
+    pub(crate) focus_released: bool,
+    pub(crate) ime_state: Option<ImeState>,
+}
+
 /// Context threaded into [`crate::widget::Widget::event`]: mutate the type-erased app state
 /// ([`EventCtx::state_mut`]), request a redraw or layout, capture the pointer or focus, and read
 /// the widget's own geometry (event positions are already local).
@@ -381,29 +395,32 @@ impl<'a> EventCtx<'a> {
         }
     }
 
+    /// Drain this (child) context's request flags and IME surface into a [`ChildFold`].
+    pub(crate) fn fold(&mut self) -> ChildFold {
+        ChildFold {
+            needs_redraw: self.needs_redraw,
+            captured: self.capture_requested,
+            contacts_requested: self.contacts_requested,
+            capture_released: self.capture_released,
+            hover_claimed: self.hover_claimed,
+            focus_requested: self.focus_requested,
+            focus_released: self.focus_released,
+            ime_state: self.ime_state.take(),
+        }
+    }
+
     /// Fold a child dispatch's request flags and any published IME surface back into this context.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn absorb_child(
-        &mut self,
-        child_needs_redraw: bool,
-        child_captured: bool,
-        child_contacts_requested: bool,
-        child_capture_released: bool,
-        child_hover_claimed: bool,
-        child_focus_requested: bool,
-        child_focus_released: bool,
-        child_ime_state: Option<ImeState>,
-    ) {
-        self.needs_redraw |= child_needs_redraw;
-        self.capture_requested |= child_captured;
-        self.contacts_requested |= child_contacts_requested;
-        self.capture_released |= child_capture_released;
+    pub(crate) fn absorb_child(&mut self, child: ChildFold) {
+        self.needs_redraw |= child.needs_redraw;
+        self.capture_requested |= child.captured;
+        self.contacts_requested |= child.contacts_requested;
+        self.capture_released |= child.capture_released;
         // A claim bubbles like a focus request, so the whole path carries the same stamp.
-        self.hover_claimed |= child_hover_claimed;
-        self.focus_requested |= child_focus_requested;
-        self.focus_released |= child_focus_released;
-        if child_ime_state.is_some() {
-            self.ime_state = child_ime_state;
+        self.hover_claimed |= child.hover_claimed;
+        self.focus_requested |= child.focus_requested;
+        self.focus_released |= child.focus_released;
+        if child.ime_state.is_some() {
+            self.ime_state = child.ime_state;
         }
     }
 }
