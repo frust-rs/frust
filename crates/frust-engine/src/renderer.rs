@@ -13,10 +13,19 @@
 //!
 //! - every pass the engine begins is ended before `encode` returns, so the
 //!   caller's next `begin_render_pass` on the same encoder is legal; and
-//! - the engine issues no `queue.submit` for scene work. It does issue
-//!   `queue.write_texture`/`write_buffer` uploads, which are ordered ahead of
-//!   the command buffers submitted after them and so land before the passes
-//!   that read them.
+//! - the engine issues no `queue.submit` for scene work. Its per-frame
+//!   uploads — coverage, encoded paints, instances, the viewport uniform and
+//!   each page round's — are written into a mapped staging slot and moved into
+//!   place by copy commands recorded into the caller's encoder, ahead of the
+//!   passes that read them (see [`frust_gpu::staging`]). The slot's re-mapping
+//!   rides the same encoder (`map_buffer_on_submit`), so the caller's one
+//!   submit is also what returns the slot to the engine; an encoder dropped
+//!   unsubmitted just costs the engine that slot. Its on-change uploads
+//!   (colour ramps, atlas regions) — and every upload under
+//!   `FRUST_ENGINE_NO_STAGING_RING`, or on a frame the ring has no free slot
+//!   for — are `queue.write_texture`/`write_buffer` calls, which are ordered
+//!   ahead of the command buffers submitted after them and so land before the
+//!   passes that read them.
 //!
 //! One thing the engine *does* submit, and it is worth naming precisely because
 //! the rule above is otherwise absolute: growing the image atlas array submits a
@@ -255,6 +264,9 @@ use std::sync::{Arc, Once};
 #[cfg(any(test, feature = "perf-trace"))]
 use std::time::Duration;
 
+use frust_gpu::staging::{
+    BUFFER_COPY_ALIGNMENT, StagingFrame, StagingRing, TEXTURE_COPY_ALIGNMENT,
+};
 use frust_gpu::{PipelineCache, PooledTexture, SceneTextureId, ShaderLibrary, TierCaps};
 use frust_scene::{Scene, SceneBuilder};
 use glifo::{AtlasCommand, AtlasCommandRecorder, AtlasPaint};
@@ -288,7 +300,8 @@ use crate::gpu::atlas::{
     AtlasPageBuffers, AtlasRenderReport, AtlasRenderer, lower_encoded_image, push_solid_strips,
 };
 use crate::gpu::bindings::{
-    ATLAS_SAMPLER_BINDING, ExternalRuns, ExternalTextures, lower_encoded_external,
+    ATLAS_SAMPLER_BINDING, ExternalRuns, ExternalTextures, GroupKind, GroupSource,
+    SourceGroupCache, SourceGroupKey, lower_encoded_external,
 };
 use crate::gpu::config::resource_widths_agree;
 use crate::gpu::depth::DepthAttachment;
@@ -507,11 +520,19 @@ const ENCODE_TRACE_COLUMNS: [&str; 17] = [
 /// - `glyph_misses` — glyphs that took the cache-miss path.
 /// - `glyph_evicted` — atlas rectangles the eviction pass freed.
 ///
-/// The last, `run_keys`, is a per-frame median again: the distinct run
-/// identities (font, size, hinting) the policy classified in a frame. The
-/// replay figures read zero on a frame whose replay did not run.
+/// `run_keys` is a per-frame median again: the distinct run identities (font,
+/// size, hinting) the policy classified in a frame. The replay figures read
+/// zero on a frame whose replay did not run.
+///
+/// The last five cover the staging ring and the bind-group cache. `staged_bytes`
+/// is the frame's staging-slot bytes, a median (zero on the queue-write route).
+/// The other four are **sums over the window** of this frame's change in the
+/// ring's counters and in the bind-group count: `staging_busy` and
+/// `staging_too_large` are frames the ring refused, `staging_buffers` is slot
+/// buffers it created, and `bind_groups` is bind groups the frame path created.
+/// A ring that is off reports zero for all three staging counts.
 #[cfg(feature = "perf-trace")]
-const ENCODE_TRACE_COUNTS: [&str; 11] = [
+const ENCODE_TRACE_COUNTS: [&str; 16] = [
     "draws",
     "strips",
     "alphas",
@@ -523,6 +544,11 @@ const ENCODE_TRACE_COUNTS: [&str; 11] = [
     "glyph_misses",
     "glyph_evicted",
     "run_keys",
+    "staged_bytes",
+    "staging_busy",
+    "staging_too_large",
+    "staging_buffers",
+    "bind_groups",
 ];
 
 /// Index into [`ENCODE_TRACE_COUNTS`] of the first count reported as a sum over
@@ -538,9 +564,32 @@ const ENCODE_TRACE_FIRST_SUMMED: usize = 5;
 #[cfg(feature = "perf-trace")]
 const ENCODE_TRACE_MEDIAN_AGAIN: usize = 10;
 
+/// Index into [`ENCODE_TRACE_COUNTS`] of the first count summed over the window
+/// again, through the end of the line: the staging refusals, buffer creations
+/// and bind-group creations. `staged_bytes`, just before it, is a median.
+#[cfg(feature = "perf-trace")]
+const ENCODE_TRACE_SUMMED_AGAIN: usize = 12;
+
 /// Width of one window row: every phase column followed by every count.
 #[cfg(feature = "perf-trace")]
 const ENCODE_TRACE_ROW: usize = ENCODE_TRACE_COLUMNS.len() + ENCODE_TRACE_COUNTS.len();
+
+/// The staging ring's and the bind-group cache's counters, read at one point so
+/// a frame's row can carry only the change since the previous read.
+#[cfg(feature = "perf-trace")]
+#[derive(Debug, Clone, Copy, Default)]
+struct TraceCounters {
+    busy: u64,
+    too_large: u64,
+    buffers_created: u64,
+    bind_groups: u64,
+}
+
+/// `now - before` as one frame's count, saturating at both ends.
+#[cfg(feature = "perf-trace")]
+fn counter_delta(now: u64, before: u64) -> u32 {
+    u32::try_from(now.saturating_sub(before)).unwrap_or(u32::MAX)
+}
 
 /// What one frame drew, carried beside its phases.
 ///
@@ -572,17 +621,35 @@ struct EncodeCounts {
     glyph_evicted: u32,
     /// Distinct run identities classified this frame.
     run_keys: u32,
+    /// Bytes the frame placed in its staging slot, alignment padding included;
+    /// zero on the queue-write route.
+    staged_bytes: u32,
+    /// Frames the staging ring refused this frame because every slot was in
+    /// flight. Filled by [`EncodeTrace::record`], which holds the previous
+    /// reading.
+    staging_busy: u32,
+    /// Frames the staging ring refused this frame because they needed more than
+    /// a slot may hold. Filled by [`EncodeTrace::record`].
+    staging_too_large: u32,
+    /// Slot buffers the staging ring created this frame. Filled by
+    /// [`EncodeTrace::record`].
+    staging_buffers: u32,
+    /// Bind groups the frame path created this frame. Filled by
+    /// [`EncodeTrace::record`].
+    bind_groups: u32,
 }
 
 #[cfg(feature = "perf-trace")]
 impl EncodeCounts {
     /// What `frame` drew, with the atlas figures the frame's replay and policy
-    /// reported.
+    /// reported and the bytes it staged. The staging-counter and bind-group
+    /// deltas are left at zero for [`EncodeTrace::record`] to fill.
     fn of(
         frame: &CompiledFrame,
         replayed: bool,
         report: &AtlasRenderReport,
         policy: &crate::text::atlas_policy::AtlasTrace,
+        staged: u64,
     ) -> Self {
         fn count(len: usize) -> u32 {
             u32::try_from(len).unwrap_or(u32::MAX)
@@ -599,6 +666,11 @@ impl EncodeCounts {
             glyph_misses: policy.glyph_misses,
             glyph_evicted: policy.glyph_evicted,
             run_keys: policy.run_keys(),
+            staged_bytes: u32::try_from(staged).unwrap_or(u32::MAX),
+            staging_busy: 0,
+            staging_too_large: 0,
+            staging_buffers: 0,
+            bind_groups: 0,
         }
     }
 }
@@ -677,6 +749,11 @@ impl EncodeSpans {
             self.counts.glyph_misses,
             self.counts.glyph_evicted,
             self.counts.run_keys,
+            self.counts.staged_bytes,
+            self.counts.staging_busy,
+            self.counts.staging_too_large,
+            self.counts.staging_buffers,
+            self.counts.bind_groups,
         ]
     }
 }
@@ -703,6 +780,9 @@ struct EncodeTrace {
     /// which is the engine's count and deliberately not the host's raw-line
     /// `n` (a different emitter counting different frames).
     frames: u64,
+    /// The counters as the previous frame read them, so each row reports only
+    /// its own frame's change.
+    previous: TraceCounters,
 }
 
 #[cfg(feature = "perf-trace")]
@@ -713,11 +793,21 @@ impl EncodeTrace {
     /// Called at the very end of the encode, so the formatting a full window
     /// costs falls outside every phase the line reports — the numbers describe
     /// the encode, not the encode plus its own accounting.
-    fn record(&mut self, spans: &EncodeSpans) {
+    ///
+    /// `now` is the counters read at the same point in the encode; the row
+    /// carries the change since the previous frame's reading.
+    fn record(&mut self, spans: &EncodeSpans, now: TraceCounters) {
         // Saturating like every other counter on this path: a renderer that
         // outlived `u64::MAX` frames would report a wrapped `n`, and a wrong
         // number in a capture is worse than a stuck one.
         self.frames = self.frames.saturating_add(1);
+        let mut spans = *spans;
+        spans.counts.staging_busy = counter_delta(now.busy, self.previous.busy);
+        spans.counts.staging_too_large = counter_delta(now.too_large, self.previous.too_large);
+        spans.counts.staging_buffers =
+            counter_delta(now.buffers_created, self.previous.buffers_created);
+        spans.counts.bind_groups = counter_delta(now.bind_groups, self.previous.bind_groups);
+        self.previous = now;
         self.window.push(spans.row());
         if self.window.len() < ENCODE_TRACE_WINDOW {
             return;
@@ -729,8 +819,9 @@ impl EncodeTrace {
 
     /// The `frust-perf enc` line the current window reports.
     ///
-    /// The counts `replays` through `glyph_evicted` are window sums; every
-    /// other column (including `run_keys`) is its own median over the window.
+    /// The counts `replays` through `glyph_evicted` and `staging_busy` through
+    /// `bind_groups` are window sums; every other column (including `run_keys`
+    /// and `staged_bytes`) is its own median over the window.
     /// The trailing field is the whole encode's 95th percentile, so a column
     /// answers "what does this phase usually cost" while the tail answers "how
     /// bad is a bad frame". Medians are taken per column and so do not sum to
@@ -742,7 +833,7 @@ impl EncodeTrace {
         // `<name>_us=<7 digits>.<1>` field per phase, a `<name>=<10 digits>`
         // field per count, the two `n`/`w` fields and the p95 tail, with room
         // to spare rather than a byte-exact fit.
-        let mut line = String::with_capacity(640);
+        let mut line = String::with_capacity(896);
         line.push_str("frust-perf enc n=");
         line.push_str(&self.frames.to_string());
         line.push_str(" w=");
@@ -759,8 +850,9 @@ impl EncodeTrace {
         line.push_str(&format_us(tail));
         for (offset, name) in ENCODE_TRACE_COUNTS.iter().enumerate() {
             let column = ENCODE_TRACE_COLUMNS.len() + offset;
-            let value = if (ENCODE_TRACE_FIRST_SUMMED..ENCODE_TRACE_MEDIAN_AGAIN).contains(&offset)
-            {
+            let summed = (ENCODE_TRACE_FIRST_SUMMED..ENCODE_TRACE_MEDIAN_AGAIN).contains(&offset)
+                || offset >= ENCODE_TRACE_SUMMED_AGAIN;
+            let value = if summed {
                 self.window
                     .iter()
                     .filter_map(|row| row.get(column))
@@ -879,6 +971,11 @@ pub struct EngineRenderer {
     /// ([`RegionCopyMode::Fragment`]). Lazy for [`Self::filters`]' reason: a
     /// renderer whose frames never copy a region owns none.
     region_copies: Option<RegionCopyResources>,
+    /// The composite and backdrop groups of the round being recorded, kept
+    /// here so the buffer is reused; emptied at the end of every round.
+    composite_groups: Vec<wgpu::BindGroup>,
+    /// Bind groups the region copy passes built outside the cache.
+    region_copy_groups: u64,
     /// The retained pages `PushRetained` bodies render into and
     /// `DrawRetained`s composite from, kept across frames (see
     /// [`crate::cache::retained`]).
@@ -889,6 +986,14 @@ pub struct EngineRenderer {
     /// The scene [`Self::record_range`] projects a range into, kept for its
     /// allocation alone; empty until the first range is recorded.
     range_scene: Scene,
+    /// The mapped staging slots a frame's per-frame uploads are written into
+    /// and copied out of inside the caller's encoder (see
+    /// [`frust_gpu::staging`]); `None` under `FRUST_ENGINE_NO_STAGING_RING`,
+    /// which sends every one of them through queue writes instead.
+    staging: Option<StagingRing>,
+    /// Bytes the last encoded frame placed in its staging slot — zero when it
+    /// took the queue-write route.
+    last_staged: u64,
     /// The rolling CPU-phase window `frust-perf enc` lines are emitted from.
     ///
     /// Absent entirely from a build without `perf-trace`, along with the type
@@ -999,9 +1104,13 @@ impl EngineRenderer {
             atlas_report: AtlasRenderReport::default(),
             filters: None,
             region_copies: None,
+            composite_groups: Vec::new(),
+            region_copy_groups: 0,
             retained: RetainedPages::for_caps(caps),
             retained_layers: RetainedLayers::new(),
             range_scene: Scene::new(),
+            staging: (!config::staging_ring_disabled()).then(StagingRing::new),
+            last_staged: 0,
             #[cfg(feature = "perf-trace")]
             encode_trace: EncodeTrace::default(),
         })
@@ -1181,6 +1290,77 @@ impl EngineRenderer {
         self.pass_merge
     }
 
+    /// Routes the frame's per-frame uploads through the staging ring, or
+    /// through queue writes — the programmatic counterpart of
+    /// `FRUST_ENGINE_NO_STAGING_RING`, which only sets the value a renderer
+    /// starts with.
+    ///
+    /// Takes effect from the next frame. Both routes upload the same bytes to
+    /// the same resources, so both draw the same pixels, which is what a caller
+    /// comparing the two arms in one process checks. Turning the ring off
+    /// drops its slots; a slot still in flight is kept alive by `wgpu` until
+    /// its submission retires.
+    pub fn set_staging_ring(&mut self, enabled: bool) {
+        match (enabled, self.staging.is_some()) {
+            (true, false) => self.staging = Some(StagingRing::new()),
+            (false, true) => self.staging = None,
+            _ => {}
+        }
+    }
+
+    /// Whether the frame's per-frame uploads go through the staging ring.
+    #[must_use]
+    pub fn staging_ring(&self) -> bool {
+        self.staging.is_some()
+    }
+
+    /// Bytes the last [`Self::encode`] placed in its staging slot, alignment
+    /// padding included — zero when the frame's uploads took the queue-write
+    /// route (the ring off, every slot still in flight, or a frame larger than
+    /// a slot may hold). A diagnostic: what a test pins to tell the two routes
+    /// apart.
+    #[must_use]
+    pub fn last_frame_staged_bytes(&self) -> u64 {
+        self.last_staged
+    }
+
+    /// The staging and bind-group counters as they stand now, for the trace's
+    /// per-frame deltas. A ring that is off reads as zero.
+    #[cfg(feature = "perf-trace")]
+    fn trace_counters(&self) -> TraceCounters {
+        let staging = self.staging_stats().unwrap_or_default();
+        TraceCounters {
+            busy: staging.busy,
+            too_large: staging.too_large,
+            buffers_created: staging.buffers_created,
+            bind_groups: self.bind_groups_created(),
+        }
+    }
+
+    /// What the staging ring has done so far, or `None` with the ring off.
+    #[must_use]
+    pub fn staging_stats(&self) -> Option<frust_gpu::staging::StagingStats> {
+        self.staging.as_ref().map(StagingRing::stats)
+    }
+
+    /// How many bind groups this renderer's frame path has created so far —
+    /// the strip, external, page-round, composite, backdrop, filter and
+    /// region-copy groups. A steady frame over unchanged pages creates none, so
+    /// a test diffs this across two frames to pin that. The glyph-atlas
+    /// replay's own groups are not counted.
+    #[must_use]
+    pub fn bind_groups_created(&self) -> u64 {
+        self.resources
+            .groups_created
+            .saturating_add(self.resources.source_groups.created())
+            .saturating_add(self.region_copy_groups)
+            .saturating_add(
+                self.filters
+                    .as_ref()
+                    .map_or(0, |filters| filters.groups_created),
+            )
+    }
+
     /// The passes the last [`Self::encode`] recorded into the caller's
     /// encoder, in recording order.
     ///
@@ -1293,6 +1473,8 @@ impl EngineRenderer {
     /// re-recorded) at the new one.
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         self.targets.drop_parked();
+        // A cached group would otherwise keep a dropped page's texture alive.
+        self.resources.source_groups.clear();
         self.depth.resize(device, width, height);
         self.retained.clear();
     }
@@ -1330,6 +1512,8 @@ impl EngineRenderer {
     /// Drop every retained page — what a surface recreate or a device-scale
     /// change calls for. The next ledger read reports the empty store.
     pub fn clear_retained(&mut self) {
+        // A cached group would otherwise keep a dropped page's texture alive.
+        self.resources.source_groups.clear();
         self.retained.clear();
     }
 
@@ -1342,6 +1526,8 @@ impl EngineRenderer {
     /// Re-budget the retained store, evicting least recently used pages until
     /// what it holds fits.
     pub fn set_retained_budget(&mut self, budget: RetainedBudget) {
+        // A cached group would otherwise keep an evicted page's texture alive.
+        self.resources.source_groups.clear();
         self.retained.set_budget(budget);
     }
 
@@ -1396,6 +1582,7 @@ impl EngineRenderer {
     pub fn end_frame(&mut self, _queue: &wgpu::Queue) {
         self.targets.end_frame();
         self.gradients.maintain();
+        self.resources.source_groups.sweep();
     }
 
     /// Compiles `scene` and records the frame's passes into `encoder`.
@@ -1489,8 +1676,11 @@ impl EngineRenderer {
         // `perf-trace` — no clock is read at all.
         let mut clock = PhaseClock::start();
         // Emptied first, so a frame refused below reports the nothing it
-        // recorded rather than the last frame's passes.
+        // recorded rather than the last frame's passes. The atlas report is
+        // the same kind of record: a frame that errors before its replay
+        // would otherwise carry the last replay's numbers forward.
         self.frame_passes.clear();
+        self.atlas_report = AtlasRenderReport::default();
         let size = grid_size(target.width, target.height)?;
         let mut frame = self.compiler.compile(scene, root, size)?;
         let compile_total = clock.lap();
@@ -1659,11 +1849,23 @@ impl EngineRenderer {
         self.resources.resize_paints(device, paints_grown);
         self.resources.resize_gradients(device, gradients_grown);
         let resize_span = clock.lap();
-        let atlas_serviced =
-            self.resources
-                .upload(queue, &mut frame, &mut self.gradients, size, dim);
+        // The frame's staging slot, opened only now that nothing can refuse
+        // the frame: the per-frame uploads below — and each page round's
+        // viewport uniform in `record_frame` — are written into it and copied
+        // out of it into `encoder`, ahead of every pass this frame records
+        // that reads them. `None` sends them through queue writes instead.
+        let mut stage = self.begin_staging(device);
+        let atlas_serviced = self.resources.upload(
+            queue,
+            encoder,
+            stage.as_mut(),
+            &mut frame,
+            &mut self.gradients,
+            size,
+            dim,
+        );
         self.resources
-            .upload_instances(device, queue, &self.scratch);
+            .upload_instances(device, queue, encoder, stage.as_mut(), &self.scratch);
 
         // Residency is committed exactly here: the frame passed every fallible
         // step and its evictions and uploads have reached the array, so the
@@ -1694,9 +1896,6 @@ impl EngineRenderer {
         // above are: acknowledging is what lifts the eviction deferral, so an
         // acknowledgement for a replay that returned early would let `glifo`
         // free and re-let the very rectangles those commands still name.
-        // The report describes only a frame whose replay ran: a frame that
-        // skipped it must not carry the last replay's numbers forward.
-        self.atlas_report = AtlasRenderReport::default();
         #[cfg(feature = "perf-trace")]
         let mut replayed = false;
         if self.compiler.glyph_replay_pending()
@@ -1743,9 +1942,23 @@ impl EngineRenderer {
         let pipelines_span = clock.lap();
 
         self.record_frame(
-            device, queue, encoder, &target, depth_view, base_color, &pipelines, copy_mode,
+            device,
+            queue,
+            encoder,
+            stage.as_mut(),
+            &target,
+            depth_view,
+            base_color,
+            &pipelines,
+            copy_mode,
             timestamps,
         );
+        // Unmapped and fenced on `encoder`: the slot is handed out again only
+        // once the submission carrying this frame has finished on the GPU.
+        self.last_staged = stage.as_ref().map_or(0, StagingFrame::used);
+        if let Some(stage) = stage {
+            stage.finish(encoder);
+        }
 
         // The laps above still run without `perf-trace` — `PhaseClock` reads
         // no clock there, so each one is `Duration::ZERO` — but nothing records
@@ -1768,24 +1981,30 @@ impl EngineRenderer {
         // partial encode and would drag every percentile toward a frame that
         // was never presented.
         #[cfg(feature = "perf-trace")]
-        self.encode_trace.record(&EncodeSpans {
-            compile: frame.compile_spans,
-            compile_total,
-            schedule: schedule_span,
-            paints: paints_span,
-            instances: instances_span,
-            resize: resize_span,
-            upload: upload_span,
-            replay: replay_span,
-            pipelines: pipelines_span,
-            record: clock.lap(),
-            counts: EncodeCounts::of(
-                &frame,
-                replayed,
-                &self.atlas_report,
-                self.compiler.glyph_atlas_trace(),
-            ),
-        });
+        let now = self.trace_counters();
+        #[cfg(feature = "perf-trace")]
+        self.encode_trace.record(
+            &EncodeSpans {
+                compile: frame.compile_spans,
+                compile_total,
+                schedule: schedule_span,
+                paints: paints_span,
+                instances: instances_span,
+                resize: resize_span,
+                upload: upload_span,
+                replay: replay_span,
+                pipelines: pipelines_span,
+                record: clock.lap(),
+                counts: EncodeCounts::of(
+                    &frame,
+                    replayed,
+                    &self.atlas_report,
+                    self.compiler.glyph_atlas_trace(),
+                    self.last_staged,
+                ),
+            },
+            now,
+        );
 
         Ok(())
     }
@@ -1839,6 +2058,42 @@ impl EngineRenderer {
         );
         self.range_scene = projected;
         result.map(|()| cut)
+    }
+
+    /// Opens this frame's staging slot, sized for every upload the frame routes
+    /// through it, or `None` when the ring is off or refuses the frame (every
+    /// slot still in flight, or more bytes than a slot may hold) — in which
+    /// case each of those uploads is a queue write, as without the ring.
+    fn begin_staging(&mut self, device: &wgpu::Device) -> Option<StagingFrame> {
+        let bytes = self.staging_bytes();
+        self.staging.as_mut()?.begin(device, bytes)
+    }
+
+    /// An upper bound on the bytes this frame stages, alignment padding
+    /// included: the whole alpha texture, the whole encoded-paint texture
+    /// when the frame has paints, the viewport uniform, the instances, and
+    /// one viewport uniform per scheduled round (more than the page rounds
+    /// that take one, which is all an upper bound needs).
+    fn staging_bytes(&self) -> u64 {
+        let resources = &self.resources;
+        let texture = |texture: &ResourceTexture| {
+            gpu::resource_texture_bytes(texture.width, texture.height)
+                .saturating_add(TEXTURE_COPY_ALIGNMENT)
+        };
+        let buffer = |len: u64| len.saturating_add(BUFFER_COPY_ALIGNMENT);
+        let config = buffer(size_of::<GpuConfig>() as u64);
+        let (opaque, alpha) = self.scratch.instance_bytes();
+        let paints = if resources.paints_data.is_empty() {
+            0
+        } else {
+            texture(&resources.paints)
+        };
+        let rounds = self.scratch.rounds.len() as u64;
+        texture(&resources.alphas)
+            .saturating_add(paints)
+            .saturating_add(config)
+            .saturating_add(buffer((opaque.len() + alpha.len()) as u64))
+            .saturating_add(config.saturating_mul(rounds))
     }
 
     /// Creates the render-to-atlas pass on first use.
@@ -2018,6 +2273,11 @@ impl EngineRenderer {
                 format: Some(format),
                 ..ResolvedPipelines::default()
             };
+            self.resources.source_groups.clear();
+            // Derived from the copy pipeline built for the old format.
+            if let Some(copies) = self.region_copies.as_mut() {
+                copies.staging_group = None;
+            }
         }
 
         // The surface's own pass is unconditional — it is what the frame's
@@ -2078,22 +2338,28 @@ impl EngineRenderer {
             // description is pinned to `INTERMEDIATE_FORMAT`. One filter
             // pipeline therefore serves a renderer for its whole life,
             // whatever its surface is reconfigured to.
-            frame.filter = Some(
-                self.pipelines
-                    .get_or_create(device, &EnginePipeline::Filter.desc(&self.shaders, format))
-                    .clone(),
-            );
+            if self.resolved.filter.is_none() {
+                self.resolved.filter = Some(
+                    self.pipelines
+                        .get_or_create(device, &EnginePipeline::Filter.desc(&self.shaders, format))
+                        .clone(),
+                );
+            }
+            frame.filter.clone_from(&self.resolved.filter);
         }
 
         if self.scratch.copies > 0 && copy_mode != RegionCopyMode::Unavailable {
             // Pinned to `INTERMEDIATE_FORMAT` like the filter pipeline — a copy
             // only ever writes a pooled page — so one serves the renderer for
             // its whole life whatever the frame's own format.
-            frame.copy = Some(
-                self.pipelines
-                    .get_or_create(device, &EnginePipeline::Copy.desc(&self.shaders, format))
-                    .clone(),
-            );
+            if self.resolved.copy.is_none() {
+                self.resolved.copy = Some(
+                    self.pipelines
+                        .get_or_create(device, &EnginePipeline::Copy.desc(&self.shaders, format))
+                        .clone(),
+                );
+            }
+            frame.copy.clone_from(&self.resolved.copy);
         }
 
         if let Some(pipeline) = frame.alpha.1.any() {
@@ -2198,6 +2464,7 @@ impl EngineRenderer {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
+        mut stage: Option<&mut StagingFrame>,
         target: &EngineTarget<'_>,
         depth_view: Option<&wgpu::TextureView>,
         base_color: Color,
@@ -2402,7 +2669,19 @@ impl EngineRenderer {
             if let Some(source) = plan.copy {
                 if let Some((_, pooled)) = own.as_ref() {
                     record_owed_opening(&mut opening, encoder, timestamps, &mut self.frame_passes);
-                    RegionCopyPass {
+                    // The staging texture's group is stable until the texture
+                    // grows, so a texture-mode copy builds it once.
+                    if copy_mode == RegionCopyMode::Texture
+                        && let (Some(copies), Some(pipeline)) =
+                            (self.region_copies.as_mut(), pipelines.copy.as_ref())
+                        && copies.staging_group.is_none()
+                        && let Some(staging) = copies.staging.as_ref()
+                    {
+                        let group = copy_source_group(device, pipeline, &staging.view);
+                        copies.staging_group = Some(group);
+                        self.region_copy_groups = self.region_copy_groups.saturating_add(1);
+                    }
+                    let built = RegionCopyPass {
                         mode: copy_mode,
                         target: target.view,
                         page: pooled,
@@ -2417,6 +2696,7 @@ impl EngineRenderer {
                         encoder,
                         timestamps.writes(EngineSpan::Composite),
                     );
+                    self.region_copy_groups = self.region_copy_groups.saturating_add(built);
                     copy_slot = copy_slot.saturating_add(1);
                     self.frame_passes.push(FramePass::Copy);
                 }
@@ -2458,11 +2738,21 @@ impl EngineRenderer {
                     // Unreachable: the round that wrote this pass's source is
                     // the one before it, and nothing between the two releases
                     // that group.
-                    let source = live[filter.source.index()].as_ref().map_or(
-                        &self.resources.placeholders.layer_input,
-                        PooledTexture::view,
+                    let (source, key) = match live[filter.source.index()].as_ref() {
+                        Some(pooled) => (pooled.view(), pooled_source(pooled)),
+                        None => (
+                            &self.resources.placeholders.layer_input,
+                            GroupSource::Placeholder,
+                        ),
+                    };
+                    let source_group = self.resources.source_groups.get_or_build(
+                        SourceGroupKey {
+                            kind: GroupKind::FilterSource,
+                            source: key,
+                        },
+                        || filters.source_group(device, pipeline, source),
                     );
-                    filters.record_pass_timed(
+                    filters.record_pass_with(
                         device,
                         encoder,
                         &FilterPassPlan {
@@ -2473,6 +2763,7 @@ impl EngineRenderer {
                             instance: filter.instance,
                         },
                         timestamps.writes(EngineSpan::Composite),
+                        Some(&source_group),
                     );
                     self.frame_passes.push(FramePass::Filter);
                 }
@@ -2506,17 +2797,28 @@ impl EngineRenderer {
             // the extent it quantized the request up to, and NDC is computed
             // against the attachment's real extent. Distinct buffers, so the
             // write ordering against the frame's own config never matters.
+            // Staged, its copy lands in the encoder here — between passes,
+            // immediately ahead of the one round that reads it.
+
+            // The page-config buffer this round binds; the surface's own
+            // config has no slot and is named by the maximum.
+            let config_slot = offscreen.map_or(u32::MAX, |_| {
+                u32::try_from(page_slot).unwrap_or(u32::MAX - 1)
+            });
             let config = match offscreen {
                 None => &self.resources.config,
                 Some((_, (width, height))) => {
                     let Some(config) = self.resources.page_configs.get(page_slot) else {
                         continue;
                     };
-                    queue.write_buffer(
-                        config,
-                        0,
-                        bytemuck::bytes_of(&GpuConfig::new(width, height, dim, dim)),
-                    );
+                    let bytes = GpuConfig::new(width, height, dim, dim);
+                    let bytes = bytemuck::bytes_of(&bytes);
+                    let staged = stage
+                        .as_deref_mut()
+                        .is_some_and(|stage| stage.copy_to_buffer(encoder, bytes, config, 0));
+                    if !staged {
+                        queue.write_buffer(config, 0, bytes);
+                    }
                     page_slot = page_slot.saturating_add(1);
                     config
                 }
@@ -2541,14 +2843,24 @@ impl EngineRenderer {
             };
 
             // A page round binds its own viewport uniform; the root round's is
-            // already the one the shared set carries.
+            // already the one the shared set carries. Cached by the config
+            // slot: the buffers are grown-only, so the group stays valid until
+            // the coverage view it also names is recreated.
             let page_resources = offscreen.map(|_| {
-                resources_bind_group(
-                    device,
-                    pipeline,
-                    &self.resources.alphas.view,
-                    config,
-                    &self.resources.placeholders.layer_input,
+                self.resources.source_groups.get_or_build(
+                    SourceGroupKey {
+                        kind: GroupKind::Resources { slot: config_slot },
+                        source: GroupSource::Placeholder,
+                    },
+                    || {
+                        resources_bind_group(
+                            device,
+                            pipeline,
+                            &self.resources.alphas.view,
+                            config,
+                            &self.resources.placeholders.layer_input,
+                        )
+                    },
                 )
             });
             let resources = page_resources.as_ref().unwrap_or(&groups.resources);
@@ -2558,23 +2870,35 @@ impl EngineRenderer {
                 .segments
                 .get(plan.segments.clone())
                 .unwrap_or(&[]);
-            let mut composites: Vec<wgpu::BindGroup> = Vec::new();
+            let mut composites = std::mem::take(&mut self.composite_groups);
+            composites.clear();
             for segment in segments {
                 // A backdrop's draws sample the page holding its blurred
                 // region through the same group-0 layer input a composite
                 // reads, so its group is built here, in segment order, beside
                 // the composites' own.
                 if let Segment::Backdrop(_, _, parity) = *segment {
-                    let view = live[parity.index()].as_ref().map_or(
-                        &self.resources.placeholders.layer_input,
-                        PooledTexture::view,
-                    );
-                    composites.push(resources_bind_group(
-                        device,
-                        pipeline,
-                        &self.resources.alphas.view,
-                        config,
-                        view,
+                    let (view, source) = match live[parity.index()].as_ref() {
+                        Some(pooled) => (pooled.view(), pooled_source(pooled)),
+                        None => (
+                            &self.resources.placeholders.layer_input,
+                            GroupSource::Placeholder,
+                        ),
+                    };
+                    composites.push(self.resources.source_groups.get_or_build(
+                        SourceGroupKey {
+                            kind: GroupKind::Resources { slot: config_slot },
+                            source,
+                        },
+                        || {
+                            resources_bind_group(
+                                device,
+                                pipeline,
+                                &self.resources.alphas.view,
+                                config,
+                                view,
+                            )
+                        },
                     ));
                 }
                 if let Segment::Composite(_, source) = *segment {
@@ -2582,22 +2906,42 @@ impl EngineRenderer {
                     // page bound — samples the transparent placeholder, which
                     // composites nothing: the same "draw less, never wrong"
                     // answer an unresolvable paint gets.
-                    let view = match source {
-                        CompositeSource::Page(parity) => live[parity.index()].as_ref().map_or(
-                            &self.resources.placeholders.layer_input,
-                            PooledTexture::view,
-                        ),
+                    let placeholder = (
+                        &self.resources.placeholders.layer_input,
+                        GroupSource::Placeholder,
+                    );
+                    let (view, source) = match source {
+                        CompositeSource::Page(parity) => live[parity.index()]
+                            .as_ref()
+                            .map_or(placeholder, |pooled| (pooled.view(), pooled_source(pooled))),
                         CompositeSource::Retained(bracket) => self
                             .retained
                             .page_for(bracket)
-                            .map_or(&self.resources.placeholders.layer_input, |(view, _)| view),
+                            .map_or(placeholder, |(view, size)| {
+                                (
+                                    view,
+                                    GroupSource::Retained {
+                                        view: std::ptr::from_ref(view) as usize,
+                                        generation: self.retained.generation(),
+                                        size,
+                                    },
+                                )
+                            }),
                     };
-                    composites.push(resources_bind_group(
-                        device,
-                        pipeline,
-                        &self.resources.alphas.view,
-                        config,
-                        view,
+                    composites.push(self.resources.source_groups.get_or_build(
+                        SourceGroupKey {
+                            kind: GroupKind::Resources { slot: config_slot },
+                            source,
+                        },
+                        || {
+                            resources_bind_group(
+                                device,
+                                pipeline,
+                                &self.resources.alphas.view,
+                                config,
+                                view,
+                            )
+                        },
                     ));
                 }
             }
@@ -2685,6 +3029,11 @@ impl EngineRenderer {
                 }
             }
 
+            // Handed back empty so the buffer is reused and no cached group is
+            // held past the round.
+            composites.clear();
+            self.composite_groups = composites;
+
             settle_pages(&mut self.targets, &mut live, plan.released, own);
 
             // The cut this plan ends at, erased once the ops before it have
@@ -2748,6 +3097,11 @@ impl EngineRenderer {
             "the recorded pass list disagrees with the planned one"
         );
     }
+}
+
+/// The cache key naming `pooled`'s texture as a group's layer input.
+fn pooled_source(pooled: &PooledTexture) -> GroupSource {
+    GroupSource::Pooled(pooled.texture().as_scene_texture())
 }
 
 /// One render pass a frame recorded into the caller's encoder — what
@@ -2941,6 +3295,11 @@ struct ResolvedPipelines {
     format: Option<wgpu::TextureFormat>,
     /// Indexed by [`Self::slot`].
     entries: [Option<wgpu::RenderPipeline>; RESOLVED_SLOTS],
+    /// The filter pass's pipeline; its description is pinned to one format, so
+    /// it is built once per renderer rather than once per filtering frame.
+    filter: Option<wgpu::RenderPipeline>,
+    /// The fragment region copy's pipeline, memoised on the same terms.
+    copy: Option<wgpu::RenderPipeline>,
 }
 
 /// One [`ResolvedPipelines`] entry per render state and paint class.
@@ -2951,6 +3310,8 @@ impl Default for ResolvedPipelines {
         Self {
             format: None,
             entries: [const { None }; RESOLVED_SLOTS],
+            filter: None,
+            copy: None,
         }
     }
 }
@@ -3352,6 +3713,8 @@ pub struct FilterResources {
     /// Reusable staging for the parameter-block upload, padded to the
     /// texture's own footprint.
     staging: Vec<u8>,
+    /// Bind groups [`Self::prepare`] has built, over this value's life.
+    groups_created: u64,
 }
 
 impl FilterResources {
@@ -3368,6 +3731,7 @@ impl FilterResources {
             instances: None,
             instance_capacity: 0,
             staging: Vec::new(),
+            groups_created: 0,
         }
     }
 
@@ -3402,6 +3766,7 @@ impl FilterResources {
             self.data_group = None;
         }
         if self.data_group.is_none() {
+            self.groups_created = self.groups_created.saturating_add(1);
             self.data_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("frust-engine filter data"),
                 layout: &pipeline.get_bind_group_layout(0),
@@ -3517,6 +3882,45 @@ impl FilterResources {
         plan: &FilterPassPlan<'_>,
         timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
     ) {
+        self.record_pass_with(device, encoder, plan, timestamps, None);
+    }
+
+    /// The group 1 a pass samples `source` through: the page and this
+    /// resource's sampler. Built against `pipeline`'s layout, which every
+    /// filter pass shares.
+    fn source_group(
+        &self,
+        device: &wgpu::Device,
+        pipeline: &wgpu::RenderPipeline,
+        source: &wgpu::TextureView,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("frust-engine filter source"),
+            layout: &pipeline.get_bind_group_layout(1),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(source),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        })
+    }
+
+    /// [`Self::record_pass_timed`] over a source group the caller already
+    /// holds (`Some`, built by [`Self::source_group`] for `plan.source`), or one
+    /// built here (`None`).
+    fn record_pass_with(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        plan: &FilterPassPlan<'_>,
+        timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
+        source: Option<&wgpu::BindGroup>,
+    ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some(plan.label),
             color_attachments: &[Some(color_attachment(
@@ -3537,25 +3941,19 @@ impl FilterResources {
             return;
         };
 
-        let source = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("frust-engine filter source"),
-            layout: &plan.pipeline.get_bind_group_layout(1),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(plan.source),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-            ],
-        });
+        let built;
+        let source = match source {
+            Some(source) => source,
+            None => {
+                built = self.source_group(device, plan.pipeline, plan.source);
+                &built
+            }
+        };
 
         pass.set_pipeline(plan.pipeline);
         pass.set_vertex_buffer(0, instances.slice(..));
         pass.set_bind_group(0, data_group, &[]);
-        pass.set_bind_group(1, &source, &[]);
+        pass.set_bind_group(1, source, &[]);
         pass.draw(
             0..FILTER_QUAD_VERTICES,
             plan.instance..plan.instance.saturating_add(1),
@@ -5103,6 +5501,20 @@ struct ResourceTexture {
     view: wgpu::TextureView,
     width: u32,
     height: u32,
+    /// The rows, counted from the top, that may differ from what a
+    /// full-footprint upload of the next frame would leave there.
+    ///
+    /// A queue upload writes the whole texture every frame: the frame's bytes,
+    /// then the upload buffer's tail — zeroes for coverage, the reused staging
+    /// vector's earlier records for encoded paints. A staged upload writes only
+    /// the rows the frame fills plus every row the last frame left live, and
+    /// so leaves the texture byte-for-byte as the full upload would: the rows
+    /// below this mark already hold exactly that tail. Rows at or beyond the
+    /// current frame's filled rows are never read, so a stale row there (a
+    /// dropped encoder leaves its rows past `filled` as they were) cannot reach
+    /// a pixel. A new texture is live throughout, so its first upload is a full
+    /// one.
+    live_rows: u32,
 }
 
 impl ResourceTexture {
@@ -5114,6 +5526,23 @@ impl ResourceTexture {
             view,
             width: descriptor.size.width,
             height: descriptor.size.height,
+            live_rows: descriptor.size.height,
+        }
+    }
+
+    /// The rows a frame whose bytes fill `filled_rows` rows uploads through a
+    /// stage: those, and every row the last upload left live (see
+    /// [`Self::live_rows`]), never past the texture's height.
+    fn staged_rows(&self, filled_rows: u32) -> u32 {
+        staged_rows(filled_rows, self.live_rows, self.height)
+    }
+
+    /// The extent of an upload of the texture's top `rows` rows.
+    fn rows_extent(&self, rows: u32) -> wgpu::Extent3d {
+        wgpu::Extent3d {
+            width: self.width,
+            height: rows,
+            depth_or_array_layers: 1,
         }
     }
 
@@ -5208,6 +5637,14 @@ struct FrameResources {
     /// kept in step with residency across frames without reaching into the
     /// compiler's own cache.
     image_registry: HashMap<ImageId, ResidentImage>,
+    /// Reused zero fill for the atlas eviction clears.
+    clear_zeros: Vec<u8>,
+    /// Group-0 and filter-source bind groups naming a page, kept across frames
+    /// and swept at every frame's end (see [`SourceGroupCache`]). Cleared with
+    /// the coverage texture they all name.
+    source_groups: SourceGroupCache,
+    /// Strip, external and image bind groups built by the group-set paths.
+    groups_created: u64,
     /// How many atlas regions have been declined — a write or clear the array
     /// refused, or one the budget says the array could not hold. Counted rather
     /// than dropped silently, because each one is a region the frame believed
@@ -5240,6 +5677,9 @@ impl FrameResources {
             bind_group_format: None,
             atlas: None,
             image_registry: HashMap::new(),
+            clear_zeros: Vec::new(),
+            source_groups: SourceGroupCache::default(),
+            groups_created: 0,
             refused_regions: 0,
         }
     }
@@ -5384,7 +5824,7 @@ impl FrameResources {
     ///
     /// Two passes, and each reads the frame's plan directly rather than
     /// inferring anything from draw order. First, every region this frame's
-    /// residency reaped is forgotten — `frame.image_evictions` names it by
+    /// residency reaped is forgotten — `frame.image_forgets` names it by
     /// rectangle, and a rectangle uniquely identifies the one image that held it
     /// (padding is always zero in this engine, so the reported and the stored
     /// rectangle are the same value; see [`crate::cache::images`]'s module doc).
@@ -5404,12 +5844,12 @@ impl FrameResources {
     /// then skipped, which is the whole point: a registered rectangle nothing
     /// wrote would be sampled as whatever the texture happened to contain.
     fn update_image_registry(&mut self, frame: &CompiledFrame, budget: AtlasBudget) {
-        if !frame.image_evictions.is_empty() {
+        if !frame.image_forgets.is_empty() {
             // A set rather than `Vec::contains`: both sides of this scan scale
             // with content — the registry with how many images and glyph slots
             // are resident, the plan with how hard the atlas is churning — and
             // their product is the frame path's, not a report's.
-            let cleared: HashSet<AtlasRegion> = frame.image_evictions.iter().copied().collect();
+            let cleared: HashSet<AtlasRegion> = frame.image_forgets.iter().copied().collect();
             self.image_registry
                 .retain(|_, resident| !cleared.contains(&resident.region));
         }
@@ -5524,7 +5964,7 @@ impl FrameResources {
             Some(atlas) => {
                 let mut refused = 0_u64;
                 for region in &frame.image_evictions {
-                    if !atlas.clear_region(queue, *region) {
+                    if !atlas.clear_region_with(queue, *region, &mut self.clear_zeros) {
                         refused = refused.saturating_add(1);
                     }
                 }
@@ -5589,6 +6029,8 @@ impl FrameResources {
                 &gpu::alpha_texture_descriptor(self.alphas.width, height),
             );
             self.bind_groups.clear();
+            // Every page group names the old coverage view.
+            self.source_groups.clear();
         }
     }
 
@@ -5615,9 +6057,21 @@ impl FrameResources {
     /// Uploads the frame's coverage, paint records, colour ramps, atlas
     /// evictions/uploads and config, answering whether the atlas plan was
     /// serviced in full (see [`Self::upload_atlas`]).
+    ///
+    /// The per-frame uploads — coverage, paint records, config — go through
+    /// `stage` when the frame has one, as copies recorded into `encoder` ahead
+    /// of every pass; the on-change ones (colour ramps, atlas regions) stay
+    /// queue writes, which is also what every one of them is without a stage.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the upload's two routes (queue, encoder + stage) beside the \
+                  frame, the ramp cache and the extents it uploads against"
+    )]
     fn upload(
         &mut self,
         queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        mut stage: Option<&mut StagingFrame>,
         frame: &mut CompiledFrame,
         cache: &mut GradientCache,
         size: (u16, u16),
@@ -5626,19 +6080,40 @@ impl FrameResources {
         let atlas_serviced = self.upload_atlas(queue, frame);
 
         let alphas = &self.alphas;
-        gpu::with_padded_alphas(
-            &mut frame.strips.alphas,
-            alphas.width,
-            alphas.height,
-            |bytes| {
-                queue.write_texture(
+        let bytes_per_row = gpu::resource_bytes_per_row(alphas.width);
+        let coverage = &frame.strips.alphas;
+        // Staged, only the rows this frame's coverage fills and the rows the
+        // last frame left live are written — the rest of the texture already
+        // holds the zeroes a full upload would put there.
+        let filled = rows_filled(coverage.len(), bytes_per_row).min(alphas.height);
+        let rows = alphas.staged_rows(filled);
+        let staged = stage.as_deref_mut().is_some_and(|stage| {
+            rows == 0
+                || stage.copy_to_texture(
+                    encoder,
                     alphas.copy_target(),
-                    bytes,
-                    resource_layout(gpu::resource_bytes_per_row(alphas.width), alphas.height),
-                    alphas.extent(),
-                );
-            },
-        );
+                    bytes_per_row,
+                    rows,
+                    alphas.rows_extent(rows),
+                    |dst| gpu::write_zero_padded(dst, coverage),
+                )
+        });
+        if !staged {
+            gpu::with_padded_alphas(
+                &mut frame.strips.alphas,
+                alphas.width,
+                alphas.height,
+                |bytes| {
+                    queue.write_texture(
+                        alphas.copy_target(),
+                        bytes,
+                        resource_layout(bytes_per_row, alphas.height),
+                        alphas.extent(),
+                    );
+                },
+            );
+        }
+        self.alphas.live_rows = filled;
 
         if !self.paints_data.is_empty() {
             let footprint = gpu::resource_texture_bytes(self.paints.width, self.paints.height);
@@ -5647,18 +6122,36 @@ impl FrameResources {
             // The height was checked to fit before any pass was recorded, so a
             // buffer too short for the records is unreachable; skipping the
             // upload rather than unwrapping keeps the frame path total anyway.
-            if GpuEncodedPaint::serialize_to_buffer(&self.paints_data, &mut self.paint_staging)
-                .is_ok()
+            if let Ok(len) =
+                GpuEncodedPaint::serialize_to_buffer(&self.paints_data, &mut self.paint_staging)
             {
-                queue.write_texture(
-                    self.paints.copy_target(),
-                    &self.paint_staging,
-                    resource_layout(
-                        gpu::resource_bytes_per_row(self.paints.width),
-                        self.paints.height,
-                    ),
-                    self.paints.extent(),
-                );
+                let paints = &self.paints;
+                let staging = &self.paint_staging;
+                let bytes_per_row = gpu::resource_bytes_per_row(paints.width);
+                // The rows below the live mark already hold the staging
+                // vector's own tail, which is what a full upload rewrites.
+                let filled = rows_filled(len, bytes_per_row).min(paints.height);
+                let rows = paints.staged_rows(filled);
+                let staged = stage.as_deref_mut().is_some_and(|stage| {
+                    rows == 0
+                        || stage.copy_to_texture(
+                            encoder,
+                            paints.copy_target(),
+                            bytes_per_row,
+                            rows,
+                            paints.rows_extent(rows),
+                            |dst| gpu::write_zero_padded(dst, staging),
+                        )
+                });
+                if !staged {
+                    queue.write_texture(
+                        paints.copy_target(),
+                        staging,
+                        resource_layout(bytes_per_row, paints.height),
+                        paints.extent(),
+                    );
+                }
+                self.paints.live_rows = filled;
             }
         }
 
@@ -5698,14 +6191,27 @@ impl FrameResources {
             self.gradients.width,
         );
         let config = GpuConfig::new(u32::from(size.0), u32::from(size.1), dim, dim);
-        queue.write_buffer(&self.config, 0, bytemuck::bytes_of(&config));
+        let config = bytemuck::bytes_of(&config);
+        let staged =
+            stage.is_some_and(|stage| stage.copy_to_buffer(encoder, config, &self.config, 0));
+        if !staged {
+            queue.write_buffer(&self.config, 0, config);
+        }
 
         atlas_serviced
     }
 
     /// Grows the instance buffer if this frame outgrew it, then uploads the
-    /// opaque and alpha instances back to back.
-    fn upload_instances(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, scratch: &Scratch) {
+    /// opaque and alpha instances back to back — as one staged copy when the
+    /// frame has a stage, two queue writes otherwise.
+    fn upload_instances(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        stage: Option<&mut StagingFrame>,
+        scratch: &Scratch,
+    ) {
         let (opaque, alpha) = scratch.instance_bytes();
         let required = (opaque.len() + alpha.len()) as u64;
         if required == 0 {
@@ -5729,6 +6235,11 @@ impl FrameResources {
                 }))
             }
         };
+        if let Some(stage) = stage
+            && stage.copy_parts_to_buffer(encoder, &[opaque, alpha], buffer, 0)
+        {
+            return;
+        }
         if !opaque.is_empty() {
             queue.write_buffer(buffer, 0, opaque);
         }
@@ -5770,6 +6281,7 @@ impl FrameResources {
             &self.gradients.view,
         );
         self.bind_groups.insert(variant, groups);
+        self.groups_created = self.groups_created.saturating_add(4);
     }
 
     /// Builds `variant`'s group 1 for every external texture this frame draws
@@ -5803,6 +6315,7 @@ impl FrameResources {
             atlas,
             placeholders,
             atlas_sampler,
+            groups_created,
             ..
         } = self;
         let atlas_view = atlas
@@ -5823,6 +6336,7 @@ impl FrameResources {
                 *key,
                 images_bind_group(device, pipeline, atlas_view, view, atlas_sampler.as_ref()),
             );
+            *groups_created = groups_created.saturating_add(1);
         }
     }
 
@@ -5972,6 +6486,19 @@ fn config_descriptor(label: &str) -> wgpu::BufferDescriptor<'_> {
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     }
+}
+
+/// The rows a staged upload writes: the `filled` rows the frame's bytes take
+/// and every row the last upload left `live`, never past `height` — see
+/// [`ResourceTexture::live_rows`].
+fn staged_rows(filled: u32, live: u32, height: u32) -> u32 {
+    filled.max(live).min(height)
+}
+
+/// The rows of a resource texture `len` bytes fill, the last one partly.
+fn rows_filled(len: usize, bytes_per_row: u32) -> u32 {
+    let rows = (len as u64).div_ceil(u64::from(bytes_per_row.max(1)));
+    u32::try_from(rows).unwrap_or(u32::MAX)
 }
 
 /// The texel copy layout of a full resource-texture upload.
@@ -6329,6 +6856,9 @@ struct RegionCopyResources {
     /// textures, for the renderer's life. Created by the first texture-mode
     /// frame.
     staging: Option<ResourceTexture>,
+    /// Group 0 of the copy pass naming [`Self::staging`]'s view, built on the
+    /// first texture-mode copy after the staging texture was (re)created.
+    staging_group: Option<wgpu::BindGroup>,
 }
 
 impl RegionCopyResources {
@@ -6342,6 +6872,7 @@ impl RegionCopyResources {
                 mapped_at_creation: false,
             }),
             staging: None,
+            staging_group: None,
         }
     }
 
@@ -6358,6 +6889,7 @@ impl RegionCopyResources {
         if held_width >= width && held_height >= height {
             return;
         }
+        self.staging_group = None;
         self.staging = Some(ResourceTexture::new(
             device,
             &wgpu::TextureDescriptor {
@@ -6413,7 +6945,7 @@ impl RegionCopyPass<'_> {
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
-    ) {
+    ) -> u64 {
         let width = self.source.width();
         let height = self.source.height();
         // The texture the pass reads, and where in it the region starts.
@@ -6464,11 +6996,11 @@ impl RegionCopyPass<'_> {
         let (Some((view, origin)), Some(pipeline), Some(resources)) =
             (source, self.pipeline, self.resources)
         else {
-            return;
+            return 0;
         };
         let offset = u64::from(self.slot).saturating_mul(COPY_INSTANCE_BYTES);
         if offset.saturating_add(COPY_INSTANCE_BYTES) > resources.instances.size() {
-            return;
+            return 0;
         }
         let (page_width, page_height) = self.page.size();
         let instance = [
@@ -6485,22 +7017,42 @@ impl RegionCopyPass<'_> {
             offset,
             bytemuck::cast_slice(&instance),
         );
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("frust-engine region copy source"),
-            layout: &pipeline.get_bind_group_layout(0),
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(view),
-            }],
-        });
+        // The staging texture's group is cached; the frame's own target is
+        // the caller's and changes with the swapchain image, so a fragment-mode
+        // copy builds its group per copy.
+        let built;
+        let (bind_group, created) = match (self.mode, resources.staging_group.as_ref()) {
+            (RegionCopyMode::Texture, Some(group)) => (group, 0),
+            _ => {
+                built = copy_source_group(device, pipeline, view);
+                (&built, 1)
+            }
+        };
         pass.set_pipeline(pipeline);
         pass.set_vertex_buffer(0, resources.instances.slice(..));
-        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_bind_group(0, bind_group, &[]);
         pass.draw(
             0..COPY_QUAD_VERTICES,
             self.slot..self.slot.saturating_add(1),
         );
+        created
     }
+}
+
+/// Group 0 of the region copy pass: the texture it reads the region from.
+fn copy_source_group(
+    device: &wgpu::Device,
+    pipeline: &wgpu::RenderPipeline,
+    view: &wgpu::TextureView,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("frust-engine region copy source"),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::TextureView(view),
+        }],
+    })
 }
 
 /// Group 0 of a strip pass: the frame's coverage, the pass's own viewport
@@ -7128,6 +7680,9 @@ mod tests {
             row[base + 6] = 2; // dirty_pages: sum 6
             row[base + 8] = frame; // glyph_misses: sum 3
             row[base + 10] = 4 + frame; // run_keys: median 5
+            row[base + 11] = 100 + frame; // staged_bytes: median 101
+            row[base + 12] = 1; // staging_busy: sum 3
+            row[base + 15] = 2; // bind_groups: sum 6
             trace.window.push(row);
         }
         let line = trace.line();
@@ -7136,8 +7691,39 @@ mod tests {
         assert_eq!(
             counts,
             "draws=11 strips=0 alphas=0 glyph_draws=0 atlas_glyphs=0 replays=3 \
-             dirty_pages=6 atlas_refused=0 glyph_misses=3 glyph_evicted=0 run_keys=5"
+             dirty_pages=6 atlas_refused=0 glyph_misses=3 glyph_evicted=0 run_keys=5 \
+             staged_bytes=101 staging_busy=3 staging_too_large=0 staging_buffers=0 \
+             bind_groups=6"
         );
+    }
+
+    /// The staging and bind-group counts are per-frame deltas: each row carries
+    /// only the change since the previous frame's reading, so a window's sum is
+    /// the change across the window.
+    #[cfg(feature = "perf-trace")]
+    #[test]
+    fn a_frame_row_carries_only_the_staging_and_bind_group_change_since_the_last() {
+        let mut trace = EncodeTrace::default();
+        let base = ENCODE_TRACE_COLUMNS.len();
+        let readings = [
+            TraceCounters {
+                busy: 2,
+                too_large: 0,
+                buffers_created: 1,
+                bind_groups: 4,
+            },
+            TraceCounters {
+                busy: 5,
+                too_large: 1,
+                buffers_created: 1,
+                bind_groups: 4,
+            },
+        ];
+        for now in readings {
+            trace.record(&EncodeSpans::default(), now);
+        }
+        assert_eq!(&trace.window[0][base + 12..], &[2, 0, 1, 4]);
+        assert_eq!(&trace.window[1][base + 12..], &[3, 1, 0, 0]);
     }
 
     /// A window's percentile is nearest-rank over the column it names, so the
@@ -7166,6 +7752,28 @@ mod tests {
         assert_eq!(format_us(0), "0.0");
         assert_eq!(format_us(1), "0.1");
         assert_eq!(format_us(4_170_000), "4170.0");
+    }
+
+    /// A staged upload covers the rows the frame fills and every row the last
+    /// upload left live — so a frame whose coverage shrank re-zeroes the rows
+    /// it gave up exactly once — and nothing past the texture.
+    #[test]
+    fn a_staged_upload_covers_filled_and_previously_live_rows() {
+        assert_eq!(rows_filled(0, 32_768), 0);
+        assert_eq!(rows_filled(1, 32_768), 1);
+        assert_eq!(rows_filled(32_768, 32_768), 1);
+        assert_eq!(rows_filled(32_769, 32_768), 2);
+        // A new texture is live throughout: its first upload is a full one.
+        assert_eq!(staged_rows(1, 8, 8), 8);
+        // Shrinking: the rows the last frame filled are rewritten once...
+        assert_eq!(staged_rows(2, 5, 8), 5);
+        // ...and after that only the frame's own.
+        assert_eq!(staged_rows(2, 2, 8), 2);
+        // Growing past the live mark, never past the texture.
+        assert_eq!(staged_rows(6, 2, 8), 6);
+        assert_eq!(staged_rows(9, 2, 8), 8);
+        // Nothing filled and nothing live: nothing to write.
+        assert_eq!(staged_rows(0, 0, 8), 0);
     }
 
     /// The compile phases partition the compile they sit inside, so their sum

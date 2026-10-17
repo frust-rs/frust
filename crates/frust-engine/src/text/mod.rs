@@ -176,6 +176,22 @@ pub(crate) struct GlyphRunTargets<'a> {
     pub(crate) frame: &'a mut CompiledFrame,
     /// The frame's painter-order depth counter.
     pub(crate) depth: &'a mut DepthCounter,
+}
+
+/// How a glyph run is routed: the atlas it caches through, whether it may be
+/// drawn out of the resident-run cache, and where its glyph quads are held
+/// back.
+///
+/// One value because the three are decided together from the policy's route
+/// for the run, and each is read by a different half of the lowering.
+#[derive(Debug)]
+pub(crate) struct GlyphRunRouting<'a> {
+    /// The policy and the shared allocator when the policy routed the run to
+    /// the atlas, `None` for a run it routed to outlines.
+    pub(crate) atlas: Option<(&'a mut AtlasPolicy, &'a mut ImageCache)>,
+    /// Whether the run may be drawn out of the resident-run cache (see
+    /// [`ResidentPlan`]).
+    pub(crate) resident: bool,
     /// Where the run's glyph quads are held back until it is known whether
     /// every glyph of it was resident, or `None` for a run that may not draw
     /// quads at all (see [`backend`]'s module doc).
@@ -195,7 +211,7 @@ pub(crate) struct GlyphRunTargets<'a> {
 /// through unchanged; `glifo` still applies its transform-shape half on top
 /// (see the module doc).
 ///
-/// `atlas` is [`atlas_policy`]'s answer for this run, already decided: the
+/// `routing.atlas` is [`atlas_policy`]'s answer for this run, already decided: the
 /// policy's own entry map and the shared atlas allocator for a run it routed
 /// to the atlas — handed to `glifo` as [`AtlasCacher::Enabled`] — and `None`
 /// for one it routed to outlines. Nothing here re-decides it — the
@@ -206,7 +222,7 @@ pub(crate) struct GlyphRunTargets<'a> {
 /// glyph quads as quads, one that missed draws them the general way (see
 /// [`backend`]'s module doc).
 ///
-/// `resident` lets a run the atlas serves be drawn out of the policy's
+/// `routing.resident` lets a run the atlas serves be drawn out of the policy's
 /// resident-run cache instead of through `glifo` — see [`ResidentPlan`] for
 /// when that is possible and why it draws exactly what `glifo` would. A run the
 /// cache cannot resolve whole goes to `glifo` as before, and a run `glifo` then
@@ -215,30 +231,26 @@ pub(crate) struct GlyphRunTargets<'a> {
 ///
 /// Returns what the run cost: how many glyphs became draws, and how many were
 /// refused.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the run, its two transforms' worth of placement, its brush in \
-              both encodings and the two routing switches are each read by a \
-              different half of the lowering; grouping them would only move \
-              the list"
-)]
 pub(crate) fn lower_glyph_run(
     run: &GlyphRun,
     transform: Affine,
     paint: Paint,
     context_brush: &peniko::Brush,
     hint: bool,
-    mut atlas: Option<(&mut AtlasPolicy, &mut ImageCache)>,
-    resident: bool,
+    routing: GlyphRunRouting<'_>,
     targets: GlyphRunTargets<'_>,
 ) -> GlyphRunOutcome {
+    let GlyphRunRouting {
+        mut atlas,
+        resident,
+        quads,
+    } = routing;
     let GlyphRunTargets {
         generator,
         clips,
         prep,
         frame,
         depth,
-        quads,
     } = targets;
 
     let context = context_paint(context_brush);

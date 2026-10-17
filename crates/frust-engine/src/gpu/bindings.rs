@@ -168,6 +168,14 @@ pub fn strip_bind_group_layout_entries(
 /// against it hands out these same group layouts from
 /// `get_bind_group_layout`, so the renderer's existing bind-group construction
 /// is unchanged and its groups bind under every strip variant and class.
+///
+/// **One layout per renderer is the convention** (two with the image sampler,
+/// where the atlas-layer pass takes the sampler-free one). The pipeline cache
+/// keys a pipeline on the layout through an interning table with a fixed
+/// number of slots (`frust_gpu::pipeline::LAYOUT_BITS`); a layout created per
+/// frame, per class or per variant would fill it and push every later pipeline
+/// onto the uncached, compile-per-request path. Build another only with a
+/// reason the table can afford.
 #[must_use]
 pub fn strip_pipeline_layout(device: &wgpu::Device, image_sampler: bool) -> wgpu::PipelineLayout {
     let entries = strip_bind_group_layout_entries(image_sampler);
@@ -370,6 +378,133 @@ pub fn lower_encoded_external(entry: &EncodedExternalTexture) -> GpuEncodedPaint
     })
 }
 
+/// What a cached bind group samples as its layer input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GroupSource {
+    /// The transparent placeholder, which composites nothing.
+    Placeholder,
+    /// A pooled page, by the id its texture minted for itself. A pool that
+    /// drops a texture and allocates another never reuses the id, so an entry
+    /// naming a dropped texture can only ever miss.
+    Pooled(SceneTextureId),
+    /// A retained page: the address of its view in the store, the store's
+    /// generation and the page extent. The store advances its generation
+    /// whenever a page is added, evicted, re-rendered at another extent or the
+    /// store is cleared, which are the only ways a view's address can come to
+    /// name a different texture.
+    Retained {
+        /// Address of the page's view inside the store.
+        view: usize,
+        /// The store's generation when the key was made.
+        generation: u64,
+        /// The page extent.
+        size: (u32, u32),
+    },
+}
+
+/// Which bind group over a [`GroupSource`] a [`SourceGroupCache`] entry is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GroupKind {
+    /// Group 0 of a strip pass over page-config buffer `slot`: the frame's
+    /// coverage, that buffer, and the source as the layer input.
+    Resources {
+        /// Index into the renderer's page-config buffers.
+        slot: u32,
+    },
+    /// The filter pass's source group (its group 1).
+    FilterSource,
+}
+
+/// A cache key: one kind of group over one source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SourceGroupKey {
+    /// Which group.
+    pub kind: GroupKind,
+    /// What it samples.
+    pub source: GroupSource,
+}
+
+/// The most entries a cache keeps before it drops them all.
+///
+/// A steady frame touches a handful (one per live page and composite source);
+/// the bound only matters if the sweep is never driven.
+const SOURCE_GROUP_CAP: usize = 64;
+
+/// Bind groups that name a pooled or retained page, kept across frames.
+///
+/// A page-round resources group, a composite or backdrop segment's group and a
+/// filter pass's source group each name one texture view; rebuilding them for
+/// the same view every frame is pure cost. Entries are keyed by what they
+/// sample ([`SourceGroupKey`]) and **swept every frame**: [`Self::sweep`] drops
+/// every entry the frame did not use, so a group never keeps a texture alive
+/// past the frame after the last one that drew with it — well inside the page
+/// pool's own keep-alive window, which has no eviction hook to invalidate
+/// against. The owner clears the cache outright when an input every entry
+/// shares (the coverage view) is recreated.
+///
+/// Generic over the group type so the keying and sweep rules test without a
+/// device.
+#[derive(Debug)]
+pub struct SourceGroupCache<G = wgpu::BindGroup> {
+    entries: HashMap<SourceGroupKey, (G, bool)>,
+    created: u64,
+}
+
+impl<G> Default for SourceGroupCache<G> {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            created: 0,
+        }
+    }
+}
+
+impl<G: Clone> SourceGroupCache<G> {
+    /// The group under `key`, built by `build` on a miss. Marks it used.
+    pub fn get_or_build(&mut self, key: SourceGroupKey, build: impl FnOnce() -> G) -> G {
+        if let Some((group, used)) = self.entries.get_mut(&key) {
+            *used = true;
+            return group.clone();
+        }
+        if self.entries.len() >= SOURCE_GROUP_CAP {
+            self.entries.clear();
+        }
+        self.created = self.created.saturating_add(1);
+        let group = build();
+        self.entries.insert(key, (group.clone(), true));
+        group
+    }
+
+    /// Ends a frame: drops every entry the frame did not use and marks the
+    /// survivors unused for the next one.
+    pub fn sweep(&mut self) {
+        self.entries.retain(|_, (_, used)| std::mem::take(used));
+    }
+
+    /// Drops every entry.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    /// How many groups this cache has built, over its life.
+    #[must_use]
+    pub fn created(&self) -> u64 {
+        self.created
+    }
+
+    /// How many entries it holds right now.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether it holds none.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,6 +513,68 @@ mod tests {
     use vello_common::TextureId;
     use vello_common::geometry::RectU16;
     use vello_common::kurbo::Affine;
+
+    fn key(slot: u32, source: GroupSource) -> SourceGroupKey {
+        SourceGroupKey {
+            kind: GroupKind::Resources { slot },
+            source,
+        }
+    }
+
+    #[test]
+    fn a_source_group_is_built_once_while_it_keeps_being_used() {
+        let mut cache: SourceGroupCache<u32> = SourceGroupCache::default();
+        let page = key(0, GroupSource::Pooled(SceneTextureId::mint()));
+        for _ in 0..4 {
+            assert_eq!(cache.get_or_build(page, || 7), 7);
+            cache.sweep();
+        }
+        assert_eq!(cache.created(), 1);
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn a_sweep_drops_a_group_the_frame_did_not_use() {
+        let mut cache: SourceGroupCache<u32> = SourceGroupCache::default();
+        let kept = key(0, GroupSource::Placeholder);
+        let gone = key(1, GroupSource::Pooled(SceneTextureId::mint()));
+        cache.get_or_build(kept, || 1);
+        cache.get_or_build(gone, || 2);
+        cache.sweep();
+        assert_eq!(cache.len(), 2, "both were used by the frame just ended");
+        cache.get_or_build(kept, || 1);
+        cache.sweep();
+        assert_eq!(cache.len(), 1, "the unused one is dropped");
+        cache.get_or_build(gone, || 3);
+        assert_eq!(cache.created(), 3, "a dropped group is rebuilt on return");
+    }
+
+    #[test]
+    fn keys_differ_by_slot_source_and_retained_generation() {
+        let mut cache: SourceGroupCache<u32> = SourceGroupCache::default();
+        let retained = |generation| GroupSource::Retained {
+            view: 0x10,
+            generation,
+            size: (8, 8),
+        };
+        cache.get_or_build(key(0, retained(1)), || 1);
+        cache.get_or_build(key(0, retained(2)), || 2);
+        cache.get_or_build(key(1, retained(1)), || 3);
+        cache.get_or_build(key(0, GroupSource::Pooled(SceneTextureId::mint())), || 4);
+        cache.get_or_build(key(0, GroupSource::Pooled(SceneTextureId::mint())), || 5);
+        assert_eq!(cache.created(), 5);
+    }
+
+    #[test]
+    fn clear_forgets_everything_and_a_runaway_cache_is_bounded() {
+        let mut cache: SourceGroupCache<u32> = SourceGroupCache::default();
+        for n in 0..(SOURCE_GROUP_CAP as u32 * 3) {
+            cache.get_or_build(key(n, GroupSource::Placeholder), || n);
+            assert!(cache.len() <= SOURCE_GROUP_CAP);
+        }
+        cache.clear();
+        assert!(cache.is_empty());
+    }
 
     /// A registry over plain values, which is all the map's own behaviour
     /// needs — minting a real `wgpu::TextureView` would require a device.

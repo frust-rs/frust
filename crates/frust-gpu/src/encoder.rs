@@ -67,6 +67,13 @@ use crate::texture::RenderTarget;
 /// may submit their OWN encoder so atlas content is committed before the
 /// scene pass reads it (vello_hybrid render/wgpu/mod.rs:428-430).
 ///
+/// A staged upload may leave one more thing on the encoder: the deferred
+/// re-map of the staging slot it was copied from
+/// (`wgpu::CommandEncoder::map_buffer_on_submit`, see [`crate::staging`]).
+/// It runs only when the caller submits, after the caller's own work in the
+/// same submission, and is dropped harmlessly with an encoder that is never
+/// submitted — it asks nothing of the caller beyond the one submit.
+///
 /// A caller recording depth-writing passes of its own around a renderer's owes
 /// the module-level *two caller rules* on top of this: depth-clear ownership,
 /// with the comparison, direction and extent that ride along with it.

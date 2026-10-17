@@ -30,6 +30,7 @@ pub mod pipeline;
 pub mod pipeline_cache;
 pub mod pool;
 pub mod shader;
+pub mod staging;
 pub mod surface;
 pub mod texture;
 
@@ -48,6 +49,7 @@ pub use lint::{LintError, check_limits_against_webgl2, lint_pipeline_layout, lin
 pub use pipeline::{PipelineCache, RenderPipelineDesc, VertexLayout};
 pub use pool::{PoolKey, PoolStats, PooledTexture, TextureAllocator, TexturePool};
 pub use shader::{ShaderId, ShaderLibrary};
+pub use staging::{StagingFrame, StagingRing};
 pub use surface::{
     ConfiguredSurface, DetachedSurface, SURFACE_FORMATS, SurfaceAlphaRequest, SurfaceFactory,
     compositor_expects_premultiplied,

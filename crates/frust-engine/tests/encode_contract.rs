@@ -1388,3 +1388,587 @@ fn a_punch_cut_frame_records_two_passes_fewer() {
     assert_ne!(pixel(&merged.pixels, 64, 64)[3], 0);
     assert_eq!(pixel(&merged.pixels, 200, 32), [255, 0, 0, 255]);
 }
+
+// ---------------------------------------------------------------------
+// The staging ring: the frame's per-frame uploads (coverage, encoded paints,
+// instances, viewport and page uniforms) written into a mapped staging slot
+// and copied into their destinations inside the caller's encoder, ahead of the
+// passes that read them (`frust_gpu::staging`). Every case below checks
+// pixels, since the copies themselves are invisible to any other probe.
+// ---------------------------------------------------------------------
+
+/// The scenes the two-route case renders, frame after frame on one renderer:
+/// every upload the ring carries (coverage, an encoded gradient paint, a page
+/// round's uniform, image residency beside it).
+fn staging_scenes() -> Vec<Scene> {
+    vec![
+        scene(),
+        dense_coverage_scene(),
+        layer_scene(),
+        gradient_scene(),
+        image_scene(),
+        scene(),
+    ]
+}
+
+/// Hundreds of anti-aliased diamonds over the whole target: coverage several
+/// alpha-texture rows deep, so the frames after it, whose coverage fits in
+/// one row, upload fewer rows than it left live.
+fn dense_coverage_scene() -> Scene {
+    let mut scene = Scene::new();
+    let mut builder = SceneBuilder::new(&mut scene);
+    for row in 0..24 {
+        for column in 0..24 {
+            let (x, y) = (f64::from(column) * 10.7 + 3.3, f64::from(row) * 10.7 + 3.3);
+            let mut path = BezPath::new();
+            path.move_to((x + 4.5, y));
+            path.line_to((x + 9.0, y + 4.5));
+            path.line_to((x + 4.5, y + 9.0));
+            path.line_to((x, y + 4.5));
+            path.close_path();
+            let colour = if (row + column) % 2 == 0 { RED } else { BLUE };
+            builder.fill_path(path, Brush::Solid(colour));
+        }
+    }
+    scene
+}
+
+/// One frame of `scene` on `renderer` into a fresh target, submitted alone.
+fn staged_frame(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    renderer: &mut EngineRenderer,
+    scene: &Scene,
+) -> Vec<u8> {
+    let target = HeadlessTarget::new(device, SIZE, SIZE, FORMAT);
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("frust-engine staging frame"),
+    });
+    renderer
+        .encode(
+            device,
+            queue,
+            &mut encoder,
+            scene,
+            EngineTarget {
+                view: target.view(),
+                format: FORMAT,
+                width: SIZE,
+                height: SIZE,
+                depth: None,
+                output: OutputAlpha::Premultiplied,
+            },
+            Color::TRANSPARENT,
+            Affine::IDENTITY,
+        )
+        .expect("a well-formed frame encodes");
+    queue.submit([encoder.finish()]);
+    renderer.end_frame(queue);
+    target.read_back(device, queue)
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn staged_and_queued_uploads_draw_the_same_pixels_frame_after_frame() {
+    let _serialized = render_lock();
+    let (device, queue, caps) = gpu();
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+
+    let mut staged = EngineRenderer::new(&device, &caps, FORMAT, None)
+        .expect("the engine builds on this device");
+    staged.set_staging_ring(true);
+    let mut queued = EngineRenderer::new(&device, &caps, FORMAT, None)
+        .expect("the engine builds on this device");
+    queued.set_staging_ring(false);
+    assert!(staged.staging_ring() && !queued.staging_ring());
+
+    let mut staged_bytes = Vec::new();
+    for (index, scene) in staging_scenes().iter().enumerate() {
+        let through_ring = staged_frame(&device, &queue, &mut staged, scene);
+        assert!(
+            staged.last_frame_staged_bytes() > 0,
+            "frame {index} took the ring"
+        );
+        staged_bytes.push(staged.last_frame_staged_bytes());
+        let through_queue = staged_frame(&device, &queue, &mut queued, scene);
+        assert_eq!(
+            queued.last_frame_staged_bytes(),
+            0,
+            "frame {index} took queue writes"
+        );
+        assert!(
+            through_ring == through_queue,
+            "frame {index}: the staged route drew different pixels from queue writes"
+        );
+    }
+    // The dense frame's coverage takes more alpha rows than the first frame's;
+    // the frame after it fills one, yet still rewrites (re-zeroes) every row
+    // the dense frame left live, and once that is done the last frame — the
+    // first frame's scene again — uploads only its own rows.
+    let row = u64::from(caps.resource_texture_dim) * 16;
+    assert!(
+        staged_bytes[1] >= staged_bytes[0] + row,
+        "the dense frame spans more alpha rows: {staged_bytes:?}"
+    );
+    assert!(
+        staged_bytes[2] >= 2 * row,
+        "the frame after it rewrites the rows it left live: {staged_bytes:?}"
+    );
+    assert_eq!(
+        staged_bytes[5], staged_bytes[0],
+        "once re-zeroed, those rows are not uploaded again: {staged_bytes:?}"
+    );
+    let stats = staged.staging_stats().expect("the ring is on");
+    assert_eq!(stats.frames, staging_scenes().len() as u64);
+    assert_eq!(stats.busy, 0, "paced frames never find the ring busy");
+    assert!(queued.staging_stats().is_none());
+
+    let error = drain_error_scope(&device, scope);
+    assert!(error.is_none(), "a staged frame raised {error:?}");
+    warm_up_ran(&staged);
+}
+
+/// Two frames of one renderer, then a frame of a second renderer, all into ONE
+/// encoder and one submit — the shape a segmented frame takes, its overlays'
+/// renderers recording after the main segment's passes.
+///
+/// Every frame rewrites the same uniforms, instances and coverage texture of
+/// its renderer. Queue writes would all land ahead of the one command buffer,
+/// so every pass in it would read the LAST frame's bytes; each staged frame's
+/// copies are recorded into the encoder immediately ahead of its own passes,
+/// so each target must show its own scene — which is the ordering this pins.
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn each_frames_staged_copies_precede_its_own_passes_in_a_shared_encoder() {
+    let _serialized = render_lock();
+    let (device, queue, caps) = gpu();
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+
+    let mut main = EngineRenderer::new(&device, &caps, FORMAT, None)
+        .expect("the engine builds on this device");
+    main.set_staging_ring(true);
+    let mut overlay = EngineRenderer::new(&device, &caps, FORMAT, None)
+        .expect("the engine builds on this device");
+    overlay.set_staging_ring(true);
+
+    let targets: Vec<HeadlessTarget> = (0..3)
+        .map(|_| HeadlessTarget::new(&device, SIZE, SIZE, FORMAT))
+        .collect();
+    let scenes = [scene(), layer_scene(), scene()];
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("frust-engine shared staging encoder"),
+    });
+    for (index, (scene, target)) in scenes.iter().zip(&targets).enumerate() {
+        let renderer = if index < 2 { &mut main } else { &mut overlay };
+        renderer
+            .encode(
+                &device,
+                &queue,
+                &mut encoder,
+                scene,
+                EngineTarget {
+                    view: target.view(),
+                    format: FORMAT,
+                    width: SIZE,
+                    height: SIZE,
+                    depth: None,
+                    output: OutputAlpha::Premultiplied,
+                },
+                Color::TRANSPARENT,
+                Affine::IDENTITY,
+            )
+            .expect("a well-formed frame encodes");
+        assert!(
+            renderer.last_frame_staged_bytes() > 0,
+            "frame {index} took the ring"
+        );
+    }
+    queue.submit([encoder.finish()]);
+    main.end_frame(&queue);
+    overlay.end_frame(&queue);
+
+    let error = drain_error_scope(&device, scope);
+    assert!(error.is_none(), "the shared encoder raised {error:?}");
+
+    // The first frame: `scene()` exactly as the single-frame case draws it,
+    // not the layer scene recorded after it into the same encoder.
+    let first = targets[0].read_back(&device, &queue);
+    assert_eq!(pixel(&first, 64, 64), [255, 0, 0, 255]);
+    assert_eq!(pixel(&first, 176, 176), [0, 0, 255, 255]);
+    assert_eq!(pixel(&first, 56, 200), [0, 128, 0, 255]);
+    assert_eq!(pixel(&first, 4, 4), [0, 0, 0, 0]);
+
+    // The second: the layer scene, its page round's uniform staged mid-frame.
+    let second = targets[1].read_back(&device, &queue);
+    assert_eq!(pixel(&second, 8, 8), [0, 0, 0, 255]);
+    let inside = pixel(&second, 128, 128);
+    for channel in 0..3 {
+        assert!(
+            (i32::from(inside[channel]) - 128).abs() <= 1,
+            "the second frame composites its own layer, got {inside:?}"
+        );
+    }
+
+    // The second renderer's frame, recorded after both: its own resources.
+    let third = targets[2].read_back(&device, &queue);
+    assert!(third == first, "the second renderer drew its own scene");
+
+    warm_up_ran(&main);
+    warm_up_ran(&overlay);
+}
+
+/// Frames encoded but not yet submitted hold their slots; one more frame finds
+/// every slot in flight and takes queue writes instead — same pixels — and
+/// the ring serves frames again once those submissions retire.
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn a_frame_finding_every_slot_in_flight_falls_back_to_queue_writes() {
+    let _serialized = render_lock();
+    let (device, queue, caps) = gpu();
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+
+    let mut renderer = EngineRenderer::new(&device, &caps, FORMAT, None)
+        .expect("the engine builds on this device");
+    renderer.set_staging_ring(true);
+    let scene = scene();
+
+    let targets: Vec<HeadlessTarget> = (0..4)
+        .map(|_| HeadlessTarget::new(&device, SIZE, SIZE, FORMAT))
+        .collect();
+    let mut staged_bytes = Vec::new();
+    let encoders: Vec<wgpu::CommandBuffer> = targets
+        .iter()
+        .map(|target| {
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("frust-engine held frame"),
+            });
+            renderer
+                .encode(
+                    &device,
+                    &queue,
+                    &mut encoder,
+                    &scene,
+                    EngineTarget {
+                        view: target.view(),
+                        format: FORMAT,
+                        width: SIZE,
+                        height: SIZE,
+                        depth: None,
+                        output: OutputAlpha::Premultiplied,
+                    },
+                    Color::TRANSPARENT,
+                    Affine::IDENTITY,
+                )
+                .expect("a well-formed frame encodes");
+            staged_bytes.push(renderer.last_frame_staged_bytes());
+            encoder.finish()
+        })
+        .collect();
+    assert!(
+        staged_bytes[..3].iter().all(|bytes| *bytes > 0),
+        "one slot per held frame: {staged_bytes:?}"
+    );
+    assert_eq!(staged_bytes[3], 0, "no slot was free for the fourth frame");
+    let stats = renderer.staging_stats().expect("the ring is on");
+    assert_eq!(stats.busy, 1, "{stats:?}");
+
+    queue.submit(encoders);
+    renderer.end_frame(&queue);
+    for target in &targets {
+        let pixels = target.read_back(&device, &queue);
+        assert_eq!(pixel(&pixels, 64, 64), [255, 0, 0, 255]);
+        assert_eq!(pixel(&pixels, 176, 176), [0, 0, 255, 255]);
+        assert_eq!(pixel(&pixels, 4, 4), [0, 0, 0, 0]);
+    }
+
+    // Retired: the slots are mapped again and the next frame takes one.
+    let _ = device.poll(wgpu::PollType::wait_indefinitely());
+    let pixels = staged_frame(&device, &queue, &mut renderer, &scene);
+    assert!(renderer.last_frame_staged_bytes() > 0);
+    assert_eq!(pixel(&pixels, 64, 64), [255, 0, 0, 255]);
+    assert_eq!(
+        renderer.staging_stats().map(|stats| stats.buffers_created),
+        Some(3),
+        "the recovered slot is reused, not replaced"
+    );
+
+    let error = drain_error_scope(&device, scope);
+    assert!(error.is_none(), "the held frames raised {error:?}");
+    warm_up_ran(&renderer);
+}
+
+/// Two sibling layers over an opaque backdrop, the second holding a nested
+/// layer: three page rounds across both ping-pong groups, each composited.
+fn two_page_scene() -> Scene {
+    let mut scene = Scene::new();
+    let mut builder = SceneBuilder::new(&mut scene);
+    builder.fill_rect(
+        Rect::new(0.0, 0.0, f64::from(SIZE), f64::from(SIZE)),
+        Brush::Solid(BLACK),
+    );
+    builder.push_layer(Rect::new(16.0, 16.0, 112.0, 112.0), 0.5);
+    builder.fill_rect(Rect::new(16.0, 16.0, 112.0, 112.0), Brush::Solid(WHITE));
+    builder.pop_layer();
+    builder.push_layer(Rect::new(128.0, 128.0, 240.0, 240.0), 0.5);
+    builder.fill_rect(Rect::new(128.0, 128.0, 240.0, 240.0), Brush::Solid(RED));
+    builder.push_layer(Rect::new(144.0, 144.0, 224.0, 224.0), 0.5);
+    builder.fill_rect(Rect::new(144.0, 144.0, 224.0, 224.0), Brush::Solid(BLUE));
+    builder.pop_layer();
+    builder.pop_layer();
+    scene
+}
+
+/// Encodes `scene` into `target` and returns how many bind groups the frame
+/// path created doing it.
+fn groups_created_by(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    renderer: &mut EngineRenderer,
+    scene: &Scene,
+    target: &HeadlessTarget,
+) -> u64 {
+    let before = renderer.bind_groups_created();
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("frust-engine bind group count frame"),
+    });
+    renderer
+        .encode(
+            device,
+            queue,
+            &mut encoder,
+            scene,
+            EngineTarget {
+                view: target.view(),
+                format: FORMAT,
+                width: SIZE,
+                height: SIZE,
+                depth: None,
+                output: OutputAlpha::Premultiplied,
+            },
+            Color::TRANSPARENT,
+            Affine::IDENTITY,
+        )
+        .expect("a well-formed frame encodes");
+    queue.submit([encoder.finish()]);
+    renderer.end_frame(queue);
+    renderer.bind_groups_created() - before
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn a_steady_two_page_frame_creates_no_bind_group() {
+    let _serialized = render_lock();
+    let (device, queue, caps) = gpu();
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut renderer = EngineRenderer::new(&device, &caps, FORMAT, None)
+        .expect("the engine builds on this device");
+    let scene = two_page_scene();
+    let target = HeadlessTarget::new(&device, SIZE, SIZE, FORMAT);
+
+    let first = groups_created_by(&device, &queue, &mut renderer, &scene, &target);
+    assert!(first > 0, "the first frame builds its groups");
+    let reference = target.read_back(&device, &queue);
+    // The pool settles after a frame or two; once it has, nothing is built.
+    let _ = groups_created_by(&device, &queue, &mut renderer, &scene, &target);
+    for frame in 0..6 {
+        let created = groups_created_by(&device, &queue, &mut renderer, &scene, &target);
+        assert_eq!(created, 0, "steady frame {frame} built {created} groups");
+        assert_eq!(
+            target.read_back(&device, &queue),
+            reference,
+            "a cached group draws the same pixels (frame {frame})"
+        );
+    }
+
+    let error = drain_error_scope(&device, scope);
+    assert!(error.is_none(), "the frames raised {error:?}");
+    warm_up_ran(&renderer);
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn a_steady_frame_compositing_a_retained_page_creates_no_bind_group() {
+    let _serialized = render_lock();
+    let (device, queue, caps) = gpu();
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut renderer = EngineRenderer::new(&device, &caps, FORMAT, None)
+        .expect("the engine builds on this device");
+    let target = HeadlessTarget::new(&device, SIZE, SIZE, FORMAT);
+    let rect = Rect::new(32.0, 32.0, 160.0, 160.0);
+
+    // The body is recorded once, into a retained page.
+    let mut record = Scene::new();
+    {
+        let mut builder = SceneBuilder::new(&mut record);
+        builder.fill_rect(
+            Rect::new(0.0, 0.0, f64::from(SIZE), f64::from(SIZE)),
+            Brush::Solid(BLACK),
+        );
+        builder.push_retained(5, rect, 1.0, 1.0);
+        builder.fill_rect(rect, Brush::Solid(GREEN));
+        builder.pop_retained();
+    }
+    let recorded = groups_created_by(&device, &queue, &mut renderer, &record, &target);
+    assert!(recorded > 0, "the recording frame builds its groups");
+    assert!(
+        renderer.retained_ledger().any(|entry| entry.key == 5),
+        "the body is resident after its recording frame"
+    );
+
+    // Then composited from that page, frame after frame.
+    let mut draw = Scene::new();
+    {
+        let mut builder = SceneBuilder::new(&mut draw);
+        builder.fill_rect(
+            Rect::new(0.0, 0.0, f64::from(SIZE), f64::from(SIZE)),
+            Brush::Solid(BLACK),
+        );
+        builder.draw_retained(5, rect, 0.75, 1.0);
+    }
+    // The recording frame already composited the same page, so its group is
+    // cached and this frame — a different scene over the same page — finds it.
+    let first = groups_created_by(&device, &queue, &mut renderer, &draw, &target);
+    assert_eq!(first, 0, "the composite reuses the recording frame's group");
+    let reference = target.read_back(&device, &queue);
+    assert_ne!(
+        pixel(&reference, 96, 96),
+        [0, 0, 0, 255],
+        "the page composited"
+    );
+    for frame in 0..6 {
+        let created = groups_created_by(&device, &queue, &mut renderer, &draw, &target);
+        assert_eq!(created, 0, "steady frame {frame} built {created} groups");
+        assert_eq!(target.read_back(&device, &queue), reference);
+    }
+
+    let error = drain_error_scope(&device, scope);
+    assert!(error.is_none(), "the frames raised {error:?}");
+    warm_up_ran(&renderer);
+}
+
+/// Dropping the retained store empties the group cache with it: a steady frame
+/// whose groups were all cached builds again on the frame after the clear, and
+/// settles back to none on the one after.
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn clearing_the_retained_store_empties_the_group_cache() {
+    let _serialized = render_lock();
+    let (device, queue, caps) = gpu();
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut renderer = EngineRenderer::new(&device, &caps, FORMAT, None)
+        .expect("the engine builds on this device");
+    let scene = two_page_scene();
+    let target = HeadlessTarget::new(&device, SIZE, SIZE, FORMAT);
+
+    let _ = groups_created_by(&device, &queue, &mut renderer, &scene, &target);
+    let _ = groups_created_by(&device, &queue, &mut renderer, &scene, &target);
+    let reference = target.read_back(&device, &queue);
+    for frame in 0..3 {
+        let created = groups_created_by(&device, &queue, &mut renderer, &scene, &target);
+        assert_eq!(created, 0, "steady frame {frame} built {created} groups");
+    }
+
+    renderer.clear_retained();
+    let rebuilt = groups_created_by(&device, &queue, &mut renderer, &scene, &target);
+    assert!(
+        rebuilt > 0,
+        "the frame after clear_retained reused groups cached before the clear"
+    );
+    assert_eq!(
+        target.read_back(&device, &queue),
+        reference,
+        "the rebuilt groups draw the same pixels"
+    );
+    let settled = groups_created_by(&device, &queue, &mut renderer, &scene, &target);
+    assert_eq!(settled, 0, "the rebuilt groups are cached again");
+
+    let error = drain_error_scope(&device, scope);
+    assert!(error.is_none(), "the frames raised {error:?}");
+    warm_up_ran(&renderer);
+}
+
+/// Collects the `frust-perf enc` lines the engine logs.
+#[cfg(feature = "perf-trace")]
+struct EncLines;
+
+#[cfg(feature = "perf-trace")]
+static ENC_LINES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+#[cfg(feature = "perf-trace")]
+impl log::Log for EncLines {
+    fn enabled(&self, _metadata: &log::Metadata) -> bool {
+        true
+    }
+
+    fn log(&self, record: &log::Record) {
+        let line = record.args().to_string();
+        if line.starts_with("frust-perf enc") {
+            ENC_LINES
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(line);
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+/// Two full windows of steady frames: the first window holds the frames that
+/// build the pool and its groups, the second holds frames that build none, and
+/// both lines carry the staging and bind-group keys at their end.
+#[cfg(feature = "perf-trace")]
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract --features perf-trace -- --ignored`"]
+fn the_enc_trace_line_reports_staging_and_bind_group_counts() {
+    let _serialized = render_lock();
+    // Another logger in this process would leave the lines elsewhere; a second
+    // install is refused, which is harmless here.
+    let _ = log::set_logger(&EncLines);
+    log::set_max_level(log::LevelFilter::Info);
+    ENC_LINES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clear();
+    let (device, queue, caps) = gpu();
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut renderer = EngineRenderer::new(&device, &caps, FORMAT, None)
+        .expect("the engine builds on this device");
+    renderer.set_staging_ring(true);
+    let target = HeadlessTarget::new(&device, SIZE, SIZE, FORMAT);
+    let scene = two_page_scene();
+
+    for _ in 0..120 {
+        let _ = groups_created_by(&device, &queue, &mut renderer, &scene, &target);
+    }
+
+    let lines = ENC_LINES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    assert_eq!(lines.len(), 2, "two windows of sixty frames: {lines:?}");
+    for line in &lines {
+        for key in [
+            " staged_bytes=",
+            " staging_busy=",
+            " staging_too_large=",
+            " staging_buffers=",
+            " bind_groups=",
+        ] {
+            assert!(line.contains(key), "missing {key} in {line}");
+        }
+        assert!(
+            line.ends_with(char::is_numeric),
+            "the keys close the line: {line}"
+        );
+    }
+    assert!(
+        lines[1].ends_with(" bind_groups=0"),
+        "the steady window built groups: {}",
+        lines[1]
+    );
+    eprintln!("{}", lines[1]);
+
+    let error = drain_error_scope(&device, scope);
+    assert!(error.is_none(), "the frames raised {error:?}");
+    warm_up_ran(&renderer);
+}
