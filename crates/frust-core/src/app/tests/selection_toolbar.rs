@@ -1,8 +1,8 @@
+//! Selection-toolbar publish and generation tests for RenderRoot.
+
 use super::*;
 
-// ---------------------------------------------------------------------
 // Selection toolbar: publish, generation, clear.
-// ---------------------------------------------------------------------
 
 /// A request with the menu up, anchored at `x` — the shape a field
 /// publishes while its bar stands.
@@ -50,11 +50,8 @@ fn a_selection_toolbar_publish_resolves_and_only_a_menu_edge_moves_the_generatio
     assert_eq!(h.root.selection_toolbar(), Some(toolbar_request(10.0)));
     assert_eq!(h.root.selection_toolbar_generation(), first_gen);
 
-    // A moved anchor is stored — a shell re-reads it to place a menu it
-    // already has on screen — but it is NOT a menu edge. This assertion used
-    // to read `first_gen + 1`: the anchor is recomputed every painted frame
-    // and a drag that widens a selection moves it on every touch sample, so
-    // bumping here asked the platform to re-present its menu per sample.
+    // A moved anchor is stored (a shell re-reads it to place a shown menu) but is NOT
+    // a menu edge: it moves on every touch sample of a selection drag.
     h.state.publish = Some(toolbar_request(60.0));
     h.frame();
     assert_eq!(h.root.selection_toolbar(), Some(toolbar_request(60.0)));
@@ -93,9 +90,8 @@ fn only_the_menu_flag_going_up_asks_a_shell_to_present() {
     h.down(30.0, 120.0);
     assert!(h.root.is_focus_active());
 
-    // A focused field with no bar up publishes all the same: the verbs are
-    // the answer a platform responder chain needs for a hardware shortcut
-    // that arrives with nothing on screen.
+    // A focused field with no bar up publishes all the same, so a platform responder
+    // chain can answer for a hardware shortcut.
     h.state.publish = Some(toolbar_level(10.0));
     h.frame();
     assert_eq!(h.root.selection_toolbar(), Some(toolbar_level(10.0)));
@@ -126,10 +122,8 @@ fn only_the_menu_flag_going_up_asks_a_shell_to_present() {
 
 #[test]
 fn a_pass_that_publishes_nothing_still_moves_the_generation() {
-    // `RenderRoot::paint` resolves a pass nobody published in to `None`,
-    // which reads as "no menu, no verbs" and must differ from whatever
-    // stood — otherwise a shell holding a presented menu never learns to
-    // put it away.
+    // A pass nobody published in resolves to `None` (no menu, no verbs) and must
+    // differ from whatever stood, so a shell learns to put a presented menu away.
     let mut h = OverlayHarness::new(vec![]);
     h.down(30.0, 120.0);
     h.state.publish = Some(toolbar_request(10.0));

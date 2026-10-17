@@ -1,3 +1,5 @@
+//! Multi-contact pointer routing tests for RenderRoot.
+
 use super::*;
 
 /// What every probe saw: which probe, which contact, which phase.
@@ -414,9 +416,8 @@ fn another_contact_reaches_only_the_captor_and_moves_no_hover_or_focus() {
     assert!(root.pointer_capture_contacts());
     let (focus_generation, hover) = (root.focus_ime_generation(), root.is_hover_active());
 
-    // A second finger landing outside the guard's child: delivered to A down
-    // the captured path, while the guard — whose own `Down` handling would
-    // release focus on a tap outside — never runs on it.
+    // A second finger outside the guard's child goes to A down the captured path;
+    // the guard, whose own `Down` would release focus, never runs on it.
     assert!(
         root.event(&mut log, &touch(1, Down, NOWHERE.0, NOWHERE.1))
             .handled

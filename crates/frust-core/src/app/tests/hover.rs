@@ -1,13 +1,9 @@
+//! Hover-claim pipeline tests for RenderRoot.
+
 use super::*;
 
-// --- Hover: the claim pipeline -------------------------------------------
-//
-// Hover has no Enter/Leave phase to lean on (adding one to `PointerPhase`
-// would break every out-of-tree exhaustive match). It is instead an opt-in
-// claim a widget makes from its uncaptured `Move` arm, recorded as an epoch
-// stamp down the pod chain — so the fixture below is deliberately shaped like
-// a real container: two hit-tested children, a capture fast-path, and paint
-// recording what `PaintCtx::is_hovered` reported.
+// Fixture: two hit-tested children, a capture fast-path, and paint recording what
+// `PaintCtx::is_hovered` reported; hover is an opt-in claim from an uncaptured `Move`.
 
 /// What one hover leaf observed, shared out of the widget tree.
 #[derive(Default)]
@@ -18,16 +14,11 @@ struct HoverProbe {
     event_hovered: Cell<bool>,
 }
 
-/// A leaf that claims hover on any `Move` landing inside its own bounds — the
-/// canonical opt-in shape — and optionally captures the pointer on `Down` (the
-/// drag fixture: a captured pointer must never create hover).
+/// A leaf that claims hover on any `Move` inside its bounds and optionally captures
+/// the pointer on `Down` (a captured pointer must never create hover).
 ///
-/// With `latches` set it follows the whole consumer contract: the same hit test
-/// updates an internal flag, `request_redraw` is gated on that flag changing,
-/// and `paint` self-corrects the flag from the authoritative
-/// `PaintCtx::is_hovered`. Clearing `latches` is a deliberate negative control —
-/// a claimant that keeps no flag — used to pin which frames the pipeline itself
-/// does and does not manufacture.
+/// With `latches` set it keeps the consumer-contract flag, gating `request_redraw` on
+/// it and self-correcting in `paint`; clearing it is the negative control.
 struct HoverLeaf {
     captures: bool,
     latches: bool,
@@ -96,14 +87,11 @@ enum GroupClaim {
     BeforeRouting,
 }
 
-/// A container wrapping one hover leaf, recording what its **own**
-/// `PaintCtx::is_hovered`/`EventCtx::is_hovered` reported — the
-/// ancestor-on-the-claim-path case, which the two sibling leaves alone cannot
-/// show. With `claims` set it also wants hover chrome of its own, claiming
-/// either side of the route to exercise the ordering rule.
+/// A container wrapping one hover leaf, recording what its own
+/// `PaintCtx::is_hovered`/`EventCtx::is_hovered` reported (the ancestor-on-the-claim-path
+/// case). With `claims` set it claims hover itself, before or after routing.
 ///
-/// The child is an `Option` so a rebuild can *remove* it — the unmount case,
-/// where the claimant stops existing between hover passes.
+/// The child is an `Option` so a rebuild can remove it (the unmount case).
 struct HoverGroup {
     probe: Rc<HoverProbe>,
     claims: GroupClaim,
@@ -265,9 +253,8 @@ impl View<()> for HoverPairView {
         }
     }
     fn rebuild(&self, p: &Self, e: &mut HoverPair, _c: &mut BuildCtx<'_>) -> ChangeFlags {
-        // The only structural op this fixture performs: drop the nested
-        // container's child pod, the way a real reconciler drops a truncated
-        // or conditionally-removed child.
+        // The only structural op: drop the nested container's child pod, as a
+        // reconciler drops a removed child.
         let removes_child = self.fixture.drop_claimant && !p.fixture.drop_claimant;
         if !removes_child {
             return ChangeFlags::NONE;
@@ -498,9 +485,8 @@ fn a_second_widgets_claim_clears_the_first_and_asks_for_a_repaint() {
         "the previous claimant lost its link when the new one recorded"
     );
 
-    // Both widgets need a repaint, and a repaint is global — one request
-    // covers them. The *losing* side is what the root itself must guarantee:
-    // moving onto a leaf that claims nothing still repaints.
+    // Both widgets need a repaint and a repaint is global, so one request covers
+    // them; moving onto a leaf that claims nothing still repaints.
     let outcome = h.dispatch(PointerPhase::Move, 50.0, 200.0);
     assert!(
         !h.root.is_hover_active(),
@@ -551,9 +537,8 @@ fn a_captured_move_cannot_claim_hover() {
 
 #[test]
 fn a_down_up_or_cancel_ends_the_hover() {
-    // Every pointer phase other than an uncaptured `Move` ends the link. `Up`
-    // is in here for touch: a lifted finger sends no further move, so a tint
-    // claimed during an uncaptured touch drag would otherwise stand for good.
+    // Every phase other than an uncaptured `Move` ends the link; `Up` is here for
+    // touch, where a lifted finger sends no further move.
     for ending in [PointerPhase::Down, PointerPhase::Up, PointerPhase::Cancel] {
         let mut h = HoverHarness::new(false);
         h.move_over(Leaf::Top);
@@ -631,11 +616,8 @@ fn a_container_on_the_claim_path_reads_hovered_and_a_sibling_does_not() {
 
 #[test]
 fn an_ancestor_claiming_after_routing_loses_to_its_child_and_still_reads_hovered() {
-    // A container that wants hover chrome of its own claims after routing the
-    // move into its child. Only one claim per pass is recorded and the first one
-    // recorded wins, so the child's claim is the one that lands; the container's
-    // own late call is a silent no-op, and it reads hovered through the stamped
-    // path anyway — which is what makes this ordering correct in every case.
+    // Claiming after routing: the child's claim lands first and the container's late
+    // call is a no-op, yet it reads hovered through the stamped path.
     let mut h = HoverHarness::nested_group_claiming(GroupClaim::AfterRouting);
     let gain = h.move_over(Leaf::Top);
     h.paint();
@@ -664,12 +646,8 @@ fn an_ancestor_claiming_after_routing_loses_to_its_child_and_still_reads_hovered
 
 #[test]
 fn an_ancestor_claiming_before_routing_starves_its_subtree() {
-    // The negative control for the ordering rule above, pinning the trap it
-    // exists to prevent: a container that claims *before* forwarding is recorded
-    // first, which closes the pass to every descendant. The child under the
-    // pointer can never read hovered, so its hover chrome never appears — and
-    // because its latched flag is corrected back to `false` at paint time, it
-    // flips and asks for a frame again on every single move.
+    // Negative control: claiming before forwarding closes the pass to descendants, so
+    // the child never reads hovered and flips and asks for a frame on every move.
     let mut h = HoverHarness::nested_group_claiming(GroupClaim::BeforeRouting);
     h.move_over(Leaf::Top);
     h.paint();
@@ -697,9 +675,8 @@ fn an_ancestor_claiming_before_routing_starves_its_subtree() {
 #[test]
 fn hover_gain_is_repainted_by_the_consumers_own_flag() {
     let mut h = HoverHarness::new(false);
-    // Entering a widget: the root manufactures nothing here (its mirror went
-    // `false` → `true`, and it cannot know which widget cares), so the frame
-    // comes from the claimant's own change-gated request.
+    // Entering a widget: the root manufactures nothing; the frame comes from the
+    // claimant's own change-gated request.
     let gain = h.move_over(Leaf::Top);
     assert!(gain.needs_redraw, "hover gain repaints");
     assert_eq!(h.painted(), (true, false));
@@ -709,9 +686,8 @@ fn hover_gain_is_repainted_by_the_consumers_own_flag() {
     let settled = h.dispatch(PointerPhase::Move, 60.0, 20.0);
     assert!(!settled.needs_redraw, "an unchanged flag asks for nothing");
 
-    // A handoff repaints both sides at once: the arriving leaf's flag changed
-    // (it asks), and because a repaint is global that same frame is what lets
-    // the departing leaf drop its chrome from the authoritative paint read.
+    // A handoff repaints both sides in one frame: the arriving leaf asks, and a
+    // repaint is global, so the departing leaf drops its chrome.
     let handoff = h.move_over(Leaf::Bottom);
     assert!(handoff.needs_redraw, "a claimant handoff repaints");
     assert_eq!(
@@ -723,11 +699,8 @@ fn hover_gain_is_repainted_by_the_consumers_own_flag() {
 
 #[test]
 fn a_claimant_without_its_own_flag_gets_only_the_loss_frame() {
-    // The negative control for the contract above: leaves that claim hover but
-    // keep no flag of their own. Gain and handoff are invisible to the root
-    // (its hover mirror is identity-free — `false` → `true` and `true` →
-    // `true`), so nothing repaints for them, which is exactly why the
-    // consumer's latched flag is normative rather than an optimization.
+    // Negative control: leaves that claim hover but keep no flag. The root's mirror is
+    // identity-free, so gain and handoff repaint nothing; hence the latch is normative.
     let mut h = HoverHarness::without_consumer_flag();
     let gain = h.move_over(Leaf::Top);
     assert!(h.root.is_hover_active());
@@ -745,9 +718,8 @@ fn a_claimant_without_its_own_flag_gets_only_the_loss_frame() {
 
 #[test]
 fn a_rebuild_that_removes_the_claimant_ends_the_hover() {
-    // The one severance the epoch cannot strand: the claimant is dropped by a
-    // view diff, so it will never see the `Move` that would have re-derived
-    // the link. Its pod reports the drop and `rebuild` ends the hover.
+    // The claimant is dropped by a view diff and will never see the `Move` that
+    // would re-derive the link; its pod reports the drop and `rebuild` ends the hover.
     let mut h = HoverHarness::nested_group_claiming(GroupClaim::AfterRouting);
     h.move_over(Leaf::Top);
     h.paint();
@@ -769,9 +741,8 @@ fn a_rebuild_that_removes_the_claimant_ends_the_hover() {
          reconciler that dropped the claimant reported"
     );
 
-    // The survivor is the ancestor that was on the claim path: its own stamp
-    // still names the epoch the claim recorded, so nothing but the epoch
-    // advance keeps it from painting hover chrome for a child that is gone.
+    // The surviving ancestor's stamp still names the claim epoch; only the epoch
+    // advance stops it painting hover chrome for a child that is gone.
     h.paint();
     assert!(
         !h.group.painted_hovered.get(),
@@ -782,10 +753,8 @@ fn a_rebuild_that_removes_the_claimant_ends_the_hover() {
         "and the sibling never had it"
     );
 
-    // And the pipeline is not wedged: the next move over the same spot claims
-    // cleanly, now for the container itself. (No frame is manufactured for
-    // that gain — this container keeps no latched flag of its own, which is
-    // the documented consumer-side half of the contract, not a pipeline job.)
+    // The pipeline is not wedged: the next move claims cleanly, now for the container
+    // (no frame is manufactured; this container keeps no latched flag).
     h.move_over(Leaf::Top);
     assert!(h.root.is_hover_active(), "the next move re-claims");
     h.paint();
@@ -797,12 +766,8 @@ fn a_rebuild_that_removes_the_claimant_ends_the_hover() {
 
 #[test]
 fn a_silent_reconcilers_removal_still_carries_its_own_repaint() {
-    // The reason the release flags `PAINT` itself rather than trusting the
-    // diff to have reported one. The destructor route deliberately reaches
-    // containers this workspace never sees, and such a container can drop the
-    // claimant while reporting nothing — leaving the hover correctly ended but
-    // the frame that shows it unrequested, on a pointer the user has stopped
-    // moving.
+    // Why the release flags `PAINT` itself: a container outside this workspace can
+    // drop the claimant while reporting nothing, leaving the ended hover unrequested.
     let mut h = HoverHarness::nested_group_with_silent_reconciler();
     h.move_over(Leaf::Top);
     assert!(h.root.is_hover_active());
@@ -818,10 +783,8 @@ fn a_silent_reconcilers_removal_still_carries_its_own_repaint() {
 
 #[test]
 fn a_rebuild_that_keeps_the_claimant_leaves_the_hover_standing() {
-    // The negative control for the release above, and the reason the mark is
-    // gated on the *live* epoch rather than on "some pod with a stamp died":
-    // an ordinary rebuild — including one that drops pods carrying stale
-    // stamps — must not touch a link the pointer still rests on.
+    // Negative control: the mark is gated on the live epoch, so an ordinary rebuild
+    // dropping pods with stale stamps must not touch a link the pointer rests on.
     let mut h = HoverHarness::nested_group_claiming(GroupClaim::AfterRouting);
     // Hover the top leaf, then hand the link to the sibling. The top pod chain
     // keeps its (now stale) stamp, which is what the next rebuild drops.
@@ -843,11 +806,8 @@ fn a_rebuild_that_keeps_the_claimant_leaves_the_hover_standing() {
 
 #[test]
 fn another_roots_dying_claimant_cannot_end_this_roots_hover() {
-    // Two roots on one thread. Each has run exactly one hover pass, so their
-    // epoch counters hold the identical integer — the collision the root
-    // identity exists to break. Without it, the first root's pods dying (its
-    // window closing, a page tearing down) raise a mark the second root's
-    // next rebuild drains, ending a hover the pointer is still resting on.
+    // Two roots on one thread, each after one hover pass, hold the same epoch
+    // integer; root identity keeps one root's dying pods from ending the other's hover.
     let mut first = HoverHarness::nested_group_claiming(GroupClaim::AfterRouting);
     let mut second = HoverHarness::nested_group_claiming(GroupClaim::AfterRouting);
     first.move_over(Leaf::Top);

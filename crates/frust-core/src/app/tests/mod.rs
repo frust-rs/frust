@@ -1,3 +1,5 @@
+//! Fixtures shared by more than one `RenderRoot` test family (overlay, IME and focus
+//! harnesses), plus the declarations of the family modules.
 mod clipboard;
 /// The root half of the multi-contact contract (`InputEvent::PointerContact`):
 /// how a contact's id, the claimant latch and the `capture_contacts` opt-in
@@ -220,13 +222,9 @@ pub(super) struct OverlayLog {
 
 pub(super) type Log = std::rc::Rc<std::cell::RefCell<OverlayLog>>;
 
-/// The leaf inside a floated pod: paints its label at the pod's absolute
-/// origin and records what reaches it.
-///
-/// Optionally an editable — it claims focus on a `Down` of its own and
-/// republishes an IME surface on every paint. The publish is deliberately
-/// ungated: a pod describing a session it holds no focus link for is
-/// precisely what the root has to answer for.
+/// The leaf inside a floated pod: paints its label at the pod's absolute origin and
+/// records what reaches it. Optionally an editable that claims focus on `Down` and
+/// republishes an IME surface on every paint, deliberately ungated.
 pub(super) struct OverlayContentWidget {
     label: &'static str,
     log: Log,
@@ -417,13 +415,9 @@ impl crate::widget::Widget for OverlayOwnerWidget {
     }
 }
 
-/// The main-tree sibling: painted AFTER the owner, claims focus on a `Down`
-/// inside it, and records what it sees.
-///
-/// It stands in for a secure text field: the surface it publishes carries
-/// [`ImeContentType::Password`], and it republishes that surface on every
-/// paint for as long as the pass seeds it focused — the shipped field's
-/// republish-and-self-correct shape, in miniature.
+/// The main-tree sibling: painted AFTER the owner, claims focus on a `Down` inside
+/// it, and records what it sees. It stands in for a secure text field, republishing
+/// an [`ImeContentType::Password`] surface on every paint while seeded focused.
 pub(super) struct SiblingLeafWidget {
     log: Log,
     /// The selection-toolbar request to publish each paint, if any.
@@ -470,10 +464,8 @@ impl crate::widget::Widget for SiblingLeafWidget {
                 ctx.publish_ime_state(Self::surface());
                 EventResult::Handled
             }
-            // A scroll is hit-tested like a press but travels the root's
-            // keyboard-class focus arm (`Scroll | Key | Ime | EditCommand`),
-            // so claiming focus here is how the fixture expresses a focus
-            // move that is not a pointer `Down`.
+            // A scroll is hit-tested like a press but travels the keyboard-class
+            // focus arm, so claiming here is a focus move that is not a `Down`.
             InputEvent::Scroll { .. } => {
                 ctx.request_focus();
                 ctx.publish_ime_state(Self::surface());
@@ -529,11 +521,8 @@ impl crate::widget::Widget for OverlayRootWidget {
             }
         }
         if event.is_focus_routed() {
-            // `holds_live_focus`, not `is_focused` — the same read
-            // `frust-widgets`' `route_event` makes, and the reason this
-            // fixture can stand in for it: both children can carry a
-            // recorded link at once, and only one of them can carry the live
-            // session's.
+            // `holds_live_focus`, not `is_focused` (as `frust-widgets`' `route_event`):
+            // both children can carry a recorded link, only one the live session's.
             if self.sibling.holds_live_focus() {
                 return self.sibling.event_child(ctx, event);
             }

@@ -1,3 +1,5 @@
+//! Scale (pinch) event routing tests for RenderRoot.
+
 use super::*;
 use crate::event::{ScaleEvent, ScalePhase};
 
@@ -142,10 +144,8 @@ fn scale_hit_tests_by_focal_point_and_translates_through_a_container() {
     );
     assert!(!outside.handled);
 
-    // Window (30, 40): inside the container, local (20, 20) once the
-    // Offset container's (10, 20) origin is subtracted by
-    // `InputEvent::translated` — squarely inside both overlapping 40x40
-    // leaves, so the topmost one (`top`) is the one that sees it.
+    // Window (30, 40) is local (20, 20) after the Offset origin is subtracted: inside
+    // both overlapping leaves, so the topmost (`top`) sees it.
     let inside = root.event(&mut log, &scale(ScalePhase::Update, 1.2, 30.0, 40.0));
     assert!(inside.handled);
     assert_eq!(log.seen.len(), 1, "the topmost leaf alone handled it");
@@ -162,10 +162,8 @@ fn scale_hit_tests_by_focal_point_and_translates_through_a_container() {
 
 #[test]
 fn an_ignored_scale_bubbles_to_the_next_hit_widget() {
-    // `top` ignores every `Scale` it sees; `bottom`, at the identical
-    // bounds, still handles it — proving the hit test falls through to
-    // the next topmost-first candidate instead of stopping (and
-    // swallowing the event) at the first hit.
+    // `top` ignores every `Scale`; `bottom` at identical bounds still handles it, so
+    // the hit test falls through instead of swallowing at the first hit.
     let (mut root, mut log) = root_with(false);
     let outcome = root.event(&mut log, &scale(ScalePhase::Begin, 0.9, 30.0, 40.0));
     assert!(outcome.handled, "the bottom leaf still handled it");

@@ -1,3 +1,5 @@
+//! File-drop phase routing tests for RenderRoot.
+
 use super::*;
 
 /// Every `FileDrop` phase a leaf saw, in order, and whether the leaf

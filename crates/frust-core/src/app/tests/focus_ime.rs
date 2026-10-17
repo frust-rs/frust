@@ -1,3 +1,5 @@
+//! Focus, IME surface and focus-session identity tests for RenderRoot.
+
 use super::*;
 use crate::event::EditingState;
 
@@ -92,23 +94,11 @@ fn focus_and_ime_state_surface_and_clear_on_blur() {
     assert!(root.ime_state().is_none());
 }
 
-// --- Session release: the focus session must die with its owner -----------
+// --- Session release: the focus session must die with its owner ---
 //
-// Two routes end a session without any user input reaching the root:
-//
-//  (a) a widget publishes an INACTIVE IME surface (the navigator's post-pop
-//      `cleared_ime_state`, `PatternSwitcher`'s equivalent, a `TextInput`
-//      turned disabled under a live focus), and
-//  (b) a reconciler tears the focused pod out of the tree (any generic
-//      unmount — `frust-widgets`' `cancel_active_children`/`teardown_child`),
-//      which raises `mark_focus_orphaned` because it has no `RenderRoot` to
-//      reach from a `BuildCtx` pass.
-//
-// Both must perform the SAME full release a blur does. Leaving either half
-// standing — `focus_active` true, or `ime_state` parked at `Some(inactive)` —
-// is what stranded a popped screen: `is_focus_active()` kept lying, the
-// shell's IME poll kept seeing a surface, and the next real focus
-// interaction started from a corrupt baseline.
+// A session can end without input reaching the root: a widget publishes an INACTIVE
+// IME surface, or a reconciler unmounts the focused pod (raising `mark_focus_orphaned`).
+// Both must perform the same full release a blur does.
 
 /// The navigator's cleared surface, spelled out here so the fixture below
 /// publishes exactly the shape `nav::navigator::cleared_ime_state` does
@@ -221,10 +211,8 @@ fn inactive_paint_publish_releases_the_whole_session() {
         "one release is exactly one edge"
     );
 
-    // The widget keeps publishing the cleared surface every frame (a real
-    // one-shot flag would not, but an idle screen must survive the worst
-    // case): the paint take's `focus_active` guard makes each a no-op, so
-    // the released session neither resurrects nor spins the edge.
+    // The widget keeps publishing the cleared surface every frame; the paint take's
+    // `focus_active` guard makes each a no-op, so the session neither resurrects nor spins.
     let released = root.focus_ime_generation();
     for _ in 0..30 {
         root.paint(&mut scene, FrameTime::ZERO);
@@ -267,9 +255,8 @@ impl View<ClickState> for UnmountView {
 
 #[test]
 fn generic_unmount_orphan_releases_the_whole_session() {
-    // (b) The child-list-diff shape: no publish, no event — the focused
-    // widget simply stops existing. Nothing self-corrects this on an idle
-    // screen, which is why the reconciler's mark is drained here.
+    // (b) The child-list-diff shape: no publish, no event; the focused widget
+    // just stops existing, so only the reconciler's mark can release it.
     let _ = crate::event::take_focus_orphaned();
     let orphan = Rc::new(Cell::new(false));
     let mut build = {
@@ -316,15 +303,10 @@ fn generic_unmount_orphan_releases_the_whole_session() {
     assert!(!root.is_focus_active());
 }
 
-// --- The focus/IME EDGE generation ---------------------------------------
+// --- The focus/IME EDGE generation ---
 //
-// `focus_ime_generation` is the shell-facing edge behind the mobile frame
-// gate's `FrameInputs::focus_or_ime_changed`: a shell caches the value and
-// runs a frame when it moves. Two properties make that safe, and both are
-// pinned below: EVERY real transition moves it (or a focus change strands
-// unpainted), and NO same-value write moves it (or a focused screen forces
-// a frame every vsync — the level-input behavior this replaced, measured at
-// 62–120 fps on a static focused screen).
+// `focus_ime_generation` must move on EVERY real transition and on NO same-value write,
+// or a focused screen forces a frame every vsync.
 
 /// A widget that focuses on `Down`, releases focus on any `Key`, and — the
 /// point of the fixture — re-publishes an IME surface from its **paint**
@@ -428,9 +410,8 @@ fn focus_ime_generation_moves_on_every_pointer_transition_only() {
         "focus + IME publish must move the generation"
     );
 
-    // The SAME tap again, on the already-focused widget publishing the
-    // identical surface: no state moved, so no edge. This is the case that
-    // decides whether a live text field forces a frame per vsync.
+    // The same tap on the already-focused widget publishing an identical surface:
+    // no state moved, so no edge.
     root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
     assert_eq!(
         root.focus_ime_generation(),
@@ -455,12 +436,8 @@ fn focus_ime_generation_moves_on_every_pointer_transition_only() {
 
 #[test]
 fn focus_ime_generation_ignores_an_unchanged_paint_republish() {
-    // The paint pass re-publishes the focused widget's IME surface on EVERY
-    // frame (that is how a rebuild-applied controlled change refreshes the
-    // shell-facing state). If that unconditional write moved the
-    // generation, the frame gate's edge would fire every single frame for
-    // the whole life of a focus session — exactly the per-vsync forcing the
-    // edge exists to remove.
+    // Paint re-publishes the IME surface every frame; if that write moved the
+    // generation, the edge would fire per frame for the whole focus session.
     let published = Rc::new(RefCell::new("abc".to_string()));
     let mut build = {
         let published = published.clone();
@@ -542,9 +519,8 @@ fn focus_ime_generation_moves_on_a_focus_release_only_once() {
         "a focus release must move the generation"
     );
 
-    // A second release against an already-released root: no edge. (The
-    // paint pass republishes nothing now — the paint-take arm only accepts
-    // a publish while focus is active.)
+    // A second release against an already-released root: no edge (paint only
+    // accepts a publish while focus is active).
     root.event(&mut state, &key_event());
     root.paint(&mut scene, FrameTime::ZERO);
     assert_eq!(
@@ -554,19 +530,11 @@ fn focus_ime_generation_moves_on_a_focus_release_only_once() {
     );
 }
 
-// --- The focus session's IDENTITY, beside the edge generation ------------
+// --- The focus session's IDENTITY, beside the edge generation ---
 //
-// `focus_epoch` answers a question `focus_ime_generation` cannot: "is this
-// still the session that asked?". A caller that binds a slow, asynchronous
-// answer to the field that asked for it needs an identity, and a counter
-// over the published surface's *value* is not one — two fields publish
-// equal surfaces, and a field is free to take focus and publish nothing at
-// all.
-//
-// Each test below asserts what BOTH counters did at the same moment. The
-// `focus_ime_generation` assertions are the point rather than decoration:
-// they are what states, in a form the compiler checks, that the edge
-// generation stands still exactly where the identity moves.
+// `focus_epoch` answers "is this still the session that asked?", which a counter over
+// the published surface's value cannot: two fields publish equal surfaces, and a field
+// may take focus and publish nothing. Each test asserts what both counters did.
 
 /// The text both fields publish from a press, so neither can be told from
 /// the other by the published value alone.
@@ -574,33 +542,18 @@ const SHARED_FIELD_TEXT: &str = "shared";
 
 /// One field of the two-field fixture.
 ///
-/// Takes the focus session on any press inside itself; publishes an IME
-/// surface on that press only when built to; and treats an `Ime` event as an
-/// edit — the text changes and the surface is republished, but nothing
-/// re-claims a session the field already holds.
-///
-/// `publishes: false` is not a contrivance: the baseline text input claims
-/// focus and republishes nothing for a press that lands inside text it
-/// already had selected (such a press moves no caret and collapses no
-/// selection), and any app-authored focusable that publishes no IME surface
-/// of its own behaves the same way.
-///
-/// A press publishes the *shared* surface, so the two fields are
-/// indistinguishable to anything reading the published value — that is the
-/// case under test. An edit publishes the field's own `name` instead, which
-/// is how a test proves which field a focus-routed event actually reached.
+/// A press takes the focus session and, only if `publishes`, publishes the shared
+/// surface (a text input pressed inside already-selected text claims focus and
+/// publishes nothing). An `Ime` edit republishes the field's own `name`, which
+/// proves which field a focus-routed event reached.
 struct SessionField {
     name: &'static str,
     publishes: bool,
 }
 
 impl SessionField {
-    /// The surface a field publishes. Deliberately carries nothing that
-    /// tells one field from another: `ImeState` is
-    /// `{active, editing, caret, content_type}` and names no widget, so two
-    /// fields holding the same text and caret publish equal values — which
-    /// is the ordinary shape of two empty fields, or two overlapping ones
-    /// mid-transition.
+    /// The surface a field publishes; it carries nothing that tells fields apart, so
+    /// two fields with the same text and caret publish equal values.
     fn surface(text: &str) -> ImeState {
         ImeState {
             active: true,
@@ -747,10 +700,8 @@ fn focus_epoch_moves_when_focus_crosses_two_fields_publishing_alike() {
         Some(SessionField::surface(SHARED_FIELD_TEXT))
     );
 
-    // Press the bottom field. Focus really does move — and nothing
-    // observable about the published surface moves with it: claiming while
-    // some field is already focused writes `true` over `true`, and the
-    // surface the second field publishes compares equal to the first's.
+    // Press the bottom field: focus moves, but nothing observable about the
+    // published surface does (it compares equal to the first field's).
     root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 60.0));
     assert!(root.is_focus_active());
     assert_eq!(
@@ -781,11 +732,8 @@ fn focus_epoch_moves_when_the_field_taking_focus_publishes_nothing() {
     let first_session = root.focus_epoch();
     let steady_edge = root.focus_ime_generation();
 
-    // Press the bottom field, which takes the session and publishes no
-    // surface of its own. A publish-nothing dispatch leaves the standing
-    // surface standing, so what the shell still sees describes the field
-    // the user just left — for as long as this session lasts, not merely
-    // until the next frame.
+    // The bottom field takes the session and publishes nothing, so the shell still
+    // sees the surface of the field the user left.
     root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 60.0));
     assert!(root.is_focus_active());
     assert_eq!(
@@ -817,10 +765,8 @@ fn focus_epoch_moves_when_the_field_taking_focus_publishes_nothing() {
 
 #[test]
 fn focus_epoch_ignores_an_edit_inside_one_session() {
-    // The converse direction, and the reason the two counters are kept
-    // apart rather than merged: a caller holding an identity can let a
-    // harmless edit ride, where a caller comparing the published value has
-    // to treat every keystroke as a reason to give up.
+    // The converse, and why the counters stay apart: an identity holder can let a
+    // harmless edit ride, while a value comparer must give up on every keystroke.
     let (mut root, mut state) = two_fields_focused(true);
     let session = root.focus_epoch();
     let before_edit = root.focus_ime_generation();

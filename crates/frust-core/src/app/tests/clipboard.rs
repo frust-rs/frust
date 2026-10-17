@@ -1,14 +1,9 @@
+//! Clipboard write and paste-request channel tests for RenderRoot.
+
 use super::*;
 
-// --- Clipboard: the per-pass write / paste-request channels ---------------
-//
-// The cursor's two siblings, resolved by the same bracket but committed on
-// every pass rather than on a pointer `Move` alone, and drained one-shot
-// rather than read as a standing level. The fixture is the cursor pair's
-// shape with focus in place of hit testing, because a clipboard verb is
-// focus-routed: two stacked leaves, a container that can speak before or
-// after routing (the last-writer case) or ask for a paste of its own (the
-// two-channels-in-one-pass case).
+// Fixture: two stacked leaves under a container that can speak before or after
+// routing (last-writer case) or ask for a paste of its own (two channels, one pass).
 
 /// How the clipboard fixture's container speaks relative to its children.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -312,8 +307,8 @@ fn a_paste_answered_after_a_blur_reaches_nobody() {
     h.dispatch(&pointer(PointerPhase::Down, 50.0, 100.0));
     assert!(!h.root.is_focus_active(), "the tap blurred the field");
 
-    // The shell answers anyway — it never has to track who asked, because the
-    // answer is focus-routed and simply reaches no widget.
+    // The shell answers anyway; focus was released by the tap on empty chrome, so
+    // the focus-routed paste reaches no widget.
     h.dispatch(&InputEvent::EditCommand(EditCommand::Paste(
         "from the host".to_string(),
     )));

@@ -1,9 +1,9 @@
+//! Overlay portal routing, capture and focus-session tests for RenderRoot.
+
 use super::*;
 
-// ---------------------------------------------------------------------
-// Overlay portal: an owner that floats a pod, a sibling painted after it,
-// and a root that routes like any hand-written container.
-// ---------------------------------------------------------------------
+// Overlay portal: an owner that floats a pod, a sibling painted after it, and a root
+// that routes like any hand-written container.
 
 /// A rect well clear of the sibling (which sits at y >= 100).
 fn floating_rect() -> Rect {
@@ -247,9 +247,8 @@ fn a_capture_from_inside_a_surface_routes_the_next_move_by_the_capture_path() {
     );
     h.clear_log();
 
-    // Still INSIDE the surface's own rect — which is the case that
-    // discriminates: the pre-pass would happily hit-test this one and route it
-    // as another broadcast, and it must not, because the gesture is captured.
+    // Still INSIDE the surface's rect: the pre-pass would hit-test and route it as
+    // a broadcast, and must not, because the gesture is captured.
     h.dispatch(&pointer(PointerPhase::Move, 160.0, 45.0));
     assert!(
         h.owner_overlays().is_empty(),
@@ -309,9 +308,8 @@ fn a_capture_claimed_on_a_move_inside_a_surface_reaches_the_root() {
         "the root mirrors a claim the surface made mid-gesture"
     );
 
-    // Which is what ends it: the mirrored capture short-circuits the overlay
-    // pre-pass, so the `Up` routes down the capture path — outside the
-    // surface's own rect, where a hit test would never have delivered it.
+    // The mirrored capture short-circuits the overlay pre-pass, so the `Up` routes
+    // down the capture path, outside the surface's rect.
     h.dispatch(&pointer(PointerPhase::Up, 30.0, 120.0));
     assert!(
         !h.root.is_pointer_captured(),
@@ -319,13 +317,9 @@ fn a_capture_claimed_on_a_move_inside_a_surface_reaches_the_root() {
     );
 }
 
-/// The release side of the root's overlay capture mirror. The claim is
-/// mirrored on any phase, so the release has to be bounded on any phase too:
-/// an `Up` reaches a surface as an overlay event exactly when no capture was
-/// standing to divert it, and a claim made there has no gesture left to own.
-/// A latch left standing short-circuits the overlay pre-pass, which stops
-/// every floated surface taking input until some unrelated pointer release
-/// happens along.
+/// The release side of the capture mirror. The claim is mirrored on any phase, so
+/// the release is bounded on any phase too: a latch left standing short-circuits the
+/// overlay pre-pass and stops every floated surface taking input.
 #[test]
 fn a_capture_claimed_on_an_overlay_up_does_not_outlive_the_gesture() {
     let mut spec = SurfaceSpec::floating("popover", floating_rect());
@@ -396,10 +390,8 @@ fn a_pod_focus_claim_retires_the_branch_it_supersedes() {
     h.down(150.0, 30.0);
     assert!(h.root.is_focus_active(), "the claim is honoured");
 
-    // The claim stamped its own chain with a session identity nothing older
-    // carries, so the field's link stops counting on the very next pass —
-    // no convergence frame, and nothing had to visit the branch the session
-    // left in order to clear it.
+    // The claim stamped its chain with a newer session identity, so the old link stops
+    // counting on the next pass, with no convergence frame.
     h.frame();
     assert_eq!(
         h.branch_focus(),
@@ -427,16 +419,11 @@ fn a_pod_focus_claim_retires_the_branch_it_supersedes() {
     );
 }
 
-/// The return direction, which the test above never exercises: the session
-/// goes to a floated surface and the user then presses the field in the main
-/// tree again.
+/// The return direction: the session goes to a floated surface and the user then
+/// presses the main-tree field again.
 ///
-/// A press outside every floated rect is hit-tested through the containers
-/// like any other, so the claim it produces is the main tree's by
-/// construction — and the surface's own recorded link has to stop counting
-/// the moment that claim lands, or the tree is de-seeded for the rest of the
-/// pod's life and the secure surface the field publishes is thrown away
-/// every frame.
+/// That claim is the main tree's by construction, and the surface's recorded link
+/// must stop counting at once or the secure surface is thrown away every frame.
 #[test]
 fn a_hit_tested_claim_takes_the_session_back_from_a_floated_surface() {
     let mut spec = SurfaceSpec::floating("popover", floating_rect());

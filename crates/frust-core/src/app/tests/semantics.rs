@@ -1,11 +1,10 @@
+//! Semantics id stability and accessibility action routing tests for RenderRoot.
+
 use super::*;
 use accesskit::{Action, NodeId, Role};
 
-// --- Semantics: stable ids + accessibility action routing ---
-//
-// Fixtures: an accessibility-visible button (fire-on-up-inside, contributes a
-// `Role::Button` node) and a checkbox variant (`Role::CheckBox`), plus a
-// labelled leaf used to prove id stability survives a pod relocation.
+// Fixtures: an accessibility-visible button (`Role::Button`), a checkbox variant
+// (`Role::CheckBox`), and a labelled leaf proving id stability across pod relocation.
 
 /// A fire-on-up-inside button that also contributes a semantics node — the
 /// end-to-end target for `perform_accessibility_action(Click)`.
@@ -99,9 +98,8 @@ fn semantics_ids_are_stable_across_frames() {
 
 #[test]
 fn semantics_ids_survive_a_pod_relocation() {
-    // A keyed reorder relocates the whole `ChildPod` (preserving its cached
-    // semantics id); simulate that here by swapping two pods in place and
-    // asserting each labelled node keeps its id despite changing position.
+    // A keyed reorder relocates the whole `ChildPod` (keeping its cached id); swap two
+    // pods in place and assert each labelled node keeps its id.
     struct LabeledLeaf {
         label: &'static str,
     }
@@ -121,9 +119,8 @@ fn semantics_ids_survive_a_pod_relocation() {
         crate::widget::ChildPod::new(Box::new(LabeledLeaf { label: "B" })),
     ];
 
-    // Collect (label -> id) for a given pod order. `SemanticsCtx` is
-    // crate-private, so this drives the pods directly — the same allocation
-    // path `RenderRoot::semantics` uses.
+    // Collect label -> id for a pod order, driving the pods directly (`SemanticsCtx`
+    // is crate-private) through the allocation path `RenderRoot::semantics` uses.
     let collect = |pods: &[crate::widget::ChildPod]| {
         let mut ctx = SemanticsCtx::new(Size::new(100.0, 100.0), 2);
         for pod in pods {
@@ -210,9 +207,8 @@ fn perform_click_action_activates_a_button() {
 
 #[test]
 fn perform_click_action_toggles_a_checkbox() {
-    // A checkbox-shaped widget (`Role::CheckBox`) reached through the same
-    // synthetic-pointer path — proving Click drives any fire-on-up-inside
-    // control, not just buttons.
+    // A checkbox-shaped widget reached through the same synthetic-pointer path:
+    // Click drives any fire-on-up-inside control.
     struct CheckboxWidget;
     impl crate::widget::Widget for CheckboxWidget {
         fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
@@ -274,11 +270,8 @@ fn perform_click_action_toggles_a_checkbox() {
 
 #[test]
 fn perform_focus_action_claims_focus_and_clears_capture() {
-    // Two focus-claiming, fire-on-up-inside buttons in a container. A11y
-    // `Focus` on B must claim focus for B *and* release the capture the
-    // synthesized `Down` opened — the CRITICAL leak this regresses: without
-    // the trailing `Cancel`, B stayed captured and swallowed every later
-    // pointer event, so a tap on A never reached A.
+    // Two focus-claiming buttons: a11y `Focus` on B must claim focus AND release the
+    // capture the synthesized `Down` opened, or B swallows later events and A never gets a tap.
 
     #[derive(Default)]
     struct FocusState {

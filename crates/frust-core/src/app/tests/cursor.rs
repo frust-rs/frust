@@ -1,12 +1,9 @@
+//! Cursor request channel tests for RenderRoot.
+
 use super::*;
 
-// --- Cursor: the per-pass request channel ---------------------------------
-//
-// The cursor is hover's sibling and is deliberately not derived from it (the
-// root's hover mirror is identity-free), so it gets its own fixture: two
-// leaves that ask for different shapes, a container that can speak before or
-// after routing (the last-writer case), and a capture fast-path (the drag
-// case, where the shape must survive the pointer leaving the widget).
+// Fixture: two leaves asking for different shapes, a container that can speak before
+// or after routing (last-writer case), and a capture fast-path (the drag case).
 
 /// How the cursor fixture's container speaks relative to its children.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,9 +39,8 @@ impl crate::widget::Widget for CursorLeaf {
         match p.phase {
             PointerPhase::Move => {
                 if self.captured {
-                    // The captured pass belongs to this widget wherever the
-                    // pointer has gone — re-asking here is what keeps the drag
-                    // shape alive outside its own bounds.
+                    // Captured pass: re-asking keeps the drag shape alive outside
+                    // the widget's bounds.
                     if let Some(icon) = self.drag_icon {
                         ctx.set_cursor(icon);
                     }
@@ -221,9 +217,8 @@ fn a_move_resolves_the_requested_cursor_and_absence_resolves_default() {
     h.move_over(Leaf::Bottom);
     assert_eq!(h.cursor(), CursorIcon::Text);
 
-    // Moving off both: the next pass has no writer at all, and absence is the
-    // default rather than a stale value — the whole point of a stateless
-    // request.
+    // Moving off both: the next pass has no writer, and absence is the default,
+    // not a stale value.
     h.dispatch(PointerPhase::Move, 50.0, 200.0);
     assert_eq!(
         h.cursor(),
@@ -234,9 +229,8 @@ fn a_move_resolves_the_requested_cursor_and_absence_resolves_default() {
 
 #[test]
 fn a_cursor_change_does_not_ask_for_a_repaint() {
-    // Applying a cursor is a platform call the shell makes after the pass, with
-    // no frame involved; folding it into `needs_redraw` would repaint the whole
-    // tree on every hover move.
+    // Applying a cursor is a platform call after the pass with no frame involved;
+    // folding it into `needs_redraw` would repaint the tree on every hover move.
     let mut h = CursorHarness::new(ContainerCursor::Silent, false);
     let outcome = h.dispatch(PointerPhase::Move, 50.0, 15.0);
     assert_eq!(h.cursor(), CursorIcon::Pointer);
@@ -248,9 +242,8 @@ fn a_cursor_change_does_not_ask_for_a_repaint() {
 
 #[test]
 fn the_last_writer_on_the_routed_path_wins() {
-    // A container that asks before routing loses to its child: the child's
-    // handler runs later in the same pass, which is what makes a specific
-    // control override the generic surface behind it.
+    // A container asking before routing loses to its child, whose handler runs later
+    // in the same pass.
     let mut h = CursorHarness::new(ContainerCursor::BeforeRouting(CursorIcon::ColResize), false);
     h.move_over(Leaf::Top);
     assert_eq!(
@@ -312,9 +305,8 @@ fn a_captured_drag_keeps_the_capturing_widgets_cursor() {
     assert!(h.root.is_pointer_captured());
     assert_eq!(h.cursor(), CursorIcon::Pointer);
 
-    // Drag inside, then well outside its own bounds and over the sibling: every
-    // one of these moves routes to the captured leaf alone, so its drag shape is
-    // the only request in the pass — the sibling's `Text` never gets a say.
+    // Every move routes to the captured leaf alone, so its drag shape is the only
+    // request in the pass; the sibling's `Text` never gets a say.
     h.dispatch(PointerPhase::Move, 50.0, 16.0);
     assert_eq!(h.cursor(), CursorIcon::Grabbing);
     h.dispatch(PointerPhase::Move, 50.0, 45.0);

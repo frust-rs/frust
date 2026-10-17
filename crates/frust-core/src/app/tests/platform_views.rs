@@ -1,3 +1,5 @@
+//! Platform-view frame and z-shield channel tests for RenderRoot.
+
 use super::*;
 
 /// A leaf widget that publishes a fixed [`PlatformViewFrame`] — and reports
@@ -130,17 +132,15 @@ fn platform_view_frames_arrive_in_order_and_clear_on_empty_pass() {
     let mut scene = RecordingScene::default();
     root.paint(&mut scene, FrameTime::ZERO);
 
-    // Two slots publishing in one pass both arrive, in paint order — the
-    // regression test for the overwrite hazard (an Option-based `ime_state`
-    // shape here would leave only the second slot's frame).
+    // Two slots publishing in one pass both arrive, in paint order (an Option-based
+    // shape would keep only the second).
     let frames = root.platform_view_frames();
     assert_eq!(frames.len(), 2);
     assert_eq!(frames[0].slot_id, 1);
     assert_eq!(frames[1].slot_id, 2);
 
-    // Next pass: neither slot publishes (simulates both going away/culled).
-    // The collection is REPLACED, so the previous pass's frames must not
-    // survive as stale entries.
+    // Next pass neither slot publishes: the collection is REPLACED, so earlier
+    // frames must not survive as stale entries.
     state.publish_a = false;
     state.publish_b = false;
     root.rebuild(&mut platform_view_logic, &mut state);
@@ -154,11 +154,8 @@ fn platform_view_frames_arrive_in_order_and_clear_on_empty_pass() {
 
 #[test]
 fn input_shields_arrive_in_order_and_clear_on_empty_pass() {
-    // The shield channel's half of the contract above:
-    // two shields reported in one pass both survive (the `Vec`
-    // extend, not an `Option` overwrite), and a pass that reports none
-    // replaces the collection rather than merging — a stale shield must
-    // never keep stealing input from an interactive slot.
+    // Shield channel: two shields in one pass both survive, and a pass reporting none
+    // replaces the collection, so a stale shield never steals input.
     let mut root: RenderRoot<PvState, PlatformViewRootView> = RenderRoot::new();
     let mut state = PvState {
         publish_a: true,
@@ -189,10 +186,8 @@ fn input_shields_arrive_in_order_and_clear_on_empty_pass() {
 
 #[test]
 fn retired_platform_views_drain_exactly_once() {
-    // The prompt-teardown channel: a reported slot
-    // id is handed to the shell once and then gone, mirroring
-    // `take_change_flags`. Serialized against the other test touching the
-    // process-wide list (see `RETIRE_TEST_LOCK`).
+    // Prompt teardown: a reported slot id is handed to the shell once, like
+    // `take_change_flags`; serialized via `RETIRE_TEST_LOCK` (process-wide list).
     let _guard = RETIRE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut root: RenderRoot<PvState, PlatformViewRootView> = RenderRoot::new();
     let _ = root.take_retired_platform_views(); // clear anything a sibling left
@@ -208,9 +203,8 @@ fn retired_platform_views_drain_exactly_once() {
 
 #[test]
 fn retired_platform_views_are_capped_dropping_the_oldest() {
-    // A shell that never drains (desktop: no native compositor) must not
-    // grow this list forever; past the cap the OLDEST id is dropped and the
-    // differ's missing-streak backstop covers it.
+    // A shell that never drains must not grow the list forever: past the cap the
+    // OLDEST id is dropped.
     let _guard = RETIRE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut root: RenderRoot<PvState, PlatformViewRootView> = RenderRoot::new();
     let _ = root.take_retired_platform_views();

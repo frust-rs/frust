@@ -1,3 +1,5 @@
+//! RenderRoot lifecycle tests: build, layout, paint, change flags, theme and insets.
+
 use super::*;
 use crate::insets::{EdgeInsets, WindowInsets};
 
@@ -205,9 +207,8 @@ fn paint_folds_request_layout_into_pending_change_flags() {
         label: "x".to_string(),
     };
 
-    // A root calling `request_layout` in paint surfaces it on the outcome AND
-    // folds LAYOUT into `pending`, so the NEXT frame's `take_change_flags`
-    // reports `needs_layout()`.
+    // `request_layout` in paint surfaces on the outcome AND folds LAYOUT into
+    // `pending`, so the next `take_change_flags` reports `needs_layout()`.
     let mut anim: RenderRoot<AppState, LayoutFrameView> = RenderRoot::new();
     anim.rebuild(&mut |_s: &mut AppState| LayoutFrameView, &mut state);
     anim.layout(Size::new(100.0, 100.0));
@@ -234,11 +235,8 @@ fn paint_request_frame_only_folds_layout_into_pending() {
         label: "x".to_string(),
     };
 
-    // A paint-only animation (request_frame, no request_layout) dirties its
-    // path conservatively, so it folds LAYOUT into pending — a shell gating
-    // its layout pass on the flags must run the (mostly skipped) pass that
-    // reaches the marked pods. It does not report `needs_layout` on the
-    // outcome: that stays the `request_layout` channel.
+    // A paint-only animation dirties its path conservatively, folding LAYOUT into
+    // pending, but does not report `needs_layout` on the outcome.
     let mut anim: RenderRoot<AppState, FrameView> = RenderRoot::new();
     anim.rebuild(&mut |_s: &mut AppState| FrameView, &mut state);
     anim.layout(Size::new(100.0, 100.0));
@@ -360,9 +358,8 @@ impl View<AppState> for SlowPacedFrameView {
 
 #[test]
 fn paint_surfaces_the_requested_paced_interval_on_outcome() {
-    // The end-to-end core half of the per-request pacing seam: a widget's
-    // `request_frame_paced_at` reaches the shell on `PaintOutcome`, which is
-    // what the mobile gate latches into `FramePacing`.
+    // End-to-end core half of per-request pacing: `request_frame_paced_at` reaches
+    // the shell on `PaintOutcome`.
     let mut state = AppState {
         label: "x".to_string(),
     };
@@ -656,9 +653,8 @@ fn take_change_flags_drains_accumulated_dirtiness() {
 
 #[test]
 fn has_pending_change_flags_peeks_without_draining() {
-    // The frame-gate peek: observe pending dirtiness without
-    // clearing it, so a skipped frame preserves the flags for the next
-    // frame that actually runs.
+    // The frame-gate peek observes pending dirtiness without clearing it, so a
+    // skipped frame preserves the flags.
     let mut root: RenderRoot<AppState, MockTextView> = RenderRoot::new();
     assert!(
         !root.has_pending_change_flags(),
@@ -679,9 +675,8 @@ fn has_pending_change_flags_peeks_without_draining() {
 
 #[test]
 fn set_theme_marks_layout_and_paint_pending() {
-    // `set_theme` alone (no rebuild) must dirty layout/paint so a shell
-    // gating on `take_change_flags` doesn't skip re-resolving theme-baked
-    // widget state (e.g. Text's themed glyph color) on a bare theme swap.
+    // `set_theme` alone (no rebuild) must dirty layout/paint so a gated shell does
+    // not skip re-resolving theme-baked widget state.
     let mut root: RenderRoot<AppState, MockTextView> = RenderRoot::new();
     root.set_theme(Box::new(TestTheme { accent: 1 }));
     let flags = root.take_change_flags();
@@ -781,9 +776,8 @@ fn no_insets_yields_zero_in_layout_and_paint() {
 
 #[test]
 fn set_insets_marks_layout_and_paint_pending() {
-    // Mirrors `set_theme_marks_layout_and_paint_pending`: a bare inset push
-    // (no rebuild) must dirty layout/paint so a shell gating on
-    // `take_change_flags` relayouts a `SafeArea` when the insets move.
+    // Mirrors `set_theme_marks_layout_and_paint_pending`: a bare inset push must
+    // dirty layout/paint so a gated shell relayouts a `SafeArea`.
     let mut root: RenderRoot<AppState, MockTextView> = RenderRoot::new();
     root.set_insets(WindowInsets::new(
         EdgeInsets::new(0.0, 24.0, 0.0, 0.0),
@@ -798,9 +792,8 @@ fn set_insets_marks_layout_and_paint_pending() {
 
 #[test]
 fn set_insets_no_op_when_unchanged_marks_nothing() {
-    // The `PartialEq` no-op guard: re-pushing the current insets dirties
-    // nothing, so a shell that forwards the platform insets every frame
-    // never forces a needless relayout.
+    // The `PartialEq` no-op guard: re-pushing the current insets dirties nothing, so
+    // forwarding platform insets every frame never forces a relayout.
     let mut root: RenderRoot<AppState, MockTextView> = RenderRoot::new();
     let insets = WindowInsets::new(EdgeInsets::new(0.0, 24.0, 0.0, 34.0), EdgeInsets::ZERO);
     root.set_insets(insets);
@@ -917,10 +910,8 @@ fn unset_presented_frames_yields_none_in_paint() {
 
 #[test]
 fn set_presented_frames_marks_no_change_flags() {
-    // Unlike `set_theme`/`set_insets`, a presented-count push is a paint-only
-    // observation — it must dirty NOTHING, so a monotonically ticking counter
-    // never forces a relayout or (on mobile) keeps the frame gate perpetually
-    // "Run" (the menu-idle behavior depends on this).
+    // A presented-count push is a paint-only observation and must dirty NOTHING, or
+    // a ticking counter would force relayouts and keep the mobile frame gate on "Run".
     let mut root: RenderRoot<AppState, MockTextView> = RenderRoot::new();
     let gen_before = root.semantics_generation();
     root.set_presented_frames(1);
@@ -962,9 +953,8 @@ fn orientation_from_size_is_landscape_when_wider_than_tall() {
 
 #[test]
 fn orientation_from_size_square_reads_as_portrait() {
-    // Height >= width is the derivation rule (see `Orientation::from_size`'s
-    // doc); an exact square satisfies `>=` and must not panic/ambiguously
-    // resolve, so this is pinned explicitly rather than left implicit.
+    // An exact square satisfies `>=` (height >= width is the rule) and must not
+    // resolve ambiguously.
     assert_eq!(
         Orientation::from_size(Size::new(500.0, 500.0)),
         Orientation::Portrait
@@ -1163,12 +1153,9 @@ fn a_runaway_callback_chain_is_capped_and_deferred_to_the_next_frame() {
     let _ = crate::event::take_pending_result_flush();
 }
 
-/// The redraw-only flush shape: a widget that queues a callback exactly like
-/// [`FlushView`] above, but whose broadcast handler touches **no** state at
-/// all — it only calls [`EventCtx::request_redraw`]. `frust-widgets`' gesture
-/// long-press latch is the shipped instance (its `on_long_press` consumer may
-/// mutate nothing the view diff can see), and the widget's own
-/// `ctx.request_redraw()` after firing is then the whole wake signal.
+/// The redraw-only flush shape: queues a callback like [`FlushView`] above, but its
+/// broadcast handler touches no state and only calls [`EventCtx::request_redraw`]
+/// (the gesture long-press latch is the shipped instance).
 struct RedrawOnlyView {
     ops: std::rc::Rc<Cell<u32>>,
 }
