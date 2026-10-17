@@ -205,7 +205,7 @@ upload 381; OnePlus 9 S1 5.96 / 7.57, upload 358, replay 1184; S6 4.76 / 5.47, u
 `FRUST_ENGINE_NO_STAGING_RING=1` arm reproduces the before `upload` (Pixel 4a 565 / 382, OnePlus 9 382 / 262) with
 everything else unmoved, so the ring owns the upload gain and the replay fix (no switch) owns the replay one.
 Acceptance: `replay_us` <= 0.1 ms on S1 / S6 MET on both phones; `upload_us` <= 0.2 ms MET except Pixel 4a S1 at 216
-(the p3-01 miss, from 571); S1 / S6 totals not worse MET on p50 and enc total (Pixel 4a S1 p95 12.44 sits inside the
+(the staging-ring target miss, from 571); S1 / S6 totals not worse MET on p50 and enc total (Pixel 4a S1 p95 12.44 sits inside the
 10.27-12.59 spread of the GPU-bound captures at 355 MHz); S4 `submit - gpu_main` <= 1.0 ms was a Pixel 4 target — the
 Pixel 4a gives 1.39 and the OnePlus 9 3.50 (its inline-path `submit` holds the present block), both recorded as not
 met. Pixel 4a S1 `gpu_main` sits at 13.9-14.0 in every Phase 3 capture (Phase 2: 13.89). iPhone SE rows: Mac leg owed.

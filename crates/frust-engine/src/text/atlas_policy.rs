@@ -2098,11 +2098,14 @@ fn outline_key(
 /// horizon while the other three go unused, age out, and are rasterized again
 /// the moment the label drifts back — a miss, and so a replay, on a frame that
 /// draws nothing new. So the pass is also given the glyph: while a position was
-/// drawn in *any* bucket within the window, every bucket of it that is resident
-/// is probed and so kept, drawn or not. The cost is bounded by what is already
-/// in use — at most the four buckets of the glyphs on screen — and a glyph
-/// nothing draws any more still ages out after the window, together with its
-/// siblings. Only a position the record remembers is covered; a run the record
+/// drawn in *any* bucket within the window, every one of its buckets is probed,
+/// resident or not, and so every resident sibling is kept, drawn or not. The
+/// probe of a bucket that is not resident is what finds a sibling `glifo`
+/// inserted outside this record. Each such probe that misses is a `glifo`
+/// cumulative miss that lands after the frame's `frame_misses()` has been read,
+/// so no frame is charged for it. The cost is bounded by what is already in
+/// use — at most the four buckets of the glyphs on screen — and a glyph nothing
+/// draws any more still ages out after the window, together with its siblings. Only a position the record remembers is covered; a run the record
 /// does not hold (refused, over the bound, forgotten) is `glifo`'s to age.
 ///
 /// A map that loses entries any other way — a reap the mirror did not predict,

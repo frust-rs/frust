@@ -2799,6 +2799,7 @@ impl EngineRenderer {
             // write ordering against the frame's own config never matters.
             // Staged, its copy lands in the encoder here — between passes,
             // immediately ahead of the one round that reads it.
+
             // The page-config buffer this round binds; the surface's own
             // config has no slot and is named by the maximum.
             let config_slot = offscreen.map_or(u32::MAX, |_| {
@@ -5508,8 +5509,11 @@ struct ResourceTexture {
     /// vector's earlier records for encoded paints. A staged upload writes only
     /// the rows the frame fills plus every row the last frame left live, and
     /// so leaves the texture byte-for-byte as the full upload would: the rows
-    /// below this mark already hold exactly that tail. A new texture is live
-    /// throughout, so its first upload is a full one.
+    /// below this mark already hold exactly that tail. Rows at or beyond the
+    /// current frame's filled rows are never read, so a stale row there (a
+    /// dropped encoder leaves its rows past `filled` as they were) cannot reach
+    /// a pixel. A new texture is live throughout, so its first upload is a full
+    /// one.
     live_rows: u32,
 }
 
