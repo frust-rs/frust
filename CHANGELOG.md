@@ -38,6 +38,13 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   314 B to 116,758 B; S1 steady state unchanged. Method and every row:
   [docs/PERFORMANCE_BASELINES.md](docs/PERFORMANCE_BASELINES.md) § Engine close-out per device.
 
+### Changed
+
+- `frust-core` internals. `app.rs` and `event.rs` are now the `app/` and `event/` directory modules,
+  with no public path changed; `RenderRoot::event` is decomposed into named steps; the crate's
+  comments are cut to the contracts they state (at most 25 % of any region); and the
+  `comment_density_budget` test in `frust-ui` keeps them there.
+
 ### Added
 
 - `frust_gpu::staging` (`StagingRing`, `StagingFrame`, `StagingStats`) and
