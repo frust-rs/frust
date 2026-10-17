@@ -1845,3 +1845,89 @@ fn a_steady_frame_compositing_a_retained_page_creates_no_bind_group() {
     assert!(error.is_none(), "the frames raised {error:?}");
     warm_up_ran(&renderer);
 }
+
+/// Collects the `frust-perf enc` lines the engine logs.
+#[cfg(feature = "perf-trace")]
+struct EncLines;
+
+#[cfg(feature = "perf-trace")]
+static ENC_LINES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+#[cfg(feature = "perf-trace")]
+impl log::Log for EncLines {
+    fn enabled(&self, _metadata: &log::Metadata) -> bool {
+        true
+    }
+
+    fn log(&self, record: &log::Record) {
+        let line = record.args().to_string();
+        if line.starts_with("frust-perf enc") {
+            ENC_LINES
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(line);
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+/// Two full windows of steady frames: the first window holds the frames that
+/// build the pool and its groups, the second holds frames that build none, and
+/// both lines carry the staging and bind-group keys at their end.
+#[cfg(feature = "perf-trace")]
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract --features perf-trace -- --ignored`"]
+fn the_enc_trace_line_reports_staging_and_bind_group_counts() {
+    let _serialized = render_lock();
+    // Another logger in this process would leave the lines elsewhere; a second
+    // install is refused, which is harmless here.
+    let _ = log::set_logger(&EncLines);
+    log::set_max_level(log::LevelFilter::Info);
+    ENC_LINES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clear();
+    let (device, queue, caps) = gpu();
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut renderer = EngineRenderer::new(&device, &caps, FORMAT, None)
+        .expect("the engine builds on this device");
+    renderer.set_staging_ring(true);
+    let target = HeadlessTarget::new(&device, SIZE, SIZE, FORMAT);
+    let scene = two_page_scene();
+
+    for _ in 0..120 {
+        let _ = groups_created_by(&device, &queue, &mut renderer, &scene, &target);
+    }
+
+    let lines = ENC_LINES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    assert_eq!(lines.len(), 2, "two windows of sixty frames: {lines:?}");
+    for line in &lines {
+        for key in [
+            " staged_bytes=",
+            " staging_busy=",
+            " staging_too_large=",
+            " staging_buffers=",
+            " bind_groups=",
+        ] {
+            assert!(line.contains(key), "missing {key} in {line}");
+        }
+        assert!(
+            line.ends_with(char::is_numeric),
+            "the keys close the line: {line}"
+        );
+    }
+    assert!(
+        lines[1].ends_with(" bind_groups=0"),
+        "the steady window built groups: {}",
+        lines[1]
+    );
+    eprintln!("{}", lines[1]);
+
+    let error = drain_error_scope(&device, scope);
+    assert!(error.is_none(), "the frames raised {error:?}");
+    warm_up_ran(&renderer);
+}

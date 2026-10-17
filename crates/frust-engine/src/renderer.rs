@@ -520,11 +520,19 @@ const ENCODE_TRACE_COLUMNS: [&str; 17] = [
 /// - `glyph_misses` — glyphs that took the cache-miss path.
 /// - `glyph_evicted` — atlas rectangles the eviction pass freed.
 ///
-/// The last, `run_keys`, is a per-frame median again: the distinct run
-/// identities (font, size, hinting) the policy classified in a frame. The
-/// replay figures read zero on a frame whose replay did not run.
+/// `run_keys` is a per-frame median again: the distinct run identities (font,
+/// size, hinting) the policy classified in a frame. The replay figures read
+/// zero on a frame whose replay did not run.
+///
+/// The last five cover the staging ring and the bind-group cache. `staged_bytes`
+/// is the frame's staging-slot bytes, a median (zero on the queue-write route).
+/// The other four are **sums over the window** of this frame's change in the
+/// ring's counters and in the bind-group count: `staging_busy` and
+/// `staging_too_large` are frames the ring refused, `staging_buffers` is slot
+/// buffers it created, and `bind_groups` is bind groups the frame path created.
+/// A ring that is off reports zero for all three staging counts.
 #[cfg(feature = "perf-trace")]
-const ENCODE_TRACE_COUNTS: [&str; 11] = [
+const ENCODE_TRACE_COUNTS: [&str; 16] = [
     "draws",
     "strips",
     "alphas",
@@ -536,6 +544,11 @@ const ENCODE_TRACE_COUNTS: [&str; 11] = [
     "glyph_misses",
     "glyph_evicted",
     "run_keys",
+    "staged_bytes",
+    "staging_busy",
+    "staging_too_large",
+    "staging_buffers",
+    "bind_groups",
 ];
 
 /// Index into [`ENCODE_TRACE_COUNTS`] of the first count reported as a sum over
@@ -551,9 +564,32 @@ const ENCODE_TRACE_FIRST_SUMMED: usize = 5;
 #[cfg(feature = "perf-trace")]
 const ENCODE_TRACE_MEDIAN_AGAIN: usize = 10;
 
+/// Index into [`ENCODE_TRACE_COUNTS`] of the first count summed over the window
+/// again, through the end of the line: the staging refusals, buffer creations
+/// and bind-group creations. `staged_bytes`, just before it, is a median.
+#[cfg(feature = "perf-trace")]
+const ENCODE_TRACE_SUMMED_AGAIN: usize = 12;
+
 /// Width of one window row: every phase column followed by every count.
 #[cfg(feature = "perf-trace")]
 const ENCODE_TRACE_ROW: usize = ENCODE_TRACE_COLUMNS.len() + ENCODE_TRACE_COUNTS.len();
+
+/// The staging ring's and the bind-group cache's counters, read at one point so
+/// a frame's row can carry only the change since the previous read.
+#[cfg(feature = "perf-trace")]
+#[derive(Debug, Clone, Copy, Default)]
+struct TraceCounters {
+    busy: u64,
+    too_large: u64,
+    buffers_created: u64,
+    bind_groups: u64,
+}
+
+/// `now - before` as one frame's count, saturating at both ends.
+#[cfg(feature = "perf-trace")]
+fn counter_delta(now: u64, before: u64) -> u32 {
+    u32::try_from(now.saturating_sub(before)).unwrap_or(u32::MAX)
+}
 
 /// What one frame drew, carried beside its phases.
 ///
@@ -585,17 +621,35 @@ struct EncodeCounts {
     glyph_evicted: u32,
     /// Distinct run identities classified this frame.
     run_keys: u32,
+    /// Bytes the frame placed in its staging slot, alignment padding included;
+    /// zero on the queue-write route.
+    staged_bytes: u32,
+    /// Frames the staging ring refused this frame because every slot was in
+    /// flight. Filled by [`EncodeTrace::record`], which holds the previous
+    /// reading.
+    staging_busy: u32,
+    /// Frames the staging ring refused this frame because they needed more than
+    /// a slot may hold. Filled by [`EncodeTrace::record`].
+    staging_too_large: u32,
+    /// Slot buffers the staging ring created this frame. Filled by
+    /// [`EncodeTrace::record`].
+    staging_buffers: u32,
+    /// Bind groups the frame path created this frame. Filled by
+    /// [`EncodeTrace::record`].
+    bind_groups: u32,
 }
 
 #[cfg(feature = "perf-trace")]
 impl EncodeCounts {
     /// What `frame` drew, with the atlas figures the frame's replay and policy
-    /// reported.
+    /// reported and the bytes it staged. The staging-counter and bind-group
+    /// deltas are left at zero for [`EncodeTrace::record`] to fill.
     fn of(
         frame: &CompiledFrame,
         replayed: bool,
         report: &AtlasRenderReport,
         policy: &crate::text::atlas_policy::AtlasTrace,
+        staged: u64,
     ) -> Self {
         fn count(len: usize) -> u32 {
             u32::try_from(len).unwrap_or(u32::MAX)
@@ -612,6 +666,11 @@ impl EncodeCounts {
             glyph_misses: policy.glyph_misses,
             glyph_evicted: policy.glyph_evicted,
             run_keys: policy.run_keys(),
+            staged_bytes: u32::try_from(staged).unwrap_or(u32::MAX),
+            staging_busy: 0,
+            staging_too_large: 0,
+            staging_buffers: 0,
+            bind_groups: 0,
         }
     }
 }
@@ -690,6 +749,11 @@ impl EncodeSpans {
             self.counts.glyph_misses,
             self.counts.glyph_evicted,
             self.counts.run_keys,
+            self.counts.staged_bytes,
+            self.counts.staging_busy,
+            self.counts.staging_too_large,
+            self.counts.staging_buffers,
+            self.counts.bind_groups,
         ]
     }
 }
@@ -716,6 +780,9 @@ struct EncodeTrace {
     /// which is the engine's count and deliberately not the host's raw-line
     /// `n` (a different emitter counting different frames).
     frames: u64,
+    /// The counters as the previous frame read them, so each row reports only
+    /// its own frame's change.
+    previous: TraceCounters,
 }
 
 #[cfg(feature = "perf-trace")]
@@ -726,11 +793,21 @@ impl EncodeTrace {
     /// Called at the very end of the encode, so the formatting a full window
     /// costs falls outside every phase the line reports — the numbers describe
     /// the encode, not the encode plus its own accounting.
-    fn record(&mut self, spans: &EncodeSpans) {
+    ///
+    /// `now` is the counters read at the same point in the encode; the row
+    /// carries the change since the previous frame's reading.
+    fn record(&mut self, spans: &EncodeSpans, now: TraceCounters) {
         // Saturating like every other counter on this path: a renderer that
         // outlived `u64::MAX` frames would report a wrapped `n`, and a wrong
         // number in a capture is worse than a stuck one.
         self.frames = self.frames.saturating_add(1);
+        let mut spans = *spans;
+        spans.counts.staging_busy = counter_delta(now.busy, self.previous.busy);
+        spans.counts.staging_too_large = counter_delta(now.too_large, self.previous.too_large);
+        spans.counts.staging_buffers =
+            counter_delta(now.buffers_created, self.previous.buffers_created);
+        spans.counts.bind_groups = counter_delta(now.bind_groups, self.previous.bind_groups);
+        self.previous = now;
         self.window.push(spans.row());
         if self.window.len() < ENCODE_TRACE_WINDOW {
             return;
@@ -742,8 +819,9 @@ impl EncodeTrace {
 
     /// The `frust-perf enc` line the current window reports.
     ///
-    /// The counts `replays` through `glyph_evicted` are window sums; every
-    /// other column (including `run_keys`) is its own median over the window.
+    /// The counts `replays` through `glyph_evicted` and `staging_busy` through
+    /// `bind_groups` are window sums; every other column (including `run_keys`
+    /// and `staged_bytes`) is its own median over the window.
     /// The trailing field is the whole encode's 95th percentile, so a column
     /// answers "what does this phase usually cost" while the tail answers "how
     /// bad is a bad frame". Medians are taken per column and so do not sum to
@@ -755,7 +833,7 @@ impl EncodeTrace {
         // `<name>_us=<7 digits>.<1>` field per phase, a `<name>=<10 digits>`
         // field per count, the two `n`/`w` fields and the p95 tail, with room
         // to spare rather than a byte-exact fit.
-        let mut line = String::with_capacity(640);
+        let mut line = String::with_capacity(896);
         line.push_str("frust-perf enc n=");
         line.push_str(&self.frames.to_string());
         line.push_str(" w=");
@@ -772,8 +850,9 @@ impl EncodeTrace {
         line.push_str(&format_us(tail));
         for (offset, name) in ENCODE_TRACE_COUNTS.iter().enumerate() {
             let column = ENCODE_TRACE_COLUMNS.len() + offset;
-            let value = if (ENCODE_TRACE_FIRST_SUMMED..ENCODE_TRACE_MEDIAN_AGAIN).contains(&offset)
-            {
+            let summed = (ENCODE_TRACE_FIRST_SUMMED..ENCODE_TRACE_MEDIAN_AGAIN).contains(&offset)
+                || offset >= ENCODE_TRACE_SUMMED_AGAIN;
+            let value = if summed {
                 self.window
                     .iter()
                     .filter_map(|row| row.get(column))
@@ -1243,6 +1322,19 @@ impl EngineRenderer {
     #[must_use]
     pub fn last_frame_staged_bytes(&self) -> u64 {
         self.last_staged
+    }
+
+    /// The staging and bind-group counters as they stand now, for the trace's
+    /// per-frame deltas. A ring that is off reads as zero.
+    #[cfg(feature = "perf-trace")]
+    fn trace_counters(&self) -> TraceCounters {
+        let staging = self.staging_stats().unwrap_or_default();
+        TraceCounters {
+            busy: staging.busy,
+            too_large: staging.too_large,
+            buffers_created: staging.buffers_created,
+            bind_groups: self.bind_groups_created(),
+        }
     }
 
     /// What the staging ring has done so far, or `None` with the ring off.
@@ -1885,24 +1977,30 @@ impl EngineRenderer {
         // partial encode and would drag every percentile toward a frame that
         // was never presented.
         #[cfg(feature = "perf-trace")]
-        self.encode_trace.record(&EncodeSpans {
-            compile: frame.compile_spans,
-            compile_total,
-            schedule: schedule_span,
-            paints: paints_span,
-            instances: instances_span,
-            resize: resize_span,
-            upload: upload_span,
-            replay: replay_span,
-            pipelines: pipelines_span,
-            record: clock.lap(),
-            counts: EncodeCounts::of(
-                &frame,
-                replayed,
-                &self.atlas_report,
-                self.compiler.glyph_atlas_trace(),
-            ),
-        });
+        let now = self.trace_counters();
+        #[cfg(feature = "perf-trace")]
+        self.encode_trace.record(
+            &EncodeSpans {
+                compile: frame.compile_spans,
+                compile_total,
+                schedule: schedule_span,
+                paints: paints_span,
+                instances: instances_span,
+                resize: resize_span,
+                upload: upload_span,
+                replay: replay_span,
+                pipelines: pipelines_span,
+                record: clock.lap(),
+                counts: EncodeCounts::of(
+                    &frame,
+                    replayed,
+                    &self.atlas_report,
+                    self.compiler.glyph_atlas_trace(),
+                    self.last_staged,
+                ),
+            },
+            now,
+        );
 
         Ok(())
     }
@@ -7570,6 +7668,9 @@ mod tests {
             row[base + 6] = 2; // dirty_pages: sum 6
             row[base + 8] = frame; // glyph_misses: sum 3
             row[base + 10] = 4 + frame; // run_keys: median 5
+            row[base + 11] = 100 + frame; // staged_bytes: median 101
+            row[base + 12] = 1; // staging_busy: sum 3
+            row[base + 15] = 2; // bind_groups: sum 6
             trace.window.push(row);
         }
         let line = trace.line();
@@ -7578,8 +7679,39 @@ mod tests {
         assert_eq!(
             counts,
             "draws=11 strips=0 alphas=0 glyph_draws=0 atlas_glyphs=0 replays=3 \
-             dirty_pages=6 atlas_refused=0 glyph_misses=3 glyph_evicted=0 run_keys=5"
+             dirty_pages=6 atlas_refused=0 glyph_misses=3 glyph_evicted=0 run_keys=5 \
+             staged_bytes=101 staging_busy=3 staging_too_large=0 staging_buffers=0 \
+             bind_groups=6"
         );
+    }
+
+    /// The staging and bind-group counts are per-frame deltas: each row carries
+    /// only the change since the previous frame's reading, so a window's sum is
+    /// the change across the window.
+    #[cfg(feature = "perf-trace")]
+    #[test]
+    fn a_frame_row_carries_only_the_staging_and_bind_group_change_since_the_last() {
+        let mut trace = EncodeTrace::default();
+        let base = ENCODE_TRACE_COLUMNS.len();
+        let readings = [
+            TraceCounters {
+                busy: 2,
+                too_large: 0,
+                buffers_created: 1,
+                bind_groups: 4,
+            },
+            TraceCounters {
+                busy: 5,
+                too_large: 1,
+                buffers_created: 1,
+                bind_groups: 4,
+            },
+        ];
+        for now in readings {
+            trace.record(&EncodeSpans::default(), now);
+        }
+        assert_eq!(&trace.window[0][base + 12..], &[2, 0, 1, 4]);
+        assert_eq!(&trace.window[1][base + 12..], &[3, 1, 0, 0]);
     }
 
     /// A window's percentile is nearest-rank over the column it names, so the
