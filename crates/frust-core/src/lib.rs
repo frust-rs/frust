@@ -1,49 +1,24 @@
-//! Layer 1+2 of Frust: the declarative view API, the retained widget tree,
-//! box-constraint layout, and the rebuild/layout/paint pass skeleton.
+//! Layer 1+2 of Frust: the declarative view API, the retained widget tree, box-constraint layout,
+//! and the rebuild/layout/paint pass skeleton. Modelled on xilem/Masonry, depending on neither,
+//! with no `unsafe`.
 //!
-//! The design mirrors `xilem_core`'s proven `View` lifecycle and Masonry's
-//! `tree_arena`-backed widget tree, but owns its implementation — there is **no
-//! xilem/masonry dependency and no `unsafe`** in this crate.
-//!
-//! # Layers
-//!
-//! * [`view`] — layer 1: the [`View`](view::View) trait, [`ChangeFlags`], and
-//!   [`BuildCtx`](view::BuildCtx). Views are cheap descriptors produced by
-//!   `fn build(&mut State) -> impl View<State>`. [`ViewSeq`] is
-//!   the child-sequence trait container child lists take (a view, a tuple, a
-//!   `Vec`/array/`Option`, or [`views`] over an iterator).
-//! * [`widget`] — layer 2: the [`Widget`](widget::Widget) trait and its
-//!   layout/paint/event contexts, the [`PaintScene`](widget::PaintScene) paint
-//!   boundary, and container-owned [`ChildPod`](widget::ChildPod) children.
-//! * [`event`] — layer 2 input: [`InputEvent`](event::InputEvent)/
-//!   [`PointerEvent`](event::PointerEvent) and the [`EventCtx`](event::EventCtx)
-//!   handlers mutate state through.
-//! * [`input`] — pure gesture helpers: slop/wheel constants, a
-//!   [`VelocityTracker`](input::VelocityTracker), and the fling-decay math the
-//!   interactive widgets build on.
-//! * [`layout`] — the [`BoxConstraints`](layout::BoxConstraints) box model.
-//! * [`sliver`] — the sliver protocol a scrolling viewport lays its children
-//!   out with: [`SliverConstraints`](sliver::SliverConstraints) in,
-//!   [`SliverGeometry`](sliver::SliverGeometry) out, offered by a widget
-//!   through [`Widget::as_sliver`](widget::Widget::as_sliver).
-//! * [`tree`] — the [`WidgetTree`](tree::WidgetTree) arena wrapper,
-//!   [`WidgetPod`](tree::WidgetPod), and the read-only
-//!   [`InspectNode`](tree::InspectNode) walk tooling reads the tree through.
-//! * [`app`] — the [`RenderRoot`](app::RenderRoot) that drives rebuild → layout
-//!   → paint. This is what each platform shell owns.
-//! * [`component`] — [`Component`](component::Component), Flutter's
-//!   `StatefulWidget` analog: a subtree with retained local state, a
-//!   per-component reactive `Owner`, and a state boundary the outer view tree
-//!   never sees.
-//! * [`overlay`] — the overlay portal: an owner-hosted, root-painted,
-//!   root-routed pod a widget floats above the whole app (menus, popovers,
-//!   tooltips, selection toolbars).
-//! * [`selection_toolbar`] — what a text field publishes when it has a
-//!   selection, plus the process-global policy/builder slots that decide who
-//!   draws the toolbar.
-//! * [`hit`] — hit-testing helpers for content drawn under an arbitrary
-//!   [`kurbo::Affine`]: the test [`ChildPod`](widget::ChildPod) uses for a
-//!   transformed pod, exposed for canvas hit closures and pan/zoom containers.
+//! * [`anim`] — the frame clock, curves, tweens, springs and animation controllers.
+//! * [`app`] — the [`RenderRoot`] each platform shell drives through rebuild, layout and paint.
+//! * [`mod@component`] — [`Component`], a subtree with retained local state and its own `Owner`.
+//! * [`event`] — input events and the [`EventCtx`] handlers mutate state through.
+//! * `hotpatch` (feature `hotpatch`) — the hot-patch seam every `Component::build` runs through.
+//! * [`hit`] — hit tests for content drawn under an arbitrary [`kurbo::Affine`].
+//! * [`input`] — slop/wheel constants, [`VelocityTracker`] and fling-decay math.
+//! * [`insets`] — the [`WindowInsets`] safe-area and keyboard inset model.
+//! * [`layout`] — the [`BoxConstraints`] box model.
+//! * [`overlay`] — the portal a widget floats a pod above the whole app through.
+//! * [`retained`] — retained-page keys and the renderer's resident-key ledger.
+//! * [`selection_toolbar`] — a text field's toolbar request and the policy/builder slots.
+//! * [`semantics`] — the accessibility tree pass behind [`SemanticsUpdate`].
+//! * [`sliver`] — the sliver protocol a scrolling viewport lays children out with.
+//! * [`tree`] — the [`WidgetTree`] arena and the read-only [`InspectNode`] walk.
+//! * [`view`] — the [`View`] trait, [`ChangeFlags`], [`BuildCtx`] and [`ViewSeq`].
+//! * [`widget`] — the [`Widget`] trait, its contexts, [`PaintScene`] and [`ChildPod`].
 
 pub mod anim;
 pub mod app;
@@ -63,21 +38,14 @@ pub mod tree;
 pub mod view;
 pub mod widget;
 
-/// Hit-testing under an arbitrary [`kurbo::Affine`].
-///
-/// [`ChildPod::set_transform`](widget::ChildPod::set_transform) places a child
-/// under a transform; these are the helpers it hit-tests with, exposed so a
-/// canvas hit closure or a pan/zoom container answers "is this point on that
-/// shape" exactly the way the pod does.
+/// Hit-testing under an arbitrary [`kurbo::Affine`]: the helpers a transformed
+/// [`ChildPod`] uses, for canvas hit closures and pan/zoom containers.
 pub mod hit {
     use kurbo::{Affine, Point, Rect};
 
-    /// `affine`'s inverse, or `None` when it has none — a singular (zero
-    /// determinant) or non-finite transform, or one whose inverse overflows.
-    ///
-    /// [`Affine::inverse`] on a singular matrix divides by zero and returns
-    /// non-finite coefficients rather than failing; this is the checked form
-    /// every caller that maps a point back through a transform should use.
+    /// `affine`'s inverse, or `None` for a singular or non-finite transform or an
+    /// overflowing inverse. Use it instead of [`Affine::inverse`], which returns
+    /// non-finite coefficients for a singular matrix rather than failing.
     pub fn checked_inverse(affine: &Affine) -> Option<Affine> {
         let det = affine.determinant();
         if det == 0.0 || !det.is_finite() || !affine.is_finite() {
@@ -87,19 +55,10 @@ pub mod hit {
         inverse.is_finite().then_some(inverse)
     }
 
-    /// Whether `point` lands inside `rect` once `rect` is drawn under `affine`.
-    ///
-    /// `rect` is in the content's own (local) space and `affine` maps that space
-    /// into the space `point` is in, so this is the hit test for content painted
-    /// inside `push_transform(affine)`: `point` is mapped back through the
-    /// inverse and tested against `rect` with the same half-open convention as
-    /// [`ChildPod::contains`](crate::widget::ChildPod::contains) (`x0 <= x < x1`,
-    /// `y0 <= y < y1`). A rotated rect therefore hits along its rotated edges,
-    /// not its axis-aligned bounding box.
-    ///
-    /// A transform with no inverse ([`checked_inverse`]) collapses the rect to a
-    /// line or a point, which nothing can hit: the answer is `false`, never a
-    /// panic.
+    /// Whether `point` hits local-space `rect` drawn under `affine` (content inside
+    /// `push_transform(affine)`): `point` is mapped back and tested half-open, like
+    /// `ChildPod::contains`, so a rotated rect hits along its rotated edges. A
+    /// non-invertible `affine` hits nothing.
     pub fn point_in_transformed_rect(point: Point, rect: Rect, affine: &Affine) -> bool {
         let Some(inverse) = checked_inverse(affine) else {
             return false;
@@ -196,12 +155,9 @@ pub mod hit {
     }
 }
 
-/// Re-export of the [`accesskit`] accessibility vocabulary (roles, node
-/// builders, toggle/value state) widgets use to populate a
-/// [`semantics::SemanticsCtx`]. Re-exported here — the sole crate that depends
-/// on accesskit — so `frust-widgets` (and app code) name the vocabulary
-/// through `frust_core::accesskit::*` without a direct dependency; the
-/// platform `accesskit_*` adapter crates live in the shells, not here.
+/// The [`accesskit`] vocabulary widgets fill a [`semantics::SemanticsCtx`] with,
+/// re-exported so `frust-widgets` and apps use it without their own dependency;
+/// the platform `accesskit_*` adapters live in the shells.
 pub use accesskit;
 pub use anim::{
     AnimationController, AnimationStatus, Curve, FrameTime, Lerp, Spring, SpringDesc, Tween,

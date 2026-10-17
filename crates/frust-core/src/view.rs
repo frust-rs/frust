@@ -1,30 +1,26 @@
 //! Layer 1: the declarative [`View`] trait.
 //!
-//! Views are cheap, short-lived descriptors produced by a root component's `Component::build`
-//! closure, a pure function of application state (`fn build(&mut State) -> impl View<State>`).
-//! They are *not* the retained tree — re-running the build closure on every state
-//! mutation must stay cheap by construction.
+//! Views are cheap, short-lived descriptors produced by a root component's
+//! `Component::build`, a pure function of application state. They are not the
+//! retained tree: re-running the build on every state mutation must stay cheap.
 //!
-//! The lifecycle mirrors `xilem_core`'s proven `View` design
-//! (`build`/`rebuild`/`teardown`/`message`) but owns its implementation: no
-//! xilem/masonry dependency. The `Action` generic is intentionally omitted for
-//! v0 — messages route directly against `State`.
+//! The lifecycle mirrors `xilem_core`'s `View` (`build`/`rebuild`/`teardown`/
+//! `message`) but owns its implementation. There is no `Action` generic:
+//! messages route directly against `State`.
 
 use std::any::Any;
 
 use crate::widget::Widget;
 
-/// Bitflags describing what work a [`View::rebuild`] pass invalidated.
+/// Bitflags describing what work a [`View::rebuild`] pass invalidated; combine with `|`.
 ///
-/// Combine with `|`. `LAYOUT` implies a subsequent paint, but the flags are
-/// stored orthogonally so a caller can distinguish "geometry changed" from
-/// "only pixels changed"; use [`ChangeFlags::needs_paint`] for the common
-/// "does anything need repainting?" query.
+/// `LAYOUT` implies a paint but the flags are stored orthogonally;
+/// [`ChangeFlags::needs_paint`] answers "does anything need repainting?".
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ChangeFlags(u8);
 
 impl ChangeFlags {
-    /// Nothing changed; no downstream work required.
+    /// Nothing changed.
     pub const NONE: Self = Self(0);
     /// The widget must be re-painted.
     pub const PAINT: Self = Self(0b0000_0001);
@@ -76,9 +72,7 @@ impl Default for ChangeFlags {
     }
 }
 
-/// A stable identity for a node in the widget tree.
-///
-/// Wraps the `u64` node id used by `tree_arena`. Allocated by [`BuildCtx`].
+/// A stable identity for a node in the widget tree: the `tree_arena` node id, allocated by [`BuildCtx`].
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct WidgetId(pub u64);
 
@@ -88,41 +82,22 @@ impl From<WidgetId> for u64 {
     }
 }
 
-/// Context threaded through [`View::build`] / [`View::rebuild`].
-///
-/// Three responsibilities: allocating unique [`WidgetId`]s (it borrows the id
-/// counter owned by the render root so ids stay monotonic across passes),
-/// carrying the **effective focus chain** — whether every link from the root down
-/// to the node being built/rebuilt/torn down is focused (see
-/// [`BuildCtx::has_focus`]) — and carrying the **element-replaced signal** a
-/// same-typed element swap raises for its enclosing reconciler (see
-/// [`BuildCtx::mark_element_replaced`]).
+/// Context threaded through [`View::build`] / [`View::rebuild`]: allocates unique
+/// [`WidgetId`]s from the render root's counter and carries the effective focus
+/// chain ([`BuildCtx::has_focus`]) and element-replaced signal
+/// ([`BuildCtx::mark_element_replaced`]).
 pub struct BuildCtx<'a> {
     next_id: &'a mut u64,
-    /// The effective focus chain: `true` only while every recorded focus link
-    /// from the root down to the current node is set. See
-    /// [`BuildCtx::has_focus`].
     has_focus: bool,
-    /// Set by a view whose `rebuild` replaced its element's widget without
-    /// changing the element *type*; consumed by the nearest enclosing
-    /// [`BuildCtx::track_element_replaced`] scope. See
-    /// [`BuildCtx::mark_element_replaced`].
     element_replaced: bool,
 }
 
 impl<'a> BuildCtx<'a> {
     /// Create a context borrowing the render root's id counter.
     ///
-    /// The focus chain seeds **`true`** — "unknown, assume live". A caller that
-    /// does not thread the chain therefore keeps the pre-chain behavior (every
-    /// reconciler under it treats a `focused` pod as the live one) instead of
-    /// silently suppressing a release it owed: over-releasing costs the user one
-    /// tap, while under-releasing strands the shell's IME surface over a widget
-    /// that no longer exists and nothing on an idle screen ever corrects it (the
-    /// same default-to-must-run rule the frame gate follows). The seams that
-    /// *know* the real value — [`RenderRoot::rebuild`](crate::app::RenderRoot)'s
-    /// view diff and [`ComponentWidget`](crate::component::ComponentWidget)'s
-    /// inner context — set it explicitly with [`BuildCtx::set_has_focus`].
+    /// The focus chain seeds `true` ("unknown, assume live"): over-releasing costs
+    /// one tap, while under-releasing strands the shell's IME surface over a dead
+    /// widget. Seams that know the real value set it with [`BuildCtx::set_has_focus`].
     pub fn new(next_id: &'a mut u64) -> Self {
         Self {
             next_id,
@@ -137,50 +112,28 @@ impl<'a> BuildCtx<'a> {
         WidgetId(*self.next_id)
     }
 
-    /// Whether the recorded focus path is live all the way from the root to the
-    /// node currently being built/rebuilt/torn down — the rebuild-pass mirror of
-    /// [`PaintCtx::has_focus`](crate::widget::PaintCtx::has_focus), composed the
-    /// same way (`self.focused && ctx.has_focus()`).
+    /// Whether the recorded focus path is live from the root to the node being
+    /// built/rebuilt/torn down: the rebuild-pass mirror of
+    /// [`PaintCtx::has_focus`](crate::widget::PaintCtx::has_focus).
     ///
-    /// This is what makes a `focused` [`ChildPod`](crate::widget::ChildPod) flag
-    /// *deep inside a blurred branch* harmless. A container-routed blur clears the
-    /// focus link at the nearest common ancestor only, so flags below it
-    /// legitimately go stale until focus next enters that subtree; a pod under a
-    /// cleared link sees `has_focus() == false` here, exactly as it sees `false`
-    /// in paint and exactly as focus-routed events never reach it. A reconciler
-    /// therefore raises [`mark_focus_orphaned`](crate::event::mark_focus_orphaned)
-    /// only when `ctx.has_focus() && pod.is_focused()` — only when the pod losing
-    /// its identity is the one whose session is actually live.
+    /// A blur clears the link at the nearest common ancestor only, so a `focused`
+    /// [`ChildPod`](crate::widget::ChildPod) flag below it goes stale harmlessly. A
+    /// reconciler raises [`mark_focus_orphaned`](crate::event::mark_focus_orphaned)
+    /// only when `ctx.has_focus() && pod.is_focused()`: the session is actually live.
     pub fn has_focus(&self) -> bool {
         self.has_focus
     }
 
-    /// Seed the effective focus chain (see [`BuildCtx::has_focus`]).
-    ///
-    /// For the two kinds of seam that *start* a chain rather than descend one:
-    /// [`RenderRoot`](crate::app::RenderRoot)'s view diff, which seeds it from the
-    /// root's own session mirror, and a component-style widget that builds an
-    /// inner `BuildCtx` over its own id counter
-    /// ([`ComponentWidget`](crate::component::ComponentWidget) is the in-crate
-    /// one) and must carry its outer chain across that boundary. A container
-    /// descending into a child pod uses [`BuildCtx::with_focus_link`] instead — it
-    /// can only narrow, which is what keeps this an AND-chain.
+    /// Seed the focus chain for a seam that starts one (`RenderRoot`'s view diff, or a
+    /// component carrying its outer chain across an inner `BuildCtx`). A container
+    /// descending into a pod uses [`BuildCtx::with_focus_link`], which can only narrow.
     pub fn set_has_focus(&mut self, has_focus: bool) {
         self.has_focus = has_focus;
     }
 
-    /// Run `f` with the focus chain extended by one link, restoring the caller's
-    /// chain when it returns.
-    ///
-    /// `link_focused` is the descended-into pod's own
-    /// [`ChildPod::is_focused`](crate::widget::ChildPod::is_focused) flag, so the
-    /// closure sees `self.has_focus() && link_focused`: a cleared link anywhere
-    /// above forces `false` for the whole subtree below it, and no descent can
-    /// ever widen the chain. The rebuild-pass counterpart of
-    /// [`ChildPod::paint_child`](crate::widget::ChildPod::paint_child)'s
-    /// `set_has_focus(self.focused && ctx.has_focus())`, in the scoped-closure
-    /// shape [`SemanticsCtx::descend_into_pod`](crate::semantics::SemanticsCtx)
-    /// already uses for the semantics pass.
+    /// Run `f` with the focus chain extended by one link (`link_focused` is the pod's
+    /// `is_focused` flag), restoring it afterwards: the closure sees
+    /// `self.has_focus() && link_focused`, so no descent can widen the chain.
     pub fn with_focus_link<R>(&mut self, link_focused: bool, f: impl FnOnce(&mut Self) -> R) -> R {
         let outer = self.has_focus;
         self.has_focus = outer && link_focused;
@@ -189,41 +142,22 @@ impl<'a> BuildCtx<'a> {
         result
     }
 
-    /// Report that this view's `rebuild` **replaced its element's widget while
-    /// keeping the element type** — an enum view switching arms (`Either`,
-    /// `EitherOf3` .. `EitherOf8` in `frust-widgets`) is the shape this exists
-    /// for.
+    /// Report that this view's `rebuild` replaced its element's widget while keeping
+    /// the element type (an enum view switching arms, e.g. `Either`).
     ///
-    /// A reconciler detects an [`AnyView`] concrete-type swap by comparing the
-    /// boxed widget's type id across the rebuild; on a swap it drops the child
-    /// pod's capture (`active`) and focus (`focused`) links, because the fresh
-    /// widget never saw the `Down` and never claimed focus. An enum element keeps
-    /// one static type across an arm swap, so that comparison cannot see it.
-    /// Calling this makes the enclosing reconciler treat the rebuild exactly like
-    /// a concrete-type swap.
-    ///
-    /// **Scope rule.** The nearest enclosing
-    /// [`track_element_replaced`](BuildCtx::track_element_replaced) scope consumes
-    /// the signal. An enum nested *inline* inside another enum (no pod between
-    /// them) therefore propagates to the outer one's scope — the same pod lost
-    /// its widget — while a pod anywhere inside the swapped subtree runs its own
-    /// scope and consumes its own signal, leaving the outer pod's flags intact.
-    /// A signal raised where no scope encloses it (a root-level enum, or a
-    /// container that rebuilds a child without a pod) is inert or, at worst,
-    /// reaches the next scope up: an over-release, never an under-release.
+    /// A reconciler detects an [`AnyView`] type swap by type id and drops the child
+    /// pod's capture and focus links; an enum keeps one static type, so it raises this
+    /// signal instead. The nearest enclosing
+    /// [`track_element_replaced`](BuildCtx::track_element_replaced) scope consumes it
+    /// (a pod inside the swapped subtree consumes its own); with no scope it is inert
+    /// or reaches the next one up: an over-release, never an under-release.
     pub fn mark_element_replaced(&mut self) {
         self.element_replaced = true;
     }
 
-    /// Run `f` as a **tracking scope** for
-    /// [`mark_element_replaced`](BuildCtx::mark_element_replaced), returning
-    /// `f`'s result and whether anything inside it raised the signal.
-    ///
-    /// The caller's pending value is saved and cleared before `f` runs and
-    /// restored afterwards, so a scope sees only signals raised inside it and a
-    /// signal raised by an earlier sibling is neither consumed nor lost. A
-    /// reconciler wraps each child's nested `rebuild` in this and ORs the result
-    /// into its own type-swap detection.
+    /// Run `f` as a tracking scope for [`mark_element_replaced`](BuildCtx::mark_element_replaced),
+    /// returning `f`'s result and whether anything inside raised the signal. The
+    /// caller's pending value is saved and restored.
     pub fn track_element_replaced<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> (R, bool) {
         let outer = std::mem::replace(&mut self.element_replaced, false);
         let result = f(self);
@@ -234,10 +168,9 @@ impl<'a> BuildCtx<'a> {
 
 /// A declarative description of a piece of UI.
 ///
-/// Each `View` knows how to materialise itself into a retained [`Widget`]
-/// ([`View::build`]) and how to reconcile a previous version of itself against
-/// the live widget ([`View::rebuild`]). `State` is `'static` so views never
-/// capture borrowed data — they are values, re-created every frame.
+/// A `View` builds itself into a retained [`Widget`] ([`View::build`]) and
+/// reconciles a previous version against the live widget ([`View::rebuild`]).
+/// `State` is `'static`, so views are values re-created every frame.
 pub trait View<State: 'static>: 'static {
     /// The retained widget this view produces.
     type Element: Widget;
@@ -245,8 +178,7 @@ pub trait View<State: 'static>: 'static {
     /// Materialise a fresh widget for this view.
     fn build(&self, ctx: &mut BuildCtx<'_>) -> Self::Element;
 
-    /// Reconcile `prev` (the previous view of the same type) against the live
-    /// `element`, mutating it in place and reporting what changed.
+    /// Reconcile `prev` (the previous view of the same type) against the live `element`, in place.
     fn rebuild(
         &self,
         prev: &Self,
@@ -254,33 +186,20 @@ pub trait View<State: 'static>: 'static {
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags;
 
-    /// Tear down `element` when this view is being removed.
-    ///
-    /// A no-op for v0 leaf views; kept in the trait so the lifecycle is
-    /// complete and container/removal logic (later phases) has a hook.
+    /// Tear down `element` when this view is being removed; a no-op for leaf views.
     fn teardown(&self, _element: &mut Self::Element, _ctx: &mut BuildCtx<'_>) {}
 
-    /// Deliver an event message to this view, mutating application state.
-    ///
-    /// Stubbed for v0 (no event routing yet); present so the trait shape is
-    /// stable as event routing is added later.
+    /// Deliver an event message to this view, mutating application state (stubbed:
+    /// no event routing goes through it yet).
     fn message(&self, _element: &mut Self::Element, _state: &mut State) {}
 }
 
-/// Object-safe mirror of [`View`], used only as the erased backing of
-/// [`AnyView`].
-///
-/// The methods mirror `build`/`rebuild`/`teardown` but drop the associated
-/// `Element` type in favour of a `Box<dyn Widget>`, and add [`ErasedView::as_any`]
-/// so a rebuild can downcast the *previous* erased view to detect a
-/// concrete-type change (the xilem `AnyView` trick).
+/// Object-safe mirror of [`View`], the erased backing of [`AnyView`]; `as_any` lets a rebuild downcast the previous view.
 trait ErasedView<State: 'static>: 'static {
-    /// Materialise a fresh boxed widget for this view.
     fn dyn_build(&self, ctx: &mut BuildCtx<'_>) -> Box<dyn Widget>;
 
-    /// Reconcile against `prev` (the previous erased view). If `prev` is the same
-    /// concrete type, do a typed in-place rebuild; otherwise tear the old widget
-    /// down and build a fresh one, replacing `element`.
+    /// Reconcile against `prev`: a typed in-place rebuild if it is the same concrete
+    /// type, otherwise tear the old widget down and build a fresh one.
     fn dyn_rebuild(
         &self,
         prev: &dyn ErasedView<State>,
@@ -288,10 +207,8 @@ trait ErasedView<State: 'static>: 'static {
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags;
 
-    /// Tear down `element` (dispatched to the concrete view's `teardown`).
     fn dyn_teardown(&self, element: &mut Box<dyn Widget>, ctx: &mut BuildCtx<'_>);
 
-    /// Upcast to `&dyn Any` so a rebuild can downcast the previous view.
     fn as_any(&self) -> &dyn Any;
 }
 
@@ -307,16 +224,11 @@ impl<State: 'static, V: View<State>> ErasedView<State> for V {
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         if let Some(prev) = prev.as_any().downcast_ref::<V>() {
-            // Same concrete view type: recover the typed element and rebuild in
-            // place. The element's erased type is `V::Element` because it was
-            // produced by this view's `build` (via `dyn_build`).
             let element = (**element)
                 .downcast_mut::<V::Element>()
                 .expect("erased element type matches its originating view");
             self.rebuild(prev, element, ctx)
         } else {
-            // Concrete type changed: tear the old widget down through the *old*
-            // view, then build a fresh one and swap it in.
             prev.dyn_teardown(element, ctx);
             *element = self.dyn_build(ctx);
             ChangeFlags::LAYOUT | ChangeFlags::PAINT
@@ -335,35 +247,23 @@ impl<State: 'static, V: View<State>> ErasedView<State> for V {
 }
 
 /// A type-erased [`View`]: lets a piece of UI change its concrete view type
-/// between frames (e.g. a conditional `if cond { text(..) } else { button(..) }`)
-/// while still fitting the statically-typed rebuild machinery.
+/// between frames while still fitting the statically typed rebuild machinery.
 ///
-/// Rebuild follows the xilem `AnyView` pattern: the previous view is downcast to
-/// detect whether the concrete type is unchanged. Same type → a typed in-place
-/// rebuild; different type → the old widget is torn down and a fresh one built
-/// and swapped in (signalling `LAYOUT | PAINT`). Its `Element` is a
-/// `Box<dyn Widget>`, which implements [`Widget`] through the blanket impl so it
-/// satisfies `View::Element: Widget`.
+/// The previous view is downcast to detect a type change: same type is a typed
+/// in-place rebuild; otherwise the old widget is torn down and a fresh one swapped
+/// in (`LAYOUT | PAINT`). Its `Element` is a `Box<dyn Widget>`.
 ///
-/// Erasure is idempotent, and the generic builders (`child`, tuples such as
-/// `Column((a, b))`, ..) accept any [`View`] and erase internally, so app code
-/// needs `AnyView` only for stored views, branches of more than eight arms, and
-/// genuinely heterogeneous dynamic lists (see [`any`]). Branches are written
-/// with `either(..)` (two arms) or `EitherOf3`..`EitherOf8` (three to eight),
-/// which keep every arm statically typed and do not erase.
+/// Generic builders erase internally, so app code needs `AnyView` only for stored
+/// views, branches of more than eight arms, and heterogeneous dynamic lists (see
+/// [`any`]); `either(..)` and `EitherOf3`..`EitherOf8` stay statically typed.
 pub struct AnyView<State: 'static> {
     inner: Box<dyn ErasedView<State>>,
 }
 
 impl<State: 'static> AnyView<State> {
-    /// Erase `view` into an `AnyView`.
-    ///
-    /// Erasure is idempotent: if `view` is already an `AnyView<State>`, it is
-    /// returned unchanged — `any(any(v))` and `AnyView::new(any_view)` do not box
-    /// twice.
+    /// Erase `view` into an `AnyView`; idempotent, so `any(any(v))` and
+    /// `AnyView::new(any_view)` do not box twice.
     pub fn new<V: View<State>>(view: V) -> Self {
-        // Slot holds the value so it can be moved out through `&mut dyn Any`'s borrow.
-        // `take()` extracts it after the downcast_mut succeeds, or the original is boxed.
         let mut slot = Some(view);
         if let Some(erased) =
             (&mut slot as &mut dyn core::any::Any).downcast_mut::<Option<AnyView<State>>>()
@@ -376,20 +276,12 @@ impl<State: 'static> AnyView<State> {
     }
 }
 
-/// Erase `view` into an [`AnyView`] — the free-function spelling of
-/// [`AnyView::new`], mirroring the `text(..)`/`button(..)` view-fn vocabulary.
+/// Erase `view` into an [`AnyView`], the free-function spelling of [`AnyView::new`].
 ///
-/// Erasure is idempotent: `any(any(v))` returns the inner `AnyView` unchanged,
-/// not a doubly-boxed wrapper. This makes double erasure safe for swap detection
-/// in containers like `inflexible(any(x))`.
-///
-/// Because of that, writing `any(..)` around an argument is redundant in
-/// 0.6: the generic builders (`child`, tuples such as `Column((a, b))`, ..)
-/// accept any [`View`] and erase internally. `either(..)` and
-/// `EitherOf3`..`EitherOf8` are the no-erasure way to write a branch of two to
-/// eight arms: they keep every arm statically typed. Reach for `any` only to
-/// *store* a view (a struct field, a `Vec` of builders), for a branch with more
-/// than eight arms, or for a genuinely heterogeneous dynamic list.
+/// Idempotent, so double erasure is safe for swap detection in containers like
+/// `inflexible(any(x))`. Wrapping an argument in `any(..)` is redundant since the
+/// generic builders erase; reach for it to *store* a view, for a branch of more
+/// than eight arms, or for a heterogeneous dynamic list.
 pub fn any<State: 'static, V: View<State>>(view: V) -> AnyView<State> {
     AnyView::new(view)
 }
@@ -415,116 +307,39 @@ impl<State: 'static> View<State> for AnyView<State> {
     }
 }
 
-/// A child sequence: what a container's child-list parameter accepts, so app
-/// code passes heterogeneous children without writing [`any`] at the call site.
+/// A child sequence: what a container's child-list parameter accepts, so app code
+/// passes heterogeneous children without writing [`any`].
 ///
-/// A container takes `children: impl ViewSeq<State, M>` (generic over the
-/// inference marker `M`, which callers never name) and calls
-/// [`ViewSeq::extend_views`] once to push every element into the erased child
-/// vector it already stores (`Vec<AnyView<State>>`). That push is the **one place
-/// erasure happens**: each element goes through [`AnyView::new`], which is
-/// idempotent, so an element that is already an [`AnyView`] is moved in as-is —
-/// never boxed twice — and no intermediate collection is built.
+/// A container takes `impl ViewSeq<State, M>` and calls [`ViewSeq::extend_views`]
+/// once, the one place erasure happens ([`AnyView::new`], idempotent). Implemented
+/// for any single [`View`], tuples of 1 to 12 sequences (nest beyond that; nested
+/// tuples flatten in order), `Vec<S>`, `[S; N]`, `Option<S>` and [`views(iter)`](views).
 ///
-/// Implemented for:
-///
-/// - any single [`View`] (one element; [`AnyView`] included),
-/// - tuples `(S1, .., Sn)` for `n = 1..=12`, where every element is itself a
-///   `ViewSeq`, so elements of *different* concrete types mix freely and tuples
-///   nest — a nested tuple flattens in order,
-/// - `Vec<S>` and `[S; N]` (homogeneous; the element is any `ViewSeq`),
-/// - `Option<S>` (`None` contributes no element — see below),
-/// - [`views(iter)`](views) for any iterator of views (there is deliberately no
-///   blanket impl over `IntoIterator`: it would overlap the tuple impls).
-///
-/// **Identity is positional.** The reconciler matches children by position (plus
-/// the concrete element type), so a tuple's elements keep their identity only
-/// while their positions do. An `Option` that is `None` contributes nothing, so
-/// every *later* sibling moves up one slot when it flips — exactly like a
-/// conditional child added through a builder's `.when_some(..)`/`.when(..)`.
-/// Put optional children last, or use the container's keyed-child API (still a
-/// `Vec`-based affair, not a tuple one) when sibling identity must survive.
-///
-/// **Arity.** A single tuple holds at most 12 elements; beyond that, nest tuples
-/// (`((a, b, .., l), (m, n))`), which flattens to the same order.
-///
-/// **The marker parameter.** `M` exists only so the single-view impl
-/// (`impl<V: View<State>> ViewSeq<State, _> for V`) can coexist with the
-/// container impls — without it the compiler must assume some downstream crate
-/// could implement `View` for a `Vec` or a tuple and rejects the overlap. Each
-/// impl picks a distinct marker from [`seq_marker`], so inference always resolves
-/// it; a function accepting a sequence just declares a generic `M`.
-///
-/// ```
-/// use frust_core::{AnyView, ViewSeq};
-///
-/// // A container-style API: generic over the marker, erasing into one Vec.
-/// fn children<M>(seq: impl ViewSeq<(), M>) -> Vec<AnyView<()>> {
-///     let mut out = Vec::new();
-///     seq.extend_views(&mut out);
-///     out
-/// }
-///
-/// let none = || None::<AnyView<()>>;
-/// let empty = Vec::<AnyView<()>>::new;
-/// // Twelve elements is the widest flat tuple.
-/// let twelve = (
-///     none(), none(), none(), none(), none(), none(),
-///     none(), none(), none(), none(), none(), empty(),
-/// );
-/// assert!(children(twelve).is_empty());
-/// ```
-///
-/// A thirteenth flat element is not a sequence — nest instead:
-///
-/// ```compile_fail,E0277
-/// use frust_core::{AnyView, ViewSeq};
-///
-/// fn children<M>(seq: impl ViewSeq<(), M>) -> Vec<AnyView<()>> {
-///     let mut out = Vec::new();
-///     seq.extend_views(&mut out);
-///     out
-/// }
-///
-/// let none = || None::<AnyView<()>>;
-/// let thirteen = (
-///     none(), none(), none(), none(), none(), none(), none(),
-///     none(), none(), none(), none(), none(), none(),
-/// );
-/// let _ = children(thirteen);
-/// ```
+/// Identity is positional: a `None` contributes nothing, so later siblings move up
+/// one slot when it flips. `M` lets the single-view impl coexist with the container
+/// impls (else a downstream `View for Vec` could overlap); inference resolves it.
 #[diagnostic::on_unimplemented(
     message = "this is not a child sequence",
     note = "a child list is a View, a tuple of up to 12 views (nest tuples beyond 12), an array, a Vec, an Option, or views(iter) for an iterator"
 )]
 pub trait ViewSeq<State: 'static, M> {
-    /// Push every element of this sequence, in order, onto `out` — erasing each
-    /// with [`AnyView::new`] (a no-op for an element already an [`AnyView`]).
+    /// Push every element of this sequence, in order, onto `out`, erasing each with [`AnyView::new`].
     fn extend_views(self, out: &mut Vec<AnyView<State>>);
 }
 
-/// Inference markers for [`ViewSeq`]'s second parameter.
-///
-/// One marker per impl keeps the single-[`View`] impl from overlapping the
-/// container impls. They are never constructed and callers never name them: an
-/// API accepting a child sequence declares a generic `M` and lets inference pick.
+/// Inference markers for [`ViewSeq`]'s second parameter: one per impl, so the
+/// single-[`View`] impl does not overlap the container impls. Never named by callers.
 pub mod seq_marker {
     use core::marker::PhantomData;
 
-    /// Marks the impl for a single [`View`](super::View).
     pub enum One {}
 
-    /// Marks the impl for `Vec<S>`, where `S`'s own marker is `M`.
     pub struct VecOf<M>(PhantomData<fn() -> M>);
 
-    /// Marks the impl for `[S; N]`, where `S`'s own marker is `M`.
     pub struct ArrayOf<M>(PhantomData<fn() -> M>);
 
-    /// Marks the impl for `Option<S>`, where `S`'s own marker is `M`.
     pub struct OptionOf<M>(PhantomData<fn() -> M>);
 
-    /// Marks the impl for [`Views`](super::Views), the [`views`](super::views)
-    /// iterator adapter.
     pub enum Iter {}
 }
 
@@ -564,8 +379,7 @@ impl<State: 'static, M, S: ViewSeq<State, M>> ViewSeq<State, seq_marker::OptionO
     }
 }
 
-/// Implements [`ViewSeq`] for one tuple arity per `(Element Marker index, ..)`
-/// group; the tuple's marker is the tuple of its elements' markers.
+/// Implements [`ViewSeq`] per tuple arity; the tuple's marker is the tuple of its elements' markers.
 macro_rules! impl_view_seq_for_tuples {
     ($( ($($S:ident $M:ident $idx:tt),+) )+) => {$(
         impl<State: 'static, $($M, $S: ViewSeq<State, $M>),+> ViewSeq<State, ($($M,)+)>
@@ -609,12 +423,8 @@ where
     }
 }
 
-/// Wrap an iterator of views as a [`ViewSeq`] — the child-sequence spelling of
-/// "one child per item", e.g. `views(items.iter().map(|i| text(&i.name)))`.
-///
-/// `ViewSeq` has no blanket impl over `IntoIterator` (it would overlap the tuple
-/// impls), so an iterator goes through this adapter; a `Vec` or array needs no
-/// wrapping. Each item is erased once, as it is pushed.
+/// Wrap an iterator of views as a [`ViewSeq`] (one child per item), e.g.
+/// `views(items.iter().map(|i| text(&i.name)))`. A `Vec` or array needs no wrapping.
 pub fn views<State: 'static, I>(iter: I) -> Views<I>
 where
     I: IntoIterator,

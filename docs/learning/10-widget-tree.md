@@ -16,8 +16,8 @@ after lab 2 and before lab 3.
 | Retained layer | `crates/frust-core/src/widget.rs` | `pub trait Widget: Any` ≈2015, `visit_children` ≈2091, `downcast_mut` ≈2099, `impl Widget for Box<dyn Widget>` ≈2114 |
 | A container's child | `crates/frust-core/src/widget.rs` | `ChildPod` ≈2163, `holds_live_focus` ≈2561, `layout_child` ≈2624, `paint_child` ≈2637, `event_child` ≈2807 |
 | The arena | `crates/frust-core/src/tree.rs` | `WidgetPod` ≈52, `new_typed` ≈90, `WidgetTree` ≈214, `inspect` ≈300 |
-| The driver | `crates/frust-core/src/app.rs` | `RenderRoot` ≈292, `rebuild` ≈1189, `rebuild_view` ≈1334, `layout_with_text` ≈1398, `paint` ≈1469, `event` ≈2122 |
-| Focus-orphan side channel | `crates/frust-core/src/event.rs` | `FOCUS_ORPHANED` ≈744, `mark_focus_orphaned` ≈776 |
+| The driver | `crates/frust-core/src/app/` | `RenderRoot` (`mod.rs`), `RenderRoot::rebuild` and `rebuild_view` (`rebuild.rs`), `layout_with_text` (`layout.rs`), `paint` (`paint.rs`), `event` (`dispatch.rs`) |
+| Focus-orphan side channel | `crates/frust-core/src/event/flags.rs` | `FOCUS_ORPHANED`, `mark_focus_orphaned` |
 | Reconcilers | `crates/frust-widgets/src/authoring.rs` | `build_child` ≈278, `rebuild_child` ≈308, `teardown_child` ≈393, `rebuild_children_positional` ≈635 |
 | Routing + introspection | `crates/frust-widgets/src/authoring.rs` | `route_event` ≈978, `route_event_single` ≈1039, `VisitPods` ≈803, `macro_rules! visit_children` ≈870 |
 | A real container | `crates/frust-widgets/src/flex.rs` | `FlexView` (its `rebuild` ≈271) |
@@ -31,7 +31,7 @@ after lab 2 and before lab 3.
    `build` re-creates every frame. `View<State>` has `type Element: Widget` plus `build` (make the widget),
    `rebuild(prev, element, ctx) -> ChangeFlags` (mutate the live widget to match), and `teardown`.
    Its `BuildCtx` does two jobs. `alloc_id` mints a `WidgetId`; the only production caller is the
-   root's first build (`app.rs` ≈1367). It also threads the **focus chain**
+   root's first build (`RenderRoot::rebuild_view` in `crates/frust-core/src/app/rebuild.rs`). It also threads the **focus chain**
    (`has_focus`/`set_has_focus`/`with_focus_link`), an AND of every focus link from the root down
    to the node being diffed. A **Widget** is the retained object:
    `layout`/`paint`/`event`/`semantics`, a `visit_children` that visits nothing by default, and
@@ -101,7 +101,7 @@ after lab 2 and before lab 3.
    rebuild are also read a second way, before that decision is even made: mobile's whole-frame gate
    takes pending flags as one of its Run/Skip inputs. `FrameInputs::change_flags_pending`
    (`crates/frust-shell-common/src/frame_gate.rs` ≈292, ORed into `any_set` ≈343) is filled from
-   `RenderRoot::has_pending_change_flags()` (`crates/frust-core/src/app.rs` ≈1122) by both mobile
+   `RenderRoot::has_pending_change_flags()` (`crates/frust-core/src/app/rebuild.rs`) by both mobile
    shells (`crates/frust-shell-android/src/app/frame.rs` ≈250,
    `crates/frust-shell-ios/src/app/frame.rs` ≈203; lab 7 lists it among the gate inputs). So there
    are two consumers, not one: the frame gate reads pending flags on Android and iOS to decide

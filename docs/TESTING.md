@@ -56,6 +56,10 @@ The repository already contains substantial non-pixel coverage:
 - `examples/huddle/tests/`: GPU-free screen, workflow, input, navigation,
   async, and architecture integration tests driven through `RenderRoot`.
 - `crates/frust/tests/`: facade-level interaction and text-input integration.
+- `crates/frust/tests/comment_density_budget.rs`: source-scan gate over `crates/frust-core`;
+  comments stay at most 25 % of any region of 80+ lines, `///`/`//` runs at most 12 lines, `//!`
+  runs at most 24, and per-file caps only tighten. Run
+  `cargo test -p frust-ui --test comment_density_budget`.
 - `crates/frust-tui/tests/snapshots.rs`: terminal rendering snapshots using
   ratatui's `TestBackend` and `insta`.
 - `crates/frust-render`: render-path selection, the engine's adapter capability gate, and

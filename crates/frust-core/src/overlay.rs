@@ -1,79 +1,21 @@
-//! The overlay portal: the mechanism a widget anywhere in the tree floats a pod
-//! above the whole app with.
+//! The overlay portal: how a widget anywhere in the tree floats a pod above the
+//! whole app (menus, popovers, tooltips, selection toolbars).
 //!
-//! # The contract: owner-hosted, root-painted, root-routed
+//! The owner builds, lays out and keeps the pod and registers an [`OverlayEntry`]
+//! from its `paint`; the root paints every entry after the main tree, unclipped.
 //!
-//! A floating surface (a popover, a menu, a selection toolbar, a tooltip) has to
-//! escape its owner's bounds in three different ways at once, and this module
-//! splits the three between the owner and the root:
-//!
-//! * **Owner-hosted.** The pod is a plain [`ChildPod`] the *owner* builds, lays
-//!   out (against [`LayoutCtx::window_size`](crate::widget::LayoutCtx::window_size),
-//!   loosely) and keeps — so it retains its own widget state and sits inside the
-//!   owner's reactive context, exactly like any other child. Nothing is
-//!   re-parented and no second tree exists: the pod stays a logical child of its
-//!   call site.
-//! * **Root-painted.** The owner does **not** paint the pod. It hands the root a
-//!   registration ([`OverlayEntry`]) from its own `paint`, through
-//!   [`PaintCtx::register_overlay`](crate::widget::PaintCtx::register_overlay),
-//!   and [`RenderRoot::paint`](crate::app::RenderRoot::paint) paints every
-//!   registered pod *after* the main tree — which is the only way a pod escapes
-//!   both its owner's paint order and every ancestor's clip. Because the entry
-//!   carries an absolute [`OverlayEntry::window_rect`] the owner computed from
-//!   its own [`PaintCtx::origin`](crate::widget::PaintCtx::origin), an anchor
-//!   follows the owner for free: the owner re-registers every frame from
-//!   wherever it now paints. `window_rect` is just a rect either way, so
-//!   nothing here cares whether the owner derived it from its own bounds or
-//!   from an absolute window-space point it is tracking instead (a drag
-//!   ghost following the pointer, in `frust-widgets`' `OverlaySlot`) — the
-//!   mechanism is the same registration, repainted on whatever cadence the
-//!   owner now needs.
-//! * **Root-routed.** Painting last is not enough, because hit testing is
-//!   bounds-gated: a pointer over the floated pod lands on whatever the *main*
-//!   tree has at that position. So the root hit-tests the registered rects
-//!   **first** (topmost band first) and, on a hit, dispatches
-//!   [`InputEvent::Overlay`](crate::event::InputEvent::Overlay) as a broadcast
-//!   instead of the original event. The broadcast reaches the owner wherever it
-//!   sits, and the owner forwards the window-space payload into its pod. Nothing
-//!   is hit-tested against the owner's own bounds, and — because a broadcast is
-//!   not user input at the root — the main tree's focus session is untouched:
-//!   tapping a popover does not blur the field that opened it.
-//!
-//! # Per-pass entries
-//!
-//! The registry is **per paint pass**: it is cleared when
-//! [`RenderRoot::paint`](crate::app::RenderRoot::paint) begins and drained when
-//! the main tree has finished painting. An owner keeps a surface alive by
-//! registering it again every frame; an owner that stops registering disappears
-//! from the root's routing table after the next paint, with nothing to
-//! unregister and no way to leak an entry whose owner has been unmounted. A
-//! kept-mounted exit animation is therefore just "keep registering while the
-//! animation runs".
-//!
-//! The routing table the root retains between passes
-//! ([`OverlayHit`]) deliberately carries **no pod handle** — only the key, the
-//! band, the input class, the outside-tap policy and the rect. The owner holds
-//! the pod; the root never does, so a pod can never outlive its owner because
-//! the root kept a clone of it, and no [`RefCell`] borrow is ever held across a
-//! pass boundary.
+//! Per-pass registry contract: the root clears the registry every paint, so an
+//! owner re-registers each frame to stay up. The root hit-tests registered rects
+//! first; a hit is an [`InputEvent::Overlay`](crate::event::InputEvent::Overlay)
+//! broadcast that only the owner holding the key acts on.
 //!
 //! # Not in v1
 //!
-//! * **No focus trap.** Focus inside a pod behaves exactly like focus anywhere
-//!   else; nothing confines traversal to the pod or restores it on dismiss.
-//! * **No declined-key forwarding.** Key/IME/edit-command events stay
-//!   focus-routed and are never re-offered to an overlay owner that did not take
-//!   focus.
-//! * **Not visible to [`inspect`](crate::app::RenderRoot::inspect).** An overlay
-//!   pod is not reachable through [`Widget::visit_children`](crate::widget::Widget::visit_children)
-//!   unless its owner chooses to visit it, so devtools sees the owner, not the
-//!   floated surface.
-//! * **No nesting.** The registry is drained once, after the main tree paints, so
-//!   a registration made from *inside* a floated pod's own paint is not painted
-//!   this pass — and, because the pass's bracket clears the slot as it closes, it
-//!   is dropped rather than leaked into the next one. A surface that itself needs
-//!   a floated surface (a menu opening a submenu) registers both from the one
-//!   owner, in the main tree's paint.
+//! * No focus trap: focus inside a pod is neither confined nor restored on dismiss.
+//! * No declined-key forwarding: key/IME/edit-command events stay focus-routed.
+//! * Not seen by [`inspect`](crate::app::RenderRoot::inspect) unless the owner visits the pod.
+//! * No nesting: a registration made from inside a floated pod's paint is dropped;
+//!   register a submenu from the same owner, in the main tree's paint.
 
 use std::cell::{Cell, RefCell};
 use std::fmt;
@@ -86,62 +28,21 @@ use crate::insets::WindowInsets;
 use crate::widget::ChildPod;
 
 thread_local! {
-    /// The next value [`OverlayKey::next`] hands out.
-    ///
-    /// Thread-local and UI-thread-affine, mirroring
-    /// [`ChildPod`]'s own `NEXT_INSPECT_ID` allocator: the widget tree is
-    /// single-threaded, and an owner allocates its key while building itself
-    /// with no root in scope to ask. Two threads each running a tree therefore
-    /// hand out the same integers, which is harmless — a key is only ever
-    /// compared against the entries of the one root that painted them.
-    ///
-    /// Starts at `1` so `0` stays available as "no overlay" for a consumer that
-    /// wants a niche-free sentinel.
+    /// The next [`OverlayKey::next`] value; starts at `1` so `0` can mean "none".
     static NEXT_OVERLAY_KEY: Cell<u64> = const { Cell::new(1) };
 
-    /// The entries registered so far in the paint pass currently running on this
-    /// thread — written by
-    /// [`PaintCtx::register_overlay`](crate::widget::PaintCtx::register_overlay)
-    /// and drained by [`RenderRoot::paint`](crate::app::RenderRoot::paint).
-    ///
-    /// A side channel for the *routing* reason
-    /// [`EventCtx::set_cursor`](crate::event::EventCtx::set_cursor)'s slot is
-    /// one, not for a missing-handle reason: an entry means nothing to any
-    /// container between the owner and the root, so bubbling it pod by pod would
-    /// widen every container's paint absorb to carry a payload no container
-    /// reads. Unlike the cursor this is a `Vec` rather than a last-writer-wins
-    /// slot — any number of owners may float a surface in one pass, and
-    /// registration order is what orders them within a band.
-    ///
-    /// **Pass-scoped**: cleared when a pass opens and drained when it closes, so
-    /// an entry registered by a widget painted with no root above it (a leaf
-    /// unit test) is dropped by the next pass's clear rather than leaking into
-    /// it.
+    /// Entries registered so far in this thread's open paint pass, in order.
     static OVERLAY_REGISTRY: Cell<Vec<OverlayEntry>> = const { Cell::new(Vec::new()) };
 
-    /// Whether an overlay registration pass is open on this thread — owned by
-    /// [`OverlayPaintPass`] alone (see [`PassBracket`]).
     static OVERLAY_PASS_OPEN: Cell<bool> = const { Cell::new(false) };
 }
 
-/// An overlay owner's identity, allocated once by the owner and quoted back to
-/// it by every [`InputEvent::Overlay`](crate::event::InputEvent::Overlay) the
-/// root routes into its surface.
-///
-/// Stable for the owner's lifetime: an owner allocates one key when it is built
-/// and stores it, re-registering under the same key every paint. The root
-/// therefore never has to recognise an owner by position, and an owner that
-/// floats two surfaces simply holds two keys.
+/// An overlay owner's identity, quoted back by every overlay event routed to it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct OverlayKey(u64);
 
 impl OverlayKey {
-    /// Allocate a fresh key, distinct from every other key handed out on this
-    /// thread.
-    ///
-    /// An owner calls this **once**, when it is built, and stores the result —
-    /// calling it per frame would hand the root a new identity every paint and
-    /// break the routing it exists to enable.
+    /// Allocate a key unique on this thread. Call once when the owner is built.
     pub fn next() -> Self {
         OverlayKey(NEXT_OVERLAY_KEY.with(|next| {
             let id = next.get();
@@ -150,128 +51,62 @@ impl OverlayKey {
         }))
     }
 
-    /// The underlying integer, for a consumer that needs to key a map by it.
-    /// Diagnostic and bookkeeping only — never derive routing from the *value*
-    /// (allocation order is not a contract).
+    /// The raw integer, for map keys; allocation order is not a contract.
     pub fn value(self) -> u64 {
         self.0
     }
 }
 
-/// Which z-band a registered surface paints and hit-tests in.
-///
-/// Two bands, ordered `Floating` **below** `Tooltip`: a tooltip explaining a
-/// menu item must never be painted under the menu, and — because hit testing
-/// walks the bands in reverse — must never steal the pointer from it either
-/// (a tooltip is normally registered [`OverlayInput::Transparent`] anyway).
-/// Registration order breaks ties *within* a band; the band itself always wins.
+/// A surface's z-band: `Floating` paints below `Tooltip`, which hit-tests first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum OverlayBand {
-    /// Menus, popovers, dropdowns, selection toolbars — anything the user can
-    /// interact with. Painted first, hit-tested last.
+    /// Menus, popovers, dropdowns, selection toolbars.
     Floating,
-    /// Tooltips and other explanatory chrome that must sit above everything
-    /// else. Painted last, hit-tested first.
+    /// Tooltips and other chrome above everything else.
     Tooltip,
 }
 
-/// Whether a registered surface takes pointer input at all.
-///
-/// [`OverlayInput::Transparent`] is the rule egui's `Order::Tooltip` encodes: a
-/// surface that is painted above the app but never hit-tested, so the pointer
-/// passes straight through it to whatever the main tree has underneath. A
-/// transparent entry is skipped by the root's pre-pass entirely — it receives no
-/// [`InputEvent::Overlay`](crate::event::InputEvent::Overlay), including no
-/// [`OverlayEventKind::OutsideDown`](crate::event::OverlayEventKind::OutsideDown).
+/// Whether a registered surface takes pointer input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum OverlayInput {
-    /// The surface hit-tests: a pointer inside its rect is routed to its owner
-    /// and never reaches the main tree.
+    /// Hit-tested: a pointer inside the rect goes to the owner, not the main tree.
     Interactive,
-    /// The surface is painted but never hit-tested — pointer input passes
-    /// through as though it were not there.
+    /// Painted but never hit-tested, and never sent any overlay event.
     Transparent,
 }
 
-/// What a registered surface wants to hear about a press that landed on
-/// *nothing* floated — the light-dismiss policy, a per-surface boolean
-/// everywhere this pattern exists.
+/// What a surface hears about a press that landed on nothing floated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum OutsideTap {
-    /// Say nothing. A surface that dismisses some other way (a menu closed by
-    /// its own item, a toolbar that follows a selection) wants this.
+    /// Nothing.
     Ignore,
-    /// Deliver
-    /// [`OverlayEventKind::OutsideDown`](crate::event::OverlayEventKind::OutsideDown)
-    /// to the owner on a primary press outside every registered rect.
+    /// Send `OverlayEventKind::OutsideDown` on a primary press outside every rect.
     Notify {
-        /// Whether the press is **consumed** by the notification.
-        ///
-        /// `true` is the modal light-dismiss shape: the press closes the surface
-        /// and the main tree never sees it, so the tap that dismisses a menu
-        /// does not also activate the button under it. `false` is the
-        /// pass-through shape: the owner is told, *and* the press continues into
-        /// the main tree as usual.
+        /// Whether the press stops there instead of also reaching the main tree.
         consume: bool,
     },
 }
 
-/// The shared handle an owner and the root address one floated pod through.
-///
-/// `Rc<RefCell<_>>` rather than a borrow because the two sides run in different
-/// passes: the owner keeps one clone for the layout/event side, the registration
-/// carries the other so the root can paint it after the owner's own paint has
-/// returned. The root never *retains* a clone past the paint it was registered
-/// for (see [`OverlayHit`]), so the pod's lifetime stays the owner's.
+/// The shared handle the owner and the root reach one floated pod through.
 pub type OverlayPod = Rc<RefCell<ChildPod>>;
 
 /// One floated surface, registered by its owner for the paint pass in progress.
-///
-/// Every field is a D7 rule the root reads back: `band` and registration order
-/// decide paint and hit order, `input` decides whether the surface is hit-tested
-/// at all, `outside_tap` decides what a press elsewhere delivers, and
-/// `window_rect` is both where the pod is painted and what the root hit-tests.
 #[derive(Clone)]
 pub struct OverlayEntry {
-    /// The owner's identity, quoted back on every routed
-    /// [`InputEvent::Overlay`](crate::event::InputEvent::Overlay) so the owner
-    /// recognises its own surface's input and every other widget ignores it.
     pub key: OverlayKey,
-    /// Which z-band the surface paints and hit-tests in (`Floating` below
-    /// `Tooltip`).
     pub band: OverlayBand,
-    /// Whether the surface takes pointer input or is painted through.
     pub input: OverlayInput,
-    /// What a primary press outside every registered rect delivers here.
     pub outside_tap: OutsideTap,
-    /// Where the surface sits, in **absolute logical window space** — the one
-    /// coordinate space both the root's paint origin and the root's hit test use.
-    /// An owner computes it in `paint` from
-    /// [`PaintCtx::origin`](crate::widget::PaintCtx::origin), the only absolute
-    /// anchor a widget has, which is what makes an anchored surface follow its
-    /// owner with no subscription of any kind.
+    /// Absolute logical window rect (from `PaintCtx::origin`): where the pod
+    /// paints and what routing hit-tests.
     pub window_rect: Rect,
-    /// The pod the root paints. The owner holds the other clone and lays this
-    /// out itself, against the window size; the owner must **not** paint it —
-    /// painting it as well would draw the surface twice, once clipped in place
-    /// and once floated.
-    ///
-    /// The root paints it with `window_rect.origin()` as the absolute origin, and
-    /// [`ChildPod::paint_child`](crate::widget::ChildPod::paint_child) then adds
-    /// the pod's **own** origin on top as it does for any child — so leave that at
-    /// [`Point::ZERO`](kurbo::Point::ZERO) unless you mean an offset the hit test
-    /// will not know about (routing tests `window_rect` alone).
+    /// The pod the root paints; the owner lays it out but must not paint it.
     pub pod: OverlayPod,
-    /// The window insets the pod was laid out under (its owner's `LayoutCtx`
-    /// view); paint installs the same value so paint-time reads agree with
-    /// layout-time reads.
+    /// The insets the pod was laid out under; paint installs the same value.
     pub insets: WindowInsets,
 }
 
 impl fmt::Debug for OverlayEntry {
-    /// Prints every routing field and elides the pod: a [`ChildPod`] is not
-    /// [`Debug`], and what a diagnostic wants from an entry is where it sits and
-    /// how it routes, not what it contains.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OverlayEntry")
             .field("key", &self.key)
@@ -285,31 +120,17 @@ impl fmt::Debug for OverlayEntry {
     }
 }
 
-/// What the root retains from an [`OverlayEntry`] to route the *next* pass's
-/// input with: everything except the pod.
-///
-/// Dropping the pod handle is the point. The root holds these between paints, so
-/// retaining an [`OverlayPod`] here would make the root a co-owner of a pod whose
-/// owner may have been unmounted since, and would invite a borrow held across a
-/// pass boundary. Routing needs none of it: the root decides *which key* the
-/// event belongs to and broadcasts that key, and the owner — which does hold the
-/// pod — forwards it in.
+/// An [`OverlayEntry`]'s routing half, kept between passes; no pod, so no co-ownership.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OverlayHit {
-    /// The owner's identity, broadcast with the routed event.
     pub key: OverlayKey,
-    /// The band, which orders the hit test (`Tooltip` tested before `Floating`).
     pub band: OverlayBand,
-    /// Whether this entry is hit-tested at all.
     pub input: OverlayInput,
-    /// What a press outside every rect delivers here.
     pub outside_tap: OutsideTap,
-    /// The absolute logical rect the hit test runs against.
     pub window_rect: Rect,
 }
 
 impl OverlayHit {
-    /// Take the routing half of `entry`, leaving the pod behind.
     pub(crate) fn of(entry: &OverlayEntry) -> Self {
         Self {
             key: entry.key,
@@ -320,11 +141,7 @@ impl OverlayHit {
         }
     }
 
-    /// Whether `point` (absolute logical window space) lies inside this entry.
-    ///
-    /// Half-open on the far edges, exactly like
-    /// [`ChildPod::contains`](crate::widget::ChildPod::contains), so two
-    /// surfaces sharing an edge cannot both claim the same pixel.
+    /// Half-open on the far edges, so surfaces sharing an edge never both hit.
     pub(crate) fn contains(&self, point: kurbo::Point) -> bool {
         point.x >= self.window_rect.x0
             && point.x < self.window_rect.x1
@@ -333,56 +150,29 @@ impl OverlayHit {
     }
 }
 
-/// The open/close bracket around one overlay registration pass.
-///
-/// [`RenderRoot::paint`](crate::app::RenderRoot::paint) holds one for the length
-/// of the pass: entering clears the registry (so nothing from a previous pass —
-/// or from a widget painted with no root above it — can survive into this one),
-/// [`OverlayPaintPass::take`] drains what this pass registered, and `Drop` hands
-/// an enclosing pass its own in-progress registrations back.
-///
-/// The mechanism is [`PassBracket`]'s, shared with the event pass's request
-/// slots; only the channel and the open flag differ.
+/// The [`PassBracket`] around one registration pass: enter clears, `take` drains.
 pub(crate) struct OverlayPaintPass(PassBracket<Vec<OverlayEntry>>);
 
 impl OverlayPaintPass {
-    /// Open an overlay registration pass, starting from "nobody has registered
-    /// anything".
     pub(crate) fn enter() -> Self {
         OverlayPaintPass(PassBracket::enter(&OVERLAY_REGISTRY, &OVERLAY_PASS_OPEN))
     }
 
-    /// Take what *this* pass registered, in registration order, leaving the
-    /// registry empty.
     pub(crate) fn take(&self) -> Vec<OverlayEntry> {
         self.0.take()
     }
 }
 
-/// Record `entry` in the pass currently painting on this thread.
-///
-/// The implementation behind
-/// [`PaintCtx::register_overlay`](crate::widget::PaintCtx::register_overlay),
-/// which is the API an owner calls; this is the module-private half so the slot
-/// stays owned here.
+/// Record `entry` in this thread's open pass (behind `PaintCtx::register_overlay`).
 pub(crate) fn register(entry: OverlayEntry) {
     OVERLAY_REGISTRY.with(|registry| {
-        // Move the `Vec` out, push, move it back: a `Cell` rather than a
-        // `RefCell` because the slot is bracketed by the shared [`PassBracket`]
-        // machinery, which is written against `Cell`'s `take`/`set`. The move is
-        // three words; the allocation is reused across the whole pass.
         let mut entries = registry.take();
         entries.push(entry);
         registry.set(entries);
     });
 }
 
-/// Sort `entries` into paint order in place: `Floating` first, then `Tooltip`,
-/// preserving registration order within each band.
-///
-/// A **stable** sort, which is the whole rule — the band is the only key, so
-/// stability is what makes "later registration paints above earlier" true within
-/// a band. Reversing the result gives the hit-test order (topmost first).
+/// Stable sort by band: later registrations paint above earlier; reverse to hit-test.
 pub(crate) fn sort_into_paint_order(entries: &mut [OverlayEntry]) {
     entries.sort_by_key(|entry| entry.band);
 }

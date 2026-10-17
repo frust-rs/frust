@@ -1,66 +1,32 @@
-//! Layer 2: the semantics seam — a pull-based accessibility tree pass.
+//! The semantics seam: a pull-based accessibility tree pass.
 //!
-//! Each widget *optionally* contributes an [`accesskit::Node`] describing its
-//! role, label, and state ([`Widget::semantics`](crate::widget::Widget::semantics),
-//! defaulted to a no-op so no existing widget is affected). The collection pass
-//! mirrors paint, not the arena tree-walk: a container's children are
-//! [`ChildPod`](crate::widget::ChildPod)s outside the arena, so — exactly like
-//! [`ChildPod::paint_child`](crate::widget::ChildPod::paint_child) threads an
-//! absolute origin down — [`ChildPod::semantics_child`](crate::widget::ChildPod::semantics_child)
-//! translates the current absolute origin into the child's space and recurses.
+//! A widget optionally contributes an [`accesskit::Node`] from
+//! [`Widget::semantics`](crate::widget::Widget::semantics). The pass mirrors paint:
+//! [`ChildPod::semantics_child`](crate::widget::ChildPod::semantics_child) threads the
+//! absolute origin into each child, and
+//! [`RenderRoot::semantics`](crate::app::RenderRoot::semantics) runs it after layout
+//! and returns a [`SemanticsUpdate`] for a shell's `accesskit_*` adapter.
 //!
-//! [`RenderRoot::semantics`](crate::app::RenderRoot::semantics) drives it *after*
-//! layout (so bounds are valid) and returns a [`SemanticsUpdate`]: a flat
-//! `(NodeId, Node)` list plus the root id and the focused node id, ready for a
-//! platform adapter (`accesskit_*`) to consume. This crate owns **no** platform
-//! wiring or per-frame scheduling — those live in each platform shell.
-//!
-//! # Contributing a node
-//!
-//! A leaf widget calls [`SemanticsCtx::push_node`] with its role and a closure
-//! that sets label/state; bounds are filled from the current absolute
-//! origin/size automatically. A widget that also has semantics-visible children
-//! (e.g. a scroll view) uses [`SemanticsCtx::push_container`], whose `visit`
-//! closure recurses into the children (via `semantics_child`) so they become the
-//! node's accesskit children. A *transparent* container (Flex/Stack/Padding/…)
-//! contributes no node of its own — it just calls `semantics_child` for each
-//! child, so their nodes attach to whatever encloses the container.
+//! A leaf calls [`SemanticsCtx::push_node`]; a container with semantic children
+//! calls [`SemanticsCtx::push_container`] and recurses in `visit`; a transparent
+//! container (Flex, Stack, Padding) only calls `semantics_child` on each child.
 
 use std::num::NonZeroU64;
 
 use accesskit::{Node, NodeId, Rect as AccessRect, Role};
 use kurbo::{Point, Size, Vec2};
 
-/// The reserved [`NodeId`] of the synthetic window/root node
-/// ([`RenderRoot::semantics`](crate::app::RenderRoot::semantics) always roots the
-/// tree here). It is a fixed constant — the one id never drawn from the
-/// per-`ChildPod` allocator — so a platform adapter can treat "the root" as a
-/// stable anchor across every frame. Pod-derived ids start well
-/// above it (see [`SemanticsCtx::alloc_base`]).
+/// The fixed id of the synthetic window node every tree is rooted at; never
+/// drawn from the per-pod allocator, so it is stable across frames.
 pub const ROOT_NODE_ID: NodeId = NodeId(1);
 
-/// Number of low bits of a composed [`NodeId`] reserved for a widget's per-pod
-/// sub-node *slot* ordinal.
-///
-/// A [`ChildPod`](crate::widget::ChildPod)'s stable base id occupies the high
-/// bits; the low [`SLOT_BITS`] bits distinguish the (at most `2^SLOT_BITS`)
-/// nodes a single widget contributes for that pod — its own node is slot `0`,
-/// and any extra nodes it pushes (navbar items, list rows, …) take slots
-/// `1, 2, …` in a stable push order. This keeps every node id stable across
-/// frames (the base survives the pod's lifetime, including keyed relocation)
-/// while staying collision-free: distinct bases never overlap as long as a
-/// single widget contributes fewer than `2^SLOT_BITS` nodes and the base fits
-/// the remaining `64 - SLOT_BITS` bits.
+/// Low bits of a composed [`NodeId`] holding the per-pod slot: a widget's own
+/// node is slot `0`, extra nodes it pushes take `1, 2, …` in push order. Ids
+/// stay stable and collision-free while one widget pushes fewer than `2^16`.
 const SLOT_BITS: u32 = 16;
 
-/// Compose a stable [`NodeId`] from a pod's `base` id and a per-pod sub-node
-/// `slot` ordinal (see [`SLOT_BITS`]).
-///
-/// `base` is a monotonically-allocated, never-reused per-pod id (`>= 2`, so the
-/// composed value never collides with the reserved [`ROOT_NODE_ID`]); `slot`
-/// distinguishes the nodes one widget contributes for that pod. The mapping is
-/// injective over `(base, slot)` while `base < 2^(64 - SLOT_BITS)`, which a
-/// `NonZeroU64` allocator exhausts only after ~2.8e14 pods.
+/// `(base << SLOT_BITS) | slot`. `base` is a never-reused per-pod id `>= 2`, so
+/// no composed id equals [`ROOT_NODE_ID`]; injective while `base < 2^48`.
 pub(crate) fn compose_node_id(base: NonZeroU64, slot: u16) -> NodeId {
     debug_assert!(
         base.get() < (1u64 << (64 - SLOT_BITS)),
@@ -71,92 +37,54 @@ pub(crate) fn compose_node_id(base: NonZeroU64, slot: u16) -> NodeId {
     NodeId((base.get() << SLOT_BITS) | slot as u64)
 }
 
-/// A collected accessibility tree produced by
+/// A collected accessibility tree from
 /// [`RenderRoot::semantics`](crate::app::RenderRoot::semantics).
-///
-/// `nodes` is the flat `(NodeId, Node)` map every accesskit platform adapter
-/// consumes; `root` is the id of the enclosing window node (always present, even
-/// for an empty tree); `focus` is the node a focused widget claimed via
-/// [`SemanticsCtx::set_focused`], or `None` when nothing in the tree is focused
-/// (a platform adapter defaults the platform focus to `root` in that case).
 #[derive(Clone, Debug, PartialEq)]
 pub struct SemanticsUpdate {
-    /// The flat node map, root first, then each contributed node in the order it
-    /// was collected (pre-order, mirroring paint).
+    /// The flat node map in collection order: each container follows its
+    /// children (post-order), so the root window node comes last.
     pub nodes: Vec<(NodeId, Node)>,
-    /// The id of the root (window) node.
+    /// The window node, present even for an empty tree.
     pub root: NodeId,
-    /// The focused node, if any widget claimed focus this pass.
+    /// The node a widget claimed with [`SemanticsCtx::set_focused`], if any.
     pub focus: Option<NodeId>,
 }
 
 impl SemanticsUpdate {
-    /// The node a platform adapter should report as focused — the focused widget's
-    /// node, or [`root`](SemanticsUpdate::root) when nothing in the tree is
-    /// focused.
-    ///
-    /// accesskit's `TreeUpdate::focus` is a non-optional [`NodeId`]: an adapter
-    /// must always name *some* focus target, and the window root is the
-    /// conventional fallback. This is the value a shell feeds
-    /// straight into the adapter, versus reading [`focus`](SemanticsUpdate::focus)
-    /// when it needs to distinguish "root, because focused" from "root, because
-    /// nothing is focused".
+    /// The focus to hand an adapter: [`focus`](Self::focus), else
+    /// [`root`](Self::root), since accesskit's `TreeUpdate::focus` is not optional.
     pub fn focus_id(&self) -> NodeId {
         self.focus.unwrap_or(self.root)
     }
 }
 
-/// Collects [`accesskit::Node`]s during a semantics pass, tracking the current
-/// absolute origin/size (mirroring paint's origin threading) and the
-/// parent/child structure.
+/// Collects nodes during a semantics pass, threading the absolute origin/size
+/// and the parent/child structure.
 ///
-/// Node ids are **stable across passes**: each node's id is
-/// composed from the owning [`ChildPod`](crate::widget::ChildPod)'s persistent
-/// base id (assigned on first visit from a monotonic, never-reused
-/// [`RenderRoot`](crate::app::RenderRoot) allocator and threaded in through
-/// [`SemanticsCtx::new`]) and a per-pod sub-node slot (see
-/// [`compose_node_id`]) — so the same widget keeps the same id every frame,
-/// including across a keyed reorder that relocates its pod. accesskit
-/// `TreeUpdate`s require stable ids for assistive-technology focus continuity.
-/// Bounds are derived from the current absolute origin/size when a node is
-/// pushed, so a widget never computes its own absolute rect.
+/// Node ids are stable across passes: each is composed from the owning pod's
+/// persistent base id and a per-pod slot, so a widget keeps its id every frame,
+/// keyed reorders included, as assistive-technology focus continuity requires.
 pub struct SemanticsCtx {
-    /// Absolute origin of the widget currently being visited.
     origin: Point,
-    /// Size of the widget currently being visited.
     size: Size,
-    /// Monotonic *fallback* node-id counter, used only for a node pushed with no
-    /// current pod base (the direct-`push_node` unit-test path). Real tree walks
-    /// always compose ids from a pod base — see [`SemanticsCtx::next_node_id`].
+    /// Fallback id counter for a node pushed with no pod base in scope (the
+    /// direct-`push_node` unit tests only).
     next_id: u64,
-    /// The persistent per-pod base-id allocator's next value, seeded by
-    /// [`RenderRoot`](crate::app::RenderRoot) from its cross-pass high-water mark
-    /// and read back via [`SemanticsCtx::next_base`] after the pass so newly-seen
-    /// pods never reuse an already-assigned base.
+    /// The base allocator's next value; the root reads it back after the pass so
+    /// a base is never reused.
     next_base: u64,
-    /// The base id of the pod currently being visited (set by
-    /// [`SemanticsCtx::descend_into_pod`]); `None` at the window-root level and in
-    /// direct `push_node` unit tests.
+    /// The pod being visited; `None` at the window-root level.
     current_base: Option<NonZeroU64>,
-    /// The next sub-node slot ordinal for the current pod — bumped by each
-    /// [`SemanticsCtx::next_node_id`] so a widget contributing several nodes gets
-    /// stable, distinct ids.
     current_slot: u16,
-    /// The flat node map accumulated so far.
     nodes: Vec<(NodeId, Node)>,
-    /// A stack of child-id collection frames: the top frame gathers the ids of
-    /// nodes contributed at the current nesting level, so a container can set
-    /// them as its node's children after recursing.
+    /// One frame per nesting level, gathering the child ids its container sets.
     frames: Vec<Vec<NodeId>>,
-    /// The focused node, recorded by [`SemanticsCtx::set_focused`].
     focus: Option<NodeId>,
 }
 
 impl SemanticsCtx {
-    /// Create a context for a pass over a `window_size`-sized root, positioned at
-    /// the origin, seeding the persistent per-pod base allocator at `next_base`
-    /// (the caller's cross-pass high-water mark). One (root-level) child frame is
-    /// open.
+    /// A pass over a `window_size` root with the base allocator at `next_base`;
+    /// one root-level child frame is open.
     pub(crate) fn new(window_size: Size, next_base: u64) -> Self {
         Self {
             origin: Point::ZERO,
@@ -171,44 +99,35 @@ impl SemanticsCtx {
         }
     }
 
-    /// The absolute origin of the widget currently being visited.
+    /// The absolute origin of the widget being visited.
     pub fn origin(&self) -> Point {
         self.origin
     }
 
-    /// The size of the widget currently being visited.
+    /// The size of the widget being visited.
     pub fn size(&self) -> Size {
         self.size
     }
 
-    /// Allocate the next persistent per-pod base id, advancing the allocator.
-    ///
-    /// A [`ChildPod`](crate::widget::ChildPod) calls this on its *first* semantics
-    /// visit and caches the result for its whole lifetime; the
-    /// [`RenderRoot`](crate::app::RenderRoot) reads the final value back via
-    /// [`SemanticsCtx::next_base`] so the next pass never reuses it.
+    /// Allocate a persistent pod base id; a pod calls this on its first visit and
+    /// caches the result for its lifetime.
     pub(crate) fn alloc_base(&mut self) -> NonZeroU64 {
         let id = self.next_base;
         self.next_base += 1;
         NonZeroU64::new(id).expect("base allocator is seeded >= 2, never zero")
     }
 
-    /// The allocator's next value after the pass — the caller's new cross-pass
-    /// high-water mark (see [`SemanticsCtx::alloc_base`]).
     pub(crate) fn next_base(&self) -> u64 {
         self.next_base
     }
 
-    /// Allocate the next sequential *fallback* node id (no pod base in scope).
     fn alloc_id(&mut self) -> NodeId {
         let id = NodeId(self.next_id);
         self.next_id += 1;
         id
     }
 
-    /// The [`NodeId`] for the next node the current widget contributes: composed
-    /// from the current pod base and its running slot ([`compose_node_id`]) when a
-    /// pod is in scope, else the sequential fallback (direct-`push_node` tests).
+    /// The current pod's next composed id, else the fallback counter.
     fn next_node_id(&mut self) -> NodeId {
         match self.current_base {
             Some(base) => {
@@ -223,8 +142,7 @@ impl SemanticsCtx {
         }
     }
 
-    /// The accesskit bounds of the widget currently being visited (absolute,
-    /// top-down y), derived from the current origin/size.
+    /// Absolute, top-down bounds of the widget being visited.
     fn bounds(&self) -> AccessRect {
         AccessRect {
             x0: self.origin.x,
@@ -234,13 +152,8 @@ impl SemanticsCtx {
         }
     }
 
-    /// Contribute a **leaf** semantics node for the current widget.
-    ///
-    /// Allocates a node id, creates an [`accesskit::Node`] of `role` with its
-    /// bounds set from the current absolute origin/size, lets `build` set the
-    /// label/state, records it as a child of the enclosing node, and appends it
-    /// to the flat map. Returns the allocated id (e.g. so a widget can
-    /// [`set_focused`](SemanticsCtx::set_focused) it).
+    /// Contribute a leaf node of `role` with bounds from the current geometry;
+    /// `build` sets label and state. Returns its id.
     pub fn push_node(&mut self, role: Role, build: impl FnOnce(&mut Node)) -> NodeId {
         let id = self.next_node_id();
         let mut node = Node::new(role);
@@ -250,16 +163,8 @@ impl SemanticsCtx {
         id
     }
 
-    /// Contribute a **container** semantics node whose accesskit children are the
-    /// nodes contributed during `visit`.
-    ///
-    /// Like [`push_node`](SemanticsCtx::push_node) but opens a fresh child frame,
-    /// runs `visit` (which recurses into the container's
-    /// [`ChildPod`](crate::widget::ChildPod)s via
-    /// [`semantics_child`](crate::widget::ChildPod::semantics_child)), then sets
-    /// the collected ids as this node's [`Node::set_children`]. The container node
-    /// is appended to the flat map *after* its children (post-order), but is still
-    /// registered as a child of its own parent frame.
+    /// Contribute a container node whose children are the nodes contributed
+    /// during `visit`; it is stored after them (post-order).
     pub fn push_container(
         &mut self,
         role: Role,
@@ -270,9 +175,8 @@ impl SemanticsCtx {
         self.push_container_inner(id, role, build, visit)
     }
 
-    /// Like [`push_container`](SemanticsCtx::push_container) but with an explicit,
-    /// caller-chosen `id` — used for the reserved [`ROOT_NODE_ID`] window node,
-    /// which is not owned by any pod.
+    /// [`push_container`](Self::push_container) under a caller-chosen `id` (the
+    /// window node's [`ROOT_NODE_ID`]).
     pub(crate) fn push_container_with_id(
         &mut self,
         id: NodeId,
@@ -283,8 +187,6 @@ impl SemanticsCtx {
         self.push_container_inner(id, role, build, visit)
     }
 
-    /// Shared container body: build the node, open a fresh child frame, run
-    /// `visit`, then set the collected ids as this node's children.
     fn push_container_inner(
         &mut self,
         id: NodeId,
@@ -303,7 +205,6 @@ impl SemanticsCtx {
         id
     }
 
-    /// Register `id` as a child of the enclosing frame and store its node.
     fn attach(&mut self, id: NodeId, node: Node) {
         self.frames
             .last_mut()
@@ -312,22 +213,13 @@ impl SemanticsCtx {
         self.nodes.push((id, node));
     }
 
-    /// Record that the node `id` holds input focus (accesskit tracks focus at the
-    /// tree level, not per-node). The last widget to call this in a pass wins.
+    /// Record `id` as the focused node; the last call in a pass wins.
     pub fn set_focused(&mut self, id: NodeId) {
         self.focus = Some(id);
     }
 
-    /// Run `f` with the current geometry translated into a child's space:
-    /// `child_offset` is the child's origin *relative to the current origin*
-    /// (matching [`ChildPod::paint_child`](crate::widget::ChildPod::paint_child)'s
-    /// `ctx.origin() + pod.origin` absolute-origin rule), and `child_size` its
-    /// resolved size. The previous geometry is restored afterward.
-    ///
-    /// Geometry-only sibling of [`descend_into_pod`](SemanticsCtx::descend_into_pod)
-    /// (which also enters a pod's stable-id scope); real tree walks always go
-    /// through the pod variant, so this is retained only for the direct-`push_node`
-    /// unit tests that exercise origin threading without a pod.
+    /// Run `f` translated by `child_offset` into a `child_size` child, restoring
+    /// the geometry after. Geometry only; for the unit tests without a pod.
     #[cfg(test)]
     pub(crate) fn descend(
         &mut self,
@@ -344,12 +236,8 @@ impl SemanticsCtx {
         self.size = saved_size;
     }
 
-    /// Enter a [`ChildPod`](crate::widget::ChildPod)'s geometry **and** its stable
-    /// id scope: like [`descend`](SemanticsCtx::descend) it translates into the
-    /// child's absolute space, and additionally makes `base` the current pod base
-    /// (resetting the sub-node slot counter) so nodes the child contributes get
-    /// stable [`compose_node_id`]-composed ids. The previous geometry, base, and
-    /// slot are all restored afterward.
+    /// Like `descend`, and also enter pod `base`'s id scope with the slot reset;
+    /// geometry, base and slot are all restored after.
     pub(crate) fn descend_into_pod(
         &mut self,
         base: NonZeroU64,
@@ -372,7 +260,6 @@ impl SemanticsCtx {
         self.current_slot = saved_slot;
     }
 
-    /// Finish the pass, returning the collected update rooted at `root`.
     pub(crate) fn finish(self, root: NodeId) -> SemanticsUpdate {
         SemanticsUpdate {
             nodes: self.nodes,

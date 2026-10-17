@@ -1,9 +1,5 @@
-//! Box-constraint layout model.
-//!
-//! Constraints flow *down* the widget tree; sizes flow *up*. This is the
-//! Flutter/Masonry box model — not full CSS. A parent hands each child a
-//! [`BoxConstraints`] describing the allowed `min`/`max` size, and the child
-//! returns the concrete [`Size`] it chose within those bounds.
+//! Box-constraint layout, the Flutter/Masonry box model (not CSS): a parent
+//! hands each child [`BoxConstraints`] and the child returns a [`Size`] within them.
 
 use kurbo::Size;
 
@@ -12,12 +8,8 @@ fn non_negative(size: Size) -> Size {
     Size::new(size.width.max(0.0), size.height.max(0.0))
 }
 
-/// Immutable min/max size bounds passed down during layout.
-///
-/// Invariant: both `min` and `max` are non-negative and `min <= max`
-/// component-wise. This is enforced unconditionally by every constructor —
-/// there is no way to construct a `BoxConstraints` that violates it, so
-/// [`constrain`](Self::constrain) can never panic.
+/// Min/max size bounds passed down during layout. Every constructor keeps both
+/// non-negative with `min <= max`, so [`constrain`](Self::constrain) never panics.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BoxConstraints {
     min: Size,
@@ -25,15 +17,8 @@ pub struct BoxConstraints {
 }
 
 impl BoxConstraints {
-    /// Construct constraints from explicit `min`/`max` bounds.
-    ///
-    /// Both bounds are clamped to be non-negative. If `max` is smaller than
-    /// `min` on either axis (an inverted/inconsistent input), `max` is
-    /// widened up to `min` on that axis — `min` is authoritative — so the
-    /// resulting constraints always satisfy `min <= max`. Inverted input
-    /// usually indicates an upstream layout bug (e.g. padding subtraction
-    /// underflow), so debug builds print a diagnostic when this correction
-    /// fires; release builds correct silently.
+    /// Bounds clamped non-negative; an inverted axis widens `max` to `min`, with a
+    /// debug-build diagnostic since it usually means an upstream layout bug.
     pub fn new(min: Size, max: Size) -> Self {
         let min = non_negative(min);
         let max = non_negative(max);
@@ -92,10 +77,7 @@ impl BoxConstraints {
         }
     }
 
-    /// Return tight constraints at the `size` clamped into this range.
-    ///
-    /// Useful when a parent wants to force a child to a specific size that
-    /// still respects the incoming bounds.
+    /// Tight constraints at `size` clamped into this range.
     pub fn tighten(&self, size: Size) -> Self {
         let size = self.constrain(size);
         Self {

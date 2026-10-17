@@ -1,10 +1,8 @@
-//! Hot-patch seam (opt-in `hotpatch` feature): every `Component::build` runs through frust-hotpatch's
-//! jump table, so a `dx` patch that swaps the monomorphised call takes effect on the next rebuild.
-//!
-//! The seam's boundary types are layout-fixed. [`build_erased`] erases the component's view inside
-//! the hot function, so the return slot is `Result<AnyView<_>, LayoutMismatch>` whatever the view
-//! type is; and it takes a [`SeamWitness`] written by the image that created the state, which the
-//! (possibly patched) callee compares with its own layout before it touches that state.
+//! Hot-patch seam (opt-in `hotpatch` feature): every `Component::build` runs through
+//! frust-hotpatch's jump table, so a patch that swaps the monomorphised call takes effect on the
+//! next rebuild. [`build_erased`] erases the view inside the hot function, so the return type is
+//! `Result<AnyView<_>, LayoutMismatch>` in every image, and checks a [`SeamWitness`] written by the
+//! state's creating image before the (possibly patched) callee touches that state.
 
 use std::any::type_name;
 use std::cell::RefCell;
@@ -20,14 +18,10 @@ use crate::layout::BoxConstraints;
 use crate::view::{AnyView, BuildCtx, ChangeFlags, View};
 use crate::widget::{LayoutCtx, PaintCtx, PaintScene, Widget};
 
-/// The layout a component's types have in one image: the size and alignment of `C::State` and of
-/// `C` itself.
-///
-/// Written once by the image that runs `init` (so creates the state) and compared, before any
-/// `C`-generic code touches that state, with [`SeamWitness::of`] as computed by the image doing the
-/// touching. A difference means a patch changed the layout under a live value: the toucher reports
-/// it ([`frust_hotpatch::report_layout_mismatch`]) and backs off. Four `u32`s in `repr(C)`, so the
-/// witness itself has the same layout in every image.
+/// The size and alignment of `C::State` and `C` in one image. Written by the image that runs
+/// `init` and compared with the toucher's [`SeamWitness::of`] before any `C`-generic code touches
+/// the state; a difference is reported and the toucher backs off. `repr(C)` `u32`s, so the witness
+/// itself has one layout in every image.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SeamWitness {
@@ -69,9 +63,9 @@ impl fmt::Display for SeamWitness {
     }
 }
 
-/// Compare `stored` (written by the state's creating image) with this image's own layout for `C`.
-/// On a difference the mismatch is reported to frust-hotpatch and returned; the caller must then
-/// leave the state, and everything built over it, alone.
+/// Compare `stored` (from the state's creating image) with this image's layout for `C`. On a
+/// difference the mismatch is reported and returned, and the caller leaves the state alone. The
+/// report refuses later applies only: one already past its pending-mismatch check still installs.
 pub(crate) fn verify_witness<C: Component>(stored: SeamWitness) -> Result<(), LayoutMismatch> {
     let own = SeamWitness::of::<C>();
     if stored == own {
@@ -86,15 +80,11 @@ pub(crate) fn verify_witness<C: Component>(stored: SeamWitness) -> Result<(), La
     })
 }
 
-/// Run `c.build(s)` through the jump table and return its view erased.
-///
-/// The hot function checks `witness` against its own layout first and returns the mismatch (already
-/// reported) without touching `s` when they differ. `witness` must come from storage the state's
-/// creating image wrote: a nested component passes its widget's stored witness, a root driver (the
-/// creator of the root state) its own `SeamWitness::of::<Root>()`. The erasure happens inside the
-/// hot function, so the type crossing the return slot is the same in every image. With no patch
-/// applied frust-hotpatch falls through to the original function. `init` is deliberately not
-/// routed here: it must not re-run on a patch.
+/// Run `c.build(s)` through the jump table and return its view erased inside the hot function, so
+/// the return type is the same in every image. On a `witness` mismatch it returns the (reported)
+/// error without touching `s`. `witness` must come from the state's creating image: a nested
+/// component's stored witness, or a root driver's own `SeamWitness::of::<Root>()`. `init` is never
+/// routed here, so it does not re-run on a patch.
 // erasure: keep hot-patch boundary type must be layout-fixed
 pub fn build_erased<C: Component>(
     c: &C,
@@ -151,18 +141,14 @@ impl<S: 'static> View<S> for Inert {
     }
 }
 
-/// The view a root driver hands its shell under the hot-patch feature: the root component's view
-/// from [`build_erased`], or nothing when the seam reported a layout mismatch.
+/// The view a root driver hands its shell under the hot-patch feature: the root's [`build_erased`]
+/// view, or nothing on a layout mismatch.
 ///
-/// A refused frame keeps the tree already on screen: the rebuild does nothing (as a nested
-/// component's skipped rebuild does) and carries the last accepted view forward, so a later
-/// accepted build (after the host acknowledged the mismatch and a corrective or revert patch
-/// matching the stored layout was applied) is diffed against it in place: no replace, nested
-/// component state kept, the normal teardown path. Only a first build that mismatches has nothing
-/// to carry: it shows an empty root, and the first accepted build then replaces that empty root.
+/// A refused frame leaves the tree on screen and carries the last accepted view forward, so the
+/// next accepted build diffs against it in place, keeping nested state. A refused first build shows
+/// an empty root, which the first accepted build replaces.
 pub struct RootView<S: 'static> {
-    /// The accepted view whose tree is on screen when this is the current frame: this frame's own
-    /// view, or (refused frame) the one moved in from the previous frame by `rebuild`.
+    /// The accepted view on screen: this frame's, or (refused frame) the previous one's.
     live: RefCell<Option<AnyView<S>>>,
     /// Whether this frame's build was accepted.
     accepted: bool,

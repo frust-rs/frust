@@ -214,7 +214,7 @@ macro_rules! ios_app {
         /// `3`=cancelled — an ABI shared with the Swift `FrustView`);
         /// `pointer_id` is the per-sequence contact slot (first contact of a
         /// sequence is 0; later contacts 1..; see FrustView.swift's slot map and
-        /// the 'Multi-contact contract' rustdoc in crates/frust-core/src/event.rs);
+        /// the 'Multi-contact contract' rustdoc in crates/frust-core/src/event/input.rs);
         /// `x`/`y` are logical points (passed through, no scale division).
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]

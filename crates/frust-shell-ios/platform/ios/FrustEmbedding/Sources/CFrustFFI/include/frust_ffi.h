@@ -48,7 +48,7 @@ uint8_t frust_render_frame(void *handle, uint64_t timestamp_ns);
 //   0 = began, 1 = moved, 2 = ended, 3 = cancelled.
 // `pointer_id` is the per-sequence contact slot (first contact of a sequence is
 // 0; later contacts 1..; see FrustView.swift's slot map and the 'Multi-contact
-// contract' rustdoc in crates/frust-core/src/event.rs).
+// contract' rustdoc in crates/frust-core/src/event/input.rs).
 // `x`/`y` are logical points (`touch.location(in:)`) — already density-scaled,
 // so the Rust side passes them through without dividing by the display scale.
 void  frust_dispatch_touch(void *handle, uint32_t phase, uint32_t pointer_id, float x, float y);

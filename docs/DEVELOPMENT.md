@@ -519,7 +519,7 @@ API 24/25 (Android 7.x) sit below the floor because **`EditorInfo.IME_FLAG_NO_PE
 is API 26+**: it is an `imeOptions` bit, so the constant inlines at compile time and an older IME
 simply ignores it — no compile error, no runtime crash, just the keyboard-learning half of FINDINGS
 #31's mitigation silently doing nothing. At 26 the flag is unconditionally honoured and
-`frust-core/src/event.rs`'s IME contract table holds at the floor.
+`crates/frust-core/src/event/ime.rs`'s IME contract table holds at the floor.
 
 **Lowering the floor below 26 re-opens that hole silently.** If it is ever lowered, restore the
 API-caveat entry in `docs/LIMITATIONS.md` in the same change. Android Lint flags the shape

@@ -372,7 +372,7 @@ that was on the clipboard when the first press asked.
 `CLIPBOARD_RESOLUTION_TIMEOUT_MS`; the identity it compares crosses JNI as
 `nativeFocusEpoch` (`crates/frust-shell-android/src/jni_glue.rs`) from
 `AppTree::focus_epoch`. What that counter does where the older surface-change
-counter beside it stands still is pinned by `crates/frust-core/src/app.rs`'s
+counter beside it stands still is pinned by `crates/frust-core/src/app/tests/focus_ime.rs`'s
 `focus_epoch_moves_when_focus_crosses_two_fields_publishing_alike`,
 `focus_epoch_moves_when_the_field_taking_focus_publishes_nothing`, and
 `focus_epoch_ignores_an_edit_inside_one_session`, each of which asserts what
@@ -3267,7 +3267,7 @@ consumer (a `material::list_item` row with `on_press` is the reference; drag fro
 it so nothing captures) and confirm the 8% overlay appears under the finger *and* is gone by the
 frame after lift — i.e. the residual is transient, never a tint stranded on a touch-only screen.
 
-**Evidence**: `crates/frust-core/src/app.rs`'s hover pipeline tests (`a_captured_move_cannot_claim_hover`,
+**Evidence**: `crates/frust-core/src/app/tests/hover.rs`'s hover pipeline tests (`a_captured_move_cannot_claim_hover`,
 `a_down_up_or_cancel_ends_the_hover`, `a_non_pointer_pass_leaves_a_live_hover_standing`);
 the hover pipeline (2026-08-17, commit `68ac7e93`) listed this among its known v1 gaps; the touch residual and
 the `Up` rule were traced in review the same day.
@@ -3310,7 +3310,7 @@ same root cause (nothing re-derives without a real `Move`).
 liveness independently of input, the same cost the hover model above declines to pay; the residual
 is cosmetic (a stale shape, never a stuck-captured pointer) and self-corrects on the next motion.
 
-**Evidence**: `crates/frust-core/src/app.rs`'s `RenderRoot::cursor()` doc comment ("Residual:
+**Evidence**: `crates/frust-core/src/app/session.rs`'s `RenderRoot::cursor()` doc comment ("Residual:
 a widget that is torn down … leaves the last shape in place until the next `Move`");
 the cursor API (merged 2026-08-17, `49bc7657`) listed this among its limitations.
 
@@ -3383,7 +3383,7 @@ per frame, and the broadcast is the only route that reaches an owner without kno
 
 **Evidence**: `crates/frust-core/src/overlay.rs`'s "Not in v1" section (focus trap, declined keys,
 inspection, nesting) and its per-pass registry contract; `crates/frust-widgets/src/overlay.rs`'s
-own "Not in v1" section (semantics, hover, IME); `crates/frust-core/src/event.rs`'s
+own "Not in v1" section (semantics, hover, IME); `crates/frust-core/src/event/input.rs`'s
 `InputEvent::Overlay` routing contract (the broadcast); `plugins/shadcn/src/components/tooltip.rs`,
 `plugins/beui/src/components/tooltip.rs`, and `plugins/material/src/tooltip.rs` module docs (all
 titled "Riding the framework portal") against the six unported
@@ -3530,11 +3530,24 @@ the coordinator's own registry-not-hit-test design working as specified: resolut
 registry a target reports at paint, and a region with nothing registered has nothing to resolve
 against.
 
-**Evidence**: `crates/frust-core/src/event.rs`'s `FileDropEvent` "Source" and "Broadcast follow-up"
+**Evidence**: `crates/frust-core/src/event/input.rs`'s `FileDropEvent` "Source" and "Broadcast follow-up"
 doc sections; `crates/frust-widgets/src/drag/target.rs`'s "OS file drops" module-doc section ("The
 drag always ends", "Known limit"); `crates/frust-shell-desktop/src/app_handler.rs`'s
 `FileDropAccumulator`, `FileHoverLatch` and the
 `WindowEvent::HoveredFile`/`DroppedFile`/`HoveredFileCancelled` arms.
+
+---
+
+### `file-drop-overlay-surface-unreachable` — an OS file drop over a floated overlay surface never reaches a drop target hosted in it
+
+**Observed**: an OS file drop whose pointer lands inside a floated overlay surface never reaches a
+drop target hosted in that surface: file-drop events are routed by the main tree's hit test, not
+through the overlay registry, so the surface's own targets see no `Hover`, `Drop` or `Cancel`.
+
+**Evidence**: `crates/frust-core/src/app/dispatch.rs`'s file-drop handling and `route_overlay`
+(which passes `FileDrop` straight through); `crates/frust-core/src/event/input.rs`'s `FileDropEvent`.
+
+**Trigger for removal**: overlay-aware file-drop hit testing.
 
 ---
 
@@ -3585,7 +3598,7 @@ browser has `pointerType`, both mobile shells synthesize their own) — a change
 deliberately rather than as a side effect of one field's gesture. The wrong behaviour here costs a
 selection the user can dismiss, never an edit.
 
-**Evidence**: `crates/frust-core/src/event.rs`'s `PointerEvent` (three fields, no kind);
+**Evidence**: `crates/frust-core/src/event/pointer.rs`'s `PointerEvent` (three fields, no kind);
 `crates/frust-widgets/src/textinput.rs`'s "Selection gestures and the toolbar" section (the
 long-press arms on a primary `Down`, with no kind consulted).
 
@@ -3654,7 +3667,7 @@ something a text field can do from inside itself.
 technology" section ("What is still missing is the dispatch, and it does not live here") and its
 `A11Y_CUT_ID` neighbours' `set_custom_actions` publication;
 `crates/frust-shell-common/src/app_tree.rs`'s `AppTree::perform_accessibility_action` signature;
-`crates/frust-core/src/app.rs`'s `RenderRoot::perform_accessibility_action` (a `Click` arm, a
+`crates/frust-core/src/app/semantics.rs`'s `RenderRoot::perform_accessibility_action` (a `Click` arm, a
 `Focus` arm, nothing else).
 
 **Trigger for removal**: the three widened together, proven by a custom action invoked from a real

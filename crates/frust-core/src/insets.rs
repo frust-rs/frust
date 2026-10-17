@@ -1,55 +1,20 @@
-//! Window insets: Flutter's `ViewportMetrics` inset model ported into the
-//! framework core.
+//! Window insets: Flutter's `ViewportMetrics` inset model in the framework core.
 //!
-//! A [`WindowInsets`] value flows shell → [`RenderRoot`](crate::app::RenderRoot)
-//! → layout/paint contexts, delivered exactly like the theme: the shell reads
-//! the platform's per-edge occlusion (Android `WindowInsets`, iOS
-//! `safeAreaInsets`/keyboard frame), converts device px to **logical** px at the
-//! FFI boundary, and pushes a [`WindowInsets`] onto the render root. A widget
-//! (v1: `SafeArea`) recovers the resolved [`WindowInsets::padding`] through
-//! [`LayoutCtx::window_insets`](crate::widget::LayoutCtx::window_insets) /
-//! [`PaintCtx::window_insets`](crate::widget::PaintCtx::window_insets).
+//! The shell converts the platform's per-edge occlusion to logical px and pushes a
+//! [`WindowInsets`] onto the render root; widgets read it through
+//! [`LayoutCtx::window_insets`](crate::widget::LayoutCtx::window_insets). Values
+//! are window-global, not relative to any widget's origin.
 //!
-//! Unlike the theme this is a **concrete** core-owned type (not `Box<dyn Any>`):
-//! it carries only `f64` scalars, so `frust-core` names it directly with no
-//! downstream-crate dependency and threads it by copy.
-//!
-//! # Coordinate space and origin-independence
-//!
-//! All values are **logical px** (the shell divides device px by the density
-//! before crossing into core). The insets are **global** — measured against the
-//! window, not any particular widget's origin — so containers need no per-child
-//! adjustment: a `SafeArea` consumes them knowing it spans the window.
-//!
-//! # Consumption (Flutter's `MediaQuery.removePadding`)
-//!
-//! A widget that pads its subtree by the safe-area padding also *removes* what
-//! it consumed from that subtree: it derives a reduced value with
-//! [`WindowInsets::consuming`] and installs it for its children through
-//! [`LayoutCtx::with_window_insets`](crate::widget::LayoutCtx::with_window_insets)
-//! / [`PaintCtx::with_window_insets`](crate::widget::PaintCtx::with_window_insets).
-//! Descendants then read zero padding on the consumed edges, so a self-insetting
-//! widget nested inside a `SafeArea` does not inset a second time. Outside such
-//! a scope the value is the single root-seeded one. A pod floated through the
-//! overlay portal carries its owner's consumed view along in its
-//! [`OverlayEntry`](crate::overlay::OverlayEntry), so the same guarantee — a
-//! paint-time read agrees with the layout-time one — holds for floated content
-//! too, even though the root paints it from a separate pass.
-//!
-//! [`CornerInsets`] are the exception: they are window-corner facts a
-//! `SafeArea` neither pads by nor removes, and a widget that laid out around
-//! them does not rewrite them for its subtree.
+//! A widget that pads by the safe area installs [`WindowInsets::consuming`] for its
+//! subtree (Flutter's `MediaQuery.removePadding`), so nested self-insetting widgets
+//! do not inset twice; an overlay entry carries its owner's consumed value along.
+//! [`CornerInsets`] are never consumed.
 
-/// The footprint of a system window control at one corner, in logical pixels.
-///
-/// `width` is measured inward from the safe-area rectangle's vertical edge and
-/// `height` inward from its horizontal edge. See [`CornerInsets`] for the full
-/// contract.
+/// The footprint of a system window control at one corner, in logical px; see
+/// [`CornerInsets`].
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct CornerInset {
-    /// Horizontal extent, in logical px.
     pub width: f64,
-    /// Vertical extent, in logical px.
     pub height: f64,
 }
 
@@ -60,46 +25,28 @@ impl CornerInset {
         height: 0.0,
     };
 
-    /// Construct from a width and a height, in logical px.
     pub const fn new(width: f64, height: f64) -> Self {
         Self { width, height }
     }
 }
 
-/// Window-control footprints at the four window corners, in logical pixels.
+/// Window-control footprints at the four window corners, in logical px.
 ///
-/// * Values are **logical px** (see the [module docs](self)).
-/// * Corners are **physical**: frust has no RTL layout, so the shell resolves
-///   direction. In an RTL locale the iPadOS window control lands top-RIGHT.
-/// * Each value is the extent by which a system window control **protrudes
-///   beyond the safe-area rectangle** at that corner: `width` is measured
-///   inward from the safe area's vertical edge, `height` inward from its
-///   horizontal edge. A widget whose content band starts at the safe-area top
-///   therefore overlaps the corner iff `height > 0.0` -- whether it self-insets
-///   the top (reads `padding().top`) or sits under a top-consuming `SafeArea`
-///   (reads 0) -- because in both cases the control's bottom edge is
-///   safe-area-top + `height`.
-/// * Corners are **never consumed** and never part of
-///   [`WindowInsets::padding`]; [`WindowInsets::consuming`] leaves them alone.
-/// * Today only the iOS shell reports them (the iPadOS 26+ window control).
-///   Android, desktop, web and iOS < 26 leave them zero.
-/// * Accepted gap: a bar that does not consume the horizontal safe-area insets
-///   under-shifts for a control on a notched edge (no platform draws one there).
-/// * Bars shift for overlap only when spanning the window's left/right edges
-///   (typical of app bars at the top). Content hosted in a detail pane, sheet,
-///   dialog, or below other content still receives the window-wide corner values
-///   (corners are never consumed; layout cannot see its window-space origin) and
-///   would over-shift. Shipped bars expose `corner_shift(false)` as the author's
-///   opt-out; no automatic detection exists.
+/// * Corners are physical (frust has no RTL layout; the shell resolves direction).
+/// * Each value is how far a control protrudes past the safe-area rectangle:
+///   `width` inward from its vertical edge, `height` from its horizontal edge, so
+///   content starting at the safe-area top overlaps the corner iff `height > 0.0`.
+/// * Never consumed or part of [`WindowInsets::padding`]; only iOS reports them (iPadOS 26+).
+/// * Accepted gap: a bar not consuming the horizontal insets under-shifts for a
+///   control on a notched edge (no platform draws one there).
+/// * Accepted gap: content not spanning the window's left/right edges (a detail
+///   pane, sheet or dialog) still gets window-wide values and would over-shift;
+///   shipped bars expose `corner_shift(false)` as the opt-out.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct CornerInsets {
-    /// Top-left corner footprint.
     pub top_left: CornerInset,
-    /// Top-right corner footprint.
     pub top_right: CornerInset,
-    /// Bottom-left corner footprint.
     pub bottom_left: CornerInset,
-    /// Bottom-right corner footprint.
     pub bottom_right: CornerInset,
 }
 
@@ -112,7 +59,6 @@ impl CornerInsets {
         bottom_right: CornerInset::ZERO,
     };
 
-    /// Construct from the four corner footprints.
     pub const fn new(
         top_left: CornerInset,
         top_right: CornerInset,
@@ -128,27 +74,18 @@ impl CornerInsets {
     }
 }
 
-/// Per-edge inset amounts, in logical pixels.
-///
-/// The framework-core counterpart of `frust-widgets`' layout `EdgeInsets`
-/// (that one is a `Padding` container's spacing; this one is the platform
-/// occlusion model — a different layer, so it is not reused). Every value is a
-/// non-negative logical-px distance from the corresponding window edge.
+/// Non-negative per-edge distances from the window edges, in logical px. The
+/// platform occlusion model, distinct from `frust-widgets`' layout `EdgeInsets`.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct EdgeInsets {
-    /// Inset from the left edge.
     pub left: f64,
-    /// Inset from the top edge.
     pub top: f64,
-    /// Inset from the right edge.
     pub right: f64,
-    /// Inset from the bottom edge.
     pub bottom: f64,
 }
 
 impl EdgeInsets {
-    /// The zero inset — no occlusion on any edge (the default, and the value a
-    /// [`WindowInsets`] carries until a shell pushes a real one).
+    /// No occlusion on any edge.
     pub const ZERO: EdgeInsets = EdgeInsets {
         left: 0.0,
         top: 0.0,
@@ -156,7 +93,6 @@ impl EdgeInsets {
         bottom: 0.0,
     };
 
-    /// Construct per-edge insets directly.
     pub fn new(left: f64, top: f64, right: f64, bottom: f64) -> Self {
         Self {
             left,
@@ -166,12 +102,8 @@ impl EdgeInsets {
         }
     }
 
-    /// Per-edge maximum of `self` and `other`.
-    ///
-    /// Mirrors Flutter's engine-side merge of `Type.systemBars()` with the
-    /// display cutout (`FlutterView.java:751-793`): a shell that assembles its
-    /// `view_padding` from several platform inset sources combines them per edge
-    /// with this rather than summing.
+    /// Per-edge maximum: how a shell merges several platform inset sources, as
+    /// Flutter's engine merges system bars with the display cutout.
     #[must_use]
     pub fn max(self, other: EdgeInsets) -> EdgeInsets {
         EdgeInsets {
@@ -182,14 +114,7 @@ impl EdgeInsets {
         }
     }
 
-    /// Per-edge saturating subtraction: `max(0.0, self.edge - other.edge)` for
-    /// each edge, clamping a would-be-negative result to zero.
-    ///
-    /// This is the building block of [`WindowInsets::padding`] (Flutter's
-    /// `padding = max(0.0, viewPadding - viewInsets)`,
-    /// `media_query.dart:152-170`): where the IME (`view_insets`) fully covers a
-    /// system-bar edge (`view_padding`), the derived safe-area padding for that
-    /// edge collapses to zero rather than going negative.
+    /// Per-edge `max(0.0, self - other)`.
     #[must_use]
     pub fn saturating_sub(self, other: EdgeInsets) -> EdgeInsets {
         EdgeInsets {
@@ -201,36 +126,19 @@ impl EdgeInsets {
     }
 }
 
-/// The window's inset state, mirroring Flutter's `ViewportMetrics`
-/// (`media_query.dart`).
-///
-/// Carries the two per-edge sets a shell transports; the third (the derived
-/// safe-area [`padding`](WindowInsets::padding)) is computed on demand, never
-/// stored:
-///
-/// * [`view_padding`](WindowInsets::view_padding) — system-UI-occluded edges
-///   (status/navigation bars, display cutout). Never includes the IME.
-/// * [`view_insets`](WindowInsets::view_insets) — fully-obscured area, in
-///   practice the on-screen keyboard (IME). The status bar is never part of
-///   this on either platform.
-///
-/// All values are **logical px** (see the [module docs](self)). `Default` is
-/// the all-zero state (no occlusion). `PartialEq` lets a shell compare the
-/// freshly-read platform insets against the last-pushed value and skip a no-op
-/// [`set_insets`](crate::app::RenderRoot::set_insets).
+/// The window's inset state, mirroring Flutter's `ViewportMetrics`; `Default` is
+/// no occlusion.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct WindowInsets {
-    /// System-UI-occluded edges (status/navigation bars, cutout), in logical px.
+    /// System-UI-occluded edges (status/navigation bars, cutout); never the IME.
     pub view_padding: EdgeInsets,
-    /// Fully-obscured edges (the IME/keyboard), in logical px.
+    /// Fully obscured edges: in practice the on-screen keyboard.
     pub view_insets: EdgeInsets,
-    /// Window-control corners, in logical px; see [`CornerInsets`].
     pub corner_insets: CornerInsets,
 }
 
 impl WindowInsets {
-    /// Construct from the two transported per-edge sets; corners are
-    /// [`CornerInsets::ZERO`] (see [`with_corner_insets`](Self::with_corner_insets)).
+    /// From the two per-edge sets, with [`CornerInsets::ZERO`].
     pub fn new(view_padding: EdgeInsets, view_insets: EdgeInsets) -> Self {
         Self {
             view_padding,
@@ -239,42 +147,21 @@ impl WindowInsets {
         }
     }
 
-    /// These insets with the window-control `corner_insets` set. `padding()`
-    /// is unaffected.
     #[must_use]
     pub fn with_corner_insets(mut self, corner_insets: CornerInsets) -> Self {
         self.corner_insets = corner_insets;
         self
     }
 
-    /// The derived safe-area padding: `max(0.0, view_padding - view_insets)`
-    /// per edge (Flutter's formula, `media_query.dart:152-170`).
-    ///
-    /// This is what a `SafeArea` widget insets by — where the IME
-    /// (`view_insets`) overlaps a system-bar edge (`view_padding`), that edge's
-    /// safe-area padding clamps to zero (the IME already handles keyboard
-    /// avoidance for that edge). Computed on demand; never transported.
+    /// The safe-area padding a `SafeArea` insets by: `view_padding - view_insets`
+    /// per edge, saturating at zero (Flutter's formula). Never transported.
     pub fn padding(&self) -> EdgeInsets {
         self.view_padding.saturating_sub(self.view_insets)
     }
 
-    /// These insets with the safe-area [`padding`](WindowInsets::padding) on
-    /// each enabled edge marked as consumed — the value a widget that has
-    /// already padded by those edges hands to its subtree.
-    ///
-    /// Flutter parity: `MediaQuery.removePadding` as applied by `SafeArea`. For
-    /// each enabled edge, `view_padding.<edge>` is reduced by
-    /// `self.padding().<edge>` (saturating at zero); `view_insets` is left
-    /// untouched. The invariants are:
-    ///
-    /// * `consuming(..).padding().<edge> == 0.0` on every enabled edge;
-    /// * `view_insets` is unchanged, so the IME still reaches descendants for
-    ///   keyboard avoidance;
-    /// * disabled edges are unchanged in both sets;
-    /// * `consuming(..).corner_insets == self.corner_insets` — corners are never
-    ///   consumed;
-    /// * the operation is idempotent — consuming an already-consumed edge is a
-    ///   no-op, which is what makes nested `SafeArea`s consume only once.
+    /// These insets with [`padding`](Self::padding) consumed on each enabled edge:
+    /// those edges then read zero padding, `view_insets` and corners are unchanged
+    /// (the IME still reaches descendants), and repeating it is a no-op.
     #[must_use]
     pub fn consuming(self, left: bool, top: bool, right: bool, bottom: bool) -> WindowInsets {
         let padding = self.padding();
