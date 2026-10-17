@@ -704,6 +704,11 @@ impl<'a> PaintCtx<'a> {
         self.has_focus = has_focus;
     }
 
+    /// The previous paint's shortcut declarations, as `BuildCtx::shortcut_hints` returns them.
+    pub fn shortcut_hints(&self) -> std::rc::Rc<[crate::shortcuts::ShortcutHint]> {
+        crate::shortcuts::last_hints()
+    }
+
     /// Whether to draw a focus ring: [`PaintCtx::has_focus`] and the root's
     /// [`FocusRingPolicy`](crate::app::FocusRingPolicy) allowing one right now.
     pub fn is_focused_for_ring(&self) -> bool {

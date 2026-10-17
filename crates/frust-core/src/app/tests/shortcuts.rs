@@ -46,6 +46,10 @@ struct Fixture {
     keys: Vec<&'static str>,
     /// Overlay events the owner received.
     owner: Vec<OverlayEventKind>,
+    /// Labels `BuildCtx::shortcut_hints` returned on the latest rebuild.
+    built_hints: Vec<String>,
+    /// Labels `PaintCtx::shortcut_hints` returned during the latest paint.
+    painted_hints: Vec<String>,
 }
 
 type Shared = Rc<RefCell<Fixture>>;
@@ -77,6 +81,11 @@ impl crate::widget::Widget for Declarer {
     }
     fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
         let slot = slot(&self.shared, self.name);
+        if self.name == "global" || self.name == "a" {
+            let hints = ctx.shortcut_hints();
+            let labels = hints.iter().map(|h| h.label.clone());
+            self.shared.borrow_mut().painted_hints = labels.collect();
+        }
         if slot.declare {
             ctx.register_shortcut(ShortcutDecl {
                 id: slot.id,
@@ -242,7 +251,10 @@ impl View<()> for KeysView {
             children: children.collect(),
         }
     }
-    fn rebuild(&self, _: &Self, _: &mut KeysRoot, _: &mut BuildCtx<'_>) -> ChangeFlags {
+    fn rebuild(&self, _: &Self, _: &mut KeysRoot, ctx: &mut BuildCtx<'_>) -> ChangeFlags {
+        let hints = ctx.shortcut_hints();
+        let labels = hints.iter().map(|h| h.label.clone());
+        self.shared.borrow_mut().built_hints = labels.collect();
         ChangeFlags::NONE
     }
 }
@@ -547,4 +559,46 @@ fn a_shortcut_answer_may_claim_focus() {
         vec!["search"],
         "keys now route to it"
     );
+}
+
+#[test]
+fn widgets_see_the_last_paints_hints_in_paint_order_across_events() {
+    let mut keys = Keys::new(
+        vec![
+            Slot::new("a", "Ctrl+K", ShortcutScope::AppGlobal),
+            Slot::new("b", "Ctrl+J", ShortcutScope::Local),
+        ],
+        vec![Child::Leaf("a", true), Child::Leaf("b", false)],
+    );
+    let rebuild = |keys: &mut Keys| {
+        let shared = Rc::clone(&keys.shared);
+        keys.root.rebuild(
+            &mut |_: &mut ()| KeysView {
+                layout: vec![Child::Leaf("a", true), Child::Leaf("b", false)],
+                shared: Rc::clone(&shared),
+            },
+            &mut (),
+        );
+    };
+    assert!(keys.shared.borrow().painted_hints.is_empty(), "first paint");
+    rebuild(&mut keys);
+    assert_eq!(keys.shared.borrow().built_hints, ["a", "b"]);
+    keys.frame();
+    assert_eq!(keys.shared.borrow().painted_hints, ["a", "b"]);
+
+    keys.press("Ctrl+K");
+    rebuild(&mut keys);
+    assert_eq!(keys.shared.borrow().built_hints, ["a", "b"], "event pass");
+
+    edit(&keys.shared, "a", |s| s.declare = false);
+    edit(&keys.shared, "b", |s| s.declare = false);
+    rebuild(&mut keys);
+    assert_eq!(
+        keys.shared.borrow().built_hints,
+        ["a", "b"],
+        "not repainted"
+    );
+    keys.frame();
+    rebuild(&mut keys);
+    assert!(keys.shared.borrow().built_hints.is_empty());
 }

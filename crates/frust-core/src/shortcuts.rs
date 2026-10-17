@@ -13,8 +13,9 @@
 //! broadcast (wrapped in an overlay event for a stamped one); the declarer answers `Handled`, and
 //! an unanswered delivery falls through to the next candidate.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::fmt;
+use std::rc::Rc;
 
 use crate::event::{Key, KeyEvent, Modifiers, NamedKey, PassBracket};
 use crate::overlay::OverlayKey;
@@ -38,6 +39,14 @@ thread_local! {
     static KEY_FORWARD: Cell<Option<OverlayKey>> = const { Cell::new(None) };
 
     static KEY_FORWARD_OPEN: Cell<bool> = const { Cell::new(false) };
+
+    /// The last paint's hints, replaced every paint (one root per thread, like the rest here).
+    static LAST_HINTS: RefCell<Rc<[ShortcutHint]>> = RefCell::new(Rc::from(Vec::new()));
+}
+
+/// The previous paint's declarations in paint order, masked or unreachable ones included.
+pub(crate) fn last_hints() -> Rc<[ShortcutHint]> {
+    LAST_HINTS.with(|hints| Rc::clone(&hints.borrow()))
 }
 
 /// Whether `Mod` means Command (Apple targets) or Ctrl (everything else, `wasm32` included).
@@ -410,6 +419,12 @@ impl ShortcutTable {
         hints.filter(|hint| filter(hint)).collect()
     }
 
+    /// Make this table's hints the thread's snapshot that `last_hints` returns.
+    pub(crate) fn publish(&self) {
+        let snapshot: Rc<[ShortcutHint]> = self.hints(|_| true).into();
+        LAST_HINTS.with(|hints| *hints.borrow_mut() = snapshot);
+    }
+
     /// The declarations `event` presses, as `(id, overlay stamp)` in delivery order: the
     /// `top_overlay` pod's, then (unless `masked`, a modal pod's mask) main-tree `Local`, then
     /// `AppGlobal`, newest first in each. Any other floated pod's declarations are left out.
@@ -570,6 +585,28 @@ mod tests {
         let apple = cfg!(any(target_os = "macos", target_os = "ios"));
         let expected = if apple { "⌘K" } else { "Ctrl+K" };
         assert_eq!(chord("Mod+K").display(), expected);
+    }
+
+    #[test]
+    fn publish_replaces_the_thread_snapshot_each_time() {
+        let table = ShortcutTable::new(vec![
+            ShortcutEntry {
+                decl: decl("Mod+K", ShortcutScope::AppGlobal),
+                overlay: None,
+            },
+            ShortcutEntry {
+                decl: decl("Esc", ShortcutScope::Local),
+                overlay: Some(OverlayKey::next()),
+            },
+        ]);
+        table.publish();
+        let first = last_hints();
+        let labels: Vec<_> = first.iter().map(|h| h.label.as_str()).collect();
+        assert_eq!(labels, ["Mod+K", "Esc"]);
+        assert!(Rc::ptr_eq(&first, &last_hints()), "reads share one Rc");
+        ShortcutTable::default().publish();
+        assert!(last_hints().is_empty());
+        assert_eq!(first.len(), 2, "a held snapshot is unaffected");
     }
 
     #[test]
