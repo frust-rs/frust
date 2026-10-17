@@ -1,0 +1,19 @@
+[package]
+name = "frust-file-dialogs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Native file open/save dialogs for Frust apps on Linux, macOS and Windows, backed by the rfd crate."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[dependencies]
+thiserror = { workspace = true }
+
+# Desktop only: Android, iOS and wasm never compile rfd.
+[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows", target_os = "freebsd", target_os = "dragonfly", target_os = "netbsd", target_os = "openbsd"))'.dependencies]
+rfd = { workspace = true }

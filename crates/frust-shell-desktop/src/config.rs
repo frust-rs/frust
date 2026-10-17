@@ -3,8 +3,9 @@
 //! crates.
 //!
 //! Everything here is plain data — no `winit`, no platform types, no behavior.
-//! The core itself consumes exactly one field ([`DesktopConfig::app_name`], as
-//! the window title); the rest exists so a per-OS shell can read one config
+//! The core consumes the window title ([`DesktopConfig::app_name`]) and the
+//! window geometry fields (initial/min/max size, opt-in window-state
+//! persistence); the rest exists so a per-OS shell can read one config
 //! rather than inventing its own (`app_id` becomes a Wayland `app_id`/X11
 //! `WM_CLASS` or a Windows AppUserModelID; `window_icon` becomes an
 //! `NSApplication` icon / `HICON` / X11 icon; `menu_spec` becomes an NSApp menu
@@ -24,8 +25,11 @@
 //!
 //! [`DesktopConfig::default()`] reproduces the zero-config dev-preview window
 //! byte-for-byte: the title falls back to [`DEFAULT_APP_NAME`], no icon, no
-//! menu, and a close request quits. An app that never configures anything gets
-//! precisely the window it got before this seam existed.
+//! menu, no size constraints, no persisted geometry, and a close request
+//! quits. An app that never configures anything gets precisely the window it
+//! got before this seam existed.
+
+use kurbo::Size;
 
 /// The window title used when no [`DesktopConfig::app_name`] is configured —
 /// the dev-preview shell's historical hardcoded title, preserved so the
@@ -37,7 +41,9 @@ pub const DEFAULT_APP_NAME: &str = "Frust";
 /// Built by the facade from an app's own declaration and handed to
 /// [`run_desktop_with`](crate::run_desktop_with); every field is optional and
 /// the [`Default`] value is today's dev-preview behavior (see the module docs).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `PartialEq` but not `Eq`: the size fields are `f64`-backed [`Size`]s.
+#[derive(Debug, Clone, PartialEq)]
 pub struct DesktopConfig {
     /// The app's display name: the window title, and (for the per-OS shells)
     /// the name a macOS menu bar's application menu shows. `None` falls back to
@@ -66,6 +72,21 @@ pub struct DesktopConfig {
     /// convention is for an app to stay running with no window until ⌘Q —
     /// see `DesktopExtensions::on_close_requested`.
     pub quit_on_last_window_closed: bool,
+    /// The window's initial inner size in logical pixels, or `None` for the
+    /// shell default (800×600). A persisted window state and the
+    /// `FRUST_WINDOW_SIZE` measurement knob both take precedence over it.
+    pub initial_size: Option<Size>,
+    /// The smallest inner size, in logical pixels, the user can resize the
+    /// window to. Also clamps a restored window state.
+    pub min_size: Option<Size>,
+    /// The largest inner size, in logical pixels, the user can resize the
+    /// window to. Also clamps a restored window state.
+    pub max_size: Option<Size>,
+    /// Whether the window's size, position and maximized state are saved to
+    /// the user's data directory and restored on the next launch. Opt-in
+    /// (`false` by default); a restored position that no longer lands on any
+    /// connected monitor is dropped and the OS places the window instead.
+    pub persist_window_state: bool,
 }
 
 impl Default for DesktopConfig {
@@ -80,6 +101,10 @@ impl Default for DesktopConfig {
             window_icon: None,
             menu_spec: None,
             quit_on_last_window_closed: true,
+            initial_size: None,
+            min_size: None,
+            max_size: None,
+            persist_window_state: false,
         }
     }
 }
@@ -118,6 +143,33 @@ impl DesktopConfig {
     /// Set whether closing the last window quits the app.
     pub fn with_quit_on_last_window_closed(mut self, quit: bool) -> Self {
         self.quit_on_last_window_closed = quit;
+        self
+    }
+
+    /// Set the window's initial inner size, in logical pixels (see
+    /// [`initial_size`](DesktopConfig::initial_size)).
+    pub fn with_initial_size(mut self, size: impl Into<Size>) -> Self {
+        self.initial_size = Some(size.into());
+        self
+    }
+
+    /// Set the window's minimum inner size, in logical pixels.
+    pub fn with_min_size(mut self, size: impl Into<Size>) -> Self {
+        self.min_size = Some(size.into());
+        self
+    }
+
+    /// Set the window's maximum inner size, in logical pixels.
+    pub fn with_max_size(mut self, size: impl Into<Size>) -> Self {
+        self.max_size = Some(size.into());
+        self
+    }
+
+    /// Opt in to (or out of) saving and restoring the window's geometry
+    /// across launches (see
+    /// [`persist_window_state`](DesktopConfig::persist_window_state)).
+    pub fn with_persist_window_state(mut self, persist: bool) -> Self {
+        self.persist_window_state = persist;
         self
     }
 
@@ -430,7 +482,24 @@ mod tests {
         // A close request quits, exactly as the unconditional
         // `event_loop.exit()` did before this seam existed.
         assert!(config.quit_on_last_window_closed);
+        assert_eq!(config.initial_size, None);
+        assert_eq!(config.min_size, None);
+        assert_eq!(config.max_size, None);
+        assert!(!config.persist_window_state, "persistence is opt-in");
         assert_eq!(DesktopConfig::new(), config);
+    }
+
+    #[test]
+    fn the_geometry_builders_set_logical_sizes_and_the_persistence_flag() {
+        let config = DesktopConfig::new()
+            .with_initial_size((1024.0, 768.0))
+            .with_min_size(Size::new(400.0, 300.0))
+            .with_max_size((1920.0, 1080.0))
+            .with_persist_window_state(true);
+        assert_eq!(config.initial_size, Some(Size::new(1024.0, 768.0)));
+        assert_eq!(config.min_size, Some(Size::new(400.0, 300.0)));
+        assert_eq!(config.max_size, Some(Size::new(1920.0, 1080.0)));
+        assert!(config.persist_window_state);
     }
 
     #[test]

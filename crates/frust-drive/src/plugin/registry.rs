@@ -1,4 +1,4 @@
-//! The static plugin registry (v1) — twenty-one entries mirroring `plugins/`:
+//! The static plugin registry (v1) — twenty-two entries mirroring `plugins/`:
 //! `shared-preferences` (dependency only), `secure-storage` (dependency plus
 //! an optional `biometric-gate` feature wiring in the plugin's own Android
 //! library module and the iOS plist key its README documents),
@@ -677,6 +677,25 @@ const QR: PluginSpec = PluginSpec {
     requires_sibling: None,
 };
 
+/// `file-dialogs`' single base contribution: a Cargo dependency and nothing
+/// else. Desktop dialogs go through `rfd` (portal/zenity, NSOpenPanel,
+/// IFileDialog); no manifest permission, plist key, Gradle module or Swift
+/// package is involved, and Android/iOS report `Unsupported`.
+const FILE_DIALOGS_BASE: &[Contribution] = &[Contribution::CargoDep {
+    name: "frust-file-dialogs",
+}];
+
+const FILE_DIALOGS: PluginSpec = PluginSpec {
+    id: "file-dialogs",
+    summary: "Native file open/save dialogs on Linux, macOS and Windows via rfd \
+              (blocking calls: run them in spawn_blocking); Android, iOS and web \
+              report Unsupported.",
+    crate_dir: "file-dialogs",
+    base: FILE_DIALOGS_BASE,
+    optional_features: &[],
+    requires_sibling: None,
+};
+
 /// The v1 static plugin registry (Vec-factory convention). A caller (the CLI
 /// or the TUI Add Plugin dialog) enumerates this to drive selection without
 /// hardcoding plugin ids.
@@ -703,6 +722,7 @@ pub fn known_plugins() -> Vec<PluginSpec> {
         NETWORK_IMAGE,
         SHARE,
         QR,
+        FILE_DIALOGS,
     ]
 }
 
@@ -722,7 +742,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
-    fn registry_lists_the_twenty_one_v1_plugins() {
+    fn registry_lists_the_twenty_two_v1_plugins() {
         let ids: Vec<&str> = known_plugins().iter().map(|p| p.id).collect();
         assert_eq!(
             ids,
@@ -748,6 +768,7 @@ mod tests {
                 "network-image",
                 "share",
                 "qr",
+                "file-dialogs",
             ]
         );
     }
@@ -788,13 +809,14 @@ mod tests {
     /// same single-contribution shape this test already checks, so it is
     /// grouped here rather than duplicated into its own test.
     #[test]
-    fn design_systems_and_url_launcher_are_each_a_cargo_dep_and_nothing_else() {
+    fn design_systems_url_launcher_and_file_dialogs_are_each_a_cargo_dep_and_nothing_else() {
         for (id, crate_name) in [
             ("glyph", "frust-glyph"),
             ("material", "frust-material"),
             ("cupertino", "frust-cupertino"),
             ("shadcn", "frust-shadcn"),
             ("url-launcher", "frust-url-launcher"),
+            ("file-dialogs", "frust-file-dialogs"),
         ] {
             let spec = find_plugin(id).unwrap();
             assert_eq!(spec.crate_dir, id);

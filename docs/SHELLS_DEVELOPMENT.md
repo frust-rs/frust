@@ -233,6 +233,40 @@ X11); Wayland remains owed (see [LIMITATIONS.md](LIMITATIONS.md)
 - **Linux:** `WM_CLASS` matches the app id and the `.desktop` pairing via `StartupWMClass`, plus
   the X11 window icon — done on X11; the Wayland `app_id` pairing is still owed.
 
+## Desktop window geometry (macOS + Windows + Linux)
+
+`DesktopConfig`'s geometry fields — `initial_size`, `min_size`, `max_size` (logical pixels) and the
+opt-in `persist_window_state` — shape the shared core's window
+([SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md) § Configuration vocabulary); `min_size`/`max_size`
+are the window's resize limits. Creation geometry resolves lowest to highest precedence:
+
+1. the shell default, 800×600;
+2. `initial_size` (an invalid size is ignored);
+3. the saved state (size, position, maximized), only when persistence is on;
+4. `FRUST_WINDOW_SIZE` (size only) and `FRUST_WINDOW_MAXIMIZED` (maximized only; `0` un-maximizes
+   a saved maximized state) — [DEVELOPMENT.md](DEVELOPMENT.md) § Instrumentation;
+5. the extension's pre-create hook, which may override any attribute.
+
+The state file is `<data_dir>/frust/window_state_<app_stem>.txt`: versioned `key=value` lines
+(`version=1`, `width`, `height`, `maximized`, optional `x`/`y`/`monitor`). Another version or a
+malformed line is ignored, and a failed read or write logs at debug level without failing startup.
+Saves are debounced 500 ms after the last resize or move, with a final save on close request and on
+exit; a minimized window records nothing, and a maximized one keeps its last un-maximized geometry.
+A restored state is fitted to the connected monitors first: the position is dropped (the OS places
+the window) when the saved monitor is gone or the rectangle overlaps no monitor, the size is fitted
+to that monitor (the primary once the position is dropped), then `max_size` and `min_size` apply in
+that order, so the minimum wins. Wayland reports no position, so only size and maximized state
+restore there.
+
+Gate, against `examples/playground` (480×320 minimum, persistence on; its README's gate table is
+the record):
+
+- **Linux — passed** (2026-10-18, linux-native rig): resize and move saved after the debounce, a
+  300×200 request held at the 480×320 minimum, close wrote the final state, relaunch restored size and position.
+- **macOS — owed:** relaunch restore and the minimum size.
+- **Windows — owed:** relaunch restore, the off-screen clamp (saved monitor disconnected), and the
+  minimum size.
+
 ## Browser manual gate (web)
 
 A gate for `crates/frust-shell-web`, run against `examples/web-gallery` per its own README's

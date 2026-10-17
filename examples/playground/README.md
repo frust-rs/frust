@@ -14,7 +14,7 @@ neutral backdrop for the capabilities under test.
 
 A Material `app_bar` (a plug brand mark, the title, and the
 brightness / reduce-motion / animations toggles) sits above the
-`pattern_switcher`-hosted section body, selecting between sixteen sections
+`pattern_switcher`-hosted section body, selecting between seventeen sections
 through one of two responsive navigation shapes (`use_context::<WindowMetrics>()`
 against a 600px width breakpoint — `pages::responsive`'s own named-breakpoint
 convention, applied to the shell itself):
@@ -22,7 +22,7 @@ convention, applied to the shell itself):
 - **Narrow** (< 600px, e.g. a phone): a bottom `navigation_bar` shows the
   first five sections directly, plus a trailing "More" destination that opens
   an overlay listing every section.
-- **Wide** (≥ 600px, e.g. a desktop window): a side rail lists all sixteen
+- **Wide** (≥ 600px, e.g. a desktop window): a side rail lists all seventeen
   sections directly, in a column beside the page body — nothing is ever
   behind an overflow menu at this width.
 
@@ -145,6 +145,15 @@ The sections, in order:
    `sliver_app_bar`, a floating `sliver_persistent_header`, a variable-extent
    `sliver_list`, a 4-column `sliver_grid` and `sliver_fill_remaining`, with
    `ScrollController` jump buttons; the reference surface for the sliver protocol.
+17. **Desktop** — `frust-file-dialogs` from real button presses (Open file / Open
+    files / Save as…, each run in `spawn_blocking` and delivered through
+    `use_task`; file names only, never contents or full paths; non-desktop
+    targets show "desktop only"), plus a window card with the live logical size
+    and the persisted-state file location
+    (`<data dir>/frust/window_state_<app>.txt`). The app's `DesktopConfig`
+    (`lib.rs`) persists window geometry and enforces a 480 x 320 minimum size.
+    The Scroll page also carries the opt-in baseline scrollbar (default and
+    `Always` variants).
 
 The Terminal fixtures live in [`fixtures/terminal/`](fixtures/terminal/README.md)
 (bytes + the deterministic generator that produced them, embedded with
@@ -207,6 +216,11 @@ trackpad, or touchscreen. Rows marked OWED have not been run:
 | Same legs, single contact only | iOS Simulator (iPhone 17), iOS 26.2, 2026-10-02 | PASS except pinch: NOT RUN |
 | Scroll: every button (Jump to 0 / Jump to end / Animate to 50% / #150 Start / #42 Center / Animated #280 End) | Linux (local) | OWED |
 | Scroll: a touch drag mid-`animate_to`/animated `scroll_to_item` interrupts the move | Android device | OWED |
+| Desktop: open / open-multi / save-as dialog round trip (portal-served) | Linux (conductor, linux-native rig: host-built playground on the rig's Xorg :20, dialogs from the host xdg-desktop-portal-gtk under DISPLAY=:20) | PASSED 2026-10-18 (GTK chooser with the Images filter; one file, two files, and a save with the suggested name all came back as names only) |
+| Desktop: relaunch restores window geometry; min size is enforced | Linux (conductor, linux-native rig) | PASSED 2026-10-18 (resize + move saved after the debounce, a 300×200 request clamped to 480×320, close wrote the final state, relaunch restored 480×320 at the saved position) |
+| Scroll: scrollbar fade-out, thumb drag, track click, `Always` variant | Linux (conductor, linux-native rig) | PASSED 2026-10-18 (bar visible during an animated move and gone after the delay; thumb drag and track paging on the `Always` box; hover widens 6 → 10 px; wheel scrolling was not exercised — the rig's synthetic wheel events never reach the window) |
+| Desktop + Scroll scrollbar: dialogs, window-state restore, min size, scrollbar | macOS (e-g1) | OWED |
+| Desktop + Scroll scrollbar: dialogs, window-state restore + off-screen clamp, min size, scrollbar | Windows (e-g2) | OWED |
 | Drag: desktop pointer drag (kanban card between columns, edge auto-scroll, highlight) | Linux desktop (X11, NVIDIA T400), 2026-10-06 | PASS (card lands in Doing/Done incl. a drag with a vertical leg; ghost, source dim, column highlight; edge auto-scroll not exercisable — the demo columns never overflow) |
 | Drag: Escape cancels a live pointer drag | Linux desktop (X11, NVIDIA T400), 2026-10-06 | PASS (ghost + highlight clear with the button still held) |
 | Drag: keyboard reorder (lift/cycle/drop) on the reorderable list | Linux desktop (X11, NVIDIA T400), 2026-10-06 | PASS (Enter / ArrowDown ×4 / Enter → "Last move: 0 → 2") |

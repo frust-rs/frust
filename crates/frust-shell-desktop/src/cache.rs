@@ -20,14 +20,23 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// `<base>/frust/<prefix>_<app_stem>.<ext>` — the per-binary filename shape
+/// every file this crate persists uses (the pipeline cache here, the window
+/// state in `window_state`), so two frust apps on one machine never share one.
+pub(crate) fn app_file_path(base: &Path, prefix: &str, ext: &str) -> PathBuf {
+    let mut file = std::ffi::OsString::from(prefix);
+    file.push("_");
+    file.push(frust_paths::app_stem());
+    file.push(".");
+    file.push(ext);
+    base.join("frust").join(file)
+}
+
 /// `<base>/frust/pipeline_cache_desktop_<app_stem>.bin` — this module's
 /// on-disk filename shape, over any base directory so the legacy-base
 /// read-through below (and tests) can build the same shape elsewhere.
 fn cache_file_path(base: &Path) -> PathBuf {
-    let mut file = std::ffi::OsString::from("pipeline_cache_desktop_");
-    file.push(frust_paths::app_stem());
-    file.push(".bin");
-    base.join("frust").join(file)
+    app_file_path(base, "pipeline_cache_desktop", "bin")
 }
 
 /// The path the desktop pipeline cache blob is **written** to, or `None`
@@ -385,6 +394,24 @@ mod tests {
 
         assert_eq!(load_path(&new_path, Some(&legacy_base)), new_path);
         assert_eq!(load_path(&new_path, None), new_path);
+    }
+
+    /// The shared helper builds `<base>/frust/<prefix>_<app_stem>.<ext>`, and
+    /// the pipeline cache's own shape is exactly that helper's output.
+    #[test]
+    fn test_app_file_path_shape() {
+        let base = Path::new("/base");
+        let mut expected = std::ffi::OsString::from("window_state_");
+        expected.push(frust_paths::app_stem());
+        expected.push(".txt");
+        assert_eq!(
+            app_file_path(base, "window_state", "txt"),
+            base.join("frust").join(expected)
+        );
+        assert_eq!(
+            cache_file_path(base),
+            app_file_path(base, "pipeline_cache_desktop", "bin")
+        );
     }
 
     /// `cache_path()` is `cache_file_path()` over the resolved cache dir —

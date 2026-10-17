@@ -45,7 +45,8 @@
 
 use frust::{
     AnimateTo, ButtonStyle, ChildKey, Color, Curve, EdgeInsets, Get, ItemAlignment, ListView,
-    Padding, SizedBox, Theme, View, button, column, row, text, use_context,
+    Padding, ScrollbarShow, ScrollbarStyle, SizedBox, Theme, View, button, column, row,
+    scroll_view, text, use_context,
 };
 
 use crate::PlaygroundState;
@@ -110,7 +111,8 @@ pub fn page(state: &PlaygroundState) -> impl View<PlaygroundState> {
     let builder = move |index: usize| row_view(index, accent, muted);
     let list = ListView::builder_keyed(ROW_COUNT, ROW_EXTENT, key_of, builder)
         .estimated_item_extent(ROW_EXTENT)
-        .controller(state.scroll_controller.clone());
+        .controller(state.scroll_controller.clone())
+        .scrollbar(ScrollbarStyle::default());
     let list_viewport = SizedBox::<PlaygroundState>(None, Some(VIEWPORT_H)).child(list);
 
     let (offset, max_offset) = state.scroll_readout.get();
@@ -178,6 +180,23 @@ pub fn page(state: &PlaygroundState) -> impl View<PlaygroundState> {
         .small()
     };
 
+    // Scrollbar showcase: a plain `ScrollView` with the default
+    // (`WhileScrolling`) bar and one with the `Always` variant. The list above
+    // carries the default bar too.
+    let sample_rows = |prefix: &'static str| {
+        let mut col = column();
+        for i in 0..24 {
+            col = col.child(text(format!("{prefix} row {i}")).size(12.0));
+        }
+        col
+    };
+    let default_bar = SizedBox::<PlaygroundState>(None, Some(96.0))
+        .child(scroll_view(sample_rows("Default bar")).scrollbar(ScrollbarStyle::default()));
+    let always_bar = SizedBox::<PlaygroundState>(None, Some(96.0)).child(
+        scroll_view(sample_rows("Always bar"))
+            .scrollbar(ScrollbarStyle::new(ScrollbarShow::Always)),
+    );
+
     Padding(
         EdgeInsets::all(16.0),
         column()
@@ -215,7 +234,22 @@ pub fn page(state: &PlaygroundState) -> impl View<PlaygroundState> {
                     .child(item_42)
                     .child(SizedBox(Some(8.0), None))
                     .child(item_280_animated),
-            ),
+            )
+            .child(SizedBox(None, Some(16.0)))
+            .child(text("Scrollbars").size(13.0).color(accent))
+            .child(
+                text(
+                    "Opt-in baseline scrollbar: the list above and the first box show it \
+                     while scrolling (fades out); the second box keeps it always visible. \
+                     Hover widens the thumb; drag the thumb or click the track.",
+                )
+                .size(11.0)
+                .color(muted),
+            )
+            .child(SizedBox(None, Some(8.0)))
+            .child(default_bar)
+            .child(SizedBox(None, Some(8.0)))
+            .child(always_bar),
     )
 }
 

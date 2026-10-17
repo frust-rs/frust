@@ -7,25 +7,25 @@ expression: rendered
                                                                                                     
  PROJECTS         ╭ Add plugin ───────────────────────────────────── [Esc] Close ╮                  
   ▸ huddle        │                                                              │▓▓                
-                  │  Choose a plugin to add to this project  (13-21 of 21)       │▓▓                
- DEVICES ↻ R      │    ( ) database                                              │▓▓                
-   none found     │        Embedded SQL database (SQLite via rusqlite;           │▓▓                
-                  │    ( ) i18n                                                  │▓▓                
- SESSIONS         │        Fluent Project-based                                  │▓▓                
-   none running   │    ( ) glyph                                                 │▓▓                
-                  │        Glyph catalog; needs frust_glyph::install() in app!   │▓▓                
- ACTIONS          │    ( ) material                                              │▓▓                
-   New project · n│        Material 3 catalog; needs frust_material::install()   │▓▓                
-   Add plugin · a │    ( ) cupertino                                             │▓▓                
-   Doctor · i     │        Cupertino catalog; needs frust_cupertino::install()   │▓▓                
-   Build · b      │    ( ) shadcn                                                │▓▓                
-   Clean · c      │        shadcn/ui catalog; needs frust_shadcn::install() in   │▓▓                
-   MCP off · M    │    ( ) network-image                                         │▓▓                
-   DAP off · D    │        Network image view: URL images with an in-memory +    │▓▓                
-                  │    ( ) share                                                 │▓▓                
-                  │        Share text or a URL through the platform share sheet  │▓▓                
-                  │  ▸ (o) qr                                                    │▓▓                
+                  │  Choose a plugin to add to this project  (14-22 of 22)       │▓▓                
+ DEVICES ↻ R      │    ( ) i18n                                                  │▓▓                
+   none found     │        Fluent Project-based                                  │▓▓                
+                  │    ( ) glyph                                                 │▓▓                
+ SESSIONS         │        Glyph catalog; needs frust_glyph::install() in app!   │▓▓                
+   none running   │    ( ) material                                              │▓▓                
+                  │        Material 3 catalog; needs frust_material::install()   │▓▓                
+ ACTIONS          │    ( ) cupertino                                             │▓▓                
+   New project · n│        Cupertino catalog; needs frust_cupertino::install()   │▓▓                
+   Add plugin · a │    ( ) shadcn                                                │▓▓                
+   Doctor · i     │        shadcn/ui catalog; needs frust_shadcn::install() in   │▓▓                
+   Build · b      │    ( ) network-image                                         │▓▓                
+   Clean · c      │        Network image view: URL images with an in-memory +    │▓▓                
+   MCP off · M    │    ( ) share                                                 │▓▓                
+   DAP off · D    │        Share text or a URL through the platform share sheet  │▓▓                
+                  │    ( ) qr                                                    │▓▓                
                   │        QR code view (qrcode encoder, canvas-painted)         │▓▓                
+                  │  ▸ (o) file-dialogs                                          │▓▓                
+                  │        Native file open/save dialogs on Linux, macOS and     │▓▓                
                   │                                                              │▓▓                
                   │   Back    Next    Cancel                                     │▓▓                
                   │  ↑/↓ choose · Enter next · Esc close                         │▓▓                
