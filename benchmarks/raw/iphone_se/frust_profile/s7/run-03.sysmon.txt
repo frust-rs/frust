@@ -1,0 +1,16 @@
+t_s=0.071 cpu_pct=na cpu_ns=951962000 footprint_bytes=40469624 rss_bytes=47349760
+t_s=1.159 cpu_pct=1.66 cpu_ns=970034250 footprint_bytes=40486008 rss_bytes=47366144
+t_s=2.208 cpu_pct=1.72 cpu_ns=988128458 footprint_bytes=40486008 rss_bytes=47366144
+t_s=3.271 cpu_pct=1.73 cpu_ns=1006467291 footprint_bytes=40486008 rss_bytes=47366144
+t_s=4.305 cpu_pct=1.70 cpu_ns=1024005166 footprint_bytes=40486008 rss_bytes=47366144
+t_s=5.365 cpu_pct=1.99 cpu_ns=1045058458 footprint_bytes=40486008 rss_bytes=47267840
+t_s=6.405 cpu_pct=1.71 cpu_ns=1062859875 footprint_bytes=40486008 rss_bytes=47267840
+t_s=7.471 cpu_pct=1.76 cpu_ns=1081623541 footprint_bytes=40486008 rss_bytes=47267840
+t_s=8.508 cpu_pct=1.71 cpu_ns=1099374416 footprint_bytes=40486008 rss_bytes=47267840
+t_s=9.568 cpu_pct=1.75 cpu_ns=1117927291 footprint_bytes=40486008 rss_bytes=47267840
+t_s=10.607 cpu_pct=1.72 cpu_ns=1135753500 footprint_bytes=40486008 rss_bytes=47267840
+t_s=11.674 cpu_pct=1.72 cpu_ns=1154106500 footprint_bytes=40486008 rss_bytes=47267840
+t_s=12.708 cpu_pct=1.71 cpu_ns=1171763375 footprint_bytes=40486008 rss_bytes=47267840
+t_s=13.774 cpu_pct=1.71 cpu_ns=1189964875 footprint_bytes=40486008 rss_bytes=47267840
+t_s=14.806 cpu_pct=1.72 cpu_ns=1207741291 footprint_bytes=40486008 rss_bytes=47267840
+t_s=15.875 cpu_pct=1.76 cpu_ns=1226582708 footprint_bytes=40486008 rss_bytes=47267840

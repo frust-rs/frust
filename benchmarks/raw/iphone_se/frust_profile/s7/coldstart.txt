@@ -1,0 +1,16 @@
+== launch 1 2026-10-17T19:20:34Z (ios: FrontBoard bootstrap -> scene content ready)
+Oct 18 02:20:35.045179 SpringBoard(FrontBoard)[35] <Notice>: Bootstrapping app<it.f0x.frustbench> with intent foreground-interactive
+Oct 18 02:20:35.296505 SpringBoard(FrontBoard)[35] <Notice>: [(FBSceneManager):sceneID:it.f0x.frustbench-default] scene content state changed: ready
+TotalTime: 251
+== launch 2 2026-10-17T19:20:44Z (ios: FrontBoard bootstrap -> scene content ready)
+Oct 18 02:20:45.200975 SpringBoard(FrontBoard)[35] <Notice>: Bootstrapping app<it.f0x.frustbench> with intent foreground-interactive
+Oct 18 02:20:45.374328 SpringBoard(FrontBoard)[35] <Notice>: [(FBSceneManager):sceneID:it.f0x.frustbench-default] scene content state changed: ready
+TotalTime: 173
+== launch 3 2026-10-17T19:20:54Z (ios: FrontBoard bootstrap -> scene content ready)
+Oct 18 02:20:55.287214 SpringBoard(FrontBoard)[35] <Notice>: Bootstrapping app<it.f0x.frustbench> with intent foreground-interactive
+Oct 18 02:20:55.470349 SpringBoard(FrontBoard)[35] <Notice>: [(FBSceneManager):sceneID:it.f0x.frustbench-default] scene content state changed: ready
+TotalTime: 183
+== launch 4 2026-10-17T19:21:05Z (ios: FrontBoard bootstrap -> scene content ready)
+Oct 18 02:21:05.444050 SpringBoard(FrontBoard)[35] <Notice>: Bootstrapping app<it.f0x.frustbench> with intent foreground-interactive
+Oct 18 02:21:05.694059 SpringBoard(FrontBoard)[35] <Notice>: [(FBSceneManager):sceneID:it.f0x.frustbench-default] scene content state changed: ready
+TotalTime: 250
