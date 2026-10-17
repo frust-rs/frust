@@ -7794,7 +7794,28 @@ mod tests {
             for key in &base {
                 assert!(listed.contains(key), "{key:?} is missing from the list");
             }
-            assert_eq!(list.first(), Some(&atlas()), "opens with the atlas pass");
+
+            // The first-frame openers, in the order an ordinary first frame
+            // draws them. Pinned exactly: a reorder changes which pipeline
+            // the frame waits behind.
+            let openers = [
+                atlas(),
+                describe(EnginePipeline::StripDepthAlpha, PaintClass::Glyph),
+                describe(EnginePipeline::StripDepthAlpha, PaintClass::SolidCoverage),
+                describe(EnginePipeline::StripOpaque, PaintClass::SolidCoverage),
+                describe(EnginePipeline::StripDepthAlpha, PaintClass::Uber),
+            ];
+            assert_eq!(
+                &list[..5],
+                &openers[..],
+                "opens with the first frame's pipelines"
+            );
+            // The base list follows the openers in its own order, unchanged.
+            assert_eq!(
+                &list[5..list.len() - 1],
+                &base[..],
+                "the base list follows the openers in warm_up_descs_for's order"
+            );
             assert_eq!(list.last(), Some(&tail), "ends with the layer composite");
 
             // De-duplicated by first occurrence, as the queue does: the

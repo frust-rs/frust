@@ -1883,7 +1883,10 @@ impl CachePersistence {
         }
         self.warm_up_persisted = true;
         let compiled = renderer.compiled_pipelines();
-        self.persist(renderer, PersistMoment::AfterWarmUp, compiled);
+        // A writer the OS refused leaves the warm-up owed: the next frame retries.
+        if !self.persist(renderer, PersistMoment::AfterWarmUp, compiled) {
+            self.warm_up_persisted = false;
+        }
     }
 
     /// Reads the blob and, when it differs from the file, hands it to a
@@ -1893,12 +1896,15 @@ impl CachePersistence {
     ///
     /// The blob is [`frust_render::SurfaceRenderer::pipeline_cache_data`]'s,
     /// which is what makes it a valid seed: bytes that renderer produced.
+    ///
+    /// Returns `false` only when the writer thread could not start, so the
+    /// write was not dispatched.
     fn persist(
         &mut self,
         renderer: &mut frust_render::SurfaceRenderer,
         moment: PersistMoment,
         compiled: Option<u64>,
-    ) {
+    ) -> bool {
         let when = moment.describe();
         let pipelines = compiled.map_or_else(|| "unknown".to_string(), |n| n.to_string());
         let Some(data) = renderer.pipeline_cache_data() else {
@@ -1906,7 +1912,7 @@ impl CachePersistence {
                 "frust-shell-android: pipeline cache persisted 0 B {when} (no blob; {pipelines} \
                  pipelines)"
             );
-            return;
+            return true;
         };
         if !differs_from_on_disk(&self.on_disk, &data) {
             log::info!(
@@ -1914,7 +1920,7 @@ impl CachePersistence {
                  rewritten; {pipelines} pipelines)",
                 data.len()
             );
-            return;
+            return true;
         }
         log::info!(
             "frust-shell-android: pipeline cache persisting {} B {when} ({pipelines} pipelines)",
@@ -1941,7 +1947,7 @@ impl CachePersistence {
                     path.display()
                 ),
             }
-        });
+        })
     }
 }
 
@@ -1970,8 +1976,7 @@ fn persist_pipeline_cache_if_changed(
         );
         return; // no cache to persist (Metal/desktop, or nothing compiled)
     };
-    let cache_changed = pipeline_cache_differs(loaded, &data);
-    if !cache_changed {
+    if !pipeline_cache_differs(loaded, &data) {
         log::info!(
             "frust-shell-android: pipeline cache persisted {} B (unchanged, not rewritten; \
              {warmed} warm-up pipelines finished)",
@@ -1981,29 +1986,17 @@ fn persist_pipeline_cache_if_changed(
     }
     let data_len = data.len();
     log::info!(
-        "frust-shell-android: pipeline cache persisted {data_len} B ({warmed} warm-up \
-         pipelines finished)"
+        "frust-shell-android: pipeline cache persisting {data_len} B at install \
+         ({warmed} warm-up pipelines finished)"
     );
-    let perf_enabled = perf::enabled();
     let generation = next_pipeline_cache_generation();
     spawn_pipeline_cache_writer(move || {
         match write_pipeline_cache_in_order(&path, &data, generation) {
             Ok(false) => {}
-            Ok(true) => {
-                log::debug!(
-                    "frust-shell-android: persisted pipeline cache ({} bytes) to {}",
-                    data_len,
-                    path.display()
-                );
-                // Log persisted size + whether it changed (perf-gated).
-                if perf_enabled {
-                    log::info!(
-                        "frust-shell-android: persisted pipeline cache ({} bytes, changed: {})",
-                        data_len,
-                        cache_changed
-                    );
-                }
-            }
+            Ok(true) => log::info!(
+                "frust-shell-android: pipeline cache written {data_len} B at install to {}",
+                path.display()
+            ),
             Err(err) => log::warn!(
                 "frust-shell-android: failed to persist pipeline cache to {}: {err}",
                 path.display()

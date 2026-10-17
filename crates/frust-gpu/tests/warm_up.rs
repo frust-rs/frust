@@ -10,7 +10,7 @@
 //! On a multi-adapter host, pin the adapter the same way any other headless
 //! run does (`WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=T400`). The blob test needs
 //! a Vulkan adapter (the only backend wgpu implements `PIPELINE_CACHE` on) and
-//! fails on any other.
+//! reports itself skipped elsewhere.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -127,18 +127,24 @@ fn requesting_every_listed_variant_finishes_the_warm_up_and_is_idempotent() {
     });
 }
 
+/// Needs a Vulkan adapter: the driver cache blob is only readable where wgpu
+/// implements `PIPELINE_CACHE`. On any other adapter (Metal on a Mac, for
+/// one) the test logs one skip line and passes without asserting anything.
 #[test]
-#[ignore = "needs a real GPU adapter; run with `cargo test -p frust-gpu --test warm_up -- --ignored \
-            --test-threads=1` (pin the adapter with WGPU_BACKEND / WGPU_ADAPTER_NAME)"]
+#[ignore = "needs a Vulkan adapter with PIPELINE_CACHE (WGPU_BACKEND=vulkan); run with \
+            `cargo test -p frust-gpu --test warm_up -- --ignored --test-threads=1`"]
 fn the_driver_cache_blob_holds_the_pipelines_once_the_warm_up_has_drained() {
     let _serialized = gpu_lock();
     pollster::block_on(async {
         let mut context = RenderContext::new();
         context.device().await.expect("device creation");
-        assert!(
-            context.pipeline_cache_supported(),
-            "this test needs a Vulkan adapter with PIPELINE_CACHE (WGPU_BACKEND=vulkan)"
-        );
+        if !context.pipeline_cache_supported() {
+            println!(
+                "skipped: the {} adapter has no PIPELINE_CACHE (this test needs Vulkan)",
+                context.device_handle().adapter.get_info().backend
+            );
+            return;
+        }
         // SAFETY: no seed — a cold cache carries no foreign data, which is
         // the only thing `create_pipeline_cache`'s contract constrains.
         let driver_cache =

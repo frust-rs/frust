@@ -730,15 +730,21 @@ fn record_after_write(
     Ok(())
 }
 
-/// Runs `job` on a detached thread named for the pipeline-cache writer. A
-/// thread the OS refuses is logged and the job dropped: the persist is
-/// best-effort and the caller's bookkeeping is untouched, so it is retried.
-pub(crate) fn spawn_pipeline_cache_writer(job: impl FnOnce() + Send + 'static) {
-    if let Err(err) = std::thread::Builder::new()
+/// Runs `job` on a detached thread named for the pipeline-cache writer.
+///
+/// Returns `false` when the OS refuses the thread: the job is dropped and
+/// nothing is written, so a caller that has already marked the write done must
+/// unmark it to retry.
+pub(crate) fn spawn_pipeline_cache_writer(job: impl FnOnce() + Send + 'static) -> bool {
+    match std::thread::Builder::new()
         .name("frust pipeline-cache writer".into())
         .spawn(job)
     {
-        log::warn!("frust-shell-android: could not start the pipeline-cache writer: {err}");
+        Ok(_) => true,
+        Err(err) => {
+            log::warn!("frust-shell-android: could not start the pipeline-cache writer: {err}");
+            false
+        }
     }
 }
 

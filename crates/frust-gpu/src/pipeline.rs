@@ -1596,20 +1596,40 @@ mod tests {
         changed: Condvar,
     }
 
+    /// The longest a test waits on a latch before failing: a latch nobody
+    /// opens is a failed test, not a hung suite.
+    const LATCH_WAIT: Duration = Duration::from_secs(30);
+
     impl Latch {
+        /// Parks until [`Self::open`], and panics once [`LATCH_WAIT`] passes
+        /// without it.
         fn wait(&self) {
+            let deadline = std::time::Instant::now() + LATCH_WAIT;
             let mut open = lock(&self.open);
             while !*open {
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                assert!(!left.is_zero(), "the latch was never opened");
                 open = self
                     .changed
-                    .wait(open)
-                    .unwrap_or_else(PoisonError::into_inner);
+                    .wait_timeout(open, left)
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0;
             }
         }
 
         fn open(&self) {
             *lock(&self.open) = true;
             self.changed.notify_all();
+        }
+    }
+
+    /// Opens its latch on drop, so a test that unwinds before opening the
+    /// latch itself still releases the worker parked on it.
+    struct OpenOnDrop(Arc<Latch>);
+
+    impl Drop for OpenOnDrop {
+        fn drop(&mut self) {
+            self.0.open();
         }
     }
 
@@ -1747,6 +1767,9 @@ mod tests {
         let counter = Arc::new(Counter::default());
         let latch = Arc::new(Latch::default());
         let entered = Arc::new(Latch::default());
+        // Declared after the cache, so an unwinding assertion releases the
+        // worker before `VariantCache::drop` joins it.
+        let _release = OpenOnDrop(Arc::clone(&latch));
         let listed = shader_variants(5);
 
         // The worker signals that it is inside its first compile, then parks
@@ -1801,7 +1824,14 @@ mod tests {
         for desc in &listed {
             cache.get_or_create(desc, |d| counter.compile(d));
         }
+        // The wait's own timeout is far longer than this bound: a wait that
+        // sat it out fails here rather than passing slowly.
+        let started = std::time::Instant::now();
         assert!(cache.wait_warm_up(Duration::from_secs(30)));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "a settled warm-up must return at once"
+        );
         assert_eq!(counter.count(), 2);
     }
 
