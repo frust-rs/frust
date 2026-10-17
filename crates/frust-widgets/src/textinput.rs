@@ -84,8 +84,9 @@
 //!   an [`EditCommand`] instead. [`NamedKey::Copy`]/[`Cut`](NamedKey::Cut)/
 //!   [`Paste`](NamedKey::Paste), `Ctrl+Insert`, `Shift+Insert` and
 //!   `Shift+Delete` are the legacy spellings of the same three verbs; `alt` is
-//!   never a chord modifier, and any other chorded character is consumed rather
-//!   than typed.
+//!   never a chord modifier. An undecoded chord is declined, never typed, so
+//!   the root's shortcut registry can still match it (for example a
+//!   `Mod+K` palette opener while the field has focus).
 //!
 //! **The clipboard itself lives in the shell**, so the two directions are
 //! asymmetric (see [`EditCommand`]): a copy/cut answers by writing into the
@@ -1773,11 +1774,10 @@ impl TextInputWidget {
                     if s.eq_ignore_ascii_case("a") {
                         return self.handle_command(ctx, &EditCommand::SelectAll);
                     }
-                    // Every other chorded character (Cmd+Z, Ctrl+B, …) stays
-                    // consumed rather than typed: a chord is never literal text,
-                    // and swallowing it here keeps an unimplemented verb from
-                    // inserting a stray letter.
-                    return EventResult::Handled;
+                    // Every other chorded character (Cmd+Z, Ctrl+B, …) is
+                    // declined, never typed: a chord is never literal text. The
+                    // root's shortcut registry gets the chance to match it.
+                    return EventResult::Ignored;
                 }
                 if !self.editable() {
                     // Focusable but not editable: a read-only field takes no
@@ -7004,7 +7004,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unrecognized_chord_is_still_consumed_and_never_typed() {
+    fn an_unrecognized_chord_is_declined_and_never_typed() {
         let mut state = AppState::default();
         let mut root = harness(&mut state);
         root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
@@ -7014,13 +7014,48 @@ mod tests {
         let outcome = root.event(&mut state, &chord("z", meta()));
 
         assert!(
-            outcome.handled,
-            "an undecoded chord is swallowed, not typed"
+            !outcome.handled,
+            "an undecoded chord is declined so the registry can match it"
         );
         assert_eq!(widget(&root).editor.text(), "a", "no 'z' was inserted");
         assert_eq!(state.changes, changes);
         assert!(root.take_clipboard_write().is_none());
         assert!(!root.take_paste_request());
+    }
+
+    #[test]
+    fn ctrl_and_meta_k_are_declined_and_insert_nothing() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut state, &ch("a"));
+        let changes = state.changes;
+
+        for modifiers in [ctrl(), meta()] {
+            let outcome = root.event(&mut state, &chord("k", modifiers));
+            assert!(!outcome.handled, "Mod+K is declined, not consumed");
+        }
+
+        assert_eq!(widget(&root).editor.text(), "a", "no 'k' was inserted");
+        assert_eq!(state.changes, changes);
+    }
+
+    #[test]
+    fn ctrl_a_still_selects_all_after_the_decline_change() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut state, &ch("a"));
+        root.event(&mut state, &ch("b"));
+
+        let outcome = root.event(&mut state, &chord("a", ctrl()));
+
+        assert!(outcome.handled, "the decoded select-all chord is consumed");
+        assert_eq!(
+            widget(&root).editor.text(),
+            "ab",
+            "select-all types nothing"
+        );
     }
 
     #[test]

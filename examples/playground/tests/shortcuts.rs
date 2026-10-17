@@ -343,9 +343,10 @@ fn precedence_matrix() {
         (false, true,  "Tab",    "handled consumer=- palette=open pane=off tab=0 query=\" \" field=\"\" focus->palette filter".into()),
         (false, true,  "a",      "ignored consumer=- palette=open pane=off tab=0 query=\"\" field=\"\"".into()),
         // -- page TextInput focused, palette closed: the input is first in line.
-        // It swallows chorded characters (never typed, never a shortcut).
-        (true,  false, "Mod+K",  "handled consumer=- palette=closed pane=off tab=0 query=\"\" field=\"\"".into()),
-        (true,  false, "Mod+B",  "handled consumer=- palette=closed pane=off tab=0 query=\"\" field=\"\"".into()),
+        // It declines a chord it does not decode (never typed), so the
+        // registry still opens the palette and toggles the pane.
+        (true,  false, "Mod+K",  "handled consumer=Mod+K: palette opened palette=open pane=off tab=0 query=\"\" field=\"\"".into()),
+        (true,  false, "Mod+B",  "handled consumer=Mod+B: pane toggled palette=closed pane=on tab=0 query=\"\" field=\"\"".into()),
         // A bare digit is text, not the tab chord: typed text is never lost.
         (true,  false, "1",      "handled consumer=TextInput: typed text palette=closed pane=off tab=0 query=\"\" field=\"1\"".into()),
         // Escape blurs the field (it is the input's, not the page's).
@@ -354,8 +355,9 @@ fn precedence_matrix() {
         (true,  false, "Tab",    "handled consumer=- palette=closed pane=off tab=0 query=\"\" field=\"\" focus->Button: tab 1".into()),
         (true,  false, "a",      "handled consumer=TextInput: typed text palette=closed pane=off tab=0 query=\"\" field=\"a\"".into()),
         // -- palette filter focused, palette open: same input rules, in the modal.
-        (true,  true,  "Mod+K",  "handled consumer=- palette=open pane=off tab=0 query=\"\" field=\"\"".into()),
-        (true,  true,  "Mod+B",  "handled consumer=- palette=open pane=off tab=0 query=\"\" field=\"\"".into()),
+        // The filter declines the chord and the open modal masks it.
+        (true,  true,  "Mod+K",  "ignored consumer=- palette=open pane=off tab=0 query=\"\" field=\"\"".into()),
+        (true,  true,  "Mod+B",  "ignored consumer=- palette=open pane=off tab=0 query=\"\" field=\"\"".into()),
         (true,  true,  "1",      "handled consumer=- palette=open pane=off tab=0 query=\"1\" field=\"\"".into()),
         // The focused filter takes Escape (blur) before the modal's close hook;
         // a second Escape, with nothing focused, closes the palette.
