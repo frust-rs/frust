@@ -11,7 +11,7 @@
 //! mark, the "playground" title, and the brightness/reduce-motion/animations
 //! toggles folded into its trailing actions — over a
 //! [`pattern_switcher`](frust::motion::switcher::pattern_switcher) hosting one
-//! of sixteen section pages in a [`scroll_view`], the whole column inside one
+//! of seventeen section pages in a [`scroll_view`], the whole column inside one
 //! [`safe_area`] and under a toast overlay), and the [`frust::app!`] entry
 //! binding all three platforms. The section pages themselves live in
 //! [`pages`] — each a `page(&PlaygroundState) -> impl View<PlaygroundState>`
@@ -19,7 +19,7 @@
 //!
 //! # Responsive navigation
 //!
-//! [`pages::SECTION_LABELS`] carries sixteen destinations now — too many for a
+//! [`pages::SECTION_LABELS`] carries seventeen destinations now — too many for a
 //! single bottom nav bar to divide evenly without its labels wrapping (see
 //! that constant's own doc). [`home_page`] picks between two shapes, the same
 //! `use_context::<WindowMetrics>()` / named-breakpoint idiom
@@ -39,11 +39,11 @@
 //!
 //! [`bottom_nav_bar`] still rides the existing
 //! [`navigation_bar`](frust_material::navigation_bar)/[`nav_item`](frust_material::nav_item)
-//! chrome (neither needs an icon, so growing to 16 labels costs nothing
+//! chrome (neither needs an icon, so growing to 17 labels costs nothing
 //! there); [`side_rail`] and [`more_overlay`] are hand-rolled from baseline
 //! [`button`]s instead of `frust_material::navigation_rail`/
 //! `navigation_drawer` — those destinations carry a *mandatory* icon per
-//! entry, and playground names no icon set for its sixteen sections (the
+//! entry, and playground names no icon set for its seventeen sections (the
 //! module docs' design-neutral charter: "Nothing in this app demonstrates a
 //! design language"). [`pages::SECTION_LABELS`] stays the single source of
 //! truth every shape reads from.
@@ -840,6 +840,12 @@ impl Component for PlaygroundApp {
 // shell's own fallback is `Theme::neutral()`.
 frust::app!(
     PlaygroundApp,
+    desktop = {
+        frust::DesktopConfig::new()
+            .with_persist_window_state(true)
+            .with_min_size(Size::new(480.0, 320.0))
+            .with_max_size(Size::new(3840.0, 2160.0))
+    },
     setup = {
         frust::set_default_theme(frust_material::baseline());
         frust_network_image::NetworkImages::install();
