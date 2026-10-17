@@ -4,8 +4,7 @@
 //! [`RenderRoot::rebuild`], [`RenderRoot::layout`], [`RenderRoot::paint`] and
 //! [`RenderRoot::event`] passes.
 //!
-//! It is single-root: the build closure returns one `impl View<State>` of a fixed concrete type,
-//! so the previous view and the root element are stored typed.
+//! Single-root: the build closure returns one `impl View<State>` of a fixed type, stored typed.
 
 mod config;
 mod dispatch;
@@ -37,12 +36,10 @@ use crate::widget::{ChildPod, PlatformViewFrame};
 use layout::LayoutAudit;
 pub use metrics::{Orientation, WindowMetrics};
 
-/// Housekeeping flush passes one [`RenderRoot::rebuild`] runs before deferring the rest to the
-/// next frame: enough for a result that navigates once plus that page's own result.
+/// Rebuild flush passes per frame: a result that navigates once, plus that page's own result.
 const MAX_PENDING_RESULT_FLUSH_PASSES: usize = 3;
 
-/// Allocator behind `RenderRoot::root_identity`; starts at `1` so `0` means "no root". A module
-/// static, not one inside the generic `impl`, so roots of different `<State, V>` never collide.
+/// Allocates `root_identity` (`0` = no root); module-level so distinct `<State, V>` never collide.
 static NEXT_ROOT_IDENTITY: AtomicU64 = AtomicU64::new(1);
 
 /// The next focus epoch after `epoch`, skipping `0` (a never-claimed pod's stamp).

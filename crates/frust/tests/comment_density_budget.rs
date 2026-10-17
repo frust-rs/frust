@@ -9,9 +9,9 @@
 //! # Regions
 //!
 //! A file splits at the first line that is exactly `#[cfg(test)]` and is
-//! immediately followed by a line starting with `mod `: the head is every line
-//! before it, the tail runs from it to the end. Otherwise the file is one
-//! "whole" region.
+//! immediately followed by an inline module (`mod name {`, not `mod name;`): the
+//! head is every line before it, the tail runs from it to the end. Otherwise —
+//! an out-of-line `mod tests;` declaration included — the file is one "whole" region.
 //!
 //! # Rules
 //!
@@ -44,7 +44,7 @@ const CAPS: &[(&str, f32)] = &[
     ("crates/frust-core/src/app/dispatch.rs", 25.0), // measured 23.2
     ("crates/frust-core/src/app/layout.rs", 21.1), // measured 18.1
     ("crates/frust-core/src/app/metrics.rs", 25.0), // measured 25.0
-    ("crates/frust-core/src/app/mod.rs", 25.0), // measured 47.1
+    ("crates/frust-core/src/app/mod.rs", 25.0), // measured 24.8
     ("crates/frust-core/src/app/paint.rs", 25.0), // measured 24.7
     ("crates/frust-core/src/app/rebuild.rs", 25.0), // measured 24.6
     ("crates/frust-core/src/app/semantics.rs", 25.0), // measured 23.5
@@ -69,7 +69,7 @@ const CAPS: &[(&str, f32)] = &[
     ("crates/frust-core/src/event/ime.rs", 25.0), // measured 24.2
     ("crates/frust-core/src/event/input.rs", 25.0), // measured 24.5
     ("crates/frust-core/src/event/key.rs", 24.2), // measured 21.2
-    ("crates/frust-core/src/event/mod.rs", 25.0), // measured 71.0
+    ("crates/frust-core/src/event/mod.rs", 25.0), // measured 38.6 over 57 lines (size-exempt)
     ("crates/frust-core/src/event/pass.rs", 25.0), // measured 22.3
     ("crates/frust-core/src/event/pointer.rs", 25.0), // measured 24.1
     ("crates/frust-core/src/event/tests.rs", 10.7), // measured 7.7
@@ -104,10 +104,15 @@ struct Region<'a> {
     lines: Vec<&'a str>,
 }
 
+/// `mod name;` only declares a module; any other `mod name …` line opens it inline.
+fn is_inline_mod(line: &str) -> bool {
+    line.starts_with("mod ") && !line.trim_end().ends_with(';')
+}
+
 fn regions(src: &str) -> Vec<Region<'_>> {
     let lines: Vec<&str> = src.lines().collect();
     let split = (0..lines.len().saturating_sub(1))
-        .find(|&i| lines[i] == "#[cfg(test)]" && lines[i + 1].starts_with("mod "));
+        .find(|&i| lines[i] == "#[cfg(test)]" && is_inline_mod(lines[i + 1]));
     match split {
         Some(i) => vec![
             Region {
@@ -293,6 +298,13 @@ mod tests {
         assert_eq!(r.len(), 2);
         assert_eq!((r[0].name, r[0].lines.len()), ("head", 1));
         assert_eq!((r[1].name, r[1].lines.len()), ("tail", 2));
+    }
+
+    #[test]
+    fn out_of_line_mod_declaration_is_not_a_split() {
+        let r = regions("#[cfg(test)]\nmod tests;\nfn a() {}\n");
+        assert_eq!(r.len(), 1);
+        assert_eq!((r[0].name, r[0].lines.len()), ("whole", 3));
     }
 
     #[test]
