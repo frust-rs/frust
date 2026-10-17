@@ -55,6 +55,7 @@ runtime env var, resolved once and cached.
 | Variable | Purpose | Default |
 |---|---|---|
 | GPU timestamps (`gpu_q`, `gpu_prepass_us`/`gpu_main_us`/`gpu_composite_us`/`gpu_blit_us` — `FRUST_TRACE_RAW`'s v4 fields) | Real per-pass GPU time via pass-boundary `timestamp_writes` (`wgpu::Features::TIMESTAMP_QUERY`) (`frust_gpu::diag::TimestampRing`, spans named by `frust_engine::diag::EngineSpan`). `gpu_q=1` only on a `perf-trace` build whose adapter actually offers the feature; every other case — no `perf-trace`, no adapter feature, or a frame ahead of the ring's first completed readback (readings lag up to `RING_FRAMES` = 4 frames; a frame whose Main span has no valid pair — its only pass drew nothing, `GpuFrameSpans::is_measured` false — counts too) — reports the ordinary `gpu_q=0`, not a failure; a refused frame abandons its ring slot rather than mapping it. Full raw-line field format: `benchmarks/PROTOCOL.md`. | `gpu_q=0` (no reading) |
+| `FRUST_FIRST_FRAME_WARM_UP` = `steal` \| `await` \| `finish` | How the first frame after each surface install meets the engine's pipeline warm-up (`frust-render`'s `FirstFrameWarmUp`, one setting for every shell, logged once per process): `steal` requests only what the frame draws, `await` waits up to 1 s for the worker to build the whole list, `finish` builds the rest of the list on the render thread. Compile-time define or runtime env, a non-empty runtime value winning; an unknown value warns and keeps the default. `await` and `finish` are diagnostics — they make the first frame pay the whole list (see [PERFORMANCE_BASELINES.md](PERFORMANCE_BASELINES.md) § Engine close-out per device) and widen the window Android's 2 s surface-destroy barrier has to cover. | `steal` |
 
 **`FRUST_ENGINE_*` knobs (`frust-gpu`/`frust-engine`-owned, distinct from the GPU-timestamps row
 above):**
@@ -69,11 +70,12 @@ above):**
 | `FRUST_ENGINE_NO_PASS_MERGE=1` | Records the clear and the opaque strips as passes of their own ahead of every round, and every surface round in a pass of its own, instead of the one-pass surface opening. `EngineRenderer::set_pass_merge` is the programmatic counterpart; `last_frame_passes` shows which arm a frame took. | Wired |
 | `FRUST_ENGINE_IMAGE_SAMPLER` | On by default: bilinear atlas images use the hardware sampler program family. `0` or `false` selects the manual four-`textureLoad` family, pixel-identical to the engine before the sampler. Read once per process; `EngineRenderer::with_image_sampler` picks per renderer. `engine_goldens` are meant to run in both arms; the WebGL2 `wasm_goldens` re-run with the sampler family as default is still owed. | Wired |
 | `FRUST_ENGINE_DOWNLEVEL=1` | Rehearses the WebGL2/GLES3.0 limit ceiling (`downlevel_webgl2_defaults()`) against a desktop adapter — `frust-gpu`'s `TierCaps`/device-request path only (see GPU Substrate below). A real browser measurement now exists too (`examples/web-spike/RESULTS.md` §§ 16-17): Chrome WebGL2 (`Backend::Gl`/ANGLE) renders shapes, shaped text, images, gradients, blur and layers pixel-correct against the same Chrome WebGPU arm, after the atlas-array workaround (`engine-webgl2-atlas-target` in LIMITATIONS.md) landed. | Wired |
-| `FRUST_ENGINE_NO_GLYPH_QUADS=1` | Draws a cached atlas glyph the general way (one image record and one generated rectangle per glyph) instead of as a `PaintClass::Glyph` quad — the Phase 2 glyph-quad off-arm. `SceneCompiler::set_glyph_quads` is the per-compiler counterpart. | Wired |
+| `FRUST_ENGINE_NO_GLYPH_QUADS=1` | Draws a cached atlas glyph the general way (one image record and one generated rectangle per glyph) instead of as a `PaintClass::Glyph` quad — the glyph-quad off-arm. `SceneCompiler::set_glyph_quads` is the per-compiler counterpart. | Wired |
 | `FRUST_ENGINE_NO_GLYPH_RUN_CACHE=1` | Disables the resident glyph-run cache, so every run goes through `glifo`'s per-glyph probe again (quads stay on unless also switched off). `SceneCompiler::set_glyph_run_cache`; `resident_glyph_run_count` reports the population. | Wired |
 | `FRUST_ENGINE_NO_PARALLEL=1` | The sequential strip walk: no planning pass, no helper thread — the parallel-walk off-arm and its revert path. Wins over the two knobs below. `SceneCompiler::set_parallel_workers(1)` per compiler. | Wired |
 | `FRUST_ENGINE_PARALLEL_WORKERS=<n>` | Threads generating a frame's strips, the walk included; default 3, capped by `available_parallelism`; `0` or unparsable is no override. `SceneCompiler::set_parallel_workers` (capped at `MAX_PARALLEL_WORKERS` 8 rather than the machine). | Wired |
 | `FRUST_ENGINE_PARALLEL_MIN_COST=<n>` | Planned-cost threshold below which no helper is spawned; default `DEFAULT_PARALLEL_MIN_COST` (8000, measured on the Pixel 4a — a spawn+join costs about 130 us there). `0` hands every planned frame to the helpers, which is how the goldens are run through them. `SceneCompiler::set_parallel_min_cost`. | Wired |
+| `FRUST_ENGINE_NO_STAGING_RING=1` | Sends every per-frame upload (coverage, encoded paints, instances, viewport and page uniforms) through `queue.write_buffer`/`write_texture` again instead of the staging ring (`config::staging_ring_disabled`, logged once as `frust-engine staging ring: off`) — the ring's off-arm and the escape hatch for a driver that mishandles the copies; the enc line's `staged_bytes` and staging counts then read zero. `EngineRenderer::set_staging_ring` is the per-renderer counterpart. | Wired |
 | `FRUST_ENGINE_NO_LAYERS` | The engine-side retained-pages kill switch: the compiler records no `RetainedBracket` and lowers every `PushRetained` inline, so the store and the resident-key ledger stay empty and no `DrawRetained` is ever emitted. The widget-side switch is `FRUST_NO_RETAINED_LAYERS` ([CORE_DEVELOPMENT.md](CORE_DEVELOPMENT.md)). | Wired |
 | `FRUST_ENGINE_RETAINED_BUDGET_MB=<n>` | Whole MiB overriding the adapter-tier budget of the retained-page store (`cache::retained`); unset, empty or non-numeric is no override, `0` refuses every bracket (retains nothing). | Wired |
 | `FRUST_ENGINE_NO_POOL` / `FRUST_ENGINE_MAX_TEX=<n>` | Parsed and cached (`crates/frust-engine/src/config.rs`) but consulted by nothing yet — reserved for the resource-pool/texture-ceiling subsystems that will read them. | Reserved (no effect) |
@@ -86,7 +88,26 @@ switch.
 
 On Adreno the measured `gpu_main` moves with the governor's DCVS clock choice, so A/B GPU work with
 the kgsl `gpuclk`/`gpubusy` counters beside the timing (readable on the Pixel 4a, not the Pixel 4);
-see [PERFORMANCE_BASELINES.md](PERFORMANCE_BASELINES.md) § After Phase 1.
+see [PERFORMANCE_BASELINES.md](PERFORMANCE_BASELINES.md) § Engine close-out per device.
+
+**The `frust-perf enc` line** (`perf-trace` only, one per 60 frames): a `<phase>_us` median per
+`CompileSpans`/`EncodeSpans` column plus `total`, then the counts in `ENCODE_TRACE_COUNTS` order —
+`draws strips alphas glyph_draws atlas_glyphs` (medians), `replays dirty_pages atlas_refused
+glyph_misses glyph_evicted` (window sums), `run_keys` (median), `staged_bytes` (median, zero on the
+queue-write route) and `staging_busy staging_too_large staging_buffers bind_groups` (window sums of
+per-frame deltas; a steady frame adds nothing to any of the four). A non-zero `staging_busy` or
+`staging_too_large` counts frames the ring refused, which then took queue writes. The first frame's
+`submit` is split on the startup line into `first_submit_pipeline_wait`, `first_submit_encode` and
+`first_submit_queue` durations (`frust-shell-common::perf`).
+
+**Two-phone capture recipe.** Build the protocol profile APK with `--define FRUST_TRACE_RAW=1` (add
+`FRUST_NO_RENDER_THREAD=1` for the inline path, a knob's define for an A/B arm), start each phone
+unlocked and below 34 C (`run.sh` keeps the screen awake with `svc power stayon true` but cannot
+dismiss a keyguard), then run `benchmarks/harness/run.sh <sN> --app frust --device <serial> --runs 12
+--duration 30` (S3 `--runs 4 --duration 20`, S7 `--runs 12 --duration 20`), discard the first two
+runs (one for S3), and read the enc columns as medians over the kept runs' 60-frame windows, with
+clocks unpinned and the charging state noted. The per-device results are in
+[PERFORMANCE_BASELINES.md](PERFORMANCE_BASELINES.md).
 
 **Browser gate** (`crates/frust-testing`'s non-default `webgl` feature; headless Chrome via
 `wasm-bindgen-test-runner`/chromedriver): `tests/wasm_goldens.rs` renders every unit-corpus case
@@ -134,6 +155,11 @@ cargo test -p frust-gpu
 # the pin is Metal's default adapter):
 WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=T400 cargo test -p frust-gpu -- --ignored
 ```
+
+`tests/warm_up.rs`'s driver-blob test needs `PIPELINE_CACHE`, i.e. Vulkan: on any other adapter
+(Metal on a Mac) it prints one skip line and passes, and libtest captures that line, so add
+`--nocapture` to see it (`cargo test -p frust-gpu --test warm_up -- --ignored --test-threads=1
+--nocapture`).
 
 Every device-suite fixture — this crate's own `--ignored` arm, `frust-engine`'s, and
 `frust-testing`'s `EngineOracle::new` — requests its device limits through
