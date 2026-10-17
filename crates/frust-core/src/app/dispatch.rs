@@ -3,19 +3,21 @@
 //! bookkeeping the root keeps across passes.
 
 use std::any::Any;
+use std::rc::Weak;
 
 use kurbo::Point;
 
 use super::{OverlayRoute, RenderRoot, advance_focus_epoch};
 use crate::event::{
     ContactFrame, ContactPass, EventCtx, EventOutcome, EventResult, FileDropEvent, FileDropPhase,
-    ImeState, InputEvent, Key, NamedKey, OverlayEvent, OverlayEventKind, PointerButton, PointerId,
-    PointerPhase, RequestPass,
+    ImeState, InputEvent, Key, KeyEvent, NamedKey, OverlayEvent, OverlayEventKind, PointerButton,
+    PointerId, PointerPhase, RequestPass,
 };
-use crate::overlay::{OutsideTap, OverlayHit, OverlayInput};
+use crate::overlay::{OutsideTap, OverlayHit, OverlayInput, OverlayKey, OverlayPod};
 use crate::shortcuts::{DeliveryProbe, KeyForwardPass};
 use crate::tree::WidgetPod;
 use crate::view::{ChangeFlags, View};
+use crate::widget::{ChildPod, FocusGrant};
 
 /// Per-dispatch state the steps of `RenderRoot::event` share, read after the overlay route.
 struct DispatchFrame {
@@ -51,6 +53,70 @@ struct RootDispatch {
     root_opted_in: bool,
 }
 
+/// One pod the focus-traversal walk can stop on.
+struct FocusStop {
+    /// The pod's `inspect_id`: the grant's target.
+    id: u64,
+    /// The floated surface holding the pod, whose owner the grant is addressed through.
+    surface: Option<OverlayKey>,
+    /// Whether the pod and every ancestor hold live focus links.
+    current: bool,
+}
+
+/// The traversal walk's state: the floated pods the last paint drew, and the stops so far.
+struct FocusWalk<'a> {
+    floated: &'a [(OverlayPod, OverlayHit)],
+    stops: Vec<FocusStop>,
+}
+
+impl FocusWalk<'_> {
+    /// Visit `pod` and its traversable subtree in pre-order; `chain` is the ancestors' live focus.
+    fn visit(&mut self, pod: &ChildPod, chain: bool, mut surface: Option<OverlayKey>) {
+        let floated = self
+            .floated
+            .iter()
+            .find(|(float, _)| std::ptr::eq(float.as_ptr(), pod));
+        if let Some((_, hit)) = floated {
+            // A transparent surface takes no input, so nothing in it is a stop either.
+            if hit.input == OverlayInput::Transparent {
+                return;
+            }
+            surface = Some(hit.key);
+        }
+        let chain = chain && pod.holds_live_focus();
+        let widget = pod.widget();
+        if widget.is_focusable() {
+            let id = pod.inspect_id().0;
+            self.stops.push(FocusStop {
+                id,
+                surface,
+                current: chain,
+            });
+        }
+        widget.visit_focus_children(&mut |child| self.visit(child, chain, surface));
+    }
+}
+
+/// `Some(backward)` for a bare Tab or Shift+Tab, the keys focus traversal answers.
+fn traversal_direction(key: &KeyEvent) -> Option<bool> {
+    let mods = key.modifiers;
+    let bare = !(mods.ctrl || mods.alt || mods.meta);
+    (key.key == Key::Named(NamedKey::Tab) && bare).then_some(mods.shift)
+}
+
+/// A pointer `Down`, bare or routed to a floated surface: what ends a keyboard-origin focus.
+fn is_pointer_down(event: &InputEvent) -> bool {
+    let pointer = match event {
+        InputEvent::Pointer(pointer) => pointer,
+        InputEvent::Overlay(OverlayEvent {
+            kind: OverlayEventKind::Pointer(pointer),
+            ..
+        }) => pointer,
+        _ => return false,
+    };
+    pointer.phase == PointerPhase::Down
+}
+
 /// Contact gate, first half: unwrap a `PointerContact` into a bare `Pointer` (returned, for the
 /// caller to hold) and name its contact. A bare `Pointer` is the mouse; other events keep the
 /// enclosing pass's contact.
@@ -84,6 +150,9 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         };
         let (unwrapped, pointer_id) = unwrap_contact(event);
         let event = unwrapped.as_ref().unwrap_or(event);
+        if is_pointer_down(event) {
+            self.set_keyboard_focus(false);
+        }
         let Some(secondary) = self.gate_contact(event, pointer_id) else {
             return EventOutcome::default();
         };
@@ -461,8 +530,9 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// Offer a `Key` the focus path declined, each delivery a full pass of its own, until one is
     /// answered: as `OverlayEventKind::Key` to the focus session's forward target, then (an
     /// Escape) to the topmost modal pod, then to the last paint's shortcut declarations in tier
-    /// order (`ShortcutTable::candidates`), masked to the modal pod's own. Only an interactive
-    /// pod takes keys. Folds every delivery's outcome into `carried`.
+    /// order (`ShortcutTable::candidates`), masked to the modal pod's own, then (a bare Tab or
+    /// Shift+Tab) to `traverse_focus`. Only an interactive pod takes keys. Folds every delivery's
+    /// outcome into `carried`.
     fn dispatch_declined_key(
         &mut self,
         state: &mut State,
@@ -504,10 +574,95 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                 }),
             };
             if self.deliver_declined(state, &delivery, &mut carried) {
-                break;
+                return carried;
             }
         }
+        if let Some(backward) = traversal_direction(key) {
+            self.traverse_focus(state, backward, &mut carried);
+        }
         carried
+    }
+
+    /// Move focus to the next (`backward`: previous) stop in walk order, wrapping; with nothing
+    /// focused, to the first (last). Answers the key whenever a stop exists.
+    ///
+    /// # The grant
+    ///
+    /// The old session is released first (epoch advanced, IME surface and key forward dropped),
+    /// then one pass delivers `InputEvent::Shortcut` carrying this root's private `focus_grant`
+    /// id — bare for a main-tree stop, as `OverlayEventKind::Shortcut` through its owner for a
+    /// floated one — under an open [`FocusGrant`]. Its reach is a shortcut's, which is the
+    /// walk's: a navigator's Current page, an `IndexedStack`'s selected child. The target pod
+    /// records the claim like `EventCtx::request_focus`; `resolve_focus_session` commits it. A
+    /// stop the carrier misses is skipped for the next, down to the one that held focus.
+    fn traverse_focus(&mut self, state: &mut State, backward: bool, carried: &mut EventOutcome) {
+        let stops = self.focus_stops();
+        let len = stops.len();
+        let current = stops.iter().rposition(|stop| stop.current);
+        let next = match current {
+            _ if len == 0 => return,
+            None if backward => len - 1,
+            None => 0,
+            Some(i) if backward => (i + len - 1) % len,
+            Some(i) => (i + 1) % len,
+        };
+        carried.handled = true;
+        carried.needs_redraw = true;
+        if current != Some(next) {
+            self.release_focus_session();
+            let step = |n: usize| if backward { len - n } else { n };
+            for n in 0..len {
+                self.grant_focus(state, &stops[(next + step(n)) % len]);
+                if self.focus_active {
+                    break;
+                }
+            }
+        }
+        self.set_keyboard_focus(self.focus_active);
+    }
+
+    /// One grant pass to `stop` (see `traverse_focus`).
+    fn grant_focus(&mut self, state: &mut State, stop: &FocusStop) {
+        let carrier = self.focus_grant;
+        let delivery = match stop.surface {
+            None => InputEvent::Shortcut(carrier),
+            Some(key) => InputEvent::Overlay(OverlayEvent {
+                key,
+                kind: OverlayEventKind::Shortcut(carrier),
+            }),
+        };
+        let _grant = FocusGrant::enter(carrier, stop.id);
+        let _probe = DeliveryProbe::enter();
+        self.event(state, &delivery);
+    }
+
+    /// The traversal walk: focusable pods in pre-order over `Widget::visit_focus_children`,
+    /// from the main root, or from the topmost modal pod alone while one is registered.
+    fn focus_stops(&self) -> Vec<FocusStop> {
+        self.publish_focus_session();
+        let floated: Vec<(OverlayPod, OverlayHit)> = self
+            .overlay_pods
+            .iter()
+            .zip(&self.overlay_hits)
+            .filter_map(|(weak, hit)| Some((weak.upgrade()?, *hit)))
+            .collect();
+        let mut walk = FocusWalk {
+            floated: &floated,
+            stops: Vec::new(),
+        };
+        let chain = self.focus_active;
+        if let Some(modal) = self.overlay_hits.iter().rposition(|hit| hit.is_modal()) {
+            // `overlay_pods` runs parallel to `overlay_hits`: both come from one paint's entries.
+            if let Some(pod) = self.overlay_pods.get(modal).and_then(Weak::upgrade)
+                && let Ok(pod) = pod.try_borrow()
+            {
+                walk.visit(&pod, chain, None);
+            }
+        } else if let Some(root) = self.root_id.and_then(|id| self.tree.pod(id)) {
+            root.widget()
+                .visit_focus_children(&mut |pod| walk.visit(pod, chain, None));
+        }
+        walk.stops
     }
 
     /// One `dispatch_declined_key` delivery: run it, fold its outcome into `carried`, and

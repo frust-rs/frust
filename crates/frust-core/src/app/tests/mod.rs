@@ -10,6 +10,7 @@ mod cursor;
 /// handled or not, is followed by an `Ended` broadcast.
 mod file_drop;
 mod focus_ime;
+mod focus_traversal;
 mod hover;
 mod lifecycle;
 mod overlay;

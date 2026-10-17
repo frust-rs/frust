@@ -372,6 +372,13 @@ impl Widget for IndexedStackWidget {
     // Every retained child, selected or not: inspection shows what the tree
     // holds, not what input reaches.
     crate::authoring::visit_children!(children);
+
+    /// The selected child only: Tab traversal follows input routing.
+    fn visit_focus_children(&self, visitor: &mut dyn FnMut(&ChildPod)) {
+        if let Some(pod) = self.selected() {
+            visitor(pod);
+        }
+    }
 }
 
 /// The cleared/inactive IME surface published after a selection change so the
@@ -1019,5 +1026,23 @@ mod tests {
         let w = build(&tuple);
         assert_eq!(w.children.len(), 3);
         assert_eq!(reach_of(&w), vec![false, true, false]);
+    }
+
+    #[test]
+    fn traversal_enters_only_the_selected_child() {
+        let view: IndexedStackView<Vec<u32>> =
+            IndexedStack(Some(1), (probe(0), probe(1), probe(2)));
+        let w = build(&view);
+        let mut all = 0;
+        w.visit_children(&mut |_| all += 1);
+        let mut entered: Vec<*const ChildPod> = Vec::new();
+        w.visit_focus_children(&mut |pod| entered.push(pod));
+        assert_eq!(all, 3, "inspection still sees every retained child");
+        assert_eq!(entered, vec![&w.children[1] as *const ChildPod]);
+
+        let none: IndexedStackView<Vec<u32>> = IndexedStack(None, (probe(0),));
+        let mut entered = 0;
+        build(&none).visit_focus_children(&mut |_| entered += 1);
+        assert_eq!(entered, 0, "nothing selected, nothing to traverse");
     }
 }

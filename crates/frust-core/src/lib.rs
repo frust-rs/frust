@@ -164,7 +164,7 @@ pub use accesskit;
 pub use anim::{
     AnimationController, AnimationStatus, Curve, FrameTime, Lerp, Spring, SpringDesc, Tween,
 };
-pub use app::{Orientation, RenderRoot, WindowMetrics};
+pub use app::{FocusRingPolicy, Orientation, RenderRoot, WindowMetrics};
 pub use component::{Component, ComponentView, ComponentWidget, component};
 pub use event::{
     CursorIcon, EditCommand, EditingState, EventCtx, EventOutcome, EventResult, ImeContentType,
