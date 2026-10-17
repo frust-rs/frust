@@ -3,6 +3,7 @@
 
 use super::{RenderRoot, advance_focus_epoch};
 use crate::event::{CursorIcon, ImeState, PointerId};
+use crate::overlay::OverlayKey;
 use crate::view::View;
 
 /// Replace `slot` and bump `generation` only when the value actually moves: paint republishes the
@@ -114,7 +115,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     }
 
     /// The `&mut self` form of [`release_focus_session_in`], also clearing the session's owner
-    /// surface and selection toolbar. Idempotent.
+    /// surface, key forward and selection toolbar. Idempotent.
     pub(super) fn release_focus_session(&mut self) {
         release_focus_session_in(
             &mut self.focus_active,
@@ -124,10 +125,25 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             self.root_identity,
         );
         self.focus_surface = None;
+        self.key_forward = None;
         // The toolbar belongs to the session: end it on the blurring pass, not a paint later.
         if self.selection_toolbar.take().is_some() {
             self.selection_toolbar_gen = self.selection_toolbar_gen.wrapping_add(1);
         }
+    }
+
+    /// Record a pass's forward request against the session live after it; none without one.
+    pub(super) fn record_key_forward(&mut self, requested: Option<OverlayKey>) {
+        if let Some(key) = requested.filter(|_| self.focus_active) {
+            self.key_forward = Some((key, self.focus_epoch));
+        }
+    }
+
+    /// The forward target, while the session it was recorded under is still the live one.
+    pub(super) fn live_key_forward(&self) -> Option<OverlayKey> {
+        self.key_forward
+            .filter(|&(_, epoch)| self.focus_active && epoch == self.focus_epoch)
+            .map(|(key, _)| key)
     }
 
     /// Publish this root's at-rest focus session for pods to compare stamps against; called at the

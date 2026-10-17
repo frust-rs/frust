@@ -136,6 +136,7 @@ impl crate::widget::Widget for FloatOwner {
             band: OverlayBand::Floating,
             input: self.input,
             outside_tap: OutsideTap::Ignore,
+            keys: crate::overlay::OverlayKeys::Pass,
             window_rect: Rect::new(120.0, 0.0, 200.0, 40.0),
             pod: Rc::clone(&self.pod),
             insets: ctx.window_insets(),

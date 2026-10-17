@@ -36,6 +36,8 @@ pub enum OverlayEventKind {
     OutsideDown,
     /// A shortcut the pod declared; the owner forwards it as [`InputEvent::Shortcut`].
     Shortcut(ShortcutId),
+    /// A key the focus path declined (see [`crate::overlay`]); answer via `consume_overlay_key`.
+    Key(KeyEvent),
 }
 
 /// The phase of a desktop OS file drag over the window. A shell publishes `Hover`, `Drop` and

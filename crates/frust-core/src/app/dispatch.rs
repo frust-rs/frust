@@ -9,11 +9,11 @@ use kurbo::Point;
 use super::{OverlayRoute, RenderRoot, advance_focus_epoch};
 use crate::event::{
     ContactFrame, ContactPass, EventCtx, EventOutcome, EventResult, FileDropEvent, FileDropPhase,
-    ImeState, InputEvent, OverlayEvent, OverlayEventKind, PointerButton, PointerId, PointerPhase,
-    RequestPass,
+    ImeState, InputEvent, Key, NamedKey, OverlayEvent, OverlayEventKind, PointerButton, PointerId,
+    PointerPhase, RequestPass,
 };
-use crate::overlay::{OutsideTap, OverlayInput};
-use crate::shortcuts::DeliveryProbe;
+use crate::overlay::{OutsideTap, OverlayHit, OverlayInput};
+use crate::shortcuts::{DeliveryProbe, KeyForwardPass};
 use crate::tree::WidgetPod;
 use crate::view::{ChangeFlags, View};
 
@@ -77,7 +77,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// pointer `Move`), the clipboard write and paste request (every pass), the
     /// IME state and the focus epoch. A [`FileDropPhase::Drop`] or `Cancel` is
     /// followed in the same call by a [`FileDropPhase::Ended`] broadcast to the
-    /// whole tree; an unhandled `Key` is offered to the shortcut table; the outcome folds all.
+    /// whole tree; an unhandled `Key` goes on (`dispatch_declined_key`); the outcome folds all.
     pub fn event(&mut self, state: &mut State, event: &InputEvent) -> EventOutcome {
         let Some(root_id) = self.root_id else {
             return EventOutcome::default();
@@ -105,17 +105,20 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // Opened empty, so a request from a dispatch no root drove cannot leak in; closed by
         // `resolve_requests`, before the file-drop follow-up opens its own.
         let request_slot = RequestPass::enter();
+        let forward_slot = KeyForwardPass::enter();
         let mut root = Self::dispatch_root(pod, &mut self.pending, &frame, state, event);
 
         self.publish_ime(event, root.focus_req, root.ime.take());
         let focus_claim_honoured = self.commit_event(event, &frame, &root, &contact_pass);
         self.resolve_focus_session(&frame, focus_claim_honoured);
+        self.record_key_forward(forward_slot.take());
+        drop(forward_slot);
         self.resolve_hover(&frame, root.hover_claimed);
         self.resolve_requests(request_slot, frame.cursor_pass);
         let carried = if root.handled {
             carried
         } else {
-            self.dispatch_shortcut(state, event, carried)
+            self.dispatch_declined_key(state, event, carried)
         };
         let mut outcome = self.build_outcome(&frame, &root, carried);
         self.file_drop_follow_up(state, event, &mut outcome);
@@ -455,10 +458,12 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         self.pending_paste_request |= requested.paste_request;
     }
 
-    /// Offer a `Key` the tree left unhandled to the last paint's shortcut declarations, in tier
-    /// order (`ShortcutTable::candidates`), each delivery a full pass of its own; the first one
-    /// a widget answers ends the walk. Folds every delivery's outcome into `carried`.
-    fn dispatch_shortcut(
+    /// Offer a `Key` the focus path declined, each delivery a full pass of its own, until one is
+    /// answered: as `OverlayEventKind::Key` to the focus session's forward target, then (an
+    /// Escape) to the topmost modal pod, then to the last paint's shortcut declarations in tier
+    /// order (`ShortcutTable::candidates`), masked to the modal pod's own. Only an interactive
+    /// pod takes keys. Folds every delivery's outcome into `carried`.
+    fn dispatch_declined_key(
         &mut self,
         state: &mut State,
         event: &InputEvent,
@@ -467,13 +472,29 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         let InputEvent::Key(key) = event else {
             return carried;
         };
-        let top_overlay = self
-            .overlay_hits
-            .iter()
-            .rev()
-            .find(|hit| hit.input == OverlayInput::Interactive)
-            .map(|hit| hit.key);
-        for (id, overlay) in self.shortcuts.candidates(key, top_overlay) {
+        let interactive = |hit: &&OverlayHit| hit.input == OverlayInput::Interactive;
+        let modal = self.overlay_hits.iter().rev().find(|hit| hit.is_modal());
+        let modal = modal.map(|hit| hit.key);
+        let forward = self.live_key_forward().filter(|pod| {
+            self.overlay_hits
+                .iter()
+                .filter(interactive)
+                .any(|hit| hit.key == *pod)
+        });
+        let escape =
+            modal.filter(|pod| key.key == Key::Named(NamedKey::Escape) && forward != Some(*pod));
+        for pod in forward.into_iter().chain(escape) {
+            let kind = OverlayEventKind::Key(key.clone());
+            let delivery = InputEvent::Overlay(OverlayEvent { key: pod, kind });
+            if self.deliver_declined(state, &delivery, &mut carried) {
+                return carried;
+            }
+        }
+        let top_overlay = modal.or_else(|| {
+            let top = self.overlay_hits.iter().rev().find(interactive);
+            top.map(|hit| hit.key)
+        });
+        for (id, overlay) in self.shortcuts.candidates(key, top_overlay, modal.is_some()) {
             // A floated pod is reached only through its owner's slot, never by a bare broadcast.
             let delivery = match overlay {
                 None => InputEvent::Shortcut(id),
@@ -482,16 +503,27 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                     kind: OverlayEventKind::Shortcut(id),
                 }),
             };
-            let probe = DeliveryProbe::enter();
-            let outcome = self.event(state, &delivery);
-            let answered = probe.handled() || outcome.handled;
-            carried.needs_redraw |= outcome.needs_redraw || answered;
-            if answered {
-                carried.handled = true;
+            if self.deliver_declined(state, &delivery, &mut carried) {
                 break;
             }
         }
         carried
+    }
+
+    /// One `dispatch_declined_key` delivery: run it, fold its outcome into `carried`, and
+    /// report whether a widget answered it.
+    fn deliver_declined(
+        &mut self,
+        state: &mut State,
+        delivery: &InputEvent,
+        carried: &mut EventOutcome,
+    ) -> bool {
+        let probe = DeliveryProbe::enter();
+        let outcome = self.event(state, delivery);
+        let answered = probe.handled() || outcome.handled;
+        carried.needs_redraw |= outcome.needs_redraw || answered;
+        carried.handled |= answered;
+        answered
     }
 
     /// The pass's outcome, folding in the overlay route's `carried` outside-tap outcome. A hover
