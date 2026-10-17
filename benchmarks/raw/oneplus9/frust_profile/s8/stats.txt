@@ -1,5 +1,5 @@
 -- stats.py (discarding first 2 runs, per protocol convention) --
 == frust s8 ==
-frames: 31 total, 31 active, 0 skipped
-p50=5.45ms  p95=70.89ms  p99=75.52ms  worst=75.52ms
-missed_60hz=10 (budget 16.67ms)  missed_120hz=10 (budget 8.33ms)
+frames: 28 total, 28 active, 0 skipped
+p50=2.35ms  p95=13.61ms  p99=13.65ms  worst=13.65ms
+missed_60hz=0 (budget 16.67ms)  missed_120hz=10 (budget 8.33ms)
