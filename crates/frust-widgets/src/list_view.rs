@@ -403,6 +403,7 @@ use crate::physics::{ScrollPhysics, default_overscroll_effect};
 use crate::scroll::ScrollInfo;
 use crate::scroll_controller::{AnimateTo, ItemAlignment, ScrollController, ScrollToItem};
 use crate::scroll_core::{ScrollSurface, ScrollSurfaceCore};
+use crate::scrollbar::ScrollbarStyle;
 use crate::slivers::reconcile::{self, ItemViews, LiveRows, Measured};
 // The in-file tests reach these through `use super::*`; production code here
 // no longer names them since the machinery moved into `crate::scroll_core`.
@@ -579,6 +580,8 @@ pub struct ListView<State: 'static> {
     /// The programmatic-scroll handle to attach, if any. See
     /// [`ListView::controller`].
     controller: Option<ScrollController>,
+    /// The opt-in scrollbar. See [`ListView::scrollbar`].
+    scrollbar: Option<ScrollbarStyle>,
 }
 
 impl<State: 'static> ListView<State> {
@@ -630,6 +633,7 @@ impl<State: 'static> ListView<State> {
             physics: None,
             effect: default_overscroll_effect(),
             controller: None,
+            scrollbar: None,
         }
     }
 
@@ -689,6 +693,7 @@ impl<State: 'static> ListView<State> {
             physics: None,
             effect: default_overscroll_effect(),
             controller: None,
+            scrollbar: None,
         }
     }
 
@@ -889,6 +894,14 @@ impl<State: 'static> ListView<State> {
     /// scrolling* section for what is local to a list.
     pub fn controller(mut self, controller: ScrollController) -> Self {
         self.controller = Some(controller);
+        self
+    }
+
+    /// Paint an opt-in scrollbar over the rows — identical to
+    /// [`crate::ScrollView::scrollbar`], measured against this list's content
+    /// extent (the converging estimate in variable-extent mode).
+    pub fn scrollbar(mut self, style: ScrollbarStyle) -> Self {
+        self.scrollbar = Some(style);
         self
     }
 }
@@ -2112,7 +2125,7 @@ impl ListViewWidget {
             // windowing offset outside `[0, max_offset]` (see the module docs'
             // *Overscroll and pull-to-refresh*).
             InputEvent::Scroll { delta, .. } => self.handle_wheel(ctx, delta),
-            InputEvent::Pointer(p) => self.handle_pointer(ctx, event, p, t_ms),
+            InputEvent::Pointer(p) => self.route_pointer(ctx, event, p, t_ms),
             // `InputEvent` grows (a scale gesture and file drops are planned);
             // this widget handles only the variants named above, and hands any
             // other to its children exactly like the broadcast arm.
@@ -2334,6 +2347,7 @@ impl<State: 'static> View<State> for ListView<State> {
             .as_ref()
             .map(crate::authoring::erase_callback);
         widget.core.install(self.physics.as_ref(), self.effect);
+        widget.core.install_scrollbar(self.scrollbar);
         widget.core.attach_controller(self.controller.as_ref());
         // The key function and the unmeasured-row estimate are widget state (the
         // window math and layout's measurement both run without the view in
@@ -2531,7 +2545,8 @@ impl<State: 'static> View<State> for ListView<State> {
         // *Programmatic scrolling* section). Anything it cannot apply yet (no
         // layout has measured a viewport) still owes a frame, and a settling
         // `scroll_to_item` owes the layout its next correction runs in.
-        let rebound = element.core.attach_controller(self.controller.as_ref());
+        let restyled = element.core.install_scrollbar(self.scrollbar);
+        let rebound = element.core.attach_controller(self.controller.as_ref()) || restyled;
         let reduce_motion = element.motion.reduce_motion;
         if element.drain_controller(reduce_motion) || element.item_target.is_some() {
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
@@ -2648,6 +2663,7 @@ impl Widget for ListViewWidget {
         if stretch.is_some() {
             scene.pop_transform();
         }
+        self.paint_scrollbar(ctx, scene, self.motion.reduce_motion);
         scene.pop_clip();
         // If the (now-known) viewport needs rows the materialized window does not
         // yet hold — first build, a constraint change, a fling that advanced the
@@ -8152,5 +8168,104 @@ mod controller_tests {
             1,
             "the edge the tween crossed fired through the next frame's flush"
         );
+    }
+}
+
+#[cfg(test)]
+mod scrollbar_tests {
+    //! `ListView` scrollbar parity with `ScrollView`: the same opt-in, the
+    //! same geometry against the list's content extent, the same drag/page
+    //! writes and the same implicit-controller rule.
+
+    use std::any::Any;
+
+    use frust_core::FrameTime;
+
+    use super::*;
+    use crate::scrollbar::tests::BarScene;
+    use crate::scrollbar::{ScrollbarShow, ScrollbarStyle};
+    use crate::test_support::leaf;
+
+    const VIEWPORT: Size = Size::new(200.0, 100.0);
+
+    /// 25 rows of 40 px: 1000 px of content, the `ScrollView` fixture's height.
+    fn base() -> ListView<()> {
+        list_view(25, 40.0, |_| leaf(200.0, 40.0))
+    }
+
+    fn build(view: &ListView<()>) -> ListViewWidget {
+        let mut counter = 0u64;
+        let mut w = View::<()>::build(view, &mut BuildCtx::new(&mut counter));
+        w.layout(&mut LayoutCtx::new(), &BoxConstraints::loose(VIEWPORT));
+        w
+    }
+
+    fn paint(w: &mut ListViewWidget, ms: u64) -> Vec<(Point, Size, peniko::Color)> {
+        let at = FrameTime::from_nanos(ms * 1_000_000);
+        let mut ctx = PaintCtx::for_test(Point::ZERO, VIEWPORT, at);
+        let mut scene = BarScene::default();
+        w.paint(&mut ctx, &mut scene);
+        scene.rounded
+    }
+
+    fn send(w: &mut ListViewWidget, phase: PointerPhase, x: f64, y: f64) {
+        let mut unit = ();
+        let state: &mut dyn Any = &mut unit;
+        let mut ctx = EventCtx::new(state, Point::ZERO, VIEWPORT);
+        let event = InputEvent::Pointer(PointerEvent {
+            phase,
+            position: Point::new(x, y),
+            button: PointerButton::Primary,
+        });
+        w.event_at(&mut ctx, &event, 0.0);
+    }
+
+    #[test]
+    fn without_a_scrollbar_nothing_paints_hits_or_binds() {
+        for view in [
+            base(),
+            base().scrollbar(ScrollbarStyle::new(ScrollbarShow::Never)),
+        ] {
+            let mut w = build(&view);
+            assert!(w.core.scrollbar.is_none());
+            assert!(w.core.controller.is_none());
+            assert!(paint(&mut w, 0).is_empty());
+            send(&mut w, PointerPhase::Down, 195.0, 5.0);
+            assert!(
+                w.core.down_active,
+                "the press reached the gesture machinery"
+            );
+        }
+    }
+
+    #[test]
+    fn an_implicit_controller_exists_only_with_a_scrollbar() {
+        let with_bar = base().scrollbar(ScrollbarStyle::default());
+        let mut w = build(&with_bar);
+        assert!(w.core.controller.is_some());
+        let plain = base();
+        let mut counter = 10u64;
+        View::<()>::rebuild(&plain, &with_bar, &mut w, &mut BuildCtx::new(&mut counter));
+        assert!(w.core.controller.is_none());
+    }
+
+    #[test]
+    fn the_bar_matches_the_scroll_view_and_drives_the_list() {
+        let mut w = build(&base().scrollbar(ScrollbarStyle::new(ScrollbarShow::Always)));
+        let thumb = paint(&mut w, 0);
+        assert_eq!(thumb.len(), 1);
+        assert_eq!(thumb[0].0, Point::new(VIEWPORT.width - 8.0, 2.0));
+        assert_eq!(
+            thumb[0].1.height, 24.0,
+            "the minimum thumb, as on the ScrollView"
+        );
+        send(&mut w, PointerPhase::Down, 195.0, 5.0);
+        send(&mut w, PointerPhase::Move, 150.0, 41.0);
+        paint(&mut w, 16);
+        assert_eq!(w.offset(), 450.0);
+        send(&mut w, PointerPhase::Up, 150.0, 41.0);
+        send(&mut w, PointerPhase::Down, 195.0, 98.0);
+        paint(&mut w, 32);
+        assert_eq!(w.offset(), 550.0);
     }
 }

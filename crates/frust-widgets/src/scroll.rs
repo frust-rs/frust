@@ -206,6 +206,7 @@ use crate::physics::effect::OverscrollEffect;
 use crate::physics::{ScrollMetrics, ScrollPhysics, default_overscroll_effect};
 use crate::scroll_controller::ScrollController;
 use crate::scroll_core::{ScrollSurface, ScrollSurfaceCore};
+use crate::scrollbar::ScrollbarStyle;
 // The in-file tests reach these through `use super::*`; production code here
 // no longer names them since the machinery moved into `crate::scroll_core`.
 #[cfg(test)]
@@ -627,6 +628,8 @@ pub struct ScrollView<State: 'static> {
     /// The programmatic-scroll handle to attach, if any. See
     /// [`ScrollView::controller`].
     controller: Option<ScrollController>,
+    /// The opt-in scrollbar. See [`ScrollView::scrollbar`].
+    scrollbar: Option<ScrollbarStyle>,
 }
 
 impl<State: 'static> ScrollView<State> {
@@ -639,6 +642,7 @@ impl<State: 'static> ScrollView<State> {
             physics: None,
             effect: default_overscroll_effect(),
             controller: None,
+            scrollbar: None,
         }
     }
 
@@ -747,6 +751,19 @@ impl<State: 'static> ScrollView<State> {
     /// detaches. Dropping the widget detaches the handle it still holds.
     pub fn controller(mut self, controller: ScrollController) -> Self {
         self.controller = Some(controller);
+        self
+    }
+
+    /// Paint an opt-in scrollbar over the content, styled by `style`; without
+    /// this call the surface has no bar at all. The thumb is the viewport's
+    /// share of the track, widens while the lane is hovered or the thumb held,
+    /// and follows [`ScrollbarShow`](crate::ScrollbarShow) for visibility
+    /// (fading out after `fade_delay_ms` idle; `reduce_motion` snaps it). A
+    /// primary press drags the thumb and a track press pages one viewport,
+    /// both through the attached [`ScrollController`]'s `jump_to`; with none
+    /// attached the surface binds an internal one while the bar is enabled.
+    pub fn scrollbar(mut self, style: ScrollbarStyle) -> Self {
+        self.scrollbar = Some(style);
         self
     }
 }
@@ -915,7 +932,7 @@ impl ScrollWidget {
                 }
             }
             InputEvent::Scroll { delta, .. } => self.handle_wheel(ctx, delta),
-            InputEvent::Pointer(p) => self.handle_pointer(ctx, event, p, t_ms),
+            InputEvent::Pointer(p) => self.route_pointer(ctx, event, p, t_ms),
             // Any other variant — a hit-tested `Scale` today — belongs to the
             // child, and so does its result: a child that handled it consumed
             // it, so an enclosing recognizer (a `pinch_detector` offered the
@@ -1041,6 +1058,7 @@ impl<State: 'static> View<State> for ScrollView<State> {
             .as_ref()
             .map(crate::authoring::erase_callback);
         widget.core.install(self.physics.as_ref(), self.effect);
+        widget.core.install_scrollbar(self.scrollbar);
         widget.core.attach_controller(self.controller.as_ref());
         widget
     }
@@ -1070,8 +1088,9 @@ impl<State: 'static> View<State> for ScrollView<State> {
             crate::authoring::rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
         // A new binding publishes, and a queued command applies, at the next
         // layout or paint — make sure a frame-gated shell runs one.
+        let restyled = element.core.install_scrollbar(self.scrollbar);
         let rebound = element.core.attach_controller(self.controller.as_ref());
-        if rebound {
+        if rebound || restyled {
             flags |= ChangeFlags::PAINT;
         }
         // A queued command moves the child's origin when it applies, and the
@@ -1176,6 +1195,7 @@ impl Widget for ScrollWidget {
         if stretch.is_some() {
             scene.pop_transform();
         }
+        self.paint_scrollbar(ctx, scene, reduce_motion);
         scene.pop_clip();
     }
 
@@ -5080,5 +5100,162 @@ mod controller_tests {
             }),
             "and where it landed"
         );
+    }
+}
+
+#[cfg(test)]
+mod scrollbar_tests {
+    //! The opt-in scrollbar on a `ScrollView`: absent means no paint, no hit
+    //! and no controller; present means a draggable thumb, paging track and
+    //! an implicit controller only when the app attached none.
+
+    use std::any::Any;
+
+    use frust_core::FrameTime;
+
+    use super::*;
+    use crate::scrollbar::tests::BarScene;
+    use crate::scrollbar::{ScrollbarShow, ScrollbarStyle};
+    use crate::test_support::leaf;
+
+    const VIEWPORT: Size = Size::new(200.0, 100.0);
+
+    fn build(view: &ScrollView<()>) -> ScrollWidget {
+        let mut counter = 0u64;
+        let mut w = View::<()>::build(view, &mut BuildCtx::new(&mut counter));
+        w.layout(&mut LayoutCtx::new(), &BoxConstraints::loose(VIEWPORT));
+        w
+    }
+
+    fn base() -> ScrollView<()> {
+        scroll_view(leaf(200.0, 1000.0))
+    }
+
+    fn always() -> ScrollbarStyle {
+        ScrollbarStyle::new(ScrollbarShow::Always)
+    }
+
+    /// Paint at `ms`, returning the bar's rounded rects.
+    fn paint(w: &mut ScrollWidget, ms: u64) -> Vec<(Point, Size, peniko::Color)> {
+        let at = FrameTime::from_nanos(ms * 1_000_000);
+        let mut ctx = PaintCtx::for_test(Point::ZERO, VIEWPORT, at);
+        let mut scene = BarScene::default();
+        w.paint(&mut ctx, &mut scene);
+        scene.rounded
+    }
+
+    /// Dispatch a primary pointer event at `(x, y)`, returning whether it
+    /// asked for a redraw.
+    fn send(w: &mut ScrollWidget, phase: PointerPhase, x: f64, y: f64) -> bool {
+        send_at(w, phase, x, y, 0.0)
+    }
+
+    fn send_at(w: &mut ScrollWidget, phase: PointerPhase, x: f64, y: f64, t_ms: f64) -> bool {
+        let mut unit = ();
+        let state: &mut dyn Any = &mut unit;
+        let mut ctx = EventCtx::new(state, Point::ZERO, VIEWPORT);
+        let event = InputEvent::Pointer(PointerEvent {
+            phase,
+            position: Point::new(x, y),
+            button: PointerButton::Primary,
+        });
+        w.event_at(&mut ctx, &event, t_ms);
+        ctx.needs_redraw()
+    }
+
+    #[test]
+    fn without_a_scrollbar_nothing_paints_hits_or_binds() {
+        for view in [
+            base(),
+            base().scrollbar(ScrollbarStyle::new(ScrollbarShow::Never)),
+        ] {
+            let mut w = build(&view);
+            assert!(w.core.scrollbar.is_none());
+            assert!(w.core.controller.is_none(), "no implicit controller");
+            assert!(paint(&mut w, 0).is_empty());
+            send(&mut w, PointerPhase::Down, 195.0, 5.0);
+            assert!(
+                w.core.down_active,
+                "the press reached the gesture machinery"
+            );
+            send(&mut w, PointerPhase::Up, 195.0, 5.0);
+            assert!(
+                !send(&mut w, PointerPhase::Move, 195.0, 50.0),
+                "hover never redraws"
+            );
+        }
+    }
+
+    #[test]
+    fn an_implicit_controller_exists_only_with_a_scrollbar() {
+        let with_bar = base().scrollbar(ScrollbarStyle::default());
+        let mut w = build(&with_bar);
+        assert!(w.core.controller.is_some());
+        let plain = base();
+        let mut counter = 10u64;
+        View::<()>::rebuild(&plain, &with_bar, &mut w, &mut BuildCtx::new(&mut counter));
+        assert!(w.core.controller.is_none(), "removing the bar drops it");
+        let app = ScrollController::new();
+        let owned = base().controller(app.clone()).scrollbar(always());
+        View::<()>::rebuild(&owned, &plain, &mut w, &mut BuildCtx::new(&mut counter));
+        let binding = w.core.controller.as_ref().expect("bound");
+        assert!(
+            binding.controller().same(&app),
+            "the app's handle, not an implicit one"
+        );
+    }
+
+    #[test]
+    fn a_thumb_drag_and_a_track_press_move_the_surface() {
+        let mut w = build(&base().scrollbar(always()));
+        let thumb = paint(&mut w, 0);
+        assert_eq!(thumb.len(), 1, "an idle Always bar paints its thumb");
+        assert_eq!(thumb[0].0.x, VIEWPORT.width - 2.0 - 6.0);
+        send(&mut w, PointerPhase::Down, 195.0, 5.0);
+        assert!(!w.core.down_active, "the bar took the press");
+        assert!(
+            send(&mut w, PointerPhase::Move, 150.0, 41.0),
+            "a drag requests its redraw"
+        );
+        let wide = paint(&mut w, 16);
+        assert_eq!(w.offset(), 450.0, "half the travel is half the range");
+        assert_eq!(wide.len(), 2, "a held thumb widens over its track");
+        send(&mut w, PointerPhase::Up, 150.0, 41.0);
+        send(&mut w, PointerPhase::Down, 195.0, 98.0);
+        paint(&mut w, 32);
+        assert_eq!(w.offset(), 550.0, "a track press pages one viewport");
+        send(&mut w, PointerPhase::Up, 195.0, 98.0);
+    }
+
+    #[test]
+    fn a_thumb_press_halts_a_fling_where_it_stands() {
+        let mut w = build(&base().scrollbar(always()));
+        paint(&mut w, 0);
+        send_at(&mut w, PointerPhase::Down, 50.0, 100.0, 0.0);
+        send_at(&mut w, PointerPhase::Move, 50.0, 75.0, 16.0);
+        send_at(&mut w, PointerPhase::Move, 50.0, 50.0, 32.0);
+        send_at(&mut w, PointerPhase::Up, 50.0, 50.0, 32.0);
+        assert!(w.is_flinging());
+        let (before, thumb_top) = (w.offset(), 2.0 + 72.0 * w.offset() / 900.0);
+        send(&mut w, PointerPhase::Down, 195.0, thumb_top + 5.0);
+        assert!(matches!(
+            w.core.scrollbar.as_ref().map(|bar| bar.is_widened()),
+            Some(true)
+        ));
+        paint(&mut w, 16);
+        assert!(!w.is_flinging(), "the thumb press stopped the fling");
+        assert_eq!(w.offset(), before, "where the press landed");
+    }
+
+    #[test]
+    fn hovering_the_lane_widens_the_bar_and_redraws() {
+        let mut w = build(&base().scrollbar(ScrollbarStyle::default()));
+        paint(&mut w, 0);
+        assert!(
+            !send(&mut w, PointerPhase::Move, 50.0, 50.0),
+            "content hover: no redraw"
+        );
+        assert!(send(&mut w, PointerPhase::Move, 195.0, 50.0));
+        assert!(w.core.scrollbar.as_ref().unwrap().is_widened());
     }
 }
