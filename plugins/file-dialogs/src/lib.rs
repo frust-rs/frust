@@ -2,8 +2,8 @@
 //! Windows, backed by the `rfd` crate.
 //!
 //! This is a **platform plugin** (`docs/ARCHITECTURE.md`): it depends on
-//! `frust-plugin` plus FFI/platform crates only, and the `frust` facade does
-//! not re-export it. Android, iOS and web report
+//! platform crates only (no `frust-*` framework crate), and the `frust`
+//! facade does not re-export it. Android, iOS and web report
 //! [`FileDialogError::Unsupported`].
 //!
 //! # Blocking contract

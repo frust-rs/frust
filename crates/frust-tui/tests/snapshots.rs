@@ -708,8 +708,9 @@ fn add_plugin_select_step_last_entry_scrolled_100x30() {
             "row {row} is shell chrome and must be untouched by the dialog:\n{rendered}"
         );
     }
+    let focused = format!("\u{25b8} (o) {}", known_plugins()[last].id);
     assert!(
-        rendered.contains("\u{25b8} (o) qr"),
+        rendered.contains(&focused),
         "the focused last card must be drawn:\n{rendered}"
     );
 

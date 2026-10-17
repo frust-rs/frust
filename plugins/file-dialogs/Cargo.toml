@@ -13,8 +13,6 @@ readme = "README.md"
 
 [dependencies]
 thiserror = { workspace = true }
-# Only `frust-*` dependency a platform plugin may carry (docs/ARCHITECTURE.md).
-frust-plugin = { path = "../../crates/frust-plugin", version = "0.6.2" }
 
 # Desktop only: Android, iOS and wasm never compile rfd.
 [target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows", target_os = "freebsd", target_os = "dragonfly", target_os = "netbsd", target_os = "openbsd"))'.dependencies]

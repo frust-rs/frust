@@ -2521,6 +2521,16 @@ where
     /// sites already do (`resumed`'s theme seed, `Resized`'s own
     /// `request_redraw`), and a metrics publish that forced a frame on its own
     /// would defeat the guard's purpose.
+    fn push_window_metrics(&mut self, physical: (u32, u32), scale: f64) {
+        let Some(metrics) = self
+            .window_metrics
+            .poll(physical, scale, WindowInsets::default())
+        else {
+            return; // unchanged — no re-provide, no app-wide rebuild
+        };
+        self.runtime.with_owner(move || provide_context(metrics));
+    }
+
     /// A resize or move: restart the window-state saver's quiet period (a
     /// no-op unless the app opted in to persistence).
     fn note_window_geometry_change(&mut self) {
@@ -2545,16 +2555,6 @@ where
         if let Some(state) = state {
             crate::window_state::save(&state);
         }
-    }
-
-    fn push_window_metrics(&mut self, physical: (u32, u32), scale: f64) {
-        let Some(metrics) = self
-            .window_metrics
-            .poll(physical, scale, WindowInsets::default())
-        else {
-            return; // unchanged — no re-provide, no app-wide rebuild
-        };
-        self.runtime.with_owner(move || provide_context(metrics));
     }
 
     /// Handle one `accesskit_winit` adapter event delivered through the

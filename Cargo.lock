@@ -2319,7 +2319,6 @@ dependencies = [
 name = "frust-file-dialogs"
 version = "0.6.2"
 dependencies = [
- "frust-plugin",
  "rfd",
  "thiserror 2.0.20",
 ]
