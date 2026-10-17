@@ -164,8 +164,9 @@ The sections, in order:
     TextInput) takes Tab / Shift+Tab with the focus ring, and a readout line
     names the last consumer of a key. `tests/shortcuts.rs` pins the precedence
     matrix (input focused or not, palette open or closed, against Mod+K, Mod+B,
-    `1`, Escape, Tab and a typed letter). Because a focused text input swallows
-    chorded characters, `Mod+K` and `Mod+B` do nothing while one has focus, and
+    `1`, Escape, Tab and a typed letter). A focused text input declines the
+    chords it does not decode, so `Mod+K` and `Mod+B` still reach the registry
+    while one has focus; an open palette masks them, filter focused or not, and
     the palette's focused filter takes the first `Escape` (blur) before the
     modal's close hook.
 
