@@ -585,16 +585,16 @@ design-system installation are the WIDGETS unit's rules — [WIDGETS_CODE_STANDA
 - **Header budget scales with the module.** A simple module gets a 1–3 line header; a complex
   one gives contract + rationale plus one pointer to the owning spoke doc. Inline comments
   state what the code can't show (a `# Safety` contract, a magic-number source).
-- **These conventions apply to TOML manifests too** (`Cargo.toml`, scaffold `*.tmpl`,
-  `frust.toml`, `.cargo/config.toml`). A manifest comment states only what the TOML cannot
-  show — an exact/LAW pin and its lockstep site, a must-not-re-add feature, a non-obvious
-  cfg/exclusion reason — in at most 3 lines, pointing to the owning doc. Pin and constraint
-  comments are the last to cut; commented-out scaffold option keys are documentation.
-- **Mechanically checked.** `crates/frust/tests/comment_residue_conformance.rs` scans source and
-  manifest `#` comments for the banned plan/phase, plan-task, findings-ledger, review-round,
-  plan-document, `req N` and `review finding <id>` refs; sanctioned citations exempt only
-  their match span. Bare PR numbers and plan tags (`T04`/`D6a` vs. `M3`/`R8`) stay
-  human-reviewed, still banned. `manifest_comment_budget.rs` fails a manifest comment block over
-  3 lines, and a manifest whose prose `#` lines (commented-out TOML excluded) exceed 12 and
-  whose ratio to setting lines tops 0.9 (Cargo manifests, `.cargo/config.toml`) or 3.3
-  (`frust.toml`); no per-file allowlist.
+- **Rust source comment budget.** Per region (production head before the first top-level
+  `#[cfg(test)]` module; test tail) at most 25 % comment lines (regions under 80 lines exempt);
+  `///`/`//` runs at most 12 lines (across blank lines), `//!` at most 24. The gate
+  `crates/frust/tests/comment_density_budget.rs` covers `frust-core` with tighten-only per-file caps
+  (measured + 3 points, never above 25); other crates follow it, human-reviewed.
+- **TOML manifests follow these too** (`Cargo.toml`, `*.tmpl`, `frust.toml`, `.cargo/config.toml`):
+  only what the TOML cannot show (LAW pin + lockstep site, must-not-re-add feature, cfg reason), at most 3 lines, linking the owning doc.
+- **Mechanically checked.** `comment_residue_conformance.rs` scans source and manifest `#` comments
+  for banned plan/phase, plan-task, findings-ledger, review-round, plan-document, `req N` and
+  `review finding <id>` refs (citations exempt only their match span); bare PR numbers and plan
+  tags (`T04`/`D6a` vs. `M3`/`R8`) stay human-reviewed. `manifest_comment_budget.rs` fails a
+  manifest comment block over 3 lines, or over 12 prose `#` lines (commented-out TOML excluded)
+  with a prose/setting ratio over 0.9 (Cargo, `.cargo/config.toml`) or 3.3 (`frust.toml`); no allowlist.
