@@ -261,8 +261,8 @@ restore there.
 Gate, against `examples/playground` (480×320 minimum, persistence on; its README's gate table is
 the record):
 
-- **Linux — passed:** resize and move saved after the debounce, a 300×200 request held at the
-  480×320 minimum, close wrote the final state, relaunch restored size and position.
+- **Linux — passed** (2026-10-18, linux-native rig): resize and move saved after the debounce, a
+  300×200 request held at the 480×320 minimum, close wrote the final state, relaunch restored size and position.
 - **macOS — owed:** relaunch restore and the minimum size.
 - **Windows — owed:** relaunch restore, the off-screen clamp (saved monitor disconnected), and the
   minimum size.

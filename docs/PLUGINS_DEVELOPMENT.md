@@ -137,8 +137,8 @@ A desktop gate for `frust-file-dialogs` (`plugins/file-dialogs`), against `examp
 Desktop section (`src/pages/desktop_services.rs`): Open file, Open files and Save as… each run in
 `spawn_blocking` and report file names only. The playground README's gate table is the record:
 
-- **Linux — passed:** open, open-multi and save-as round trips through the host
-  xdg-desktop-portal-gtk (the GTK chooser with the Images filter; the save pre-fills the suggested
+- **Linux — passed** (2026-10-18, linux-native rig): open, open-multi and save-as round trips
+  through the host xdg-desktop-portal-gtk (the GTK chooser with the Images filter; the save pre-fills the suggested
   name). With neither a portal nor `zenity` the call returns no selection, indistinguishable from a
   cancel (`file-dialogs-linux-runtime-deps` in [LIMITATIONS.md](LIMITATIONS.md)).
 - **macOS — owed:** the same three round trips through `NSOpenPanel`/`NSSavePanel`.

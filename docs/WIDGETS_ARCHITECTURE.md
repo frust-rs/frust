@@ -417,7 +417,8 @@ selection range is not published either — accesskit models one as a pair of po
 `Role::TextRun` nodes, and this field contributes a single leaf carrying its text as a plain value.
 
 ### Read-only Text Fields
-`TextInput::read_only(true)` makes a field uneditable without dimming it — dimming stays keyed to
+`TextInput::read_only(true)` makes a field uneditable without dimming it (`content_type` is the
+separate IME hint, [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md) `ImeContentType`) — dimming stays keyed to
 `enabled` alone, never to read-only, so a live-styled static mock does not pop to full alpha when it
 goes live. Focus and mutation answer separate questions: a read-only field is still **focusable and
 copyable** — Material 3's and Apple's HIG's convention, and the plain reading that visible text is
