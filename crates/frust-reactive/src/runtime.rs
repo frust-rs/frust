@@ -36,8 +36,6 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-#[cfg(not(target_family = "wasm"))]
-use std::time::Duration;
 
 use any_spawner::Executor;
 #[cfg(target_family = "wasm")]
@@ -90,24 +88,21 @@ impl CustomExecutor for WasmExecutor {
 /// fires it and background tasks may drive signal writes.
 pub type FrameWaker = Arc<dyn Fn() + Send + Sync>;
 
-/// How long an idle blocking-pool thread lingers before it exits under the
-/// thread policy — tokio's own default, set explicitly so the policy's pool
-/// shape is stated in one place.
-#[cfg(not(target_family = "wasm"))]
-const BLOCKING_KEEP_ALIVE: Duration = Duration::from_secs(10);
-
 /// Builds the one background runtime [`ReactiveRuntime::init`] installs.
 ///
 /// Native: the real multi-thread worker pool with the time + IO drivers
 /// enabled. Unless `FRUST_NO_THREAD_TUNING` is set
-/// ([`thread_policy::thread_tuning_enabled`]) the pool also follows the
-/// thread policy: the blocking pool is capped at
-/// [`thread_policy::blocking_pool_cap`] (every core but two, at least two)
-/// instead of tokio's 512, and every thread the runtime starts — the two async
-/// workers and each blocking thread — runs [`ThreadClass::Background`] first,
-/// measured from the calling (UI) thread, which is recorded here as the
-/// reference. With the switch set the builder is exactly tokio's defaults plus
-/// the worker count, drivers and name.
+/// ([`thread_policy::thread_tuning_enabled`]) the calling (UI) thread's
+/// priority is recorded as the reference the background class is measured
+/// from, and the idle blocking-thread keep-alive is stated explicitly
+/// ([`thread_policy::BLOCKING_KEEP_ALIVE`]). The two async workers keep the
+/// class they inherit; only blocking threads are lowered, by
+/// [`spawn_blocking`]. The blocking pool is deliberately left at tokio's
+/// default size: it carries parked plugin calls (a camera permission prompt
+/// for up to 120 s, a purchase flow for 60 s, database work) beside image
+/// decode and DNS, so a small cap would starve the quick jobs behind the
+/// parked ones. With the switch set the builder is exactly tokio's defaults
+/// plus the worker count, drivers and name.
 #[cfg(not(target_family = "wasm"))]
 fn build_background_runtime() -> Runtime {
     let mut builder = Builder::new_multi_thread();
@@ -120,14 +115,7 @@ fn build_background_runtime() -> Runtime {
         .thread_name("frust-reactive");
     if thread_policy::thread_tuning_enabled() {
         thread_policy::record_reference_thread();
-        builder
-            .max_blocking_threads(thread_policy::blocking_pool_cap())
-            .thread_keep_alive(BLOCKING_KEEP_ALIVE)
-            .on_thread_start(|| {
-                // Best-effort: a pool thread the OS refuses to lower simply
-                // keeps the priority it inherited.
-                let _ = thread_policy::set_current_thread_class(ThreadClass::Background);
-            });
+        builder.thread_keep_alive(thread_policy::BLOCKING_KEEP_ALIVE);
     }
     builder
         .build()
@@ -350,6 +338,12 @@ impl ReactiveRuntime {
 /// `use_task(|| async { spawn_blocking(parse).await })` — to get load/error
 /// states and cancellation for free.
 ///
+/// **Priority:** under the thread policy the first job on each blocking
+/// thread lowers that thread to [`ThreadClass::Background`] once (later jobs
+/// make no syscall); the async workers keep the class they inherit. Only
+/// closures submitted through this function are lowered — a raw
+/// `tokio::task::spawn_blocking` caller is not.
+///
 /// **Cancellation limitation:** dropping/aborting the returned handle stops the
 /// result from being delivered, but a blocking closure *already running*
 /// cannot be interrupted (there is no safe way to unwind arbitrary blocking
@@ -395,7 +389,28 @@ where
              this is a wiring bug: initialize the reactive runtime (the shell does \
              this on startup) before spawning work",
         );
-        rt.handle.spawn_blocking(f)
+        if thread_policy::thread_tuning_enabled() {
+            rt.handle.spawn_blocking(move || {
+                lower_blocking_thread_once();
+                f()
+            })
+        } else {
+            rt.handle.spawn_blocking(f)
+        }
+    }
+}
+
+/// Lowers the calling blocking-pool thread to [`ThreadClass::Background`] the
+/// first time it runs a job; a thread-local flag makes later jobs free.
+#[cfg(not(target_arch = "wasm32"))]
+fn lower_blocking_thread_once() {
+    thread_local! {
+        static LOWERED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    if !LOWERED.with(|l| l.replace(true)) {
+        // Best-effort: a thread the OS refuses to lower keeps the priority it
+        // inherited.
+        let _ = thread_policy::set_current_thread_class(ThreadClass::Background);
     }
 }
 
@@ -551,14 +566,14 @@ mod tests {
         );
     }
 
-    /// Under the thread policy every thread the background runtime starts —
-    /// an async worker and a blocking-pool thread alike — runs at a higher
-    /// nice value than the UI thread that built it (Linux kernels; the test
-    /// threads all share the process's nice value, so the runner thread
+    /// Under the thread policy a blocking-pool thread runs at the background
+    /// target for the UI (builder) thread's nice value, while an async worker
+    /// keeps the class it inherited from the UI thread (Linux kernels; the
+    /// test threads all share the process's nice value, so the runner thread
     /// stands in for the UI thread whichever test built the runtime).
     #[cfg(any(target_os = "android", target_os = "linux"))]
     #[test]
-    fn pool_threads_run_below_the_thread_that_built_the_runtime() {
+    fn only_blocking_threads_run_below_the_thread_that_built_the_runtime() {
         if !thread_policy::thread_tuning_enabled() {
             return;
         }
@@ -585,17 +600,14 @@ mod tests {
             .expect("a spawned task must run within 5s")
             .expect("nice is readable on a worker thread");
 
-        if ui >= 19 {
-            assert_eq!((blocking, worker), (19, 19));
-            return;
-        }
-        assert!(
-            blocking > ui,
-            "blocking-pool nice {blocking} must be higher than the UI thread's {ui}"
+        assert_eq!(
+            blocking,
+            thread_policy::background_target(ui, Some(ui)).unwrap_or(ui),
+            "blocking-pool nice must be the background target for the UI thread's {ui}"
         );
-        assert!(
-            worker > ui,
-            "worker nice {worker} must be higher than the UI thread's {ui}"
+        assert_eq!(
+            worker, ui,
+            "an async worker keeps the UI thread's nice {ui}, got {worker}"
         );
     }
 
@@ -604,17 +616,16 @@ mod tests {
     /// run in a child process whose environment engages the kill switch, it
     /// builds the runtime and checks that a blocking-pool thread and an async
     /// worker both report the nice value the UI (builder) thread has, i.e.
-    /// that nothing was written over the inherited priority. Ignored in the
-    /// parent run, where the switch is off.
+    /// that nothing was written over the inherited priority. A no-op unless the switch is engaged in its own process.
     #[cfg(any(target_os = "android", target_os = "linux"))]
     #[test]
     #[ignore = "driven by the_kill_switch_leaves_every_pool_thread_at_the_inherited_nice"]
     fn kill_switch_probe_pool_threads_keep_the_inherited_nice() {
-        assert!(
-            !thread_policy::thread_tuning_enabled(),
-            "this probe only means something with {} engaged",
-            thread_policy::NO_THREAD_TUNING_VAR
-        );
+        if thread_policy::thread_tuning_enabled() {
+            // Run directly (for example by `--include-ignored`) without the
+            // kill switch: nothing to check; the driving test sets it.
+            return;
+        }
         let _guard = crate::WAKER_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -660,7 +671,7 @@ mod tests {
             return;
         }
         let exe = std::env::current_exe().expect("test binary path is known");
-        let output = std::process::Command::new(exe)
+        let mut child = std::process::Command::new(exe)
             .args([
                 "--exact",
                 "runtime::tests::kill_switch_probe_pool_threads_keep_the_inherited_nice",
@@ -668,12 +679,37 @@ mod tests {
                 "--test-threads=1",
             ])
             .env(thread_policy::NO_THREAD_TUNING_VAR, "1")
-            .output()
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
             .expect("the test binary re-executes");
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let status = loop {
+            match child.try_wait().expect("child status is readable") {
+                Some(status) => break status,
+                None if std::time::Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("kill-switch probe did not finish within 60s");
+                }
+                None => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        };
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        {
+            use std::io::Read;
+            let _ = child
+                .stdout
+                .take()
+                .map(|mut o| o.read_to_string(&mut stdout));
+            let _ = child
+                .stderr
+                .take()
+                .map(|mut o| o.read_to_string(&mut stderr));
+        }
         assert!(
-            output.status.success() && stdout.contains("1 passed"),
+            status.success() && stdout.contains("1 passed"),
             "kill-switch probe failed in the child process:\n{stdout}\n{stderr}"
         );
     }

@@ -22,9 +22,13 @@
 //! The `reference` for the background class is the nice value of the thread
 //! that built the background runtime — the UI thread (see
 //! [`ReactiveRuntime::init`](crate::ReactiveRuntime::init)) — recorded once, so
-//! every pool thread lands ten steps below the UI thread whichever thread
+//! every lowered thread lands ten steps below the UI thread whichever thread
 //! happened to spawn it (a blocking thread spawned from an already-lowered
-//! worker would otherwise drift a further ten steps down).
+//! worker would otherwise drift a further ten steps down). Only blocking-pool
+//! threads are lowered, by [`spawn_blocking`](crate::spawn_blocking) on the
+//! first job each thread runs; the async workers keep the class they inherit,
+//! and the pool keeps tokio's default size (it carries parked plugin calls
+//! beside decode and DNS).
 //!
 //! The shim only ever asks for a priority the platform hands out without
 //! privilege, and never takes one away from a thread that inherited better:
@@ -54,8 +58,8 @@ pub enum ThreadClass {
     /// On the frame's critical path: the render thread's encode → acquire →
     /// submit tail.
     Frame,
-    /// Off the frame's critical path: the background runtime's async workers
-    /// and its blocking pool.
+    /// Off the frame's critical path: the background runtime's blocking-pool
+    /// threads.
     Background,
 }
 
@@ -151,18 +155,33 @@ pub(crate) fn background_target(inherited: i32, reference: Option<i32>) -> Optio
     (target != inherited).then_some(target)
 }
 
-/// The background runtime's blocking-pool cap on this machine: every core but
-/// two, never fewer than two, over `std::thread::available_parallelism`
-/// (one core assumed when that is unknown). Public so a shell can log the
-/// value it runs with.
-pub fn blocking_pool_cap() -> usize {
-    blocking_pool_cap_for(std::thread::available_parallelism().map_or(1, |n| n.get()))
+/// How long an idle blocking-pool thread lingers before it exits under the
+/// thread policy: tokio's own default, set explicitly so the policy's pool
+/// shape is stated in one place.
+pub const BLOCKING_KEEP_ALIVE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// One line describing the background runtime's thread policy for a shell to
+/// log: the recorded reference (UI thread) nice, the blocking keep-alive and
+/// whether tuning is on. This crate has no logger, so the shell logs it.
+pub fn runtime_policy_summary() -> String {
+    let reference = current_thread_nice_reference();
+    format!(
+        "background runtime thread policy: reference nice {}, blocking keep-alive {}s, tuning {}",
+        reference.map_or_else(|| "unknown".to_owned(), |n| n.to_string()),
+        BLOCKING_KEEP_ALIVE.as_secs(),
+        if thread_tuning_enabled() { "on" } else { "off" },
+    )
 }
 
-/// The blocking-pool size cap for a machine with `cores` CPUs: every core but
-/// two (the UI and render threads keep theirs), never fewer than two.
-pub(crate) fn blocking_pool_cap_for(cores: usize) -> usize {
-    cores.saturating_sub(2).max(2)
+fn current_thread_nice_reference() -> Option<i32> {
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    {
+        recorded_reference()
+    }
+    #[cfg(not(any(target_os = "android", target_os = "linux")))]
+    {
+        None
+    }
 }
 
 /// Sentinel for "no reference recorded yet".
@@ -273,7 +292,13 @@ mod sys {
         // SAFETY: `SYS_getpriority` with `PRIO_PROCESS` and this thread's own
         // id only reads the thread's scheduling attribute; no pointer crosses
         // the call.
-        let raw = unsafe { libc::syscall(libc::SYS_getpriority, libc::PRIO_PROCESS, tid()) };
+        let raw = unsafe {
+            libc::syscall(
+                libc::SYS_getpriority,
+                libc::PRIO_PROCESS as libc::c_long,
+                tid() as libc::c_long,
+            )
+        };
         if raw < 0 {
             Err(last_errno())
         } else {
@@ -349,16 +374,6 @@ mod tests {
     fn background_target_clamps_at_the_weakest_nice() {
         assert_eq!(background_target(15, None), Some(MAX_NICE));
         assert_eq!(background_target(MAX_NICE, None), None);
-    }
-
-    #[test]
-    fn blocking_pool_cap_leaves_two_cores_and_never_drops_below_two() {
-        assert_eq!(blocking_pool_cap_for(0), 2);
-        assert_eq!(blocking_pool_cap_for(1), 2);
-        assert_eq!(blocking_pool_cap_for(4), 2);
-        assert_eq!(blocking_pool_cap_for(6), 4);
-        assert_eq!(blocking_pool_cap_for(8), 6);
-        assert_eq!(blocking_pool_cap_for(12), 10);
     }
 
     #[test]
