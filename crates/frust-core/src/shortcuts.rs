@@ -9,7 +9,7 @@
 //! A `Key` the focus path left unhandled is matched against the last paint's table in tier
 //! order — declarations stamped with the topmost interactive overlay, then main-tree
 //! [`ShortcutScope::Local`], then [`ShortcutScope::AppGlobal`] — newest declaration first within
-//! a tier. Each candidate gets an [`InputEvent::Shortcut`](crate::event::InputEvent::Shortcut)
+//! a tier. While a modal pod is registered only that pod's tier is tried. Each candidate gets an [`InputEvent::Shortcut`](crate::event::InputEvent::Shortcut)
 //! broadcast (wrapped in an overlay event for a stamped one); the declarer answers `Handled`, and
 //! an unanswered delivery falls through to the next candidate.
 
@@ -33,6 +33,11 @@ thread_local! {
 
     /// Raised when a widget answers a shortcut delivery `Handled` (containers drop the result).
     static SHORTCUT_HANDLED: Cell<bool> = const { Cell::new(false) };
+
+    /// The pod this event pass asked declined keys be forwarded to.
+    static KEY_FORWARD: Cell<Option<OverlayKey>> = const { Cell::new(None) };
+
+    static KEY_FORWARD_OPEN: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Whether `Mod` means Command (Apple targets) or Ctrl (everything else, `wasm32` included).
@@ -297,6 +302,24 @@ impl Drop for DeliveryProbe {
     }
 }
 
+/// Record a forward request (behind `EventCtx::forward_declined_keys_to`); last writer wins.
+pub(crate) fn request_key_forward(key: OverlayKey) {
+    KEY_FORWARD.with(|slot| slot.set(Some(key)));
+}
+
+/// The [`PassBracket`] around one event pass's forward request: enter clears, `take` drains.
+pub(crate) struct KeyForwardPass(PassBracket<Option<OverlayKey>>);
+
+impl KeyForwardPass {
+    pub(crate) fn enter() -> Self {
+        KeyForwardPass(PassBracket::enter(&KEY_FORWARD, &KEY_FORWARD_OPEN))
+    }
+
+    pub(crate) fn take(&self) -> Option<OverlayKey> {
+        self.0.take()
+    }
+}
+
 /// The last paint's declarations, in paint order: the snapshot `RenderRoot` matches keys against.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ShortcutTable {
@@ -314,12 +337,13 @@ impl ShortcutTable {
     }
 
     /// The declarations `event` presses, as `(id, overlay stamp)` in delivery order: the
-    /// `top_overlay` pod's, then main-tree `Local`, then main-tree `AppGlobal`, newest first in
-    /// each. Declarations from any other floated pod are unreachable and left out.
+    /// `top_overlay` pod's, then (unless `masked`, a modal pod's mask) main-tree `Local`, then
+    /// `AppGlobal`, newest first in each. Any other floated pod's declarations are left out.
     pub(crate) fn candidates(
         &self,
         event: &KeyEvent,
         top_overlay: Option<OverlayKey>,
+        masked: bool,
     ) -> Vec<(ShortcutId, Option<OverlayKey>)> {
         let tiers: [&dyn Fn(&ShortcutEntry) -> bool; 3] = [
             &|e| e.overlay.is_some() && e.overlay == top_overlay,
@@ -327,7 +351,7 @@ impl ShortcutTable {
             &|e| e.overlay.is_none() && e.decl.scope == ShortcutScope::AppGlobal,
         ];
         let mut out = Vec::new();
-        for in_tier in tiers {
+        for in_tier in &tiers[..if masked { 1 } else { 3 }] {
             let tier: Vec<_> = self
                 .entries
                 .iter()
@@ -478,7 +502,7 @@ mod tests {
         ]);
         let event = press(character("k"), mods(false, true, false, false));
         assert_eq!(
-            table.candidates(&event, Some(top)),
+            table.candidates(&event, Some(top), false),
             vec![
                 (in_top.id, Some(top)),
                 (local_new.id, None),
@@ -488,9 +512,14 @@ mod tests {
             "overlay tier, then Local (last declared first), then AppGlobal"
         );
         assert_eq!(
-            table.candidates(&event, None).len(),
+            table.candidates(&event, None, false).len(),
             3,
             "with no interactive pod on top, no stamped declaration is reachable"
+        );
+        assert_eq!(
+            table.candidates(&event, Some(top), true),
+            vec![(in_top.id, Some(top))],
+            "a modal pod masks both main-tree tiers"
         );
     }
 
@@ -529,6 +558,31 @@ mod tests {
             ctx.paint_publications(),
             1,
             "a retained boundary must refuse to replay a declaring body"
+        );
+    }
+
+    #[test]
+    fn a_forward_request_is_pass_scoped_and_nests() {
+        let (outer_key, inner_key) = (OverlayKey::next(), OverlayKey::next());
+        let outer = KeyForwardPass::enter();
+        request_key_forward(outer_key);
+        {
+            let inner = KeyForwardPass::enter();
+            assert_eq!(inner.take(), None, "a nested pass starts empty");
+            request_key_forward(inner_key);
+            assert_eq!(inner.take(), Some(inner_key));
+        }
+        assert_eq!(
+            outer.take(),
+            Some(outer_key),
+            "and hands the enclosing request back"
+        );
+        drop(outer);
+        request_key_forward(inner_key);
+        assert_eq!(
+            KeyForwardPass::enter().take(),
+            None,
+            "a stray request never leaks in"
         );
     }
 

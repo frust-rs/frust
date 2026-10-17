@@ -349,6 +349,7 @@ impl crate::widget::Widget for OverlayOwnerWidget {
                 band: surface.spec.band,
                 input: surface.spec.input,
                 outside_tap: surface.spec.outside_tap,
+                keys: crate::overlay::OverlayKeys::Pass,
                 window_rect: surface.spec.rect,
                 pod: std::rc::Rc::clone(&surface.pod),
                 insets: ctx.window_insets(),
@@ -415,6 +416,12 @@ impl crate::widget::Widget for OverlayOwnerWidget {
                     .pod
                     .borrow_mut()
                     .event_child(ctx, &InputEvent::Shortcut(*id));
+            }
+            OverlayEventKind::Key(key) => {
+                surface
+                    .pod
+                    .borrow_mut()
+                    .event_child(ctx, &InputEvent::Key(key.clone()));
             }
         }
         // A broadcast is never consumed, whatever the pod returned.

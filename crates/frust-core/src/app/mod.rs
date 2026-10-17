@@ -80,6 +80,8 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     focus_surface: Option<OverlayKey>,
     /// The live focus session's identity, stamped beside each pod's focus link; never `0`.
     focus_epoch: u64,
+    /// The pod declined keys are forwarded to, with the `focus_epoch` it was recorded under.
+    key_forward: Option<(OverlayKey, u64)>,
     hover_active: bool,
     /// Identity of the latest hover pass; a pod's hover stamp counts only while it equals this.
     hover_epoch: u64,
@@ -160,6 +162,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             focus_active: false,
             focus_surface: None,
             focus_epoch: 1,
+            key_forward: None,
             hover_active: false,
             hover_epoch: 1,
             root_identity: NEXT_ROOT_IDENTITY.fetch_add(1, Ordering::Relaxed),
