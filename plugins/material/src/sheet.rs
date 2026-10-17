@@ -2240,7 +2240,7 @@ mod tests {
     // above) skipped `ctx.request_focus()` because the guard had already fired
     // once. With nothing else on that dispatch's path claiming focus either
     // (the handle-strip branch returns before `content` is ever routed to),
-    // `RenderRoot`'s own Down arm (`crates/frust-core/src/app.rs`) saw no claim
+    // `RenderRoot`'s own Down arm (`commit_pointer` in `crates/frust-core/src/app/dispatch.rs`) saw no claim
     // bubble up at all and took its blur branch — `release_focus_session`,
     // dropping `focus_active` **and** `ime_state` together — even though a
     // `TextInput` inside the sheet's content was still mid-edit.

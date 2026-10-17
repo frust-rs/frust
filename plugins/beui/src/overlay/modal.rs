@@ -805,7 +805,7 @@ impl ModalWidget {
             // backdrop Up is deferred instead of dropped — [`Self::drain_focus_release`]
             // fires it on this host's next pass of one of those kinds. This set
             // must mirror the exhaustive match in [`RenderRoot::event`]
-            // (crates/frust-core/src/app.rs) — see its arms for `Scroll`/`Key`/
+            // (`commit_event` in crates/frust-core/src/app/dispatch.rs) — see its arms for `Scroll`/`Key`/
             // `Ime`/`EditCommand`.
             if matches!(
                 event,

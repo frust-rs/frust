@@ -512,7 +512,7 @@ is not always the caller (the nested-component case under L2 below).
     state (the counterexample above; L3 only); same-size changes and field reorders of
     `C::State`; nested props (a nested `C` value lives inside the parent's `R`, not in the widget);
     `R` and everything else in the retained tree; closure environments; and values read through `TypeId`-keyed storage, i.e. event-time
-    `state_mut` (`crates/frust-core/src/event.rs:2404-2406`) and owner-scoped context
+    `EventCtx::state_mut` (`crates/frust-core/src/event/ctx.rs`) and owner-scoped context
     (`component.rs:24-27`). A same-size `HomeState` edit passes L2, and the new increment closure is
     then installed and later runs on the old value.
   - L2 is therefore a backstop that turns the measured D2 case into a restart even when L3 is absent

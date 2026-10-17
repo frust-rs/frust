@@ -60,7 +60,7 @@
 //! purchase token — Android's Play token, iOS's StoreKit JWS — which a
 //! verifying server accepts on its own, exactly like an API key. All three
 //! therefore hand-write [`fmt::Debug`] instead of deriving it (the `ImeState`
-//! precedent in `frust-core`'s `event.rs`): every other field prints as the
+//! precedent in `frust-core`'s `event/ime.rs`): every other field prints as the
 //! derive would, and the token prints as the literal `"<redacted>"` with no
 //! length, which would itself leak. **Serialization is deliberately
 //! untouched** — `serde` is how the token legitimately reaches a verifying
