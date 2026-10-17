@@ -7639,6 +7639,54 @@ mod tests {
     use vello_common::geometry::RectU16;
     use vello_common::paint::IndexedPaint;
 
+    /// Polls `future` to completion on the calling thread — device creation
+    /// is the only future this module's GPU tests await.
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        use std::task::{Context, Poll, Waker};
+
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut future = std::pin::pin!(future);
+        loop {
+            match future.as_mut().poll(&mut cx) {
+                Poll::Ready(value) => return value,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
+
+    /// Finishing the warm-up builds the whole list exactly once however often
+    /// it is called, waiting on a finished warm-up returns at once, and
+    /// neither encodes a frame: the staging ring still holds no slot.
+    #[test]
+    #[ignore = "needs a real GPU adapter; run with `cargo test -p frust-engine --lib -- --ignored \
+                --test-threads=1` (pin the adapter with WGPU_BACKEND / WGPU_ADAPTER_NAME)"]
+    fn finishing_the_warm_up_is_idempotent_and_encodes_nothing() {
+        let mut context = frust_gpu::RenderContext::new();
+        let handle = block_on(context.device()).expect("device creation");
+        let caps = handle.caps.clone();
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let mut renderer = EngineRenderer::new(&handle.device, &caps, format, None)
+            .expect("the engine builds on this device");
+
+        renderer.finish_warm_up(&handle.device);
+        assert!(renderer.warm_up_done());
+        let compiled = renderer.compiled_pipelines();
+        assert!(compiled > 0);
+        for _ in 0..3 {
+            renderer.finish_warm_up(&handle.device);
+            assert!(renderer.wait_warm_up(Duration::ZERO));
+        }
+        assert_eq!(
+            renderer.compiled_pipelines(),
+            compiled,
+            "a finished warm-up compiles nothing more"
+        );
+        assert!(
+            renderer.last_frame_passes().is_empty(),
+            "the warm-up records no frame"
+        );
+    }
+
     /// The `frust-perf enc` line is a contract: a capture is graded by
     /// grepping its fields, so the field order and the names are pinned here
     /// rather than only by the formatter. `perf-trace`-only, with the line —
