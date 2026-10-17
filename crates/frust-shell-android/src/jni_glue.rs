@@ -81,11 +81,11 @@ use crate::app::{
 };
 use crate::ffi_support::{
     EditCommandWire, FRAME_SYNC_ALL_BITS, FrameObservation, FrameSyncLatch, ImeJsonState,
-    PlatformViewCommandJson, build_ime_state_json, build_platform_view_commands_json,
-    edit_command_from_code, frame_sync_gating_enabled, load_pipeline_cache,
-    next_pipeline_cache_generation, normalize_ime_indices, pipeline_cache_differs,
+    OnDiskCache, PlatformViewCommandJson, build_ime_state_json, build_platform_view_commands_json,
+    differs_from_on_disk, edit_command_from_code, frame_sync_gating_enabled, load_pipeline_cache,
+    next_pipeline_cache_generation, normalize_ime_indices, on_disk_cache, pipeline_cache_differs,
     pipeline_cache_path, platform_view_commands_up_to_date, publish_resolved_translucency,
-    write_pipeline_cache_in_order,
+    spawn_pipeline_cache_writer, write_pipeline_cache_in_order, write_pipeline_cache_recording,
 };
 use crate::overlay_state::{
     FrameRequest, OVERLAYS_ENV_VAR, OverlayCutSpec, OverlayLedger, OverlayMode, OverlaySkew,
@@ -1845,7 +1845,7 @@ impl PersistMoment {
 }
 
 /// The split render thread's pipeline-cache persistence: where the blob lives,
-/// the bytes this process last loaded from or wrote to it, and whether the
+/// the bytes the file is known to hold, and whether the
 /// current surface's warm-up has been persisted yet.
 ///
 /// A blob is written at most once per moment that can change it — once the
@@ -1854,7 +1854,9 @@ impl PersistMoment {
 /// (see [`Self::persist`]), so no frame and no lifecycle barrier waits on disk.
 struct CachePersistence {
     path: PathBuf,
-    on_disk: Option<Vec<u8>>,
+    /// What the file holds: the bytes loaded at startup, replaced by a writer
+    /// only after its write succeeded.
+    on_disk: OnDiskCache,
     warm_up_persisted: bool,
 }
 
@@ -1863,7 +1865,7 @@ impl CachePersistence {
     fn new(path: PathBuf, loaded: Option<Vec<u8>>) -> Self {
         Self {
             path,
-            on_disk: loaded,
+            on_disk: on_disk_cache(loaded),
             warm_up_persisted: false,
         }
     }
@@ -1906,7 +1908,7 @@ impl CachePersistence {
             );
             return;
         };
-        if !pipeline_cache_differs(self.on_disk.as_deref(), &data) {
+        if !differs_from_on_disk(&self.on_disk, &data) {
             log::info!(
                 "frust-shell-android: pipeline cache persisted {} B {when} (unchanged, not \
                  rewritten; {pipelines} pipelines)",
@@ -1915,17 +1917,18 @@ impl CachePersistence {
             return;
         }
         log::info!(
-            "frust-shell-android: pipeline cache persisted {} B {when} ({pipelines} pipelines)",
+            "frust-shell-android: pipeline cache persisting {} B {when} ({pipelines} pipelines)",
             data.len()
         );
         renderer.set_initial_pipeline_cache_data(Some(data.clone()));
-        self.on_disk = Some(data.clone());
+        let data: Arc<[u8]> = Arc::from(data);
         let path = self.path.clone();
+        let on_disk = Arc::clone(&self.on_disk);
         let generation = next_pipeline_cache_generation();
-        std::thread::spawn(
-            move || match write_pipeline_cache_in_order(&path, &data, generation) {
-                Ok(true) => log::debug!(
-                    "frust-shell-android: wrote pipeline cache ({} bytes) to {}",
+        spawn_pipeline_cache_writer(move || {
+            match write_pipeline_cache_recording(&path, &data, generation, &on_disk) {
+                Ok(true) => log::info!(
+                    "frust-shell-android: pipeline cache written {} B {when} to {}",
                     data.len(),
                     path.display()
                 ),
@@ -1937,8 +1940,8 @@ impl CachePersistence {
                     "frust-shell-android: failed to persist pipeline cache to {}: {err}",
                     path.display()
                 ),
-            },
-        );
+            }
+        });
     }
 }
 
@@ -1983,8 +1986,8 @@ fn persist_pipeline_cache_if_changed(
     );
     let perf_enabled = perf::enabled();
     let generation = next_pipeline_cache_generation();
-    std::thread::spawn(
-        move || match write_pipeline_cache_in_order(&path, &data, generation) {
+    spawn_pipeline_cache_writer(move || {
+        match write_pipeline_cache_in_order(&path, &data, generation) {
             Ok(false) => {}
             Ok(true) => {
                 log::debug!(
@@ -2005,8 +2008,8 @@ fn persist_pipeline_cache_if_changed(
                 "frust-shell-android: failed to persist pipeline cache to {}: {err}",
                 path.display()
             ),
-        },
-    );
+        }
+    });
 }
 
 /// `nativeOnSurfaceChanged`: recreate the surface against a new window, or resize

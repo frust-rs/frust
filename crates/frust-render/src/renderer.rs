@@ -697,9 +697,11 @@ impl SurfaceRenderer {
     /// way) whatever generation the old engine had reached.
     ///
     /// An episode that ends hands its driver pipeline cache to
-    /// [`Self::retired_pipeline_cache`] after the rest of it is dropped — so the
-    /// engine's warm-up worker has been joined and everything it built is in
-    /// the cache — and one that begins drops whatever was retired there.
+    /// [`Self::retired_pipeline_cache`]; the rest of the episode is dropped when
+    /// this method's block for the old surface ends, which joins the engine's
+    /// warm-up worker, so everything it built is in the cache by the time the
+    /// method returns. That is safe because nothing reads the retired cache
+    /// before then. An episode that begins drops whatever was retired there.
     fn adopt_surface_state(&mut self, state: SurfaceState) {
         let previous = std::mem::replace(&mut self.state, SurfaceState::NoSurface);
         if let SurfaceState::Ready(ready) = previous {
