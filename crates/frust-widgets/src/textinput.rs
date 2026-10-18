@@ -329,9 +329,10 @@
 //! at all: the ask itself reaches the host, and on iOS it is one of the gestures
 //! that can raise the system's paste prompt, which a field that would discard
 //! the answer has no business provoking. Escape still ends the session, a field
-//! that can hold one needing a keyboard way out of it. Its caret is drawn but
-//! does **not** blink: a blink advertises an insertion point, and this field
-//! takes no insertion.
+//! that can hold one needing a keyboard way out of it. A bare Escape is then
+//! declined, so a modal around the field closes on the same press. Its caret is
+//! drawn but does **not** blink: a blink advertises an insertion point, and this
+//! field takes no insertion.
 //!
 //! **The keyboard.** A focused read-only field publishes
 //! `ImeState { active: true, suppress_soft_keyboard: true, .. }`. Active,
@@ -1867,6 +1868,14 @@ impl TextInputWidget {
                         // — it is the field's, not a surface of its own.
                         self.hide_toolbar(ctx);
                         ctx.request_redraw();
+                        // A bare Escape ends the session but is declined, so the
+                        // root's declined-key chain still reaches a modal around
+                        // the field and any app binding. A modified Escape is
+                        // answered here, as it always was.
+                        if !modifiers.shift && !modifiers.ctrl && !modifiers.alt && !modifiers.meta
+                        {
+                            return EventResult::Ignored;
+                        }
                     }
                     // Vertical motion drives the caret across lines in multi-line
                     // mode; in single-line mode there is only one line, so it (and
@@ -3360,11 +3369,30 @@ mod tests {
         root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
         assert!(root.is_focus_active());
 
-        root.event(&mut state, &named(NamedKey::Escape, Modifiers::default()));
+        let outcome = root.event(&mut state, &named(NamedKey::Escape, Modifiers::default()));
 
         assert!(!root.is_focus_active(), "Escape blurs the field");
+        assert!(!outcome.handled, "a bare Escape is declined, not consumed");
         assert!(root.ime_state().is_none());
         assert!(!widget(&root).focused);
+    }
+
+    #[test]
+    fn modified_escape_still_blurs_and_is_answered() {
+        // A modified Escape is not the bare key a modal closes on: it keeps the
+        // field's answer (the session ends, the event is consumed).
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        let shifted = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+
+        let outcome = root.event(&mut state, &named(NamedKey::Escape, shifted));
+
+        assert!(!root.is_focus_active(), "a modified Escape still blurs");
+        assert!(outcome.handled, "and is answered by the field");
     }
 
     #[test]
@@ -5899,8 +5927,8 @@ mod tests {
         let outcome = root.event(&mut state, &named(NamedKey::Escape, Modifiers::default()));
 
         assert!(
-            outcome.handled,
-            "Escape is answered, not left for an ancestor"
+            !outcome.handled,
+            "Escape is declined, so an ancestor (a modal) hears it"
         );
         assert!(!root.is_focus_active(), "the session is over");
         assert!(!widget(&root).focused);
