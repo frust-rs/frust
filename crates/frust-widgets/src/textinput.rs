@@ -4443,7 +4443,7 @@ mod tests {
                     s.value = v;
                 },
             ))
-            .child(crate::button("ok", |_s: &mut NestedState| {}).disabled(true))
+            .child(crate::button("ok", |_s: &mut NestedState| {}))
     }
 
     #[test]
@@ -4477,7 +4477,7 @@ mod tests {
         root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 45.0));
 
         // Leg 1 — the blur event clears the shell-facing focus + IME surface.
-        assert!(!root.is_focus_active(), "the sibling tap blurs the field");
+        assert!(root.is_focus_active(), "the button takes the focus session");
         assert!(
             root.ime_state().is_none(),
             "container-routed blur clears the IME surface"
@@ -4511,7 +4511,7 @@ mod tests {
                     s.value = v;
                 },
             )))
-            .child(crate::button("ok", |_s: &mut NestedState| {}).disabled(true))
+            .child(crate::button("ok", |_s: &mut NestedState| {}))
     }
 
     #[test]
@@ -4536,7 +4536,7 @@ mod tests {
         // so this stays a pure blur probe.
         root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 45.0));
         root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 45.0));
-        assert!(!root.is_focus_active());
+        assert!(root.is_focus_active(), "the button takes the focus session");
         assert!(root.ime_state().is_none());
 
         // Paint: the cleared outer link must force has_focus == false for the

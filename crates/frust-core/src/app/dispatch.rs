@@ -52,6 +52,7 @@ struct RootDispatch {
     focus_req: bool,
     focus_rel: bool,
     ime: Option<ImeState>,
+    ime_published: bool,
     /// The root widget opted into the other contacts during this dispatch.
     root_opted_in: bool,
 }
@@ -203,6 +204,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         if frame.grant && root.focus_req {
             self.release_focus_session();
         }
+        root.ime_published = root.ime.is_some();
         self.publish_ime(event, root.focus_req, root.ime.take());
         let focus_claim_honoured = self.commit_event(event, &frame, &root, &contact_pass);
         self.resolve_focus_session(&frame, focus_claim_honoured);
@@ -338,6 +340,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             focus_req: ctx.is_focus_requested(),
             focus_rel: ctx.is_focus_released(),
             ime: ctx.take_ime_state(),
+            ime_published: false,
             root_opted_in,
         }
     }
@@ -423,7 +426,8 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     }
 
     /// Commit a claimant (or uncaptured) pointer: a `Down` latches a capture and claims focus or
-    /// blurs; an `Up`/`Cancel` (only the claimant's reaches here) clears the latch. Returns
+    /// blurs; an `Up`/`Cancel` (only the claimant's reaches here) clears the latch. A claim whose
+    /// pass published no `ImeState` drops the previous holder's surface. Returns
     /// whether a claim was honoured; writes the capture latch, `focus_surface` and focus session.
     fn commit_pointer(
         &mut self,
@@ -442,6 +446,9 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                     self.set_focus_active(true);
                     // A hit-tested claim belongs to the main tree (see `focus_surface`).
                     self.focus_surface = None;
+                    if !root.ime_published {
+                        self.store_ime_state(None);
+                    }
                     true
                 } else {
                     // Blur: no widget on the tapped path took focus.
