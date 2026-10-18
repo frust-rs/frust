@@ -2779,6 +2779,9 @@ impl Widget for TextInputWidget {
                         ctx.capture_pointer();
                         self.focused = true;
                         self.captured = true;
+                        // Publish now: a focus-claiming press that publishes nothing drops the
+                        // standing IME surface (see the root's `commit_pointer`).
+                        self.publish(ctx);
                         // Hide rule: every primary press puts the bar away
                         // first. What the press turns out to be (a toggle, a
                         // double-tap, a hold) decides on its own whether to put
