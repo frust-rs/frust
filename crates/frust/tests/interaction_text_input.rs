@@ -30,8 +30,8 @@ use std::any::Any;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use frust::{
-    Axis, Button, Column, Component, FlexView, Image, ImageFit, ImageSource, SizedBox,
-    TextInputView, any, keyed, row, scroll_view, text, text_input,
+    Axis, Button, Column, Component, FlexView, Image, ImageFit, ImageSource, OverlayKeys, SizedBox,
+    TextInputView, any, keyed, overlay_portal, row, scroll_view, text, text_input,
 };
 use frust_core::{
     AnyView, FrameTime, ImeEvent, InputEvent, Key, KeyEvent, Modifiers, NamedKey, PaintScene,
@@ -816,4 +816,57 @@ fn obscured_editing_matches_a_clear_field_across_a_multi_byte_grapheme() {
     );
     // The backspace mid-script removed the emoji as one grapheme in both.
     assert_eq!(clear_state.value, "q");
+}
+
+// --- A focused field inside a modal pod ---
+
+/// The modal pod's state: the field's value and the Escapes its `on_escape`
+/// has answered.
+#[derive(Default)]
+struct PodState {
+    value: String,
+    escapes: u32,
+}
+
+/// One frame over the pod: rebuild, lay out, and record the paint output.
+fn pod_frame<V: View<PodState>>(
+    root: &mut RenderRoot<PodState, V>,
+    logic: &mut impl FnMut(&mut PodState) -> V,
+    state: &mut PodState,
+    tcx: &mut TextContext,
+) -> RecScene {
+    root.rebuild(logic, state);
+    let tcx_any: &mut dyn Any = tcx;
+    root.layout_with_text(Size::new(W, H), tcx_any);
+    let mut scene = RecScene::default();
+    root.paint(&mut scene, FrameTime::ZERO);
+    scene
+}
+
+#[test]
+fn one_escape_blurs_a_field_inside_a_modal_pod_and_closes_it() {
+    let mut tcx = TextContext::new();
+    let mut state = PodState::default();
+    let mut logic = |state: &mut PodState| {
+        overlay_portal(text("anchor"))
+            .overlay(Some(text_input(
+                state.value.clone(),
+                |s: &mut PodState, v: String| s.value = v,
+            )))
+            .keys(OverlayKeys::Modal)
+            .on_escape(|s: &mut PodState| s.escapes += 1)
+    };
+    let mut root = RenderRoot::new();
+    let scene = pod_frame(&mut root, &mut logic, &mut state, &mut tcx);
+
+    let field = center(field_rect(&scene));
+    root.event(&mut state, &pointer(PointerPhase::Down, field.x, field.y));
+    root.event(&mut state, &pointer(PointerPhase::Up, field.x, field.y));
+    assert!(root.is_focus_active(), "the field holds the session");
+
+    let outcome = root.event(&mut state, &named(NamedKey::Escape, Modifiers::default()));
+
+    assert!(outcome.handled, "the modal answers the declined Escape");
+    assert!(!root.is_focus_active(), "the field blurred on that press");
+    assert_eq!(state.escapes, 1, "on_escape ran on the same single press");
 }
