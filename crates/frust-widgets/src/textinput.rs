@@ -1156,6 +1156,36 @@ fn inside(pos: Point, size: Size) -> bool {
     pos.x >= 0.0 && pos.y >= 0.0 && pos.x < size.width && pos.y < size.height
 }
 
+/// Every function-key variant, so the exhaustive `NamedKey` matches stay exhaustive.
+macro_rules! any_function_key {
+    () => {
+        NamedKey::F1
+            | NamedKey::F2
+            | NamedKey::F3
+            | NamedKey::F4
+            | NamedKey::F5
+            | NamedKey::F6
+            | NamedKey::F7
+            | NamedKey::F8
+            | NamedKey::F9
+            | NamedKey::F10
+            | NamedKey::F11
+            | NamedKey::F12
+            | NamedKey::F13
+            | NamedKey::F14
+            | NamedKey::F15
+            | NamedKey::F16
+            | NamedKey::F17
+            | NamedKey::F18
+            | NamedKey::F19
+            | NamedKey::F20
+            | NamedKey::F21
+            | NamedKey::F22
+            | NamedKey::F23
+            | NamedKey::F24
+    };
+}
+
 /// Which named keys a focusable-but-not-editable field still answers.
 ///
 /// The clipboard verbs, and Escape — the keyboard's way out of a session such a
@@ -1183,7 +1213,8 @@ fn answered_while_read_only(named: NamedKey, modifiers: frust_core::Modifiers) -
         | NamedKey::ArrowDown
         | NamedKey::Home
         | NamedKey::End
-        | NamedKey::Tab => false,
+        | NamedKey::Tab
+        | any_function_key!() => false,
     }
 }
 
@@ -1854,7 +1885,7 @@ impl TextInputWidget {
                             return EventResult::Ignored;
                         }
                     }
-                    NamedKey::Tab => {
+                    NamedKey::Tab | any_function_key!() => {
                         return EventResult::Ignored;
                     }
                     // The dedicated hardware clipboard keys arrive already
@@ -7000,6 +7031,19 @@ mod tests {
 
         assert!(!outcome.handled, "no overtype mode to toggle: not ours");
         assert!(!root.take_paste_request());
+        assert_eq!(widget(&root).editor.text(), "a");
+    }
+
+    #[test]
+    fn a_bare_function_key_is_declined_so_it_reaches_the_shortcut_registry() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut state, &ch("a"));
+
+        let outcome = root.event(&mut state, &named(NamedKey::F2, Modifiers::default()));
+
+        assert!(!outcome.handled, "a function key is not the field's");
         assert_eq!(widget(&root).editor.text(), "a");
     }
 

@@ -350,6 +350,18 @@ fn an_unhandled_key_reaches_an_app_global_declaration() {
 }
 
 #[test]
+fn a_function_key_chord_fires_through_the_declined_key_chain() {
+    let mut keys = Keys::new(
+        vec![Slot::new("f2", "F2", ShortcutScope::AppGlobal)],
+        vec![Child::Leaf("f2", true)],
+    );
+    assert!(keys.press("F2").handled);
+    assert_eq!(keys.own_deliveries(), vec!["f2"]);
+    keys.clear();
+    assert!(!keys.press("F3").handled);
+}
+
+#[test]
 fn a_key_the_focus_path_consumes_never_reaches_the_table() {
     let mut eater = Slot::new("field", "Ctrl+Q", ShortcutScope::Local);
     eater.eats_keys = true;

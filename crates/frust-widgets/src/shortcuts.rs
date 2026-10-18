@@ -455,9 +455,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "invalid shortcut chord `F2`")]
+    #[should_panic(expected = "invalid shortcut chord `F25`")]
     fn an_unparsable_chord_panics_naming_it() {
-        let _ = shortcuts::<App, _>(text("x")).on("F2", "Rename", |_| {});
+        let _ = shortcuts::<App, _>(text("x")).on("F25", "Rename", |_| {});
     }
 
     #[test]
