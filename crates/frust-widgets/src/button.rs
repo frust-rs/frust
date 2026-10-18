@@ -12,8 +12,9 @@
 //! # Keyboard
 //!
 //! An enabled button is a Tab stop ([`Widget::is_focusable`]); while focused, a bare Space or
-//! Enter fires `on_press` exactly as a click does. A primary pointer press also takes focus
-//! (pointer-sourced, so `KeyboardOnly` paints no ring), so the next Tab continues from here.
+//! Enter fires `on_press` exactly as a click does. A primary mouse press also takes focus
+//! (pointer-sourced, so `KeyboardOnly` paints no ring), so the next Tab continues from here; a
+//! touch tap never claims it.
 //!
 //! # Style variants
 //!
@@ -93,7 +94,7 @@ use peniko::{Brush, Color};
 
 use crate::authoring::presses;
 use crate::nav::transition::{TransitionDriver, make_driver};
-use crate::shortcuts::activation;
+use crate::shortcuts::{activation, press_claims_focus};
 use crate::text;
 use crate::text::ThemeTextColor;
 use crate::{Alignment, Timing, authoring::PRESSED_OPACITY};
@@ -885,7 +886,9 @@ impl Widget for ButtonWidget {
                 if !presses(p) {
                     return EventResult::Ignored;
                 }
-                ctx.request_focus();
+                if press_claims_focus(ctx) {
+                    ctx.request_focus();
+                }
                 self.pressed = true;
                 self.captured = true;
                 self.press.set_pressed(true);
@@ -947,7 +950,7 @@ impl Widget for ButtonWidget {
         });
     }
 
-    /// A Tab stop unless disabled (a loading button keeps its focus). A primary press also
+    /// A Tab stop unless disabled (a loading button keeps its focus). A primary mouse press also
     /// takes focus — see the module docs' Keyboard section.
     fn is_focusable(&self) -> bool {
         !self.disabled
@@ -1711,6 +1714,24 @@ mod tests {
             );
             root.event(&mut state, &space());
             assert_eq!(state.presses, 11, "Tab went to the second button");
+        }
+
+        #[test]
+        fn a_touch_tap_presses_without_claiming_focus() {
+            let mut root = root(false);
+            let mut state = Counter::default();
+            for phase in [PointerPhase::Down, PointerPhase::Up] {
+                let InputEvent::Pointer(event) = ev(phase, 5.0, 5.0) else {
+                    unreachable!()
+                };
+                let contact = InputEvent::PointerContact {
+                    pointer_id: frust_core::event::PointerId::touch(0),
+                    event,
+                };
+                root.event(&mut state, &contact);
+            }
+            assert_eq!(state.presses, 1);
+            assert!(!root.is_focus_active(), "a tap leaves focus alone");
         }
 
         #[test]

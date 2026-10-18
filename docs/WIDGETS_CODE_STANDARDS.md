@@ -246,9 +246,10 @@ Semantics.
   Tab, the function keys and every chord it does not decode (it still decodes Ctrl/Meta + c/x/v/a
   and the legacy Insert/Delete chords; Alt is never a chord modifier), so app chords reach the
   registry while a field has focus; a bare Escape blurs it and is declined too, so a modal around it
-  closes on the same press. A primary press on any of them requests focus (pointer-sourced, so
-  `KeyboardOnly` paints no ring) and the next Tab continues from there; a `TextInput` publishes its
-  IME state on every primary press, since a focus-claiming press that publishes none drops the
+  closes on the same press. A primary **mouse** press on the four controls requests focus (pointer-sourced, so
+  `KeyboardOnly` paints no ring) and the next Tab continues from there; a touch tap activates
+  without claiming focus, so a focused field keeps its session and keyboard; a `TextInput`
+  publishes its IME state on every primary press, since a focus-claiming press that publishes none drops the
   standing surface. None paints a keyboard-focus visual (`baseline-controls-no-focus-visual` in
   [LIMITATIONS.md](LIMITATIONS.md)).
 - **A container that paints only some children narrows `visit_focus_children` and forwards
