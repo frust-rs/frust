@@ -2,17 +2,17 @@
 
 use std::path::PathBuf;
 
-use crate::{Kind, Request};
+use crate::{FileDialogError, Kind, Request};
 
 /// Shows the dialog and blocks; an empty result means the user cancelled.
-pub(crate) fn show(request: Request) -> Vec<PathBuf> {
+pub(crate) fn show(request: Request) -> Result<Vec<PathBuf>, FileDialogError> {
     let kind = request.kind;
     let dialog = build(request);
-    match kind {
+    Ok(match kind {
         Kind::OpenFile => dialog.pick_file().into_iter().collect(),
         Kind::OpenFiles => dialog.pick_files().unwrap_or_default(),
         Kind::SaveFile => dialog.save_file().into_iter().collect(),
-    }
+    })
 }
 
 fn build(request: Request) -> rfd::FileDialog {
