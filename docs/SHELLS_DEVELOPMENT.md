@@ -274,8 +274,8 @@ the record):
 - **Any OS — owed (manual):** multi-monitor hot-unplug while running (saved monitor disconnected
   before close).
 
-The same README table owes a re-run of the Shortcuts page's F2, `?`, single-Escape and press-focus
-legs on Linux (added after its run) and as part of the macOS and Windows Shortcuts rows.
+The same README table records the Linux re-run of the Shortcuts page's F2, `?`, single-Escape and
+press-focus legs (2026-10-18) and still owes them as part of the macOS and Windows Shortcuts rows.
 
 ## Browser manual gate (web)
 
