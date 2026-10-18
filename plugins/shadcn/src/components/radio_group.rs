@@ -187,16 +187,6 @@ fn resolve_colors(theme: Option<&Theme>) -> RadioColors {
     }
 }
 
-/// Whether `key` activates the focused item: `Space` (arriving as typed text —
-/// there is no `NamedKey::Space`) or `Enter`.
-fn is_activation_key(key: &KeyEvent) -> bool {
-    match &key.key {
-        Key::Named(NamedKey::Enter) => true,
-        Key::Character(text) => text == " ",
-        _ => false,
-    }
-}
-
 /// Which way an arrow key moves the roving focus, or `None` for any other key.
 ///
 /// Both axes move: the source's grid is vertical, but Radix accepts either pair
@@ -424,7 +414,7 @@ impl Widget for RadioGroupWidget {
                     self.request_value(ctx, next);
                     return EventResult::Handled;
                 }
-                if is_activation_key(key) && self.enabled(self.focused_item) {
+                if key.is_activation() && self.enabled(self.focused_item) {
                     self.request_value(ctx, self.focused_item);
                     return EventResult::Handled;
                 }

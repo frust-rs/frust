@@ -984,3 +984,24 @@ fn a_contact_pass_seeds_every_context_and_collects_the_opt_in() {
     assert_eq!(current_pointer_id(), PointerId::MOUSE);
     assert!(!in_secondary_contact_pass());
 }
+
+#[test]
+fn key_event_activation_is_a_bare_fresh_space_or_enter() {
+    let press = |key: Key, modifiers: Modifiers, repeat: bool| {
+        KeyEvent {
+            key,
+            modifiers,
+            repeat,
+        }
+        .is_activation()
+    };
+    let none = Modifiers::default();
+    let space = || Key::Character(" ".to_string());
+    assert!(press(space(), none, false));
+    assert!(press(Key::Named(NamedKey::Enter), none, false));
+    assert!(!press(space(), none, true), "an auto-repeat");
+    let ctrl = Modifiers { ctrl: true, ..none };
+    assert!(!press(Key::Named(NamedKey::Enter), ctrl, false));
+    assert!(!press(Key::Character("a".to_string()), none, false));
+    assert!(!press(Key::Named(NamedKey::Tab), none, false));
+}

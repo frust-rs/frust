@@ -10,7 +10,7 @@
 //!
 //! A slider is a Tab stop; while focused, a bare Left/Down arrow requests the value `0.05`
 //! lower, Right/Up `0.05` higher, Home `0.0` and End `1.0` (auto-repeat included). A pointer
-//! press claims no focus, so focus arrives through traversal only.
+//! primary press also takes focus, so the next Tab continues from here.
 //!
 //! # Design-language branch
 //!
@@ -329,6 +329,7 @@ impl Widget for SliderWidget {
                 if !presses(p) {
                     return EventResult::Ignored;
                 }
+                ctx.request_focus();
                 self.captured = true;
                 ctx.capture_pointer();
                 let v = value_from_x(p.position.x, ctx.size().width);
@@ -366,7 +367,7 @@ impl Widget for SliderWidget {
         });
     }
 
-    /// Always a Tab stop; a pointer press never claims focus (see the module docs).
+    /// Always a Tab stop; a primary press also takes focus (see the module docs).
     fn is_focusable(&self) -> bool {
         true
     }
@@ -659,6 +660,29 @@ mod tests {
                 modifiers: Modifiers::default(),
                 repeat,
             })
+        }
+
+        #[test]
+        fn a_press_keeps_focus_so_the_next_tab_moves_to_the_next_stop() {
+            let mut logic = |s: &mut Val| {
+                crate::column()
+                    .child(slider(0.5, |s: &mut Val, _| s.changes += 1))
+                    .child(slider(s.value, |s: &mut Val, _| s.changes += 10))
+            };
+            let mut root: RenderRoot<Val, crate::FlexView<Val>> = RenderRoot::new();
+            let mut state = Val {
+                value: 0.5,
+                changes: 0,
+            };
+            root.rebuild(&mut logic, &mut state);
+            root.layout(Size::new(200.0, 100.0));
+            root.paint(&mut DiscardScene, FrameTime::ZERO);
+            root.event(&mut state, &ev(PointerPhase::Down, 50.0));
+            root.event(&mut state, &ev(PointerPhase::Up, 50.0));
+            assert_eq!(state.changes, 1);
+            root.event(&mut state, &key(NamedKey::Tab, false));
+            root.event(&mut state, &key(NamedKey::ArrowRight, false));
+            assert_eq!(state.changes, 11, "Tab went to the second slider");
         }
 
         #[test]

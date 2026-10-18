@@ -12,8 +12,8 @@
 //! # Keyboard
 //!
 //! An enabled button is a Tab stop ([`Widget::is_focusable`]); while focused, a bare Space or
-//! Enter fires `on_press` exactly as a click does. A pointer press claims no focus, so touch and
-//! mouse behaviour are unchanged: focus arrives through traversal only.
+//! Enter fires `on_press` exactly as a click does. A primary pointer press also takes focus
+//! (pointer-sourced, so `KeyboardOnly` paints no ring), so the next Tab continues from here.
 //!
 //! # Style variants
 //!
@@ -93,7 +93,7 @@ use peniko::{Brush, Color};
 
 use crate::authoring::presses;
 use crate::nav::transition::{TransitionDriver, make_driver};
-use crate::shortcuts::is_activation;
+use crate::shortcuts::activation;
 use crate::text;
 use crate::text::ThemeTextColor;
 use crate::{Alignment, Timing, authoring::PRESSED_OPACITY};
@@ -872,10 +872,7 @@ impl Widget for ButtonWidget {
         if self.loading || self.disabled {
             return EventResult::Ignored;
         }
-        if let InputEvent::Key(key) = event {
-            if !(ctx.has_focus() && is_activation(key)) {
-                return EventResult::Ignored;
-            }
+        if activation(ctx, event) {
             (self.on_press)(ctx);
             ctx.request_redraw();
             return EventResult::Handled;
@@ -888,6 +885,7 @@ impl Widget for ButtonWidget {
                 if !presses(p) {
                     return EventResult::Ignored;
                 }
+                ctx.request_focus();
                 self.pressed = true;
                 self.captured = true;
                 self.press.set_pressed(true);
@@ -949,8 +947,8 @@ impl Widget for ButtonWidget {
         });
     }
 
-    /// A Tab stop unless disabled (a loading button keeps its focus). A pointer press never
-    /// claims focus — see the module docs' Keyboard section.
+    /// A Tab stop unless disabled (a loading button keeps its focus). A primary press also
+    /// takes focus — see the module docs' Keyboard section.
     fn is_focusable(&self) -> bool {
         !self.disabled
     }
@@ -1675,16 +1673,13 @@ mod tests {
         }
 
         #[test]
-        fn a_click_claims_no_focus_and_a_disabled_button_is_skipped() {
+        fn a_click_claims_focus_and_a_disabled_button_is_skipped() {
             let mut root = root(false);
             let mut state = Counter::default();
             root.event(&mut state, &ev(PointerPhase::Down, 5.0, 5.0));
             root.event(&mut state, &ev(PointerPhase::Up, 5.0, 5.0));
             assert_eq!(state.presses, 1);
-            assert!(
-                !root.is_focus_active(),
-                "focus arrives through traversal only"
-            );
+            assert!(root.is_focus_active(), "a press claims focus");
 
             let mut root = self::root(true);
             root.event(
@@ -1692,6 +1687,30 @@ mod tests {
                 &key(Key::Named(NamedKey::Tab), Modifiers::default()),
             );
             assert!(!root.is_focus_active(), "no stop to land on");
+        }
+
+        #[test]
+        fn a_press_keeps_focus_so_the_next_tab_moves_to_the_next_stop() {
+            let mut root: RenderRoot<Counter, crate::FlexView<Counter>> = RenderRoot::new();
+            let mut logic = |_: &mut Counter| {
+                crate::column()
+                    .child(button::<Counter, _>("a", |s: &mut Counter| s.presses += 1))
+                    .child(button::<Counter, _>("b", |s: &mut Counter| s.presses += 10))
+            };
+            let mut state = Counter::default();
+            root.rebuild(&mut logic, &mut state);
+            let mut tcx = frust_text::TextContext::new();
+            root.layout_with_text(Size::new(200.0, 200.0), &mut tcx as &mut dyn Any);
+            root.paint(&mut DiscardScene, FrameTime::ZERO);
+            root.event(&mut state, &ev(PointerPhase::Down, 5.0, 5.0));
+            root.event(&mut state, &ev(PointerPhase::Up, 5.0, 5.0));
+            assert!(root.is_focus_active());
+            root.event(
+                &mut state,
+                &key(Key::Named(NamedKey::Tab), Modifiers::default()),
+            );
+            root.event(&mut state, &space());
+            assert_eq!(state.presses, 11, "Tab went to the second button");
         }
 
         #[test]

@@ -8,7 +8,7 @@
 //! value back in (the masonry rule: application state is the source of truth).
 //!
 //! A checkbox is a Tab stop; while focused, a bare Space or Enter requests the toggle exactly as
-//! a click does. A pointer press claims no focus, so focus arrives through traversal only.
+//! a click does. A primary pointer press also takes focus, so the next Tab continues from here.
 
 use std::rc::Rc;
 
@@ -22,7 +22,7 @@ use kurbo::{Point, Size};
 use peniko::Color;
 
 use crate::authoring::presses;
-use crate::shortcuts::is_activation;
+use crate::shortcuts::activation;
 use crate::text;
 
 /// Side length of the check box, in logical px.
@@ -186,10 +186,7 @@ impl Widget for CheckboxWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        if let InputEvent::Key(key) = event {
-            if !(ctx.has_focus() && is_activation(key)) {
-                return EventResult::Ignored;
-            }
+        if activation(ctx, event) {
             (self.on_toggle)(ctx, !self.checked);
             ctx.request_redraw();
             return EventResult::Handled;
@@ -202,6 +199,7 @@ impl Widget for CheckboxWidget {
                 if !presses(p) {
                     return EventResult::Ignored;
                 }
+                ctx.request_focus();
                 self.pressed = true;
                 self.captured = true;
                 ctx.capture_pointer();
@@ -254,7 +252,7 @@ impl Widget for CheckboxWidget {
         });
     }
 
-    /// Always a Tab stop; a pointer press never claims focus (see the module docs).
+    /// Always a Tab stop; a primary press also takes focus (see the module docs).
     fn is_focusable(&self) -> bool {
         true
     }
@@ -481,6 +479,30 @@ mod tests {
         }
 
         #[test]
+        fn a_press_keeps_focus_so_the_next_tab_moves_to_the_next_stop() {
+            let mut logic = |_: &mut ToggleState| {
+                crate::column()
+                    .child(checkbox(false, "a", |s: &mut ToggleState, _| {
+                        s.toggles += 1
+                    }))
+                    .child(checkbox(false, "b", |s: &mut ToggleState, _| {
+                        s.toggles += 10
+                    }))
+            };
+            let mut root: RenderRoot<ToggleState, crate::FlexView<ToggleState>> = RenderRoot::new();
+            let mut state = ToggleState::default();
+            let mut tcx = frust_text::TextContext::new();
+            root.rebuild(&mut logic, &mut state);
+            root.layout_with_text(Size::new(200.0, 200.0), &mut tcx as &mut dyn Any);
+            root.paint(&mut DiscardScene, FrameTime::ZERO);
+            root.event(&mut state, &ev(PointerPhase::Down, 5.0, 10.0));
+            root.event(&mut state, &ev(PointerPhase::Up, 5.0, 10.0));
+            root.event(&mut state, &key(Key::Named(NamedKey::Tab)));
+            root.event(&mut state, &key(Key::Character(" ".to_string())));
+            assert_eq!(state.toggles, 11, "Tab went to the second checkbox");
+        }
+
+        #[test]
         fn tab_focuses_the_checkbox_then_space_or_enter_requests_the_toggle() {
             assert!(widget(false).is_focusable());
             let mut logic = |s: &mut ToggleState| {
@@ -501,7 +523,7 @@ mod tests {
             root.event(&mut state, &ev(PointerPhase::Down, 5.0, 10.0));
             root.event(&mut state, &ev(PointerPhase::Up, 5.0, 10.0));
             assert_eq!(state.toggles, 1);
-            assert!(!root.is_focus_active(), "a click claims no focus");
+            assert!(root.is_focus_active(), "a click claims focus");
             root.rebuild(&mut logic, &mut state);
 
             root.event(&mut state, &key(Key::Named(NamedKey::Tab)));

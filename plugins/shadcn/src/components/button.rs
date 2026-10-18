@@ -46,9 +46,8 @@ use frust::Theme;
 use frust::authoring::text::{FontWeight, TextStyle};
 use frust::authoring::{
     Action, BoxConstraints, Brush, BuildCtx, ChangeFlags, Color, ErasedCallback, EventCtx,
-    EventResult, InputEvent, Key, KeyEvent, LayoutCtx, Modifiers, NamedKey, PaintCtx, PaintScene,
-    PointerPhase, Role, RoundedRect, SemanticsCtx, Shape, Size, ThemeTextType, Vec2, View, Widget,
-    erase_callback,
+    EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerPhase, Role, RoundedRect,
+    SemanticsCtx, Shape, Size, ThemeTextType, Vec2, View, Widget, erase_callback,
 };
 
 use crate::hit::{inside, presses};
@@ -422,7 +421,7 @@ impl Widget for ButtonWidget {
             return EventResult::Ignored;
         }
         if let InputEvent::Key(key) = event {
-            if !(ctx.has_focus() && activates(key)) {
+            if !(ctx.has_focus() && key.is_activation()) {
                 return EventResult::Ignored;
             }
             (self.on_press)(ctx);
@@ -504,20 +503,12 @@ impl Widget for ButtonWidget {
     }
 }
 
-/// Whether `key` is a bare, fresh Space or Enter: a native `<button>`'s activation keys.
-fn activates(key: &KeyEvent) -> bool {
-    let pressed = match &key.key {
-        Key::Named(named) => *named == NamedKey::Enter,
-        Key::Character(text) => text == " ",
-    };
-    pressed && !key.repeat && key.modifiers == Modifiers::default()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use frust::authoring::Point;
     use frust::authoring::text::TextContext;
+    use frust::authoring::{Key, KeyEvent, Modifiers, NamedKey};
     use frust_core::RenderRoot;
     use std::any::Any;
 
