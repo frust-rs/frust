@@ -22,7 +22,8 @@ A running xdg-desktop-portal with a file-chooser backend (GTK, KDE, ...).
 libdbus is loaded at runtime, so nothing links at build time. If the portal is
 unavailable `rfd` falls back to `zenity`. If neither exists, `rfd` logs an
 error and returns no selection: the call yields `Ok(None)` / an empty `Vec`,
-indistinguishable from a cancel.
+indistinguishable from a cancel. On a zenity-only desktop `rfd` splits the
+multi-selection on `|`, so `open_files` splits a file name containing `|`.
 
 ## Usage
 
@@ -54,8 +55,15 @@ let picked = use_task(|| frust::spawn_blocking(|| {
 ```
 
 Never call from a paint or event handler, and never `signal.set` from the
-background thread; hand the value back through the task result. On macOS `rfd`
-hops to the main thread internally.
+background thread; hand the value back through the task result.
+
+Threading follows `rfd`: on macOS it marshals the panel to the main thread
+(`dispatch2::run_on_main`) when `NSApplication` is running, so calling from
+`spawn_blocking` under the frust desktop shell is correct and the main thread
+blocks while the modal panel runs; on Windows it initialises COM per calling
+thread, so a worker thread is fine; on Linux the portal call blocks only the
+calling thread. The macOS and Windows legs are validated by the owed platform
+gates (e-g1, e-g2), Linux by the 2026-10-18 rig run.
 
 ## Security
 
