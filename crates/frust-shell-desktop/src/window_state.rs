@@ -8,11 +8,13 @@
 //! no thread of its own), the monitor-validity clamp over plain monitor
 //! rectangles, and the initial-geometry precedence. `app_handler` translates
 //! winit values in and out. Window state is user state, not a cache, so it
-//! lives under `frust_paths::data_dir()`; a failed read or write is logged at
-//! debug level and never fails startup.
+//! lives under `frust_paths::data_dir()`; a failed read is logged at debug
+//! level, the first failed write per process at warn (later ones at debug),
+//! and neither fails startup.
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use kurbo::Size;
@@ -143,23 +145,48 @@ fn load_from(path: &Path) -> Option<WindowState> {
     state
 }
 
-/// Write `state` atomically (best-effort).
+/// Whether this run may write the state file: the app opted in and no
+/// `FRUST_WINDOW_SIZE`/`FRUST_WINDOW_MAXIMIZED` knob is set. A knob run is a
+/// measurement run; it still reads and applies the saved state, but never
+/// overwrites it.
+pub(crate) fn persistence_enabled(opted_in: bool, knob_set: bool) -> bool {
+    opted_in && !knob_set
+}
+
+/// Set once the first save failure of the process has been logged at warn.
+static SAVE_FAILURE_WARNED: AtomicBool = AtomicBool::new(false);
+
+/// Write `state` atomically (best-effort). The first failed write per process
+/// logs at warn (path and error); later failures log at debug.
 pub(crate) fn save(state: &WindowState) {
     if let Some(path) = state_path() {
-        save_to(&path, state);
+        save_to(&path, state, &SAVE_FAILURE_WARNED);
     }
 }
 
-fn save_to(path: &Path, state: &WindowState) {
+/// `true` exactly once per flag: the failure that should warn.
+fn first_failure(warned: &AtomicBool) -> bool {
+    !warned.swap(true, Ordering::Relaxed)
+}
+
+fn save_to(path: &Path, state: &WindowState, warned: &AtomicBool) {
     match frust_paths::atomic_write(path, state.encode().as_bytes()) {
         Ok(()) => log::debug!(
             "frust-shell-desktop: saved window state to {}",
             path.display()
         ),
-        Err(e) => log::debug!(
-            "frust-shell-desktop: failed to save window state to {}: {e}",
-            path.display()
-        ),
+        Err(e) => {
+            let level = if first_failure(warned) {
+                log::Level::Warn
+            } else {
+                log::Level::Debug
+            };
+            log::log!(
+                level,
+                "frust-shell-desktop: failed to save window state to {}: {e}",
+                path.display()
+            );
+        }
     }
 }
 
@@ -172,6 +199,8 @@ pub(crate) struct WindowSnapshot {
     pub position: Option<(i32, i32)>,
     pub maximized: bool,
     pub minimized: bool,
+    /// Whether the window is fullscreen. Fullscreen is never persisted.
+    pub fullscreen: bool,
     pub monitor: Option<String>,
 }
 
@@ -179,6 +208,9 @@ pub(crate) struct WindowSnapshot {
 /// runs once it has been quiet for [`SAVE_DEBOUNCE`] (or at once on close).
 /// The caller supplies `now`, polls from its own event loop, and parks the
 /// loop until [`deadline`](Self::deadline) so a quiet window still saves.
+/// The un-maximized geometry is tracked from creation (and on every
+/// un-maximized change via [`note_normal`](Self::note_normal)), so a window
+/// maximized before its first save still records its normal size.
 #[derive(Debug, Default)]
 pub(crate) struct WindowStateSaver {
     due: Option<Instant>,
@@ -188,10 +220,19 @@ pub(crate) struct WindowStateSaver {
 
 impl WindowStateSaver {
     /// Seed with what was loaded (the file's own contents, so an identical
-    /// snapshot skips the write) and the geometry actually restored.
-    pub fn seed(&mut self, loaded: Option<WindowState>, restored: Option<&WindowState>) {
+    /// snapshot skips the write) and the geometry the window is created with,
+    /// which is the normal geometry until a change says otherwise.
+    pub fn seed(&mut self, loaded: Option<WindowState>, creation: &InitialGeometry) {
         self.written = loaded;
-        self.normal = restored.map(|s| (s.size, s.position));
+        self.normal = Some((creation.size, creation.position));
+    }
+
+    /// Record the geometry of a window that is neither maximized, minimized
+    /// nor fullscreen. An invalid size is ignored.
+    pub fn note_normal(&mut self, size: Size, position: Option<(i32, i32)>) {
+        if valid_size(size) {
+            self.normal = Some((size, position));
+        }
     }
 
     /// A resize or move happened at `now`: (re)start the quiet period.
@@ -232,10 +273,11 @@ impl WindowStateSaver {
         Some(state)
     }
 
-    /// A minimized window records nothing (platforms report sentinel
-    /// geometry); a maximized one keeps the last un-maximized size/position.
+    /// A minimized or fullscreen window records nothing (the previous saved
+    /// state stands; platforms report sentinel geometry when minimized); a
+    /// maximized one keeps the last un-maximized size/position.
     fn resolve(&mut self, snap: WindowSnapshot) -> Option<WindowState> {
-        if snap.minimized || !valid_size(snap.size) {
+        if snap.minimized || snap.fullscreen || !valid_size(snap.size) {
             return None;
         }
         let (size, position) = if snap.maximized {
@@ -355,7 +397,8 @@ pub(crate) struct InitialGeometry {
     pub maximized: bool,
 }
 
-/// Resolve the creation geometry, lowest precedence first: the shell
+/// Resolve the creation geometry (fullscreen is never part of it), lowest
+/// precedence first: the shell
 /// `default` → `DesktopConfig::initial_size` → the persisted state (the
 /// caller passes it only when persistence is on and it loaded and clamped)
 /// → the `FRUST_WINDOW_SIZE`/`FRUST_WINDOW_MAXIMIZED` measurement knobs,
@@ -415,6 +458,7 @@ mod tests {
             position: Some(position),
             maximized: false,
             minimized: false,
+            fullscreen: false,
             monitor: Some("DP-1".to_string()),
         })
     }
@@ -484,11 +528,28 @@ mod tests {
         let path = root.join("frust").join("window_state.txt");
         assert_eq!(load_from(&path), None, "absent file");
         let saved = state(1024.0, 768.0, Some((10, 20)), Some("eDP-1"));
-        save_to(&path, &saved);
+        save_to(&path, &saved, &AtomicBool::new(false));
         assert_eq!(load_from(&path), Some(saved));
         fs::write(&path, "version=9\n").unwrap();
         assert_eq!(load_from(&path), None, "unknown version");
         let _ = fs::remove_dir_all(&root);
+    }
+
+    fn creation(w: f64, h: f64, position: Option<(i32, i32)>) -> InitialGeometry {
+        InitialGeometry {
+            size: Size::new(w, h),
+            position,
+            maximized: false,
+        }
+    }
+
+    fn maximized_snapshot() -> Option<WindowSnapshot> {
+        Some(WindowSnapshot {
+            size: Size::new(2560.0, 1400.0),
+            position: Some((0, 0)),
+            maximized: true,
+            ..snapshot(1.0, 1.0, (0, 0))?
+        })
     }
 
     // --- debounce ---
@@ -530,7 +591,7 @@ mod tests {
     fn a_seeded_saver_skips_rewriting_the_loaded_state() {
         let loaded = state(900.0, 700.0, Some((1, 2)), Some("DP-1"));
         let mut saver = WindowStateSaver::default();
-        saver.seed(Some(loaded.clone()), Some(&loaded));
+        saver.seed(Some(loaded.clone()), &creation(900.0, 700.0, Some((1, 2))));
         assert_eq!(saver.flush(|| snapshot(900.0, 700.0, (1, 2))), None);
     }
 
@@ -544,6 +605,7 @@ mod tests {
                 position: Some((0, 0)),
                 maximized: true,
                 minimized: false,
+                fullscreen: false,
                 monitor: Some("DP-1".to_string()),
             })
         });
@@ -560,6 +622,77 @@ mod tests {
             })
         });
         assert_eq!(minimized, None);
+    }
+
+    #[test]
+    fn maximizing_before_the_first_save_records_the_creation_geometry() {
+        let mut saver = WindowStateSaver::default();
+        saver.seed(None, &creation(800.0, 600.0, Some((5, 6))));
+        let saved = saver.flush(maximized_snapshot).expect("saves");
+        assert_eq!(saved.size, Size::new(800.0, 600.0));
+        assert_eq!(saved.position, Some((5, 6)));
+        assert!(saved.maximized);
+    }
+
+    #[test]
+    fn an_unmaximized_resize_is_tracked_before_a_maximize() {
+        let mut saver = WindowStateSaver::default();
+        saver.seed(None, &creation(800.0, 600.0, None));
+        saver.note_normal(Size::new(900.0, 700.0), Some((3, 4)));
+        saver.note_normal(Size::new(f64::NAN, 1.0), None);
+        let saved = saver.flush(maximized_snapshot).expect("saves");
+        assert_eq!(saved.size, Size::new(900.0, 700.0));
+        assert_eq!(saved.position, Some((3, 4)));
+        assert!(saved.maximized);
+    }
+
+    #[test]
+    fn a_fullscreen_snapshot_saves_nothing() {
+        let mut saver = WindowStateSaver::default();
+        saver.seed(None, &creation(800.0, 600.0, None));
+        saver.note_change(Instant::now());
+        let fullscreen = || {
+            Some(WindowSnapshot {
+                fullscreen: true,
+                ..snapshot(1920.0, 1080.0, (0, 0))?
+            })
+        };
+        assert_eq!(saver.flush(fullscreen), None);
+        saver.note_change(Instant::now());
+        let later = Instant::now() + SAVE_DEBOUNCE * 2;
+        assert_eq!(saver.poll(later, fullscreen), None);
+    }
+
+    #[test]
+    fn knob_runs_do_not_persist() {
+        assert!(persistence_enabled(true, false));
+        assert!(!persistence_enabled(true, true));
+        assert!(!persistence_enabled(false, false));
+        assert!(!persistence_enabled(false, true));
+    }
+
+    #[test]
+    fn only_the_first_failed_save_warns() {
+        let root =
+            std::env::temp_dir().join(format!("frust-window-state-warn-{}", std::process::id()));
+        fs::create_dir(&root).expect("scratch root must not already exist (planted path?)");
+        let blocker = root.join("blocker");
+        fs::write(&blocker, "file").unwrap();
+        let path = blocker.join("window_state.txt");
+        let flag = AtomicBool::new(false);
+        assert!(first_failure(&flag));
+        assert!(!first_failure(&flag));
+        let warned = AtomicBool::new(false);
+        let saved = state(800.0, 600.0, None, None);
+        save_to(&path, &saved, &warned);
+        assert!(warned.load(Ordering::Relaxed), "first failure warns");
+        assert!(!path.exists());
+        save_to(&path, &saved, &warned);
+        assert!(
+            warned.load(Ordering::Relaxed),
+            "stays set; later ones are debug"
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
