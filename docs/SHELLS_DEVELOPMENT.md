@@ -249,9 +249,14 @@ are the window's resize limits. Creation geometry resolves lowest to highest pre
 
 The state file is `<data_dir>/frust/window_state_<app_stem>.txt`: versioned `key=value` lines
 (`version=1`, `width`, `height`, `maximized`, optional `x`/`y`/`monitor`). Another version or a
-malformed line is ignored, and a failed read or write logs at debug level without failing startup.
-Saves are debounced 500 ms after the last resize or move, with a final save on close request and on
-exit; a minimized window records nothing, and a maximized one keeps its last un-maximized geometry.
+malformed line is ignored; a failed read logs at debug, the first failed write per process at warn
+and later ones at debug, and none fails startup. A run with a valid `FRUST_WINDOW_SIZE` or any
+`FRUST_WINDOW_MAXIMIZED` set reads and applies the saved state but never writes it; window creation
+logs `frust-shell-desktop window persist=on`, `off (knob)` or (not opted in) `off` once. Saves are
+debounced 500 ms after the last resize or move, with a final save on close request and on exit. The
+normal (un-maximized) geometry is seeded from the creation geometry and tracked on every
+un-maximized change, so a window maximized before its first save still records it; a minimized or
+fullscreen window records nothing, and fullscreen is never restored.
 A restored state is fitted to the connected monitors first: the position is dropped (the OS places
 the window) when the saved monitor is gone or the rectangle overlaps no monitor, the size is fitted
 to that monitor (the primary once the position is dropped), then `max_size` and `min_size` apply in
@@ -266,6 +271,11 @@ the record):
 - **macOS — owed:** relaunch restore and the minimum size.
 - **Windows — owed:** relaunch restore, the off-screen clamp (saved monitor disconnected), and the
   minimum size.
+- **Any OS — owed (manual):** multi-monitor hot-unplug while running (saved monitor disconnected
+  before close).
+
+The same README table owes a re-run of the Shortcuts page's F2, `?`, single-Escape and press-focus
+legs on Linux (added after its run) and as part of the macOS and Windows Shortcuts rows.
 
 ## Browser manual gate (web)
 

@@ -91,6 +91,13 @@
 //! [`OverlaySlot::pod_has_focus`] reports a link on the **live** session, not a
 //! flag that was once set, and every routing decision here reads it.
 //!
+//! # Tab traversal
+//!
+//! The root never walks a floated pod on its own. [`OverlayPortalWidget`] visits
+//! its pod through [`OverlaySlot::visit_focus_pod`] after its child, so a
+//! non-modal pod's focusable content is reached right after its owner's stops.
+//! A modal pod is the exception: the root walks it alone.
+//!
 //! # Not in v1
 //!
 //! * **The pod contributes no semantics.** A pod's nodes would attach under the
@@ -560,6 +567,19 @@ impl<PodState: 'static> OverlaySlot<PodState> {
         self.pod
             .as_ref()
             .is_some_and(|pod| pod.borrow().holds_live_focus())
+    }
+
+    /// Visit the mounted pod for the focus walk, if one is mounted and not
+    /// currently borrowed. The owner calls this from its
+    /// `Widget::visit_focus_children`, after its own children, so a floated
+    /// pod's stops follow its owner's. The root's walk decides what the pod
+    /// contributes; a closed slot visits nothing.
+    pub fn visit_focus_pod(&self, visitor: &mut dyn FnMut(&ChildPod)) {
+        if let Some(pod) = &self.pod
+            && let Ok(pod) = pod.try_borrow()
+        {
+            visitor(&pod);
+        }
     }
 
     /// Drop the pod's recorded focus link, so focus-routed events stop reaching
@@ -1332,6 +1352,15 @@ impl<State: 'static> Widget for OverlayPortalWidget<State> {
     }
 
     crate::authoring::visit_children!(child);
+
+    // The pod is visited after the child, so Tab reaches the owner's own stops
+    // first. Not `is_focusable` forwarding: the walk would then stop on the
+    // portal and its child for one control, and the phantom stop's grant
+    // would leave focus where it was.
+    fn visit_focus_children(&self, visitor: &mut dyn FnMut(&ChildPod)) {
+        visitor(&self.child);
+        self.slot.visit_focus_pod(visitor);
+    }
 }
 
 #[cfg(test)]
@@ -2915,5 +2944,135 @@ mod tests {
              {:?}",
             rects(&scene)
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Tab traversal into a floated pod
+    // -----------------------------------------------------------------------
+
+    /// A focusable leaf that records, on each paint, whether it holds focus.
+    struct Stop {
+        focused: Rc<std::cell::Cell<bool>>,
+    }
+
+    struct StopWidget {
+        focused: Rc<std::cell::Cell<bool>>,
+    }
+
+    impl View<TabApp> for Stop {
+        type Element = StopWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> StopWidget {
+            StopWidget {
+                focused: Rc::clone(&self.focused),
+            }
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            element: &mut StopWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            element.focused = Rc::clone(&self.focused);
+            ChangeFlags::NONE
+        }
+    }
+
+    impl Widget for StopWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(40.0, 20.0))
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            self.focused.set(ctx.has_focus());
+            scene.fill_rect(ctx.origin(), ctx.size(), Color::BLACK);
+        }
+        fn event(&mut self, _ctx: &mut EventCtx, _event: &InputEvent) -> EventResult {
+            EventResult::Ignored
+        }
+        fn is_focusable(&self) -> bool {
+            true
+        }
+    }
+
+    /// The owner's button and the floated pod's content, and whether the pod is mounted.
+    #[derive(Default)]
+    struct TabApp {
+        open: bool,
+        owner: Rc<std::cell::Cell<bool>>,
+        pod: Rc<std::cell::Cell<bool>>,
+    }
+
+    fn tab_logic(state: &mut TabApp) -> StackView<TabApp> {
+        let surface = state.open.then(|| Stop {
+            focused: Rc::clone(&state.pod),
+        });
+        stack().child(
+            overlay_portal(Stop {
+                focused: Rc::clone(&state.owner),
+            })
+            .overlay(surface),
+        )
+    }
+
+    fn tab_frame(root: &mut RenderRoot<TabApp, StackView<TabApp>>, state: &mut TabApp) {
+        let mut build: fn(&mut TabApp) -> StackView<TabApp> = tab_logic;
+        root.rebuild(&mut build, state);
+        root.layout(WINDOW);
+        root.paint(&mut RecordingScene::default(), FrameTime::from_nanos(0));
+    }
+
+    /// One Tab (or Shift+Tab) press, then a frame so the paint reports the new focus.
+    fn tab_press(
+        root: &mut RenderRoot<TabApp, StackView<TabApp>>,
+        state: &mut TabApp,
+        shift: bool,
+    ) {
+        let event = KeyEvent {
+            key: Key::Named(NamedKey::Tab),
+            modifiers: Modifiers {
+                shift,
+                ..Modifiers::default()
+            },
+            repeat: false,
+        };
+        root.event(state, &InputEvent::Key(event));
+        tab_frame(root, state);
+    }
+
+    #[test]
+    fn tab_moves_from_the_owner_into_an_open_pass_pod_and_shift_tab_comes_back() {
+        let mut root = RenderRoot::new();
+        let mut state = TabApp {
+            open: true,
+            ..TabApp::default()
+        };
+        tab_frame(&mut root, &mut state);
+
+        tab_press(&mut root, &mut state, false);
+        assert!(state.owner.get(), "the owner's button takes the first stop");
+        assert!(!state.pod.get());
+
+        tab_press(&mut root, &mut state, false);
+        assert!(root.is_focus_active());
+        assert!(state.pod.get(), "the pod's content takes the next stop");
+        assert!(!state.owner.get(), "the owner gives up focus to the pod");
+
+        tab_press(&mut root, &mut state, true);
+        assert!(state.owner.get(), "Shift+Tab goes back to the owner's stop");
+        assert!(!state.pod.get());
+    }
+
+    #[test]
+    fn a_closed_pod_contributes_no_stops() {
+        let mut root = RenderRoot::new();
+        let mut state = TabApp::default();
+        tab_frame(&mut root, &mut state);
+
+        tab_press(&mut root, &mut state, false);
+        assert!(state.owner.get());
+        // The owner is the only stop, so Tab wraps back onto it and the pod
+        // never takes focus.
+        tab_press(&mut root, &mut state, false);
+        assert!(state.owner.get());
+        assert!(!state.pod.get(), "an unmounted pod is never a stop");
     }
 }

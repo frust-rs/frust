@@ -268,15 +268,6 @@ fn label_style(theme: Option<&Theme>) -> TextStyle {
     )
 }
 
-/// Whether `key` activates the focused item.
-fn is_activation_key(key: &KeyEvent) -> bool {
-    match &key.key {
-        Key::Named(NamedKey::Enter) => true,
-        Key::Character(text) => text == " ",
-        _ => false,
-    }
-}
-
 /// Which way an arrow key moves the roving focus, or `None`.
 fn arrow_step(key: &KeyEvent) -> Option<isize> {
     match &key.key {
@@ -657,7 +648,7 @@ impl Widget for ToggleGroupWidget {
                     ctx.request_redraw();
                     return EventResult::Handled;
                 }
-                if is_activation_key(key) && self.enabled(self.focused_item) {
+                if key.is_activation() && self.enabled(self.focused_item) {
                     let index = self.focused_item;
                     self.request_press(ctx, index);
                     return EventResult::Handled;

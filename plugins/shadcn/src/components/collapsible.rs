@@ -36,7 +36,6 @@ use frust::authoring::{
 };
 use frust::{AnimationController, Curve, Theme};
 
-use crate::components::native_select::activates;
 use crate::hit::{inside, presses};
 use crate::style;
 use crate::tokens::ShadcnTokens;
@@ -298,7 +297,7 @@ impl Widget for CollapsibleWidget {
             return routed;
         }
         if let InputEvent::Key(key) = event {
-            if self.disabled || !activates(&key.key) {
+            if self.disabled || !key.is_activation() {
                 return EventResult::Ignored;
             }
             self.toggle(ctx);

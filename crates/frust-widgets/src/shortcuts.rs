@@ -12,10 +12,11 @@
 
 use std::rc::Rc;
 
+use frust_core::event::PointerSource;
 use frust_core::{
-    BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Chord, EventCtx, EventResult, InputEvent, Key,
-    KeyEvent, LayoutCtx, Modifiers, NamedKey, PaintCtx, PaintScene, SemanticsCtx, ShortcutDecl,
-    ShortcutId, ShortcutScope, SliverWidget, View, Widget,
+    BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Chord, EventCtx, EventResult, InputEvent,
+    LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, ShortcutDecl, ShortcutId, ShortcutScope,
+    SliverWidget, View, Widget,
 };
 use kurbo::Size;
 
@@ -225,13 +226,15 @@ impl<W: Widget> Widget for ShortcutsWidget<W> {
     }
 }
 
-/// Whether `key` is a bare, fresh Space or Enter: what activates a focused button-like control.
-pub(crate) fn is_activation(key: &KeyEvent) -> bool {
-    let pressed = match &key.key {
-        Key::Named(named) => *named == NamedKey::Enter,
-        Key::Character(text) => text == " ",
-    };
-    pressed && !key.repeat && key.modifiers == Modifiers::default()
+/// Whether the widget holds focus and `event` is an activation key (see [`KeyEvent::is_activation`]).
+pub(crate) fn activation(ctx: &EventCtx, event: &InputEvent) -> bool {
+    ctx.has_focus() && matches!(event, InputEvent::Key(key) if key.is_activation())
+}
+
+/// Whether a primary press may claim focus: only a mouse contact does. A touch tap activates
+/// the control but leaves focus alone, so a focused text field keeps its session and keyboard.
+pub(crate) fn press_claims_focus(ctx: &EventCtx) -> bool {
+    ctx.pointer_id().source == PointerSource::Mouse
 }
 
 #[cfg(test)]
@@ -239,7 +242,9 @@ mod tests {
     use std::any::Any;
     use std::cell::Cell;
 
-    use frust_core::{DiscardScene, FrameTime, RenderRoot, ShortcutHint};
+    use frust_core::{
+        DiscardScene, FrameTime, Key, KeyEvent, Modifiers, NamedKey, RenderRoot, ShortcutHint,
+    };
     use frust_text::TextContext;
 
     use super::*;
@@ -455,31 +460,8 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "invalid shortcut chord `F2`")]
+    #[should_panic(expected = "invalid shortcut chord `F25`")]
     fn an_unparsable_chord_panics_naming_it() {
-        let _ = shortcuts::<App, _>(text("x")).on("F2", "Rename", |_| {});
-    }
-
-    #[test]
-    fn activation_is_a_bare_fresh_space_or_enter() {
-        let press = |k: Key, modifiers: Modifiers, repeat: bool| {
-            is_activation(&KeyEvent {
-                key: k,
-                modifiers,
-                repeat,
-            })
-        };
-        let none = Modifiers::default();
-        let space = || Key::Character(" ".to_string());
-        assert!(press(space(), none, false));
-        assert!(press(Key::Named(NamedKey::Enter), none, false));
-        assert!(!press(space(), none, true), "an auto-repeat");
-        let shift = Modifiers {
-            shift: true,
-            ..none
-        };
-        assert!(!press(Key::Named(NamedKey::Enter), shift, false));
-        assert!(!press(Key::Character("a".to_string()), none, false));
-        assert!(!press(Key::Named(NamedKey::Tab), none, false));
+        let _ = shortcuts::<App, _>(text("x")).on("F25", "Rename", |_| {});
     }
 }

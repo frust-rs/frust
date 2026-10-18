@@ -158,10 +158,10 @@ pub fn mouse_button_should_dispatch(
     }
 }
 
-/// Map a winit [`WinitNamedKey`] to our editing-semantics [`NamedKey`] set, or
-/// `None` for a named key this shell carries no editing semantics for (function
-/// keys, media keys, browser keys) — those are dropped rather than misreported
-/// as text.
+/// Map a winit [`WinitNamedKey`] to our [`NamedKey`] set (the editing keys and
+/// `F1`..`F24`), or `None` for a named key this shell carries no semantics for
+/// (media keys, browser keys, `F25`+) — those are dropped rather than
+/// misreported as text.
 ///
 /// The four clipboard keys are carried like every other editing key, and the
 /// browser is where they are rarest: a page sees the dedicated `Copy`/`Cut`/
@@ -189,6 +189,30 @@ pub fn map_named_key(key: WinitNamedKey) -> Option<NamedKey> {
         WinitNamedKey::Cut => NamedKey::Cut,
         WinitNamedKey::Paste => NamedKey::Paste,
         WinitNamedKey::Insert => NamedKey::Insert,
+        WinitNamedKey::F1 => NamedKey::F1,
+        WinitNamedKey::F2 => NamedKey::F2,
+        WinitNamedKey::F3 => NamedKey::F3,
+        WinitNamedKey::F4 => NamedKey::F4,
+        WinitNamedKey::F5 => NamedKey::F5,
+        WinitNamedKey::F6 => NamedKey::F6,
+        WinitNamedKey::F7 => NamedKey::F7,
+        WinitNamedKey::F8 => NamedKey::F8,
+        WinitNamedKey::F9 => NamedKey::F9,
+        WinitNamedKey::F10 => NamedKey::F10,
+        WinitNamedKey::F11 => NamedKey::F11,
+        WinitNamedKey::F12 => NamedKey::F12,
+        WinitNamedKey::F13 => NamedKey::F13,
+        WinitNamedKey::F14 => NamedKey::F14,
+        WinitNamedKey::F15 => NamedKey::F15,
+        WinitNamedKey::F16 => NamedKey::F16,
+        WinitNamedKey::F17 => NamedKey::F17,
+        WinitNamedKey::F18 => NamedKey::F18,
+        WinitNamedKey::F19 => NamedKey::F19,
+        WinitNamedKey::F20 => NamedKey::F20,
+        WinitNamedKey::F21 => NamedKey::F21,
+        WinitNamedKey::F22 => NamedKey::F22,
+        WinitNamedKey::F23 => NamedKey::F23,
+        WinitNamedKey::F24 => NamedKey::F24,
         _ => return None,
     })
 }
@@ -2537,6 +2561,9 @@ mod tests {
         // Space is deliberately absent: it types a character, and
         // `map_key_event` routes it through the character path instead.
         assert_eq!(map_named_key(WinitNamedKey::Space), None);
+        assert_eq!(map_named_key(WinitNamedKey::F1), Some(NamedKey::F1));
+        assert_eq!(map_named_key(WinitNamedKey::F24), Some(NamedKey::F24));
+        assert_eq!(map_named_key(WinitNamedKey::F25), None);
     }
 
     #[test]

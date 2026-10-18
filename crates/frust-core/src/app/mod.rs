@@ -20,7 +20,7 @@ mod tests;
 use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::num::NonZeroU64;
-use std::rc::Weak;
+use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use kurbo::{Rect, Size};
@@ -85,9 +85,11 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     key_forward: Option<(OverlayKey, u64)>,
     /// The carrier id of this root's traversal grants (`widget::FocusGrant`); declared by no one.
     focus_grant: ShortcutId,
-    /// Whether traversal granted the live focus; a pointer `Down` clears it.
+    /// Whether traversal granted the live focus; any other claim, a release or a `Down` clears it.
     keyboard_focus: bool,
     focus_ring_policy: FocusRingPolicy,
+    /// Whether a declined bare Tab/Shift+Tab runs traversal ([`RenderRoot::set_tab_traversal`]).
+    tab_traversal: bool,
     hover_active: bool,
     /// Identity of the latest hover pass; a pod's hover stamp counts only while it equals this.
     hover_epoch: u64,
@@ -128,6 +130,8 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     overlay_hits: Vec<OverlayHit>,
     /// The shortcut declarations the last paint made, matched against unhandled keys.
     shortcuts: ShortcutTable,
+    /// `shortcuts` as the snapshot this root's build and paint contexts hand out.
+    last_hints: Rc<[ShortcutHint]>,
     /// The focused field's selection-toolbar request from the last paint; a release clears it.
     selection_toolbar: Option<SelectionToolbarRequest>,
     /// Bumped on every actual change of `selection_toolbar`, a clear included.
@@ -172,6 +176,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             focus_grant: ShortcutId::next(),
             keyboard_focus: false,
             focus_ring_policy: FocusRingPolicy::KeyboardOnly,
+            tab_traversal: true,
             hover_active: false,
             hover_epoch: 1,
             root_identity: NEXT_ROOT_IDENTITY.fetch_add(1, Ordering::Relaxed),
@@ -194,6 +199,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             painted_animating: false,
             overlay_hits: Vec::new(),
             shortcuts: ShortcutTable::default(),
+            last_hints: Rc::from(Vec::new()),
             selection_toolbar: None,
             selection_toolbar_gen: 0,
             layout_epoch: 1,
@@ -211,8 +217,15 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     }
 
     /// The last paint's shortcut declarations `filter` keeps, in paint order: a palette's list.
-    pub fn shortcut_hints(&self, filter: impl FnMut(&ShortcutHint) -> bool) -> Vec<ShortcutHint> {
-        self.shortcuts.hints(filter)
+    pub fn shortcut_hints(
+        &self,
+        mut filter: impl FnMut(&ShortcutHint) -> bool,
+    ) -> Vec<ShortcutHint> {
+        self.last_hints
+            .iter()
+            .filter(|hint| filter(hint))
+            .cloned()
+            .collect()
     }
 }
 

@@ -95,8 +95,9 @@ pub trait AppTree {
     /// before using this counter to decide whether focus is still where it was.
     fn focus_ime_generation(&self) -> u64;
 
-    /// The live focus session's **identity**, advanced once per honoured focus
-    /// claim and once per session release (delegates to
+    /// The live focus session's **identity**. It advances once per honoured claim (an
+    /// `EventCtx::request_focus` or a traversal grant) and once per session release, so a Tab
+    /// step that lands from a live session moves it by two (by one from none) and one that lands nowhere leaves it unchanged (delegates to
     /// [`RenderRoot::focus_epoch`]).
     ///
     /// Two adjacent generation counters invite exactly one mistake, so: the

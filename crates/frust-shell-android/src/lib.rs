@@ -519,8 +519,10 @@ macro_rules! android_app {
         /// Kotlin clipboard resolver can bind an async URI-backed paste to the
         /// session that asked for it. `EditCommand::Paste` is focus-routed, so
         /// a slow `ContentProvider`'s answer would otherwise land in whatever
-        /// field holds focus when it arrives. Advanced once per honoured focus
-        /// claim and once per session release, so it moves when focus crosses
+        /// field holds focus when it arrives. It advances once per honoured claim (an
+        /// `EventCtx::request_focus` or a traversal grant) and once per session release, so a Tab
+        /// step that lands from a live session moves it by two (by one from none) and one that lands nowhere leaves it unchanged. It moves
+        /// when focus crosses
         /// fields (published surface or not) and stands still through an edit
         /// inside one session. A missing handle returns `0`, which no live
         /// root ever reports (see `jni_glue::native_focus_epoch`). Additive:

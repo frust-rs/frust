@@ -209,8 +209,10 @@ impl AndroidAppHandle {
     /// and would otherwise land wherever focus happens to be when a slow
     /// `ContentProvider` finally answers.
     ///
-    /// `AppTree::focus_epoch` advances once per honoured focus claim and once
-    /// per session release, so it answers that question directly rather than by
+    /// `AppTree::focus_epoch` advances once per honoured claim (an
+    /// `EventCtx::request_focus` or a traversal grant) and once per session release, so a Tab step
+    /// that lands from a live session moves it by two (by one from none) and one that lands nowhere leaves it unchanged. It answers that
+    /// question directly rather than by
     /// proxy: a move to another field moves it whether or not the field taking
     /// focus publishes anything, and an edit or a reposition *inside* one
     /// session leaves it alone — which is what lets a paste the user is still

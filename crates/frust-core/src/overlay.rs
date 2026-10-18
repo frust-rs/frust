@@ -15,7 +15,7 @@
 //!
 //! # Not in v1
 //!
-//! * No focus trap: a modal pod masks shortcuts only; focus is neither confined nor restored.
+//! * No focus restore: registering a modal pod ends a main-tree session; none returns on close.
 //! * Not seen by [`inspect`](crate::app::RenderRoot::inspect) unless the owner visits the pod.
 //! * No nesting: a registration made from inside a floated pod's paint is dropped;
 //!   register a submenu from the same owner, in the main tree's paint.

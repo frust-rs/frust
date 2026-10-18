@@ -89,7 +89,6 @@ use frust::{
 };
 
 use crate::components::input::FALLBACK;
-use crate::components::native_select::activates;
 use crate::hit::{inside, presses};
 use crate::style::{
     ACTIVE_CURSOR, BORDER_WIDTH, DISABLED_CURSOR, PATH_TOLERANCE, SHADOW_SM, TEXT_SM, TEXT_XS,
@@ -1794,7 +1793,7 @@ impl Widget for SidebarTriggerWidget {
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         if let InputEvent::Key(key) = event {
-            if !activates(&key.key) {
+            if !key.is_activation() {
                 return EventResult::Ignored;
             }
             self.toggle(ctx);
@@ -2317,7 +2316,7 @@ impl Widget for SidebarMenuButtonWidget {
             return EventResult::Ignored;
         }
         if let InputEvent::Key(key) = event {
-            if self.disabled || !activates(&key.key) {
+            if self.disabled || !key.is_activation() {
                 return EventResult::Ignored;
             }
             self.activate(ctx);
@@ -2559,7 +2558,7 @@ impl Widget for SidebarActionWidget {
             return EventResult::Ignored;
         }
         if let InputEvent::Key(key) = event {
-            if !activates(&key.key) {
+            if !key.is_activation() {
                 return EventResult::Ignored;
             }
             (self.on_press)(ctx);

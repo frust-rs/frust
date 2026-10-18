@@ -2427,18 +2427,29 @@ mod tests {
         );
     }
 
+    /// `ev` as a touch contact, the way the Android and iOS shells deliver it.
+    fn touch(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+        let InputEvent::Pointer(event) = ev(phase, x, y) else {
+            unreachable!()
+        };
+        InputEvent::PointerContact {
+            pointer_id: frust_core::event::PointerId::touch(0),
+            event,
+        }
+    }
+
     #[test]
     fn action_down_leaves_the_field_session_intact() {
         // No pre-blur regression: tapping an action while the field is focused
         // activates it with the session untouched (the action row is an
-        // interactive region, not dead space).
+        // interactive region, not dead space). A touch tap never claims focus.
         let area = Size::new(375.0, 667.0);
         let mut f = focused_field_dialog(area);
         let before = f.root.focus_ime_generation();
 
         f.root.event(
             &mut f.state,
-            &ev(PointerPhase::Down, f.action.x, f.action.y),
+            &touch(PointerPhase::Down, f.action.x, f.action.y),
         );
         assert!(
             f.root.ime_state().is_some(),
@@ -2449,9 +2460,28 @@ mod tests {
             before,
             "and fires no focus/IME edge at all"
         );
-        f.root
-            .event(&mut f.state, &ev(PointerPhase::Up, f.action.x, f.action.y));
+        f.root.event(
+            &mut f.state,
+            &touch(PointerPhase::Up, f.action.x, f.action.y),
+        );
         assert_eq!(dialog_widget(&f.root).phase, Phase::Shown);
+    }
+
+    #[test]
+    fn a_mouse_press_on_an_action_keeps_the_field_surface() {
+        let area = Size::new(375.0, 667.0);
+        let mut f = focused_field_dialog(area);
+        assert!(f.root.ime_state().is_some());
+
+        f.root.event(
+            &mut f.state,
+            &ev(PointerPhase::Down, f.action.x, f.action.y),
+        );
+        // The dialog's chrome re-claims focus from the live chain, so the surface stays.
+        assert!(
+            f.root.ime_state().is_some(),
+            "a mouse press on dialog chrome is a live re-claim and keeps the IME surface"
+        );
     }
 
     #[test]

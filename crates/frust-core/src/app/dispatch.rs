@@ -38,6 +38,9 @@ struct DispatchFrame {
     cursor_pass: bool,
     /// The root widget itself holds the live contacts opt-in, rather than a pod below it.
     contacts_captor_is_root: bool,
+    /// A traversal grant pass (`traverse_focus`); `root_grant` when the root widget is its target.
+    grant: bool,
+    root_grant: bool,
 }
 
 /// What the root widget's dispatch reported, read off its `EventCtx`.
@@ -47,15 +50,21 @@ struct RootDispatch {
     captured: bool,
     hover_claimed: bool,
     focus_req: bool,
+    /// The claim came from a pod already on the live focus chain.
+    focus_req_from_live: bool,
     focus_rel: bool,
     ime: Option<ImeState>,
+    ime_published: bool,
     /// The root widget opted into the other contacts during this dispatch.
     root_opted_in: bool,
 }
 
+/// The root widget's stop id: no `ChildPod::inspect_id` is `0`.
+const ROOT_STOP: u64 = 0;
+
 /// One pod the focus-traversal walk can stop on.
 struct FocusStop {
-    /// The pod's `inspect_id`: the grant's target.
+    /// The pod's `inspect_id`, or `ROOT_STOP`: the grant's target.
     id: u64,
     /// The floated surface holding the pod, whose owner the grant is addressed through.
     surface: Option<OverlayKey>,
@@ -150,16 +159,28 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// followed in the same call by a [`FileDropPhase::Ended`] broadcast to the
     /// whole tree; an unhandled `Key` goes on (`dispatch_declined_key`); the outcome folds all.
     pub fn event(&mut self, state: &mut State, event: &InputEvent) -> EventOutcome {
+        self.dispatch_pass(state, event, None).0
+    }
+
+    /// `event`'s body, as a traversal grant pass when `grant` is `Some(root_is_target)`; also
+    /// returns whether a focus claim was honoured.
+    fn dispatch_pass(
+        &mut self,
+        state: &mut State,
+        event: &InputEvent,
+        grant: Option<bool>,
+    ) -> (EventOutcome, bool) {
         let Some(root_id) = self.root_id else {
-            return EventOutcome::default();
+            return (EventOutcome::default(), false);
         };
+        self.trap_modal_focus();
         let (unwrapped, pointer_id) = unwrap_contact(event);
         let event = unwrapped.as_ref().unwrap_or(event);
         if is_pointer_down(event) {
             self.set_keyboard_focus(false);
         }
         let Some(secondary) = self.gate_contact(event, pointer_id) else {
-            return EventOutcome::default();
+            return (EventOutcome::default(), false);
         };
         // Published for the whole dispatch, file-drop follow-up included (`EventCtx::pointer_id`,
         // the contact opt-in, `ChildPod::set_active`); restored on drop at the end of this call.
@@ -167,21 +188,25 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
 
         // A pointer over a floated surface reaches nothing below, not even the blur rule.
         let carried = match self.route_overlay(state, event) {
-            OverlayRoute::Consumed(outcome) => return outcome,
+            OverlayRoute::Consumed(outcome) => return (outcome, false),
             OverlayRoute::Continue(outcome) => outcome,
         };
-        let frame = self.open_frame(event, pointer_id, secondary);
+        let frame = self.open_frame(event, pointer_id, secondary, grant);
         let Some(pod) = self.tree.pod_mut(root_id) else {
             // Keep the outcome an outside-tap notification already produced.
             self.publish_focus_session();
-            return carried;
+            return (carried, false);
         };
         // Opened empty, so a request from a dispatch no root drove cannot leak in; closed by
         // `resolve_requests`, before the file-drop follow-up opens its own.
         let request_slot = RequestPass::enter();
         let forward_slot = KeyForwardPass::enter();
         let mut root = Self::dispatch_root(pod, &mut self.pending, &frame, state, event);
-
+        // Release-then-commit: only a landing grant ends the old session (`traverse_focus`).
+        if frame.grant && root.focus_req {
+            self.release_focus_session();
+        }
+        root.ime_published = root.ime.is_some();
         self.publish_ime(event, root.focus_req, root.ime.take());
         let focus_claim_honoured = self.commit_event(event, &frame, &root, &contact_pass);
         self.resolve_focus_session(&frame, focus_claim_honoured);
@@ -196,7 +221,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         };
         let mut outcome = self.build_outcome(&frame, &root, carried);
         self.file_drop_follow_up(state, event, &mut outcome);
-        outcome
+        (outcome, focus_claim_honoured)
     }
 
     /// Contact gate, second half: `Some(secondary)` for a routed pointer (see `contact_route`),
@@ -212,15 +237,20 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
 
     /// Open the focus-epoch bracket (claims are stamped with a candidate epoch so older links
     /// strand by arithmetic; `resolve_focus_session` commits it or not) and read the pass flags.
-    /// Writes no root field; publishes the live focus session.
+    /// A grant's candidate skips the epoch its release would take. Writes no root field;
+    /// publishes the live focus session.
     fn open_frame(
         &self,
         event: &InputEvent,
         pointer_id: PointerId,
         secondary: bool,
+        grant: Option<bool>,
     ) -> DispatchFrame {
         let live_focus_epoch = self.focus_epoch;
-        let candidate_focus_epoch = advance_focus_epoch(live_focus_epoch);
+        let mut candidate_focus_epoch = advance_focus_epoch(live_focus_epoch);
+        if grant.is_some() && (self.focus_active || self.ime_state.is_some()) {
+            candidate_focus_epoch = advance_focus_epoch(candidate_focus_epoch);
+        }
         crate::widget::set_live_focus_session(
             self.root_identity,
             live_focus_epoch,
@@ -252,6 +282,8 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             contacts_captor_is_root: self.capture_claimant.is_some()
                 && self.capture_contacts
                 && self.contacts_captor_is_root,
+            grant: grant.is_some(),
+            root_grant: grant == Some(true),
         }
     }
 
@@ -267,6 +299,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     ) -> RootDispatch {
         // The claimant pod this dispatch records, if any (see `hover_link`).
         crate::widget::clear_hover_claimant();
+        crate::widget::clear_focus_req_from_live();
         let state_any: &mut dyn Any = state;
         let mut ctx = EventCtx::new(state_any, pod.origin(), pod.size());
         // Seed the root widget's focus and hover state; deeper pods thread their own.
@@ -276,6 +309,9 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         ctx.set_hover_eligible(frame.hover_pass);
         // Tells a dropping pod's destructor this root's link apart (see `root_identity`).
         ctx.set_hover_root(frame.root_identity);
+        if frame.root_grant {
+            ctx.request_focus();
+        }
         // Attributes a `capture_contacts` made by the root widget itself to the root.
         let contact_frame = ContactFrame::enter(frame.contacts_captor_is_root);
         let result = if frame.secondary && !frame.contacts_captor_is_root {
@@ -305,8 +341,12 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             captured: ctx.is_pointer_captured(),
             hover_claimed: ctx.is_hover_claimed(),
             focus_req: ctx.is_focus_requested(),
+            // A root-widget claim (no pod) re-claims whenever a session stands.
+            focus_req_from_live: crate::widget::take_focus_req_from_live()
+                .unwrap_or(frame.focus_active_before),
             focus_rel: ctx.is_focus_released(),
             ime: ctx.take_ime_state(),
+            ime_published: false,
             root_opted_in,
         }
     }
@@ -392,7 +432,9 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     }
 
     /// Commit a claimant (or uncaptured) pointer: a `Down` latches a capture and claims focus or
-    /// blurs; an `Up`/`Cancel` (only the claimant's reaches here) clears the latch. Returns
+    /// blurs; an `Up`/`Cancel` (only the claimant's reaches here) clears the latch. A claim whose
+    /// pass published no `ImeState` drops the previous holder's surface, unless the claimant
+    /// already held a live link (a chrome re-claim). Returns
     /// whether a claim was honoured; writes the capture latch, `focus_surface` and focus session.
     fn commit_pointer(
         &mut self,
@@ -411,6 +453,9 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                     self.set_focus_active(true);
                     // A hit-tested claim belongs to the main tree (see `focus_surface`).
                     self.focus_surface = None;
+                    if !root.ime_published && !root.focus_req_from_live {
+                        self.store_ime_state(None);
+                    }
                     true
                 } else {
                     // Blur: no widget on the tapped path took focus.
@@ -480,8 +525,12 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     }
 
     /// Session resolution: an ended session strands everything (past the candidate); an honoured
-    /// claim commits the candidate; else the live epoch stays. Writes `focus_epoch`, publishes it.
+    /// claim commits the candidate (outside a grant, clearing the keyboard flag); else the live
+    /// epoch stays. Writes `focus_epoch`, publishes it.
     fn resolve_focus_session(&mut self, frame: &DispatchFrame, focus_claim_honoured: bool) {
+        if focus_claim_honoured && !frame.grant {
+            self.set_keyboard_focus(false);
+        }
         let session_ended = frame.focus_active_before && !self.focus_active;
         self.focus_epoch = if session_ended {
             advance_focus_epoch(frame.candidate_focus_epoch)
@@ -536,8 +585,8 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// answered: as `OverlayEventKind::Key` to the focus session's forward target, then (an
     /// Escape) to the topmost modal pod, then to the last paint's shortcut declarations in tier
     /// order (`ShortcutTable::candidates`), masked to the modal pod's own, then (a bare Tab or
-    /// Shift+Tab) to `traverse_focus`. Only an interactive pod takes keys. Folds every delivery's
-    /// outcome into `carried`.
+    /// Shift+Tab, unless [`RenderRoot::set_tab_traversal`] is off) to `traverse_focus`. Only an
+    /// interactive pod takes keys. Folds every delivery's outcome into `carried`.
     fn dispatch_declined_key(
         &mut self,
         state: &mut State,
@@ -581,24 +630,24 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                 return carried;
             }
         }
-        if let Some(backward) = traversal_direction(key) {
+        if let Some(backward) = traversal_direction(key).filter(|_| self.tab_traversal) {
             self.traverse_focus(state, backward, &mut carried);
         }
         carried
     }
 
     /// Move focus to the next (`backward`: previous) stop in walk order, wrapping; with nothing
-    /// focused, to the first (last). Answers the key whenever a stop exists.
+    /// focused, to the first (last). Answers the key (and sets the keyboard flag) only when a
+    /// grant lands or the focused stop is the only one; a walk where none lands changes nothing.
     ///
     /// # The grant
     ///
-    /// The old session is released first (epoch advanced, IME surface and key forward dropped),
-    /// then one pass delivers `InputEvent::Shortcut` carrying this root's private `focus_grant`
-    /// id — bare for a main-tree stop, as `OverlayEventKind::Shortcut` through its owner for a
-    /// floated one — under an open [`FocusGrant`]. Its reach is a shortcut's, which is the
-    /// walk's: a navigator's Current page, an `IndexedStack`'s selected child. The target pod
-    /// records the claim like `EventCtx::request_focus`; `resolve_focus_session` commits it. A
-    /// stop the carrier misses is skipped for the next, down to the one that held focus.
+    /// One pass delivers `InputEvent::Shortcut` carrying this root's private `focus_grant` id (bare
+    /// for a main-tree stop, as `OverlayEventKind::Shortcut` through a floated stop's owner) under
+    /// an open [`FocusGrant`], reaching what a shortcut reaches. The target pod (or root widget)
+    /// records the claim like `EventCtx::request_focus`; only then is the old session released
+    /// (`focus_epoch` advanced, IME surface and key forward dropped) and the claim committed, so a
+    /// landing step advances the epoch twice. A missed stop is skipped, short of the focused one.
     fn traverse_focus(&mut self, state: &mut State, backward: bool, carried: &mut EventOutcome) {
         let stops = self.focus_stops();
         let len = stops.len();
@@ -610,23 +659,21 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             Some(i) if backward => (i + len - 1) % len,
             Some(i) => (i + 1) % len,
         };
-        carried.handled = true;
-        carried.needs_redraw = true;
-        if current != Some(next) {
-            self.release_focus_session();
-            let step = |n: usize| if backward { len - n } else { n };
-            for n in 0..len {
-                self.grant_focus(state, &stops[(next + step(n)) % len]);
-                if self.focus_active {
-                    break;
-                }
-            }
+        let step = |n: usize| if backward { len - n } else { n };
+        let landed = current == Some(next)
+            || (0..len)
+                .map(|n| (next + step(n)) % len)
+                .take_while(|&i| Some(i) != current)
+                .any(|i| self.grant_focus(state, &stops[i]));
+        if landed {
+            carried.handled = true;
+            carried.needs_redraw = true;
+            self.set_keyboard_focus(true);
         }
-        self.set_keyboard_focus(self.focus_active);
     }
 
-    /// One grant pass to `stop` (see `traverse_focus`).
-    fn grant_focus(&mut self, state: &mut State, stop: &FocusStop) {
+    /// One grant pass to `stop` (see `traverse_focus`); whether its claim was honoured.
+    fn grant_focus(&mut self, state: &mut State, stop: &FocusStop) -> bool {
         let carrier = self.focus_grant;
         let delivery = match stop.surface {
             None => InputEvent::Shortcut(carrier),
@@ -637,11 +684,13 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         };
         let _grant = FocusGrant::enter(carrier, stop.id);
         let _probe = DeliveryProbe::enter();
-        self.event(state, &delivery);
+        let root_is_target = stop.id == ROOT_STOP;
+        self.dispatch_pass(state, &delivery, Some(root_is_target)).1
     }
 
     /// The traversal walk: focusable pods in pre-order over `Widget::visit_focus_children`,
-    /// from the main root, or from the topmost modal pod alone while one is registered.
+    /// from the main root (itself a stop when focusable), or from the topmost modal pod alone
+    /// while one is registered.
     fn focus_stops(&self) -> Vec<FocusStop> {
         self.publish_focus_session();
         let floated: Vec<(OverlayPod, OverlayHit)> = self
@@ -663,6 +712,13 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                 walk.visit(&pod, chain, None);
             }
         } else if let Some(root) = self.root_id.and_then(|id| self.tree.pod(id)) {
+            if root.widget().is_focusable() {
+                walk.stops.push(FocusStop {
+                    id: ROOT_STOP,
+                    surface: None,
+                    current: chain,
+                });
+            }
             root.widget()
                 .visit_focus_children(&mut |pod| walk.visit(pod, chain, None));
         }

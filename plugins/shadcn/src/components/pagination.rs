@@ -45,7 +45,7 @@ use frust::authoring::{
 use frust::{TextView, Theme, text};
 
 use crate::components::input::FALLBACK;
-use crate::components::native_select::{activates, draw_chevron};
+use crate::components::native_select::draw_chevron;
 use crate::hit::{inside, presses};
 use crate::style::{self, PATH_TOLERANCE};
 use crate::tokens::ShadcnTokens;
@@ -535,7 +535,7 @@ impl Widget for PaginationWidget {
             let Some(index) = self.focused.filter(|i| self.is_activatable(*i)) else {
                 return EventResult::Ignored;
             };
-            if !activates(&key.key) {
+            if !key.is_activation() {
                 return EventResult::Ignored;
             }
             self.activate(index, ctx);

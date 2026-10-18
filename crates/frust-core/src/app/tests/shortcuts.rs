@@ -81,7 +81,7 @@ impl crate::widget::Widget for Declarer {
     }
     fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
         let slot = slot(&self.shared, self.name);
-        if self.name == "global" || self.name == "a" {
+        if matches!(self.name, "global" | "a" | "one" | "two") {
             let hints = ctx.shortcut_hints();
             let labels = hints.iter().map(|h| h.label.clone());
             self.shared.borrow_mut().painted_hints = labels.collect();
@@ -350,6 +350,18 @@ fn an_unhandled_key_reaches_an_app_global_declaration() {
 }
 
 #[test]
+fn a_function_key_chord_fires_through_the_declined_key_chain() {
+    let mut keys = Keys::new(
+        vec![Slot::new("f2", "F2", ShortcutScope::AppGlobal)],
+        vec![Child::Leaf("f2", true)],
+    );
+    assert!(keys.press("F2").handled);
+    assert_eq!(keys.own_deliveries(), vec!["f2"]);
+    keys.clear();
+    assert!(!keys.press("F3").handled);
+}
+
+#[test]
 fn a_key_the_focus_path_consumes_never_reaches_the_table() {
     let mut eater = Slot::new("field", "Ctrl+Q", ShortcutScope::Local);
     eater.eats_keys = true;
@@ -601,4 +613,33 @@ fn widgets_see_the_last_paints_hints_in_paint_order_across_events() {
     keys.frame();
     rebuild(&mut keys);
     assert!(keys.shared.borrow().built_hints.is_empty());
+}
+
+#[test]
+fn two_roots_on_one_thread_each_report_their_own_hints() {
+    let layout = |name| vec![Child::Leaf(name, true)];
+    let mut one = Keys::new(
+        vec![Slot::new("one", "Ctrl+K", ShortcutScope::AppGlobal)],
+        layout("one"),
+    );
+    let mut two = Keys::new(
+        vec![Slot::new("two", "Ctrl+J", ShortcutScope::AppGlobal)],
+        layout("two"),
+    );
+    one.frame();
+    two.frame();
+    one.frame();
+    let labels = |keys: &Keys| -> Vec<String> {
+        let hints = keys.root.shortcut_hints(|_| true);
+        hints.into_iter().map(|h| h.label).collect()
+    };
+    assert_eq!(labels(&one), ["one"]);
+    assert_eq!(labels(&two), ["two"]);
+    two.frame();
+    assert_eq!(keys_painted(&one), ["one"]);
+    assert_eq!(keys_painted(&two), ["two"]);
+}
+
+fn keys_painted(keys: &Keys) -> Vec<String> {
+    keys.shared.borrow().painted_hints.clone()
 }

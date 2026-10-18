@@ -264,6 +264,10 @@ impl<State: 'static> AnimatedOpacityView<State> {
 }
 
 /// The retained widget for an [`AnimatedOpacityView`].
+///
+/// Keyboard input (`Shortcut`, `Key`, `Ime`, `EditCommand`) reaches the child
+/// and the child is a Tab stop only while the fade is above opacity 0; an
+/// invisible child answers no chord and takes no grant.
 pub struct AnimatedOpacityWidget {
     child: ChildPod,
     explicit_timing: Option<Timing>,
@@ -344,7 +348,27 @@ impl Widget for AnimatedOpacityWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        // Fully faded out the child still paints but is invisible: it must not
+        // answer a chord or a key (see the type docs).
+        if self.anim.value() <= 0.0
+            && matches!(
+                event,
+                InputEvent::Shortcut(_)
+                    | InputEvent::Key(_)
+                    | InputEvent::Ime(_)
+                    | InputEvent::EditCommand(_)
+            )
+        {
+            return EventResult::Ignored;
+        }
         crate::authoring::route_event_single(&mut self.child, ctx, event)
+    }
+
+    fn visit_focus_children(&self, visitor: &mut dyn FnMut(&ChildPod)) {
+        // An invisible child is no Tab stop either.
+        if self.anim.value() > 0.0 {
+            visitor(&self.child);
+        }
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
@@ -531,6 +555,27 @@ mod tests {
     // is what's actually asserted against.
 
     // --- AnimatedOpacity ---
+
+    #[test]
+    fn a_fully_faded_out_child_answers_no_shortcut_but_a_visible_one_does() {
+        use crate::test_support::probe;
+        let shortcut = InputEvent::Shortcut(frust_core::ShortcutId::next());
+        let fire = |target: f64| {
+            let view: AnimatedOpacityView<Vec<u32>> = animated_opacity(target, probe(7));
+            let mut w = build(&view);
+            let size = w.layout(
+                &mut LayoutCtx::new(),
+                &BoxConstraints::tight(Size::new(50.0, 50.0)),
+            );
+            let mut log: Vec<u32> = Vec::new();
+            let mut ectx = EventCtx::new(&mut log, Point::ZERO, size);
+            w.event(&mut ectx, &shortcut);
+            log
+        };
+        assert!(fire(0.0).is_empty(), "an invisible child must not answer");
+        assert_eq!(fire(1.0), vec![7], "a visible child still answers");
+        assert_eq!(fire(0.4), vec![7], "a partly faded child still answers");
+    }
 
     #[test]
     fn opacity_mid_animation_paint_emits_expected_interpolated_alpha() {

@@ -71,8 +71,8 @@ use std::rc::Rc;
 
 use frust::authoring::{
     Action, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, Color, CursorIcon, EventCtx,
-    EventResult, InputEvent, Key, KeyEvent, LayoutCtx, NamedKey, PaintCtx, PaintScene, Point,
-    PointerPhase, Rect, Role, SemanticsCtx, Size, Toggled, View, Widget, erase_callback_arg,
+    EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, Rect, Role,
+    SemanticsCtx, Size, Toggled, View, Widget, erase_callback_arg,
 };
 use frust::{Brightness, Theme};
 
@@ -230,19 +230,6 @@ fn minus_path(origin: Point, size: f64) -> BezPath {
     path.move_to(at(5.0, 12.0));
     path.line_to(at(19.0, 12.0));
     path
-}
-
-/// Whether `key` activates a control: `Space` (WAI-ARIA's checkbox key, arriving
-/// as typed text since there is no `NamedKey::Space`) or `Enter`.
-///
-/// Upstream leaves `Enter` to a form submit; frust has no form to submit into, so
-/// the catalog accepts both rather than leaving `Enter` inert.
-fn is_activation_key(key: &KeyEvent) -> bool {
-    match &key.key {
-        Key::Named(NamedKey::Enter) => true,
-        Key::Character(text) => text == " ",
-        _ => false,
-    }
 }
 
 impl<State: 'static> View<State> for CheckboxView<State> {
@@ -437,7 +424,7 @@ impl Widget for CheckboxWidget {
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         match event {
             InputEvent::Key(key) => {
-                if self.disabled || !is_activation_key(key) {
+                if self.disabled || !key.is_activation() {
                     return EventResult::Ignored;
                 }
                 self.request_toggle(ctx);
@@ -526,6 +513,7 @@ mod tests {
     use frust::authoring::{
         EventOutcome, KeyEvent, Modifiers, PointerButton, PointerEvent, SemanticsUpdate,
     };
+    use frust::authoring::{Key, NamedKey};
     use frust::{Brightness, FrameTime};
     use std::any::Any;
 
@@ -850,6 +838,19 @@ mod tests {
         assert!(!w.captured, "Cancel disarms");
         // A stray `Up` after the cancel is not a press.
         dispatch(&mut w, &mut state, &pointer(PointerPhase::Up, 8.0, 8.0));
+        assert_eq!(state.count, 0);
+    }
+
+    #[test]
+    fn a_repeat_space_does_not_toggle() {
+        let mut w = widget(false, false);
+        let mut state = Toggles::default();
+        let repeat = InputEvent::Key(KeyEvent {
+            key: Key::Character(" ".to_string()),
+            modifiers: Modifiers::default(),
+            repeat: true,
+        });
+        assert_eq!(dispatch(&mut w, &mut state, &repeat), EventResult::Ignored);
         assert_eq!(state.count, 0);
     }
 

@@ -265,7 +265,17 @@ enum Press {
 /// overflowing `Duration`.
 const MAX_HOLD_SECS: f64 = 3600.0;
 
+/// Frame interval assumed when pacing a fade (the paint ctx carries none).
+const FADE_FRAME_SECS: f64 = 1.0 / 60.0;
+
+/// One 8-bit opacity level.
+const LEVEL: f64 = 1.0 / 255.0;
+
 /// The paint/fade schedule [`ScrollbarState::visibility`] asks for.
+///
+/// `Fade` asks for a frame every tick and is used only while one frame's
+/// opacity step is at least one 8-bit level; a slower fade holds until the
+/// next visible level instead.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Wake {
     Idle,
@@ -287,6 +297,9 @@ pub(crate) struct ScrollbarState {
     stamp_pending: bool,
     /// The opacity last painted; a press hits only a visible bar.
     opacity: f64,
+    /// The wake the last paint asked for (test-only).
+    #[cfg(test)]
+    last_wake: Option<Wake>,
 }
 
 impl ScrollbarState {
@@ -300,6 +313,8 @@ impl ScrollbarState {
             last_position: None,
             stamp_pending: false,
             opacity: 0.0,
+            #[cfg(test)]
+            last_wake: None,
         }
     }
 
@@ -418,6 +433,10 @@ impl ScrollbarState {
     }
 
     /// The opacity at `now` and the frame schedule that keeps the fade moving.
+    ///
+    /// Pacing: a fade whose per-frame step (`1/60 s` over the duration) is
+    /// below one 8-bit level returns `Wake::Hold` until the next visible
+    /// level, capped at `MAX_HOLD_SECS`, rather than `Wake::Fade`.
     fn visibility(&self, now: FrameTime, reduce_motion: bool) -> (f64, Wake) {
         match self.style.show {
             ScrollbarShow::Always => return (1.0, Wake::Idle),
@@ -450,7 +469,15 @@ impl ScrollbarState {
         if t >= 1.0 {
             (0.0, Wake::Idle)
         } else {
-            (1.0 - t, Wake::Fade)
+            let opacity = 1.0 - t;
+            if FADE_FRAME_SECS * 1000.0 / duration >= LEVEL {
+                return (opacity, Wake::Fade);
+            }
+            let levels = opacity * 255.0;
+            let next = levels.ceil() - 1.0;
+            let ms = ((levels - next) / 255.0 * duration).max(1.0);
+            let secs = (ms / 1000.0).min(MAX_HOLD_SECS);
+            (opacity, Wake::Hold(Duration::from_secs_f64(secs)))
         }
     }
 
@@ -477,6 +504,10 @@ impl ScrollbarState {
         }
         let (opacity, wake) = self.visibility(now, reduce_motion);
         self.opacity = opacity;
+        #[cfg(test)]
+        {
+            self.last_wake = Some(wake);
+        }
         match wake {
             Wake::Idle => {}
             Wake::Hold(remaining) => ctx.request_frame_paced_at(remaining),
@@ -770,6 +801,7 @@ pub(crate) mod tests {
         paint(&mut state, 0, info(0.0, 900.0), false);
         let (drawn, _) = paint(&mut state, 16, info(40.0, 900.0), false);
         assert_eq!(drawn, 1, "a huge delay holds without overflowing the wake");
+        assert_eq!(state.last_wake, Some(Wake::Hold(Duration::from_secs(3600))));
 
         let forever = ScrollbarStyle::default().fade_duration_ms(f64::INFINITY);
         let mut state = ScrollbarState::new(forever);
@@ -781,6 +813,25 @@ pub(crate) mod tests {
             "an endless fade stays opaque and asks for no frame"
         );
         assert_eq!(state.opacity(), 1.0);
+
+        let slow = ScrollbarStyle::default().fade_duration_ms(1e9);
+        let mut state = ScrollbarState::new(slow);
+        paint(&mut state, 0, info(0.0, 900.0), false);
+        paint(&mut state, 16, info(40.0, 900.0), false);
+        paint(&mut state, 16 + 801, info(40.0, 900.0), false);
+        assert!(state.opacity() >= 0.99);
+        assert!(
+            matches!(state.last_wake, Some(Wake::Hold(d)) if d > Duration::ZERO),
+            "a sub-level fade step holds instead of spinning: {:?}",
+            state.last_wake
+        );
+
+        let normal = ScrollbarStyle::default().fade_duration_ms(250.0);
+        let mut state = ScrollbarState::new(normal);
+        paint(&mut state, 0, info(0.0, 900.0), false);
+        paint(&mut state, 16, info(40.0, 900.0), false);
+        paint(&mut state, 16 + 801 + 50, info(40.0, 900.0), false);
+        assert_eq!(state.last_wake, Some(Wake::Fade));
     }
 
     #[test]

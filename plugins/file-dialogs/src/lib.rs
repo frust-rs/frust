@@ -14,12 +14,23 @@
 //! the result through `use_task` / `AsyncValue`; never call them from a paint
 //! or event handler, and never write a signal from the background thread.
 //!
+//! Threading follows `rfd`. On macOS it marshals the panel to the main thread
+//! (`dispatch2::run_on_main`) when `NSApplication` is running, so calling from
+//! `frust::spawn_blocking` under the frust desktop shell is correct and the
+//! main thread blocks while the modal panel runs. On Windows it initialises
+//! COM per calling thread, so a worker thread is fine. On Linux the portal
+//! call blocks only the calling thread. The Linux leg was exercised on
+//! 2026-10-18; the macOS and Windows legs have not been run on this plugin yet.
+//!
 //! # Cancellation and failure
 //!
 //! `Ok(None)` / an empty `Vec` means the user cancelled. `rfd`'s synchronous
 //! API cannot report backend failures: on Linux, when neither an
 //! xdg-desktop-portal backend nor `zenity` is available it logs an error and
-//! returns no selection, which is indistinguishable from a cancel.
+//! returns no selection, which is indistinguishable from a cancel. On a
+//! zenity-only desktop `rfd` splits a multi-selection on `'|'`, so
+//! [`FileDialog::open_files`] loses a file name containing `|` (the relative
+//! fragments such a split leaves are dropped, never returned as paths).
 
 mod filter;
 
@@ -32,7 +43,21 @@ mod filter;
     target_os = "netbsd",
     target_os = "openbsd"
 ))]
-mod desktop;
+#[path = "desktop.rs"]
+mod backend;
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows",
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "netbsd",
+    target_os = "openbsd"
+)))]
+#[path = "fallback.rs"]
+mod backend;
+
+use backend::show;
 
 use std::path::{Path, PathBuf};
 
@@ -111,20 +136,20 @@ impl FileDialog {
     /// Picks one file. Blocks; see the crate-level blocking contract.
     /// `Ok(None)` means the user cancelled.
     pub fn open_file(self) -> Result<Option<PathBuf>, FileDialogError> {
-        let mut picked = run(self.request(Kind::OpenFile, None))?;
+        let mut picked = show(self.request(Kind::OpenFile, None))?;
         picked.truncate(1);
         Ok(picked.pop())
     }
 
     /// Picks any number of files. Blocks; an empty `Vec` means cancelled.
     pub fn open_files(self) -> Result<Vec<PathBuf>, FileDialogError> {
-        run(self.request(Kind::OpenFiles, None))
+        show(self.request(Kind::OpenFiles, None))
     }
 
     /// Chooses a save destination, pre-filling `file_name` when given.
     /// Blocks; `Ok(None)` means cancelled. The file is not created.
     pub fn save_file(self, file_name: Option<&str>) -> Result<Option<PathBuf>, FileDialogError> {
-        let mut picked = run(self.request(Kind::SaveFile, file_name))?;
+        let mut picked = show(self.request(Kind::SaveFile, file_name))?;
         picked.truncate(1);
         Ok(picked.pop())
     }
@@ -138,32 +163,6 @@ impl FileDialog {
             filters: self.filters,
         }
     }
-}
-
-#[cfg(any(
-    target_os = "linux",
-    target_os = "macos",
-    target_os = "windows",
-    target_os = "freebsd",
-    target_os = "dragonfly",
-    target_os = "netbsd",
-    target_os = "openbsd"
-))]
-fn run(request: Request) -> Result<Vec<PathBuf>, FileDialogError> {
-    Ok(desktop::show(request))
-}
-
-#[cfg(not(any(
-    target_os = "linux",
-    target_os = "macos",
-    target_os = "windows",
-    target_os = "freebsd",
-    target_os = "dragonfly",
-    target_os = "netbsd",
-    target_os = "openbsd"
-)))]
-fn run(_request: Request) -> Result<Vec<PathBuf>, FileDialogError> {
-    Err(FileDialogError::Unsupported)
 }
 
 #[cfg(test)]
@@ -198,23 +197,6 @@ mod tests {
         assert_eq!(
             FileDialogError::Unsupported.to_string(),
             "file dialogs are not supported on this platform"
-        );
-    }
-
-    #[cfg(not(any(
-        target_os = "linux",
-        target_os = "macos",
-        target_os = "windows",
-        target_os = "freebsd",
-        target_os = "dragonfly",
-        target_os = "netbsd",
-        target_os = "openbsd"
-    )))]
-    #[test]
-    fn non_desktop_targets_are_unsupported() {
-        assert_eq!(
-            FileDialog::new().open_file(),
-            Err(FileDialogError::Unsupported)
         );
     }
 }

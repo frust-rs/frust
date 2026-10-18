@@ -54,8 +54,8 @@ use std::time::Duration;
 
 use frust::authoring::{
     Action, BoxConstraints, Brush, BuildCtx, ChangeFlags, Color, CursorIcon, EventCtx, EventResult,
-    InputEvent, Key, KeyEvent, LayoutCtx, NamedKey, PaintCtx, PaintScene, Point, PointerPhase,
-    Rect, Role, RoundedRect, SemanticsCtx, Shape, Size, Toggled, View, Widget, erase_callback_arg,
+    InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, Rect, Role, RoundedRect,
+    SemanticsCtx, Shape, Size, Toggled, View, Widget, erase_callback_arg,
 };
 use frust::{AnimationController, Brightness, Curve, FrameTime, Theme, Tween};
 
@@ -241,16 +241,6 @@ fn lerp_color(begin: Color, end: Color, t: f64) -> Color {
         end
     } else {
         Tween::new(begin, end).lerp(t)
-    }
-}
-
-/// Whether `key` activates the control: `Space` (arriving as typed text — there
-/// is no `NamedKey::Space`) or `Enter`.
-fn is_activation_key(key: &KeyEvent) -> bool {
-    match &key.key {
-        Key::Named(NamedKey::Enter) => true,
-        Key::Character(text) => text == " ",
-        _ => false,
     }
 }
 
@@ -472,7 +462,7 @@ impl Widget for SwitchWidget {
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         match event {
             InputEvent::Key(key) => {
-                if self.disabled || !is_activation_key(key) {
+                if self.disabled || !key.is_activation() {
                     return EventResult::Ignored;
                 }
                 // Report the requested value; never self-toggle.
@@ -551,6 +541,7 @@ mod tests {
     use frust::authoring::{
         BezPath, EventOutcome, Modifiers, PointerButton, PointerEvent, SemanticsUpdate,
     };
+    use frust::authoring::{Key, KeyEvent};
     use std::any::Any;
 
     /// Records the rounded-rect fills (track, then thumb), stroked paths and

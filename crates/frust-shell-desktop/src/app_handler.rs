@@ -88,8 +88,8 @@ use crate::paced_wake::{
 use crate::platform_view::DesktopPlatformViews;
 use crate::render::FrameExecutor;
 use crate::window_state::{
-    MonitorRect, WindowSnapshot, WindowState, WindowStateSaver, clamp_restored, initial_geometry,
-    merge_wake,
+    InitialGeometry, MonitorRect, WindowSnapshot, WindowState, WindowStateSaver, clamp_restored,
+    initial_geometry, merge_wake, persistence_enabled,
 };
 
 /// Initial preview-window size, in logical pixels.
@@ -859,8 +859,10 @@ fn paste_input_event(text: PasteText) -> InputEvent {
 /// field is silently typed into another. That is what this refuses.
 ///
 /// [`RenderRoot::focus_epoch`] is the right counter for the question and
-/// `focus_ime_generation` is not: this one advances once per honoured focus
-/// claim and once per session release and on nothing else, so it moves when
+/// `focus_ime_generation` is not: this one advances once per honoured claim (an
+/// `EventCtx::request_focus` or a traversal grant) and once per session release and on
+/// nothing else, so a Tab step that lands from a live session moves it by two (by one from none) and one that lands nowhere leaves
+/// it unchanged; it moves when
 /// focus crosses two fields publishing identical surfaces, and stands still
 /// through an edit or a caret move inside the one session. Both accessors
 /// document the contrast.
@@ -1193,6 +1195,25 @@ fn apply_window_size(
     }
 }
 
+/// The window's creation geometry after precedence (see [`window_attributes`]).
+fn creation_geometry(config: &DesktopConfig, persisted: Option<&WindowState>) -> InitialGeometry {
+    let knobs = window_size_config();
+    let default = Size::new(
+        f64::from(INITIAL_SIZE.width),
+        f64::from(INITIAL_SIZE.height),
+    );
+    let env_size = knobs
+        .size
+        .map(|s| Size::new(f64::from(s.width), f64::from(s.height)));
+    initial_geometry(
+        default,
+        config.initial_size,
+        persisted,
+        env_size,
+        knobs.maximized,
+    )
+}
+
 /// Assemble the preview window's [`WindowAttributes`] from the app's
 /// [`DesktopConfig`], then hand them to the extension's pre-create hook.
 ///
@@ -1218,21 +1239,7 @@ fn window_attributes(
     persisted: Option<&WindowState>,
     extensions: &mut impl DesktopExtensions,
 ) -> WindowAttributes {
-    let knobs = window_size_config();
-    let default = Size::new(
-        f64::from(INITIAL_SIZE.width),
-        f64::from(INITIAL_SIZE.height),
-    );
-    let env_size = knobs
-        .size
-        .map(|s| Size::new(f64::from(s.width), f64::from(s.height)));
-    let geometry = initial_geometry(
-        default,
-        config.initial_size,
-        persisted,
-        env_size,
-        knobs.maximized,
-    );
+    let geometry = creation_geometry(config, persisted);
     let mut attributes = WindowAttributes::default()
         .with_title(config.window_title())
         .with_visible(false);
@@ -1291,6 +1298,7 @@ fn window_snapshot(window: &Window) -> WindowSnapshot {
         position: window.outer_position().ok().map(|p| (p.x, p.y)),
         maximized: window.is_maximized(),
         minimized: window.is_minimized().unwrap_or(false),
+        fullscreen: window.fullscreen().is_some(),
         monitor: window.current_monitor().and_then(|m| m.name()),
     }
 }
@@ -1524,10 +1532,10 @@ fn mouse_button_should_dispatch(
     }
 }
 
-/// Map a winit [`WinitNamedKey`] to our editing-semantics [`NamedKey`] set,
-/// or `None` for a named key we carry no editing semantics for
-/// (function keys, media keys, etc. — those fall through to `KeyboardInput`
-/// being dropped rather than misreported as text).
+/// Map a winit [`WinitNamedKey`] to our [`NamedKey`] set (the editing keys and
+/// `F1`..`F24`), or `None` for a named key we carry no semantics for (media
+/// keys, `F25`+, etc. — those fall through to `KeyboardInput` being dropped
+/// rather than misreported as text).
 ///
 /// `Copy`/`Cut`/`Paste`/`Insert` are the dedicated hardware clipboard keys
 /// some full-size/multimedia keyboards carry (see each [`NamedKey`] variant's
@@ -1553,6 +1561,30 @@ fn map_named_key(key: WinitNamedKey) -> Option<NamedKey> {
         WinitNamedKey::Cut => NamedKey::Cut,
         WinitNamedKey::Paste => NamedKey::Paste,
         WinitNamedKey::Insert => NamedKey::Insert,
+        WinitNamedKey::F1 => NamedKey::F1,
+        WinitNamedKey::F2 => NamedKey::F2,
+        WinitNamedKey::F3 => NamedKey::F3,
+        WinitNamedKey::F4 => NamedKey::F4,
+        WinitNamedKey::F5 => NamedKey::F5,
+        WinitNamedKey::F6 => NamedKey::F6,
+        WinitNamedKey::F7 => NamedKey::F7,
+        WinitNamedKey::F8 => NamedKey::F8,
+        WinitNamedKey::F9 => NamedKey::F9,
+        WinitNamedKey::F10 => NamedKey::F10,
+        WinitNamedKey::F11 => NamedKey::F11,
+        WinitNamedKey::F12 => NamedKey::F12,
+        WinitNamedKey::F13 => NamedKey::F13,
+        WinitNamedKey::F14 => NamedKey::F14,
+        WinitNamedKey::F15 => NamedKey::F15,
+        WinitNamedKey::F16 => NamedKey::F16,
+        WinitNamedKey::F17 => NamedKey::F17,
+        WinitNamedKey::F18 => NamedKey::F18,
+        WinitNamedKey::F19 => NamedKey::F19,
+        WinitNamedKey::F20 => NamedKey::F20,
+        WinitNamedKey::F21 => NamedKey::F21,
+        WinitNamedKey::F22 => NamedKey::F22,
+        WinitNamedKey::F23 => NamedKey::F23,
+        WinitNamedKey::F24 => NamedKey::F24,
         _ => return None,
     })
 }
@@ -2531,12 +2563,19 @@ where
         self.runtime.with_owner(move || provide_context(metrics));
     }
 
-    /// A resize or move: restart the window-state saver's quiet period (a
-    /// no-op unless the app opted in to persistence).
+    /// A resize or move: record the un-maximized geometry and restart the
+    /// window-state saver's quiet period (a no-op unless persistence is on).
     fn note_window_geometry_change(&mut self) {
-        if let Some(saver) = self.window_state.as_mut() {
-            saver.note_change(Instant::now());
+        let Some(saver) = self.window_state.as_mut() else {
+            return;
+        };
+        if let Some(window) = self.window.as_deref() {
+            let snap = window_snapshot(window);
+            if !(snap.maximized || snap.minimized || snap.fullscreen) {
+                saver.note_normal(snap.size, snap.position);
+            }
         }
+        saver.note_change(Instant::now());
     }
 
     /// Write the window state when it is due: `Some(now)` is the debounced
@@ -2837,13 +2876,25 @@ where
             // chance a per-OS shell gets at attributes winit refuses to change
             // after creation (Wayland `app_id`, X11 icon). An opted-in app's
             // persisted geometry is loaded and fitted to today's monitors first.
-            let restored = if self.config.persist_window_state {
+            let opted_in = self.config.persist_window_state;
+            let restored = if opted_in {
                 let (loaded, restored) = restore_window_state(event_loop, &self.config);
-                let mut saver = WindowStateSaver::default();
-                saver.seed(loaded, restored.as_ref());
-                self.window_state = Some(saver);
+                // A knob run still applies the saved state but never writes it.
+                let knobs = window_size_config();
+                let knob_set = knobs.size.is_some() || knobs.maximized.is_some();
+                if persistence_enabled(opted_in, knob_set) {
+                    let mut saver = WindowStateSaver::default();
+                    let creation = creation_geometry(&self.config, restored.as_ref());
+                    saver.seed(loaded, &creation);
+                    self.window_state = Some(saver);
+                }
+                log::info!(
+                    "frust-shell-desktop window persist={}",
+                    if knob_set { "off (knob)" } else { "on" }
+                );
                 restored
             } else {
+                log::info!("frust-shell-desktop window persist=off");
                 None
             };
             let attrs = window_attributes(&self.config, restored.as_ref(), &mut self.extensions);
@@ -4540,9 +4591,16 @@ mod tests {
     }
 
     #[test]
+    fn map_named_key_delivers_f1_to_f24_and_drops_f25() {
+        assert_eq!(map_named_key(WinitNamedKey::F1), Some(NamedKey::F1));
+        assert_eq!(map_named_key(WinitNamedKey::F24), Some(NamedKey::F24));
+        assert_eq!(map_named_key(WinitNamedKey::F25), None);
+    }
+
+    #[test]
     fn map_named_key_is_none_for_unmapped_named_keys() {
         // No editing semantics for these — they must not be misreported.
-        assert_eq!(map_named_key(WinitNamedKey::F1), None);
+        assert_eq!(map_named_key(WinitNamedKey::F25), None);
         assert_eq!(map_named_key(WinitNamedKey::Alt), None);
         assert_eq!(map_named_key(WinitNamedKey::CapsLock), None);
     }
@@ -4836,7 +4894,7 @@ mod tests {
     #[test]
     fn map_key_event_is_none_for_unmapped_named_key_with_no_text() {
         let event = map_key_event(
-            &WinitKey::Named(WinitNamedKey::F1),
+            &WinitKey::Named(WinitNamedKey::F25),
             None,
             ElementState::Pressed,
             false,
@@ -4851,7 +4909,7 @@ mod tests {
         // The character carve-out is Space's alone: any other named key with no
         // editing semantics stays dropped, text payload or not.
         let event = map_key_event(
-            &WinitKey::Named(WinitNamedKey::F1),
+            &WinitKey::Named(WinitNamedKey::F25),
             Some("\u{f704}"),
             ElementState::Pressed,
             false,

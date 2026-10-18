@@ -56,9 +56,8 @@ use std::rc::Rc;
 use frust::Theme;
 use frust::authoring::{
     Action, BoxConstraints, Brush, BuildCtx, ChangeFlags, Color, EventCtx, EventResult, InputEvent,
-    Key, KeyEvent, LayoutCtx, NamedKey, PaintCtx, PaintScene, Point, PointerPhase, Rect, Role,
-    RoundedRect, SemanticsCtx, Shape, Size, ThemeTextType, Toggled, View, Widget,
-    erase_callback_arg,
+    LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, Rect, Role, RoundedRect, SemanticsCtx,
+    Shape, Size, ThemeTextType, Toggled, View, Widget, erase_callback_arg,
     text::{FontWeight, TextStyle},
 };
 
@@ -255,16 +254,6 @@ fn resolve_colors(theme: Option<&Theme>, variant: ToggleVariant) -> ToggleColors
     }
 }
 
-/// Whether `key` activates the control: `Space` (arriving as typed text — there
-/// is no `NamedKey::Space`) or `Enter`.
-fn is_activation_key(key: &KeyEvent) -> bool {
-    match &key.key {
-        Key::Named(NamedKey::Enter) => true,
-        Key::Character(text) => text == " ",
-        _ => false,
-    }
-}
-
 impl<State: 'static> View<State> for ToggleView<State> {
     type Element = ToggleWidget;
 
@@ -446,7 +435,7 @@ impl Widget for ToggleWidget {
         }
         match event {
             InputEvent::Key(key) => {
-                if !is_activation_key(key) {
+                if !key.is_activation() {
                     return EventResult::Ignored;
                 }
                 // Report the requested value; never self-toggle.
@@ -535,6 +524,7 @@ mod tests {
     use frust::authoring::{
         BezPath, EventOutcome, Modifiers, PointerButton, PointerEvent, SemanticsUpdate,
     };
+    use frust::authoring::{Key, KeyEvent};
     use frust::{CursorIcon, FrameTime};
     use std::any::Any;
 

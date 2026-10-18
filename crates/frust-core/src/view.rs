@@ -90,6 +90,8 @@ pub struct BuildCtx<'a> {
     next_id: &'a mut u64,
     has_focus: bool,
     element_replaced: bool,
+    /// The owning root's last paint snapshot; `None` outside a root.
+    hints: Option<std::rc::Rc<[crate::shortcuts::ShortcutHint]>>,
 }
 
 impl<'a> BuildCtx<'a> {
@@ -103,7 +105,17 @@ impl<'a> BuildCtx<'a> {
             next_id,
             has_focus: true,
             element_replaced: false,
+            hints: None,
         }
+    }
+
+    /// Hand the context its root's last paint snapshot ([`BuildCtx::shortcut_hints`]).
+    pub fn with_shortcut_hints(
+        mut self,
+        hints: std::rc::Rc<[crate::shortcuts::ShortcutHint]>,
+    ) -> Self {
+        self.hints = Some(hints);
+        self
     }
 
     /// Allocate a fresh, unique widget id.
@@ -125,9 +137,12 @@ impl<'a> BuildCtx<'a> {
     }
 
     /// The previous paint's shortcut declarations in paint order, unreachable ones
-    /// included; label each chord with `Chord::display`. They lag this build by a frame.
+    /// included; label each chord with `Chord::display`. They lag this build by a frame, and are
+    /// empty on a context its root did not seed.
     pub fn shortcut_hints(&self) -> std::rc::Rc<[crate::shortcuts::ShortcutHint]> {
-        crate::shortcuts::last_hints()
+        self.hints
+            .clone()
+            .unwrap_or_else(|| std::rc::Rc::from(Vec::new()))
     }
 
     /// Seed the focus chain for a seam that starts one (`RenderRoot`'s view diff, or a

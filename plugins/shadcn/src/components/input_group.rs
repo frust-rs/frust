@@ -47,7 +47,6 @@ use frust::authoring::{
 use frust::{TextView, Theme, text};
 
 use crate::components::input::{FALLBACK, FieldChrome, paint_field_border, resolve_field_border};
-use crate::components::native_select::activates;
 use crate::hit::{inside, presses};
 use crate::style;
 use crate::tokens::ShadcnTokens;
@@ -620,7 +619,7 @@ impl Widget for InputGroupButtonWidget {
             return routed;
         }
         if let InputEvent::Key(key) = event {
-            if self.disabled || !activates(&key.key) {
+            if self.disabled || !key.is_activation() {
                 return EventResult::Ignored;
             }
             (self.on_click)(ctx);

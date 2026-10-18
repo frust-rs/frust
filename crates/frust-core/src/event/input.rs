@@ -19,6 +19,7 @@ pub struct OverlayEvent {
 }
 
 /// An [`OverlayEvent`]'s input, in window space (the owner subtracts its rect origin itself).
+/// [`InputEvent::translated`] leaves an `Overlay` payload unchanged, so it stays in window space.
 #[derive(Clone, Debug, PartialEq)]
 pub enum OverlayEventKind {
     Pointer(PointerEvent),

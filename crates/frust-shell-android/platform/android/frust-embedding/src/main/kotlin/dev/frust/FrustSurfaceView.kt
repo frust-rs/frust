@@ -438,11 +438,11 @@ class FrustSurfaceView(
      * ([readClipboardTextAsync]). A cheap `jlong` read, the same shape
      * [nativeSystemUiState] above uses.
      *
-     * It advances once per focus claim the framework honours and once per
-     * session release, and on nothing else — so it moves when focus crosses to
-     * another field (whether or not that field publishes an IME surface of its
-     * own) and stands still while the user edits, moves the caret, or has the
-     * field moved under them inside one session.
+     * It advances once per honoured focus claim (a widget's request or a Tab
+     * traversal grant) and once per session release, and on nothing else — a
+     * Tab step that lands from a live session moves it by two (by one from none), one that lands nowhere leaves it
+     * unchanged, and it stands still while the user edits, moves the caret, or
+     * has the field moved under them inside one session.
      *
      * `0` means no live native handle, and nothing else: no live session ever
      * reports `0`, because the counter behind it starts at `1` and steps past

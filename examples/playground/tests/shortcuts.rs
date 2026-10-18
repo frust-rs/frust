@@ -2,7 +2,9 @@
 //! a real `RenderRoot` (no GPU, no window).
 //!
 //! The matrix is `{text input focused, not focused} x {palette open, closed}
-//! x {Mod+K, Mod+B, '1', Escape, Tab, typed 'a'}`. For each cell it asserts
+//! x {Mod+K, Mod+B, '1', Escape, Tab, typed 'a'}`; the F2 and `?` chords have
+//! their own rows in `function_and_symbol_chords_follow_precedence`. For each
+//! cell it asserts
 //! exactly who consumed the key: the page's own readout (`last_consumer`),
 //! whether the root reported the key handled, whether keyboard focus moved,
 //! and the state each consumer owns (palette, pane, tab, filter text, field
@@ -36,6 +38,10 @@ const TABS_TO_INPUT: usize = 6;
 
 /// Where a probe click may land inside the palette while it is open.
 const PALETTE_SCAN_Y: std::ops::Range<usize> = 40..280;
+
+/// Where a probe click may land on the focus row: below the header button and
+/// above the control row's bottom edge.
+const CONTROL_ROW_SCAN_Y: std::ops::Range<usize> = 56..104;
 
 struct Harness {
     _owner: Owner,
@@ -201,6 +207,22 @@ impl Harness {
         }
         panic!("no click inside the palette focused its filter input");
     }
+
+    /// Click the focus row's Checkbox: scan the row from the left until a click
+    /// flips the value, as `focus_palette_input` does for the filter.
+    fn click_checkbox(&mut self) {
+        let sc = self.state.shortcuts;
+        for y in CONTROL_ROW_SCAN_Y.step_by(4) {
+            for x in (16..240).step_by(4) {
+                let before = sc.checked.get_untracked();
+                self.click(x as f64, y as f64);
+                if sc.checked.get_untracked() != before {
+                    return;
+                }
+            }
+        }
+        panic!("no click on the focus row toggled the Checkbox");
+    }
 }
 
 fn ch(s: &str) -> Key {
@@ -349,8 +371,8 @@ fn precedence_matrix() {
         (true,  false, "Mod+B",  "handled consumer=Mod+B: pane toggled palette=closed pane=on tab=0 query=\"\" field=\"\"".into()),
         // A bare digit is text, not the tab chord: typed text is never lost.
         (true,  false, "1",      "handled consumer=TextInput: typed text palette=closed pane=off tab=0 query=\"\" field=\"1\"".into()),
-        // Escape blurs the field (it is the input's, not the page's).
-        (true,  false, "Escape", "handled consumer=- palette=closed pane=off tab=0 query=\"\" field=\"\"".into()),
+        // Escape blurs the field and is declined, so nothing answers it.
+        (true,  false, "Escape", "ignored consumer=- palette=closed pane=off tab=0 query=\"\" field=\"\"".into()),
         // The input declines Tab, so the root traverses to the next stop.
         (true,  false, "Tab",    "handled consumer=- palette=closed pane=off tab=0 query=\"\" field=\"\" focus->Button: tab 1".into()),
         (true,  false, "a",      "handled consumer=TextInput: typed text palette=closed pane=off tab=0 query=\"\" field=\"a\"".into()),
@@ -359,9 +381,9 @@ fn precedence_matrix() {
         (true,  true,  "Mod+K",  "ignored consumer=- palette=open pane=off tab=0 query=\"\" field=\"\"".into()),
         (true,  true,  "Mod+B",  "ignored consumer=- palette=open pane=off tab=0 query=\"\" field=\"\"".into()),
         (true,  true,  "1",      "handled consumer=- palette=open pane=off tab=0 query=\"1\" field=\"\"".into()),
-        // The focused filter takes Escape (blur) before the modal's close hook;
-        // a second Escape, with nothing focused, closes the palette.
-        (true,  true,  "Escape", "handled consumer=- palette=open pane=off tab=0 query=\"\" field=\"\"".into()),
+        // The focused filter blurs and declines Escape, so the modal's close
+        // hook takes the first press.
+        (true,  true,  "Escape", "handled consumer=Escape: palette closed palette=closed pane=off tab=0 query=\"\" field=\"\"".into()),
         (true,  true,  "Tab",    "handled consumer=- palette=open pane=off tab=0 query=\" \" field=\"\" focus->palette filter".into()),
         (true,  true,  "a",      "handled consumer=- palette=open pane=off tab=0 query=\"a\" field=\"\"".into()),
     ];
@@ -382,20 +404,87 @@ fn precedence_matrix() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// The second Escape closes the palette once the focused filter has let go.
+/// A single Escape closes the palette while its filter is focused: the focused
+/// filter blurs and declines Escape, so the modal's close hook takes the press.
 #[test]
-fn a_second_escape_closes_the_palette_after_the_filter_blurs() {
+fn a_single_escape_closes_the_palette_with_the_filter_focused() {
     let mut h = Harness::new();
     h.press(ch("k"), Harness::mod_keys());
     h.focus_palette_input();
-    let first = h.press(named(NamedKey::Escape), Modifiers::default());
-    assert!(
-        first.palette_open,
-        "the focused filter takes the first Escape"
-    );
-    let second = h.press(named(NamedKey::Escape), Modifiers::default());
-    assert!(!second.palette_open);
-    assert_eq!(second.consumer.as_deref(), Some("Escape: palette closed"));
+    let e = h.press(named(NamedKey::Escape), Modifiers::default());
+    assert!(e.handled, "the modal's close hook consumed the Escape");
+    assert!(!e.palette_open, "the first Escape closes the palette");
+    assert_eq!(e.consumer.as_deref(), Some("Escape: palette closed"));
+    assert_eq!(e.query, "");
+}
+
+/// A press on a baseline control keeps keyboard focus on it: Tab from the
+/// Checkbox lands on Radio, the next stop, rather than restarting the row.
+#[test]
+fn a_click_on_a_baseline_control_keeps_keyboard_focus() {
+    let mut h = Harness::new();
+    h.click_checkbox();
+    assert!(h.state.shortcuts.checked.get_untracked());
+    h.send(named(NamedKey::Tab), Modifiers::default());
+    assert_eq!(h.probe_focus(), "Radio");
+}
+
+/// F2 and `?` against the precedence rules. F2 is a function key: the focused
+/// field declines it, so the registry fires, and the open modal masks it. `?` is
+/// a symbol the field types as text, and opens the palette when nothing takes it.
+#[test]
+fn function_and_symbol_chords_follow_precedence() {
+    const F2_CONSUMER: &str = "F2: tab one rename toggled";
+    let shift = Modifiers {
+        shift: true,
+        ..Modifiers::default()
+    };
+
+    // Nothing focused: F2 toggles the rename; `?` (shifted or not) opens the palette.
+    let mut h = Harness::new();
+    let e = h.press(named(NamedKey::F2), Modifiers::default());
+    assert!(e.handled);
+    assert_eq!(e.consumer.as_deref(), Some(F2_CONSUMER));
+    assert!(h.state.shortcuts.renamed.get_untracked());
+    let e = h.press(ch("?"), shift);
+    assert!(e.handled);
+    assert!(e.palette_open);
+    assert_eq!(e.consumer.as_deref(), Some("?: palette opened"));
+
+    // The page field focused: it declines F2, so the registry fires; it types `?`.
+    let mut h = Harness::new();
+    h.focus_page_input();
+    let e = h.press(named(NamedKey::F2), Modifiers::default());
+    assert!(e.handled);
+    assert_eq!(e.consumer.as_deref(), Some(F2_CONSUMER));
+    assert_eq!(e.field, "");
+    let e = h.press(ch("?"), shift);
+    assert!(!e.palette_open, "a focused field takes the typed `?`");
+    assert_eq!(e.consumer.as_deref(), Some("TextInput: typed text"));
+    assert_eq!(e.field, "?");
+
+    // Palette open, nothing focused: the modal masks F2 and `?`.
+    let mut h = Harness::new();
+    h.press(ch("k"), Harness::mod_keys());
+    let e = h.press(named(NamedKey::F2), Modifiers::default());
+    assert!(!e.handled);
+    assert_eq!(e.consumer, None);
+    assert!(!h.state.shortcuts.renamed.get_untracked());
+    let e = h.press(ch("?"), shift);
+    assert!(!e.handled);
+    assert_eq!(e.consumer, None);
+    assert!(e.palette_open);
+
+    // Palette open, filter focused: F2 is declined and masked; `?` is typed into the filter.
+    let mut h = Harness::new();
+    h.press(ch("k"), Harness::mod_keys());
+    h.focus_palette_input();
+    let e = h.press(named(NamedKey::F2), Modifiers::default());
+    assert!(!e.handled);
+    assert!(!h.state.shortcuts.renamed.get_untracked());
+    let e = h.press(ch("?"), shift);
+    assert!(e.palette_open);
+    assert_eq!(e.query, "?");
 }
 
 /// Shift+Tab walks backward from the start to the last stop, and Tab walks the

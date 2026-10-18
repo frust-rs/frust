@@ -77,6 +77,9 @@ impl<State: 'static> StackView<State> {
 }
 
 /// The retained widget for a [`StackView`].
+///
+/// Every child paints, so every child receives keyboard broadcasts
+/// ([`InputEvent::Shortcut`], [`InputEvent::Key`] by focus).
 pub struct StackWidget {
     children: Vec<ChildPod>,
 }

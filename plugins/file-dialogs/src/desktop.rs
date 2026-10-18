@@ -2,17 +2,23 @@
 
 use std::path::PathBuf;
 
-use crate::{Kind, Request};
+use crate::{FileDialogError, Kind, Request};
 
 /// Shows the dialog and blocks; an empty result means the user cancelled.
-pub(crate) fn show(request: Request) -> Vec<PathBuf> {
+pub(crate) fn show(request: Request) -> Result<Vec<PathBuf>, FileDialogError> {
     let kind = request.kind;
     let dialog = build(request);
-    match kind {
+    Ok(match kind {
         Kind::OpenFile => dialog.pick_file().into_iter().collect(),
-        Kind::OpenFiles => dialog.pick_files().unwrap_or_default(),
+        Kind::OpenFiles => absolute_only(dialog.pick_files().unwrap_or_default()),
         Kind::SaveFile => dialog.save_file().into_iter().collect(),
-    }
+    })
+}
+
+/// A dialog only ever names absolute paths; the zenity fallback's `|` split can
+/// leave relative fragments of one file name, which are never a selection.
+fn absolute_only(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    paths.into_iter().filter(|p| p.is_absolute()).collect()
 }
 
 fn build(request: Request) -> rfd::FileDialog {
@@ -36,6 +42,12 @@ fn build(request: Request) -> rfd::FileDialog {
 mod tests {
     use super::*;
     use crate::FileFilter;
+
+    #[test]
+    fn relative_fragments_of_a_split_selection_are_dropped() {
+        let picked = absolute_only(vec![PathBuf::from("/dir/report"), PathBuf::from(".env")]);
+        assert_eq!(picked, vec![PathBuf::from("/dir/report")]);
+    }
 
     #[test]
     fn build_accepts_a_full_request_without_showing_it() {

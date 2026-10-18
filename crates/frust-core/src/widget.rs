@@ -565,6 +565,8 @@ pub struct PaintCtx<'a> {
     paint_serial: u64,
     /// Side-channel publications this (sub)paint made, summed over children.
     paint_publications: u32,
+    /// The owning root's last paint snapshot, `None` on a bare context.
+    shortcut_hints: Option<std::rc::Rc<[crate::shortcuts::ShortcutHint]>>,
 }
 
 impl<'a> PaintCtx<'a> {
@@ -598,7 +600,17 @@ impl<'a> PaintCtx<'a> {
             retained_ledger: None,
             paint_serial: 0,
             paint_publications: 0,
+            shortcut_hints: None,
         }
+    }
+
+    /// Hand the context its root's last paint snapshot ([`PaintCtx::shortcut_hints`]).
+    pub(crate) fn with_shortcut_hints(
+        mut self,
+        hints: std::rc::Rc<[crate::shortcuts::ShortcutHint]>,
+    ) -> Self {
+        self.shortcut_hints = Some(hints);
+        self
     }
 
     /// Attach the app's active theme, type-erased (widget tests).
@@ -704,9 +716,12 @@ impl<'a> PaintCtx<'a> {
         self.has_focus = has_focus;
     }
 
-    /// The previous paint's shortcut declarations, as `BuildCtx::shortcut_hints` returns them.
+    /// The previous paint's shortcut declarations, as `BuildCtx::shortcut_hints` returns them;
+    /// empty on a context its root did not seed.
     pub fn shortcut_hints(&self) -> std::rc::Rc<[crate::shortcuts::ShortcutHint]> {
-        crate::shortcuts::last_hints()
+        self.shortcut_hints
+            .clone()
+            .unwrap_or_else(|| std::rc::Rc::from(Vec::new()))
     }
 
     /// Whether to draw a focus ring: [`PaintCtx::has_focus`] and the root's
@@ -980,6 +995,7 @@ impl<'a> PaintCtx<'a> {
             retained_ledger: self.retained_ledger,
             paint_serial: self.paint_serial,
             paint_publications: 0,
+            shortcut_hints: self.shortcut_hints.clone(),
         };
         f(&mut child);
         self.paint_publications = self
@@ -1396,6 +1412,9 @@ thread_local! {
     /// The inspect id of the pod that recorded this dispatch's hover claim.
     static HOVER_CLAIMANT: Cell<Option<u64>> = const { Cell::new(None) };
 
+    /// Whether the first pod to record this dispatch's focus claim already held a live link.
+    static FOCUS_REQ_FROM_LIVE: Cell<Option<bool>> = const { Cell::new(None) };
+
     /// The thread's focus session as `(root, live epoch, claim epoch)`; the
     /// claim epoch is a dispatch's candidate session. `(0, 0, 0)` until a root
     /// publishes, which a real root never does.
@@ -1469,6 +1488,16 @@ pub(crate) fn clear_hover_claimant() {
 /// Take the inspect id of the pod that recorded the last hover claim.
 pub(crate) fn take_hover_claimant() -> Option<u64> {
     HOVER_CLAIMANT.with(Cell::take)
+}
+
+/// Forget the recorded claimant liveness (called before a dispatch).
+pub(crate) fn clear_focus_req_from_live() {
+    FOCUS_REQ_FROM_LIVE.with(|c| c.set(None));
+}
+
+/// Take whether the claim's first pod already held a live link (`None`: no pod claimed).
+pub(crate) fn take_focus_req_from_live() -> Option<bool> {
+    FOCUS_REQ_FROM_LIVE.with(Cell::take)
 }
 
 impl ChildPod {
@@ -1808,6 +1837,7 @@ impl ChildPod {
         child_ctx.set_hero(ctx.hero_ref());
         child_ctx.set_visible_rect(visible_rect);
         child_ctx.set_translucent(ctx.is_translucent());
+        child_ctx.shortcut_hints = ctx.shortcut_hints.clone();
         child_ctx.set_paint_state(
             ctx.paint_epoch,
             ctx.retained_layers,
@@ -2031,6 +2061,11 @@ impl ChildPod {
             self.set_focused(false);
         }
         if focus_req {
+            // Bottom-up: the first pod here is the claimant's own.
+            if FOCUS_REQ_FROM_LIVE.with(Cell::get).is_none() {
+                let live = self.holds_live_focus();
+                FOCUS_REQ_FROM_LIVE.with(|c| c.set(Some(live)));
+            }
             self.set_focused(true);
         }
         ctx.absorb_child(fold);

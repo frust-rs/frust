@@ -38,6 +38,14 @@ Method deviations: the base-side material3demo runs 2 and 3 overlapped a ~40 s u
 and the head-side frust-gallery run 1 a short formatting check; medians are reported, so neither
 changes the figure.
 
+### frust-file-dialogs (rfd) cost
+
+2026-10-18, i5-12600 Linux, rfd 0.17.2 default features (`xdg-portal`, `wayland`), rustc warm: a scratch `bin` linking
+`frust-file-dialogs` (`.open_file()` kept live behind an impossible runtime branch) against an empty `fn main() {}`, both
+with the workspace `[profile.release]` (`lto = "fat"`, `codegen-units = 1`, `strip = "symbols"`, `panic = "abort"`, opt 3).
+Stripped size 301,712 B → 564,344 B (**+262,632 B**, +87 %); clean `cargo build --release` 4.80 s → 63.02 s (**+58.2 s**;
+one run each, bash timestamps, per-side target dir). The delta is a desktop-only plugin cost; Android, iOS and web never compile `rfd`.
+
 ## Engine bench scenes
 
 `crates/frust-engine/benches/` carries three phone-shaped scenes recorded straight through
