@@ -45,8 +45,10 @@ mod tests {
 
     #[test]
     fn relative_fragments_of_a_split_selection_are_dropped() {
-        let picked = absolute_only(vec![PathBuf::from("/dir/report"), PathBuf::from(".env")]);
-        assert_eq!(picked, vec![PathBuf::from("/dir/report")]);
+        // `temp_dir` is absolute on every target (`/tmp/..`, `C:\\..`); a bare name never is.
+        let report = std::env::temp_dir().join("report");
+        let picked = absolute_only(vec![report.clone(), PathBuf::from(".env")]);
+        assert_eq!(picked, vec![report]);
     }
 
     #[test]

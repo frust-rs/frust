@@ -269,8 +269,10 @@ the record):
 - **Linux — passed** (2026-10-18, linux-native rig): resize and move saved after the debounce, a
   300×200 request held at the 480×320 minimum, close wrote the final state, relaunch restored size and position.
 - **macOS — owed:** relaunch restore and the minimum size.
-- **Windows — owed:** relaunch restore, the off-screen clamp (saved monitor disconnected), and the
-  minimum size.
+- **Windows — passed** (2026-10-18, dell_mini_pc over RDP): relaunch restored a resized and moved
+  window exactly, a corner drag stopped at the 480×320 minimum, a position edited to 5000,5000
+  relaunched on-screen, a maximized close relaunched maximized. Open: after a maximize the saved
+  normal geometry is the maximized rect, not the last un-maximized one (action item).
 - **Any OS — owed (manual):** multi-monitor hot-unplug while running (saved monitor disconnected
   before close).
 
