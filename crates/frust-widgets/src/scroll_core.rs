@@ -636,6 +636,12 @@ pub(crate) trait ScrollSurface {
     /// answer.
     fn forward_pointer(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult;
 
+    /// Deliver a wheel `event` to the content under its position — hit-tested,
+    /// so only what the pointer is over sees it — returning the content's
+    /// answer. `Handled` means a nested surface (or any other wheel consumer)
+    /// took the notch and this surface must not move on it.
+    fn forward_wheel(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult;
+
     /// The drag just crossed the slop and this surface takes it over: cancel
     /// the content's armed `Down` at `position` and release its capture.
     fn take_over_from_content(&mut self, ctx: &mut EventCtx, position: Point);
@@ -1114,11 +1120,48 @@ pub(crate) trait ScrollSurface {
         }
     }
 
+    /// The wheel entry every owner routes [`InputEvent::Scroll`] through: the
+    /// content under the pointer is offered the wheel first, so the innermost
+    /// surface that can still move takes the notch; only an unconsumed wheel
+    /// steps this surface, and one it cannot move on either passes outward
+    /// unhandled ([`ScrollSurface::handle_wheel`]). A horizontal surface
+    /// nested in a vertical page, or an inner list already at the edge the
+    /// wheel pushes toward, thus lets the page scroll instead of swallowing
+    /// the notch. A notch the content took leaves this surface entirely
+    /// alone — motion of its own in flight keeps going, as Flutter's
+    /// pointer-signal resolver leaves an enclosing `Scrollable` alone.
+    fn route_wheel(
+        &mut self,
+        ctx: &mut EventCtx,
+        event: &InputEvent,
+        delta: &ScrollDelta,
+    ) -> EventResult {
+        if self.forward_wheel(ctx, event) == EventResult::Handled {
+            return EventResult::Handled;
+        }
+        self.handle_wheel(ctx, delta)
+    }
+
     /// A wheel step: a physics-independent hard clamp (no overscroll, no
     /// physics consulted — the clamp is a property of the input device, not of
-    /// the installed feel), ending any motion in flight.
+    /// the installed feel), ending any motion in flight. A wheel that cannot
+    /// move this surface — no travel along its axis, or the effective
+    /// position already resting at the edge it pushes toward — is answered
+    /// `Ignored` and this surface changes nothing of its own, so an enclosing
+    /// surface gets to scroll on it. The test is Flutter's
+    /// (`Scrollable._targetScrollOffsetForPointerScroll`): the notch is this
+    /// surface's iff it changes the clamped position, so a surface displaced
+    /// past an edge still takes one — it snaps back on it — whichever way it
+    /// points.
     fn handle_wheel(&mut self, ctx: &mut EventCtx, delta: &ScrollDelta) -> EventResult {
         let travel = axis_wheel_delta(self.core().axis, delta);
+        let position = self.pixels();
+        let reachable = (position + travel)
+            .max(0.0)
+            .min(self.max_scroll_extent().max(0.0));
+        if travel == 0.0 || reachable == position {
+            return EventResult::Ignored;
+        }
         self.core_mut().halt_motion();
         self.on_user_input();
         self.core_mut().edge_pull = 0.0;
@@ -1430,6 +1473,8 @@ mod tests {
         overscroll: f64,
         content: f64,
         viewport: f64,
+        /// What the content answers a forwarded wheel with.
+        content_takes_wheel: bool,
     }
 
     impl Probe {
@@ -1445,6 +1490,7 @@ mod tests {
                 overscroll: 0.0,
                 content: 1000.0,
                 viewport: 200.0,
+                content_takes_wheel: false,
             }
         }
     }
@@ -1495,6 +1541,13 @@ mod tests {
         fn forward_pointer(&mut self, _ctx: &mut EventCtx, _event: &InputEvent) -> EventResult {
             EventResult::Ignored
         }
+        fn forward_wheel(&mut self, _ctx: &mut EventCtx, _event: &InputEvent) -> EventResult {
+            if self.content_takes_wheel {
+                EventResult::Handled
+            } else {
+                EventResult::Ignored
+            }
+        }
         fn take_over_from_content(&mut self, _ctx: &mut EventCtx, _position: Point) {}
     }
 
@@ -1520,6 +1573,114 @@ mod tests {
         let sa: &mut dyn Any = &mut unit;
         let mut ctx = EventCtx::new(sa, Point::ZERO, Size::new(200.0, 200.0));
         probe.handle_wheel(&mut ctx, &delta);
+    }
+
+    /// Route a wheel through the owner entry, as a widget's `Scroll` arm does.
+    fn route(probe: &mut Probe, delta: ScrollDelta) -> EventResult {
+        let mut unit = ();
+        let sa: &mut dyn Any = &mut unit;
+        let mut ctx = EventCtx::new(sa, Point::ZERO, Size::new(200.0, 200.0));
+        let event = InputEvent::Scroll {
+            position: Point::new(100.0, 100.0),
+            delta,
+        };
+        probe.route_wheel(&mut ctx, &event, &delta)
+    }
+
+    /// The app-side `on_scroll` shape over `()` state.
+    type ScrollCallback = std::rc::Rc<dyn Fn(&mut (), ScrollInfo)>;
+
+    /// Count `on_scroll` fires on `probe`.
+    fn count_scroll_notifications(probe: &mut Probe) -> std::rc::Rc<std::cell::Cell<u32>> {
+        let fired = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let cb: ScrollCallback = {
+            let fired = fired.clone();
+            std::rc::Rc::new(move |_: &mut (), _| fired.set(fired.get() + 1))
+        };
+        probe.core.on_scroll = Some(crate::authoring::erase_callback_arg(&cb));
+        fired
+    }
+
+    #[test]
+    fn a_wheel_the_surface_cannot_move_on_is_passed_outward_untouched() {
+        let mut probe = Probe::new(ScrollAxis::Vertical);
+        let fired = count_scroll_notifications(&mut probe);
+        probe.core.edge_pull = 12.0;
+        probe.core.settling = true;
+        // No travel along the axis: a horizontal notch over a vertical surface.
+        assert_eq!(
+            route(&mut probe, ScrollDelta::Lines(2.0, 0.0)),
+            EventResult::Ignored
+        );
+        // Already at the leading edge the wheel pushes toward.
+        assert_eq!(
+            route(&mut probe, ScrollDelta::Pixels(0.0, -40.0)),
+            EventResult::Ignored
+        );
+        assert_eq!(probe.offset, 0.0);
+        assert_eq!(fired.get(), 0, "a blocked wheel notifies nothing");
+        assert_eq!(probe.core.edge_pull, 12.0, "and halts nothing");
+        assert!(probe.core.settling);
+        // A moving notch is taken, clamped and notified as before; at the far
+        // edge the next one in the same direction is passed on, the opposite
+        // one taken.
+        assert_eq!(
+            route(&mut probe, ScrollDelta::Pixels(0.0, 5000.0)),
+            EventResult::Handled
+        );
+        assert_eq!(probe.offset, 800.0);
+        assert_eq!(fired.get(), 1);
+        assert_eq!(probe.core.edge_pull, 0.0);
+        assert!(!probe.core.settling);
+        assert_eq!(
+            route(&mut probe, ScrollDelta::Pixels(0.0, 1.0)),
+            EventResult::Ignored
+        );
+        assert_eq!(
+            route(&mut probe, ScrollDelta::Lines(0.0, -1.0)),
+            EventResult::Handled
+        );
+        assert_eq!(probe.offset, 800.0 - WHEEL_LINE_PX);
+        assert_eq!(fired.get(), 2);
+    }
+
+    #[test]
+    fn a_wheel_while_displaced_past_an_edge_is_taken_and_snaps_the_surface_back() {
+        let mut probe = Probe::new(ScrollAxis::Vertical);
+        probe.overscroll = -20.0;
+        // Pushing further out still changes the clamped position (the
+        // displacement snaps), so the notch is this surface's — Flutter's rule.
+        assert_eq!(
+            route(&mut probe, ScrollDelta::Pixels(0.0, -10.0)),
+            EventResult::Handled
+        );
+        assert_eq!((probe.offset, probe.overscroll), (0.0, 0.0));
+        probe.overscroll = -20.0;
+        assert_eq!(
+            route(&mut probe, ScrollDelta::Pixels(0.0, 10.0)),
+            EventResult::Handled
+        );
+        assert_eq!((probe.offset, probe.overscroll), (10.0, 0.0));
+    }
+
+    #[test]
+    fn a_wheel_the_content_takes_never_moves_the_surface() {
+        let mut probe = Probe::new(ScrollAxis::Vertical);
+        let fired = count_scroll_notifications(&mut probe);
+        probe.content_takes_wheel = true;
+        assert_eq!(
+            route(&mut probe, ScrollDelta::Pixels(0.0, 40.0)),
+            EventResult::Handled
+        );
+        assert_eq!(probe.offset, 0.0);
+        assert_eq!(fired.get(), 0);
+        probe.content_takes_wheel = false;
+        assert_eq!(
+            route(&mut probe, ScrollDelta::Pixels(0.0, 40.0)),
+            EventResult::Handled
+        );
+        assert_eq!(probe.offset, 40.0);
+        assert_eq!(fired.get(), 1);
     }
 
     #[test]

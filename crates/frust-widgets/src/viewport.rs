@@ -706,7 +706,7 @@ impl ViewportWidget {
             self.deliver_pending_scroll(ctx);
         }
         match event {
-            InputEvent::Scroll { delta, .. } => self.handle_wheel(ctx, delta),
+            InputEvent::Scroll { delta, .. } => self.route_wheel(ctx, event, delta),
             InputEvent::Pointer(p) => self.pointer_on_axis(ctx, event, p, t_ms),
             // Broadcasts, focus-routed events and anything hit-tested (a
             // `Scale`, a file drop) belong to the content.
@@ -898,6 +898,12 @@ impl ScrollSurface for ViewportWidget {
         let result = with_axis_frame(&frame, || self.route_to_slivers(ctx, event));
         self.down_inner_axis = frame.inner_axis.get();
         result
+    }
+
+    /// The sliver under the pointer, hit-tested against each child's hit
+    /// region like any other content event.
+    fn forward_wheel(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        self.route_to_slivers(ctx, event)
     }
 
     fn take_over_from_content(&mut self, ctx: &mut EventCtx, position: Point) {
@@ -1175,6 +1181,43 @@ mod tests {
         assert_eq!(w.viewport.height, 150.0);
         assert_eq!(w.max_offset(), 0.0);
         assert_eq!(w.sliver_geometry(1).expect("child 1").paint_extent, 50.0);
+    }
+
+    #[test]
+    fn a_wheel_over_a_nested_scroll_view_moves_the_inner_surface_before_the_viewport() {
+        let inner = ScrollController::new();
+        let mut logic = {
+            let inner = inner.clone();
+            move |_: &mut ()| {
+                custom_scroll_view((
+                    // A 200 px box onto 1000 px of content, then plain content.
+                    crate::SizedBox(None, Some(200.0)).child(
+                        crate::scroll::scroll_view(leaf(400.0, 1000.0)).controller(inner.clone()),
+                    ),
+                    leaf(400.0, 1000.0),
+                ))
+            }
+        };
+        let mut root = mount(&mut logic);
+        let wheel = |y: f64| InputEvent::Scroll {
+            position: Point::new(10.0, y),
+            delta: frust_core::ScrollDelta::Pixels(0.0, 100.0),
+        };
+        // Over the box: the inner scrolls, the viewport stays put.
+        root.event(&mut (), &wheel(100.0));
+        assert_eq!((widget(&root).offset(), inner.offset()), (0.0, 100.0));
+        // Over the plain leaf below it: the viewport scrolls.
+        root.event(&mut (), &wheel(300.0));
+        assert_eq!((widget(&root).offset(), inner.offset()), (100.0, 100.0));
+        // Over the box again with the inner exhausted: the viewport takes it.
+        root.event(&mut (), &wheel(50.0));
+        assert_eq!((widget(&root).offset(), inner.offset()), (100.0, 200.0));
+        for _ in 0..6 {
+            root.event(&mut (), &wheel(50.0));
+        }
+        assert_eq!((widget(&root).offset(), inner.offset()), (100.0, 800.0));
+        root.event(&mut (), &wheel(50.0));
+        assert_eq!((widget(&root).offset(), inner.offset()), (200.0, 800.0));
     }
 
     #[test]

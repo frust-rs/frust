@@ -452,8 +452,9 @@ paints: `Translate`/`Stretch`/`None`) and to `Simulation` (Friction/Spring/Clamp
 `Stretch`; elsewhere `Bouncing` + `Translate`) unless the app names its own. `RubberBand` is an
 explicit opt-in only, and the only physics still on the legacy hand-rolled fling/settle path
 (`create_ballistic_simulation` returns `None` by design). Wheel input is a physics-independent hard
-clamp. A release carries interrupted momentum forward only when it plainly continues it, as in Flutter's
-`ScrollDragController.end`.
+clamp, offered to the content under the pointer first — the innermost surface that can move takes
+the notch, one at its pushed edge passes it outward (`ScrollSurface::route_wheel`). A release carries
+interrupted momentum forward only when it plainly continues it, as in Flutter's `ScrollDragController.end`.
 
 Each drag `Move` hands the physics that move's raw delta against the live position (a
 path-dependent mapping). The core accumulates the boundary-rejected excess as its own edge-pull
