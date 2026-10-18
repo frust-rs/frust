@@ -123,6 +123,21 @@ const SPAN_FONT_PREINIT_JOINED: &str = "font_preinit_joined";
 /// body of one record/take call, never across a frame's surrounding work.
 type SharedStartupSpans = Arc<Mutex<Option<StartupSpans>>>;
 
+/// The renderer's first-install timings as the plain-`Duration` steps the
+/// startup recorder prints.
+fn install_steps(t: &frust_render::InstallTimings) -> perf::InstallSteps {
+    perf::InstallSteps {
+        engine_surface: t.engine_surface,
+        device_create: t.device_create,
+        cache_seed: t.cache_seed,
+        caps_probe: t.caps_probe,
+        shader_modules: t.engine.shader_modules,
+        warm_up_start: t.engine.warm_up_start,
+        engine_rest: t.engine.rest,
+        install_rest: t.rest,
+    }
+}
+
 /// Record `names`, in order, on a shared startup recorder. A no-op once the
 /// startup line has been emitted (the recorder is gone by then), and
 /// poison-tolerant: a panicked holder costs instrumentation, never a frame.
@@ -506,6 +521,12 @@ fn install_surface(
                 perf::SPAN_RENDERER_READY,
             ],
         );
+        if let Some(t) = renderer.take_install_timings() {
+            let mut guard = startup_spans.lock().unwrap_or_else(|err| err.into_inner());
+            if let Some(spans) = guard.as_mut() {
+                spans.record_install_steps(&install_steps(&t), Some(perf::SPAN_INIT_ENTRY));
+            }
+        }
     }
     Ok(())
 }
@@ -908,7 +929,10 @@ fn create_handle(
     // so this thread cannot fail, only panic (handled at the join inside the
     // executor builders). Joined as late as possible (right before layout needs
     // it) to maximize overlap with the GPU work.
-    let font_preinit = std::thread::spawn(TextContext::new);
+    let font_preinit = std::thread::spawn(|| {
+        let (text_ctx, timings) = TextContext::new_with_timings();
+        (text_ctx, timings.font_system, timings.app_sync)
+    });
     let physical = (width.max(1), height.max(1));
 
     // Read the translucent opt-in latch BEFORE any
@@ -1059,7 +1083,7 @@ fn build_inline_executor(
     metal_layer: *mut c_void,
     physical: (u32, u32),
     scale: f32,
-    font_preinit: std::thread::JoinHandle<TextContext>,
+    font_preinit: std::thread::JoinHandle<(TextContext, std::time::Duration, std::time::Duration)>,
     alpha: SurfaceAlphaRequest,
     translucent_resolved: &AtomicBool,
 ) -> Result<(FrameExecutor, TextContext)> {
@@ -1097,19 +1121,24 @@ fn build_inline_executor(
     startup.record(perf::SPAN_ADAPTER_READY);
     startup.record(perf::SPAN_DEVICE_READY);
     startup.record(perf::SPAN_RENDERER_READY);
+    if let Some(t) = renderer.take_install_timings() {
+        startup.record_install_steps(&install_steps(&t), Some(perf::SPAN_INIT_ENTRY));
+    }
 
     // Join the font-preload thread as late as possible (max overlap with the GPU
     // work above). Best-effort: a panicked thread falls back to a synchronous
     // `TextContext::new` with a log line — kill nothing, defer nothing silently.
     startup.record(SPAN_FONT_PREINIT_STARTED);
-    let text_ctx = font_preinit.join().unwrap_or_else(|_| {
+    let (text_ctx, font_system, font_app_sync) = font_preinit.join().unwrap_or_else(|_| {
         log::warn!(
             "frust-shell-ios: font pre-init thread panicked; \
              falling back to synchronous TextContext::new"
         );
-        TextContext::new()
+        let (text_ctx, timings) = TextContext::new_with_timings();
+        (text_ctx, timings.font_system, timings.app_sync)
     });
     startup.record(SPAN_FONT_PREINIT_JOINED);
+    startup.record_font_steps(font_system, font_app_sync);
 
     let executor =
         FrameExecutor::Inline(Box::new(InlineExecutor::new(render_cx, renderer, startup)));
@@ -1131,7 +1160,7 @@ fn spawn_split_executor(
     metal_layer: *mut c_void,
     physical: (u32, u32),
     scale: f32,
-    font_preinit: std::thread::JoinHandle<TextContext>,
+    font_preinit: std::thread::JoinHandle<(TextContext, std::time::Duration, std::time::Duration)>,
     alpha: SurfaceAlphaRequest,
     translucent_resolved: Arc<AtomicBool>,
     present: Arc<PresentHandoff>,
@@ -1225,17 +1254,24 @@ fn spawn_split_executor(
     // deferring nothing silently. The "layout never runs before `TextContext`
     // exists" invariant is untouched: `create_handle`'s initial `rebuild()` is
     // downstream of this join.
-    let text_ctx = font_preinit.join().unwrap_or_else(|_| {
+    let (text_ctx, font_system, font_app_sync) = font_preinit.join().unwrap_or_else(|_| {
         log::warn!(
             "frust-shell-ios: font pre-init thread panicked; \
              falling back to synchronous TextContext::new"
         );
-        TextContext::new()
+        let (text_ctx, timings) = TextContext::new_with_timings();
+        (text_ctx, timings.font_system, timings.app_sync)
     });
     // The last UI-side span, and this thread's last touch of the shared recorder.
     // It lands after `adapter_ready` in the emitted line whenever the GPU won the
     // race — which is the whole point of the ordering above.
     record_startup_spans(&startup, &[SPAN_FONT_PREINIT_JOINED]);
+    {
+        let mut guard = startup.lock().unwrap_or_else(|err| err.into_inner());
+        if let Some(spans) = guard.as_mut() {
+            spans.record_font_steps(font_system, font_app_sync);
+        }
+    }
 
     (
         FrameExecutor::Split(SplitExecutor::new(

@@ -1327,6 +1327,74 @@ pub const SPAN_FIRST_SUBMIT_ENCODE: &str = "first_submit_encode";
 /// duration (see [`StartupSpans::record_duration`]).
 pub const SPAN_FIRST_SUBMIT_QUEUE: &str = "first_submit_queue";
 
+/// Startup sub-step names. Every one is a **duration** in milliseconds (recorded
+/// through [`StartupSpans::record_duration`]), not an offset from the epoch,
+/// and each is printed right after `adapter_ready`. They split the gap between
+/// `pipeline_cache_restored` (Android) / the render-thread start (iOS) and
+/// `adapter_ready`: `engine_surface_ms`, `cache_seed_ms`, `caps_probe_ms`,
+/// `shader_modules_ms`, `warm_up_start_ms`, `engine_rest_ms` and
+/// `install_rest_ms` are disjoint and sum to the renderer's first install;
+/// `device_create_ms` is a part of `engine_surface_ms`, reported on its own.
+/// `font_system_ms` and `font_app_sync_ms` split `TextContext::new` (which runs
+/// on the font-preinit thread, so it overlaps the above rather than adding to it).
+///
+/// Surface creation, device creation, capability gate and swapchain configure.
+pub const SPAN_ENGINE_SURFACE_MS: &str = "engine_surface_ms";
+/// The `ensure_device` call (a part of [`SPAN_ENGINE_SURFACE_MS`]).
+pub const SPAN_DEVICE_CREATE_MS: &str = "device_create_ms";
+/// `create_pipeline_cache`, the driver-cache seed.
+pub const SPAN_CACHE_SEED_MS: &str = "cache_seed_ms";
+/// `TierCaps::probe`.
+pub const SPAN_CAPS_PROBE_MS: &str = "caps_probe_ms";
+/// The engine's shader-module registration (`register_family`).
+pub const SPAN_SHADER_MODULES_MS: &str = "shader_modules_ms";
+/// The engine's pipeline-cache construction plus warm-up enqueue/spawn.
+pub const SPAN_WARM_UP_START_MS: &str = "warm_up_start_ms";
+/// The rest of `EngineRenderer::new`.
+pub const SPAN_ENGINE_REST_MS: &str = "engine_rest_ms";
+/// The rest of the renderer install (timestamp ring, shader quad pass, state
+/// adoption). The shell-side remainder is a separate key,
+/// [`SPAN_RENDER_THREAD_START_MS`].
+pub const SPAN_INSTALL_REST_MS: &str = "install_rest_ms";
+/// iOS only: the time between `init_entry` and the renderer install starting
+/// (render-thread spawn and scheduling), derived as the `init_entry` to
+/// `adapter_ready` gap less every install sub-step above.
+pub const SPAN_RENDER_THREAD_START_MS: &str = "render_thread_start_ms";
+/// `parley::FontContext::new` inside `TextContext::new`.
+pub const SPAN_FONT_SYSTEM_MS: &str = "font_system_ms";
+/// `sync_app_fonts` inside `TextContext::new` (about 0 for an app that
+/// registers no fonts).
+pub const SPAN_FONT_APP_SYNC_MS: &str = "font_app_sync_ms";
+
+/// The disjoint sub-step durations of one renderer install, in the plain
+/// `Duration`s a shell copies out of `frust-render`'s `InstallTimings` (this
+/// crate does not depend on `frust-render`). See the `SPAN_*_MS` consts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct InstallSteps {
+    pub engine_surface: Duration,
+    pub device_create: Duration,
+    pub cache_seed: Duration,
+    pub caps_probe: Duration,
+    pub shader_modules: Duration,
+    pub warm_up_start: Duration,
+    pub engine_rest: Duration,
+    pub install_rest: Duration,
+}
+
+impl InstallSteps {
+    /// The whole install: the disjoint steps (`device_create` is inside
+    /// `engine_surface`).
+    pub fn total(&self) -> Duration {
+        self.engine_surface
+            + self.cache_seed
+            + self.caps_probe
+            + self.shader_modules
+            + self.warm_up_start
+            + self.engine_rest
+            + self.install_rest
+    }
+}
+
 /// A monotonic clock reading, injectable so [`StartupSpans`]'s deltas are
 /// deterministically testable without a real clock. Only differences
 /// between successive readings are meaningful — the absolute value has no
@@ -1431,6 +1499,44 @@ impl<C: Clock> StartupSpans<C> {
         self.spans.push((name, duration));
     }
 
+    /// The recorded offset of the first span called `name`, if any.
+    pub fn offset_of(&self, name: &str) -> Option<Duration> {
+        self.spans.iter().find(|(n, _)| *n == name).map(|(_, d)| *d)
+    }
+
+    /// Record every install sub-step as a duration. With `start_ref`, also
+    /// record [`SPAN_RENDER_THREAD_START_MS`]: the `start_ref` to
+    /// `adapter_ready` gap less the install's own total (call after
+    /// `adapter_ready` is recorded; skipped when either span is missing).
+    pub fn record_install_steps(&mut self, steps: &InstallSteps, start_ref: Option<&str>) {
+        if !self.enabled {
+            return;
+        }
+        self.record_duration(SPAN_ENGINE_SURFACE_MS, steps.engine_surface);
+        self.record_duration(SPAN_DEVICE_CREATE_MS, steps.device_create);
+        self.record_duration(SPAN_CACHE_SEED_MS, steps.cache_seed);
+        self.record_duration(SPAN_CAPS_PROBE_MS, steps.caps_probe);
+        self.record_duration(SPAN_SHADER_MODULES_MS, steps.shader_modules);
+        self.record_duration(SPAN_WARM_UP_START_MS, steps.warm_up_start);
+        self.record_duration(SPAN_ENGINE_REST_MS, steps.engine_rest);
+        self.record_duration(SPAN_INSTALL_REST_MS, steps.install_rest);
+        if let Some(start) = start_ref.and_then(|r| self.offset_of(r))
+            && let Some(ready) = self.offset_of(SPAN_ADAPTER_READY)
+        {
+            let gap = ready.saturating_sub(start);
+            self.record_duration(
+                SPAN_RENDER_THREAD_START_MS,
+                gap.saturating_sub(steps.total()),
+            );
+        }
+    }
+
+    /// Record the two `TextContext::new` halves as durations.
+    pub fn record_font_steps(&mut self, font_system: Duration, app_sync: Duration) {
+        self.record_duration(SPAN_FONT_SYSTEM_MS, font_system);
+        self.record_duration(SPAN_FONT_APP_SYNC_MS, app_sync);
+    }
+
     /// The recorded `(name, delta)` pairs in insertion order.
     pub fn spans(&self) -> &[(&'static str, Duration)] {
         &self.spans
@@ -1448,19 +1554,121 @@ impl<C: Clock> StartupSpans<C> {
         if self.enabled && !self.spans.is_empty() {
             #[cfg(feature = "perf-trace")]
             {
-                let mut line = String::from("frust-perf startup");
-                for (name, delta) in &self.spans {
-                    line.push_str(&format!(" {name}={}ms", delta.as_millis()));
+                if let Some(line) = self.format_line() {
+                    log::info!("{line}");
                 }
-                log::info!("{line}");
             }
         }
+    }
+
+    /// The `frust-perf startup ...` line [`Self::emit_log`] logs, or `None`
+    /// when disabled or nothing was recorded.
+    #[cfg(feature = "perf-trace")]
+    fn format_line(&self) -> Option<String> {
+        if !self.enabled || self.spans.is_empty() {
+            return None;
+        }
+        let mut line = String::from("frust-perf startup");
+        for (name, delta) in &self.spans {
+            line.push_str(&format!(" {name}={}ms", delta.as_millis()));
+        }
+        Some(line)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn substep_durations_follow_adapter_ready_and_keep_the_existing_spelling() {
+        let mut spans = StartupSpans::begin_with_enabled(|| Duration::from_millis(500), true);
+        spans.record(SPAN_ADAPTER_READY);
+        spans.record_duration(SPAN_ENGINE_SURFACE_MS, Duration::from_millis(30));
+        spans.record_duration(SPAN_DEVICE_CREATE_MS, Duration::from_millis(12));
+        spans.record_duration(SPAN_CACHE_SEED_MS, Duration::from_millis(1));
+        spans.record_duration(SPAN_CAPS_PROBE_MS, Duration::from_millis(2));
+        spans.record_duration(SPAN_SHADER_MODULES_MS, Duration::from_millis(3));
+        spans.record_duration(SPAN_WARM_UP_START_MS, Duration::from_millis(4));
+        spans.record_duration(SPAN_ENGINE_REST_MS, Duration::from_millis(5));
+        spans.record_duration(SPAN_INSTALL_REST_MS, Duration::from_millis(6));
+        spans.record_duration(SPAN_FONT_SYSTEM_MS, Duration::from_millis(7));
+        spans.record_duration(SPAN_FONT_APP_SYNC_MS, Duration::from_millis(0));
+        spans.record(SPAN_FIRST_FRAME_PRESENTED);
+        let names: Vec<&str> = spans.spans().iter().map(|(n, _)| *n).collect();
+        assert_eq!(
+            names,
+            [
+                "adapter_ready",
+                "engine_surface_ms",
+                "device_create_ms",
+                "cache_seed_ms",
+                "caps_probe_ms",
+                "shader_modules_ms",
+                "warm_up_start_ms",
+                "engine_rest_ms",
+                "install_rest_ms",
+                "font_system_ms",
+                "font_app_sync_ms",
+                "first_frame_presented",
+            ]
+        );
+        // The existing keys keep their exact spelling and offset semantics.
+        assert_eq!(SPAN_ADAPTER_READY, "adapter_ready");
+        assert_eq!(SPAN_FIRST_FRAME_PRESENTED, "first_frame_presented");
+        assert_eq!(spans.spans()[0].1, Duration::ZERO);
+        assert_eq!(spans.spans()[1].1, Duration::from_millis(30));
+    }
+
+    #[test]
+    fn install_steps_record_in_order_and_derive_the_render_thread_start() {
+        let mut now = 0u64;
+        let clock = move || {
+            let t = Duration::from_millis(now);
+            now += 100;
+            t
+        };
+        // begin reads 0; init_entry 100; adapter_ready 200.
+        let mut spans = StartupSpans::begin_with_enabled(clock, true);
+        spans.record(SPAN_INIT_ENTRY);
+        spans.record(SPAN_ADAPTER_READY);
+        let ms = Duration::from_millis;
+        let steps = InstallSteps {
+            engine_surface: ms(30),
+            device_create: ms(12),
+            cache_seed: ms(1),
+            caps_probe: ms(2),
+            shader_modules: ms(3),
+            warm_up_start: ms(4),
+            engine_rest: ms(5),
+            install_rest: ms(6),
+        };
+        assert_eq!(steps.total(), ms(51));
+        spans.record_install_steps(&steps, Some(SPAN_INIT_ENTRY));
+        let last = spans.spans().last().copied().unwrap();
+        assert_eq!(last, (SPAN_RENDER_THREAD_START_MS, ms(100 - 51)));
+        assert_eq!(spans.spans().len(), 2 + 8 + 1);
+
+        let mut off = StartupSpans::begin_with_enabled(|| Duration::ZERO, false);
+        off.record_install_steps(&steps, Some(SPAN_INIT_ENTRY));
+        assert!(off.spans().is_empty());
+    }
+
+    #[cfg(feature = "perf-trace")]
+    #[test]
+    fn emit_log_prints_the_substeps_after_adapter_ready() {
+        let mut spans = StartupSpans::begin_with_enabled(|| Duration::from_millis(500), true);
+        spans.record(SPAN_ADAPTER_READY);
+        spans.record_duration(SPAN_ENGINE_SURFACE_MS, Duration::from_millis(30));
+        spans.record_duration(SPAN_INSTALL_REST_MS, Duration::from_millis(6));
+        spans.record(SPAN_FIRST_FRAME_PRESENTED);
+        let line = spans.format_line().expect("enabled and non-empty");
+        assert_eq!(
+            line,
+            "frust-perf startup adapter_ready=0ms engine_surface_ms=30ms install_rest_ms=6ms \
+             first_frame_presented=0ms"
+        );
+    }
 
     #[test]
     fn record_duration_pushes_the_value_unshifted_and_is_inert_when_disabled() {

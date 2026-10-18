@@ -38,7 +38,7 @@ use core::ops::Range;
 use anyhow::{Result, anyhow};
 
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use kurbo::Affine;
 
@@ -379,6 +379,10 @@ pub struct SurfaceRenderer {
     /// compilation. `None` is a cold start. Only meaningful on adapters with
     /// `PIPELINE_CACHE` (any Vulkan adapter); validated and discarded elsewhere.
     initial_cache_data: Option<Vec<u8>>,
+    /// Sub-step durations of the first surface install, until a shell takes them.
+    install_timings: Option<InstallTimings>,
+    /// Whether the first install has been measured (later installs are not).
+    install_timings_seen: bool,
     /// The swapchain texture [`Self::acquire`] acquired and stashed for
     /// [`Self::submit`] to render into and present (the acquire/submit span split).
     /// `None` outside an in-flight `acquire`→`submit` pair — set only on an
@@ -623,6 +627,28 @@ impl Default for SurfaceRenderer {
     }
 }
 
+/// Where the first surface install spent its time, from the
+/// `on_surface_created_*` entry to `install_surface`'s exit. Durations, not
+/// offsets. `device_create` is a part of `engine_surface` (reported on its own);
+/// the other fields are disjoint, so
+/// `engine_surface + cache_seed + caps_probe + engine.* + rest` is the whole
+/// install.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct InstallTimings {
+    /// Surface creation, device creation, capability gate and swapchain configure.
+    pub engine_surface: Duration,
+    /// The `ensure_device` call inside `engine_surface`.
+    pub device_create: Duration,
+    /// `create_pipeline_cache` (the driver-cache seed; ~0 off Vulkan).
+    pub cache_seed: Duration,
+    /// `TierCaps::probe`.
+    pub caps_probe: Duration,
+    /// `EngineRenderer::new`'s own split.
+    pub engine: frust_engine::renderer::ConstructionTimings,
+    /// The rest of `install_surface` (timestamp ring, shader quad pass, state adoption).
+    pub rest: Duration,
+}
+
 impl SurfaceRenderer {
     /// Creates an empty renderer in [`SurfacePhase::NoSurface`].
     ///
@@ -634,6 +660,8 @@ impl SurfaceRenderer {
             state: SurfaceState::NoSurface,
             consecutive_invalid: 0,
             initial_cache_data: None,
+            install_timings: None,
+            install_timings_seen: false,
             pending_present: None,
             pending_base_color: None,
             engine_scene: frust_scene::Scene::default(),
@@ -1040,6 +1068,7 @@ impl SurfaceRenderer {
         height: u32,
         alpha: SurfaceAlphaRequest,
     ) -> Result<()> {
+        let started = Instant::now();
         let surface = crate::context::create_engine_surface_from_target(
             ctx,
             window,
@@ -1050,7 +1079,7 @@ impl SurfaceRenderer {
         )
         .await
         .map_err(|e| anyhow!("frust-render: failed to create render surface: {e}"))?;
-        self.install_surface(ctx, surface)
+        self.install_surface(ctx, surface, started)
     }
 
     /// Brings the surface online from a [`DetachedSurface`] that was created on
@@ -1078,6 +1107,7 @@ impl SurfaceRenderer {
         height: u32,
         alpha: SurfaceAlphaRequest,
     ) -> Result<()> {
+        let started = Instant::now();
         let surface = crate::context::create_engine_surface(
             ctx,
             surface.into_surface(),
@@ -1088,7 +1118,7 @@ impl SurfaceRenderer {
         )
         .await
         .map_err(|e| anyhow!("frust-render: failed to configure detached surface: {e}"))?;
-        self.install_surface(ctx, surface)
+        self.install_surface(ctx, surface, started)
     }
 
     /// Brings the surface online from a raw `ANativeWindow` pointer (Android
@@ -1114,6 +1144,7 @@ impl SurfaceRenderer {
         height: u32,
         alpha: SurfaceAlphaRequest,
     ) -> Result<()> {
+        let started = Instant::now();
         // SAFETY: forwarded to the caller's `on_surface_created_from_android_window`
         // contract — `window_ptr` is a valid, acquired ANativeWindow* outliving
         // the surface.
@@ -1129,7 +1160,7 @@ impl SurfaceRenderer {
         )
         .await
         .map_err(|e| anyhow!("frust-render: failed to configure Android surface: {e}"))?;
-        self.install_surface(ctx, surface)
+        self.install_surface(ctx, surface, started)
     }
 
     /// Brings the surface online from a raw `CAMetalLayer*` pointer (iOS/macOS
@@ -1159,6 +1190,7 @@ impl SurfaceRenderer {
         height: u32,
         alpha: SurfaceAlphaRequest,
     ) -> Result<()> {
+        let started = Instant::now();
         // SAFETY: forwarded to the caller's `on_surface_created_from_metal_layer`
         // contract — `layer_ptr` is a valid, live CAMetalLayer* outliving the
         // surface.
@@ -1173,12 +1205,20 @@ impl SurfaceRenderer {
         )
         .await
         .map_err(|e| anyhow!("frust-render: failed to configure Metal surface: {e}"))?;
-        self.install_surface(ctx, surface)
+        self.install_surface(ctx, surface, started)
     }
 
     /// Wraps a freshly created `RenderSurface` in a device-bound renderer and
     /// installs it as the live surface. Shared by the safe and Android paths.
-    fn install_surface(&mut self, ctx: &RenderContext, surface: EngineSurface) -> Result<()> {
+    fn install_surface(
+        &mut self,
+        ctx: &RenderContext,
+        surface: EngineSurface,
+        started: Instant,
+    ) -> Result<()> {
+        let engine_surface = started.elapsed();
+        let device_create = surface.device_create;
+        let install_started = Instant::now();
         // Seed the engine's shader-pipeline compilation from a persisted
         // `wgpu::PipelineCache` when the adapter supports it (Vulkan/Android) and
         // the shell restored a validated blob via
@@ -1195,13 +1235,15 @@ impl SurfaceRenderer {
         // check, which rejects every accidental mismatch (integrity against a
         // deliberate forgery is out of scope — see the setter's doc). `None`
         // is a cold start.
+        let cache_started = Instant::now();
         let pipeline_cache =
             unsafe { ctx.create_pipeline_cache(self.initial_cache_data.as_deref()) };
+        let cache_seed = cache_started.elapsed();
 
         // Build the backend. There is exactly one renderer and no tier to
         // dispatch on: `context::create_engine_surface` has already refused an
         // adapter the engine cannot drive, before any surface is configured.
-        let backend = {
+        let (backend, caps_probe, engine_timings) = {
             let device = &ctx.device_handle().device;
             // Built for the format this surface's FRAMES will target,
             // because the engine warms its strip pipelines for exactly one
@@ -1218,7 +1260,9 @@ impl SurfaceRenderer {
             // from the same persisted `wgpu::PipelineCache` blob, so a
             // re-warm after a format change is a driver-cache hit rather
             // than a cold compile.
+            let probe_started = Instant::now();
             let caps = frust_gpu::TierCaps::probe(&ctx.device_handle().adapter);
+            let caps_probe = probe_started.elapsed();
             let engine_format = engine_target_format(&surface.path, surface.config().format);
             let engine = frust_engine::EngineRenderer::new(
                 device,
@@ -1227,6 +1271,7 @@ impl SurfaceRenderer {
                 pipeline_cache.as_ref(),
             )
             .map_err(|e| anyhow!("frust-render: failed to create engine renderer: {e}"))?;
+            let engine_timings = engine.construction_timings();
             // One line per process naming the renderer, next to the
             // `render-path`/`aa-mode` lines, so a capture proves which
             // renderer produced the frames it is timing.
@@ -1262,12 +1307,13 @@ impl SurfaceRenderer {
                 frust_engine::EngineSpan::COUNT,
                 frust_engine::diag::TIMESTAMP_RING_LABEL,
             );
-            TierBackend::Engine {
+            let backend = TierBackend::Engine {
                 engine: Box::new(engine),
                 refused_frames: 0,
                 shader_quads: Box::new(frust_engine::ShaderQuadPass::new(pipeline_cache.clone())),
                 timestamps,
-            }
+            };
+            (backend, caps_probe, engine_timings)
         };
         debug_assert_eq!(
             next_phase(self.phase(), SurfaceEvent::Created),
@@ -1297,7 +1343,29 @@ impl SurfaceRenderer {
             pipeline_cache,
             warm_up_pending: true,
         })));
+        if !self.install_timings_seen {
+            self.install_timings_seen = true;
+            let measured = cache_seed
+                + caps_probe
+                + engine_timings.shader_modules
+                + engine_timings.warm_up_start
+                + engine_timings.rest;
+            self.install_timings = Some(InstallTimings {
+                engine_surface,
+                device_create,
+                cache_seed,
+                caps_probe,
+                engine: engine_timings,
+                rest: install_started.elapsed().saturating_sub(measured),
+            });
+        }
         Ok(())
+    }
+
+    /// The first surface install's sub-step durations, once (`None` afterwards,
+    /// and before any install). Startup evidence only.
+    pub fn take_install_timings(&mut self) -> Option<InstallTimings> {
+        self.install_timings.take()
     }
 
     /// Resizes the swapchain (`surfaceChanged`/`Resized`).

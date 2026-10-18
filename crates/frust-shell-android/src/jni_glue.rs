@@ -50,6 +50,7 @@ use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::{Arc, Mutex, Once, OnceLock};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use accesskit_android::jni as ak_jni;
 use anyhow::{Context, Result};
@@ -153,7 +154,12 @@ static GPU_PREINIT: OnceLock<Mutex<Option<JoinHandle<PreInitResult>>>> = OnceLoc
 /// the handle's lifetime (a prewarm-then-move design, not shared mutable
 /// state). Holds `Some(TextContext)` unconditionally — construction has no
 /// fallible step — until [`take_preinit_text_context`] takes it.
-static FONT_PREINIT: OnceLock<Mutex<Option<JoinHandle<TextContext>>>> = OnceLock::new();
+static FONT_PREINIT: OnceLock<Mutex<Option<JoinHandle<PreinitText>>>> = OnceLock::new();
+
+/// What the font pre-init thread hands back: the context plus the
+/// `TextContext::new` split (font-system scan, app-font sync) for the
+/// `font_system_ms`/`font_app_sync_ms` stamps.
+type PreinitText = (TextContext, Duration, Duration);
 
 /// The process [`JavaVM`](jni::JavaVM) pointer, captured at [`JNI_OnLoad`].
 /// The JVM hands `JNI_OnLoad` the `JavaVM` before any
@@ -828,6 +834,21 @@ fn take_preinit_context() -> frust_render::RenderContext {
     crate::ffi_support::resolve_preinit(joined, frust_render::RenderContext::new)
 }
 
+/// The renderer's first-install timings as the plain-`Duration` steps the
+/// startup recorder prints (`engine_surface_ms` .. `install_rest_ms`).
+fn install_steps(t: &frust_render::InstallTimings) -> perf::InstallSteps {
+    perf::InstallSteps {
+        engine_surface: t.engine_surface,
+        device_create: t.device_create,
+        cache_seed: t.cache_seed,
+        caps_probe: t.caps_probe,
+        shader_modules: t.engine.shader_modules,
+        warm_up_start: t.engine.warm_up_start,
+        engine_rest: t.engine.rest,
+        install_rest: t.rest,
+    }
+}
+
 /// Spawn the single background font-preload thread, best-effort
 /// and single-shot, mirroring [`spawn_gpu_preinit`]'s shape exactly: it builds
 /// a [`TextContext`] (parley font-DB/`FontContext` + `LayoutContext`
@@ -846,7 +867,10 @@ fn spawn_font_preinit() {
     if slot_guard.is_some() {
         return; // already spawned this process
     }
-    *slot_guard = Some(std::thread::spawn(TextContext::new));
+    *slot_guard = Some(std::thread::spawn(|| {
+        let (text_ctx, timings) = TextContext::new_with_timings();
+        (text_ctx, timings.font_system, timings.app_sync)
+    }));
 }
 
 /// Join the [`JNI_OnLoad`] font-preload thread and return the
@@ -862,12 +886,12 @@ fn spawn_font_preinit() {
 /// `TextContext::new()` work ran synchronously inside `AndroidAppHandle::new`
 /// before, so at worst this blocks for the remainder of work already in
 /// flight.
-fn take_preinit_text_context() -> TextContext {
+fn take_preinit_text_context() -> PreinitText {
     let joined = FONT_PREINIT
         .get()
         .and_then(|slot| slot.lock().ok().and_then(|mut g| g.take()))
         .and_then(|handle| match handle.join() {
-            Ok(text_ctx) => Some(text_ctx),
+            Ok(preinit) => Some(preinit),
             Err(_) => {
                 log::warn!(
                     "frust-shell-android: font pre-init thread panicked; \
@@ -881,7 +905,8 @@ fn take_preinit_text_context() -> TextContext {
             "frust-shell-android: no font pre-init result available; \
              building TextContext synchronously"
         );
-        TextContext::new()
+        let (text_ctx, timings) = TextContext::new_with_timings();
+        (text_ctx, timings.font_system, timings.app_sync)
     })
 }
 
@@ -1069,6 +1094,9 @@ fn install_surface(
             spans.record(perf::SPAN_ADAPTER_READY);
             spans.record(perf::SPAN_DEVICE_READY);
             spans.record(perf::SPAN_RENDERER_READY);
+            if let Some(t) = renderer.take_install_timings() {
+                spans.record_install_steps(&install_steps(&t), None);
+            }
         }
         // Nothing is written here: the engine has only just queued its
         // warm-up, so the blob would hold none of its pipelines yet. The
@@ -1712,6 +1740,9 @@ fn build_inline_executor(
     startup_spans.record(perf::SPAN_ADAPTER_READY);
     startup_spans.record(perf::SPAN_DEVICE_READY);
     startup_spans.record(perf::SPAN_RENDERER_READY);
+    if let Some(t) = renderer.take_install_timings() {
+        startup_spans.record_install_steps(&install_steps(&t), None);
+    }
 
     // Persist the pipeline cache the driver populated, if it changed.
     if let Some(path) = cache_path {
@@ -1721,8 +1752,9 @@ fn build_inline_executor(
     // Font/`TextContext` warmup: join the font-preload thread as
     // late as possible (max overlap with the GPU work above).
     startup_spans.record(SPAN_FONT_PREINIT_STARTED);
-    let text_ctx = take_preinit_text_context();
+    let (text_ctx, font_system, font_app_sync) = take_preinit_text_context();
     startup_spans.record(SPAN_FONT_PREINIT_JOINED);
+    startup_spans.record_font_steps(font_system, font_app_sync);
 
     let executor = FrameExecutor::Inline(Box::new(InlineExecutor::new(
         render_cx,
@@ -1751,8 +1783,9 @@ fn spawn_split_executor(
     // bring-up no longer matters; record it before the recorder is moved into the
     // render thread below.
     startup_spans.record(SPAN_FONT_PREINIT_STARTED);
-    let text_ctx = take_preinit_text_context();
+    let (text_ctx, font_system, font_app_sync) = take_preinit_text_context();
     startup_spans.record(SPAN_FONT_PREINIT_JOINED);
+    startup_spans.record_font_steps(font_system, font_app_sync);
 
     let (sender, receiver) = render_channel::<PaintedScene, SendableWindowPtr>();
     let (scene_return_tx, scene_return_rx) = scene_return_channel::<Scene>();

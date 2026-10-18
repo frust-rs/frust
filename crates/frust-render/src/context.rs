@@ -482,6 +482,9 @@ pub(crate) struct EngineSurface {
     pub(crate) gpu: ConfiguredSurface,
     /// The engine resources of this surface's arm.
     pub(crate) path: RenderPath,
+    /// How long the `ensure_device` call took while this surface was created
+    /// (startup evidence only).
+    pub(crate) device_create: std::time::Duration,
 }
 
 impl EngineSurface {
@@ -627,7 +630,9 @@ pub(crate) async fn create_engine_surface(
     present_mode: wgpu::PresentMode,
     alpha: SurfaceAlphaRequest,
 ) -> Result<EngineSurface> {
+    let device_started = std::time::Instant::now();
     ctx.ensure_device(&surface).await?;
+    let device_create = device_started.elapsed();
     // The capability gate's diagnosis is this crate's single fail-fast message
     // for an adapter the engine cannot drive.
     check_engine_support(&ctx.device_handle().adapter)?;
@@ -712,6 +717,7 @@ pub(crate) async fn create_engine_surface(
     Ok(EngineSurface {
         gpu: configured,
         path,
+        device_create,
     })
 }
 
