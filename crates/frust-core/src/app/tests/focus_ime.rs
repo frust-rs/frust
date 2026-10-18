@@ -732,20 +732,12 @@ fn focus_epoch_moves_when_the_field_taking_focus_publishes_nothing() {
     let first_session = root.focus_epoch();
     let steady_edge = root.focus_ime_generation();
 
-    // The bottom field takes the session and publishes nothing, so the shell still
-    // sees the surface of the field the user left.
+    // The bottom field takes the session and publishes nothing: the surface of the
+    // field the user left is dropped, and the edge generation moves with it.
     root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 60.0));
     assert!(root.is_focus_active());
-    assert_eq!(
-        root.ime_state(),
-        Some(SessionField::surface(SHARED_FIELD_TEXT)),
-        "the field that lost focus is still the one the surface describes"
-    );
-    assert_eq!(
-        root.focus_ime_generation(),
-        steady_edge,
-        "no published value moved, so the edge generation cannot have"
-    );
+    assert_eq!(root.ime_state(), None, "the left field's surface is gone");
+    assert_ne!(root.focus_ime_generation(), steady_edge);
     assert_ne!(
         root.focus_epoch(),
         first_session,
@@ -753,8 +745,8 @@ fn focus_epoch_moves_when_the_field_taking_focus_publishes_nothing() {
          claimant publishes anything"
     );
 
-    // And again, the move is a real one: the focus path now ends at the
-    // field that published nothing.
+    // The move is a real one: the focus path now ends at the field that
+    // published nothing.
     root.event(&mut state, &edit_event());
     assert_eq!(
         root.ime_state(),
@@ -797,4 +789,48 @@ fn focus_epoch_ignores_an_edit_inside_one_session() {
         session,
         "a release retires the session's identity"
     );
+}
+
+#[test]
+fn pointer_focus_move_to_a_non_publishing_pod_clears_the_surface_at_paint() {
+    let (mut root, mut state) = two_fields_focused(false);
+    let first_session = root.focus_epoch();
+    let mut scene = RecordingScene::default();
+    root.paint(&mut scene, FrameTime::ZERO);
+    assert!(root.ime_state().is_some(), "the top field's surface stands");
+
+    root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 60.0));
+    let moved = root.focus_epoch();
+    assert_ne!(moved, first_session);
+    root.paint(&mut scene, FrameTime::ZERO);
+    assert!(root.is_focus_active(), "the bottom pod holds the session");
+    assert!(root.ime_state().is_none(), "no stale surface after paint");
+    assert_eq!(root.focus_epoch(), moved, "the epoch moved exactly once");
+    root.paint(&mut scene, FrameTime::ZERO);
+    assert!(root.ime_state().is_none());
+}
+
+#[test]
+fn pointer_focus_move_between_publishing_pods_keeps_the_new_surface() {
+    let (mut root, mut state) = two_fields_focused(true);
+    let mut scene = RecordingScene::default();
+    root.paint(&mut scene, FrameTime::ZERO);
+    root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 60.0));
+    root.paint(&mut scene, FrameTime::ZERO);
+    assert!(root.is_focus_active());
+    assert_eq!(
+        root.ime_state(),
+        Some(SessionField::surface(SHARED_FIELD_TEXT))
+    );
+}
+
+#[test]
+fn outside_tap_blur_still_clears_the_surface() {
+    let (mut root, mut state) = two_fields_focused(true);
+    let mut scene = RecordingScene::default();
+    root.paint(&mut scene, FrameTime::ZERO);
+    root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 90.0));
+    root.paint(&mut scene, FrameTime::ZERO);
+    assert!(!root.is_focus_active());
+    assert!(root.ime_state().is_none());
 }
