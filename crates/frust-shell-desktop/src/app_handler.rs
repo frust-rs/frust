@@ -1524,10 +1524,10 @@ fn mouse_button_should_dispatch(
     }
 }
 
-/// Map a winit [`WinitNamedKey`] to our editing-semantics [`NamedKey`] set,
-/// or `None` for a named key we carry no editing semantics for
-/// (function keys, media keys, etc. — those fall through to `KeyboardInput`
-/// being dropped rather than misreported as text).
+/// Map a winit [`WinitNamedKey`] to our [`NamedKey`] set (the editing keys and
+/// `F1`..`F24`), or `None` for a named key we carry no semantics for (media
+/// keys, `F25`+, etc. — those fall through to `KeyboardInput` being dropped
+/// rather than misreported as text).
 ///
 /// `Copy`/`Cut`/`Paste`/`Insert` are the dedicated hardware clipboard keys
 /// some full-size/multimedia keyboards carry (see each [`NamedKey`] variant's

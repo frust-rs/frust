@@ -158,10 +158,10 @@ pub fn mouse_button_should_dispatch(
     }
 }
 
-/// Map a winit [`WinitNamedKey`] to our editing-semantics [`NamedKey`] set, or
-/// `None` for a named key this shell carries no editing semantics for (function
-/// keys, media keys, browser keys) — those are dropped rather than misreported
-/// as text.
+/// Map a winit [`WinitNamedKey`] to our [`NamedKey`] set (the editing keys and
+/// `F1`..`F24`), or `None` for a named key this shell carries no semantics for
+/// (media keys, browser keys, `F25`+) — those are dropped rather than
+/// misreported as text.
 ///
 /// The four clipboard keys are carried like every other editing key, and the
 /// browser is where they are rarest: a page sees the dedicated `Copy`/`Cut`/

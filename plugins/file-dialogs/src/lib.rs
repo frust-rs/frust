@@ -19,9 +19,8 @@
 //! `frust::spawn_blocking` under the frust desktop shell is correct and the
 //! main thread blocks while the modal panel runs. On Windows it initialises
 //! COM per calling thread, so a worker thread is fine. On Linux the portal
-//! call blocks only the calling thread. The macOS and Windows legs are
-//! validated by the owed platform gates (e-g1, e-g2), Linux by the 2026-10-18
-//! rig run.
+//! call blocks only the calling thread. The Linux leg was exercised on
+//! 2026-10-18; the macOS and Windows legs have not been run on this plugin yet.
 //!
 //! # Cancellation and failure
 //!

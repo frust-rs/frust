@@ -65,6 +65,8 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         self.shortcuts.publish();
 
         self.resolve_session_surface(main_tree_ime, holder, holder_ime);
+        // A modal registered by this paint ends a main-tree session now, not at the next event.
+        self.trap_modal_focus();
 
         // Last, so a field painted inside a floated pod is resolved like any other.
         self.resolve_selection_toolbar(toolbar_pass.take());
