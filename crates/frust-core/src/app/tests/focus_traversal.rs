@@ -69,6 +69,9 @@ impl Widget for Leaf {
         match event {
             InputEvent::Key(key) => {
                 self.log.borrow_mut().keys.push(self.name);
+                if key.key == Key::Named(NamedKey::Escape) {
+                    ctx.release_focus();
+                }
                 let tab = key.key == Key::Named(NamedKey::Tab);
                 if tab && self.spec.eats_tab {
                     EventResult::Handled
@@ -86,6 +89,10 @@ impl Widget for Leaf {
                 }
             }
             InputEvent::Pointer(p) if p.phase == PointerPhase::Down => {
+                ctx.request_focus();
+                EventResult::Handled
+            }
+            InputEvent::Scroll { .. } => {
                 ctx.request_focus();
                 EventResult::Handled
             }
@@ -516,7 +523,7 @@ fn the_old_session_is_released_before_the_grant_claims_a_fresh_one() {
     assert!(h.root.ime_state().is_some(), "a publishes while focused");
     let (epoch, generation) = (h.root.focus_epoch(), h.root.focus_ime_generation());
 
-    h.root.event(&mut (), &tab_key(false));
+    assert!(h.root.event(&mut (), &tab_key(false)).handled);
     assert!(h.root.is_focus_active());
     assert_eq!(
         h.root.ime_state(),
@@ -536,6 +543,93 @@ fn pair(log: &Shared) -> Column {
         vec![leaf("a", FOCUSABLE, log), leaf("b", FOCUSABLE, log)],
         log,
     )
+}
+
+#[test]
+fn a_focusable_root_widget_is_the_first_stop() {
+    let mut h = Harness::new(|log| Column {
+        focusable: true,
+        ..pair(log)
+    });
+    let mut order = Vec::new();
+    for _ in 0..4 {
+        assert!(h.tab().handled);
+        order.push(h.focused().unwrap());
+    }
+    assert_eq!(order, ["root", "a", "b", "root"]);
+}
+
+/// `a`, then `x` inside a column that drops every grant.
+fn deaf_tail(log: &Shared) -> Column {
+    let mut deaf = column("deaf", vec![leaf("x", FOCUSABLE, log)], log);
+    deaf.deaf = true;
+    let children = vec![leaf("a", FOCUSABLE, log), ChildPod::new(Box::new(deaf))];
+    column("root", children, log)
+}
+
+#[test]
+fn a_walk_where_no_grant_lands_keeps_the_session_and_declines_the_key() {
+    let mut h = Harness::new(deaf_tail);
+    assert!(h.tab().handled);
+    assert_eq!(h.focused(), Some("a"));
+    let (epoch, generation) = (h.root.focus_epoch(), h.root.focus_ime_generation());
+
+    assert!(!h.tab().handled);
+    assert!(h.root.is_focus_active());
+    assert_eq!(h.root.focus_epoch(), epoch);
+    assert_eq!(h.root.focus_ime_generation(), generation);
+    assert_eq!(h.focused(), Some("a"));
+    assert_eq!(h.ringed(), ["a"]);
+
+    let mut h = Harness::new(|log| {
+        let mut deaf = column("deaf", vec![leaf("x", FOCUSABLE, log)], log);
+        deaf.deaf = true;
+        column("root", vec![ChildPod::new(Box::new(deaf))], log)
+    });
+    assert!(!h.tab().handled);
+    assert!(!h.root.is_focus_active());
+}
+
+#[test]
+fn a_claim_outside_traversal_or_a_release_drops_the_keyboard_flag() {
+    let mut h = Harness::new(pair);
+    h.tab();
+    assert_eq!(h.ringed(), ["a"]);
+    let scroll = InputEvent::Scroll {
+        position: Point::new(5.0, 25.0),
+        delta: ScrollDelta::Lines(0.0, 1.0),
+    };
+    h.send(&scroll);
+    assert_eq!(h.focused(), Some("b"));
+    assert!(
+        h.ringed().is_empty(),
+        "a claim with no `Down` shows no ring"
+    );
+
+    h.tab();
+    assert_eq!(h.ringed(), ["a"]);
+    let escape = InputEvent::Key(KeyEvent {
+        key: Key::Named(NamedKey::Escape),
+        modifiers: Modifiers::default(),
+        repeat: false,
+    });
+    h.send(&escape);
+    assert!(!h.root.is_focus_active());
+    assert!(!h.root.focus_ring_visible(), "the release cleared it");
+}
+
+#[test]
+fn with_tab_traversal_off_a_declined_tab_stays_unhandled() {
+    let mut h = Harness::new(pair);
+    assert!(h.root.tab_traversal());
+    h.root.set_tab_traversal(false);
+    assert!(!h.tab().handled);
+    assert!(!h.shift_tab().handled);
+    assert_eq!(h.focused(), None);
+
+    h.root.set_tab_traversal(true);
+    assert!(h.tab().handled);
+    assert_eq!(h.focused(), Some("a"));
 }
 
 #[test]

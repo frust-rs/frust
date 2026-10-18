@@ -85,9 +85,11 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     key_forward: Option<(OverlayKey, u64)>,
     /// The carrier id of this root's traversal grants (`widget::FocusGrant`); declared by no one.
     focus_grant: ShortcutId,
-    /// Whether traversal granted the live focus; a pointer `Down` clears it.
+    /// Whether traversal granted the live focus; any other claim, a release or a `Down` clears it.
     keyboard_focus: bool,
     focus_ring_policy: FocusRingPolicy,
+    /// Whether a declined bare Tab/Shift+Tab runs traversal ([`RenderRoot::set_tab_traversal`]).
+    tab_traversal: bool,
     hover_active: bool,
     /// Identity of the latest hover pass; a pod's hover stamp counts only while it equals this.
     hover_epoch: u64,
@@ -172,6 +174,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             focus_grant: ShortcutId::next(),
             keyboard_focus: false,
             focus_ring_policy: FocusRingPolicy::KeyboardOnly,
+            tab_traversal: true,
             hover_active: false,
             hover_epoch: 1,
             root_identity: NEXT_ROOT_IDENTITY.fetch_add(1, Ordering::Relaxed),
