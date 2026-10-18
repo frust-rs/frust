@@ -3,21 +3,24 @@
 //!
 //! # What is bound
 //!
-//! | Chord   | Scope                | Effect                                   |
-//! |---------|----------------------|------------------------------------------|
-//! | `Mod+K` | [`ShortcutScope::AppGlobal`] | opens the command palette        |
-//! | `Mod+B` | [`ShortcutScope::Local`]     | toggles the side pane            |
-//! | `1`/`2`/`3` | [`ShortcutScope::Local`] | selects tab one, two or three   |
+//! | Chord       | Scope                        | Effect                                 |
+//! |-------------|------------------------------|----------------------------------------|
+//! | `Mod+K`     | [`ShortcutScope::AppGlobal`] | opens the command palette              |
+//! | `?`         | [`ShortcutScope::AppGlobal`] | opens the command palette too          |
+//! | `Mod+B`     | [`ShortcutScope::Local`]     | toggles the side pane                  |
+//! | `F2`        | [`ShortcutScope::Local`]     | toggles the `One*` rename of tab one   |
+//! | `1`/`2`/`3` | [`ShortcutScope::Local`]     | selects tab one, two or three          |
 //!
-//! `Mod` is Command on macOS/iOS and Ctrl elsewhere. Function keys are not in
-//! the key vocabulary, so the pane toggle is `Mod+B`.
+//! `Mod` is Command on macOS/iOS and Ctrl elsewhere. `Mod+B` stays the pane
+//! toggle, chosen before function keys existed; `F2` is the page's function-key
+//! chord. `?` is a symbol key, so Shift does not change whether it matches.
 //!
 //! # The palette
 //!
 //! An [`overlay_portal`] anchored to the page header, mounted while
 //! [`ShortcutsState::palette_open`] is set, with [`OverlayKeys::Modal`]: while
 //! it is open the page's chords are masked, and `Escape` closes it through
-//! [`on_escape`](frust::OverlayPortalView::on_escape) even when nothing inside
+//! [`on_escape`](frust::OverlayPortalView::on_escape) whether or not the filter
 //! is focused. It holds a text input (the filter) and a list of the live
 //! shortcut hints, each labelled with [`Chord::display`]. The hints come from
 //! `BuildCtx::shortcut_hints()` — the *previous* frame's declarations in paint
@@ -30,10 +33,13 @@
 //! the first run of Tab stops on the page, so Tab / Shift+Tab walk it (the
 //! baseline controls paint no focus cue; the field's border is the visible
 //! stop). A focused text input consumes typed text, declines Tab and every
-//! chord it does not decode (so `Mod+K` and `Mod+B` still fire while it has
-//! focus), and consumes Escape to blur itself. Bare `1`/`2`/`3` and typed text
-//! reach the registry only when no focused widget takes them. The readout line
-//! names the last consumer; `tests/shortcuts.rs` pins the whole matrix.
+//! chord it does not decode (so `Mod+K`, `Mod+B` and `F2` still fire while it
+//! has focus). A bare Escape blurs it and is declined, so an open palette closes
+//! on the first press even with its filter focused. Bare `1`/`2`/`3`, `?` and
+//! typed text reach the registry only when no focused widget takes them. A press
+//! on a baseline control keeps keyboard focus on it, so Tab continues from
+//! there. The readout line names the last consumer; `tests/shortcuts.rs` pins
+//! the whole matrix.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -69,6 +75,8 @@ pub struct ShortcutsState {
     pub pane_open: RwSignal<bool>,
     /// The selected tab index (into [`TAB_LABELS`]).
     pub tab: RwSignal<usize>,
+    /// Whether F2 has marked tab one as renamed (`One*`).
+    pub renamed: RwSignal<bool>,
     /// The last consumer of a key, as a short human-readable line.
     pub last_consumer: RwSignal<String>,
     /// How many times the focusable `Button` was activated.
@@ -91,6 +99,7 @@ impl ShortcutsState {
             query: RwSignal::new(String::new()),
             pane_open: RwSignal::new(false),
             tab: RwSignal::new(0),
+            renamed: RwSignal::new(false),
             last_consumer: RwSignal::new(String::from("none yet")),
             presses: RwSignal::new(0),
             checked: RwSignal::new(false),
@@ -181,6 +190,16 @@ fn theme() -> Theme {
 /// Record `who` as the last consumer.
 fn consumed(state: &PlaygroundState, who: impl Into<String>) {
     state.shortcuts.last_consumer.set(who.into());
+}
+
+/// The name tab `tab` shows: tab one reads `One*` while F2 has renamed it.
+fn tab_name(renamed: bool, tab: usize) -> String {
+    let base = TAB_LABELS[tab.min(2)];
+    if tab == 0 && renamed {
+        format!("{base}*")
+    } else {
+        base.to_string()
+    }
 }
 
 /// The hints whose label or chord contains `query` (case-insensitive).
@@ -317,9 +336,10 @@ fn control_row(sc: ShortcutsState) -> impl View<PlaygroundState> + use<> {
 /// The three tab selector buttons plus the selected tab's body.
 fn tab_area(sc: ShortcutsState) -> impl View<PlaygroundState> + use<> {
     let selected = sc.tab.get();
+    let renamed = sc.renamed.get();
     let tab_button = move |tab: usize| {
         button(
-            format!("{} ({})", TAB_LABELS[tab], tab + 1),
+            format!("{} ({})", tab_name(renamed, tab), tab + 1),
             move |state: &mut PlaygroundState| {
                 sc.tab.set(tab);
                 consumed(state, format!("Button: tab {}", tab + 1));
@@ -342,7 +362,7 @@ fn tab_area(sc: ShortcutsState) -> impl View<PlaygroundState> + use<> {
                 .child(tab_button(2)),
         )
         .child(SizedBox(None, Some(8.0)))
-        .child(text(format!("Tab body: {}", TAB_LABELS[selected.min(2)])).size(12.0))
+        .child(text(format!("Tab body: {}", tab_name(renamed, selected))).size(12.0))
 }
 
 /// The side pane shown while `pane_open` is set.
@@ -366,8 +386,9 @@ fn body(sc: ShortcutsState) -> impl View<PlaygroundState> + use<> {
     let main = column()
         .child(
             text(
-                "Mod+K opens the palette (Escape closes it); Mod+B toggles the side pane; \
-                 1 / 2 / 3 select a tab; Tab / Shift+Tab walk the controls below.",
+                "Mod+K or ? opens the palette (Escape closes it); Mod+B toggles the side \
+                 pane; F2 renames tab one; 1 / 2 / 3 select a tab; Tab / Shift+Tab walk \
+                 the controls below.",
             )
             .size(11.0)
             .color(muted()),
@@ -421,6 +442,14 @@ pub fn page(state: &PlaygroundState) -> impl View<PlaygroundState> {
                 consumed(state, "Mod+K: palette opened");
             },
         )
+        .global(
+            "?",
+            "Open palette with ?",
+            move |state: &mut PlaygroundState| {
+                sc.palette_open.set(true);
+                consumed(state, "?: palette opened");
+            },
+        )
         .on(
             "Mod+B",
             "Toggle side pane",
@@ -443,6 +472,14 @@ pub fn page(state: &PlaygroundState) -> impl View<PlaygroundState> {
             move |state: &mut PlaygroundState| {
                 sc.tab.set(2);
                 consumed(state, "3: tab three");
+            },
+        )
+        .on(
+            "F2",
+            "Toggle tab one rename",
+            move |state: &mut PlaygroundState| {
+                sc.renamed.update(|on| *on = !*on);
+                consumed(state, "F2: tab one rename toggled");
             },
         )
     })

@@ -155,20 +155,23 @@ The sections, in order:
     The Scroll page also carries the opt-in baseline scrollbar (default and
     `Always` variants).
 18. **Shortcuts** — the keyboard-shortcut registry, modal key scoping and Tab
-    traversal. An app-global `Mod+K` opens a command palette (a modal
-    `overlay_portal` with a filter input over the live shortcut hints, each
-    labelled with `Chord::display`; `Escape` closes it); a local `Mod+B` toggles
-    a side pane; local `1`/`2`/`3` select one of three tabs (`Mod` is ⌘ on
-    macOS/iOS, Ctrl elsewhere; function keys are not in the key vocabulary).
+    traversal. An app-global `Mod+K` (and `?`, a symbol key whose Shift state
+    is ignored) opens a command palette (a modal `overlay_portal` with a filter
+    input over the live shortcut hints, each labelled with `Chord::display`;
+    the first `Escape` closes it, even with the filter focused); a local
+    `Mod+B` toggles a side pane; a local `F2` marks tab one `One*`; local
+    `1`/`2`/`3` select one of three tabs (`Mod` is ⌘ on macOS/iOS, Ctrl
+    elsewhere).
     A row of focusable baseline controls (Button, Checkbox, Radio, Slider,
-    TextInput) takes Tab / Shift+Tab with the focus ring, and a readout line
-    names the last consumer of a key. `tests/shortcuts.rs` pins the precedence
-    matrix (input focused or not, palette open or closed, against Mod+K, Mod+B,
-    `1`, Escape, Tab and a typed letter). A focused text input declines the
-    chords it does not decode, so `Mod+K` and `Mod+B` still reach the registry
-    while one has focus; an open palette masks them, filter focused or not, and
-    the palette's focused filter takes the first `Escape` (blur) before the
-    modal's close hook.
+    TextInput) takes Tab / Shift+Tab with the focus ring, a press on one keeps
+    keyboard focus on it, and a readout line names the last consumer of a key.
+    `tests/shortcuts.rs` pins the precedence matrix (input focused or not,
+    palette open or closed, against Mod+K, Mod+B, `1`, Escape, Tab and a typed
+    letter), plus the F2 and `?` rows. A focused text input declines the chords
+    it does not decode, so `Mod+K`, `Mod+B` and `F2` still reach the registry
+    while one has focus, and it types `?` as text; an open palette masks them,
+    filter focused or not. A bare Escape blurs a focused filter and is declined,
+    so the modal's close hook takes the same press.
 
 The Terminal fixtures live in [`fixtures/terminal/`](fixtures/terminal/README.md)
 (bytes + the deterministic generator that produced them, embedded with
@@ -236,9 +239,9 @@ trackpad, or touchscreen. Rows marked OWED have not been run:
 | Scroll: scrollbar fade-out, thumb drag, track click, `Always` variant | Linux (conductor, linux-native rig) | PASSED 2026-10-18 (bar visible during an animated move and gone after the delay; thumb drag and track paging on the `Always` box; hover widens 6 → 10 px; wheel scrolling was not exercised — the rig's synthetic wheel events never reach the window) |
 | Desktop + Scroll scrollbar: dialogs, window-state restore, min size, scrollbar | macOS (e-g1) | OWED |
 | Desktop + Scroll scrollbar: dialogs, window-state restore + off-screen clamp, min size, scrollbar | Windows (e-g2) | OWED |
-| Shortcuts: Mod+K palette (Escape closes), Mod+B pane, 1/2/3 tabs, Tab / Shift+Tab ring over the control row | Linux (conductor, linux-native rig via xdotool) | PASSED 2026-10-18 (linux-native rig via xdotool: Ctrl+K opens the modal palette listing the live hints with Chord::display labels and Escape closes it; Ctrl+B toggles the pane; 1/2/3 select tabs; Tab/Shift+Tab move focus across the row — observed through where typed keys land and Enter activating the next stop; with the field focused Ctrl+K and Ctrl+B still fire after the text input learned to decline undecoded chords. Not visible: the baseline controls paint no keyboard-focus ring, so the Tab ring can only be seen on the text field's border) |
-| Shortcuts: the same chords with ⌘ in place of Ctrl, ⌘K / ⌘B hint labels | macOS (e-g1) | OWED |
-| Shortcuts: the same chords with Ctrl, Tab ring | Windows (e-g2) | OWED |
+| Shortcuts: Mod+K palette (Escape closes), Mod+B pane, 1/2/3 tabs, Tab / Shift+Tab ring over the control row | Linux (conductor, linux-native rig via xdotool) | PASSED 2026-10-18 (linux-native rig via xdotool: Ctrl+K opens the modal palette listing the live hints with Chord::display labels and Escape closes it; Ctrl+B toggles the pane; 1/2/3 select tabs; Tab/Shift+Tab move focus across the row — observed through where typed keys land and Enter activating the next stop; with the field focused Ctrl+K and Ctrl+B still fire after the text input learned to decline undecoded chords. Not visible: the baseline controls paint no keyboard-focus ring, so the Tab ring can only be seen on the text field's border; the F2, `?`, single-Escape and press-focus legs were added to the playground after this run and are to be re-run by the conductor) |
+| Shortcuts: the same chords with ⌘ in place of Ctrl, ⌘K / ⌘B hint labels, plus F2, `?`, single Escape with the filter focused, and press focus | macOS (e-g1) | OWED |
+| Shortcuts: the same chords with Ctrl, Tab ring, plus F2, `?`, single Escape with the filter focused, and press focus | Windows (e-g2) | OWED |
 | Drag: desktop pointer drag (kanban card between columns, edge auto-scroll, highlight) | Linux desktop (X11, NVIDIA T400), 2026-10-06 | PASS (card lands in Doing/Done incl. a drag with a vertical leg; ghost, source dim, column highlight; edge auto-scroll not exercisable — the demo columns never overflow) |
 | Drag: Escape cancels a live pointer drag | Linux desktop (X11, NVIDIA T400), 2026-10-06 | PASS (ghost + highlight clear with the button still held) |
 | Drag: keyboard reorder (lift/cycle/drop) on the reorderable list | Linux desktop (X11, NVIDIA T400), 2026-10-06 | PASS (Enter / ArrowDown ×4 / Enter → "Last move: 0 → 2") |
