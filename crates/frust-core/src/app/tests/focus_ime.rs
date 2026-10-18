@@ -834,3 +834,91 @@ fn outside_tap_blur_still_clears_the_surface() {
     assert!(!root.is_focus_active());
     assert!(root.ime_state().is_none());
 }
+
+/// A field whose first `Down` publishes the surface and later ones claim focus and publish nothing.
+struct ReclaimField {
+    downs: u32,
+}
+
+impl crate::widget::Widget for ReclaimField {
+    fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        bc.constrain(Size::new(100.0, 20.0))
+    }
+    fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        match event {
+            InputEvent::Pointer(p) if p.phase == PointerPhase::Down => {
+                ctx.request_focus();
+                if self.downs == 0 {
+                    ctx.publish_ime_state(SessionField::surface(SHARED_FIELD_TEXT));
+                }
+                self.downs += 1;
+                EventResult::Handled
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+}
+
+/// A root holding one [`ReclaimField`] pod.
+struct ReclaimRoot {
+    pod: crate::widget::ChildPod,
+}
+
+impl crate::widget::Widget for ReclaimRoot {
+    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        self.pod.layout_child(ctx, bc);
+        self.pod.set_origin(Point::new(0.0, 0.0));
+        bc.max()
+    }
+    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        self.pod.paint_child(ctx, scene);
+    }
+    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        self.pod.event_child(ctx, event)
+    }
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        self.pod.semantics_child(ctx);
+    }
+}
+
+struct ReclaimView;
+
+impl View<ClickState> for ReclaimView {
+    type Element = ReclaimRoot;
+    fn build(&self, _ctx: &mut BuildCtx<'_>) -> ReclaimRoot {
+        ReclaimRoot {
+            pod: crate::widget::ChildPod::new(Box::new(ReclaimField { downs: 0 })),
+        }
+    }
+    fn rebuild(
+        &self,
+        _prev: &Self,
+        _element: &mut ReclaimRoot,
+        _ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        ChangeFlags::NONE
+    }
+}
+
+#[test]
+fn a_reclaim_from_the_live_chain_keeps_the_surface() {
+    let mut root: RenderRoot<ClickState, ReclaimView> = RenderRoot::new();
+    let mut state = ClickState::default();
+    root.rebuild(&mut |_| ReclaimView, &mut state);
+    root.layout(Size::new(200.0, 200.0));
+    root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+    let surface = root.ime_state();
+    assert!(surface.is_some(), "the first press opened the surface");
+    let edge = root.focus_ime_generation();
+
+    // The pod already holds the live link: the publish-nothing re-claim keeps everything.
+    root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+    assert!(root.is_focus_active());
+    assert_eq!(
+        root.ime_state(),
+        surface,
+        "a live re-claim keeps the surface"
+    );
+    assert_eq!(root.focus_ime_generation(), edge, "and fires no IME edge");
+}

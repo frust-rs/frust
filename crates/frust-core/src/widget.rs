@@ -1412,6 +1412,9 @@ thread_local! {
     /// The inspect id of the pod that recorded this dispatch's hover claim.
     static HOVER_CLAIMANT: Cell<Option<u64>> = const { Cell::new(None) };
 
+    /// Whether the first pod to record this dispatch's focus claim already held a live link.
+    static FOCUS_REQ_FROM_LIVE: Cell<Option<bool>> = const { Cell::new(None) };
+
     /// The thread's focus session as `(root, live epoch, claim epoch)`; the
     /// claim epoch is a dispatch's candidate session. `(0, 0, 0)` until a root
     /// publishes, which a real root never does.
@@ -1485,6 +1488,16 @@ pub(crate) fn clear_hover_claimant() {
 /// Take the inspect id of the pod that recorded the last hover claim.
 pub(crate) fn take_hover_claimant() -> Option<u64> {
     HOVER_CLAIMANT.with(Cell::take)
+}
+
+/// Forget the recorded claimant liveness (called before a dispatch).
+pub(crate) fn clear_focus_req_from_live() {
+    FOCUS_REQ_FROM_LIVE.with(|c| c.set(None));
+}
+
+/// Take whether the claim's first pod already held a live link (`None`: no pod claimed).
+pub(crate) fn take_focus_req_from_live() -> Option<bool> {
+    FOCUS_REQ_FROM_LIVE.with(Cell::take)
 }
 
 impl ChildPod {
@@ -2048,6 +2061,11 @@ impl ChildPod {
             self.set_focused(false);
         }
         if focus_req {
+            // Bottom-up: the first pod here is the claimant's own.
+            if FOCUS_REQ_FROM_LIVE.with(Cell::get).is_none() {
+                let live = self.holds_live_focus();
+                FOCUS_REQ_FROM_LIVE.with(|c| c.set(Some(live)));
+            }
             self.set_focused(true);
         }
         ctx.absorb_child(fold);
