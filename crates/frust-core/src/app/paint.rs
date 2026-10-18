@@ -62,7 +62,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         drop(entries);
         // After the pods, so their (stamped) declarations are in the snapshot too.
         self.shortcuts = ShortcutTable::new(shortcut_pass.take());
-        self.shortcuts.publish();
+        self.last_hints = self.shortcuts.publish();
 
         self.resolve_session_surface(main_tree_ime, holder, holder_ime);
         // A modal registered by this paint ends a main-tree session now, not at the next event.
@@ -127,10 +127,11 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         let paint_serial = self.paint_serial;
         let focus_ring = self.focus_ring_visible();
         let retained_ledger = &self.retained_ledger;
+        let hints = Rc::clone(&self.last_hints);
         let Some(pod) = self.tree.pod_mut(root_id) else {
             return (PaintOutcome::default(), None);
         };
-        let mut ctx = PaintCtx::new(pod.origin(), pod.size());
+        let mut ctx = PaintCtx::new(pod.origin(), pod.size()).with_shortcut_hints(hints);
         // The pass's global inputs (clock, theme, insets, frame count, translucency, retain).
         ctx.set_frame_time(frame_time);
         ctx.set_theme(theme);
@@ -205,7 +206,8 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         let mut contested = false;
 
         for entry in entries {
-            let mut ctx = PaintCtx::new(entry.window_rect.origin(), entry.window_rect.size());
+            let mut ctx = PaintCtx::new(entry.window_rect.origin(), entry.window_rect.size())
+                .with_shortcut_hints(Rc::clone(&self.last_hints));
             ctx.set_frame_time(frame_time);
             ctx.set_theme(theme);
             ctx.set_window_insets(entry.insets);

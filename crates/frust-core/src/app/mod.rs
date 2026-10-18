@@ -20,7 +20,7 @@ mod tests;
 use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::num::NonZeroU64;
-use std::rc::Weak;
+use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use kurbo::{Rect, Size};
@@ -130,6 +130,8 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     overlay_hits: Vec<OverlayHit>,
     /// The shortcut declarations the last paint made, matched against unhandled keys.
     shortcuts: ShortcutTable,
+    /// `shortcuts` as the snapshot this root's build and paint contexts hand out.
+    last_hints: Rc<[ShortcutHint]>,
     /// The focused field's selection-toolbar request from the last paint; a release clears it.
     selection_toolbar: Option<SelectionToolbarRequest>,
     /// Bumped on every actual change of `selection_toolbar`, a clear included.
@@ -197,6 +199,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             painted_animating: false,
             overlay_hits: Vec::new(),
             shortcuts: ShortcutTable::default(),
+            last_hints: Rc::from(Vec::new()),
             selection_toolbar: None,
             selection_toolbar_gen: 0,
             layout_epoch: 1,
@@ -214,8 +217,15 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     }
 
     /// The last paint's shortcut declarations `filter` keeps, in paint order: a palette's list.
-    pub fn shortcut_hints(&self, filter: impl FnMut(&ShortcutHint) -> bool) -> Vec<ShortcutHint> {
-        self.shortcuts.hints(filter)
+    pub fn shortcut_hints(
+        &self,
+        mut filter: impl FnMut(&ShortcutHint) -> bool,
+    ) -> Vec<ShortcutHint> {
+        self.last_hints
+            .iter()
+            .filter(|hint| filter(hint))
+            .cloned()
+            .collect()
     }
 }
 

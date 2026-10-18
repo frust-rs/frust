@@ -12,8 +12,13 @@
 //! a tier. While a modal pod is registered only that pod's tier is tried. Each candidate gets an [`InputEvent::Shortcut`](crate::event::InputEvent::Shortcut)
 //! broadcast (wrapped in an overlay event for a stamped one); the declarer answers `Handled`, and
 //! an unanswered delivery falls through to the next candidate.
+//!
+//! The thread-locals below are single-threaded RAII brackets, each scoped to one root's pass at a
+//! time and safe to re-enter: `SHORTCUT_TABLE` collects a paint pass's declarations and
+//! `SHORTCUT_PASS_OPEN` guards it; `CURRENT_OVERLAY` stamps those made while a pod paints;
+//! `SHORTCUT_HANDLED` and `KEY_FORWARD`/`KEY_FORWARD_OPEN` bracket one key dispatch.
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::fmt;
 use std::rc::Rc;
 
@@ -39,14 +44,6 @@ thread_local! {
     static KEY_FORWARD: Cell<Option<OverlayKey>> = const { Cell::new(None) };
 
     static KEY_FORWARD_OPEN: Cell<bool> = const { Cell::new(false) };
-
-    /// The last paint's hints, replaced every paint (one root per thread, like the rest here).
-    static LAST_HINTS: RefCell<Rc<[ShortcutHint]>> = RefCell::new(Rc::from(Vec::new()));
-}
-
-/// The previous paint's declarations in paint order, masked or unreachable ones included.
-pub(crate) fn last_hints() -> Rc<[ShortcutHint]> {
-    LAST_HINTS.with(|hints| Rc::clone(&hints.borrow()))
 }
 
 /// Whether `Mod` means Command (Apple targets) or Ctrl (everything else, `wasm32` included).
@@ -122,18 +119,24 @@ impl fmt::Display for ChordParseError {
 impl std::error::Error for ChordParseError {}
 
 impl Chord {
-    /// A chord from its parts; a character key is lowercased so it matches either case.
+    /// A chord from its parts; a character key is lowercased so it matches either case, and a
+    /// Shift-insensitive symbol key (see [`Chord::matches`]) drops `mods.shift`.
     pub fn new(key: Key, mods: Modifiers) -> Self {
         let key = match key {
             Key::Character(text) => Key::Character(text.to_lowercase()),
             named => named,
         };
+        let mut mods = mods;
+        if shift_insensitive(&key) {
+            mods.shift = false;
+        }
         Chord { key, mods }
     }
 
     /// Parse `"Mod+K"`, `"Shift+Tab"`, `"Ctrl+Shift+P"`, `"1"`, `"F2"`: `+`-separated, case-insensitive
     /// modifiers then one key. `Mod` is Command on macOS/iOS and Ctrl elsewhere, chosen at compile
-    /// time, so a web build running on a Mac maps it to Ctrl.
+    /// time, so a web build running on a Mac maps it to Ctrl. A symbol key (`+`, `?`, `!`) ignores
+    /// Shift, so `"Shift+?"` parses as `"?"`; spell `Shift+1` as `!`.
     pub fn parse(spec: &str) -> Result<Chord, ChordParseError> {
         let spec = spec.trim();
         if spec.is_empty() {
@@ -166,9 +169,15 @@ impl Chord {
     }
 
     /// Whether `event` presses this chord: the same key (characters case-insensitively) and
-    /// exactly the same modifiers. An auto-repeat matches like a fresh press.
+    /// exactly the same modifiers. A symbol key (a character that is neither alphanumeric nor
+    /// whitespace) ignores `event.modifiers.shift`, because shells report Shift for the keys
+    /// that need it; ctrl, alt and meta still compare. An auto-repeat matches like a fresh press.
     pub fn matches(&self, event: &KeyEvent) -> bool {
-        if event.modifiers != self.mods {
+        let mut held = event.modifiers;
+        if shift_insensitive(&self.key) {
+            held.shift = false;
+        }
+        if held != self.mods {
             return false;
         }
         match (&self.key, &event.key) {
@@ -200,6 +209,19 @@ impl Chord {
         let mut parts: Vec<&str> = held.iter().filter(|(on, _)| *on).map(|(_, n)| *n).collect();
         parts.push(&key);
         parts.join(if apple { "" } else { "+" })
+    }
+}
+
+/// Whether `key` is a symbol character whose Shift state a chord ignores.
+fn shift_insensitive(key: &Key) -> bool {
+    match key {
+        Key::Character(text) => {
+            !text.is_empty()
+                && text
+                    .chars()
+                    .all(|c| !c.is_alphanumeric() && !c.is_whitespace())
+        }
+        Key::Named(_) => false,
     }
 }
 
@@ -422,10 +444,9 @@ impl ShortcutTable {
         hints.filter(|hint| filter(hint)).collect()
     }
 
-    /// Make this table's hints the thread's snapshot that `last_hints` returns.
-    pub(crate) fn publish(&self) {
-        let snapshot: Rc<[ShortcutHint]> = self.hints(|_| true).into();
-        LAST_HINTS.with(|hints| *hints.borrow_mut() = snapshot);
+    /// Every declaration as a shared snapshot, which the owning root hands to its contexts.
+    pub(crate) fn publish(&self) -> Rc<[ShortcutHint]> {
+        self.hints(|_| true).into()
     }
 
     /// The declarations `event` presses, as `(id, overlay stamp)` in delivery order: the
@@ -615,7 +636,7 @@ mod tests {
     }
 
     #[test]
-    fn publish_replaces_the_thread_snapshot_each_time() {
+    fn publish_snapshots_the_table_as_one_shared_rc() {
         let table = ShortcutTable::new(vec![
             ShortcutEntry {
                 decl: decl("Mod+K", ShortcutScope::AppGlobal),
@@ -626,14 +647,40 @@ mod tests {
                 overlay: Some(OverlayKey::next()),
             },
         ]);
-        table.publish();
-        let first = last_hints();
+        let first = table.publish();
         let labels: Vec<_> = first.iter().map(|h| h.label.as_str()).collect();
         assert_eq!(labels, ["Mod+K", "Esc"]);
-        assert!(Rc::ptr_eq(&first, &last_hints()), "reads share one Rc");
-        ShortcutTable::default().publish();
-        assert!(last_hints().is_empty());
+        assert!(ShortcutTable::default().publish().is_empty());
         assert_eq!(first.len(), 2, "a held snapshot is unaffected");
+    }
+
+    #[test]
+    fn symbol_chords_ignore_shift_and_the_rest_stay_exact() {
+        let (ctrl, shift) = (
+            mods(false, true, false, false),
+            mods(true, false, false, false),
+        );
+        let both = mods(true, true, false, false);
+        let plus = Chord::parse("Ctrl++").unwrap();
+        assert!(plus.matches(&press(character("+"), both)));
+        assert!(plus.matches(&press(character("+"), ctrl)));
+        assert!(
+            !plus.matches(&press(character("+"), shift)),
+            "ctrl still counts"
+        );
+        let query = Chord::parse("?").unwrap();
+        assert!(query.matches(&press(character("?"), shift)));
+        assert!(query.matches(&press(character("?"), Modifiers::default())));
+        assert_eq!(Chord::parse("Shift+?").unwrap(), query);
+        assert_eq!(query.display_for(false), "?");
+        let space = Chord::parse("Shift+Space").unwrap();
+        assert!(!space.matches(&press(character(" "), Modifiers::default())));
+        assert!(space.matches(&press(character(" "), shift)));
+        let digit = Chord::parse("1").unwrap();
+        assert!(!digit.matches(&press(character("1"), shift)));
+        let palette = Chord::parse("Ctrl+Shift+P").unwrap();
+        assert!(!palette.matches(&press(character("p"), ctrl)));
+        assert!(palette.matches(&press(character("P"), both)));
     }
 
     #[test]

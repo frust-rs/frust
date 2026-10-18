@@ -1,6 +1,8 @@
 //! The rebuild pass on [`RenderRoot`] — build closure, view diff, deferred-callback flush and
 //! unmount drains — plus the shell-facing drains and tree inspection that read its results.
 
+use std::rc::Rc;
+
 use kurbo::Rect;
 
 use super::{MAX_PENDING_RESULT_FLUSH_PASSES, RenderRoot};
@@ -137,7 +139,8 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         match (self.root_id, self.prev_view.take()) {
             // Reconcile against the previous view of the same type.
             (Some(root_id), Some(prev)) => {
-                let mut ctx = BuildCtx::new(&mut self.next_id);
+                let mut ctx = BuildCtx::new(&mut self.next_id)
+                    .with_shortcut_hints(Rc::clone(&self.last_hints));
                 ctx.set_has_focus(session_live);
                 let flags = {
                     let pod = self
@@ -158,7 +161,8 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             }
             // First build: materialise the widget and insert it as the root.
             _ => {
-                let mut ctx = BuildCtx::new(&mut self.next_id);
+                let mut ctx = BuildCtx::new(&mut self.next_id)
+                    .with_shortcut_hints(Rc::clone(&self.last_hints));
                 // Moot on a first build, but the root always seeds the chain.
                 ctx.set_has_focus(session_live);
                 let id = ctx.alloc_id();
