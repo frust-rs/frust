@@ -3324,13 +3324,12 @@ the cursor API (merged 2026-08-17, `49bc7657`) listed this among its limitations
 whole app — owner-hosted, root-painted after the main tree, root-routed ahead of it — and the v1
 seam declines six things, each named in its own source:
 
-1. **No focus trap.** A modal pod (`OverlayKeys::Modal`, or a consuming outside tap) masks
-   main-tree shortcuts and confines Tab traversal to itself, but focus is neither trapped nor
-   restored: a main-tree widget that held focus when the pod opened keeps it and still sees every
-   key first, nothing returns focus to the opener on dismiss, and the pod's first focusable is not
-   auto-focused (`overlay-no-auto-focus-on-appear`). Traversal also never stops in a Transparent
-   pod, a non-Current navigator page, an unselected `IndexedStack` child, or a non-modal floated pod
-   (`OverlaySlot` does not visit its pod for traversal).
+1. **No focus restore.** A modal pod (`OverlayKeys::Modal`, or a consuming outside tap) masks
+   main-tree shortcuts, confines Tab traversal to itself, and ends a main-tree focus session on the
+   paint that registers it, but nothing returns focus to the opener on dismiss and the pod's first
+   focusable is not auto-focused (`overlay-no-auto-focus-on-appear`), so after the modal closes the
+   next Tab starts from the first stop. Traversal also never stops in a Transparent pod, a
+   non-Current navigator page or an unselected `IndexedStack` child.
 2. **Declined-key forwarding carries keys only, on request.** Key, IME and edit-command events
    stay focus-routed (`InputEvent::is_focus_routed`). A declined `Key` reaches a pod only when its
    owner asked for the focus session's declined keys (`EventCtx::forward_declined_keys_to`) or, for
@@ -3393,6 +3392,7 @@ per frame, and the broadcast is the only route that reaches an owner without kno
 
 **Evidence**: `crates/frust-core/src/overlay.rs`'s "Not in v1" section (focus trap, inspection,
 nesting), its declined-key paragraph and its per-pass registry contract;
+`crates/frust-core/src/app/session.rs`'s `trap_modal_focus` ("Not restored when the modal closes");
 `crates/frust-core/src/app/dispatch.rs`'s `dispatch_declined_key` and `focus_stops`; `crates/frust-widgets/src/overlay.rs`'s
 own "Not in v1" section (semantics, hover, IME); `crates/frust-core/src/event/input.rs`'s
 `InputEvent::Overlay` routing contract (the broadcast); `plugins/shadcn/src/components/tooltip.rs`,
@@ -3402,7 +3402,7 @@ titled "Riding the framework portal") against the six unported
 `plugins/material/src/tooltip.rs`'s `TooltipWidget`/`RichTooltipWidget` `semantics` methods and
 their pre-port use of `crate::overlay::anchored` (for item (4)'s regression above).
 
-**Trigger for removal**: per item — a focus trap with restore and auto-focus, forwarding for IME,
+**Trigger for removal**: per item — focus restore and auto-focus for a modal pod, forwarding for IME,
 edit commands and the missing named keys, the catalog hosts
 ported onto `OverlaySlot`, an overlay-aware semantics and inspection path, and a keyed dispatch
 that reaches an owner without a full walk.
@@ -7664,15 +7664,15 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 ### `file-dialogs-linux-runtime-deps` — Linux dialogs need a portal or `zenity` at runtime
 
-**Observed**: on Linux `rfd` asks xdg-desktop-portal's file chooser over D-Bus (libdbus is loaded at runtime, nothing links at build time) and falls back to `zenity`. With neither present, `rfd` logs an error and returns no selection: the call yields `Ok(None)` or an empty `Vec`, indistinguishable from a user cancel.
+**Observed**: on Linux `rfd` asks xdg-desktop-portal's file chooser over D-Bus (libdbus is loaded at runtime, nothing links at build time) and falls back to `zenity`. With neither present, `rfd` logs an error and returns no selection: the call yields `Ok(None)` or an empty `Vec`, indistinguishable from a user cancel. On a zenity-only desktop `rfd` splits a multi-selection on `|`, so `open_files` splits a file name containing `|` into two paths. Threading follows `rfd`: on macOS it marshals the panel to the main thread through dispatch when `NSApplication` is running (the main thread blocks while the panel runs), on Windows it initialises COM per calling thread, and on Linux the portal call blocks only the calling thread. Only the Linux leg has been exercised (2026-10-18); the macOS and Windows threading is read from `rfd`, not yet run on this plugin.
 
-**Applies to**: Linux desktops without a running xdg-desktop-portal file-chooser backend (GTK, KDE, …) and without `zenity`.
+**Applies to**: Linux desktops without a running xdg-desktop-portal file-chooser backend (GTK, KDE, …) and without `zenity`; the `|` split to zenity-only desktops; the unrun threading legs to macOS and Windows.
 
 **Why accepted**: `rfd`'s synchronous API cannot report a backend failure, and the default features (`xdg-portal`, not `gtk3`) are what keep GTK out of the build. An app that must tell the two apart has to check for a portal itself.
 
-**Trigger for removal**: `rfd` surfaces backend failures through its synchronous API, or the plugin probes for a backend before showing the dialog.
+**Trigger for removal**: `rfd` surfaces backend failures through its synchronous API, or the plugin probes for a backend before showing the dialog; for the threading legs, a macOS and Windows run of the playground's Desktop page.
 
-**Evidence**: `plugins/file-dialogs/src/lib.rs` (*Cancellation and failure*); `plugins/file-dialogs/README.md` (*Linux runtime requirements*).
+**Evidence**: `plugins/file-dialogs/src/lib.rs` (threading note, *Cancellation and failure*); `plugins/file-dialogs/README.md` (*Linux runtime requirements*, threading paragraph).
 
 ---
 
@@ -8127,51 +8127,36 @@ in every shell and is future work.
 
 ---
 
-### `shortcuts-v1-scope` — `Mod` is fixed at compile time, no function-key chords, and a focused field inside a modal takes the first Escape
+### `shortcuts-v1-scope` — `Mod` is fixed at compile time
 
-**Observed**: three edges of the keyboard-shortcut registry. (1) `Mod` resolves at compile time —
-Command on macOS/iOS, Ctrl everywhere else, `wasm32` included — so a web build running in a browser
-on a Mac binds and labels Ctrl (`Ctrl+K`, not `⌘K`). (2) No function-key chords: `NamedKey` has no
-F1-F24 and the shells drop them, so `Chord::parse("F2")` returns `ChordParseError::UnsupportedKey`.
-(3) The focus path sees every key before a modal pod's Escape, so a palette whose filter field holds
-focus spends the first Escape blurring the field and closes on the second.
+**Observed**: `Mod` resolves at compile time — Command on macOS/iOS, Ctrl everywhere else, `wasm32`
+included — so a web build running in a browser on a Mac binds and labels Ctrl (`Ctrl+K`, not `⌘K`).
 
-**Applies to**: apps binding chords through `shortcuts(..)` or `PaintCtx::register_shortcut`; (1) web
-builds on macOS only; (3) any modal overlay holding a focused text field, such as the playground's
-Shortcuts palette.
+**Applies to**: web builds running on macOS that bind chords through `shortcuts(..)` or
+`PaintCtx::register_shortcut`.
 
-**Why accepted**: (1) a runtime platform probe on web is a separate seam no caller has needed yet;
-(2) needs function keys in the shared key vocabulary and in every shell's key mapping; (3) follows
-from the chain's order — the focused widget always sees a key first, and a field's Escape-to-blur is
-its keyboard way out.
+**Why accepted**: a runtime platform probe on web is a separate seam no caller has needed yet.
 
-**Trigger for removal**: (1) a runtime `Mod` resolution on web; (2) function keys in `NamedKey`;
-(3) a modal Escape that runs ahead of the focus path.
+**Trigger for removal**: a runtime `Mod` resolution on web.
 
-**Evidence**: `crates/frust-core/src/shortcuts.rs` (`Chord::parse`, `Chord::display`);
-`crates/frust-core/src/event/key.rs` (`NamedKey`); `crates/frust-shell-desktop/src/app_handler.rs`
-(`map_named_key` drops F1); `crates/frust-core/src/app/dispatch.rs` (`dispatch_declined_key`);
-`examples/playground/src/pages/shortcuts.rs`.
+**Evidence**: `crates/frust-core/src/shortcuts.rs` (`Chord::parse`, `Chord::display`).
 
 ---
 
-### `baseline-controls-no-focus-visual` — baseline controls paint no keyboard-focus cue, and a click drops their keyboard focus
+### `baseline-controls-no-focus-visual` — baseline controls paint no keyboard-focus cue
 
 **Observed**: the baseline `Button`, `Checkbox`, `Radio` and `Slider` are Tab stops and answer the
 keyboard while focused, but none paints a ring or any other keyboard-focus cue, so tabbing across a
-row of them shows nothing moving (a focused `TextInput`'s own border is the only visible stop). They
-take focus from traversal only, never from a press, so clicking one that holds keyboard focus
-releases the session and the next Tab starts again from the first stop.
+row of them shows nothing moving (a focused `TextInput`'s own border is the only visible stop).
 
 **Applies to**: `frust_widgets`' baseline `Button`, `Checkbox`, `Radio` and `Slider`; design-system
 controls paint their own (`frust_shadcn::button` reads `PaintCtx::is_focused_for_ring`).
 
-**Why accepted**: the baseline set carries no design language to draw a ring in, and not claiming
-focus on a press keeps touch and mouse behaviour unchanged; `PaintCtx::is_focused_for_ring` is the
-hook a catalog reads today.
+**Why accepted**: the baseline set carries no design language to draw a ring in;
+`PaintCtx::is_focused_for_ring` is the hook a catalog reads today.
 
 **Trigger for removal**: a baseline keyboard-focus visual read through `is_focused_for_ring`.
 
-**Evidence**: `crates/frust-widgets/src/{button,checkbox,radio,slider}.rs` module docs ("focus
-arrives through traversal only"); the Shortcuts gate row in `examples/playground/README.md` ("the
-baseline controls paint no keyboard-focus ring").
+**Evidence**: `crates/frust-widgets/src/{button,checkbox,radio,slider}.rs` (no `is_focused_for_ring`
+read in `paint`); the Shortcuts gate row in `examples/playground/README.md` ("the baseline controls
+paint no keyboard-focus ring").

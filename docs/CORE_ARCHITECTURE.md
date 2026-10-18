@@ -287,7 +287,9 @@ widget holds focus") and `ime_state` (the last-published IME surface) — and th
 both cleared or paired into one **active** session; there is no at-rest inactive surface. A widget
 publishing an *inactive* IME surface therefore reads as a full session release, not a value update:
 one primitive clears `focus_active` and `ime_state` together, exactly like an outside-tap blur or an
-explicit `EventCtx::release_focus`.
+explicit `EventCtx::release_focus`. A pointer press that moves focus to a pod whose pass publishes
+no `ImeState` clears the surface at event time (`commit_pointer`), so tapping a button lowers the
+soft keyboard.
 
 A monotonic `focus_ime_generation` counter bumps exactly once per release (a paired clear counts as
 one edge, not two) and once per focus/IME change otherwise. `RenderRoot::focus_ime_generation()`
@@ -302,7 +304,8 @@ analog of the hover epoch below — and a `ChildPod` stamps it beside the link i
 existed. A dispatch stamps claims with a candidate one step ahead: an honoured claim commits it, a
 session that ends inside the dispatch lands one step past it (so nothing that pass stamped
 survives), a dispatch that does neither keeps the live epoch, and a release outside a dispatch (an
-orphan drain, a traversal handover) advances it once. Every older link strands by arithmetic:
+orphan drain) advances it once; a traversal grant's candidate sits two steps ahead while a session
+is live, leaving room for the release inside its pass. Every older link strands by arithmetic:
 `ChildPod::holds_live_focus` is the falsifiable read every routing decision takes, while the raw
 `is_focused` flag survives for the few things that legitimately want it (a paint-time cull
 exemption, a container's own sweep). Arithmetic rather than a sweep is what makes it work off-tree —
@@ -330,10 +333,16 @@ table is rebuilt every paint, so a declarer that stops (or unmounts) stops match
 one, and a declaration counts as a paint publication so a retained page around it re-records. One
 made while the root paints a floated pod is stamped with that pod's `OverlayKey`. `Chord::parse`
 reads `"Mod+K"`-style specs with `Mod` fixed at compile time (Command on macOS/iOS, Ctrl elsewhere,
-`wasm32` included) and refuses function keys, which `NamedKey` cannot deliver; `Chord::display`
-renders ⌘K or Ctrl+K by the same rule. `RenderRoot::shortcut_hints(filter)`,
-`BuildCtx::shortcut_hints()` and `PaintCtx::shortcut_hints()` return the *previous* paint's
-declarations in paint order, masked and unreachable ones included, for a palette or help surface.
+`wasm32` included) and accepts `F1`–`F24` (`NamedKey::F1..F24`, delivered by the desktop and web
+shells; Android and iOS have no hardware-key path); `Chord::display` renders ⌘K or Ctrl+K by the
+same rule. A symbol key — a character neither alphanumeric nor whitespace, such as `?` or `+` — is
+Shift-insensitive, since shells report Shift for the keys that need it: `Chord::new` clears Shift
+and `matches` ignores it, so `"Shift+?"` is `"?"`; letters, digits, Space and named keys compare
+exactly. `RenderRoot::shortcut_hints(filter)`, `BuildCtx::shortcut_hints()` and
+`PaintCtx::shortcut_hints()` return the *previous* paint's declarations in paint order, masked and
+unreachable ones included, for a palette or help surface. The snapshot is per root: `RenderRoot`
+owns it and seeds its build and paint contexts (a component's inner build included); a context no
+root seeded reads empty.
 
 **The declined-key chain.** A `Key` no widget on the focus path handled is offered on, each offer a
 full dispatch of its own, until one is answered:
@@ -342,7 +351,8 @@ full dispatch of its own, until one is answered:
    keys its focused editable declines reach its floated pod as `OverlayEventKind::Key` (bound to the
    session live after that pass, Interactive pods only), answered by `EventCtx::consume_overlay_key`;
 2. an Escape, to the topmost **modal** pod the same way — one that is Interactive and either
-   `OverlayKeys::Modal` or `OutsideTap::Notify { consume: true }`;
+   `OverlayKeys::Modal` or `OutsideTap::Notify { consume: true }`; a focused `TextInput` blurs on a
+   bare Escape and declines it, so this step runs on the first press;
 3. to the shortcut table in tier order — declarations stamped with the topmost Interactive pod, then
    main-tree `Local`, then `AppGlobal`, newest first within a tier, so a nested binding beats an
    enclosing one for the same chord; while a modal pod is open only its own tier is tried. Each
@@ -350,24 +360,31 @@ full dispatch of its own, until one is answered:
    the owner's slot for a stamped one); its declarer answers that id alone `Handled`, which the
    `ChildPod` dispatch probe reports to the root past containers that return `Ignored`, and an
    unanswered delivery falls through to the next candidate;
-4. a bare Tab or Shift+Tab, to focus traversal.
+4. a bare Tab or Shift+Tab, to focus traversal — unless `RenderRoot::set_tab_traversal(false)`
+   leaves it unhandled for the host.
 
 **Traversal.** The walk is pre-order over `Widget::visit_focus_children` (default: `visit_children`)
-and stops on pods whose widget answers `Widget::is_focusable` (default `false`); `Box<dyn Widget>`,
-`Either`/`EitherOfN` and the `shortcuts` wrapper forward both, and a container showing only some
-children narrows the visit (WIDGETS_CODE_STANDARDS.md's Keyboard Focus and Shortcuts). While a
-modal pod is open the walk runs inside it alone; a Transparent pod is never a stop, and a non-modal
-floated pod is reached only if its owner visits it, which `OverlaySlot` does not. Movement wraps;
-with nothing focused Tab lands on the first stop and Shift+Tab on the last. The handover releases the old session first, then delivers a grant —
-an `InputEvent::Shortcut` carrying an id private to the root, addressed to the target pod — that the
-pod records like `EventCtx::request_focus`, so one step advances `focus_epoch` twice; a stop the
-grant cannot reach is skipped for the next.
+and stops on pods whose widget answers `Widget::is_focusable` (default `false`), the root widget
+included; `Box<dyn Widget>`, `Either`/`EitherOfN` and the `shortcuts` wrapper forward both, and a
+container showing only some children narrows the visit (WIDGETS_CODE_STANDARDS.md's Keyboard Focus
+and Shortcuts). While a modal pod is open the walk runs inside it alone; a Transparent pod is never
+a stop, and a non-modal floated pod is reached through its owner — the portal calls
+`OverlaySlot::visit_focus_pod` after its child, so the pod's stops follow the owner's. Movement
+wraps; with nothing focused Tab lands on the first stop and Shift+Tab on the last. Each step
+delivers a grant — an `InputEvent::Shortcut` carrying an id private to the root, addressed to the
+target pod — that the pod records like `EventCtx::request_focus`. Only a landing grant releases the
+old session and commits the claim, so a step that lands from a live session advances `focus_epoch`
+twice; a stop the grant cannot reach is skipped for the next, and when none lands short of the
+focused stop the session, `focus_epoch` and the keyboard flag stay untouched and Tab is reported
+unhandled. A paint that registers a modal pod ends a main-tree session at once (one a floated pod
+holds survives), so a field behind the modal takes no more keys; closing the modal restores nothing.
 
 **Focus ring.** `PaintCtx::is_focused_for_ring()` is `has_focus` gated by the root's
 `FocusRingPolicy` (`Never`, `KeyboardOnly` by default, `Always`; `RenderRoot::set_focus_ring_policy`).
-Under `KeyboardOnly` it holds while the focus came from traversal and no pointer `Down` has landed
-since — the analog of CSS `:focus-visible`. A ring change bumps the paint epoch, so retained pages
-re-record. The facade re-exports this vocabulary flat and under `frust::authoring`.
+Under `KeyboardOnly` it holds while the live focus came from a landing traversal grant; a pointer
+`Down`, any claim honoured outside a grant and any session release clear that flag — the analog of
+CSS `:focus-visible`. A ring change bumps the paint epoch, so retained pages re-record. The facade
+re-exports this vocabulary flat and under `frust::authoring`.
 
 ## Hover and Cursor
 
@@ -478,9 +495,9 @@ only — key, band, input class, outside-tap policy, rect — never the pod, so 
 exactly its owner's.
 
 An entry's `OverlayKeys` (default `Pass`) says whether it claims declined keys (see Keyboard
-Shortcuts and Traversal). v1 deliberately excludes three things: no focus trap (a modal pod masks
-shortcuts and confines traversal, but nothing auto-focuses its first stop or restores focus on
-dismiss); no nesting (a surface that itself needs one registers both from the single owner); and no
+Shortcuts and Traversal). v1 deliberately excludes three things: no focus restore (a modal pod
+masks shortcuts, confines traversal and ends a main-tree session, but nothing auto-focuses its first
+stop or restores focus on dismiss); no nesting (a surface that itself needs one registers both from the single owner); and no
 visibility to `RenderRoot::inspect()` or the semantics pass — a floated pod publishes no
 accessibility node and devtools sees the owner, not the surface, so an assistive-technology user
 reaches a floated surface through the owner's own node.

@@ -56,6 +56,31 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `Widget::visit_focus_children` are defaulted. `TextInput` now declines a chord it does not decode
   instead of consuming it, so app shortcuts reach the registry while a field has focus; it still
   decodes Ctrl/Meta+C/X/V/A and the legacy Insert/Delete chords.
+- Shortcut matching and hints. A symbol chord (a character key that is neither alphanumeric nor
+  whitespace, such as `?` or `+`) ignores Shift: `Chord::new` clears it, `Chord::matches` ignores
+  it, and `"Shift+?"` parses as `"?"`; letters, digits, Space and named keys still compare exactly.
+  Shortcut hints are per root: `RenderRoot` owns the previous paint's snapshot and seeds its build
+  and paint contexts, a component's inner build included; the thread-local `LAST_HINTS` is gone, and
+  a context no root seeded reads empty.
+- Focus behaviour. The baseline `Button`, `Checkbox`, `Radio` and `Slider` take focus on a primary
+  press (pointer-sourced, so `KeyboardOnly` paints no ring) and the next Tab continues from there. A
+  focused `TextInput`'s bare Escape blurs it and is declined, so a modal around it closes on the
+  first Escape. A paint that registers a modal surface ends a main-tree focus session (nothing
+  restores it on close). `OverlaySlot` visits its floated pod for Tab traversal, so a non-modal
+  pod's stops follow its owner's. Every shadcn control uses `KeyEvent::is_activation`, so none
+  activates on an auto-repeat or a modified Space/Enter any more.
+- The baseline scrollbar paces slow fades: a fade whose per-frame step is under one 8-bit opacity
+  level holds until the next visible level instead of asking for every frame.
+- Desktop window state. A run with a valid `FRUST_WINDOW_SIZE` or any `FRUST_WINDOW_MAXIMIZED` set
+  reads and applies the saved state but never writes it (a one-time `window persist=` log line says
+  which). The un-maximized geometry is seeded from the creation geometry and tracked on every
+  un-maximized change, so a window maximized before its first save keeps its normal size;
+  fullscreen saves nothing and is never restored; the first failed write per process warns, later
+  ones log at debug.
+- `frust-file-dialogs`: the desktop and fallback backends are separate modules behind one desktop
+  predicate (no API change); its docs add threading and zenity `|` multi-select notes, and the
+  `rfd` cost is recorded in docs/PERFORMANCE_BASELINES.md (+262,632 B stripped, +58.2 s clean
+  release build on the reference box; desktop only).
 
 ### Added
 
@@ -95,11 +120,31 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   ring. The baseline `Button`, `Checkbox`, `Radio`, `Slider` and `TextInput` are Tab stops; the
   first three activate on Space/Enter and `Slider` steps on the arrow keys and jumps on Home/End.
   shadcn's button draws its focus ring for keyboard focus only.
+- Function keys: `NamedKey::F1`–`F24` (new variants, so a downstream exhaustive `match` on
+  `NamedKey` needs an arm) with `NamedKey::function_number`/`NamedKey::function`; `Chord::parse`
+  accepts `F1`–`F24` and `Chord::display` labels them (`F2`, `⌘F2`). The desktop and web shells
+  deliver them; `F25` and up are still dropped, and `ChordParseError::UnsupportedKey` is no longer
+  produced.
+- `KeyEvent::is_activation` (a bare, non-repeat Space or Enter), and
+  `RenderRoot::set_tab_traversal`/`tab_traversal`: off, a declined bare Tab or Shift+Tab stays
+  unhandled for the host's own tab order.
 - Facade: `Chord`, `FocusRingPolicy`, `OverlayKeys`, `ShortcutHint`, `ShortcutScope`, `shortcuts`
   and `ShortcutsView` at the top level, and the full shortcut vocabulary under `frust::authoring`.
-- The playground's Shortcuts section: a Mod+K command palette listing the live hints, a Mod+B
-  pane, 1/2/3 tab chords, a row of focusable controls, a readout naming each key's consumer, and a
-  precedence-matrix test suite.
+- The playground's Shortcuts section: a Mod+K (or `?`) command palette listing the live hints, a
+  Mod+B pane, an F2 chord, 1/2/3 tab chords, a row of focusable controls, a readout naming each
+  key's consumer, and a precedence-matrix test suite.
+
+### Fixed
+
+- Tab traversal keeps focus when no grant lands: the session, `focus_epoch` and the keyboard-focus
+  flag stay untouched and Tab is reported unhandled. A focusable root widget is now a stop.
+- The keyboard-focus flag behind `FocusRingPolicy::KeyboardOnly` clears on any claim honoured
+  outside traversal and on any session release, not only on a pointer press.
+- A hidden child no longer answers shortcuts: `AnimatedOpacity` settled at opacity 0 forwards no
+  `Shortcut` or `Key` (the navigator, `IndexedStack`, pattern switcher, `Stack` and `Either` were
+  checked and already forwarded only to what they paint).
+- A pointer press that moves focus from a text field to a control publishing no IME state clears
+  the IME surface at once, so the soft keyboard goes down when a button is tapped.
 
 ## 0.6.2 — 2026-10-16
 

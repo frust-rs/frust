@@ -236,19 +236,27 @@ Semantics.
   `.on`/`.global` panic on a spec that does not parse — use `.bind` for a spec read at runtime. A
   palette lists `BuildCtx::shortcut_hints()` (the previous frame's declarations) with
   `Chord::display` labels.
+- **`KeyEvent::is_activation` is the one activation predicate** (a bare, non-repeat Space or
+  Enter). `frust-widgets` gates it on focus in its crate-private `activation(ctx, event)` helper and
+  every shadcn control calls it; beUI's `press::is_activation_key` and material's split button still
+  carry their own copies, which also accept a repeat or a modified press — a known gap, not a model.
 - **Baseline Tab stops.** `Button` (unless disabled), `Checkbox`, `Radio`, `Slider` and `TextInput`
-  (when enabled) answer `is_focusable`. While focused, `Button`/`Checkbox`/`Radio` activate on a bare,
-  non-repeat Space or Enter, `Slider` steps 0.05 on the arrows and jumps on Home/End, and
-  `TextInput` declines Tab plus every chord it does not decode (it still decodes Ctrl/Meta +
-  c/x/v/a and the legacy Insert/Delete chords; Alt is never a chord modifier), so app chords reach
-  the registry while a field has focus. The four non-text controls take focus from traversal only,
-  never from a press, so clicking one that holds keyboard focus drops it, and none of the baseline
-  controls paints a keyboard-focus visual (`baseline-controls-no-focus-visual` in
+  (when enabled) answer `is_focusable`. While focused, `Button`/`Checkbox`/`Radio` activate on
+  `is_activation`, `Slider` steps 0.05 on the arrows and jumps on Home/End, and `TextInput` declines
+  Tab, the function keys and every chord it does not decode (it still decodes Ctrl/Meta + c/x/v/a
+  and the legacy Insert/Delete chords; Alt is never a chord modifier), so app chords reach the
+  registry while a field has focus; a bare Escape blurs it and is declined too, so a modal around it
+  closes on the same press. A primary press on any of them requests focus (pointer-sourced, so
+  `KeyboardOnly` paints no ring) and the next Tab continues from there; a `TextInput` publishes its
+  IME state on every primary press, since a focus-claiming press that publishes none drops the
+  standing surface. None paints a keyboard-focus visual (`baseline-controls-no-focus-visual` in
   [LIMITATIONS.md](LIMITATIONS.md)).
-- **A container that shows only some children narrows `visit_focus_children` and `Shortcut`
-  delivery to the same set.** `NavigatorWidget` visits its Current page and `IndexedStackWidget` its
-  selected child; a covered page or hidden tab still paints and declares, but never answers or
-  takes focus.
+- **A container that paints only some children narrows `visit_focus_children` and forwards
+  `Shortcut`/`Key` only to those.** `NavigatorWidget` visits its Current page and routes keys to its
+  input-routed page(s), none while a transition runs; `IndexedStackWidget` takes its selected child,
+  a pattern switcher its incoming child (the frozen exiting one paints but never answers),
+  `Either`/`EitherOfN` its live arm, and `AnimatedOpacity` settled at opacity 0 answers no chord or
+  key. `Stack` paints every child, so every child receives them.
 - **A design system's focus visual is the consumer's call.** `frust_shadcn::button` is the
   reference keyboard-only consumer: its ring and ring-coloured border read
   `PaintCtx::is_focused_for_ring`, like upstream's `focus-visible:` — true under the root's
