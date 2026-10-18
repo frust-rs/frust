@@ -88,8 +88,8 @@ use crate::paced_wake::{
 use crate::platform_view::DesktopPlatformViews;
 use crate::render::FrameExecutor;
 use crate::window_state::{
-    MonitorRect, WindowSnapshot, WindowState, WindowStateSaver, clamp_restored, initial_geometry,
-    merge_wake,
+    InitialGeometry, MonitorRect, WindowSnapshot, WindowState, WindowStateSaver, clamp_restored,
+    initial_geometry, merge_wake, persistence_enabled,
 };
 
 /// Initial preview-window size, in logical pixels.
@@ -1193,6 +1193,25 @@ fn apply_window_size(
     }
 }
 
+/// The window's creation geometry after precedence (see [`window_attributes`]).
+fn creation_geometry(config: &DesktopConfig, persisted: Option<&WindowState>) -> InitialGeometry {
+    let knobs = window_size_config();
+    let default = Size::new(
+        f64::from(INITIAL_SIZE.width),
+        f64::from(INITIAL_SIZE.height),
+    );
+    let env_size = knobs
+        .size
+        .map(|s| Size::new(f64::from(s.width), f64::from(s.height)));
+    initial_geometry(
+        default,
+        config.initial_size,
+        persisted,
+        env_size,
+        knobs.maximized,
+    )
+}
+
 /// Assemble the preview window's [`WindowAttributes`] from the app's
 /// [`DesktopConfig`], then hand them to the extension's pre-create hook.
 ///
@@ -1218,21 +1237,7 @@ fn window_attributes(
     persisted: Option<&WindowState>,
     extensions: &mut impl DesktopExtensions,
 ) -> WindowAttributes {
-    let knobs = window_size_config();
-    let default = Size::new(
-        f64::from(INITIAL_SIZE.width),
-        f64::from(INITIAL_SIZE.height),
-    );
-    let env_size = knobs
-        .size
-        .map(|s| Size::new(f64::from(s.width), f64::from(s.height)));
-    let geometry = initial_geometry(
-        default,
-        config.initial_size,
-        persisted,
-        env_size,
-        knobs.maximized,
-    );
+    let geometry = creation_geometry(config, persisted);
     let mut attributes = WindowAttributes::default()
         .with_title(config.window_title())
         .with_visible(false);
@@ -1291,6 +1296,7 @@ fn window_snapshot(window: &Window) -> WindowSnapshot {
         position: window.outer_position().ok().map(|p| (p.x, p.y)),
         maximized: window.is_maximized(),
         minimized: window.is_minimized().unwrap_or(false),
+        fullscreen: window.fullscreen().is_some(),
         monitor: window.current_monitor().and_then(|m| m.name()),
     }
 }
@@ -2555,12 +2561,19 @@ where
         self.runtime.with_owner(move || provide_context(metrics));
     }
 
-    /// A resize or move: restart the window-state saver's quiet period (a
-    /// no-op unless the app opted in to persistence).
+    /// A resize or move: record the un-maximized geometry and restart the
+    /// window-state saver's quiet period (a no-op unless persistence is on).
     fn note_window_geometry_change(&mut self) {
-        if let Some(saver) = self.window_state.as_mut() {
-            saver.note_change(Instant::now());
+        let Some(saver) = self.window_state.as_mut() else {
+            return;
+        };
+        if let Some(window) = self.window.as_deref() {
+            let snap = window_snapshot(window);
+            if !(snap.maximized || snap.minimized || snap.fullscreen) {
+                saver.note_normal(snap.size, snap.position);
+            }
         }
+        saver.note_change(Instant::now());
     }
 
     /// Write the window state when it is due: `Some(now)` is the debounced
@@ -2861,13 +2874,25 @@ where
             // chance a per-OS shell gets at attributes winit refuses to change
             // after creation (Wayland `app_id`, X11 icon). An opted-in app's
             // persisted geometry is loaded and fitted to today's monitors first.
-            let restored = if self.config.persist_window_state {
+            let opted_in = self.config.persist_window_state;
+            let restored = if opted_in {
                 let (loaded, restored) = restore_window_state(event_loop, &self.config);
-                let mut saver = WindowStateSaver::default();
-                saver.seed(loaded, restored.as_ref());
-                self.window_state = Some(saver);
+                // A knob run still applies the saved state but never writes it.
+                let knobs = window_size_config();
+                let knob_set = knobs.size.is_some() || knobs.maximized.is_some();
+                if persistence_enabled(opted_in, knob_set) {
+                    let mut saver = WindowStateSaver::default();
+                    let creation = creation_geometry(&self.config, restored.as_ref());
+                    saver.seed(loaded, &creation);
+                    self.window_state = Some(saver);
+                }
+                log::info!(
+                    "frust-shell-desktop window persist={}",
+                    if knob_set { "off (knob)" } else { "on" }
+                );
                 restored
             } else {
+                log::info!("frust-shell-desktop window persist=off");
                 None
             };
             let attrs = window_attributes(&self.config, restored.as_ref(), &mut self.extensions);
