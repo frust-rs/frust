@@ -97,7 +97,7 @@ pub trait AppTree {
 
     /// The live focus session's **identity**. It advances once per honoured claim (an
     /// `EventCtx::request_focus` or a traversal grant) and once per session release, so a Tab
-    /// step that lands moves it by two and one that lands nowhere leaves it unchanged (delegates to
+    /// step that lands from a live session moves it by two (by one from none) and one that lands nowhere leaves it unchanged (delegates to
     /// [`RenderRoot::focus_epoch`]).
     ///
     /// Two adjacent generation counters invite exactly one mistake, so: the

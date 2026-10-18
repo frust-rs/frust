@@ -440,7 +440,7 @@ class FrustSurfaceView(
      *
      * It advances once per honoured focus claim (a widget's request or a Tab
      * traversal grant) and once per session release, and on nothing else — a
-     * Tab step that lands moves it by two, one that lands nowhere leaves it
+     * Tab step that lands from a live session moves it by two (by one from none), one that lands nowhere leaves it
      * unchanged, and it stands still while the user edits, moves the caret, or
      * has the field moved under them inside one session.
      *

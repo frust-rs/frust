@@ -23,7 +23,8 @@ libdbus is loaded at runtime, so nothing links at build time. If the portal is
 unavailable `rfd` falls back to `zenity`. If neither exists, `rfd` logs an
 error and returns no selection: the call yields `Ok(None)` / an empty `Vec`,
 indistinguishable from a cancel. On a zenity-only desktop `rfd` splits the
-multi-selection on `|`, so `open_files` splits a file name containing `|`.
+multi-selection on `|`, so `open_files` loses a file name containing `|` (the
+relative fragments of such a split are dropped, never returned as paths).
 
 ## Usage
 

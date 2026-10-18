@@ -2553,7 +2553,7 @@ pub fn native_focus_generation(handle: jlong) -> jlong {
 ///
 /// What it reports, exactly: `AppTree::focus_epoch` advances once per honoured
 /// claim (an `EventCtx::request_focus` or a traversal grant) and once per session release, and
-/// on nothing else, so a Tab step that lands moves it by two and one that lands nowhere leaves
+/// on nothing else, so a Tab step that lands from a live session moves it by two (by one from none) and one that lands nowhere leaves
 /// it unchanged. So a move to
 /// another field moves it whether or not that field publishes an IME surface,
 /// and an edit, a caret move, or the field being repositioned under the user

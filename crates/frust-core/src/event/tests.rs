@@ -1005,3 +1005,16 @@ fn key_event_activation_is_a_bare_fresh_space_or_enter() {
     assert!(!press(Key::Character("a".to_string()), none, false));
     assert!(!press(Key::Named(NamedKey::Tab), none, false));
 }
+
+#[test]
+fn function_key_tables_are_inverses_over_f1_to_f24() {
+    for n in 1..=24 {
+        assert_eq!(
+            NamedKey::function(n).and_then(NamedKey::function_number),
+            Some(n),
+            "F{n} round-trips"
+        );
+    }
+    assert!(NamedKey::function(0).is_none() && NamedKey::function(25).is_none());
+    assert_eq!(NamedKey::Enter.function_number(), None);
+}

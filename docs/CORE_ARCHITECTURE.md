@@ -376,7 +376,7 @@ target pod — that the pod records like `EventCtx::request_focus`. Only a landi
 old session and commits the claim, so a step that lands from a live session advances `focus_epoch`
 twice; a stop the grant cannot reach is skipped for the next, and when none lands short of the
 focused stop the session, `focus_epoch` and the keyboard flag stay untouched and Tab is reported
-unhandled. A paint that registers a modal pod ends a main-tree session at once (one a floated pod
+unhandled. A paint that registers an Interactive `OverlayKeys::Modal` pod ends a main-tree session at once (one a floated pod
 holds survives), so a field behind the modal takes no more keys; closing the modal restores nothing.
 
 **Focus ring.** `PaintCtx::is_focused_for_ring()` is `has_focus` gated by the root's

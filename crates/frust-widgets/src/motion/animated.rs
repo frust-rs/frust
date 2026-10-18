@@ -265,9 +265,9 @@ impl<State: 'static> AnimatedOpacityView<State> {
 
 /// The retained widget for an [`AnimatedOpacityView`].
 ///
-/// Keyboard broadcasts ([`InputEvent::Shortcut`], [`InputEvent::Key`]) reach the
-/// child unless the fade has fully settled at opacity 0; an invisible child
-/// answers no chord.
+/// Keyboard input (`Shortcut`, `Key`, `Ime`, `EditCommand`) reaches the child
+/// and the child is a Tab stop only while the fade is above opacity 0; an
+/// invisible child answers no chord and takes no grant.
 pub struct AnimatedOpacityWidget {
     child: ChildPod,
     explicit_timing: Option<Timing>,
@@ -350,11 +350,25 @@ impl Widget for AnimatedOpacityWidget {
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         // Fully faded out the child still paints but is invisible: it must not
         // answer a chord or a key (see the type docs).
-        if self.anim.value() <= 0.0 && matches!(event, InputEvent::Shortcut(_) | InputEvent::Key(_))
+        if self.anim.value() <= 0.0
+            && matches!(
+                event,
+                InputEvent::Shortcut(_)
+                    | InputEvent::Key(_)
+                    | InputEvent::Ime(_)
+                    | InputEvent::EditCommand(_)
+            )
         {
             return EventResult::Ignored;
         }
         crate::authoring::route_event_single(&mut self.child, ctx, event)
+    }
+
+    fn visit_focus_children(&self, visitor: &mut dyn FnMut(&ChildPod)) {
+        // An invisible child is no Tab stop either.
+        if self.anim.value() > 0.0 {
+            visitor(&self.child);
+        }
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {

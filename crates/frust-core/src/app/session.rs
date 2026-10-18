@@ -5,7 +5,7 @@ use std::rc::Weak;
 
 use super::{RenderRoot, advance_focus_epoch};
 use crate::event::{CursorIcon, ImeState, PointerId};
-use crate::overlay::{OverlayHit, OverlayKey};
+use crate::overlay::{OverlayHit, OverlayInput, OverlayKey, OverlayKeys};
 use crate::view::View;
 
 /// Replace `slot` and bump `generation` only when the value actually moves: paint republishes the
@@ -99,7 +99,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
 
     /// The live focus session's identity. It advances once per honoured claim (an
     /// `EventCtx::request_focus` or a traversal grant) and once per release, so a Tab step that
-    /// lands moves it by two and one that lands nowhere leaves it unchanged. It moves when focus
+    /// lands from a live session moves it by two (by one from none) and one that lands nowhere leaves it unchanged. It moves when focus
     /// crosses fields that publish alike. Never `0`: a safe sentinel.
     pub fn focus_epoch(&self) -> u64 {
         self.focus_epoch
@@ -137,10 +137,14 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         }
     }
 
-    /// Modal focus trap: while a modal pod is registered, end a session no floated pod holds (the
-    /// main tree's), so it takes no more keys. Not restored when the modal closes (v1).
+    /// Modal focus trap: while an Interactive `OverlayKeys::Modal` pod is registered (a consuming
+    /// outside tap alone is a light-dismiss menu, not a trap), end a session no floated pod holds
+    /// (the main tree's), so it takes no more keys. Not restored when the modal closes (v1).
     pub(super) fn trap_modal_focus(&mut self) {
-        if !self.focus_active || !self.overlay_hits.iter().any(OverlayHit::is_modal) {
+        let traps = |hit: &OverlayHit| {
+            hit.input == OverlayInput::Interactive && hit.keys == OverlayKeys::Modal
+        };
+        if !self.focus_active || !self.overlay_hits.iter().any(traps) {
             return;
         }
         self.publish_focus_session();

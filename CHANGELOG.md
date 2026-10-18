@@ -64,10 +64,12 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   a context no root seeded reads empty.
 - Focus behaviour. The baseline `Button`, `Checkbox`, `Radio` and `Slider` take focus on a primary
   mouse press (pointer-sourced, so `KeyboardOnly` paints no ring) and the next Tab continues from
-  there; a touch tap activates without claiming focus, so a focused field keeps its keyboard. A
-  focused `TextInput`'s bare Escape blurs it and is declined, so a modal around it closes on the
-  first Escape. A paint that registers a modal surface ends a main-tree focus session (nothing
-  restores it on close). `OverlaySlot` visits its floated pod for Tab traversal, so a non-modal
+  there; a touch tap activates without claiming focus (an unclaimed Down still blurs a plain
+  sibling field; a dialog or sheet re-claiming focus on its chrome keeps it). A focused
+  `TextInput`'s bare Escape blurs it and is declined, so a modal around it closes on the first
+  Escape — an app chord bound to a bare Escape now fires on the press that leaves a field. A paint
+  that registers an `OverlayKeys::Modal` surface ends a main-tree focus session (nothing restores it
+  on close; a light-dismiss menu does not end it). `OverlaySlot` visits its floated pod for Tab traversal, so a non-modal
   pod's stops follow its owner's. Every shadcn control uses `KeyEvent::is_activation`, so none
   activates on an auto-repeat or a modified Space/Enter any more.
 - The baseline scrollbar paces slow fades: a fade whose per-frame step is under one 8-bit opacity

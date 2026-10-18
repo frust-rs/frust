@@ -861,7 +861,7 @@ fn paste_input_event(text: PasteText) -> InputEvent {
 /// [`RenderRoot::focus_epoch`] is the right counter for the question and
 /// `focus_ime_generation` is not: this one advances once per honoured claim (an
 /// `EventCtx::request_focus` or a traversal grant) and once per session release and on
-/// nothing else, so a Tab step that lands moves it by two and one that lands nowhere leaves
+/// nothing else, so a Tab step that lands from a live session moves it by two (by one from none) and one that lands nowhere leaves
 /// it unchanged; it moves when
 /// focus crosses two fields publishing identical surfaces, and stands still
 /// through an edit or a caret move inside the one session. Both accessors

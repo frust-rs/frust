@@ -29,7 +29,8 @@
 //! xdg-desktop-portal backend nor `zenity` is available it logs an error and
 //! returns no selection, which is indistinguishable from a cancel. On a
 //! zenity-only desktop `rfd` splits a multi-selection on `'|'`, so
-//! [`FileDialog::open_files`] splits a file name containing `|`.
+//! [`FileDialog::open_files`] loses a file name containing `|` (the relative
+//! fragments such a split leaves are dropped, never returned as paths).
 
 mod filter;
 

@@ -251,7 +251,33 @@ fn key_label(key: &Key, apple: bool) -> String {
             (NamedKey::Copy, _) => "Copy",
             (NamedKey::Cut, _) => "Cut",
             (NamedKey::Paste, _) => "Paste",
-            (f, _) => return format!("F{}", f.function_number().unwrap_or(0)),
+            (
+                NamedKey::F1
+                | NamedKey::F2
+                | NamedKey::F3
+                | NamedKey::F4
+                | NamedKey::F5
+                | NamedKey::F6
+                | NamedKey::F7
+                | NamedKey::F8
+                | NamedKey::F9
+                | NamedKey::F10
+                | NamedKey::F11
+                | NamedKey::F12
+                | NamedKey::F13
+                | NamedKey::F14
+                | NamedKey::F15
+                | NamedKey::F16
+                | NamedKey::F17
+                | NamedKey::F18
+                | NamedKey::F19
+                | NamedKey::F20
+                | NamedKey::F21
+                | NamedKey::F22
+                | NamedKey::F23
+                | NamedKey::F24,
+                _,
+            ) => return format!("F{}", named.function_number().unwrap_or(0)),
         },
     };
     named.to_string()
