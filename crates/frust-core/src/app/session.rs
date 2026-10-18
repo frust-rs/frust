@@ -1,9 +1,11 @@
 //! Session state on [`RenderRoot`]: pointer capture, focus/IME, hover, cursor and clipboard
 //! accessors, plus the change-guarded writers that keep their edge generations honest.
 
+use std::rc::Weak;
+
 use super::{RenderRoot, advance_focus_epoch};
 use crate::event::{CursorIcon, ImeState, PointerId};
-use crate::overlay::OverlayKey;
+use crate::overlay::{OverlayHit, OverlayKey};
 use crate::view::View;
 
 /// Replace `slot` and bump `generation` only when the value actually moves: paint republishes the
@@ -115,8 +117,9 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     }
 
     /// The `&mut self` form of [`release_focus_session_in`], also clearing the session's owner
-    /// surface, key forward and selection toolbar. Idempotent.
+    /// surface, key forward, selection toolbar and keyboard-focus flag. Idempotent.
     pub(super) fn release_focus_session(&mut self) {
+        self.set_keyboard_focus(false);
         release_focus_session_in(
             &mut self.focus_active,
             &mut self.ime_state,
@@ -129,6 +132,23 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // The toolbar belongs to the session: end it on the blurring pass, not a paint later.
         if self.selection_toolbar.take().is_some() {
             self.selection_toolbar_gen = self.selection_toolbar_gen.wrapping_add(1);
+        }
+    }
+
+    /// Modal focus trap: while a modal pod is registered, end a session no floated pod holds (the
+    /// main tree's), so it takes no more keys. Not restored when the modal closes (v1).
+    pub(super) fn trap_modal_focus(&mut self) {
+        if !self.focus_active || !self.overlay_hits.iter().any(OverlayHit::is_modal) {
+            return;
+        }
+        self.publish_focus_session();
+        let floated_holds = self
+            .overlay_pods
+            .iter()
+            .filter_map(Weak::upgrade)
+            .any(|pod| pod.try_borrow().map_or(true, |pod| pod.holds_live_focus()));
+        if !floated_holds {
+            self.release_focus_session();
         }
     }
 

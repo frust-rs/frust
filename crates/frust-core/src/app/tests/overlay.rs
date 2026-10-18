@@ -735,6 +735,8 @@ struct KeyLog {
     shortcuts: Vec<&'static str>,
     keys: Vec<(&'static str, Key)>,
     overlay_keys: Vec<Key>,
+    /// While set, the owner registers no floated pod.
+    pod_hidden: bool,
 }
 
 type KeyShared = Rc<RefCell<KeyLog>>;
@@ -839,6 +841,9 @@ impl crate::widget::Widget for KeyOwner {
     }
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         self.field.paint_child(ctx, scene);
+        if self.log.borrow().pod_hidden {
+            return;
+        }
         ctx.register_overlay(OverlayEntry {
             key: self.key,
             band: OverlayBand::Floating,
@@ -1000,10 +1005,14 @@ impl KeyHarness {
             log: Rc::clone(&log),
         };
         h.root.rebuild(&mut build, &mut ());
-        h.root.layout(Size::new(200.0, 200.0));
-        h.root
-            .paint(&mut RecordingScene::default(), FrameTime::ZERO);
+        h.frame();
         h
+    }
+
+    fn frame(&mut self) {
+        self.root.layout(Size::new(200.0, 200.0));
+        self.root
+            .paint(&mut RecordingScene::default(), FrameTime::ZERO);
     }
 
     fn press(&mut self, key: Key, ctrl: bool) -> EventOutcome {
@@ -1181,4 +1190,37 @@ fn a_transparent_pod_never_takes_keys() {
     assert!(h.overlay_keys().is_empty(), "neither forwarded nor modal");
     h.press(char_key("j"), true);
     assert_eq!(h.shortcuts(), vec!["nav", "global"], "and it masks nothing");
+}
+
+#[test]
+fn a_modal_pod_ends_a_main_tree_session_and_keeps_its_own() {
+    let [modal, _] = modal_specs();
+    let mut h = KeyHarness::new(KeySpec {
+        pod_eats: true,
+        ..modal
+    });
+    h.log.borrow_mut().pod_hidden = true;
+    h.frame();
+    h.down(40.0, 20.0);
+    assert!(h.root.is_focus_active(), "the main-tree field took focus");
+    h.log.borrow_mut().pod_hidden = false;
+    h.frame();
+
+    assert!(!h.press(char_key("a"), false).handled);
+    assert!(
+        !h.root.is_focus_active(),
+        "the modal ended the field's session"
+    );
+    assert!(h.press(ESCAPE, false).handled);
+    assert_eq!(h.overlay_keys(), vec![ESCAPE]);
+    assert!(h.log.borrow().keys.is_empty(), "the field took no key");
+
+    h.down(150.0, 20.0);
+    h.frame();
+    assert!(h.press(char_key("b"), false).handled);
+    assert!(
+        h.root.is_focus_active(),
+        "the modal's own pod keeps its focus"
+    );
+    assert_eq!(h.log.borrow().keys, vec![("pod", char_key("b"))]);
 }

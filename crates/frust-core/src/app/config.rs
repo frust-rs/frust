@@ -1,5 +1,5 @@
-//! Configuration knobs and shell-pushed inputs on [`RenderRoot`]: layout skip and audit,
-//! retained layers, focus ring, theme, insets, presented frames and surface translucency.
+//! Configuration knobs and shell-pushed inputs on [`RenderRoot`]: layout skip and audit, retained
+//! layers, focus ring, Tab traversal, theme, insets, presented frames and surface translucency.
 
 use std::any::Any;
 
@@ -42,11 +42,24 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         }
     }
 
-    /// Record whether the live focus came from the keyboard (traversal sets it, a `Down` clears it).
+    /// Record whether the live focus came from the keyboard: a landing traversal grant sets it; a
+    /// claim honoured outside a grant, a session release and a pointer `Down` clear it.
     pub(super) fn set_keyboard_focus(&mut self, keyboard: bool) {
         let visible = self.focus_ring_visible();
         self.keyboard_focus = keyboard;
         self.repaint_if_ring_moved(visible);
+    }
+
+    /// Switch Tab traversal on (the default) or off. Off, a bare Tab/Shift+Tab the tree, the
+    /// forward and the shortcut table declined stays unhandled, for the host's own tab order.
+    /// On, each such Tab rebuilds the walk's stops (accepted: Tab is rare).
+    pub fn set_tab_traversal(&mut self, enabled: bool) {
+        self.tab_traversal = enabled;
+    }
+
+    /// Whether a declined bare Tab runs traversal ([`RenderRoot::set_tab_traversal`]).
+    pub fn tab_traversal(&self) -> bool {
+        self.tab_traversal
     }
 
     /// A moved ring changes pod reads without dirtying them, so no retained subtree stays clean.
