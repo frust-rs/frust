@@ -2438,11 +2438,7 @@ mod tests {
         }
     }
 
-    // Red since the root began clearing the IME surface on a focus claim that publishes none:
-    // the dialog's own Down claim (above) and an unclaimed Down (a blur) both end the field's
-    // session, and the dialog cannot republish the field's `ImeState`. Needs a core primitive.
     #[test]
-    #[ignore = "the dialog's Down claim clears the field's IME surface; needs a core keep-surface hook"]
     fn action_down_leaves_the_field_session_intact() {
         // No pre-blur regression: tapping an action while the field is focused
         // activates it with the session untouched (the action row is an
@@ -2472,7 +2468,7 @@ mod tests {
     }
 
     #[test]
-    fn a_mouse_press_on_an_action_takes_focus_and_clears_the_field_surface() {
+    fn a_mouse_press_on_an_action_keeps_the_field_surface() {
         let area = Size::new(375.0, 667.0);
         let mut f = focused_field_dialog(area);
         assert!(f.root.ime_state().is_some());
@@ -2481,9 +2477,10 @@ mod tests {
             &mut f.state,
             &ev(PointerPhase::Down, f.action.x, f.action.y),
         );
+        // The dialog's chrome re-claims focus from the live chain, so the surface stays.
         assert!(
-            f.root.ime_state().is_none(),
-            "a mouse press moves focus to the action and clears the IME surface"
+            f.root.ime_state().is_some(),
+            "a mouse press on dialog chrome is a live re-claim and keeps the IME surface"
         );
     }
 

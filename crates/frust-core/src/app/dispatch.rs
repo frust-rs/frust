@@ -50,6 +50,8 @@ struct RootDispatch {
     captured: bool,
     hover_claimed: bool,
     focus_req: bool,
+    /// The claim came from a pod already on the live focus chain.
+    focus_req_from_live: bool,
     focus_rel: bool,
     ime: Option<ImeState>,
     ime_published: bool,
@@ -297,6 +299,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     ) -> RootDispatch {
         // The claimant pod this dispatch records, if any (see `hover_link`).
         crate::widget::clear_hover_claimant();
+        crate::widget::clear_focus_req_from_live();
         let state_any: &mut dyn Any = state;
         let mut ctx = EventCtx::new(state_any, pod.origin(), pod.size());
         // Seed the root widget's focus and hover state; deeper pods thread their own.
@@ -338,6 +341,9 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             captured: ctx.is_pointer_captured(),
             hover_claimed: ctx.is_hover_claimed(),
             focus_req: ctx.is_focus_requested(),
+            // A root-widget claim (no pod) re-claims whenever a session stands.
+            focus_req_from_live: crate::widget::take_focus_req_from_live()
+                .unwrap_or(frame.focus_active_before),
             focus_rel: ctx.is_focus_released(),
             ime: ctx.take_ime_state(),
             ime_published: false,
@@ -427,7 +433,8 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
 
     /// Commit a claimant (or uncaptured) pointer: a `Down` latches a capture and claims focus or
     /// blurs; an `Up`/`Cancel` (only the claimant's reaches here) clears the latch. A claim whose
-    /// pass published no `ImeState` drops the previous holder's surface. Returns
+    /// pass published no `ImeState` drops the previous holder's surface, unless the claimant
+    /// already held a live link (a chrome re-claim). Returns
     /// whether a claim was honoured; writes the capture latch, `focus_surface` and focus session.
     fn commit_pointer(
         &mut self,
@@ -446,7 +453,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                     self.set_focus_active(true);
                     // A hit-tested claim belongs to the main tree (see `focus_surface`).
                     self.focus_surface = None;
-                    if !root.ime_published {
+                    if !root.ime_published && !root.focus_req_from_live {
                         self.store_ime_state(None);
                     }
                     true
