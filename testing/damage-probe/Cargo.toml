@@ -1,0 +1,56 @@
+# Standalone workspace, outside the root graph: a pure-wgpu probe of damage-aware
+# presentation (gfx-rs/wgpu#10152, `Queue::present_with_damage`). It deliberately
+# depends on the PR head by SHA from the base repository, so nothing here is a
+# pin change and nothing is pushed anywhere. See README.md for the method.
+[package]
+name = "damage-probe"
+version = "0.1.0"
+edition = "2024"
+# The PR head's own `rust-version`.
+rust-version = "1.95"
+publish = false
+description = "Does this backend + compositor honour wgpu's damage hint? Under-report it on purpose and look for the trail."
+
+[lib]
+name = "damage_probe"
+crate-type = ["lib", "cdylib"]
+
+[[bin]]
+name = "damage-probe"
+path = "src/main.rs"
+
+[workspace]
+
+# gfx-rs/wgpu#10152 head (sauliusvl:damage-present-regions). ONE constant: change
+# it here when the PR moves or lands. Fetched by SHA — GitHub serves pull-request
+# commits from the base repository, so no fork or push is involved.
+[dependencies]
+wgpu = { git = "https://github.com/gfx-rs/wgpu", rev = "167e768752987f97af5dd9448df84616b0039c58", default-features = false, features = ["std", "wgsl"] }
+winit = "0.30.13"
+pollster = "0.4"
+log = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+
+# Vulkan + GLES/EGL everywhere wgpu has them (Linux, Windows, Android): the two
+# paths the PR implements.
+[target.'cfg(not(target_vendor = "apple"))'.dependencies]
+wgpu = { git = "https://github.com/gfx-rs/wgpu", rev = "167e768752987f97af5dd9448df84616b0039c58", default-features = false, features = ["vulkan", "gles"] }
+
+# Metal: the PR ignores the rects there — this arm is the no-op control.
+[target.'cfg(target_vendor = "apple")'.dependencies]
+wgpu = { git = "https://github.com/gfx-rs/wgpu", rev = "167e768752987f97af5dd9448df84616b0039c58", default-features = false, features = ["metal"] }
+
+# DX12 (FLIP_DISCARD, rects dropped by the PR) beside Vulkan for the `WGPU_BACKEND=vulkan` arm.
+[target.'cfg(windows)'.dependencies]
+wgpu = { git = "https://github.com/gfx-rs/wgpu", rev = "167e768752987f97af5dd9448df84616b0039c58", default-features = false, features = ["dx12"] }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+env_logger = "0.11"
+
+[target.'cfg(target_os = "android")'.dependencies]
+winit = { version = "0.30.13", features = ["android-native-activity"] }
+android_logger = "0.15"
+android_system_properties = "0.1"
+
+[profile.release]
+debug = 1
