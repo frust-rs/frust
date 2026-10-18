@@ -97,8 +97,10 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         self.focus_ime_gen
     }
 
-    /// The live focus session's identity, advanced once per honoured claim and once per release
-    /// (so it moves when focus crosses fields that publish alike). Never `0`: a safe sentinel.
+    /// The live focus session's identity. It advances once per honoured claim (an
+    /// `EventCtx::request_focus` or a traversal grant) and once per release, so a Tab step that
+    /// lands moves it by two and one that lands nowhere leaves it unchanged. It moves when focus
+    /// crosses fields that publish alike. Never `0`: a safe sentinel.
     pub fn focus_epoch(&self) -> u64 {
         self.focus_epoch
     }

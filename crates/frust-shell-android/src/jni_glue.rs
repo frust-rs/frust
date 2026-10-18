@@ -2552,7 +2552,9 @@ pub fn native_focus_generation(handle: jlong) -> jlong {
 /// compares it again when the text comes back, dispatching only on a match.
 ///
 /// What it reports, exactly: `AppTree::focus_epoch` advances once per honoured
-/// focus claim and once per session release, and on nothing else. So a move to
+/// claim (an `EventCtx::request_focus` or a traversal grant) and once per session release, and
+/// on nothing else, so a Tab step that lands moves it by two and one that lands nowhere leaves
+/// it unchanged. So a move to
 /// another field moves it whether or not that field publishes an IME surface,
 /// and an edit, a caret move, or the field being repositioned under the user
 /// leaves it alone. Its neighbour [`native_focus_generation`] gets both of
