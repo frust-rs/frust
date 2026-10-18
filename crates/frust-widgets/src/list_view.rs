@@ -2091,7 +2091,7 @@ impl ListViewWidget {
 
     /// The event body behind [`ListViewWidget::event_at`]: the non-gesture
     /// variants are routed to the *window* of children here, the wheel and
-    /// pointer gesture by the shared core ([`ScrollSurface::handle_wheel`],
+    /// pointer gesture by the shared core ([`ScrollSurface::route_wheel`],
     /// [`ScrollSurface::handle_pointer`]) exactly as for `ScrollView`.
     fn route_event_at(&mut self, ctx: &mut EventCtx, event: &InputEvent, t_ms: f64) -> EventResult {
         // A fling-driven near-start/near-end fire recorded at paint time is
@@ -2120,11 +2120,12 @@ impl ListViewWidget {
             InputEvent::Key(_) | InputEvent::Ime(_) | InputEvent::EditCommand(_) => {
                 crate::authoring::route_event(&mut self.children, ctx, event)
             }
-            // Wheel scrolling stays hard-clamped, matching `ScrollView`; a
-            // drag's past-edge pull lands in `overscroll`, never in a
-            // windowing offset outside `[0, max_offset]` (see the module docs'
+            // Wheel scrolling stays hard-clamped, matching `ScrollView`, and
+            // the row under the pointer is offered the notch first; a drag's
+            // past-edge pull lands in `overscroll`, never in a windowing
+            // offset outside `[0, max_offset]` (see the module docs'
             // *Overscroll and pull-to-refresh*).
-            InputEvent::Scroll { delta, .. } => self.handle_wheel(ctx, delta),
+            InputEvent::Scroll { delta, .. } => self.route_wheel(ctx, event, delta),
             InputEvent::Pointer(p) => self.route_pointer(ctx, event, p, t_ms),
             // `InputEvent` grows (a scale gesture and file drops are planned);
             // this widget handles only the variants named above, and hands any
@@ -2218,6 +2219,12 @@ impl ScrollSurface for ListViewWidget {
     }
 
     fn forward_pointer(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        crate::authoring::route_event(&mut self.children, ctx, event)
+    }
+
+    /// The realized row under the pointer, hit-tested like any other content
+    /// event.
+    fn forward_wheel(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         crate::authoring::route_event(&mut self.children, ctx, event)
     }
 
@@ -2884,6 +2891,49 @@ mod tests {
         assert_eq!(w.offset(), 500.0);
         // window = floor(500/50)-2 .. ceil(700/50)+2 = 8 .. 16
         assert_eq!(w.window(), &[8, 9, 10, 11, 12, 13, 14, 15]);
+    }
+
+    #[test]
+    fn a_wheel_over_a_scrollable_row_moves_the_row_before_the_list() {
+        let inner = ScrollController::new();
+        let mut logic = {
+            let inner = inner.clone();
+            move |_: &mut ()| {
+                let inner = inner.clone();
+                list_view(20, 50.0, move |i| {
+                    if i == 0 {
+                        // A 50 px window onto 300 px of content.
+                        any::<(), _>(
+                            crate::scroll::scroll_view(crate::test_support::leaf(200.0, 300.0))
+                                .controller(inner.clone()),
+                        )
+                    } else {
+                        any::<(), _>(crate::test_support::leaf(200.0, 50.0))
+                    }
+                })
+            }
+        };
+        let mut root: RenderRoot<(), ListView<()>> = RenderRoot::new();
+        let mut state = ();
+        let window = Size::new(200.0, 200.0);
+        frame(&mut root, &mut logic, &mut state, window, 0.0);
+        frame(&mut root, &mut logic, &mut state, window, 16.0);
+
+        // Over row 0: the row scrolls, the list stays put.
+        root.event(&mut state, &wheel_at(25.0, 100.0));
+        assert_eq!(list_widget(&root).offset(), 0.0);
+        assert_eq!(inner.offset(), 100.0);
+        // Over row 1, a leaf that ignores the wheel: the list scrolls.
+        root.event(&mut state, &wheel_at(75.0, 100.0));
+        assert_eq!(list_widget(&root).offset(), 100.0);
+        assert_eq!(inner.offset(), 100.0);
+    }
+
+    fn wheel_at(y: f64, px: f64) -> InputEvent {
+        InputEvent::Scroll {
+            position: Point::new(10.0, y),
+            delta: ScrollDelta::Pixels(0.0, px),
+        }
     }
 
     // --- (2) A window shift relocates survivors (state preserved). ---
@@ -5064,9 +5114,12 @@ mod tests {
         };
 
         let mut root = converged(&mut logic, &fx.log);
-        // A real near-start approach at the top fires once — the trigger a
-        // real "load older" flow answers by prepending.
-        root.event(&mut (), &wheel(0.0));
+        // A real near-start approach — away past the threshold and back to
+        // the top — fires once: the trigger a real "load older" flow answers
+        // by prepending. (A wheel with no travel is no input at all now, so
+        // the approach has to be genuine.)
+        root.event(&mut (), &wheel(200.0));
+        root.event(&mut (), &wheel(-200.0));
         assert_eq!(loads.get(), 1, "near-start fires once at the top");
 
         // Prepend a single row — the anchor shifts the offset to 1 * extent,
@@ -5080,9 +5133,10 @@ mod tests {
             "anchored one row's worth off zero"
         );
 
-        // The very next event, still near the (corrected) start, must NOT
-        // refire.
-        root.event(&mut (), &wheel(0.0));
+        // The very next input scroll, still near the (corrected) start, must
+        // NOT refire.
+        root.event(&mut (), &wheel(10.0));
+        assert_eq!(list_widget(&root).offset(), ROW_EXTENT + 10.0);
         assert_eq!(
             loads.get(),
             1,
@@ -5091,7 +5145,7 @@ mod tests {
 
         // Scrolling away past 2x the threshold and back still rearms normally.
         root.event(&mut (), &wheel(500.0));
-        root.event(&mut (), &wheel(-450.0));
+        root.event(&mut (), &wheel(-460.0));
         assert_eq!(
             loads.get(),
             2,

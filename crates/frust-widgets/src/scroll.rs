@@ -24,7 +24,10 @@
 //! `create_ballistic_simulation` returns `None` — `RubberBand` always does —
 //! leaves post-release motion to [`ScrollWidget::tick`]/
 //! [`ScrollWidget::settle_tick`]), and the **wheel path**, which is a
-//! physics-independent hard clamp. A physics that *does* hand back a
+//! physics-independent hard clamp offered to the content under the pointer
+//! first — the innermost surface that can still move takes the notch, and one
+//! at the edge it pushes toward passes it outward
+//! ([`ScrollSurface::route_wheel`]). A physics that *does* hand back a
 //! [`Simulation`](crate::physics::Simulation) gets driven by the generic ballistic driver in
 //! [`ScrollSurface::pump_fling`] instead.
 //!
@@ -899,7 +902,7 @@ impl ScrollWidget {
 
     /// The event body behind [`ScrollWidget::event_at`]: the non-gesture
     /// variants are routed here, the wheel and pointer gesture by the core
-    /// ([`ScrollSurface::handle_wheel`], [`ScrollSurface::handle_pointer`]).
+    /// ([`ScrollSurface::route_wheel`], [`ScrollSurface::handle_pointer`]).
     fn route_event_at(&mut self, ctx: &mut EventCtx, event: &InputEvent, t_ms: f64) -> EventResult {
         // A fling/settle notification recorded at paint time is delivered on the
         // next event — except a Cancel, which clears it without firing.
@@ -931,7 +934,7 @@ impl ScrollWidget {
                     EventResult::Ignored
                 }
             }
-            InputEvent::Scroll { delta, .. } => self.handle_wheel(ctx, delta),
+            InputEvent::Scroll { delta, .. } => self.route_wheel(ctx, event, delta),
             InputEvent::Pointer(p) => self.route_pointer(ctx, event, p, t_ms),
             // Any other variant — a hit-tested `Scale` today — belongs to the
             // child, and so does its result: a child that handled it consumed
@@ -1024,6 +1027,12 @@ impl ScrollSurface for ScrollWidget {
 
     fn forward_pointer(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         self.child.event_child(ctx, event)
+    }
+
+    /// Hit-tested: the content only sees a wheel the pointer is over, so a
+    /// notch beside short content stays this surface's own.
+    fn forward_wheel(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        crate::authoring::route_event_single(&mut self.child, ctx, event)
     }
 
     fn take_over_from_content(&mut self, ctx: &mut EventCtx, position: Point) {
@@ -1280,6 +1289,72 @@ mod tests {
         let state_any: &mut dyn Any = &mut unit;
         let mut ctx = EventCtx::new(state_any, Point::ZERO, w.viewport);
         w.event_at(&mut ctx, event, t_ms);
+    }
+
+    fn dispatch_result(w: &mut ScrollWidget, event: &InputEvent, t_ms: f64) -> EventResult {
+        let mut unit = ();
+        let state_any: &mut dyn Any = &mut unit;
+        let mut ctx = EventCtx::new(state_any, Point::ZERO, w.viewport);
+        w.event_at(&mut ctx, event, t_ms)
+    }
+
+    /// An outer 200×100 viewport over a 300 px box holding an inner scroll
+    /// view with 1000 px of content: the outer can travel 200, the inner 700,
+    /// and every point of the outer viewport is over the inner.
+    fn nested(inner: &ScrollController) -> ScrollWidget {
+        let view: ScrollView<()> = scroll_view(
+            crate::SizedBox(None, Some(300.0))
+                .child(scroll_view(leaf(200.0, 1000.0)).controller(inner.clone())),
+        );
+        let mut counter = 0u64;
+        let mut w = View::<()>::build(&view, &mut BuildCtx::new(&mut counter));
+        let mut lctx = LayoutCtx::new();
+        w.layout(&mut lctx, &BoxConstraints::loose(Size::new(200.0, 100.0)));
+        w
+    }
+
+    #[test]
+    fn a_wheel_over_a_nested_scroll_view_moves_the_innermost_surface_that_can() {
+        let inner = ScrollController::new();
+        let mut w = nested(&inner);
+        assert_eq!((w.offset(), inner.offset()), (0.0, 0.0));
+        dispatch(&mut w, &scroll(50.0, false, 100.0), 0.0);
+        assert_eq!(
+            (w.offset(), inner.offset()),
+            (0.0, 100.0),
+            "the inner takes the notch"
+        );
+        // Exhaust the inner: the notch that lands it on its edge is still its
+        // own, the next one is the outer's.
+        dispatch(&mut w, &scroll(50.0, false, 600.0), 0.0);
+        assert_eq!((w.offset(), inner.offset()), (0.0, 700.0));
+        dispatch(&mut w, &scroll(50.0, false, 50.0), 0.0);
+        assert_eq!(
+            (w.offset(), inner.offset()),
+            (50.0, 700.0),
+            "an edge-blocked inner passes the wheel outward"
+        );
+        // Back up: the inner can move again, so it goes first; once at its top
+        // the outer takes the rest.
+        dispatch(&mut w, &scroll(50.0, false, -700.0), 0.0);
+        assert_eq!((w.offset(), inner.offset()), (50.0, 0.0));
+        dispatch(&mut w, &scroll(50.0, false, -50.0), 0.0);
+        assert_eq!((w.offset(), inner.offset()), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_wheel_no_nested_surface_can_take_is_left_for_an_enclosing_one() {
+        let inner = ScrollController::new();
+        let mut w = nested(&inner);
+        assert_eq!(
+            dispatch_result(&mut w, &scroll(50.0, false, -50.0), 0.0),
+            EventResult::Ignored
+        );
+        assert_eq!((w.offset(), inner.offset()), (0.0, 0.0));
+        assert_eq!(
+            dispatch_result(&mut w, &scroll(50.0, false, 50.0), 0.0),
+            EventResult::Handled
+        );
     }
 
     #[test]
