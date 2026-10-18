@@ -139,6 +139,17 @@ pub struct KeyEvent {
     pub repeat: bool,
 }
 
+impl KeyEvent {
+    /// Whether this is a bare, fresh Space or Enter: what activates a focused button-like control.
+    pub fn is_activation(&self) -> bool {
+        let pressed = match &self.key {
+            Key::Named(named) => *named == NamedKey::Enter,
+            Key::Character(text) => text == " ",
+        };
+        pressed && !self.repeat && self.modifiers == Modifiers::default()
+    }
+}
+
 /// A decoded clipboard/selection verb for the focused editable, so no widget decodes OS chords.
 /// `Copy`/`Cut` carry nothing (the widget answers with `EventCtx::write_clipboard`); `Paste`
 /// carries the text the shell already read. A widget may refuse any verb. Exhaustive on purpose:

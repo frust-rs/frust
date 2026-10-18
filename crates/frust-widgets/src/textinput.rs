@@ -4415,7 +4415,7 @@ mod tests {
                     s.value = v;
                 },
             ))
-            .child(crate::button("ok", |_s: &mut NestedState| {}))
+            .child(crate::button("ok", |_s: &mut NestedState| {}).disabled(true))
     }
 
     #[test]
@@ -4483,7 +4483,7 @@ mod tests {
                     s.value = v;
                 },
             )))
-            .child(crate::button("ok", |_s: &mut NestedState| {}))
+            .child(crate::button("ok", |_s: &mut NestedState| {}).disabled(true))
     }
 
     #[test]
