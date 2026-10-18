@@ -83,7 +83,8 @@ pub fn either<L, R>(cond: bool, l: impl FnOnce() -> L, r: impl FnOnce() -> R) ->
 }
 
 /// Retained widget for [`Either`]: the live arm's widget, delegated to for every
-/// pass.
+/// pass. Keyboard broadcasts ([`InputEvent::Shortcut`], [`InputEvent::Key`])
+/// reach the live arm only; the other arm does not exist.
 pub enum EitherWidget<L, R> {
     /// The left arm's widget.
     Left(L),
