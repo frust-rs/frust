@@ -229,10 +229,12 @@ trackpad, or touchscreen. Rows marked OWED have not been run:
 | Gate | Platform | Status |
 |------|----------|--------|
 | Desktop ctrl/⌘+wheel zoom + drag pan | Linux (local) | OWED |
+| Desktop ctrl/⌘+wheel zoom + drag pan | macOS 27.0.1 (MacBook, Apple M4), 2026-10-18 | PASS (conductor-driven synthetic input at main 0c941464: Fit frames the graph at 0.46x; ⌘+wheel zooms in to 0.62x and out to 0.34x about the pointer; a drag from empty canvas pans the offset by the drag; a plain wheel over the canvas does nothing — the page's scroll view takes every wheel, see the macOS scrollbar row) |
 | Touch pinch zoom + drag pan | Pixel 5 (redfin), Android 14, 2026-10-02 | PASS (all legs below) |
 | Touch pinch zoom + drag pan, plus tap/scroll/focus regression | iPhone SE (iPhone12,8), iOS 26.7, 2026-10-02 | PASS (all legs below; human-run) |
 | Same legs, single contact only | iOS Simulator (iPhone 17), iOS 26.2, 2026-10-02 | PASS except pinch: NOT RUN |
 | Scroll: every button (Jump to 0 / Jump to end / Animate to 50% / #150 Start / #42 Center / Animated #280 End) | Linux (local) | OWED |
+| Scroll: every button (Jump to 0 / Jump to end / Animate to 50% / #150 Start / #42 Center / Animated #280 End) | macOS 27.0.1, 2026-10-18 | PASS (offset 0 with Row 0 at the top; the max; half of the current max after the ease; Row 150 at the viewport top; the tall Row 42 centred; Row 280 ending at the viewport bottom — the max grows 16692 → 20436 as rows get measured) |
 | Scroll: a touch drag mid-`animate_to`/animated `scroll_to_item` interrupts the move | Android device | OWED |
 | Desktop: open / open-multi / save-as dialog round trip (portal-served) | Linux (conductor, linux-native rig: host-built playground on the rig's Xorg :20, dialogs from the host xdg-desktop-portal-gtk under DISPLAY=:20) | PASSED 2026-10-18 (GTK chooser with the Images filter; one file, two files, and a save with the suggested name all came back as names only) |
 | Desktop: relaunch restores window geometry; min size is enforced | Linux (conductor, linux-native rig) | PASSED 2026-10-18 (resize + move saved after the debounce, a 300×200 request clamped to 480×320, close wrote the final state, relaunch restored 480×320 at the saved position) |
@@ -246,7 +248,7 @@ trackpad, or touchscreen. Rows marked OWED have not been run:
 | Drag: Escape cancels a live pointer drag | Linux desktop (X11, NVIDIA T400), 2026-10-06 | PASS (ghost + highlight clear with the button still held) |
 | Drag: keyboard reorder (lift/cycle/drop) on the reorderable list | Linux desktop (X11, NVIDIA T400), 2026-10-06 | PASS (Enter / ArrowDown ×4 / Enter → "Last move: 0 → 2") |
 | Drag: OS file drop onto the file-drop zone | Linux desktop (X11, NVIDIA T400), 2026-10-06 | PASS (XDND v5 source; hover highlight, two names listed, hover+leave clears) |
-| Drag: desktop pointer drag / Esc cancel / keyboard reorder / OS file drop | macOS | OWED |
+| Drag: desktop pointer drag / Esc cancel / keyboard reorder / OS file drop | macOS 27.0.1 (MacBook, Apple M4), 2026-10-18 | PASS except a two-file drop (conductor-driven synthetic input at main 0c941464, window captures as evidence: a vertical-first drag lands the card in Doing with the ghost under the pointer, the source dimmed and the column highlighted, and drags back; Escape while held clears ghost and highlight and the later release changes nothing; click Item 1, Enter, ArrowDown ×4, Enter → "Last move: 0 -> 2"; a pointer drag of a row onto the 8 px gap reorders ("0 -> 1") and a release on a row cancels; Finder drag: the zone highlights while hovering, one file drops and its name is listed, Escape in Finder clears the highlight and the release drops nothing, dragging away clears it; a plain click on a card and a wheel over the board behave normally afterwards. NOT RUN: a two-file drop — synthetic Finder drags stopped initiating after the Escape-cancelled drag; needs a hand) |
 | Drag: desktop pointer drag / Esc cancel / keyboard reorder / OS file drop | Windows | OWED (binary builds and launches on the Windows 11 rig; the leg needs an interactive desktop session) |
 | Drag: long-press drag (kanban card between columns) | Pixel 5 (redfin), Android 14, 2026-10-06 | PASS (long-press lift, ghost, column highlight; drop lands both directions incl. a ~300 px vertical leg; reorder onto a gap → "Last move: 0 -> 2"; short tap / quick swipe unaffected) |
 
@@ -255,6 +257,7 @@ trackpad, or touchscreen. Rows marked OWED have not been run:
 - **Android injection**: `adb shell input motionevent DOWN x y`, hold ≥ 0.9 s, `MOVE` steps, `UP`; `input draganddrop` needs ≥ 15 s so the 500 ms long-press arms before the slop is crossed; the Done column is off-screen at 1080 px (known layout limit).
 - **Linux**: the playground runs on the host and presents on the container desktop, so dropped files must exist on the HOST filesystem; a drop aimed at a reorder row rather than its 8 px gap cancels by design.
 - **winit 0.30 on X11**: silently discards a whole drop whose uri-list contains a path that does not canonicalize on the app's filesystem while still answering XdndStatus/XdndFinished accepted — the app sees no event at all.
+- **macOS synthetic input**: a release posted by a second CGEvent process right after a window capture or an app switch was ignored once, while the same drags driven from one process landed; Finder drags stopped initiating after an Escape-cancelled drag. Rig quirks, not app behaviour.
 
 iOS legs (Phase A touch-ABI gate, build at `8a263d79`). The Simulator legs were
 driven by `idb` with screenshots. Pinch could not run there: Xcode 27 ships no
