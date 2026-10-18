@@ -859,8 +859,10 @@ fn paste_input_event(text: PasteText) -> InputEvent {
 /// field is silently typed into another. That is what this refuses.
 ///
 /// [`RenderRoot::focus_epoch`] is the right counter for the question and
-/// `focus_ime_generation` is not: this one advances once per honoured focus
-/// claim and once per session release and on nothing else, so it moves when
+/// `focus_ime_generation` is not: this one advances once per honoured claim (an
+/// `EventCtx::request_focus` or a traversal grant) and once per session release and on
+/// nothing else, so a Tab step that lands moves it by two and one that lands nowhere leaves
+/// it unchanged; it moves when
 /// focus crosses two fields publishing identical surfaces, and stands still
 /// through an edit or a caret move inside the one session. Both accessors
 /// document the contrast.
