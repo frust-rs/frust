@@ -268,6 +268,9 @@ impl Gpu {
 fn log_incremental_present_support(adapter: &wgpu::Adapter) {
     #[cfg(not(target_vendor = "apple"))]
     {
+        // SAFETY: `as_hal` only asks that the hal adapter not outlive the wgpu
+        // adapter and that no hal state is mutated; the guard is dropped inside
+        // this expression after a read-only capability query.
         let supported = unsafe { adapter.as_hal::<wgpu::hal::api::Vulkan>() }.map(|hal_adapter| {
             hal_adapter
                 .physical_device_capabilities()
@@ -317,6 +320,27 @@ impl Rect {
     }
 }
 
+/// Move the square one step along its track, remembering where it was. A free
+/// function over the two rects so it can run while the GPU side is borrowed —
+/// it must run only once a frame has actually been acquired, or a skipped
+/// frame would move the square without presenting it and the next `exact`
+/// hint would name a position that was never on screen.
+fn step_square(square: &mut Rect, prev: &mut Rect, cfg: &Config, width: u32, height: u32) {
+    *prev = *square;
+    let row_pitch = cfg.size + 8;
+    let mut x = square.x + cfg.step;
+    let mut y = square.y;
+    if x + cfg.size > width {
+        x = 0;
+        y += row_pitch;
+        if y + cfg.size > height {
+            y = 0;
+        }
+    }
+    square.x = x;
+    square.y = y;
+}
+
 struct App {
     cfg: Config,
     window: Option<Arc<Window>>,
@@ -352,29 +376,9 @@ impl App {
         }
     }
 
-    fn advance(&mut self, width: u32, height: u32) {
-        self.prev_square = self.square;
-        let row_pitch = self.cfg.size + 8;
-        let mut x = self.square.x + self.cfg.step;
-        let mut y = self.square.y;
-        if x + self.cfg.size > width {
-            x = 0;
-            y += row_pitch;
-            if y + self.cfg.size > height {
-                y = 0;
-            }
-        }
-        self.square.x = x;
-        self.square.y = y;
-    }
-
     fn render(&mut self) {
-        let (width, height) = match &self.gpu {
-            Some(gpu) => (gpu.config.width, gpu.config.height),
-            None => return,
-        };
-        self.advance(width, height);
         let Some(gpu) = self.gpu.as_mut() else { return };
+        let (width, height) = (gpu.config.width, gpu.config.height);
 
         if let Some(fps) = self.cfg.fps {
             let now = Instant::now();
@@ -392,7 +396,10 @@ impl App {
                 t
             }
             Cst::Outdated | Cst::Lost => {
-                gpu.resize(width, height);
+                // Reconfigure at the window's current size, not the stale config.
+                let size = self.window.as_ref().map(|w| w.inner_size());
+                let (w, h) = size.map_or((width, height), |s| (s.width, s.height));
+                gpu.resize(w, h);
                 self.force_full = true;
                 return;
             }
@@ -403,6 +410,14 @@ impl App {
             }
         };
 
+        // Only now — a frame is acquired and will be presented — does the square move.
+        step_square(
+            &mut self.square,
+            &mut self.prev_square,
+            &self.cfg,
+            width,
+            height,
+        );
         let marker = Rect {
             x: width.saturating_sub(32),
             y: 8,
