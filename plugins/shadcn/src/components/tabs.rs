@@ -284,15 +284,6 @@ fn label_style(theme: Option<&Theme>) -> TextStyle {
     )
 }
 
-/// Whether `key` activates the focused tab.
-fn is_activation_key(key: &KeyEvent) -> bool {
-    match &key.key {
-        Key::Named(NamedKey::Enter) => true,
-        Key::Character(text) => text == " ",
-        _ => false,
-    }
-}
-
 /// Which way an arrow key moves along the strip, or `None`.
 fn arrow_step(key: &KeyEvent) -> Option<isize> {
     match &key.key {
@@ -792,7 +783,7 @@ impl Widget for TabsWidget {
                     self.request_value(ctx, next);
                     return EventResult::Handled;
                 }
-                if is_activation_key(key) && self.enabled(self.focused_tab) {
+                if key.is_activation() && self.enabled(self.focused_tab) {
                     let index = self.focused_tab;
                     self.request_value(ctx, index);
                     return EventResult::Handled;

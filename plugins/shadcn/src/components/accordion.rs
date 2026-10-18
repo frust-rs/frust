@@ -54,7 +54,7 @@ use frust::authoring::{
 use frust::{AnimationController, Curve, TextView, Theme, text};
 
 use crate::components::input::FALLBACK;
-use crate::components::native_select::{activates, draw_chevron};
+use crate::components::native_select::draw_chevron;
 use crate::hit::{inside, presses};
 use crate::style;
 use crate::tokens::ShadcnTokens;
@@ -550,7 +550,7 @@ impl Widget for AccordionWidget {
             let Some(index) = self.focused else {
                 return EventResult::Ignored;
             };
-            if !activates(&key.key) || self.rows[index].disabled {
+            if !key.is_activation() || self.rows[index].disabled {
                 return EventResult::Ignored;
             }
             self.toggle(index, ctx);

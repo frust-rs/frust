@@ -67,7 +67,7 @@ use crate::components::dropdown_menu::{
 use crate::components::input::{
     FALLBACK, FieldChrome, input_border, paint_field_border, resolve_field_border,
 };
-use crate::components::native_select::{activates, draw_chevron};
+use crate::components::native_select::draw_chevron;
 use crate::components::popover::{PanelHandle, PanelStyle};
 use crate::hit::{inside, presses};
 use crate::overlay::{
@@ -573,7 +573,7 @@ impl Widget for SelectTriggerWidget {
             return routed;
         }
         if let InputEvent::Key(key) = event {
-            if self.disabled || !activates(&key.key) {
+            if self.disabled || !key.is_activation() {
                 return EventResult::Ignored;
             }
             self.toggle(ctx);

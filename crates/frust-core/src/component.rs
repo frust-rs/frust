@@ -153,7 +153,8 @@ impl<C: Component> Drop for ComponentWidget<C> {
 impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
     type Element = ComponentWidget<C>;
 
-    fn build(&self, _ctx: &mut BuildCtx<'_>) -> Self::Element {
+    fn build(&self, ctx: &mut BuildCtx<'_>) -> Self::Element {
+        let hints = ctx.shortcut_hints();
         let owner = Owner::new();
         #[cfg(feature = "hotpatch")]
         let witness = SeamWitness::of::<C>();
@@ -173,7 +174,7 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
             #[cfg(not(feature = "hotpatch"))]
             let view = AnyView::new(self.component.build(&mut state));
             let mut next_id = 0u64;
-            let mut inner = BuildCtx::new(&mut next_id);
+            let mut inner = BuildCtx::new(&mut next_id).with_shortcut_hints(hints);
             // A fresh pod holds no focus link, and a build tears nothing down, so no
             // session can be orphaned (see `BuildCtx::has_focus`).
             inner.set_has_focus(false);
@@ -201,6 +202,7 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
         element: &mut Self::Element,
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
+        let hints = ctx.shortcut_hints();
         // Before anything forms `&mut C::State`: a widget another image built with a
         // different layout is left as it is.
         #[cfg(feature = "hotpatch")]
@@ -234,7 +236,7 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
                     let any: &dyn Any = &**boxed;
                     any.type_id()
                 };
-                let mut inner = BuildCtx::new(&mut element.next_id);
+                let mut inner = BuildCtx::new(&mut element.next_id).with_shortcut_hints(hints);
                 // Extend the focus chain by this component's child link (the
                 // `ChildPod::paint_child` composition, spelled by hand).
                 inner.set_has_focus(outer_has_focus && child_focused);
@@ -278,12 +280,13 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
         if crate::hotpatch::verify_witness::<C>(element.witness).is_err() {
             return;
         }
+        let hints = ctx.shortcut_hints();
         // Forward teardown to the child under the owner, then dispose it. The focus
         // chain crosses the boundary as in `rebuild` (see `BuildCtx::has_focus`).
         let inner_has_focus = ctx.has_focus() && element.child.is_focused();
         element.owner.clone().with(|| {
             let mut next_id = element.next_id;
-            let mut inner = BuildCtx::new(&mut next_id);
+            let mut inner = BuildCtx::new(&mut next_id).with_shortcut_hints(hints);
             inner.set_has_focus(inner_has_focus);
             if let Some(boxed) = element.child.widget_mut().downcast_mut::<Box<dyn Widget>>() {
                 element.prev.teardown(boxed, &mut inner);

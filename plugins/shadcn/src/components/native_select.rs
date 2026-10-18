@@ -31,9 +31,9 @@ use std::rc::Rc;
 
 use frust::authoring::{
     Action, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color, ErasedCallback,
-    EventCtx, EventResult, InputEvent, Key, LayoutCtx, NamedKey, PaintCtx, PaintScene, Point,
-    PointerPhase, Role, SemanticsCtx, Size, ThemeTextColor, ThemeTextType, View, Widget,
-    build_child, erase_callback, rebuild_child, route_event_single, teardown_child, visit_children,
+    EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, Role,
+    SemanticsCtx, Size, ThemeTextColor, ThemeTextType, View, Widget, build_child, erase_callback,
+    rebuild_child, route_event_single, teardown_child, visit_children,
 };
 use frust::{Theme, text};
 
@@ -270,20 +270,6 @@ impl<State: 'static> View<State> for NativeSelectView<State> {
     }
 }
 
-/// Whether `key` activates a focused trigger (`Space`/`Enter`, the keys a native
-/// `<select>` opens on).
-///
-/// Space has no [`NamedKey`] variant — the framework's key vocabulary enumerates
-/// only keys with *editing* semantics and delivers everything else as resolved
-/// text — so it is matched as the character it produces.
-pub(crate) fn activates(key: &Key) -> bool {
-    match key {
-        Key::Named(NamedKey::Enter) => true,
-        Key::Character(text) => text == " ",
-        Key::Named(_) => false,
-    }
-}
-
 impl NativeSelectWidget {
     /// Fire the activation callback and clear the press state.
     fn activate(&mut self, ctx: &mut EventCtx) {
@@ -369,7 +355,7 @@ impl Widget for NativeSelectWidget {
             return routed;
         }
         if let InputEvent::Key(key) = event {
-            if self.disabled || !activates(&key.key) {
+            if self.disabled || !key.is_activation() {
                 return EventResult::Ignored;
             }
             self.activate(ctx);
@@ -474,6 +460,7 @@ impl Widget for NativeSelectWidget {
 mod tests {
     use super::*;
     use frust::authoring::text::TextContext;
+    use frust::authoring::{Key, NamedKey};
     use frust::authoring::{KeyEvent, Modifiers, PointerButton, PointerEvent, Rect, Shape};
     use frust::{Brightness, CursorIcon, FrameTime};
     use frust_core::RenderRoot;
