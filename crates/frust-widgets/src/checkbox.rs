@@ -8,7 +8,8 @@
 //! value back in (the masonry rule: application state is the source of truth).
 //!
 //! A checkbox is a Tab stop; while focused, a bare Space or Enter requests the toggle exactly as
-//! a click does. A primary pointer press also takes focus, so the next Tab continues from here.
+//! a click does. A primary mouse press also takes focus, so the next Tab continues from here; a touch tap never
+//! claims it.
 
 use std::rc::Rc;
 
@@ -22,7 +23,7 @@ use kurbo::{Point, Size};
 use peniko::Color;
 
 use crate::authoring::presses;
-use crate::shortcuts::activation;
+use crate::shortcuts::{activation, press_claims_focus};
 use crate::text;
 
 /// Side length of the check box, in logical px.
@@ -199,7 +200,9 @@ impl Widget for CheckboxWidget {
                 if !presses(p) {
                     return EventResult::Ignored;
                 }
-                ctx.request_focus();
+                if press_claims_focus(ctx) {
+                    ctx.request_focus();
+                }
                 self.pressed = true;
                 self.captured = true;
                 ctx.capture_pointer();
@@ -252,7 +255,7 @@ impl Widget for CheckboxWidget {
         });
     }
 
-    /// Always a Tab stop; a primary press also takes focus (see the module docs).
+    /// Always a Tab stop; a primary mouse press also takes focus (see the module docs).
     fn is_focusable(&self) -> bool {
         true
     }
@@ -500,6 +503,33 @@ mod tests {
             root.event(&mut state, &key(Key::Named(NamedKey::Tab)));
             root.event(&mut state, &key(Key::Character(" ".to_string())));
             assert_eq!(state.toggles, 11, "Tab went to the second checkbox");
+        }
+
+        #[test]
+        fn a_touch_tap_toggles_without_claiming_focus() {
+            let mut logic = |_: &mut ToggleState| {
+                crate::column().child(checkbox(false, "a", |s: &mut ToggleState, _| {
+                    s.toggles += 1
+                }))
+            };
+            let mut root: RenderRoot<ToggleState, crate::FlexView<ToggleState>> = RenderRoot::new();
+            let mut state = ToggleState::default();
+            let mut tcx = frust_text::TextContext::new();
+            root.rebuild(&mut logic, &mut state);
+            root.layout_with_text(Size::new(200.0, 200.0), &mut tcx as &mut dyn Any);
+            root.paint(&mut DiscardScene, FrameTime::ZERO);
+            for phase in [PointerPhase::Down, PointerPhase::Up] {
+                let InputEvent::Pointer(event) = ev(phase, 5.0, 10.0) else {
+                    unreachable!()
+                };
+                let contact = InputEvent::PointerContact {
+                    pointer_id: frust_core::event::PointerId::touch(0),
+                    event,
+                };
+                root.event(&mut state, &contact);
+            }
+            assert_eq!(state.toggles, 1);
+            assert!(!root.is_focus_active(), "a tap leaves focus alone");
         }
 
         #[test]

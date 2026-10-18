@@ -12,6 +12,7 @@
 
 use std::rc::Rc;
 
+use frust_core::event::PointerSource;
 use frust_core::{
     BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Chord, EventCtx, EventResult, InputEvent,
     LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, ShortcutDecl, ShortcutId, ShortcutScope,
@@ -228,6 +229,12 @@ impl<W: Widget> Widget for ShortcutsWidget<W> {
 /// Whether the widget holds focus and `event` is an activation key (see [`KeyEvent::is_activation`]).
 pub(crate) fn activation(ctx: &EventCtx, event: &InputEvent) -> bool {
     ctx.has_focus() && matches!(event, InputEvent::Key(key) if key.is_activation())
+}
+
+/// Whether a primary press may claim focus: only a mouse contact does. A touch tap activates
+/// the control but leaves focus alone, so a focused text field keeps its session and keyboard.
+pub(crate) fn press_claims_focus(ctx: &EventCtx) -> bool {
+    ctx.pointer_id().source == PointerSource::Mouse
 }
 
 #[cfg(test)]

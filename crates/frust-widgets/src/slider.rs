@@ -9,8 +9,8 @@
 //! new value back in. Horizontal only for v1.
 //!
 //! A slider is a Tab stop; while focused, a bare Left/Down arrow requests the value `0.05`
-//! lower, Right/Up `0.05` higher, Home `0.0` and End `1.0` (auto-repeat included). A pointer
-//! primary press also takes focus, so the next Tab continues from here.
+//! lower, Right/Up `0.05` higher, Home `0.0` and End `1.0` (auto-repeat included). A primary
+//! mouse press also takes focus, so the next Tab continues from here; a touch tap never claims it.
 //!
 //! # Design-language branch
 //!
@@ -49,6 +49,7 @@ use kurbo::{Point, Size};
 use peniko::{Brush, Color, Gradient};
 
 use crate::authoring::presses;
+use crate::shortcuts::press_claims_focus;
 
 /// How far one arrow key moves a focused slider: twenty steps across the track.
 const KEY_STEP: f64 = 0.05;
@@ -329,7 +330,9 @@ impl Widget for SliderWidget {
                 if !presses(p) {
                     return EventResult::Ignored;
                 }
-                ctx.request_focus();
+                if press_claims_focus(ctx) {
+                    ctx.request_focus();
+                }
                 self.captured = true;
                 ctx.capture_pointer();
                 let v = value_from_x(p.position.x, ctx.size().width);
@@ -367,7 +370,7 @@ impl Widget for SliderWidget {
         });
     }
 
-    /// Always a Tab stop; a primary press also takes focus (see the module docs).
+    /// Always a Tab stop; a primary mouse press also takes focus (see the module docs).
     fn is_focusable(&self) -> bool {
         true
     }
@@ -683,6 +686,33 @@ mod tests {
             root.event(&mut state, &key(NamedKey::Tab, false));
             root.event(&mut state, &key(NamedKey::ArrowRight, false));
             assert_eq!(state.changes, 11, "Tab went to the second slider");
+        }
+
+        #[test]
+        fn a_touch_tap_changes_the_value_without_claiming_focus() {
+            let mut logic = |s: &mut Val| {
+                crate::column().child(slider(s.value, |s: &mut Val, _| s.changes += 1))
+            };
+            let mut root: RenderRoot<Val, crate::FlexView<Val>> = RenderRoot::new();
+            let mut state = Val {
+                value: 0.5,
+                changes: 0,
+            };
+            root.rebuild(&mut logic, &mut state);
+            root.layout(Size::new(200.0, 100.0));
+            root.paint(&mut DiscardScene, FrameTime::ZERO);
+            for phase in [PointerPhase::Down, PointerPhase::Up] {
+                let InputEvent::Pointer(event) = ev(phase, 50.0) else {
+                    unreachable!()
+                };
+                let contact = InputEvent::PointerContact {
+                    pointer_id: frust_core::event::PointerId::touch(0),
+                    event,
+                };
+                root.event(&mut state, &contact);
+            }
+            assert_eq!(state.changes, 1);
+            assert!(!root.is_focus_active(), "a tap leaves focus alone");
         }
 
         #[test]

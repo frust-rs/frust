@@ -63,7 +63,8 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   and paint contexts, a component's inner build included; the thread-local `LAST_HINTS` is gone, and
   a context no root seeded reads empty.
 - Focus behaviour. The baseline `Button`, `Checkbox`, `Radio` and `Slider` take focus on a primary
-  press (pointer-sourced, so `KeyboardOnly` paints no ring) and the next Tab continues from there. A
+  mouse press (pointer-sourced, so `KeyboardOnly` paints no ring) and the next Tab continues from
+  there; a touch tap activates without claiming focus, so a focused field keeps its keyboard. A
   focused `TextInput`'s bare Escape blurs it and is declined, so a modal around it closes on the
   first Escape. A paint that registers a modal surface ends a main-tree focus session (nothing
   restores it on close). `OverlaySlot` visits its floated pod for Tab traversal, so a non-modal

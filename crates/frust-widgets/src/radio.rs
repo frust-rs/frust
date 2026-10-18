@@ -13,7 +13,8 @@
 //! application state is the source of truth).
 //!
 //! A radio is a Tab stop; while focused, a bare Space or Enter fires `on_select` exactly as a
-//! click does. A primary pointer press also takes focus, so the next Tab continues from here. There
+//! click does. A primary mouse press also takes focus, so the next Tab continues from here; a touch tap
+//! never claims it. There
 //! is no arrow-key movement within a group (there is no group widget, below).
 //!
 //! **No group container in v1.** A radio group is app-level: a column of
@@ -36,7 +37,7 @@ use kurbo::{Point, Size};
 use peniko::{Brush, Color};
 
 use crate::authoring::presses;
-use crate::shortcuts::activation;
+use crate::shortcuts::{activation, press_claims_focus};
 use crate::text;
 
 /// Outer diameter of the radio ring, in logical px (matches
@@ -240,7 +241,9 @@ impl Widget for RadioWidget {
                 if !presses(p) {
                     return EventResult::Ignored;
                 }
-                ctx.request_focus();
+                if press_claims_focus(ctx) {
+                    ctx.request_focus();
+                }
                 self.pressed = true;
                 self.captured = true;
                 ctx.capture_pointer();
@@ -295,7 +298,7 @@ impl Widget for RadioWidget {
         });
     }
 
-    /// Always a Tab stop; a primary press also takes focus (see the module docs).
+    /// Always a Tab stop; a primary mouse press also takes focus (see the module docs).
     fn is_focusable(&self) -> bool {
         true
     }
@@ -542,6 +545,32 @@ mod tests {
             root.event(&mut state, &key(Key::Named(NamedKey::Tab), false));
             root.event(&mut state, &key(Key::Character(" ".into()), false));
             assert_eq!(state.selects, 11, "Tab went to the second radio");
+        }
+
+        #[test]
+        fn a_touch_tap_selects_without_claiming_focus() {
+            let mut logic = |_: &mut SelectState| {
+                crate::column()
+                    .child(radio(false, "a").on_select(|s: &mut SelectState| s.selects += 1))
+            };
+            let mut root: RenderRoot<SelectState, crate::FlexView<SelectState>> = RenderRoot::new();
+            let mut state = SelectState::default();
+            let mut tcx = frust_text::TextContext::new();
+            root.rebuild(&mut logic, &mut state);
+            root.layout_with_text(Size::new(200.0, 200.0), &mut tcx as &mut dyn Any);
+            root.paint(&mut DiscardScene, FrameTime::ZERO);
+            for phase in [PointerPhase::Down, PointerPhase::Up] {
+                let InputEvent::Pointer(event) = pointer(phase) else {
+                    unreachable!()
+                };
+                let contact = InputEvent::PointerContact {
+                    pointer_id: frust_core::event::PointerId::touch(0),
+                    event,
+                };
+                root.event(&mut state, &contact);
+            }
+            assert_eq!(state.selects, 1);
+            assert!(!root.is_focus_active(), "a tap leaves focus alone");
         }
 
         #[test]
