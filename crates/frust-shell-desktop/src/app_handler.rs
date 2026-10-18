@@ -1553,6 +1553,30 @@ fn map_named_key(key: WinitNamedKey) -> Option<NamedKey> {
         WinitNamedKey::Cut => NamedKey::Cut,
         WinitNamedKey::Paste => NamedKey::Paste,
         WinitNamedKey::Insert => NamedKey::Insert,
+        WinitNamedKey::F1 => NamedKey::F1,
+        WinitNamedKey::F2 => NamedKey::F2,
+        WinitNamedKey::F3 => NamedKey::F3,
+        WinitNamedKey::F4 => NamedKey::F4,
+        WinitNamedKey::F5 => NamedKey::F5,
+        WinitNamedKey::F6 => NamedKey::F6,
+        WinitNamedKey::F7 => NamedKey::F7,
+        WinitNamedKey::F8 => NamedKey::F8,
+        WinitNamedKey::F9 => NamedKey::F9,
+        WinitNamedKey::F10 => NamedKey::F10,
+        WinitNamedKey::F11 => NamedKey::F11,
+        WinitNamedKey::F12 => NamedKey::F12,
+        WinitNamedKey::F13 => NamedKey::F13,
+        WinitNamedKey::F14 => NamedKey::F14,
+        WinitNamedKey::F15 => NamedKey::F15,
+        WinitNamedKey::F16 => NamedKey::F16,
+        WinitNamedKey::F17 => NamedKey::F17,
+        WinitNamedKey::F18 => NamedKey::F18,
+        WinitNamedKey::F19 => NamedKey::F19,
+        WinitNamedKey::F20 => NamedKey::F20,
+        WinitNamedKey::F21 => NamedKey::F21,
+        WinitNamedKey::F22 => NamedKey::F22,
+        WinitNamedKey::F23 => NamedKey::F23,
+        WinitNamedKey::F24 => NamedKey::F24,
         _ => return None,
     })
 }
@@ -4540,9 +4564,16 @@ mod tests {
     }
 
     #[test]
+    fn map_named_key_delivers_f1_to_f24_and_drops_f25() {
+        assert_eq!(map_named_key(WinitNamedKey::F1), Some(NamedKey::F1));
+        assert_eq!(map_named_key(WinitNamedKey::F24), Some(NamedKey::F24));
+        assert_eq!(map_named_key(WinitNamedKey::F25), None);
+    }
+
+    #[test]
     fn map_named_key_is_none_for_unmapped_named_keys() {
         // No editing semantics for these — they must not be misreported.
-        assert_eq!(map_named_key(WinitNamedKey::F1), None);
+        assert_eq!(map_named_key(WinitNamedKey::F25), None);
         assert_eq!(map_named_key(WinitNamedKey::Alt), None);
         assert_eq!(map_named_key(WinitNamedKey::CapsLock), None);
     }
@@ -4836,7 +4867,7 @@ mod tests {
     #[test]
     fn map_key_event_is_none_for_unmapped_named_key_with_no_text() {
         let event = map_key_event(
-            &WinitKey::Named(WinitNamedKey::F1),
+            &WinitKey::Named(WinitNamedKey::F25),
             None,
             ElementState::Pressed,
             false,
@@ -4851,7 +4882,7 @@ mod tests {
         // The character carve-out is Space's alone: any other named key with no
         // editing semantics stays dropped, text payload or not.
         let event = map_key_event(
-            &WinitKey::Named(WinitNamedKey::F1),
+            &WinitKey::Named(WinitNamedKey::F25),
             Some("\u{f704}"),
             ElementState::Pressed,
             false,
