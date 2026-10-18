@@ -313,6 +313,8 @@ impl<State: 'static> crate::authoring::VisitPods for ActiveTransition<State> {
 /// Broadcasts reach every page, except [`InputEvent::Shortcut`], which reaches
 /// only the input-routed page(s): a covered page still paints and declares its
 /// shortcuts, but never answers one, so the root falls through past it.
+/// [`InputEvent::Key`] routes to the input-routed page(s) only, and nothing is
+/// routed while a transition runs.
 pub struct NavigatorWidget<State: 'static> {
     pub(super) pages: Vec<PageEntry<State>>,
     /// Pop-result callbacks awaiting `&mut State` — flushed at the start of the

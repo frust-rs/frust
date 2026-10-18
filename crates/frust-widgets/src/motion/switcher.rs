@@ -270,6 +270,9 @@ impl<State: 'static, P: TransitionPattern + Clone + 'static> PatternSwitcherView
 /// [`ChildPod`](frust_core::ChildPod), so no `State` is captured — which is why
 /// it is torn down at the switch; see the [module docs](self)'s frozen-child
 /// section).
+///
+/// Keyboard broadcasts ([`InputEvent::Shortcut`], [`InputEvent::Key`]) reach the
+/// incoming child only; the frozen exiting child paints but never answers one.
 pub struct PatternSwitcherWidget<P: TransitionPattern + Clone + 'static> {
     key: ChildKey,
     child: ChildPod,
@@ -1048,6 +1051,31 @@ mod tests {
         // And the switcher's own teardown touches nothing already finished.
         v3.teardown(&mut w, &mut BuildCtx::new(&mut counter));
         assert_eq!((teardowns.get(), torn.get()), (1, 1));
+    }
+
+    #[test]
+    fn a_shortcut_reaches_the_incoming_child_not_the_frozen_exiting_one() {
+        use crate::test_support::probe;
+        let short = Timing::Duration(std::time::Duration::from_millis(100), Curve::Linear);
+        let v1: PatternSwitcherView<Vec<u32>, _> =
+            pattern_switcher(1u32, FadeThrough, probe(1)).timing(short);
+        let mut w = build(&v1);
+        let mut counter = 0u64;
+        let v2: PatternSwitcherView<Vec<u32>, _> =
+            pattern_switcher(2u32, FadeThrough, probe(2)).timing(short);
+        v2.rebuild(&v1, &mut w, &mut BuildCtx::new(&mut counter));
+        assert!(
+            w.exiting.is_some(),
+            "the old child is frozen, still painted"
+        );
+        let size = w.layout(&mut LayoutCtx::new(), &loose());
+        let mut log: Vec<u32> = Vec::new();
+        let mut ectx = EventCtx::new(&mut log, Point::ZERO, size);
+        w.event(
+            &mut ectx,
+            &InputEvent::Shortcut(frust_core::ShortcutId::next()),
+        );
+        assert_eq!(log, vec![2], "only the incoming child answers");
     }
 
     // --- A navigator under the outgoing child leaves the tree AT the switch:
