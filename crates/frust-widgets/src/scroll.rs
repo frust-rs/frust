@@ -5258,4 +5258,53 @@ mod scrollbar_tests {
         assert!(send(&mut w, PointerPhase::Move, 195.0, 50.0));
         assert!(w.core.scrollbar.as_ref().unwrap().is_widened());
     }
+
+    #[test]
+    fn dropping_the_widget_leaves_no_controller_binding_or_reference() {
+        use std::rc::Rc;
+
+        let app = ScrollController::new();
+        let implicit_view = base().scrollbar(ScrollbarStyle::default());
+        let owned_view = base()
+            .controller(app.clone())
+            .scrollbar(ScrollbarStyle::default());
+        let implicit = build(&implicit_view);
+        let handle = implicit
+            .core
+            .controller
+            .as_ref()
+            .expect("implicit binding")
+            .controller()
+            .clone();
+        let owned = build(&owned_view);
+        assert!(handle.is_attached() && app.is_attached());
+
+        let sentinel = Rc::new(());
+        let subs: Vec<_> = [&handle, &app]
+            .iter()
+            .map(|c| {
+                let held = Rc::clone(&sentinel);
+                c.on_change(move |_| {
+                    let _ = &held;
+                })
+            })
+            .collect();
+        assert_eq!(Rc::strong_count(&sentinel), 3);
+
+        drop(implicit);
+        drop(owned);
+        assert!(!handle.is_attached(), "implicit binding released on drop");
+        assert!(!app.is_attached(), "the app handle is detached on drop");
+
+        drop(handle);
+        drop(app);
+        drop(implicit_view);
+        drop(owned_view);
+        assert_eq!(
+            Rc::strong_count(&sentinel),
+            1,
+            "the scrollbar state held no Rc to either controller"
+        );
+        drop(subs);
+    }
 }
