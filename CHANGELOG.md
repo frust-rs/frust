@@ -37,6 +37,13 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   to 11 ms (66 to 3); the persisted blob grows from 328 B (0 pipelines) to 117,143 B (18) and from
   314 B to 116,758 B; S1 steady state unchanged. Method and every row:
   [docs/PERFORMANCE_BASELINES.md](docs/PERFORMANCE_BASELINES.md) § Engine close-out per device.
+- Device open. The engine's shader modules are registered at install and created on first use, the
+  first frame's four side by side on a short-lived pool, instead of all twelve at install: device
+  open (`adapter_ready`) is back to September's figures on the three phones measured, OnePlus 9 111
+  to 32 ms, Pixel 5 189 to 40, iPhone SE 82 to 12; `first_frame_presented` 124 to 67, 214 to 108 and
+  169 to 108.5 ms. On Android the first frame now waits for part of the creation (OnePlus 9 11 to
+  32 ms, Pixel 5 14 to 54 after encode); `android-first-frame-carries-shader-module-creation` in
+  docs/LIMITATIONS.md.
 
 ### Changed
 
