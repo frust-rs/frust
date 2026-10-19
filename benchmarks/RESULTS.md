@@ -741,6 +741,39 @@ Cycle health — Frust (profile) `s3-create1k` reopens per kept run: 19–19; Fl
 
 **First external cold start and idle rows on iOS; the framework first frame doubled.** FrontBoard bootstrap → scene-content-ready: Frust 183 ms median (173/183/250 kept; 251 discarded) against Flutter 171 (171/172/161) — Flutter is 12 ms faster on the one instrument that measures both apps the same way, and Frust's launches are bimodal. Idle over the recorded windows: Frust ~1.8 % CPU / 38.9 MiB footprint against Flutter ~4.0 % / 47.7 MiB (five sampled runs each, 77 / 80 samples); this build's S7 page is frame-gate idle (3–6 raw frame lines per 60 s run, where the 2026-09-06 build emitted ~61 per second), so the idle rows read a resting app. The framework-reported first frame is 201 ms median (95–304; 100 and 64–176 in September): `adapter_ready` rose 22 → 84 ms (75–107; 21–34 before) and the font preinit join moved with it — four launches joined at 56–113 ms and eight at 177–273 (six at 51–65 and six at 100–159 before) — with `first_frame_presented` = `font_preinit_joined` + 5–33 ms in eleven of the twelve launches (the twelfth presented 8 ms after `adapter_ready`, at 95). The ≤ 85 ms criterion is missed on every launch; Flutter's own entry span is 9 ms (6–49).
 
+### Startup sub-step split (2026-10-19)
+
+**Method.** The `adapter_ready` move read with the sub-step stamps of PR #97 (`main` `ccd0b47e`; this run's base is `a5f284d7`, which adds only benchmark notes). One signed profile `Runner.app` built from the checkout's own CLI (`frust build ios --profile --define FRUST_TRACE_RAW=1` in `benchmarks/frust_bench`), installed once by `run.sh`, then `run.sh s7 --app frust --platform ios --runs 12 --duration 60`: same iPhone SE (iPhone12,8) and iOS (26.7.1, build 23H30) as 2026-10-17, USB power, Xcode.app quit, no Instruments, no sysmon, no sampler, nothing else on the phone (identifier redacted). All 12 launches carry a startup line; medians and [min–max] are over all 12, as the S7 rows above. The ten added keys are durations (`…_ms`), truncated to whole milliseconds; the existing keys are offsets from `init_entry`. The iOS shell stamps `render_thread_start_ms` (not an `install_rest` carved from it); it is printed after `adapter_ready` but is the part of the gap before the install starts (render-thread spawn and scheduling, derived as the gap less the install's own total).
+
+| Key (ms) | today, 12 launches, median [min–max] |
+|---|---|
+| `font_preinit_joined` | 150.5 [55–344] |
+| `adapter_ready` | 82 [77–151] |
+| `first_rebuild_done` | 163.5 [83–380] |
+| `first_encode_done` | 163.5 [83–380] |
+| `first_frame_presented` | 169 [89–397] |
+| **gap** `adapter_ready − init_entry` | 82 [77–151] |
+| `engine_surface_ms` | 9.5 [8–65] |
+| — of which `device_create_ms` | 9 [8–60] |
+| `cache_seed_ms` | 0 [0–0] |
+| `caps_probe_ms` | 0 [0–0] |
+| **`shader_modules_ms`** | 69 [64–79] |
+| `warm_up_start_ms` | 0 [0–0] |
+| `engine_rest_ms` | 0 [0–2] |
+| `install_rest_ms` | 0 [0–1] |
+| sum of the seven install parts | 79.5 [74–140] |
+| gap − sum (≈ `render_thread_start_ms` + truncation) | 3 [2–11] |
+| `render_thread_start_ms` (inside the gap) | 1 [0–8] |
+| `font_system_ms` (preinit thread) | 149.5 [55–341] |
+| `font_app_sync_ms` | 0 [0–0] |
+| `first_encode_done → first_frame_presented` | 6 [5–17] |
+
+**Verdict — the owning sub-step.** `shader_modules_ms` owns the move: **69 of the 82 ms gap `adapter_ready − init_entry` (84 % median; 83 % on the 11 launches after the first, 48–88 % over all 12)**. It is the only part above 10 ms in the steady launches: `engine_surface_ms` 9.5 (its `device_create_ms` 9 — the Metal device is created on the install path here, unlike Android's pre-created one), `cache_seed_ms`, `caps_probe_ms`, `warm_up_start_ms` all 0, `engine_rest_ms` and `install_rest_ms` 0–2. The three candidates the criteria block named — driver-cache seeding, the capability probe, the warm-up worker spawn — are excluded: they cost nothing measurable. The stamp covers the same twelve `create_shader_module` calls as on Android (`ShaderLibrary::new` plus `EngineShaders::register_family`), ≈5.7 ms a module on the A13. The seven install parts plus `render_thread_start_ms` account for the gap to within 3 ms on all 12 launches (the residue is the truncation of eight whole-millisecond durations). The seven parts alone are within 5 ms on 11 of 12; launch 1, the first launch after the fresh install, spends 8 ms in the render-thread spawn (gap 151, seven parts 140) next to `engine_surface_ms` 65 with `device_create_ms` 60 — first-ever Metal device creation after install — and `font_system_ms` 341. That launch is a warm-up launch the protocol discards (PROTOCOL §4); the verdict holds on all 12.
+
+**The stamped build did not move `adapter_ready`; the first-frame median is outside ±10 % and follows the font join.** `adapter_ready` 82 ms median against 84 on 2026-10-17 (−2 %; [77–151] against [75–107], the high end being launch 1). `first_frame_presented` 169 ms median against 201 (−16 %, outside the ±10 % band; [89–397] against [95–304]). The cause is not the install path: as on 2026-10-17 the first frame waits on `font_preinit_joined`, which here ranges 55–344 ms (sorted: 55, 80, 91, 92, 99, 141, 160, 171, 185, 242, 300, 344), and `font_system_ms` (parley `FontContext::new` on the preinit thread) is 150 ms median [55–341] — within 1–3 ms of the join on every launch, i.e. the join is the font system — so the first-frame median moves with the bimodal/wide font-system time, which this run drew lower than the previous one; `first_encode_done → first_frame_presented` is 6 ms [5–17]. The unaltered install path (`adapter_ready`) is the figure the stamped build must not move, and it did not.
+
+**Phase 2 target.** Same as Android: f2-01's remedy (a) — take the strip-program module creation off the install path (create only the first frame's own variants, the rest on the warm-up worker that already builds their pipelines, or collapse the family into one module with several entry points if the cost is per-module overhead). On the iPhone it is worth ≈69 of 82 ms, and the bar is the September `adapter_ready` of 22 ms. The font system (150 ms median on the preinit thread, deciding `first_frame_presented` here) is a second, separate lever not named by remedies (a)–(d) and is filed as a finding for the conductor, not in this card's scope.
+
 ### S8
 
 Per-op median latency over the kept runs (µs/call; each type's first call excluded as warm-up).
