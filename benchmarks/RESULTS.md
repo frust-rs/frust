@@ -941,6 +941,27 @@ Cycle health — Frust (profile) `s3-create1k` reopens per kept run: 19–19; Fl
 
 **What is left on the iPhone.** The font system is the only remaining lever for the iPhone's first frame: f2-02 (deferred system fonts) for apps that register fonts. `frust_bench` registers none, so its first frame stays bound to the join.
 
+### Deferred system fonts (f2-02) — NO-GO (2026-10-20)
+
+**Method.** The f2-02 change (branch `perf/ios-deferred-system-fonts` at `19adf5eb`, kept on origin, not merged): on iOS, an app that registered fonts shapes its first frames with a systemless font collection whose generic slots map to the registered families, while the Core Text system collection builds on a background thread and is adopted at a later frame top, re-laying the screen out once (`frust-perf startup-late font_system_adopted=… font_system_ms=…`). Read on huddle — the one app here that registers fonts (`frust_glyph::install()`) — as `main` `9dac101b` against the branch, and on `frust_bench` (no registered fonts) on the branch, with the recipe of the blocks above (`frust build ios --profile --define FRUST_TRACE_RAW=1`; `run.sh s7 --app frust --platform ios --runs 12 --duration 60`, huddle with `--bundle-id it.f0x.huddle`): same iPhone SE and iOS 26.7.1, USB power, Xcode.app quit, no sampler, one screenshot ≈ 8 s into run 1 of each huddle leg (identifier redacted).
+
+| Key (ms), 12 launches, median [min–max] | huddle — `main` `9dac101b` | huddle — branch `19adf5eb` | `frust_bench` — branch | `frust_bench` — `main` (block above) |
+|---|---|---|---|---|
+| `font_preinit_joined` | 92 [52–369] | 3 [2–4] | 99.5 [53–157] | 94.5 [52–322] |
+| `adapter_ready` | 10.5 [9–354] | 15 [10–19] | 12 [10–14] | 12 [10–45] |
+| `first_frame_presented` | 112.5 [75–1670] | **42 [36–53]** | 114 [74–172] | 108.5 [75–377] |
+| `first_encode_done → first_frame_presented` | 6 [4–1261] | 27 [20–32] | 5.5 [4–13] | 8.5 [4–15] |
+| `font_system_ms` | 91.5 [52–365] | 192 [82–302] (`startup-late` line) | 98.5 [52–156] | 94 [51–319] |
+| `font_system_adopted` (`startup-late` line) | — | 203.5 [84–319] | — (no line) | — |
+
+**Verdict — NO-GO: the first-frame bar is met, the no-visible-swap bar is not.** huddle's first frame falls 112.5 → **42 ms** against the ≤ 85 ms bar, the join 92 → 3 ms, and `frust_bench` is unchanged (114 against 108.5, join 99.5 against 94.5, no `startup-late` line). But the card also requires the first frames and the adopted ones to draw the same text, and they do not:
+1. **The systemless window draws huddle's body text in a different face.** huddle's channel names, descriptions and section headers end in the system sans; with no system fonts, those styles fall to the generic mapping and draw in a Glyph registered face with different metrics (a diagnostic build that never adopts, not committed, shows taller rows and the first direct message pushed below the fold). Adoption at ≈ 200 ms (84–319) swaps the whole screen to the system font and re-lays it out — a visible font swap on every launch. The deferral is swap-free only for an app whose entire first screen resolves to faces it registered; no iOS app in this repository is one.
+2. **One cached layout stays in the window's face after adoption.** The app bar's "HQ" tile draws in the system sans on `main` and in the Glyph face on the branch 8 s in: a widget-cached `TextLayout` keyed on text, style and width is not re-shaped when the collection under it changes (the Glyph avatar caches the same way). The settled screenshots otherwise match, the clock aside.
+
+**Side reading.** With the join off the path, huddle's post-encode span is 27 ms [20–32] against f2-01's ≤ 25 ms guard — the first frame now waits for f2-01's module pool, as on the OnePlus 9 and the Pixel 5 above; with the join on the path (`main`, `frust_bench`) the pool is finished first and the span is 5.5–8.5 ms. The background build itself slows from ≈ 92 to ≈ 192 ms when it shares the CPU with the first frames.
+
+**What stays.** The iPhone's first frame remains bound to the font preinit join (`frust_bench` 108.5, huddle 112.5 ms median) — recorded in `docs/LIMITATIONS.md`'s `shell-ios-first-frame-above-goal`.
+
 ### S8
 
 Per-op median latency over the kept runs (µs/call; each type's first call excluded as warm-up).
