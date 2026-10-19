@@ -163,10 +163,24 @@ use frust_shell_common::{
     AppTree, FrameGate, PlatformViewState, ThemeOverrideWatcher, WindowMetricsPublisher,
     sanitize_scale,
 };
-use frust_text::TextContext;
+use frust_text::{SystemCollection, TextContext};
 use frust_theme::{Brightness, Theme};
 
 use crate::accessibility::IosA11yAdapter;
+
+/// The font state [`crate::ffi_glue::create_handle`] resolved for a new
+/// [`IosAppHandle`] — see that fn's font join (`join_fonts`).
+pub(crate) struct ShellFonts {
+    /// The shell-owned context layout shapes through.
+    pub(crate) text_ctx: TextContext,
+    /// The system collection still building for a deferred (systemless)
+    /// `text_ctx`; `None` when the join already adopted it.
+    pub(crate) system_fonts: Option<SystemCollection>,
+    /// The pending-font watcher the join already drained once.
+    pub(crate) registry: FontRegistryWatcher,
+    /// The startup line's epoch (`init_entry`), for the late adoption stamp.
+    pub(crate) startup_epoch: Instant,
+}
 
 /// Everything a running iOS app needs across frames — the state behind the opaque
 /// handle Swift passes back into every C call.
@@ -190,12 +204,21 @@ pub struct IosAppHandle {
     /// lives on this UI thread. Chosen once at construction.
     executor: FrameExecutor,
     text_ctx: TextContext,
+    /// The system-font collection still building for a `text_ctx` that started
+    /// systemless (an app that registered fonts — see
+    /// `crate::ffi_glue::join_fonts`). Polled at each frame top
+    /// ([`Self::frame`]) and adopted, once, when built; `None` from then on, and
+    /// from the start for an app that registered none.
+    system_fonts: Option<SystemCollection>,
+    /// The startup line's epoch (`init_entry`): the late
+    /// `font_system_adopted` stamp is an offset from it.
+    startup_epoch: Instant,
     /// Polls the process-wide app-facing pending-font registry
     /// (`frust::register_app_fonts`) once per frame (see [`Self::frame`],
     /// beside the theme-override poll) — draining any late registration into
-    /// `text_ctx`. Also drained once at construction ([`Self::new`], after the
-    /// background prewarm join, on this UI thread) before the first rebuild. See
-    /// `frust_shell_common::font_registry`'s module docs.
+    /// `text_ctx`. First drained at the font join, after the app is built and
+    /// before the first rebuild. See `frust_shell_common::font_registry`'s
+    /// module docs.
     font_registry: FontRegistryWatcher,
     /// Reused across frames; `reset()` each frame rather than reallocated.
     scene: Scene,
@@ -504,10 +527,10 @@ impl IosAppHandle {
     /// `crate::ffi_glue::create_handle`) so `provide_context` isn't a silent
     /// no-op.
     ///
-    /// `text_ctx` is the [`TextContext`] `create_handle` already resolved
-    /// — the pre-built one from its own background font-preload
-    /// thread when it finished in time, or a synchronous fallback otherwise —
-    /// so this method never itself pays the font-DB load cost.
+    /// `fonts` is the font state `create_handle`'s font join already resolved:
+    /// a full context, or — for an app that registered fonts — a systemless one
+    /// with its system collection still building (adopted later at a frame
+    /// top). Either way this method never itself pays the font-DB load cost.
     ///
     /// `executor` is the render-path half [`crate::ffi_glue::create_handle`]
     /// already built: the render-thread split
@@ -521,7 +544,7 @@ impl IosAppHandle {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         executor: FrameExecutor,
-        mut text_ctx: TextContext,
+        fonts: ShellFonts,
         metal_layer: *mut c_void,
         physical: (u32, u32),
         scale: f32,
@@ -529,15 +552,18 @@ impl IosAppHandle {
         translucent_resolved: Arc<AtomicBool>,
         mut app: Box<dyn AppTree>,
     ) -> Self {
-        // Construction-time font drain: apply any fonts registered via
-        // `frust::register_app_fonts` before this handle existed into the joined
-        // `TextContext`, on this (the UI) thread after the background prewarm
-        // join — NOT inside the spawned prewarm closure. `create_handle` funnels
-        // both executor paths (inline + split) through here with the already-
-        // joined `text_ctx`, so this one drain covers both. Pre-first-rebuild, so
-        // no invalidation is needed; the per-frame poll in `frame` picks up any
-        // later registration.
-        let mut font_registry = FontRegistryWatcher::new();
+        // Construction-time font drain: the font join already drained every
+        // `frust::register_app_fonts` call `make_app` made (it had to, to decide
+        // whether the system fonts are waited for); this catches anything pushed
+        // since, on this (the UI) thread. Pre-first-rebuild, so no invalidation
+        // is needed; the per-frame poll in `frame` picks up any later
+        // registration.
+        let ShellFonts {
+            mut text_ctx,
+            system_fonts,
+            registry: mut font_registry,
+            startup_epoch,
+        } = fonts;
         font_registry.drain_into(&mut text_ctx);
 
         // The seeded base theme (`theme::seed_theme`: a design system's
@@ -547,7 +573,7 @@ impl IosAppHandle {
         // preference. A design system that needs its own font bytes shaped from
         // the first frame registers them through
         // `frust_shell_common::font_registry::register_app_fonts`, which the
-        // construction-time drain above applies — the shell itself bundles no
+        // font join applies (see the drain above) — the shell itself bundles no
         // fonts.
         let theme = theme::seed_theme();
         // The base's own reduced-motion token, kept so a later OS report (or a
@@ -599,6 +625,8 @@ impl IosAppHandle {
         Self {
             executor,
             text_ctx,
+            system_fonts,
+            startup_epoch,
             font_registry,
             scene: Scene::new(),
             app,

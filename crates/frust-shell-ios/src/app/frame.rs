@@ -22,6 +22,35 @@ use kurbo::{Affine, Size};
 use super::IosAppHandle;
 use super::input::under_root_owner;
 
+/// Late startup-span name: when the frame-top poll adopted the system-font
+/// collection a deferred (systemless) context was waiting for, as an offset
+/// from `init_entry`. Never on the `frust-perf startup` line — that is emitted
+/// at the first present, which adoption normally follows, and is never held
+/// back for it — but on its own one-shot [`STARTUP_LATE_PREFIX`] line.
+const SPAN_FONT_SYSTEM_ADOPTED: &str = "font_system_adopted";
+
+/// The one-shot late-startup line's prefix, in the `frust-perf startup`
+/// line's `name=<n>ms` shape:
+/// `frust-perf startup-late font_system_adopted=<n>ms font_system_ms=<n>ms`.
+const STARTUP_LATE_PREFIX: &str = "frust-perf startup-late";
+
+/// The [`STARTUP_LATE_PREFIX`] line for an adoption `adopted_at` after
+/// `init_entry`, of a collection that took `font_system` to build.
+fn startup_late_line(adopted_at: Duration, font_system: Option<Duration>) -> String {
+    let mut line = format!(
+        "{STARTUP_LATE_PREFIX} {SPAN_FONT_SYSTEM_ADOPTED}={}ms",
+        adopted_at.as_millis()
+    );
+    if let Some(font_system) = font_system {
+        line.push_str(&format!(
+            " {}={}ms",
+            perf::SPAN_FONT_SYSTEM_MS,
+            font_system.as_millis()
+        ));
+    }
+    line
+}
+
 impl IosAppHandle {
     /// Run one frame: rebuild → layout → paint → render, mirroring the desktop
     /// shell's `RedrawRequested` path but driven by the Swift
@@ -94,6 +123,30 @@ impl IosAppHandle {
         if self.font_registry.drain_into(&mut self.text_ctx) {
             self.push_theme();
             theme_or_appearance_changed = true;
+        }
+
+        // Adopt the system-font collection a deferred context is waiting for,
+        // once its background build is done (a non-blocking poll; `None` — one
+        // branch — for an app that registered no fonts, or once adopted). The
+        // swap re-registers the app fonts and clears the shape cache, so force
+        // one relayout exactly like the late font drain above: text shaped in
+        // the systemless window re-shapes once against the full collection.
+        if self.system_fonts.is_some()
+            && self
+                .text_ctx
+                .adopt_system_collection(&mut self.system_fonts)
+        {
+            self.push_theme();
+            theme_or_appearance_changed = true;
+            if perf::enabled() {
+                log::info!(
+                    "{}",
+                    startup_late_line(
+                        self.startup_epoch.elapsed(),
+                        self.text_ctx.system_font_build_time()
+                    )
+                );
+            }
         }
 
         // Pause/ready gate FIRST — a paused/not-ready frame does no work and the

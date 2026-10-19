@@ -70,48 +70,149 @@ use frust_reactive::thread_policy::{ThreadClass, ThreadClassOutcome, set_current
 use frust_reactive::{ReactiveRuntime, push_deep_link};
 use frust_render::{RenderContext, SurfaceAlphaRequest, SurfacePhase, SurfaceRenderer};
 use frust_scene::Scene;
+use frust_shell_common::font_registry::FontRegistryWatcher;
 use frust_shell_common::perf::{self, FrameStats, StartupSpans};
 use frust_shell_common::{
     AppTree, RenderCommand, RenderPhase, RenderReceiver, SceneReturnSender, SurfaceMode,
     SurfaceModeWatcher, SurfaceSize, guard, next_render_phase, render_channel,
     render_thread_enabled, run_guarded_thread, sanitize_scale, scene_return_channel,
 };
-use frust_text::TextContext;
+use frust_text::{SystemCollection, TextContext};
 
 use crate::accessibility::IosA11yAdapter;
 use crate::app::{
-    FrameExecutor, InlineExecutor, IosAppHandle, PaintedScene, PresentHandoff, SplitExecutor,
-    note_scale, publish_ledger, render_scene,
+    FrameExecutor, InlineExecutor, IosAppHandle, PaintedScene, PresentHandoff, ShellFonts,
+    SplitExecutor, note_scale, publish_ledger, render_scene,
 };
 use crate::ffi_support::{
     CaretRect, EditCommandKind, ToolbarActions, ToolbarAnchor, publish_resolved_translucency,
 };
 
 /// Startup-span name: the font-preload overlap window
-/// opens — the background thread [`create_handle`] spawned at the top of its own
-/// body is from here on the only thing the UI thread is still waiting for (see
-/// that fn's doc — iOS has no `JNI_OnLoad`-equivalent process-wide load hook to
-/// spawn it earlier from, so the thread is spawned as early as possible inside
-/// `create_handle` itself instead). On the split path this is recorded *before*
-/// the render thread is started, so the GPU surface/device bring-up is paid
-/// inside the window rather than after it. Mirrors the Android shell's
+/// opens — the system-font collection build [`create_handle`] started at the
+/// top of its own body (iOS has no `JNI_OnLoad`-equivalent process-wide load
+/// hook to start it earlier from) runs on its background thread from here on.
+/// On the split path this is recorded *before* the render thread is started, so
+/// the GPU surface/device bring-up is paid inside the window rather than after
+/// it. Mirrors the Android shell's
 /// `SPAN_FONT_PREINIT_STARTED`/`SPAN_FONT_PREINIT_JOINED` pair.
 const SPAN_FONT_PREINIT_STARTED: &str = "font_preinit_started";
 
-/// Startup-span name: the background font-preload join returned —
-/// the pre-built [`TextContext`] was adopted, or `create_handle` fell back to
-/// a synchronous [`TextContext::new`]. On the split path the UI thread records
-/// it onto the recorder the render thread is writing to as well, so
-/// `adapter_ready`/`device_ready`/`renderer_ready` normally come *before* it in
-/// the startup line — that overlap is the point, not a reordered wire name. See
-/// [`SPAN_FONT_PREINIT_STARTED`].
+/// Startup-span name: the font join ([`join_fonts`]) handed layout its
+/// [`TextContext`]. For an app that registered no fonts that is after the
+/// blocking adoption of the system collection — today's wait, at today's cost.
+/// For an app that did (a design system's `install()`), the context is the
+/// systemless one and this lands early; the collection is adopted later, at a
+/// frame top (see `app::frame`'s `font_system_adopted`). On the split path the
+/// UI thread records it onto the recorder the render thread is writing to as
+/// well, so `adapter_ready`/`device_ready`/`renderer_ready` normally come
+/// *before* it in the startup line — that overlap is the point, not a
+/// reordered wire name. See [`SPAN_FONT_PREINIT_STARTED`].
 const SPAN_FONT_PREINIT_JOINED: &str = "font_preinit_joined";
+
+/// The render path [`create_handle`] built before the app exists — still owing
+/// the font join's spans, which [`join_fonts`] records once the app's own font
+/// registrations decide whether the system fonts are waited for.
+///
+/// The inline arm keeps the renderer parts unassembled because
+/// [`InlineExecutor`] owns its startup recorder outright; the split arm keeps
+/// the UI thread's clone of the recorder it shares with the render thread.
+enum StartedExecutor {
+    /// The inline path's renderer, surface and startup recorder — boxed, as
+    /// [`FrameExecutor::Inline`] is, for the same size reason.
+    Inline(Box<InlineParts>),
+    /// The split path's running executor and the UI thread's recorder clone.
+    Split {
+        executor: FrameExecutor,
+        startup: SharedStartupSpans,
+    },
+}
+
+/// [`InlineExecutor::new`]'s arguments, held until the font join is stamped.
+struct InlineParts {
+    render_cx: RenderContext,
+    renderer: SurfaceRenderer,
+    startup: StartupSpans,
+}
+
+impl StartedExecutor {
+    /// Record [`SPAN_FONT_PREINIT_JOINED`] and the font steps.
+    /// `font_system` is the system collection's build time when the join
+    /// waited for it, `None` on the deferred path (it is still building; the
+    /// late adoption line reports it).
+    fn record_font_join(
+        &mut self,
+        font_system: Option<std::time::Duration>,
+        app_sync: std::time::Duration,
+    ) {
+        let record = |spans: &mut StartupSpans| {
+            spans.record(SPAN_FONT_PREINIT_JOINED);
+            match font_system {
+                Some(font_system) => spans.record_font_steps(font_system, app_sync),
+                None => spans.record_duration(perf::SPAN_FONT_APP_SYNC_MS, app_sync),
+            }
+        };
+        match self {
+            Self::Inline(parts) => record(&mut parts.startup),
+            Self::Split { startup, .. } => {
+                let mut guard = startup.lock().unwrap_or_else(|err| err.into_inner());
+                if let Some(spans) = guard.as_mut() {
+                    record(spans);
+                }
+            }
+        }
+    }
+
+    /// The finished executor (the inline one assembled now, owning its
+    /// recorder).
+    fn into_executor(self) -> FrameExecutor {
+        match self {
+            Self::Inline(parts) => {
+                let InlineParts {
+                    render_cx,
+                    renderer,
+                    startup,
+                } = *parts;
+                FrameExecutor::Inline(Box::new(InlineExecutor::new(render_cx, renderer, startup)))
+            }
+            Self::Split { executor, .. } => executor,
+        }
+    }
+}
+
+/// The font join: apply the app's own font registrations to the systemless
+/// `text_ctx`, then evaluate the deferral gate. Runs after `make_app` — the
+/// app's `frust::app!` setup block (a design system's `install()`, which calls
+/// `register_app_fonts`) runs inside it, so before that the pending-font slot
+/// is always empty.
+///
+/// - Deferrable (an app font registered): keep `system_fonts` pending — the
+///   frame loop adopts it once built — and stamp the join now.
+/// - Otherwise: adopt it blocking, then stamp — the pre-deferral behaviour.
+///
+/// Both executor paths come through here, so the gate is applied to both.
+fn join_fonts(
+    mut text_ctx: TextContext,
+    mut system_fonts: Option<SystemCollection>,
+    font_app_sync: std::time::Duration,
+    font_registry: &mut FontRegistryWatcher,
+    started: &mut StartedExecutor,
+) -> (TextContext, Option<SystemCollection>) {
+    font_registry.drain_into(&mut text_ctx);
+    if text_ctx.is_deferrable() {
+        started.record_font_join(None, font_app_sync);
+    } else {
+        text_ctx.adopt_system_collection_blocking(&mut system_fonts);
+        started.record_font_join(text_ctx.system_font_build_time(), font_app_sync);
+    }
+    (text_ctx, system_fonts)
+}
 
 /// The split path's startup-span recorder, shared between the UI thread and the
 /// render thread. The render thread owns the line from `adapter_ready` onward and
 /// emits it on the first present ([`render_scene`] takes the recorder to do so);
 /// the UI thread still records [`SPAN_FONT_PREINIT_JOINED`] on it from
-/// [`spawn_split_executor`]. The two now run concurrently, so one shared recorder
+/// [`join_fonts`]. The two now run concurrently, so one shared recorder
 /// — rather than one moved render-side — is what keeps both sets of spans on a
 /// single epoch and in a single line.
 ///
@@ -143,8 +244,9 @@ fn install_steps(t: &frust_render::InstallTimings) -> perf::InstallSteps {
 /// poison-tolerant: a panicked holder costs instrumentation, never a frame.
 ///
 /// Used for the one-shot, non-per-frame writes (`adapter_ready`/`device_ready`/
-/// `renderer_ready` in [`install_surface`], `first_rebuild_done` and
-/// `font_preinit_joined`); the per-frame render tail goes through
+/// `renderer_ready` in [`install_surface`] and `first_rebuild_done`;
+/// `font_preinit_joined` takes the same lock in
+/// [`StartedExecutor::record_font_join`]); the per-frame render tail goes through
 /// [`StartupRecorder`] instead, whose contract is never to hold this lock
 /// across a frame's own GPU work.
 fn record_startup_spans(startup_spans: &Mutex<Option<StartupSpans>>, names: &[&'static str]) {
@@ -580,9 +682,9 @@ fn schedule_render_thread() {
 /// thread's `UiSpans` with its own render spans via [`render_scene`]). Owns the
 /// startup line from `adapter_ready` onward and emits it on the first present —
 /// through a recorder that is *shared* rather than moved
-/// ([`SharedStartupSpans`]), because the UI thread is still waiting on the font
-/// preinit while this thread brings the GPU up and stamps `font_preinit_joined`
-/// onto the same line when that wait ends. Exits cleanly when the `RenderSender`
+/// ([`SharedStartupSpans`]), because the UI thread is still building the app and
+/// joining the fonts while this thread brings the GPU up, and stamps
+/// `font_preinit_joined` onto the same line when that join ends. Exits cleanly when the `RenderSender`
 /// is dropped.
 ///
 /// # iOS surface recovery
@@ -915,6 +1017,9 @@ fn create_handle(
     // span this shell records (mirrors the Android shell's `create_handle`).
     let mut startup = StartupSpans::begin();
     startup.record(perf::SPAN_INIT_ENTRY);
+    // The same epoch for the one span stamped after the startup line is gone
+    // (`font_system_adopted`, see `app::frame`).
+    let startup_epoch = std::time::Instant::now();
 
     if crate::ffi_support::handle_is_null(metal_layer) {
         bail!("frust-shell-ios: frust_init called with a null CAMetalLayer");
@@ -923,16 +1028,14 @@ fn create_handle(
     // Font/`TextContext` warmup: iOS has no `JNI_OnLoad`-style
     // process-wide load hook to start this earlier from (unlike the Android
     // shell — `frust_init` is the earliest Rust entry point Swift ever calls),
-    // so spawn the background thread here, as the very first thing, right
-    // before the GPU surface/device bring-up below — the iOS counterpart to
-    // Android's pre-init overlap window. `TextContext::new` has no fallible step,
-    // so this thread cannot fail, only panic (handled at the join inside the
-    // executor builders). Joined as late as possible (right before layout needs
-    // it) to maximize overlap with the GPU work.
-    let font_preinit = std::thread::spawn(|| {
-        let (text_ctx, timings) = TextContext::new_with_timings();
-        (text_ctx, timings.font_system, timings.app_sync)
-    });
+    // so start it here, as the very first thing, right before the GPU
+    // surface/device bring-up below — the iOS counterpart to Android's pre-init
+    // overlap window. The context itself is the cheap systemless one; the
+    // system-font scan (Core Text enumeration, the expensive part) runs on the
+    // background thread `new_deferred_with_timings` spawns, and `join_fonts`
+    // decides — once the app has registered its fonts — whether layout waits
+    // for it. A panicked scan is rebuilt synchronously at adoption.
+    let (text_ctx, system_fonts, font_app_sync) = TextContext::new_deferred_with_timings();
     let physical = (width.max(1), height.max(1));
 
     // Read the translucent opt-in latch BEFORE any
@@ -991,13 +1094,12 @@ fn create_handle(
     // the UI thread.
     let present = Arc::new(PresentHandoff::new(present_sync_enabled()));
 
-    let (executor, text_ctx) = if render_thread_enabled() {
+    let mut started = if render_thread_enabled() {
         spawn_split_executor(
             startup,
             metal_layer,
             physical,
             scale,
-            font_preinit,
             alpha,
             Arc::clone(&translucent_resolved),
             present,
@@ -1008,7 +1110,6 @@ fn create_handle(
             metal_layer,
             physical,
             scale,
-            font_preinit,
             alpha,
             &translucent_resolved,
         )?
@@ -1055,11 +1156,26 @@ fn create_handle(
     // initial `rebuild()` records `first_rebuild_done` via
     // `IosAppHandle::new` → `FrameExecutor::record_first_rebuild` — inline records
     // it here, the split records it render-side on the first handed-off scene.
+    // The font join sits between the two: `make_app` is where the app registers
+    // its fonts, and the first rebuild is where layout needs a context.
     let handle = rt.with_owner(|| {
         let app = make_app();
-        IosAppHandle::new(
-            executor,
+        let mut font_registry = FontRegistryWatcher::new();
+        let (text_ctx, system_fonts) = join_fonts(
             text_ctx,
+            Some(system_fonts),
+            font_app_sync,
+            &mut font_registry,
+            &mut started,
+        );
+        IosAppHandle::new(
+            started.into_executor(),
+            ShellFonts {
+                text_ctx,
+                system_fonts,
+                registry: font_registry,
+                startup_epoch,
+            },
             metal_layer,
             physical,
             scale,
@@ -1076,17 +1192,16 @@ fn create_handle(
 
 /// Build the **inline** (`FRUST_NO_RENDER_THREAD`) executor: create the renderer +
 /// surface on this UI thread and record the full startup line, exactly as the
-/// pre-split shell did (kill-switch path). Returns the executor
-/// plus the joined [`TextContext`] the handle needs for layout.
+/// pre-split shell did (kill-switch path). Returns the parts unassembled — the
+/// font join ([`join_fonts`]) still owes its spans to the recorder.
 fn build_inline_executor(
     mut startup: StartupSpans,
     metal_layer: *mut c_void,
     physical: (u32, u32),
     scale: f32,
-    font_preinit: std::thread::JoinHandle<(TextContext, std::time::Duration, std::time::Duration)>,
     alpha: SurfaceAlphaRequest,
     translucent_resolved: &AtomicBool,
-) -> Result<(FrameExecutor, TextContext)> {
+) -> Result<StartedExecutor> {
     let mut render_cx = RenderContext::new();
     let mut renderer = SurfaceRenderer::new();
 
@@ -1125,46 +1240,34 @@ fn build_inline_executor(
         startup.record_install_steps(&install_steps(&t), Some(perf::SPAN_INIT_ENTRY));
     }
 
-    // Join the font-preload thread as late as possible (max overlap with the GPU
-    // work above). Best-effort: a panicked thread falls back to a synchronous
-    // `TextContext::new` with a log line — kill nothing, defer nothing silently.
+    // The font join comes after the app is built (see `join_fonts`), as late as
+    // possible — max overlap with the GPU work above.
     startup.record(SPAN_FONT_PREINIT_STARTED);
-    let (text_ctx, font_system, font_app_sync) = font_preinit.join().unwrap_or_else(|_| {
-        log::warn!(
-            "frust-shell-ios: font pre-init thread panicked; \
-             falling back to synchronous TextContext::new"
-        );
-        let (text_ctx, timings) = TextContext::new_with_timings();
-        (text_ctx, timings.font_system, timings.app_sync)
-    });
-    startup.record(SPAN_FONT_PREINIT_JOINED);
-    startup.record_font_steps(font_system, font_app_sync);
-
-    let executor =
-        FrameExecutor::Inline(Box::new(InlineExecutor::new(render_cx, renderer, startup)));
-    Ok((executor, text_ctx))
+    Ok(StartedExecutor::Inline(Box::new(InlineParts {
+        render_cx,
+        renderer,
+        startup,
+    })))
 }
 
 /// Spawn the **split** (default) render thread and return its executor handle.
 /// The GPU work — surface creation, drawable acquisition,
 /// encode, present, adapter/device/renderer spans — happens *on the render thread*
 /// ([`render_loop`]), so `frust_init` never blocks the UI thread on it. Only the
-/// font-preload join (needed by UI-side layout) stays on this UI thread, and it
-/// runs *after* the thread is spawned and handed its surface — so the
-/// adapter/device bring-up is paid inside the font wait (the longest serial
-/// stretch of iOS cold start) instead of after it. Returns the executor plus the
-/// joined [`TextContext`].
-#[allow(clippy::too_many_arguments)]
+/// font join (needed by UI-side layout) stays on this UI thread, and it runs
+/// *after* the thread is spawned and handed its surface — so the adapter/device
+/// bring-up is paid inside any font wait (the longest serial stretch of iOS cold
+/// start) instead of after it. Returns the executor plus the UI thread's clone
+/// of the shared recorder, which [`join_fonts`] stamps.
 fn spawn_split_executor(
     mut startup: StartupSpans,
     metal_layer: *mut c_void,
     physical: (u32, u32),
     scale: f32,
-    font_preinit: std::thread::JoinHandle<(TextContext, std::time::Duration, std::time::Duration)>,
     alpha: SurfaceAlphaRequest,
     translucent_resolved: Arc<AtomicBool>,
     present: Arc<PresentHandoff>,
-) -> (FrameExecutor, TextContext) {
+) -> StartedExecutor {
     // Font/`TextContext` warmup stays UI-side — layout runs on the UI thread —
     // but waiting for it is the longest thing left on this thread's startup path,
     // so it is spent LAST: everything below gets the render thread going first and
@@ -1247,34 +1350,15 @@ fn spawn_split_executor(
         size,
     });
 
-    // Only now block on the font preinit: the render thread has its surface
-    // command in hand, so adapter/device/renderer bring-up proceeds while this
-    // thread waits. Best-effort join — a panicked thread falls back to a
-    // synchronous `TextContext::new` with a log line, killing nothing and
-    // deferring nothing silently. The "layout never runs before `TextContext`
+    // The font join is left to `join_fonts`, after the app is built: the render
+    // thread has its surface command in hand, so adapter/device/renderer
+    // bring-up proceeds meanwhile. The "layout never runs before `TextContext`
     // exists" invariant is untouched: `create_handle`'s initial `rebuild()` is
-    // downstream of this join.
-    let (text_ctx, font_system, font_app_sync) = font_preinit.join().unwrap_or_else(|_| {
-        log::warn!(
-            "frust-shell-ios: font pre-init thread panicked; \
-             falling back to synchronous TextContext::new"
-        );
-        let (text_ctx, timings) = TextContext::new_with_timings();
-        (text_ctx, timings.font_system, timings.app_sync)
-    });
-    // The last UI-side span, and this thread's last touch of the shared recorder.
-    // It lands after `adapter_ready` in the emitted line whenever the GPU won the
-    // race — which is the whole point of the ordering above.
-    record_startup_spans(&startup, &[SPAN_FONT_PREINIT_JOINED]);
-    {
-        let mut guard = startup.lock().unwrap_or_else(|err| err.into_inner());
-        if let Some(spans) = guard.as_mut() {
-            spans.record_font_steps(font_system, font_app_sync);
-        }
-    }
-
-    (
-        FrameExecutor::Split(SplitExecutor::new(
+    // downstream of that join, whose `font_preinit_joined` is this thread's last
+    // touch of the shared recorder. It lands after `adapter_ready` in the emitted
+    // line whenever the GPU won the race — the whole point of the ordering above.
+    StartedExecutor::Split {
+        executor: FrameExecutor::Split(SplitExecutor::new(
             sender,
             join,
             fatal,
@@ -1283,8 +1367,8 @@ fn spawn_split_executor(
             present,
             surface_reinstalled,
         )),
-        text_ctx,
-    )
+        startup,
+    }
 }
 
 /// Recreate a lost surface from the handle's retained `CAMetalLayer` at the given

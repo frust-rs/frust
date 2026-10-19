@@ -8194,3 +8194,31 @@ shader modules re-measure (2026-10-20)" under the OnePlus 9 and Pixel 5 S7 secti
 `crates/frust-gpu/src/shader.rs` (`ShaderLibrary::module`, created on first use),
 `crates/frust-gpu/src/pipeline.rs` (`PipelineCache::warm_up_shaders`),
 `crates/frust-engine/src/renderer.rs` (`first_frame_shaders`).
+
+### `ios-deferred-fonts-registered-faces-only` — an iOS app that registers fonts shapes its first frames without system fonts
+
+**Observed**: an iOS app that registers fonts through `frust::register_app_fonts` (a design system's
+`install()`, e.g. huddle's `frust_glyph::install()`) shapes its first frames with only those faces.
+The Core Text system collection is built on a background thread and adopted at a later frame top
+(`frust-perf startup-late font_system_adopted=…`). Until then:
+- a character no registered face covers (emoji, CJK, symbols) shapes as `.notdef`;
+- unthemed `SystemUi`, `SansSerif` and `Monospace` text resolves to the registered families.
+
+After adoption, text in a named registered family keeps its glyphs and advances, but unthemed generic
+text re-shapes in the platform font: a one-time visible swap.
+
+**Applies to**: the iOS shell only, for an app that registered at least one font. An app that
+registers none (the playground, `benchmarks/frust_bench`) still waits for the full collection before
+its first layout, as before. Android, desktop and web are unchanged.
+
+**Why accepted**: the system-font join (94.5 ms median on the iPhone SE, 2026-10-20) is the only wait
+left between the iPhone's first frame and the 85 ms bar. Bundling a fallback face to cover the window
+would cost app size.
+
+**Trigger for removal**: a fontique release whose system collection loads lazily or faster than the
+first frame, or an app-supplied fallback face for the window.
+
+**Evidence**: `crates/frust-text/tests/deferred_system_fonts.rs` (CJK shapes as `.notdef` before
+adoption; registered-family glyphs are identical across it); `crates/frust-text/src/context.rs`
+(`TextContext::new_deferred`, `adopt_system_collection`); `crates/frust-shell-ios/src/ffi_glue.rs`
+(`join_fonts`).

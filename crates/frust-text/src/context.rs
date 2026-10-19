@@ -20,11 +20,26 @@
 //! font-family map (fontique's `SystemUi`/`SansSerif`/`Monospace`/`Serif`/
 //! `Emoji` slots) rather than a named family — see [`register_generic_fallback`]
 //! for why a host needs this seam on `wasm32`.
+//!
+//! # Deferred system fonts
+//!
+//! The platform font scan inside [`TextContext::new`] is the bulk of its cost
+//! (Core Text enumeration on Apple targets). [`TextContext::new_deferred`]
+//! returns a context whose collection has **no** system fonts, plus a
+//! [`SystemCollection`] building the full collection on a background thread.
+//! Until [`TextContext::adopt_system_collection`] swaps that collection in,
+//! the context shapes with the app's registered fonts only, and maps every
+//! registered family onto the `SansSerif`, `SystemUi` and `Monospace` generic
+//! slots so a style ending in a generic tail still resolves. Adoption
+//! re-registers every [`APP_FONTS`] blob and [`GENERIC_FALLBACKS`] entry into
+//! the fresh collection (fresh `FamilyId`s — none escapes this module), drops
+//! those window-only generic mappings, and clears the shape cache.
 
 use std::sync::Mutex;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use parley::fontique::{Blob, GenericFamily};
+use parley::fontique::{Blob, Collection, CollectionOptions, FamilyId, FontInfo, GenericFamily};
 use parley::style::StyleProperty;
 use peniko::Brush;
 
@@ -206,6 +221,113 @@ fn apply_generic_fallbacks(
     applied
 }
 
+/// Whether face `index` of the font file `data` sets the `post` table's
+/// `isFixedPitch` flag — the deferred context's monospace test (fontique's
+/// `FontInfo` carries no pitch attribute). A plain sfnt/TTC table-directory
+/// walk; any malformed or truncated input reads as proportional.
+fn is_fixed_pitch(data: &[u8], index: u32) -> bool {
+    fn u16_at(d: &[u8], at: usize) -> Option<u16> {
+        let b = d.get(at..at.checked_add(2)?)?;
+        Some(u16::from_be_bytes([b[0], b[1]]))
+    }
+    fn u32_at(d: &[u8], at: usize) -> Option<u32> {
+        let b = d.get(at..at.checked_add(4)?)?;
+        Some(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    }
+    fn walk(data: &[u8], index: u32) -> Option<bool> {
+        let face = if data.get(0..4)? == b"ttcf" {
+            u32_at(
+                data,
+                12usize.checked_add(4usize.checked_mul(index as usize)?)?,
+            )? as usize
+        } else {
+            0
+        };
+        let tables = u16_at(data, face.checked_add(4)?)?;
+        for i in 0..usize::from(tables) {
+            let record = face.checked_add(12 + 16 * i)?;
+            if data.get(record..record.checked_add(4)?)? == b"post" {
+                let post = u32_at(data, record + 8)? as usize;
+                return Some(u32_at(data, post.checked_add(12)?)? != 0);
+            }
+        }
+        Some(false)
+    }
+    walk(data, index).unwrap_or(false)
+}
+
+/// The full, system-font-backed collection a [`TextContext::new_deferred`]
+/// context is waiting for, building on a background thread.
+///
+/// Hand it to [`TextContext::adopt_system_collection`] once per frame (a
+/// non-blocking poll) or to [`TextContext::adopt_system_collection_blocking`].
+/// Dropping it un-adopted detaches the build thread, which finishes and frees
+/// its collection on its own.
+pub struct SystemCollection {
+    /// `None` only when the OS refused to spawn the thread, in which case the
+    /// collection is built on the adopting thread instead.
+    handle: Option<JoinHandle<(Collection, Duration)>>,
+}
+
+impl std::fmt::Debug for SystemCollection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SystemCollection")
+            .field("finished", &self.is_finished())
+            .finish()
+    }
+}
+
+/// Builds the system-backed collection and times it — the same work
+/// `parley::FontContext::new` does inside [`TextContext::new_with_timings`].
+fn build_system_collection() -> (Collection, Duration) {
+    let started = Instant::now();
+    let collection = Collection::new(CollectionOptions::default());
+    (collection, started.elapsed())
+}
+
+impl SystemCollection {
+    /// Starts the background build.
+    fn spawn() -> Self {
+        let handle = std::thread::Builder::new()
+            .name("frust-system-fonts".to_string())
+            .spawn(build_system_collection)
+            .ok();
+        Self { handle }
+    }
+
+    /// Whether the build is done, so adopting it cannot block.
+    pub fn is_finished(&self) -> bool {
+        self.handle.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+
+    /// The built collection and its build time. A panicked build (or a thread
+    /// that never spawned) is rebuilt here, synchronously.
+    fn join(self) -> (Collection, Duration) {
+        match self.handle.map(JoinHandle::join) {
+            Some(Ok(built)) => built,
+            _ => build_system_collection(),
+        }
+    }
+}
+
+/// The app families a systemless (pre-adoption) context maps onto the
+/// generic slots — see the module docs' *Deferred system fonts*.
+#[derive(Debug, Default)]
+struct SystemlessGenerics {
+    /// Every app family registered into the systemless collection, in
+    /// registration order.
+    families: Vec<FamilyId>,
+    /// The subset with at least one fixed-pitch face.
+    fixed_pitch: Vec<FamilyId>,
+}
+
+/// The generic slots a systemless context maps the app's families onto.
+const SYSTEMLESS_GENERICS: [GenericFamily; 3] = [
+    GenericFamily::SansSerif,
+    GenericFamily::SystemUi,
+    GenericFamily::Monospace,
+];
+
 /// Owns parley's font matching and layout scratch state.
 ///
 /// This is deliberately not `Clone`/`Sync`: it is expensive per-instance state
@@ -230,6 +352,12 @@ pub struct TextContext {
     /// app font, a generic fallback has no direct `register_*` method of its
     /// own on `TextContext`.
     generic_fallbacks_applied: usize,
+    /// `Some` while the collection has no system fonts (a
+    /// [`Self::new_deferred`] context before adoption): the app families
+    /// mapped onto the generic slots during that window.
+    systemless: Option<SystemlessGenerics>,
+    /// How long the adopted [`SystemCollection`] took to build, once adopted.
+    system_build: Option<Duration>,
     /// How many [`Self::measure_uncached`] passes this context has run — the
     /// observable hook the truncation walk's measurement bound is asserted
     /// against (an uncached measure is invisible to [`ShapeCacheStats`], which
@@ -346,15 +474,7 @@ impl TextContext {
         let font_started = Instant::now();
         let font_ctx = parley::FontContext::new();
         let font_system = font_started.elapsed();
-        let mut cx = Self {
-            font_ctx,
-            layout_ctx: parley::LayoutContext::new(),
-            shape_cache: ShapeCache::new(DEFAULT_CAPACITY),
-            app_fonts_applied: 0,
-            generic_fallbacks_applied: 0,
-            #[cfg(test)]
-            measurements: 0,
-        };
+        let mut cx = Self::with_font_ctx(font_ctx, None);
         let sync_started = Instant::now();
         cx.sync_app_fonts();
         let app_sync = sync_started.elapsed();
@@ -365,6 +485,183 @@ impl TextContext {
                 app_sync,
             },
         )
+    }
+
+    /// A context around `font_ctx` with nothing applied yet.
+    fn with_font_ctx(
+        font_ctx: parley::FontContext,
+        systemless: Option<SystemlessGenerics>,
+    ) -> Self {
+        Self {
+            font_ctx,
+            layout_ctx: parley::LayoutContext::new(),
+            shape_cache: ShapeCache::new(DEFAULT_CAPACITY),
+            app_fonts_applied: 0,
+            generic_fallbacks_applied: 0,
+            systemless,
+            system_build: None,
+            #[cfg(test)]
+            measurements: 0,
+        }
+    }
+
+    /// Builds a context with **no** system fonts, seeded with every app font
+    /// and generic fallback registered so far, and starts building the full
+    /// system collection on a background thread — see the module docs'
+    /// *Deferred system fonts*.
+    ///
+    /// Until the returned [`SystemCollection`] is adopted, only registered
+    /// faces shape: every registered family is mapped onto the `SansSerif`,
+    /// `SystemUi` and `Monospace` generic slots (`Monospace` takes the
+    /// fixed-pitch families, else the first one), and a character none of
+    /// them covers (emoji, another script) has no fallback. Native targets
+    /// only — `wasm32-unknown-unknown` cannot spawn the build thread.
+    pub fn new_deferred() -> (Self, SystemCollection) {
+        let (cx, pending, _) = Self::new_deferred_with_timings();
+        (cx, pending)
+    }
+
+    /// [`Self::new_deferred`] that also reports how long seeding the app
+    /// fonts took (the systemless counterpart of [`NewTimings::app_sync`]).
+    /// The background build's own time is reported by
+    /// [`Self::system_font_build_time`] once adopted.
+    pub fn new_deferred_with_timings() -> (Self, SystemCollection, Duration) {
+        // Started first: it is the long pole.
+        let pending = SystemCollection::spawn();
+        let font_ctx = parley::FontContext {
+            collection: Collection::new(CollectionOptions {
+                shared: false,
+                system_fonts: false,
+            }),
+            source_cache: Default::default(),
+        };
+        let mut cx = Self::with_font_ctx(font_ctx, Some(SystemlessGenerics::default()));
+        let sync_started = Instant::now();
+        cx.sync_app_fonts();
+        (cx, pending, sync_started.elapsed())
+    }
+
+    /// Whether this context may keep shaping without system fonts: it is a
+    /// [`Self::new_deferred`] context not yet adopted, and at least one app
+    /// font is registered in it (a design system's `install()` ran). The
+    /// generic-fallback record is honoured when present but not required.
+    ///
+    /// A shell evaluates this once the app's own font registrations are
+    /// drained; `false` means adopt with
+    /// [`Self::adopt_system_collection_blocking`] before the first layout.
+    pub fn is_deferrable(&self) -> bool {
+        self.systemless.is_some() && self.app_fonts_applied > 0
+    }
+
+    /// Whether this context's collection includes the platform's fonts —
+    /// `false` only for a [`Self::new_deferred`] context before adoption.
+    pub fn has_system_fonts(&self) -> bool {
+        self.systemless.is_none()
+    }
+
+    /// How long the adopted [`SystemCollection`] took to build on its thread,
+    /// or `None` before adoption (and for a context built by [`Self::new`]).
+    pub fn system_font_build_time(&self) -> Option<Duration> {
+        self.system_build
+    }
+
+    /// Non-blocking adoption: when `pending` holds a finished
+    /// [`SystemCollection`], take it, swap its collection in, re-register
+    /// every app font and generic fallback into it, and clear the shape
+    /// cache. Returns `true` exactly once — on the call that adopted.
+    ///
+    /// A `true` return carries [`Self::register_fonts`]'s relayout contract:
+    /// the caller must force a relayout so text shaped before the swap
+    /// re-shapes against the full collection.
+    pub fn adopt_system_collection(&mut self, pending: &mut Option<SystemCollection>) -> bool {
+        if !pending.as_ref().is_some_and(SystemCollection::is_finished) {
+            return false;
+        }
+        self.adopt_system_collection_blocking(pending)
+    }
+
+    /// [`Self::adopt_system_collection`] that waits for the build instead of
+    /// polling it — the path for a context that is not
+    /// [`Self::is_deferrable`]. Returns `false` only when `pending` is empty.
+    pub fn adopt_system_collection_blocking(
+        &mut self,
+        pending: &mut Option<SystemCollection>,
+    ) -> bool {
+        let Some(pending) = pending.take() else {
+            return false;
+        };
+        let (collection, build) = pending.join();
+        self.font_ctx = parley::FontContext {
+            collection,
+            source_cache: Default::default(),
+        };
+        // The window-only generic mappings go with the systemless collection:
+        // the system answers the generic slots from here on.
+        self.systemless = None;
+        self.system_build = Some(build);
+        // Re-apply both records in full, in `new`'s order.
+        self.generic_fallbacks_applied = 0;
+        self.sync_generic_fallbacks();
+        let slot = APP_FONTS.lock().unwrap_or_else(|e| e.into_inner());
+        for blob in slot.iter() {
+            let _ = self.font_ctx.collection.register_fonts(blob.clone(), None);
+        }
+        self.app_fonts_applied = slot.len();
+        drop(slot);
+        self.clear_shape_cache();
+        true
+    }
+
+    /// Registers `blob` into the collection, recording its families for the
+    /// generic-slot mapping while the context is systemless.
+    fn register_blob(&mut self, blob: &Blob<u8>) -> Vec<(FamilyId, Vec<FontInfo>)> {
+        let registered = self.font_ctx.collection.register_fonts(blob.clone(), None);
+        if let Some(generics) = self.systemless.as_mut() {
+            for (family, faces) in &registered {
+                if !generics.families.contains(family) {
+                    generics.families.push(*family);
+                }
+                if !generics.fixed_pitch.contains(family)
+                    && faces
+                        .iter()
+                        .any(|face| is_fixed_pitch(blob.as_ref(), face.index()))
+                {
+                    generics.fixed_pitch.push(*family);
+                }
+            }
+        }
+        registered
+    }
+
+    /// Re-points the systemless generic slots at the app families: each slot
+    /// keeps whatever the generic-fallback record put there first, then lists
+    /// the app families (`Monospace`: the fixed-pitch ones, else the first).
+    /// A no-op once the system collection is adopted, or before any family.
+    fn refresh_systemless_generics(&mut self) {
+        let Some(generics) = self.systemless.as_ref() else {
+            return;
+        };
+        let Some(&first) = generics.families.first() else {
+            return;
+        };
+        let monospace = if generics.fixed_pitch.is_empty() {
+            vec![first]
+        } else {
+            generics.fixed_pitch.clone()
+        };
+        let collection = &mut self.font_ctx.collection;
+        for generic in SYSTEMLESS_GENERICS {
+            let ours = if generic == GenericFamily::Monospace {
+                &monospace
+            } else {
+                &generics.families
+            };
+            let kept: Vec<FamilyId> = collection
+                .generic_families(generic)
+                .filter(|family| !generics.families.contains(family))
+                .collect();
+            collection.set_generic_families(generic, kept.into_iter().chain(ours.iter().copied()));
+        }
     }
 
     /// Lays out `text` with `style`, wrapping to `max_width` when supplied.
@@ -739,14 +1036,12 @@ impl TextContext {
         // context registered since it was built), and the watermark below
         // would otherwise declare those blobs applied without applying them.
         for missed in &slot[self.app_fonts_applied..] {
-            let _ = self
-                .font_ctx
-                .collection
-                .register_fonts(missed.clone(), None);
+            let _ = self.register_blob(missed);
         }
         self.app_fonts_applied = slot.len();
 
-        let registered = self.font_ctx.collection.register_fonts(blob.clone(), None);
+        let registered = self.register_blob(&blob);
+        self.refresh_systemless_generics();
         if registered.is_empty() {
             return Err(FontError::NoFacesFound);
         }
@@ -792,12 +1087,7 @@ impl TextContext {
         let slot = APP_FONTS.lock().unwrap_or_else(|e| e.into_inner());
         if self.app_fonts_applied != slot.len() {
             for blob in &slot[self.app_fonts_applied..] {
-                if !self
-                    .font_ctx
-                    .collection
-                    .register_fonts(blob.clone(), None)
-                    .is_empty()
-                {
+                if !self.register_blob(blob).is_empty() {
                     applied = true;
                 }
             }
@@ -806,6 +1096,7 @@ impl TextContext {
         drop(slot);
 
         if applied {
+            self.refresh_systemless_generics();
             self.clear_shape_cache();
         }
         applied
@@ -883,6 +1174,44 @@ mod tests {
         // Both phases ran: the font-system scan is never free.
         assert!(timings.font_system > Duration::ZERO);
         assert!(timings.font_system + timings.app_sync < Duration::from_secs(60));
+    }
+
+    /// A one-table sfnt whose `post` table's `isFixedPitch` is `fixed`.
+    fn sfnt_with_post(fixed: u32) -> Vec<u8> {
+        let mut data = vec![0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+        data.extend_from_slice(b"post");
+        data.extend_from_slice(&0u32.to_be_bytes());
+        data.extend_from_slice(&28u32.to_be_bytes());
+        data.extend_from_slice(&32u32.to_be_bytes());
+        let mut post = [0u8; 32];
+        post[12..16].copy_from_slice(&fixed.to_be_bytes());
+        data.extend_from_slice(&post);
+        data
+    }
+
+    #[test]
+    fn fixed_pitch_reads_the_post_table_of_a_font_or_collection_face() {
+        assert!(is_fixed_pitch(&sfnt_with_post(1), 0));
+        assert!(!is_fixed_pitch(&sfnt_with_post(0), 0));
+        assert!(!is_fixed_pitch(TUFFY, 0), "Tuffy is proportional");
+
+        // A two-face collection: the header and offset table take 20 bytes,
+        // the fixed-pitch face follows, and its table offsets are absolute.
+        let mut ttc = b"ttcf".to_vec();
+        ttc.extend_from_slice(&[0, 1, 0, 0, 0, 0, 0, 2]);
+        ttc.extend_from_slice(&0u32.to_be_bytes());
+        ttc.extend_from_slice(&20u32.to_be_bytes());
+        let mut face = sfnt_with_post(1);
+        face[20..24].copy_from_slice(&(28u32 + 20).to_be_bytes());
+        ttc.extend_from_slice(&face);
+        assert!(is_fixed_pitch(&ttc, 1));
+        assert!(!is_fixed_pitch(&ttc, 0), "face 0's offset is not a font");
+        assert!(!is_fixed_pitch(&ttc, 9), "an out-of-range face index");
+
+        // Garbage and truncation read as proportional, never panic.
+        assert!(!is_fixed_pitch(&[], 0));
+        assert!(!is_fixed_pitch(b"ttcf", 7));
+        assert!(!is_fixed_pitch(&sfnt_with_post(1)[..40], 0));
     }
 
     /// A body-text style at `size`.
@@ -1011,6 +1340,8 @@ mod tests {
             shape_cache: ShapeCache::new(DEFAULT_CAPACITY),
             app_fonts_applied: 0,
             generic_fallbacks_applied: watermark,
+            systemless: None,
+            system_build: None,
             #[cfg(test)]
             measurements: 0,
         };
