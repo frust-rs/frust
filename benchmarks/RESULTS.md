@@ -255,6 +255,43 @@ Cycle health — Frust (profile) `s3-create1k` reopens per kept run: 27–27; Fl
 
 **Frust starts ~4.6× faster and idles ~26 % lighter; its framework-reported first frame got longer.** External cold start 141 vs 643 ms (`am start -W` TotalTime; 159 on 2026-09-06), idle TOTAL PSS 85.0 vs 115.0 MiB (94.2 before). Frust's first-frame span is 202 ms median (172 before) against Flutter's 162 (unchanged), from different entry points; inside it `first_encode_done` → `first_frame_presented` fell 123.5 → 13.0 ms [12–16] while `adapter_ready` rose 44 → 180 ms (criteria block above). Idle CPU: Frust appeared in one `dumpsys cpuinfo` sample at 7.6 % during its S7 block, Flutter in none (2026-09-06: 0 and 0).
 
+### Startup sub-step split (2026-10-19)
+
+**Method.** The OnePlus 9's recipe on this phone (its block states the build, the script and the key semantics; same APK, md5 `c4ae3d9a…`), with this device's own protocol: **adb-over-Wi-Fi through a tunnel, radios left as found** (airplane off, Wi-Fi up carrying the link, Bluetooth on — the §3 radios-off state not applied, as on 2026-10-17's pass on this device, deviation 1), **refresh not pinned**, on battery (79 → 75 %, `dumpsys battery unplug` before each leg), brightness 128 during the runs (restored to 32), `svc power stayon` during the runs, 30 min timeout, same ROM as 2026-10-17 (`UP1A.231105.001.B2`, incremental `11260668`, serial redacted), no sampler; `device_state.sh` gate, 33.5 → 33.6 °C and 33.4 → 33.8 °C. Two series of `run.sh s7 --runs 12 --duration 60`: fresh install, then — after one 20 s rendering S1 launch — the warm series, for the reason the OnePlus 9 block gives (the fresh-install series restores no pipeline-cache blob). All 12 launches of every series carry a startup line; medians and [min–max] over all 12.
+
+| Key (ms) | 2026-10-17 (`87271063`, matrix S7 block, blob present) | today, fresh install (no blob on any launch) | today, after one rendering launch (blob restored) |
+|---|---|---|---|
+| `preinit_joined` | 20 [11–26] | 17 [7–91] | 20 [3–29] |
+| `cache_loaded` | 22 [11–26] | 18 [7–92] | 21 [3–30] |
+| `pipeline_cache_restored` | 22 [11–26] | **absent on all 12** | 21 [3–30] |
+| `adapter_ready` | 179 [164–197] | 186 [173–289] | 189 [178–200] |
+| `first_rebuild_done` | 189 [173–204] | 199 [183–296] | 201 [187–210] |
+| `first_encode_done` | 189 [173–204] | 199 [183–297] | 201 [187–210] |
+| `first_submit_pipeline_wait` (duration) | 3 [3–5] | 145 [140–166] | 3 [3–5] |
+| `first_frame_presented` | 202 [185–220] | 356 [333–449] | 214 [202–230] |
+| **gap** `adapter_ready − pipeline_cache_restored` (`cache_loaded` where no blob was restored) | 161 [151–174] | 167 [160–197] | 168 [159–181] |
+| `engine_surface_ms` | — | 15 [11–25] | 14 [10–22] |
+| — of which `device_create_ms` | — | 1 [0–4] | 1 [0–7] |
+| `cache_seed_ms` | — | 0 | 0 |
+| `caps_probe_ms` | — | 0 | 0 |
+| **`shader_modules_ms`** | — | 150 [143–176] | 151 [145–163] |
+| `warm_up_start_ms` | — | 0 | 0 |
+| `engine_rest_ms` | — | 0 | 0 [0–1] |
+| `install_rest_ms` | — | 0 [0–2] | 0 [0–1] |
+| sum of the seven install parts | — | 164 [157–195] | 166 [157–178] |
+| gap − sum | — | 2 [2–3] | 2 [1–4] |
+| `font_system_ms` (preinit thread) | — | 16 [9–27] | 15 [10–21] |
+| `font_app_sync_ms` | — | 0 | 0 |
+| `first_encode_done → first_frame_presented` | 13 [12–16] | 155 [150–176] | 14 [12–20] |
+
+**Verdict — the owning sub-step.** `shader_modules_ms` is **90 % of the gap** (150 of 167 ms fresh, 151 of 168 warm; the seven parts sum to within 1–4 ms of the gap on every launch). The rest is `engine_surface_ms` 15 ms [10–25] (9 %; its `device_create_ms` 1 — the pre-created Vulkan device adopted — the remainder the capability gate and the swapchain configure), and `cache_seed_ms`, `caps_probe_ms`, `warm_up_start_ms`, `engine_rest_ms`, `install_rest_ms` all 0 — the driver-cache seed, the hardware-buffer probe and the warm-up spawn are excluded here as on the OnePlus 9. The twelve `create_shader_module` calls the OnePlus 9 block lists cost ≈12.5 ms each on the Snapdragon 765G, the same per-module shape at twice the price — naga's parse and validation of nine ≈1,400-line strip programs plus clear, copy and filter, where the September tree created four modules; the per-class programs landed between `36ef20db` and `87271063` (`d3f78a2d`, `c28b2a77`, `1d43d77c`), which is where this phone's `adapter_ready` 44 → 180 ms came from. `font_system_ms` 16 ms [9–27] on the preinit thread, `font_app_sync_ms` 0, `font_preinit_joined` 0 on every launch.
+
+**The stamped build did not move the span, on this transport.** `adapter_ready` 186 ms median (fresh install, +4 %) and 189 (warm, +6 %) against 179; the gap 167 / 168 against 161 (+4 %); `first_frame_presented` on the warm series 214 ms [202–230] against 202 (+6 %), `first_encode_done → first_frame_presented` 14 ms against the criterion's 13.0; `am start -W` TotalTime 147 ms median of the kept launches (133/148/147; fresh-install block 150/152/145) against 141. All within ±10 % over the same wireless link the 2026-10-17 pass used. The fresh-install series' one outlier launch (run 1: `preinit_joined` 91 ms, `adapter_ready` 289, the first launch after the install) is in the ranges, not the medians.
+
+**The fresh-install series never restored a blob** — the OnePlus 9 finding at this phone's price: no `pipeline_cache_restored` stamp on any of the 12 launches, `first_submit_pipeline_wait` 145 ms [140–166] (3 with a blob) and `first_frame_presented` 356 ms [333–449] against 214 warm — +142 ms on the first frame for an idle first screen killed in the foreground (`act_000001a1480df74b8iv9vHyR`); the warm column is the picture every launch after one rendering launch gets.
+
+**Phase 2 target.** f2-01's remedy (a), as the OnePlus 9 block says; on this phone it is worth up to ≈110–115 of the 150 ms (nine strip programs at ≈12.5 ms), against the September `adapter_ready` of 44 ms (gap ≈22) as the bar.
+
 ### S8
 
 Per-op median latency over the kept runs (µs/call; each type's first call excluded as warm-up).
@@ -478,6 +515,43 @@ GPU, from the `gpu_q=1` readings inside the cycle (they lag their line, so the c
 | Idle memory (TOTAL PSS, mean over kept runs' post-run snapshots) | ~82.5 MiB (82.3–83.0, 10 kept snapshots) | ~133.8 MiB (133.5–134.0, 10 kept snapshots) |
 
 **Frust starts ~3.1× faster and idles ~38 % lighter; its framework-reported first frame is longer than in September.** External cold start 128 vs 402 ms (`am start -W` TotalTime; 128 on 2026-09-06), idle TOTAL PSS 82.5 vs 133.8 MiB (114.1 before: −27.6 %), idle CPU 0 samples on both. The Frust first-frame span is 114 ms median (95 before) against Flutter's 74, measured from different entry points as always; inside it, `first_encode_done` → `first_frame_presented` fell 53.5 → 10.5 ms [10–12] with the persisted pipelines, while `adapter_ready` rose 36 → 100 ms (see the criteria block above).
+
+### Startup sub-step split (2026-10-19)
+
+**Method.** Where the `adapter_ready` move sits, read with the sub-step stamps of PR #97 (`main` `e89a639d`, the 2026-10-17 engine plus the stamps and the PR #98/#99 benchmark notes — nothing on the startup path). One profile APK built on the Linux host from the checkout's own CLI (`frust build apk --profile --target-platform android-arm64 --define FRUST_TRACE_RAW=1` in `benchmarks/frust_bench`; 10,136,347 B, md5 `c4ae3d9a…`), installed fresh; same phone and ROM as 2026-10-17 (`BP1A.250405.007`, serial redacted), USB, the matrix's prep (airplane on, Wi-Fi/Bluetooth off, 120 Hz pinned both ways, brightness 128, `dumpsys battery unplug` before the leg, 30 min timeout, keyguard dismissed; all restored afterwards), no sampler. Two series of `run.sh s7 --runs 12 --duration 60` (`device_state.sh` gate, 31.9 → 33.1 °C and 33.3 → 33.6 °C, no cooldown wait): the **fresh-install series** first, then — after one 20 s S1 launch that renders continuously — the **warm series**, because the first series turned out to run every launch without a persisted pipeline-cache blob (below). The warm series ran without the on-battery spoof (`run.sh`'s own exit reset it after the S1 launch; the phone is USB-powered on both passes) — a declared deviation of that series only. The 2026-10-17 column is the committed S7 series (`raw/oneplus9/frust_profile/s7/`) re-read with the same script, which reproduces the section's published medians; today's raw trees stay out of the tree. All 12 launches of every series carry a startup line (medians and [min–max] over all 12, as the S7 rows above). The ten added keys are **durations** (`…_ms`), truncated to whole milliseconds; the existing keys are offsets from `init_entry`.
+
+| Key (ms) | 2026-10-17 (`87271063`, matrix S7 block, blob present) | today, fresh install (no blob on any launch) | today, after one rendering launch (blob restored) |
+|---|---|---|---|
+| `preinit_joined` | 20 [15–29] | 25 [16–41] | 28 [17–37] |
+| `cache_loaded` | 20 [15–29] | 26 [16–41] | 28 [18–37] |
+| `pipeline_cache_restored` | 20 [15–29] | **absent on all 12** | 28 [18–37] |
+| `adapter_ready` | 100 [95–112] | 107 [101–125] | 111 [101–121] |
+| `first_rebuild_done` | 103 [98–115] | 109 [104–129] | 113 [103–123] |
+| `first_encode_done` | 103 [98–115] | 109 [104–129] | 113 [103–123] |
+| `first_submit_pipeline_wait` (duration) | 3 [3–6] | 70 [65–71] | 3 [1–3] |
+| `first_frame_presented` | 114 [108–125] | 189 [178–205] | 124 [114–134] |
+| **gap** `adapter_ready − pipeline_cache_restored` (`cache_loaded` where no blob was restored) | 81 [78–83] | 82 [80–85] | 83 [80–85] |
+| `engine_surface_ms` | — | 5 [5–6] | 5 [5–6] |
+| — of which `device_create_ms` | — | 0 | 0 [0–1] |
+| `cache_seed_ms` | — | 0 | 0 |
+| `caps_probe_ms` | — | 0 | 0 |
+| **`shader_modules_ms`** | — | 76 [73–78] | 75 [73–79] |
+| `warm_up_start_ms` | — | 0 | 0 |
+| `engine_rest_ms` | — | 0 | 0 |
+| `install_rest_ms` | — | 0 | 0 |
+| sum of the seven install parts | — | 81 [78–83] | 81 [78–84] |
+| gap − sum | — | 2 [1–2] | 2 [1–3] |
+| `font_system_ms` (preinit thread) | — | 8 [8–13] | 8 [7–17] |
+| `font_app_sync_ms` | — | 0 | 0 |
+| `first_encode_done → first_frame_presented` | 11 [10–14] | 78 [74–80] | 11 [9–12] |
+
+**Verdict — the owning sub-step.** `shader_modules_ms` is **92 % of the gap on the fresh-install series (76 of 82 ms) and 90 % warm (75 of 83)**; the seven install parts sum to within 1–3 ms of the gap on every launch — the truncation of seven durations, nothing unaccounted for. It is the only part above 6 ms: `engine_surface_ms` 5 (its `device_create_ms` 0 — the Vulkan device was pre-created on the preinit thread and `ensure_device` only adopts it), `cache_seed_ms` 0 with and without a blob, `caps_probe_ms` 0, `warm_up_start_ms` 0, `engine_rest_ms` 0, `install_rest_ms` 0. So the three candidates the criteria block named — driver-cache seeding, the hardware-buffer probe, the warm-up worker starting beside device creation — are all excluded, together: they cost nothing measurable. The stamp covers `ShaderLibrary::new` plus `EngineShaders::register_family` (`crates/frust-engine/src/gpu/pipelines.rs`), which today is **twelve `create_shader_module` calls, not four**: the strip program's Uber variant, its seven class specialisations (`PaintClass::SPECIALISED`: solid-coverage, gradient, image, image-filtered, blurred-rect, layer-composite, glyph), the atlas-layer Uber program of the manual family (one more under the default image-sampler family), and the clear, copy and filter modules — each strip program the `helpers.wgsl` + `strip.wgsl` source (≈1,400 lines before the per-class specialisation drops the blocks a class does not use) parsed and validated by naga at module creation, ≈6 ms a module on this chipset. The September tree (`36ef20db`) created four modules (strip, clear, copy, filter); the per-class strip programs arrived with `d3f78a2d` (2026-10-13), the sampler family with `c28b2a77` and the glyph class with `1d43d77c` (2026-10-14), all between `36ef20db` and the `87271063` the 2026-10-17 pass ran — which is where `adapter_ready` 36 → 100 ms came from. The font half of the stamps reads `font_system_ms` 8 ms [7–17] on the preinit thread (parley's `FontContext::new`) and `font_app_sync_ms` 0 (the bench app registers no fonts), neither on the critical path (`font_preinit_joined` 0 on every launch).
+
+**The stamped build did not move the span.** `adapter_ready` 107 ms median (fresh install, +7 %) and 111 (warm, +11 %) against 100 on 2026-10-17; the gap itself is 82 / 83 against 81 (+2 %), and the warm series' extra sits before it, in `preinit_joined` (28 vs 20 ms — the join of the GPU pre-init thread, which also reads the blob; a between-session move of the join, read with the spoof deviation above, not of the install). `first_frame_presented` on the warm series is 124 ms [114–134] against 114 (+9 %), with `first_encode_done → first_frame_presented` 11 ms, the criterion's 10.5 — the first frame after encode is where it was. `am start -W` TotalTime 127 ms median of the kept launches (129/127/126; fresh-install block 123/119/120) against 128.
+
+**Finding on the side — the fresh-install series never restored a blob.** On all 12 launches after the fresh install the startup line carries no `pipeline_cache_restored` stamp, `first_submit_pipeline_wait` reads 70 ms [65–71] (3 with a blob) and `first_frame_presented` 189 ms [178–205]: every launch compiled the first frame's pipelines cold. The blob is written once the warm-up has built its list, **after a later frame** (`CachePersistence::after_frame` in `crates/frust-shell-android/src/jni_glue.rs`), on surface-destroy or on pause; S7 deliberately requests no frame after its first, the warm-up finishes after that frame, and the harness's `am force-stop` reaches neither pause nor surface-destroy — so an idle first screen that is killed in the foreground leaves no blob, launch after launch. On 2026-10-17 the S7 block ran after six rendering blocks that had written it. One rendering launch fixes it for every launch that follows (the warm column), and a backgrounded app pauses and persists; the exposure is the launch sequence "static first screen → killed" — already filed as the minor `act_000001a1480df74b8iv9vHyR` ("Static first screen killed in the foreground before any later frame or surface destroy leaves no blob"), now with its cost measured against the same build's warm series: +65 ms on the first frame here (189 against 124), +142 ms on the Pixel 5 (356 against 214).
+
+**Phase 2 target.** f2-01's remedy (a): take the strip-program module creation off the install path — the render thread creates only the modules the first frame's own variants need (which ones, the warm-up list says), the other class specialisations are created on the warm-up worker that already builds their pipelines, or the family collapses into one module with several entry points if the cost is per-module overhead rather than per-line parsing (to be split on the Xiaomi 12 / iPhone SE leg as the card says). At ≈6 ms a module the nine strip programs are ≈55–60 of the 76 ms; the September `adapter_ready` of 36 ms (gap ≈16) is the bar, not a projection.
 
 ### S8
 
