@@ -124,7 +124,7 @@ open under it. The follow-ups plan's f2-01 and f2-02 took this up (Follow-ups, b
 
 **Follow-ups (2026-10-20): iPhone SE S8 plugin rows — the build, not iOS.** The September tree (`36ef20db`) rebuilt and run on iOS 26.7.1 reads writes 3–6 µs / reads 1 µs; `main` the same day reads 19–28 / 4–6 (`### September tree rebuilt on iOS 26.7.1 (2026-10-19)`). Carried open as `act_000001a14dde1c5b16CCVZiT`, bisect range `c705922b..57c08eb1`.
 
-**Follow-ups (2026-10-20): iPhone SE S3 rebuild — the build, same block.** September tree rebuild p50 4.27 / 4.24 (`clear`), 9.26 / 9.15 (`create 10k`), 4.00 / 3.89 (`update`), 3.00 / 2.98 (`swap`) ms against `main` 5.98 / 6.02, 12.94 / 12.89, 5.54 / 5.58, 4.38 / 4.42; `create 1k` flat (1.7). The same range, carried open as `act_000001a14dde1e08KL4q0yxt`.
+**Follow-ups (2026-10-20): iPhone SE S3 rebuild — the build, same block.** September tree rebuild p50 4.27 / 4.24 (`clear`), 9.26 / 9.15 (`create 10k`), 4.00 / 3.89 (`update`), 2.98 / 3.00 (`swap`) ms against `main` 5.98 / 6.02, 12.94 / 12.89, 5.54 / 5.58, 4.38 / 4.42; `create 1k` flat (1.7). The same range, carried open as `act_000001a14dde1e08KL4q0yxt`.
 
 **Follow-ups (2026-10-20): OnePlus 9 S3 `create 1k` — split, not fixed.** The 14.98 → 21.38 ms p50 is the op frame's own `submit` (12.56 → 17.97 ms) plus the frame after it (7.63 → 11.27 ms); frames 10–20 of the cycle are cheaper than September's, so the whole cycle's submit falls 114.3 → 92.4 ms. It is not GPU work, not the parallel strip walk (`NO_PARALLEL` op frame 18.18 ms) and not the resident-run cache (17.80 ms) (`### create 1k split (2026-10-19)`, PR #99); the settle-window candidate is untested and `act_000001a14dde1e09f8S3m5Hm` stays open.
 
