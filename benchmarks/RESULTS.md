@@ -908,6 +908,39 @@ Cycle health — Frust (profile) `s3-create1k` reopens per kept run: 19–19; Fl
 
 **Phase 2 target.** Same as Android: f2-01's remedy (a) — take the strip-program module creation off the install path (create only the first frame's own variants, the rest on the warm-up worker that already builds their pipelines, or collapse the family into one module with several entry points if the cost is per-module overhead). On the iPhone it is worth ≈69 of 82 ms, and the bar is the September `adapter_ready` of 22 ms. The font system (150 ms median on the preinit thread, deciding `first_frame_presented` here) is a second, separate lever not named by remedies (a)–(d) and is filed as a finding for the conductor, not in this card's scope.
 
+### Device-open fix re-measure (2026-10-20)
+
+**Method.** The f2-01 change (`3658806f`, PR #102: shader modules registered at install and each created on first use, the first frame's four created side by side on a short-lived pool started at install) read on `main` `9a70c1aa` with the sub-step split's recipe above: one signed profile `Runner.app` from `benchmarks/frust_bench` (`frust build ios --profile --define FRUST_TRACE_RAW=1`), installed once by `run.sh`, then `run.sh s7 --app frust --platform ios --runs 12 --duration 60`; same iPhone SE (iPhone12,8) and iOS (26.7.1, build 23H30), USB power, Xcode.app quit, no Instruments, no sampler, nothing else on the phone (identifier redacted). The before column is the sub-step split above. The iOS startup line carries no `first_submit_pipeline_wait` key, so the post-encode guard is read as `first_encode_done → first_frame_presented`.
+
+| Key (ms) | before — `main` `42ef10d9`, 2026-10-19 (the sub-step split above) | after — `main` `9a70c1aa`, today, same recipe |
+|---|---|---|
+| `font_preinit_joined` | 150.5 [55–344] | 94.5 [52–322] |
+| `adapter_ready` | 82 [77–151] | **12 [10–45]** |
+| `first_rebuild_done` | 163.5 [83–380] | 103.5 [63–362] |
+| `first_encode_done` | 163.5 [83–380] | 103.5 [63–362] |
+| `first_frame_presented` | 169 [89–397] | **108.5 [75–377]** |
+| **gap** `adapter_ready − init_entry` | 82 [77–151] | 12 [10–45] |
+| `engine_surface_ms` | 9.5 [8–65] | 9.5 [8–34] |
+| — of which `device_create_ms` | 9 [8–60] | 8.5 [7–29] |
+| `cache_seed_ms` | 0 | 0 |
+| `caps_probe_ms` | 0 | 0 |
+| **`shader_modules_ms`** (now the registration alone) | 69 [64–79] | 1 [0–2] |
+| `warm_up_start_ms` (now includes the pool's spawn) | 0 | 0 |
+| `engine_rest_ms` | 0 [0–2] | 0 [0–2] |
+| `install_rest_ms` | 0 [0–1] | 0 [0–1] |
+| sum of the seven install parts | 79.5 [74–140] | 10 [8–39] |
+| `render_thread_start_ms` (inside the gap) | 1 [0–8] | 0 [0–5] |
+| gap − sum − `render_thread_start_ms` | 2 [1–3] | 2 [0–3] |
+| `font_system_ms` (preinit thread) | 149.5 [55–341] | 94 [51–319] |
+| `font_app_sync_ms` | 0 | 0 |
+| `first_encode_done → first_frame_presented` | 6 [5–17] | **8.5 [4–15]** |
+
+**Verdict against the card's bars.** **`adapter_ready` 12 ms [10–45] against 82 before and September's 22 — the device-open move is gone** (`shader_modules_ms` 69 → 1; the seven install parts plus `render_thread_start_ms` still close the gap to within 3 ms on every launch, so nothing moved into an unstamped place). **The post-encode span is 8.5 ms [4–15], inside the ≤ 25 ms guard** — unlike the OnePlus 9 and the Pixel 5, the A13's first frame does not wait for the pool, because on iOS the first rebuild cannot start before the font preinit join, which lands 39–277 ms after `adapter_ready` and leaves the pool's module creation finished. **`first_frame_presented` 108.5 ms [75–377] against the ≤ 100 ms bar — missed by the font join, not by the install path:** on every launch the first rebuild follows `font_preinit_joined` by 8–40 ms and the frame presents 13–55 ms after the join; the four launches whose join landed at 52–54 ms present at 75–85 ms. The join (94.5 ms [52–322]; `font_system_ms` 94 [51–319]) is the iOS 26.7.1 CoreText enumeration the September-tree block below shows does not follow the build, so, as the card rules, the residue is the font system's and `adapter_ready` is this change's iPhone figure — met. The first-frame median moved 169 → 108.5 ms, but this session's join also drew lower (150.5 → 94.5), so that move is not a measure of the change.
+
+**Metal engine gates, same `main`.** On the Mac's Apple M4 (`WGPU_BACKEND=metal`, `--ignored --test-threads=1`): `frust-gpu` 28 passed, `frust-engine` 81 passed, `engine_goldens` + `alpha_polarity` 5 passed in both sampler arms (default and `FRUST_ENGINE_IMAGE_SAMPLER=0`, `FRUST_GOLDEN_EXPECT_ADAPTER=Apple M4`), no golden changed; on the iOS Simulator (Apple2 adapter): `frust-testing --test ios_sim` 2 passed, the `frust-engine` seam suites 19 passed, `frust-gpu --test shared_encoder` 3 passed. Lazy module creation renders pixel-identically on Metal.
+
+**What is left on the iPhone.** The font system is the only remaining lever for the iPhone's first frame: f2-02 (deferred system fonts) for apps that register fonts. `frust_bench` registers none, so its first frame stays bound to the join.
+
 ### S8
 
 Per-op median latency over the kept runs (µs/call; each type's first call excluded as warm-up).
