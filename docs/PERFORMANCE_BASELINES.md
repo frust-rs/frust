@@ -86,8 +86,7 @@ Before-numbers for the frust-fast plan, captured 2026-10-13 from `feature/frust-
 protocol profile APK (`FRUST_TRACE_RAW=1`), `benchmarks/harness/run.sh <sN> --runs 12 --duration 30` (first two
 runs discarded; S3 at 4x20). Columns: harness total p50 / p95, `submit_us` p50, `gpu_main_us` p50 / p95 (ms); enc
 medians over the kept 60-frame windows for walk / glyphs / upload / replay / instances (us); draws / strips /
-alphas. Fairness gate warnings on both phones: airplane mode off, charging over USB (uncontrolled, identical
-across rows). Raw trees stay out of `benchmarks/raw`.
+alphas. Airplane mode off and USB charging on both phones (identical across rows).
 
 Pixel 4a class (Adreno 618, 1080x2340 @ 60 Hz):
 
@@ -112,31 +111,29 @@ Pixel 4 class (Adreno 640, 1080x2280 @ 90 Hz; S1 ran warm — the phone sat at 3
 | S5 | 6.32 / 12.60 | 4.92 | 8.54 / 8.82 | 1840 / 129 / 586 / 0.3 / 72 | 30 / 3,001 / 92,448 |
 | S6 | 7.21 / 7.84 | 5.90 | 7.32 / 9.46 | 2373 / 2192 / 347 / 0.2 / 187 | 508 / 8,918 / 224,352 |
 
-Cold start (S7, `first_frame_presented` medians): Pixel 4a 211 ms of which `first_submit_pipeline_wait` 118,
-encode 6, queue 3; Pixel 4 172 ms of which pipeline wait 92, encode 5, queue 2. On both phones the pipeline
-cache is persisted 328 B about 70 ms after surface install with zero warm-up pipelines finished, and the second
-launch loads that same 328 B (the after-warm-up blob is in the close-out section below). S1's atlas on both
-phones (re-captured at 9e510235 with `glyph_misses` on the production path, 6x30 s, first two runs discarded):
-every drawn glyph is atlas-resident (`glyph_draws == atlas_glyphs`: 466 on the Pixel 4a, 458 on the Pixel 4),
-yet per 60-frame window the Pixel 4a replays on 37 frames with 66 misses and 69 evictions and the Pixel 4 on 40
-frames with 81 misses and 93 evictions, and nothing is refused. Replay is gated on misses by construction, so
-the before-number to beat is the miss count; in steady state the misses roughly equal the evictions (1.8-2.1 per
-replaying frame). The misses were sibling subpixel buckets of on-screen glyphs aging out and being
-re-rasterised; keeping the siblings took them to zero (close-out section below). Pixel 4 S1 re-captured cool
+Cold start (S7, `first_frame_presented` medians): Pixel 4a 211 ms of which `first_submit_pipeline_wait` 118, encode 6,
+queue 3; Pixel 4 172 ms of which pipeline wait 92, encode 5, queue 2. On both phones the pipeline cache is persisted
+at 328 B about 70 ms after surface install with zero warm-up pipelines finished, and the second launch loads the same
+328 B (the after-warm-up blob is in the close-out section). S1's atlas (re-captured at 9e510235 with `glyph_misses` on
+the production path, 6x30 s, first two runs discarded): every drawn glyph is atlas-resident (`glyph_draws ==
+atlas_glyphs`: 466 on the Pixel 4a, 458 on the Pixel 4), yet per 60-frame window the Pixel 4a replays on 37 frames
+with 66 misses and 69 evictions and the Pixel 4 on 40 frames with 81 misses and 93 evictions, and nothing is refused.
+Replay is gated on misses, so the miss count is the number to beat (1.8-2.1 per replaying frame, roughly equal to
+evictions). The misses were sibling subpixel buckets of on-screen glyphs aging out and being re-rasterised; keeping
+the siblings took them to zero (close-out section). Pixel 4 S1 re-captured cool
 (32.7 C start): p50 11.66 / p95 15.44 ms, drifting to 35 C by run 6. Thread sample during S1: main,
 `RenderThread` and both `frust-reactive` threads at nice -10, `frust-render` at nice -4.
 
 ## Engine close-out per device
 
-The frust-fast work against the before-rows above, one row per phone and scene. Columns: harness
-total p50 / p95 and `gpu_main_us` p50 (ms); "after" is the latest split-path capture of that scene
-that carries `gpu_main`, at the ref named (`FRUST_TRACE_RAW=1`, 12x30 s with the first two runs
-discarded, S3 4x20): rows at c61ee81a and 2acaf544 predate the later levers, which left those scenes
-unmeasured, and the later S1 12x30 pairs at 3708c199 carry no `gpu_main` and sit in the first-frame
-paragraph. The OnePlus 9 and iPhone SE have no eff23e65 row: their reference is
-the 2026-09-06 pass in [RESULTS.md](../benchmarks/RESULTS.md), and the OnePlus 9 rows at 78fb0a4d
-carry their v0.6.2 before in brackets. Full tables, kill-switch arms, atlas counters, kgsl clocks
-and thermal notes stay in the gate records.
+The frust-fast work against the before-rows above, one row per phone and scene: harness total p50 /
+p95 and `gpu_main_us` p50 (ms); "after" is the latest split-path capture of that scene that carries
+`gpu_main`, at the ref named (`FRUST_TRACE_RAW=1`, 12x30 s, first two runs discarded, S3 4x20). Rows
+at c61ee81a and 2acaf544 predate the later levers; the S1 12x30 pairs at 3708c199 carry no `gpu_main`
+and sit in the first-frame paragraph. The OnePlus 9 and iPhone SE reference the 2026-09-06 pass in
+[RESULTS.md](../benchmarks/RESULTS.md) (OnePlus 9 rows at 78fb0a4d carry their v0.6.2 before in
+brackets). Full tables, kill-switch arms, atlas counters, kgsl clocks and thermal notes stay in the
+gate records.
 
 | Phone / scene | before (eff23e65) | after | at |
 |---|---|---|---|
@@ -164,21 +161,15 @@ upload 381 to 62, enc 1714 to 1408); OnePlus 9 S1 upload 358 to 121, replay 1184
 3350 (S6 upload 260 to 47, enc 1489 to 1252); replays / misses / evictions per window 51 / 124 / 132
 (Pixel 4a) and 49 / 109 / 127 (OnePlus 9) to zero. `FRUST_ENGINE_NO_STAGING_RING=1` reproduces the
 before uploads, so the ring owns the upload gain and the sibling-bucket keep owns the replay one.
-Host (i5-12600, T400), per-lever back-to-back pairs taken on each lever's own branch against its
-parent in the same session, not against the eff23e65 host table above: `s6_like` glyphs 1167 to
-500 us with glyph quads (8683cf25) and 514 to 140 with the resident glyph-run cache (b8b75d4d);
-`s1_like` glyphs 96 to 35 (b8b75d4d); `s1_like` walk 875-922 to 387 with the parallel walk
-(c61ee81a).
+Host (i5-12600, T400), per-lever pairs against each lever's parent in the same session: `s6_like`
+glyphs 1167 to 500 us with glyph quads (8683cf25) and 514 to 140 with the resident glyph-run cache
+(b8b75d4d); `s1_like` glyphs 96 to 35 (b8b75d4d) and walk 875-922 to 387 with the parallel walk (c61ee81a).
 
-Scheduling and JNI (78fb0a4d, split path): the thread policy is neutral on every S-row (the UI
-thread already runs at nice -10 and the render thread now keeps it; `FRUST_NO_THREAD_TUNING=1`
-restores `frust-render` at -4 and reproduces the before rows; blocking-pool threads take the
-background class, reference +10, on their first job). Per-frame JNI polls on an idle playground
-page fell from 166 to 36 us (Pixel 4a) and 140 to 30 us (OnePlus 9). `FRUST_ADPF=1` on the OnePlus
-9 (API 35): split path S4 4.22 / 5.91, S1 8.14 / 9.36, within noise; the inline-path A/B at
-0d5c7cb3 (12x30, hints on against off) read S4 p95 +4 % and p99 +12 % worse with hints, which kept
-the session opt-in (`android-adpf-opt-in-measured` in LIMITATIONS.md); the Pixel 4a reports no hint
-manager, so it cannot open one.
+Scheduling and JNI (78fb0a4d, split path): the thread policy is neutral on every S-row
+(`FRUST_NO_THREAD_TUNING=1` reproduces the before rows). Idle-page JNI polls fell from 166 to 36 us
+(Pixel 4a) and 140 to 30 us (OnePlus 9). `FRUST_ADPF=1` on the OnePlus 9 (API 35): S4 4.22 / 5.91,
+S1 8.14 / 9.36, within noise; the inline-path A/B at 0d5c7cb3 (12x30) read S4 p95 +4 % and p99
++12 % worse with hints, which kept it opt-in (`android-adpf-opt-in-measured` in LIMITATIONS.md).
 
 First frame (S7, `first_frame_presented` spans, split path, a7a5b074 to 3708c199; `run.sh s7 --runs
 12 --duration 20` with the blob present; cold = `pm clear`, then launch 1 and launch 2, 3 trials):
@@ -190,28 +181,39 @@ First frame (S7, `first_frame_presented` spans, split path, a7a5b074 to 3708c199
 
 `await` and `finish` make the first frame pay the whole list one pipeline at a time (Pixel 4a 86 / 85
 ms warm, ~425 cold; OnePlus 9 43 / 42.5 warm, ~187 cold), so `steal` is the default; the depth-alpha
-LayerComposite variant (+32 / +5 ms Pixel 4a cold / seeded, +10 / +2 OnePlus 9) is warmed last. The
-blob is written after the warm-up or on the first surface destroy and never rewritten unchanged. S1
+LayerComposite variant (+32 / +5 ms Pixel 4a cold / seeded, +10 / +2 OnePlus 9) is warmed last. S1
 steady state at 3708c199 is unchanged (Pixel 4a 11.24 / 13.56 vs 11.29 / 14.59, OnePlus 9 8.02 /
 8.87 vs 7.94 / 8.77).
 
-Targets. Met: Pixel 4a S1 `gpu_main` <= 16 ms (12.75 at 2acaf544, the paint-class programs alone,
-which also took Pixel 4 S1 `gpu_main` from 11.15 to 8.12 — the pair the 0.6.2 entry cites; the
-13.89 of the after row is the kgsl governor settling at 355 MHz instead of 430 once the walk
-shortened), walk
-<= 3000 and glyphs <= 1200 us, S6 enc <= 2000 us; `replay_us` <= 0.1 ms on S1 / S6; `upload_us` <=
-0.2 ms except Pixel 4a S1 (216); warm `first_encode_done` to `first_frame_presented` <= 25 ms median
-on both phones; `am start -W` not worse within noise (131 vs 128, inside that pass's 126-141
-spread); no scene worse on p50 and enc total where a not-worse bar was set (p95 moved within its
-spread on Pixel 4a S6 and Pixel 4 S3, and the two S5 rows that sit beside their befores — Pixel 4
-p50 6.32 to 6.41, OnePlus 9 p95 7.01 against 6.99 — are within noise). Not met: Pixel 4 S1 `gpu_main` <= 5.0 ms (CPU-bound) and enc
-<= 3000 us; every iPhone SE target (`upload` dominates there); S4 `submit - gpu_main` <= 1.0 ms (set for the Pixel 4
-and not evaluated there after 2acaf544; on the phones that were measured: inline path at b6e5a665
-Pixel 4a 1.39 / OnePlus 9 3.50, split path at 78fb0a4d 1.66 / 3.41); Pixel 4a S4 p95 <= 12 (12.42); OnePlus 9 S4 p50 <= 4.3 / p95 <= 5.0. Every kill
-switch's off-arm reproduced its before rows within noise, except the paint-class all-off arm on the
-Pixel 4a (16-17 % below: the atlas tier rule and the clear skip have no switch). Owed: Pixel 4 rows
-after c61ee81a (S4 / S5 after 2acaf544), iPhone SE rows after c61ee81a, split-path S2 / S3 / S6
-re-captures on the Pixel 4a and OnePlus 9 after c61ee81a, and the Pixel 5 / Xiaomi 12 matrix.
+Device-open split and fix (S7, 12 launches, medians, 2026-10-19/20; PR #97 stamps; "before" is `main`
+at the split, "after" f2-01 `3658806f`, PR #102, shader modules created on first use). Share =
+`shader_modules_ms` of the install gap (fresh install); `adapter_ready` is September -> before -> after:
+
+| Phone | share of gap | `adapter_ready` | `first_frame_presented` | enc -> presented |
+|---|---|---|---|---|
+| OnePlus 9 | 76 of 82 ms (92 %) | 36 -> 111 -> 32 | 124 -> 67 | 11 -> 32 |
+| Pixel 5 | 150 of 167 ms (90 %) | 44 -> 189 -> 40 | 214 -> 108 | 14 -> 54 |
+| iPhone SE | 69 of 82 ms (84 %) | 22 -> 82 -> 12 | 169 -> 108.5 | 6 -> 8.5 |
+
+The Android post-encode guard (<= 25 ms) is missed; f2-03's pre-init lever is a NO-GO (OnePlus 9 28
+[23-33]) and f2-02's deferred iOS fonts a NO-GO (huddle 112.5 -> 42 ms, with a font swap); the iPhone
+first frame stays bound to the font join. The Xiaomi 12 was not re-measured.
+
+Targets. Met: Pixel 4a S1 `gpu_main` <= 16 ms (12.75 at 2acaf544, the paint-class programs alone, which also took
+Pixel 4 S1 `gpu_main` from 11.15 to 8.12; the 13.89 of the after row is the kgsl governor settling at 355 MHz instead
+of 430 once the walk shortened), walk <= 3000 and glyphs <= 1200 us, S6 enc <= 2000 us; `replay_us` <= 0.1 ms on S1 /
+S6; `upload_us` <= 0.2 ms except Pixel 4a S1 (216); warm `first_encode_done` to `first_frame_presented` <= 25 ms
+median on both phones (the device-open fix above misses it on the OnePlus 9 and Pixel 5); `am start -W` not worse
+within noise (131 vs 128, inside that pass's 126-141 spread); no scene worse on p50 and enc total where a not-worse
+bar was set (p95 moved within its spread on Pixel 4a S6 and Pixel 4 S3; the S5 rows beside their befores, Pixel 4 p50
+6.32 to 6.41 and OnePlus 9 p95 7.01 against 6.99, are within noise). Not met: Pixel 4 S1 `gpu_main` <= 5.0 ms
+(CPU-bound) and enc <= 3000 us; every iPhone SE target (`upload` dominates there); S4 `submit - gpu_main` <= 1.0 ms
+(set for the Pixel 4, not evaluated there after 2acaf544; inline path at b6e5a665 Pixel 4a 1.39 / OnePlus 9 3.50,
+split path at 78fb0a4d 1.66 / 3.41); Pixel 4a S4 p95 <= 12 (12.42); OnePlus 9 S4 p50 <= 4.3 / p95 <= 5.0. Every kill
+switch's off-arm reproduced its before rows within noise, except the paint-class all-off arm on the Pixel 4a (16-17 %
+below: the atlas tier rule and the clear skip have no switch). Owed: Pixel 4 rows after c61ee81a (S4 / S5 after
+2acaf544), iPhone SE rows after c61ee81a, split-path S2 / S3 / S6 re-captures on the Pixel 4a and OnePlus 9 after
+c61ee81a, and the Pixel 5 / Xiaomi 12 matrix.
 
 ## Dev loop
 

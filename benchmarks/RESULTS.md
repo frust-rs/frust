@@ -91,7 +91,7 @@ covers seeding the driver cache from that blob and queueing the warm-up) rose fr
 on the Pixel 5, so the whole `first_frame_presented` span is **longer** than on 2026-09-06 (95→114 ms and 172→202 ms) while
 `am start -W` is flat (128→128) or better (159→141). The two stamps bound different work; which of the intervening changes
 (driver-cache seeding, the hardware-buffer device probe, the warm-up worker starting beside device creation) owns the extra
-device-open time is not measured here and is the open item this pass hands back. The Xiaomi 12 repeats the
+device-open time was not measured in this pass and was handed back; the 2026-10-19 split owns it (Follow-ups, below). The Xiaomi 12 repeats the
 pattern from the Mac: 53.5 → 9.0 ms after encode, `adapter_ready` 35 → 107 ms, `first_frame_presented` 97 → 123,
 `am start -W` 107 → 99 — three devices, one direction.
 
@@ -116,9 +116,19 @@ first-frame warm-up starting beside device creation as the one candidate common 
 measurement) — and the font preinit join is slower too (eight of twelve launches at 177–273 ms against six at 100–159 in
 September), so `first_frame_presented` lands at 201 ms median (95–304) where 2026-09-06 read 100. The frame still presents
 5–33 ms after the join in eleven launches: closing this remains September's font-preinit question, now with a slower device
-open under it. The plan's p5-02 (iOS first-frame GO/NO-GO) is the card that re-captures S7 here.
+open under it. The follow-ups plan's f2-01 and f2-02 took this up (Follow-ups, below); its p5-02 is superseded by f2-02.
 
 **iPhone SE: the S8 plugin rows are 3–6× September's.** Writes 3–5 → 18–28 µs/call and reads 1 → 3–6 on the same preferences store, while the same build's Android rows are flat and Flutter's iOS rows moved −13…+16 %. A three-run A/B after the matrix with Xcode quit reads the same as with it open (writes 15–29 µs), so the Instruments rig is not the cause. **Separated 2026-10-19: the build.** The September tree (`36ef20db`) rebuilt and run on today's phone (iOS 26.7.1) reads writes 3–6 µs / reads 1 µs, while `main` the same day reads 19–28 / 4–6 — the OS is exonerated; the regression lies in the `c705922b..57c08eb1` range (iPhone SE section, September-tree block).
+
+**Follow-ups (2026-10-20): `adapter_ready` — shader-module creation owned the move, and f2-01 fixed it.** The sub-step stamps (PR #97) put `shader_modules_ms` at 92 % of the install gap on the OnePlus 9 (76 of 82 ms fresh, 75 of 83 warm), 90 % on the Pixel 5 (150 of 167 fresh, 151 of 168 warm) and 84 % on the iPhone SE (69 of 82) — twelve `create_shader_module` calls where September created four; the driver-cache seed, the hardware-buffer probe and the warm-up spawn cost 0 (each device's `### Startup sub-step split (2026-10-19)` block). f2-01 (shader modules created on first use, the first frame's four on a pool started at install; PR #102) brings `adapter_ready` back to September's figures on all three measured phones: OnePlus 9 111 → **32** ms (September 36), Pixel 5 189 → **40** (44), iPhone SE 82 → **12** (22); `first_frame_presented` 124 → 67, 214 → 108 and 169 → 108.5 ms (`### Device-open fix re-measure`, Android 2026-10-19 and iPhone 2026-10-20). It shipped with the Android post-encode guard missed: `first_encode_done → first_frame_presented` 11 → 32 ms on the OnePlus 9 and 14 → 54 on the Pixel 5 against ≤ 25, the iPhone 6 → 8.5 (inside it). f2-03's pre-init lever for that residue is a **NO-GO** (OnePlus 9 28 ms [23–33], the modules cannot exist before the pre-init thread owns the device; `### Pre-init shader modules re-measure (2026-10-20) — NO-GO`; `android-first-frame-carries-shader-module-creation` in `docs/LIMITATIONS.md`). The Xiaomi 12 was not attached for this plan and was not re-measured; its `adapter_ready` 107 ms above stands as measured.
+
+**Follow-ups (2026-10-20): iPhone SE S8 plugin rows — the build, not iOS.** The September tree (`36ef20db`) rebuilt and run on iOS 26.7.1 reads writes 3–6 µs / reads 1 µs; `main` the same day reads 19–28 / 4–6 (`### September tree rebuilt on iOS 26.7.1 (2026-10-19)`). Carried open as `act_000001a14dde1c5b16CCVZiT`, bisect range `c705922b..57c08eb1`.
+
+**Follow-ups (2026-10-20): iPhone SE S3 rebuild — the build, same block.** September tree rebuild p50 4.27 / 4.24 (`clear`), 9.26 / 9.15 (`create 10k`), 4.00 / 3.89 (`update`), 2.98 / 3.00 (`swap`) ms against `main` 5.98 / 6.02, 12.94 / 12.89, 5.54 / 5.58, 4.38 / 4.42; `create 1k` flat (1.7). The same range, carried open as `act_000001a14dde1e08KL4q0yxt`.
+
+**Follow-ups (2026-10-20): OnePlus 9 S3 `create 1k` — split, not fixed.** The 14.98 → 21.38 ms p50 is the op frame's own `submit` (12.56 → 17.97 ms) plus the frame after it (7.63 → 11.27 ms); frames 10–20 of the cycle are cheaper than September's, so the whole cycle's submit falls 114.3 → 92.4 ms. It is not GPU work, not the parallel strip walk (`NO_PARALLEL` op frame 18.18 ms) and not the resident-run cache (17.80 ms) (`### create 1k split (2026-10-19)`, PR #99); the settle-window candidate is untested and `act_000001a14dde1e09f8S3m5Hm` stays open.
+
+**Follow-ups (2026-10-20): iPhone SE first frame — bound to the Core Text font join; deferring it is a NO-GO.** After f2-01 the median is 108.5 ms [75–377] on `frust_bench` with `adapter_ready` 12; every launch's first rebuild follows `font_preinit_joined` (94.5 ms [52–322]) by 8–40 ms. f2-02 deferred the system fonts: huddle's first frame fell 112.5 → 42 ms, but the first screen draws in another face until adoption at 203.5 ms [84–319] and swaps with a re-layout, and one cached layout stays in the old face (`### Deferred system fonts (f2-02) — NO-GO (2026-10-20)`; code kept unmerged on `perf/ios-deferred-system-fonts` `19adf5eb`; `shell-ios-first-frame-above-goal` in `docs/LIMITATIONS.md`). `act_000001a14dde1e0aHYkRX5Qx` is resolved; p5-02 (`tsk_000001a134bec1e04X7VyAND`, still `ready` on the completed frust-fast board) is superseded by f2-02.
 
 ---
 
