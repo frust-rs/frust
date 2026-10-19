@@ -292,6 +292,40 @@ Cycle health — Frust (profile) `s3-create1k` reopens per kept run: 27–27; Fl
 
 **Phase 2 target.** f2-01's remedy (a), as the OnePlus 9 block says; on this phone it is worth up to ≈110–115 of the 150 ms (nine strip programs at ≈12.5 ms), against the September `adapter_ready` of 44 ms (gap ≈22) as the bar.
 
+### Device-open fix re-measure (2026-10-19)
+
+**Method.** The f2-01 change — shader modules registered without being created at install, each created on first use by whichever thread asks, the first frame's four created side by side on a short-lived pool started at install (`perf/lazy-shader-modules` `3658806f` on `main` `42ef10d9`: `crates/frust-gpu/src/shader.rs`, `pipeline.rs`, `crates/frust-engine/src/gpu/pipelines.rs`, `renderer.rs`; no shader source, golden or pin changed) — read with the same recipe as the sub-step split above: the same profile APK as the OnePlus 9 leg (10,146,115 B, md5 `01945f7c…`), same phone and build (`UP1A.231105.001.B2`, serial redacted), wireless adb over the LAN with the radios as found (airplane off, Wi-Fi up — the recorded deviation of every Pixel 5 pass since 2026-10-17, `device_state.sh` warns on it), on battery (63 %, not charging), brightness fixed by the gate, refresh never pinned, no sampler, 33.0 → 33.5 °C. One 20 s S1 launch first so a pipeline-cache blob exists, then `run.sh s7 --runs 12 --duration 60`: all 12 launches carry a startup line and restored a blob. The **before** column is this build's baseline, the warm series of the sub-step split above (`main` `e89a639d`, same recipe, same session) re-read with the same script; `am start -W` is 4 cold launches, median of launches 2–4.
+
+| Key (ms) | before — main `e89a639d`, 2026-10-19 warm series (the m1-05 block's last column) | after — `perf/lazy-shader-modules`, today, same recipe |
+|---|---|---|
+| `preinit_joined` | 20 [3–29] | 19 [5–33] |
+| `cache_loaded` | 21 [3–30] | 20 [5–33] |
+| `pipeline_cache_restored` | 21 [3–30] | 20 [5–33] |
+| `adapter_ready` | 189 [178–200] | **40 [27–51]** |
+| `first_rebuild_done` | 201 [187–210] | 56 [40–77] |
+| `first_encode_done` | 201 [187–210] | 56 [40–77] |
+| `first_submit_pipeline_wait` (duration) | 3 [3–5] | **35 [22–47]** |
+| `first_frame_presented` | 214 [202–230] | **108 [97–125]** |
+| **gap** `adapter_ready − pipeline_cache_restored` | 168 [159–181] | 19 [15–28] |
+| `engine_surface_ms` | 14 [10–22] | 13 [11–24] |
+| — of which `device_create_ms` | 1 [0–7] | 1 [0–13] |
+| `cache_seed_ms` | 0 | 0 |
+| `caps_probe_ms` | 0 | 0 |
+| **`shader_modules_ms`** (now the registration alone) | 151 [145–163] | 1 [1–3] |
+| `warm_up_start_ms` (now includes the pool's spawn) | 0 | 1 [0–3] |
+| `engine_rest_ms` | 0 [0–1] | 0 [0–3] |
+| `install_rest_ms` | 0 [0–1] | 0 [0–1] |
+| sum of the seven install parts | 166 [157–178] | 17 [13–25] |
+| gap − sum | 2 [1–4] | 2 [1–4] |
+| `font_system_ms` (preinit thread) | 15 [10–21] | 12 [10–20] |
+| `font_app_sync_ms` | 0 | 0 |
+| `first_encode_done → first_frame_presented` | 14 [12–20] | **54 [33–62]** |
+| `am start -W` TotalTime, median of launches 2–4 | 147 (133/148/147; launch 1 133) | 138 (138/145/131; launch 1 148) |
+
+**Verdict against the card's bars.** `first_frame_presented` **108 ms median [97–125] against the bar of ≤ 172 (the 2026-09-06 median) — met**, 106 ms under the 214 ms baseline and 94 under 2026-10-17's 202. `adapter_ready` 40 [27–51] against September's 44 — back where it was: the gap is 19 ms [15–28] (its `engine_surface_ms` 13 is this phone's swapchain configure, unchanged), `shader_modules_ms` 1 (151 before), the seven install parts within 1–4 ms of the gap on every launch. **The post-encode guard is missed, by more than on the OnePlus 9:** `first_encode_done → first_frame_presented` 54 ms [33–62] against ≤ 25 (14 before), carried by `first_submit_pipeline_wait` 35 ms [22–47] (3 before): four modules of ≈ 12.5 ms each on a Snapdragon 765G with two big cores, started at install (≈ 40 ms) while the render thread's first rebuild runs to 56 ms, so the frame waits for creation the install used to pay 151 ms for. `am start -W` TotalTime 138 ms (138/145/131) against 147 before and 141 on 2026-10-17 — within the "not worse" bar, and again smaller than the engine's own move (−106 ms).
+
+**What the miss says.** As on the OnePlus 9: the pool starts at install, ≈ 16 ms before the first frame's encode is done, and this chipset creates the four modules in ≈ 25–35 ms, so the frame waits for most of it. The lever for the residue — registering and creating the first frame's modules on the GPU pre-init thread, which owns the device ≈ 20 ms before the surface exists — is the follow-up card named on the OnePlus 9 block; it would make the post-encode span this phone's ≈ 14 ms again. The GO/NO-GO on merging the first-frame win with the guard missed is the plan owner's ruling, recorded on the card.
+
 ### S8
 
 Per-op median latency over the kept runs (µs/call; each type's first call excluded as warm-up).
@@ -552,6 +586,42 @@ GPU, from the `gpu_q=1` readings inside the cycle (they lag their line, so the c
 **Finding on the side — the fresh-install series never restored a blob.** On all 12 launches after the fresh install the startup line carries no `pipeline_cache_restored` stamp, `first_submit_pipeline_wait` reads 70 ms [65–71] (3 with a blob) and `first_frame_presented` 189 ms [178–205]: every launch compiled the first frame's pipelines cold. The blob is written once the warm-up has built its list, **after a later frame** (`CachePersistence::after_frame` in `crates/frust-shell-android/src/jni_glue.rs`), on surface-destroy or on pause; S7 deliberately requests no frame after its first, the warm-up finishes after that frame, and the harness's `am force-stop` reaches neither pause nor surface-destroy — so an idle first screen that is killed in the foreground leaves no blob, launch after launch. On 2026-10-17 the S7 block ran after six rendering blocks that had written it. One rendering launch fixes it for every launch that follows (the warm column), and a backgrounded app pauses and persists; the exposure is the launch sequence "static first screen → killed" — already filed as the minor `act_000001a1480df74b8iv9vHyR` ("Static first screen killed in the foreground before any later frame or surface destroy leaves no blob"), now with its cost measured against the same build's warm series: +65 ms on the first frame here (189 against 124), +142 ms on the Pixel 5 (356 against 214).
 
 **Phase 2 target.** f2-01's remedy (a): take the strip-program module creation off the install path — the render thread creates only the modules the first frame's own variants need (which ones, the warm-up list says), the other class specialisations are created on the warm-up worker that already builds their pipelines, or the family collapses into one module with several entry points if the cost is per-module overhead rather than per-line parsing (to be split on the Xiaomi 12 / iPhone SE leg as the card says). At ≈6 ms a module the nine strip programs are ≈55–60 of the 76 ms; the September `adapter_ready` of 36 ms (gap ≈16) is the bar, not a projection.
+
+### Device-open fix re-measure (2026-10-19)
+
+**Method.** The f2-01 change — shader modules registered without being created at install, each created on first use by whichever thread asks, the first frame's four created side by side on a short-lived pool started at install (`perf/lazy-shader-modules` `3658806f` on `main` `42ef10d9`: `crates/frust-gpu/src/shader.rs`, `pipeline.rs`, `crates/frust-engine/src/gpu/pipelines.rs`, `renderer.rs`; no shader source, golden or pin changed) — read with the same recipe as the sub-step split above: one profile APK from the branch (`frust build apk --profile --target-platform android-arm64 --define FRUST_TRACE_RAW=1`; 10,146,115 B, md5 `01945f7c…`), the matrix's prep (airplane on, Wi-Fi/Bluetooth off, 120 Hz pinned both ways, brightness 128, `dumpsys battery unplug`, 30 min timeout; all restored afterwards), same phone and ROM (`BP1A.250405.007`, serial redacted), USB, no sampler, 31.6 → 33.7 °C. One 20 s S1 launch first so a pipeline-cache blob exists (the fresh-install trap above), the battery spoof re-armed after it, then `run.sh s7 --runs 12 --duration 60` (`device_state.sh` gate, charger off, airplane on): all 12 launches carry a startup line and restored a blob. The **before** column is this build's baseline, the warm series of the sub-step split above (`main` `e89a639d`, same recipe, same session) re-read with the same script; `am start -W` is 4 cold launches, median of launches 2–4.
+
+| Key (ms) | before — main `e89a639d`, 2026-10-19 warm series (the m1-05 block's last column) | after — `perf/lazy-shader-modules`, today, same recipe |
+|---|---|---|
+| `preinit_joined` | 28 [17–37] | 24 [19–36] |
+| `cache_loaded` | 28 [18–37] | 24 [19–36] |
+| `pipeline_cache_restored` | 28 [18–37] | 24 [19–36] |
+| `adapter_ready` | 111 [101–121] | **32 [27–46]** |
+| `first_rebuild_done` | 113 [103–123] | 35 [30–50] |
+| `first_encode_done` | 113 [103–123] | 35 [30–50] |
+| `first_submit_pipeline_wait` (duration) | 3 [1–3] | **21 [18–28]** |
+| `first_frame_presented` | 124 [114–134] | **67 [64–80]** |
+| **gap** `adapter_ready − pipeline_cache_restored` | 83 [80–85] | 8 [7–11] |
+| `engine_surface_ms` | 5 [5–6] | 5 [5–7] |
+| — of which `device_create_ms` | 0 [0–1] | 0 [0–1] |
+| `cache_seed_ms` | 0 | 0 |
+| `caps_probe_ms` | 0 | 0 |
+| **`shader_modules_ms`** (now the registration alone) | 75 [73–79] | 1 |
+| `warm_up_start_ms` (now includes the pool's spawn) | 0 | 0 [0–1] |
+| `engine_rest_ms` | 0 | 0 [0–2] |
+| `install_rest_ms` | 0 | 0 |
+| sum of the seven install parts | 81 [78–84] | 6 [6–9] |
+| gap − sum | 2 [1–3] | 2 [1–3] |
+| `font_system_ms` (preinit thread) | 8 [7–17] | 8 [7–13] |
+| `font_app_sync_ms` | 0 | 0 |
+| `first_encode_done → first_frame_presented` | 11 [9–12] | **32 [28–39]** |
+| `am start -W` TotalTime, median of launches 2–4 | 127 (129/127/126; launch 1 121) | 135 (135/134/135; launch 1 136) |
+
+**Verdict against the card's bars.** `first_frame_presented` **67 ms median [64–80] against the bar of ≤ 95 (the 2026-09-06 median) — met**, 57 ms under the 124 ms baseline and 47 under 2026-10-17's 114. `adapter_ready` 32 [27–46] against September's 36 — back where it was: the gap is 8 ms [7–11] (September ≈ 16), `shader_modules_ms` 1 (75 before; the bar was "at least halved"), and the seven install parts still sum to within 1–3 ms of the gap on every launch, so nothing moved into an unstamped place. **The post-encode guard is missed:** `first_encode_done → first_frame_presented` 32 ms [28–39] against ≤ 25 (11 before), all of it `first_submit_pipeline_wait` 21 ms [18–28] (3 before) — the first frame now waits for the pool's module creation, which starts at install (≈ 30 ms) and lands after the frame's encode (35 ms): four modules of ≈ 6 ms each side by side on a Snapdragon 888 whose render, preinit and UI threads are busy at the same moment, then the frame's own pipelines from the seeded driver cache. The time the install no longer pays (75 ms) is not spent elsewhere: the frame absorbs ≈ 18 ms of it and the rest is gone. `am start -W` TotalTime 135 ms (135/134/135) against 127 before and 128 on 2026-10-17: +7 ms, **outside the "not worse" bar**, and it did not follow the 57 ms move of `first_frame_presented` at all — TotalTime is bounded by something other than the engine's first present on this phone (the activity's own first window draw is the usual candidate; the pool's four threads overlapping that draw is the plausible cost) — recorded, not attributed.
+
+**Strategy arms.** One S7 launch each on a `--define FRUST_FIRST_FRAME_WARM_UP=await` and `=finish` APK, after a 20 s S1 launch each (first frames 253 / 287 ms on those rendering launches, which build the whole list): `await` `adapter_ready` 34, `first_submit_pipeline_wait` 78, `first_frame_presented` 125 ms; `finish` 29 / 79 / 121 ms — both present a first frame well inside the 1 s timeout, paying the whole list before it as designed, with `shader_modules_ms` 1 on both; the three meanings are unchanged. `steal` stays the default.
+
+**What the miss says.** The pool starts where the modules used to be created, at install, and that is ≈ 5 ms before the first frame asks for them; on this phone the frame therefore waits ≈ 18 ms for creation it previously found done (paid before `adapter_ready` instead). The lever the card names for a residue — registering and creating the first frame's modules on the GPU pre-init thread, which on Android owns the device ≈ 20 ms before the surface exists (`spawn_gpu_preinit`, `crates/frust-shell-android/src/jni_glue.rs`) — is outside this card and is filed as a follow-up; it would put the modules ahead of the install and return the post-encode span to its ≈ 11 ms. The GO/NO-GO on merging the first-frame win with the guard missed is the plan owner's ruling, recorded on the card.
 
 ### S8
 
