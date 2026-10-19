@@ -6582,12 +6582,19 @@ earlier 12-launch probe on the same build read 89-115 ms against a 99 ms baselin
 what sets the median first-frame cost. A render-thread-style QoS boost applied to the font-preinit
 thread was measured and did not close the gap either.
 
+**Re-measured 2026-10-20** (`benchmarks/RESULTS.md`, iPhone SE section): with the device open fixed (PR #102, `adapter_ready` 12 ms) the
+join is the whole residue — `frust_bench` first frame 108.5 ms median [75–377], join 94.5 [52–322], iOS 26.7.1's Core Text enumeration
+(the September tree reads the same join). Deferring the system fonts for apps that register fonts (f2-02, branch
+`perf/ios-deferred-system-fonts`, not merged) brought huddle's first frame to 42 ms but is a NO-GO: until adoption (≈ 200 ms)
+text whose style ends in the system sans draws in the app's registered face with different metrics, then the screen swaps
+font and re-lays out, and a widget-cached `TextLayout` keeps the window's face after adoption.
+
 **Accepted because**: the render/font overlap already recovers most of the achievable win without
 adding synchronization risk to the split; the remaining cost sits inside `TextContext::new`/Parley's
 own font matching, which this shell does not own.
 
 **Trigger for removal**: `TextContext::new`'s bimodal cost is made deterministic, or font preinit
-moves off the first-frame critical path entirely.
+moves off the first-frame critical path without changing the faces the first frame draws.
 
 ### `shell-ios-pace-trace-artefact-only` — the "3.5% of S3 frames take two vsyncs" reading was a measurement artefact
 
