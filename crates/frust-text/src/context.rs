@@ -22,6 +22,7 @@
 //! for why a host needs this seam on `wasm32`.
 
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use parley::fontique::{Blob, GenericFamily};
 use parley::style::StyleProperty;
@@ -312,6 +313,15 @@ fn proportional_estimate(span: usize, target: f32, measured: f32) -> usize {
     }
 }
 
+/// Where [`TextContext::new_with_timings`] spent its time (startup evidence).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NewTimings {
+    /// `parley::FontContext::new` — the platform font-source scan.
+    pub font_system: Duration,
+    /// [`TextContext::sync_app_fonts`] — seeding the app fonts and generic fallbacks.
+    pub app_sync: Duration,
+}
+
 impl TextContext {
     /// Builds a context with system fonts available, seeded with every app font
     /// registered so far.
@@ -327,8 +337,17 @@ impl TextContext {
     /// generic-family fallback a shell registered before this call is already
     /// live in the returned context — see [`GENERIC_FALLBACKS`].
     pub fn new() -> Self {
+        Self::new_with_timings().0
+    }
+
+    /// [`Self::new`] that also reports where its time went. `new` delegates
+    /// here, so the work and its order are identical.
+    pub fn new_with_timings() -> (Self, NewTimings) {
+        let font_started = Instant::now();
+        let font_ctx = parley::FontContext::new();
+        let font_system = font_started.elapsed();
         let mut cx = Self {
-            font_ctx: parley::FontContext::new(),
+            font_ctx,
             layout_ctx: parley::LayoutContext::new(),
             shape_cache: ShapeCache::new(DEFAULT_CAPACITY),
             app_fonts_applied: 0,
@@ -336,8 +355,16 @@ impl TextContext {
             #[cfg(test)]
             measurements: 0,
         };
+        let sync_started = Instant::now();
         cx.sync_app_fonts();
-        cx
+        let app_sync = sync_started.elapsed();
+        (
+            cx,
+            NewTimings {
+                font_system,
+                app_sync,
+            },
+        )
     }
 
     /// Lays out `text` with `style`, wrapping to `max_width` when supplied.
@@ -844,6 +871,19 @@ mod tests {
     use super::*;
     use crate::shape_cache::DEFAULT_CAPACITY;
     use peniko::Color;
+
+    #[test]
+    fn new_with_timings_builds_the_same_context_as_new() {
+        let (mut timed, timings) = TextContext::new_with_timings();
+        let mut plain = TextContext::new();
+        let style = style(16.0);
+        let a = timed.layout("Hello", &style, None);
+        let b = plain.layout("Hello", &style, None);
+        assert_eq!(a.size(), b.size());
+        // Both phases ran: the font-system scan is never free.
+        assert!(timings.font_system > Duration::ZERO);
+        assert!(timings.font_system + timings.app_sync < Duration::from_secs(60));
+    }
 
     /// A body-text style at `size`.
     fn style(size: f32) -> TextStyle {

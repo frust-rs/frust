@@ -259,7 +259,7 @@
 use core::ops::Range;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Once};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use frust_gpu::staging::{
     BUFFER_COPY_ALIGNMENT, StagingFrame, StagingRing, TEXTURE_COPY_ALIGNMENT,
@@ -898,6 +898,19 @@ fn format_us(nanos: u32) -> String {
     format!("{}.{}", tenths / 10, tenths % 10)
 }
 
+/// Where one [`EngineRenderer`] construction spent its wall time, measured with
+/// `Instant` reads inside [`EngineRenderer::with_image_sampler`]. Evidence for
+/// the startup sub-step stamps only; no behaviour depends on it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ConstructionTimings {
+    /// `ShaderLibrary::new` plus `EngineShaders::register_family` (the shader modules).
+    pub shader_modules: Duration,
+    /// `PipelineCache::new` plus `warm_up` (enqueue and background-worker spawn).
+    pub warm_up_start: Duration,
+    /// Everything else in construction (routing, gradients, atlas, resources).
+    pub rest: Duration,
+}
+
 /// One surface's 2D render engine: a scene in, recorded passes out.
 ///
 /// Create one per surface and keep it across frames — the retained scene
@@ -905,6 +918,8 @@ fn format_us(nanos: u32) -> String {
 /// pool are the reason a steady-state frame allocates nothing.
 #[derive(Debug)]
 pub struct EngineRenderer {
+    /// Where [`Self::with_image_sampler`] spent its time (startup evidence only).
+    construction: ConstructionTimings,
     caps: TierCaps,
     format: wgpu::TextureFormat,
     shaders: EngineShaders,
@@ -1115,16 +1130,22 @@ impl EngineRenderer {
             return Err(EngineError::AtlasError);
         }
 
+        let started = Instant::now();
         let routing = ClassRouting::from_config();
+        let shaders_started = Instant::now();
         let mut library = ShaderLibrary::new();
         let shaders = EngineShaders::register_family(&mut library, device, image_sampler);
+        let shader_modules = shaders_started.elapsed();
+        let warm_started = Instant::now();
         let mut pipelines = PipelineCache::new(Arc::new(library), pipeline_cache.cloned());
         pipelines.warm_up(device, &warm_up_list(&shaders, format, routing.uber));
+        let warm_up_start = warm_started.elapsed();
 
         let level = Level::try_detect().unwrap_or(Level::baseline());
         let gradients = GradientCache::for_texture(GradientTextureLayout::square(dim), level);
 
-        Ok(Self {
+        let mut renderer = Self {
+            construction: ConstructionTimings::default(),
             caps: caps.clone(),
             format,
             shaders,
@@ -1169,7 +1190,23 @@ impl EngineRenderer {
             last_staged: 0,
             #[cfg(feature = "perf-trace")]
             encode_trace: EncodeTrace::default(),
-        })
+        };
+        let rest = started
+            .elapsed()
+            .saturating_sub(shader_modules)
+            .saturating_sub(warm_up_start);
+        renderer.construction = ConstructionTimings {
+            shader_modules,
+            warm_up_start,
+            rest,
+        };
+        Ok(renderer)
+    }
+
+    /// Where this renderer's construction spent its time.
+    #[must_use]
+    pub fn construction_timings(&self) -> ConstructionTimings {
+        self.construction
     }
 
     /// The target format this renderer warmed its pipelines for.
