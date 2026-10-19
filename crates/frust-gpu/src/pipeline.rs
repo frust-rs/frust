@@ -106,6 +106,24 @@
 //! still pending can never settle, so a wait there returns at once rather than
 //! sitting out its timeout.
 //!
+//! ## Shader modules
+//!
+//! A pipeline names its program by [`ShaderId`], and the [`ShaderLibrary`]
+//! creates that id's `wgpu::ShaderModule` on first use (see
+//! [`crate::shader`]): the first build of any variant over a program creates
+//! its module on the building thread — the warm-up worker for a listed
+//! variant, the render thread for a stolen or unlisted one — and a build whose
+//! module another thread is creating waits for it. A module is created once.
+//!
+//! [`PipelineCache::warm_up_shaders`] starts that creation ahead of the first
+//! request, for the few modules the first frame after an install is known to
+//! draw with: one worker can create them only one after another, while module
+//! creation is wgpu's parse and validation of the WGSL — CPU work that runs in
+//! parallel, unlike pipeline builds behind one driver cache — so a small pool
+//! of short-lived threads creates them side by side and every later request
+//! finds the module built or in flight. The pool's threads hold a device
+//! clone, so [`PipelineCache::shutdown`] joins them too.
+//!
 //! ## Persisted driver cache
 //!
 //! A [`wgpu::PipelineCache`] — Vulkan-only, seeded from a shell-persisted blob
@@ -117,6 +135,7 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -667,6 +686,11 @@ impl<P> VariantCache<P> {
         Arc::clone(&self.shared)
     }
 
+    /// Whether [`Self::shutdown`] has run: the cache starts no thread again.
+    fn is_shut_down(&self) -> bool {
+        lock(&self.shared.inner).shutdown
+    }
+
     /// Returns the variant for `desc`, compiling it at most once.
     fn get_or_create<F>(&mut self, desc: &RenderPipelineDesc, compile: F) -> &P
     where
@@ -956,6 +980,9 @@ pub struct PipelineCache {
     core: VariantCache<wgpu::RenderPipeline>,
     shaders: Arc<ShaderLibrary>,
     driver_cache: Option<wgpu::PipelineCache>,
+    /// The threads [`Self::warm_up_shaders`] started, joined by
+    /// [`Self::shutdown`] and on drop.
+    shader_workers: ShaderWorkers,
 }
 
 impl PipelineCache {
@@ -971,6 +998,7 @@ impl PipelineCache {
             core: VariantCache::default(),
             shaders,
             driver_cache,
+            shader_workers: ShaderWorkers::default(),
         }
     }
 
@@ -1017,6 +1045,10 @@ impl PipelineCache {
     /// If the thread cannot be spawned the queue is drained inline instead, so
     /// warm-up degrades to a synchronous build rather than silently not
     /// happening.
+    ///
+    /// The worker creates each program's shader module as its first variant
+    /// over that program reaches it, unless [`Self::warm_up_shaders`] or an
+    /// earlier request already has.
     pub fn warm_up(&mut self, device: &wgpu::Device, descs: &[RenderPipelineDesc]) {
         let shaders = Arc::clone(&self.shaders);
         let driver_cache = self.driver_cache.clone();
@@ -1024,8 +1056,72 @@ impl PipelineCache {
             .warm_up(descs, || compiler(device, &shaders, driver_cache.as_ref()));
     }
 
-    /// Stops warm-up and joins the worker, so no thread holding a clone of the
-    /// device outlives this cache.
+    /// Starts creating the shader modules `ids` name on a small pool of
+    /// short-lived threads and returns at once.
+    ///
+    /// Call it at install, before [`Self::warm_up`], with the modules the
+    /// first frame draws with: the pool creates them side by side while the
+    /// render thread finishes its install, and the worker's or the render
+    /// thread's first build over one of them then finds the module built, or
+    /// waits for the pool thread creating it — never creating it twice. A
+    /// module already created, an id listed twice, and an id this cache's
+    /// library did not mint are skipped; everything else stays created on
+    /// first use.
+    ///
+    /// One thread per module, at most one fewer than the machine's available
+    /// parallelism (and at least one), so the calling thread keeps a core.
+    /// The threads exit when the list is done; [`Self::shutdown`] (and drop)
+    /// joins them. If a thread cannot be spawned the modules it would have
+    /// created are left to their first use rather than created inline — the
+    /// call must not put module creation back in front of the caller. After
+    /// [`Self::shutdown`] it starts nothing.
+    pub fn warm_up_shaders(&mut self, device: &wgpu::Device, ids: &[ShaderId]) {
+        self.shader_workers.reap_finished();
+        if self.core.is_shut_down() {
+            return;
+        }
+        let mut pending: Vec<ShaderId> = Vec::with_capacity(ids.len());
+        for id in ids {
+            if self.shaders.name_of(*id).is_some()
+                && !self.shaders.is_compiled(*id)
+                && !pending.contains(id)
+            {
+                pending.push(*id);
+            }
+        }
+        if pending.is_empty() {
+            return;
+        }
+        let parallelism = std::thread::available_parallelism().map_or(1, usize::from);
+        let threads = shader_thread_count(pending.len(), parallelism);
+        let list: Arc<(Vec<ShaderId>, AtomicUsize)> = Arc::new((pending, AtomicUsize::new(0)));
+        for _ in 0..threads {
+            let shaders = Arc::clone(&self.shaders);
+            let device = device.clone();
+            let list = Arc::clone(&list);
+            let spawned = std::thread::Builder::new()
+                .name("frust-gpu shader warm-up".to_string())
+                .spawn(move || {
+                    let (ids, next) = &*list;
+                    while let Some(id) = ids.get(next.fetch_add(1, Ordering::Relaxed)) {
+                        let _module = shaders.module(&device, *id);
+                    }
+                });
+            match spawned {
+                Ok(handle) => self.shader_workers.0.push(handle),
+                Err(err) => {
+                    log::warn!(
+                        "frust-gpu: could not spawn a shader warm-up thread ({err}); the \
+                         modules it would have created are created on first use"
+                    );
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Stops warm-up and joins the worker and any [`Self::warm_up_shaders`]
+    /// thread, so no thread holding a clone of the device outlives this cache.
     ///
     /// [`Drop`] calls this; call it explicitly to order the wait before other
     /// teardown of your own. It is idempotent, and terminal — afterwards
@@ -1033,6 +1129,7 @@ impl PipelineCache {
     /// they are compiled on first request.
     pub fn shutdown(&mut self) {
         self.core.shutdown();
+        self.shader_workers.join_all();
     }
 
     /// How many pipelines this cache has actually compiled.
@@ -1093,6 +1190,53 @@ impl PipelineCache {
     }
 }
 
+/// How many threads [`PipelineCache::warm_up_shaders`] creates `modules`
+/// modules with on a machine offering `parallelism` threads: one per module,
+/// at most one fewer than `parallelism` so the calling thread keeps a core,
+/// and at least one.
+fn shader_thread_count(modules: usize, parallelism: usize) -> usize {
+    modules.min(parallelism.saturating_sub(1)).max(1)
+}
+
+/// The threads [`PipelineCache::warm_up_shaders`] started. Each holds a device
+/// clone, so they are joined by [`PipelineCache::shutdown`] and on drop; a
+/// finished one is reaped by the next `warm_up_shaders` call.
+#[derive(Debug, Default)]
+struct ShaderWorkers(Vec<std::thread::JoinHandle<()>>);
+
+impl ShaderWorkers {
+    /// Joins the threads that have already exited, keeping the live ones.
+    fn reap_finished(&mut self) {
+        let (finished, live): (Vec<_>, Vec<_>) = std::mem::take(&mut self.0)
+            .into_iter()
+            .partition(std::thread::JoinHandle::is_finished);
+        self.0 = live;
+        Self::join(finished);
+    }
+
+    /// Joins every thread, waiting for the ones still creating a module.
+    fn join_all(&mut self) {
+        Self::join(std::mem::take(&mut self.0));
+    }
+
+    fn join(handles: Vec<std::thread::JoinHandle<()>>) {
+        for handle in handles {
+            if handle.join().is_err() {
+                log::error!(
+                    "frust-gpu: a shader warm-up thread panicked; the module it was creating \
+                     is created on its next request"
+                );
+            }
+        }
+    }
+}
+
+impl Drop for ShaderWorkers {
+    fn drop(&mut self) {
+        self.join_all();
+    }
+}
+
 /// A self-contained compile function for a worker thread: it owns clones of
 /// the device, library and driver cache, all of which are `Arc`-backed
 /// handles.
@@ -1116,8 +1260,10 @@ fn build_render_pipeline(
     desc: &RenderPipelineDesc,
 ) -> wgpu::RenderPipeline {
     let name = shaders.name_of(desc.shader).unwrap_or("<unknown shader>");
+    // Created here on first use — or waited for, if another thread is
+    // creating it right now (see the module docs' *Shader modules*).
     let module = shaders
-        .get(desc.shader)
+        .module(device, desc.shader)
         .expect("a RenderPipelineDesc's ShaderId must come from this cache's ShaderLibrary");
     // `wgpu::VertexState::buffers` is a slice of `Option`s: a `None` slot
     // declares a vertex-buffer index the pipeline leaves unbound. Every layout
@@ -2105,5 +2251,18 @@ fn fs_plain() -> @location(0) vec4<f32> {
         let mut packer = KeyPacker::default();
         let key = packer.key_for(&desc()).expect("key");
         assert_eq!(key >> LAYOUT_SHIFT, 0);
+    }
+
+    /// The shader warm-up pool: one thread per module, never more than the
+    /// machine leaves beside the calling thread, never none.
+    #[test]
+    fn the_shader_pool_is_one_thread_per_module_within_the_machine() {
+        assert_eq!(shader_thread_count(4, 12), 4);
+        assert_eq!(shader_thread_count(4, 8), 4);
+        assert_eq!(shader_thread_count(4, 4), 3);
+        assert_eq!(shader_thread_count(4, 2), 1);
+        assert_eq!(shader_thread_count(4, 1), 1);
+        assert_eq!(shader_thread_count(1, 12), 1);
+        assert_eq!(shader_thread_count(12, 8), 7);
     }
 }

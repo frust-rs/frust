@@ -264,7 +264,7 @@ use std::time::{Duration, Instant};
 use frust_gpu::staging::{
     BUFFER_COPY_ALIGNMENT, StagingFrame, StagingRing, TEXTURE_COPY_ALIGNMENT,
 };
-use frust_gpu::{PipelineCache, PooledTexture, SceneTextureId, ShaderLibrary, TierCaps};
+use frust_gpu::{PipelineCache, PooledTexture, SceneTextureId, ShaderId, ShaderLibrary, TierCaps};
 use frust_scene::{Scene, SceneBuilder};
 use glifo::{AtlasCommand, AtlasCommandRecorder, AtlasPaint};
 use kurbo::Affine;
@@ -903,9 +903,13 @@ fn format_us(nanos: u32) -> String {
 /// the startup sub-step stamps only; no behaviour depends on it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ConstructionTimings {
-    /// `ShaderLibrary::new` plus `EngineShaders::register_family` (the shader modules).
+    /// `ShaderLibrary::new` plus `EngineShaders::register_family`: registering
+    /// the shader sources. No module is created here any more — each is created
+    /// on first use, the first frame's on the shader warm-up pool — so this
+    /// reads the registration cost alone.
     pub shader_modules: Duration,
-    /// `PipelineCache::new` plus `warm_up` (enqueue and background-worker spawn).
+    /// `PipelineCache::new`, `warm_up_shaders` (the first-frame module pool's
+    /// spawn) and `warm_up` (enqueue and background-worker spawn).
     pub warm_up_start: Duration,
     /// Everything else in construction (routing, gradients, atlas, resources).
     pub rest: Duration,
@@ -1073,6 +1077,51 @@ fn ordered_warm_up<D>(
     descs
 }
 
+/// The shader modules the first frame after an install draws with, in the
+/// order it first needs them: the distinct programs of [`warm_up_list`]'s
+/// opening — the manual family's Uber program the atlas page pass draws with,
+/// the glyph and solid class programs, and the family's own Uber program —
+/// or, with the Uber program forced, the Uber module(s) alone.
+///
+/// [`EngineRenderer::with_image_sampler`] hands them to
+/// `PipelineCache::warm_up_shaders`, so they are created side by side at
+/// install instead of one after another on the worker the frame waits behind.
+fn first_frame_shaders(shaders: &EngineShaders, uber_only: bool) -> Vec<ShaderId> {
+    first_frame_programs(
+        uber_only,
+        |class| shaders.strip_class(class),
+        || shaders.atlas_strip,
+    )
+}
+
+/// [`first_frame_shaders`]' order and membership over any program type, so it
+/// can be checked against [`ordered_warm_up`]'s opening without a device.
+/// `program(class)` is the family's program for `class`, `atlas()` the atlas
+/// page pass's.
+fn first_frame_programs<P: PartialEq>(
+    uber_only: bool,
+    program: impl Fn(PaintClass) -> P,
+    atlas: impl Fn() -> P,
+) -> Vec<P> {
+    let classes: &[PaintClass] = if uber_only {
+        &[PaintClass::Uber]
+    } else {
+        &[
+            PaintClass::Glyph,
+            PaintClass::SolidCoverage,
+            PaintClass::Uber,
+        ]
+    };
+    let mut programs = vec![atlas()];
+    for class in classes {
+        let next = program(*class);
+        if !programs.contains(&next) {
+            programs.push(next);
+        }
+    }
+    programs
+}
+
 impl EngineRenderer {
     /// Builds a renderer for `format` targets on `caps`' adapter, warming
     /// every engine pipeline in the background.
@@ -1138,6 +1187,11 @@ impl EngineRenderer {
         let shader_modules = shaders_started.elapsed();
         let warm_started = Instant::now();
         let mut pipelines = PipelineCache::new(Arc::new(library), pipeline_cache.cloned());
+        // The first frame's modules are created side by side on a short-lived
+        // pool, started ahead of the worker: the worker's first jobs and the
+        // frame's own requests then find them built or in flight. Every other
+        // module is created by whichever build first needs it.
+        pipelines.warm_up_shaders(device, &first_frame_shaders(&shaders, routing.uber));
         pipelines.warm_up(device, &warm_up_list(&shaders, format, routing.uber));
         let warm_up_start = warm_started.elapsed();
 
@@ -7866,6 +7920,69 @@ mod tests {
 
             let forced = ordered_warm_up(image_sampler, true, describe, atlas);
             assert_eq!(forced, warm_up_plan(image_sampler, true, describe, atlas));
+        }
+    }
+
+    /// The first-frame shader set is exactly the distinct programs of the
+    /// warm-up list's opening, in the order the opening first names them —
+    /// four modules in the sampler family (the atlas pass's manual Uber
+    /// program is one of its own), three in the manual family (where it is the
+    /// family's Uber program) — and under the Uber kill switch the Uber
+    /// module(s) the first frame's atlas and surface passes draw with.
+    #[test]
+    fn the_first_frame_shaders_are_the_programs_of_the_list_opening() {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        enum Key {
+            Atlas,
+            State(EnginePipeline, PaintClass),
+        }
+        /// A program: its family (sampler or manual) and its class.
+        type Program = (bool, PaintClass);
+
+        for image_sampler in [false, true] {
+            let atlas = move || {
+                if image_sampler {
+                    Key::Atlas
+                } else {
+                    Key::State(
+                        crate::gpu::pipelines::ATLAS_STRIP_PIPELINE,
+                        PaintClass::Uber,
+                    )
+                }
+            };
+            // The atlas pass always draws the manual family's Uber program.
+            let program_of = |key: Key| -> Program {
+                match key {
+                    Key::Atlas => (false, PaintClass::Uber),
+                    Key::State(_, class) => (image_sampler, class),
+                }
+            };
+            let list = ordered_warm_up(image_sampler, false, Key::State, atlas);
+            let mut opening: Vec<Program> = Vec::new();
+            for key in &list[..5] {
+                let program = program_of(*key);
+                if !opening.contains(&program) {
+                    opening.push(program);
+                }
+            }
+            let set = first_frame_programs(
+                false,
+                |class| (image_sampler, class),
+                || (false, PaintClass::Uber),
+            );
+            assert_eq!(set, opening, "the opening's programs, in its order");
+            assert_eq!(set.len(), if image_sampler { 4 } else { 3 });
+
+            let forced = first_frame_programs(
+                true,
+                |class| (image_sampler, class),
+                || (false, PaintClass::Uber),
+            );
+            let mut uber: Vec<Program> = vec![(false, PaintClass::Uber)];
+            if image_sampler {
+                uber.push((true, PaintClass::Uber));
+            }
+            assert_eq!(forced, uber, "the Uber module(s) alone");
         }
     }
 
