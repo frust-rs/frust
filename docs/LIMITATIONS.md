@@ -8160,3 +8160,37 @@ controls paint their own (`frust_shadcn::button` reads `PaintCtx::is_focused_for
 **Evidence**: `crates/frust-widgets/src/{button,checkbox,radio,slider}.rs` (no `is_focused_for_ring`
 read in `paint`); the Shortcuts gate row in `examples/playground/README.md` ("the baseline controls
 paint no keyboard-focus ring").
+
+---
+
+### `android-first-frame-carries-shader-module-creation` — the first frame after a surface install waits for the shader modules it draws with
+
+**Observed**: since the shader modules are created on first use (PR #102, 2026-10-19), the first
+frame after a surface install on Android waits in `first_submit_pipeline_wait` for the four modules
+its own pipelines need, which a pool of threads starts at install: `first_encode_done →
+first_frame_presented` is 32 ms median on the OnePlus 9 and 54 on the Pixel 5 against the ≤ 25 ms the
+frust-fast plan set (11 / 14 when the install created every module itself) — while
+`first_frame_presented` as a whole fell from 124 to 67 ms and from 214 to 108, with `adapter_ready`
+back at September's 32 / 40 ms. Starting the modules on the GPU pre-init thread instead (f2-03,
+2026-10-20) measured 28 / 45: a `wgpu::ShaderModule` needs the device, the pre-init thread owns one
+only at the end of its work, and the install follows that moment at once, so the modules never exist
+before the install whatever thread starts them.
+
+**Applies to**: the Android shell's first frame after every surface install (launch, and a surface
+re-created after a destroy); iOS keeps the install-time pool with the same shape (`adapter_ready` 82
+ms there, not yet re-measured). Every later frame is unaffected; the warm-up worker creates the rest
+of the modules behind the first frame.
+
+**Why accepted**: the whole first frame is 57 / 106 ms earlier than before the change on the two
+phones measured, and the only levers that move the residue need WGSL parsed and validated without a
+device (naga IR handed to `create_shader_module`, a `wgpu` surface the pin does not expose today) or
+a smaller first-frame program set — a separate decision, not a tuning of where the threads start.
+
+**Trigger for removal**: a first frame whose `first_encode_done → first_frame_presented` is back at
+or under 25 ms on the OnePlus 9 and the Pixel 5 with the modules created ahead of the install.
+
+**Evidence**: `benchmarks/RESULTS.md` — "Device-open fix re-measure (2026-10-19)" and "Pre-init
+shader modules re-measure (2026-10-20)" under the OnePlus 9 and Pixel 5 S7 sections;
+`crates/frust-gpu/src/shader.rs` (`ShaderLibrary::module`, created on first use),
+`crates/frust-gpu/src/pipeline.rs` (`PipelineCache::warm_up_shaders`),
+`crates/frust-engine/src/renderer.rs` (`first_frame_shaders`).
