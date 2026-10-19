@@ -105,7 +105,10 @@ move (`clear` 15.18 → 15.33). **The A/B run after the pass clears the refactor
 `87271063` and `20e0aa2e` measure alike, the September tree rebuilt today measures 16.1–16.6 ms `create 10k` rebuild on
 the phone's current firmware, pinning the UI thread to the gold cores returns `20e0aa2e` to 7.96 ms and the platform's
 interaction boost (input events flowing, as in real use) takes it to 5.18 — the reconcile cost is unchanged; the move is the walt scheduler keeping the UI thread on the 1.79 GHz silver cores through the bursts.
-Whether the iPhone's +44…+48 % is the same class is untested.
+The iPhone's +44…+48 % is a different class: the September tree rebuilt and run on today's iPhone SE
+(iOS 26.7.1, 2026-10-19) keeps the September rebuild medians while `main` the same day reproduces the 2026-10-17 ones, so on the
+A13 the move rides the build (bisect range `c705922b..57c08eb1`, the `main` merges 2026-10-03 → 10-14) — see the iPhone SE
+section's September-tree block.
 
 **iPhone SE: the first frame doubled, on both of the things it waits for.** `adapter_ready` 22 → 84 ms is the Android
 `adapter_ready` move on a fourth device — iOS carries no pipeline-cache blob and no hardware-buffer probe, which leaves the
@@ -115,7 +118,7 @@ September), so `first_frame_presented` lands at 201 ms median (95–304) where 2
 5–33 ms after the join in eleven launches: closing this remains September's font-preinit question, now with a slower device
 open under it. The plan's p5-02 (iOS first-frame GO/NO-GO) is the card that re-captures S7 here.
 
-**iPhone SE: the S8 plugin rows are 3–6× September's.** Writes 3–5 → 18–28 µs/call and reads 1 → 3–6 on the same preferences store, while the same build's Android rows are flat and Flutter's iOS rows moved −13…+16 %. A three-run A/B after the matrix with Xcode quit reads the same as with it open (writes 15–29 µs), so the Instruments rig is not the cause; the build (`21076221` → `20e0aa2e`) and iOS 26.6.1 → 26.7.1 are the two changes left, not separated here — the third open item this pass hands back.
+**iPhone SE: the S8 plugin rows are 3–6× September's.** Writes 3–5 → 18–28 µs/call and reads 1 → 3–6 on the same preferences store, while the same build's Android rows are flat and Flutter's iOS rows moved −13…+16 %. A three-run A/B after the matrix with Xcode quit reads the same as with it open (writes 15–29 µs), so the Instruments rig is not the cause. **Separated 2026-10-19: the build.** The September tree (`36ef20db`) rebuilt and run on today's phone (iOS 26.7.1) reads writes 3–6 µs / reads 1 µs, while `main` the same day reads 19–28 / 4–6 — the OS is exonerated; the regression lies in the `c705922b..57c08eb1` range (iPhone SE section, September-tree block).
 
 ---
 
@@ -610,7 +613,7 @@ Overall S3 frame series (whole capture incl. settle gaps — continuous vs event
 
 Cycle health — Frust (profile) `s3-create1k` reopens per kept run: 19–19; Flutter (profile) `s3-create1k` reopens per kept run: 5–20.
 
-**All five Frust reconcile ops are captured, faster or flat on the † totals; the UI half got heavier under the acquire wait.** Overall series p50 16.73 → 13.04 ms (−22 %), p95 18.48 → 17.36, 60 Hz misses 55.1 → 41.8 %; per op `create 1k` 26.41 → 23.97, `create 10k` 24.32 → 16.15, `update` 20.83 → 19.21, `swap` 19.89 → 18.78, `clear` 19.17 → 19.44. Inside the op frames (the `stats.py` `[start, end)` windows) the render half got cheaper on every op (submit 2.33–4.45 → 1.69–2.45 ms) while rebuild rose +44…+48 % on `clear`, `create 10k`, `swap` and `update` (4.18 → 6.02, 8.93 → 13.06, 2.98 → 4.42, 3.84 → 5.58 ms) and the CADisplayLink wait absorbed the difference — the same four-op rebuild move the Xiaomi 12 shows at ~2× on the same build and the OnePlus 9 on `87271063` does not (deviation 2; on the Xiaomi it is scheduler placement of the UI thread, not reconcile cost — its S3 prose — and the iPhone's is untested); `create 1k`'s rebuild is flat (1.71 → 1.70) with submit 10.74 → 11.95. Flutter lands no per-op frame at all on this device (its `create 1k` reopens 5–20 per run against Frust's 19; deviation 8).
+**All five Frust reconcile ops are captured, faster or flat on the † totals; the UI half got heavier under the acquire wait.** Overall series p50 16.73 → 13.04 ms (−22 %), p95 18.48 → 17.36, 60 Hz misses 55.1 → 41.8 %; per op `create 1k` 26.41 → 23.97, `create 10k` 24.32 → 16.15, `update` 20.83 → 19.21, `swap` 19.89 → 18.78, `clear` 19.17 → 19.44. Inside the op frames (the `stats.py` `[start, end)` windows) the render half got cheaper on every op (submit 2.33–4.45 → 1.69–2.45 ms) while rebuild rose +44…+48 % on `clear`, `create 10k`, `swap` and `update` (4.18 → 6.02, 8.93 → 13.06, 2.98 → 4.42, 3.84 → 5.58 ms) and the CADisplayLink wait absorbed the difference — the same four-op rebuild move the Xiaomi 12 shows at ~2× on the same build and the OnePlus 9 on `87271063` does not (deviation 2; on the Xiaomi it is scheduler placement of the UI thread, not reconcile cost — its S3 prose — and the iPhone's is not scheduler placement but the build — the September-tree A/B below); `create 1k`'s rebuild is flat (1.71 → 1.70) with submit 10.74 → 11.95. Flutter lands no per-op frame at all on this device (its `create 1k` reopens 5–20 per run against Frust's 19; deviation 8).
 
 ### S7
 
@@ -701,11 +704,56 @@ Flutter control on the same session:
 
 The Flutter control moved −3.4…+4.3 % on p50 across the frame scenarios (its S7 entry span 8 → 9 ms, S8 −13…+16 %), so the session is comparable across an iOS, Xcode and transport change (deviation 5) and the Frust moves are real: S4 −35.6 %, S6 −30.5 %, S3 overall −22.0 %, S2 −7.8 % and S1 −3.7 % on the work row, S5 flat (+0.6 %). The regressions this pass records against September are the S7 first-frame span (+101 %, `adapter_ready` 22 → 84 ms and the font preinit join behind it), the S8 plugin rows (3–6×), and the rebuild half of four S3 ops (+44…+48 %, hidden in the † totals).
 
+### September tree rebuilt on iOS 26.7.1 (2026-10-19)
+
+The method that settled the Xiaomi 12 S3 question, run on the iPhone SE: the 2026-09-07 `main` merge `36ef20db` (a `--profile` build with `FRUST_TRACE_RAW=1`, built by **today's `target/release/frust` CLI** from that tree's own `benchmarks/frust_bench` — the generated project built without falling back to the tree's own CLI; the tree's crates are path dependencies, so the framework code is September's) installed beside `main` `a3d67a1a` built the same way, on the same phone the same day: iOS 26.7.1 (23H30) re-confirmed, Xcode.app quit, no Instruments, USB, Developer Mode. Both `Runner.app`s carry bundle id `it.f0x.frustbench`; the September app's identity is shown by its logs: `frust-perf render-path engine-direct` and `atlas tier=mobile … adapter=Apple A13 GPU` lines (this tree has no separate `frust-render tier=engine` line), `frust-perf raw` lines at 1,718–1,821 per 30 s S3 run (~60.6 fps), the startup line on S7. Order of the legs: September S3/S8/S7, `main` S3/S8, September S3/S8 again, `main` S3/S8 again, then `main` S7. Every leg is 12 complete runs (S3/S8 30 s, S7 60 s), first 2 discarded (PROTOCOL §4); the harness's own `summarize.py` produced the S8 and S7 figures and the S3 op windows are the same half-open `[start, end)` marker windows split by pass (split helper kept in the scratchpad). Columns: **Sep-06** = the 2026-09-06 series (`21076221`, iOS 26.6.1; its published figures), **Sept tree today** = `36ef20db` on iOS 26.7.1 (two legs), **Oct-17** = `20e0aa2e` 2026-10-17 on iOS 26.7.1 (this section's matrix, recomputed from `raw/iphone_se/frust_profile/`), **main today** = `a3d67a1a` (two legs).
+
+**S3 op rebuild p50 over the op frames (ms):**
+
+| Op | Sep-06 (`21076221`, 26.6.1) | Sept tree today (`36ef20db`, 26.7.1) | Oct-17 (`20e0aa2e`) | main today (`a3d67a1a`) |
+|---|---|---|---|---|
+| clear | 4.18 | 4.27 / 4.24 | 6.02 | 5.98 / 6.02 |
+| create 1k | 1.71 | 1.74 / 1.69 | 1.70 | 1.68 / 1.67 |
+| create 10k | 8.93 | 9.26 / 9.15 | 13.06 | 12.94 / 12.89 |
+| update | 3.84 | 4.00 / 3.89 | 5.58 | 5.54 / 5.58 |
+| swap | 2.98 | 2.98 / 3.00 | 4.42 | 4.38 / 4.42 |
+
+**S3 — the build.** The September tree on today's OS keeps September's rebuild (4.2–4.3, 9.2–9.3, 3.9–4.0, 3.0 ms) and `main` the same day reproduces 2026-10-17's (+38…+47 %: 6.0, 12.9, 5.5, 4.4); `create 1k` is flat everywhere (1.7). The submit half runs the other way (September tree 2.3 / 3.3 / 4.0 / 4.3 ms against `main`'s 1.9 / 1.6 / 2.3 / 2.3 on `clear` / `create 10k` / `update` / `swap`; `create 1k` 10.6 vs 11.9), so the move is a rebuild-for-submit trade inside the op frames, unlike the Xiaomi's core-placement move. The † per-op totals are not a stable axis here: they ride the CADisplayLink acquire wait, which flips between sessions (`main` leg 1 `clear` 8.55 ms, leg 2 21.99 ms; the September tree 6.9 / 7.0), so the rebuild and submit columns are the comparison; the overall-series p50 reads 9.19 / 9.54 (September tree) against 9.19 / 16.80 (`main`).
+
+**S8 per-op medians, µs/call:**
+
+| Op | Sep-06 | Sept tree today | Oct-17 | main today |
+|---|---|---|---|---|
+| write bool | 4 | 3 / 4 | 18 | 19 / 19 |
+| write i64 | 3 | 3 / 3 | 21 | 20 / 20 |
+| write f64 | 4 | 4 / 4 | 24 | 24 / 24 |
+| write String | 4 | 4 / 4 | 21 | 21 / 21 |
+| write Vec\<String\> | 5 | 6 / 6 | 28 | 28 / 28 |
+| read bool | 1 | 1 / 1 | 4 | 4 / 4 |
+| read i64 | 1 | 1 / 1 | 3 | 4 / 4 |
+| read f64 | 1 | 1 / 1 | 4 | 4 / 4 |
+| read String | 1 | 1 / 1 | 4 | 4 / 4 |
+| read Vec\<String\> | 1 | 1 / 1 | 6 | 6 / 6 |
+
+**S8 — the build.** Same phone, same iOS 26.7.1, same day: the September tree 3–6 µs writes and 1 µs reads (all four legs' `s8-errors` 0, 2,002 lines per run), `main` 19–28 µs and 4–6. A 4–6× move that follows the binary, not the OS.
+
+**S7 startup, medians over the 12 launches (ms; min–max):**
+
+| Key | Sep-06 | Sept tree today | Oct-17 | main today |
+|---|---|---|---|---|
+| `font_preinit_joined` | six at 51–65, six at 100–159 | 164 (52–281) | 185.5 (56–273) | 107 (52–181) |
+| `adapter_ready` | 22 (21–34) | 23.5 (21–30) | 84.5 (75–107) | 78.5 (76–83) |
+| `first_frame_presented` | 100 (64–176) | 179 (72–302) | 201 (95–304) | 121 (84–197) |
+
+`frust_bench` registers no fonts, so its `font_preinit_joined` is the full CoreText enumeration — the OS half of the first frame only. **S7 — `adapter_ready` is the build; the font join is not.** `adapter_ready` is 21–30 ms on the September tree and 76–83 on `main` the same day, on the same OS (+55 ms, no overlap between the distributions). The join is wide on every tree and session — the September tree reads 52–281, `main` 52–181 the same day, `20e0aa2e` 56–273 — with the same fast (52–59), middle (≈105–115) and slow (≈150–280) modes on both, so it does not follow the build; its between-session spread (median 107 against 164 for two trees one hour apart) is larger than anything the build adds, which is why `first_frame_presented` ranks the wrong way today (September tree 179 vs `main` 121): the join dominates it, `first_frame_presented` = join + 13–24 ms on the September tree and + 13–37 on `main`. The first-frame criterion therefore reads as two separate items: the +55 ms device-open (`adapter_ready`) is the build, the font-preinit time is OS/CoreText state and bimodal-to-trimodal regardless of the build.
+
+**Verdicts (iPhone SE, iOS 26.7.1 23H30, 2026-10-19):** **S3 rebuild: build** (September tree 4.3 / 9.2 / 4.0 / 3.0 ms vs `main` 6.0 / 12.9 / 5.5 / 4.4 on `clear` / `create 10k` / `update` / `swap`; bisect range `c705922b..57c08eb1`). **S8 plugin rows: build** (3–6 vs 19–28 µs writes, 1 vs 4–6 reads). **S7: `adapter_ready` build** (23.5 vs 78.5 ms); **font join OS/session** (September tree 52–281 ms, `main` 52–181, indistinguishable modes). The bisect range for the two build items is `c705922b..57c08eb1` (the `main` merges 2026-10-03 → 10-14), as on the Xiaomi's `adapter_ready` item.
+
 ### Methodology deviations (this device)
 
 1. **Flutter's S5 column is placeholder-dominated on this device — the content gate fails on the Flutter side and the S5 rows are not a like-for-like comparison.** The driver's capture (8 s into run 1) shows one decoded cell and two grey placeholders; a 45 s re-check on the same build after the matrix (four screenshots at 8/20/32/45 s, the app launched on its own) never showed more than one decoded cell. The Flutter scenario decodes each cell on creation (`decodeImageFromPixels` per `_ImageCell`) and the A13 does not keep up with the 10 s sweep, so most painted cells are the `ColoredBox` placeholder. The block graded `ok` (its line counts are complete) and the driver did not retry; a retry would reproduce the app's decode pace, not fix it. The 2026-09-06 pass had no iOS capture, so the condition may have been present then too. Frust's column is fully decoded on its capture.
-2. **The Frust build is `20e0aa2e`, not the `87271063` of the OnePlus 9 / Pixel 5 pass** — the Xiaomi 12 section's deviation 2 applies verbatim: engine, render, GPU, shell and widget crates identical, `frust-core` with the readability refactor (PR #83). The S3 rebuild move (+44…+48 % on four ops here, ~2× on the Xiaomi 12, absent on the OnePlus 9 at `87271063`) was A/B'd on the Xiaomi after the pass: the refactor is excluded there and the move is UI-thread core placement (its S3 prose); whether the A13's is the same class is untested.
-3. **S8 plugin rows 3–6× September's, on iOS only.** Frust's preferences writes read 18–28 µs/call (3–5 on 2026-09-06) and its reads 3–6 µs (1), while the Android S8 rows on the same build are flat (Xiaomi 12 writes −10…+4 %) and Flutter's iOS rows moved −13…+16 %. An A/B after the matrix with Xcode.app open and then quit (three 30 s runs each) reads the same on both legs — writes 15–29 µs, reads 3–6 µs — so the Instruments rig precondition is not the cause. The build (`21076221` → `20e0aa2e`) and the OS (iOS 26.6.1 → 26.7.1) both changed and are not separated here (the September app no longer exists on the Mac). Recorded in the criteria block as an open item; Frust still leads Flutter's channel-crossing rows by 2–5×.
+2. **The Frust build is `20e0aa2e`, not the `87271063` of the OnePlus 9 / Pixel 5 pass** — the Xiaomi 12 section's deviation 2 applies verbatim: engine, render, GPU, shell and widget crates identical, `frust-core` with the readability refactor (PR #83). The S3 rebuild move (+44…+48 % on four ops here, ~2× on the Xiaomi 12, absent on the OnePlus 9 at `87271063`) was A/B'd on the Xiaomi after the pass: the refactor is excluded there and the move is UI-thread core placement (its S3 prose). The A13's is **not** that class: the September tree rebuilt on iOS 26.7.1 on 2026-10-19 holds the September rebuild medians (`create 10k` 9.2 vs `main`'s 12.9 ms the same day), so the iPhone's move is a build change in the `c705922b..57c08eb1` range, not the OS and not the readability refactor's pass-through (September-tree block below).
+3. **S8 plugin rows 3–6× September's, on iOS only.** Frust's preferences writes read 18–28 µs/call (3–5 on 2026-09-06) and its reads 3–6 µs (1), while the Android S8 rows on the same build are flat (Xiaomi 12 writes −10…+4 %) and Flutter's iOS rows moved −13…+16 %. An A/B after the matrix with Xcode.app open and then quit (three 30 s runs each) reads the same on both legs — writes 15–29 µs, reads 3–6 µs — so the Instruments rig precondition is not the cause. The build (`21076221` → `20e0aa2e`) and the OS (iOS 26.6.1 → 26.7.1) both changed in this pass and were not separated here; the 2026-10-19 September-tree A/B separates them: the September tree (`36ef20db`) rebuilt today reads writes 3–6 µs / reads 1 µs on iOS 26.7.1, `main` the same day 19–28 / 4–6 — **the build, not the OS**, bisect range `c705922b..57c08eb1`. Frust still leads Flutter's channel-crossing rows by 2–5×.
 4. **Xcode.app was open on the Mac for the whole run** (Instruments cannot see the phone otherwise), and Instruments sampled every other kept S7 run (3/5/7/9/11) over its last 15 s — five recordings per app of 15–16 samples, none cut short; the saves stretched the S7 blocks to 840 / 890 s. The 2026-09-06 run had neither.
 5. **Environment changes since September:** iOS 26.6.1 → 26.7.1 (23H30), Xcode 26.2 → 27.0, a wired USB `devicectl` transport instead of network pairing, and Flutter's eight per-scenario apps rebuilt under Xcode 27 (24.3 MiB each; the September artifacts no longer existed). The Flutter control moved −3.4…+4.3 % on p50.
 6. **Flutter's fps column is a presented rate this time** — 18,165–18,253 frames per 300 s (~60.5–60.8 fps) on the 60 Hz panel, where the September build reported 20,092–20,498 (~67–68): the Xcode 27 build's timing callbacks arrive one per present. Compare the two apps on the per-frame rows regardless.
