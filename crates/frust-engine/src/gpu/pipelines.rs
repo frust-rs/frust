@@ -260,12 +260,13 @@ const COPY_BIND_GROUPS: usize = 1;
 /// source page together with the sampler its kernels read it through.
 const FILTER_BIND_GROUPS: usize = 2;
 
-/// The engine's compiled shader modules, by id, and the one explicit layout
-/// every strip pipeline is built against.
+/// The engine's shader modules, by id, and the one explicit layout every
+/// strip pipeline is built against.
 ///
 /// Registered once at start-up into the [`ShaderLibrary`] a
 /// [`PipelineCache`] is built over; a [`RenderPipelineDesc`] then names its
-/// program by id rather than by source.
+/// program by id rather than by source. Registration creates no module: each
+/// is created on its first use (see `frust_gpu::shader`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EngineShaders {
     /// Whether the strip programs are the image-sampler family (see the
@@ -303,20 +304,26 @@ impl EngineShaders {
         Self::register_family(library, device, crate::config::image_sampler_enabled())
     }
 
-    /// Compiles the strip program of the family `image_sampler` names — its
+    /// Registers the strip program of the family `image_sampler` names — its
     /// Uber program and every class specialisation — and the clear, copy and
     /// filter modules into `library`, returning their ids beside a freshly
     /// created strip layout of that family.
     ///
-    /// The sampler family also compiles the manual family's Uber program and
+    /// Registration stores each program's specialised source and creates no
+    /// `wgpu::ShaderModule`: a module is created on the first pipeline build
+    /// that needs it (by the warm-up worker, the render thread, or the
+    /// first-frame shader pool the renderer starts at install), so the
+    /// twelve modules' WGSL parse and validation is no longer paid here.
+    ///
+    /// The sampler family also registers the manual family's Uber program and
     /// layout, which its atlas-layer pass draws with (see the module doc's
     /// *The program family*): one more module and one more layout, nothing
     /// else.
     ///
-    /// Insertion is idempotent per name, so calling this twice against the
-    /// same library returns the same ids without recompiling (the layout is
-    /// a new object each call — a desc compares layouts by identity, so keep
-    /// one `EngineShaders` per cache).
+    /// Registration is idempotent per name, so calling this twice against the
+    /// same library returns the same ids (the layout is a new object each
+    /// call — a desc compares layouts by identity, so keep one
+    /// `EngineShaders` per cache).
     #[must_use]
     pub fn register_family(
         library: &mut ShaderLibrary,
@@ -324,10 +331,9 @@ impl EngineShaders {
         image_sampler: bool,
     ) -> Self {
         let mut strip_program = |class: PaintClass, image_sampler: bool| {
-            library.insert_wgsl(
-                device,
+            library.register_wgsl(
                 shader_src::strip_program_name(class, image_sampler),
-                &shader_src::strip_program_source(class, image_sampler),
+                shader_src::strip_program_source(class, image_sampler),
             )
         };
         let strip = strip_program(PaintClass::Uber, image_sampler);
@@ -347,9 +353,9 @@ impl EngineShaders {
             strip_layout,
             atlas_strip,
             atlas_layout,
-            clear: library.insert_wgsl(device, shader_src::CLEAR_NAME, shader_src::CLEAR),
-            copy: library.insert_wgsl(device, shader_src::COPY_NAME, shader_src::COPY),
-            filter: library.insert_wgsl(device, shader_src::FILTER_NAME, shader_src::FILTER),
+            clear: library.register_wgsl(shader_src::CLEAR_NAME, shader_src::CLEAR),
+            copy: library.register_wgsl(shader_src::COPY_NAME, shader_src::COPY),
+            filter: library.register_wgsl(shader_src::FILTER_NAME, shader_src::FILTER),
         }
     }
 
@@ -1354,6 +1360,12 @@ mod tests {
              sampler family, the manual Uber program the atlas pass draws with"
         );
         assert_eq!(
+            library.compiled_len(),
+            0,
+            "registering the family creates no module; each is created on first use"
+        );
+        let registered = library.len();
+        assert_eq!(
             EnginePipeline::ALL
                 .iter()
                 .filter(|pipeline| pipeline.is_strip())
@@ -1362,7 +1374,8 @@ mod tests {
             "six render states over the one strip program"
         );
 
-        let mut cache = PipelineCache::new(std::sync::Arc::new(library), None);
+        let library = std::sync::Arc::new(library);
+        let mut cache = PipelineCache::new(std::sync::Arc::clone(&library), None);
         let warm = warm_up_descs_for(&shaders, TARGET, false);
         let atlas_extra = usize::from(image_sampler);
         assert_eq!(
@@ -1419,6 +1432,11 @@ mod tests {
             cache.compiled_variants(),
             (VARIANT_COUNT + atlas_extra) as u64,
             "each engine pipeline variant must compile exactly once"
+        );
+        assert_eq!(
+            library.compiled_len(),
+            registered,
+            "building every variant created every registered module"
         );
     }
 }

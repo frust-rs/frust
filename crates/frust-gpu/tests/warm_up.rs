@@ -1,6 +1,8 @@
 //! GPU tests for [`frust_gpu::pipeline::PipelineCache`]'s warm-up on a real
-//! device: waiting for the worker, requesting every listed variant, and what
-//! the driver's pipeline-cache blob holds once the worker has drained.
+//! device: waiting for the worker, requesting every listed variant, what the
+//! driver's pipeline-cache blob holds once the worker has drained, and the
+//! [`ShaderLibrary`]'s modules — created on first use, once, and ahead of the
+//! warm-up by `warm_up_shaders`' pool.
 //! `#[ignore]`d — run manually on hardware with a GPU:
 //!
 //! ```text
@@ -17,7 +19,7 @@ use std::time::Duration;
 
 use frust_gpu::RenderContext;
 use frust_gpu::pipeline::{PipelineCache, RenderPipelineDesc};
-use frust_gpu::shader::ShaderLibrary;
+use frust_gpu::shader::{ShaderId, ShaderLibrary};
 
 /// One device at a time, for the driver-teardown reason every GPU suite in
 /// this workspace serializes on.
@@ -188,5 +190,117 @@ fn the_driver_cache_blob_holds_the_pipelines_once_the_warm_up_has_drained() {
         );
         assert_eq!(cache.compiled_variants(), descs.len() as u64);
         cache.shutdown();
+    });
+}
+
+/// `count` programs over the test source, registered under distinct names
+/// and created by nobody yet.
+fn lazy_programs(library: &mut ShaderLibrary, count: usize) -> Vec<ShaderId> {
+    (0..count)
+        .map(|index| library.register_wgsl(format!("lazy warm-up test {index}"), WGSL))
+        .collect()
+}
+
+/// One unblended green variant over each of `shaders`.
+fn green_variants(shaders: &[ShaderId]) -> Vec<RenderPipelineDesc> {
+    shaders
+        .iter()
+        .map(|shader| {
+            RenderPipelineDesc::new(
+                *shader,
+                "vs_main",
+                "fs_green",
+                wgpu::TextureFormat::Rgba8Unorm,
+            )
+        })
+        .collect()
+}
+
+#[test]
+#[ignore = "needs a real GPU adapter; run with `cargo test -p frust-gpu --test warm_up -- --ignored \
+            --test-threads=1` (pin the adapter with WGPU_BACKEND / WGPU_ADAPTER_NAME)"]
+fn a_registered_module_is_created_on_first_use_exactly_once() {
+    let _serialized = gpu_lock();
+    pollster::block_on(async {
+        let mut context = RenderContext::new();
+        let handle = context.device().await.expect("device creation");
+        let device = &handle.device;
+        let mut library = ShaderLibrary::new();
+        let programs = lazy_programs(&mut library, 2);
+        let (raced, built) = (programs[0], programs[1]);
+        assert_eq!(library.compiled_len(), 0, "registration created a module");
+        let library = Arc::new(library);
+
+        // Eight threads ask for the same module at once: one creates it, the
+        // rest wait for it, and every one of them gets that one module.
+        let addresses: Vec<usize> = std::thread::scope(|scope| {
+            let askers: Vec<_> = (0..8)
+                .map(|_| {
+                    let library = &library;
+                    scope.spawn(move || {
+                        let module = library.module(device, raced).expect("a minted id");
+                        std::ptr::from_ref(module) as usize
+                    })
+                })
+                .collect();
+            askers
+                .into_iter()
+                .map(|asker| asker.join().expect("an asker panicked"))
+                .collect()
+        });
+        assert!(addresses.windows(2).all(|pair| pair[0] == pair[1]));
+        assert!(library.is_compiled(raced));
+        assert!(
+            !library.is_compiled(built),
+            "an unrequested module was created"
+        );
+        assert_eq!(library.compiled_len(), 1);
+
+        // A pipeline build is a first use: it creates its program's module.
+        let mut cache = PipelineCache::new(Arc::clone(&library), None);
+        let _pipeline = cache.get_or_create(device, &green_variants(&[built])[0]);
+        assert!(library.is_compiled(built));
+        assert_eq!(cache.compiled_variants(), 1);
+        cache.shutdown();
+    });
+}
+
+#[test]
+#[ignore = "needs a real GPU adapter; run with `cargo test -p frust-gpu --test warm_up -- --ignored \
+            --test-threads=1` (pin the adapter with WGPU_BACKEND / WGPU_ADAPTER_NAME)"]
+fn the_shader_pool_creates_the_listed_modules_beside_the_warm_up() {
+    let _serialized = gpu_lock();
+    pollster::block_on(async {
+        let mut context = RenderContext::new();
+        let handle = context.device().await.expect("device creation");
+        let device = &handle.device;
+        let mut library = ShaderLibrary::new();
+        let programs = lazy_programs(&mut library, 4);
+        let late = library.register_wgsl("lazy warm-up test, after shutdown", WGSL);
+        let library = Arc::new(library);
+        let mut cache = PipelineCache::new(Arc::clone(&library), None);
+
+        // The pool takes the first two (one listed twice); the worker's builds
+        // wait for those and create the other two themselves.
+        cache.warm_up_shaders(device, &[programs[0], programs[1], programs[0]]);
+        let descs = green_variants(&programs);
+        cache.warm_up(device, &descs);
+        assert!(cache.wait_warm_up(WAIT), "the warm-up never finished");
+        assert_eq!(cache.compiled_variants(), descs.len() as u64);
+        for program in &programs {
+            assert!(library.is_compiled(*program));
+        }
+
+        // Shutdown joins the pool; afterwards it starts nothing, so the
+        // module stays uncreated until its first use.
+        cache.shutdown();
+        cache.warm_up_shaders(device, &[late]);
+        assert!(
+            !library.is_compiled(late),
+            "a shut-down cache started a pool"
+        );
+        assert_eq!(library.compiled_len(), programs.len());
+        assert!(library.module(device, late).is_some());
+        assert_eq!(library.compiled_len(), programs.len() + 1);
     });
 }
