@@ -184,6 +184,12 @@ impl IosAppHandle {
         // an idle screen keeping the frame before the refused one.
         let signals_dirty =
             signals_dirty | frust_shell_common::render_split::take_retained_repaint();
+        // A texture-bus producer pushed a frame into a registered sink since
+        // the last tick that took it. The bus polls its sources only on frames
+        // that run, so an idle screen would otherwise freeze a `texture_view`;
+        // the coalesced flag owes exactly one frame per tick however many
+        // pushes landed, taken here past the ready/paused gate like the drains above.
+        let signals_dirty = signals_dirty | frust_render::texture_bus::take_frame_owed();
         // The focus/IME session's EDGE input, PEEKED here and committed only
         // past the skip return below (on a frame that actually runs), so
         // `focus_or_ime_changed` reports "the session moved since the last tick
