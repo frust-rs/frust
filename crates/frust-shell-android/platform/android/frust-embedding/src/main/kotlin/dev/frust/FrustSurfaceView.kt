@@ -539,8 +539,10 @@ class FrustSurfaceView(
 
     /**
      * Overlay [overlayId]'s surface is going away (or the overlay is being
-     * disposed). Synchronous: the native side has dropped the overlay's GPU
-     * surface and released its window when this returns. Idempotent.
+     * disposed). Does not wait for the render thread: an idle overlay's GPU
+     * surface and window are released when this returns; one that is out for a
+     * frame is released after that frame (its present may fail once, logged at
+     * debug). Idempotent.
      */
     internal fun overlaySurfaceDestroyed(overlayId: Long) {
         nativeOverlaySurfaceDestroyed(overlayId)
