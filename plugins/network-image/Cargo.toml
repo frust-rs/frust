@@ -15,8 +15,8 @@ readme = "README.md"
 # Facade-tier plugin (no OS arm): `frust` alone among the framework crates, plus the
 # `frust-paths` leaf for the disk-cache directory.
 # Published as frust-ui, imported as frust: crates.io `frust` belongs to another project (https://github.com/lloydmeta/frunk/issues/258).
-frust = { package = "frust-ui", path = "../../crates/frust", version = "0.6.2", default-features = false }
-frust-paths = { path = "../../crates/frust-paths", version = "0.6.2" }
+frust = { package = "frust-ui", path = "../../crates/frust", version = "0.6.3", default-features = false }
+frust-paths = { path = "../../crates/frust-paths", version = "0.6.3" }
 # HTTP/TLS stack (default `reqwest` feature); optional so `--no-default-features` is network-free.
 # Pins and the ring/webpki-roots rationale live on the root rows.
 reqwest = { workspace = true, optional = true }

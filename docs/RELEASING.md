@@ -8,7 +8,10 @@ aggregate `ci-ok`).
 ## Versioning
 
 - One version for every crate: `[workspace.package] version` in the root `Cargo.toml`.
-- Before 1.0, a minor version (0.x) may break API; a patch release may not.
+- Before 1.0, a minor version (0.x) may break API. A patch release (0.x.y) may carry a narrow source
+  break — a new enum variant, a new struct field, a dropped derive, an enum made `#[non_exhaustive]`
+  — only when the CHANGELOG's Changed list marks each one with its migration and the release
+  summary names them; a change that removes or reshapes an API waits for the next minor version.
 - The minimum supported Rust version is the workspace `rust-version`; raising it is a minor-version
   change. The pinned development toolchain in `rust-toolchain.toml` is a separate, newer setting.
 - Version pins on third-party dependencies are governed by

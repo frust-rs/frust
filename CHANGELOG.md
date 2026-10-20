@@ -6,6 +6,22 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ## Unreleased
 
+## 0.6.3 — 2026-10-20
+
+A patch release (the 0.6.x line continues) that carries source changes for code that matches
+exhaustively on `InputEvent`, `OverlayEventKind` or `NamedKey`, builds `OverlayEntry`/`OverlayHit`
+literals, or compares `DesktopConfig` with `Eq` (the Changed list marks them); `NamedKey` is
+`#[non_exhaustive]` from this release, so its one wildcard arm is the last such change it asks for.
+
+The engine's per-frame and startup work shrank: per-frame uploads go through a reused staging ring,
+glyph replay stops re-rasterising slowly moving text, the render thread keeps the UI thread's
+priority, Android's per-frame polls collapse into one JNI crossing, and the first frame no longer
+waits for the whole pipeline warm-up or for shader modules it does not draw. Desktop apps gain
+keyboard shortcuts with a per-paint registry and a command-palette-ready hint list, Tab traversal
+with a keyboard-only focus ring, function keys, native file dialogs (`frust-file-dialogs`), window
+size limits and opt-in window-state persistence, and an opt-in baseline scrollbar. Measured rows,
+misses included, are in docs/PERFORMANCE_BASELINES.md and benchmarks/RESULTS.md.
+
 ### Performance
 
 - Engine uploads and glyph replay. The engine's per-frame uploads (coverage, encoded paints,
