@@ -1,14 +1,15 @@
 //! `Base`-design cases for the website's `widgets/base/scrolling` catalog
 //! page set: `list-view`, `scroll-view`, `custom-scroll-view`, `slivers`. See the crate docs and
 //! `crate::base` for the pure-`View`/slug-rule contract every case in this
-//! registry follows, and [`super::framed`] for why neither case fills its
-//! own backdrop.
+//! registry follows, and [`super::framed`] for why none of the four cases fills
+//! its own backdrop. `custom-scroll-view` and `slivers` hold lazy sliver lists
+//! whose rows materialise at rebuild, so both opt into the recorder's warm pass.
 
 use frust_core::View;
 use frust_widgets::{
-    Axis, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, SizedBox, container,
+    Axis, ChildKey, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, SizedBox, container,
     custom_scroll_view, inflexible, list_view, scroll_view, sliver_box, sliver_fill_remaining,
-    sliver_padding, text,
+    sliver_fixed_extent_list, sliver_list, sliver_padding, text,
 };
 use peniko::Color;
 
@@ -85,7 +86,7 @@ fn scroll_view_case() -> impl View<()> {
 
 /// Viewport for the two sliver cases: smaller than `custom-scroll-view`'s
 /// content so the clip is visible, leaving the variant's surface around it.
-const SLIVER_VIEWPORT: (f64, f64) = (300.0, 180.0);
+const SLIVER_VIEWPORT: (f64, f64) = (300.0, 216.0);
 
 /// A fixed-height text swatch used by the sliver cases.
 fn swatch(label: String, fill: Color, height: f64) -> impl View<()> {
@@ -94,18 +95,14 @@ fn swatch(label: String, fill: Color, height: f64) -> impl View<()> {
         .size_centered(SLIVER_VIEWPORT.0, height)
 }
 
-/// `custom_scroll_view`: a box-adapter header plus alternating box rows
-/// (plain views mix with slivers as boxes). Ten 44px rows overflow the
-/// viewport, so the clip is visible; the offset is the default zero.
+/// `custom_scroll_view`: a box-adapter header plus a lazy `sliver_list` of
+/// alternating rows. Ten 44px rows overflow the viewport, so the clip is
+/// visible; the offset is the default zero.
 ///
-/// Rows are `sliver_box` children rather than a `sliver_list`: the lazy
-/// sliver lists materialise their rows in `View::rebuild` after a first
-/// layout, and the static recorder runs a single build, so a `sliver_list`
-/// would record blank.
+/// The list materialises its rows in `View::rebuild` after a first layout, so
+/// the case sets `time_ms` and is named in `WARM_PASS_OPT_INS`: the recorder's
+/// warm pass is what lets the rows appear.
 fn custom_scroll_view_case() -> impl View<()> {
-    let rows: Vec<_> = (0..10)
-        .map(|i| sliver_box(swatch(format!("Row {}", i + 1), row_color(i), 44.0)))
-        .collect();
     framed(
         SizedBox(Some(SLIVER_VIEWPORT.0), Some(SLIVER_VIEWPORT.1)).child(custom_scroll_view((
             sliver_box(swatch(
@@ -113,37 +110,60 @@ fn custom_scroll_view_case() -> impl View<()> {
                 Color::from_rgb8(0xBF, 0xDB, 0xFE),
                 40.0,
             )),
-            rows,
+            sliver_list(
+                10,
+                |i| ChildKey::new(i as u64),
+                |i| swatch(format!("Row {}", i + 1), row_color(i), 44.0),
+            ),
         ))),
     )
 }
 
-/// The sliver family that builds statically, in one viewport: a `sliver_box`
-/// header, a `sliver_padding` around a `sliver_box`, and a
-/// `sliver_fill_remaining` footer taking the leftover space. The content is
-/// shorter than the viewport so the footer is visible. (The lazy
-/// `sliver_list` / `sliver_fixed_extent_list` materialise at rebuild and so
-/// cannot appear in a single static frame.)
+/// Every public sliver constructor in one viewport: a `sliver_box` header, a
+/// self-sizing `sliver_list` (rows of differing heights), a
+/// `sliver_fixed_extent_list` (uniform 28px rows), a `sliver_padding` around a
+/// `sliver_box`, and a `sliver_fill_remaining` footer taking the leftover
+/// space. The content is shorter than the viewport so the footer is visible.
+/// Both lists materialise at rebuild, hence the warm pass (see
+/// `custom_scroll_view_case`).
 fn slivers_case() -> impl View<()> {
     framed(
         SizedBox(Some(SLIVER_VIEWPORT.0), Some(SLIVER_VIEWPORT.1)).child(custom_scroll_view((
             sliver_box(swatch(
                 "sliver_box".to_string(),
                 Color::from_rgb8(0xBF, 0xDB, 0xFE),
-                36.0,
+                28.0,
             )),
+            sliver_list(
+                2,
+                |i| ChildKey::new(i as u64),
+                |i| {
+                    swatch(
+                        format!("sliver_list {}", i + 1),
+                        row_color(i),
+                        24.0 + 12.0 * i as f64,
+                    )
+                },
+            ),
+            sliver_fixed_extent_list(2, 28.0, |i| {
+                swatch(
+                    format!("sliver_fixed_extent_list {}", i + 1),
+                    Color::from_rgb8(0xE9, 0xD5, 0xFF),
+                    28.0,
+                )
+            }),
             sliver_padding(
-                EdgeInsets::symmetric(0.0, 8.0),
+                EdgeInsets::symmetric(0.0, 6.0),
                 sliver_box(swatch(
                     "sliver_padding".to_string(),
                     Color::from_rgb8(0xFE, 0xF3, 0xC7),
-                    36.0,
+                    28.0,
                 )),
             ),
             sliver_fill_remaining(
                 container(text("fill_remaining").size(14.0).color(CAPTION))
                     .fill(Color::from_rgb8(0xBB, 0xF7, 0xD0))
-                    .size_centered(SLIVER_VIEWPORT.0, 60.0),
+                    .size_centered(SLIVER_VIEWPORT.0, 40.0),
             ),
         ))),
     )
@@ -174,7 +194,7 @@ pub const CASES: &[Case] = &[
         title: "Custom Scroll View",
         size: Case::DEFAULT_SIZE,
         scale: Case::DEFAULT_SCALE,
-        time_ms: Case::DEFAULT_TIME_MS,
+        time_ms: 400,
         design: Design::Base,
         build: case_build!(custom_scroll_view_case),
     },
@@ -183,7 +203,7 @@ pub const CASES: &[Case] = &[
         title: "Slivers",
         size: Case::DEFAULT_SIZE,
         scale: Case::DEFAULT_SCALE,
-        time_ms: Case::DEFAULT_TIME_MS,
+        time_ms: 400,
         design: Design::Base,
         build: case_build!(slivers_case),
     },
