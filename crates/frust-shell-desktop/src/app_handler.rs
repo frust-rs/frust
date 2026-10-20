@@ -3149,6 +3149,11 @@ where
                 // dimensions publishes nothing.
                 self.push_window_metrics((size.width, size.height), window.scale_factor());
                 self.note_window_geometry_change();
+                // An overlay keeps its logical frame when the window moves to a
+                // display of another scale, so no command would republish its
+                // drawable; the drain calls the host once for the new scale.
+                self.platform_views
+                    .drain(&mut self.extensions, &window, window.scale_factor());
                 window.request_redraw();
             }
 

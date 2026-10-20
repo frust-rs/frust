@@ -236,6 +236,11 @@ pub(crate) trait NativeViewOps {
     /// Move and resize an overlay view to `frame`.
     fn place_overlay(&self, overlay: &Self::Overlay, frame: Frame);
 
+    /// Bring the overlay's layer to the window's current backing scale
+    /// (`contentsScale`), which [`Self::overlay_layer`]'s size is then
+    /// computed at. Idempotent; called on every batch.
+    fn sync_overlay_scale(&self, overlay: &Self::Overlay);
+
     /// The overlay's `CAMetalLayer*`, borrowed (the overlay keeps it alive),
     /// and the drawable size its current frame needs, physical px.
     fn overlay_layer(&self, overlay: &Self::Overlay) -> (NonNull<c_void>, (u32, u32));
@@ -281,11 +286,12 @@ struct Slot<V> {
     factory: Arc<dyn DesktopViewFactory>,
 }
 
-/// One stacked overlay: its view, the slot it sits above, and the frame it was
-/// last placed at.
+/// One stacked overlay: its view, the frame it was last placed at, and the
+/// drawable size (physical px) last published for it.
 struct OverlayView<O> {
     overlay: O,
     frame: Frame,
+    size: (u32, u32),
 }
 
 /// The OS-neutral platform-view host: live slots and overlays, plus the set of
@@ -334,9 +340,35 @@ impl<O: NativeViewOps> ViewHost<O> {
 
     /// Apply one command batch in order, after removing every withdrawn
     /// overlay whose layer the render side has handed back. The batch may be
-    /// empty: the core calls for the release alone.
+    /// empty: the core calls for the release or a scale change alone. Last,
+    /// every overlay follows the window's current backing scale.
     pub(crate) fn apply(&mut self, ops: &O, commands: &[ViewCommand]) {
         self.release_withdrawn(ops);
+        self.apply_commands(ops, commands);
+        self.follow_scale(ops);
+    }
+
+    /// Re-apply the backing scale to every stacked overlay's layer and
+    /// republish the ones whose drawable size changed with it. The rect check
+    /// in [`Self::overlay`] cannot see this: moving a window between displays
+    /// of different density keeps the logical frame while the physical size
+    /// and `contentsScale` both change. A withdrawn overlay is not in
+    /// `overlays`, so it is never republished while it waits for its layer.
+    fn follow_scale(&mut self, ops: &O) {
+        for (&overlay_id, stacked) in &mut self.overlays {
+            ops.sync_overlay_scale(&stacked.overlay);
+            let (layer, size) = ops.overlay_layer(&stacked.overlay);
+            if size == stacked.size {
+                continue;
+            }
+            stacked.size = size;
+            if ops.publish_overlay(overlay_id, layer, size) {
+                ops.request_frame();
+            }
+        }
+    }
+
+    fn apply_commands(&mut self, ops: &O, commands: &[ViewCommand]) {
         for command in commands {
             match command {
                 ViewCommand::Create {
@@ -402,6 +434,7 @@ impl<O: NativeViewOps> ViewHost<O> {
             ops.place_overlay(&stacked.overlay, frame);
             stacked.frame = frame;
             let (layer, size) = ops.overlay_layer(&stacked.overlay);
+            stacked.size = size;
             if ops.publish_overlay(overlay_id, layer, size) {
                 ops.request_frame();
             }
@@ -430,8 +463,14 @@ impl<O: NativeViewOps> ViewHost<O> {
             "frust-overlay: overlay {overlay_id} view stacked above slot {above_slot_id} \
              (CAMetalLayer {layer:p}, {width}x{height} px)"
         );
-        self.overlays
-            .insert(overlay_id, OverlayView { overlay, frame });
+        self.overlays.insert(
+            overlay_id,
+            OverlayView {
+                overlay,
+                frame,
+                size: (width, height),
+            },
+        );
         if ops.publish_overlay(overlay_id, layer, (width, height)) {
             ops.request_frame();
         }
@@ -926,6 +965,14 @@ mod appkit {
             overlay.view.setFrame(ns_rect(frame));
         }
 
+        fn sync_overlay_scale(&self, overlay: &AppKitOverlay) {
+            // SAFETY: `setContentsScale:` (`CGFloat`) is a `CALayer` setter and
+            // `layer` is the overlay's `CAMetalLayer`, sent on the main thread.
+            unsafe {
+                let _: () = msg_send![&*overlay.layer, setContentsScale: self.scale];
+            }
+        }
+
         fn overlay_layer(&self, overlay: &AppKitOverlay) -> (NonNull<c_void>, (u32, u32)) {
             let size = overlay.view.frame().size;
             let pixels = (
@@ -1309,6 +1356,8 @@ mod tests {
         fn place_overlay(&self, overlay: &(usize, std::cell::Cell<Frame>), frame: Frame) {
             overlay.1.set(frame);
         }
+
+        fn sync_overlay_scale(&self, _overlay: &(usize, std::cell::Cell<Frame>)) {}
 
         fn overlay_layer(
             &self,
@@ -1807,6 +1856,48 @@ mod tests {
 
         host.apply(&ops, &[overlay(1, 1, rect(0.0, 0.0, 1000.0, 700.0))]);
         assert_eq!(events(&ledger), ["publish 1 2000x1400", "frame"]);
+    }
+
+    #[test]
+    fn the_same_logical_frame_at_a_new_scale_re_publishes_the_overlay() {
+        let ledger = RetainLedger::new();
+        let factory = FakeFactory::new(&ledger);
+        let mut ops = FakeOps::new(&ledger).with(VIDEO, factory);
+        let mut host = ViewHost::<FakeOps>::with_overlays(true);
+        host.apply(
+            &ops,
+            &[create(1), overlay(1, 1, rect(0.0, 0.0, 800.0, 600.0))],
+        );
+        events(&ledger);
+
+        // The window moved to a 1x display: no command, the frame is the same,
+        // only the scale differs — an empty batch must still republish.
+        ops.scale = 1.0;
+        host.apply(&ops, &[]);
+        assert_eq!(events(&ledger), ["publish 1 800x600", "frame"]);
+
+        // Followed once: the same scale again changes nothing.
+        host.apply(&ops, &[overlay(1, 1, rect(0.0, 0.0, 800.0, 600.0))]);
+        assert!(events(&ledger).is_empty());
+    }
+
+    #[test]
+    fn a_withdrawn_overlay_is_not_republished_on_a_scale_change() {
+        let ledger = RetainLedger::new();
+        let factory = FakeFactory::new(&ledger);
+        let mut ops = FakeOps::new(&ledger).with(VIDEO, factory);
+        ops.defer_withdraw = true;
+        let mut host = ViewHost::<FakeOps>::with_overlays(true);
+        host.apply(
+            &ops,
+            &[create(1), overlay(1, 1, rect(0.0, 0.0, 800.0, 600.0))],
+        );
+        host.apply(&ops, &[ViewCommand::DisposeOverlay { overlay_id: 1 }]);
+        events(&ledger);
+
+        ops.scale = 1.0;
+        host.apply(&ops, &[]);
+        assert!(events(&ledger).is_empty());
     }
 
     #[test]
