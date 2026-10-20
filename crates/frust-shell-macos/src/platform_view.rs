@@ -97,8 +97,13 @@
 //! ([`frust_shell_desktop::extensions::publish_overlay_layer`], which builds a
 //! surface on it and draws the overlay's command range there), a frame is
 //! requested so that happens at once, and on dispose or suspend the layer is
-//! withdrawn — which waits until the render side dropped the surface — before
-//! the view is removed. Off, nothing here runs.
+//! withdrawn. The withdraw never waits on the render side: when no frame is
+//! drawing the surface it is dropped at once and the view goes with it;
+//! otherwise the view is hidden and kept until the land of that frame drops
+//! the surface and hands the layer back
+//! ([`frust_shell_desktop::extensions::take_released_overlay_layers`], polled
+//! at the top of every batch — the core calls the hook for it even with no
+//! command). Off, nothing here runs.
 //!
 //! # Why an OS-neutral core behind a seam
 //!
@@ -239,9 +244,18 @@ pub(crate) trait NativeViewOps {
     /// px; answers whether something changed (a frame is then owed).
     fn publish_overlay(&self, overlay_id: u64, layer: NonNull<c_void>, size: (u32, u32)) -> bool;
 
-    /// Take overlay `overlay_id`'s layer back from the render side; returns
-    /// once the surface built on it is dropped.
-    fn withdraw_overlay(&self, overlay_id: u64);
+    /// Take overlay `overlay_id`'s layer back from the render side, without
+    /// waiting: `true` when the surface built on it is already dropped (the
+    /// view may go now), `false` when a frame is drawing it — the layer then
+    /// comes back from [`Self::take_released_overlays`].
+    fn withdraw_overlay(&self, overlay_id: u64) -> bool;
+
+    /// The withdrawn layers whose surface has since been dropped, each taken
+    /// once.
+    fn take_released_overlays(&self) -> Vec<NonNull<c_void>>;
+
+    /// Hide an overlay view that is waiting for its layer to be released.
+    fn hide_overlay(&self, overlay: &Self::Overlay);
 
     /// Ask for a frame now — a newly published or resized overlay layer is
     /// drawn on the next frame, which an idle window would otherwise not
@@ -249,7 +263,8 @@ pub(crate) trait NativeViewOps {
     fn request_frame(&self);
 
     /// Unparent and release an overlay view. The surface built on its layer
-    /// must already be gone ([`Self::withdraw_overlay`]).
+    /// must already be gone ([`Self::withdraw_overlay`] answered `true`, or
+    /// [`Self::take_released_overlays`] handed the layer back).
     fn detach_overlay(&self, overlay: Self::Overlay);
 }
 
@@ -292,6 +307,9 @@ pub(crate) struct ViewHost<O: NativeViewOps> {
     /// Overlays that could not be stacked (no slot view, or no view could be
     /// built), remembered so each is logged once.
     unstacked: HashSet<u64>,
+    /// Withdrawn overlays, hidden, whose layer a frame was still drawing:
+    /// each is removed once the render side hands that layer back.
+    withdrawn: Vec<(u64, O::Overlay)>,
 }
 
 impl<O: NativeViewOps> Default for ViewHost<O> {
@@ -310,11 +328,15 @@ impl<O: NativeViewOps> ViewHost<O> {
             overlays_enabled,
             overlays: HashMap::new(),
             unstacked: HashSet::new(),
+            withdrawn: Vec::new(),
         }
     }
 
-    /// Apply one command batch in order.
+    /// Apply one command batch in order, after removing every withdrawn
+    /// overlay whose layer the render side has handed back. The batch may be
+    /// empty: the core calls for the release alone.
     pub(crate) fn apply(&mut self, ops: &O, commands: &[ViewCommand]) {
+        self.release_withdrawn(ops);
         for command in commands {
             match command {
                 ViewCommand::Create {
@@ -416,15 +438,36 @@ impl<O: NativeViewOps> ViewHost<O> {
     }
 
     /// Tear overlay `overlay_id` down: withdraw its layer from the render side
-    /// (which drops the surface on it) **before** removing the view.
+    /// (which drops the surface on it) **before** removing the view — now, or,
+    /// while a frame draws it, hidden until the layer comes back.
     fn dispose_overlay(&mut self, ops: &O, overlay_id: u64) {
         self.unstacked.remove(&overlay_id);
         let Some(stacked) = self.overlays.remove(&overlay_id) else {
             return;
         };
-        ops.withdraw_overlay(overlay_id);
-        ops.detach_overlay(stacked.overlay);
-        log::info!("frust-overlay: overlay {overlay_id} view removed");
+        if ops.withdraw_overlay(overlay_id) {
+            ops.detach_overlay(stacked.overlay);
+            log::info!("frust-overlay: overlay {overlay_id} view removed");
+        } else {
+            ops.hide_overlay(&stacked.overlay);
+            self.withdrawn.push((overlay_id, stacked.overlay));
+        }
+    }
+
+    /// Remove each withdrawn overlay whose layer the render side handed back.
+    fn release_withdrawn(&mut self, ops: &O) {
+        for layer in ops.take_released_overlays() {
+            let Some(at) = self
+                .withdrawn
+                .iter()
+                .position(|(_, overlay)| ops.overlay_layer(overlay).0 == layer)
+            else {
+                continue;
+            };
+            let (overlay_id, overlay) = self.withdrawn.swap_remove(at);
+            ops.detach_overlay(overlay);
+            log::info!("frust-overlay: overlay {overlay_id} view removed");
+        }
     }
 
     /// Every stacked overlay's id, `CAMetalLayer*` and drawable size in
@@ -457,7 +500,9 @@ impl<O: NativeViewOps> ViewHost<O> {
     /// diagnostic into a per-event repeat.
     pub(crate) fn suspend(&mut self, ops: &O) {
         // Overlays first: each layer is withdrawn (its surface dropped) before
-        // its view goes, and before the slot view under it.
+        // its view goes, and before the slot view under it. One a frame still
+        // draws stays, hidden, until its layer is handed back.
+        self.release_withdrawn(ops);
         let overlay_ids: Vec<u64> = self.overlays.keys().copied().collect();
         for overlay_id in overlay_ids {
             self.dispose_overlay(ops, overlay_id);
@@ -631,7 +676,7 @@ mod appkit {
 
     /// One stacked overlay: the view, and the `CAMetalLayer` it hosts (also
     /// retained by the view; held here so its pointer is stable to hand out —
-    /// and alive until the host has withdrawn it from the render side).
+    /// and alive until the render side has dropped every surface on it).
     pub(crate) struct AppKitOverlay {
         view: Retained<NSView>,
         layer: Retained<AnyObject>,
@@ -899,8 +944,16 @@ mod appkit {
             frust_shell_desktop::extensions::publish_overlay_layer(overlay_id, layer, width, height)
         }
 
-        fn withdraw_overlay(&self, overlay_id: u64) {
-            frust_shell_desktop::extensions::withdraw_overlay_layer(overlay_id);
+        fn withdraw_overlay(&self, overlay_id: u64) -> bool {
+            frust_shell_desktop::extensions::withdraw_overlay_layer(overlay_id)
+        }
+
+        fn take_released_overlays(&self) -> Vec<NonNull<c_void>> {
+            frust_shell_desktop::extensions::take_released_overlay_layers()
+        }
+
+        fn hide_overlay(&self, overlay: &AppKitOverlay) {
+            overlay.view.setHidden(true);
         }
 
         fn request_frame(&self) {
@@ -1006,8 +1059,10 @@ mod tests {
         /// Next address to hand out — never null, never dereferenced.
         next_address: usize,
         /// The render-side seam's calls, in order: `publish N WxH`,
-        /// `withdraw N`, `frame`, `detach N`.
+        /// `withdraw N`, `frame`, `hide N`, `detach N`.
         overlay_events: Vec<String>,
+        /// Overlay layers the render side has handed back, not yet taken.
+        released: Vec<usize>,
     }
 
     impl RetainLedger {
@@ -1159,6 +1214,9 @@ mod tests {
         refuse_attach: bool,
         /// When set, `attach_overlay` cannot build an overlay.
         refuse_overlay: bool,
+        /// When set, a withdraw meets a frame drawing the overlay: its layer
+        /// comes back later, through the ledger's `released`.
+        defer_withdraw: bool,
         /// The backing scale the fake reports drawable sizes at.
         scale: f64,
     }
@@ -1170,6 +1228,7 @@ mod tests {
                 factories: HashMap::new(),
                 refuse_attach: false,
                 refuse_overlay: false,
+                defer_withdraw: false,
                 scale: 2.0,
             }
         }
@@ -1279,11 +1338,26 @@ mod tests {
             true
         }
 
-        fn withdraw_overlay(&self, overlay_id: u64) {
+        fn withdraw_overlay(&self, overlay_id: u64) -> bool {
             self.ledger
                 .borrow_mut()
                 .overlay_events
                 .push(format!("withdraw {overlay_id}"));
+            !self.defer_withdraw
+        }
+
+        fn take_released_overlays(&self) -> Vec<NonNull<c_void>> {
+            std::mem::take(&mut self.ledger.borrow_mut().released)
+                .into_iter()
+                .filter_map(|layer| NonNull::new(std::ptr::without_provenance_mut(layer)))
+                .collect()
+        }
+
+        fn hide_overlay(&self, overlay: &(usize, std::cell::Cell<Frame>)) {
+            self.ledger
+                .borrow_mut()
+                .overlay_events
+                .push(format!("hide {:#x}", overlay.0));
         }
 
         fn request_frame(&self) {
@@ -1761,6 +1835,40 @@ mod tests {
         );
         assert!(ledger.borrow().attached.is_empty());
         assert!(host.overlay_layers(&ops).is_empty());
+    }
+
+    #[test]
+    fn an_overlay_withdrawn_mid_frame_stays_hidden_until_its_layer_comes_back() {
+        let ledger = RetainLedger::new();
+        let factory = FakeFactory::new(&ledger);
+        let mut ops = FakeOps::new(&ledger).with(VIDEO, factory);
+        let mut host = ViewHost::<FakeOps>::with_overlays(true);
+        host.apply(&ops, &[create(1), overlay(4, 1, rect(0.0, 0.0, 8.0, 6.0))]);
+        let (_, layer, _) = host.overlay_layers(&ops)[0];
+        events(&ledger);
+
+        // A frame is drawing it: the withdraw returns at once and the view
+        // stays, hidden, holding its layer.
+        ops.defer_withdraw = true;
+        host.apply(&ops, &[ViewCommand::DisposeOverlay { overlay_id: 4 }]);
+        assert_eq!(
+            events(&ledger),
+            [
+                "withdraw 4".to_string(),
+                format!("hide {:#x}", address(layer))
+            ]
+        );
+        assert_eq!(ledger.borrow().attached.len(), 2);
+        assert!(host.overlay_layers(&ops).is_empty());
+        host.apply(&ops, &[]);
+        assert!(events(&ledger).is_empty(), "nothing handed back yet");
+
+        // The frame lands and hands the layer back: the next call removes the
+        // view, with no command of its own.
+        ledger.borrow_mut().released.push(address(layer));
+        host.apply(&ops, &[]);
+        assert_eq!(events(&ledger), [format!("detach {:#x}", address(layer))]);
+        assert_eq!(ledger.borrow().attached.len(), 1, "the slot view alone");
     }
 
     #[test]
