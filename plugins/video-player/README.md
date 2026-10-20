@@ -165,7 +165,9 @@ if let Some(view) = frust_video_player::api::video_texture_view(&handle, VideoFi
   hardware-buffer importer is installed (`FRUST_ANDROID_HWBUFFER_IMPORT=1` or
   `debug.frust.hwbuffer_import`, default off) and the device runs API 29 or later, frames travel
   as zero-copy `AHardwareBuffer`s; otherwise as a CPU copy. Device outcome: pending.
-- **iOS and macOS:** pending the Apple producers. **Windows, Linux, web:** no producer.
+- **iOS and macOS:** an `AVPlayerItemVideoOutput` producer (32BGRA, IOSurface-backed pixel buffers)
+  hands frames on zero-copy when the Apple importer is installed (`frust_render::native_import::install`);
+  no `AVPlayerLayer` is involved. **Windows, Linux, web:** no producer.
 - **`VideoFit::Cover` crops inside the box** in texture mode — it does not spill the way the
   native slot's Cover does on Android.
 - **Gestures:** the platform-view gesture lead does not apply; the frames are scene content.

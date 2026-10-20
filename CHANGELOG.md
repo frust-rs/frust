@@ -239,8 +239,8 @@ limits are in [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
   decode-and-fit working set (resize working set and a progressive JPEG's coefficient store,
   counted from its header, included; default 512 MiB); over-budget images fail with
   `DecodeError::OverBudget`.
-- `frust add plugin network-image` and the TUI's Add Plugin list offer the new plugin (the registry
-  now has nineteen entries).
+- The TUI's Add Plugin dialog (`a` from either screen) offers the new plugin; the registry's 0.6.2
+  count is twenty-one, reached with the `share` and `qr` entries below.
 - The playground's Images section: six `network_image` views, a local-fixtures loopback toggle, a
   cache stats row and a Clear caches button.
 - `IndexedStack` / `indexed_stack` in `frust-widgets`, re-exported by the facade: it keeps every
@@ -256,9 +256,9 @@ limits are in [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
   copies to the clipboard through `frust-clipboard` (`ShareOutcome::CopiedToClipboard`). Device
   gates have not run yet.
 - `frust-qr` (`plugins/qr`): a `qr_code(payload)` view painted on a canvas with `.ecc`,
-  `.quiet_zone`, `.colors`, `.size` and `.semantic_label`, plus `encode` / `QrMatrix`. `frust add
-  plugin` and the TUI's Add Plugin list offer `share` and `qr` (the registry now has twenty-one
-  entries).
+  `.quiet_zone`, `.colors`, `.size` and `.semantic_label`, plus `encode` / `QrMatrix`. The TUI's
+  Add Plugin dialog (`a` from either screen) offers `share` and `qr` (the registry now has
+  twenty-one entries).
 - `frust-url-launcher` Maps helpers: `Maps::directions` / `directions_to` / `show` (Apple Maps on
   iOS/macOS, Google Maps elsewhere) and `UrlLauncher::open_maps_native` for `geo:` / `maps:` /
   `comgooglemaps:` / `google.navigation:` URIs (`NoHandler` on desktop).
