@@ -4838,15 +4838,38 @@ popovers and badges, video or camera controls over the picture) with the knob on
 
 **Why accepted**: the default stays off until the overlay hardening work (one shared overlay table,
 non-blocking withdraw) lands and decides the flip; every host now requests a frame when an overlay
-layer or window is attached, resized or withdrawn. The overlay
-lock is held across the main-surface acquire, so an overlay's `surfaceDestroyed` on the UI thread
-can wait up to one acquire timeout; the opt-in knob is the mitigation.
+layer or window is attached, resized or withdrawn. Withdrawing an overlay no longer blocks the UI
+thread; the cost is described in `android-overlay-withdraw-after-return`.
 
-**Trigger for removal**: the default flips (or the knob is retired); before any default flip the
-lock wait is bounded or replaced by an ack-barrier.
+**Trigger for removal**: the default flips (or the knob is retired); see
+`android-overlay-withdraw-after-return` for the withdraw behaviour that flip depends on.
 
 **Evidence**: `crates/frust-shell-android/src/app/frame.rs`, `jni_glue.rs`, `overlay_state.rs`; SHELLS_ARCHITECTURE.md
 § Native-view hosting.
+
+---
+
+### `android-overlay-withdraw-after-return` — An Android overlay withdrawn mid-frame is released after that frame
+
+**Observed**: with `FRUST_OVERLAYS` on, `surfaceDestroyed` for an overlay never waits on the render
+thread. An idle overlay's GPU surface is dropped and its window released before the call returns.
+An overlay whose surface is out for a frame is released when that frame lands, so that one frame
+may acquire and present into a window Android has already destroyed. The present fails (wgpu
+reports a lost or out-of-date status rather than panicking) and is logged at debug.
+
+**Applies to**: Android apps with the knob on that dispose overlays or background the app while a
+frame is in flight.
+
+**Why accepted**: blocking `surfaceDestroyed` on the render thread is what the hardening removed,
+because it could stall the UI thread for a surface-acquire timeout. The window object stays valid
+until the frame ends because the shared overlay table holds its own reference.
+
+**Trigger for removal**: an ack-barrier that lets `surfaceDestroyed` wait at most one frame
+without holding the lock across the acquire, or evidence of a driver that mishandles a present on
+an abandoned BufferQueue.
+
+**Evidence**: `crates/frust-shell-android/src/jni_glue.rs` (`nativeOverlaySurfaceDestroyed`,
+`FrameOverlays`); `crates/frust-shell-common/src/overlay.rs`.
 
 ---
 
