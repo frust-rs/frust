@@ -23,10 +23,11 @@ frust-render = { workspace = true }
 # Unconditional: host-testable `build_tree_update` uses the `accesskit` core data crate; the iOS adapter stays gated below.
 accesskit = { workspace = true }
 
+# Unconditional: host-testable `ffi_support::OverlayHost` wraps the shared overlay table.
+frust-shell-common = { workspace = true }
+
 # The C-ABI runtime and render/text stack compile only for iOS; the host build keeps the macro and pure helpers.
 [target.'cfg(target_os = "ios")'.dependencies]
-# iOS-gated: only the `ios_app!` re-exports and the FFI runtime use it.
-frust-shell-common = { workspace = true }
 frust-core = { workspace = true }
 frust-scene = { workspace = true }
 frust-text = { workspace = true }

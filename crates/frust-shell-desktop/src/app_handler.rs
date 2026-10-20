@@ -357,6 +357,11 @@ pub enum ShellUserEvent {
     /// failed). Surfaced back so `run_desktop` returns it as `Err`, mirroring the
     /// inline path's fatal handling.
     RenderFatal(anyhow::Error),
+    /// The render thread landed a frame that freed an overlay layer the host
+    /// withdrew while that frame drew it (`FRUST_OVERLAYS`, macOS): the UI
+    /// thread hands the layer to the host now, through the platform-view
+    /// drain, rather than on a next frame an idle window may never draw.
+    OverlaysReleased,
     /// The clipboard worker thread read the host clipboard and got text (see
     /// [`ClipboardWorker`]): the UI thread turns it into exactly one
     /// top-level `EditCommand::Paste` dispatch. A read that failed — for any
@@ -2855,6 +2860,13 @@ where
             ShellUserEvent::RenderFatal(err) => {
                 self.fatal = Some(err);
                 event_loop.exit();
+            }
+            ShellUserEvent::OverlaysReleased => {
+                if let Some(window) = self.window.clone() {
+                    let scale = window.scale_factor();
+                    self.platform_views
+                        .drain(&mut self.extensions, &window, scale);
+                }
             }
             // The devtools UI-thread hop: answer every queued request here, on
             // the thread that owns the tree. Injected events go through

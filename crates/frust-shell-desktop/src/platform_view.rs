@@ -78,6 +78,11 @@
 //! and travel with the very scene they were cut from to the render side, so a
 //! frame's ranges are never paired with another frame's commands. Off, the
 //! plain ingest keeps the command stream exactly as it was.
+//!
+//! An overlay layer the host withdrew while a frame drew it is freed by that
+//! frame's land, after this module's drain may already have run; so the drain
+//! also calls the host when such a layer waits, with whatever batch is pending
+//! (possibly none), and the render thread wakes the UI thread to run it.
 
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -93,9 +98,7 @@ use winit::window::Window;
 
 use crate::extensions::DesktopExtensions;
 
-/// One overlay's cut for one frame: its id and the half-open command range of
-/// that frame's scene it draws.
-pub(crate) type OverlayCutSpec = (u64, Range<usize>);
+pub(crate) use frust_shell_common::overlay::OverlayCutSpec;
 
 /// The overlays' current command ranges, folded from the differ's
 /// `Overlay`/`DisposeOverlay` commands as they are pushed — the differ
@@ -260,7 +263,9 @@ impl DesktopPlatformViews {
     /// Called once per frame, right after the scene is submitted (see the module
     /// docs' timing section) — unconditionally, not only when
     /// [`Self::after_paint`] reported a change: a backlog can also come from
-    /// [`Self::on_surface_recreated`]'s replay, which no ingest produced.
+    /// [`Self::on_surface_recreated`]'s replay, which no ingest produced. Also
+    /// called on `ShellUserEvent::OverlaysReleased`, and then (or whenever a
+    /// released overlay layer waits) it calls the host even with no batch.
     ///
     /// Acknowledging immediately after the hook returns is sound because the
     /// hook *is* the host: it has applied the batch by the time it returns,
@@ -274,6 +279,9 @@ impl DesktopPlatformViews {
         scale: f64,
     ) {
         let Some((generation, commands)) = self.pending() else {
+            if crate::render::overlay_releases_pending() {
+                ext.on_platform_view_commands(window, scale, &[]);
+            }
             return;
         };
         ext.on_platform_view_commands(window, scale, commands);
