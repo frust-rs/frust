@@ -56,7 +56,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 # `frust-plugin` is the only `frust-*` dependency a platform plugin may carry; `jni`
 # is named directly for this crate's own JNI signature calls.
 [target.'cfg(target_os = "android")'.dependencies]
-frust-plugin = { path = "../../crates/frust-plugin", version = "0.6.2" }
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.6.3" }
 jni = { workspace = true }
 
 # Storage only: the biometric gate stays `NotAvailable` here. `keyring-core` is the
@@ -78,4 +78,4 @@ windows-native-keyring-store = { workspace = true }
 # Debug-only `insecure_file` backend: `data_dir()` locates its JSON file. macOS joins the
 # list because it uses the Keychain otherwise (the leaf crate is allowed by the charter).
 [target.'cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))'.dependencies]
-frust-paths = { path = "../../crates/frust-paths", version = "0.6.2" }
+frust-paths = { path = "../../crates/frust-paths", version = "0.6.3" }
