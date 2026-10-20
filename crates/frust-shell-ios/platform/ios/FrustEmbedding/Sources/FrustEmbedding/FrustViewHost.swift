@@ -43,25 +43,45 @@ import CFrustFFI
 // is it removed. Mode B ignores the ops: the translucent surface already
 // composites above its native views.
 
-/// An overlay surface's view: a non-opaque `CAMetalLayer` Frust presents
-/// into, invisible to touches (`hitTest` answers nil and user interaction is
-/// off), so the native view under it and the Frust surface keep today's
-/// input rules.
+/// An overlay surface's view: a non-opaque `CAMetalLayer` sublayer Frust
+/// presents into, invisible to touches (`hitTest` answers nil and user
+/// interaction is off), so the native view under it and the Frust surface keep
+/// today's input rules.
 final class FrustOverlayView: UIView {
-    override class var layerClass: AnyClass { CAMetalLayer.self }
+    /// The layer Frust renders into — a sublayer of this view's plain backing
+    /// layer, never the backing layer itself. The renderer configures it from
+    /// its render thread (wgpu's `Surface::configure` writes `opaque`,
+    /// `pixelFormat`, `drawableSize`, `colorspace`, …), and UIKit rejects any
+    /// off-main property write to a view's backing layer. The sublayer's
+    /// delegate is the shared non-view action helper, as in `FrustView`. It
+    /// lives as long as this view, which is what lets the host key a detached
+    /// overlay by this layer's pointer until Rust hands it back.
+    let metalLayer = CAMetalLayer()
 
-    var metalLayer: CAMetalLayer { layer as! CAMetalLayer }
+    /// Retained here because `CALayer.delegate` is weak.
+    private let metalLayerActions = FrustMetalLayerActions()
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         isOpaque = false
         backgroundColor = .clear
         isUserInteractionEnabled = false
+        metalLayer.delegate = metalLayerActions
         metalLayer.isOpaque = false
+        metalLayer.frame = bounds
+        layer.addSublayer(metalLayer)
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    /// Keeps the sublayer at the view's bounds and scale on the main thread,
+    /// where the frame and `contentsScale` writes are legal.
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        metalLayer.frame = bounds
+        metalLayer.contentsScale = contentScaleFactor
     }
 
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? { nil }
@@ -325,12 +345,15 @@ final class FrustViewHost {
         }
     }
 
-    /// Size an overlay's view and drawable.
+    /// Size an overlay's view and lay out its sublayer.
     private func place(_ view: FrustOverlayView, frame: CGRect, width: UInt32, height: UInt32) {
         view.frame = frame
         view.contentScaleFactor = containerView.contentScaleFactor
-        view.metalLayer.contentsScale = containerView.contentScaleFactor
-        view.metalLayer.drawableSize = CGSize(width: Int(width), height: Int(height))
+        // `drawableSize` is the render thread's: `resize()` sets it when the
+        // new pixel size arrives through `frust_overlay_attach`, and a
+        // main-thread write here could race a drawable acquire.
+        view.setNeedsLayout()
+        view.layoutIfNeeded()
     }
 
     /// The view a newly created wrapper goes directly above with overlays on:
