@@ -145,12 +145,31 @@
 //! rebuilds its engine on the same device (a fresh surface) gets the current
 //! view bound again on its first frame; a *device* change drops what was
 //! shown until the source yields its next frame.
+//!
+//! # Waking the shell
+//!
+//! Polling once per engine frame alone would freeze a source on an idle
+//! screen: the shells skip frames when nothing is dirty. So a producer that
+//! has a new frame calls [`request_frame`], which owes the shell one frame.
+//! The debt is one process-wide flag, coalesced like `frust_shell_common`'s
+//! retained-repaint flag: any number of requests before a
+//! [`take_frame_owed`] are one frame. The mobile shells OR that take into
+//! their per-vsync frame gate; the desktop shell, which parks its loop until
+//! an event arrives, also installs a [`set_frame_request_hook`] that posts
+//! one wake per debt.
+//!
+//! The plugin bridges call it from the sink's waker, installed at
+//! registration and cleared when the registration's source drops, so only a
+//! registered sink wakes. Idle cost: nothing checks whether a `texture_view`
+//! actually draws the registration, so a live producer behind a registration
+//! no view draws still runs one frame per pushed frame (at most one per
+//! display refresh). Drop the registration, or stop the producer, to idle.
 
 use std::any::Any;
 use std::ffi::c_void;
 use std::fmt;
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 
 use frust_gpu::SceneTextureId;
@@ -547,6 +566,88 @@ fn native_importer(kind: NativeHandleKind) -> Option<Arc<dyn NativeImporter>> {
         .iter()
         .find(|(k, _)| *k == kind)
         .map(|(_, importer)| Arc::clone(importer))
+}
+
+/// What [`request_frame`] calls when a frame becomes owed — see
+/// [`set_frame_request_hook`].
+pub type FrameRequestHook = Arc<dyn Fn() + Send + Sync>;
+
+/// The coalesced "the shell owes a frame" flag, plus the hook a parked loop
+/// is woken through. One process-wide instance, [`FRAME_OWED`].
+struct FrameOwed {
+    owed: AtomicBool,
+    hook: Mutex<Option<FrameRequestHook>>,
+}
+
+impl FrameOwed {
+    const fn new() -> Self {
+        Self {
+            owed: AtomicBool::new(false),
+            hook: Mutex::new(None),
+        }
+    }
+
+    fn hook(&self) -> Option<FrameRequestHook> {
+        self.hook
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Owes a frame; the hook runs only on the not-owed → owed edge, so one
+    /// wake is in flight per debt however many requests land.
+    fn request(&self) {
+        if !self.owed.swap(true, Ordering::AcqRel)
+            && let Some(hook) = self.hook()
+        {
+            hook();
+        }
+    }
+
+    fn take(&self) -> bool {
+        self.owed.swap(false, Ordering::AcqRel)
+    }
+
+    fn set_hook(&self, hook: Option<FrameRequestHook>) -> Option<FrameRequestHook> {
+        let replaced = std::mem::replace(
+            &mut *self.hook.lock().unwrap_or_else(PoisonError::into_inner),
+            hook,
+        );
+        // A debt raised before the hook existed posted no wake; post it now
+        // rather than leave it stranded until something else takes it.
+        if self.owed.load(Ordering::Acquire)
+            && let Some(hook) = self.hook()
+        {
+            hook();
+        }
+        replaced
+    }
+}
+
+static FRAME_OWED: FrameOwed = FrameOwed::new();
+
+/// Owes the shell one frame, so the next frame polls every registered source
+/// (see the module docs' "Waking the shell"). Called by a producer, on its
+/// own thread, right after it hands a source a new frame: an atomic swap,
+/// plus the installed hook on the edge. Never blocks on the render side.
+pub fn request_frame() {
+    FRAME_OWED.request();
+}
+
+/// Takes the frame [`request_frame`] owed: `true` once per debt (however many
+/// requests landed since the last take), then `false`. Read by a shell's frame
+/// gate, ORed into what forces the frame to run.
+pub fn take_frame_owed() -> bool {
+    FRAME_OWED.take()
+}
+
+/// Installs `hook` to run whenever a frame becomes owed (`None` clears it),
+/// returning the one it replaced. For a shell whose loop parks until an event
+/// arrives: the hook runs on the requesting producer's thread, so it only
+/// posts a wake to the loop, which then calls [`take_frame_owed`]. A debt
+/// already owed when the hook is installed runs it at once.
+pub fn set_frame_request_hook(hook: Option<FrameRequestHook>) -> Option<FrameRequestHook> {
+    FRAME_OWED.set_hook(hook)
 }
 
 /// A frame source registered with [`register_texture_source`]; unregisters on
@@ -1107,6 +1208,68 @@ fn import(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A hook counting its calls, and the counter.
+    fn counting_hook() -> (FrameRequestHook, Arc<AtomicU64>) {
+        let calls = Arc::new(AtomicU64::new(0));
+        let counter = Arc::clone(&calls);
+        let hook: FrameRequestHook = Arc::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+        (hook, calls)
+    }
+
+    #[test]
+    fn requests_before_a_take_coalesce_into_one_owed_frame() {
+        let owed = FrameOwed::new();
+        assert!(!owed.take(), "nothing owed at first");
+        owed.request();
+        owed.request();
+        owed.request();
+        assert!(owed.take(), "the requests owe one frame");
+        assert!(!owed.take(), "taking cleared the debt");
+        owed.request();
+        assert!(owed.take(), "a later request owes a fresh frame");
+    }
+
+    #[test]
+    fn the_hook_runs_once_per_debt_not_per_request() {
+        let owed = FrameOwed::new();
+        let (hook, calls) = counting_hook();
+        assert!(owed.set_hook(Some(hook)).is_none());
+        owed.request();
+        owed.request();
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "one wake in flight");
+        assert!(owed.take());
+        owed.request();
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "a new debt wakes again");
+        assert!(owed.set_hook(None).is_some());
+        assert!(owed.take());
+        owed.request();
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "a cleared hook is not run");
+    }
+
+    #[test]
+    fn a_hook_installed_over_an_owed_frame_runs_at_once() {
+        let owed = FrameOwed::new();
+        let (hook, calls) = counting_hook();
+        owed.set_hook(Some(Arc::clone(&hook)));
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "nothing owed, no wake");
+        owed.set_hook(None);
+        owed.request();
+        owed.set_hook(Some(hook));
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "the stranded debt wakes");
+        assert!(owed.take());
+    }
+
+    #[test]
+    fn the_process_wide_flag_follows_request_and_take() {
+        // The only test in this binary that touches the process-wide flag.
+        request_frame();
+        request_frame();
+        assert!(take_frame_owed());
+        assert!(!take_frame_owed());
+    }
 
     #[test]
     fn the_packed_extent_round_trips_and_zero_means_none() {

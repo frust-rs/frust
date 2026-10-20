@@ -27,6 +27,15 @@
 //! sink handle drops with it still pending, or when a frame still holding its
 //! callback is dropped (a taker that forgot it, a panic unwinding past it).
 //!
+//! # Waking the display
+//!
+//! A display that only polls the mailbox when it draws anyway would freeze on
+//! an idle screen, so a sink may carry a [`SinkWaker`]: [`TextureSink::push`]
+//! calls it after every swap, outside the lock, on the pushing thread. The
+//! bridge that registers the sink with a display installs it and clears it
+//! when that registration goes away ([`TextureSink::set_waker`]), so a sink
+//! nobody shows wakes nothing. This crate never decides what a wake does.
+//!
 //! # Pixel contract
 //!
 //! [`TextureFormat::Rgba8`] frames are tightly packed rows (`width * 4` bytes
@@ -342,10 +351,18 @@ impl fmt::Debug for TextureFrame {
     }
 }
 
+/// What a [`TextureSink`] calls after each push to tell its display a frame is
+/// waiting. Runs on the pushing thread (a decoder or capture thread), so it
+/// must be cheap, must not block and must not panic; a typical one sets a flag
+/// the display's frame loop reads.
+pub type SinkWaker = Arc<dyn Fn() + Send + Sync>;
+
 /// The mailbox shared by every clone of one [`TextureSink`].
 struct Mailbox {
     id: u64,
     pending: Mutex<Option<TextureFrame>>,
+    /// Called after each push; see [`TextureSink::set_waker`].
+    waker: Mutex<Option<SinkWaker>>,
 }
 
 impl Mailbox {
@@ -354,6 +371,11 @@ impl Mailbox {
     /// one producer's panic must not wedge the display path.
     fn pending(&self) -> MutexGuard<'_, Option<TextureFrame>> {
         self.pending.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The waker slot, poison ignored for the same reason as [`Self::pending`].
+    fn waker(&self) -> MutexGuard<'_, Option<SinkWaker>> {
+        self.waker.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -391,6 +413,7 @@ impl TextureSink {
             mailbox: Arc::new(Mailbox {
                 id: NEXT_SINK_ID.fetch_add(1, Ordering::Relaxed),
                 pending: Mutex::new(None),
+                waker: Mutex::new(None),
             }),
         }
     }
@@ -406,14 +429,37 @@ impl TextureSink {
         self.mailbox.id
     }
 
-    /// Makes `frame` the pending frame. A frame still pending from an earlier
-    /// push is displaced and its release callback runs here, on the calling
-    /// thread, after the mailbox lock is released.
+    /// Makes `frame` the pending frame, then calls the installed
+    /// [`SinkWaker`], if any. A frame still pending from an earlier push is
+    /// displaced and its release callback runs here, on the calling thread;
+    /// both run after the mailbox lock is released, so either may use the
+    /// sink.
     pub fn push(&self, frame: TextureFrame) {
         let displaced = self.mailbox.pending().replace(frame);
+        // Cloned out so the waker runs unlocked and may replace itself.
+        let waker = self.mailbox.waker().clone();
+        if let Some(waker) = waker {
+            waker();
+        }
         if let Some(displaced) = displaced {
             displaced.release();
         }
+    }
+
+    /// Installs `waker` to run after every later push (`None` clears it),
+    /// returning the one it replaced. Shared by every clone of this sink.
+    ///
+    /// Installed by whoever registers the sink with a display, and cleared
+    /// when that registration ends, so a sink nobody displays costs its
+    /// producer nothing past the mailbox swap.
+    pub fn set_waker(&self, waker: Option<SinkWaker>) -> Option<SinkWaker> {
+        std::mem::replace(&mut *self.mailbox.waker(), waker)
+    }
+
+    /// Whether a [`SinkWaker`] is installed.
+    #[must_use]
+    pub fn has_waker(&self) -> bool {
+        self.mailbox.waker().is_some()
     }
 
     /// Takes the pending frame, if any, leaving the mailbox empty. The caller
@@ -441,6 +487,7 @@ impl fmt::Debug for TextureSink {
         f.debug_struct("TextureSink")
             .field("id", &self.mailbox.id)
             .field("pending", &self.has_pending())
+            .field("waker", &self.has_waker())
             .finish()
     }
 }
@@ -799,6 +846,81 @@ mod tests {
         assert_eq!(first_byte(&frame), 2, "the mailbox still accepts frames");
         frame.release();
         assert_eq!(released.load(Ordering::SeqCst), 1);
+    }
+
+    /// A waker counting its calls, and the counter.
+    fn counting_waker() -> (SinkWaker, Arc<AtomicUsize>) {
+        let woken = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&woken);
+        let waker: SinkWaker = Arc::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+        (waker, woken)
+    }
+
+    #[test]
+    fn each_push_calls_the_installed_waker_once() {
+        let sink = TextureSink::new();
+        let (waker, woken) = counting_waker();
+        assert!(sink.set_waker(Some(waker)).is_none());
+        assert!(sink.has_waker());
+
+        sink.push(TextureFrame::rgba8(1, 1, Arc::from(vec![0u8; 4])));
+        assert_eq!(woken.load(Ordering::SeqCst), 1);
+        sink.push(TextureFrame::rgba8(1, 1, Arc::from(vec![0u8; 4])));
+        assert_eq!(
+            woken.load(Ordering::SeqCst),
+            2,
+            "the sink itself never coalesces"
+        );
+        let _ = sink.take_latest();
+        assert_eq!(woken.load(Ordering::SeqCst), 2, "taking wakes nothing");
+    }
+
+    #[test]
+    fn a_cleared_waker_is_never_called_and_comes_back() {
+        let sink = TextureSink::new();
+        sink.push(TextureFrame::rgba8(1, 1, Arc::from(vec![0u8; 4])));
+        let (waker, woken) = counting_waker();
+        sink.set_waker(Some(waker));
+        assert!(sink.set_waker(None).is_some(), "clearing hands it back");
+        assert!(!sink.has_waker());
+
+        sink.push(TextureFrame::rgba8(1, 1, Arc::from(vec![0u8; 4])));
+        assert_eq!(woken.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn clones_share_the_waker() {
+        let producer = TextureSink::new();
+        let consumer = producer.clone();
+        let (waker, woken) = counting_waker();
+        consumer.set_waker(Some(waker));
+        producer.push(TextureFrame::rgba8(1, 1, Arc::from(vec![0u8; 4])));
+        assert_eq!(woken.load(Ordering::SeqCst), 1);
+        assert!(format!("{producer:?}").contains("waker: true"));
+    }
+
+    #[test]
+    fn the_waker_runs_after_the_swap_with_the_mailbox_unlocked() {
+        let sink = TextureSink::new();
+        let seen = Arc::new(AtomicUsize::new(0));
+        let waker: SinkWaker = {
+            let sink = sink.clone();
+            let seen = Arc::clone(&seen);
+            // Locking the mailbox here would deadlock a waker run under the
+            // lock; the pushed frame already being pending proves the order.
+            Arc::new(move || {
+                if sink.has_pending() {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+        };
+        sink.set_waker(Some(waker));
+        sink.push(TextureFrame::rgba8(1, 1, Arc::from(vec![0u8; 4])));
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
+        // The waker holds a clone of its own sink; clearing breaks the cycle.
+        sink.set_waker(None);
     }
 
     #[test]

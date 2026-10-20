@@ -199,7 +199,10 @@ pub fn request_retained_repaint() {
 /// Take the owed repaint [`request_retained_repaint`] recorded: `true` once per
 /// request (however many requests landed since the last take), then `false`.
 /// Read by the UI thread's frame gate past its surface-ready check, ORed into
-/// an input that forces the frame to run. An atomic swap, never blocks.
+/// an input that forces the frame to run. An atomic swap, never blocks. The
+/// texture bus keeps a sibling flag of the same shape for a producer's pushed
+/// frame (`frust_render::texture_bus::take_frame_owed`), ORed in beside this
+/// one; it lives there because this crate names no renderer.
 pub fn take_retained_repaint() -> bool {
     RETAINED_REPAINT_OWED.swap(false, Ordering::AcqRel)
 }
