@@ -142,7 +142,8 @@ fn publish_retained(renderer: &mut SurfaceRenderer) -> bool {
 /// (bottom to top) — each stamped with the wall clock for the
 /// `frust-overlay skew` log. Answers the main surface's outcome, exactly what
 /// [`SurfaceRenderer::submit`] would have; an overlay the engine refused is
-/// logged and presents nothing while the rest of the frame lands.
+/// noted for the log the land writes and presents nothing while the rest of
+/// the frame lands.
 fn submit_with_overlays(
     renderer: &mut SurfaceRenderer,
     render_cx: &RenderContext,
@@ -211,10 +212,11 @@ pub(crate) fn render_scene(
     frust_render::native_import::install(render_cx);
 
     // The overlay surfaces this frame draws (`crate::jni_glue::frame_overlays`):
-    // `None` — one cached-bool read with overlays off, or no overlay surface
-    // live — keeps the single-surface encode/submit below exactly as it is.
-    // `Some` cuts each overlay's command range out of the main surface's
-    // frame and holds the overlays until they are presented.
+    // `None` — one cached-bool read with overlays off, or no surface taken for
+    // this frame — keeps the single-surface encode/submit below exactly as it
+    // is. `Some` cuts each overlay's command range out of the main surface's
+    // frame. The surfaces are out of the overlay table, not under its lock,
+    // so an overlay withdrawn during the acquire below never waits on it.
     let mut overlays = crate::jni_glue::frame_overlays(frame_id, scene.commands().len());
 
     // Encode span (GPU/CPU encode, no swapchain touch).
@@ -279,7 +281,8 @@ pub(crate) fn render_scene(
         Err(err) => Err(err),
     };
     let submit_time = submit_start.map_or(Duration::ZERO, |t| t.elapsed());
-    // Every overlay frame is presented (or dropped): release them.
+    // Every overlay frame is presented (or dropped): land the surfaces back
+    // in the table, which drops any whose window went meanwhile.
     drop(overlays);
 
     // The resident-key ledger after this frame, for the UI thread's next
