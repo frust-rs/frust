@@ -1,12 +1,13 @@
 //! `Base`-design cases for the website's `widgets/base/navigation` catalog
-//! page set: `hero`, `navigator`. See the crate docs and `crate::base` for
+//! page set: `hero`, `navigator`, `indexed-stack`. See the crate docs and `crate::base` for
 //! the pure-`View`/slug-rule contract every case in this registry follows,
 //! and [`super::framed`] for why neither case fills its own backdrop.
 
 use frust_core::View;
 use frust_text::FontWeight;
 use frust_widgets::{
-    CrossAxisAlignment, NavigatorController, SizedBox, column, container, hero, navigator, text,
+    CrossAxisAlignment, NavigatorController, SizedBox, column, container, hero, indexed_stack,
+    navigator, text,
 };
 use peniko::Color;
 
@@ -54,6 +55,36 @@ fn navigator_case() -> impl View<()> {
     })
 }
 
+/// `indexed_stack` keeps every child mounted but paints only the selected
+/// one: three differently coloured panels with index 1 selected, so only the
+/// middle (green) one is visible.
+fn indexed_stack_case() -> impl View<()> {
+    let panel = |label: &'static str, fill: Color| {
+        container(
+            text(label)
+                .size(14.0)
+                .color(Color::from_rgb8(0x11, 0x18, 0x27)),
+        )
+        .fill(fill)
+        .size_centered(220.0, 120.0)
+    };
+    framed(
+        indexed_stack(Some(1))
+            .child(panel(
+                "child 0 (hidden)",
+                Color::from_rgb8(0xFC, 0xA5, 0xA5),
+            ))
+            .child(panel(
+                "child 1 (selected)",
+                Color::from_rgb8(0x86, 0xEF, 0xAC),
+            ))
+            .child(panel(
+                "child 2 (hidden)",
+                Color::from_rgb8(0x93, 0xC5, 0xFD),
+            )),
+    )
+}
+
 /// This module's slice of the registry [`crate::cases`] concatenates.
 pub const CASES: &[Case] = &[
     Case {
@@ -73,5 +104,14 @@ pub const CASES: &[Case] = &[
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Base,
         build: case_build!(navigator_case),
+    },
+    Case {
+        slug: "indexed-stack",
+        title: "Indexed Stack",
+        size: Case::DEFAULT_SIZE,
+        scale: Case::DEFAULT_SCALE,
+        time_ms: Case::DEFAULT_TIME_MS,
+        design: Design::Base,
+        build: case_build!(indexed_stack_case),
     },
 ];

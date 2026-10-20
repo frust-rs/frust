@@ -552,8 +552,9 @@ pub fn key_token(key: &Key) -> String {
     }
 }
 
-/// A [`NamedKey`]'s lowercase token (an exhaustive match, so a new variant is a
-/// compile error rather than a silent `unknown`).
+/// A [`NamedKey`]'s lowercase token. `NamedKey` is `#[non_exhaustive]`, so the
+/// exhaustiveness guard lives in frust-core only; a variant added later reads
+/// as `unknown` here until it is given a token.
 fn named_key_name(named: NamedKey) -> &'static str {
     match named {
         NamedKey::Enter => "enter",
@@ -595,6 +596,7 @@ fn named_key_name(named: NamedKey) -> &'static str {
         NamedKey::F22 => "f22",
         NamedKey::F23 => "f23",
         NamedKey::F24 => "f24",
+        _ => "unknown",
     }
 }
 

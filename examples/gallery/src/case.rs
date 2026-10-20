@@ -205,6 +205,12 @@ pub const WARM_PASS_OPT_INS: &[&str] = &[
     // changes nothing in a browser: `crate::interactive::shadcn` shadows the
     // slug and a live host resolves that twin ahead of `Case::build`.
     "shadcn/dialog",
+    // f-08: recorded without its list rows. `sliver_list` materialises its
+    // rows in `View::rebuild` after the first layout, which a single static
+    // build never reaches; the warm pass supplies that rebuild.
+    "custom-scroll-view",
+    // f-08: the same, for both `sliver_list` and `sliver_fixed_extent_list`.
+    "slivers",
 ];
 
 #[cfg(test)]

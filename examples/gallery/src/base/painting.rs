@@ -1,5 +1,5 @@
 //! `Base`-design painting cases — one per
-//! `apps/website/widgets/base/painting/*.mdx` page: `platform-view`, `shield`.
+//! `apps/website/widgets/base/painting/*.mdx` page: `platform-view`, `shield`, `repaint-boundary`.
 //!
 //! Both widgets exist to reserve/protect space for a *native* view that this
 //! CPU-oracle recorder has no host for, so both cases lean on
@@ -21,10 +21,11 @@
 use frust_core::View;
 use frust_widgets::{
     Align, Alignment, EdgeInsets, Padding, PlatformViewView, button, container, platform_view,
-    shield, stack, text,
+    repaint_boundary, row, shield, stack, text,
 };
 use peniko::Color;
 
+use super::framed;
 use crate::case::{Case, Design, case_build};
 
 /// The overlay chrome's card fill and ink — explicit, because the label sits
@@ -100,6 +101,30 @@ fn shield_case() -> impl View<()> {
         ))
 }
 
+/// `repaint_boundary` caches its body as a retained page; the pixels are the
+/// same with or without it, so this case documents the API shape only: the
+/// left swatch is wrapped in a boundary, the right one is a plain sibling.
+fn repaint_boundary_case() -> impl View<()> {
+    let swatch = |label: &'static str, fill: Color| {
+        container(
+            text(label)
+                .size(13.0)
+                .color(Color::from_rgb8(0x11, 0x18, 0x27)),
+        )
+        .fill(fill)
+        .radius(8.0)
+        .size_centered(130.0, 90.0)
+    };
+    framed(
+        row()
+            .child(repaint_boundary(swatch(
+                "repaint_boundary",
+                Color::from_rgb8(0xFD, 0xE6, 0x8A),
+            )))
+            .child(swatch("plain sibling", Color::from_rgb8(0xA7, 0xF3, 0xD0))),
+    )
+}
+
 /// This module's slice of the registry [`crate::cases`] concatenates.
 pub const CASES: &[Case] = &[
     Case {
@@ -119,5 +144,14 @@ pub const CASES: &[Case] = &[
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Base,
         build: case_build!(shield_case),
+    },
+    Case {
+        slug: "repaint-boundary",
+        title: "repaint_boundary (pixel-identical to a plain child)",
+        size: Case::DEFAULT_SIZE,
+        scale: Case::DEFAULT_SCALE,
+        time_ms: Case::DEFAULT_TIME_MS,
+        design: Design::Base,
+        build: case_build!(repaint_boundary_case),
     },
 ];

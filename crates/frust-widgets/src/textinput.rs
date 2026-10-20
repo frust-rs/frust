@@ -1196,8 +1196,8 @@ macro_rules! any_function_key {
 /// refused further down (`handle_command`, `request_paste_if_editable`), so the
 /// verb is understood and answered with nothing rather than ignored.
 ///
-/// Matched exhaustively (no `_` arm) on purpose: a named key added to
-/// [`NamedKey`] is a compile error here until it is classified.
+/// [`NamedKey`] is `#[non_exhaustive]`, so a key added later falls to the `_` arm
+/// and is not answered while read-only, as every other unhandled key is.
 fn answered_while_read_only(named: NamedKey, modifiers: frust_core::Modifiers) -> bool {
     match named {
         NamedKey::Copy | NamedKey::Cut | NamedKey::Paste | NamedKey::Insert | NamedKey::Escape => {
@@ -1216,6 +1216,7 @@ fn answered_while_read_only(named: NamedKey, modifiers: frust_core::Modifiers) -
         | NamedKey::End
         | NamedKey::Tab
         | any_function_key!() => false,
+        _ => false,
     }
 }
 
@@ -1917,6 +1918,9 @@ impl TextInputWidget {
                             return EventResult::Ignored;
                         }
                     }
+                    // A key added to the non-exhaustive `NamedKey` later is one
+                    // this field does not handle: declined, like Tab.
+                    _ => return EventResult::Ignored,
                 }
                 EventResult::Handled
             }

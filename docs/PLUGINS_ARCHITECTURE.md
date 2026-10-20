@@ -29,7 +29,7 @@ rather than painting a frame itself.
 `plugins/qr` (`frust-qr`) is likewise facade-tier: a canvas-painted, scannable `qr_code(payload)` view.
 `clean-signals-frust` is a facade-tier plugin gluing the external `clean_signals`
 clean-architecture core into Frust's `Component`/reactive model; it is a standalone workspace
-excluded from the root Cargo graph pending a crates.io publication of its dependency.
+excluded from the root Cargo graph under the standalone-workspace rule (its gate runs from its own directory).
 `plugins/network-image` (`frust-network-image`) is a facade-tier network image view: it fetches a
 URL over HTTPS (reqwest on rustls/ring with the bundled `webpki-roots` trust store, so no
 platform verifier on any target), decodes and fits it off-thread, and caches decoded images in
@@ -101,7 +101,7 @@ preview or a `frust build macos|windows|linux`. See
 | `clipboard` | generic-desktop | `arboard` on macOS, Linux, and Windows alike — macOS shares this arm rather than its own Apple `UIPasteboard` one (UIKit-only) |
 | `haptics` | unavailable-by-design | no first-class OS API to route to, on macOS, Linux, or Windows |
 | `iap` | deferred (v1) | dependency-free, always-erroring stub on macOS, Linux, and Windows — mobile-first scope, not a capability gap (`iap-desktop-unavailable-v1` in [LIMITATIONS.md](LIMITATIONS.md)) |
-| `video-player` | macOS-native (Mode A) via the desktop platform-view host | AVPlayer (macOS, sharing the Apple arm with iOS), its `NSView` hosted above the window's content view by the desktop shell; Windows and Linux have no backend at all (`video-web-windows-linux-unavailable-v1` in [LIMITATIONS.md](LIMITATIONS.md)); texture mode has no desktop producer |
+| `video-player` | macOS-native (Mode A) via the desktop platform-view host | AVPlayer (macOS, sharing the Apple arm with iOS), its `NSView` hosted above the window's content view by the desktop shell; Windows and Linux have no backend at all (`video-web-windows-linux-unavailable-v1` in [LIMITATIONS.md](LIMITATIONS.md)); opt-in texture mode on macOS uses the shared Apple `AVPlayerItemVideoOutput` producer (32BGRA, IOSurface-backed, zero-copy `CVPixelBuffer` when the importer is installed), and Linux/Windows have none |
 | `url-launcher` | generic-desktop | `xdg-open` (Linux), `open` (macOS), `ShellExecuteW` (Windows); desktop receives no deep links, so an OAuth round trip needs a typed-code fallback; native map schemes: `NoHandler` on desktop, `Maps::directions` is the https path |
 | `file-dialogs` | generic-desktop | Linux: xdg-desktop-portal file chooser with a `zenity` fallback, both runtime dependencies (libdbus is loaded at runtime, nothing links at build time; `file-dialogs-linux-runtime-deps` in [LIMITATIONS.md](LIMITATIONS.md)); macOS `NSOpenPanel`/`NSSavePanel` and Windows `IFileOpenDialog`/`IFileSaveDialog` through `rfd`; Android, iOS and web are unsupported by scope (`file-dialogs-mobile-web-unsupported`) |
 | `share` | generic-desktop | clipboard copy through `frust-clipboard` (`CopiedToClipboard`), no sheet |
