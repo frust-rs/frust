@@ -167,6 +167,9 @@ pub(crate) struct DesktopPlatformViews {
     /// The overlays' folded ranges (module docs' *Overlays*); stays empty with
     /// overlays off.
     overlays: OverlayRanges,
+    /// The window scale the host was last called (or drained) with, to spot a
+    /// scale-only change.
+    last_scale: Option<f64>,
 }
 
 impl DesktopPlatformViews {
@@ -175,6 +178,7 @@ impl DesktopPlatformViews {
         Self {
             state: PlatformViewState::new(),
             overlays: OverlayRanges::default(),
+            last_scale: None,
         }
     }
 
@@ -278,14 +282,36 @@ impl DesktopPlatformViews {
         window: &Arc<Window>,
         scale: f64,
     ) {
+        let rescaled = self.note_scale(scale);
         let Some((generation, commands)) = self.pending() else {
-            if crate::render::overlay_releases_pending() {
+            if Self::empty_call_owed(
+                crate::render::overlay_releases_pending(),
+                rescaled,
+                crate::render::overlays_enabled(),
+            ) {
                 ext.on_platform_view_commands(window, scale, &[]);
             }
             return;
         };
         ext.on_platform_view_commands(window, scale, commands);
         self.applied(generation);
+    }
+
+    /// Record `scale` and answer whether it differs from the last one seen.
+    /// The first sighting is a baseline, not a change.
+    fn note_scale(&mut self, scale: f64) -> bool {
+        let changed = self.last_scale.is_some_and(|last| last != scale);
+        self.last_scale = Some(scale);
+        changed
+    }
+
+    /// Whether a drain with no batch still calls the host: a withdrawn overlay
+    /// layer is free to release, or the window's scale changed with overlays
+    /// on. An overlay keeps its logical frame across a move between displays
+    /// of different scale, so no command announces the change; the host
+    /// re-reads the scale on any call and republishes the drawable size.
+    fn empty_call_owed(releases_pending: bool, rescaled: bool, overlays_on: bool) -> bool {
+        releases_pending || (rescaled && overlays_on)
     }
 
     /// The batch [`Self::drain`] would deliver — the not-yet-acknowledged
@@ -646,6 +672,29 @@ mod tests {
         host.ingest(&[], &[frame(1, Rect::new(0.0, 10.0, 100.0, 110.0))]);
         assert_eq!(pending(&host), pending(&host));
         assert_eq!(pending(&host).len(), 1);
+    }
+
+    // --- Scale changes -------------------------------------------------
+
+    #[test]
+    fn a_scale_only_change_owes_the_host_a_call_with_overlays_on() {
+        let mut host = DesktopPlatformViews::new();
+        // The first scale seen is the baseline.
+        assert!(!host.note_scale(2.0));
+        assert!(!host.note_scale(2.0));
+        let rescaled = host.note_scale(1.0);
+        assert!(rescaled);
+        assert!(DesktopPlatformViews::empty_call_owed(false, rescaled, true));
+        // Seen once: the next drain at the same scale owes nothing.
+        assert!(!host.note_scale(1.0));
+        assert!(!DesktopPlatformViews::empty_call_owed(false, false, true));
+    }
+
+    #[test]
+    fn a_scale_change_without_overlays_does_not_reach_the_host() {
+        assert!(!DesktopPlatformViews::empty_call_owed(false, true, false));
+        // A pending release still does.
+        assert!(DesktopPlatformViews::empty_call_owed(true, false, false));
     }
 
     // --- Overlays ------------------------------------------------------

@@ -196,8 +196,10 @@ pub trait DesktopExtensions {
     /// Called only when there is something to apply — an unchanged frame (the
     /// common case: nothing hosted, or a static hosted view) never reaches the
     /// hook at all. With overlays on it is also called when a withdrawn overlay
-    /// layer is free to release ([`take_released_overlay_layers`]); the batch
-    /// may then be empty.
+    /// layer is free to release ([`take_released_overlay_layers`]) or the
+    /// window's scale changed (a move between displays of different density);
+    /// the batch may then be empty, and a host with overlays re-reads the scale
+    /// and republishes each overlay's drawable size.
     fn on_platform_view_commands(
         &mut self,
         window: &Arc<Window>,
