@@ -232,13 +232,13 @@ impl IosAppHandle {
             // `resume`), so it needs no per-frame latch. What DOES need one is
             // the split's render-side self-heal, which never passes through a
             // UI-thread entry point at all (see the self-heal handling above).
-            // An overlay layer that just arrived or changed size
-            // (`frust_overlay_attach`, `FRUST_OVERLAYS`) is the same kind of
-            // signal: a new surface to draw onto, owed a frame now rather than
-            // on the next unrelated repaint — or an idle screen keeps the
-            // over-paint on the main surface, under the native view.
+            // An overlay layer that just arrived, changed size or was
+            // withdrawn mid-frame (`FRUST_OVERLAYS`) is the same kind of
+            // signal: a surface to draw onto (or to land), owed a frame now
+            // rather than on the next unrelated repaint — or an idle screen
+            // keeps the over-paint on the main surface, under the native view.
             surface_changed_or_resized: surface_reinstalled
-                || crate::ffi_glue::take_overlay_frame_request(),
+                || crate::ffi_glue::OVERLAY_FRAME_REQUEST.take(),
             a11y_action_performed,
             // Driven by the gate's own warmup countdown (`note_resumed`).
             resumed_recently: false,

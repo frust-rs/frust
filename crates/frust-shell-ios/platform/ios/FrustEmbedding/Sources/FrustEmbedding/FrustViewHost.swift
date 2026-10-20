@@ -36,10 +36,12 @@ import CFrustFFI
 // onto it, so its paint lands above the view and below any later slot. With
 // overlays on, a new wrapper goes above every hosted view (wrappers then stack
 // in creation order, which is paint order for a newly shown slot) instead of
-// directly above the Frust surface. A layer is detached
-// (`frust_overlay_detach`, which drops its surface) before its view is
-// released. Mode B ignores the ops: the translucent surface already composites
-// above its native views.
+// directly above the Frust surface. A disposed overlay's view is hidden and
+// detached at once (`frust_overlay_detach`, which never waits on the render
+// thread) and kept until Rust hands its layer back
+// (`frust_overlay_take_released`, once the surface on it is gone); only then
+// is it removed. Mode B ignores the ops: the translucent surface already
+// composites above its native views.
 
 /// An overlay surface's view: a non-opaque `CAMetalLayer` Frust presents
 /// into, invisible to touches (`hitTest` answers nil and user interaction is
@@ -141,6 +143,10 @@ final class FrustViewHost {
     private let overlaysPresentWithTransaction: Bool
     /// The live overlays by the differ's overlay id.
     private var overlays: [UInt64: Overlay] = [:]
+    /// Detached overlays' views, hidden and kept until Rust hands their layer
+    /// back, keyed by that layer's pointer.
+    private var detachedOverlays: [UnsafeMutableRawPointer: (id: UInt64, view: FrustOverlayView)] =
+        [:]
     /// Overlays whose slot had no wrapper (a dead slot), remembered so the
     /// skip is logged once.
     private var orphanOverlays: Set<UInt64> = []
@@ -171,6 +177,12 @@ final class FrustViewHost {
     /// `CADisplayLink` callback), so all UIKit mutation below is main-thread.
     func poll(handle: UnsafeMutableRawPointer) {
         self.handle = handle
+        applyCommands(handle: handle)
+        releaseDetachedOverlays(handle: handle)
+    }
+
+    /// Apply the command batch accumulated since [ackedGeneration], if any.
+    private func applyCommands(handle: UnsafeMutableRawPointer) {
         guard let raw = frust_platform_view_commands_json(handle, ackedGeneration) else { return }
         defer { frust_string_free(raw) }
         let data = Data(bytes: raw, count: strlen(raw))
@@ -279,15 +291,38 @@ final class FrustViewHost {
         NSLog("frust-overlay: overlay \(overlayId) view above slot \(aboveSlot) (\(width)x\(height) px)")
     }
 
-    /// Tear one overlay down: Rust drops its surface (and any frame of it
-    /// waiting to be presented) BEFORE the view and its layer go away.
+    /// Tear one overlay down: hide its view now and detach it from Rust, which
+    /// drops its surface (and any frame of it waiting to be presented) without
+    /// waiting on the render thread. The view, and so its layer, stays until
+    /// that layer comes back from `frust_overlay_take_released`.
     private func applyDisposeOverlay(_ command: [String: Any]) {
         guard let overlayId = (command["overlay"] as? NSNumber)?.uint64Value else { return }
         orphanOverlays.remove(overlayId)
         guard let overlay = overlays.removeValue(forKey: overlayId) else { return }
-        if let handle { frust_overlay_detach(handle, overlayId) }
-        overlay.view.removeFromSuperview()
-        NSLog("frust-overlay: overlay \(overlayId) view removed")
+        guard let handle else {
+            overlay.view.removeFromSuperview()
+            return
+        }
+        overlay.view.isHidden = true
+        let layer = Unmanaged.passUnretained(overlay.view.metalLayer).toOpaque()
+        detachedOverlays[layer] = (id: overlayId, view: overlay.view)
+        frust_overlay_detach(handle, overlayId)
+    }
+
+    /// Remove every detached overlay view whose layer Rust handed back. Free
+    /// while none waits; otherwise drained until Rust has no more.
+    private func releaseDetachedOverlays(handle: UnsafeMutableRawPointer) {
+        guard !detachedOverlays.isEmpty else { return }
+        var released = [UnsafeMutableRawPointer?](repeating: nil, count: 8)
+        while true {
+            let count = Int(frust_overlay_take_released(handle, &released, UInt32(released.count)))
+            for case let layer? in released.prefix(count) {
+                guard let detached = detachedOverlays.removeValue(forKey: layer) else { continue }
+                detached.view.removeFromSuperview()
+                NSLog("frust-overlay: overlay \(detached.id) view removed")
+            }
+            if count < released.count { return }
+        }
     }
 
     /// Size an overlay's view and drawable.
