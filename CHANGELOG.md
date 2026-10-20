@@ -58,7 +58,9 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `unset` for an unset knob.
 - Keyboard input (breaking for exhaustive matches). `InputEvent::Shortcut` and
   `OverlayEventKind::{Shortcut, Key}` are new variants, so a downstream exhaustive `match` on either
-  enum needs an arm; `OverlayEntry` and `OverlayHit` gained a `keys` field, so a struct literal needs
+  enum needs an arm; `NamedKey` is now `#[non_exhaustive]` (and gains `F1`–`F24`, under Added), so
+  an exhaustive `match` on it needs a wildcard arm once — a variant added later no longer breaks it;
+  `OverlayEntry` and `OverlayHit` gained a `keys` field, so a struct literal needs
   it (`OverlayKeys::Pass` keeps the old behaviour). The new `Widget::is_focusable` and
   `Widget::visit_focus_children` are defaulted. `TextInput` now declines a chord it does not decode
   instead of consuming it, so app shortcuts reach the registry while a field has focus; it still
@@ -102,10 +104,18 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `runtime_policy_summary`, `thread_tuning_enabled`); `frust-reactive` now depends on `libc`.
 - Android: the additive `nativeFrameSync` and `nativePerfTrace` JNI exports, and a `frust-perf jni`
   line per 120 frames on a `perf-trace` build.
+- Startup sub-step stamps on the `frust-perf startup` line, printed after `adapter_ready` as
+  durations in ms: `engine_surface_ms` (with `device_create_ms`, a part of it, on its own),
+  `cache_seed_ms`, `caps_probe_ms`, `shader_modules_ms`, `warm_up_start_ms`, `engine_rest_ms` and
+  `install_rest_ms` split the renderer's first install, `font_system_ms` and `font_app_sync_ms`
+  split `TextContext::new`, and iOS adds `render_thread_start_ms` (the `perf` module of
+  `frust-shell-common` documents each). Behind them: `EngineRenderer::construction_timings`
+  (`ConstructionTimings`), `SurfaceRenderer::take_install_timings` (`InstallTimings`) and
+  `TextContext::new_with_timings`. Measurement only; no behaviour or order of work changed.
 - `frust-file-dialogs` (`plugins/file-dialogs`): native open, open-multiple and save-as dialogs on
   Linux (xdg-desktop-portal, `zenity` fallback), macOS and Windows through `rfd` 0.17; blocking
   calls meant for `frust::spawn_blocking`; Android, iOS and web report `Unsupported`. Listed in the
-  Add Plugin picker.
+  Add Plugin picker as the registry's twenty-second plugin.
 - `DesktopConfig::{with_initial_size, with_min_size, with_max_size, with_persist_window_state}`:
   initial and min/max window sizes, and opt-in persistence of window size, position and maximized
   state under the data directory, fitted to the connected monitors on restore (see
@@ -130,8 +140,9 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   ring. The baseline `Button`, `Checkbox`, `Radio`, `Slider` and `TextInput` are Tab stops; the
   first three activate on Space/Enter and `Slider` steps on the arrow keys and jumps on Home/End.
   shadcn's button draws its focus ring for keyboard focus only.
-- Function keys: `NamedKey::F1`–`F24` (new variants, so a downstream exhaustive `match` on
-  `NamedKey` needs an arm) with `NamedKey::function_number`/`NamedKey::function`; `Chord::parse`
+- Function keys: `NamedKey::F1`–`F24` (new variants; `NamedKey` is `#[non_exhaustive]` from this
+  release, so a downstream exhaustive `match` needs a wildcard arm once — see Changed) with
+  `NamedKey::function_number`/`NamedKey::function`; `Chord::parse`
   accepts `F1`–`F24` and `Chord::display` labels them (`F2`, `⌘F2`). The desktop and web shells
   deliver them; `F25` and up are still dropped, and `ChordParseError::UnsupportedKey` is no longer
   produced.
@@ -146,6 +157,11 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Fixed
 
+- A desktop wheel over a nested `ListView` or `ScrollView` reaches the innermost scroll surface
+  under the pointer instead of scrolling the enclosing page: every scroll surface now offers the
+  unmodified `Scroll` to its content first (`ScrollSurface::route_wheel`), a notch with no travel on
+  the surface's axis or at its pushed edge answers `Ignored` and passes outward, and `ScrollView`,
+  `ListView` and the sliver viewport share that entry (docs/WIDGETS_ARCHITECTURE.md § scrolling).
 - Tab traversal keeps focus when no grant lands: the session, `focus_epoch` and the keyboard-focus
   flag stay untouched and Tab is reported unhandled. A focusable root widget is now a stop.
 - The keyboard-focus flag behind `FocusRingPolicy::KeyboardOnly` clears on any claim honoured
