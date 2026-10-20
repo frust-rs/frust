@@ -6,7 +6,10 @@ use std::fmt;
 /// [`Key::Character`]. `Copy`, `Cut` and `Paste` are the hardware keys a shell maps straight onto
 /// [`EditCommand`]; `Insert` exists for the `Shift+Insert`/`Ctrl+Insert` clipboard chords;
 /// `F1`..`F24` are the function keys, which no widget consumes by default.
+///
+/// Variants may be added in a minor release, so a `match` outside `frust-core` needs a wildcard arm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum NamedKey {
     Enter,
     Backspace,
