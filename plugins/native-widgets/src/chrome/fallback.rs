@@ -855,16 +855,14 @@ struct TabFace {
     enabled: bool,
 }
 
-/// `item`'s face. `TabItem` exposes only its id outside `api::builders`, so
-/// the cell shows the id's spelling, no icon or badge, and is always enabled;
-/// the drawing below already handles every field.
+/// `item`'s face: its real title, icons, badge and enabled state.
 fn tab_face(item: &TabItem) -> TabFace {
     TabFace {
-        title: item.id().to_string(),
-        icon: None,
-        selected_icon: None,
-        badge: None,
-        enabled: true,
+        title: item.title().to_owned(),
+        icon: Some(item.icon().clone()),
+        selected_icon: item.selected_icon_ref().cloned(),
+        badge: item.badge_text().map(str::to_owned),
+        enabled: item.is_enabled(),
     }
 }
 
@@ -1472,7 +1470,7 @@ mod tests {
         assert_eq!(tabs.len(), 2);
         let (inbox, _) = tabs
             .iter()
-            .find(|(_, node)| node.label() == Some("inbox"))
+            .find(|(_, node)| node.label() == Some("Inbox"))
             .expect("the inbox tab node");
         assert!(
             tabs.iter()
@@ -1538,6 +1536,52 @@ mod tests {
         let dot = row.cells[1].badge_rect.expect("an empty badge is a dot");
         assert_eq!(dot.size(), Size::new(BADGE_DOT, BADGE_DOT));
         assert!(row.cells[0].badge_rect.unwrap().width() >= BADGE_HEIGHT);
+        assert!(!row.targets[1].enabled);
+        let down = InputEvent::Pointer(PointerEvent {
+            phase: PointerPhase::Down,
+            position: row.targets[1].rect.center(),
+            button: PointerButton::Primary,
+        });
+        let mut state = ();
+        let mut ctx = EventCtx::new(&mut state, Point::ZERO, size);
+        assert_eq!(row.event(&mut ctx, &down), EventResult::Ignored);
+    }
+
+    #[test]
+    fn a_row_built_from_real_tab_items_shows_their_faces() {
+        let _guard = slot_test_guard();
+        let items = [
+            TabItem::new("home", "Home", TabIcon::AppleSymbol("house".into())).badge("3"),
+            TabItem::new("inbox", "Inbox", TabIcon::AppleSymbol("tray".into()))
+                .selected_icon(TabIcon::AppleSymbol("tray.fill".into()))
+                .enabled(false),
+        ];
+        let faces: Vec<TabFace> = items.iter().map(tab_face).collect();
+        assert_eq!(faces[0].title, "Home");
+        assert_eq!(faces[0].badge.as_deref(), Some("3"));
+        assert!(faces[0].enabled);
+        assert_eq!(faces[1].title, "Inbox");
+        assert_eq!(
+            faces[1].selected_icon,
+            Some(TabIcon::AppleSymbol("tray.fill".into()))
+        );
+        assert!(!faces[1].enabled);
+
+        let mut row = tab_row(faces);
+        let theme = Theme::neutral();
+        let mut text = TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut text).with_theme(&theme);
+        let bc = BoxConstraints::new(Size::new(390.0, 0.0), Size::new(390.0, 200.0));
+        let size = row.layout(&mut lctx, &bc);
+        let mut rec = Rec::default();
+        row.paint(
+            &mut PaintCtx::new(Point::ZERO, size).with_theme(&theme),
+            &mut rec,
+        );
+        // Two titles, the "3" badge and two icon letters.
+        assert_eq!(rec.glyph_runs, 5);
+        assert!(row.cells[0].badge_rect.is_some());
+        assert!(row.cells[1].badge_rect.is_none());
         assert!(!row.targets[1].enabled);
         let down = InputEvent::Pointer(PointerEvent {
             phase: PointerPhase::Down,

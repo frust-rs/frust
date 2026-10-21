@@ -2136,6 +2136,31 @@ impl TabItem {
     pub fn id(&self) -> &TabId {
         &self.id
     }
+
+    /// The title shown under (or beside) the icon.
+    pub(crate) fn title(&self) -> &str {
+        &self.title
+    }
+
+    /// The icon shown while the tab is not selected.
+    pub(crate) fn icon(&self) -> &TabIcon {
+        &self.icon
+    }
+
+    /// The selected-state icon, if one was set (getter for [`Self::selected_icon`]).
+    pub(crate) fn selected_icon_ref(&self) -> Option<&TabIcon> {
+        self.selected_icon.as_ref()
+    }
+
+    /// The badge text, if any (getter for [`Self::badge`]).
+    pub(crate) fn badge_text(&self) -> Option<&str> {
+        self.badge.as_deref()
+    }
+
+    /// Whether the tab can be tapped (getter for [`Self::enabled`]).
+    pub(crate) fn is_enabled(&self) -> bool {
+        self.enabled
+    }
 }
 
 /// The SF Symbol name one icon slot carries on the wire (byte icons ride
