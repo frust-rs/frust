@@ -211,11 +211,11 @@ pub(super) fn placeholder<State: 'static>(
 /// The sized, slot-clipped [`RefusalBanner`] itself, with caller-chosen
 /// wording — [`placeholder`]'s body, shared with the compile-time
 /// no-platform-arm fallback ([`NativeSegmentedView`] on Android, see
-/// [`SEGMENTED_ARM`]), which refuses for a different reason and so says a
+/// [`SEGMENTED_ARM`]) and the scaffold's one-per-app refusal, which refuses for a different reason and so says a
 /// different thing. Logging is the caller's: each refusal reason logs once
 /// under its own `Once`.
 // erasure: keep result is a child of mixed-type if/else arms and AnyView-returning builders
-fn banner_placeholder<State: 'static>(
+pub(super) fn banner_placeholder<State: 'static>(
     size: Option<(f64, f64)>,
     label: String,
     description: String,
