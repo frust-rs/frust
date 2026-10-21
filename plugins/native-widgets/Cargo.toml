@@ -115,6 +115,10 @@ objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "UIMenu",
     "UIMenuElement",
     "UIAction",
+    # Scroll mirror: `setContentScrollView:forEdge:` needs `UIScrollView` + `UIGeometry`.
+    "UIScrollView",
+    "UIGeometry",
+    "UINavigationBarAppearance",
     "block2",
     "objc2-core-foundation",
     "objc2-quartz-core",
