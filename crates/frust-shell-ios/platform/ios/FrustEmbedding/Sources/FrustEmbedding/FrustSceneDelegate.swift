@@ -8,7 +8,14 @@ import UIKit
 //
 //     class SceneDelegate: FrustSceneDelegate {}
 //
-// Roots the window at the Frust render surface's view controller.
+// Roots the window at the Frust render surface's view controller, passed
+// through `makeWindowRootViewController(hosting:)` — the default returns it
+// unchanged, so the window root is that controller. The root may be any
+// container. `frustViewController` is the one frust surface: it stays valid
+// when a plugin re-roots the window at runtime (the native-widgets chrome may
+// place it under a tab bar), and such a re-rooting must leave
+// `frustViewController` where UIKit can lay it out. Deep links route to it,
+// never to the window root.
 //
 // Deep links: a frust app is scene-based (see the generated
 // `Info.plist`'s `UIApplicationSceneManifest`), so — per Apple's documented
@@ -31,12 +38,24 @@ import UIKit
 open class FrustSceneDelegate: UIResponder, UIWindowSceneDelegate {
     public var window: UIWindow?
 
+    /// The one frust surface this scene installs. Set in
+    /// `scene(_:willConnectTo:options:)` and independent of where the window
+    /// root sits, so deep links keep reaching the surface after a re-rooting.
+    public private(set) var frustViewController: FrustViewController?
+
     /// The root view controller this scene installs. Override to substitute an
     /// app's own `FrustViewController` subclass — which is also how an app opts
     /// into a translucent (Mode B) surface, by overriding
     /// `FrustViewController.translucentSurface`.
     open func makeRootViewController() -> FrustViewController {
         FrustViewController(nibName: nil, bundle: nil)
+    }
+
+    /// The window root for `controller`. Override to wrap the frust controller
+    /// in an app's own container (`UINavigationController`,
+    /// `UITabBarController`). The default returns `controller` unchanged.
+    open func makeWindowRootViewController(hosting controller: FrustViewController) -> UIViewController {
+        controller
     }
 
     open func scene(
@@ -47,7 +66,8 @@ open class FrustSceneDelegate: UIResponder, UIWindowSceneDelegate {
         guard let windowScene = scene as? UIWindowScene else { return }
         let window = UIWindow(windowScene: windowScene)
         let controller = makeRootViewController()
-        window.rootViewController = controller
+        frustViewController = controller
+        window.rootViewController = makeWindowRootViewController(hosting: controller)
         self.window = window
         window.makeKeyAndVisible()
 
@@ -65,7 +85,7 @@ open class FrustSceneDelegate: UIResponder, UIWindowSceneDelegate {
     /// practice.
     open func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
         guard let url = URLContexts.first?.url,
-            let controller = window?.rootViewController as? FrustViewController
+            let controller = frustViewController
         else { return }
         controller.handleDeepLink(url)
     }
