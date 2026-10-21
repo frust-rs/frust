@@ -207,6 +207,73 @@ impl Editor {
 
 ---
 
+## 1c. App chrome (`native_scaffold`)
+
+`native_scaffold(body)` puts the host's own bars around your body: a top bar
+(title, subtitle, leading item, actions, pull-down menus) and a bottom tab bar,
+published as one spec to the platform host (or, on a target with no chrome arm,
+to frust-drawn fallback bars). It is one declarative tree inside
+`Component::build`:
+
+```rust
+use frust::{Component, Get, RwSignal, Set, View, text};
+use frust_native_widgets::{ActionItem, Leading, TabIcon, TabId, TabItem, native_scaffold};
+
+#[derive(Default)]
+struct Root;
+
+struct RootState {
+    tab: RwSignal<String>,
+}
+
+impl Root {
+    fn body(tab: String) -> impl View<RootState> {
+        text(format!("Showing {tab}"))
+    }
+
+    fn tabs() -> Vec<TabItem> {
+        vec![
+            TabItem::new("home", "Home", TabIcon::AppleSymbol("house".into())),
+            TabItem::new("inbox", "Inbox", TabIcon::AppleSymbol("tray".into())),
+        ]
+    }
+}
+
+impl Component for Root {
+    type State = RootState;
+
+    fn init(&self) -> RootState {
+        RootState { tab: RwSignal::new("home".to_string()) }
+    }
+
+    fn build(&self, state: &mut RootState) -> impl View<RootState> {
+        let tab = state.tab;
+        native_scaffold(Self::body(tab.get()))
+            .tabs(Self::tabs(), tab.get())
+            .title("Home")
+            .leading(Leading::Back)
+            .actions(vec![ActionItem::new("add", "Add")])
+            .on_tab_select(move |id: TabId| tab.set(id.to_string()))
+    }
+}
+
+frust::app!(Root);
+```
+
+**Controlled, like `native_tab_bar`:** the bars never navigate. A tap reports
+(`.on_tab_select`, `.on_tab_reselect`, `.on_action`, `.on_menu`, `.on_back`, or
+every event through `.events_into(signal)`); you route, and the confirmed
+`selected` comes back as the next build's props. Handlers take no `&mut State`
+— write a signal or drive a `NavigatorController`. `.scroll(controller)` mirrors
+the body's scroll position to the bars (changed values only, one publish per
+frame). The body renders full-bleed and uses the facade's `safe_area` as usual:
+the host already reports the bars through the window insets (iOS) or shrinks the
+surface (Android), so do not pad for them yourself. A second live scaffold
+publishes nothing and shows a one-line refusal above its body — one
+`native_scaffold` per app.
+
+---
+
 ## 1b. Native presentations (alerts, sheets)
 
 A native **alert** is not a control in the tree: it is a request answered by
