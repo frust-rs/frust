@@ -53,6 +53,21 @@
 //! and never for a programmatic `selectedItem` write, so the *No echo guard*
 //! rule below holds for it too.
 //!
+//! The app chrome (`crate::apple::chrome`) is one more user of the same
+//! class: one target per installed chrome, retained by it, is the
+//! `UITabBarController`'s delegate and every chrome bar button's target, and
+//! reports through `crate::chrome`'s generation-stamped slot rather than a
+//! slot id (it carries slot `0`, never dispatched):
+//!
+//! | Selector | Sender | Reports |
+//! |---|---|---|
+//! | `tabBarController:shouldSelectViewController:` | a chrome page | `TabSelected`/`TabReselected`, answering NO |
+//! | `handleChromeAction:` | a trailing `UIBarButtonItem` (tag = spec index) | `ActionTapped` |
+//! | `handleChromeBack:` | the leading back item | `BackPressed` |
+//!
+//! Menu items are `UIAction`s whose handler blocks report `MenuItemChosen`
+//! themselves; the bare tab bar's `UITabBarDelegate` path is unchanged.
+//!
 //! A public `NativeComponent` reaches the same class through
 //! `FrustNativeControlTarget::attach_component` (called by
 //! `crate::component::ComponentCtx::attach_listener`), which wires the same
@@ -156,7 +171,9 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 #[cfg(feature = "frust-api")]
-use objc2_ui_kit::UIView;
+use objc2_ui_kit::{
+    UIBarButtonItem, UITabBarController, UITabBarControllerDelegate, UIView, UIViewController,
+};
 use objc2_ui_kit::{
     UIButton, UIControl, UIControlEvents, UIDatePicker, UISegmentedControl, UISlider, UIStepper,
     UISwitch, UITabBar, UITabBarDelegate, UITabBarItem,
@@ -223,6 +240,23 @@ define_class!(
             };
             let kind = tap_kind(self.ivars().showing_tab.get(), index);
             self.dispatch(kind, pack_index(tag), "tabBar:didSelectItem:");
+        }
+    }
+
+    // The app chrome's tab bar controller (module doc's chrome table).
+    #[cfg(feature = "frust-api")]
+    unsafe impl UITabBarControllerDelegate for FrustNativeControlTarget {
+        /// Report a chrome tab tap and refuse it: the bar never moves itself,
+        /// the app's republished `selected` does. `true` only for a
+        /// controller that is no chrome page (the system "More" list).
+        #[unsafe(method(tabBarController:shouldSelectViewController:))]
+        fn tab_bar_controller_should_select(
+            &self,
+            _tabs: &UITabBarController,
+            controller: &UIViewController,
+        ) -> bool {
+            let which = "tabBarController:shouldSelectViewController:";
+            guarded(which, false, || super::chrome::tab_tapped(controller))
         }
     }
 
@@ -353,8 +387,33 @@ define_class!(
             };
             self.dispatch(EVENT_KIND_DATE, pack_date(date), "handleDateValueChanged:");
         }
+
+        /// A chrome trailing action, by its item's tag (the spec index).
+        #[cfg(feature = "frust-api")]
+        #[unsafe(method(handleChromeAction:))]
+        fn handle_chrome_action(&self, sender: &UIBarButtonItem) {
+            let tag = sender.tag();
+            guarded("handleChromeAction:", (), || super::chrome::action_tapped(tag));
+        }
+
+        /// The chrome back item.
+        #[cfg(feature = "frust-api")]
+        #[unsafe(method(handleChromeBack:))]
+        fn handle_chrome_back(&self, _sender: &UIBarButtonItem) {
+            guarded("handleChromeBack:", (), super::chrome::back_tapped);
+        }
     }
 );
+
+/// Run a chrome callback under `catch_unwind`: a panic is logged, its event
+/// dropped, and UIKit gets `fallback`.
+#[cfg(feature = "frust-api")]
+fn guarded<R>(which: &str, fallback: R, f: impl FnOnce() -> R) -> R {
+    catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|_| {
+        log::warn!("frust-native-widgets: panic caught in {which} — chrome event dropped");
+        fallback
+    })
+}
 
 impl FrustNativeControlTarget {
     /// A target for `slot`, not yet wired to any control —
@@ -622,6 +681,43 @@ impl FrustNativeControlTarget {
     /// [`Self::attach_tab_bar`]'s inverse — called from `TabBar::dispose`.
     pub(crate) fn detach_tab_bar(&self, view: &UITabBar) {
         view.setDelegate(None);
+    }
+
+    /// The app chrome's target (module doc's chrome table); its slot is unused.
+    #[cfg(feature = "frust-api")]
+    pub(crate) fn chrome_target(mtm: MainThreadMarker) -> Retained<Self> {
+        Self::new(mtm, 0)
+    }
+
+    /// Make this target `tabs`' delegate. The delegate is weak: the chrome
+    /// retains `self`.
+    #[cfg(feature = "frust-api")]
+    pub(crate) fn attach_tab_bar_controller(&self, tabs: &UITabBarController) {
+        tabs.setDelegate(Some(ProtocolObject::from_ref(self)));
+    }
+
+    /// [`Self::attach_tab_bar_controller`]'s inverse, at chrome dispose.
+    #[cfg(feature = "frust-api")]
+    pub(crate) fn detach_tab_bar_controller(&self, tabs: &UITabBarController) {
+        tabs.setDelegate(None);
+    }
+
+    /// Make this target `item`'s action: `handleChromeBack:` for the back
+    /// item, else `handleChromeAction:`. The target is weak, as above.
+    #[cfg(feature = "frust-api")]
+    pub(crate) fn attach_bar_item(&self, item: &UIBarButtonItem, back: bool) {
+        let action = if back {
+            sel!(handleChromeBack:)
+        } else {
+            sel!(handleChromeAction:)
+        };
+        let target: &AnyObject = self;
+        // SAFETY: `target` is this live target, which implements `action`
+        // (a valid selector), and the chrome retains it while `item` can fire.
+        unsafe {
+            item.setTarget(Some(target));
+            item.setAction(Some(action));
+        }
     }
 
     /// Build a target for `slot` and wire it onto `view` for whichever of the

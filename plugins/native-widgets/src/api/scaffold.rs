@@ -28,7 +28,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use frust::authoring::{build_child, rebuild_child, route_event_single, teardown_child};
-use frust::{RwSignal, ScrollController, ScrollInfo, ScrollSubscription, Set};
+use frust::{RwSignal, ScrollController, ScrollInfo, ScrollSubscription, Set, Theme, use_context};
 use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
     LayoutCtx, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, View, Widget, WindowInsets,
@@ -37,6 +37,7 @@ use kurbo::{Point, Size};
 
 use super::builders::{TabId, TabItem, banner_placeholder};
 use super::signals::{ChromeHandlers, on_chrome};
+use super::theme;
 use crate::chrome::fallback::{
     fallback_tab_row, fallback_top_bar, teardown_tab_row, teardown_top_bar,
 };
@@ -216,15 +217,22 @@ impl<V> NativeScaffoldView<V> {
         self
     }
 
-    /// The spec this builder publishes.
+    /// The spec this builder publishes, its brightness from the ambient theme.
     fn spec(&self) -> ChromeSpec {
         ChromeSpec {
             tabs: self.tabs.clone(),
             selected: self.selected.clone(),
             top: self.top.clone(),
             scroll: self.scroll.as_ref().and_then(controller_state),
+            dark: ambient_dark(),
         }
     }
+}
+
+/// The app theme's brightness through the controls' fold ([`theme::is_dark`]);
+/// light when no [`Theme`] is threaded, as the controls degrade.
+fn ambient_dark() -> bool {
+    use_context::<Theme>().as_ref().is_some_and(theme::is_dark)
 }
 
 /// The controller's current position, if a surface is attached.
@@ -1056,6 +1064,41 @@ mod tests {
         assert_eq!(kept, None);
         assert_eq!(chrome::live_generation(), None);
         teardown(&view, &mut first);
+    }
+
+    #[test]
+    fn the_spec_carries_the_ambient_theme_brightness() {
+        use frust::Brightness;
+        use std::cell::Cell;
+
+        thread_local! {
+            static SEEN: Cell<Option<bool>> = const { Cell::new(None) };
+        }
+        struct Themed(Option<Brightness>);
+        impl frust::Component for Themed {
+            type State = ();
+            fn init(&self) {
+                if let Some(brightness) = self.0 {
+                    frust::provide_context(Theme::neutral().with_brightness(brightness));
+                }
+            }
+            fn build(&self, _: &mut ()) -> impl View<()> {
+                SEEN.with(|seen| seen.set(Some(scaffold().spec().dark)));
+                text("body")
+            }
+        }
+        let themes = [
+            (Some(Brightness::Dark), true),
+            (Some(Brightness::Light), false),
+            (None, false),
+        ];
+        for (brightness, dark) in themes {
+            let mut counter = 0u64;
+            let view = frust::component(Themed(brightness));
+            let _ = View::<()>::build(&view, &mut BuildCtx::new(&mut counter));
+            assert_eq!(SEEN.with(Cell::take), Some(dark), "{brightness:?}");
+        }
+        assert!(!scaffold().spec().dark, "no owner, no theme: light");
     }
 
     #[test]

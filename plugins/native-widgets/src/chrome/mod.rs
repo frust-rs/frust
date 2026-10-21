@@ -23,7 +23,13 @@
 //! - **Controlled.** The bars never navigate: [`deliver`] decodes a
 //!   `(kind, detail)` report against the live spec into a [`ChromeEvent`]
 //!   for the registered sink, and the app confirms by publishing again.
-//!   Reports stamped with a withdrawn generation are dropped.
+//!   Reports stamped with a withdrawn generation are dropped, and so is a tap
+//!   on a disabled tab or menu item.
+//! - **Resolved where it was drawn.** An arm whose bars lag the slot (iOS
+//!   applies on a later main-queue turn) resolves a tap against the spec it
+//!   shows ([`resolve_tap`]) and hands the id-based event to [`deliver_event`],
+//!   which re-encodes it against the live spec, so a reorder in between cannot
+//!   retarget it and an item that is gone or disabled by then is dropped.
 //!
 //! The module is behind `frust-api` because the spec reuses the api layer's
 //! [`TabItem`]/[`TabIcon`]/[`TabId`]; it compiles on every target. iOS
@@ -66,6 +72,9 @@ pub(crate) struct ChromeSpec {
     pub(crate) selected: Option<TabId>,
     pub(crate) top: Option<TopBarSpec>,
     pub(crate) scroll: Option<ScrollState>,
+    /// The app theme's brightness (`crate::api::theme::is_dark`), which an
+    /// arm styles its bars with; the fallback bars read the theme directly.
+    pub(crate) dark: bool,
 }
 
 /// The top bar: title, optional subtitle, leading item and trailing actions.
@@ -265,11 +274,12 @@ pub(crate) fn encode_event(spec: &ChromeSpec, event: &ChromeEvent) -> Option<(i3
     match event {
         ChromeEvent::TabSelected(id) => Some((
             EVENT_KIND_CHROME_TAB,
-            pack_chrome_tab(tab_index(id)?, false),
+            pack_chrome_tab(tab_index(id)?, false)?,
         )),
-        ChromeEvent::TabReselected(id) => {
-            Some((EVENT_KIND_CHROME_TAB, pack_chrome_tab(tab_index(id)?, true)))
-        }
+        ChromeEvent::TabReselected(id) => Some((
+            EVENT_KIND_CHROME_TAB,
+            pack_chrome_tab(tab_index(id)?, true)?,
+        )),
         ChromeEvent::ActionTapped(id) => Some((
             EVENT_KIND_CHROME_ACTION,
             pack_index(action_index(id)? as isize),
@@ -290,7 +300,8 @@ pub(crate) fn decode_event(spec: &ChromeSpec, kind: i32, detail: i64) -> Option<
     match kind {
         EVENT_KIND_CHROME_TAB => {
             let (index, reselect) = unpack_chrome_tab(detail)?;
-            let id = spec.tabs.get(index)?.id().clone();
+            let tab = spec.tabs.get(index).filter(|tab| tab.is_enabled())?;
+            let id = tab.id().clone();
             Some(if reselect {
                 ChromeEvent::TabReselected(id)
             } else {
@@ -304,7 +315,7 @@ pub(crate) fn decode_event(spec: &ChromeSpec, kind: i32, detail: i64) -> Option<
         EVENT_KIND_CHROME_MENU => {
             let (a, m) = unpack_chrome_menu(detail)?;
             let action = actions(spec).get(a)?;
-            let item = action.menu.as_ref()?.get(m)?;
+            let item = action.menu.as_ref()?.get(m).filter(|item| item.enabled)?;
             Some(ChromeEvent::MenuItemChosen(
                 action.id.clone(),
                 item.id.clone(),
@@ -313,6 +324,45 @@ pub(crate) fn decode_event(spec: &ChromeSpec, kind: i32, detail: i64) -> Option<
         EVENT_KIND_CHROME_BACK => (detail == 0).then_some(ChromeEvent::BackPressed),
         _ => None,
     }
+}
+
+/// One tap on an arm's on-screen chrome, by position in the spec it was
+/// built from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(any(test, target_os = "ios")), allow(dead_code))]
+pub(crate) enum ChromeTap {
+    /// The tab at this index of `spec.tabs`.
+    Tab(usize),
+    /// The trailing action at this index.
+    Action(usize),
+    /// Item `.1` of action `.0`'s pull-down menu.
+    Menu(usize, usize),
+    /// The leading back item.
+    Back,
+}
+
+/// What `tap` requests, against the `spec` the tapped bar was built from: a
+/// tab tap is a reselect when it lands on the app-confirmed `selected` tab
+/// and a selection otherwise. `None` when `spec` has no such item, or it is
+/// disabled, or the back tap meets no back item.
+#[cfg_attr(not(any(test, target_os = "ios")), allow(dead_code))]
+pub(crate) fn resolve_tap(spec: &ChromeSpec, tap: ChromeTap) -> Option<ChromeEvent> {
+    let (kind, detail) = match tap {
+        ChromeTap::Tab(index) => {
+            let reselect = spec.selected.as_ref() == Some(spec.tabs.get(index)?.id());
+            (EVENT_KIND_CHROME_TAB, pack_chrome_tab(index, reselect)?)
+        }
+        ChromeTap::Action(index) => (
+            EVENT_KIND_CHROME_ACTION,
+            pack_index(isize::try_from(index).ok()?),
+        ),
+        ChromeTap::Menu(action, item) => (EVENT_KIND_CHROME_MENU, pack_chrome_menu(action, item)?),
+        ChromeTap::Back => {
+            let top = spec.top.as_ref()?;
+            (top.leading == Leading::Back).then_some((EVENT_KIND_CHROME_BACK, 0))?
+        }
+    };
+    decode_event(spec, kind, detail)
 }
 
 // --- the slot ---------------------------------------------------------------
@@ -515,6 +565,23 @@ impl<H: ChromeHost> ChromeSlot<H> {
         Some((event, Arc::clone(live.sink.as_ref()?)))
     }
 
+    /// [`Self::route`] for an id-based `event` an arm resolved against the
+    /// spec it shows: re-encoded against the live spec first, so it reaches
+    /// the sink only while that spec still carries the same, enabled item.
+    #[cfg_attr(not(any(test, target_os = "ios")), allow(dead_code))]
+    pub(crate) fn route_event(
+        &self,
+        generation: u64,
+        event: &ChromeEvent,
+    ) -> Option<(ChromeEvent, ChromeSink)> {
+        let live = self
+            .live
+            .as_ref()
+            .filter(|live| live.generation.0 == generation)?;
+        let (kind, detail) = encode_event(&live.spec, event)?;
+        self.route(generation, kind, detail)
+    }
+
     /// The live generation, if any.
     #[cfg(test)]
     pub(crate) fn generation(&self) -> Option<ChromeGeneration> {
@@ -610,6 +677,19 @@ pub(crate) fn set_sink(generation: ChromeGeneration, sink: ChromeSink) -> bool {
 /// Answers whether it was delivered.
 pub(crate) fn deliver(generation: u64, kind: i32, detail: i64) -> bool {
     let routed = lock_slot().route(generation, kind, detail);
+    hand_over(routed)
+}
+
+/// An arm's already-resolved report — see [`ChromeSlot::route_event`].
+/// Answers whether it was delivered.
+#[cfg_attr(not(any(test, target_os = "ios")), allow(dead_code))]
+pub(crate) fn deliver_event(generation: u64, event: &ChromeEvent) -> bool {
+    let routed = lock_slot().route_event(generation, event);
+    hand_over(routed)
+}
+
+/// Call the sink with the routed event; the slot lock is already released.
+fn hand_over(routed: Option<(ChromeEvent, ChromeSink)>) -> bool {
     match routed {
         Some((event, sink)) => {
             sink(event);
@@ -650,6 +730,7 @@ mod tests {
                 large_title: true,
             }),
             scroll: None,
+            dark: false,
         }
     }
 
@@ -962,6 +1043,111 @@ mod tests {
     }
 
     #[test]
+    fn a_disabled_tab_or_menu_item_decodes_to_none() {
+        let mut spec = spec();
+        spec.tabs[1] = spec.tabs[1].clone().enabled(false);
+        let actions = &mut spec.top.as_mut().unwrap().actions;
+        actions[1] = ActionItem::new("more", "More").menu(vec![
+            MenuItem::new("share", "Share"),
+            MenuItem::new("delete", "Delete").enabled(false),
+        ]);
+        let tab = pack_chrome_tab(1, false).expect("packable");
+        assert_eq!(decode_event(&spec, EVENT_KIND_CHROME_TAB, tab), None);
+        let delete = pack_chrome_menu(1, 1).expect("packable");
+        assert_eq!(decode_event(&spec, EVENT_KIND_CHROME_MENU, delete), None);
+        assert_eq!(
+            decode_event(&spec, EVENT_KIND_CHROME_TAB, 0),
+            Some(ChromeEvent::TabSelected(TabId::new("home"))),
+            "the enabled siblings still decode"
+        );
+        assert_eq!(
+            decode_event(&spec, EVENT_KIND_CHROME_MENU, 1000),
+            Some(ChromeEvent::MenuItemChosen(
+                ActionId::new("more"),
+                MenuItemId::new("share")
+            ))
+        );
+    }
+
+    #[test]
+    fn a_tap_resolves_against_the_confirmed_selection() {
+        let spec = spec();
+        let cases = [
+            (
+                ChromeTap::Tab(0),
+                Some(ChromeEvent::TabReselected(TabId::new("home"))),
+            ),
+            (
+                ChromeTap::Tab(1),
+                Some(ChromeEvent::TabSelected(TabId::new("inbox"))),
+            ),
+            (ChromeTap::Tab(2), None),
+            (
+                ChromeTap::Action(0),
+                Some(ChromeEvent::ActionTapped(ActionId::new("add"))),
+            ),
+            (ChromeTap::Action(2), None),
+            (
+                ChromeTap::Menu(1, 1),
+                Some(ChromeEvent::MenuItemChosen(
+                    ActionId::new("more"),
+                    MenuItemId::new("delete"),
+                )),
+            ),
+            (ChromeTap::Menu(0, 0), None),
+            (ChromeTap::Menu(1, 1000), None),
+            (ChromeTap::Back, Some(ChromeEvent::BackPressed)),
+        ];
+        for (tap, event) in cases {
+            assert_eq!(resolve_tap(&spec, tap), event, "{tap:?}");
+        }
+        let mut unconfirmed = spec.clone();
+        unconfirmed.selected = Some(TabId::new("gone"));
+        assert_eq!(
+            resolve_tap(&unconfirmed, ChromeTap::Tab(0)),
+            Some(ChromeEvent::TabSelected(TabId::new("home"))),
+            "no confirmed tab: every tap is a selection"
+        );
+        unconfirmed.top.as_mut().unwrap().leading = Leading::Symbol("person".into());
+        assert_eq!(resolve_tap(&unconfirmed, ChromeTap::Back), None);
+        assert_eq!(resolve_tap(&ChromeSpec::default(), ChromeTap::Back), None);
+    }
+
+    #[test]
+    fn a_resolved_event_is_rerouted_by_id_against_the_live_spec() {
+        let mut slot = slot();
+        let generation = installed(&mut slot);
+        assert!(slot.set_sink(generation, Arc::new(|_| {})));
+        let shown = spec();
+        let tapped = resolve_tap(&shown, ChromeTap::Action(0)).expect("resolved");
+        let mut reordered = spec();
+        reordered.top.as_mut().unwrap().actions.reverse();
+        slot.publish(Some(generation), reordered.clone());
+        let routed = slot
+            .route_event(generation.get(), &tapped)
+            .map(|(event, _)| event);
+        assert_eq!(routed, Some(tapped.clone()), "the id survives the reorder");
+        let mut gone = reordered;
+        gone.top
+            .as_mut()
+            .unwrap()
+            .actions
+            .retain(|action| action.id().as_str() != "add");
+        gone.tabs[1] = gone.tabs[1].clone().enabled(false);
+        slot.publish(Some(generation), gone);
+        assert!(slot.route_event(generation.get(), &tapped).is_none());
+        let inbox = ChromeEvent::TabSelected(TabId::new("inbox"));
+        assert!(
+            slot.route_event(generation.get(), &inbox).is_none(),
+            "disabled since"
+        );
+        assert!(
+            slot.route_event(generation.get() + 1, &ChromeEvent::BackPressed)
+                .is_none()
+        );
+    }
+
+    #[test]
     fn routing_drops_a_withdrawn_generation_and_needs_a_sink() {
         let mut slot = slot();
         let generation = installed(&mut slot);
@@ -980,7 +1166,7 @@ mod tests {
             .route(
                 generation.get(),
                 EVENT_KIND_CHROME_TAB,
-                pack_chrome_tab(1, false),
+                pack_chrome_tab(1, false).expect("packable"),
             )
             .expect("routed");
         sink(event);
@@ -1040,7 +1226,13 @@ mod tests {
                 PublishOutcome::Unchanged(generation)
             ))
         );
+        assert!(deliver_event(generation.get(), &ChromeEvent::BackPressed));
+        assert_eq!(
+            republished.lock().unwrap().take().map(|(event, _)| event),
+            Some(ChromeEvent::BackPressed)
+        );
         assert!(withdraw(generation));
         assert!(!deliver(generation.get(), EVENT_KIND_CHROME_BACK, 0));
+        assert!(!deliver_event(generation.get(), &ChromeEvent::BackPressed));
     }
 }

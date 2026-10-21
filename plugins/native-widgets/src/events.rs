@@ -33,8 +33,8 @@
 //! Kinds 9-12 ([`EVENT_KIND_CHROME_TAB`] .. [`EVENT_KIND_CHROME_BACK`]) are
 //! app chrome's (`crate::chrome`): host-level bars, not `platform_view` slots,
 //! so they are decoded against the published chrome spec rather than a
-//! slot's control. No arm emits them yet; their Kotlin twins keep the table
-//! whole.
+//! slot's control. The iOS arm and the fallback bars emit them; their Kotlin
+//! twins keep the table whole until the Android arm lands.
 //!
 //! `FrustNativeListener` implements every listener interface
 //! a v1 control needs — `View.OnClickListener`,
@@ -234,9 +234,11 @@ pub(crate) fn unpack_index(detail: i64) -> Option<usize> {
 
 /// Pack an app-chrome tab index plus whether it was a reselect (a tap on
 /// the showing tab) into `detail` — [`EVENT_KIND_CHROME_TAB`]'s whole
-/// payload: the index in the low 32 bits, the flag in bit 32.
-pub(crate) fn pack_chrome_tab(index: usize, reselect: bool) -> i64 {
-    (index as i64 & 0xFFFF_FFFF) | ((reselect as i64) << 32)
+/// payload: the index in the low 32 bits, the flag in bit 32. `None` for an
+/// index above `u32::MAX`, which the field cannot carry.
+pub(crate) fn pack_chrome_tab(index: usize, reselect: bool) -> Option<i64> {
+    let index = u32::try_from(index).ok()?;
+    Some(i64::from(index) | (i64::from(reselect) << 32))
 }
 
 /// [`pack_chrome_tab`]'s inverse: `None` for a negative `detail` or any bit
@@ -448,13 +450,24 @@ mod tests {
     fn a_chrome_tab_round_trips_and_stray_bits_decode_to_none() {
         for (index, reselect) in [(0, false), (0, true), (3, false), (15, true)] {
             assert_eq!(
-                unpack_chrome_tab(pack_chrome_tab(index, reselect)),
+                pack_chrome_tab(index, reselect).and_then(unpack_chrome_tab),
                 Some((index, reselect))
             );
         }
-        assert_eq!(pack_chrome_tab(2, true), (1 << 32) | 2);
+        assert_eq!(pack_chrome_tab(2, true), Some((1 << 32) | 2));
         assert_eq!(unpack_chrome_tab(-1), None);
         assert_eq!(unpack_chrome_tab(1 << 33), None);
+    }
+
+    #[test]
+    fn a_chrome_tab_index_past_u32_is_refused_not_masked() {
+        let top = u32::MAX as usize;
+        assert_eq!(pack_chrome_tab(top, false), Some(i64::from(u32::MAX)));
+        // Only a 64-bit `usize` can name the first index past the field.
+        if let Ok(past) = usize::try_from(u64::from(u32::MAX) + 1) {
+            assert_eq!(pack_chrome_tab(past, false), None, "not masked to 0");
+            assert_eq!(pack_chrome_tab(past, true), None);
+        }
     }
 
     #[test]

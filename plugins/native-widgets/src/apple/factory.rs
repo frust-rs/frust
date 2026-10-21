@@ -196,6 +196,9 @@ extern_protocol!(
     /// `createViewWithParamsJson:` taking an `NSString` and returning a
     /// **nonnull** `UIView` (the module doc's *failure contract* is what keeps
     /// that "nonnull" honest).
+    // The `# Safety` section above is present; `extern_protocol!` re-attaches
+    // the docs where clippy's lint does not read them (objc2 allows it too).
+    #[allow(clippy::missing_safety_doc)]
     #[name = "FrustPlatformViewFactory"]
     pub(crate) unsafe trait FrustPlatformViewFactory: NSObjectProtocol {
         #[unsafe(method(createViewWithParamsJson:))]
@@ -429,10 +432,10 @@ fn update_control(mtm: MainThreadMarker, params: &str) {
                 // siblings. `Unchanged` re-pins too: the brightness lives on
                 // the wire, not in the diffed `Props`, so a props-equal
                 // update can still carry a new brightness.
-                if let Ok((_, slot)) = Params::new(params).identity() {
-                    if let Some(instance) = runtime.instance(slot) {
-                        theme::apply_user_interface_style(instance.view().view(mtm), dark);
-                    }
+                if let Ok((_, slot)) = Params::new(params).identity()
+                    && let Some(instance) = runtime.instance(slot)
+                {
+                    theme::apply_user_interface_style(instance.view().view(mtm), dark);
                 }
             }
             Ok(UpdateOutcome::UnknownSlot) => {
