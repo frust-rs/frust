@@ -50,14 +50,40 @@
 //! selected page, and a page forwards to the frust controller while it holds
 //! it, so `set_system_ui_mode` keeps working under the chrome.
 //!
+//! # Events
+//!
+//! One `FrustNativeControlTarget` per install, held in the chrome state, is
+//! the tab bar controller's delegate and the target of the back and plain
+//! action items (set as each item is built); a menu item's `UIAction` block
+//! captures its action and item indices. Each tap is resolved against the
+//! spec UIKit shows (`crate::chrome::resolve_tap`, a tab against the
+//! app-confirmed `selected`) and handed to `crate::chrome::deliver_event`,
+//! never with a [`CHROME`] borrow held (`try_borrow`: an apply in progress
+//! has taken the state, and the tap is dropped). A tab tap answers NO, so
+//! UIKit never switches tabs itself.
+//!
+//! The frust UI thread is the main thread on iOS: taps and applies both run
+//! there, so a tap always resolves against the spec on screen, and the
+//! by-id re-check covers the one main-queue turn an apply trails its
+//! publish. That is why iOS needs no spec-revision stamp (the Android arm,
+//! whose delivery may hop threads, gets one).
+//!
+//! # Brightness
+//!
+//! `ChromeSpec::dark` is pinned with `overrideUserInterfaceStyle` on the tab
+//! bar and every navigation bar, not on the tab bar controller: a controller
+//! override reaches the contained frust controller, whose trait changes
+//! feed the app theme's brightness and would pin it. The bars are restyled
+//! on install, for every new page, and on any apply whose spec flips it.
+//!
 //! # Limitations
 //!
 //! `native-chrome-single-surface-containment`: one frust surface serves every
 //! tab, and the navigation controllers have no stack (no native push
 //! animation; `Leading::Back` is a custom item reporting `BackPressed`). The
-//! bars inherit the window's trait collection rather than a folded theme
-//! brightness (the spec carries none). Tab, action, menu and back events and
-//! the scroll mirror are not wired here.
+//! scroll mirror is not wired here. `ChromeDiff` has no brightness field yet,
+//! so a publish that changes only `dark` is an unchanged one to the slot and
+//! reaches the bars with the next applied diff.
 
 use std::cell::RefCell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -77,11 +103,13 @@ use objc2_ui_kit::{
     UIView, UIViewAutoresizing, UIViewContentMode, UIViewController, UIWindow, UIWindowScene,
 };
 
+use super::FrustNativeControlTarget;
+use super::theme::apply_user_interface_style;
 use crate::api::{TabIcon, TabId, TabItem};
 use crate::chrome::host::ChromeField;
 use crate::chrome::{
-    ActionItem, ChromeDiff, ChromeError, ChromeGeneration, ChromeHost, ChromeSpec, Leading,
-    MenuItem, TopBarSpec,
+    self, ActionItem, ChromeDiff, ChromeError, ChromeGeneration, ChromeHost, ChromeSpec, ChromeTap,
+    Leading, MenuItem, TopBarSpec, resolve_tap,
 };
 use crate::controls::tab_bar::icon_decode_scale;
 
@@ -275,7 +303,10 @@ struct Chrome {
     host: Retained<UIView>,
     tabs: Retained<UITabBarController>,
     pages: Vec<Page>,
-    top: Option<TopBarSpec>,
+    /// The spec UIKit shows: what taps resolve against.
+    spec: ChromeSpec,
+    /// The delegate and bar-item target; both references to it are weak.
+    target: Retained<FrustNativeControlTarget>,
 }
 
 impl Chrome {
@@ -305,9 +336,12 @@ impl Chrome {
             host,
             tabs: UITabBarController::new(mtm),
             pages: Vec::new(),
-            top: spec.top.clone(),
+            spec: spec.clone(),
+            target: FrustNativeControlTarget::chrome_target(mtm),
         };
+        chrome.target.attach_tab_bar_controller(&chrome.tabs);
         chrome.sync_pages(mtm, spec);
+        apply_user_interface_style(&chrome.tabs.tabBar(), spec.dark);
         // The root swap takes the `FrustView` out of the window; its siblings
         // stay until moved, in their old order, into the host view.
         window.setRootViewController(Some(&chrome.tabs));
@@ -324,7 +358,8 @@ impl Chrome {
 
     fn apply(&mut self, mtm: MainThreadMarker, diff: &ChromeDiff<'_>) {
         let spec = diff.spec;
-        self.top = spec.top.clone();
+        let restyle = self.spec.dark != spec.dark;
+        self.spec = spec.clone();
         if diff.contains(ChromeField::Tabs) {
             self.sync_pages(mtm, spec);
         }
@@ -332,7 +367,14 @@ impl Chrome {
             self.select(spec);
         }
         for page in &self.pages {
-            apply_top(mtm, page, self.top.as_ref(), |field| diff.contains(field));
+            let top = self.spec.top.as_ref();
+            apply_top(mtm, page, top, &self.target, |field| diff.contains(field));
+        }
+        if restyle {
+            apply_user_interface_style(&self.tabs.tabBar(), spec.dark);
+            for page in &self.pages {
+                apply_user_interface_style(&page.nav.navigationBar(), spec.dark);
+            }
         }
     }
 
@@ -350,7 +392,8 @@ impl Chrome {
                 Some(index) => old.remove(index),
                 None => {
                     let page = Page::new(mtm, id);
-                    apply_top(mtm, &page, self.top.as_ref(), |_| true);
+                    apply_top(mtm, &page, self.spec.top.as_ref(), &self.target, |_| true);
+                    apply_user_interface_style(&page.nav.navigationBar(), self.spec.dark);
                     page
                 }
             };
@@ -398,6 +441,7 @@ impl Chrome {
 
     /// Re-root the window back to the frust controller and release the rest.
     fn dispose(self, _mtm: MainThreadMarker) {
+        self.target.detach_tab_bar_controller(&self.tabs);
         let stack: Vec<Retained<UIView>> = self.host.subviews().iter().collect();
         for page in &self.pages {
             page.page.release();
@@ -467,11 +511,13 @@ impl Page {
     }
 }
 
-/// Mirror the top bar's `wants` fields onto `page`'s navigation item.
+/// Mirror the top bar's `wants` fields onto `page`'s navigation item, the
+/// rebuilt bar items wired to `target`.
 fn apply_top(
     mtm: MainThreadMarker,
     page: &Page,
     top: Option<&TopBarSpec>,
+    target: &FrustNativeControlTarget,
     wants: impl Fn(ChromeField) -> bool,
 ) {
     let empty = TopBarSpec::default();
@@ -499,7 +545,7 @@ fn apply_top(
         });
     }
     if wants(ChromeField::Leading) {
-        item.setLeftBarButtonItem(leading_item(mtm, &bar.leading).as_deref());
+        item.setLeftBarButtonItem(leading_item(mtm, &bar.leading, target).as_deref());
     }
     if wants(ChromeField::Actions) {
         // UIKit lists right items from the trailing edge; the spec reads leading-first.
@@ -508,21 +554,26 @@ fn apply_top(
             .iter()
             .enumerate()
             .rev()
-            .map(|(index, action)| action_item(mtm, index, action))
+            .map(|(index, action)| action_item(mtm, index, action, target))
             .collect();
         item.setRightBarButtonItems(Some(&NSArray::from_retained_slice(&items)));
     }
 }
 
 /// The leading item: a custom back chevron (the navigation controller has no
-/// stack to pop), a 32pt round avatar, or a symbol.
-fn leading_item(mtm: MainThreadMarker, leading: &Leading) -> Option<Retained<UIBarButtonItem>> {
+/// stack to pop) reporting through `target`, a 32pt round avatar, or a symbol.
+fn leading_item(
+    mtm: MainThreadMarker,
+    leading: &Leading,
+    target: &FrustNativeControlTarget,
+) -> Option<Retained<UIBarButtonItem>> {
     match leading {
         Leading::None => None,
         Leading::Back => {
             let item = UIBarButtonItem::new(mtm);
             item.setImage(UIImage::systemImageNamed(ns_string!("chevron.left")).as_deref());
             item.setAccessibilityLabel(Some(ns_string!("Back")), mtm);
+            target.attach_bar_item(&item, true);
             Some(item)
         }
         Leading::Image(bytes) => {
@@ -550,11 +601,13 @@ fn leading_item(mtm: MainThreadMarker, leading: &Leading) -> Option<Retained<UIB
 }
 
 /// One trailing action, tagged with its spec index: a pull-down when it has
-/// a menu, else a plain image (title as its label) or title item.
+/// a menu, else a plain image (title as its label) or title item reporting
+/// through `target`.
 fn action_item(
     mtm: MainThreadMarker,
     index: usize,
     action: &ActionItem,
+    target: &FrustNativeControlTarget,
 ) -> Retained<UIBarButtonItem> {
     let image = action.icon.as_ref().and_then(ui_image);
     let title = NSString::from_str(&action.title);
@@ -562,16 +615,17 @@ fn action_item(
         (Some(entries), Some(image)) => UIBarButtonItem::initWithImage_menu(
             UIBarButtonItem::alloc(mtm),
             Some(image),
-            Some(&menu(mtm, entries)),
+            Some(&menu(mtm, index, entries)),
         ),
         (Some(entries), None) => UIBarButtonItem::initWithTitle_menu(
             UIBarButtonItem::alloc(mtm),
             Some(&title),
-            Some(&menu(mtm, entries)),
+            Some(&menu(mtm, index, entries)),
         ),
         (None, _) => {
             let item = UIBarButtonItem::new(mtm);
             item.setImage(image.as_deref());
+            target.attach_bar_item(&item, false);
             item
         }
     };
@@ -585,19 +639,29 @@ fn action_item(
     item
 }
 
-/// The pull-down menu over `entries`.
-fn menu(mtm: MainThreadMarker, entries: &[MenuItem]) -> Retained<UIMenu> {
+/// The pull-down menu over action `action`'s `entries`.
+fn menu(mtm: MainThreadMarker, action: usize, entries: &[MenuItem]) -> Retained<UIMenu> {
     let children: Vec<Retained<UIMenuElement>> = entries
         .iter()
-        .map(|entry| Retained::into_super(menu_action(mtm, entry)))
+        .enumerate()
+        .map(|(item, entry)| Retained::into_super(menu_action(mtm, action, item, entry)))
         .collect();
     UIMenu::menuWithChildren(&NSArray::from_retained_slice(&children), mtm)
 }
 
-/// One menu entry. Its handler reports nothing yet (the events layer wires
-/// delivery).
-fn menu_action(mtm: MainThreadMarker, entry: &MenuItem) -> Retained<UIAction> {
-    let handler = RcBlock::new(|_: NonNull<UIAction>| {});
+/// Item `item` of action `action`'s menu; its handler reports the choice.
+fn menu_action(
+    mtm: MainThreadMarker,
+    action: usize,
+    item: usize,
+    entry: &MenuItem,
+) -> Retained<UIAction> {
+    let handler = RcBlock::new(move |_: NonNull<UIAction>| {
+        let tap = || report("menu UIAction", |_| Some(ChromeTap::Menu(action, item)));
+        if catch_unwind(AssertUnwindSafe(tap)).is_err() {
+            log::warn!("frust-native-widgets: panic caught in a chrome menu handler");
+        }
+    });
     let image = entry.icon.as_ref().and_then(ui_image);
     // SAFETY: `handler` is a live heap block for the whole call, and UIKit
     // copies (retains) the handler it is given.
@@ -639,6 +703,49 @@ fn ui_image(icon: &TabIcon) -> Option<Retained<UIImage>> {
                 UIImage::imageWithData_scale(&data, scale)
             }
         }
+    }
+}
+
+/// A tap on a chrome page: deliver what it requests, and answer whether
+/// UIKit may select `controller` itself (only one that is no chrome page).
+pub(super) fn tab_tapped(controller: &UIViewController) -> bool {
+    let mut foreign = false;
+    report("tab", |chrome| {
+        let index = chrome.pages.iter().position(|page| {
+            let nav: &UIViewController = &page.nav;
+            std::ptr::eq(nav, controller)
+        });
+        foreign = index.is_none();
+        index.map(ChromeTap::Tab)
+    });
+    foreign
+}
+
+/// A tap on the trailing action item tagged `tag`.
+pub(super) fn action_tapped(tag: isize) {
+    report("action", |_| {
+        usize::try_from(tag).ok().map(ChromeTap::Action)
+    });
+}
+
+/// A tap on the back item.
+pub(super) fn back_tapped() {
+    report("back", |_| Some(ChromeTap::Back));
+}
+
+/// Resolve the tap `locate` finds against the spec on screen, then deliver it
+/// with the [`CHROME`] borrow released.
+fn report(which: &str, locate: impl FnOnce(&Chrome) -> Option<ChromeTap>) {
+    let resolved = CHROME.with(|cell| {
+        let state = cell.try_borrow().ok()?;
+        let chrome = state.as_ref()?;
+        let event = resolve_tap(&chrome.spec, locate(chrome)?)?;
+        Some((chrome.generation, event))
+    });
+    let delivered =
+        resolved.is_some_and(|(generation, event)| chrome::deliver_event(generation, &event));
+    if !delivered {
+        log::debug!("frust-native-widgets: a chrome {which} tap resolved to no event — dropped");
     }
 }
 

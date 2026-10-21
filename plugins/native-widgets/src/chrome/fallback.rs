@@ -5,8 +5,8 @@
 //!
 //! Each bar is one crate-local `View`/`Widget` pair (the refusal banner's
 //! shape in `api::builders`): it shapes its own text runs, paints from the
-//! ambient [`Theme`]'s roles ([`Theme::neutral`] when none is threaded) and
-//! hit-tests its own targets. A tap is encoded with [`encode_event`] and
+//! ambient [`Theme`]'s roles ([`Theme::neutral`] when none is threaded, so
+//! `ChromeSpec::dark` goes unread) and hit-tests its own targets. A tap is encoded with [`encode_event`] and
 //! handed to [`deliver`], an arm's own report path, so the app's handlers run
 //! through the scaffold's sink and never directly.
 //!
