@@ -278,11 +278,16 @@ impl ScrollPublisher {
         !std::mem::replace(&mut self.queued, true)
     }
 
-    /// Publish the newest recorded state.
+    /// Publish the newest recorded state; a publisher that no longer holds
+    /// the slot forgets its generation, so it never publishes again.
     fn flush(&mut self) -> Option<PublishOutcome> {
         self.queued = false;
         let generation = self.generation?;
-        Some(chrome::publish(Some(generation), self.spec.clone()))
+        let outcome = chrome::publish(Some(generation), self.spec.clone());
+        if matches!(outcome, PublishOutcome::Stale | PublishOutcome::Refused(_)) {
+            self.generation = None;
+        }
+        Some(outcome)
     }
 }
 
@@ -290,6 +295,15 @@ impl ScrollPublisher {
 struct ScrollLink {
     publisher: Rc<RefCell<ScrollPublisher>>,
     _subscription: ScrollSubscription,
+}
+
+impl ScrollLink {
+    /// Make a frame task already queued for this link publish nothing.
+    fn invalidate(&self) {
+        if let Ok(mut publisher) = self.publisher.try_borrow_mut() {
+            publisher.generation = None;
+        }
+    }
 }
 
 /// The retained widget of a [`NativeScaffoldView`]: the body, the refusal
@@ -308,7 +322,7 @@ pub struct ScaffoldWidget {
 /// a refused install with one. A refused publisher holds no chrome at all.
 fn draws_fallback(outcome: &PublishOutcome) -> bool {
     match outcome {
-        PublishOutcome::Refused(_) => false,
+        PublishOutcome::Refused(_) | PublishOutcome::Stale => false,
         PublishOutcome::Fallback(..) => true,
         _ => !NATIVE_CHROME_ARM,
     }
@@ -351,7 +365,12 @@ impl<V> NativeScaffoldView<V> {
         ctx: &mut BuildCtx<'_>,
     ) -> (ChangeFlags, PublishOutcome) {
         let spec = self.spec();
-        let outcome = chrome::publish(element.generation, spec.clone());
+        let mut outcome = chrome::publish(element.generation, spec.clone());
+        if outcome == PublishOutcome::Stale {
+            // The generation was withdrawn under this scaffold: claim afresh.
+            element.generation = None;
+            outcome = chrome::publish(None, spec.clone());
+        }
         let generation = outcome.generation();
         element.generation = generation;
         if let Some(generation) = generation {
@@ -489,8 +508,27 @@ impl<Outer: 'static, V: View<Outer>> View<Outer> for NativeScaffoldView<V> {
         if let Some(mut bottom) = element.bottom.take() {
             teardown_tab_row::<Outer>(&mut bottom, ctx);
         }
-        element.scroll = None;
+        if let Some(link) = element.scroll.take() {
+            link.invalidate();
+        }
         if let Some(generation) = element.generation.take() {
+            chrome::withdraw(generation);
+        }
+    }
+}
+
+/// Frees a generation still held when the tree is dropped without
+/// `View::teardown` (an Android activity recreate, a hot-patch witness
+/// mismatch). After teardown it is a no-op; `withdraw` is generation-stamped,
+/// so a stale element never frees a newer one. It may run the host's
+/// `dispose` from `Drop`, which every arm must tolerate (Android drops on the
+/// UI thread).
+impl Drop for ScaffoldWidget {
+    fn drop(&mut self) {
+        if let Some(link) = &self.scroll {
+            link.invalidate();
+        }
+        if let Some(generation) = self.generation.take() {
             chrome::withdraw(generation);
         }
     }
@@ -737,6 +775,65 @@ mod tests {
     }
 
     #[test]
+    fn a_scaffold_dropped_without_teardown_frees_the_slot() {
+        let _guard = chrome::slot_test_guard();
+        let view = scaffold();
+        let (first, outcome) = build(&view);
+        assert!(matches!(outcome, PublishOutcome::Installed(_)));
+        drop(first);
+        assert_eq!(chrome::live_generation(), None);
+        let (mut second, outcome) = build(&view);
+        assert!(
+            matches!(outcome, PublishOutcome::Installed(_)),
+            "got {outcome:?}"
+        );
+        teardown(&view, &mut second);
+    }
+
+    #[test]
+    fn dropping_a_torn_down_scaffold_is_a_no_op() {
+        let _guard = chrome::slot_test_guard();
+        let view = scaffold();
+        let (mut first, _) = build(&view);
+        teardown(&view, &mut first);
+        let (mut second, _) = build(&view);
+        assert!(second.generation.is_some());
+        drop(first);
+        assert_eq!(chrome::live_generation(), second.generation);
+        teardown(&view, &mut second);
+    }
+
+    #[test]
+    fn a_stale_scaffolds_drop_leaves_a_newer_generation_live() {
+        let _guard = chrome::slot_test_guard();
+        let view = scaffold();
+        let (first, _) = build(&view);
+        assert!(chrome::withdraw(first.generation.expect("installed")));
+        let (mut second, outcome) = build(&view);
+        assert!(matches!(outcome, PublishOutcome::Installed(_)));
+        drop(first);
+        assert_eq!(chrome::live_generation(), second.generation);
+        teardown(&view, &mut second);
+    }
+
+    #[test]
+    fn a_scaffold_whose_generation_was_withdrawn_reinstalls_on_rebuild() {
+        let _guard = chrome::slot_test_guard();
+        let view = scaffold();
+        let (mut element, _) = build(&view);
+        let first = element.generation.expect("installed");
+        assert!(chrome::withdraw(first));
+        let outcome = rebuild(&view, &scaffold(), &mut element);
+        let PublishOutcome::Installed(second) = outcome else {
+            panic!("expected Installed, got {outcome:?}");
+        };
+        assert!(second > first);
+        assert_eq!(element.generation, Some(second));
+        assert!(element.banner.is_none());
+        teardown(&view, &mut element);
+    }
+
+    #[test]
     fn a_second_live_scaffold_is_refused_and_shows_the_banner() {
         let _guard = chrome::slot_test_guard();
         let view = scaffold();
@@ -887,6 +984,80 @@ mod tests {
         teardown(&view, &mut element);
     }
 
+    fn scrolled(offset: f64) -> ScrollInfo {
+        ScrollInfo {
+            offset,
+            max_offset: 400.0,
+            overscroll: 0.0,
+        }
+    }
+
+    fn scroll_publisher(element: &ScaffoldWidget) -> Rc<RefCell<ScrollPublisher>> {
+        Rc::clone(&element.scroll.as_ref().expect("subscribed").publisher)
+    }
+
+    #[test]
+    fn a_scroll_flush_queued_before_teardown_publishes_nothing() {
+        let _guard = chrome::slot_test_guard();
+        let view = scaffold().scroll(ScrollController::new());
+        let (mut element, _) = build(&view);
+        let queued = scroll_publisher(&element);
+        assert!(queued.borrow_mut().observe(scrolled(10.0)), "flush queued");
+        teardown(&view, &mut element);
+        // What the spawned frame task does at the next local pump.
+        let _ = queued.borrow_mut().flush();
+        assert_eq!(chrome::live_generation(), None);
+        let (mut next, outcome) = build(&view);
+        assert!(
+            matches!(outcome, PublishOutcome::Installed(_)),
+            "got {outcome:?}"
+        );
+        teardown(&view, &mut next);
+    }
+
+    #[test]
+    fn teardown_invalidates_the_scroll_publisher() {
+        let _guard = chrome::slot_test_guard();
+        let view = scaffold().scroll(ScrollController::new());
+        let (mut element, _) = build(&view);
+        let publisher = scroll_publisher(&element);
+        assert!(publisher.borrow().generation.is_some());
+        teardown(&view, &mut element);
+        assert_eq!(publisher.borrow_mut().flush(), None);
+        assert_eq!(chrome::live_generation(), None);
+    }
+
+    #[test]
+    fn a_flush_that_no_longer_holds_the_slot_forgets_its_generation() {
+        let _guard = chrome::slot_test_guard();
+        let view = scaffold();
+        let (mut first, _) = build(&view);
+        let withdrawn = first.generation.expect("installed");
+        assert!(chrome::withdraw(withdrawn));
+        let (mut second, _) = build(&view);
+        let flushed = || {
+            let mut publisher = ScrollPublisher {
+                generation: Some(withdrawn),
+                spec: view.spec(),
+                viewport: 600.0,
+                queued: false,
+            };
+            publisher.observe(scrolled(10.0));
+            let outcome = publisher.flush().expect("held a generation");
+            (outcome, publisher.generation)
+        };
+        let (outcome, kept) = flushed();
+        assert_eq!(outcome.generation(), None, "another is live: {outcome:?}");
+        assert_eq!(kept, None);
+        assert_eq!(chrome::live_generation(), second.generation);
+        teardown(&view, &mut second);
+        let (outcome, kept) = flushed();
+        assert_eq!(outcome.generation(), None, "slot empty: {outcome:?}");
+        assert_eq!(kept, None);
+        assert_eq!(chrome::live_generation(), None);
+        teardown(&view, &mut first);
+    }
+
     #[test]
     fn the_fallback_draws_unless_refused_and_follows_the_spec() {
         let _guard = chrome::slot_test_guard();
@@ -897,6 +1068,7 @@ mod tests {
         assert!(!draws_fallback(&PublishOutcome::Refused(
             chrome::ChromeError::Busy
         )));
+        assert!(!draws_fallback(&PublishOutcome::Stale));
         assert_eq!(
             draws_fallback(&PublishOutcome::Installed(held)),
             !NATIVE_CHROME_ARM
