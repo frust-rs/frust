@@ -241,10 +241,8 @@ mod controls;
 // the `ChromeEvent` vocabulary, the `ChromeHost` seam and the process-wide
 // publish slot. Behind `frust-api` because the spec reuses the api layer's
 // `TabItem`/`TabIcon`/`TabId`; crate-private, with the `native_scaffold`
-// builder re-exporting what apps need. The `allow` matches `runtime`'s: no
-// caller outside its tests until the builder and the arms land.
+// builder re-exporting what apps need.
 #[cfg(feature = "frust-api")]
-#[allow(dead_code)]
 mod chrome;
 // The typed event vocabulary (`EventPayload`) and the kind/detail codec every
 // interactive control's listener decodes through — platform-agnostic and
