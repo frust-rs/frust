@@ -4778,14 +4778,15 @@ named per line. Every line below says where its limits live:
   off (p95 0.4-1.9 ms worse, all of it in swapchain acquire), S1/S6 identical in both arms.
 - Phase 4, z-order differ, segmented rendering and the overlay hosts: shipped behind
   `FRUST_OVERLAYS` (default off). iOS passed on an iPhone SE and the iOS Simulator (0 uncaptured
-  wgpu errors in Mode A and Mode B). macOS passed too (both paint orders; a withdraw can stall the UI thread).
+  wgpu errors in Mode A and Mode B). macOS passed too (both paint orders); a withdraw never waits on the UI thread on any host.
   The Android overlay spike passed (GO); the Android host's one failure (a new overlay surface got
   no frame while the app was idle) is fixed and confirmed on a OnePlus 9; the default stays off
-  until the overlay hardening work flips it (`android-overlays-opt-in-pending-device-leg`). Limits: follow-up-see-
+  until a separate decision flips it (`android-overlays-opt-in-pending-device-leg`). Limits: follow-up-see-
   `android-overlays-cover-later-slots`, follow-up-see-`apple-overlay-limits` and
   follow-up-see-`overlay-unservable-content-stays-on-main`.
 - Phase 4, texture bus (`frust::texture`, `texture_view`, `TextureSink`): shipped-in-Phase-4;
-  follow-up-see-`texture-bus-native-release-delay` and follow-up-see-`texture-bus-no-wake-on-push`.
+  follow-up-see-`texture-bus-native-release-delay`; a push into a registered sink wakes the mobile
+  and desktop shells (web: follow-up-see-`texture-bus-no-wake-on-push`).
   Phase 5 made `NativeHandle` move-only and frames consumed by value.
 - Phase 4, zero-copy import: Apple `MetalImporter` passed on macOS (M4, debug build: first import
   79-184 us; steady 300 imports at 30 fps mean 24.6-50.5 us, p95 45-76 us; 0 cache misses after
@@ -4831,20 +4832,24 @@ over-paint stayed under the native view until an unrelated repaint. An overlay w
 resizes or is withdrawn now requests a frame; confirmed on a OnePlus 9 (Android 15): the over-paint
 is drawn or restored within one frame after a slot remount or background-to-foreground with no
 further input, drags through an overlay still reach the native control, present skew avg 0.43 ms /
-max 0.77 ms with two overlays, 0 wgpu errors.
+max 0.77 ms with two overlays, 0 wgpu errors. On the shared overlay table (2026-10-21, Pixel 5,
+Android 14): 10 rapid toggles plus background and foreground left no leaked overlay `SurfaceView`
+and no ANR, and an idle camera or video texture view stayed live without a ticker.
 
 **Applies to**: Android apps that composite frust content over a native view (native-widgets
 popovers and badges, video or camera controls over the picture) with the knob on.
 
-**Why accepted**: the default stays off until the overlay hardening work (one shared overlay table,
-non-blocking withdraw) lands and decides the flip; every host now requests a frame when an overlay
-layer or window is attached, resized or withdrawn. Withdrawing an overlay no longer blocks the UI
-thread; the cost is described in `android-overlay-withdraw-after-return`.
+**Why accepted**: the overlay hardening (one shared overlay table, non-blocking withdraw) has
+landed and passed its device legs, but the default stays off until the flip is decided on its own;
+every host requests a frame when an overlay layer or window is attached, resized or withdrawn.
+Withdrawing an overlay no longer blocks the UI thread; the cost is described in
+`android-overlay-withdraw-after-return`.
 
 **Trigger for removal**: the default flips (or the knob is retired); see
 `android-overlay-withdraw-after-return` for the withdraw behaviour that flip depends on.
 
-**Evidence**: `crates/frust-shell-android/src/app/frame.rs`, `jni_glue.rs`, `overlay_state.rs`; SHELLS_ARCHITECTURE.md
+**Evidence**: `crates/frust-shell-android/src/app/frame.rs`, `jni_glue.rs`, `overlay_state.rs`,
+`crates/frust-shell-common/src/overlay.rs`; SHELLS_ARCHITECTURE.md
 § Native-view hosting.
 
 ---
@@ -8107,7 +8112,12 @@ demo's Controls page with overlays on can reach 7; iPhone SE, 750x1334: per-over
 transparent overlay stays above a hidden slot. Unservable content stays on the main surface
 (`overlay-unservable-content-stays-on-main`). iOS overlays need the render-thread split, and Mode B
 logs `overlays are Mode A only; a translucent surface ignores them`. With present-sync armed the
-main/overlay skew measured avg 296-360 us, max 457-521 us.
+main/overlay skew measured avg 296-360 us, max 457-521 us. Device outcomes on the shared overlay
+table (2026-10-21): an iPhone 13 mini (iOS 26.7.1) driven by an XCUITest runner and an iPhone 17
+Pro simulator (iOS 26.2, Main Thread Checker loaded and silent) passed; on a macOS M4 the window
+moved 2x to 1x to 2x with overlays sharp at each scale, and 11 rapid toggles, mid-frame withdraws
+included, never waited; idle camera and video texture views stayed live without a ticker on the
+iPhone. The default stays off.
 
 **Applies to**: iOS and macOS apps with the knob on that cut a frame around native views many times.
 
@@ -8140,20 +8150,23 @@ straight on. The video-player and camera producers request 32BGRA, so they are u
 
 ---
 
-### `texture-bus-no-wake-on-push` — a new texture frame does not wake the frame gate
+### `texture-bus-no-wake-on-push` — the web shell does not wake on a texture push
 
-**Observed**: the texture bus is pull-only: a producer pushing a frame never requests a frame, so a
-page that shows a `texture_view` needs a painted frame requester of its own. In the playground a
-ticker culled below the fold froze the camera preview until the ticker sat next to the picture.
+**Observed**: a producer push into a registered texture sink owes the shell one frame
+(`frust::texture::request_frame`); the mobile frame gates and the desktop loop take it. The web shell
+neither takes the flag nor installs the frame-request hook, so a web page showing a `texture_view`
+needs a painted frame requester of its own. The hook is process-wide, so it also assumes one shell
+per process.
 
-**Applies to**: apps showing a `texture_view` on any host that gates frames on dirty state.
+**Applies to**: web apps showing a `texture_view` fed by a custom producer (no shipped plugin
+produces textures on web).
 
-**Why accepted**: the structural fix (a push-driven wake from the sink) crosses the frame-gate seam
-in every shell and is future work.
+**Why accepted**: no shipped producer targets the web shell.
 
-**Trigger for removal**: a producer push that wakes the frame gate without a requester.
+**Trigger for removal**: the web shell takes the owed-frame flag or installs the hook.
 
-**Evidence**: `examples/playground` camera page; `crates/frust-render/src/texture_bus.rs`.
+**Evidence**: `crates/frust-render/src/texture_bus.rs` (`request_frame`, `take_frame_owed`,
+`set_frame_request_hook`); `crates/frust-shell-desktop/src/app_handler.rs`.
 
 ---
 
