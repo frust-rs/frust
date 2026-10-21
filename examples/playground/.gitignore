@@ -38,3 +38,10 @@ android/local.properties
 # Kotlin daemon's per-project cache, created by any `./gradlew compile*Kotlin`
 # (the Kotlin gate any camera change has to run). Build output.
 .kotlin/
+
+# Machine-local symlinks to the local Swift packages the Xcode project
+# references by name — `FrustEmbedding` (the `frust-shell-ios` crate's) and
+# one per plugin package (`FrustIap`, `FrustCamera`, ...) — written by `frust
+# create` / the TUI's Add Plugin and refreshed by `frust run` / `frust build`;
+# each target is wherever cargo resolved that crate.
+/ios/Frust*
