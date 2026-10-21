@@ -30,6 +30,11 @@
 //! emitted by all three arms. The eighth, [`EVENT_KIND_RESELECTED`], is the
 //! iOS-only tab bar's tap on its showing item — emitted by the iOS target
 //! class alone, its Kotlin twin again kept only for table parity.
+//! Kinds 9-12 ([`EVENT_KIND_CHROME_TAB`] .. [`EVENT_KIND_CHROME_BACK`]) are
+//! app chrome's (`crate::chrome`): host-level bars, not `platform_view` slots,
+//! so they are decoded against the published chrome spec rather than a
+//! slot's control. No arm emits them yet; their Kotlin twins keep the table
+//! whole.
 //!
 //! `FrustNativeListener` implements every listener interface
 //! a v1 control needs — `View.OnClickListener`,
@@ -111,6 +116,22 @@ pub(crate) const EVENT_KIND_DATE: i32 = 7;
 /// one table (`tests/kotlin_conformance.rs`), though no Android listener emits
 /// it.
 pub(crate) const EVENT_KIND_RESELECTED: i32 = 8;
+/// An app-chrome tab tap — `detail` packs the tab index plus a reselect
+/// flag, see [`pack_chrome_tab`]/[`unpack_chrome_tab`]. One kind for both
+/// select and reselect: unlike the bare tab bar's `SELECTION`/`RESELECTED`
+/// pair, the flag rides bit 32 of `detail`, as `fromUser` does in
+/// [`pack_value_changed`].
+///
+/// **Appended** after [`EVENT_KIND_RESELECTED`], with kinds 10-12 after it.
+pub(crate) const EVENT_KIND_CHROME_TAB: i32 = 9;
+/// An app-chrome action tap — `detail` is the action's index
+/// ([`pack_index`]).
+pub(crate) const EVENT_KIND_CHROME_ACTION: i32 = 10;
+/// An app-chrome pull-down menu choice — `detail` packs the action and menu
+/// indices, see [`pack_chrome_menu`]/[`unpack_chrome_menu`].
+pub(crate) const EVENT_KIND_CHROME_MENU: i32 = 11;
+/// The app-chrome back item — `detail` unused (`0`).
+pub(crate) const EVENT_KIND_CHROME_BACK: i32 = 12;
 
 // --- the typed vocabulary the app-facing api wraps into a signal -----------
 
@@ -209,6 +230,49 @@ pub(crate) fn pack_index(platform_index: isize) -> i64 {
 /// (no-selection) report — which carries no requested segment to deliver.
 pub(crate) fn unpack_index(detail: i64) -> Option<usize> {
     usize::try_from(detail).ok()
+}
+
+/// Pack an app-chrome tab index plus whether it was a reselect (a tap on
+/// the showing tab) into `detail` — [`EVENT_KIND_CHROME_TAB`]'s whole
+/// payload: the index in the low 32 bits, the flag in bit 32.
+pub(crate) fn pack_chrome_tab(index: usize, reselect: bool) -> i64 {
+    (index as i64 & 0xFFFF_FFFF) | ((reselect as i64) << 32)
+}
+
+/// [`pack_chrome_tab`]'s inverse: `None` for a negative `detail` or any bit
+/// above the flag set.
+pub(crate) fn unpack_chrome_tab(detail: i64) -> Option<(usize, bool)> {
+    if detail >> 33 != 0 {
+        return None;
+    }
+    let index = (detail & 0xFFFF_FFFF) as usize;
+    Some((index, (detail >> 32) & 1 != 0))
+}
+
+/// The stride [`pack_chrome_menu`] multiplies the action index by — so a
+/// menu carries at most this many items on the wire.
+pub(crate) const CHROME_MENU_STRIDE: i64 = 1000;
+
+/// Pack an action index and the chosen item's index in its menu into
+/// `detail` — [`EVENT_KIND_CHROME_MENU`]'s whole payload:
+/// `action_index * 1000 + menu_index`. `None` when `menu_index` does not fit
+/// under [`CHROME_MENU_STRIDE`] or the product overflows.
+pub(crate) fn pack_chrome_menu(action_index: usize, menu_index: usize) -> Option<i64> {
+    let menu = i64::try_from(menu_index)
+        .ok()
+        .filter(|menu| *menu < CHROME_MENU_STRIDE)?;
+    i64::try_from(action_index)
+        .ok()?
+        .checked_mul(CHROME_MENU_STRIDE)?
+        .checked_add(menu)
+}
+
+/// [`pack_chrome_menu`]'s inverse: `(action_index, menu_index)`, or `None`
+/// for a negative `detail`.
+pub(crate) fn unpack_chrome_menu(detail: i64) -> Option<(usize, usize)> {
+    let action = usize::try_from(detail.checked_div(CHROME_MENU_STRIDE)?).ok()?;
+    let menu = usize::try_from(detail % CHROME_MENU_STRIDE).ok()?;
+    Some((action, menu))
 }
 
 /// Pack a civil date into `detail` — [`EVENT_KIND_DATE`]'s whole payload.
@@ -358,9 +422,9 @@ mod tests {
 
     #[test]
     fn the_kind_table_is_append_only() {
-        // Kinds 1-5 are shipped wire values; SELECTION, DATE and then
-        // RESELECTED are appended after them, never renumbered into the
-        // middle.
+        // Kinds 1-5 are shipped wire values; SELECTION, DATE, RESELECTED and
+        // the four chrome kinds are appended after them, never renumbered
+        // into the middle.
         assert_eq!(
             [
                 EVENT_KIND_CLICK,
@@ -371,9 +435,43 @@ mod tests {
                 EVENT_KIND_SELECTION,
                 EVENT_KIND_DATE,
                 EVENT_KIND_RESELECTED,
+                EVENT_KIND_CHROME_TAB,
+                EVENT_KIND_CHROME_ACTION,
+                EVENT_KIND_CHROME_MENU,
+                EVENT_KIND_CHROME_BACK,
             ],
-            [1, 2, 3, 4, 5, 6, 7, 8]
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
         );
+    }
+
+    #[test]
+    fn a_chrome_tab_round_trips_and_stray_bits_decode_to_none() {
+        for (index, reselect) in [(0, false), (0, true), (3, false), (15, true)] {
+            assert_eq!(
+                unpack_chrome_tab(pack_chrome_tab(index, reselect)),
+                Some((index, reselect))
+            );
+        }
+        assert_eq!(pack_chrome_tab(2, true), (1 << 32) | 2);
+        assert_eq!(unpack_chrome_tab(-1), None);
+        assert_eq!(unpack_chrome_tab(1 << 33), None);
+    }
+
+    #[test]
+    fn a_chrome_menu_choice_round_trips_and_refuses_what_it_cannot_carry() {
+        for (action, menu) in [(0, 0), (0, 999), (2, 5), (7, 0)] {
+            let detail = pack_chrome_menu(action, menu).expect("packable");
+            assert_eq!(detail, action as i64 * 1000 + menu as i64);
+            assert_eq!(unpack_chrome_menu(detail), Some((action, menu)));
+        }
+        assert_eq!(
+            pack_chrome_menu(0, 1000),
+            None,
+            "menu index past the stride"
+        );
+        assert_eq!(pack_chrome_menu(usize::MAX, 0), None, "overflow");
+        assert_eq!(unpack_chrome_menu(-1), None);
+        assert_eq!(unpack_chrome_menu(-1000), None);
     }
 
     #[test]

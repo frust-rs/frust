@@ -162,5 +162,19 @@ class FrustNativeListener(private val slotId: Long) :
          * `KIND_DATE`, never renumbered.
          */
         const val KIND_RESELECTED = 8
+        /**
+         * App-chrome events (the Rust side's `EVENT_KIND_CHROME_*`): a tab
+         * tap (`detail` = index | reselect flag << 32), an action tap
+         * (`detail` = action index), a pull-down menu choice (`detail` =
+         * actionIndex * 1000 + menuIndex) and the back item (`detail` = 0).
+         * **Never emitted by this listener**: chrome is a host-level surface,
+         * not a `platform_view` slot, and no Android chrome arm exists yet.
+         * Kept so this table and the Rust one stay the same table — appended
+         * after `KIND_RESELECTED`, never renumbered.
+         */
+        const val KIND_CHROME_TAB = 9
+        const val KIND_CHROME_ACTION = 10
+        const val KIND_CHROME_MENU = 11
+        const val KIND_CHROME_BACK = 12
     }
 }
