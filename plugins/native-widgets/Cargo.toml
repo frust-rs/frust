@@ -64,9 +64,6 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 # Non-obvious gates: `objc2-core-foundation` (`CGFloat`), `UIInterface` (interface
 # style), `objc2-core-text` (`UIFont`<->`CTFont` bridge), `UIBarItem` (`UITabBarItem`
 # members), `block2` (block-taking members), `NSLayout*`/`UILayoutGuide` (sheet layout).
-# The chrome arm adds the containers, `UINavigationItem`/`UINavigationBar` (title,
-# large title), `UIBarButtonItem` (bar items) and `UIMenu`/`UIMenuElement`/`UIAction`
-# (pull-downs; `initWithImage:menu:` needs all three).
 objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "std",
     "UIView",
@@ -108,6 +105,8 @@ objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "UILayoutGuide",
     # Tells iPad from iPhone: an unanchored action sheet crashes on iPad.
     "UIDevice",
+    # Chrome: `UINavigationItem`/`UINavigationBar` (titles), `UIBarButtonItem` (bar items)
+    # and `UIMenu`/`UIMenuElement`/`UIAction` (`initWithImage:menu:` needs all three).
     "UITabBarController",
     "UINavigationController",
     "UINavigationItem",
