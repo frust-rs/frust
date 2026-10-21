@@ -7643,13 +7643,13 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 ### `url-launcher-native-maps-desktop-unsupported` — native map schemes have no desktop handler
 
-**Observed**: `UrlLauncher::open_maps_native` (allowlisted `geo`/`maps`/`comgooglemaps`/`google.navigation`) reuses the Android `ACTION_VIEW` and iOS `openURL` backends and returns `NoHandler` on desktop. Android 11+ package visibility for `geo:` is unverified on devices until the share/maps device gate runs.
+**Observed**: `UrlLauncher::open_maps_native` (allowlisted `geo`/`maps`/`comgooglemaps`/`google.navigation`) reuses the Android `ACTION_VIEW` and iOS `openURL` backends and returns `NoHandler` on desktop. On Android, `geo:` resolves under Android 11+ package visibility (Pixel 5, Android 14, playground share/maps device gate).
 
-**Applies to**: macOS, Linux, and Windows; Android 11+ for `geo:` (unverified).
+**Applies to**: macOS, Linux, and Windows.
 
 **Why accepted**: desktops have no registered handler for these schemes; `Maps::directions` / `directions_to` / `show` are the https path that works everywhere.
 
-**Trigger for removal**: a desktop native-maps route, and a device run confirming `geo:` resolves under Android 11+ package visibility.
+**Trigger for removal**: a desktop native-maps route.
 
 **Evidence**: `plugins/url-launcher/src/deeplink.rs`; `plugins/url-launcher/src/maps.rs`.
 

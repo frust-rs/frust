@@ -96,7 +96,7 @@ pub enum UrlLauncherError {
     #[error("url launcher platform not initialized")]
     PlatformNotInitialized,
 
-    /// No installed app can handle an `http`/`https` `ACTION_VIEW` intent
+    /// No installed app can handle the URL's `ACTION_VIEW` intent
     /// (Android `ActivityNotFoundException`), or, on Windows,
     /// `ShellExecuteW` reports no association for the URL
     /// (`SE_ERR_NOASSOC`/`SE_ERR_ASSOCINCOMPLETE`). On macOS/Linux this
@@ -109,8 +109,9 @@ pub enum UrlLauncherError {
     /// status is available, on a detached thread with no channel back into
     /// the finished call (see the `desktop` module's own doc). This mirrors
     /// this crate doc's already-documented iOS post-dispatch
-    /// unobservability.
-    #[error("url launcher: no handler for http/https URLs on this device")]
+    /// unobservability. On desktop, [`UrlLauncher::open_maps_native`]
+    /// always returns this: native map schemes have no desktop handler.
+    #[error("url launcher: no handler for this URL on this device")]
     NoHandler,
 
     /// A backend-specific failure that isn't a not-yet-initialized/

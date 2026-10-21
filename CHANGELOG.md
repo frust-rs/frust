@@ -40,6 +40,9 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 - macOS overlays follow the window's backing scale: a move between a 2x and a 1x display
   republishes the overlay layers, which stay sharp at each scale.
+- `frust-url-launcher`: `UrlLauncherError::NoHandler` reads "no handler for this URL on this
+  device" instead of naming only `http`/`https`, since `open_maps_native` returns it for native
+  map schemes on desktop.
 
 ## 0.6.3 — 2026-10-20
 

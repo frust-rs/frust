@@ -49,11 +49,14 @@
 //!
 //! `canOpenURL:` requires the calling app to declare every custom URL scheme
 //! it wants to probe in its `Info.plist`'s `LSApplicationQueriesSchemes`
-//! (iOS 9+), and this crate only ever hands it `http`/`https` schemes (see
-//! `crate::url`'s validator) — Safari (or an equivalent default handler) is
-//! guaranteed present for those on any real device, so the query would add
-//! an `Info.plist` dependency for no discriminating value. This backend
-//! calls `openURL:options:completionHandler:` unconditionally instead.
+//! (iOS 9+). For `http`/`https` (`open_external`) Safari or an equivalent
+//! default handler is present on any real device, so the probe would add an
+//! `Info.plist` dependency for no discriminating value. For the native map
+//! schemes (`open_maps_native`) it would discriminate (`comgooglemaps:` needs
+//! Google Maps, no app registers `geo:`) but would force every app to list
+//! those schemes, so an unhandled native scheme is the same silent no-op as
+//! any other post-dispatch failure. This backend calls
+//! `openURL:options:completionHandler:` unconditionally instead.
 
 use dispatch2::DispatchQueue;
 use objc2::MainThreadMarker;
