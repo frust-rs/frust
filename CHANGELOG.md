@@ -6,6 +6,12 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ## Unreleased
 
+### Fixed
+
+- `frust-url-launcher`: `UrlLauncherError::NoHandler` reads "no handler for this URL on this
+  device" instead of naming only `http`/`https`, since `open_maps_native` returns it for native
+  map schemes on desktop.
+
 ## 0.6.3 — 2026-10-20
 
 A patch release (the 0.6.x line continues) that carries source changes for code that matches
