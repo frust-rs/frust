@@ -90,10 +90,24 @@ dependencies {
     // generated app does), and nothing in this module's public surface exposes
     // an embedding type. Note Kotlin's `internal` is MODULE-scoped, so only the
     // embedding's `public` types are visible from here.
-    //
-    // This is the module's ONLY dependency — every control is a plain
-    // `android.widget` view built from Rust over JNI, so no AndroidX artifact
-    // is needed here (the framework `Switch`/`SeekBar`/`ProgressBar`, not
-    // their Material counterparts).
     implementation(project(":frust-embedding"))
+
+    // Material Components for Android — the plugin's Material arms
+    // (MaterialToolbar/AppBarLayout, BottomNavigationView, BottomSheetDialog,
+    // MaterialButtonToggleGroup). `api`, not `implementation`: the consuming
+    // app's theme must resolve Material3 theme attributes, so the artifact has
+    // to sit on the APP's compile classpath, and the app declares nothing itself.
+    // It pulls `androidx.appcompat:appcompat` transitively (minSdk 23 <= 26).
+    //
+    // LOCKSTEP: this is the plugin's only third-party Android pin. Bump it only
+    // with the Android device gate suite and the pin row in
+    // docs/PLUGINS_DEVELOPMENT.md.
+    //
+    // THEME REQUIREMENT: a consuming app must use a Theme.Material3-derived
+    // application/activity theme. The stock `@android:style/Theme.Material.NoActionBar`
+    // scaffold theme makes the Material chrome refuse (never crash) and fall
+    // back to frust-drawn bars.
+    //
+    // Release APK cost of this pin: +116211 bytes (25874229 -> 25990440, native-widgets-demo).
+    api("com.google.android.material:material:1.14.0")
 }
