@@ -81,9 +81,7 @@
 //! `native-chrome-single-surface-containment`: one frust surface serves every
 //! tab, and the navigation controllers have no stack (no native push
 //! animation; `Leading::Back` is a custom item reporting `BackPressed`). The
-//! scroll mirror is not wired here. `ChromeDiff` has no brightness field yet,
-//! so a publish that changes only `dark` is an unchanged one to the slot and
-//! reaches the bars with the next applied diff.
+//! scroll mirror is not wired here.
 
 use std::cell::RefCell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
