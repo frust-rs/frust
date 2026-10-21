@@ -443,6 +443,17 @@ impl<H: ChromeHost> ChromeSlot<H> {
         true
     }
 
+    /// Test-only: drop whatever is live, disposing an installed host.
+    #[cfg(test)]
+    fn clear(&mut self) {
+        if let Some(Live {
+            installed: Ok(()), ..
+        }) = self.live.take()
+        {
+            self.host.dispose();
+        }
+    }
+
     /// Register where `generation`'s events go; `false` if it is not live.
     pub(crate) fn set_sink(&mut self, generation: ChromeGeneration, sink: ChromeSink) -> bool {
         match self.live.as_mut() {
@@ -500,6 +511,19 @@ static SLOT: Mutex<ChromeSlot<PlatformChromeHost>> =
 /// every later chrome call into a panic.
 fn lock_slot() -> MutexGuard<'static, ChromeSlot<PlatformChromeHost>> {
     SLOT.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Serialises every test that touches the process-wide slot and hands it
+/// over clean, so a test that panicked while holding it cannot leave a
+/// generation live for the next. Poisoning is ignored for the same reason.
+#[cfg(test)]
+pub(crate) fn slot_test_guard() -> MutexGuard<'static, ()> {
+    static GUARD: Mutex<()> = Mutex::new(());
+    let guard = GUARD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    lock_slot().clear();
+    guard
 }
 
 /// Publish `spec` to the process-wide slot — see [`ChromeSlot::publish`].
@@ -873,9 +897,9 @@ mod tests {
         assert_eq!(slot.host().calls().count(), RECORDED_CALLS_CAP);
     }
 
-    // The only test touching the process-wide slot, so it cannot race another.
     #[test]
     fn the_process_wide_slot_delivers_outside_its_lock() {
+        let _guard = slot_test_guard();
         let generation = publish(None, spec()).generation().expect("installed");
         assert_eq!(
             publish(None, spec()),

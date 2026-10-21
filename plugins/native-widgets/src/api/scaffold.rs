@@ -5,7 +5,7 @@
 //! methods and publishes it to the process-wide slot in `crate::chrome`, where
 //! an arm (or, on a target without one, the fallback chrome) owns the real
 //! bars. The body renders full-bleed. A second live scaffold publishes
-//! nothing and shows a one-line refusal above its body.
+//! nothing and shows the refusal banner above its body.
 //!
 //! # Controlled, like the bare tab bar
 //!
@@ -26,22 +26,24 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use frust::authoring::{build_child, rebuild_child, route_event_single, teardown_child};
-use frust::{RwSignal, ScrollController, ScrollInfo, ScrollSubscription, Set, text};
+use frust::{RwSignal, ScrollController, ScrollInfo, ScrollSubscription, Set};
 use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, Widget, any,
+    LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, Widget,
 };
 use kurbo::{Point, Size};
 
-use super::builders::{TabId, TabItem};
+use super::builders::{TabId, TabItem, banner_placeholder};
 use super::signals::{ChromeHandlers, on_chrome};
 use crate::chrome::{
     self, ActionId, ActionItem, ChromeEvent, ChromeGeneration, ChromeSpec, Leading, MenuItemId,
     PublishOutcome, ScrollState, TopBarSpec,
 };
 
-/// What a refused (second) scaffold shows above its body.
-const REFUSAL_MESSAGE: &str = "native_scaffold: one per app — this one publishes no chrome";
+/// The refusal banner's label.
+const REFUSAL_LABEL: &str = "one native_scaffold per app";
+/// Its description.
+const REFUSAL_DESCRIPTION: &str = "this scaffold publishes no chrome";
 
 /// App chrome around `body`: tabs, title, subtitle, leading item and actions
 /// (an action with a menu is a pull-down). See the [module docs](self) for the
@@ -229,9 +231,13 @@ fn controller_state(controller: &ScrollController) -> Option<ScrollState> {
     })
 }
 
-/// The refusal line, erased so it can be rebuilt in place.
+/// The plugin's refusal banner, unsized, rebuilt in place.
 fn refusal<Outer: 'static>() -> AnyView<Outer> {
-    any(text(REFUSAL_MESSAGE))
+    banner_placeholder(
+        None,
+        REFUSAL_LABEL.to_string(),
+        REFUSAL_DESCRIPTION.to_string(),
+    )
 }
 
 /// Coalesces scroll reports into at most one publish per frame: the listener
@@ -476,15 +482,8 @@ mod tests {
     use super::*;
     use crate::api::{MenuItem, TabIcon};
     use crate::chrome::{decode_event, encode_event};
+    use frust::text;
     use std::sync::Mutex;
-
-    /// The slot is process-wide: every test that publishes serialises here
-    /// and withdraws what it installed.
-    static SLOT_LOCK: Mutex<()> = Mutex::new(());
-
-    fn lock() -> std::sync::MutexGuard<'static, ()> {
-        SLOT_LOCK.lock().unwrap_or_else(|p| p.into_inner())
-    }
 
     fn scaffold() -> NativeScaffoldView<frust::TextView> {
         native_scaffold(text("body"))
@@ -528,7 +527,7 @@ mod tests {
 
     #[test]
     fn publishes_once_per_distinct_spec() {
-        let _guard = lock();
+        let _guard = chrome::slot_test_guard();
         let view = scaffold();
         let (mut element, outcome) = build(&view);
         assert!(matches!(outcome, PublishOutcome::Installed(_)));
@@ -554,7 +553,7 @@ mod tests {
 
     #[test]
     fn teardown_withdraws_so_the_next_scaffold_installs() {
-        let _guard = lock();
+        let _guard = chrome::slot_test_guard();
         let view = scaffold();
         let (mut first, _) = build(&view);
         teardown(&view, &mut first);
@@ -565,7 +564,7 @@ mod tests {
 
     #[test]
     fn a_second_live_scaffold_is_refused_and_shows_the_banner() {
-        let _guard = lock();
+        let _guard = chrome::slot_test_guard();
         let view = scaffold();
         let (mut first, _) = build(&view);
         let (mut second, outcome) = build(&view);
@@ -590,7 +589,7 @@ mod tests {
 
     #[test]
     fn every_event_reaches_its_typed_callback_and_events_into() {
-        let _guard = lock();
+        let _guard = chrome::slot_test_guard();
         let log = Arc::new(Mutex::new(Vec::<String>::new()));
         let note = |tag: &'static str| {
             let log = Arc::clone(&log);
@@ -649,7 +648,7 @@ mod tests {
 
     #[test]
     fn tab_select_into_writes_the_requested_tab() {
-        let _guard = lock();
+        let _guard = chrome::slot_test_guard();
         let picked = RwSignal::new(TabId::new("home"));
         let view = scaffold().on_tab_select_into(picked);
         let (mut element, _) = build(&view);
@@ -665,7 +664,7 @@ mod tests {
 
     #[test]
     fn the_scroll_publisher_publishes_changed_values_only_once_per_flush() {
-        let _guard = lock();
+        let _guard = chrome::slot_test_guard();
         let view = scaffold();
         let (mut element, _) = build(&view);
         let generation = element.generation;
@@ -711,7 +710,7 @@ mod tests {
 
     #[test]
     fn layout_stacks_the_banner_above_the_body() {
-        let _guard = lock();
+        let _guard = chrome::slot_test_guard();
         let view = scaffold();
         let (mut first, _) = build(&view);
         let (mut second, _) = build(&view);
