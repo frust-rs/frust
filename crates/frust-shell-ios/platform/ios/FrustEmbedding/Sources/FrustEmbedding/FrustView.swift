@@ -56,7 +56,7 @@ enum FrustEditCommand {
 /// deliberately *not* the view: a layer whose delegate is a `UIView` is one
 /// UIKit forbids touching off the main thread (see `FrustView.metalLayer`).
 /// Stateless, so it is safe to consult from the render thread.
-private final class FrustMetalLayerActions: NSObject, CALayerDelegate {
+final class FrustMetalLayerActions: NSObject, CALayerDelegate {
     func action(for layer: CALayer, forKey event: String) -> CAAction? {
         NSNull()
     }

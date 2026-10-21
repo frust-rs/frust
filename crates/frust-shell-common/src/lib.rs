@@ -42,7 +42,10 @@
 //! cargo feature, [`gpu`] carries the process-wide GPU-device slot
 //! ([`gpu::install_gpu_handle`]/[`gpu::gpu_handle`]) a shell's render
 //! executor installs its device into once, type-erased so this crate still
-//! names no GPU type — see the module's own docs.
+//! names no GPU type — see the module's own docs. The [`overlay`] module is
+//! the shells' shared overlay-surface core: the layer/surface table whose
+//! withdraw never blocks, the `FRUST_OVERLAYS` switch, the frame-request
+//! latch, cut assembly and the present-skew window.
 //!
 //! This crate is deliberately platform-free: it depends on `frust-core`
 //! (retained tree / `RenderRoot`) plus `frust-scene`/`frust-text`/
@@ -72,6 +75,7 @@ pub mod frame_gate;
 /// this crate names no GPU type (see the module's own docs).
 #[cfg(feature = "gpu")]
 pub mod gpu;
+pub mod overlay;
 pub mod perf;
 pub mod platform_view;
 pub mod render_split;

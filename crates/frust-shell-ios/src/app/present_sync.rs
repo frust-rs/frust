@@ -70,8 +70,10 @@ struct ParkedFrame {
 ///   ([`IosAppHandle::present_pending_frame`]), so a frame it has taken is
 ///   never still in its hands when the render thread next touches a swapchain;
 /// - every lifecycle door that reconfigures or tears down a swapchain
-///   (backgrounding, a surface resize or (re)install, an overlay detach,
-///   teardown) [`Self::clear`]s it (or drops the one overlay's present) first.
+///   (backgrounding, a surface resize or (re)install, an overlay detach or
+///   the land that drops a detached overlay's surface, teardown)
+///   [`Self::clear`]s it (or drops the one overlay's present) first: a parked
+///   `wgpu::SurfaceTexture` must not outlive its surface.
 ///
 /// A tick with nothing parked presents nothing — the zero-frames-at-rest
 /// contract is untouched.
@@ -169,7 +171,8 @@ impl PresentHandoff {
 impl IosAppHandle {
     /// Drop overlay `overlay_id`'s parked present, if any (see
     /// [`PresentHandoff::drop_overlay`]) — `frust_overlay_attach`/`_detach`,
-    /// before the overlay's surface goes. A no-op on the inline path.
+    /// before the overlay's surface goes (the render thread's land does the
+    /// same through its own handle). A no-op on the inline path.
     pub(crate) fn drop_parked_overlay(&self, overlay_id: u64) {
         if let FrameExecutor::Split(split) = &self.executor {
             split.present.drop_overlay(overlay_id);

@@ -357,6 +357,16 @@ pub enum ShellUserEvent {
     /// failed). Surfaced back so `run_desktop` returns it as `Err`, mirroring the
     /// inline path's fatal handling.
     RenderFatal(anyhow::Error),
+    /// The render thread landed a frame that freed an overlay layer the host
+    /// withdrew while that frame drew it (`FRUST_OVERLAYS`, macOS): the UI
+    /// thread hands the layer to the host now, through the platform-view
+    /// drain, rather than on a next frame an idle window may never draw.
+    OverlaysReleased,
+    /// A texture-bus producer owes the window a frame (a camera or decoder
+    /// pushed into a registered sink): the bus's frame-request hook posts this
+    /// from the producer's thread once per debt, and the UI thread takes the
+    /// debt and requests a redraw, whose frame polls the bus's sources.
+    TextureFrameOwed,
     /// The clipboard worker thread read the host clipboard and got text (see
     /// [`ClipboardWorker`]): the UI thread turns it into exactly one
     /// top-level `EditCommand::Paste` dispatch. A read that failed — for any
@@ -1082,11 +1092,20 @@ where
     // per-frame poll in `RedrawRequested` picks up any later registration.
     handler.font_registry.drain_into(&mut handler.text_ctx);
 
+    // The texture bus's frame-request hook runs on a producer's thread, so it
+    // only posts through the proxy; the bus coalesces, so at most one post is
+    // in flight. Installed only around the loop, so no stale proxy outlives it.
+    let texture_proxy = event_loop.create_proxy();
+    frust_render::texture_bus::set_frame_request_hook(Some(Arc::new(move || {
+        let _ = texture_proxy.send_event(ShellUserEvent::TextureFrameOwed);
+    })));
+
     // The loop's own result is held rather than propagated with `?` so the
     // clipboard worker is always stopped — including on the error path. The
     // handshake is what gives a copy made just before quitting its chance to
     // reach a clipboard manager; see `ShellHandler::shutdown_clipboard`.
     let loop_result = event_loop.run_app(&mut handler);
+    frust_render::texture_bus::set_frame_request_hook(None);
     handler.shutdown_clipboard();
     loop_result?;
     finish(handler.fatal)
@@ -2856,6 +2875,23 @@ where
                 self.fatal = Some(err);
                 event_loop.exit();
             }
+            ShellUserEvent::OverlaysReleased => {
+                if let Some(window) = self.window.clone() {
+                    let scale = window.scale_factor();
+                    self.platform_views
+                        .drain(&mut self.extensions, &window, scale);
+                }
+            }
+            // Taking the debt re-arms the bus's hook for the next push. A plain
+            // redraw like a signal wake: the paced-wake deadline is untouched,
+            // and the frame it runs polls every registered texture source.
+            ShellUserEvent::TextureFrameOwed => {
+                if frust_render::texture_bus::take_frame_owed()
+                    && let Some(window) = self.window.as_ref()
+                {
+                    window.request_redraw();
+                }
+            }
             // The devtools UI-thread hop: answer every queued request here, on
             // the thread that owns the tree. Injected events go through
             // `DevtoolsUi::dispatch` → this shell's own `dispatch`, i.e. the
@@ -3137,6 +3173,11 @@ where
                 // dimensions publishes nothing.
                 self.push_window_metrics((size.width, size.height), window.scale_factor());
                 self.note_window_geometry_change();
+                // An overlay keeps its logical frame when the window moves to a
+                // display of another scale, so no command would republish its
+                // drawable; the drain calls the host once for the new scale.
+                self.platform_views
+                    .drain(&mut self.extensions, &window, window.scale_factor());
                 window.request_redraw();
             }
 

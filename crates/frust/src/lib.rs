@@ -1160,10 +1160,20 @@ pub mod gpu {
 /// the unsafe [`NativeHandle::new`] — a handle cannot be copied, and outside
 /// `unsafe` it cannot leave the frame that carries its release. Not behind the
 /// `gpu` feature: nothing here needs a device of the app's own.
+///
+/// The renderer polls a source only on frames that run, and an idle screen
+/// runs none, so a producer with a new frame calls [`request_frame`] (a plugin
+/// bridge does so from its frame mailbox's waker): it owes the shell one
+/// frame, however many requests land before that frame.
 pub mod texture {
+    /// The shell's side of [`request_frame`]'s debt, for a producer's tests to
+    /// observe it. An app that takes it would swallow the frame owed.
+    #[doc(hidden)]
+    pub use frust_render::texture_bus::take_frame_owed;
     pub use frust_render::texture_bus::{
         MAX_RETIRING, NativeHandle, NativeHandleKind, NativeImporter, SourceFormat, SourceFrame,
         SourcePayload, TextureRegistration, native_importer_installed, register_texture_source,
+        request_frame,
     };
 }
 
