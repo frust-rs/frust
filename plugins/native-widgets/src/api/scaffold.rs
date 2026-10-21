@@ -253,31 +253,51 @@ fn refusal<Outer: 'static>() -> AnyView<Outer> {
     )
 }
 
+/// How a publisher's flush is queued: [`spawn_flush`] in production.
+type ScheduleFlush = fn(Rc<RefCell<ScrollPublisher>>);
+
+/// Queue `publisher`'s flush as a frame task on the UI thread.
+fn spawn_flush(publisher: Rc<RefCell<ScrollPublisher>>) {
+    frust::spawn_local(async move {
+        // The borrow ends before `flush`'s publish result is dropped.
+        let _ = publisher.borrow_mut().flush();
+    });
+}
+
 /// Coalesces scroll reports into at most one publish per frame: the listener
 /// records the newest value (`observe`) and the frame task publishes it
 /// (`flush`).
 struct ScrollPublisher {
     generation: Option<ChromeGeneration>,
     spec: ChromeSpec,
-    viewport: f64,
     queued: bool,
+    schedule: ScheduleFlush,
 }
 
 impl ScrollPublisher {
+    fn new(generation: Option<ChromeGeneration>, spec: ChromeSpec) -> Self {
+        Self {
+            generation,
+            spec,
+            queued: false,
+            schedule: spawn_flush,
+        }
+    }
+
     /// Adopt what the view just published.
     fn adopt(&mut self, generation: Option<ChromeGeneration>, spec: ChromeSpec) {
-        self.viewport = spec.scroll.map_or(self.viewport, |scroll| scroll.viewport);
         self.generation = generation;
         self.spec = spec;
     }
 
-    /// Record `info`; `true` when a flush must be scheduled (the value changed
-    /// and none is already queued).
-    fn observe(&mut self, info: ScrollInfo) -> bool {
+    /// Record `info` over `viewport`, the controller's extent as of this
+    /// report; `true` when a flush must be scheduled (the value changed and
+    /// none is already queued).
+    fn observe(&mut self, info: ScrollInfo, viewport: f64) -> bool {
         let state = ScrollState {
             offset: info.offset,
             max_offset: info.max_offset,
-            viewport: self.viewport,
+            viewport,
         };
         if self.spec.scroll == Some(state) {
             return false;
@@ -308,6 +328,7 @@ struct ScrollLink {
 impl ScrollLink {
     /// Make a frame task already queued for this link publish nothing.
     fn invalidate(&self) {
+        // Busy is the flush itself running; past a withdraw it gets Stale/Refused and forgets.
         if let Ok(mut publisher) = self.publisher.try_borrow_mut() {
             publisher.generation = None;
         }
@@ -423,29 +444,30 @@ impl<V> NativeScaffoldView<V> {
         spec: ChromeSpec,
     ) {
         let Some(controller) = &self.scroll else {
-            element.scroll = None;
+            // A flush queued before `.scroll(..)` went away must publish nothing.
+            if let Some(link) = element.scroll.take() {
+                link.invalidate();
+            }
             return;
         };
         let publisher = match element.scroll.take() {
             Some(link) => link.publisher,
-            None => Rc::new(RefCell::new(ScrollPublisher {
-                generation,
-                spec: spec.clone(),
-                viewport: 0.0,
-                queued: false,
-            })),
+            None => Rc::new(RefCell::new(ScrollPublisher::new(generation, spec.clone()))),
         };
         publisher.borrow_mut().adopt(generation, spec);
         let listener = Rc::clone(&publisher);
+        // The controller publishes its extent before notifying, so the
+        // viewport is read live: the rebuild-time value is 0 before layout.
+        let source = controller.clone();
         // `ScrollController` has no identity to compare, so every rebuild
         // resubscribes; the publisher (and its coalescing flag) carries over.
         let subscription = controller.on_change(move |info| {
-            if listener.borrow_mut().observe(info) {
-                let task = Rc::clone(&listener);
-                frust::spawn_local(async move {
-                    // The borrow ends before `flush`'s publish result is dropped.
-                    let _ = task.borrow_mut().flush();
-                });
+            let viewport = source.viewport_extent();
+            let mut publisher = listener.borrow_mut();
+            if publisher.observe(info, viewport) {
+                let schedule = publisher.schedule;
+                drop(publisher);
+                schedule(Rc::clone(&listener));
             }
         });
         element.scroll = Some(ScrollLink {
@@ -952,31 +974,29 @@ mod tests {
         let view = scaffold();
         let (mut element, _) = build(&view);
         let generation = element.generation;
-        let mut publisher = ScrollPublisher {
-            generation,
-            spec: view.spec(),
-            viewport: 600.0,
-            queued: false,
-        };
+        let mut publisher = ScrollPublisher::new(generation, view.spec());
         let at = |offset| ScrollInfo {
             offset,
             max_offset: 400.0,
             overscroll: 0.0,
         };
         assert!(
-            publisher.observe(at(10.0)),
+            publisher.observe(at(10.0), 600.0),
             "first change schedules a flush"
         );
-        assert!(!publisher.observe(at(20.0)), "a flush is already queued");
+        assert!(
+            !publisher.observe(at(20.0), 600.0),
+            "a flush is already queued"
+        );
         assert!(matches!(
             publisher.flush(),
             Some(PublishOutcome::Applied(_))
         ));
         assert!(
-            !publisher.observe(at(20.0)),
+            !publisher.observe(at(20.0), 600.0),
             "an unchanged value schedules nothing"
         );
-        assert!(publisher.observe(at(30.0)));
+        assert!(publisher.observe(at(30.0), 600.0));
         assert!(matches!(
             publisher.flush(),
             Some(PublishOutcome::Applied(_))
@@ -1010,7 +1030,10 @@ mod tests {
         let view = scaffold().scroll(ScrollController::new());
         let (mut element, _) = build(&view);
         let queued = scroll_publisher(&element);
-        assert!(queued.borrow_mut().observe(scrolled(10.0)), "flush queued");
+        assert!(
+            queued.borrow_mut().observe(scrolled(10.0), 600.0),
+            "flush queued"
+        );
         teardown(&view, &mut element);
         // What the spawned frame task does at the next local pump.
         let _ = queued.borrow_mut().flush();
@@ -1021,6 +1044,86 @@ mod tests {
             "got {outcome:?}"
         );
         teardown(&view, &mut next);
+    }
+
+    thread_local! {
+        /// Flushes [`queue_flush`] scheduled, for a test to run by hand.
+        static QUEUED: RefCell<Vec<Rc<RefCell<ScrollPublisher>>>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// A [`ScheduleFlush`] that queues for [`run_queued_flushes`] instead of
+    /// needing a UI-thread executor.
+    fn queue_flush(publisher: Rc<RefCell<ScrollPublisher>>) {
+        QUEUED.with(|queued| queued.borrow_mut().push(publisher));
+    }
+
+    fn run_queued_flushes() -> Vec<Option<PublishOutcome>> {
+        let queued = QUEUED.with(|queued| std::mem::take(&mut *queued.borrow_mut()));
+        queued
+            .iter()
+            .map(|task| task.borrow_mut().flush())
+            .collect()
+    }
+
+    #[test]
+    fn a_published_scroll_state_carries_the_live_viewport_after_layout() {
+        let _guard = chrome::slot_test_guard();
+        let controller = ScrollController::new();
+        let body = frust::scroll_view(frust::colored_box().size(300.0, 2000.0))
+            .controller(controller.clone());
+        let view = native_scaffold(body).scroll(controller.clone());
+        let mut counter = 0u64;
+        let (mut element, outcome) = view.build_synced::<()>(&mut BuildCtx::new(&mut counter));
+        assert!(matches!(outcome, PublishOutcome::Installed(_)));
+        let built = chrome::live_spec().and_then(|spec| spec.scroll);
+        assert!(
+            built.is_none_or(|scroll| scroll.viewport == 0.0),
+            "nothing is laid out at build: {built:?}"
+        );
+        scroll_publisher(&element).borrow_mut().schedule = queue_flush;
+        let bc = BoxConstraints::loose(Size::new(300.0, 500.0));
+        element.layout(&mut LayoutCtx::new(), &bc);
+        let outcomes = run_queued_flushes();
+        assert!(
+            matches!(outcomes.as_slice(), [Some(PublishOutcome::Applied(_))]),
+            "one coalesced publish: {outcomes:?}"
+        );
+        assert_eq!(controller.viewport_extent(), 500.0);
+        assert_eq!(
+            chrome::live_spec().and_then(|spec| spec.scroll),
+            Some(ScrollState {
+                offset: 0.0,
+                max_offset: 1500.0,
+                viewport: 500.0,
+            })
+        );
+        let mut counter = 0u64;
+        View::<()>::teardown(&view, &mut element, &mut BuildCtx::new(&mut counter));
+    }
+
+    #[test]
+    fn removing_scroll_invalidates_a_flush_queued_before() {
+        let _guard = chrome::slot_test_guard();
+        let view = scaffold().scroll(ScrollController::new());
+        let (mut element, _) = build(&view);
+        let queued = scroll_publisher(&element);
+        assert!(
+            queued.borrow_mut().observe(scrolled(10.0), 600.0),
+            "flush queued"
+        );
+        let unscrolled = scaffold();
+        assert!(matches!(
+            rebuild(&view, &unscrolled, &mut element),
+            PublishOutcome::Unchanged(_)
+        ));
+        assert!(element.scroll.is_none());
+        assert_eq!(queued.borrow_mut().flush(), None, "publishes nothing");
+        assert_eq!(
+            chrome::live_spec().map(|spec| spec.scroll),
+            Some(None),
+            "no stale scroll state reached the slot"
+        );
+        teardown(&unscrolled, &mut element);
     }
 
     #[test]
@@ -1044,13 +1147,8 @@ mod tests {
         assert!(chrome::withdraw(withdrawn));
         let (mut second, _) = build(&view);
         let flushed = || {
-            let mut publisher = ScrollPublisher {
-                generation: Some(withdrawn),
-                spec: view.spec(),
-                viewport: 600.0,
-                queued: false,
-            };
-            publisher.observe(scrolled(10.0));
+            let mut publisher = ScrollPublisher::new(Some(withdrawn), view.spec());
+            publisher.observe(scrolled(10.0), 600.0);
             let outcome = publisher.flush().expect("held a generation");
             (outcome, publisher.generation)
         };

@@ -41,6 +41,10 @@
 #[cfg(feature = "frust-api")]
 #[cfg_attr(test, allow(dead_code))]
 mod chrome;
+// The chrome arm's scroll mirror (decision C5), driven only by `chrome`.
+#[cfg(feature = "frust-api")]
+#[cfg_attr(test, allow(dead_code))]
+mod chrome_scroll;
 mod ctx;
 mod events;
 mod factory;
