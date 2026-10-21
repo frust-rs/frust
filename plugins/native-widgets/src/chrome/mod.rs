@@ -16,10 +16,10 @@
 //! - **Diff-gated.** The first [`publish`] installs; later ones diff against
 //!   the retained spec ([`ChromeDiff`]) and apply only the changed fields; an
 //!   identical spec makes no host call.
-//! - **One publisher.** Each install gets a fresh, never-zero, increasing
-//!   [`ChromeGeneration`]; a publish naming any other generation while one
-//!   is live is refused [`ChromeError::Busy`]. [`withdraw`] (scaffold
-//!   teardown) frees the slot only for its own generation.
+//! - **One publisher.** Only a generation-less publish installs, under a fresh, never-zero,
+//!   increasing [`ChromeGeneration`]; naming another generation while one is live is refused
+//!   [`ChromeError::Busy`], a withdrawn one on an empty slot is [`PublishOutcome::Stale`].
+//!   [`withdraw`] (scaffold teardown or drop) frees the slot only for its own generation.
 //! - **Controlled.** The bars never navigate: [`deliver`] decodes a
 //!   `(kind, detail)` report against the live spec into a [`ChromeEvent`]
 //!   for the registered sink, and the app confirms by publishing again.
@@ -343,6 +343,9 @@ pub(crate) enum PublishOutcome {
     Fallback(ChromeGeneration, ChromeError),
     /// Another generation holds the slot ([`ChromeError::Busy`]).
     Refused(ChromeError),
+    /// The publisher's generation was withdrawn and the slot is empty; nothing
+    /// was installed. Only a publisher holding no generation may claim it.
+    Stale,
 }
 
 impl PublishOutcome {
@@ -353,7 +356,7 @@ impl PublishOutcome {
             | Self::Applied(generation)
             | Self::Unchanged(generation)
             | Self::Fallback(generation, _) => Some(*generation),
-            Self::Refused(_) => None,
+            Self::Refused(_) | Self::Stale => None,
         }
     }
 }
@@ -392,6 +395,9 @@ impl<H: ChromeHost> ChromeSlot<H> {
         spec: ChromeSpec,
     ) -> PublishOutcome {
         let Some(live) = self.live.as_mut() else {
+            if publisher.is_some() {
+                return PublishOutcome::Stale;
+            }
             self.last_generation = self.last_generation.checked_add(1).unwrap_or(1);
             let generation = ChromeGeneration(self.last_generation);
             let installed = self.host.install(generation, &spec);
@@ -549,6 +555,12 @@ pub(crate) fn slot_test_guard() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     lock_slot().clear();
     guard
+}
+
+/// Test-only: the process-wide slot's live generation, if any.
+#[cfg(test)]
+pub(crate) fn live_generation() -> Option<ChromeGeneration> {
+    lock_slot().generation()
 }
 
 /// Publish `spec` to the process-wide slot — see [`ChromeSlot::publish`].
@@ -768,26 +780,31 @@ mod tests {
     }
 
     #[test]
-    fn withdraw_then_publish_installs_again_under_a_newer_generation() {
+    fn a_withdrawn_generation_is_stale_and_only_a_fresh_publisher_installs() {
         let mut slot = slot();
         let first = installed(&mut slot);
         assert!(slot.withdraw(first));
         assert!(!slot.withdraw(first), "withdraw is once");
         assert_eq!(slot.generation(), None);
-        let outcome = slot.publish(Some(first), spec());
+        slot.host_mut().take_calls();
+        assert_eq!(slot.publish(Some(first), spec()), PublishOutcome::Stale);
+        assert_eq!(
+            slot.generation(),
+            None,
+            "a stale publisher installs nothing"
+        );
+        assert_eq!(slot.host().calls().count(), 0);
+        let outcome = slot.publish(None, spec());
         let PublishOutcome::Installed(second) = outcome else {
             panic!("expected Installed, got {outcome:?}");
         };
         assert!(second > first, "generations increase");
         assert_eq!(
             slot.host_mut().take_calls(),
-            [
-                HostCall::Dispose,
-                HostCall::Install {
-                    generation: second,
-                    spec: spec()
-                }
-            ]
+            [HostCall::Install {
+                generation: second,
+                spec: spec()
+            }]
         );
     }
 
