@@ -26,15 +26,18 @@
 //!   Reports stamped with a withdrawn generation are dropped.
 //!
 //! The module is behind `frust-api` because the spec reuses the api layer's
-//! [`TabItem`]/[`TabIcon`]/[`TabId`]; it compiles on every target, and every
-//! target uses [`RecordingChromeHost`] until its arm lands.
+//! [`TabItem`]/[`TabIcon`]/[`TabId`]; it compiles on every target. iOS
+//! installs `crate::apple::chrome`'s host; every other target uses the inert
+//! `NullChromeHost` until its arm lands, and tests use `RecordingChromeHost`.
 
 /// The frust-drawn bars the scaffold shows from the same spec wherever no arm
 /// owns the chrome (see [`NATIVE_CHROME_ARM`]).
 pub(crate) mod fallback;
 pub(crate) mod host;
 
-pub(crate) use host::{ChromeDiff, ChromeError, ChromeHost, RecordingChromeHost};
+#[cfg(test)]
+pub(crate) use host::RecordingChromeHost;
+pub(crate) use host::{ChromeDiff, ChromeError, ChromeHost};
 
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, Once};
@@ -46,11 +49,11 @@ use crate::events::{
     unpack_chrome_tab, unpack_index,
 };
 
-/// Whether this target has a native chrome arm. `false` everywhere today, so
-/// every scaffold draws the [`fallback`] bars; the iOS and Android arms set it
-/// per `cfg` as they land. A target with an arm still draws the fallback for a
+/// Whether this target has a native chrome arm: iOS today (Android sets it
+/// when its arm lands in a3-02), so every other target's scaffold draws the
+/// [`fallback`] bars. A target with an arm still draws the fallback for a
 /// [`PublishOutcome::Fallback`] (its install was refused).
-pub(crate) const NATIVE_CHROME_ARM: bool = false;
+pub(crate) const NATIVE_CHROME_ARM: bool = cfg!(target_os = "ios");
 
 // --- the data contract ------------------------------------------------------
 
@@ -388,7 +391,8 @@ impl<H: ChromeHost> ChromeSlot<H> {
     }
 
     /// Publish `spec` as `publisher` — `None` for a scaffold that holds no
-    /// generation yet, else the one its first publish returned.
+    /// generation yet, else the one its first publish returned. A generation
+    /// whose install failed [`ChromeError::NoHost`] retries it here.
     pub(crate) fn publish(
         &mut self,
         publisher: Option<ChromeGeneration>,
@@ -429,6 +433,20 @@ impl<H: ChromeHost> ChromeSlot<H> {
             return PublishOutcome::Refused(ChromeError::Busy);
         }
         let generation = live.generation;
+        if live.installed == Err(ChromeError::NoHost) {
+            // NoHost is transient: retry; a success switches to the arm.
+            live.installed = self.host.install(generation, &spec);
+            live.spec = spec;
+            return match &live.installed {
+                Ok(()) => PublishOutcome::Installed(generation),
+                Err(error) => {
+                    if *error != ChromeError::NoHost {
+                        log_install_failure(error);
+                    }
+                    PublishOutcome::Fallback(generation, error.clone())
+                }
+            };
+        }
         if let Err(error) = &live.installed {
             let error = error.clone();
             live.spec = spec;
@@ -498,19 +516,23 @@ impl<H: ChromeHost> ChromeSlot<H> {
     }
 
     /// The live generation, if any.
+    #[cfg(test)]
     pub(crate) fn generation(&self) -> Option<ChromeGeneration> {
         self.live.as_ref().map(|live| live.generation)
     }
 
     /// The retained spec of the live generation, if any.
+    #[cfg(test)]
     pub(crate) fn spec(&self) -> Option<&ChromeSpec> {
         self.live.as_ref().map(|live| &live.spec)
     }
 
+    #[cfg(test)]
     pub(crate) fn host(&self) -> &H {
         &self.host
     }
 
+    #[cfg(test)]
     pub(crate) fn host_mut(&mut self) -> &mut H {
         &mut self.host
     }
@@ -532,11 +554,17 @@ fn log_install_failure(error: &ChromeError) {
     }
 }
 
-/// The host behind the process-wide slot; arms swap theirs in per target.
+/// The host behind the process-wide slot, per target: the iOS arm, the
+/// recorder under test, and the inert host everywhere else.
+#[cfg(all(target_os = "ios", not(test)))]
+type PlatformChromeHost = crate::apple::IosChromeHost;
+#[cfg(test)]
 type PlatformChromeHost = RecordingChromeHost;
+#[cfg(not(any(test, target_os = "ios")))]
+type PlatformChromeHost = host::NullChromeHost;
 
 static SLOT: Mutex<ChromeSlot<PlatformChromeHost>> =
-    Mutex::new(ChromeSlot::new(RecordingChromeHost::new()));
+    Mutex::new(ChromeSlot::new(PlatformChromeHost::new()));
 
 /// Lock [`SLOT`], recovering from poisoning: a panicking caller must not turn
 /// every later chrome call into a panic.
@@ -809,7 +837,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_install_holds_the_slot_without_host_calls() {
+    fn a_no_host_install_is_retried_on_the_next_publish() {
         let mut slot = ChromeSlot::new(RecordingChromeHost::refusing(ChromeError::NoHost));
         let outcome = slot.publish(None, spec());
         let PublishOutcome::Fallback(generation, ChromeError::NoHost) = outcome else {
@@ -828,14 +856,62 @@ mod tests {
             "fallback chrome still reads the spec"
         );
         assert_eq!(
+            slot.host_mut().take_calls(),
+            [HostCall::Install {
+                generation,
+                spec: next.clone()
+            }],
+            "a NoHost install is retried under the same generation"
+        );
+        assert_eq!(
             slot.publish(None, spec()),
             PublishOutcome::Refused(ChromeError::Busy)
         );
+        slot.host_mut().set_refusal(None);
+        assert_eq!(
+            slot.publish(Some(generation), spec()),
+            PublishOutcome::Installed(generation)
+        );
+        assert_eq!(
+            slot.publish(Some(generation), spec()),
+            PublishOutcome::Unchanged(generation)
+        );
+        assert!(slot.withdraw(generation));
+        assert_eq!(
+            slot.host_mut().take_calls(),
+            [
+                HostCall::Install {
+                    generation,
+                    spec: spec()
+                },
+                HostCall::Dispose
+            ]
+        );
+    }
+
+    #[test]
+    fn a_refused_install_pins_the_fallback_without_host_calls() {
+        let refusal = ChromeError::Refused("window already re-rooted".into());
+        let mut slot = ChromeSlot::new(RecordingChromeHost::refusing(refusal.clone()));
+        let outcome = slot.publish(None, spec());
+        let PublishOutcome::Fallback(generation, error) = outcome else {
+            panic!("expected Fallback, got {outcome:?}");
+        };
+        assert_eq!(error, refusal);
+        slot.host_mut().take_calls();
+        slot.host_mut().set_refusal(None);
+        let mut next = spec();
+        next.selected = None;
+        assert_eq!(
+            slot.publish(Some(generation), next.clone()),
+            PublishOutcome::Fallback(generation, refusal)
+        );
+        assert_eq!(slot.spec(), Some(&next));
         assert!(slot.withdraw(generation));
         assert_eq!(
             slot.host().calls().count(),
             0,
-            "nothing installed, nothing disposed"
+            "never retried, nothing installed, nothing disposed"
         );
     }
 

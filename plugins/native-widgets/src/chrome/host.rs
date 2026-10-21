@@ -1,8 +1,9 @@
 //! The `ChromeHost` seam a platform arm implements, the field-level
-//! [`ChromeDiff`] it is handed, and [`RecordingChromeHost`] — the stand-in
-//! every target without an arm uses, recording calls the way the runtime's
-//! host `NativeCtx` does.
+//! [`ChromeDiff`] it is handed, `NullChromeHost` — the production stand-in
+//! on every target without an arm — and the test-only `RecordingChromeHost`,
+//! which records calls the way the runtime's host `NativeCtx` does.
 
+#[cfg(test)]
 use std::collections::VecDeque;
 
 use super::{ChromeGeneration, ChromeSpec, TopBarSpec};
@@ -12,10 +13,13 @@ use super::{ChromeGeneration, ChromeSpec, TopBarSpec};
 pub(crate) enum ChromeError {
     /// The platform arm declined to install (an Android theme that is not
     /// Material3-derived, an inflate failure) — the app falls back to
-    /// frust-drawn chrome.
+    /// frust-drawn chrome. Only an arm constructs it.
+    #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
     #[error("native chrome refused: {0}")]
     Refused(String),
     /// No host surface exists yet (no resumed `Activity`, no key window).
+    /// Transient: the slot retries the install on the generation's next
+    /// publish, while a [`Self::Refused`] pins the fallback.
     #[error("no native chrome host is available")]
     NoHost,
     /// Another `native_scaffold` already owns the app chrome — one per app.
@@ -83,7 +87,8 @@ impl<'a> ChromeDiff<'a> {
         self.changed.is_empty()
     }
 
-    /// Whether `field` changed.
+    /// Whether `field` changed — an arm's question.
+    #[cfg_attr(not(any(test, target_os = "ios")), allow(dead_code))]
     pub(crate) fn contains(&self, field: ChromeField) -> bool {
         self.changed.contains(&field)
     }
@@ -109,12 +114,40 @@ pub(crate) trait ChromeHost {
     /// Update only `diff.changed`; never called with an empty diff.
     fn apply(&mut self, diff: &ChromeDiff<'_>);
 
-    /// Tear the containers down (scaffold teardown); only called after a
-    /// successful [`Self::install`].
+    /// Tear the containers down; only called after a successful
+    /// [`Self::install`]. Runs from scaffold teardown or from
+    /// `ScaffoldWidget::drop`, so it must be panic-free and must not assume
+    /// the host surface (window, `Activity`) is still alive.
     fn dispose(&mut self);
 }
 
+/// The production host on every target without a chrome arm: accepts every
+/// install and does nothing, so the scaffold draws the fallback bars.
+#[cfg(not(any(test, target_os = "ios")))]
+#[derive(Debug, Default)]
+pub(crate) struct NullChromeHost;
+
+#[cfg(not(any(test, target_os = "ios")))]
+impl NullChromeHost {
+    /// The host (const, for the process-wide slot's static).
+    pub(crate) const fn new() -> Self {
+        Self
+    }
+}
+
+#[cfg(not(any(test, target_os = "ios")))]
+impl ChromeHost for NullChromeHost {
+    fn install(&mut self, _: ChromeGeneration, _: &ChromeSpec) -> Result<(), ChromeError> {
+        Ok(())
+    }
+
+    fn apply(&mut self, _: &ChromeDiff<'_>) {}
+
+    fn dispose(&mut self) {}
+}
+
 /// One call a [`RecordingChromeHost`] saw.
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum HostCall {
     Install {
@@ -128,19 +161,21 @@ pub(crate) enum HostCall {
     Dispose,
 }
 
-/// The most calls a [`RecordingChromeHost`] keeps — it is the production
-/// host on every target without an arm, where scroll publishes arrive at
-/// frame rate, so the log drops its oldest entry rather than grow.
+/// The most calls a [`RecordingChromeHost`] keeps — scroll publishes arrive
+/// at frame rate, so the log drops its oldest entry rather than grow.
+#[cfg(test)]
 pub(crate) const RECORDED_CALLS_CAP: usize = 64;
 
-/// The stand-in host for every target without a chrome arm: accepts every
-/// install (unless built [`Self::refusing`]) and records each call.
+/// The test host: accepts every install (unless built [`Self::refusing`])
+/// and records each call.
+#[cfg(test)]
 #[derive(Debug, Default)]
 pub(crate) struct RecordingChromeHost {
     calls: VecDeque<HostCall>,
     refusal: Option<ChromeError>,
 }
 
+#[cfg(test)]
 impl RecordingChromeHost {
     /// A host that accepts every install.
     pub(crate) const fn new() -> Self {
@@ -156,6 +191,11 @@ impl RecordingChromeHost {
             calls: VecDeque::new(),
             refusal: Some(error),
         }
+    }
+
+    /// Make every later install fail with `error`, or succeed for `None`.
+    pub(crate) fn set_refusal(&mut self, error: Option<ChromeError>) {
+        self.refusal = error;
     }
 
     /// The recorded calls, oldest first.
@@ -176,6 +216,7 @@ impl RecordingChromeHost {
     }
 }
 
+#[cfg(test)]
 impl ChromeHost for RecordingChromeHost {
     fn install(
         &mut self,
