@@ -29,12 +29,15 @@
 //! [`TabItem`]/[`TabIcon`]/[`TabId`]; it compiles on every target, and every
 //! target uses [`RecordingChromeHost`] until its arm lands.
 
+/// The frust-drawn bars the scaffold shows from the same spec wherever no arm
+/// owns the chrome (see [`NATIVE_CHROME_ARM`]).
+pub(crate) mod fallback;
 pub(crate) mod host;
 
 pub(crate) use host::{ChromeDiff, ChromeError, ChromeHost, RecordingChromeHost};
 
 use std::fmt;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Once};
 
 use crate::api::{TabIcon, TabId, TabItem};
 use crate::events::{
@@ -42,6 +45,12 @@ use crate::events::{
     EVENT_KIND_CHROME_TAB, pack_chrome_menu, pack_chrome_tab, pack_index, unpack_chrome_menu,
     unpack_chrome_tab, unpack_index,
 };
+
+/// Whether this target has a native chrome arm. `false` everywhere today, so
+/// every scaffold draws the [`fallback`] bars; the iOS and Android arms set it
+/// per `cfg` as they land. A target with an arm still draws the fallback for a
+/// [`PublishOutcome::Fallback`] (its install was refused).
+pub(crate) const NATIVE_CHROME_ARM: bool = false;
 
 // --- the data contract ------------------------------------------------------
 
@@ -389,7 +398,7 @@ impl<H: ChromeHost> ChromeSlot<H> {
             let outcome = match &installed {
                 Ok(()) => PublishOutcome::Installed(generation),
                 Err(error) => {
-                    log::warn!("frust-native-widgets: {error}; rendering fallback chrome");
+                    log_install_failure(error);
                     PublishOutcome::Fallback(generation, error.clone())
                 }
             };
@@ -498,6 +507,22 @@ impl<H: ChromeHost> ChromeSlot<H> {
 
     pub(crate) fn host_mut(&mut self) -> &mut H {
         &mut self.host
+    }
+}
+
+/// Log an arm's failed install. A refusal is a property of the app's theme,
+/// not of one scaffold, so it is logged once per process and names the fix.
+fn log_install_failure(error: &ChromeError) {
+    static REFUSAL_LOGGED: Once = Once::new();
+    match error {
+        ChromeError::Refused(_) => REFUSAL_LOGGED.call_once(|| {
+            log::warn!(
+                "frust-native-widgets: {error}; the native chrome arm needs a Material3-derived \
+                 app theme (Android: a Theme.Material3.* parent) — rendering frust-drawn \
+                 fallback chrome"
+            );
+        }),
+        _ => log::warn!("frust-native-widgets: {error}; rendering fallback chrome"),
     }
 }
 

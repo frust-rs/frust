@@ -19,7 +19,9 @@
 //! On a target with a chrome arm the host already reports the bars through the
 //! window insets (iOS safe area) or shrinks the surface (Android), so the body
 //! uses the facade's `safe_area` as usual. The scaffold adds no padding of its
-//! own: do not double-pad.
+//! own: do not double-pad. The fallback bars (`crate::chrome::fallback`) take
+//! the top and bottom insets themselves and lay the body out between them
+//! with those edges consumed, so the same `safe_area` body pads only the sides.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -29,15 +31,18 @@ use frust::authoring::{build_child, rebuild_child, route_event_single, teardown_
 use frust::{RwSignal, ScrollController, ScrollInfo, ScrollSubscription, Set};
 use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, Widget,
+    LayoutCtx, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, View, Widget, WindowInsets,
 };
 use kurbo::{Point, Size};
 
 use super::builders::{TabId, TabItem, banner_placeholder};
 use super::signals::{ChromeHandlers, on_chrome};
+use crate::chrome::fallback::{
+    fallback_tab_row, fallback_top_bar, teardown_tab_row, teardown_top_bar,
+};
 use crate::chrome::{
     self, ActionId, ActionItem, ChromeEvent, ChromeGeneration, ChromeSpec, Leading, MenuItemId,
-    PublishOutcome, ScrollState, TopBarSpec,
+    NATIVE_CHROME_ARM, PublishOutcome, ScrollState, TopBarSpec,
 };
 
 /// The refusal banner's label.
@@ -288,17 +293,58 @@ struct ScrollLink {
 }
 
 /// The retained widget of a [`NativeScaffoldView`]: the body, the refusal
-/// line when refused, and the chrome publication it owns.
+/// line when refused, the fallback bars when drawn, and the chrome
+/// publication it owns.
 pub struct ScaffoldWidget {
     body: ChildPod,
     banner: Option<ChildPod>,
+    top: Option<ChildPod>,
+    bottom: Option<ChildPod>,
     generation: Option<ChromeGeneration>,
     scroll: Option<ScrollLink>,
 }
 
+/// Whether `outcome` leaves the bars to frust: always without an arm, and on
+/// a refused install with one. A refused publisher holds no chrome at all.
+fn draws_fallback(outcome: &PublishOutcome) -> bool {
+    match outcome {
+        PublishOutcome::Refused(_) => false,
+        PublishOutcome::Fallback(..) => true,
+        _ => !NATIVE_CHROME_ARM,
+    }
+}
+
+type Retire = fn(&mut ChildPod, &mut BuildCtx<'_>);
+
+/// Bring one fallback bar's pod in line with `view` (`None`: no bar).
+fn sync_bar<Outer: 'static>(
+    slot: &mut Option<ChildPod>,
+    view: Option<AnyView<Outer>>,
+    retire: Retire,
+    ctx: &mut BuildCtx<'_>,
+) -> ChangeFlags {
+    match (slot.is_some(), view) {
+        (false, None) => ChangeFlags::NONE,
+        (false, Some(view)) => {
+            *slot = Some(build_child(&view, ctx));
+            ChangeFlags::LAYOUT | ChangeFlags::PAINT
+        }
+        (true, Some(view)) => match slot.as_mut() {
+            Some(pod) => rebuild_child(&view, &view, pod, ctx),
+            None => ChangeFlags::NONE,
+        },
+        (true, None) => {
+            if let Some(mut pod) = slot.take() {
+                retire(&mut pod, ctx);
+            }
+            ChangeFlags::LAYOUT | ChangeFlags::PAINT
+        }
+    }
+}
+
 impl<V> NativeScaffoldView<V> {
-    /// Publish this builder's spec for `element` and bring its banner and
-    /// scroll subscription in line with the outcome.
+    /// Publish this builder's spec for `element` and bring its banner,
+    /// fallback bars and scroll subscription in line with the outcome.
     fn sync<Outer: 'static>(
         &self,
         element: &mut ScaffoldWidget,
@@ -329,6 +375,15 @@ impl<V> NativeScaffoldView<V> {
             }
             (true, false) => {}
         }
+        let drawn = generation.filter(|_| draws_fallback(&outcome));
+        let top = drawn
+            .filter(|_| spec.top.is_some())
+            .map(|generation| fallback_top_bar::<Outer>(&spec, generation));
+        let tabs = drawn
+            .filter(|_| !spec.tabs.is_empty())
+            .map(|generation| fallback_tab_row::<Outer>(&spec, generation));
+        flags |= sync_bar(&mut element.top, top, teardown_top_bar::<Outer>, ctx);
+        flags |= sync_bar(&mut element.bottom, tabs, teardown_tab_row::<Outer>, ctx);
         self.sync_scroll(element, generation, spec);
         (flags, outcome)
     }
@@ -382,6 +437,8 @@ impl<V> NativeScaffoldView<V> {
         let mut element = ScaffoldWidget {
             body: build_child(&self.body, ctx),
             banner: None,
+            top: None,
+            bottom: None,
             generation: None,
             scroll: None,
         };
@@ -426,11 +483,70 @@ impl<Outer: 'static, V: View<Outer>> View<Outer> for NativeScaffoldView<V> {
         if let Some(mut banner) = element.banner.take() {
             teardown_child(&refusal::<Outer>(), &mut banner, ctx);
         }
+        if let Some(mut top) = element.top.take() {
+            teardown_top_bar::<Outer>(&mut top, ctx);
+        }
+        if let Some(mut bottom) = element.bottom.take() {
+            teardown_tab_row::<Outer>(&mut bottom, ctx);
+        }
         element.scroll = None;
         if let Some(generation) = element.generation.take() {
             chrome::withdraw(generation);
         }
     }
+}
+
+impl ScaffoldWidget {
+    fn has_bars(&self) -> bool {
+        self.top.is_some() || self.bottom.is_some()
+    }
+
+    /// The insets the body sees: the edges the fallback bars took, consumed.
+    fn body_insets(&self, insets: WindowInsets) -> WindowInsets {
+        insets.consuming(false, self.top.is_some(), false, self.bottom.is_some())
+    }
+}
+
+/// [`frust::authoring::route_event`] over the scaffold's separately held
+/// pods, given in paint order.
+fn route_pods(
+    pods: &mut [&mut ChildPod],
+    ctx: &mut EventCtx<'_>,
+    event: &InputEvent,
+) -> EventResult {
+    if event.is_broadcast() {
+        for pod in pods.iter_mut() {
+            pod.event_child(ctx, event);
+        }
+        return EventResult::Ignored;
+    }
+    if event.is_focus_routed() {
+        return match pods.iter_mut().find(|pod| pod.holds_live_focus()) {
+            Some(pod) => pod.event_child(ctx, event),
+            None => EventResult::Ignored,
+        };
+    }
+    if let Some(pod) = pods.iter_mut().find(|pod| pod.is_active()) {
+        return route_event_single(pod, ctx, event);
+    }
+    let position = event.position();
+    let mut handled = EventResult::Ignored;
+    let mut kept_focus = None;
+    for (i, pod) in pods.iter_mut().enumerate().rev() {
+        if pod.contains(position) && pod.event_child(ctx, event) == EventResult::Handled {
+            kept_focus = pod.holds_live_focus().then_some(i);
+            handled = EventResult::Handled;
+            break;
+        }
+    }
+    if matches!(event, InputEvent::Pointer(p) if p.phase == PointerPhase::Down) {
+        for (i, pod) in pods.iter_mut().enumerate() {
+            if Some(i) != kept_focus && pod.is_focused() {
+                pod.set_focused(false);
+            }
+        }
+    }
+    handled
 }
 
 impl Widget for ScaffoldWidget {
@@ -447,34 +563,92 @@ impl Widget for ScaffoldWidget {
             }
             None => 0.0,
         };
-        let body_bc = BoxConstraints::new(
-            Size::new(bc.min().width, (bc.min().height - banner_height).max(0.0)),
-            Size::new(bc.max().width, (bc.max().height - banner_height).max(0.0)),
-        );
-        let body = self.body.layout_child(ctx, &body_bc);
-        self.body.set_origin(Point::new(0.0, banner_height));
-        bc.constrain(Size::new(body.width, body.height + banner_height))
+        if !self.has_bars() {
+            let body_bc = BoxConstraints::new(
+                Size::new(bc.min().width, (bc.min().height - banner_height).max(0.0)),
+                Size::new(bc.max().width, (bc.max().height - banner_height).max(0.0)),
+            );
+            let body = self.body.layout_child(ctx, &body_bc);
+            self.body.set_origin(Point::new(0.0, banner_height));
+            return bc.constrain(Size::new(body.width, body.height + banner_height));
+        }
+        // Column: banner, top bar, body (flexible), tab row — bars full width.
+        let width = if bc.max().width.is_finite() {
+            bc.max().width
+        } else {
+            bc.min().width
+        };
+        let bar_bc = BoxConstraints::new(Size::new(width, 0.0), Size::new(width, bc.max().height));
+        let mut bar_height = |bar: &mut Option<ChildPod>| {
+            bar.as_mut()
+                .map_or(0.0, |bar| bar.layout_child(ctx, &bar_bc).height)
+        };
+        let top_height = bar_height(&mut self.top);
+        let bottom_height = bar_height(&mut self.bottom);
+        let used = banner_height + top_height + bottom_height;
+        let body_bc = if bc.max().height.is_finite() {
+            let height = (bc.max().height - used).max(0.0);
+            BoxConstraints::new(
+                Size::new(bc.min().width, height),
+                Size::new(bc.max().width, height),
+            )
+        } else {
+            BoxConstraints::new(
+                Size::new(bc.min().width, 0.0),
+                Size::new(bc.max().width, f64::INFINITY),
+            )
+        };
+        let insets = self.body_insets(ctx.window_insets());
+        let body = &mut self.body;
+        let body_size = ctx.with_window_insets(insets, |ctx| body.layout_child(ctx, &body_bc));
+        let body_y = banner_height + top_height;
+        self.body.set_origin(Point::new(0.0, body_y));
+        if let Some(top) = &mut self.top {
+            top.set_origin(Point::new(0.0, banner_height));
+        }
+        if let Some(bottom) = &mut self.bottom {
+            bottom.set_origin(Point::new(0.0, body_y + body_size.height));
+        }
+        bc.constrain(Size::new(
+            body_size.width.max(width),
+            used + body_size.height,
+        ))
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
-        self.body.paint_child(ctx, scene);
-        if let Some(banner) = &mut self.banner {
-            banner.paint_child(ctx, scene);
+        let insets = self.body_insets(ctx.window_insets());
+        let body = &mut self.body;
+        ctx.with_window_insets(insets, |ctx| body.paint_child(ctx, scene));
+        for pod in [&mut self.top, &mut self.bottom, &mut self.banner]
+            .into_iter()
+            .flatten()
+        {
+            pod.paint_child(ctx, scene);
         }
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        route_event_single(&mut self.body, ctx, event)
+        if !self.has_bars() {
+            return route_event_single(&mut self.body, ctx, event);
+        }
+        let mut pods: Vec<&mut ChildPod> = std::iter::once(&mut self.body)
+            .chain(self.top.as_mut())
+            .chain(self.bottom.as_mut())
+            .collect();
+        route_pods(&mut pods, ctx, event)
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
+        for pod in [&self.top, &self.banner].into_iter().flatten() {
+            pod.semantics_child(ctx);
+        }
         self.body.semantics_child(ctx);
-        if let Some(banner) = &self.banner {
-            banner.semantics_child(ctx);
+        if let Some(bottom) = &self.bottom {
+            bottom.semantics_child(ctx);
         }
     }
 
-    frust::authoring::visit_children!(body, banner);
+    frust::authoring::visit_children!(body, banner, top, bottom);
 }
 
 #[cfg(test)]
@@ -570,7 +744,12 @@ mod tests {
         let (mut second, outcome) = build(&view);
         assert!(matches!(outcome, PublishOutcome::Refused(_)));
         assert!(second.banner.is_some() && second.generation.is_none());
+        assert!(second.top.is_none() && second.bottom.is_none(), "no bars");
         assert!(first.banner.is_none());
+        assert!(
+            first.top.is_some() && first.bottom.is_some(),
+            "fallback bars"
+        );
         assert!(matches!(
             rebuild(&view, &scaffold(), &mut first),
             PublishOutcome::Unchanged(_)
@@ -709,6 +888,33 @@ mod tests {
     }
 
     #[test]
+    fn the_fallback_draws_unless_refused_and_follows_the_spec() {
+        let _guard = chrome::slot_test_guard();
+        let generation = || chrome::publish(None, ChromeSpec::default()).generation();
+        let held = generation().expect("an empty slot installs");
+        let refused = chrome::ChromeError::Refused("stock theme".into());
+        assert!(draws_fallback(&PublishOutcome::Fallback(held, refused)));
+        assert!(!draws_fallback(&PublishOutcome::Refused(
+            chrome::ChromeError::Busy
+        )));
+        assert_eq!(
+            draws_fallback(&PublishOutcome::Installed(held)),
+            !NATIVE_CHROME_ARM
+        );
+        chrome::withdraw(held);
+        let view = native_scaffold(text("body")).title("Only a title");
+        let (mut element, _) = build(&view);
+        assert!(element.top.is_some() && element.bottom.is_none());
+        let tabs_only = native_scaffold(text("body")).tabs(
+            vec![TabItem::new("a", "A", TabIcon::AppleSymbol("a".into()))],
+            "a",
+        );
+        rebuild(&view, &tabs_only, &mut element);
+        assert!(element.top.is_none() && element.bottom.is_some());
+        teardown(&tabs_only, &mut element);
+    }
+
+    #[test]
     fn layout_stacks_the_banner_above_the_body() {
         let _guard = chrome::slot_test_guard();
         let view = scaffold();
@@ -717,9 +923,17 @@ mod tests {
         let bc = BoxConstraints::loose(Size::new(300.0, 500.0));
         let mut text_ctx = frust_text::TextContext::new();
         let mut lctx = LayoutCtx::with_text_context(&mut text_ctx as &mut dyn std::any::Any);
-        let plain = first.layout(&mut lctx, &bc);
-        let stacked = second.layout(&mut lctx, &bc);
-        assert!(stacked.height > plain.height, "the banner adds height");
+        first.layout(&mut lctx, &bc);
+        second.layout(&mut lctx, &bc);
+        assert!(
+            second.body.origin().y > 0.0,
+            "the banner sits above the body"
+        );
+        assert_eq!(
+            first.body.origin().y,
+            first.top.as_ref().map_or(0.0, |top| top.size().height),
+            "the fallback top bar sits above the body"
+        );
         teardown(&view, &mut first);
         teardown(&view, &mut second);
     }
