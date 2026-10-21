@@ -762,6 +762,25 @@ mod tests {
     }
 
     #[test]
+    fn a_brightness_only_publish_is_an_applied_brightness_diff() {
+        let mut slot = slot();
+        let generation = installed(&mut slot);
+        let mut next = spec();
+        next.dark = !next.dark;
+        assert_eq!(
+            slot.publish(Some(generation), next.clone()),
+            PublishOutcome::Applied(generation)
+        );
+        assert_eq!(
+            slot.host_mut().take_calls(),
+            [HostCall::Apply {
+                changed: vec![ChromeField::Brightness],
+                spec: next,
+            }]
+        );
+    }
+
+    #[test]
     fn a_diff_applies_only_the_changed_fields() {
         let mut slot = slot();
         let generation = installed(&mut slot);
@@ -795,7 +814,7 @@ mod tests {
     fn every_field_is_reported_on_its_own() {
         let base = spec();
         type Edit = (ChromeField, fn(&mut ChromeSpec));
-        let edits: [Edit; 8] = [
+        let edits: [Edit; 9] = [
             (ChromeField::Tabs, |s| s.tabs.truncate(1)),
             (ChromeField::Selected, |s| s.selected = None),
             (ChromeField::Title, |s| {
@@ -816,6 +835,7 @@ mod tests {
             (ChromeField::Scroll, |s| {
                 s.scroll = Some(ScrollState::default())
             }),
+            (ChromeField::Brightness, |s| s.dark = !s.dark),
         ];
         for (field, edit) in edits {
             let mut next = base.clone();

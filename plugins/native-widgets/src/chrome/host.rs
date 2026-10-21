@@ -40,6 +40,8 @@ pub(crate) enum ChromeField {
     Actions,
     LargeTitle,
     Scroll,
+    /// The app theme's brightness (`ChromeSpec::dark`).
+    Brightness,
 }
 
 /// What changed between the retained spec and a newly published one. A
@@ -74,6 +76,7 @@ impl<'a> ChromeDiff<'a> {
                 old_top.large_title != new_top.large_title,
             ),
             (ChromeField::Scroll, old.scroll != new.scroll),
+            (ChromeField::Brightness, old.dark != new.dark),
         ];
         let changed = checks
             .into_iter()
