@@ -11,9 +11,11 @@
 //! the renderer is done with each frame — see `frust::texture`'s module doc
 //! for when that is.
 
+use std::sync::Arc;
+
 use frust::texture::{
     NativeHandle, NativeHandleKind, SourceFormat, SourceFrame, SourcePayload, TextureRegistration,
-    register_texture_source,
+    register_texture_source, request_frame,
 };
 use frust_plugin::texture::{
     FramePayload, NativeHandleKind as FrameHandleKind, TextureFormat, TextureFrame, TextureSink,
@@ -46,9 +48,32 @@ impl VideoPlayerHandle {
 }
 
 /// Registers `sink` as a renderer frame source: each poll takes its newest
-/// frame and converts it with [`source_frame`].
+/// frame and converts it with [`source_frame`], and each push owes the shell
+/// a frame while the registration lives (see [`WakeWhileRegistered`]).
 fn register_sink(sink: TextureSink) -> TextureRegistration {
-    register_texture_source(move || sink.take_latest().and_then(source_frame))
+    let wake = WakeWhileRegistered::install(sink);
+    register_texture_source(move || wake.sink.take_latest().and_then(source_frame))
+}
+
+/// The sink a registration polls, with [`request_frame`] installed as its
+/// waker for exactly as long as this lives. The registration's frame source
+/// owns it, and the renderer drops that source when the registration is
+/// dropped, so a push into an unregistered sink wakes nothing.
+struct WakeWhileRegistered {
+    sink: TextureSink,
+}
+
+impl WakeWhileRegistered {
+    fn install(sink: TextureSink) -> Self {
+        sink.set_waker(Some(Arc::new(request_frame)));
+        Self { sink }
+    }
+}
+
+impl Drop for WakeWhileRegistered {
+    fn drop(&mut self) {
+        self.sink.set_waker(None);
+    }
 }
 
 /// Carries a producer-side frame into the renderer's twin type, field for
@@ -105,9 +130,10 @@ pub(crate) fn hardware_buffer_import_installed() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+    use frust::texture::take_frame_owed;
     use frust_plugin::texture::FrameMeta;
 
     use super::*;
@@ -208,5 +234,64 @@ mod tests {
         );
         drop(converted);
         assert_eq!(released.load(Ordering::SeqCst), 1);
+    }
+
+    /// Serializes every test here that pushes into a registered sink: the
+    /// owed-frame flag those pushes raise is one per process.
+    static OWED_FLAG: Mutex<()> = Mutex::new(());
+
+    fn owed_flag() -> MutexGuard<'static, ()> {
+        let guard = OWED_FLAG.lock().unwrap_or_else(PoisonError::into_inner);
+        let _ = take_frame_owed();
+        guard
+    }
+
+    fn rgba() -> TextureFrame {
+        TextureFrame::rgba8(1, 1, Arc::from(vec![0u8; 4]))
+    }
+
+    #[test]
+    fn a_push_into_a_registered_sink_owes_one_frame() {
+        let _flag = owed_flag();
+        let sink = TextureSink::new();
+        let _registration = register_sink(sink.clone());
+        assert!(sink.has_waker(), "registering installs the waker");
+        sink.push(rgba());
+        assert!(take_frame_owed(), "the push owes the shell a frame");
+        assert!(!take_frame_owed(), "taking cleared it");
+    }
+
+    #[test]
+    fn pushes_before_a_take_coalesce_into_one_owed_frame() {
+        let _flag = owed_flag();
+        let sink = TextureSink::new();
+        let _registration = register_sink(sink.clone());
+        sink.push(rgba());
+        sink.push(rgba());
+        sink.push(rgba());
+        assert!(take_frame_owed());
+        assert!(!take_frame_owed(), "three pushes owed one frame");
+    }
+
+    #[test]
+    fn a_push_into_an_unregistered_sink_owes_nothing() {
+        let _flag = owed_flag();
+        let sink = TextureSink::new();
+        sink.push(rgba());
+        assert!(!sink.has_waker());
+        assert!(!take_frame_owed());
+    }
+
+    #[test]
+    fn a_dropped_registration_stops_waking() {
+        let _flag = owed_flag();
+        let sink = TextureSink::new();
+        drop(register_sink(sink.clone()));
+        assert!(
+            !sink.has_waker(),
+            "dropping the registration clears the waker"
+        );
+        sink.push(rgba());
+        assert!(!take_frame_owed());
     }
 }

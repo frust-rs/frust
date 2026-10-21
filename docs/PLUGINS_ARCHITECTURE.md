@@ -160,6 +160,9 @@ hosting `UIView` and the playback audio-session category) and `objc2-app-kit` on
 only), and pulls from the sink — `frust-plugin` stays a leaf and the facade never names a plugin. A
 producer builds its frames through `TextureFrame::new`/`rgba8` and `on_release`, and its handles
 through the unsafe `NativeHandle::new`, keeping its own reference until the release callback runs.
+A bridge installs `frust::texture::request_frame` as the sink's waker (`TextureSink::set_waker`)
+only while its source is registered and clears it when the registration drops, one sink per
+registration, so a push into an unshown sink wakes nothing.
 Only the bridge's one unsafe block splits a frame (`into_parts`), after checking the format and
 running the guarded `release` on a mismatch; a producer never splits its own frame. Release
 callbacks must not panic and must not assume an attached JVM thread: a Java-touching release uses

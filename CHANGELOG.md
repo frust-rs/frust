@@ -6,8 +6,40 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ## Unreleased
 
+### Added
+
+- `frust::texture::request_frame`: a producer that has a new frame owes the shell one frame, so an
+  idle `texture_view` stays live without a ticker. `TextureSink::set_waker` (`SinkWaker`) runs
+  after every push; the camera and video-player bridges install `request_frame` there while their
+  source is registered. The mobile frame gates and the desktop loop take the owed frame
+  (`frust_render::texture_bus::{request_frame, take_frame_owed, set_frame_request_hook}`); the web
+  shell does not yet (`texture-bus-no-wake-on-push`).
+- The iOS C export `frust_overlay_take_released` (additive, declared in `frust_ffi.h`, emitted by
+  `ios_app!`): it hands back the overlay layers whose surface has dropped.
+- `frust-shell-common::overlay`: the shared `OverlayTable`, `OverlaySwitch`, `FrameRequest`,
+  `assemble_overlay_cuts` and `SkewWindow` that the Android, iOS and macOS overlay hosts now use.
+
+### Changed
+
+- Overlay withdraw never blocks the UI thread on Android, iOS or macOS. All three hosts share one
+  overlay table; a layer comes back only after its surface dropped. On iOS `frust_overlay_detach`
+  returns at once, so a host keeps a detached view hidden until `frust_overlay_take_released`
+  returns its layer (the shipped `FrustViewHost` does); macOS removes a withdrawn view when the
+  release arrives.
+- Android: the overlay lock is no longer held across the main-surface acquire, and
+  `surfaceDestroyed` for an overlay does not wait. An overlay out for a frame is released when that
+  frame lands, so one frame may present into a window Android already destroyed; the present fails
+  and is logged at debug (`android-overlay-withdraw-after-return`).
+- The overlay switch takes the first non-blank source — runtime `FRUST_OVERLAYS`, compile-time
+  `FRUST_OVERLAYS`, then the same two for the `FRUST_OVERLAY_SPIKE` alias — so a runtime
+  `FRUST_OVERLAY_SPIKE=0` switches off an alias value baked in at compile time.
+- iOS overlay views host their `CAMetalLayer` as a sublayer sized on the main thread, and the
+  render thread leaves `drawableSize` alone.
+
 ### Fixed
 
+- macOS overlays follow the window's backing scale: a move between a 2x and a 1x display
+  republishes the overlay layers, which stay sharp at each scale.
 - `frust-url-launcher`: `UrlLauncherError::NoHandler` reads "no handler for this URL on this
   device" instead of naming only `http`/`https`, since `open_maps_native` returns it for native
   map schemes on desktop.

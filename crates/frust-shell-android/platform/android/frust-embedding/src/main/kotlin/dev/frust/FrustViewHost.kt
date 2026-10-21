@@ -135,9 +135,11 @@ class FrustViewHost(
         }
 
         override fun surfaceDestroyed(holder: SurfaceHolder) {
-            // Synchronous: the native side drops the overlay's GPU surface and
-            // releases its window before this returns, as the platform
-            // requires of `surfaceDestroyed`.
+            // The native side never waits for the render thread. An idle
+            // overlay's GPU surface is dropped and its window released before
+            // this returns; one that is out for a frame is released after that
+            // frame, which may fail its present into the dead window once
+            // (logged at debug, not an error).
             surfaceView.overlaySurfaceDestroyed(overlayId)
         }
     }
@@ -394,9 +396,13 @@ class FrustViewHost(
     }
 
     /**
-     * Tear overlay `overlay` down: the native side drops its GPU surface and
-     * releases its window first, then the view goes (its own
-     * `surfaceDestroyed` is then a native no-op).
+     * Tear overlay `overlay` down. The native side never waits for the render
+     * thread: an idle overlay's GPU surface is dropped and its window released
+     * before the call returns; one that is out for a frame is released after
+     * that frame, which may fail its present into the dead window once (logged
+     * at debug, not an error). Removing the view afterwards is safe because the
+     * native side holds its own window reference until then, and the view's own
+     * `surfaceDestroyed` is then a native no-op.
      */
     private fun applyDisposeOverlay(cmd: JSONObject) {
         val overlay = overlays.remove(cmd.optLong("overlay")) ?: return

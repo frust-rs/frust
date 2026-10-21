@@ -195,7 +195,11 @@ pub trait DesktopExtensions {
     ///
     /// Called only when there is something to apply — an unchanged frame (the
     /// common case: nothing hosted, or a static hosted view) never reaches the
-    /// hook at all.
+    /// hook at all. With overlays on it is also called when a withdrawn overlay
+    /// layer is free to release ([`take_released_overlay_layers`]) or the
+    /// window's scale changed (a move between displays of different density);
+    /// the batch may then be empty, and a host with overlays re-reads the scale
+    /// and republishes each overlay's drawable size.
     fn on_platform_view_commands(
         &mut self,
         window: &Arc<Window>,
@@ -257,7 +261,8 @@ pub fn overlays_enabled() -> bool {
 /// the next unrelated repaint.
 ///
 /// The host must keep `layer` alive until [`withdraw_overlay_layer`] for the
-/// same id has returned.
+/// same id answers `true`, or the layer comes back from
+/// [`take_released_overlay_layers`].
 #[doc(hidden)]
 pub fn publish_overlay_layer(
     overlay_id: u64,
@@ -275,14 +280,32 @@ pub fn publish_overlay_layer(
     )
 }
 
-/// Withdraw overlay `overlay_id`'s layer **before** the host releases it:
-/// waits out a frame that is drawing the overlay's surface, then drops the
-/// surface. On return the layer may go. A no-op for an id never published.
+/// Withdraw overlay `overlay_id`'s layer **before** the host releases it.
+/// Never waits on the render side: answers `true` when the surface on the
+/// layer is already dropped, so the layer may go now (also for an id never
+/// published), and `false` when a frame is drawing it — the layer then comes
+/// back from [`take_released_overlay_layers`] once that frame dropped it, and
+/// [`DesktopExtensions::on_platform_view_commands`] is called so the host
+/// can take it. Hide the view meanwhile.
 #[doc(hidden)]
-pub fn withdraw_overlay_layer(overlay_id: u64) {
-    if overlays_enabled() {
-        crate::render::withdraw_overlay_layer(overlay_id);
+pub fn withdraw_overlay_layer(overlay_id: u64) -> bool {
+    !overlays_enabled() || crate::render::withdraw_overlay_layer(overlay_id)
+}
+
+/// The overlay layers withdrawn while a frame drew them whose surface has
+/// since been dropped, oldest first — each the `CAMetalLayer*` the host
+/// published, now its to release. Taken once: a second call answers only
+/// layers freed since. Poll it from
+/// [`DesktopExtensions::on_platform_view_commands`].
+#[doc(hidden)]
+pub fn take_released_overlay_layers() -> Vec<std::ptr::NonNull<std::ffi::c_void>> {
+    if !overlays_enabled() {
+        return Vec::new();
     }
+    crate::render::take_released_overlay_layers()
+        .into_iter()
+        .filter_map(|layer| std::ptr::NonNull::new(std::ptr::with_exposed_provenance_mut(layer)))
+        .collect()
 }
 
 /// The no-op extension set: every hook keeps this core's own behavior.

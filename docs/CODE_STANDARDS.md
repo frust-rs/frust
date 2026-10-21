@@ -26,14 +26,21 @@ off this index — read this plus the one that covers what you are touching:
     `nativeInitPlatform`'s `JavaVM` stash), the `android_app!`/`ios_app!` generated exports, and the
     render-thread split's `unsafe impl Send` for `SendableWindowPtr`/`SendableMetalLayer` plus the
     bare `libc` priority/QoS call kept for the `FRUST_NO_THREAD_TUNING` arm. Android's zone also
-    holds `prepare_overlays`'s one `OverlaySurface::new` call (an overlay `ANativeWindow` to a
-    `wgpu::Surface`, dropped before the window); iOS's holds `take_frame_overlays`'s
-    `OverlaySurface::new` (an overlay `CAMetalLayer`) and the `ios_app!`-emitted `frust_overlay_*`
-    exports. Android's `adpf::platform` holds the opt-in performance-hint `dlsym` binding
-    (`libandroid.so`).
+    holds `prepare_overlays`'s one `OverlaySurface::new` call; iOS's holds `take_frame_overlays`'s
+    plus the `ios_app!`-emitted `frust_overlay_*` exports (`frust_overlay_take_released` writes
+    `count <= capacity` layer pointers into Swift's buffer). Every overlay `OverlaySurface::new`
+    site argues SAFETY from the shared `OverlayTable` order: a surface drops before its layer or
+    window is handed back. That is ordering and leak-freedom, not memory safety — wgpu-hal retains
+    the `CAMetalLayer` itself on Apple; on Android the table's held `ANativeWindow` reference keeps
+    the object valid past `surfaceDestroyed` (a late present fails, it does not touch freed memory).
+    Android's `adpf::platform` holds the opt-in performance-hint `dlsym` binding (`libandroid.so`).
   - `frust-shell-desktop`'s `render.rs` (macOS only) — `build_overlay_surface`, one
-    `OverlaySurface::new(.., OverlayTarget::CoreAnimationLayer(ptr), ..)` block; the layer crosses
-    threads as an exposed-provenance `usize`, so there is no `unsafe impl Send`.
+    `OverlaySurface::new(.., OverlayTarget::CoreAnimationLayer(ptr), ..)` block under the same
+    table order; the layer crosses threads as an exposed-provenance `usize`, so there is no
+    `unsafe impl Send`.
+  - `frust-shell-macos`'s `platform_view` (macOS only) — the `FrustOverlaySurfaceView`
+    `define_class!`, the `msg_send!` calls building and rescaling the overlay's `CAMetalLayer`
+    and view, and the view-handle `from_raw`/`Retained` conversions; each `SAFETY`-noted.
   - `frust-shell-macos`'s `appkit_glue` module — four `SAFETY`-noted sites: the reopen-observer
     `define_class!` block, `msg_send![super(this), init]`, `addObserver_selector_name_object`
     (plus its notification `extern` static) and `removeObserver` in `Drop`.
@@ -67,11 +74,11 @@ off this index — read this plus the one that covers what you are touching:
     `frust-render`'s `native_import::apple` makes one forwarding call (`NativeHandle::new` contract).
   - `frust-plugin`'s `NativeHandle::new` and `TextureFrame::into_parts`, `frust-render`'s
     `SourceFrame::into_parts` (`unsafe fn`s; the bus's own call site is the SAFETY-noted block in
-    `SourcePass::record`). The camera and video-player bridges each
-    hold two `SAFETY`-noted sites: the split and the renderer-twin `NativeHandle::new`. Their
-    Apple producers build `NativeHandle::new(CvPixelBuffer, ptr)` owning a +1 reference released in
-    a single-call release callback.
-    `frust-video-player`'s Android backend: its constructor call, the `AHardwareBuffer_*` NDK calls and a direct-buffer plane read.
+    `SourcePass::record`). The camera and video-player bridges each hold two `SAFETY`-noted sites:
+    the split and the renderer-twin `NativeHandle::new`. Their Apple producers build
+    `NativeHandle::new(CvPixelBuffer, ptr)` owning a +1 reference released in a single-call
+    release callback. `frust-video-player`'s Android backend: its constructor call, the
+    `AHardwareBuffer_*` NDK calls and a direct-buffer plane read.
   - `frust-gpu`'s `RenderContext::create_pipeline_cache` — one call building a `wgpu::PipelineCache`
     from a shell-persisted, fingerprint-validated blob.
   - `frust-reactive`'s private `thread_policy::sys` — `gettid`/`getpriority`/`setpriority` (Linux)
@@ -84,29 +91,28 @@ off this index — read this plus the one that covers what you are touching:
     `frust_camera_session_handle`'s raw-pointer C export (retain contract **+1**); its Android
     backend keeps its single `plane_data` direct-buffer block, texture preview included.
   - `frust-native-widgets`'s Android backend — cached `JMethodID` + `call_method_unchecked` for hot
-    per-frame setters, confined to one `# Safety` helper (`call_void_cached`, `controls/mod.rs`'s
-    `platform` submodule); cold setters use the checked `NativeCtx::call_void`. Its Apple backend
-    closes objc2's nullability-unannotated `unsafe` behind **safe** property wrappers, each
-    `// SAFETY:`-noted, plus the `define_class!`/`extern_protocol!` registrations, `addTarget:action:`
-    attach/detach, `apple_host::on_main`'s `MainThreadMarker::new_unchecked()`, and the
-    `apple_alert`/`apple_sheet`/`appkit_alert` controllers and `block2` handlers — each `SAFETY`-noted.
+    per-frame setters, confined to one `# Safety` helper (`call_void_cached`); cold setters use the
+    checked `NativeCtx::call_void`. Its Apple backend closes objc2's nullability-unannotated
+    `unsafe` behind **safe** property wrappers, plus the `define_class!`/`extern_protocol!`
+    registrations, `addTarget:action:` attach/detach, `apple_host::on_main`'s
+    `MainThreadMarker::new_unchecked()`, and the alert/sheet controllers and `block2` handlers —
+    each site `SAFETY`-noted.
   - `frust-iap`'s `apple` backend — one untyped `msg_send![class, shared]` resolving the Swift
     glue's singleton by runtime-only class name, plus two `RcBlock` completion blocks receiving raw
     `NSString` pointers whose validity only the glue's contract establishes; each site is
     `SAFETY`-noted and `catch_unwind`-wrapped. Its `android` backend holds only its two JNI exports'
     `#[unsafe(no_mangle)]` attributes.
-  - `frust-auth-session`'s `apple` backend — the `objc2-authentication-services` calls (the deprecated
-    `ASWebAuthenticationSession` initializer, its setters, `-start`), the completion handler's raw
-    `NSURL`/`NSError` derefs and error-domain `extern` static, the `define_class!` presentation-anchor
-    class (with its `msg_send![super(this), init]`), one `MainThreadMarker::new_unchecked()`; each is
-    `SAFETY`-noted, the completion body under `catch_unwind`. Its `android` backend, like `frust-iap`'s,
-    holds only a JNI export's `#[unsafe(no_mangle)]`.
+  - `frust-auth-session`'s `apple` backend — the `objc2-authentication-services` calls (the
+    deprecated `ASWebAuthenticationSession` initializer, its setters, `-start`), the completion
+    handler's raw `NSURL`/`NSError` derefs and error-domain `extern` static, the `define_class!`
+    presentation-anchor class, one `MainThreadMarker::new_unchecked()`; each is `SAFETY`-noted, the
+    completion body under `catch_unwind`. Its `android` backend, like `frust-iap`'s, holds only a
+    JNI export's `#[unsafe(no_mangle)]`.
   - `frust-hotpatch` — `patch.rs`: `load_patch_library` (`libloading`; initialisers run, so only a
     library built for this process), `apply_patch` (a table for this exact executable, anchored on
-    `__frust_hotpatch_anchor`; the builder's L3 gate checks cross-image layouts) and
-    `get_jump_table` (the leaked, Release-published table, used within one call); `hot_fn.rs`:
-    casting a table address to the hot function's signature; `anchor.rs`: image lookup;
-    `android.rs`: memfd + `android_dlopen_ext`. `frust-shell-common` calls the safe
+    `__frust_hotpatch_anchor`) and `get_jump_table` (the leaked, Release-published table);
+    `hot_fn.rs`: casting a table address to the hot function's signature; `anchor.rs`: image
+    lookup; `android.rs`: memfd + `android_dlopen_ext`. `frust-shell-common` calls the safe
     `apply_from_devtools`; `frust::app!` emits only the anchor's `#[unsafe(no_mangle)]`.
 - **No unwind across FFI.** Every platform export routes through `frust-shell-common`'s `guard`
   helper (`catch_unwind` + log, returning a benign default) rather than unwinding into
@@ -121,21 +127,19 @@ off this index — read this plus the one that covers what you are touching:
   mutex-guarded queue push plus a redraw request. Texture release callbacks
   (`TextureFrame`/`SourceFrame`, run from `Drop`) must not panic: the `catch_unwind` in
   `run_release` is a last line of defence in unwinding builds only.
-- **State-sync, not op-forwarding, across a mobile IME bridge.** Android/iOS platform text
-  input doesn't send individual keystrokes across the FFI boundary — the platform owns
-  composition (Gboard, CJK marked text) against a local mirror, then hands the framework a
-  whole reconciled `EditingState` and reads one back to keep its own IME machinery
-  synchronized — never add a per-keystroke op-forwarding path.
-- **UTF-16 at the FFI seam, bytes inside.** `EditingState`'s `selection_*`/`composing_*`
-  indices are UTF-16 code-unit indexed everywhere they cross a shell boundary; convert
-  to/from byte offsets only inside `frust-text`'s `TextEditor`.
+- **State-sync, not op-forwarding, across a mobile IME bridge.** Android/iOS platform text input
+  doesn't send individual keystrokes across the FFI boundary — the platform owns composition
+  (Gboard, CJK marked text) against a local mirror, then hands the framework a whole reconciled
+  `EditingState` and reads one back — never add a per-keystroke op-forwarding path.
+- **UTF-16 at the FFI seam, bytes inside.** `EditingState`'s `selection_*`/`composing_*` indices are
+  UTF-16 code-unit indexed wherever they cross a shell boundary; convert to/from byte offsets only
+  inside `frust-text`'s `TextEditor`.
 - **Hand-roll JSON at the mobile FFI boundary — no `serde` in shell crates.**
   `frust-shell-android`/`frust-shell-ios` serialize `ImeState` with a small hand-written
   escaper/builder for a handful of fixed fields.
-- **Type-erase to avoid a downstream crate dependency**, not to avoid writing a type. When a
-  lower layer threads a resource owned by a higher layer, pass it as `&mut dyn Any` and
-  recover it at the one call site that knows the concrete type via a documented,
-  panic-on-mismatch `downcast_mut::<T>()`.
+- **Type-erase to avoid a downstream crate dependency**, not to avoid writing a type. When a lower
+  layer threads a resource owned by a higher layer, pass it as `&mut dyn Any` and recover it at the
+  one call site that knows the concrete type via a documented, panic-on-mismatch `downcast_mut::<T>()`.
 - **Erase at the API boundary, not at call sites.** A helper returns `-> impl View<S>`
   (`+ use<..>` only when the opaque type must not be tied to a borrow — a navigator closure, a
   stored result; edition 2024 captures correctly by default otherwise); a child list is a tuple
@@ -150,8 +154,8 @@ off this index — read this plus the one that covers what you are touching:
   drives it via the generic `build_child`/`rebuild_child`/`teardown_child`. A kept site carries
   `// erasure: keep <why>` (`scripts/ci/erasure-check.sh`, rules T1-T7); a driver closure erases
   `Component::build`: `move |s| AnyView::new(root.build(s))`. No `#[allow(refining_impl_trait)]`.
-- **Edition-2024 `-> impl Trait` return types capture all in-scope lifetimes by default.**
-  When a returned `impl View<State>` must not borrow a parameter (stored, or returned from a
+- **Edition-2024 `-> impl Trait` return types capture all in-scope lifetimes by default.** When a
+  returned `impl View<State>` must not borrow a parameter (stored, or returned from a
   navigator/`RenderRoot` closure), opt out explicitly — the compiler says so; otherwise the default is fine:
 
   ```rust
@@ -160,11 +164,11 @@ off this index — read this plus the one that covers what you are touching:
   }
   ```
 
-- **A platform value with no published spec is a named constant with a source comment, not a
-  bare literal.** Where a platform's exact behavior is private (an iOS gesture's edge zone,
-  commit threshold, or fling velocity; an animation's duration/curve), name the constant,
-  and its doc comment states whether it's a published value or **community-approximate** (a
-  reverse-engineered/community-converged estimate) plus what it's approximating:
+- **A platform value with no published spec is a named constant with a source comment, not a bare
+  literal.** Where a platform's exact behavior is private (an iOS gesture's edge zone, commit
+  threshold, or fling velocity; an animation's duration/curve), name the constant; its doc comment
+  states whether it's a published value or **community-approximate** (a reverse-engineered estimate)
+  plus what it's approximating:
 
   ```rust
   /// Left-edge activation zone width for the interactive pop-swipe (logical px).
@@ -205,13 +209,12 @@ means matching a spec or adjusting a guess.
 | JNI exports | `Java_<fixed_package>_<FixedClass>_native<Name>` | `Java_dev_frust_FrustSurfaceView_nativeOnFrame` |
 | Platform-view factory `viewType` | Android: any fully-qualified class under `dev.frust.*` (the embedding owns the root package); iOS: bare `@objc(<Name>)` runtime name | `dev.frust.camera.CameraPreviewFactory` / `@objc(MapFactory)` |
 
-JNI export names are LAW: the package/class (`dev.frust.FrustSurfaceView`) is fixed across
-every generated app, so the mangled symbol stays stable regardless of the app's own package.
-A `platform_view` factory's `viewType` naming is LAW too: **any fully-qualified class under
-`dev.frust.*`** via the app classloader (Android) or the bare `@objc(<Name>)` name via
-`NSClassFromString` (iOS). Both hosts check **prefix (Android) then interface/protocol
-assignability, before instantiation** — constructing an untrusted class first runs its side
-effects unchecked.
+JNI export names are LAW: the package/class (`dev.frust.FrustSurfaceView`) is fixed across every
+generated app, so the mangled symbol stays stable regardless of the app's own package. A
+`platform_view` factory's `viewType` naming is LAW too (any class under `dev.frust.*` via the app
+classloader on Android, the bare `@objc(<Name>)` name via `NSClassFromString` on iOS). Both hosts
+check **prefix (Android) then interface/protocol assignability, before instantiation** —
+constructing an untrusted class first runs its side effects unchecked.
 
 ## Plugin Conventions
 
@@ -221,22 +224,22 @@ Both plugin tiers under `plugins/` carry additional conventions of their own —
 ## Platform-View Conventions
 
 - **Mode B is a build-time host configuration, never an app Rust opt-in, and Android/iOS only.** The
-  embedding module's overridable `translucentSurface` seam (Android: `FrustSurfaceView`'s constructor
-  parameter, fed by `FrustActivity`'s `open val`; iOS: `FrustViewController`'s `open var` — per-platform
-  mechanisms, not a symmetric API) must drive the window pixel format, the host's native-sibling z-order
-  and the `declare_host_translucent_surface` call *together*, in the same branch — splitting them ships
-  black rectangles. App Rust has no matching call; only the two mobile shells' own FFI glue may declare
-  it (see `docs/ARCHITECTURE.md`'s Platform-view flow).
+  embedding module's overridable `translucentSurface` seam (Android: `FrustSurfaceView`'s
+  constructor parameter, fed by `FrustActivity`'s `open val`; iOS: `FrustViewController`'s `open
+  var`) must drive the window pixel format, the host's native-sibling z-order and the
+  `declare_host_translucent_surface` call *together*, in the same branch — splitting them ships
+  black rectangles. App Rust has no matching call; only the two mobile shells' own FFI glue may
+  declare it (see `docs/ARCHITECTURE.md`'s Platform-view flow).
 - **A desktop host is Mode A: `DesktopExtensions`' platform-view hooks, never an FFI poller.** It
-  resolves a slot's `view_type` through `frust_plugin::desktop` rather than naming a plugin crate, leaves
-  rects and clips in **logical points** (no physical conversion, unlike the mobile FFI boundary), and
-  treats `on_platform_views_suspended` as remove-not-hide — the surface-recreate replay is the way back.
+  resolves a slot's `view_type` through `frust_plugin::desktop` rather than naming a plugin crate,
+  leaves rects and clips in **logical points**, and treats `on_platform_views_suspended` as
+  remove-not-hide — the surface-recreate replay is the way back.
 - **A desktop-hosted `NSControl` owns its input; `interactive` means nothing there.** AppKit's
   responder chain routes it, so `frust-shell-macos`' Mode-A host ignores `interactive` and shields —
   add no shielding or hit-test forwarding for `plugins/native-widgets/src/appkit/`'s controls.
 - **Mode B paint contract: an unpainted region is a window, not a compositor bug.** `platform_view`
-  punches its own slot rect automatically; any other chrome region a Mode B host leaves unpainted shows
-  raw OS content — pair translucency with an opaque app-root background (the `AppBackground` precedent).
+  punches its own slot rect automatically; any other chrome region a Mode B host leaves unpainted
+  shows raw OS content — pair translucency with an opaque app-root background (`AppBackground`).
 - **A `platform_view` slot never receives `Widget::event` (v1).** Native-view input is OS-routed
   through the host's own view hierarchy, not `EventCtx` — there is no hit-test/dispatch seam for a
   hosted view; don't add pointer handling to `PlatformViewWidget`.
@@ -297,9 +300,9 @@ GPU backend be swapped later without touching widget or text code. **The one nam
 
 ### Reaching into a design-system plugin's internals from a design-system crate
 
-**BAD:** a `crates/frust-drive/templates/design-system/`-derived crate's `Cargo.toml` declaring a dependency on
-`frust-glyph`/`frust-material`/`frust-cupertino` to reach one convenience symbol, or depending on
-`frust-widgets`/`frust-core` directly instead of the facade.
+**BAD:** a `crates/frust-drive/templates/design-system/`-derived crate's `Cargo.toml` declaring a
+dependency on `frust-glyph`/`frust-material`/`frust-cupertino` to reach one convenience symbol, or
+depending on `frust-widgets`/`frust-core` directly instead of the facade.
 
 **GOOD:** depend on `frust::authoring` only (`frust`, `default-features = false`), and file a gap
 against `authoring` instead. `frust` carries no catalog cargo feature at all — the three built-ins
@@ -379,21 +382,18 @@ Conventions for `Widget::event` implementations in every interactive `frust-widg
   Space/Enter while focused;** its keyboard-focus look reads `PaintCtx::is_focused_for_ring`, while
   a text field keeps `has_focus` (WIDGETS_CODE_STANDARDS.md's Keyboard Focus and Shortcuts).
 
-- **Input constants have one source.** Gesture thresholds (`TOUCH_SLOP`, `MOUSE_SLOP`),
-  scroll/fling tuning (`WHEEL_LINE_PX`, `FLING_DECAY`, `FLING_STOP`, `VELOCITY_WINDOW_MS`),
-  and `VelocityTracker` live in `frust-core::input`; widgets import them rather than
-  hardcoding a local threshold.
+- **Input constants have one source.** Gesture thresholds (`TOUCH_SLOP`, `MOUSE_SLOP`), scroll/fling
+  tuning (`WHEEL_LINE_PX`, `FLING_DECAY`, `FLING_STOP`, `VELOCITY_WINDOW_MS`) and `VelocityTracker`
+  live in `frust-core::input`; widgets import them rather than hardcoding a local threshold.
 
-- **Events are logical-coordinate by the time they cross `AppTree`.** Every platform
-  boundary (winit, JNI `nativeOnTouch`, the C `frust_dispatch_touch`) converts to
-  density-independent logical pixels before building an `InputEvent` — widget/container code
-  never divides by scale factor; only the shell's FFI-boundary helpers do.
+- **Events are logical-coordinate by the time they cross `AppTree`.** Every platform boundary
+  (winit, JNI `nativeOnTouch`, the C `frust_dispatch_touch`) converts to logical pixels before
+  building an `InputEvent` — widget/container code never divides by scale factor.
 
 - **Insets follow the same physical-at-FFI, logical-inside rule as coordinates.** A platform
-  delivers occlusion in physical px (Android `Insets`) or already-logical points (iOS
-  `safeAreaInsets`); either way the FFI-boundary `logical_insets` helper reconciles it —
-  widget code only ever sees a resolved `WindowInsets` in logical px
-  (`docs/SHELLS_ARCHITECTURE.md`'s cross-cutting host-signal flow).
+  delivers occlusion in physical px (Android `Insets`) or logical points (iOS `safeAreaInsets`);
+  the FFI-boundary `logical_insets` helper reconciles it — widget code only ever sees a resolved
+  `WindowInsets` in logical px (`docs/SHELLS_ARCHITECTURE.md`'s cross-cutting host-signal flow).
 
 - **A self-sizing chrome widget consumes its own window inset exactly once, in its own
   `layout`, never pre-inset by its container** (`Scaffold`'s R-B4-inset: `app_bar`/`bottom_bar`
@@ -402,15 +402,15 @@ Conventions for `Widget::event` implementations in every interactive `frust-widg
 
 - **A `Cancel` arm must never call `EventCtx::state_mut`.** It may only clear internal flags
   (`self.pressed`/`self.captured`/`self.armed`) and request a redraw. A rebuild can synthesize a
-  `Cancel` to a still-captured child over a throwaway `()` state (`docs/CORE_ARCHITECTURE.md`'s event-routing data flow) — reaching for real state there panics on the `()` downcast, a deliberate tripwire.
+  `Cancel` to a still-captured child over a throwaway `()` state (`docs/CORE_ARCHITECTURE.md`'s
+  event-routing data flow) — reaching for real state there panics on the `()` downcast, a tripwire.
 
-- **A container that suppresses routing to its children must cancel their capture, clear
-  their focus, and publish a cleared IME surface — in that order, with no bypass.** This
-  binds any container that stops forwarding events to an already-interactive child (the
-  navigator's mid-transition input block is the reference impl). Skipping this leaves a
-  child armed or a stale focus/IME surface behind after the block lifts. Publishing a cleared
-  surface here means the same thing it means everywhere: a full root focus/IME session release,
-  not a value update (`docs/CORE_ARCHITECTURE.md`'s Focus/IME Lifecycle).
+- **A container that suppresses routing to its children must cancel their capture, clear their
+  focus, and publish a cleared IME surface — in that order, with no bypass.** This binds any
+  container that stops forwarding events to an already-interactive child (the navigator's
+  mid-transition input block is the reference impl); skipping it leaves a child armed or a stale
+  focus/IME surface behind after the block lifts. A cleared surface is a full root focus/IME
+  session release, not a value update (`docs/CORE_ARCHITECTURE.md`'s Focus/IME Lifecycle).
 
 - **A hover consumer claims from the uncaptured `Move` arm, latches its own flag, and
   self-corrects that flag at paint time.** All three, because each covers a case the others

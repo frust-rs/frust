@@ -45,7 +45,8 @@
 //! `unsafe fn` in [`accessibility`] but *called* only from `ffi_glue`),
 //! `Box::into_raw`/`from_raw` for the opaque handle, reconstituting it as a
 //! `&mut`, and — under the default-off `FRUST_OVERLAYS` switch — the one
-//! `OverlaySurface::new` over an overlay view's `CAMetalLayer*` — each with a
+//! `OverlaySurface::new` over an overlay view's `CAMetalLayer*` and the write
+//! of released overlay layers into Swift's buffer — each with a
 //! safety comment, plus the `#[unsafe(no_mangle)]`
 //! attributes the [`ios_app!`] macro emits on its generated `extern "C"` exports
 //! (edition 2024 spells `no_mangle` as an unsafe attribute). The `app` module —
@@ -500,8 +501,8 @@ macro_rules! ios_app {
         /// `frust_overlay_attach`: overlay `overlay_id`'s view hands over its
         /// `CAMetalLayer*` at `width` x `height` physical px — a new layer, or
         /// the same one resized. Swift keeps the layer alive until
-        /// `frust_overlay_detach` (or `frust_destroy`) returns (see
-        /// `ffi_glue::overlay_attach`).
+        /// `frust_overlay_take_released` hands it back (or `frust_destroy`
+        /// returns; see `ffi_glue::overlay_attach`).
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         pub extern "C" fn frust_overlay_attach(
@@ -514,13 +515,28 @@ macro_rules! ios_app {
             $crate::ffi_glue::overlay_attach(handle, overlay_id, layer, width, height)
         }
 
-        /// `frust_overlay_detach`: overlay `overlay_id`'s view is going away;
-        /// returns once the surface on its layer is dropped, so Swift may then
-        /// release the layer (see `ffi_glue::overlay_detach`).
+        /// `frust_overlay_detach`: overlay `overlay_id`'s view is going away.
+        /// Returns at once; the layer is handed back through
+        /// `frust_overlay_take_released` once the surface on it is dropped
+        /// (see `ffi_glue::overlay_detach`).
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         pub extern "C" fn frust_overlay_detach(handle: *mut ::core::ffi::c_void, overlay_id: u64) {
             $crate::ffi_glue::overlay_detach(handle, overlay_id)
+        }
+
+        /// `frust_overlay_take_released`: write up to `capacity` overlay
+        /// layers whose surface is gone into `layers`, oldest first, and
+        /// answer how many — each now Swift's to release with its view (see
+        /// `ffi_glue::overlay_take_released`).
+        #[cfg(target_os = "ios")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn frust_overlay_take_released(
+            handle: *mut ::core::ffi::c_void,
+            layers: *mut *mut ::core::ffi::c_void,
+            capacity: u32,
+        ) -> u32 {
+            $crate::ffi_glue::overlay_take_released(handle, layers, capacity)
         }
     };
 }

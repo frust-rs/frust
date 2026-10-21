@@ -36,30 +36,52 @@ import CFrustFFI
 // onto it, so its paint lands above the view and below any later slot. With
 // overlays on, a new wrapper goes above every hosted view (wrappers then stack
 // in creation order, which is paint order for a newly shown slot) instead of
-// directly above the Frust surface. A layer is detached
-// (`frust_overlay_detach`, which drops its surface) before its view is
-// released. Mode B ignores the ops: the translucent surface already composites
-// above its native views.
+// directly above the Frust surface. A disposed overlay's view is hidden and
+// detached at once (`frust_overlay_detach`, which never waits on the render
+// thread) and kept until Rust hands its layer back
+// (`frust_overlay_take_released`, once the surface on it is gone); only then
+// is it removed. Mode B ignores the ops: the translucent surface already
+// composites above its native views.
 
-/// An overlay surface's view: a non-opaque `CAMetalLayer` Frust presents
-/// into, invisible to touches (`hitTest` answers nil and user interaction is
-/// off), so the native view under it and the Frust surface keep today's
-/// input rules.
+/// An overlay surface's view: a non-opaque `CAMetalLayer` sublayer Frust
+/// presents into, invisible to touches (`hitTest` answers nil and user
+/// interaction is off), so the native view under it and the Frust surface keep
+/// today's input rules.
 final class FrustOverlayView: UIView {
-    override class var layerClass: AnyClass { CAMetalLayer.self }
+    /// The layer Frust renders into — a sublayer of this view's plain backing
+    /// layer, never the backing layer itself. The renderer configures it from
+    /// its render thread (wgpu's `Surface::configure` writes `opaque`,
+    /// `pixelFormat`, `drawableSize`, `colorspace`, …), and UIKit rejects any
+    /// off-main property write to a view's backing layer. The sublayer's
+    /// delegate is the shared non-view action helper, as in `FrustView`. It
+    /// lives as long as this view, which is what lets the host key a detached
+    /// overlay by this layer's pointer until Rust hands it back.
+    let metalLayer = CAMetalLayer()
 
-    var metalLayer: CAMetalLayer { layer as! CAMetalLayer }
+    /// Retained here because `CALayer.delegate` is weak.
+    private let metalLayerActions = FrustMetalLayerActions()
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         isOpaque = false
         backgroundColor = .clear
         isUserInteractionEnabled = false
+        metalLayer.delegate = metalLayerActions
         metalLayer.isOpaque = false
+        metalLayer.frame = bounds
+        layer.addSublayer(metalLayer)
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    /// Keeps the sublayer at the view's bounds and scale on the main thread,
+    /// where the frame and `contentsScale` writes are legal.
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        metalLayer.frame = bounds
+        metalLayer.contentsScale = contentScaleFactor
     }
 
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? { nil }
@@ -141,6 +163,10 @@ final class FrustViewHost {
     private let overlaysPresentWithTransaction: Bool
     /// The live overlays by the differ's overlay id.
     private var overlays: [UInt64: Overlay] = [:]
+    /// Detached overlays' views, hidden and kept until Rust hands their layer
+    /// back, keyed by that layer's pointer.
+    private var detachedOverlays: [UnsafeMutableRawPointer: (id: UInt64, view: FrustOverlayView)] =
+        [:]
     /// Overlays whose slot had no wrapper (a dead slot), remembered so the
     /// skip is logged once.
     private var orphanOverlays: Set<UInt64> = []
@@ -171,6 +197,12 @@ final class FrustViewHost {
     /// `CADisplayLink` callback), so all UIKit mutation below is main-thread.
     func poll(handle: UnsafeMutableRawPointer) {
         self.handle = handle
+        applyCommands(handle: handle)
+        releaseDetachedOverlays(handle: handle)
+    }
+
+    /// Apply the command batch accumulated since [ackedGeneration], if any.
+    private func applyCommands(handle: UnsafeMutableRawPointer) {
         guard let raw = frust_platform_view_commands_json(handle, ackedGeneration) else { return }
         defer { frust_string_free(raw) }
         let data = Data(bytes: raw, count: strlen(raw))
@@ -279,23 +311,49 @@ final class FrustViewHost {
         NSLog("frust-overlay: overlay \(overlayId) view above slot \(aboveSlot) (\(width)x\(height) px)")
     }
 
-    /// Tear one overlay down: Rust drops its surface (and any frame of it
-    /// waiting to be presented) BEFORE the view and its layer go away.
+    /// Tear one overlay down: hide its view now and detach it from Rust, which
+    /// drops its surface (and any frame of it waiting to be presented) without
+    /// waiting on the render thread. The view, and so its layer, stays until
+    /// that layer comes back from `frust_overlay_take_released`.
     private func applyDisposeOverlay(_ command: [String: Any]) {
         guard let overlayId = (command["overlay"] as? NSNumber)?.uint64Value else { return }
         orphanOverlays.remove(overlayId)
         guard let overlay = overlays.removeValue(forKey: overlayId) else { return }
-        if let handle { frust_overlay_detach(handle, overlayId) }
-        overlay.view.removeFromSuperview()
-        NSLog("frust-overlay: overlay \(overlayId) view removed")
+        guard let handle else {
+            overlay.view.removeFromSuperview()
+            return
+        }
+        overlay.view.isHidden = true
+        let layer = Unmanaged.passUnretained(overlay.view.metalLayer).toOpaque()
+        detachedOverlays[layer] = (id: overlayId, view: overlay.view)
+        frust_overlay_detach(handle, overlayId)
     }
 
-    /// Size an overlay's view and drawable.
+    /// Remove every detached overlay view whose layer Rust handed back. Free
+    /// while none waits; otherwise drained until Rust has no more.
+    private func releaseDetachedOverlays(handle: UnsafeMutableRawPointer) {
+        guard !detachedOverlays.isEmpty else { return }
+        var released = [UnsafeMutableRawPointer?](repeating: nil, count: 8)
+        while true {
+            let count = Int(frust_overlay_take_released(handle, &released, UInt32(released.count)))
+            for case let layer? in released.prefix(count) {
+                guard let detached = detachedOverlays.removeValue(forKey: layer) else { continue }
+                detached.view.removeFromSuperview()
+                NSLog("frust-overlay: overlay \(detached.id) view removed")
+            }
+            if count < released.count { return }
+        }
+    }
+
+    /// Size an overlay's view and lay out its sublayer.
     private func place(_ view: FrustOverlayView, frame: CGRect, width: UInt32, height: UInt32) {
         view.frame = frame
         view.contentScaleFactor = containerView.contentScaleFactor
-        view.metalLayer.contentsScale = containerView.contentScaleFactor
-        view.metalLayer.drawableSize = CGSize(width: Int(width), height: Int(height))
+        // `drawableSize` is the render thread's: `resize()` sets it when the
+        // new pixel size arrives through `frust_overlay_attach`, and a
+        // main-thread write here could race a drawable acquire.
+        view.setNeedsLayout()
+        view.layoutIfNeeded()
     }
 
     /// The view a newly created wrapper goes directly above with overlays on:

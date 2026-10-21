@@ -278,14 +278,21 @@ uint32_t frust_overlay_mode(void *handle);
 // frust_overlay_attach hands overlay `overlay_id`'s CAMetalLayer* (unretained)
 // over at width x height PHYSICAL px: a new layer, or the same one resized.
 // Rust builds the overlay surface on it on the render thread and requests a
-// frame. The layer must stay alive until frust_overlay_detach (or
-// frust_destroy) returns.
+// frame. The layer must stay alive until frust_overlay_take_released hands it
+// back (or frust_destroy returns).
 void  frust_overlay_attach(
     void *handle, uint64_t overlay_id, void *layer, uint32_t width, uint32_t height
 );
-// frust_overlay_detach: the overlay's view is going away. Returns once the
-// surface on its layer (and any frame of it parked for frust_present_frame)
-// is dropped; only then may the view and layer be released.
+// frust_overlay_detach: the overlay's view is going away. Returns at once,
+// never waiting on the render thread; keep the view (hidden) until its layer
+// comes back from frust_overlay_take_released.
 void  frust_overlay_detach(void *handle, uint64_t overlay_id);
+// frust_overlay_take_released writes up to `capacity` CAMetalLayer*s whose
+// overlay surface (and any frame of it parked for frust_present_frame) is
+// dropped into `layers`, oldest first, and returns how many. Each was handed
+// to frust_overlay_attach and may now be released with its view. Drain it
+// each tick while a detached view waits, until it returns less than
+// `capacity`.
+uint32_t frust_overlay_take_released(void *handle, void **layers, uint32_t capacity);
 
 #endif /* FRUST_FFI_H */

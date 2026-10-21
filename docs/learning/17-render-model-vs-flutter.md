@@ -8,8 +8,8 @@ what Flutter still does that frust does not (each with the `docs/LIMITATIONS.md`
 it), and gives three labs you can run today. Read it after labs 10 (widget tree) and 12 (clips,
 layers, punch); lab 9 covers the native-view half in more depth.
 
-Every Apple (macOS/iOS) cell of the platform-view matrix reads *pending*, and every Android device
-outcome reads *device leg pending*. This chapter says the same and no more.
+The overlay hosts ship on Android, iOS and macOS behind a default-off knob, each with device
+outcomes recorded in `docs/LIMITATIONS.md`. This chapter says the same and no more.
 
 ## The mapping
 
@@ -30,7 +30,7 @@ docs.flutter.dev page. Frust paths are in this repository.
 | Layout assertions | `FRUST_LAYOUT_AUDIT` | `crates/frust-core/src/app/layout.rs` (`LayoutAudit`, `RenderRoot::set_layout_audit`), `docs/CORE_DEVELOPMENT.md` | After a skipping pass the audit runs a forced full pass and logs every pod whose geometry differs: it finds a widget that changes layout state without saying so. A debug aid; it doubles layout cost. |
 | `ClipPath`, `BackdropFilter` | `PushClipPath`, `BackdropBlur` | `crates/frust-scene/src/`, `crates/frust-engine/src/compile/clip.rs` / `widgets/basic.dart` | Path clips are coverage masks; at most four backdrop blurs render per frame (`backdrop-blur-bound`). |
 | Partial repaint / damage | measured, rejected, removed | `LIMITATIONS.md` `partial-repaint-outcome` | Flutter repaints only the damaged region when the embedder reports one (`engine/src/flutter/shell/common/rasterizer.h`, `FrameDamage`); frust re-rasterizes the surface each rendered frame. A scissored partial path was built and measured: it lost on mobile-shaped workloads, so it was removed. |
-| `PlatformView` hybrid composition | overlay surfaces plus the Mode A / Mode B matrix | `crates/frust-shell-common/src/platform_view.rs` (`ingest_scene`), `crates/frust-render/src/overlay.rs` (`# Segments`), `docs/SHELLS_ARCHITECTURE.md`, `docs/NATIVE_WIDGETS_ARCHITECTURE.md` / docs.flutter.dev/platform-integration/android/platform-views | Mode A: opaque frust surface, native view above. Mode B: translucent surface, native view below, hole-punched. To paint frust content *above* a native view the display list is cut at the view's slot and each cut is drawn on its own overlay surface. Android ships this behind `FRUST_OVERLAYS` (default off); Apple is pending. |
+| `PlatformView` hybrid composition | overlay surfaces plus the Mode A / Mode B matrix | `crates/frust-shell-common/src/platform_view.rs` (`ingest_scene`), `crates/frust-render/src/overlay.rs` (`# Segments`), `docs/SHELLS_ARCHITECTURE.md`, `docs/NATIVE_WIDGETS_ARCHITECTURE.md` / docs.flutter.dev/platform-integration/android/platform-views | Mode A: opaque frust surface, native view above. Mode B: translucent surface, native view below, hole-punched. To paint frust content *above* a native view the display list is cut at the view's slot and each cut is drawn on its own overlay surface. Android, iOS and macOS ship this behind `FRUST_OVERLAYS` (default off), on one shared overlay table whose withdraw never waits. |
 | `Texture` widget | `texture_view` fed by a `TextureSink` | `crates/frust-widgets/src/texture_view.rs`, `crates/frust-plugin/src/texture.rs`, `crates/frust-render/src/texture_bus.rs`, `frust::texture` / `widgets/texture.dart`, `rendering/texture.dart` | A producer pushes frames into a latest-frame mailbox; the renderer imports them as a scene texture. Producers: video-player `VideoOutput::Texture`, camera `preview_texture`. Android hardware-buffer import (`crates/frust-gpu/src/import/android.rs`) is behind `FRUST_ANDROID_HWBUFFER_IMPORT`. |
 
 ## What Flutter does that frust still does not
@@ -38,7 +38,7 @@ docs.flutter.dev page. Frust paths are in this repository.
 | Gap | Entry in `docs/LIMITATIONS.md` |
 |---|---|
 | No partial repaint; each rendered frame re-rasterizes the surface | `partial-repaint-outcome` |
-| Residual render-model gaps (a parent on a dirty path still lays out; a non-default `BlendMode` on a layer is refused; Apple pending) | `render-model-gaps` |
+| Residual render-model gaps (a parent on a dirty path still lays out; a non-default `BlendMode` on a layer is refused) | `render-model-gaps` |
 | Retained pages are a budgeted, refusable cache; the ledger is process-global; an eviction between publish and the next scene can refuse a frame | `retained-pages-budget-refusals`, `retained-ledger-single-renderer`, `retained-stale-ledger-eviction-thrash` |
 | `BackdropBlur` has five limits; `PushClipPath` re-rasterizes its mask per push | `backdrop-blur-bound`, `path-clip-mask-rerasterized` |
 | No `NestedScrollView`, no reverse growth, no snapping or stretching headers | `sliver-v1-scope` |
@@ -53,8 +53,10 @@ docs.flutter.dev page. Frust paths are in this repository.
 | A native frame's release can lag by a submit; a full backlog drops the newest frame | `texture-bus-native-release-delay` |
 | An external texture never joins the opaque depth-writing pass | `engine-scene-texture-always-blended` |
 
-Nothing Apple-side in the platform-view and texture rows is shipped: overlay hosts, Metal import and
-Apple texture producers are pending (`render-model-gaps`).
+The Apple side of those rows is shipped: the iOS and macOS overlay hosts sit behind the same
+`FRUST_OVERLAYS` knob (default off, `apple-overlay-limits`), and Metal import and the Apple texture
+producers are in (`nv12-import-unsupported` is their one gap). A texture push wakes an idle frame
+loop; the web shell does not take that wake yet (`texture-bus-no-wake-on-push`).
 
 ## Lab 17.1 — Read a frame with and without retained layers
 
@@ -127,4 +129,5 @@ Then write down what you would need to add for a `NestedScrollView` (`sliver-v1-
   second tree in the framework. Every refusal falls back to plain painting.
 - The sliver protocol rides beside the box protocol through one defaulted method.
 - Both claims about platform views and textures hold on Android and Apple behind default-off knobs;
-  the Android device legs ran on a OnePlus 9 and the Apple legs on an iPhone SE and macOS.
+  the Android device legs ran on a OnePlus 9 and the Apple legs on an iPhone SE and macOS; the
+  shared-overlay-table re-runs used a Pixel 5, an iPhone 13 mini and an M4 Mac.
