@@ -265,10 +265,13 @@ frust::app!(Root);
 every event through `.events_into(signal)`); you route, and the confirmed
 `selected` comes back as the next build's props. Handlers take no `&mut State`
 — write a signal or drive a `NavigatorController`. `.scroll(controller)` mirrors
-the body's scroll position to the bars (changed values only, one publish per
-frame). The body renders full-bleed and uses the facade's `safe_area` as usual:
-the host already reports the bars through the window insets (iOS) or shrinks the
-surface (Android), so do not pad for them yourself. A second live scaffold
+the body's scroll position to the Android arm (changed values only, one publish
+per frame); iOS does not minimize its tab bar on scroll. On iOS the bars float
+over a full-bleed body, so put the safe area INSIDE the scroller
+(`scroll_view(safe_area(page))`) for content to scroll under them; the scaffold
+paints a static edge fade in the theme surface colour under each bar
+(`.edge_fade(color)` / `.no_edge_fade()`). On Android the surface sits between
+the bars, so do not pad for them yourself. A second live scaffold
 publishes nothing and shows a one-line refusal above its body — one
 `native_scaffold` per app.
 
