@@ -324,8 +324,12 @@ fn theme_toggle_demo(brightness: Brightness) -> impl View<S> {
     })
 }
 
-/// See the page-fn contract in [`crate::pages`] and the [module docs](self).
-pub fn page(state: &S) -> AnyView<S> {
+/// The deep-link slug of this section: the anchor its tab scrolls to.
+pub const ANCHOR: &str = "Controls";
+
+/// The section body, without a page header: the rows the Controls tab stacks
+/// under its own section header. See the [module docs](self).
+pub fn section(state: &S) -> Vec<frust::FlexChild<S>> {
     // Tracked reads: a native listener's signal write is not a frust event
     // pass, so it only wakes this page because the page subscribed here.
     let taps = tap_count_sig().get();
@@ -532,11 +536,20 @@ pub fn page(state: &S) -> AnyView<S> {
         overlay_rows.push(gap(32.0));
     }
 
-    let mut children = vec![page_header(SECTION), intro, theme_block, writeback_block];
+    let mut children = vec![intro, theme_block, writeback_block];
     children.extend(pairs);
     children.push(readout_block);
     // LAST on the page: the field's overlay range runs from the field to the
     // end of the frame (module doc's *Overlay surfaces*).
     children.push(block(overlay_rows));
+    children
+}
+
+/// The whole section as a standalone page: its [`page_header`] then
+/// [`section`]. Kept for [`super::current`] and the headless gate tests; the
+/// Controls tab stacks [`section`] under its own section header instead.
+pub fn page(state: &S) -> AnyView<S> {
+    let mut children = vec![page_header(SECTION)];
+    children.extend(section(state));
     page_column(children)
 }

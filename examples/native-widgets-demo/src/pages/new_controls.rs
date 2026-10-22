@@ -16,14 +16,19 @@
 //! refusal count (see `controls.rs`' module doc for why a refusal has to
 //! move a prop).
 //!
-//! `native_segmented`/`native_stepper` have no Android arm: there (and in a
-//! Linux/Windows desktop preview) each renders the plugin's frust-drawn
-//! refusal banner in place (`native-widgets-segmented-stepper-apple-only`).
+//! `native_segmented` has an Android arm (`MaterialButtonToggleGroup`: single
+//! selection, selection required; a momentary group reports a tap and never
+//! shows a persistent check; a tint replaces each segment's checked
+//! background). `native_stepper` has none: on Android (and in a Linux/Windows
+//! desktop preview) it renders the plugin's frust-drawn refusal banner in
+//! place (`native-widgets-segmented-stepper-apple-only`), as does the
+//! segmented control in a desktop preview. The segmented section shows one
+//! plain and one momentary control.
 //! Android fixes a date picker's style when it is created, so the style
 //! switch applies there only after the picker remounts (leave the page and
 //! come back).
 //!
-//! Native slots at rest: 4 on iOS/macOS, 2 elsewhere.
+//! Native slots at rest: see `SECTION_AT_REST_SLOTS`.
 
 use frust::{AnyView, Get, GetUntracked, Set, button, checkbox, either, inflexible, text};
 use frust_glyph::{dots_loader, segmented_control};
@@ -53,6 +58,8 @@ local_sig!(segment_sig, usize, 0);
 local_sig!(segment_refuse_sig, bool, false);
 local_sig!(segment_refused_sig, u32, 0);
 local_sig!(segment_events_sig, u32, 0);
+local_sig!(momentary_on_sig, bool, false);
+local_sig!(momentary_tap_sig, Option<usize>, None);
 local_sig!(stepper_sig, i32, 5);
 local_sig!(stepper_wraps_sig, bool, false);
 local_sig!(stepper_big_step_sig, bool, false);
@@ -172,7 +179,7 @@ fn segmented_block(selected: usize, refusing: bool, refused: u32, events: u32) -
         pair_row(
             "Segmented control",
             NativeClasses {
-                android: "none (refusal banner)",
+                android: "MaterialButtonToggleGroup",
                 ios: "UISegmentedControl",
                 macos: "NSSegmentedControl",
             },
@@ -206,6 +213,58 @@ fn segmented_block(selected: usize, refusing: bool, refused: u32, events: u32) -
             )),
         ]),
     ]
+}
+
+/// The momentary segmented pair behind a default-off toggle (so the at-rest
+/// slot count stays [`SECTION_AT_REST_SLOTS`](super::common::SECTION_AT_REST_SLOTS)'s):
+/// a tap reports its segment and the control never shows a persistent
+/// selection (Android: no checked segment, r4-01). The drawn peer is three
+/// chips, which are momentary by nature.
+fn momentary_block(on: bool, last_tap: Option<usize>) -> Vec<FlexChildS> {
+    let labels: Vec<String> = SEGMENTS.iter().map(|s| s.to_string()).collect();
+    let tapped = |index: usize| SEGMENTS[index.min(SEGMENTS.len() - 1)];
+    let mut rows = vec![
+        inflexible(checkbox(
+            on,
+            "Show the MOMENTARY segmented control",
+            |_: &mut S, on: bool| momentary_on_sig().set(on),
+        )),
+        gap(4.0),
+        inflexible(readout(match last_tap {
+            Some(index) => format!("Last momentary tap: {}", tapped(index)),
+            None => "Last momentary tap: (none yet)".to_string(),
+        })),
+    ];
+    if on {
+        let chips = SEGMENTS
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                inflexible(chip(*name, move |_: &mut S| {
+                    momentary_tap_sig().set(Some(index))
+                }))
+            })
+            .collect();
+        rows.push(gap(6.0));
+        rows.push(pair_row(
+            "Momentary segmented",
+            NativeClasses {
+                android: "MaterialButtonToggleGroup (no persistent check)",
+                ios: "UISegmentedControl (momentary)",
+                macos: "NSSegmentedControl (momentary)",
+            },
+            "A tap flashes its segment and reports it; nothing stays selected.",
+            CellFit::Stretch,
+            32.0,
+            native_segmented(labels, 0)
+                .momentary(true)
+                .content_description("Native momentary segmented control")
+                .size(PAIR_CELL_W, 32.0)
+                .on_select(|index| momentary_tap_sig().set(Some(index))),
+            row(chips),
+        ));
+    }
+    vec![block(rows)]
 }
 
 /// The stepper pair: native stepper vs baseline `−`/`+` buttons.
@@ -363,14 +422,20 @@ fn date_block(value: CivilDate, inline: bool, events: u32) -> Vec<FlexChildS> {
 /// A page-local alias so the block helpers read cleanly.
 type FlexChildS = frust::FlexChild<S>;
 
-/// See the page-fn contract in [`crate::pages`] and the [module docs](self).
-pub fn page(_state: &S) -> AnyView<S> {
+/// The deep-link slug of this section: the anchor its tab scrolls to.
+pub const ANCHOR: &str = "New";
+
+/// The section body, without a page header: the rows the Controls tab stacks
+/// under its own section header. See the [module docs](self).
+pub fn section(_state: &S) -> Vec<FlexChildS> {
     // Tracked reads — native listener writes wake the page through these.
     let animating = spinner_animating_sig().get();
     let selected = segment_sig().get();
     let refusing = segment_refuse_sig().get();
     let refused = segment_refused_sig().get();
     let segment_events = segment_events_sig().get();
+    let momentary_on = momentary_on_sig().get();
+    let momentary_tap = momentary_tap_sig().get();
     let stepper_value = stepper_sig().get();
     let wraps = stepper_wraps_sig().get();
     let big_step = stepper_big_step_sig().get();
@@ -379,9 +444,9 @@ pub fn page(_state: &S) -> AnyView<S> {
     let inline = date_inline_sig().get();
     let date_events = date_events_sig().get();
 
-    let mut children = vec![page_header(SECTION)];
-    children.extend(spinner_block(animating));
+    let mut children = spinner_block(animating);
     children.extend(segmented_block(selected, refusing, refused, segment_events));
+    children.extend(momentary_block(momentary_on, momentary_tap));
     children.extend(stepper_block(
         stepper_value,
         wraps,
@@ -389,6 +454,15 @@ pub fn page(_state: &S) -> AnyView<S> {
         stepper_events,
     ));
     children.extend(date_block(date_value, inline, date_events));
+    children
+}
+
+/// The whole section as a standalone page: its [`page_header`] then
+/// [`section`]. Kept for [`super::current`] and the headless gate tests; the
+/// Controls tab stacks [`section`] under its own section header instead.
+pub fn page(state: &S) -> AnyView<S> {
+    let mut children = vec![page_header(SECTION)];
+    children.extend(section(state));
     page_column(children)
 }
 
