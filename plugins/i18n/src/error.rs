@@ -54,4 +54,9 @@ pub enum I18nError {
     /// available.
     #[error("ICU formatting is unavailable — enable the `formatting` feature")]
     FormattingUnavailable,
+
+    /// A time-zone id is not in the bundled IANA database (or, for a fixed
+    /// offset, is not `±HH:MM`).
+    #[error("unknown time zone '{0}'")]
+    UnknownTimeZone(String),
 }

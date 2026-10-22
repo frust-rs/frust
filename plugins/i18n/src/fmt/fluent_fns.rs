@@ -33,17 +33,19 @@
 //!
 //! # `DATETIME($d, …)`
 //!
-//! Positional argument: either seconds since the Unix epoch (a number,
-//! resolved in **UTC**) or an ISO-8601 string — `YYYY-MM-DD`,
-//! `YYYY-MM-DDTHH:MM`, or `YYYY-MM-DDTHH:MM:SS`, with an optional trailing
-//! `Z`. A `T` may be a space. No offset other than `Z` is accepted: this
-//! crate has no time-zone conversion (see [`datetime`](super::datetime)).
-//! Honored named options:
+//! Positional argument: either seconds since the Unix epoch (a number)
+//! or an ISO-8601 string — `YYYY-MM-DD`, `YYYY-MM-DDTHH:MM`, or
+//! `YYYY-MM-DDTHH:MM:SS`, with an optional suffix of `Z` or an offset
+//! (`+08:00`, `-0530`, `+05`). A `T` may be a space. A string with no suffix
+//! is read as UTC; one with an offset is converted to the UTC instant it
+//! names. The instant is then rendered in the `timeZone` option's zone, or
+//! **UTC** when there is none. Honored named options:
 //!
 //! | Option | Values | Effect |
 //! |---|---|---|
 //! | `dateStyle` | `short`, `medium` (default), `long` | the date half's length |
 //! | `timeStyle` | `short`, `medium`, `long` | adds the time half |
+//! | `timeZone` | an IANA id (`"Asia/Makassar"`) or a fixed offset (`"+08:00"`) | the zone the instant is rendered in; default UTC |
 //!
 //! With neither, a medium date is formatted. With `timeStyle` alone, only the
 //! time. With both, the combined form at `dateStyle`'s length.
@@ -75,7 +77,7 @@ use fluent_bundle::{FluentArgs, FluentValue};
 
 use crate::{FluentFunction, Locale, LocaleSet};
 
-use super::{CivilDate, CivilTime, DateLength, datetime};
+use super::{CivilDate, CivilTime, DateLength, datetime, zone};
 
 /// Registers ICU-backed `NUMBER` and `DATETIME` into `set`.
 pub(super) fn with_icu_functions(set: LocaleSet) -> LocaleSet {
@@ -161,14 +163,28 @@ fn number_minor<'a>(
     }
 }
 
-/// `DATETIME($d, dateStyle: …, timeStyle: …)`.
+/// `DATETIME($d, dateStyle: …, timeStyle: …, timeZone: …)`.
 fn date_time<'a>(
     locale: &Locale,
     positional: &[FluentValue<'a>],
     named: &FluentArgs<'_>,
 ) -> FluentValue<'a> {
-    let Some((date, time)) = as_civil(positional.first()) else {
+    let Some(instant) = as_instant(positional.first()) else {
         return FluentValue::Error;
+    };
+    let zoned = match option(named, "timeZone") {
+        None => zone::civil_at_offset(instant, 0),
+        Some(id) => match zone::parse_offset(id) {
+            Some(offset) => zone::civil_at_offset(instant, offset),
+            None => zone::zoned_civil(instant, id),
+        },
+    };
+    let (date, time) = match zoned {
+        Ok(civil) => civil,
+        Err(error) => {
+            log::debug!("frust-i18n: DATETIME(timeZone): {error}");
+            return FluentValue::Error;
+        }
     };
 
     let date_style = option(named, "dateStyle").map(length);
@@ -182,7 +198,7 @@ fn date_time<'a>(
         }
     };
 
-    report_unhonored(named, "DATETIME", &["dateStyle", "timeStyle"]);
+    report_unhonored(named, "DATETIME", &["dateStyle", "timeStyle", "timeZone"]);
     match formatted {
         Ok(formatted) => FluentValue::from(formatted),
         Err(error) => {
@@ -235,21 +251,20 @@ fn as_f64(value: Option<&FluentValue<'_>>) -> Option<f64> {
     }
 }
 
-/// Reads a positional argument as a civil date-time — epoch seconds, or an
+/// Reads a positional argument as an instant — epoch seconds, or an
 /// ISO-8601 string.
-fn as_civil(value: Option<&FluentValue<'_>>) -> Option<(CivilDate, CivilTime)> {
+fn as_instant(value: Option<&FluentValue<'_>>) -> Option<i64> {
     match value {
-        Some(FluentValue::Number(number)) => {
-            datetime::from_unix_seconds(number.value.trunc() as i64)
-        }
+        Some(FluentValue::Number(number)) => Some(number.value.trunc() as i64),
         Some(FluentValue::String(text)) => parse_iso(text),
         _ => None,
     }
 }
 
-/// Parses the ISO-8601 subset this crate accepts (see the module header).
-fn parse_iso(text: &str) -> Option<(CivilDate, CivilTime)> {
-    let text = text.strip_suffix('Z').unwrap_or(text);
+/// Parses the ISO-8601 subset this crate accepts (see the module header) to
+/// Unix seconds. A missing suffix means UTC; `Z` or `±HH:MM` is applied.
+fn parse_iso(text: &str) -> Option<i64> {
+    let (text, offset) = split_offset(text);
     let (date, time) = match text.split_once(['T', ' ']) {
         Some((date, time)) => (date, Some(time)),
         None => (text, None),
@@ -265,23 +280,46 @@ fn parse_iso(text: &str) -> Option<(CivilDate, CivilTime)> {
         return None;
     }
 
-    let Some(time) = time else {
-        return Some((date, CivilTime::MIDNIGHT));
+    let time = match time {
+        None => CivilTime::MIDNIGHT,
+        Some(time) => {
+            let mut time_parts = time.split(':');
+            let parsed = CivilTime {
+                hour: time_parts.next()?.parse().ok()?,
+                minute: time_parts.next()?.parse().ok()?,
+                second: match time_parts.next() {
+                    Some(second) => second.parse().ok()?,
+                    None => 0,
+                },
+            };
+            if time_parts.next().is_some() {
+                return None;
+            }
+            parsed
+        }
     };
-    let mut time_parts = time.split(':');
-    let time = CivilTime {
-        hour: time_parts.next()?.parse().ok()?,
-        minute: time_parts.next()?.parse().ok()?,
-        second: match time_parts.next() {
-            Some(second) => second.parse().ok()?,
-            None => 0,
-        },
-    };
-    if time_parts.next().is_some() {
-        return None;
-    }
 
-    Some((date, time))
+    Some(zone::utc_unix(date, time)? - i64::from(offset?))
+}
+
+/// Splits a trailing `Z`/`±HH[:MM]` off an ISO string. The offset is `None`
+/// when a suffix is present but malformed; `Some(0)` when absent.
+fn split_offset(text: &str) -> (&str, Option<i32>) {
+    if let Some(rest) = text.strip_suffix('Z') {
+        return (rest, Some(0));
+    }
+    // A sign after the time separator begins an offset; the date's own
+    // hyphens come before it.
+    let Some(time_start) = text.find(['T', ' ']) else {
+        return (text, Some(0));
+    };
+    match text[time_start..].rfind(['+', '-']) {
+        Some(at) => {
+            let (body, suffix) = text.split_at(time_start + at);
+            (body, zone::parse_offset(suffix))
+        }
+        None => (text, Some(0)),
+    }
 }
 
 #[cfg(test)]
@@ -407,37 +445,15 @@ mod tests {
     }
 
     #[test]
-    fn the_iso_subset_covers_dates_datetimes_and_a_trailing_zulu() {
-        let midnight = CivilTime::MIDNIGHT;
-
-        assert_eq!(
-            parse_iso("2024-01-31"),
-            Some((
-                CivilDate {
-                    year: 2024,
-                    month: 1,
-                    day: 31
-                },
-                midnight
-            ))
-        );
-        assert_eq!(
-            parse_iso("2024-01-31T15:47:50Z").map(|(_, time)| time),
-            Some(CivilTime {
-                hour: 15,
-                minute: 47,
-                second: 50
-            })
-        );
-        assert_eq!(
-            parse_iso("2024-01-31 15:47").map(|(_, time)| time),
-            Some(CivilTime {
-                hour: 15,
-                minute: 47,
-                second: 0
-            })
-        );
+    fn the_iso_subset_covers_dates_datetimes_and_offsets() {
+        assert_eq!(parse_iso("2024-01-31"), Some(1_706_659_200));
+        assert_eq!(parse_iso("2024-01-31T15:47:50Z"), Some(1_706_716_070));
+        assert_eq!(parse_iso("2024-01-31 15:47"), Some(1_706_716_020));
+        assert_eq!(parse_iso("2023-11-15T06:13:20+08:00"), Some(1_700_000_000));
+        assert_eq!(parse_iso("2023-11-14T22:13:20+00:00"), Some(1_700_000_000));
+        assert_eq!(parse_iso("2023-11-14T17:13:20-0500"), Some(1_700_000_000));
         assert_eq!(parse_iso("2024-01"), None);
-        assert_eq!(parse_iso("2024-01-31T15:47:50+02:00"), None);
+        assert_eq!(parse_iso("2024-01-31T15:47:50+2"), None);
+        assert_eq!(parse_iso("2024-02-30"), None);
     }
 }
