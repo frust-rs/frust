@@ -9,10 +9,13 @@
 //!
 //! # Controlled, like the bare tab bar
 //!
-//! The bars never navigate. A tap reports a [`ChromeEvent`]; the app routes
-//! and the confirmed `selected` comes back through the next build — exactly
+//! A tap reports a [`ChromeEvent`]; the app routes and the confirmed
+//! `selected` comes back through the next build — exactly
 //! [`NativeTabBarView`](super::NativeTabBarView)'s contract and handler shape
-//! (`Fn + Send + Sync`, no `&mut State`).
+//! (`Fn + Send + Sync`, no `&mut State`). Android and the fallback bars are
+//! controlled: they never navigate on a tap. iOS selects natively and
+//! converges to the app's spec within a ~250 ms settle, so the app must
+//! confirm in `on_tab_select`.
 //!
 //! # The toolbar
 //!

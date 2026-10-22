@@ -2942,47 +2942,109 @@ functions and their host tests.
 
 ---
 
-### `native-widgets-segmented-stepper-apple-only` — `native_segmented`/`native_stepper` exist on iOS and macOS only, and decision D2 refuses `native_tab_bar`/`show_native_sheet` on Android too
+### `native-widgets-segmented-stepper-apple-only` — `native_stepper` is Apple-only; `native_segmented` and `show_native_sheet` have Android arms, `native_tab_bar` stays iOS-only
 
-**Observed**: `native_segmented` and `native_stepper` are registered in `APPLE_KINDS`
-(`plugins/native-widgets/src/controls/mod.rs`), not `SHARED_KINDS` — neither control has an
-Android `NativeWidget` impl, or a Linux/Windows/web host one either. Each app-facing builder
-resolves this at compile time: `NativeSegmentedView`/`NativeStepperView`'s `SEGMENTED_ARM`/
-`STEPPER_ARM` constants (`plugins/native-widgets/src/api/builders.rs`) are `true` only under
-`cfg(any(target_os = "ios", target_os = "macos"))`; everywhere else the builder renders the
-frust-drawn `RefusalBanner` placeholder instead of an empty slot, naming the missing arm. Android's
-framework has no segmented control (the stock option, `MaterialButtonToggleGroup`, would impose an
-AndroidX/Material dependency this chartered leaf plugin never assumes an app added) and no
-increment/decrement stepper control either.
+**Observed**: `native_stepper` is registered in `APPLE_KINDS`
+(`plugins/native-widgets/src/controls/mod.rs`), not `SHARED_KINDS`/`MATERIAL_KINDS` — it has no
+Android `NativeWidget` impl, nor a Linux/Windows/web one; Android's framework has no
+increment/decrement control and a composite (two `ImageButton`s plus a `TextView`) is a named
+follow-up. `native_segmented` is in both `MATERIAL_KINDS` (Android: `MaterialButtonToggleGroup`) and
+`APPLE_KINDS`; `show_native_sheet` has an Android arm (`present::android_sheet`, a
+`BottomSheetDialog`) beside iOS's. Each app-facing builder resolves the rest at compile time:
+`SEGMENTED_ARM` is `true` on iOS/macOS/Android and `STEPPER_ARM` on iOS/macOS only
+(`plugins/native-widgets/src/api/builders.rs`); elsewhere the builder renders the frust-drawn
+`RefusalBanner` naming the missing arm. The sheet resolves through `UnsupportedSheet`
+(`PresentError::Unsupported`) on macOS, Linux, Windows and web. `native_tab_bar` (a bare
+`UITabBar`, `IOS_ONLY_KINDS`) is still iOS-only — decision D2 gives macOS no bottom-tab idiom; on
+Android the tab bar is the chrome's `BottomNavigationView` (`native_scaffold`), not this control.
 
-`native_tab_bar` is the same decision, one arm narrower: it is registered in `IOS_ONLY_KINDS`, not
-`APPLE_KINDS` (macOS has no bottom-tab-bar idiom either —
-`plugins/native-widgets/src/controls/tab_bar.rs`'s module doc, *No macOS arm, no Android arm
-(decision D2)*), and `NativeTabBarView`'s own compile-time gate (`TAB_BAR_ARM`,
-`plugins/native-widgets/src/api/builders.rs`) renders the same `RefusalBanner` everywhere but iOS,
-naming both the missing idiom and decision D2. `show_native_sheet`/`show_native_sheet_into` refuse
-for the same reason at runtime instead of compile time: the sheet arm exists only on iOS
-(`present::apple_sheet`), and every other target — Android included — resolves through
-`present::mod.rs`'s own `UnsupportedSheet`, answering `PresentError::Unsupported`.
+The Android sheet has one draggable half ratio: `BottomSheetBehavior` holds a single half-expanded
+ratio, so of several half detents the user drags between the selected (else smallest) one and the
+full height (`SheetHandle::select_detent` reaches the others); `largest_undimmed` and
+`scrolling_expands` are ignored (the dialog dims at every height, the scroll view always hands
+nested scrolls to the behavior). One live presentation supersedes the previous: showing a sheet or
+alert takes down any alert or sheet on screen and resolves its abandoned resolver.
 
-**Why accepted**: a Material-backed segmented Android arm and a composite stepper Android arm (two
-`ImageButton`s plus a `TextView`) are both named follow-up plans, not v1 scope — building either
-means taking on the Material/AndroidX dependency this plugin's leaf-plugin charter
-(`docs/PLUGINS_CODE_STANDARDS.md`) currently avoids entirely. No Linux/Windows/web arm exists for
-either control either; the compile-time refusal covers every non-Apple target uniformly. The same
-reasoning covers `native_tab_bar` (no `BottomNavigationView` dependency either) and the sheet arm
-(no `BottomSheetDialog`/`NSPopover` arm yet — `present/mod.rs`'s module doc's *Platform arms*
-names both as follow-up work).
+**Why accepted**: the stepper composite is follow-up work, and no Linux/Windows/web arm exists for
+the segmented control or the sheet (a macOS `NSPopover` arm is also follow-up); the compile-time
+refusal covers every such target uniformly. The old "no AndroidX/Material" rationale no longer
+holds: the Android embedding already ships AndroidX and the plugin's Gradle module now takes
+Material Components (`com.google.android.material:material`, the pin row in
+`docs/PLUGINS_DEVELOPMENT.md`), whose theme requirement is
+`native-chrome-android-material3-theme-required`.
 
-**Evidence**: `plugins/native-widgets/src/controls/mod.rs`'s `SHARED_KINDS`/`APPLE_KINDS`/
-`IOS_ONLY_KINDS` tables and their source-scanning parity test;
-`plugins/native-widgets/src/controls/segmented.rs`'s and
-`stepper.rs`'s module docs ("No Android arm (decision D2)" / "No Android arm (the same shape as
-decision D2)"); `plugins/native-widgets/src/controls/tab_bar.rs`'s module doc, *No macOS arm, no
-Android arm (decision D2)*; `plugins/native-widgets/src/api/builders.rs`'s `SEGMENTED_ARM`/
-`STEPPER_ARM`/`TAB_BAR_ARM` compile-time constants and `banner_placeholder`;
-`plugins/native-widgets/src/present/mod.rs`'s `UnsupportedSheet` and its module doc's *Platform
-arms* section; `plugins/native-widgets/README.md`'s "Eleven controls" table.
+**Evidence**: `plugins/native-widgets/src/controls/mod.rs`'s kind tables and their source-scanning
+parity test; `controls/segmented.rs`'s *The Android arm (decision C7)*, `controls/stepper.rs`'s
+module doc and `controls/tab_bar.rs`'s *No macOS arm, no Android arm (decision D2)*;
+`api/builders.rs`'s `SEGMENTED_ARM`/`STEPPER_ARM`/`TAB_BAR_ARM`; `present/mod.rs`'s *Platform arms*
+and `present/android_sheet.rs`; `plugins/native-widgets/README.md`'s controls table.
+
+---
+
+### `native-chrome-android-material3-theme-required` — Android chrome, sheet, segmented and the toolbar FABs need a Material3-derived Activity theme
+
+**Observed**: the Material views are built under the Activity's manifest theme
+(`FrustNativeControlFactory.materialContext`), because `create_control`'s night-qualified context
+carries the framework default theme. A stock theme (e.g. `Theme.Material.NoActionBar`, the scaffold
+default) makes Material's theme enforcement throw: the chrome install answers `INSTALL_REFUSED` →
+`ChromeError::Refused`, the slot pins the generation to the frust-drawn fallback bars and logs the
+fix once; a segmented control logs and takes the host's dead-slot path; the sheet fails with
+`PresentError::Platform`. Never a crash.
+
+The Material chrome also costs a landscape phone roughly half its height to the top bar and
+`BottomNavigationView`; there is no `NavigationRail` arm yet (`act_000001a163cc0ec5lDSXD9Wh`).
+
+**Applies to**: Android apps whose Activity theme derives from neither `Theme.Material3.*` nor
+`Theme.MaterialComponents.*`.
+
+**Why accepted**: Material's own enforcement is the only reliable signal, and the fallback keeps
+the app usable; the fix is one theme parent in the app. A typed error for the refusal is filed as
+`act_000001a164261f815JMdGTJf`.
+
+**Evidence**: `plugins/native-widgets/src/android/chrome.rs`'s *Install, refusal and the theme
+requirement*; `controls/segmented.rs`'s Android arm; `platform/android/build.gradle.kts` (THEME
+REQUIREMENT); d5-05 device gates (`rsa_000001a1648de91eTLTlKIIG`: iPhone SE iOS 26.7.1, Xiaomi 12
+Android 16, Pixel 5 Android 14, macOS)); release APK cost of the Material pin +1.44 MB universal, R8 binds (a3-04,
+`rsa_000001a163cbb62dAF49dVpP`).
+
+---
+
+### `native-chrome-android-bitmap-icons` — Android chrome icons are bitmaps; SF Symbols and menu-item icons are not drawn
+
+**Observed**: Android tab and action icons travel as PNG bytes (`setIcon`); an Apple SF Symbol has
+no Android rendering, so a symbol tab or action shows its title alone and `Leading::Symbol` shows
+no leading item (encoded `"none"`). A bottom item has one icon (a tab's selected-state icon is
+unused) and a menu item's icon is not shown.
+
+**Applies to**: `native_scaffold` on Android.
+
+**Why accepted**: there is no cross-platform symbol vocabulary to map; apps supply bitmaps for
+Android, and the title keeps every item reachable.
+
+**Evidence**: `plugins/native-widgets/src/android/chrome.rs`'s *Icons* and
+`chrome/mod.rs`'s `Leading::Symbol` doc.
+
+---
+
+### `native-chrome-single-surface-containment` — one frust surface serves every chrome tab; iOS navigation controllers have no stack
+
+**Observed**: the iOS chrome re-roots the window into a `UITabBarController` of
+`UINavigationController`s and moves the one frust `UIViewController` into the selected page, so tab
+state lives in the frust tree, not in per-tab UIKit stacks: there is no native push animation and
+`Leading::Back` is a custom item reporting `BackPressed`. Tab selection is native and optimistic:
+a tap selects at once and stays pending for a ~250 ms settle window; if the app's spec names
+another tab by then, the bar snaps back to it, so an app must confirm in `on_tab_select`. While a
+toolbar is shown the iOS tab bar is hidden (`act_000001a16497cbecZdfXd0j2`).
+
+**Applies to**: iOS `native_scaffold`. Android and the frust-drawn fallback are fully controlled
+(no optimism, no settle).
+
+**Why accepted**: frust owns routing (decision D5) and its single surface cannot be duplicated per
+tab; native selection is what keeps the Liquid Glass lens animation. The toolbar hide is chosen
+because frust pushes never hide the tab bar the native way and the toolbar would sit behind it.
+
+**Evidence**: `plugins/native-widgets/src/apple/chrome.rs`'s *Selection*, *Toolbar* and
+*Limitations* sections; d5-05 device gate `rsa_000001a1648de91eTLTlKIIG` (iPhone SE iOS 26.7.1).
 
 ---
 

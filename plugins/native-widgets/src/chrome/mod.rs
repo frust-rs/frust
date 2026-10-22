@@ -20,9 +20,12 @@
 //!   increasing [`ChromeGeneration`]; naming another generation while one is live is refused
 //!   [`ChromeError::Busy`], a withdrawn one on an empty slot is [`PublishOutcome::Stale`].
 //!   [`withdraw`] (scaffold teardown or drop) frees the slot only for its own generation.
-//! - **Controlled.** The bars never navigate: [`deliver`] decodes a
-//!   `(kind, detail)` report against the live spec into a [`ChromeEvent`]
-//!   for the registered sink, and the app confirms by publishing again.
+//! - **Controlled (Android and the fallback), converging (iOS).** [`deliver`]
+//!   decodes a `(kind, detail)` report against the live spec into a
+//!   [`ChromeEvent`] for the registered sink, and the app confirms by
+//!   publishing again. Android and the fallback bars never navigate on a tap;
+//!   iOS selects the tapped tab natively and converges to the app's spec
+//!   within a ~250 ms settle (`apple::chrome`'s *Selection*).
 //!   Reports stamped with a withdrawn generation are dropped, and so is a tap
 //!   on a disabled tab or menu item.
 //! - **One action index space.** An action report names its item by index

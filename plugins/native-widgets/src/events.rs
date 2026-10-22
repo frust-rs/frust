@@ -19,13 +19,13 @@
 //! [`EventPayload`] straight into a signal write, which is what wakes
 //! exactly one frust frame.
 //!
-//! # One listener, eight kinds, no JSON
+//! # One listener, twelve kinds, no JSON
 //!
 //! Kinds 1-5 are emitted on Android; the sixth,
-//! [`EVENT_KIND_SELECTION`], is appended for the Apple-arm-only segmented
-//! control and is emitted only by the two Apple target classes today (its
-//! Kotlin twin exists purely to keep the shared table whole; the iOS tab bar
-//! reports its selections through it too). The seventh,
+//! [`EVENT_KIND_SELECTION`], is appended for the segmented control and is
+//! emitted by the two Apple target classes and the Android segmented arm
+//! (`FrustNativeListener.reportSelection`; the iOS tab bar reports its
+//! selections through it too). The seventh,
 //! [`EVENT_KIND_DATE`], is appended after it for the date picker and is
 //! emitted by all three arms. The eighth, [`EVENT_KIND_RESELECTED`], is the
 //! iOS-only tab bar's tap on its showing item — emitted by the iOS target
