@@ -23,7 +23,7 @@
 //! drives `@JvmStatic` helpers on `FrustNativeControlFactory` (no new JNI
 //! export) and the Kotlin listener reports [`EVENT_KIND_SELECTION`] through
 //! `FrustNativeListener.reportSelection`. The group is built under the
-//! Activity's manifest theme (`FrustNativeControlFactory.materialContext`),
+//! Activity's manifest theme (the Kotlin-internal `FrustMaterialContext.wrap`),
 //! not the raw context. Under a non-Material theme
 //! construction throws, is logged, and the slot takes the host's existing
 //! dead-slot path — never a crash.
