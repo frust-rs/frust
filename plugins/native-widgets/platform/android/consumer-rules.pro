@@ -51,3 +51,11 @@
 # surprises — the provider is how the presenter learns which Activity is
 # resumed at all.
 -keep class dev.frust.nativewidgets.FrustNativePresenterInitProvider { *; }
+
+# `dev.frust.nativewidgets.FrustNativeChrome` (native app chrome) is loaded by
+# binary class name from Rust and called through its `@JvmStatic` members over
+# JNI, and its `external` `nativeOnChromeEvent`/`nativeOnChromeLost` bind by
+# their mangled `Java_dev_frust_nativewidgets_FrustNativeChrome_native*` names —
+# R8 traces none of it, so a minified build would strip the object and every
+# chrome install would fail its class lookup.
+-keep class dev.frust.nativewidgets.FrustNativeChrome { *; }

@@ -120,7 +120,9 @@ class FrustNativeListener(private val slotId: Long) :
 
     private external fun nativeOnEvent(slotId: Long, kind: Int, detail: Long)
 
-    private companion object {
+    // `internal`, not `private`: [FrustNativeChrome] reports the
+    // `KIND_CHROME_*` codes from this one table.
+    internal companion object {
         /**
          * `View.OnClickListener.onClick`. The codes below are shared
          * verbatim with the Rust `EVENT_KIND_*` constants
@@ -167,10 +169,11 @@ class FrustNativeListener(private val slotId: Long) :
          * tap (`detail` = index | reselect flag << 32), an action tap
          * (`detail` = action index), a pull-down menu choice (`detail` =
          * actionIndex * 1000 + menuIndex) and the back item (`detail` = 0).
-         * **Never emitted by this listener**: chrome is a host-level surface,
-         * not a `platform_view` slot, and no Android chrome arm exists yet.
-         * Kept so this table and the Rust one stay the same table — appended
-         * after `KIND_RESELECTED`, never renumbered.
+         * **Emitted by [FrustNativeChrome], never by this listener**: chrome
+         * is a host-level surface, not a `platform_view` slot, so it reports
+         * through `FrustNativeChrome.nativeOnChromeEvent`. Kept in this table
+         * so it and the Rust one stay the same table — appended after
+         * `KIND_RESELECTED`, never renumbered.
          */
         const val KIND_CHROME_TAB = 9
         const val KIND_CHROME_ACTION = 10
