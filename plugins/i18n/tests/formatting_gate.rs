@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 /// `formatting` feature must gate. `icu_provider` is on the list even though
 /// no source file names it: it is declared for its `sync` feature alone, and
 /// it has to stay just as gated as the rest.
-const GATED_CRATES: [&str; 7] = [
+const GATED_CRATES: [&str; 9] = [
     "icu_decimal",
     "icu_datetime",
     "icu_plurals",
@@ -30,6 +30,8 @@ const GATED_CRATES: [&str; 7] = [
     "icu_locale_core",
     "icu_provider",
     "tinystr",
+    "jiff",
+    "icu_list",
 ];
 
 /// The one directory allowed to name a crate from [`GATED_CRATES`].
