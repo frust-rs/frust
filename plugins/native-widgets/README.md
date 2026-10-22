@@ -269,8 +269,10 @@ the body's scroll position to the Android arm (changed values only, one publish
 per frame); iOS does not minimize its tab bar on scroll. On iOS the bars float
 over a full-bleed body, so put the safe area INSIDE the scroller
 (`scroll_view(safe_area(page))`) for content to scroll under them; the scaffold
-paints a static edge fade in the theme surface colour under each bar
-(`.edge_fade(color)` / `.no_edge_fade()`). On Android the surface sits between
+paints a static edge fade in the theme surface colour under each bar:
+`.edge_fade(EdgeFade::default().color(..).bar_alpha(..))` tunes colour, edge and
+bar-line alpha and tail, `EdgeFade::strong()` is a heavier preset and
+`.no_edge_fade()` turns it off. On Android the surface sits between
 the bars, so do not pad for them yourself. A second live scaffold
 publishes nothing and shows a one-line refusal above its body — one
 `native_scaffold` per app.
