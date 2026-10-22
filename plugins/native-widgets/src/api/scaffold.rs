@@ -637,9 +637,8 @@ impl ScrollLink {
 /// publication it owns.
 pub struct ScaffoldWidget {
     body: ChildPod,
-    banner: Option<ChildPod>,
-    /// What [`Self::banner`] shows, while it is up.
-    banner_kind: Option<Banner>,
+    /// The up banner and what it shows, kept together so they cannot disagree.
+    banner: Option<(Banner, ChildPod)>,
     /// The toolbar ids the last sync dropped, so a repeat is logged once.
     repeats: Vec<ActionId>,
     top: Option<ChildPod>,
@@ -676,23 +675,31 @@ fn sync_banner<Outer: 'static>(
     wanted: Option<Banner>,
     ctx: &mut BuildCtx<'_>,
 ) -> ChangeFlags {
-    if let (Some(kind), Some(pod)) = (wanted, element.banner.as_mut())
-        && element.banner_kind == Some(kind)
-    {
-        return rebuild_child(&kind.view::<Outer>(), &kind.view::<Outer>(), pod, ctx);
-    }
-    let mut flags = ChangeFlags::NONE;
-    if let Some(mut pod) = element.banner.take() {
-        let shown = element.banner_kind.unwrap_or(Banner::Refused);
-        teardown_child(&shown.view::<Outer>(), &mut pod, ctx);
-        flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
-    }
-    element.banner_kind = wanted;
     if let Some(kind) = wanted {
-        element.banner = Some(build_child(&kind.view::<Outer>(), ctx));
+        let view = kind.view::<Outer>();
+        if let Some((shown, pod)) = element.banner.as_mut()
+            && *shown == kind
+        {
+            return rebuild_child(&view, &view, pod, ctx);
+        }
+        let mut flags = retire_banner::<Outer>(element, ctx);
+        element.banner = Some((kind, build_child(&view, ctx)));
         flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        return flags;
     }
-    flags
+    retire_banner::<Outer>(element, ctx)
+}
+
+/// Tear down the up banner, if any.
+fn retire_banner<Outer: 'static>(
+    element: &mut ScaffoldWidget,
+    ctx: &mut BuildCtx<'_>,
+) -> ChangeFlags {
+    let Some((shown, mut pod)) = element.banner.take() else {
+        return ChangeFlags::NONE;
+    };
+    teardown_child(&shown.view::<Outer>(), &mut pod, ctx);
+    ChangeFlags::LAYOUT | ChangeFlags::PAINT
 }
 
 /// Bring one fallback bar's pod in line with `view` (`None`: no bar).
@@ -843,7 +850,6 @@ impl<V> NativeScaffoldView<V> {
         let mut element = ScaffoldWidget {
             body: build_child(&self.body, ctx),
             banner: None,
-            banner_kind: None,
             repeats: Vec::new(),
             top: None,
             toolbar: None,
@@ -1027,7 +1033,7 @@ fn route_pods(
 
 impl Widget for ScaffoldWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
-        let banner_height = match &mut self.banner {
+        let banner_height = match self.banner.as_mut().map(|(_, pod)| pod) {
             Some(banner) => {
                 let loose = BoxConstraints::new(
                     Size::new(bc.min().width, 0.0),
@@ -1139,7 +1145,7 @@ impl Widget for ScaffoldWidget {
             self.top.as_mut(),
             self.toolbar.as_mut(),
             bottom,
-            self.banner.as_mut(),
+            self.banner.as_mut().map(|(_, pod)| pod),
         ]
         .into_iter()
         .flatten()
@@ -1161,7 +1167,10 @@ impl Widget for ScaffoldWidget {
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
-        for pod in [&self.top, &self.banner].into_iter().flatten() {
+        for pod in [self.top.as_ref(), self.banner.as_ref().map(|(_, pod)| pod)]
+            .into_iter()
+            .flatten()
+        {
             pod.semantics_child(ctx);
         }
         self.body.semantics_child(ctx);
@@ -1173,7 +1182,16 @@ impl Widget for ScaffoldWidget {
         }
     }
 
-    frust::authoring::visit_children!(body, banner, top, toolbar, bottom);
+    fn visit_children(&self, visitor: &mut dyn FnMut(&frust::authoring::ChildPod)) {
+        use frust::authoring::VisitPods;
+        self.body.visit_pods(visitor);
+        if let Some((_, pod)) = &self.banner {
+            pod.visit_pods(visitor);
+        }
+        self.top.visit_pods(visitor);
+        self.toolbar.visit_pods(visitor);
+        self.bottom.visit_pods(visitor);
+    }
 }
 
 #[cfg(test)]
@@ -1427,7 +1445,7 @@ mod tests {
 
         let (mut element, outcome) = build(&view);
         assert!(matches!(outcome, PublishOutcome::Installed(_)));
-        assert_eq!(element.banner_kind, Some(Banner::Repeated));
+        assert_eq!(element.banner.as_ref().map(|b| b.0), Some(Banner::Repeated));
         assert!(element.banner.is_some());
         let live = chrome::live_spec().expect("live");
         assert_eq!(live.toolbar.map(|t| t.items.len()), Some(1));
@@ -1438,7 +1456,7 @@ mod tests {
                 .primary(ActionItem::new("comment", "Comment")),
         );
         rebuild(&view, &clean, &mut element);
-        assert!(element.banner.is_none() && element.banner_kind.is_none());
+        assert!(element.banner.is_none());
         assert!(element.repeats.is_empty());
         teardown(&clean, &mut element);
     }
@@ -1450,13 +1468,13 @@ mod tests {
         let (mut first, _) = build(&scaffold());
         let (mut second, outcome) = build(&repeated);
         assert!(matches!(outcome, PublishOutcome::Refused(_)));
-        assert_eq!(second.banner_kind, Some(Banner::Refused));
+        assert_eq!(second.banner.as_ref().map(|b| b.0), Some(Banner::Refused));
         teardown(&scaffold(), &mut first);
         assert!(matches!(
             rebuild(&repeated, &repeated, &mut second),
             PublishOutcome::Installed(_)
         ));
-        assert_eq!(second.banner_kind, Some(Banner::Repeated));
+        assert_eq!(second.banner.as_ref().map(|b| b.0), Some(Banner::Repeated));
         teardown(&repeated, &mut second);
         assert!(second.banner.is_none());
     }

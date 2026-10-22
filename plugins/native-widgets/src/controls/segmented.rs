@@ -31,7 +31,8 @@
 //! *checked* background of each segment (there is no single selected-tint
 //! property) and leaves unchecked segments transparent; `momentary` has no
 //! native mode, so a tap reports and the group then clears its check
-//! (selection is not required while momentary).
+//! (selection is not required while momentary); while momentary the
+//! platform ignores the planned selection, so no check is ever drawn.
 //!
 //! # The labels ride flat params
 //!
@@ -869,6 +870,22 @@ mod tests {
                 Setter::ContentDescription(Some("range")),
             ]
         );
+    }
+
+    #[test]
+    fn a_momentary_create_with_a_selection_still_plans_it_for_the_platform_to_mute() {
+        let props = decode(&format!(
+            "{DAY_WEEK_MONTH},\"selected\":2,\"momentary\":true"
+        ));
+        let plan = SegmentedProps::plan(&SegmentedProps::platform_default(5), &props, None);
+        let momentary = plan
+            .iter()
+            .position(|s| matches!(s, Setter::Momentary(true)));
+        let selected = plan
+            .iter()
+            .position(|s| matches!(s, Setter::SelectedSegment(Some(2))));
+        // Momentary lands first, so Android's select sees the flag and draws no check.
+        assert!(momentary.is_some() && momentary < selected);
     }
 
     #[test]

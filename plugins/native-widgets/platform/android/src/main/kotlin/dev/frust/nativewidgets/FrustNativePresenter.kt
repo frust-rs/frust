@@ -27,6 +27,7 @@ import android.content.Context
 import android.content.DialogInterface
 import android.content.res.ColorStateList
 import android.content.res.Configuration
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Bundle
 import android.os.Handler
@@ -433,6 +434,29 @@ object FrustNativePresenter {
     }
 
     /** The drag handle (when `grabber`) over a scrolling column of the spec's rows. */
+    /**
+     * Decode [bytes] with the longer side kept at or under the larger of four
+     * times the image row's max height and the display width: bounds first,
+     * then a power-of-two sample. `null` (logged) when it does not decode.
+     */
+    private fun decodeSheetImage(context: Context, bytes: ByteArray): Bitmap? = try {
+        val metrics = context.resources.displayMetrics
+        val cap = maxOf(4 * dp(context, SHEET_IMAGE_MAX_DP), metrics.widthPixels)
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+            null
+        } else {
+            val longer = maxOf(bounds.outWidth, bounds.outHeight)
+            var sample = 1
+            while ((longer + sample - 1) / sample > cap) sample *= 2
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample })
+        }
+    } catch (t: Throwable) {
+        Log.w(TAG, "Frust: native sheet image decode threw", t)
+        null
+    }
+
     private fun sheetContent(dialog: BottomSheetDialog, spec: JSONObject, image: ByteArray?, generation: Long): View {
         val context = dialog.context
         val grabber = spec.optBoolean("grabber", true)
@@ -452,7 +476,7 @@ object FrustNativePresenter {
             addRow(message)
         }
         if (image != null) {
-            val bitmap = BitmapFactory.decodeByteArray(image, 0, image.size)
+            val bitmap = decodeSheetImage(context, image)
             if (bitmap == null) {
                 Log.w(TAG, "Frust: native sheet image (${image.size} bytes) did not decode — row omitted")
             } else {
