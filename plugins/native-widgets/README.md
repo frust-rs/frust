@@ -213,7 +213,10 @@ impl Editor {
 (title, subtitle, leading item, actions, pull-down menus) and a bottom tab bar,
 published as one spec to the platform host (or, on a target with no chrome arm,
 to frust-drawn fallback bars). It is one declarative tree inside
-`Component::build`:
+`Component::build`. The scaffold resizes its body to avoid the keyboard by
+default (`.resize_to_avoid_keyboard(false)` to opt out), so a bottom-pinned
+composer sits on the keyboard; on Android the bottom navigation hides while the
+keyboard is up:
 
 ```rust
 use frust::{Component, Get, RwSignal, Set, View, text};
