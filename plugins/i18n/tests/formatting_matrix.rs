@@ -511,3 +511,147 @@ fn ftl_iso_offsets_name_the_same_instant() {
         "10:13\u{202f}PM"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Ranges (hand-rolled: ICU4X 2.2 has no interval formatter)
+// ---------------------------------------------------------------------------
+
+fn t(hour: u8, minute: u8) -> CivilTime {
+    CivilTime {
+        hour,
+        minute,
+        second: 0,
+    }
+}
+
+fn d(year: i32, month: u8, day: u8) -> CivilDate {
+    CivilDate { year, month, day }
+}
+
+#[test]
+fn time_ranges_collapse_a_shared_day_period_and_keep_a_differing_one() {
+    let short = DateLength::Short;
+    let range = |tag: &str, a, b| fmt::time_range(&locale(tag), a, b, short).unwrap();
+
+    assert_eq!(range("en-US", t(9, 0), t(11, 0)), "9:00 – 11:00\u{202f}AM");
+    assert_eq!(
+        range("en-US", t(11, 0), t(13, 0)),
+        "11:00\u{202f}AM – 1:00\u{202f}PM"
+    );
+    assert_eq!(range("ja-JP", t(9, 0), t(11, 0)), "9:00～11:00");
+    assert_eq!(range("th-TH", t(9, 0), t(11, 0)), "09:00 – 11:00");
+    assert_eq!(range("vi-VN", t(9, 0), t(11, 0)), "09:00 – 11:00");
+    assert_eq!(range("es-ES", t(9, 0), t(11, 0)), "09:00 – 11:00");
+    assert_eq!(range("es-ES", t(11, 0), t(13, 0)), "11:00 – 13:00");
+}
+
+#[test]
+fn a_reversed_time_range_is_joined_in_the_given_order_without_panicking() {
+    let en = locale("en-US");
+    assert_eq!(
+        fmt::time_range(&en, t(11, 0), t(9, 0), DateLength::Short).unwrap(),
+        "11:00\u{202f}AM – 9:00\u{202f}AM"
+    );
+    assert_eq!(
+        fmt::time_range(&locale("ja-JP"), t(11, 0), t(9, 0), DateLength::Short).unwrap(),
+        "11:00～9:00"
+    );
+}
+
+#[test]
+fn a_range_across_local_midnight_in_a_zone_keeps_both_periods() {
+    // 17:13 in New York on 2023-11-14; +6h is 23:13, +8h is 01:13 next day.
+    let (start, end) = (INSTANT + 6 * 3_600, INSTANT + 8 * 3_600);
+    let zone = "America/New_York";
+    let short = DateLength::Short;
+
+    assert_eq!(
+        fmt::time_range_in_zone(&locale("en-US"), start, end, zone, short).unwrap(),
+        "11:13\u{202f}PM – 1:13\u{202f}AM"
+    );
+    assert_eq!(
+        fmt::time_range_in_zone(&locale("ja-JP"), start, end, zone, short).unwrap(),
+        "23:13～1:13"
+    );
+    assert_eq!(
+        fmt::time_range_in_zone(&locale("th-TH"), start, end, zone, short).unwrap(),
+        "23:13 – 01:13"
+    );
+    assert_eq!(
+        fmt::time_range_in_zone(&locale("en-US"), INSTANT, INSTANT + 7_200, zone, short).unwrap(),
+        "5:13 – 7:13\u{202f}PM"
+    );
+    assert!(fmt::time_range_in_zone(&locale("en-US"), 0, 1, "Not/AZone", short).is_err());
+}
+
+#[test]
+fn datetime_ranges_share_the_date_on_one_day_and_repeat_it_across_days() {
+    let en = locale("en-US");
+    let zone = "Asia/Makassar";
+    let short = DateLength::Short;
+
+    assert_eq!(
+        fmt::datetime_range_in_zone(&en, INSTANT, INSTANT + 3_600, zone, short).unwrap(),
+        "11/15/23, 6:13 – 7:13\u{202f}AM"
+    );
+    assert_eq!(
+        fmt::datetime_range_in_zone(&en, INSTANT, INSTANT + 12 * 3_600, zone, short).unwrap(),
+        "11/15/23, 6:13\u{202f}AM – 6:13\u{202f}PM"
+    );
+    assert_eq!(
+        fmt::datetime_range_in_zone(&locale("vi-VN"), INSTANT, INSTANT + 3_600, zone, short)
+            .unwrap(),
+        "06:13 – 07:13 15/11/2023"
+    );
+    // Different local days: two full date-times.
+    let across =
+        fmt::datetime_range_in_zone(&en, INSTANT, INSTANT + 24 * 3_600, zone, short).unwrap();
+    assert_eq!(
+        across,
+        "11/15/23, 6:13\u{202f}AM – 11/16/23, 6:13\u{202f}AM"
+    );
+}
+
+#[test]
+fn date_ranges_across_months_and_years_across_the_matrix() {
+    let medium = DateLength::Medium;
+    let cases = [
+        (
+            "en-US",
+            "Mar 5, 2024 – Mar 9, 2024",
+            "Mar 28, 2024 – Apr 2, 2024",
+            "Dec 30, 2024 – Jan 2, 2025",
+        ),
+        (
+            "es-ES",
+            "5 mar 2024 – 9 mar 2024",
+            "28 mar 2024 – 2 abr 2024",
+            "30 dic 2024 – 2 ene 2025",
+        ),
+        (
+            "ja-JP",
+            "2024/03/05～2024/03/09",
+            "2024/03/28～2024/04/02",
+            "2024/12/30～2025/01/02",
+        ),
+        (
+            "th-TH",
+            "5 ม\u{e35}.ค. 2567 – 9 ม\u{e35}.ค. 2567",
+            "28 ม\u{e35}.ค. 2567 – 2 เม.ย. 2567",
+            "30 ธ.ค. 2567 – 2 ม.ค. 2568",
+        ),
+        (
+            "vi-VN",
+            "5 thg 3, 2024 – 9 thg 3, 2024",
+            "28 thg 3, 2024 – 2 thg 4, 2024",
+            "30 thg 12, 2024 – 2 thg 1, 2025",
+        ),
+    ];
+    for (tag, same_month, months, years) in cases {
+        let l = locale(tag);
+        let range = |a, b| fmt::date_range(&l, a, b, medium).unwrap();
+        assert_eq!(range(d(2024, 3, 5), d(2024, 3, 9)), same_month, "{tag}");
+        assert_eq!(range(d(2024, 3, 28), d(2024, 4, 2)), months, "{tag}");
+        assert_eq!(range(d(2024, 12, 30), d(2025, 1, 2)), years, "{tag}");
+    }
+}

@@ -420,6 +420,21 @@ renders in UTC. The positional may be epoch seconds or an ISO string with `Z` or
 zone-less civil date cannot be re-zoned. Zone data adds the jiff tzdb to the binary — see
 `docs/LIMITATIONS.md` once recorded.
 
+Ranges (slot pills, booking windows) are hand-rolled, because ICU4X 2.2 has no interval
+formatter: `fmt::time_range`, `time_range_in_zone`, `date_range` and `datetime_range_in_zone`
+format both ends and join them with a per-language separator (` – ` for en/es/vi/th, `～` for ja,
+`–` for zh). In a 12-hour locale a shared day period is kept only on the last end:
+
+```rust
+fmt::time_range(&en, t(9, 0), t(11, 0), DateLength::Short)?;   // "9:00 – 11:00\u{202f}AM"
+fmt::time_range(&en, t(11, 0), t(13, 0), DateLength::Short)?;  // "11:00\u{202f}AM – 1:00\u{202f}PM"
+fmt::time_range(&ja, t(9, 0), t(11, 0), DateLength::Short)?;   // "9:00～11:00"
+```
+
+`date_range` does no month/year elision (`Mar 28, 2024 – Apr 2, 2024`), and a reversed range
+(end before start) is joined in the order given, never panicking. This is a simplification of
+CLDR's interval formats; `docs/LIMITATIONS.md` records it as `i18n-interval-hand-rolled`.
+
 Honored named options: `NUMBER`'s `style` (`decimal`/`percent`/`currency`), `currency` and
 `minorUnits`;
 `DATETIME`'s `dateStyle`/`timeStyle`/`timeZone`. Anything else (ECMA-402-style
