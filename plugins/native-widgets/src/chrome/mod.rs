@@ -232,6 +232,12 @@ impl MenuItem {
     }
 }
 
+/// Whether the host's bars float over the body (iOS reports them through the
+/// window insets); Android's arm shrinks the surface between its bars and the
+/// fallback bars are laid out beside the body, so neither floats.
+#[cfg_attr(not(feature = "frust-api"), allow(dead_code))]
+pub(crate) const BARS_FLOAT_OVER_BODY: bool = cfg!(target_os = "ios");
+
 /// The body's scroll position, mirrored to the host so the bars can react
 /// (scroll-edge appearance, lifted app bar). Logical pixels.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -242,79 +248,6 @@ pub struct ScrollState {
     pub max_offset: f64,
     /// The visible extent along the scroll axis.
     pub viewport: f64,
-}
-
-// --- the scroll mirror ------------------------------------------------------
-
-/// How the iOS arm mirrors [`ScrollState`] onto its bars (decision C5); see
-/// `crate::apple::chrome_scroll` for both modes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-// The variant [`SCROLL_MIRROR`] does not name is never constructed.
-#[allow(dead_code)]
-pub(crate) enum ScrollMirror {
-    /// A per-page invisible `UIScrollView` UIKit observes for the bars' edges.
-    HiddenScrollView,
-    /// The bar's scroll-edge appearance flipped at [`past_scroll_edge`].
-    ManualAppearance,
-}
-
-/// The mirror the iOS arm ships. Whether UIKit honours an offset-driven,
-/// invisible scroll view is undocumented and settled on device; if it is not,
-/// this flips to [`ScrollMirror::ManualAppearance`].
-#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
-pub(crate) const SCROLL_MIRROR: ScrollMirror = ScrollMirror::HiddenScrollView;
-
-/// The manual mirror's hysteresis band past the edge, in logical pixels, so
-/// sub-pixel settle jitter at the top never flickers the bar.
-pub(crate) const SCROLL_EDGE_HYSTERESIS: f64 = 1.0;
-
-/// The mirror scroll view's vertical geometry for one [`ScrollState`], every
-/// value finite and non-negative.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-#[cfg_attr(not(any(test, target_os = "ios")), allow(dead_code))]
-pub(crate) struct MirrorGeometry {
-    /// The frame height.
-    pub(crate) viewport: f64,
-    /// Viewport plus the largest reachable offset.
-    pub(crate) content_height: f64,
-    /// Within `0..=max_offset`.
-    pub(crate) offset: f64,
-}
-
-/// `value` when finite and positive, else 0.
-fn finite_non_negative(value: f64) -> f64 {
-    if value.is_finite() {
-        value.max(0.0)
-    } else {
-        0.0
-    }
-}
-
-impl ScrollState {
-    /// The geometry the hidden mirror scroll view is given for this state.
-    #[cfg_attr(not(any(test, target_os = "ios")), allow(dead_code))]
-    pub(crate) fn mirror_geometry(self) -> MirrorGeometry {
-        let viewport = finite_non_negative(self.viewport);
-        let max_offset = finite_non_negative(self.max_offset);
-        MirrorGeometry {
-            viewport,
-            content_height: viewport + max_offset,
-            offset: finite_non_negative(self.offset).min(max_offset),
-        }
-    }
-}
-
-/// Whether the manual mirror shows the bar's standard (scrolled) appearance
-/// at `offset`, given whether it already did (`was`): it turns on above
-/// [`SCROLL_EDGE_HYSTERESIS`] and off only back at the edge.
-#[cfg_attr(not(any(test, target_os = "ios")), allow(dead_code))]
-pub(crate) fn past_scroll_edge(was: bool, offset: f64) -> bool {
-    let offset = finite_non_negative(offset);
-    if was {
-        offset > 0.0
-    } else {
-        offset > SCROLL_EDGE_HYSTERESIS
-    }
 }
 
 // --- the event vocabulary ---------------------------------------------------
@@ -1298,59 +1231,6 @@ mod tests {
             slot.publish(Some(generation), next);
         }
         assert_eq!(slot.host().calls().count(), RECORDED_CALLS_CAP);
-    }
-
-    fn scroll(offset: f64, max_offset: f64, viewport: f64) -> ScrollState {
-        ScrollState {
-            offset,
-            max_offset,
-            viewport,
-        }
-    }
-
-    #[test]
-    fn the_mirror_geometry_is_viewport_plus_max_offset_at_the_offset() {
-        let at = |offset, max, viewport| scroll(offset, max, viewport).mirror_geometry();
-        let geometry = |viewport, content_height, offset| MirrorGeometry {
-            viewport,
-            content_height,
-            offset,
-        };
-        assert_eq!(at(120.0, 900.0, 600.0), geometry(600.0, 1500.0, 120.0));
-        assert_eq!(at(0.0, 0.0, 600.0), geometry(600.0, 600.0, 0.0));
-        assert_eq!(
-            at(950.0, 900.0, 600.0),
-            geometry(600.0, 1500.0, 900.0),
-            "an offset past the end clamps to it"
-        );
-        assert_eq!(at(-4.0, 900.0, 600.0).offset, 0.0, "overscroll clamps to 0");
-        assert_eq!(
-            at(f64::NAN, f64::INFINITY, -1.0),
-            MirrorGeometry::default(),
-            "non-finite or negative values read as 0"
-        );
-        assert_eq!(
-            ScrollState::default().mirror_geometry(),
-            MirrorGeometry::default()
-        );
-    }
-
-    #[test]
-    fn the_scroll_edge_flips_above_the_hysteresis_band_and_back_only_at_zero() {
-        let mut shown = false;
-        let mut trace = Vec::new();
-        for offset in [0.0, 0.4, 1.0, 1.5, 0.6, 0.0, 0.9, 3.0, -2.0] {
-            shown = past_scroll_edge(shown, offset);
-            trace.push(shown);
-        }
-        assert_eq!(
-            trace,
-            [false, false, false, true, true, false, false, true, false]
-        );
-        assert!(past_scroll_edge(false, SCROLL_EDGE_HYSTERESIS + 0.01));
-        assert!(!past_scroll_edge(false, SCROLL_EDGE_HYSTERESIS));
-        assert!(past_scroll_edge(true, 0.01));
-        assert!(!past_scroll_edge(true, f64::NAN));
     }
 
     #[test]

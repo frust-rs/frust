@@ -80,8 +80,7 @@
 //!
 //! `native-chrome-single-surface-containment`: one frust surface serves every
 //! tab, and the navigation controllers have no stack (no native push
-//! animation; `Leading::Back` is a custom item reporting `BackPressed`). Each
-//! page's scroll mirror ([`PageMirror`]) is [`super::chrome_scroll`]'s.
+//! animation; `Leading::Back` is a custom item reporting `BackPressed`).
 
 use std::cell::RefCell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -102,7 +101,6 @@ use objc2_ui_kit::{
 };
 
 use super::FrustNativeControlTarget;
-use super::chrome_scroll::{PageMirror, apply_minimize};
 use super::theme::apply_user_interface_style;
 use crate::api::{TabIcon, TabId, TabItem};
 use crate::chrome::host::ChromeField;
@@ -291,7 +289,6 @@ struct Page {
     id: Option<TabId>,
     nav: Retained<UINavigationController>,
     page: Retained<FrustChromePageController>,
-    mirror: PageMirror,
 }
 
 /// Everything the installed chrome owns.
@@ -353,11 +350,11 @@ impl Chrome {
             view.setAutoresizingMask(flexible);
         }
         chrome.select(spec);
-        chrome.mirror_scroll(mtm);
-        apply_minimize(&chrome.tabs, spec.scroll);
         chrome
     }
 
+    /// `ChromeField::Scroll` is ignored here: the iOS bars do not react to the
+    /// body's scroll (the scaffold draws the edge fade instead).
     fn apply(&mut self, mtm: MainThreadMarker, diff: &ChromeDiff<'_>) {
         let spec = diff.spec;
         let restyle = self.spec.dark != spec.dark;
@@ -377,22 +374,6 @@ impl Chrome {
             for page in &self.pages {
                 apply_user_interface_style(&page.nav.navigationBar(), spec.dark);
             }
-        }
-        let moved = diff.contains(ChromeField::Tabs) || diff.contains(ChromeField::Selected);
-        if moved || diff.contains(ChromeField::Scroll) {
-            self.mirror_scroll(mtm);
-        }
-        if diff.contains(ChromeField::Scroll) {
-            apply_minimize(&self.tabs, spec.scroll);
-        }
-    }
-
-    /// Feed the scroll state to the mirror of the page holding the frust
-    /// controller: the body it describes is shown there.
-    fn mirror_scroll(&mut self, mtm: MainThreadMarker) {
-        let state = self.spec.scroll;
-        if let Some(page) = self.pages.iter_mut().find(|page| page.page.holds()) {
-            page.mirror.apply(mtm, &page.nav, state);
         }
     }
 
@@ -511,13 +492,7 @@ impl Page {
             UINavigationController::alloc(mtm),
             &page,
         );
-        let mirror = PageMirror::new(mtm, &page);
-        Self {
-            id,
-            nav,
-            page,
-            mirror,
-        }
+        Self { id, nav, page }
     }
 
     /// Mirror `tab` onto the navigation controller's `tabBarItem`.

@@ -28,6 +28,8 @@ frust = { workspace = true, optional = true }
 frust-core = { workspace = true, optional = true }
 # `ClipToSlot` hand-implements `Widget::layout`, which returns a bare `kurbo::Size`.
 kurbo = { workspace = true, optional = true }
+# The scaffold's edge-fade `Gradient` brush.
+peniko = { workspace = true, optional = true }
 # Theme ladder L3's `NativeTypefaces`/`FontFace`, named directly so they stay
 # reachable independently of the facade's re-export list.
 frust-theme = { workspace = true, optional = true }
@@ -115,10 +117,6 @@ objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "UIMenu",
     "UIMenuElement",
     "UIAction",
-    # Scroll mirror: `setContentScrollView:forEdge:` needs `UIScrollView` + `UIGeometry`.
-    "UIScrollView",
-    "UIGeometry",
-    "UINavigationBarAppearance",
     "block2",
     "objc2-core-foundation",
     "objc2-quartz-core",
@@ -258,7 +256,7 @@ default = ["frust-api"]
 # Default-on app-facing builders. `--no-default-features` is the charter-line
 # gate (see the `[dependencies]` comments above `frust`/`frust-core`), checked
 # with `cargo tree -p frust-native-widgets --no-default-features -e normal`.
-frust-api = ["dep:frust", "dep:frust-core", "dep:frust-theme", "dep:kurbo"]
+frust-api = ["dep:frust", "dep:frust-core", "dep:frust-theme", "dep:kurbo", "dep:peniko"]
 # The demo composite (`src/demo.rs`). Must stay NON-default: a demonstration,
 # not product surface. Adds no dependency — it enables `frust-api`, so it never
 # reaches the `--no-default-features` tree and the charter line holds.
