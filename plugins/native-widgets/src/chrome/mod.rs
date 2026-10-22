@@ -30,6 +30,22 @@
 //!   shows ([`resolve_tap`]) and hands the id-based event to [`deliver_event`],
 //!   which re-encodes it against the live spec, so a reorder in between cannot
 //!   retarget it and an item that is gone or disabled by then is dropped.
+//! - **Failures reported late.** An arm that installs on a later turn reports
+//!   a failure it finds there through [`ChromeHost::take_failure`]; the slot
+//!   takes it at the top of the generation's next publish (or withdraw),
+//!   answers that publish [`PublishOutcome::Fallback`] and, for
+//!   [`ChromeError::NoHost`], retries the install on the one after.
+//!
+//! # The epoch
+//!
+//! An outcome change off the scaffold's build path (a failure an arm records
+//! on the main queue, a scroll flush whose publish crosses between native and
+//! fallback) calls [`bump_epoch`] outside the slot lock: it counts the change
+//! and owes the shell a frame, whose rebuild re-runs the scaffold's sync so
+//! its fallback bars and `native` flag follow. It is not a signal: every
+//! frame that runs rebuilds the whole tree, so the frame is all that is owed,
+//! and a signal the plugin created inside a build would die with that
+//! component's owner.
 //!
 //! The module is behind `frust-api` because the spec reuses the api layer's
 //! [`TabItem`]/[`TabIcon`]/[`TabId`]; it compiles on every target. iOS
@@ -46,6 +62,7 @@ pub(crate) use host::RecordingChromeHost;
 pub(crate) use host::{ChromeDiff, ChromeError, ChromeHost};
 
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Once};
 
 use crate::api::{TabIcon, TabId, TabItem};
@@ -60,6 +77,57 @@ use crate::events::{
 /// [`fallback`] bars. A target with an arm still draws the fallback for a
 /// [`PublishOutcome::Fallback`] (its install was refused).
 pub(crate) const NATIVE_CHROME_ARM: bool = cfg!(target_os = "ios");
+
+#[cfg(test)]
+thread_local! {
+    /// [`native_arm`]'s per-test-thread override.
+    static TEST_ARM: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// [`NATIVE_CHROME_ARM`], which a test may override on its own thread
+/// ([`ArmOverride`]) to drive the arm's outcome classes on a host build.
+pub(crate) fn native_arm() -> bool {
+    #[cfg(test)]
+    if let Some(arm) = TEST_ARM.with(std::cell::Cell::get) {
+        return arm;
+    }
+    NATIVE_CHROME_ARM
+}
+
+/// Test-only: [`native_arm`] answers `arm` on this thread until dropped.
+#[cfg(test)]
+pub(crate) struct ArmOverride;
+
+#[cfg(test)]
+impl ArmOverride {
+    pub(crate) fn new(arm: bool) -> Self {
+        TEST_ARM.with(|cell| cell.set(Some(arm)));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for ArmOverride {
+    fn drop(&mut self) {
+        TEST_ARM.with(|cell| cell.set(None));
+    }
+}
+
+static EPOCH: AtomicU64 = AtomicU64::new(0);
+
+/// Record an outcome change made off the scaffold's build path and owe the
+/// shell a frame, whose rebuild re-syncs the scaffold (module doc, "The
+/// epoch"). Callable from any thread; never with the slot locked.
+pub(crate) fn bump_epoch() {
+    EPOCH.fetch_add(1, Ordering::AcqRel);
+    frust::texture::request_frame();
+}
+
+/// How many times [`bump_epoch`] ran.
+#[cfg(test)]
+pub(crate) fn epoch() -> u64 {
+    EPOCH.load(Ordering::Acquire)
+}
 
 // --- the data contract ------------------------------------------------------
 
@@ -489,6 +557,14 @@ impl<H: ChromeHost> ChromeSlot<H> {
             return PublishOutcome::Refused(ChromeError::Busy);
         }
         let generation = live.generation;
+        if absorb_failure(&mut self.host, live)
+            && let Err(error) = &live.installed
+        {
+            // Fresh from the arm: fall back now, retry (NoHost) on the next publish.
+            let error = error.clone();
+            live.spec = spec;
+            return PublishOutcome::Fallback(generation, error);
+        }
         if live.installed == Err(ChromeError::NoHost) {
             // NoHost is transient: retry; a success switches to the arm.
             live.installed = self.host.install(generation, &spec);
@@ -523,24 +599,32 @@ impl<H: ChromeHost> ChromeSlot<H> {
         if self.live.as_ref().map(|live| live.generation) != Some(generation) {
             return false;
         }
-        if let Some(Live {
-            installed: Ok(()), ..
-        }) = self.live.take()
-        {
-            self.host.dispose();
+        if let Some(live) = self.live.as_mut() {
+            absorb_failure(&mut self.host, live);
         }
+        self.release();
         true
+    }
+
+    /// Drop the live generation: dispose an installed host, else tell it the
+    /// failed generation is gone.
+    fn release(&mut self) {
+        match self.live.take() {
+            Some(Live {
+                installed: Ok(()), ..
+            }) => self.host.dispose(),
+            Some(live) => self.host.abandon(live.generation),
+            None => {}
+        }
     }
 
     /// Test-only: drop whatever is live, disposing an installed host.
     #[cfg(test)]
     fn clear(&mut self) {
-        if let Some(Live {
-            installed: Ok(()), ..
-        }) = self.live.take()
-        {
-            self.host.dispose();
+        if let Some(live) = self.live.as_mut() {
+            absorb_failure(&mut self.host, live);
         }
+        self.release();
     }
 
     /// Register where `generation`'s events go; `false` if it is not live.
@@ -611,6 +695,16 @@ impl<H: ChromeHost> ChromeSlot<H> {
     }
 }
 
+/// Take a failure `host` reported for `live` since it answered the install
+/// `Ok` (the arm logged it); `true` when one arrived.
+fn absorb_failure<H: ChromeHost>(host: &mut H, live: &mut Live) -> bool {
+    let Some(error) = host.take_failure(live.generation) else {
+        return false;
+    };
+    live.installed = Err(error);
+    true
+}
+
 /// Log an arm's failed install. A refusal is a property of the app's theme,
 /// not of one scaffold, so it is logged once per process and names the fix.
 fn log_install_failure(error: &ChromeError) {
@@ -654,8 +748,16 @@ pub(crate) fn slot_test_guard() -> MutexGuard<'static, ()> {
     let guard = GUARD
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    lock_slot().clear();
+    let mut slot = lock_slot();
+    slot.clear();
+    *slot.host_mut() = RecordingChromeHost::new();
     guard
+}
+
+/// Test-only: run `f` on the process-wide slot's recording host.
+#[cfg(test)]
+pub(crate) fn with_test_host<R>(f: impl FnOnce(&mut RecordingChromeHost) -> R) -> R {
+    f(lock_slot().host_mut())
 }
 
 /// Test-only: the process-wide slot's live generation, if any.
@@ -1025,6 +1127,89 @@ mod tests {
             slot.host().calls().count(),
             0,
             "never retried, nothing installed, nothing disposed"
+        );
+    }
+
+    #[test]
+    fn a_deferred_no_host_failure_falls_back_then_retries() {
+        let mut slot = slot();
+        let generation = installed(&mut slot);
+        slot.host_mut()
+            .fail_deferred(generation, ChromeError::NoHost);
+        let mut next = spec();
+        next.selected = None;
+        assert_eq!(
+            slot.publish(Some(generation), next.clone()),
+            PublishOutcome::Fallback(generation, ChromeError::NoHost)
+        );
+        assert_eq!(slot.spec(), Some(&next), "the fallback reads the new spec");
+        assert_eq!(slot.host().calls().count(), 0, "no apply to a dead install");
+        assert_eq!(
+            slot.publish(Some(generation), spec()),
+            PublishOutcome::Installed(generation),
+            "the next publish retries the install"
+        );
+        assert_eq!(
+            slot.host_mut().take_calls(),
+            [HostCall::Install {
+                generation,
+                spec: spec()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_deferred_refusal_pins_the_fallback() {
+        let mut slot = slot();
+        let generation = installed(&mut slot);
+        let refusal = ChromeError::Refused("a native chrome step panicked".into());
+        slot.host_mut().fail_deferred(generation, refusal.clone());
+        for _ in 0..2 {
+            assert_eq!(
+                slot.publish(Some(generation), spec()),
+                PublishOutcome::Fallback(generation, refusal.clone())
+            );
+        }
+        assert!(slot.withdraw(generation));
+        assert_eq!(
+            slot.host().calls().count(),
+            0,
+            "never retried, and the failed install is not disposed"
+        );
+    }
+
+    #[test]
+    fn a_failure_withdrawn_before_any_publish_is_not_disposed() {
+        let mut slot = slot();
+        let generation = installed(&mut slot);
+        slot.host_mut()
+            .fail_deferred(generation, ChromeError::NoHost);
+        assert!(slot.withdraw(generation));
+        assert_eq!(slot.host().calls().count(), 0);
+    }
+
+    #[test]
+    fn an_older_generations_failure_leaves_a_newer_one_alone() {
+        let mut slot = slot();
+        let first = installed(&mut slot);
+        assert!(slot.withdraw(first));
+        let second = installed(&mut slot);
+        slot.host_mut().fail_deferred(first, ChromeError::NoHost);
+        assert_eq!(
+            slot.publish(Some(second), spec()),
+            PublishOutcome::Unchanged(second)
+        );
+        let mut next = spec();
+        next.dark = !next.dark;
+        assert_eq!(
+            slot.publish(Some(second), next),
+            PublishOutcome::Applied(second)
+        );
+        assert!(slot.withdraw(second));
+        assert_eq!(
+            slot.host_mut().take_calls().last(),
+            Some(&HostCall::Dispose),
+            "the newer install is still disposed"
         );
     }
 

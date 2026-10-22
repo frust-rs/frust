@@ -122,6 +122,21 @@ pub(crate) trait ChromeHost {
     /// `ScaffoldWidget::drop`, so it must be panic-free and must not assume
     /// the host surface (window, `Activity`) is still alive.
     fn dispose(&mut self);
+
+    /// The failure channel: a failure the host found for `generation` after
+    /// [`Self::install`] answered `Ok` (an arm that installs on a later turn
+    /// and then finds no host, or panics), taken once. Reporting one forgets
+    /// the install, so the slot never disposes it; a failure recorded for any
+    /// other generation never answers here. Called under the slot lock on
+    /// each of the generation's publishes and on its withdraw, so it must be
+    /// cheap and lock-free.
+    fn take_failure(&mut self, _generation: ChromeGeneration) -> Option<ChromeError> {
+        None
+    }
+
+    /// `generation`, whose install failed, was withdrawn: stop any retry the
+    /// host scheduled for it. [`Self::dispose`] covers an installed one.
+    fn abandon(&mut self, _generation: ChromeGeneration) {}
 }
 
 /// The production host on every target without a chrome arm: accepts every
@@ -176,6 +191,8 @@ pub(crate) const RECORDED_CALLS_CAP: usize = 64;
 pub(crate) struct RecordingChromeHost {
     calls: VecDeque<HostCall>,
     refusal: Option<ChromeError>,
+    /// A deferred failure [`Self::fail_deferred`] injected.
+    failure: Option<(ChromeGeneration, ChromeError)>,
 }
 
 #[cfg(test)]
@@ -185,6 +202,7 @@ impl RecordingChromeHost {
         Self {
             calls: VecDeque::new(),
             refusal: None,
+            failure: None,
         }
     }
 
@@ -193,12 +211,19 @@ impl RecordingChromeHost {
         Self {
             calls: VecDeque::new(),
             refusal: Some(error),
+            failure: None,
         }
     }
 
     /// Make every later install fail with `error`, or succeed for `None`.
     pub(crate) fn set_refusal(&mut self, error: Option<ChromeError>) {
         self.refusal = error;
+    }
+
+    /// Report `error` for `generation` through [`ChromeHost::take_failure`],
+    /// as an arm whose install failed on a later turn does.
+    pub(crate) fn fail_deferred(&mut self, generation: ChromeGeneration, error: ChromeError) {
+        self.failure = Some((generation, error));
     }
 
     /// The recorded calls, oldest first.
@@ -242,5 +267,18 @@ impl ChromeHost for RecordingChromeHost {
 
     fn dispose(&mut self) {
         self.record(HostCall::Dispose);
+    }
+
+    /// Not recorded: the slot asks on every publish.
+    fn take_failure(&mut self, generation: ChromeGeneration) -> Option<ChromeError> {
+        match self.failure.take() {
+            Some((failed, error)) if failed == generation => Some(error),
+            // A newer generation's failure waits for it; an older one is dropped.
+            Some(newer) if newer.0 > generation => {
+                self.failure = Some(newer);
+                None
+            }
+            _ => None,
+        }
     }
 }
