@@ -1,4 +1,4 @@
-//! `NUMBER()` and `DATETIME()` for FTL messages, over the same formatters
+//! `NUMBER()`, `DATETIME()`, `RELATIVE_DAY()` and `LIST()` for FTL messages, over the same formatters
 //! the direct API uses.
 //!
 //! # Registration
@@ -50,6 +50,12 @@
 //! With neither, a medium date is formatted. With `timeStyle` alone, only the
 //! time. With both, the combined form at `dateStyle`'s length.
 //!
+//! # `LIST($a, $b, …)`
+//!
+//! The positional arguments are the items. `style` is `and` (default), `or`
+//! or `unit`; `length` is `wide` (default), `short` or `narrow`. A number
+//! item is formatted as a decimal in the bundle's locale.
+//!
 //! # Everything else is ignored, at `debug` level
 //!
 //! Any other named option — ECMA-402's `minimumFractionDigits`,
@@ -77,9 +83,12 @@ use fluent_bundle::{FluentArgs, FluentValue};
 
 use crate::{FluentFunction, Locale, LocaleSet};
 
-use super::{CivilDate, CivilTime, DateLength, RelativeDayStyle, datetime, relative, zone};
+use super::{
+    CivilDate, CivilTime, DateLength, ListLength, ListStyle, RelativeDayStyle, datetime, relative,
+    zone,
+};
 
-/// Registers ICU-backed `NUMBER`, `DATETIME` and `RELATIVE_DAY` into `set`.
+/// Registers ICU-backed `NUMBER`, `DATETIME`, `RELATIVE_DAY` and `LIST` into `set`.
 pub(super) fn with_icu_functions(set: LocaleSet) -> LocaleSet {
     set.with_locale_function("NUMBER", |locale| {
         let locale = locale.clone();
@@ -99,6 +108,62 @@ pub(super) fn with_icu_functions(set: LocaleSet) -> LocaleSet {
             Arc::new(move |positional, named| relative_day(&locale, positional, named));
         function
     })
+    .with_locale_function("LIST", |locale| {
+        let locale = locale.clone();
+        let function: FluentFunction =
+            Arc::new(move |positional, named| list(&locale, positional, named));
+        function
+    })
+}
+
+/// `LIST($a, $b, $c, style: "and"|"or"|"unit", length: "wide"|"short"|"narrow")`.
+///
+/// Fluent has no list type, so the items are the positional arguments, each
+/// a string or number. `style` defaults to `and` and `length` to `wide`.
+fn list<'a>(
+    locale: &Locale,
+    positional: &[FluentValue<'a>],
+    named: &FluentArgs<'_>,
+) -> FluentValue<'a> {
+    let mut items = Vec::with_capacity(positional.len());
+    for value in positional {
+        match value {
+            FluentValue::String(text) => items.push(text.to_string()),
+            FluentValue::Number(number) => items.push(super::decimal(locale, number.value)),
+            _ => {
+                log::debug!("frust-i18n: LIST() takes string or number items");
+                return FluentValue::Error;
+            }
+        }
+    }
+    let style = match option(named, "style") {
+        None | Some("and") => ListStyle::And,
+        Some("or") => ListStyle::Or,
+        Some("unit") => ListStyle::Unit,
+        Some(unknown) => {
+            log::debug!("frust-i18n: LIST(style: \"{unknown}\") — using the `and` style");
+            ListStyle::And
+        }
+    };
+    let length = match option(named, "length") {
+        None | Some("wide") => ListLength::Wide,
+        Some("short") => ListLength::Short,
+        Some("narrow") => ListLength::Narrow,
+        Some(unknown) => {
+            log::debug!("frust-i18n: LIST(length: \"{unknown}\") — using the wide length");
+            ListLength::Wide
+        }
+    };
+
+    report_unhonored(named, "LIST", &["style", "length"]);
+    let refs: Vec<&str> = items.iter().map(String::as_str).collect();
+    match super::list(locale, &refs, style, length) {
+        Ok(joined) => FluentValue::from(joined),
+        Err(error) => {
+            log::debug!("frust-i18n: LIST(): {error}");
+            FluentValue::Error
+        }
+    }
 }
 
 /// `RELATIVE_DAY($unix, $now_unix, timeZone: …, style: "short"|"long")`.

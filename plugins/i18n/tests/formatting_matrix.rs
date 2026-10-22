@@ -873,3 +873,133 @@ fn units_render_the_other_units_and_reject_an_unknown_id() {
         "{error:?}"
     );
 }
+
+#[test]
+fn lists_join_in_each_locales_own_pattern() {
+    use fmt::{ListLength::Wide, ListStyle::And};
+    let three = ["Pool", "Shower", "Wi-Fi"];
+    for (tag, want) in [
+        ("en", "Pool, Shower, and Wi-Fi"),
+        ("th", "Pool Shower และWi-Fi"),
+        ("vi", "Pool, Shower và Wi-Fi"),
+        ("ja", "Pool、Shower、Wi-Fi"),
+        ("es", "Pool, Shower y Wi-Fi"),
+    ] {
+        assert_eq!(
+            fmt::list(&locale(tag), &three, And, Wide).expect("formats"),
+            want,
+            "{tag}"
+        );
+    }
+}
+
+#[test]
+fn two_item_and_one_item_lists_per_locale() {
+    use fmt::{ListLength::Wide, ListStyle::And};
+    for (tag, want) in [
+        ("en", "Pool and Shower"),
+        ("th", "PoolและShower"),
+        ("vi", "Pool và Shower"),
+        ("ja", "Pool、Shower"),
+        ("es", "Pool y Shower"),
+    ] {
+        assert_eq!(
+            fmt::list(&locale(tag), &["Pool", "Shower"], And, Wide).expect("formats"),
+            want,
+            "{tag}"
+        );
+        assert_eq!(
+            fmt::list(&locale(tag), &["Pool"], And, Wide).expect("formats"),
+            "Pool",
+            "{tag}"
+        );
+    }
+}
+
+#[test]
+fn short_lists_and_other_styles() {
+    use fmt::{ListLength, ListStyle};
+    let en = locale("en");
+    assert_eq!(
+        fmt::list(&en, &["Pool", "Shower"], ListStyle::And, ListLength::Wide).expect("formats"),
+        "Pool and Shower"
+    );
+    assert_eq!(
+        fmt::list(&en, &["Pool"], ListStyle::And, ListLength::Wide).expect("formats"),
+        "Pool"
+    );
+    assert_eq!(
+        fmt::list(&en, &[], ListStyle::And, ListLength::Wide).expect("formats"),
+        ""
+    );
+    let three = ["Pool", "Shower", "Wi-Fi"];
+    assert_eq!(
+        fmt::list(&en, &three, ListStyle::And, ListLength::Short).expect("formats"),
+        "Pool, Shower, & Wi-Fi"
+    );
+    assert_eq!(
+        fmt::list(&en, &three, ListStyle::And, ListLength::Narrow).expect("formats"),
+        "Pool, Shower, Wi-Fi"
+    );
+    assert_eq!(
+        fmt::list(&en, &three, ListStyle::Unit, ListLength::Narrow).expect("formats"),
+        "Pool Shower Wi-Fi"
+    );
+    assert_eq!(
+        fmt::list(&en, &["a", "b", "c"], ListStyle::Or, ListLength::Wide).expect("formats"),
+        "a, b, or c"
+    );
+}
+
+#[test]
+fn language_endonyms_and_cross_language_names() {
+    for (tag, want) in [
+        ("en", "English"),
+        ("th", "ไทย"),
+        ("vi", "Tiếng Việt"),
+        ("ja", "日本語"),
+        ("es", "español"),
+        ("de", "Deutsch"),
+        ("fr", "français"),
+    ] {
+        assert_eq!(
+            fmt::language_endonym(&locale(tag)).expect("named"),
+            want,
+            "{tag}"
+        );
+    }
+    assert_eq!(
+        fmt::language_name(&locale("de"), &locale("en")).expect("named"),
+        "German"
+    );
+}
+
+#[test]
+fn list_function_in_ftl() {
+    let engine = Engine::new(fmt::with_icu_functions(
+        LocaleSet::new(locale("en"))
+            .with_locale(
+                locale("en"),
+                [(
+                    "a.ftl",
+                    "amenities = { LIST($a, $b, $c) }\neither = { LIST($a, $b, style: \"or\") }",
+                )],
+            )
+            .with_isolating(false),
+    ))
+    .expect("engine");
+    let chain = engine.negotiate(&[locale("en")]);
+    let args = args!("a" => "Pool", "b" => "Shower", "c" => "Wi-Fi");
+    assert_eq!(
+        engine
+            .resolve(&chain, "amenities", Some(&args))
+            .expect("resolves"),
+        "Pool, Shower, and Wi-Fi"
+    );
+    assert_eq!(
+        engine
+            .resolve(&chain, "either", Some(&args))
+            .expect("resolves"),
+        "Pool or Shower"
+    );
+}

@@ -59,6 +59,8 @@ mod currency;
 mod datetime;
 mod fluent_fns;
 mod interval;
+mod list;
+mod names;
 mod number;
 mod relative;
 mod units;
@@ -67,6 +69,8 @@ mod zone;
 use crate::{I18nError, Locale, LocaleSet};
 
 pub use interval::{date_range, datetime_range_in_zone, time_range, time_range_in_zone};
+pub use list::{ListLength, ListStyle, list};
+pub use names::{language_endonym, language_name};
 pub use relative::{RelativeDayStyle, relative_day, relative_day_civil};
 pub use units::{Unit, UnitStyle, duration_minutes, units, units_by_id, units_decimal};
 pub use zone::{
@@ -225,7 +229,7 @@ pub fn datetime(
     datetime::datetime(locale, date, time, length)
 }
 
-/// Registers ICU-backed `NUMBER()` and `DATETIME()` into `set`, so FTL
+/// Registers ICU-backed `NUMBER()`, `DATETIME()`, `RELATIVE_DAY()` and `LIST()` into `set`, so FTL
 /// messages can format through the same formatters as the functions above.
 ///
 /// ```
