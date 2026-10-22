@@ -118,6 +118,18 @@ class FrustNativeListener(private val slotId: Long) :
         nativeOnEvent(slotId, KIND_DATE, detail)
     }
 
+    /**
+     * `detail` is the signed segment index (Rust `pack_index`). Called by the
+     * segmented control's own Material listener in [FrustNativeControlFactory]
+     * — the one reporter here that is not an interface override, because
+     * `MaterialButtonToggleGroup.OnButtonCheckedListener` must never be a
+     * supertype of this class (an app without Material would fail to load it).
+     */
+    fun reportSelection(index: Int) {
+        if (!armed) return
+        nativeOnEvent(slotId, KIND_SELECTION, index.toLong())
+    }
+
     private external fun nativeOnEvent(slotId: Long, kind: Int, detail: Long)
 
     // `internal`, not `private`: [FrustNativeChrome] reports the
@@ -141,11 +153,8 @@ class FrustNativeListener(private val slotId: Long) :
         /**
          * A segmented control's selection (the Rust side's
          * `EVENT_KIND_SELECTION`, `detail` = the signed segment index).
-         * **Never emitted on Android in this build**: the segmented control
-         * has no Android arm yet (its builder renders a refusal banner
-         * there), so this listener implements no interface that reports it.
-         * The constant exists so this table and the Rust one stay the same
-         * table — append-only, never renumbered.
+         * Emitted on Android by [reportSelection], from the segmented
+         * control's Material listener (`FrustNativeControlFactory`).
          */
         const val KIND_SELECTION = 6
         /**
