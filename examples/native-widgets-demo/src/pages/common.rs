@@ -10,7 +10,7 @@
 //! Every color resolves from the live [`Theme`] (Glyph baseline fallback), so
 //! each page follows the brightness toggle.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
@@ -223,6 +223,19 @@ const STEPPER_SLOTS: usize = if cfg!(any(target_os = "ios", target_os = "macos")
 /// The one slot `native_tab_bar` adds on iOS/iPadOS; a banner elsewhere.
 const TAB_BAR_SLOTS: usize = if cfg!(target_os = "ios") { 1 } else { 0 };
 
+/// The [`SECTION_LABELS`] indices by name, so a tab's section list reads as
+/// the sections it shows rather than as bare positions.
+mod section {
+    pub const CONTROLS: usize = 0;
+    pub const MACOS: usize = 1;
+    pub const NEW: usize = 2;
+    pub const ALERTS: usize = 3;
+    pub const TAB_BAR: usize = 4;
+    pub const SHEET: usize = 5;
+    pub const COMPOSITE: usize = 6;
+    pub const STRESS: usize = 7;
+}
+
 /// The documented native `platform_view` slots each section publishes at
 /// rest (every toggle at its default), by [`SECTION_LABELS`] index, for this
 /// target. A presentation is never a slot (Alerts, Sheet: 0); New counts the
@@ -230,24 +243,43 @@ const TAB_BAR_SLOTS: usize = if cfg!(target_os = "ios") { 1 } else { 0 };
 /// Composite card (1 slot) and the Stress cycler (+6) and grid (+50) sit
 /// behind default-off toggles. A Mode B surface whose translucency the
 /// platform refused renders placeholders, which publish no slot.
-pub const SECTION_AT_REST_SLOTS: [usize; SECTION_LABELS.len()] = [
-    6,
-    2,
-    2 + SEGMENTED_SLOTS + STEPPER_SLOTS,
-    0,
-    TAB_BAR_SLOTS,
-    0,
-    0,
-    0,
-];
+pub const SECTION_AT_REST_SLOTS: [usize; SECTION_LABELS.len()] = {
+    let mut slots = [0; SECTION_LABELS.len()];
+    slots[section::CONTROLS] = 6;
+    slots[section::MACOS] = 2;
+    slots[section::NEW] = 2 + SEGMENTED_SLOTS + STEPPER_SLOTS;
+    slots[section::TAB_BAR] = TAB_BAR_SLOTS;
+    slots
+};
 
 /// Home's one slot: the Favorites card's `native_button`. A `native_button`
 /// publishes its slot on every target, so this does not vary.
 const HOME_SLOTS: usize = 1;
 
+/// The [`SECTION_LABELS`] indices each tab's body shows, by [`Tab::index`]
+/// (Home has none): the one list [`AT_REST_SLOTS`] sums, so reordering or
+/// moving a section is a change to this table alone.
+pub const TAB_SECTIONS: [&[usize]; Tab::COUNT] = [
+    &[],
+    &[section::CONTROLS, section::NEW, section::COMPOSITE],
+    &[section::ALERTS, section::SHEET],
+    &[section::MACOS, section::TAB_BAR, section::STRESS],
+];
+
+/// The sum of [`SECTION_AT_REST_SLOTS`] over `sections`.
+const fn section_slots(sections: &[usize]) -> usize {
+    let mut total = 0;
+    let mut i = 0;
+    while i < sections.len() {
+        total += SECTION_AT_REST_SLOTS[sections[i]];
+        i += 1;
+    }
+    total
+}
+
 /// The documented native slots each tab publishes at rest with its whole
 /// body laid out visible (a clipped body publishes fewer), by [`Tab::index`]:
-/// Home's [`HOME_SLOTS`]; elsewhere the sum of its sections' [`SECTION_AT_REST_SLOTS`] (plus
+/// Home's [`HOME_SLOTS`]; elsewhere the sum of its [`TAB_SECTIONS`]' [`SECTION_AT_REST_SLOTS`] (plus
 /// [`SANDWICH_AT_REST_SLOTS`] on Lab). The chrome is never a slot.
 ///
 /// **Hidden tabs.** The tab stack lays out every tab but paints only the
@@ -257,13 +289,10 @@ const HOME_SLOTS: usize = 1;
 /// The host then disposes the unpublished slots, at its own pace — so the
 /// live count may lag a switch — and re-creates them when the tab returns.
 pub const AT_REST_SLOTS: [usize; Tab::COUNT] = [
-    HOME_SLOTS,
-    SECTION_AT_REST_SLOTS[0] + SECTION_AT_REST_SLOTS[2] + SECTION_AT_REST_SLOTS[6],
-    SECTION_AT_REST_SLOTS[3] + SECTION_AT_REST_SLOTS[5],
-    SECTION_AT_REST_SLOTS[1]
-        + SECTION_AT_REST_SLOTS[4]
-        + SECTION_AT_REST_SLOTS[7]
-        + SANDWICH_AT_REST_SLOTS,
+    HOME_SLOTS + section_slots(TAB_SECTIONS[0]),
+    section_slots(TAB_SECTIONS[1]),
+    section_slots(TAB_SECTIONS[2]),
+    section_slots(TAB_SECTIONS[3]) + SANDWICH_AT_REST_SLOTS,
 ];
 
 /// What a header, readout or slot count is for: a whole tab, or one section
@@ -386,10 +415,22 @@ pub fn page_header(key: impl Into<PageKey>) -> FlexChild<S> {
 /// like [`page_column`]), the safe area inside the tab's own scroll view so
 /// content starts below floating bars at rest and scrolls under them.
 pub fn tab_body(state: &S, tab: Tab, children: Vec<FlexChild<S>>) -> AnyView<S> {
-    any(
+    any(viewport_probe(
+        viewport_key(tab),
         scroll_view(safe_area(FlexView::new(Axis::Vertical, children)))
             .controller(state.scroll(tab).clone()),
-    )
+    ))
+}
+
+/// The [`anchor_probe`] key of `tab`'s scroll viewport: the reference that
+/// does not scroll, which section probes are measured against.
+pub const fn viewport_key(tab: Tab) -> &'static str {
+    match tab {
+        Tab::Home => "home.viewport",
+        Tab::Controls => "controls.viewport",
+        Tab::Dialogs => "dialogs.viewport",
+        Tab::Lab => "lab.viewport",
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -530,7 +571,12 @@ thread_local! {
     /// The last painted window rect of every mounted [`AnchorProbe`], by key.
     /// Plain (non-reactive) storage on purpose: paint must never write a
     /// signal, and nothing renders from this — an event handler reads it.
-    static ANCHORS: RefCell<HashMap<&'static str, AnchorRect>> = RefCell::new(HashMap::new());
+    static ANCHORS: RefCell<HashMap<&'static str, (AnchorRect, u64)>> = RefCell::new(HashMap::new());
+
+    /// The paint epoch: bumped each time a [`viewport_probe`] starts painting,
+    /// so every rect recorded under the same value was measured in one frame
+    /// against the same scroll offset.
+    static EPOCH: Cell<u64> = const { Cell::new(0) };
 }
 
 /// Wrap `child` so its painted window rect is recorded under `key`, for
@@ -548,13 +594,45 @@ thread_local! {
 /// the most recent paint: read it from an event handler (the button the user
 /// just pressed was painted where they saw it).
 pub fn anchor_probe<V: View<S>>(key: &'static str, child: V) -> AnchorProbe<V> {
-    AnchorProbe { key, child }
+    AnchorProbe {
+        key,
+        child,
+        viewport: false,
+    }
+}
+
+/// [`anchor_probe`] for a scroll viewport: it also starts a new paint epoch
+/// before painting its child, so [`fresh_anchor_rect`] can tell the probes
+/// painted in this frame from the stale rects of earlier ones. Wrap at most
+/// one painted viewport per frame (the tab stack paints only the selected
+/// tab).
+pub fn viewport_probe<V: View<S>>(key: &'static str, child: V) -> AnchorProbe<V> {
+    AnchorProbe {
+        key,
+        child,
+        viewport: true,
+    }
 }
 
 /// The last painted window rect recorded under `key`, if a probe with that key
 /// has painted on this thread.
 pub fn anchor_rect(key: &str) -> Option<AnchorRect> {
-    ANCHORS.with(|anchors| anchors.borrow().get(key).copied())
+    ANCHORS.with(|anchors| anchors.borrow().get(key).map(|(rect, _)| *rect))
+}
+
+/// Like [`anchor_rect`], but only when the probe painted in the current
+/// paint epoch (the latest [`viewport_probe`] frame): a probe the scroll view
+/// culled this frame answers `None` instead of a rect from an earlier scroll
+/// position.
+pub fn fresh_anchor_rect(key: &str) -> Option<AnchorRect> {
+    let epoch = EPOCH.with(Cell::get);
+    ANCHORS.with(|anchors| {
+        anchors
+            .borrow()
+            .get(key)
+            .filter(|(_, stamp)| *stamp == epoch)
+            .map(|(rect, _)| *rect)
+    })
 }
 
 /// Convert a window-space rect into the plugin's [`AnchorRect`].
@@ -571,11 +649,13 @@ pub fn anchor_from_rect(rect: Rect) -> AnchorRect {
 pub struct AnchorProbe<V> {
     key: &'static str,
     child: V,
+    viewport: bool,
 }
 
 /// The retained widget for an [`AnchorProbe`].
 pub struct AnchorProbeWidget {
     key: &'static str,
+    viewport: bool,
     child: ChildPod,
 }
 
@@ -585,6 +665,7 @@ impl<V: View<S>> View<S> for AnchorProbe<V> {
     fn build(&self, ctx: &mut BuildCtx<'_>) -> AnchorProbeWidget {
         AnchorProbeWidget {
             key: self.key,
+            viewport: self.viewport,
             child: build_child(&self.child, ctx),
         }
     }
@@ -596,6 +677,7 @@ impl<V: View<S>> View<S> for AnchorProbe<V> {
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         element.key = self.key;
+        element.viewport = self.viewport;
         rebuild_child(&prev.child, &self.child, &mut element.child, ctx)
     }
 
@@ -611,12 +693,16 @@ impl Widget for AnchorProbeWidget {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        if self.viewport {
+            EPOCH.with(|epoch| epoch.set(epoch.get() + 1));
+        }
         self.child.paint_child(ctx, scene);
         let rect = Rect::from_origin_size(ctx.origin(), ctx.size());
+        let stamp = EPOCH.with(Cell::get);
         ANCHORS.with(|anchors| {
             anchors
                 .borrow_mut()
-                .insert(self.key, anchor_from_rect(rect));
+                .insert(self.key, (anchor_from_rect(rect), stamp));
         });
     }
 

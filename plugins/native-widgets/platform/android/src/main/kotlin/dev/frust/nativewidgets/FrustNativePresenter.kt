@@ -25,8 +25,8 @@ import android.app.Application
 import android.app.Dialog
 import android.content.Context
 import android.content.DialogInterface
+import android.content.pm.PackageManager
 import android.content.res.ColorStateList
-import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Bundle
@@ -34,7 +34,6 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.util.TypedValue
-import android.view.ContextThemeWrapper
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -422,11 +421,28 @@ object FrustNativePresenter {
     /**
      * The dialog's context: the Activity's manifest theme, with the night bit
      * forced when the spec pins `dark`, the way [FrustNativeChrome] themes its bars.
+     * A theme that cannot be resolved (no manifest entry, or a zero theme
+     * resource) is logged once and the Activity itself is used instead.
      */
     private fun sheetContext(activity: Activity, spec: JSONObject): Context =
-        FrustNativeControlFactory.materialContext(activity, null, if (spec.has("dark")) spec.getBoolean("dark") else null)
+        try {
+            FrustMaterialContext.wrap(activity, null, if (spec.has("dark")) spec.getBoolean("dark") else null)
+        } catch (e: PackageManager.NameNotFoundException) {
+            sheetThemeFallback(e)
+            activity
+        } catch (e: IllegalStateException) {
+            sheetThemeFallback(e)
+            activity
+        }
 
-    /** The drag handle (when `grabber`) over a scrolling column of the spec's rows. */
+    private var sheetThemeWarned = false
+
+    private fun sheetThemeFallback(cause: Exception) {
+        if (sheetThemeWarned) return
+        sheetThemeWarned = true
+        Log.w(TAG, "Frust: native sheet theme lookup failed; using the Activity's own theme", cause)
+    }
+
     /**
      * Decode [bytes] with the longer side kept at or under the larger of four
      * times the image row's max height and the display width: bounds first,
