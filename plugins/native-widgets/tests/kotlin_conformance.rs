@@ -95,9 +95,13 @@
 //! `ICON_SLOT_*` codes; [`chrome_class_and_exports_match_the_kotlin_object`]
 //! the class name and the two `external fun` exports, which live in
 //! `src/android/chrome.rs` beside the host rather than in `android/mod.rs`;
-//! and [`chrome_json_key_table_copy_matches_the_kotlin_header`] that the
+//! [`chrome_json_key_table_copy_matches_the_kotlin_header`] that the
 //! copy of the header's JSON key table `src/chrome/mod.rs`'s encoder tests
-//! round-trip against is still verbatim.
+//! round-trip against is still verbatim; and
+//! [`chrome_changed_field_spellings_match_between_kotlin_and_rust`] that
+//! Kotlin's `FIELD_*` constants spell the ten `ChromeField`s exactly as
+//! `android_wire::field_name` does, are the only place Kotlin spells them, and
+//! that Kotlin's `INSTALL_FIELDS` names `android_wire::INSTALL_FIELDS`.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -898,4 +902,136 @@ fn chrome_json_key_table_copy_matches_the_kotlin_header() {
              {KOTLIN_CHROME_PATH}'s header — update the copy and the encoder together"
         );
     }
+}
+
+/// Kotlin's `[private ]const val FIELD_<NAME> = "<spelling>"` constants,
+/// keyed by `<NAME>`.
+fn kotlin_field_constants(contents: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for line in contents.lines().map(str::trim) {
+        let line = line.strip_prefix("private ").unwrap_or(line);
+        let Some(after) = line.strip_prefix("const val FIELD_") else {
+            continue;
+        };
+        let Some((name, value)) = after.split_once('=') else {
+            continue;
+        };
+        let value = value.trim();
+        let spelling = value
+            .strip_prefix('"')
+            .and_then(|rest| rest.strip_suffix('"'))
+            .unwrap_or_else(|| panic!("`{line}` in {KOTLIN_CHROME_PATH} is not a string constant"));
+        out.insert(name.trim().to_string(), spelling.to_string());
+    }
+    out
+}
+
+/// `android_wire::field_name`'s `ChromeField::<Variant> => "<spelling>"`
+/// arms, keyed by `<Variant>`. The function sits inside the indented
+/// `android_wire` module, so its body ends at the first indented `}` line.
+fn rust_field_name_arms(contents: &str) -> BTreeMap<String, String> {
+    let body = contents
+        .split_once("fn field_name(")
+        .and_then(|(_, rest)| rest.split_once("\n    }\n"))
+        .map(|(body, _)| body)
+        .unwrap_or_else(|| panic!("no `fn field_name(` body found in {RUST_CHROME_MOD_PATH}"));
+    body.lines()
+        .filter_map(|line| line.trim().strip_prefix("ChromeField::"))
+        .filter_map(|arm| arm.split_once("=>"))
+        .map(|(variant, spelling)| {
+            let spelling = spelling.trim().trim_end_matches(',').trim_matches('"');
+            (variant.trim().to_string(), spelling.to_string())
+        })
+        .collect()
+}
+
+/// The `ChromeField::<Variant>` entries of Rust's `INSTALL_FIELDS` array.
+fn rust_install_fields(contents: &str) -> Vec<String> {
+    let opener = "pub(crate) const INSTALL_FIELDS: [ChromeField; ";
+    let start = contents
+        .find(opener)
+        .unwrap_or_else(|| panic!("no `{opener}` found in {RUST_CHROME_MOD_PATH}"));
+    let rest = &contents[start..];
+    let end = rest
+        .find("];")
+        .unwrap_or_else(|| panic!("no closing `];` for INSTALL_FIELDS in {RUST_CHROME_MOD_PATH}"));
+    rest[..end]
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("ChromeField::"))
+        .map(|variant| variant.trim_end_matches(',').to_string())
+        .collect()
+}
+
+#[test]
+fn chrome_changed_field_spellings_match_between_kotlin_and_rust() {
+    let kotlin = read(KOTLIN_CHROME_PATH);
+    let rust = read(RUST_CHROME_MOD_PATH);
+
+    let arms = rust_field_name_arms(&rust);
+    assert_eq!(
+        arms.len(),
+        10,
+        "{RUST_CHROME_MOD_PATH}'s field_name should spell all ten ChromeFields: {arms:?}"
+    );
+    for (variant, spelling) in &arms {
+        assert_eq!(
+            variant, spelling,
+            "{RUST_CHROME_MOD_PATH}'s field_name must spell ChromeField::{variant} as its Rust name"
+        );
+    }
+
+    let constants = kotlin_field_constants(&kotlin);
+    let mut kotlin_spellings: Vec<&String> = constants.values().collect();
+    let mut rust_spellings: Vec<&String> = arms.values().collect();
+    kotlin_spellings.sort();
+    rust_spellings.sort();
+    assert_eq!(
+        kotlin_spellings, rust_spellings,
+        "{KOTLIN_CHROME_PATH}'s FIELD_* constants drifted from {RUST_CHROME_MOD_PATH}'s \
+         field_name — an apply naming the renamed field would be silently ignored"
+    );
+
+    // Each spelling appears once in Kotlin: in its constant, never as a stray literal.
+    for spelling in constants.values() {
+        let quoted = format!("\"{spelling}\"");
+        assert_eq!(
+            kotlin.matches(&quoted).count(),
+            1,
+            "{KOTLIN_CHROME_PATH} spells {quoted} outside its FIELD_* constant"
+        );
+    }
+
+    // Kotlin's INSTALL_FIELDS names exactly Rust's.
+    let by_name: BTreeMap<&str, &str> = constants
+        .iter()
+        .map(|(name, spelling)| (name.as_str(), spelling.as_str()))
+        .collect();
+    let kotlin_install = kotlin
+        .split_once("val INSTALL_FIELDS = setOf(")
+        .and_then(|(_, rest)| rest.split_once(')'))
+        .map(|(body, _)| body)
+        .unwrap_or_else(|| panic!("no `val INSTALL_FIELDS = setOf(` in {KOTLIN_CHROME_PATH}"));
+    let mut kotlin_install: Vec<&str> = kotlin_install
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let name = entry.strip_prefix("FIELD_").unwrap_or_else(|| {
+                panic!("{KOTLIN_CHROME_PATH}'s INSTALL_FIELDS entry `{entry}` is not a FIELD_*")
+            });
+            *by_name
+                .get(name)
+                .unwrap_or_else(|| panic!("{KOTLIN_CHROME_PATH} declares no FIELD_{name}"))
+        })
+        .collect();
+    let mut rust_install: Vec<String> = rust_install_fields(&rust)
+        .iter()
+        .map(|variant| arms[variant].clone())
+        .collect();
+    kotlin_install.sort_unstable();
+    rust_install.sort();
+    assert_eq!(
+        kotlin_install, rust_install,
+        "{KOTLIN_CHROME_PATH}'s INSTALL_FIELDS drifted from {RUST_CHROME_MOD_PATH}'s"
+    );
 }

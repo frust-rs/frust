@@ -77,8 +77,12 @@
 //! stale and keeps the bar, one naming the tapped tab confirms it, a third tab
 //! is honoured at once. At the deadline a spec still naming the left tab snaps
 //! the bar back the same unanimated way: the app rejected the tap ([`expire`]).
-//! A newer tap replaces the pending one, a tab-list change drops it, and the
-//! timer acts only on its own generation and tap.
+//! A newer tap inside the window chains onto the pending one ([`chain`]): it
+//! keeps the originally confirmed tab as `from`, so an apply confirming an
+//! earlier tap holds rather than snapping off the newest one, and while a tap
+//! is pending a tab tap resolves against the tab UIKit shows ([`tap_spec`]).
+//! A tab-list change drops the pending tap, and the timer acts only on its
+//! own generation and tap.
 //!
 //! Every page view and the tab bar controller's view carry a backdrop,
 //! `systemBackgroundColor` resolved for `ChromeSpec::dark` into a concrete
@@ -108,7 +112,8 @@
 //! action items (set as each item is built); a menu item's `UIAction` block
 //! captures its action and item indices. Each tap is resolved against the
 //! spec UIKit shows (`crate::chrome::resolve_tap`, a tab against the
-//! app-confirmed `selected`) and handed to `crate::chrome::deliver_event`,
+//! app-confirmed `selected`, or the pending tap's tab while one is pending)
+//! and handed to `crate::chrome::deliver_event`,
 //! never with a [`CHROME`] borrow held (`try_borrow`: an apply in progress
 //! has taken the state, the tap is dropped and the delegate answers NO). A tap
 //! on the shown tab reports `TabReselected` and answers NO; one on another
@@ -136,6 +141,7 @@
 //! tab, and the navigation controllers have no stack (no native push
 //! animation; `Leading::Back` is a custom item reporting `BackPressed`).
 
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::NonNull;
@@ -840,13 +846,15 @@ impl Chrome {
         self.pages[to].page.hold(&self.frust, &self.host);
         self.taps += 1;
         let tap = self.taps;
-        // No chrome page shown before (the "More" list): nothing to snap back to.
-        self.pending = (from < self.pages.len()).then(|| NativeSelect {
+        let deadline = Instant::now() + SETTLE_WINDOW;
+        self.pending = chain(
+            self.pending.as_ref(),
             from,
             to,
-            deadline: Instant::now() + SETTLE_WINDOW,
+            self.pages.len(),
+            deadline,
             tap,
-        });
+        );
         if self.pending.is_some() {
             settle_after(self.generation, tap);
         }
@@ -1025,16 +1033,64 @@ fn selected_index(spec: &ChromeSpec) -> Option<usize> {
 }
 
 /// A tab tap UIKit selected natively that no apply has confirmed yet.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct NativeSelect {
-    /// The page shown before the tap.
+    /// The page shown before the first unconfirmed tap.
     from: usize,
-    /// The tapped page.
+    /// The newest tapped page, the one UIKit shows.
     to: usize,
+    /// Pages tapped in between: an apply naming one confirms an older tap.
+    passed: Vec<usize>,
     /// When an unconfirmed tap snaps back.
     deadline: Instant,
-    /// The tap's number ([`Chrome::taps`]): a timer acts only on its own tap.
+    /// The newest tap's number ([`Chrome::taps`]): a timer acts only on it.
     tap: u64,
+}
+
+/// The pending state after a native tap moves UIKit from page `shown` to
+/// page `to`: chained onto `previous` (keeping its `from`) when a tap is
+/// still pending, else fresh from `shown` — or `None` when `shown` is no
+/// chrome page (the "More" list), with nothing to snap back to.
+fn chain(
+    previous: Option<&NativeSelect>,
+    shown: usize,
+    to: usize,
+    pages: usize,
+    deadline: Instant,
+    tap: u64,
+) -> Option<NativeSelect> {
+    let Some(previous) = previous else {
+        return (shown < pages).then(|| NativeSelect {
+            from: shown,
+            to,
+            passed: Vec::new(),
+            deadline,
+            tap,
+        });
+    };
+    let mut passed = previous.passed.clone();
+    if !passed.contains(&previous.to) {
+        passed.push(previous.to);
+    }
+    passed.retain(|&page| page != previous.from && page != to);
+    Some(NativeSelect {
+        from: previous.from,
+        to,
+        passed,
+        deadline,
+        tap,
+    })
+}
+
+/// The spec a tap resolves against: `spec`, with `selected` moved to the
+/// pending tap's page — the tab UIKit shows — while one is pending.
+fn tap_spec<'a>(spec: &'a ChromeSpec, pending: Option<&NativeSelect>) -> Cow<'a, ChromeSpec> {
+    let Some(tab) = pending.and_then(|pending| spec.tabs.get(pending.to)) else {
+        return Cow::Borrowed(spec);
+    };
+    let mut shown = spec.clone();
+    shown.selected = Some(tab.id().clone());
+    Cow::Owned(shown)
 }
 
 /// What an apply does with the page its spec selects ([`settle`]).
@@ -1042,7 +1098,7 @@ struct NativeSelect {
 enum Settle {
     /// No tap pending: select the spec's page.
     Follow,
-    /// The spec predates the tap or names no page: keep the bar and the tap.
+    /// The spec predates the newest tap or names no page: keep the bar and the tap.
     Hold,
     /// Select the spec's page and drop the tap: confirmed, overridden or expired.
     Resolve,
@@ -1058,7 +1114,7 @@ fn settle(pending: Option<&NativeSelect>, wanted: Option<usize>, now: Instant) -
     }
     match wanted {
         Some(index) if index == pending.to => Settle::Resolve,
-        Some(index) if index == pending.from => Settle::Hold,
+        Some(index) if index == pending.from || pending.passed.contains(&index) => Settle::Hold,
         Some(_) => Settle::Resolve,
         None => Settle::Hold,
     }
@@ -1069,16 +1125,19 @@ fn settle(pending: Option<&NativeSelect>, wanted: Option<usize>, now: Instant) -
 enum Expiry {
     /// A newer tap, an apply or a tab-list change already settled this one.
     Superseded,
-    /// The spec moved off the left page: drop the tap, keep the bar.
+    /// The spec moved off the left page, or the bar already shows it: drop
+    /// the tap, keep the bar.
     Settled,
-    /// The spec still selects this page: the app rejected the tap.
+    /// The spec still selects the page left: the app rejected the taps.
     SnapBack(usize),
 }
 
 /// The deadline decision for tap `tap` while the last spec selects `wanted`.
 fn expire(pending: Option<&NativeSelect>, tap: u64, wanted: Option<usize>) -> Expiry {
     match pending {
-        Some(pending) if pending.tap == tap && wanted == Some(pending.from) => {
+        Some(pending)
+            if pending.tap == tap && wanted == Some(pending.from) && pending.to != pending.from =>
+        {
             Expiry::SnapBack(pending.from)
         }
         Some(pending) if pending.tap == tap => Expiry::Settled,
@@ -1382,7 +1441,10 @@ fn report(which: &str, locate: impl FnOnce(&Chrome) -> Option<ChromeTap>) {
     let resolved = CHROME.with(|cell| {
         let state = cell.try_borrow().ok()?;
         let chrome = state.as_ref()?;
-        let event = resolve_tap(&chrome.spec, locate(chrome)?)?;
+        let event = resolve_tap(
+            &tap_spec(&chrome.spec, chrome.pending.as_ref()),
+            locate(chrome)?,
+        )?;
         Some((chrome.generation, event))
     });
     let delivered =
@@ -1542,6 +1604,7 @@ impl FrustChromePageController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chrome::ChromeEvent;
 
     const LEFT: usize = 0;
     const TAPPED: usize = 1;
@@ -1551,8 +1614,20 @@ mod tests {
         NativeSelect {
             from: LEFT,
             to: TAPPED,
+            passed: Vec::new(),
             deadline,
             tap,
+        }
+    }
+
+    fn three_tabs(selected: &str) -> ChromeSpec {
+        ChromeSpec {
+            tabs: ["left", "tapped", "third"]
+                .into_iter()
+                .map(|id| TabItem::new(id, id, TabIcon::AppleSymbol("circle".into())))
+                .collect(),
+            selected: Some(TabId::new(selected)),
+            ..ChromeSpec::default()
         }
     }
 
@@ -1607,5 +1682,66 @@ mod tests {
         let newer = pending(Instant::now(), 4);
         assert_eq!(expire(Some(&newer), 3, Some(LEFT)), Expiry::Superseded);
         assert_eq!(expire(None, 3, Some(LEFT)), Expiry::Superseded);
+    }
+
+    #[test]
+    fn a_first_tap_starts_from_the_shown_page_unless_it_is_no_chrome_page() {
+        let now = Instant::now();
+        let first = chain(None, LEFT, TAPPED, 3, now, 1);
+        assert_eq!(first, Some(pending(now, 1)));
+        assert_eq!(chain(None, 7, TAPPED, 3, now, 1), None);
+    }
+
+    #[test]
+    fn a_second_tap_resolves_against_the_shown_tab_not_the_confirmed_one() {
+        let spec = three_tabs("left");
+        let first = pending(Instant::now() + SETTLE_WINDOW, 1);
+        let shown = tap_spec(&spec, Some(&first));
+        assert_eq!(
+            resolve_tap(&shown, ChromeTap::Tab(LEFT)),
+            Some(ChromeEvent::TabSelected(TabId::new("left")))
+        );
+        assert_eq!(
+            resolve_tap(&shown, ChromeTap::Tab(TAPPED)),
+            Some(ChromeEvent::TabReselected(TabId::new("tapped")))
+        );
+        assert_eq!(
+            resolve_tap(&tap_spec(&spec, None), ChromeTap::Tab(LEFT)),
+            Some(ChromeEvent::TabReselected(TabId::new("left")))
+        );
+    }
+
+    #[test]
+    fn a_double_tap_inside_the_window_keeps_the_latest_intent() {
+        // Confirmed on LEFT; tap TAPPED, then tap LEFT again before any apply.
+        let now = Instant::now();
+        let deadline = now + SETTLE_WINDOW;
+        let first = chain(None, LEFT, TAPPED, 3, deadline, 1).unwrap();
+        let second = chain(Some(&first), TAPPED, LEFT, 3, deadline, 2).unwrap();
+        assert_eq!((second.from, second.to), (LEFT, LEFT));
+        assert_eq!(second.passed, vec![TAPPED]);
+        // The app confirming the first tap is neither stale nor an override.
+        assert_eq!(settle(Some(&second), Some(TAPPED), now), Settle::Hold);
+        // Confirming the newest tap resolves.
+        assert_eq!(settle(Some(&second), Some(LEFT), now), Settle::Resolve);
+        // The bar already shows the newest tap's page: nothing to snap back.
+        assert_eq!(expire(Some(&second), 2, Some(LEFT)), Expiry::Settled);
+        assert_eq!(expire(Some(&second), 2, Some(TAPPED)), Expiry::Settled);
+        // The first tap's timer is superseded by the second.
+        assert_eq!(expire(Some(&second), 1, Some(LEFT)), Expiry::Superseded);
+    }
+
+    #[test]
+    fn a_chained_tap_onto_a_third_page_snaps_back_only_to_the_original_page() {
+        let now = Instant::now();
+        let deadline = now + SETTLE_WINDOW;
+        let first = chain(None, LEFT, TAPPED, 3, deadline, 1).unwrap();
+        let second = chain(Some(&first), TAPPED, THIRD, 3, deadline, 2).unwrap();
+        assert_eq!((second.from, second.to), (LEFT, THIRD));
+        assert_eq!(settle(Some(&second), Some(LEFT), now), Settle::Hold);
+        assert_eq!(settle(Some(&second), Some(TAPPED), now), Settle::Hold);
+        assert_eq!(settle(Some(&second), Some(THIRD), now), Settle::Resolve);
+        assert_eq!(expire(Some(&second), 2, Some(LEFT)), Expiry::SnapBack(LEFT));
+        assert_eq!(expire(Some(&second), 2, Some(TAPPED)), Expiry::Settled);
     }
 }

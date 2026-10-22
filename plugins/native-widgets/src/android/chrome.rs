@@ -32,15 +32,16 @@
 //! `install` answers `INSTALL_OK` (0), `INSTALL_REFUSED` (1) or
 //! `INSTALL_NO_ACTIVITY` (2). A refusal — an app theme that is not
 //! Material-derived (Material's theme enforcement throws inflating the
-//! bars), a content view that is not the frust embedding's root, a malformed
-//! spec, or a menu of [`crate::events::CHROME_MENU_STRIDE`] or more items —
-//! becomes [`ChromeError::Refused`]: the slot pins the generation to the
-//! frust-drawn fallback chrome and logs the fix once (limitation
-//! `native-chrome-android-material3-theme-required`: the app's theme must
-//! derive from `Theme.Material3.*` or `Theme.MaterialComponents.*`). A spec
-//! that arrives before the Activity's `setContentView` answers
-//! [`ChromeError::NoHost`], which the slot retries on the generation's next
-//! publish. Kotlin restores everything it touched before refusing; Rust only
+//! bars), a malformed spec, or a menu of [`crate::events::CHROME_MENU_STRIDE`]
+//! or more items — becomes [`ChromeError::Refused`]: the slot pins the
+//! generation to the frust-drawn fallback chrome and logs the fix once
+//! (limitation `native-chrome-android-material3-theme-required`: the app's
+//! theme must derive from `Theme.Material3.*` or `Theme.MaterialComponents.*`).
+//! When no live Activity's content hosts the frust surface — a spec before
+//! `setContentView`, or only a foreign Activity (a billing proxy) resumed —
+//! `install` answers [`ChromeError::NoHost`], which the slot retries on the
+//! generation's next publish. Every successful install is followed by
+//! `setScroll` with the spec's scroll state. Kotlin restores everything it touched before refusing; Rust only
 //! drops the icon cache it filled. The bars join `android.R.id.content`
 //! beside the frust root — no re-parent, the surface is never recreated —
 //! so an install has no surface side effect on this side.
@@ -110,7 +111,7 @@ pub(crate) const CHROME_CLASS: &str = "dev.frust.nativewidgets.FrustNativeChrome
 pub(crate) const INSTALL_OK: i32 = 0;
 /// `FrustNativeChrome.INSTALL_REFUSED`: declined; the fallback is pinned.
 pub(crate) const INSTALL_REFUSED: i32 = 1;
-/// `FrustNativeChrome.INSTALL_NO_ACTIVITY`: no content yet; retried.
+/// `FrustNativeChrome.INSTALL_NO_ACTIVITY`: no Activity hosts the frust surface; retried.
 pub(crate) const INSTALL_NO_ACTIVITY: i32 = 2;
 
 /// The local references one host call creates at most (a string, a byte
@@ -194,6 +195,7 @@ impl ChromeHost for AndroidChromeHost {
         match code {
             Ok(INSTALL_OK) => {
                 self.live = Some(generation);
+                push_scroll(spec);
                 Ok(())
             }
             Ok(code) => {
@@ -303,9 +305,8 @@ impl ChromeHost for AndroidChromeHost {
 fn install_error(code: i32) -> ChromeError {
     match code {
         INSTALL_REFUSED => ChromeError::Refused(
-            "FrustNativeChrome refused the install — the app theme is not Material-derived, \
-             the content view is not the frust embedding's root, or the spec was rejected \
-             (logcat tag `frust` names which)"
+            "FrustNativeChrome refused the install — the app theme is not Material-derived \
+             or the spec was rejected (logcat tag `frust` names which)"
                 .into(),
         ),
         INSTALL_NO_ACTIVITY => ChromeError::NoHost,
@@ -324,7 +325,28 @@ fn scroll_args(spec: &ChromeSpec) -> (f32, f32) {
     })
 }
 
-/// Hand `uploads` to `setIcon`, in order (empty bytes clear an entry).
+/// Hand the freshly installed chrome `spec`'s scroll state: Kotlin's
+/// install starts unlifted, so an install over a scrolled body (an Activity
+/// relaunch, a retried [`ChromeError::NoHost`]) lifts the bar at once rather
+/// than at the next offset change. A failure only logs; the install stands.
+fn push_scroll(spec: &ChromeSpec) {
+    let (offset, max) = scroll_args(spec);
+    let pushed = host_call("FrustNativeChrome.setScroll", |env, class| {
+        env.call_static_method(
+            class,
+            jni_str!("setScroll"),
+            jni_sig!("(FF)V"),
+            &[JValue::Float(offset), JValue::Float(max)],
+        )
+        .map(drop)
+    });
+    if let Err(error) = pushed {
+        log::warn!("frust-native-widgets: native chrome scroll after install failed: {error}");
+    }
+}
+
+/// Hand `uploads` to `setIcon`, in order (empty bytes clear an entry). An
+/// index past `i32` cannot cross JNI: it is logged and skipped.
 fn upload_icons(
     env: &mut Env<'_>,
     class: &Global<JClass<'static>>,
@@ -332,6 +354,11 @@ fn upload_icons(
 ) -> Result<(), jni::errors::Error> {
     for upload in uploads {
         let Ok(index) = i32::try_from(upload.index) else {
+            log::warn!(
+                "frust-native-widgets: chrome icon {} of slot {} does not fit a JNI int — not sent",
+                upload.index,
+                upload.slot
+            );
             continue;
         };
         let bytes = env.byte_array_from_slice(upload.bytes.as_deref().unwrap_or_default())?;
