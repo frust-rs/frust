@@ -26,8 +26,6 @@ package dev.frust.nativewidgets
 
 import android.app.Activity
 import android.content.Context
-import android.content.res.Configuration
-import android.view.ContextThemeWrapper
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.util.Log
@@ -83,28 +81,6 @@ class FrustNativeControlFactory : FrustPlatformViewFactory {
         private const val TAG = "FrustNativeWidgets"
 
         /**
-         * The Activity's manifest theme, with the night/locale configuration
-         * of [qualified] when given (else the Activity's), and the night bit
-         * forced when [dark] is non-null, as FrustNativeChrome themes its
-         * bars. The night-qualified context alone fails Material's AppCompat
-         * theme check: it is a bare ContextImpl with the framework theme and
-         * no Activity to unwrap; the raw Activity context fails it too (its
-         * live theme lacks the AppCompat marker the manifest theme carries).
-         */
-        @JvmStatic
-        fun materialContext(activity: Activity, qualified: Context? = null, dark: Boolean? = null): Context {
-            val theme = activity.packageManager.getActivityInfo(activity.componentName, 0).themeResource
-            val wrapper = ContextThemeWrapper(activity, theme)
-            val config = Configuration(qualified?.resources?.configuration ?: activity.resources.configuration)
-            if (dark != null) {
-                val night = if (dark) Configuration.UI_MODE_NIGHT_YES else Configuration.UI_MODE_NIGHT_NO
-                config.uiMode = (config.uiMode and Configuration.UI_MODE_NIGHT_MASK.inv()) or night
-            }
-            wrapper.applyOverrideConfiguration(config)
-            return wrapper
-        }
-
-        /**
          * A single-selection, selection-required toggle group wired to a
          * [FrustNativeListener] for [slotId]. Under a non-Material theme the
          * `MaterialButton` inflation throws; that is logged and rethrown so
@@ -114,7 +90,7 @@ class FrustNativeControlFactory : FrustPlatformViewFactory {
         @JvmStatic
         fun segmentedCreate(activity: Activity, qualified: Context, slotId: Long): View {
             try {
-                val group = MaterialButtonToggleGroup(materialContext(activity, qualified))
+                val group = MaterialButtonToggleGroup(FrustMaterialContext.wrap(activity, qualified))
                 group.isSingleSelection = true
                 group.isSelectionRequired = true
                 val holder = SegmentedHolder(FrustNativeListener(slotId))
