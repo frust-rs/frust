@@ -311,16 +311,14 @@ submit), a UIKit watchdog hazard. Once the startup line is emitted on the first 
 thread drops to a lock-free `Owned` handle. The threads race onto one line, so spans do not print
 in causal order — read each span's own delta, not its position.
 
-Frame pacing itself is unchanged: the surface's desired maximum frame latency stays at its constant
-(two frames in flight, `crates/frust-gpu/src/surface.rs`), and pre-acquiring a drawable ahead of its
-frame was measured and rejected — a drawable parked across a `Pause` is a UIKit watchdog hazard.
-What exists instead is a `perf-trace`-only diagnostic behind the `FRUST_PACE_TRACE` dial: one
-`frust-perf ios-pace` line per rendered frame decomposing wake/idle/acquire/submit/loop time plus
-`p2p_us`, the submit-to-submit cadence between frames actually submitted for presentation. A frame
-that presented nothing reports `p2p_us=NA` and leaves the cadence base untouched; under armed
-present-sync the UI thread commits the drawable later than the render thread's submit, which the
-render thread never observes. `FramePasses::total` sums the UI and render threads'
-concurrently-running spans, so it is a cost, not an interval to read a dropped vsync out of.
+Frame pacing is unchanged: the surface's maximum frame latency stays constant (two frames in
+flight, `crates/frust-gpu/src/surface.rs`), and pre-acquiring a drawable ahead of its frame was
+measured and rejected — a drawable parked across a `Pause` is a UIKit watchdog hazard. Instead a
+`perf-trace`-only `FRUST_PACE_TRACE` dial emits one `frust-perf ios-pace` line per rendered frame
+(wake/idle/acquire/submit/loop time plus `p2p_us`, the submit-to-submit cadence, `NA` for a frame
+that presented nothing; under armed present-sync the UI thread commits the drawable later than the
+submit, which the render thread never observes). `FramePasses::total` sums the UI and render threads'
+concurrent spans, so it is a cost, not an interval to read a dropped vsync out of.
 
 ### Web frame path
 
@@ -357,6 +355,9 @@ does not publish. A suspend removes every hosted view; every surface bring-up re
 Mode A is an opaque frust surface with hosted views above it (frust content cannot paint over a
 view); Mode B is a translucent surface with the views below, hole-punched.
 
+Android never re-parents the `FrustSurfaceView`'s root `FrameLayout` (`surfaceDestroyed` would fire
+inside a frame): plugins add siblings in `android.R.id.content` and pad the root (native-widgets chrome).
+
 | Platform | Mode | Overlays (frust paint above a Mode A view) |
 |----------|------|--------------------------------------------|
 | macOS | A: plugin `NSView` above winit's content view, nothing forwarded into it, the frust slot behind it covered | shipped behind `FRUST_OVERLAYS` (default off; verified in both paint orders) |
@@ -386,12 +387,10 @@ kept). The overlay lock is never held across the main-surface acquire or a prese
 returns, one out for a frame at that frame's land, so that frame may present into a destroyed
 window (the present fails; the table's `ANativeWindow` reference keeps the object valid —
 `android-overlay-withdraw-after-return`). A cut the overlay cannot serve stays on main
-(`overlay-unservable-content-stays-on-main`). The render tail runs `prepare_overlays` →
-`SurfaceRenderer::encode_segmented` → acquire → `submit_segmented_deferred` → present main, then
-overlays: one compiled frame, one submit; a `frust-overlay skew` line logs every 120 frames.
-On-top overlays sit above every native view, so frust content interleaved between two slots covers
+(`overlay-unservable-content-stays-on-main`). The render tail encodes segmented, submits once
+(`submit_segmented_deferred`) and presents main, then overlays; a `frust-overlay skew` line logs
+every 120 frames. On-top overlays sit above every native view, so frust content interleaved between two slots covers
 the later one (`android-overlays-cover-later-slots`).
-
 **Apple overlay hosts.** The differ, the `overlay`/`disposeOverlay` ops (byte-identical to
 Android's) and the `FRUST_OVERLAYS` resolution are shared; Android's `media` value means plain
 on. Ranges travel in the frame (`PaintedScene.overlay_cuts`), which is encoded segmented and
@@ -469,7 +468,8 @@ hidden slot) are in [LIMITATIONS.md](LIMITATIONS.md) § `apple-overlay-limits`.
   `FrustViewController` also pushes four **physical** window-control corner sizes through
   `frust_set_corner_insets` (beside `frust_set_insets`); the Rust handle merges both calls into one
   `WindowInsets` (zero elsewhere and below iOS 26). An app's `FrustSceneDelegate` subclass owns
-  `preferredWindowingControlStyle(for:)` and `windowScene.sizeRestrictions`.
+  `preferredWindowingControlStyle(for:)` and `windowScene.sizeRestrictions`; it stores the surface as `frustViewController` and roots the
+  window at `makeWindowRootViewController(hosting:)` (default: that controller; a plugin may re-root).
 - **Android edge-to-edge:** `FrustActivity`, not the manifest theme, owns edge-to-edge — `onCreate`
   calls androidx `enableEdgeToEdge` with transparent `SystemBarStyle`s, then on API < 35 adds
   `FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS` and (API 29+) clears the bar contrast scrim, so transparent

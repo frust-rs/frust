@@ -49,23 +49,23 @@ Eleven controls, one Rust API, no Kotlin or Swift to write for any of them:
 | `native_image(bytes)` | `ImageView` | `UIImageView` | `NSImageView` |
 | `native_spinner(animating)` | `ProgressBar` (circular style) | `UIActivityIndicatorView` | `NSProgressIndicator` (`Spinning` style) |
 | `native_date_picker(date)` | `DatePicker` | `UIDatePicker` (date mode) | `NSDatePicker` (year/month/day) |
-| `native_segmented(labels, selected)` | **none — renders a refusal banner** (see below) | `UISegmentedControl` | `NSSegmentedControl` (select-one) |
+| `native_segmented(labels, selected)` | `MaterialButtonToggleGroup` (Material3 theme required) | `UISegmentedControl` | `NSSegmentedControl` (select-one) |
 | `native_stepper(value, min, max)` | **none — renders a refusal banner** (see below) | `UIStepper` | `NSStepper` |
 | `native_tab_bar(items, selected)` | **none — renders a refusal banner** (see below) | a bare `UITabBar` (no `UITabBarController`) | **none — renders a refusal banner** |
 
-`native_segmented` and `native_stepper` are **iOS/iPadOS and macOS only** in
-this release. Android's framework has no segmented control — the stock one is
-Material's `MaterialButtonToggleGroup` — and no increment/decrement stepper
-control either; this plugin never assumes a Material/AndroidX dependency your
-app did not add — so on Android (and on every desktop-preview host) each
-builder is resolved **at compile time** to the same frust-drawn warning
-banner the translucency-refused fallback uses, naming the missing arm, rather
-than an empty slot. A Material-backed segmented Android arm and a composite
-stepper Android arm (two `ImageButton`s plus a `TextView`) are both follow-up
-plans. `native_segmented` is controlled like `native_switch`:
+`native_segmented` runs on iOS/iPadOS, macOS and Android (Material's
+`MaterialButtonToggleGroup`, equal-width single-line segments; it needs a
+Material3 app theme — under a stock theme construction is logged and the slot
+stays empty, never a crash). `native_stepper` is **iOS/iPadOS and macOS only**:
+Android's framework has no increment/decrement stepper control, so there (and
+on every desktop-preview host) the builder is resolved **at compile time** to
+the same frust-drawn warning banner the translucency-refused fallback uses,
+naming the missing arm, rather than an empty slot; a composite stepper Android
+arm (two `ImageButton`s plus a `TextView`) is a follow-up plan.
+`native_segmented` is controlled like `native_switch`:
 `.on_select(|index| …)` reports the *requested* segment, and the app confirms
 it by feeding `selected` back; `.momentary(true)` makes a tap flash its
-segment instead of selecting it. The selected segment wears the theme's
+segment instead of selecting it (no persistent check is ever shown). The selected segment wears the theme's
 `accent_fill`. `native_stepper` is controlled like `native_slider`:
 `.on_change(|value| …)` reports the *requested* value on a tap, and the app
 confirms it by feeding `value` back; `.step(n)` sets the increment (default
@@ -76,8 +76,9 @@ silent no-op there, logged at debug (same shape as the AppKit tint gaps in §4
 below).
 
 `native_tab_bar` is **iOS/iPadOS only**: macOS has no bottom-tab-bar idiom,
-and Android's `BottomNavigationView` needs Material, which this plugin never
-assumes — both render the refusal banner, naming both reasons. It is a
+and the bare control has no Android arm (Android's bottom navigation ships
+with `native_scaffold`, §1c) — both render the refusal banner, naming both
+reasons. It is a
 **bare** `UITabBar`, never a `UITabBarController`: frust keeps screen
 ownership and routing, so a tap never navigates by itself. Each `TabItem`
 carries a stable app-chosen `TabId`, a title, an icon — `TabIcon::AppleSymbol`
@@ -266,20 +267,30 @@ impl Component for Root {
 frust::app!(Root);
 ```
 
-**Controlled, like `native_tab_bar`:** the bars never navigate. A tap reports
-(`.on_tab_select`, `.on_tab_reselect`, `.on_action`, `.on_menu`, `.on_back`, or
-every event through `.events_into(signal)`); you route, and the confirmed
-`selected` comes back as the next build's props. Handlers take no `&mut State`
-— write a signal or drive a `NavigatorController`. `.scroll(controller)` mirrors
-the body's scroll position to the Android arm (changed values only, one publish
-per frame); iOS does not minimize its tab bar on scroll. On iOS the bars float
+**You route, the bars report.** A tap reports (`.on_tab_select`,
+`.on_tab_reselect`, `.on_action`, `.on_menu`, `.on_back`, or every event through
+`.events_into(signal)`); you route, and the confirmed `selected` comes back as
+the next build's props. Handlers take no `&mut State` — write a signal or drive
+a `NavigatorController`. iOS tab selection is native and optimistic: UIKit
+selects on the tap and the frust surface moves into the tapped page, then the
+app has about 250 ms to confirm by publishing that tab; otherwise the bar snaps
+back to the tab the spec names (chained taps converge on the spec). An
+app-driven `selected` change is applied without animation.
+`.scroll(controller)` feeds Android's lift-on-scroll app bar and the fallback
+bars (changed values only); iOS does not minimize its tab bar on scroll. On iOS the bars float
 over a full-bleed body, so put the safe area INSIDE the scroller
 (`scroll_view(safe_area(page))`) for content to scroll under them; the scaffold
 paints a static edge fade in the theme surface colour under each bar:
 `.edge_fade(EdgeFade::default().color(..).bar_alpha(..))` tunes colour, edge and
 bar-line alpha and tail, `EdgeFade::strong()` is a heavier preset and
-`.no_edge_fade()` turns it off. On Android the surface sits between
-the bars, so do not pad for them yourself. A second live scaffold
+`.no_edge_fade()` turns it off. On Android the Material 3 bars (`MaterialToolbar` in an `AppBarLayout`, a
+`BottomNavigationView`) are siblings of the frust surface inside the Activity's
+content view, which is padded to sit between them — the surface is never
+re-parented — so do not pad for them yourself. The Activity's theme must derive
+from `Theme.Material3.*` (or `Theme.MaterialComponents.*`): under a stock theme
+the plugin logs the fix and draws the frust fallback bars instead. The same
+requirement covers the Android sheet, segmented control and toolbar buttons.
+A second live scaffold
 publishes nothing and shows a one-line refusal above its body — one
 `native_scaffold` per app.
 
@@ -383,7 +394,7 @@ above) rather than `Cancelled`. **Android:** `cancelable` gates both the back
 key and an outside tap, either resolving `Cancelled`. **macOS:** no analog —
 a window sheet has no click-away dismissal, so `cancelable` is ignored there.
 
-### Native sheets (iOS / iPadOS)
+### Native sheets (iOS / iPadOS / Android)
 
 A **sheet** is the same kind of request: a `SheetSpec` answered by exactly
 one `SheetOutcome` — `Action(id)` (the user tapped a row; the sheet has
@@ -395,7 +406,8 @@ up, a sheet request is refused `PresentError::Busy`, and the reverse.
 | Platform | Today |
 |---|---|
 | iOS / iPadOS | a page sheet under `UISheetPresentationController`: detents, grabber, swipe-to-dismiss |
-| macOS, Android, desktop preview, web | `PresentError::Unsupported` (an `NSPopover` / `BottomSheetDialog` arm is follow-up work) |
+| Android | Material `BottomSheetDialog` (Material3 theme required): detents map to half-expanded/expanded states, one half ratio at a time; `largest_undimmed` and `scrolling_expands` are ignored; a new request supersedes the live sheet |
+| macOS, desktop preview, web | `PresentError::Unsupported` (an `NSPopover` arm is follow-up work) |
 
 The content is a **constrained native schema**, not frust widgets: an
 optional title, an optional message, optional image bytes and up to three
@@ -474,11 +486,14 @@ This is the **only** step iOS needs — see §4.
 ## 3. Android setup — include the plugin's Gradle module
 
 **One addition: include this plugin's Android library module.** It carries
-both of the plugin's Kotlin classes — `dev.frust.nativewidgets`'s
+the plugin's Kotlin classes — `dev.frust.nativewidgets`'s
 `FrustNativeControlFactory` (the ONE platform-view factory every control
-resolves through) and `FrustNativeListener` (the ONE listener class every
-control's events funnel through) — plus the two R8 keep rules they need, in
-its own `consumer-rules.pro`. Your `AndroidManifest.xml` and
+resolves through), `FrustNativeListener` (the ONE listener class every
+control's events funnel through), `FrustNativePresenter` (alerts and sheets)
+and `FrustNativeChrome` (the app chrome) — plus the R8 keep rules they need,
+in its own `consumer-rules.pro`. The module depends on Material Components
+(`api` scope), so your **app theme must derive from `Theme.Material3.*`** for
+the chrome, sheet and segmented control. Your `AndroidManifest.xml` and
 `proguard-rules.pro` stay untouched, and there is no file to copy, so nothing
 can drift.
 
