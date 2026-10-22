@@ -3,17 +3,22 @@
 //! GPU, no window — the same harness shape as `examples/playground`'s
 //! `tests/smoke.rs`.
 //!
-//! These tests prove the shell and every section page mount, lay out, and
+//! These tests prove the four tab bodies and the full shell mount, lay out, and
 //! paint without panicking at two viewport sizes and both brightnesses — the
-//! coverage gate. They assert structural paint output (text runs were shaped,
-//! no panic), not pixel-exact content; what every page here exists to show
-//! (real OS controls beside their frust-drawn peers) is a separate, human-run
-//! device gate this suite cannot replace — see `README.md`.
+//! coverage gate — and that each tab publishes its documented at-rest slot
+//! count. They assert structural output (text runs were shaped, accessibility
+//! labels are present, slot counts), not pixel-exact content; what every tab
+//! exists to show (real OS controls and chrome beside their frust-drawn peers)
+//! is a separate, human-run device gate this suite cannot replace — see
+//! `README.md`.
 
 use std::any::Any;
 
-use frust::{AnyView, Brightness, Theme, component, provide_context};
+use std::sync::{Mutex, MutexGuard};
+
+use frust::{AnyView, Brightness, Component, GetUntracked, Set, Theme, component, provide_context};
 use frust_core::FrameTime;
+use frust_core::accesskit::Role;
 use frust_core::{PaintOutcome, PaintScene, RenderRoot, View};
 use frust_reactive::ReactiveRuntime;
 use frust_scene::GlyphRun;
@@ -22,8 +27,13 @@ use kurbo::{BezPath, Point, Rect, Size};
 use peniko::{Brush, Color};
 use reactive_graph::owner::Owner;
 
-use native_widgets_demo::pages;
-use native_widgets_demo::{NativeWidgetsDemoApp, NativeWidgetsDemoState, SECTION_LABELS};
+use native_widgets_demo::pages::{self, detail};
+use native_widgets_demo::{
+    DetailRoute, NativeWidgetsDemoApp, NativeWidgetsDemoState, Tab, section_destination,
+};
+
+type S = NativeWidgetsDemoState;
+type Page = fn(&S) -> AnyView<S>;
 
 const W: f64 = 900.0;
 const H: f64 = 700.0;
@@ -31,6 +41,28 @@ const H: f64 = 700.0;
 /// Two viewport sizes the coverage sweep lays every page out at: a phone-ish
 /// portrait size and a desktop-ish landscape size.
 const SIZES: [(f64, f64); 2] = [(390.0, 844.0), (W, H)];
+
+/// A viewport tall enough to lay a whole tab body out visible: a
+/// `platform_view` slot is created per painted frame, so a clipped body
+/// publishes fewer than its documented at-rest count.
+const TALL: Size = Size::new(390.0, 12000.0);
+
+/// Every tab's root page, by [`Tab::index`].
+const TAB_PAGES: [(Tab, Page); Tab::COUNT] = [
+    (Tab::Home, pages::home::page),
+    (Tab::Controls, pages::controls_tab::page),
+    (Tab::Dialogs, pages::dialogs::page),
+    (Tab::Lab, pages::lab::page),
+];
+
+/// Serialises the full-shell tests: the app chrome is one process-wide slot.
+static SHELL: Mutex<()> = Mutex::new(());
+
+fn shell_guard() -> MutexGuard<'static, ()> {
+    SHELL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Both brightnesses the coverage sweep checks — every page's colors resolve
 /// from the live theme, so sweeping both is what exercises that contract.
@@ -131,87 +163,55 @@ fn frame_at<S: 'static, V: View<S>>(
     frame_at_size(root, logic, state, tcx, Size::new(W, H), t_ms)
 }
 
-#[test]
-fn every_page_mounts_and_paints() {
-    let _owner = setup();
-    let mut tcx = TextContext::new();
-
-    for (section, label) in SECTION_LABELS.iter().enumerate() {
-        let mut root: RenderRoot<NativeWidgetsDemoState, AnyView<NativeWidgetsDemoState>> =
-            RenderRoot::new();
-        let mut state = NativeWidgetsDemoState::new();
-        let mut logic = |s: &mut NativeWidgetsDemoState| pages::current(section, s);
-        let (scene, _outcome) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
-        assert!(
-            scene.text_runs > 0,
-            "section {section} ({label}) must paint some text",
-        );
-    }
+/// A fresh headless root on `theme`, under the ambient owner.
+fn root_with<V: View<S>>(theme: Theme) -> RenderRoot<S, V> {
+    let mut root = RenderRoot::new();
+    root.set_theme(Box::new(theme));
+    root
 }
 
-/// The coverage gate: every section page builds/lays out/paints headless at
-/// two viewport sizes and both brightnesses, then survives a second
+/// The coverage gate: every tab body builds, lays out and paints at two
+/// viewport sizes and both brightnesses, then survives a second
 /// (reconcile-in-place) frame.
 #[test]
-fn every_page_mounts_at_every_size_and_brightness() {
+fn every_tab_mounts_and_paints_at_every_size_and_brightness() {
     for brightness in BRIGHTNESSES {
-        for (section, label) in SECTION_LABELS.iter().enumerate() {
+        for (tab, page) in TAB_PAGES {
             for (w, h) in SIZES {
                 let (_owner, theme) = setup_with_theme(brightness);
                 let mut tcx = TextContext::new();
-                let mut root: RenderRoot<NativeWidgetsDemoState, AnyView<NativeWidgetsDemoState>> =
-                    RenderRoot::new();
-                root.set_theme(Box::new(theme));
-                let mut state = NativeWidgetsDemoState::new();
-                let mut logic = |s: &mut NativeWidgetsDemoState| pages::current(section, s);
-                let (scene, _outcome) = frame_at_size(
-                    &mut root,
-                    &mut logic,
-                    &mut state,
-                    &mut tcx,
-                    Size::new(w, h),
-                    0,
-                );
-                assert!(
-                    scene.text_runs > 0,
-                    "section {section} ({label}) must paint text at {w}x{h} under {brightness:?}",
-                );
-
-                let (scene2, _outcome2) = frame_at_size(
-                    &mut root,
-                    &mut logic,
-                    &mut state,
-                    &mut tcx,
-                    Size::new(w, h),
-                    16,
-                );
-                assert!(
-                    scene2.text_runs > 0,
-                    "section {section} ({label}) must still paint on a second frame at {w}x{h} \
-                     under {brightness:?}",
-                );
+                let mut root = root_with(theme);
+                let mut state = S::new();
+                let mut logic = |s: &mut S| page(s);
+                let size = Size::new(w, h);
+                for t_ms in [0, 16] {
+                    let (scene, _outcome) =
+                        frame_at_size(&mut root, &mut logic, &mut state, &mut tcx, size, t_ms);
+                    assert!(
+                        scene.text_runs > 0,
+                        "{tab:?} must paint text at {w}x{h} under {brightness:?} (frame {t_ms} ms)",
+                    );
+                }
             }
         }
     }
 }
 
 /// The brightness sweep must verify COLOR values, not just paint counts — a
-/// page that hardcoded its text colors would paint an identical color set
+/// tab that hardcoded its text colors would paint an identical color set
 /// under both brightnesses.
 #[test]
-fn page_text_colors_track_brightness() {
+fn tab_text_colors_track_brightness() {
     use std::collections::BTreeSet;
     let (w, h) = SIZES[0];
-    for (section, label) in SECTION_LABELS.iter().enumerate() {
+    for (tab, page) in TAB_PAGES {
         let mut palettes: Vec<BTreeSet<[u8; 4]>> = Vec::new();
         for brightness in BRIGHTNESSES {
             let (_owner, theme) = setup_with_theme(brightness);
             let mut tcx = TextContext::new();
-            let mut root: RenderRoot<NativeWidgetsDemoState, AnyView<NativeWidgetsDemoState>> =
-                RenderRoot::new();
-            root.set_theme(Box::new(theme));
-            let mut state = NativeWidgetsDemoState::new();
-            let mut logic = |s: &mut NativeWidgetsDemoState| pages::current(section, s);
+            let mut root = root_with(theme);
+            let mut state = S::new();
+            let mut logic = |s: &mut S| page(s);
             let (scene, _outcome) = frame_at_size(
                 &mut root,
                 &mut logic,
@@ -230,50 +230,39 @@ fn page_text_colors_track_brightness() {
         }
         assert_ne!(
             palettes[0], palettes[1],
-            "section {section} ({label}): painted text-color set is identical under Dark and \
-             Light — at least one theme-resolved role must differ (hardcoded-color regression)",
+            "{tab:?}: painted text-color set is identical under Dark and Light — at least one \
+             theme-resolved role must differ (hardcoded-color regression)",
         );
     }
 }
 
-/// Every page publishes exactly its documented at-rest number of native
+/// Every tab publishes exactly its documented at-rest number of native
 /// `platform_view` slots ([`pages::AT_REST_SLOTS`], resolved for the target
-/// this test runs on) at both viewport sizes and on a second frame — the
-/// structural half of each page's "expected at rest" readout. A builder that
-/// renders a refusal banner on this target publishes no slot, so the count
-/// also pins which families refuse here.
+/// this test runs on) when laid out with its whole body visible, on a first
+/// and a second frame — the structural half of each tab's "expected at rest"
+/// readout. A builder that renders a refusal banner on this target publishes
+/// no slot, so the count also pins which families refuse here.
 #[test]
-fn every_page_publishes_its_documented_at_rest_slot_count() {
-    for (section, label) in SECTION_LABELS.iter().enumerate() {
-        for (w, h) in SIZES {
-            let (_owner, theme) = setup_with_theme(Brightness::Dark);
-            let mut tcx = TextContext::new();
-            let mut root: RenderRoot<NativeWidgetsDemoState, AnyView<NativeWidgetsDemoState>> =
-                RenderRoot::new();
-            root.set_theme(Box::new(theme));
-            let mut state = NativeWidgetsDemoState::new();
-            let mut logic = |s: &mut NativeWidgetsDemoState| pages::current(section, s);
-            let expected = pages::at_rest_slots(section);
-            for t_ms in [0, 16] {
-                let (scene, _outcome) = frame_at_size(
-                    &mut root,
-                    &mut logic,
-                    &mut state,
-                    &mut tcx,
-                    Size::new(w, h),
-                    t_ms,
-                );
-                assert_eq!(
-                    root.platform_view_frames().len(),
-                    expected,
-                    "section {section} ({label}) at {w}x{h}, frame at {t_ms} ms: published \
-                     native slots must equal the documented at-rest count",
-                );
-                assert!(
-                    scene.text_runs > 0 && scene.rounded + scene.fills > 0,
-                    "section {section} ({label}) paints text and chrome at {w}x{h}",
-                );
-            }
+fn every_tab_publishes_its_documented_at_rest_slot_count() {
+    for (tab, page) in TAB_PAGES {
+        let (_owner, theme) = setup_with_theme(Brightness::Dark);
+        let mut tcx = TextContext::new();
+        let mut root = root_with(theme);
+        let mut state = S::new();
+        let mut logic = |s: &mut S| page(s);
+        for t_ms in [0, 16] {
+            let (scene, _outcome) =
+                frame_at_size(&mut root, &mut logic, &mut state, &mut tcx, TALL, t_ms);
+            assert_eq!(
+                root.platform_view_frames().len(),
+                pages::at_rest_slots(tab),
+                "{tab:?}, frame at {t_ms} ms: published native slots must equal the documented \
+                 at-rest count",
+            );
+            assert!(
+                scene.text_runs > 0 && scene.rounded + scene.fills > 0,
+                "{tab:?} paints text and chrome",
+            );
         }
     }
 }
@@ -311,23 +300,35 @@ fn anchor_probe_records_the_painted_window_rect() {
     );
 }
 
-#[test]
-fn out_of_range_section_falls_back() {
-    let _owner = setup();
-    let mut tcx = TextContext::new();
-    let mut root: RenderRoot<NativeWidgetsDemoState, AnyView<NativeWidgetsDemoState>> =
-        RenderRoot::new();
-    let mut state = NativeWidgetsDemoState::new();
-    let mut logic = |s: &mut NativeWidgetsDemoState| pages::current(99, s);
-    let (scene, _outcome) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
-    assert!(scene.text_runs > 0, "the fallback page paints");
+/// The accessibility labels of every node of `role` in the last-painted tree.
+fn labels<St: 'static, V: View<St>>(root: &RenderRoot<St, V>, role: Role) -> Vec<String> {
+    root.semantics()
+        .nodes
+        .into_iter()
+        .filter(|(_, node)| node.role() == role)
+        .filter_map(|(_, node)| node.label().map(str::to_string))
+        .collect()
+}
+
+/// The ambient owner, a theme at `brightness`, a fresh app state and a text
+/// context: what every shell-over-state test starts from.
+fn shell_parts(brightness: Brightness) -> (Owner, Theme, S, TextContext) {
+    let (owner, theme) = setup_with_theme(brightness);
+    (owner, theme, S::new(), TextContext::new())
+}
+
+/// Whether the last-painted tree has a node of `role` labelled `label`.
+fn has_label<St: 'static, V: View<St>>(root: &RenderRoot<St, V>, role: Role, label: &str) -> bool {
+    labels(root, role).iter().any(|seen| seen == label)
 }
 
 /// Mounts the whole app through its root Component — the same tree `app!`
-/// binds on every platform (navigator → app bar + pattern-switched section
-/// body + bottom section navigation) — at both viewport sizes.
+/// binds on every platform (a `native_scaffold` over the tab stack) — at both
+/// viewport sizes: the fallback chrome draws its title and four tab labels,
+/// and publishes no native slot.
 #[test]
-fn full_shell_mounts_with_app_bar_body_and_section_nav() {
+fn full_shell_mounts_with_fallback_chrome() {
+    let _guard = shell_guard();
     for (w, h) in SIZES {
         let _owner = setup();
         let mut tcx = TextContext::new();
@@ -337,26 +338,159 @@ fn full_shell_mounts_with_app_bar_body_and_section_nav() {
 
         let size = Size::new(w, h);
         let (scene, _outcome) = frame_at_size(&mut root, &mut logic, &mut state, &mut tcx, size, 0);
-
-        // App-bar title, one label per section button, and the first page's
-        // own text all shape runs.
         assert!(
-            scene.text_runs > SECTION_LABELS.len() + 1,
-            "the shell paints its app bar, every section button and the page body at {w}x{h} \
-             (got {} text runs)",
+            scene.text_runs > Tab::COUNT + 1,
+            "the shell paints its title, every tab label and the body at {w}x{h} (got {} runs)",
             scene.text_runs,
         );
-        // The active section button (ButtonStyle::Primary) paints a rounded
-        // fill; the Ghost buttons and the resting icon button are transparent.
-        assert!(
-            scene.rounded >= 1,
-            "the active section button paints its fill at {w}x{h} (got {} rounded rects)",
-            scene.rounded,
+        assert_eq!(
+            labels(&root, Role::Heading),
+            [Tab::Home.title()],
+            "the top bar's title is the selected tab's at {w}x{h}",
         );
+        let tab_labels = labels(&root, Role::Tab);
+        for tab in Tab::ALL {
+            assert!(
+                tab_labels.iter().any(|label| label == tab.title()),
+                "the tab row names {:?} at {w}x{h}; saw {tab_labels:?}",
+                tab.title(),
+            );
+        }
 
-        // A second frame keeps mounting cleanly (reconcile-in-place, no panic).
         let (scene2, _outcome2) =
             frame_at_size(&mut root, &mut logic, &mut state, &mut tcx, size, 16);
-        assert!(scene2.text_runs > 0);
+        assert!(scene2.text_runs > 0, "a second frame reconciles in place");
     }
+}
+
+/// The chrome is never a slot: the full shell, tall enough to show the whole
+/// Home body, publishes exactly the Home body's own count.
+#[test]
+fn the_chrome_publishes_zero_native_slots() {
+    let _guard = shell_guard();
+    let (_owner, theme, mut state, mut tcx) = shell_parts(Brightness::Dark);
+    let mut root = root_with(theme);
+    let held = state.clone();
+    let mut logic = |_: &mut S| component(ShellOver(held.clone()));
+    for t_ms in [0, 16] {
+        frame_at_size(&mut root, &mut logic, &mut state, &mut tcx, TALL, t_ms);
+        assert_eq!(
+            root.platform_view_frames().len(),
+            pages::at_rest_slots(Tab::Home),
+            "frame at {t_ms} ms: the bars add no slot to the body's",
+        );
+    }
+}
+
+/// [`NativeWidgetsDemoApp`] over a state the test holds, so it can push pages
+/// and flip signals the shell's own `init` would keep private. The state's
+/// handles are shared, as the tab components' are.
+struct ShellOver(S);
+
+impl Component for ShellOver {
+    type State = S;
+
+    fn init(&self) -> S {
+        self.0.clone()
+    }
+
+    fn build(&self, state: &mut S) -> impl View<S> {
+        NativeWidgetsDemoApp.build(state)
+    }
+}
+
+/// Push the Home detail page the way a work row's tap does.
+fn push_detail(state: &S) {
+    let route = DetailRoute::new("Pull request", "frust/frust");
+    let (handles, shown) = (state.clone(), route.clone());
+    route.push(state.nav(Tab::Home), move || detail::page(&handles, &shown));
+}
+
+/// The toolbar row is the detail page's and no other's: absent on Home's
+/// root, present once a detail page is pushed.
+#[test]
+fn the_toolbar_row_shows_on_a_home_detail_page_only() {
+    let _guard = shell_guard();
+    let (_owner, theme, mut state, mut tcx) = shell_parts(Brightness::Light);
+    let mut root = root_with(theme);
+    let held = state.clone();
+    let mut logic = |_: &mut S| component(ShellOver(held.clone()));
+    let size = Size::new(390.0, 844.0);
+    for t_ms in [0, 16] {
+        frame_at_size(&mut root, &mut logic, &mut state, &mut tcx, size, t_ms);
+    }
+    assert!(
+        !has_label(&root, Role::Button, "Comment"),
+        "Home's root has no toolbar row"
+    );
+    assert_eq!(labels(&root, Role::Heading), [Tab::Home.title()]);
+
+    push_detail(&state);
+    for t_ms in [32, 48, 64] {
+        frame_at_size(&mut root, &mut logic, &mut state, &mut tcx, size, t_ms);
+    }
+    assert!(
+        has_label(&root, Role::Button, "Comment"),
+        "a Home detail page shows the toolbar row"
+    );
+    assert_eq!(
+        labels(&root, Role::Heading),
+        ["Pull request"],
+        "the bar carries the pushed page's title",
+    );
+}
+
+/// `composer_open` renders the composer row as the detail column's last child:
+/// its input sits below the scroller, at the bottom of the viewport.
+#[test]
+fn the_composer_row_is_the_detail_columns_last_child() {
+    let _owner = setup();
+    let mut tcx = TextContext::new();
+    let mut root: RenderRoot<S, AnyView<S>> = RenderRoot::new();
+    let mut state = S::new();
+    let route = DetailRoute::new("Pull request", "frust/frust");
+    let size = Size::new(390.0, 844.0);
+    let mut logic = |s: &mut S| detail::page(s, &route);
+    let input_bottom = |root: &RenderRoot<S, AnyView<S>>| {
+        let update = root.semantics();
+        update
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.role() == Role::TextInput)
+            .filter_map(|(_, node)| node.bounds())
+            .map(|bounds| bounds.y1)
+            .reduce(f64::max)
+    };
+
+    frame_at_size(&mut root, &mut logic, &mut state, &mut tcx, size, 0);
+    assert_eq!(input_bottom(&root), None, "no composer while it is closed");
+
+    state.composer_open.set(true);
+    frame_at_size(&mut root, &mut logic, &mut state, &mut tcx, size, 16);
+    let bottom = input_bottom(&root).expect("the composer's input painted");
+    assert!(
+        bottom > size.height * 0.8 && bottom <= size.height,
+        "the composer is pinned under the scroller (input bottom {bottom} of {})",
+        size.height,
+    );
+}
+
+/// A `section/sheet` deep link selects the Dialogs tab and asks it to scroll
+/// to the Sheet section.
+#[test]
+fn a_section_deep_link_selects_its_tab_and_sets_the_anchor() {
+    let _owner = setup();
+    let state = S::new();
+    assert_eq!(state.tab.get_untracked(), Tab::Home);
+    assert_eq!(state.pending_anchor.get_untracked(), None);
+
+    let destination = section_destination("sheet").expect("sheet is an old section slug");
+    state.go(destination);
+
+    assert_eq!(state.tab.get_untracked(), Tab::Dialogs);
+    let request = state
+        .pending_anchor
+        .get_untracked()
+        .expect("an anchor request");
+    assert_eq!(request.anchor, pages::sheet::ANCHOR);
 }

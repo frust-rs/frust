@@ -241,19 +241,23 @@ pub const SECTION_AT_REST_SLOTS: [usize; SECTION_LABELS.len()] = [
     0,
 ];
 
+/// Home's one slot: the Favorites card's `native_button`. A `native_button`
+/// publishes its slot on every target, so this does not vary.
+const HOME_SLOTS: usize = 1;
+
 /// The documented native slots each tab publishes at rest with its whole
 /// body laid out visible (a clipped body publishes fewer), by [`Tab::index`]:
-/// the sum of its sections' [`SECTION_AT_REST_SLOTS`] (plus
+/// Home's [`HOME_SLOTS`]; elsewhere the sum of its sections' [`SECTION_AT_REST_SLOTS`] (plus
 /// [`SANDWICH_AT_REST_SLOTS`] on Lab). The chrome is never a slot.
 ///
 /// **Hidden tabs.** The tab stack lays out every tab but paints only the
 /// selected one, and a slot is published only while painted: from the first
 /// frame after a switch the published set is the new tab's alone (measured
-/// headless on macOS over consecutive frames: Controls 10, Lab 4, Home 0).
+/// headless on macOS over consecutive frames: Controls 10, Lab 4, Home 1).
 /// The host then disposes the unpublished slots, at its own pace — so the
 /// live count may lag a switch — and re-creates them when the tab returns.
 pub const AT_REST_SLOTS: [usize; Tab::COUNT] = [
-    0,
+    HOME_SLOTS,
     SECTION_AT_REST_SLOTS[0] + SECTION_AT_REST_SLOTS[2] + SECTION_AT_REST_SLOTS[6],
     SECTION_AT_REST_SLOTS[3] + SECTION_AT_REST_SLOTS[5],
     SECTION_AT_REST_SLOTS[1]
