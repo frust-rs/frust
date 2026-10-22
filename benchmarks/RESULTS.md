@@ -1157,7 +1157,7 @@ Frust pass p50 (ms): rebuild 0.05, layout 0.00, paint 0.09, encode 0.05, acquire
 
 Frust pass p50 (ms): rebuild 0.04, layout 2.16, paint 0.16, encode 0.03, acquire 14.91, submit 1.72; layout_us>0 on 18,183/18,183 frames; GPU (gpu_q=1 on 18,143) total p50/p95 2.77/3.21 ms
 
-**Frust's median frame is lighter, its tail heavier, and it paints three times as many frames.** Work row 4.37 vs 4.95 ms p50 but 7.26 vs 6.15 p95, with 4 frames (0.02 %) over the 60 Hz budget against Flutter's none. Frust repaints continuously at ~60.6 fps (18,183 frames) while Flutter's scroll paint is event-driven (6,457 frames; deviation 8), so the per-frame figures compare and the frame counts do not. Per-frame layout is half of Frust's row (2.16 ms).
+**Frust's median frame is lighter, its tail heavier, and it paints ~2.8× as many frames.** Work row 4.37 vs 4.95 ms p50 but 7.26 vs 6.15 p95, with 4 frames (0.02 %) over the 60 Hz budget against Flutter's none. Frust repaints continuously at ~60.6 fps (18,183 frames) while Flutter's scroll paint is event-driven (6,457 frames; deviation 8), so the per-frame figures compare and the frame counts do not. Per-frame layout is half of Frust's row (2.16 ms).
 
 ### S4
 
@@ -1169,7 +1169,7 @@ Frust pass p50 (ms): rebuild 0.04, layout 2.16, paint 0.16, encode 0.03, acquire
 
 Frust pass p50 (ms): rebuild 0.04, layout 0.00, paint 0.02, encode 0.01, acquire 15.81, submit 0.83; layout_us>0 on 18,064/18,254 frames; GPU (gpu_q=1 on 18,214) total p50/p95 0.94/1.17 ms
 
-**Flutter wins S4 on the work axis** — 0.76 vs 0.92 ms p50, 1.09 vs 1.48 p95 — while Frust misses no frame and Flutter misses 7 (0.04 %). Both are under a tenth of the budget; Frust's row is almost entirely `submit` over a 0.94 ms GPU pass.
+**Flutter wins S4 on the work axis** — 0.76 vs 0.92 ms p50, 1.09 vs 1.48 p95 — while Frust's work row misses no frame and Flutter misses 7 (0.04 %). Both are under a tenth of the budget; Frust's row is almost entirely `submit` over a 0.94 ms GPU pass.
 
 ### S5
 
