@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Generate the demo's tab icons and its Home avatar as 96x96 RGBA PNGs.
+"""Generate the demo's tab icons, its action icons and its Home avatar as
+96x96 RGBA PNGs.
 
-Writes ``assets/icons/{home,controls,dialogs,lab,avatar}.png`` beside this
-script's parent directory. Standard library only (``zlib`` + ``struct``): each
-glyph is a union/difference of simple shapes sampled 4x4 per pixel for
-anti-aliased edges, so the output is byte-for-byte reproducible.
+Writes ``assets/icons/{home,controls,dialogs,lab,plus,search,more,avatar}.png``
+beside this script's parent directory. Standard library only (``zlib`` +
+``struct``): each glyph is a union/difference of simple shapes sampled 4x4 per
+pixel for anti-aliased edges, so the output is byte-for-byte reproducible.
 
-The tab glyphs are a mid grey on transparent. The Android bottom navigation
-tints an icon by its alpha alone, so the colour is unseen there; the
+The tab and action glyphs are a mid grey on transparent. The Android bottom
+navigation tints an icon by its alpha alone, so the colour is unseen there; the
 frust-drawn fallback tab row draws byte icons untinted, and grey stays legible
 on both a light and a dark surface where white would vanish on light. Apple
 builds use SF Symbols instead of these files.
@@ -109,6 +110,22 @@ def lab():
     return minus(union(rim, neck, body, base), bubble)
 
 
+def plus():
+    bar = rect(16, 44, 80, 52)
+    stem = rect(44, 16, 52, 80)
+    return union(bar, stem)
+
+
+def search():
+    ring = minus(circle(42, 42, 26), circle(42, 42, 17))
+    handle = polygon((58, 62), (62, 58), (84, 80), (80, 84))
+    return union(ring, handle)
+
+
+def more():
+    return union(*(circle(x, 48, 8) for x in (20, 48, 76)))
+
+
 def avatar():
     """A filled circle with a white "F" cut from rectangles."""
     disc = circle(48, 48, 47)
@@ -182,6 +199,9 @@ def main():
         "controls": glyph_pixels(controls(), GLYPH_RGB),
         "dialogs": glyph_pixels(dialogs(), GLYPH_RGB),
         "lab": glyph_pixels(lab(), GLYPH_RGB),
+        "plus": glyph_pixels(plus(), GLYPH_RGB),
+        "search": glyph_pixels(search(), GLYPH_RGB),
+        "more": glyph_pixels(more(), GLYPH_RGB),
         "avatar": avatar_pixels(),
     }
     for name, rows in images.items():
