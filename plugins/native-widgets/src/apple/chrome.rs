@@ -119,9 +119,17 @@
 //! space) and is re-applied to every page on each such change. `Prominent`
 //! shares its raw value with the older `Done`, so it needs no availability
 //! check: iOS 26 draws a separated tinted button, earlier systems a bold title.
-//! The navigation controller insets its page's safe area by the toolbar as it
-//! does for the tab bar, so the frust body's bottom view padding (and the
-//! scaffold's edge fade keyed off it) covers both.
+//! While a toolbar is shown the tab bar is hidden (the GitHub app's detail
+//! page): frust pushes are internal to one surface, so the tab bar never hides
+//! the native way and the toolbar would sit behind it. The state is global, so
+//! it is re-applied after install, a page rebuild and every apply
+//! (`setTabBarHidden:animated:`, iOS 18+, behind a `respondsToSelector` check;
+//! earlier systems use `tabBar().setHidden`). It animates only when the
+//! toolbar appears or goes with no tab change in the same apply (a push or pop
+//! inside the selected tab); with a tab change it is instant, as the switch is.
+//! The navigation controller insets its page's safe area by the toolbar (and
+//! the tab bar when shown), so the frust body's bottom view padding (and the
+//! scaffold's edge fade keyed off it) covers both, and follows the hide.
 //!
 //! # Events
 //!
@@ -695,6 +703,7 @@ impl Chrome {
         // superview; detaching keeps that true before a page holds it.
         detach_from_parent(&chrome.frust);
         chrome.select(spec, cover);
+        chrome.apply_tab_bar_visibility(false);
         chrome
     }
 
@@ -703,6 +712,8 @@ impl Chrome {
     fn apply(&mut self, mtm: MainThreadMarker, diff: &ChromeDiff<'_>) {
         let spec = diff.spec;
         let restyle = self.spec.dark != spec.dark;
+        let toolbar_was_shown = shown_toolbar(&self.spec).is_some();
+        let tab_before = self.tabs.selectedIndex();
         self.spec = spec.clone();
         let cover = if diff.contains(ChromeField::Tabs) {
             // The pending tap's page indices may name other pages now.
@@ -732,6 +743,10 @@ impl Chrome {
                 apply_toolbar(mtm, page, &self.spec, &self.target);
             }
         }
+        // Animate only a push/pop inside the selected tab (module doc, Toolbar).
+        let toolbar_changed = toolbar_was_shown != shown_toolbar(&self.spec).is_some();
+        let animated = toolbar_changed && self.tabs.selectedIndex() == tab_before;
+        self.apply_tab_bar_visibility(animated);
         if restyle {
             apply_user_interface_style(&self.tabs.tabBar(), spec.dark);
             paint_backdrop(self.tabs.view(), spec.dark);
@@ -785,8 +800,29 @@ impl Chrome {
             .collect();
         self.tabs
             .setViewControllers(Some(&NSArray::from_retained_slice(&navs)));
-        self.tabs.tabBar().setHidden(spec.tabs.is_empty());
+        self.apply_tab_bar_visibility(false);
         cover
+    }
+
+    /// Hide the tab bar when there are no tabs or while a toolbar is shown
+    /// (module doc, Toolbar), then lay the tab controller out so the pages'
+    /// safe areas, and the inset the frust body reports, follow at once.
+    fn apply_tab_bar_visibility(&self, animated: bool) {
+        let hidden = self.spec.tabs.is_empty() || shown_toolbar(&self.spec).is_some();
+        let tabs = &self.tabs;
+        if tabs.respondsToSelector(sel!(setTabBarHidden:animated:)) {
+            if tabs.isTabBarHidden() != hidden {
+                tabs.setTabBarHidden_animated(hidden, animated);
+            }
+        } else {
+            tabs.tabBar().setHidden(hidden);
+        }
+        if let Some(view) = tabs.view() {
+            view.setNeedsLayout();
+            if !animated {
+                view.layoutIfNeeded();
+            }
+        }
     }
 
     /// Select `spec.selected` (an unknown id keeps the current tab) through
