@@ -33,8 +33,13 @@
 //! Kinds 9-12 ([`EVENT_KIND_CHROME_TAB`] .. [`EVENT_KIND_CHROME_BACK`]) are
 //! app chrome's (`crate::chrome`): host-level bars, not `platform_view` slots,
 //! so they are decoded against the published chrome spec rather than a
-//! slot's control. The iOS arm and the fallback bars emit them; their Kotlin
-//! twins keep the table whole until the Android arm lands.
+//! slot's control. All three emitters report them — the iOS arm, the
+//! fallback bars and the Android arm, whose `FrustNativeChrome` funnels its
+//! taps through its own `nativeOnChromeEvent` (`crate::android::chrome`)
+//! with these kinds and `FrustNativeListener`'s `KIND_CHROME_*` twins. Its
+//! `CHROME_MENU_STRIDE` and `CHROME_TAB_RESELECT_SHIFT` twin
+//! [`CHROME_MENU_STRIDE`] and [`pack_chrome_tab`]'s reselect bit
+//! (`tests/kotlin_conformance.rs` pins both).
 //!
 //! `FrustNativeListener` implements every listener interface
 //! a v1 control needs — `View.OnClickListener`,

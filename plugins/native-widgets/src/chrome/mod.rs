@@ -49,8 +49,9 @@
 //!
 //! The module is behind `frust-api` because the spec reuses the api layer's
 //! [`TabItem`]/[`TabIcon`]/[`TabId`]; it compiles on every target. iOS
-//! installs `crate::apple::chrome`'s host; every other target uses the inert
-//! `NullChromeHost` until its arm lands, and tests use `RecordingChromeHost`.
+//! installs `crate::apple::chrome`'s host and Android `crate::android::chrome`'s
+//! (over the [`android_wire`] encoding); every other target uses the inert
+//! `NullChromeHost`, and tests use `RecordingChromeHost`.
 
 /// The frust-drawn bars the scaffold shows from the same spec wherever no arm
 /// owns the chrome (see [`NATIVE_CHROME_ARM`]).
@@ -72,11 +73,11 @@ use crate::events::{
     unpack_chrome_tab, unpack_index,
 };
 
-/// Whether this target has a native chrome arm: iOS today (Android sets it
-/// when its arm lands in a3-02), so every other target's scaffold draws the
-/// [`fallback`] bars. A target with an arm still draws the fallback for a
-/// [`PublishOutcome::Fallback`] (its install was refused).
-pub(crate) const NATIVE_CHROME_ARM: bool = cfg!(target_os = "ios");
+/// Whether this target has a native chrome arm: iOS and Android, so every
+/// other target's scaffold draws the [`fallback`] bars. A target with an arm
+/// still draws the fallback for a [`PublishOutcome::Fallback`] (its install
+/// was refused — on Android, a theme that is not Material-derived).
+pub(crate) const NATIVE_CHROME_ARM: bool = cfg!(any(target_os = "ios", target_os = "android"));
 
 #[cfg(test)]
 thread_local! {
@@ -721,13 +722,15 @@ fn log_install_failure(error: &ChromeError) {
     }
 }
 
-/// The host behind the process-wide slot, per target: the iOS arm, the
-/// recorder under test, and the inert host everywhere else.
+/// The host behind the process-wide slot, per target: the iOS and Android
+/// arms, the recorder under test, and the inert host everywhere else.
 #[cfg(all(target_os = "ios", not(test)))]
 type PlatformChromeHost = crate::apple::IosChromeHost;
+#[cfg(all(target_os = "android", not(test)))]
+type PlatformChromeHost = crate::android::AndroidChromeHost;
 #[cfg(test)]
 type PlatformChromeHost = RecordingChromeHost;
-#[cfg(not(any(test, target_os = "ios")))]
+#[cfg(not(any(test, target_os = "ios", target_os = "android")))]
 type PlatformChromeHost = host::NullChromeHost;
 
 static SLOT: Mutex<ChromeSlot<PlatformChromeHost>> =
@@ -810,6 +813,690 @@ fn hand_over(routed: Option<(ChromeEvent, ChromeSink)>) -> bool {
             true
         }
         None => false,
+    }
+}
+
+// --- the Android arm's wire -------------------------------------------------
+
+/// The Android arm's wire (decision C3): the flat JSON
+/// `FrustNativeChrome.install`/`apply` read and the revision-gated icon table
+/// whose bytes travel through `setIcon` instead. Pure, so it compiles and is
+/// host-tested on every target; `crate::android::chrome` is its one
+/// production caller.
+///
+/// # The contract
+///
+/// `FrustNativeChrome.kt`'s file header is the authority: the keys, the
+/// `changed` array's [`ChromeField`] spellings, the badge encoding (absent or
+/// `null` = none, `""` = dot, anything else shown as-is — Kotlin turns a
+/// numeric string into a count) and the `ICON_SLOT_*` codes.
+/// `tests/kotlin_conformance.rs` pins the copy of that header the tests below
+/// round-trip against, and the slot codes.
+///
+/// # What `apply` sends
+///
+/// Only the changed fields' keys, plus a `changed` array naming them —
+/// except [`ChromeField::Scroll`], which is never JSON (the arm calls
+/// `setScroll` directly), and except that a [`ChromeField::Tabs`] change
+/// also carries [`ChromeField::Selected`]: the wire names the selection by
+/// index, so a reorder that keeps the selected id moves its index.
+///
+/// # Icons
+///
+/// [`IconTable`] is `controls::tab_bar`'s icon side table in miniature: one
+/// entry per `(slot, index)` the arm has handed Kotlin, re-sent only when the
+/// bytes change (compared by content, like the spec), and a revision per
+/// entry that `tab<i>IconRev` carries. Sync it before encoding: the JSON
+/// reads its revisions. An Apple symbol has no Android rendering — a tab or
+/// action carrying one is title-only and a `Leading::Symbol` encodes as
+/// `"none"` (limitation `native-chrome-android-bitmap-icons`).
+#[cfg_attr(not(any(test, target_os = "android")), allow(dead_code))]
+pub(crate) mod android_wire {
+    use std::fmt::Write as _;
+    use std::sync::Arc;
+
+    use super::host::ChromeField;
+    use super::{ChromeSpec, Leading, TopBarSpec};
+    use crate::api::TabIcon;
+    use crate::runtime::escape;
+
+    /// `setIcon` slot: a bottom tab's icon, `index` = tab index.
+    pub(crate) const ICON_SLOT_TAB: i32 = 0;
+    /// `setIcon` slot: a top-bar action's icon, `index` = action index.
+    pub(crate) const ICON_SLOT_ACTION: i32 = 1;
+    /// `setIcon` slot: the leading image (avatar), `index` `0`.
+    pub(crate) const ICON_SLOT_LEADING: i32 = 2;
+
+    /// Every field `install` encodes, in [`ChromeField`] declaration order.
+    pub(crate) const INSTALL_FIELDS: [ChromeField; 9] = [
+        ChromeField::Tabs,
+        ChromeField::Selected,
+        ChromeField::TopBar,
+        ChromeField::Title,
+        ChromeField::Subtitle,
+        ChromeField::Leading,
+        ChromeField::Actions,
+        ChromeField::LargeTitle,
+        ChromeField::Brightness,
+    ];
+
+    /// `field`'s spelling in an apply's `changed` array — its Rust name.
+    pub(crate) fn field_name(field: ChromeField) -> &'static str {
+        match field {
+            ChromeField::Tabs => "Tabs",
+            ChromeField::Selected => "Selected",
+            ChromeField::TopBar => "TopBar",
+            ChromeField::Title => "Title",
+            ChromeField::Subtitle => "Subtitle",
+            ChromeField::Leading => "Leading",
+            ChromeField::Actions => "Actions",
+            ChromeField::LargeTitle => "LargeTitle",
+            ChromeField::Scroll => "Scroll",
+            ChromeField::Brightness => "Brightness",
+        }
+    }
+
+    /// One JSON value of the flat object.
+    #[derive(Clone, Debug, PartialEq)]
+    pub(crate) enum Value {
+        Str(String),
+        /// `null` for `None`.
+        OptStr(Option<String>),
+        Bool(bool),
+        Int(i64),
+    }
+
+    /// The flat object's entries, in encoding order.
+    pub(crate) type Fields = Vec<(String, Value)>;
+
+    /// The `install` payload: every key, no `changed` array.
+    pub(crate) fn install_json(spec: &ChromeSpec, icons: &IconTable) -> String {
+        to_json(&fields(spec, &INSTALL_FIELDS, icons), None)
+    }
+
+    /// The `apply` payload for a diff whose changed fields are `changed`, or
+    /// `None` when none of them travels as JSON (a scroll-only diff).
+    pub(crate) fn apply_json(
+        spec: &ChromeSpec,
+        changed: &[ChromeField],
+        icons: &IconTable,
+    ) -> Option<String> {
+        let wire = wire_fields(changed);
+        if wire.is_empty() {
+            return None;
+        }
+        Some(to_json(&fields(spec, &wire, icons), Some(&wire)))
+    }
+
+    /// The fields an apply names on the wire for `changed`: no
+    /// [`ChromeField::Scroll`], and [`ChromeField::Selected`] beside a
+    /// [`ChromeField::Tabs`] change (module doc), in declaration order.
+    pub(crate) fn wire_fields(changed: &[ChromeField]) -> Vec<ChromeField> {
+        let tabs = changed.contains(&ChromeField::Tabs);
+        INSTALL_FIELDS
+            .into_iter()
+            .filter(|field| changed.contains(field) || (tabs && *field == ChromeField::Selected))
+            .collect()
+    }
+
+    /// The entries `wire` names, read from `spec` (an absent top bar reads as
+    /// an empty one, `hasTop` false).
+    pub(crate) fn fields(spec: &ChromeSpec, wire: &[ChromeField], icons: &IconTable) -> Fields {
+        let empty = TopBarSpec::default();
+        let top = spec.top.as_ref().unwrap_or(&empty);
+        let mut out = Fields::new();
+        let mut put = |key: String, value: Value| out.push((key, value));
+        for field in wire {
+            match field {
+                ChromeField::Tabs => {
+                    put("tabCount".into(), Value::Int(count(spec.tabs.len())));
+                    for (i, tab) in spec.tabs.iter().enumerate() {
+                        put(format!("tab{i}Title"), Value::Str(tab.title().into()));
+                        put(format!("tab{i}Enabled"), Value::Bool(tab.is_enabled()));
+                        put(
+                            format!("tab{i}Badge"),
+                            Value::OptStr(tab.badge_text().map(str::to_owned)),
+                        );
+                        let rev = icons.rev(ICON_SLOT_TAB, i);
+                        put(format!("tab{i}IconRev"), Value::Int(rev_value(rev)));
+                    }
+                }
+                ChromeField::Selected => {
+                    put("selectedIndex".into(), Value::Int(selected_index(spec)));
+                }
+                ChromeField::TopBar => put("hasTop".into(), Value::Bool(spec.top.is_some())),
+                ChromeField::Title => put("title".into(), Value::Str(top.title.clone())),
+                ChromeField::Subtitle => {
+                    put("subtitle".into(), Value::OptStr(top.subtitle.clone()));
+                }
+                ChromeField::Leading => {
+                    put(
+                        "leading".into(),
+                        Value::Str(leading_name(&top.leading).into()),
+                    );
+                }
+                ChromeField::Actions => {
+                    put("actionCount".into(), Value::Int(count(top.actions.len())));
+                    for (a, action) in top.actions.iter().enumerate() {
+                        let menu = action.menu.as_deref().unwrap_or_default();
+                        put(format!("action{a}Title"), Value::Str(action.title.clone()));
+                        put(
+                            format!("action{a}HasIcon"),
+                            Value::Bool(matches!(action.icon, Some(TabIcon::Bytes(_)))),
+                        );
+                        put(format!("action{a}MenuCount"), Value::Int(count(menu.len())));
+                        for (m, item) in menu.iter().enumerate() {
+                            put(format!("menu{a}_{m}Title"), Value::Str(item.title.clone()));
+                            put(
+                                format!("menu{a}_{m}Destructive"),
+                                Value::Bool(item.destructive),
+                            );
+                            put(format!("menu{a}_{m}Enabled"), Value::Bool(item.enabled));
+                        }
+                    }
+                }
+                ChromeField::LargeTitle => {
+                    put("largeTitle".into(), Value::Bool(top.large_title));
+                }
+                ChromeField::Scroll => {}
+                ChromeField::Brightness => put("dark".into(), Value::Bool(spec.dark)),
+            }
+        }
+        out
+    }
+
+    /// `leading`'s wire spelling: an Apple symbol has no Android rendering.
+    pub(crate) fn leading_name(leading: &Leading) -> &'static str {
+        match leading {
+            Leading::None | Leading::Symbol(_) => "none",
+            Leading::Back => "back",
+            Leading::Image(_) => "image",
+        }
+    }
+
+    /// The selected tab's index, `-1` for none (an id no tab carries).
+    fn selected_index(spec: &ChromeSpec) -> i64 {
+        spec.selected
+            .as_ref()
+            .and_then(|id| spec.tabs.iter().position(|tab| tab.id() == id))
+            .map_or(-1, count)
+    }
+
+    fn count(n: usize) -> i64 {
+        i64::try_from(n).unwrap_or(i64::MAX)
+    }
+
+    fn rev_value(rev: u64) -> i64 {
+        i64::try_from(rev).unwrap_or(i64::MAX)
+    }
+
+    /// Serialize `fields` as one flat JSON object, with a `changed` array
+    /// when it is an apply. Keys are built from ASCII and never escaped.
+    pub(crate) fn to_json(fields: &Fields, changed: Option<&[ChromeField]>) -> String {
+        let mut out = String::with_capacity(32 + fields.len() * 24);
+        out.push('{');
+        for (i, (key, value)) in fields.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            let _ = write!(out, "\"{key}\":");
+            match value {
+                Value::Str(text) | Value::OptStr(Some(text)) => {
+                    let _ = write!(out, "\"{}\"", escape(text));
+                }
+                Value::OptStr(None) => out.push_str("null"),
+                Value::Bool(flag) => {
+                    let _ = write!(out, "{flag}");
+                }
+                Value::Int(n) => {
+                    let _ = write!(out, "{n}");
+                }
+            }
+        }
+        if let Some(changed) = changed {
+            if !fields.is_empty() {
+                out.push(',');
+            }
+            out.push_str("\"changed\":[");
+            for (i, field) in changed.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                let _ = write!(out, "\"{}\"", field_name(*field));
+            }
+            out.push(']');
+        }
+        out.push('}');
+        out
+    }
+
+    /// One `setIcon(slot, index, bytes)` call: `None` clears the entry
+    /// (empty bytes on the wire).
+    #[derive(Clone, Debug, PartialEq)]
+    pub(crate) struct IconUpload {
+        pub(crate) slot: i32,
+        pub(crate) index: usize,
+        pub(crate) bytes: Option<Arc<[u8]>>,
+    }
+
+    #[derive(Debug)]
+    struct SentIcon {
+        slot: i32,
+        index: usize,
+        rev: u64,
+        bytes: Arc<[u8]>,
+    }
+
+    /// The icons handed to Kotlin, by `(slot, index)` — module doc's *Icons*.
+    #[derive(Debug)]
+    pub(crate) struct IconTable {
+        sent: Vec<SentIcon>,
+        next_rev: u64,
+    }
+
+    impl Default for IconTable {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl IconTable {
+        /// An empty table (const, for the host in the slot's `static`).
+        pub(crate) const fn new() -> Self {
+            Self {
+                sent: Vec::new(),
+                next_rev: 1,
+            }
+        }
+
+        /// The revision the bytes at `(slot, index)` were sent at; `0` for
+        /// none.
+        pub(crate) fn rev(&self, slot: i32, index: usize) -> u64 {
+            self.sent
+                .iter()
+                .find(|sent| sent.slot == slot && sent.index == index)
+                .map_or(0, |sent| sent.rev)
+        }
+
+        /// Forget every entry — Kotlin's cache is gone (`dispose`) or about
+        /// to be refilled from scratch (`install`).
+        pub(crate) fn clear(&mut self) {
+            self.sent.clear();
+        }
+
+        /// Bring the table to `spec`'s byte icons, answering the calls that
+        /// get Kotlin there: clears for entries `spec` no longer has, then
+        /// new or changed bytes, in slot then index order. Unchanged bytes
+        /// send nothing.
+        pub(crate) fn sync(&mut self, spec: &ChromeSpec) -> Vec<IconUpload> {
+            let wanted = wanted_icons(spec);
+            let mut uploads = Vec::new();
+            self.sent.retain(|sent| {
+                let keep = wanted
+                    .iter()
+                    .any(|(slot, index, _)| *slot == sent.slot && *index == sent.index);
+                if !keep {
+                    uploads.push(IconUpload {
+                        slot: sent.slot,
+                        index: sent.index,
+                        bytes: None,
+                    });
+                }
+                keep
+            });
+            for (slot, index, bytes) in wanted {
+                let rev = self.next_rev;
+                let entry = self
+                    .sent
+                    .iter_mut()
+                    .find(|sent| sent.slot == slot && sent.index == index);
+                match entry {
+                    Some(sent) if *sent.bytes == **bytes => continue,
+                    Some(sent) => {
+                        sent.bytes = Arc::clone(bytes);
+                        sent.rev = rev;
+                    }
+                    None => self.sent.push(SentIcon {
+                        slot,
+                        index,
+                        rev,
+                        bytes: Arc::clone(bytes),
+                    }),
+                }
+                self.next_rev += 1;
+                uploads.push(IconUpload {
+                    slot,
+                    index,
+                    bytes: Some(Arc::clone(bytes)),
+                });
+            }
+            uploads
+        }
+    }
+
+    /// Every byte icon `spec` shows, as `(slot, index, bytes)`: tab icons
+    /// (the unselected one — Kotlin's bottom bar has one icon per item),
+    /// action icons and the leading image.
+    fn wanted_icons(spec: &ChromeSpec) -> Vec<(i32, usize, &Arc<[u8]>)> {
+        let mut wanted = Vec::new();
+        for (i, tab) in spec.tabs.iter().enumerate() {
+            if let TabIcon::Bytes(bytes) = tab.icon() {
+                wanted.push((ICON_SLOT_TAB, i, bytes));
+            }
+        }
+        if let Some(top) = &spec.top {
+            for (a, action) in top.actions.iter().enumerate() {
+                if let Some(TabIcon::Bytes(bytes)) = &action.icon {
+                    wanted.push((ICON_SLOT_ACTION, a, bytes));
+                }
+            }
+            if let Leading::Image(bytes) = &top.leading {
+                wanted.push((ICON_SLOT_LEADING, 0, bytes));
+            }
+        }
+        wanted
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::collections::BTreeSet;
+
+        use super::*;
+        use crate::api::{TabId, TabItem};
+        use crate::chrome::{ActionItem, MenuItem};
+
+        /// `FrustNativeChrome.kt`'s key table, copied verbatim from its file
+        /// header (`tests/kotlin_conformance.rs` fails if the two drift).
+        const KOTLIN_KEY_HEADER: &str = r#"
+//   Tabs:     tabCount, tab<i>Title, tab<i>Enabled, tab<i>Badge (absent/null =
+//             none, "" = dot), tab<i>IconRev (0 = no icon)
+//   Selected: selectedIndex (-1 = none)
+//   TopBar:   hasTop          Title: title          Subtitle: subtitle (absent/null = none)
+//   Leading:  leading = "none" | "back" | "image"   LargeTitle: largeTitle (ignored here)
+//   Actions:  actionCount, action<i>Title, action<i>HasIcon, action<i>MenuCount,
+//             menu<i>_<j>Title, menu<i>_<j>Destructive, menu<i>_<j>Enabled
+//   Brightness: dark
+"#;
+
+        /// Every key template [`KOTLIN_KEY_HEADER`] names.
+        const KEY_TEMPLATES: [&str; 20] = [
+            "tabCount",
+            "tab<i>Title",
+            "tab<i>Enabled",
+            "tab<i>Badge",
+            "tab<i>IconRev",
+            "selectedIndex",
+            "hasTop",
+            "title",
+            "subtitle",
+            "leading",
+            "largeTitle",
+            "actionCount",
+            "action<i>Title",
+            "action<i>HasIcon",
+            "action<i>MenuCount",
+            "menu<i>_<j>Title",
+            "menu<i>_<j>Destructive",
+            "menu<i>_<j>Enabled",
+            "dark",
+            // Not a spec key: an apply's field list.
+            "changed",
+        ];
+
+        fn bytes(content: &[u8]) -> Arc<[u8]> {
+            Arc::from(content.to_vec().into_boxed_slice())
+        }
+
+        /// A spec exercising every key: two tabs (one byte icon, one badge),
+        /// a top bar with an icon action and a two-item menu action.
+        fn full_spec() -> ChromeSpec {
+            ChromeSpec {
+                tabs: vec![
+                    TabItem::new("home", "Home", TabIcon::Bytes(bytes(&[1]))).badge("3"),
+                    TabItem::new("me", "Me", TabIcon::AppleSymbol("person".into())).enabled(false),
+                ],
+                selected: Some(TabId::new("me")),
+                top: Some(TopBarSpec {
+                    title: "Inbox".into(),
+                    subtitle: Some("2 new".into()),
+                    leading: Leading::Image(bytes(&[7])),
+                    actions: vec![
+                        ActionItem::new("add", "Add").icon(TabIcon::Bytes(bytes(&[2]))),
+                        ActionItem::new("more", "More").menu(vec![
+                            MenuItem::new("share", "Share"),
+                            MenuItem::new("delete", "Delete")
+                                .destructive(true)
+                                .enabled(false),
+                        ]),
+                    ],
+                    large_title: true,
+                }),
+                scroll: None,
+                dark: true,
+            }
+        }
+
+        /// `key` with its first digit run spelled `<i>` and its second `<j>`.
+        fn template(key: &str) -> String {
+            let mut out = String::new();
+            let mut runs = 0;
+            let mut in_run = false;
+            for c in key.chars() {
+                if c.is_ascii_digit() {
+                    if !in_run {
+                        out.push_str(if runs == 0 { "<i>" } else { "<j>" });
+                        runs += 1;
+                        in_run = true;
+                    }
+                } else {
+                    in_run = false;
+                    out.push(c);
+                }
+            }
+            out
+        }
+
+        /// Whether `token` appears in `text` as a whole word.
+        fn names(text: &str, token: &str) -> bool {
+            text.match_indices(token).any(|(at, _)| {
+                let word = |c: char| c.is_ascii_alphanumeric() || c == '<' || c == '>';
+                let before = text[..at].chars().next_back().is_none_or(|c| !word(c));
+                let after = text[at + token.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| !word(c) && c != '_');
+                before && after
+            })
+        }
+
+        /// The JSON keys of a flat object as the test parser sees them:
+        /// every string literal followed by `:`, honouring escapes.
+        fn json_keys(json: &str) -> Vec<String> {
+            let mut keys = Vec::new();
+            let mut chars = json.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c != '"' {
+                    continue;
+                }
+                let mut text = String::new();
+                while let Some(c) = chars.next() {
+                    match c {
+                        '\\' => {
+                            chars.next();
+                        }
+                        '"' => break,
+                        c => text.push(c),
+                    }
+                }
+                if chars.peek() == Some(&':') {
+                    keys.push(text);
+                }
+            }
+            keys
+        }
+
+        #[test]
+        fn install_round_trips_the_kotlin_key_table() {
+            for template in KEY_TEMPLATES {
+                assert!(
+                    template == "changed" || names(KOTLIN_KEY_HEADER, template),
+                    "{template} is not in the Kotlin header copy"
+                );
+            }
+            let mut icons = IconTable::new();
+            icons.sync(&full_spec());
+            let json = install_json(&full_spec(), &icons);
+            let encoded: BTreeSet<String> = json_keys(&json).iter().map(|k| template(k)).collect();
+            let expected: BTreeSet<String> = KEY_TEMPLATES
+                .iter()
+                .filter(|key| **key != "changed")
+                .map(|key| (*key).to_string())
+                .collect();
+            assert_eq!(encoded, expected, "{json}");
+        }
+
+        #[test]
+        fn an_apply_carries_its_fields_and_the_changed_spellings() {
+            let mut icons = IconTable::new();
+            icons.sync(&full_spec());
+            let json = apply_json(
+                &full_spec(),
+                &[ChromeField::Title, ChromeField::Brightness],
+                &icons,
+            )
+            .expect("JSON fields");
+            assert_eq!(
+                json,
+                r#"{"title":"Inbox","dark":true,"changed":["Title","Brightness"]}"#
+            );
+            for field in INSTALL_FIELDS {
+                assert_eq!(field_name(field), format!("{field:?}"));
+            }
+            assert_eq!(field_name(ChromeField::Scroll), "Scroll");
+            let keys = json_keys(&apply_json(&full_spec(), &INSTALL_FIELDS, &icons).unwrap());
+            assert!(
+                keys.iter()
+                    .all(|key| names(KOTLIN_KEY_HEADER, &template(key)) || key == "changed")
+            );
+        }
+
+        #[test]
+        fn scroll_never_travels_as_json_and_tabs_carry_the_selection() {
+            let icons = IconTable::new();
+            assert_eq!(
+                apply_json(&full_spec(), &[ChromeField::Scroll], &icons),
+                None
+            );
+            assert_eq!(
+                wire_fields(&[ChromeField::Tabs, ChromeField::Scroll]),
+                [ChromeField::Tabs, ChromeField::Selected]
+            );
+            let json = apply_json(&full_spec(), &[ChromeField::Tabs], &icons).unwrap();
+            assert!(json.contains(r#""selectedIndex":1"#), "{json}");
+            assert!(
+                json.ends_with(r#""changed":["Tabs","Selected"]}"#),
+                "{json}"
+            );
+        }
+
+        #[test]
+        fn values_escape_and_pack_by_index() {
+            let mut spec = full_spec();
+            spec.top.as_mut().unwrap().title = "say \"hi\"\\\n\u{1}".into();
+            spec.top.as_mut().unwrap().subtitle = None;
+            spec.tabs[1] = spec.tabs[1].clone().badge("");
+            let mut icons = IconTable::new();
+            icons.sync(&spec);
+            let json = install_json(&spec, &icons);
+            for needle in [
+                r#""title":"say \"hi\"\\\n\u0001""#,
+                r#""subtitle":null"#,
+                r#""tabCount":2"#,
+                r#""tab0Title":"Home""#,
+                r#""tab0Badge":"3""#,
+                r#""tab0IconRev":1"#,
+                r#""tab1Enabled":false"#,
+                r#""tab1Badge":"""#,
+                r#""tab1IconRev":0"#,
+                r#""selectedIndex":1"#,
+                r#""hasTop":true"#,
+                r#""leading":"image""#,
+                r#""actionCount":2"#,
+                r#""action0HasIcon":true"#,
+                r#""action0MenuCount":0"#,
+                r#""action1HasIcon":false"#,
+                r#""action1MenuCount":2"#,
+                r#""menu1_0Title":"Share""#,
+                r#""menu1_1Destructive":true"#,
+                r#""menu1_1Enabled":false"#,
+                r#""largeTitle":true"#,
+                r#""dark":true"#,
+            ] {
+                assert!(json.contains(needle), "{needle} missing from {json}");
+            }
+            assert!(!json.contains("changed"));
+            assert!(json.starts_with('{') && json.ends_with('}'));
+        }
+
+        #[test]
+        fn absent_top_and_unknown_selection_encode_empty() {
+            let spec = ChromeSpec {
+                selected: Some(TabId::new("gone")),
+                ..ChromeSpec::default()
+            };
+            assert_eq!(
+                install_json(&spec, &IconTable::new()),
+                r#"{"tabCount":0,"selectedIndex":-1,"hasTop":false,"title":"","subtitle":null,"leading":"none","actionCount":0,"largeTitle":false,"dark":false}"#
+            );
+            assert_eq!(leading_name(&Leading::Symbol("person".into())), "none");
+            assert_eq!(leading_name(&Leading::Back), "back");
+        }
+
+        #[test]
+        fn icons_are_sent_once_per_content_and_cleared_when_gone() {
+            let mut icons = IconTable::new();
+            let first = icons.sync(&full_spec());
+            assert_eq!(
+                first
+                    .iter()
+                    .map(|up| (up.slot, up.index, up.bytes.as_deref().map(<[u8]>::to_vec)))
+                    .collect::<Vec<_>>(),
+                [
+                    (ICON_SLOT_TAB, 0, Some(vec![1])),
+                    (ICON_SLOT_ACTION, 0, Some(vec![2])),
+                    (ICON_SLOT_LEADING, 0, Some(vec![7])),
+                ]
+            );
+            // Same content in fresh Arcs: nothing to send, revisions kept.
+            assert!(icons.sync(&full_spec()).is_empty());
+            assert_eq!(icons.rev(ICON_SLOT_TAB, 0), 1);
+            // Changed bytes re-send at a fresh revision; a gone icon clears.
+            let mut next = full_spec();
+            next.tabs[0] = TabItem::new("home", "Home", TabIcon::Bytes(bytes(&[9])));
+            next.top.as_mut().unwrap().leading = Leading::Back;
+            let uploads = icons.sync(&next);
+            assert_eq!(
+                uploads,
+                [
+                    IconUpload {
+                        slot: ICON_SLOT_LEADING,
+                        index: 0,
+                        bytes: None
+                    },
+                    IconUpload {
+                        slot: ICON_SLOT_TAB,
+                        index: 0,
+                        bytes: Some(bytes(&[9]))
+                    },
+                ]
+            );
+            assert_eq!(icons.rev(ICON_SLOT_TAB, 0), 4);
+            assert_eq!(icons.rev(ICON_SLOT_LEADING, 0), 0);
+            // An Apple symbol is title-only: no bytes, no revision.
+            assert_eq!(icons.rev(ICON_SLOT_TAB, 1), 0);
+            icons.clear();
+            assert_eq!(icons.sync(&next).len(), 2, "a cleared table re-sends all");
+        }
     }
 }
 

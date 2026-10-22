@@ -1,10 +1,12 @@
 //! The `ChromeHost` seam a platform arm implements, the field-level
 //! [`ChromeDiff`] it is handed, `NullChromeHost` — the production stand-in
-//! on every target without an arm — and the test-only `RecordingChromeHost`,
+//! on every target without an arm (neither iOS nor Android) — and the
+//! test-only `RecordingChromeHost`,
 //! which records calls the way the runtime's host `NativeCtx` does.
 
 #[cfg(test)]
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{ChromeGeneration, ChromeSpec, TopBarSpec};
 
@@ -14,7 +16,7 @@ pub(crate) enum ChromeError {
     /// The platform arm declined to install (an Android theme that is not
     /// Material3-derived, an inflate failure) — the app falls back to
     /// frust-drawn chrome. Only an arm constructs it.
-    #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "ios", target_os = "android")), allow(dead_code))]
     #[error("native chrome refused: {0}")]
     Refused(String),
     /// No host surface exists yet (no resumed `Activity`, no key window).
@@ -91,7 +93,10 @@ impl<'a> ChromeDiff<'a> {
     }
 
     /// Whether `field` changed — an arm's question.
-    #[cfg_attr(not(any(test, target_os = "ios")), allow(dead_code))]
+    #[cfg_attr(
+        not(any(test, target_os = "ios", target_os = "android")),
+        allow(dead_code)
+    )]
     pub(crate) fn contains(&self, field: ChromeField) -> bool {
         self.changed.contains(&field)
     }
@@ -139,13 +144,66 @@ pub(crate) trait ChromeHost {
     fn abandon(&mut self, _generation: ChromeGeneration) {}
 }
 
+/// The failure channel's cell for an arm whose failures arrive from a
+/// platform callback (Android's `nativeOnChromeLost`): the failed generation
+/// shifted past a small kind code, `0` for none. Written from the callback
+/// and taken under the slot lock by [`ChromeHost::take_failure`], both
+/// lock-free; a failure recorded for an older generation never replaces a
+/// newer one's. The iOS arm's `FAILURE` cell packs the same way.
+#[cfg_attr(not(any(test, target_os = "android")), allow(dead_code))]
+#[derive(Debug)]
+pub(crate) struct FailureCell(AtomicU64);
+
+#[cfg_attr(not(any(test, target_os = "android")), allow(dead_code))]
+impl FailureCell {
+    /// The low bits a kind occupies; kinds are `1..=3`.
+    const KIND_BITS: u32 = 2;
+
+    /// An empty cell (const, for a `static`).
+    pub(crate) const fn new() -> Self {
+        Self(AtomicU64::new(0))
+    }
+
+    /// Record `kind` (`1..=3`) for `generation`, unless a newer
+    /// generation's failure is already waiting. Generations stay far below
+    /// `2^62`.
+    pub(crate) fn record(&self, generation: u64, kind: u8) {
+        debug_assert!((1..=3).contains(&kind), "failure kind {kind} out of range");
+        let packed = (generation << Self::KIND_BITS) | u64::from(kind & 3);
+        let _ = self
+            .0
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |held| {
+                (held >> Self::KIND_BITS <= generation).then_some(packed)
+            });
+    }
+
+    /// The kind recorded for `generation`, taken once. An older
+    /// generation's failure is spent (cleared, `None`); a newer one's stays
+    /// for its own generation.
+    pub(crate) fn take(&self, generation: u64) -> Option<u8> {
+        let held = self.0.load(Ordering::Acquire);
+        let kind = (held & ((1 << Self::KIND_BITS) - 1)) as u8;
+        if kind == 0 {
+            return None;
+        }
+        let failed = held >> Self::KIND_BITS;
+        if failed > generation {
+            return None;
+        }
+        self.0
+            .compare_exchange(held, 0, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+        (failed == generation).then_some(kind)
+    }
+}
+
 /// The production host on every target without a chrome arm: accepts every
 /// install and does nothing, so the scaffold draws the fallback bars.
-#[cfg(not(any(test, target_os = "ios")))]
+#[cfg(not(any(test, target_os = "ios", target_os = "android")))]
 #[derive(Debug, Default)]
 pub(crate) struct NullChromeHost;
 
-#[cfg(not(any(test, target_os = "ios")))]
+#[cfg(not(any(test, target_os = "ios", target_os = "android")))]
 impl NullChromeHost {
     /// The host (const, for the process-wide slot's static).
     pub(crate) const fn new() -> Self {
@@ -153,7 +211,7 @@ impl NullChromeHost {
     }
 }
 
-#[cfg(not(any(test, target_os = "ios")))]
+#[cfg(not(any(test, target_os = "ios", target_os = "android")))]
 impl ChromeHost for NullChromeHost {
     fn install(&mut self, _: ChromeGeneration, _: &ChromeSpec) -> Result<(), ChromeError> {
         Ok(())
@@ -280,5 +338,31 @@ impl ChromeHost for RecordingChromeHost {
             }
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FailureCell;
+
+    #[test]
+    fn a_failure_cell_answers_only_its_generation_once() {
+        let cell = FailureCell::new();
+        assert_eq!(cell.take(1), None);
+        cell.record(4, 1);
+        assert_eq!(cell.take(3), None, "a newer generation's failure waits");
+        assert_eq!(cell.take(4), Some(1));
+        assert_eq!(cell.take(4), None, "taken once");
+    }
+
+    #[test]
+    fn an_older_failure_never_clobbers_a_newer_one_and_is_spent() {
+        let cell = FailureCell::new();
+        cell.record(7, 1);
+        cell.record(6, 2);
+        assert_eq!(cell.take(7), Some(1));
+        cell.record(2, 1);
+        assert_eq!(cell.take(5), None, "an older generation's failure is spent");
+        assert_eq!(cell.take(2), None, "and gone");
     }
 }
