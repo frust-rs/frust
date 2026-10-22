@@ -1,8 +1,8 @@
 //! **Stress** — the gate harness: a measurement rig, not a design pattern.
 //!
 //! - **Live slot readout** — `live_slot_count` (a diagnostics accessor with
-//!   no compatibility promise), read against every page's documented at-rest
-//!   count, tabulated here from [`AT_REST_SLOTS`].
+//!   no compatibility promise), read against the tab's documented at-rest
+//!   count; the Lab tab tabulates every tab's count above this section.
 //! - **Mount/unmount cycler** — its OWN six-control group (separate from the
 //!   Controls page), mounted and unmounted every [`CYCLE_STEP_MS`]: each
 //!   mount allocates six fresh native slots, each unmount tears them down,
@@ -15,7 +15,7 @@
 //! The cycler's state is a pure function of wall-clock time since the run
 //! started ([`cycle_state`]); while a run has cycles left, [`GateFrameTicker`]
 //! requests a frame every paint so the page keeps re-evaluating it. No
-//! nested scroll view: the shell's own scroll view already covers the page.
+//! nested scroll view: the Lab tab's own scroll view already covers it.
 //!
 //! Zero native slots at rest; +6 while the cycler's group is mounted; +50
 //! with the stress toggle on.
@@ -34,13 +34,15 @@ use frust_native_widgets::{
 };
 
 use super::common::{
-    AT_REST_SLOTS, S, block, caption, chip, demo_image_bytes, gap, gap_h, label, local_sig,
-    page_column, page_header, readout, row,
+    S, block, caption, chip, demo_image_bytes, gap, gap_h, label, local_sig, page_column,
+    page_header, readout, row,
 };
-use crate::SECTION_LABELS;
 
-/// This page's index in [`SECTION_LABELS`].
+/// This page's index in [`crate::SECTION_LABELS`].
 const SECTION: usize = 7;
+
+/// The deep-link slug of this section: the anchor the Lab tab scrolls to.
+pub const ANCHOR: &str = "Stress";
 
 /// How many single-control slots the stress toggle mounts.
 pub const STRESS_SLOT_COUNT: u32 = 50;
@@ -192,27 +194,9 @@ fn stress_grid() -> impl View<S> {
     FlexView::new(Axis::Vertical, rows)
 }
 
-/// The at-rest table: every page's documented count for this build.
-fn at_rest_table() -> FlexChild<S> {
-    let mut rows = vec![
-        inflexible(label(
-            "Documented native slots at rest, per page (this build)",
-        )),
-        gap(4.0),
-        inflexible(caption(
-            "Only the showing page is mounted, so after a page settles the live count above \
-             equals its entry here (Re-read after switching pages).",
-        )),
-        gap(6.0),
-    ];
-    for (label_text, count) in SECTION_LABELS.iter().zip(AT_REST_SLOTS) {
-        rows.push(inflexible(readout(format!("{label_text}: {count}"))));
-    }
-    block(rows)
-}
-
-/// See the page-fn contract in [`crate::pages`] and the [module docs](self).
-pub fn page(_state: &S) -> AnyView<S> {
+/// The section body, without a page header: the rows the Lab tab stacks under
+/// its own section header. See the [module docs](self).
+pub fn section(_state: &S) -> Vec<FlexChild<S>> {
     // Tracked, so a chip tap (a signal write) wakes the page even at rest.
     let cycle_target = cycle_target_sig().get();
     let stress_visible = stress_visible_sig().get();
@@ -283,19 +267,22 @@ pub fn page(_state: &S) -> AnyView<S> {
         )),
     ]);
 
-    let mut children = vec![
-        page_header(SECTION),
-        intro,
-        at_rest_table(),
-        cycler,
-        stress_toggle,
-    ];
+    let mut children = vec![intro, cycler, stress_toggle];
     if stress_visible {
         children.push(block(vec![inflexible(stress_grid())]));
     }
     if cycle_running {
         children.push(inflexible(GateFrameTicker));
     }
+    children
+}
+
+/// The whole section as a standalone page: its [`page_header`] then
+/// [`section`]. Kept for [`super::current`]; the Lab tab stacks [`section`]
+/// under its own section header instead.
+pub fn page(state: &S) -> AnyView<S> {
+    let mut children = vec![page_header(SECTION)];
+    children.extend(section(state));
     page_column(children)
 }
 

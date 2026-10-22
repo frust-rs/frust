@@ -9,9 +9,10 @@
 //! *this* platform's behavior for contrast: iOS and Android crop `Cover`,
 //! macOS letterboxes it (`native-widgets-macos-image-cover-letterboxes`).
 //!
-//! Two native slots at rest: the image pair.
+//! Two native slots at rest: the image pair. This is the Lab tab's macOS
+//! section; its [`ANCHOR`] is the `section/macOS` deep-link slug.
 
-use frust::{AnyView, inflexible};
+use frust::{AnyView, FlexChild, inflexible};
 use frust_native_widgets::{NativeImageFit, native_image};
 
 use super::common::{
@@ -70,8 +71,12 @@ const APPKIT_GAPS: [&str; 7] = [
      page's buttons report it.",
 ];
 
-/// See the page-fn contract in [`crate::pages`] and the [module docs](self).
-pub fn page(_state: &S) -> AnyView<S> {
+/// The deep-link slug of this section: the anchor the Lab tab scrolls to.
+pub const ANCHOR: &str = "macOS";
+
+/// The section body, without a page header: the rows the Lab tab stacks under
+/// its own section header. See the [module docs](self).
+pub fn section(_state: &S) -> Vec<FlexChild<S>> {
     let status = if ON_MACOS {
         "You are on the AppKit arm: every other page's left column is these AppKit views."
     } else {
@@ -130,10 +135,14 @@ pub fn page(_state: &S) -> AnyView<S> {
         inflexible(caption("Left: Cover. Right: Contain.")),
     ]);
 
-    page_column(vec![
-        page_header(SECTION),
-        block(map_rows),
-        block(gap_rows),
-        image_pair,
-    ])
+    vec![block(map_rows), block(gap_rows), image_pair]
+}
+
+/// The whole section as a standalone page: its [`page_header`] then
+/// [`section`]. Kept for [`super::current`]; the Lab tab stacks [`section`]
+/// under its own section header instead.
+pub fn page(state: &S) -> AnyView<S> {
+    let mut children = vec![page_header(SECTION)];
+    children.extend(section(state));
+    page_column(children)
 }
