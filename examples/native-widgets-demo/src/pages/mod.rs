@@ -1,49 +1,36 @@
-//! The section pages, one module per [`SECTION_LABELS`](crate::SECTION_LABELS)
-//! entry, plus [`common`] (the chrome and helpers they share):
+//! The tab bodies, one module per [`Tab`](crate::Tab), the pushed detail page,
+//! the per-family section modules they are built from, and [`common`] (the
+//! helpers they share):
 //!
-//! | Label | Module | Demonstrates |
+//! | Tab | Module | Shows |
 //! |---|---|---|
-//! | Controls | [`controls`] | the six base builders beside frust-drawn peers, write-back, theme toggle |
-//! | macOS | [`macos`] | the AppKit arm: class map, documented AppKit gaps, a live `Cover`/`Contain` image pair |
-//! | New | [`new_controls`] | spinner, segmented, stepper, date picker |
-//! | Alerts | [`alerts`] | native alerts + an anchored action sheet, Busy, programmatic dismiss |
-//! | TabBar | [`tab_bar`] | a bare native tab bar driving a page-local index |
-//! | Sheet | [`sheet`] | the native page sheet: detents, grabber, non-dismissible, programmatic control |
-//! | Composite | [`composite`] | the plugin's `DemoCard` composite and its events, behind a toggle |
-//! | Stress | [`stress`] | the live-slot readout, mount/unmount cycler and 50-slot stress toggle |
-//! | Sandwich | [`sandwich`] | frust paint under and over native views (overlay surfaces); outside [`SECTION_LABELS`] — see the crate docs' *The Sandwich page* |
+//! | Home | [`home`] | work rows pushing [`detail`] pages |
+//! | Controls | [`controls_tab`] | [`controls`], [`new_controls`], [`composite`] |
+//! | Dialogs | [`dialogs`] | [`alerts`], [`sheet`] and the chrome's menus |
+//! | Lab | [`lab`] | [`macos`], [`tab_bar`], [`stress`], [`sandwich`] |
 //!
-//! Each page states its documented at-rest native-slot count in its header
-//! ([`common::AT_REST_SLOTS`]).
+//! # Page-fn contract
 //!
-//! # Page-fn contract (fixed across every section)
-//!
-//! Each section module exposes exactly:
-//!
-//! ```ignore
-//! pub fn page(state: &NativeWidgetsDemoState) -> AnyView<NativeWidgetsDemoState>;
-//! ```
-//!
-//! - **Argument**: the shared reactive handle the shell owns
-//!   ([`NativeWidgetsDemoState`]). `state.brightness` is the one theme
-//!   signal; `state.toasts` is the FIFO toast queue (append **inside an
-//!   event handler**, never during `build`); `state.nav` is the shared
-//!   navigator for pushed overlays.
-//! - **Return**: a type-erased [`AnyView`]. The shell wraps it in a
-//!   [`scroll_view`](frust::scroll_view), so a page returns its content column
-//!   directly (no outer scroll of its own).
-//! - **Placement rule**: a native control and its frust-drawn peer sit side by
-//!   side under the same theme and the same signal, so a device gate can
-//!   compare them in one frame.
+//! A tab body is `pub fn page(state: &NativeWidgetsDemoState) ->
+//! AnyView<NativeWidgetsDemoState>`, the root page of that tab's navigator.
+//! It owns its scroll: a [`scroll_view`](frust::scroll_view) on
+//! [`state.scroll(tab)`](crate::NativeWidgetsDemoState::scroll), with the safe
+//! area INSIDE the scroller so content scrolls under floating bars. It never
+//! sets chrome: the shell derives the bar from the tab's route observer, and a
+//! pushed page carries its bar title as a [`DetailRoute`](crate::DetailRoute).
 //!
 //! **Reactivity rule** (see `docs/CODE_STANDARDS.md`): a page's `build` may
-//! only *read* signals; every write happens in an event handler — a frust
-//! `on_*` callback or a native control's listener.
+//! only *read* signals; every write happens in an event handler.
 
 pub mod alerts;
 pub mod common;
 pub mod composite;
 pub mod controls;
+pub mod controls_tab;
+pub mod detail;
+pub mod dialogs;
+pub mod home;
+pub mod lab;
 pub mod macos;
 pub mod new_controls;
 pub mod sandwich;
@@ -53,12 +40,20 @@ pub mod tab_bar;
 
 use frust::AnyView;
 
-use crate::{NativeWidgetsDemoState, SECTION_LABELS};
+use crate::{NativeWidgetsDemoState, SECTION_LABELS, Tab};
 
-pub use common::{AT_REST_SLOTS, at_rest_slots};
+pub use common::{AT_REST_SLOTS, SECTION_AT_REST_SLOTS, at_rest_slots};
+
+/// One-line summary per tab, by [`Tab::index`].
+pub const TAB_SUMMARIES: [&str; Tab::COUNT] = [
+    "Native chrome around a frust-drawn home: rows push detail pages.",
+    "Every native control beside its frust-drawn peer, one signal each.",
+    "Native alerts, sheets and the chrome's own pull-down menus.",
+    "Slot accounting, the stress harness, sandwich paint and the macOS reference.",
+];
 
 /// One-line summary per section, index-aligned with
-/// [`SECTION_LABELS`](crate::SECTION_LABELS) — what each page catalogs.
+/// [`SECTION_LABELS`](crate::SECTION_LABELS).
 pub const SECTION_SUMMARIES: [&str; SECTION_LABELS.len()] = [
     "The six base controls - button, label, switch, slider, progress, image - \
      native beside frust-drawn.",
@@ -71,9 +66,9 @@ pub const SECTION_SUMMARIES: [&str; SECTION_LABELS.len()] = [
     "Live-slot readout, mount/unmount cycler and a 50-slot stress toggle.",
 ];
 
-/// Dispatch to the page for `section`, falling back to the first section for
-/// any out-of-range index (defensive — the navigation only ever yields a
-/// valid index).
+/// The page of one section on its own, falling back to the first section for
+/// an out-of-range index — the per-section view the headless gate tests
+/// mount, and what the tab bodies stack.
 pub fn current(section: usize, state: &NativeWidgetsDemoState) -> AnyView<NativeWidgetsDemoState> {
     match section {
         1 => macos::page(state),

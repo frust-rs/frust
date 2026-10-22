@@ -1,13 +1,14 @@
-//! Chrome and helpers every section page shares: the text roles (accent
+//! Helpers every tab body and section shares: the text roles (accent
 //! heading, muted caption), spacing, the padded showcase [`block`], the
 //! side-by-side [`pair_row`] (REAL control left, frust-drawn right, one cell
 //! size), the page-local signal macro, the embedded demo image, the
-//! documented at-rest slot count per page ([`AT_REST_SLOTS`]) with the
-//! [`page_header`] that states it, and [`AnchorProbe`] — the window-rect
-//! helper an action sheet anchors on.
+//! documented at-rest slot counts per tab and per section ([`AT_REST_SLOTS`],
+//! [`SECTION_AT_REST_SLOTS`]) with the [`page_header`] that states them, the
+//! scrolling [`tab_body`], and [`AnchorProbe`] — the window-rect helper an
+//! action sheet anchors on.
 //!
 //! Every color resolves from the live [`Theme`] (Glyph baseline fallback), so
-//! each page follows the app-bar brightness toggle.
+//! each page follows the brightness toggle.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -21,11 +22,12 @@ use frust::authoring::{
 use frust::{
     Align, Alignment, AnyView, Axis, ButtonStyle, Color, CrossAxisAlignment, EdgeInsets, Either,
     FlexChild, FlexView, Get, GetUntracked, ImageSource, Padding, Set, SizedBox, Theme, any,
-    button, inflexible, text, use_context,
+    button, inflexible, safe_area, scroll_view, text, use_context,
 };
 use frust_native_widgets::{AnchorRect, live_slot_count};
 
-use crate::{NativeWidgetsDemoState, SECTION_LABELS};
+use super::sandwich::SANDWICH_AT_REST_SLOTS;
+use crate::{NativeWidgetsDemoState, SECTION_LABELS, Tab};
 
 /// Shorthand for the one app state every page is generic over.
 pub type S = NativeWidgetsDemoState;
@@ -199,10 +201,21 @@ impl NativeClasses {
 // At-rest slot counts + the page header
 // ---------------------------------------------------------------------------
 
-/// Native `platform_view` slots `native_segmented` + `native_stepper` add:
-/// two on iOS/macOS, none elsewhere (a frust-drawn refusal banner instead).
-const SEGMENTED_STEPPER_SLOTS: usize = if cfg!(any(target_os = "ios", target_os = "macos")) {
-    2
+/// The one slot `native_segmented` adds where it has a native arm
+/// (iOS/macOS/Android); a refusal banner elsewhere.
+const SEGMENTED_SLOTS: usize = if cfg!(any(
+    target_os = "ios",
+    target_os = "macos",
+    target_os = "android"
+)) {
+    1
+} else {
+    0
+};
+
+/// The one slot `native_stepper` adds on iOS/macOS; a banner elsewhere.
+const STEPPER_SLOTS: usize = if cfg!(any(target_os = "ios", target_os = "macos")) {
+    1
 } else {
     0
 };
@@ -210,52 +223,107 @@ const SEGMENTED_STEPPER_SLOTS: usize = if cfg!(any(target_os = "ios", target_os 
 /// The one slot `native_tab_bar` adds on iOS/iPadOS; a banner elsewhere.
 const TAB_BAR_SLOTS: usize = if cfg!(target_os = "ios") { 1 } else { 0 };
 
-/// The documented number of native `platform_view` slots each page publishes
-/// **at rest** (every toggle at its default), index-aligned with
-/// [`SECTION_LABELS`] and resolved for this build's target:
-///
-/// | Page | Slots at rest | Grows to |
-/// |---|---|---|
-/// | Controls | 6 — the six pairs' native column | — |
-/// | macOS | 2 — the `Cover`/`Contain` image pair | — |
-/// | New | 4 on iOS/macOS, 2 elsewhere (segmented + stepper are banners) | — |
-/// | Alerts | 0 — a presentation is never a slot | — |
-/// | TabBar | 1 on iOS/iPadOS, 0 elsewhere (a banner) | — |
-/// | Sheet | 0 | — |
-/// | Composite | 0 — the card is behind a default-off toggle | 1 (ONE slot for the whole card) |
-/// | Stress | 0 | +6 while the cycler's group is mounted, +50 with the stress toggle on |
-///
-/// This is the gate constant each page's `Live native slots` readout is read
-/// against. Adding an always-mounted slot to a page changes its entry here —
-/// put an extra demo behind a toggle instead. A Mode B surface whose
-/// translucency the platform refused renders every builder as a frust-drawn
-/// placeholder, which publishes no slot.
-pub const AT_REST_SLOTS: [usize; SECTION_LABELS.len()] =
-    [6, 2, 2 + SEGMENTED_STEPPER_SLOTS, 0, TAB_BAR_SLOTS, 0, 0, 0];
+/// The documented native `platform_view` slots each section publishes at
+/// rest (every toggle at its default), by [`SECTION_LABELS`] index, for this
+/// target. A presentation is never a slot (Alerts, Sheet: 0); New counts the
+/// spinner and date picker plus segmented and stepper where native; the
+/// Composite card (1 slot) and the Stress cycler (+6) and grid (+50) sit
+/// behind default-off toggles. A Mode B surface whose translucency the
+/// platform refused renders placeholders, which publish no slot.
+pub const SECTION_AT_REST_SLOTS: [usize; SECTION_LABELS.len()] = [
+    6,
+    2,
+    2 + SEGMENTED_SLOTS + STEPPER_SLOTS,
+    0,
+    TAB_BAR_SLOTS,
+    0,
+    0,
+    0,
+];
 
-/// [`AT_REST_SLOTS`] for `section`, `0` out of range.
-pub fn at_rest_slots(section: usize) -> usize {
-    AT_REST_SLOTS.get(section).copied().unwrap_or(0)
+/// The documented native slots each tab publishes at rest with its whole
+/// body laid out visible (a clipped body publishes fewer), by [`Tab::index`]:
+/// the sum of its sections' [`SECTION_AT_REST_SLOTS`] (plus
+/// [`SANDWICH_AT_REST_SLOTS`] on Lab). The chrome is never a slot.
+///
+/// **Hidden tabs.** The tab stack lays out every tab but paints only the
+/// selected one, and a slot is published only while painted: from the first
+/// frame after a switch the published set is the new tab's alone (measured
+/// headless on macOS over consecutive frames: Controls 10, Lab 4, Home 0).
+/// The host then disposes the unpublished slots, at its own pace — so the
+/// live count may lag a switch — and re-creates them when the tab returns.
+pub const AT_REST_SLOTS: [usize; Tab::COUNT] = [
+    0,
+    SECTION_AT_REST_SLOTS[0] + SECTION_AT_REST_SLOTS[2] + SECTION_AT_REST_SLOTS[6],
+    SECTION_AT_REST_SLOTS[3] + SECTION_AT_REST_SLOTS[5],
+    SECTION_AT_REST_SLOTS[1]
+        + SECTION_AT_REST_SLOTS[4]
+        + SECTION_AT_REST_SLOTS[7]
+        + SANDWICH_AT_REST_SLOTS,
+];
+
+/// What a header, readout or slot count is for: a whole tab, or one section
+/// by its index into [`SECTION_LABELS`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageKey {
+    /// A tab body.
+    Tab(Tab),
+    /// One section page.
+    Section(usize),
 }
 
-/// The expected value [`live_readout`] displays for `section`: [`at_rest_slots`]
-/// on a target with a native host (Android/iOS/macOS), or `0` everywhere
-/// else. A Linux/Windows desktop preview has no [`frust_native_widgets`]
-/// runtime at all — [`live_slot_count`] always reads `0` there (its own doc:
-/// "0 ... on a platform with no live runtime at all") — so comparing it
-/// against a nonzero [`AT_REST_SLOTS`] entry (e.g. Controls' 6) would show a
-/// count that target can never reach. [`AT_REST_SLOTS`]/[`at_rest_slots`]
-/// stay exactly as documented — the structural count `tests/smoke.rs`'s
-/// `every_page_publishes_its_documented_at_rest_slot_count` asserts, which is
-/// unaffected by whether a native runtime exists; only this header's
-/// displayed comparison changes.
-fn expected_live_slots(section: usize) -> usize {
+impl From<Tab> for PageKey {
+    fn from(tab: Tab) -> Self {
+        PageKey::Tab(tab)
+    }
+}
+
+impl From<usize> for PageKey {
+    fn from(section: usize) -> Self {
+        PageKey::Section(section)
+    }
+}
+
+impl PageKey {
+    /// The heading a [`page_header`] shows.
+    fn title(self) -> &'static str {
+        match self {
+            PageKey::Tab(tab) => tab.title(),
+            PageKey::Section(section) => SECTION_LABELS.get(section).copied().unwrap_or("?"),
+        }
+    }
+
+    /// The one-line summary a [`page_header`] shows.
+    fn summary(self) -> &'static str {
+        match self {
+            PageKey::Tab(tab) => super::TAB_SUMMARIES[tab.index()],
+            PageKey::Section(section) => {
+                super::SECTION_SUMMARIES.get(section).copied().unwrap_or("")
+            }
+        }
+    }
+}
+
+/// The documented at-rest count for a tab ([`AT_REST_SLOTS`]) or a section
+/// ([`SECTION_AT_REST_SLOTS`]), `0` for an out-of-range section.
+pub fn at_rest_slots(key: impl Into<PageKey>) -> usize {
+    match key.into() {
+        PageKey::Tab(tab) => AT_REST_SLOTS[tab.index()],
+        PageKey::Section(section) => SECTION_AT_REST_SLOTS.get(section).copied().unwrap_or(0),
+    }
+}
+
+/// The value [`live_readout`] expects: [`at_rest_slots`] on a target with a
+/// native host (Android/iOS/macOS), `0` elsewhere — a Linux/Windows preview
+/// has no runtime, so [`live_slot_count`] always reads `0` there. The
+/// structural counts stay as documented either way.
+fn expected_live_slots(key: PageKey) -> usize {
     if cfg!(any(
         target_os = "android",
         target_os = "ios",
         target_os = "macos"
     )) {
-        at_rest_slots(section)
+        at_rest_slots(key)
     } else {
         0
     }
@@ -263,23 +331,28 @@ fn expected_live_slots(section: usize) -> usize {
 
 local_sig!(live_refresh_sig, u32, 0);
 
+/// The signal every [`live_readout`] subscribes to: bump it (from an event
+/// handler, on any thread) to re-sample [`live_slot_count`] — the chrome's
+/// "Re-read live slots" menu item does.
+pub fn live_refresh() -> frust::RwSignal<u32> {
+    live_refresh_sig()
+}
+
 /// The live-slot readout line plus its "Re-read" chip.
 ///
-/// [`live_slot_count`] is a plain function sampled when the page rebuilds, and
-/// a newly mounted slot is created by the host after the paint that published
-/// it — so the value shown on a page's first frame can still include the
-/// previous page's slots. "Re-read" forces one rebuild (the tracked read below
-/// subscribes the page to it) to sample it again. Diagnostics only:
-/// `live_slot_count` carries no compatibility promise. The "expected at rest"
-/// figure is [`expected_live_slots`], not [`at_rest_slots`] directly — see its
-/// doc comment for why they diverge on a no-native-host target.
-pub fn live_readout(section: usize) -> Vec<FlexChild<S>> {
+/// [`live_slot_count`] is sampled when the page rebuilds, and a new slot is
+/// created by the host after the paint that published it — so a page's first
+/// frame can still count the previous page's slots. "Re-read" forces a
+/// rebuild to sample it again. Diagnostics only: `live_slot_count` carries no
+/// compatibility promise.
+pub fn live_readout(key: impl Into<PageKey>) -> Vec<FlexChild<S>> {
+    let key = key.into();
     let _ = live_refresh_sig().get();
     vec![
         inflexible(readout(format!(
             "Live native slots (process): {} \u{2014} expected at rest here: {}",
             live_slot_count(),
-            expected_live_slots(section)
+            expected_live_slots(key)
         ))),
         gap(4.0),
         inflexible(chip("Re-read live count", |_: &mut S| {
@@ -288,21 +361,31 @@ pub fn live_readout(section: usize) -> Vec<FlexChild<S>> {
     ]
 }
 
-/// A page's opening block: the section label as a heading, its
-/// [`SECTION_SUMMARIES`](super::SECTION_SUMMARIES) line, the platform this
-/// build runs on, and the live-slot readout against the documented at-rest
-/// count.
-pub fn page_header(section: usize) -> FlexChild<S> {
+/// A tab's or section's opening block: its title as a heading, its summary,
+/// the platform this build runs on, and the live-slot readout against the
+/// documented at-rest count.
+pub fn page_header(key: impl Into<PageKey>) -> FlexChild<S> {
+    let key = key.into();
     let mut rows = vec![
-        inflexible(text(SECTION_LABELS[section]).size(22.0).color(accent())),
+        inflexible(text(key.title()).size(22.0).color(accent())),
         gap(6.0),
-        inflexible(caption(super::SECTION_SUMMARIES[section])),
+        inflexible(caption(key.summary())),
         gap(6.0),
         inflexible(caption(format!("This build: {PLATFORM}."))),
         gap(4.0),
     ];
-    rows.extend(live_readout(section));
+    rows.extend(live_readout(key));
     block(rows)
+}
+
+/// A tab's root body: `children` in a column (each brings its own padding,
+/// like [`page_column`]), the safe area inside the tab's own scroll view so
+/// content starts below floating bars at rest and scrolls under them.
+pub fn tab_body(state: &S, tab: Tab, children: Vec<FlexChild<S>>) -> AnyView<S> {
+    any(
+        scroll_view(safe_area(FlexView::new(Axis::Vertical, children)))
+            .controller(state.scroll(tab).clone()),
+    )
 }
 
 // ---------------------------------------------------------------------------
