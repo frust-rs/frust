@@ -18,6 +18,7 @@ against the same device.
 | Budget Android | Google Pixel 5 (redfin) | Snapdragon 765G / Adreno 620 | at desk — in the 2026-09-05 engine pass (first Frust-vs-Flutter pass on it; run over adb-over-Wi-Fi, radios uncontrolled) |
 | iOS | iPhone SE (2nd gen) | Apple A13 (60 Hz panel, no ProMotion) | at desk — in the 2026-09-05 engine pass |
 | Headline Android | Xiaomi 12 (cupid) | Snapdragon 8 Gen 1 / Adreno 730 | at desk — in the 2026-09-06 engine pass (USB, 120 Hz pinned), replacing its 2026-07-21 vello-era pass |
+| iOS (second) | iPhone 13 mini (iPhone14,4) | Apple A15 (60 Hz panel, no ProMotion) | at desk — first pass 2026-10-22 (USB `devicectl`, `main` `095585e4`) |
 
 `RESULTS.md` records whatever devices actually ran a given matrix pass, not
 an aspirational list — a device column with no runs is left absent, not
