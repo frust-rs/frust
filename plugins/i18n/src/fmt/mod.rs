@@ -59,8 +59,14 @@ mod currency;
 mod datetime;
 mod fluent_fns;
 mod number;
+mod zone;
 
 use crate::{I18nError, Locale, LocaleSet};
+
+pub use zone::{
+    civil_at_offset, date_in_zone, datetime_at_offset, datetime_in_zone, time_in_zone,
+    zone_offset_seconds, zoned_civil,
+};
 
 /// A calendar date with no time zone, in the proleptic Gregorian calendar
 /// (ISO 8601) — the shape [`date`]/[`datetime`] take.
@@ -237,14 +243,4 @@ pub fn datetime(
 /// argument and option contract both functions honor.
 pub fn with_icu_functions(set: LocaleSet) -> LocaleSet {
     fluent_fns::with_icu_functions(set)
-}
-
-/// Links the pinned `jiff` and `icu_list` crates so the dependency gate and size delta are real;
-/// replaced by the zoned and list formatting code.
-#[cfg(feature = "formatting")]
-mod _pin_gate {
-    pub(crate) fn _touch() {
-        let _ = jiff::tz::TimeZone::UTC;
-        let _ = icu_list::ListFormatter::try_new_and;
-    }
 }

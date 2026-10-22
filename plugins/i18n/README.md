@@ -398,9 +398,31 @@ Money held as integer minor units formats exactly with `fmt::currency_minor(&loc
 (`2`); both share `currency`'s digit tables. In FTL pass the integer as a STRING, since Fluent
 numbers are `f64`: `{ NUMBER($minor, style: "currency", currency: "THB", minorUnits: "true") }`.
 
+Instants render in a venue zone, not the device's, through `jiff`'s bundled tz database (no OS
+zone data is read, so DST is identical on every platform):
+
+```rust
+use frust_i18n::fmt;
+
+fmt::zoned_civil(1_700_000_000, "Asia/Makassar")?;                    // 2023-11-15 06:13:20
+fmt::datetime_in_zone(&en, 1_700_000_000, "Asia/Makassar", DateLength::Medium)?;
+                                                                      // "Nov 15, 2023, 6:13:20\u{202f}AM"
+fmt::date_in_zone(&en, 1_700_000_000, "America/New_York", DateLength::Medium)?; // "Nov 14, 2023"
+fmt::time_in_zone(&en, 1_700_000_000, "Europe/Berlin", DateLength::Short)?;     // "11:13\u{202f}PM"
+fmt::datetime_at_offset(&en, 1_700_000_000, 8 * 3_600, DateLength::Short)?;     // fixed offset, no zone
+```
+
+`zone_offset_seconds(unix, iana)` returns the offset in force at that instant. An unknown zone is
+`Err(I18nError::UnknownTimeZone(id))`. In FTL, `{ DATETIME($t, timeStyle: "short", timeZone:
+"Asia/Makassar") }` takes an IANA id or a fixed offset (`"+08:00"`); with no `timeZone` the instant
+renders in UTC. The positional may be epoch seconds or an ISO string with `Z` or a `±HH:MM` suffix
+(converted to the UTC instant it names; no suffix means UTC). The zone applies to the instant, so a
+zone-less civil date cannot be re-zoned. Zone data adds the jiff tzdb to the binary — see
+`docs/LIMITATIONS.md` once recorded.
+
 Honored named options: `NUMBER`'s `style` (`decimal`/`percent`/`currency`), `currency` and
 `minorUnits`;
-`DATETIME`'s `dateStyle`/`timeStyle`. Anything else (ECMA-402-style
+`DATETIME`'s `dateStyle`/`timeStyle`/`timeZone`. Anything else (ECMA-402-style
 `minimumFractionDigits`, `useGrouping`, …) is ignored at `debug` log level, never a warning or
 an error — these run on a UI's formatting path, potentially every frame.
 

@@ -29,12 +29,13 @@
 //! *language identifier*), so neither the calendar nor the hour cycle can be
 //! overridden per call — both are whatever CLDR gives the locale.
 //!
-//! # Time zones: none
+//! # Time zones: none here, zoned entry points in `zone`
 //!
 //! Every input is a civil (wall-clock) date-time with no zone, and no field
 //! set here contains a zone field, so nothing is ever converted or labelled
-//! with an offset. The one place an instant enters this crate is
-//! [`from_unix_seconds`], which resolves it in **UTC**.
+//! with an offset. An instant enters this crate through
+//! [`from_unix_seconds`], which resolves it in **UTC**; the `zone` module
+//! shifts an instant by a zone's offset first, then reuses these formatters.
 
 use std::sync::LazyLock;
 

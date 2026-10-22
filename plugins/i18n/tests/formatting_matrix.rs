@@ -318,3 +318,196 @@ fn currency_minor_agrees_with_the_f64_path_where_f64_is_exact() {
         assert_eq!(exact, oracle, "{code} {minor}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Zoned formatting (jiff offsets, ICU4X strings)
+// ---------------------------------------------------------------------------
+
+/// 2023-11-14T22:13:20Z.
+const INSTANT: i64 = 1_700_000_000;
+
+fn civil(date: (i32, u8, u8), time: (u8, u8, u8)) -> (CivilDate, CivilTime) {
+    (
+        CivilDate {
+            year: date.0,
+            month: date.1,
+            day: date.2,
+        },
+        CivilTime {
+            hour: time.0,
+            minute: time.1,
+            second: time.2,
+        },
+    )
+}
+
+#[test]
+fn one_instant_reads_differently_per_zone() {
+    let en = locale("en-US");
+    let cases = [
+        (
+            "Asia/Makassar",
+            8 * 3_600,
+            civil((2023, 11, 15), (6, 13, 20)),
+        ),
+        (
+            "America/New_York",
+            -5 * 3_600,
+            civil((2023, 11, 14), (17, 13, 20)),
+        ),
+        ("Europe/Berlin", 3_600, civil((2023, 11, 14), (23, 13, 20))),
+    ];
+
+    for (zone, offset, expected) in cases {
+        assert_eq!(
+            fmt::zone_offset_seconds(INSTANT, zone).unwrap(),
+            offset,
+            "{zone}"
+        );
+        assert_eq!(fmt::zoned_civil(INSTANT, zone).unwrap(), expected, "{zone}");
+        assert_eq!(
+            fmt::civil_at_offset(INSTANT, offset).unwrap(),
+            expected,
+            "{zone}"
+        );
+
+        // The zoned entry points are the zone-less ones over the civil pair.
+        let (d, t) = expected;
+        assert_eq!(
+            fmt::date_in_zone(&en, INSTANT, zone, DateLength::Medium).unwrap(),
+            fmt::date(&en, d, DateLength::Medium).unwrap()
+        );
+        assert_eq!(
+            fmt::time_in_zone(&en, INSTANT, zone, DateLength::Medium).unwrap(),
+            fmt::time(&en, t, DateLength::Medium).unwrap()
+        );
+        assert_eq!(
+            fmt::datetime_in_zone(&en, INSTANT, zone, DateLength::Medium).unwrap(),
+            fmt::datetime(&en, d, t, DateLength::Medium).unwrap()
+        );
+        assert_eq!(
+            fmt::datetime_at_offset(&en, INSTANT, offset, DateLength::Medium).unwrap(),
+            fmt::datetime(&en, d, t, DateLength::Medium).unwrap()
+        );
+    }
+}
+
+#[test]
+fn zoned_en_us_strings_are_pinned_for_the_venue_zone() {
+    let en = locale("en-US");
+
+    assert_eq!(
+        fmt::date_in_zone(&en, INSTANT, "Asia/Makassar", DateLength::Medium).unwrap(),
+        "Nov 15, 2023"
+    );
+    assert_eq!(
+        fmt::time_in_zone(&en, INSTANT, "Asia/Makassar", DateLength::Medium).unwrap(),
+        "6:13:20\u{202f}AM"
+    );
+    assert_eq!(
+        fmt::datetime_in_zone(&en, INSTANT, "Asia/Makassar", DateLength::Medium).unwrap(),
+        "Nov 15, 2023, 6:13:20\u{202f}AM"
+    );
+    assert_eq!(
+        fmt::time_in_zone(&en, INSTANT, "America/New_York", DateLength::Short).unwrap(),
+        "5:13\u{202f}PM"
+    );
+    assert_eq!(
+        fmt::time_in_zone(&en, INSTANT, "Europe/Berlin", DateLength::Short).unwrap(),
+        "11:13\u{202f}PM"
+    );
+}
+
+#[test]
+fn a_dst_boundary_in_berlin_flips_the_offset_between_adjacent_seconds() {
+    // 2024-03-31T01:00:00Z is when Europe/Berlin springs from +01:00 to +02:00.
+    let boundary = 1_711_846_800;
+    let de = locale("de-DE");
+
+    assert_eq!(
+        fmt::zone_offset_seconds(boundary - 1, "Europe/Berlin").unwrap(),
+        3_600
+    );
+    assert_eq!(
+        fmt::zone_offset_seconds(boundary, "Europe/Berlin").unwrap(),
+        7_200
+    );
+    assert_eq!(
+        fmt::zoned_civil(boundary - 1, "Europe/Berlin").unwrap(),
+        civil((2024, 3, 31), (1, 59, 59))
+    );
+    assert_eq!(
+        fmt::zoned_civil(boundary, "Europe/Berlin").unwrap(),
+        civil((2024, 3, 31), (3, 0, 0))
+    );
+    assert_eq!(
+        fmt::time_in_zone(&de, boundary - 1, "Europe/Berlin", DateLength::Medium).unwrap(),
+        "01:59:59"
+    );
+    assert_eq!(
+        fmt::time_in_zone(&de, boundary, "Europe/Berlin", DateLength::Medium).unwrap(),
+        "03:00:00"
+    );
+}
+
+#[test]
+fn an_unknown_zone_is_a_typed_error() {
+    let en = locale("en-US");
+
+    assert!(matches!(
+        fmt::zoned_civil(INSTANT, "Mars/Olympus"),
+        Err(frust_i18n::I18nError::UnknownTimeZone(zone)) if zone == "Mars/Olympus"
+    ));
+    assert!(fmt::datetime_in_zone(&en, INSTANT, "Nope", DateLength::Short).is_err());
+}
+
+fn ftl_engine() -> Engine {
+    Engine::new(fmt::with_icu_functions(
+        LocaleSet::new(locale("en-US"))
+            .with_locale(
+                locale("en-US"),
+                [(
+                    "t.ftl",
+                    concat!(
+                        "venue = { DATETIME($t, timeStyle: \"short\", timeZone: \"Asia/Makassar\") }\n",
+                        "offset = { DATETIME($t, timeStyle: \"short\", timeZone: \"-05:00\") }\n",
+                        "utc = { DATETIME($t, timeStyle: \"short\") }\n",
+                        "bad = { DATETIME($t, timeStyle: \"short\", timeZone: \"Nope/Zone\") }\n",
+                    ),
+                )],
+            )
+            .with_isolating(false),
+    ))
+    .expect("engine builds")
+}
+
+fn resolve(key: &str, instant: impl Into<fluent_bundle::FluentValue<'static>>) -> String {
+    let mut args = fluent_bundle::FluentArgs::new();
+    args.set("t", instant);
+    ftl_engine()
+        .resolve(&[locale("en-US")], key, Some(&args))
+        .expect("resolves")
+}
+
+#[test]
+fn ftl_datetime_honours_the_time_zone_option() {
+    assert_eq!(resolve("venue", INSTANT as f64), "6:13\u{202f}AM");
+    assert_eq!(resolve("offset", INSTANT as f64), "5:13\u{202f}PM");
+    assert_eq!(resolve("utc", INSTANT as f64), "10:13\u{202f}PM");
+    // An unknown zone is Fluent's placeholder, not an error.
+    assert_eq!(resolve("bad", INSTANT as f64), "DATETIME()");
+}
+
+#[test]
+fn ftl_iso_offsets_name_the_same_instant() {
+    // 06:13:20+08:00 is 1700000000; rendered in the venue zone it round-trips.
+    assert_eq!(
+        resolve("venue", "2023-11-15T06:13:20+08:00"),
+        "6:13\u{202f}AM"
+    );
+    assert_eq!(resolve("venue", "2023-11-14T22:13:20Z"), "6:13\u{202f}AM");
+    assert_eq!(
+        resolve("utc", "2023-11-15T06:13:20+08:00"),
+        "10:13\u{202f}PM"
+    );
+}
