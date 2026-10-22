@@ -42,12 +42,24 @@
 //! # The containment-move contract
 //!
 //! The frust controller's view (the `FrustView`) is wrapped in a plugin-owned
-//! host `UIView`; the controller is a child of exactly one page at a time
-//! (`addChildViewController`, host view added, `didMoveToParentViewController`)
-//! and a selection change moves it (`willMoveToParentViewController(nil)`,
-//! host view removed, `removeFromParentViewController`, then the same three
-//! steps on the new page). Pages are kept by `TabId`, so a reorder never
-//! loses the contained controller.
+//! host `UIView`; the controller is a child of exactly one page at a time.
+//! The host never leaves the window during a selection change: a host out of
+//! it takes the `CAMetalLayer` along and the window shows a black frame. So
+//! the host is first re-parented (a same-window `insertSubview`, never
+//! `removeFromSuperview`) to the bottom of the tab bar controller's view; the
+//! old page lets the controller go (`willMoveToParentViewController(nil)`,
+//! `removeFromParentViewController`), the new page takes it
+//! (`addChildViewController`, `didMoveToParentViewController`); then
+//! `setSelectedIndex`, a forced `layoutIfNeeded` that puts the new page in the
+//! window (UIKit would on a later pass), and a second same-window re-parent
+//! into the page's view. A page still out of the window adopts the host from
+//! its `viewDidLayoutSubviews`/`viewDidAppear`. Pages are kept by `TabId`, so
+//! a reorder never loses the contained controller.
+//!
+//! Every page view and the tab bar controller's view carry a backdrop,
+//! `systemBackgroundColor` resolved for `ChromeSpec::dark` into a concrete
+//! colour, so a frame the host has not reached shows the theme's background
+//! rather than black; it is repainted where the bars are restyled.
 //!
 //! # The FrustViewHost origin-zero invariant
 //!
@@ -88,8 +100,9 @@
 //! `ChromeSpec::dark` is pinned with `overrideUserInterfaceStyle` on the tab
 //! bar and every navigation bar, not on the tab bar controller: a controller
 //! override reaches the contained frust controller, whose trait changes
-//! feed the app theme's brightness and would pin it. The bars are restyled
-//! on install, for every new page, and on any apply whose spec flips it.
+//! feed the app theme's brightness and would pin it (hence the resolved
+//! backdrop colour, not a page override). The bars are restyled on install,
+//! for every new page, and on any apply whose spec flips it.
 //!
 //! # Limitations
 //!
@@ -111,10 +124,11 @@ use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_clas
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{NSArray, NSData, NSString, ns_string};
 use objc2_ui_kit::{
-    NSObjectUIAccessibility, UIAction, UIApplication, UIBarButtonItem, UIImage, UIImageView,
-    UIMenu, UIMenuElement, UIMenuElementAttributes, UINavigationController,
+    NSObjectUIAccessibility, UIAction, UIApplication, UIBarButtonItem, UIColor, UIImage,
+    UIImageView, UIMenu, UIMenuElement, UIMenuElementAttributes, UINavigationController,
     UINavigationItemLargeTitleDisplayMode, UIResponder, UISceneActivationState, UITabBarController,
-    UIView, UIViewAutoresizing, UIViewContentMode, UIViewController, UIWindow, UIWindowScene,
+    UITraitCollection, UIUserInterfaceStyle, UIView, UIViewAutoresizing, UIViewContentMode,
+    UIViewController, UIWindow, UIWindowScene,
 };
 
 use super::FrustNativeControlTarget;
@@ -599,6 +613,7 @@ impl Chrome {
         chrome.target.attach_tab_bar_controller(&chrome.tabs);
         chrome.sync_pages(mtm, spec);
         apply_user_interface_style(&chrome.tabs.tabBar(), spec.dark);
+        paint_backdrop(chrome.tabs.view(), spec.dark);
         // The root swap takes the `FrustView` out of the window; its siblings
         // stay until moved, in their old order, into the host view.
         window.setRootViewController(Some(&chrome.tabs));
@@ -631,8 +646,10 @@ impl Chrome {
         }
         if restyle {
             apply_user_interface_style(&self.tabs.tabBar(), spec.dark);
+            paint_backdrop(self.tabs.view(), spec.dark);
             for page in &self.pages {
                 apply_user_interface_style(&page.nav.navigationBar(), spec.dark);
+                paint_backdrop(page.page.view(), spec.dark);
             }
         }
     }
@@ -653,6 +670,7 @@ impl Chrome {
                     let page = Page::new(mtm, id);
                     apply_top(mtm, &page, self.spec.top.as_ref(), &self.target, |_| true);
                     apply_user_interface_style(&page.nav.navigationBar(), self.spec.dark);
+                    paint_backdrop(page.page.view(), self.spec.dark);
                     page
                 }
             };
@@ -660,6 +678,9 @@ impl Chrome {
                 page.set_tab_item(tab);
             }
             self.pages.push(page);
+        }
+        if old.iter().any(|page| page.page.holds()) {
+            self.park_host();
         }
         for page in old {
             page.page.release();
@@ -675,7 +696,8 @@ impl Chrome {
     }
 
     /// Select `spec.selected` (an unknown id keeps the current tab) and move
-    /// the frust controller into that page.
+    /// the frust controller into that page, the host staying in the window
+    /// throughout (module doc, containment-move contract).
     fn select(&mut self, spec: &ChromeSpec) {
         let current = self.tabs.selectedIndex();
         let index = spec
@@ -687,15 +709,41 @@ impl Chrome {
         let Some(target) = self.pages.get(index) else {
             return;
         };
-        self.tabs.setSelectedIndex(index);
-        if !target.page.holds() {
+        if target.page.holds() {
+            self.tabs.setSelectedIndex(index);
+        } else {
+            self.park_host();
             for page in &self.pages {
                 page.page.release();
             }
             target.page.hold(&self.frust, &self.host);
+            self.tabs.setSelectedIndex(index);
+            if let Some(view) = self.tabs.view() {
+                view.layoutIfNeeded();
+            }
+            if let Some(view) = target.nav.view() {
+                view.layoutIfNeeded();
+            }
+            if !target.page.place_host() {
+                log::debug!(
+                    "frust-native-widgets: chrome page {index} is not in the window after a \
+                     forced layout; the host waits in the tab bar controller's view"
+                );
+            }
         }
         self.tabs.setNeedsStatusBarAppearanceUpdate();
         self.tabs.setNeedsUpdateOfHomeIndicatorAutoHidden();
+    }
+
+    /// Move the host to the bottom of the tab bar controller's view, which
+    /// stays in the window while pages come and go.
+    fn park_host(&self) {
+        let Some(tabs) = self.tabs.view() else {
+            return;
+        };
+        if !is_superview(&self.host, &tabs) {
+            reparent(&self.host, &tabs, true);
+        }
     }
 
     /// Re-root the window back to the frust controller and release the rest.
@@ -746,6 +794,44 @@ fn restore_siblings(stack: &[Retained<UIView>], frust_view: &UIView, superview: 
         superview.insertSubview_aboveSubview(view, anchor);
         anchor = view;
     }
+}
+
+fn is_superview(view: &UIView, parent: &UIView) -> bool {
+    view.superview()
+        .is_some_and(|superview| std::ptr::eq(&*superview, parent))
+}
+
+/// Re-parent `host` into `into` (at the bottom when `bottom`, else on top),
+/// filling it. No `removeFromSuperview` first: within one window the host's
+/// layers never leave it. Taking a host out of the window is a contract bug.
+fn reparent(host: &UIView, into: &UIView, bottom: bool) {
+    let leaves_window = host.window().is_some() && into.window().is_none();
+    if leaves_window {
+        log::debug!("frust-native-widgets: the chrome host is moving out of the window");
+    }
+    debug_assert!(!leaves_window, "the chrome host left the window");
+    if bottom {
+        into.insertSubview_atIndex(host, 0);
+    } else {
+        into.addSubview(host);
+    }
+    host.setFrame(into.bounds());
+}
+
+/// Paint `view`'s backdrop: `systemBackgroundColor` resolved for `dark` into
+/// a concrete colour, no `overrideUserInterfaceStyle` (module doc, Brightness).
+fn paint_backdrop(view: Option<Retained<UIView>>, dark: bool) {
+    let Some(view) = view else {
+        return;
+    };
+    let style = if dark {
+        UIUserInterfaceStyle::Dark
+    } else {
+        UIUserInterfaceStyle::Light
+    };
+    let traits = UITraitCollection::traitCollectionWithUserInterfaceStyle(style);
+    let color = UIColor::systemBackgroundColor().resolvedColorWithTraitCollection(&traits);
+    view.setBackgroundColor(Some(&color));
 }
 
 impl Page {
@@ -1042,20 +1128,27 @@ define_class!(
             self.contained()
         }
 
-        /// Pins the host view to the page's bounds.
+        /// Pins the host view to the page's bounds, adopting a host that
+        /// waits in the tab bar controller's view once this page is in the window.
         #[unsafe(method(viewDidLayoutSubviews))]
         fn view_did_layout_subviews(&self) {
             // SAFETY: forwarding the same no-argument selector to
             // `UIViewController`'s implementation, as UIKit expects.
             let _: () = unsafe { msg_send![super(self), viewDidLayoutSubviews] };
-            let pinned = catch_unwind(AssertUnwindSafe(|| {
-                let host = self.ivars().host.borrow().clone();
-                if let (Some(host), Some(view)) = (host, self.viewIfLoaded()) {
-                    host.setFrame(view.bounds());
-                }
-            }));
-            if pinned.is_err() {
+            if catch_unwind(AssertUnwindSafe(|| self.place_host())).is_err() {
                 log::error!("frust-native-widgets: a chrome page layout step panicked");
+            }
+        }
+
+        /// Adopts a host still waiting in the tab bar controller's view.
+        #[unsafe(method(viewDidAppear:))]
+        fn view_did_appear(&self, animated: bool) {
+            // SAFETY: forwarding the same selector with its one `BOOL`
+            // argument to `UIViewController`'s implementation, which UIKit
+            // requires an override to call.
+            let _: () = unsafe { msg_send![super(self), viewDidAppear: animated] };
+            if catch_unwind(AssertUnwindSafe(|| self.place_host())).is_err() {
+                log::error!("frust-native-widgets: a chrome page appearance step panicked");
             }
         }
     }
@@ -1082,25 +1175,50 @@ impl FrustChromePageController {
         self.contained().is_some()
     }
 
-    /// Contain `frust`, adding `host` (the wrapped `FrustView`) to this view.
+    /// Contain `frust` and take charge of `host` (the wrapped `FrustView`),
+    /// which [`Self::place_host`] moves into this view once it is in the window.
     fn hold(&self, frust: &UIViewController, host: &UIView) {
         self.addChildViewController(frust);
-        if let Some(view) = self.view() {
-            host.setFrame(view.bounds());
-            view.addSubview(host);
-        }
         frust.didMoveToParentViewController(Some(self));
         self.ivars().contained.replace(Some(frust.retain()));
         self.ivars().host.replace(Some(host.retain()));
     }
 
-    /// Give up the frust controller, if held; the host view leaves too.
+    /// Pin the held host to this view's bounds, first re-parenting it here
+    /// when it waits elsewhere and this view is in the window. Whether the
+    /// host is in this view afterwards.
+    fn place_host(&self) -> bool {
+        let host = self
+            .ivars()
+            .host
+            .try_borrow()
+            .ok()
+            .and_then(|host| host.clone());
+        let (Some(host), Some(view)) = (host, self.viewIfLoaded()) else {
+            return false;
+        };
+        if is_superview(&host, &view) {
+            host.setFrame(view.bounds());
+            return true;
+        }
+        if view.window().is_none() {
+            return false;
+        }
+        reparent(&host, &view, false);
+        true
+    }
+
+    /// Give up the frust controller, if held; the host view leaves too
+    /// unless the chrome already parked it outside this view.
     fn release(&self) {
         let Some(frust) = self.ivars().contained.take() else {
             return;
         };
         frust.willMoveToParentViewController(None);
-        if let Some(host) = self.ivars().host.take() {
+        if let Some(host) = self.ivars().host.take()
+            && let Some(view) = self.viewIfLoaded()
+            && is_superview(&host, &view)
+        {
             host.removeFromSuperview();
         }
         frust.removeFromParentViewController();
