@@ -241,20 +241,17 @@ fn live_rows() -> Vec<FlexChild<S>> {
     ]
 }
 
-/// See the page-fn contract in [`crate::pages`] and the [module docs](self).
-pub fn page(_state: &S) -> AnyView<S> {
+/// The deep-link slug of this section: the anchor the Lab tab scrolls to.
+pub const ANCHOR: &str = crate::SANDWICH_LABEL;
+
+/// The section body, without a heading: the live-slot readout, the paint-order
+/// checkbox and the sandwich itself, which the Lab tab stacks under its own
+/// section header. See the [module docs](self).
+pub fn section(_state: &S) -> Vec<FlexChild<S>> {
     let value = slider_value_sig().get();
     let interleaved = interleaved_sig().get();
 
-    let mut header = vec![
-        inflexible(text(crate::SANDWICH_LABEL).size(22.0).color(accent())),
-        gap(6.0),
-        inflexible(caption(SANDWICH_SUMMARY)),
-        gap(6.0),
-        inflexible(caption(format!("This build: {PLATFORM}."))),
-        gap(4.0),
-    ];
-    header.extend(live_rows());
+    let readouts = block(live_rows());
 
     let modes = block(vec![
         inflexible(label("What to look for")),
@@ -287,7 +284,23 @@ pub fn page(_state: &S) -> AnyView<S> {
         inflexible(readout(format!("Slider (app value): {value}"))),
     ]);
 
-    page_column(vec![block(header), modes, stack])
+    vec![readouts, modes, stack]
+}
+
+/// The whole section as a standalone page: its own heading and summary, then
+/// [`section`]. Kept for [`super::current`]; the Lab tab stacks [`section`]
+/// under its own section header instead.
+pub fn page(state: &S) -> AnyView<S> {
+    let header = block(vec![
+        inflexible(text(crate::SANDWICH_LABEL).size(22.0).color(accent())),
+        gap(6.0),
+        inflexible(caption(SANDWICH_SUMMARY)),
+        gap(6.0),
+        inflexible(caption(format!("This build: {PLATFORM}."))),
+    ]);
+    let mut children = vec![header];
+    children.extend(section(state));
+    page_column(children)
 }
 
 // The geometry sandwiches each view, checked at compile time: the toolbar

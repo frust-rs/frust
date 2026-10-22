@@ -118,9 +118,23 @@ class FrustNativeListener(private val slotId: Long) :
         nativeOnEvent(slotId, KIND_DATE, detail)
     }
 
+    /**
+     * `detail` is the signed segment index (Rust `pack_index`). Called by the
+     * segmented control's own Material listener in [FrustNativeControlFactory]
+     * — the one reporter here that is not an interface override, because
+     * `MaterialButtonToggleGroup.OnButtonCheckedListener` must never be a
+     * supertype of this class (an app without Material would fail to load it).
+     */
+    fun reportSelection(index: Int) {
+        if (!armed) return
+        nativeOnEvent(slotId, KIND_SELECTION, index.toLong())
+    }
+
     private external fun nativeOnEvent(slotId: Long, kind: Int, detail: Long)
 
-    private companion object {
+    // `internal`, not `private`: [FrustNativeChrome] reports the
+    // `KIND_CHROME_*` codes from this one table.
+    internal companion object {
         /**
          * `View.OnClickListener.onClick`. The codes below are shared
          * verbatim with the Rust `EVENT_KIND_*` constants
@@ -139,11 +153,8 @@ class FrustNativeListener(private val slotId: Long) :
         /**
          * A segmented control's selection (the Rust side's
          * `EVENT_KIND_SELECTION`, `detail` = the signed segment index).
-         * **Never emitted on Android in this build**: the segmented control
-         * has no Android arm yet (its builder renders a refusal banner
-         * there), so this listener implements no interface that reports it.
-         * The constant exists so this table and the Rust one stay the same
-         * table — append-only, never renumbered.
+         * Emitted on Android by [reportSelection], from the segmented
+         * control's Material listener (`FrustNativeControlFactory`).
          */
         const val KIND_SELECTION = 6
         /**
@@ -162,5 +173,20 @@ class FrustNativeListener(private val slotId: Long) :
          * `KIND_DATE`, never renumbered.
          */
         const val KIND_RESELECTED = 8
+        /**
+         * App-chrome events (the Rust side's `EVENT_KIND_CHROME_*`): a tab
+         * tap (`detail` = index | reselect flag << 32), an action tap
+         * (`detail` = action index), a pull-down menu choice (`detail` =
+         * actionIndex * 1000 + menuIndex) and the back item (`detail` = 0).
+         * **Emitted by [FrustNativeChrome], never by this listener**: chrome
+         * is a host-level surface, not a `platform_view` slot, so it reports
+         * through `FrustNativeChrome.nativeOnChromeEvent`. Kept in this table
+         * so it and the Rust one stay the same table — appended after
+         * `KIND_RESELECTED`, never renumbered.
+         */
+        const val KIND_CHROME_TAB = 9
+        const val KIND_CHROME_ACTION = 10
+        const val KIND_CHROME_MENU = 11
+        const val KIND_CHROME_BACK = 12
     }
 }

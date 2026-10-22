@@ -35,6 +35,12 @@
 //!
 //! [`MainThreadMarker`]: objc2::MainThreadMarker
 
+// The chrome arm (decision C2): `IosChromeHost`, the process-wide slot's
+// host on iOS, behind `frust-api` like `crate::chrome`. Tests run the slot
+// over `RecordingChromeHost` instead, so a test build leaves the arm uncalled.
+#[cfg(feature = "frust-api")]
+#[cfg_attr(test, allow(dead_code))]
+mod chrome;
 mod ctx;
 mod events;
 mod factory;
@@ -52,6 +58,8 @@ pub(crate) mod fonts;
 // arm, see `theme`'s own module doc).
 mod theme;
 
+#[cfg(all(feature = "frust-api", not(test)))]
+pub(crate) use chrome::IosChromeHost;
 pub(crate) use ctx::NativeCtx;
 pub(crate) use events::FrustNativeControlTarget;
 pub(crate) use factory::ensure_registered;

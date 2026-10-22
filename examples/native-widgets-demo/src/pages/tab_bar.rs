@@ -1,6 +1,7 @@
-//! **TabBar** — a bare native `UITabBar` (`native_tab_bar`) docked at the
-//! bottom of this page, beside Glyph's drawn `tabs` strip on the same
-//! selection.
+//! **TabBar** — a bare native `UITabBar` (`native_tab_bar`) at the bottom of
+//! this section, beside Glyph's drawn `tabs` strip on the same selection. It is
+//! the Lab tab's TabBar section; compare it with the app's real tab bar, the
+//! scaffold's, at the bottom of the window.
 //!
 //! Three items cover the item vocabulary: a byte icon (the demo PNG, tinted
 //! as a template), an SF Symbol with a distinct selected-state symbol, and a
@@ -13,24 +14,23 @@
 //! Selection drives a page-local signal whose value picks the "tab page"
 //! content above the bar — deliberately NOT the shell's section navigation.
 //! This page exists to show the control, and routing the app from it would
-//! navigate away from the control under test (the shell's own navigation is
-//! frust-drawn precisely because this bar is iOS-only). A real app would feed
-//! the same confirmed id to its router (`RouteNavigator::go`), as the plugin
-//! README shows.
+//! navigate away from the control under test (the app's own tab bar is the
+//! scaffold's). A real app would feed the same confirmed id to its router
+//! (`RouteNavigator::go`), as the plugin README shows.
 //!
 //! # Placement
 //!
-//! The bar is the page column's last child, but this page sits inside the
-//! shell's scroll view above the section navigation — it is not docked to the
-//! window's bottom edge — so it is built with `.safe_area(false)`: the bare
-//! 49pt, without growing by the home-indicator inset.
+//! The bar is the section column's last child, but it sits inside the Lab tab's
+//! scroll view above the app's real tab bar — it is not docked to the window's
+//! bottom edge — so it is built with `.safe_area(false)`: the bare 49pt,
+//! without growing by the home-indicator inset.
 //!
 //! macOS has no bottom-tab idiom and Android's `BottomNavigationView` needs
 //! Material, so both (and any desktop preview) render the plugin's refusal
 //! banner in place of the bar. One native slot at rest on iOS/iPadOS, none
 //! elsewhere.
 
-use frust::{AnyView, Get, Set, inflexible};
+use frust::{AnyView, FlexChild, Get, Set, inflexible};
 use frust_glyph::tabs;
 use frust_native_widgets::{TabIcon, TabId, TabItem, native_tab_bar};
 
@@ -91,8 +91,12 @@ fn items() -> Vec<TabItem> {
     ]
 }
 
-/// See the page-fn contract in [`crate::pages`] and the [module docs](self).
-pub fn page(_state: &S) -> AnyView<S> {
+/// The deep-link slug of this section: the anchor the Lab tab scrolls to.
+pub const ANCHOR: &str = "TabBar";
+
+/// The section body, without a page header: the rows the Lab tab stacks under
+/// its own section header. See the [module docs](self).
+pub fn section(_state: &S) -> Vec<FlexChild<S>> {
     let selected = selected_sig().get().min(TABS.len() - 1);
     let select_events = select_events_sig().get();
     let reselects = reselect_sig().get();
@@ -129,12 +133,13 @@ pub fn page(_state: &S) -> AnyView<S> {
     ]);
 
     let native_intro = block(vec![
-        inflexible(label("Native tab bar (docked at the page bottom)")),
+        inflexible(label("Native tab bar (bare, embedded in the body)")),
         gap(4.0),
         inflexible(caption(
-            "Android: none (refusal banner) \u{b7} iOS: UITabBar (bare, no controller) \u{b7} \
-             macOS: none (refusal banner). Built with .safe_area(false): this page is not \
-             docked to the window's bottom edge.",
+            "The bare embedded UITabBar \u{2014} compare with the app's real tab bar below. \
+             Android: none (refusal banner) \u{b7} iOS: UITabBar (bare, no controller) \u{b7} \
+             macOS: none (refusal banner). Built with .safe_area(false): it is not docked to \
+             the window's bottom edge.",
         )),
     ]);
 
@@ -148,11 +153,14 @@ pub fn page(_state: &S) -> AnyView<S> {
         })
         .on_reselect(|_| bump(reselect_sig()));
 
-    page_column(vec![
-        page_header(SECTION),
-        tab_page,
-        drawn,
-        native_intro,
-        inflexible(bar),
-    ])
+    vec![tab_page, drawn, native_intro, inflexible(bar)]
+}
+
+/// The whole section as a standalone page: its [`page_header`] then
+/// [`section`]. Kept for [`super::current`]; the Lab tab stacks [`section`]
+/// under its own section header instead.
+pub fn page(state: &S) -> AnyView<S> {
+    let mut children = vec![page_header(SECTION)];
+    children.extend(section(state));
+    page_column(children)
 }

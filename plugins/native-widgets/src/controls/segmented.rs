@@ -1,7 +1,9 @@
 //! `Segmented` — a real segmented control, built and driven from Rust:
 //! `UISegmentedControl` on iOS/iPadOS, `NSSegmentedControl` (select-one
-//! tracking) on macOS. **Apple-arm-only**: the first control in
-//! [`super::APPLE_KINDS`].
+//! tracking) on macOS, and Material's `MaterialButtonToggleGroup` on Android.
+//! In [`super::APPLE_KINDS`] (the first control there) and, for Android, in
+//! [`super::MATERIAL_KINDS`]; on Linux/Windows/web the builder renders the
+//! frust-drawn refusal banner at compile time.
 //!
 //! Six properties: the segment labels, the selected segment, enabled,
 //! momentary, the selected-segment tint, and the accessibility label. Every
@@ -9,19 +11,30 @@
 //! [`Setter::Segments`] ([`Tier::Relayout`](super::Tier::Relayout): a label
 //! list replace re-measures every segment).
 //!
-//! # No Android arm (decision D2)
+//! # The Android arm (decision C7) — Material, through Kotlin statics
 //!
-//! Android's framework has no segmented control — the stock one is
-//! Material's `MaterialButtonToggleGroup`, and this plugin never assumes an
-//! AndroidX/Material dependency the app did not add (`switch.rs`'s `CLASS`
-//! note: the framework widget, never `SwitchCompat`). So this module has no
-//! `#[cfg(target_os = "android")] mod platform`, `crate::android::
-//! register_controls` does not register [`KIND`] (the kind sits in
-//! [`super::APPLE_KINDS`], not [`super::SHARED_KINDS`]), and the app-facing
-//! builder (`crate::api::builders::NativeSegmentedView`) renders the existing
-//! frust-drawn refusal banner **at compile time** on every non-Apple target
-//! instead of publishing a slot no factory could serve. A Material-backed
-//! Android arm is a follow-up plan, not this control's v1.
+//! Android's framework has no segmented control; the stock one is
+//! `com.google.android.material.button.MaterialButtonToggleGroup`, which the
+//! plugin's Gradle module already depends on (`api`) and which needs a
+//! Material3 app theme. The group (single selection, selection required)
+//! holds one outlined `MaterialButton` per segment. Its listener is a
+//! Material interface that cannot be built from raw JNI and must not be a
+//! supertype of `FrustNativeListener`, so the Android `platform` module
+//! drives `@JvmStatic` helpers on `FrustNativeControlFactory` (no new JNI
+//! export) and the Kotlin listener reports [`EVENT_KIND_SELECTION`] through
+//! `FrustNativeListener.reportSelection`. The group is built under the
+//! Activity's manifest theme (the Kotlin-internal `FrustMaterialContext.wrap`),
+//! not the raw context. Under a non-Material theme
+//! construction throws, is logged, and the slot takes the host's existing
+//! dead-slot path — never a crash.
+//!
+//! What Material does not give us: `enabled` is applied per segment (the
+//! group's own flag does not reach its buttons); the tint replaces the
+//! *checked* background of each segment (there is no single selected-tint
+//! property) and leaves unchecked segments transparent; `momentary` has no
+//! native mode, so a tap reports and the group then clears its check
+//! (selection is not required while momentary); while momentary the
+//! platform ignores the planned selection, so no check is ever drawn.
 //!
 //! # The labels ride flat params
 //!
@@ -48,12 +61,16 @@
 //!    an app that reports the identical props back produces no `update`).
 //!    A **momentary** control has no persistent selection to drift from, so
 //!    its plan ignores `observed`.
-//! 2. **Echo guard: expected to be empty.** Neither UIKit nor AppKit sends a
-//!    control's action for a programmatic `setSelectedSegmentIndex:`/
-//!    `setSelectedSegment:` (the rule `crate::apple::events`' and
-//!    `crate::appkit::events`' *No echo guard* sections cite); should one ever
-//!    re-enter, `crate::runtime::with_runtime`'s re-entrancy drop catches it
-//!    one layer up. No per-instance suppression flag.
+//! 2. **Echo guard.** Neither UIKit nor AppKit sends a control's action for a
+//!    programmatic `setSelectedSegmentIndex:`/`setSelectedSegment:` (the rule
+//!    `crate::apple::events`' and `crate::appkit::events`' *No echo guard*
+//!    sections cite), so those arms carry none. Android's
+//!    `MaterialButtonToggleGroup` DOES notify for `check`/`clearChecked`, and
+//!    additionally for the button being unchecked, so the Kotlin listener
+//!    reports only `isChecked == true` and every programmatic mutation runs
+//!    muted (`SegmentedHolder.muted`) — the app's write-back never reports
+//!    itself. `crate::runtime::with_runtime`'s re-entrancy drop remains the
+//!    backstop one layer up.
 //!
 //! # Replacing the segments resets the selection
 //!
@@ -125,7 +142,8 @@ pub(crate) fn platform_index(selected: Option<usize>, segment_count: usize) -> i
         .unwrap_or(NO_SEGMENT)
 }
 
-/// The marker type registered under [`KIND`] — by the two Apple arms only.
+/// The marker type registered under [`KIND`] — by the Android arm and the two
+/// Apple arms.
 pub(crate) struct Segmented;
 
 /// Everything a `Segmented` slot can be told, as one Rust-diffed value.
@@ -242,8 +260,9 @@ impl SegmentedProps {
 /// segment (a negative index, `crate::events::unpack_index`): there is no
 /// requested segment to deliver, and `observed` is left untouched.
 ///
-/// Pure and host-testable, and the ONE decoder both Apple arms' `on_event`
-/// call — kind/detail parity by construction.
+/// Pure and host-testable, and the ONE decoder every arm's `on_event` calls
+/// (Android's `MaterialButtonToggleGroup` listener packs the same
+/// [`crate::events::pack_index`] detail) — kind/detail parity by construction.
 pub(crate) fn decode_event(
     observed: &mut Option<usize>,
     event: NativeEvent,
@@ -254,6 +273,255 @@ pub(crate) fn decode_event(
     let index = unpack_index(event.detail)?;
     *observed = Some(index);
     Some(EventPayload::Selected(index))
+}
+
+#[cfg(target_os = "android")]
+pub(crate) mod platform {
+    //! The Android half: a `MaterialButtonToggleGroup` built and driven
+    //! through `FrustNativeControlFactory`'s `@JvmStatic` segmented helpers
+    //! (module doc's *The Android arm*).
+    //!
+    //! A fresh group is [`SegmentedProps::platform_default`] — no segments,
+    //! nothing checked, enabled, persistent selection, the theme's own fill —
+    //! so no construction-time normalization precedes the diffed create plan.
+    //! The listener is attached inside the Kotlin `segmentedCreate`, before
+    //! the plan runs; that is safe because every plan write runs muted
+    //! on the Kotlin side, so an initial selection never reaches the runtime
+    //! as an event.
+
+    use jni::objects::{JObject, JValue};
+    use jni::refs::Global;
+    use jni::signature::MethodSignature;
+    use jni::strings::JNIStr;
+    use jni::{jni_sig, jni_str};
+
+    use super::{KIND, Segmented, SegmentedProps, decode_event, platform_index};
+    use crate::NativeWidgetError;
+    use crate::android::{NativeCtx, NativeView};
+    use crate::controls::platform::{FRAME_CAPACITY, apply as apply_shared};
+    use crate::controls::{Plan, Setter};
+    use crate::events::EventPayload;
+    use crate::runtime::{NativeEvent, NativeWidget, Params};
+
+    /// The factory class that hosts the `@JvmStatic` helpers (binary name).
+    const FACTORY_CLASS: &str = "dev.frust.nativewidgets.FrustNativeControlFactory";
+
+    /// A live segmented control's retained state.
+    pub(crate) struct SegmentedState {
+        /// The group's own global reference (the second one — see
+        /// `button.rs`'s note).
+        view: Global<JObject<'static>>,
+        /// The index the platform last reported, `None` while untouched —
+        /// [`SegmentedProps::plan`]'s write-back drift signal.
+        observed: Option<usize>,
+    }
+
+    impl NativeWidget for Segmented {
+        type Props = SegmentedProps;
+        type State = SegmentedState;
+
+        fn decode_props(params: &Params<'_>) -> Result<Self::Props, NativeWidgetError> {
+            SegmentedProps::decode(params)
+        }
+
+        fn create(
+            ctx: &mut NativeCtx<'_, '_>,
+            props: &Self::Props,
+        ) -> Result<(NativeView, Self::State), NativeWidgetError> {
+            let slot = i64::try_from(props.slot).unwrap_or(i64::MAX);
+            let view = ctx.with_frame(FRAME_CAPACITY, |ctx| {
+                let class = ctx.class(FACTORY_CLASS)?;
+                let activity = ctx.activity()?;
+                let qualified = ctx.context()?;
+                let view = ctx.run_jni("FrustNativeControlFactory.segmentedCreate", |env| {
+                    env.call_static_method(
+                        &class,
+                        jni_str!("segmentedCreate"),
+                        jni_sig!(
+                            "(Landroid/app/Activity;Landroid/content/Context;J)Landroid/view/View;"
+                        ),
+                        &[
+                            JValue::Object(activity),
+                            JValue::Object(qualified),
+                            JValue::Long(slot),
+                        ],
+                    )?
+                    .l()
+                })?;
+                ctx.retain(&view)
+            })?;
+            let plan =
+                SegmentedProps::plan(&SegmentedProps::platform_default(props.slot), props, None);
+            ctx.with_frame(FRAME_CAPACITY, |ctx| apply_all(ctx, &view, &plan))?;
+            let handle = ctx.retain(&view)?;
+            Ok((
+                NativeView::with_extra(handle, Vec::new()),
+                SegmentedState {
+                    view,
+                    observed: None,
+                },
+            ))
+        }
+
+        fn update(
+            ctx: &mut NativeCtx<'_, '_>,
+            state: &mut Self::State,
+            old: &Self::Props,
+            new: &Self::Props,
+        ) -> Result<(), NativeWidgetError> {
+            let plan = SegmentedProps::plan(old, new, state.observed);
+            let applied = ctx.with_frame(FRAME_CAPACITY, |ctx| apply_all(ctx, &state.view, &plan));
+            if applied.is_ok() {
+                // The platform matches the app again; a failed apply keeps the
+                // drift signal so the next differing params retries it
+                // (`Switch`'s Android arm).
+                state.observed = None;
+            }
+            applied
+        }
+
+        fn on_event(state: &mut Self::State, event: NativeEvent) -> Option<EventPayload> {
+            decode_event(&mut state.observed, event)
+        }
+
+        fn dispose(
+            ctx: &mut NativeCtx<'_, '_>,
+            state: Self::State,
+        ) -> Result<(), NativeWidgetError> {
+            // Detach and disarm so a stray in-flight selection can't fire
+            // after this slot's instance is gone; dropping `state` releases
+            // its global reference either way.
+            call_static(
+                ctx,
+                jni_str!("segmentedDispose"),
+                jni_sig!("(Landroid/view/View;)V"),
+                &[JValue::Object(&state.view)],
+            )
+        }
+    }
+
+    /// `FrustNativeControlFactory.<name>(group, ...)` — a `void` static
+    /// helper; `signature` and `args` carry the group first.
+    fn call_static<'sig, 'sig_args>(
+        ctx: &mut NativeCtx<'_, '_>,
+        name: &JNIStr,
+        signature: impl AsRef<MethodSignature<'sig, 'sig_args>>,
+        args: &[JValue<'_>],
+    ) -> Result<(), NativeWidgetError> {
+        let class = ctx.class(FACTORY_CLASS)?;
+        ctx.run_jni(&format!("FrustNativeControlFactory.{name}"), |env| {
+            env.call_static_method(&class, name, signature, args)?.v()
+        })
+    }
+
+    /// Execute a whole [`Plan`], front to back.
+    fn apply_all(
+        ctx: &mut NativeCtx<'_, '_>,
+        view: &JObject<'_>,
+        plan: &Plan<'_>,
+    ) -> Result<(), NativeWidgetError> {
+        for setter in plan {
+            apply(ctx, view, setter)?;
+        }
+        Ok(())
+    }
+
+    /// Execute one planned property write — this control's own setters
+    /// here, `ContentDescription` through the shared apply.
+    fn apply(
+        ctx: &mut NativeCtx<'_, '_>,
+        view: &JObject<'_>,
+        setter: &Setter<'_>,
+    ) -> Result<(), NativeWidgetError> {
+        match *setter {
+            Setter::Segments(labels) => {
+                call_static(
+                    ctx,
+                    jni_str!("segmentedClear"),
+                    jni_sig!("(Landroid/view/View;)V"),
+                    &[JValue::Object(view)],
+                )?;
+                for label in labels {
+                    add_segment(ctx, view, label)?;
+                }
+                Ok(())
+            }
+            // `check`/`clearChecked` run muted Kotlin-side (module doc's echo
+            // guard), so the write-back's snap-back is a plain write.
+            Setter::SelectedSegment(selected) => {
+                let count = child_count(ctx, view)?;
+                let index = i32::try_from(platform_index(selected, count)).unwrap_or(-1);
+                call_static(
+                    ctx,
+                    jni_str!("segmentedSelect"),
+                    jni_sig!("(Landroid/view/View;I)V"),
+                    &[JValue::Object(view), JValue::Int(index)],
+                )
+            }
+            Setter::Momentary(momentary) => call_static(
+                ctx,
+                jni_str!("segmentedSetMomentary"),
+                jni_sig!("(Landroid/view/View;Z)V"),
+                &[JValue::Object(view), JValue::Bool(momentary)],
+            ),
+            Setter::Enabled(enabled) => call_static(
+                ctx,
+                jni_str!("segmentedSetEnabled"),
+                jni_sig!("(Landroid/view/View;Z)V"),
+                &[JValue::Object(view), JValue::Bool(enabled)],
+            ),
+            Setter::SegmentTint(argb) => call_static(
+                ctx,
+                jni_str!("segmentedSetTint"),
+                jni_sig!("(Landroid/view/View;ZI)V"),
+                &[
+                    JValue::Object(view),
+                    JValue::Bool(argb.is_some()),
+                    JValue::Int(argb.unwrap_or(0)),
+                ],
+            ),
+            Setter::ContentDescription(_) => apply_shared(ctx, view, setter),
+            ref other => {
+                log::warn!(
+                    "frust-native-widgets: control '{KIND}' planned a setter its Android arm \
+                     does not implement ({other:?}) — ignored"
+                );
+                Ok(())
+            }
+        }
+    }
+
+    /// `FrustNativeControlFactory.segmentedAdd(group, label)`.
+    fn add_segment(
+        ctx: &mut NativeCtx<'_, '_>,
+        view: &JObject<'_>,
+        label: &str,
+    ) -> Result<(), NativeWidgetError> {
+        let class = ctx.class(FACTORY_CLASS)?;
+        ctx.run_jni("FrustNativeControlFactory.segmentedAdd", |env| {
+            let text = env.new_string(label)?;
+            env.call_static_method(
+                &class,
+                jni_str!("segmentedAdd"),
+                jni_sig!("(Landroid/view/View;Ljava/lang/String;)V"),
+                &[JValue::Object(view), JValue::Object(&text)],
+            )?
+            .v()
+        })
+    }
+
+    /// `ViewGroup.getChildCount()` — the live segment count the selection is
+    /// range-checked against ([`platform_index`]).
+    fn child_count(
+        ctx: &mut NativeCtx<'_, '_>,
+        view: &JObject<'_>,
+    ) -> Result<usize, NativeWidgetError> {
+        let count = ctx.run_jni("ViewGroup.getChildCount", |env| {
+            env.call_method(view, jni_str!("getChildCount"), jni_sig!("()I"), &[])?
+                .i()
+        })?;
+        Ok(usize::try_from(count).unwrap_or(0))
+    }
 }
 
 #[cfg(target_os = "ios")]
@@ -614,6 +882,22 @@ mod tests {
     }
 
     #[test]
+    fn a_momentary_create_with_a_selection_still_plans_it_for_the_platform_to_mute() {
+        let props = decode(&format!(
+            "{DAY_WEEK_MONTH},\"selected\":2,\"momentary\":true"
+        ));
+        let plan = SegmentedProps::plan(&SegmentedProps::platform_default(5), &props, None);
+        let momentary = plan
+            .iter()
+            .position(|s| matches!(s, Setter::Momentary(true)));
+        let selected = plan
+            .iter()
+            .position(|s| matches!(s, Setter::SelectedSegment(Some(2))));
+        // Momentary lands first, so Android's select sees the flag and draws no check.
+        assert!(momentary.is_some() && momentary < selected);
+    }
+
+    #[test]
     fn a_selection_change_alone_plans_exactly_one_setter() {
         let old = decode(&format!("{DAY_WEEK_MONTH},\"selected\":0"));
         let new = decode(&format!("{DAY_WEEK_MONTH},\"selected\":1"));
@@ -744,5 +1028,55 @@ mod tests {
         };
         assert_eq!(decode_event(&mut observed, toggle), None);
         assert_eq!(observed, None);
+    }
+
+    // --- the Android arm's wire contract -------------------------------------
+
+    #[test]
+    fn the_android_key_set_is_the_shared_flat_params() {
+        // The Android arm decodes through the one `SegmentedProps::decode`; the
+        // Kotlin helpers receive the plan's scalars, never raw keys. Pin the
+        // key spellings the api layer injects so a rename cannot desync them.
+        assert_eq!(KIND, "segmented");
+        assert_eq!(SEGMENT_COUNT, "segmentCount");
+        assert_eq!(SELECTED, "selected");
+        assert_eq!(MOMENTARY, "momentary");
+        assert_eq!(segment_key(7), "segment7");
+        let props = decode(&format!(
+            "{DAY_WEEK_MONTH},\"selected\":0,\"enabled\":false,\"tint\":-65536"
+        ));
+        assert_eq!(props.tint, Some(-65536));
+        assert!(!props.enabled);
+    }
+
+    #[test]
+    fn a_recorded_index_is_written_back_once_then_the_signal_clears() {
+        // Echo-guard sequence on the Android arm: the user taps segment 2
+        // (`observed`), the app rejects it and keeps 0. The next differing
+        // params re-plan the check; `update` then clears `observed`, so a
+        // following identical update plans nothing — a programmatic check
+        // never re-triggers itself.
+        let old = decode(&format!("{DAY_WEEK_MONTH},\"selected\":0"));
+        let mut observed = None;
+        decode_event(&mut observed, selection(2));
+        let new = decode(&format!(
+            "{DAY_WEEK_MONTH},\"selected\":0,\"enabled\":false"
+        ));
+        assert_eq!(
+            SegmentedProps::plan(&old, &new, observed),
+            vec![Setter::SelectedSegment(Some(0)), Setter::Enabled(false)]
+        );
+        observed = None;
+        assert!(SegmentedProps::plan(&new, &new, observed).is_empty());
+    }
+
+    #[test]
+    fn a_stale_unchecked_report_is_not_a_selection() {
+        // MaterialButtonToggleGroup also notifies for the button that just
+        // lost its check; the Kotlin listener drops those, and a negative
+        // index that slipped through still decodes to nothing.
+        let mut observed = Some(1);
+        assert_eq!(decode_event(&mut observed, selection(-1)), None);
+        assert_eq!(observed, Some(1));
     }
 }

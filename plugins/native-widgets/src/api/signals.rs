@@ -27,6 +27,7 @@
 use std::sync::Arc;
 
 use super::builders::TabId;
+use crate::chrome::{ActionId, ChromeEvent, ChromeSink, MenuItemId};
 use crate::controls::date_picker::CivilDate;
 use crate::events::EventPayload;
 
@@ -126,6 +127,60 @@ pub(super) fn on_tab_bar(
     })
 }
 
+/// An optional `Fn(ActionId)` chrome handler.
+pub(super) type ActionHandler = Option<Arc<dyn Fn(ActionId) + Send + Sync>>;
+
+/// The typed handlers a `native_scaffold` routes [`ChromeEvent`]s to, plus the
+/// catch-all every event also reaches (the `events_into` signal form).
+#[derive(Clone, Default)]
+pub(super) struct ChromeHandlers {
+    pub(super) on_tab_select: TabHandler,
+    pub(super) on_tab_reselect: TabHandler,
+    pub(super) on_action: ActionHandler,
+    pub(super) on_menu: Option<Arc<dyn Fn(ActionId, MenuItemId) + Send + Sync>>,
+    pub(super) on_back: Option<Arc<dyn Fn() + Send + Sync>>,
+    pub(super) on_event: Option<Arc<dyn Fn(ChromeEvent) + Send + Sync>>,
+}
+
+/// Wrap the scaffold's handlers into the sink `crate::chrome::set_sink`
+/// stores: each [`ChromeEvent`] variant reaches its own typed handler, and
+/// every event also reaches `on_event`. Selection is **requested**, never
+/// applied — the app confirms it by feeding `selected` back (controlled).
+pub(super) fn on_chrome(handlers: ChromeHandlers) -> ChromeSink {
+    Arc::new(move |event| {
+        if let Some(all) = &handlers.on_event {
+            all(event.clone());
+        }
+        match event {
+            ChromeEvent::TabSelected(id) => {
+                if let Some(handler) = &handlers.on_tab_select {
+                    handler(id);
+                }
+            }
+            ChromeEvent::TabReselected(id) => {
+                if let Some(handler) = &handlers.on_tab_reselect {
+                    handler(id);
+                }
+            }
+            ChromeEvent::ActionTapped(id) => {
+                if let Some(handler) = &handlers.on_action {
+                    handler(id);
+                }
+            }
+            ChromeEvent::MenuItemChosen(action, item) => {
+                if let Some(handler) = &handlers.on_menu {
+                    handler(action, item);
+                }
+            }
+            ChromeEvent::BackPressed => {
+                if let Some(handler) = &handlers.on_back {
+                    handler();
+                }
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,6 +218,52 @@ mod tests {
         );
         cb(EventPayload::Reselected(0));
         assert!(selected.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn on_chrome_routes_each_variant_to_its_handler_and_every_event_to_the_catch_all() {
+        let log = Arc::new(Mutex::new(Vec::<String>::new()));
+        let push = |tag: &'static str| {
+            let log = Arc::clone(&log);
+            move |detail: String| log.lock().unwrap().push(format!("{tag}:{detail}"))
+        };
+        let (select, reselect, action, menu, back, all) = (
+            push("select"),
+            push("reselect"),
+            push("action"),
+            push("menu"),
+            push("back"),
+            push("all"),
+        );
+        let sink = on_chrome(ChromeHandlers {
+            on_tab_select: Some(Arc::new(move |id| select(id.to_string()))),
+            on_tab_reselect: Some(Arc::new(move |id| reselect(id.to_string()))),
+            on_action: Some(Arc::new(move |id| action(id.to_string()))),
+            on_menu: Some(Arc::new(move |a, m| menu(format!("{a}/{m}")))),
+            on_back: Some(Arc::new(move || back(String::new()))),
+            on_event: Some(Arc::new(move |event| all(format!("{event:?}")))),
+        });
+        sink(ChromeEvent::TabSelected(TabId::new("a")));
+        sink(ChromeEvent::TabReselected(TabId::new("b")));
+        sink(ChromeEvent::ActionTapped("add".into()));
+        sink(ChromeEvent::MenuItemChosen("more".into(), "share".into()));
+        sink(ChromeEvent::BackPressed);
+        let log = log.lock().unwrap();
+        for expected in [
+            "select:a",
+            "reselect:b",
+            "action:add",
+            "menu:more/share",
+            "back:",
+        ] {
+            assert!(log.iter().any(|line| line == expected), "{expected}");
+        }
+        assert_eq!(log.iter().filter(|l| l.starts_with("all:")).count(), 5);
+    }
+
+    #[test]
+    fn on_chrome_without_handlers_drops_events() {
+        on_chrome(ChromeHandlers::default())(ChromeEvent::BackPressed);
     }
 
     #[test]

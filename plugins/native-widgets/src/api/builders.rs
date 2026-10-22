@@ -4,7 +4,7 @@
 //! `native_stepper`/`native_tab_bar`, each
 //! composing exactly one [`platform_view`] slot behind this crate's one
 //! factory per platform (the "N controls = N slots" envelope) —
-//! `native_segmented`/`native_stepper` only on iOS and macOS and
+//! `native_segmented` on iOS, macOS and Android, `native_stepper` only on iOS and macOS and
 //! `native_tab_bar` only on iOS; elsewhere each renders its own refusal
 //! banner at compile time ([`SEGMENTED_ARM`]/[`STEPPER_ARM`]/
 //! [`TAB_BAR_ARM`]).
@@ -210,12 +210,12 @@ pub(super) fn placeholder<State: 'static>(
 
 /// The sized, slot-clipped [`RefusalBanner`] itself, with caller-chosen
 /// wording — [`placeholder`]'s body, shared with the compile-time
-/// no-platform-arm fallback ([`NativeSegmentedView`] on Android, see
-/// [`SEGMENTED_ARM`]), which refuses for a different reason and so says a
+/// no-platform-arm fallback ([`NativeSegmentedView`] on Linux/Windows/web, see
+/// [`SEGMENTED_ARM`]) and the scaffold's one-per-app refusal, which refuses for a different reason and so says a
 /// different thing. Logging is the caller's: each refusal reason logs once
 /// under its own `Once`.
 // erasure: keep result is a child of mixed-type if/else arms and AnyView-returning builders
-fn banner_placeholder<State: 'static>(
+pub(super) fn banner_placeholder<State: 'static>(
     size: Option<(f64, f64)>,
     label: String,
     description: String,
@@ -1566,9 +1566,10 @@ impl Component for NativeDatePickerView {
 
 /// Whether this build's platform arm registers the segmented control — the
 /// crate's first **compile-time** platform gate on a builder. `Segmented` is
-/// in `crate::controls::APPLE_KINDS`: iOS and macOS carry a `NativeWidget`
-/// impl, Android does not (decision D2 — `crate::controls::segmented`'s module
-/// doc), and neither does any host target. Where it is `false`,
+/// in `crate::controls::APPLE_KINDS` and `crate::controls::MATERIAL_KINDS`:
+/// iOS, macOS and Android (a `MaterialButtonToggleGroup`, decision C7 —
+/// `crate::controls::segmented`'s module doc) carry a `NativeWidget` impl;
+/// Linux, Windows and web do not. Where it is `false`,
 /// [`NativeSegmentedView`] renders the frust-drawn refusal banner
 /// ([`RefusalBanner`], via [`banner_placeholder`]) instead of publishing a slot
 /// no registered kind could serve — a visible, screen-reader-announced
@@ -1577,11 +1578,10 @@ impl Component for NativeDatePickerView {
 /// A `cfg`-selected constant rather than `cfg`'d code paths so both branches
 /// compile, and are host-tested ([`NativeSegmentedView::build_for_arm`]), on
 /// every target.
-#[cfg(any(target_os = "ios", target_os = "macos"))]
+#[cfg(any(target_os = "ios", target_os = "macos", target_os = "android"))]
 const SEGMENTED_ARM: bool = true;
-/// See the Apple-arm definition above: no segmented arm on Android (D2) or on
-/// any host target.
-#[cfg(not(any(target_os = "ios", target_os = "macos")))]
+/// See the definition above: no segmented arm on Linux, Windows or web.
+#[cfg(not(any(target_os = "ios", target_os = "macos", target_os = "android")))]
 const SEGMENTED_ARM: bool = false;
 
 /// The banner's visible label on a target with no segmented arm.
@@ -1589,9 +1589,9 @@ const SEGMENTED_UNAVAILABLE_LABEL: &str = "Native segmented control unavailable"
 
 /// The banner's explanation on a target with no segmented arm — names the
 /// missing Android arm and where it is tracked.
-const SEGMENTED_UNAVAILABLE_DESCRIPTION: &str = "native_segmented has no Android arm in this \
-     build (the framework has no segmented control; a Material-backed Android arm is a \
-     follow-up plan) — rendering a frust placeholder instead of an empty native slot.";
+const SEGMENTED_UNAVAILABLE_DESCRIPTION: &str = "native_segmented has no arm on this \
+     platform (it ships on iOS, macOS and Android; Linux, Windows and web have no native \
+     segmented control) — rendering a frust placeholder instead of an empty native slot.";
 
 /// Log the no-segmented-arm fallback exactly once, crate-wide.
 static SEGMENTED_NO_ARM_LOGGED: Once = Once::new();
@@ -1599,16 +1599,16 @@ static SEGMENTED_NO_ARM_LOGGED: Once = Once::new();
 fn warn_no_segmented_arm_once() {
     SEGMENTED_NO_ARM_LOGGED.call_once(|| {
         log::warn!(
-            "frust-native-widgets: native_segmented is an iOS/macOS-only control in this build \
-             (no Android arm yet — a Material-backed one is a follow-up plan); rendering the \
-             frust-drawn refusal banner instead of a native slot"
+            "frust-native-widgets: native_segmented has no arm on this platform (iOS, macOS and Android only); \
+             rendering the frust-drawn refusal banner instead of a native slot"
         );
     });
 }
 
 /// A real segmented control rendered from pure Rust — `UISegmentedControl` on
-/// iOS/iPadOS, `NSSegmentedControl` on macOS, and a frust-drawn refusal banner
-/// everywhere else (Android included: see [`SEGMENTED_ARM`]). A
+/// iOS/iPadOS, `NSSegmentedControl` on macOS, `MaterialButtonToggleGroup` on
+/// Android (which needs a Material3 app theme), and a frust-drawn refusal
+/// banner everywhere else (see [`SEGMENTED_ARM`]). A
 /// **controlled** component, like [`NativeSwitchView`]: the app owns
 /// `selected`, and a tap only ever arrives through [`Self::on_select`] as a
 /// *requested* index. Build one with [`native_segmented`].
@@ -2135,6 +2135,31 @@ impl TabItem {
     /// This tab's id.
     pub fn id(&self) -> &TabId {
         &self.id
+    }
+
+    /// The title shown under (or beside) the icon.
+    pub(crate) fn title(&self) -> &str {
+        &self.title
+    }
+
+    /// The icon shown while the tab is not selected.
+    pub(crate) fn icon(&self) -> &TabIcon {
+        &self.icon
+    }
+
+    /// The selected-state icon, if one was set (getter for [`Self::selected_icon`]).
+    pub(crate) fn selected_icon_ref(&self) -> Option<&TabIcon> {
+        self.selected_icon.as_ref()
+    }
+
+    /// The badge text, if any (getter for [`Self::badge`]).
+    pub(crate) fn badge_text(&self) -> Option<&str> {
+        self.badge.as_deref()
+    }
+
+    /// Whether the tab can be tapped (getter for [`Self::enabled`]).
+    pub(crate) fn is_enabled(&self) -> bool {
+        self.enabled
     }
 }
 
@@ -2895,14 +2920,19 @@ mod tests {
     }
 
     #[test]
-    fn the_segmented_arm_gate_is_exactly_the_apple_targets() {
+    fn the_segmented_arm_gate_is_the_apple_and_android_targets() {
         assert_eq!(
             SEGMENTED_ARM,
-            cfg!(any(target_os = "ios", target_os = "macos")),
-            "Android (decision D2) and every host target render the banner"
+            cfg!(any(
+                target_os = "ios",
+                target_os = "macos",
+                target_os = "android"
+            )),
+            "Linux, Windows, web and every host target render the banner"
         );
-        assert!(SEGMENTED_UNAVAILABLE_DESCRIPTION.contains("Android"));
-        assert!(SEGMENTED_UNAVAILABLE_DESCRIPTION.contains("follow-up"));
+        assert!(SEGMENTED_UNAVAILABLE_DESCRIPTION.contains("Linux"));
+        assert!(SEGMENTED_UNAVAILABLE_DESCRIPTION.contains("Windows"));
+        assert!(SEGMENTED_UNAVAILABLE_DESCRIPTION.contains("web"));
     }
 
     #[test]

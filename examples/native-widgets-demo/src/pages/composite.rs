@@ -180,15 +180,26 @@ fn composite_block(visible: bool, presses: u32, title: usize) -> Vec<frust::Flex
     vec![intro, second]
 }
 
-/// See the page-fn contract in [`crate::pages`] and the [module docs](self).
-pub fn page(_state: &S) -> AnyView<S> {
+/// The deep-link slug of this section: the anchor its tab scrolls to.
+pub const ANCHOR: &str = "Composite";
+
+/// The section body, without a page header: the rows the Controls tab stacks
+/// under its own section header. See the [module docs](self).
+pub fn section(_state: &S) -> Vec<frust::FlexChild<S>> {
     // Tracked: the card's native click writes `presses_sig` from the
     // platform listener, outside any frust event pass.
     let visible = visible_sig().get();
     let presses = presses_sig().get();
     let title = title_sig().get();
 
+    composite_block(visible, presses, title)
+}
+
+/// The whole section as a standalone page: its [`page_header`] then
+/// [`section`]. Kept for [`super::current`] and the headless gate tests; the
+/// Controls tab stacks [`section`] under its own section header instead.
+pub fn page(state: &S) -> AnyView<S> {
     let mut children = vec![page_header(SECTION)];
-    children.extend(composite_block(visible, presses, title));
+    children.extend(section(state));
     page_column(children)
 }

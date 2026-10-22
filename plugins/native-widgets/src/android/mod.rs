@@ -100,7 +100,27 @@
 //! The package is baked into every symbol name below and into
 //! [`ctx::LISTENER_CLASS`], so this is a one-time move: it may not happen
 //! again once shipped.
+//!
+//! ## `FrustNativeChrome` (the app-chrome host — not a control)
+//!
+//! A fourth class in the same package, also outside the control surface: the
+//! Material 3 bars a `native_scaffold` publishes its chrome spec to
+//! (decision C3). [`chrome::AndroidChromeHost`] drives it, and its two
+//! callbacks, `nativeOnChromeEvent(generation, kind, detail)` and
+//! `nativeOnChromeLost(generation)`, are exported as
+//! `Java_dev_frust_nativewidgets_FrustNativeChrome_nativeOnChromeEvent` and
+//! `..._nativeOnChromeLost` by [`chrome`], beside the host — the presenter's
+//! precedent, so this module's own four exports stay pinned to the control
+//! classes.
+//! `tests/kotlin_conformance.rs` pins the chrome's names separately. Behind
+//! `frust-api`, like `crate::chrome`.
 
+// The chrome arm: `AndroidChromeHost`, the process-wide slot's host on
+// Android. Tests run the slot over `RecordingChromeHost` instead, so a test
+// build leaves the arm uncalled (the iOS arm's shape).
+#[cfg(feature = "frust-api")]
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) mod chrome;
 mod ctx;
 // Theme ladder L3: registering Glyph font bytes with Android and
 // creating/caching the resulting `Typeface` objects. `pub(crate)`, not
@@ -119,6 +139,8 @@ use jni::strings::JNIString;
 use jni::sys::{jint, jlong, jobject};
 use jni::{Env, EnvUnowned, jni_str};
 
+#[cfg(all(feature = "frust-api", not(test)))]
+pub(crate) use chrome::AndroidChromeHost;
 pub(crate) use ctx::NativeCtx;
 // Re-exported so code outside this module reuses the crate's own
 // exception-extracting helper instead of re-implementing a weaker bare
@@ -129,7 +151,9 @@ pub(crate) use ctx::NativeCtx;
 pub(crate) use ctx::run_jni;
 
 use crate::NativeWidgetError;
-use crate::controls::{button, date_picker, image, label, progress, slider, spinner, switch};
+use crate::controls::{
+    button, date_picker, image, label, progress, segmented, slider, spinner, switch,
+};
 use crate::registry::SlotId;
 use crate::runtime::{self, NativeEvent, NativeRuntime, UpdateOutcome};
 
@@ -158,6 +182,8 @@ pub(crate) fn register_controls(runtime: &mut NativeRuntime) {
     runtime.register::<image::Image>(image::KIND);
     runtime.register::<spinner::Spinner>(spinner::KIND);
     runtime.register::<date_picker::DatePicker>(date_picker::KIND);
+    // The Material-backed kinds (`crate::controls::MATERIAL_KINDS`).
+    runtime.register::<segmented::Segmented>(segmented::KIND);
 }
 
 // --- exports: FrustNativeControlFactory -------------------------------------

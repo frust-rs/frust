@@ -1,7 +1,7 @@
 //! The v1 controls — eight shared (`Button`, `Label`, `Switch`, `Slider`,
-//! `ProgressBar`, `Image`, `Spinner`, `DatePicker`), the two
-//! Apple-arm-only controls
-//! `Segmented` and `Stepper` ([`APPLE_KINDS`]), and the iOS-only `TabBar`
+//! `ProgressBar`, `Image`, `Spinner`, `DatePicker`), `Segmented`
+//! ([`MATERIAL_KINDS`] on Android, [`APPLE_KINDS`] on iOS/macOS), the
+//! Apple-arm-only `Stepper` ([`APPLE_KINDS`]), and the iOS-only `TabBar`
 //! ([`IOS_ONLY_KINDS`]) — each an internal
 //! [`NativeWidget`](crate::runtime::NativeWidget)
 //! impl over [`crate::runtime`], with every property write a direct platform
@@ -140,19 +140,27 @@ use self::typeface::Typeface;
 
 // --- the kind tables ----------------------------------------------------------
 //
-// Which control kinds each platform arm registers, as three tables — one per
+// Which control kinds each platform arm registers, as four tables — one per
 // arm-membership shape, because membership is per ARM, not per vendor:
 //
 // | table | Android | iOS | macOS |
 // |---|---|---|---|
 // | `SHARED_KINDS` | yes | yes | yes |
+// | `MATERIAL_KINDS` | yes | — | — |
 // | `APPLE_KINDS` | — | yes | yes |
 // | `IOS_ONLY_KINDS` | — | yes | — |
+//
+// `Segmented` is in BOTH `MATERIAL_KINDS` (Android: `MaterialButtonToggleGroup`)
+// and `APPLE_KINDS` (iOS/macOS), so it is registered on all three arms yet is
+// not a `SHARED_KINDS` row — the kind strings in two tables are the one
+// deliberate overlap, which `tests::the_kind_tables_are_the_shipped_wire_strings`
+// allows for exactly this kind.
 //
 // A kind outside an arm's tables has no `NativeWidget` impl there, and its
 // builder renders a refusal banner on that target at compile time
 // (`crate::api::builders`). Every arm's `register_controls` registers exactly
-// its tables, in this order (shared, then Apple, then iOS-only) — pinned
+// its tables, in this order (shared, then Material on Android / Apple on the
+// Apple arms, then iOS-only) — pinned
 // host-side by
 // `tests::every_register_controls_registers_exactly_its_kind_tables`, and on
 // the two Apple arms additionally checked at runtime (a `debug_assert!` loop
@@ -171,9 +179,15 @@ pub(crate) const SHARED_KINDS: [&str; 8] = [
     date_picker::KIND,
 ];
 
-/// The kinds only the two Apple arms (iOS, macOS) register — Android has no
-/// `NativeWidget` impl for these yet, and its builder path renders the
-/// refusal banner instead of a slot.
+/// The Android-only additions: kinds backed by a Material Components view
+/// (`MaterialButtonToggleGroup`), which the plugin's Gradle module already
+/// depends on. `Segmented` also appears in [`APPLE_KINDS`]; membership is per
+/// arm, so the Android arm registers this table and the Apple arms theirs.
+pub(crate) const MATERIAL_KINDS: [&str; 1] = [segmented::KIND];
+
+/// The kinds the two Apple arms (iOS, macOS) register — `Stepper` has no
+/// Android `NativeWidget` impl yet, and its builder path renders the refusal
+/// banner instead of a slot; `Segmented` is here and in [`MATERIAL_KINDS`].
 pub(crate) const APPLE_KINDS: [&str; 2] = [segmented::KIND, stepper::KIND];
 
 /// The kinds only the iOS arm registers — the macOS arm has no counterpart
@@ -1147,10 +1161,10 @@ pub(crate) mod platform {
                 warn_size_class_unsupported(size_class);
                 Ok(())
             }
-            // `Segmented`'s four setters: that control has no Android arm
-            // (`crate::controls::APPLE_KINDS`; `segmented.rs`'s module doc),
-            // so no control this arm registers ever plans one. Reaching here
-            // is a plan/apply drift bug — warned, never a dead slot.
+            // `Segmented`'s four setters are applied by that control's own
+            // Android `apply` (`segmented.rs`), which forwards only the shared
+            // `ContentDescription` here — so reaching this arm is a
+            // plan/apply drift bug, warned, never a dead slot.
             Setter::Segments(_)
             | Setter::SelectedSegment(_)
             | Setter::Momentary(_)
@@ -2183,6 +2197,11 @@ mod tests {
              register against them"
         );
         assert_eq!(
+            MATERIAL_KINDS,
+            ["segmented"],
+            "the Android-only (Material-backed) kinds are a shipped wire contract too"
+        );
+        assert_eq!(
             APPLE_KINDS,
             ["segmented", "stepper"],
             "the Apple-arm-only kinds are a shipped wire contract too"
@@ -2192,6 +2211,8 @@ mod tests {
             ["tab_bar"],
             "the iOS-only kinds are a shipped wire contract too"
         );
+        // `MATERIAL_KINDS` is left out on purpose: `Segmented` sits in it and in
+        // `APPLE_KINDS`, one arm each, never two registrations on one arm.
         let mut unique: Vec<&str> = SHARED_KINDS
             .iter()
             .chain(&APPLE_KINDS)
@@ -2248,12 +2269,16 @@ mod tests {
         // `#[cfg(target_os = ...)]`-gated, so no single host test can CALL all
         // three — but every host can READ all three. Each arm must register
         // exactly its tables, in table order, line for line: Android the
-        // shared kinds only (an Apple-only kind registered there would be a
-        // control with no Android `NativeWidget` impl — it would not even
-        // compile), macOS the shared kinds then the Apple ones, and iOS the
+        // shared kinds then the Material ones (an Apple-only kind registered
+        // there would be a control with no Android `NativeWidget` impl — it
+        // would not even compile), macOS the shared kinds then the Apple ones, and iOS the
         // shared kinds, the Apple ones, then the iOS-only ones — per-arm
         // membership, the kind-table matrix above `SHARED_KINDS`.
-        let shared: Vec<&str> = SHARED_KINDS.to_vec();
+        let android: Vec<&str> = SHARED_KINDS
+            .iter()
+            .chain(&MATERIAL_KINDS)
+            .copied()
+            .collect();
         let macos: Vec<&str> = SHARED_KINDS.iter().chain(&APPLE_KINDS).copied().collect();
         let ios: Vec<&str> = SHARED_KINDS
             .iter()
@@ -2262,7 +2287,11 @@ mod tests {
             .copied()
             .collect();
         for (file, source, expected) in [
-            ("android/mod.rs", include_str!("../android/mod.rs"), &shared),
+            (
+                "android/mod.rs",
+                include_str!("../android/mod.rs"),
+                &android,
+            ),
             ("apple/mod.rs", include_str!("../apple/mod.rs"), &ios),
             ("appkit/mod.rs", include_str!("../appkit/mod.rs"), &macos),
         ] {

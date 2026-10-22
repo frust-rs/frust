@@ -1,15 +1,16 @@
-//! Chrome and helpers every section page shares: the text roles (accent
+//! Helpers every tab body and section shares: the text roles (accent
 //! heading, muted caption), spacing, the padded showcase [`block`], the
 //! side-by-side [`pair_row`] (REAL control left, frust-drawn right, one cell
 //! size), the page-local signal macro, the embedded demo image, the
-//! documented at-rest slot count per page ([`AT_REST_SLOTS`]) with the
-//! [`page_header`] that states it, and [`AnchorProbe`] — the window-rect
-//! helper an action sheet anchors on.
+//! documented at-rest slot counts per tab and per section ([`AT_REST_SLOTS`],
+//! [`SECTION_AT_REST_SLOTS`]) with the [`page_header`] that states them, the
+//! scrolling [`tab_body`], and [`AnchorProbe`] — the window-rect helper an
+//! action sheet anchors on.
 //!
 //! Every color resolves from the live [`Theme`] (Glyph baseline fallback), so
-//! each page follows the app-bar brightness toggle.
+//! each page follows the brightness toggle.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
@@ -21,11 +22,12 @@ use frust::authoring::{
 use frust::{
     Align, Alignment, AnyView, Axis, ButtonStyle, Color, CrossAxisAlignment, EdgeInsets, Either,
     FlexChild, FlexView, Get, GetUntracked, ImageSource, Padding, Set, SizedBox, Theme, any,
-    button, inflexible, text, use_context,
+    button, inflexible, safe_area, scroll_view, text, use_context,
 };
 use frust_native_widgets::{AnchorRect, live_slot_count};
 
-use crate::{NativeWidgetsDemoState, SECTION_LABELS};
+use super::sandwich::SANDWICH_AT_REST_SLOTS;
+use crate::{NativeWidgetsDemoState, SECTION_LABELS, Tab};
 
 /// Shorthand for the one app state every page is generic over.
 pub type S = NativeWidgetsDemoState;
@@ -199,10 +201,21 @@ impl NativeClasses {
 // At-rest slot counts + the page header
 // ---------------------------------------------------------------------------
 
-/// Native `platform_view` slots `native_segmented` + `native_stepper` add:
-/// two on iOS/macOS, none elsewhere (a frust-drawn refusal banner instead).
-const SEGMENTED_STEPPER_SLOTS: usize = if cfg!(any(target_os = "ios", target_os = "macos")) {
-    2
+/// The one slot `native_segmented` adds where it has a native arm
+/// (iOS/macOS/Android); a refusal banner elsewhere.
+const SEGMENTED_SLOTS: usize = if cfg!(any(
+    target_os = "ios",
+    target_os = "macos",
+    target_os = "android"
+)) {
+    1
+} else {
+    0
+};
+
+/// The one slot `native_stepper` adds on iOS/macOS; a banner elsewhere.
+const STEPPER_SLOTS: usize = if cfg!(any(target_os = "ios", target_os = "macos")) {
+    1
 } else {
     0
 };
@@ -210,52 +223,140 @@ const SEGMENTED_STEPPER_SLOTS: usize = if cfg!(any(target_os = "ios", target_os 
 /// The one slot `native_tab_bar` adds on iOS/iPadOS; a banner elsewhere.
 const TAB_BAR_SLOTS: usize = if cfg!(target_os = "ios") { 1 } else { 0 };
 
-/// The documented number of native `platform_view` slots each page publishes
-/// **at rest** (every toggle at its default), index-aligned with
-/// [`SECTION_LABELS`] and resolved for this build's target:
-///
-/// | Page | Slots at rest | Grows to |
-/// |---|---|---|
-/// | Controls | 6 — the six pairs' native column | — |
-/// | macOS | 2 — the `Cover`/`Contain` image pair | — |
-/// | New | 4 on iOS/macOS, 2 elsewhere (segmented + stepper are banners) | — |
-/// | Alerts | 0 — a presentation is never a slot | — |
-/// | TabBar | 1 on iOS/iPadOS, 0 elsewhere (a banner) | — |
-/// | Sheet | 0 | — |
-/// | Composite | 0 — the card is behind a default-off toggle | 1 (ONE slot for the whole card) |
-/// | Stress | 0 | +6 while the cycler's group is mounted, +50 with the stress toggle on |
-///
-/// This is the gate constant each page's `Live native slots` readout is read
-/// against. Adding an always-mounted slot to a page changes its entry here —
-/// put an extra demo behind a toggle instead. A Mode B surface whose
-/// translucency the platform refused renders every builder as a frust-drawn
-/// placeholder, which publishes no slot.
-pub const AT_REST_SLOTS: [usize; SECTION_LABELS.len()] =
-    [6, 2, 2 + SEGMENTED_STEPPER_SLOTS, 0, TAB_BAR_SLOTS, 0, 0, 0];
-
-/// [`AT_REST_SLOTS`] for `section`, `0` out of range.
-pub fn at_rest_slots(section: usize) -> usize {
-    AT_REST_SLOTS.get(section).copied().unwrap_or(0)
+/// The [`SECTION_LABELS`] indices by name, so a tab's section list reads as
+/// the sections it shows rather than as bare positions.
+mod section {
+    pub const CONTROLS: usize = 0;
+    pub const MACOS: usize = 1;
+    pub const NEW: usize = 2;
+    pub const ALERTS: usize = 3;
+    pub const TAB_BAR: usize = 4;
+    pub const SHEET: usize = 5;
+    pub const COMPOSITE: usize = 6;
+    pub const STRESS: usize = 7;
 }
 
-/// The expected value [`live_readout`] displays for `section`: [`at_rest_slots`]
-/// on a target with a native host (Android/iOS/macOS), or `0` everywhere
-/// else. A Linux/Windows desktop preview has no [`frust_native_widgets`]
-/// runtime at all — [`live_slot_count`] always reads `0` there (its own doc:
-/// "0 ... on a platform with no live runtime at all") — so comparing it
-/// against a nonzero [`AT_REST_SLOTS`] entry (e.g. Controls' 6) would show a
-/// count that target can never reach. [`AT_REST_SLOTS`]/[`at_rest_slots`]
-/// stay exactly as documented — the structural count `tests/smoke.rs`'s
-/// `every_page_publishes_its_documented_at_rest_slot_count` asserts, which is
-/// unaffected by whether a native runtime exists; only this header's
-/// displayed comparison changes.
-fn expected_live_slots(section: usize) -> usize {
+/// The documented native `platform_view` slots each section publishes at
+/// rest (every toggle at its default), by [`SECTION_LABELS`] index, for this
+/// target. A presentation is never a slot (Alerts, Sheet: 0); New counts the
+/// spinner and date picker plus segmented and stepper where native; the
+/// Composite card (1 slot) and the Stress cycler (+6) and grid (+50) sit
+/// behind default-off toggles. A Mode B surface whose translucency the
+/// platform refused renders placeholders, which publish no slot.
+pub const SECTION_AT_REST_SLOTS: [usize; SECTION_LABELS.len()] = {
+    let mut slots = [0; SECTION_LABELS.len()];
+    slots[section::CONTROLS] = 6;
+    slots[section::MACOS] = 2;
+    slots[section::NEW] = 2 + SEGMENTED_SLOTS + STEPPER_SLOTS;
+    slots[section::TAB_BAR] = TAB_BAR_SLOTS;
+    slots
+};
+
+/// Home's one slot: the Favorites card's `native_button`. A `native_button`
+/// publishes its slot on every target, so this does not vary.
+const HOME_SLOTS: usize = 1;
+
+/// The [`SECTION_LABELS`] indices each tab's body shows, by [`Tab::index`]
+/// (Home has none): the one list [`AT_REST_SLOTS`] sums, so reordering or
+/// moving a section is a change to this table alone.
+pub const TAB_SECTIONS: [&[usize]; Tab::COUNT] = [
+    &[],
+    &[section::CONTROLS, section::NEW, section::COMPOSITE],
+    &[section::ALERTS, section::SHEET],
+    &[section::MACOS, section::TAB_BAR, section::STRESS],
+];
+
+/// The sum of [`SECTION_AT_REST_SLOTS`] over `sections`.
+const fn section_slots(sections: &[usize]) -> usize {
+    let mut total = 0;
+    let mut i = 0;
+    while i < sections.len() {
+        total += SECTION_AT_REST_SLOTS[sections[i]];
+        i += 1;
+    }
+    total
+}
+
+/// The documented native slots each tab publishes at rest with its whole
+/// body laid out visible (a clipped body publishes fewer), by [`Tab::index`]:
+/// Home's [`HOME_SLOTS`]; elsewhere the sum of its [`TAB_SECTIONS`]' [`SECTION_AT_REST_SLOTS`] (plus
+/// [`SANDWICH_AT_REST_SLOTS`] on Lab). The chrome is never a slot.
+///
+/// **Hidden tabs.** The tab stack lays out every tab but paints only the
+/// selected one, and a slot is published only while painted: from the first
+/// frame after a switch the published set is the new tab's alone (measured
+/// headless on macOS over consecutive frames: Controls 10, Lab 4, Home 1).
+/// The host then disposes the unpublished slots, at its own pace — so the
+/// live count may lag a switch — and re-creates them when the tab returns.
+pub const AT_REST_SLOTS: [usize; Tab::COUNT] = [
+    HOME_SLOTS + section_slots(TAB_SECTIONS[0]),
+    section_slots(TAB_SECTIONS[1]),
+    section_slots(TAB_SECTIONS[2]),
+    section_slots(TAB_SECTIONS[3]) + SANDWICH_AT_REST_SLOTS,
+];
+
+/// What a header, readout or slot count is for: a whole tab, or one section
+/// by its index into [`SECTION_LABELS`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageKey {
+    /// A tab body.
+    Tab(Tab),
+    /// One section page.
+    Section(usize),
+}
+
+impl From<Tab> for PageKey {
+    fn from(tab: Tab) -> Self {
+        PageKey::Tab(tab)
+    }
+}
+
+impl From<usize> for PageKey {
+    fn from(section: usize) -> Self {
+        PageKey::Section(section)
+    }
+}
+
+impl PageKey {
+    /// The heading a [`page_header`] shows.
+    fn title(self) -> &'static str {
+        match self {
+            PageKey::Tab(tab) => tab.title(),
+            PageKey::Section(section) => SECTION_LABELS.get(section).copied().unwrap_or("?"),
+        }
+    }
+
+    /// The one-line summary a [`page_header`] shows.
+    fn summary(self) -> &'static str {
+        match self {
+            PageKey::Tab(tab) => super::TAB_SUMMARIES[tab.index()],
+            PageKey::Section(section) => {
+                super::SECTION_SUMMARIES.get(section).copied().unwrap_or("")
+            }
+        }
+    }
+}
+
+/// The documented at-rest count for a tab ([`AT_REST_SLOTS`]) or a section
+/// ([`SECTION_AT_REST_SLOTS`]), `0` for an out-of-range section.
+pub fn at_rest_slots(key: impl Into<PageKey>) -> usize {
+    match key.into() {
+        PageKey::Tab(tab) => AT_REST_SLOTS[tab.index()],
+        PageKey::Section(section) => SECTION_AT_REST_SLOTS.get(section).copied().unwrap_or(0),
+    }
+}
+
+/// The value [`live_readout`] expects: [`at_rest_slots`] on a target with a
+/// native host (Android/iOS/macOS), `0` elsewhere — a Linux/Windows preview
+/// has no runtime, so [`live_slot_count`] always reads `0` there. The
+/// structural counts stay as documented either way.
+fn expected_live_slots(key: PageKey) -> usize {
     if cfg!(any(
         target_os = "android",
         target_os = "ios",
         target_os = "macos"
     )) {
-        at_rest_slots(section)
+        at_rest_slots(key)
     } else {
         0
     }
@@ -263,23 +364,28 @@ fn expected_live_slots(section: usize) -> usize {
 
 local_sig!(live_refresh_sig, u32, 0);
 
+/// The signal every [`live_readout`] subscribes to: bump it (from an event
+/// handler, on any thread) to re-sample [`live_slot_count`] — the chrome's
+/// "Re-read live slots" menu item does.
+pub fn live_refresh() -> frust::RwSignal<u32> {
+    live_refresh_sig()
+}
+
 /// The live-slot readout line plus its "Re-read" chip.
 ///
-/// [`live_slot_count`] is a plain function sampled when the page rebuilds, and
-/// a newly mounted slot is created by the host after the paint that published
-/// it — so the value shown on a page's first frame can still include the
-/// previous page's slots. "Re-read" forces one rebuild (the tracked read below
-/// subscribes the page to it) to sample it again. Diagnostics only:
-/// `live_slot_count` carries no compatibility promise. The "expected at rest"
-/// figure is [`expected_live_slots`], not [`at_rest_slots`] directly — see its
-/// doc comment for why they diverge on a no-native-host target.
-pub fn live_readout(section: usize) -> Vec<FlexChild<S>> {
+/// [`live_slot_count`] is sampled when the page rebuilds, and a new slot is
+/// created by the host after the paint that published it — so a page's first
+/// frame can still count the previous page's slots. "Re-read" forces a
+/// rebuild to sample it again. Diagnostics only: `live_slot_count` carries no
+/// compatibility promise.
+pub fn live_readout(key: impl Into<PageKey>) -> Vec<FlexChild<S>> {
+    let key = key.into();
     let _ = live_refresh_sig().get();
     vec![
         inflexible(readout(format!(
             "Live native slots (process): {} \u{2014} expected at rest here: {}",
             live_slot_count(),
-            expected_live_slots(section)
+            expected_live_slots(key)
         ))),
         gap(4.0),
         inflexible(chip("Re-read live count", |_: &mut S| {
@@ -288,21 +394,49 @@ pub fn live_readout(section: usize) -> Vec<FlexChild<S>> {
     ]
 }
 
-/// A page's opening block: the section label as a heading, its
-/// [`SECTION_SUMMARIES`](super::SECTION_SUMMARIES) line, the platform this
-/// build runs on, and the live-slot readout against the documented at-rest
-/// count.
-pub fn page_header(section: usize) -> FlexChild<S> {
+/// A tab's or section's opening block: its title as a heading, its summary,
+/// the platform this build runs on, and the live-slot readout against the
+/// documented at-rest count.
+pub fn page_header(key: impl Into<PageKey>) -> FlexChild<S> {
+    let key = key.into();
     let mut rows = vec![
-        inflexible(text(SECTION_LABELS[section]).size(22.0).color(accent())),
+        inflexible(text(key.title()).size(22.0).color(accent())),
         gap(6.0),
-        inflexible(caption(super::SECTION_SUMMARIES[section])),
+        inflexible(caption(key.summary())),
         gap(6.0),
         inflexible(caption(format!("This build: {PLATFORM}."))),
         gap(4.0),
     ];
-    rows.extend(live_readout(section));
+    rows.extend(live_readout(key));
     block(rows)
+}
+
+/// A tab's root body: `children` in a column (each brings its own padding,
+/// like [`page_column`]), the safe area inside the tab's own scroll view so
+/// content starts below floating bars at rest and scrolls under them. The
+/// [`body_inset_probe`] around the safe area records the top inset it applies,
+/// which is where the body's first content sits.
+// erasure: keep every tab's page fn returns this as its AnyView root (page-fn contract)
+pub fn tab_body(state: &S, tab: Tab, children: Vec<FlexChild<S>>) -> AnyView<S> {
+    any(viewport_probe(
+        viewport_key(tab),
+        scroll_view(body_inset_probe(
+            viewport_key(tab),
+            safe_area(FlexView::new(Axis::Vertical, children)),
+        ))
+        .controller(state.scroll(tab).clone()),
+    ))
+}
+
+/// The [`anchor_probe`] key of `tab`'s scroll viewport: the reference that
+/// does not scroll, which section probes are measured against.
+pub const fn viewport_key(tab: Tab) -> &'static str {
+    match tab {
+        Tab::Home => "home.viewport",
+        Tab::Controls => "controls.viewport",
+        Tab::Dialogs => "dialogs.viewport",
+        Tab::Lab => "lab.viewport",
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -443,7 +577,16 @@ thread_local! {
     /// The last painted window rect of every mounted [`AnchorProbe`], by key.
     /// Plain (non-reactive) storage on purpose: paint must never write a
     /// signal, and nothing renders from this — an event handler reads it.
-    static ANCHORS: RefCell<HashMap<&'static str, AnchorRect>> = RefCell::new(HashMap::new());
+    static ANCHORS: RefCell<HashMap<&'static str, (AnchorRect, u64)>> = RefCell::new(HashMap::new());
+
+    /// The paint epoch: bumped each time a [`viewport_probe`] starts painting,
+    /// so every rect recorded under the same value was measured in one frame
+    /// against the same scroll offset.
+    static EPOCH: Cell<u64> = const { Cell::new(0) };
+
+    /// The top safe-area inset each [`body_inset_probe`] saw while painting,
+    /// by key, with the epoch it painted in. Plain storage, like `ANCHORS`.
+    static BODY_INSETS: RefCell<HashMap<&'static str, (f64, u64)>> = RefCell::new(HashMap::new());
 }
 
 /// Wrap `child` so its painted window rect is recorded under `key`, for
@@ -461,13 +604,85 @@ thread_local! {
 /// the most recent paint: read it from an event handler (the button the user
 /// just pressed was painted where they saw it).
 pub fn anchor_probe<V: View<S>>(key: &'static str, child: V) -> AnchorProbe<V> {
-    AnchorProbe { key, child }
+    AnchorProbe {
+        key,
+        child,
+        role: ProbeRole::Anchor,
+    }
+}
+
+/// [`anchor_probe`] for a scroll viewport: it also starts a new paint epoch
+/// before painting its child, so [`fresh_anchor_rect`] can tell the probes
+/// painted in this frame from the stale rects of earlier ones. Wrap at most
+/// one painted viewport per frame (the tab stack paints only the selected
+/// tab).
+pub fn viewport_probe<V: View<S>>(key: &'static str, child: V) -> AnchorProbe<V> {
+    AnchorProbe {
+        key,
+        child,
+        role: ProbeRole::Viewport,
+    }
+}
+
+/// [`anchor_probe`] for a scroll view's content root, placed OUTSIDE its
+/// [`safe_area`]: it records the top safe-area inset the safe area is about to
+/// apply (the window inset still unconsumed there), for [`fresh_body_inset`].
+/// A scroll view always paints its content root, so unlike a section probe it
+/// is never culled; and it reads the live window insets every paint, so a
+/// rotation is seen the same frame it re-lays the body out.
+pub fn body_inset_probe<V: View<S>>(key: &'static str, child: V) -> AnchorProbe<V> {
+    AnchorProbe {
+        key,
+        child,
+        role: ProbeRole::BodyInset,
+    }
+}
+
+/// What an [`AnchorProbe`] records beyond its window rect.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProbeRole {
+    /// Only the rect.
+    Anchor,
+    /// Also starts a new paint epoch.
+    Viewport,
+    /// Records only the top safe-area inset the window pushes (its key is
+    /// shared with the viewport probe, so it leaves the rect alone).
+    BodyInset,
 }
 
 /// The last painted window rect recorded under `key`, if a probe with that key
 /// has painted on this thread.
 pub fn anchor_rect(key: &str) -> Option<AnchorRect> {
-    ANCHORS.with(|anchors| anchors.borrow().get(key).copied())
+    ANCHORS.with(|anchors| anchors.borrow().get(key).map(|(rect, _)| *rect))
+}
+
+/// Like [`anchor_rect`], but only when the probe painted in the current
+/// paint epoch (the latest [`viewport_probe`] frame): a probe the scroll view
+/// culled this frame answers `None` instead of a rect from an earlier scroll
+/// position.
+pub fn fresh_anchor_rect(key: &str) -> Option<AnchorRect> {
+    let epoch = EPOCH.with(Cell::get);
+    ANCHORS.with(|anchors| {
+        anchors
+            .borrow()
+            .get(key)
+            .filter(|(_, stamp)| *stamp == epoch)
+            .map(|(rect, _)| *rect)
+    })
+}
+
+/// The top safe-area inset recorded under `key` by a [`body_inset_probe`] that
+/// painted in the current paint epoch; `None` before the first paint of the
+/// epoch, never a stale value from an earlier one.
+pub fn fresh_body_inset(key: &str) -> Option<f64> {
+    let epoch = EPOCH.with(Cell::get);
+    BODY_INSETS.with(|insets| {
+        insets
+            .borrow()
+            .get(key)
+            .filter(|(_, stamp)| *stamp == epoch)
+            .map(|(inset, _)| *inset)
+    })
 }
 
 /// Convert a window-space rect into the plugin's [`AnchorRect`].
@@ -484,11 +699,13 @@ pub fn anchor_from_rect(rect: Rect) -> AnchorRect {
 pub struct AnchorProbe<V> {
     key: &'static str,
     child: V,
+    role: ProbeRole,
 }
 
 /// The retained widget for an [`AnchorProbe`].
 pub struct AnchorProbeWidget {
     key: &'static str,
+    role: ProbeRole,
     child: ChildPod,
 }
 
@@ -498,6 +715,7 @@ impl<V: View<S>> View<S> for AnchorProbe<V> {
     fn build(&self, ctx: &mut BuildCtx<'_>) -> AnchorProbeWidget {
         AnchorProbeWidget {
             key: self.key,
+            role: self.role,
             child: build_child(&self.child, ctx),
         }
     }
@@ -509,6 +727,7 @@ impl<V: View<S>> View<S> for AnchorProbe<V> {
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         element.key = self.key;
+        element.role = self.role;
         rebuild_child(&prev.child, &self.child, &mut element.child, ctx)
     }
 
@@ -524,12 +743,24 @@ impl Widget for AnchorProbeWidget {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        if self.role == ProbeRole::Viewport {
+            EPOCH.with(|epoch| epoch.set(epoch.get() + 1));
+        }
+        if self.role == ProbeRole::BodyInset {
+            let inset = ctx.window_insets().padding().top;
+            let stamp = EPOCH.with(Cell::get);
+            BODY_INSETS.with(|insets| insets.borrow_mut().insert(self.key, (inset, stamp)));
+        }
         self.child.paint_child(ctx, scene);
+        if self.role == ProbeRole::BodyInset {
+            return;
+        }
         let rect = Rect::from_origin_size(ctx.origin(), ctx.size());
+        let stamp = EPOCH.with(Cell::get);
         ANCHORS.with(|anchors| {
             anchors
                 .borrow_mut()
-                .insert(self.key, anchor_from_rect(rect));
+                .insert(self.key, (anchor_from_rect(rect), stamp));
         });
     }
 

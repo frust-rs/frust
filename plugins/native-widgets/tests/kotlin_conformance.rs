@@ -84,6 +84,24 @@
 //! reconstruct the expected class/symbol names from the two Kotlin files'
 //! `package`/`class` lines and pin the Rust side against that reconstruction,
 //! the same shape as [`kind_constants_match_between_kotlin_and_rust`] above.
+//!
+//! # The app-chrome twins (`FrustNativeChrome.kt`)
+//!
+//! The Android chrome arm duplicates a second, smaller table:
+//! [`chrome_menu_stride_and_reselect_shift_match_between_kotlin_and_rust`]
+//! pins Kotlin's `CHROME_MENU_STRIDE`/`CHROME_TAB_RESELECT_SHIFT` against
+//! `src/events.rs`'s `CHROME_MENU_STRIDE` and `pack_chrome_tab`'s reselect
+//! bit; [`chrome_codes_match_between_kotlin_and_rust`] the `INSTALL_*` and
+//! `ICON_SLOT_*` codes; [`chrome_class_and_exports_match_the_kotlin_object`]
+//! the class name and the two `external fun` exports, which live in
+//! `src/android/chrome.rs` beside the host rather than in `android/mod.rs`;
+//! [`chrome_json_key_table_copy_matches_the_kotlin_header`] that the
+//! copy of the header's JSON key table `src/chrome/mod.rs`'s encoder tests
+//! round-trip against is still verbatim; and
+//! [`chrome_changed_field_spellings_match_between_kotlin_and_rust`] that
+//! Kotlin's `FIELD_*` constants spell the ten `ChromeField`s exactly as
+//! `android_wire::field_name` does, are the only place Kotlin spells them, and
+//! that Kotlin's `INSTALL_FIELDS` names `android_wire::INSTALL_FIELDS`.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -124,6 +142,15 @@ const RUST_BUILDERS_PATH: &str = "plugins/native-widgets/src/api/builders.rs";
 /// `plugins/native-widgets/src/android/mod.rs`, home of the four `Java_*`
 /// JNI export symbols.
 const RUST_ANDROID_MOD_PATH: &str = "plugins/native-widgets/src/android/mod.rs";
+/// The app-chrome object beside [`KOTLIN_LISTENER_PATH`], same module.
+const KOTLIN_CHROME_PATH: &str = "plugins/native-widgets/platform/android/src/main/kotlin/\
+                                  dev/frust/nativewidgets/FrustNativeChrome.kt";
+/// `plugins/native-widgets/src/android/chrome.rs`: the chrome host, its
+/// `CHROME_CLASS`/`INSTALL_*` constants and its two `Java_*` exports.
+const RUST_ANDROID_CHROME_PATH: &str = "plugins/native-widgets/src/android/chrome.rs";
+/// `plugins/native-widgets/src/chrome/mod.rs`: the `android_wire` encoder,
+/// its `ICON_SLOT_*` codes and its copy of the Kotlin JSON key table.
+const RUST_CHROME_MOD_PATH: &str = "plugins/native-widgets/src/chrome/mod.rs";
 
 /// Parse every `const val KIND_<NAME> = <value>` line out of the Kotlin
 /// listener's companion object, keyed by `<NAME>` (the `KIND_` prefix
@@ -663,5 +690,348 @@ fn java_export_symbols_match_reconstructed_package_and_class_names() {
         "found no `{RUST_ANDROID_MOD_PATH}` export starting with the reconstructed listener \
          prefix `{listener_prefix}` — either the scan's own parser is broken, or every listener \
          export drifted from {KOTLIN_LISTENER_PATH}'s package/class declaration"
+    );
+}
+
+// --- the app-chrome twins ----------------------------------------------------
+
+/// The integer value of `const val <name> = <value>` in Kotlin `contents`.
+fn kotlin_const_int(contents: &str, name: &str, source_path: &str) -> i64 {
+    let needle = format!("const val {name} = ");
+    let line = contents
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with(&needle))
+        .unwrap_or_else(|| panic!("no `{needle}` found in {source_path}"));
+    line[needle.len()..]
+        .trim()
+        .parse()
+        .unwrap_or_else(|e| panic!("parsing `{line}` in {source_path}: {e}"))
+}
+
+/// Every `<prefix><NAME> = <int>` constant in `contents`, keyed by `<NAME>`:
+/// Kotlin's `const val <prefix>...` or Rust's `pub(crate) const <prefix>...:
+/// <ty> = <int>;` (indentation ignored).
+fn prefixed_int_constants(
+    contents: &str,
+    prefix: &str,
+    source_path: &str,
+) -> BTreeMap<String, i64> {
+    let mut out = BTreeMap::new();
+    for line in contents.lines().map(str::trim) {
+        let after = line
+            .strip_prefix("const val ")
+            .or_else(|| line.strip_prefix("pub(crate) const "));
+        let Some(after) = after.and_then(|after| after.strip_prefix(prefix)) else {
+            continue;
+        };
+        let Some((name, value)) = after.split_once('=') else {
+            continue;
+        };
+        let name: String = name
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        let value: i64 = value
+            .trim()
+            .trim_end_matches(';')
+            .parse()
+            .unwrap_or_else(|e| panic!("parsing `{line}` in {source_path}: {e}"));
+        out.insert(name, value);
+    }
+    assert!(
+        !out.is_empty(),
+        "no `{prefix}*` constants found in {source_path}"
+    );
+    out
+}
+
+#[test]
+fn chrome_menu_stride_and_reselect_shift_match_between_kotlin_and_rust() {
+    let kotlin = read(KOTLIN_CHROME_PATH);
+    let rust = read(RUST_EVENTS_PATH);
+
+    let kotlin_stride = kotlin_const_int(&kotlin, "CHROME_MENU_STRIDE", KOTLIN_CHROME_PATH);
+    let rust_stride = quoted_free_int_after(
+        &rust,
+        "pub(crate) const CHROME_MENU_STRIDE: i64 = ",
+        RUST_EVENTS_PATH,
+    );
+    assert_eq!(
+        kotlin_stride, rust_stride,
+        "{KOTLIN_CHROME_PATH}'s CHROME_MENU_STRIDE ({kotlin_stride}) drifted from \
+         {RUST_EVENTS_PATH}'s ({rust_stride}) — every menu choice would decode as the wrong item"
+    );
+
+    let kotlin_shift = kotlin_const_int(&kotlin, "CHROME_TAB_RESELECT_SHIFT", KOTLIN_CHROME_PATH);
+    let pack = extract_fn_body(&rust, "fn", "pack_chrome_tab", RUST_EVENTS_PATH);
+    let rust_shift = i64::from(int_after(pack, "<<", RUST_EVENTS_PATH));
+    assert_eq!(
+        kotlin_shift, rust_shift,
+        "{KOTLIN_CHROME_PATH}'s CHROME_TAB_RESELECT_SHIFT ({kotlin_shift}) drifted from \
+         pack_chrome_tab's reselect bit ({rust_shift}) in {RUST_EVENTS_PATH}"
+    );
+
+    // And Kotlin packs with the constants, not a stray literal.
+    // `emitTab` is an `object` member: its body ends at the indented `}`.
+    let emit_tab = kotlin
+        .split_once("fun emitTab(")
+        .and_then(|(_, rest)| rest.split_once("\n    }"))
+        .map(|(body, _)| body)
+        .unwrap_or_else(|| panic!("no `fun emitTab(` body found in {KOTLIN_CHROME_PATH}"));
+    assert!(
+        emit_tab.contains("shl CHROME_TAB_RESELECT_SHIFT"),
+        "{KOTLIN_CHROME_PATH}'s emitTab no longer packs with CHROME_TAB_RESELECT_SHIFT"
+    );
+    assert!(
+        kotlin.contains("* CHROME_MENU_STRIDE +"),
+        "{KOTLIN_CHROME_PATH} no longer packs a menu choice as `action * CHROME_MENU_STRIDE + item`"
+    );
+}
+
+/// The integer right after `needle` in `contents`, up to its `;`.
+fn quoted_free_int_after(contents: &str, needle: &str, source_path: &str) -> i64 {
+    let idx = contents
+        .find(needle)
+        .unwrap_or_else(|| panic!("no `{needle}` found in {source_path}"));
+    let rest = &contents[idx + needle.len()..];
+    let end = rest
+        .find(';')
+        .unwrap_or_else(|| panic!("no `;` after `{needle}` in {source_path}"));
+    rest[..end]
+        .trim()
+        .parse()
+        .unwrap_or_else(|e| panic!("parsing the value after `{needle}` in {source_path}: {e}"))
+}
+
+#[test]
+fn chrome_codes_match_between_kotlin_and_rust() {
+    let kotlin = read(KOTLIN_CHROME_PATH);
+    for (prefix, rust_path) in [
+        ("INSTALL_", RUST_ANDROID_CHROME_PATH),
+        ("ICON_SLOT_", RUST_CHROME_MOD_PATH),
+    ] {
+        let kotlin_codes = prefixed_int_constants(&kotlin, prefix, KOTLIN_CHROME_PATH);
+        let rust_codes = prefixed_int_constants(&read(rust_path), prefix, rust_path);
+        assert_eq!(
+            kotlin_codes, rust_codes,
+            "the `{prefix}*` codes in {KOTLIN_CHROME_PATH} and {rust_path} drifted apart"
+        );
+    }
+}
+
+#[test]
+fn chrome_class_and_exports_match_the_kotlin_object() {
+    let kotlin = read(KOTLIN_CHROME_PATH);
+    let package = parse_kotlin_package(&kotlin, KOTLIN_CHROME_PATH);
+    let object = kotlin
+        .lines()
+        .find_map(|line| line.strip_prefix("object "))
+        .map(|rest| {
+            rest.chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect::<String>()
+        })
+        .unwrap_or_else(|| panic!("no top-level `object <Name>` found in {KOTLIN_CHROME_PATH}"));
+
+    let rust = read(RUST_ANDROID_CHROME_PATH);
+    let class = quoted_value_after(
+        &rust,
+        "pub(crate) const CHROME_CLASS: &str = ",
+        RUST_ANDROID_CHROME_PATH,
+    );
+    assert_eq!(
+        class,
+        format!("{package}.{object}"),
+        "{RUST_ANDROID_CHROME_PATH}'s CHROME_CLASS no longer names {KOTLIN_CHROME_PATH}'s object \
+         — the classloader lookup would fail at runtime"
+    );
+
+    let natives: Vec<String> = kotlin
+        .lines()
+        .filter_map(|line| line.split_once("external fun ").map(|(_, rest)| rest))
+        .map(|rest| {
+            rest.chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect()
+        })
+        .collect();
+    let mut expected: Vec<String> = natives
+        .iter()
+        .map(|name| format!("Java_{}_{object}_{name}", package.replace('.', "_")))
+        .collect();
+    let mut exports = parse_java_export_names(&rust);
+    expected.sort();
+    exports.sort();
+    assert_eq!(
+        exports, expected,
+        "{RUST_ANDROID_CHROME_PATH}'s exports must be exactly {KOTLIN_CHROME_PATH}'s `external \
+         fun`s, mangled — a mismatch is an `UnsatisfiedLinkError` at the first tap"
+    );
+    assert_eq!(
+        natives.len(),
+        2,
+        "nativeOnChromeEvent and nativeOnChromeLost"
+    );
+}
+
+#[test]
+fn chrome_json_key_table_copy_matches_the_kotlin_header() {
+    let kotlin = read(KOTLIN_CHROME_PATH);
+    let header = kotlin
+        .split("\npackage ")
+        .next()
+        .expect("split yields at least one piece");
+    let start = header
+        .find("// Flat JSON keys")
+        .unwrap_or_else(|| panic!("no `// Flat JSON keys` block in {KOTLIN_CHROME_PATH}"));
+    let table: Vec<&str> = header[start..]
+        .lines()
+        .skip_while(|line| !line.starts_with("//   "))
+        .take_while(|line| line.starts_with("//   "))
+        .collect();
+    assert!(
+        table.len() >= 5,
+        "the key table in {KOTLIN_CHROME_PATH}'s header was not found ({table:?})"
+    );
+    let rust = read(RUST_CHROME_MOD_PATH);
+    for line in table {
+        assert!(
+            rust.lines().any(|rust_line| rust_line == line),
+            "{RUST_CHROME_MOD_PATH}'s KOTLIN_KEY_HEADER copy is missing `{line}` from \
+             {KOTLIN_CHROME_PATH}'s header — update the copy and the encoder together"
+        );
+    }
+}
+
+/// Kotlin's `[private ]const val FIELD_<NAME> = "<spelling>"` constants,
+/// keyed by `<NAME>`.
+fn kotlin_field_constants(contents: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for line in contents.lines().map(str::trim) {
+        let line = line.strip_prefix("private ").unwrap_or(line);
+        let Some(after) = line.strip_prefix("const val FIELD_") else {
+            continue;
+        };
+        let Some((name, value)) = after.split_once('=') else {
+            continue;
+        };
+        let value = value.trim();
+        let spelling = value
+            .strip_prefix('"')
+            .and_then(|rest| rest.strip_suffix('"'))
+            .unwrap_or_else(|| panic!("`{line}` in {KOTLIN_CHROME_PATH} is not a string constant"));
+        out.insert(name.trim().to_string(), spelling.to_string());
+    }
+    out
+}
+
+/// `android_wire::field_name`'s `ChromeField::<Variant> => "<spelling>"`
+/// arms, keyed by `<Variant>`. The function sits inside the indented
+/// `android_wire` module, so its body ends at the first indented `}` line.
+fn rust_field_name_arms(contents: &str) -> BTreeMap<String, String> {
+    let body = contents
+        .split_once("fn field_name(")
+        .and_then(|(_, rest)| rest.split_once("\n    }\n"))
+        .map(|(body, _)| body)
+        .unwrap_or_else(|| panic!("no `fn field_name(` body found in {RUST_CHROME_MOD_PATH}"));
+    body.lines()
+        .filter_map(|line| line.trim().strip_prefix("ChromeField::"))
+        .filter_map(|arm| arm.split_once("=>"))
+        .map(|(variant, spelling)| {
+            let spelling = spelling.trim().trim_end_matches(',').trim_matches('"');
+            (variant.trim().to_string(), spelling.to_string())
+        })
+        .collect()
+}
+
+/// The `ChromeField::<Variant>` entries of Rust's `INSTALL_FIELDS` array.
+fn rust_install_fields(contents: &str) -> Vec<String> {
+    let opener = "pub(crate) const INSTALL_FIELDS: [ChromeField; ";
+    let start = contents
+        .find(opener)
+        .unwrap_or_else(|| panic!("no `{opener}` found in {RUST_CHROME_MOD_PATH}"));
+    let rest = &contents[start..];
+    let end = rest
+        .find("];")
+        .unwrap_or_else(|| panic!("no closing `];` for INSTALL_FIELDS in {RUST_CHROME_MOD_PATH}"));
+    rest[..end]
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("ChromeField::"))
+        .map(|variant| variant.trim_end_matches(',').to_string())
+        .collect()
+}
+
+#[test]
+fn chrome_changed_field_spellings_match_between_kotlin_and_rust() {
+    let kotlin = read(KOTLIN_CHROME_PATH);
+    let rust = read(RUST_CHROME_MOD_PATH);
+
+    let arms = rust_field_name_arms(&rust);
+    assert_eq!(
+        arms.len(),
+        10,
+        "{RUST_CHROME_MOD_PATH}'s field_name should spell all ten ChromeFields: {arms:?}"
+    );
+    for (variant, spelling) in &arms {
+        assert_eq!(
+            variant, spelling,
+            "{RUST_CHROME_MOD_PATH}'s field_name must spell ChromeField::{variant} as its Rust name"
+        );
+    }
+
+    let constants = kotlin_field_constants(&kotlin);
+    let mut kotlin_spellings: Vec<&String> = constants.values().collect();
+    let mut rust_spellings: Vec<&String> = arms.values().collect();
+    kotlin_spellings.sort();
+    rust_spellings.sort();
+    assert_eq!(
+        kotlin_spellings, rust_spellings,
+        "{KOTLIN_CHROME_PATH}'s FIELD_* constants drifted from {RUST_CHROME_MOD_PATH}'s \
+         field_name — an apply naming the renamed field would be silently ignored"
+    );
+
+    // Each spelling appears once in Kotlin: in its constant, never as a stray literal.
+    for spelling in constants.values() {
+        let quoted = format!("\"{spelling}\"");
+        assert_eq!(
+            kotlin.matches(&quoted).count(),
+            1,
+            "{KOTLIN_CHROME_PATH} spells {quoted} outside its FIELD_* constant"
+        );
+    }
+
+    // Kotlin's INSTALL_FIELDS names exactly Rust's.
+    let by_name: BTreeMap<&str, &str> = constants
+        .iter()
+        .map(|(name, spelling)| (name.as_str(), spelling.as_str()))
+        .collect();
+    let kotlin_install = kotlin
+        .split_once("val INSTALL_FIELDS = setOf(")
+        .and_then(|(_, rest)| rest.split_once(')'))
+        .map(|(body, _)| body)
+        .unwrap_or_else(|| panic!("no `val INSTALL_FIELDS = setOf(` in {KOTLIN_CHROME_PATH}"));
+    let mut kotlin_install: Vec<&str> = kotlin_install
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let name = entry.strip_prefix("FIELD_").unwrap_or_else(|| {
+                panic!("{KOTLIN_CHROME_PATH}'s INSTALL_FIELDS entry `{entry}` is not a FIELD_*")
+            });
+            *by_name
+                .get(name)
+                .unwrap_or_else(|| panic!("{KOTLIN_CHROME_PATH} declares no FIELD_{name}"))
+        })
+        .collect();
+    let mut rust_install: Vec<String> = rust_install_fields(&rust)
+        .iter()
+        .map(|variant| arms[variant].clone())
+        .collect();
+    kotlin_install.sort_unstable();
+    rust_install.sort();
+    assert_eq!(
+        kotlin_install, rust_install,
+        "{KOTLIN_CHROME_PATH}'s INSTALL_FIELDS drifted from {RUST_CHROME_MOD_PATH}'s"
     );
 }

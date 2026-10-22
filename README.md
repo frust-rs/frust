@@ -42,15 +42,24 @@ entirely with Frust.
 
 <p align="center">
   <img src="docs/assets/readme/app-material3-demo.png" alt="material3-demo: the Material 3 Expressive component catalog" width="24%">
-  <img src="docs/assets/readme/app-native-widgets-demo.png" alt="native-widgets-demo: a native action sheet anchored to its button" width="24%">
   <img src="docs/assets/readme/app-shadertoy.png" alt="shadertoy: a fragment shader rendered at 60 fps" width="24%">
   <img src="docs/assets/readme/app-glyph-catalog.png" alt="glyph-catalog: badges, tags, alerts and toasts" width="24%">
 </p>
 <p align="center"><em>
   <a href="examples/material3-demo">material3-demo</a> ·
-  <a href="examples/native-widgets-demo">native-widgets-demo</a> ·
   <a href="examples/shadertoy">shadertoy</a> ·
   <a href="examples/glyph-catalog">glyph-catalog</a>
+</em></p>
+
+**Native widgets demo** — the platform's own tab bar, navigation bar and controls around a Frust
+body, from one Rust codebase:
+
+<p align="center">
+  <img src="docs/assets/readme/native-widgets-demo-ios.png" alt="native-widgets-demo on iOS: Liquid Glass tab bar and navigation bar around a Frust list" width="32%">
+  <img src="docs/assets/readme/native-widgets-demo-android.png" alt="native-widgets-demo on Android: Material 3 toolbar and bottom navigation around a Frust list" width="32%">
+</p>
+<p align="center"><em>
+  <a href="examples/native-widgets-demo">native-widgets-demo</a> on iOS (left) and Android (right)
 </em></p>
 
 ### Fast

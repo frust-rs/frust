@@ -237,6 +237,13 @@ mod coretext;
 // tests.
 #[allow(dead_code)]
 mod controls;
+// App chrome's platform-free half (decision C1): the `ChromeSpec` contract,
+// the `ChromeEvent` vocabulary, the `ChromeHost` seam and the process-wide
+// publish slot. Behind `frust-api` because the spec reuses the api layer's
+// `TabItem`/`TabIcon`/`TabId`; crate-private, with the `native_scaffold`
+// builder re-exporting what apps need.
+#[cfg(feature = "frust-api")]
+mod chrome;
 // The typed event vocabulary (`EventPayload`) and the kind/detail codec every
 // interactive control's listener decodes through — platform-agnostic and
 // host-tested for the same reason `controls` is (see that module's `allow`).

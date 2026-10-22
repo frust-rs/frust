@@ -74,9 +74,15 @@
 mod builders;
 mod mount;
 mod present;
+mod scaffold;
 mod signals;
 mod theme;
 
+/// The app-chrome builder and the vocabulary it speaks, re-exported from the
+/// crate-private `chrome` module — see [`native_scaffold`].
+pub use crate::chrome::{
+    ActionId, ActionItem, ChromeEvent, Leading, MenuItem, MenuItemId, ScrollState, ToolbarSpec,
+};
 /// The date value `native_date_picker` shows and reports — defined beside the
 /// control (`crate::controls::date_picker`) because the platform-agnostic
 /// event vocabulary carries it too, and re-exported here as the builder's
@@ -96,6 +102,7 @@ pub use mount::{NativeComponentView, native_component};
 pub use present::{
     show_native_alert, show_native_alert_into, show_native_sheet, show_native_sheet_into,
 };
+pub use scaffold::{EdgeFade, NativeScaffoldView, native_scaffold};
 
 /// Make sure this build's platform factory exists before the host can look it
 /// up — **optional**: every builder already does this for you.

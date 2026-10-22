@@ -11,21 +11,28 @@
 //! drags stream through `on_detent` into the detent readout; they are never
 //! outcomes.
 //!
-//! iOS/iPadOS only: macOS, Android and every desktop preview refuse with
-//! `PresentError::Unsupported`, which the status line reports — the designed
-//! behavior there, not a failure. An iPad in regular width presents a
-//! centered form sheet that ignores detents (see the plugin README). Zero
-//! native slots at rest.
+//! iOS/iPadOS present `UISheetPresentationController`; Android presents a
+//! Material `BottomSheetDialog`: Medium is half height (ratio 0.5), Large is
+//! expanded, `Custom(f)` is half-ratio `f`. Only ONE half ratio is draggable
+//! at a time (the others are reachable through `select_detent`);
+//! `largest_undimmed` and `scrolling_expands` are ignored on Android; detent
+//! changes still stream to `on_detent`. macOS and every Linux/Windows desktop
+//! preview refuse with `PresentError::Unsupported`, which the status line
+//! reports - the designed behavior there, not a failure. An iPad in regular
+//! width presents a centered form sheet that ignores detents (see the plugin
+//! README). Zero native slots at rest.
 
 use std::time::Duration;
 
-use frust::{AnyView, Get, Set, Theme, button, inflexible};
+use frust::{AnyView, FlexChild, Get, Set, Theme, button, inflexible};
 use frust_native_widgets::{
-    ActionRole, Detent, PresentError, SheetContent, SheetOutcome, SheetSpec, show_native_sheet_into,
+    ActionRole, Detent, PresentError, SheetContent, SheetHandle, SheetOutcome, SheetSpec,
+    show_native_sheet,
 };
 
 use crate::push_toast;
 
+use super::alerts::note_outcome;
 use super::common::{
     S, block, caption, demo_image_bytes, gap, label, local_sig, page_column, page_header, readout,
     theme,
@@ -33,6 +40,15 @@ use super::common::{
 
 /// This page's index in [`SECTION_LABELS`](crate::SECTION_LABELS).
 const SECTION: usize = 5;
+
+/// The native class backing a sheet on this target.
+const SHEET_CLASS: &str = if cfg!(target_os = "android") {
+    "BottomSheetDialog"
+} else if cfg!(target_os = "ios") {
+    "UISheetPresentationController"
+} else {
+    "nothing (Unsupported)"
+};
 
 /// The custom detent's fraction of the available height.
 const CUSTOM_DETENT: f64 = 0.4;
@@ -65,27 +81,34 @@ fn base_spec(theme: &Theme) -> SheetSpec {
         .on_detent(|detent| detent_sig().set(format!("{detent:?}")))
 }
 
-/// Present `spec`, clearing the last outcome and recording the synchronous
-/// result. Returns the handle when shown.
-fn present_sheet(what: &str, spec: SheetSpec) -> Option<frust_native_widgets::SheetHandle> {
+/// Present `spec`, clearing the last outcome. An accepted request reads
+/// "presented" at once; a refusal resolves on the next task-queue pump and
+/// replaces it. The outcome is awaited on the UI task queue, written into this
+/// page's signal and counted for the Dialogs badge when another tab is
+/// showing. Returns the handle when shown.
+fn present_sheet(state: &S, what: &str, spec: SheetSpec) -> Option<SheetHandle> {
     outcome_sig().set(None);
     detent_sig().set("(none reported)".to_string());
-    match show_native_sheet_into(spec, outcome_sig()) {
-        Ok(handle) => {
-            status_sig().set(format!("{what}: presented"));
-            Some(handle)
-        }
-        Err(PresentError::Unsupported) => {
-            status_sig().set(format!(
-                "{what}: Unsupported \u{2014} native sheets are iOS/iPadOS only (designed)"
-            ));
-            None
-        }
-        Err(err) => {
-            status_sig().set(format!("{what}: refused: {err}"));
-            None
-        }
+    let presentation = show_native_sheet(spec);
+    let handle = presentation.sheet_handle();
+    if handle.is_some() {
+        status_sig().set(format!("{what}: presented"));
     }
+    let (tab, unseen) = (state.tab, state.unseen_outcomes);
+    let what = what.to_string();
+    frust::spawn_local(async move {
+        match presentation.await {
+            Ok(outcome) => {
+                outcome_sig().set(Some(outcome));
+                note_outcome(tab, unseen);
+            }
+            Err(PresentError::Unsupported) => status_sig().set(format!(
+                "{what}: Unsupported \u{2014} native sheets are iOS/iPadOS/Android only (designed)"
+            )),
+            Err(err) => status_sig().set(format!("{what}: refused: {err}")),
+        }
+    });
+    handle
 }
 
 /// A readable line for the last outcome.
@@ -114,8 +137,12 @@ fn trigger(
     ])
 }
 
-/// See the page-fn contract in [`crate::pages`] and the [module docs](self).
-pub fn page(state: &S) -> AnyView<S> {
+/// The deep-link slug of this section: the anchor its tab scrolls to.
+pub const ANCHOR: &str = "Sheet";
+
+/// The section body, without a page header: the rows the Dialogs tab stacks
+/// under its own section header. See the [module docs](self).
+pub fn section(state: &S) -> Vec<FlexChild<S>> {
     // Copy handle, cheap to move into the programmatic run's timers below —
     // see their `Err(join_err)` arms.
     let toasts = state.toasts;
@@ -134,13 +161,31 @@ pub fn page(state: &S) -> AnyView<S> {
         inflexible(readout(format!("Last user detent: {detent}"))),
     ]);
 
+    let arms = block(vec![
+        inflexible(label("Per-platform arm")),
+        gap(4.0),
+        inflexible(caption(format!(
+            "iOS/iPadOS UISheetPresentationController \u{b7} Android BottomSheetDialog \u{b7} \
+             macOS and desktop previews Unsupported \u{2014} here: {}.",
+            SHEET_CLASS
+        ))),
+        gap(2.0),
+        inflexible(caption(
+            "Android: Medium = half height (ratio 0.5), Large = expanded, Custom(f) = half \
+             ratio f. Only one half ratio is draggable at a time (others via select_detent); \
+             largest_undimmed and scrolling_expands are ignored; detent changes still stream \
+             to the readout below.",
+        )),
+    ]);
+
     let t1 = active.clone();
     let standard = trigger(
         "Medium + large, grabber",
         "The default spec: resting at medium, draggable to large, swipe down to dismiss.",
         "Show sheet",
-        move |_: &mut S| {
+        move |state: &mut S| {
             present_sheet(
+                state,
                 "Medium + large",
                 base_spec(&t1).with_detents([Detent::Medium, Detent::Large]),
             );
@@ -152,8 +197,12 @@ pub fn page(state: &S) -> AnyView<S> {
         "Non-dismissible",
         "No swipe-down: only an action row ends it.",
         "Show non-dismissible sheet",
-        move |_: &mut S| {
-            present_sheet("Non-dismissible", base_spec(&t2).with_dismissible(false));
+        move |state: &mut S| {
+            present_sheet(
+                state,
+                "Non-dismissible",
+                base_spec(&t2).with_dismissible(false),
+            );
         },
     );
 
@@ -163,8 +212,9 @@ pub fn page(state: &S) -> AnyView<S> {
         "Opens at 40% height with large available. iOS 16+; iOS 15 uses the nearest of \
          medium/large.",
         "Show 0.4 sheet",
-        move |_: &mut S| {
+        move |state: &mut S| {
             present_sheet(
+                state,
                 "Custom 0.4",
                 base_spec(&t3)
                     .with_detents([Detent::Custom(CUSTOM_DETENT), Detent::Large])
@@ -179,8 +229,8 @@ pub fn page(state: &S) -> AnyView<S> {
         "Presents at medium, expands to large after 1 s (select_detent), then dismisses after \
          2 s more: the outcome must read Dismissed(Programmatic).",
         "Show, expand, dismiss",
-        move |_: &mut S| {
-            let Some(handle) = present_sheet("Programmatic", base_spec(&t4)) else {
+        move |state: &mut S| {
+            let Some(handle) = present_sheet(state, "Programmatic", base_spec(&t4)) else {
                 return;
             };
             frust::spawn_local(async move {
@@ -219,12 +269,21 @@ pub fn page(state: &S) -> AnyView<S> {
         },
     );
 
-    page_column(vec![
-        page_header(SECTION),
+    vec![
         readouts,
+        arms,
         standard,
         non_dismissible,
         custom,
         programmatic,
-    ])
+    ]
+}
+
+/// The whole section as a standalone page: its [`page_header`] then
+/// [`section`]. Kept for [`super::current`] and the headless gate tests; the
+/// Dialogs tab stacks [`section`] under its own section header instead.
+pub fn page(state: &S) -> AnyView<S> {
+    let mut children = vec![page_header(SECTION)];
+    children.extend(section(state));
+    page_column(children)
 }
