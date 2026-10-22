@@ -209,8 +209,8 @@ app code stays on the builders.
 
   The Android sheet (`BottomSheetDialog`, one half-expanded ratio at a time; `largest_undimmed` and
   `scrolling_expands` ignored) resolves the same outcomes through `nativeOnOutcome`. Material-backed
-  views (sheet, segmented) are built under `FrustNativeControlFactory.materialContext`: a
-  `ContextThemeWrapper` of the Activity's manifest theme with the night-qualified configuration
+  views (sheet, segmented) are built under the Kotlin-internal `FrustMaterialContext.wrap` (not on the JNI-facing
+  factory): a `ContextThemeWrapper` of the Activity's manifest theme with the night-qualified configuration
   that `create_control` hands Kotlin (which has no Material theme of its own). The iOS sheet resolves `Action(id)` after it has finished dismissing itself, `Dismissed(User)` on
   a swipe-down (only when `dismissible`), `Dismissed(Programmatic)` through its `SheetHandle`, and
   `HostLost` when its scene disconnects or its presenter is torn down. Custom detents need iOS 16

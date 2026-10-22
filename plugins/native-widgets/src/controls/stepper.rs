@@ -13,9 +13,8 @@
 //! `android.widget` has no stepper/increment control — the framework's
 //! numeric-input widgets are `SeekBar` (already `native_slider`) and
 //! `NumberPicker` (a scrolling wheel, a different interaction entirely), and
-//! this plugin never assumes an AndroidX/Material dependency the app did not
-//! add (`segmented.rs`'s module doc makes the identical argument for
-//! `MaterialButtonToggleGroup`). So this module has no
+//! and no Material equivalent was shipped for it (the plugin's Android module
+//! does depend on Material, as `segmented.rs`'s Android arm shows). So this module has no
 //! `#[cfg(target_os = "android")] mod platform`, `crate::android::
 //! register_controls` does not register [`KIND`] (the kind sits in
 //! [`super::APPLE_KINDS`], not [`super::SHARED_KINDS`]), and the app-facing

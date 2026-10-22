@@ -2984,7 +2984,7 @@ and `present/android_sheet.rs`; `plugins/native-widgets/README.md`'s controls ta
 ### `native-chrome-android-material3-theme-required` — Android chrome, sheet, segmented and the toolbar FABs need a Material3-derived Activity theme
 
 **Observed**: the Material views are built under the Activity's manifest theme
-(`FrustNativeControlFactory.materialContext`), because `create_control`'s night-qualified context
+(the Kotlin-internal `FrustMaterialContext.wrap`), because `create_control`'s night-qualified context
 carries the framework default theme. A stock theme (e.g. `Theme.Material.NoActionBar`, the scaffold
 default) makes Material's theme enforcement throw: the chrome install answers `INSTALL_REFUSED` →
 `ChromeError::Refused`, the slot pins the generation to the frust-drawn fallback bars and logs the

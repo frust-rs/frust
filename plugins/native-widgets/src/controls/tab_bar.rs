@@ -15,9 +15,8 @@
 //! # No macOS arm, no Android arm (decision D2)
 //!
 //! macOS has no bottom-tab-bar idiom (`NSTabView` is a different control with
-//! a different job), and Android's `BottomNavigationView` is Material — this
-//! plugin never assumes an AndroidX/Material dependency the app did not add
-//! (`segmented.rs`'s *No Android arm*). So this module carries one
+//! a different job), and Android's bottom navigation (`BottomNavigationView`)
+//! belongs to `native_scaffold`'s chrome, not a standalone bar. So this module carries one
 //! `#[cfg(target_os = "ios")] mod platform` and nothing else, and the builder
 //! (`crate::api::builders::NativeTabBarView`) renders the frust-drawn refusal
 //! banner **at compile time** on every other target, naming both facts.
