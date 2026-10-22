@@ -10,8 +10,11 @@
 //! here as a [`pending_anchor`](crate::NativeWidgetsDemoState::pending_anchor)
 //! request; [`scroll_on_request`] applies each new request (by its
 //! `sequence`) once the probes have painted: the target offset is the
-//! header's content-space y minus the tab header's, so the section's header
-//! ends where the body starts. Every measurement is taken against the scroll
+//! header's content-space y minus the body start (the top safe-area inset the
+//! tab body applies, read from the same epoch's
+//! [`body_inset_probe`](super::common::body_inset_probe), never remembered
+//! from an older one), so the section's header ends where the body starts; a
+//! request is never reported landed while that inset is unmeasured. Every measurement is taken against the scroll
 //! viewport's own window rect in the same paint epoch (see
 //! [`fresh_anchor_rect`]), plus the controller's offset, so it is right from
 //! any current offset; a section the scroll view culled is approached by its
@@ -25,8 +28,8 @@ use std::time::Duration;
 use frust::{AnyView, FlexChild, Get, ScrollController, inflexible, text};
 
 use super::common::{
-    S, accent, anchor_probe, caption, fresh_anchor_rect, page_column, page_header, tab_body,
-    viewport_key,
+    S, accent, anchor_probe, caption, fresh_anchor_rect, fresh_body_inset, page_column,
+    page_header, tab_body, viewport_key,
 };
 use super::{SECTION_SUMMARIES, composite, controls, new_controls};
 use crate::{SECTION_LABELS, Tab};
@@ -63,8 +66,9 @@ thread_local! {
 pub enum AnchorStep {
     /// The target header already sits where the body starts.
     Landed,
-    /// A jump was issued (or nothing could be measured yet): step again after
-    /// the next frame.
+    /// A jump was issued (or the viewport or its safe-area inset has not
+    /// painted in the latest epoch, so nothing could be measured): step again
+    /// after the next frame.
     Pending,
 }
 
@@ -73,32 +77,38 @@ pub enum AnchorStep {
 /// Reads the probes painted in the latest epoch against `tab`'s scroll
 /// viewport, so a probe the scroll view culled is simply absent rather than
 /// stale. With the target painted it jumps to its content-space y less the
-/// tab header's (clamped to the scrollable range), or reports
-/// [`AnchorStep::Landed`] when already there. With it culled it jumps to its
+/// body start (clamped to the scrollable range), or reports
+/// [`AnchorStep::Landed`] when already there. The body start is the top
+/// safe-area inset the tab body applies, read from the latest epoch's
+/// [`body_inset_probe`](super::common::body_inset_probe) (the scroll view
+/// always paints it, so it needs no section to be on screen and follows a
+/// rotation); until the viewport and that inset have both painted in the
+/// epoch, the step is [`AnchorStep::Pending`] and never lands. With it culled it jumps to its
 /// remembered position, or one viewport-sized step toward it (by body order of
 /// the probes that did paint), and the next step corrects.
 pub fn anchor_scroll_step(
     controller: &ScrollController,
     tab: Tab,
-    top: &'static str,
     anchor: &'static str,
     anchors: &'static [&'static str],
 ) -> AnchorStep {
-    let Some(viewport) = fresh_anchor_rect(viewport_key(tab)) else {
+    let (Some(viewport), Some(body_start)) = (
+        fresh_anchor_rect(viewport_key(tab)),
+        fresh_body_inset(viewport_key(tab)),
+    ) else {
         return AnchorStep::Pending;
     };
     let offset = controller.offset();
     let content_y = |key: &str| fresh_anchor_rect(key).map(|rect| rect.y - viewport.y + offset);
     CONTENT_Y.with(|map| {
         let mut map = map.borrow_mut();
-        for &key in anchors.iter().chain(std::iter::once(&top)) {
+        for &key in anchors {
             if let Some(y) = content_y(key) {
                 map.insert(key, y);
             }
         }
     });
     let remembered = |key: &str| CONTENT_Y.with(|map| map.borrow().get(key).copied());
-    let body_start = remembered(top).unwrap_or(0.0);
     let clamp = |target: f64| target.clamp(0.0, controller.max_offset());
 
     if let Some(y) = content_y(anchor) {
@@ -156,11 +166,13 @@ pub(super) fn titled(
 /// [`pending_anchor`](crate::NativeWidgetsDemoState::pending_anchor) request
 /// names, when it names one of `anchors`. Build-time only: it reads the
 /// signal, then schedules the scroll on the UI task queue, which runs an
-/// [`anchor_scroll_step`] every pause until the section has landed.
+/// [`anchor_scroll_step`] every pause until the section has landed. `_top`
+/// (the tab header's probe key) is no longer read: the body start comes from
+/// the safe-area inset, not the header's position; callers still pass it.
 pub(super) fn scroll_on_request(
     state: &S,
     tab: Tab,
-    top: &'static str,
+    _top: &'static str,
     anchors: &'static [&'static str],
 ) {
     let Some(request) = state.pending_anchor.get() else {
@@ -185,9 +197,7 @@ pub(super) fn scroll_on_request(
                 log::warn!("native-widgets-demo: anchor scroll timer panicked: {join_err}");
                 return;
             }
-            if anchor_scroll_step(&controller, tab, top, request.anchor, anchors)
-                == AnchorStep::Landed
-            {
+            if anchor_scroll_step(&controller, tab, request.anchor, anchors) == AnchorStep::Landed {
                 return;
             }
         }

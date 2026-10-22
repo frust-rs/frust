@@ -16,14 +16,19 @@ use std::any::Any;
 
 use std::sync::{Mutex, MutexGuard};
 
-use frust::{AnyView, Brightness, Component, GetUntracked, Set, Theme, component, provide_context};
+use frust::{
+    AnyView, Brightness, Component, GetUntracked, ScrollController, Set, Theme, component,
+    provide_context,
+};
 use frust_core::FrameTime;
 use frust_core::accesskit::Role;
-use frust_core::{PaintOutcome, PaintScene, RenderRoot, View};
+use frust_core::{PaintOutcome, PaintScene, RenderRoot, View, WindowEdgeInsets, WindowInsets};
 use frust_reactive::ReactiveRuntime;
 use frust_scene::GlyphRun;
 use frust_text::TextContext;
 use kurbo::{BezPath, Point, Rect, Size};
+use native_widgets_demo::pages::common::{fresh_anchor_rect, viewport_key};
+use native_widgets_demo::pages::controls_tab::{ANCHORS, AnchorStep, anchor_scroll_step};
 use peniko::{Brush, Color};
 use reactive_graph::owner::Owner;
 
@@ -495,74 +500,114 @@ fn a_section_deep_link_selects_its_tab_and_sets_the_anchor() {
     assert_eq!(request.anchor, pages::sheet::ANCHOR);
 }
 
-/// Drives the Controls tab at a phone-sized viewport: scrolls it to
-/// `start_offset`, issues a `section/<label>` request for `label`, then
-/// alternates anchor-scroll steps with frames until the request lands (the
-/// order the UI task runs them in). Asserts the section header ends where the
-/// body starts, or the scroll hit its bottom edge when the section is too
-/// near the end to get there.
-fn assert_anchor_lands_from(start_offset: f64, label: &str) {
-    use native_widgets_demo::pages::common::{fresh_anchor_rect, viewport_key};
-    use native_widgets_demo::pages::controls_tab::{ANCHORS, AnchorStep, TOP, anchor_scroll_step};
+/// The Controls tab at a phone-sized viewport under a pushed top inset, with
+/// frames pumped by hand in the order the UI task runs them.
+struct AnchorRig {
+    _owner: Owner,
+    tcx: TextContext,
+    root: RenderRoot<S, AnyView<S>>,
+    state: S,
+    t_ms: u64,
+}
 
-    let (_owner, theme) = setup_with_theme(Brightness::Dark);
-    let mut tcx = TextContext::new();
-    let mut root = root_with(theme);
-    let mut state = S::new();
-    let mut logic = |s: &mut S| pages::controls_tab::page(s);
-    let size = Size::new(390.0, 800.0);
-    let controller = state.scroll(Tab::Controls).clone();
-    let mut t_ms = 0;
-    let mut pump = |root: &mut _, logic: &mut _, state: &mut S, tcx: &mut _| {
-        t_ms += 16;
-        frame_at_size(root, logic, state, tcx, size, t_ms);
-    };
+impl AnchorRig {
+    const SIZE: Size = Size::new(390.0, 800.0);
 
-    // Where the body starts: the tab header's window offset from the viewport
-    // at rest.
-    for _ in 0..2 {
-        pump(&mut root, &mut logic, &mut state, &mut tcx);
+    fn new(top_inset: f64) -> Self {
+        let (owner, theme) = setup_with_theme(Brightness::Dark);
+        let mut rig = Self {
+            _owner: owner,
+            tcx: TextContext::new(),
+            root: root_with(theme),
+            state: S::new(),
+            t_ms: 0,
+        };
+        rig.root.rebuild(
+            &mut |s: &mut S| pages::controls_tab::page(s),
+            &mut rig.state,
+        );
+        rig.set_top_inset(top_inset);
+        rig.pump(2);
+        rig
     }
-    let viewport = fresh_anchor_rect(viewport_key(Tab::Controls)).expect("viewport painted");
-    let body_start = fresh_anchor_rect(TOP).expect("top painted").y - viewport.y;
-    assert!(controller.max_offset() > start_offset, "the body scrolls");
 
-    controller.jump_to(start_offset);
-    for _ in 0..3 {
-        pump(&mut root, &mut logic, &mut state, &mut tcx);
+    /// Push a status-bar-like top inset, as a rotation or a shell would.
+    fn set_top_inset(&mut self, top: f64) {
+        self.root.set_insets(WindowInsets::new(
+            WindowEdgeInsets::new(0.0, top, 0.0, 0.0),
+            WindowEdgeInsets::ZERO,
+        ));
     }
-    assert!((controller.offset() - start_offset).abs() < 1.0, "scrolled");
 
-    let destination = section_destination(label).expect("a section slug");
-    state.go(destination);
-    let anchor = destination.anchor.expect("an anchored destination");
-
-    let mut landed = false;
-    for _ in 0..40 {
-        if anchor_scroll_step(&controller, Tab::Controls, TOP, anchor, ANCHORS)
-            == AnchorStep::Landed
-        {
-            landed = true;
-            break;
-        }
-        for _ in 0..2 {
-            pump(&mut root, &mut logic, &mut state, &mut tcx);
+    fn pump(&mut self, frames: usize) {
+        for _ in 0..frames {
+            self.t_ms += 16;
+            frame_at_size(
+                &mut self.root,
+                &mut |s: &mut S| pages::controls_tab::page(s),
+                &mut self.state,
+                &mut self.tcx,
+                Self::SIZE,
+                self.t_ms,
+            );
         }
     }
-    assert!(landed, "{label} from offset {start_offset}: never landed");
 
-    let header = fresh_anchor_rect(anchor)
-        .expect("the target header is painted")
-        .y
-        - viewport.y;
-    let at_bottom = (controller.max_offset() - controller.offset()).abs() < 2.0;
-    assert!(
-        (header - body_start).abs() < 2.0 || at_bottom,
-        "{label} from offset {start_offset}: header at {header}, body starts at {body_start}, \
-         offset {} of {}",
-        controller.offset(),
-        controller.max_offset(),
-    );
+    fn controller(&self) -> ScrollController {
+        self.state.scroll(Tab::Controls).clone()
+    }
+
+    /// Scroll to `offset` and let the frames settle.
+    fn scroll_to(&mut self, offset: f64) {
+        let controller = self.controller();
+        assert!(controller.max_offset() > offset, "the body scrolls");
+        controller.jump_to(offset);
+        self.pump(3);
+        assert!((controller.offset() - offset).abs() < 1.0, "scrolled");
+    }
+
+    /// Issue a `section/<label>` request and alternate anchor-scroll steps with
+    /// frames until it lands; asserts the section header then sits `inset`
+    /// below the viewport top (where the body starts), or the scroll hit its
+    /// bottom edge when the section is too near the end to get there.
+    fn assert_lands(&mut self, label: &str, inset: f64) {
+        let controller = self.controller();
+        let destination = section_destination(label).expect("a section slug");
+        self.state.go(destination);
+        let anchor = destination.anchor.expect("an anchored destination");
+
+        let mut landed = false;
+        for _ in 0..40 {
+            if anchor_scroll_step(&controller, Tab::Controls, anchor, ANCHORS) == AnchorStep::Landed
+            {
+                landed = true;
+                break;
+            }
+            self.pump(2);
+        }
+        assert!(landed, "{label}: never landed");
+
+        let viewport = fresh_anchor_rect(viewport_key(Tab::Controls)).expect("viewport painted");
+        let header = fresh_anchor_rect(anchor)
+            .expect("the target header is painted")
+            .y
+            - viewport.y;
+        let at_bottom = (controller.max_offset() - controller.offset()).abs() < 2.0;
+        assert!(
+            (header - inset).abs() < 2.0 || at_bottom,
+            "{label}: header at {header}, body starts at {inset}, offset {} of {}",
+            controller.offset(),
+            controller.max_offset(),
+        );
+    }
+}
+
+/// A fresh Controls tab under `inset`, scrolled to `start_offset`, then a
+/// request for `label` must land it at the inset.
+fn assert_anchor_lands_from(start_offset: f64, label: &str, inset: f64) {
+    let mut rig = AnchorRig::new(inset);
+    rig.scroll_to(start_offset);
+    rig.assert_lands(label, inset);
 }
 
 /// After scrolling more than a viewport, the top probe is culled and its rect
@@ -570,8 +615,8 @@ fn assert_anchor_lands_from(start_offset: f64, label: &str) {
 #[test]
 fn an_anchor_lands_after_the_body_was_scrolled_past_a_viewport() {
     let _guard = shell_guard();
-    assert_anchor_lands_from(2500.0, "New");
-    assert_anchor_lands_from(2500.0, "Controls");
+    assert_anchor_lands_from(2500.0, "New", 0.0);
+    assert_anchor_lands_from(2500.0, "Controls", 0.0);
 }
 
 /// A section more than two viewports away never paints until the scroll gets
@@ -579,6 +624,39 @@ fn an_anchor_lands_after_the_body_was_scrolled_past_a_viewport() {
 #[test]
 fn an_anchor_lands_on_the_far_section_from_the_top() {
     let _guard = shell_guard();
-    assert_anchor_lands_from(0.0, "Composite");
-    assert_anchor_lands_from(0.0, "New");
+    assert_anchor_lands_from(0.0, "Composite", 0.0);
+    assert_anchor_lands_from(0.0, "New", 0.0);
+}
+
+/// The header must end at the safe-area inset (below the floating bar), from
+/// an offset where the tab header is culled and nothing was ever measured on
+/// this fresh thread, for a mid and a far section.
+#[test]
+fn an_anchor_lands_at_a_nonzero_top_inset_from_a_culled_header() {
+    let _guard = shell_guard();
+    assert_anchor_lands_from(2500.0, "New", 59.0);
+    assert_anchor_lands_from(2500.0, "Controls", 59.0);
+    assert_anchor_lands_from(2500.0, "Composite", 59.0);
+}
+
+/// Same, from the top, where the far section is culled.
+#[test]
+fn an_anchor_lands_at_a_nonzero_top_inset_on_the_far_section() {
+    let _guard = shell_guard();
+    assert_anchor_lands_from(0.0, "Composite", 47.0);
+}
+
+/// A rotation changes the top inset between two requests: the second landing
+/// uses the new inset, not the first one's.
+#[test]
+fn an_anchor_follows_a_changed_top_inset_between_requests() {
+    let _guard = shell_guard();
+    let mut rig = AnchorRig::new(59.0);
+    rig.scroll_to(2500.0);
+    rig.assert_lands("Controls", 59.0);
+
+    rig.set_top_inset(20.0);
+    rig.pump(2);
+    rig.scroll_to(2500.0);
+    rig.assert_lands("New", 20.0);
 }
