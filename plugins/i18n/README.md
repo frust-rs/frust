@@ -435,9 +435,23 @@ fmt::time_range(&ja, t(9, 0), t(11, 0), DateLength::Short)?;   // "9:00～11:00"
 (end before start) is joined in the order given, never panicking. This is a simplification of
 CLDR's interval formats; `docs/LIMITATIONS.md` records it as `i18n-interval-hand-rolled`.
 
+Relative days ("Today" / "Tomorrow" / "Yesterday" for bookings) are computed on the venue zone's
+civil days, not the device's: `fmt::relative_day(&locale, instant, now, "Asia/Makassar",
+RelativeDayStyle::Long)?` reads both instants in the zone, and a distance of at most one day goes
+through ICU4X's relative-time formatter (`Numeric::Auto`: en `today`/`tomorrow`/`yesterday`, th
+`วันนี้`/`พรุ่งนี้`/`เมื่อวาน`, ja `今日`/`明日`/`昨日`, es `hoy`/`mañana`/`ayer`); two or more days away
+it returns a medium date (`Nov 17, 2023`). `relative_day_civil(&locale, day, today, style)` takes
+dates you already hold. The string is ICU's, returned as-is: CLDR capitalises per width in some
+languages (vi short `hôm nay`, vi long `Hôm nay`) and the words are lower case in most, so
+sentence-casing a standalone label is the caller's job. In FTL:
+`{ RELATIVE_DAY($t, $now, timeZone: "Asia/Makassar", style: "short") }`. Fluent allows only
+literals as named-argument values, so a variable `now` is the second positional (a literal
+`now: 1700000000` also works); `style` is `"long"` (default) or `"short"`; a missing `now` or an
+unknown zone renders `RELATIVE_DAY()`.
+
 Honored named options: `NUMBER`'s `style` (`decimal`/`percent`/`currency`), `currency` and
 `minorUnits`;
-`DATETIME`'s `dateStyle`/`timeStyle`/`timeZone`. Anything else (ECMA-402-style
+`DATETIME`'s `dateStyle`/`timeStyle`/`timeZone`; `RELATIVE_DAY`'s `now`/`timeZone`/`style`. Anything else (ECMA-402-style
 `minimumFractionDigits`, `useGrouping`, …) is ignored at `debug` log level, never a warning or
 an error — these run on a UI's formatting path, potentially every frame.
 
