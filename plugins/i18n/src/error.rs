@@ -59,4 +59,8 @@ pub enum I18nError {
     /// offset, is not `±HH:MM`).
     #[error("unknown time zone '{0}'")]
     UnknownTimeZone(String),
+
+    /// ICU has no unit data for this CLDR unit id.
+    #[error("unsupported unit '{0}'")]
+    UnsupportedUnit(String),
 }

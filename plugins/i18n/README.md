@@ -449,6 +449,15 @@ literals as named-argument values, so a variable `now` is the second positional 
 `now: 1700000000` also works); `style` is `"long"` (default) or `"short"`; a missing `now` or an
 unknown zone renders `RELATIVE_DAY()`.
 
+Units and durations go through ICU4X's `UnitsFormatter`: `fmt::units(&locale, 1.5, Unit::Hour,
+UnitStyle::Short)?` is `"1.5 hr"` in en (`Narrow` `"1.5h"`, `Long` `"1.5 hours"`); `Unit` is
+`Hour`/`Minute`/`Day`/`Kilometer`/`Meter`/`Mile`, `units_decimal` takes a `Decimal`, and
+`units_by_id` takes a CLDR id (bare `hour`, not `duration-hour`), answering
+`Err(I18nError::UnsupportedUnit(id))` for one with no data. `fmt::duration_minutes(&locale, 90,
+style)?` renders under an hour as minutes (`45 min`), whole hours as hours (`2 hours`), and anything
+else as hours to one decimal (`1.5 hr`). Widths are CLDR's call: vi spells all three alike, ja long
+equals short, and vi/es use a comma decimal (`1,5 giờ`, `1,5 horas`).
+
 Honored named options: `NUMBER`'s `style` (`decimal`/`percent`/`currency`), `currency` and
 `minorUnits`;
 `DATETIME`'s `dateStyle`/`timeStyle`/`timeZone`; `RELATIVE_DAY`'s `now`/`timeZone`/`style`. Anything else (ECMA-402-style
