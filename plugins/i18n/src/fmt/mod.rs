@@ -61,12 +61,14 @@ mod fluent_fns;
 mod interval;
 mod number;
 mod relative;
+mod units;
 mod zone;
 
 use crate::{I18nError, Locale, LocaleSet};
 
 pub use interval::{date_range, datetime_range_in_zone, time_range, time_range_in_zone};
 pub use relative::{RelativeDayStyle, relative_day, relative_day_civil};
+pub use units::{Unit, UnitStyle, duration_minutes, units, units_by_id, units_decimal};
 pub use zone::{
     civil_at_offset, date_in_zone, datetime_at_offset, datetime_in_zone, time_in_zone,
     zone_offset_seconds, zoned_civil,

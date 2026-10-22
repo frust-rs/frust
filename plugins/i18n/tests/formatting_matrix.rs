@@ -806,3 +806,70 @@ fn ftl_relative_day_round_trips_through_the_venue_zone() {
     // A literal `now:` (1700000000 = Nov 15 06:13 local) names the same day.
     assert_eq!(resolve("literal", makassar(0, 1, 0), now), "today");
 }
+
+/// `[short, narrow, long]` for 90, 60, 45 and 120 minutes, exactly as ICU4X
+/// renders them. Vietnamese spells all three widths alike, Japanese long
+/// equals short, and Thai minutes long equals short.
+#[test]
+fn duration_minutes_across_the_matrix() {
+    use fmt::UnitStyle::{Long, Narrow, Short};
+
+    #[rustfmt::skip]
+    let expected: [(&str, u32, [&str; 3]); 20] = [
+        ("en", 90, ["1.5 hr", "1.5h", "1.5 hours"]),
+        ("en", 60, ["1 hr", "1h", "1 hour"]),
+        ("en", 45, ["45 min", "45m", "45 minutes"]),
+        ("en", 120, ["2 hr", "2h", "2 hours"]),
+        ("th", 90, ["1.5 ชม.", "1.5ชม.", "1.5 ช\u{e31}\u{e48}วโมง"]),
+        ("th", 60, ["1 ชม.", "1ชม.", "1 ช\u{e31}\u{e48}วโมง"]),
+        ("th", 45, ["45 นาท\u{e35}", "45นาท\u{e35}", "45 นาท\u{e35}"]),
+        ("th", 120, ["2 ชม.", "2ชม.", "2 ช\u{e31}\u{e48}วโมง"]),
+        ("ja", 90, ["1.5 時間", "1.5h", "1.5 時間"]),
+        ("ja", 60, ["1 時間", "1h", "1 時間"]),
+        ("ja", 45, ["45 分", "45m", "45 分"]),
+        ("ja", 120, ["2 時間", "2h", "2 時間"]),
+        ("vi", 90, ["1,5 giờ", "1,5 giờ", "1,5 giờ"]),
+        ("vi", 60, ["1 giờ", "1 giờ", "1 giờ"]),
+        ("vi", 45, ["45 phút", "45 phút", "45 phút"]),
+        ("vi", 120, ["2 giờ", "2 giờ", "2 giờ"]),
+        ("es", 90, ["1,5 h", "1,5h", "1,5 horas"]),
+        ("es", 60, ["1 h", "1h", "1 hora"]),
+        ("es", 45, ["45 min", "45min", "45 minutos"]),
+        ("es", 120, ["2 h", "2h", "2 horas"]),
+    ];
+
+    for (tag, minutes, strings) in expected {
+        for (style, want) in [Short, Narrow, Long].into_iter().zip(strings) {
+            assert_eq!(
+                fmt::duration_minutes(&locale(tag), minutes, style).expect("formats"),
+                want,
+                "{tag} {minutes} min {style:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn units_render_the_other_units_and_reject_an_unknown_id() {
+    let en = locale("en");
+    assert_eq!(
+        fmt::units(&en, 2.0, fmt::Unit::Kilometer, fmt::UnitStyle::Long).expect("formats"),
+        "2 kilometers"
+    );
+    assert_eq!(
+        fmt::units(&en, 1.0, fmt::Unit::Day, fmt::UnitStyle::Long).expect("formats"),
+        "1 day"
+    );
+    assert_eq!(
+        fmt::duration_minutes(&en, 100, fmt::UnitStyle::Short).expect("formats"),
+        "1.7 hr"
+    );
+    assert!(fmt::units(&en, f64::NAN, fmt::Unit::Hour, fmt::UnitStyle::Short).is_err());
+
+    let error = fmt::units_by_id(&en, 1.0, "duration-hour", fmt::UnitStyle::Short)
+        .expect_err("not a data id");
+    assert!(
+        matches!(&error, frust_i18n::I18nError::UnsupportedUnit(id) if id == "duration-hour"),
+        "{error:?}"
+    );
+}

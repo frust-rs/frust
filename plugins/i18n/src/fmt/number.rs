@@ -111,7 +111,7 @@ pub(super) fn percent(locale: &Locale, value: f64) -> String {
 /// `Decimal::round` sets the number's lower magnitude *to* the rounding
 /// position, so it pads as well as rounds (`1.5` → `1.500`); `pad_end` is
 /// what takes the padding back off, and it never truncates a non-zero digit.
-fn standard_fraction(mut number: Decimal) -> Decimal {
+pub(super) fn standard_fraction(mut number: Decimal) -> Decimal {
     number.round(MAX_FRACTION_POSITION);
     number.absolute.pad_end(MIN_FRACTION_POSITION);
     number
