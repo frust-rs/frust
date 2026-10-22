@@ -75,8 +75,11 @@
 //! A native tap stays pending for [`SETTLE_WINDOW`] against applies published
 //! before the app saw it ([`settle`]): one still naming the tab the tap left is
 //! stale and keeps the bar, one naming the tapped tab confirms it, a third tab
-//! is honoured at once. At the deadline a spec still naming the left tab snaps
-//! the bar back the same unanimated way: the app rejected the tap ([`expire`]).
+//! is honoured at once. At the deadline the bar always converges to the tab
+//! the app's spec names ([`expire`]): a spec naming any tab other than the
+//! newest tapped one (the left tab, a tab passed on the way, or another)
+//! moves the bar there the same unanimated way, since the app rejected the
+//! newest tap; a spec naming the tapped tab, or none, keeps it.
 //! A newer tap inside the window chains onto the pending one ([`chain`]): it
 //! keeps the originally confirmed tab as `from`, so an apply confirming an
 //! earlier tap holds rather than snapping off the newest one, and while a tap
@@ -863,18 +866,18 @@ impl Chrome {
         true
     }
 
-    /// Native tap `tap`'s deadline: snap the bar back when the app never
-    /// confirmed it ([`expire`]).
+    /// Native tap `tap`'s deadline: move the bar to the spec's page when the
+    /// app never confirmed the newest tap ([`expire`]).
     fn settle_expired(&mut self, tap: u64) {
         match expire(self.pending.as_ref(), tap, selected_index(&self.spec)) {
             Expiry::Superseded => {}
             Expiry::Settled => self.pending = None,
-            Expiry::SnapBack(from) => {
+            Expiry::SnapBack(page) => {
                 self.pending = None;
                 log::debug!(
-                    "frust-native-widgets: unconfirmed chrome tab tap; back to page {from}"
+                    "frust-native-widgets: unconfirmed chrome tab tap; to the spec's page {page}"
                 );
-                self.show_page(from, None);
+                self.show_page(page, None);
             }
         }
     }
@@ -1125,22 +1128,22 @@ fn settle(pending: Option<&NativeSelect>, wanted: Option<usize>, now: Instant) -
 enum Expiry {
     /// A newer tap, an apply or a tab-list change already settled this one.
     Superseded,
-    /// The spec moved off the left page, or the bar already shows it: drop
-    /// the tap, keep the bar.
+    /// The spec selects the page the bar shows, or names no page: drop the
+    /// tap, keep the bar.
     Settled,
-    /// The spec still selects the page left: the app rejected the taps.
+    /// The spec selects another page (the one left, one passed or any other):
+    /// the app rejected the newest tap, so the bar moves to the spec's page.
     SnapBack(usize),
 }
 
-/// The deadline decision for tap `tap` while the last spec selects `wanted`.
+/// The deadline decision for tap `tap` while the last spec selects `wanted`:
+/// the bar converges to the page the spec names.
 fn expire(pending: Option<&NativeSelect>, tap: u64, wanted: Option<usize>) -> Expiry {
-    match pending {
-        Some(pending)
-            if pending.tap == tap && wanted == Some(pending.from) && pending.to != pending.from =>
-        {
-            Expiry::SnapBack(pending.from)
+    match (pending, wanted) {
+        (Some(pending), Some(page)) if pending.tap == tap && page != pending.to => {
+            Expiry::SnapBack(page)
         }
-        Some(pending) if pending.tap == tap => Expiry::Settled,
+        (Some(pending), _) if pending.tap == tap => Expiry::Settled,
         _ => Expiry::Superseded,
     }
 }
@@ -1670,11 +1673,16 @@ mod tests {
     }
 
     #[test]
-    fn a_tap_the_spec_moved_off_settles_without_moving() {
+    fn a_tap_the_spec_confirms_or_names_no_page_settles_without_moving() {
         let tap = pending(Instant::now(), 3);
         assert_eq!(expire(Some(&tap), 3, Some(TAPPED)), Expiry::Settled);
-        assert_eq!(expire(Some(&tap), 3, Some(THIRD)), Expiry::Settled);
         assert_eq!(expire(Some(&tap), 3, None), Expiry::Settled);
+    }
+
+    #[test]
+    fn at_the_deadline_the_bar_moves_to_any_other_page_the_spec_names() {
+        let tap = pending(Instant::now(), 3);
+        assert_eq!(expire(Some(&tap), 3, Some(THIRD)), Expiry::SnapBack(THIRD));
     }
 
     #[test]
@@ -1726,22 +1734,64 @@ mod tests {
         assert_eq!(settle(Some(&second), Some(LEFT), now), Settle::Resolve);
         // The bar already shows the newest tap's page: nothing to snap back.
         assert_eq!(expire(Some(&second), 2, Some(LEFT)), Expiry::Settled);
-        assert_eq!(expire(Some(&second), 2, Some(TAPPED)), Expiry::Settled);
         // The first tap's timer is superseded by the second.
         assert_eq!(expire(Some(&second), 1, Some(LEFT)), Expiry::Superseded);
     }
 
-    #[test]
-    fn a_chained_tap_onto_a_third_page_snaps_back_only_to_the_original_page() {
-        let now = Instant::now();
-        let deadline = now + SETTLE_WINDOW;
+    /// Confirmed on LEFT; tap TAPPED, then THIRD, inside the window.
+    fn left_tapped_third(deadline: Instant) -> NativeSelect {
         let first = chain(None, LEFT, TAPPED, 3, deadline, 1).unwrap();
-        let second = chain(Some(&first), TAPPED, THIRD, 3, deadline, 2).unwrap();
+        chain(Some(&first), TAPPED, THIRD, 3, deadline, 2).unwrap()
+    }
+
+    #[test]
+    fn a_chained_tap_onto_a_third_page_converges_to_the_confirmed_page() {
+        let now = Instant::now();
+        let second = left_tapped_third(now + SETTLE_WINDOW);
         assert_eq!((second.from, second.to), (LEFT, THIRD));
+        assert_eq!(second.passed, vec![TAPPED]);
+        // Inside the window an intermediate or stale confirmation keeps the bar.
         assert_eq!(settle(Some(&second), Some(LEFT), now), Settle::Hold);
         assert_eq!(settle(Some(&second), Some(TAPPED), now), Settle::Hold);
         assert_eq!(settle(Some(&second), Some(THIRD), now), Settle::Resolve);
+        // At the deadline the bar moves to whichever page the spec names.
         assert_eq!(expire(Some(&second), 2, Some(LEFT)), Expiry::SnapBack(LEFT));
-        assert_eq!(expire(Some(&second), 2, Some(TAPPED)), Expiry::Settled);
+        assert_eq!(
+            expire(Some(&second), 2, Some(TAPPED)),
+            Expiry::SnapBack(TAPPED)
+        );
+    }
+
+    #[test]
+    fn left_tapped_third_confirmed_only_up_to_tapped_snaps_to_tapped() {
+        // The app accepts TabSelected(TAPPED) and rejects TabSelected(THIRD).
+        let now = Instant::now();
+        let second = left_tapped_third(now + SETTLE_WINDOW);
+        assert_eq!(settle(Some(&second), Some(TAPPED), now), Settle::Hold);
+        assert_eq!(
+            expire(Some(&second), 2, Some(TAPPED)),
+            Expiry::SnapBack(TAPPED)
+        );
+    }
+
+    #[test]
+    fn left_tapped_left_with_the_second_tap_ignored_snaps_to_tapped() {
+        // The app accepts TabSelected(TAPPED) and ignores the TabSelected(LEFT).
+        let now = Instant::now();
+        let deadline = now + SETTLE_WINDOW;
+        let first = chain(None, LEFT, TAPPED, 3, deadline, 1).unwrap();
+        let second = chain(Some(&first), TAPPED, LEFT, 3, deadline, 2).unwrap();
+        assert_eq!(settle(Some(&second), Some(TAPPED), now), Settle::Hold);
+        assert_eq!(
+            expire(Some(&second), 2, Some(TAPPED)),
+            Expiry::SnapBack(TAPPED)
+        );
+    }
+
+    #[test]
+    fn left_tapped_third_confirmed_third_settles() {
+        let now = Instant::now();
+        let second = left_tapped_third(now + SETTLE_WINDOW);
+        assert_eq!(expire(Some(&second), 2, Some(THIRD)), Expiry::Settled);
     }
 }
