@@ -170,6 +170,7 @@ trybuild = "1"
 icu_decimal = "2.2"
 icu_datetime = "2.2"
 icu_plurals = "2.2"
+icu_list = "2.2"
 # Exact pin: an explicitly unstable pre-1.0 crate; 0.5.0 still resolves to the 2.2.x components
 # above (0.6.0 would pull 2.3.x).
 icu_experimental = "=0.5.0"
@@ -184,6 +185,9 @@ tinystr = "0.8"
 icu_provider = { version = "2.3", default-features = false, features = ["sync"] }
 # Exact pin: a small, young surface with no minor-version stability record.
 sys-locale = "=0.3.2"
+# frust-i18n zoned formatting only. Bundled tzdb: mobile targets have no reliable system zoneinfo.
+# MSRV 1.70.
+jiff = { version = "0.2.38", default-features = false, features = ["std", "tzdb-bundle-always"] }
 # reactive stack (frust-reactive) — do not add reactive_graph's `effects`
 # feature anywhere (see docs/DEVELOPMENT.md's Version-Pin Policy)
 reactive_graph = "0.2"

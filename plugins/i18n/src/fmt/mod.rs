@@ -212,3 +212,13 @@ pub fn datetime(
 pub fn with_icu_functions(set: LocaleSet) -> LocaleSet {
     fluent_fns::with_icu_functions(set)
 }
+
+/// Links the pinned `jiff` and `icu_list` crates so the dependency gate and size delta are real;
+/// replaced by the zoned and list formatting code.
+#[cfg(feature = "formatting")]
+mod _pin_gate {
+    pub(crate) fn _touch() {
+        let _ = jiff::tz::TimeZone::UTC;
+        let _ = icu_list::ListFormatter::try_new_and;
+    }
+}
