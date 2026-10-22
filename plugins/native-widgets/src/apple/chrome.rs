@@ -42,19 +42,26 @@
 //! # The containment-move contract
 //!
 //! The frust controller's view (the `FrustView`) is wrapped in a plugin-owned
-//! host `UIView`; the controller is a child of exactly one page at a time.
-//! The host never leaves the window during a selection change: a host out of
-//! it takes the `CAMetalLayer` along and the window shows a black frame. So
-//! the host is first re-parented (a same-window `insertSubview`, never
-//! `removeFromSuperview`) to the bottom of the tab bar controller's view; the
-//! old page lets the controller go (`willMoveToParentViewController(nil)`,
-//! `removeFromParentViewController`), the new page takes it
-//! (`addChildViewController`, `didMoveToParentViewController`); then
-//! `setSelectedIndex`, a forced `layoutIfNeeded` that puts the new page in the
-//! window (UIKit would on a later pass), and a second same-window re-parent
-//! into the page's view. A page still out of the window adopts the host from
-//! its `viewDidLayoutSubviews`/`viewDidAppear`. Pages are kept by `TabId`, so
-//! a reorder never loses the contained controller.
+//! host `UIView`; the controller is a child of exactly one page at a time,
+//! and the host is only ever in that page's view (its current parent's) or
+//! in no view at all: UIKit raises a hierarchy-inconsistency exception for a
+//! child controller's view under another controller's view, and a foreign
+//! exception aborts the process. A selection change runs in one main-queue
+//! turn, so Core Animation never commits a frame with the host detached:
+//! snapshot the host while it is on screen; the old page lets the controller
+//! go (`willMoveToParentViewController(nil)`, host removed,
+//! `removeFromParentViewController`), leaving the host with no superview; the
+//! new page takes it (`addChildViewController`, `didMoveToParentViewController`);
+//! `setSelectedIndex`; a forced `layoutIfNeeded` of the tab bar and
+//! navigation controllers' views, which puts the new page in the window
+//! (UIKit would on a later pass); then the host is added to the page's view.
+//! A page still out of the window places the host from its
+//! `viewDidLayoutSubviews`/`viewDidAppear`; until then the snapshot (a plain
+//! view, no controller) covers the host's last frame just below the tab bar
+//! in the tab bar controller's view, removed once the host is placed or after
+//! 0.5 s at the latest. A tab change that drops the holding page snapshots
+//! before letting it go. Pages are kept by `TabId`, so a reorder never loses
+//! the contained controller.
 //!
 //! Every page view and the tab bar controller's view carry a backdrop,
 //! `systemBackgroundColor` resolved for `ChromeSpec::dark` into a concrete
@@ -110,7 +117,7 @@
 //! tab, and the navigation controllers have no stack (no native push
 //! animation; `Leading::Back` is a custom item reporting `BackPressed`).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -121,7 +128,7 @@ use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{NSObject, NSObjectProtocol};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
-use objc2_core_foundation::CGFloat;
+use objc2_core_foundation::{CGFloat, CGRect};
 use objc2_foundation::{NSArray, NSData, NSString, ns_string};
 use objc2_ui_kit::{
     NSObjectUIAccessibility, UIAction, UIApplication, UIBarButtonItem, UIColor, UIImage,
@@ -289,6 +296,8 @@ static RECHECK: AtomicU64 = AtomicU64::new(0);
 /// [`RECHECK_MAX`].
 const RECHECK_FIRST: Duration = Duration::from_millis(100);
 const RECHECK_MAX: Duration = Duration::from_secs(2);
+/// The longest a [`Cover`] stays up when no page places the host.
+const COVER_MAX: Duration = Duration::from_millis(500);
 
 /// Record `failure` for `generation`; an older generation's never replaces
 /// a newer one's.
@@ -379,6 +388,9 @@ fn recheck(mtm: MainThreadMarker, generation: u64, delay: Duration) {
 thread_local! {
     /// The installed chrome, if any. Main thread only.
     static CHROME: RefCell<Option<Chrome>> = const { RefCell::new(None) };
+    /// The shown cover and its sequence number. Main thread only.
+    static COVER: RefCell<Option<(u64, Retained<UIView>)>> = const { RefCell::new(None) };
+    static COVER_SEQ: Cell<u64> = const { Cell::new(0) };
 }
 
 /// Take generation `generation`'s chrome out of [`CHROME`] (any when `None`).
@@ -611,7 +623,7 @@ impl Chrome {
             target: FrustNativeControlTarget::chrome_target(mtm),
         };
         chrome.target.attach_tab_bar_controller(&chrome.tabs);
-        chrome.sync_pages(mtm, spec);
+        let cover = chrome.sync_pages(mtm, spec);
         apply_user_interface_style(&chrome.tabs.tabBar(), spec.dark);
         paint_backdrop(chrome.tabs.view(), spec.dark);
         // The root swap takes the `FrustView` out of the window; its siblings
@@ -624,7 +636,10 @@ impl Chrome {
             view.setFrame(chrome.host.bounds());
             view.setAutoresizingMask(flexible);
         }
-        chrome.select(spec);
+        // The former window root has no parent and the fresh host no
+        // superview; detaching keeps that true before a page holds it.
+        detach_from_parent(&chrome.frust);
+        chrome.select(spec, cover);
         chrome
     }
 
@@ -634,11 +649,13 @@ impl Chrome {
         let spec = diff.spec;
         let restyle = self.spec.dark != spec.dark;
         self.spec = spec.clone();
-        if diff.contains(ChromeField::Tabs) {
-            self.sync_pages(mtm, spec);
-        }
+        let cover = if diff.contains(ChromeField::Tabs) {
+            self.sync_pages(mtm, spec)
+        } else {
+            None
+        };
         if diff.contains(ChromeField::Tabs) || diff.contains(ChromeField::Selected) {
-            self.select(spec);
+            self.select(spec, cover);
         }
         for page in &self.pages {
             let top = self.spec.top.as_ref();
@@ -655,7 +672,9 @@ impl Chrome {
     }
 
     /// Rebuild the view-controller array for `spec.tabs`, keeping pages by id.
-    fn sync_pages(&mut self, mtm: MainThreadMarker, spec: &ChromeSpec) {
+    /// Dropping the holding page detaches the host; its snapshot, taken first,
+    /// is returned for the [`Self::select`] that follows in the same turn.
+    fn sync_pages(&mut self, mtm: MainThreadMarker, spec: &ChromeSpec) -> Option<Cover> {
         let wanted: Vec<Option<&TabItem>> = if spec.tabs.is_empty() {
             vec![None]
         } else {
@@ -679,9 +698,11 @@ impl Chrome {
             }
             self.pages.push(page);
         }
-        if old.iter().any(|page| page.page.holds()) {
-            self.park_host();
-        }
+        let cover = old
+            .iter()
+            .any(|page| page.page.holds())
+            .then(|| self.snapshot_cover())
+            .flatten();
         for page in old {
             page.page.release();
         }
@@ -693,12 +714,14 @@ impl Chrome {
         self.tabs
             .setViewControllers(Some(&NSArray::from_retained_slice(&navs)));
         self.tabs.tabBar().setHidden(spec.tabs.is_empty());
+        cover
     }
 
     /// Select `spec.selected` (an unknown id keeps the current tab) and move
-    /// the frust controller into that page, the host staying in the window
-    /// throughout (module doc, containment-move contract).
-    fn select(&mut self, spec: &ChromeSpec) {
+    /// the frust controller into that page in this one turn (module doc,
+    /// containment-move contract). `cover` is a snapshot [`Self::sync_pages`]
+    /// took before detaching the host; otherwise one is taken here.
+    fn select(&mut self, spec: &ChromeSpec, cover: Option<Cover>) {
         let current = self.tabs.selectedIndex();
         let index = spec
             .selected
@@ -712,7 +735,7 @@ impl Chrome {
         if target.page.holds() {
             self.tabs.setSelectedIndex(index);
         } else {
-            self.park_host();
+            let cover = cover.or_else(|| self.snapshot_cover());
             for page in &self.pages {
                 page.page.release();
             }
@@ -724,32 +747,62 @@ impl Chrome {
             if let Some(view) = target.nav.view() {
                 view.layoutIfNeeded();
             }
-            if !target.page.place_host() {
-                log::debug!(
-                    "frust-native-widgets: chrome page {index} is not in the window after a \
-                     forced layout; the host waits in the tab bar controller's view"
-                );
-            }
+            let covered = !target.page.place_host() && self.show_cover(cover);
+            let in_window = self.host.window().is_some();
+            log::debug!(
+                "frust-native-widgets: chrome page {index} selected; host in window: \
+                 {in_window}, cover shown: {covered}"
+            );
+            debug_assert!(
+                in_window || covered,
+                "the chrome host is off screen, uncovered"
+            );
         }
         self.tabs.setNeedsStatusBarAppearanceUpdate();
         self.tabs.setNeedsUpdateOfHomeIndicatorAutoHidden();
     }
 
-    /// Move the host to the bottom of the tab bar controller's view, which
-    /// stays in the window while pages come and go.
-    fn park_host(&self) {
+    /// The host as it shows now and its frame in the tab bar controller's
+    /// view; `None` when it is not in the window.
+    fn snapshot_cover(&self) -> Option<Cover> {
+        let tabs = self.tabs.view()?;
+        self.host.window()?;
+        let view = self.host.snapshotViewAfterScreenUpdates(false)?;
+        let frame = self
+            .host
+            .convertRect_toView(self.host.bounds(), Some(&tabs));
+        Some(Cover { view, frame })
+    }
+
+    /// Put `cover` (a backdrop-painted view over the whole tab bar controller
+    /// when `None`) in the tab bar controller's view just below the tab bar,
+    /// until a page places the host or [`COVER_MAX`] passes. Whether it is up.
+    fn show_cover(&self, cover: Option<Cover>) -> bool {
         let Some(tabs) = self.tabs.view() else {
-            return;
+            return false;
         };
-        if !is_superview(&self.host, &tabs) {
-            reparent(&self.host, &tabs, true);
+        let cover = cover.unwrap_or_else(|| {
+            let view = UIView::new(self.tabs.mtm());
+            paint_backdrop(Some(view.clone()), self.spec.dark);
+            Cover {
+                view,
+                frame: tabs.bounds(),
+            }
+        });
+        cover.view.setFrame(cover.frame);
+        match child_holding(&tabs, &self.tabs.tabBar()) {
+            Some(bar) => tabs.insertSubview_belowSubview(&cover.view, &bar),
+            None => tabs.addSubview(&cover.view),
         }
+        keep_cover(cover.view);
+        true
     }
 
     /// Re-root the window back to the frust controller and release the rest.
     /// Tolerates a half-applied chrome: a page a panicking `sync_pages` let
     /// go of may still contain the frust controller, which is detached.
     fn dispose(self, _mtm: MainThreadMarker) {
+        remove_cover(None);
         self.target.detach_tab_bar_controller(&self.tabs);
         let stack: Vec<Retained<UIView>> = self.host.subviews().iter().collect();
         for page in &self.pages {
@@ -801,21 +854,59 @@ fn is_superview(view: &UIView, parent: &UIView) -> bool {
         .is_some_and(|superview| std::ptr::eq(&*superview, parent))
 }
 
-/// Re-parent `host` into `into` (at the bottom when `bottom`, else on top),
-/// filling it. No `removeFromSuperview` first: within one window the host's
-/// layers never leave it. Taking a host out of the window is a contract bug.
-fn reparent(host: &UIView, into: &UIView, bottom: bool) {
-    let leaves_window = host.window().is_some() && into.window().is_none();
-    if leaves_window {
-        log::debug!("frust-native-widgets: the chrome host is moving out of the window");
+/// `view`'s ancestor (itself included) that is a direct subview of `parent`.
+fn child_holding(parent: &UIView, view: &UIView) -> Option<Retained<UIView>> {
+    let mut child = view.retain();
+    loop {
+        let superview = child.superview()?;
+        if std::ptr::eq(&*superview, parent) {
+            return Some(child);
+        }
+        child = superview;
     }
-    debug_assert!(!leaves_window, "the chrome host left the window");
-    if bottom {
-        into.insertSubview_atIndex(host, 0);
-    } else {
-        into.addSubview(host);
+}
+
+/// A plain view (no controller) standing in for the host while the selected
+/// page is off-window, and its frame in the tab bar controller's view.
+struct Cover {
+    view: Retained<UIView>,
+    frame: CGRect,
+}
+
+/// Record `view` as the shown cover, replacing any older one, and remove it
+/// after [`COVER_MAX`] unless a page placed the host first.
+fn keep_cover(view: Retained<UIView>) {
+    let seq = COVER_SEQ.with(|cell| {
+        cell.set(cell.get() + 1);
+        cell.get()
+    });
+    let old = COVER.with(|cell| cell.replace(Some((seq, view))));
+    if let Some((_, old)) = old {
+        old.removeFromSuperview();
     }
-    host.setFrame(into.bounds());
+    let when = DispatchTime::try_from(COVER_MAX).unwrap_or(DispatchTime::NOW);
+    let queued = DispatchQueue::main().after(when, move || {
+        if catch_unwind(AssertUnwindSafe(|| remove_cover(Some(seq)))).is_err() {
+            log::error!("frust-native-widgets: removing a chrome cover panicked");
+        }
+    });
+    if queued.is_err() {
+        remove_cover(Some(seq));
+    }
+}
+
+/// Remove the shown cover: any when `only` is `None`, else only cover `only`.
+fn remove_cover(only: Option<u64>) {
+    let cover = COVER.with(|cell| {
+        let mut slot = cell.try_borrow_mut().ok()?;
+        match (slot.as_ref(), only) {
+            (Some((seq, _)), Some(wanted)) if *seq != wanted => None,
+            _ => slot.take(),
+        }
+    });
+    if let Some((_, view)) = cover {
+        view.removeFromSuperview();
+    }
 }
 
 /// Paint `view`'s backdrop: `systemBackgroundColor` resolved for `dark` into
@@ -1128,8 +1219,8 @@ define_class!(
             self.contained()
         }
 
-        /// Pins the host view to the page's bounds, adopting a host that
-        /// waits in the tab bar controller's view once this page is in the window.
+        /// Pins the host view to the page's bounds, placing a held host that
+        /// has no superview once this page is in the window.
         #[unsafe(method(viewDidLayoutSubviews))]
         fn view_did_layout_subviews(&self) {
             // SAFETY: forwarding the same no-argument selector to
@@ -1140,7 +1231,7 @@ define_class!(
             }
         }
 
-        /// Adopts a host still waiting in the tab bar controller's view.
+        /// Places a held host that still has no superview.
         #[unsafe(method(viewDidAppear:))]
         fn view_did_appear(&self, animated: bool) {
             // SAFETY: forwarding the same selector with its one `BOOL`
@@ -1184,9 +1275,10 @@ impl FrustChromePageController {
         self.ivars().host.replace(Some(host.retain()));
     }
 
-    /// Pin the held host to this view's bounds, first re-parenting it here
-    /// when it waits elsewhere and this view is in the window. Whether the
-    /// host is in this view afterwards.
+    /// Pin the held host to this view's bounds, first adding it here when
+    /// this view is in the window, which drops the cover. Only the holding
+    /// page has a host, so the host only ever lands in its parent's view.
+    /// Whether the host is in this view afterwards.
     fn place_host(&self) -> bool {
         let host = self
             .ivars()
@@ -1199,17 +1291,20 @@ impl FrustChromePageController {
         };
         if is_superview(&host, &view) {
             host.setFrame(view.bounds());
+            remove_cover(None);
             return true;
         }
         if view.window().is_none() {
             return false;
         }
-        reparent(&host, &view, false);
+        view.addSubview(&host);
+        host.setFrame(view.bounds());
+        remove_cover(None);
         true
     }
 
-    /// Give up the frust controller, if held; the host view leaves too
-    /// unless the chrome already parked it outside this view.
+    /// Give up the frust controller, if held; the host view leaves this
+    /// view too and has no superview until the next page places it.
     fn release(&self) {
         let Some(frust) = self.ivars().contained.take() else {
             return;
