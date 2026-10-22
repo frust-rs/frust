@@ -84,7 +84,9 @@ import kotlin.math.roundToInt
  * Material's own padding. The root gets a copy with the top/bottom system-bar
  * and cutout insets zeroed on the sides a visible bar covers, and the IME inset
  * reduced by the bottom bar's height, so the surface reports only what it
- * touches. Nothing here consumes insets.
+ * touches. While the keyboard is visible the bottom navigation is hidden
+ * (Material guidance): the surface then extends down to the keyboard and the
+ * IME inset is forwarded whole. Nothing here consumes insets.
  *
  * ## Threading and ordering
  *
@@ -170,6 +172,9 @@ object FrustNativeChrome {
 
         /** The lifted state last handed to [AppBarLayout.setLifted]; a rebuilt bar re-adopts it. */
         var lifted = false
+
+        /** The IME visibility last seen by the insets listener; the bottom bar is hidden while it is true. */
+        var imeVisible = false
     }
 
     private var live: Installed? = null
@@ -529,6 +534,12 @@ object FrustNativeChrome {
 
     private fun rootInsets(installed: Installed, insets: WindowInsetsCompat): WindowInsetsCompat {
         val bars = installed.bars
+        // Keyboard up -> bottom navigation hidden; applied on a transition only, no relayout churn.
+        val imeVisible = insets.isVisible(WindowInsetsCompat.Type.ime())
+        if (imeVisible != installed.imeVisible) {
+            installed.imeVisible = imeVisible
+            applyBottomVisibility(installed)
+        }
         val topCovered = bars.appBar.visibility == View.VISIBLE
         val bottomCovered = bars.bottom.visibility == View.VISIBLE
         val builder = WindowInsetsCompat.Builder(insets)
@@ -672,12 +683,19 @@ object FrustNativeChrome {
         } finally {
             applyingSelection = false
         }
-        val visibility = if (tabs.isEmpty()) View.GONE else View.VISIBLE
+        applyBottomVisibility(installed)
+        applySelected(installed)
+    }
+
+    /** GONE without tabs or while the keyboard is up, else VISIBLE; only a change touches the view. */
+    private fun applyBottomVisibility(installed: Installed) {
+        val bottom = installed.bars.bottom
+        val hidden = installed.model.tabs.isEmpty() || installed.imeVisible
+        val visibility = if (hidden) View.GONE else View.VISIBLE
         if (bottom.visibility != visibility) {
             bottom.visibility = visibility
             ViewCompat.requestApplyInsets(installed.content)
         }
-        applySelected(installed)
     }
 
     private fun refreshTabIcon(installed: Installed, index: Int) {
