@@ -4,10 +4,12 @@
 
 NATIVE_WIDGETS (`plugins/native-widgets`) is a platform plugin rendering real OS controls from pure
 Rust: eleven built-in controls in three membership tiers (eight shared by every platform arm, two
-Apple-only, one iOS-only — see *Platform Matrix*), arbitrary plugin-authored native view hierarchies
-through the public `NativeComponent` trait, and native presentations — host-owned modal UI (an
-alert everywhere, a sheet on iOS/iPadOS) requested imperatively and resolved to exactly one outcome,
-never a node in the `View` tree. A builder whose control has no arm on the current target renders a
+Apple-only (segmented also on Android), one iOS-only — see *Platform Matrix*), arbitrary plugin-authored native view hierarchies
+through the public `NativeComponent` trait, native presentations — host-owned modal UI (an alert
+everywhere, a sheet on iOS/iPadOS and Android) requested imperatively and resolved to exactly one
+outcome, never a node in the `View` tree — and app chrome: `native_scaffold` publishes one
+host-level spec (tabs, top bar, bottom toolbar) that iOS and Android realise as real bars, with
+frust-drawn fallback bars everywhere else, one scaffold per app. A builder whose control has no arm on the current target renders a
 frust-drawn refusal banner, decided at compile time — never an empty slot.
 
 Every control is driven through exactly one generic factory and one generic listener per platform,
@@ -15,7 +17,8 @@ in three arms:
 
 - **Android** — the Kotlin pair `FrustNativeControlFactory` (create/update/dispose) and
   `FrustNativeListener` (every listener interface a control needs), shipped as their own Gradle
-  library module and driven by four frozen JNI exports. **Mode B**: the differ punches a transparent
+  library module and driven by four frozen JNI exports (the presenter and chrome add their own,
+  below). **Mode B**: the differ punches a transparent
   hole in the frust surface and the native view is composited into it.
 - **iOS/iPadOS** — a Rust-registered ObjC factory class (`apple/factory.rs`, resolved by the
   embedding through `NSClassFromString`) plus one Rust target class, `FrustNativeControlTarget`
@@ -36,41 +39,51 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how NATIVE_WIDGETS relates to the oth
 ## Platform Matrix
 
 Membership is per arm, not per vendor: `controls/mod.rs`'s `SHARED_KINDS`/`APPLE_KINDS`/
-`IOS_ONLY_KINDS` tables are what each arm's `register_controls` registers, and `api/builders.rs`'s
+`IOS_ONLY_KINDS`/`MATERIAL_KINDS` tables are what each arm's `register_controls` registers, and `api/builders.rs`'s
 `SEGMENTED_ARM`/`STEPPER_ARM`/`TAB_BAR_ARM` constants are what select a builder's refusal banner.
 
 | Control / surface | Android | iOS/iPadOS | macOS |
 |-------------------|---------|------------|-------|
 | Button, Label, Switch, Slider, ProgressBar, Image, Spinner, DatePicker (`SHARED_KINDS`) | native | native | native |
-| Segmented, Stepper (`APPLE_KINDS`) | refusal banner | native | native |
+| Segmented (`APPLE_KINDS` + `MATERIAL_KINDS`) | native (`MaterialButtonToggleGroup`, Material3 theme) | native | native |
+| Stepper (`APPLE_KINDS`) | refusal banner | native | native |
 | TabBar (`IOS_ONLY_KINDS`) | refusal banner | native (a bare `UITabBar`) | refusal banner |
+| App chrome (`native_scaffold`) | Material 3 toolbar + bottom navigation + FABs (Material3 theme required; else fallback bars) | `UITabBarController` over `UINavigationController`s | frust-drawn fallback bars |
 | `NativeComponent` (incl. the `demo-components` `DemoCard`) | native | native | native |
 | Alert (`show_native_alert`) | `android.app.AlertDialog` | `UIAlertController` | `NSAlert` window sheet |
-| Sheet (`show_native_sheet`) | `PresentError::Unsupported` | page sheet | `PresentError::Unsupported` |
+| Sheet (`show_native_sheet`) | Material `BottomSheetDialog` | page sheet | `PresentError::Unsupported` |
 
 Desktop Linux/Windows and web have no arm at all: no native view is created, the Apple-only and
-iOS-only builders render their banner, and both presentation kinds answer
-`PresentError::Unsupported`. The refusals and their rationale (no framework segmented control or
-stepper on Android and no AndroidX/Material dependency assumed; no bottom-tab-bar idiom on macOS)
-are [LIMITATIONS.md](LIMITATIONS.md)'s `native-widgets-segmented-stepper-apple-only`.
+iOS-only builders render their banner, the scaffold draws fallback bars, and the sheet answers
+`PresentError::Unsupported`. Decisions: D5 keeps the bare `native_tab_bar` an embedded
+`platform_view` slot (iOS only); D2 (no Material dependency, so no Android arm) is superseded for
+chrome, sheet and segmented on Android — the module now takes Material Components — while the
+stepper stays Apple-only (no framework stepper) and the bare tab bar stays refused on Android
+(its chrome sibling is `native_scaffold`). The remaining refusals are
+[LIMITATIONS.md](LIMITATIONS.md)'s `native-widgets-segmented-stepper-apple-only`.
 
 ## Module Structure
 
 | Module | Responsibility |
 |--------|-----------------|
 | `runtime` / `registry` | Internal type-erased dispatch engine and retained-instance registry driving the create/update/dispose/event lifecycle. Its `NativeCtx`/`NativeView` pair is real on each platform arm and a recording stand-in on a host with none, so the shared dispatch/diff/lifecycle contract is exercised by host tests on Linux/Windows/web only (each arm swaps in its own real types; the gate commands are [DEVELOPMENT.md](DEVELOPMENT.md)'s) |
-| `controls/` | The eleven built-in controls (`button`, `label`, `switch`, `slider`, `progress`, `image`, `spinner`, `date_picker`, `segmented`, `stepper`, `tab_bar`), each one file: a platform-agnostic, host-tested `Props`/`decode`/`plan` half plus one `mod platform` per arm it supports. `mod.rs` owns the three kind tables (append-only), the flat-params wire keys and the setter cost tiers |
+| `controls/` | The eleven built-in controls (`button`, `label`, `switch`, `slider`, `progress`, `image`, `spinner`, `date_picker`, `segmented`, `stepper`, `tab_bar`), each one file: a platform-agnostic, host-tested `Props`/`decode`/`plan` half plus one `mod platform` per arm it supports (Android's segmented rides Kotlin statics on `FrustNativeControlFactory` and reports `SELECTION` through `FrustNativeListener.reportSelection`). `mod.rs` owns the four kind tables (append-only), the flat-params wire keys and the setter cost tiers |
 | `events.rs` | The typed event vocabulary (`EventPayload`) and the primitive `(kind, detail)` codec every arm's listener or target packs into; the `EVENT_KIND_*` constants (1-8) are mirrored verbatim by `FrustNativeListener.kt`'s `KIND_*` |
 | `component.rs` | Public `NativeComponent` trait, `ComponentCtx`, `ListenerKinds`/`ListenerHandle`, `register_component`, and the crate-private `Bridge<C>` routing a third-party component through the same runtime as the built-in controls |
 | `api/` | App-facing layer behind the default-on `frust-api` feature: `builders.rs` (the eleven builders, the refusal banner, the translucency fallback, and `native_tab_bar`'s inset-aware `TabBarSlot` — 49pt plus the window's bottom safe-area inset), `mount.rs` (`native_component`), `present.rs` (`show_native_alert`/`_into`, `show_native_sheet`/`_into`), `signals.rs` (events-as-signals) and `theme.rs` (theme folding) |
-| `present/mod.rs` | The presentation substrate, platform-independent: `AlertSpec`/`SheetSpec` and their outcome types, `PresentError`, the `Presentation<T>` future and its generation-guarded one-shot channel (`oneshot.rs`), the process-wide Busy slot (`ActiveSlot`), and the `AlertHost`/`SheetHost` seams selected per OS by `cfg` — including `UnsupportedSheet`, the sheet arm of every non-iOS target |
+| `present/mod.rs` | The presentation substrate, platform-independent: `AlertSpec`/`SheetSpec` and their outcome types, `PresentError`, the `Presentation<T>` future and its generation-guarded one-shot channel (`oneshot.rs`), the process-wide Busy slot (`ActiveSlot`), and the `AlertHost`/`SheetHost` seams selected per OS by `cfg` — including `UnsupportedSheet`, the sheet arm of every target other than iOS and Android |
 | `present/apple_host.rs` | Shared by every Apple arm: `on_main` (the main-queue hop), `presenting_anchor` (host discovery — the topmost view controller on iOS, the key/main/first-visible non-sheet window on macOS), the `LIVE` generation-tagged guard, and the `LivePresentation::dismiss(then)` seam that takes down a presentation displaced by a newer request before the newer one presents (`displaced_action` is its pure decision) |
 | `present/apple_alert.rs` / `present/apple_sheet.rs` | The iOS/iPadOS arms: a `UIAlertController` (an iPad action sheet anchored as a popover), and a plugin-owned controller presented as a page sheet under `UISheetPresentationController` |
 | `present/appkit_alert.rs` | The macOS alert arm: an `NSAlert` presented as a window sheet |
 | `present/android_host.rs` + `present/android_alert.rs` | The Android alert arm: the Kotlin `FrustNativePresenter` object (tracking the resumed `Activity` via the manifest-declared `FrustNativePresenterInitProvider`) building a framework `android.app.AlertDialog`, answered through its one `nativeOnOutcome` export |
+| `present/android_sheet.rs` | The Android sheet arm: a Material `BottomSheetDialog` built by the same `FrustNativePresenter` (`showSheet`/`dismissSheet`/`selectSheetDetent`), resolved through `nativeOnOutcome`; a detent change is the non-terminal `OUTCOME_DETENT` |
 | `present/unsupported.rs` | The alert arm of every target with no native modal UI (desktop Linux, Windows, web) |
+| `chrome/` (behind `frust-api`) | App chrome's platform-free half: `mod.rs` (the `ChromeSpec` data contract, `ChromeEvent`, the diff-gated publish slot with generations, the epoch), `host.rs` (the `ChromeHost` seam, `ChromeDiff`, the inert `NullChromeHost`), `fallback.rs` (frust-drawn top/toolbar/tab bars from the same spec) |
+| `api/scaffold.rs` | `native_scaffold`/`NativeScaffoldView` and `EdgeFade`: builds the spec from builder methods, publishes it, lays out the body and fallback bars |
 | `android/` (Kotlin + JNI) | The Kotlin factory/listener pair and the Rust side of their JNI exports |
+| `android/chrome.rs` | `AndroidChromeHost`: drives the Kotlin `FrustNativeChrome` over JNI and exports its two callbacks |
 | `apple/` (objc2) | The iOS factory class, `FrustNativeControlTarget`, and the iOS halves of theme ladder L1/L2 |
+| `apple/chrome.rs` | `IosChromeHost`: the iOS tab-bar/navigation-controller chrome, zero Swift |
 | `appkit/` (objc2) | The macOS `DesktopViewFactory` (`ensure_registered`), its target class, and the macOS halves of theme ladder L1/L2 |
 | `coretext.rs` | Theme ladder L3's shared CoreText half (embedded bytes to `CTFontDescriptor`, latch-on-first-publish caching), compiled for both Apple arms so neither can drift from the other's typeface behaviour |
 | `demo.rs` | `DemoCard`, one composite `NativeComponent` (a parent, a title and two buttons in one slot) behind the non-default `demo-components` feature — the plugin's end-to-end proof of define → register → mount → attach |
@@ -96,10 +109,20 @@ This is a chartered leaf plugin: `frust-plugin` + FFI only with default features
 no-default-features conformance gate. The one-generic-factory/one-generic-listener shape per
 platform is permanent: a new control extends the existing dispatch, and a control that reports
 through a delegate protocol (the tab bar) gains that conformance on the existing target class
-rather than a second one. Native presentations are the one chartered exception, adding one
-presenter per platform rather than riding the control dispatch — on Android a third frozen Kotlin
-class, `FrustNativePresenter`, plus one frozen JNI export,
-`Java_dev_frust_nativewidgets_FrustNativePresenter_nativeOnOutcome`. Once shipped, JNI export
+rather than a second one. Two chartered exceptions add a host per platform rather than riding the
+control dispatch. Native presentations add one presenter — on Android a third frozen Kotlin class,
+`FrustNativePresenter` (which tracks every live Activity and picks the one hosting a
+`FrustSurfaceView`), plus one frozen JNI export,
+`Java_dev_frust_nativewidgets_FrustNativePresenter_nativeOnOutcome`. App chrome adds a fourth
+frozen Kotlin class, `FrustNativeChrome`, with two frozen exports,
+`Java_dev_frust_nativewidgets_FrustNativeChrome_nativeOnChromeEvent` (`generation, kind, detail`) and
+`..._nativeOnChromeLost` (`generation`); its JSON keys, `INSTALL_*` codes, `ICON_SLOT_*` (0 tab, 1
+action, 2 leading, 3 toolbar) and `CHROME_MENU_STRIDE`/reselect shift are pinned by
+`tests/kotlin_conformance.rs`. The Android module also takes Material Components (`api` scope, so the
+consuming app's theme resolves Material3 attributes): the app theme must derive from
+`Theme.Material3.*` or `Theme.MaterialComponents.*`, and a stock theme makes chrome fall back to
+frust-drawn bars and the sheet/segmented fail soft (`PresentError::Platform` / dead slot), never
+crash. Once shipped, JNI export
 symbol names and Kotlin package/class names are frozen; each Apple arm gates on its own
 `target_os` (`"ios"` for `apple/`, `"macos"` for `appkit/`), never `target_vendor = "apple"` —
 UIKit does not exist on macOS, and `coretext.rs` is the one module compiled for both; and the FFI
@@ -120,16 +143,41 @@ app code stays on the builders.
   date picker, tab bar) write the app-confirmed value back when the platform has drifted.
 - **Events**: the platform listener or target fires on the main thread and routes by slot id into
   a typed payload delivered to app callbacks through signals, bypassing the core render/event
-  system in [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md) entirely. Eight wire kinds cross that
-  boundary, pinned against Kotlin drift by `tests/kotlin_conformance.rs`: `CLICK`, `TOGGLED`,
+  system in [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md) entirely. Twelve wire kinds cross that
+  boundary, pinned against Kotlin drift by `tests/kotlin_conformance.rs` — kinds 1-8 per control,
+  9-12 for chrome (below): `CLICK`, `TOGGLED`,
   `VALUE_CHANGED` (1-3, all three arms); `DRAG_START`/`DRAG_END` (4-5, Android and iOS only — AppKit
   target-action carries no gesture phase, and macOS never synthesizes one); `SELECTION` (6, the
   Apple segmented control and the iOS tab bar); `DATE` (7, all three arms); `RESELECTED` (8, the iOS
-  tab bar's tap on the tab the app last confirmed). A Kotlin twin exists for every kind, emitted or
-  not, so the two tables stay one append-only table.
-- **Tab bar**: the bar never navigates. A tap reports the requested `TabId` through `on_select`
+  tab bar's tap on the tab the app last confirmed); `CHROME_TAB`/`CHROME_ACTION`/`CHROME_MENU`/
+  `CHROME_BACK` (9-12, decoded against the published chrome spec, not a slot). A Kotlin twin exists
+  for every kind, emitted or not, so the two tables stay one append-only table.
+- **Bare tab bar**: it never navigates. A tap reports the requested `TabId` through `on_select`
   (or `on_reselect`), the app routes, and the confirmed id comes back as props; which tab counts as
   "showing" is the app's last confirmed selection, not UIKit's highlight.
+- **Chrome**: `native_scaffold` publishes a `ChromeSpec` to the process-wide slot; the first publish
+  installs under a fresh generation, later ones diff field by field (`ChromeDiff`; an identical
+  spec makes no host call) and a second scaffold is refused (`Busy`). Taps return as events 9-12
+  stamped with that generation, are decoded against the live spec into a `ChromeEvent` and routed to
+  the scaffold's handlers; stale generations and disabled items are dropped. Actions, the toolbar's
+  items and its primary share one index space (`ChromeField::Actions`). A refused or late failure
+  (`ChromeHost::take_failure`/`abandon`) pins frust-drawn fallback bars, and `bump_epoch` (atomic +
+  `request_frame`) makes an off-build outcome change reach the scaffold's next rebuild.
+  - *iOS* re-roots the window into a `UITabBarController` of `UINavigationController`s; every UIKit
+    mutation runs on a later main-queue turn. The one `FrustViewController` is contained in the
+    selected page and moved between pages in one turn, its `FrustView` at origin zero in a plugin-owned
+    host view (Mode B wrappers are its siblings). Selection is native and optimistic: UIKit selects on
+    the tap, the app has a ~250 ms settle window to confirm, else the bar converges to the spec's
+    tab; app-driven changes run under `performWithoutAnimation`. Bars float over the body
+    (`BARS_FLOAT_OVER_BODY`), under a frust-drawn `EdgeFade`; a shown toolbar hides the tab bar.
+  - *Android* does not re-root: `MaterialToolbar` in an `AppBarLayout` and a `BottomNavigationView`
+    are siblings of the frust root in `android.R.id.content`, the root's padding shrinking the
+    surface between them (re-parenting the `FrustSurfaceView` is forbidden — it fires
+    `surfaceDestroyed` mid-frame). Toolbar entries are a FAB column above the bottom bar. Insets are
+    forwarded to the root, the bottom navigation hides while the IME shows, `.scroll` drives
+    `AppBarLayout.setLifted`, and the scaffold resizes its body for the keyboard by default.
+  - *Elsewhere* the scaffold lays out the fallback bars beside its body and feeds their taps through
+    the same `deliver` path.
 - **`NativeComponent`** reuses the built-in controls' runtime and factory, so a plugin author's
   native subtree mounts through one slot. A component attaches its platform's one listener class to
   any view it built through `ComponentCtx::attach_listener`, naming a `ListenerKinds` family (click,
@@ -150,8 +198,8 @@ app code stays on the builders.
   any presentation is live answers `Busy` at once. Dropping the `Presentation` future frees the slot
   but not the platform UI; a later request takes that displaced presentation down first, its
   outcome discarded, so two never show stacked (on iOS the newer one presents from the displaced
-  one's dismissal completion). A sheet's detent changes stream to `SheetSpec::on_detent` and are
-  not outcomes.
+  one's dismissal completion; on Android a new sheet supersedes the live one). A sheet's detent
+  changes stream to `SheetSpec::on_detent` and are not outcomes.
 
   | Platform | Alert dismissal | Alert action mapping | Alert `style`/`anchor` |
   |----------|-----------------|----------------------|------------------------|
@@ -159,7 +207,11 @@ app code stays on the builders.
   | iOS/iPadOS | `Cancelled` only on an iPad popover's outside tap | UIKit places the Cancel-role action itself | `ActionSheet` on iPad requires `anchor` (`InvalidSpec` without one) |
   | Android | back key / outside tap → `Cancelled`, only when `cancelable` | Cancel → negative, then neutral, then positive; Default/Destructive → positive, then neutral, then negative | ignored — `android.app.AlertDialog` has no action-sheet idiom |
 
-  The iOS sheet resolves `Action(id)` after it has finished dismissing itself, `Dismissed(User)` on
+  The Android sheet (`BottomSheetDialog`, one half-expanded ratio at a time; `largest_undimmed` and
+  `scrolling_expands` ignored) resolves the same outcomes through `nativeOnOutcome`. Material-backed
+  views (sheet, segmented) are built under `FrustNativeControlFactory.materialContext`: a
+  `ContextThemeWrapper` of the Activity's manifest theme with the night-qualified configuration
+  that `create_control` hands Kotlin (which has no Material theme of its own). The iOS sheet resolves `Action(id)` after it has finished dismissing itself, `Dismissed(User)` on
   a swipe-down (only when `dismissible`), `Dismissed(Programmatic)` through its `SheetHandle`, and
   `HostLost` when its scene disconnects or its presenter is torn down. Custom detents need iOS 16
   (older systems substitute the nearest medium/large detent). A page sheet in a regular-width iPad
@@ -220,7 +272,12 @@ platform runs which.
 | Type | Purpose |
 |------|---------|
 | `native_button` / `native_label` / `native_switch` / `native_slider` / `native_progress` / `native_image` / `native_spinner` / `native_date_picker` | The eight shared app-facing builders, each composing one `platform_view` slot |
-| `native_segmented` / `native_stepper` | The two Apple-only builders (iOS + macOS; a refusal banner elsewhere) |
+| `native_segmented` / `native_stepper` | `native_segmented` runs on iOS, macOS and Android; `native_stepper` is Apple-only (a refusal banner elsewhere) |
+| `native_scaffold` / `NativeScaffoldView` | The one-per-app chrome builder: `.tabs`/`.title`/`.subtitle`/`.leading`/`.actions`/`.large_title`/`.toolbar`/`.scroll`, `on_*` handlers or `.events_into`, `.edge_fade`/`.no_edge_fade`, `.resize_to_avoid_keyboard` (default on) |
+| `ChromeEvent` | `TabSelected`/`TabReselected`/`ActionTapped`/`MenuItemChosen`/`BackPressed`: requests decoded against the live spec, never indices |
+| `ActionItem` / `MenuItem` / `Leading` / `ScrollState` | A top-bar or toolbar action (stable `ActionId`, optional icon and pull-down menu); a menu entry (`MenuItemId`, destructive/enabled); the leading item (`None`/`Back`/`Image`/`Symbol`); the body's scroll offset/max/viewport |
+| `ToolbarSpec` | Bottom toolbar `{ items, primary }`: iOS navigation-controller toolbar items, Android FABs, a fallback trailing row |
+| `EdgeFade` | Frust-drawn fade under the floating iOS bars (default 0.92/0.6, `EdgeFade::strong()`, colour/alpha/tail setters) |
 | `native_tab_bar` + `TabItem` / `TabId` / `TabIcon` | The iOS-only controlled bottom tab bar (a refusal banner elsewhere); an item (id, title, icon, optional selected icon, badge, enabled); the app-chosen stable tab identity it selects and reports, never an index; and an icon as encoded bytes or an SF Symbol name |
 | `CivilDate` | Plain year/month/day value `native_date_picker` takes and its `DATE` event reports |
 | `NativeComponent` (+ `ComponentCtx`) | Public trait for a plugin author to drive a native view hierarchy from Rust |
