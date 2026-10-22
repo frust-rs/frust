@@ -170,7 +170,8 @@ pub const ROBOTO_MONO_FAMILY: &str = "Roboto Mono";
 /// [`MaterialTokens::material`], and [`native_typefaces`] as pre-populated
 /// extensions (see `Theme::extension`), so `extension::<StatusPalette>()`,
 /// `extension::<MaterialTokens>()`, and `extension::<NativeTypefaces>()` are
-/// always `Some` on this baseline. See [module docs](self)'s "Two semantic
+/// always `Some` on this baseline, as is `extension::<MaterialStrings>()` (the
+/// English table). See [module docs](self)'s "Two semantic
 /// vocabularies" section for why the first two both carry `info`/`success`/
 /// `warning` fields at different values — that is by design, not a
 /// conflict.
@@ -179,6 +180,7 @@ pub fn baseline() -> Theme {
     extensions.insert(status_palette());
     extensions.insert(MaterialTokens::material());
     extensions.insert(native_typefaces());
+    extensions.insert(crate::strings::MaterialStrings::ENGLISH.clone());
     Theme {
         light: color_scheme_light(),
         dark: color_scheme_dark(),
