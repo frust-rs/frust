@@ -151,6 +151,32 @@ pub fn currency(locale: &Locale, amount: f64, iso_code: &str) -> Result<String, 
     currency::currency(locale, amount, iso_code)
 }
 
+/// Formats `minor`, an integer count of the currency's minor units, exactly —
+/// no `f64` on the path, so any `i64` round-trips.
+///
+/// ```ignore
+/// currency_minor(&ja, 1000, "JPY")?;  // "￥1,000" (ja-JP; "¥1,000" in en-US/th-TH)
+/// currency_minor(&th, 12345, "THB")?; // "฿123.45"
+/// currency_minor(&vi, 50000, "VND")?; // "50.000\u{a0}₫" (vi-VN)
+/// ```
+///
+/// # Errors
+///
+/// As [`currency`].
+pub fn currency_minor(locale: &Locale, minor: i64, iso_code: &str) -> Result<String, I18nError> {
+    currency::currency_minor(locale, minor, iso_code)
+}
+
+/// The number of minor-unit digits CLDR gives `iso_code` (`JPY` 0, `USD` 2,
+/// `KWD` 3) — the same tables [`currency`] and [`currency_minor`] use.
+///
+/// # Errors
+///
+/// [`I18nError::Format`] when `iso_code` is not three ASCII letters.
+pub fn minor_unit_digits(iso_code: &str) -> Result<u8, I18nError> {
+    currency::minor_unit_digits(iso_code)
+}
+
 /// Formats `date` at `length` in `locale`'s calendar.
 ///
 /// # Errors

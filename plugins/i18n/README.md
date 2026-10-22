@@ -393,7 +393,13 @@ month names, grouping, calendar — even though every other message on the same 
 German. `docs/LIMITATIONS.md` records this as an accepted limitation, not a bug to work around per
 call site.
 
-Honored named options: `NUMBER`'s `style` (`decimal`/`percent`/`currency`) and `currency`;
+Money held as integer minor units formats exactly with `fmt::currency_minor(&locale, 12345, "THB")?`
+(`"฿123.45"`; no `f64` on the path, so every `i64` is exact) and `fmt::minor_unit_digits("THB")?`
+(`2`); both share `currency`'s digit tables. In FTL pass the integer as a STRING, since Fluent
+numbers are `f64`: `{ NUMBER($minor, style: "currency", currency: "THB", minorUnits: "true") }`.
+
+Honored named options: `NUMBER`'s `style` (`decimal`/`percent`/`currency`), `currency` and
+`minorUnits`;
 `DATETIME`'s `dateStyle`/`timeStyle`. Anything else (ECMA-402-style
 `minimumFractionDigits`, `useGrouping`, …) is ignored at `debug` log level, never a warning or
 an error — these run on a UI's formatting path, potentially every frame.

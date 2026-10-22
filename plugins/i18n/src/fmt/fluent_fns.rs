@@ -19,6 +19,11 @@
 //! |---|---|---|
 //! | `style` | `decimal` (default), `percent`, `currency` | which formatter runs |
 //! | `currency` | an ISO 4217 code | required by `style: "currency"` |
+//! | `minorUnits` | `"true"` | the positional is a STRING parsing as `i64` minor units; `style: "currency"` formats it exactly via [`super::currency_minor`] |
+//!
+//! `FluentValue::Number` is an `f64`, so exact money must arrive as a
+//! string: `NUMBER($minor, style: "currency", currency: "THB", minorUnits:
+//! "true")` with `$minor = "12345"` renders `฿123.45`.
 //!
 //! `style: "percent"` takes the **percentage**, not a ratio: `NUMBER(75,
 //! style: "percent")` is `75%`. This follows ICU4X's own `PercentFormatter`
@@ -94,6 +99,9 @@ fn number<'a>(
     positional: &[FluentValue<'a>],
     named: &FluentArgs<'_>,
 ) -> FluentValue<'a> {
+    if option(named, "minorUnits") == Some("true") {
+        return number_minor(locale, positional, named);
+    }
     let Some(value) = as_f64(positional.first()) else {
         return FluentValue::Error;
     };
@@ -120,8 +128,37 @@ fn number<'a>(
         }
     };
 
-    report_unhonored(named, "NUMBER", &["style", "currency"]);
+    report_unhonored(named, "NUMBER", &["style", "currency", "minorUnits"]);
     FluentValue::from(formatted)
+}
+
+/// The `minorUnits: "true"` form of `NUMBER`: an exact `i64` from a string.
+fn number_minor<'a>(
+    locale: &Locale,
+    positional: &[FluentValue<'a>],
+    named: &FluentArgs<'_>,
+) -> FluentValue<'a> {
+    let minor = match positional.first() {
+        Some(FluentValue::String(text)) => text.parse::<i64>().ok(),
+        _ => None,
+    };
+    let (Some(minor), Some("currency"), Some(code)) =
+        (minor, option(named, "style"), option(named, "currency"))
+    else {
+        log::debug!(
+            "frust-i18n: NUMBER(minorUnits: \"true\") needs a string i64 and style: \"currency\" with `currency`"
+        );
+        return FluentValue::Error;
+    };
+
+    report_unhonored(named, "NUMBER", &["style", "currency", "minorUnits"]);
+    match super::currency_minor(locale, minor, code) {
+        Ok(formatted) => FluentValue::from(formatted),
+        Err(error) => {
+            log::debug!("frust-i18n: NUMBER(minorUnits): {error}");
+            FluentValue::Error
+        }
+    }
 }
 
 /// `DATETIME($d, dateStyle: …, timeStyle: …)`.

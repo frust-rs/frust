@@ -215,3 +215,106 @@ fn registering_number_twice_fails_engine_construction() {
 
     assert!(built.is_err(), "a duplicate function id must be rejected");
 }
+
+#[test]
+fn minor_unit_money_formats_exactly_across_the_matrix() {
+    // Exact ICU4X/CLDR output observed on 2.2.x; U+00A0 is CLDR's own space.
+    let expected: [(&str, &str, i64, &str); 25] = [
+        ("en-US", "JPY", 1000, "¥1,000"),
+        ("en-US", "THB", 12345, "THB\u{a0}123.45"),
+        ("en-US", "VND", 50000, "₫50,000"),
+        ("en-US", "USD", -1999, "-$19.99"),
+        ("en-US", "KWD", 123456, "KWD\u{a0}123.456"),
+        ("th-TH", "JPY", 1000, "¥1,000"),
+        ("th-TH", "THB", 12345, "฿123.45"),
+        ("th-TH", "VND", 50000, "₫50,000"),
+        ("th-TH", "USD", -1999, "-US$19.99"),
+        ("th-TH", "KWD", 123456, "KWD\u{a0}123.456"),
+        ("vi-VN", "JPY", 1000, "1.000\u{a0}¥"),
+        ("vi-VN", "THB", 12345, "123,45\u{a0}฿"),
+        ("vi-VN", "VND", 50000, "50.000\u{a0}₫"),
+        ("vi-VN", "USD", -1999, "-19,99\u{a0}US$"),
+        ("vi-VN", "KWD", 123456, "123,456\u{a0}KWD"),
+        ("ja-JP", "JPY", 1000, "￥1,000"),
+        ("ja-JP", "THB", 12345, "THB\u{a0}123.45"),
+        ("ja-JP", "VND", 50000, "₫50,000"),
+        ("ja-JP", "USD", -1999, "-$19.99"),
+        ("ja-JP", "KWD", 123456, "KWD\u{a0}123.456"),
+        ("es-ES", "JPY", 1000, "1000\u{a0}JPY"),
+        ("es-ES", "THB", 12345, "123,45\u{a0}฿"),
+        ("es-ES", "VND", 50000, "50.000\u{a0}₫"),
+        ("es-ES", "USD", -1999, "-19,99\u{a0}US$"),
+        ("es-ES", "KWD", 123456, "123,456\u{a0}KWD"),
+    ];
+
+    for (tag, code, minor, rendered) in expected {
+        assert_eq!(
+            fmt::currency_minor(&locale(tag), minor, code).expect("formats"),
+            rendered,
+            "{tag}/{code}/{minor}"
+        );
+    }
+}
+
+#[test]
+fn minor_unit_digits_matches_the_currency_tables() {
+    assert_eq!(fmt::minor_unit_digits("JPY").expect("digits"), 0);
+    assert_eq!(fmt::minor_unit_digits("THB").expect("digits"), 2);
+    assert_eq!(fmt::minor_unit_digits("KWD").expect("digits"), 3);
+    assert!(fmt::minor_unit_digits("EU").is_err());
+}
+
+#[test]
+fn an_ftl_minor_units_number_matches_the_direct_call() {
+    const FTL: &str = r#"
+price = { NUMBER($minor, style: "currency", currency: "THB", minorUnits: "true") }
+"#;
+
+    let engine = Engine::new(fmt::with_icu_functions(
+        LocaleSet::new(locale("th-TH"))
+            .with_locale(locale("th-TH"), [("app.ftl", FTL)])
+            .with_isolating(false),
+    ))
+    .expect("engine builds");
+
+    let resolved = engine
+        .resolve(
+            &[locale("th-TH")],
+            "price",
+            Some(&args!("minor" => "12345")),
+        )
+        .expect("resolves");
+
+    assert_eq!(resolved, "฿123.45");
+    assert_eq!(
+        resolved,
+        fmt::currency_minor(&locale("th-TH"), 12345, "THB").expect("formats")
+    );
+}
+
+#[test]
+fn currency_minor_agrees_with_the_f64_path_where_f64_is_exact() {
+    // xorshift64*: deterministic, dependency-free pseudo-randomness.
+    let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+    let mut next = move || {
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        state.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    };
+
+    let en = locale("en-US");
+    for _ in 0..1000 {
+        // Below 10^13 the quotient has at most 15 significant digits, so
+        // f64's shortest rendering is exact; above that (up to 2^53) the f64
+        // oracle itself drifts and is no longer an oracle.
+        let minor = (next() % 10_000_000_000_000) as i64;
+        let code = ["USD", "JPY", "KWD"][(next() % 3) as usize];
+        let digits = fmt::minor_unit_digits(code).expect("digits");
+
+        let oracle = fmt::currency(&en, minor as f64 / 10f64.powi(i32::from(digits)), code)
+            .expect("formats");
+        let exact = fmt::currency_minor(&en, minor, code).expect("formats");
+        assert_eq!(exact, oracle, "{code} {minor}");
+    }
+}
