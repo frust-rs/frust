@@ -108,6 +108,9 @@ object FrustNativeChrome {
     /** A tab report's reselect flag rides this bit of `detail`. */
     const val CHROME_TAB_RESELECT_SHIFT = 32
 
+    /** Scroll offset (logical px) above which the app bar counts as lifted. */
+    private const val LIFT_THRESHOLD_PX = 1f
+
     /** [setIcon] slot: a bottom tab's icon, `index` = tab index. */
     const val ICON_SLOT_TAB = 0
 
@@ -164,6 +167,9 @@ object FrustNativeChrome {
         val basePadding = intArrayOf(root.paddingLeft, root.paddingTop, root.paddingRight, root.paddingBottom)
         val baseRootId = root.id
         var observer: ViewTreeObserver? = null
+
+        /** The lifted state last handed to [AppBarLayout.setLifted]; a rebuilt bar re-adopts it. */
+        var lifted = false
     }
 
     private var live: Installed? = null
@@ -279,11 +285,24 @@ object FrustNativeChrome {
         }
     }
 
-    /** Mirror the body's scroll position: the app bar lifts once scrolled. */
+    /**
+     * Mirror the body's scroll position: the app bar lifts once scrolled.
+     *
+     * The lift source is the frust scroll offset (`ChromeSpec.scroll`), NOT a
+     * RecyclerView or other NestedScrollingChild: the frust surface is none,
+     * so Material's own lift-on-scroll never fires and the lifted state is
+     * driven by hand. Android is the only consumer of `ChromeSpec.scroll`
+     * (iOS draws a frust-side edge fade instead). `(0, 0)` means at the top.
+     * Main thread only; `setLifted` runs only when the state flips, so a
+     * scrolling frame costs one compare.
+     */
     @JvmStatic
     fun setScroll(offset: Float, max: Float) {
         val installed = live ?: return
-        installed.bars.appBar.setLifted(offset > 0f && max > 0f)
+        val lifted = offset > LIFT_THRESHOLD_PX && max > 0f
+        if (lifted == installed.lifted) return
+        installed.lifted = lifted
+        installed.bars.appBar.setLifted(lifted)
     }
 
     /** [FrustNativePresenter]'s lifecycle hook: the host Activity is going away. */
@@ -365,7 +384,12 @@ object FrustNativeChrome {
         context.applyOverrideConfiguration(config)
         val appBar = AppBarLayout(context)
         appBar.fitsSystemWindows = false
+        // Lift on scroll with no liftOnScrollTargetViewId: AppBarLayout has no
+        // nested-scrolling sibling to watch, so [setScroll] drives setLifted.
+        // setLiftable(true) pins the liftable state so layout passes cannot
+        // recompute it away (Material 1.14.0 setLiftable sets liftableOverride).
         appBar.isLiftOnScroll = true
+        appBar.setLiftable(true)
         val toolbar = MaterialToolbar(context)
         appBar.addView(toolbar, AppBarLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         val bottom = BottomNavigationView(context)
@@ -421,6 +445,7 @@ object FrustNativeChrome {
         dismissPopup()
         removeBars(installed)
         installed.bars = fresh
+        if (installed.lifted) fresh.appBar.setLifted(true)
         attachBars(installed)
         applyAll(installed)
         ViewCompat.requestApplyInsets(installed.content)
