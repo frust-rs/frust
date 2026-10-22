@@ -108,11 +108,27 @@
 //! selected page, and a page forwards to the frust controller while it holds
 //! it, so `set_system_ui_mode` keeps working under the chrome.
 //!
+//! # Toolbar
+//!
+//! `ChromeSpec::toolbar` is global, so every page controller carries its own
+//! `toolbarItems` (secondary items with flexible space between them, then the
+//! primary trailing in `UIBarButtonItemStyle::Prominent`) and every navigation
+//! controller shows its toolbar (`setToolbarHidden:animated:NO`), so a tab
+//! switch never animates it in or out; an absent or empty toolbar hides it on
+//! all of them. It rides `ChromeField::Actions` (the slot's one action index
+//! space) and is re-applied to every page on each such change. `Prominent`
+//! shares its raw value with the older `Done`, so it needs no availability
+//! check: iOS 26 draws a separated tinted button, earlier systems a bold title.
+//! The navigation controller insets its page's safe area by the toolbar as it
+//! does for the tab bar, so the frust body's bottom view padding (and the
+//! scaffold's edge fade keyed off it) covers both.
+//!
 //! # Events
 //!
 //! One `FrustNativeControlTarget` per install, held in the chrome state, is
-//! the tab bar controller's delegate and the target of the back and plain
-//! action items (set as each item is built); a menu item's `UIAction` block
+//! the tab bar controller's delegate and the target of the back, plain action
+//! and toolbar items (set as each item is built), tagged with their
+//! `crate::chrome::chrome_actions` index; a menu item's `UIAction` block
 //! captures its action and item indices. Each tap is resolved against the
 //! spec UIKit shows (`crate::chrome::resolve_tap`, a tab against the
 //! app-confirmed `selected`, or the pending tap's tab while one is pending)
@@ -161,11 +177,11 @@ use objc2::{
 use objc2_core_foundation::{CGFloat, CGRect};
 use objc2_foundation::{NSArray, NSData, NSString, ns_string};
 use objc2_ui_kit::{
-    NSObjectUIAccessibility, UIAction, UIApplication, UIBarButtonItem, UIColor, UIImage,
-    UIImageView, UIMenu, UIMenuElement, UIMenuElementAttributes, UINavigationController,
-    UINavigationItemLargeTitleDisplayMode, UIResponder, UISceneActivationState, UITabBarController,
-    UITraitCollection, UIUserInterfaceStyle, UIView, UIViewAutoresizing, UIViewContentMode,
-    UIViewController, UIWindow, UIWindowScene,
+    NSObjectUIAccessibility, UIAction, UIApplication, UIBarButtonItem, UIBarButtonItemStyle,
+    UIColor, UIImage, UIImageView, UIMenu, UIMenuElement, UIMenuElementAttributes,
+    UINavigationController, UINavigationItemLargeTitleDisplayMode, UIResponder,
+    UISceneActivationState, UITabBarController, UITraitCollection, UIUserInterfaceStyle, UIView,
+    UIViewAutoresizing, UIViewContentMode, UIViewController, UIWindow, UIWindowScene,
 };
 
 use super::FrustNativeControlTarget;
@@ -174,7 +190,7 @@ use crate::api::{TabIcon, TabId, TabItem};
 use crate::chrome::host::ChromeField;
 use crate::chrome::{
     self, ActionItem, ChromeDiff, ChromeError, ChromeGeneration, ChromeHost, ChromeSpec, ChromeTap,
-    Leading, MenuItem, TopBarSpec, resolve_tap,
+    Leading, MenuItem, TopBarSpec, resolve_tap, shown_toolbar, toolbar_offset,
 };
 use crate::controls::tab_bar::icon_decode_scale;
 
@@ -712,6 +728,9 @@ impl Chrome {
         for page in &self.pages {
             let top = self.spec.top.as_ref();
             apply_top(mtm, page, top, &self.target, |field| diff.contains(field));
+            if diff.contains(ChromeField::Actions) {
+                apply_toolbar(mtm, page, &self.spec, &self.target);
+            }
         }
         if restyle {
             apply_user_interface_style(&self.tabs.tabBar(), spec.dark);
@@ -740,6 +759,7 @@ impl Chrome {
                 None => {
                     let page = Page::new(mtm, id);
                     apply_top(mtm, &page, self.spec.top.as_ref(), &self.target, |_| true);
+                    apply_toolbar(mtm, &page, &self.spec, &self.target);
                     apply_user_interface_style(&page.nav.navigationBar(), self.spec.dark);
                     paint_backdrop(page.page.view(), self.spec.dark);
                     page
@@ -1256,6 +1276,40 @@ fn apply_top(
     }
 }
 
+/// Mirror `spec`'s toolbar onto `page` (module doc, Toolbar): its items with
+/// flexible space between them and the primary trailing and prominent, each
+/// tagged with its `chrome_actions` index; hidden, without animation, when
+/// `spec` shows none.
+fn apply_toolbar(
+    mtm: MainThreadMarker,
+    page: &Page,
+    spec: &ChromeSpec,
+    target: &FrustNativeControlTarget,
+) {
+    let Some(toolbar) = shown_toolbar(spec) else {
+        page.page.setToolbarItems_animated(None, false);
+        page.nav.setToolbarHidden_animated(true, false);
+        return;
+    };
+    let offset = toolbar_offset(spec);
+    let mut items = Vec::with_capacity(2 * toolbar.items.len() + 2);
+    for (i, entry) in toolbar.items.iter().enumerate() {
+        if i > 0 {
+            items.push(UIBarButtonItem::flexibleSpaceItem(mtm));
+        }
+        items.push(action_item(mtm, offset + i, entry, target));
+    }
+    if let Some(primary) = &toolbar.primary {
+        items.push(UIBarButtonItem::flexibleSpaceItem(mtm));
+        let item = action_item(mtm, offset + toolbar.items.len(), primary, target);
+        item.setStyle(UIBarButtonItemStyle::Prominent);
+        items.push(item);
+    }
+    page.page
+        .setToolbarItems_animated(Some(&NSArray::from_retained_slice(&items)), false);
+    page.nav.setToolbarHidden_animated(false, false);
+}
+
 /// The leading item: a custom back chevron (the navigation controller has no
 /// stack to pop) reporting through `target`, a 32pt round avatar, or a symbol.
 fn leading_item(
@@ -1296,9 +1350,9 @@ fn leading_item(
     }
 }
 
-/// One trailing action, tagged with its spec index: a pull-down when it has
-/// a menu, else a plain image (title as its label) or title item reporting
-/// through `target`.
+/// One top-bar or toolbar action, tagged with its `chrome_actions` index: a
+/// pull-down when it has a menu, else a plain image (title as its label) or
+/// title item reporting through `target`.
 fn action_item(
     mtm: MainThreadMarker,
     index: usize,
@@ -1330,7 +1384,7 @@ fn action_item(
     } else {
         item.setTitle(Some(&title));
     }
-    // Spec indices are small (a top bar's actions); the tag maps a tap back.
+    // Action indices are small (the top bar's and toolbar's); the tag maps a tap back.
     item.setTag(index as isize);
     item
 }
@@ -1426,7 +1480,7 @@ pub(super) fn tab_tapped(controller: &UIViewController) -> bool {
     })
 }
 
-/// A tap on the trailing action item tagged `tag`.
+/// A tap on the top-bar or toolbar action item tagged `tag`.
 pub(super) fn action_tapped(tag: isize) {
     report("action", |_| {
         usize::try_from(tag).ok().map(ChromeTap::Action)

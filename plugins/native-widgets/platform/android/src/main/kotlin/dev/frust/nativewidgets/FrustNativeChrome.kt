@@ -1,7 +1,8 @@
 // The `frust-native-widgets` plugin's Android app-chrome host: Material 3 bars
-// (AppBarLayout + MaterialToolbar on top, BottomNavigationView at the bottom)
-// around the frust embedding's content root, driven from Rust's `ChromeHost`
-// (`plugins/native-widgets/src/chrome/host.rs`) over JNI.
+// (AppBarLayout + MaterialToolbar on top, BottomNavigationView at the bottom,
+// the toolbar's floating action buttons) around the frust embedding's content
+// root, driven from Rust's `ChromeHost` (`plugins/native-widgets/src/chrome/host.rs`)
+// over JNI.
 //
 // FROZEN once shipped: the binary class name `dev.frust.nativewidgets.FrustNativeChrome`
 // (Rust loads it through the application classloader), the `@JvmStatic` entry
@@ -19,8 +20,12 @@
 //   TopBar:   hasTop          Title: title          Subtitle: subtitle (absent/null = none)
 //   Leading:  leading = "none" | "back" | "image"   LargeTitle: largeTitle (ignored here)
 //   Actions:  actionCount, action<i>Title, action<i>HasIcon, action<i>MenuCount,
-//             menu<i>_<j>Title, menu<i>_<j>Destructive, menu<i>_<j>Enabled
+//             menu<i>_<j>Title, menu<i>_<j>Destructive, menu<i>_<j>Enabled,
+//             toolbarCount, toolbarPrimary (the last entry is the primary),
+//             toolbar<i>Title, toolbar<i>HasIcon, toolbar<i>MenuCount,
+//             toolbarMenu<i>_<j>Title, toolbarMenu<i>_<j>Destructive, toolbarMenu<i>_<j>Enabled
 //   Brightness: dark
+// Toolbar entry i reports as action index actionCount + i (its menu likewise).
 // Icon bytes never travel as JSON: `setIcon(slot, index, png)` caches one
 // bitmap per (slot, index) until `dispose`, before or after the call naming it.
 package dev.frust.nativewidgets
@@ -48,6 +53,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import android.widget.FrameLayout
+import android.widget.LinearLayout
 import android.widget.PopupMenu
 import androidx.core.graphics.Insets
 import androidx.core.graphics.drawable.RoundedBitmapDrawableFactory
@@ -58,6 +64,8 @@ import com.google.android.material.appbar.AppBarLayout
 import com.google.android.material.appbar.MaterialToolbar
 import com.google.android.material.bottomnavigation.BottomNavigationView
 import com.google.android.material.color.MaterialColors
+import com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
+import com.google.android.material.floatingactionbutton.FloatingActionButton
 import com.google.android.material.navigation.NavigationBarView
 import dev.frust.FrustSurfaceView
 import org.json.JSONObject
@@ -88,6 +96,17 @@ import kotlin.math.roundToInt
  * touches. While the keyboard is visible the bottom navigation is hidden
  * (Material guidance): the surface then extends down to the keyboard and the
  * IME inset is forwarded whole. Nothing here consumes insets.
+ *
+ * ## Toolbar
+ *
+ * The spec's toolbar is a column of floating action buttons, one more sibling
+ * added *after* the root so it draws over the surface: the secondary entries
+ * as [ExtendedFloatingActionButton]s stacked above the primary, a
+ * [FloatingActionButton] when it has an icon (else extended, with its title).
+ * It floats over the body and takes no root padding. The root's insets
+ * listener positions it [FAB_MARGIN_DP] above the bottom navigation while
+ * that is shown, else above the larger of the IME and navigation-bar insets,
+ * and the same distance in from the trailing edge's system insets.
  *
  * ## Threading and ordering
  *
@@ -123,6 +142,9 @@ object FrustNativeChrome {
     /** [setIcon] slot: the leading image (avatar), `index` ignored. */
     const val ICON_SLOT_LEADING = 2
 
+    /** [setIcon] slot: a toolbar entry's icon, `index` = toolbar entry index. */
+    const val ICON_SLOT_TOOLBAR = 3
+
     private const val TAG = "frust"
     private const val LEADING_NONE = "none"
     private const val LEADING_BACK = "back"
@@ -136,6 +158,12 @@ object FrustNativeChrome {
 
     /** A bottom navigation item's icon box (Material 3 spec: 24dp). */
     private const val TAB_ICON_DP = 24
+
+    /** The toolbar column's distance from the bars and edges (Material 3 FAB margin: 16dp). */
+    private const val FAB_MARGIN_DP = 16
+
+    /** The gap between stacked toolbar buttons. */
+    private const val FAB_GAP_DP = 12
 
     /** [setIcon] decodes to at most 4x the slot's on-screen size, but never caps below this (px). */
     private const val MIN_ICON_DECODE_PX = 256
@@ -184,6 +212,10 @@ object FrustNativeChrome {
         var subtitle: String? = null
         var leading = LEADING_NONE
         var actions: List<Action> = emptyList()
+
+        /** The toolbar's entries, the primary last when [toolbarPrimary]. */
+        var toolbar: List<Action> = emptyList()
+        var toolbarPrimary = false
         var dark = false
     }
 
@@ -192,6 +224,8 @@ object FrustNativeChrome {
         val appBar: AppBarLayout,
         val toolbar: MaterialToolbar,
         val bottom: BottomNavigationView,
+        /** The toolbar's floating action buttons, top to bottom. */
+        val fabs: LinearLayout,
     )
 
     private class Installed(
@@ -258,7 +292,7 @@ object FrustNativeChrome {
             Log.w(TAG, "Frust: native app chrome refused — malformed spec ($t)")
             return INSTALL_REFUSED
         }
-        if (model.actions.any { it.menu.size >= CHROME_MENU_STRIDE }) {
+        if ((model.actions + model.toolbar).any { it.menu.size >= CHROME_MENU_STRIDE }) {
             Log.w(TAG, "Frust: native app chrome refused — a menu has $CHROME_MENU_STRIDE or more items")
             return INSTALL_REFUSED
         }
@@ -349,6 +383,7 @@ object FrustNativeChrome {
                 ICON_SLOT_TAB -> refreshTabIcon(installed, index)
                 ICON_SLOT_ACTION -> applyActions(installed)
                 ICON_SLOT_LEADING -> applyLeading(installed)
+                ICON_SLOT_TOOLBAR -> applyToolbar(installed)
             }
         } catch (t: Throwable) {
             Log.w(TAG, "Frust: native app chrome icon refresh failed", t)
@@ -415,21 +450,30 @@ object FrustNativeChrome {
         if (FIELD_LEADING in fields) model.leading = json.optString("leading", LEADING_NONE)
         if (FIELD_ACTIONS in fields) {
             model.actions = List(json.optInt("actionCount", 0)) { a ->
-                val count = json.optInt("action${a}MenuCount", 0).coerceIn(0, CHROME_MENU_STRIDE - 1)
-                Action(
-                    json.optString("action${a}Title"),
-                    json.optBoolean("action${a}HasIcon", false),
-                    List(count) { m ->
-                        MenuEntry(
-                            json.optString("menu${a}_${m}Title"),
-                            json.optBoolean("menu${a}_${m}Destructive", false),
-                            json.optBoolean("menu${a}_${m}Enabled", true),
-                        )
-                    },
-                )
+                parseAction(json, "action", "menu", a)
             }
+            model.toolbar = List(json.optInt("toolbarCount", 0)) { t ->
+                parseAction(json, "toolbar", "toolbarMenu", t)
+            }
+            model.toolbarPrimary = json.optBoolean("toolbarPrimary", false)
         }
         if (FIELD_BRIGHTNESS in fields) model.dark = json.optBoolean("dark", false)
+    }
+
+    /** Action `a`'s keys under `prefix` and its menu's under `menuPrefix` (the header's two shapes). */
+    private fun parseAction(json: JSONObject, prefix: String, menuPrefix: String, a: Int): Action {
+        val count = json.optInt("$prefix${a}MenuCount", 0).coerceIn(0, CHROME_MENU_STRIDE - 1)
+        return Action(
+            json.optString("$prefix${a}Title"),
+            json.optBoolean("$prefix${a}HasIcon", false),
+            List(count) { m ->
+                MenuEntry(
+                    json.optString("$menuPrefix${a}_${m}Title"),
+                    json.optBoolean("$menuPrefix${a}_${m}Destructive", false),
+                    json.optBoolean("$menuPrefix${a}_${m}Enabled", true),
+                )
+            },
+        )
     }
 
     private fun optStringOrNull(json: JSONObject, key: String): String? =
@@ -477,7 +521,11 @@ object FrustNativeChrome {
         appBar.addView(toolbar, AppBarLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         val bottom = BottomNavigationView(context)
         bottom.labelVisibilityMode = NavigationBarView.LABEL_VISIBILITY_LABELED
-        return Bars(context, appBar, toolbar, bottom)
+        val fabs = LinearLayout(context)
+        fabs.orientation = LinearLayout.VERTICAL
+        fabs.gravity = Gravity.END
+        fabs.visibility = View.GONE
+        return Bars(context, appBar, toolbar, bottom, fabs)
     }
 
     private fun attach(installed: Installed) {
@@ -498,6 +546,12 @@ object FrustNativeChrome {
         val wrap = ViewGroup.LayoutParams.WRAP_CONTENT
         installed.content.addView(bars.appBar, 0, FrameLayout.LayoutParams(match, wrap, Gravity.TOP))
         installed.content.addView(bars.bottom, 1, FrameLayout.LayoutParams(match, wrap, Gravity.BOTTOM))
+        // Last, so it draws over the root; the insets listener moves it off the bars.
+        val margin = dp(bars.context, FAB_MARGIN_DP)
+        val fabParams = FrameLayout.LayoutParams(wrap, wrap, Gravity.BOTTOM or Gravity.END)
+        fabParams.marginEnd = margin
+        fabParams.bottomMargin = margin
+        installed.content.addView(bars.fabs, fabParams)
         ViewCompat.setOnApplyWindowInsetsListener(bars.appBar) { view, insets ->
             val sides = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
             view.setPadding(sides.left, sides.top, sides.right, 0)
@@ -539,6 +593,7 @@ object FrustNativeChrome {
         bars.bottom.removeOnLayoutChangeListener(bottomHeightWatch)
         installed.content.removeView(bars.appBar)
         installed.content.removeView(bars.bottom)
+        installed.content.removeView(bars.fabs)
     }
 
     private fun detachQuietly(installed: Installed) {
@@ -644,7 +699,32 @@ object FrustNativeChrome {
         val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
         val imeBottom = if (bottomCovered) max(0, ime.bottom - bars.bottom.height) else ime.bottom
         builder.setInsets(WindowInsetsCompat.Type.ime(), Insets.of(ime.left, ime.top, ime.right, imeBottom))
+        positionToolbar(installed, insets)
         return builder.build()
+    }
+
+    /**
+     * Keep the toolbar column [FAB_MARGIN_DP] above the bottom navigation while
+     * it shows, else above the larger of the IME and navigation-bar insets,
+     * and that far in from the trailing edge's system insets.
+     */
+    private fun positionToolbar(installed: Installed, insets: WindowInsetsCompat) {
+        val bars = installed.bars
+        val margin = dp(bars.context, FAB_MARGIN_DP)
+        val below = if (bars.bottom.visibility == View.VISIBLE) {
+            bars.bottom.height
+        } else {
+            val ime = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
+            max(ime, insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom)
+        }
+        val sides = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+        val rtl = installed.content.layoutDirection == View.LAYOUT_DIRECTION_RTL
+        val end = margin + if (rtl) sides.left else sides.right
+        val params = bars.fabs.layoutParams as? FrameLayout.LayoutParams ?: return
+        if (params.bottomMargin == below + margin && params.marginEnd == end) return
+        params.bottomMargin = below + margin
+        params.marginEnd = end
+        bars.fabs.layoutParams = params
     }
 
     // --- applying the spec ---------------------------------------------------
@@ -658,7 +738,10 @@ object FrustNativeChrome {
         if (FIELD_TOP_BAR in changed) applyTopVisibility(installed)
         if (FIELD_TITLE in changed || FIELD_SUBTITLE in changed) applyTitles(installed)
         if (FIELD_LEADING in changed) applyLeading(installed)
-        if (FIELD_ACTIONS in changed) applyActions(installed)
+        if (FIELD_ACTIONS in changed) {
+            applyActions(installed)
+            applyToolbar(installed)
+        }
         if (FIELD_TABS in changed) applyTabs(installed) else if (FIELD_SELECTED in changed) applySelected(installed)
     }
 
@@ -667,6 +750,7 @@ object FrustNativeChrome {
         applyTitles(installed)
         applyLeading(installed)
         applyActions(installed)
+        applyToolbar(installed)
         applyTabs(installed)
     }
 
@@ -727,15 +811,63 @@ object FrustNativeChrome {
         }
     }
 
+    /** Rebuild the toolbar column from the model: items stacked above the primary; GONE when empty. */
+    private fun applyToolbar(installed: Installed) {
+        dismissPopup()
+        val bars = installed.bars
+        val context = bars.context
+        val stack = bars.fabs
+        stack.removeAllViews()
+        val entries = installed.model.toolbar
+        stack.visibility = if (entries.isEmpty()) View.GONE else View.VISIBLE
+        val wrap = ViewGroup.LayoutParams.WRAP_CONTENT
+        entries.forEachIndexed { t, entry ->
+            val primary = installed.model.toolbarPrimary && t == entries.lastIndex
+            val bitmap = icons[iconKey(ICON_SLOT_TOOLBAR, t)]
+            val icon = if (entry.hasIcon && bitmap != null) {
+                BitmapDrawable(context.resources, fitScaled(bitmap, dp(context, ACTION_ICON_DP)))
+            } else {
+                null
+            }
+            val button: View = if (primary && icon != null) {
+                FloatingActionButton(context).apply { setImageDrawable(icon) }
+            } else {
+                ExtendedFloatingActionButton(context).apply {
+                    text = entry.title
+                    this.icon = icon
+                }
+            }
+            button.contentDescription = entry.title
+            button.setOnClickListener { onToolbarClicked(t, it) }
+            val params = LinearLayout.LayoutParams(wrap, wrap)
+            params.gravity = Gravity.END
+            if (t > 0) params.topMargin = dp(context, FAB_GAP_DP)
+            stack.addView(button, params)
+        }
+    }
+
     private fun onActionClicked(index: Int) {
         val installed = live ?: return
         val action = installed.model.actions.getOrNull(index) ?: return
+        val bars = installed.bars
+        val anchor = bars.toolbar.findViewById<View?>(index + 1) ?: bars.toolbar
+        reportOrShowMenu(installed, index, action, anchor)
+    }
+
+    /** Toolbar entry `t`, whose report index follows the top bar's actions. */
+    private fun onToolbarClicked(t: Int, anchor: View) {
+        val installed = live ?: return
+        val entry = installed.model.toolbar.getOrNull(t) ?: return
+        reportOrShowMenu(installed, installed.model.actions.size + t, entry, anchor)
+    }
+
+    /** Report action `index`, or pop its menu up from `anchor`, each choice reporting its item. */
+    private fun reportOrShowMenu(installed: Installed, index: Int, action: Action, anchor: View) {
         if (action.menu.isEmpty()) {
             emit(FrustNativeListener.KIND_CHROME_ACTION, index.toLong())
             return
         }
         val bars = installed.bars
-        val anchor = bars.toolbar.findViewById<View?>(index + 1) ?: bars.toolbar
         val shown = PopupMenu(bars.context, anchor, Gravity.END)
         val danger = MaterialColors.getColor(bars.toolbar, androidx.appcompat.R.attr.colorError)
         action.menu.forEachIndexed { m, entry ->
