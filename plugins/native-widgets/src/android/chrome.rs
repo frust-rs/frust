@@ -1,7 +1,8 @@
 //! The Android chrome arm (decision C3): [`AndroidChromeHost`] drives the
 //! Kotlin `dev.frust.nativewidgets.FrustNativeChrome` object — Material 3
 //! bars (`AppBarLayout` + `MaterialToolbar` on top, `BottomNavigationView`
-//! at the bottom) placed beside the frust embedding's content root — over
+//! at the bottom, the toolbar's floating action buttons over the body's
+//! bottom-end corner) placed beside the frust embedding's content root — over
 //! JNI, and this module exports the object's two callbacks.
 //!
 //! # The frozen contract
@@ -74,7 +75,9 @@
 //! # Icons
 //!
 //! Byte icons ride `setIcon` before the `install`/`apply` naming them,
-//! re-sent only when their bytes change ([`android_wire::IconTable`]). A
+//! re-sent only when their bytes change ([`android_wire::IconTable`]); a
+//! toolbar entry's ride `ICON_SLOT_TOOLBAR` and, like the toolbar itself,
+//! [`ChromeField::Actions`], which already re-syncs the table. A
 //! bottom item has one icon (a tab's selected-state icon is unused), and an
 //! Apple SF Symbol has no Android rendering: a symbol tab or action shows
 //! its title alone and `Leading::Symbol` shows no leading item (limitation

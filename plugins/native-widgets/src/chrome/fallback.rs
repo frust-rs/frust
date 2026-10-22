@@ -1,5 +1,5 @@
-//! Frust-drawn fallback chrome: a top bar and a bottom tab row built from the
-//! same [`ChromeSpec`] an arm mirrors, shown on every target without a chrome
+//! Frust-drawn fallback chrome: a top bar, a toolbar row and a bottom tab row
+//! built from the same [`ChromeSpec`] an arm mirrors, shown on every target without a chrome
 //! arm and for every install an arm refused, so a `native_scaffold` app always
 //! keeps its navigation.
 //!
@@ -16,6 +16,11 @@
 //!   overlay host, so the menu is not a popup.
 //! - The tab row is 64 px plus the bottom inset; the app-confirmed `selected`
 //!   tab is drawn in `primary` and decides select versus reselect.
+//! - The toolbar row sits above the tab row (or takes the bottom inset when it
+//!   is the lowest bar): 56 px of trailing-aligned buttons, the primary last,
+//!   as a filled pill. A menu entry toggles an inline row of its items above
+//!   it. Its taps are id-based ([`deliver_event`]): it holds the toolbar
+//!   alone, whose indices follow the top bar's in the live spec.
 //! - SF Symbol names exist only on Apple platforms, so a symbol icon draws the
 //!   first letters of its name in a circle; byte icons draw untinted.
 //! - No keyboard focus: each target publishes a clickable semantics node,
@@ -34,8 +39,8 @@ use frust_core::{
 use kurbo::{Affine, BezPath, Point, Rect, Size};
 
 use super::{
-    ActionItem, ChromeEvent, ChromeGeneration, ChromeSpec, Leading, TopBarSpec, deliver,
-    encode_event,
+    ActionItem, ChromeEvent, ChromeGeneration, ChromeSpec, Leading, ToolbarSpec, TopBarSpec,
+    deliver, deliver_event, encode_event,
 };
 use crate::api::{TabIcon, TabItem};
 
@@ -49,6 +54,10 @@ const MENU_ITEM_HEIGHT: f64 = 40.0;
 const MENU_ITEM_PAD: f64 = 16.0;
 /// The tab row's content height above the bottom inset.
 const TAB_ROW_HEIGHT: f64 = 64.0;
+/// The toolbar row's content height above the bottom inset.
+const TOOLBAR_ROW_HEIGHT: f64 = 56.0;
+/// The primary pill's height inside the toolbar row.
+const PRIMARY_HEIGHT: f64 = 40.0;
 /// A tap target's side: the 48 px minimum touch target.
 const SLOT: f64 = 48.0;
 /// Gap between the bar's edge (inside the insets) and its outermost slot.
@@ -843,6 +852,342 @@ impl Widget for TopBarWidget {
     }
 }
 
+// --- the toolbar row ---------------------------------------------------------
+
+/// The fallback toolbar row for `spec`'s toolbar, reporting under `generation`.
+pub(crate) fn fallback_toolbar_row<Outer: 'static>(
+    spec: &ChromeSpec,
+    generation: ChromeGeneration,
+) -> AnyView<Outer> {
+    any(ToolbarRowView {
+        toolbar: spec.toolbar.clone().unwrap_or_default(),
+        generation,
+    })
+}
+
+/// Tear down a pod [`fallback_toolbar_row`] built.
+pub(crate) fn teardown_toolbar_row<Outer: 'static>(pod: &mut ChildPod, ctx: &mut BuildCtx<'_>) {
+    let inert = fallback_toolbar_row::<Outer>(&ChromeSpec::default(), ChromeGeneration(0));
+    teardown_child(&inert, pod, ctx);
+}
+
+struct ToolbarRowView {
+    toolbar: ToolbarSpec,
+    generation: ChromeGeneration,
+}
+
+struct ToolbarRowWidget {
+    toolbar: ToolbarSpec,
+    generation: ChromeGeneration,
+    /// One face per entry, items then the primary.
+    faces: Vec<ActionFace>,
+    /// The expanded entry's menu-item runs.
+    menu: Vec<Run>,
+    expanded: Option<usize>,
+    armed: Option<usize>,
+    decoded: Decoded,
+    targets: Vec<Target>,
+    rects: Vec<Rect>,
+    menu_rects: Vec<Rect>,
+    size: Size,
+}
+
+impl ToolbarRowWidget {
+    fn new(generation: ChromeGeneration) -> Self {
+        Self {
+            toolbar: ToolbarSpec::default(),
+            generation,
+            faces: Vec::new(),
+            menu: Vec::new(),
+            expanded: None,
+            armed: None,
+            decoded: Decoded::default(),
+            targets: Vec::new(),
+            rects: Vec::new(),
+            menu_rects: Vec::new(),
+            size: Size::ZERO,
+        }
+    }
+
+    fn entry(&self, index: usize) -> Option<&ActionItem> {
+        self.toolbar.entries().nth(index)
+    }
+
+    fn is_primary(&self, index: usize) -> bool {
+        self.toolbar.primary.is_some() && index == self.toolbar.items.len()
+    }
+
+    /// Take `toolbar` as the shown one, reusing decoded icons.
+    fn adopt(&mut self, toolbar: &ToolbarSpec) {
+        let previous = std::mem::take(&mut self.decoded);
+        self.faces = toolbar
+            .entries()
+            .map(|entry| match &entry.icon {
+                Some(icon) => ActionFace::Icon(IconFace::of(icon, &mut self.decoded, &previous)),
+                None => ActionFace::Text(Run::new(entry.title.clone())),
+            })
+            .collect();
+        self.toolbar = toolbar.clone();
+        self.expanded = self
+            .expanded
+            .filter(|&i| self.entry(i).is_some_and(|entry| entry.menu.is_some()));
+        self.armed = None;
+        self.sync_menu();
+    }
+
+    fn sync_menu(&mut self) {
+        let items = self
+            .expanded
+            .and_then(|i| self.entry(i))
+            .and_then(|entry| entry.menu.as_deref())
+            .unwrap_or(&[]);
+        self.menu = items
+            .iter()
+            .map(|item| Run::new(item.title.clone()))
+            .collect();
+    }
+
+    fn fire(&mut self, hit: Hit, ctx: &mut EventCtx) {
+        let event = match hit {
+            Hit::Action(i) => {
+                let Some(entry) = self.entry(i) else {
+                    return;
+                };
+                ChromeEvent::ActionTapped(entry.id.clone())
+            }
+            Hit::Menu(i) => {
+                self.expanded = (self.expanded != Some(i)).then_some(i);
+                self.sync_menu();
+                ctx.request_layout();
+                return;
+            }
+            Hit::MenuItem(a, m) => {
+                let entry = self.entry(a);
+                let item = entry.and_then(|entry| entry.menu.as_ref()?.get(m));
+                let (Some(entry), Some(item)) = (entry, item) else {
+                    return;
+                };
+                ChromeEvent::MenuItemChosen(entry.id.clone(), item.id.clone())
+            }
+            Hit::Back | Hit::Tab(_) => return,
+        };
+        if self.expanded.take().is_some() {
+            self.menu.clear();
+            ctx.request_layout();
+        }
+        deliver_event(self.generation.get(), &event);
+    }
+
+    fn label(&self, hit: Hit) -> (Role, &str) {
+        match hit {
+            Hit::Action(i) | Hit::Menu(i) => (
+                Role::Button,
+                self.entry(i).map_or("", |entry| entry.title.as_str()),
+            ),
+            Hit::MenuItem(a, m) => {
+                let item = self.entry(a).and_then(|entry| entry.menu.as_ref()?.get(m));
+                (Role::MenuItem, item.map_or("", |item| item.title.as_str()))
+            }
+            Hit::Back | Hit::Tab(_) => (Role::Button, ""),
+        }
+    }
+}
+
+impl<Outer: 'static> View<Outer> for ToolbarRowView {
+    type Element = ToolbarRowWidget;
+
+    fn build(&self, _ctx: &mut BuildCtx<'_>) -> ToolbarRowWidget {
+        let mut widget = ToolbarRowWidget::new(self.generation);
+        widget.adopt(&self.toolbar);
+        widget
+    }
+
+    fn rebuild(
+        &self,
+        _prev: &Self,
+        element: &mut ToolbarRowWidget,
+        _ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        element.generation = self.generation;
+        if element.toolbar == self.toolbar {
+            return ChangeFlags::NONE;
+        }
+        element.adopt(&self.toolbar);
+        ChangeFlags::LAYOUT | ChangeFlags::PAINT
+    }
+
+    fn teardown(&self, _element: &mut ToolbarRowWidget, _ctx: &mut BuildCtx<'_>) {}
+}
+
+impl Widget for ToolbarRowWidget {
+    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        let theme = theme_or_neutral(Theme::from_layout_ctx(ctx));
+        let styles = TopStyles::of(theme, false);
+        let primary_style = styled(&theme.type_scale.label_large, theme.scheme().on_primary);
+        let pad = ctx.window_insets().padding();
+        let width = finite_or(bc.max().width, bc.min().width);
+        self.targets.clear();
+        self.menu_rects.clear();
+
+        let mut y = 0.0;
+        if let Some(a) = self.expanded {
+            let items = self
+                .toolbar
+                .entries()
+                .nth(a)
+                .and_then(|entry| entry.menu.as_deref())
+                .unwrap_or(&[]);
+            let item_y = (MENU_ROW_HEIGHT - MENU_ITEM_HEIGHT) / 2.0;
+            let mut item_x = pad.left + 2.0 * EDGE_PAD;
+            for (m, (run, item)) in self.menu.iter_mut().zip(items).enumerate() {
+                let style = match (item.enabled, item.destructive) {
+                    (false, _) => &styles.menu_disabled,
+                    (true, true) => &styles.menu_destructive,
+                    (true, false) => &styles.menu,
+                };
+                let w = run.shape(ctx, style.clone()).width + 2.0 * MENU_ITEM_PAD;
+                let rect = Rect::new(item_x, item_y, item_x + w, item_y + MENU_ITEM_HEIGHT);
+                self.menu_rects.push(rect);
+                self.targets.push(Target {
+                    rect,
+                    hit: Hit::MenuItem(a, m),
+                    enabled: item.enabled,
+                });
+                item_x += w + EDGE_PAD;
+            }
+            y = MENU_ROW_HEIGHT;
+        }
+
+        let primary = self
+            .toolbar
+            .primary
+            .is_some()
+            .then_some(self.toolbar.items.len());
+        let mut right = width - pad.right - EDGE_PAD;
+        self.rects = vec![Rect::ZERO; self.faces.len()];
+        for (i, face) in self.faces.iter_mut().enumerate().rev() {
+            let style = if primary == Some(i) {
+                &primary_style
+            } else {
+                &styles.action
+            };
+            let w = match face {
+                ActionFace::Icon(icon) => {
+                    icon.shape(ctx, &styles.letters);
+                    SLOT
+                }
+                ActionFace::Text(run) => {
+                    (run.shape(ctx, style.clone()).width + 2.0 * TEXT_PAD).max(SLOT)
+                }
+            };
+            let h = if primary == Some(i) {
+                PRIMARY_HEIGHT
+            } else {
+                SLOT
+            };
+            right -= w;
+            let top = y + (TOOLBAR_ROW_HEIGHT - h) / 2.0;
+            self.rects[i] = Rect::new(right, top, right + w, top + h);
+            right -= EDGE_PAD;
+        }
+        for (i, rect) in self.rects.iter().enumerate() {
+            let menu = self
+                .toolbar
+                .entries()
+                .nth(i)
+                .is_some_and(|e| e.menu.is_some());
+            self.targets.push(Target {
+                rect: *rect,
+                hit: if menu { Hit::Menu(i) } else { Hit::Action(i) },
+                enabled: true,
+            });
+        }
+        self.size = bc.constrain(Size::new(width, y + TOOLBAR_ROW_HEIGHT + pad.bottom));
+        self.size
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        let scheme = theme_or_neutral(Theme::from_paint_ctx(ctx)).scheme();
+        let origin = ctx.origin();
+        let at = |rect: Rect| rect + origin.to_vec2();
+        scene.fill_rect(origin, self.size, scheme.surface_container);
+        if self.expanded.is_some() {
+            scene.fill_rect(
+                origin,
+                Size::new(self.size.width, MENU_ROW_HEIGHT),
+                scheme.surface_container_high,
+            );
+            for rect in &self.menu_rects {
+                let r = at(*rect);
+                let fill = scheme.surface_container_highest;
+                scene.fill_rounded_rect(r.origin(), r.size(), r.height() / 2.0, fill);
+            }
+        }
+        scene.fill_rect(
+            origin,
+            Size::new(self.size.width, HAIRLINE),
+            scheme.outline_variant,
+        );
+        for (i, rect) in self.rects.iter().enumerate() {
+            if self.is_primary(i) {
+                let r = at(*rect);
+                scene.fill_rounded_rect(r.origin(), r.size(), r.height() / 2.0, scheme.primary);
+            }
+        }
+        if let Some(target) = self.armed.and_then(|i| self.targets.get(i)) {
+            pressed_layer(at(target.rect), scheme, scene);
+        }
+        for (face, rect) in self.faces.iter().zip(&self.rects) {
+            let rect = at(*rect);
+            match face {
+                ActionFace::Icon(icon) => {
+                    let side = if matches!(icon, IconFace::Letters(_)) {
+                        ICON + 4.0
+                    } else {
+                        ICON
+                    };
+                    icon.paint(
+                        Rect::from_center_size(rect.center(), (side, side)),
+                        scheme,
+                        scene,
+                    );
+                }
+                ActionFace::Text(run) => run.paint_centered(rect, scene),
+            }
+        }
+        for (run, rect) in self.menu.iter().zip(&self.menu_rects) {
+            run.paint_centered(at(*rect), scene);
+        }
+    }
+
+    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        let (result, fired) = press(&self.targets, &mut self.armed, ctx, event);
+        if let Some(hit) = fired {
+            self.fire(hit, ctx);
+        }
+        result
+    }
+
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        let origin = ctx.origin();
+        ctx.push_container(
+            Role::Toolbar,
+            |_| {},
+            |ctx| {
+                for target in &self.targets {
+                    let (role, label) = self.label(target.hit);
+                    ctx.push_node(role, |node| {
+                        target_node(node, origin, target, label);
+                        if let Hit::Menu(i) = target.hit {
+                            node.set_expanded(self.expanded == Some(i));
+                        }
+                    });
+                }
+            },
+        );
+    }
+}
+
 // --- the tab row -------------------------------------------------------------
 
 /// What one tab cell shows.
@@ -1293,6 +1638,8 @@ mod tests {
         log: Log,
         text: TextContext,
         size: Size,
+        toolbar: Option<ToolbarSpec>,
+        tabs: bool,
     }
 
     impl App {
@@ -1309,13 +1656,34 @@ mod tests {
                 log: Arc::default(),
                 text: TextContext::new(),
                 size: Size::new(size.0, size.1),
+                toolbar: None,
+                tabs: true,
             }
+        }
+
+        /// This app with `toolbar`, and without tabs unless `tabs`.
+        fn with_toolbar(mut self, toolbar: ToolbarSpec, tabs: bool) -> Self {
+            self.toolbar = Some(toolbar);
+            self.tabs = tabs;
+            self
         }
 
         fn frame(&mut self) -> Rec {
             let (seen, log) = (Rc::clone(&self.seen), Arc::clone(&self.log));
-            self.root
-                .rebuild(&mut |_: &mut ()| scaffold(&seen, &log), &mut ());
+            let (toolbar, tabs) = (self.toolbar.clone(), self.tabs);
+            let mut build = move |_: &mut ()| {
+                let view = scaffold(&seen, &log);
+                let view = if tabs {
+                    view
+                } else {
+                    view.tabs(Vec::new(), "")
+                };
+                match &toolbar {
+                    Some(toolbar) => view.toolbar(toolbar.clone()),
+                    None => view,
+                }
+            };
+            self.root.rebuild(&mut build, &mut ());
             self.root.layout_with_text(self.size, &mut self.text);
             let mut rec = Rec::default();
             self.root.paint(&mut rec, FrameTime::from_nanos(0));
@@ -1479,6 +1847,82 @@ mod tests {
         app.root
             .perform_accessibility_action(&mut (), *inbox, Action::Click);
         assert_eq!(app.take_log(), ["select:inbox"]);
+    }
+
+    fn comment_toolbar() -> ToolbarSpec {
+        ToolbarSpec::new()
+            .item(ActionItem::new("info", "Info"))
+            .item(ActionItem::new("sort", "Sort").menu(vec![
+                MenuItem::new("new", "Newest"),
+                MenuItem::new("old", "Oldest"),
+            ]))
+            .primary(ActionItem::new("comment", "Comment"))
+    }
+
+    #[test]
+    fn the_toolbar_row_sits_above_the_tab_row_and_reports_by_id() {
+        let _guard = slot_test_guard();
+        let (w, h) = SIZES[0];
+        let mut app = App::new(SIZES[0], Brightness::Light, insets(0.0, 0.0, 34.0))
+            .with_toolbar(comment_toolbar(), true);
+        app.frame();
+        let seen = app.seen();
+        let tab_row = TAB_ROW_HEIGHT + 34.0;
+        assert_eq!(
+            seen.size.height,
+            h - TOP_BAR_HEIGHT - TOOLBAR_ROW_HEIGHT - tab_row
+        );
+        assert_eq!(seen.bottom, 0.0, "the bottom inset is consumed once");
+        let row_y = h - tab_row - TOOLBAR_ROW_HEIGHT / 2.0;
+        // The primary is the trailing-most button.
+        app.tap(w - EDGE_PAD - 10.0, row_y);
+        assert_eq!(app.take_log(), ["action:comment"]);
+        assert_eq!(app.nodes(Role::Toolbar).len(), 2, "the top bar and the row");
+    }
+
+    #[test]
+    fn a_toolbar_menu_expands_above_its_row_and_reports_the_choice() {
+        let _guard = slot_test_guard();
+        let (_, h) = SIZES[1];
+        let mut app = App::new(SIZES[1], Brightness::Dark, WindowInsets::default())
+            .with_toolbar(comment_toolbar(), false);
+        app.frame();
+        let body = app.seen().size.height;
+        assert_eq!(body, h - TOP_BAR_HEIGHT - TOOLBAR_ROW_HEIGHT);
+        let sort = app
+            .nodes(Role::Button)
+            .into_iter()
+            .find(|(_, node)| node.label() == Some("Sort"))
+            .expect("the sort button");
+        app.root
+            .perform_accessibility_action(&mut (), sort.0, Action::Click);
+        app.frame();
+        assert!(
+            app.take_log().is_empty(),
+            "a menu entry reports nothing itself"
+        );
+        assert_eq!(app.seen().size.height, body - MENU_ROW_HEIGHT);
+        assert_eq!(app.nodes(Role::MenuItem).len(), 2);
+        let menu_y = h - TOOLBAR_ROW_HEIGHT - MENU_ROW_HEIGHT / 2.0;
+        app.tap(2.0 * EDGE_PAD + MENU_ITEM_PAD, menu_y);
+        assert_eq!(app.take_log(), ["menu:sort/new"]);
+        assert_eq!(app.seen().size.height, body, "a choice collapses the row");
+    }
+
+    #[test]
+    fn the_toolbar_row_takes_the_bottom_inset_when_it_is_the_lowest_bar() {
+        let _guard = slot_test_guard();
+        let (_, h) = SIZES[0];
+        let mut app = App::new(SIZES[0], Brightness::Light, insets(0.0, 0.0, 34.0))
+            .with_toolbar(comment_toolbar(), false);
+        let rec = app.frame();
+        assert!(rec.glyph_runs >= 3, "the row's labels");
+        let seen = app.seen();
+        assert_eq!(
+            seen.size.height,
+            h - TOP_BAR_HEIGHT - TOOLBAR_ROW_HEIGHT - 34.0
+        );
+        assert_eq!(seen.bottom, 0.0);
     }
 
     fn tab_row(faces: Vec<TabFace>) -> TabRowWidget {

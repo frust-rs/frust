@@ -210,9 +210,9 @@ impl Editor {
 ## 1c. App chrome (`native_scaffold`)
 
 `native_scaffold(body)` puts the host's own bars around your body: a top bar
-(title, subtitle, leading item, actions, pull-down menus) and a bottom tab bar,
-published as one spec to the platform host (or, on a target with no chrome arm,
-to frust-drawn fallback bars). It is one declarative tree inside
+(title, subtitle, leading item, actions, pull-down menus), a bottom tab bar and
+an optional bottom toolbar, published as one spec to the platform host (or, on
+a target with no chrome arm, to frust-drawn fallback bars). It is one declarative tree inside
 `Component::build`. The scaffold resizes its body to avoid the keyboard by
 default (`.resize_to_avoid_keyboard(false)` to opt out), so a bottom-pinned
 composer sits on the keyboard; on Android the bottom navigation hides while the
@@ -220,7 +220,9 @@ keyboard is up:
 
 ```rust
 use frust::{Component, Get, RwSignal, Set, View, text};
-use frust_native_widgets::{ActionItem, Leading, TabIcon, TabId, TabItem, native_scaffold};
+use frust_native_widgets::{
+    ActionItem, Leading, TabIcon, TabId, TabItem, ToolbarSpec, native_scaffold,
+};
 
 #[derive(Default)]
 struct Root;
@@ -256,6 +258,7 @@ impl Component for Root {
             .title("Home")
             .leading(Leading::Back)
             .actions(vec![ActionItem::new("add", "Add")])
+            .toolbar(ToolbarSpec::new().primary(ActionItem::new("comment", "Comment")))
             .on_tab_select(move |id: TabId| tab.set(id.to_string()))
     }
 }
@@ -279,6 +282,14 @@ bar-line alpha and tail, `EdgeFade::strong()` is a heavier preset and
 the bars, so do not pad for them yourself. A second live scaffold
 publishes nothing and shows a one-line refusal above its body — one
 `native_scaffold` per app.
+
+**Toolbar:** `.toolbar(ToolbarSpec::new().items(..).primary(..))` adds a bottom
+action strip — iOS navigation-controller toolbar items (the primary trailing,
+prominent), Android floating action buttons (the primary a FAB 16dp above the
+bottom navigation, the items stacked above it), a frust-drawn row above the
+fallback tab row. Its taps report through `.on_action`/`.on_menu` like the top
+bar's, so action ids must be unique across both: a toolbar entry repeating an
+earlier id is dropped and a one-line banner says so.
 
 ---
 

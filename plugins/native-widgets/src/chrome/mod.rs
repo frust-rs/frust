@@ -4,11 +4,11 @@
 //!
 //! # A host-level surface, not a `platform_view` slot
 //!
-//! Tabs, title, leading item and actions belong to the host (iOS
-//! `UITabBarController` and `UINavigationController`, Android
-//! `MaterialToolbar` and `BottomNavigationView`), not to the differ, so one
-//! `native_scaffold` per app publishes a spec here and an arm behind
-//! [`ChromeHost`] owns the real containers. The bare `native_tab_bar` control is unchanged (D5): it
+//! Tabs, title, leading item, actions and the bottom toolbar belong to the
+//! host (iOS `UITabBarController` and `UINavigationController`, Android
+//! `MaterialToolbar`, `BottomNavigationView` and floating action buttons), not
+//! to the differ, so one `native_scaffold` per app publishes a spec here and an
+//! arm behind [`ChromeHost`] owns the real containers. The bare `native_tab_bar` control is unchanged (D5): it
 //! stays an embedded `platform_view` slot.
 //!
 //! # The slot
@@ -25,6 +25,10 @@
 //!   for the registered sink, and the app confirms by publishing again.
 //!   Reports stamped with a withdrawn generation are dropped, and so is a tap
 //!   on a disabled tab or menu item.
+//! - **One action index space.** An action report names its item by index
+//!   into [`chrome_actions`]: the top bar's actions, then the toolbar's items,
+//!   then its primary. So a toolbar change is diffed as
+//!   [`ChromeField::Actions`] ([`diff_specs`]): the two always travel together.
 //! - **Resolved where it was drawn.** An arm whose bars lag the slot (iOS
 //!   applies on a later main-queue turn) resolves a tap against the spec it
 //!   shows ([`resolve_tap`]) and hands the id-based event to [`deliver_event`],
@@ -72,6 +76,7 @@ use crate::events::{
     EVENT_KIND_CHROME_TAB, pack_chrome_menu, pack_chrome_tab, pack_index, unpack_chrome_menu,
     unpack_chrome_tab, unpack_index,
 };
+use host::ChromeField;
 
 /// Whether this target has a native chrome arm: iOS and Android, so every
 /// other target's scaffold draws the [`fallback`] bars. A target with an arm
@@ -140,6 +145,8 @@ pub(crate) struct ChromeSpec {
     /// The app-confirmed tab; an id no tab carries shows no selection.
     pub(crate) selected: Option<TabId>,
     pub(crate) top: Option<TopBarSpec>,
+    /// The bottom toolbar; `None` or an empty one shows none.
+    pub(crate) toolbar: Option<ToolbarSpec>,
     pub(crate) scroll: Option<ScrollState>,
     /// The app theme's brightness (`crate::api::theme::is_dark`), which an
     /// arm styles its bars with; the fallback bars read the theme directly.
@@ -301,6 +308,90 @@ impl MenuItem {
     }
 }
 
+/// The bottom toolbar: secondary `items` and an optional `primary` action,
+/// shown trailing and emphasised — iOS navigation-controller toolbar items,
+/// Android floating action buttons, a frust-drawn row in the fallback. Its
+/// actions report like the top bar's ([`ChromeEvent::ActionTapped`],
+/// [`ChromeEvent::MenuItemChosen`]), so their ids must not repeat a top-bar
+/// action's or each other's: the scaffold drops a repeat and says so.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ToolbarSpec {
+    pub(crate) items: Vec<ActionItem>,
+    pub(crate) primary: Option<ActionItem>,
+}
+
+impl ToolbarSpec {
+    /// An empty toolbar, which shows nothing.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The secondary items, leading-first.
+    pub fn items(mut self, items: Vec<ActionItem>) -> Self {
+        self.items = items;
+        self
+    }
+
+    /// Append one secondary item.
+    pub fn item(mut self, item: ActionItem) -> Self {
+        self.items.push(item);
+        self
+    }
+
+    /// The primary action, trailing and emphasised (the floating button).
+    pub fn primary(mut self, primary: ActionItem) -> Self {
+        self.primary = Some(primary);
+        self
+    }
+
+    /// Whether it has no item and no primary.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.items.is_empty() && self.primary.is_none()
+    }
+
+    /// The items, then the primary: the toolbar's report order.
+    pub(crate) fn entries(&self) -> impl Iterator<Item = &ActionItem> {
+        self.items.iter().chain(self.primary.as_ref())
+    }
+}
+
+/// The toolbar `spec` shows: none for an absent or empty one.
+pub(crate) fn shown_toolbar(spec: &ChromeSpec) -> Option<&ToolbarSpec> {
+    spec.toolbar.as_ref().filter(|toolbar| !toolbar.is_empty())
+}
+
+/// Every action `spec` shows, in report-index order: the top bar's actions,
+/// then the toolbar's items, then its primary.
+pub(crate) fn chrome_actions(spec: &ChromeSpec) -> impl Iterator<Item = &ActionItem> {
+    let top = spec.top.as_ref().map_or(&[][..], |top| &top.actions[..]);
+    top.iter()
+        .chain(spec.toolbar.iter().flat_map(ToolbarSpec::entries))
+}
+
+/// The report index of the toolbar's first entry: the top bar's action count.
+#[cfg_attr(not(any(test, target_os = "ios")), allow(dead_code))]
+pub(crate) fn toolbar_offset(spec: &ChromeSpec) -> usize {
+    spec.top.as_ref().map_or(0, |top| top.actions.len())
+}
+
+/// [`ChromeDiff::between`], with a toolbar change reported as
+/// [`ChromeField::Actions`] (module doc, "One action index space").
+pub(crate) fn diff_specs<'a>(old: &ChromeSpec, new: &'a ChromeSpec) -> ChromeDiff<'a> {
+    let mut diff = ChromeDiff::between(old, new);
+    if old.toolbar != new.toolbar && !diff.contains(ChromeField::Actions) {
+        let later = |field: &ChromeField| {
+            matches!(
+                field,
+                ChromeField::LargeTitle | ChromeField::Scroll | ChromeField::Brightness
+            )
+        };
+        let at = diff.changed.iter().position(later);
+        diff.changed
+            .insert(at.unwrap_or(diff.changed.len()), ChromeField::Actions);
+    }
+    diff
+}
+
 /// Whether the host's bars float over the body (iOS reports them through the
 /// window insets); Android's arm shrinks the surface between its bars and the
 /// fallback bars are laid out beside the body, so neither floats.
@@ -337,15 +428,11 @@ pub enum ChromeEvent {
     BackPressed,
 }
 
-fn actions(spec: &ChromeSpec) -> &[ActionItem] {
-    spec.top.as_ref().map_or(&[], |top| &top.actions)
-}
-
 /// `event` as the `(kind, detail)` an arm reports, resolving ids to the
 /// first item carrying them in `spec`. `None` when `spec` has no such item.
 pub(crate) fn encode_event(spec: &ChromeSpec, event: &ChromeEvent) -> Option<(i32, i64)> {
     let tab_index = |id: &TabId| spec.tabs.iter().position(|tab| tab.id() == id);
-    let action_index = |id: &ActionId| actions(spec).iter().position(|action| &action.id == id);
+    let action_index = |id: &ActionId| chrome_actions(spec).position(|action| &action.id == id);
     match event {
         ChromeEvent::TabSelected(id) => Some((
             EVENT_KIND_CHROME_TAB,
@@ -361,7 +448,7 @@ pub(crate) fn encode_event(spec: &ChromeSpec, event: &ChromeEvent) -> Option<(i3
         )),
         ChromeEvent::MenuItemChosen(action, item) => {
             let a = action_index(action)?;
-            let menu = actions(spec)[a].menu.as_deref()?;
+            let menu = chrome_actions(spec).nth(a)?.menu.as_deref()?;
             let m = menu.iter().position(|entry| &entry.id == item)?;
             Some((EVENT_KIND_CHROME_MENU, pack_chrome_menu(a, m)?))
         }
@@ -384,12 +471,12 @@ pub(crate) fn decode_event(spec: &ChromeSpec, kind: i32, detail: i64) -> Option<
             })
         }
         EVENT_KIND_CHROME_ACTION => {
-            let action = actions(spec).get(unpack_index(detail)?)?;
+            let action = chrome_actions(spec).nth(unpack_index(detail)?)?;
             Some(ChromeEvent::ActionTapped(action.id.clone()))
         }
         EVENT_KIND_CHROME_MENU => {
             let (a, m) = unpack_chrome_menu(detail)?;
-            let action = actions(spec).get(a)?;
+            let action = chrome_actions(spec).nth(a)?;
             let item = action.menu.as_ref()?.get(m).filter(|item| item.enabled)?;
             Some(ChromeEvent::MenuItemChosen(
                 action.id.clone(),
@@ -408,7 +495,7 @@ pub(crate) fn decode_event(spec: &ChromeSpec, kind: i32, detail: i64) -> Option<
 pub(crate) enum ChromeTap {
     /// The tab at this index of `spec.tabs`.
     Tab(usize),
-    /// The trailing action at this index.
+    /// The action at this [`chrome_actions`] index.
     Action(usize),
     /// Item `.1` of action `.0`'s pull-down menu.
     Menu(usize, usize),
@@ -585,7 +672,7 @@ impl<H: ChromeHost> ChromeSlot<H> {
             live.spec = spec;
             return PublishOutcome::Fallback(generation, error);
         }
-        let diff = ChromeDiff::between(&live.spec, &spec);
+        let diff = diff_specs(&live.spec, &spec);
         if diff.is_empty() {
             return PublishOutcome::Unchanged(generation);
         }
@@ -850,13 +937,21 @@ fn hand_over(routed: Option<(ChromeEvent, ChromeSink)>) -> bool {
 /// reads its revisions. An Apple symbol has no Android rendering — a tab or
 /// action carrying one is title-only and a `Leading::Symbol` encodes as
 /// `"none"` (limitation `native-chrome-android-bitmap-icons`).
+///
+/// # The toolbar
+///
+/// It rides [`ChromeField::Actions`] (the parent module's "One action index
+/// space"): the `toolbar*` keys sit in that group, its entries are the items
+/// then the primary (`toolbarPrimary` says whether the last one is), and
+/// entry `i` reports as action `actionCount + i`. Its byte icons use
+/// [`ICON_SLOT_TOOLBAR`].
 #[cfg_attr(not(any(test, target_os = "android")), allow(dead_code))]
 pub(crate) mod android_wire {
     use std::fmt::Write as _;
     use std::sync::Arc;
 
     use super::host::ChromeField;
-    use super::{ChromeSpec, Leading, TopBarSpec};
+    use super::{ActionItem, ChromeSpec, Leading, ToolbarSpec, TopBarSpec};
     use crate::api::TabIcon;
     use crate::runtime::escape;
 
@@ -866,6 +961,8 @@ pub(crate) mod android_wire {
     pub(crate) const ICON_SLOT_ACTION: i32 = 1;
     /// `setIcon` slot: the leading image (avatar), `index` `0`.
     pub(crate) const ICON_SLOT_LEADING: i32 = 2;
+    /// `setIcon` slot: a toolbar entry's icon, `index` = toolbar entry index.
+    pub(crate) const ICON_SLOT_TOOLBAR: i32 = 3;
 
     /// Every field `install` encodes, in [`ChromeField`] declaration order.
     pub(crate) const INSTALL_FIELDS: [ChromeField; 9] = [
@@ -978,21 +1075,18 @@ pub(crate) mod android_wire {
                 ChromeField::Actions => {
                     put("actionCount".into(), Value::Int(count(top.actions.len())));
                     for (a, action) in top.actions.iter().enumerate() {
-                        let menu = action.menu.as_deref().unwrap_or_default();
-                        put(format!("action{a}Title"), Value::Str(action.title.clone()));
-                        put(
-                            format!("action{a}HasIcon"),
-                            Value::Bool(matches!(action.icon, Some(TabIcon::Bytes(_)))),
-                        );
-                        put(format!("action{a}MenuCount"), Value::Int(count(menu.len())));
-                        for (m, item) in menu.iter().enumerate() {
-                            put(format!("menu{a}_{m}Title"), Value::Str(item.title.clone()));
-                            put(
-                                format!("menu{a}_{m}Destructive"),
-                                Value::Bool(item.destructive),
-                            );
-                            put(format!("menu{a}_{m}Enabled"), Value::Bool(item.enabled));
-                        }
+                        put_action(&mut put, ("action", "menu"), a, action);
+                    }
+                    let empty = ToolbarSpec::default();
+                    let toolbar = spec.toolbar.as_ref().unwrap_or(&empty);
+                    let entries: Vec<&ActionItem> = toolbar.entries().collect();
+                    put("toolbarCount".into(), Value::Int(count(entries.len())));
+                    put(
+                        "toolbarPrimary".into(),
+                        Value::Bool(toolbar.primary.is_some()),
+                    );
+                    for (t, entry) in entries.into_iter().enumerate() {
+                        put_action(&mut put, ("toolbar", "toolbarMenu"), t, entry);
                     }
                 }
                 ChromeField::LargeTitle => {
@@ -1003,6 +1097,35 @@ pub(crate) mod android_wire {
             }
         }
         out
+    }
+
+    /// One action's keys under `prefix` (`action`/`toolbar`) and its menu's
+    /// under `menu_prefix` (`menu`/`toolbarMenu`), at index `a`.
+    fn put_action(
+        put: &mut impl FnMut(String, Value),
+        (prefix, menu_prefix): (&str, &str),
+        a: usize,
+        action: &ActionItem,
+    ) {
+        let menu = action.menu.as_deref().unwrap_or_default();
+        put(
+            format!("{prefix}{a}Title"),
+            Value::Str(action.title.clone()),
+        );
+        put(
+            format!("{prefix}{a}HasIcon"),
+            Value::Bool(matches!(action.icon, Some(TabIcon::Bytes(_)))),
+        );
+        put(
+            format!("{prefix}{a}MenuCount"),
+            Value::Int(count(menu.len())),
+        );
+        for (m, item) in menu.iter().enumerate() {
+            let key = |field: &str| format!("{menu_prefix}{a}_{m}{field}");
+            put(key("Title"), Value::Str(item.title.clone()));
+            put(key("Destructive"), Value::Bool(item.destructive));
+            put(key("Enabled"), Value::Bool(item.enabled));
+        }
     }
 
     /// `leading`'s wire spelling: an Apple symbol has no Android rendering.
@@ -1176,7 +1299,7 @@ pub(crate) mod android_wire {
 
     /// Every byte icon `spec` shows, as `(slot, index, bytes)`: tab icons
     /// (the unselected one — Kotlin's bottom bar has one icon per item),
-    /// action icons and the leading image.
+    /// action icons, the leading image and toolbar entry icons.
     fn wanted_icons(spec: &ChromeSpec) -> Vec<(i32, usize, &Arc<[u8]>)> {
         let mut wanted = Vec::new();
         for (i, tab) in spec.tabs.iter().enumerate() {
@@ -1192,6 +1315,12 @@ pub(crate) mod android_wire {
             }
             if let Leading::Image(bytes) = &top.leading {
                 wanted.push((ICON_SLOT_LEADING, 0, bytes));
+            }
+        }
+        let entries = spec.toolbar.iter().flat_map(ToolbarSpec::entries);
+        for (t, entry) in entries.enumerate() {
+            if let Some(TabIcon::Bytes(bytes)) = &entry.icon {
+                wanted.push((ICON_SLOT_TOOLBAR, t, bytes));
             }
         }
         wanted
@@ -1214,12 +1343,15 @@ pub(crate) mod android_wire {
 //   TopBar:   hasTop          Title: title          Subtitle: subtitle (absent/null = none)
 //   Leading:  leading = "none" | "back" | "image"   LargeTitle: largeTitle (ignored here)
 //   Actions:  actionCount, action<i>Title, action<i>HasIcon, action<i>MenuCount,
-//             menu<i>_<j>Title, menu<i>_<j>Destructive, menu<i>_<j>Enabled
+//             menu<i>_<j>Title, menu<i>_<j>Destructive, menu<i>_<j>Enabled,
+//             toolbarCount, toolbarPrimary (the last entry is the primary),
+//             toolbar<i>Title, toolbar<i>HasIcon, toolbar<i>MenuCount,
+//             toolbarMenu<i>_<j>Title, toolbarMenu<i>_<j>Destructive, toolbarMenu<i>_<j>Enabled
 //   Brightness: dark
 "#;
 
         /// Every key template [`KOTLIN_KEY_HEADER`] names.
-        const KEY_TEMPLATES: [&str; 20] = [
+        const KEY_TEMPLATES: [&str; 28] = [
             "tabCount",
             "tab<i>Title",
             "tab<i>Enabled",
@@ -1238,6 +1370,14 @@ pub(crate) mod android_wire {
             "menu<i>_<j>Title",
             "menu<i>_<j>Destructive",
             "menu<i>_<j>Enabled",
+            "toolbarCount",
+            "toolbarPrimary",
+            "toolbar<i>Title",
+            "toolbar<i>HasIcon",
+            "toolbar<i>MenuCount",
+            "toolbarMenu<i>_<j>Title",
+            "toolbarMenu<i>_<j>Destructive",
+            "toolbarMenu<i>_<j>Enabled",
             "dark",
             // Not a spec key: an apply's field list.
             "changed",
@@ -1248,7 +1388,8 @@ pub(crate) mod android_wire {
         }
 
         /// A spec exercising every key: two tabs (one byte icon, one badge),
-        /// a top bar with an icon action and a two-item menu action.
+        /// a top bar with an icon action and a two-item menu action, and a
+        /// toolbar with a menu item and a byte-icon primary.
         fn full_spec() -> ChromeSpec {
             ChromeSpec {
                 tabs: vec![
@@ -1271,6 +1412,16 @@ pub(crate) mod android_wire {
                     ],
                     large_title: true,
                 }),
+                toolbar: Some(
+                    ToolbarSpec::new()
+                        .item(
+                            ActionItem::new("sort", "Sort")
+                                .menu(vec![MenuItem::new("new", "Newest").enabled(false)]),
+                        )
+                        .primary(
+                            ActionItem::new("comment", "Comment").icon(TabIcon::Bytes(bytes(&[5]))),
+                        ),
+                ),
                 scroll: None,
                 dark: true,
             }
@@ -1430,6 +1581,15 @@ pub(crate) mod android_wire {
                 r#""menu1_1Destructive":true"#,
                 r#""menu1_1Enabled":false"#,
                 r#""largeTitle":true"#,
+                r#""toolbarCount":2"#,
+                r#""toolbarPrimary":true"#,
+                r#""toolbar0Title":"Sort""#,
+                r#""toolbar0HasIcon":false"#,
+                r#""toolbar0MenuCount":1"#,
+                r#""toolbarMenu0_0Title":"Newest""#,
+                r#""toolbarMenu0_0Enabled":false"#,
+                r#""toolbar1Title":"Comment""#,
+                r#""toolbar1HasIcon":true"#,
                 r#""dark":true"#,
             ] {
                 assert!(json.contains(needle), "{needle} missing from {json}");
@@ -1446,7 +1606,7 @@ pub(crate) mod android_wire {
             };
             assert_eq!(
                 install_json(&spec, &IconTable::new()),
-                r#"{"tabCount":0,"selectedIndex":-1,"hasTop":false,"title":"","subtitle":null,"leading":"none","actionCount":0,"largeTitle":false,"dark":false}"#
+                r#"{"tabCount":0,"selectedIndex":-1,"hasTop":false,"title":"","subtitle":null,"leading":"none","actionCount":0,"toolbarCount":0,"toolbarPrimary":false,"largeTitle":false,"dark":false}"#
             );
             assert_eq!(leading_name(&Leading::Symbol("person".into())), "none");
             assert_eq!(leading_name(&Leading::Back), "back");
@@ -1465,6 +1625,7 @@ pub(crate) mod android_wire {
                     (ICON_SLOT_TAB, 0, Some(vec![1])),
                     (ICON_SLOT_ACTION, 0, Some(vec![2])),
                     (ICON_SLOT_LEADING, 0, Some(vec![7])),
+                    (ICON_SLOT_TOOLBAR, 1, Some(vec![5])),
                 ]
             );
             // Same content in fresh Arcs: nothing to send, revisions kept.
@@ -1490,12 +1651,12 @@ pub(crate) mod android_wire {
                     },
                 ]
             );
-            assert_eq!(icons.rev(ICON_SLOT_TAB, 0), 4);
+            assert_eq!(icons.rev(ICON_SLOT_TAB, 0), 5);
             assert_eq!(icons.rev(ICON_SLOT_LEADING, 0), 0);
             // An Apple symbol is title-only: no bytes, no revision.
             assert_eq!(icons.rev(ICON_SLOT_TAB, 1), 0);
             icons.clear();
-            assert_eq!(icons.sync(&next).len(), 2, "a cleared table re-sends all");
+            assert_eq!(icons.sync(&next).len(), 3, "a cleared table re-sends all");
         }
     }
 }
@@ -1530,8 +1691,25 @@ mod tests {
                 ],
                 large_title: true,
             }),
+            toolbar: None,
             scroll: None,
             dark: false,
+        }
+    }
+
+    /// [`spec`] with a toolbar: a plain item, a menu item and a primary.
+    fn with_toolbar() -> ChromeSpec {
+        ChromeSpec {
+            toolbar: Some(
+                ToolbarSpec::new()
+                    .item(ActionItem::new("info", "Info"))
+                    .item(ActionItem::new("sort", "Sort").menu(vec![
+                        MenuItem::new("new", "Newest"),
+                        MenuItem::new("old", "Oldest").enabled(false),
+                    ]))
+                    .primary(ActionItem::new("comment", "Comment")),
+            ),
+            ..spec()
         }
     }
 
@@ -1656,6 +1834,104 @@ mod tests {
             [ChromeField::TopBar]
         );
         assert!(ChromeDiff::between(&base, &base.clone()).is_empty());
+    }
+
+    #[test]
+    fn a_toolbar_change_is_an_actions_change_in_declaration_order() {
+        let base = spec();
+        let shown = with_toolbar();
+        assert_eq!(
+            diff_specs(&base, &shown).changed,
+            [ChromeField::Actions],
+            "a toolbar appearing"
+        );
+        let mut both = shown.clone();
+        both.top.as_mut().unwrap().title.push('!');
+        both.dark = !both.dark;
+        assert_eq!(
+            diff_specs(&base, &both).changed,
+            [
+                ChromeField::Title,
+                ChromeField::Actions,
+                ChromeField::Brightness
+            ]
+        );
+        let mut actions_too = shown.clone();
+        actions_too.top.as_mut().unwrap().actions.pop();
+        assert_eq!(
+            diff_specs(&base, &actions_too).changed,
+            [ChromeField::Actions],
+            "reported once"
+        );
+        assert!(diff_specs(&shown, &with_toolbar()).is_empty());
+
+        let mut slot = slot();
+        let generation = installed(&mut slot);
+        assert_eq!(
+            slot.publish(Some(generation), shown.clone()),
+            PublishOutcome::Applied(generation)
+        );
+        assert_eq!(
+            slot.host_mut().take_calls(),
+            [HostCall::Apply {
+                changed: vec![ChromeField::Actions],
+                spec: shown,
+            }]
+        );
+    }
+
+    #[test]
+    fn toolbar_entries_follow_the_top_bars_actions_in_one_index_space() {
+        let spec = with_toolbar();
+        assert_eq!(toolbar_offset(&spec), 2);
+        let ids: Vec<&str> = chrome_actions(&spec).map(|a| a.id().as_str()).collect();
+        assert_eq!(ids, ["add", "more", "info", "sort", "comment"]);
+        for event in [
+            ChromeEvent::ActionTapped(ActionId::new("info")),
+            ChromeEvent::ActionTapped(ActionId::new("comment")),
+            ChromeEvent::MenuItemChosen(ActionId::new("sort"), MenuItemId::new("new")),
+        ] {
+            let (kind, detail) = encode_event(&spec, &event).expect("encodable");
+            assert_eq!(decode_event(&spec, kind, detail), Some(event.clone()));
+        }
+        assert_eq!(
+            encode_event(&spec, &ChromeEvent::ActionTapped(ActionId::new("comment"))),
+            Some((EVENT_KIND_CHROME_ACTION, 4))
+        );
+        assert_eq!(
+            resolve_tap(&spec, ChromeTap::Action(2)),
+            Some(ChromeEvent::ActionTapped(ActionId::new("info")))
+        );
+        assert_eq!(resolve_tap(&spec, ChromeTap::Menu(3, 1)), None, "disabled");
+        assert_eq!(resolve_tap(&spec, ChromeTap::Action(5)), None);
+        let bare = ChromeSpec {
+            top: None,
+            ..with_toolbar()
+        };
+        assert_eq!(toolbar_offset(&bare), 0);
+        assert_eq!(
+            resolve_tap(&bare, ChromeTap::Action(0)),
+            Some(ChromeEvent::ActionTapped(ActionId::new("info")))
+        );
+    }
+
+    #[test]
+    fn an_empty_toolbar_shows_none() {
+        assert_eq!(shown_toolbar(&spec()), None);
+        let empty = ChromeSpec {
+            toolbar: Some(ToolbarSpec::new()),
+            ..spec()
+        };
+        assert_eq!(shown_toolbar(&empty), None);
+        let primary = ToolbarSpec::new().primary(ActionItem::new("go", "Go"));
+        assert!(!primary.is_empty());
+        assert_eq!(
+            primary
+                .entries()
+                .map(|a| a.id().as_str())
+                .collect::<Vec<_>>(),
+            ["go"]
+        );
     }
 
     #[test]

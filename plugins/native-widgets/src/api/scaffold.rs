@@ -1,6 +1,6 @@
 //! `native_scaffold(body)`: the app-facing chrome builder (decision C1).
 //!
-//! The tab bar, title, leading item and actions are the *host's*, not a
+//! The tab bar, title, leading item, actions and toolbar are the *host's*, not a
 //! `platform_view` slot: the scaffold builds a `ChromeSpec` from its builder
 //! methods and publishes it to the process-wide slot in `crate::chrome`, where
 //! an arm (or, on a target without one, the fallback chrome) owns the real
@@ -14,14 +14,25 @@
 //! [`NativeTabBarView`](super::NativeTabBarView)'s contract and handler shape
 //! (`Fn + Send + Sync`, no `&mut State`).
 //!
+//! # The toolbar
+//!
+//! `.toolbar(ToolbarSpec)` adds a bottom action strip: iOS navigation-controller
+//! toolbar items, Android floating action buttons, a frust-drawn row above the
+//! fallback tab row. Its actions report through `.on_action`/`.on_menu` like
+//! the top bar's, so every action id must be unique across both: a toolbar
+//! entry repeating an earlier id is dropped from the published spec, logged
+//! once per change and named by a one-line banner above the body.
+//!
 //! # Insets
 //!
 //! On a target with a chrome arm the host already reports the bars through the
-//! window insets (iOS safe area) or shrinks the surface (Android), so the body
-//! uses the facade's `safe_area` as usual. The scaffold adds no padding of its
-//! own: do not double-pad. The fallback bars (`crate::chrome::fallback`) take
-//! the top and bottom insets themselves and lay the body out between them
-//! with those edges consumed, so the same `safe_area` body pads only the sides.
+//! window insets (iOS safe area, the toolbar included) or shrinks the surface
+//! (Android; its floating action buttons float over the body and take no
+//! inset), so the body uses the facade's `safe_area` as usual. The scaffold
+//! adds no padding of its own: do not double-pad. The fallback bars
+//! (`crate::chrome::fallback`) take the top and bottom insets themselves and
+//! lay the body out between them with those edges consumed, so the same
+//! `safe_area` body pads only the sides.
 //!
 //! # Outcome changes off the build path
 //!
@@ -49,11 +60,12 @@ use super::builders::{TabId, TabItem, banner_placeholder};
 use super::signals::{ChromeHandlers, on_chrome};
 use super::theme;
 use crate::chrome::fallback::{
-    fallback_tab_row, fallback_top_bar, teardown_tab_row, teardown_top_bar,
+    fallback_tab_row, fallback_toolbar_row, fallback_top_bar, teardown_tab_row,
+    teardown_toolbar_row, teardown_top_bar,
 };
 use crate::chrome::{
     self, ActionId, ActionItem, BARS_FLOAT_OVER_BODY, ChromeEvent, ChromeGeneration, ChromeSpec,
-    Leading, MenuItemId, PublishOutcome, ScrollState, TopBarSpec,
+    Leading, MenuItemId, PublishOutcome, ScrollState, ToolbarSpec, TopBarSpec, shown_toolbar,
 };
 
 /// How far past a bar's inset line the edge fade reaches into the body, in
@@ -164,14 +176,20 @@ struct ResolvedFade {
 const REFUSAL_LABEL: &str = "one native_scaffold per app";
 /// Its description.
 const REFUSAL_DESCRIPTION: &str = "this scaffold publishes no chrome";
+/// The repeated-id banner's label.
+const REPEAT_LABEL: &str = "chrome action ids must be unique";
+/// Its description.
+const REPEAT_DESCRIPTION: &str = "toolbar entries repeating an action id are not shown";
 
-/// App chrome around `body`: tabs, title, subtitle, leading item and actions
-/// (an action with a menu is a pull-down). See the [module docs](self) for the
-/// controlled contract and the inset rule.
+/// App chrome around `body`: tabs, title, subtitle, leading item, actions (an
+/// action with a menu is a pull-down) and a bottom toolbar. See the
+/// [module docs](self) for the controlled contract and the inset rule.
 ///
 /// ```
 /// use frust::{Component, Get, RwSignal, Set, View, text};
-/// use frust_native_widgets::{ActionItem, Leading, TabIcon, TabId, TabItem, native_scaffold};
+/// use frust_native_widgets::{
+///     ActionItem, Leading, TabIcon, TabId, TabItem, ToolbarSpec, native_scaffold,
+/// };
 ///
 /// #[derive(Default)]
 /// struct Root;
@@ -207,6 +225,7 @@ const REFUSAL_DESCRIPTION: &str = "this scaffold publishes no chrome";
 ///             .title("Home")
 ///             .leading(Leading::Back)
 ///             .actions(vec![ActionItem::new("add", "Add")])
+///             .toolbar(ToolbarSpec::new().primary(ActionItem::new("comment", "Comment")))
 ///             .on_tab_select(move |id: TabId| tab.set(id.to_string()))
 ///     }
 /// }
@@ -219,6 +238,7 @@ pub fn native_scaffold<V>(body: V) -> NativeScaffoldView<V> {
         tabs: Vec::new(),
         selected: None,
         top: None,
+        toolbar: None,
         scroll: None,
         fade: Some(EdgeFade::default().resolve()),
         resize_to_avoid_keyboard: true,
@@ -233,6 +253,7 @@ pub struct NativeScaffoldView<V> {
     tabs: Vec<TabItem>,
     selected: Option<TabId>,
     top: Option<TopBarSpec>,
+    toolbar: Option<ToolbarSpec>,
     scroll: Option<ScrollController>,
     fade: Option<ResolvedFade>,
     resize_to_avoid_keyboard: bool,
@@ -279,6 +300,13 @@ impl<V> NativeScaffoldView<V> {
     /// Large-title display where the platform has one (iOS); ignored elsewhere.
     pub fn large_title(mut self, large: bool) -> Self {
         self.top_mut().large_title = large;
+        self
+    }
+
+    /// The bottom toolbar (see the [module docs](self)); its ids must not
+    /// repeat an action's.
+    pub fn toolbar(mut self, toolbar: ToolbarSpec) -> Self {
+        self.toolbar = Some(toolbar);
         self
     }
 
@@ -360,14 +388,76 @@ impl<V> NativeScaffoldView<V> {
     }
 
     /// The spec this builder publishes, its brightness from the ambient theme.
+    #[cfg(test)]
     fn spec(&self) -> ChromeSpec {
-        ChromeSpec {
+        self.spec_and_repeats().0
+    }
+
+    /// [`Self::spec`], and the ids of the toolbar entries it dropped for
+    /// repeating an earlier action's.
+    fn spec_and_repeats(&self) -> (ChromeSpec, Vec<ActionId>) {
+        let (toolbar, repeats) = match &self.toolbar {
+            Some(toolbar) => {
+                let (kept, repeats) = without_repeats(self.top.as_ref(), toolbar);
+                (Some(kept), repeats)
+            }
+            None => (None, Vec::new()),
+        };
+        let spec = ChromeSpec {
             tabs: self.tabs.clone(),
             selected: self.selected.clone(),
             top: self.top.clone(),
+            toolbar,
             scroll: self.scroll.as_ref().and_then(controller_state),
             dark: ambient_dark(),
+        };
+        (spec, repeats)
+    }
+}
+
+/// `toolbar` without the entries whose id a top-bar action or an earlier
+/// toolbar entry already carries, and those entries' ids in order.
+fn without_repeats(
+    top: Option<&TopBarSpec>,
+    toolbar: &ToolbarSpec,
+) -> (ToolbarSpec, Vec<ActionId>) {
+    let mut seen: Vec<&ActionId> = top
+        .map(|top| top.actions.iter().map(ActionItem::id).collect())
+        .unwrap_or_default();
+    let mut repeats = Vec::new();
+    let mut kept = ToolbarSpec::default();
+    let primary_at = toolbar.items.len();
+    for (index, entry) in toolbar.entries().enumerate() {
+        if seen.contains(&entry.id()) {
+            repeats.push(entry.id().clone());
+            continue;
         }
+        seen.push(entry.id());
+        if index == primary_at {
+            kept.primary = Some(entry.clone());
+        } else {
+            kept.items.push(entry.clone());
+        }
+    }
+    (kept, repeats)
+}
+
+/// Which one-line banner the scaffold shows above its body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Banner {
+    /// Another scaffold holds the chrome: this one publishes nothing.
+    Refused,
+    /// Toolbar entries were dropped for repeating an action id.
+    Repeated,
+}
+
+impl Banner {
+    fn view<Outer: 'static>(self) -> AnyView<Outer> {
+        let (label, description) = match self {
+            Self::Refused => (REFUSAL_LABEL, REFUSAL_DESCRIPTION),
+            Self::Repeated => (REPEAT_LABEL, REPEAT_DESCRIPTION),
+        };
+        banner_placeholder(None, label.to_string(), description.to_string())
     }
 }
 
@@ -446,15 +536,6 @@ fn controller_state(controller: &ScrollController) -> Option<ScrollState> {
         max_offset: controller.max_offset(),
         viewport: controller.viewport_extent(),
     })
-}
-
-/// The plugin's refusal banner, unsized, rebuilt in place.
-fn refusal<Outer: 'static>() -> AnyView<Outer> {
-    banner_placeholder(
-        None,
-        REFUSAL_LABEL.to_string(),
-        REFUSAL_DESCRIPTION.to_string(),
-    )
 }
 
 /// How a publisher's flush is queued: [`spawn_flush`] in production.
@@ -557,7 +638,13 @@ impl ScrollLink {
 pub struct ScaffoldWidget {
     body: ChildPod,
     banner: Option<ChildPod>,
+    /// What [`Self::banner`] shows, while it is up.
+    banner_kind: Option<Banner>,
+    /// The toolbar ids the last sync dropped, so a repeat is logged once.
+    repeats: Vec<ActionId>,
     top: Option<ChildPod>,
+    /// The fallback toolbar row, between the body and the tab row.
+    toolbar: Option<ChildPod>,
     bottom: Option<ChildPod>,
     generation: Option<ChromeGeneration>,
     scroll: Option<ScrollLink>,
@@ -581,6 +668,32 @@ fn draws_fallback(outcome: &PublishOutcome) -> bool {
 }
 
 type Retire = fn(&mut ChildPod, &mut BuildCtx<'_>);
+
+/// Bring `element`'s banner in line with `wanted`, rebuilding in place while
+/// the kind holds and replacing it when the kind changes.
+fn sync_banner<Outer: 'static>(
+    element: &mut ScaffoldWidget,
+    wanted: Option<Banner>,
+    ctx: &mut BuildCtx<'_>,
+) -> ChangeFlags {
+    if let (Some(kind), Some(pod)) = (wanted, element.banner.as_mut())
+        && element.banner_kind == Some(kind)
+    {
+        return rebuild_child(&kind.view::<Outer>(), &kind.view::<Outer>(), pod, ctx);
+    }
+    let mut flags = ChangeFlags::NONE;
+    if let Some(mut pod) = element.banner.take() {
+        let shown = element.banner_kind.unwrap_or(Banner::Refused);
+        teardown_child(&shown.view::<Outer>(), &mut pod, ctx);
+        flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+    }
+    element.banner_kind = wanted;
+    if let Some(kind) = wanted {
+        element.banner = Some(build_child(&kind.view::<Outer>(), ctx));
+        flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+    }
+    flags
+}
 
 /// Bring one fallback bar's pod in line with `view` (`None`: no bar).
 fn sync_bar<Outer: 'static>(
@@ -616,7 +729,17 @@ impl<V> NativeScaffoldView<V> {
         element: &mut ScaffoldWidget,
         ctx: &mut BuildCtx<'_>,
     ) -> (ChangeFlags, PublishOutcome) {
-        let spec = self.spec();
+        let (spec, repeats) = self.spec_and_repeats();
+        if repeats != element.repeats {
+            if !repeats.is_empty() {
+                let ids: Vec<&str> = repeats.iter().map(ActionId::as_str).collect();
+                log::warn!(
+                    "frust-native-widgets: native_scaffold toolbar entries {ids:?} repeat an \
+                     action id and are not shown (ids are unique across the top bar and toolbar)"
+                );
+            }
+            element.repeats = repeats;
+        }
         let mut outcome = chrome::publish(element.generation, spec.clone());
         if outcome == PublishOutcome::Stale {
             // The generation was withdrawn under this scaffold: claim afresh.
@@ -628,24 +751,14 @@ impl<V> NativeScaffoldView<V> {
         if let Some(generation) = generation {
             chrome::set_sink(generation, on_chrome(self.handlers.clone()));
         }
-        let mut flags = ChangeFlags::NONE;
-        match (generation.is_some(), element.banner.is_some()) {
-            (false, false) => {
-                element.banner = Some(build_child(&refusal::<Outer>(), ctx));
-                flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
-            }
-            (false, true) => {
-                let banner = element.banner.as_mut().expect("checked above");
-                flags |= rebuild_child(&refusal::<Outer>(), &refusal::<Outer>(), banner, ctx);
-            }
-            (true, true) => {
-                if let Some(mut banner) = element.banner.take() {
-                    teardown_child(&refusal::<Outer>(), &mut banner, ctx);
-                }
-                flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
-            }
-            (true, false) => {}
-        }
+        let wanted = if generation.is_none() {
+            Some(Banner::Refused)
+        } else if !element.repeats.is_empty() {
+            Some(Banner::Repeated)
+        } else {
+            None
+        };
+        let mut flags = sync_banner::<Outer>(element, wanted, ctx);
         let drawn = generation.filter(|_| draws_fallback(&outcome));
         let top = drawn
             .filter(|_| spec.top.is_some())
@@ -653,8 +766,13 @@ impl<V> NativeScaffoldView<V> {
         let tabs = drawn
             .filter(|_| !spec.tabs.is_empty())
             .map(|generation| fallback_tab_row::<Outer>(&spec, generation));
+        let toolbar = drawn
+            .filter(|_| shown_toolbar(&spec).is_some())
+            .map(|generation| fallback_toolbar_row::<Outer>(&spec, generation));
         flags |= sync_bar(&mut element.top, top, teardown_top_bar::<Outer>, ctx);
         flags |= sync_bar(&mut element.bottom, tabs, teardown_tab_row::<Outer>, ctx);
+        let teardown_toolbar = teardown_toolbar_row::<Outer>;
+        flags |= sync_bar(&mut element.toolbar, toolbar, teardown_toolbar, ctx);
         let native = generation.is_some() && !draws_fallback(&outcome);
         if element.native != native || element.fade != self.fade {
             flags |= ChangeFlags::PAINT;
@@ -725,7 +843,10 @@ impl<V> NativeScaffoldView<V> {
         let mut element = ScaffoldWidget {
             body: build_child(&self.body, ctx),
             banner: None,
+            banner_kind: None,
+            repeats: Vec::new(),
             top: None,
+            toolbar: None,
             bottom: None,
             generation: None,
             scroll: None,
@@ -772,11 +893,12 @@ impl<Outer: 'static, V: View<Outer>> View<Outer> for NativeScaffoldView<V> {
 
     fn teardown(&self, element: &mut ScaffoldWidget, ctx: &mut BuildCtx<'_>) {
         teardown_child(&self.body, &mut element.body, ctx);
-        if let Some(mut banner) = element.banner.take() {
-            teardown_child(&refusal::<Outer>(), &mut banner, ctx);
-        }
+        sync_banner::<Outer>(element, None, ctx);
         if let Some(mut top) = element.top.take() {
             teardown_top_bar::<Outer>(&mut top, ctx);
+        }
+        if let Some(mut toolbar) = element.toolbar.take() {
+            teardown_toolbar_row::<Outer>(&mut toolbar, ctx);
         }
         if let Some(mut bottom) = element.bottom.take() {
             teardown_tab_row::<Outer>(&mut bottom, ctx);
@@ -809,7 +931,7 @@ impl Drop for ScaffoldWidget {
 
 impl ScaffoldWidget {
     fn has_bars(&self) -> bool {
-        self.top.is_some() || self.bottom.is_some()
+        self.top.is_some() || self.toolbar.is_some() || self.bottom.is_some()
     }
 
     /// Fill the edge fade bands over the body for bar insets `top`/`bottom`,
@@ -850,7 +972,8 @@ impl ScaffoldWidget {
     /// when shrunk by the keyboard, no IME inset and no bottom padding the
     /// keyboard already covers.
     fn body_insets(&self, insets: WindowInsets) -> WindowInsets {
-        let mut body = insets.consuming(false, self.top.is_some(), false, self.bottom.is_some());
+        let below = self.bottom.is_some() || self.toolbar.is_some();
+        let mut body = insets.consuming(false, self.top.is_some(), false, below);
         let ime = self.keyboard(insets);
         if ime > 0.0 {
             body.view_insets.bottom = 0.0;
@@ -931,7 +1054,7 @@ impl Widget for ScaffoldWidget {
             self.body.set_origin(Point::new(0.0, banner_height));
             return bc.constrain(Size::new(body.width, body.height + banner_height));
         }
-        // Column: banner, top bar, body (flexible), tab row — bars full width.
+        // Column: banner, top bar, body (flexible), toolbar row, tab row — bars full width.
         let width = if bc.max().width.is_finite() {
             bc.max().width
         } else {
@@ -948,7 +1071,19 @@ impl Widget for ScaffoldWidget {
         } else {
             bar_height(&mut self.bottom)
         };
-        let used = banner_height + top_height + bottom_height;
+        // The toolbar row takes the bottom inset only when it is the lowest bar.
+        let toolbar_insets = if self.bottom.is_some() && !self.bottom_hidden {
+            window.consuming(false, false, false, true)
+        } else {
+            window
+        };
+        let toolbar_height = match &mut self.toolbar {
+            Some(toolbar) => ctx.with_window_insets(toolbar_insets, |ctx| {
+                toolbar.layout_child(ctx, &bar_bc).height
+            }),
+            None => 0.0,
+        };
+        let used = banner_height + top_height + toolbar_height + bottom_height;
         let body_bc = if bc.max().height.is_finite() {
             let height = (bc.max().height - used - ime).max(0.0);
             BoxConstraints::new(
@@ -969,8 +1104,12 @@ impl Widget for ScaffoldWidget {
         if let Some(top) = &mut self.top {
             top.set_origin(Point::new(0.0, banner_height));
         }
+        let below_body = body_y + body_size.height;
+        if let Some(toolbar) = &mut self.toolbar {
+            toolbar.set_origin(Point::new(0.0, below_body));
+        }
         if let Some(bottom) = &mut self.bottom {
-            bottom.set_origin(Point::new(0.0, body_y + body_size.height));
+            bottom.set_origin(Point::new(0.0, below_body + toolbar_height));
         }
         bc.constrain(Size::new(
             body_size.width.max(width),
@@ -996,9 +1135,14 @@ impl Widget for ScaffoldWidget {
         } else {
             self.bottom.as_mut()
         };
-        for pod in [self.top.as_mut(), bottom, self.banner.as_mut()]
-            .into_iter()
-            .flatten()
+        for pod in [
+            self.top.as_mut(),
+            self.toolbar.as_mut(),
+            bottom,
+            self.banner.as_mut(),
+        ]
+        .into_iter()
+        .flatten()
         {
             pod.paint_child(ctx, scene);
         }
@@ -1010,6 +1154,7 @@ impl Widget for ScaffoldWidget {
         }
         let mut pods: Vec<&mut ChildPod> = std::iter::once(&mut self.body)
             .chain(self.top.as_mut())
+            .chain(self.toolbar.as_mut())
             .chain(self.bottom.as_mut().filter(|_| !self.bottom_hidden))
             .collect();
         route_pods(&mut pods, ctx, event)
@@ -1020,12 +1165,15 @@ impl Widget for ScaffoldWidget {
             pod.semantics_child(ctx);
         }
         self.body.semantics_child(ctx);
+        if let Some(toolbar) = &self.toolbar {
+            toolbar.semantics_child(ctx);
+        }
         if let Some(bottom) = self.bottom.as_ref().filter(|_| !self.bottom_hidden) {
             bottom.semantics_child(ctx);
         }
     }
 
-    frust::authoring::visit_children!(body, banner, top, bottom);
+    frust::authoring::visit_children!(body, banner, top, toolbar, bottom);
 }
 
 #[cfg(test)]
@@ -1259,6 +1407,87 @@ mod tests {
             !chrome::deliver(generation, 0, 0),
             "a withdrawn generation's reports are dropped"
         );
+    }
+
+    #[test]
+    fn a_repeated_toolbar_id_is_dropped_bannered_and_cleared() {
+        let _guard = chrome::slot_test_guard();
+        let toolbar = ToolbarSpec::new()
+            .item(ActionItem::new("add", "Add again"))
+            .item(ActionItem::new("info", "Info"))
+            .item(ActionItem::new("info", "Info twice"))
+            .primary(ActionItem::new("comment", "Comment"));
+        let view = scaffold().toolbar(toolbar);
+        let (spec, repeats) = view.spec_and_repeats();
+        assert_eq!(repeats, [ActionId::new("add"), ActionId::new("info")]);
+        let shown = spec.toolbar.expect("a toolbar");
+        let ids: Vec<&str> = shown.entries().map(|a| a.id().as_str()).collect();
+        assert_eq!(ids, ["info", "comment"]);
+        assert_eq!(shown.items[0].title, "Info", "the first carrier stays");
+
+        let (mut element, outcome) = build(&view);
+        assert!(matches!(outcome, PublishOutcome::Installed(_)));
+        assert_eq!(element.banner_kind, Some(Banner::Repeated));
+        assert!(element.banner.is_some());
+        let live = chrome::live_spec().expect("live");
+        assert_eq!(live.toolbar.map(|t| t.items.len()), Some(1));
+
+        let clean = scaffold().toolbar(
+            ToolbarSpec::new()
+                .item(ActionItem::new("info", "Info"))
+                .primary(ActionItem::new("comment", "Comment")),
+        );
+        rebuild(&view, &clean, &mut element);
+        assert!(element.banner.is_none() && element.banner_kind.is_none());
+        assert!(element.repeats.is_empty());
+        teardown(&clean, &mut element);
+    }
+
+    #[test]
+    fn the_refusal_banner_outranks_a_repeat_and_swaps_back() {
+        let _guard = chrome::slot_test_guard();
+        let repeated = scaffold().toolbar(ToolbarSpec::new().primary(ActionItem::new("add", "A")));
+        let (mut first, _) = build(&scaffold());
+        let (mut second, outcome) = build(&repeated);
+        assert!(matches!(outcome, PublishOutcome::Refused(_)));
+        assert_eq!(second.banner_kind, Some(Banner::Refused));
+        teardown(&scaffold(), &mut first);
+        assert!(matches!(
+            rebuild(&repeated, &repeated, &mut second),
+            PublishOutcome::Installed(_)
+        ));
+        assert_eq!(second.banner_kind, Some(Banner::Repeated));
+        teardown(&repeated, &mut second);
+        assert!(second.banner.is_none());
+    }
+
+    #[test]
+    fn toolbar_actions_and_menus_reach_the_shared_handlers() {
+        let _guard = chrome::slot_test_guard();
+        let log = Arc::new(Mutex::new(Vec::<String>::new()));
+        let (actions, menus) = (Arc::clone(&log), Arc::clone(&log));
+        let view = scaffold()
+            .toolbar(
+                ToolbarSpec::new()
+                    .item(
+                        ActionItem::new("sort", "Sort").menu(vec![MenuItem::new("new", "Newest")]),
+                    )
+                    .primary(ActionItem::new("comment", "Comment")),
+            )
+            .on_action(move |id| actions.lock().unwrap().push(format!("action:{id}")))
+            .on_menu(move |a, m| menus.lock().unwrap().push(format!("menu:{a}/{m}")));
+        let (mut element, _) = build(&view);
+        let generation = element.generation.expect("installed").get();
+        let spec = view.spec();
+        for event in [
+            ChromeEvent::ActionTapped("comment".into()),
+            ChromeEvent::MenuItemChosen("sort".into(), "new".into()),
+        ] {
+            let (kind, detail) = encode_event(&spec, &event).expect("spec carries the ids");
+            assert!(chrome::deliver(generation, kind, detail));
+        }
+        assert_eq!(*log.lock().unwrap(), ["action:comment", "menu:sort/new"]);
+        teardown(&view, &mut element);
     }
 
     #[test]
