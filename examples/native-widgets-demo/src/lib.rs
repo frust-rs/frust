@@ -133,9 +133,11 @@ fn avatar_png() -> Arc<[u8]> {
     Arc::clone(AVATAR.get_or_init(|| Arc::from(&include_bytes!("../assets/icons/avatar.png")[..])))
 }
 
-/// An icon: the SF Symbol `symbol` on Apple targets, `png` everywhere else.
+/// An icon: the SF Symbol `symbol` on iOS, `png` everywhere else. macOS and
+/// the other desktop targets draw the fallback chrome, which has no SF Symbol
+/// arm, so they take the bitmap asset.
 fn chrome_icon(symbol: &str, png: Arc<[u8]>) -> TabIcon {
-    if cfg!(target_vendor = "apple") {
+    if cfg!(target_os = "ios") {
         TabIcon::AppleSymbol(symbol.to_string())
     } else {
         TabIcon::Bytes(png)
@@ -821,8 +823,8 @@ impl NativeWidgetsDemoApp {
         }
     }
 
-    /// One action: its SF Symbol on Apple targets, else its `png` icon, with
-    /// its title beside either (see [`chrome_icon`]).
+    /// One action: its SF Symbol on iOS, else its `png` icon, with its title
+    /// beside either (see [`chrome_icon`]).
     fn action(id: &str, title: &str, symbol: &str, png: Arc<[u8]>) -> ActionItem {
         ActionItem::new(id, title).icon(chrome_icon(symbol, png))
     }
