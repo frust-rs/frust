@@ -413,12 +413,17 @@ pub fn page_header(key: impl Into<PageKey>) -> FlexChild<S> {
 
 /// A tab's root body: `children` in a column (each brings its own padding,
 /// like [`page_column`]), the safe area inside the tab's own scroll view so
-/// content starts below floating bars at rest and scrolls under them.
+/// content starts below floating bars at rest and scrolls under them. The
+/// [`body_inset_probe`] around the safe area records the top inset it applies,
+/// which is where the body's first content sits.
 pub fn tab_body(state: &S, tab: Tab, children: Vec<FlexChild<S>>) -> AnyView<S> {
     any(viewport_probe(
         viewport_key(tab),
-        scroll_view(safe_area(FlexView::new(Axis::Vertical, children)))
-            .controller(state.scroll(tab).clone()),
+        scroll_view(body_inset_probe(
+            viewport_key(tab),
+            safe_area(FlexView::new(Axis::Vertical, children)),
+        ))
+        .controller(state.scroll(tab).clone()),
     ))
 }
 
@@ -577,6 +582,10 @@ thread_local! {
     /// so every rect recorded under the same value was measured in one frame
     /// against the same scroll offset.
     static EPOCH: Cell<u64> = const { Cell::new(0) };
+
+    /// The top safe-area inset each [`body_inset_probe`] saw while painting,
+    /// by key, with the epoch it painted in. Plain storage, like `ANCHORS`.
+    static BODY_INSETS: RefCell<HashMap<&'static str, (f64, u64)>> = RefCell::new(HashMap::new());
 }
 
 /// Wrap `child` so its painted window rect is recorded under `key`, for
@@ -597,7 +606,7 @@ pub fn anchor_probe<V: View<S>>(key: &'static str, child: V) -> AnchorProbe<V> {
     AnchorProbe {
         key,
         child,
-        viewport: false,
+        role: ProbeRole::Anchor,
     }
 }
 
@@ -610,8 +619,34 @@ pub fn viewport_probe<V: View<S>>(key: &'static str, child: V) -> AnchorProbe<V>
     AnchorProbe {
         key,
         child,
-        viewport: true,
+        role: ProbeRole::Viewport,
     }
+}
+
+/// [`anchor_probe`] for a scroll view's content root, placed OUTSIDE its
+/// [`safe_area`]: it records the top safe-area inset the safe area is about to
+/// apply (the window inset still unconsumed there), for [`fresh_body_inset`].
+/// A scroll view always paints its content root, so unlike a section probe it
+/// is never culled; and it reads the live window insets every paint, so a
+/// rotation is seen the same frame it re-lays the body out.
+pub fn body_inset_probe<V: View<S>>(key: &'static str, child: V) -> AnchorProbe<V> {
+    AnchorProbe {
+        key,
+        child,
+        role: ProbeRole::BodyInset,
+    }
+}
+
+/// What an [`AnchorProbe`] records beyond its window rect.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProbeRole {
+    /// Only the rect.
+    Anchor,
+    /// Also starts a new paint epoch.
+    Viewport,
+    /// Records only the top safe-area inset the window pushes (its key is
+    /// shared with the viewport probe, so it leaves the rect alone).
+    BodyInset,
 }
 
 /// The last painted window rect recorded under `key`, if a probe with that key
@@ -635,6 +670,20 @@ pub fn fresh_anchor_rect(key: &str) -> Option<AnchorRect> {
     })
 }
 
+/// The top safe-area inset recorded under `key` by a [`body_inset_probe`] that
+/// painted in the current paint epoch; `None` before the first paint of the
+/// epoch, never a stale value from an earlier one.
+pub fn fresh_body_inset(key: &str) -> Option<f64> {
+    let epoch = EPOCH.with(Cell::get);
+    BODY_INSETS.with(|insets| {
+        insets
+            .borrow()
+            .get(key)
+            .filter(|(_, stamp)| *stamp == epoch)
+            .map(|(inset, _)| *inset)
+    })
+}
+
 /// Convert a window-space rect into the plugin's [`AnchorRect`].
 pub fn anchor_from_rect(rect: Rect) -> AnchorRect {
     AnchorRect {
@@ -649,13 +698,13 @@ pub fn anchor_from_rect(rect: Rect) -> AnchorRect {
 pub struct AnchorProbe<V> {
     key: &'static str,
     child: V,
-    viewport: bool,
+    role: ProbeRole,
 }
 
 /// The retained widget for an [`AnchorProbe`].
 pub struct AnchorProbeWidget {
     key: &'static str,
-    viewport: bool,
+    role: ProbeRole,
     child: ChildPod,
 }
 
@@ -665,7 +714,7 @@ impl<V: View<S>> View<S> for AnchorProbe<V> {
     fn build(&self, ctx: &mut BuildCtx<'_>) -> AnchorProbeWidget {
         AnchorProbeWidget {
             key: self.key,
-            viewport: self.viewport,
+            role: self.role,
             child: build_child(&self.child, ctx),
         }
     }
@@ -677,7 +726,7 @@ impl<V: View<S>> View<S> for AnchorProbe<V> {
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         element.key = self.key;
-        element.viewport = self.viewport;
+        element.role = self.role;
         rebuild_child(&prev.child, &self.child, &mut element.child, ctx)
     }
 
@@ -693,10 +742,18 @@ impl Widget for AnchorProbeWidget {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
-        if self.viewport {
+        if self.role == ProbeRole::Viewport {
             EPOCH.with(|epoch| epoch.set(epoch.get() + 1));
         }
+        if self.role == ProbeRole::BodyInset {
+            let inset = ctx.window_insets().padding().top;
+            let stamp = EPOCH.with(Cell::get);
+            BODY_INSETS.with(|insets| insets.borrow_mut().insert(self.key, (inset, stamp)));
+        }
         self.child.paint_child(ctx, scene);
+        if self.role == ProbeRole::BodyInset {
+            return;
+        }
         let rect = Rect::from_origin_size(ctx.origin(), ctx.size());
         let stamp = EPOCH.with(Cell::get);
         ANCHORS.with(|anchors| {
