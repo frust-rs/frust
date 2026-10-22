@@ -3004,8 +3004,10 @@ the app usable; the fix is one theme parent in the app. A typed error for the re
 **Evidence**: `plugins/native-widgets/src/android/chrome.rs`'s *Install, refusal and the theme
 requirement*; `controls/segmented.rs`'s Android arm; `platform/android/build.gradle.kts` (THEME
 REQUIREMENT); d5-05 device gates (`rsa_000001a1648de91eTLTlKIIG`: iPhone SE iOS 26.7.1, Xiaomi 12
-Android 16, Pixel 5 Android 14, macOS)); release APK cost of the Material pin +1.44 MB universal, R8 binds (a3-04,
-`rsa_000001a163cbb62dAF49dVpP`).
+Android 16, Pixel 5 Android 14, macOS); release APK cost: the Material pin alone is +116,211 B (h0-03, the figure in
+`platform/android/build.gradle.kts`); the whole gate app (Material plus chrome code, demo code and
+gate icons) is +1.44 MB universal against the Phase 0 build (resources.arsc +594 KB, dex +166 KB,
+arm64 .so +141 KB), and R8 binds (a3-04, `rsa_000001a163cbb62dAF49dVpP`).
 
 ---
 
