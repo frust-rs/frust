@@ -393,6 +393,21 @@ month names, grouping, calendar — even though every other message on the same 
 German. `docs/LIMITATIONS.md` records this as an accepted limitation, not a bug to work around per
 call site.
 
+Lists and language names (for amenity rows and a language picker):
+
+```rust
+use frust_i18n::fmt::{self, ListLength, ListStyle};
+
+fmt::list(&en, &["Pool", "Shower", "Wi-Fi"], ListStyle::And, ListLength::Wide)?;
+                                                  // "Pool, Shower, and Wi-Fi"  (th: "Pool Shower และWi-Fi", ja: "Pool、Shower、Wi-Fi")
+fmt::language_endonym(&"th".parse()?)?;           // "ไทย"  (also "English", "Tiếng Việt", "日本語", "español")
+fmt::language_name(&"de".parse()?, &en)?;         // "German"
+```
+
+The strings are ICU's, unedited. A language CLDR has no name for is `Err(I18nError::Format)`. In FTL,
+`{ LIST($a, $b, $c) }` takes the items as positional arguments, with optional `style: "and"|"or"|"unit"`
+and `length: "wide"|"short"|"narrow"`.
+
 Money held as integer minor units formats exactly with `fmt::currency_minor(&locale, 12345, "THB")?`
 (`"฿123.45"`; no `f64` on the path, so every `i64` is exact) and `fmt::minor_unit_digits("THB")?`
 (`2`); both share `currency`'s digit tables. In FTL pass the integer as a STRING, since Fluent
