@@ -107,11 +107,12 @@ object FrustNativePresenter {
     private var resumed: WeakReference<Activity>? = null
 
     /**
-     * The most recently created Activity, so [FrustNativeChrome] can find a
-     * host before the first resume. Cleared on that instance's destroy.
+     * Every created, not yet destroyed Activity, oldest first, so
+     * [FrustNativeChrome] can find the frust host before its first resume or
+     * behind a foreign resumed Activity. Main-thread only (the lifecycle
+     * callbacks and [hostActivity]); each entry leaves on its destroy.
      */
-    @Volatile
-    private var created: WeakReference<Activity>? = null
+    private val created = ArrayList<WeakReference<Activity>>()
 
     /**
      * The dialog [showAlert] currently has up, or `null` between
@@ -160,13 +161,18 @@ object FrustNativePresenter {
     }
 
     /**
-     * The Activity app chrome installs into: [resumedActivity], else the most
-     * recently created live one (created but not yet resumed).
+     * The Activity app chrome installs into: [resumedActivity] when `hosts`
+     * accepts it (its content holds the frust surface), else the most
+     * recently created live one `hosts` accepts — so a foreign Activity
+     * resumed over the frust one (a billing proxy) is passed over, not
+     * chosen. `null` when no live Activity qualifies.
      */
-    internal fun hostActivity(): Activity? {
-        resumedActivity()?.let { return it }
-        val activity = created?.get() ?: return null
-        return if (activity.isFinishing || activity.isDestroyed) null else activity
+    internal fun hostActivity(hosts: (Activity) -> Boolean): Activity? {
+        resumedActivity()?.let { if (hosts(it)) return it }
+        created.removeAll { it.get().let { activity -> activity == null || activity.isDestroyed } }
+        return created.asReversed().firstNotNullOfOrNull { ref ->
+            ref.get()?.takeIf { !it.isFinishing && hosts(it) }
+        }
     }
 
     /** Whether [resumedActivity] has one — Rust's host-discovery probe. */
@@ -355,7 +361,7 @@ object FrustNativePresenter {
     private val activityCallbacks =
         object : Application.ActivityLifecycleCallbacks {
             override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
-                created = WeakReference(activity)
+                created.add(WeakReference(activity))
             }
 
             override fun onActivityStarted(activity: Activity) {}
@@ -374,9 +380,7 @@ object FrustNativePresenter {
                 if (resumed?.get() === activity) {
                     resumed = null
                 }
-                if (created?.get() === activity) {
-                    created = null
-                }
+                created.removeAll { it.get().let { live -> live == null || live === activity } }
                 FrustNativeChrome.onActivityDestroyed(activity)
                 // The dialog [liveDialog] is attached to is going away with
                 // its Activity (a configuration change, e.g. rotation, or

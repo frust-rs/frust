@@ -29,6 +29,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.res.Configuration
 import android.content.res.ColorStateList
+import android.content.res.Resources
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Rect
@@ -98,10 +99,10 @@ object FrustNativeChrome {
     /** [install] built the chrome. */
     const val INSTALL_OK = 0
 
-    /** [install] declined (non-Material theme, unexpected content root, bad spec). */
+    /** [install] declined (non-Material theme, malformed spec, a menu of [CHROME_MENU_STRIDE]+ items). */
     const val INSTALL_REFUSED = 1
 
-    /** [install] found no live Activity content to install into; retried later. */
+    /** [install] found no live Activity whose content hosts the frust surface; retried later. */
     const val INSTALL_NO_ACTIVITY = 2
 
     /** A menu choice's `detail` is `action * CHROME_MENU_STRIDE + item`. */
@@ -132,6 +133,38 @@ object FrustNativeChrome {
 
     /** The leading avatar's diameter (Material 3 top app bar avatar: 32dp). */
     private const val AVATAR_DP = 32
+
+    /** A bottom navigation item's icon box (Material 3 spec: 24dp). */
+    private const val TAB_ICON_DP = 24
+
+    /** [setIcon] decodes to at most 4x the slot's on-screen size, but never caps below this (px). */
+    private const val MIN_ICON_DECODE_PX = 256
+
+    // The `changed` array's spellings: Rust's `ChromeField` names, declared once
+    // here (`tests/kotlin_conformance.rs` pins them against `android_wire`).
+    private const val FIELD_TABS = "Tabs"
+    private const val FIELD_SELECTED = "Selected"
+    private const val FIELD_TOP_BAR = "TopBar"
+    private const val FIELD_TITLE = "Title"
+    private const val FIELD_SUBTITLE = "Subtitle"
+    private const val FIELD_LEADING = "Leading"
+    private const val FIELD_ACTIONS = "Actions"
+    private const val FIELD_LARGE_TITLE = "LargeTitle"
+    private const val FIELD_SCROLL = "Scroll"
+    private const val FIELD_BRIGHTNESS = "Brightness"
+
+    /** Every field [install]'s spec carries (Rust's `INSTALL_FIELDS`; [FIELD_SCROLL] rides [setScroll]). */
+    private val INSTALL_FIELDS = setOf(
+        FIELD_TABS,
+        FIELD_SELECTED,
+        FIELD_TOP_BAR,
+        FIELD_TITLE,
+        FIELD_SUBTITLE,
+        FIELD_LEADING,
+        FIELD_ACTIONS,
+        FIELD_LARGE_TITLE,
+        FIELD_BRIGHTNESS,
+    )
 
     private class Tab(val title: String, val enabled: Boolean, val badge: String?, val iconRev: Long)
 
@@ -195,15 +228,14 @@ object FrustNativeChrome {
             live = null
             detachQuietly(it)
         }
-        val activity = FrustNativePresenter.hostActivity() ?: return INSTALL_NO_ACTIVITY
-        debuggable = (activity.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
-        val content = activity.findViewById<ViewGroup?>(android.R.id.content) ?: return INSTALL_NO_ACTIVITY
-        if (content.childCount == 0) return INSTALL_NO_ACTIVITY
-        val root = content.getChildAt(0) as? ViewGroup
-        if (content !is FrameLayout || root == null || !hostsSurface(root)) {
-            Log.w(TAG, "Frust: native app chrome refused — the content view is not the frust embedding's root")
-            return INSTALL_REFUSED
+        val activity = FrustNativePresenter.hostActivity { frustRoot(it) != null }
+        val content = activity?.let(::contentOf)
+        val root = content?.let(::rootOf)
+        if (activity == null || content == null || root == null) {
+            Log.d(TAG, "Frust: native app chrome waits — no live Activity hosts the frust surface yet")
+            return INSTALL_NO_ACTIVITY
         }
+        debuggable = (activity.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
         val model = Model()
         try {
             mergeAll(model, JSONObject(specJson))
@@ -235,27 +267,33 @@ object FrustNativeChrome {
         return INSTALL_OK
     }
 
-    /** Merge the fields `diffJson`'s `changed` array names and update only those. */
+    /**
+     * Merge the fields `diffJson`'s `changed` array names and update only
+     * those. A view update that throws leaves the model ahead of the views, so
+     * the whole merged model is re-applied once; if that throws too, the bars
+     * stay as they are until the next apply.
+     */
     @JvmStatic
     fun apply(diffJson: String) {
         assertMainThread()
         val installed = live ?: return
-        try {
-            val json = JSONObject(diffJson)
-            val changed = changedFields(json)
-            val model = installed.model
-            merge(model, json, changed)
-            if ("Brightness" in changed) {
-                rebuildBars(installed)
-                return
-            }
-            if ("TopBar" in changed) applyTopVisibility(installed)
-            if ("Title" in changed || "Subtitle" in changed) applyTitles(installed)
-            if ("Leading" in changed) applyLeading(installed)
-            if ("Actions" in changed) applyActions(installed)
-            if ("Tabs" in changed) applyTabs(installed) else if ("Selected" in changed) applySelected(installed)
+        val json = try {
+            JSONObject(diffJson)
         } catch (t: Throwable) {
-            Log.w(TAG, "Frust: native app chrome apply failed", t)
+            Log.w(TAG, "Frust: native app chrome apply dropped — malformed diff", t)
+            return
+        }
+        try {
+            val changed = changedFields(json)
+            merge(installed.model, json, changed)
+            applyChanged(installed, changed)
+        } catch (t: Throwable) {
+            Log.w(TAG, "Frust: native app chrome apply failed; re-applying the whole spec", t)
+            try {
+                applyAll(installed)
+            } catch (again: Throwable) {
+                Log.w(TAG, "Frust: native app chrome re-apply failed; the bars stay as they are", again)
+            }
         }
     }
 
@@ -271,12 +309,19 @@ object FrustNativeChrome {
         if (installed != null) detachQuietly(installed)
     }
 
-    /** Cache icon `png` for (`slot`, `index`) and refresh the live bar showing it; empty bytes clear it. */
+    /**
+     * Cache icon `png` for (`slot`, `index`) and refresh the live bar showing
+     * it; empty bytes clear it. The decode is bounded ([decodeIcon]); bytes
+     * that do not decode are logged and leave the entry empty.
+     */
     @JvmStatic
     fun setIcon(slot: Int, index: Int, png: ByteArray) {
         assertMainThread()
         val key = iconKey(slot, index)
-        val bitmap = if (png.isEmpty()) null else BitmapFactory.decodeByteArray(png, 0, png.size)
+        val bitmap = if (png.isEmpty()) null else decodeIcon(png, iconDecodeCap(slot))
+        if (bitmap == null && png.isNotEmpty()) {
+            Log.w(TAG, "Frust: native app chrome icon (slot $slot, index $index) did not decode (${png.size} bytes); shown without it")
+        }
         if (bitmap == null) icons.remove(key) else icons[key] = bitmap
         val installed = live ?: return
         try {
@@ -303,6 +348,7 @@ object FrustNativeChrome {
      */
     @JvmStatic
     fun setScroll(offset: Float, max: Float) {
+        assertMainThread()
         val installed = live ?: return
         val lifted = offset > LIFT_THRESHOLD_PX && max > 0f
         if (lifted == installed.lifted) return
@@ -324,8 +370,7 @@ object FrustNativeChrome {
 
     // --- spec parsing -------------------------------------------------------
 
-    private fun mergeAll(model: Model, json: JSONObject) =
-        merge(model, json, setOf("Tabs", "Selected", "TopBar", "Title", "Subtitle", "Leading", "Actions", "Brightness"))
+    private fun mergeAll(model: Model, json: JSONObject) = merge(model, json, INSTALL_FIELDS)
 
     private fun changedFields(json: JSONObject): Set<String> {
         val array = json.optJSONArray("changed") ?: return emptySet()
@@ -333,7 +378,7 @@ object FrustNativeChrome {
     }
 
     private fun merge(model: Model, json: JSONObject, fields: Set<String>) {
-        if ("Tabs" in fields) {
+        if (FIELD_TABS in fields) {
             model.tabs = List(json.optInt("tabCount", 0)) { i ->
                 Tab(
                     json.optString("tab${i}Title"),
@@ -343,12 +388,12 @@ object FrustNativeChrome {
                 )
             }
         }
-        if ("Selected" in fields) model.selected = json.optInt("selectedIndex", -1)
-        if ("TopBar" in fields) model.hasTop = json.optBoolean("hasTop", false)
-        if ("Title" in fields) model.title = json.optString("title")
-        if ("Subtitle" in fields) model.subtitle = optStringOrNull(json, "subtitle")
-        if ("Leading" in fields) model.leading = json.optString("leading", LEADING_NONE)
-        if ("Actions" in fields) {
+        if (FIELD_SELECTED in fields) model.selected = json.optInt("selectedIndex", -1)
+        if (FIELD_TOP_BAR in fields) model.hasTop = json.optBoolean("hasTop", false)
+        if (FIELD_TITLE in fields) model.title = json.optString("title")
+        if (FIELD_SUBTITLE in fields) model.subtitle = optStringOrNull(json, "subtitle")
+        if (FIELD_LEADING in fields) model.leading = json.optString("leading", LEADING_NONE)
+        if (FIELD_ACTIONS in fields) {
             model.actions = List(json.optInt("actionCount", 0)) { a ->
                 val count = json.optInt("action${a}MenuCount", 0).coerceIn(0, CHROME_MENU_STRIDE - 1)
                 Action(
@@ -364,7 +409,7 @@ object FrustNativeChrome {
                 )
             }
         }
-        if ("Brightness" in fields) model.dark = json.optBoolean("dark", false)
+        if (FIELD_BRIGHTNESS in fields) model.dark = json.optBoolean("dark", false)
     }
 
     private fun optStringOrNull(json: JSONObject, key: String): String? =
@@ -372,8 +417,21 @@ object FrustNativeChrome {
 
     // --- building and attaching --------------------------------------------
 
-    private fun hostsSurface(root: ViewGroup): Boolean =
-        (0 until root.childCount).any { root.getChildAt(it) is FrustSurfaceView }
+    /**
+     * The frust embedding's root in `activity`: the first child of its
+     * `android.R.id.content` [FrameLayout], hosting a [FrustSurfaceView] —
+     * `null` before `setContentView` or for a foreign Activity. Reads
+     * through `peekDecorView`, so probing an Activity never installs its decor.
+     */
+    private fun frustRoot(activity: Activity): ViewGroup? = contentOf(activity)?.let(::rootOf)
+
+    private fun contentOf(activity: Activity): FrameLayout? =
+        activity.window?.peekDecorView()?.findViewById<View?>(android.R.id.content) as? FrameLayout
+
+    private fun rootOf(content: FrameLayout): ViewGroup? {
+        val root = (if (content.childCount > 0) content.getChildAt(0) else null) as? ViewGroup ?: return null
+        return if ((0 until root.childCount).any { root.getChildAt(it) is FrustSurfaceView }) root else null
+    }
 
     /**
      * Inflate the bars in the Activity's own theme with the night bit forced to
@@ -570,6 +628,19 @@ object FrustNativeChrome {
     }
 
     // --- applying the spec ---------------------------------------------------
+
+    /** Update the views for the `changed` fields of the already merged model. */
+    private fun applyChanged(installed: Installed, changed: Set<String>) {
+        if (FIELD_BRIGHTNESS in changed) {
+            rebuildBars(installed)
+            return
+        }
+        if (FIELD_TOP_BAR in changed) applyTopVisibility(installed)
+        if (FIELD_TITLE in changed || FIELD_SUBTITLE in changed) applyTitles(installed)
+        if (FIELD_LEADING in changed) applyLeading(installed)
+        if (FIELD_ACTIONS in changed) applyActions(installed)
+        if (FIELD_TABS in changed) applyTabs(installed) else if (FIELD_SELECTED in changed) applySelected(installed)
+    }
 
     private fun applyAll(installed: Installed) {
         applyTopVisibility(installed)
@@ -777,6 +848,38 @@ object FrustNativeChrome {
 
     private fun assertMainThread() {
         if (debuggable) check(Looper.myLooper() == Looper.getMainLooper()) { "FrustNativeChrome called off the main thread" }
+    }
+
+    /** [setIcon]'s decode cap for `slot`: 4x its on-screen size, at least [MIN_ICON_DECODE_PX]. */
+    private fun iconDecodeCap(slot: Int): Int {
+        val dp = when (slot) {
+            ICON_SLOT_LEADING -> AVATAR_DP
+            ICON_SLOT_TAB -> TAB_ICON_DP
+            else -> ACTION_ICON_DP
+        }
+        val px = (dp * Resources.getSystem().displayMetrics.density).roundToInt()
+        return max(4 * px, MIN_ICON_DECODE_PX)
+    }
+
+    /**
+     * `bytes` decoded with a power-of-two `inSampleSize` that brings the
+     * longer side to at most `cap` px (bounds read first, so an oversized
+     * image never allocates full size); `null` when the bytes do not decode.
+     */
+    private fun decodeIcon(bytes: ByteArray, cap: Int): Bitmap? = try {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+            null
+        } else {
+            val longer = max(bounds.outWidth, bounds.outHeight)
+            var sample = 1
+            while ((longer + sample - 1) / sample > cap) sample *= 2
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample })
+        }
+    } catch (t: Throwable) {
+        Log.w(TAG, "Frust: native app chrome icon decode threw", t)
+        null
     }
 
     private fun iconKey(slot: Int, index: Int): Long = (slot.toLong() shl 32) or (index.toLong() and 0xFFFFFFFFL)
