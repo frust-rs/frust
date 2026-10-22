@@ -26,8 +26,8 @@
 
 use std::borrow::Cow;
 
-use frust::Theme;
 use frust::authoring::{LayoutCtx, PaintCtx};
+use frust::{Theme, use_context};
 
 use crate::date_picker::DatePickerStrings;
 use crate::time_picker::TimePickerStrings;
@@ -323,6 +323,17 @@ impl MaterialStrings {
         time_picker: TimePickerStringsCow::ENGLISH,
     };
 
+    /// The strings in force for the *ambient* theme, read at build time via
+    /// [`use_context`]`::<Theme>()` and falling back to
+    /// [`ENGLISH`](Self::ENGLISH) when no theme is provided (or it carries no
+    /// extension). For labels a widget bakes into its tree during `build` /
+    /// `rebuild`, where no paint/layout context exists yet.
+    pub(crate) fn from_build_context() -> MaterialStrings {
+        use_context::<Theme>()
+            .and_then(|t| t.extension::<MaterialStrings>().cloned())
+            .unwrap_or(Self::ENGLISH)
+    }
+
     /// The strings in force for `theme`: its attached extension, else
     /// [`ENGLISH`](Self::ENGLISH).
     pub fn resolve(theme: Option<&Theme>) -> Cow<'_, MaterialStrings> {
@@ -427,157 +438,6 @@ mod tests {
         assert_eq!(
             TimePickerStringsCow::from(TimePickerStrings::default()),
             TimePickerStringsCow::ENGLISH
-        );
-    }
-
-    /// Source scan: every ENGLISH value is still the literal at its cited
-    /// site. DELETE this test when the Phase 5 cluster cards migrate the
-    /// sites (the literals then disappear from the widget files).
-    #[test]
-    fn english_matches_widget_literals() {
-        let sites: &[(&str, &str, &str)] = &[
-            (include_str!("dialog.rs"), "\"Cancel\"", "dialog_cancel"),
-            (include_str!("dialog.rs"), "\"OK\"", "dialog_confirm"),
-            (include_str!("dialog.rs"), "\"Close\"", "dialog_close_a11y"),
-            (
-                include_str!("snackbar.rs"),
-                "\"Dismiss\"",
-                "snackbar_dismiss_a11y",
-            ),
-            (
-                include_str!("navigation_rail.rs"),
-                "\"Collapse\"",
-                "rail_collapse_a11y",
-            ),
-            (
-                include_str!("navigation_rail.rs"),
-                "\"Expand\"",
-                "rail_expand_a11y",
-            ),
-            (
-                include_str!("navigation_drawer.rs"),
-                "\"Navigation drawer\"",
-                "drawer_a11y",
-            ),
-            (
-                include_str!("search/view.rs"),
-                "\"Back\"",
-                "search_back_a11y",
-            ),
-            (
-                include_str!("search/view.rs"),
-                "\"Clear\"",
-                "search_clear_a11y",
-            ),
-            (
-                include_str!("selection.rs"),
-                "\"Clear selection\"",
-                "selection_clear_a11y",
-            ),
-            (
-                include_str!("selection.rs"),
-                "\"Select all\"",
-                "selection_select_all",
-            ),
-            (
-                include_str!("selection.rs"),
-                "\"{count} selected\"",
-                "selection_count_a11y",
-            ),
-            (
-                include_str!("split_button.rs"),
-                "\"Show menu\"",
-                "split_button_show_menu_a11y",
-            ),
-            (
-                include_str!("toolbar.rs"),
-                "\"More options\"",
-                "toolbar_more_options_a11y",
-            ),
-            (
-                include_str!("toolbar.rs"),
-                "\"Action {}\"",
-                "toolbar_action_fallback_a11y",
-            ),
-            (include_str!("fab_menu.rs"), "\"Menu\"", "fab_menu_a11y"),
-            (include_str!("chips.rs"), "\"Remove\"", "chip_remove_a11y"),
-            (
-                include_str!("badge.rs"),
-                "\"Notifications: {count}\"",
-                "badge_notifications_a11y",
-            ),
-            (
-                include_str!("badge.rs"),
-                "\"Notifications\"",
-                "badge_notifications_none_a11y",
-            ),
-            (
-                include_str!("dropdown/mod.rs"),
-                "\"Select\"",
-                "dropdown_hint",
-            ),
-            (
-                include_str!("dropdown/mod.rs"),
-                "\"No items found\"",
-                "dropdown_empty",
-            ),
-            (
-                include_str!("dropdown/mod.rs"),
-                "\"Search…\"",
-                "dropdown_search_hint",
-            ),
-        ];
-        let e = &MaterialStrings::ENGLISH;
-        let value = |field: &str| -> String {
-            match field {
-                "dialog_cancel" => &e.dialog_cancel,
-                "dialog_confirm" => &e.dialog_confirm,
-                "dialog_close_a11y" => &e.dialog_close_a11y,
-                "snackbar_dismiss_a11y" => &e.snackbar_dismiss_a11y,
-                "rail_collapse_a11y" => &e.rail_collapse_a11y,
-                "rail_expand_a11y" => &e.rail_expand_a11y,
-                "drawer_a11y" => &e.drawer_a11y,
-                "search_back_a11y" => &e.search_back_a11y,
-                "search_clear_a11y" => &e.search_clear_a11y,
-                "selection_clear_a11y" => &e.selection_clear_a11y,
-                "selection_select_all" => &e.selection_select_all,
-                "selection_count_a11y" => &e.selection_count_a11y,
-                "split_button_show_menu_a11y" => &e.split_button_show_menu_a11y,
-                "toolbar_more_options_a11y" => &e.toolbar_more_options_a11y,
-                "toolbar_action_fallback_a11y" => &e.toolbar_action_fallback_a11y,
-                "fab_menu_a11y" => &e.fab_menu_a11y,
-                "chip_remove_a11y" => &e.chip_remove_a11y,
-                "badge_notifications_a11y" => &e.badge_notifications_a11y,
-                "badge_notifications_none_a11y" => &e.badge_notifications_none_a11y,
-                "dropdown_hint" => &e.dropdown_hint,
-                "dropdown_empty" => &e.dropdown_empty,
-                "dropdown_search_hint" => &e.dropdown_search_hint,
-                other => panic!("unmapped field {other}"),
-            }
-            .to_string()
-        };
-        for (source, literal, field) in sites {
-            assert!(
-                source.contains(literal),
-                "{field}: {literal} gone from its site"
-            );
-            // Format-string sites use `{}` / inline `{count}`; the table uses
-            // named placeholders, so compare only the literal-bearing ones.
-            let v = value(field);
-            if !v.contains('{') {
-                assert_eq!(format!("\"{v}\""), *literal, "{field}");
-            }
-        }
-        // `{count}` / `{n}` templates equal their sites modulo placeholder.
-        assert_eq!(
-            e.toolbar_action_fallback_a11y.replace("{n}", "{}"),
-            "Action {}"
-        );
-        // Date and time picker tables are the pickers' own ENGLISH / Default.
-        assert_eq!(e.date_picker, DatePickerStrings::ENGLISH);
-        assert_eq!(
-            e.time_picker.to_picker_strings(),
-            TimePickerStrings::default()
         );
     }
 }
