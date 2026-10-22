@@ -22,6 +22,15 @@
 //! own: do not double-pad. The fallback bars (`crate::chrome::fallback`) take
 //! the top and bottom insets themselves and lay the body out between them
 //! with those edges consumed, so the same `safe_area` body pads only the sides.
+//!
+//! # Outcome changes off the build path
+//!
+//! The fallback bars and the `native` flag are reconciled only by `sync`, on
+//! build and rebuild. An outcome that changes elsewhere (an arm's failure
+//! taken by a scroll flush, a NoHost retry a flush turns into an install, an
+//! arm's own late failure) bumps the chrome epoch, which owes the shell the
+//! frame whose rebuild re-runs `sync`. A flush bumps only when its outcome
+//! crosses between native and fallback, never per scroll frame.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -44,7 +53,7 @@ use crate::chrome::fallback::{
 };
 use crate::chrome::{
     self, ActionId, ActionItem, BARS_FLOAT_OVER_BODY, ChromeEvent, ChromeGeneration, ChromeSpec,
-    Leading, MenuItemId, NATIVE_CHROME_ARM, PublishOutcome, ScrollState, TopBarSpec,
+    Leading, MenuItemId, PublishOutcome, ScrollState, TopBarSpec,
 };
 
 /// How far past a bar's inset line the edge fade reaches into the body, in
@@ -452,24 +461,28 @@ fn spawn_flush(publisher: Rc<RefCell<ScrollPublisher>>) {
 struct ScrollPublisher {
     generation: Option<ChromeGeneration>,
     spec: ChromeSpec,
+    /// Whether the outcome the scaffold last drew left the bars to the arm.
+    native: bool,
     queued: bool,
     schedule: ScheduleFlush,
 }
 
 impl ScrollPublisher {
-    fn new(generation: Option<ChromeGeneration>, spec: ChromeSpec) -> Self {
+    fn new(generation: Option<ChromeGeneration>, spec: ChromeSpec, native: bool) -> Self {
         Self {
             generation,
             spec,
+            native,
             queued: false,
             schedule: spawn_flush,
         }
     }
 
-    /// Adopt what the view just published.
-    fn adopt(&mut self, generation: Option<ChromeGeneration>, spec: ChromeSpec) {
+    /// Adopt what the view just published and whether it drew the bars native.
+    fn adopt(&mut self, generation: Option<ChromeGeneration>, spec: ChromeSpec, native: bool) {
         self.generation = generation;
         self.spec = spec;
+        self.native = native;
     }
 
     /// Record `info` over `viewport`, the controller's extent as of this
@@ -489,13 +502,21 @@ impl ScrollPublisher {
     }
 
     /// Publish the newest recorded state; a publisher that no longer holds
-    /// the slot forgets its generation, so it never publishes again.
+    /// the slot forgets its generation, so it never publishes again. An
+    /// outcome that crosses between native and fallback bumps the chrome
+    /// epoch once, so the scaffold re-syncs its bars.
     fn flush(&mut self) -> Option<PublishOutcome> {
         self.queued = false;
         let generation = self.generation?;
         let outcome = chrome::publish(Some(generation), self.spec.clone());
         if matches!(outcome, PublishOutcome::Stale | PublishOutcome::Refused(_)) {
             self.generation = None;
+            return Some(outcome);
+        }
+        let native = !draws_fallback(&outcome);
+        if native != self.native {
+            self.native = native;
+            chrome::bump_epoch();
         }
         Some(outcome)
     }
@@ -538,7 +559,7 @@ fn draws_fallback(outcome: &PublishOutcome) -> bool {
     match outcome {
         PublishOutcome::Refused(_) | PublishOutcome::Stale => false,
         PublishOutcome::Fallback(..) => true,
-        _ => !NATIVE_CHROME_ARM,
+        _ => !chrome::native_arm(),
     }
 }
 
@@ -627,13 +648,15 @@ impl<V> NativeScaffoldView<V> {
         (flags, outcome)
     }
 
-    /// (Re)subscribe to the scroll controller, if any.
+    /// (Re)subscribe to the scroll controller, if any, seeding the publisher
+    /// with what `sync` just drew.
     fn sync_scroll(
         &self,
         element: &mut ScaffoldWidget,
         generation: Option<ChromeGeneration>,
         spec: ChromeSpec,
     ) {
+        let native = element.native;
         let Some(controller) = &self.scroll else {
             // A flush queued before `.scroll(..)` went away must publish nothing.
             if let Some(link) = element.scroll.take() {
@@ -643,9 +666,13 @@ impl<V> NativeScaffoldView<V> {
         };
         let publisher = match element.scroll.take() {
             Some(link) => link.publisher,
-            None => Rc::new(RefCell::new(ScrollPublisher::new(generation, spec.clone()))),
+            None => Rc::new(RefCell::new(ScrollPublisher::new(
+                generation,
+                spec.clone(),
+                native,
+            ))),
         };
-        publisher.borrow_mut().adopt(generation, spec);
+        publisher.borrow_mut().adopt(generation, spec, native);
         let listener = Rc::clone(&publisher);
         // The controller publishes its extent before notifying, so the
         // viewport is read live: the rebuild-time value is 0 before layout.
@@ -1201,7 +1228,7 @@ mod tests {
         let view = scaffold();
         let (mut element, _) = build(&view);
         let generation = element.generation;
-        let mut publisher = ScrollPublisher::new(generation, view.spec());
+        let mut publisher = ScrollPublisher::new(generation, view.spec(), element.native);
         let at = |offset| ScrollInfo {
             offset,
             max_offset: 400.0,
@@ -1374,7 +1401,7 @@ mod tests {
         assert!(chrome::withdraw(withdrawn));
         let (mut second, _) = build(&view);
         let flushed = || {
-            let mut publisher = ScrollPublisher::new(Some(withdrawn), view.spec());
+            let mut publisher = ScrollPublisher::new(Some(withdrawn), view.spec(), false);
             publisher.observe(scrolled(10.0), 600.0);
             let outcome = publisher.flush().expect("held a generation");
             (outcome, publisher.generation)
@@ -1389,6 +1416,135 @@ mod tests {
         assert_eq!(kept, None);
         assert_eq!(chrome::live_generation(), None);
         teardown(&view, &mut first);
+    }
+
+    /// Observe and flush one scroll step through `element`'s publisher,
+    /// answering the outcome and how many epoch bumps it made.
+    fn flush_scroll(element: &ScaffoldWidget, offset: f64) -> (PublishOutcome, u64) {
+        let publisher = scroll_publisher(element);
+        let before = chrome::epoch();
+        publisher.borrow_mut().observe(scrolled(offset), 600.0);
+        let outcome = publisher.borrow_mut().flush().expect("holds a generation");
+        (outcome, chrome::epoch() - before)
+    }
+
+    fn scrolling() -> NativeScaffoldView<frust::TextView> {
+        scaffold().scroll(ScrollController::new())
+    }
+
+    fn fallback_pods(element: &ScaffoldWidget) -> bool {
+        element.top.is_some() && element.bottom.is_some()
+    }
+
+    #[test]
+    fn a_flush_into_the_fallback_bumps_once_and_the_next_sync_draws_it() {
+        let _guard = chrome::slot_test_guard();
+        let _arm = chrome::ArmOverride::new(true);
+        let view = scrolling();
+        let (mut element, outcome) = build(&view);
+        let generation = outcome.generation().expect("installed");
+        assert!(element.native && !fallback_pods(&element));
+        chrome::with_test_host(|host| {
+            host.fail_deferred(generation, chrome::ChromeError::NoHost);
+            host.set_refusal(Some(chrome::ChromeError::NoHost));
+        });
+        let (outcome, bumps) = flush_scroll(&element, 10.0);
+        assert!(
+            matches!(outcome, PublishOutcome::Fallback(..)),
+            "{outcome:?}"
+        );
+        assert_eq!(bumps, 1, "the crossing bumps the epoch once");
+        let (outcome, bumps) = flush_scroll(&element, 20.0);
+        assert!(
+            matches!(outcome, PublishOutcome::Fallback(..)),
+            "{outcome:?}"
+        );
+        assert_eq!(bumps, 0, "still fallback: no second bump");
+        assert!(element.native, "nothing re-synced yet");
+        let outcome = rebuild(&view, &scrolling(), &mut element);
+        assert!(
+            matches!(outcome, PublishOutcome::Fallback(..)),
+            "{outcome:?}"
+        );
+        assert!(
+            !element.native && fallback_pods(&element),
+            "the sync drew the fallback"
+        );
+        teardown(&view, &mut element);
+    }
+
+    #[test]
+    fn a_flush_that_installs_bumps_once_and_the_next_sync_drops_the_fallback() {
+        let _guard = chrome::slot_test_guard();
+        let _arm = chrome::ArmOverride::new(true);
+        chrome::with_test_host(|host| host.set_refusal(Some(chrome::ChromeError::NoHost)));
+        let view = scrolling();
+        let (mut element, outcome) = build(&view);
+        assert!(
+            matches!(outcome, PublishOutcome::Fallback(..)),
+            "{outcome:?}"
+        );
+        assert!(!element.native && fallback_pods(&element));
+        let (outcome, bumps) = flush_scroll(&element, 10.0);
+        assert!(
+            matches!(outcome, PublishOutcome::Fallback(..)),
+            "{outcome:?}"
+        );
+        assert_eq!(bumps, 0, "a NoHost retry that fails again changes nothing");
+        chrome::with_test_host(|host| host.set_refusal(None));
+        let (outcome, bumps) = flush_scroll(&element, 20.0);
+        assert!(
+            matches!(outcome, PublishOutcome::Installed(_)),
+            "{outcome:?}"
+        );
+        assert_eq!(bumps, 1);
+        for offset in [30.0, 30.0, 40.0] {
+            let (outcome, bumps) = flush_scroll(&element, offset);
+            assert!(
+                matches!(
+                    outcome,
+                    PublishOutcome::Applied(_) | PublishOutcome::Unchanged(_)
+                ),
+                "{outcome:?}"
+            );
+            assert_eq!(bumps, 0, "Applied/Unchanged never bump");
+        }
+        assert!(fallback_pods(&element), "nothing re-synced yet");
+        rebuild(&view, &scrolling(), &mut element);
+        assert!(
+            element.native && !fallback_pods(&element),
+            "the sync dropped the fallback"
+        );
+        teardown(&view, &mut element);
+    }
+
+    #[test]
+    fn a_reported_failure_never_leaves_the_scaffold_native_after_sync() {
+        let _guard = chrome::slot_test_guard();
+        let _arm = chrome::ArmOverride::new(true);
+        for error in [
+            chrome::ChromeError::NoHost,
+            chrome::ChromeError::Refused("a native chrome step panicked".into()),
+        ] {
+            let view = scaffold();
+            let (mut element, outcome) = build(&view);
+            let generation = outcome.generation().expect("installed");
+            assert!(element.native);
+            chrome::with_test_host(|host| host.fail_deferred(generation, error.clone()));
+            let outcome = rebuild(&view, &scaffold(), &mut element);
+            assert_eq!(outcome, PublishOutcome::Fallback(generation, error.clone()));
+            assert!(!element.native && fallback_pods(&element), "{error:?}");
+            let outcome = rebuild(&view, &scaffold(), &mut element);
+            let retried = error == chrome::ChromeError::NoHost;
+            assert_eq!(
+                matches!(outcome, PublishOutcome::Installed(_)),
+                retried,
+                "{outcome:?}"
+            );
+            assert_eq!(element.native, retried);
+            assert_eq!(fallback_pods(&element), !retried);
+            teardown(&view, &mut element);
+        }
     }
 
     #[test]
@@ -1439,7 +1595,7 @@ mod tests {
         assert!(!draws_fallback(&PublishOutcome::Stale));
         assert_eq!(
             draws_fallback(&PublishOutcome::Installed(held)),
-            !NATIVE_CHROME_ARM
+            !chrome::NATIVE_CHROME_ARM
         );
         chrome::withdraw(held);
         let view = native_scaffold(text("body")).title("Only a title");

@@ -12,6 +12,21 @@
 //! root presenting a modal, answers [`ChromeError::NoHost`], which the slot
 //! retries on the next publish.
 //!
+//! # Failures after `install` answered `Ok`
+//!
+//! The queued half re-checks the precondition (an alert queued on the same
+//! main queue may present first) and may panic; either way it records the
+//! failure for its generation in a lock-free cell (`FAILURE`) that
+//! [`IosChromeHost::take_failure`] hands the slot on its next publish, then
+//! bumps the chrome epoch so the scaffold republishes and draws the fallback
+//! bars. A panic in an apply disposes the half-applied chrome (re-rooting the
+//! window to the frust controller) and records a refusal; a panic mid-install
+//! restores the window's original root first. A NoHost, synchronous or
+//! deferred, starts bounded re-checks of the precondition on later main-queue
+//! turns (100 ms doubling to a 2 s interval) that bump the epoch once it
+//! passes, so the slot's retry installs without waiting for an unrelated
+//! rebuild; they stop when the generation is withdrawn, installed or replaced.
+//!
 //! # Threading and ordering
 //!
 //! The slot calls the host on the frame's (main) thread with its lock held,
@@ -85,9 +100,11 @@
 use std::cell::RefCell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use block2::RcBlock;
-use dispatch2::DispatchQueue;
+use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{NSObject, NSObjectProtocol};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
@@ -133,12 +150,28 @@ impl ChromeHost for IosChromeHost {
         generation: ChromeGeneration,
         spec: &ChromeSpec,
     ) -> Result<(), ChromeError> {
-        let mtm = MainThreadMarker::new().ok_or(ChromeError::NoHost)?;
-        check_host(mtm)?;
         let generation = generation.get();
+        let checked = MainThreadMarker::new()
+            .ok_or(ChromeError::NoHost)
+            .and_then(check_host);
+        if let Err(error) = checked {
+            if error == ChromeError::NoHost {
+                schedule_recheck(generation);
+            } else {
+                stop_recheck(generation);
+            }
+            return Err(error);
+        }
+        // Any re-check chain ends: this install supersedes it.
+        RECHECK.store(0, Ordering::Release);
+        INSTALLING.store(generation, Ordering::Release);
         let spec = spec.clone();
         self.live = Some(generation);
-        on_main(move |mtm| install_now(mtm, generation, &spec));
+        on_main(move |mtm| {
+            if catch_unwind(AssertUnwindSafe(|| install_now(mtm, generation, &spec))).is_err() {
+                fail(generation, Failure::Panicked);
+            }
+        });
         Ok(())
     }
 
@@ -153,18 +186,179 @@ impl ChromeHost for IosChromeHost {
                 spec: &spec,
                 changed,
             };
-            with_chrome(generation, |chrome| chrome.apply(mtm, &diff));
+            with_chrome(mtm, generation, |chrome| chrome.apply(mtm, &diff));
         });
     }
 
     fn dispose(&mut self) {
         if let Some(generation) = self.live.take() {
+            forget(generation);
             on_main(move |mtm| {
                 if let Some(chrome) = take_chrome(generation) {
                     chrome.dispose(mtm);
                 }
             });
         }
+    }
+
+    /// Lock-free: reads and clears [`FAILURE`]. Taking a failure forgets the
+    /// install, so a later dispose never targets the dead generation.
+    fn take_failure(&mut self, generation: ChromeGeneration) -> Option<ChromeError> {
+        let generation = generation.get();
+        let held = FAILURE.load(Ordering::Acquire);
+        let failure = Failure::decode(held)?;
+        let failed = held >> FAILURE_KIND_BITS;
+        if failed > generation {
+            return None;
+        }
+        // Ours, or an older generation's that no one will ask for: spent.
+        FAILURE
+            .compare_exchange(held, 0, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+        if failed != generation {
+            return None;
+        }
+        if self.live == Some(generation) {
+            self.live = None;
+        }
+        Some(failure.error())
+    }
+
+    fn abandon(&mut self, generation: ChromeGeneration) {
+        forget(generation.get());
+    }
+}
+
+/// Why a deferred step failed: the low [`FAILURE_KIND_BITS`] of [`FAILURE`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Failure {
+    /// No window, or the root presents a modal: retried.
+    NoHost = 1,
+    /// The root became a container: the fallback is pinned.
+    Rerooted = 2,
+    /// A UIKit step panicked: the fallback is pinned.
+    Panicked = 3,
+}
+
+const FAILURE_KIND_BITS: u32 = 2;
+
+impl Failure {
+    fn decode(held: u64) -> Option<Self> {
+        match held & ((1 << FAILURE_KIND_BITS) - 1) {
+            1 => Some(Self::NoHost),
+            2 => Some(Self::Rerooted),
+            3 => Some(Self::Panicked),
+            _ => None,
+        }
+    }
+
+    fn error(self) -> ChromeError {
+        match self {
+            Self::NoHost => ChromeError::NoHost,
+            Self::Rerooted => ChromeError::Refused("window already re-rooted".into()),
+            Self::Panicked => ChromeError::Refused("a native chrome step panicked".into()),
+        }
+    }
+}
+
+/// The failure channel's cell: the failed generation shifted past the
+/// [`Failure`] kind, `0` for none. Written on the main queue and taken under
+/// the slot lock, both lock-free; generations stay far below `2^62`.
+static FAILURE: AtomicU64 = AtomicU64::new(0);
+/// The generation the last accepted install was for; `0` once it is gone.
+static INSTALLING: AtomicU64 = AtomicU64::new(0);
+/// The generation a NoHost re-check chain runs for; `0` for none. A chain
+/// whose generation this no longer names stops at its next turn.
+static RECHECK: AtomicU64 = AtomicU64::new(0);
+
+/// The first NoHost re-check's delay; each later one doubles, up to
+/// [`RECHECK_MAX`].
+const RECHECK_FIRST: Duration = Duration::from_millis(100);
+const RECHECK_MAX: Duration = Duration::from_secs(2);
+
+/// Record `failure` for `generation`; an older generation's never replaces
+/// a newer one's.
+fn record_failure(generation: u64, failure: Failure) {
+    let packed = (generation << FAILURE_KIND_BITS) | failure as u64;
+    let _ = FAILURE.fetch_update(Ordering::AcqRel, Ordering::Acquire, |held| {
+        (held >> FAILURE_KIND_BITS <= generation).then_some(packed)
+    });
+}
+
+/// The main-queue failure path: record `failure` for `generation`, re-check
+/// the host for a NoHost while that install is still the current one, then
+/// bump the chrome epoch so the scaffold republishes and the slot takes it.
+fn fail(generation: u64, failure: Failure) {
+    log::warn!(
+        "frust-native-widgets: native chrome generation {generation} failed after install \
+         ({failure:?}); falling back to frust-drawn chrome"
+    );
+    record_failure(generation, failure);
+    if failure == Failure::NoHost && INSTALLING.load(Ordering::Acquire) == generation {
+        schedule_recheck(generation);
+    }
+    chrome::bump_epoch();
+}
+
+/// `generation` was disposed or withdrawn: stop what still runs for it.
+fn forget(generation: u64) {
+    let _ = INSTALLING.compare_exchange(generation, 0, Ordering::AcqRel, Ordering::Acquire);
+    stop_recheck(generation);
+}
+
+fn stop_recheck(generation: u64) {
+    let _ = RECHECK.compare_exchange(generation, 0, Ordering::AcqRel, Ordering::Acquire);
+}
+
+/// Start re-checking the host for `generation`, unless a chain already runs
+/// for it (each NoHost publish lands here, at frame rate under a scroll).
+fn schedule_recheck(generation: u64) {
+    if RECHECK.swap(generation, Ordering::AcqRel) != generation {
+        recheck_after(generation, RECHECK_FIRST);
+    }
+}
+
+/// Queue one [`recheck`] for `generation` after `delay`.
+fn recheck_after(generation: u64, delay: Duration) {
+    let when = DispatchTime::try_from(delay).unwrap_or(DispatchTime::NOW);
+    let queued = DispatchQueue::main().after(when, move || {
+        // SAFETY: a block submitted to the main queue runs on the main
+        // thread, as in [`on_main`].
+        let mtm = unsafe { MainThreadMarker::new_unchecked() };
+        if catch_unwind(AssertUnwindSafe(|| recheck(mtm, generation, delay))).is_err() {
+            log::error!("frust-native-widgets: a native chrome host re-check panicked");
+            stop_recheck(generation);
+        }
+    });
+    if queued.is_err() {
+        stop_recheck(generation);
+    }
+}
+
+/// One NoHost re-check. Stops once [`RECHECK`] moved on (withdrawn, installed
+/// or replaced). When the precondition passes it bumps the epoch, so the
+/// scaffold republishes and the slot's NoHost retry installs — but only once
+/// the slot has taken the deferred failure, or that publish would spend the
+/// wake falling back. Still no host: check again, the interval doubling up
+/// to [`RECHECK_MAX`]. Refused: stop; the next retry pins the fallback.
+fn recheck(mtm: MainThreadMarker, generation: u64, delay: Duration) {
+    if RECHECK.load(Ordering::Acquire) != generation {
+        return;
+    }
+    match check_host(mtm) {
+        Ok(()) if FAILURE.load(Ordering::Acquire) >> FAILURE_KIND_BITS == generation => {
+            recheck_after(generation, delay);
+        }
+        Ok(()) => {
+            if RECHECK
+                .compare_exchange(generation, 0, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                chrome::bump_epoch();
+            }
+        }
+        Err(ChromeError::NoHost) => recheck_after(generation, (delay * 2).min(RECHECK_MAX)),
+        Err(_) => stop_recheck(generation),
     }
 }
 
@@ -190,11 +384,22 @@ fn take_chrome(generation: u64) -> Option<Chrome> {
 
 /// Run `f` on `generation`'s chrome, outside the `RefCell` borrow so a UIKit
 /// callback reaching [`CHROME`] meanwhile finds it empty rather than panics.
-fn with_chrome(generation: u64, f: impl FnOnce(&mut Chrome)) {
-    if let Some(mut chrome) = take_chrome(generation) {
-        f(&mut chrome);
+/// A panic in `f` disposes the half-applied chrome (re-rooting the window to
+/// the frust controller) and records [`Failure::Panicked`], so the slot falls
+/// back instead of applying to a chrome that is gone.
+fn with_chrome(mtm: MainThreadMarker, generation: u64, f: impl FnOnce(&mut Chrome)) {
+    let Some(mut chrome) = take_chrome(generation) else {
+        return;
+    };
+    if catch_unwind(AssertUnwindSafe(|| f(&mut chrome))).is_ok() {
         CHROME.with(|cell| *cell.borrow_mut() = Some(chrome));
+        return;
     }
+    log::error!("frust-native-widgets: a native chrome apply panicked; disposing the chrome");
+    if catch_unwind(AssertUnwindSafe(|| chrome.dispose(mtm))).is_err() {
+        log::error!("frust-native-widgets: disposing the panicked native chrome panicked too");
+    }
+    fail(generation, Failure::Panicked);
 }
 
 /// Run `f` on the main thread, on a later main-queue turn, under
@@ -265,22 +470,79 @@ fn check_host(mtm: MainThreadMarker) -> Result<(), ChromeError> {
     Ok(())
 }
 
-/// The queued half of [`IosChromeHost::install`].
+/// The queued half of [`IosChromeHost::install`]: re-checks the
+/// precondition, which a modal presented since may break, and records a
+/// failure ([`fail`]) instead of installing: NoHost for no window or a
+/// presented modal, a refusal for a container root or a panic mid-install,
+/// after restoring the window's original root.
 fn install_now(mtm: MainThreadMarker, generation: u64, spec: &ChromeSpec) {
     if let Some(stale) = take_chrome_matching(None) {
         stale.dispose(mtm);
     }
     let root = anchor_window(mtm).and_then(|window| Some((window.rootViewController()?, window)));
     let Some((frust, window)) = root else {
-        log::warn!("frust-native-widgets: native chrome found no window to re-root");
-        return;
+        return fail(generation, Failure::NoHost);
     };
-    if is_container(&frust) || frust.presentedViewController().is_some() {
-        log::warn!("frust-native-widgets: native chrome skipped; the window root changed");
-        return;
+    if is_container(&frust) {
+        return fail(generation, Failure::Rerooted);
     }
-    let chrome = Chrome::install(mtm, generation, &window, frust, spec);
-    CHROME.with(|cell| *cell.borrow_mut() = Some(chrome));
+    if frust.presentedViewController().is_some() {
+        return fail(generation, Failure::NoHost);
+    }
+    let stack = sibling_stack(&frust);
+    let original = frust.clone();
+    let built = catch_unwind(AssertUnwindSafe(|| {
+        Chrome::install(mtm, generation, &window, frust, spec, &stack)
+    }));
+    match built {
+        Ok(chrome) => CHROME.with(|cell| *cell.borrow_mut() = Some(chrome)),
+        Err(_) => {
+            log::error!("frust-native-widgets: native chrome install panicked; restoring the root");
+            let restored = catch_unwind(AssertUnwindSafe(|| {
+                restore_root(&window, &original, &stack);
+            }));
+            if restored.is_err() {
+                log::error!("frust-native-widgets: restoring the window root panicked");
+            }
+            fail(generation, Failure::Panicked);
+        }
+    }
+}
+
+/// The views sharing the frust view's superview, bottom to top (the frust
+/// view among them), which install moves into the host view.
+fn sibling_stack(frust: &UIViewController) -> Vec<Retained<UIView>> {
+    frust
+        .view()
+        .and_then(|view| view.superview())
+        .map(|superview| superview.subviews().iter().collect())
+        .unwrap_or_default()
+}
+
+/// Undo a half-done install: free the frust controller from any page, root
+/// the window at it again and put `stack` back around its view.
+fn restore_root(window: &UIWindow, frust: &UIViewController, stack: &[Retained<UIView>]) {
+    detach_from_parent(frust);
+    let rooted = window
+        .rootViewController()
+        .is_some_and(|root| std::ptr::eq(&*root, frust));
+    if !rooted {
+        window.setRootViewController(Some(frust));
+    }
+    if let Some(view) = frust.view()
+        && let Some(superview) = view.superview()
+    {
+        restore_siblings(stack, &view, &superview);
+    }
+}
+
+/// Take `frust` out of whatever page still contains it (one a panic left
+/// holding it), so the window can root it again.
+fn detach_from_parent(frust: &UIViewController) {
+    if frust.parentViewController().is_some() {
+        frust.willMoveToParentViewController(None);
+        frust.removeFromParentViewController();
+    }
 }
 
 /// One tab: its navigation controller and the page under it.
@@ -307,19 +569,17 @@ struct Chrome {
 }
 
 impl Chrome {
+    /// `stack` is [`sibling_stack`]'s, taken by the caller so a panic here
+    /// can put it back.
     fn install(
         mtm: MainThreadMarker,
         generation: u64,
         window: &Retained<UIWindow>,
         frust: Retained<UIViewController>,
         spec: &ChromeSpec,
+        stack: &[Retained<UIView>],
     ) -> Self {
         let frust_view = frust.view();
-        let stack: Vec<Retained<UIView>> = frust_view
-            .as_ref()
-            .and_then(|view| view.superview())
-            .map(|superview| superview.subviews().iter().collect())
-            .unwrap_or_default();
         let host = UIView::new(mtm);
         let flexible = UIViewAutoresizing::FlexibleWidth | UIViewAutoresizing::FlexibleHeight;
         host.setAutoresizingMask(flexible);
@@ -342,7 +602,7 @@ impl Chrome {
         // The root swap takes the `FrustView` out of the window; its siblings
         // stay until moved, in their old order, into the host view.
         window.setRootViewController(Some(&chrome.tabs));
-        for view in &stack {
+        for view in stack {
             chrome.host.addSubview(view);
         }
         if let Some(view) = frust_view {
@@ -439,12 +699,15 @@ impl Chrome {
     }
 
     /// Re-root the window back to the frust controller and release the rest.
+    /// Tolerates a half-applied chrome: a page a panicking `sync_pages` let
+    /// go of may still contain the frust controller, which is detached.
     fn dispose(self, _mtm: MainThreadMarker) {
         self.target.detach_tab_bar_controller(&self.tabs);
         let stack: Vec<Retained<UIView>> = self.host.subviews().iter().collect();
         for page in &self.pages {
             page.page.release();
         }
+        detach_from_parent(&self.frust);
         let Some(window) = self.window.load() else {
             return;
         };
