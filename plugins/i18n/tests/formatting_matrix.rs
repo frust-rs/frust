@@ -655,3 +655,154 @@ fn date_ranges_across_months_and_years_across_the_matrix() {
         assert_eq!(range(d(2024, 12, 30), d(2025, 1, 2)), years, "{tag}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Relative days (venue-zone civil days)
+// ---------------------------------------------------------------------------
+
+/// 2023-11-15T00:00:00+08:00 (Asia/Makassar), as epoch seconds.
+const MAKASSAR_MIDNIGHT: i64 = 1_699_977_600;
+
+/// `day` days after the Makassar day of `MAKASSAR_MIDNIGHT`, at `hour:minute` local.
+fn makassar(day: i64, hour: i64, minute: i64) -> i64 {
+    MAKASSAR_MIDNIGHT + day * 86_400 + hour * 3_600 + minute * 60
+}
+
+fn relative(tag: &str, instant: i64, now: i64, style: fmt::RelativeDayStyle) -> String {
+    fmt::relative_day(&locale(tag), instant, now, "Asia/Makassar", style).expect("relative day")
+}
+
+#[test]
+fn relative_days_flip_at_the_venue_zones_midnight_in_five_locales() {
+    use fmt::RelativeDayStyle::{Long, Short};
+
+    // "now" is 23:45 local on the 15th; in UTC that is 15:45 on the same date,
+    // so a UTC reading would put 00:30 local (16:30Z on the 15th) on "today".
+    let now = makassar(0, 23, 45);
+    let yesterday = makassar(-1, 23, 30);
+    let today = makassar(0, 23, 30);
+    let tomorrow = makassar(1, 0, 30);
+
+    let expected: [(&str, fmt::RelativeDayStyle, [&str; 3]); 6] = [
+        ("en", Long, ["yesterday", "today", "tomorrow"]),
+        (
+            "th",
+            Long,
+            [
+                "เม\u{e37}\u{e48}อวาน",
+                "ว\u{e31}นน\u{e35}\u{e49}",
+                "พร\u{e38}\u{e48}งน\u{e35}\u{e49}",
+            ],
+        ),
+        ("vi", Short, ["hôm qua", "hôm nay", "ngày mai"]),
+        ("vi", Long, ["Hôm qua", "Hôm nay", "Ngày mai"]),
+        ("ja", Long, ["昨日", "今日", "明日"]),
+        ("es", Long, ["ayer", "hoy", "mañana"]),
+    ];
+    for (tag, style, [past, present, future]) in expected {
+        assert_eq!(
+            relative(tag, yesterday, now, style),
+            past,
+            "{tag} {style:?}"
+        );
+        assert_eq!(relative(tag, today, now, style), present, "{tag} {style:?}");
+        assert_eq!(
+            relative(tag, tomorrow, now, style),
+            future,
+            "{tag} {style:?}"
+        );
+    }
+}
+
+#[test]
+fn relative_days_two_days_away_fall_back_to_a_medium_date() {
+    let now = makassar(0, 23, 45);
+    let after = makassar(2, 0, 30);
+    let before = makassar(-2, 23, 30);
+
+    assert_eq!(
+        relative("en", after, now, fmt::RelativeDayStyle::Long),
+        "Nov 17, 2023"
+    );
+    assert_eq!(
+        relative("en", before, now, fmt::RelativeDayStyle::Long),
+        "Nov 13, 2023"
+    );
+    assert_eq!(
+        relative("es", after, now, fmt::RelativeDayStyle::Long),
+        "17 nov 2023"
+    );
+    assert_eq!(
+        relative("ja", before, now, fmt::RelativeDayStyle::Long),
+        "2023/11/13"
+    );
+}
+
+#[test]
+fn relative_day_civil_and_an_unknown_zone() {
+    let day = CivilDate {
+        year: 2024,
+        month: 3,
+        day: 1,
+    };
+    let leap_eve = CivilDate {
+        year: 2024,
+        month: 2,
+        day: 29,
+    };
+    assert_eq!(
+        fmt::relative_day_civil(&locale("en"), day, leap_eve, fmt::RelativeDayStyle::Long)
+            .expect("formats"),
+        "tomorrow"
+    );
+    assert!(matches!(
+        fmt::relative_day(
+            &locale("en"),
+            0,
+            0,
+            "Nope/Zone",
+            fmt::RelativeDayStyle::Long
+        ),
+        Err(frust_i18n::I18nError::UnknownTimeZone(_))
+    ));
+}
+
+#[test]
+fn ftl_relative_day_round_trips_through_the_venue_zone() {
+    let engine = Engine::new(fmt::with_icu_functions(
+        LocaleSet::new(locale("en-US"))
+            .with_locale(
+                locale("en-US"),
+                [(
+                    "r.ftl",
+                    concat!(
+                        "day = { RELATIVE_DAY($t, $now, timeZone: \"Asia/Makassar\", style: \"short\") }\n",
+                        "utc = { RELATIVE_DAY($t, $now) }\n",
+                        "nonow = { RELATIVE_DAY($t) }\n",
+                        "literal = { RELATIVE_DAY($t, now: 1700000000, timeZone: \"Asia/Makassar\") }\n",
+                    ),
+                )],
+            )
+            .with_isolating(false),
+    ))
+    .expect("engine builds");
+    let resolve = |key: &str, t: i64, now: i64| {
+        let mut args = fluent_bundle::FluentArgs::new();
+        args.set("t", t as f64);
+        args.set("now", now as f64);
+        engine
+            .resolve(&[locale("en-US")], key, Some(&args))
+            .expect("resolves")
+    };
+
+    let now = makassar(0, 23, 45);
+    assert_eq!(resolve("day", makassar(1, 0, 30), now), "tomorrow");
+    assert_eq!(resolve("day", makassar(0, 23, 30), now), "today");
+    assert_eq!(resolve("day", makassar(-1, 23, 30), now), "yesterday");
+    assert_eq!(resolve("day", makassar(2, 0, 30), now), "Nov 17, 2023");
+    // Read in UTC, 16:30Z and 15:45Z are the same day: "today", not "tomorrow".
+    assert_eq!(resolve("utc", makassar(1, 0, 30), now), "today");
+    assert_eq!(resolve("nonow", makassar(0, 1, 0), now), "RELATIVE_DAY()");
+    // A literal `now:` (1700000000 = Nov 15 06:13 local) names the same day.
+    assert_eq!(resolve("literal", makassar(0, 1, 0), now), "today");
+}

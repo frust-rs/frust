@@ -77,9 +77,9 @@ use fluent_bundle::{FluentArgs, FluentValue};
 
 use crate::{FluentFunction, Locale, LocaleSet};
 
-use super::{CivilDate, CivilTime, DateLength, datetime, zone};
+use super::{CivilDate, CivilTime, DateLength, RelativeDayStyle, datetime, relative, zone};
 
-/// Registers ICU-backed `NUMBER` and `DATETIME` into `set`.
+/// Registers ICU-backed `NUMBER`, `DATETIME` and `RELATIVE_DAY` into `set`.
 pub(super) fn with_icu_functions(set: LocaleSet) -> LocaleSet {
     set.with_locale_function("NUMBER", |locale| {
         let locale = locale.clone();
@@ -93,6 +93,69 @@ pub(super) fn with_icu_functions(set: LocaleSet) -> LocaleSet {
             Arc::new(move |positional, named| date_time(&locale, positional, named));
         function
     })
+    .with_locale_function("RELATIVE_DAY", |locale| {
+        let locale = locale.clone();
+        let function: FluentFunction =
+            Arc::new(move |positional, named| relative_day(&locale, positional, named));
+        function
+    })
+}
+
+/// `RELATIVE_DAY($unix, $now_unix, timeZone: …, style: "short"|"long")`.
+///
+/// Both instants are read in `timeZone` (IANA id or `±HH:MM`; UTC when
+/// absent). `now` is required: a function that read the clock would make a
+/// message's output change under the caller.
+fn relative_day<'a>(
+    locale: &Locale,
+    positional: &[FluentValue<'a>],
+    named: &FluentArgs<'_>,
+) -> FluentValue<'a> {
+    let Some(instant) = as_instant(positional.first()) else {
+        return FluentValue::Error;
+    };
+    // Fluent restricts named-argument values to literals, so a variable
+    // `now` travels as the second positional; a literal `now:` also works.
+    let now = as_instant(positional.get(1)).or_else(|| {
+        named
+            .iter()
+            .find_map(|(name, value)| (name == "now").then(|| as_instant(Some(value))).flatten())
+    });
+    let Some(now) = now else {
+        log::debug!(
+            "frust-i18n: RELATIVE_DAY() needs a `now` (second positional or `now:` literal)"
+        );
+        return FluentValue::Error;
+    };
+    let style = match option(named, "style") {
+        None | Some("long") => RelativeDayStyle::Long,
+        Some("short") => RelativeDayStyle::Short,
+        Some(unknown) => {
+            log::debug!("frust-i18n: RELATIVE_DAY(style: \"{unknown}\") — using the long style");
+            RelativeDayStyle::Long
+        }
+    };
+
+    let days = |at: i64| match option(named, "timeZone") {
+        None => zone::civil_at_offset(at, 0),
+        Some(id) => match zone::parse_offset(id) {
+            Some(offset) => zone::civil_at_offset(at, offset),
+            None => zone::zoned_civil(at, id),
+        },
+    };
+    let formatted = days(instant).and_then(|(day, _)| {
+        let (today, _) = days(now)?;
+        relative::relative_day_civil(locale, day, today, style)
+    });
+
+    report_unhonored(named, "RELATIVE_DAY", &["now", "timeZone", "style"]);
+    match formatted {
+        Ok(formatted) => FluentValue::from(formatted),
+        Err(error) => {
+            log::debug!("frust-i18n: RELATIVE_DAY(): {error}");
+            FluentValue::Error
+        }
+    }
 }
 
 /// `NUMBER($n, style: …, currency: …)`.
