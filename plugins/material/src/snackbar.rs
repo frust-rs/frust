@@ -104,6 +104,18 @@
 //! host only ever promotes it once [`SnackbarHostWidget`] has nothing of its
 //! own currently showing.
 //!
+//! # Two APIs: `show` and `enqueue`
+//!
+//! [`SnackbarController::show`] is the one-pending-slot call above and is
+//! unchanged: it replaces the pending slot and never touches the queue.
+//! [`SnackbarController::enqueue`] is the app-wide notice queue: a FIFO that
+//! shows one message at a time, promoting the next when the visible one
+//! settles (the host asks for a frame on settle, so the promoting rebuild
+//! runs). When the host frees up, the explicit `show` slot is served before the
+//! queue front. `show` does **not** clear the queue;
+//! [`SnackbarController::clear_queue`] drops waiting messages and
+//! [`SnackbarController::queue_len`] reports how many wait.
+//!
 //! # Motion and color
 //!
 //! Slide-up + fade entrance (`crate::tokens::MaterialMotion::MEDIUM_2`, 300ms)
@@ -160,6 +172,7 @@
 //! panel.
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -435,12 +448,14 @@ impl<State: 'static> SnackbarMessage<State> {
 /// queue/replace rule this slot implements.
 pub struct SnackbarController<State: 'static> {
     pending: Rc<RefCell<Option<SnackbarMessage<State>>>>,
+    queue: Rc<RefCell<VecDeque<SnackbarMessage<State>>>>,
 }
 
 impl<State: 'static> Clone for SnackbarController<State> {
     fn clone(&self) -> Self {
         Self {
             pending: Rc::clone(&self.pending),
+            queue: Rc::clone(&self.queue),
         }
     }
 }
@@ -456,6 +471,7 @@ impl<State: 'static> SnackbarController<State> {
     pub fn new() -> Self {
         Self {
             pending: Rc::new(RefCell::new(None)),
+            queue: Rc::new(RefCell::new(VecDeque::new())),
         }
     }
 
@@ -466,14 +482,38 @@ impl<State: 'static> SnackbarController<State> {
         *self.pending.borrow_mut() = Some(message);
     }
 
-    /// Take whatever is pending, leaving the slot empty. Only
+    /// Append `message` to the FIFO notice queue. Queued messages show one at
+    /// a time, in order, each promoted once the previous one has fully
+    /// dismissed or timed out, and each with its own duration and action. The
+    /// explicit [`show`](Self::show) slot is served first. See the
+    /// [module docs](self) for how the two APIs relate.
+    pub fn enqueue(&self, message: SnackbarMessage<State>) {
+        self.queue.borrow_mut().push_back(message);
+    }
+
+    /// Drop every message waiting in the [`enqueue`](Self::enqueue) queue. The
+    /// visible message and the explicit [`show`](Self::show) slot are
+    /// untouched.
+    pub fn clear_queue(&self) {
+        self.queue.borrow_mut().clear();
+    }
+
+    /// How many messages are waiting in the [`enqueue`](Self::enqueue) queue
+    /// (not counting the visible one or the [`show`](Self::show) slot).
+    pub fn queue_len(&self) -> usize {
+        self.queue.borrow().len()
+    }
+
+    /// Take whatever is next: the explicit pending slot first, otherwise the
+    /// queue front, leaving both consistent. Only
     /// [`SnackbarHostView::build`]/[`SnackbarHostView::rebuild`] call this —
     /// both run inside a `View` pass generic over `State`, the one place this
     /// crate's callback-erasure rule
     /// (`docs/CODE_STANDARDS.md`'s Type-erase idiom) allows touching a typed
     /// closure before it is erased into the non-generic retained widget.
     fn take_pending(&self) -> Option<SnackbarMessage<State>> {
-        self.pending.borrow_mut().take()
+        let explicit = self.pending.borrow_mut().take();
+        explicit.or_else(|| self.queue.borrow_mut().pop_front())
     }
 }
 
@@ -1284,6 +1324,154 @@ mod tests {
             "a Cancel never dismisses"
         );
         assert!(w.current.as_ref().unwrap().captured_region.is_none());
+    }
+
+    // ---- enqueue FIFO -------------------------------------------------------
+
+    /// Rebuild the host against the controller (what the frame request drives
+    /// in production).
+    fn rebuild_host(
+        controller: &SnackbarController<Vec<u32>>,
+        prev: &SnackbarHostView<Vec<u32>>,
+        w: &mut SnackbarHostWidget,
+    ) -> SnackbarHostView<Vec<u32>> {
+        let next = snackbar_host(controller, probe(0).into_any());
+        let mut counter = 0u64;
+        next.rebuild(prev, w, &mut BuildCtx::new(&mut counter));
+        next
+    }
+
+    /// Run the current message from entrance through exit starting at `t0`,
+    /// returning the time after it has settled.
+    fn run_to_settle(w: &mut SnackbarHostWidget, t0: f64, hold_ms: f64) -> f64 {
+        frame(w, t0);
+        frame(w, t0 + 350.0);
+        // Still held shortly before its own duration elapses.
+        // (the hold clock starts with the first frame, alongside the entrance)
+        if hold_ms >= 600.0 {
+            frame(w, t0 + hold_ms - 100.0);
+            assert!(!w.current.as_ref().unwrap().exiting, "own {hold_ms}ms hold");
+        }
+        frame(w, t0 + 350.0 + hold_ms + 100.0);
+        assert!(w.current.as_ref().unwrap().exiting);
+        frame(w, t0 + 350.0 + hold_ms + 150.0);
+        frame(w, t0 + 350.0 + hold_ms + 500.0);
+        assert!(w.current.is_none());
+        t0 + 350.0 + hold_ms + 500.0
+    }
+
+    #[test]
+    fn enqueued_messages_appear_one_after_another_with_their_own_durations() {
+        let controller: SnackbarController<Vec<u32>> = SnackbarController::new();
+        controller.enqueue(snackbar("one").duration(Duration::from_millis(100)));
+        controller.enqueue(snackbar("two").duration(Duration::from_millis(600)));
+        controller.enqueue(snackbar("three").duration(Duration::from_millis(100)));
+        assert_eq!(controller.queue_len(), 3);
+
+        let mut view = snackbar_host(&controller, probe(0).into_any());
+        let mut w = build(&view);
+        layout(&mut w);
+        assert_eq!(w.current.as_ref().unwrap().message, "one");
+        assert_eq!(controller.queue_len(), 2);
+
+        // A rebuild while "one" is visible must not promote "two".
+        view = rebuild_host(&controller, &view, &mut w);
+        assert_eq!(w.current.as_ref().unwrap().message, "one");
+
+        let t = run_to_settle(&mut w, 0.0, 100.0);
+        view = rebuild_host(&controller, &view, &mut w);
+        assert_eq!(w.current.as_ref().unwrap().message, "two");
+        assert_eq!(controller.queue_len(), 1);
+        layout(&mut w);
+
+        let t = run_to_settle(&mut w, t + 10.0, 600.0);
+        view = rebuild_host(&controller, &view, &mut w);
+        assert_eq!(w.current.as_ref().unwrap().message, "three");
+        assert_eq!(controller.queue_len(), 0);
+        layout(&mut w);
+
+        run_to_settle(&mut w, t + 10.0, 100.0);
+        rebuild_host(&controller, &view, &mut w);
+        assert!(w.current.is_none(), "queue drained");
+    }
+
+    #[test]
+    fn show_replaces_the_pending_slot_and_leaves_the_queue_intact() {
+        let controller: SnackbarController<Vec<u32>> = SnackbarController::new();
+        controller.show(snackbar("visible").duration(Duration::from_millis(100)));
+        let mut view = snackbar_host(&controller, probe(0).into_any());
+        let mut w = build(&view);
+        layout(&mut w);
+        assert_eq!(w.current.as_ref().unwrap().message, "visible");
+
+        controller.enqueue(snackbar("q1"));
+        controller.enqueue(snackbar("q2"));
+        controller.show(snackbar("slot-a"));
+        controller.show(snackbar("slot-b"));
+        assert_eq!(controller.queue_len(), 2, "show never touches the queue");
+
+        view = rebuild_host(&controller, &view, &mut w);
+        assert_eq!(w.current.as_ref().unwrap().message, "visible");
+
+        let t = run_to_settle(&mut w, 0.0, 100.0);
+        view = rebuild_host(&controller, &view, &mut w);
+        assert_eq!(
+            w.current.as_ref().unwrap().message,
+            "slot-b",
+            "the explicit slot (last show wins) is served before the queue"
+        );
+        assert_eq!(controller.queue_len(), 2);
+        layout(&mut w);
+
+        run_to_settle(&mut w, t + 10.0, 4000.0);
+        rebuild_host(&controller, &view, &mut w);
+        assert_eq!(w.current.as_ref().unwrap().message, "q1");
+        assert_eq!(controller.queue_len(), 1);
+    }
+
+    #[test]
+    fn clear_queue_drops_waiting_messages() {
+        let controller: SnackbarController<Vec<u32>> = SnackbarController::new();
+        controller.show(snackbar("visible").duration(Duration::from_millis(100)));
+        let mut view = snackbar_host(&controller, probe(0).into_any());
+        let mut w = build(&view);
+        layout(&mut w);
+        controller.enqueue(snackbar("q1"));
+        controller.enqueue(snackbar("q2"));
+        assert_eq!(controller.queue_len(), 2);
+
+        controller.clear_queue();
+        assert_eq!(controller.queue_len(), 0);
+
+        run_to_settle(&mut w, 0.0, 100.0);
+        view = rebuild_host(&controller, &view, &mut w);
+        let _ = view;
+        assert!(w.current.is_none(), "nothing left to promote");
+    }
+
+    #[test]
+    fn an_action_on_a_queued_message_fires_when_it_is_the_visible_one() {
+        let controller: SnackbarController<Vec<u32>> = SnackbarController::new();
+        controller.enqueue(snackbar("one").duration(Duration::from_millis(100)));
+        controller.enqueue(snackbar("two").action("Undo", |s: &mut Vec<u32>| s.push(7)));
+        let view = snackbar_host(&controller, probe(0).into_any());
+        let mut w = build(&view);
+        layout(&mut w);
+        let t = run_to_settle(&mut w, 0.0, 100.0);
+        rebuild_host(&controller, &view, &mut w);
+        assert_eq!(w.current.as_ref().unwrap().message, "two");
+        layout(&mut w);
+        frame(&mut w, t + 10.0);
+        frame(&mut w, t + 400.0);
+
+        let action_rect = w.current.as_ref().unwrap().action_rect.unwrap();
+        let bar_origin = w.current.as_ref().unwrap().bar_rect.origin();
+        let at = bar_origin + action_rect.center().to_vec2();
+        let mut state: Vec<u32> = Vec::new();
+        dispatch(&mut w, &mut state, &pointer(PointerPhase::Down, at.x, at.y));
+        dispatch(&mut w, &mut state, &pointer(PointerPhase::Up, at.x, at.y));
+        assert_eq!(state, vec![7], "the queued message's action fired once");
+        assert!(w.current.as_ref().unwrap().exiting);
     }
 
     // ---- Queue/replace ------------------------------------------------------
