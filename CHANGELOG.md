@@ -18,6 +18,15 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `ios_app!`): it hands back the overlay layers whose surface has dropped.
 - `frust-shell-common::overlay`: the shared `OverlayTable`, `OverlaySwitch`, `FrameRequest`,
   `assemble_overlay_cuts` and `SkewWindow` that the Android, iOS and macOS overlay hosts now use.
+- `frust_native_widgets::native_scaffold`: app chrome the host owns — a tab bar, title, leading
+  item, actions and an optional bottom toolbar (iOS `UITabBarController`, Android Material 3 bars
+  and floating action buttons, frust-drawn bars elsewhere). It brings `ChromeEvent`, `ActionItem`,
+  `MenuItem`, `Leading`, `ScrollState`, `ToolbarSpec` and `EdgeFade`, and the builder methods
+  `.toolbar`, `.edge_fade`/`.no_edge_fade` and `.resize_to_avoid_keyboard`.
+- `frust-native-widgets` Android arms for `native_segmented` (`MaterialButtonToggleGroup`) and
+  `show_native_sheet` (`BottomSheetDialog`).
+- iOS embedding: `FrustSceneDelegate.makeWindowRootViewController(hosting:)` and
+  `frustViewController`, so a host can place the one frust surface inside its own container.
 
 ### Changed
 
@@ -35,6 +44,12 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `FRUST_OVERLAY_SPIKE=0` switches off an alias value baked in at compile time.
 - iOS overlay views host their `CAMetalLayer` as a sublayer sized on the main thread, and the
   render thread leaves `drawableSize` alone.
+- `frust-native-widgets`' Android module depends on Material Components 1.14.0 (`api`), and a
+  consuming app needs a Material3-derived theme (`native-chrome-android-material3-theme-required`).
+- iOS tab selection under `native_scaffold` is native: a tap selects at once and the bar converges
+  to the app's spec after a ~250 ms settle, so apps must confirm in `on_tab_select`.
+- `examples/native-widgets-demo` is rewritten as four native-chrome tabs (Home, Controls, Dialogs,
+  Lab); the `section/<label>` deep links still work and `tab/<slug>` opens a tab.
 
 ### Fixed
 
