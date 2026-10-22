@@ -142,6 +142,30 @@ fn chrome_icon(symbol: &str, png: Arc<[u8]>) -> TabIcon {
     }
 }
 
+/// Publishes the `assets/icons` PNG `bytes` once in `cell`, so every build
+/// hands the chrome the same bytes.
+fn published_png(cell: &'static OnceLock<Arc<[u8]>>, bytes: &'static [u8]) -> Arc<[u8]> {
+    Arc::clone(cell.get_or_init(|| Arc::from(bytes)))
+}
+
+/// The New action's `plus.png`.
+fn plus_png() -> Arc<[u8]> {
+    static PLUS_PNG: OnceLock<Arc<[u8]>> = OnceLock::new();
+    published_png(&PLUS_PNG, include_bytes!("../assets/icons/plus.png"))
+}
+
+/// The Search action's `search.png`.
+fn search_png() -> Arc<[u8]> {
+    static SEARCH_PNG: OnceLock<Arc<[u8]>> = OnceLock::new();
+    published_png(&SEARCH_PNG, include_bytes!("../assets/icons/search.png"))
+}
+
+/// The More actions' `more.png`.
+fn more_png() -> Arc<[u8]> {
+    static MORE_PNG: OnceLock<Arc<[u8]>> = OnceLock::new();
+    published_png(&MORE_PNG, include_bytes!("../assets/icons/more.png"))
+}
+
 // ---------------------------------------------------------------------------
 // Old section labels, destinations and anchors
 // ---------------------------------------------------------------------------
@@ -685,13 +709,14 @@ impl Component for NativeWidgetsDemoApp {
     fn build(&self, state: &mut NativeWidgetsDemoState) -> impl View<NativeWidgetsDemoState> {
         let tab = state.tab.get();
         let detail = Self::detail(state, tab);
+        let composer_open = state.composer_open.get();
         native_scaffold(Self::body(state, tab))
             .tabs(Self::tabs(state), tab.slug())
             .title(Self::title(tab, detail.as_ref()))
             .subtitle_if(Self::subtitle(detail.as_ref()))
             .leading(Self::leading(state, tab))
             .actions(Self::actions(tab, state.route(tab).depth() > 1))
-            .toolbar(Self::toolbar(tab, detail.as_ref()))
+            .toolbar(Self::toolbar(tab, detail.as_ref(), composer_open))
             .scroll(Self::scroll(state, tab))
             .events_into(state.chrome_event)
             .on_tab_select(Self::on_tab_select(state))
@@ -796,14 +821,10 @@ impl NativeWidgetsDemoApp {
         }
     }
 
-    /// One action, its SF Symbol shown on Apple targets and its title elsewhere.
-    fn action(id: &str, title: &str, symbol: &str) -> ActionItem {
-        let item = ActionItem::new(id, title);
-        if cfg!(target_vendor = "apple") {
-            item.icon(TabIcon::AppleSymbol(symbol.to_string()))
-        } else {
-            item
-        }
+    /// One action: its SF Symbol on Apple targets, else its `png` icon, with
+    /// its title beside either (see [`chrome_icon`]).
+    fn action(id: &str, title: &str, symbol: &str, png: Arc<[u8]>) -> ActionItem {
+        ActionItem::new(id, title).icon(chrome_icon(symbol, png))
     }
 
     /// Above a root: the page's Share/Copy link menu. At a root: Home's '+'
@@ -811,7 +832,7 @@ impl NativeWidgetsDemoApp {
     fn actions(tab: Tab, pushed: bool) -> Vec<ActionItem> {
         if pushed {
             return vec![
-                Self::action(DETAIL_MORE, "More", "ellipsis.circle").menu(vec![
+                Self::action(DETAIL_MORE, "More", "ellipsis.circle", more_png()).menu(vec![
                     MenuItem::new("share", "Share"),
                     MenuItem::new("copy-link", "Copy link"),
                 ]),
@@ -819,17 +840,17 @@ impl NativeWidgetsDemoApp {
         }
         let home = (tab == Tab::Home).then(|| {
             [
-                Self::action(ADD, "New", "plus").menu(vec![
+                Self::action(ADD, "New", "plus", plus_png()).menu(vec![
                     MenuItem::new("new-issue", "New issue"),
                     MenuItem::new("new-repository", "New repository"),
                 ]),
-                Self::action(SEARCH, "Search", "magnifyingglass"),
+                Self::action(SEARCH, "Search", "magnifyingglass", search_png()),
             ]
         });
         home.into_iter()
             .flatten()
             .chain(std::iter::once(
-                Self::action(MORE, "More", "ellipsis.circle").menu(vec![
+                Self::action(MORE, "More", "ellipsis.circle", more_png()).menu(vec![
                     MenuItem::new("toggle-brightness", "Toggle brightness"),
                     MenuItem::new("reread-slots", "Re-read live slots"),
                     MenuItem::new("about", "About"),
@@ -838,10 +859,11 @@ impl NativeWidgetsDemoApp {
             .collect()
     }
 
-    /// The Comment/Info toolbar while Home shows a detail page; empty (shown
-    /// as nothing) otherwise.
-    fn toolbar(tab: Tab, detail: Option<&DetailRoute>) -> ToolbarSpec {
-        if tab != Tab::Home || detail.is_none() {
+    /// The Comment/Info toolbar while Home shows a detail page with its
+    /// composer closed: an open composer sits at the column's foot, where the
+    /// toolbar would cover it. Empty (shown as nothing) otherwise.
+    fn toolbar(tab: Tab, detail: Option<&DetailRoute>, composer_open: bool) -> ToolbarSpec {
+        if tab != Tab::Home || detail.is_none() || composer_open {
             return ToolbarSpec::new();
         }
         ToolbarSpec::new()

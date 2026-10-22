@@ -7,7 +7,7 @@
 use frust::authoring::text::FontWeight;
 use frust::{
     AnyView, Axis, Color, EdgeInsets, FlexChild, FlexView, GestureDetector, IconSource, Padding,
-    Theme, View, container, divider, flexible, icon, icons, inflexible, text,
+    Set, Theme, View, container, divider, flexible, icon, icons, inflexible, text,
 };
 use frust_native_widgets::native_button;
 
@@ -27,11 +27,13 @@ const TILE: f64 = 40.0;
 /// Width and height of the native "Add Favorites" button.
 const FAVORITES_BUTTON: (f64, f64) = (180.0, 44.0);
 
-/// One "My Work" row: its label, icon, and which theme colour fills its tile.
+/// One "My Work" row: its label, icon, the theme colour that fills its tile,
+/// and the colour of the icon on it.
 struct WorkRow {
     label: &'static str,
     icon: IconSource,
     tile: fn(&Theme) -> Color,
+    glyph: fn(&Theme) -> Color,
 }
 
 /// The "My Work" rows, in the GitHub app's order.
@@ -40,36 +42,43 @@ const WORK_ROWS: [WorkRow; 7] = [
         label: "Issues",
         icon: icons::DESCRIPTION,
         tile: |t| t.scheme().primary,
+        glyph: |t| t.scheme().surface,
     },
     WorkRow {
         label: "Pull Requests",
         icon: icons::ARROW_FORWARD,
         tile: |t| t.scheme().tertiary,
+        glyph: |t| t.scheme().surface,
     },
     WorkRow {
         label: "Discussions",
         icon: icons::FORUM,
         tile: |t| t.scheme().secondary,
+        glyph: |t| t.scheme().surface,
     },
     WorkRow {
         label: "Projects",
         icon: icons::PUSH_PIN,
         tile: |t| t.scheme().error,
+        glyph: |t| t.scheme().surface,
     },
     WorkRow {
         label: "Top Repositories",
         icon: icons::TAG,
-        tile: |t| t.scheme().on_primary_container,
+        tile: |t| t.scheme().tertiary_container,
+        glyph: |t| t.scheme().on_tertiary_container,
     },
     WorkRow {
         label: "Organizations",
         icon: icons::GROUP,
         tile: |t| t.scheme().on_tertiary_container,
+        glyph: |t| t.scheme().surface,
     },
     WorkRow {
         label: "Starred",
         icon: icons::STAR,
         tile: |t| t.scheme().on_secondary_container,
+        glyph: |t| t.scheme().surface,
     },
 ];
 
@@ -136,7 +145,7 @@ fn work_rows(state: &S) -> Vec<FlexChild<S>> {
 /// pushes the detail page onto the Home navigator.
 fn work_row(state: &S, work: &WorkRow) -> impl View<S> {
     let theme = theme();
-    let tile = container(icon(work.icon).size(22.0).color(theme.scheme().surface))
+    let tile = container(icon(work.icon).size(22.0).color((work.glyph)(&theme)))
         .fill((work.tile)(&theme))
         .radius(10.0)
         .size_centered(TILE, TILE);
@@ -167,8 +176,9 @@ fn detail_title(label: &str) -> String {
 }
 
 /// Push a detail page titled `title` onto the Home navigator. Runs in a tap
-/// handler, never in `build`.
+/// handler, never in `build`. The page opens with its composer closed.
 fn open_detail(state: &mut S, handles: &S, title: &str) {
+    state.composer_open.set(false);
     let route = DetailRoute::new(title, REPOSITORY);
     let (handles, shown) = (handles.clone(), route.clone());
     route.push(state.nav(Tab::Home), move || detail::page(&handles, &shown));
