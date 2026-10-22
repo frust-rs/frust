@@ -420,18 +420,11 @@ object FrustNativePresenter {
     }
 
     /**
-     * The dialog's context: [activity] itself, or — when the spec pins
-     * `dark` — the Activity's theme with the night bit forced, the way
-     * [FrustNativeChrome] themes its bars.
+     * The dialog's context: the Activity's manifest theme, with the night bit
+     * forced when the spec pins `dark`, the way [FrustNativeChrome] themes its bars.
      */
-    private fun sheetContext(activity: Activity, spec: JSONObject): Context {
-        if (!spec.has("dark")) return activity
-        val config = Configuration(activity.resources.configuration)
-        val night = if (spec.getBoolean("dark")) Configuration.UI_MODE_NIGHT_YES else Configuration.UI_MODE_NIGHT_NO
-        config.uiMode = (config.uiMode and Configuration.UI_MODE_NIGHT_MASK.inv()) or night
-        val theme = activity.packageManager.getActivityInfo(activity.componentName, 0).themeResource
-        return ContextThemeWrapper(activity, theme).apply { applyOverrideConfiguration(config) }
-    }
+    private fun sheetContext(activity: Activity, spec: JSONObject): Context =
+        FrustNativeControlFactory.materialContext(activity, if (spec.has("dark")) spec.getBoolean("dark") else null)
 
     /** The drag handle (when `grabber`) over a scrolling column of the spec's rows. */
     /**
