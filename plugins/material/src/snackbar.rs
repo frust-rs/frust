@@ -188,6 +188,7 @@ use peniko::{Brush, Color};
 
 use crate::icons;
 use crate::press::presses;
+use crate::strings::MaterialStrings;
 use crate::tokens::MaterialMotion;
 
 // ---- Theme-token constants (m3e_snackbar_theme.dart's `M3ESnackbarTheme.defaults`) --
@@ -387,6 +388,7 @@ pub struct SnackbarMessage<State: 'static> {
     on_action: Option<OnAction<State>>,
     duration: Duration,
     dismissible: bool,
+    dismiss_label: Option<String>,
 }
 
 /// Start building a snackbar message with body text `message`. Chain
@@ -400,6 +402,7 @@ pub fn snackbar<State: 'static>(message: impl Into<String>) -> SnackbarMessage<S
         on_action: None,
         duration: DEFAULT_DURATION,
         dismissible: false,
+        dismiss_label: None,
     }
 }
 
@@ -435,6 +438,14 @@ impl<State: 'static> SnackbarMessage<State> {
     /// affordance at all (see the module docs).
     pub fn dismissible(mut self) -> Self {
         self.dismissible = true;
+        self
+    }
+
+    /// Override the close icon's accessible name. Unset, it reads
+    /// [`MaterialStrings::snackbar_dismiss_a11y`] from the active theme
+    /// ("Dismiss" in English).
+    pub fn dismiss_label(mut self, label: impl Into<String>) -> Self {
+        self.dismiss_label = Some(label.into());
         self
     }
 }
@@ -529,6 +540,7 @@ struct ErasedSnackbar {
     on_action: Option<ErasedCallback>,
     duration: Duration,
     dismissible: bool,
+    dismiss_label: Option<String>,
 }
 
 fn erase<State: 'static>(msg: SnackbarMessage<State>) -> ErasedSnackbar {
@@ -538,6 +550,7 @@ fn erase<State: 'static>(msg: SnackbarMessage<State>) -> ErasedSnackbar {
         on_action: msg.on_action.map(|f| erase_callback(&f)),
         duration: msg.duration,
         dismissible: msg.dismissible,
+        dismiss_label: msg.dismiss_label,
     }
 }
 
@@ -618,6 +631,11 @@ struct ActiveSnackbar {
     action_run: Option<TextRun>,
     on_action: Option<ErasedCallback>,
     dismissible: bool,
+    /// The setter's close-icon accessible name; wins over the theme.
+    dismiss_label: Option<String>,
+    /// The theme-resolved close-icon accessible name, refreshed each layout
+    /// (semantics has no theme handle).
+    dismiss_a11y: String,
     hold: AnimationController,
 
     /// Overall slide/fade progress, `0.0` (fully hidden) to `1.0` (fully
@@ -662,6 +680,8 @@ impl ActiveSnackbar {
             action_run,
             on_action: msg.on_action,
             dismissible: msg.dismissible,
+            dismiss_label: msg.dismiss_label,
+            dismiss_a11y: MaterialStrings::ENGLISH.snackbar_dismiss_a11y.to_string(),
             hold,
             progress: 0.0,
             ramp_from: 0.0,
@@ -784,6 +804,11 @@ impl Widget for SnackbarHostWidget {
 
         if let Some(active) = &mut self.current {
             let theme = Theme::from_layout_ctx(ctx);
+            if active.dismissible && active.dismiss_label.is_none() {
+                active.dismiss_a11y = MaterialStrings::resolve(theme)
+                    .snackbar_dismiss_a11y
+                    .to_string();
+            }
             let (message_style, action_style) = (message_style(theme), action_style(theme));
             let message_size = active.message_run.shape(ctx, &message_style);
             let action_content = active.action_run.as_mut().map(|run| {
@@ -979,6 +1004,10 @@ impl Widget for SnackbarHostWidget {
             let message = active.message.clone();
             let action_label = active.action_label.clone();
             let dismissible = active.dismissible;
+            let dismiss_a11y = active
+                .dismiss_label
+                .clone()
+                .unwrap_or_else(|| active.dismiss_a11y.clone());
             ctx.push_container(
                 Role::Alert,
                 move |node| node.set_label(message.as_str()),
@@ -991,7 +1020,7 @@ impl Widget for SnackbarHostWidget {
                     }
                     if dismissible {
                         ctx.push_node(Role::Button, |node| {
-                            node.set_label("Dismiss");
+                            node.set_label(dismiss_a11y.as_str());
                             node.add_action(Action::Click);
                         });
                     }
@@ -1887,5 +1916,60 @@ mod tests {
             (bar.center().x - 600.0).abs() < 1e-9,
             "centered, not edge-pinned"
         );
+    }
+
+    // ---- MaterialStrings: setter > theme > English (close-icon a11y) -------
+
+    fn thai_theme() -> Theme {
+        let mut theme = crate::baseline();
+        let mut thai = MaterialStrings::ENGLISH;
+        thai.snackbar_dismiss_a11y = "ปิด".into();
+        theme.extensions.insert(thai);
+        theme
+    }
+
+    /// The semantics labels of a dismissible message laid out under `theme`.
+    fn dismiss_labels(theme: Option<Theme>, label: Option<&str>) -> Vec<String> {
+        let controller = SnackbarController::<Vec<u32>>::new();
+        let mut msg = snackbar("Saved").dismissible();
+        if let Some(label) = label {
+            msg = msg.dismiss_label(label);
+        }
+        controller.show(msg);
+        let mut root: frust_core::RenderRoot<Vec<u32>, SnackbarHostView<Vec<u32>>> =
+            frust_core::RenderRoot::new();
+        if let Some(theme) = theme {
+            root.set_theme(Box::new(theme));
+        }
+        let mut logic = |_: &mut Vec<u32>| snackbar_host(&controller, probe(0).into_any());
+        let mut state = Vec::<u32>::new();
+        root.rebuild(&mut logic, &mut state);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(WINDOW, &mut tcx as &mut dyn Any);
+        root.semantics()
+            .nodes
+            .iter()
+            .filter_map(|(_, n)| n.label().map(str::to_string))
+            .collect()
+    }
+
+    #[test]
+    fn dismiss_a11y_defaults_to_english() {
+        let labels = dismiss_labels(None, None);
+        assert!(labels.iter().any(|l| l == "Dismiss"), "{labels:?}");
+    }
+
+    #[test]
+    fn dismiss_a11y_reads_the_thai_theme_strings() {
+        let labels = dismiss_labels(Some(thai_theme()), None);
+        assert!(labels.iter().any(|l| l == "ปิด"), "{labels:?}");
+        assert!(!labels.iter().any(|l| l == "Dismiss"));
+    }
+
+    #[test]
+    fn dismiss_label_setter_beats_the_theme_strings() {
+        let labels = dismiss_labels(Some(thai_theme()), Some("Shut"));
+        assert!(labels.iter().any(|l| l == "Shut"), "{labels:?}");
+        assert!(!labels.iter().any(|l| l == "ปิด"));
     }
 }

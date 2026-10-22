@@ -114,6 +114,7 @@ use peniko::{Brush, Color};
 use super::icons;
 use super::press::presses;
 use super::state_layer::StateLayer;
+use super::strings::MaterialStrings;
 
 /// Fixed chip height, in logical px (`M3EChipTheme.height`).
 const CHIP_HEIGHT: f64 = 32.0;
@@ -1083,6 +1084,7 @@ pub struct InputChipView<State: 'static> {
     elevated: bool,
     on_press: OnPress<State>,
     on_deleted: Option<OnPress<State>>,
+    remove_label: Option<String>,
 }
 
 /// Create an input chip labelled `label` that runs `on_press` against the
@@ -1098,6 +1100,7 @@ pub fn input_chip<State: 'static, F: Fn(&mut State) + 'static>(
         elevated: false,
         on_press: Rc::new(on_press),
         on_deleted: None,
+        remove_label: None,
     }
 }
 
@@ -1134,6 +1137,14 @@ impl<State: 'static> InputChipView<State> {
         self.on_deleted = Some(Rc::new(on_deleted));
         self
     }
+
+    /// Override the delete icon's accessible name. Unset, it reads
+    /// [`MaterialStrings::chip_remove_a11y`] from the active theme ("Remove"
+    /// in English).
+    pub fn remove_label(mut self, label: impl Into<String>) -> Self {
+        self.remove_label = Some(label.into());
+        self
+    }
 }
 
 /// The retained widget for an [`InputChipView`].
@@ -1144,6 +1155,11 @@ pub struct InputChipWidget {
     label_text: String,
     elevated: bool,
     has_delete: bool,
+    /// The setter's delete-icon accessible name; wins over the theme.
+    remove_label: Option<String>,
+    /// The theme-resolved delete-icon accessible name, refreshed each layout
+    /// (semantics has no theme handle).
+    remove_a11y: String,
     /// The delete icon's local hit rect, from [`Widget::layout`]. `Rect::ZERO`
     /// when `has_delete` is `false`.
     delete_rect: Rect,
@@ -1171,6 +1187,8 @@ impl<State: 'static> View<State> for InputChipView<State> {
             label_text: self.label.clone(),
             elevated: self.elevated,
             has_delete: self.on_deleted.is_some(),
+            remove_label: self.remove_label.clone(),
+            remove_a11y: MaterialStrings::ENGLISH.chip_remove_a11y.to_string(),
             delete_rect: Rect::ZERO,
             armed: None,
             pressed_inside: false,
@@ -1195,6 +1213,11 @@ impl<State: 'static> View<State> for InputChipView<State> {
             .as_ref()
             .map(frust::authoring::erase_callback);
         let mut flags = ChangeFlags::NONE;
+
+        if prev.remove_label != self.remove_label {
+            element.remove_label = self.remove_label.clone();
+            flags |= ChangeFlags::PAINT;
+        }
 
         if prev.elevated != self.elevated {
             element.elevated = self.elevated;
@@ -1287,6 +1310,11 @@ impl Widget for InputChipWidget {
             .set_origin(Point::new(x, (CHIP_HEIGHT - label_size.height) / 2.0));
         x += label_size.width;
         if self.has_delete {
+            if self.remove_label.is_none() {
+                self.remove_a11y = MaterialStrings::from_layout_ctx(ctx)
+                    .chip_remove_a11y
+                    .to_string();
+            }
             x += CHIP_ICON_LABEL_GAP;
             let icon_y = (CHIP_HEIGHT - CHIP_ICON_SIZE) / 2.0;
             self.delete_rect = Rect::new(x, icon_y, x + CHIP_ICON_SIZE, icon_y + CHIP_ICON_SIZE);
@@ -1412,7 +1440,11 @@ impl Widget for InputChipWidget {
                         node.add_action(Action::Click);
                     });
                     ctx.push_node(Role::Button, |node| {
-                        node.set_label("Remove");
+                        node.set_label(
+                            self.remove_label
+                                .as_deref()
+                                .unwrap_or(self.remove_a11y.as_str()),
+                        );
                         node.add_action(Action::Click);
                     });
                 },
@@ -2254,6 +2286,66 @@ mod tests {
                 .find(|(_, n)| n.role() == Role::Button)
                 .expect("input chip without delete contributes a single Role::Button node");
             assert_eq!(node.label(), Some("Tag"));
+        }
+    }
+
+    mod strings {
+        use super::*;
+        use frust::authoring::text::TextContext;
+
+        fn thai_theme() -> Theme {
+            let mut theme = crate::baseline();
+            let mut thai = MaterialStrings::ENGLISH;
+            thai.chip_remove_a11y = "ลบ".into();
+            theme.extensions.insert(thai);
+            theme
+        }
+
+        /// The semantics labels of a deletable input chip laid out under
+        /// `theme`, optionally with the `remove_label` setter.
+        fn labels(theme: Option<Theme>, setter: Option<&str>) -> Vec<String> {
+            let setter = setter.map(str::to_string);
+            let mut logic = move |_: &mut ()| {
+                let chip =
+                    input_chip::<(), _>("Tag", |_s: &mut ()| {}).on_deleted(|_s: &mut ()| {});
+                match &setter {
+                    Some(label) => chip.remove_label(label.clone()),
+                    None => chip,
+                }
+            };
+            let mut root: frust_core::RenderRoot<(), InputChipView<()>> =
+                frust_core::RenderRoot::new();
+            if let Some(theme) = theme {
+                root.set_theme(Box::new(theme));
+            }
+            let mut state = ();
+            root.rebuild(&mut logic, &mut state);
+            let mut tcx = TextContext::new();
+            root.layout_with_text(Size::new(200.0, 200.0), &mut tcx as &mut dyn Any);
+            root.semantics()
+                .nodes
+                .iter()
+                .filter_map(|(_, n)| n.label().map(str::to_string))
+                .collect()
+        }
+
+        #[test]
+        fn remove_a11y_defaults_to_english() {
+            assert!(labels(None, None).iter().any(|l| l == "Remove"));
+        }
+
+        #[test]
+        fn remove_a11y_reads_the_thai_theme_strings() {
+            let labels = labels(Some(thai_theme()), None);
+            assert!(labels.iter().any(|l| l == "ลบ"), "{labels:?}");
+            assert!(!labels.iter().any(|l| l == "Remove"));
+        }
+
+        #[test]
+        fn remove_label_setter_beats_the_theme_strings() {
+            let labels = labels(Some(thai_theme()), Some("Drop"));
+            assert!(labels.iter().any(|l| l == "Drop"), "{labels:?}");
+            assert!(!labels.iter().any(|l| l == "ลบ"));
         }
     }
 }

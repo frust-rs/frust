@@ -121,6 +121,7 @@ use crate::overlay::{
     OverlaySide, overlay_modal, show_overlay_modal,
 };
 use crate::radio::radio;
+use crate::strings::MaterialStrings;
 
 /// Panel padding on all four edges, in logical px (`M3EDialogTheme.padding`).
 const DIALOG_PADDING: f64 = 24.0;
@@ -146,12 +147,6 @@ const HEADER_EDGE_GAP: f64 = 4.0;
 /// Gap between the header's title and a trailing action, and between that
 /// action and the header's trailing edge (`M3EDialogTheme.headerActionGap`).
 const HEADER_ACTION_GAP: f64 = 16.0;
-/// The reference's `_cancelLabel` default.
-const DEFAULT_CANCEL_LABEL: &str = "Cancel";
-/// The reference's `_confirmLabel` default.
-const DEFAULT_CONFIRM_LABEL: &str = "OK";
-/// The reference's `_closeSemanticLabel`.
-const CLOSE_SEMANTIC_LABEL: &str = "Close";
 
 /// Title type-scale token (M3 `headlineSmallEmphasized` — matches
 /// `frust-theme::typography`'s `HEADLINE_SMALL_EMPHASIZED`). Hardcoded rather
@@ -750,8 +745,8 @@ pub struct SelectionDialogView<State: 'static> {
     multi_select: bool,
     selected: Vec<String>,
     on_toggle: Option<OnToggle<State>>,
-    cancel_label: String,
-    confirm_label: String,
+    cancel_label: Option<String>,
+    confirm_label: Option<String>,
     on_confirm: Option<OnDismiss<State>>,
     dismissable: bool,
     on_dismiss: Option<OnDismiss<State>>,
@@ -770,8 +765,8 @@ pub fn selection_dialog<State: 'static>(
         multi_select: false,
         selected: Vec::new(),
         on_toggle: None,
-        cancel_label: DEFAULT_CANCEL_LABEL.to_string(),
-        confirm_label: DEFAULT_CONFIRM_LABEL.to_string(),
+        cancel_label: None,
+        confirm_label: None,
         on_confirm: None,
         dismissable: true,
         on_dismiss: None,
@@ -803,15 +798,19 @@ impl<State: 'static> SelectionDialogView<State> {
         self
     }
 
-    /// Override the cancel action's label (`_cancelLabel`, default "Cancel").
+    /// Override the cancel action's label (`_cancelLabel`). Unset, it reads
+    /// [`MaterialStrings::dialog_cancel`] from the ambient theme ("Cancel" in
+    /// English).
     pub fn cancel_label(mut self, label: impl Into<String>) -> Self {
-        self.cancel_label = label.into();
+        self.cancel_label = Some(label.into());
         self
     }
 
-    /// Override the confirm action's label (`_confirmLabel`, default "OK").
+    /// Override the confirm action's label (`_confirmLabel`). Unset, it reads
+    /// [`MaterialStrings::dialog_confirm`] from the ambient theme ("OK" in
+    /// English).
     pub fn confirm_label(mut self, label: impl Into<String>) -> Self {
-        self.confirm_label = label.into();
+        self.confirm_label = Some(label.into());
         self
     }
 
@@ -855,25 +854,30 @@ impl<State: 'static> SelectionDialogView<State> {
             on_toggle: self.on_toggle.clone().unwrap_or_else(|| Rc::new(|_, _| {})),
         };
 
+        let strings = MaterialStrings::from_build_context();
+        let cancel_label = self
+            .cancel_label
+            .clone()
+            .unwrap_or_else(|| strings.dialog_cancel.to_string());
+        let confirm_label = self
+            .confirm_label
+            .clone()
+            .unwrap_or_else(|| strings.dialog_confirm.to_string());
         let on_dismiss = self.on_dismiss.clone();
-        let cancel_action: AnyView<State> = any(text_button(
-            self.cancel_label.clone(),
-            move |state: &mut State| {
+        let cancel_action: AnyView<State> =
+            any(text_button(cancel_label, move |state: &mut State| {
                 if let Some(on_dismiss) = &on_dismiss {
                     on_dismiss(state);
                 }
-            },
-        ));
+            }));
         let on_confirm = self.on_confirm.clone();
-        let confirm_action: AnyView<State> = any(button(
-            self.confirm_label.clone(),
-            move |state: &mut State| {
+        let confirm_action: AnyView<State> =
+            any(button(confirm_label, move |state: &mut State| {
                 if let Some(on_confirm) = &on_confirm {
                     on_confirm(state);
                 }
-            },
-        )
-        .enabled(!self.selected.is_empty()));
+            })
+            .enabled(!self.selected.is_empty()));
 
         let panel = DialogPanelView {
             title: Some(self.title.clone()),
@@ -1185,6 +1189,7 @@ pub struct FullScreenDialogView<State: 'static> {
     title: String,
     body: Rc<AnyView<State>>,
     action: Option<Rc<AnyView<State>>>,
+    close_label: Option<String>,
     dismissable: bool,
     on_dismiss: Option<OnDismiss<State>>,
     dismiss_handle: Option<ModalDismiss>,
@@ -1201,6 +1206,7 @@ pub fn full_screen_dialog<State: 'static, V: View<State>>(
         title: title.into(),
         body: Rc::new(any(body)),
         action: None,
+        close_label: None,
         dismissable: true,
         on_dismiss: None,
         dismiss_handle: None,
@@ -1222,6 +1228,14 @@ impl<State: 'static> FullScreenDialogView<State> {
     /// where the header close is the dialog's one unconditional exit).
     pub fn dismissable(mut self, dismissable: bool) -> Self {
         self.dismissable = dismissable;
+        self
+    }
+
+    /// Override the header close affordance's accessible name. Unset, it
+    /// reads [`MaterialStrings::dialog_close_a11y`] from the ambient theme
+    /// ("Close" in English).
+    pub fn close_label(mut self, label: impl Into<String>) -> Self {
+        self.close_label = Some(label.into());
         self
     }
 
@@ -1258,6 +1272,11 @@ impl<State: 'static> FullScreenDialogView<State> {
             body: self.body.clone(),
             action: self.action.clone(),
             on_dismiss: self.on_dismiss.clone(),
+            close_label: self.close_label.clone().unwrap_or_else(|| {
+                MaterialStrings::from_build_context()
+                    .dialog_close_a11y
+                    .to_string()
+            }),
         };
         let mut view = overlay_modal(panel, Self::config())
             .dismissable(self.dismissable)
@@ -1331,6 +1350,9 @@ struct FullScreenPanelView<State: 'static> {
     body: Rc<AnyView<State>>,
     action: Option<Rc<AnyView<State>>>,
     on_dismiss: Option<OnDismiss<State>>,
+    /// The close affordance's accessible name, resolved at compose time
+    /// (setter > ambient theme > English).
+    close_label: String,
 }
 
 /// The retained widget for a [`FullScreenPanelView`].
@@ -1345,13 +1367,16 @@ struct FullScreenPanelWidget {
 /// Build the header close affordance's view — [`icon_button`] over
 /// [`crate::icons::CLOSE`], firing `on_dismiss` directly (see the module
 /// docs' *Deliberate v1 scope cuts*).
-fn close_view<State: 'static>(on_dismiss: Option<OnDismiss<State>>) -> impl View<State> {
+fn close_view<State: 'static>(
+    on_dismiss: Option<OnDismiss<State>>,
+    label: &str,
+) -> impl View<State> {
     icon_button(icon(crate::icons::CLOSE), move |state: &mut State| {
         if let Some(on_dismiss) = &on_dismiss {
             on_dismiss(state);
         }
     })
-    .semantic_label(CLOSE_SEMANTIC_LABEL)
+    .semantic_label(label.to_string())
 }
 
 /// Build the header title's view (`titleLarge`, family from the theme's
@@ -1372,7 +1397,10 @@ impl<State: 'static> View<State> for FullScreenPanelView<State> {
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> FullScreenPanelWidget {
         FullScreenPanelWidget {
-            close: build_child(&close_view::<State>(self.on_dismiss.clone()), ctx),
+            close: build_child(
+                &close_view::<State>(self.on_dismiss.clone(), &self.close_label),
+                ctx,
+            ),
             title: build_child(&header_title_view::<State>(&self.title), ctx),
             action: self.action.as_ref().map(|a| build_child(a.as_ref(), ctx)),
             divider: build_child(&divider_view::<State>(), ctx),
@@ -1387,8 +1415,8 @@ impl<State: 'static> View<State> for FullScreenPanelView<State> {
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         let mut flags = rebuild_child(
-            &close_view::<State>(prev.on_dismiss.clone()),
-            &close_view::<State>(self.on_dismiss.clone()),
+            &close_view::<State>(prev.on_dismiss.clone(), &prev.close_label),
+            &close_view::<State>(self.on_dismiss.clone(), &self.close_label),
             &mut element.close,
             ctx,
         );
@@ -1433,7 +1461,7 @@ impl<State: 'static> View<State> for FullScreenPanelView<State> {
 
     fn teardown(&self, element: &mut FullScreenPanelWidget, ctx: &mut BuildCtx<'_>) {
         teardown_child(
-            &close_view::<State>(self.on_dismiss.clone()),
+            &close_view::<State>(self.on_dismiss.clone(), &self.close_label),
             &mut element.close,
             ctx,
         );
@@ -2052,5 +2080,123 @@ mod tests {
         h.pass();
         h.settle();
         assert!(h.state.results.is_empty());
+    }
+
+    // --- MaterialStrings: setter > ambient theme > English. ---
+
+    /// Provides `theme` as the ambient `Theme` context (when set), then hosts
+    /// the dialog under test, so build-time `use_context::<Theme>()` resolves.
+    struct StringsHost {
+        theme: Option<Theme>,
+        make: fn() -> AnyView<()>,
+    }
+    impl frust::Component for StringsHost {
+        type State = ();
+        fn init(&self) {}
+        fn build(&self, _state: &mut ()) -> impl View<()> {
+            if let Some(theme) = &self.theme {
+                frust::provide_context(theme.clone());
+            }
+            (self.make)()
+        }
+    }
+
+    /// A baseline theme carrying a Thai `MaterialStrings` extension.
+    fn thai_theme() -> Theme {
+        let mut theme = crate::baseline();
+        let mut thai = MaterialStrings::ENGLISH;
+        thai.dialog_cancel = "ยกเลิก".into();
+        thai.dialog_confirm = "ตกลง".into();
+        thai.dialog_close_a11y = "ปิด".into();
+        theme.extensions.insert(thai);
+        theme
+    }
+
+    /// Every label in the semantics tree of `make()` hosted under `theme`.
+    fn semantic_labels(theme: Option<Theme>, make: fn() -> AnyView<()>) -> Vec<String> {
+        let mut root: RenderRoot<(), frust::ComponentView<StringsHost>> = RenderRoot::new();
+        let mut logic = move |_: &mut ()| {
+            frust::component(StringsHost {
+                theme: theme.clone(),
+                make,
+            })
+        };
+        let mut state = ();
+        root.rebuild(&mut logic, &mut state);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(WINDOW, &mut tcx as &mut dyn Any);
+        root.paint(
+            &mut Recorder::default(),
+            FrameTime::from_nanos(1_000_000_000),
+        );
+        root.paint(
+            &mut Recorder::default(),
+            FrameTime::from_nanos(2_000_000_000),
+        );
+        root.rebuild(&mut logic, &mut state);
+        root.layout_with_text(WINDOW, &mut tcx as &mut dyn Any);
+        root.semantics()
+            .nodes
+            .iter()
+            .filter_map(|(_, n)| n.label().map(str::to_string))
+            .collect()
+    }
+
+    fn selection() -> AnyView<()> {
+        any(selection_dialog::<()>("Pick", vec!["A".into()]))
+    }
+    fn selection_with_setters() -> AnyView<()> {
+        any(selection_dialog::<()>("Pick", vec!["A".into()])
+            .cancel_label("Nope")
+            .confirm_label("Yep"))
+    }
+    fn full_screen() -> AnyView<()> {
+        any(full_screen_dialog::<(), _>("Edit", body_view::<()>("body")))
+    }
+    fn full_screen_with_setter() -> AnyView<()> {
+        any(full_screen_dialog::<(), _>("Edit", body_view::<()>("body")).close_label("Shut"))
+    }
+
+    #[test]
+    fn selection_dialog_actions_default_to_english() {
+        let labels = semantic_labels(None, selection);
+        assert!(labels.iter().any(|l| l == "Cancel"), "{labels:?}");
+        assert!(labels.iter().any(|l| l == "OK"), "{labels:?}");
+    }
+
+    #[test]
+    fn selection_dialog_actions_read_the_thai_theme_strings() {
+        let labels = semantic_labels(Some(thai_theme()), selection);
+        assert!(labels.iter().any(|l| l == "ยกเลิก"), "{labels:?}");
+        assert!(labels.iter().any(|l| l == "ตกลง"), "{labels:?}");
+        assert!(!labels.iter().any(|l| l == "Cancel" || l == "OK"));
+    }
+
+    #[test]
+    fn selection_dialog_setters_beat_the_theme_strings() {
+        let labels = semantic_labels(Some(thai_theme()), selection_with_setters);
+        assert!(labels.iter().any(|l| l == "Nope"), "{labels:?}");
+        assert!(labels.iter().any(|l| l == "Yep"), "{labels:?}");
+        assert!(!labels.iter().any(|l| l == "ยกเลิก" || l == "ตกลง"));
+    }
+
+    #[test]
+    fn full_screen_close_defaults_to_english() {
+        let labels = semantic_labels(None, full_screen);
+        assert!(labels.iter().any(|l| l == "Close"), "{labels:?}");
+    }
+
+    #[test]
+    fn full_screen_close_reads_the_thai_theme_strings() {
+        let labels = semantic_labels(Some(thai_theme()), full_screen);
+        assert!(labels.iter().any(|l| l == "ปิด"), "{labels:?}");
+        assert!(!labels.iter().any(|l| l == "Close"));
+    }
+
+    #[test]
+    fn full_screen_close_setter_beats_the_theme_strings() {
+        let labels = semantic_labels(Some(thai_theme()), full_screen_with_setter);
+        assert!(labels.iter().any(|l| l == "Shut"), "{labels:?}");
+        assert!(!labels.iter().any(|l| l == "ปิด"));
     }
 }
