@@ -16,7 +16,7 @@
 //! | Rust → Kotlin | `@JvmStatic install(generation: Long, specJson: String): Int` | Every key ([`android_wire::install_json`]); answers an `INSTALL_*` code |
 //! | Rust → Kotlin | `@JvmStatic apply(diffJson: String)` | Only the changed keys plus a `changed` array ([`android_wire::apply_json`]) |
 //! | Rust → Kotlin | `@JvmStatic setIcon(slot: Int, index: Int, png: ByteArray)` | Icon bytes, never JSON; empty bytes clear the entry |
-//! | Rust → Kotlin | `@JvmStatic setScroll(offset: Float, max: Float)` | [`ChromeField::Scroll`], never JSON (a3-03 owns the lift policy) |
+//! | Rust → Kotlin | `@JvmStatic setScroll(offset: Float, max: Float)` | [`ChromeField::Scroll`], never JSON; drives `AppBarLayout.setLifted` on a lifted-state change only |
 //! | Rust → Kotlin | `@JvmStatic dispose()` | Idempotent; never calls back into Rust |
 //! | Kotlin → Rust | [`Java_dev_frust_nativewidgets_FrustNativeChrome_nativeOnChromeEvent`]`(env, class, generation: jlong, kind: jint, detail: jlong)` | A tap, `FrustNativeListener`'s `KIND_CHROME_*` kinds → [`chrome::deliver`] |
 //! | Kotlin → Rust | [`Java_dev_frust_nativewidgets_FrustNativeChrome_nativeOnChromeLost`]`(env, class, generation: jlong)` | The Activity or content root went away under the installed chrome |
@@ -313,7 +313,11 @@ fn install_error(code: i32) -> ChromeError {
     }
 }
 
-/// `setScroll`'s `(offset, max)`, `(0, 0)` without a scroll state.
+/// `setScroll`'s `(offset, max)`, `(0, 0)` without a scroll state (at the top,
+/// so not lifted). The frust scroll offset, not a RecyclerView, is the lift
+/// source, and Android is the only consumer of `ChromeSpec.scroll` (iOS draws
+/// an edge fade instead). The scaffold publishes at most one per frame and
+/// Kotlin calls `setLifted` only when the lifted state flips.
 fn scroll_args(spec: &ChromeSpec) -> (f32, f32) {
     spec.scroll.map_or((0.0, 0.0), |scroll| {
         (scroll.offset as f32, scroll.max_offset as f32)
