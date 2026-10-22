@@ -112,7 +112,9 @@ class FrustNativeControlFactory : FrustPlatformViewFactory {
         @JvmStatic
         fun segmentedClear(group: View) {
             val g = group as MaterialButtonToggleGroup
-            holder(g).muted { g.removeAllViews() }
+            val holder = holder(g)
+            holder.muted { g.removeAllViews() }
+            holder.defaultTints.clear()
         }
 
         /** Append one outlined-style segment titled [label]. */
@@ -135,12 +137,17 @@ class FrustNativeControlFactory : FrustPlatformViewFactory {
             }
         }
 
-        /** Check segment [index], or clear the selection for a negative one. */
+        /**
+         * Check segment [index], or clear the selection for a negative one.
+         * A momentary group never shows a persistent check, so it clears
+         * whatever the planned index is (the drawn state follows the props).
+         */
         @JvmStatic
         fun segmentedSelect(group: View, index: Int) {
             val g = group as MaterialButtonToggleGroup
+            val momentary = holder(g).momentary
             holder(g).muted {
-                val child = if (index >= 0) g.getChildAt(index) else null
+                val child = if (index >= 0 && !momentary) g.getChildAt(index) else null
                 if (child != null) g.check(child.id) else g.clearChecked()
             }
         }

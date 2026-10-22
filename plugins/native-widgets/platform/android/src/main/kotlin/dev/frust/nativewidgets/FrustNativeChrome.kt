@@ -647,10 +647,18 @@ object FrustNativeChrome {
     private val bottomHeightWatch =
         View.OnLayoutChangeListener { _, _, top, _, bottom, _, oldTop, _, oldBottom ->
             val installed = live
-            if (installed != null && bottom - top != oldBottom - oldTop) {
-                ViewCompat.requestApplyInsets(installed.content)
+            if (installed != null) {
+                if (bottom - top != oldBottom - oldTop) ViewCompat.requestApplyInsets(installed.content)
+                // A nav laid out after the last insets pass still moves the FAB column.
+                repositionToolbar(installed)
             }
         }
+
+    /** [positionToolbar] from the window's current insets, for callers outside an insets pass. */
+    private fun repositionToolbar(installed: Installed) {
+        val insets = ViewCompat.getRootWindowInsets(installed.content) ?: return
+        positionToolbar(installed, insets)
+    }
 
     /** Pad the root to the bars' laid-out heights; `false` cancels a draw that would show a stale size. */
     private fun syncRootPadding(): Boolean {
@@ -918,6 +926,7 @@ object FrustNativeChrome {
         if (bottom.visibility != visibility) {
             bottom.visibility = visibility
             ViewCompat.requestApplyInsets(installed.content)
+            repositionToolbar(installed)
         }
     }
 

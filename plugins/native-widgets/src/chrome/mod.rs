@@ -374,20 +374,31 @@ pub(crate) fn toolbar_offset(spec: &ChromeSpec) -> usize {
     spec.top.as_ref().map_or(0, |top| top.actions.len())
 }
 
+/// A field's position in [`ChromeField`]'s declaration order; exhaustive, so
+/// a new field must be placed here too.
+fn declaration_rank(field: ChromeField) -> u8 {
+    match field {
+        ChromeField::Tabs => 0,
+        ChromeField::Selected => 1,
+        ChromeField::TopBar => 2,
+        ChromeField::Title => 3,
+        ChromeField::Subtitle => 4,
+        ChromeField::Leading => 5,
+        ChromeField::Actions => 6,
+        ChromeField::LargeTitle => 7,
+        ChromeField::Scroll => 8,
+        ChromeField::Brightness => 9,
+    }
+}
+
 /// [`ChromeDiff::between`], with a toolbar change reported as
 /// [`ChromeField::Actions`] (module doc, "One action index space").
 pub(crate) fn diff_specs<'a>(old: &ChromeSpec, new: &'a ChromeSpec) -> ChromeDiff<'a> {
     let mut diff = ChromeDiff::between(old, new);
     if old.toolbar != new.toolbar && !diff.contains(ChromeField::Actions) {
-        let later = |field: &ChromeField| {
-            matches!(
-                field,
-                ChromeField::LargeTitle | ChromeField::Scroll | ChromeField::Brightness
-            )
-        };
-        let at = diff.changed.iter().position(later);
-        diff.changed
-            .insert(at.unwrap_or(diff.changed.len()), ChromeField::Actions);
+        diff.changed.push(ChromeField::Actions);
+        // Restore `ChromeField` declaration order (the `ChromeDiff::changed` contract).
+        diff.changed.sort_by_key(|field| declaration_rank(*field));
     }
     diff
 }
@@ -1834,6 +1845,22 @@ mod tests {
             [ChromeField::TopBar]
         );
         assert!(ChromeDiff::between(&base, &base.clone()).is_empty());
+    }
+
+    #[test]
+    fn a_toolbar_change_keeps_earlier_and_later_fields_in_declaration_order() {
+        let base = spec();
+        let mut new = with_toolbar();
+        new.selected = Some(TabId::from("other"));
+        new.dark = !new.dark;
+        assert_eq!(
+            diff_specs(&base, &new).changed,
+            [
+                ChromeField::Selected,
+                ChromeField::Actions,
+                ChromeField::Brightness
+            ]
+        );
     }
 
     #[test]

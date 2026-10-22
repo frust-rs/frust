@@ -91,8 +91,9 @@ use super::{Detent, PresentError, Sender, SheetHost, SheetOutcome, SheetSpec, wi
 
 /// The live sheet's generation and detents — what
 /// [`select_detent`](SheetHost::select_detent) turns a [`Detent`] into a
-/// spec index with. Superseded by the next sheet; a stale entry is harmless,
-/// the generation filters it.
+/// spec index with. Superseded by the next sheet and cleared when `showSheet`
+/// fails; a stale entry is harmless, the generation filters it. (It stays
+/// outside the live entry, which lives in the unscoped `android_host`.)
 static DETENTS: Mutex<Option<(u64, Vec<Detent>)>> = Mutex::new(None);
 
 /// The spec index of `detent` in presentation `generation`'s detents.
@@ -101,6 +102,17 @@ fn detent_index(generation: u64, detent: Detent) -> Option<usize> {
     match detents.as_ref() {
         Some((live, detents)) if *live == generation => detents.iter().position(|d| *d == detent),
         _ => None,
+    }
+}
+
+/// Forget `generation`'s detents (a newer sheet's entry is left alone).
+fn clear_detents(generation: u64) {
+    let mut detents = DETENTS.lock().unwrap_or_else(|p| p.into_inner());
+    if detents
+        .as_ref()
+        .is_some_and(|(live, _)| *live == generation)
+    {
+        *detents = None;
     }
 }
 
@@ -140,6 +152,7 @@ impl SheetHost for Host {
         if result.is_err() {
             // `showSheet` never ran: nothing will resolve the parked entry.
             drop(take_live(generation));
+            clear_detents(generation);
         }
         result
     }
