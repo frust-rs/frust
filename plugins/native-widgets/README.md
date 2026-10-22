@@ -289,7 +289,9 @@ prominent), Android floating action buttons (the primary a FAB 16dp above the
 bottom navigation, the items stacked above it), a frust-drawn row above the
 fallback tab row. Its taps report through `.on_action`/`.on_menu` like the top
 bar's, so action ids must be unique across both: a toolbar entry repeating an
-earlier id is dropped and a one-line banner says so.
+earlier id is dropped and a one-line banner says so. On iOS the tab bar hides
+while a toolbar is shown (the toolbar takes the bottom spot, as in the GitHub
+app), animated only for a push/pop inside a tab, and returns with the toolbar.
 
 ---
 
