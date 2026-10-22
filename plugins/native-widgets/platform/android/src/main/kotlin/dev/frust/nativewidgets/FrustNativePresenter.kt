@@ -424,7 +424,7 @@ object FrustNativePresenter {
      * forced when the spec pins `dark`, the way [FrustNativeChrome] themes its bars.
      */
     private fun sheetContext(activity: Activity, spec: JSONObject): Context =
-        FrustNativeControlFactory.materialContext(activity, if (spec.has("dark")) spec.getBoolean("dark") else null)
+        FrustNativeControlFactory.materialContext(activity, null, if (spec.has("dark")) spec.getBoolean("dark") else null)
 
     /** The drag handle (when `grabber`) over a scrolling column of the spec's rows. */
     /**

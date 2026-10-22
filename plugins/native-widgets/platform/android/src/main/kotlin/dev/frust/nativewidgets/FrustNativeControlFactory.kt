@@ -26,13 +26,13 @@ package dev.frust.nativewidgets
 
 import android.app.Activity
 import android.content.Context
-import android.content.ContextWrapper
 import android.content.res.Configuration
 import android.view.ContextThemeWrapper
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.util.Log
 import android.view.View
+import android.widget.LinearLayout
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.button.MaterialButtonToggleGroup
 import dev.frust.FrustPlatformViewFactory
@@ -83,25 +83,24 @@ class FrustNativeControlFactory : FrustPlatformViewFactory {
         private const val TAG = "FrustNativeWidgets"
 
         /**
-         * [context] re-themed with the Activity's manifest theme (night bit
-         * forced when [dark] is non-null), as FrustNativeChrome themes its
-         * bars. The raw Activity context fails Material's AppCompat theme
-         * check on device (its live theme lacks the AppCompat marker the
-         * manifest theme carries), so every Material view is built under this.
+         * The Activity's manifest theme, with the night/locale configuration
+         * of [qualified] when given (else the Activity's), and the night bit
+         * forced when [dark] is non-null, as FrustNativeChrome themes its
+         * bars. The night-qualified context alone fails Material's AppCompat
+         * theme check: it is a bare ContextImpl with the framework theme and
+         * no Activity to unwrap; the raw Activity context fails it too (its
+         * live theme lacks the AppCompat marker the manifest theme carries).
          */
         @JvmStatic
-        fun materialContext(context: Context, dark: Boolean? = null): Context {
-            var base = context
-            while (base !is Activity && base is ContextWrapper) base = base.baseContext
-            val activity = base as? Activity ?: return context
+        fun materialContext(activity: Activity, qualified: Context? = null, dark: Boolean? = null): Context {
             val theme = activity.packageManager.getActivityInfo(activity.componentName, 0).themeResource
             val wrapper = ContextThemeWrapper(activity, theme)
+            val config = Configuration(qualified?.resources?.configuration ?: activity.resources.configuration)
             if (dark != null) {
-                val config = Configuration(activity.resources.configuration)
                 val night = if (dark) Configuration.UI_MODE_NIGHT_YES else Configuration.UI_MODE_NIGHT_NO
                 config.uiMode = (config.uiMode and Configuration.UI_MODE_NIGHT_MASK.inv()) or night
-                wrapper.applyOverrideConfiguration(config)
             }
+            wrapper.applyOverrideConfiguration(config)
             return wrapper
         }
 
@@ -113,9 +112,9 @@ class FrustNativeControlFactory : FrustPlatformViewFactory {
          * crashing.
          */
         @JvmStatic
-        fun segmentedCreate(context: Context, slotId: Long): View {
+        fun segmentedCreate(activity: Activity, qualified: Context, slotId: Long): View {
             try {
-                val group = MaterialButtonToggleGroup(materialContext(context))
+                val group = MaterialButtonToggleGroup(materialContext(activity, qualified))
                 group.isSingleSelection = true
                 group.isSelectionRequired = true
                 val holder = SegmentedHolder(FrustNativeListener(slotId))
@@ -159,7 +158,16 @@ class FrustNativeControlFactory : FrustPlatformViewFactory {
                 button.isEnabled = holder.enabled
                 holder.defaultTints[button.id] = button.backgroundTintList
                 holder.tint(button)
-                g.addView(button)
+                // Equal shares of the group width; labels must fit a narrow slot.
+                button.minWidth = 0
+                button.minimumWidth = 0
+                button.insetTop = 0
+                button.insetBottom = 0
+                val pad = (4 * g.resources.displayMetrics.density).toInt()
+                button.setPadding(pad, button.paddingTop, pad, button.paddingBottom)
+                button.maxLines = 1
+                button.ellipsize = android.text.TextUtils.TruncateAt.END
+                g.addView(button, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f))
             }
         }
 
