@@ -22,7 +22,9 @@
 //! supertype of `FrustNativeListener`, so the Android `platform` module
 //! drives `@JvmStatic` helpers on `FrustNativeControlFactory` (no new JNI
 //! export) and the Kotlin listener reports [`EVENT_KIND_SELECTION`] through
-//! `FrustNativeListener.reportSelection`. Under a non-Material theme
+//! `FrustNativeListener.reportSelection`. The group is built under the
+//! Activity's manifest theme (`FrustNativeControlFactory.materialContext`),
+//! not the raw context. Under a non-Material theme
 //! construction throws, is logged, and the slot takes the host's existing
 //! dead-slot path — never a crash.
 //!
@@ -329,13 +331,20 @@ pub(crate) mod platform {
             let slot = i64::try_from(props.slot).unwrap_or(i64::MAX);
             let view = ctx.with_frame(FRAME_CAPACITY, |ctx| {
                 let class = ctx.class(FACTORY_CLASS)?;
-                let context = ctx.context()?;
+                let activity = ctx.activity()?;
+                let qualified = ctx.context()?;
                 let view = ctx.run_jni("FrustNativeControlFactory.segmentedCreate", |env| {
                     env.call_static_method(
                         &class,
                         jni_str!("segmentedCreate"),
-                        jni_sig!("(Landroid/content/Context;J)Landroid/view/View;"),
-                        &[JValue::Object(context), JValue::Long(slot)],
+                        jni_sig!(
+                            "(Landroid/app/Activity;Landroid/content/Context;J)Landroid/view/View;"
+                        ),
+                        &[
+                            JValue::Object(activity),
+                            JValue::Object(qualified),
+                            JValue::Long(slot),
+                        ],
                     )?
                     .l()
                 })?;
