@@ -416,6 +416,7 @@ pub fn page_header(key: impl Into<PageKey>) -> FlexChild<S> {
 /// content starts below floating bars at rest and scrolls under them. The
 /// [`body_inset_probe`] around the safe area records the top inset it applies,
 /// which is where the body's first content sits.
+// erasure: keep every tab's page fn returns this as its AnyView root (page-fn contract)
 pub fn tab_body(state: &S, tab: Tab, children: Vec<FlexChild<S>>) -> AnyView<S> {
     any(viewport_probe(
         viewport_key(tab),

@@ -31,6 +31,7 @@ const TABLE_ROWS: [(&str, &str, &str); 4] = [
 
 /// See the page-fn contract in [`crate::pages`]; `route` is what this page
 /// was pushed with.
+// erasure: keep page-fn contract: a pushed page is an AnyView, mounted as one by the smoke tests
 pub fn page(state: &S, route: &DetailRoute) -> AnyView<S> {
     let scroller =
         scroll_view(safe_area(page_column(body(route)))).controller(state.detail_scroll.clone());
