@@ -1,6 +1,6 @@
 //! Native presentations: platform-owned modal UI (an alert, and on iOS/iPadOS
-//! a sheet) requested imperatively from Rust and resolved to exactly one
-//! terminal outcome.
+//! and Android a sheet) requested imperatively from Rust and resolved to
+//! exactly one terminal outcome.
 //!
 //! # Why not a platform-view slot
 //!
@@ -60,9 +60,12 @@
 //! `SheetHost` is the sheet seam: **iOS/iPadOS** — `apple_sheet`, a
 //! plugin-owned `UIViewController` subclass presented as a page sheet under
 //! `UISheetPresentationController` (detents, grabber, adaptive dismissal);
-//! **every other target** — this module's own `UnsupportedSheet`
-//! ([`PresentError::Unsupported`]; a macOS `NSPopover` or Android
-//! `BottomSheetDialog` arm is follow-up work).
+//! **Android** — `android_sheet`, a Material `BottomSheetDialog` built by the
+//! same `FrustNativePresenter` over `android_host`'s plumbing, its detents
+//! mapped onto `BottomSheetBehavior`'s half-expanded/expanded states
+//! ([`wire::sheet_state`]); **every other target** — this module's own
+//! `UnsupportedSheet` ([`PresentError::Unsupported`]; a macOS `NSPopover` arm
+//! is follow-up work).
 //!
 //! `apple_host` holds what every Apple arm shares: host discovery, the
 //! main-queue hop and the live-presentation guard.
@@ -73,6 +76,8 @@ mod oneshot;
 mod android_alert;
 #[cfg(target_os = "android")]
 mod android_host;
+#[cfg(target_os = "android")]
+mod android_sheet;
 #[cfg(target_os = "macos")]
 mod appkit_alert;
 #[cfg(target_os = "ios")]
@@ -93,8 +98,10 @@ use apple_alert::Host as PlatformHost;
 #[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
 use unsupported::Host as PlatformHost;
 
-#[cfg(not(target_os = "ios"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use UnsupportedSheet as SheetPlatformHost;
+#[cfg(target_os = "android")]
+use android_sheet::Host as SheetPlatformHost;
 #[cfg(target_os = "ios")]
 use apple_sheet::Host as SheetPlatformHost;
 
@@ -415,6 +422,12 @@ pub struct SheetAction {
 
 /// A height a sheet rests at.
 ///
+/// On Android a detent is a `BottomSheetBehavior` state ([`wire::sheet_state`]);
+/// the behavior holds one half-expanded height at a time, so of several
+/// [`Self::Medium`]/[`Self::Custom`] detents the user drags between the
+/// selected (else smallest) one and the full height, and reaches the others
+/// through [`SheetHandle::select_detent`].
+///
 /// **iPad in regular width ignores detents**: UIKit presents a page sheet
 /// there as a centered form sheet at a fixed size, and only an edge-attached
 /// presentation (compact width, or compact height with
@@ -568,7 +581,10 @@ impl SheetSpec {
     }
 
     /// The listener [`Self::on_detent`] registered, if any.
-    #[cfg_attr(not(any(test, target_os = "ios")), allow(dead_code))]
+    #[cfg_attr(
+        not(any(test, target_os = "android", target_os = "ios")),
+        allow(dead_code)
+    )]
     pub(crate) fn detent_listener(&self) -> Option<Arc<dyn Fn(Detent) + Send + Sync>> {
         self.on_detent
             .as_ref()
@@ -1059,10 +1075,10 @@ pub(crate) trait SheetHost {
 }
 
 /// The sheet arm of every target without a native sheet (everything but
-/// iOS/iPadOS today — macOS, Android, desktop Linux/Windows, web): every
+/// iOS/iPadOS and Android today — macOS, desktop Linux/Windows, web): every
 /// request resolves [`PresentError::Unsupported`] on its first poll, and
 /// nothing is ever live to dismiss or move.
-#[cfg_attr(target_os = "ios", allow(dead_code))]
+#[cfg_attr(any(target_os = "android", target_os = "ios"), allow(dead_code))]
 pub(crate) struct UnsupportedSheet;
 
 impl SheetHost for UnsupportedSheet {
@@ -1120,8 +1136,8 @@ fn select_detent_on<H: SheetHost>(handle: &SheetHandle, detent: Detent) {
 /// (an action row, a swipe-down), [`SheetHandle::dismiss`] or the host going
 /// away ends the sheet, or [`PresentError`]: `InvalidSpec` / `Busy` (another
 /// presentation of any kind is live) / `Unsupported` (every platform but
-/// iOS/iPadOS) on its first poll, or a later `NoHost`/`Platform` from the
-/// arm. [`Presentation::sheet_handle`] names it for
+/// iOS/iPadOS and Android) on its first poll, or a later `NoHost`/`Platform`
+/// from the arm. [`Presentation::sheet_handle`] names it for
 /// [`SheetHandle::select_detent`] and [`SheetHandle::dismiss`].
 ///
 /// On iPad in regular width the system shows a centered form sheet and
@@ -1130,19 +1146,27 @@ pub fn show_sheet(spec: SheetSpec) -> Presentation<SheetOutcome> {
     show_sheet_on::<SheetPlatformHost>(spec)
 }
 
-/// The integer outcome codes the Android presenter reports through its one
-/// `nativeOnOutcome(generation, code, actionIndex)` callback — mirrored
-/// verbatim by `FrustNativePresenter.kt`'s `OUTCOME_*` constants and pinned
-/// against drift by this module's tests. Consumed by the Android alert arm
-/// (`android_alert`/`android_host`); on every other target this module's own
-/// tests are the only reader.
+/// The integer codes the Android presenter and its arms share: the outcome
+/// codes `FrustNativePresenter.kt` reports through its one
+/// `nativeOnOutcome(generation, code, actionIndex)` callback and the action
+/// role codes it reads — each mirrored verbatim by the Kotlin `OUTCOME_*` /
+/// `ROLE_*` constants and pinned against drift by this module's tests — plus
+/// the pure halves of the Android sheet arm (outcome decoding, the detent
+/// mapping, the `showSheet` payload). Consumed by `android_alert`,
+/// `android_sheet` and `android_host`; on every other target this module's
+/// own tests are the only reader.
 #[cfg_attr(not(any(test, target_os = "android")), allow(dead_code))]
 pub(crate) mod wire {
-    use super::{AlertOutcome, PresentError};
+    use std::fmt::Write as _;
+
+    use super::{
+        ActionRole, AlertOutcome, Detent, DismissReason, PresentError, SheetOutcome, SheetSpec,
+    };
+    use crate::runtime::escape;
 
     /// The user chose the action at `actionIndex` (spec order).
     pub(crate) const OUTCOME_ACTION: i32 = 0;
-    /// The user cancelled (back key, outside tap).
+    /// The user cancelled (back key, outside tap; a sheet's swipe-down).
     pub(crate) const OUTCOME_CANCELLED: i32 = 1;
     /// Programmatic dismissal.
     pub(crate) const OUTCOME_DISMISSED: i32 = 2;
@@ -1152,6 +1176,45 @@ pub(crate) mod wire {
     pub(crate) const OUTCOME_NO_HOST: i32 = 4;
     /// The show threw.
     pub(crate) const OUTCOME_FAILED: i32 = 5;
+    /// **Not terminal**: the user settled a live sheet at the detent at
+    /// `actionIndex` (spec order). `android_host` streams it to the sheet's
+    /// [`SheetSpec::on_detent`] and leaves the presentation live.
+    pub(crate) const OUTCOME_DETENT: i32 = 6;
+
+    /// An action's [`ActionRole::Default`] wire code.
+    pub(crate) const ROLE_DEFAULT: i32 = 0;
+    /// An action's [`ActionRole::Cancel`] wire code.
+    pub(crate) const ROLE_CANCEL: i32 = 1;
+    /// An action's [`ActionRole::Destructive`] wire code.
+    pub(crate) const ROLE_DESTRUCTIVE: i32 = 2;
+
+    /// `role`'s `ROLE_*` code.
+    pub(crate) fn role_code(role: ActionRole) -> i32 {
+        match role {
+            ActionRole::Default => ROLE_DEFAULT,
+            ActionRole::Cancel => ROLE_CANCEL,
+            ActionRole::Destructive => ROLE_DESTRUCTIVE,
+        }
+    }
+
+    /// The id of the action at `action_index` in `action_ids` (spec order).
+    fn action_id(action_index: i32, action_ids: &[String]) -> Result<String, PresentError> {
+        usize::try_from(action_index)
+            .ok()
+            .and_then(|index| action_ids.get(index))
+            .cloned()
+            .ok_or_else(|| {
+                PresentError::Platform(format!(
+                    "action index {action_index} out of range for {} actions",
+                    action_ids.len()
+                ))
+            })
+    }
+
+    /// The error every code without a terminal meaning decodes to.
+    fn unknown(code: i32) -> PresentError {
+        PresentError::Platform(format!("unknown presenter outcome code {code}"))
+    }
 
     /// Map one `nativeOnOutcome` report onto an alert's result, reading the
     /// chosen action's id out of `action_ids` (the spec's ids, in order).
@@ -1161,16 +1224,7 @@ pub(crate) mod wire {
         action_ids: &[String],
     ) -> Result<AlertOutcome, PresentError> {
         match code {
-            OUTCOME_ACTION => usize::try_from(action_index)
-                .ok()
-                .and_then(|index| action_ids.get(index))
-                .map(|id| AlertOutcome::Action(id.clone()))
-                .ok_or_else(|| {
-                    PresentError::Platform(format!(
-                        "action index {action_index} out of range for {} actions",
-                        action_ids.len()
-                    ))
-                }),
+            OUTCOME_ACTION => action_id(action_index, action_ids).map(AlertOutcome::Action),
             OUTCOME_CANCELLED => Ok(AlertOutcome::Cancelled),
             OUTCOME_DISMISSED => Ok(AlertOutcome::Dismissed),
             OUTCOME_HOST_LOST => Ok(AlertOutcome::HostLost),
@@ -1178,10 +1232,140 @@ pub(crate) mod wire {
             OUTCOME_FAILED => Err(PresentError::Platform(
                 "the presenter failed to show the alert".to_string(),
             )),
-            other => Err(PresentError::Platform(format!(
-                "unknown presenter outcome code {other}"
-            ))),
+            other => Err(unknown(other)),
         }
+    }
+
+    /// Map one terminal `nativeOnOutcome` report onto a sheet's result: a
+    /// cancel is the user's dismissal, a dismissal the programmatic one.
+    /// [`OUTCOME_DETENT`] is never terminal (`android_host` intercepts it),
+    /// so it decodes as unknown here.
+    pub(crate) fn sheet_outcome(
+        code: i32,
+        action_index: i32,
+        action_ids: &[String],
+    ) -> Result<SheetOutcome, PresentError> {
+        match code {
+            OUTCOME_ACTION => action_id(action_index, action_ids).map(SheetOutcome::Action),
+            OUTCOME_CANCELLED => Ok(SheetOutcome::Dismissed(DismissReason::User)),
+            OUTCOME_DISMISSED => Ok(SheetOutcome::Dismissed(DismissReason::Programmatic)),
+            OUTCOME_HOST_LOST => Ok(SheetOutcome::HostLost),
+            OUTCOME_NO_HOST => Err(PresentError::NoHost),
+            OUTCOME_FAILED => Err(PresentError::Platform(
+                "the presenter failed to show the sheet".to_string(),
+            )),
+            other => Err(unknown(other)),
+        }
+    }
+
+    /// The detent an [`OUTCOME_DETENT`] report names — `None` out of range.
+    pub(crate) fn detent_at(index: i32, detents: &[Detent]) -> Option<Detent> {
+        usize::try_from(index)
+            .ok()
+            .and_then(|index| detents.get(index))
+            .copied()
+    }
+
+    /// Where a [`Detent`] rests on Material's `BottomSheetBehavior`.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub(crate) enum SheetState {
+        /// `STATE_HALF_EXPANDED` at this `halfExpandedRatio`.
+        Half(f64),
+        /// `STATE_EXPANDED`: the full-height sheet.
+        Full,
+    }
+
+    /// [`Detent::Medium`]'s `halfExpandedRatio`.
+    pub(crate) const MEDIUM_RATIO: f64 = 0.5;
+    /// The bounds a half ratio is clamped into: Material refuses a ratio
+    /// outside the open interval `(0, 1)`, and the Kotlin side narrows it to
+    /// a `Float`, which rounds a fraction just below `1` up to it.
+    pub(crate) const HALF_RATIO_MIN: f64 = 0.01;
+    pub(crate) const HALF_RATIO_MAX: f64 = 0.99;
+
+    /// The detent mapping: `Medium` is half expanded at [`MEDIUM_RATIO`],
+    /// `Large` fully expanded, and `Custom(f)` half expanded at `f` clamped
+    /// into Material's `(0, 1)` rule — except `f >= 1`, the full height,
+    /// which is `Large`'s state.
+    pub(crate) fn sheet_state(detent: Detent) -> SheetState {
+        match detent {
+            Detent::Medium => SheetState::Half(MEDIUM_RATIO),
+            Detent::Large => SheetState::Full,
+            Detent::Custom(fraction) if fraction >= 1.0 => SheetState::Full,
+            Detent::Custom(fraction) => {
+                SheetState::Half(fraction.clamp(HALF_RATIO_MIN, HALF_RATIO_MAX))
+            }
+        }
+    }
+
+    /// The index of the detent a sheet opens at: [`SheetSpec::selected`],
+    /// else the smallest — the lowest half ratio, or the first full-height
+    /// detent when none is a half one. `0` for a spec without detents
+    /// (refused by validation before this is reached).
+    pub(crate) fn initial_detent(spec: &SheetSpec) -> usize {
+        if let Some(index) = spec
+            .selected
+            .and_then(|selected| spec.detents.iter().position(|d| *d == selected))
+        {
+            return index;
+        }
+        let height = |detent: &Detent| match sheet_state(*detent) {
+            SheetState::Half(ratio) => ratio,
+            SheetState::Full => 1.0,
+        };
+        spec.detents
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| height(a).total_cmp(&height(b)))
+            .map_or(0, |(index, _)| index)
+    }
+
+    /// `showSheet`'s `specJson`: one flat object (the chrome wire's shape),
+    /// every key always present except `cornerRadius`, `tint` and `dark`,
+    /// which are omitted for `None`. The image travels beside it as bytes.
+    pub(crate) fn sheet_json(spec: &SheetSpec) -> String {
+        let content = &spec.content;
+        let mut out = String::from("{");
+        let mut put = |key: &str, value: &str| {
+            if out.len() > 1 {
+                out.push(',');
+            }
+            let _ = write!(out, "\"{key}\":{value}");
+        };
+        let text = |value: Option<&str>| format!("\"{}\"", escape(value.unwrap_or_default()));
+        put("title", &text(content.title.as_deref()));
+        put("message", &text(content.message.as_deref()));
+        put("actionCount", &content.actions.len().to_string());
+        for (i, action) in content.actions.iter().enumerate() {
+            put(&format!("action{i}Label"), &text(Some(&action.label)));
+            put(
+                &format!("action{i}Role"),
+                &role_code(action.role).to_string(),
+            );
+        }
+        put("detentCount", &spec.detents.len().to_string());
+        for (i, detent) in spec.detents.iter().enumerate() {
+            let (full, ratio) = match sheet_state(*detent) {
+                SheetState::Half(ratio) => (false, ratio),
+                SheetState::Full => (true, 1.0),
+            };
+            put(&format!("detent{i}Full"), &full.to_string());
+            put(&format!("detent{i}Ratio"), &ratio.to_string());
+        }
+        put("selected", &initial_detent(spec).to_string());
+        put("grabber", &spec.grabber.to_string());
+        put("dismissible", &spec.dismissible.to_string());
+        if let Some(radius) = spec.corner_radius {
+            put("cornerRadius", &radius.to_string());
+        }
+        if let Some(tint) = spec.tint {
+            put("tint", &tint.to_string());
+        }
+        if let Some(dark) = spec.dark {
+            put("dark", &dark.to_string());
+        }
+        out.push('}');
+        out
     }
 }
 
@@ -1719,6 +1903,106 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn the_sheet_wire_table_maps_every_code() {
+        let ids = ["copy".to_string(), "delete".to_string()];
+        assert_eq!(
+            wire::sheet_outcome(wire::OUTCOME_ACTION, 0, &ids),
+            Ok(SheetOutcome::Action("copy".into()))
+        );
+        assert!(matches!(
+            wire::sheet_outcome(wire::OUTCOME_ACTION, 2, &ids),
+            Err(PresentError::Platform(_))
+        ));
+        assert_eq!(
+            wire::sheet_outcome(wire::OUTCOME_CANCELLED, -1, &ids),
+            Ok(SheetOutcome::Dismissed(DismissReason::User))
+        );
+        assert_eq!(
+            wire::sheet_outcome(wire::OUTCOME_DISMISSED, -1, &ids),
+            Ok(SheetOutcome::Dismissed(DismissReason::Programmatic))
+        );
+        assert_eq!(
+            wire::sheet_outcome(wire::OUTCOME_HOST_LOST, -1, &ids),
+            Ok(SheetOutcome::HostLost)
+        );
+        assert_eq!(
+            wire::sheet_outcome(wire::OUTCOME_NO_HOST, -1, &ids),
+            Err(PresentError::NoHost)
+        );
+        // Neither a failed show nor a detent report is a terminal outcome.
+        for code in [wire::OUTCOME_FAILED, wire::OUTCOME_DETENT, 99] {
+            assert!(matches!(
+                wire::sheet_outcome(code, 0, &ids),
+                Err(PresentError::Platform(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn a_detent_report_names_a_spec_detent() {
+        let detents = [Detent::Medium, Detent::Custom(0.3), Detent::Large];
+        assert_eq!(wire::detent_at(1, &detents), Some(Detent::Custom(0.3)));
+        assert_eq!(wire::detent_at(2, &detents), Some(Detent::Large));
+        assert_eq!(wire::detent_at(3, &detents), None);
+        assert_eq!(wire::detent_at(-1, &detents), None);
+    }
+
+    #[test]
+    fn detents_map_onto_bottom_sheet_states() {
+        use wire::SheetState::{Full, Half};
+        assert_eq!(wire::sheet_state(Detent::Medium), Half(0.5));
+        assert_eq!(wire::sheet_state(Detent::Large), Full);
+        assert_eq!(wire::sheet_state(Detent::Custom(0.3)), Half(0.3));
+        assert_eq!(wire::sheet_state(Detent::Custom(1.0)), Full);
+        // Clamped into Material's open (0, 1) half-ratio rule.
+        assert_eq!(
+            wire::sheet_state(Detent::Custom(f64::MIN_POSITIVE)),
+            Half(wire::HALF_RATIO_MIN)
+        );
+        assert_eq!(
+            wire::sheet_state(Detent::Custom(0.999_999_99)),
+            Half(wire::HALF_RATIO_MAX)
+        );
+    }
+
+    #[test]
+    fn a_sheet_opens_at_its_selected_else_smallest_detent() {
+        let spec = sheet_spec().with_detents([Detent::Large, Detent::Medium, Detent::Custom(0.2)]);
+        assert_eq!(wire::initial_detent(&spec), 2);
+        assert_eq!(wire::initial_detent(&spec.with_selected(Detent::Large)), 0);
+        let full_only = sheet_spec().with_detents([Detent::Large, Detent::Custom(1.0)]);
+        assert_eq!(wire::initial_detent(&full_only), 0);
+    }
+
+    #[test]
+    fn the_show_sheet_payload_is_a_flat_object() {
+        let mut spec = SheetSpec::new(
+            SheetContent::new()
+                .with_title("Say \"hi\"")
+                .with_action("ok", "OK", ActionRole::Default)
+                .with_action("no", "Cancel", ActionRole::Cancel),
+        )
+        .with_detents([Detent::Medium, Detent::Large])
+        .with_selected(Detent::Large)
+        .with_dismissible(false);
+        assert_eq!(
+            wire::sheet_json(&spec),
+            "{\"title\":\"Say \\\"hi\\\"\",\"message\":\"\",\"actionCount\":2,\
+             \"action0Label\":\"OK\",\"action0Role\":0,\"action1Label\":\"Cancel\",\
+             \"action1Role\":1,\"detentCount\":2,\"detent0Full\":false,\"detent0Ratio\":0.5,\
+             \"detent1Full\":true,\"detent1Ratio\":1,\"selected\":1,\"grabber\":true,\
+             \"dismissible\":false}"
+        );
+        spec.corner_radius = Some(12.5);
+        spec.tint = Some(0xFF00_80FF);
+        spec.dark = Some(true);
+        assert!(
+            wire::sheet_json(&spec)
+                .ends_with(",\"cornerRadius\":12.5,\"tint\":4278223103,\"dark\":true}")
+        );
+    }
+
     // --- Sheets ----------------------------------------------------------
 
     /// The sheet counterpart of [`FakeState`]: one live sender, and a record
@@ -1941,11 +2225,11 @@ mod tests {
         });
     }
 
-    /// The public entry point on this (non-iOS) host resolves through the
-    /// unsupported arm.
-    #[cfg(not(target_os = "ios"))]
+    /// The public entry point on a host without a sheet arm resolves through
+    /// the unsupported arm.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     #[test]
-    fn show_sheet_is_unsupported_off_ios() {
+    fn show_sheet_is_unsupported_off_ios_and_android() {
         isolated_sheet(|| {
             let mut presentation = show_sheet(sheet_spec());
             assert_eq!(
@@ -2147,12 +2431,52 @@ mod tests {
             ("HOST_LOST".to_string(), wire::OUTCOME_HOST_LOST),
             ("NO_HOST".to_string(), wire::OUTCOME_NO_HOST),
             ("FAILED".to_string(), wire::OUTCOME_FAILED),
+            ("DETENT".to_string(), wire::OUTCOME_DETENT),
         ]);
         assert_eq!(
             kotlin, rust,
             "FrustNativePresenter.kt's OUTCOME_* constants and present::wire must be edited \
              together"
         );
+    }
+
+    #[test]
+    fn presenter_role_codes_match_between_kotlin_and_rust() {
+        let mut kotlin = BTreeMap::new();
+        for line in PRESENTER_KT.lines() {
+            let Some(rest) = line.trim().strip_prefix("private const val ROLE_") else {
+                continue;
+            };
+            let (name, value) = rest.split_once('=').expect("`NAME = value`");
+            let value: i32 = value
+                .trim()
+                .parse()
+                .unwrap_or_else(|e| panic!("ROLE_{name}: {e}"));
+            kotlin.insert(name.trim().to_string(), value);
+        }
+        let rust = BTreeMap::from([
+            ("DEFAULT".to_string(), wire::ROLE_DEFAULT),
+            ("CANCEL".to_string(), wire::ROLE_CANCEL),
+            ("DESTRUCTIVE".to_string(), wire::ROLE_DESTRUCTIVE),
+        ]);
+        assert_eq!(
+            kotlin, rust,
+            "FrustNativePresenter.kt's ROLE_* constants and present::wire must be edited together"
+        );
+    }
+
+    #[test]
+    fn the_sheet_presenter_members_exist_in_kotlin() {
+        for member in [
+            "fun showSheet(generation: Long, specJson: String, image: ByteArray?)",
+            "fun dismissSheet(generation: Long)",
+            "fun selectSheetDetent(generation: Long, index: Int)",
+        ] {
+            assert!(
+                PRESENTER_KT.contains(member),
+                "FrustNativePresenter.kt must declare `{member}` (android_sheet.rs calls it)"
+            );
+        }
     }
 
     #[test]

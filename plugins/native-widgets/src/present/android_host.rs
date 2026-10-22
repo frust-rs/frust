@@ -13,7 +13,7 @@
 //! | Direction | Member | Notes |
 //! |---|---|---|
 //! | Rust → Kotlin | `@JvmStatic fun hasResumedActivity(): Boolean` — `()Z` | The host-discovery probe: `false` → [`PresentError::NoHost`] |
-//! | Kotlin → Rust | [`Java_dev_frust_nativewidgets_FrustNativePresenter_nativeOnOutcome`]`(env, class, generation: jlong, code: jint, actionIndex: jint)` | The presenter's ONE callback, for every presentation kind; `code` is `super::wire`'s `OUTCOME_*` table |
+//! | Kotlin → Rust | [`Java_dev_frust_nativewidgets_FrustNativePresenter_nativeOnOutcome`]`(env, class, generation: jlong, code: jint, actionIndex: jint)` | The presenter's ONE callback, for every presentation kind; `code` is `super::wire`'s `OUTCOME_*` table, where `OUTCOME_DETENT` alone is not terminal |
 //!
 //! # Why an init provider
 //!
@@ -38,6 +38,11 @@
 //! resolver maps `(code, actionIndex)` into its own outcome type, so the
 //! one callback serves every presentation kind.
 //!
+//! A sheet parks a [`Stream`] beside its resolver: a
+//! `super::wire::OUTCOME_DETENT` report is handed to it with the entry left
+//! in place — a detent change is an event, not an outcome — so a later
+//! terminal report still finds the resolver.
+//!
 //! # Where the export lives
 //!
 //! Beside the host it belongs to, not in `crate::android`: that module's
@@ -54,7 +59,7 @@
 //!
 //! [`nativeOnOutcome`]: Java_dev_frust_nativewidgets_FrustNativePresenter_nativeOnOutcome
 
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use jni::errors::LogErrorAndDefault;
 use jni::objects::{JClass, JObject, JValue};
@@ -62,7 +67,7 @@ use jni::refs::Global;
 use jni::sys::{jint, jlong};
 use jni::{Env, EnvUnowned, jni_sig, jni_str};
 
-use super::{AlertOutcome, PresentError, Sender, wire};
+use super::{AlertOutcome, PresentError, Sender, SheetOutcome, wire};
 
 /// The presenter's fully-qualified name in the **binary/dotted** form
 /// `ClassLoader.loadClass` expects. Resolved through the application
@@ -167,7 +172,7 @@ pub(crate) fn has_resumed_activity(
 
 /// Run JNI calls through the crate's exception-clearing helper
 /// (`crate::android::run_jni`), as a [`PresentError::Platform`].
-fn jni_call<'local, T>(
+pub(crate) fn jni_call<'local, T>(
     env: &mut Env<'local>,
     op: &str,
     f: impl FnOnce(&mut Env<'local>) -> Result<T, jni::errors::Error>,
@@ -180,10 +185,15 @@ fn jni_call<'local, T>(
 /// live-presentation guard*.
 pub(crate) type Resolve = Box<dyn FnOnce(i32, i32) + Send>;
 
+/// Receives each non-terminal `OUTCOME_DETENT` report's `actionIndex` (the
+/// detent's spec index) — see the module doc's *The live-presentation guard*.
+pub(crate) type Stream = Arc<dyn Fn(i32) + Send + Sync>;
+
 /// One parked presentation, tagged with its generation.
 struct LiveEntry {
     generation: u64,
     resolve: Resolve,
+    stream: Option<Stream>,
 }
 
 /// The one live presentation's resolver, if any. A `Mutex` rather than a
@@ -202,12 +212,31 @@ fn lock_live() -> MutexGuard<'static, Option<LiveEntry>> {
 /// dropped here so no resolver code runs under the lock; dropping it drops
 /// its sender, whose receiver is already gone.
 pub(crate) fn install_live(generation: u64, resolve: Resolve) -> Option<Resolve> {
+    install_live_streaming(generation, resolve, None)
+}
+
+/// [`install_live`] with the [`Stream`] a sheet's detent reports go to.
+pub(crate) fn install_live_streaming(
+    generation: u64,
+    resolve: Resolve,
+    stream: Option<Stream>,
+) -> Option<Resolve> {
     lock_live()
         .replace(LiveEntry {
             generation,
             resolve,
+            stream,
         })
         .map(|displaced| displaced.resolve)
+}
+
+/// The live entry's [`Stream`], if it is still `generation`'s and has one —
+/// cloned out, so the caller runs it with the lock released.
+fn live_stream(generation: u64) -> Option<Stream> {
+    lock_live()
+        .as_ref()
+        .filter(|entry| entry.generation == generation)
+        .and_then(|entry| entry.stream.clone())
 }
 
 /// Take the live resolver out, but only if it is still `generation`'s. The
@@ -228,9 +257,18 @@ pub(crate) fn alert_resolver(tx: Sender<AlertOutcome>, action_ids: Vec<String>) 
     })
 }
 
+/// The resolver a sheet parks: `super::wire`'s sheet table over the spec's
+/// action ids, into the sheet's sender.
+pub(crate) fn sheet_resolver(tx: Sender<SheetOutcome>, action_ids: Vec<String>) -> Resolve {
+    Box::new(move |code, action_index| {
+        tx.send(wire::sheet_outcome(code, action_index, &action_ids));
+    })
+}
+
 /// `FrustNativePresenter.nativeOnOutcome` — the presenter's one callback
 /// into Rust (module doc's contract table), resolving presentation
-/// `generation` through its parked resolver. Called on the main thread; a
+/// `generation` through its parked resolver, or streaming an
+/// `OUTCOME_DETENT` report to its [`Stream`]. Called on the main thread; a
 /// generation with no parked resolver is dropped.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_frust_nativewidgets_FrustNativePresenter_nativeOnOutcome<'local>(
@@ -243,7 +281,18 @@ pub extern "system" fn Java_dev_frust_nativewidgets_FrustNativePresenter_nativeO
     env.with_env(|_env| {
         // The inverse of the `u64 as jlong` an arm hands Kotlin — the same
         // 64 bits back.
-        match take_live(generation as u64) {
+        let generation = generation as u64;
+        if code == wire::OUTCOME_DETENT {
+            match live_stream(generation) {
+                Some(stream) => stream(action_index),
+                None => log::debug!(
+                    "frust-native-widgets: detent report for generation {generation} has no live \
+                     sheet listening — dropped"
+                ),
+            }
+            return Ok::<(), jni::errors::Error>(());
+        }
+        match take_live(generation) {
             Some(resolve) => resolve(code, action_index),
             None => log::debug!(
                 "frust-native-widgets: presenter outcome {code} for generation {generation} \
