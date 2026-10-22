@@ -328,6 +328,7 @@ use peniko::Color;
 use crate::icon_button::{IconButtonSize, IconButtonVariant, icon_button};
 use crate::menu::{MenuNode, MenuSelection, menu, menu_entry};
 use crate::overlay::{OverlayAlign, OverlayAnchor, overlay_anchor};
+use crate::strings::MaterialStrings;
 
 // ---- Tokens (`res/m3e_toolbar_tokens.dart`'s `M3EToolbarTokens`) -----------
 
@@ -446,11 +447,6 @@ const LEVEL2_SHADOW_BLUR: f64 = 3.0;
 /// Unthemed-fallback shadow color (opaque black at `crate::tokens::elevation()`'s
 /// `0.3` alpha — identical at every level).
 const FALLBACK_SHADOW_COLOR: Color = Color::new([0.0, 0.0, 0.0, 0.3]);
-
-/// The accessible name of the overflow trigger — upstream's own
-/// `tooltip: 'More options'`, overridable per bar with
-/// [`ToolbarView::overflow_label`].
-const OVERFLOW_LABEL: &str = "More options";
 
 // ---- Enums -----------------------------------------------------------------
 
@@ -1047,13 +1043,19 @@ impl<State: 'static> ToolbarAction<State> {
 
     /// The title this action's overflow row takes — upstream's
     /// `label ?? tooltip ?? semanticLabel ?? 'Action {n}'` fallback chain.
+    ///
+    /// The final fallback reads
+    /// [`MaterialStrings::toolbar_action_fallback_a11y`] from the ambient
+    /// theme (so call it while building), English when none is provided.
     pub fn menu_label(&self, index: usize) -> String {
         self.label
             .as_deref()
             .or(self.tooltip.as_deref())
             .or(self.semantic_label.as_deref())
             .map(str::to_owned)
-            .unwrap_or_else(|| format!("Action {}", index + 1))
+            .unwrap_or_else(|| {
+                MaterialStrings::from_build_context().toolbar_action_fallback(index + 1)
+            })
     }
 
     /// The inline icon-button view for this action.
@@ -1178,6 +1180,7 @@ pub struct ToolbarView<State: 'static> {
 /// Build a [`ToolbarView`] of `variant` with every prop at its upstream
 /// default.
 fn toolbar<State: 'static>(variant: ToolbarVariant) -> ToolbarView<State> {
+    let strings = MaterialStrings::from_build_context();
     ToolbarView {
         variant,
         color_style: ToolbarColorStyle::default(),
@@ -1190,7 +1193,7 @@ fn toolbar<State: 'static>(variant: ToolbarVariant) -> ToolbarView<State> {
         actions: Vec::new(),
         max_inline_actions: TOOLBAR_MAX_INLINE_ACTIONS,
         overflow_icon: crate::icons::MORE_VERT,
-        overflow_label: OVERFLOW_LABEL.to_owned(),
+        overflow_label: strings.toolbar_more_options_a11y.to_string(),
         on_overflow: None,
         overflow_anchor: None,
         expanded: true,
@@ -1287,8 +1290,9 @@ impl<State: 'static> ToolbarView<State> {
         self
     }
 
-    /// Replace the overflow trigger's accessible name (upstream's own
-    /// `'More options'`).
+    /// Replace the overflow trigger's accessible name. Unset, it reads
+    /// [`MaterialStrings::toolbar_more_options_a11y`] from the ambient theme
+    /// (upstream's own `'More options'` in English).
     pub fn overflow_label(mut self, label: impl Into<String>) -> Self {
         self.overflow_label = label.into();
         self
@@ -2962,5 +2966,87 @@ mod tests {
         assert!(w.adjacent_fab);
         let size = layout(&mut w, &BoxConstraints::loose(Size::new(800.0, 200.0)));
         assert_eq!(size.height, TOOLBAR_FAB_MEDIUM);
+    }
+
+    // ---- MaterialStrings: setter > ambient theme > English ------------------
+
+    mod strings {
+        use super::*;
+        use std::cell::RefCell;
+
+        /// The overflow trigger label and a bare action's fallback row title,
+        /// as resolved while building under the host's ambient theme.
+        type Seen = Rc<RefCell<Vec<String>>>;
+
+        struct Host {
+            theme: Option<Theme>,
+            overflow_setter: Option<&'static str>,
+            seen: Seen,
+        }
+        impl frust::Component for Host {
+            type State = ();
+            fn init(&self) {}
+            fn build(&self, _state: &mut ()) -> impl View<()> {
+                if let Some(theme) = &self.theme {
+                    frust::provide_context(theme.clone());
+                }
+                let bar = floating_toolbar::<()>();
+                let bar = match self.overflow_setter {
+                    Some(label) => bar.overflow_label(label),
+                    None => bar,
+                };
+                let bare = toolbar_action::<(), _>(crate::icons::MORE_VERT, |_| {});
+                let mut seen = self.seen.borrow_mut();
+                seen.push(bar.overflow_label.clone());
+                seen.push(bare.menu_label(2));
+                leaf_any(1.0, 1.0)
+            }
+        }
+
+        fn thai_theme() -> Theme {
+            let mut theme = crate::baseline();
+            let mut thai = MaterialStrings::ENGLISH;
+            thai.toolbar_more_options_a11y = "ตัวเลือกเพิ่มเติม".into();
+            thai.toolbar_action_fallback_a11y = "การดำเนินการ {n}".into();
+            theme.extensions.insert(thai);
+            theme
+        }
+
+        fn seen(theme: Option<Theme>, overflow_setter: Option<&'static str>) -> Vec<String> {
+            let seen: Seen = Rc::default();
+            let sink = seen.clone();
+            let mut root: frust_core::RenderRoot<(), frust::ComponentView<Host>> =
+                frust_core::RenderRoot::new();
+            let mut logic = move |_: &mut ()| {
+                frust::component(Host {
+                    theme: theme.clone(),
+                    overflow_setter,
+                    seen: sink.clone(),
+                })
+            };
+            root.rebuild(&mut logic, &mut ());
+            seen.take()
+        }
+
+        #[test]
+        fn defaults_to_english() {
+            assert_eq!(seen(None, None), ["More options", "Action 3"]);
+        }
+
+        #[test]
+        fn reads_the_thai_theme_strings() {
+            assert_eq!(
+                seen(Some(thai_theme()), None),
+                ["ตัวเลือกเพิ่มเติม", "การดำเนินการ 3"]
+            );
+        }
+
+        #[test]
+        fn overflow_label_setter_beats_the_theme_strings() {
+            assert_eq!(
+                seen(Some(thai_theme()), Some("Extras"))[0],
+                "Extras".to_string()
+            );
+        }
     }
 }
