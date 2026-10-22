@@ -107,6 +107,13 @@ object FrustNativePresenter {
     private var resumed: WeakReference<Activity>? = null
 
     /**
+     * The most recently created Activity, so [FrustNativeChrome] can find a
+     * host before the first resume. Cleared on that instance's destroy.
+     */
+    @Volatile
+    private var created: WeakReference<Activity>? = null
+
+    /**
      * The dialog [showAlert] currently has up, or `null` between
      * presentations — this object's own exactly-once guard (class doc's *The
      * live dialog*). Main-thread only, unlike [resumed]: nothing here is ever
@@ -149,6 +156,16 @@ object FrustNativePresenter {
     @JvmStatic
     fun resumedActivity(): Activity? {
         val activity = resumed?.get() ?: return null
+        return if (activity.isFinishing || activity.isDestroyed) null else activity
+    }
+
+    /**
+     * The Activity app chrome installs into: [resumedActivity], else the most
+     * recently created live one (created but not yet resumed).
+     */
+    internal fun hostActivity(): Activity? {
+        resumedActivity()?.let { return it }
+        val activity = created?.get() ?: return null
         return if (activity.isFinishing || activity.isDestroyed) null else activity
     }
 
@@ -334,10 +351,12 @@ object FrustNativePresenter {
     @JvmStatic
     external fun nativeOnOutcome(generation: Long, code: Int, actionIndex: Int)
 
-    /** Records the resumed Activity; see the class doc. */
+    /** Records the created and resumed Activity; see the class doc. */
     private val activityCallbacks =
         object : Application.ActivityLifecycleCallbacks {
-            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
+            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
+                created = WeakReference(activity)
+            }
 
             override fun onActivityStarted(activity: Activity) {}
 
@@ -355,6 +374,10 @@ object FrustNativePresenter {
                 if (resumed?.get() === activity) {
                     resumed = null
                 }
+                if (created?.get() === activity) {
+                    created = null
+                }
+                FrustNativeChrome.onActivityDestroyed(activity)
                 // The dialog [liveDialog] is attached to is going away with
                 // its Activity (a configuration change, e.g. rotation, or
                 // the user leaving the app) — report HostLost and take it
