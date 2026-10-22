@@ -200,6 +200,7 @@ use crate::menu::{MenuIcon, MenuNode, MenuSelection, menu, menu_panel, menu_sele
 use crate::overlay::OverlayAnchor;
 use crate::press::presses;
 use crate::sheet::{BottomSheetView, bottom_sheet};
+use crate::strings::MaterialStrings;
 
 // ---- Theme defaults (m3e_split_button_theme.dart's constructor) ------------
 
@@ -283,10 +284,6 @@ const PATH_TOLERANCE: f64 = 0.1;
 /// The ink every label run is *shaped* with; never painted — see
 /// [`mod@crate::button`]'s `SHAPING_INK` for why (recolor-without-reshape).
 const SHAPING_INK: Color = Color::BLACK;
-
-/// The trailing segment's default accessible name, used when no
-/// [`SplitButtonView::trailing_label`] is set.
-const DEFAULT_TRAILING_LABEL: &str = "Show menu";
 
 // ---- Size / shape / variant vocabulary -------------------------------------
 
@@ -1313,8 +1310,8 @@ impl<State: 'static> View<State> for SegmentView<State> {
             // Both kinds carry their resolved label: the leading half paints
             // it, the trailing half only exposes it through semantics (the
             // menu-trigger's accessible name) — [`SplitButtonView::trailing_view`]
-            // already resolved `trailing_label` against
-            // [`DEFAULT_TRAILING_LABEL`] before this view was built.
+            // already resolved `trailing_label` against the theme's strings
+            // before this view was built.
             label: LabelRun::new(self.label.clone()),
             label_origin: Point::ZERO,
             icon: self.icon.as_ref().map(|icon| build_child(icon, ctx)),
@@ -1658,11 +1655,10 @@ impl Widget for SegmentWidget {
         ctx.push_node(Role::Button, |node| {
             if self.is_trailing() {
                 // The carried name (`SplitButtonView::trailing_label`, already
-                // resolved by `trailing_view`) wins; `DEFAULT_TRAILING_LABEL`
-                // is only the last-resort fallback for an explicitly-empty
-                // custom label.
+                // resolved by `trailing_view`) wins; the English string is
+                // only the last-resort fallback for an empty one.
                 node.set_label(if self.label.content().is_empty() {
-                    DEFAULT_TRAILING_LABEL
+                    &MaterialStrings::ENGLISH.split_button_show_menu_a11y
                 } else {
                     self.label.content()
                 });
@@ -1713,6 +1709,8 @@ type IconFactory<State> = Rc<dyn Fn() -> AnyView<State>>;
 pub struct SplitButtonView<State: 'static> {
     label: String,
     trailing_label: Option<String>,
+    /// The ambient theme's trailing-half name, read when the view was created.
+    default_trailing_label: String,
     size: SplitButtonSize,
     shape: SplitButtonShape,
     variant: SplitButtonVariant,
@@ -1761,6 +1759,9 @@ where
     SplitButtonView {
         label: label.into(),
         trailing_label: None,
+        default_trailing_label: MaterialStrings::from_build_context()
+            .split_button_show_menu_a11y
+            .to_string(),
         size: SplitButtonSize::default(),
         shape: SplitButtonShape::default(),
         variant: SplitButtonVariant::default(),
@@ -1858,9 +1859,10 @@ impl<State: 'static> SplitButtonView<State> {
         self
     }
 
-    /// Override the trailing half's accessible name (default
-    /// `"Show menu"`) — the reference's `trailingTooltip` in the one role this
-    /// framework has for it.
+    /// Override the trailing half's accessible name. Unset, it reads
+    /// [`MaterialStrings::split_button_show_menu_a11y`] from the ambient theme
+    /// — the reference's `trailingTooltip` in the one role this framework has
+    /// for it.
     pub fn trailing_label(mut self, label: impl Into<String>) -> Self {
         self.trailing_label = Some(label.into());
         self
@@ -2020,7 +2022,8 @@ impl<State: 'static> SplitButtonView<State> {
             label: self
                 .trailing_label
                 .clone()
-                .unwrap_or_else(|| DEFAULT_TRAILING_LABEL.to_string()),
+                .filter(|label| !label.is_empty())
+                .unwrap_or_else(|| self.default_trailing_label.clone()),
             icon: None,
             haptic: self.haptic,
             anchor: Some(self.menu_anchor.clone()),
@@ -2188,6 +2191,9 @@ mod tests {
     use frust::authoring::scene::GlyphRun;
     use frust::authoring::{KeyEvent, Modifiers, PointerButton, PointerEvent};
     use std::any::Any;
+
+    /// The English trailing-half name every default-label assertion expects.
+    const DEFAULT_TRAILING_LABEL: &str = "Show menu";
 
     // ---- fixtures ---------------------------------------------------------
 
@@ -3367,5 +3373,85 @@ mod tests {
         }
         let mut widget = laid_out(&plain(true));
         let _ = paint_at(&mut widget, Size::new(300.0, 48.0), Some(&bare));
+    }
+
+    // ---- MaterialStrings: setter > ambient theme > English ------------------
+
+    mod strings {
+        use super::*;
+
+        /// Provides `theme` as the ambient `Theme` context (when set), then
+        /// builds the split button under test so build-time `use_context`
+        /// resolves.
+        struct Host {
+            theme: Option<Theme>,
+            setter: Option<&'static str>,
+        }
+        impl frust::Component for Host {
+            type State = ();
+            fn init(&self) {}
+            fn build(&self, _state: &mut ()) -> impl View<()> {
+                if let Some(theme) = &self.theme {
+                    frust::provide_context(theme.clone());
+                }
+                let button =
+                    split_button::<(), _, _>("Save", false, |_s: &mut ()| {}, |_s: &mut ()| {});
+                match self.setter {
+                    Some(label) => button.trailing_label(label),
+                    None => button,
+                }
+            }
+        }
+
+        fn thai_theme() -> Theme {
+            let mut theme = crate::baseline();
+            let mut thai = MaterialStrings::ENGLISH;
+            thai.split_button_show_menu_a11y = "แสดงเมนู".into();
+            theme.extensions.insert(thai);
+            theme
+        }
+
+        fn labels(theme: Option<Theme>, setter: Option<&'static str>) -> Vec<String> {
+            let mut root: frust_core::RenderRoot<(), frust::ComponentView<Host>> =
+                frust_core::RenderRoot::new();
+            let mut logic = move |_: &mut ()| {
+                frust::component(Host {
+                    theme: theme.clone(),
+                    setter,
+                })
+            };
+            let mut state = ();
+            root.rebuild(&mut logic, &mut state);
+            let mut tcx = TextContext::new();
+            root.layout_with_text(Size::new(400.0, 80.0), &mut tcx as &mut dyn Any);
+            root.semantics()
+                .nodes
+                .iter()
+                .filter_map(|(_, n)| n.label().map(str::to_string))
+                .collect()
+        }
+
+        #[test]
+        fn trailing_label_defaults_to_english() {
+            assert!(
+                labels(None, None)
+                    .iter()
+                    .any(|l| l == DEFAULT_TRAILING_LABEL)
+            );
+        }
+
+        #[test]
+        fn trailing_label_reads_the_thai_theme_strings() {
+            let l = labels(Some(thai_theme()), None);
+            assert!(l.iter().any(|l| l == "แสดงเมนู"), "{l:?}");
+            assert!(!l.iter().any(|l| l == DEFAULT_TRAILING_LABEL));
+        }
+
+        #[test]
+        fn trailing_label_setter_beats_the_theme_strings() {
+            let l = labels(Some(thai_theme()), Some("More actions"));
+            assert!(l.iter().any(|l| l == "More actions"), "{l:?}");
+            assert!(!l.iter().any(|l| l == "แสดงเมนู"));
+        }
     }
 }

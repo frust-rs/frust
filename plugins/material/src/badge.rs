@@ -62,6 +62,8 @@ use frust::authoring::{
 use kurbo::{Point, Rect, Size, Vec2};
 use peniko::{Brush, Color};
 
+use crate::strings::MaterialStrings;
+
 // ---- Theme-token constants (m3e_badge_theme.dart's `M3EBadgeTheme.defaults`) --
 
 /// The dot indicator's diameter, in logical px (`dotSize` default,
@@ -301,9 +303,12 @@ impl<State: 'static> BadgeView<State> {
         self
     }
 
-    /// Override the indicator's accessibility label. Defaults to
-    /// `"Notifications: {count}"` for a numeric badge or `"Notifications"`
-    /// for a dot (the reference's own default label text).
+    /// Override the indicator's accessibility label. Unset, it reads
+    /// [`MaterialStrings::badge_notifications_a11y`] (with the count filled
+    /// in) for a numeric badge or
+    /// [`MaterialStrings::badge_notifications_none_a11y`] for a dot, from the
+    /// active theme; English reads `Notifications: {count}` and
+    /// `Notifications` (the reference's own default label text).
     pub fn semantic_label(mut self, label: impl Into<String>) -> Self {
         self.semantic_label = Some(label.into());
         self
@@ -320,6 +325,9 @@ pub struct BadgeWidget {
     foreground_color: Option<Color>,
     semantic_label: Option<String>,
     count: Option<u32>,
+    /// The theme-resolved default accessibility label, refreshed each layout
+    /// (semantics has no theme handle). Unused while `semantic_label` is set.
+    default_a11y: String,
     label_run: LabelRun,
     indicator_size: Size,
     indicator_offset: Point,
@@ -338,6 +346,7 @@ impl<State: 'static> View<State> for BadgeView<State> {
             foreground_color: self.foreground_color,
             semantic_label: self.semantic_label.clone(),
             count: self.count,
+            default_a11y: default_a11y(&MaterialStrings::ENGLISH, self.count),
             label_run: LabelRun::new(),
             indicator_size: Size::ZERO,
             indicator_offset: Point::ZERO,
@@ -385,6 +394,10 @@ impl<State: 'static> View<State> for BadgeView<State> {
 impl Widget for BadgeWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let content_size = self.content.layout_child(ctx, bc);
+
+        if self.semantic_label.is_none() && !matches!(self.resolved, ResolvedBadge::None) {
+            self.default_a11y = default_a11y(&MaterialStrings::from_layout_ctx(ctx), self.count);
+        }
 
         let ResolvedBadge::None = self.resolved else {
             self.indicator_size = match &self.resolved {
@@ -488,18 +501,24 @@ impl Widget for BadgeWidget {
             ctx.push_node(Role::Label, |node| {
                 let label = self
                     .semantic_label
-                    .clone()
-                    .unwrap_or_else(|| match self.count {
-                        Some(count) => format!("Notifications: {count}"),
-                        None => "Notifications".to_string(),
-                    });
-                node.set_value(label.as_str());
+                    .as_deref()
+                    .unwrap_or(self.default_a11y.as_str());
+                node.set_value(label);
             });
         }
         self.content.semantics_child(ctx);
     }
 
     frust::authoring::visit_children!(content);
+}
+
+/// The default accessibility label under `strings`: the counted form for a
+/// numeric badge, the bare form for a dot.
+fn default_a11y(strings: &MaterialStrings, count: Option<u32>) -> String {
+    match count {
+        Some(count) => strings.badge_notifications(count),
+        None => strings.badge_notifications_none_a11y.to_string(),
+    }
 }
 
 /// The resolved container fill. Themed: `colors.error_container`. Unthemed:
@@ -847,5 +866,68 @@ mod tests {
         let mut pctx = PaintCtx::new(Point::ZERO, size);
         w.paint(&mut pctx, &mut rec);
         assert_eq!(rec.rounded_rects[0].3, bg);
+    }
+
+    // ---- MaterialStrings: setter > theme > English --------------------------
+
+    mod strings {
+        use super::*;
+        use frust::authoring::text::TextContext;
+        use frust_widgets::test_support::leaf_any;
+
+        fn thai_theme() -> Theme {
+            let mut theme = crate::baseline();
+            let mut thai = MaterialStrings::ENGLISH;
+            thai.badge_notifications_a11y = "การแจ้งเตือน: {count}".into();
+            thai.badge_notifications_none_a11y = "การแจ้งเตือน".into();
+            theme.extensions.insert(thai);
+            theme
+        }
+
+        /// The accessibility values of a badge laid out under `theme`.
+        fn values(theme: Option<Theme>, view: BadgeView<()>) -> Vec<String> {
+            let mut root: frust_core::RenderRoot<(), BadgeView<()>> = frust_core::RenderRoot::new();
+            if let Some(theme) = theme {
+                root.set_theme(Box::new(theme));
+            }
+            let mut view = Some(view);
+            let mut logic = move |_: &mut ()| view.take().expect("one rebuild");
+            let mut state = ();
+            root.rebuild(&mut logic, &mut state);
+            let mut tcx = TextContext::new();
+            root.layout_with_text(Size::new(200.0, 200.0), &mut tcx as &mut dyn Any);
+            root.semantics()
+                .nodes
+                .iter()
+                .filter_map(|(_, n)| n.value().map(str::to_string))
+                .collect()
+        }
+
+        fn counted() -> BadgeView<()> {
+            badge(leaf_any(40.0, 40.0)).count(3)
+        }
+        fn dot() -> BadgeView<()> {
+            badge(leaf_any(40.0, 40.0)).dot()
+        }
+
+        #[test]
+        fn defaults_to_english() {
+            assert_eq!(values(None, counted()), ["Notifications: 3"]);
+            assert_eq!(values(None, dot()), ["Notifications"]);
+        }
+
+        #[test]
+        fn reads_the_thai_theme_strings() {
+            assert_eq!(values(Some(thai_theme()), counted()), ["การแจ้งเตือน: 3"]);
+            assert_eq!(values(Some(thai_theme()), dot()), ["การแจ้งเตือน"]);
+        }
+
+        #[test]
+        fn semantic_label_setter_beats_the_theme_strings() {
+            assert_eq!(
+                values(Some(thai_theme()), counted().semantic_label("Three new")),
+                ["Three new"]
+            );
+        }
     }
 }

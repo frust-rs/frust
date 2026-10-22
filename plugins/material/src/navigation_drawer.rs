@@ -193,6 +193,7 @@ use crate::overlay::{
     OverlayModalWidget, OverlaySide, overlay_modal, show_overlay_modal,
 };
 use crate::press::presses;
+use crate::strings::MaterialStrings;
 use crate::tokens::MaterialSpacing;
 
 /// This module's fixed panel width, in logical px — `M3ENavigationDrawerTheme`'s
@@ -1312,7 +1313,10 @@ pub fn navigation_drawer<State: 'static, F: Fn(&mut State, usize) + 'static>(
     on_select: F,
 ) -> NavigationDrawerView<State> {
     let content = navigation_drawer_content(sections, selected, on_select);
-    NavigationDrawerView(overlay_modal(content, drawer_config()).label("Navigation drawer"))
+    let strings = MaterialStrings::from_build_context();
+    NavigationDrawerView(
+        overlay_modal(content, drawer_config()).label(strings.drawer_a11y.to_string()),
+    )
 }
 
 /// PascalCase alias for [`navigation_drawer`], matching the catalog's
@@ -1327,6 +1331,14 @@ pub fn NavigationDrawer<State: 'static, F: Fn(&mut State, usize) + 'static>(
 }
 
 impl<State: 'static> NavigationDrawerView<State> {
+    /// Override the drawer's accessible name. Unset, it reads
+    /// [`MaterialStrings::drawer_a11y`] from the ambient theme ("Navigation
+    /// drawer" in English).
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.0 = self.0.label(label);
+        self
+    }
+
     /// Whether the user can dismiss this drawer at all — the scrim tap,
     /// `Escape`, and an Android back press (default `true`; see
     /// [`mod@crate::overlay::modal`]'s module docs). `false` disables all of
@@ -1943,5 +1955,78 @@ mod tests {
             vec![None],
             "a scrim tap stages the exit and pops with an empty result"
         );
+    }
+
+    // ---- MaterialStrings: setter > ambient theme > English ------------------
+
+    mod strings {
+        use super::*;
+
+        /// Provides `theme` as the ambient `Theme` context (when set), then
+        /// builds the drawer under test so build-time `use_context` resolves.
+        struct Host {
+            theme: Option<Theme>,
+            labelled: Option<&'static str>,
+        }
+        impl frust::Component for Host {
+            type State = ();
+            fn init(&self) {}
+            fn build(&self, _state: &mut ()) -> impl View<()> {
+                if let Some(theme) = &self.theme {
+                    frust::provide_context(theme.clone());
+                }
+                let drawer = navigation_drawer(one_section(&["Home"]), 0, |_: &mut (), _| {});
+                match self.labelled {
+                    Some(label) => drawer.label(label),
+                    None => drawer,
+                }
+            }
+        }
+
+        fn thai_theme() -> Theme {
+            let mut theme = crate::baseline();
+            let mut thai = MaterialStrings::ENGLISH;
+            thai.drawer_a11y = "เมนูนำทาง".into();
+            theme.extensions.insert(thai);
+            theme
+        }
+
+        fn labels(theme: Option<Theme>, labelled: Option<&'static str>) -> Vec<String> {
+            let mut root: RenderRoot<(), frust::ComponentView<Host>> = RenderRoot::new();
+            let mut logic = move |_: &mut ()| {
+                frust::component(Host {
+                    theme: theme.clone(),
+                    labelled,
+                })
+            };
+            let mut state = ();
+            root.rebuild(&mut logic, &mut state);
+            let mut tcx = TextContext::new();
+            root.layout_with_text(WINDOW, &mut tcx as &mut dyn Any);
+            root.semantics()
+                .nodes
+                .iter()
+                .filter_map(|(_, n)| n.label().map(str::to_string))
+                .collect()
+        }
+
+        #[test]
+        fn drawer_label_defaults_to_english() {
+            assert!(labels(None, None).iter().any(|l| l == "Navigation drawer"));
+        }
+
+        #[test]
+        fn drawer_label_reads_the_thai_theme_strings() {
+            let l = labels(Some(thai_theme()), None);
+            assert!(l.iter().any(|l| l == "เมนูนำทาง"), "{l:?}");
+            assert!(!l.iter().any(|l| l == "Navigation drawer"));
+        }
+
+        #[test]
+        fn drawer_label_setter_beats_the_theme_strings() {
+            let l = labels(Some(thai_theme()), Some("Main menu"));
+            assert!(l.iter().any(|l| l == "Main menu"), "{l:?}");
+            assert!(!l.iter().any(|l| l == "เมนูนำทาง"));
+        }
     }
 }
