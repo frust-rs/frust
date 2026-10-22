@@ -140,6 +140,9 @@ object FrustNativeChrome {
     /** [setIcon] decodes to at most 4x the slot's on-screen size, but never caps below this (px). */
     private const val MIN_ICON_DECODE_PX = 256
 
+    /** Consecutive [INSTALL_NO_ACTIVITY] answers after which [install] warns once. */
+    private const val NO_ACTIVITY_WARN_AFTER = 30
+
     // The `changed` array's spellings: Rust's `ChromeField` names, declared once
     // here (`tests/kotlin_conformance.rs` pins them against `android_wire`).
     private const val FIELD_TABS = "Tabs"
@@ -216,6 +219,9 @@ object FrustNativeChrome {
     private var popup: PopupMenu? = null
     private var debuggable = false
 
+    /** [INSTALL_NO_ACTIVITY] answers since the last [INSTALL_OK]. */
+    private var noActivityStreak = 0
+
     /**
      * Build the chrome for `specJson` (every key) into the host Activity and
      * stamp every later report with `generation`. Returns an `INSTALL_*` code.
@@ -233,6 +239,15 @@ object FrustNativeChrome {
         val root = content?.let(::rootOf)
         if (activity == null || content == null || root == null) {
             Log.d(TAG, "Frust: native app chrome waits — no live Activity hosts the frust surface yet")
+            noActivityStreak += 1
+            if (noActivityStreak == NO_ACTIVITY_WARN_AFTER) {
+                Log.w(
+                    TAG,
+                    "Frust: native app chrome found no Activity hosting the frust surface after " +
+                        "$NO_ACTIVITY_WARN_AFTER attempts — the frust embedding's root is likely not the " +
+                        "content view of any created Activity (e.g. wrapped in another root); still retrying",
+                )
+            }
             return INSTALL_NO_ACTIVITY
         }
         debuggable = (activity.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
@@ -264,33 +279,38 @@ object FrustNativeChrome {
             warnTheme(t)
             return INSTALL_REFUSED
         }
+        noActivityStreak = 0
         return INSTALL_OK
     }
 
     /**
      * Merge the fields `diffJson`'s `changed` array names and update only
      * those. A view update that throws leaves the model ahead of the views, so
-     * the whole merged model is re-applied once; if that throws too, the bars
-     * stay as they are until the next apply.
+     * the whole merged model is re-applied once — through [rebuildBars] when
+     * the diff changed Brightness, since only a rebuild inflates the bars for
+     * the new `dark`; if that throws too, the bars stay as they are until the
+     * next apply.
      */
     @JvmStatic
     fun apply(diffJson: String) {
         assertMainThread()
         val installed = live ?: return
-        val json = try {
-            JSONObject(diffJson)
+        val (json, changed) = try {
+            val parsed = JSONObject(diffJson)
+            parsed to changedFields(parsed)
         } catch (t: Throwable) {
             Log.w(TAG, "Frust: native app chrome apply dropped — malformed diff", t)
             return
         }
         try {
-            val changed = changedFields(json)
             merge(installed.model, json, changed)
             applyChanged(installed, changed)
         } catch (t: Throwable) {
-            Log.w(TAG, "Frust: native app chrome apply failed; re-applying the whole spec", t)
+            val rebuild = FIELD_BRIGHTNESS in changed
+            val fallback = if (rebuild) "rebuilding the bars" else "re-applying the whole spec"
+            Log.w(TAG, "Frust: native app chrome apply failed; $fallback", t)
             try {
-                applyAll(installed)
+                if (rebuild) rebuildBars(installed) else applyAll(installed)
             } catch (again: Throwable) {
                 Log.w(TAG, "Frust: native app chrome re-apply failed; the bars stay as they are", again)
             }
