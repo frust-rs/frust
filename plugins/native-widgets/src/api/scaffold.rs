@@ -221,6 +221,7 @@ pub fn native_scaffold<V>(body: V) -> NativeScaffoldView<V> {
         top: None,
         scroll: None,
         fade: Some(EdgeFade::default().resolve()),
+        resize_to_avoid_keyboard: true,
         handlers: ChromeHandlers::default(),
     }
 }
@@ -234,6 +235,7 @@ pub struct NativeScaffoldView<V> {
     top: Option<TopBarSpec>,
     scroll: Option<ScrollController>,
     fade: Option<ResolvedFade>,
+    resize_to_avoid_keyboard: bool,
     handlers: ChromeHandlers,
 }
 
@@ -343,6 +345,17 @@ impl<V> NativeScaffoldView<V> {
     /// Draw no edge fade under the floating bars.
     pub fn no_edge_fade(mut self) -> Self {
         self.fade = None;
+        self
+    }
+
+    /// Whether the body shrinks by the on-screen keyboard (Flutter's
+    /// `resizeToAvoidBottomInset`), default on, so a bottom-pinned composer
+    /// sits on the keyboard. The body then sees no IME inset, and the
+    /// frust-drawn fallback tab row is hidden while the keyboard is up (the
+    /// Android arm hides its bottom navigation the same way). Off leaves the
+    /// body full height under the keyboard.
+    pub fn resize_to_avoid_keyboard(mut self, enabled: bool) -> Self {
+        self.resize_to_avoid_keyboard = enabled;
         self
     }
 
@@ -549,6 +562,10 @@ pub struct ScaffoldWidget {
     generation: Option<ChromeGeneration>,
     scroll: Option<ScrollLink>,
     fade: Option<ResolvedFade>,
+    /// Whether the body shrinks by the keyboard inset.
+    resize: bool,
+    /// Whether the last layout hid the fallback tab row under the keyboard.
+    bottom_hidden: bool,
     /// Whether a native arm holds the bars (not the fallback, not refused).
     native: bool,
 }
@@ -642,6 +659,10 @@ impl<V> NativeScaffoldView<V> {
         if element.native != native || element.fade != self.fade {
             flags |= ChangeFlags::PAINT;
         }
+        if element.resize != self.resize_to_avoid_keyboard {
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
+        element.resize = self.resize_to_avoid_keyboard;
         element.native = native;
         element.fade = self.fade;
         self.sync_scroll(element, generation, spec);
@@ -709,6 +730,8 @@ impl<V> NativeScaffoldView<V> {
             generation: None,
             scroll: None,
             fade: None,
+            resize: self.resize_to_avoid_keyboard,
+            bottom_hidden: false,
             native: false,
         };
         let (_, outcome) = self.sync::<Outer>(&mut element, ctx);
@@ -814,9 +837,26 @@ impl ScaffoldWidget {
         }
     }
 
-    /// The insets the body sees: the edges the fallback bars took, consumed.
+    /// The keyboard height the body is shrunk by: zero when not resizing.
+    fn keyboard(&self, insets: WindowInsets) -> f64 {
+        if self.resize {
+            insets.view_insets.bottom.max(0.0)
+        } else {
+            0.0
+        }
+    }
+
+    /// The insets the body sees: the edges the fallback bars took, consumed;
+    /// when shrunk by the keyboard, no IME inset and no bottom padding the
+    /// keyboard already covers.
     fn body_insets(&self, insets: WindowInsets) -> WindowInsets {
-        insets.consuming(false, self.top.is_some(), false, self.bottom.is_some())
+        let mut body = insets.consuming(false, self.top.is_some(), false, self.bottom.is_some());
+        let ime = self.keyboard(insets);
+        if ime > 0.0 {
+            body.view_insets.bottom = 0.0;
+            body.view_padding.bottom = (body.view_padding.bottom - ime).max(0.0);
+        }
+        body
     }
 }
 
@@ -876,12 +916,18 @@ impl Widget for ScaffoldWidget {
             }
             None => 0.0,
         };
+        let window = ctx.window_insets();
+        let ime = self.keyboard(window);
+        self.bottom_hidden = ime > 0.0 && self.bottom.is_some();
         if !self.has_bars() {
+            let cut = banner_height + ime;
             let body_bc = BoxConstraints::new(
-                Size::new(bc.min().width, (bc.min().height - banner_height).max(0.0)),
-                Size::new(bc.max().width, (bc.max().height - banner_height).max(0.0)),
+                Size::new(bc.min().width, (bc.min().height - cut).max(0.0)),
+                Size::new(bc.max().width, (bc.max().height - cut).max(0.0)),
             );
-            let body = self.body.layout_child(ctx, &body_bc);
+            let insets = self.body_insets(window);
+            let body_pod = &mut self.body;
+            let body = ctx.with_window_insets(insets, |ctx| body_pod.layout_child(ctx, &body_bc));
             self.body.set_origin(Point::new(0.0, banner_height));
             return bc.constrain(Size::new(body.width, body.height + banner_height));
         }
@@ -897,10 +943,14 @@ impl Widget for ScaffoldWidget {
                 .map_or(0.0, |bar| bar.layout_child(ctx, &bar_bc).height)
         };
         let top_height = bar_height(&mut self.top);
-        let bottom_height = bar_height(&mut self.bottom);
+        let bottom_height = if self.bottom_hidden {
+            0.0
+        } else {
+            bar_height(&mut self.bottom)
+        };
         let used = banner_height + top_height + bottom_height;
         let body_bc = if bc.max().height.is_finite() {
-            let height = (bc.max().height - used).max(0.0);
+            let height = (bc.max().height - used - ime).max(0.0);
             BoxConstraints::new(
                 Size::new(bc.min().width, height),
                 Size::new(bc.max().width, height),
@@ -911,7 +961,7 @@ impl Widget for ScaffoldWidget {
                 Size::new(bc.max().width, f64::INFINITY),
             )
         };
-        let insets = self.body_insets(ctx.window_insets());
+        let insets = self.body_insets(window);
         let body = &mut self.body;
         let body_size = ctx.with_window_insets(insets, |ctx| body.layout_child(ctx, &body_bc));
         let body_y = banner_height + top_height;
@@ -941,7 +991,12 @@ impl Widget for ScaffoldWidget {
             ctx.size(),
             (padding.top, padding.bottom),
         );
-        for pod in [&mut self.top, &mut self.bottom, &mut self.banner]
+        let bottom = if self.bottom_hidden {
+            None
+        } else {
+            self.bottom.as_mut()
+        };
+        for pod in [self.top.as_mut(), bottom, self.banner.as_mut()]
             .into_iter()
             .flatten()
         {
@@ -955,7 +1010,7 @@ impl Widget for ScaffoldWidget {
         }
         let mut pods: Vec<&mut ChildPod> = std::iter::once(&mut self.body)
             .chain(self.top.as_mut())
-            .chain(self.bottom.as_mut())
+            .chain(self.bottom.as_mut().filter(|_| !self.bottom_hidden))
             .collect();
         route_pods(&mut pods, ctx, event)
     }
@@ -965,7 +1020,7 @@ impl Widget for ScaffoldWidget {
             pod.semantics_child(ctx);
         }
         self.body.semantics_child(ctx);
-        if let Some(bottom) = &self.bottom {
+        if let Some(bottom) = self.bottom.as_ref().filter(|_| !self.bottom_hidden) {
             bottom.semantics_child(ctx);
         }
     }
@@ -1632,6 +1687,157 @@ mod tests {
         );
         teardown(&view, &mut first);
         teardown(&view, &mut second);
+    }
+
+    /// What the probe body saw on its last layout.
+    #[derive(Default)]
+    struct Seen {
+        max: Size,
+        insets: WindowInsets,
+    }
+
+    struct ProbeBody(Rc<RefCell<Seen>>);
+
+    impl Widget for ProbeBody {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            *self.0.borrow_mut() = Seen {
+                max: bc.max(),
+                insets: ctx.window_insets(),
+            };
+            bc.max()
+        }
+        fn paint(&mut self, _: &mut PaintCtx, _: &mut dyn PaintScene) {}
+    }
+
+    /// Lay `view` out in 300x800 under `insets`, with a probe as the body.
+    fn laid_out(
+        view: &NativeScaffoldView<frust::TextView>,
+        insets: WindowInsets,
+    ) -> (ScaffoldWidget, Seen) {
+        let (mut element, _) = build(view);
+        let seen = Rc::new(RefCell::new(Seen::default()));
+        element.body = ChildPod::new(Box::new(ProbeBody(seen.clone())));
+        let mut text_ctx = frust_text::TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut text_ctx as &mut dyn std::any::Any);
+        let bc = BoxConstraints::loose(Size::new(300.0, 800.0));
+        lctx.with_window_insets(insets, |ctx| element.layout(ctx, &bc));
+        let seen = std::mem::take(&mut *seen.borrow_mut());
+        (element, seen)
+    }
+
+    fn keyboard_insets(padding_bottom: f64, ime: f64) -> WindowInsets {
+        WindowInsets::new(
+            frust_core::insets::EdgeInsets::new(0.0, 0.0, 0.0, padding_bottom),
+            frust_core::insets::EdgeInsets::new(0.0, 0.0, 0.0, ime),
+        )
+    }
+
+    fn bare() -> NativeScaffoldView<frust::TextView> {
+        native_scaffold(text("body"))
+    }
+
+    #[test]
+    fn resizing_to_avoid_the_keyboard_is_the_default() {
+        assert!(bare().resize_to_avoid_keyboard);
+        assert!(
+            !bare()
+                .resize_to_avoid_keyboard(false)
+                .resize_to_avoid_keyboard
+        );
+    }
+
+    #[test]
+    fn the_body_shrinks_by_the_keyboard_without_bars() {
+        let _guard = chrome::slot_test_guard();
+        let view = bare();
+        let (mut element, seen) = laid_out(&view, keyboard_insets(34.0, 300.0));
+        assert_eq!(seen.max.height, 500.0);
+        assert_eq!(element.body.origin().y, 0.0);
+        assert_eq!(seen.insets.view_insets.bottom, 0.0);
+        assert_eq!(seen.insets.view_padding.bottom, 0.0);
+        teardown(&view, &mut element);
+    }
+
+    #[test]
+    fn the_body_is_unchanged_when_resizing_is_disabled() {
+        let _guard = chrome::slot_test_guard();
+        let insets = keyboard_insets(34.0, 300.0);
+        for view in [
+            bare().resize_to_avoid_keyboard(false),
+            scaffold().resize_to_avoid_keyboard(false),
+        ] {
+            let (mut element, seen) = laid_out(&view, insets);
+            assert_eq!(seen.insets.view_insets.bottom, 300.0);
+            assert!(!element.bottom_hidden);
+            if !element.has_bars() {
+                assert_eq!(seen.max.height, 800.0);
+            }
+            teardown(&view, &mut element);
+        }
+    }
+
+    #[test]
+    fn the_body_sees_the_bottom_padding_the_keyboard_does_not_cover() {
+        let _guard = chrome::slot_test_guard();
+        // Raw view_padding 340 over a 300 keyboard: 40 remains visible.
+        let view = bare();
+        let (mut element, seen) = laid_out(&view, keyboard_insets(340.0, 300.0));
+        assert_eq!(seen.insets.view_padding.bottom, 40.0);
+        assert_eq!(seen.insets.view_insets.bottom, 0.0);
+        teardown(&view, &mut element);
+    }
+
+    #[test]
+    fn the_fallback_bars_path_shrinks_the_body_and_hides_the_tab_row() {
+        let _guard = chrome::slot_test_guard();
+        let view = scaffold();
+        let (mut resting, rest) = laid_out(&view, keyboard_insets(0.0, 0.0));
+        let tab_row = resting
+            .bottom
+            .as_ref()
+            .expect("fallback tab row")
+            .size()
+            .height;
+        let top = resting
+            .top
+            .as_ref()
+            .expect("fallback top bar")
+            .size()
+            .height;
+        assert!(!resting.bottom_hidden);
+        assert_eq!(rest.max.height, 800.0 - top - tab_row);
+        teardown(&view, &mut resting);
+
+        let (mut up, seen) = laid_out(&view, keyboard_insets(0.0, 300.0));
+        assert!(up.bottom_hidden, "the tab row hides under the keyboard");
+        assert_eq!(seen.max.height, 800.0 - top - 300.0);
+        assert_eq!(seen.insets.view_insets.bottom, 0.0);
+        assert_eq!(up.body.origin().y, top);
+        teardown(&view, &mut up);
+    }
+
+    #[test]
+    fn a_keyboard_taller_than_the_space_clamps_the_body_to_zero() {
+        let _guard = chrome::slot_test_guard();
+        for view in [bare(), scaffold()] {
+            let (mut element, seen) = laid_out(&view, keyboard_insets(0.0, 5000.0));
+            assert_eq!(seen.max.height, 0.0);
+            teardown(&view, &mut element);
+        }
+    }
+
+    #[test]
+    fn toggling_resize_requests_layout() {
+        let _guard = chrome::slot_test_guard();
+        let on = bare();
+        let (mut element, _) = build(&on);
+        let off = bare().resize_to_avoid_keyboard(false);
+        let mut counter = 0u64;
+        let (flags, _) =
+            off.rebuild_synced::<()>(&on, &mut element, &mut BuildCtx::new(&mut counter));
+        assert!(flags.contains(ChangeFlags::LAYOUT));
+        assert!(!element.resize);
+        teardown(&off, &mut element);
     }
 
     /// Counts and keeps every brush fill.
