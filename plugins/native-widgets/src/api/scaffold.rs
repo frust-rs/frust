@@ -53,6 +53,103 @@ const EDGE_FADE_TAIL: f64 = 24.0;
 /// The fade's alpha at the screen edge and where it crosses the inset line.
 const EDGE_FADE_EDGE_ALPHA: f32 = 0.92;
 const EDGE_FADE_INSET_ALPHA: f32 = 0.6;
+/// The [`EdgeFade::strong`] alphas.
+const STRONG_FADE_EDGE_ALPHA: f32 = 1.0;
+const STRONG_FADE_INSET_ALPHA: f32 = 0.88;
+
+/// The edge fade [`NativeScaffoldView::edge_fade`] paints under the floating
+/// iOS bars: an optional colour, the alpha at the screen edge, the alpha where
+/// the band crosses the bar's inset line and how far it reaches past it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EdgeFade {
+    color: Option<Color>,
+    edge_alpha: f32,
+    bar_alpha: f32,
+    tail: f64,
+}
+
+impl Default for EdgeFade {
+    /// The theme surface colour, 0.92 at the edge, 0.6 at the bar line and a
+    /// 24 px tail.
+    fn default() -> Self {
+        Self {
+            color: None,
+            edge_alpha: EDGE_FADE_EDGE_ALPHA,
+            bar_alpha: EDGE_FADE_INSET_ALPHA,
+            tail: EDGE_FADE_TAIL,
+        }
+    }
+}
+
+impl EdgeFade {
+    /// The stronger look tried on device: opaque at the edge, 0.88 at the bar
+    /// line.
+    pub fn strong() -> Self {
+        Self {
+            edge_alpha: STRONG_FADE_EDGE_ALPHA,
+            bar_alpha: STRONG_FADE_INSET_ALPHA,
+            ..Self::default()
+        }
+    }
+
+    /// Fade in `color` instead of the theme surface.
+    pub fn color(mut self, color: Color) -> Self {
+        self.color = Some(color);
+        self
+    }
+
+    /// The alpha at the screen edge, clamped to `0.0..=1.0` (NaN: the default).
+    pub fn edge_alpha(mut self, alpha: f32) -> Self {
+        self.edge_alpha = clamp_alpha(alpha, EDGE_FADE_EDGE_ALPHA);
+        self
+    }
+
+    /// The alpha where the band crosses the bar's inset line, clamped to
+    /// `0.0..=1.0` (NaN: the default).
+    pub fn bar_alpha(mut self, alpha: f32) -> Self {
+        self.bar_alpha = clamp_alpha(alpha, EDGE_FADE_INSET_ALPHA);
+        self
+    }
+
+    /// Logical pixels the fade reaches past the inset; non-finite or negative
+    /// becomes 0.
+    pub fn tail(mut self, tail: f64) -> Self {
+        self.tail = if tail.is_finite() && tail > 0.0 {
+            tail
+        } else {
+            0.0
+        };
+        self
+    }
+
+    /// This config with its colour resolved.
+    fn resolve(self) -> ResolvedFade {
+        ResolvedFade {
+            color: self.color.unwrap_or_else(default_fade_color),
+            edge_alpha: self.edge_alpha,
+            bar_alpha: self.bar_alpha,
+            tail: self.tail,
+        }
+    }
+}
+
+/// `alpha` clamped to `0.0..=1.0`, `fallback` for NaN.
+fn clamp_alpha(alpha: f32, fallback: f32) -> f32 {
+    if alpha.is_nan() {
+        fallback
+    } else {
+        alpha.clamp(0.0, 1.0)
+    }
+}
+
+/// An [`EdgeFade`] with its colour fixed at build time.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ResolvedFade {
+    color: Color,
+    edge_alpha: f32,
+    bar_alpha: f32,
+    tail: f64,
+}
 
 /// The refusal banner's label.
 const REFUSAL_LABEL: &str = "one native_scaffold per app";
@@ -114,7 +211,7 @@ pub fn native_scaffold<V>(body: V) -> NativeScaffoldView<V> {
         selected: None,
         top: None,
         scroll: None,
-        fade: default_edge_fade(),
+        fade: Some(EdgeFade::default().resolve()),
         handlers: ChromeHandlers::default(),
     }
 }
@@ -127,7 +224,7 @@ pub struct NativeScaffoldView<V> {
     selected: Option<TabId>,
     top: Option<TopBarSpec>,
     scroll: Option<ScrollController>,
-    fade: Option<Color>,
+    fade: Option<ResolvedFade>,
     handlers: ChromeHandlers,
 }
 
@@ -227,10 +324,10 @@ impl<V> NativeScaffoldView<V> {
         self
     }
 
-    /// Paint the edge fade under the floating bars in `color` instead of the
-    /// theme surface. Only drawn where the bars float over the body (iOS).
-    pub fn edge_fade(mut self, color: Color) -> Self {
-        self.fade = Some(color);
+    /// Paint the edge fade under the floating bars as `fade` configures it.
+    /// Only drawn where the bars float over the body (iOS).
+    pub fn edge_fade(mut self, fade: EdgeFade) -> Self {
+        self.fade = Some(fade.resolve());
         self
     }
 
@@ -260,12 +357,12 @@ fn ambient_dark() -> bool {
 
 /// The default fade colour: the threaded theme's surface, else opaque black
 /// when the ambient brightness is dark and white otherwise.
-fn default_edge_fade() -> Option<Color> {
-    Some(match use_context::<Theme>() {
+fn default_fade_color() -> Color {
+    match use_context::<Theme>() {
         Some(theme) => theme.scheme().surface,
         None if ambient_dark() => Color::BLACK,
         None => Color::WHITE,
-    })
+    }
 }
 
 /// One fade band: its origin and size within the scaffold, and the fraction
@@ -274,10 +371,10 @@ type EdgeBand = (Point, Size, f64);
 
 /// The top and bottom fade bands for bar insets `top` and `bottom`; an edge
 /// without an inset gets none.
-fn edge_fade_bands(size: Size, top: f64, bottom: f64) -> [Option<EdgeBand>; 2] {
+fn edge_fade_bands(size: Size, top: f64, bottom: f64, tail: f64) -> [Option<EdgeBand>; 2] {
     let band = |inset: f64, at_bottom: bool| {
         (inset > 0.0).then(|| {
-            let height = inset + EDGE_FADE_TAIL;
+            let height = inset + tail;
             let y = if at_bottom { size.height - height } else { 0.0 };
             (
                 Point::new(0.0, y),
@@ -290,24 +387,28 @@ fn edge_fade_bands(size: Size, top: f64, bottom: f64) -> [Option<EdgeBand>; 2] {
 }
 
 /// The fade colour to paint, if any: the bars must float and be native.
-fn edge_fade_color(floats: bool, native: bool, fade: Option<Color>) -> Option<Color> {
+fn edge_fade_color(floats: bool, native: bool, fade: Option<ResolvedFade>) -> Option<ResolvedFade> {
     fade.filter(|_| floats && native)
 }
 
 /// A band's gradient, running from its screen edge (`top`: the upper one)
 /// inward through the inset line to transparent.
-fn edge_fade_brush(origin: Point, size: Size, solid_until: f64, top: bool, color: Color) -> Brush {
+fn edge_fade_brush(
+    origin: Point,
+    size: Size,
+    solid_until: f64,
+    top: bool,
+    color: Color,
+    (edge_alpha, bar_alpha): (f32, f32),
+) -> Brush {
     let (from, to) = if top {
         (origin.y, origin.y + size.height)
     } else {
         (origin.y + size.height, origin.y)
     };
     let stops = [
-        (0.0f32, color.multiply_alpha(EDGE_FADE_EDGE_ALPHA)),
-        (
-            solid_until as f32,
-            color.multiply_alpha(EDGE_FADE_INSET_ALPHA),
-        ),
+        (0.0f32, color.multiply_alpha(edge_alpha)),
+        (solid_until as f32, color.multiply_alpha(bar_alpha)),
         (1.0f32, color.multiply_alpha(0.0)),
     ];
     Brush::Gradient(
@@ -426,7 +527,7 @@ pub struct ScaffoldWidget {
     bottom: Option<ChildPod>,
     generation: Option<ChromeGeneration>,
     scroll: Option<ScrollLink>,
-    fade: Option<Color>,
+    fade: Option<ResolvedFade>,
     /// Whether a native arm holds the bars (not the fallback, not refused).
     native: bool,
 }
@@ -671,14 +772,16 @@ impl ScaffoldWidget {
         size: Size,
         (top, bottom): (f64, f64),
     ) {
-        let Some(color) = edge_fade_color(floats, self.native, self.fade) else {
+        let Some(fade) = edge_fade_color(floats, self.native, self.fade) else {
             return;
         };
-        let bands = edge_fade_bands(size, top, bottom);
+        let bands = edge_fade_bands(size, top, bottom, fade.tail);
+        let alphas = (fade.edge_alpha, fade.bar_alpha);
         for (index, band) in bands.into_iter().enumerate() {
             if let Some((offset, band_size, solid_until)) = band {
                 let at = Point::new(origin.x + offset.x, origin.y + offset.y);
-                let brush = edge_fade_brush(at, band_size, solid_until, index == 0, color);
+                let brush =
+                    edge_fade_brush(at, band_size, solid_until, index == 0, fade.color, alphas);
                 scene.fill_rect_brush(at, band_size, &brush);
             }
         }
@@ -1408,7 +1511,7 @@ mod tests {
 
     #[test]
     fn the_edge_bands_span_the_inset_plus_the_tail() {
-        let [top, bottom] = edge_fade_bands(Size::new(375.0, 667.0), 74.0, 83.0);
+        let [top, bottom] = edge_fade_bands(Size::new(375.0, 667.0), 74.0, 83.0, EDGE_FADE_TAIL);
         assert_eq!(
             top,
             Some((Point::new(0.0, 0.0), Size::new(375.0, 98.0), 74.0 / 98.0))
@@ -1421,10 +1524,10 @@ mod tests {
                 83.0 / 107.0
             ))
         );
-        let [top, bottom] = edge_fade_bands(Size::new(375.0, 667.0), 0.0, 83.0);
+        let [top, bottom] = edge_fade_bands(Size::new(375.0, 667.0), 0.0, 83.0, EDGE_FADE_TAIL);
         assert!(top.is_none() && bottom.is_some());
         assert_eq!(
-            edge_fade_bands(Size::new(375.0, 667.0), 0.0, 0.0),
+            edge_fade_bands(Size::new(375.0, 667.0), 0.0, 0.0, EDGE_FADE_TAIL),
             [None, None]
         );
     }
@@ -1459,9 +1562,9 @@ mod tests {
         teardown(&off, &mut element);
 
         let red = Color::from_rgb8(200, 0, 0);
-        let on = scaffold().edge_fade(red);
+        let on = scaffold().edge_fade(EdgeFade::default().color(red));
         let mut element = faded(&on, true);
-        assert_eq!(element.fade, Some(red));
+        assert_eq!(element.fade.map(|fade| fade.color), Some(red));
         let scene = paint_fade(&element, true);
         let Brush::Gradient(gradient) = &scene.0[0].2 else {
             panic!("a gradient brush");
@@ -1493,7 +1596,7 @@ mod tests {
                 }
             }
             fn build(&self, _: &mut ()) -> impl View<()> {
-                SEEN.with(|seen| seen.set(Some(scaffold().fade)));
+                SEEN.with(|seen| seen.set(Some(scaffold().fade.map(|fade| fade.color))));
                 text("body")
             }
         }
@@ -1507,6 +1610,120 @@ mod tests {
                 .surface;
             assert_eq!(SEEN.with(Cell::take), Some(Some(surface)), "{brightness:?}");
         }
-        assert_eq!(scaffold().fade, Some(Color::WHITE), "no theme");
+        let plain = scaffold().fade.map(|fade| fade.color);
+        assert_eq!(plain, Some(Color::WHITE), "no theme");
+    }
+
+    #[test]
+    fn edge_fade_defaults_and_strong_preset() {
+        let default = EdgeFade::default();
+        assert_eq!(
+            (
+                default.color,
+                default.edge_alpha,
+                default.bar_alpha,
+                default.tail
+            ),
+            (None, 0.92, 0.6, 24.0)
+        );
+        let strong = EdgeFade::strong();
+        assert_eq!(
+            (
+                strong.color,
+                strong.edge_alpha,
+                strong.bar_alpha,
+                strong.tail
+            ),
+            (None, 1.0, 0.88, 24.0)
+        );
+    }
+
+    #[test]
+    fn edge_fade_setters_sanitise() {
+        let fade = EdgeFade::default().edge_alpha(1.5).bar_alpha(-0.2);
+        assert_eq!((fade.edge_alpha, fade.bar_alpha), (1.0, 0.0));
+        let fade = EdgeFade::strong().edge_alpha(f32::NAN).bar_alpha(f32::NAN);
+        assert_eq!((fade.edge_alpha, fade.bar_alpha), (0.92, 0.6));
+        assert_eq!(EdgeFade::default().tail(-5.0).tail, 0.0);
+        assert_eq!(EdgeFade::default().tail(f64::NAN).tail, 0.0);
+        assert_eq!(EdgeFade::default().tail(f64::INFINITY).tail, 0.0);
+        assert_eq!(EdgeFade::default().tail(10.0).tail, 10.0);
+    }
+
+    #[test]
+    fn a_custom_fade_reaches_the_stops_and_band_rects() {
+        let _guard = chrome::slot_test_guard();
+        let red = Color::from_rgb8(200, 0, 0);
+        let view = scaffold().edge_fade(
+            EdgeFade::default()
+                .color(red)
+                .edge_alpha(0.5)
+                .bar_alpha(0.25)
+                .tail(10.0),
+        );
+        let mut element = faded(&view, true);
+        let scene = paint_fade(&element, true);
+        assert_eq!(scene.0[0].1, Size::new(375.0, 84.0));
+        assert_eq!(scene.0[1].0, Point::new(0.0, 574.0));
+        let Brush::Gradient(gradient) = &scene.0[0].2 else {
+            panic!("a gradient brush");
+        };
+        let at = |index: usize| {
+            gradient.stops[index]
+                .color
+                .to_alpha_color::<peniko::color::Srgb>()
+        };
+        assert_eq!(at(0), red.multiply_alpha(0.5));
+        assert_eq!(at(1), red.multiply_alpha(0.25));
+        teardown(&view, &mut element);
+    }
+
+    #[test]
+    fn the_fade_colour_overrides_or_resolves_to_the_theme_surface() {
+        use std::cell::RefCell;
+
+        thread_local! {
+            static SEEN: RefCell<Vec<Option<Color>>> = const { RefCell::new(Vec::new()) };
+        }
+        let red = Color::from_rgb8(200, 0, 0);
+        struct Themed;
+        impl frust::Component for Themed {
+            type State = ();
+            fn init(&self) {
+                frust::provide_context(Theme::neutral());
+            }
+            fn build(&self, _: &mut ()) -> impl View<()> {
+                let seen = |fade: EdgeFade| {
+                    scaffold()
+                        .edge_fade(fade)
+                        .fade
+                        .map(|resolved| resolved.color)
+                };
+                let both = [
+                    seen(EdgeFade::default()),
+                    seen(EdgeFade::default().color(Color::from_rgb8(200, 0, 0))),
+                ];
+                SEEN.with(|cell| cell.borrow_mut().extend(both));
+                text("body")
+            }
+        }
+        let mut counter = 0u64;
+        let view = frust::component(Themed);
+        let _ = View::<()>::build(&view, &mut BuildCtx::new(&mut counter));
+        let surface = Theme::neutral().scheme().surface;
+        let seen = SEEN.with(|cell| cell.borrow().clone());
+        assert_eq!(seen, vec![Some(surface), Some(red)]);
+    }
+
+    #[test]
+    fn changing_only_the_fade_alpha_requests_paint() {
+        let _guard = chrome::slot_test_guard();
+        let first = scaffold();
+        let (mut element, _) = build(&first);
+        let second = scaffold().edge_fade(EdgeFade::default().bar_alpha(0.3));
+        let mut counter = 0u64;
+        let (flags, _) = second.sync::<()>(&mut element, &mut BuildCtx::new(&mut counter));
+        assert!(flags.contains(ChangeFlags::PAINT));
+        teardown(&second, &mut element);
     }
 }

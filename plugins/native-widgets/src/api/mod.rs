@@ -102,7 +102,7 @@ pub use mount::{NativeComponentView, native_component};
 pub use present::{
     show_native_alert, show_native_alert_into, show_native_sheet, show_native_sheet_into,
 };
-pub use scaffold::{NativeScaffoldView, native_scaffold};
+pub use scaffold::{EdgeFade, NativeScaffoldView, native_scaffold};
 
 /// Make sure this build's platform factory exists before the host can look it
 /// up — **optional**: every builder already does this for you.
