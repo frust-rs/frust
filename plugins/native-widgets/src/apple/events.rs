@@ -61,7 +61,7 @@
 //!
 //! | Selector | Sender | Reports |
 //! |---|---|---|
-//! | `tabBarController:shouldSelectViewController:` | a chrome page | `TabSelected`/`TabReselected`, answering NO |
+//! | `tabBarController:shouldSelectViewController:` | a chrome page | `TabSelected`, answering YES (UIKit selects natively); `TabReselected`, answering NO |
 //! | `handleChromeAction:` | a trailing `UIBarButtonItem` (tag = spec index) | `ActionTapped` |
 //! | `handleChromeBack:` | the leading back item | `BackPressed` |
 //!
@@ -246,9 +246,10 @@ define_class!(
     // The app chrome's tab bar controller (module doc's chrome table).
     #[cfg(feature = "frust-api")]
     unsafe impl UITabBarControllerDelegate for FrustNativeControlTarget {
-        /// Report a chrome tab tap and refuse it: the bar never moves itself,
-        /// the app's republished `selected` does. `true` only for a
-        /// controller that is no chrome page (the system "More" list).
+        /// Report a chrome tab tap. YES for another chrome page (the frust
+        /// controller already moved there, the app's republished `selected`
+        /// settles it) and for a controller that is no chrome page (the
+        /// system "More" list); NO for the shown page and on a panic.
         #[unsafe(method(tabBarController:shouldSelectViewController:))]
         fn tab_bar_controller_should_select(
             &self,

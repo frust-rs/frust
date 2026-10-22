@@ -36,18 +36,54 @@
 //! every UIKit mutation (install, each diff, dispose) runs on a later
 //! main-queue turn, in publish order. The UIKit objects live in a main-thread
 //! `thread_local!`; the host itself holds only the live generation, so it is
-//! `Send` and const-constructible for the slot's `static`. A selection move is
-//! therefore never made inside a tab-bar delegate callback.
+//! `Send` and const-constructible for the slot's `static`. Only a tab tap moves
+//! the frust controller inside a UIKit callback, the tab bar controller
+//! delegate's, which no frust frame encloses (Selection below).
 //!
 //! # The containment-move contract
 //!
 //! The frust controller's view (the `FrustView`) is wrapped in a plugin-owned
-//! host `UIView`; the controller is a child of exactly one page at a time
-//! (`addChildViewController`, host view added, `didMoveToParentViewController`)
-//! and a selection change moves it (`willMoveToParentViewController(nil)`,
-//! host view removed, `removeFromParentViewController`, then the same three
-//! steps on the new page). Pages are kept by `TabId`, so a reorder never
-//! loses the contained controller.
+//! host `UIView`; the controller is a child of exactly one page at a time,
+//! and the host is only ever in that page's view (its current parent's) or
+//! in no view at all: UIKit raises a hierarchy-inconsistency exception for a
+//! child controller's view under another controller's view, and a foreign
+//! exception aborts the process. A selection change moves the controller in
+//! one turn: the old page lets it go (`willMoveToParentViewController(nil)`,
+//! host removed, `removeFromParentViewController`), leaving the host with no
+//! superview; the new page takes it (`addChildViewController`,
+//! `didMoveToParentViewController`) and adds the host to its view once it is
+//! in the window, from `viewIsAppearing:` (iOS 17+; the deployment target is
+//! 15.0, so the method is `respondsToSelector`-guarded and earlier systems
+//! rely on `viewDidLayoutSubviews`/`viewDidAppear:`, which place it too).
+//! Pages are kept by `TabId`, so a reorder never loses the contained controller.
+//!
+//! # Selection
+//!
+//! A tap on another chrome page moves the controller inside
+//! `tabBarController:shouldSelectViewController:` and answers YES, so UIKit
+//! selects natively (the Liquid Glass lens slides without a bounce). An
+//! app-driven change (`ChromeSpec::selected`) snapshots the host while on
+//! screen, moves it, calls `setSelectedIndex` inside `performWithoutAnimation`
+//! (iOS 26 animates it otherwise, the page entering the window only at the
+//! end), forces a `layoutIfNeeded` of the tab bar and navigation controllers'
+//! views, then places the host. A page still out of the window places it
+//! later; until then the snapshot (a plain view, no controller) covers the
+//! host's last frame just below the tab bar in the tab bar controller's view,
+//! removed once the host is placed or after 0.5 s at the latest. A tab change
+//! that drops the holding page snapshots before letting it go.
+//!
+//! A native tap stays pending for [`SETTLE_WINDOW`] against applies published
+//! before the app saw it ([`settle`]): one still naming the tab the tap left is
+//! stale and keeps the bar, one naming the tapped tab confirms it, a third tab
+//! is honoured at once. At the deadline a spec still naming the left tab snaps
+//! the bar back the same unanimated way: the app rejected the tap ([`expire`]).
+//! A newer tap replaces the pending one, a tab-list change drops it, and the
+//! timer acts only on its own generation and tap.
+//!
+//! Every page view and the tab bar controller's view carry a backdrop,
+//! `systemBackgroundColor` resolved for `ChromeSpec::dark` into a concrete
+//! colour, so a frame the host has not reached shows the theme's background
+//! rather than black; it is repainted where the bars are restyled.
 //!
 //! # The FrustViewHost origin-zero invariant
 //!
@@ -74,8 +110,10 @@
 //! spec UIKit shows (`crate::chrome::resolve_tap`, a tab against the
 //! app-confirmed `selected`) and handed to `crate::chrome::deliver_event`,
 //! never with a [`CHROME`] borrow held (`try_borrow`: an apply in progress
-//! has taken the state, and the tap is dropped). A tab tap answers NO, so
-//! UIKit never switches tabs itself.
+//! has taken the state, the tap is dropped and the delegate answers NO). A tap
+//! on the shown tab reports `TabReselected` and answers NO; one on another
+//! chrome page reports `TabSelected` and answers YES (Selection above); a
+//! foreign controller (the system "More" list) answers YES.
 //!
 //! The frust UI thread is the main thread on iOS: taps and applies both run
 //! there, so a tap always resolves against the spec on screen, and the
@@ -88,8 +126,9 @@
 //! `ChromeSpec::dark` is pinned with `overrideUserInterfaceStyle` on the tab
 //! bar and every navigation bar, not on the tab bar controller: a controller
 //! override reaches the contained frust controller, whose trait changes
-//! feed the app theme's brightness and would pin it. The bars are restyled
-//! on install, for every new page, and on any apply whose spec flips it.
+//! feed the app theme's brightness and would pin it (hence the resolved
+//! backdrop colour, not a page override). The bars are restyled on install,
+//! for every new page, and on any apply whose spec flips it.
 //!
 //! # Limitations
 //!
@@ -97,24 +136,27 @@
 //! tab, and the navigation controllers have no stack (no native push
 //! animation; `Leading::Back` is a custom item reporting `BackPressed`).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{NSObject, NSObjectProtocol};
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
-use objc2_core_foundation::CGFloat;
+use objc2::{
+    ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel,
+};
+use objc2_core_foundation::{CGFloat, CGRect};
 use objc2_foundation::{NSArray, NSData, NSString, ns_string};
 use objc2_ui_kit::{
-    NSObjectUIAccessibility, UIAction, UIApplication, UIBarButtonItem, UIImage, UIImageView,
-    UIMenu, UIMenuElement, UIMenuElementAttributes, UINavigationController,
+    NSObjectUIAccessibility, UIAction, UIApplication, UIBarButtonItem, UIColor, UIImage,
+    UIImageView, UIMenu, UIMenuElement, UIMenuElementAttributes, UINavigationController,
     UINavigationItemLargeTitleDisplayMode, UIResponder, UISceneActivationState, UITabBarController,
-    UIView, UIViewAutoresizing, UIViewContentMode, UIViewController, UIWindow, UIWindowScene,
+    UITraitCollection, UIUserInterfaceStyle, UIView, UIViewAutoresizing, UIViewContentMode,
+    UIViewController, UIWindow, UIWindowScene,
 };
 
 use super::FrustNativeControlTarget;
@@ -275,6 +317,11 @@ static RECHECK: AtomicU64 = AtomicU64::new(0);
 /// [`RECHECK_MAX`].
 const RECHECK_FIRST: Duration = Duration::from_millis(100);
 const RECHECK_MAX: Duration = Duration::from_secs(2);
+/// The longest a [`Cover`] stays up when no page places the host.
+const COVER_MAX: Duration = Duration::from_millis(500);
+/// How long a native tab tap waits for the app's confirmation (module doc,
+/// Selection).
+const SETTLE_WINDOW: Duration = Duration::from_millis(250);
 
 /// Record `failure` for `generation`; an older generation's never replaces
 /// a newer one's.
@@ -365,6 +412,9 @@ fn recheck(mtm: MainThreadMarker, generation: u64, delay: Duration) {
 thread_local! {
     /// The installed chrome, if any. Main thread only.
     static CHROME: RefCell<Option<Chrome>> = const { RefCell::new(None) };
+    /// The shown cover and its sequence number. Main thread only.
+    static COVER: RefCell<Option<(u64, Retained<UIView>)>> = const { RefCell::new(None) };
+    static COVER_SEQ: Cell<u64> = const { Cell::new(0) };
 }
 
 /// Take generation `generation`'s chrome out of [`CHROME`] (any when `None`).
@@ -566,6 +616,10 @@ struct Chrome {
     spec: ChromeSpec,
     /// The delegate and bar-item target; both references to it are weak.
     target: Retained<FrustNativeControlTarget>,
+    /// The native tab tap the app has not confirmed yet (module doc, Selection).
+    pending: Option<NativeSelect>,
+    /// Native tab taps so far: the last one's number.
+    taps: u64,
 }
 
 impl Chrome {
@@ -595,10 +649,13 @@ impl Chrome {
             pages: Vec::new(),
             spec: spec.clone(),
             target: FrustNativeControlTarget::chrome_target(mtm),
+            pending: None,
+            taps: 0,
         };
         chrome.target.attach_tab_bar_controller(&chrome.tabs);
-        chrome.sync_pages(mtm, spec);
+        let cover = chrome.sync_pages(mtm, spec);
         apply_user_interface_style(&chrome.tabs.tabBar(), spec.dark);
+        paint_backdrop(chrome.tabs.view(), spec.dark);
         // The root swap takes the `FrustView` out of the window; its siblings
         // stay until moved, in their old order, into the host view.
         window.setRootViewController(Some(&chrome.tabs));
@@ -609,7 +666,10 @@ impl Chrome {
             view.setFrame(chrome.host.bounds());
             view.setAutoresizingMask(flexible);
         }
-        chrome.select(spec);
+        // The former window root has no parent and the fresh host no
+        // superview; detaching keeps that true before a page holds it.
+        detach_from_parent(&chrome.frust);
+        chrome.select(spec, cover);
         chrome
     }
 
@@ -619,11 +679,26 @@ impl Chrome {
         let spec = diff.spec;
         let restyle = self.spec.dark != spec.dark;
         self.spec = spec.clone();
-        if diff.contains(ChromeField::Tabs) {
-            self.sync_pages(mtm, spec);
-        }
+        let cover = if diff.contains(ChromeField::Tabs) {
+            // The pending tap's page indices may name other pages now.
+            self.pending = None;
+            self.sync_pages(mtm, spec)
+        } else {
+            None
+        };
         if diff.contains(ChromeField::Tabs) || diff.contains(ChromeField::Selected) {
-            self.select(spec);
+            let wanted = selected_index(spec);
+            match settle(self.pending.as_ref(), wanted, Instant::now()) {
+                Settle::Follow => self.select(spec, cover),
+                Settle::Hold => log::debug!(
+                    "frust-native-widgets: chrome selection {wanted:?} predates a native tab tap; \
+                     the bar stays"
+                ),
+                Settle::Resolve => {
+                    self.pending = None;
+                    self.select(spec, cover);
+                }
+            }
         }
         for page in &self.pages {
             let top = self.spec.top.as_ref();
@@ -631,14 +706,18 @@ impl Chrome {
         }
         if restyle {
             apply_user_interface_style(&self.tabs.tabBar(), spec.dark);
+            paint_backdrop(self.tabs.view(), spec.dark);
             for page in &self.pages {
                 apply_user_interface_style(&page.nav.navigationBar(), spec.dark);
+                paint_backdrop(page.page.view(), spec.dark);
             }
         }
     }
 
     /// Rebuild the view-controller array for `spec.tabs`, keeping pages by id.
-    fn sync_pages(&mut self, mtm: MainThreadMarker, spec: &ChromeSpec) {
+    /// Dropping the holding page detaches the host; its snapshot, taken first,
+    /// is returned for the [`Self::select`] that follows in the same turn.
+    fn sync_pages(&mut self, mtm: MainThreadMarker, spec: &ChromeSpec) -> Option<Cover> {
         let wanted: Vec<Option<&TabItem>> = if spec.tabs.is_empty() {
             vec![None]
         } else {
@@ -653,6 +732,7 @@ impl Chrome {
                     let page = Page::new(mtm, id);
                     apply_top(mtm, &page, self.spec.top.as_ref(), &self.target, |_| true);
                     apply_user_interface_style(&page.nav.navigationBar(), self.spec.dark);
+                    paint_backdrop(page.page.view(), self.spec.dark);
                     page
                 }
             };
@@ -661,6 +741,11 @@ impl Chrome {
             }
             self.pages.push(page);
         }
+        let cover = old
+            .iter()
+            .any(|page| page.page.holds())
+            .then(|| self.snapshot_cover())
+            .flatten();
         for page in old {
             page.page.release();
         }
@@ -672,36 +757,161 @@ impl Chrome {
         self.tabs
             .setViewControllers(Some(&NSArray::from_retained_slice(&navs)));
         self.tabs.tabBar().setHidden(spec.tabs.is_empty());
+        cover
     }
 
-    /// Select `spec.selected` (an unknown id keeps the current tab) and move
-    /// the frust controller into that page.
-    fn select(&mut self, spec: &ChromeSpec) {
+    /// Select `spec.selected` (an unknown id keeps the current tab) through
+    /// [`Self::show_page`].
+    fn select(&self, spec: &ChromeSpec, cover: Option<Cover>) {
         let current = self.tabs.selectedIndex();
-        let index = spec
-            .selected
-            .as_ref()
-            .and_then(|id| spec.tabs.iter().position(|tab| tab.id() == id))
-            .unwrap_or(current);
+        self.show_page(selected_index(spec).unwrap_or(current), cover);
+    }
+
+    /// Select page `index` (page 0 when out of range) without animation and
+    /// move the frust controller into it in this one turn (module doc,
+    /// Selection). `cover` is a snapshot [`Self::sync_pages`] took before
+    /// detaching the host; otherwise one is taken here.
+    fn show_page(&self, index: usize, cover: Option<Cover>) {
         let index = if index < self.pages.len() { index } else { 0 };
         let Some(target) = self.pages.get(index) else {
             return;
         };
-        self.tabs.setSelectedIndex(index);
-        if !target.page.holds() {
+        if target.page.holds() {
+            self.select_tab(index);
+        } else {
+            let cover = cover.or_else(|| self.snapshot_cover());
             for page in &self.pages {
                 page.page.release();
             }
             target.page.hold(&self.frust, &self.host);
+            self.select_tab(index);
+            if let Some(view) = self.tabs.view() {
+                view.layoutIfNeeded();
+            }
+            if let Some(view) = target.nav.view() {
+                view.layoutIfNeeded();
+            }
+            let covered = !target.page.place_host() && self.show_cover(cover);
+            let in_window = self.host.window().is_some();
+            log::debug!(
+                "frust-native-widgets: chrome page {index} selected; host in window: \
+                 {in_window}, cover shown: {covered}"
+            );
+            debug_assert!(
+                in_window || covered,
+                "the chrome host is off screen, uncovered"
+            );
         }
         self.tabs.setNeedsStatusBarAppearanceUpdate();
         self.tabs.setNeedsUpdateOfHomeIndicatorAutoHidden();
+    }
+
+    /// `setSelectedIndex` inside `performWithoutAnimation`: iOS 26 animates a
+    /// programmatic selection, putting the page in the window only at its end.
+    fn select_tab(&self, index: usize) {
+        let tabs = self.tabs.clone();
+        let block = RcBlock::new(move || tabs.setSelectedIndex(index));
+        UIView::performWithoutAnimation(&block, self.tabs.mtm());
+    }
+
+    /// The page whose navigation controller is `controller`.
+    fn page_of(&self, controller: &UIViewController) -> Option<usize> {
+        self.pages.iter().position(|page| {
+            let nav: &UIViewController = &page.nav;
+            std::ptr::eq(nav, controller)
+        })
+    }
+
+    /// A tap on `controller`'s tab: when it is another chrome page, move the
+    /// frust controller there (the host has no superview until that page
+    /// places it), record the tap as pending and start its settle timer.
+    /// Whether UIKit may select it natively.
+    fn native_select(&mut self, controller: &UIViewController) -> bool {
+        let Some(to) = self.page_of(controller) else {
+            return false;
+        };
+        let from = self.tabs.selectedIndex();
+        if from == to {
+            return false;
+        }
+        for page in &self.pages {
+            page.page.release();
+        }
+        self.pages[to].page.hold(&self.frust, &self.host);
+        self.taps += 1;
+        let tap = self.taps;
+        // No chrome page shown before (the "More" list): nothing to snap back to.
+        self.pending = (from < self.pages.len()).then(|| NativeSelect {
+            from,
+            to,
+            deadline: Instant::now() + SETTLE_WINDOW,
+            tap,
+        });
+        if self.pending.is_some() {
+            settle_after(self.generation, tap);
+        }
+        self.tabs.setNeedsStatusBarAppearanceUpdate();
+        self.tabs.setNeedsUpdateOfHomeIndicatorAutoHidden();
+        true
+    }
+
+    /// Native tap `tap`'s deadline: snap the bar back when the app never
+    /// confirmed it ([`expire`]).
+    fn settle_expired(&mut self, tap: u64) {
+        match expire(self.pending.as_ref(), tap, selected_index(&self.spec)) {
+            Expiry::Superseded => {}
+            Expiry::Settled => self.pending = None,
+            Expiry::SnapBack(from) => {
+                self.pending = None;
+                log::debug!(
+                    "frust-native-widgets: unconfirmed chrome tab tap; back to page {from}"
+                );
+                self.show_page(from, None);
+            }
+        }
+    }
+
+    /// The host as it shows now and its frame in the tab bar controller's
+    /// view; `None` when it is not in the window.
+    fn snapshot_cover(&self) -> Option<Cover> {
+        let tabs = self.tabs.view()?;
+        self.host.window()?;
+        let view = self.host.snapshotViewAfterScreenUpdates(false)?;
+        let frame = self
+            .host
+            .convertRect_toView(self.host.bounds(), Some(&tabs));
+        Some(Cover { view, frame })
+    }
+
+    /// Put `cover` (a backdrop-painted view over the whole tab bar controller
+    /// when `None`) in the tab bar controller's view just below the tab bar,
+    /// until a page places the host or [`COVER_MAX`] passes. Whether it is up.
+    fn show_cover(&self, cover: Option<Cover>) -> bool {
+        let Some(tabs) = self.tabs.view() else {
+            return false;
+        };
+        let cover = cover.unwrap_or_else(|| {
+            let view = UIView::new(self.tabs.mtm());
+            paint_backdrop(Some(view.clone()), self.spec.dark);
+            Cover {
+                view,
+                frame: tabs.bounds(),
+            }
+        });
+        cover.view.setFrame(cover.frame);
+        match child_holding(&tabs, &self.tabs.tabBar()) {
+            Some(bar) => tabs.insertSubview_belowSubview(&cover.view, &bar),
+            None => tabs.addSubview(&cover.view),
+        }
+        keep_cover(cover.view);
+        true
     }
 
     /// Re-root the window back to the frust controller and release the rest.
     /// Tolerates a half-applied chrome: a page a panicking `sync_pages` let
     /// go of may still contain the frust controller, which is detached.
     fn dispose(self, _mtm: MainThreadMarker) {
+        remove_cover(None);
         self.target.detach_tab_bar_controller(&self.tabs);
         let stack: Vec<Retained<UIView>> = self.host.subviews().iter().collect();
         for page in &self.pages {
@@ -746,6 +956,168 @@ fn restore_siblings(stack: &[Retained<UIView>], frust_view: &UIView, superview: 
         superview.insertSubview_aboveSubview(view, anchor);
         anchor = view;
     }
+}
+
+fn is_superview(view: &UIView, parent: &UIView) -> bool {
+    view.superview()
+        .is_some_and(|superview| std::ptr::eq(&*superview, parent))
+}
+
+/// `view`'s ancestor (itself included) that is a direct subview of `parent`.
+fn child_holding(parent: &UIView, view: &UIView) -> Option<Retained<UIView>> {
+    let mut child = view.retain();
+    loop {
+        let superview = child.superview()?;
+        if std::ptr::eq(&*superview, parent) {
+            return Some(child);
+        }
+        child = superview;
+    }
+}
+
+/// A plain view (no controller) standing in for the host while the selected
+/// page is off-window, and its frame in the tab bar controller's view.
+struct Cover {
+    view: Retained<UIView>,
+    frame: CGRect,
+}
+
+/// Record `view` as the shown cover, replacing any older one, and remove it
+/// after [`COVER_MAX`] unless a page placed the host first.
+fn keep_cover(view: Retained<UIView>) {
+    let seq = COVER_SEQ.with(|cell| {
+        cell.set(cell.get() + 1);
+        cell.get()
+    });
+    let old = COVER.with(|cell| cell.replace(Some((seq, view))));
+    if let Some((_, old)) = old {
+        old.removeFromSuperview();
+    }
+    let when = DispatchTime::try_from(COVER_MAX).unwrap_or(DispatchTime::NOW);
+    let queued = DispatchQueue::main().after(when, move || {
+        if catch_unwind(AssertUnwindSafe(|| remove_cover(Some(seq)))).is_err() {
+            log::error!("frust-native-widgets: removing a chrome cover panicked");
+        }
+    });
+    if queued.is_err() {
+        remove_cover(Some(seq));
+    }
+}
+
+/// Remove the shown cover: any when `only` is `None`, else only cover `only`.
+fn remove_cover(only: Option<u64>) {
+    let cover = COVER.with(|cell| {
+        let mut slot = cell.try_borrow_mut().ok()?;
+        match (slot.as_ref(), only) {
+            (Some((seq, _)), Some(wanted)) if *seq != wanted => None,
+            _ => slot.take(),
+        }
+    });
+    if let Some((_, view)) = cover {
+        view.removeFromSuperview();
+    }
+}
+
+/// The page `spec.selected` names, if any.
+fn selected_index(spec: &ChromeSpec) -> Option<usize> {
+    let id = spec.selected.as_ref()?;
+    spec.tabs.iter().position(|tab| tab.id() == id)
+}
+
+/// A tab tap UIKit selected natively that no apply has confirmed yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NativeSelect {
+    /// The page shown before the tap.
+    from: usize,
+    /// The tapped page.
+    to: usize,
+    /// When an unconfirmed tap snaps back.
+    deadline: Instant,
+    /// The tap's number ([`Chrome::taps`]): a timer acts only on its own tap.
+    tap: u64,
+}
+
+/// What an apply does with the page its spec selects ([`settle`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Settle {
+    /// No tap pending: select the spec's page.
+    Follow,
+    /// The spec predates the tap or names no page: keep the bar and the tap.
+    Hold,
+    /// Select the spec's page and drop the tap: confirmed, overridden or expired.
+    Resolve,
+}
+
+/// The settle decision for an apply selecting page `wanted` at `now`.
+fn settle(pending: Option<&NativeSelect>, wanted: Option<usize>, now: Instant) -> Settle {
+    let Some(pending) = pending else {
+        return Settle::Follow;
+    };
+    if now >= pending.deadline {
+        return Settle::Resolve;
+    }
+    match wanted {
+        Some(index) if index == pending.to => Settle::Resolve,
+        Some(index) if index == pending.from => Settle::Hold,
+        Some(_) => Settle::Resolve,
+        None => Settle::Hold,
+    }
+}
+
+/// What tap `tap`'s deadline does ([`expire`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Expiry {
+    /// A newer tap, an apply or a tab-list change already settled this one.
+    Superseded,
+    /// The spec moved off the left page: drop the tap, keep the bar.
+    Settled,
+    /// The spec still selects this page: the app rejected the tap.
+    SnapBack(usize),
+}
+
+/// The deadline decision for tap `tap` while the last spec selects `wanted`.
+fn expire(pending: Option<&NativeSelect>, tap: u64, wanted: Option<usize>) -> Expiry {
+    match pending {
+        Some(pending) if pending.tap == tap && wanted == Some(pending.from) => {
+            Expiry::SnapBack(pending.from)
+        }
+        Some(pending) if pending.tap == tap => Expiry::Settled,
+        _ => Expiry::Superseded,
+    }
+}
+
+/// Queue native tap `tap`'s deadline on the main queue, for `generation`'s
+/// chrome only. Unqueued, the tap settles at the first apply past it.
+fn settle_after(generation: u64, tap: u64) {
+    let when = DispatchTime::try_from(SETTLE_WINDOW).unwrap_or(DispatchTime::NOW);
+    let queued = DispatchQueue::main().after(when, move || {
+        // SAFETY: a block submitted to the main queue runs on the main
+        // thread, as in [`on_main`].
+        let mtm = unsafe { MainThreadMarker::new_unchecked() };
+        let expired = || with_chrome(mtm, generation, |chrome| chrome.settle_expired(tap));
+        if catch_unwind(AssertUnwindSafe(expired)).is_err() {
+            log::error!("frust-native-widgets: settling a chrome tab tap panicked");
+        }
+    });
+    if queued.is_err() {
+        log::warn!("frust-native-widgets: a chrome tab tap's settle timer was not queued");
+    }
+}
+
+/// Paint `view`'s backdrop: `systemBackgroundColor` resolved for `dark` into
+/// a concrete colour, no `overrideUserInterfaceStyle` (module doc, Brightness).
+fn paint_backdrop(view: Option<Retained<UIView>>, dark: bool) {
+    let Some(view) = view else {
+        return;
+    };
+    let style = if dark {
+        UIUserInterfaceStyle::Dark
+    } else {
+        UIUserInterfaceStyle::Light
+    };
+    let traits = UITraitCollection::traitCollectionWithUserInterfaceStyle(style);
+    let color = UIColor::systemBackgroundColor().resolvedColorWithTraitCollection(&traits);
+    view.setBackgroundColor(Some(&color));
 }
 
 impl Page {
@@ -968,19 +1340,28 @@ fn ui_image(icon: &TabIcon) -> Option<Retained<UIImage>> {
     }
 }
 
-/// A tap on a chrome page: deliver what it requests, and answer whether
-/// UIKit may select `controller` itself (only one that is no chrome page).
+/// A tap on `controller`'s tab: deliver what it requests, then answer whether
+/// UIKit may select it natively — YES for a foreign controller (the system
+/// "More" list) and for another chrome page, which then already holds the
+/// frust controller; NO for the shown page or while an apply has the chrome.
 pub(super) fn tab_tapped(controller: &UIViewController) -> bool {
     let mut foreign = false;
     report("tab", |chrome| {
-        let index = chrome.pages.iter().position(|page| {
-            let nav: &UIViewController = &page.nav;
-            std::ptr::eq(nav, controller)
-        });
+        let index = chrome.page_of(controller);
         foreign = index.is_none();
         index.map(ChromeTap::Tab)
     });
-    foreign
+    if foreign {
+        return true;
+    }
+    CHROME.with(|cell| {
+        let Ok(mut state) = cell.try_borrow_mut() else {
+            return false;
+        };
+        state
+            .as_mut()
+            .is_some_and(|chrome| chrome.native_select(controller))
+    })
 }
 
 /// A tap on the trailing action item tagged `tag`.
@@ -1042,20 +1423,42 @@ define_class!(
             self.contained()
         }
 
-        /// Pins the host view to the page's bounds.
+        /// Pins the host view to the page's bounds, placing a held host that
+        /// has no superview once this page is in the window.
         #[unsafe(method(viewDidLayoutSubviews))]
         fn view_did_layout_subviews(&self) {
             // SAFETY: forwarding the same no-argument selector to
             // `UIViewController`'s implementation, as UIKit expects.
             let _: () = unsafe { msg_send![super(self), viewDidLayoutSubviews] };
-            let pinned = catch_unwind(AssertUnwindSafe(|| {
-                let host = self.ivars().host.borrow().clone();
-                if let (Some(host), Some(view)) = (host, self.viewIfLoaded()) {
-                    host.setFrame(view.bounds());
-                }
-            }));
-            if pinned.is_err() {
+            if catch_unwind(AssertUnwindSafe(|| self.place_host())).is_err() {
                 log::error!("frust-native-widgets: a chrome page layout step panicked");
+            }
+        }
+
+        /// Places a held host as the page enters the window, before it shows
+        /// (iOS 17+; earlier systems never send it, see the module doc).
+        #[unsafe(method(viewIsAppearing:))]
+        fn view_is_appearing(&self, animated: bool) {
+            if UIViewController::class().responds_to(sel!(viewIsAppearing:)) {
+                // SAFETY: forwarding the same selector with its one `BOOL`
+                // argument to `UIViewController`'s implementation, checked
+                // to exist, which UIKit requires an override to call.
+                let _: () = unsafe { msg_send![super(self), viewIsAppearing: animated] };
+            }
+            if catch_unwind(AssertUnwindSafe(|| self.place_host())).is_err() {
+                log::error!("frust-native-widgets: a chrome page appearance step panicked");
+            }
+        }
+
+        /// Places a held host that still has no superview.
+        #[unsafe(method(viewDidAppear:))]
+        fn view_did_appear(&self, animated: bool) {
+            // SAFETY: forwarding the same selector with its one `BOOL`
+            // argument to `UIViewController`'s implementation, which UIKit
+            // requires an override to call.
+            let _: () = unsafe { msg_send![super(self), viewDidAppear: animated] };
+            if catch_unwind(AssertUnwindSafe(|| self.place_host())).is_err() {
+                log::error!("frust-native-widgets: a chrome page appearance step panicked");
             }
         }
     }
@@ -1082,27 +1485,127 @@ impl FrustChromePageController {
         self.contained().is_some()
     }
 
-    /// Contain `frust`, adding `host` (the wrapped `FrustView`) to this view.
+    /// Contain `frust` and take charge of `host` (the wrapped `FrustView`),
+    /// which [`Self::place_host`] moves into this view once it is in the window.
     fn hold(&self, frust: &UIViewController, host: &UIView) {
         self.addChildViewController(frust);
-        if let Some(view) = self.view() {
-            host.setFrame(view.bounds());
-            view.addSubview(host);
-        }
         frust.didMoveToParentViewController(Some(self));
         self.ivars().contained.replace(Some(frust.retain()));
         self.ivars().host.replace(Some(host.retain()));
     }
 
-    /// Give up the frust controller, if held; the host view leaves too.
+    /// Pin the held host to this view's bounds, first adding it here when
+    /// this view is in the window, which drops the cover. Only the holding
+    /// page has a host, so the host only ever lands in its parent's view.
+    /// Whether the host is in this view afterwards.
+    fn place_host(&self) -> bool {
+        let host = self
+            .ivars()
+            .host
+            .try_borrow()
+            .ok()
+            .and_then(|host| host.clone());
+        let (Some(host), Some(view)) = (host, self.viewIfLoaded()) else {
+            return false;
+        };
+        if is_superview(&host, &view) {
+            host.setFrame(view.bounds());
+            remove_cover(None);
+            return true;
+        }
+        if view.window().is_none() {
+            return false;
+        }
+        view.addSubview(&host);
+        host.setFrame(view.bounds());
+        remove_cover(None);
+        true
+    }
+
+    /// Give up the frust controller, if held; the host view leaves this
+    /// view too and has no superview until the next page places it.
     fn release(&self) {
         let Some(frust) = self.ivars().contained.take() else {
             return;
         };
         frust.willMoveToParentViewController(None);
-        if let Some(host) = self.ivars().host.take() {
+        if let Some(host) = self.ivars().host.take()
+            && let Some(view) = self.viewIfLoaded()
+            && is_superview(&host, &view)
+        {
             host.removeFromSuperview();
         }
         frust.removeFromParentViewController();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LEFT: usize = 0;
+    const TAPPED: usize = 1;
+    const THIRD: usize = 2;
+
+    fn pending(deadline: Instant, tap: u64) -> NativeSelect {
+        NativeSelect {
+            from: LEFT,
+            to: TAPPED,
+            deadline,
+            tap,
+        }
+    }
+
+    #[test]
+    fn without_a_pending_tap_an_apply_follows_the_spec() {
+        let now = Instant::now();
+        assert_eq!(settle(None, Some(LEFT), now), Settle::Follow);
+        assert_eq!(settle(None, None, now), Settle::Follow);
+    }
+
+    #[test]
+    fn inside_the_window_a_spec_naming_the_left_page_is_stale() {
+        let now = Instant::now();
+        let tap = pending(now + SETTLE_WINDOW, 1);
+        assert_eq!(settle(Some(&tap), Some(LEFT), now), Settle::Hold);
+        assert_eq!(settle(Some(&tap), None, now), Settle::Hold);
+    }
+
+    #[test]
+    fn the_tapped_page_confirms_and_a_third_page_overrides() {
+        let now = Instant::now();
+        let tap = pending(now + SETTLE_WINDOW, 1);
+        assert_eq!(settle(Some(&tap), Some(TAPPED), now), Settle::Resolve);
+        assert_eq!(settle(Some(&tap), Some(THIRD), now), Settle::Resolve);
+    }
+
+    #[test]
+    fn past_the_deadline_an_apply_follows_the_spec_even_back() {
+        let now = Instant::now();
+        let tap = pending(now, 1);
+        assert_eq!(settle(Some(&tap), Some(LEFT), now), Settle::Resolve);
+        let later = now + Duration::from_millis(1);
+        assert_eq!(settle(Some(&tap), Some(LEFT), later), Settle::Resolve);
+    }
+
+    #[test]
+    fn an_unconfirmed_tap_snaps_back_at_its_deadline() {
+        let tap = pending(Instant::now(), 3);
+        assert_eq!(expire(Some(&tap), 3, Some(LEFT)), Expiry::SnapBack(LEFT));
+    }
+
+    #[test]
+    fn a_tap_the_spec_moved_off_settles_without_moving() {
+        let tap = pending(Instant::now(), 3);
+        assert_eq!(expire(Some(&tap), 3, Some(TAPPED)), Expiry::Settled);
+        assert_eq!(expire(Some(&tap), 3, Some(THIRD)), Expiry::Settled);
+        assert_eq!(expire(Some(&tap), 3, None), Expiry::Settled);
+    }
+
+    #[test]
+    fn a_stale_timer_never_touches_a_newer_or_settled_tap() {
+        let newer = pending(Instant::now(), 4);
+        assert_eq!(expire(Some(&newer), 3, Some(LEFT)), Expiry::Superseded);
+        assert_eq!(expire(None, 3, Some(LEFT)), Expiry::Superseded);
     }
 }

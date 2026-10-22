@@ -117,6 +117,8 @@ objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "UIMenu",
     "UIMenuElement",
     "UIAction",
+    # Gates `resolvedColorWithTraitCollection:` (the chrome's concrete page backdrop).
+    "UITraitCollection",
     "block2",
     "objc2-core-foundation",
     "objc2-quartz-core",
