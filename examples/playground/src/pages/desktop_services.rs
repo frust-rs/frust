@@ -24,14 +24,18 @@
 //! Shows the live logical window size from [`WindowMetrics`] and where the
 //! persisted state file lives. The matching `DesktopConfig` is set in
 //! `lib.rs`'s `frust::app!` call.
+//!
+//! - The Window row's Minimize, Maximize/Restore and Enter/Exit fullscreen
+//!   buttons push a [`WindowCommand`]; the readout follows the live
+//!   [`WindowState`] (or says there is none off desktop).
 
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use frust::{
     AsyncValue, ButtonStyle, Color, Component, EdgeInsets, Get, Padding, SizedBox, Theme, UseTask,
-    View, WindowMetrics, button, column, component, row, spawn_blocking, text, use_context,
-    use_task,
+    View, WindowCommand, WindowMetrics, WindowState, button, column, component,
+    push_window_command, row, spawn_blocking, text, use_context, use_task,
 };
 use frust_file_dialogs::{FileDialog, FileDialogError, FileFilter};
 
@@ -146,6 +150,16 @@ impl Component for DesktopPage {
                 )
             })
             .unwrap_or_else(|| "Window: size not published".to_string());
+        let window_state = use_context::<WindowState>();
+        let maximized = window_state.is_some_and(|s| s.maximized);
+        let fullscreen = window_state.is_some_and(|s| s.fullscreen);
+        let readout = match window_state {
+            Some(s) => format!(
+                "maximized={} fullscreen={} focused={} minimized={}",
+                s.maximized, s.fullscreen, s.focused, s.minimized
+            ),
+            None => "WindowState: none (not a desktop shell)".to_string(),
+        };
 
         let mut list = column();
         for name in names {
@@ -181,6 +195,25 @@ impl Component for DesktopPage {
                 .child(text("Window").size(13.0).color(accent))
                 .child(text(window).size(12.0))
                 .child(
+                    row()
+                        .child(window_button("Minimize", WindowCommand::Minimize))
+                        .child(SizedBox(Some(8.0), None))
+                        .child(window_button(
+                            if maximized { "Restore" } else { "Maximize" },
+                            WindowCommand::ToggleMaximized,
+                        ))
+                        .child(SizedBox(Some(8.0), None))
+                        .child(window_button(
+                            if fullscreen {
+                                "Exit fullscreen"
+                            } else {
+                                "Enter fullscreen"
+                            },
+                            WindowCommand::SetFullscreen(!fullscreen),
+                        )),
+                )
+                .child(text(readout).size(12.0).color(muted))
+                .child(
                     text(
                         "Min size 480 x 320; geometry is saved to \
                          <data dir>/frust/window_state_<app>.txt and restored on the \
@@ -207,6 +240,15 @@ fn dialog_button(
     button(label, move |_state: &mut DesktopPageState| {
         *cell.lock().expect("request cell poisoned") = request;
         picked.restart();
+    })
+    .style(ButtonStyle::Secondary)
+    .small()
+}
+
+/// A window-command button: a press queues `command` for the desktop shell.
+fn window_button(label: &'static str, command: WindowCommand) -> impl View<DesktopPageState> {
+    button(label, move |_state: &mut DesktopPageState| {
+        push_window_command(command)
     })
     .style(ButtonStyle::Secondary)
     .small()
