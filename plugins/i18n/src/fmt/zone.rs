@@ -19,6 +19,7 @@ use jiff::tz::TimeZone;
 
 use crate::{I18nError, Locale};
 
+use super::datetime::DateTimeOptions;
 use super::{CivilDate, CivilTime, DateLength, datetime};
 
 /// The UTC offset, in seconds east of UTC, that IANA zone `iana` has at the
@@ -74,8 +75,29 @@ pub fn datetime_in_zone(
     iana: &str,
     length: DateLength,
 ) -> Result<String, I18nError> {
+    datetime_in_zone_with(
+        locale,
+        unix_seconds,
+        iana,
+        length,
+        &DateTimeOptions::default(),
+    )
+}
+
+/// [`datetime_in_zone`] with `options` overriding the calendar and hour cycle.
+///
+/// # Errors
+///
+/// As [`datetime_in_zone`].
+pub fn datetime_in_zone_with(
+    locale: &Locale,
+    unix_seconds: i64,
+    iana: &str,
+    length: DateLength,
+    options: &DateTimeOptions,
+) -> Result<String, I18nError> {
     let (date, time) = zoned_civil(unix_seconds, iana)?;
-    datetime::datetime(locale, date, time, length)
+    datetime::datetime_with(locale, date, time, length, options)
 }
 
 /// Formats the date the instant `unix_seconds` falls on in zone `iana`.
@@ -89,8 +111,29 @@ pub fn date_in_zone(
     iana: &str,
     length: DateLength,
 ) -> Result<String, I18nError> {
+    date_in_zone_with(
+        locale,
+        unix_seconds,
+        iana,
+        length,
+        &DateTimeOptions::default(),
+    )
+}
+
+/// [`date_in_zone`] with `options` overriding the calendar.
+///
+/// # Errors
+///
+/// As [`datetime_in_zone`].
+pub fn date_in_zone_with(
+    locale: &Locale,
+    unix_seconds: i64,
+    iana: &str,
+    length: DateLength,
+    options: &DateTimeOptions,
+) -> Result<String, I18nError> {
     let (date, _) = zoned_civil(unix_seconds, iana)?;
-    datetime::date(locale, date, length)
+    datetime::date_with(locale, date, length, options)
 }
 
 /// Formats the time of day the instant `unix_seconds` reads as in zone `iana`.
@@ -104,8 +147,29 @@ pub fn time_in_zone(
     iana: &str,
     length: DateLength,
 ) -> Result<String, I18nError> {
+    time_in_zone_with(
+        locale,
+        unix_seconds,
+        iana,
+        length,
+        &DateTimeOptions::default(),
+    )
+}
+
+/// [`time_in_zone`] with `options` overriding the hour cycle.
+///
+/// # Errors
+///
+/// As [`datetime_in_zone`].
+pub fn time_in_zone_with(
+    locale: &Locale,
+    unix_seconds: i64,
+    iana: &str,
+    length: DateLength,
+    options: &DateTimeOptions,
+) -> Result<String, I18nError> {
     let (_, time) = zoned_civil(unix_seconds, iana)?;
-    datetime::time(locale, time, length)
+    datetime::time_with(locale, time, length, options)
 }
 
 /// Formats the instant `unix_seconds` as a date-and-time at a fixed
@@ -121,8 +185,29 @@ pub fn datetime_at_offset(
     offset_seconds: i32,
     length: DateLength,
 ) -> Result<String, I18nError> {
+    datetime_at_offset_with(
+        locale,
+        unix_seconds,
+        offset_seconds,
+        length,
+        &DateTimeOptions::default(),
+    )
+}
+
+/// [`datetime_at_offset`] with `options` overriding the calendar and hour cycle.
+///
+/// # Errors
+///
+/// As [`datetime_at_offset`].
+pub fn datetime_at_offset_with(
+    locale: &Locale,
+    unix_seconds: i64,
+    offset_seconds: i32,
+    length: DateLength,
+    options: &DateTimeOptions,
+) -> Result<String, I18nError> {
     let (date, time) = civil_at_offset(unix_seconds, offset_seconds)?;
-    datetime::datetime(locale, date, time, length)
+    datetime::datetime_with(locale, date, time, length, options)
 }
 
 /// Parses a fixed UTC offset: `Z`, `±HH:MM`, `±HHMM` or `±HH`, to seconds

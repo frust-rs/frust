@@ -289,12 +289,13 @@ app language stays fixed, only the user's region composes onto it):
    English month names and text, Thai regional conventions (grouping, currency defaults, week
    start) where CLDR regionalizes them — **and, surprisingly, the calendar system**: ICU4X's
    calendar default is keyed off the region, not the language, so `en-TH` still renders a
-   Buddhist-era year (`"January 31, 2567 BE"`, not `"...2024"`) even though every month/weekday
-   name is English (verified — see `I18n::format_locale`'s doc for the full explanation). This
-   branch never adopts a requested tag's *language* — an app with no Thai `.ftl` catalog must
-   never render UI text the user can't read, so only the region crosses the boundary, but the
-   calendar-system surprise above is worth knowing before shipping a date-heavy screen behind
-   this branch.
+   Buddhist-era year (`"Oct 13, 2569 BE"`, not `"Oct 13, 2026"`) even though every month/weekday
+   name is English. A bare `th` tag has no region and is already Gregorian; only region-bearing
+   tags (`th-TH`, `en-TH`) are Buddhist by default. Pin Gregorian with
+   `DateTimeOptions { calendar: Some(Calendar::Gregorian), .. }` (§4e). This branch never
+   adopts a requested tag's *language* — an app with no Thai `.ftl` catalog must never render UI
+   text the user can't read, so only the region crosses the boundary (see `I18n::format_locale`'s
+   doc).
 3. If no requested tag carries a region anywhere (including nothing requested at all), the
    message locale unmodified.
 
@@ -337,7 +338,7 @@ Only with the default-on `formatting` feature (ICU4X-backed, CLDR data baked int
 binary — no provider to configure, no async load):
 
 ```rust
-use frust_i18n::fmt::{self, CivilDate, DateLength};
+use frust_i18n::fmt::{self, Calendar, CivilDate, DateLength, DateTimeOptions};
 
 let de: frust_i18n::Locale = "de-DE".parse()?;
 let en: frust_i18n::Locale = "en-US".parse()?;
@@ -346,6 +347,12 @@ fmt::decimal(&de, 1234.56);                                    // "1.234,56"
 fmt::percent(&en, 75.0);                                       // "75%"
 fmt::currency(&de, 9.99, "EUR")?;               // "9,99\u{a0}€" — U+00A0, CLDR's own space
 fmt::date(&de, CivilDate { year: 2024, month: 1, day: 31 }, DateLength::Medium)?; // "31.01.2024"
+// A Locale carries no -u-ca-/-u-hc- keywords, so the calendar and hour cycle travel in options
+// (`date_with`/`time_with`/`datetime_with`, and `*_in_zone_with`/`datetime_at_offset_with`):
+// th-TH unset -> "13 ต.ค. 2569"; calendar Gregorian -> "13 ต.ค. 2026" (bare `th` is Gregorian
+// either way: the Buddhist default is keyed on the TH region, not the language).
+let opts = DateTimeOptions { calendar: Some(Calendar::Gregorian), hour_cycle: None };
+fmt::date_with(&"th-TH".parse()?, CivilDate { year: 2026, month: 10, day: 13 }, DateLength::Medium, &opts)?;
 ```
 
 Pulling the locale from a live `I18n` handle (§4c) instead of a literal? Pass
@@ -475,7 +482,7 @@ equals short, and vi/es use a comma decimal (`1,5 giờ`, `1,5 horas`).
 
 Honored named options: `NUMBER`'s `style` (`decimal`/`percent`/`currency`), `currency` and
 `minorUnits`;
-`DATETIME`'s `dateStyle`/`timeStyle`/`timeZone`; `RELATIVE_DAY`'s `now`/`timeZone`/`style`. Anything else (ECMA-402-style
+`DATETIME`'s `dateStyle`/`timeStyle`/`timeZone`/`calendar` (`"gregory"`, `"buddhist"`, …)/`hourCycle` (`"h11"`/`"h12"`/`"h23"`); `RELATIVE_DAY`'s `now`/`timeZone`/`style`. Anything else (ECMA-402-style
 `minimumFractionDigits`, `useGrouping`, …) is ignored at `debug` log level, never a warning or
 an error — these run on a UI's formatting path, potentially every frame.
 
