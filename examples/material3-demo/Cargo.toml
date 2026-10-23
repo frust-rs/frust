@@ -20,6 +20,9 @@ frust = { package = "frust-ui", path = "../../crates/frust" }
 frust-material = { path = "../../plugins/material" }
 # Pure Rust, so neither generated project needs plugin gradle/Xcode wiring for it.
 frust-clipboard = { path = "../../plugins/clipboard" }
+# The theme page's en/th toggle: the active locale picks the Material widget strings.
+frust-i18n = { path = "../../plugins/i18n" }
+frust-material-i18n = { path = "../../plugins/material-i18n" }
 
 # Present so the release-only `lean` feature can cap the log level. Never make
 # the cap unconditional: `profile` builds must keep `frust-perf` output.

@@ -38,6 +38,7 @@
 
 use std::sync::LazyLock;
 
+use icu_decimal::input::Decimal;
 use icu_experimental::dimension::currency::CurrencyCode;
 use icu_experimental::dimension::currency::formatter::{
     CurrencyFormatter, CurrencyFormatterPreferences,
@@ -84,6 +85,38 @@ pub(super) fn currency(locale: &Locale, amount: f64, iso_code: &str) -> Result<S
     // Padding is on the unsigned half; `Decimal` carries its sign separately.
     value.absolute.pad_end(position);
 
+    render(locale, &value, &code)
+}
+
+/// The currency's CLDR minor-unit digit count (`JPY` 0, `USD` 2, `KWD` 3).
+///
+/// # Errors
+///
+/// [`I18nError::Format`] for a code that is not three ASCII letters.
+pub(super) fn minor_unit_digits(iso_code: &str) -> Result<u8, I18nError> {
+    parse_code(iso_code)?;
+    Ok(fraction_digits(iso_code) as u8)
+}
+
+/// Formats `minor` (an integer count of the currency's minor units) exactly:
+/// the `Decimal` is built from the integer and shifted, never via `f64`.
+pub(super) fn currency_minor(
+    locale: &Locale,
+    minor: i64,
+    iso_code: &str,
+) -> Result<String, I18nError> {
+    let code = parse_code(iso_code)?;
+    let digits = -fraction_digits(iso_code);
+
+    let mut value = Decimal::from(minor);
+    value.multiply_pow10(digits);
+    value.absolute.pad_end(digits);
+
+    render(locale, &value, &code)
+}
+
+/// Runs the cached locale formatter over an already-rounded `value`.
+fn render(locale: &Locale, value: &Decimal, code: &CurrencyCode) -> Result<String, I18nError> {
     let formatter = CURRENCIES
         .get_or_build(locale, || {
             CurrencyFormatter::try_new(
@@ -93,7 +126,7 @@ pub(super) fn currency(locale: &Locale, amount: f64, iso_code: &str) -> Result<S
         })
         .map_err(|error| I18nError::Format(format!("{locale}: loading currency data: {error}")))?;
 
-    Ok(formatter.format_fixed_decimal(&value, &code).to_string())
+    Ok(formatter.format_fixed_decimal(value, code).to_string())
 }
 
 /// Validates and normalizes an ISO 4217 code into ICU4X's own newtype.
@@ -165,6 +198,32 @@ mod tests {
     #[test]
     fn a_three_digit_currency_pads_to_three() {
         assert!(format("en-US", 9.5, "KWD").contains("9.500"));
+    }
+
+    #[test]
+    fn minor_unit_digits_reads_the_tables_and_rejects_malformed_codes() {
+        assert_eq!(minor_unit_digits("JPY").unwrap(), 0);
+        assert_eq!(minor_unit_digits("usd").unwrap(), 2);
+        assert_eq!(minor_unit_digits("KWD").unwrap(), 3);
+        assert!(minor_unit_digits("US").is_err());
+    }
+
+    #[test]
+    fn currency_minor_is_exact_at_the_i64_extremes() {
+        let en = locale("en-US");
+
+        assert_eq!(currency_minor(&en, 1, "USD").unwrap(), "$0.01");
+        assert_eq!(currency_minor(&en, 0, "USD").unwrap(), "$0.00");
+        assert!(
+            currency_minor(&en, i64::MAX, "USD")
+                .unwrap()
+                .contains("92,233,720,368,547,758.07")
+        );
+        assert!(
+            currency_minor(&en, i64::MIN, "USD")
+                .unwrap()
+                .contains("92,233,720,368,547,758.08")
+        );
     }
 
     #[test]

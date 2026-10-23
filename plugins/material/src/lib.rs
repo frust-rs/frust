@@ -142,6 +142,7 @@ pub mod slider;
 pub mod snackbar;
 pub mod split_button;
 pub mod state_layer;
+pub mod strings;
 pub mod switch;
 pub mod tabs;
 pub mod text_field;
@@ -329,6 +330,7 @@ pub use split_button::{
     SplitButtonSize, SplitButtonTrailingAlignment, SplitButtonVariant, SplitButtonView,
     SplitButtonWidget, TRAILING_SELECTED_CORNER_PERCENT, split_button, split_button_item,
 };
+pub use strings::{DatePickerStringsOwned, MaterialStrings, TimePickerStringsCow};
 pub use switch::{Switch, SwitchView, SwitchWidget, switch};
 pub use tabs::{MIN_TABS, Tab, Tabs, TabsVariant, TabsView, TabsWidget, tab, tabs};
 pub use text_field::{TextField, TextFieldVariant, TextFieldView, TextFieldWidget, text_field};

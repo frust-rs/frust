@@ -1,4 +1,4 @@
-//! The static plugin registry (v1) — twenty-two entries mirroring `plugins/`:
+//! The static plugin registry (v1) — twenty-three entries mirroring `plugins/`:
 //! `shared-preferences` (dependency only), `secure-storage` (dependency plus
 //! an optional `biometric-gate` feature wiring in the plugin's own Android
 //! library module and the iOS plist key its README documents),
@@ -696,6 +696,21 @@ const FILE_DIALOGS: PluginSpec = PluginSpec {
     requires_sibling: None,
 };
 
+/// `material-i18n`'s single base contribution: the bridge is a plain
+/// dependency (no file, no install call). It needs `material` and `i18n`
+/// wired in the app as well; see `plugins/material-i18n/README.md`.
+const MATERIAL_I18N: PluginSpec = PluginSpec {
+    id: "material-i18n",
+    summary: "Localized Material widget strings that follow the active \
+              frust-i18n locale; use with material and i18n.",
+    crate_dir: "material-i18n",
+    base: &[Contribution::CargoDep {
+        name: "frust-material-i18n",
+    }],
+    optional_features: &[],
+    requires_sibling: None,
+};
+
 /// The v1 static plugin registry (Vec-factory convention). A caller (the CLI
 /// or the TUI Add Plugin dialog) enumerates this to drive selection without
 /// hardcoding plugin ids.
@@ -723,6 +738,7 @@ pub fn known_plugins() -> Vec<PluginSpec> {
         SHARE,
         QR,
         FILE_DIALOGS,
+        MATERIAL_I18N,
     ]
 }
 
@@ -742,7 +758,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
-    fn registry_lists_the_twenty_two_v1_plugins() {
+    fn registry_lists_the_twenty_three_v1_plugins() {
         let ids: Vec<&str> = known_plugins().iter().map(|p| p.id).collect();
         assert_eq!(
             ids,
@@ -769,6 +785,7 @@ mod tests {
                 "share",
                 "qr",
                 "file-dialogs",
+                "material-i18n",
             ]
         );
     }

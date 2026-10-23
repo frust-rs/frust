@@ -62,6 +62,8 @@ use frust::authoring::{
 use kurbo::{Point, Rect, Size, Vec2};
 use peniko::{Brush, Color};
 
+use crate::strings::MaterialStrings;
+
 // ---- Theme-token constants (m3e_badge_theme.dart's `M3EBadgeTheme.defaults`) --
 
 /// The dot indicator's diameter, in logical px (`dotSize` default,
@@ -234,6 +236,9 @@ pub struct BadgeView<State: 'static> {
     background_color: Option<Color>,
     foreground_color: Option<Color>,
     semantic_label: Option<String>,
+    /// The ambient theme's badge announcements, read when the view was
+    /// created.
+    default_strings: BadgeStrings,
 }
 
 /// Wrap `child` with a badge slot — no indicator paints until
@@ -250,6 +255,7 @@ pub fn badge<State: 'static, V: View<State>>(child: V) -> BadgeView<State> {
         background_color: None,
         foreground_color: None,
         semantic_label: None,
+        default_strings: BadgeStrings::from_build_context(),
     }
 }
 
@@ -301,9 +307,13 @@ impl<State: 'static> BadgeView<State> {
         self
     }
 
-    /// Override the indicator's accessibility label. Defaults to
-    /// `"Notifications: {count}"` for a numeric badge or `"Notifications"`
-    /// for a dot (the reference's own default label text).
+    /// Override the indicator's accessibility label. Unset, it reads
+    /// [`MaterialStrings::badge_notifications_a11y`] (with the count filled
+    /// in) for a numeric badge or
+    /// [`MaterialStrings::badge_notifications_none_a11y`] for a dot, from the
+    /// ambient theme read when the view is created; English reads
+    /// `Notifications: {count}` and `Notifications` (the reference's own
+    /// default label text).
     pub fn semantic_label(mut self, label: impl Into<String>) -> Self {
         self.semantic_label = Some(label.into());
         self
@@ -320,6 +330,9 @@ pub struct BadgeWidget {
     foreground_color: Option<Color>,
     semantic_label: Option<String>,
     count: Option<u32>,
+    /// The view's resolved announcements, formatted against `count` at
+    /// semantics time. Unused while `semantic_label` is set.
+    default_strings: BadgeStrings,
     label_run: LabelRun,
     indicator_size: Size,
     indicator_offset: Point,
@@ -338,6 +351,7 @@ impl<State: 'static> View<State> for BadgeView<State> {
             foreground_color: self.foreground_color,
             semantic_label: self.semantic_label.clone(),
             count: self.count,
+            default_strings: self.default_strings.clone(),
             label_run: LabelRun::new(),
             indicator_size: Size::ZERO,
             indicator_offset: Point::ZERO,
@@ -369,8 +383,18 @@ impl<State: 'static> View<State> for BadgeView<State> {
             element.foreground_color = self.foreground_color;
             flags |= ChangeFlags::PAINT;
         }
-        element.semantic_label = self.semantic_label.clone();
-        element.count = self.count;
+        // The accessibility label is formatted at semantics time, so these
+        // need no layout; a repaint moves the semantics generation so the
+        // next pull reads the new label.
+        if element.semantic_label != self.semantic_label
+            || element.count != self.count
+            || element.default_strings != self.default_strings
+        {
+            element.semantic_label = self.semantic_label.clone();
+            element.count = self.count;
+            element.default_strings = self.default_strings.clone();
+            flags |= ChangeFlags::PAINT;
+        }
 
         flags |=
             frust::authoring::rebuild_child(&prev.child, &self.child, &mut element.content, ctx);
@@ -485,21 +509,46 @@ impl Widget for BadgeWidget {
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
         if !matches!(self.resolved, ResolvedBadge::None) {
-            ctx.push_node(Role::Label, |node| {
-                let label = self
-                    .semantic_label
-                    .clone()
-                    .unwrap_or_else(|| match self.count {
-                        Some(count) => format!("Notifications: {count}"),
-                        None => "Notifications".to_string(),
-                    });
-                node.set_value(label.as_str());
+            ctx.push_node(Role::Label, |node| match self.semantic_label.as_deref() {
+                Some(label) => node.set_value(label),
+                None => node.set_value(self.default_strings.label(self.count)),
             });
         }
         self.content.semantics_child(ctx);
     }
 
     frust::authoring::visit_children!(content);
+}
+
+/// The two badge announcements from [`MaterialStrings`], carried from the
+/// view into the widget so the label follows the current count without a
+/// theme handle.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BadgeStrings {
+    /// [`MaterialStrings::badge_notifications_a11y`], `{count}` unfilled.
+    counted: String,
+    /// [`MaterialStrings::badge_notifications_none_a11y`].
+    none: String,
+}
+
+impl BadgeStrings {
+    /// The ambient theme's announcements, English when none is provided.
+    fn from_build_context() -> Self {
+        let strings = MaterialStrings::from_build_context();
+        Self {
+            counted: strings.badge_notifications_a11y.to_string(),
+            none: strings.badge_notifications_none_a11y.to_string(),
+        }
+    }
+
+    /// The default accessibility label: the counted form for a numeric
+    /// badge, the bare form for a dot.
+    fn label(&self, count: Option<u32>) -> String {
+        match count {
+            Some(count) => crate::strings::fill_count(&self.counted, count),
+            None => self.none.clone(),
+        }
+    }
 }
 
 /// The resolved container fill. Themed: `colors.error_container`. Unthemed:
@@ -847,5 +896,166 @@ mod tests {
         let mut pctx = PaintCtx::new(Point::ZERO, size);
         w.paint(&mut pctx, &mut rec);
         assert_eq!(rec.rounded_rects[0].3, bg);
+    }
+
+    // ---- MaterialStrings: setter > ambient theme > English ------------------
+
+    mod strings {
+        use super::*;
+        use frust::authoring::text::TextContext;
+        use frust_core::RenderRoot;
+        use frust_widgets::test_support::leaf_any;
+
+        fn thai_theme() -> Theme {
+            let mut theme = crate::baseline();
+            let mut thai = MaterialStrings::ENGLISH;
+            thai.badge_notifications_a11y = "การแจ้งเตือน: {count}".into();
+            thai.badge_notifications_none_a11y = "การแจ้งเตือน".into();
+            theme.extensions.insert(thai);
+            theme
+        }
+
+        /// Provides `theme` as the ambient `Theme` context (when set), then
+        /// creates the badge so its strings resolve from that context.
+        #[derive(Clone)]
+        struct Host {
+            theme: Option<Theme>,
+            dot: bool,
+            count: u32,
+            setter: Option<&'static str>,
+        }
+
+        impl frust::Component for Host {
+            type State = ();
+            fn init(&self) {}
+            fn build(&self, _state: &mut ()) -> impl View<()> {
+                if let Some(theme) = &self.theme {
+                    frust::provide_context(theme.clone());
+                }
+                let view = badge::<(), _>(leaf_any(40.0, 40.0));
+                let view = if self.dot {
+                    view.dot()
+                } else {
+                    view.count(self.count)
+                };
+                match self.setter {
+                    Some(label) => view.semantic_label(label),
+                    None => view,
+                }
+            }
+        }
+
+        type Root = RenderRoot<(), frust::ComponentView<Host>>;
+
+        fn rebuild(root: &mut Root, host: &Host) -> ChangeFlags {
+            let mut logic = |_: &mut ()| frust::component(host.clone());
+            root.rebuild(&mut logic, &mut ())
+        }
+
+        fn semantic_values(root: &Root) -> Vec<String> {
+            root.semantics()
+                .nodes
+                .iter()
+                .filter_map(|(_, n)| n.value().map(str::to_string))
+                .collect()
+        }
+
+        /// The accessibility values of a badge built under `host`.
+        fn values(host: Host) -> Vec<String> {
+            let mut root = Root::new();
+            rebuild(&mut root, &host);
+            let mut tcx = TextContext::new();
+            root.layout_with_text(Size::new(200.0, 200.0), &mut tcx as &mut dyn Any);
+            semantic_values(&root)
+        }
+
+        fn counted(theme: Option<Theme>) -> Host {
+            Host {
+                theme,
+                dot: false,
+                count: 3,
+                setter: None,
+            }
+        }
+        fn dot(theme: Option<Theme>) -> Host {
+            Host {
+                dot: true,
+                ..counted(theme)
+            }
+        }
+
+        #[test]
+        fn defaults_to_english() {
+            assert_eq!(values(counted(None)), ["Notifications: 3"]);
+            assert_eq!(values(dot(None)), ["Notifications"]);
+        }
+
+        #[test]
+        fn reads_the_provided_thai_strings() {
+            assert_eq!(values(counted(Some(thai_theme()))), ["การแจ้งเตือน: 3"]);
+            assert_eq!(values(dot(Some(thai_theme()))), ["การแจ้งเตือน"]);
+        }
+
+        #[test]
+        fn semantic_label_setter_beats_the_theme_strings() {
+            let host = Host {
+                setter: Some("Three new"),
+                ..counted(Some(thai_theme()))
+            };
+            assert_eq!(values(host), ["Three new"]);
+        }
+
+        #[test]
+        fn count_change_and_setter_removal_reach_semantics_without_layout() {
+            let mut root = Root::new();
+            let host = Host {
+                count: 150,
+                setter: Some("Lots"),
+                ..counted(None)
+            };
+            rebuild(&mut root, &host);
+            let mut tcx = TextContext::new();
+            root.layout_with_text(Size::new(200.0, 200.0), &mut tcx as &mut dyn Any);
+            assert_eq!(semantic_values(&root), ["Lots"]);
+
+            // Both counts paint "99+", so nothing needs a layout.
+            let generation = root.semantics_generation();
+            let flags = rebuild(
+                &mut root,
+                &Host {
+                    count: 200,
+                    ..host.clone()
+                },
+            );
+            assert!(!flags.needs_layout(), "{flags:?}");
+            assert!(root.semantics_generation() > generation);
+            assert_eq!(semantic_values(&root), ["Lots"]);
+
+            let generation = root.semantics_generation();
+            let flags = rebuild(
+                &mut root,
+                &Host {
+                    count: 200,
+                    setter: None,
+                    ..host
+                },
+            );
+            assert!(!flags.needs_layout(), "{flags:?}");
+            assert!(root.semantics_generation() > generation);
+            assert_eq!(semantic_values(&root), ["Notifications: 200"]);
+        }
+
+        #[test]
+        fn switching_the_provided_theme_relabels_on_rebuild() {
+            let mut root = Root::new();
+            rebuild(&mut root, &counted(None));
+            let mut tcx = TextContext::new();
+            root.layout_with_text(Size::new(200.0, 200.0), &mut tcx as &mut dyn Any);
+            assert_eq!(semantic_values(&root), ["Notifications: 3"]);
+            rebuild(&mut root, &counted(Some(thai_theme())));
+            assert_eq!(semantic_values(&root), ["การแจ้งเตือน: 3"]);
+            rebuild(&mut root, &counted(Some(crate::baseline())));
+            assert_eq!(semantic_values(&root), ["Notifications: 3"]);
+        }
     }
 }

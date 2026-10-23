@@ -60,6 +60,8 @@ use frust::{
     RouteParams, Router, SizedBox, Theme, TransitionSpec, View, any, icon, navigator,
     provide_context, safe_area, scaffold, shell_route, use_context,
 };
+use frust_i18n::{I18n, Locale, LocaleSet, provide_i18n};
+use frust_material_i18n::provide_localized_strings;
 
 use frust_material::{app_bar, icon_button, icons, nav_item, navigation_bar};
 
@@ -90,6 +92,24 @@ pub struct AppState {
     /// The inner navigator's published route stack — the navigation bar's
     /// source of truth for which destination is lit.
     pub section_routes: RouteObserver,
+    /// The active language, switched from the theme settings page.
+    pub i18n: I18n,
+}
+
+/// The two languages the theme settings page toggles between.
+const LANGUAGES: [&str; 2] = ["en", "th"];
+
+/// The app's locale handle: `en` and `th` catalogs with no messages of their
+/// own (the gallery's text stays English), so the only thing the locale
+/// drives is the Material widget strings.
+fn build_i18n() -> I18n {
+    let tag = |tag: &str| -> Locale { tag.parse().expect("LANGUAGES are valid BCP-47 tags") };
+    let set = LANGUAGES
+        .iter()
+        .fold(LocaleSet::new(tag("en")), |set, language| {
+            set.with_locale(tag(language), [("app.ftl", "")])
+        });
+    I18n::new(set, &[tag("en")]).expect("the empty catalogs parse")
 }
 
 /// The root page both navigators are constructed with.
@@ -200,6 +220,8 @@ impl Component for Material3Demo {
         let inner = NavigatorController::new();
         let selection = SectionSelection::new();
         let section_routes = RouteObserver::new();
+        let i18n = build_i18n();
+        provide_i18n(i18n.clone());
         let router = Router::with_controller(&outer, routes(&inner, selection, section_routes));
         // Places the shell and its first section; both controllers drain these
         // ops on their first build, so the first painted frame is already the
@@ -213,10 +235,16 @@ impl Component for Material3Demo {
             inner,
             selection,
             section_routes,
+            i18n,
         }
     }
 
     fn build(&self, state: &mut AppState) -> impl View<AppState> {
+        // Tracked locale read: a language switch rebuilds this component and
+        // re-provides the theme with the active table, which every Material
+        // widget below reads when its view is created. Brightness, seed and
+        // font reach the shell separately, through `ThemeSettings::apply`.
+        provide_localized_strings(&state.i18n);
         // Parent→child navigation (a playground or `/theme` pushed over the
         // gallery shell): M3's shared-axis-X pattern. Pop reversal, including
         // the edge-swipe gesture, comes free — the navigator reverses the

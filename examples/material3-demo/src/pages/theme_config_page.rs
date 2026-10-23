@@ -14,6 +14,7 @@ use frust::{
     Color, CrossAxisAlignment, EdgeInsets, GestureDetector, Padding, SizedBox, Theme, View, any,
     column, container, row, scroll_view, text, use_context,
 };
+use frust_i18n::{Locale, use_i18n};
 use frust_material::{card_list_items, list_item, segment, segmented_button, switch};
 
 use crate::AppState;
@@ -47,6 +48,41 @@ const SEED_GAP: f64 = 16.0;
 /// `4 * 56 + 3 * 16 = 272 <= 328` (fits).
 const SEED_ROW_COLUMNS: usize = 4;
 
+/// A language the page can switch the Material widget strings to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum DemoLanguage {
+    English,
+    Thai,
+}
+
+impl DemoLanguage {
+    const ALL: [Self; 2] = [Self::English, Self::Thai];
+
+    /// The BCP-47 tag the app's locale handle negotiates.
+    fn tag(self) -> &'static str {
+        match self {
+            Self::English => "en",
+            Self::Thai => "th",
+        }
+    }
+
+    /// The language's name in itself.
+    fn label(self) -> &'static str {
+        match self {
+            Self::English => "English",
+            Self::Thai => "ไทย",
+        }
+    }
+
+    /// The entry matching `locale`'s language, English when it is neither.
+    fn of(locale: &Locale) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|language| locale.language().as_str() == language.tag())
+            .unwrap_or(Self::English)
+    }
+}
+
 /// The theme settings screen, pushed over the gallery shell.
 pub fn theme_config_page() -> impl View<AppState> {
     let settings = use_context::<ThemeSettings>();
@@ -67,12 +103,56 @@ fn body(theme: &Theme, settings: ThemeSettings) -> impl View<AppState> {
     scroll_view(Padding(
         EdgeInsets::all(16.0),
         column()
+            .child(language_section(theme))
+            .child(SizedBox::<AppState>(None, Some(24.0)))
             .child(toggles(theme, settings))
             .child(SizedBox::<AppState>(None, Some(24.0)))
             .child(seeds(theme, settings))
             .child(SizedBox::<AppState>(None, Some(24.0)))
             .child(type_section(theme, settings)),
     ))
+}
+
+/// The en/th toggle for the Material widget strings. The locale read is
+/// tracked, so the selection follows a switch from anywhere; the switch itself
+/// reaches every widget through the root component's `build`, which calls
+/// `provide_localized_strings` on each rebuild.
+fn language_section(theme: &Theme) -> impl View<AppState> {
+    let scheme = theme.scheme();
+    let mut title_style = theme.type_scale.title_medium.clone();
+    title_style.color = scheme.on_surface;
+    let mut detail_style = theme.type_scale.body_medium.clone();
+    detail_style.color = scheme.on_surface_variant;
+
+    let active = use_i18n().map_or(DemoLanguage::English, |i18n| {
+        DemoLanguage::of(&i18n.locale())
+    });
+    let picker = segmented_button::<AppState, DemoLanguage, _>(
+        DemoLanguage::ALL
+            .iter()
+            .map(|language| segment(*language).label(language.label())),
+        [active],
+        |state: &mut AppState, selection: Vec<DemoLanguage>| {
+            if let Some(language) = selection.into_iter().next() {
+                state.i18n.set_locale(
+                    language
+                        .tag()
+                        .parse()
+                        .expect("DemoLanguage tags are valid BCP-47 identifiers"),
+                );
+            }
+        },
+    );
+
+    column()
+        .child(text("Language").style(title_style))
+        .child(SizedBox::<AppState>(None, Some(4.0)))
+        .child(
+            text("Switches the Material widget strings (dialogs, pickers, snackbars).")
+                .style(detail_style),
+        )
+        .child(SizedBox::<AppState>(None, Some(16.0)))
+        .child(picker)
 }
 
 /// Auto theming (live) and dynamic color (unavailable) — the reference's

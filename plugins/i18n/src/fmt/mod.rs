@@ -58,15 +58,34 @@ mod bridge;
 mod currency;
 mod datetime;
 mod fluent_fns;
+mod interval;
+mod list;
+mod names;
 mod number;
+mod relative;
+mod units;
+mod zone;
 
 use crate::{I18nError, Locale, LocaleSet};
+
+pub use datetime::{Calendar, DateTimeOptions, HourCycle};
+pub use interval::{date_range, datetime_range_in_zone, time_range, time_range_in_zone};
+pub use list::{ListLength, ListStyle, list};
+pub use names::{language_endonym, language_name};
+pub use number::{CompactStyle, Grouping, Notation, NumberOptions};
+pub use relative::{RelativeDayStyle, relative_day, relative_day_civil};
+pub use units::{Unit, UnitStyle, duration_minutes, units, units_by_id, units_decimal};
+pub use zone::{
+    civil_at_offset, date_in_zone, date_in_zone_with, datetime_at_offset, datetime_at_offset_with,
+    datetime_in_zone, datetime_in_zone_with, time_in_zone, time_in_zone_with, zone_offset_seconds,
+    zoned_civil,
+};
 
 /// A calendar date with no time zone, in the proleptic Gregorian calendar
 /// (ISO 8601) — the shape [`date`]/[`datetime`] take.
 ///
 /// Rendered in the calendar CLDR gives the target locale, which is Gregorian
-/// for all but a handful of locales; the fields themselves are always
+/// for all but a handful of region-keyed locales (`th-TH`); the fields themselves are always
 /// proleptic Gregorian regardless.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CivilDate {
@@ -137,6 +156,22 @@ pub fn percent(locale: &Locale, value: f64) -> String {
     number::percent(locale, value)
 }
 
+/// [`decimal`] with explicit fraction bounds, grouping and notation.
+///
+/// `NumberOptions::default()` is exactly [`decimal`]:
+/// `decimal_with(&en, 4.8, &NumberOptions { min_fraction: Some(2), ..Default::default() })`
+/// is `"4.80"`, and a compact notation renders `1234.0` as `"1.2K"` (short)
+/// or `"1.2 thousand"` (long).
+pub fn decimal_with(locale: &Locale, value: f64, options: &NumberOptions) -> String {
+    number::decimal_with(locale, value, options)
+}
+
+/// [`percent`] with explicit fraction bounds and grouping; the notation is
+/// ignored.
+pub fn percent_with(locale: &Locale, value: f64, options: &NumberOptions) -> String {
+    number::percent_with(locale, value, options)
+}
+
 /// Formats `amount` as the ISO 4217 currency `iso_code` in `locale`'s
 /// currency pattern, rounded and padded to that currency's minor units
 /// (`currency(&ja, 9.99, "JPY")` is `"￥10"`).
@@ -149,6 +184,32 @@ pub fn percent(locale: &Locale, value: f64) -> String {
 /// [`currency`](self::currency)'s module doc.
 pub fn currency(locale: &Locale, amount: f64, iso_code: &str) -> Result<String, I18nError> {
     currency::currency(locale, amount, iso_code)
+}
+
+/// Formats `minor`, an integer count of the currency's minor units, exactly —
+/// no `f64` on the path, so any `i64` round-trips.
+///
+/// ```ignore
+/// currency_minor(&ja, 1000, "JPY")?;  // "￥1,000" (ja-JP; "¥1,000" in en-US/th-TH)
+/// currency_minor(&th, 12345, "THB")?; // "฿123.45"
+/// currency_minor(&vi, 50000, "VND")?; // "50.000\u{a0}₫" (vi-VN)
+/// ```
+///
+/// # Errors
+///
+/// As [`currency`].
+pub fn currency_minor(locale: &Locale, minor: i64, iso_code: &str) -> Result<String, I18nError> {
+    currency::currency_minor(locale, minor, iso_code)
+}
+
+/// The number of minor-unit digits CLDR gives `iso_code` (`JPY` 0, `USD` 2,
+/// `KWD` 3) — the same tables [`currency`] and [`currency_minor`] use.
+///
+/// # Errors
+///
+/// [`I18nError::Format`] when `iso_code` is not three ASCII letters.
+pub fn minor_unit_digits(iso_code: &str) -> Result<u8, I18nError> {
+    currency::minor_unit_digits(iso_code)
 }
 
 /// Formats `date` at `length` in `locale`'s calendar.
@@ -187,7 +248,55 @@ pub fn datetime(
     datetime::datetime(locale, date, time, length)
 }
 
-/// Registers ICU-backed `NUMBER()` and `DATETIME()` into `set`, so FTL
+/// Formats `date` at `length`, with `options` overriding the locale's calendar.
+///
+/// `date_with(&th_th, d, DateLength::Medium, &DateTimeOptions { calendar:
+/// Some(Calendar::Gregorian), ..Default::default() })` renders Gregorian
+/// years where `th-TH` alone gives Buddhist ones.
+///
+/// # Errors
+///
+/// As [`date`].
+pub fn date_with(
+    locale: &Locale,
+    date: CivilDate,
+    length: DateLength,
+    options: &DateTimeOptions,
+) -> Result<String, I18nError> {
+    datetime::date_with(locale, date, length, options)
+}
+
+/// Formats `time` at `length`, with `options` overriding the locale's hour cycle.
+///
+/// # Errors
+///
+/// As [`time`], plus [`I18nError::Format`] for [`HourCycle::H24`].
+pub fn time_with(
+    locale: &Locale,
+    time: CivilTime,
+    length: DateLength,
+    options: &DateTimeOptions,
+) -> Result<String, I18nError> {
+    datetime::time_with(locale, time, length, options)
+}
+
+/// Formats `date` and `time` together, with `options` overriding the
+/// locale's calendar and hour cycle.
+///
+/// # Errors
+///
+/// As [`datetime`], plus [`I18nError::Format`] for [`HourCycle::H24`].
+pub fn datetime_with(
+    locale: &Locale,
+    date: CivilDate,
+    time: CivilTime,
+    length: DateLength,
+    options: &DateTimeOptions,
+) -> Result<String, I18nError> {
+    datetime::datetime_with(locale, date, time, length, options)
+}
+
+/// Registers ICU-backed `NUMBER()`, `DATETIME()`, `RELATIVE_DAY()` and `LIST()` into `set`, so FTL
 /// messages can format through the same formatters as the functions above.
 ///
 /// ```

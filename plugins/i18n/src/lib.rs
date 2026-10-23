@@ -62,6 +62,8 @@ mod locale;
 
 #[cfg(feature = "formatting")]
 pub mod fmt;
+#[cfg(feature = "persistence")]
+mod persist;
 #[cfg(feature = "frust-api")]
 mod reactive;
 
@@ -71,6 +73,8 @@ pub use error::I18nError;
 pub use frust_i18n_macros::locales;
 pub use locale::Locale;
 
+#[cfg(feature = "persistence")]
+pub use persist::{LOCALE_KEY, persisted_locale};
 #[cfg(feature = "frust-api")]
 pub use reactive::{I18n, active_locale, expect_i18n, provide_i18n, use_i18n};
 

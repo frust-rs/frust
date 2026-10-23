@@ -289,12 +289,13 @@ app language stays fixed, only the user's region composes onto it):
    English month names and text, Thai regional conventions (grouping, currency defaults, week
    start) where CLDR regionalizes them — **and, surprisingly, the calendar system**: ICU4X's
    calendar default is keyed off the region, not the language, so `en-TH` still renders a
-   Buddhist-era year (`"January 31, 2567 BE"`, not `"...2024"`) even though every month/weekday
-   name is English (verified — see `I18n::format_locale`'s doc for the full explanation). This
-   branch never adopts a requested tag's *language* — an app with no Thai `.ftl` catalog must
-   never render UI text the user can't read, so only the region crosses the boundary, but the
-   calendar-system surprise above is worth knowing before shipping a date-heavy screen behind
-   this branch.
+   Buddhist-era year (`"Oct 13, 2569 BE"`, not `"Oct 13, 2026"`) even though every month/weekday
+   name is English. A bare `th` tag has no region and is already Gregorian; only region-bearing
+   tags (`th-TH`, `en-TH`) are Buddhist by default. Pin Gregorian with
+   `DateTimeOptions { calendar: Some(Calendar::Gregorian), .. }` (§4e). This branch never
+   adopts a requested tag's *language* — an app with no Thai `.ftl` catalog must never render UI
+   text the user can't read, so only the region crosses the boundary (see `I18n::format_locale`'s
+   doc).
 3. If no requested tag carries a region anywhere (including nothing requested at all), the
    message locale unmodified.
 
@@ -337,7 +338,7 @@ Only with the default-on `formatting` feature (ICU4X-backed, CLDR data baked int
 binary — no provider to configure, no async load):
 
 ```rust
-use frust_i18n::fmt::{self, CivilDate, DateLength};
+use frust_i18n::fmt::{self, Calendar, CivilDate, DateLength, DateTimeOptions};
 
 let de: frust_i18n::Locale = "de-DE".parse()?;
 let en: frust_i18n::Locale = "en-US".parse()?;
@@ -346,6 +347,12 @@ fmt::decimal(&de, 1234.56);                                    // "1.234,56"
 fmt::percent(&en, 75.0);                                       // "75%"
 fmt::currency(&de, 9.99, "EUR")?;               // "9,99\u{a0}€" — U+00A0, CLDR's own space
 fmt::date(&de, CivilDate { year: 2024, month: 1, day: 31 }, DateLength::Medium)?; // "31.01.2024"
+// A Locale carries no -u-ca-/-u-hc- keywords, so the calendar and hour cycle travel in options
+// (`date_with`/`time_with`/`datetime_with`, and `*_in_zone_with`/`datetime_at_offset_with`):
+// th-TH unset -> "13 ต.ค. 2569"; calendar Gregorian -> "13 ต.ค. 2026" (bare `th` is Gregorian
+// either way: the Buddhist default is keyed on the TH region, not the language).
+let opts = DateTimeOptions { calendar: Some(Calendar::Gregorian), hour_cycle: None };
+fmt::date_with(&"th-TH".parse()?, CivilDate { year: 2026, month: 10, day: 13 }, DateLength::Medium, &opts)?;
 ```
 
 Pulling the locale from a live `I18n` handle (§4c) instead of a literal? Pass
@@ -393,18 +400,144 @@ month names, grouping, calendar — even though every other message on the same 
 German. `docs/LIMITATIONS.md` records this as an accepted limitation, not a bug to work around per
 call site.
 
-Honored named options: `NUMBER`'s `style` (`decimal`/`percent`/`currency`) and `currency`;
-`DATETIME`'s `dateStyle`/`timeStyle`. Anything else (ECMA-402-style
-`minimumFractionDigits`, `useGrouping`, …) is ignored at `debug` log level, never a warning or
+Digit control and compact notation go through `NumberOptions` (`Default` is exactly
+`decimal`/`percent`); the FTL `NUMBER` options above map onto the same struct:
+
+```rust
+use frust_i18n::fmt::{self, CompactStyle, Grouping, Notation, NumberOptions};
+
+let pad = NumberOptions { min_fraction: Some(2), ..Default::default() };
+fmt::decimal_with(&en, 4.8, &pad);                             // "4.80"
+let compact = |style| NumberOptions { notation: Notation::Compact(style), ..Default::default() };
+fmt::decimal_with(&en, 1234.0, &compact(CompactStyle::Short)); // "1.2K"
+fmt::decimal_with(&en, 1234.0, &compact(CompactStyle::Long));  // "1.2 thousand"
+fmt::decimal_with(&"ja-JP".parse()?, 12345.0, &compact(CompactStyle::Short)); // "1.2万"
+let flat = NumberOptions { grouping: Grouping::Never, ..Default::default() };
+fmt::decimal_with(&en, 1234567.5, &flat);                      // "1234567.5"
+```
+
+`min_fraction` pads, `max_fraction` rounds half-to-even (default 3; a `min_fraction` above it raises
+it). Compact notation lets ICU choose the significand's precision, so the fraction bounds do not
+apply to it, and `percent_with` ignores the notation. `Grouping::Always` renders like `Auto` for a
+plain decimal (ICU4X's own behavior). Compact `ja` starts at 万, so `1234` stays `1,234`.
+
+Lists and language names (for amenity rows and a language picker):
+
+```rust
+use frust_i18n::fmt::{self, ListLength, ListStyle};
+
+fmt::list(&en, &["Pool", "Shower", "Wi-Fi"], ListStyle::And, ListLength::Wide)?;
+                                                  // "Pool, Shower, and Wi-Fi"  (th: "Pool Shower และWi-Fi", ja: "Pool、Shower、Wi-Fi")
+fmt::language_endonym(&"th".parse()?)?;           // "ไทย"  (also "English", "Tiếng Việt", "日本語", "español")
+fmt::language_name(&"de".parse()?, &en)?;         // "German"
+```
+
+The strings are ICU's, unedited. A language CLDR has no name for is `Err(I18nError::Format)`. In FTL,
+`{ LIST($a, $b, $c) }` takes the items as positional arguments, with optional `style: "and"|"or"|"unit"`
+and `length: "wide"|"short"|"narrow"`.
+
+Money held as integer minor units formats exactly with `fmt::currency_minor(&locale, 12345, "THB")?`
+(`"฿123.45"`; no `f64` on the path, so every `i64` is exact) and `fmt::minor_unit_digits("THB")?`
+(`2`); both share `currency`'s digit tables. In FTL pass the integer as a STRING, since Fluent
+numbers are `f64`: `{ NUMBER($minor, style: "currency", currency: "THB", minorUnits: "true") }`.
+
+Instants render in a venue zone, not the device's, through `jiff`'s bundled tz database (no OS
+zone data is read, so DST is identical on every platform):
+
+```rust
+use frust_i18n::fmt;
+
+fmt::zoned_civil(1_700_000_000, "Asia/Makassar")?;                    // 2023-11-15 06:13:20
+fmt::datetime_in_zone(&en, 1_700_000_000, "Asia/Makassar", DateLength::Medium)?;
+                                                                      // "Nov 15, 2023, 6:13:20\u{202f}AM"
+fmt::date_in_zone(&en, 1_700_000_000, "America/New_York", DateLength::Medium)?; // "Nov 14, 2023"
+fmt::time_in_zone(&en, 1_700_000_000, "Europe/Berlin", DateLength::Short)?;     // "11:13\u{202f}PM"
+fmt::datetime_at_offset(&en, 1_700_000_000, 8 * 3_600, DateLength::Short)?;     // fixed offset, no zone
+```
+
+`zone_offset_seconds(unix, iana)` returns the offset in force at that instant. An unknown zone is
+`Err(I18nError::UnknownTimeZone(id))`. In FTL, `{ DATETIME($t, timeStyle: "short", timeZone:
+"Asia/Makassar") }` takes an IANA id or a fixed offset (`"+08:00"`); with no `timeZone` the instant
+renders in UTC. The positional may be epoch seconds or an ISO string with `Z` or a `±HH:MM` suffix
+(converted to the UTC instant it names; no suffix means UTC). The zone applies to the instant, so a
+zone-less civil date cannot be re-zoned. Zone data adds the jiff tzdb to the binary — see
+`docs/LIMITATIONS.md`'s `i18n-tzdb-bundled-size`.
+
+Ranges (slot pills, booking windows) are hand-rolled, because ICU4X 2.2 has no interval
+formatter: `fmt::time_range`, `time_range_in_zone`, `date_range` and `datetime_range_in_zone`
+format both ends and join them with a per-language separator (` – ` for en/es/vi/th, `～` for ja,
+`–` for zh). In a 12-hour locale a shared day period is kept only on the last end:
+
+```rust
+fmt::time_range(&en, t(9, 0), t(11, 0), DateLength::Short)?;   // "9:00 – 11:00\u{202f}AM"
+fmt::time_range(&en, t(11, 0), t(13, 0), DateLength::Short)?;  // "11:00\u{202f}AM – 1:00\u{202f}PM"
+fmt::time_range(&ja, t(9, 0), t(11, 0), DateLength::Short)?;   // "9:00～11:00"
+```
+
+`date_range` does no month/year elision (`Mar 28, 2024 – Apr 2, 2024`), and a reversed range
+(end before start) is joined in the order given, never panicking. This is a simplification of
+CLDR's interval formats; `docs/LIMITATIONS.md` records it as `i18n-interval-hand-rolled`.
+
+Relative days ("Today" / "Tomorrow" / "Yesterday" for bookings) are computed on the venue zone's
+civil days, not the device's: `fmt::relative_day(&locale, instant, now, "Asia/Makassar",
+RelativeDayStyle::Long)?` reads both instants in the zone, and a distance of at most one day goes
+through ICU4X's relative-time formatter (`Numeric::Auto`: en `today`/`tomorrow`/`yesterday`, th
+`วันนี้`/`พรุ่งนี้`/`เมื่อวาน`, ja `今日`/`明日`/`昨日`, es `hoy`/`mañana`/`ayer`); two or more days away
+it returns a medium date (`Nov 17, 2023`). `relative_day_civil(&locale, day, today, style)` takes
+dates you already hold. The string is ICU's, returned as-is: CLDR capitalises per width in some
+languages (vi short `hôm nay`, vi long `Hôm nay`) and the words are lower case in most, so
+sentence-casing a standalone label is the caller's job. In FTL:
+`{ RELATIVE_DAY($t, $now, timeZone: "Asia/Makassar", style: "short") }`. Fluent allows only
+literals as named-argument values, so a variable `now` is the second positional (a literal
+`now: 1700000000` also works); `style` is `"long"` (default) or `"short"`; a missing `now` or an
+unknown zone renders `RELATIVE_DAY()`.
+
+Units and durations go through ICU4X's `UnitsFormatter`: `fmt::units(&locale, 1.5, Unit::Hour,
+UnitStyle::Short)?` is `"1.5 hr"` in en (`Narrow` `"1.5h"`, `Long` `"1.5 hours"`); `Unit` is
+`Hour`/`Minute`/`Day`/`Kilometer`/`Meter`/`Mile`, `units_decimal` takes a `Decimal`, and
+`units_by_id` takes a CLDR id (bare `hour`, not `duration-hour`), answering
+`Err(I18nError::UnsupportedUnit(id))` for one with no data. `fmt::duration_minutes(&locale, 90,
+style)?` renders under an hour as minutes (`45 min`), whole hours as hours (`2 hours`), and anything
+else as hours to one decimal (`1.5 hr`). Widths are CLDR's call: vi spells all three alike, ja long
+equals short, and vi/es use a comma decimal (`1,5 giờ`, `1,5 horas`).
+
+Honored named options: `NUMBER`'s `style` (`decimal`/`percent`/`currency`), `currency`,
+`minorUnits`, `minimumFractionDigits`, `maximumFractionDigits`, `useGrouping` (`"false"` or
+`"always"`), `notation: "compact"` and `compactDisplay` (`"short"`/`"long"`);
+`DATETIME`'s `dateStyle`/`timeStyle`/`timeZone`/`calendar` (`"gregory"`, `"buddhist"`, …)/`hourCycle` (`"h11"`/`"h12"`/`"h23"`); `RELATIVE_DAY`'s `now`/`timeZone`/`style`. Anything else (ECMA-402-style
+`signDisplay`, `currencyDisplay`, …) is ignored at `debug` log level, never a warning or
 an error — these run on a UI's formatting path, potentially every frame.
 
 ---
 
-## 5. Persistence recipe — restoring a user's chosen locale
+## 5. Persistence — restoring a user's chosen locale
 
-`I18n` holds the active locale in memory only; nothing in this crate persists a choice across
-a kill/relaunch. Pair it with `frust-shared-preferences` — no new machinery, just this crate's
-existing API plus that plugin's:
+`I18n` holds the active locale in memory only. Two ways to keep a choice across a
+kill/relaunch, both on `frust-shared-preferences`.
+
+### With the `persistence` feature
+
+Enable `persistence` (§7) and build the handle with `I18n::with_persistence`:
+
+```rust
+use frust_i18n::{I18n, provide_i18n, system_locales};
+use frust_shared_preferences::SharedPreferences;
+
+let prefs = SharedPreferences::standard()?;
+let i18n = I18n::with_persistence(locale_set(), &system_locales()?, prefs)?;
+provide_i18n(i18n.clone());
+```
+
+A tag saved under the key `frust_i18n.locale` is prepended to the requested list, so it
+wins over the system locales; with nothing saved (or an unparsable value) the system list
+decides. Every later `set_locale` saves the tag it negotiated against — the composed
+region-qualified tag when a region was retained (§4c), so a Swiss German user who picks
+"Deutsch" comes back as `de-CH`. A failed save is logged at `warn` and never fatal.
+`persisted_locale(&prefs)` reads the saved value without building a handle, and
+`i18n.clear_persisted_locale()` removes it so the next launch follows the system again.
+`persistence` implies `frust-api`.
+
+### Without the feature (recipe)
 
 Assumes `frust_i18n::locales!("locales");` was invoked at the crate root, as in §2 — so
 `locale_set()` below is that module's generated function, unqualified:
@@ -503,6 +636,7 @@ on resume) and calls `I18n::set_locale`. This is a v1 scope line, not a bug — 
 | Feature | Default | Gates |
 |---|---|---|
 | `frust-api` | on | The reactive `I18n` handle, `provide_i18n`/`use_i18n`/`expect_i18n`/`active_locale` (§4c) — pulls in the `frust` facade. |
+| `persistence` | off | `I18n::with_persistence`, `persisted_locale`, `clear_persisted_locale` (§5) — pulls in `frust-shared-preferences` and implies `frust-api`. |
 | `formatting` | on | `fmt::` — ICU4X decimal/percent/currency/date/time formatting plus the `NUMBER`/`DATETIME` Fluent functions (§4e) — pulls in `icu_decimal`/`icu_datetime`/`icu_plurals`/`icu_experimental` and their support crates. |
 
 Independently toggleable — all four combinations (default, `--no-default-features`,
@@ -564,6 +698,27 @@ list `docs/PLUGINS_DEVELOPMENT.md`'s i18n section tracks — keep both in sync):
   zero-decimal currency (JPY) and a two-decimal one (USD/EUR) correctly, and
   `fmt::date`/`fmt::time` differ visibly between at least two locales (symbol placement,
   separator, hour cycle).
+- **Zoned times.** `fmt::datetime_in_zone` / `time_in_zone` for `Asia/Makassar`,
+  `America/New_York` and `Europe/Berlin` match the §4e values on Android and iOS (no system
+  zoneinfo needed), and an FTL `DATETIME(timeZone: ...)` with an ISO `Z` / `±HH:MM` string
+  renders the named instant in the venue zone.
+- **Ranges.** `fmt::time_range` shows a shared day period once in en (`9:00 – 11:00 AM`),
+  keeps both across noon, and uses `～` in ja; `date_range` does no month or year elision.
+- **Relative day.** `fmt::relative_day` reads Today / Tomorrow / Yesterday in en, th, ja and es
+  on the venue zone's civil days, and a date two or more days away falls back to a medium date.
+- **Units and lists.** `fmt::units` / `duration_minutes` (`45 min`, `2 hours`, `1.5 hr`) and
+  `fmt::list` / `{ LIST(...) }` read correctly in en, th, vi, ja and es; `language_endonym`
+  shows each language in its own script in a language picker.
+- **th-TH calendar.** With `th-TH` requested over an English-only bundle set, a date shows the
+  Buddhist-era year by default and the Gregorian year with `DateTimeOptions { calendar:
+  Some(Calendar::Gregorian), .. }` or `DATETIME(calendar: "gregory")`.
+- **Compact numbers.** `NumberOptions { notation: Notation::Compact(..), .. }` and `{ NUMBER($n, notation:
+  "compact") }` render `1.2K` / `1.2 thousand` in en and `1.2万` in ja, matching §4e.
+- **Material strings switch.** In the playground, change the language with the locale switcher
+  and in `examples/material3-demo` with the language toggle on the theme settings page: dialog
+  and snackbar labels, the date and time pickers (CLDR month and weekday names) and the
+  badge / FAB menu / chip accessibility labels follow the new locale. A dialog already open
+  keeps its labels until reopened (`material-open-dialog-ignores-live-locale-switch`).
 - **Persistence survives a kill/relaunch.** Following §5's recipe: pick a non-default locale,
   kill the app, relaunch, and confirm it reopens in the saved locale rather than re-detecting
   the system one.

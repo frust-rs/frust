@@ -231,6 +231,7 @@ use frust::authoring::{ThemeTextColor, ThemeTextType};
 
 use super::press::presses;
 use crate::shapes::{Morph, ShapeKind};
+use crate::strings::MaterialStrings;
 use crate::tokens::MaterialSpring;
 
 /// Trigger container size when the menu is closed, in logical px — upstream's
@@ -570,6 +571,8 @@ pub struct FabMenuView<State: 'static> {
     items: Vec<FabMenuItem<State>>,
     /// The accessible name for the trigger button (both open/closed states).
     label: Option<String>,
+    /// The ambient theme's trigger name, read when the view was created.
+    default_label: String,
     on_toggle: std::rc::Rc<dyn Fn(&mut State)>,
 }
 
@@ -578,7 +581,7 @@ pub struct FabMenuView<State: 'static> {
 /// on every gesture requesting an open/close flip — see the
 /// [module docs](self) for the full list of such gestures, and chain
 /// [`FabMenuView::label`] to set the trigger's accessible name (defaults to
-/// `"Menu"`).
+/// [`MaterialStrings::fab_menu_a11y`] from the ambient theme, read here).
 pub fn fab_menu<State: 'static, F: Fn(&mut State) + 'static>(
     icon: impl View<State>,
     open: bool,
@@ -590,6 +593,9 @@ pub fn fab_menu<State: 'static, F: Fn(&mut State) + 'static>(
         open,
         items,
         label: None,
+        default_label: MaterialStrings::from_build_context()
+            .fab_menu_a11y
+            .to_string(),
         on_toggle: std::rc::Rc::new(on_toggle),
     }
 }
@@ -607,7 +613,9 @@ pub fn FabMenu<State: 'static, F: Fn(&mut State) + 'static>(
 }
 
 impl<State: 'static> FabMenuView<State> {
-    /// Set the trigger's accessible name (both open/closed states).
+    /// Set the trigger's accessible name (both open/closed states). Unset, it
+    /// reads [`MaterialStrings::fab_menu_a11y`] from the ambient theme when
+    /// the view is created.
     pub fn label(mut self, label: impl Into<String>) -> Self {
         self.label = Some(label.into());
         self
@@ -636,8 +644,10 @@ pub struct FabMenuWidget {
     item_labels: Vec<String>,
     /// The controlled expanded state (never self-mutated).
     open: bool,
-    /// The accessible trigger label, `"Menu"` when unset.
+    /// The setter's accessible trigger label; wins over the theme.
     label: Option<String>,
+    /// The view's theme-resolved trigger label. Unused while `label` is set.
+    default_label: String,
     /// The trigger's shape/size morph spring (`0.0` closed, `1.0` open) —
     /// upstream's `_fabShapeCtrl`. Drives a *layout* value — see the
     /// [module docs](self)' Trigger morph section.
@@ -756,6 +766,7 @@ impl<State: 'static> View<State> for FabMenuView<State> {
             item_labels: self.items.iter().map(|i| i.label.clone()).collect(),
             open: self.open,
             label: self.label.clone(),
+            default_label: self.default_label.clone(),
             fab_morph,
             item_anim,
             cascade_launched,
@@ -791,8 +802,12 @@ impl<State: 'static> View<State> for FabMenuView<State> {
             flags |= ChangeFlags::PAINT;
         }
 
-        if prev.label != self.label {
+        // A repaint moves the semantics generation so the next pull reads the
+        // new trigger name.
+        if element.label != self.label || element.default_label != self.default_label {
             element.label = self.label.clone();
+            element.default_label = self.default_label.clone();
+            flags |= ChangeFlags::PAINT;
         }
 
         if prev.items.len() != self.items.len() {
@@ -1157,7 +1172,7 @@ impl Widget for FabMenuWidget {
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
-        let trigger_label = self.label.as_deref().unwrap_or("Menu");
+        let trigger_label = self.label.as_deref().unwrap_or(self.default_label.as_str());
         if self.open {
             ctx.push_container(
                 Role::Group,
@@ -2225,5 +2240,132 @@ mod tests {
             .find(|(_, n)| n.role() == Role::MenuItem)
             .expect("an item contributes a Role::MenuItem node");
         assert_eq!(menu_item.1.label(), Some("New note"));
+    }
+
+    // ---- MaterialStrings: setter > ambient theme > English ------------------
+
+    mod strings {
+        use super::*;
+
+        fn thai_theme() -> Theme {
+            let mut theme = crate::baseline();
+            let mut thai = MaterialStrings::ENGLISH;
+            thai.fab_menu_a11y = "เมนู".into();
+            theme.extensions.insert(thai);
+            theme
+        }
+
+        /// Provides `theme` as the ambient `Theme` context (when set), then
+        /// creates the menu so its trigger name resolves from that context.
+        #[derive(Clone)]
+        struct Host {
+            theme: Option<Theme>,
+            setter: Option<&'static str>,
+        }
+
+        impl frust::Component for Host {
+            type State = ();
+            fn init(&self) {}
+            fn build(&self, _state: &mut ()) -> impl View<()> {
+                if let Some(theme) = &self.theme {
+                    frust::provide_context(theme.clone());
+                }
+                let menu = fab_menu::<(), _>(leaf_any(24.0, 24.0), false, vec![], |_s: &mut ()| {});
+                match self.setter {
+                    Some(label) => menu.label(label),
+                    None => menu,
+                }
+            }
+        }
+
+        type Root = RenderRoot<(), frust::ComponentView<Host>>;
+
+        fn rebuild(root: &mut Root, host: &Host) -> ChangeFlags {
+            let mut logic = |_: &mut ()| frust::component(host.clone());
+            root.rebuild(&mut logic, &mut ())
+        }
+
+        fn trigger(root: &Root) -> String {
+            root.semantics()
+                .nodes
+                .iter()
+                .find(|(_, n)| n.role() == Role::Button)
+                .and_then(|(_, n)| n.label().map(str::to_string))
+                .expect("the trigger carries a label")
+        }
+
+        /// The trigger's accessible name under `theme`, with an optional
+        /// `label` setter.
+        fn trigger_label(theme: Option<Theme>, setter: Option<&'static str>) -> String {
+            let mut root = Root::new();
+            rebuild(&mut root, &Host { theme, setter });
+            let mut tcx = frust::authoring::text::TextContext::new();
+            root.layout_with_text(Size::new(400.0, 600.0), &mut tcx as &mut dyn Any);
+            trigger(&root)
+        }
+
+        #[test]
+        fn trigger_label_defaults_to_english() {
+            assert_eq!(trigger_label(None, None), "Menu");
+        }
+
+        #[test]
+        fn trigger_label_reads_the_provided_thai_strings() {
+            assert_eq!(trigger_label(Some(thai_theme()), None), "เมนู");
+        }
+
+        #[test]
+        fn trigger_label_setter_beats_the_theme_strings() {
+            assert_eq!(
+                trigger_label(Some(thai_theme()), Some("Compose")),
+                "Compose"
+            );
+        }
+
+        #[test]
+        fn trigger_label_follows_the_provided_theme_and_setter_on_rebuild() {
+            let mut root = Root::new();
+            rebuild(
+                &mut root,
+                &Host {
+                    theme: None,
+                    setter: None,
+                },
+            );
+            let mut tcx = frust::authoring::text::TextContext::new();
+            root.layout_with_text(Size::new(400.0, 600.0), &mut tcx as &mut dyn Any);
+            assert_eq!(trigger(&root), "Menu");
+
+            let generation = root.semantics_generation();
+            rebuild(
+                &mut root,
+                &Host {
+                    theme: Some(thai_theme()),
+                    setter: None,
+                },
+            );
+            assert!(root.semantics_generation() > generation);
+            assert_eq!(trigger(&root), "เมนู");
+
+            rebuild(
+                &mut root,
+                &Host {
+                    theme: Some(thai_theme()),
+                    setter: Some("Compose"),
+                },
+            );
+            assert_eq!(trigger(&root), "Compose");
+
+            let generation = root.semantics_generation();
+            rebuild(
+                &mut root,
+                &Host {
+                    theme: Some(thai_theme()),
+                    setter: None,
+                },
+            );
+            assert!(root.semantics_generation() > generation);
+            assert_eq!(trigger(&root), "เมนู");
+        }
     }
 }

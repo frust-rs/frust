@@ -1,4 +1,4 @@
-//! `NUMBER()` and `DATETIME()` for FTL messages, over the same formatters
+//! `NUMBER()`, `DATETIME()`, `RELATIVE_DAY()` and `LIST()` for FTL messages, over the same formatters
 //! the direct API uses.
 //!
 //! # Registration
@@ -19,6 +19,11 @@
 //! |---|---|---|
 //! | `style` | `decimal` (default), `percent`, `currency` | which formatter runs |
 //! | `currency` | an ISO 4217 code | required by `style: "currency"` |
+//! | `minorUnits` | `"true"` | the positional is a STRING parsing as `i64` minor units; `style: "currency"` formats it exactly via [`super::currency_minor`] |
+//!
+//! `FluentValue::Number` is an `f64`, so exact money must arrive as a
+//! string: `NUMBER($minor, style: "currency", currency: "THB", minorUnits:
+//! "true")` with `$minor = "12345"` renders `฿123.45`.
 //!
 //! `style: "percent"` takes the **percentage**, not a ratio: `NUMBER(75,
 //! style: "percent")` is `75%`. This follows ICU4X's own `PercentFormatter`
@@ -28,25 +33,45 @@
 //!
 //! # `DATETIME($d, …)`
 //!
-//! Positional argument: either seconds since the Unix epoch (a number,
-//! resolved in **UTC**) or an ISO-8601 string — `YYYY-MM-DD`,
-//! `YYYY-MM-DDTHH:MM`, or `YYYY-MM-DDTHH:MM:SS`, with an optional trailing
-//! `Z`. A `T` may be a space. No offset other than `Z` is accepted: this
-//! crate has no time-zone conversion (see [`datetime`](super::datetime)).
-//! Honored named options:
+//! Positional argument: either seconds since the Unix epoch (a number)
+//! or an ISO-8601 string — `YYYY-MM-DD`, `YYYY-MM-DDTHH:MM`, or
+//! `YYYY-MM-DDTHH:MM:SS`, with an optional suffix of `Z` or an offset
+//! (`+08:00`, `-0530`, `+05`). A `T` may be a space. A string with no suffix
+//! is read as UTC; one with an offset is converted to the UTC instant it
+//! names. The instant is then rendered in the `timeZone` option's zone, or
+//! **UTC** when there is none. Honored named options:
 //!
 //! | Option | Values | Effect |
 //! |---|---|---|
 //! | `dateStyle` | `short`, `medium` (default), `long` | the date half's length |
 //! | `timeStyle` | `short`, `medium`, `long` | adds the time half |
+//! | `timeZone` | an IANA id (`"Asia/Makassar"`) or a fixed offset (`"+08:00"`) | the zone the instant is rendered in; default UTC |
 //!
 //! With neither, a medium date is formatted. With `timeStyle` alone, only the
 //! time. With both, the combined form at `dateStyle`'s length.
 //!
+//! # `NUMBER($n, …)` digit options
+//!
+//! On a decimal or percent `NUMBER` (not currency, whose digits the currency
+//! fixes):
+//!
+//! | Option | Values | Effect |
+//! |---|---|---|
+//! | `minimumFractionDigits` | a whole number | zero-pads the fraction (`4.8` → `4.80`) |
+//! | `maximumFractionDigits` | a whole number | rounds the fraction (default 3) |
+//! | `useGrouping` | `"false"`, `"always"` | `"false"` drops grouping separators |
+//! | `notation` | `"compact"` | `1.2K`; decimal only |
+//! | `compactDisplay` | `"short"` (default), `"long"` | `1.2K` vs `1.2 thousand` |
+//!
+//! # `LIST($a, $b, …)`
+//!
+//! The positional arguments are the items. `style` is `and` (default), `or`
+//! or `unit`; `length` is `wide` (default), `short` or `narrow`. A number
+//! item is formatted as a decimal in the bundle's locale.
+//!
 //! # Everything else is ignored, at `debug` level
 //!
-//! Any other named option — ECMA-402's `minimumFractionDigits`,
-//! `currencyDisplay`, `useGrouping`, … — is dropped with a `debug!` log, not
+//! Any other named option — ECMA-402's `currencyDisplay`, `signDisplay`, … — is dropped with a `debug!` log, not
 //! a warning and never an error: these functions run on a UI's formatting
 //! path, potentially per frame, so an unhonored option must not be able to
 //! flood a release log.
@@ -70,9 +95,12 @@ use fluent_bundle::{FluentArgs, FluentValue};
 
 use crate::{FluentFunction, Locale, LocaleSet};
 
-use super::{CivilDate, CivilTime, DateLength, datetime};
+use super::{
+    Calendar, CivilDate, CivilTime, CompactStyle, DateLength, DateTimeOptions, Grouping, HourCycle,
+    ListLength, ListStyle, Notation, NumberOptions, RelativeDayStyle, datetime, relative, zone,
+};
 
-/// Registers ICU-backed `NUMBER` and `DATETIME` into `set`.
+/// Registers ICU-backed `NUMBER`, `DATETIME`, `RELATIVE_DAY` and `LIST` into `set`.
 pub(super) fn with_icu_functions(set: LocaleSet) -> LocaleSet {
     set.with_locale_function("NUMBER", |locale| {
         let locale = locale.clone();
@@ -86,6 +114,125 @@ pub(super) fn with_icu_functions(set: LocaleSet) -> LocaleSet {
             Arc::new(move |positional, named| date_time(&locale, positional, named));
         function
     })
+    .with_locale_function("RELATIVE_DAY", |locale| {
+        let locale = locale.clone();
+        let function: FluentFunction =
+            Arc::new(move |positional, named| relative_day(&locale, positional, named));
+        function
+    })
+    .with_locale_function("LIST", |locale| {
+        let locale = locale.clone();
+        let function: FluentFunction =
+            Arc::new(move |positional, named| list(&locale, positional, named));
+        function
+    })
+}
+
+/// `LIST($a, $b, $c, style: "and"|"or"|"unit", length: "wide"|"short"|"narrow")`.
+///
+/// Fluent has no list type, so the items are the positional arguments, each
+/// a string or number. `style` defaults to `and` and `length` to `wide`.
+fn list<'a>(
+    locale: &Locale,
+    positional: &[FluentValue<'a>],
+    named: &FluentArgs<'_>,
+) -> FluentValue<'a> {
+    let mut items = Vec::with_capacity(positional.len());
+    for value in positional {
+        match value {
+            FluentValue::String(text) => items.push(text.to_string()),
+            FluentValue::Number(number) => items.push(super::decimal(locale, number.value)),
+            _ => {
+                log::debug!("frust-i18n: LIST() takes string or number items");
+                return FluentValue::Error;
+            }
+        }
+    }
+    let style = match option(named, "style") {
+        None | Some("and") => ListStyle::And,
+        Some("or") => ListStyle::Or,
+        Some("unit") => ListStyle::Unit,
+        Some(unknown) => {
+            log::debug!("frust-i18n: LIST(style: \"{unknown}\") — using the `and` style");
+            ListStyle::And
+        }
+    };
+    let length = match option(named, "length") {
+        None | Some("wide") => ListLength::Wide,
+        Some("short") => ListLength::Short,
+        Some("narrow") => ListLength::Narrow,
+        Some(unknown) => {
+            log::debug!("frust-i18n: LIST(length: \"{unknown}\") — using the wide length");
+            ListLength::Wide
+        }
+    };
+
+    report_unhonored(named, "LIST", &["style", "length"]);
+    let refs: Vec<&str> = items.iter().map(String::as_str).collect();
+    match super::list(locale, &refs, style, length) {
+        Ok(joined) => FluentValue::from(joined),
+        Err(error) => {
+            log::debug!("frust-i18n: LIST(): {error}");
+            FluentValue::Error
+        }
+    }
+}
+
+/// `RELATIVE_DAY($unix, $now_unix, timeZone: …, style: "short"|"long")`.
+///
+/// Both instants are read in `timeZone` (IANA id or `±HH:MM`; UTC when
+/// absent). `now` is required: a function that read the clock would make a
+/// message's output change under the caller.
+fn relative_day<'a>(
+    locale: &Locale,
+    positional: &[FluentValue<'a>],
+    named: &FluentArgs<'_>,
+) -> FluentValue<'a> {
+    let Some(instant) = as_instant(positional.first()) else {
+        return FluentValue::Error;
+    };
+    // Fluent restricts named-argument values to literals, so a variable
+    // `now` travels as the second positional; a literal `now:` also works.
+    let now = as_instant(positional.get(1)).or_else(|| {
+        named
+            .iter()
+            .find_map(|(name, value)| (name == "now").then(|| as_instant(Some(value))).flatten())
+    });
+    let Some(now) = now else {
+        log::debug!(
+            "frust-i18n: RELATIVE_DAY() needs a `now` (second positional or `now:` literal)"
+        );
+        return FluentValue::Error;
+    };
+    let style = match option(named, "style") {
+        None | Some("long") => RelativeDayStyle::Long,
+        Some("short") => RelativeDayStyle::Short,
+        Some(unknown) => {
+            log::debug!("frust-i18n: RELATIVE_DAY(style: \"{unknown}\") — using the long style");
+            RelativeDayStyle::Long
+        }
+    };
+
+    let days = |at: i64| match option(named, "timeZone") {
+        None => zone::civil_at_offset(at, 0),
+        Some(id) => match zone::parse_offset(id) {
+            Some(offset) => zone::civil_at_offset(at, offset),
+            None => zone::zoned_civil(at, id),
+        },
+    };
+    let formatted = days(instant).and_then(|(day, _)| {
+        let (today, _) = days(now)?;
+        relative::relative_day_civil(locale, day, today, style)
+    });
+
+    report_unhonored(named, "RELATIVE_DAY", &["now", "timeZone", "style"]);
+    match formatted {
+        Ok(formatted) => FluentValue::from(formatted),
+        Err(error) => {
+            log::debug!("frust-i18n: RELATIVE_DAY(): {error}");
+            FluentValue::Error
+        }
+    }
 }
 
 /// `NUMBER($n, style: …, currency: …)`.
@@ -94,13 +241,16 @@ fn number<'a>(
     positional: &[FluentValue<'a>],
     named: &FluentArgs<'_>,
 ) -> FluentValue<'a> {
+    if option(named, "minorUnits") == Some("true") {
+        return number_minor(locale, positional, named);
+    }
     let Some(value) = as_f64(positional.first()) else {
         return FluentValue::Error;
     };
 
     let formatted = match option(named, "style").unwrap_or("decimal") {
-        "decimal" => super::decimal(locale, value),
-        "percent" => super::percent(locale, value),
+        "decimal" => super::decimal_with(locale, value, &number_options(named)),
+        "percent" => super::percent_with(locale, value, &number_options(named)),
         "currency" => {
             let Some(code) = option(named, "currency") else {
                 log::debug!("frust-i18n: NUMBER(style: \"currency\") without a `currency` option");
@@ -116,36 +266,148 @@ fn number<'a>(
         }
         unknown => {
             log::debug!("frust-i18n: NUMBER(style: \"{unknown}\") — formatting as a decimal");
-            super::decimal(locale, value)
+            super::decimal_with(locale, value, &number_options(named))
         }
     };
 
-    report_unhonored(named, "NUMBER", &["style", "currency"]);
+    report_unhonored(named, "NUMBER", NUMBER_OPTIONS);
     FluentValue::from(formatted)
 }
 
-/// `DATETIME($d, dateStyle: …, timeStyle: …)`.
+/// Every named option `NUMBER` honors.
+const NUMBER_OPTIONS: &[&str] = &[
+    "style",
+    "currency",
+    "minorUnits",
+    "minimumFractionDigits",
+    "maximumFractionDigits",
+    "notation",
+    "compactDisplay",
+    "useGrouping",
+];
+
+/// Reads `NUMBER`'s digit, grouping and notation options.
+fn number_options(named: &FluentArgs<'_>) -> NumberOptions {
+    let notation = match option(named, "notation") {
+        Some("compact") => Notation::Compact(match option(named, "compactDisplay") {
+            Some("long") => CompactStyle::Long,
+            _ => CompactStyle::Short,
+        }),
+        _ => Notation::Standard,
+    };
+    let grouping = match option(named, "useGrouping") {
+        Some("false") => Grouping::Never,
+        Some("always") => Grouping::Always,
+        _ => Grouping::Auto,
+    };
+    NumberOptions {
+        min_fraction: digit_count(named, "minimumFractionDigits"),
+        max_fraction: digit_count(named, "maximumFractionDigits"),
+        grouping,
+        notation,
+    }
+}
+
+/// A non-negative whole-number option, given as a number or a numeric string.
+fn digit_count(named: &FluentArgs<'_>, key: &str) -> Option<u8> {
+    named.iter().find_map(|(name, value)| {
+        if name != key {
+            return None;
+        }
+        let count = match value {
+            FluentValue::Number(number) => number.value,
+            FluentValue::String(text) => text.parse().ok()?,
+            _ => return None,
+        };
+        (count.is_finite() && count >= 0.0).then(|| count.min(f64::from(u8::MAX)) as u8)
+    })
+}
+
+/// The `minorUnits: "true"` form of `NUMBER`: an exact `i64` from a string.
+fn number_minor<'a>(
+    locale: &Locale,
+    positional: &[FluentValue<'a>],
+    named: &FluentArgs<'_>,
+) -> FluentValue<'a> {
+    let minor = match positional.first() {
+        Some(FluentValue::String(text)) => text.parse::<i64>().ok(),
+        _ => None,
+    };
+    let (Some(minor), Some("currency"), Some(code)) =
+        (minor, option(named, "style"), option(named, "currency"))
+    else {
+        log::debug!(
+            "frust-i18n: NUMBER(minorUnits: \"true\") needs a string i64 and style: \"currency\" with `currency`"
+        );
+        return FluentValue::Error;
+    };
+
+    report_unhonored(named, "NUMBER", &["style", "currency", "minorUnits"]);
+    match super::currency_minor(locale, minor, code) {
+        Ok(formatted) => FluentValue::from(formatted),
+        Err(error) => {
+            log::debug!("frust-i18n: NUMBER(minorUnits): {error}");
+            FluentValue::Error
+        }
+    }
+}
+
+/// `DATETIME($d, dateStyle: …, timeStyle: …, timeZone: …, calendar: "gregory"|…, hourCycle: "h23"|…)`.
 fn date_time<'a>(
     locale: &Locale,
     positional: &[FluentValue<'a>],
     named: &FluentArgs<'_>,
 ) -> FluentValue<'a> {
-    let Some((date, time)) = as_civil(positional.first()) else {
+    let Some(instant) = as_instant(positional.first()) else {
         return FluentValue::Error;
+    };
+    let zoned = match option(named, "timeZone") {
+        None => zone::civil_at_offset(instant, 0),
+        Some(id) => match zone::parse_offset(id) {
+            Some(offset) => zone::civil_at_offset(instant, offset),
+            None => zone::zoned_civil(instant, id),
+        },
+    };
+    let (date, time) = match zoned {
+        Ok(civil) => civil,
+        Err(error) => {
+            log::debug!("frust-i18n: DATETIME(timeZone): {error}");
+            return FluentValue::Error;
+        }
     };
 
     let date_style = option(named, "dateStyle").map(length);
     let time_style = option(named, "timeStyle").map(length);
 
-    let formatted = match (date_style, time_style) {
-        (Some(date_style), Some(_)) => datetime::datetime(locale, date, time, date_style),
-        (None, Some(time_style)) => datetime::time(locale, time, time_style),
-        (date_style, None) => {
-            datetime::date(locale, date, date_style.unwrap_or(DateLength::Medium))
-        }
+    let options = DateTimeOptions {
+        calendar: option(named, "calendar").and_then(calendar),
+        hour_cycle: option(named, "hourCycle").and_then(hour_cycle),
     };
 
-    report_unhonored(named, "DATETIME", &["dateStyle", "timeStyle"]);
+    let formatted = match (date_style, time_style) {
+        (Some(date_style), Some(_)) => {
+            datetime::datetime_with(locale, date, time, date_style, &options)
+        }
+        (None, Some(time_style)) => datetime::time_with(locale, time, time_style, &options),
+        (date_style, None) => datetime::date_with(
+            locale,
+            date,
+            date_style.unwrap_or(DateLength::Medium),
+            &options,
+        ),
+    };
+
+    report_unhonored(
+        named,
+        "DATETIME",
+        &[
+            "dateStyle",
+            "timeStyle",
+            "timeZone",
+            "calendar",
+            "hourCycle",
+        ],
+    );
     match formatted {
         Ok(formatted) => FluentValue::from(formatted),
         Err(error) => {
@@ -180,6 +442,40 @@ fn length(style: &str) -> DateLength {
     }
 }
 
+/// Maps a `calendar` value (a Unicode `ca` identifier) onto a calendar.
+fn calendar(id: &str) -> Option<Calendar> {
+    match id {
+        "gregory" | "gregorian" => Some(Calendar::Gregorian),
+        "buddhist" => Some(Calendar::Buddhist),
+        "japanese" => Some(Calendar::Japanese),
+        "islamic" => Some(Calendar::Islamic),
+        "hebrew" => Some(Calendar::Hebrew),
+        "chinese" => Some(Calendar::Chinese),
+        unknown => {
+            log::debug!(
+                "frust-i18n: DATETIME(calendar: \"{unknown}\") — using the locale's calendar"
+            );
+            None
+        }
+    }
+}
+
+/// Maps an `hourCycle` value onto an hour cycle.
+fn hour_cycle(id: &str) -> Option<HourCycle> {
+    match id {
+        "h11" => Some(HourCycle::H11),
+        "h12" => Some(HourCycle::H12),
+        "h23" => Some(HourCycle::H23),
+        "h24" => Some(HourCycle::H24),
+        unknown => {
+            log::debug!(
+                "frust-i18n: DATETIME(hourCycle: \"{unknown}\") — using the locale's hour cycle"
+            );
+            None
+        }
+    }
+}
+
 /// Logs every named option outside `honored`.
 fn report_unhonored(named: &FluentArgs<'_>, function: &str, honored: &[&str]) {
     for (key, _) in named.iter() {
@@ -198,21 +494,20 @@ fn as_f64(value: Option<&FluentValue<'_>>) -> Option<f64> {
     }
 }
 
-/// Reads a positional argument as a civil date-time — epoch seconds, or an
+/// Reads a positional argument as an instant — epoch seconds, or an
 /// ISO-8601 string.
-fn as_civil(value: Option<&FluentValue<'_>>) -> Option<(CivilDate, CivilTime)> {
+fn as_instant(value: Option<&FluentValue<'_>>) -> Option<i64> {
     match value {
-        Some(FluentValue::Number(number)) => {
-            datetime::from_unix_seconds(number.value.trunc() as i64)
-        }
+        Some(FluentValue::Number(number)) => Some(number.value.trunc() as i64),
         Some(FluentValue::String(text)) => parse_iso(text),
         _ => None,
     }
 }
 
-/// Parses the ISO-8601 subset this crate accepts (see the module header).
-fn parse_iso(text: &str) -> Option<(CivilDate, CivilTime)> {
-    let text = text.strip_suffix('Z').unwrap_or(text);
+/// Parses the ISO-8601 subset this crate accepts (see the module header) to
+/// Unix seconds. A missing suffix means UTC; `Z` or `±HH:MM` is applied.
+fn parse_iso(text: &str) -> Option<i64> {
+    let (text, offset) = split_offset(text);
     let (date, time) = match text.split_once(['T', ' ']) {
         Some((date, time)) => (date, Some(time)),
         None => (text, None),
@@ -228,23 +523,46 @@ fn parse_iso(text: &str) -> Option<(CivilDate, CivilTime)> {
         return None;
     }
 
-    let Some(time) = time else {
-        return Some((date, CivilTime::MIDNIGHT));
+    let time = match time {
+        None => CivilTime::MIDNIGHT,
+        Some(time) => {
+            let mut time_parts = time.split(':');
+            let parsed = CivilTime {
+                hour: time_parts.next()?.parse().ok()?,
+                minute: time_parts.next()?.parse().ok()?,
+                second: match time_parts.next() {
+                    Some(second) => second.parse().ok()?,
+                    None => 0,
+                },
+            };
+            if time_parts.next().is_some() {
+                return None;
+            }
+            parsed
+        }
     };
-    let mut time_parts = time.split(':');
-    let time = CivilTime {
-        hour: time_parts.next()?.parse().ok()?,
-        minute: time_parts.next()?.parse().ok()?,
-        second: match time_parts.next() {
-            Some(second) => second.parse().ok()?,
-            None => 0,
-        },
-    };
-    if time_parts.next().is_some() {
-        return None;
-    }
 
-    Some((date, time))
+    Some(zone::utc_unix(date, time)? - i64::from(offset?))
+}
+
+/// Splits a trailing `Z`/`±HH[:MM]` off an ISO string. The offset is `None`
+/// when a suffix is present but malformed; `Some(0)` when absent.
+fn split_offset(text: &str) -> (&str, Option<i32>) {
+    if let Some(rest) = text.strip_suffix('Z') {
+        return (rest, Some(0));
+    }
+    // A sign after the time separator begins an offset; the date's own
+    // hyphens come before it.
+    let Some(time_start) = text.find(['T', ' ']) else {
+        return (text, Some(0));
+    };
+    match text[time_start..].rfind(['+', '-']) {
+        Some(at) => {
+            let (body, suffix) = text.split_at(time_start + at);
+            (body, zone::parse_offset(suffix))
+        }
+        None => (text, Some(0)),
+    }
 }
 
 #[cfg(test)]
@@ -306,7 +624,7 @@ mod tests {
     #[test]
     fn an_unhonored_option_is_ignored_rather_than_failing() {
         let formatted = resolved(
-            r#"m = { NUMBER($n, useGrouping: "false") }"#,
+            r#"m = { NUMBER($n, signDisplay: "always") }"#,
             "en-US",
             crate::args!("n" => 1234),
         );
@@ -370,37 +688,15 @@ mod tests {
     }
 
     #[test]
-    fn the_iso_subset_covers_dates_datetimes_and_a_trailing_zulu() {
-        let midnight = CivilTime::MIDNIGHT;
-
-        assert_eq!(
-            parse_iso("2024-01-31"),
-            Some((
-                CivilDate {
-                    year: 2024,
-                    month: 1,
-                    day: 31
-                },
-                midnight
-            ))
-        );
-        assert_eq!(
-            parse_iso("2024-01-31T15:47:50Z").map(|(_, time)| time),
-            Some(CivilTime {
-                hour: 15,
-                minute: 47,
-                second: 50
-            })
-        );
-        assert_eq!(
-            parse_iso("2024-01-31 15:47").map(|(_, time)| time),
-            Some(CivilTime {
-                hour: 15,
-                minute: 47,
-                second: 0
-            })
-        );
+    fn the_iso_subset_covers_dates_datetimes_and_offsets() {
+        assert_eq!(parse_iso("2024-01-31"), Some(1_706_659_200));
+        assert_eq!(parse_iso("2024-01-31T15:47:50Z"), Some(1_706_716_070));
+        assert_eq!(parse_iso("2024-01-31 15:47"), Some(1_706_716_020));
+        assert_eq!(parse_iso("2023-11-15T06:13:20+08:00"), Some(1_700_000_000));
+        assert_eq!(parse_iso("2023-11-14T22:13:20+00:00"), Some(1_700_000_000));
+        assert_eq!(parse_iso("2023-11-14T17:13:20-0500"), Some(1_700_000_000));
         assert_eq!(parse_iso("2024-01"), None);
-        assert_eq!(parse_iso("2024-01-31T15:47:50+02:00"), None);
+        assert_eq!(parse_iso("2024-01-31T15:47:50+2"), None);
+        assert_eq!(parse_iso("2024-02-30"), None);
     }
 }

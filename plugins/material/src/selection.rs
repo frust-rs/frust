@@ -199,6 +199,7 @@ use peniko::Color;
 
 use crate::icon_button::icon_button;
 use crate::press::presses;
+use crate::strings::MaterialStrings;
 
 // ---- Metrics cited against `appbar.rs` (private there; see the module docs'
 // Contextual bar section) --------------------------------------------------
@@ -231,11 +232,6 @@ const COUNT_WEIGHT: FontWeight = FontWeight::MEDIUM;
 /// Unthemed-fallback contextual bar container fill (a theme resolves this
 /// from `colors.primary_container`).
 const CONTEXTUAL_BACKGROUND: Color = Color::from_rgb8(0xEA, 0xDD, 0xFF);
-
-/// Accessible label for the contextual bar's close affordance
-/// (`M3ESelectionAppBar`'s `tooltip`/`semanticLabel`, both `'Clear
-/// selection'`).
-const CLEAR_SELECTION_LABEL: &str = "Clear selection";
 
 /// The press duration after which a held row press becomes a long-press
 /// (`frust_widgets::gesture`'s and `toggle_button.rs`'s own
@@ -667,6 +663,13 @@ pub struct SelectionAppBarView<State: 'static> {
     actions: Vec<AnyView<State>>,
     show_select_all: bool,
     select_all_label: String,
+    /// The close affordance's accessible name: the setter, else the ambient
+    /// theme's strings read when the view was created
+    /// (`M3ESelectionAppBar`'s `tooltip`/`semanticLabel`).
+    clear_label: String,
+    /// The selected-count announcement template (`{count}` unfilled), from
+    /// the ambient theme's strings read when the view was created.
+    count_template: String,
     on_clear: OnClear<State>,
     on_all_selected: Option<OnAllSelected<State>>,
     safe_area: bool,
@@ -687,13 +690,16 @@ pub fn selection_app_bar<State: 'static, F>(
 where
     F: Fn(&mut State) + 'static,
 {
+    let strings = MaterialStrings::from_build_context();
     SelectionAppBarView {
         idle: AnyView::new(idle),
         selected: selected.clone(),
         item_count,
         actions: Vec::new(),
         show_select_all: true,
-        select_all_label: "Select all".to_string(),
+        select_all_label: strings.selection_select_all.to_string(),
+        clear_label: strings.selection_clear_a11y.to_string(),
+        count_template: strings.selection_count_a11y.to_string(),
         on_clear: Rc::new(on_clear),
         on_all_selected: None,
         safe_area: true,
@@ -716,10 +722,24 @@ impl<State: 'static> SelectionAppBarView<State> {
         self
     }
 
-    /// Override the select-all row's label. Defaults to `"Select all"`.
+    /// Override the select-all row's label. Unset, it reads
+    /// [`MaterialStrings::selection_select_all`] from the ambient theme.
     pub fn select_all_label(mut self, label: impl Into<String>) -> Self {
         self.select_all_label = label.into();
         self
+    }
+
+    /// Override the close affordance's accessible name. Unset, it reads
+    /// [`MaterialStrings::selection_clear_a11y`] from the ambient theme.
+    pub fn clear_label(mut self, label: impl Into<String>) -> Self {
+        self.clear_label = label.into();
+        self
+    }
+
+    /// The selected-count accessibility label for the current selection,
+    /// filled from the template read when the view was created.
+    fn count_label(&self) -> String {
+        crate::strings::fill_count(&self.count_template, self.selected.len())
     }
 
     /// Fire when the select-all row is toggled — `true` means the app should
@@ -759,11 +779,11 @@ impl<State: 'static> SelectionAppBarView<State> {
 /// Build the close affordance's view (`icon_button` over
 /// [`crate::icons::CLOSE`], firing `on_clear` directly) — mirrors
 /// `dialog.rs`'s `close_view` helper of the same shape.
-fn close_view<State: 'static>(on_clear: OnClear<State>) -> impl View<State> {
+fn close_view<State: 'static>(on_clear: OnClear<State>, label: &str) -> impl View<State> {
     icon_button(icon(crate::icons::CLOSE), move |state: &mut State| {
         (on_clear)(state);
     })
-    .semantic_label(CLEAR_SELECTION_LABEL)
+    .semantic_label(label)
 }
 
 /// Build the selected-count label's view (`titleLargeEmphasized`,
@@ -840,7 +860,7 @@ fn build_contextual_children<State: 'static>(
 ) -> (Vec<ChildPod>, ContextualSlots) {
     let mut children = Vec::new();
 
-    let close_v = close_view::<State>(view.on_clear.clone());
+    let close_v = close_view::<State>(view.on_clear.clone(), &view.clear_label);
     children.push(frust::authoring::build_child(&close_v, ctx));
     let close = 0;
 
@@ -889,7 +909,7 @@ fn teardown_contextual_children<State: 'static>(
     children: &mut [ChildPod],
     ctx: &mut BuildCtx<'_>,
 ) {
-    let close_v = close_view::<State>(view.on_clear.clone());
+    let close_v = close_view::<State>(view.on_clear.clone(), &view.clear_label);
     frust::authoring::teardown_child(&close_v, &mut children[slots.close], ctx);
 
     let count_v = count_view::<State>(view.selected.len());
@@ -927,6 +947,9 @@ pub struct SelectionAppBarWidget {
     item_count: usize,
     show_select_all: bool,
     select_all_label: String,
+    /// The selected-count accessibility label, filled from the template the
+    /// view read at build time (semantics has no theme handle).
+    count_label: String,
     /// Whether the contextual branch consumes the top/left/right window
     /// insets — see [`SelectionAppBarView::safe_area`].
     safe_area: bool,
@@ -945,6 +968,7 @@ impl<State: 'static> View<State> for SelectionAppBarView<State> {
             item_count: self.item_count,
             show_select_all: self.show_select_all,
             select_all_label: self.select_all_label.clone(),
+            count_label: self.count_label(),
             safe_area: self.safe_area,
         }
     }
@@ -972,8 +996,8 @@ impl<State: 'static> View<State> for SelectionAppBarView<State> {
         } else {
             let slots = element.contextual_slots;
 
-            let prev_close = close_view::<State>(prev.on_clear.clone());
-            let next_close = close_view::<State>(self.on_clear.clone());
+            let prev_close = close_view::<State>(prev.on_clear.clone(), &prev.clear_label);
+            let next_close = close_view::<State>(self.on_clear.clone(), &self.clear_label);
             flags |= frust::authoring::rebuild_child(
                 &prev_close,
                 &next_close,
@@ -1032,6 +1056,11 @@ impl<State: 'static> View<State> for SelectionAppBarView<State> {
             element.selected = self.selected.clone();
             // The idle/contextual branch itself may have flipped.
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
+        let count_label = self.count_label();
+        if element.count_label != count_label {
+            element.count_label = count_label;
+            flags |= ChangeFlags::PAINT;
         }
         if element.safe_area != self.safe_area {
             element.safe_area = self.safe_area;
@@ -1169,13 +1198,12 @@ impl Widget for SelectionAppBarWidget {
             self.idle.semantics_child(ctx);
             return;
         }
-        let count = self.selected.len();
-        let label = format!("{count} selected");
+        let label = self.count_label.as_str();
         let contextual = &self.contextual;
         ctx.push_container(
             Role::TitleBar,
             |node| {
-                node.set_label(label.as_str());
+                node.set_label(label);
                 node.add_action(Action::Click);
             },
             |ctx| {
@@ -1873,5 +1901,137 @@ mod tests {
             .find(|(_, n)| n.role() == Role::TitleBar)
             .expect("a TitleBar node is contributed in selection mode");
         assert_eq!(node.label(), Some("2 selected"));
+    }
+
+    #[test]
+    fn the_count_label_follows_the_selection_on_rebuild() {
+        type Root = frust_core::RenderRoot<(), SelectionAppBarView<()>>;
+        let selected_count = Rc::new(std::cell::Cell::new(2usize));
+        let for_logic = selected_count.clone();
+        let mut logic = move |_: &mut ()| {
+            let selected: BTreeSet<usize> = (0..for_logic.get()).collect();
+            selection_app_bar(idle_view(), &selected, 4, |_: &mut ()| {})
+        };
+        let mut root: Root = frust_core::RenderRoot::new();
+        let mut state = ();
+        let mut tcx = TextContext::new();
+        let mut title = |root: &mut Root| {
+            root.layout_with_text(Size::new(300.0, 200.0), &mut tcx as &mut dyn Any);
+            root.semantics()
+                .nodes
+                .iter()
+                .find(|(_, n)| n.role() == Role::TitleBar)
+                .and_then(|(_, n)| n.label().map(str::to_string))
+        };
+        root.rebuild(&mut logic, &mut state);
+        assert_eq!(title(&mut root).as_deref(), Some("2 selected"));
+        selected_count.set(3);
+        root.rebuild(&mut logic, &mut state);
+        assert_eq!(title(&mut root).as_deref(), Some("3 selected"));
+    }
+
+    // ---- MaterialStrings: setter > ambient theme > English ------------------
+
+    mod strings {
+        use super::*;
+        use std::cell::RefCell;
+
+        fn thai_theme() -> Theme {
+            let mut theme = crate::baseline();
+            let mut thai = MaterialStrings::ENGLISH;
+            thai.selection_clear_a11y = "ล้างการเลือก".into();
+            thai.selection_select_all = "เลือกทั้งหมด".into();
+            thai.selection_count_a11y = "เลือกแล้ว {count} รายการ".into();
+            theme.extensions.insert(thai);
+            theme
+        }
+
+        /// Builds the bar under the ambient `Theme` context (when set) and
+        /// records the labels the view resolved at build time.
+        struct Host {
+            theme: Option<Theme>,
+            setters: bool,
+            seen: Rc<RefCell<(String, String)>>,
+        }
+        impl frust::Component for Host {
+            type State = ();
+            fn init(&self) {}
+            fn build(&self, _state: &mut ()) -> impl View<()> {
+                if let Some(theme) = &self.theme {
+                    frust::provide_context(theme.clone());
+                }
+                let selected = BTreeSet::from([0usize, 1]);
+                let mut view = selection_app_bar(idle_view(), &selected, 3, |_: &mut ()| {});
+                if self.setters {
+                    view = view.clear_label("Wipe").select_all_label("Pick all");
+                }
+                *self.seen.borrow_mut() = (view.clear_label.clone(), view.select_all_label.clone());
+                view
+            }
+        }
+
+        /// The `(close label, select-all label)` resolved at build time, and
+        /// the accessibility labels the laid-out tree exposes.
+        fn probe(theme: Option<Theme>, setters: bool) -> ((String, String), Vec<String>) {
+            let seen = Rc::new(RefCell::new((String::new(), String::new())));
+            let host_seen = seen.clone();
+            let mut root: frust_core::RenderRoot<(), frust::ComponentView<Host>> =
+                frust_core::RenderRoot::new();
+            let mut logic = move |_: &mut ()| {
+                frust::component(Host {
+                    theme: theme.clone(),
+                    setters,
+                    seen: host_seen.clone(),
+                })
+            };
+            let mut state = ();
+            root.rebuild(&mut logic, &mut state);
+            let mut tcx = TextContext::new();
+            root.layout_with_text(Size::new(300.0, 200.0), &mut tcx as &mut dyn Any);
+            let labels = root
+                .semantics()
+                .nodes
+                .iter()
+                .filter_map(|(_, n)| n.label().map(str::to_string))
+                .collect();
+            let seen = seen.borrow().clone();
+            (seen, labels)
+        }
+
+        #[test]
+        fn defaults_to_english() {
+            let ((clear, all), labels) = probe(None, false);
+            assert_eq!(
+                (clear.as_str(), all.as_str()),
+                ("Clear selection", "Select all")
+            );
+            assert!(labels.iter().any(|l| l == "Clear selection"));
+            assert!(labels.iter().any(|l| l == "2 selected"));
+        }
+
+        #[test]
+        fn reads_the_thai_theme_strings() {
+            let ((clear, all), labels) = probe(Some(thai_theme()), false);
+            assert_eq!((clear.as_str(), all.as_str()), ("ล้างการเลือก", "เลือกทั้งหมด"));
+            assert!(labels.iter().any(|l| l == "ล้างการเลือก"));
+        }
+
+        #[test]
+        fn setters_beat_the_theme_strings() {
+            let ((clear, all), labels) = probe(Some(thai_theme()), true);
+            assert_eq!((clear.as_str(), all.as_str()), ("Wipe", "Pick all"));
+            assert!(labels.iter().any(|l| l == "Wipe"));
+        }
+
+        /// The count label is filled from the template read at build time,
+        /// so the provided theme drives it like the other two labels.
+        #[test]
+        fn the_count_label_follows_the_provided_theme() {
+            let (_, english) = probe(None, false);
+            assert!(english.iter().any(|l| l == "2 selected"), "{english:?}");
+            let (_, thai) = probe(Some(thai_theme()), false);
+            assert!(thai.iter().any(|l| l == "เลือกแล้ว 2 รายการ"), "{thai:?}");
+            assert!(!thai.iter().any(|l| l == "2 selected"), "{thai:?}");
+        }
     }
 }

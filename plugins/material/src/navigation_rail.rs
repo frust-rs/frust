@@ -231,6 +231,7 @@ use crate::fab::{FabColor, FabSize, extended_fab, fab};
 use crate::icon_button::icon_button;
 use crate::overlay::{OVERLAY_SCRIM_ALPHA, finite_or_zero};
 use crate::press::presses;
+use crate::strings::MaterialStrings;
 
 // ---- Layout tokens ---------------------------------------------------------
 
@@ -943,6 +944,11 @@ pub struct NavigationRailView<State: 'static> {
     trailing: Option<AnyView<State>>,
     trailing_at_bottom: bool,
     background: Option<Color>,
+    /// The collapse toggle's accessible name: the setter, else the ambient
+    /// theme's strings read when the view was created.
+    collapse_label: String,
+    /// The expand toggle's accessible name; resolved like `collapse_label`.
+    expand_label: String,
 }
 
 /// Create a navigation rail over `sections`, with `selected` the current
@@ -957,6 +963,7 @@ pub fn navigation_rail<State: 'static, F: Fn(&mut State, usize) + 'static>(
     selected: usize,
     on_select: F,
 ) -> NavigationRailView<State> {
+    let strings = MaterialStrings::from_build_context();
     NavigationRailView {
         sections,
         selected,
@@ -972,6 +979,8 @@ pub fn navigation_rail<State: 'static, F: Fn(&mut State, usize) + 'static>(
         trailing: None,
         trailing_at_bottom: true,
         background: None,
+        collapse_label: strings.rail_collapse_a11y.to_string(),
+        expand_label: strings.rail_expand_a11y.to_string(),
     }
 }
 
@@ -987,6 +996,22 @@ pub fn NavigationRail<State: 'static, F: Fn(&mut State, usize) + 'static>(
 }
 
 impl<State: 'static> NavigationRailView<State> {
+    /// Override the collapse toggle's accessible name. Unset, it reads
+    /// [`MaterialStrings::rail_collapse_a11y`] from the ambient theme
+    /// (Collapse in English).
+    pub fn collapse_label(mut self, label: impl Into<String>) -> Self {
+        self.collapse_label = label.into();
+        self
+    }
+
+    /// Override the expand toggle's accessible name. Unset, it reads
+    /// [`MaterialStrings::rail_expand_a11y`] from the ambient theme
+    /// (Expand in English).
+    pub fn expand_label(mut self, label: impl Into<String>) -> Self {
+        self.expand_label = label.into();
+        self
+    }
+
     /// The rail shape (default [`NavigationRailType::Expanded`], the
     /// reference's own default).
     pub fn rail_type(mut self, rail_type: NavigationRailType) -> Self {
@@ -1105,9 +1130,9 @@ impl<State: 'static> NavigationRailView<State> {
         // The reference's own tooltip strings, carried as accessible names —
         // this port ships no per-item tooltips (see Not ported).
         let (source, label) = if expanded {
-            (crate::icons::MENU_OPEN, "Collapse")
+            (crate::icons::MENU_OPEN, self.collapse_label.as_str())
         } else {
-            (crate::icons::MENU, "Expand")
+            (crate::icons::MENU, self.expand_label.as_str())
         };
         Some(any(icon_button(icon(source), move |state: &mut State| {
             if let Some(callback) = &callback {
@@ -3068,5 +3093,110 @@ mod tests {
             .find(|(_, node)| node.label() == Some("Home"))
             .expect("the Home tab is present");
         assert_eq!(unselected.1.is_selected(), Some(false));
+    }
+
+    // ---- MaterialStrings: setter > ambient theme > English ------------------
+
+    mod strings {
+        use super::*;
+
+        /// Provides `theme` as the ambient `Theme` context (when set), then
+        /// builds the rail under test so build-time `use_context` resolves.
+        struct Host {
+            theme: Option<Theme>,
+            make: fn() -> AnyView<()>,
+        }
+        impl frust::Component for Host {
+            type State = ();
+            fn init(&self) {}
+            fn build(&self, _state: &mut ()) -> impl View<()> {
+                if let Some(theme) = &self.theme {
+                    frust::provide_context(theme.clone());
+                }
+                (self.make)()
+            }
+        }
+
+        fn thai_theme() -> Theme {
+            let mut theme = crate::baseline();
+            let mut thai = MaterialStrings::ENGLISH;
+            thai.rail_collapse_a11y = "ยุบ".into();
+            thai.rail_expand_a11y = "ขยาย".into();
+            theme.extensions.insert(thai);
+            theme
+        }
+
+        fn labels(theme: Option<Theme>, make: fn() -> AnyView<()>) -> Vec<String> {
+            let mut root: frust_core::RenderRoot<(), frust::ComponentView<Host>> =
+                frust_core::RenderRoot::new();
+            let mut logic = move |_: &mut ()| {
+                frust::component(Host {
+                    theme: theme.clone(),
+                    make,
+                })
+            };
+            let mut state = ();
+            root.rebuild(&mut logic, &mut state);
+            let mut tcx = TextContext::new();
+            root.layout_with_text(AREA, &mut tcx as &mut dyn Any);
+            root.semantics()
+                .nodes
+                .iter()
+                .filter_map(|(_, n)| n.label().map(str::to_string))
+                .collect()
+        }
+
+        fn expanded() -> AnyView<()> {
+            any(rail::<()>()
+                .rail_type(NavigationRailType::Expanded)
+                .on_type_changed(|_s: &mut (), _t| {}))
+        }
+        fn collapsed() -> AnyView<()> {
+            any(rail::<()>()
+                .rail_type(NavigationRailType::Collapsed)
+                .on_type_changed(|_s: &mut (), _t| {}))
+        }
+        fn expanded_with_setters() -> AnyView<()> {
+            any(rail::<()>()
+                .rail_type(NavigationRailType::Expanded)
+                .on_type_changed(|_s: &mut (), _t| {})
+                .collapse_label("Fold"))
+        }
+        fn collapsed_with_setters() -> AnyView<()> {
+            any(rail::<()>()
+                .rail_type(NavigationRailType::Collapsed)
+                .on_type_changed(|_s: &mut (), _t| {})
+                .expand_label("Unfold"))
+        }
+
+        fn has(labels: &[String], wanted: &str) -> bool {
+            labels.iter().any(|l| l == wanted)
+        }
+
+        #[test]
+        fn toggle_labels_default_to_english() {
+            assert!(has(&labels(None, expanded), "Collapse"));
+            assert!(has(&labels(None, collapsed), "Expand"));
+        }
+
+        #[test]
+        fn toggle_labels_read_the_thai_theme_strings() {
+            let l = labels(Some(thai_theme()), expanded);
+            assert!(has(&l, "ยุบ"), "{l:?}");
+            assert!(!has(&l, "Collapse"));
+            let l = labels(Some(thai_theme()), collapsed);
+            assert!(has(&l, "ขยาย"), "{l:?}");
+            assert!(!has(&l, "Expand"));
+        }
+
+        #[test]
+        fn toggle_label_setters_beat_the_theme_strings() {
+            let l = labels(Some(thai_theme()), expanded_with_setters);
+            assert!(has(&l, "Fold"), "{l:?}");
+            assert!(!has(&l, "ยุบ"));
+            let l = labels(Some(thai_theme()), collapsed_with_setters);
+            assert!(has(&l, "Unfold"), "{l:?}");
+            assert!(!has(&l, "ขยาย"));
+        }
     }
 }

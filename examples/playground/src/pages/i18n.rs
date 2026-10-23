@@ -48,10 +48,16 @@
 
 use frust::{
     Axis, ButtonStyle, Color, Component, CrossAxisAlignment, EdgeInsets, FlexView, Get, Padding,
-    RwSignal, Set, SizedBox, Theme, View, button, column, component, inflexible, text, use_context,
+    RwSignal, Set, SizedBox, Theme, View, button, column, component, inflexible, row, text,
+    use_context,
 };
-use frust_i18n::fmt::{self, CivilDate, CivilTime, DateLength};
+use frust_i18n::fmt::{
+    self, Calendar, CivilDate, CivilTime, CompactStyle, DateLength, DateTimeOptions, ListLength,
+    ListStyle, Notation, NumberOptions, RelativeDayStyle, UnitStyle,
+};
 use frust_i18n::{I18n, Locale, use_i18n};
+use frust_material::{TimeEntry, TimeOfDay, filled_button, text_button, time_input};
+use frust_material_i18n::{material_strings_for, provide_localized_strings};
 
 use crate::PlaygroundState;
 
@@ -87,6 +93,25 @@ const SAMPLE_TIME: CivilTime = CivilTime {
     minute: 47,
     second: 50,
 };
+
+/// The instant the zoned and relative-day rows read (2023-11-14 22:13:20 UTC).
+const SAMPLE_INSTANT: i64 = 1_700_000_000;
+
+/// The zone the zoned and relative-day rows read the instant in (UTC+8, so the
+/// local date is already the 15th).
+const SAMPLE_ZONE: &str = "Asia/Makassar";
+
+/// One day in seconds — the "tomorrow" offset for the relative-day row.
+const SECONDS_PER_DAY: i64 = 86_400;
+
+/// A fixed amount of money in minor units (123.45 baht).
+const SAMPLE_MINOR_AMOUNT: i64 = 12_345;
+
+/// The three amenities the list row joins.
+const AMENITIES: [&str; 3] = ["Wi-Fi", "Parking", "Breakfast"];
+
+/// The tags the endonym row names, each in its own language.
+const ENDONYM_TAGS: [&str; 5] = ["en", "de", "ja", "th", "vi"];
 
 /// Padding around the whole section column, in logical px.
 const CONTENT_PAD: f64 = 16.0;
@@ -200,6 +225,16 @@ impl Component for I18nDemoPage {
             .child(SizedBox(None, Some(SECTION_GAP)))
             .child(section_heading("Formatting matrix (frust_i18n::fmt)"))
             .child(formatting_table(&format_locale, muted))
+            .child(SizedBox(None, Some(SECTION_GAP)))
+            .child(section_heading("Formatting (new)"))
+            .child(new_formatting_table(&format_locale, muted))
+            .child(SizedBox(None, Some(SECTION_GAP)))
+            .child(section_heading("Material strings"))
+            .child(text(
+                "A dialog action, a snackbar dismiss and an inline time picker, each reading the \
+                 Material strings for the language chosen above.",
+            ).size(10.0).color(muted))
+            .child(component(MaterialStringsSample))
             .child(SizedBox(None, Some(BOTTOM_GAP)))
             .cross_axis(CrossAxisAlignment::Start);
 
@@ -361,6 +396,169 @@ fn formatting_table(format_locale: &Locale, muted: Color) -> impl View<I18nDemoP
     FlexView::new(Axis::Vertical, items).cross_axis(CrossAxisAlignment::Start)
 }
 
+/// The rows for the formatting functions beyond the basic matrix: each one is
+/// a fresh call with fixed inputs, so a language switch re-renders it in the
+/// new locale.
+///
+/// The two `th-TH` date rows use a fixed locale on purpose: they show what
+/// [`Calendar::Gregorian`] changes about a Thai date, which the active locale
+/// would hide whenever it is not Thai.
+fn new_formatting_lines(locale: &Locale) -> Vec<String> {
+    fn shown(label: &str, result: Result<String, frust_i18n::I18nError>) -> String {
+        format!(
+            "{label}: {}",
+            result.unwrap_or_else(|error| format!("<error: {error}>"))
+        )
+    }
+
+    let th_th: Locale = "th-TH"
+        .parse()
+        .expect("`th-TH` is a valid BCP-47 identifier");
+    let gregorian = DateTimeOptions {
+        calendar: Some(Calendar::Gregorian),
+        ..DateTimeOptions::default()
+    };
+    let nine = CivilTime {
+        hour: 9,
+        minute: 0,
+        second: 0,
+    };
+    let eleven = CivilTime {
+        hour: 11,
+        minute: 0,
+        second: 0,
+    };
+    let compact = NumberOptions {
+        notation: Notation::Compact(CompactStyle::Short),
+        ..NumberOptions::default()
+    };
+    let endonyms: Vec<String> = ENDONYM_TAGS
+        .iter()
+        .map(|tag| {
+            let of: Locale = tag.parse().expect("ENDONYM_TAGS are valid identifiers");
+            fmt::language_endonym(&of).unwrap_or_else(|error| format!("<error: {error}>"))
+        })
+        .collect();
+
+    vec![
+        shown(
+            "currency_minor THB 12345",
+            fmt::currency_minor(locale, SAMPLE_MINOR_AMOUNT, "THB"),
+        ),
+        shown(
+            "datetime_in_zone 1700000000 Asia/Makassar",
+            fmt::datetime_in_zone(locale, SAMPLE_INSTANT, SAMPLE_ZONE, DateLength::Medium),
+        ),
+        shown(
+            "time_range 9:00-11:00",
+            fmt::time_range(locale, nine, eleven, DateLength::Short),
+        ),
+        shown(
+            "relative_day today",
+            fmt::relative_day(
+                locale,
+                SAMPLE_INSTANT,
+                SAMPLE_INSTANT,
+                SAMPLE_ZONE,
+                RelativeDayStyle::Long,
+            ),
+        ),
+        shown(
+            "relative_day tomorrow",
+            fmt::relative_day(
+                locale,
+                SAMPLE_INSTANT + SECONDS_PER_DAY,
+                SAMPLE_INSTANT,
+                SAMPLE_ZONE,
+                RelativeDayStyle::Long,
+            ),
+        ),
+        shown(
+            "duration_minutes 90",
+            fmt::duration_minutes(locale, 90, UnitStyle::Long),
+        ),
+        shown(
+            "list amenities",
+            fmt::list(locale, &AMENITIES, ListStyle::And, ListLength::Wide),
+        ),
+        format!("endonyms: {}", endonyms.join(" / ")),
+        shown(
+            "date th-TH",
+            fmt::date(&th_th, SAMPLE_DATE, DateLength::Medium),
+        ),
+        shown(
+            "date th-TH Gregorian",
+            fmt::date_with(&th_th, SAMPLE_DATE, DateLength::Medium, &gregorian),
+        ),
+        format!(
+            "decimal_with 1234567 compact: {}",
+            fmt::decimal_with(locale, 1_234_567.0, &compact)
+        ),
+    ]
+}
+
+/// [`new_formatting_lines`] as a column of muted captions.
+fn new_formatting_table(
+    format_locale: &Locale,
+    muted: Color,
+) -> impl View<I18nDemoPageState> + use<> {
+    let items = new_formatting_lines(format_locale)
+        .into_iter()
+        .map(|line| inflexible(text(line).size(11.0).color(muted)))
+        .collect();
+    FlexView::new(Axis::Vertical, items).cross_axis(CrossAxisAlignment::Start)
+}
+
+/// The Material strings sample: a dialog's action buttons, a snackbar's
+/// dismiss action and an inline time picker, all reading the table for the
+/// active language.
+///
+/// A child [`Component`] so its `build` owns the tracked locale read: every
+/// [`I18n::set_locale`] rebuilds it, re-provides the localized theme to the
+/// widgets below (the time picker reads its field labels from it) and re-reads
+/// the table for the buttons.
+struct MaterialStringsSample;
+
+impl Component for MaterialStringsSample {
+    type State = ();
+
+    fn init(&self) {}
+
+    fn build(&self, _state: &mut ()) -> impl View<()> {
+        let i18n = resolve_i18n();
+        provide_localized_strings(&i18n);
+        let strings = material_strings_for(&i18n.locale());
+        let muted = muted();
+
+        column()
+            .child(text("Dialog actions").size(11.0).color(muted))
+            .child(
+                row()
+                    .child(text_button(
+                        strings.dialog_cancel.to_string(),
+                        |_: &mut ()| {},
+                    ))
+                    .child(filled_button(
+                        strings.dialog_confirm.to_string(),
+                        |_: &mut ()| {},
+                    )),
+            )
+            .child(SizedBox(None, Some(SECTION_GAP)))
+            .child(text("Snackbar").size(11.0).color(muted))
+            .child(row().child(text("Saved").size(12.0)).child(text_button(
+                strings.snackbar_dismiss_a11y.to_string(),
+                |_: &mut ()| {},
+            )))
+            .child(SizedBox(None, Some(SECTION_GAP)))
+            .child(text("Time picker input").size(11.0).color(muted))
+            .child(time_input(
+                TimeEntry::from_time(TimeOfDay::new(9, 30), false),
+                |_: &mut (), _entry| {},
+            ))
+            .cross_axis(CrossAxisAlignment::Start)
+    }
+}
+
 /// Live-theme accent-text role (`primary`), falling back to the Material
 /// baseline pre-context — the same pattern every other section page uses.
 fn accent() -> Color {
@@ -376,4 +574,126 @@ fn muted() -> Color {
         .unwrap_or_else(frust_material::baseline)
         .scheme()
         .on_surface_variant
+}
+
+#[cfg(test)]
+mod tests {
+    use std::any::Any;
+
+    use frust::ComponentView;
+    use frust_core::RenderRoot;
+    use frust_i18n::{I18n, Locale, provide_i18n};
+    use frust_text::TextContext;
+    use kurbo::Size;
+    use reactive_graph::owner::Owner;
+
+    use super::*;
+
+    fn locale(tag: &str) -> Locale {
+        tag.parse().expect("valid locale")
+    }
+
+    /// The semantics labels of `view` laid out under an `I18n` that requested
+    /// `tag`.
+    fn labels_for<C: Component>(tag: &str, make: fn() -> C) -> Vec<String>
+    where
+        C::State: 'static,
+    {
+        let owner = Owner::new();
+        owner.set();
+        let engine =
+            frust_i18n::Engine::new(frust_i18n::fmt::with_icu_functions(crate::locale_set()))
+                .expect("`locales!` validated every embedded source at compile time");
+        provide_i18n(I18n::from_engine(engine, &[locale(tag)]));
+
+        let mut root: RenderRoot<(), ComponentView<C>> = RenderRoot::new();
+        let mut logic = move |_: &mut ()| component(make());
+        let mut state = ();
+        let mut tcx = TextContext::new();
+        root.rebuild(&mut logic, &mut state);
+        root.layout_with_text(Size::new(400.0, 3000.0), &mut tcx as &mut dyn Any);
+        root.semantics()
+            .nodes
+            .iter()
+            .filter_map(|(_, n)| n.label().map(str::to_string))
+            .collect()
+    }
+
+    fn has(labels: &[String], needle: &str) -> bool {
+        labels.iter().any(|label| label.contains(needle))
+    }
+
+    /// Text widgets carry no semantics label, so the rows are checked at the
+    /// string level (what the page hands each `text`), and the page itself is
+    /// laid out once per locale to prove the whole tree builds.
+    #[test]
+    fn the_new_formatting_rows_render_in_english_and_thai() {
+        let en = new_formatting_lines(&locale("en"));
+        let th = new_formatting_lines(&locale("th"));
+
+        assert_eq!(en.len(), 11);
+        assert_eq!(th.len(), en.len());
+        for (index, label) in [
+            "currency_minor THB 12345",
+            "datetime_in_zone 1700000000 Asia/Makassar",
+            "time_range 9:00-11:00",
+            "relative_day today",
+            "relative_day tomorrow",
+            "duration_minutes 90",
+            "list amenities",
+            "endonyms",
+            "date th-TH",
+            "date th-TH Gregorian",
+            "decimal_with 1234567 compact",
+        ]
+        .iter()
+        .enumerate()
+        {
+            for rows in [&en, &th] {
+                let value = rows[index]
+                    .strip_prefix(label)
+                    .and_then(|rest| rest.strip_prefix(": "))
+                    .unwrap_or_else(|| panic!("row {index} is not `{label}`: {:?}", rows[index]));
+                assert!(
+                    !value.is_empty() && !value.starts_with('<'),
+                    "{label}: {value}"
+                );
+            }
+        }
+
+        // The rows that read the active locale differ between English and
+        // Thai; the two fixed th-TH date rows and the endonyms do not (nor does
+        // the short compact number, which CLDR spells the same in both).
+        for index in [0, 1, 2, 3, 4, 5, 6] {
+            assert_ne!(
+                en[index], th[index],
+                "row {index} did not follow the locale"
+            );
+        }
+        for index in [7, 8, 9] {
+            assert_eq!(en[index], th[index], "row {index} must be locale-fixed");
+        }
+        assert_ne!(en[8], en[9], "Gregorian must change the th-TH year");
+
+        for tag in ["en", "th"] {
+            let labels = labels_for(tag, || I18nDemoPage);
+            assert!(has(&labels, "English"), "{tag}: {labels:?}");
+        }
+    }
+
+    #[test]
+    fn the_material_strings_sample_follows_the_locale() {
+        let en = labels_for("en", || MaterialStringsSample);
+        let ja = labels_for("ja", || MaterialStringsSample);
+
+        let english = material_strings_for(&locale("en"));
+        let japanese = material_strings_for(&locale("ja"));
+
+        assert!(has(&en, &english.dialog_cancel), "{en:?}");
+        assert!(has(&en, &english.snackbar_dismiss_a11y), "{en:?}");
+        assert!(has(&ja, &japanese.dialog_cancel), "{ja:?}");
+        assert!(has(&ja, &japanese.snackbar_dismiss_a11y), "{ja:?}");
+        assert_ne!(english.dialog_cancel, japanese.dialog_cancel);
+        assert!(!has(&ja, &english.dialog_cancel), "{ja:?}");
+    }
 }

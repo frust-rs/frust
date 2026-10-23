@@ -822,6 +822,13 @@ impl Component for PlaygroundApp {
     }
 
     fn build(&self, state: &mut PlaygroundState) -> impl View<PlaygroundState> {
+        // Tracked read of the locale (inside `provide_localized_strings`):
+        // every language switch rebuilds this component and re-provides the
+        // localized theme, which every Material widget below reads when its
+        // view is created.
+        if let Some(i18n) = frust_i18n::use_i18n() {
+            frust_material_i18n::provide_localized_strings(&i18n);
+        }
         // Clone the reactive handle into the navigator's stateless home-page
         // builder; the controller is shared so overlay pages push onto this
         // same stack.

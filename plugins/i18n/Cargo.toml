@@ -28,11 +28,17 @@ unic-langid = { workspace = true }
 # Published as frust-ui, imported as frust: crates.io `frust` belongs to another project (https://github.com/lloydmeta/frunk/issues/258).
 frust = { package = "frust-ui", path = "../../crates/frust", version = "0.6.3", optional = true }
 
+# Optional plugin->plugin edge (`persistence`): a facade-tier crate persisting the locale override
+# through the platform plugin that owns key-value storage. Literal path, acyclic, off by default.
+frust-shared-preferences = { path = "../shared-preferences", version = "0.6.3", optional = true }
+
 # Pin rationale in the root `Cargo.toml` (`icu_experimental` exact-pinned). Independent of
 # `frust-api`.
 icu_decimal = { workspace = true, optional = true }
 icu_datetime = { workspace = true, optional = true }
 icu_plurals = { workspace = true, optional = true }
+icu_list = { workspace = true, optional = true }
+jiff = { workspace = true, optional = true }
 icu_experimental = { workspace = true, optional = true }
 icu_locale_core = { workspace = true, optional = true }
 tinystr = { workspace = true, optional = true }
@@ -51,10 +57,13 @@ frust-reactive = { workspace = true }
 [features]
 default = ["frust-api", "formatting"]
 frust-api = ["dep:frust"]
+persistence = ["dep:frust-shared-preferences", "frust-api"]
 formatting = [
     "dep:icu_decimal",
     "dep:icu_datetime",
     "dep:icu_plurals",
+    "dep:icu_list",
+    "dep:jiff",
     "dep:icu_experimental",
     "dep:icu_locale_core",
     "dep:tinystr",

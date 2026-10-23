@@ -1,0 +1,26 @@
+[package]
+name = "frust-material-i18n"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Bridge between frust-i18n and frust-material: localized Material widget strings that follow the active locale."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[dependencies]
+# Published as frust-ui, imported as frust: crates.io `frust` belongs to another project (https://github.com/lloydmeta/frunk/issues/258).
+frust = { package = "frust-ui", path = "../../crates/frust", version = "0.6.3" }
+frust-material = { path = "../material", version = "0.6.3" }
+frust-i18n = { path = "../i18n", version = "0.6.3" }
+# Month and weekday names come straight from CLDR through the same ICU4X pins frust-i18n uses.
+icu_datetime = { workspace = true }
+icu_locale_core = { workspace = true }
+
+[dev-dependencies]
+frust-core = { path = "../../crates/frust-core", version = "0.6.3", features = ["test-support"] }
+frust-widgets = { path = "../../crates/frust-widgets", version = "0.6.3", features = ["test-support"] }
+frust-reactive = { workspace = true }

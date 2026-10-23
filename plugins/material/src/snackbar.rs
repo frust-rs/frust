@@ -104,6 +104,18 @@
 //! host only ever promotes it once [`SnackbarHostWidget`] has nothing of its
 //! own currently showing.
 //!
+//! # Two APIs: `show` and `enqueue`
+//!
+//! [`SnackbarController::show`] is the one-pending-slot call above and is
+//! unchanged: it replaces the pending slot and never touches the queue.
+//! [`SnackbarController::enqueue`] is the app-wide notice queue: a FIFO that
+//! shows one message at a time, promoting the next when the visible one
+//! settles (the host asks for a frame on settle, so the promoting rebuild
+//! runs). When the host frees up, the explicit `show` slot is served before the
+//! queue front. `show` does **not** clear the queue;
+//! [`SnackbarController::clear_queue`] drops waiting messages and
+//! [`SnackbarController::queue_len`] reports how many wait.
+//!
 //! # Motion and color
 //!
 //! Slide-up + fade entrance (`crate::tokens::MaterialMotion::MEDIUM_2`, 300ms)
@@ -160,6 +172,7 @@
 //! panel.
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -175,6 +188,7 @@ use peniko::{Brush, Color};
 
 use crate::icons;
 use crate::press::presses;
+use crate::strings::MaterialStrings;
 use crate::tokens::MaterialMotion;
 
 // ---- Theme-token constants (m3e_snackbar_theme.dart's `M3ESnackbarTheme.defaults`) --
@@ -374,6 +388,7 @@ pub struct SnackbarMessage<State: 'static> {
     on_action: Option<OnAction<State>>,
     duration: Duration,
     dismissible: bool,
+    dismiss_label: Option<String>,
 }
 
 /// Start building a snackbar message with body text `message`. Chain
@@ -387,6 +402,7 @@ pub fn snackbar<State: 'static>(message: impl Into<String>) -> SnackbarMessage<S
         on_action: None,
         duration: DEFAULT_DURATION,
         dismissible: false,
+        dismiss_label: None,
     }
 }
 
@@ -424,6 +440,14 @@ impl<State: 'static> SnackbarMessage<State> {
         self.dismissible = true;
         self
     }
+
+    /// Override the close icon's accessible name. Unset, it reads
+    /// [`MaterialStrings::snackbar_dismiss_a11y`] from the ambient theme when
+    /// the [`snackbar_host`] view is created ("Dismiss" in English).
+    pub fn dismiss_label(mut self, label: impl Into<String>) -> Self {
+        self.dismiss_label = Some(label.into());
+        self
+    }
 }
 
 /// The app-state handle to a [`snackbar_host`]: a cloneable single-slot queue
@@ -435,12 +459,14 @@ impl<State: 'static> SnackbarMessage<State> {
 /// queue/replace rule this slot implements.
 pub struct SnackbarController<State: 'static> {
     pending: Rc<RefCell<Option<SnackbarMessage<State>>>>,
+    queue: Rc<RefCell<VecDeque<SnackbarMessage<State>>>>,
 }
 
 impl<State: 'static> Clone for SnackbarController<State> {
     fn clone(&self) -> Self {
         Self {
             pending: Rc::clone(&self.pending),
+            queue: Rc::clone(&self.queue),
         }
     }
 }
@@ -456,6 +482,7 @@ impl<State: 'static> SnackbarController<State> {
     pub fn new() -> Self {
         Self {
             pending: Rc::new(RefCell::new(None)),
+            queue: Rc::new(RefCell::new(VecDeque::new())),
         }
     }
 
@@ -466,14 +493,38 @@ impl<State: 'static> SnackbarController<State> {
         *self.pending.borrow_mut() = Some(message);
     }
 
-    /// Take whatever is pending, leaving the slot empty. Only
+    /// Append `message` to the FIFO notice queue. Queued messages show one at
+    /// a time, in order, each promoted once the previous one has fully
+    /// dismissed or timed out, and each with its own duration and action. The
+    /// explicit [`show`](Self::show) slot is served first. See the
+    /// [module docs](self) for how the two APIs relate.
+    pub fn enqueue(&self, message: SnackbarMessage<State>) {
+        self.queue.borrow_mut().push_back(message);
+    }
+
+    /// Drop every message waiting in the [`enqueue`](Self::enqueue) queue. The
+    /// visible message and the explicit [`show`](Self::show) slot are
+    /// untouched.
+    pub fn clear_queue(&self) {
+        self.queue.borrow_mut().clear();
+    }
+
+    /// How many messages are waiting in the [`enqueue`](Self::enqueue) queue
+    /// (not counting the visible one or the [`show`](Self::show) slot).
+    pub fn queue_len(&self) -> usize {
+        self.queue.borrow().len()
+    }
+
+    /// Take whatever is next: the explicit pending slot first, otherwise the
+    /// queue front, leaving both consistent. Only
     /// [`SnackbarHostView::build`]/[`SnackbarHostView::rebuild`] call this —
     /// both run inside a `View` pass generic over `State`, the one place this
     /// crate's callback-erasure rule
     /// (`docs/CODE_STANDARDS.md`'s Type-erase idiom) allows touching a typed
     /// closure before it is erased into the non-generic retained widget.
     fn take_pending(&self) -> Option<SnackbarMessage<State>> {
-        self.pending.borrow_mut().take()
+        let explicit = self.pending.borrow_mut().take();
+        explicit.or_else(|| self.queue.borrow_mut().pop_front())
     }
 }
 
@@ -489,6 +540,7 @@ struct ErasedSnackbar {
     on_action: Option<ErasedCallback>,
     duration: Duration,
     dismissible: bool,
+    dismiss_label: Option<String>,
 }
 
 fn erase<State: 'static>(msg: SnackbarMessage<State>) -> ErasedSnackbar {
@@ -498,6 +550,7 @@ fn erase<State: 'static>(msg: SnackbarMessage<State>) -> ErasedSnackbar {
         on_action: msg.on_action.map(|f| erase_callback(&f)),
         duration: msg.duration,
         dismissible: msg.dismissible,
+        dismiss_label: msg.dismiss_label,
     }
 }
 
@@ -507,6 +560,9 @@ fn erase<State: 'static>(msg: SnackbarMessage<State>) -> ErasedSnackbar {
 pub struct SnackbarHostView<State: 'static> {
     controller: SnackbarController<State>,
     app: AnyView<State>,
+    /// The ambient theme's close-icon accessible name, read when the view was
+    /// created.
+    dismiss_a11y: String,
 }
 
 /// Wrap `app` (the app's own root view) in a kept-mounted snackbar host driven
@@ -518,6 +574,9 @@ pub fn snackbar_host<State: 'static, V: View<State>>(
     SnackbarHostView {
         controller: controller.clone(),
         app: any(app),
+        dismiss_a11y: MaterialStrings::from_build_context()
+            .snackbar_dismiss_a11y
+            .to_string(),
     }
 }
 
@@ -528,6 +587,7 @@ impl<State: 'static> View<State> for SnackbarHostView<State> {
         let mut widget = SnackbarHostWidget {
             app: frust::authoring::build_child(&self.app, ctx),
             current: None,
+            dismiss_a11y: self.dismiss_a11y.clone(),
         };
         if let Some(msg) = self.controller.take_pending() {
             widget.begin_show(erase(msg));
@@ -543,6 +603,12 @@ impl<State: 'static> View<State> for SnackbarHostView<State> {
     ) -> ChangeFlags {
         let mut flags =
             frust::authoring::rebuild_child(&prev.app, &self.app, &mut element.app, ctx);
+        if element.dismiss_a11y != self.dismiss_a11y {
+            element.dismiss_a11y = self.dismiss_a11y.clone();
+            // A repaint moves the semantics generation so the next pull reads
+            // the new close-icon name.
+            flags |= ChangeFlags::PAINT;
+        }
         if element.current.is_none()
             && let Some(msg) = self.controller.take_pending()
         {
@@ -578,6 +644,9 @@ struct ActiveSnackbar {
     action_run: Option<TextRun>,
     on_action: Option<ErasedCallback>,
     dismissible: bool,
+    /// The setter's close-icon accessible name; wins over the host's
+    /// theme-resolved one.
+    dismiss_label: Option<String>,
     hold: AnimationController,
 
     /// Overall slide/fade progress, `0.0` (fully hidden) to `1.0` (fully
@@ -622,6 +691,7 @@ impl ActiveSnackbar {
             action_run,
             on_action: msg.on_action,
             dismissible: msg.dismissible,
+            dismiss_label: msg.dismiss_label,
             hold,
             progress: 0.0,
             ramp_from: 0.0,
@@ -721,6 +791,9 @@ impl ActiveSnackbar {
 pub struct SnackbarHostWidget {
     app: ChildPod,
     current: Option<ActiveSnackbar>,
+    /// The view's theme-resolved close-icon accessible name, used by any
+    /// message without its own `dismiss_label`.
+    dismiss_a11y: String,
 }
 
 impl SnackbarHostWidget {
@@ -939,6 +1012,10 @@ impl Widget for SnackbarHostWidget {
             let message = active.message.clone();
             let action_label = active.action_label.clone();
             let dismissible = active.dismissible;
+            let dismiss_a11y = active
+                .dismiss_label
+                .clone()
+                .unwrap_or_else(|| self.dismiss_a11y.clone());
             ctx.push_container(
                 Role::Alert,
                 move |node| node.set_label(message.as_str()),
@@ -951,7 +1028,7 @@ impl Widget for SnackbarHostWidget {
                     }
                     if dismissible {
                         ctx.push_node(Role::Button, |node| {
-                            node.set_label("Dismiss");
+                            node.set_label(dismiss_a11y.as_str());
                             node.add_action(Action::Click);
                         });
                     }
@@ -1284,6 +1361,154 @@ mod tests {
             "a Cancel never dismisses"
         );
         assert!(w.current.as_ref().unwrap().captured_region.is_none());
+    }
+
+    // ---- enqueue FIFO -------------------------------------------------------
+
+    /// Rebuild the host against the controller (what the frame request drives
+    /// in production).
+    fn rebuild_host(
+        controller: &SnackbarController<Vec<u32>>,
+        prev: &SnackbarHostView<Vec<u32>>,
+        w: &mut SnackbarHostWidget,
+    ) -> SnackbarHostView<Vec<u32>> {
+        let next = snackbar_host(controller, probe(0).into_any());
+        let mut counter = 0u64;
+        next.rebuild(prev, w, &mut BuildCtx::new(&mut counter));
+        next
+    }
+
+    /// Run the current message from entrance through exit starting at `t0`,
+    /// returning the time after it has settled.
+    fn run_to_settle(w: &mut SnackbarHostWidget, t0: f64, hold_ms: f64) -> f64 {
+        frame(w, t0);
+        frame(w, t0 + 350.0);
+        // Still held shortly before its own duration elapses.
+        // (the hold clock starts with the first frame, alongside the entrance)
+        if hold_ms >= 600.0 {
+            frame(w, t0 + hold_ms - 100.0);
+            assert!(!w.current.as_ref().unwrap().exiting, "own {hold_ms}ms hold");
+        }
+        frame(w, t0 + 350.0 + hold_ms + 100.0);
+        assert!(w.current.as_ref().unwrap().exiting);
+        frame(w, t0 + 350.0 + hold_ms + 150.0);
+        frame(w, t0 + 350.0 + hold_ms + 500.0);
+        assert!(w.current.is_none());
+        t0 + 350.0 + hold_ms + 500.0
+    }
+
+    #[test]
+    fn enqueued_messages_appear_one_after_another_with_their_own_durations() {
+        let controller: SnackbarController<Vec<u32>> = SnackbarController::new();
+        controller.enqueue(snackbar("one").duration(Duration::from_millis(100)));
+        controller.enqueue(snackbar("two").duration(Duration::from_millis(600)));
+        controller.enqueue(snackbar("three").duration(Duration::from_millis(100)));
+        assert_eq!(controller.queue_len(), 3);
+
+        let mut view = snackbar_host(&controller, probe(0).into_any());
+        let mut w = build(&view);
+        layout(&mut w);
+        assert_eq!(w.current.as_ref().unwrap().message, "one");
+        assert_eq!(controller.queue_len(), 2);
+
+        // A rebuild while "one" is visible must not promote "two".
+        view = rebuild_host(&controller, &view, &mut w);
+        assert_eq!(w.current.as_ref().unwrap().message, "one");
+
+        let t = run_to_settle(&mut w, 0.0, 100.0);
+        view = rebuild_host(&controller, &view, &mut w);
+        assert_eq!(w.current.as_ref().unwrap().message, "two");
+        assert_eq!(controller.queue_len(), 1);
+        layout(&mut w);
+
+        let t = run_to_settle(&mut w, t + 10.0, 600.0);
+        view = rebuild_host(&controller, &view, &mut w);
+        assert_eq!(w.current.as_ref().unwrap().message, "three");
+        assert_eq!(controller.queue_len(), 0);
+        layout(&mut w);
+
+        run_to_settle(&mut w, t + 10.0, 100.0);
+        rebuild_host(&controller, &view, &mut w);
+        assert!(w.current.is_none(), "queue drained");
+    }
+
+    #[test]
+    fn show_replaces_the_pending_slot_and_leaves_the_queue_intact() {
+        let controller: SnackbarController<Vec<u32>> = SnackbarController::new();
+        controller.show(snackbar("visible").duration(Duration::from_millis(100)));
+        let mut view = snackbar_host(&controller, probe(0).into_any());
+        let mut w = build(&view);
+        layout(&mut w);
+        assert_eq!(w.current.as_ref().unwrap().message, "visible");
+
+        controller.enqueue(snackbar("q1"));
+        controller.enqueue(snackbar("q2"));
+        controller.show(snackbar("slot-a"));
+        controller.show(snackbar("slot-b"));
+        assert_eq!(controller.queue_len(), 2, "show never touches the queue");
+
+        view = rebuild_host(&controller, &view, &mut w);
+        assert_eq!(w.current.as_ref().unwrap().message, "visible");
+
+        let t = run_to_settle(&mut w, 0.0, 100.0);
+        view = rebuild_host(&controller, &view, &mut w);
+        assert_eq!(
+            w.current.as_ref().unwrap().message,
+            "slot-b",
+            "the explicit slot (last show wins) is served before the queue"
+        );
+        assert_eq!(controller.queue_len(), 2);
+        layout(&mut w);
+
+        run_to_settle(&mut w, t + 10.0, 4000.0);
+        rebuild_host(&controller, &view, &mut w);
+        assert_eq!(w.current.as_ref().unwrap().message, "q1");
+        assert_eq!(controller.queue_len(), 1);
+    }
+
+    #[test]
+    fn clear_queue_drops_waiting_messages() {
+        let controller: SnackbarController<Vec<u32>> = SnackbarController::new();
+        controller.show(snackbar("visible").duration(Duration::from_millis(100)));
+        let mut view = snackbar_host(&controller, probe(0).into_any());
+        let mut w = build(&view);
+        layout(&mut w);
+        controller.enqueue(snackbar("q1"));
+        controller.enqueue(snackbar("q2"));
+        assert_eq!(controller.queue_len(), 2);
+
+        controller.clear_queue();
+        assert_eq!(controller.queue_len(), 0);
+
+        run_to_settle(&mut w, 0.0, 100.0);
+        view = rebuild_host(&controller, &view, &mut w);
+        let _ = view;
+        assert!(w.current.is_none(), "nothing left to promote");
+    }
+
+    #[test]
+    fn an_action_on_a_queued_message_fires_when_it_is_the_visible_one() {
+        let controller: SnackbarController<Vec<u32>> = SnackbarController::new();
+        controller.enqueue(snackbar("one").duration(Duration::from_millis(100)));
+        controller.enqueue(snackbar("two").action("Undo", |s: &mut Vec<u32>| s.push(7)));
+        let view = snackbar_host(&controller, probe(0).into_any());
+        let mut w = build(&view);
+        layout(&mut w);
+        let t = run_to_settle(&mut w, 0.0, 100.0);
+        rebuild_host(&controller, &view, &mut w);
+        assert_eq!(w.current.as_ref().unwrap().message, "two");
+        layout(&mut w);
+        frame(&mut w, t + 10.0);
+        frame(&mut w, t + 400.0);
+
+        let action_rect = w.current.as_ref().unwrap().action_rect.unwrap();
+        let bar_origin = w.current.as_ref().unwrap().bar_rect.origin();
+        let at = bar_origin + action_rect.center().to_vec2();
+        let mut state: Vec<u32> = Vec::new();
+        dispatch(&mut w, &mut state, &pointer(PointerPhase::Down, at.x, at.y));
+        dispatch(&mut w, &mut state, &pointer(PointerPhase::Up, at.x, at.y));
+        assert_eq!(state, vec![7], "the queued message's action fired once");
+        assert!(w.current.as_ref().unwrap().exiting);
     }
 
     // ---- Queue/replace ------------------------------------------------------
@@ -1699,5 +1924,112 @@ mod tests {
             (bar.center().x - 600.0).abs() < 1e-9,
             "centered, not edge-pinned"
         );
+    }
+
+    // ---- MaterialStrings: setter > ambient theme > English (close-icon a11y) -
+
+    fn thai_theme() -> Theme {
+        let mut theme = crate::baseline();
+        let mut thai = MaterialStrings::ENGLISH;
+        thai.snackbar_dismiss_a11y = "ปิด".into();
+        theme.extensions.insert(thai);
+        theme
+    }
+
+    /// Provides `theme` as the ambient `Theme` context (when set), then
+    /// creates the host so its close-icon name resolves from that context.
+    #[derive(Clone)]
+    struct StringsHost {
+        theme: Option<Theme>,
+        controller: SnackbarController<()>,
+    }
+
+    impl frust::Component for StringsHost {
+        type State = ();
+        fn init(&self) {}
+        fn build(&self, _state: &mut ()) -> impl View<()> {
+            if let Some(theme) = &self.theme {
+                frust::provide_context(theme.clone());
+            }
+            snackbar_host(
+                &self.controller,
+                frust_widgets::test_support::leaf_any(10.0, 10.0),
+            )
+        }
+    }
+
+    type StringsRoot = frust_core::RenderRoot<(), frust::ComponentView<StringsHost>>;
+
+    fn rebuild_strings(root: &mut StringsRoot, host: &StringsHost) {
+        let mut logic = |_: &mut ()| frust::component(host.clone());
+        root.rebuild(&mut logic, &mut ());
+    }
+
+    fn all_labels(root: &StringsRoot) -> Vec<String> {
+        root.semantics()
+            .nodes
+            .iter()
+            .filter_map(|(_, n)| n.label().map(str::to_string))
+            .collect()
+    }
+
+    /// The semantics labels of a dismissible message shown under a host
+    /// created with `theme` provided.
+    fn dismiss_labels(theme: Option<Theme>, label: Option<&str>) -> Vec<String> {
+        let controller = SnackbarController::<()>::new();
+        let mut msg = snackbar("Saved").dismissible();
+        if let Some(label) = label {
+            msg = msg.dismiss_label(label);
+        }
+        controller.show(msg);
+        let mut root = StringsRoot::new();
+        rebuild_strings(&mut root, &StringsHost { theme, controller });
+        let mut tcx = TextContext::new();
+        root.layout_with_text(WINDOW, &mut tcx as &mut dyn Any);
+        all_labels(&root)
+    }
+
+    #[test]
+    fn dismiss_a11y_defaults_to_english() {
+        let labels = dismiss_labels(None, None);
+        assert!(labels.iter().any(|l| l == "Dismiss"), "{labels:?}");
+    }
+
+    #[test]
+    fn dismiss_a11y_reads_the_provided_thai_strings() {
+        let labels = dismiss_labels(Some(thai_theme()), None);
+        assert!(labels.iter().any(|l| l == "ปิด"), "{labels:?}");
+        assert!(!labels.iter().any(|l| l == "Dismiss"));
+    }
+
+    #[test]
+    fn dismiss_label_setter_beats_the_theme_strings() {
+        let labels = dismiss_labels(Some(thai_theme()), Some("Shut"));
+        assert!(labels.iter().any(|l| l == "Shut"), "{labels:?}");
+        assert!(!labels.iter().any(|l| l == "ปิด"));
+    }
+
+    #[test]
+    fn showing_message_relabels_when_the_provided_theme_changes() {
+        let controller = SnackbarController::<()>::new();
+        controller.show(snackbar("Saved").dismissible());
+        let mut host = StringsHost {
+            theme: None,
+            controller,
+        };
+        let mut root = StringsRoot::new();
+        rebuild_strings(&mut root, &host);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(WINDOW, &mut tcx as &mut dyn Any);
+        let labels = all_labels(&root);
+        assert!(labels.iter().any(|l| l == "Dismiss"), "{labels:?}");
+
+        let generation = root.semantics_generation();
+        host.theme = Some(thai_theme());
+        rebuild_strings(&mut root, &host);
+        assert!(root.semantics_generation() > generation);
+        let labels = all_labels(&root);
+        assert!(labels.iter().any(|l| l == "ปิด"), "{labels:?}");
+        assert!(!labels.iter().any(|l| l == "Dismiss"));
     }
 }

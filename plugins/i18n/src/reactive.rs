@@ -42,6 +42,10 @@ pub struct I18n {
 
 struct Inner {
     engine: Engine,
+    /// The preferences store [`I18n::set_locale`] saves the choice into, when
+    /// the handle was built by [`I18n::with_persistence`].
+    #[cfg(feature = "persistence")]
+    prefs: Option<frust_shared_preferences::SharedPreferences>,
     /// The active (negotiated best-match) locale — the tracked signal every
     /// [`I18n::locale`]/[`I18n::t`]/[`Resolve::resolve_message`] call reads
     /// first, so a rebuild calling through any of them subscribes to
@@ -96,10 +100,25 @@ impl I18n {
     ///
     /// Same ambient-owner contract as [`I18n::new`].
     pub fn from_engine(engine: Engine, requested: &[Locale]) -> Self {
+        Self::build(
+            engine,
+            requested,
+            #[cfg(feature = "persistence")]
+            None,
+        )
+    }
+
+    fn build(
+        engine: Engine,
+        requested: &[Locale],
+        #[cfg(feature = "persistence")] prefs: Option<frust_shared_preferences::SharedPreferences>,
+    ) -> Self {
         let (active, chain) = negotiate_active(&engine, requested);
         Self {
             inner: Arc::new(Inner {
                 engine,
+                #[cfg(feature = "persistence")]
+                prefs,
                 locale: RwSignal::new(active),
                 chain: Mutex::new(chain),
                 requested: Mutex::new(requested.to_vec()),
@@ -154,16 +173,19 @@ impl I18n {
     ///    defaults, first day of week — **and, surprisingly, the calendar
     ///    system**: ICU4X's calendar default is keyed off the *region*, not
     ///    the language, so `en-TH` still renders a Buddhist-era year
-    ///    (`"January 31, 2567 BE"`, not `"...2024"`) even though every
-    ///    month/weekday name is English — verified empirically, this crate's
-    ///    own `fmt::datetime` module doc's "`th` is Buddhist" framing is
-    ///    language-shaped prose for a region-driven fact). This branch
-    ///    **never** adopts a requested tag's *language* — an app with no
-    ///    Thai `.ftl` catalog must never render UI text the user can't read,
-    ///    so only the region crosses the boundary; the calendar-system
-    ///    surprise above is the one place that boundary still lets through
-    ///    something visibly non-Western, worth a caller's attention before
-    ///    shipping a date-heavy screen behind this branch. Every in-message
+    ///    (`"Oct 13, 2569 BE"`, not `"Oct 13, 2026"`) even though every
+    ///    month/weekday name is English. A bare `th` tag (no region) is
+    ///    already Gregorian, so only region-bearing tags such as `th-TH` and
+    ///    `en-TH` are affected. Pass
+    ///    `DateTimeOptions { calendar: Some(Calendar::Gregorian), .. }` to
+    ///    `fmt::date_with` (or `calendar: "gregory"` to `DATETIME()`) to pin
+    ///    Gregorian years. This branch **never** adopts a requested tag's
+    ///    *language* — an app with no Thai `.ftl` catalog must never render
+    ///    UI text the user can't read, so only the region crosses the
+    ///    boundary; the calendar-system surprise above is the one place that
+    ///    boundary still lets through something visibly non-Western, worth a
+    ///    caller's attention before shipping a date-heavy screen behind this
+    ///    branch. Every in-message
     ///    `NUMBER()`/`DATETIME()` Fluent placeable formats at the *message*
     ///    locale's own language, never `format_locale`'s composed region —
     ///    see §4e of this crate's README for why, and `docs/LIMITATIONS.md`
@@ -235,6 +257,8 @@ impl I18n {
             requested
         };
 
+        #[cfg(feature = "persistence")]
+        let requested_tag = requested.clone();
         let (active, chain) =
             negotiate_active(&self.inner.engine, std::slice::from_ref(&requested));
         *self.inner.chain.lock().unwrap_or_else(|e| e.into_inner()) = chain;
@@ -243,7 +267,28 @@ impl I18n {
             .requested
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = vec![requested];
+        #[cfg(feature = "persistence")]
+        if let Some(prefs) = &self.inner.prefs {
+            crate::persist::save(prefs, &requested_tag);
+        }
         self.inner.locale.set(active);
+    }
+
+    /// A persistence-backed handle: [`Engine`] built from `set`, the store
+    /// attached for [`I18n::set_locale`] to save into.
+    #[cfg(feature = "persistence")]
+    pub(crate) fn persistent(
+        engine: Engine,
+        requested: &[Locale],
+        prefs: frust_shared_preferences::SharedPreferences,
+    ) -> Self {
+        Self::build(engine, requested, Some(prefs))
+    }
+
+    /// The store this handle saves into, if it has one.
+    #[cfg(feature = "persistence")]
+    pub(crate) fn prefs(&self) -> Option<&frust_shared_preferences::SharedPreferences> {
+        self.inner.prefs.as_ref()
     }
 
     /// Formats `key` with no arguments — shorthand for

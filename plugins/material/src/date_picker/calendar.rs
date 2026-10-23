@@ -100,6 +100,7 @@ use crate::dropdown::Glyph;
 use crate::interaction::{HapticSignal, MaterialHaptics};
 use crate::press::presses;
 use crate::state_layer::StateLayer;
+use crate::strings::MaterialStrings;
 use crate::tokens::MaterialMotion;
 
 /// The day number's type role (M3 `bodyMedium`, `M3EDatePickerTheme.dayStyle`).
@@ -204,7 +205,7 @@ pub struct CalendarDatePicker<State: 'static> {
     last_date: MaterialDate,
     today: Option<MaterialDate>,
     range: Option<DateRange>,
-    strings: DatePickerStrings,
+    strings: Option<DatePickerStrings>,
     selectable: Option<SelectableDay>,
     on_change: TypedArgCallback<State, DatePickerState>,
 }
@@ -246,7 +247,7 @@ where
         last_date,
         today: None,
         range: None,
-        strings: DatePickerStrings::ENGLISH,
+        strings: None,
         selectable: None,
         on_change: Rc::new(on_change),
     }
@@ -275,10 +276,11 @@ impl<State: 'static> CalendarDatePicker<State> {
         self
     }
 
-    /// Replace the localized strings and the first-day-of-week index (default
-    /// [`DatePickerStrings::ENGLISH`]).
+    /// Replace the localized strings and the first-day-of-week index. Without
+    /// this the ambient theme's [`MaterialStrings`] date-picker table applies
+    /// (English by default).
     pub fn strings(mut self, strings: DatePickerStrings) -> Self {
-        self.strings = strings;
+        self.strings = Some(strings);
         self
     }
 
@@ -288,6 +290,16 @@ impl<State: 'static> CalendarDatePicker<State> {
     pub fn selectable<F: Fn(MaterialDate) -> bool + 'static>(mut self, predicate: F) -> Self {
         self.selectable = Some(Rc::new(predicate));
         self
+    }
+}
+
+impl<State: 'static> CalendarDatePicker<State> {
+    /// The strings in force: the [`strings`](Self::strings) override, else the
+    /// ambient theme's [`MaterialStrings`] date-picker table (English without
+    /// a theme).
+    fn active_strings(&self) -> DatePickerStrings {
+        self.strings
+            .unwrap_or_else(|| MaterialStrings::from_build_context().date_picker)
     }
 }
 
@@ -301,7 +313,7 @@ impl<State: 'static> View<State> for CalendarDatePicker<State> {
             last_date: self.last_date,
             today: self.today,
             range: self.range,
-            strings: self.strings,
+            strings: self.active_strings(),
             selectable: self.selectable.clone(),
             on_change: erase_callback_arg(&self.on_change),
             runs: Runs::new(),
@@ -363,8 +375,9 @@ impl<State: 'static> View<State> for CalendarDatePicker<State> {
             element.range = self.range;
             flags |= ChangeFlags::PAINT;
         }
-        if prev.strings != self.strings {
-            element.strings = self.strings;
+        let strings = self.active_strings();
+        if element.strings != strings {
+            element.strings = strings;
             element.runs.invalidate_all();
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
@@ -756,7 +769,7 @@ impl<State: 'static> CalendarDatePicker<State> {
             &self.state,
             self.first_date,
             self.last_date,
-            self.strings.first_day_of_week,
+            self.active_strings().first_day_of_week,
         )
     }
 }
@@ -2282,5 +2295,129 @@ mod tests {
         // Every cell carries its own bounds, not the grid's.
         let twelfth = node_for("12").bounds().expect("a day node has bounds");
         assert!(twelfth.x1 - twelfth.x0 < 350.0);
+    }
+
+    // ---- MaterialStrings: setter > ambient theme > English ------------------
+
+    mod strings {
+        use super::*;
+        use crate::strings::MaterialStrings;
+        use frust::authoring::{AnyView, any};
+
+        const THAI_MONTHS: [&str; 12] = [
+            "มกราคม",
+            "กุมภาพันธ์",
+            "มีนาคม",
+            "เมษายน",
+            "พฤษภาคม",
+            "มิถุนายน",
+            "กรกฎาคม",
+            "สิงหาคม",
+            "กันยายน",
+            "ตุลาคม",
+            "พฤศจิกายน",
+            "ธันวาคม",
+        ];
+
+        fn thai_table() -> DatePickerStrings {
+            DatePickerStrings {
+                months: THAI_MONTHS,
+                ..DatePickerStrings::ENGLISH
+            }
+        }
+
+        fn thai_theme() -> frust::Theme {
+            let mut theme = crate::baseline();
+            let mut thai = MaterialStrings::ENGLISH;
+            thai.date_picker = thai_table();
+            theme.extensions.insert(thai);
+            theme
+        }
+
+        /// Provides `theme` as the ambient `Theme` context (when set), then
+        /// builds the calendar so build-time `use_context` resolves.
+        struct Host {
+            theme: Option<frust::Theme>,
+            make: std::rc::Rc<dyn Fn() -> AnyView<()>>,
+        }
+        impl frust::Component for Host {
+            type State = ();
+            fn init(&self) {}
+            fn build(&self, _state: &mut ()) -> impl View<()> {
+                if let Some(theme) = &self.theme {
+                    frust::provide_context(theme.clone());
+                }
+                (self.make)()
+            }
+        }
+
+        fn group_label(
+            theme: Option<frust::Theme>,
+            make: std::rc::Rc<dyn Fn() -> AnyView<()>>,
+        ) -> String {
+            let mut root: frust_core::RenderRoot<(), frust::ComponentView<Host>> =
+                frust_core::RenderRoot::new();
+            let mut logic = move |_: &mut ()| {
+                frust::component(Host {
+                    theme: theme.clone(),
+                    make: make.clone(),
+                })
+            };
+            let mut state = ();
+            root.rebuild(&mut logic, &mut state);
+            let mut tcx = TextContext::new();
+            root.layout_with_text(Size::new(350.0, 700.0), &mut tcx as &mut dyn Any);
+            root.semantics()
+                .nodes
+                .iter()
+                .find(|(_, n)| n.role() == Role::Group)
+                .and_then(|(_, n)| n.label().map(str::to_string))
+                .expect("the grid contributes a labelled group")
+        }
+
+        fn calendar() -> CalendarDatePicker<()> {
+            calendar_date_picker(
+                DatePickerState::new(None, MaterialDate::new(2026, 5, 10)),
+                MaterialDate::new(2026, 5, 10),
+                MaterialDate::new(2026, 5, 20),
+                |_: &mut (), _| {},
+            )
+        }
+        fn plain() -> impl View<()> {
+            calendar()
+        }
+        fn with_override() -> impl View<()> {
+            calendar().strings(DatePickerStrings {
+                months: ["Override"; 12],
+                ..DatePickerStrings::ENGLISH
+            })
+        }
+
+        #[test]
+        fn defaults_to_english_month_names() {
+            assert_eq!(
+                group_label(None, std::rc::Rc::new(|| any(plain()))),
+                "May 2026"
+            );
+        }
+
+        #[test]
+        fn thai_theme_changes_the_month_name_in_the_grid_semantics() {
+            assert_eq!(
+                group_label(Some(thai_theme()), std::rc::Rc::new(|| any(plain()))),
+                "พฤษภาคม 2026"
+            );
+        }
+
+        #[test]
+        fn strings_override_beats_the_theme_table() {
+            assert_eq!(
+                group_label(
+                    Some(thai_theme()),
+                    std::rc::Rc::new(|| any(with_override()))
+                ),
+                "Override 2026"
+            );
+        }
     }
 }

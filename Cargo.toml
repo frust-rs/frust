@@ -2,7 +2,7 @@
 resolver = "3"
 # Members are `crates/*`, `examples/*` and the explicitly listed `plugins/*` crates: no glob reaches
 # `plugins/` (or nested `plugins/i18n/macros`), and `benchmarks/` sits outside every member glob.
-members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage", "plugins/camera", "plugins/native-widgets", "plugins/clipboard", "plugins/haptics", "plugins/url-launcher", "plugins/auth-session", "plugins/oauth-native", "plugins/iap", "plugins/database", "plugins/i18n", "plugins/i18n/macros", "plugins/video-player", "plugins/beui", "plugins/cupertino", "plugins/glyph", "plugins/material", "plugins/shadcn", "plugins/network-image", "plugins/share", "plugins/qr", "plugins/file-dialogs"]
+members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage", "plugins/camera", "plugins/native-widgets", "plugins/clipboard", "plugins/haptics", "plugins/url-launcher", "plugins/auth-session", "plugins/oauth-native", "plugins/iap", "plugins/database", "plugins/i18n", "plugins/i18n/macros", "plugins/video-player", "plugins/beui", "plugins/cupertino", "plugins/glyph", "plugins/material", "plugins/shadcn", "plugins/network-image", "plugins/share", "plugins/qr", "plugins/file-dialogs", "plugins/material-i18n"]
 # Standalone workspaces (gate each from its dir). huddle, plugins/clean-signals-frust: keep crates.io clean-signals
 # out of the root graph (Version-Pin Policy); hotpatch-spike: dx/subsecond pins likewise. shadertoy, glyph-catalog,
 # playground, material3-demo, native-widgets-demo: `frust create` scaffolds. design-system-sample: facade-only. web-*: wasm-only.
@@ -170,6 +170,7 @@ trybuild = "1"
 icu_decimal = "2.2"
 icu_datetime = "2.2"
 icu_plurals = "2.2"
+icu_list = "2.2"
 # Exact pin: an explicitly unstable pre-1.0 crate; 0.5.0 still resolves to the 2.2.x components
 # above (0.6.0 would pull 2.3.x).
 icu_experimental = "=0.5.0"
@@ -184,6 +185,9 @@ tinystr = "0.8"
 icu_provider = { version = "2.3", default-features = false, features = ["sync"] }
 # Exact pin: a small, young surface with no minor-version stability record.
 sys-locale = "=0.3.2"
+# frust-i18n zoned formatting only. Bundled tzdb: mobile targets have no reliable system zoneinfo.
+# MSRV 1.70.
+jiff = { version = "0.2.38", default-features = false, features = ["std", "tzdb-bundle-always"] }
 # reactive stack (frust-reactive) — do not add reactive_graph's `effects`
 # feature anywhere (see docs/DEVELOPMENT.md's Version-Pin Policy)
 reactive_graph = "0.2"
