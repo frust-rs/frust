@@ -2496,6 +2496,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "frust-material-i18n"
+version = "0.6.3"
+dependencies = [
+ "frust-core",
+ "frust-i18n",
+ "frust-material",
+ "frust-reactive",
+ "frust-ui",
+ "frust-widgets",
+ "icu_datetime",
+ "icu_locale_core",
+]
+
+[[package]]
 name = "frust-mcp"
 version = "0.6.3"
 dependencies = [

@@ -2,7 +2,7 @@
 resolver = "3"
 # Members are `crates/*`, `examples/*` and the explicitly listed `plugins/*` crates: no glob reaches
 # `plugins/` (or nested `plugins/i18n/macros`), and `benchmarks/` sits outside every member glob.
-members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage", "plugins/camera", "plugins/native-widgets", "plugins/clipboard", "plugins/haptics", "plugins/url-launcher", "plugins/auth-session", "plugins/oauth-native", "plugins/iap", "plugins/database", "plugins/i18n", "plugins/i18n/macros", "plugins/video-player", "plugins/beui", "plugins/cupertino", "plugins/glyph", "plugins/material", "plugins/shadcn", "plugins/network-image", "plugins/share", "plugins/qr", "plugins/file-dialogs"]
+members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage", "plugins/camera", "plugins/native-widgets", "plugins/clipboard", "plugins/haptics", "plugins/url-launcher", "plugins/auth-session", "plugins/oauth-native", "plugins/iap", "plugins/database", "plugins/i18n", "plugins/i18n/macros", "plugins/video-player", "plugins/beui", "plugins/cupertino", "plugins/glyph", "plugins/material", "plugins/shadcn", "plugins/network-image", "plugins/share", "plugins/qr", "plugins/file-dialogs", "plugins/material-i18n"]
 # Standalone workspaces (gate each from its dir). huddle, plugins/clean-signals-frust: keep crates.io clean-signals
 # out of the root graph (Version-Pin Policy); hotpatch-spike: dx/subsecond pins likewise. shadertoy, glyph-catalog,
 # playground, material3-demo, native-widgets-demo: `frust create` scaffolds. design-system-sample: facade-only. web-*: wasm-only.
