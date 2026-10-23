@@ -3813,8 +3813,18 @@ where
             // The adapter saw it above; app code needs the new `focused` flag, and a focus
             // change produces no frame of its own.
             WindowEvent::Focused(_) => {
-                self.publish_window_state();
-                window.request_redraw();
+                if self.publish_window_state() {
+                    window.request_redraw();
+                }
+            }
+
+            // macOS reports miniaturize and restore as occlusion, not as a resize, so
+            // `minimized` is republished here; a redraw only when the state changed.
+            WindowEvent::Occluded(_) => {
+                let changed = self.publish_window_state();
+                if changed {
+                    window.request_redraw();
+                }
             }
 
             _ => {}

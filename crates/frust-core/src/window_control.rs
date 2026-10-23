@@ -1,7 +1,7 @@
 //! The window-control vocabulary an app-drawn title bar uses: [`WindowCommand`], [`ResizeEdge`],
 //! the process-global queue [`push_window_command`] fills, and the [`WindowState`] context.
-//! The desktop shell drains the queue after each input dispatch and once per frame. It is not
-//! pass-scoped, so a push from outside an event pass is kept. Other shells never drain it.
+//! The desktop shell drains the queue after each input dispatch and once per frame; other shells
+//! never drain it.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,8 +22,7 @@ pub enum ResizeEdge {
     NorthWest,
 }
 
-/// A request to the desktop shell about its window. Not `#[non_exhaustive]`, so the shell's
-/// exhaustive match fails to compile when a variant is added.
+/// A request to the desktop shell about its window; not `#[non_exhaustive]` by design.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowCommand {
     /// Start the OS move drag; push it from a primary pointer-down (macOS needs that event).
@@ -65,17 +64,23 @@ impl WindowState {
     }
 }
 
-/// Pending commands, oldest first.
 static QUEUE: Mutex<Vec<WindowCommand>> = Mutex::new(Vec::new());
 
 /// Latched after the first overflow warning, so a flood logs one line.
 static OVERFLOW_WARNED: AtomicBool = AtomicBool::new(false);
 
-/// Queue a command for the next drain. Past the cap, the oldest command is dropped.
+/// Queue a command for the next drain. Past the cap, the oldest non-`RequestClose` command is
+/// dropped. The queue serves the one desktop window (no window id; multi-window is out of scope),
+/// so push from UI-thread contexts. A push does not wake the event loop: it runs at the end of
+/// the current input dispatch or the next frame, so a cross-thread push waits for either.
 pub fn push_window_command(command: WindowCommand) {
     let mut queue = QUEUE.lock().unwrap_or_else(|e| e.into_inner());
     if queue.len() >= WINDOW_COMMAND_CAP {
-        queue.remove(0);
+        let victim = queue
+            .iter()
+            .position(|queued| *queued != WindowCommand::RequestClose)
+            .unwrap_or(0);
+        queue.remove(victim);
         if !OVERFLOW_WARNED.swap(true, Ordering::Relaxed) {
             log::warn!(
                 "frust-core: more than {WINDOW_COMMAND_CAP} window commands are queued and \
@@ -159,6 +164,30 @@ mod tests {
         assert!(
             OVERFLOW_WARNED.load(Ordering::Relaxed),
             "the overflow warning latches once the cap is exceeded"
+        );
+    }
+
+    #[test]
+    fn a_request_close_pushed_first_survives_later_overflow() {
+        let _guard = lock_and_drain();
+        push_window_command(WindowCommand::RequestClose);
+        for _ in 0..40 {
+            push_window_command(WindowCommand::ToggleMaximized);
+        }
+
+        let drained = take_window_commands();
+        assert_eq!(drained.len(), WINDOW_COMMAND_CAP);
+        assert_eq!(
+            drained.first(),
+            Some(&WindowCommand::RequestClose),
+            "the close is kept while the oldest non-close commands are evicted"
+        );
+        assert_eq!(
+            drained
+                .iter()
+                .filter(|c| **c == WindowCommand::RequestClose)
+                .count(),
+            1
         );
     }
 
