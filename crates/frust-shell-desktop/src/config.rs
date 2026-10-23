@@ -5,7 +5,8 @@
 //! Everything here is plain data — no `winit`, no platform types, no behavior.
 //! The core consumes the window title ([`DesktopConfig::app_name`]) and the
 //! window geometry fields (initial/min/max size, opt-in window-state
-//! persistence); the rest exists so a per-OS shell can read one config
+//! persistence) and the frame style ([`DesktopConfig::decorations`]);
+//! [`DesktopConfig::title_buttons`] is carried for the macOS shell; the rest exists so a per-OS shell can read one config
 //! rather than inventing its own (`app_id` becomes a Wayland `app_id`/X11
 //! `WM_CLASS` or a Windows AppUserModelID; `window_icon` becomes an
 //! `NSApplication` icon / `HICON` / X11 icon; `menu_spec` becomes an NSApp menu
@@ -87,6 +88,54 @@ pub struct DesktopConfig {
     /// (`false` by default); a restored position that no longer lands on any
     /// connected monitor is dropped and the OS places the window instead.
     pub persist_window_state: bool,
+    /// How much OS window frame the app wants (see [`Decorations`]). Defaults
+    /// to [`Decorations::Full`], so the zero-config window is unchanged.
+    pub decorations: Decorations,
+    /// Where macOS places the standard window buttons under
+    /// [`Decorations::NoTitleBar`] (see [`TitleButtons`]). `None` (the default)
+    /// leaves them at the OS position; ignored on other OSes.
+    pub title_buttons: Option<TitleButtons>,
+}
+
+/// How much OS window frame the app wants. Creation-time only: there is no
+/// runtime setter in this release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Decorations {
+    /// The OS draws the frame (today's behaviour).
+    #[default]
+    Full,
+    /// The OS draws nothing; the app supplies the title bar, move/resize
+    /// gestures and window controls (every OS).
+    None,
+    /// macOS keeps the frame, shadow, resize edges and the traffic lights but
+    /// omits the title bar and lets content extend under it, so the app draws
+    /// a bar around the buttons. Every other OS treats it exactly as
+    /// [`Decorations::None`].
+    NoTitleBar,
+}
+
+/// Placement of the macOS window buttons, in logical pixels. macOS only;
+/// ignored elsewhere and unless decorations are [`Decorations::NoTitleBar`].
+///
+/// The close button's left edge sits `leading` from the window's left edge and
+/// the three buttons are centred vertically in a `band_height`-tall band at the
+/// top of the window.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TitleButtons {
+    /// Distance from the window's left edge to the close button's left edge.
+    pub leading: f64,
+    /// Height of the band, at the top of the window, the buttons are centred in.
+    pub band_height: f64,
+}
+
+impl TitleButtons {
+    /// Buttons `leading` px from the left edge, centred in a `band_height` band.
+    pub fn new(leading: f64, band_height: f64) -> Self {
+        Self {
+            leading,
+            band_height,
+        }
+    }
 }
 
 impl Default for DesktopConfig {
@@ -105,6 +154,8 @@ impl Default for DesktopConfig {
             min_size: None,
             max_size: None,
             persist_window_state: false,
+            decorations: Decorations::Full,
+            title_buttons: None,
         }
     }
 }
@@ -170,6 +221,18 @@ impl DesktopConfig {
     /// [`persist_window_state`](DesktopConfig::persist_window_state)).
     pub fn with_persist_window_state(mut self, persist: bool) -> Self {
         self.persist_window_state = persist;
+        self
+    }
+
+    /// Set the window frame style (see [`Decorations`]).
+    pub fn with_decorations(mut self, decorations: Decorations) -> Self {
+        self.decorations = decorations;
+        self
+    }
+
+    /// Set the macOS window-button placement (see [`TitleButtons`]).
+    pub fn with_title_buttons(mut self, buttons: TitleButtons) -> Self {
+        self.title_buttons = Some(buttons);
         self
     }
 
@@ -486,6 +549,8 @@ mod tests {
         assert_eq!(config.min_size, None);
         assert_eq!(config.max_size, None);
         assert!(!config.persist_window_state, "persistence is opt-in");
+        assert_eq!(config.decorations, Decorations::Full);
+        assert_eq!(config.title_buttons, None);
         assert_eq!(DesktopConfig::new(), config);
     }
 
@@ -517,8 +582,12 @@ mod tests {
             .with_app_id("dev.frust.huddle")
             .with_window_icon(icon.clone())
             .with_menu_spec(MenuSpec::new().with_item(MenuItemSpec::role(MenuRole::Quit)))
-            .with_quit_on_last_window_closed(false);
+            .with_quit_on_last_window_closed(false)
+            .with_decorations(Decorations::NoTitleBar)
+            .with_title_buttons(TitleButtons::new(12.0, 40.0));
 
+        assert_eq!(config.decorations, Decorations::NoTitleBar);
+        assert_eq!(config.title_buttons, Some(TitleButtons::new(12.0, 40.0)));
         assert_eq!(config.app_id.as_deref(), Some("dev.frust.huddle"));
         assert_eq!(config.window_icon, Some(icon));
         assert_eq!(config.menu_spec.map(|m| m.items.len()), Some(1));

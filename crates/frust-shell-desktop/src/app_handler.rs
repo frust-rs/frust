@@ -80,7 +80,7 @@ use winit::window::{
     WindowId,
 };
 
-use crate::config::DesktopConfig;
+use crate::config::{Decorations, DesktopConfig};
 use crate::extensions::{CloseAction, DesktopExtensions, NoExtensions};
 use crate::paced_wake::{
     ControlFlowIntent, next_paced_wake, paced_wake_action, schedule_present_retry,
@@ -1214,6 +1214,29 @@ fn apply_window_size(
     }
 }
 
+/// Applies the configured [`Decorations`] to an in-progress
+/// [`WindowAttributes`]. `Full` leaves them untouched; `None` drops the OS
+/// frame; `NoTitleBar` keeps the frame on macOS but makes the title bar
+/// transparent with content extending under it and the title hidden, and acts
+/// as `None` on every other OS. A free function so it is unit-testable
+/// host-side.
+fn apply_decorations(attributes: WindowAttributes, decorations: Decorations) -> WindowAttributes {
+    match decorations {
+        Decorations::Full => attributes,
+        Decorations::None => attributes.with_decorations(false),
+        #[cfg(target_os = "macos")]
+        Decorations::NoTitleBar => {
+            use winit::platform::macos::WindowAttributesExtMacOS;
+            attributes
+                .with_titlebar_transparent(true)
+                .with_fullsize_content_view(true)
+                .with_title_hidden(true)
+        }
+        #[cfg(not(target_os = "macos"))]
+        Decorations::NoTitleBar => attributes.with_decorations(false),
+    }
+}
+
 /// The window's creation geometry after precedence (see [`window_attributes`]).
 fn creation_geometry(config: &DesktopConfig, persisted: Option<&WindowState>) -> InitialGeometry {
     let knobs = window_size_config();
@@ -1246,6 +1269,8 @@ fn creation_geometry(config: &DesktopConfig, persisted: Option<&WindowState>) ->
 ///   [`WINDOW_SIZE_VAR`]/[`WINDOW_MAXIMIZED_VAR`] measurement knobs, each
 ///   overriding only its own field (see `window_state::initial_geometry`);
 /// * the config's min/max inner size, logical pixels;
+/// * the frame style, from [`DesktopConfig::decorations`] (see
+///   [`apply_decorations`]);
 /// * `visible(false)` — the accessibility adapter must be constructed before
 ///   the window is ever shown (see [`Adapter::with_event_loop_proxy`]'s
 ///   contract), so `resumed` makes it visible itself once that is done.
@@ -1277,6 +1302,7 @@ fn window_attributes(
     if let Some(max) = config.max_size.filter(valid) {
         attributes = attributes.with_max_inner_size(LogicalSize::new(max.width, max.height));
     }
+    attributes = apply_decorations(attributes, config.decorations);
     extensions.on_window_attributes(attributes)
 }
 
@@ -3767,6 +3793,7 @@ mod tests {
         paste_input_event, physical_to_logical, resolved_window_knob, theme_after_override_poll,
         wheel_zoom_chord_held, window_attributes, winit_cursor_for,
     };
+    use crate::config::Decorations;
     use frust_core::SemanticsUpdate;
     use frust_core::accesskit::{
         Affine as AccessKitAffine, Node, NodeId, Rect as AccessKitRect, Role,
@@ -5749,6 +5776,40 @@ mod tests {
             "the window must be created hidden — the accessibility adapter is \
              constructed before it is shown"
         );
+    }
+
+    #[test]
+    fn window_attributes_keep_decorations_by_default() {
+        let attributes = window_attributes(&DesktopConfig::default(), None, &mut NoExtensions);
+        assert!(attributes.decorations);
+    }
+
+    #[test]
+    fn window_attributes_drop_decorations_for_none() {
+        let config = DesktopConfig::new().with_decorations(Decorations::None);
+        let attributes = window_attributes(&config, None, &mut NoExtensions);
+        assert!(!attributes.decorations);
+    }
+
+    /// The macOS extension fields are `pub(crate)` in winit and cannot be
+    /// asserted host-side; the macOS arm is left to the Mac gate.
+    #[test]
+    fn window_attributes_map_no_title_bar_per_platform() {
+        let config = DesktopConfig::new().with_decorations(Decorations::NoTitleBar);
+        let attributes = window_attributes(&config, None, &mut NoExtensions);
+        #[cfg(not(target_os = "macos"))]
+        assert!(!attributes.decorations);
+        #[cfg(target_os = "macos")]
+        assert!(attributes.decorations);
+    }
+
+    #[test]
+    fn window_attributes_apply_decorations_before_the_extension_hook() {
+        let mut extensions = SpyExtensions::default();
+        let config = DesktopConfig::new().with_decorations(Decorations::None);
+        let attributes = window_attributes(&config, None, &mut extensions);
+        assert_eq!(extensions.attributes_calls, 1);
+        assert!(!attributes.decorations);
     }
 
     #[test]
