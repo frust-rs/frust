@@ -510,11 +510,34 @@ an error — these run on a UI's formatting path, potentially every frame.
 
 ---
 
-## 5. Persistence recipe — restoring a user's chosen locale
+## 5. Persistence — restoring a user's chosen locale
 
-`I18n` holds the active locale in memory only; nothing in this crate persists a choice across
-a kill/relaunch. Pair it with `frust-shared-preferences` — no new machinery, just this crate's
-existing API plus that plugin's:
+`I18n` holds the active locale in memory only. Two ways to keep a choice across a
+kill/relaunch, both on `frust-shared-preferences`.
+
+### With the `persistence` feature
+
+Enable `persistence` (§7) and build the handle with `I18n::with_persistence`:
+
+```rust
+use frust_i18n::{I18n, provide_i18n, system_locales};
+use frust_shared_preferences::SharedPreferences;
+
+let prefs = SharedPreferences::standard()?;
+let i18n = I18n::with_persistence(locale_set(), &system_locales()?, prefs)?;
+provide_i18n(i18n.clone());
+```
+
+A tag saved under the key `frust_i18n.locale` is prepended to the requested list, so it
+wins over the system locales; with nothing saved (or an unparsable value) the system list
+decides. Every later `set_locale` saves the tag it negotiated against — the composed
+region-qualified tag when a region was retained (§4c), so a Swiss German user who picks
+"Deutsch" comes back as `de-CH`. A failed save is logged at `warn` and never fatal.
+`persisted_locale(&prefs)` reads the saved value without building a handle, and
+`i18n.clear_persisted_locale()` removes it so the next launch follows the system again.
+`persistence` implies `frust-api`.
+
+### Without the feature (recipe)
 
 Assumes `frust_i18n::locales!("locales");` was invoked at the crate root, as in §2 — so
 `locale_set()` below is that module's generated function, unqualified:
@@ -613,6 +636,7 @@ on resume) and calls `I18n::set_locale`. This is a v1 scope line, not a bug — 
 | Feature | Default | Gates |
 |---|---|---|
 | `frust-api` | on | The reactive `I18n` handle, `provide_i18n`/`use_i18n`/`expect_i18n`/`active_locale` (§4c) — pulls in the `frust` facade. |
+| `persistence` | off | `I18n::with_persistence`, `persisted_locale`, `clear_persisted_locale` (§5) — pulls in `frust-shared-preferences` and implies `frust-api`. |
 | `formatting` | on | `fmt::` — ICU4X decimal/percent/currency/date/time formatting plus the `NUMBER`/`DATETIME` Fluent functions (§4e) — pulls in `icu_decimal`/`icu_datetime`/`icu_plurals`/`icu_experimental` and their support crates. |
 
 Independently toggleable — all four combinations (default, `--no-default-features`,
