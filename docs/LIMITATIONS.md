@@ -2322,6 +2322,10 @@ in-process notification is delivered either way.
 **Applies to**: every platform. A shell-forwarded locale-change event (the seam an app could
 subscribe through instead of polling) is deferred, not shipped.
 
+The same surprise applies to the calendar: the `en-TH` Buddhist-era year is keyed on the TH
+region (a bare `th` is Gregorian), and a call can now override it with
+`DateTimeOptions { calendar: Some(Calendar::Gregorian), .. }` or `DATETIME(calendar: "gregory")`.
+
 **Why accepted**: v1 scope — detection is a deliberately uncached, re-query-on-demand read
 (`src/detect/mod.rs`'s module doc), and no platform event is plumbed through any shell yet. An
 app that wants to react to a live change polls `system_locales()` itself (e.g. on resume) and
@@ -2365,6 +2369,10 @@ minor-unit-digit lookup a caller can query.
 digit-count change, or a move into/out of either table) needs a manual update to keep
 rendering correct.
 
+`fmt::currency_minor(&Locale, i64, iso)` shares the same `ZERO_DIGIT`/`THREE_DIGIT` tables and is
+exact for any `i64`; in FTL, `NUMBER` takes the integer as a string positional with
+`minorUnits: "true"` for that exact path.
+
 **Why accepted**: `icu_experimental`'s own crate doc calls its whole surface unstable, and no
 minor-unit API exists yet to delegate to instead. The maintenance cost is bounded — both
 tables are short, CLDR's minor-unit exceptions change rarely — and is reassessed the day the
@@ -2389,6 +2397,11 @@ key. For messages present in the active bundle, region-level conventions still d
 from `format_locale` — an `en-GB` user of an `en`-only app sees `Jan 31, 2024` (US date
 order) inside messages, but `31 Jan 2024` (UK date order) from direct `frust_i18n::fmt::date`
 calls.
+
+The constraint covers every FTL option too: `DATETIME`'s `timeZone`/`calendar`/`hourCycle`,
+`NUMBER`'s `minimumFractionDigits`/`maximumFractionDigits`/`notation`/`compactDisplay`/
+`useGrouping`/`minorUnits`, and the `RELATIVE_DAY` and `LIST` functions all format at the
+resolving bundle's locale.
 
 **Mechanism**: ICU Fluent functions (`NUMBER`/`DATETIME`) are registered once per bundle
 locale during `Engine::new` via `LocaleSet::with_locale_function`, with each closure
@@ -5525,34 +5538,23 @@ bullet); confirmed in review as a major finding.
 
 ---
 
-### `material-picker-strings-no-i18n-seam` — the date/time pickers ship English-default strings with no path to a real locale
+### `material-picker-strings-no-i18n-seam` — the date picker's typed-entry mode is a fixed `mm/dd/yyyy`
 
-**Observed**: `frust_material::date_picker` and `time_picker` take every label, weekday name, and
-the first-day-of-week index from a caller-fillable `DatePickerStrings`/`TimePickerStrings` struct,
-defaulted to `DatePickerStrings::ENGLISH`/`TimePickerStrings::default()` (Flutter
-`MaterialLocalizations`' own `en_US` values). This is an *adaptation* of the reference's
-localization, not a port of it: a design-system plugin may not depend on a sibling plugin
-(`docs/PLUGINS_ARCHITECTURE.md`'s Layer Dependencies), so `frust-i18n` is out of reach from
-`plugins/material`, and there is no seam connecting one to the other even at the app layer. The date
-picker's input-mode parse/format (`MaterialDate::format_compact`, `mm/dd/yyyy`) is narrower still:
-it is the fixed `en_US` compact form, and **not overridable in v1** even via the strings struct —
-unlike every other label, a non-`mm/dd/yyyy` input format cannot be substituted at all.
+**Observed**: the date and time pickers take their labels, month and weekday names and the
+first-day-of-week index from the theme's `MaterialStrings`, and `frust-material-i18n` provides
+localized tables (months and weekdays from CLDR). What is not localized is the date picker's
+input-mode parse/format (`MaterialDate::format_compact`, `mm/dd/yyyy`): it is the fixed `en_US`
+compact form and is not overridable through the strings struct, so a non-US app's typed-entry
+mode still reads and writes `mm/dd/yyyy`.
 
-**Applies to**: any app shipping `frust_material::date_picker`/`time_picker` in a non-English
-locale. An app translates the label surface itself (`..DatePickerStrings::ENGLISH`/
-`TimePickerStrings::default()` for the fields it doesn't override) and reformats displayed dates on
-its own, but the date picker's typed-entry mode stays `mm/dd/yyyy` regardless.
+**Applies to**: `frust_material::date_picker` input mode in any locale whose date order differs
+from month-day-year.
 
-**Why accepted**: closing this needs either an i18n-aware seam threaded from an app's own
-`frust-i18n` locale into the picker (a cross-plugin bridge the charter above doesn't provide today)
-or a second, locale-parametrized compact-date format — both out of scope for the Phase 3 port,
-which prioritized reference-accurate calendar/dial math over a localization bridge no other
-design-system plugin has either.
+**Why accepted**: closing it needs a second, locale-parametrized compact-date format threaded
+through `MaterialDate`, which no caller has needed yet; the calendar mode is fully localized.
 
-**Evidence**: `plugins/material/src/date_picker/mod.rs` module doc's "Localization: English
-defaults plus an override struct" section; `plugins/material/src/time_picker/mod.rs` module doc's
-"Strings: English defaults, overridable as a bundle" section; `docs/PLUGINS_ARCHITECTURE.md`'s
-Layer Dependencies (no design-system plugin may depend on a sibling plugin).
+**Evidence**: `plugins/material/src/date_picker/date.rs`'s `MaterialDate::format_compact`;
+`plugins/material/src/date_picker/mod.rs` module doc's Localization section.
 
 ---
 
@@ -8301,3 +8303,91 @@ shader modules re-measure (2026-10-20)" under the OnePlus 9 and Pixel 5 S7 secti
 `crates/frust-gpu/src/shader.rs` (`ShaderLibrary::module`, created on first use),
 `crates/frust-gpu/src/pipeline.rs` (`PipelineCache::warm_up_shaders`),
 `crates/frust-engine/src/renderer.rs` (`first_frame_shaders`).
+
+---
+
+### `i18n-interval-hand-rolled` — date and time ranges are joined by hand, with no CLDR interval formats
+
+**Observed**: `fmt::time_range`, `time_range_in_zone`, `date_range` and `datetime_range_in_zone`
+are hand-rolled. ICU4X 2.2 (`icu_datetime`, `icu_experimental`, `icu_time`) has no interval
+formatter and its baked data has no interval key, so each end is formatted separately and the
+two are joined with a per-language separator (ja U+FF5E, zh U+2013, otherwise ` – `). In
+12-hour locales a day period shared by both ends is collapsed onto the last end by string
+post-processing. There is no month or year elision (`Mar 28, 2024 – Apr 2, 2024`), CLDR
+`intervalFormats` are not consulted, and a reversed range is joined in the order given.
+
+**Applies to**: every platform; languages whose CLDR interval pattern differs from
+"start separator end" render in the simple joined form.
+
+**Why accepted**: there is no upstream API to delegate to; the join covers booking windows and
+slot pills, and the behavior is deterministic and pinned by tests.
+
+**Revisit**: when ICU4X ships an interval formatter with baked data.
+
+**Evidence**: (2026-10-23) `plugins/i18n/src/fmt/interval.rs`; the `formatting_matrix` range rows.
+
+---
+
+### `i18n-tzdb-bundled-size` — `frust-i18n` bundles the jiff time-zone database
+
+**Observed**: `jiff` is pinned with `tzdb-bundle-always` so instant-to-civil conversion works on
+Android and iOS, which expose no system zoneinfo. Measured: `frust-i18n`'s Android release rlib
+grew from 1439872 to 1440312 bytes (+440 B), and the bundled database is the 599954-byte
+`libjiff_tzdb` intermediate rlib. The final app-size delta is unmeasured.
+
+**Applies to**: an app using `frust-i18n` zoned formatting on any platform.
+
+**Why accepted**: correctness of DST and zone offsets on every platform outweighs an
+unmeasured, linker-trimmed size cost.
+
+**Trigger for removal**: the platform tzdb (`tzdb-bundle-platform`) proven reliable on Android
+and iOS.
+
+**Evidence**: (2026-10-23) `plugins/i18n/Cargo.toml`'s `jiff` pin; the rlib sizes above.
+
+---
+
+### `material-strings-machine-drafted-locales` — the non-English Material string tables are machine-drafted
+
+**Observed**: the th, vi, ja, es, de and fr `MaterialStrings` tables in
+`plugins/material-i18n/src/tables` are machine-drafted and pending native review; only English
+is reviewed. Month and weekday names come from CLDR; the other strings are hand-written.
+
+**Applies to**: apps shipping those languages through `frust-material-i18n`.
+
+**Why accepted**: a machine draft is better than English fallback and the tables are plain
+data, replaceable without an API change.
+
+**Evidence**: (2026-10-23) the native-review table in `plugins/material-i18n/README.md`.
+
+---
+
+### `material-date-picker-strings-static-str` — a runtime date-picker table is leaked once per language
+
+**Observed**: `DatePickerStrings` is `Copy` with `&'static str` fields, so a runtime locale
+table is converted once through `DatePickerStringsOwned` and leaked, once per language table.
+
+**Applies to**: apps using `frust-material-i18n` (or any runtime-built date-picker table).
+
+**Why accepted**: the leak is bounded by the number of supported languages, and keeping the
+struct `Copy` and `const`-constructible avoids an API break.
+
+**Evidence**: (2026-10-23) `plugins/material/src/strings.rs`'s module doc ("Picker tables").
+
+---
+
+### `material-open-dialog-ignores-live-locale-switch` — an already-open dialog keeps its labels after a locale switch
+
+**Observed**: `SelectionDialogView::rebuild` (`plugins/material/src/dialog.rs`) diffs
+`compose()` against `prev.compose()`, both read under the current theme, so a dialog that is
+already open keeps its labels after `I18n::set_locale`; dialogs opened afterwards are correct.
+Paint- and layout-time readers (snackbar, badge, FAB menu, chips) take strings from the
+render-root theme, so an app applies `frust_material_i18n::localized_theme` to the app theme
+(`set_app_theme`) for those to follow a switch.
+
+**Applies to**: a dialog open at the moment the app language changes.
+
+**Why accepted**: a language switch with a modal dialog open is rare, and closing and reopening
+is correct.
+
+**Evidence**: (2026-10-23) `plugins/material/src/dialog.rs`'s `SelectionDialogView` `rebuild`.
