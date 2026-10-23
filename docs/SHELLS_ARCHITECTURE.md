@@ -588,7 +588,7 @@ The desktop tier is unevenly proven, and the gap is tracked rather than assumed 
 | **macOS** | Runtime-verified on hardware: real windows, the app-named menu bar, ⌘Q by both menu and accelerator, Hide/Show All, and close-then-Dock-click reopen |
 | **Windows** | Runtime-verified on hardware: titlebar/taskbar icon, AppUserModelID identity, titlebar theming, menu-bar activation delivery, accelerators, and quit. Two Win32 menu rules are documented at their `menu.rs` sites: muda's predefined quit dead-ends under winit's pump, and an accelerator enters the `HACCEL` only if its submenu is attached before the item is appended |
 | **Linux** | Proven by cross-target compilation only, plus every native call site read against its vendored source. Owed: a non-headless `app_id`/icon pass. See [LIMITATIONS.md](LIMITATIONS.md) `desktop-shells-runtime-unverified` and `desktop-windows-titlebar-theme-revert` |
-| **Decorations / window commands** | Gate owed on macOS, Windows, Linux X11 and Linux Wayland (SHELLS_DEVELOPMENT.md § Decorations and window commands); `desktop-windows-menu-bar-undecorated-unverified` and `desktop-macos-borderless-shadow-unverified` close with it |
+| **Decorations / window commands** | Linux X11 and Wayland gates passed; Windows and macOS see SHELLS_DEVELOPMENT.md § Decorations and window commands; `desktop-windows-menu-bar-undecorated-unverified` and `desktop-macos-borderless-shadow-unverified` close with it |
 
 Multi-window is out of scope: every desktop shell manages exactly one window (`desktop-single-window`).
 

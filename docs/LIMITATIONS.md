@@ -2634,6 +2634,21 @@ Decorations and window commands) records the outcome.
 
 ---
 
+### `desktop-linux-wayland-minimized-unreported` — `WindowState.minimized` is always `false` on Wayland
+
+**Observed**: Wayland gives a client no minimized state, so winit reports `is_minimized()` as
+unknown and the desktop shell publishes `minimized: false`. `WindowCommand::Minimize` works (the
+compositor hides the surface); restoring is the compositor's, not the app's.
+
+**Applies to**: Linux Wayland sessions reading `use_context::<WindowState>()`.
+
+**Why accepted**: a protocol limit, not a frust gap; X11, Windows and macOS report it.
+
+**Evidence**: Linux Wayland row of the decorations gate (SHELLS_DEVELOPMENT.md § Decorations and
+window commands); `crates/frust-shell-desktop/src/window_control.rs` (`is_minimized`).
+
+---
+
 ### `desktop-macos-borderless-shadow-unverified` — the shadow of a borderless macOS window is unverified
 
 **Observed**: under `Decorations::None` the macOS window is borderless; whether it keeps a window

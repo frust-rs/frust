@@ -283,7 +283,7 @@ press-focus legs (2026-10-18) and still owes them as part of the macOS and Windo
 
 API (all desktop-only; `examples/custom-titlebar` is the worked app): `DesktopConfig::with_decorations`
 (`Decorations::{Full, None, NoTitleBar}`) and `with_title_buttons(TitleButtons::new(leading,
-band_height))` (macOS `NoTitleBar` only); `frust_core::push_window_command` with `WindowCommand`
+band_height))` (macOS `NoTitleBar` only); `frust::push_window_command` with `WindowCommand`
 (`BeginMove`, `BeginResize(ResizeEdge)`, `SetMaximized`, `ToggleMaximized`, `Minimize`,
 `SetFullscreen`, `RequestClose`); the `WindowState` context (`maximized`, `fullscreen`, `focused`,
 `minimized`); and the `window_drag_region` widget, which turns a primary press its child ignored
@@ -312,8 +312,15 @@ Gates, against `examples/custom-titlebar` (each gate card flips its bullet):
 - **macOS — owed:** drag, double-click maximize, traffic-light placement and fullscreen,
   edge resize, close; borderless shadow (`desktop-macos-borderless-shadow-unverified`).
 - **Windows — owed:** drag, snap, resize strips, DWM shadow, close; menu bar on an undecorated window.
-- **Linux X11 — owed:** drag, resize strips, maximize/minimize/fullscreen, close.
-- **Linux Wayland — owed:** the same legs; `minimized` stays `false`.
+- **Linux X11 — passed 2026-10-24** (KWin, Xorg, NVIDIA T400): Motif hints remove the frame; drag
+  (`_NET_WM_MOVERESIZE`), double-click maximize/restore, all eight strips, maximize to the work area,
+  minimize, fullscreen round-trip, close and the focus readout act; no shadow is drawn for the
+  frameless window. A press released within a few ms can leave KWin in a sticky move (synthetic
+  input only). Playground Window row passes.
+- **Linux Wayland — passed 2026-10-24** (nested KWin 6.7): no frame; drag (`xdg_toplevel.move`),
+  double-click, five strips (`xdg_toplevel.resize`), maximize, minimize, fullscreen, close and
+  focus act; `minimized` stays `false` (`desktop-linux-wayland-minimized-unreported`). Playground
+  Window row passes. GNOME not run.
 
 ## Browser manual gate (web)
 

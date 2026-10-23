@@ -35,11 +35,12 @@ fullscreen.
 
 ## Gate checklist
 
-All cells are owed until the Phase 3 gates fill them.
+Cells record each gate's observed result (date in the gate notes of
+`docs/SHELLS_DEVELOPMENT.md`); `owed` means that gate has not run.
 
 | OS | frame gone | drag moves | double-click toggles | buttons work | strips resize | maximize fills work area | fullscreen round-trip | close honours policy | shadow present |
 |----|-----------|------------|----------------------|--------------|---------------|--------------------------|-----------------------|----------------------|----------------|
 | macOS | owed | owed | owed | owed | owed | owed | owed | owed | owed |
 | Windows | owed | owed | owed | owed | owed | owed | owed | owed | owed |
-| Linux X11 | owed | owed | owed | owed | owed | owed | owed | owed | owed |
-| Linux Wayland | owed | owed | owed | owed | owed | owed | owed | owed | owed |
+| Linux X11 (KWin) | PASS | PASS | PASS | PASS | PASS (all 8) | PASS | PASS | PASS | none drawn |
+| Linux Wayland (KWin) | PASS | PASS | PASS | PASS | PASS (5 of 8 run) | PASS | PASS | PASS | none drawn |
