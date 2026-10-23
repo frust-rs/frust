@@ -181,6 +181,7 @@ use crate::overlay::{
     AnchoredOverlayView, AnchoredOverlayWidget, OVERLAY_ANCHOR_GAP, OverlayAlign, OverlayAnchor,
     OverlayPlacement, OverlaySide, anchored_overlay, with_alpha,
 };
+use crate::strings::MaterialStrings;
 use crate::tokens::{MaterialDimensions, MaterialSpacing, MaterialSpring};
 
 // ---- Metrics --------------------------------------------------------------
@@ -268,13 +269,18 @@ pub const DROPDOWN_CHIP_LABEL_GAP: f64 = MaterialSpacing::XS;
 /// one deliberate metric deviation.
 pub const DROPDOWN_CHIP_ICON_SIZE: f64 = 18.0;
 
-/// The field's placeholder when nothing is selected
-/// (`m3e_dropdown_menu_field.dart:167`'s `hintText ?? 'Select'`).
+/// The English field placeholder when nothing is selected
+/// (`m3e_dropdown_menu_field.dart:167`'s `hintText ?? 'Select'`). The live
+/// default is [`MaterialStrings::dropdown_hint`] from the active theme; this
+/// constant is the English value, kept for API compatibility.
 pub const DROPDOWN_HINT: &str = "Select";
-/// The panel's message when the filter matches nothing
-/// (`M3EDropdownPanelStyle.noItemsFoundText`).
+/// The English panel message when the filter matches nothing
+/// (`M3EDropdownPanelStyle.noItemsFoundText`). The live default is
+/// [`MaterialStrings::dropdown_empty`]; this constant is the English value.
 pub const DROPDOWN_EMPTY_TEXT: &str = "No items found";
-/// The search field's placeholder (`M3EDropdownSearchStyle.hintText`).
+/// The English search-field placeholder (`M3EDropdownSearchStyle.hintText`).
+/// The live default is [`MaterialStrings::dropdown_search_hint`]; this
+/// constant is the English value.
 pub const DROPDOWN_SEARCH_HINT: &str = "Search…";
 
 /// The field's hover overlay alpha (`m3e_dropdown_menu_field.dart:272`).
@@ -721,6 +727,7 @@ pub struct DropdownView<State: 'static> {
     loading: bool,
     error: Option<String>,
     empty_text: String,
+    search_hint: String,
     max_selections: usize,
     max_height: f64,
     placement: OverlayPlacement,
@@ -745,6 +752,7 @@ pub fn dropdown<State: 'static, F: Fn(&mut State, Vec<String>) + 'static>(
     items: Vec<DropdownItem>,
     on_change: F,
 ) -> DropdownView<State> {
+    let strings = MaterialStrings::from_build_context();
     DropdownView {
         items,
         selected: Vec::new(),
@@ -754,7 +762,8 @@ pub fn dropdown<State: 'static, F: Fn(&mut State, Vec<String>) + 'static>(
         searchable: false,
         loading: false,
         error: None,
-        empty_text: DROPDOWN_EMPTY_TEXT.to_string(),
+        empty_text: strings.dropdown_empty.to_string(),
+        search_hint: strings.dropdown_search_hint.to_string(),
         max_selections: 0,
         max_height: DROPDOWN_PANEL_MAX_HEIGHT,
         placement: OverlayPlacement::default()
@@ -839,9 +848,18 @@ impl<State: 'static> DropdownView<State> {
         self
     }
 
-    /// Replace the empty-state message (`noItemsFoundText`).
+    /// Replace the empty-state message (`noItemsFoundText`). Unset, it reads
+    /// [`MaterialStrings::dropdown_empty`] from the ambient theme.
     pub fn empty_text(mut self, text: impl Into<String>) -> Self {
         self.empty_text = text.into();
+        self
+    }
+
+    /// Replace the search field's placeholder
+    /// (`M3EDropdownSearchStyle.hintText`). Unset, it reads
+    /// [`MaterialStrings::dropdown_search_hint`] from the ambient theme.
+    pub fn search_hint(mut self, hint: impl Into<String>) -> Self {
+        self.search_hint = hint.into();
         self
     }
 
@@ -895,6 +913,7 @@ impl<State: 'static> DropdownView<State> {
         .loading(self.loading)
         .error(self.error.clone())
         .empty_text(self.empty_text.clone())
+        .search_hint(self.search_hint.clone())
         .max_height(self.max_height)
         .open(self.open);
         if let Some(on_open) = self.on_open.clone() {
@@ -975,8 +994,12 @@ mod tests {
         assert_eq!(DROPDOWN_CHIP_SPACING, 6.0);
         assert_eq!(DROPDOWN_CHIP_RUN_SPACING, 6.0);
         assert_eq!(DROPDOWN_CHIP_LABEL_GAP, 4.0);
-        assert_eq!(DROPDOWN_HINT, "Select");
-        assert_eq!(DROPDOWN_EMPTY_TEXT, "No items found");
+        assert_eq!(DROPDOWN_HINT, MaterialStrings::ENGLISH.dropdown_hint);
+        assert_eq!(DROPDOWN_EMPTY_TEXT, MaterialStrings::ENGLISH.dropdown_empty);
+        assert_eq!(
+            DROPDOWN_SEARCH_HINT,
+            MaterialStrings::ENGLISH.dropdown_search_hint
+        );
     }
 
     #[test]
@@ -1436,5 +1459,101 @@ mod tests {
             "item order wins over the order the values arrived in"
         );
         assert!(ordered_selection(&items, &[]).is_empty());
+    }
+
+    // ---- MaterialStrings: setter > ambient theme > English ------------------
+
+    mod strings {
+        use super::*;
+        use std::cell::RefCell;
+
+        fn thai_theme() -> Theme {
+            let mut theme = crate::baseline();
+            let mut thai = MaterialStrings::ENGLISH;
+            thai.dropdown_hint = "เลือก".into();
+            thai.dropdown_empty = "ไม่พบรายการ".into();
+            thai.dropdown_search_hint = "ค้นหา…".into();
+            theme.extensions.insert(thai);
+            theme
+        }
+
+        /// Builds `make` under the ambient `Theme` context (when set) and
+        /// hands the result to `record`, so the test reads what the builder
+        /// resolved.
+        struct Host<V: 'static> {
+            theme: Option<Theme>,
+            make: fn() -> V,
+            record: fn(&V),
+        }
+        impl<V: View<()> + 'static> frust::Component for Host<V> {
+            type State = ();
+            fn init(&self) {}
+            fn build(&self, _state: &mut ()) -> impl View<()> {
+                if let Some(theme) = &self.theme {
+                    frust::provide_context(theme.clone());
+                }
+                let view = (self.make)();
+                (self.record)(&view);
+                view
+            }
+        }
+
+        fn build_under<V: View<()> + 'static>(
+            theme: Option<Theme>,
+            make: fn() -> V,
+            record: fn(&V),
+        ) {
+            let mut root: frust_core::RenderRoot<(), frust::ComponentView<Host<V>>> =
+                frust_core::RenderRoot::new();
+            let mut logic = move |_: &mut ()| {
+                frust::component(Host {
+                    theme: theme.clone(),
+                    make,
+                    record,
+                })
+            };
+            let mut state = ();
+            root.rebuild(&mut logic, &mut state);
+        }
+
+        thread_local! {
+            static SEEN: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+        }
+        fn seen() -> Vec<String> {
+            SEEN.with(|s| s.borrow().clone())
+        }
+        fn note(values: &[&str]) {
+            SEEN.with(|s| *s.borrow_mut() = values.iter().map(|v| v.to_string()).collect());
+        }
+
+        fn plain() -> DropdownView<()> {
+            dropdown(Vec::new(), |_: &mut (), _| {})
+        }
+        fn with_setters() -> DropdownView<()> {
+            dropdown(Vec::new(), |_: &mut (), _| {})
+                .empty_text("Nothing")
+                .search_hint("Find")
+        }
+        fn record(view: &DropdownView<()>) {
+            note(&[&view.empty_text, &view.search_hint]);
+        }
+
+        #[test]
+        fn defaults_to_english() {
+            build_under(None, plain, record);
+            assert_eq!(seen(), ["No items found", "Search…"]);
+        }
+
+        #[test]
+        fn reads_the_thai_theme_strings() {
+            build_under(Some(thai_theme()), plain, record);
+            assert_eq!(seen(), ["ไม่พบรายการ", "ค้นหา…"]);
+        }
+
+        #[test]
+        fn setters_beat_the_theme_strings() {
+            build_under(Some(thai_theme()), with_setters, record);
+            assert_eq!(seen(), ["Nothing", "Find"]);
+        }
     }
 }
