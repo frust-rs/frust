@@ -461,7 +461,7 @@ fmt::datetime_at_offset(&en, 1_700_000_000, 8 * 3_600, DateLength::Short)?;     
 renders in UTC. The positional may be epoch seconds or an ISO string with `Z` or a `±HH:MM` suffix
 (converted to the UTC instant it names; no suffix means UTC). The zone applies to the instant, so a
 zone-less civil date cannot be re-zoned. Zone data adds the jiff tzdb to the binary — see
-`docs/LIMITATIONS.md` once recorded.
+`docs/LIMITATIONS.md`'s `i18n-tzdb-bundled-size`.
 
 Ranges (slot pills, booking windows) are hand-rolled, because ICU4X 2.2 has no interval
 formatter: `fmt::time_range`, `time_range_in_zone`, `date_range` and `datetime_range_in_zone`
@@ -698,6 +698,27 @@ list `docs/PLUGINS_DEVELOPMENT.md`'s i18n section tracks — keep both in sync):
   zero-decimal currency (JPY) and a two-decimal one (USD/EUR) correctly, and
   `fmt::date`/`fmt::time` differ visibly between at least two locales (symbol placement,
   separator, hour cycle).
+- **Zoned times.** `fmt::datetime_in_zone` / `time_in_zone` for `Asia/Makassar`,
+  `America/New_York` and `Europe/Berlin` match the §4e values on Android and iOS (no system
+  zoneinfo needed), and an FTL `DATETIME(timeZone: ...)` with an ISO `Z` / `±HH:MM` string
+  renders the named instant in the venue zone.
+- **Ranges.** `fmt::time_range` shows a shared day period once in en (`9:00 – 11:00 AM`),
+  keeps both across noon, and uses `～` in ja; `date_range` does no month or year elision.
+- **Relative day.** `fmt::relative_day` reads Today / Tomorrow / Yesterday in en, th, ja and es
+  on the venue zone's civil days, and a date two or more days away falls back to a medium date.
+- **Units and lists.** `fmt::units` / `duration_minutes` (`45 min`, `2 hours`, `1.5 hr`) and
+  `fmt::list` / `{ LIST(...) }` read correctly in en, th, vi, ja and es; `language_endonym`
+  shows each language in its own script in a language picker.
+- **th-TH calendar.** With `th-TH` requested over an English-only bundle set, a date shows the
+  Buddhist-era year by default and the Gregorian year with `DateTimeOptions { calendar:
+  Some(Calendar::Gregorian), .. }` or `DATETIME(calendar: "gregory")`.
+- **Compact numbers.** `NumberOptions { notation: Notation::Compact(..), .. }` and `{ NUMBER($n, notation:
+  "compact") }` render `1.2K` / `1.2 thousand` in en and `1.2万` in ja, matching §4e.
+- **Material strings switch.** In the playground, change the language with the locale switcher
+  and in `examples/material3-demo` with the language toggle on the theme settings page: dialog
+  and snackbar labels, the date and time pickers (CLDR month and weekday names) and the
+  badge / FAB menu / chip accessibility labels follow the new locale. A dialog already open
+  keeps its labels until reopened (`material-open-dialog-ignores-live-locale-switch`).
 - **Persistence survives a kill/relaunch.** Following §5's recipe: pick a non-default locale,
   kill the app, relaunch, and confirm it reopens in the saved locale rather than re-detecting
   the system one.

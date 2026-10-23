@@ -27,6 +27,32 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `show_native_sheet` (`BottomSheetDialog`).
 - iOS embedding: `FrustSceneDelegate.makeWindowRootViewController(hosting:)` and
   `frustViewController`, so a host can place the one frust surface inside its own container.
+- `frust-i18n` formatting: `fmt::currency_minor` and `fmt::minor_unit_digits` (exact integer
+  minor units, FTL `NUMBER(..., minorUnits: "true")`); zoned formatting over `jiff`'s bundled tz
+  database (`datetime_in_zone`, `date_in_zone`, `time_in_zone`, `datetime_at_offset`, FTL
+  `DATETIME(timeZone: ...)`, and ISO `Z` or `±HH:MM` suffixes on FTL date strings); `fmt::time_range`,
+  `time_range_in_zone`, `date_range` and `datetime_range_in_zone`
+  (`i18n-interval-hand-rolled`); `fmt::relative_day` and FTL `RELATIVE_DAY`; `fmt::units` and
+  `duration_minutes`; `fmt::list`, `language_name` and `language_endonym` with FTL `LIST`;
+  `DateTimeOptions` (calendar, hour cycle) with `_with` variants, and `NumberOptions` with compact
+  notation plus the FTL `NUMBER` options (`minimumFractionDigits`, `maximumFractionDigits`,
+  `notation`, `compactDisplay`, `useGrouping`). The bundled tz database is recorded as
+  `i18n-tzdb-bundled-size`.
+- `frust-i18n` optional `persistence` feature: restores the user's chosen locale through
+  `frust-shared-preferences`.
+- `frust-material` `MaterialStrings`: a theme extension carrying every label and accessibility
+  string, read by every widget with explicit setter > theme extension > English precedence, with
+  new per-widget setters (`close_label`, `dismiss_label`, `remove_label`, `collapse_label`,
+  `expand_label`, `NavigationDrawerView::label`, `back_label`, `clear_label`, `search_hint`); the
+  date and time pickers default their strings from it. `SnackbarController::enqueue`,
+  `clear_queue` and `queue_len` add a FIFO notice queue beside `show`.
+- `frust-material-i18n` (`plugins/material-i18n`): a facade-tier bridge crate with localized
+  `MaterialStrings` tables for en, th, vi, ja, es, de and fr (CLDR month and weekday names) and
+  `provide_localized_strings`, `localized_theme` and `material_strings_for`. The non-English
+  tables are machine-drafted (`material-strings-machine-drafted-locales`).
+- The registry lists `frust-material-i18n` as its twenty-third plugin entry in the Add Plugin picker.
+- `examples/playground` (locale switcher) and `examples/material3-demo` (language toggle on the
+  theme settings page) demonstrate the localized Material strings.
 
 ### Changed
 
