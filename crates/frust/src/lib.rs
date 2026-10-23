@@ -824,7 +824,10 @@ pub mod authoring {
     /// name the value. See [`WindowMetrics`]'s own doc for the plain-value
     /// delivery contract, the alongside-not-superseding relationship with
     /// [`WindowInsets`], and the derived-orientation/rebuild-cost notes.
-    pub use frust_core::{Orientation, WindowMetrics};
+    /// [`WindowState`] (the live maximized/fullscreen/focused/minimized flags,
+    /// absent off desktop) is lifted the same way; see the facade's window-control
+    /// re-export.
+    pub use frust_core::{Orientation, WindowMetrics, WindowState};
 
     /// The accessibility-node vocabulary a widget that *contributes* a
     /// semantics node needs — as opposed to one that only forwards a child's.
@@ -2033,8 +2036,17 @@ macro_rules! web_app {
 /// window/taskbar bitmap the OS shows). The `Desktop` prefix matches
 /// [`DesktopConfig`], whose `with_window_icon` is its only consumer.
 ///
+/// [`Decorations`] (how much OS window frame the app wants) and [`TitleButtons`]
+/// (where macOS places its window buttons under [`Decorations::NoTitleBar`]) are
+/// creation-time only: there is no runtime setter, so set them on the config
+/// before the window opens. [`Decorations::NoTitleBar`] on a non-macOS OS behaves
+/// exactly as [`Decorations::None`], and [`TitleButtons`] is macOS-only. With
+/// `None` or `NoTitleBar` the app supplies its own title bar, including its own
+/// move, resize and window-control gestures; the baseline `window_drag_region`
+/// widget is the place to start.
+///
 /// ```no_run
-/// use frust::{DesktopConfig, MenuItemSpec, MenuRole, MenuSpec};
+/// use frust::{Decorations, DesktopConfig, MenuItemSpec, MenuRole, MenuSpec, TitleButtons};
 ///
 /// let file = MenuSpec::new()
 ///     .with_item(MenuItemSpec::item("file.open", "Open…").with_accelerator("CmdOrCtrl+O"))
@@ -2044,7 +2056,9 @@ macro_rules! web_app {
 /// let config = DesktopConfig::new()
 ///     .with_app_name("Huddle")
 ///     .with_app_id("dev.frust.huddle")
-///     .with_menu_spec(MenuSpec::new().with_item(MenuItemSpec::submenu("File", file)));
+///     .with_menu_spec(MenuSpec::new().with_item(MenuItemSpec::submenu("File", file)))
+///     .with_decorations(Decorations::NoTitleBar)
+///     .with_title_buttons(TitleButtons::new(16.0, 40.0));
 /// # let _ = config;
 /// ```
 ///
@@ -2060,6 +2074,48 @@ macro_rules! web_app {
 pub use frust_shell_desktop::{
     DEFAULT_APP_NAME, DesktopConfig, IconData as DesktopIconData, MenuItemSpec, MenuRole, MenuSpec,
 };
+
+/// The window-frame vocabulary a [`DesktopConfig`] carries: [`Decorations`]
+/// (how much OS frame the window draws) and [`TitleButtons`] (macOS button
+/// placement under [`Decorations::NoTitleBar`]). Both are read by the desktop
+/// shell at window creation and are desktop-only, under the same cfg gate as
+/// the re-export above; see that block for the creation-time contract.
+#[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
+pub use frust_shell_desktop::config::{Decorations, TitleButtons};
+
+/// The **window-control** vocabulary an app-drawn title bar uses, flat-re-exported
+/// from `frust-core::window_control` and available on **every** target.
+///
+/// [`push_window_command`] queues a [`WindowCommand`] for the desktop shell to
+/// perform after the current input dispatch. [`WindowCommand::BeginMove`] starts
+/// the OS move drag and belongs in a primary pointer-down (prefer the widget that
+/// does this for you). [`WindowCommand::BeginResize`] takes a [`ResizeEdge`] and
+/// is a no-op on macOS, where AppKit keeps its own edge resizing.
+/// [`WindowCommand::SetMaximized`], [`WindowCommand::ToggleMaximized`],
+/// [`WindowCommand::Minimize`] and [`WindowCommand::SetFullscreen`] do what their
+/// names say; minimize has no un-minimize, which Wayland cannot provide.
+/// [`WindowCommand::RequestClose`] is a request, not a force: it goes through the
+/// same path as the OS close button and honours
+/// [`DesktopConfig::with_quit_on_last_window_closed`]. No variant bypasses that.
+///
+/// The queue is bounded: past 32 pending commands the oldest is dropped. On
+/// mobile and web nothing drains it, so a push is a bounded no-op there. The
+/// live [`WindowState`] (maximized, fullscreen, focused, minimized) is provided
+/// as context and read with `use_context::<WindowState>()`; that is `None` off
+/// desktop.
+///
+/// The drain side, `take_window_commands`, is deliberately **not** re-exported:
+/// only the desktop shell drains the queue, the same way the menu push side is
+/// kept shell-side (see the menu read-side doc above).
+///
+/// ```no_run
+/// use frust::{WindowCommand, push_window_command};
+///
+/// // A title-bar button or a keyboard shortcut can push any command; a drag
+/// // handle pushes `BeginMove` from its own pointer-down.
+/// push_window_command(WindowCommand::ToggleMaximized);
+/// ```
+pub use frust_core::{ResizeEdge, WindowCommand, WindowState, push_window_command};
 
 /// A Frust application: the app state plus the `build` closure that maps it
 /// to a view tree.
@@ -2116,7 +2172,9 @@ impl<State, Build> App<State, Build> {
 #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
 impl<State: 'static, Build> App<State, Build> {
     /// Give the app a desktop identity — name, reverse-DNS id, window icon,
-    /// native menu bar, last-window-close policy (see [`DesktopConfig`]).
+    /// native menu bar, last-window-close policy (see [`DesktopConfig`]). Window
+    /// decoration (the OS frame and macOS title-button placement) is part of the
+    /// same config, set at creation; see the facade's desktop re-export docs.
     ///
     /// Optional: an app that never calls this runs with
     /// [`DesktopConfig::default()`], which is the dev-preview window exactly as
@@ -2569,6 +2627,10 @@ pub fn __frust_register_hotpatch_anchor(_anchor: extern "C" fn()) {}
 /// # fn main() {}
 /// ```
 ///
+/// Window decoration ([`DesktopConfig`]'s `with_decorations` and
+/// `with_title_buttons`) is part of the same config, fixed at window creation;
+/// see the facade's desktop re-export docs.
+///
 /// The two may be combined in either order
 /// (`setup = { .. }, desktop = { .. }` or the reverse). The expression is
 /// emitted **only** into the desktop `__frust_main`, so it may name
@@ -2983,7 +3045,7 @@ mod root_build {
     not(any(target_os = "android", target_os = "ios", target_arch = "wasm32"))
 ))]
 mod desktop_config_threading {
-    use crate::{App, DesktopConfig, View, text};
+    use crate::{App, Decorations, DesktopConfig, TitleButtons, View, text};
 
     fn logic(_state: &mut ()) -> impl View<()> + use<> {
         text("fixture")
@@ -3012,6 +3074,18 @@ mod desktop_config_threading {
             .desktop(DesktopConfig::new().with_app_id("dev.frust.second"));
         assert_eq!(app.config.app_name, None);
         assert_eq!(app.config.app_id.as_deref(), Some("dev.frust.second"));
+    }
+
+    #[test]
+    fn desktop_threads_decorations_and_title_buttons_unchanged() {
+        let buttons = TitleButtons::new(16.0, 40.0);
+        let app = App::new((), logic).desktop(
+            DesktopConfig::new()
+                .with_decorations(Decorations::NoTitleBar)
+                .with_title_buttons(buttons),
+        );
+        assert_eq!(app.config.decorations, Decorations::NoTitleBar);
+        assert_eq!(app.config.title_buttons, Some(buttons));
     }
 }
 
