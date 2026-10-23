@@ -17,10 +17,14 @@ pub mod extensions;
 mod logger;
 mod platform_view;
 mod render;
+mod window_control;
 mod window_state;
 
 pub use app_handler::{run_desktop, run_desktop_with};
-pub use config::{DEFAULT_APP_NAME, DesktopConfig, IconData, MenuItemSpec, MenuRole, MenuSpec};
+pub use config::{
+    DEFAULT_APP_NAME, Decorations, DesktopConfig, IconData, MenuItemSpec, MenuRole, MenuSpec,
+    TitleButtons,
+};
 pub use extensions::{CloseAction, DesktopEventLoopBuilder, DesktopExtensions, NoExtensions};
 
 /// The desktop event loop's user-event type, `pub` only so
