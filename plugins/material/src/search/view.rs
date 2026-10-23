@@ -81,13 +81,7 @@ use crate::overlay::{
     OverlayModalView, OverlayModalWidget, OverlayPlacement, OverlaySide, anchored_overlay,
     container, finite_or_zero, overlay_modal, radius, shadow, show_overlay_modal,
 };
-
-/// The back affordance's accessible name — `M3ESearchConstants.backButtonTooltip`.
-const BACK_LABEL: &str = "Back";
-
-/// The clear affordance's accessible name —
-/// `M3ESearchConstants.clearButtonTooltip`.
-const CLEAR_LABEL: &str = "Clear";
+use crate::strings::MaterialStrings;
 
 /// A view-held, typed text callback.
 type OnText<State> = Rc<dyn Fn(&mut State, String)>;
@@ -149,6 +143,13 @@ pub struct SearchView<State: 'static> {
     on_back: Option<OnState<State>>,
     dismissable: bool,
     on_dismiss: Option<OnState<State>>,
+    /// The back affordance's accessible name: the setter, else the ambient
+    /// theme's strings read when the view was created
+    /// (`M3ESearchConstants.backButtonTooltip` in English).
+    back_label: String,
+    /// The clear affordance's accessible name; resolved like `back_label`
+    /// (`M3ESearchConstants.clearButtonTooltip` in English).
+    clear_label: String,
 }
 
 /// Build a controlled M3 search view showing `query` and reporting every edit
@@ -173,7 +174,10 @@ pub fn search_view<State: 'static, F: Fn(&mut State, String) + 'static>(
     query: impl Into<String>,
     on_query_changed: F,
 ) -> SearchView<State> {
+    let strings = MaterialStrings::from_build_context();
     SearchView {
+        back_label: strings.search_back_a11y.to_string(),
+        clear_label: strings.search_clear_a11y.to_string(),
         query: query.into(),
         on_query_changed: Rc::new(on_query_changed),
         hint: None,
@@ -188,6 +192,20 @@ pub fn search_view<State: 'static, F: Fn(&mut State, String) + 'static>(
 }
 
 impl<State: 'static> SearchView<State> {
+    /// Override the back affordance's accessible name. Unset, it reads
+    /// [`MaterialStrings::search_back_a11y`] from the ambient theme.
+    pub fn back_label(mut self, label: impl Into<String>) -> Self {
+        self.back_label = label.into();
+        self
+    }
+
+    /// Override the clear affordance's accessible name. Unset, it reads
+    /// [`MaterialStrings::search_clear_a11y`] from the ambient theme.
+    pub fn clear_label(mut self, label: impl Into<String>) -> Self {
+        self.clear_label = label.into();
+        self
+    }
+
     /// Set the field's placeholder (`M3ESearchAnchor.viewHintText`), which also
     /// labels the view's accessibility node.
     pub fn hint(mut self, hint: impl Into<String>) -> Self {
@@ -330,6 +348,8 @@ impl<State: 'static> SearchView<State> {
             suggestions: self.suggestions,
             on_submit: self.on_submit,
             on_back: self.on_back,
+            back_label: self.back_label,
+            clear_label: self.clear_label,
         }
     }
 }
@@ -347,6 +367,8 @@ struct SearchViewContentView<State: 'static> {
     suggestions: Option<AnyView<State>>,
     on_submit: Option<OnText<State>>,
     on_back: Option<OnState<State>>,
+    back_label: String,
+    clear_label: String,
 }
 
 impl<State: 'static> SearchViewContentView<State> {
@@ -384,7 +406,7 @@ impl<State: 'static> SearchViewContentView<State> {
                     }
                 },
             )
-            .semantic_label(BACK_LABEL),
+            .semantic_label(self.back_label.clone()),
         )
     }
 
@@ -404,7 +426,7 @@ impl<State: 'static> SearchViewContentView<State> {
             icon_button(any::<State, _>(icon(crate::icons::CLOSE)), move |state| {
                 on_query_changed(state, String::new());
             })
-            .semantic_label(CLEAR_LABEL),
+            .semantic_label(self.clear_label.clone()),
         )]
     }
 
@@ -1554,6 +1576,95 @@ mod tests {
         }
         fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
             scene.fill_rect(ctx.origin(), ctx.size(), Color::BLACK);
+        }
+    }
+
+    // ---- MaterialStrings: setter > ambient theme > English ------------------
+
+    mod strings {
+        use super::*;
+
+        /// Provides `theme` as the ambient `Theme` context (when set), then
+        /// builds the view under test so build-time `use_context` resolves.
+        struct Host {
+            theme: Option<frust::Theme>,
+            make: fn() -> AnyView<()>,
+        }
+        impl frust::Component for Host {
+            type State = ();
+            fn init(&self) {}
+            fn build(&self, _state: &mut ()) -> impl View<()> {
+                if let Some(theme) = &self.theme {
+                    frust::provide_context(theme.clone());
+                }
+                (self.make)()
+            }
+        }
+
+        fn thai_theme() -> frust::Theme {
+            let mut theme = crate::baseline();
+            let mut thai = MaterialStrings::ENGLISH;
+            thai.search_back_a11y = "ย้อนกลับ".into();
+            thai.search_clear_a11y = "ล้าง".into();
+            theme.extensions.insert(thai);
+            theme
+        }
+
+        fn labels(theme: Option<frust::Theme>, make: fn() -> AnyView<()>) -> Vec<String> {
+            let mut root: RenderRoot<(), frust::ComponentView<Host>> = RenderRoot::new();
+            let mut logic = move |_: &mut ()| {
+                frust::component(Host {
+                    theme: theme.clone(),
+                    make,
+                })
+            };
+            let mut state = ();
+            root.rebuild(&mut logic, &mut state);
+            let mut tcx = TextContext::new();
+            root.layout_with_text(COMPACT, &mut tcx as &mut dyn Any);
+            root.semantics()
+                .nodes
+                .iter()
+                .filter_map(|(_, n)| n.label().map(str::to_string))
+                .collect()
+        }
+
+        fn has(labels: &[String], wanted: &str) -> bool {
+            labels.iter().any(|l| l == wanted)
+        }
+
+        fn plain() -> AnyView<()> {
+            any(search_view("hello", |_: &mut (), _| {})
+                .into_content(SearchViewMode::FullScreen, None))
+        }
+        fn with_setters() -> AnyView<()> {
+            any(search_view("hello", |_: &mut (), _| {})
+                .back_label("Go back")
+                .clear_label("Wipe")
+                .into_content(SearchViewMode::FullScreen, None))
+        }
+
+        #[test]
+        fn defaults_to_english() {
+            let got = labels(None, plain);
+            assert!(has(&got, "Back"));
+            assert!(has(&got, "Clear"));
+        }
+
+        #[test]
+        fn reads_the_thai_theme_strings() {
+            let got = labels(Some(thai_theme()), plain);
+            assert!(has(&got, "ย้อนกลับ"));
+            assert!(has(&got, "ล้าง"));
+            assert!(!has(&got, "Back"));
+        }
+
+        #[test]
+        fn setters_beat_the_theme_strings() {
+            let got = labels(Some(thai_theme()), with_setters);
+            assert!(has(&got, "Go back"));
+            assert!(has(&got, "Wipe"));
+            assert!(!has(&got, "ย้อนกลับ"));
         }
     }
 }

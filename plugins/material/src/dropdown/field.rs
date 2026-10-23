@@ -74,14 +74,15 @@ use super::{
     DROPDOWN_CHIP_RADIUS, DROPDOWN_CHIP_RUN_SPACING, DROPDOWN_CHIP_SPACING,
     DROPDOWN_CHIP_V_PADDING, DROPDOWN_FIELD_H_PADDING, DROPDOWN_FIELD_HOVER_ALPHA,
     DROPDOWN_FIELD_LOADING_SIZE, DROPDOWN_FIELD_LOADING_STROKE, DROPDOWN_FIELD_PRESSED_ALPHA,
-    DROPDOWN_FIELD_V_PADDING, DROPDOWN_FLING_VELOCITY, DROPDOWN_HINT, DROPDOWN_ICON_GAP,
-    DROPDOWN_ICON_SIZE, DROPDOWN_PROGRESS_EPSILON, DROPDOWN_SPRING, DropdownColors, DropdownItem,
-    Glyph, OnOpen, OnSelection, Run, SHAPING_INK, container_radius, ordered_selection,
+    DROPDOWN_FIELD_V_PADDING, DROPDOWN_FLING_VELOCITY, DROPDOWN_ICON_GAP, DROPDOWN_ICON_SIZE,
+    DROPDOWN_PROGRESS_EPSILON, DROPDOWN_SPRING, DropdownColors, DropdownItem, Glyph, OnOpen,
+    OnSelection, Run, SHAPING_INK, container_radius, ordered_selection,
 };
 use crate::icons;
 use crate::overlay::{OverlayAnchor, with_alpha};
 use crate::press::presses;
 use crate::progress::{ProgressValue, circular_progress};
+use crate::strings::MaterialStrings;
 
 /// Width used when the incoming constraints are horizontally unbounded — the
 /// same fallback [`mod@crate::text_field`] applies for the same reason.
@@ -179,7 +180,9 @@ pub fn dropdown_field<State: 'static>(items: Vec<DropdownItem>) -> DropdownField
     DropdownFieldView {
         items,
         selected: Vec::new(),
-        hint: DROPDOWN_HINT.to_string(),
+        hint: MaterialStrings::from_build_context()
+            .dropdown_hint
+            .to_string(),
         multi: false,
         open: false,
         enabled: true,
@@ -207,6 +210,8 @@ impl<State: 'static> DropdownFieldView<State> {
     }
 
     /// Replace the placeholder shown when nothing is selected (`hintText`).
+    /// Unset, it reads [`MaterialStrings::dropdown_hint`] from the ambient
+    /// theme.
     pub fn hint(mut self, hint: impl Into<String>) -> Self {
         self.hint = hint.into();
         self
@@ -1872,5 +1877,99 @@ mod tests {
             .find(|(_, node)| node.role() == Role::ComboBox)
             .expect("a combo-box node");
         assert!(node.1.is_expanded().unwrap_or(false));
+    }
+
+    // ---- MaterialStrings: setter > ambient theme > English ------------------
+
+    mod strings {
+        use super::*;
+        use std::cell::RefCell;
+
+        fn thai_theme() -> Theme {
+            let mut theme = crate::baseline();
+            let mut thai = MaterialStrings::ENGLISH;
+            thai.dropdown_hint = "เลือก".into();
+            thai.dropdown_empty = "ไม่พบรายการ".into();
+            thai.dropdown_search_hint = "ค้นหา…".into();
+            theme.extensions.insert(thai);
+            theme
+        }
+
+        /// Builds `make` under the ambient `Theme` context (when set) and
+        /// hands the result to `record`, so the test reads what the builder
+        /// resolved.
+        struct Host<V: 'static> {
+            theme: Option<Theme>,
+            make: fn() -> V,
+            record: fn(&V),
+        }
+        impl<V: View<()> + 'static> frust::Component for Host<V> {
+            type State = ();
+            fn init(&self) {}
+            fn build(&self, _state: &mut ()) -> impl View<()> {
+                if let Some(theme) = &self.theme {
+                    frust::provide_context(theme.clone());
+                }
+                let view = (self.make)();
+                (self.record)(&view);
+                view
+            }
+        }
+
+        fn build_under<V: View<()> + 'static>(
+            theme: Option<Theme>,
+            make: fn() -> V,
+            record: fn(&V),
+        ) {
+            let mut root: frust_core::RenderRoot<(), frust::ComponentView<Host<V>>> =
+                frust_core::RenderRoot::new();
+            let mut logic = move |_: &mut ()| {
+                frust::component(Host {
+                    theme: theme.clone(),
+                    make,
+                    record,
+                })
+            };
+            let mut state = ();
+            root.rebuild(&mut logic, &mut state);
+        }
+
+        thread_local! {
+            static SEEN: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+        }
+        fn seen() -> Vec<String> {
+            SEEN.with(|s| s.borrow().clone())
+        }
+        fn note(values: &[&str]) {
+            SEEN.with(|s| *s.borrow_mut() = values.iter().map(|v| v.to_string()).collect());
+        }
+
+        fn plain() -> DropdownFieldView<()> {
+            dropdown_field(Vec::new())
+        }
+        fn with_setter() -> DropdownFieldView<()> {
+            dropdown_field(Vec::new()).hint("Pick one")
+        }
+        fn record(view: &DropdownFieldView<()>) {
+            note(&[&view.hint]);
+        }
+
+        #[test]
+        fn defaults_to_english() {
+            build_under(None, plain, record);
+            assert_eq!(seen(), ["Select"]);
+        }
+
+        #[test]
+        fn reads_the_thai_theme_strings() {
+            build_under(Some(thai_theme()), plain, record);
+            assert_eq!(seen(), ["เลือก"]);
+        }
+
+        #[test]
+        fn setter_beats_the_theme_strings() {
+            build_under(Some(thai_theme()), with_setter, record);
+            assert_eq!(seen(), ["Pick one"]);
+        }
     }
 }

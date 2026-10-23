@@ -71,12 +71,12 @@ use frust::authoring::{
 use frust::input::WHEEL_LINE_PX;
 
 use super::{
-    DROPDOWN_CONTENT_PADDING, DROPDOWN_EMPTY_TEXT, DROPDOWN_ICON_GAP, DROPDOWN_ICON_SIZE,
-    DROPDOWN_ITEM_GAP, DROPDOWN_ITEM_H_PADDING, DROPDOWN_ITEM_HOVER_RADIUS,
-    DROPDOWN_ITEM_INNER_RADIUS, DROPDOWN_ITEM_OUTER_RADIUS, DROPDOWN_ITEM_PRESSED_RADIUS,
-    DROPDOWN_ITEM_V_PADDING, DROPDOWN_LOADING_PADDING, DROPDOWN_MESSAGE_PADDING,
-    DROPDOWN_PANEL_MAX_HEIGHT, DROPDOWN_SEARCH_HINT, DropdownColors, DropdownItem, Glyph, OnOpen,
-    OnQuery, Run, SHAPING_INK, container_radius, dropdown_filter, ordered_selection,
+    DROPDOWN_CONTENT_PADDING, DROPDOWN_ICON_GAP, DROPDOWN_ICON_SIZE, DROPDOWN_ITEM_GAP,
+    DROPDOWN_ITEM_H_PADDING, DROPDOWN_ITEM_HOVER_RADIUS, DROPDOWN_ITEM_INNER_RADIUS,
+    DROPDOWN_ITEM_OUTER_RADIUS, DROPDOWN_ITEM_PRESSED_RADIUS, DROPDOWN_ITEM_V_PADDING,
+    DROPDOWN_LOADING_PADDING, DROPDOWN_MESSAGE_PADDING, DROPDOWN_PANEL_MAX_HEIGHT, DropdownColors,
+    DropdownItem, Glyph, OnOpen, OnQuery, Run, SHAPING_INK, container_radius, dropdown_filter,
+    ordered_selection,
 };
 use crate::card_list::{card_position, card_radii};
 use crate::icons;
@@ -84,6 +84,7 @@ use crate::interaction::InteractionState;
 use crate::overlay::{OverlayAnchor, OverlayElevation, shadow, with_alpha};
 use crate::press::presses;
 use crate::progress::{ProgressValue, circular_progress};
+use crate::strings::MaterialStrings;
 use crate::text_field::text_field;
 
 /// Left/right and top/bottom margins around the search field
@@ -138,6 +139,7 @@ pub struct DropdownPanelView<State: 'static> {
     loading: bool,
     error: Option<String>,
     empty_text: String,
+    search_hint: String,
     max_height: f64,
     open: bool,
     anchor: OverlayAnchor,
@@ -157,6 +159,7 @@ pub fn dropdown_panel<State: 'static, F: Fn(&mut State, Vec<String>) + 'static>(
     items: Vec<DropdownItem>,
     on_change: F,
 ) -> DropdownPanelView<State> {
+    let strings = MaterialStrings::from_build_context();
     DropdownPanelView {
         items,
         selected: Vec::new(),
@@ -166,7 +169,8 @@ pub fn dropdown_panel<State: 'static, F: Fn(&mut State, Vec<String>) + 'static>(
         searchable: false,
         loading: false,
         error: None,
-        empty_text: DROPDOWN_EMPTY_TEXT.to_string(),
+        empty_text: strings.dropdown_empty.to_string(),
+        search_hint: strings.dropdown_search_hint.to_string(),
         max_height: DROPDOWN_PANEL_MAX_HEIGHT,
         open: true,
         anchor: OverlayAnchor::new(),
@@ -226,9 +230,17 @@ impl<State: 'static> DropdownPanelView<State> {
         self
     }
 
-    /// Replace the empty-state message.
+    /// Replace the empty-state message. Unset, it reads
+    /// [`MaterialStrings::dropdown_empty`] from the ambient theme.
     pub fn empty_text(mut self, text: impl Into<String>) -> Self {
         self.empty_text = text.into();
+        self
+    }
+
+    /// Replace the search field's placeholder. Unset, it reads
+    /// [`MaterialStrings::dropdown_search_hint`] from the ambient theme.
+    pub fn search_hint(mut self, hint: impl Into<String>) -> Self {
+        self.search_hint = hint.into();
         self
     }
 
@@ -309,7 +321,7 @@ impl<State: 'static> DropdownPanelView<State> {
                 }
             },
         )
-        .label(DROPDOWN_SEARCH_HINT))]
+        .label(self.search_hint.clone()))]
     }
 
     /// The busy indicator's view, in a zero-or-one list on the same rule.
@@ -1986,5 +1998,101 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    // ---- MaterialStrings: setter > ambient theme > English ------------------
+
+    mod strings {
+        use super::*;
+        use std::cell::RefCell;
+
+        fn thai_theme() -> Theme {
+            let mut theme = crate::baseline();
+            let mut thai = MaterialStrings::ENGLISH;
+            thai.dropdown_hint = "เลือก".into();
+            thai.dropdown_empty = "ไม่พบรายการ".into();
+            thai.dropdown_search_hint = "ค้นหา…".into();
+            theme.extensions.insert(thai);
+            theme
+        }
+
+        /// Builds `make` under the ambient `Theme` context (when set) and
+        /// hands the result to `record`, so the test reads what the builder
+        /// resolved.
+        struct Host<V: 'static> {
+            theme: Option<Theme>,
+            make: fn() -> V,
+            record: fn(&V),
+        }
+        impl<V: View<()> + 'static> frust::Component for Host<V> {
+            type State = ();
+            fn init(&self) {}
+            fn build(&self, _state: &mut ()) -> impl View<()> {
+                if let Some(theme) = &self.theme {
+                    frust::provide_context(theme.clone());
+                }
+                let view = (self.make)();
+                (self.record)(&view);
+                view
+            }
+        }
+
+        fn build_under<V: View<()> + 'static>(
+            theme: Option<Theme>,
+            make: fn() -> V,
+            record: fn(&V),
+        ) {
+            let mut root: frust_core::RenderRoot<(), frust::ComponentView<Host<V>>> =
+                frust_core::RenderRoot::new();
+            let mut logic = move |_: &mut ()| {
+                frust::component(Host {
+                    theme: theme.clone(),
+                    make,
+                    record,
+                })
+            };
+            let mut state = ();
+            root.rebuild(&mut logic, &mut state);
+        }
+
+        thread_local! {
+            static SEEN: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+        }
+        fn seen() -> Vec<String> {
+            SEEN.with(|s| s.borrow().clone())
+        }
+        fn note(values: &[&str]) {
+            SEEN.with(|s| *s.borrow_mut() = values.iter().map(|v| v.to_string()).collect());
+        }
+
+        fn plain() -> DropdownPanelView<()> {
+            dropdown_panel(Vec::new(), |_: &mut (), _| {})
+        }
+        fn with_setters() -> DropdownPanelView<()> {
+            dropdown_panel(Vec::new(), |_: &mut (), _| {})
+                .empty_text("Nothing")
+                .search_hint("Find")
+        }
+        fn record(view: &DropdownPanelView<()>) {
+            note(&[&view.empty_text, &view.search_hint]);
+        }
+
+        #[test]
+        fn defaults_to_english() {
+            build_under(None, plain, record);
+            assert_eq!(seen(), ["No items found", "Search…"]);
+        }
+
+        #[test]
+        fn reads_the_thai_theme_strings() {
+            build_under(Some(thai_theme()), plain, record);
+            assert_eq!(seen(), ["ไม่พบรายการ", "ค้นหา…"]);
+        }
+
+        #[test]
+        fn setters_beat_the_theme_strings() {
+            build_under(Some(thai_theme()), with_setters, record);
+            assert_eq!(seen(), ["Nothing", "Find"]);
+        }
     }
 }

@@ -95,6 +95,7 @@ use crate::icon_button::icon_button;
 use crate::overlay::{finite_or_zero, reduce_motion};
 use crate::press::presses;
 use crate::state_layer::StateLayer;
+use crate::strings::MaterialStrings;
 
 /// The pill's resting horizontal inset, in logical px —
 /// `M3ESearchBarTheme.restingExpandPadding` (8dp).
@@ -208,6 +209,10 @@ pub struct SearchBarView<State: 'static> {
     trailing: Vec<AnyView<State>>,
     on_tap: Option<OnState<State>>,
     enabled: bool,
+    /// The clear action's accessible name: the setter, else the ambient
+    /// theme's strings read when the view was created
+    /// (`M3ESearchConstants.clearButtonTooltip` in English).
+    clear_label: String,
 }
 
 /// Build a controlled M3 search bar showing `query`.
@@ -227,6 +232,9 @@ pub fn search_bar<State: 'static, F: Fn(&mut State, String) + 'static>(
     on_query_changed: F,
 ) -> SearchBarView<State> {
     SearchBarView {
+        clear_label: MaterialStrings::from_build_context()
+            .search_clear_a11y
+            .to_string(),
         query: query.into(),
         on_query_changed: Rc::new(on_query_changed),
         hint: None,
@@ -238,6 +246,13 @@ pub fn search_bar<State: 'static, F: Fn(&mut State, String) + 'static>(
 }
 
 impl<State: 'static> SearchBarView<State> {
+    /// Override the clear action's accessible name. Unset, it reads
+    /// [`MaterialStrings::search_clear_a11y`] from the ambient theme.
+    pub fn clear_label(mut self, label: impl Into<String>) -> Self {
+        self.clear_label = label.into();
+        self
+    }
+
     /// Set the placeholder shown while `query` is empty
     /// (`M3ESearchBar.hintText`). It also labels the bar's accessibility node.
     pub fn hint(mut self, hint: impl Into<String>) -> Self {
@@ -303,7 +318,7 @@ impl<State: 'static> SearchBarView<State> {
             icon_button(any::<State, _>(icon(crate::icons::CLOSE)), move |state| {
                 on_query_changed(state, String::new());
             })
-            .semantic_label(CLEAR_LABEL),
+            .semantic_label(self.clear_label.clone()),
         )]
     }
 
@@ -339,9 +354,6 @@ impl<State: 'static> SearchBarView<State> {
         )
     }
 }
-
-/// The clear action's accessible name — `M3ESearchConstants.clearButtonTooltip`.
-const CLEAR_LABEL: &str = "Clear";
 
 impl<State: 'static> View<State> for SearchBarView<State> {
     type Element = SearchBarWidget;
@@ -1166,5 +1178,85 @@ mod tests {
             bc.constrain(self.size)
         }
         fn paint(&mut self, _c: &mut PaintCtx, _s: &mut dyn PaintScene) {}
+    }
+
+    // ---- MaterialStrings: setter > ambient theme > English ------------------
+
+    mod strings {
+        use super::*;
+
+        /// Provides `theme` as the ambient `Theme` context (when set), then
+        /// builds the view under test so build-time `use_context` resolves.
+        struct Host {
+            theme: Option<frust::Theme>,
+            make: fn() -> AnyView<()>,
+        }
+        impl frust::Component for Host {
+            type State = ();
+            fn init(&self) {}
+            fn build(&self, _state: &mut ()) -> impl View<()> {
+                if let Some(theme) = &self.theme {
+                    frust::provide_context(theme.clone());
+                }
+                (self.make)()
+            }
+        }
+
+        fn thai_theme() -> frust::Theme {
+            let mut theme = crate::baseline();
+            let mut thai = MaterialStrings::ENGLISH;
+            thai.search_clear_a11y = "ล้าง".into();
+            theme.extensions.insert(thai);
+            theme
+        }
+
+        fn labels(theme: Option<frust::Theme>, make: fn() -> AnyView<()>) -> Vec<String> {
+            let mut root: RenderRoot<(), frust::ComponentView<Host>> = RenderRoot::new();
+            let mut logic = move |_: &mut ()| {
+                frust::component(Host {
+                    theme: theme.clone(),
+                    make,
+                })
+            };
+            let mut state = ();
+            root.rebuild(&mut logic, &mut state);
+            let mut tcx = TextContext::new();
+            root.layout_with_text(Size::new(400.0, 200.0), &mut tcx as &mut dyn Any);
+            root.semantics()
+                .nodes
+                .iter()
+                .filter_map(|(_, n)| n.label().map(str::to_string))
+                .collect()
+        }
+
+        fn has(labels: &[String], wanted: &str) -> bool {
+            labels.iter().any(|l| l == wanted)
+        }
+
+        fn plain() -> AnyView<()> {
+            any(search_bar("hello", |_: &mut (), _| {}))
+        }
+        fn with_setter() -> AnyView<()> {
+            any(search_bar("hello", |_: &mut (), _| {}).clear_label("Wipe"))
+        }
+
+        #[test]
+        fn defaults_to_english() {
+            assert!(has(&labels(None, plain), "Clear"));
+        }
+
+        #[test]
+        fn reads_the_thai_theme_strings() {
+            let got = labels(Some(thai_theme()), plain);
+            assert!(has(&got, "ล้าง"));
+            assert!(!has(&got, "Clear"));
+        }
+
+        #[test]
+        fn setter_beats_the_theme_strings() {
+            let got = labels(Some(thai_theme()), with_setter);
+            assert!(has(&got, "Wipe"));
+            assert!(!has(&got, "ล้าง"));
+        }
     }
 }
