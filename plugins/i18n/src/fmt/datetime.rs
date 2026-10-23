@@ -15,19 +15,22 @@
 //! between them is the *date* half's spelling, which is CLDR's call, not
 //! this module's.
 //!
-//! # Calendar: the locale's, with a proleptic-Gregorian input
+//! # Calendar: the locale's by default, overridable per call
 //!
 //! Input is a plain proleptic-Gregorian (ISO 8601) year/month/day —
 //! [`super::CivilDate`] — and output is rendered in the calendar CLDR gives
-//! the locale, which is Gregorian for every locale but a handful (`th` is
-//! Buddhist, `fa` Persian). That is ICU4X's own recommendation and the
-//! reason [`DateTimeFormatter`] exists at all; pinning Gregorian output
-//! instead would need `FixedCalendarDateTimeFormatter<Gregorian, _>`, whose
-//! calendar type `icu_datetime` does not re-export.
+//! the locale, which is Gregorian for nearly every locale. The exceptions are
+//! keyed on the **region**, not the language: `th-TH` and `en-TH` render
+//! Buddhist years (`13 ต.ค. 2569`, `Oct 13, 2569 BE`) while a bare `th` tag
+//! (no region) is already Gregorian (`13 ต.ค. 2026`). That is ICU4X's own
+//! recommendation and the reason [`DateTimeFormatter`] exists at all.
 //!
 //! A [`crate::Locale`] carries no `-u-ca-`/`-u-hc-` extension (it is a
-//! *language identifier*), so neither the calendar nor the hour cycle can be
-//! overridden per call — both are whatever CLDR gives the locale.
+//! *language identifier*), so the calendar and hour cycle travel beside it in
+//! [`DateTimeOptions`]: `calendar: Some(Calendar::Gregorian)` pins `th-TH` or
+//! `en-TH` to Gregorian years, and `hour_cycle` overrides the locale's clock.
+//! Only a region-bearing tag has a non-Gregorian default to override, so the
+//! calendar option leaves a bare `th` unchanged.
 //!
 //! # Time zones: none here, zoned entry points in `zone`
 //!
@@ -43,6 +46,9 @@ use icu_datetime::fieldsets::{T, YMD, YMDT};
 use icu_datetime::input::{Date, DateTime, Time};
 use icu_datetime::options::TimePrecision;
 use icu_datetime::{DateTimeFormatter, DateTimeFormatterPreferences, NoCalendarFormatter};
+use icu_locale_core::preferences::extensions::unicode::keywords::{
+    CalendarAlgorithm, HijriCalendarAlgorithm, HourCycle as IcuHourCycle,
+};
 
 use crate::{I18nError, Locale};
 
@@ -62,9 +68,51 @@ const DAYS_TO_UNIX_EPOCH: i64 = 719_468;
 /// Days in a 400-year Gregorian era.
 const DAYS_PER_ERA: i64 = 146_097;
 
-type DateCache = Cache<(Locale, DateLength), DateTimeFormatter<YMD>>;
-type TimeCache = Cache<(Locale, DateLength), NoCalendarFormatter<T>>;
-type DateTimeCache = Cache<(Locale, DateLength), DateTimeFormatter<YMDT>>;
+/// A calendar a caller can pin a date to, instead of the locale's default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Calendar {
+    /// The Gregorian calendar (`-u-ca-gregory`).
+    Gregorian,
+    /// The Thai Buddhist calendar (`-u-ca-buddhist`): Gregorian with a
+    /// year offset of 543.
+    Buddhist,
+    /// The Japanese imperial-era calendar (`-u-ca-japanese`).
+    Japanese,
+    /// The Hijri calendar (`-u-ca-islamic`), with ICU4X's default variant.
+    Islamic,
+    /// The Hebrew calendar (`-u-ca-hebrew`).
+    Hebrew,
+    /// The traditional Chinese calendar (`-u-ca-chinese`).
+    Chinese,
+}
+
+/// A clock a caller can pin a time to, instead of the locale's default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HourCycle {
+    /// Hours 0-11 on a 12-hour clock (`-u-hc-h11`).
+    H11,
+    /// Hours 1-12 on a 12-hour clock (`-u-hc-h12`).
+    H12,
+    /// Hours 0-23 (`-u-hc-h23`).
+    H23,
+    /// Hours 1-24. ICU4X has no such cycle, so asking for it is an error.
+    H24,
+}
+
+/// Per-call overrides for what a [`crate::Locale`] cannot carry: the Unicode
+/// `ca` and `hc` keywords. `None` keeps the locale's own default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct DateTimeOptions {
+    /// The calendar to render the date in.
+    pub calendar: Option<Calendar>,
+    /// The hour cycle to render the time in.
+    pub hour_cycle: Option<HourCycle>,
+}
+
+type Key = (Locale, DateLength, Option<Calendar>, Option<HourCycle>);
+type DateCache = Cache<Key, DateTimeFormatter<YMD>>;
+type TimeCache = Cache<Key, NoCalendarFormatter<T>>;
+type DateTimeCache = Cache<Key, DateTimeFormatter<YMDT>>;
 
 static DATES: LazyLock<DateCache> = LazyLock::new(Cache::new);
 static TIMES: LazyLock<TimeCache> = LazyLock::new(Cache::new);
@@ -76,11 +124,22 @@ pub(super) fn date(
     date: CivilDate,
     length: DateLength,
 ) -> Result<String, I18nError> {
+    date_with(locale, date, length, &DateTimeOptions::default())
+}
+
+/// Formats `date` at `length`, with `options` overriding the locale's calendar.
+pub(super) fn date_with(
+    locale: &Locale,
+    date: CivilDate,
+    length: DateLength,
+    options: &DateTimeOptions,
+) -> Result<String, I18nError> {
+    let preferences = prefs(locale, options)?;
     let value =
         Date::try_new_iso(date.year, date.month, date.day).map_err(|e| bad_date(date, e))?;
     let formatter = DATES
-        .get_or_build(&(locale.clone(), length), || {
-            DateTimeFormatter::try_new(prefs(locale), date_fields(length))
+        .get_or_build(&key(locale, length, options), || {
+            DateTimeFormatter::try_new(preferences, date_fields(length))
         })
         .map_err(|error| load_failure(locale, "date", &error))?;
 
@@ -93,11 +152,22 @@ pub(super) fn time(
     time: CivilTime,
     length: DateLength,
 ) -> Result<String, I18nError> {
+    time_with(locale, time, length, &DateTimeOptions::default())
+}
+
+/// Formats `time` at `length`, with `options` overriding the locale's hour cycle.
+pub(super) fn time_with(
+    locale: &Locale,
+    time: CivilTime,
+    length: DateLength,
+    options: &DateTimeOptions,
+) -> Result<String, I18nError> {
+    let preferences = prefs(locale, options)?;
     let value =
         Time::try_new(time.hour, time.minute, time.second, 0).map_err(|e| bad_time(time, e))?;
     let formatter = TIMES
-        .get_or_build(&(locale.clone(), length), || {
-            NoCalendarFormatter::try_new(prefs(locale), time_fields(length))
+        .get_or_build(&key(locale, length, options), || {
+            NoCalendarFormatter::try_new(preferences, time_fields(length))
         })
         .map_err(|error| load_failure(locale, "time", &error))?;
 
@@ -111,14 +181,27 @@ pub(super) fn datetime(
     time: CivilTime,
     length: DateLength,
 ) -> Result<String, I18nError> {
+    datetime_with(locale, date, time, length, &DateTimeOptions::default())
+}
+
+/// Formats `date` and `time` together, with `options` overriding the
+/// locale's calendar and hour cycle.
+pub(super) fn datetime_with(
+    locale: &Locale,
+    date: CivilDate,
+    time: CivilTime,
+    length: DateLength,
+    options: &DateTimeOptions,
+) -> Result<String, I18nError> {
+    let preferences = prefs(locale, options)?;
     let value = DateTime {
         date: Date::try_new_iso(date.year, date.month, date.day).map_err(|e| bad_date(date, e))?,
         time: Time::try_new(time.hour, time.minute, time.second, 0)
             .map_err(|e| bad_time(time, e))?,
     };
     let formatter = DATE_TIMES
-        .get_or_build(&(locale.clone(), length), || {
-            DateTimeFormatter::try_new(prefs(locale), datetime_fields(length))
+        .get_or_build(&key(locale, length, options), || {
+            DateTimeFormatter::try_new(preferences, datetime_fields(length))
         })
         .map_err(|error| load_failure(locale, "date-time", &error))?;
 
@@ -179,9 +262,41 @@ fn civil_from_days(days: i64) -> Option<CivilDate> {
     })
 }
 
-/// The ICU4X preferences bag for `locale`.
-fn prefs(locale: &Locale) -> DateTimeFormatterPreferences {
-    DateTimeFormatterPreferences::from(&bridge::lang_id(locale))
+/// The cache key for one formatter configuration.
+fn key(locale: &Locale, length: DateLength, options: &DateTimeOptions) -> Key {
+    (locale.clone(), length, options.calendar, options.hour_cycle)
+}
+
+/// The ICU4X preferences bag for `locale`, with `options` applied.
+///
+/// # Errors
+///
+/// [`I18nError::Format`] for an hour cycle ICU4X cannot express.
+fn prefs(
+    locale: &Locale,
+    options: &DateTimeOptions,
+) -> Result<DateTimeFormatterPreferences, I18nError> {
+    let mut preferences = DateTimeFormatterPreferences::from(&bridge::lang_id(locale));
+    preferences.calendar_algorithm = options.calendar.map(|calendar| match calendar {
+        Calendar::Gregorian => CalendarAlgorithm::Gregory,
+        Calendar::Buddhist => CalendarAlgorithm::Buddhist,
+        Calendar::Japanese => CalendarAlgorithm::Japanese,
+        Calendar::Islamic => CalendarAlgorithm::Hijri(None::<HijriCalendarAlgorithm>),
+        Calendar::Hebrew => CalendarAlgorithm::Hebrew,
+        Calendar::Chinese => CalendarAlgorithm::Chinese,
+    });
+    preferences.hour_cycle = match options.hour_cycle {
+        None => None,
+        Some(HourCycle::H11) => Some(IcuHourCycle::H11),
+        Some(HourCycle::H12) => Some(IcuHourCycle::H12),
+        Some(HourCycle::H23) => Some(IcuHourCycle::H23),
+        Some(HourCycle::H24) => {
+            return Err(I18nError::Format(format!(
+                "{locale}: the h24 hour cycle is not supported"
+            )));
+        }
+    };
+    Ok(preferences)
 }
 
 /// The date field set for `length`.

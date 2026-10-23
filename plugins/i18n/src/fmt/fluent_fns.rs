@@ -84,8 +84,8 @@ use fluent_bundle::{FluentArgs, FluentValue};
 use crate::{FluentFunction, Locale, LocaleSet};
 
 use super::{
-    CivilDate, CivilTime, DateLength, ListLength, ListStyle, RelativeDayStyle, datetime, relative,
-    zone,
+    Calendar, CivilDate, CivilTime, DateLength, DateTimeOptions, HourCycle, ListLength, ListStyle,
+    RelativeDayStyle, datetime, relative, zone,
 };
 
 /// Registers ICU-backed `NUMBER`, `DATETIME`, `RELATIVE_DAY` and `LIST` into `set`.
@@ -291,7 +291,7 @@ fn number_minor<'a>(
     }
 }
 
-/// `DATETIME($d, dateStyle: …, timeStyle: …, timeZone: …)`.
+/// `DATETIME($d, dateStyle: …, timeStyle: …, timeZone: …, calendar: "gregory"|…, hourCycle: "h23"|…)`.
 fn date_time<'a>(
     locale: &Locale,
     positional: &[FluentValue<'a>],
@@ -318,15 +318,35 @@ fn date_time<'a>(
     let date_style = option(named, "dateStyle").map(length);
     let time_style = option(named, "timeStyle").map(length);
 
-    let formatted = match (date_style, time_style) {
-        (Some(date_style), Some(_)) => datetime::datetime(locale, date, time, date_style),
-        (None, Some(time_style)) => datetime::time(locale, time, time_style),
-        (date_style, None) => {
-            datetime::date(locale, date, date_style.unwrap_or(DateLength::Medium))
-        }
+    let options = DateTimeOptions {
+        calendar: option(named, "calendar").and_then(calendar),
+        hour_cycle: option(named, "hourCycle").and_then(hour_cycle),
     };
 
-    report_unhonored(named, "DATETIME", &["dateStyle", "timeStyle", "timeZone"]);
+    let formatted = match (date_style, time_style) {
+        (Some(date_style), Some(_)) => {
+            datetime::datetime_with(locale, date, time, date_style, &options)
+        }
+        (None, Some(time_style)) => datetime::time_with(locale, time, time_style, &options),
+        (date_style, None) => datetime::date_with(
+            locale,
+            date,
+            date_style.unwrap_or(DateLength::Medium),
+            &options,
+        ),
+    };
+
+    report_unhonored(
+        named,
+        "DATETIME",
+        &[
+            "dateStyle",
+            "timeStyle",
+            "timeZone",
+            "calendar",
+            "hourCycle",
+        ],
+    );
     match formatted {
         Ok(formatted) => FluentValue::from(formatted),
         Err(error) => {
@@ -357,6 +377,40 @@ fn length(style: &str) -> DateLength {
         unknown => {
             log::debug!("frust-i18n: DATETIME(…: \"{unknown}\") — using the medium length");
             DateLength::Medium
+        }
+    }
+}
+
+/// Maps a `calendar` value (a Unicode `ca` identifier) onto a calendar.
+fn calendar(id: &str) -> Option<Calendar> {
+    match id {
+        "gregory" | "gregorian" => Some(Calendar::Gregorian),
+        "buddhist" => Some(Calendar::Buddhist),
+        "japanese" => Some(Calendar::Japanese),
+        "islamic" => Some(Calendar::Islamic),
+        "hebrew" => Some(Calendar::Hebrew),
+        "chinese" => Some(Calendar::Chinese),
+        unknown => {
+            log::debug!(
+                "frust-i18n: DATETIME(calendar: \"{unknown}\") — using the locale's calendar"
+            );
+            None
+        }
+    }
+}
+
+/// Maps an `hourCycle` value onto an hour cycle.
+fn hour_cycle(id: &str) -> Option<HourCycle> {
+    match id {
+        "h11" => Some(HourCycle::H11),
+        "h12" => Some(HourCycle::H12),
+        "h23" => Some(HourCycle::H23),
+        "h24" => Some(HourCycle::H24),
+        unknown => {
+            log::debug!(
+                "frust-i18n: DATETIME(hourCycle: \"{unknown}\") — using the locale's hour cycle"
+            );
+            None
         }
     }
 }

@@ -68,21 +68,23 @@ mod zone;
 
 use crate::{I18nError, Locale, LocaleSet};
 
+pub use datetime::{Calendar, DateTimeOptions, HourCycle};
 pub use interval::{date_range, datetime_range_in_zone, time_range, time_range_in_zone};
 pub use list::{ListLength, ListStyle, list};
 pub use names::{language_endonym, language_name};
 pub use relative::{RelativeDayStyle, relative_day, relative_day_civil};
 pub use units::{Unit, UnitStyle, duration_minutes, units, units_by_id, units_decimal};
 pub use zone::{
-    civil_at_offset, date_in_zone, datetime_at_offset, datetime_in_zone, time_in_zone,
-    zone_offset_seconds, zoned_civil,
+    civil_at_offset, date_in_zone, date_in_zone_with, datetime_at_offset, datetime_at_offset_with,
+    datetime_in_zone, datetime_in_zone_with, time_in_zone, time_in_zone_with, zone_offset_seconds,
+    zoned_civil,
 };
 
 /// A calendar date with no time zone, in the proleptic Gregorian calendar
 /// (ISO 8601) — the shape [`date`]/[`datetime`] take.
 ///
 /// Rendered in the calendar CLDR gives the target locale, which is Gregorian
-/// for all but a handful of locales; the fields themselves are always
+/// for all but a handful of region-keyed locales (`th-TH`); the fields themselves are always
 /// proleptic Gregorian regardless.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CivilDate {
@@ -227,6 +229,54 @@ pub fn datetime(
     length: DateLength,
 ) -> Result<String, I18nError> {
     datetime::datetime(locale, date, time, length)
+}
+
+/// Formats `date` at `length`, with `options` overriding the locale's calendar.
+///
+/// `date_with(&th_th, d, DateLength::Medium, &DateTimeOptions { calendar:
+/// Some(Calendar::Gregorian), ..Default::default() })` renders Gregorian
+/// years where `th-TH` alone gives Buddhist ones.
+///
+/// # Errors
+///
+/// As [`date`].
+pub fn date_with(
+    locale: &Locale,
+    date: CivilDate,
+    length: DateLength,
+    options: &DateTimeOptions,
+) -> Result<String, I18nError> {
+    datetime::date_with(locale, date, length, options)
+}
+
+/// Formats `time` at `length`, with `options` overriding the locale's hour cycle.
+///
+/// # Errors
+///
+/// As [`time`], plus [`I18nError::Format`] for [`HourCycle::H24`].
+pub fn time_with(
+    locale: &Locale,
+    time: CivilTime,
+    length: DateLength,
+    options: &DateTimeOptions,
+) -> Result<String, I18nError> {
+    datetime::time_with(locale, time, length, options)
+}
+
+/// Formats `date` and `time` together, with `options` overriding the
+/// locale's calendar and hour cycle.
+///
+/// # Errors
+///
+/// As [`datetime`], plus [`I18nError::Format`] for [`HourCycle::H24`].
+pub fn datetime_with(
+    locale: &Locale,
+    date: CivilDate,
+    time: CivilTime,
+    length: DateLength,
+    options: &DateTimeOptions,
+) -> Result<String, I18nError> {
+    datetime::datetime_with(locale, date, time, length, options)
 }
 
 /// Registers ICU-backed `NUMBER()`, `DATETIME()`, `RELATIVE_DAY()` and `LIST()` into `set`, so FTL

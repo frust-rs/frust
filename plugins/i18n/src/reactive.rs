@@ -154,16 +154,19 @@ impl I18n {
     ///    defaults, first day of week — **and, surprisingly, the calendar
     ///    system**: ICU4X's calendar default is keyed off the *region*, not
     ///    the language, so `en-TH` still renders a Buddhist-era year
-    ///    (`"January 31, 2567 BE"`, not `"...2024"`) even though every
-    ///    month/weekday name is English — verified empirically, this crate's
-    ///    own `fmt::datetime` module doc's "`th` is Buddhist" framing is
-    ///    language-shaped prose for a region-driven fact). This branch
-    ///    **never** adopts a requested tag's *language* — an app with no
-    ///    Thai `.ftl` catalog must never render UI text the user can't read,
-    ///    so only the region crosses the boundary; the calendar-system
-    ///    surprise above is the one place that boundary still lets through
-    ///    something visibly non-Western, worth a caller's attention before
-    ///    shipping a date-heavy screen behind this branch. Every in-message
+    ///    (`"Oct 13, 2569 BE"`, not `"Oct 13, 2026"`) even though every
+    ///    month/weekday name is English. A bare `th` tag (no region) is
+    ///    already Gregorian, so only region-bearing tags such as `th-TH` and
+    ///    `en-TH` are affected. Pass
+    ///    `DateTimeOptions { calendar: Some(Calendar::Gregorian), .. }` to
+    ///    `fmt::date_with` (or `calendar: "gregory"` to `DATETIME()`) to pin
+    ///    Gregorian years. This branch **never** adopts a requested tag's
+    ///    *language* — an app with no Thai `.ftl` catalog must never render
+    ///    UI text the user can't read, so only the region crosses the
+    ///    boundary; the calendar-system surprise above is the one place that
+    ///    boundary still lets through something visibly non-Western, worth a
+    ///    caller's attention before shipping a date-heavy screen behind this
+    ///    branch. Every in-message
     ///    `NUMBER()`/`DATETIME()` Fluent placeable formats at the *message*
     ///    locale's own language, never `format_locale`'s composed region —
     ///    see §4e of this crate's README for why, and `docs/LIMITATIONS.md`

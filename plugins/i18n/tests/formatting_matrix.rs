@@ -17,7 +17,9 @@
 
 #![cfg(feature = "formatting")]
 
-use frust_i18n::fmt::{self, CivilDate, CivilTime, DateLength};
+use frust_i18n::fmt::{
+    self, Calendar, CivilDate, CivilTime, DateLength, DateTimeOptions, HourCycle,
+};
 use frust_i18n::{Engine, Locale, LocaleSet, args};
 
 /// 2024-01-31, the sample date every date assertion below formats.
@@ -1001,5 +1003,147 @@ fn list_function_in_ftl() {
             .resolve(&chain, "either", Some(&args))
             .expect("resolves"),
         "Pool or Shower"
+    );
+}
+
+const OCT_13: CivilDate = CivilDate {
+    year: 2026,
+    month: 10,
+    day: 13,
+};
+
+fn calendar_option(calendar: Calendar) -> DateTimeOptions {
+    DateTimeOptions {
+        calendar: Some(calendar),
+        hour_cycle: None,
+    }
+}
+
+#[test]
+fn the_buddhist_default_is_keyed_on_the_region_and_the_calendar_option_overrides_it() {
+    let gregorian = calendar_option(Calendar::Gregorian);
+    let rows = [
+        ("th-TH", "13 ต.ค. 2569", "13 ต.ค. 2026"),
+        ("en-TH", "Oct 13, 2569 BE", "Oct 13, 2026"),
+        ("th", "13 ต.ค. 2026", "13 ต.ค. 2026"),
+    ];
+
+    for (tag, unset, pinned) in rows {
+        assert_eq!(
+            fmt::date(&locale(tag), OCT_13, DateLength::Medium).expect("formats"),
+            unset,
+            "{tag} unset"
+        );
+        assert_eq!(
+            fmt::date_with(&locale(tag), OCT_13, DateLength::Medium, &gregorian).expect("formats"),
+            pinned,
+            "{tag} gregorian"
+        );
+    }
+}
+
+#[test]
+fn the_hour_cycle_option_overrides_the_locales_clock() {
+    let option = |hour_cycle| DateTimeOptions {
+        calendar: None,
+        hour_cycle: Some(hour_cycle),
+    };
+    let at = CivilTime {
+        hour: 13,
+        minute: 5,
+        second: 0,
+    };
+
+    assert_eq!(
+        fmt::time_with(
+            &locale("en"),
+            at,
+            DateLength::Short,
+            &option(HourCycle::H23)
+        )
+        .expect("formats"),
+        "13:05"
+    );
+    let ja = fmt::time_with(
+        &locale("ja"),
+        at,
+        DateLength::Short,
+        &option(HourCycle::H12),
+    )
+    .expect("formats");
+    assert!(ja.contains("1:05"), "{ja}");
+    assert!(
+        fmt::time_with(
+            &locale("en"),
+            at,
+            DateLength::Short,
+            &option(HourCycle::H24)
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn the_zoned_with_variants_honour_the_options() {
+    let gregorian = calendar_option(Calendar::Gregorian);
+    // 2026-10-13T12:00:00Z
+    let instant = 1_791_892_800;
+    let th = locale("th-TH");
+    let medium = DateLength::Medium;
+
+    assert_eq!(
+        fmt::date_in_zone_with(&th, instant, "Asia/Bangkok", medium, &gregorian).unwrap(),
+        "13 ต.ค. 2026"
+    );
+    assert_eq!(
+        fmt::date_in_zone(&th, instant, "Asia/Bangkok", medium).unwrap(),
+        "13 ต.ค. 2569"
+    );
+    let at = fmt::datetime_at_offset_with(&th, instant, 7 * 3600, medium, &gregorian).unwrap();
+    assert!(at.contains("2026"), "{at}");
+    let zoned = fmt::datetime_in_zone_with(&th, instant, "Asia/Bangkok", medium, &gregorian);
+    assert!(zoned.unwrap().contains("2026"));
+    let clock = DateTimeOptions {
+        calendar: None,
+        hour_cycle: Some(HourCycle::H23),
+    };
+    assert_eq!(
+        fmt::time_in_zone_with(
+            &locale("en"),
+            instant,
+            "Asia/Bangkok",
+            DateLength::Short,
+            &clock
+        )
+        .unwrap(),
+        "19:00"
+    );
+}
+
+#[test]
+fn ftl_datetime_honours_calendar_and_hour_cycle() {
+    const FTL: &str = "d = { DATETIME($t, dateStyle: \"medium\", calendar: \"gregory\") }\n\
+                       u = { DATETIME($t, dateStyle: \"medium\") }\n\
+                       c = { DATETIME($t, timeStyle: \"short\", hourCycle: \"h23\") }\n";
+    let engine = Engine::new(fmt::with_icu_functions(
+        LocaleSet::new(locale("th-TH"))
+            .with_locale(locale("th-TH"), [("app.ftl", FTL)])
+            .with_isolating(false),
+    ))
+    .expect("engine");
+    let chain = engine.negotiate(&[locale("th-TH")]);
+    let args = args!("t" => 1_791_892_800_i64);
+
+    assert_eq!(
+        engine.resolve(&chain, "d", Some(&args)).expect("d"),
+        "13 ต.ค. 2026"
+    );
+    assert_eq!(
+        engine.resolve(&chain, "u", Some(&args)).expect("u"),
+        "13 ต.ค. 2569"
+    );
+    assert_eq!(
+        engine.resolve(&chain, "c", Some(&args)).expect("c"),
+        "12:00"
     );
 }
