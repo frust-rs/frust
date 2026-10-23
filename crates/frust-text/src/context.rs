@@ -2163,6 +2163,9 @@ mod tests {
             .collect()
     }
 
+    // One sequential test on purpose: every leg asserts an exact delta of the
+    // process-wide `notdef_glyph_count()`, so splitting them into parallel tests
+    // lets one leg's increments land inside another's window.
     #[test]
     fn notdef_counts_and_warns_once() {
         let _ = log::set_logger(&WarnCapture);
@@ -2191,15 +2194,13 @@ mod tests {
         let mid = crate::notdef_glyph_count();
         walk(&mut cx, &family, "He llo");
         assert_eq!(crate::notdef_glyph_count() - mid, 0);
-    }
 
-    #[test]
-    fn covered_han_is_not_counted() {
+        // Han the face covers is not .notdef.
         let (mut cx, family) = systemless_cx(include_bytes!(
             "../../../testing/fonts/NotoSansJP-Subset.otf"
         ));
-        let before = crate::notdef_glyph_count();
+        let mid = crate::notdef_glyph_count();
         walk(&mut cx, &family, "日本語");
-        assert_eq!(crate::notdef_glyph_count() - before, 0);
+        assert_eq!(crate::notdef_glyph_count() - mid, 0);
     }
 }
