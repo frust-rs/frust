@@ -184,8 +184,7 @@ const HAN_FALLBACK_KEYS: &[(&str, Option<&str>)] = &[
 ///
 /// A non-empty list is never touched (macOS's Heiti, or a parsable PingFang,
 /// keeps its answer). When no candidate is installed this changes nothing and
-/// logs once in debug builds. Target-independent so host tests exercise it.
-#[doc(hidden)]
+/// logs at debug level. Target-independent so host tests exercise it.
 #[cfg_attr(not(target_vendor = "apple"), allow(dead_code))]
 pub(crate) fn append_han_fallbacks(
     collection: &mut parley::fontique::Collection,
@@ -197,14 +196,7 @@ pub(crate) fn append_han_fallbacks(
         .find_map(|name| collection.family_by_name(name))
         .map(|info| info.id());
     let Some(family) = family else {
-        #[cfg(debug_assertions)]
-        {
-            static LOGGED: std::sync::atomic::AtomicBool =
-                std::sync::atomic::AtomicBool::new(false);
-            if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                eprintln!("frust-text: no Han fallback family installed (tried {candidates:?})");
-            }
-        }
+        log::debug!("frust-text: no Han fallback family installed (tried {candidates:?})");
         return 0;
     };
     let mut filled = 0;
@@ -2114,5 +2106,100 @@ mod tests {
                 .next()
                 .is_none()
         );
+    }
+
+    // --- .notdef detection (system fonts off so host Han fonts never cover) ---
+
+    struct WarnCapture;
+    static WARNS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    impl log::Log for WarnCapture {
+        fn enabled(&self, m: &log::Metadata) -> bool {
+            m.level() <= log::Level::Warn
+        }
+        fn log(&self, r: &log::Record) {
+            if r.level() == log::Level::Warn {
+                WARNS.lock().unwrap().push(r.args().to_string());
+            }
+        }
+        fn flush(&self) {}
+    }
+
+    /// Registers `bytes` in a system-less context; returns it and the family.
+    fn systemless_cx(bytes: &[u8]) -> (TextContext, String) {
+        let mut cx = TextContext::new();
+        cx.font_ctx.collection =
+            parley::fontique::Collection::new(parley::fontique::CollectionOptions {
+                shared: false,
+                system_fonts: false,
+            });
+        let id = cx
+            .font_ctx
+            .collection
+            .register_fonts(Blob::from(bytes.to_vec()), None)[0]
+            .0;
+        let name = cx.font_ctx.collection.family_name(id).unwrap().to_owned();
+        (cx, name)
+    }
+
+    fn walk(cx: &mut TextContext, family: &str, text: &str) {
+        let style = TextStyle {
+            family: crate::FontFamily::named(family),
+            ..style(16.0)
+        };
+        let _ = cx
+            .layout(text, &style, None)
+            .to_scene_runs(kurbo::Point::ORIGIN);
+    }
+
+    fn warns_naming(family: &str) -> Vec<String> {
+        let quoted = format!("'{family}");
+        WARNS
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|w| w.contains(&quoted) || w.contains(family))
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn notdef_counts_and_warns_once() {
+        let _ = log::set_logger(&WarnCapture);
+        log::set_max_level(log::LevelFilter::Warn);
+
+        // Latin-only subset (" ,Helo\u{e9}"): two Han characters are .notdef.
+        let noto = include_bytes!("../../../testing/fonts/NotoSans-Subset.ttf");
+        let (mut cx, family) = systemless_cx(noto);
+        let before = crate::notdef_glyph_count();
+        walk(&mut cx, &family, "He中文 lo");
+        assert_eq!(crate::notdef_glyph_count() - before, 2);
+        let first = warns_naming(&family);
+        assert_eq!(first.len(), 1, "first layout warns: {first:?}");
+        assert!(
+            first[0].contains("中文"),
+            "names affected chars: {}",
+            first[0]
+        );
+
+        // Counted again, but warned only once per font.
+        walk(&mut cx, &family, "He中文 lo");
+        assert_eq!(crate::notdef_glyph_count() - before, 4);
+        assert_eq!(warns_naming(&family).len(), 1, "warn fires once per font");
+
+        // Whitespace is not .notdef.
+        let mid = crate::notdef_glyph_count();
+        walk(&mut cx, &family, "He llo");
+        assert_eq!(crate::notdef_glyph_count() - mid, 0);
+    }
+
+    #[test]
+    fn covered_han_is_not_counted() {
+        let (mut cx, family) = systemless_cx(include_bytes!(
+            "../../../testing/fonts/NotoSansJP-Subset.otf"
+        ));
+        let before = crate::notdef_glyph_count();
+        walk(&mut cx, &family, "日本語");
+        assert_eq!(crate::notdef_glyph_count() - before, 0);
     }
 }
