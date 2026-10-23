@@ -145,13 +145,14 @@ Each concrete shell confines all unsafe/FFI code to one named module — `jni_gl
 `ffi_glue` on iOS, `appkit_glue` on macOS, `win32_glue` on Windows — so each platform boundary is
 auditable as a single surface. `frust-shell-common` and `frust-shell-linux` hold no `unsafe` at
 all, hot-patch code included (the patch loader's `unsafe` lives in `frust-hotpatch`);
-`frust-shell-desktop` holds exactly one macOS-only block, `render.rs`'s `build_overlay_surface`. The
+`frust-shell-desktop` holds exactly one macOS-only block, `render.rs`'s `build_overlay_surface`;
+macOS has a second zone, `frust-shell-macos`'s `cfg(macos)` `title_buttons` AppKit section. The
 register of what each zone is permitted to do, and the `# Safety`/no-unwind rules that govern
 it, live in [CODE_STANDARDS.md](CODE_STANDARDS.md) § Language Idioms.
 Android's zone also holds the one `OverlaySurface::new` call in `prepare_overlays`, iOS's the one in
-`take_frame_overlays` plus the overlay exports. Android's one `unsafe` module outside `jni_glue` is
-`adpf::platform` (the `dlsym` binding and `gettid`); render-thread scheduling goes through `frust-reactive::thread_policy`
-(its `unsafe` is that crate's `sys` module), a bare `libc` call left only for `FRUST_NO_THREAD_TUNING`.
+`take_frame_overlays` plus the overlay exports. Android's one other `unsafe` module is
+`adpf::platform` (the `dlsym` binding and `gettid`); render-thread scheduling goes through
+`frust-reactive::thread_policy` (`unsafe` in its `sys` module), with a bare `libc` call only for `FRUST_NO_THREAD_TUNING`.
 
 `surface_mode`'s writer set is pinned by a source-scan conformance test: exactly one call site per
 platform may publish a resolved surface mode, a single-writer contract that keeps the signal-poll
@@ -159,10 +160,9 @@ seam race-free without a lock.
 
 ## The Desktop Extension Seam
 
-`DesktopExtensions` is an eight-hook trait, every method defaulted to a no-op, invoked at the
-points in the loop where a native integration has something to say. `NoExtensions` implements none
-of them and is what the zero-config preview installs, so that path pays nothing for a seam it does
-not use.
+`DesktopExtensions` is an eight-hook trait, every method defaulted to a no-op, invoked where a
+native integration has something to say. `NoExtensions` implements none and is what the zero-config
+preview installs, so that path pays nothing for the seam.
 
 | Hook | When | Motivating use |
 |------|------|----------------|
@@ -183,25 +183,24 @@ if a later hook needs it, and `on_platform_view_commands`, which fires from insi
 and must parent a hosted view into that exact window. That keeps the other six unit-testable with
 no live event loop.
 
-`CloseAction::Exit` (the default) exits the loop, which is what runs the real shutdown path:
-`run_app` returns, the frame executor drops, the render thread joins after a final present and its
-best-effort cache persist. `CloseAction::KeepRunning` hands the eventual exit to the extension —
-nothing in the core will call `exit()` on its behalf.
+`CloseAction::Exit` (the default) exits the loop, running the real shutdown path: `run_app`
+returns, the frame executor drops, the render thread joins after a final present and its
+best-effort cache persist. `CloseAction::KeepRunning` leaves the eventual exit to the extension.
 
 ### Configuration vocabulary
 
 `DesktopConfig` (app name, reverse-DNS id, window icon, menu spec, last-window-close policy,
-initial/min/max window size, opt-in window-state persistence) and the
-`MenuSpec`/`MenuItemSpec`/`MenuRole` tree are plain data defined in `frust-shell-desktop` — the
-lowest crate both the core (which carries the spec) and the per-OS shells (which build a native menu
-from it) share. They cannot live in the facade, which depends on the shell crates and never the
-reverse; the facade **re-exports** them instead, exactly as it re-exports the reactive seams it
-likewise cannot own. `IconData` is re-exported *renamed* as `DesktopIconData`, because the facade
+initial/min/max window size, opt-in window-state persistence, `decorations` (`Full`/`None`/`NoTitleBar`,
+creation-time only), macOS `title_buttons`) and the `MenuSpec`/`MenuItemSpec`/`MenuRole` tree are
+plain data defined in `frust-shell-desktop` — the lowest crate both the core and the per-OS shells
+(which build a native menu from the spec) share. They cannot live in the facade, which depends on
+the shell crates and never the reverse; the facade **re-exports** them instead. `IconData` is re-exported *renamed* as `DesktopIconData`, because the facade
 already carries `frust-widgets`' `IconData` (an in-UI vector icon).
 
-The core consumes the title and geometry fields (`window_state` persists size, position and
-maximized state; precedence, file and clamp: [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md) §
-Desktop window geometry); the rest is carried for the per-OS shells, and `DesktopConfig::default()`
+The core consumes the title, geometry and `decorations` fields (`window_state` persists size,
+position and maximized state; precedence, file and clamp: [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md)
+§ Desktop window geometry; `decorations` is applied in `window_attributes` before the extension's
+pre-create hook); the rest, `title_buttons` included, is carried for the per-OS shells, and `DesktopConfig::default()`
 reproduces the zero-config preview window exactly. An icon is a decoded, tightly-packed RGBA8 buffer
 whose dimensions are checked at construction — this tier carries no image decoder (decoding is the
 tooling tier's job, see [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md)).
@@ -217,8 +216,8 @@ the activation against the ids its own spec declared, queues it in a bounded (ol
 queue, and requests a redraw through a `MenuWaker` over the retained window.
 
 `pump` hands **exactly one** activation per frame to `frust_reactive::push_menu_event` and re-wakes
-while more remain: the reactive menu source is a single-slot signal, so a batch would coalesce to
-its last entry. The queue also keeps the push on the UI thread, which `push_menu_event` requires.
+while more remain: the reactive menu source is a single-slot signal, so a batch would coalesce. The
+queue also keeps the push on the UI thread.
 App code reads the other end through the facade's `menu_events()`, whose `MenuEvent` carries the
 app's item id plus a monotonic sequence so choosing the same item twice reads as two activations;
 that read side compiles on **every** target. See [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md) for
@@ -235,23 +234,24 @@ platform's menu vocabulary — and must not diverge in behavior.
 | Theme | winit handles it | titlebar brightness follows the app's resolved theme through winit's `Window::set_theme`, re-issued on every change the core signals; a resolution arriving before the window exists is held pending | winit handles it |
 | Close / quit | `quit_on_last_window_closed = false` hides the window and keeps the loop running; a Dock re-activation brings it back | default exit-on-close | default exit-on-close |
 | Activation policy | winit's, deliberately: it sets `NSApplicationActivationPolicy` while launching, so a competing call here could only disagree with it | n/a | n/a |
+| Decorations | `None`: borderless + resizable; `NoTitleBar`: transparent title bar + full-size content view, traffic lights kept and placed from `TitleButtons` via `NSWindow` (skipped in fullscreen) | frame removed by winit's `WM_NCCALCSIZE`; the shell adds the undecorated DWM shadow | X11 Motif hints / Wayland client-side mode; nothing shell-side |
+| Window commands | the `frust-core` queue is drained after each dispatch and per frame: `BeginMove`/`BeginResize` become `drag_window`/`drag_resize_window` (macOS `BeginResize` is a no-op), `RequestClose` takes `on_close_requested`; `WindowState` is republished on seed/`Resized`/`Focused`/`Occluded`/after commands | same | same |
 
 Two macOS shapes are load-bearing. **Reopen** is observed through
 `NSApplicationDidBecomeActiveNotification` on a notification observer registered beside winit's
 delegate, because winit owns `NSApplication`'s delegate and `applicationShouldHandleReopen:` is
 therefore unreachable. **Quit** stays on AppKit's own `terminate:` for both ⌘Q and the menu item,
-because it must work while the window is hidden and no frames are being produced — which means
-that route skips the whole handler `Drop` chain. Both carry accepted limitations
+because it must work while the window is hidden and no frames are produced — so that route skips the
+whole handler `Drop` chain. Both carry accepted limitations
 (`desktop-macos-reopen-gap-already-active`, `desktop-macos-quit-skips-executor-drop`,
 and `desktop-macos-app-menu-title-process-name` for the unbundled menu title) in
 [LIMITATIONS.md](LIMITATIONS.md).
 
 Every per-OS crate compiles **inert off its own target**: native bindings sit in a
 `cfg(target_os)` dependency table and each native entry point pairs its real body with a
-do-nothing stand-in, so the whole workspace builds on any host while only the platform-free halves
-(menu planning, the titlebar latch, the lifecycle state machine) stay host-testable. Failure is
-always degradation — a refused menu install, an unparseable accelerator, or an unattachable icon
-logs and leaves the app running without that one integration.
+do-nothing stand-in, so the workspace builds on any host while only the platform-free halves (menu planning, the
+titlebar latch, the lifecycle state machine) stay host-testable. Failure is always degradation: a
+refused menu install, unparseable accelerator or unattachable icon logs and the app runs without it.
 
 ## Data Flow
 
@@ -588,9 +588,9 @@ The desktop tier is unevenly proven, and the gap is tracked rather than assumed 
 | **macOS** | Runtime-verified on hardware: real windows, the app-named menu bar, ⌘Q by both menu and accelerator, Hide/Show All, and close-then-Dock-click reopen |
 | **Windows** | Runtime-verified on hardware: titlebar/taskbar icon, AppUserModelID identity, titlebar theming, menu-bar activation delivery, accelerators, and quit. Two Win32 menu rules are documented at their `menu.rs` sites: muda's predefined quit dead-ends under winit's pump, and an accelerator enters the `HACCEL` only if its submenu is attached before the item is appended |
 | **Linux** | Proven by cross-target compilation only, plus every native call site read against its vendored source. Owed: a non-headless `app_id`/icon pass. See [LIMITATIONS.md](LIMITATIONS.md) `desktop-shells-runtime-unverified` and `desktop-windows-titlebar-theme-revert` |
+| **Decorations / window commands** | Gate owed on macOS, Windows, Linux X11 and Linux Wayland (SHELLS_DEVELOPMENT.md § Decorations and window commands); `desktop-windows-menu-bar-undecorated-unverified` and `desktop-macos-borderless-shadow-unverified` close with it |
 
-Multi-window is out of scope at this tier — every desktop shell manages exactly one window
-(`desktop-single-window`).
+Multi-window is out of scope: every desktop shell manages exactly one window (`desktop-single-window`).
 
 ## See Also
 

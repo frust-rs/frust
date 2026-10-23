@@ -38,12 +38,12 @@ off this index — read this plus the one that covers what you are touching:
     `OverlaySurface::new(.., OverlayTarget::CoreAnimationLayer(ptr), ..)` block under the same
     table order; the layer crosses threads as an exposed-provenance `usize`, so there is no
     `unsafe impl Send`.
-  - `frust-shell-macos`'s `platform_view` (macOS only) — the `FrustOverlaySurfaceView`
-    `define_class!`, the `msg_send!` calls building and rescaling the overlay's `CAMetalLayer`
-    and view, and the view-handle `from_raw`/`Retained` conversions; each `SAFETY`-noted.
+  - `frust-shell-macos`'s `platform_view` (macOS only) — the `FrustOverlaySurfaceView` `define_class!`,
+    the `msg_send!` calls building/rescaling the overlay `CAMetalLayer` and view, and the view-handle
+    `from_raw`/`Retained` conversions; each `SAFETY`-noted.
   - `frust-shell-macos`'s `appkit_glue` module — four `SAFETY`-noted sites: the reopen-observer
-    `define_class!` block, `msg_send![super(this), init]`, `addObserver_selector_name_object`
-    (plus its notification `extern` static) and `removeObserver` in `Drop`.
+    `define_class!`, `msg_send![super(this), init]`, `addObserver_selector_name_object` (plus its
+    `extern` static) and `removeObserver` in `Drop`; and its `cfg(macos)` `title_buttons` AppKit section.
   - `frust-shell-windows`'s `win32_glue` module — three `SAFETY`-noted sites:
     `SetCurrentProcessExplicitAppUserModelID`, `TranslateAcceleratorW` in the accelerator hook, and
     muda's `Menu::init_for_hwnd`.
