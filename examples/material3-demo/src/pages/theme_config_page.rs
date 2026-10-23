@@ -115,8 +115,8 @@ fn body(theme: &Theme, settings: ThemeSettings) -> impl View<AppState> {
 
 /// The en/th toggle for the Material widget strings. The locale read is
 /// tracked, so the selection follows a switch from anywhere; the switch itself
-/// reaches the shell through the root component's `build`, which re-provides
-/// the localized theme (see `sync_localized_theme` in `lib.rs`).
+/// reaches every widget through the root component's `build`, which calls
+/// `provide_localized_strings` on each rebuild.
 fn language_section(theme: &Theme) -> impl View<AppState> {
     let scheme = theme.scheme();
     let mut title_style = theme.type_scale.title_medium.clone();

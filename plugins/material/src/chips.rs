@@ -1085,6 +1085,9 @@ pub struct InputChipView<State: 'static> {
     on_press: OnPress<State>,
     on_deleted: Option<OnPress<State>>,
     remove_label: Option<String>,
+    /// The ambient theme's delete-icon accessible name, read when the view was
+    /// created.
+    remove_a11y: String,
 }
 
 /// Create an input chip labelled `label` that runs `on_press` against the
@@ -1101,6 +1104,9 @@ pub fn input_chip<State: 'static, F: Fn(&mut State) + 'static>(
         on_press: Rc::new(on_press),
         on_deleted: None,
         remove_label: None,
+        remove_a11y: MaterialStrings::from_build_context()
+            .chip_remove_a11y
+            .to_string(),
     }
 }
 
@@ -1139,8 +1145,8 @@ impl<State: 'static> InputChipView<State> {
     }
 
     /// Override the delete icon's accessible name. Unset, it reads
-    /// [`MaterialStrings::chip_remove_a11y`] from the active theme ("Remove"
-    /// in English).
+    /// [`MaterialStrings::chip_remove_a11y`] from the ambient theme when the
+    /// view is created ("Remove" in English).
     pub fn remove_label(mut self, label: impl Into<String>) -> Self {
         self.remove_label = Some(label.into());
         self
@@ -1157,8 +1163,8 @@ pub struct InputChipWidget {
     has_delete: bool,
     /// The setter's delete-icon accessible name; wins over the theme.
     remove_label: Option<String>,
-    /// The theme-resolved delete-icon accessible name, refreshed each layout
-    /// (semantics has no theme handle).
+    /// The view's theme-resolved delete-icon accessible name. Unused while
+    /// `remove_label` is set.
     remove_a11y: String,
     /// The delete icon's local hit rect, from [`Widget::layout`]. `Rect::ZERO`
     /// when `has_delete` is `false`.
@@ -1188,7 +1194,7 @@ impl<State: 'static> View<State> for InputChipView<State> {
             elevated: self.elevated,
             has_delete: self.on_deleted.is_some(),
             remove_label: self.remove_label.clone(),
-            remove_a11y: MaterialStrings::ENGLISH.chip_remove_a11y.to_string(),
+            remove_a11y: self.remove_a11y.clone(),
             delete_rect: Rect::ZERO,
             armed: None,
             pressed_inside: false,
@@ -1214,8 +1220,11 @@ impl<State: 'static> View<State> for InputChipView<State> {
             .map(frust::authoring::erase_callback);
         let mut flags = ChangeFlags::NONE;
 
-        if prev.remove_label != self.remove_label {
+        // A repaint moves the semantics generation so the next pull reads the
+        // new delete-icon name.
+        if element.remove_label != self.remove_label || element.remove_a11y != self.remove_a11y {
             element.remove_label = self.remove_label.clone();
+            element.remove_a11y = self.remove_a11y.clone();
             flags |= ChangeFlags::PAINT;
         }
 
@@ -1310,11 +1319,6 @@ impl Widget for InputChipWidget {
             .set_origin(Point::new(x, (CHIP_HEIGHT - label_size.height) / 2.0));
         x += label_size.width;
         if self.has_delete {
-            if self.remove_label.is_none() {
-                self.remove_a11y = MaterialStrings::from_layout_ctx(ctx)
-                    .chip_remove_a11y
-                    .to_string();
-            }
             x += CHIP_ICON_LABEL_GAP;
             let icon_y = (CHIP_HEIGHT - CHIP_ICON_SIZE) / 2.0;
             self.delete_rect = Rect::new(x, icon_y, x + CHIP_ICON_SIZE, icon_y + CHIP_ICON_SIZE);
@@ -2301,32 +2305,54 @@ mod tests {
             theme
         }
 
-        /// The semantics labels of a deletable input chip laid out under
-        /// `theme`, optionally with the `remove_label` setter.
-        fn labels(theme: Option<Theme>, setter: Option<&str>) -> Vec<String> {
-            let setter = setter.map(str::to_string);
-            let mut logic = move |_: &mut ()| {
+        /// Provides `theme` as the ambient `Theme` context (when set), then
+        /// creates a deletable chip so its delete-icon name resolves from
+        /// that context.
+        #[derive(Clone)]
+        struct Host {
+            theme: Option<Theme>,
+            setter: Option<&'static str>,
+        }
+
+        impl frust::Component for Host {
+            type State = ();
+            fn init(&self) {}
+            fn build(&self, _state: &mut ()) -> impl View<()> {
+                if let Some(theme) = &self.theme {
+                    frust::provide_context(theme.clone());
+                }
                 let chip =
                     input_chip::<(), _>("Tag", |_s: &mut ()| {}).on_deleted(|_s: &mut ()| {});
-                match &setter {
-                    Some(label) => chip.remove_label(label.clone()),
+                match self.setter {
+                    Some(label) => chip.remove_label(label),
                     None => chip,
                 }
-            };
-            let mut root: frust_core::RenderRoot<(), InputChipView<()>> =
-                frust_core::RenderRoot::new();
-            if let Some(theme) = theme {
-                root.set_theme(Box::new(theme));
             }
-            let mut state = ();
-            root.rebuild(&mut logic, &mut state);
-            let mut tcx = TextContext::new();
-            root.layout_with_text(Size::new(200.0, 200.0), &mut tcx as &mut dyn Any);
+        }
+
+        type Root = frust_core::RenderRoot<(), frust::ComponentView<Host>>;
+
+        fn rebuild(root: &mut Root, host: &Host) {
+            let mut logic = |_: &mut ()| frust::component(host.clone());
+            root.rebuild(&mut logic, &mut ());
+        }
+
+        fn all_labels(root: &Root) -> Vec<String> {
             root.semantics()
                 .nodes
                 .iter()
                 .filter_map(|(_, n)| n.label().map(str::to_string))
                 .collect()
+        }
+
+        /// The semantics labels of a deletable input chip created with
+        /// `theme` provided, optionally with the `remove_label` setter.
+        fn labels(theme: Option<Theme>, setter: Option<&'static str>) -> Vec<String> {
+            let mut root = Root::new();
+            rebuild(&mut root, &Host { theme, setter });
+            let mut tcx = TextContext::new();
+            root.layout_with_text(Size::new(200.0, 200.0), &mut tcx as &mut dyn Any);
+            all_labels(&root)
         }
 
         #[test]
@@ -2335,7 +2361,7 @@ mod tests {
         }
 
         #[test]
-        fn remove_a11y_reads_the_thai_theme_strings() {
+        fn remove_a11y_reads_the_provided_thai_strings() {
             let labels = labels(Some(thai_theme()), None);
             assert!(labels.iter().any(|l| l == "ลบ"), "{labels:?}");
             assert!(!labels.iter().any(|l| l == "Remove"));
@@ -2346,6 +2372,36 @@ mod tests {
             let labels = labels(Some(thai_theme()), Some("Drop"));
             assert!(labels.iter().any(|l| l == "Drop"), "{labels:?}");
             assert!(!labels.iter().any(|l| l == "ลบ"));
+        }
+
+        #[test]
+        fn remove_a11y_follows_the_provided_theme_and_setter_on_rebuild() {
+            let mut root = Root::new();
+            let mut host = Host {
+                theme: None,
+                setter: None,
+            };
+            rebuild(&mut root, &host);
+            let mut tcx = TextContext::new();
+            root.layout_with_text(Size::new(200.0, 200.0), &mut tcx as &mut dyn Any);
+            assert!(all_labels(&root).iter().any(|l| l == "Remove"));
+
+            let generation = root.semantics_generation();
+            host.theme = Some(thai_theme());
+            rebuild(&mut root, &host);
+            assert!(root.semantics_generation() > generation);
+            let seen = all_labels(&root);
+            assert!(seen.iter().any(|l| l == "ลบ"), "{seen:?}");
+
+            host.setter = Some("Drop");
+            rebuild(&mut root, &host);
+            assert!(all_labels(&root).iter().any(|l| l == "Drop"));
+
+            host.setter = None;
+            rebuild(&mut root, &host);
+            let seen = all_labels(&root);
+            assert!(seen.iter().any(|l| l == "ลบ"), "{seen:?}");
+            assert!(!seen.iter().any(|l| l == "Drop"));
         }
     }
 }

@@ -100,7 +100,7 @@ fn build_table(language: &str) -> MaterialStrings {
 ///
 /// Region and script are ignored: `de-CH` and `de` share one table. Month and
 /// weekday names come from CLDR; every other string is hand-written.
-pub fn material_strings_for(locale: &Locale, _i18n: &I18n) -> MaterialStrings {
+pub fn material_strings_for(locale: &Locale) -> MaterialStrings {
     let language = locale.language();
     let language = language.as_str();
     let mut guard = TABLES.lock().unwrap_or_else(PoisonError::into_inner);
@@ -114,10 +114,11 @@ pub fn material_strings_for(locale: &Locale, _i18n: &I18n) -> MaterialStrings {
 /// `theme` with the [`MaterialStrings`] extension replaced by the table for
 /// `i18n`'s active locale. A tracked read of the locale signal.
 ///
-/// For apps that push their theme through the shell (`set_app_theme`) rather
-/// than context: localize it with this before handing it over.
+/// [`provide_localized_strings`] is all a component tree needs; this is for
+/// an app that manages the shell theme itself (`set_app_theme`) and wants the
+/// theme it hands over to carry the same table.
 pub fn localized_theme(mut theme: Theme, i18n: &I18n) -> Theme {
-    let strings = material_strings_for(&i18n.locale(), i18n);
+    let strings = material_strings_for(&i18n.locale());
     theme.extensions.insert(strings);
     theme
 }
@@ -128,7 +129,9 @@ pub fn localized_theme(mut theme: Theme, i18n: &I18n) -> Theme {
 /// Call it from a component's `build`: it reads the locale signal, so every
 /// [`I18n::set_locale`] rebuilds that component and provides the new table.
 /// The base theme is the ambient one, or the Material baseline when none is
-/// provided yet; widgets below read the replaced extension at build time.
+/// provided yet. Every Material widget created below resolves its strings
+/// from the provided theme when its view is created, so this call alone
+/// localizes the subtree; no shell theme push is needed.
 pub fn provide_localized_strings(i18n: &I18n) {
     let base = use_context::<Theme>().unwrap_or_else(frust_material::baseline);
     provide_context(localized_theme(base, i18n));

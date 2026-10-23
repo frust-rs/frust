@@ -4,11 +4,11 @@
 //! The extension is attached by [`baseline`](crate::tokens::baseline) with
 //! [`MaterialStrings::ENGLISH`]; a localization layer replaces it with
 //! [`ThemeExtensions::insert`](frust::ThemeExtensions) (last write wins). A
-//! widget reads it through [`MaterialStrings::resolve`] (or the
-//! [`from_paint_ctx`](MaterialStrings::from_paint_ctx) /
-//! [`from_layout_ctx`](MaterialStrings::from_layout_ctx) helpers), which falls
-//! back to English when the theme carries no extension, so custom themes keep
-//! working unchanged.
+//! widget looks the extension up when its view is created (`from_build_context`,
+//! the ambient theme at build time); the selection app bar's count label is the
+//! one layout-time reader, through [`from_layout_ctx`](MaterialStrings::from_layout_ctx).
+//! Every path ends in [`MaterialStrings::resolve`], which falls back to English
+//! when the theme carries no extension, so custom themes keep working unchanged.
 //!
 //! This crate takes no dependency on any other `frust-*` plugin (the
 //! design-system charter), so the table is plain data: fields are
