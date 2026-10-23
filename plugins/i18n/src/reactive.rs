@@ -42,6 +42,10 @@ pub struct I18n {
 
 struct Inner {
     engine: Engine,
+    /// The preferences store [`I18n::set_locale`] saves the choice into, when
+    /// the handle was built by [`I18n::with_persistence`].
+    #[cfg(feature = "persistence")]
+    prefs: Option<frust_shared_preferences::SharedPreferences>,
     /// The active (negotiated best-match) locale — the tracked signal every
     /// [`I18n::locale`]/[`I18n::t`]/[`Resolve::resolve_message`] call reads
     /// first, so a rebuild calling through any of them subscribes to
@@ -96,10 +100,25 @@ impl I18n {
     ///
     /// Same ambient-owner contract as [`I18n::new`].
     pub fn from_engine(engine: Engine, requested: &[Locale]) -> Self {
+        Self::build(
+            engine,
+            requested,
+            #[cfg(feature = "persistence")]
+            None,
+        )
+    }
+
+    fn build(
+        engine: Engine,
+        requested: &[Locale],
+        #[cfg(feature = "persistence")] prefs: Option<frust_shared_preferences::SharedPreferences>,
+    ) -> Self {
         let (active, chain) = negotiate_active(&engine, requested);
         Self {
             inner: Arc::new(Inner {
                 engine,
+                #[cfg(feature = "persistence")]
+                prefs,
                 locale: RwSignal::new(active),
                 chain: Mutex::new(chain),
                 requested: Mutex::new(requested.to_vec()),
@@ -238,6 +257,8 @@ impl I18n {
             requested
         };
 
+        #[cfg(feature = "persistence")]
+        let requested_tag = requested.clone();
         let (active, chain) =
             negotiate_active(&self.inner.engine, std::slice::from_ref(&requested));
         *self.inner.chain.lock().unwrap_or_else(|e| e.into_inner()) = chain;
@@ -246,7 +267,28 @@ impl I18n {
             .requested
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = vec![requested];
+        #[cfg(feature = "persistence")]
+        if let Some(prefs) = &self.inner.prefs {
+            crate::persist::save(prefs, &requested_tag);
+        }
         self.inner.locale.set(active);
+    }
+
+    /// A persistence-backed handle: [`Engine`] built from `set`, the store
+    /// attached for [`I18n::set_locale`] to save into.
+    #[cfg(feature = "persistence")]
+    pub(crate) fn persistent(
+        engine: Engine,
+        requested: &[Locale],
+        prefs: frust_shared_preferences::SharedPreferences,
+    ) -> Self {
+        Self::build(engine, requested, Some(prefs))
+    }
+
+    /// The store this handle saves into, if it has one.
+    #[cfg(feature = "persistence")]
+    pub(crate) fn prefs(&self) -> Option<&frust_shared_preferences::SharedPreferences> {
+        self.inner.prefs.as_ref()
     }
 
     /// Formats `key` with no arguments — shorthand for
