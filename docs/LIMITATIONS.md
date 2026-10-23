@@ -2616,21 +2616,44 @@ is the OS default position.
 
 ---
 
-### `desktop-windows-menu-bar-undecorated-unverified` — a menu bar on an undecorated Windows window is unverified
+### `desktop-windows-menu-bar-undecorated-unverified` — a menu bar on an undecorated Windows window is not drawn
 
-**Observed**: winit keeps `WS_CAPTION` on an undecorated window and zeroes its non-client area, so
-whether an `HMENU` still draws or reserves space there is unknown. `frust-shell-windows` installs
-the menu anyway and warns once.
+**Observed**: winit keeps `WS_CAPTION` on an undecorated window and zeroes its non-client area.
+`frust-shell-windows` still installs the `HMENU` (`GetMenu` returns it) and warns once, but the
+Windows gate saw no menu bar drawn, no space reserved, and nothing opening where it would sit.
+(The id keeps its historical `-unverified` suffix because the runtime warning cites it.)
 
 **Applies to**: Windows apps combining a native menu spec with `Decorations::None` or
 `NoTitleBar`.
 
-**Why accepted**: the Windows runtime gate has not run for decorations.
+**Why accepted**: an app that draws its own title bar draws its own menu there; keyboard access to
+the hidden `HMENU` is untested.
 
-**Evidence**: `crates/frust-shell-windows/src/lib.rs` (`menu_on_undecorated` and its warning).
+**Evidence**: Windows row of the decorations gate (SHELLS_DEVELOPMENT.md § Decorations and window
+commands); `crates/frust-shell-windows/src/lib.rs` (`menu_on_undecorated` and its warning).
 
-**Trigger for removal**: the Windows row of the decorations gate (SHELLS_DEVELOPMENT.md §
-Decorations and window commands) records the outcome.
+**Trigger for removal**: the shell skips the `HMENU` when undecorated, or the combination is
+documented as unsupported in the API.
+
+---
+
+### `desktop-windows-double-click-maximize-missed` — double-click on a `window_drag_region` does not maximize on Windows
+
+**Observed**: the first press pushes `BeginMove`; winit's `drag_window` starts the OS modal move
+loop, which stalls the frust event loop about 300 ms while paints advance the frame clock, so the
+press record ages past `DOUBLE_TAP_MS` before the queued second press is dispatched. The second
+press starts another move. X11 and Wayland toggle as designed.
+
+**Applies to**: Windows apps relying on `window_drag_region`'s double-click toggle.
+
+**Why accepted**: drag, snap and the window buttons work; the fix changes when the move starts
+(after a drag threshold instead of on the press) and is pending a design decision.
+
+**Evidence**: Windows row of the decorations gate (SHELLS_DEVELOPMENT.md § Decorations and window
+commands); `crates/frust-widgets/src/window_drag_region.rs`.
+
+**Trigger for removal**: `window_drag_region` starts the OS move only after the pointer moves past
+the slop, or another fix passes the Windows double-click row.
 
 ---
 

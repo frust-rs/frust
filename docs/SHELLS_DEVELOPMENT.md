@@ -311,7 +311,12 @@ Gates, against `examples/custom-titlebar` (each gate card flips its bullet):
 
 - **macOS — owed:** drag, double-click maximize, traffic-light placement and fullscreen,
   edge resize, close; borderless shadow (`desktop-macos-borderless-shadow-unverified`).
-- **Windows — owed:** drag, snap, resize strips, DWM shadow, close; menu bar on an undecorated window.
+- **Windows — run 2026-10-24, one FAIL** (Windows 11, 96 dpi): no caption; DWM shadow and rounded
+  corners; drag and Aero Snap (the OS move loop); all eight strips; maximize to the work area,
+  minimize, fullscreen round-trip, close and the focus readout pass; playground Window row passes.
+  FAIL: double-click on the bar never maximizes (`desktop-windows-double-click-maximize-missed`).
+  A menu bar on an undecorated window is installed but not drawn
+  (`desktop-windows-menu-bar-undecorated-unverified`).
 - **Linux X11 — passed 2026-10-24** (KWin, Xorg, NVIDIA T400): Motif hints remove the frame; drag
   (`_NET_WM_MOVERESIZE`), double-click maximize/restore, all eight strips, maximize to the work area,
   minimize, fullscreen round-trip, close and the focus readout act; no shadow is drawn for the
