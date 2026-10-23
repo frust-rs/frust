@@ -39,6 +39,7 @@ pub mod sliver;
 pub mod tree;
 pub mod view;
 pub mod widget;
+pub mod window_control;
 
 /// Hit-testing under an arbitrary [`kurbo::Affine`]: the helpers a transformed
 /// [`ChildPod`] uses, for canvas hit closures and pan/zoom containers.
@@ -204,4 +205,7 @@ pub use view::{AnyView, BuildCtx, ChangeFlags, View, ViewSeq, WidgetId, any, vie
 pub use widget::{
     ChildPod, CornerRadii, DashPattern, DiscardScene, HeroDirective, HeroFrames, LayoutCtx,
     PaintCtx, PaintOutcome, PaintScene, TickClass, Widget,
+};
+pub use window_control::{
+    ResizeEdge, WindowCommand, WindowState, push_window_command, take_window_commands,
 };
