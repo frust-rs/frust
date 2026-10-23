@@ -1317,6 +1317,7 @@ version = "0.6.3"
 dependencies = [
  "frust-scene",
  "kurbo",
+ "log",
  "parley",
  "peniko",
  "thiserror 2.0.20",
