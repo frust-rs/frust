@@ -6,11 +6,11 @@
 //! The core consumes the window title ([`DesktopConfig::app_name`]) and the
 //! window geometry fields (initial/min/max size, opt-in window-state
 //! persistence) and the frame style ([`DesktopConfig::decorations`]);
-//! [`DesktopConfig::title_buttons`] is carried for the macOS shell; the rest exists so a per-OS shell can read one config
-//! rather than inventing its own (`app_id` becomes a Wayland `app_id`/X11
-//! `WM_CLASS` or a Windows AppUserModelID; `window_icon` becomes an
-//! `NSApplication` icon / `HICON` / X11 icon; `menu_spec` becomes an NSApp menu
-//! bar or an HMENU).
+//! [`DesktopConfig::title_buttons`] is carried for the macOS shell; the rest
+//! exists so a per-OS shell can read one config rather than inventing its own
+//! (`app_id` becomes a Wayland `app_id`/X11 `WM_CLASS` or a Windows
+//! AppUserModelID; `window_icon` becomes an `NSApplication` icon / `HICON` /
+//! X11 icon; `menu_spec` becomes an NSApp menu bar or an HMENU).
 //!
 //! # Why the menu vocabulary lives here, below the facade
 //!

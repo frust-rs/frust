@@ -5752,11 +5752,13 @@ mod tests {
     struct SpyExtensions {
         attributes_calls: usize,
         override_title: Option<&'static str>,
+        seen_decorations: Option<bool>,
     }
 
     impl DesktopExtensions for SpyExtensions {
         fn on_window_attributes(&mut self, attributes: WindowAttributes) -> WindowAttributes {
             self.attributes_calls += 1;
+            self.seen_decorations = Some(attributes.decorations);
             match self.override_title {
                 Some(title) => attributes.with_title(title),
                 None => attributes,
@@ -5809,6 +5811,11 @@ mod tests {
         let config = DesktopConfig::new().with_decorations(Decorations::None);
         let attributes = window_attributes(&config, None, &mut extensions);
         assert_eq!(extensions.attributes_calls, 1);
+        assert_eq!(
+            extensions.seen_decorations,
+            Some(false),
+            "the hook must receive the attributes with decorations already applied"
+        );
         assert!(!attributes.decorations);
     }
 
