@@ -23,8 +23,10 @@
 //! presses, keys) goes to the child unchanged.
 //!
 //! The double-press window rides the paint clock, as the text field's
-//! double-tap does, because a pointer event carries no timestamp. Off desktop
-//! the commands are no-ops.
+//! double-tap does, because a pointer event carries no timestamp. A press is
+//! stamped at the first paint after it (an idle window's last paint is old),
+//! and a press not yet stamped counts as inside the window. Off desktop the
+//! commands are no-ops.
 
 use std::marker::PhantomData;
 
@@ -87,8 +89,9 @@ impl<State: 'static> WindowDragRegionView<State> {
 pub struct WindowDragRegionWidget {
     child: ChildPod,
     mode: Mode,
-    /// The last unhandled press: where it landed and the paint-clock time.
-    last_press: Option<(Point, FrameTime)>,
+    /// The last unhandled press: where it landed and the paint-clock time of
+    /// the first paint after it (`None` until that paint).
+    last_press: Option<(Point, Option<FrameTime>)>,
     /// The latest paint-pass clock, the only one available to the event pass.
     last_frame_time: FrameTime,
 }
@@ -100,7 +103,8 @@ impl WindowDragRegionWidget {
 
     fn is_double_press(&self, pos: Point) -> bool {
         self.last_press.is_some_and(|(prev, at)| {
-            (pos - prev).hypot() <= TOUCH_SLOP && self.elapsed_ms(at) <= DOUBLE_TAP_MS
+            (pos - prev).hypot() <= TOUCH_SLOP
+                && at.is_none_or(|at| self.elapsed_ms(at) <= DOUBLE_TAP_MS)
         })
     }
 }
@@ -123,6 +127,9 @@ impl<State: 'static> View<State> for WindowDragRegionView<State> {
         element: &mut WindowDragRegionWidget,
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
+        if element.mode != self.mode {
+            element.last_press = None;
+        }
         element.mode = self.mode;
         crate::authoring::rebuild_child(&prev.child, &self.child, &mut element.child, ctx)
     }
@@ -144,6 +151,10 @@ impl Widget for WindowDragRegionWidget {
         // Keep the clock moving while a press is inside its window, so an idle
         // window cannot make a much later press look like a double-press.
         if let Some((_, at)) = self.last_press {
+            let at = at.unwrap_or(self.last_frame_time);
+            if let Some((_, stamp)) = &mut self.last_press {
+                *stamp = Some(at);
+            }
             if self.elapsed_ms(at) > DOUBLE_TAP_MS {
                 self.last_press = None;
             } else {
@@ -172,7 +183,7 @@ impl Widget for WindowDragRegionWidget {
                     self.last_press = None;
                     push_window_command(WindowCommand::ToggleMaximized);
                 } else {
-                    self.last_press = Some((p.position, self.last_frame_time));
+                    self.last_press = Some((p.position, None));
                     push_window_command(WindowCommand::BeginMove);
                     // Start the paint loop that ages the record out.
                     ctx.request_redraw();
@@ -283,7 +294,7 @@ mod tests {
         body(&mut root, &mut state);
     }
 
-    /// Press twice at `x2` with paints at `t1` and `t2` ms between and after.
+    /// Press twice at `x2`; the press-triggered paint stamps at 0, then one at `t2` ms.
     fn two_presses(
         root: &mut RenderRoot<Presses, WindowDragRegionView<Presses>>,
         state: &mut Presses,
@@ -293,9 +304,109 @@ mod tests {
         let mut sink = NullScene;
         root.paint(&mut sink, ft(0.0));
         root.event(state, &ev(PointerPhase::Down, 10.0, 10.0));
+        root.paint(&mut sink, ft(0.0));
         root.paint(&mut sink, ft(t2));
         root.event(state, &ev(PointerPhase::Down, x2, 10.0));
         take_window_commands()
+    }
+
+    fn press_at(root: &mut RenderRoot<Presses, WindowDragRegionView<Presses>>, s: &mut Presses) {
+        root.event(s, &ev(PointerPhase::Down, 10.0, 10.0));
+    }
+
+    #[test]
+    fn a_double_click_survives_an_idle_window() {
+        let p = probe(EventResult::Ignored);
+        for second_paint in [None, Some(5200.0)] {
+            with_root(
+                || window_drag_region(p.clone()),
+                |root, state| {
+                    let mut sink = NullScene;
+                    root.paint(&mut sink, ft(0.0));
+                    press_at(root, state);
+                    root.paint(&mut sink, ft(5000.0));
+                    if let Some(t) = second_paint {
+                        root.paint(&mut sink, ft(t));
+                    }
+                    press_at(root, state);
+                    assert_eq!(
+                        take_window_commands(),
+                        vec![WindowCommand::BeginMove, WindowCommand::ToggleMaximized]
+                    );
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn two_presses_with_no_paint_between_toggle_maximize() {
+        let p = probe(EventResult::Ignored);
+        with_root(
+            || window_drag_region(p.clone()),
+            |root, state| {
+                press_at(root, state);
+                press_at(root, state);
+                assert_eq!(
+                    take_window_commands(),
+                    vec![WindowCommand::BeginMove, WindowCommand::ToggleMaximized]
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn an_aged_press_is_cleared_and_stops_requesting_frames() {
+        let p = probe(EventResult::Ignored);
+        with_root(
+            || window_drag_region(p.clone()),
+            |root, state| {
+                let mut sink = NullScene;
+                root.paint(&mut sink, ft(0.0));
+                press_at(root, state);
+                assert!(root.paint(&mut sink, ft(5000.0)).needs_frame);
+                assert!(!root.paint(&mut sink, ft(5400.0)).needs_frame);
+                press_at(root, state);
+                assert_eq!(
+                    take_window_commands(),
+                    vec![WindowCommand::BeginMove, WindowCommand::BeginMove]
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn a_mode_change_on_rebuild_clears_the_record() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        take_window_commands();
+        let p = probe(EventResult::Ignored);
+        let resize = Cell::new(false);
+        let mut logic = |_: &mut Presses| {
+            let v = window_drag_region(p.clone());
+            if resize.get() {
+                v.resize(ResizeEdge::SouthEast)
+            } else {
+                v
+            }
+        };
+        let mut root = RenderRoot::new();
+        let mut state = Presses::default();
+        root.rebuild(&mut logic, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        press_at(&mut root, &mut state);
+        resize.set(true);
+        root.rebuild(&mut logic, &mut state);
+        press_at(&mut root, &mut state);
+        resize.set(false);
+        root.rebuild(&mut logic, &mut state);
+        press_at(&mut root, &mut state);
+        assert_eq!(
+            take_window_commands(),
+            vec![
+                WindowCommand::BeginMove,
+                WindowCommand::BeginResize(ResizeEdge::SouthEast),
+                WindowCommand::BeginMove,
+            ]
+        );
     }
 
     #[test]
