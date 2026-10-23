@@ -18,6 +18,7 @@ mod shape_cache;
 mod style;
 
 pub use context::{FontError, RegisteredFamily, TextContext, register_generic_fallback};
+pub use convert::notdef_glyph_count;
 pub use editor::{
     EditOp, EditingState, EditingStateBytes, TextEditor, byte_to_utf16, sanitize_paste,
     utf16_to_byte,

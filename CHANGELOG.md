@@ -84,6 +84,12 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 - `frust-url-launcher`: `UrlLauncherError::NoHandler` reads "no handler for this URL on this
   device" instead of naming only `http`/`https`, since `open_maps_native` returns it for native
   map schemes on desktop.
+- iOS Han text no longer draws as striped boxes for every character: on Apple targets
+  `TextContext` falls back to Hiragino Sans when fontique finds no Han fallback (iOS's PingFang
+  is unreadable to fontique). Coverage is partial: some Simplified-only characters still draw as
+  `.notdef` (`ios-han-fallback-partial`). `frust-text` now logs a warning once per font when
+  visible text shapes to `.notdef`, and `frust_text::notdef_glyph_count()` reports the process
+  total.
 
 ## 0.6.3 — 2026-10-20
 

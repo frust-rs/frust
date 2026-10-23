@@ -8391,3 +8391,19 @@ included) resolves its strings from the provided theme when its view is created,
 is correct.
 
 **Evidence**: (2026-10-23) `plugins/material/src/dialog.rs`'s `SelectionDialogView` `rebuild`.
+
+---
+
+### `ios-han-fallback-partial` — iOS Han text has a partial system fallback; uncovered characters render as `.notdef`
+
+**Observed**: iOS's system Han font (PingFangUI) is hvgl-only (fontations cannot read it; fontique 0.11.1 rejects it), and the Heiti family fontique's CoreText fallback asks for is absent on iOS, so Han had no readable fallback. Since `1df2b6a4` (`crates/frust-text/src/context.rs`, `append_han_fallbacks`), Hiragino Sans, then Hiragino Kaku Gothic ProN, fill each empty Han fallback list on Apple targets; a non-empty list is never overridden. Measured on the iOS 27 runtime: all S6 kanji, Big5 level-1 96.8%, GB2312 level-1 71.4% and level-2 57.9%. Simplified and Traditional Chinese get Japanese glyph shapes. Uncovered characters still render as `.notdef` bars; since `040058f9` (`crates/frust-text/src/convert.rs`) a warn-once log names the font, the count and up to 8 characters, and `frust_text::notdef_glyph_count()` reports the total.
+
+**Applies to**: iOS apps rendering Han text outside the Japanese set. macOS is unaffected (Heiti SC/TC ships there).
+
+**Workaround**: register a Han-capable font with `TextContext::register_fonts` and select it by `FontFamily::Named`; `frust_text::register_generic_fallback` is the seam for generic slots.
+
+**Why accepted**: full coverage (CoreText outlines for hvgl PingFang, or Apple's PingFang asset) is still being evaluated; the stopgap beats the empty fallback it replaced.
+
+**Trigger for removal**: an iOS route rendering PingFang as the Han fallback, measured to cover the S6 corpus.
+
+**Evidence**: `rsa_000001a1685a4a91k9NhUoKn` (Zabin research); `fplan_000001a1685a6aa9Ex9nuzzW` Phase 2; frust-rs/frust#119.
