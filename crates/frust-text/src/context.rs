@@ -20,6 +20,14 @@
 //! font-family map (fontique's `SystemUi`/`SansSerif`/`Monospace`/`Serif`/
 //! `Emoji` slots) rather than a named family — see [`register_generic_fallback`]
 //! for why a host needs this seam on `wasm32`.
+//!
+//! # Han fallback on Apple targets
+//!
+//! iOS's own Han font (PingFangUI) is hvgl-only, which fontique rejects, and
+//! fontique's CoreText fallback hack asks for Heiti, which iOS does not ship,
+//! so every Han fallback list is empty and Han shapes to `.notdef`.
+//! [`append_han_fallbacks`] fills only the *empty* lists with Hiragino Sans (a
+//! partial-coverage stopgap; see LIMITATIONS id `ios-han-fallback-partial`).
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -151,6 +159,66 @@ pub fn register_generic_fallback(data: Vec<u8>, generics: &[GenericSlot]) {
         blob: Blob::from(data),
         generics: generics.to_vec(),
     });
+}
+
+/// Family names tried, in order, as the Han fallback on Apple targets.
+#[cfg(target_vendor = "apple")]
+const HAN_FALLBACK_CANDIDATES: &[&str] = &["Hiragino Sans", "Hiragino Kaku Gothic ProN"];
+
+/// The Han-capable fallback keys: script `Hani` with no locale and each CJK
+/// locale fontique tracks, plus `Hant`/`Hans` for scripts that distinguish them.
+const HAN_FALLBACK_KEYS: &[(&str, Option<&str>)] = &[
+    ("Hani", None),
+    ("Hani", Some("zh-Hans")),
+    ("Hani", Some("zh-CN")),
+    ("Hani", Some("zh-Hant")),
+    ("Hani", Some("zh-TW")),
+    ("Hani", Some("zh-HK")),
+    ("Hani", Some("ja")),
+    ("Hant", None),
+    ("Hans", None),
+];
+
+/// Appends the first installed family of `candidates` to every Han fallback
+/// key whose list is currently empty, returning how many keys were filled.
+///
+/// A non-empty list is never touched (macOS's Heiti, or a parsable PingFang,
+/// keeps its answer). When no candidate is installed this changes nothing and
+/// logs once in debug builds. Target-independent so host tests exercise it.
+#[doc(hidden)]
+#[cfg_attr(not(target_vendor = "apple"), allow(dead_code))]
+pub(crate) fn append_han_fallbacks(
+    collection: &mut parley::fontique::Collection,
+    candidates: &[&str],
+) -> usize {
+    use parley::fontique::{FallbackKey, Language, Script};
+    let family = candidates
+        .iter()
+        .find_map(|name| collection.family_by_name(name))
+        .map(|info| info.id());
+    let Some(family) = family else {
+        #[cfg(debug_assertions)]
+        {
+            static LOGGED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!("frust-text: no Han fallback family installed (tried {candidates:?})");
+            }
+        }
+        return 0;
+    };
+    let mut filled = 0;
+    for &(script, locale) in HAN_FALLBACK_KEYS {
+        let script = Script::from_str_unchecked(script);
+        let locale = locale.and_then(|l| Language::parse(l).ok());
+        let key = FallbackKey::new(script, locale.as_ref());
+        if collection.fallback_families(key).next().is_none()
+            && collection.append_fallbacks(key, std::iter::once(family))
+        {
+            filled += 1;
+        }
+    }
+    filled
 }
 
 /// Converts a Frust [`GenericSlot`] into parley's `GenericFamily` — the
@@ -344,7 +412,10 @@ impl TextContext {
     /// here, so the work and its order are identical.
     pub fn new_with_timings() -> (Self, NewTimings) {
         let font_started = Instant::now();
-        let font_ctx = parley::FontContext::new();
+        #[allow(unused_mut)]
+        let mut font_ctx = parley::FontContext::new();
+        #[cfg(target_vendor = "apple")]
+        append_han_fallbacks(&mut font_ctx.collection, HAN_FALLBACK_CANDIDATES);
         let font_system = font_started.elapsed();
         let mut cx = Self {
             font_ctx,
@@ -1943,6 +2014,105 @@ mod tests {
         assert!(
             center_x[1] > start_x[1] + 1.0,
             "center-aligned truncated line must move off the left edge: {center_x:?}"
+        );
+    }
+
+    /// A system-less `TextContext` plus the JP subset face's family name.
+    fn bare_cx() -> (TextContext, String, Vec<u8>) {
+        let mut cx = TextContext::new();
+        cx.font_ctx.collection =
+            parley::fontique::Collection::new(parley::fontique::CollectionOptions {
+                shared: false,
+                system_fonts: false,
+            });
+        let bytes = include_bytes!("../../../testing/fonts/NotoSansJP-Subset.otf").to_vec();
+        let registered = cx
+            .font_ctx
+            .collection
+            .register_fonts(Blob::from(bytes.clone()), None);
+        let id = registered[0].0;
+        let name = cx.font_ctx.collection.family_name(id).unwrap().to_owned();
+        (cx, name, bytes)
+    }
+
+    fn han_key(locale: Option<&str>) -> parley::fontique::FallbackKey {
+        let locale = locale.and_then(|l| parley::fontique::Language::parse(l).ok());
+        parley::fontique::FallbackKey::new(
+            parley::fontique::Script::from_str_unchecked("Hani"),
+            locale.as_ref(),
+        )
+    }
+
+    #[test]
+    fn han_fallback_fills_empty_keys_and_han_text_shapes() {
+        let (mut cx, name, _) = bare_cx();
+        let id = cx.font_ctx.collection.family_id(&name).unwrap();
+        assert!(
+            cx.font_ctx
+                .collection
+                .fallback_families(han_key(None))
+                .next()
+                .is_none()
+        );
+        let filled = append_han_fallbacks(&mut cx.font_ctx.collection, &["No Such Family", &name]);
+        assert!(filled > 0);
+        for loc in [
+            None,
+            Some("zh-CN"),
+            Some("zh-TW"),
+            Some("zh-HK"),
+            Some("ja"),
+        ] {
+            let got: Vec<_> = cx
+                .font_ctx
+                .collection
+                .fallback_families(han_key(loc))
+                .collect();
+            assert_eq!(got, vec![id], "locale {loc:?}");
+        }
+        let layout = cx.layout("日本語", &style(16.0), None);
+        let runs = layout.to_scene_runs(kurbo::Point::ORIGIN);
+        let glyphs: Vec<_> = runs.iter().flat_map(|r| r.glyphs.iter()).collect();
+        assert!(!glyphs.is_empty());
+        assert!(
+            glyphs.iter().all(|g| g.id != 0),
+            "Han must not shape to .notdef"
+        );
+    }
+
+    #[test]
+    fn han_fallback_leaves_non_empty_lists_untouched() {
+        let (mut cx, name, bytes) = bare_cx();
+        let other = cx.font_ctx.collection.register_fonts(
+            Blob::from(bytes),
+            Some(parley::fontique::FontInfoOverride {
+                family_name: Some("Pre Existing"),
+                ..Default::default()
+            }),
+        )[0]
+        .0;
+        let key = han_key(Some("ja"));
+        cx.font_ctx
+            .collection
+            .set_fallbacks(key, std::iter::once(other));
+        append_han_fallbacks(&mut cx.font_ctx.collection, &[&name]);
+        let got: Vec<_> = cx.font_ctx.collection.fallback_families(key).collect();
+        assert_eq!(got, vec![other]);
+    }
+
+    #[test]
+    fn han_fallback_with_no_installed_candidate_changes_nothing() {
+        let (mut cx, _, _) = bare_cx();
+        assert_eq!(
+            append_han_fallbacks(&mut cx.font_ctx.collection, &["Nope", "Also Nope"]),
+            0
+        );
+        assert!(
+            cx.font_ctx
+                .collection
+                .fallback_families(han_key(None))
+                .next()
+                .is_none()
         );
     }
 }
