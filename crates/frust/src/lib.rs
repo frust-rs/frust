@@ -2089,8 +2089,9 @@ pub use frust_shell_desktop::config::{Decorations, TitleButtons};
 /// [`push_window_command`] queues a [`WindowCommand`] for the desktop shell to
 /// perform after the current input dispatch. [`WindowCommand::BeginMove`] starts
 /// the OS move drag and belongs in a primary pointer-down (prefer the widget that
-/// does this for you). [`WindowCommand::BeginResize`] takes a [`ResizeEdge`] and
-/// is a no-op on macOS, where AppKit keeps its own edge resizing.
+/// does this for you). [`WindowCommand::BeginResize`] takes a [`ResizeEdge`],
+/// belongs in a primary pointer-down the same way, and is a no-op on macOS,
+/// where AppKit keeps its own edge resizing.
 /// [`WindowCommand::SetMaximized`], [`WindowCommand::ToggleMaximized`],
 /// [`WindowCommand::Minimize`] and [`WindowCommand::SetFullscreen`] do what their
 /// names say; minimize has no un-minimize, which Wayland cannot provide.
@@ -2111,8 +2112,8 @@ pub use frust_shell_desktop::config::{Decorations, TitleButtons};
 /// ```no_run
 /// use frust::{WindowCommand, push_window_command};
 ///
-/// // A title-bar button or a keyboard shortcut can push any command; a drag
-/// // handle pushes `BeginMove` from its own pointer-down.
+/// // A title-bar button or a keyboard shortcut can push the state commands; a
+/// // drag handle pushes `BeginMove` from its own pointer-down.
 /// push_window_command(WindowCommand::ToggleMaximized);
 /// ```
 pub use frust_core::{ResizeEdge, WindowCommand, WindowState, push_window_command};
