@@ -36,6 +36,9 @@ frust-camera = { path = "../../plugins/camera" }
 # Default features required: the `frust-api` hooks and the ICU4X `formatting` that `locales/*/main.ftl` uses.
 frust-i18n = { path = "../../plugins/i18n" }
 
+# Localized Material widget strings: the i18n page's Material strings sample and the app theme follow the locale switcher.
+frust-material-i18n = { path = "../../plugins/material-i18n" }
+
 # Default features required: the `frust-api` builders (`use_video_player`, `video_view`,
 # `video_texture_view`).
 frust-video-player = { path = "../../plugins/video-player" }

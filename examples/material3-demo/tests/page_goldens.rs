@@ -49,7 +49,9 @@
 
 use frust::authoring::text::FontFamily;
 use frust::{Color, CrossAxisAlignment, View};
+use frust_i18n::{I18n, Locale, LocaleSet};
 use frust_material as m3;
+use frust_material_i18n::localized_theme;
 use frust_testing::case::Tolerance;
 use frust_testing::corpus::CorpusCase;
 use frust_testing::frame::{
@@ -306,6 +308,23 @@ fn progress_and_cards() -> CorpusCase {
     }
 }
 
+/// Records the selection dialog under the Material strings of `tag`, the way
+/// the app localizes its theme (`localized_theme` over the pinned baseline).
+fn record_dialog(scene: &mut Scene, tag: &str) {
+    let (mut tcx, family) = test_text_context();
+    let active: Locale = tag.parse().expect("`tag` is a valid BCP-47 tag");
+    let english: Locale = "en".parse().expect("`en` is a valid BCP-47 tag");
+    let thai: Locale = "th".parse().expect("`th` is a valid BCP-47 tag");
+    let set = LocaleSet::new(english.clone())
+        .with_locale(english, [("app.ftl", "")])
+        .with_locale(thai, [("app.ftl", "")]);
+    let i18n = I18n::new(set, &[active]).expect("the empty catalogs parse");
+    let theme = localized_theme(pin_type_scale(m3::baseline(), &family), &i18n);
+    record_view(scene, &FrameSpec::phone(), theme, &mut tcx, || {
+        m3::selection_dialog::<()>("Hello", vec!["Hello".into()]).selected(vec!["Hello".into()])
+    });
+}
+
 /// The gate: all four pages against their committed `cpu/` baselines.
 #[test]
 fn the_gallery_pages_match_their_goldens() {
@@ -383,4 +402,25 @@ fn every_page_records_commands_and_shapes_text() {
             case.spec.name
         );
     }
+}
+
+/// The Thai Material strings reach a real dialog: its Cancel and OK actions
+/// record different text than under English.
+///
+/// Not a golden. The Thai actions can only be shaped against a host font (the
+/// bundled test faces carry no Thai), which `foreign_font_runs` refuses to
+/// promote as a portable baseline, so the localized rendering is pinned by
+/// comparing the two recordings instead.
+#[test]
+fn thai_strings_reach_the_selection_dialog() {
+    let mut english = Scene::new();
+    record_dialog(&mut english, "en");
+    let mut thai = Scene::new();
+    record_dialog(&mut thai, "th");
+    assert!(glyph_run_count(&thai) > 0, "the Thai dialog shaped no text");
+    assert_ne!(
+        format!("{:?}", english.commands()),
+        format!("{:?}", thai.commands()),
+        "the Thai strings did not change what the dialog paints"
+    );
 }
