@@ -15,7 +15,11 @@
 //!   re-activation brings it back (the `lifecycle` module);
 //! - the AppKit calls neither `winit` nor `muda` expose, confined to the
 //!   `appkit_glue` module — this crate's sanctioned-unsafe zone, in the shape
-//!   of `frust-shell-android`'s `jni_glue` and `frust-shell-ios`'s `ffi_glue`.
+//!   of `frust-shell-android`'s `jni_glue` and `frust-shell-ios`'s `ffi_glue`;
+//! - **window-button placement** under `Decorations::NoTitleBar`: the close,
+//!   minimize and zoom buttons moved to the app's `TitleButtons` and re-placed
+//!   after a resize or a fullscreen exit (the `title_buttons` module, whose
+//!   AppKit half is a second zone of the same kind).
 //!
 //! # Shutdown
 //!
@@ -69,6 +73,7 @@ use std::sync::Arc;
 use frust_shell_common::platform_view::ViewCommand;
 use frust_shell_desktop::config::{DEFAULT_APP_NAME, DesktopConfig, MenuSpec};
 use frust_shell_desktop::extensions::{CloseAction, DesktopExtensions};
+use frust_shell_desktop::{Decorations, TitleButtons};
 use winit::window::Window;
 
 #[cfg(target_os = "macos")]
@@ -89,6 +94,10 @@ mod menu;
 // host has no caller, hence the same scoped allow.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod platform_view;
+// Half-gated like `platform_view`: the placement geometry is tested on every
+// host, but its only caller is the AppKit half.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod title_buttons;
 
 use lifecycle::{CloseDecision, Lifecycle};
 
@@ -106,6 +115,11 @@ pub struct MacosExtensions {
     app_name: String,
     /// The app's own menu declaration, appended after the application menu.
     menu_spec: Option<MenuSpec>,
+    /// The window frame style; window-button placement runs only for
+    /// [`Decorations::NoTitleBar`].
+    decorations: Decorations,
+    /// Where the app wants the window buttons (see [`title_buttons`]).
+    title_buttons: Option<TitleButtons>,
     /// Close/reopen policy plus the retained window, shared with the AppKit
     /// activation observer (see [`lifecycle`]).
     lifecycle: Arc<Lifecycle>,
@@ -116,6 +130,10 @@ pub struct MacosExtensions {
     /// The live reopen registration; dropping it unregisters.
     #[cfg(target_os = "macos")]
     activation: Option<appkit_glue::AppActivationObserver>,
+    /// The live resize/exit-fullscreen registration that re-places the window
+    /// buttons; dropping it unregisters.
+    #[cfg(target_os = "macos")]
+    button_observer: Option<title_buttons::WindowButtonObserver>,
     /// The hosted native views: one `NSView` per live platform-view slot,
     /// parented above the window's content view (see [`platform_view`]).
     #[cfg(target_os = "macos")]
@@ -136,11 +154,15 @@ impl MacosExtensions {
                 current_exe_stem().as_deref(),
             ),
             menu_spec: config.menu_spec.clone(),
+            decorations: config.decorations,
+            title_buttons: config.title_buttons,
             lifecycle: Arc::new(Lifecycle::new(config.quit_on_last_window_closed)),
             #[cfg(target_os = "macos")]
             menu: None,
             #[cfg(target_os = "macos")]
             activation: None,
+            #[cfg(target_os = "macos")]
+            button_observer: None,
             #[cfg(target_os = "macos")]
             view_host: platform_view::AppKitViewHost::default(),
         }
@@ -165,6 +187,12 @@ impl DesktopExtensions for MacosExtensions {
             self.menu = menu::install_menu(&self.app_name, self.menu_spec.as_ref());
             self.activation =
                 appkit_glue::AppActivationObserver::install(Arc::clone(&self.lifecycle));
+            // Before the window is shown; `Full`/`None` never reach AppKit here.
+            if let Some(buttons) = title_buttons::wanted(self.decorations, self.title_buttons) {
+                title_buttons::apply(window, buttons);
+                self.button_observer =
+                    title_buttons::WindowButtonObserver::install(window, buttons);
+            }
         }
     }
 
@@ -228,11 +256,14 @@ impl std::fmt::Debug for MacosExtensions {
         debug
             .field("app_name", &self.app_name)
             .field("menu_spec", &self.menu_spec)
+            .field("decorations", &self.decorations)
+            .field("title_buttons", &self.title_buttons)
             .field("lifecycle", &self.lifecycle);
         #[cfg(target_os = "macos")]
         debug
             .field("menu_installed", &self.menu.is_some())
             .field("reopen_observer", &self.activation.is_some())
+            .field("title_button_observer", &self.button_observer.is_some())
             .field("hosted_platform_views", &self.view_host.hosted_count());
         debug.finish()
     }
@@ -346,6 +377,41 @@ mod tests {
         assert_eq!(extensions.app_name, "Huddle");
         assert_eq!(extensions.menu_spec, config.menu_spec);
         assert!(!extensions.lifecycle.is_hidden());
+    }
+
+    #[test]
+    fn the_title_button_placement_is_read_at_construction() {
+        let config = DesktopConfig::new()
+            .with_decorations(Decorations::NoTitleBar)
+            .with_title_buttons(TitleButtons::new(16.0, 40.0));
+        let extensions = MacosExtensions::new(&config);
+        assert_eq!(extensions.decorations, Decorations::NoTitleBar);
+        assert_eq!(
+            extensions.title_buttons,
+            Some(TitleButtons::new(16.0, 40.0))
+        );
+        assert_eq!(
+            title_buttons::wanted(extensions.decorations, extensions.title_buttons),
+            Some(TitleButtons::new(16.0, 40.0))
+        );
+    }
+
+    #[test]
+    fn a_titled_or_frameless_window_wants_no_button_placement() {
+        for decorations in [Decorations::Full, Decorations::None] {
+            let config = DesktopConfig::new()
+                .with_decorations(decorations)
+                .with_title_buttons(TitleButtons::new(16.0, 40.0));
+            let extensions = MacosExtensions::new(&config);
+            assert_eq!(extensions.decorations, decorations);
+            assert_eq!(
+                title_buttons::wanted(extensions.decorations, extensions.title_buttons),
+                None
+            );
+        }
+        let extensions = MacosExtensions::new(&DesktopConfig::new());
+        assert_eq!(extensions.decorations, Decorations::Full);
+        assert_eq!(extensions.title_buttons, None);
     }
 
     #[test]
