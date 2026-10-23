@@ -34,13 +34,29 @@
 //! missing, never drawn in a wrong face. A target without CoreText refuses
 //! every face, so there an `hvgl` run is counted as skipped whole.
 //!
+//! # Variation instances
+//!
+//! PingFang's faces are variable (`wght`, plus Apple's `WDTH` and `HGHT`), and
+//! a run carries the normalized coordinates its shaper chose
+//! ([`FontHandle::normalized_coords`](frust_scene::FontHandle::normalized_coords)).
+//! Those are F2Dot14 values after the face's `avar` mapping, one per `fvar`
+//! axis; CoreText wants user values (`wght` 600). So each is mapped back
+//! through the inverse of the axis's `avar` segment map, then denormalized
+//! against the axis's `fvar` minimum, default and maximum ([`user_value`]),
+//! and the face is copied with a `kCTFontVariationAttribute` dictionary naming
+//! every axis (axis tag to user value). Each face keeps its few most recently
+//! used instances open ([`MAX_INSTANCES_PER_FACE`]). A run with no coordinates
+//! — every non-variable face, and a variable one at its default — draws from
+//! the face as opened, exactly as before.
+//!
 //! # The cache
 //!
 //! Outlines are retained in a least-recently-used cache bounded by entry count
 //! ([`MAX_CACHED_OUTLINES`]), keyed by the face's blob id and collection index
-//! — the pair `glifo` keys on — plus the glyph id and a [`VariationKey`]. A
-//! glyph CoreText cannot supply is remembered as missing too, so a refusal is
-//! paid for once.
+//! — the pair `glifo` keys on — plus the glyph id and a [`VariationKey`] built
+//! from the run's coordinates, so one instance's outline is never served for
+//! another's. A glyph CoreText cannot supply is remembered as missing too, so a
+//! refusal is paid for once.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -59,6 +75,21 @@ const HVGL_TAG: [u8; 4] = *b"hvgl";
 const OUTLINE_TAGS: [[u8; 4]; 3] = [*b"glyf", *b"CFF ", *b"CFF2"];
 /// `name`, on the same terms.
 const NAME_TAG: [u8; 4] = *b"name";
+/// `fvar`, the face's variation axes.
+const FVAR_TAG: [u8; 4] = *b"fvar";
+/// `avar`, the face's per-axis normalization remapping.
+const AVAR_TAG: [u8; 4] = *b"avar";
+/// An `fvar` header's fixed length, ahead of its axis records.
+const FVAR_HEADER_LEN: usize = 16;
+/// The shortest `fvar` axis record: tag, minimum, default, maximum, flags and
+/// name id.
+const FVAR_AXIS_MIN_LEN: usize = 20;
+/// An `avar` header's fixed length, ahead of its segment maps.
+const AVAR_HEADER_LEN: usize = 8;
+/// One F2Dot14 unit: a normalized coordinate of 1.0.
+const F2DOT14_ONE: f64 = 16384.0;
+/// One 16.16 `Fixed` unit.
+const FIXED_ONE: f64 = 65536.0;
 /// The `name` table's PostScript-name record.
 const POSTSCRIPT_NAME_ID: u16 = 6;
 /// The longest PostScript name the OpenType `name` table allows.
@@ -83,18 +114,52 @@ pub(crate) const MAX_CACHED_OUTLINES: usize = 1024;
 /// fallback faces; one evicted is simply opened again by name.
 const MAX_OPEN_FACES: usize = 16;
 
-/// Which variation instance of a face an outline belongs to.
+/// How many variation instances of one face stay open at once. A screen uses
+/// a few weights of a family (regular, medium, semibold); one evicted is
+/// copied from the face again.
+pub(crate) const MAX_INSTANCES_PER_FACE: usize = 8;
+
+/// Which variation instance of a face an outline belongs to, derived from a
+/// run's normalized coordinates.
 ///
-/// Every outline is currently fetched from the face's default instance, so
-/// every key carries [`VariationKey::DEFAULT`]; the field is in the key now so
-/// that carrying a run's variation coordinates (a requested weight) cannot
-/// serve one instance's outline for another's.
+/// Up to three coordinates — every face this module exists for: PingFang has
+/// `WDTH`, `wght` and `HGHT` — are packed exactly, with their count, so two
+/// distinct instances never share a key. A face with more axes keys on a
+/// 64-bit hash of its coordinates, tagged by the top bit so it cannot collide
+/// with a packed key. Coordinates that are all zero name the default instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub(crate) struct VariationKey(u64);
 
 impl VariationKey {
     /// The face's default instance — no variation coordinates.
     pub(crate) const DEFAULT: Self = Self(0);
+
+    /// The coordinates packed exactly when there are at most this many.
+    const PACKED_AXES: usize = 3;
+
+    /// The key for `coords`, normalized F2Dot14 values in `fvar` axis order.
+    pub(crate) fn of(coords: &[i16]) -> Self {
+        let coords = match coords.iter().rposition(|coord| *coord != 0) {
+            Some(last) => &coords[..=last],
+            None => return Self::DEFAULT,
+        };
+        if coords.len() <= Self::PACKED_AXES {
+            let packed = coords.iter().fold(0_u64, |packed, coord| {
+                (packed << 16) | u64::from(coord.cast_unsigned())
+            });
+            // The count (1..=3) sits above the 48 coordinate bits, so the key
+            // is never zero and never has the hash tag bit.
+            return Self(((coords.len() as u64) << 48) | packed);
+        }
+        // FNV-1a over the coordinates' bytes.
+        let hash = coords
+            .iter()
+            .flat_map(|coord| coord.to_be_bytes())
+            .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+            });
+        Self(hash | (1 << 63))
+    }
 }
 
 /// One cached outline's identity.
@@ -168,6 +233,8 @@ pub(crate) fn glyph_transform(
 
 /// Fill every glyph of `run` from `outlines` into `sink`, under the run's
 /// device `transform`, answering how many glyphs could not be drawn.
+///
+/// The glyphs are drawn at the variation instance the run's handle carries.
 pub(crate) fn draw_run(
     run: &GlyphRun,
     transform: Affine,
@@ -175,9 +242,10 @@ pub(crate) fn draw_run(
     outlines: &mut HvglOutlines,
 ) -> u32 {
     let font = run.font.font();
+    let coords = run.font.normalized_coords();
     let mut unavailable = 0_u32;
     for glyph in &run.glyphs {
-        match outlines.outline(font, glyph.id, VariationKey::DEFAULT) {
+        match outlines.outline(font, glyph.id, coords) {
             GlyphOutline::Path { path, units_per_em } => {
                 sink.set_transform(glyph_transform(
                     transform,
@@ -240,26 +308,35 @@ impl HvglOutlines {
         self.outlines.capacity
     }
 
-    /// `glyph_id`'s outline in `font`'s face at `variation`, fetched from
-    /// CoreText on a cache miss.
+    /// `glyph_id`'s outline in `font`'s face at the variation instance
+    /// `coords` names (normalized F2Dot14 values in `fvar` axis order; empty
+    /// for the default instance), fetched from CoreText on a cache miss.
+    ///
+    /// Coordinates on a face with no `fvar` axes name nothing to vary, and
+    /// draw from the face as opened.
     pub(crate) fn outline(
         &mut self,
         font: &FontData,
         glyph_id: u32,
-        variation: VariationKey,
+        coords: &[i16],
     ) -> GlyphOutline<'_> {
         let Self { faces, outlines } = self;
         let Some(face) = faces.open(font) else {
             return GlyphOutline::Unavailable;
         };
         let units_per_em = face.units_per_em;
+        let variation = if face.axes.is_empty() {
+            VariationKey::DEFAULT
+        } else {
+            VariationKey::of(coords)
+        };
         let key = OutlineKey {
             font_id: font.data.id(),
             face_index: font.index,
             glyph_id,
             variation,
         };
-        match outlines.get_or_fetch(key, || fetch(&face.ct, glyph_id)) {
+        match outlines.get_or_fetch(key, || fetch(face.instance(variation, coords), glyph_id)) {
             Some(Fetched::Path(path)) => GlyphOutline::Path { path, units_per_em },
             Some(Fetched::Empty) => GlyphOutline::Empty,
             Some(Fetched::Missing) | None => GlyphOutline::Unavailable,
@@ -322,10 +399,203 @@ impl OutlineCache {
 /// One face open in CoreText.
 struct Face {
     /// The CoreText face, opened at `units_per_em` points so its outlines are
-    /// in font units.
+    /// in font units — the face's default instance.
     ct: platform::CtFace,
     /// The face's `head.unitsPerEm`.
     units_per_em: f64,
+    /// The face's variation axes, in `fvar` order; empty for a face that does
+    /// not vary.
+    axes: Vec<Axis>,
+    /// The variation instances copied from `ct`, with their last use.
+    instances: Vec<(VariationKey, platform::CtFace, u64)>,
+    /// A use counter, for the least-recently-used replacement of `instances`.
+    uses: u64,
+}
+
+impl Face {
+    /// The CoreText face to read `variation`'s outlines from: the face as
+    /// opened for the default instance, else a copy at the user values
+    /// `coords` maps to, copied on first use.
+    fn instance(&mut self, variation: VariationKey, coords: &[i16]) -> &platform::CtFace {
+        if variation == VariationKey::DEFAULT {
+            return &self.ct;
+        }
+        self.uses = self.uses.wrapping_add(1);
+        let position = match self
+            .instances
+            .iter()
+            .position(|(key, ..)| *key == variation)
+        {
+            Some(position) => position,
+            None => {
+                if self.instances.len() >= MAX_INSTANCES_PER_FACE
+                    && let Some(oldest) = self
+                        .instances
+                        .iter()
+                        .enumerate()
+                        .min_by_key(|(_, (.., used))| *used)
+                        .map(|(position, _)| position)
+                {
+                    self.instances.swap_remove(oldest);
+                }
+                let values = user_values(&self.axes, coords);
+                let Some(varied) = self.ct.varied(&values, self.units_per_em) else {
+                    return &self.ct;
+                };
+                self.instances.push((variation, varied, 0));
+                self.instances.len() - 1
+            }
+        };
+        let Some(entry) = self.instances.get_mut(position) else {
+            return &self.ct;
+        };
+        entry.2 = self.uses;
+        &entry.1
+    }
+}
+
+/// One `fvar` axis, with its `avar` segment map.
+#[derive(Debug, Clone, PartialEq)]
+struct Axis {
+    /// The axis tag as a big-endian integer — CoreText's axis identifier.
+    tag: u32,
+    /// The axis minimum, in user units.
+    min: f64,
+    /// The axis default, in user units.
+    default: f64,
+    /// The axis maximum, in user units.
+    max: f64,
+    /// The axis's `avar` map as `(from, to)` normalized pairs; empty when the
+    /// face has no `avar` (the identity).
+    avar: Vec<(f64, f64)>,
+}
+
+/// Every axis of `coords`'s instance as `(axis tag, user value)`: each
+/// coordinate mapped back through its axis's `avar`, then denormalized
+/// against the axis's range. An axis `coords` stops short of sits at its
+/// default, so the instance is absolute rather than relative to the face's
+/// own named instance.
+fn user_values(axes: &[Axis], coords: &[i16]) -> Vec<(u32, f64)> {
+    axes.iter()
+        .enumerate()
+        .map(|(index, axis)| {
+            let coord = coords.get(index).copied().unwrap_or(0);
+            (axis.tag, user_value(axis, f64::from(coord) / F2DOT14_ONE))
+        })
+        .collect()
+}
+
+/// The user value an `avar`-mapped normalized coordinate stands for on `axis`.
+fn user_value(axis: &Axis, normalized: f64) -> f64 {
+    let normalized = unmap_avar(&axis.avar, normalized.clamp(-1.0, 1.0));
+    if normalized < 0.0 {
+        axis.default + normalized * (axis.default - axis.min)
+    } else {
+        axis.default + normalized * (axis.max - axis.default)
+    }
+}
+
+/// The pre-`avar` coordinate `mapped` came from, through the inverse of the
+/// segment map `map` (`(from, to)` pairs, ascending in both): linear between
+/// the two pairs whose `to` values bracket it. A map with fewer than two
+/// pairs is the identity, as the `avar` spec treats it. Where several `from`
+/// values share a `to` (a flat segment), the first is answered.
+fn unmap_avar(map: &[(f64, f64)], mapped: f64) -> f64 {
+    if map.len() < 2 {
+        return mapped;
+    }
+    for pair in map.windows(2) {
+        let [(from0, to0), (from1, to1)] = [pair[0], pair[1]];
+        if mapped >= to0 && mapped <= to1 {
+            if to1 - to0 <= f64::EPSILON {
+                return from0;
+            }
+            return from0 + (mapped - to0) * (from1 - from0) / (to1 - to0);
+        }
+    }
+    mapped
+}
+
+/// The face's `fvar` axes with their `avar` maps, or none when it has no
+/// readable `fvar`. An `avar` whose axis count disagrees with `fvar`'s is
+/// ignored (the identity), as is any part of one that does not fit the blob.
+fn variation_axes(data: &[u8], directory: usize) -> Vec<Axis> {
+    let Some(mut axes) = fvar_axes(data, directory) else {
+        return Vec::new();
+    };
+    if let Some(maps) = avar_maps(data, directory).filter(|maps| maps.len() == axes.len()) {
+        for (axis, map) in axes.iter_mut().zip(maps) {
+            axis.avar = map;
+        }
+    }
+    axes
+}
+
+/// Where the table `tag` starts in `data`, when its record and its whole
+/// extent fit.
+fn table_start(data: &[u8], directory: usize, tag: [u8; 4]) -> Option<usize> {
+    let record = table_record(data, directory, tag)?;
+    let offset = usize::try_from(read_u32(data, record.checked_add(8)?)?).ok()?;
+    let length = usize::try_from(read_u32(data, record.checked_add(12)?)?).ok()?;
+    (offset.checked_add(length)? <= data.len()).then_some(offset)
+}
+
+/// The `fvar` axis records, without their `avar` maps.
+fn fvar_axes(data: &[u8], directory: usize) -> Option<Vec<Axis>> {
+    let table = table_start(data, directory, FVAR_TAG)?;
+    if data.len() < table.checked_add(FVAR_HEADER_LEN)? {
+        return None;
+    }
+    let first = table.checked_add(usize::from(read_u16(data, table.checked_add(4)?)?))?;
+    let count = usize::from(read_u16(data, table.checked_add(8)?)?);
+    let size = usize::from(read_u16(data, table.checked_add(10)?)?);
+    if size < FVAR_AXIS_MIN_LEN {
+        return None;
+    }
+    let fixed = |at: usize| -> Option<f64> {
+        Some(f64::from(read_u32(data, at)?.cast_signed()) / FIXED_ONE)
+    };
+    (0..count)
+        .map(|index| {
+            let at = first.checked_add(index.checked_mul(size)?)?;
+            Some(Axis {
+                tag: read_u32(data, at)?,
+                min: fixed(at.checked_add(4)?)?,
+                default: fixed(at.checked_add(8)?)?,
+                max: fixed(at.checked_add(12)?)?,
+                avar: Vec::new(),
+            })
+        })
+        .collect()
+}
+
+/// The `avar` segment maps, one per axis, as normalized `(from, to)` pairs.
+/// Version 2's extra variation data is not read; its segment maps are.
+fn avar_maps(data: &[u8], directory: usize) -> Option<Vec<Vec<(f64, f64)>>> {
+    let table = table_start(data, directory, AVAR_TAG)?;
+    let major = read_u16(data, table)?;
+    if major != 1 && major != 2 {
+        return None;
+    }
+    let count = usize::from(read_u16(data, table.checked_add(6)?)?);
+    let f2dot14 = |at: usize| -> Option<f64> {
+        Some(f64::from(read_u16(data, at)?.cast_signed()) / F2DOT14_ONE)
+    };
+    let mut at = table.checked_add(AVAR_HEADER_LEN)?;
+    let mut maps = Vec::with_capacity(count);
+    for _ in 0..count {
+        let pairs = usize::from(read_u16(data, at)?);
+        at = at.checked_add(2)?;
+        let map = (0..pairs)
+            .map(|pair| {
+                let pair_at = at.checked_add(pair.checked_mul(4)?)?;
+                Some((f2dot14(pair_at)?, f2dot14(pair_at.checked_add(2)?)?))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        at = at.checked_add(pairs.checked_mul(4)?)?;
+        maps.push(map);
+    }
+    Some(maps)
 }
 
 /// A face the provider has looked at: open, or refused for good.
@@ -348,7 +618,7 @@ struct FaceTable {
 impl FaceTable {
     /// `font`'s face open in CoreText, opening it on first sight, or `None`
     /// when it was refused.
-    fn open(&mut self, font: &FontData) -> Option<&Face> {
+    fn open(&mut self, font: &FontData) -> Option<&mut Face> {
         let id = font.data.id();
         self.uses = self.uses.wrapping_add(1);
         let position = match self
@@ -374,7 +644,7 @@ impl FaceTable {
         };
         let entry = self.faces.get_mut(position)?;
         entry.3 = self.uses;
-        match &entry.2 {
+        match &mut entry.2 {
             FaceSlot::Open(face) => Some(face),
             FaceSlot::Refused => None,
         }
@@ -415,7 +685,13 @@ fn try_open_face(font: &FontData) -> Result<Face, String> {
     }
     let ct = platform::CtFace::open(&name, units_per_em)
         .ok_or_else(|| format!("'{name}': {}", platform::UNAVAILABLE))?;
-    Ok(Face { ct, units_per_em })
+    Ok(Face {
+        ct,
+        units_per_em,
+        axes: variation_axes(data, directory),
+        instances: Vec::new(),
+        uses: 0,
+    })
 }
 
 /// Whether `name` is a PostScript name as the `name` table defines one:
@@ -504,9 +780,9 @@ mod platform {
     use core::ptr::NonNull;
 
     use kurbo::{PathEl, Point};
-    use objc2_core_foundation::{CFRetained, CFString};
+    use objc2_core_foundation::{CFDictionary, CFNumber, CFRetained, CFString, CFType};
     use objc2_core_graphics::{CGPath, CGPathElement, CGPathElementType};
-    use objc2_core_text::{CTFont, CTFontOrientation};
+    use objc2_core_text::{CTFont, CTFontDescriptor, CTFontOrientation, kCTFontVariationAttribute};
 
     /// Why [`CtFace::open`] refuses a face here.
     pub(super) const UNAVAILABLE: &str =
@@ -550,6 +826,43 @@ mod platform {
             // SAFETY: a getter on a live font.
             let glyph_count = usize::try_from(unsafe { font.glyph_count() }).unwrap_or(0);
             Some(Self { font, glyph_count })
+        }
+
+        /// A copy of this face at the variation instance `axes` names — each
+        /// `(axis tag, user value)` — at `units_per_em` points.
+        ///
+        /// Built from a `kCTFontVariationAttribute` dictionary (axis
+        /// identifier to value, both `CFNumber`s), which CoreText honours on
+        /// an `hvgl` face as on any variable one. Always `Some` here; the
+        /// `Option` is the shape the target without CoreText shares.
+        pub(super) fn varied(&self, axes: &[(u32, f64)], units_per_em: f64) -> Option<Self> {
+            let tags: Vec<CFRetained<CFNumber>> = axes
+                .iter()
+                .map(|(tag, _)| CFNumber::new_i64(i64::from(*tag)))
+                .collect();
+            let values: Vec<CFRetained<CFNumber>> = axes
+                .iter()
+                .map(|(_, value)| CFNumber::new_f64(*value))
+                .collect();
+            let tags: Vec<&CFNumber> = tags.iter().map(|tag| &**tag).collect();
+            let values: Vec<&CFNumber> = values.iter().map(|value| &**value).collect();
+            let variation = CFDictionary::<CFNumber, CFNumber>::from_slices(&tags, &values);
+            // SAFETY: reading an immutable CoreText constant.
+            let key: &CFString = unsafe { kCTFontVariationAttribute };
+            let variation: &CFType = variation.as_ref();
+            let attributes = CFDictionary::<CFString, CFType>::from_slices(&[key], &[variation]);
+            // SAFETY: the attribute dictionary maps a CoreText attribute name
+            // to the dictionary type that attribute documents.
+            let descriptor = unsafe { CTFontDescriptor::with_attributes(attributes.as_opaque()) };
+            // SAFETY: the font is live and a null matrix keeps the original's.
+            let font = unsafe {
+                self.font
+                    .copy_with_attributes(units_per_em, core::ptr::null(), Some(&descriptor))
+            };
+            Some(Self {
+                font,
+                glyph_count: self.glyph_count,
+            })
         }
 
         /// Whether `glyph_id` names a glyph of the face.
@@ -643,6 +956,11 @@ mod platform {
         /// Always `None`: there is no CoreText here.
         pub(super) fn open(_name: &str, _units_per_em: f64) -> Option<Self> {
             None
+        }
+
+        /// Unreachable — no `CtFace` exists on this target.
+        pub(super) fn varied(&self, _axes: &[(u32, f64)], _units_per_em: f64) -> Option<Self> {
+            match *self {}
         }
 
         /// Unreachable — no `CtFace` exists on this target.
@@ -808,7 +1126,7 @@ mod tests {
         );
         let mut outlines = HvglOutlines::default();
         assert!(matches!(
-            outlines.outline(&hidden, 1, VariationKey::DEFAULT),
+            outlines.outline(&hidden, 1, &[]),
             GlyphOutline::Unavailable
         ));
         assert_eq!(outlines.cached_outlines(), 0);
@@ -855,6 +1173,227 @@ mod tests {
             ]),
             Fetched::Path(_)
         ));
+    }
+
+    /// An `fvar` table of `(tag, min, default, max)` axes.
+    fn fvar(axes: &[(&[u8; 4], f64, f64, f64)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let count = u16::try_from(axes.len()).unwrap();
+        for field in [1_u16, 0, 16, 2, count, 20, 0, 0] {
+            out.extend(field.to_be_bytes());
+        }
+        for (tag, min, default, max) in axes {
+            out.extend(*tag);
+            for value in [min, default, max] {
+                out.extend(((value * FIXED_ONE) as i32).to_be_bytes());
+            }
+            out.extend([0; 4]);
+        }
+        out
+    }
+
+    /// An `avar` table of one segment map of `(from, to)` pairs per axis.
+    fn avar(maps: &[&[(f64, f64)]]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let count = u16::try_from(maps.len()).unwrap();
+        for field in [1_u16, 0, 0, count] {
+            out.extend(field.to_be_bytes());
+        }
+        for map in maps {
+            out.extend(u16::try_from(map.len()).unwrap().to_be_bytes());
+            for (from, to) in *map {
+                out.extend(((from * F2DOT14_ONE) as i16).to_be_bytes());
+                out.extend(((to * F2DOT14_ONE) as i16).to_be_bytes());
+            }
+        }
+        out
+    }
+
+    fn axis(tag: &[u8; 4], min: f64, default: f64, max: f64) -> Axis {
+        Axis {
+            tag: u32::from_be_bytes(*tag),
+            min,
+            default,
+            max,
+            avar: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn variation_keys_separate_every_instance_and_fold_the_default() {
+        assert_eq!(VariationKey::of(&[]), VariationKey::DEFAULT);
+        assert_eq!(VariationKey::of(&[0, 0, 0]), VariationKey::DEFAULT);
+        // Trailing zeros are default axes: the same instance.
+        assert_eq!(VariationKey::of(&[0, 100]), VariationKey::of(&[0, 100, 0]));
+        let keys = [
+            VariationKey::of(&[100]),
+            VariationKey::of(&[0, 100]),
+            VariationKey::of(&[0, 0, 100]),
+            VariationKey::of(&[-100]),
+            VariationKey::of(&[0, -9830, 0]),
+            VariationKey::of(&[0, 16384, 0]),
+            VariationKey::of(&[1, 2, 3, 4]),
+            VariationKey::of(&[1, 2, 3, 5]),
+        ];
+        for (index, key) in keys.iter().enumerate() {
+            assert_ne!(*key, VariationKey::DEFAULT, "{index}");
+            for other in &keys[index + 1..] {
+                assert_ne!(key, other);
+            }
+        }
+        // Packed keys never carry the hashed keys' tag bit.
+        assert_eq!(VariationKey::of(&[-1, -1, -1]).0 >> 63, 0);
+        assert_eq!(VariationKey::of(&[1, 2, 3, 4]).0 >> 63, 1);
+    }
+
+    #[test]
+    fn a_normalized_coordinate_denormalizes_against_its_axis_range() {
+        let wght = axis(b"wght", 100.0, 500.0, 600.0);
+        assert_eq!(user_value(&wght, 0.0), 500.0);
+        assert_eq!(user_value(&wght, -1.0), 100.0);
+        assert_eq!(user_value(&wght, -0.5), 300.0);
+        assert_eq!(user_value(&wght, 1.0), 600.0);
+        assert_eq!(user_value(&wght, 2.0), 600.0, "clamped to the axis");
+        let values = user_values(&[axis(b"WDTH", 1.0, 500.0, 1000.0), wght], &[0]);
+        assert_eq!(
+            values,
+            vec![
+                (u32::from_be_bytes(*b"WDTH"), 500.0),
+                (u32::from_be_bytes(*b"wght"), 500.0)
+            ],
+            "an axis past the coordinates sits at its default"
+        );
+    }
+
+    #[test]
+    fn an_avar_mapped_coordinate_is_mapped_back_before_denormalizing() {
+        // PingFang SC's `wght` map (macOS 27): the light half is bent, and
+        // the heavy half maps 0..1 onto 0..0.2 with a jump to 1.0 at the end.
+        let map = [
+            (-1.0, -1.0),
+            (-0.5, -0.6),
+            (0.0, 0.0),
+            (1.0, 0.2),
+            (1.0, 1.0),
+        ];
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        assert!(close(unmap_avar(&map, -0.6), -0.5));
+        assert!(close(unmap_avar(&map, -0.8), -0.75));
+        assert!(close(unmap_avar(&map, 0.1), 0.5));
+        assert!(close(unmap_avar(&map, 0.2), 1.0));
+        assert!(close(unmap_avar(&map, 0.6), 1.0), "the flat top is the max");
+        assert!(close(unmap_avar(&map, 1.0), 1.0));
+        assert!(close(unmap_avar(&[], 0.3), 0.3), "no map is the identity");
+        let mut wght = axis(b"wght", 100.0, 500.0, 600.0);
+        wght.avar = map.to_vec();
+        assert!(close(user_value(&wght, -0.6), 300.0));
+        assert!(close(user_value(&wght, 0.2), 600.0));
+    }
+
+    #[test]
+    fn fvar_axes_and_their_avar_maps_are_read_from_the_face() {
+        let tables = [
+            (*b"head", head(1000)),
+            (
+                FVAR_TAG,
+                fvar(&[
+                    (b"WDTH", 1.0, 500.0, 1000.0),
+                    (b"wght", 100.0, 500.0, 600.0),
+                ]),
+            ),
+            (
+                AVAR_TAG,
+                avar(&[
+                    &[(-1.0, -1.0), (0.0, 0.0), (1.0, 1.0)],
+                    &[(-1.0, -1.0), (-0.5, -0.625), (0.0, 0.0), (1.0, 1.0)],
+                ]),
+            ),
+        ];
+        let data = sfnt(&tables);
+        let axes = variation_axes(&data, table_directory(&data, 0).unwrap());
+        assert_eq!(axes.len(), 2);
+        assert_eq!(axes[1].tag, u32::from_be_bytes(*b"wght"));
+        assert_eq!(
+            (axes[1].min, axes[1].default, axes[1].max),
+            (100.0, 500.0, 600.0)
+        );
+        assert_eq!(axes[1].avar[1], (-0.5, -0.625));
+        assert_eq!(user_value(&axes[1], -0.625), 300.0);
+
+        // An `avar` for the wrong number of axes is ignored, not misapplied.
+        let short = sfnt(&[
+            tables[0].clone(),
+            tables[1].clone(),
+            (AVAR_TAG, avar(&[&[(-1.0, -1.0), (0.0, 0.0), (1.0, 1.0)]])),
+        ]);
+        let axes = variation_axes(&short, table_directory(&short, 0).unwrap());
+        assert!(axes.iter().all(|axis| axis.avar.is_empty()));
+
+        // No `fvar`, or one that does not fit, reads as a face that does not
+        // vary.
+        let plain = sfnt(&[(*b"head", head(1000))]);
+        assert!(variation_axes(&plain, table_directory(&plain, 0).unwrap()).is_empty());
+        let mut truncated = fvar(&[(b"wght", 100.0, 500.0, 600.0)]);
+        truncated.truncate(24);
+        let broken = sfnt(&[(*b"head", head(1000)), (FVAR_TAG, truncated)]);
+        assert!(variation_axes(&broken, table_directory(&broken, 0).unwrap()).is_empty());
+    }
+
+    /// The face the macOS cases read: `PingFangSC-Medium` from the system
+    /// collection, or `None` when it is not installed.
+    #[cfg(target_os = "macos")]
+    fn system_pingfang_sc() -> Option<FontData> {
+        let data = [
+            "/System/Library/PrivateFrameworks/FontServices.framework/Versions/A/Resources/Reserved/PingFangUI.ttc",
+            "/System/Library/Fonts/PingFangUI.ttc",
+        ]
+        .iter()
+        .find_map(|path| std::fs::read(path).ok())?;
+        let count = read_u32(&data, 8)?;
+        let blob = Blob::new(Arc::new(data));
+        (0..count).find_map(|index| {
+            let font = FontData::new(blob.clone(), index);
+            let data = font.data.data();
+            let directory = table_directory(data, index)?;
+            (postscript_name(data, directory).as_deref() == Some("PingFangSC-Medium"))
+                .then_some(font)
+        })
+    }
+
+    /// The light and semibold instances of PingFang SC's `中` have different
+    /// outline bounds: the coordinates reach CoreText.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pingfang_outlines_follow_the_requested_weight() {
+        let Some(font) = system_pingfang_sc() else {
+            println!("skipped: PingFangUI.ttc's PingFangSC-Medium is not installed");
+            return;
+        };
+        let data = font.data.data();
+        let axes = variation_axes(data, table_directory(data, font.index).unwrap());
+        let wght = axes
+            .iter()
+            .position(|axis| axis.tag == u32::from_be_bytes(*b"wght"))
+            .expect("PingFang SC varies its weight");
+        // Glyph 289 is `中` in this face (CoreText's own character map, as in
+        // the integration tests); any inked glyph shows the same.
+        let glyph = 289;
+        let mut outlines = HvglOutlines::default();
+        let mut bounds_at = |normalized: i16| {
+            let mut coords = vec![0_i16; axes.len()];
+            coords[wght] = normalized;
+            match outlines.outline(&font, glyph, &coords) {
+                GlyphOutline::Path { path, .. } => kurbo::Shape::bounding_box(path),
+                other => panic!("no outline at {normalized}: {other:?}"),
+            }
+        };
+        let light = bounds_at(-16384);
+        let heavy = bounds_at(16384);
+        let default = bounds_at(0);
+        assert_ne!(light, heavy);
+        assert_ne!(light, default);
+        assert!(heavy.width() > light.width(), "{light:?} vs {heavy:?}");
+        assert_eq!(outlines.cached_outlines(), 3, "one entry per instance");
     }
 
     #[test]

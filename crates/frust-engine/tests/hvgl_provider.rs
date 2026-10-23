@@ -19,7 +19,20 @@
 //!   many distinct glyphs are drawn. These cases print why and pass when the
 //!   collection is not installed.
 //! - **Through the GPU** (ignored by default, needs Metal): the same run read
-//!   back from a headless target carries ink.
+//!   back from a headless target carries ink, and more of it at weight 600
+//!   than at 300.
+//!
+//! And the variation coordinates a run is shaped at:
+//!
+//! - **`TextContext` carries them.** A variable `glyf` face laid out at
+//!   weights 300 and 600 yields runs whose handles carry distinct
+//!   coordinates, and none at the face's default weight. `glifo`'s route still
+//!   draws such a run exactly as it did before coordinates were carried.
+//! - **On macOS PingFang draws at the requested weight.** 中 at weights 300
+//!   and 600 in `PingFangSC-Medium` compiles to different coverage. The
+//!   coordinates come from `TextContext` when it resolves the `hvgl` face
+//!   itself; fontique 0.11.1 rejects every `hvgl` face, so at that pin the case
+//!   prints so and derives them from the face's `fvar`/`avar` instead.
 
 use std::sync::Arc;
 
@@ -27,7 +40,8 @@ use frust_engine::cache::images::ImageResidency;
 use frust_engine::compile::CompiledFrame;
 use frust_engine::{AtlasBudget, SceneCompiler};
 use frust_scene::{FontHandle, Glyph, GlyphRun, Scene, SceneBuilder};
-use kurbo::Affine;
+use frust_text::{FontFamily, FontWeight, TextContext, TextStyle};
+use kurbo::{Affine, Point};
 use peniko::{Blob, Brush, Color, FontData};
 
 /// Viewport every case compiles against.
@@ -35,6 +49,10 @@ const VIEWPORT: (u16, u16) = (128, 64);
 
 /// Font size every case draws at.
 const FONT_SIZE: f32 = 24.0;
+
+/// A variable `glyf` face (`wght` 100..900, default 400) that fontique
+/// accepts, so `TextContext` shapes it at a requested weight.
+const VARIABLE_FONT: &[u8] = include_bytes!("../../../plugins/beui/fonts/geist/Geist-Variable.ttf");
 
 /// A single-face sfnt holding `tables` (tag, bytes), table data 4-aligned.
 fn sfnt(tables: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
@@ -131,6 +149,72 @@ fn compile(compiler: &mut SceneCompiler, runs: Vec<GlyphRun>) -> CompiledFrame {
         .expect("an in-range scene compiles")
 }
 
+/// `text` laid out through a fresh `TextContext` in `family` at `weight`, as
+/// scene runs inside the viewport.
+fn laid_out(ctx: &mut TextContext, family: &str, weight: FontWeight, text: &str) -> Vec<GlyphRun> {
+    let mut style = TextStyle::new(FONT_SIZE, Color::BLACK);
+    style.family = FontFamily::named(family);
+    style.weight = weight;
+    ctx.layout(text, &style, None)
+        .to_scene_runs(Point::new(8.0, 8.0))
+}
+
+/// The variable face registered into a fresh context, and its family name.
+fn variable_font_context() -> (TextContext, String) {
+    let mut ctx = TextContext::new();
+    let families = ctx
+        .register_fonts(VARIABLE_FONT.to_vec())
+        .expect("the variable face registers");
+    let family = families[0].name.clone();
+    (ctx, family)
+}
+
+#[test]
+fn text_context_runs_carry_the_variation_coordinates_they_were_shaped_at() {
+    let (mut ctx, family) = variable_font_context();
+    let mut coords = |weight| {
+        let runs = laid_out(&mut ctx, &family, weight, "Hamburg");
+        assert_eq!(runs.len(), 1, "one face, one run");
+        runs[0].font.normalized_coords().to_vec()
+    };
+    let light = coords(FontWeight::LIGHT);
+    let semibold = coords(FontWeight::SEMI_BOLD);
+    assert!(!light.is_empty(), "weight 300 is not the default instance");
+    assert!(
+        !semibold.is_empty(),
+        "weight 600 is not the default instance"
+    );
+    assert_ne!(light, semibold);
+    assert!(light[0] < 0 && semibold[0] > 0, "{light:?} {semibold:?}");
+    assert!(
+        coords(FontWeight::REGULAR).is_empty(),
+        "the face's default weight carries no coordinates"
+    );
+}
+
+/// `glifo`'s route is not handed the coordinates: a run carrying them draws
+/// exactly what the same run without them draws.
+#[test]
+fn a_glifo_run_draws_the_same_with_or_without_coordinates() {
+    let (mut ctx, family) = variable_font_context();
+    let varied = laid_out(&mut ctx, &family, FontWeight::SEMI_BOLD, "Hamburg");
+    assert!(!varied[0].font.normalized_coords().is_empty());
+    let plain: Vec<GlyphRun> = varied
+        .iter()
+        .map(|run| GlyphRun {
+            font: FontHandle::new(run.font.font().clone()),
+            ..run.clone()
+        })
+        .collect();
+    let varied_frame = compile(&mut compiler(), varied);
+    let plain_frame = compile(&mut compiler(), plain);
+    assert!(varied_frame.glyph_draws > 0);
+    assert_eq!(varied_frame.glyph_draws, plain_frame.glyph_draws);
+    assert_eq!(varied_frame.skipped_glyphs, plain_frame.skipped_glyphs);
+    assert_eq!(varied_frame.alphas(), plain_frame.alphas());
+    assert_eq!(varied_frame.strip_buf(), plain_frame.strip_buf());
+}
+
 #[test]
 fn the_compiler_stays_send_and_sync_with_the_hvgl_provider_inside() {
     fn assert_send_sync<T: Send + Sync>() {}
@@ -204,15 +288,17 @@ mod macos {
     use std::ptr::NonNull;
     use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+    use frust_engine::compile::CompiledFrame;
     use frust_engine::{EngineRenderer, EngineTarget, OutputAlpha};
     use frust_gpu::{HeadlessTarget, TierCaps};
-    use frust_scene::FontHandle;
+    use frust_scene::{FontHandle, GlyphRun};
+    use frust_text::{FontWeight, TextContext};
     use kurbo::Affine;
     use objc2_core_foundation::CFString;
     use objc2_core_text::CTFont;
     use peniko::{Blob, Color, FontData};
 
-    use super::{VIEWPORT, compile, compiler, run, scene_of};
+    use super::{VIEWPORT, compile, compiler, laid_out, run, scene_of};
 
     /// Where macOS keeps the PingFang collection. It moved into a private
     /// framework's reserved fonts; older releases kept it in `Fonts`.
@@ -281,6 +367,150 @@ mod macos {
             .find(|(_, face)| face == name)
             .unwrap_or_else(|| panic!("PingFangUI.ttc has no face named {name}"));
         FontHandle::new(FontData::new(Blob::new(data.clone()), index))
+    }
+
+    /// The table `tag` of the face at `index` in the font file `data` (a
+    /// collection or a single face), as `(offset, length)`.
+    fn table(data: &[u8], index: u32, tag: &[u8; 4]) -> Option<(usize, usize)> {
+        let directory = if &data[0..4] == b"ttcf" {
+            be_u32(data, 12 + 4 * index as usize) as usize
+        } else {
+            0
+        };
+        (0..be_u16(data, directory + 4) as usize)
+            .map(|table| directory + 12 + 16 * table)
+            .find(|record| &data[*record..*record + 4] == tag)
+            .map(|record| {
+                (
+                    be_u32(data, record + 8) as usize,
+                    be_u32(data, record + 12) as usize,
+                )
+            })
+    }
+
+    /// The normalized coordinates — `fvar` normalization, then the `avar`
+    /// map, in F2Dot14 — of the instance at `weight` (every other axis at its
+    /// default): what a shaper hands a run of `font` at that weight.
+    fn coords_at_weight(font: &FontData, weight: f64) -> Vec<i16> {
+        let data = font.data.data();
+        let (fvar, _) = table(data, font.index, b"fvar").expect("PingFang varies");
+        let first = fvar + be_u16(data, fvar + 4) as usize;
+        let (count, size) = (
+            be_u16(data, fvar + 8) as usize,
+            be_u16(data, fvar + 10) as usize,
+        );
+        let fixed = |at: usize| f64::from(be_u32(data, at).cast_signed()) / 65536.0;
+        let f2dot14 = |at: usize| f64::from(be_u16(data, at).cast_signed()) / 16384.0;
+        let mut maps: Vec<Vec<(f64, f64)>> = vec![Vec::new(); count];
+        if let Some((avar, _)) = table(data, font.index, b"avar") {
+            let mut at = avar + 8;
+            for map in &mut maps {
+                let pairs = be_u16(data, at) as usize;
+                *map = (0..pairs)
+                    .map(|pair| (f2dot14(at + 2 + 4 * pair), f2dot14(at + 4 + 4 * pair)))
+                    .collect();
+                at += 2 + 4 * pairs;
+            }
+        }
+        (0..count)
+            .map(|axis| {
+                let record = first + axis * size;
+                if &data[record..record + 4] != b"wght" {
+                    return 0;
+                }
+                let (min, default, max) =
+                    (fixed(record + 4), fixed(record + 8), fixed(record + 12));
+                let weight = weight.clamp(min, max);
+                let mut normalized = if weight < default {
+                    (weight - default) / (default - min)
+                } else {
+                    (weight - default) / (max - default)
+                };
+                if let Some(pair) = maps[axis]
+                    .windows(2)
+                    .find(|pair| normalized >= pair[0].0 && normalized <= pair[1].0)
+                {
+                    let [(from0, to0), (from1, to1)] = [pair[0], pair[1]];
+                    normalized = to0 + (normalized - from0) * (to1 - to0) / (from1 - from0);
+                }
+                (normalized * 16384.0).round() as i16
+            })
+            .collect()
+    }
+
+    /// Runs of 中 in PingFang SC at `weight`, with the coordinates
+    /// `TextContext` shapes them at when it resolves the `hvgl` face itself,
+    /// else (fontique rejecting `hvgl` faces) the face's own `fvar`/`avar`
+    /// coordinates for that weight on a run of CoreText's glyph.
+    fn pingfang_runs_at(
+        data: &Arc<Vec<u8>>,
+        ctx: Option<&mut TextContext>,
+        weight: FontWeight,
+        user_weight: f64,
+    ) -> Vec<GlyphRun> {
+        if let Some(ctx) = ctx {
+            let runs = laid_out(ctx, "PingFang SC", weight, "中");
+            if runs.iter().all(|run| {
+                let font = run.font.font();
+                table(font.data.data(), font.index, b"hvgl").is_some()
+            }) {
+                return runs;
+            }
+        }
+        let font = face(data, FACE);
+        let coords = coords_at_weight(font.font(), user_weight);
+        vec![run(
+            font.with_normalized_coords(&coords),
+            &coretext_glyphs(FACE, "中"),
+        )]
+    }
+
+    /// Whether `TextContext` resolves PingFang SC to its `hvgl` face. At
+    /// fontique 0.11.1 it cannot: its scan rejects every face carrying `hvgl`.
+    fn text_context_resolves_pingfang(data: &Arc<Vec<u8>>) -> Option<TextContext> {
+        let mut ctx = TextContext::new();
+        let _ = ctx.register_fonts(data.as_ref().clone());
+        let resolved = laid_out(&mut ctx, "PingFang SC", FontWeight::LIGHT, "中")
+            .iter()
+            .all(|run| {
+                let font = run.font.font();
+                table(font.data.data(), font.index, b"hvgl").is_some()
+            });
+        if !resolved {
+            println!(
+                "TextContext leg skipped: fontique rejects hvgl faces at this pin, so PingFang \
+                 SC resolves to another face; the coordinates come from PingFang's fvar/avar"
+            );
+        }
+        resolved.then_some(ctx)
+    }
+
+    fn pingfang_frame_at(data: &Arc<Vec<u8>>, weight: FontWeight, user: f64) -> CompiledFrame {
+        let mut ctx = text_context_resolves_pingfang(data);
+        let runs = pingfang_runs_at(data, ctx.as_mut(), weight, user);
+        assert!(
+            runs.iter()
+                .all(|run| !run.font.normalized_coords().is_empty()),
+            "weight {user} is not PingFang SC's default instance"
+        );
+        compile(&mut compiler(), runs)
+    }
+
+    #[test]
+    fn pingfang_han_draws_at_the_requested_weight() {
+        let Some(data) = pingfang() else { return };
+        let light = pingfang_frame_at(&data, FontWeight::LIGHT, 300.0);
+        let semibold = pingfang_frame_at(&data, FontWeight::SEMI_BOLD, 600.0);
+        for frame in [&light, &semibold] {
+            assert_eq!(frame.skipped_glyphs, 0);
+            assert_eq!(frame.glyph_draws, 1);
+            assert!(frame.alphas().iter().any(|alpha| *alpha != 0));
+        }
+        assert_ne!(
+            light.alphas(),
+            semibold.alphas(),
+            "weights 300 and 600 draw different outlines"
+        );
     }
 
     /// The first hidden (dot-named) face of `data`.
@@ -429,15 +659,12 @@ mod macos {
         })
     }
 
-    #[test]
-    #[ignore = "requires a GPU (Metal); run with `cargo test -p frust-engine --test hvgl_provider -- --ignored`"]
-    fn pingfang_han_glyphs_render_ink_through_the_gpu() {
-        let Some(data) = pingfang() else { return };
+    /// How many pixels of `runs`, rendered headless through Metal, carry ink.
+    fn inked_pixels(runs: Vec<GlyphRun>) -> usize {
         let _guard = render_lock();
         let (device, queue, caps) = gpu();
         const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-        let glyphs = coretext_glyphs(FACE, TEXT);
-        let scene = scene_of(vec![run(face(&data, FACE), &glyphs)]);
+        let scene = scene_of(runs);
         let mut renderer = EngineRenderer::with_image_sampler(&device, &caps, FORMAT, None, true)
             .expect("the engine builds on this device");
         renderer.finish_warm_up(&device);
@@ -467,13 +694,45 @@ mod macos {
         queue.submit([encoder.finish()]);
         renderer.end_frame(&queue);
         let pixels = target.read_back(&device, &queue);
-        let inked = pixels
+        pixels
             .as_chunks::<4>()
             .0
             .iter()
             .filter(|px| px[3] != 0)
-            .count();
+            .count()
+    }
+
+    #[test]
+    #[ignore = "requires a GPU (Metal); run with `cargo test -p frust-engine --test hvgl_provider -- --ignored`"]
+    fn pingfang_han_glyphs_render_ink_through_the_gpu() {
+        let Some(data) = pingfang() else { return };
+        let glyphs = coretext_glyphs(FACE, TEXT);
+        let inked = inked_pixels(vec![run(face(&data, FACE), &glyphs)]);
         // Three 24 px Han glyphs cover well over a hundred pixels between them.
         assert!(inked > 100, "only {inked} pixels carry ink");
+    }
+
+    /// Strokes thicken with weight: 中 at 600 inks more pixels than at 300.
+    #[test]
+    #[ignore = "requires a GPU (Metal); run with `cargo test -p frust-engine --test hvgl_provider -- --ignored`"]
+    fn pingfang_semibold_inks_more_than_light_through_the_gpu() {
+        let Some(data) = pingfang() else { return };
+        let mut ctx = text_context_resolves_pingfang(&data);
+        let light = inked_pixels(pingfang_runs_at(
+            &data,
+            ctx.as_mut(),
+            FontWeight::LIGHT,
+            300.0,
+        ));
+        let semibold = inked_pixels(pingfang_runs_at(
+            &data,
+            ctx.as_mut(),
+            FontWeight::SEMI_BOLD,
+            600.0,
+        ));
+        assert!(
+            semibold > light,
+            "weight 600 inks {semibold} pixels, weight 300 {light}"
+        );
     }
 }
