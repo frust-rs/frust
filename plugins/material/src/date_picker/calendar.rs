@@ -2338,7 +2338,7 @@ mod tests {
         /// builds the calendar so build-time `use_context` resolves.
         struct Host {
             theme: Option<frust::Theme>,
-            make: fn() -> AnyView<()>,
+            make: std::rc::Rc<dyn Fn() -> AnyView<()>>,
         }
         impl frust::Component for Host {
             type State = ();
@@ -2351,13 +2351,16 @@ mod tests {
             }
         }
 
-        fn group_label(theme: Option<frust::Theme>, make: fn() -> AnyView<()>) -> String {
+        fn group_label(
+            theme: Option<frust::Theme>,
+            make: std::rc::Rc<dyn Fn() -> AnyView<()>>,
+        ) -> String {
             let mut root: frust_core::RenderRoot<(), frust::ComponentView<Host>> =
                 frust_core::RenderRoot::new();
             let mut logic = move |_: &mut ()| {
                 frust::component(Host {
                     theme: theme.clone(),
-                    make,
+                    make: make.clone(),
                 })
             };
             let mut state = ();
@@ -2380,30 +2383,39 @@ mod tests {
                 |_: &mut (), _| {},
             )
         }
-        fn plain() -> AnyView<()> {
-            any(calendar())
+        fn plain() -> impl View<()> {
+            calendar()
         }
-        fn with_override() -> AnyView<()> {
-            any(calendar().strings(DatePickerStrings {
+        fn with_override() -> impl View<()> {
+            calendar().strings(DatePickerStrings {
                 months: ["Override"; 12],
                 ..DatePickerStrings::ENGLISH
-            }))
+            })
         }
 
         #[test]
         fn defaults_to_english_month_names() {
-            assert_eq!(group_label(None, plain), "May 2026");
+            assert_eq!(
+                group_label(None, std::rc::Rc::new(|| any(plain()))),
+                "May 2026"
+            );
         }
 
         #[test]
         fn thai_theme_changes_the_month_name_in_the_grid_semantics() {
-            assert_eq!(group_label(Some(thai_theme()), plain), "พฤษภาคม 2026");
+            assert_eq!(
+                group_label(Some(thai_theme()), std::rc::Rc::new(|| any(plain()))),
+                "พฤษภาคม 2026"
+            );
         }
 
         #[test]
         fn strings_override_beats_the_theme_table() {
             assert_eq!(
-                group_label(Some(thai_theme()), with_override),
+                group_label(
+                    Some(thai_theme()),
+                    std::rc::Rc::new(|| any(with_override()))
+                ),
                 "Override 2026"
             );
         }

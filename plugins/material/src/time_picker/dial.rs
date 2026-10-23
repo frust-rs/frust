@@ -1608,7 +1608,7 @@ mod tests {
         /// builds the dial so build-time `use_context` resolves.
         struct Host {
             theme: Option<frust::Theme>,
-            make: fn() -> AnyView<()>,
+            make: std::rc::Rc<dyn Fn() -> AnyView<()>>,
         }
         impl frust::Component for Host {
             type State = ();
@@ -1621,12 +1621,15 @@ mod tests {
             }
         }
 
-        fn labels(theme: Option<frust::Theme>, make: fn() -> AnyView<()>) -> Vec<String> {
+        fn labels(
+            theme: Option<frust::Theme>,
+            make: std::rc::Rc<dyn Fn() -> AnyView<()>>,
+        ) -> Vec<String> {
             let mut root: RenderRoot<(), frust::ComponentView<Host>> = RenderRoot::new();
             let mut logic = move |_: &mut ()| {
                 frust::component(Host {
                     theme: theme.clone(),
-                    make,
+                    make: make.clone(),
                 })
             };
             let mut state = ();
@@ -1644,30 +1647,42 @@ mod tests {
         fn dial() -> TimeDialView<()> {
             time_dial(TimeOfDay::new(9, 30), |_: &mut (), _| {})
         }
-        fn plain() -> AnyView<()> {
-            any(dial())
+        fn plain() -> impl View<()> {
+            dial()
         }
-        fn with_override() -> AnyView<()> {
-            any(dial().strings(TimePickerStrings {
+        fn with_override() -> impl View<()> {
+            dial().strings(TimePickerStrings {
                 am: "a.m.".into(),
                 pm: "p.m.".into(),
                 ..TimePickerStrings::default()
-            }))
+            })
         }
 
         #[test]
         fn defaults_to_english_am_pm() {
-            assert_eq!(labels(None, plain), ["AM", "PM"]);
+            assert_eq!(
+                labels(None, std::rc::Rc::new(|| any(plain()))),
+                ["AM", "PM"]
+            );
         }
 
         #[test]
         fn thai_theme_changes_the_am_pm_labels() {
-            assert_eq!(labels(Some(thai_theme()), plain), ["ก่อนเที่ยง", "หลังเที่ยง"]);
+            assert_eq!(
+                labels(Some(thai_theme()), std::rc::Rc::new(|| any(plain()))),
+                ["ก่อนเที่ยง", "หลังเที่ยง"]
+            );
         }
 
         #[test]
         fn strings_override_beats_the_theme_table() {
-            assert_eq!(labels(Some(thai_theme()), with_override), ["a.m.", "p.m."]);
+            assert_eq!(
+                labels(
+                    Some(thai_theme()),
+                    std::rc::Rc::new(|| any(with_override()))
+                ),
+                ["a.m.", "p.m."]
+            );
         }
     }
 }
