@@ -89,6 +89,7 @@ const CAPS: &[(&str, f32)] = &[
     ("crates/frust-core/src/tree.rs", 25.0), // measured 22.9
     ("crates/frust-core/src/view.rs", 25.0), // measured 24.8
     ("crates/frust-core/src/widget.rs", 23.6), // measured 20.6
+    ("crates/frust-core/src/window_control.rs", 23.9), // measured 20.9
     ("crates/frust-core/tests/layout_audit.rs", 10.9), // measured 7.9
     ("crates/frust-core/tests/layout_skip.rs", 17.2), // measured 14.2
     ("crates/frust-core/tests/paint_dirty.rs", 14.4), // measured 11.4
