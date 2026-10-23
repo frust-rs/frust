@@ -1,0 +1,45 @@
+# custom-titlebar
+
+The reference for drawing your own window chrome in Frust. The OS title bar is
+removed and the app paints a 40 px bar itself, using only baseline widgets:
+`window_drag_region` for dragging and double-click maximize, and
+`WindowCommand`s for the Minimize / Maximize / Close buttons. The body shows a
+counter and a live `WindowState` readout (maximized / fullscreen / focused /
+minimized) plus a "Toggle fullscreen" button.
+
+Read `src/main.rs`: one root component, a single tree in `build` composed from
+`Self::title_bar`, `Self::body` and `Self::resize_frame`.
+
+## Run
+
+```
+cargo run -p custom-titlebar
+```
+
+from the repository root (desktop only; no Android or iOS shell).
+
+## Per-OS expectations
+
+- macOS: `Decorations::NoTitleBar`. The traffic lights stay, placed at leading
+  16 / band 40 by `TitleButtons`. The system resizes from the edges; double-click
+  on the bar zooms. No resize strips are built.
+- Windows: `Decorations::None`. Frameless; the bar draws its own buttons.
+  Eight resize strips (6 px edges, 10 px corners) start the OS resize, and
+  dragging the bar uses the OS move loop (Aero Snap).
+- Linux (X11 and Wayland): `Decorations::None`. Same as Windows; the move and
+  resize gestures are handed to the window manager or compositor (snap and
+  tiling come from there).
+
+On every non-macOS OS the strips are hidden while the window is maximized or
+fullscreen.
+
+## Gate checklist
+
+All cells are owed until the Phase 3 gates fill them.
+
+| OS | frame gone | drag moves | double-click toggles | buttons work | strips resize | maximize fills work area | fullscreen round-trip | close honours policy | shadow present |
+|----|-----------|------------|----------------------|--------------|---------------|--------------------------|-----------------------|----------------------|----------------|
+| macOS | owed | owed | owed | owed | owed | owed | owed | owed | owed |
+| Windows | owed | owed | owed | owed | owed | owed | owed | owed | owed |
+| Linux X11 | owed | owed | owed | owed | owed | owed | owed | owed | owed |
+| Linux Wayland | owed | owed | owed | owed | owed | owed | owed | owed | owed |

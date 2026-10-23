@@ -1,0 +1,11 @@
+# Root-workspace member: desktop-only example; covered by workspace gates.
+# Single-crate, desktop-only (no lib.rs/android/ios/cdylib): `main.rs` calls `__frust_main`.
+[package]
+name = "custom-titlebar"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+frust = { workspace = true }
