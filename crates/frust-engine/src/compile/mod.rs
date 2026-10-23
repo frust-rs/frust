@@ -104,6 +104,7 @@ use crate::compile::parallel::{Claim, Geometry, Merge, Pool};
 use crate::config;
 use crate::error::EngineError;
 use crate::filters::{Backdrop, MAX_BACKDROPS_PER_FRAME, backdrop_region, backdrop_sigma};
+use crate::text::hvgl::HvglOutlines;
 use crate::text::{
     AtlasPolicy, FontFacts, GlyphQuadScratch, GlyphQuadTargets, GlyphRunRouting, GlyphRunTargets,
     RunKey, RunRoute, context_paint, glyph_atlas_policy, lower_glyph_run,
@@ -639,6 +640,10 @@ pub struct SceneCompiler {
     /// of many short runs reads each face's table directory once (see
     /// [`crate::text::FontFacts`]).
     font_facts: FontFacts,
+    /// The outline provider for `hvgl`-only faces, which `glifo` cannot draw:
+    /// the faces it opened in CoreText and its bounded outline cache (see
+    /// [`crate::text::hvgl`]).
+    hvgl_outlines: HvglOutlines,
     /// Whether a glyph run's outline is hinted before it is rasterized (see
     /// [`crate::text`]'s module doc for the split this half of the policy
     /// answers). Mobile-safe by default — `false`, the same "known nothing
@@ -779,6 +784,24 @@ impl SceneCompiler {
         self.glyph_atlas.resident_runs()
     }
 
+    /// How many glyph outlines of `hvgl`-only faces (Apple's PingFang, whose
+    /// outlines `glifo` cannot read) the compiler currently keeps, fetched
+    /// from CoreText.
+    ///
+    /// Bounded by [`Self::hvgl_outline_capacity`] however many distinct
+    /// glyphs have been drawn; always zero on a target without CoreText.
+    #[must_use]
+    pub fn hvgl_cached_outlines(&self) -> usize {
+        self.hvgl_outlines.cached_outlines()
+    }
+
+    /// The most `hvgl` glyph outlines the compiler keeps; past it the least
+    /// recently drawn one is evicted.
+    #[must_use]
+    pub fn hvgl_outline_capacity(&self) -> usize {
+        self.hvgl_outlines.capacity()
+    }
+
     /// Set how many threads generate a frame's strips, the calling thread
     /// included (see the `parallel` module). One — or zero, read as one — is the
     /// sequential walk: no planning pass, no helper thread.
@@ -850,6 +873,7 @@ impl SceneCompiler {
             glyph_quad_scratch: GlyphQuadScratch::default(),
             glyph_run_cache: !config::glyph_run_cache_disabled(),
             font_facts: FontFacts::default(),
+            hvgl_outlines: HvglOutlines::default(),
             hint_text: false,
             externals: ExternalExtents::new(),
             frame_extent: (width, height),
@@ -1708,11 +1732,15 @@ impl SceneCompiler {
                         vello_common::paint::PaintType::Solid(color) => color,
                         _ => peniko::color::palette::css::BLACK,
                     };
+                    // An `hvgl`-only face is routed to outlines exactly as a
+                    // colour face is: its glyphs are drawn by the `hvgl`
+                    // provider, never cached by `glifo`.
+                    let facts = self.font_facts.of(run.font.font());
                     let key = RunKey::for_run(
                         run,
                         root * retained_stack.correction() * run.transform,
                         self.hint_text,
-                        self.font_facts.of(run.font.font()).color,
+                        facts.color || facts.hvgl,
                         context_color,
                         &mut self.run_glyph_ids,
                     );
@@ -1783,7 +1811,8 @@ impl SceneCompiler {
         if run.glyphs.is_empty() || self.clips.blocks_everything() {
             return;
         }
-        if !self.font_facts.of(run.font.font()).readable {
+        let facts = self.font_facts.of(run.font.font());
+        if !facts.readable {
             note_font_skip();
             let glyphs = u32::try_from(run.glyphs.len()).unwrap_or(u32::MAX);
             frame.skipped_glyphs = frame.skipped_glyphs.saturating_add(glyphs);
@@ -1800,6 +1829,7 @@ impl SceneCompiler {
         // fields would fight the borrow checker for no reason.
         let hint_text = self.hint_text;
         let glyph_run_cache = self.glyph_run_cache;
+        let hvgl_face = facts.hvgl;
         // Destructured rather than passed as `self`, because the sink borrows
         // the generator and the clip stack mutably while the glyph caches, the
         // entry map and the shared allocator are borrowed mutably alongside
@@ -1813,6 +1843,7 @@ impl SceneCompiler {
             glyph_atlas,
             glyph_quads,
             glyph_quad_scratch,
+            hvgl_outlines,
             ..
         } = self;
         // The policy's decision, turned into the borrow `glifo` caches
@@ -1841,6 +1872,7 @@ impl SceneCompiler {
                 atlas,
                 resident: glyph_run_cache,
                 quads,
+                hvgl_face,
             },
             GlyphRunTargets {
                 generator,
@@ -1848,6 +1880,7 @@ impl SceneCompiler {
                 prep: glyphs,
                 frame,
                 depth,
+                hvgl: hvgl_outlines,
             },
         );
 
