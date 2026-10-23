@@ -1,0 +1,12 @@
+2026-10-23 05:48:15.895 Runner[8328:1019405] frust-perf vc-load
+[frust INFO] frust-perf render-path engine-direct (frust-engine into the acquired swapchain view (RENDER_ATTACHMENT, surface-reported format, surface-owned depth))
+[frust INFO] frust-perf atlas tier=mobile rule=table budget=1024x1024x4 downlevel=Full transient_saves_memory=true memory_mib=unknown adapter=Apple A15 GPU
+[frust INFO] frust-perf startup init_entry=0ms font_preinit_started=0ms adapter_ready=7ms device_ready=7ms renderer_ready=7ms engine_surface_ms=4ms device_create_ms=4ms cache_seed_ms=0ms caps_probe_ms=0ms shader_modules_ms=0ms warm_up_start_ms=0ms engine_rest_ms=0ms install_rest_ms=0ms render_thread_start_ms=0ms font_preinit_joined=49ms font_system_ms=49ms font_app_sync_ms=0ms first_rebuild_done=63ms first_encode_done=63ms first_frame_presented=74ms
+[frust INFO] bench-scenario-start n=1 s7
+[frust INFO] bench-scenario-start n=1 s7-idle
+[frust INFO] frust-perf raw n=1 total_us=14889 rebuild_us=54 layout_us=3649 paint_us=23 encode_us=2 acquire_us=1457 submit_us=9703 skipped=0 gpu_q=0
+[frust INFO] frust-perf raw n=2 total_us=3171 rebuild_us=16 layout_us=3 paint_us=8 encode_us=5 acquire_us=1445 submit_us=1692 skipped=0 gpu_q=0
+[frust INFO] frust-perf raw n=3 total_us=2231 rebuild_us=19 layout_us=0 paint_us=15 encode_us=32 acquire_us=849 submit_us=1314 skipped=0 gpu_q=0
+[frust INFO] frust-perf raw n=4 total_us=2273 rebuild_us=27 layout_us=0 paint_us=19 encode_us=5 acquire_us=30 submit_us=2190 skipped=0 gpu_q=0
+[frust INFO] frust-perf raw n=5 total_us=2526 rebuild_us=42 layout_us=10 paint_us=18 encode_us=10 acquire_us=28 submit_us=2415 skipped=0 gpu_q=1 gpu_total_us=6815 gpu_prepass_us=194 gpu_main_us=6620 gpu_composite_us=0 gpu_blit_us=0
+[frust INFO] frust-perf raw n=6 total_us=2648 rebuild_us=34 layout_us=0 paint_us=22 encode_us=8 acquire_us=28 submit_us=2553 skipped=0 gpu_q=1 gpu_total_us=987 gpu_prepass_us=0 gpu_main_us=987 gpu_composite_us=0 gpu_blit_us=0
