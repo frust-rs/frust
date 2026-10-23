@@ -37,9 +37,8 @@ objc2-foundation = { workspace = true, features = [
     "NSGeometry",
     "objc2-core-foundation",
 ] }
-# Short explicit list, declared here (crate-local), not the large default set: `NSApplication` (did-become-active; winit 0.30 has
-# no reopen event), `NSResponder`, `NSView`, `NSGraphics` (`NSWindowOrderingMode`), and `NSWindow` + `NSButton` + `NSControl`
-# (`standardWindowButton:` and the resize/exit-fullscreen notifications that re-place the window buttons, `title_buttons`).
+# Crate-local short list, not the default set: `NSApplication` (did-become-active; winit 0.30 has no reopen event), `NSResponder`,
+# `NSView`, `NSGraphics` (`NSWindowOrderingMode`), `NSWindow`/`NSButton`/`NSControl` (`title_buttons`: window-button placement).
 # Version literal repeated: Cargo forbids overriding a workspace dep's `default-features` unless the workspace sets it; keep in step with the root pin.
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
