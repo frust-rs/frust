@@ -478,52 +478,11 @@ impl Default for PlaygroundState {
 /// already the *effective* flag (see [`effective_reduce_motion`]), not the
 /// raw reduce-motion toggle.
 pub(crate) fn apply_theme(brightness: Brightness, reduce_motion: bool) {
-    let mut theme = Theme::builder(frust_material::baseline())
+    let theme = Theme::builder(frust_material::baseline())
         .brightness(brightness)
         .map_motion(move |m: MotionScheme| MotionScheme { reduce_motion, ..m })
         .build();
-    // A toggle rebuilds the theme from the baseline, which would put the
-    // English Material strings back; keep the ones the locale switcher chose.
-    if let Some(strings) = localized_strings().clone() {
-        theme.extensions.insert(strings);
-    }
     set_app_theme(theme);
-}
-
-/// The Material strings last pushed to the app theme for the active locale,
-/// shared with [`apply_theme`] (called from event handlers, where no I18n
-/// context is reachable). `None` until [`sync_material_strings`] first runs.
-fn localized_strings() -> std::sync::MutexGuard<'static, Option<frust_material::MaterialStrings>> {
-    static STRINGS: std::sync::Mutex<Option<frust_material::MaterialStrings>> =
-        std::sync::Mutex::new(None);
-    STRINGS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-/// Pushes the Material strings for `i18n`'s active locale into the app theme,
-/// so the paint- and layout-time readers (snackbar, badge, FAB menu, chips)
-/// follow the language switcher the way the build-time readers do through
-/// `provide_localized_strings`.
-///
-/// Forces the app theme only when the strings change: the first build under
-/// English leaves the platform-following theme alone.
-fn sync_material_strings(i18n: &frust_i18n::I18n) {
-    let strings = frust_material_i18n::material_strings_for(&i18n.locale(), i18n);
-    let first = {
-        let mut slot = localized_strings();
-        if slot.as_ref() == Some(&strings) {
-            return;
-        }
-        let first = slot.is_none();
-        *slot = Some(strings.clone());
-        first
-    };
-    let ambient = use_context::<Theme>().unwrap_or_else(frust_material::baseline);
-    if first && frust_material::MaterialStrings::resolve(Some(&ambient)).as_ref() == &strings {
-        return;
-    }
-    set_app_theme(frust_material_i18n::localized_theme(ambient, i18n));
 }
 
 /// The theme's effective reduced-motion flag: ON if either the reduce-motion
@@ -864,12 +823,11 @@ impl Component for PlaygroundApp {
 
     fn build(&self, state: &mut PlaygroundState) -> impl View<PlaygroundState> {
         // Tracked read of the locale (inside `provide_localized_strings`):
-        // every language switch rebuilds this component, re-providing the
-        // localized theme to the whole tree and pushing the same strings to
-        // the shell theme for the paint-time readers.
+        // every language switch rebuilds this component and re-provides the
+        // localized theme, which every Material widget below reads when its
+        // view is created.
         if let Some(i18n) = frust_i18n::use_i18n() {
             frust_material_i18n::provide_localized_strings(&i18n);
-            sync_material_strings(&i18n);
         }
         // Clone the reactive handle into the navigator's stateless home-page
         // builder; the controller is shared so overlay pages push onto this

@@ -6,6 +6,11 @@
 //! depends on both: it picks the table for the active locale and re-provides
 //! the ambient [`Theme`](frust::Theme) with that extension swapped in.
 //!
+//! [`provide_localized_strings`] inside a build that tracks the locale is the
+//! whole recipe. Material widgets resolve their strings from the provided
+//! theme when their views are created, so each `set_locale` relabels every
+//! widget below on the rebuild it triggers:
+//!
 //! ```ignore
 //! fn build(&self, state: &mut State) -> impl View<State> {
 //!     // Reads the locale signal, so every `set_locale` rebuilds this
@@ -14,6 +19,14 @@
 //!     /* the app tree */
 //! }
 //! ```
+//!
+//! [`localized_theme`] is for an app that manages the shell theme itself
+//! (`set_app_theme`) and wants that theme to carry the same table;
+//! [`material_strings_for`] returns a locale's table directly.
+//!
+//! One label still reads the render-root theme at layout: the selection app
+//! bar's count (`selection_count_a11y`), which an app that needs it localized
+//! keeps in step by also pushing [`localized_theme`] to the shell.
 //!
 //! # Languages
 //!
@@ -34,15 +47,16 @@ pub use provide::{localized_theme, material_strings_for, provide_localized_strin
 mod tests {
     use std::any::Any;
 
-    use crate::{localized_theme, material_strings_for, provide_localized_strings};
+    use crate::{material_strings_for, provide_localized_strings};
     use frust::authoring::text::TextContext;
     use frust::authoring::{AnyView, Size, any};
     use frust::{Component, ComponentView, View, component};
     use frust_core::RenderRoot;
     use frust_i18n::{I18n, Locale, LocaleSet};
     use frust_material::{
-        DatePickerState, MaterialDate, MaterialStrings, SnackbarController, TimeOfDay,
-        calendar_date_picker, selection_dialog, snackbar, snackbar_host, time_dial,
+        DatePickerState, MaterialDate, MaterialStrings, SnackbarController, TimeOfDay, badge,
+        calendar_date_picker, fab_menu, input_chip, selection_dialog, snackbar, snackbar_host,
+        time_dial,
     };
     use frust_reactive::Owner;
 
@@ -74,18 +88,12 @@ mod tests {
     }
 
     /// Builds `make` under the bridge, switches the locale to each of `tags` in
-    /// turn, and returns the semantics labels seen after the initial build and
-    /// after each switch.
+    /// turn, and returns the semantics labels and values seen after the initial
+    /// build and after each switch.
     ///
-    /// With `push_theme`, the localized theme is also handed to the render root
-    /// (what an app does through `set_app_theme`), which is where the paint- and
-    /// layout-time readers such as the snackbar take their strings from.
-    fn labels_across(
-        i18n: &I18n,
-        tags: &[&str],
-        make: fn() -> AnyView<()>,
-        push_theme: bool,
-    ) -> Vec<Vec<String>> {
+    /// Only `provide_localized_strings` is in play: the render root never
+    /// receives a theme, so every string seen comes from the provided context.
+    fn labels_across(i18n: &I18n, tags: &[&str], make: fn() -> AnyView<()>) -> Vec<Vec<String>> {
         let mut root: RenderRoot<(), ComponentView<Host>> = RenderRoot::new();
         let host = i18n.clone();
         let mut logic = move |_: &mut ()| {
@@ -101,20 +109,15 @@ mod tests {
             root.semantics()
                 .nodes
                 .iter()
-                .filter_map(|(_, n)| n.label().map(str::to_string))
+                .flat_map(|(_, n)| [n.label(), n.value()])
+                .flatten()
+                .map(str::to_string)
                 .collect::<Vec<_>>()
         };
-        let theme = |i18n: &I18n| Box::new(localized_theme(frust_material::baseline(), i18n));
-        if push_theme {
-            root.set_theme(theme(i18n));
-        }
         root.rebuild(&mut logic, &mut state);
         let mut seen = vec![snapshot(&mut root)];
         for tag in tags {
             i18n.set_locale(locale(tag));
-            if push_theme {
-                root.set_theme(theme(i18n));
-            }
             root.rebuild(&mut logic, &mut state);
             seen.push(snapshot(&mut root));
         }
@@ -125,6 +128,17 @@ mod tests {
         labels.iter().any(|l| l == wanted)
     }
 
+    /// Asserts `seen` (English, Thai, English) carries `english` then `thai`
+    /// then `english` again, never both at once.
+    fn english_thai_english(seen: &[Vec<String>], english: &str, thai: &str) {
+        assert!(has(&seen[0], english), "{:?}", seen[0]);
+        assert!(!has(&seen[0], thai), "{:?}", seen[0]);
+        assert!(has(&seen[1], thai), "{:?}", seen[1]);
+        assert!(!has(&seen[1], english), "{:?}", seen[1]);
+        assert!(has(&seen[2], english), "{:?}", seen[2]);
+        assert!(!has(&seen[2], thai), "{:?}", seen[2]);
+    }
+
     fn dialog() -> AnyView<()> {
         any(selection_dialog::<()>("Pick", vec!["A".into()]))
     }
@@ -133,6 +147,18 @@ mod tests {
         let controller = SnackbarController::<()>::new();
         controller.show(snackbar("Saved").dismissible());
         any(snackbar_host(&controller, frust::text("body")))
+    }
+
+    fn counted_badge() -> AnyView<()> {
+        any(badge(frust::text("Inbox")).count(3))
+    }
+
+    fn closed_fab_menu() -> AnyView<()> {
+        any(fab_menu(frust::text("+"), false, vec![], |_: &mut ()| {}))
+    }
+
+    fn deletable_chip() -> AnyView<()> {
+        any(input_chip("Tag", |_: &mut ()| {}).on_deleted(|_: &mut ()| {}))
     }
 
     fn dial() -> AnyView<()> {
@@ -150,13 +176,10 @@ mod tests {
 
     #[test]
     fn extension_is_english_then_thai_after_set_locale() {
-        let _owner = Owner::new();
-        _owner.set();
-        let i18n = i18n("en");
-        let en = material_strings_for(&locale("en"), &i18n);
+        let en = material_strings_for(&locale("en"));
         assert_eq!(en.dialog_confirm, "OK");
         assert_eq!(en.date_picker.months[0], "January");
-        let th = material_strings_for(&locale("th"), &i18n);
+        let th = material_strings_for(&locale("th"));
         assert_eq!(th.dialog_confirm, "ตกลง");
         assert_eq!(th.date_picker.months[4], "พฤษภาคม");
         assert_eq!(th.date_picker.months[0], "มกราคม");
@@ -167,24 +190,50 @@ mod tests {
         let owner = Owner::new();
         owner.set();
         let i18n = i18n("en");
-        let before = labels_across(&i18n, &[], dialog, false);
+        let before = labels_across(&i18n, &[], dialog);
         assert!(has(&before[0], "OK"), "{:?}", before[0]);
         // A dialog shown after the switch is built under the Thai table.
         i18n.set_locale(locale("th"));
-        let after = labels_across(&i18n, &[], dialog, false);
+        let after = labels_across(&i18n, &[], dialog);
         assert!(has(&after[0], "ตกลง"), "{:?}", after[0]);
         assert!(has(&after[0], "ยกเลิก"), "{:?}", after[0]);
         assert!(!has(&after[0], "OK"));
     }
 
     #[test]
-    fn snackbar_dismiss_a11y_switches_to_thai() {
+    fn snackbar_dismiss_a11y_switches_to_thai_and_back_with_provide_only() {
         let owner = Owner::new();
         owner.set();
         let i18n = i18n("en");
-        let seen = labels_across(&i18n, &["th"], dismissible_snackbar, true);
-        assert!(has(&seen[0], "Dismiss"), "{:?}", seen[0]);
-        assert!(has(&seen[1], "ปิด"), "{:?}", seen[1]);
+        let seen = labels_across(&i18n, &["th", "en"], dismissible_snackbar);
+        english_thai_english(&seen, "Dismiss", "ปิด");
+    }
+
+    #[test]
+    fn badge_a11y_label_switches_to_thai_and_back_with_provide_only() {
+        let owner = Owner::new();
+        owner.set();
+        let i18n = i18n("en");
+        let seen = labels_across(&i18n, &["th", "en"], counted_badge);
+        english_thai_english(&seen, "Notifications: 3", "การแจ้งเตือน: 3");
+    }
+
+    #[test]
+    fn fab_menu_trigger_label_switches_to_thai_and_back_with_provide_only() {
+        let owner = Owner::new();
+        owner.set();
+        let i18n = i18n("en");
+        let seen = labels_across(&i18n, &["th", "en"], closed_fab_menu);
+        english_thai_english(&seen, "Menu", "เมนู");
+    }
+
+    #[test]
+    fn chip_remove_label_switches_to_thai_and_back_with_provide_only() {
+        let owner = Owner::new();
+        owner.set();
+        let i18n = i18n("en");
+        let seen = labels_across(&i18n, &["th", "en"], deletable_chip);
+        english_thai_english(&seen, "Remove", "ลบ");
     }
 
     #[test]
@@ -192,7 +241,7 @@ mod tests {
         let owner = Owner::new();
         owner.set();
         let i18n = i18n("en");
-        let seen = labels_across(&i18n, &["th"], dial, false);
+        let seen = labels_across(&i18n, &["th"], dial);
         assert!(has(&seen[0], "AM") && has(&seen[0], "PM"), "{:?}", seen[0]);
         assert!(
             has(&seen[1], "ก่อนเที่ยง") && has(&seen[1], "หลังเที่ยง"),
@@ -206,7 +255,7 @@ mod tests {
         let owner = Owner::new();
         owner.set();
         let i18n = i18n("en");
-        let seen = labels_across(&i18n, &["th", "de"], calendar, false);
+        let seen = labels_across(&i18n, &["th", "de"], calendar);
         assert!(has(&seen[0], "May 2026"), "{:?}", seen[0]);
         assert!(has(&seen[1], "พฤษภาคม 2026"), "{:?}", seen[1]);
         assert!(has(&seen[2], "Mai 2026"), "{:?}", seen[2]);
@@ -214,25 +263,19 @@ mod tests {
 
     #[test]
     fn german_and_french_tables_load() {
-        let owner = Owner::new();
-        owner.set();
-        let i18n = i18n("en");
-        let de = material_strings_for(&locale("de"), &i18n);
+        let de = material_strings_for(&locale("de"));
         assert_eq!(de.dialog_cancel, "Abbrechen");
         assert_eq!(de.date_picker.months[2], "März");
         assert_eq!(de.date_picker.first_day_of_week, 1);
-        let fr = material_strings_for(&locale("fr"), &i18n);
+        let fr = material_strings_for(&locale("fr"));
         assert_eq!(fr.dialog_cancel, "Annuler");
         assert_eq!(fr.date_picker.months[1], "février");
     }
 
     #[test]
     fn every_supported_language_fills_cldr_names() {
-        let owner = Owner::new();
-        owner.set();
-        let i18n = i18n("en");
         for tag in ["en", "th", "vi", "ja", "es", "de", "fr"] {
-            let s = material_strings_for(&locale(tag), &i18n);
+            let s = material_strings_for(&locale(tag));
             let d = s.date_picker;
             assert!(d.months.iter().all(|m| !m.is_empty()), "{tag}");
             assert!(d.month_abbreviations.iter().all(|m| !m.is_empty()), "{tag}");
@@ -252,15 +295,12 @@ mod tests {
 
     #[test]
     fn region_is_ignored_and_unknown_language_is_english() {
-        let owner = Owner::new();
-        owner.set();
-        let i18n = i18n("en");
         assert_eq!(
-            material_strings_for(&locale("de-CH"), &i18n),
-            material_strings_for(&locale("de"), &i18n)
+            material_strings_for(&locale("de-CH")),
+            material_strings_for(&locale("de"))
         );
         assert_eq!(
-            material_strings_for(&locale("xx"), &i18n),
+            material_strings_for(&locale("xx")),
             MaterialStrings::ENGLISH
         );
     }

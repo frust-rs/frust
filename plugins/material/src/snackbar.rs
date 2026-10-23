@@ -442,8 +442,8 @@ impl<State: 'static> SnackbarMessage<State> {
     }
 
     /// Override the close icon's accessible name. Unset, it reads
-    /// [`MaterialStrings::snackbar_dismiss_a11y`] from the active theme
-    /// ("Dismiss" in English).
+    /// [`MaterialStrings::snackbar_dismiss_a11y`] from the ambient theme when
+    /// the [`snackbar_host`] view is created ("Dismiss" in English).
     pub fn dismiss_label(mut self, label: impl Into<String>) -> Self {
         self.dismiss_label = Some(label.into());
         self
@@ -560,6 +560,9 @@ fn erase<State: 'static>(msg: SnackbarMessage<State>) -> ErasedSnackbar {
 pub struct SnackbarHostView<State: 'static> {
     controller: SnackbarController<State>,
     app: AnyView<State>,
+    /// The ambient theme's close-icon accessible name, read when the view was
+    /// created.
+    dismiss_a11y: String,
 }
 
 /// Wrap `app` (the app's own root view) in a kept-mounted snackbar host driven
@@ -571,6 +574,9 @@ pub fn snackbar_host<State: 'static, V: View<State>>(
     SnackbarHostView {
         controller: controller.clone(),
         app: any(app),
+        dismiss_a11y: MaterialStrings::from_build_context()
+            .snackbar_dismiss_a11y
+            .to_string(),
     }
 }
 
@@ -581,6 +587,7 @@ impl<State: 'static> View<State> for SnackbarHostView<State> {
         let mut widget = SnackbarHostWidget {
             app: frust::authoring::build_child(&self.app, ctx),
             current: None,
+            dismiss_a11y: self.dismiss_a11y.clone(),
         };
         if let Some(msg) = self.controller.take_pending() {
             widget.begin_show(erase(msg));
@@ -596,6 +603,12 @@ impl<State: 'static> View<State> for SnackbarHostView<State> {
     ) -> ChangeFlags {
         let mut flags =
             frust::authoring::rebuild_child(&prev.app, &self.app, &mut element.app, ctx);
+        if element.dismiss_a11y != self.dismiss_a11y {
+            element.dismiss_a11y = self.dismiss_a11y.clone();
+            // A repaint moves the semantics generation so the next pull reads
+            // the new close-icon name.
+            flags |= ChangeFlags::PAINT;
+        }
         if element.current.is_none()
             && let Some(msg) = self.controller.take_pending()
         {
@@ -631,11 +644,9 @@ struct ActiveSnackbar {
     action_run: Option<TextRun>,
     on_action: Option<ErasedCallback>,
     dismissible: bool,
-    /// The setter's close-icon accessible name; wins over the theme.
+    /// The setter's close-icon accessible name; wins over the host's
+    /// theme-resolved one.
     dismiss_label: Option<String>,
-    /// The theme-resolved close-icon accessible name, refreshed each layout
-    /// (semantics has no theme handle).
-    dismiss_a11y: String,
     hold: AnimationController,
 
     /// Overall slide/fade progress, `0.0` (fully hidden) to `1.0` (fully
@@ -681,7 +692,6 @@ impl ActiveSnackbar {
             on_action: msg.on_action,
             dismissible: msg.dismissible,
             dismiss_label: msg.dismiss_label,
-            dismiss_a11y: MaterialStrings::ENGLISH.snackbar_dismiss_a11y.to_string(),
             hold,
             progress: 0.0,
             ramp_from: 0.0,
@@ -781,6 +791,9 @@ impl ActiveSnackbar {
 pub struct SnackbarHostWidget {
     app: ChildPod,
     current: Option<ActiveSnackbar>,
+    /// The view's theme-resolved close-icon accessible name, used by any
+    /// message without its own `dismiss_label`.
+    dismiss_a11y: String,
 }
 
 impl SnackbarHostWidget {
@@ -804,11 +817,6 @@ impl Widget for SnackbarHostWidget {
 
         if let Some(active) = &mut self.current {
             let theme = Theme::from_layout_ctx(ctx);
-            if active.dismissible && active.dismiss_label.is_none() {
-                active.dismiss_a11y = MaterialStrings::resolve(theme)
-                    .snackbar_dismiss_a11y
-                    .to_string();
-            }
             let (message_style, action_style) = (message_style(theme), action_style(theme));
             let message_size = active.message_run.shape(ctx, &message_style);
             let action_content = active.action_run.as_mut().map(|run| {
@@ -1007,7 +1015,7 @@ impl Widget for SnackbarHostWidget {
             let dismiss_a11y = active
                 .dismiss_label
                 .clone()
-                .unwrap_or_else(|| active.dismiss_a11y.clone());
+                .unwrap_or_else(|| self.dismiss_a11y.clone());
             ctx.push_container(
                 Role::Alert,
                 move |node| node.set_label(message.as_str()),
@@ -1918,7 +1926,7 @@ mod tests {
         );
     }
 
-    // ---- MaterialStrings: setter > theme > English (close-icon a11y) -------
+    // ---- MaterialStrings: setter > ambient theme > English (close-icon a11y) -
 
     fn thai_theme() -> Theme {
         let mut theme = crate::baseline();
@@ -1928,29 +1936,57 @@ mod tests {
         theme
     }
 
-    /// The semantics labels of a dismissible message laid out under `theme`.
-    fn dismiss_labels(theme: Option<Theme>, label: Option<&str>) -> Vec<String> {
-        let controller = SnackbarController::<Vec<u32>>::new();
-        let mut msg = snackbar("Saved").dismissible();
-        if let Some(label) = label {
-            msg = msg.dismiss_label(label);
+    /// Provides `theme` as the ambient `Theme` context (when set), then
+    /// creates the host so its close-icon name resolves from that context.
+    #[derive(Clone)]
+    struct StringsHost {
+        theme: Option<Theme>,
+        controller: SnackbarController<()>,
+    }
+
+    impl frust::Component for StringsHost {
+        type State = ();
+        fn init(&self) {}
+        fn build(&self, _state: &mut ()) -> impl View<()> {
+            if let Some(theme) = &self.theme {
+                frust::provide_context(theme.clone());
+            }
+            snackbar_host(
+                &self.controller,
+                frust_widgets::test_support::leaf_any(10.0, 10.0),
+            )
         }
-        controller.show(msg);
-        let mut root: frust_core::RenderRoot<Vec<u32>, SnackbarHostView<Vec<u32>>> =
-            frust_core::RenderRoot::new();
-        if let Some(theme) = theme {
-            root.set_theme(Box::new(theme));
-        }
-        let mut logic = |_: &mut Vec<u32>| snackbar_host(&controller, probe(0).into_any());
-        let mut state = Vec::<u32>::new();
-        root.rebuild(&mut logic, &mut state);
-        let mut tcx = TextContext::new();
-        root.layout_with_text(WINDOW, &mut tcx as &mut dyn Any);
+    }
+
+    type StringsRoot = frust_core::RenderRoot<(), frust::ComponentView<StringsHost>>;
+
+    fn rebuild_strings(root: &mut StringsRoot, host: &StringsHost) {
+        let mut logic = |_: &mut ()| frust::component(host.clone());
+        root.rebuild(&mut logic, &mut ());
+    }
+
+    fn all_labels(root: &StringsRoot) -> Vec<String> {
         root.semantics()
             .nodes
             .iter()
             .filter_map(|(_, n)| n.label().map(str::to_string))
             .collect()
+    }
+
+    /// The semantics labels of a dismissible message shown under a host
+    /// created with `theme` provided.
+    fn dismiss_labels(theme: Option<Theme>, label: Option<&str>) -> Vec<String> {
+        let controller = SnackbarController::<()>::new();
+        let mut msg = snackbar("Saved").dismissible();
+        if let Some(label) = label {
+            msg = msg.dismiss_label(label);
+        }
+        controller.show(msg);
+        let mut root = StringsRoot::new();
+        rebuild_strings(&mut root, &StringsHost { theme, controller });
+        let mut tcx = TextContext::new();
+        root.layout_with_text(WINDOW, &mut tcx as &mut dyn Any);
+        all_labels(&root)
     }
 
     #[test]
@@ -1960,7 +1996,7 @@ mod tests {
     }
 
     #[test]
-    fn dismiss_a11y_reads_the_thai_theme_strings() {
+    fn dismiss_a11y_reads_the_provided_thai_strings() {
         let labels = dismiss_labels(Some(thai_theme()), None);
         assert!(labels.iter().any(|l| l == "ปิด"), "{labels:?}");
         assert!(!labels.iter().any(|l| l == "Dismiss"));
@@ -1971,5 +2007,29 @@ mod tests {
         let labels = dismiss_labels(Some(thai_theme()), Some("Shut"));
         assert!(labels.iter().any(|l| l == "Shut"), "{labels:?}");
         assert!(!labels.iter().any(|l| l == "ปิด"));
+    }
+
+    #[test]
+    fn showing_message_relabels_when_the_provided_theme_changes() {
+        let controller = SnackbarController::<()>::new();
+        controller.show(snackbar("Saved").dismissible());
+        let mut host = StringsHost {
+            theme: None,
+            controller,
+        };
+        let mut root = StringsRoot::new();
+        rebuild_strings(&mut root, &host);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(WINDOW, &mut tcx as &mut dyn Any);
+        let labels = all_labels(&root);
+        assert!(labels.iter().any(|l| l == "Dismiss"), "{labels:?}");
+
+        let generation = root.semantics_generation();
+        host.theme = Some(thai_theme());
+        rebuild_strings(&mut root, &host);
+        assert!(root.semantics_generation() > generation);
+        let labels = all_labels(&root);
+        assert!(labels.iter().any(|l| l == "ปิด"), "{labels:?}");
+        assert!(!labels.iter().any(|l| l == "Dismiss"));
     }
 }

@@ -57,12 +57,11 @@ mod widgets;
 // point — the idiom `app!`'s own docs prescribe for desktop-only types.
 use frust::{
     AnyView, Brightness, Component, NavigatorController, PageTransition, Route, RouteObserver,
-    RouteParams, Router, SizedBox, Theme, TransitionSpec, View, any, clear_app_theme, icon,
-    navigator, provide_context, safe_area, scaffold, set_app_theme, set_default_theme, shell_route,
-    use_context,
+    RouteParams, Router, SizedBox, Theme, TransitionSpec, View, any, icon, navigator,
+    provide_context, safe_area, scaffold, shell_route, use_context,
 };
 use frust_i18n::{I18n, Locale, LocaleSet, provide_i18n};
-use frust_material_i18n::{localized_theme, provide_localized_strings};
+use frust_material_i18n::provide_localized_strings;
 
 use frust_material::{app_bar, icon_button, icons, nav_item, navigation_bar};
 
@@ -111,47 +110,6 @@ fn build_i18n() -> I18n {
             set.with_locale(tag(language), [("app.ftl", "")])
         });
     I18n::new(set, &[tag("en")]).expect("the empty catalogs parse")
-}
-
-/// Re-applies the settings to the shell with the Material strings for the
-/// active language.
-///
-/// [`ThemeSettings::apply`] builds a theme with no strings, and every settings
-/// mutator calls it, so this runs from the root `build` after any of them (and
-/// after a language switch). The reads of the locale and of each setting are
-/// tracked, which is what reruns it; `applied` holds the last state pushed so
-/// a rebuild for any other reason does not touch the shell theme again.
-fn sync_localized_theme(state: &AppState) {
-    thread_local! {
-        static APPLIED: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
-    }
-
-    let i18n = &state.i18n;
-    // Tracked locale read; also provides the localized theme to the tree.
-    provide_localized_strings(i18n);
-    let settings = &state.settings;
-    let key = format!(
-        "{}|{}|{}|{}|{:?}|{:?}|{:?}",
-        i18n.locale(),
-        settings.seed_index(),
-        settings.auto_theming(),
-        settings.invert_platform(),
-        settings.brightness_override(),
-        settings.font(),
-        settings.type_style(),
-    );
-    if APPLIED.with(|applied| applied.replace(key.clone()) == key) {
-        return;
-    }
-
-    let platform = use_context::<Theme>().map_or(Brightness::Light, |theme| theme.brightness);
-    let resolved = settings.resolved_brightness(platform);
-    let theme = localized_theme(settings.theme(resolved.unwrap_or(platform)), i18n);
-    set_default_theme(theme.clone());
-    match resolved {
-        Some(brightness) => set_app_theme(theme.with_brightness(brightness)),
-        None => clear_app_theme(),
-    }
 }
 
 /// The root page both navigators are constructed with.
@@ -282,7 +240,11 @@ impl Component for Material3Demo {
     }
 
     fn build(&self, state: &mut AppState) -> impl View<AppState> {
-        sync_localized_theme(state);
+        // Tracked locale read: a language switch rebuilds this component and
+        // re-provides the theme with the active table, which every Material
+        // widget below reads when its view is created. Brightness, seed and
+        // font reach the shell separately, through `ThemeSettings::apply`.
+        provide_localized_strings(&state.i18n);
         // Parent→child navigation (a playground or `/theme` pushed over the
         // gallery shell): M3's shared-axis-X pattern. Pop reversal, including
         // the edge-swipe gesture, comes free — the navigator reverses the

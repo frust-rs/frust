@@ -527,7 +527,7 @@ impl Component for MaterialStringsSample {
     fn build(&self, _state: &mut ()) -> impl View<()> {
         let i18n = resolve_i18n();
         provide_localized_strings(&i18n);
-        let strings = material_strings_for(&i18n.locale(), &i18n);
+        let strings = material_strings_for(&i18n.locale());
         let muted = muted();
 
         column()
@@ -686,14 +686,8 @@ mod tests {
         let en = labels_for("en", || MaterialStringsSample);
         let ja = labels_for("ja", || MaterialStringsSample);
 
-        let owner = Owner::new();
-        owner.set();
-        let i18n = I18n::from_engine(
-            frust_i18n::Engine::new(crate::locale_set()).expect("embedded sources validate"),
-            &[locale("en")],
-        );
-        let english = material_strings_for(&locale("en"), &i18n);
-        let japanese = material_strings_for(&locale("ja"), &i18n);
+        let english = material_strings_for(&locale("en"));
+        let japanese = material_strings_for(&locale("ja"));
 
         assert!(has(&en, &english.dialog_cancel), "{en:?}");
         assert!(has(&en, &english.snackbar_dismiss_a11y), "{en:?}");

@@ -16,13 +16,22 @@ fn build(&self, state: &mut State) -> impl View<State> {
 }
 ```
 
+That one call is the whole recipe. Material widgets resolve their strings from
+the provided theme when their views are created, so the rebuild a `set_locale`
+triggers relabels every widget below it: dialogs, pickers, the navigation rail,
+badges, the FAB menu, snackbars and chips alike. No shell theme push is needed.
+
 - `provide_localized_strings(&I18n)` re-provides the ambient `Theme` with the
   active language's table (the Material baseline when no theme is provided).
-- `localized_theme(theme, &I18n)` does the same for a theme you hand to the
-  shell yourself (`set_app_theme`), which the paint-time readers (badge, FAB
-  menu, snackbar, chips) see.
-- `material_strings_for(&Locale, &I18n)` returns the table directly. An
-  unsupported language gives `MaterialStrings::ENGLISH`.
+- `localized_theme(theme, &I18n)` does the same for an app that manages the
+  shell theme itself (`set_app_theme`) and wants that theme to carry the same
+  table.
+- `material_strings_for(&Locale)` returns the table directly. An unsupported
+  language gives `MaterialStrings::ENGLISH`.
+
+One label still reads the render-root theme at layout: the selection app bar's
+count (`selection_count_a11y`). An app that shows it localized also pushes
+`localized_theme` to the shell.
 
 Month and weekday names are read from CLDR (through ICU4X), not hand-written.
 
