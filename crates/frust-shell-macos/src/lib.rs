@@ -189,9 +189,11 @@ impl DesktopExtensions for MacosExtensions {
                 appkit_glue::AppActivationObserver::install(Arc::clone(&self.lifecycle));
             // Before the window is shown; `Full`/`None` never reach AppKit here.
             if let Some(buttons) = title_buttons::wanted(self.decorations, self.title_buttons) {
-                title_buttons::apply(window, buttons);
+                let placed = title_buttons::apply(window, buttons);
+                // Unplaced here (buttons not laid out before the first show):
+                // the observer retries once on the first become-key.
                 self.button_observer =
-                    title_buttons::WindowButtonObserver::install(window, buttons);
+                    title_buttons::WindowButtonObserver::install(window, buttons, placed);
             }
         }
     }
