@@ -89,6 +89,10 @@ fn first_failure(guard: &AtomicBool) -> bool {
 /// caller then runs its close path once. A refused drag is logged once per kind, never fatal.
 pub(crate) fn execute(commands: &[WindowCommand], window: &impl WindowOps) -> bool {
     let mut close = false;
+    // The maximized state this pass has requested so far, seeded from the window on first
+    // need. A platform may apply `set_maximized` asynchronously, so a toggle reads this and
+    // not `is_maximized()`: two toggles in one batch cancel out.
+    let mut requested_maximized: Option<bool> = None;
     for command in commands {
         match *command {
             WindowCommand::BeginMove => {
@@ -111,8 +115,15 @@ pub(crate) fn execute(commands: &[WindowCommand], window: &impl WindowOps) -> bo
                     );
                 }
             }
-            WindowCommand::SetMaximized(maximized) => window.set_maximized(maximized),
-            WindowCommand::ToggleMaximized => window.set_maximized(!window.is_maximized()),
+            WindowCommand::SetMaximized(maximized) => {
+                window.set_maximized(maximized);
+                requested_maximized = Some(maximized);
+            }
+            WindowCommand::ToggleMaximized => {
+                let next = !requested_maximized.unwrap_or_else(|| window.is_maximized());
+                window.set_maximized(next);
+                requested_maximized = Some(next);
+            }
             WindowCommand::Minimize => window.set_minimized(true),
             WindowCommand::SetFullscreen(fullscreen) => window.set_fullscreen(fullscreen),
             WindowCommand::RequestClose => close = true,
@@ -260,6 +271,36 @@ mod tests {
         assert_eq!(calls, ["set_maximized(false)"]);
         let (_, calls) = run(&[WindowCommand::ToggleMaximized], &FakeWindow::default());
         assert_eq!(calls, ["set_maximized(true)"]);
+    }
+
+    #[test]
+    fn two_toggles_in_one_batch_cancel_out_before_the_platform_applies_them() {
+        // `FakeWindow` never updates its maximized flag on `set_maximized`, standing in for a
+        // platform that applies the request asynchronously.
+        let (_, calls) = run(
+            &[
+                WindowCommand::ToggleMaximized,
+                WindowCommand::ToggleMaximized,
+            ],
+            &FakeWindow::default(),
+        );
+        assert_eq!(calls, ["set_maximized(true)", "set_maximized(false)"]);
+    }
+
+    #[test]
+    fn a_set_then_toggle_in_one_batch_toggles_from_the_requested_state() {
+        let maximized = FakeWindow {
+            maximized: true,
+            ..FakeWindow::default()
+        };
+        let (_, calls) = run(
+            &[
+                WindowCommand::SetMaximized(false),
+                WindowCommand::ToggleMaximized,
+            ],
+            &maximized,
+        );
+        assert_eq!(calls, ["set_maximized(false)", "set_maximized(true)"]);
     }
 
     #[test]
