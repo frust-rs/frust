@@ -169,13 +169,14 @@ pub use frust_widgets::{
     SliverFillRemainingView, SliverFixedExtentListView, SliverGridDelegate, SliverGridView,
     SliverListView, SliverPaddingView, SliverPersistentHeaderDelegate, SliverPersistentHeaderView,
     SourceFeedback, SpringDescription, Stack, StackView, TextInput, TextInputView, TextView,
-    Timing, Tolerance, TransitionSpec, TransitionState, VisibilityCallback, auto_scroll_zone,
-    button, checkbox, colored_box, column, container, custom_scroll_view, divider, drag_target,
-    draggable, flexible, hero, icon, icon_button, indexed_stack, inflexible, keep_alive, keyed,
-    list_view, overlay_portal, radio, reorderable_list, repaint_boundary, row, safe_area, scaffold,
-    scroll_view, shortcuts, slider, sliver_box, sliver_fill_remaining, sliver_fixed_extent_list,
-    sliver_fixed_extent_list_keyed, sliver_grid, sliver_grid_keyed, sliver_list, sliver_padding,
-    sliver_persistent_header, stack, text, text_input,
+    Timing, Tolerance, TransitionSpec, TransitionState, VisibilityCallback, WindowDragRegionView,
+    auto_scroll_zone, button, checkbox, colored_box, column, container, custom_scroll_view,
+    divider, drag_target, draggable, flexible, hero, icon, icon_button, indexed_stack, inflexible,
+    keep_alive, keyed, list_view, overlay_portal, radio, reorderable_list, repaint_boundary, row,
+    safe_area, scaffold, scroll_view, shortcuts, slider, sliver_box, sliver_fill_remaining,
+    sliver_fixed_extent_list, sliver_fixed_extent_list_keyed, sliver_grid, sliver_grid_keyed,
+    sliver_list, sliver_padding, sliver_persistent_header, stack, text, text_input,
+    window_drag_region,
 };
 // [`ItemAlignment`] (the alignment `ScrollController::scroll_to_item` lands a
 // row at) is not in `frust_widgets`'s own flat re-export list, so the block
@@ -2042,7 +2043,7 @@ macro_rules! web_app {
 /// before the window opens. [`Decorations::NoTitleBar`] on a non-macOS OS behaves
 /// exactly as [`Decorations::None`], and [`TitleButtons`] is macOS-only. With
 /// `None` or `NoTitleBar` the app supplies its own title bar, including its own
-/// move, resize and window-control gestures; the baseline `window_drag_region`
+/// move, resize and window-control gestures; the baseline [`window_drag_region`]
 /// widget is the place to start.
 ///
 /// ```no_run
