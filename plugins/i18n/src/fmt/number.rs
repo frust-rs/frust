@@ -14,6 +14,12 @@
 //! `0.1 + 0.2` the same 17 digits `println!("{x}")` would — which is why the
 //! fraction is then rounded, below.
 //!
+//! # Options
+//!
+//! [`NumberOptions`] sets the fraction bounds, the grouping strategy and
+//! compact notation; its `Default` reproduces the plain entry points. A
+//! `min_fraction` pads (`4.8` → `4.80`) and a `max_fraction` rounds.
+//!
 //! # The one CLDR shape this applies itself: max three fraction digits
 //!
 //! CLDR's standard decimal pattern is `#,##0.###` — at most three fraction
@@ -42,8 +48,11 @@
 
 use std::sync::LazyLock;
 
-use icu_decimal::options::DecimalFormatterOptions;
-use icu_decimal::{DecimalFormatter, DecimalFormatterPreferences};
+use icu_decimal::options::{
+    CompactDecimalFormatterOptions, DecimalFormatterOptions, GroupingStrategy,
+};
+use icu_decimal::preferences::CompactDecimalFormatterPreferences;
+use icu_decimal::{CompactDecimalFormatter, DecimalFormatter, DecimalFormatterPreferences};
 use icu_experimental::dimension::percent::formatter::{
     PercentFormatter, PercentFormatterPreferences,
 };
@@ -58,30 +67,146 @@ use crate::Locale;
 use super::bridge::{self, Cache};
 
 /// CLDR's standard decimal pattern (`#,##0.###`) caps the fraction at three
-/// digits; ICU4X positions are powers of ten, so that cap is position `-3`.
-const MAX_FRACTION_POSITION: i16 = -3;
+/// digits.
+const DEFAULT_MAX_FRACTION: u8 = 3;
 
 /// The pattern's *minimum* fraction is zero digits (`#,##0.###` has no `0`
 /// after the point), so trailing zeros come back off after rounding.
-const MIN_FRACTION_POSITION: i16 = 0;
+const DEFAULT_MIN_FRACTION: u8 = 0;
 
-static DECIMALS: LazyLock<Cache<Locale, DecimalFormatter>> = LazyLock::new(Cache::new);
-static PERCENTS: LazyLock<Cache<Locale, PercentFormatter<DecimalFormatter>>> =
+/// The most fraction digits an option may ask for; a larger request is
+/// clamped rather than allowed to build an absurdly long string.
+const FRACTION_CAP: u8 = 20;
+
+/// When to render grouping separators.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Grouping {
+    /// The locale's own rule (`1234` stays `1234` in `es`, `1,234` in `en`).
+    #[default]
+    Auto,
+    /// Always group. ICU4X renders this identically to [`Grouping::Auto`] for
+    /// a plain decimal; it differs only under compact notation, where `Auto`
+    /// suppresses grouping below five digits.
+    Always,
+    /// Never render a grouping separator (`useGrouping: "false"`).
+    Never,
+}
+
+/// How long a compact suffix is spelled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CompactStyle {
+    /// `1.2K`.
+    Short,
+    /// `1.2 thousand`.
+    Long,
+}
+
+/// The overall shape of the number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Notation {
+    /// Plain digits, honoring the fraction bounds.
+    #[default]
+    Standard,
+    /// A scaled significand with the locale's magnitude word or suffix.
+    ///
+    /// ICU4X picks the significand's precision itself (one fraction digit
+    /// below ten, none above), so the fraction bounds do not apply.
+    Compact(CompactStyle),
+}
+
+/// Knobs [`decimal_with`](super::decimal_with) and
+/// [`percent_with`](super::percent_with) accept. `Default` is exactly what
+/// [`decimal`](super::decimal) and [`percent`](super::percent) do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct NumberOptions {
+    /// Fewest fraction digits; shorter fractions are zero-padded
+    /// (`4.8` with `Some(2)` is `4.80`). Default zero.
+    pub min_fraction: Option<u8>,
+    /// Most fraction digits; longer fractions are rounded half-to-even.
+    /// Default three, or `min_fraction` when that is larger.
+    pub max_fraction: Option<u8>,
+    /// When to render grouping separators.
+    pub grouping: Grouping,
+    /// Standard digits or compact notation. Applies to [`decimal_with`](super::decimal_with)
+    /// only; a percent is always standard.
+    pub notation: Notation,
+}
+
+impl NumberOptions {
+    /// The `(min, max)` fraction digit counts after defaults and clamping.
+    fn fraction_bounds(&self) -> (u8, u8) {
+        let min = self.min_fraction.map(|min| min.min(FRACTION_CAP));
+        let max = self.max_fraction.map(|max| max.min(FRACTION_CAP));
+        match (min, max) {
+            (None, None) => (DEFAULT_MIN_FRACTION, DEFAULT_MAX_FRACTION),
+            (Some(min), None) => (min, min.max(DEFAULT_MAX_FRACTION)),
+            (None, Some(max)) => (DEFAULT_MIN_FRACTION, max),
+            (Some(min), Some(max)) => (min, min.max(max)),
+        }
+    }
+}
+
+fn strategy(grouping: Grouping) -> GroupingStrategy {
+    match grouping {
+        Grouping::Auto => GroupingStrategy::Auto,
+        Grouping::Always => GroupingStrategy::Always,
+        Grouping::Never => GroupingStrategy::Never,
+    }
+}
+
+static DECIMALS: LazyLock<Cache<(Locale, Grouping), DecimalFormatter>> = LazyLock::new(Cache::new);
+static PERCENTS: LazyLock<Cache<(Locale, Grouping), PercentFormatter<DecimalFormatter>>> =
+    LazyLock::new(Cache::new);
+static COMPACTS: LazyLock<Cache<(Locale, CompactStyle, Grouping), CompactDecimalFormatter>> =
     LazyLock::new(Cache::new);
 
 /// Formats `value` with the locale's grouping and decimal separators.
 pub(super) fn decimal(locale: &Locale, value: f64) -> String {
+    decimal_with(locale, value, &NumberOptions::default())
+}
+
+/// [`decimal`] under `options`.
+pub(super) fn decimal_with(locale: &Locale, value: f64, options: &NumberOptions) -> String {
     let Some(number) = to_decimal(value) else {
         return degrade(value, "not a finite number");
     };
 
-    match DECIMALS.get_or_build(locale, || {
+    if let Notation::Compact(style) = options.notation {
+        return compact(locale, value, number, style, options.grouping);
+    }
+
+    let (min, max) = options.fraction_bounds();
+    match DECIMALS.get_or_build(&(locale.clone(), options.grouping), || {
         DecimalFormatter::try_new(
             DecimalFormatterPreferences::from(&bridge::lang_id(locale)),
-            DecimalFormatterOptions::default(),
+            DecimalFormatterOptions::from(strategy(options.grouping)),
         )
     }) {
-        Ok(formatter) => formatter.format(&standard_fraction(number)).to_string(),
+        Ok(formatter) => formatter
+            .format(&with_fraction(number, min, max))
+            .to_string(),
+        Err(error) => degrade(value, &error.to_string()),
+    }
+}
+
+/// The compact-notation arm of [`decimal_with`].
+fn compact(
+    locale: &Locale,
+    value: f64,
+    number: Decimal,
+    style: CompactStyle,
+    grouping: Grouping,
+) -> String {
+    let built = COMPACTS.get_or_build(&(locale.clone(), style, grouping), || {
+        let preferences = CompactDecimalFormatterPreferences::from(&bridge::lang_id(locale));
+        let options = CompactDecimalFormatterOptions::from(strategy(grouping));
+        match style {
+            CompactStyle::Short => CompactDecimalFormatter::try_new_short(preferences, options),
+            CompactStyle::Long => CompactDecimalFormatter::try_new_long(preferences, options),
+        }
+    });
+    match built {
+        Ok(formatter) => formatter.format(&number).to_string(),
         Err(error) => degrade(value, &error.to_string()),
     }
 }
@@ -90,30 +215,45 @@ pub(super) fn decimal(locale: &Locale, value: f64) -> String {
 ///
 /// `value` is the percentage itself, not a ratio — see [`super::percent`].
 pub(super) fn percent(locale: &Locale, value: f64) -> String {
+    percent_with(locale, value, &NumberOptions::default())
+}
+
+/// [`percent`] under `options` (notation is ignored).
+pub(super) fn percent_with(locale: &Locale, value: f64, options: &NumberOptions) -> String {
     let Some(number) = to_decimal(value) else {
         return degrade(value, "not a finite number");
     };
 
-    match PERCENTS.get_or_build(locale, || {
-        PercentFormatter::try_new(
-            PercentFormatterPreferences::from(&bridge::lang_id(locale)),
-            Default::default(),
-        )
+    let (min, max) = options.fraction_bounds();
+    match PERCENTS.get_or_build(&(locale.clone(), options.grouping), || {
+        let preferences = PercentFormatterPreferences::from(&bridge::lang_id(locale));
+        let decimals = DecimalFormatter::try_new(
+            (&preferences).into(),
+            DecimalFormatterOptions::from(strategy(options.grouping)),
+        )?;
+        PercentFormatter::try_new_with_decimal_formatter(preferences, decimals, Default::default())
     }) {
-        Ok(formatter) => formatter.format(&standard_fraction(number)).to_string(),
+        Ok(formatter) => formatter
+            .format(&with_fraction(number, min, max))
+            .to_string(),
         Err(error) => degrade(value, &error.to_string()),
     }
 }
 
 /// Applies CLDR's standard decimal fraction bounds: round at three digits,
 /// then drop the trailing zeros rounding left behind.
+pub(super) fn standard_fraction(number: Decimal) -> Decimal {
+    with_fraction(number, DEFAULT_MIN_FRACTION, DEFAULT_MAX_FRACTION)
+}
+
+/// Rounds to `max` fraction digits, then pads (or trims zeros) to `min`.
 ///
 /// `Decimal::round` sets the number's lower magnitude *to* the rounding
 /// position, so it pads as well as rounds (`1.5` → `1.500`); `pad_end` is
-/// what takes the padding back off, and it never truncates a non-zero digit.
-pub(super) fn standard_fraction(mut number: Decimal) -> Decimal {
-    number.round(MAX_FRACTION_POSITION);
-    number.absolute.pad_end(MIN_FRACTION_POSITION);
+/// what then sets the final width, and it never truncates a non-zero digit.
+fn with_fraction(mut number: Decimal, min: u8, max: u8) -> Decimal {
+    number.round(-i16::from(max));
+    number.absolute.pad_end(-i16::from(min));
     number
 }
 

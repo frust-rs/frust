@@ -400,6 +400,27 @@ month names, grouping, calendar — even though every other message on the same 
 German. `docs/LIMITATIONS.md` records this as an accepted limitation, not a bug to work around per
 call site.
 
+Digit control and compact notation go through `NumberOptions` (`Default` is exactly
+`decimal`/`percent`); the FTL `NUMBER` options above map onto the same struct:
+
+```rust
+use frust_i18n::fmt::{self, CompactStyle, Grouping, Notation, NumberOptions};
+
+let pad = NumberOptions { min_fraction: Some(2), ..Default::default() };
+fmt::decimal_with(&en, 4.8, &pad);                             // "4.80"
+let compact = |style| NumberOptions { notation: Notation::Compact(style), ..Default::default() };
+fmt::decimal_with(&en, 1234.0, &compact(CompactStyle::Short)); // "1.2K"
+fmt::decimal_with(&en, 1234.0, &compact(CompactStyle::Long));  // "1.2 thousand"
+fmt::decimal_with(&"ja-JP".parse()?, 12345.0, &compact(CompactStyle::Short)); // "1.2万"
+let flat = NumberOptions { grouping: Grouping::Never, ..Default::default() };
+fmt::decimal_with(&en, 1234567.5, &flat);                      // "1234567.5"
+```
+
+`min_fraction` pads, `max_fraction` rounds half-to-even (default 3; a `min_fraction` above it raises
+it). Compact notation lets ICU choose the significand's precision, so the fraction bounds do not
+apply to it, and `percent_with` ignores the notation. `Grouping::Always` renders like `Auto` for a
+plain decimal (ICU4X's own behavior). Compact `ja` starts at 万, so `1234` stays `1,234`.
+
 Lists and language names (for amenity rows and a language picker):
 
 ```rust
@@ -480,10 +501,11 @@ style)?` renders under an hour as minutes (`45 min`), whole hours as hours (`2 h
 else as hours to one decimal (`1.5 hr`). Widths are CLDR's call: vi spells all three alike, ja long
 equals short, and vi/es use a comma decimal (`1,5 giờ`, `1,5 horas`).
 
-Honored named options: `NUMBER`'s `style` (`decimal`/`percent`/`currency`), `currency` and
-`minorUnits`;
+Honored named options: `NUMBER`'s `style` (`decimal`/`percent`/`currency`), `currency`,
+`minorUnits`, `minimumFractionDigits`, `maximumFractionDigits`, `useGrouping` (`"false"` or
+`"always"`), `notation: "compact"` and `compactDisplay` (`"short"`/`"long"`);
 `DATETIME`'s `dateStyle`/`timeStyle`/`timeZone`/`calendar` (`"gregory"`, `"buddhist"`, …)/`hourCycle` (`"h11"`/`"h12"`/`"h23"`); `RELATIVE_DAY`'s `now`/`timeZone`/`style`. Anything else (ECMA-402-style
-`minimumFractionDigits`, `useGrouping`, …) is ignored at `debug` log level, never a warning or
+`signDisplay`, `currencyDisplay`, …) is ignored at `debug` log level, never a warning or
 an error — these run on a UI's formatting path, potentially every frame.
 
 ---
