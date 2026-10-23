@@ -86,10 +86,10 @@ impl CustomTitleBarApp {
                 r.flex(1, SizedBox(None, None)).child(controls)
             });
 
-        window_drag_region(
-            SizedBox(None, Some(BAR_HEIGHT))
-                .child(Stack((colored_box().fill(Self::surface()).expand(), bar))),
-        )
+        window_drag_region(SizedBox(None, Some(BAR_HEIGHT)).child(Stack((
+            colored_box().fill(Self::surface()).expand(),
+            SizedBox(None, Some(BAR_HEIGHT)).child(bar),
+        ))))
     }
 
     fn window_button(label: &'static str, command: WindowCommand) -> impl View<AppState> {
@@ -137,23 +137,28 @@ impl CustomTitleBarApp {
             Stack((
                 edge(
                     Alignment::new(0.0, -1.0),
-                    None,
+                    Some(f64::INFINITY),
                     Some(EDGE),
                     ResizeEdge::North,
                 ),
                 edge(
                     Alignment::new(0.0, 1.0),
-                    None,
+                    Some(f64::INFINITY),
                     Some(EDGE),
                     ResizeEdge::South,
                 ),
                 edge(
                     Alignment::new(-1.0, 0.0),
                     Some(EDGE),
-                    None,
+                    Some(f64::INFINITY),
                     ResizeEdge::West,
                 ),
-                edge(Alignment::new(1.0, 0.0), Some(EDGE), None, ResizeEdge::East),
+                edge(
+                    Alignment::new(1.0, 0.0),
+                    Some(EDGE),
+                    Some(f64::INFINITY),
+                    ResizeEdge::East,
+                ),
                 edge(
                     Alignment::TOP_LEFT,
                     Some(CORNER),
