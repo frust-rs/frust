@@ -1147,3 +1147,317 @@ fn ftl_datetime_honours_calendar_and_hour_cycle() {
         "12:00"
     );
 }
+
+#[test]
+fn th_vi_es_decimal_percent_and_currency_rows() {
+    // (tag, decimal 1234.56, percent 75, EUR 1234.5, THB 1234.5)
+    let rows = [
+        ("th-TH", "1,234.56", "75%", "€1,234.50", "฿1,234.50"),
+        (
+            "vi-VN",
+            "1.234,56",
+            "75%",
+            "1.234,50\u{a0}€",
+            "1.234,50\u{a0}฿",
+        ),
+        // es drops the group separator below five digits.
+        (
+            "es-ES",
+            "1234,56",
+            "75\u{a0}%",
+            "1234,50\u{a0}€",
+            "1234,50\u{a0}฿",
+        ),
+    ];
+
+    for (tag, decimal, percent, eur, thb) in rows {
+        let l = locale(tag);
+        assert_eq!(fmt::decimal(&l, 1234.56), decimal, "{tag} decimal");
+        assert_eq!(fmt::percent(&l, 75.0), percent, "{tag} percent");
+        assert_eq!(fmt::currency(&l, 1234.5, "EUR").unwrap(), eur, "{tag} EUR");
+        assert_eq!(fmt::currency(&l, 1234.5, "THB").unwrap(), thb, "{tag} THB");
+    }
+}
+
+#[test]
+fn th_vi_es_date_time_and_datetime_rows() {
+    // (tag, [short, medium, long] date, [short, medium, long] time,
+    //  [short, medium, long] datetime)
+    #[allow(clippy::type_complexity)]
+    let rows: [(&str, [&str; 3], [&str; 3], [&str; 3]); 3] = [
+        (
+            // th-TH renders the Buddhist year (2024 CE is 2567 BE).
+            "th-TH",
+            ["31/1/2567", "31 ม.ค. 2567", "31 มกราคม 2567"],
+            ["15:47", "15:47:50", "15:47:50"],
+            [
+                "31/1/2567 15:47",
+                "31 ม.ค. 2567 15:47:50",
+                "31 มกราคม 2567 เวลา 15:47:50",
+            ],
+        ),
+        (
+            "vi-VN",
+            ["31/01/2024", "31 thg 1, 2024", "31 tháng 1, 2024"],
+            ["15:47", "15:47:50", "15:47:50"],
+            [
+                "15:47 31/01/2024",
+                "15:47:50 31 thg 1, 2024",
+                "lúc 15:47:50 31 tháng 1, 2024",
+            ],
+        ),
+        (
+            "es-ES",
+            ["31/1/24", "31 ene 2024", "31 de enero de 2024"],
+            ["15:47", "15:47:50", "15:47:50"],
+            [
+                "31/1/24, 15:47",
+                "31 ene 2024, 15:47:50",
+                "31 de enero de 2024 a las 15:47:50",
+            ],
+        ),
+    ];
+    let lengths = [DateLength::Short, DateLength::Medium, DateLength::Long];
+
+    for (tag, dates, times, datetimes) in rows {
+        let l = locale(tag);
+        for (index, length) in lengths.into_iter().enumerate() {
+            assert_eq!(
+                fmt::date(&l, SAMPLE_DATE, length).unwrap(),
+                dates[index],
+                "{tag} date {length:?}"
+            );
+            assert_eq!(
+                fmt::time(&l, SAMPLE_TIME, length).unwrap(),
+                times[index],
+                "{tag} time {length:?}"
+            );
+            assert_eq!(
+                fmt::datetime(&l, SAMPLE_DATE, SAMPLE_TIME, length).unwrap(),
+                datetimes[index],
+                "{tag} datetime {length:?}"
+            );
+        }
+    }
+}
+
+fn with_fraction(min: Option<u8>, max: Option<u8>) -> fmt::NumberOptions {
+    fmt::NumberOptions {
+        min_fraction: min,
+        max_fraction: max,
+        ..Default::default()
+    }
+}
+
+fn compact(style: fmt::CompactStyle) -> fmt::NumberOptions {
+    fmt::NumberOptions {
+        notation: fmt::Notation::Compact(style),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn default_number_options_equal_the_plain_entry_points() {
+    let defaults = fmt::NumberOptions::default();
+    for tag in [
+        "en-US", "de-DE", "fr-FR", "ja-JP", "th-TH", "vi-VN", "es-ES",
+    ] {
+        let l = locale(tag);
+        for value in [0.0, 1.5, 1234.56, 0.1 + 0.2, -9876543.2109] {
+            assert_eq!(
+                fmt::decimal_with(&l, value, &defaults),
+                fmt::decimal(&l, value)
+            );
+            assert_eq!(
+                fmt::percent_with(&l, value, &defaults),
+                fmt::percent(&l, value)
+            );
+        }
+    }
+}
+
+#[test]
+fn fraction_bounds_pad_and_round_across_locales() {
+    let rows = [
+        ("en-US", "4.80", "4.8", "1,234.57"),
+        ("de-DE", "4,80", "4,8", "1.234,57"),
+        ("fr-FR", "4,80", "4,8", "1\u{202f}234,57"),
+        ("ja-JP", "4.80", "4.8", "1,234.57"),
+        ("th-TH", "4.80", "4.8", "1,234.57"),
+        ("vi-VN", "4,80", "4,8", "1.234,57"),
+        ("es-ES", "4,80", "4,8", "1234,57"),
+    ];
+
+    for (tag, padded, unpadded, rounded) in rows {
+        let l = locale(tag);
+        assert_eq!(
+            fmt::decimal_with(&l, 4.8, &with_fraction(Some(2), None)),
+            padded,
+            "{tag}"
+        );
+        assert_eq!(
+            fmt::decimal_with(&l, 4.8, &with_fraction(None, Some(1))),
+            unpadded,
+            "{tag}"
+        );
+        assert_eq!(
+            fmt::decimal_with(&l, 1234.5678, &with_fraction(Some(2), Some(2))),
+            rounded,
+            "{tag}"
+        );
+    }
+
+    let en = locale("en-US");
+    // A max below the default min of zero digits drops the fraction.
+    assert_eq!(
+        fmt::decimal_with(&en, 2.5, &with_fraction(None, Some(0))),
+        "2"
+    );
+    // Half-to-even, like the default rounding.
+    assert_eq!(
+        fmt::decimal_with(&en, 0.125, &with_fraction(None, Some(2))),
+        "0.12"
+    );
+    // A min above the default max raises it rather than rounding the fraction away.
+    assert_eq!(
+        fmt::decimal_with(&en, 1.23456, &with_fraction(Some(5), None)),
+        "1.23456"
+    );
+    // A min above an explicit max wins.
+    assert_eq!(
+        fmt::decimal_with(&en, 1.5, &with_fraction(Some(3), Some(1))),
+        "1.500"
+    );
+    assert_eq!(
+        fmt::decimal_with(&en, -4.8, &with_fraction(Some(2), None)),
+        "-4.80"
+    );
+    assert_eq!(
+        fmt::percent_with(&en, 12.5, &with_fraction(Some(2), Some(2))),
+        "12.50%"
+    );
+    assert_eq!(
+        fmt::percent_with(&locale("es-ES"), 12.345, &with_fraction(None, Some(1))),
+        "12,3\u{a0}%"
+    );
+}
+
+#[test]
+fn grouping_never_drops_the_separator_everywhere() {
+    let never = fmt::NumberOptions {
+        grouping: fmt::Grouping::Never,
+        ..Default::default()
+    };
+    let always = fmt::NumberOptions {
+        grouping: fmt::Grouping::Always,
+        ..Default::default()
+    };
+    let rows = [
+        ("en-US", "1234567.891", "1,234,567.891"),
+        ("de-DE", "1234567,891", "1.234.567,891"),
+        ("fr-FR", "1234567,891", "1\u{202f}234\u{202f}567,891"),
+        ("es-ES", "1234567,891", "1.234.567,891"),
+    ];
+
+    for (tag, ungrouped, grouped) in rows {
+        let l = locale(tag);
+        assert_eq!(
+            fmt::decimal_with(&l, 1_234_567.891, &never),
+            ungrouped,
+            "{tag}"
+        );
+        assert_eq!(
+            fmt::decimal_with(&l, 1_234_567.891, &always),
+            grouped,
+            "{tag}"
+        );
+    }
+    assert_eq!(
+        fmt::percent_with(&locale("en-US"), 12345.0, &never),
+        "12345%"
+    );
+}
+
+#[test]
+fn compact_notation_short_and_long_per_locale() {
+    use fmt::CompactStyle::{Long, Short};
+
+    // (tag, 1234 short, 1234 long, 12345 short)
+    let rows = [
+        ("en-US", "1.2K", "1.2 thousand", "12K"),
+        ("de-DE", "1.234", "1,2 Tausend", "12.345"),
+        ("fr-FR", "1,2\u{a0}k", "1,2 millier", "12\u{a0}k"),
+        ("ja-JP", "1,234", "1,234", "1.2万"),
+        ("vi-VN", "1,2\u{a0}N", "1,2 nghìn", "12\u{a0}N"),
+        ("es-ES", "1,2\u{a0}mil", "1,2 mil", "12\u{a0}mil"),
+    ];
+
+    for (tag, short, long, short_five) in rows {
+        let l = locale(tag);
+        assert_eq!(
+            fmt::decimal_with(&l, 1234.0, &compact(Short)),
+            short,
+            "{tag} short"
+        );
+        assert_eq!(
+            fmt::decimal_with(&l, 1234.0, &compact(Long)),
+            long,
+            "{tag} long"
+        );
+        assert_eq!(
+            fmt::decimal_with(&l, 12345.0, &compact(Short)),
+            short_five,
+            "{tag} 12345"
+        );
+    }
+    assert_eq!(
+        fmt::decimal_with(&locale("en-US"), 12_345_678.0, &compact(Short)),
+        "12M"
+    );
+    assert_eq!(
+        fmt::decimal_with(&locale("ja-JP"), 12_345_678.0, &compact(Short)),
+        "1,235万"
+    );
+    assert_eq!(
+        fmt::decimal_with(&locale("en-US"), 999.0, &compact(Short)),
+        "999"
+    );
+}
+
+#[test]
+fn ftl_number_honours_the_digit_grouping_and_notation_options() {
+    const FTL: &str = r#"
+padded = { NUMBER($n, minimumFractionDigits: 2) }
+rounded = { NUMBER($n, maximumFractionDigits: 0) }
+ungrouped = { NUMBER($n, useGrouping: "false") }
+short = { NUMBER($n, notation: "compact") }
+long = { NUMBER($n, notation: "compact", compactDisplay: "long") }
+pct = { NUMBER($n, style: "percent", minimumFractionDigits: 1) }
+stringly = { NUMBER($n, minimumFractionDigits: "2") }
+currency = { NUMBER($n, style: "currency", currency: "EUR", minimumFractionDigits: 5) }
+"#;
+    let engine = Engine::new(fmt::with_icu_functions(
+        LocaleSet::new(locale("en-US"))
+            .with_locale(locale("en-US"), [("n.ftl", FTL)])
+            .with_locale(locale("es-ES"), [("n.ftl", FTL)])
+            .with_isolating(false),
+    ))
+    .expect("engine builds");
+
+    let resolve = |tag: &str, key: &str, n: f64| {
+        engine
+            .resolve(&[locale(tag)], key, Some(&args!("n" => n)))
+            .expect("resolves")
+    };
+
+    assert_eq!(resolve("en-US", "padded", 4.8), "4.80");
+    assert_eq!(resolve("es-ES", "padded", 4.8), "4,80");
+    assert_eq!(resolve("en-US", "rounded", 1234.5), "1,234");
+    assert_eq!(resolve("en-US", "ungrouped", 1234567.5), "1234567.5");
+    assert_eq!(resolve("en-US", "short", 1234.0), "1.2K");
+    assert_eq!(resolve("en-US", "long", 1234.0), "1.2 thousand");
+    assert_eq!(resolve("en-US", "pct", 12.0), "12.0%");
+    assert_eq!(resolve("en-US", "stringly", 4.8), "4.80");
+    // Currency digits stay the currency's own.
+    assert_eq!(resolve("en-US", "currency", 4.8), "€4.80");
+}

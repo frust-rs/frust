@@ -72,6 +72,7 @@ pub use datetime::{Calendar, DateTimeOptions, HourCycle};
 pub use interval::{date_range, datetime_range_in_zone, time_range, time_range_in_zone};
 pub use list::{ListLength, ListStyle, list};
 pub use names::{language_endonym, language_name};
+pub use number::{CompactStyle, Grouping, Notation, NumberOptions};
 pub use relative::{RelativeDayStyle, relative_day, relative_day_civil};
 pub use units::{Unit, UnitStyle, duration_minutes, units, units_by_id, units_decimal};
 pub use zone::{
@@ -153,6 +154,22 @@ pub fn decimal(locale: &Locale, value: f64) -> String {
 /// Degrades like [`decimal`] rather than failing.
 pub fn percent(locale: &Locale, value: f64) -> String {
     number::percent(locale, value)
+}
+
+/// [`decimal`] with explicit fraction bounds, grouping and notation.
+///
+/// `NumberOptions::default()` is exactly [`decimal`]:
+/// `decimal_with(&en, 4.8, &NumberOptions { min_fraction: Some(2), ..Default::default() })`
+/// is `"4.80"`, and a compact notation renders `1234.0` as `"1.2K"` (short)
+/// or `"1.2 thousand"` (long).
+pub fn decimal_with(locale: &Locale, value: f64, options: &NumberOptions) -> String {
+    number::decimal_with(locale, value, options)
+}
+
+/// [`percent`] with explicit fraction bounds and grouping; the notation is
+/// ignored.
+pub fn percent_with(locale: &Locale, value: f64, options: &NumberOptions) -> String {
+    number::percent_with(locale, value, options)
 }
 
 /// Formats `amount` as the ISO 4217 currency `iso_code` in `locale`'s

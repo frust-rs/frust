@@ -50,6 +50,19 @@
 //! With neither, a medium date is formatted. With `timeStyle` alone, only the
 //! time. With both, the combined form at `dateStyle`'s length.
 //!
+//! # `NUMBER($n, …)` digit options
+//!
+//! On a decimal or percent `NUMBER` (not currency, whose digits the currency
+//! fixes):
+//!
+//! | Option | Values | Effect |
+//! |---|---|---|
+//! | `minimumFractionDigits` | a whole number | zero-pads the fraction (`4.8` → `4.80`) |
+//! | `maximumFractionDigits` | a whole number | rounds the fraction (default 3) |
+//! | `useGrouping` | `"false"`, `"always"` | `"false"` drops grouping separators |
+//! | `notation` | `"compact"` | `1.2K`; decimal only |
+//! | `compactDisplay` | `"short"` (default), `"long"` | `1.2K` vs `1.2 thousand` |
+//!
 //! # `LIST($a, $b, …)`
 //!
 //! The positional arguments are the items. `style` is `and` (default), `or`
@@ -58,8 +71,7 @@
 //!
 //! # Everything else is ignored, at `debug` level
 //!
-//! Any other named option — ECMA-402's `minimumFractionDigits`,
-//! `currencyDisplay`, `useGrouping`, … — is dropped with a `debug!` log, not
+//! Any other named option — ECMA-402's `currencyDisplay`, `signDisplay`, … — is dropped with a `debug!` log, not
 //! a warning and never an error: these functions run on a UI's formatting
 //! path, potentially per frame, so an unhonored option must not be able to
 //! flood a release log.
@@ -84,8 +96,8 @@ use fluent_bundle::{FluentArgs, FluentValue};
 use crate::{FluentFunction, Locale, LocaleSet};
 
 use super::{
-    Calendar, CivilDate, CivilTime, DateLength, DateTimeOptions, HourCycle, ListLength, ListStyle,
-    RelativeDayStyle, datetime, relative, zone,
+    Calendar, CivilDate, CivilTime, CompactStyle, DateLength, DateTimeOptions, Grouping, HourCycle,
+    ListLength, ListStyle, Notation, NumberOptions, RelativeDayStyle, datetime, relative, zone,
 };
 
 /// Registers ICU-backed `NUMBER`, `DATETIME`, `RELATIVE_DAY` and `LIST` into `set`.
@@ -237,8 +249,8 @@ fn number<'a>(
     };
 
     let formatted = match option(named, "style").unwrap_or("decimal") {
-        "decimal" => super::decimal(locale, value),
-        "percent" => super::percent(locale, value),
+        "decimal" => super::decimal_with(locale, value, &number_options(named)),
+        "percent" => super::percent_with(locale, value, &number_options(named)),
         "currency" => {
             let Some(code) = option(named, "currency") else {
                 log::debug!("frust-i18n: NUMBER(style: \"currency\") without a `currency` option");
@@ -254,12 +266,61 @@ fn number<'a>(
         }
         unknown => {
             log::debug!("frust-i18n: NUMBER(style: \"{unknown}\") — formatting as a decimal");
-            super::decimal(locale, value)
+            super::decimal_with(locale, value, &number_options(named))
         }
     };
 
-    report_unhonored(named, "NUMBER", &["style", "currency", "minorUnits"]);
+    report_unhonored(named, "NUMBER", NUMBER_OPTIONS);
     FluentValue::from(formatted)
+}
+
+/// Every named option `NUMBER` honors.
+const NUMBER_OPTIONS: &[&str] = &[
+    "style",
+    "currency",
+    "minorUnits",
+    "minimumFractionDigits",
+    "maximumFractionDigits",
+    "notation",
+    "compactDisplay",
+    "useGrouping",
+];
+
+/// Reads `NUMBER`'s digit, grouping and notation options.
+fn number_options(named: &FluentArgs<'_>) -> NumberOptions {
+    let notation = match option(named, "notation") {
+        Some("compact") => Notation::Compact(match option(named, "compactDisplay") {
+            Some("long") => CompactStyle::Long,
+            _ => CompactStyle::Short,
+        }),
+        _ => Notation::Standard,
+    };
+    let grouping = match option(named, "useGrouping") {
+        Some("false") => Grouping::Never,
+        Some("always") => Grouping::Always,
+        _ => Grouping::Auto,
+    };
+    NumberOptions {
+        min_fraction: digit_count(named, "minimumFractionDigits"),
+        max_fraction: digit_count(named, "maximumFractionDigits"),
+        grouping,
+        notation,
+    }
+}
+
+/// A non-negative whole-number option, given as a number or a numeric string.
+fn digit_count(named: &FluentArgs<'_>, key: &str) -> Option<u8> {
+    named.iter().find_map(|(name, value)| {
+        if name != key {
+            return None;
+        }
+        let count = match value {
+            FluentValue::Number(number) => number.value,
+            FluentValue::String(text) => text.parse().ok()?,
+            _ => return None,
+        };
+        (count.is_finite() && count >= 0.0).then(|| count.min(f64::from(u8::MAX)) as u8)
+    })
 }
 
 /// The `minorUnits: "true"` form of `NUMBER`: an exact `i64` from a string.
@@ -563,7 +624,7 @@ mod tests {
     #[test]
     fn an_unhonored_option_is_ignored_rather_than_failing() {
         let formatted = resolved(
-            r#"m = { NUMBER($n, useGrouping: "false") }"#,
+            r#"m = { NUMBER($n, signDisplay: "always") }"#,
             "en-US",
             crate::args!("n" => 1234),
         );
