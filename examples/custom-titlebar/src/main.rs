@@ -78,18 +78,22 @@ impl CustomTitleBarApp {
 
         let bar = row()
             .cross_axis(frust::CrossAxisAlignment::Center)
-            .when(IS_MACOS, |r| {
-                r.child(SizedBox(Some(TRAFFIC_LIGHT_WIDTH), None))
-            })
+            .child(SizedBox(
+                Some(if IS_MACOS { TRAFFIC_LIGHT_WIDTH } else { 12.0 }),
+                None,
+            ))
             .child(title)
             .when(!IS_MACOS, |r| {
                 r.flex(1, SizedBox(None, None)).child(controls)
             });
 
-        window_drag_region(SizedBox(None, Some(BAR_HEIGHT)).child(Stack((
-            colored_box().fill(Self::surface()).expand(),
-            SizedBox(None, Some(BAR_HEIGHT)).child(bar),
-        ))))
+        window_drag_region(
+            SizedBox(None, Some(BAR_HEIGHT)).child(Stack((
+                colored_box().fill(Self::surface()).expand(),
+                SizedBox(Some(f64::INFINITY), Some(BAR_HEIGHT))
+                    .child(Align(Alignment::new(-1.0, 0.0), bar)),
+            ))),
+        )
     }
 
     fn window_button(label: &'static str, command: WindowCommand) -> impl View<AppState> {
