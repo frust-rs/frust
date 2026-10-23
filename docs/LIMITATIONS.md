@@ -8381,10 +8381,9 @@ struct `Copy` and `const`-constructible avoids an API break.
 **Observed**: `SelectionDialogView::rebuild` (`plugins/material/src/dialog.rs`) diffs
 `compose()` against `prev.compose()`, both read under the current theme, so a dialog that is
 already open keeps its labels after `I18n::set_locale`; dialogs opened afterwards are correct.
-Every other widget (snackbar, badge, FAB menu and chips included) resolves its strings from the
-provided theme when its view is created, so `provide_localized_strings` alone relabels it on the
-switch's rebuild; the one layout-time reader left is the selection app bar's count label, which
-follows the render-root theme.
+Every other widget (snackbar, badge, FAB menu, chips and the selection app bar's count label
+included) resolves its strings from the provided theme when its view is created, so
+`provide_localized_strings` alone relabels it on the switch's rebuild.
 
 **Applies to**: a dialog open at the moment the app language changes.
 

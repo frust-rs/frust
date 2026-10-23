@@ -29,10 +29,6 @@ badges, the FAB menu, snackbars and chips alike. No shell theme push is needed.
 - `material_strings_for(&Locale)` returns the table directly. An unsupported
   language gives `MaterialStrings::ENGLISH`.
 
-One label still reads the render-root theme at layout: the selection app bar's
-count (`selection_count_a11y`). An app that shows it localized also pushes
-`localized_theme` to the shell.
-
 Month and weekday names are read from CLDR (through ICU4X), not hand-written.
 
 ## Native review status

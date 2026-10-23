@@ -3,12 +3,15 @@
 //!
 //! The extension is attached by [`baseline`](crate::tokens::baseline) with
 //! [`MaterialStrings::ENGLISH`]; a localization layer replaces it with
-//! [`ThemeExtensions::insert`](frust::ThemeExtensions) (last write wins). A
+//! [`ThemeExtensions::insert`](frust::ThemeExtensions) (last write wins). Every
 //! widget looks the extension up when its view is created (`from_build_context`,
-//! the ambient theme at build time); the selection app bar's count label is the
-//! one layout-time reader, through [`from_layout_ctx`](MaterialStrings::from_layout_ctx).
-//! Every path ends in [`MaterialStrings::resolve`], which falls back to English
-//! when the theme carries no extension, so custom themes keep working unchanged.
+//! the ambient theme at build time), so a provided theme relabels it on the
+//! next rebuild. [`from_layout_ctx`](MaterialStrings::from_layout_ctx) and
+//! [`from_paint_ctx`](MaterialStrings::from_paint_ctx) remain for a custom
+//! widget that must read at layout or paint time; they see the render-root
+//! theme, not a provided context. Every path ends in
+//! [`MaterialStrings::resolve`], which falls back to English when the theme
+//! carries no extension, so custom themes keep working unchanged.
 //!
 //! This crate takes no dependency on any other `frust-*` plugin (the
 //! design-system charter), so the table is plain data: fields are
@@ -363,7 +366,7 @@ impl MaterialStrings {
 
     /// [`selection_count_a11y`](Self::selection_count_a11y) with `n` filled in.
     pub fn selection_count(&self, n: usize) -> String {
-        self.selection_count_a11y.replace("{count}", &n.to_string())
+        fill_count(&self.selection_count_a11y, n)
     }
 
     /// [`toolbar_action_fallback_a11y`](Self::toolbar_action_fallback_a11y)
@@ -376,9 +379,15 @@ impl MaterialStrings {
     /// [`badge_notifications_a11y`](Self::badge_notifications_a11y) with
     /// `count` filled in.
     pub fn badge_notifications(&self, count: impl std::fmt::Display) -> String {
-        self.badge_notifications_a11y
-            .replace("{count}", &count.to_string())
+        fill_count(&self.badge_notifications_a11y, count)
     }
+}
+
+/// `template` with its `{count}` placeholder filled in — the one substitution
+/// behind every counted announcement, so a widget that keeps a template of its
+/// own (read at build time) fills it the same way.
+pub(crate) fn fill_count(template: &str, count: impl std::fmt::Display) -> String {
+    template.replace("{count}", &count.to_string())
 }
 
 #[cfg(test)]

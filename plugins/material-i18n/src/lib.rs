@@ -24,10 +24,6 @@
 //! (`set_app_theme`) and wants that theme to carry the same table;
 //! [`material_strings_for`] returns a locale's table directly.
 //!
-//! One label still reads the render-root theme at layout: the selection app
-//! bar's count (`selection_count_a11y`), which an app that needs it localized
-//! keeps in step by also pushing [`localized_theme`] to the shell.
-//!
 //! # Languages
 //!
 //! English, Thai, Vietnamese, Japanese, Spanish, German and French. Only the
@@ -46,6 +42,7 @@ pub use provide::{localized_theme, material_strings_for, provide_localized_strin
 #[cfg(test)]
 mod tests {
     use std::any::Any;
+    use std::collections::BTreeSet;
 
     use crate::{material_strings_for, provide_localized_strings};
     use frust::authoring::text::TextContext;
@@ -55,8 +52,8 @@ mod tests {
     use frust_i18n::{I18n, Locale, LocaleSet};
     use frust_material::{
         DatePickerState, MaterialDate, MaterialStrings, SnackbarController, TimeOfDay, badge,
-        calendar_date_picker, fab_menu, input_chip, selection_dialog, snackbar, snackbar_host,
-        time_dial,
+        calendar_date_picker, fab_menu, input_chip, selection_app_bar, selection_dialog, snackbar,
+        snackbar_host, time_dial,
     };
     use frust_reactive::Owner;
 
@@ -161,6 +158,16 @@ mod tests {
         any(input_chip("Tag", |_: &mut ()| {}).on_deleted(|_: &mut ()| {}))
     }
 
+    fn selecting_bar() -> AnyView<()> {
+        let selected = BTreeSet::from([0usize, 1]);
+        any(selection_app_bar(
+            frust::text("Inbox"),
+            &selected,
+            3,
+            |_: &mut ()| {},
+        ))
+    }
+
     fn dial() -> AnyView<()> {
         any(time_dial(TimeOfDay::new(9, 30), |_: &mut (), _| {}))
     }
@@ -234,6 +241,15 @@ mod tests {
         let i18n = i18n("en");
         let seen = labels_across(&i18n, &["th", "en"], deletable_chip);
         english_thai_english(&seen, "Remove", "ลบ");
+    }
+
+    #[test]
+    fn selection_app_bar_count_label_switches_to_thai_and_back_with_provide_only() {
+        let owner = Owner::new();
+        owner.set();
+        let i18n = i18n("en");
+        let seen = labels_across(&i18n, &["th", "en"], selecting_bar);
+        english_thai_english(&seen, "2 selected", "เลือกแล้ว 2 รายการ");
     }
 
     #[test]

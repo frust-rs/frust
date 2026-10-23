@@ -311,8 +311,9 @@ impl<State: 'static> BadgeView<State> {
     /// [`MaterialStrings::badge_notifications_a11y`] (with the count filled
     /// in) for a numeric badge or
     /// [`MaterialStrings::badge_notifications_none_a11y`] for a dot, from the
-    /// ambient theme read when the view is created; English reads `Notifications: {count}` and
-    /// `Notifications` (the reference's own default label text).
+    /// ambient theme read when the view is created; English reads
+    /// `Notifications: {count}` and `Notifications` (the reference's own
+    /// default label text).
     pub fn semantic_label(mut self, label: impl Into<String>) -> Self {
         self.semantic_label = Some(label.into());
         self
@@ -544,7 +545,7 @@ impl BadgeStrings {
     /// badge, the bare form for a dot.
     fn label(&self, count: Option<u32>) -> String {
         match count {
-            Some(count) => self.counted.replace("{count}", &count.to_string()),
+            Some(count) => crate::strings::fill_count(&self.counted, count),
             None => self.none.clone(),
         }
     }

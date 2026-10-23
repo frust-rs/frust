@@ -667,6 +667,9 @@ pub struct SelectionAppBarView<State: 'static> {
     /// theme's strings read when the view was created
     /// (`M3ESelectionAppBar`'s `tooltip`/`semanticLabel`).
     clear_label: String,
+    /// The selected-count announcement template (`{count}` unfilled), from
+    /// the ambient theme's strings read when the view was created.
+    count_template: String,
     on_clear: OnClear<State>,
     on_all_selected: Option<OnAllSelected<State>>,
     safe_area: bool,
@@ -696,6 +699,7 @@ where
         show_select_all: true,
         select_all_label: strings.selection_select_all.to_string(),
         clear_label: strings.selection_clear_a11y.to_string(),
+        count_template: strings.selection_count_a11y.to_string(),
         on_clear: Rc::new(on_clear),
         on_all_selected: None,
         safe_area: true,
@@ -730,6 +734,12 @@ impl<State: 'static> SelectionAppBarView<State> {
     pub fn clear_label(mut self, label: impl Into<String>) -> Self {
         self.clear_label = label.into();
         self
+    }
+
+    /// The selected-count accessibility label for the current selection,
+    /// filled from the template read when the view was created.
+    fn count_label(&self) -> String {
+        crate::strings::fill_count(&self.count_template, self.selected.len())
     }
 
     /// Fire when the select-all row is toggled — `true` means the app should
@@ -937,8 +947,8 @@ pub struct SelectionAppBarWidget {
     item_count: usize,
     show_select_all: bool,
     select_all_label: String,
-    /// The selected-count accessibility label, refreshed each contextual
-    /// layout from the theme (semantics has no theme handle).
+    /// The selected-count accessibility label, filled from the template the
+    /// view read at build time (semantics has no theme handle).
     count_label: String,
     /// Whether the contextual branch consumes the top/left/right window
     /// insets — see [`SelectionAppBarView::safe_area`].
@@ -958,7 +968,7 @@ impl<State: 'static> View<State> for SelectionAppBarView<State> {
             item_count: self.item_count,
             show_select_all: self.show_select_all,
             select_all_label: self.select_all_label.clone(),
-            count_label: MaterialStrings::ENGLISH.selection_count(self.selected.len()),
+            count_label: self.count_label(),
             safe_area: self.safe_area,
         }
     }
@@ -1047,6 +1057,11 @@ impl<State: 'static> View<State> for SelectionAppBarView<State> {
             // The idle/contextual branch itself may have flipped.
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
+        let count_label = self.count_label();
+        if element.count_label != count_label {
+            element.count_label = count_label;
+            flags |= ChangeFlags::PAINT;
+        }
         if element.safe_area != self.safe_area {
             element.safe_area = self.safe_area;
             flags |= ChangeFlags::LAYOUT;
@@ -1078,9 +1093,6 @@ impl Widget for SelectionAppBarWidget {
             self.idle.set_origin(Point::ZERO);
             return bc.constrain(Size::new(width, idle_size.height));
         }
-
-        self.count_label =
-            MaterialStrings::from_layout_ctx(ctx).selection_count(self.selected.len());
 
         // Consume the same top/left/right window insets an idle top app bar
         // does, so the swap keeps one height and one set of slot offsets in
@@ -1891,6 +1903,33 @@ mod tests {
         assert_eq!(node.label(), Some("2 selected"));
     }
 
+    #[test]
+    fn the_count_label_follows_the_selection_on_rebuild() {
+        type Root = frust_core::RenderRoot<(), SelectionAppBarView<()>>;
+        let selected_count = Rc::new(std::cell::Cell::new(2usize));
+        let for_logic = selected_count.clone();
+        let mut logic = move |_: &mut ()| {
+            let selected: BTreeSet<usize> = (0..for_logic.get()).collect();
+            selection_app_bar(idle_view(), &selected, 4, |_: &mut ()| {})
+        };
+        let mut root: Root = frust_core::RenderRoot::new();
+        let mut state = ();
+        let mut tcx = TextContext::new();
+        let mut title = |root: &mut Root| {
+            root.layout_with_text(Size::new(300.0, 200.0), &mut tcx as &mut dyn Any);
+            root.semantics()
+                .nodes
+                .iter()
+                .find(|(_, n)| n.role() == Role::TitleBar)
+                .and_then(|(_, n)| n.label().map(str::to_string))
+        };
+        root.rebuild(&mut logic, &mut state);
+        assert_eq!(title(&mut root).as_deref(), Some("2 selected"));
+        selected_count.set(3);
+        root.rebuild(&mut logic, &mut state);
+        assert_eq!(title(&mut root).as_deref(), Some("3 selected"));
+    }
+
     // ---- MaterialStrings: setter > ambient theme > English ------------------
 
     mod strings {
@@ -1984,37 +2023,15 @@ mod tests {
             assert!(labels.iter().any(|l| l == "Wipe"));
         }
 
-        /// The count label is resolved at layout time, so it is driven through
-        /// the root's theme rather than a build-time context.
+        /// The count label is filled from the template read at build time,
+        /// so the provided theme drives it like the other two labels.
         #[test]
-        fn the_count_label_follows_the_root_theme() {
-            let count = |theme: Option<Theme>| -> String {
-                let mut root: frust_core::RenderRoot<(), SelectionAppBarView<()>> =
-                    frust_core::RenderRoot::new();
-                if let Some(theme) = theme {
-                    root.set_theme(Box::new(theme));
-                }
-                let selected = BTreeSet::from([0usize, 1]);
-                let mut view = Some(selection_app_bar(
-                    idle_view(),
-                    &selected,
-                    3,
-                    |_: &mut ()| {},
-                ));
-                let mut logic = move |_: &mut ()| view.take().expect("one rebuild");
-                let mut state = ();
-                root.rebuild(&mut logic, &mut state);
-                let mut tcx = TextContext::new();
-                root.layout_with_text(Size::new(300.0, 200.0), &mut tcx as &mut dyn Any);
-                root.semantics()
-                    .nodes
-                    .iter()
-                    .find(|(_, n)| n.role() == Role::TitleBar)
-                    .and_then(|(_, n)| n.label().map(str::to_string))
-                    .expect("a TitleBar node is contributed in selection mode")
-            };
-            assert_eq!(count(None), "2 selected");
-            assert_eq!(count(Some(thai_theme())), "เลือกแล้ว 2 รายการ");
+        fn the_count_label_follows_the_provided_theme() {
+            let (_, english) = probe(None, false);
+            assert!(english.iter().any(|l| l == "2 selected"), "{english:?}");
+            let (_, thai) = probe(Some(thai_theme()), false);
+            assert!(thai.iter().any(|l| l == "เลือกแล้ว 2 รายการ"), "{thai:?}");
+            assert!(!thai.iter().any(|l| l == "2 selected"), "{thai:?}");
         }
     }
 }
