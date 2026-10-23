@@ -23,6 +23,12 @@
 //! in, bridged with [`From`] both ways (owned to static *leaks* the strings —
 //! intended once per locale table). [`TimePickerStrings`] holds `String`s and
 //! so cannot be a `const`; [`TimePickerStringsCow`] is its `Cow` mirror.
+//!
+//! The pickers read these tables at build time when no per-widget `strings()`
+//! override is set. The date picker copies the theme's `Copy` table (a few
+//! pointers) and the time picker converts the `Cow` mirror once per build, so
+//! no picker leaks: the only leak is the one-off owned-to-static conversion of
+//! a locale table, done once when the extension is built.
 
 use std::borrow::Cow;
 

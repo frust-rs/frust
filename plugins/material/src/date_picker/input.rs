@@ -47,6 +47,7 @@ use frust::authoring::{BuildCtx, ChangeFlags, View};
 use super::calendar::SelectableDay;
 use super::date::MaterialDate;
 use super::{DatePickerState, DatePickerStrings, OnDatePickerChange};
+use crate::strings::MaterialStrings;
 use crate::text_field::{TextFieldView, TextFieldWidget, text_field};
 
 /// Why a typed date was refused — the two errors the reference's `_validate`
@@ -93,7 +94,7 @@ pub struct DateInputField<State: 'static> {
     state: DatePickerState,
     first_date: MaterialDate,
     last_date: MaterialDate,
-    strings: DatePickerStrings,
+    strings: Option<DatePickerStrings>,
     selectable: Option<SelectableDay>,
     validate: bool,
     on_change: OnDatePickerChange<State>,
@@ -119,7 +120,7 @@ where
         state,
         first_date,
         last_date,
-        strings: DatePickerStrings::ENGLISH,
+        strings: None,
         selectable: None,
         validate: true,
         on_change: Rc::new(on_change),
@@ -127,9 +128,10 @@ where
 }
 
 impl<State: 'static> DateInputField<State> {
-    /// Replace the localized strings (default [`DatePickerStrings::ENGLISH`]).
+    /// Replace the localized strings. Without this the ambient theme's
+    /// [`MaterialStrings`] date-picker table applies (English by default).
     pub fn strings(mut self, strings: DatePickerStrings) -> Self {
-        self.strings = strings;
+        self.strings = Some(strings);
         self
     }
 
@@ -166,8 +168,8 @@ impl<State: 'static> DateInputField<State> {
         }
         match self.parse(&self.state.input_text) {
             Ok(_) => None,
-            Err(DateInputError::Format) => Some(self.strings.error_format),
-            Err(DateInputError::OutOfRange) => Some(self.strings.error_invalid),
+            Err(DateInputError::Format) => Some(self.active_strings().error_format),
+            Err(DateInputError::OutOfRange) => Some(self.active_strings().error_invalid),
         }
     }
 
@@ -194,16 +196,27 @@ impl<State: 'static> DateInputField<State> {
             last: self.last_date,
             selectable: self.selectable.clone(),
         };
+        let strings = self.active_strings();
         let on_change = self.on_change.clone();
         let field = text_field(
             self.state.input_text.clone(),
             move |app: &mut State, text: String| on_change(app, parsed.next_state(&text)),
         )
-        .label(self.strings.field_label);
+        .label(strings.field_label);
         match self.error() {
             Some(message) => field.error_text(message),
-            None => field.supporting_text(self.strings.field_hint),
+            None => field.supporting_text(strings.field_hint),
         }
+    }
+}
+
+impl<State: 'static> DateInputField<State> {
+    /// The strings in force: the [`strings`](Self::strings) override, else the
+    /// ambient theme's [`MaterialStrings`] date-picker table (English without
+    /// a theme).
+    fn active_strings(&self) -> DatePickerStrings {
+        self.strings
+            .unwrap_or_else(|| MaterialStrings::from_build_context().date_picker)
     }
 }
 

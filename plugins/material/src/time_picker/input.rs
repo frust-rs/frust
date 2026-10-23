@@ -51,6 +51,7 @@ use kurbo::{Point, Size};
 
 use super::{TimeEntry, TimePickerStrings};
 use crate::button::{ButtonVariant, button};
+use crate::strings::MaterialStrings;
 use crate::text_field::text_field;
 
 /// Gap between the hour and minute fields, and between the field row and the
@@ -66,7 +67,7 @@ pub struct TimeInputView<State: 'static> {
     entry: TimeEntry,
     use_24_hour: bool,
     autovalidate: bool,
-    strings: Rc<TimePickerStrings>,
+    strings: Option<Rc<TimePickerStrings>>,
     on_change: TypedArgCallback<State, TimeEntry>,
 }
 
@@ -80,7 +81,7 @@ pub fn time_input<State: 'static, F: Fn(&mut State, TimeEntry) + 'static>(
         entry,
         use_24_hour: false,
         autovalidate: false,
-        strings: Rc::new(TimePickerStrings::default()),
+        strings: None,
         on_change: Rc::new(on_change),
     }
 }
@@ -101,22 +102,37 @@ impl<State: 'static> TimeInputView<State> {
     }
 
     /// Override the field labels, the AM/PM labels and the error text.
+    /// Without this the ambient theme's [`MaterialStrings`] time-picker table
+    /// applies (English by default).
     pub fn strings(mut self, strings: TimePickerStrings) -> Self {
-        self.strings = Rc::new(strings);
+        self.strings = Some(Rc::new(strings));
         self
     }
 
     /// Share an already-`Rc`'d string bundle (used by
     /// [`crate::time_picker::time_picker`]).
     pub(super) fn shared_strings(mut self, strings: Rc<TimePickerStrings>) -> Self {
-        self.strings = strings;
+        self.strings = Some(strings);
         self
+    }
+
+    /// The strings in force: the [`strings`](Self::strings) override, else the
+    /// ambient theme's [`MaterialStrings`] time-picker table (English without
+    /// a theme).
+    fn active_strings(&self) -> Rc<TimePickerStrings> {
+        self.strings.clone().unwrap_or_else(|| {
+            Rc::new(
+                MaterialStrings::from_build_context()
+                    .time_picker
+                    .to_picker_strings(),
+            )
+        })
     }
 
     /// The error text for a field, or `None` while autovalidation is off or
     /// the field is well-formed.
-    fn error_for(&self, valid: bool) -> Option<&str> {
-        (self.autovalidate && !valid).then_some(self.strings.invalid_time.as_str())
+    fn error_for(&self, valid: bool) -> Option<String> {
+        (self.autovalidate && !valid).then(|| self.active_strings().invalid_time.clone())
     }
 
     fn hour_field(&self) -> impl View<State> + use<State> {
@@ -128,7 +144,7 @@ impl<State: 'static> TimeInputView<State> {
                 on_change(state, entry.clone().with_hour_text(text));
             },
         )
-        .label(self.strings.hour_label.clone());
+        .label(self.active_strings().hour_label.clone());
         if let Some(error) = self.error_for(self.entry.hour_is_valid(self.use_24_hour)) {
             field = field.error_text(error);
         }
@@ -144,7 +160,7 @@ impl<State: 'static> TimeInputView<State> {
                 on_change(state, entry.clone().with_minute_text(text));
             },
         )
-        .label(self.strings.minute_label.clone());
+        .label(self.active_strings().minute_label.clone());
         if let Some(error) = self.error_for(self.entry.minute_is_valid()) {
             field = field.error_text(error);
         }
@@ -157,10 +173,11 @@ impl<State: 'static> TimeInputView<State> {
     fn period_button(&self, pm: bool) -> AnyView<State> {
         let on_change = self.on_change.clone();
         let entry = self.entry.clone();
+        let strings = self.active_strings();
         let label = if pm {
-            self.strings.pm.clone()
+            strings.pm.clone()
         } else {
-            self.strings.am.clone()
+            strings.am.clone()
         };
         let selected = self.entry.pm == pm;
         any(button(label, move |state: &mut State| {
@@ -504,12 +521,12 @@ mod tests {
             pm: false,
         };
         let quiet: TimeInputView<App> = time_input(entry.clone(), |_: &mut App, _| {});
-        assert_eq!(quiet.error_for(entry.hour_is_valid(false)), None);
+        assert_eq!(quiet.error_for(entry.hour_is_valid(false)), None::<String>);
         let loud: TimeInputView<App> =
             time_input(entry.clone(), |_: &mut App, _| {}).autovalidate(true);
         assert_eq!(
             loud.error_for(entry.hour_is_valid(false)),
-            Some(TimePickerStrings::default().invalid_time.as_str())
+            Some(TimePickerStrings::default().invalid_time)
         );
         assert_eq!(
             loud.error_for(true),

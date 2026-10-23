@@ -129,6 +129,7 @@ use crate::overlay::{
     ModalDismiss, OverlayModalConfig, OverlayModalContent, OverlayModalView, OverlayModalWidget,
     overlay_modal, show_overlay_modal,
 };
+use crate::strings::MaterialStrings;
 
 /// Panel padding on all four edges (`M3EDialogTheme.padding`, the padding the
 /// reference's header/actions/content all inset by).
@@ -927,7 +928,7 @@ pub struct TimePickerView<State: 'static> {
     orientation: TimePickerOrientation,
     use_24_hour: bool,
     autovalidate: bool,
-    strings: Rc<TimePickerStrings>,
+    strings: Option<Rc<TimePickerStrings>>,
     on_change: Option<OnValue<State, TimeOfDay>>,
     on_entry_change: Option<OnValue<State, TimeEntry>>,
     on_entry_mode_change: Option<OnValue<State, TimePickerEntryMode>>,
@@ -950,7 +951,7 @@ pub fn time_picker<State: 'static>(value: TimeOfDay) -> TimePickerView<State> {
         orientation: TimePickerOrientation::default(),
         use_24_hour: false,
         autovalidate: false,
-        strings: Rc::new(TimePickerStrings::default()),
+        strings: None,
         on_change: None,
         on_entry_change: None,
         on_entry_mode_change: None,
@@ -1011,8 +1012,10 @@ impl<State: 'static> TimePickerView<State> {
     }
 
     /// Replace every user-visible string (see the [module docs](self)).
+    /// Without this the ambient theme's [`MaterialStrings`] time-picker table
+    /// applies (English by default).
     pub fn strings(mut self, strings: TimePickerStrings) -> Self {
-        self.strings = Rc::new(strings);
+        self.strings = Some(Rc::new(strings));
         self
     }
 
@@ -1101,7 +1104,20 @@ impl<State: 'static> TimePickerView<State> {
         }
     }
 
-    fn body_view(&self) -> AnyView<State> {
+    /// The strings in force: the [`strings`](Self::strings) override, else the
+    /// ambient theme's [`MaterialStrings`] time-picker table (English without
+    /// a theme).
+    fn active_strings(&self) -> Rc<TimePickerStrings> {
+        self.strings.clone().unwrap_or_else(|| {
+            Rc::new(
+                MaterialStrings::from_build_context()
+                    .time_picker
+                    .to_picker_strings(),
+            )
+        })
+    }
+
+    fn body_view(&self, strings: &Rc<TimePickerStrings>) -> AnyView<State> {
         if self.entry_mode.is_input() {
             let on_change = self.on_entry_change.clone();
             any(
@@ -1112,7 +1128,7 @@ impl<State: 'static> TimePickerView<State> {
                 })
                 .use_24_hour(self.use_24_hour)
                 .autovalidate(self.autovalidate)
-                .shared_strings(self.strings.clone()),
+                .shared_strings(strings.clone()),
             )
         } else {
             let on_change = self.on_change.clone();
@@ -1122,18 +1138,19 @@ impl<State: 'static> TimePickerView<State> {
                 }
             })
             .use_24_hour(self.use_24_hour)
-            .shared_strings(self.strings.clone()))
+            .shared_strings(strings.clone()))
         }
     }
 
     /// Compose the host-facing modal fresh from the current fields (the same
     /// per-pass recompose [`crate::dialog`] documents).
     fn compose(&self) -> OverlayModalView<State> {
+        let strings = self.active_strings();
         let input_mode = self.entry_mode.is_input();
         let help = if input_mode {
-            self.strings.input_help.clone()
+            strings.input_help.clone()
         } else {
-            self.strings.dial_help.clone()
+            strings.dial_help.clone()
         };
         let confirmed = self.confirmed();
         let on_confirm = self.on_confirm.clone();
@@ -1143,9 +1160,9 @@ impl<State: 'static> TimePickerView<State> {
             PanelModeButton {
                 to_input: !input_mode,
                 tooltip: if input_mode {
-                    self.strings.dial_mode_tooltip.clone()
+                    strings.dial_mode_tooltip.clone()
                 } else {
-                    self.strings.input_mode_tooltip.clone()
+                    strings.input_mode_tooltip.clone()
                 },
                 on_press: Rc::new(move |state: &mut State| {
                     if let Some(on_mode_change) = &on_mode_change {
@@ -1156,15 +1173,15 @@ impl<State: 'static> TimePickerView<State> {
         });
         let panel = TimePickerPanelView {
             help,
-            title: self.value.format(self.use_24_hour, &self.strings),
+            title: self.value.format(self.use_24_hour, &strings),
             // `isShort`: the landscape input layout only.
             short_title: self.orientation.is_landscape() && input_mode,
             orientation: self.orientation,
             input_mode,
             mode_button,
-            body: Rc::new(self.body_view()),
-            cancel_label: self.strings.cancel.clone(),
-            confirm_label: self.strings.confirm.clone(),
+            body: Rc::new(self.body_view(&strings)),
+            cancel_label: strings.cancel.clone(),
+            confirm_label: strings.confirm.clone(),
             on_cancel: self.on_cancel.clone(),
             on_confirm: Some(Rc::new(move |state: &mut State| {
                 if let Some(on_confirm) = &on_confirm {
@@ -1178,9 +1195,9 @@ impl<State: 'static> TimePickerView<State> {
         )
         .dismissable(self.dismissable)
         .label(if input_mode {
-            self.strings.input_help.clone()
+            strings.input_help.clone()
         } else {
-            self.strings.dial_help.clone()
+            strings.dial_help.clone()
         });
         if let Some(on_dismiss) = &self.on_dismiss {
             let on_dismiss = on_dismiss.clone();
