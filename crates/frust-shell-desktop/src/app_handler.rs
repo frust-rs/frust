@@ -87,6 +87,7 @@ use crate::paced_wake::{
 };
 use crate::platform_view::DesktopPlatformViews;
 use crate::render::FrameExecutor;
+use crate::window_control;
 use crate::window_state::{
     InitialGeometry, MonitorRect, WindowSnapshot, WindowState, WindowStateSaver, clamp_restored,
     initial_geometry, merge_wake, persistence_enabled,
@@ -1077,6 +1078,8 @@ where
         present_retry_mark: 0,
         anim_pacing: !frust_shell_common::anim_pacing_kill_switch_engaged(),
         window_metrics: WindowMetricsPublisher::new(),
+        published_window_state: None,
+        close_pending: false,
         // Spawned lazily on the first clipboard action — see the `clipboard`
         // field's doc.
         clipboard: None,
@@ -2184,6 +2187,13 @@ struct ShellHandler<State: 'static, Build, V: View<State>, E> {
     /// a decorated desktop window. Mobile's own standalone `WindowInsets`
     /// context is unaffected.
     window_metrics: WindowMetricsPublisher,
+    /// The last [`WindowState`](frust_core::WindowState) provided to app code, so
+    /// [`ShellHandler::publish_window_state`] re-provides only on change. Re-polled at the
+    /// seed, on `Resized` and `Focused`, and after app window commands; never per frame.
+    published_window_state: Option<frust_core::WindowState>,
+    /// A `RequestClose` drained inside [`ShellHandler::dispatch`], which has no event loop
+    /// to close with; `about_to_wait` runs the close path for it the same turn.
+    close_pending: bool,
     /// The clipboard worker thread's handle — spawned lazily, on the first
     /// copy/cut/paste, and then held for the rest of the process's lifetime.
     /// `None` until that first use, and again for the rest of the run once the
@@ -2314,6 +2324,9 @@ where
         self.sync_ime(window);
         self.sync_cursor(window);
         self.sync_clipboard();
+        // Inside the input dispatch, not only per frame: macOS starts a move drag from
+        // the event being handled, and a drain outside one is ignored.
+        self.close_pending |= self.drain_window_commands();
         if outcome.needs_redraw {
             window.request_redraw();
         }
@@ -2606,6 +2619,65 @@ where
             return; // unchanged — no re-provide, no app-wide rebuild
         };
         self.runtime.with_owner(move || provide_context(metrics));
+    }
+
+    /// Re-provide [`WindowState`](frust_core::WindowState) under the root owner, but only
+    /// when it differs from the last one provided (the [`push_window_metrics`] guard).
+    /// Returns whether it re-provided; like that guard it requests no redraw itself.
+    ///
+    /// [`push_window_metrics`]: ShellHandler::push_window_metrics
+    fn publish_window_state(&mut self) -> bool {
+        let Some(window) = self.window.as_deref() else {
+            return false;
+        };
+        let state = window_control::window_state_snapshot(window);
+        if self.published_window_state == Some(state) {
+            return false; // unchanged — no re-provide, no app-wide rebuild
+        }
+        self.published_window_state = Some(state);
+        self.runtime.with_owner(move || provide_context(state));
+        true
+    }
+
+    /// Execute the app's queued window commands, then republish the window state they may
+    /// have moved. Returns whether one was `RequestClose`; the caller runs the close path.
+    fn drain_window_commands(&mut self) -> bool {
+        let Some(window) = self.window.clone() else {
+            return false;
+        };
+        let Some(close) = window_control::drain(&*window) else {
+            return false;
+        };
+        // A command that moved the state may raise no resize to carry it to a frame.
+        if self.publish_window_state() {
+            window.request_redraw();
+        }
+        close
+    }
+
+    /// The OS close button's path, shared by an app `RequestClose`. The extension decides
+    /// whether a close ends the app: the default (and the zero-config preview) exits, while a
+    /// macOS shell may hide its retained window and keep the loop alive. Pipeline-cache
+    /// persistence hangs off the frame executor's drop, not off this.
+    fn handle_close_requested(&mut self, event_loop: &ActiveEventLoop) {
+        // The final window-state save runs before the extension decides,
+        // while the window still reports its real geometry.
+        self.save_window_state(None);
+        match self.extensions.on_close_requested() {
+            CloseAction::Exit => {
+                // The window is about to be destroyed: let the host tear
+                // its hosted views out of a hierarchy that still exists,
+                // rather than leaving them to be dropped with it.
+                self.platform_views.suspend(&mut self.extensions);
+                event_loop.exit();
+            }
+            // Not a teardown — a macOS shell is only hiding its retained
+            // window, and the hosted views hide with it. Removing them
+            // here would strand the host with nothing to restore on
+            // reopen, since no surface is re-created on that path to
+            // replay them.
+            CloseAction::KeepRunning => {}
+        }
     }
 
     /// A resize or move: record the un-maximized geometry and restart the
@@ -3042,6 +3114,7 @@ where
         // nothing. Live changes arrive via `WindowEvent::Resized`.
         let physical = window.inner_size();
         self.push_window_metrics((physical.width, physical.height), window.scale_factor());
+        self.publish_window_state();
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
@@ -3080,6 +3153,11 @@ where
         // when the queue is empty; a task that writes a signal here re-dirties a
         // scope and fires the waker, which re-arms the loop rather than parking.
         self.runtime.pump_local();
+
+        // An app `RequestClose` drained inside a dispatch this turn (see `close_pending`).
+        if std::mem::take(&mut self.close_pending) {
+            self.handle_close_requested(event_loop);
+        }
 
         // Animation pacing (frame-gate pacing): a paced-only decorative loop
         // scheduled its follow-up redraw for a future instant rather than the
@@ -3154,33 +3232,7 @@ where
         }
 
         match event {
-            // The extension decides whether a close request ends the app: the
-            // default (and the whole zero-config preview) is the unconditional
-            // exit this arm always was, while a macOS shell may hide its
-            // retained window instead and keep the loop alive. The
-            // pipeline-cache persistence path is unaffected either way — it
-            // hangs off the frame executor's drop once `run_app` returns, not
-            // off this event.
-            WindowEvent::CloseRequested => {
-                // The final window-state save runs before the extension decides,
-                // while the window still reports its real geometry.
-                self.save_window_state(None);
-                match self.extensions.on_close_requested() {
-                    CloseAction::Exit => {
-                        // The window is about to be destroyed: let the host tear
-                        // its hosted views out of a hierarchy that still exists,
-                        // rather than leaving them to be dropped with it.
-                        self.platform_views.suspend(&mut self.extensions);
-                        event_loop.exit();
-                    }
-                    // Not a teardown — a macOS shell is only hiding its retained
-                    // window, and the hosted views hide with it. Removing them
-                    // here would strand the host with nothing to restore on
-                    // reopen, since no surface is re-created on that path to
-                    // replay them.
-                    CloseAction::KeepRunning => {}
-                }
-            }
+            WindowEvent::CloseRequested => self.handle_close_requested(event_loop),
 
             WindowEvent::Resized(size) => {
                 // A resize with no live surface is dropped by the machine
@@ -3198,6 +3250,8 @@ where
                 // of its own. Self-guarded, so a resize that reports unchanged
                 // dimensions publishes nothing.
                 self.push_window_metrics((size.width, size.height), window.scale_factor());
+                // Maximize, restore and fullscreen all arrive as a resize.
+                self.publish_window_state();
                 self.note_window_geometry_change();
                 // An overlay keeps its logical frame when the window moves to a
                 // display of another scale, so no command would republish its
@@ -3486,6 +3540,15 @@ where
                     self.apply_theme(&window);
                 }
 
+                // Commands pushed outside an input dispatch (a timer, a task) run here,
+                // top of frame; a move drag from here is ignored on macOS (see `dispatch`).
+                if self.drain_window_commands() {
+                    self.handle_close_requested(event_loop);
+                    if event_loop.exiting() {
+                        return; // no frame for a window being torn down
+                    }
+                }
+
                 // Poll the app-facing pending-font registry once per
                 // frame, beside the theme poll above. `drain_into` applies any
                 // late-registered fonts to `text_ctx` (clearing the shape cache
@@ -3745,6 +3808,13 @@ where
                 // for a host that needs to convert.
                 self.platform_views
                     .drain(&mut self.extensions, &window, scale);
+            }
+
+            // The adapter saw it above; app code needs the new `focused` flag, and a focus
+            // change produces no frame of its own.
+            WindowEvent::Focused(_) => {
+                self.publish_window_state();
+                window.request_redraw();
             }
 
             _ => {}
