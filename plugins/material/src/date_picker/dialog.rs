@@ -104,6 +104,7 @@ use crate::overlay::{
     ModalDismiss, OverlayModalConfig, OverlayModalContent, OverlayModalView, OverlayModalWidget,
     overlay_modal, show_overlay_modal,
 };
+use crate::strings::MaterialStrings;
 
 /// The panel's inset on all four edges, in logical px (`M3EDialogTheme.padding`,
 /// which the reference's header/actions/input body all read).
@@ -187,7 +188,7 @@ pub struct DatePickerDialog<State: 'static> {
     first_date: MaterialDate,
     last_date: MaterialDate,
     today: Option<MaterialDate>,
-    strings: DatePickerStrings,
+    strings: Option<DatePickerStrings>,
     selectable: Option<SelectableDay>,
     on_change: OnDatePickerChange<State>,
     on_confirm: Option<OnConfirm<State>>,
@@ -237,13 +238,23 @@ where
         first_date,
         last_date,
         today: None,
-        strings: DatePickerStrings::ENGLISH,
+        strings: None,
         selectable: None,
         on_change: Rc::new(on_change),
         on_confirm: None,
         dismissable: true,
         on_dismiss: None,
         dismiss_handle: None,
+    }
+}
+
+impl<State: 'static> DatePickerDialog<State> {
+    /// The strings in force: the [`strings`](Self::strings) override, else the
+    /// ambient theme's [`MaterialStrings`] date-picker table (English without
+    /// a theme).
+    fn active_strings(&self) -> DatePickerStrings {
+        self.strings
+            .unwrap_or_else(|| MaterialStrings::from_build_context().date_picker)
     }
 }
 
@@ -256,9 +267,10 @@ impl<State: 'static> DatePickerDialog<State> {
         self
     }
 
-    /// Replace the localized strings (default [`DatePickerStrings::ENGLISH`]).
+    /// Replace the localized strings. Without this the ambient theme's
+    /// [`MaterialStrings`] date-picker table applies (English by default).
     pub fn strings(mut self, strings: DatePickerStrings) -> Self {
-        self.strings = strings;
+        self.strings = Some(strings);
         self
     }
 
@@ -355,8 +367,8 @@ impl<State: 'static> DatePickerDialog<State> {
     /// so the header does not change height on the first pick.
     fn headline(&self) -> String {
         match self.state.selected {
-            Some(date) => self.strings.medium_date(date),
-            None => self.strings.no_date_selected.to_string(),
+            Some(date) => self.active_strings().medium_date(date),
+            None => self.active_strings().no_date_selected.to_string(),
         }
     }
 
@@ -388,7 +400,7 @@ impl<State: 'static> DatePickerDialog<State> {
                 self.last_date,
                 move |app: &mut State, next| on_change(app, next),
             )
-            .strings(self.strings);
+            .strings(self.active_strings());
             if let Some(predicate) = &self.selectable {
                 let predicate = predicate.clone();
                 field = field.selectable(move |date| predicate(date));
@@ -401,7 +413,7 @@ impl<State: 'static> DatePickerDialog<State> {
                 self.last_date,
                 move |app: &mut State, next| on_change(app, next),
             )
-            .strings(self.strings);
+            .strings(self.active_strings());
             if let Some(today) = self.today {
                 calendar = calendar.today(today);
             }
@@ -419,7 +431,7 @@ impl<State: 'static> DatePickerDialog<State> {
         let on_dismiss = self.on_dismiss.clone();
         let dismiss = self.dismiss_handle.clone();
         any::<State, _>(text_button(
-            self.strings.cancel_label,
+            self.active_strings().cancel_label,
             move |app: &mut State| cancel_action(dismiss.as_ref(), on_dismiss.as_ref(), app),
         ))
     }
@@ -431,7 +443,7 @@ impl<State: 'static> DatePickerDialog<State> {
         let confirmable = self.confirmable();
         let can_confirm = self.can_confirm();
         any::<State, _>(button(
-            self.strings.confirm_label,
+            self.active_strings().confirm_label,
             move |app: &mut State| {
                 confirm_action(on_confirm.as_ref(), can_confirm, confirmable, app)
             },
@@ -459,8 +471,9 @@ impl<State: 'static> DatePickerDialog<State> {
     /// Compose the host-facing modal view fresh from the current fields — the
     /// same recompose-per-pass shape [`crate::dialog`] takes.
     fn compose(&self) -> OverlayModalView<State> {
+        let strings = self.active_strings();
         let panel = DatePickerPanel {
-            help: self.strings.help_text.to_string(),
+            help: strings.help_text.to_string(),
             headline: self.headline(),
             toggle: self.toggle_view(),
             body: self.body_view(),
@@ -474,7 +487,7 @@ impl<State: 'static> DatePickerDialog<State> {
         };
         let mut view = overlay_modal(panel, OverlayModalConfig::centered(self.panel_width()))
             .dismissable(self.dismissable)
-            .label(self.strings.help_text);
+            .label(strings.help_text);
         if let Some(on_dismiss) = &self.on_dismiss {
             let on_dismiss = on_dismiss.clone();
             view = view.on_dismiss(move |state: &mut State| on_dismiss(state));

@@ -82,6 +82,7 @@ use kurbo::{Point, Rect, Size};
 use super::{TimeOfDay, TimePickerMode, TimePickerStrings};
 use crate::interaction::{HapticSignal, MaterialHaptics};
 use crate::press::presses;
+use crate::strings::MaterialStrings;
 
 /// Dial diameter (`M3ETimePickerTheme.dialSize`).
 pub const DIAL_SIZE: f64 = 256.0;
@@ -455,7 +456,7 @@ impl Run {
 pub struct TimeDialView<State: 'static> {
     value: TimeOfDay,
     use_24_hour: bool,
-    strings: Rc<TimePickerStrings>,
+    strings: Option<Rc<TimePickerStrings>>,
     on_change: TypedArgCallback<State, TimeOfDay>,
 }
 
@@ -468,7 +469,7 @@ pub fn time_dial<State: 'static, F: Fn(&mut State, TimeOfDay) + 'static>(
     TimeDialView {
         value,
         use_24_hour: false,
-        strings: Rc::new(TimePickerStrings::default()),
+        strings: None,
         on_change: Rc::new(on_change),
     }
 }
@@ -482,8 +483,10 @@ impl<State: 'static> TimeDialView<State> {
     }
 
     /// Override the AM/PM labels and the ring's accessibility announcements.
+    /// Without this the ambient theme's [`MaterialStrings`] time-picker table
+    /// applies (English by default).
     pub fn strings(mut self, strings: TimePickerStrings) -> Self {
-        self.strings = Rc::new(strings);
+        self.strings = Some(Rc::new(strings));
         self
     }
 
@@ -491,8 +494,21 @@ impl<State: 'static> TimeDialView<State> {
     /// [`crate::time_picker::time_picker`], which owns one for the whole
     /// dialog).
     pub(super) fn shared_strings(mut self, strings: Rc<TimePickerStrings>) -> Self {
-        self.strings = strings;
+        self.strings = Some(strings);
         self
+    }
+
+    /// The strings in force: the [`strings`](Self::strings) override, else the
+    /// ambient theme's [`MaterialStrings`] time-picker table (English without
+    /// a theme).
+    fn active_strings(&self) -> Rc<TimePickerStrings> {
+        self.strings.clone().unwrap_or_else(|| {
+            Rc::new(
+                MaterialStrings::from_build_context()
+                    .time_picker
+                    .to_picker_strings(),
+            )
+        })
     }
 }
 
@@ -671,7 +687,7 @@ impl<State: 'static> View<State> for TimeDialView<State> {
         let mut widget = TimeDialWidget {
             value: self.value,
             use_24_hour: self.use_24_hour,
-            strings: self.strings.clone(),
+            strings: self.active_strings(),
             mode: TimePickerMode::Hour,
             hour_run: Run::new(HEADER_FONT_SIZE, FontWeight::REGULAR),
             colon_run: Run::new(HEADER_FONT_SIZE, FontWeight::REGULAR),
@@ -711,8 +727,9 @@ impl<State: 'static> View<State> for TimeDialView<State> {
             element.use_24_hour = self.use_24_hour;
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
-        if prev.strings != self.strings {
-            element.strings = self.strings.clone();
+        let strings = self.active_strings();
+        if element.strings != strings {
+            element.strings = strings;
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
         element.sync_runs();
@@ -1568,5 +1585,89 @@ mod tests {
                 .iter()
                 .any(|(_, n)| n.role() == Role::Slider && n.label() == Some("Select hours"))
         );
+    }
+
+    // ---- MaterialStrings: setter > ambient theme > English ------------------
+
+    mod strings {
+        use super::*;
+        use crate::strings::MaterialStrings;
+        use frust::authoring::{AnyView, any};
+        use frust_core::RenderRoot;
+
+        fn thai_theme() -> frust::Theme {
+            let mut theme = crate::baseline();
+            let mut thai = MaterialStrings::ENGLISH;
+            thai.time_picker.am = "ก่อนเที่ยง".into();
+            thai.time_picker.pm = "หลังเที่ยง".into();
+            theme.extensions.insert(thai);
+            theme
+        }
+
+        /// Provides `theme` as the ambient `Theme` context (when set), then
+        /// builds the dial so build-time `use_context` resolves.
+        struct Host {
+            theme: Option<frust::Theme>,
+            make: fn() -> AnyView<()>,
+        }
+        impl frust::Component for Host {
+            type State = ();
+            fn init(&self) {}
+            fn build(&self, _state: &mut ()) -> impl View<()> {
+                if let Some(theme) = &self.theme {
+                    frust::provide_context(theme.clone());
+                }
+                (self.make)()
+            }
+        }
+
+        fn labels(theme: Option<frust::Theme>, make: fn() -> AnyView<()>) -> Vec<String> {
+            let mut root: RenderRoot<(), frust::ComponentView<Host>> = RenderRoot::new();
+            let mut logic = move |_: &mut ()| {
+                frust::component(Host {
+                    theme: theme.clone(),
+                    make,
+                })
+            };
+            let mut state = ();
+            root.rebuild(&mut logic, &mut state);
+            let mut tcx = TextContext::new();
+            root.layout_with_text(Size::new(400.0, 600.0), &mut tcx as &mut dyn Any);
+            root.semantics()
+                .nodes
+                .iter()
+                .filter(|(_, n)| n.role() == Role::RadioButton)
+                .filter_map(|(_, n)| n.label().map(str::to_string))
+                .collect()
+        }
+
+        fn dial() -> TimeDialView<()> {
+            time_dial(TimeOfDay::new(9, 30), |_: &mut (), _| {})
+        }
+        fn plain() -> AnyView<()> {
+            any(dial())
+        }
+        fn with_override() -> AnyView<()> {
+            any(dial().strings(TimePickerStrings {
+                am: "a.m.".into(),
+                pm: "p.m.".into(),
+                ..TimePickerStrings::default()
+            }))
+        }
+
+        #[test]
+        fn defaults_to_english_am_pm() {
+            assert_eq!(labels(None, plain), ["AM", "PM"]);
+        }
+
+        #[test]
+        fn thai_theme_changes_the_am_pm_labels() {
+            assert_eq!(labels(Some(thai_theme()), plain), ["ก่อนเที่ยง", "หลังเที่ยง"]);
+        }
+
+        #[test]
+        fn strings_override_beats_the_theme_table() {
+            assert_eq!(labels(Some(thai_theme()), with_override), ["a.m.", "p.m."]);
+        }
     }
 }
