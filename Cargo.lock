@@ -2438,6 +2438,7 @@ dependencies = [
  "frust-i18n-macros",
  "frust-plugin",
  "frust-reactive",
+ "frust-shared-preferences",
  "frust-ui",
  "icu_datetime",
  "icu_decimal",
