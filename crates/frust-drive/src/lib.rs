@@ -57,6 +57,10 @@ pub(crate) mod interrupt;
 pub mod ios_build;
 pub mod ios_id;
 pub mod ios_run;
+/// The cargo-resolve preflight a Debug/Profile build runs first: repairs the
+/// stale local index entry the debug-only frust crates hit after a release
+/// with one `cargo add --dry-run` refresh, then retries the resolve once.
+pub mod lock_refresh;
 pub mod manifest;
 /// Streamable system-metrics collectors (per-process CPU/RSS/thermal,
 /// coarse network counters), sampled tool-side via `/proc`+`/sys` on desktop
