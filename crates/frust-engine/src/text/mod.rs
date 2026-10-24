@@ -116,6 +116,15 @@
 //! a face carrying `COLR` draws every glyph through [`color`]'s layer
 //! recombination instead.
 //!
+//! # Which glyphs never reach `glifo` at all
+//!
+//! A face that keeps its outlines only in an `hvgl` table — Apple's PingFang,
+//! the iOS Han fallback — gives `skrifa` nothing to read, and `glifo` would
+//! skip every one of its glyphs without counting them. Such a run is routed to
+//! outlines like a colour face and drawn by [`hvgl`] instead, from CoreText's
+//! own outlines on Apple targets; a glyph it cannot supply is counted as
+//! skipped.
+//!
 //! # The font gate
 //!
 //! `glifo` takes the font blob as read: it parses the face and reads its
@@ -134,6 +143,7 @@
 pub(crate) mod atlas_policy;
 pub(crate) mod backend;
 pub(crate) mod color;
+pub(crate) mod hvgl;
 
 use glifo::{AtlasCacher, FontEmbolden, Glyph, GlyphPrepCache, GlyphRunBuilder, ImageCache};
 use kurbo::{Affine, Point, Vec2};
@@ -176,6 +186,8 @@ pub(crate) struct GlyphRunTargets<'a> {
     pub(crate) frame: &'a mut CompiledFrame,
     /// The frame's painter-order depth counter.
     pub(crate) depth: &'a mut DepthCounter,
+    /// The compiler's retained outline provider for `hvgl`-only faces.
+    pub(crate) hvgl: &'a mut hvgl::HvglOutlines,
 }
 
 /// How a glyph run is routed: the atlas it caches through, whether it may be
@@ -196,6 +208,10 @@ pub(crate) struct GlyphRunRouting<'a> {
     /// every glyph of it was resident, or `None` for a run that may not draw
     /// quads at all (see [`backend`]'s module doc).
     pub(crate) quads: Option<GlyphQuadTargets<'a>>,
+    /// Whether the run's face keeps its outlines only in an `hvgl` table
+    /// ([`hvgl::font_needs_hvgl_provider`]), so its glyphs are filled from
+    /// [`hvgl`] rather than handed to `glifo`.
+    pub(crate) hvgl_face: bool,
 }
 
 /// Draw `run` into `targets`, painted with the already-encoded `paint`.
@@ -222,6 +238,10 @@ pub(crate) struct GlyphRunRouting<'a> {
 /// glyph quads as quads, one that missed draws them the general way (see
 /// [`backend`]'s module doc).
 ///
+/// `routing.hvgl_face` sends the run to [`hvgl`] instead of `glifo`: every
+/// glyph is filled from the provider's outline, and every one it cannot
+/// supply is counted as skipped (see that module's doc).
+///
 /// `routing.resident` lets a run the atlas serves be drawn out of the policy's
 /// resident-run cache instead of through `glifo` — see [`ResidentPlan`] for
 /// when that is possible and why it draws exactly what `glifo` would. A run the
@@ -244,6 +264,7 @@ pub(crate) fn lower_glyph_run(
         mut atlas,
         resident,
         quads,
+        hvgl_face,
     } = routing;
     let GlyphRunTargets {
         generator,
@@ -251,7 +272,26 @@ pub(crate) fn lower_glyph_run(
         prep,
         frame,
         depth,
+        hvgl,
     } = targets;
+
+    if hvgl_face {
+        // Never quads and never the resident-run cache: the run was routed to
+        // outlines, and its glyphs are not `glifo`'s to place.
+        let mut sink = EngineGlyphSink::new(
+            generator,
+            clips,
+            frame,
+            depth,
+            paint,
+            context_paint(context_brush),
+            None,
+        );
+        let unavailable = hvgl::draw_run(run, transform, &mut sink, hvgl);
+        let mut outcome = sink.outcome();
+        outcome.skipped = outcome.skipped.saturating_add(unavailable);
+        return outcome;
+    }
 
     let context = context_paint(context_brush);
     // Planned before the sink takes the context paint over.
@@ -475,14 +515,17 @@ pub(crate) fn glyph_atlas_policy(images: &ImageResidency) -> AtlasPolicy {
 }
 
 /// What the font gate answered for one face: whether it is readable at all
-/// ([`font_is_readable`]) and whether it carries colour glyphs
-/// ([`font_has_color_glyphs`]).
+/// ([`font_is_readable`]), whether it carries colour glyphs
+/// ([`font_has_color_glyphs`]), and whether its outlines are `hvgl`-only
+/// ([`hvgl::font_needs_hvgl_provider`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FaceFacts {
     /// [`font_is_readable`]'s answer.
     pub(crate) readable: bool,
     /// [`font_has_color_glyphs`]'s answer.
     pub(crate) color: bool,
+    /// [`hvgl::font_needs_hvgl_provider`]'s answer.
+    pub(crate) hvgl: bool,
 }
 
 /// How many faces [`FontFacts`] remembers: a frame of mixed scripts draws a
@@ -522,6 +565,7 @@ impl FontFacts {
         let facts = FaceFacts {
             readable: font_is_readable(font),
             color: font_has_color_glyphs(font),
+            hvgl: hvgl::font_needs_hvgl_provider(font),
         };
         if let Some(slot) = self
             .faces

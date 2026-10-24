@@ -14,8 +14,9 @@ off this index — read this plus the one that covers what you are touching:
 - **`unsafe` is confined to a small set of sanctioned platform-FFI boundaries.** Every other
   crate (`frust-core`, `frust-scene`, `frust-text`, `frust-widgets`, `frust-shell-common`,
   `frust-shell-linux`, `frust-shell-web`, `frust`) stays `unsafe`-free, bar `frust-shell-desktop`'s
-  one macOS-only block (listed below) — where Masonry/xilem-style code would reach for `unsafe` downcasting, bound a trait on `Any`
-  (e.g. `Widget: Any`) and downcast through `&mut dyn Any`; the web shell's frame waker is a
+  one macOS-only block (listed below) — where Masonry/xilem-style code would reach for `unsafe`
+  downcasting, bound a trait on `Any` (e.g. `Widget: Any`) and downcast through `&mut dyn Any`;
+  the web shell's frame waker is a
   capture-nothing closure over a `thread_local` `EventLoopProxy` slot (`WAKE_PROXY`). The
   sanctioned zones are raw-pointer boundaries a GPU/platform shell or loader cannot avoid, each
   isolated in one function/module with a `# Safety` doc comment:
@@ -52,16 +53,14 @@ off this index — read this plus the one that covers what you are touching:
   - `frust-shared-preferences`'s `apple` backend — two `# Safety`-noted `setObject:forKey:` calls;
     `frust-secure-storage`'s — a confined `as_cf` objc→`CFType` Keychain bridge.
   - `frust-clipboard`'s `apple` backend — `UIPasteboard`'s `string`/`setString:`/`setItems_options:`
-    calls plus one `extern` static read (`UIPasteboardOptionLocalOnly`), each `# Safety`-noted; its
-    other backends hold no `unsafe`.
+    calls plus one `extern` static read (`UIPasteboardOptionLocalOnly`), each `# Safety`-noted.
   - `frust-share`'s `apple` backend — three `SAFETY`-noted sites: `MainThreadMarker::new_unchecked()`
     in the main-queue closure, `UIActivityViewController::initWithActivityItems_applicationActivities`,
     and the subject `setValue_forKey` guarded by `respondsToSelector(setSubject:)`.
   - `frust-url-launcher`'s `apple` backend — `MainThreadMarker::new_unchecked()` in the main-queue
     hop and the one `openURL:options:completionHandler:` call objc2-ui-kit marks unsafe; its
     `desktop` backend — the Windows `ShellExecuteW` call (`SAFETY`-noted).
-  - `frust-haptics`'s `apple` backend — one `MainThreadMarker::new_unchecked()` in a main-queue
-    callback; its other backends hold no `unsafe`.
+  - `frust-haptics`'s `apple` backend — one `MainThreadMarker::new_unchecked()` in a main-queue callback.
   - `frust-gpu`'s Android `import` zone — the hand-opened Vulkan device (`open_with_callback` +
     `create_device_from_hal`, `context.rs`), `import_hardware_buffer` (`create_texture_from_hal`,
     raw `ash`) and the `dlsym`-resolved `AHardwareBuffer_*` entries, each `# Safety`-noted, behind
@@ -79,6 +78,11 @@ off this index — read this plus the one that covers what you are touching:
     `NativeHandle::new(CvPixelBuffer, ptr)` owning a +1 reference released in a single-call
     release callback. `frust-video-player`'s Android backend: its constructor call, the
     `AHardwareBuffer_*` NDK calls and a direct-buffer plane read.
+  - `frust-engine`'s Apple-only `text/hvgl.rs` — the CoreText calls (`CTFont::with_name`,
+    `post_script_name`, `glyph_count`, `path_for_glyph`, `bounding_rects_for_glyphs`, and the
+    `CTFontDescriptor::with_attributes`/`copy_with_attributes` variation-instance pair),
+    `CGPath::apply` with the `extern "C-unwind"` `push_element` callback, and `unsafe impl Send +
+    Sync for CtFace` (read-only; its SAFETY note cites Apple's Core Text thread-safety statement).
   - `frust-gpu`'s `RenderContext::create_pipeline_cache` — one call building a `wgpu::PipelineCache`
     from a shell-persisted, fingerprint-validated blob.
   - `frust-reactive`'s private `thread_policy::sys` — `gettid`/`getpriority`/`setpriority` (Linux)
@@ -156,14 +160,7 @@ off this index — read this plus the one that covers what you are touching:
   `Component::build`: `move |s| AnyView::new(root.build(s))`. No `#[allow(refining_impl_trait)]`.
 - **Edition-2024 `-> impl Trait` return types capture all in-scope lifetimes by default.** When a
   returned `impl View<State>` must not borrow a parameter (stored, or returned from a
-  navigator/`RenderRoot` closure), opt out explicitly — the compiler says so; otherwise the default is fine:
-
-  ```rust
-  fn greeting(state: &AppState) -> impl frust::View<AppState> + use<> {
-      frust::text(state.greeting.clone()).size(32.0)
-  }
-  ```
-
+  navigator/`RenderRoot` closure), opt out explicitly with `+ use<>` — the compiler says so.
 - **A platform value with no published spec is a named constant with a source comment, not a bare
   literal.** Where a platform's exact behavior is private (an iOS gesture's edge zone, commit
   threshold, or fling velocity; an animation's duration/curve), name the constant; its doc comment
