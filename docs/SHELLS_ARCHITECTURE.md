@@ -160,7 +160,7 @@ seam race-free without a lock.
 
 ## The Desktop Extension Seam
 
-`DesktopExtensions` is an eight-hook trait, every method defaulted to a no-op, invoked where a
+`DesktopExtensions` is a nine-hook trait, every method defaulted to a no-op, invoked where a
 native integration has something to say. `NoExtensions` implements none and is what the zero-config
 preview installs, so that path pays nothing for the seam.
 
@@ -174,14 +174,14 @@ preview installs, so that path pays nothing for the seam.
 | `on_platform_view_commands(&Arc<Window>, scale, &[ViewCommand])` | once per frame, right after the frame is submitted | placing plugin-provided native views — macOS's AppKit host |
 | `on_platform_views_suspended` | the window or its surface is going away | removing every hosted native view before it is orphaned |
 | `on_close_requested() -> CloseAction` | on a close request | macOS hide-instead-of-quit |
+| `window_maximized(&Window) -> Option<bool>` | wherever the core reads maximized: each resize-driven publish and the persistence snapshot | a macOS undecorated window reads it from its frame, so winit's `is_maximized` does not cancel AppKit's edge resize |
 
 Two contracts shape it. **Static dispatch, not `dyn`:** the builder hook hands out a
 `DesktopEventLoopBuilder` that a platform crate extends through winit's own `EventLoopBuilderExt*`
-traits (object safety would bite), and there is exactly one extension per binary anyway. **Only
-two hooks receive the window:** `on_window_created`, as an `&Arc` the extension clones and retains
-if a later hook needs it, and `on_platform_view_commands`, which fires from inside the frame path
-and must parent a hosted view into that exact window. That keeps the other six unit-testable with
-no live event loop.
+traits (object safety would bite); there is one extension per binary anyway. **Only three hooks
+receive the window:** `on_window_created` (an `&Arc` the extension retains if a later hook needs it),
+`on_platform_view_commands` (fires in the frame path and must parent into that exact window), and
+`window_maximized` (a borrowed `&Window`). The other six stay unit-testable with no live loop.
 
 `CloseAction::Exit` (the default) exits the loop, running the real shutdown path: `run_app`
 returns, the frame executor drops, the render thread joins after a final present and its
@@ -574,7 +574,7 @@ hidden slot) are in [LIMITATIONS.md](LIMITATIONS.md) § `apple-overlay-limits`.
 | `PlatformViewState` / `ViewCommand` | Generation-stamped native-sibling create/update/dispose backlog — polled by a mobile shell's embedding module, pushed by the desktop shell to its per-OS host |
 | `SurfaceMode` / `ResolvedSurfaceMode` / `SurfaceModeWatcher` | Host translucency declaration latch plus per-frame resolved-mode publication |
 | `WindowMetricsPublisher` | Shared, change-guarded path every shell drives to provide window-shape context without per-frame re-provides (see [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md)) |
-| `DesktopExtensions` / `NoExtensions` / `CloseAction` / `DesktopEventLoopBuilder` | The per-OS desktop seam: its eight hooks — including `on_platform_view_commands` (the per-frame native-view batch) and `on_platform_views_suspended` (remove every hosted view) — the whole-set no-op, the close verdict, and the builder type a platform crate extends |
+| `DesktopExtensions` / `NoExtensions` / `CloseAction` / `DesktopEventLoopBuilder` | The per-OS desktop seam: its nine hooks — including `on_platform_view_commands` (the per-frame native-view batch) and `on_platform_views_suspended` (remove every hosted view) — the whole-set no-op, the close verdict, and the builder type a platform crate extends |
 | `DesktopConfig` / `MenuSpec` / `MenuItemSpec` / `MenuRole` / `IconData` | Platform-independent desktop identity and native-menu vocabulary, re-exported by the facade (`IconData` as `DesktopIconData`) |
 | `MacosExtensions` / `WindowsExtensions` / `LinuxExtensions` | The three per-OS implementations, each built from a borrowed `DesktopConfig` and installed by the facade under its own target `cfg` |
 | `android_app!` / `ios_app!` / `web_app!` / `app!` | Facade macros binding a generated app's state/logic to the fixed JNI / C-ABI export set, the wasm-bindgen start shim, and the desktop entry point |
@@ -588,7 +588,7 @@ The desktop tier is unevenly proven, and the gap is tracked rather than assumed 
 | **macOS** | Runtime-verified on hardware: real windows, the app-named menu bar, ⌘Q by both menu and accelerator, Hide/Show All, and close-then-Dock-click reopen |
 | **Windows** | Runtime-verified on hardware: titlebar/taskbar icon, AppUserModelID identity, titlebar theming, menu-bar activation delivery, accelerators, and quit. Two Win32 menu rules are documented at their `menu.rs` sites: muda's predefined quit dead-ends under winit's pump, and an accelerator enters the `HACCEL` only if its submenu is attached before the item is appended |
 | **Linux** | Proven by cross-target compilation only, plus every native call site read against its vendored source. Owed: a non-headless `app_id`/icon pass. See [LIMITATIONS.md](LIMITATIONS.md) `desktop-shells-runtime-unverified` and `desktop-windows-titlebar-theme-revert` |
-| **Decorations / window commands** | Linux X11 and Wayland gates passed; Windows and macOS see SHELLS_DEVELOPMENT.md § Decorations and window commands; `desktop-windows-menu-bar-undecorated-unverified` and `desktop-macos-borderless-shadow-unverified` close with it |
+| **Decorations / window commands** | Linux (X11, Wayland), Windows and macOS gates all passed (SHELLS_DEVELOPMENT.md § Decorations and window commands); open: `desktop-windows-menu-bar-undecorated-unverified` |
 
 Multi-window is out of scope: every desktop shell manages exactly one window (`desktop-single-window`).
 
