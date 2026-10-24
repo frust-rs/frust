@@ -39,6 +39,7 @@ use frust_drive::hotpatch::session::{
     DesktopStart, HotSession, RestartReason, SessionHost, StartError, start_desktop,
 };
 use frust_drive::hotpatch::watch::{WatchSet, watch_set_in};
+use frust_drive::lock_refresh::{self, PreflightError};
 use frust_drive::process::{ProcessRunner, StreamHandle};
 
 /// A unique per-session identifier, handed out monotonically by a single
@@ -118,6 +119,26 @@ impl SessionSpec {
             cwd: plan.cwd,
             env: plan.env,
         })
+    }
+
+    /// [`launch_plan`](Self::launch_plan) after resolving the app's dependency
+    /// graph under the plan's own cargo features, for a Debug/Profile desktop
+    /// build: their features pull in frust crates the app's lockfile may
+    /// lack, and a stale index entry should fail here with cargo's own text
+    /// (and `frust-drive`'s one-line remedy) rather than as an opaque failed
+    /// build inside the session. `on_line` receives the single line announcing
+    /// a refresh. Release adds no crate, so it resolves nothing.
+    pub fn launch_plan_preflighted(
+        &self,
+        runner: &dyn ProcessRunner,
+        on_line: &mut dyn FnMut(&str),
+    ) -> Result<LaunchPlan, LaunchError> {
+        let plan = self.launch_plan()?;
+        if self.build.mode != BuildMode::Release {
+            let features = plan_features(&plan.args);
+            lock_refresh::ensure_resolves(runner, &plan.cwd, &features, on_line)?;
+        }
+        Ok(plan)
     }
 
     /// Whether this spec can run as a hot-patch session, or the failed
@@ -401,6 +422,15 @@ pub struct LaunchPlan {
     pub env: Vec<(String, String)>,
 }
 
+/// The `--features` values of a cargo argv, in order — already spelled with
+/// the app's facade key, exactly what cargo will resolve.
+fn plan_features(args: &[String]) -> Vec<String> {
+    args.windows(2)
+        .filter(|pair| pair[0] == "--features")
+        .map(|pair| pair[1].clone())
+        .collect()
+}
+
 /// Why a [`SessionSpec`] could not be turned into a [`LaunchPlan`].
 #[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
 pub enum LaunchError {
@@ -421,6 +451,10 @@ pub enum LaunchError {
     /// spelling.
     #[error("resolving the app's frust dependency: {0}")]
     FacadeKey(#[from] FacadeKeyError),
+    /// The app's dependency graph does not resolve under the plan's
+    /// features; the text is cargo's own, plus the remedy for a stale index.
+    #[error("{0}")]
+    Preflight(#[from] PreflightError),
 }
 
 /// The lifecycle of a supervised session.
@@ -617,6 +651,58 @@ mod tests {
         );
         assert_eq!(plan.cwd, PathBuf::from("/tmp/app"));
         assert!(plan.env.is_empty());
+    }
+
+    #[test]
+    fn a_preflighted_debug_plan_resolves_the_graph_under_the_plans_features_first() {
+        use frust_drive::process::{FakeProcessRunner, Output};
+        let root = PathBuf::from("/tmp/app");
+        let spec = SessionSpec {
+            project_root: root.clone(),
+            target: DeviceTarget::Desktop,
+            build: build(BuildMode::Debug),
+        };
+        let ok = Output {
+            success: true,
+            stdout: "{}".to_string(),
+            stderr: String::new(),
+        };
+        let runner = FakeProcessRunner::new().with("cargo metadata --format-version 1", ok);
+        assert_eq!(
+            spec.launch_plan_preflighted(&runner, &mut |_| {}).unwrap(),
+            spec.launch_plan().unwrap()
+        );
+
+        // Only the exact argv fails, so the failure proves which features
+        // the resolve was given.
+        let runner = runner.with(
+            format!(
+                "cargo metadata --format-version 1 --manifest-path {} --features frust/perf-trace --features frust/devtools",
+                root.join("Cargo.toml").display()
+            ),
+            Output {
+                success: false,
+                stdout: String::new(),
+                stderr: "error: the graph does not resolve".to_string(),
+            },
+        );
+        let err = spec
+            .launch_plan_preflighted(&runner, &mut |_| {})
+            .unwrap_err();
+        assert!(matches!(err, LaunchError::Preflight(_)), "{err:?}");
+        assert_eq!(err.to_string(), "error: the graph does not resolve");
+    }
+
+    #[test]
+    fn a_preflighted_release_plan_resolves_nothing() {
+        // An unscripted fake errors on any call, so success proves none ran.
+        let runner = frust_drive::process::FakeProcessRunner::new();
+        let spec = SessionSpec {
+            project_root: PathBuf::from("/tmp/app"),
+            target: DeviceTarget::Desktop,
+            build: build(BuildMode::Release),
+        };
+        assert!(spec.launch_plan_preflighted(&runner, &mut |_| {}).is_ok());
     }
 
     #[test]

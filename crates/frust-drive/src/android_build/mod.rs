@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use crate::android_run::preflight::{self, PreflightCtx};
-use crate::build_info::BuildInfo;
+use crate::build_info::{BuildInfo, BuildMode};
 use crate::doctor::{EnvLookup, RealEnv};
 use crate::facade_key::FacadeKey;
 use crate::process::{ProcessRunner, tail_lines};
@@ -167,6 +167,14 @@ fn build_with_env(
     // here, the one boundary the key-agnostic Gradle template trusts.
     let key = FacadeKey::resolve(project_dir).context("resolving the app's frust dependency")?;
     let features: Vec<String> = features.iter().map(|feature| key.map(feature)).collect();
+
+    // Resolve the Debug/Profile feature crates in this process, so a stale
+    // index entry surfaces as cargo's own text rather than from inside
+    // Gradle. Release adds no crate, so it skips the resolve.
+    if info.mode != BuildMode::Release {
+        crate::lock_refresh::ensure_resolves(runner, project_dir, &features, on_line)
+            .map_err(|err| anyhow::anyhow!(err))?;
+    }
 
     let task = tasks::task_name(target, info.mode, info.flavor.as_deref());
     let feature_refs: Vec<&str> = features.iter().map(String::as_str).collect();
@@ -332,6 +340,14 @@ mod tests {
 
     fn preflight_ok_runner() -> FakeProcessRunner {
         FakeProcessRunner::new()
+            .with(
+                "cargo metadata --format-version 1",
+                Output {
+                    success: true,
+                    stdout: "{}".to_string(),
+                    stderr: String::new(),
+                },
+            )
             .with(
                 "rustup target list --installed",
                 Output {
@@ -968,6 +984,55 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.paths, vec![out_dir.join("app-debug.apk")]);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A Debug build resolves the app's dependency graph first, under exactly
+    /// the mapped features Gradle will pass, and a failure stops the build
+    /// with cargo's own text before Gradle is invoked (a Gradle reply is
+    /// scripted, so reaching it would succeed).
+    #[test]
+    fn a_debug_build_resolves_the_graph_first_with_the_mapped_features() {
+        let dir = unique_project_dir("resolve-first");
+        let out_dir = dir.join("build/android/app/outputs/apk/debug");
+        fs::create_dir_all(&out_dir).unwrap();
+        fs::write(out_dir.join("app-debug.apk"), b"fake").unwrap();
+
+        let runner = preflight_ok_runner()
+            .with(
+                format!(
+                    "cargo metadata --format-version 1 --manifest-path {} --features frust/perf-trace --features frust/devtools",
+                    dir.join("Cargo.toml").display()
+                ),
+                Output {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: "error: the graph does not resolve".to_string(),
+                },
+            )
+            .with(
+                gradlew_key(
+                    &dir,
+                    "assembleDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+                ),
+                Output {
+                    success: true,
+                    stdout: "BUILD SUCCESSFUL".to_string(),
+                    stderr: String::new(),
+                },
+            );
+        let err = build_with_env(
+            &runner,
+            &dir,
+            &info(BuildMode::Debug, None),
+            &arm64_apk(),
+            NO_EXTRA,
+            &fake_env(),
+            &mut |_| {},
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), "error: the graph does not resolve");
 
         let _ = fs::remove_dir_all(&dir);
     }
