@@ -41,11 +41,6 @@ Cells record each gate's observed result (date in the gate notes of
 | OS | frame gone | drag moves | double-click toggles | buttons work | strips resize | maximize fills work area | fullscreen round-trip | close honours policy | shadow present |
 |----|-----------|------------|----------------------|--------------|---------------|--------------------------|-----------------------|----------------------|----------------|
 | macOS | owed | owed | owed | owed | owed | owed | owed | owed | owed |
-| Windows 11 | PASS | PASS (Snap too) | FAIL (see below) | PASS | PASS (all 8) | PASS | PASS | PASS | PASS (DWM) |
+| Windows 11 | PASS | PASS (Snap too) | PASS | PASS | PASS (all 8) | PASS | PASS | PASS | PASS (DWM) |
 | Linux X11 (KWin) | PASS | PASS | PASS | PASS | PASS (all 8) | PASS | PASS | PASS | none drawn |
 | Linux Wayland (KWin) | PASS | PASS | PASS | PASS | PASS (5 of 8 run) | PASS | PASS | PASS | none drawn |
-
-On Windows a double-click on the bar does not maximize yet: the first press
-starts the OS move loop, which stalls the frame clock past the double-click
-window (`desktop-windows-double-click-maximize-missed` in `docs/LIMITATIONS.md`).
-Use the Maximize button there.

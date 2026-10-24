@@ -2637,26 +2637,6 @@ documented as unsupported in the API.
 
 ---
 
-### `desktop-windows-double-click-maximize-missed` — double-click on a `window_drag_region` does not maximize on Windows
-
-**Observed**: the first press pushes `BeginMove`; winit's `drag_window` starts the OS modal move
-loop, which stalls the frust event loop about 300 ms while paints advance the frame clock, so the
-press record ages past `DOUBLE_TAP_MS` before the queued second press is dispatched. The second
-press starts another move. X11 and Wayland toggle as designed.
-
-**Applies to**: Windows apps relying on `window_drag_region`'s double-click toggle.
-
-**Why accepted**: drag, snap and the window buttons work; the fix changes when the move starts
-(after a drag threshold instead of on the press) and is pending a design decision.
-
-**Evidence**: Windows row of the decorations gate (SHELLS_DEVELOPMENT.md § Decorations and window
-commands); `crates/frust-widgets/src/window_drag_region.rs`.
-
-**Trigger for removal**: `window_drag_region` starts the OS move only after the pointer moves past
-the slop, or another fix passes the Windows double-click row.
-
----
-
 ### `desktop-linux-wayland-minimized-unreported` — `WindowState.minimized` is always `false` on Wayland
 
 **Observed**: Wayland gives a client no minimized state, so winit reports `is_minimized()` as
