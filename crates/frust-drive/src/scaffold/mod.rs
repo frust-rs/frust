@@ -740,6 +740,17 @@ mod tests {
             !cargo_toml.contains("frust-shared-preferences"),
             "{cargo_toml}"
         );
+        // `frust-debug` pins the debug-only crates in Cargo.lock; `lean` stays.
+        assert!(
+            cargo_toml.contains("lean = [\"log/release_max_level_warn\"]"),
+            "{cargo_toml}"
+        );
+        assert!(
+            cargo_toml.contains(
+                "frust-debug = [\"frust/perf-trace\", \"frust/devtools\", \"frust/hotpatch\"]"
+            ),
+            "{cargo_toml}"
+        );
         assert!(!cargo_toml.contains("[\"glyph\""), "{cargo_toml}");
         assert!(!cargo_toml.contains("\"material\""), "{cargo_toml}");
         assert!(!cargo_toml.contains("\"cupertino\""), "{cargo_toml}");
@@ -1762,6 +1773,17 @@ mod tests {
             "{cargo_toml}"
         );
         assert!(!cargo_toml.contains("frust-glyph"), "{cargo_toml}");
+        // `frust-debug` pins the debug-only crates in Cargo.lock; `lean` stays.
+        assert!(
+            cargo_toml.contains("lean = [\"log/release_max_level_warn\"]"),
+            "{cargo_toml}"
+        );
+        assert!(
+            cargo_toml.contains(
+                "frust-debug = [\"frust/perf-trace\", \"frust/devtools\", \"frust/hotpatch\"]"
+            ),
+            "{cargo_toml}"
+        );
 
         // The full `counter` feature-slice tree lands.
         let expected_files = [
