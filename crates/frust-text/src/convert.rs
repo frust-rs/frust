@@ -55,7 +55,10 @@ pub(crate) fn layout_to_scene_runs(layout: &parley::Layout<Brush>, origin: Point
 
             let run = glyph_run.run();
             notdef.scan_run(run);
-            let font = FontHandle::new(run.font().clone());
+            // The variation instance the shaper chose (a requested weight on
+            // a variable face); all-zero coords name the default and are dropped.
+            let font =
+                FontHandle::new(run.font().clone()).with_normalized_coords(run.normalized_coords());
             let font_size = run.font_size();
             // Per-run brush resolved from the pushed `StyleProperty::Brush`.
             let brush = glyph_run.style().brush.clone();
