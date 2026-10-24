@@ -40,7 +40,7 @@ Cells record each gate's observed result (date in the gate notes of
 
 | OS | frame gone | drag moves | double-click toggles | buttons work | strips resize | maximize fills work area | fullscreen round-trip | close honours policy | shadow present |
 |----|-----------|------------|----------------------|--------------|---------------|--------------------------|-----------------------|----------------------|----------------|
-| macOS | owed | owed | owed | owed | owed | owed | owed | owed | owed |
+| macOS | PASS | PASS | PASS (zoom) | PASS (traffic lights at 16/40) | PASS (AppKit edges; `None`: FAIL) | PASS (visible frame) | PASS (×2) | PASS | PASS (`None` too) |
 | Windows 11 | PASS | PASS (Snap too) | PASS | PASS | PASS (all 8) | PASS | PASS | PASS | PASS (DWM) |
 | Linux X11 (KWin) | PASS | PASS | PASS | PASS | PASS (all 8) | PASS | PASS | PASS | none drawn |
 | Linux Wayland (KWin) | PASS | PASS | PASS | PASS | PASS (5 of 8 run) | PASS | PASS | PASS | none drawn |

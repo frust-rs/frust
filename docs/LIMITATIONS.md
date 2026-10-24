@@ -2583,8 +2583,8 @@ stays harmless there. `WindowState` is likewise absent, so an app reads it as an
 ### `desktop-macos-begin-resize-unsupported` — `BeginResize` is a no-op on macOS
 
 **Observed**: winit's `drag_resize_window` returns `NotSupported` on macOS, so the executor logs
-one warning and does nothing. AppKit keeps its own edge resizing on both decoration levels, which
-covers the use.
+one warning and does nothing. AppKit's own edge resizing covers the use under `NoTitleBar`;
+under `None` it stalls (`desktop-macos-borderless-shadow-unverified`).
 
 **Applies to**: macOS desktop apps using `window_drag_region(..).resize(edge)` or
 `WindowCommand::BeginResize`.
@@ -2652,20 +2652,26 @@ window commands); `crates/frust-shell-desktop/src/window_control.rs` (`is_minimi
 
 ---
 
-### `desktop-macos-borderless-shadow-unverified` — the shadow of a borderless macOS window is unverified
+### `desktop-macos-borderless-shadow-unverified` — a borderless macOS window barely resizes from its edges
 
-**Observed**: under `Decorations::None` the macOS window is borderless; whether it keeps a window
-shadow and its resize edges has not been checked on hardware.
+**Observed**: under `Decorations::None` the macOS window is borderless (winit's
+`Borderless | Resizable`). The window keeps its shadow, the bar drags it and double-click zooms
+it. But an edge drag grows a frust window by only 0–10 px per 100 px dragged. Under the same
+synthetic drag, a bare AppKit `Borderless | Resizable` window and a bare winit 0.30.13
+`with_decorations(false)` window both resize the full distance. So the stall happens on frust's
+side. `BeginResize` cannot stand in for it (`desktop-macos-begin-resize-unsupported`). (The id
+keeps its historical name because CHANGELOG and SHELLS_ARCHITECTURE cite it.)
 
 **Applies to**: macOS apps using `Decorations::None`.
 
-**Why accepted**: the macOS runtime gate has not run for decorations; `NoTitleBar` keeps the
-standard frame and shadow.
+**Why accepted**: `NoTitleBar` is the macOS level for an app-drawn bar and resizes normally;
+`examples/custom-titlebar` uses it.
 
-**Evidence**: `crates/frust-shell-desktop/src/app_handler.rs` (`apply_decorations`).
+**Evidence**: macOS row of the decorations gate (SHELLS_DEVELOPMENT.md § Decorations and window
+commands); `crates/frust-shell-desktop/src/app_handler.rs` (`apply_decorations`).
 
-**Trigger for removal**: the macOS row of the decorations gate (SHELLS_DEVELOPMENT.md §
-Decorations and window commands) records the outcome.
+**Trigger for removal**: a fix that lets AppKit's edge resize run its full tracking loop on a
+borderless frust window, re-checked against the same controls.
 
 ---
 
