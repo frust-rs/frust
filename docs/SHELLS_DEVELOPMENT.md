@@ -309,15 +309,16 @@ into `BeginMove` (a second one into `ToggleMaximized`) or, with `.resize(edge)`,
 
 Gates, against `examples/custom-titlebar` (each gate card flips its bullet):
 
-- **macOS — `NoTitleBar` passed 2026-10-24; `None` edge resize fails** (macOS 27, Apple M4,
-  2x built-in plus an external display switched to 1x): the traffic lights sit at leading 16 /
-  band 40 (pixel-measured) after edge resize, two fullscreen round-trips, zoom and a 2x→1x→2x
-  display move, and AppKit shows its own buttons while fullscreen. Drag from the bar or the title
-  works; a press-release does not move the window; double-click zooms to the visible frame and
-  restores; controls in the bar never start a drag. AppKit edge resize, the focus readout and
-  close (`quit_on_last_window_closed(false)` hides, ⌘Q quits) all pass, and so does the
-  playground row. `None`: no frame, shadow present, drag and double-click pass, edge resize
-  stalls (`desktop-macos-borderless-shadow-unverified`). `maximized` reads `true` in fullscreen.
+- **macOS — passed 2026-10-24** (macOS 27, Apple M4, 2x built-in plus an external display
+  switched to 1x): under `NoTitleBar` the traffic lights sit at leading 16 / band 40
+  (pixel-measured) after edge resize, two fullscreen round-trips, zoom and a 2x→1x→2x display
+  move, and AppKit shows its own buttons while fullscreen. Drag from the bar or the title works; a
+  press-release does not move the window; double-click zooms to the visible frame and restores;
+  controls in the bar never start a drag. AppKit edge resize, the focus readout and close
+  (`quit_on_last_window_closed(false)` hides, ⌘Q quits) all pass, and so does the playground row.
+  `None`: no frame, shadow present; drag, double-click and edge resize pass. An undecorated
+  window reads `maximized` from its frame, because winit's style-mask probe cancels AppKit's
+  resize.
 - **Windows — passed 2026-10-24** (Windows 11, 96 dpi): no caption; DWM shadow and rounded
   corners; drag and Aero Snap (the OS move loop); double-click maximize/restore (80–250 ms
   press to press); all eight strips; maximize to the work area, minimize, fullscreen round-trip,
