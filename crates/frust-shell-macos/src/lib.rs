@@ -242,6 +242,18 @@ impl DesktopExtensions for MacosExtensions {
         self.view_host.suspend();
     }
 
+    fn window_maximized(&mut self, window: &Window) -> Option<bool> {
+        // Only an undecorated window: winit's own read would toggle its style
+        // mask on every resize and cancel the edge drag. The decorated styles
+        // keep winit's answer.
+        #[cfg(target_os = "macos")]
+        if self.decorations == Decorations::None {
+            return appkit_glue::window_is_zoomed(window);
+        }
+        let _ = window;
+        None
+    }
+
     fn on_close_requested(&mut self) -> CloseAction {
         match self.lifecycle.on_close_requested() {
             CloseDecision::Quit => CloseAction::Exit,

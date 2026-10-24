@@ -1339,12 +1339,15 @@ fn restore_window_state(
 
 /// The live window's geometry for the window-state saver: logical inner size,
 /// physical outer position (absent on Wayland), and the current monitor's name.
-fn window_snapshot(window: &Window) -> WindowSnapshot {
+///
+/// `maximized` is passed in rather than read: winit's `is_maximized` can change an
+/// undecorated macOS window's style mask (see `DesktopExtensions::window_maximized`).
+fn window_snapshot(window: &Window, maximized: bool) -> WindowSnapshot {
     let inner = window.inner_size().to_logical::<f64>(window.scale_factor());
     WindowSnapshot {
         size: Size::new(inner.width, inner.height),
         position: window.outer_position().ok().map(|p| (p.x, p.y)),
-        maximized: window.is_maximized(),
+        maximized,
         minimized: window.is_minimized().unwrap_or(false),
         fullscreen: window.fullscreen().is_some(),
         monitor: window.current_monitor().and_then(|m| m.name()),
@@ -2630,7 +2633,8 @@ where
         let Some(window) = self.window.as_deref() else {
             return false;
         };
-        let state = window_control::window_state_snapshot(window);
+        let maximized = self.extensions.window_maximized(window);
+        let state = window_control::window_state_snapshot(window, maximized);
         if self.published_window_state == Some(state) {
             return false; // unchanged — no re-provide, no app-wide rebuild
         }
@@ -2687,7 +2691,11 @@ where
             return;
         };
         if let Some(window) = self.window.as_deref() {
-            let snap = window_snapshot(window);
+            let maximized = self
+                .extensions
+                .window_maximized(window)
+                .unwrap_or_else(|| window.is_maximized());
+            let snap = window_snapshot(window, maximized);
             if !(snap.maximized || snap.minimized || snap.fullscreen) {
                 saver.note_normal(snap.size, snap.position);
             }
@@ -2703,7 +2711,15 @@ where
             return;
         };
         let window = self.window.as_deref();
-        let snapshot = || window.map(window_snapshot);
+        let extensions = &mut self.extensions;
+        let snapshot = || {
+            window.map(|w| {
+                let maximized = extensions
+                    .window_maximized(w)
+                    .unwrap_or_else(|| w.is_maximized());
+                window_snapshot(w, maximized)
+            })
+        };
         let state = match now {
             Some(now) => saver.poll(now, snapshot),
             None => saver.flush(snapshot),
