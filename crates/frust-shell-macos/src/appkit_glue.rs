@@ -14,7 +14,7 @@
 //!
 //! # The `unsafe` in this module
 //!
-//! Four sites, each with a `SAFETY:` note at its call site, mirroring the
+//! Five sites, each with a `SAFETY:` note at its call site, mirroring the
 //! audit discipline of `frust-shell-android`'s `jni_glue` and
 //! `frust-shell-ios`'s `ffi_glue`:
 //!
@@ -31,6 +31,10 @@
 //!    rather than a fire-and-forget registration: the notification center
 //!    keeps an **unretained** reference, so the observer must outlive the
 //!    registration and the registration must end before the observer does.
+//!
+//! 5. `Retained::retain` on winit's raw-window-handle `NSView` in
+//!    [`window_is_zoomed`] — how the `NSWindow` is reached (the
+//!    `title_buttons` shape); everything after it is safe bindings.
 //!
 //! # No unwind across the AppKit boundary
 //!
@@ -53,8 +57,11 @@ use std::sync::Arc;
 use objc2::rc::Retained;
 use objc2::runtime::{NSObject, NSObjectProtocol};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
-use objc2_app_kit::NSApplicationDidBecomeActiveNotification;
+use objc2_app_kit::{NSApplicationDidBecomeActiveNotification, NSView};
 use objc2_foundation::{NSBundle, NSNotification, NSNotificationCenter, NSString};
+
+use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use winit::window::Window;
 
 use crate::lifecycle::Lifecycle;
 
@@ -192,4 +199,32 @@ pub(crate) fn bundle_display_name() -> Option<String> {
         }
     }
     None
+}
+
+/// Whether `window` fills its screen's visible frame (within 1 pt), read without
+/// touching the style mask — the maximized flag for an undecorated window, where
+/// winit's `is_maximized` toggles `Titled | Resizable` around `isZoomed` and so
+/// cancels AppKit's incremental edge-drag resize on every `Resized`. `None` off
+/// the main thread or without a window/screen. Matches the frame a zoom produces.
+pub(crate) fn window_is_zoomed(window: &Window) -> Option<bool> {
+    MainThreadMarker::new()?;
+    let handle = window.window_handle().ok()?;
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return None;
+    };
+    // SAFETY: `ns_view` is the live content view winit owns for `window`, which
+    // the caller borrows for this whole call; `Retained::retain` takes a +1 of
+    // our own instead of stealing winit's.
+    let view: Retained<NSView> =
+        unsafe { Retained::retain(appkit.ns_view.cast::<NSView>().as_ptr()) }?;
+    let ns_window = view.window()?;
+    let frame = ns_window.frame();
+    let visible = ns_window.screen()?.visibleFrame();
+    let close = |a: f64, b: f64| (a - b).abs() <= 1.0;
+    Some(
+        close(frame.origin.x, visible.origin.x)
+            && close(frame.origin.y, visible.origin.y)
+            && close(frame.size.width, visible.size.width)
+            && close(frame.size.height, visible.size.height),
+    )
 }

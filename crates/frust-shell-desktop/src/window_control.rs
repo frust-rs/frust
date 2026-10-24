@@ -143,10 +143,19 @@ pub(crate) fn drain(window: &impl WindowOps) -> Option<bool> {
 }
 
 /// The window's current state, as the app-facing context carries it.
-pub(crate) fn window_state_snapshot(window: &impl WindowOps) -> WindowState {
+///
+/// `maximized_override` is an extension's answer for the maximized flag (see
+/// `DesktopExtensions::window_maximized`); `None` reads the window. A fullscreen
+/// window is never published as maximized, though AppKit counts it as zoomed.
+pub(crate) fn window_state_snapshot(
+    window: &impl WindowOps,
+    maximized_override: Option<bool>,
+) -> WindowState {
+    let fullscreen = window.is_fullscreen();
+    let maximized = maximized_override.unwrap_or_else(|| window.is_maximized());
     WindowState::new(
-        window.is_maximized(),
-        window.is_fullscreen(),
+        maximized && !fullscreen,
+        fullscreen,
         window.has_focus(),
         window.is_minimized(),
     )
@@ -406,7 +415,7 @@ mod tests {
             ..FakeWindow::default()
         };
         assert_eq!(
-            window_state_snapshot(&window),
+            window_state_snapshot(&window, None),
             WindowState::new(true, false, true, false)
         );
         let window = FakeWindow {
@@ -415,10 +424,42 @@ mod tests {
             ..FakeWindow::default()
         };
         assert_eq!(
-            window_state_snapshot(&window),
+            window_state_snapshot(&window, None),
             WindowState::new(false, true, false, true)
         );
         assert!(window.calls().is_empty(), "a snapshot only reads");
+    }
+
+    #[test]
+    fn a_fullscreen_window_is_never_published_as_maximized() {
+        let window = FakeWindow {
+            maximized: true,
+            fullscreen: true,
+            ..FakeWindow::default()
+        };
+        assert_eq!(
+            window_state_snapshot(&window, None),
+            WindowState::new(false, true, false, false)
+        );
+        assert_eq!(
+            window_state_snapshot(&window, Some(true)),
+            WindowState::new(false, true, false, false)
+        );
+    }
+
+    #[test]
+    fn the_maximized_override_replaces_the_window_read() {
+        let window = FakeWindow {
+            maximized: false,
+            ..FakeWindow::default()
+        };
+        assert!(window_state_snapshot(&window, Some(true)).maximized);
+        let window = FakeWindow {
+            maximized: true,
+            ..FakeWindow::default()
+        };
+        assert!(!window_state_snapshot(&window, Some(false)).maximized);
+        assert!(window_state_snapshot(&window, None).maximized);
     }
 
     #[test]

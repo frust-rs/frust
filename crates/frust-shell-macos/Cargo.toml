@@ -37,8 +37,8 @@ objc2-foundation = { workspace = true, features = [
     "NSGeometry",
     "objc2-core-foundation",
 ] }
-# Crate-local short list, not the default set: `NSApplication` (did-become-active; winit 0.30 has no reopen event), `NSResponder`,
-# `NSView`, `NSGraphics` (`NSWindowOrderingMode`), `NSWindow`/`NSButton`/`NSControl` (`title_buttons`: window-button placement).
+# Crate-local short list, not the default set: `NSApplication` (did-become-active; winit 0.30 has no reopen event),
+# `NSWindow`/`NSButton`/`NSControl` (window-button placement), `NSScreen` (`window_is_zoomed`: visible frame), plus their bases.
 # Version literal repeated: Cargo forbids overriding a workspace dep's `default-features` unless the workspace sets it; keep in step with the root pin.
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
@@ -49,6 +49,7 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSWindow",
     "NSButton",
     "NSControl",
+    "NSScreen",
 ] }
 
 # docs.rs builds x86_64 Linux by default; a target-specific crate would document as empty.
