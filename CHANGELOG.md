@@ -58,9 +58,9 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   NoTitleBar}`, creation-time only) and `with_title_buttons` (`TitleButtons`, macOS placement of the
   traffic lights under `NoTitleBar`). `frust::{WindowCommand, ResizeEdge, push_window_command}`
   ask the desktop shell to move, resize, maximize, minimize, fullscreen or close the window, and the
-  `WindowState` context reports maximized, fullscreen, focused and minimized. Off desktop the
-  commands do nothing (`desktop-window-commands-off-desktop-noop`); the gates are owed
-  (`desktop-macos-borderless-shadow-unverified`, `desktop-windows-menu-bar-undecorated-unverified`).
+  `WindowState` context reports maximized (false while fullscreen), fullscreen, focused and
+  minimized. Off desktop the commands do nothing (`desktop-window-commands-off-desktop-noop`). The
+  Linux, Windows and macOS gates passed; open: `desktop-windows-menu-bar-undecorated-unverified`.
 - `window_drag_region`: wraps a title bar or edge strip and turns a primary press its child ignored
   into a window move (double press toggles maximize) or, with `.resize(edge)`, a resize drag.
 - `examples/custom-titlebar` draws a title bar with the window controls; the playground has a

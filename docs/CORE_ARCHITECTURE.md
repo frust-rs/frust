@@ -256,7 +256,7 @@ republishes both `WindowInsets` and `WindowMetrics` through the same guarded pat
 process-global queue (`push_window_command` of a `WindowCommand`; bounded at 32, FIFO, overflow drops
 the oldest non-`RequestClose` entry), callable from any UI-side context. Only the desktop shell
 drains it, so mobile and web never do; it serves the single desktop window. `WindowState`
-(`maximized`, `fullscreen`, `focused`, `minimized`; `#[non_exhaustive]`) is a desktop-only plain
+(`maximized` — false while fullscreen — `fullscreen`, `focused`, `minimized`; `#[non_exhaustive]`) is a desktop-only plain
 context, re-provided on change like `WindowMetrics`. Drain points: [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md).
 
 **Contexts are visible inside both build and event passes.** A root-level `provide_context` (the
