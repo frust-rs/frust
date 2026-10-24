@@ -32,13 +32,13 @@ log = { workspace = true }
 muda = { workspace = true }
 objc2 = { workspace = true }
 # `NSGeometry` + `objc2-core-foundation` gate `NSRect`/`NSPoint`/`NSSize`; both ride the default set today, spelled out so a
-# future narrowing fails loudly here. Features are added to the workspace row (default-features may not be overridden).
+# future narrowing fails loudly here. Added on top of the workspace row's default set (a workspace dep may extend features).
 objc2-foundation = { workspace = true, features = [
     "NSGeometry",
     "objc2-core-foundation",
 ] }
-# Short explicit list, not the large default set: `NSApplication` (did-become-active; winit 0.30 has no reopen event), `NSResponder`,
-# `NSView`, `NSGraphics` (`NSWindowOrderingMode`). `NSWindow` absent: the host uses winit's raw-window-handle `NSView`.
+# Crate-local short list, not the default set: `NSApplication` (did-become-active; winit 0.30 has no reopen event),
+# `NSWindow`/`NSButton`/`NSControl` (window-button placement), `NSScreen` (`window_is_zoomed`: visible frame), plus their bases.
 # Version literal repeated: Cargo forbids overriding a workspace dep's `default-features` unless the workspace sets it; keep in step with the root pin.
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
@@ -46,6 +46,10 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSResponder",
     "NSView",
     "NSGraphics",
+    "NSWindow",
+    "NSButton",
+    "NSControl",
+    "NSScreen",
 ] }
 
 # docs.rs builds x86_64 Linux by default; a target-specific crate would document as empty.

@@ -280,6 +280,24 @@ pub(crate) fn with_icons(attributes: WindowAttributes, icon: &IconData) -> Windo
     attributes
 }
 
+/// Ask Windows for the DWM drop shadow on an undecorated window.
+///
+/// winit hides the shadow by default, which leaves a frameless window looking
+/// flat against the desktop. Enabling it costs winit's documented thin 1 px
+/// line along the window's edge, accepted in exchange for the shadow.
+#[cfg(target_os = "windows")]
+pub(crate) fn with_undecorated_shadow(attributes: WindowAttributes) -> WindowAttributes {
+    use winit::platform::windows::WindowAttributesExtWindows;
+
+    attributes.with_undecorated_shadow(true)
+}
+
+// Inert off Windows: the DWM shadow is another shell's business.
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn with_undecorated_shadow(attributes: WindowAttributes) -> WindowAttributes {
+    attributes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

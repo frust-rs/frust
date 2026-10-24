@@ -279,6 +279,62 @@ the record):
 The same README table records the Linux re-run of the Shortcuts page's F2, `?`, single-Escape and
 press-focus legs (2026-10-18) and still owes them as part of the macOS and Windows Shortcuts rows.
 
+### Decorations and window commands
+
+API (all desktop-only; `examples/custom-titlebar` is the worked app): `DesktopConfig::with_decorations`
+(`Decorations::{Full, None, NoTitleBar}`) and `with_title_buttons(TitleButtons::new(leading,
+band_height))` (macOS `NoTitleBar` only); `frust::push_window_command` with `WindowCommand`
+(`BeginMove`, `BeginResize(ResizeEdge)`, `SetMaximized`, `ToggleMaximized`, `Minimize`,
+`SetFullscreen`, `RequestClose`); the `WindowState` context (`maximized`, `fullscreen`, `focused`,
+`minimized`); and the `window_drag_region` widget, which turns a primary press its child ignored
+into `BeginMove` (a second one into `ToggleMaximized`) or, with `.resize(edge)`, `BeginResize`.
+
+- **Creation-time only:** `decorations` and `title_buttons` are read when the window is built;
+  there is no runtime setter (`desktop-decorations-creation-time-only`).
+- **The app owns the controls:** under `None`/`NoTitleBar` it must draw at least a drag region and a
+  close control, or the window can be neither moved nor closed. A refused drag logs once per kind.
+- **Drain points:** after every input dispatch (macOS starts a move drag only from the event being
+  handled, so a move pushed outside one is ignored) and once per frame, top of redraw, for pushes
+  from timers and tasks. `RequestClose` takes the OS close-button path (`on_close_requested`).
+- **Push contract:** one desktop window, no window id; push from UI-thread contexts. A push does
+  not wake the loop: it runs at the end of the current dispatch or the next frame. Off desktop
+  nothing drains the queue (`desktop-window-commands-off-desktop-noop`).
+- **Per OS:** macOS `BeginResize` is a no-op (`desktop-macos-begin-resize-unsupported`; hide resize
+  strips there and while maximized or fullscreen) and the traffic-light placement is best effort
+  (`desktop-title-buttons-macos-best-effort`); Windows adds the DWM shadow to an undecorated window
+  and warns once about a menu bar on one (`desktop-windows-menu-bar-undecorated-unverified`); Linux
+  uses X11 Motif hints or Wayland client-side mode.
+- **`WindowState.minimized` is unreliable** on Wayland (always `false`: the compositor reports no
+  minimization) and on macOS relies on the `Occluded` event.
+
+Gates, against `examples/custom-titlebar` (each gate card flips its bullet):
+
+- **macOS — passed 2026-10-24** (macOS 27, Apple M4, 2x built-in plus an external display
+  switched to 1x): under `NoTitleBar` the traffic lights sit at leading 16 / band 40
+  (pixel-measured) after edge resize, two fullscreen round-trips, zoom and a 2x→1x→2x display
+  move, and AppKit shows its own buttons while fullscreen. Drag from the bar or the title works; a
+  press-release does not move the window; double-click zooms to the visible frame and restores;
+  controls in the bar never start a drag. AppKit edge resize, the focus readout and close
+  (`quit_on_last_window_closed(false)` hides, ⌘Q quits) all pass, and so does the playground row.
+  `None`: no frame, shadow present; drag, double-click and edge resize pass. An undecorated
+  window reads `maximized` from its frame, because winit's style-mask probe cancels AppKit's
+  resize.
+- **Windows — passed 2026-10-24** (Windows 11, 96 dpi): no caption; DWM shadow and rounded
+  corners; drag and Aero Snap (the OS move loop); double-click maximize/restore (80–250 ms
+  press to press); all eight strips; maximize to the work area, minimize, fullscreen round-trip,
+  close and the focus readout pass; playground Window row passes.
+  A menu bar on an undecorated window is installed but not drawn
+  (`desktop-windows-menu-bar-undecorated-unverified`).
+- **Linux X11 — passed 2026-10-24** (KWin, Xorg, NVIDIA T400): Motif hints remove the frame; drag
+  (`_NET_WM_MOVERESIZE`), double-click maximize/restore, all eight strips, maximize to the work area,
+  minimize, fullscreen round-trip, close and the focus readout act; no shadow is drawn for the
+  frameless window. A press released within a few ms can leave KWin in a sticky move (synthetic
+  input only). Playground Window row passes.
+- **Linux Wayland — passed 2026-10-24** (nested KWin 6.7): no frame; drag (`xdg_toplevel.move`),
+  double-click, five strips (`xdg_toplevel.resize`), maximize, minimize, fullscreen, close and
+  focus act; `minimized` stays `false` (`desktop-linux-wayland-minimized-unreported`). Playground
+  Window row passes. GNOME not run.
+
 ## Browser manual gate (web)
 
 A gate for `crates/frust-shell-web`, run against `examples/web-gallery` per its own README's
@@ -362,7 +418,7 @@ unit's, since the two hold arboard differently (one long-lived instance on the s
 worker thread against the plugin's per-call ones).
 
 `objc2-app-kit 0.3` (the `NSApplication`/`NSResponder` slice `frust-shell-macos` names directly,
-for the Dock-reopen observer) joins the objc2 pin family owned by
+for the Dock-reopen observer, plus `NSWindow`/`NSButton`/`NSControl` for `title_buttons`) joins the objc2 pin family owned by
 [PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md) rather than getting a row here — see its Version
 Pins table. `frust-shell-macos`'s own manifest declares it with a literal version and a trimmed
 `default-features = false` feature list, not `{ workspace = true }`, because Cargo forbids a

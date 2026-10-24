@@ -252,6 +252,13 @@ or component reads them inside `Component::build` via `use_context::<WindowMetri
 signal subscription. `WindowMetrics.insets` carries the window-control corners too; a corner change
 republishes both `WindowInsets` and `WindowMetrics` through the same guarded path.
 
+**Window commands and `WindowState`.** An app-drawn title bar asks for window actions through a
+process-global queue (`push_window_command` of a `WindowCommand`; bounded at 32, FIFO, overflow drops
+the oldest non-`RequestClose` entry), callable from any UI-side context. Only the desktop shell
+drains it, so mobile and web never do; it serves the single desktop window. `WindowState`
+(`maximized` — false while fullscreen — `fullscreen`, `focused`, `minimized`; `#[non_exhaustive]`) is a desktop-only plain
+context, re-provided on change like `WindowMetrics`. Drain points: [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md).
+
 **Contexts are visible inside both build and event passes.** A root-level `provide_context` (the
 shell's root `Owner`) makes its context available to every `Component::build` **and** every
 `Widget::event` handler, since the shell runs both passes under the same owner. This includes

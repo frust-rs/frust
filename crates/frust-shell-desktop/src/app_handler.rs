@@ -80,13 +80,14 @@ use winit::window::{
     WindowId,
 };
 
-use crate::config::DesktopConfig;
+use crate::config::{Decorations, DesktopConfig};
 use crate::extensions::{CloseAction, DesktopExtensions, NoExtensions};
 use crate::paced_wake::{
     ControlFlowIntent, next_paced_wake, paced_wake_action, schedule_present_retry,
 };
 use crate::platform_view::DesktopPlatformViews;
 use crate::render::FrameExecutor;
+use crate::window_control;
 use crate::window_state::{
     InitialGeometry, MonitorRect, WindowSnapshot, WindowState, WindowStateSaver, clamp_restored,
     initial_geometry, merge_wake, persistence_enabled,
@@ -1077,6 +1078,8 @@ where
         present_retry_mark: 0,
         anim_pacing: !frust_shell_common::anim_pacing_kill_switch_engaged(),
         window_metrics: WindowMetricsPublisher::new(),
+        published_window_state: None,
+        close_pending: false,
         // Spawned lazily on the first clipboard action — see the `clipboard`
         // field's doc.
         clipboard: None,
@@ -1214,6 +1217,29 @@ fn apply_window_size(
     }
 }
 
+/// Applies the configured [`Decorations`] to an in-progress
+/// [`WindowAttributes`]. `Full` leaves them untouched; `None` drops the OS
+/// frame; `NoTitleBar` keeps the frame on macOS but makes the title bar
+/// transparent with content extending under it and the title hidden, and acts
+/// as `None` on every other OS. A free function so it is unit-testable
+/// host-side.
+fn apply_decorations(attributes: WindowAttributes, decorations: Decorations) -> WindowAttributes {
+    match decorations {
+        Decorations::Full => attributes,
+        Decorations::None => attributes.with_decorations(false),
+        #[cfg(target_os = "macos")]
+        Decorations::NoTitleBar => {
+            use winit::platform::macos::WindowAttributesExtMacOS;
+            attributes
+                .with_titlebar_transparent(true)
+                .with_fullsize_content_view(true)
+                .with_title_hidden(true)
+        }
+        #[cfg(not(target_os = "macos"))]
+        Decorations::NoTitleBar => attributes.with_decorations(false),
+    }
+}
+
 /// The window's creation geometry after precedence (see [`window_attributes`]).
 fn creation_geometry(config: &DesktopConfig, persisted: Option<&WindowState>) -> InitialGeometry {
     let knobs = window_size_config();
@@ -1246,6 +1272,8 @@ fn creation_geometry(config: &DesktopConfig, persisted: Option<&WindowState>) ->
 ///   [`WINDOW_SIZE_VAR`]/[`WINDOW_MAXIMIZED_VAR`] measurement knobs, each
 ///   overriding only its own field (see `window_state::initial_geometry`);
 /// * the config's min/max inner size, logical pixels;
+/// * the frame style, from [`DesktopConfig::decorations`] (see
+///   [`apply_decorations`]);
 /// * `visible(false)` — the accessibility adapter must be constructed before
 ///   the window is ever shown (see [`Adapter::with_event_loop_proxy`]'s
 ///   contract), so `resumed` makes it visible itself once that is done.
@@ -1277,6 +1305,7 @@ fn window_attributes(
     if let Some(max) = config.max_size.filter(valid) {
         attributes = attributes.with_max_inner_size(LogicalSize::new(max.width, max.height));
     }
+    attributes = apply_decorations(attributes, config.decorations);
     extensions.on_window_attributes(attributes)
 }
 
@@ -1310,12 +1339,15 @@ fn restore_window_state(
 
 /// The live window's geometry for the window-state saver: logical inner size,
 /// physical outer position (absent on Wayland), and the current monitor's name.
-fn window_snapshot(window: &Window) -> WindowSnapshot {
+///
+/// `maximized` is passed in rather than read: winit's `is_maximized` can change an
+/// undecorated macOS window's style mask (see `DesktopExtensions::window_maximized`).
+fn window_snapshot(window: &Window, maximized: bool) -> WindowSnapshot {
     let inner = window.inner_size().to_logical::<f64>(window.scale_factor());
     WindowSnapshot {
         size: Size::new(inner.width, inner.height),
         position: window.outer_position().ok().map(|p| (p.x, p.y)),
-        maximized: window.is_maximized(),
+        maximized,
         minimized: window.is_minimized().unwrap_or(false),
         fullscreen: window.fullscreen().is_some(),
         monitor: window.current_monitor().and_then(|m| m.name()),
@@ -2158,6 +2190,13 @@ struct ShellHandler<State: 'static, Build, V: View<State>, E> {
     /// a decorated desktop window. Mobile's own standalone `WindowInsets`
     /// context is unaffected.
     window_metrics: WindowMetricsPublisher,
+    /// The last [`WindowState`](frust_core::WindowState) provided to app code, so
+    /// [`ShellHandler::publish_window_state`] re-provides only on change. Re-polled at the
+    /// seed, on `Resized` and `Focused`, and after app window commands; never per frame.
+    published_window_state: Option<frust_core::WindowState>,
+    /// A `RequestClose` drained inside [`ShellHandler::dispatch`], which has no event loop
+    /// to close with; `about_to_wait` runs the close path for it the same turn.
+    close_pending: bool,
     /// The clipboard worker thread's handle — spawned lazily, on the first
     /// copy/cut/paste, and then held for the rest of the process's lifetime.
     /// `None` until that first use, and again for the rest of the run once the
@@ -2288,6 +2327,9 @@ where
         self.sync_ime(window);
         self.sync_cursor(window);
         self.sync_clipboard();
+        // Inside the input dispatch, not only per frame: macOS starts a move drag from
+        // the event being handled, and a drain outside one is ignored.
+        self.close_pending |= self.drain_window_commands();
         if outcome.needs_redraw {
             window.request_redraw();
         }
@@ -2582,6 +2624,66 @@ where
         self.runtime.with_owner(move || provide_context(metrics));
     }
 
+    /// Re-provide [`WindowState`](frust_core::WindowState) under the root owner, but only
+    /// when it differs from the last one provided (the [`push_window_metrics`] guard).
+    /// Returns whether it re-provided; like that guard it requests no redraw itself.
+    ///
+    /// [`push_window_metrics`]: ShellHandler::push_window_metrics
+    fn publish_window_state(&mut self) -> bool {
+        let Some(window) = self.window.as_deref() else {
+            return false;
+        };
+        let maximized = self.extensions.window_maximized(window);
+        let state = window_control::window_state_snapshot(window, maximized);
+        if self.published_window_state == Some(state) {
+            return false; // unchanged — no re-provide, no app-wide rebuild
+        }
+        self.published_window_state = Some(state);
+        self.runtime.with_owner(move || provide_context(state));
+        true
+    }
+
+    /// Execute the app's queued window commands, then republish the window state they may
+    /// have moved. Returns whether one was `RequestClose`; the caller runs the close path.
+    fn drain_window_commands(&mut self) -> bool {
+        let Some(window) = self.window.clone() else {
+            return false;
+        };
+        let Some(close) = window_control::drain(&*window) else {
+            return false;
+        };
+        // A command that moved the state may raise no resize to carry it to a frame.
+        if self.publish_window_state() {
+            window.request_redraw();
+        }
+        close
+    }
+
+    /// The OS close button's path, shared by an app `RequestClose`. The extension decides
+    /// whether a close ends the app: the default (and the zero-config preview) exits, while a
+    /// macOS shell may hide its retained window and keep the loop alive. Pipeline-cache
+    /// persistence hangs off the frame executor's drop, not off this.
+    fn handle_close_requested(&mut self, event_loop: &ActiveEventLoop) {
+        // The final window-state save runs before the extension decides,
+        // while the window still reports its real geometry.
+        self.save_window_state(None);
+        match self.extensions.on_close_requested() {
+            CloseAction::Exit => {
+                // The window is about to be destroyed: let the host tear
+                // its hosted views out of a hierarchy that still exists,
+                // rather than leaving them to be dropped with it.
+                self.platform_views.suspend(&mut self.extensions);
+                event_loop.exit();
+            }
+            // Not a teardown — a macOS shell is only hiding its retained
+            // window, and the hosted views hide with it. Removing them
+            // here would strand the host with nothing to restore on
+            // reopen, since no surface is re-created on that path to
+            // replay them.
+            CloseAction::KeepRunning => {}
+        }
+    }
+
     /// A resize or move: record the un-maximized geometry and restart the
     /// window-state saver's quiet period (a no-op unless persistence is on).
     fn note_window_geometry_change(&mut self) {
@@ -2589,7 +2691,11 @@ where
             return;
         };
         if let Some(window) = self.window.as_deref() {
-            let snap = window_snapshot(window);
+            let maximized = self
+                .extensions
+                .window_maximized(window)
+                .unwrap_or_else(|| window.is_maximized());
+            let snap = window_snapshot(window, maximized);
             if !(snap.maximized || snap.minimized || snap.fullscreen) {
                 saver.note_normal(snap.size, snap.position);
             }
@@ -2605,7 +2711,15 @@ where
             return;
         };
         let window = self.window.as_deref();
-        let snapshot = || window.map(window_snapshot);
+        let extensions = &mut self.extensions;
+        let snapshot = || {
+            window.map(|w| {
+                let maximized = extensions
+                    .window_maximized(w)
+                    .unwrap_or_else(|| w.is_maximized());
+                window_snapshot(w, maximized)
+            })
+        };
         let state = match now {
             Some(now) => saver.poll(now, snapshot),
             None => saver.flush(snapshot),
@@ -3016,6 +3130,7 @@ where
         // nothing. Live changes arrive via `WindowEvent::Resized`.
         let physical = window.inner_size();
         self.push_window_metrics((physical.width, physical.height), window.scale_factor());
+        self.publish_window_state();
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
@@ -3054,6 +3169,11 @@ where
         // when the queue is empty; a task that writes a signal here re-dirties a
         // scope and fires the waker, which re-arms the loop rather than parking.
         self.runtime.pump_local();
+
+        // An app `RequestClose` drained inside a dispatch this turn (see `close_pending`).
+        if std::mem::take(&mut self.close_pending) {
+            self.handle_close_requested(event_loop);
+        }
 
         // Animation pacing (frame-gate pacing): a paced-only decorative loop
         // scheduled its follow-up redraw for a future instant rather than the
@@ -3128,33 +3248,7 @@ where
         }
 
         match event {
-            // The extension decides whether a close request ends the app: the
-            // default (and the whole zero-config preview) is the unconditional
-            // exit this arm always was, while a macOS shell may hide its
-            // retained window instead and keep the loop alive. The
-            // pipeline-cache persistence path is unaffected either way — it
-            // hangs off the frame executor's drop once `run_app` returns, not
-            // off this event.
-            WindowEvent::CloseRequested => {
-                // The final window-state save runs before the extension decides,
-                // while the window still reports its real geometry.
-                self.save_window_state(None);
-                match self.extensions.on_close_requested() {
-                    CloseAction::Exit => {
-                        // The window is about to be destroyed: let the host tear
-                        // its hosted views out of a hierarchy that still exists,
-                        // rather than leaving them to be dropped with it.
-                        self.platform_views.suspend(&mut self.extensions);
-                        event_loop.exit();
-                    }
-                    // Not a teardown — a macOS shell is only hiding its retained
-                    // window, and the hosted views hide with it. Removing them
-                    // here would strand the host with nothing to restore on
-                    // reopen, since no surface is re-created on that path to
-                    // replay them.
-                    CloseAction::KeepRunning => {}
-                }
-            }
+            WindowEvent::CloseRequested => self.handle_close_requested(event_loop),
 
             WindowEvent::Resized(size) => {
                 // A resize with no live surface is dropped by the machine
@@ -3172,6 +3266,8 @@ where
                 // of its own. Self-guarded, so a resize that reports unchanged
                 // dimensions publishes nothing.
                 self.push_window_metrics((size.width, size.height), window.scale_factor());
+                // Maximize, restore and fullscreen all arrive as a resize.
+                self.publish_window_state();
                 self.note_window_geometry_change();
                 // An overlay keeps its logical frame when the window moves to a
                 // display of another scale, so no command would republish its
@@ -3460,6 +3556,15 @@ where
                     self.apply_theme(&window);
                 }
 
+                // Commands pushed outside an input dispatch (a timer, a task) run here,
+                // top of frame; a move drag from here is ignored on macOS (see `dispatch`).
+                if self.drain_window_commands() {
+                    self.handle_close_requested(event_loop);
+                    if event_loop.exiting() {
+                        return; // no frame for a window being torn down
+                    }
+                }
+
                 // Poll the app-facing pending-font registry once per
                 // frame, beside the theme poll above. `drain_into` applies any
                 // late-registered fonts to `text_ctx` (clearing the shape cache
@@ -3721,6 +3826,23 @@ where
                     .drain(&mut self.extensions, &window, scale);
             }
 
+            // The adapter saw it above; app code needs the new `focused` flag, and a focus
+            // change produces no frame of its own.
+            WindowEvent::Focused(_) => {
+                if self.publish_window_state() {
+                    window.request_redraw();
+                }
+            }
+
+            // macOS reports miniaturize and restore as occlusion, not as a resize, so
+            // `minimized` is republished here; a redraw only when the state changed.
+            WindowEvent::Occluded(_) => {
+                let changed = self.publish_window_state();
+                if changed {
+                    window.request_redraw();
+                }
+            }
+
             _ => {}
         }
     }
@@ -3767,6 +3889,7 @@ mod tests {
         paste_input_event, physical_to_logical, resolved_window_knob, theme_after_override_poll,
         wheel_zoom_chord_held, window_attributes, winit_cursor_for,
     };
+    use crate::config::Decorations;
     use frust_core::SemanticsUpdate;
     use frust_core::accesskit::{
         Affine as AccessKitAffine, Node, NodeId, Rect as AccessKitRect, Role,
@@ -5725,11 +5848,13 @@ mod tests {
     struct SpyExtensions {
         attributes_calls: usize,
         override_title: Option<&'static str>,
+        seen_decorations: Option<bool>,
     }
 
     impl DesktopExtensions for SpyExtensions {
         fn on_window_attributes(&mut self, attributes: WindowAttributes) -> WindowAttributes {
             self.attributes_calls += 1;
+            self.seen_decorations = Some(attributes.decorations);
             match self.override_title {
                 Some(title) => attributes.with_title(title),
                 None => attributes,
@@ -5749,6 +5874,45 @@ mod tests {
             "the window must be created hidden — the accessibility adapter is \
              constructed before it is shown"
         );
+    }
+
+    #[test]
+    fn window_attributes_keep_decorations_by_default() {
+        let attributes = window_attributes(&DesktopConfig::default(), None, &mut NoExtensions);
+        assert!(attributes.decorations);
+    }
+
+    #[test]
+    fn window_attributes_drop_decorations_for_none() {
+        let config = DesktopConfig::new().with_decorations(Decorations::None);
+        let attributes = window_attributes(&config, None, &mut NoExtensions);
+        assert!(!attributes.decorations);
+    }
+
+    /// The macOS extension fields are `pub(crate)` in winit and cannot be
+    /// asserted host-side; the macOS arm is left to the Mac gate.
+    #[test]
+    fn window_attributes_map_no_title_bar_per_platform() {
+        let config = DesktopConfig::new().with_decorations(Decorations::NoTitleBar);
+        let attributes = window_attributes(&config, None, &mut NoExtensions);
+        #[cfg(not(target_os = "macos"))]
+        assert!(!attributes.decorations);
+        #[cfg(target_os = "macos")]
+        assert!(attributes.decorations);
+    }
+
+    #[test]
+    fn window_attributes_apply_decorations_before_the_extension_hook() {
+        let mut extensions = SpyExtensions::default();
+        let config = DesktopConfig::new().with_decorations(Decorations::None);
+        let attributes = window_attributes(&config, None, &mut extensions);
+        assert_eq!(extensions.attributes_calls, 1);
+        assert_eq!(
+            extensions.seen_decorations,
+            Some(false),
+            "the hook must receive the attributes with decorations already applied"
+        );
+        assert!(!attributes.decorations);
     }
 
     #[test]

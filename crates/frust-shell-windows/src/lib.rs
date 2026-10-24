@@ -39,9 +39,9 @@
 //! logic that *can* be host-tested deliberately is: it lives in the
 //! platform-free halves of `menu` and `theme`.
 
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 
-use frust_shell_desktop::config::{DesktopConfig, IconData};
+use frust_shell_desktop::config::{Decorations, DesktopConfig, IconData};
 use frust_shell_desktop::extensions::{DesktopEventLoopBuilder, DesktopExtensions};
 use frust_theme::Brightness;
 use winit::window::{Window, WindowAttributes};
@@ -80,6 +80,9 @@ pub struct WindowsExtensions {
     app_id: Option<String>,
     /// Window/taskbar icon, attached at the window-attributes hook.
     window_icon: Option<IconData>,
+    /// The frame style the app asked for; an undecorated level wants the DWM
+    /// shadow and triggers the menu-bar warning.
+    decorations: Decorations,
     /// The planned menu bar, resolved once at construction (the native menu is
     /// built from it when there is a window to attach it to).
     menu_plan: MenuPlan,
@@ -98,12 +101,13 @@ impl WindowsExtensions {
     ///
     /// Borrows rather than consumes: the same [`DesktopConfig`] is also handed
     /// to `run_desktop_with`, which reads the fields this shell does not (the
-    /// window title). Only the three identity fields this platform integrates
-    /// — `app_id`, `window_icon`, `menu_spec` — are retained.
+    /// window title). The identity fields this platform integrates — `app_id`,
+    /// `window_icon`, `decorations`, `menu_spec` — are retained.
     pub fn new(config: &DesktopConfig) -> Self {
         Self {
             app_id: config.app_id.clone(),
             window_icon: config.window_icon.clone(),
+            decorations: config.decorations,
             menu_plan: MenuPlan::from_spec(config.menu_spec.as_ref()),
             accelerators: AcceleratorTable::new(),
             titlebar_theme: TitlebarTheme::new(),
@@ -128,6 +132,29 @@ impl WindowsExtensions {
     }
 }
 
+/// Whether the window should keep the DWM drop shadow, which an undecorated
+/// window hides unless asked. True for every level that drops the OS frame.
+///
+/// Platform-free so the decision is host-testable; the Windows-only attribute
+/// call it gates lives in `win32_glue`.
+fn wants_undecorated_shadow(decorations: Decorations) -> bool {
+    decorations != Decorations::Full
+}
+
+/// Whether the configured menu bar sits on a window that has dropped its OS
+/// frame, which is the combination not yet verified on Windows.
+///
+/// winit keeps `WS_CAPTION` on an undecorated window and zeroes its
+/// non-client area, so whether an `HMENU` still draws or reserves space there
+/// is unknown until the Windows gate runs. The caller warns on this and
+/// installs the menu regardless.
+fn menu_on_undecorated(menu_plan_is_empty: bool, decorations: Decorations) -> bool {
+    !menu_plan_is_empty && decorations != Decorations::Full
+}
+
+/// Warn once per process that a menu bar on an undecorated window is unverified.
+static MENU_ON_UNDECORATED_WARNING: Once = Once::new();
+
 impl DesktopExtensions for WindowsExtensions {
     /// Claims the process's shell identity and installs the accelerator
     /// message hook.
@@ -146,11 +173,18 @@ impl DesktopExtensions for WindowsExtensions {
     }
 
     /// Attaches the configured window/taskbar icon — winit takes both only at
-    /// creation time.
+    /// creation time — then, for an undecorated window, the DWM shadow. The
+    /// order is icons first, shadow second, matching the order the attributes
+    /// are documented to accumulate in.
     fn on_window_attributes(&mut self, attributes: WindowAttributes) -> WindowAttributes {
-        match &self.window_icon {
+        let attributes = match &self.window_icon {
             Some(icon) => win32_glue::with_icons(attributes, icon),
             None => attributes,
+        };
+        if wants_undecorated_shadow(self.decorations) {
+            win32_glue::with_undecorated_shadow(attributes)
+        } else {
+            attributes
         }
     }
 
@@ -174,6 +208,15 @@ impl DesktopExtensions for WindowsExtensions {
         // `Arc<dyn MenuWaker>` needs the method call's inferred target type.
         bridge.set_waker(window.clone());
         menu::install_event_handler();
+        if menu_on_undecorated(self.menu_plan.is_empty(), self.decorations) {
+            MENU_ON_UNDECORATED_WARNING.call_once(|| {
+                log::warn!(
+                    "frust-shell-windows: a native menu bar on an undecorated window is \
+                     unverified (docs/LIMITATIONS.md: desktop-windows-menu-bar-undecorated-unverified); \
+                     installing it anyway"
+                );
+            });
+        }
         self.menu = menu::install(&self.menu_plan, window, &self.accelerators);
         self.sync_titlebar_theme();
     }
@@ -213,11 +256,15 @@ mod tests {
 
     #[test]
     fn a_default_config_configures_no_integration_at_all() {
-        let extensions = WindowsExtensions::new(&DesktopConfig::new());
+        let mut extensions = WindowsExtensions::new(&DesktopConfig::new());
         assert_eq!(extensions.app_id, None);
         assert_eq!(extensions.window_icon, None);
+        assert_eq!(extensions.decorations, Decorations::Full);
         // Nothing to install: the zero-config preview window keeps no menu bar.
         assert!(extensions.menu_plan.is_empty());
+        // The default frame keeps winit's own (shadowed) attributes.
+        let result = extensions.on_window_attributes(WindowAttributes::default());
+        assert!(result.decorations);
     }
 
     #[test]
@@ -227,6 +274,7 @@ mod tests {
             .with_app_name("Fake")
             .with_app_id("dev.frust.fake")
             .with_window_icon(icon.clone())
+            .with_decorations(Decorations::None)
             .with_menu_spec(
                 MenuSpec::new().with_item(MenuItemSpec::submenu(
                     "File",
@@ -239,6 +287,7 @@ mod tests {
 
         assert_eq!(extensions.app_id.as_deref(), Some("dev.frust.fake"));
         assert_eq!(extensions.window_icon, Some(icon));
+        assert_eq!(extensions.decorations, Decorations::None);
         assert!(!extensions.menu_plan.is_empty());
         assert!(extensions.menu_plan.activation_ids().contains("file.open"));
     }
@@ -250,6 +299,39 @@ mod tests {
         let result = extensions.on_window_attributes(attributes.clone());
         assert_eq!(result.title, attributes.title);
         assert!(result.window_icon.is_none());
+        assert_eq!(result.decorations, attributes.decorations);
+    }
+
+    #[test]
+    fn an_undecorated_window_keeps_its_title_and_frame_flag() {
+        // `WindowAttributes` exposes no getter for the DWM shadow (winit's
+        // `platform_specific` is crate-private), so on Windows the applied
+        // shadow cannot be read back here. Off Windows the hook is the
+        // pass-through stub, which is what this asserts; the frame drop itself
+        // is applied by the shared core, not this hook.
+        let config = DesktopConfig::new().with_decorations(Decorations::None);
+        let mut extensions = WindowsExtensions::new(&config);
+        let attributes = WindowAttributes::default().with_title("Frust");
+        let result = extensions.on_window_attributes(attributes.clone());
+        assert_eq!(result.title, attributes.title);
+        assert_eq!(result.decorations, attributes.decorations);
+    }
+
+    #[test]
+    fn only_an_undecorated_level_wants_the_dwm_shadow() {
+        assert!(!wants_undecorated_shadow(Decorations::Full));
+        assert!(wants_undecorated_shadow(Decorations::None));
+        assert!(wants_undecorated_shadow(Decorations::NoTitleBar));
+    }
+
+    #[test]
+    fn a_menu_on_an_undecorated_window_is_the_one_unverified_case() {
+        // (menu plan is empty, decorations) -> warn.
+        assert!(!menu_on_undecorated(true, Decorations::Full));
+        assert!(!menu_on_undecorated(true, Decorations::None));
+        assert!(!menu_on_undecorated(false, Decorations::Full));
+        assert!(menu_on_undecorated(false, Decorations::None));
+        assert!(menu_on_undecorated(false, Decorations::NoTitleBar));
     }
 
     #[test]

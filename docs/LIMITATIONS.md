@@ -2544,6 +2544,114 @@ does not close"); desktop-shells Phase A fix-round-1 task F2.
 
 ---
 
+### `desktop-decorations-creation-time-only` — the window frame style is fixed when the window is created
+
+**Observed**: `DesktopConfig::decorations` and `title_buttons` are read once, while the window
+attributes are built. There is no runtime setter, so an app cannot switch between `Full`, `None`
+and `NoTitleBar` after launch.
+
+**Applies to**: every desktop shell.
+
+**Why accepted**: the frame style changes the window's style mask, title-bar state and (on
+Windows) shadow, and none of that is verified to survive a live switch on all three OSes. Every
+known use picks one style at startup.
+
+**Evidence**: `crates/frust-shell-desktop/src/config.rs` (`Decorations` docs);
+`crates/frust-shell-desktop/src/app_handler.rs` (`apply_decorations`).
+
+**Trigger for removal**: an app that needs a live switch, and a gate showing the switch is sound on
+each OS.
+
+---
+
+### `desktop-window-commands-off-desktop-noop` — window commands do nothing off the desktop shell
+
+**Observed**: `push_window_command` only fills a process-global queue that the desktop shell
+drains. Mobile and web shells never drain it, so a command pushed there is never executed; the
+queue is bounded at 32 and, once full, drops the oldest non-`RequestClose` entry and logs one
+warning per process.
+
+**Applies to**: Android, iOS and web builds that share app code with a desktop build.
+
+**Why accepted**: window actions have no meaning on those shells, and a shared title-bar widget
+stays harmless there. `WindowState` is likewise absent, so an app reads it as an `Option`.
+
+**Evidence**: `crates/frust-core/src/window_control.rs` (queue, cap and overflow warning).
+
+---
+
+### `desktop-macos-begin-resize-unsupported` — `BeginResize` is a no-op on macOS
+
+**Observed**: winit's `drag_resize_window` returns `NotSupported` on macOS, so the executor logs
+one warning and does nothing. AppKit keeps its own edge resizing on both decoration levels, which
+covers the use (the macOS decorations gate checked both).
+
+**Applies to**: macOS desktop apps using `window_drag_region(..).resize(edge)` or
+`WindowCommand::BeginResize`.
+
+**Why accepted**: the OS already resizes from the window edges; an app hides its resize strips on
+macOS and while maximized or fullscreen.
+
+**Evidence**: `crates/frust-shell-desktop/src/window_control.rs` (`execute`);
+`crates/frust-widgets/src/window_drag_region.rs` module docs.
+
+---
+
+### `desktop-title-buttons-macos-best-effort` — traffic-light placement under `NoTitleBar` is best effort
+
+**Observed**: winit 0.30 has no API to place the macOS window buttons, so
+`frust-shell-macos::title_buttons` moves the three `NSButton`s inside their title-bar view by an
+AppKit technique AppKit does not support. It is re-applied on resize and fullscreen exit, skipped
+in fullscreen, and a hierarchy that differs from the assumed one leaves the buttons at the OS
+position with one warning.
+
+**Applies to**: macOS apps passing `TitleButtons` under `Decorations::NoTitleBar`.
+
+**Why accepted**: without it the buttons cannot be aligned with an app-drawn bar; the failure mode
+is the OS default position.
+
+**Evidence**: `crates/frust-shell-macos/src/title_buttons.rs` module docs.
+
+**Trigger for removal**: a winit release that exposes window-button placement.
+
+---
+
+### `desktop-windows-menu-bar-undecorated-unverified` — a menu bar on an undecorated Windows window is not drawn
+
+**Observed**: winit keeps `WS_CAPTION` on an undecorated window and zeroes its non-client area.
+`frust-shell-windows` still installs the `HMENU` (`GetMenu` returns it) and warns once, but the
+Windows gate saw no menu bar drawn, no space reserved, and nothing opening where it would sit.
+(The id keeps its historical `-unverified` suffix because the runtime warning cites it.)
+
+**Applies to**: Windows apps combining a native menu spec with `Decorations::None` or
+`NoTitleBar`.
+
+**Why accepted**: an app that draws its own title bar draws its own menu there; keyboard access to
+the hidden `HMENU` is untested.
+
+**Evidence**: Windows row of the decorations gate (SHELLS_DEVELOPMENT.md § Decorations and window
+commands); `crates/frust-shell-windows/src/lib.rs` (`menu_on_undecorated` and its warning).
+
+**Trigger for removal**: the shell skips the `HMENU` when undecorated, or the combination is
+documented as unsupported in the API.
+
+---
+
+### `desktop-linux-wayland-minimized-unreported` — `WindowState.minimized` is always `false` on Wayland
+
+**Observed**: Wayland gives a client no minimized state, so winit reports `is_minimized()` as
+unknown and the desktop shell publishes `minimized: false`. `WindowCommand::Minimize` works (the
+compositor hides the surface); restoring is the compositor's, not the app's.
+
+**Applies to**: Linux Wayland sessions reading `use_context::<WindowState>()`.
+
+**Why accepted**: a protocol limit, not a frust gap; X11, Windows and macOS report it.
+
+**Evidence**: Linux Wayland row of the decorations gate (SHELLS_DEVELOPMENT.md § Decorations and
+window commands); `crates/frust-shell-desktop/src/window_control.rs` (`is_minimized`).
+
+---
+
 ### `desktop-macos-reopen-gap-already-active` — Dock-click reopen does not re-show an already-active hidden window
 
 **Observed**: winit 0.30 owns `NSApplication`'s delegate and panics if replaced, so

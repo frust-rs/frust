@@ -984,6 +984,75 @@ fn bounds_of<S: 'static, V: View<S>>(root: &RenderRoot<S, V>, name: &str) -> Rec
         .unwrap_or_else(|| panic!("no laid-out {name}"))
 }
 
+/// Serializes the Desktop window-button test: the window-command queue is
+/// process-global, so another test draining it at the same time would race.
+static WINDOW_COMMANDS_LOCK: Mutex<()> = Mutex::new(());
+
+/// The `n`-th laid-out `ButtonWidget` in tree order (the Desktop page's six
+/// buttons: three dialog buttons, then the Window row).
+fn button_bounds<S: 'static, V: View<S>>(root: &RenderRoot<S, V>, n: usize) -> Rect {
+    root.inspect()
+        .iter()
+        .filter(|node| node.type_name.contains("ButtonWidget"))
+        .nth(n)
+        .map(|node| node.bounds)
+        .unwrap_or_else(|| panic!("no laid-out button {n}"))
+}
+
+/// The Desktop page's Window row, headless: Minimize, Maximize and Enter
+/// fullscreen each queue their command on a full tap, in press order. The
+/// harness has no `WindowState`, so the maximize button reads "Maximize" and
+/// the fullscreen button "Enter fullscreen" — the commands are the same as
+/// they would be with a live window whose flags are off.
+#[test]
+fn desktop_page_window_buttons_push_their_commands() {
+    use frust_core::{InputEvent, PointerButton, PointerEvent, PointerPhase, WindowCommand};
+
+    let _lock = WINDOW_COMMANDS_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    frust_core::take_window_commands();
+    let _owner = setup();
+    let mut tcx = TextContext::new();
+    let desktop_index = pages::section_index_for("desktop").expect("desktop is a known section");
+
+    let mut root: RenderRoot<PlaygroundState, AnyView<PlaygroundState>> = RenderRoot::new();
+    let mut state = PlaygroundState::new();
+    let mut logic = |s: &mut PlaygroundState| pages::current(desktop_index, s);
+    frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
+    assert_eq!(
+        root.inspect()
+            .iter()
+            .filter(|node| node.type_name.contains("ButtonWidget"))
+            .count(),
+        6,
+        "the Desktop page has three dialog buttons and three window buttons"
+    );
+
+    for n in [3, 4, 5] {
+        let at = button_bounds(&root, n).center();
+        for phase in [PointerPhase::Down, PointerPhase::Up] {
+            root.event(
+                &mut state,
+                &InputEvent::Pointer(PointerEvent {
+                    phase,
+                    position: at,
+                    button: PointerButton::Primary,
+                }),
+            );
+        }
+    }
+
+    assert_eq!(
+        frust_core::take_window_commands(),
+        vec![
+            WindowCommand::Minimize,
+            WindowCommand::ToggleMaximized,
+            WindowCommand::SetFullscreen(true),
+        ],
+    );
+}
+
 /// The "Slivers" section's one `custom_scroll_view`, headless: the Material
 /// bar is a real sliver (the viewport's own offset collapses it, and it stays
 /// pinned at the viewport's top at its collapsed band), a wheel step scrolls

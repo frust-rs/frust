@@ -5,7 +5,7 @@
 //! the frame pipeline, input/IME/theme translation, accessibility — and knows
 //! nothing about menu bars, Dock reopen semantics, taskbar identity, or
 //! `WM_CLASS`. [`DesktopExtensions`] is where that native half attaches: a
-//! trait of eight hooks, each with a no-op default, invoked at the points in the
+//! trait of nine hooks, each with a no-op default, invoked at the points in the
 //! loop where a platform integration has something to say. [`NoExtensions`]
 //! is the whole-set no-op, and is what [`run_desktop`](crate::run_desktop) —
 //! the zero-config dev preview — installs, so the preview path pays nothing for
@@ -23,12 +23,13 @@
 //!
 //! # Which hooks receive the window
 //!
-//! Two do. [`DesktopExtensions::on_window_created`] hands it over as an
+//! Three do. [`DesktopExtensions::on_window_created`] hands it over as an
 //! `&Arc<Window>` an extension is expected to **clone and retain** if it needs
 //! one later, and [`DesktopExtensions::on_platform_view_commands`] hands over
 //! the same handle again because it fires from inside the frame path, where this
 //! core is already holding a live window and a hosted native view must be
-//! parented into that exact one.
+//! parented into that exact one. [`DesktopExtensions::window_maximized`] takes
+//! it by reference too: a synchronous query answered from the live window.
 //!
 //! Every other hook is window-free, deliberately: the hooks that need a window
 //! (hide-on-close, titlebar theming) need it at a moment this core cannot always
@@ -79,7 +80,7 @@ pub enum CloseAction {
 /// shared winit core.
 ///
 /// Every method has a no-op default, so an implementation writes only the hooks
-/// it uses; [`NoExtensions`] implements none at all. The eight hooks, in the
+/// it uses; [`NoExtensions`] implements none at all. The nine hooks, in the
 /// order a running app meets them:
 ///
 /// 1. [`on_event_loop_builder`](Self::on_event_loop_builder) — before the loop
@@ -97,6 +98,8 @@ pub enum CloseAction {
 /// 7. [`on_platform_views_suspended`](Self::on_platform_views_suspended) — when
 ///    the window or its surface goes away and every hosted view must go with it.
 /// 8. [`on_close_requested`](Self::on_close_requested) — on a close request.
+/// 9. [`window_maximized`](Self::window_maximized) — whenever the core reads the
+///    window's maximized flag outside a window command.
 pub trait DesktopExtensions {
     /// Called with the winit event-loop builder, before `build()`.
     ///
@@ -234,6 +237,20 @@ pub trait DesktopExtensions {
     fn on_close_requested(&mut self) -> CloseAction {
         CloseAction::Exit
     }
+
+    /// Called wherever the core reads whether `window` is maximized: each
+    /// resize-driven window-state publish and the persistence snapshot.
+    ///
+    /// `None` (the default) means "ask winit". An extension returns `Some` when
+    /// winit's own answer has a side effect it cannot afford: on macOS winit's
+    /// `is_maximized` flips an undecorated window's style mask to read `isZoomed`,
+    /// and doing that on every `Resized` cancels AppKit's incremental edge-drag
+    /// resize. Must not change the window. Not consulted when executing a
+    /// maximize command, which reads winit directly at command time.
+    fn window_maximized(&mut self, window: &Window) -> Option<bool> {
+        let _ = window;
+        None
+    }
 }
 
 /// Whether overlay surfaces are on: `FRUST_OVERLAYS` (runtime env, then a
@@ -329,6 +346,7 @@ mod tests {
     struct SpyExtensions {
         calls: Vec<String>,
         close_action: Option<CloseAction>,
+        maximized: Option<bool>,
     }
 
     impl DesktopExtensions for SpyExtensions {
@@ -352,6 +370,11 @@ mod tests {
         fn on_close_requested(&mut self) -> CloseAction {
             self.calls.push("on_close_requested".to_string());
             self.close_action.unwrap_or(CloseAction::Exit)
+        }
+
+        fn window_maximized(&mut self, _window: &Window) -> Option<bool> {
+            self.calls.push("window_maximized".to_string());
+            self.maximized
         }
     }
 
@@ -406,6 +429,22 @@ mod tests {
         };
         assert_eq!(spy.on_close_requested(), CloseAction::KeepRunning);
         assert_eq!(spy.calls, vec!["on_close_requested"]);
+    }
+
+    #[test]
+    fn the_maximized_override_defaults_to_none_and_a_spy_can_supply_one() {
+        // `window_maximized` takes a `&Window`, which needs a live event loop,
+        // so only the default's *shape* is pinned here (the trait method exists
+        // with a body); the override threading is covered in `window_control`.
+        let _default: fn(&mut NoExtensions, &Window) -> Option<bool> =
+            <NoExtensions as DesktopExtensions>::window_maximized;
+        let _spy: fn(&mut SpyExtensions, &Window) -> Option<bool> =
+            <SpyExtensions as DesktopExtensions>::window_maximized;
+        let spy = SpyExtensions {
+            maximized: Some(true),
+            ..SpyExtensions::default()
+        };
+        assert_eq!(spy.maximized, Some(true));
     }
 
     #[test]
