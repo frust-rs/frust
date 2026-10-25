@@ -6,20 +6,29 @@
 //! Text on macOS with no registration) and a [`parley::LayoutContext`] scratch
 //! buffer reused across layout passes.
 //!
+//! # The font oracle beside parley
+//!
+//! It also owns the frust font oracle ([`crate::oracle::Oracle`], built with
+//! the platform backend for the target), which will replace fontique's
+//! collection as the shaper's font source. Until that switch both are live:
+//! parley still shapes through its own `FontContext`, and every app-font and
+//! generic-fallback registration goes through the oracle's registry, which
+//! mirrors it into parley's collection ([`ParleyMirror`]).
+//!
 //! # App fonts across independent contexts
 //!
 //! A shell owns *the* context widgets shape through at layout time, but a
 //! widget that must shape outside the layout pass legitimately owns a private
-//! one (`frust_widgets::textinput`). [`APP_FONTS`] is the process-wide record
-//! that keeps those two in agreement about registered app fonts — see its docs
-//! for the layering rationale.
+//! one (`frust_widgets::textinput`). The registry's process-wide app-font
+//! record (`oracle::registry`) keeps those two in agreement about registered
+//! app fonts — see its docs for the layering rationale.
 //!
 //! # Generic-family fallback registry
 //!
-//! [`GENERIC_FALLBACKS`] is the process-wide counterpart for the *generic*
-//! font-family map (fontique's `SystemUi`/`SansSerif`/`Monospace`/`Serif`/
-//! `Emoji` slots) rather than a named family — see [`register_generic_fallback`]
-//! for why a host needs this seam on `wasm32`.
+//! The registry's generic-fallback record is the process-wide counterpart for
+//! the *generic* font-family map (fontique's `SystemUi`/`SansSerif`/
+//! `Monospace`/`Serif`/`Emoji` slots) rather than a named family — see
+//! [`register_generic_fallback`] for why a host needs this seam on `wasm32`.
 //!
 //! # Han fallback on Apple targets
 //!
@@ -29,7 +38,6 @@
 //! [`append_han_fallbacks`] fills only the *empty* lists with Hiragino Sans (a
 //! partial-coverage stopgap; see LIMITATIONS id `ios-han-fallback-partial`).
 
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use parley::fontique::{Blob, GenericFamily};
@@ -37,6 +45,8 @@ use parley::style::StyleProperty;
 use peniko::Brush;
 
 use crate::layout::TextLayout;
+use crate::oracle::registry::{FamilySummary, RegistryMirror};
+use crate::oracle::{self, Oracle, RenderCapabilities};
 use crate::shape_cache::{DEFAULT_CAPACITY, ShapeCache, ShapeCacheStats, ShapeKey};
 use crate::style::{
     GenericSlot, TextOverflow, TextStyle, to_parley_align, to_parley_family, to_parley_line_height,
@@ -80,53 +90,12 @@ pub enum FontError {
     NoFacesFound,
 }
 
-/// The process-wide record of every font blob a [`TextContext::register_fonts`]
-/// call accepted, in registration order and **never drained**.
-///
-/// # Why this lives here
-///
-/// App fonts enter the framework through `frust::register_app_fonts`, whose
-/// pending-byte slot (`frust_shell_common::font_registry`) each shell drains —
-/// destructively — into the one shell-owned `TextContext`. That context is the
-/// one `LayoutCtx::text_context` threads to widgets during layout, so every
-/// widget shaping through it (`Text`) already sees app fonts. The gap is the
-/// widget that legitimately owns a *private* context: `TextInput` applies edits
-/// synchronously during the event pass, where no context is threaded (see
-/// `frust_widgets::textinput`'s module docs), and a private context built after
-/// the shell drained the pending slot would otherwise carry no app font at all.
-///
-/// `frust-widgets` cannot read the shell's slot — `frust-shell-common` sits
-/// *above* it (`docs/ARCHITECTURE.md`'s layer dependencies) — so the durable
-/// record lives at the one layer the shell drain and every widget both already
-/// depend on. Registering into any context records the blob here; every other
-/// context picks it up through [`TextContext::sync_app_fonts`], which
-/// [`TextContext::new`] calls for free.
-///
-/// Append-only by design: the payloads must survive to seed contexts created
-/// *later*, which is exactly what a drain-once slot cannot do. Blobs are
-/// `Arc`-backed, so seeding a fresh context costs a refcount bump plus
-/// fontique's own parse, never a copy of the font bytes.
-static APP_FONTS: Mutex<Vec<Blob<u8>>> = Mutex::new(Vec::new());
-
-/// One [`register_generic_fallback`] call's payload: the raw font bytes plus
-/// the generic slot(s) it should be appended to.
-struct PendingGenericFallback {
-    blob: Blob<u8>,
-    generics: Vec<GenericSlot>,
-}
-
-/// The process-wide record of every [`register_generic_fallback`] call
-/// accepted so far, in registration order and **never drained** — the
-/// generic-family counterpart of [`APP_FONTS`], applied by
-/// [`TextContext::sync_app_fonts`] (and so, for free, by [`TextContext::new`])
-/// to every context's `fontique::Collection` generic-family map rather than
-/// its named-family table.
-static GENERIC_FALLBACKS: Mutex<Vec<PendingGenericFallback>> = Mutex::new(Vec::new());
-
 /// Registers `data` (raw font bytes) as a fallback face for each generic
 /// family slot in `generics`, applied to every [`TextContext`] — existing,
 /// on its next [`TextContext::sync_app_fonts`], and future, seeded for free
-/// by [`TextContext::new`] — via `fontique::Collection::append_generic_families`.
+/// by [`TextContext::new`] — through the oracle's registry, which records it
+/// process-wide and mirrors it into parley's collection via
+/// `fontique::Collection::append_generic_families`.
 ///
 /// # Why this exists
 ///
@@ -151,14 +120,7 @@ static GENERIC_FALLBACKS: Mutex<Vec<PendingGenericFallback>> = Mutex::new(Vec::n
 /// this is a harmless no-op then too — the same "no error surface" contract
 /// [`TextContext::sync_app_fonts`] already follows for app fonts.
 pub fn register_generic_fallback(data: Vec<u8>, generics: &[GenericSlot]) {
-    if generics.is_empty() {
-        return;
-    }
-    let mut slot = GENERIC_FALLBACKS.lock().unwrap_or_else(|e| e.into_inner());
-    slot.push(PendingGenericFallback {
-        blob: Blob::from(data),
-        generics: generics.to_vec(),
-    });
+    oracle::registry::record_generic_fallback(data, generics);
 }
 
 /// Family names tried, in order, as the Han fallback on Apple targets.
@@ -167,16 +129,16 @@ const HAN_FALLBACK_CANDIDATES: &[&str] = &["Hiragino Sans", "Hiragino Kaku Gothi
 
 /// The Han-capable fallback keys: script `Hani` with no locale and each CJK
 /// locale fontique tracks, plus `Hant`/`Hans` for scripts that distinguish them.
-const HAN_FALLBACK_KEYS: &[(&str, Option<&str>)] = &[
-    ("Hani", None),
-    ("Hani", Some("zh-Hans")),
-    ("Hani", Some("zh-CN")),
-    ("Hani", Some("zh-Hant")),
-    ("Hani", Some("zh-TW")),
-    ("Hani", Some("zh-HK")),
-    ("Hani", Some("ja")),
-    ("Hant", None),
-    ("Hans", None),
+const HAN_FALLBACK_KEYS: &[([u8; 4], Option<&str>)] = &[
+    (*b"Hani", None),
+    (*b"Hani", Some("zh-Hans")),
+    (*b"Hani", Some("zh-CN")),
+    (*b"Hani", Some("zh-Hant")),
+    (*b"Hani", Some("zh-TW")),
+    (*b"Hani", Some("zh-HK")),
+    (*b"Hani", Some("ja")),
+    (*b"Hant", None),
+    (*b"Hans", None),
 ];
 
 /// Appends the first installed family of `candidates` to every Han fallback
@@ -201,7 +163,7 @@ pub(crate) fn append_han_fallbacks(
     };
     let mut filled = 0;
     for &(script, locale) in HAN_FALLBACK_KEYS {
-        let script = Script::from_str_unchecked(script);
+        let script = Script::from_bytes(script);
         let locale = locale.and_then(|l| Language::parse(l).ok());
         let key = FallbackKey::new(script, locale.as_ref());
         if collection.fallback_families(key).next().is_none()
@@ -227,43 +189,40 @@ fn generic_slot_to_parley(slot: GenericSlot) -> GenericFamily {
     }
 }
 
-/// Applies `entries[*watermark..]` to `font_ctx`'s generic-family map,
-/// registering each entry's face and appending it to every generic slot the
-/// entry requested, then advances `*watermark` to `entries.len()`. A no-op,
-/// returning `false`, when `*watermark` already equals `entries.len()`.
-///
-/// Pure over its arguments — no process-wide state — so [`TextContext`]'s
-/// [`TextContext::sync_app_fonts`] can drive it against the shared
-/// [`GENERIC_FALLBACKS`] record for production use, while a test drives it
-/// against a locally built `entries`/`watermark` pair to exercise the exact
-/// registration/append logic without leaking a face into the process-wide
-/// record — [`register_generic_fallback`] never drains, so a test call
-/// through the real seam would otherwise remain registered for, and change
-/// the font resolution of, every other `TextContext` built later in the same
-/// test binary process.
-fn apply_generic_fallbacks(
-    font_ctx: &mut parley::FontContext,
-    entries: &[PendingGenericFallback],
-    watermark: &mut usize,
-) -> bool {
-    if *watermark == entries.len() {
-        return false;
+/// Mirrors the oracle registry's registrations into parley's fontique
+/// collection, which still does the shaping until the oracle feeds the shaper.
+pub(crate) struct ParleyMirror<'a>(pub(crate) &'a mut parley::FontContext);
+
+impl RegistryMirror for ParleyMirror<'_> {
+    fn app_font(&mut self, blob: &Blob<u8>) -> Vec<FamilySummary> {
+        let collection = &mut self.0.collection;
+        let registered = collection.register_fonts(blob.clone(), None);
+        registered
+            .into_iter()
+            .map(|(family_id, faces)| FamilySummary {
+                name: collection
+                    .family_name(family_id)
+                    .unwrap_or_default()
+                    .to_string(),
+                face_count: faces.len(),
+            })
+            .collect()
     }
-    let mut applied = false;
-    for entry in &entries[*watermark..] {
-        let registered = font_ctx.collection.register_fonts(entry.blob.clone(), None);
-        for (family_id, _faces) in registered {
+
+    fn generic_fallback(&mut self, blob: &Blob<u8>, generics: &[GenericSlot]) -> bool {
+        let collection = &mut self.0.collection;
+        let mut applied = false;
+        for (family_id, _faces) in collection.register_fonts(blob.clone(), None) {
             applied = true;
-            for &generic in &entry.generics {
-                font_ctx.collection.append_generic_families(
+            for &generic in generics {
+                collection.append_generic_families(
                     generic_slot_to_parley(generic),
                     std::iter::once(family_id),
                 );
             }
         }
+        applied
     }
-    *watermark = entries.len();
-    applied
 }
 
 /// Owns parley's font matching and layout scratch state.
@@ -280,16 +239,10 @@ pub struct TextContext {
     /// line-breaking only and repeated content shapes once. See
     /// [`crate::shape_cache`].
     shape_cache: ShapeCache,
-    /// How many of [`APP_FONTS`]' blobs this context has already registered —
-    /// its watermark into that append-only record. Bumped by
-    /// [`Self::sync_app_fonts`] and [`Self::register_fonts`].
-    app_fonts_applied: usize,
-    /// How many of [`GENERIC_FALLBACKS`]' entries this context has already
-    /// applied — its watermark into that append-only record, mirroring
-    /// `app_fonts_applied`. Bumped by [`Self::sync_app_fonts`] only; unlike an
-    /// app font, a generic fallback has no direct `register_*` method of its
-    /// own on `TextContext`.
-    generic_fallbacks_applied: usize,
+    /// The frust font oracle: platform backend, fallback cache, and this
+    /// context's app-font registry (with its watermarks into the process-wide
+    /// app-font and generic-fallback records).
+    oracle: Oracle,
     /// How many [`Self::measure_uncached`] passes this context has run — the
     /// observable hook the truncation walk's measurement bound is asserted
     /// against (an uncached measure is invisible to [`ShapeCacheStats`], which
@@ -376,7 +329,9 @@ fn proportional_estimate(span: usize, target: f32, measured: f32) -> usize {
 /// Where [`TextContext::new_with_timings`] spent its time (startup evidence).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NewTimings {
-    /// `parley::FontContext::new` — the platform font-source scan.
+    /// The font system's start-up: the oracle's construction, dominated by its
+    /// persistent fallback-cache read, plus — while parley still shapes —
+    /// `parley::FontContext::new`'s platform font-source scan.
     pub font_system: Duration,
     /// [`TextContext::sync_app_fonts`] — seeding the app fonts and generic fallbacks.
     pub app_sync: Duration,
@@ -392,29 +347,62 @@ impl TextContext {
     ///
     /// The seeding step ([`Self::sync_app_fonts`]) is what makes a *private*
     /// context (a `TextInput`'s) shape with the same app fonts the shell-owned
-    /// context does, however late it is constructed — see [`APP_FONTS`]. It
-    /// also applies every pending [`register_generic_fallback`] entry, so a
-    /// generic-family fallback a shell registered before this call is already
-    /// live in the returned context — see [`GENERIC_FALLBACKS`].
+    /// context does, however late it is constructed — see the oracle
+    /// registry's app-font record. It also applies every pending
+    /// [`register_generic_fallback`] entry, so a generic-family fallback a
+    /// shell registered before this call is already live in the returned
+    /// context.
+    ///
+    /// The context's font oracle is built with this target's platform backend
+    /// and the default [`RenderCapabilities`]; [`Self::with_capabilities`]
+    /// takes others.
     pub fn new() -> Self {
         Self::new_with_timings().0
+    }
+
+    /// [`Self::new`] for an engine that draws a different set of glyph formats
+    /// than today's default (see [`RenderCapabilities`]): the font oracle
+    /// refuses faces the engine cannot draw rather than handing them to it.
+    pub fn with_capabilities(capabilities: RenderCapabilities) -> Self {
+        Self::build(capabilities).0
     }
 
     /// [`Self::new`] that also reports where its time went. `new` delegates
     /// here, so the work and its order are identical.
     pub fn new_with_timings() -> (Self, NewTimings) {
+        Self::build(RenderCapabilities::default())
+    }
+
+    /// What frust-engine can draw, as this context's font oracle assumes.
+    pub fn render_capabilities(&self) -> RenderCapabilities {
+        self.oracle.capabilities()
+    }
+
+    fn build(capabilities: RenderCapabilities) -> (Self, NewTimings) {
         let font_started = Instant::now();
         #[allow(unused_mut)]
         let mut font_ctx = parley::FontContext::new();
         #[cfg(target_vendor = "apple")]
         append_han_fallbacks(&mut font_ctx.collection, HAN_FALLBACK_CANDIDATES);
-        let font_system = font_started.elapsed();
+        let parley_scan = font_started.elapsed();
+        // Tests never touch the user's cache directory.
+        let persist = if cfg!(test) {
+            None
+        } else {
+            oracle::persistent_cache_path()
+        };
+        let oracle_started = Instant::now();
+        let oracle = Oracle::new(oracle::platform_backend(), capabilities, persist);
+        let font_system = parley_scan + oracle_started.elapsed();
+        log::trace!(
+            "frust-text: font system {font_system:?} (oracle cache read {:?})",
+            oracle.cache_read_time()
+        );
         let mut cx = Self {
             font_ctx,
             layout_ctx: parley::LayoutContext::new(),
             shape_cache: ShapeCache::new(DEFAULT_CAPACITY),
-            app_fonts_applied: 0,
-            generic_fallbacks_applied: 0,
+            oracle,
             #[cfg(test)]
             measurements: 0,
         };
@@ -767,11 +755,15 @@ impl TextContext {
     /// collection) so they resolve by family name via
     /// [`crate::FontFamily::named`]/[`crate::FontFamily::stack`].
     ///
-    /// Wraps fontique's [`parley::fontique::Collection::register_fonts`]. A
-    /// registered family **shadows** a same-named system family (fontique
-    /// 0.11 semantics: the registered map is checked before the system map),
-    /// so bundling a family already present on the platform (e.g. "Roboto")
-    /// deterministically wins over the platform's own copy.
+    /// Registers into the font oracle's app-font registry (parsed with
+    /// read-fonts), which mirrors the bytes into parley's fontique collection
+    /// ([`parley::fontique::Collection::register_fonts`]) while parley still
+    /// shapes. A registered family **shadows** a same-named system family in
+    /// both (fontique 0.11: the registered map is checked before the system
+    /// map; the oracle: app faces before the system, and a provided family is
+    /// never asked of the system), so bundling a family already present on the
+    /// platform (e.g. "Roboto") deterministically wins over the platform's own
+    /// copy. The returned names are fontique's when it registered the bytes.
     ///
     /// Always clears the shape cache on success — a same-named registered
     /// family changes shaping without changing the cache key, so any layout
@@ -787,56 +779,31 @@ impl TextContext {
     /// next layout pass re-shapes against the newly registered faces. This
     /// crate only owns the shape-cache half of that contract.
     ///
-    /// An accepted payload is also recorded process-wide ([`APP_FONTS`]), so
-    /// every `TextContext` constructed later — and every existing one that
-    /// calls [`Self::sync_app_fonts`] — resolves the same family. That is what
-    /// carries an app font from a shell's drain into a widget-owned private
-    /// context.
+    /// An accepted payload is also recorded process-wide (the registry's
+    /// app-font record), so every `TextContext` constructed later — and every
+    /// existing one that calls [`Self::sync_app_fonts`] — resolves the same
+    /// family. That is what carries an app font from a shell's drain into a
+    /// widget-owned private context.
     pub fn register_fonts(&mut self, data: Vec<u8>) -> Result<Vec<RegisteredFamily>, FontError> {
         let blob = Blob::from(data);
-
-        // Held across the registration below so the watermark this sets cannot
-        // skip a blob another context records concurrently.
-        let mut slot = APP_FONTS.lock().unwrap_or_else(|e| e.into_inner());
-        // Catch up first: this context may be behind the record (another
-        // context registered since it was built), and the watermark below
-        // would otherwise declare those blobs applied without applying them.
-        for missed in &slot[self.app_fonts_applied..] {
-            let _ = self
-                .font_ctx
-                .collection
-                .register_fonts(missed.clone(), None);
-        }
-        self.app_fonts_applied = slot.len();
-
-        let registered = self.font_ctx.collection.register_fonts(blob.clone(), None);
-        if registered.is_empty() {
-            return Err(FontError::NoFacesFound);
-        }
-        slot.push(blob);
-        self.app_fonts_applied = slot.len();
-        drop(slot);
-
-        let families = registered
+        let families = self
+            .oracle
+            .registry_mut()
+            .register(blob, &mut ParleyMirror(&mut self.font_ctx))
+            .map_err(|_| FontError::NoFacesFound)?
             .into_iter()
-            .map(|(family_id, faces)| RegisteredFamily {
-                name: self
-                    .font_ctx
-                    .collection
-                    .family_name(family_id)
-                    .unwrap_or_default()
-                    .to_string(),
-                face_count: faces.len(),
+            .map(|family| RegisteredFamily {
+                name: family.name,
+                face_count: family.face_count,
             })
             .collect();
-
         self.clear_shape_cache();
         Ok(families)
     }
 
-    /// Registers every app font this context is missing (see [`APP_FONTS`])
-    /// and applies every [`register_generic_fallback`] entry it is missing
-    /// (see [`GENERIC_FALLBACKS`]), returning whether either actually
+    /// Registers every app font this context is missing and applies every
+    /// [`register_generic_fallback`] entry it is missing (the oracle
+    /// registry's process-wide records), returning whether either actually
     /// changed this context's resolution.
     ///
     /// Cheap when there is nothing to do — a lock and a length compare per
@@ -850,52 +817,14 @@ impl TextContext {
     /// layout retained *outside* it (a [`crate::TextEditor`]'s parley layout)
     /// must be re-shaped by its owner.
     pub fn sync_app_fonts(&mut self) -> bool {
-        let mut applied = self.sync_generic_fallbacks();
-
-        let slot = APP_FONTS.lock().unwrap_or_else(|e| e.into_inner());
-        if self.app_fonts_applied != slot.len() {
-            for blob in &slot[self.app_fonts_applied..] {
-                if !self
-                    .font_ctx
-                    .collection
-                    .register_fonts(blob.clone(), None)
-                    .is_empty()
-                {
-                    applied = true;
-                }
-            }
-            self.app_fonts_applied = slot.len();
-        }
-        drop(slot);
-
+        let applied = self
+            .oracle
+            .registry_mut()
+            .sync(&mut ParleyMirror(&mut self.font_ctx));
         if applied {
             self.clear_shape_cache();
         }
         applied
-    }
-
-    /// Applies every [`GENERIC_FALLBACKS`] entry this context is missing,
-    /// appending each face's registered family(ies) to every generic slot the
-    /// entry requested. Idempotent: an entry already applied to this context
-    /// (tracked by [`Self::generic_fallbacks_applied`], a watermark into that
-    /// append-only record, exactly like [`Self::app_fonts_applied`]) is never
-    /// re-registered, so a repeated [`Self::sync_app_fonts`] call never
-    /// double-appends the same family into a generic slot's fallback list.
-    ///
-    /// Returns whether at least one face actually registered — the same
-    /// signal [`Self::sync_app_fonts`] folds together with the app-font half
-    /// to decide whether to clear the shape cache.
-    ///
-    /// Thin wrapper over [`apply_generic_fallbacks`], the pure logic this
-    /// drives against the process-wide [`GENERIC_FALLBACKS`] record — see
-    /// that function's docs for why the split exists.
-    fn sync_generic_fallbacks(&mut self) -> bool {
-        let slot = GENERIC_FALLBACKS.lock().unwrap_or_else(|e| e.into_inner());
-        apply_generic_fallbacks(
-            &mut self.font_ctx,
-            &slot,
-            &mut self.generic_fallbacks_applied,
-        )
     }
 
     /// Drops every cached shaped layout, forcing the next [`Self::layout`]
@@ -934,6 +863,7 @@ mod tests {
     use super::*;
     use crate::shape_cache::DEFAULT_CAPACITY;
     use peniko::Color;
+    use std::sync::Mutex;
 
     #[test]
     fn new_with_timings_builds_the_same_context_as_new() {
@@ -1017,20 +947,20 @@ mod tests {
     /// reproduce the defect this seam fixes.
     #[test]
     fn generic_fallback_maps_requested_slots_and_is_idempotent() {
+        use crate::oracle::registry::PendingGenericFallback;
         use parley::fontique::{Collection, CollectionOptions, GenericFamily};
 
-        // Entries built locally, driven straight through `apply_generic_fallbacks`
-        // rather than the real `register_generic_fallback` seam — that seam
-        // writes to the process-wide `GENERIC_FALLBACKS` record, which is
-        // never drained, so a real call here would keep applying this face to
-        // every other test's (real-system-font) `TextContext` built later in
-        // this same test binary process and could change which face they
-        // resolve. See `apply_generic_fallbacks`'s docs.
+        // Entries built locally, driven straight through the registry's
+        // `apply_generic_entries` rather than the real
+        // `register_generic_fallback` seam — that seam writes to the
+        // process-wide generic-fallback record, which is never drained, so a
+        // real call here would keep applying this face to every other test's
+        // (real-system-font) `TextContext` built later in this same test
+        // binary process and could change which face they resolve.
         let entries = vec![PendingGenericFallback {
             blob: Blob::from(TUFFY.to_vec()),
             generics: vec![GenericSlot::SystemUi, GenericSlot::SansSerif],
         }];
-        let mut watermark = 0;
 
         // A systemless collection: fontique's own stand-in for the wasm32
         // dummy backend's empty generic-family map.
@@ -1041,8 +971,15 @@ mod tests {
             }),
             source_cache: Default::default(),
         };
+        let mut oracle = Oracle::new(
+            oracle::platform_backend(),
+            RenderCapabilities::default(),
+            None,
+        );
 
-        let applied = apply_generic_fallbacks(&mut font_ctx, &entries, &mut watermark);
+        let applied = oracle
+            .registry_mut()
+            .apply_generic_entries(&entries, &mut ParleyMirror(&mut font_ctx));
         assert!(
             applied,
             "registering a parseable face must report at least one applied family"
@@ -1065,6 +1002,13 @@ mod tests {
                 .is_none(),
             "Monospace must stay unmapped — only SystemUi/SansSerif were requested"
         );
+        // The oracle sees the same face (the platform backends are stubs, so
+        // the app generic fallback is the answer).
+        let face = oracle
+            .default_face(GenericSlot::SystemUi)
+            .expect("the oracle resolves SystemUi to the registered fallback");
+        assert_eq!(face.blob.data(), TUFFY);
+        assert!(oracle.default_face(GenericSlot::Monospace).is_none());
 
         // The defect under test: SystemUi-styled text on an otherwise-empty
         // system collection must still shape into glyph runs.
@@ -1072,8 +1016,7 @@ mod tests {
             font_ctx,
             layout_ctx: parley::LayoutContext::new(),
             shape_cache: ShapeCache::new(DEFAULT_CAPACITY),
-            app_fonts_applied: 0,
-            generic_fallbacks_applied: watermark,
+            oracle,
             #[cfg(test)]
             measurements: 0,
         };
@@ -1087,7 +1030,10 @@ mod tests {
 
         // Idempotence: a second apply with nothing new pending must not
         // re-append the same family into the generic-family list.
-        let applied_again = apply_generic_fallbacks(&mut cx.font_ctx, &entries, &mut watermark);
+        let applied_again = cx
+            .oracle
+            .registry_mut()
+            .apply_generic_entries(&entries, &mut ParleyMirror(&mut cx.font_ctx));
         assert!(
             !applied_again,
             "nothing new is pending — a repeat apply must be a no-op"
@@ -1106,23 +1052,52 @@ mod tests {
     #[test]
     fn register_generic_fallback_is_a_noop_with_no_generics() {
         // Deliberately the *empty-generics* case only: `register_generic_fallback`
-        // writes to the process-wide, never-drained `GENERIC_FALLBACKS` record,
+        // writes to the process-wide, never-drained generic-fallback record,
         // so a call naming a real slot here would keep applying for the rest of
-        // this test binary's run — see `apply_generic_fallbacks`'s docs and the
-        // isolated-collection test above, which exercises the real
-        // registration/append behavior without that leak.
-        let before = GENERIC_FALLBACKS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .len();
+        // this test binary's run — see the isolated-collection test above,
+        // which exercises the real registration/append behavior without that
+        // leak.
+        let before = oracle::registry::generic_fallback_count();
         register_generic_fallback(vec![1, 2, 3], &[]);
-        let after = GENERIC_FALLBACKS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .len();
         assert_eq!(
-            before, after,
+            before,
+            oracle::registry::generic_fallback_count(),
             "no generic slots requested — nothing should be queued"
+        );
+    }
+
+    #[test]
+    fn a_registered_app_font_reaches_the_oracle_too() {
+        let mut cx = TextContext::new();
+        let families = cx
+            .register_fonts(TUFFY.to_vec())
+            .expect("valid TTF bytes must register");
+        assert_eq!(families[0].name, "Tuffy");
+        let request = crate::oracle::FallbackRequest::new(
+            "0123",
+            crate::oracle::ScriptTag(*b"Zyyy"),
+            &crate::FontFamily::named("Tuffy"),
+            cx.render_capabilities(),
+        );
+        let face = cx
+            .oracle
+            .resolve(&request)
+            .expect("the oracle resolves the app family");
+        assert_eq!(face.blob.data(), TUFFY);
+        assert_eq!(cx.oracle.stats().app_hits, 1);
+    }
+
+    #[test]
+    fn with_capabilities_reaches_the_oracle() {
+        let caps = RenderCapabilities {
+            bitmap: false,
+            ..RenderCapabilities::default()
+        };
+        let cx = TextContext::with_capabilities(caps);
+        assert_eq!(cx.render_capabilities(), caps);
+        assert_eq!(
+            TextContext::new().render_capabilities(),
+            RenderCapabilities::default()
         );
     }
 
@@ -2030,7 +2005,7 @@ mod tests {
     fn han_key(locale: Option<&str>) -> parley::fontique::FallbackKey {
         let locale = locale.and_then(|l| parley::fontique::Language::parse(l).ok());
         parley::fontique::FallbackKey::new(
-            parley::fontique::Script::from_str_unchecked("Hani"),
+            parley::fontique::Script::from_bytes(*b"Hani"),
             locale.as_ref(),
         )
     }
