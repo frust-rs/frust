@@ -32,7 +32,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use frust_drive::build_info::BuildMode;
-use frust_drive::process::{FakeProcessRunner, ProcessRunner};
+use frust_drive::process::{FakeProcessRunner, Output, ProcessRunner};
 use frust_mcp::engine::RunTarget;
 use frust_mcp::{ClientRegistry, SharedBackend};
 use frust_tui::engine::{AppState, DevtoolsLaunch, Effect, Engine, Message, Screen, SessionTarget};
@@ -57,6 +57,21 @@ const DEADLINE: Duration = Duration::from_secs(20);
 /// matching and the test fails loudly rather than silently launching nothing.
 const DEBUG_DESKTOP_INVOCATION: &str =
     "cargo run --features frust/perf-trace --features frust/devtools";
+
+/// A fake runner whose dependency-graph resolve succeeds: a Debug desktop
+/// session runs `cargo metadata --format-version 1 ..` (matched here as a
+/// prefix, whatever the feature list) on its own thread before `cargo run`,
+/// and an unscripted resolve would end the session before it launched.
+fn resolving_runner() -> FakeProcessRunner {
+    FakeProcessRunner::new().with(
+        "cargo metadata --format-version 1",
+        Output {
+            success: true,
+            stdout: "{}".to_string(),
+            stderr: String::new(),
+        },
+    )
+}
 
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 
@@ -444,8 +459,7 @@ async fn start_embedded(
 async fn an_agent_drives_the_workbenchs_own_sessions() {
     let project_root = PathBuf::from("/tmp/frust-tui-mcp-embedded-test");
     let runner: Arc<dyn ProcessRunner + Send + Sync> = Arc::new(
-        FakeProcessRunner::new()
-            .with_hanging_stream(DEBUG_DESKTOP_INVOCATION, ["     Running `app`"]),
+        resolving_runner().with_hanging_stream(DEBUG_DESKTOP_INVOCATION, ["     Running `app`"]),
     );
     let workbench = Workbench::start(project_root.clone(), runner);
     let (addr, cancel) = start_embedded(workbench.backend(), ClientRegistry::new()).await;
@@ -547,8 +561,7 @@ async fn the_backend_reports_the_project_the_workbench_is_on_right_now() {
 async fn devtools_backed_tools_report_the_embedded_mode_refusal() {
     let project_root = PathBuf::from("/tmp/frust-tui-mcp-embedded-devtools-test");
     let runner: Arc<dyn ProcessRunner + Send + Sync> = Arc::new(
-        FakeProcessRunner::new()
-            .with_hanging_stream(DEBUG_DESKTOP_INVOCATION, ["     Running `app`"]),
+        resolving_runner().with_hanging_stream(DEBUG_DESKTOP_INVOCATION, ["     Running `app`"]),
     );
     let workbench = Workbench::start(project_root, runner);
     let (addr, cancel) = start_embedded(workbench.backend(), ClientRegistry::new()).await;
@@ -793,8 +806,7 @@ async fn wait_for_clients(engine: &Engine, expected: usize) {
 async fn a_second_run_app_onto_a_running_target_is_refused_and_registers_nothing() {
     let project_root = PathBuf::from("/tmp/frust-tui-mcp-embedded-duplicate-test");
     let runner: Arc<dyn ProcessRunner + Send + Sync> = Arc::new(
-        FakeProcessRunner::new()
-            .with_hanging_stream(DEBUG_DESKTOP_INVOCATION, ["     Running `app`"]),
+        resolving_runner().with_hanging_stream(DEBUG_DESKTOP_INVOCATION, ["     Running `app`"]),
     );
     let workbench = Workbench::start(project_root, runner);
     let backend = workbench.backend();
@@ -870,8 +882,7 @@ async fn a_second_run_app_onto_a_running_target_is_refused_and_registers_nothing
 async fn a_user_started_session_on_the_target_refuses_an_agents_restart() {
     let project_root = PathBuf::from("/tmp/frust-tui-mcp-embedded-user-session-test");
     let runner: Arc<dyn ProcessRunner + Send + Sync> = Arc::new(
-        FakeProcessRunner::new()
-            .with_hanging_stream(DEBUG_DESKTOP_INVOCATION, ["     Running `app`"]),
+        resolving_runner().with_hanging_stream(DEBUG_DESKTOP_INVOCATION, ["     Running `app`"]),
     );
     let workbench = Workbench::start(project_root.clone(), runner);
     let backend = workbench.backend();
@@ -935,8 +946,7 @@ async fn a_user_started_session_on_the_target_refuses_an_agents_restart() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_launchs_registration_is_applied_before_its_already_queued_events() {
     let runner: Arc<dyn ProcessRunner + Send + Sync> = Arc::new(
-        FakeProcessRunner::new()
-            .with_hanging_stream(DEBUG_DESKTOP_INVOCATION, ["     Running `app`"]),
+        resolving_runner().with_hanging_stream(DEBUG_DESKTOP_INVOCATION, ["     Running `app`"]),
     );
     let workbench = Workbench::start_holding_launches(
         PathBuf::from("/tmp/frust-tui-mcp-embedded-ordering-test"),

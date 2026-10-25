@@ -1472,12 +1472,14 @@ fn spawn_device_discovery(tx: UnboundedSender<Message>) {
 
 /// Launch one supervised session per spec (the run-config modal's checked
 /// targets), registering each successfully-started session back into the model
-/// so its events have a home. A spec that fails to start (e.g. a desktop
-/// `cargo run` that can't spawn) is skipped and reported as a warn toast —
-/// stderr is invisible under the raw-mode TUI, and on the restart path the
-/// tab being replaced is already gone, so a silent skip would leave the user
-/// with no tab and no explanation. A device pipeline that fails mid-build
-/// instead surfaces the error as a line in its own session tab.
+/// so its events have a home. A spec that fails to start (e.g. a Release
+/// desktop `cargo run` that can't spawn) is skipped and reported as a warn
+/// toast — stderr is invisible under the raw-mode TUI, and on the restart path
+/// the tab being replaced is already gone, so a silent skip would leave the
+/// user with no tab and no explanation. A device pipeline that fails mid-build,
+/// and a Debug/Profile desktop session whose dependency-graph resolve or
+/// late `cargo run` spawn fails on its own thread, instead surface the error
+/// as a line in their own session tab.
 fn launch_sessions(
     specs: Vec<SessionSpec>,
     supervisor: &mut Supervisor,
@@ -4820,10 +4822,12 @@ mod tests {
         let (tx, mut rx) = unbounded_channel();
         let mut next_adhoc_id = MAX_ADHOC_SESSION_ID;
         let mut records = McpSessionRecords::new();
-        records.insert(
-            SessionId(7),
-            watch_desktop_spec(Path::new("/tmp/frust-restart-spawn-failure")),
-        );
+        // Release: a Debug/Profile desktop session resolves its dependency
+        // graph on its own thread and spawns `cargo run` there, so a spawn
+        // failure reaches its tab as a line rather than failing the start.
+        let mut spec = watch_desktop_spec(Path::new("/tmp/frust-restart-spawn-failure"));
+        spec.build.mode = BuildMode::Release;
+        records.insert(SessionId(7), spec);
         let backend: SharedBackend = Arc::new(TuiSessionBackend::new(
             tx.clone(),
             Arc::new(FakeProcessRunner::new()),
@@ -5000,11 +5004,24 @@ mod tests {
 
         let root = watch_scratch_dir("restart-reenable");
         let mut engine = Engine::new(AppState::default());
-        let runner = Arc::new(FakeProcessRunner::new().with_stream(
-            "cargo run --features frust/perf-trace --features frust/devtools",
-            ["   Compiling app", "     Running `app`"],
-            true,
-        ));
+        // The relaunch resolves the app's dependency graph on its session
+        // thread before `cargo run`.
+        let runner = Arc::new(
+            FakeProcessRunner::new()
+                .with(
+                    "cargo metadata --format-version 1",
+                    frust_drive::process::Output {
+                        success: true,
+                        stdout: "{}".to_string(),
+                        stderr: String::new(),
+                    },
+                )
+                .with_stream(
+                    "cargo run --features frust/perf-trace --features frust/devtools",
+                    ["   Compiling app", "     Running `app`"],
+                    true,
+                ),
+        );
         let (mut supervisor, _events) = Supervisor::new(runner.clone());
         let mut devtools = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
         let mut metrics = MetricsBridge::new(Arc::new(FakeProcessRunner::new()));

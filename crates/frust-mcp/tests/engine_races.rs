@@ -16,7 +16,9 @@ use std::thread;
 mod common;
 
 use anyhow::Result;
-use common::{DEADLINE, DEBUG_DESKTOP_INVOCATION, TEST_PROJECT_ROOT, await_snapshot};
+use common::{
+    DEADLINE, DEBUG_DESKTOP_INVOCATION, TEST_PROJECT_ROOT, await_snapshot, resolving_runner,
+};
 use frust_drive::build_info::BuildMode;
 use frust_drive::process::{
     FakeProcessRunner, LineReceiver, Output, ProcessRunner, StreamHandle, TryRecvError,
@@ -87,7 +89,7 @@ impl ProcessRunner for RecordingRunner {
 /// and then hangs, plus the spawned-stream channel.
 fn recording_engine(lines: Vec<String>) -> (SessionEngine, Receiver<LineReceiver>) {
     let (runner, spawned) = RecordingRunner::new(
-        FakeProcessRunner::new().with_hanging_stream(DEBUG_DESKTOP_INVOCATION, lines),
+        resolving_runner().with_hanging_stream(DEBUG_DESKTOP_INVOCATION, lines),
     );
     (
         SessionEngine::with_runner(TEST_PROJECT_ROOT, runner),
