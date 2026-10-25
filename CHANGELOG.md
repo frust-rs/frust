@@ -65,6 +65,10 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   into a window move (double press toggles maximize) or, with `.resize(edge)`, a resize drag.
 - `examples/custom-titlebar` draws a title bar with the window controls; the playground has a
   Window row for minimize, maximize-restore, fullscreen and the live `WindowState` readout.
+- `frust new` apps declare a `frust-debug` feature (never passed by frust) so `Cargo.lock` pins
+  `frust-hotpatch`, `frust-devtools` and `frust-devtools-protocol`; an existing app can opt in with
+  the one line `frust-debug = ["frust/perf-trace", "frust/devtools", "frust/hotpatch"]` in
+  `[features]` (its own dependency key if it renamed `frust`).
 
 ### Changed
 
@@ -91,6 +95,8 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   to the app's spec after a ~250 ms settle, so apps must confirm in `on_tab_select`.
 - `examples/native-widgets-demo` is rewritten as four native-chrome tabs (Home, Controls, Dialogs,
   Lab); the `section/<label>` deep links still work and `tab/<slug>` opens a tab.
+- In the TUI, a Debug/Profile desktop session that cannot spawn `cargo run` reports it in the
+  session tab instead of a toast.
 
 ### Fixed
 
@@ -105,6 +111,11 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `.notdef` (`ios-han-fallback-partial`). `frust-text` now logs a warning once per font when
   visible text shapes to `.notdef`, and `frust_text::notdef_glyph_count()` reports the process
   total.
+- The first Debug/Profile or hot build after a frust release no longer fails with `failed to select
+  a version for the requirement frust-hotpatch/frust-devtools ...` when the machine's crates.io
+  index cache predates the release: the CLI, TUI and MCP server run a cargo-resolve preflight
+  (`frust_drive::lock_refresh`) that refreshes those index entries (manifest untouched) and
+  otherwise prints the exact remedy.
 
 ## 0.6.3 — 2026-10-20
 
