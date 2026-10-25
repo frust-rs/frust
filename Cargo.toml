@@ -42,6 +42,18 @@ web-time = "1.1.0"
 console_log = "1.0.0"
 console_error_panic_hook = "0.1.7"
 parley = "0.11.1"
+# Exact pins (pre-1.0): frust-text's font-oracle shaping engine. fontique/parley_data 0.12.0 sit beside
+# parley 0.11.1's 0.11.1 copies until parley retires (expected duplicates).
+parley_engine = "=0.12.0"
+# No `system` feature: the oracle owns the OS backends, so fontique 0.12 never scans system fonts.
+fontique = { version = "=0.12.0", default-features = false }
+# cmap/name/OS2 parsing for the app-font registry and coverage checks; must unify with the 0.41.0
+# skrifa 0.44 / glifo already lock (one read-fonts on every graph).
+read-fonts = { version = "0.41", default-features = false, features = ["std"] }
+# The Linux/BSD oracle backend's fontconfig binding; fontique 0.11.1's locked version, used `dlopen`.
+yeslogic-fontconfig-sys = "=6.0.1"
+# The DirectWrite oracle backend's raw-dylib linkage; the 0.2 line is already locked.
+windows-link = "0.2"
 peniko = "0.6.1"
 kurbo = "0.13.1"
 tree_arena = "0.2.0"
