@@ -14,8 +14,9 @@
 //! exercises each one against a known string, the guard against the
 //! wrong-slot bug class), and a [`ComPtr`] guard that releases on drop.
 //!
-//! The scale factor `MapCharacters` reports is not carried on `FaceSource`
-//! (it has no field for it); it is read and exposed to this module's tests only.
+//! The scale factor `MapCharacters` reports travels on `FaceSource::scale`. The
+//! PostScript name stays `None`: reading it needs `GetInformationalStrings`, a
+//! vtable slot this module does not declare, so it is not cheaply available.
 
 #![allow(unsafe_code)]
 
@@ -925,8 +926,6 @@ struct Resolved {
     source: FaceSource,
     #[cfg(test)]
     family: String,
-    #[cfg(test)]
-    scale: f32,
 }
 
 impl System {
@@ -957,12 +956,12 @@ impl System {
             )?;
             if let Some(font) = &mapped.font {
                 let (path, index) = font.location()?;
+                let mut source = FaceSource::path(path, index);
+                source.scale = Some(mapped.scale);
                 return Some(Resolved {
-                    source: FaceSource::path(path, index),
+                    source,
                     #[cfg(test)]
                     family: font.family()?.names()?.preferred_string()?,
-                    #[cfg(test)]
-                    scale: mapped.scale,
                 });
             }
             pos += mapped.length.max(1);
@@ -1129,7 +1128,7 @@ mod tests {
             .expect("latin");
         assert_eq!(latin.family, "Segoe UI");
         assert_eq!(file_name(&latin.source), "segoeui.ttf");
-        assert!(latin.scale > 0.0);
+        assert!(latin.source.scale.is_some_and(|s| s > 0.0));
 
         let han = sys
             .resolve(&request("\u{4e2d}\u{6587}", "zh-CN"))

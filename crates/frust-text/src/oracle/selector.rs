@@ -306,6 +306,8 @@ impl Oracle {
                         blob,
                         index: source.index,
                         synthesis,
+                        postscript_name: source.postscript_name.clone(),
+                        hidden: source.hidden,
                     });
                 }
                 Err(rejection) => self.count(rejection),
@@ -319,6 +321,8 @@ impl Oracle {
                 blob: face.blob,
                 index: face.index,
                 synthesis: Synthesis::default(),
+                postscript_name: None,
+                hidden: false,
             })
     }
 
@@ -381,6 +385,8 @@ impl Oracle {
             blob: face.blob.clone(),
             index: face.index,
             synthesis: synthesize(&face.facts.attrs, req.weight.value(), req.slant, req.width),
+            postscript_name: None,
+            hidden: false,
         })
     }
 
@@ -411,6 +417,8 @@ impl Oracle {
                 blob,
                 index: source.index,
                 synthesis: synthesis_for(source, &facts.attrs, req),
+                postscript_name: source.postscript_name.clone(),
+                hidden: source.hidden,
             }),
             Err(rejection) => {
                 self.count(rejection);
@@ -428,6 +436,8 @@ impl Oracle {
             blob,
             index,
             synthesis: synthesis_for(source, &attrs, req),
+            postscript_name: source.postscript_name.clone(),
+            hidden: source.hidden,
         })
     }
 
@@ -798,6 +808,9 @@ mod tests {
                     value: 17.0,
                 }],
                 synthesis_hint: Some(hint),
+                postscript_name: None,
+                hidden: false,
+                scale: None,
             },
             "中",
         );
@@ -813,6 +826,32 @@ mod tests {
             Some(17.0),
             "the backend's instance coordinates are kept"
         );
+    }
+
+    #[test]
+    fn a_hidden_face_passes_through_with_its_flag_and_name() {
+        let hidden = Blob::from(FaceSpec::new(".Hidden Sans").chars("a").build());
+        let mut backend = SyntheticBackend::new("b");
+        backend.cover_with(
+            FaceSource {
+                postscript_name: Some(".HiddenSans-Regular".into()),
+                hidden: true,
+                ..FaceSource::blob(hidden.clone(), 0)
+            },
+            "a",
+        );
+        let mut oracle = oracle_over(backend);
+        let face = oracle
+            .resolve(&req("a", b"Latn", &FontFamily::SystemUi))
+            .expect("a hidden face is not substituted");
+        assert_eq!(face.blob.id(), hidden.id());
+        assert!(face.hidden);
+        assert_eq!(face.postscript_name.as_deref(), Some(".HiddenSans-Regular"));
+        // Cached lookups keep the flag.
+        let again = oracle
+            .resolve(&req("a", b"Latn", &FontFamily::SystemUi))
+            .unwrap();
+        assert!(again.hidden);
     }
 
     #[test]
