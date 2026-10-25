@@ -5,18 +5,18 @@
 target-dir = "build/rust"
 
 # Android link flags (packed relocations, identical-code folding) read by `cargo ndk` and
-# Gradle without RUSTFLAGS injection; a caller's `RUSTFLAGS` replaces them. `relr` (DT_RELR) needs API 28+; the floor is 29.
+# Gradle without RUSTFLAGS injection; a caller's `RUSTFLAGS` replaces them. `relr` with `--use-android-relr-tags` (DT_ANDROID_RELR, API 28+, below the floor of 29); the standard DT_RELR tags need API 30 and must not be used until the floor is 30.
 
 # Only the `[target.*]` tables are compared with the repo root's `.cargo/config.toml`
 # (`crates/frust-cli/tests/profile_sync.rs`); `[build]` above exists only here.
 [target.aarch64-linux-android]
-rustflags = ["-C", "link-arg=-Wl,--pack-dyn-relocs=relr", "-C", "link-arg=-Wl,--icf=all"]
+rustflags = ["-C", "link-arg=-Wl,--pack-dyn-relocs=relr", "-C", "link-arg=-Wl,--use-android-relr-tags", "-C", "link-arg=-Wl,--icf=all"]
 
 [target.armv7-linux-androideabi]
-rustflags = ["-C", "link-arg=-Wl,--pack-dyn-relocs=relr", "-C", "link-arg=-Wl,--icf=all"]
+rustflags = ["-C", "link-arg=-Wl,--pack-dyn-relocs=relr", "-C", "link-arg=-Wl,--use-android-relr-tags", "-C", "link-arg=-Wl,--icf=all"]
 
 [target.x86_64-linux-android]
-rustflags = ["-C", "link-arg=-Wl,--pack-dyn-relocs=relr", "-C", "link-arg=-Wl,--icf=all"]
+rustflags = ["-C", "link-arg=-Wl,--pack-dyn-relocs=relr", "-C", "link-arg=-Wl,--use-android-relr-tags", "-C", "link-arg=-Wl,--icf=all"]
 
 [target.i686-linux-android]
-rustflags = ["-C", "link-arg=-Wl,--pack-dyn-relocs=relr", "-C", "link-arg=-Wl,--icf=all"]
+rustflags = ["-C", "link-arg=-Wl,--pack-dyn-relocs=relr", "-C", "link-arg=-Wl,--use-android-relr-tags", "-C", "link-arg=-Wl,--icf=all"]
