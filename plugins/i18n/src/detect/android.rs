@@ -1,6 +1,6 @@
 //! The Android detection backend — `Resources.getSystem().getConfiguration()
 //! .getLocales()` (`android.os.LocaleList`, API 24+ — always present since
-//! this workspace's Android floor is API 26) via plain JNI, no
+//! this workspace's Android floor is API 29) via plain JNI, no
 //! Kotlin/Gradle module, the same "no app-defined helper class" shape
 //! `frust-haptics`'s `Vibrator` backend uses.
 //!

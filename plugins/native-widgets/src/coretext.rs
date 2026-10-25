@@ -39,8 +39,8 @@
 //! # Registration, the Apple way: a descriptor, not a registered font
 //!
 //! Android's `Typeface.createFromFile` needs an actual file path — there is
-//! no create-from-bytes overload at this crate's `minSdk` floor
-//! (`crate::android::fonts`'s own doc) — so that half writes the embedded
+//! no create-from-bytes overload below API 29 (`crate::android::fonts`'s own
+//! doc; frust's floor is 29, and the cache-file path is kept) — so that half writes the embedded
 //! bytes to a content-hash-keyed cache file once. CoreText carries no such
 //! restriction: `CTFontManagerCreateFontDescriptorFromData` builds a real
 //! `CTFontDescriptor` straight from an in-memory `CFData`, and a descriptor

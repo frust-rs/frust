@@ -39,7 +39,7 @@
 //! # Binding
 //!
 //! The entry points are resolved at runtime with `dlsym` from `libandroid.so`
-//! and never linked: they do not exist below API 33, and frust's minSdk is 26.
+//! and never linked: they do not exist below API 33, and frust's minSdk is 29.
 //! Any missing symbol leaves the session off, never a failed load. The pure
 //! session logic ([`HintSession`], [`TargetPeriod`], the kill switch) is
 //! platform-free and host-tested through `tests/adpf.rs`; the `unsafe` FFI
