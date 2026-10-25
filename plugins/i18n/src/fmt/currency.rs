@@ -14,13 +14,14 @@
 //! [`number`](super::number) — the exception, and the second file to review
 //! on a graduation.)
 //!
-//! # Minor units are applied here, not by ICU4X
+//! # Minor units are applied here, and kept here
 //!
-//! `CurrencyFormatter::format_fixed_decimal` renders the `Decimal` it is
-//! handed exactly, and ICU4X 2.2.x exposes no CLDR `currencyData` minor-unit
-//! digits at all. So this module rounds and pads to the currency's own digit
-//! count itself: two digits for almost every currency, zero for the
-//! [`ZERO_DIGIT`] set (`JPY 9.99` → `¥10`), three for the [`THREE_DIGIT`]
+//! `icu_experimental` 0.7's formatter applies the currency's CLDR fraction
+//! digits itself, but this module still rounds and pads to the currency's
+//! own digit count first, so the output is independent of that rounding (the
+//! formatter then sees an already-exact value). Two digits for almost every
+//! currency, zero for the [`ZERO_DIGIT`] set (`JPY 9.99` → `¥10`), three for the
+//! [`THREE_DIGIT`]
 //! set. Both lists are the *active* currencies of CLDR's
 //! `supplemental/currencyData.json` `fractions` block — a documented
 //! simplification: historic currencies with non-default digit counts (ADP,
@@ -38,8 +39,9 @@
 
 use std::sync::LazyLock;
 
+use icu_decimal::DecimalFormatter;
 use icu_decimal::input::Decimal;
-use icu_experimental::dimension::currency::CurrencyCode;
+use icu_experimental::dimension::currency::CurrencyType;
 use icu_experimental::dimension::currency::formatter::{
     CurrencyFormatter, CurrencyFormatterPreferences,
 };
@@ -67,7 +69,8 @@ const THREE_DIGIT: [&str; 7] = ["BHD", "IQD", "JOD", "KWD", "LYD", "OMR", "TND"]
 /// CLDR's default when a currency is absent from the `fractions` block.
 const DEFAULT_DIGITS: i16 = 2;
 
-static CURRENCIES: LazyLock<Cache<Locale, CurrencyFormatter>> = LazyLock::new(Cache::new);
+static CURRENCIES: LazyLock<Cache<(Locale, CurrencyType), CurrencyFormatter<DecimalFormatter>>> =
+    LazyLock::new(Cache::new);
 
 /// Formats `amount` as `iso_code` in `locale`'s currency pattern.
 ///
@@ -116,21 +119,22 @@ pub(super) fn currency_minor(
 }
 
 /// Runs the cached locale formatter over an already-rounded `value`.
-fn render(locale: &Locale, value: &Decimal, code: &CurrencyCode) -> Result<String, I18nError> {
+fn render(locale: &Locale, value: &Decimal, code: &CurrencyType) -> Result<String, I18nError> {
     let formatter = CURRENCIES
-        .get_or_build(locale, || {
-            CurrencyFormatter::try_new(
+        .get_or_build(&(locale.clone(), *code), || {
+            CurrencyFormatter::try_new_symbol(
                 CurrencyFormatterPreferences::from(&bridge::lang_id(locale)),
+                *code,
                 Default::default(),
             )
         })
         .map_err(|error| I18nError::Format(format!("{locale}: loading currency data: {error}")))?;
 
-    Ok(formatter.format_fixed_decimal(value, code).to_string())
+    Ok(formatter.format_fixed_decimal(value).to_string())
 }
 
-/// Validates and normalizes an ISO 4217 code into ICU4X's own newtype.
-fn parse_code(iso_code: &str) -> Result<CurrencyCode, I18nError> {
+/// Validates and normalizes an ISO 4217 code into ICU4X's own keyword type.
+fn parse_code(iso_code: &str) -> Result<CurrencyType, I18nError> {
     let malformed = || {
         I18nError::Format(format!(
             "`{iso_code}` is not an ISO 4217 currency code (expected three ASCII letters)"
@@ -142,8 +146,9 @@ fn parse_code(iso_code: &str) -> Result<CurrencyCode, I18nError> {
     }
 
     TinyAsciiStr::<CODE_LEN>::try_from_str(iso_code)
-        .map(|code| CurrencyCode(code.to_ascii_uppercase()))
-        .map_err(|_| malformed())
+        .ok()
+        .and_then(|code| CurrencyType::try_from_str(code.to_ascii_uppercase().as_str()).ok())
+        .ok_or_else(malformed)
 }
 
 /// The currency's CLDR minor-unit digit count.

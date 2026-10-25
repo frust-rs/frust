@@ -20,17 +20,18 @@
 //! Input is a plain proleptic-Gregorian (ISO 8601) year/month/day —
 //! [`super::CivilDate`] — and output is rendered in the calendar CLDR gives
 //! the locale, which is Gregorian for nearly every locale. The exceptions are
-//! keyed on the **region**, not the language: `th-TH` and `en-TH` render
-//! Buddhist years (`13 ต.ค. 2569`, `Oct 13, 2569 BE`) while a bare `th` tag
-//! (no region) is already Gregorian (`13 ต.ค. 2026`). That is ICU4X's own
-//! recommendation and the reason [`DateTimeFormatter`] exists at all.
+//! keyed on the **region**: `th-TH` and `en-TH` render Buddhist years
+//! (`13 ต.ค. 2569`, `Oct 13, 2569 BE`). Since the ICU4X 2.4 / CLDR 49 data a
+//! bare `th` tag (no region) resolves to Thailand's calendar too
+//! (`13 ต.ค. 2569`); on the previous 2.2 data it was Gregorian. That is ICU4X's
+//! own recommendation and the reason [`DateTimeFormatter`] exists at all.
 //!
 //! A [`crate::Locale`] carries no `-u-ca-`/`-u-hc-` extension (it is a
 //! *language identifier*), so the calendar and hour cycle travel beside it in
 //! [`DateTimeOptions`]: `calendar: Some(Calendar::Gregorian)` pins `th-TH` or
 //! `en-TH` to Gregorian years, and `hour_cycle` overrides the locale's clock.
-//! Only a region-bearing tag has a non-Gregorian default to override, so the
-//! calendar option leaves a bare `th` unchanged.
+//! The calendar option is how a `th`, `th-TH` or `en-TH` caller opts back
+//! into Gregorian years.
 //!
 //! # Time zones: none here, zoned entry points in `zone`
 //!

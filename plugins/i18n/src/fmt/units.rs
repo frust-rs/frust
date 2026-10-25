@@ -39,9 +39,18 @@
 use std::sync::LazyLock;
 
 use icu_decimal::input::Decimal;
-use icu_experimental::dimension::units::formatter::{UnitsFormatter, UnitsFormatterPreferences};
-use icu_experimental::dimension::units::options::{UnitsFormatterOptions, Width};
-use icu_provider::DataErrorKind;
+use icu_decimal::{DecimalFormatter, DecimalFormatterPreferences};
+use icu_experimental::dimension::provider::units::categorized_display_names::{
+    UnitsNamesAreaCoreV1, UnitsNamesAreaExtendedV1, UnitsNamesAreaOutlierV1,
+    UnitsNamesDurationCoreV1, UnitsNamesDurationExtendedV1, UnitsNamesDurationOutlierV1,
+    UnitsNamesLengthCoreV1, UnitsNamesLengthExtendedV1, UnitsNamesLengthOutlierV1,
+    UnitsNamesMassCoreV1, UnitsNamesMassExtendedV1, UnitsNamesMassOutlierV1,
+    UnitsNamesVolumeCoreV1, UnitsNamesVolumeExtendedV1, UnitsNamesVolumeOutlierV1,
+};
+use icu_experimental::dimension::provider::units::display_names::UnitsDisplayNames;
+use icu_plurals::{PluralRules, PluralRulesPreferences};
+use icu_provider::marker::{DataMarkerExt, ErasedMarker};
+use icu_provider::prelude::*;
 
 use crate::{I18nError, Locale};
 
@@ -93,16 +102,30 @@ pub enum UnitStyle {
 }
 
 impl UnitStyle {
-    const fn width(self) -> Width {
+    /// The width prefix of the data attribute (`short-hour`).
+    const fn width(self) -> &'static str {
         match self {
-            Self::Narrow => Width::Narrow,
-            Self::Short => Width::Short,
-            Self::Long => Width::Long,
+            Self::Narrow => "narrow",
+            Self::Short => "short",
+            Self::Long => "long",
         }
     }
 }
 
-type UnitCache = Cache<(Locale, String, UnitStyle), UnitsFormatter>;
+/// Everything needed to render one unit in one locale and width: the
+/// unit's plural-keyed display-name patterns, the number formatter and the
+/// cardinal plural rules that pick among them.
+///
+/// `icu_experimental` 0.7 replaced the string-keyed `UnitsFormatter` with a
+/// per-category typed formatter that only constructs a handful of units, so
+/// this assembles the same parts from the public display-name data markers.
+struct UnitFormatter {
+    names: DataPayload<ErasedMarker<UnitsDisplayNames<'static>>>,
+    decimal: DecimalFormatter,
+    plurals: PluralRules,
+}
+
+type UnitCache = Cache<(Locale, String, UnitStyle), UnitFormatter>;
 
 static UNITS: LazyLock<UnitCache> = LazyLock::new(Cache::new);
 
@@ -163,13 +186,7 @@ fn units_by_id_decimal(
 ) -> Result<String, I18nError> {
     let key = (locale.clone(), unit_id.to_owned(), style);
     let formatter = UNITS
-        .get_or_build(&key, || {
-            UnitsFormatter::try_new(
-                UnitsFormatterPreferences::from(&bridge::lang_id(locale)),
-                unit_id,
-                UnitsFormatterOptions::from(style.width()),
-            )
-        })
+        .get_or_build(&key, || build_formatter(locale, unit_id, style))
         .map_err(|error| match error.kind {
             DataErrorKind::IdentifierNotFound | DataErrorKind::Custom => {
                 I18nError::UnsupportedUnit(unit_id.to_owned())
@@ -177,9 +194,78 @@ fn units_by_id_decimal(
             _ => I18nError::Format(format!("{locale}: loading unit data: {error}")),
         })?;
 
-    Ok(formatter
-        .format_fixed_decimal(&number::standard_fraction(value))
+    let value = number::standard_fraction(value);
+    let pattern = formatter
+        .names
+        .get()
+        .get((&value).into(), &formatter.plurals);
+    Ok(pattern
+        .interpolate((formatter.decimal.format(&value),))
         .to_string())
+}
+
+/// Loads the display names for `unit_id` from whichever category holds it.
+fn build_formatter(
+    locale: &Locale,
+    unit_id: &str,
+    style: UnitStyle,
+) -> Result<UnitFormatter, DataError> {
+    let lang = bridge::lang_id(locale);
+    let decimal =
+        DecimalFormatter::try_new(DecimalFormatterPreferences::from(&lang), Default::default())?;
+    let plurals = PluralRules::try_new_cardinal(PluralRulesPreferences::from(&lang))?;
+
+    let attribute = format!("{}-{unit_id}", style.width());
+    let attribute = DataMarkerAttributes::try_from_str(&attribute)
+        .map_err(|_| DataError::custom("not a unit data attribute"))?;
+    let data_locale = UnitsNamesDurationCoreV1::make_locale((&lang).into());
+    let request = DataRequest {
+        id: DataIdentifierBorrowed::for_marker_attributes_and_locale(attribute, &data_locale),
+        ..Default::default()
+    };
+
+    let names = load_names(request)?;
+    Ok(UnitFormatter {
+        names,
+        decimal,
+        plurals,
+    })
+}
+
+/// Tries each category's core, extended and outlier markers in turn; the
+/// attribute is unique across categories, so at most one holds it.
+fn load_names(
+    request: DataRequest<'_>,
+) -> Result<DataPayload<ErasedMarker<UnitsDisplayNames<'static>>>, DataError> {
+    macro_rules! try_markers {
+        ($($marker:ty),* $(,)?) => {
+            $(
+                match DataProvider::<$marker>::load(&icu_experimental::provider::Baked, request) {
+                    Ok(response) => return Ok(response.payload.cast()),
+                    Err(error) if error.kind == DataErrorKind::IdentifierNotFound => {}
+                    Err(error) => return Err(error),
+                }
+            )*
+        };
+    }
+    try_markers!(
+        UnitsNamesDurationCoreV1,
+        UnitsNamesLengthCoreV1,
+        UnitsNamesMassCoreV1,
+        UnitsNamesAreaCoreV1,
+        UnitsNamesVolumeCoreV1,
+        UnitsNamesDurationExtendedV1,
+        UnitsNamesLengthExtendedV1,
+        UnitsNamesMassExtendedV1,
+        UnitsNamesAreaExtendedV1,
+        UnitsNamesVolumeExtendedV1,
+        UnitsNamesDurationOutlierV1,
+        UnitsNamesLengthOutlierV1,
+        UnitsNamesMassOutlierV1,
+        UnitsNamesAreaOutlierV1,
+        UnitsNamesVolumeOutlierV1,
+    );
+    Err(DataErrorKind::IdentifierNotFound.into_error())
 }
 
 /// Formats a duration of `minutes` as minutes, whole hours, or hours with

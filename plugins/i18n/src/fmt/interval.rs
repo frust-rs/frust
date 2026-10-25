@@ -3,7 +3,7 @@
 //!
 //! # Why hand-rolled
 //!
-//! `icu_datetime` 2.2, `icu_experimental` 0.5 and `icu_time` 2.2 ship no
+//! `icu_datetime` 2.4, `icu_experimental` 0.7 and `icu_time` 2.4 expose no
 //! interval or range formatter, and the baked data has no interval key. CLDR
 //! publishes `intervalFormats`, but nothing in the ICU4X crates consumes
 //! them. So a range here is two ordinary formatted ends joined by a
