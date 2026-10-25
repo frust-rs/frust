@@ -44,13 +44,13 @@ android {
 
     // Both SDK levels mirror the app template's `app/build.gradle.kts`, the
     // `frust-embedding` module and the secure-storage module exactly
-    // (`compileSdk = 36`, `minSdk = 26`). A mismatch is a silent behavior
+    // (`compileSdk = 36`, `minSdk = 29`). A mismatch is a silent behavior
     // change, not a build error — keep them in lockstep. (CameraX 1.6's own
-    // minSdk is 23, below frust's 26, so it imposes no floor of its own.)
+    // minSdk is 23, below frust's 29, so it imposes no floor of its own.)
     compileSdk = 36
 
     defaultConfig {
-        minSdk = 26
+        minSdk = 29
 
         // The R8 keep rules for the JNI-referenced host, the
         // classloader-instantiated factory and the manifest-declared init
