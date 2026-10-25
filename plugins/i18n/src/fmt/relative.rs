@@ -81,7 +81,7 @@ pub fn relative_day_civil(
     let formatter = RELATIVE
         .get_or_build(&(locale.clone(), style), || {
             let mut options = RelativeTimeFormatterOptions::default();
-            options.numeric = Numeric::Auto;
+            options.numeric = Some(Numeric::Auto);
             let prefs = RelativeTimeFormatterPreferences::from(&bridge::lang_id(locale));
             match style {
                 RelativeDayStyle::Long => RelativeTimeFormatter::try_new_long_day(prefs, options),
