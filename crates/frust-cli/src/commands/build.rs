@@ -1026,6 +1026,35 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// The scaffold's `frust-debug` feature names `frust/devtools` and
+    /// `frust/hotpatch`, so a release APK build that passes it is refused
+    /// under its own name, exactly like the hand-written alias above.
+    #[test]
+    fn build_apk_refuses_scaffold_frust_debug_feature() {
+        let dir = android_project_dir("apk-frust-debug-scaffold");
+        fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"app\"\n\n[features]\n\
+             lean = [\"log/release_max_level_warn\"]\n\
+             frust-debug = [\"frust/perf-trace\", \"frust/devtools\", \"frust/hotpatch\"]\n",
+        )
+        .unwrap();
+        let runner = FakeProcessRunner::new();
+        let target = BuildTarget::Apk {
+            build: BuildFlags {
+                features: vec!["frust-debug".to_string()],
+                ..Default::default()
+            },
+            split_per_abi: false,
+            target_platform: None,
+        };
+        let err = run_in(&runner, &dir, target).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("devtools"), "{message}");
+        assert!(message.contains("frust-debug"), "{message}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// An app whose facade dependency is keyed `frust-ui` (the crates.io
     /// name) spells the facade's devtools switch `frust-ui/devtools`; an
     /// app-defined alias built on that spelling is refused on a release lane

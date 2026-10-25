@@ -193,8 +193,13 @@ fn prepare_simulator_core(
     // session's `on_line`) and the app's facade key (`frust-ui/hotpatch` for
     // an app depending on `frust-ui = ".."`), so the simulator build never
     // threads a feature `cargo` cannot resolve.
-    let features_b64 =
-        crate::ios_build::resolve_features_b64(&project.root, info.mode, extra_features, on_line)?;
+    let features_b64 = crate::ios_build::resolve_features_b64_preflighted(
+        runner,
+        &project.root,
+        info.mode,
+        extra_features,
+        on_line,
+    )?;
 
     on_line(&format!("Building `{}`…", project.bundle_id));
     let build_start = Instant::now();
@@ -679,6 +684,7 @@ mod tests {
     fn xcodebuild_failure_surfaces_tail_of_both_stdout_and_stderr() {
         let dir = unique_project_dir("build-fail");
         let runner = FakeProcessRunner::new()
+            .with("cargo metadata --format-version 1", ok("{}"))
             .with(
                 "xcode-select -p",
                 ok("/Applications/Xcode.app/Contents/Developer\n"),
@@ -746,6 +752,7 @@ mod tests {
         let app_path = app_dir.to_string_lossy().into_owned();
 
         let runner = FakeProcessRunner::new()
+            .with("cargo metadata --format-version 1", ok("{}"))
             .with(
                 "xcode-select -p",
                 ok("/Applications/Xcode.app/Contents/Developer\n"),
@@ -804,6 +811,7 @@ mod tests {
         let app_path = app_dir.to_string_lossy().into_owned();
 
         let runner = FakeProcessRunner::new()
+            .with("cargo metadata --format-version 1", ok("{}"))
             .with(
                 "xcode-select -p",
                 ok("/Applications/Xcode.app/Contents/Developer\n"),
@@ -868,6 +876,7 @@ mod tests {
         let app_path = app_dir.to_string_lossy().into_owned();
 
         let runner = FakeProcessRunner::new()
+            .with("cargo metadata --format-version 1", ok("{}"))
             .with(
                 "xcode-select -p",
                 ok("/Applications/Xcode.app/Contents/Developer\n"),
@@ -927,6 +936,7 @@ mod tests {
         let app_path = app_dir.to_string_lossy().into_owned();
 
         let runner = FakeProcessRunner::new()
+            .with("cargo metadata --format-version 1", ok("{}"))
             .with(
                 "xcode-select -p",
                 ok("/Applications/Xcode.app/Contents/Developer\n"),
@@ -1061,6 +1071,7 @@ mod tests {
     /// happy/failure-path test needs (mirrors `ios_build::mod`'s `base_runner`).
     fn physical_base_runner() -> FakeProcessRunner {
         FakeProcessRunner::new()
+            .with("cargo metadata --format-version 1", ok("{}"))
             .with("xcode-select -p", ok("/Applications/Xcode.app\n"))
             .with(
                 "rustup target list --installed",
@@ -1238,6 +1249,7 @@ mod tests {
     /// verification passes.
     fn flavored_base_runner() -> FakeProcessRunner {
         FakeProcessRunner::new()
+            .with("cargo metadata --format-version 1", ok("{}"))
             .with("xcode-select -p", ok("/Applications/Xcode.app\n"))
             .with(
                 "rustup target list --installed",
@@ -1400,6 +1412,7 @@ mod tests {
         let features =
             "ZnJ1c3QtdWkvcGVyZi10cmFjZSxmcnVzdC11aS9kZXZ0b29scyxmcnVzdC11aS9ob3RwYXRjaA==";
         let runner = FakeProcessRunner::new()
+            .with("cargo metadata --format-version 1", ok("{}"))
             .with(
                 "xcode-select -p",
                 ok("/Applications/Xcode.app/Contents/Developer\n"),
@@ -1482,6 +1495,7 @@ mod tests {
         ];
         let pipeline = |install_ok: bool| {
             FakeProcessRunner::new()
+                .with("cargo metadata --format-version 1", ok("{}"))
                 .with(
                     "xcode-select -p",
                     ok("/Applications/Xcode.app/Contents/Developer\n"),
@@ -1692,6 +1706,7 @@ mod tests {
         );
         let mut runner = RecordingRunner::new(
             FakeProcessRunner::new()
+                .with("cargo metadata --format-version 1", ok("{}"))
                 .with(
                     "xcode-select -p",
                     ok("/Applications/Xcode.app/Contents/Developer\n"),
@@ -1736,6 +1751,26 @@ mod tests {
         assert!(
             runner.simctl_calls().is_empty(),
             "nothing installed or launched"
+        );
+        // One dependency resolve, before xcodebuild, over the hot feature list.
+        let calls = runner.calls.lock().unwrap().clone();
+        let resolves: Vec<usize> = calls
+            .iter()
+            .enumerate()
+            .filter(|(_, call)| call.starts_with("cargo metadata "))
+            .map(|(index, _)| index)
+            .collect();
+        let xcodebuild = calls
+            .iter()
+            .position(|call| call.starts_with("xcrun xcodebuild -project"))
+            .expect("xcodebuild ran");
+        assert_eq!(resolves.len(), 1, "{calls:?}");
+        assert!(resolves[0] < xcodebuild, "{calls:?}");
+        assert!(
+            calls[resolves[0]].ends_with(
+                "--features frust/perf-trace --features frust/devtools --features frust/hotpatch"
+            ),
+            "{calls:?}"
         );
 
         let _ = fs::remove_dir_all(&dir);

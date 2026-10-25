@@ -22,6 +22,7 @@ use anyhow::{Context, Result};
 
 use crate::build_info::{BuildInfo, BuildMode};
 use crate::facade_key::{FacadeKey, FacadeKeyError};
+use crate::lock_refresh;
 use crate::process::{ProcessRunner, StreamHandle};
 
 /// The env var a `--profile` desktop preview needs set for the shell's perf
@@ -168,14 +169,37 @@ pub(crate) fn desktop_env(info: &BuildInfo) -> Vec<(String, String)> {
 /// the args but not the env would be running a different preview than the one
 /// this module resolved. An unresolvable facade key is an error here
 /// ([`desktop_plan_with_features`]), before anything spawns.
+///
+/// A Debug/Profile plan first resolves the app's dependency graph under the
+/// plan's own `--features` ([`lock_refresh::ensure_resolves`]): those features
+/// pull in frust crates the app's lockfile may lack, and a stale index entry
+/// then fails here with cargo's own text instead of as an opaque failed
+/// `cargo run`. `on_line` receives the single line announcing a refresh. The
+/// resolve blocks the calling thread for one `cargo metadata` (two, plus a
+/// `cargo add --dry-run`, on a refresh). Release adds no crate, so it resolves
+/// nothing.
 pub fn spawn_desktop_session(
     runner: &dyn ProcessRunner,
     root: &Path,
     info: &BuildInfo,
+    on_line: &mut dyn FnMut(&str),
 ) -> Result<StreamHandle> {
     let plan = desktop_plan_with_features(root, info, info.mode.cargo_features())
         .with_context(|| format!("resolving the frust dependency of `{}`", root.display()))?;
+    if info.mode != BuildMode::Release {
+        lock_refresh::ensure_resolves(runner, root, &plan_features(&plan), on_line)?;
+    }
     spawn_desktop_plan(runner, &plan)
+}
+
+/// The `--features` values of `plan`'s argv, in order — already spelled with
+/// the app's facade key, exactly what `cargo run` will resolve.
+fn plan_features(plan: &DesktopPlan) -> Vec<String> {
+    plan.args
+        .windows(2)
+        .filter(|pair| pair[0] == "--features")
+        .map(|pair| pair[1].clone())
+        .collect()
 }
 
 /// The plan that runs an already-linked desktop executable directly — a
@@ -213,7 +237,7 @@ pub fn spawn_desktop_plan(runner: &dyn ProcessRunner, plan: &DesktopPlan) -> Res
 mod tests {
     use super::*;
     use crate::build_info::BuildMode;
-    use crate::process::FakeProcessRunner;
+    use crate::process::{FakeProcessRunner, Output};
     use std::collections::HashMap;
     use std::path::PathBuf;
 
@@ -345,7 +369,8 @@ mod tests {
             true,
         );
         let mut handle =
-            spawn_desktop_session(&runner, &root, &build_info(BuildMode::Release)).unwrap();
+            spawn_desktop_session(&runner, &root, &build_info(BuildMode::Release), &mut |_| {})
+                .unwrap();
         let lines: Vec<String> = handle.lines.iter().collect();
         assert_eq!(
             lines,
@@ -482,7 +507,7 @@ mod tests {
         let err = desktop_plan(&root, &info).unwrap_err();
         assert!(matches!(err, FacadeKeyError::Ambiguous { .. }), "{err:?}");
         let runner = FakeProcessRunner::new();
-        let err = spawn_desktop_session(&runner, &root, &info)
+        let err = spawn_desktop_session(&runner, &root, &info, &mut |_| {})
             .err()
             .expect("an ambiguous key refuses to spawn");
         let message = format!("{err:#}");
@@ -511,14 +536,205 @@ mod tests {
     #[test]
     fn spawn_desktop_session_reports_the_project_root_as_cwd() {
         let root = PathBuf::from("/tmp/project");
-        let runner = FakeProcessRunner::new().with_stream(
-            "cargo run --features frust/perf-trace --features frust/devtools",
-            Vec::<&str>::new(),
-            true,
-        );
+        let runner = FakeProcessRunner::new()
+            .with("cargo metadata --format-version 1", resolved())
+            .with_stream(
+                "cargo run --features frust/perf-trace --features frust/devtools",
+                Vec::<&str>::new(),
+                true,
+            );
         let mut handle =
-            spawn_desktop_session(&runner, &root, &build_info(BuildMode::Debug)).unwrap();
+            spawn_desktop_session(&runner, &root, &build_info(BuildMode::Debug), &mut |_| {})
+                .unwrap();
         handle.wait();
         assert_eq!(runner.recorded_cwd(), Some(root));
+    }
+
+    /// A successful `cargo metadata` reply.
+    fn resolved() -> Output {
+        Output {
+            success: true,
+            stdout: "{}".to_string(),
+            stderr: String::new(),
+        }
+    }
+
+    /// A [`FakeProcessRunner`] that also logs every invocation in order, as
+    /// `run <key>`/`stream <key>`/`spawn <key>`, so a test can assert what ran
+    /// and in which order.
+    struct CallLog {
+        inner: FakeProcessRunner,
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl CallLog {
+        fn over(inner: FakeProcessRunner) -> Self {
+            Self {
+                inner,
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn log(&self, kind: &str, cmd: &str, args: &[&str]) {
+            let mut call = format!("{kind} {cmd}");
+            for arg in args {
+                call.push(' ');
+                call.push_str(arg);
+            }
+            self.calls.lock().unwrap().push(call);
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl ProcessRunner for CallLog {
+        fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<Output> {
+            self.log("run", cmd, args);
+            self.inner.run(cmd, args)
+        }
+
+        fn run_streaming(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            cwd: Option<&Path>,
+            env: &[(&str, &str)],
+            on_line: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<Output> {
+            self.log("stream", cmd, args);
+            self.inner.run_streaming(cmd, args, cwd, env, on_line)
+        }
+
+        fn spawn_streaming(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            cwd: Option<&Path>,
+            env: &[(&str, &str)],
+        ) -> anyhow::Result<StreamHandle> {
+            self.log("spawn", cmd, args);
+            self.inner.spawn_streaming(cmd, args, cwd, env)
+        }
+    }
+
+    /// A Debug session resolves the graph once, first, under exactly the
+    /// facade-mapped features its `cargo run` passes, then spawns the build.
+    #[test]
+    fn a_debug_session_resolves_the_graph_under_the_plans_features_before_it_spawns() {
+        let root = project_with_deps("preflight-debug", "frust-ui = \"0.6.0\"\n");
+        let manifest = root.join("Cargo.toml");
+        let runner = CallLog::over(
+            FakeProcessRunner::new()
+                .with("cargo metadata --format-version 1", resolved())
+                .with_stream(
+                    "cargo run --features frust-ui/perf-trace --features frust-ui/devtools",
+                    ["Compiling app v0.1.0"],
+                    true,
+                ),
+        );
+        let mut announced = Vec::new();
+        let mut handle =
+            spawn_desktop_session(&runner, &root, &build_info(BuildMode::Debug), &mut |line| {
+                announced.push(line.to_string())
+            })
+            .unwrap();
+        assert!(handle.wait());
+        assert_eq!(
+            runner.calls(),
+            vec![
+                format!(
+                    "stream cargo metadata --format-version 1 --manifest-path {} \
+                     --features frust-ui/perf-trace --features frust-ui/devtools",
+                    manifest.display()
+                ),
+                "spawn cargo run --features frust-ui/perf-trace --features frust-ui/devtools"
+                    .to_string(),
+            ]
+        );
+        assert!(announced.is_empty(), "no refresh, no line: {announced:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A Profile session resolves under its own feature list too.
+    #[test]
+    fn a_profile_session_resolves_the_graph_before_it_spawns() {
+        let root = PathBuf::from("/tmp/project");
+        let runner = CallLog::over(
+            FakeProcessRunner::new()
+                .with("cargo metadata --format-version 1", resolved())
+                .with_stream(
+                    "cargo run --profile profile --features frust/perf-trace --features frust/devtools",
+                    Vec::<&str>::new(),
+                    true,
+                ),
+        );
+        let mut handle =
+            spawn_desktop_session(&runner, &root, &build_info(BuildMode::Profile), &mut |_| {})
+                .unwrap();
+        handle.wait();
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert!(
+            calls[0].starts_with("stream cargo metadata --format-version 1 --manifest-path ")
+                && calls[0].ends_with("--features frust/perf-trace --features frust/devtools"),
+            "{calls:?}"
+        );
+        assert!(
+            calls[1].starts_with("spawn cargo run --profile profile "),
+            "{calls:?}"
+        );
+    }
+
+    /// A graph that does not resolve fails the launch with cargo's own text,
+    /// and `cargo run` never starts.
+    #[test]
+    fn a_debug_session_whose_graph_does_not_resolve_never_spawns() {
+        let root = PathBuf::from("/tmp/project");
+        let runner = CallLog::over(
+            FakeProcessRunner::new()
+                .with(
+                    "cargo metadata --format-version 1",
+                    Output {
+                        success: false,
+                        stdout: String::new(),
+                        stderr: "error: the graph does not resolve".to_string(),
+                    },
+                )
+                .with_stream(
+                    "cargo run --features frust/perf-trace --features frust/devtools",
+                    Vec::<&str>::new(),
+                    true,
+                ),
+        );
+        let err = spawn_desktop_session(&runner, &root, &build_info(BuildMode::Debug), &mut |_| {})
+            .err()
+            .expect("an unresolvable graph refuses to spawn");
+        assert_eq!(format!("{err:#}"), "error: the graph does not resolve");
+        let calls = runner.calls();
+        assert!(
+            calls.iter().all(|call| !call.starts_with("spawn ")),
+            "{calls:?}"
+        );
+    }
+
+    /// A Release session adds no crate, so it resolves nothing.
+    #[test]
+    fn a_release_session_resolves_nothing() {
+        let root = PathBuf::from("/tmp/project");
+        let runner = CallLog::over(FakeProcessRunner::new().with_stream(
+            "cargo run --release --features lean",
+            Vec::<&str>::new(),
+            true,
+        ));
+        let mut handle =
+            spawn_desktop_session(&runner, &root, &build_info(BuildMode::Release), &mut |_| {})
+                .unwrap();
+        handle.wait();
+        assert_eq!(
+            runner.calls(),
+            vec!["spawn cargo run --release --features lean"]
+        );
     }
 }

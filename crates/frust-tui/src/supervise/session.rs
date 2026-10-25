@@ -120,6 +120,22 @@ impl SessionSpec {
         })
     }
 
+    /// The cargo features the app's dependency graph must resolve under
+    /// before `plan` (this spec's desktop [`launch_plan`](Self::launch_plan))
+    /// builds, or `None` when nothing needs resolving.
+    ///
+    /// A Debug/Profile build's features pull in frust crates the app's
+    /// lockfile may lack, and a stale index entry should fail with cargo's own
+    /// text (and `frust-drive`'s one-line remedy, through
+    /// `lock_refresh::ensure_resolves`) rather than as an opaque failed build
+    /// inside the session. The features are read off the plan's own argv, so
+    /// they are exactly the facade-key-mapped spellings `cargo run` passes.
+    /// Release adds no crate, so it resolves nothing. The resolve itself runs
+    /// on the session's supervision thread ([`super::Supervisor::start`]).
+    pub fn preflight_features(&self, plan: &LaunchPlan) -> Option<Vec<String>> {
+        (self.build.mode != BuildMode::Release).then(|| plan_features(&plan.args))
+    }
+
     /// Whether this spec can run as a hot-patch session, or the failed
     /// precondition, worded for a toast: only the desktop preview, an
     /// Android device or an iOS simulator, and only a debug build
@@ -401,6 +417,15 @@ pub struct LaunchPlan {
     pub env: Vec<(String, String)>,
 }
 
+/// The `--features` values of a cargo argv, in order — already spelled with
+/// the app's facade key, exactly what cargo will resolve.
+fn plan_features(args: &[String]) -> Vec<String> {
+    args.windows(2)
+        .filter(|pair| pair[0] == "--features")
+        .map(|pair| pair[1].clone())
+        .collect()
+}
+
 /// Why a [`SessionSpec`] could not be turned into a [`LaunchPlan`].
 #[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
 pub enum LaunchError {
@@ -617,6 +642,37 @@ mod tests {
         );
         assert_eq!(plan.cwd, PathBuf::from("/tmp/app"));
         assert!(plan.env.is_empty());
+    }
+
+    #[test]
+    fn debug_and_profile_plans_resolve_under_their_own_features() {
+        for mode in [BuildMode::Debug, BuildMode::Profile] {
+            let spec = SessionSpec {
+                project_root: PathBuf::from("/tmp/app"),
+                target: DeviceTarget::Desktop,
+                build: build(mode),
+            };
+            let plan = spec.launch_plan().unwrap();
+            assert_eq!(
+                spec.preflight_features(&plan),
+                Some(vec![
+                    "frust/perf-trace".to_string(),
+                    "frust/devtools".to_string()
+                ]),
+                "{mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_release_plan_resolves_nothing() {
+        let spec = SessionSpec {
+            project_root: PathBuf::from("/tmp/app"),
+            target: DeviceTarget::Desktop,
+            build: build(BuildMode::Release),
+        };
+        let plan = spec.launch_plan().unwrap();
+        assert_eq!(spec.preflight_features(&plan), None);
     }
 
     #[test]

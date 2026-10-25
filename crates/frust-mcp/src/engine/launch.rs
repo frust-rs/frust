@@ -100,11 +100,19 @@ fn start(session: &Arc<Session>, runner: &Runner) -> Result<Option<LineReceiver>
     let root = session.project_root.clone();
 
     let handle = match &session.target {
-        RunTarget::Desktop => Some(desktop_run::spawn_desktop_session(
-            runner.as_ref(),
-            &root,
-            &info,
-        )?),
+        // A Debug/Profile launch resolves the app's dependency graph before
+        // `cargo run` starts, on this session thread (never the caller's): a
+        // refresh line reaches the session log like any pipeline line, and a
+        // graph that does not resolve fails the session with cargo's own text.
+        RunTarget::Desktop => {
+            let mut on_line = |line: &str| ingest_line(session, runner, line);
+            Some(desktop_run::spawn_desktop_session(
+                runner.as_ref(),
+                &root,
+                &info,
+                &mut on_line,
+            )?)
+        }
         RunTarget::Android(device) => {
             let mut on_line = |line: &str| ingest_line(session, runner, line);
             android_run::spawn_session(
@@ -214,10 +222,13 @@ fn parse_launch_marker(line: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
 
     use frust_drive::build_info::BuildMode;
-    use frust_drive::process::{FakeProcessRunner, TryRecvError};
+    use frust_drive::process::{
+        FakeProcessRunner, Output, ProcessRunner, StreamHandle, TryRecvError,
+    };
 
     use super::super::session::SessionId;
     use super::super::test_support::RecordingRunner;
@@ -243,6 +254,7 @@ mod tests {
         ));
         let recorder = Arc::new(RecordingRunner::new(
             FakeProcessRunner::new()
+                .with("cargo metadata --format-version 1", resolved())
                 .with_hanging_stream(DEBUG_DESKTOP_INVOCATION, Vec::<String>::new()),
         ));
         let runner: Runner = Arc::clone(&recorder) as Runner;
@@ -265,6 +277,189 @@ mod tests {
         // disconnected receiver here *is* the kill — and `start` already
         // waited for it, hence no blocking read.
         assert_eq!(stream.try_recv(), Err(TryRecvError::Disconnected));
+    }
+
+    /// A successful `cargo metadata` reply.
+    fn resolved() -> Output {
+        Output {
+            success: true,
+            stdout: "{}".to_string(),
+            stderr: String::new(),
+        }
+    }
+
+    /// A [`FakeProcessRunner`] that logs every invocation in order, as
+    /// `stream <key>` (a blocking streamed call such as the resolve) or
+    /// `spawn <key>` (a supervised child such as `cargo run`).
+    struct CallLog {
+        inner: FakeProcessRunner,
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl CallLog {
+        fn over(inner: FakeProcessRunner) -> Self {
+            Self {
+                inner,
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl ProcessRunner for CallLog {
+        fn run(&self, cmd: &str, args: &[&str]) -> Result<Output> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("run {cmd} {}", args.join(" ")));
+            self.inner.run(cmd, args)
+        }
+
+        fn run_streaming(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            cwd: Option<&Path>,
+            env: &[(&str, &str)],
+            on_line: &mut dyn FnMut(&str),
+        ) -> Result<Output> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("stream {cmd} {}", args.join(" ")));
+            self.inner.run_streaming(cmd, args, cwd, env, on_line)
+        }
+
+        fn spawn_streaming(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            cwd: Option<&Path>,
+            env: &[(&str, &str)],
+        ) -> Result<StreamHandle> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("spawn {cmd} {}", args.join(" ")));
+            self.inner.spawn_streaming(cmd, args, cwd, env)
+        }
+    }
+
+    fn desktop_session(mode: BuildMode, root: PathBuf) -> Arc<Session> {
+        Arc::new(Session::new(SessionId(1), RunTarget::Desktop, mode, root))
+    }
+
+    /// An app whose manifest depends on the facade as `frust-ui`, so every
+    /// facade feature is spelled `frust-ui/<feature>` on the argv.
+    fn frust_ui_app(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("frust-mcp-launch-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nfrust-ui = \"0.6.0\"\n",
+        )
+        .unwrap();
+        dir
+    }
+
+    /// A Debug desktop launch resolves the app's graph once, first, under
+    /// exactly the facade-mapped features its `cargo run` passes.
+    #[test]
+    fn a_debug_desktop_launch_resolves_the_graph_before_cargo_run() {
+        let root = frust_ui_app("debug-preflight");
+        let invocation = "cargo run --features frust-ui/perf-trace --features frust-ui/devtools";
+        let recorder = Arc::new(CallLog::over(
+            FakeProcessRunner::new()
+                .with("cargo metadata --format-version 1", resolved())
+                .with_stream(invocation, ["Compiling app v0.1.0"], true),
+        ));
+        let runner: Runner = Arc::clone(&recorder) as Runner;
+        let session = desktop_session(BuildMode::Debug, root.clone());
+
+        run(Arc::clone(&session), runner);
+
+        assert_eq!(
+            recorder.calls(),
+            vec![
+                format!(
+                    "stream cargo metadata --format-version 1 --manifest-path {} \
+                     --features frust-ui/perf-trace --features frust-ui/devtools",
+                    root.join("Cargo.toml").display()
+                ),
+                format!("spawn {invocation}"),
+            ]
+        );
+        assert_eq!(
+            session.snapshot().state,
+            SessionState::Exited { success: true }
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A graph that does not resolve fails the session with cargo's own text,
+    /// and `cargo run` never starts.
+    #[test]
+    fn a_desktop_graph_that_does_not_resolve_fails_the_session_without_cargo_run() {
+        let recorder = Arc::new(CallLog::over(
+            FakeProcessRunner::new()
+                .with(
+                    "cargo metadata --format-version 1",
+                    Output {
+                        success: false,
+                        stdout: String::new(),
+                        stderr: "error: the graph does not resolve".to_string(),
+                    },
+                )
+                .with_stream(DEBUG_DESKTOP_INVOCATION, Vec::<String>::new(), true),
+        ));
+        let runner: Runner = Arc::clone(&recorder) as Runner;
+        let session = desktop_session(
+            BuildMode::Debug,
+            PathBuf::from("/tmp/frust-mcp-launch-test"),
+        );
+
+        run(Arc::clone(&session), runner);
+
+        assert_eq!(
+            session.snapshot().state,
+            SessionState::Failed {
+                reason: "error: the graph does not resolve".to_string()
+            }
+        );
+        let calls = recorder.calls();
+        assert!(
+            calls.iter().all(|call| !call.starts_with("spawn ")),
+            "{calls:?}"
+        );
+    }
+
+    /// A Release desktop launch adds no crate, so it resolves nothing.
+    #[test]
+    fn a_release_desktop_launch_resolves_nothing() {
+        let invocation = "cargo run --release --features lean";
+        let recorder = Arc::new(CallLog::over(FakeProcessRunner::new().with_stream(
+            invocation,
+            Vec::<String>::new(),
+            true,
+        )));
+        let runner: Runner = Arc::clone(&recorder) as Runner;
+        let session = desktop_session(
+            BuildMode::Release,
+            PathBuf::from("/tmp/frust-mcp-launch-test"),
+        );
+
+        run(Arc::clone(&session), runner);
+
+        assert_eq!(recorder.calls(), vec![format!("spawn {invocation}")]);
+        assert_eq!(
+            session.snapshot().state,
+            SessionState::Exited { success: true }
+        );
     }
 
     #[test]

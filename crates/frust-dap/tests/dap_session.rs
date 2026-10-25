@@ -19,7 +19,7 @@ use frust_dap::{
     SharedBackend, run_session,
 };
 use frust_drive::build_info::BuildMode;
-use frust_drive::process::FakeProcessRunner;
+use frust_drive::process::{FakeProcessRunner, Output};
 use frust_mcp::SessionEngine;
 use frust_mcp::engine::{RunTarget, SessionState};
 use tokio::io::{BufReader, DuplexStream};
@@ -199,13 +199,26 @@ fn launch_arguments(project_root: &str) -> Option<serde_json::Value> {
     }))
 }
 
+/// A fake runner whose dependency-graph resolve succeeds: a Debug desktop
+/// launch resolves before it spawns `cargo run`.
+fn resolving_runner() -> FakeProcessRunner {
+    FakeProcessRunner::new().with(
+        "cargo metadata --format-version 1",
+        Output {
+            success: true,
+            stdout: "{}".to_string(),
+            stderr: String::new(),
+        },
+    )
+}
+
 /// The full lifecycle script: `initialize` -> `launch` -> `threads` -> an
 /// unknown command -> `disconnect`, asserting on the wire messages at every
 /// step and on the backend's own state at the end.
 #[tokio::test]
 async fn a_headless_client_drives_a_full_session_over_a_duplex_pair() {
     let project_root = tempdir_fixture("full-session");
-    let runner = Arc::new(FakeProcessRunner::new().with_hanging_stream(
+    let runner = Arc::new(resolving_runner().with_hanging_stream(
         DEBUG_DESKTOP_INVOCATION,
         vec!["booting the app", "ready for input"],
     ));
@@ -371,7 +384,7 @@ async fn a_headless_client_drives_a_full_session_over_a_duplex_pair() {
 #[tokio::test]
 async fn an_app_that_exits_on_its_own_reports_its_last_output_then_exited_then_terminated() {
     let project_root = tempdir_fixture("app-exit");
-    let runner = Arc::new(FakeProcessRunner::new().with_stream(
+    let runner = Arc::new(resolving_runner().with_stream(
         DEBUG_DESKTOP_INVOCATION,
         vec!["working", "all done"],
         true,

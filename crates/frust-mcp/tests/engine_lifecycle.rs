@@ -9,10 +9,11 @@ use std::sync::Arc;
 mod common;
 
 use common::devtools::{FIXTURE_TOKEN, Fixture, FixtureConfig, fixture_frame};
-use common::{TEST_PROJECT_ROOT, await_snapshot, engine_with_hanging_desktop_stream};
+use common::{
+    TEST_PROJECT_ROOT, await_snapshot, engine_with_hanging_desktop_stream, resolving_runner,
+};
 use frust_devtools_protocol::{Capability, format_discovery_line, format_failure_line};
 use frust_drive::build_info::BuildMode;
-use frust_drive::process::FakeProcessRunner;
 use frust_mcp::SessionEngine;
 use frust_mcp::engine::{RunTarget, SessionState, TERMINAL_SESSION_CAP};
 
@@ -144,8 +145,9 @@ async fn frame_stats_notifications_land_in_the_session_ring() {
 /// drive's own error chain rather than hanging in `Launching` forever.
 #[tokio::test]
 async fn an_unspawnable_launch_fails_with_a_reason() {
-    // No stream registered for the desktop invocation at all.
-    let engine = SessionEngine::with_runner(TEST_PROJECT_ROOT, Arc::new(FakeProcessRunner::new()));
+    // The graph resolves, but no stream is registered for the desktop
+    // invocation at all.
+    let engine = SessionEngine::with_runner(TEST_PROJECT_ROOT, Arc::new(resolving_runner()));
 
     let id = engine.run_app(RunTarget::Desktop, BuildMode::Debug);
     let snapshot = await_snapshot(&engine, id, |s| s.state.is_terminal()).await;

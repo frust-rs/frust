@@ -2135,9 +2135,10 @@ mod tests {
         // Restarting one of the cap's own live sessions is a 1-for-1 swap —
         // net zero live sessions — and must not be refused as
         // `TooManySessions` just because the cap is already exactly met.
-        // (`FakeProcessRunner` has no script for the desktop invocation, so
-        // the launch itself still fails past the cap check — that failure is
-        // `start_session`'s own concern, not this one.)
+        // (`FakeProcessRunner` has no script for the desktop resolve or
+        // invocation, so the launch itself still fails past the cap check, on
+        // the session's own thread — that failure is the session's concern,
+        // not this one.)
         let result = restart_app(&mut ctx, McpSessionId(0));
         assert_ne!(
             result,

@@ -229,6 +229,9 @@ server started.
   plan resolved by `frust_drive::desktop_run`, the same construction site `frust-cli run` and
   `frust-mcp` use — or Android/iOS build → install → launch → logcat), streaming output back as
   `SessionState` transitions and log messages the engine consumes.
+  A Debug/Profile cold desktop session first resolves the app's dependency graph
+  (`frust_drive::lock_refresh`) on its own supervision thread, never the UI thread; a stop during it
+  never spawns `cargo run`.
 - Clean session: an ad-hoc, targetless session delegating straight to `frust_drive::clean::run`,
   streaming its lines into the session log the same way a build does. A failed `cargo clean` ends
   the session `Exited(false)` (failed), never succeeding silently — the same `CleanReport`
