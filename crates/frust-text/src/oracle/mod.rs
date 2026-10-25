@@ -281,27 +281,38 @@ pub(crate) struct FaceSource {
     /// A backend-provided synthesis decision (e.g. Android's matcher reporting
     /// faux bold is needed); replaces the oracle's own weight/slant rule.
     pub(crate) synthesis_hint: Option<Synthesis>,
+    /// The PostScript name (name ID 6 of the face, or of the fvar named
+    /// instance) as the OS resolved it; `None` when the backend does not know it.
+    pub(crate) postscript_name: Option<String>,
+    /// A dot-prefixed system-private face (e.g. `.SF NS`): passed through
+    /// with the flag set, never substituted.
+    pub(crate) hidden: bool,
+    /// DirectWrite's `MapCharacters` scale factor; `None` on every other backend.
+    pub(crate) scale: Option<f32>,
 }
 
 impl FaceSource {
-    /// A plain path answer with no coordinates or hint.
-    pub(crate) fn path(path: impl Into<PathBuf>, index: u32) -> Self {
+    /// An answer at `location` with no coordinates, hint, name or scale.
+    pub(crate) fn new(location: FaceLocation, index: u32) -> Self {
         Self {
-            location: FaceLocation::Path(path.into()),
+            location,
             index,
             variations: Vec::new(),
             synthesis_hint: None,
+            postscript_name: None,
+            hidden: false,
+            scale: None,
         }
+    }
+
+    /// A plain path answer with no coordinates or hint.
+    pub(crate) fn path(path: impl Into<PathBuf>, index: u32) -> Self {
+        Self::new(FaceLocation::Path(path.into()), index)
     }
 
     /// A plain in-memory answer with no coordinates or hint.
     pub(crate) fn blob(blob: Blob<u8>, index: u32) -> Self {
-        Self {
-            location: FaceLocation::Blob(blob),
-            index,
-            variations: Vec::new(),
-            synthesis_hint: None,
-        }
+        Self::new(FaceLocation::Blob(blob), index)
     }
 }
 
@@ -340,6 +351,10 @@ pub(crate) struct FaceRef {
     pub(crate) blob: Blob<u8>,
     pub(crate) index: u32,
     pub(crate) synthesis: Synthesis,
+    /// The PostScript name the OS resolved, when a backend reported one.
+    pub(crate) postscript_name: Option<String>,
+    /// A dot-prefixed system-private face, carried forward for the shaper and engine.
+    pub(crate) hidden: bool,
 }
 
 /// Reads each font file once and hands out shared [`Blob`]s.
@@ -758,6 +773,24 @@ mod tests {
         assert_eq!(caps.can_draw(&hvgl_only), cfg!(target_vendor = "apple"));
     }
 
+    #[test]
+    fn the_platform_backend_constructs_and_names_the_os_build() {
+        let backend = platform_backend();
+        assert!(!backend.os_build_id().is_empty());
+    }
+
+    #[test]
+    fn face_source_new_defaults_the_os_facts() {
+        let src = FaceSource::new(FaceLocation::Path(PathBuf::from("a.ttf")), 3);
+        assert_eq!(src.index, 3);
+        assert!(src.variations.is_empty());
+        assert_eq!(src.synthesis_hint, None);
+        assert_eq!(src.postscript_name, None);
+        assert!(!src.hidden);
+        assert_eq!(src.scale, None);
+    }
+
+    #[cfg(target_family = "wasm")]
     #[test]
     fn the_platform_stub_backend_answers_nothing() {
         let mut backend = platform_backend();

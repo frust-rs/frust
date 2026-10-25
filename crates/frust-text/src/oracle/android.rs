@@ -199,6 +199,10 @@ impl NdkFontBackend {
                 .collect::<Vec<_>>(),
             synth,
         );
+        // The NDK reports no PostScript name without parsing the file's name table, so
+        // `postscript_name` stays `None`; `hidden` is false and `scale` is DirectWrite-only.
+        // The emoji colour format needs no field: the selector classifies COLR/CBDT/sbix
+        // from the face's own tables (`face_facts`), so `emoji_format` stays a log aid.
         let mut source = FaceSource::path(path, index);
         if synth != Synthesis::default() {
             source.synthesis_hint = Some(synth);

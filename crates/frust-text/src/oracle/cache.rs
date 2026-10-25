@@ -43,7 +43,7 @@ pub(crate) const MEMORY_CAPACITY: usize = 4096;
 pub(crate) const PERSIST_FILE_NAME: &str = "font-fallback.json";
 
 /// Bumped whenever the serialised shape changes; a mismatch discards the file.
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 
 /// Serialises every context's [`FallbackCache::persist`] write in the process.
 static PERSIST_LOCK: Mutex<()> = Mutex::new(());
@@ -175,6 +175,9 @@ enum PersistedAnswer {
         index: u32,
         variations: Vec<VariationSetting>,
         synthesis_hint: Option<Synthesis>,
+        postscript_name: Option<String>,
+        hidden: bool,
+        scale: Option<f32>,
     },
     Miss,
 }
@@ -342,11 +345,17 @@ impl FallbackCache {
                     index,
                     variations,
                     synthesis_hint,
+                    postscript_name,
+                    hidden,
+                    scale,
                 } => CachedAnswer::Face(FaceSource {
                     location: FaceLocation::Path(path),
                     index,
                     variations,
                     synthesis_hint,
+                    postscript_name,
+                    hidden,
+                    scale,
                 }),
                 PersistedAnswer::Miss => CachedAnswer::Miss,
             };
@@ -387,6 +396,9 @@ impl FallbackCache {
                         index: source.index,
                         variations: source.variations.clone(),
                         synthesis_hint: source.synthesis_hint.clone(),
+                        postscript_name: source.postscript_name.clone(),
+                        hidden: source.hidden,
+                        scale: source.scale,
                     }
                 }
             };
@@ -652,6 +664,48 @@ mod tests {
             old.attach_persistent(file, stamp("b")),
             LoadOutcome::Invalidated("format version")
         );
+    }
+
+    #[test]
+    fn the_new_face_fields_round_trip_and_a_format_one_file_is_discarded() {
+        let dir = TempDir::new("persist-fields");
+        let font = dir.write("face.ttf", &FaceSpec::new("Face").chars("a").build());
+        let file = dir.path().join("cache").join(PERSIST_FILE_NAME);
+        let mut cache = FallbackCache::new(16);
+        cache.attach_persistent(file.clone(), stamp("b"));
+        cache.insert(
+            key("a"),
+            CachedAnswer::Face(FaceSource {
+                postscript_name: Some("Face-Regular".into()),
+                hidden: true,
+                scale: Some(0.75),
+                ..FaceSource::path(&font, 0)
+            }),
+        );
+        cache.persist().unwrap();
+        let mut reread = FallbackCache::new(16);
+        assert_eq!(
+            reread.attach_persistent(file.clone(), stamp("b")),
+            LoadOutcome::Loaded(1)
+        );
+        let Some(CachedAnswer::Face(source)) = reread.get(&key("a")) else {
+            panic!("the face survives");
+        };
+        assert_eq!(source.postscript_name.as_deref(), Some("Face-Regular"));
+        assert!(source.hidden);
+        assert_eq!(source.scale, Some(0.75));
+
+        // A file written by the previous format (no new fields) is discarded.
+        let text = std::fs::read_to_string(&file).unwrap();
+        let old = text.replacen(&format!("\"format\":{FORMAT_VERSION}"), "\"format\":1", 1);
+        assert_ne!(text, old);
+        std::fs::write(&file, old).unwrap();
+        let mut stale = FallbackCache::new(16);
+        assert_eq!(
+            stale.attach_persistent(file, stamp("b")),
+            LoadOutcome::Invalidated("format version")
+        );
+        assert_eq!(stale.len(), 0);
     }
 
     #[test]
