@@ -13,7 +13,7 @@
 //! "AES/GCM/NoPadding"` ciphertext, persisted `iv_len || iv || ciphertext`,
 //! Base64, via `SharedPreferences.putString` in a file named `frust.ss.<store>`
 //! (the same per-store namespace, so `clear` never touches another store's or
-//! another library's data). Works on minSdk 26 (Keystore AES-GCM is available
+//! another library's data). Works on minSdk 29 (Keystore AES-GCM is available
 //! from API 23, well below the floor). The Base64 + IV framing are pure Rust ([`framing`], host-
 //! tested); everything below is the JNI wiring, exercised on-device only.
 //!
@@ -71,7 +71,7 @@
 //!    `FindClass` on a JNI worker thread sees only the bootstrap loader, never
 //!    app classes). Absent → [`SecureStorageError::NotAvailable`]`(`[`Unavailability::HelperMissing`](crate::Unavailability::HelperMissing)`)`.
 //!
-//! The framework `BiometricPrompt` path is API 28+; a gated open on API < 28
+//! The framework `BiometricPrompt` path is API 28+; a gated open on API < 28 (unreachable at frust's floor of 29)
 //! fails with [`Unavailability::UnsupportedApiLevel`](crate::Unavailability::UnsupportedApiLevel).
 //! All of this compiles on the Android gate but is exercised only by a
 //! physical-device manual gate; a plain (`auth: None`) store is unchanged.

@@ -475,7 +475,7 @@ impl<'local, 'env> NativeCtx<'local, 'env> {
     }
 
     /// `DatePicker.setOnDateChangedListener(listener)` (API 26, inside this
-    /// plugin's `minSdk = 26` floor) — the date picker's detach: pass
+    /// plugin's `minSdk = 29` floor) — the date picker's detach: pass
     /// `&JObject::null()`. The attach itself goes through
     /// [`Self::init_date_picker`], which sets the initial date in the same
     /// call.
