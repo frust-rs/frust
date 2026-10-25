@@ -1,15 +1,15 @@
-# Android link flags (cargo, cargo-ndk, Gradle): --pack-dyn-relocs=android (API 23+; RELR needs 28 > minSdk 26)
+# Android link flags (cargo, cargo-ndk, Gradle): --pack-dyn-relocs=relr (DT_RELR; API 28+, below the Android floor of 29)
 # and --icf=all (Frust never compares fn-pointer/vtable identity). Numbers: docs/PERFORMANCE_BASELINES.md "Android link flags".
 # Governs nested in-tree workspaces; crates/frust-cli/tests/profile_sync.rs diffs these with the template's; no [build].
 
 [target.aarch64-linux-android]
-rustflags = ["-C", "link-arg=-Wl,--pack-dyn-relocs=android", "-C", "link-arg=-Wl,--icf=all"]
+rustflags = ["-C", "link-arg=-Wl,--pack-dyn-relocs=relr", "-C", "link-arg=-Wl,--icf=all"]
 
 [target.armv7-linux-androideabi]
-rustflags = ["-C", "link-arg=-Wl,--pack-dyn-relocs=android", "-C", "link-arg=-Wl,--icf=all"]
+rustflags = ["-C", "link-arg=-Wl,--pack-dyn-relocs=relr", "-C", "link-arg=-Wl,--icf=all"]
 
 [target.x86_64-linux-android]
-rustflags = ["-C", "link-arg=-Wl,--pack-dyn-relocs=android", "-C", "link-arg=-Wl,--icf=all"]
+rustflags = ["-C", "link-arg=-Wl,--pack-dyn-relocs=relr", "-C", "link-arg=-Wl,--icf=all"]
 
 [target.i686-linux-android]
-rustflags = ["-C", "link-arg=-Wl,--pack-dyn-relocs=android", "-C", "link-arg=-Wl,--icf=all"]
+rustflags = ["-C", "link-arg=-Wl,--pack-dyn-relocs=relr", "-C", "link-arg=-Wl,--icf=all"]
