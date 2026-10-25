@@ -139,8 +139,9 @@ Rust backend looks it up through the application classloader. If the module
 isn't wired in, a gated open returns a typed `NotAvailable(HelperMissing)`,
 never a crash.
 
-The framework `BiometricPrompt` path requires **API 28+**; on API 26–27 a
-gated open returns `NotAvailable(UnsupportedApiLevel)` (frust's minSdk is 26).
+The framework `BiometricPrompt` path requires **API 28+**; on a floor
+below 28 (API 26–27; unreachable at frust's minSdk 29, arm kept) a
+gated open returns `NotAvailable(UnsupportedApiLevel)`.
 No third-party Gradle dependency and no `FragmentActivity` are needed — the
 module above pulls in nothing (not even `:frust-embedding`), and the plugin uses
 the application `Context` frust already provides.

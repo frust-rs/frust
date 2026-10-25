@@ -58,7 +58,9 @@
 //!
 //! `VibrationEffect.createPredefined(int)` (the `EFFECT_TICK`/`EFFECT_CLICK`/
 //! `EFFECT_HEAVY_CLICK` constants) is API 29+; this workspace's Android floor
-//! is API 26 (`frust-embedding`'s `minSdk`). Below 29, [`HapticEffect::SelectionClick`]/
+//! is API 29 (`frust-embedding`'s `minSdk`), so the predefined effects are always
+//! available. For a floor below 29 (unreachable at frust's floor, arm kept),
+//! [`HapticEffect::SelectionClick`]/
 //! [`HapticEffect::ImpactLight`]/[`HapticEffect::ImpactHeavy`] fall back to
 //! `VibrationEffect.createOneShot(long, int)` (API 26) with a duration/
 //! amplitude pair standing in for the missing predefined effect.
@@ -117,7 +119,7 @@ const EFFECTS_SUPPORTED_QUERY_API: i32 = 30;
 /// `_UNKNOWN` (0) both fall back to [`EFFECT_CLICK`] conservatively.
 const VIBRATION_EFFECT_SUPPORT_YES: i32 = 1;
 
-// One-shot fallback durations/amplitudes (API 26-28, and `ImpactMedium` on
+// One-shot fallback durations/amplitudes (kept for a floor below 29, unreachable at frust's floor of 29; and `ImpactMedium` on
 // every API level — see the module doc). Amplitudes are `1..=255`; chosen so
 // the three impact intensities are clearly distinguishable from each other
 // on hardware with amplitude control, and degrade to a single fixed strength

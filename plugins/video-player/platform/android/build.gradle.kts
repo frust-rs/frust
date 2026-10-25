@@ -47,7 +47,7 @@ android {
 
     // Both SDK levels mirror the app template's `app/build.gradle.kts`, the
     // `frust-embedding` module and the camera module exactly (`compileSdk =
-    // 36`, `minSdk = 26`). A mismatch is a silent behavior change, not a build
+    // 36`, `minSdk = 29`). A mismatch is a silent behavior change, not a build
     // error — keep them in lockstep.
     //
     // `compileSdk = 36` is additionally a HARD FLOOR here, not just a
@@ -56,12 +56,12 @@ android {
     // libraries and applications that depend on it to compile against version
     // 36 or later") for any consumer compiling against less. Lowering this line
     // would therefore break the build rather than change behavior silently.
-    // (Media3's own `minSdk` is 23, below frust's 26, so it imposes no runtime
+    // (Media3's own `minSdk` is 23, below frust's 29, so it imposes no runtime
     // floor of its own.)
     compileSdk = 36
 
     defaultConfig {
-        minSdk = 26
+        minSdk = 29
 
         // The R8 keep rules for the JNI-referenced host, the
         // classloader-instantiated factory and the manifest-declared init
