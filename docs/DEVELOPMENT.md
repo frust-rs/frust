@@ -299,7 +299,7 @@ hot-patch tests: [TESTING.md](TESTING.md).
 # CC_*/AR_* passthrough, which plain `cargo check --target` lacks (plain works only with
 # `-p frust-network-image --no-default-features`); playground links ring (same form); iOS gate needs xcrun (macOS-only).
 cargo ndk -t arm64-v8a check -p frust-database
-cargo ndk -t arm64-v8a -P 26 check -p frust-network-image
+cargo ndk -t arm64-v8a -P 29 check -p frust-network-image
 cargo check -p frust-database --target aarch64-apple-ios
 ```
 
@@ -496,14 +496,14 @@ must declare the same floor; the numbers are repeated in an in-file comment at e
 mismatch fails in one of two ways, depending on direction** (both verified empirically):
 
 - **App below library → hard build error.** AGP's manifest merger refuses it
-  (`uses-sdk:minSdkVersion 24 cannot be smaller than version 26 declared in library
+  (`uses-sdk:minSdkVersion 24 cannot be smaller than version 29 declared in library
   [:frust-embedding] …`); `:app:processDebugMainManifest` fails and nothing is produced.
 - **Library below app → silent behaviour change.** No error; the library just misses APIs it could
   have used, exactly as `IME_FLAG_NO_PERSONALIZED_LEARNING` did (below).
 
 | Platform | Floor | Declared in |
 |----------|-------|-------------|
-| Android | **`minSdk = 26`** (Android 8.0) · `compileSdk = 36` | 15 Gradle files: `crates/frust-shell-android/platform/android/frust-embedding`, `plugins/{auth-session,camera,iap,native-widgets,secure-storage,video-player}/platform/android`, `crates/frust-drive/templates/app/android.tmpl/app`, and the 7 example/benchmark apps |
+| Android | **`minSdk = 29`** (Android 10) · `compileSdk = 36` | 15 Gradle files: `crates/frust-shell-android/platform/android/frust-embedding`, `plugins/{auth-session,camera,iap,native-widgets,secure-storage,video-player}/platform/android`, `crates/frust-drive/templates/app/android.tmpl/app`, and the 7 example/benchmark apps |
 | iOS | **15.0** | `crates/frust-shell-ios/platform/ios/FrustEmbedding/Package.swift` (`.iOS(.v15)`) and each app's `IPHONEOS_DEPLOYMENT_TARGET` |
 | macOS | **11.0** (`LSMinimumSystemVersion`, `[macos] minimum-system-version` overridable per app) | Three separate literals, none referencing another: `crates/frust-drive/src/manifest.rs`'s private `DEFAULT_MACOS_MINIMUM_SYSTEM_VERSION` (the manifest-parsed default, read back at build time); `crates/frust-drive/src/scaffold/context.rs`'s own `pub` const of the same name (the scaffold-time default that fills `{{ macos_minimum_system_version }}` in `crates/frust-drive/templates/app/macos.tmpl/Info.plist.tmpl`); and a hard-coded `<string>11.0</string>` test literal in `crates/frust-drive/src/scaffold/mod.rs`. This trio needs the same lockstep discipline as the Android table below but none of the three sites carries the in-file lockstep comment yet — treat that as open follow-up work |
 | Windows | **10**, de facto — winit itself supports 7+ and only tests 10 regularly | Not an in-repo literal. The floor comes from the Win10-era API `frust-shell-windows` actually drives: winit's `Window::set_theme` (native titlebar light/dark theming) reaches DWM immersive dark-mode support, which requires Windows 10 1809+ |
@@ -513,31 +513,30 @@ mismatch fails in one of two ways, depending on direction** (both verified empir
 target?** `Package.swift`'s `platforms:` must stay **at or below** every consumer's
 `IPHONEOS_DEPLOYMENT_TARGET` — a package minimum above the app's is a compile error.
 
-### Why Android is 26 and must not go lower
+### Why Android is 29
 
-API 24/25 (Android 7.x) sit below the floor because **`EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING`
-is API 26+**: it is an `imeOptions` bit, so the constant inlines at compile time and an older IME
-simply ignores it — no compile error, no runtime crash, just the keyboard-learning half of FINDINGS
-#31's mitigation silently doing nothing. At 26 the flag is unconditionally honoured and
-`crates/frust-core/src/event/ime.rs`'s IME contract table holds at the floor.
+The floor moved from 26 in `ec68c13a`. It is set by the NDK system-font API (`AFontMatcher`, API 29)
+that the text stack's font oracle uses, so **lowering it is not a manifest-only change**: the oracle
+needs a pre-29 fallback first. The API-26 IME flag (`IME_FLAG_NO_PERSONALIZED_LEARNING`, an
+`imeOptions` bit older IMEs ignore silently) was the earlier lower bound; the IME contract in
+`crates/frust-core/src/event/ime.rs` holds at 29. No gate runs Android Lint — wiring `lintDebug` in
+is open work (*Verifying a floor change* below).
 
-**Lowering the floor below 26 re-opens that hole silently.** If it is ever lowered, restore the
-API-caveat entry in `docs/LIMITATIONS.md` in the same change. Android Lint flags the shape
-(**`InlinedApi`**) but **no gate runs Android Lint at all** — wiring `lintDebug` in, and deciding
-whether `InlinedApi` is an error here, is open work (*Verifying a floor change* below).
+**Recorded follow-ups** the floor now unlocks, none adopted by this change:
 
-**One** API the floor unlocks is deliberately **not** adopted (`SeekBar.setMin`: native-widgets'
-slider keeps its Rust-side range mapping), and two it does not unlock still need their workarounds —
-`Font.Builder(ByteBuffer)` (API 29, so the Android typeface path still writes a cache file) and
-`BiometricPrompt` (API 28+, so `secure-storage`'s `NotAvailable(UnsupportedApiLevel)` gate stays
-reachable on 26/27).
+- **haptics:** the sub-29 `createOneShot` fallback arms (API 26–28) are now unreachable.
+- **secure-storage:** the `NotAvailable(UnsupportedApiLevel)` gate below API 28 is dead code, and the
+  API 28–29 auth-validity path needs its own review.
+- **native-widgets:** the Android typeface path still writes a cache file; `Font.Builder(ByteBuffer)`
+  (API 29) removes that need. `SeekBar.setMin` stays unadopted by design (Rust-side range mapping).
 
 ### Migrating an already-scaffolded app
 
-An app scaffolded against an older floor carries `minSdk = 24`. **The bump is mandatory** — a
-scaffolded app consumes the embedding as a Gradle *project* dependency, so an app at 24 against the
-26 library fails the manifest merger outright. Set `minSdk = 26` in `app/build.gradle.kts`; there is
-no other migration step. **Verifying a floor change:** `cargo` sees none of this — from an app dir:
+An app scaffolded against an older floor carries a lower `minSdk` (24 or 26). **The bump is
+mandatory** — a scaffolded app consumes the embedding as a Gradle *project* dependency, so an app
+below 29 against the 29 library fails the manifest merger outright. Set `minSdk = 29` in
+`app/build.gradle.kts`; there is no other migration step. **Verifying a floor change:** `cargo`
+sees none of this — from an app dir:
 
 ```
 ./gradlew :app:processDebugMainManifest   # catches an app-below-library mismatch (hard error)
