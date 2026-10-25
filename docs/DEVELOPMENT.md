@@ -299,7 +299,7 @@ hot-patch tests: [TESTING.md](TESTING.md).
 # CC_*/AR_* passthrough, which plain `cargo check --target` lacks (plain works only with
 # `-p frust-network-image --no-default-features`); playground links ring (same form); iOS gate needs xcrun (macOS-only).
 cargo ndk -t arm64-v8a check -p frust-database
-cargo ndk -t arm64-v8a -P 26 check -p frust-network-image
+cargo ndk -t arm64-v8a -P 29 check -p frust-network-image
 cargo check -p frust-database --target aarch64-apple-ios
 ```
 

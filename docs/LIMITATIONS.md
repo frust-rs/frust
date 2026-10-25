@@ -563,16 +563,12 @@ never built via `xcodebuild` (Kotlin's `compileDebugKotlin` equivalent).
 Compile/typecheck-verified is not device-verified, so F5 narrows FINDINGS
 #31's Android gap without closing the finding.
 
-**API-level note — resolved by raising the floor to 26.**
-`EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING` was added in **API 26**. While
-frust's floor was `minSdk = 24` the keyboard-learning suppression was a
-*silent* no-op on API 24 and 25 — it is an `imeOptions` bit rather than a
-method call, so the constant inlines at compile time, an older IME simply
-ignores the unknown bit, and neither a crash nor a `NewApi` lint would have
-surfaced it. **Every frust Gradle module now pins `minSdk = 26`**, so the flag
-is unconditionally honoured and the Android contract table holds at the floor
-with no API caveat. Do not lower the floor below 26 without re-introducing
-this caveat.
+**API-level note — historical.** `EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING`
+is an API 26 `imeOptions` bit, so while frust's floor was `minSdk = 24` the
+suppression was a *silent* no-op on API 24–25 (the constant inlines, an older
+IME ignores the unknown bit, no crash and no `NewApi` lint). **Every frust
+Gradle module now pins `minSdk = 29`**, so the flag is unconditionally
+honoured and the Android contract table holds at the floor with no API caveat.
 
 **Why not closed**: FINDINGS #31's only proof gate is on-device
 verification, and that gate is currently blocked on device access. **The
