@@ -2,7 +2,7 @@
 //! Gradle, the fat library is staged where Gradle packages it from, and the
 //! session reaches the app through `adb forward`.
 //!
-//! **Fat build.** `cargo ndk -t arm64-v8a --platform 21 -o
+//! **Fat build.** `cargo ndk -t arm64-v8a --platform 29 -o
 //! <app>/build/android/jniLibs rustc -p <package> --lib --features ... --
 //! -Csave-temps=true -Clink-dead-code -Clinker=<frust>` ([`fat_build_command`]),
 //! with the capture wrapper (`RUSTC_WORKSPACE_WRAPPER=<frust>`, the scope in
@@ -18,8 +18,8 @@
 //! cargo-ndk's own linker (cargo-ndk names itself, then calls
 //! `<ndk>/.../clang --target=aarch64-linux-android<api>`). No
 //! `CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS` fallback is needed. The
-//! API level is cargo-ndk's default, 21, passed explicitly so the proxied
-//! linker and the cold `cargoNdkBuild` link at the same level.
+//! API level is the minSdk floor, 29, passed explicitly so the proxied
+//! linker and the cold `cargoNdkBuild` (`--platform <minSdk>`) link at the same level.
 //!
 //! **Fat link.** The builder re-links the captured line itself through the
 //! shared base-image half of a session start (`session::link_base`): Gnu
@@ -109,9 +109,9 @@ pub const TRIPLE: &str = "aarch64-linux-android";
 /// [`TRIPLE`]'s ABI name, as cargo-ndk, Gradle and `getprop` spell it.
 pub const ABI: &str = "arm64-v8a";
 
-/// The NDK API level the fat build links at: cargo-ndk's own default, which
-/// the template's `cargoNdkBuild` task relies on.
-pub const API_LEVEL: u32 = 21;
+/// The NDK API level the fat build links at: the minSdk floor, which the
+/// template's `cargoNdkBuild` task passes as `--platform <minSdk>`.
+pub const API_LEVEL: u32 = 29;
 
 /// The identical-code-folding setting the fat image links with.
 const ICF_NONE: &str = "-Wl,--icf=none";
@@ -122,7 +122,7 @@ pub struct NdkToolchain {
     /// The NDK root, handed to cargo-ndk as `ANDROID_NDK_HOME` so it uses
     /// this very NDK.
     pub home: PathBuf,
-    /// `<home>/toolchains/llvm/prebuilt/<host>/bin/aarch64-linux-android21-clang`:
+    /// `<home>/toolchains/llvm/prebuilt/<host>/bin/aarch64-linux-android29-clang`:
     /// the proxied linker of the fat build, and the fat and thin links'
     /// driver.
     pub clang: PathBuf,
@@ -218,7 +218,7 @@ fn highest_ndk(dir: &Path) -> Option<PathBuf> {
         .map(|(_, path)| path)
 }
 
-/// `cargo ndk -t arm64-v8a --platform 21 -o <jni_libs> rustc -p <package>
+/// `cargo ndk -t arm64-v8a --platform 29 -o <jni_libs> rustc -p <package>
 /// --lib --message-format json-diagnostic-rendered-ansi --features ... --
 /// -Csave-temps=true -Clink-dead-code -Clinker=<frust>`, with `defines`
 /// (the `--define`s, as the Gradle task threads them), `ANDROID_NDK_HOME`,
@@ -882,7 +882,7 @@ mod tests {
     fn fake_ndk(root: &Path) -> NdkToolchain {
         let bin = root.join("toolchains/llvm/prebuilt/darwin-x86_64/bin");
         std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(bin.join("aarch64-linux-android21-clang"), "#!/bin/sh\n").unwrap();
+        std::fs::write(bin.join("aarch64-linux-android29-clang"), "#!/bin/sh\n").unwrap();
         let strip = format!("llvm-strip{}", std::env::consts::EXE_SUFFIX);
         std::fs::write(bin.join(strip), "#!/bin/sh\n").unwrap();
         NdkToolchain::at(root, "darwin-x86_64").unwrap()
@@ -908,7 +908,7 @@ mod tests {
         assert_eq!(
             ndk.clang,
             explicit
-                .join("toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android21-clang")
+                .join("toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android29-clang")
         );
         let env = FakeEnv::new().set("ANDROID_NDK_HOME", &explicit.to_string_lossy());
         assert_eq!(ndk_home(&env).unwrap(), explicit);
@@ -1056,7 +1056,7 @@ mod tests {
     fn the_fat_build_is_cargo_ndk_rustc_with_the_capture_and_proxy_link_env() {
         let ndk = NdkToolchain {
             home: PathBuf::from("/sdk/ndk/28.2.13676358"),
-            clang: PathBuf::from("/sdk/ndk/28.2.13676358/bin/aarch64-linux-android21-clang"),
+            clang: PathBuf::from("/sdk/ndk/28.2.13676358/bin/aarch64-linux-android29-clang"),
             strip: PathBuf::from("/sdk/ndk/28.2.13676358/bin/llvm-strip"),
         };
         let link = LinkAction {
@@ -1082,7 +1082,7 @@ mod tests {
         assert_eq!(fat.program, "cargo");
         assert_eq!(
             fat.args.join(" "),
-            "ndk -t arm64-v8a --platform 21 -o /w/my-app/build/android/jniLibs rustc -p my-app \
+            "ndk -t arm64-v8a --platform 29 -o /w/my-app/build/android/jniLibs rustc -p my-app \
              --lib --message-format json-diagnostic-rendered-ansi --features frust/perf-trace \
              --features frust/devtools --features frust/hotpatch -- -Csave-temps=true \
              -Clink-dead-code -Clinker=/opt/frust/bin/frust"
@@ -1100,7 +1100,7 @@ mod tests {
                 pair("FRUST_HOTPATCH_LINK_ERR_FILE", "/t/fat/link-err.txt"),
                 pair(
                     "FRUST_HOTPATCH_LINKER",
-                    "/sdk/ndk/28.2.13676358/bin/aarch64-linux-android21-clang"
+                    "/sdk/ndk/28.2.13676358/bin/aarch64-linux-android29-clang"
                 ),
                 pair(
                     "FRUST_HOTPATCH_AMBIENT",
