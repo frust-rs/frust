@@ -31,13 +31,17 @@
 //!
 //! # No FFI here
 //!
-//! frust-text is on CODE_STANDARDS' unsafe-free list, and this module is
-//! compiled with `forbid(unsafe_code)`. [`FaceStore`] reads font files with
-//! `std::fs::read` (no memory mapping); [`FaceLocation::Blob`] lets a backend
-//! hand over an already-built buffer instead, which is the seam a future
-//! sanctioned mapping zone (decision D-6, pending) would use.
+//! frust-text is on CODE_STANDARDS' unsafe-free list, with one sanctioned
+//! zone (decision D-6): the `apple`, `android`, `fontconfig` and `dwrite`
+//! backend files, each opening it with `#![allow(unsafe_code)]`. [`FaceStore`]
+//! reads font files with `std::fs::read` (no memory mapping);
+//! [`FaceLocation::Blob`] lets a backend hand over an already-built buffer
+//! instead.
 
-#![forbid(unsafe_code)]
+// `deny`, not `forbid`: `forbid` cannot be overridden by an inner `allow`, and
+// the D-6 zone files must be able to open it. Every other file under `oracle/`
+// stays unsafe-free, enforced by the guard tests below.
+#![deny(unsafe_code)]
 #![cfg_attr(
     not(test),
     allow(
@@ -648,25 +652,98 @@ mod tests {
         }
     }
 
+    /// The word the guard scans for, spelled so this file does not match itself.
+    const UNSAFE_WORD: &str = concat!("un", "safe");
+
+    /// The sanctioned unsafe zone (decision D-6): the only oracle files that may
+    /// contain `unsafe`. `store.rs` is reserved for the file-mapping zone and may
+    /// not exist yet.
+    const UNSAFE_ZONE: [&str; 5] = [
+        "apple.rs",
+        "android.rs",
+        "fontconfig.rs",
+        "dwrite.rs",
+        "store.rs",
+    ];
+
+    /// The marker every zone file's leading `//!` header carries.
+    const ZONE_MARKER: &str = concat!("Sanctioned un", "safe zone (decision D-6)");
+
+    /// The attribute that opens the zone for one module.
+    const ZONE_ALLOW: &str = "#![allow(unsafe_code)]";
+
+    fn is_zone(path: &Path) -> bool {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| UNSAFE_ZONE.contains(&name))
+    }
+
+    /// Whether `code` contains [`UNSAFE_WORD`] as a whole word, so identifiers
+    /// such as `unsafe_code` do not count.
+    fn has_unsafe_token(code: &str) -> bool {
+        let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+        code.match_indices(UNSAFE_WORD).any(|(at, _)| {
+            let before = code[..at].chars().next_back();
+            let after = code[at + UNSAFE_WORD.len()..].chars().next();
+            !before.is_some_and(is_ident) && !after.is_some_and(is_ident)
+        })
+    }
+
     #[test]
-    fn the_oracle_contains_no_unsafe_code() {
-        let forbidden = [
-            concat!("un", "safe {"),
-            concat!("un", "safe fn"),
-            concat!("un", "safe impl"),
-            concat!("un", "safe extern"),
-            concat!("un", "safe trait"),
-            concat!("un", "safe("),
-        ];
+    fn no_unsafe_token_outside_the_zone() {
         for (path, text) in oracle_sources() {
-            for word in forbidden {
+            if is_zone(&path) {
+                continue;
+            }
+            for line in text.lines() {
+                // Prose may say "unsafe"; only the code before a `//` counts.
+                let code = line.split_once("//").map_or(line, |(code, _)| code);
                 assert!(
-                    !text.contains(word),
-                    "{} contains `{word}`: frust-text is unsafe-free",
+                    !has_unsafe_token(code),
+                    "{} uses `{UNSAFE_WORD}` outside the D-6 zone: {line}",
                     path.display()
                 );
             }
         }
+    }
+
+    #[test]
+    fn every_zone_file_opens_the_zone_with_a_header() {
+        let zone_files: Vec<_> = oracle_sources()
+            .into_iter()
+            .filter(|(path, _)| is_zone(path))
+            .collect();
+        assert!(
+            zone_files.len() >= 4,
+            "expected the four backend zone files, found {}",
+            zone_files.len()
+        );
+        for (path, text) in zone_files {
+            let allow = text.lines().position(|line| line == ZONE_ALLOW);
+            let first_item = text
+                .lines()
+                .position(|line| line.starts_with("use ") || line.starts_with("mod "));
+            assert!(
+                allow.is_some() && allow < first_item,
+                "{} must open with `{ZONE_ALLOW}` before its items",
+                path.display()
+            );
+            assert!(
+                text.lines()
+                    .take_while(|line| line.starts_with("//!"))
+                    .any(|line| line.contains(ZONE_MARKER)),
+                "{} lacks the `{ZONE_MARKER}` header",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn the_unsafe_token_scan_matches_whole_words_only() {
+        assert!(has_unsafe_token(concat!("un", "safe { f() }")));
+        assert!(has_unsafe_token(concat!("pub ", "un", "safe fn f()")));
+        assert!(!has_unsafe_token("#![deny(unsafe_code)]"));
+        assert!(!has_unsafe_token("let is_unsafe_free = true;"));
     }
 
     #[test]

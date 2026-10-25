@@ -1,3 +1,8 @@
+//! Sanctioned unsafe zone (decision D-6): FFI to DirectWrite (windows-sys and windows-link, no `windows` crate).
+//! Every `unsafe` block carries a SAFETY note, and the FFI stays behind safe
+//! wrappers that never leak past the `Backend` trait. No other oracle module
+//! may contain `unsafe`; the guard tests in `oracle/mod.rs` enforce it.
+//!
 //! The DirectWrite oracle backend (Windows).
 //!
 //! Compiled only for `windows` (the cfg gate is on this module's `mod` line in
@@ -5,6 +10,8 @@
 //! so the oracle falls through to the app-font registry's generic fallbacks.
 //!
 //! Planned shape (s-04): `IDWriteFontFallback::MapCharacters` over the cluster, then the mapped font's local file loader gives the file path and `IDWriteFontFace::GetIndex` the face index (windows-sys + windows-link, no `windows` crate).
+
+#![allow(unsafe_code)]
 
 use super::{Backend, FaceSource, FallbackRequest};
 use crate::style::GenericSlot;

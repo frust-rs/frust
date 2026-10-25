@@ -1,3 +1,8 @@
+//! Sanctioned unsafe zone (decision D-6): FFI to the NDK font matcher (`AFontMatcher`, API 29).
+//! Every `unsafe` block carries a SAFETY note, and the FFI stays behind safe
+//! wrappers that never leak past the `Backend` trait. No other oracle module
+//! may contain `unsafe`; the guard tests in `oracle/mod.rs` enforce it.
+//!
 //! The Android NDK oracle backend (`AFontMatcher`, API 29).
 //!
 //! Compiled only for `target_os = "android"` (the cfg gate is on this module's `mod` line in
@@ -5,6 +10,8 @@
 //! so the oracle falls through to the app-font registry's generic fallbacks.
 //!
 //! Planned shape (s-03): one reused `AFontMatcher` per (family, weight, italic, locales) key; `AFont_getFontFilePath`/`AFont_getCollectionIndex` give (file, face index), and the matched weight/italic become a synthesis hint (variable Roboto takes `wght`, CJK bold needs faux bold).
+
+#![allow(unsafe_code)]
 
 use super::{Backend, FaceSource, FallbackRequest};
 use crate::style::GenericSlot;

@@ -1,3 +1,8 @@
+//! Sanctioned unsafe zone (decision D-6): FFI to fontconfig, reached through `dlopen`.
+//! Every `unsafe` block carries a SAFETY note, and the FFI stays behind safe
+//! wrappers that never leak past the `Backend` trait. No other oracle module
+//! may contain `unsafe`; the guard tests in `oracle/mod.rs` enforce it.
+//!
 //! The fontconfig oracle backend (Linux, FreeBSD).
 //!
 //! Compiled only for `target_os = "linux"` or `"freebsd"` (the cfg gate is on this module's `mod` line in
@@ -5,6 +10,8 @@
 //! so the oracle falls through to the app-font registry's generic fallbacks.
 //!
 //! Planned shape: an `FcFontSort`/`FcFontMatch` query per cluster (charset, lang, weight, slant) through the `dlopen`-loaded library, answering the matched pattern's `FC_FILE` and `FC_INDEX`.
+
+#![allow(unsafe_code)]
 
 use super::{Backend, FaceSource, FallbackRequest};
 use crate::style::GenericSlot;
