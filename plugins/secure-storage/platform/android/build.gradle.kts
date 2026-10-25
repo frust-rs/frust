@@ -33,15 +33,15 @@ android {
     namespace = "dev.frust.securestorage"
 
     // Both SDK levels mirror the app template's `app/build.gradle.kts` and the
-    // `frust-embedding` module exactly (`compileSdk = 36`, `minSdk = 26`). A
+    // `frust-embedding` module exactly (`compileSdk = 36`, `minSdk = 29`). A
     // mismatch is a silent behavior change, not a build error — keep them in
-    // lockstep. (The biometric gate itself needs API 28+; a gated open below
-    // that returns `NotAvailable(UnsupportedApiLevel)` at runtime, so minSdk
-    // stays at the framework's 26 — the gate is still needed on 26 and 27.)
+    // lockstep. (The biometric gate itself needs API 28+, which the floor now covers; a gated open below
+    // that would return `NotAvailable(UnsupportedApiLevel)` at runtime, so minSdk
+    // stays at the framework's 29 — the gate is always available there.)
     compileSdk = 36
 
     defaultConfig {
-        minSdk = 26
+        minSdk = 29
 
         // The R8 keep rule for the helper travels WITH this module: a consuming
         // app inherits it automatically instead of hand-editing its own

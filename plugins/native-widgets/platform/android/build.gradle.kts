@@ -54,14 +54,14 @@ android {
 
     // Both SDK levels mirror the app template's `app/build.gradle.kts`, the
     // `frust-embedding` module and the camera/secure-storage modules exactly
-    // (`compileSdk = 36`, `minSdk = 26`). A mismatch is a silent behavior
+    // (`compileSdk = 36`, `minSdk = 29`). A mismatch is a silent behavior
     // change, not a build error — keep them in lockstep. Every control this
     // plugin builds is a plain `android.widget` view available since well
-    // before API 26, so nothing here imposes a floor of its own.
+    // before API 29, so nothing here imposes a floor of its own.
     compileSdk = 36
 
     defaultConfig {
-        minSdk = 26
+        minSdk = 29
 
         // The R8 keep rules for the two JNI-bound, reflectively-instantiated
         // classes travel WITH this module: a consuming app inherits them
@@ -97,7 +97,7 @@ dependencies {
     // MaterialButtonToggleGroup). `api`, not `implementation`: the consuming
     // app's theme must resolve Material3 theme attributes, so the artifact has
     // to sit on the APP's compile classpath, and the app declares nothing itself.
-    // It pulls `androidx.appcompat:appcompat` transitively (minSdk 23 <= 26).
+    // It pulls `androidx.appcompat:appcompat` transitively (minSdk 23 <= 29).
     //
     // LOCKSTEP: this is the plugin's only third-party Android pin. Bump it only
     // with the Android device gate suite and the pin row in

@@ -7,7 +7,7 @@
 //!
 //! `SeekBar.setMin` needs API 26. This mapping was written when frust's floor
 //! was `minSdk = 24`, where calling it would have been a `NoSuchMethodError`
-//! on two supported API levels. **The floor is now 26, so `setMin` would be
+//! on two supported API levels. **The floor is now 29, so `setMin` would be
 //! available** — the mapping is retained deliberately rather than because the
 //! platform still forces it: it is correct, it is covered by tests, and
 //! switching to `setMin` would change the wire plan (`Setter::Max` stops being

@@ -71,7 +71,7 @@ android {
 
     defaultConfig {
         applicationId = "it.f0x.glyphcatalog"
-        minSdk = 26
+        minSdk = 29
         targetSdk = 36
         versionCode = versionCodeValue
         versionName = versionNameValue

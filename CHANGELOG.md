@@ -6,6 +6,14 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ## Unreleased
 
+### Breaking
+
+- Android `minSdk` is now 29 (Android 10), up from 26, in the embedding, every plugin module, the
+  scaffold template and the example apps. An app scaffolded earlier must set `minSdk = 29` in
+  `app/build.gradle.kts` (or its manifest) or the manifest merger fails. The text stack needs the
+  NDK font API (`AFontMatcher_match`, API 29+) instead of parsing the `fonts.xml` that Android 15
+  deprecates.
+
 ### Added
 
 - `frust::texture::request_frame`: a producer that has a new frame owes the shell one frame, so an

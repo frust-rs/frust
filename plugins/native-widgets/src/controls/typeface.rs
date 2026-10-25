@@ -27,8 +27,9 @@
 //! license text; another design system's licence terms are its own).
 //! `crate::android::fonts` writes those bytes, unmodified, to a private
 //! app-cache file purely because `Typeface.createFromFile` needs a filesystem
-//! path (there is no create-from-bytes overload at this crate's `minSdk` 26
-//! floor — `Font.Builder(ByteBuffer)` is API 29) — it never redistributes a
+//! path (the cache-file path was written for a floor below 29, where there is no
+//! create-from-bytes overload; `Font.Builder(ByteBuffer)` is API 29 and the
+//! path is kept, unreachable-as-required at frust's floor of 29) — it never redistributes a
 //! face anywhere a user or another app can reach.
 
 use crate::runtime::Params;

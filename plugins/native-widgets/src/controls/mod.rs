@@ -362,8 +362,8 @@ pub(crate) enum Setter<'a> {
 
     /// `ProgressBar.setMax(int)` / `UIStepper.setMaximumValue:` /
     /// `NSStepper.setMaxValue:` — **[`Tier::Cheap`]**. Platform-space span
-    /// (`max - min`), since `SeekBar.setMin` needs API 26 and this crate's
-    /// floor is 24. Reused by `Stepper` for the same reason [`Self::Progress`]
+    /// (`max - min`), since `SeekBar.setMin` needs API 26 (written when this
+    /// crate's floor was 24; the floor is now 29). Reused by `Stepper` for the same reason [`Self::Progress`]
     /// documents.
     Max(i32),
 
