@@ -65,13 +65,17 @@ val definesB64 = prop("frust.defines", "")
 // foul of the release env-drop Known Issue by construction.
 val cargoFeaturesB64 = prop("frust.cargoFeatures", "")
 
+// Single source for the Android floor: the `defaultConfig` minSdk and the NDK link
+// platform `cargoNdkBuild` passes to `cargo ndk --platform`, so the two cannot drift.
+val minSdkValue = 29
+
 android {
     namespace = "it.f0x.frustbench"
     compileSdk = 36
 
     defaultConfig {
         applicationId = "it.f0x.frustbench"
-        minSdk = 29
+        minSdk = minSdkValue
         targetSdk = 36
         versionCode = versionCodeValue
         versionName = versionNameValue
@@ -261,6 +265,8 @@ val cargoNdkBuild = tasks.register<Exec>("cargoNdkBuild") {
         buildList {
             add("cargo")
             add("ndk")
+            add("--platform")
+            add(minSdkValue.toString())
             addAll(cargoTargetArgs)
             add("-o")
             add(file("../../build/android/jniLibs").absolutePath)
