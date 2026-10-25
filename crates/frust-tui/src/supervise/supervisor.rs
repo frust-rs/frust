@@ -102,6 +102,10 @@
 //! mid-flight), not instantly. The device path is driven by
 //! [`Supervisor::start_device`] over `frust-drive`'s `android_run`/`ios_run`
 //! cancellable `spawn_session` seams; the desktop path is fully killable.
+//! A Debug/Profile desktop session first resolves the app's dependency graph
+//! on its supervision thread ([`PendingStream`]); that `cargo metadata` cannot
+//! be interrupted either, so a stop during it is observed once it returns,
+//! and `cargo run` is then never spawned.
 //!
 //! # Stopping the app, not just our view of it
 //!
@@ -189,6 +193,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use frust_drive::devices::{Kind, Platform};
+use frust_drive::lock_refresh;
 use frust_drive::process::{LineReceiver, ProcessRunner, StreamHandle};
 use frust_drive::{android_run, ios_run};
 use tokio::sync::mpsc::error::TrySendError;
@@ -303,6 +308,86 @@ enum Killer {
     /// `stop` sets its cancel flag (abandoning the pipeline at the next phase
     /// boundary) and kills the logcat stream if it has begun.
     Device(Arc<DeviceControl>),
+    /// A Debug/Profile desktop `cargo run` whose dependency-graph resolve
+    /// runs on the session's own thread first, so the child does not exist
+    /// yet when `start` returns (see [`PendingStream`]).
+    Preflighted(Arc<PendingStream>),
+}
+
+/// The kill path for a desktop session whose `cargo run` is spawned late, by
+/// its supervision thread, once the app's dependency graph resolves.
+///
+/// The resolve itself (`cargo metadata`, run to completion through
+/// `ProcessRunner::run_streaming`) cannot be interrupted, so a `stop` during
+/// it only sets `killed`; what matters is that `cargo run` is never spawned
+/// afterwards. That is the stop/spawn race, closed the way
+/// [`DeviceControl::install_logcat`] closes the device one — under **one
+/// continuous hold** of the `handle` mutex `stop` also takes:
+///
+/// - `stop` stores `killed` first, then takes the lock and kills whatever
+///   handle is there.
+/// - [`spawn`](Self::spawn) takes the lock, re-checks `killed`, and only then
+///   spawns and stores the handle before releasing it.
+///
+/// So either the spawn sees `killed` and never starts the child (a stop
+/// before or during the resolve), or the child is already stored when
+/// `stop`'s lock is granted and is killed there (a stop after the spawn,
+/// exactly as [`Killer::Stream`] behaves). No ordering leaves a running child
+/// nothing will kill. The lock is held across the spawn call only — a
+/// process start, the same cost `start` paid inline before — never across
+/// the resolve.
+struct PendingStream {
+    /// Set by `stop` before it takes the lock; the drain then reports
+    /// [`Killed`](SessionState::Killed), and an unspawned child stays unspawned.
+    killed: AtomicBool,
+    /// The `cargo run` child once spawned; `None` while the resolve runs (and
+    /// forever, for a session stopped or failed before it).
+    handle: Mutex<Option<StreamHandle>>,
+}
+
+impl PendingStream {
+    fn new() -> Self {
+        Self {
+            killed: AtomicBool::new(false),
+            handle: Mutex::new(None),
+        }
+    }
+
+    /// Mark the session killed, then kill the child if it has been spawned.
+    /// Idempotent, and never blocks on the resolve.
+    fn stop(&self) {
+        self.killed.store(true, Ordering::SeqCst);
+        if let Some(handle) = lock_pending(&self.handle).as_mut() {
+            handle.kill();
+        }
+    }
+
+    fn is_killed(&self) -> bool {
+        self.killed.load(Ordering::SeqCst)
+    }
+
+    /// Spawn `plan` and store its handle, unless a stop already landed —
+    /// the install-and-recheck half of the race the type docs describe.
+    /// `Ok(None)` means the session was stopped and nothing was spawned.
+    fn spawn(&self, runner: &dyn ProcessRunner, plan: &LaunchPlan) -> Result<Option<LineReceiver>> {
+        let mut slot = lock_pending(&self.handle);
+        if self.is_killed() {
+            return Ok(None);
+        }
+        let handle = spawn_plan(runner, plan)?;
+        let lines = handle.lines.clone();
+        *slot = Some(handle);
+        Ok(Some(lines))
+    }
+
+    /// Reap the spawned child (idempotent with `stop`'s kill), yielding its
+    /// exit success.
+    fn wait(&self) -> bool {
+        lock_pending(&self.handle)
+            .as_mut()
+            .map(StreamHandle::wait)
+            .unwrap_or(false)
+    }
 }
 
 /// Where a stopped device session's app actually lives, so the OS can be asked
@@ -628,12 +713,25 @@ impl Supervisor {
     /// single streaming `cargo run` child; a [`DeviceTarget::Device`] drives
     /// the multi-phase device pipeline (build → install → launch → logcat) on
     /// its own supervision thread (see [`Supervisor::start_device`]). Errors
-    /// if the process/thread fails to spawn.
+    /// if the plan cannot be resolved or the process/thread fails to spawn.
+    ///
+    /// A Debug/Profile desktop session first resolves the app's dependency
+    /// graph under the plan's features ([`SessionSpec::preflight_features`]).
+    /// That resolve is a blocking `cargo metadata`, and this is called from
+    /// the workbench's event loop, so it runs on the session's own
+    /// supervision thread: `start` returns as soon as that thread exists, and
+    /// the thread spawns `cargo run` itself once the graph resolves (see
+    /// [`PendingStream`]). A spawn failure there surfaces as a session line
+    /// and [`Exited(false)`](SessionState::Exited), not as an `Err` here. A
+    /// Release session resolves nothing and spawns immediately.
     pub fn start(&mut self, spec: &SessionSpec) -> Result<SessionId> {
         match &spec.target {
             DeviceTarget::Desktop => {
                 let plan = spec.launch_plan()?;
-                self.start_with_plan(plan)
+                match spec.preflight_features(&plan) {
+                    Some(features) => self.start_preflighted(plan, features),
+                    None => self.start_with_plan(plan),
+                }
             }
             DeviceTarget::Device(device) => self.start_device(DevicePlan {
                 project_root: spec.project_root.clone(),
@@ -650,24 +748,7 @@ impl Supervisor {
     /// the session emits.
     pub fn start_with_plan(&mut self, plan: LaunchPlan) -> Result<SessionId> {
         let id = SessionId(self.next_id);
-
-        // Borrow the owned plan pieces for the spawn call.
-        let arg_refs: Vec<&str> = plan.args.iter().map(String::as_str).collect();
-        let env_refs: Vec<(&str, &str)> = plan
-            .env
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
-
-        let handle = self
-            .runner
-            .spawn_streaming(
-                &plan.program,
-                &arg_refs,
-                Some(plan.cwd.as_path()),
-                &env_refs,
-            )
-            .with_context(|| format!("failed to start session `{}`", plan.program))?;
+        let handle = spawn_plan(self.runner.as_ref(), &plan)?;
 
         // Clone the line receiver for the drain thread (`LineReceiver` is an
         // `Arc` over the shared ring; clones compete for lines and only the
@@ -692,6 +773,40 @@ impl Supervisor {
             id,
             SessionEntry {
                 killer: Killer::Stream { handle, killed },
+                worker: Some(worker),
+            },
+        );
+        self.next_id += 1;
+        Ok(id)
+    }
+
+    /// Start a desktop session whose dependency graph must resolve under
+    /// `features` before `plan` (its `cargo run`) is spawned. The resolve, the
+    /// spawn and the drain all run on one `frust-tui-session-<id>` thread, so
+    /// this returns without running cargo on the calling thread. The session
+    /// starts [`Configuring`](SessionState::Configuring); a refresh line
+    /// arrives as a [`Lines`](SessionEventKind::Lines) batch, a resolve
+    /// failure as its text followed by [`Exited(false)`](SessionState::Exited)
+    /// with no `cargo run` ever spawned, and a `stop` before the spawn ends it
+    /// [`Killed`](SessionState::Killed) with no child at all.
+    fn start_preflighted(&mut self, plan: LaunchPlan, features: Vec<String>) -> Result<SessionId> {
+        let id = SessionId(self.next_id);
+        let pending = Arc::new(PendingStream::new());
+        let runner = Arc::clone(&self.runner);
+        let events = self.events_tx.clone();
+
+        let worker = {
+            let pending = Arc::clone(&pending);
+            thread::Builder::new()
+                .name(format!("frust-tui-session-{}", id.0))
+                .spawn(move || run_preflighted_session(id, plan, features, runner, pending, events))
+                .context("spawning session supervision thread")?
+        };
+
+        self.sessions.insert(
+            id,
+            SessionEntry {
+                killer: Killer::Preflighted(pending),
                 worker: Some(worker),
             },
         );
@@ -755,6 +870,7 @@ impl Supervisor {
                     lock(handle).kill();
                 }
                 Killer::Device(control) => control.stop(),
+                Killer::Preflighted(pending) => pending.stop(),
             }
         }
     }
@@ -796,6 +912,9 @@ impl Drop for Supervisor {
         // Kill every still-running session (`stop_all` also bounded-joins the
         // termination threads its stops spawned), then join the drain threads
         // so a dropped supervisor leaves no orphaned process or thread behind.
+        // A desktop session still resolving its dependency graph is joined
+        // like a device session mid-build: its uninterruptible `cargo metadata`
+        // finishes, the thread sees the stop and returns without spawning.
         self.stop_all();
         for (_, mut entry) in self.sessions.drain() {
             if let Some(worker) = entry.worker.take() {
@@ -829,6 +948,33 @@ fn join_bounded(threads: Vec<JoinHandle<()>>) {
         let _ = done_tx.send(());
     });
     let _ = done_rx.recv_timeout(TERMINATION_JOIN_DEADLINE);
+}
+
+/// Spawn `plan` through `runner`'s cancellable `spawn_streaming` seam — the
+/// one spawn site both desktop paths share.
+fn spawn_plan(runner: &dyn ProcessRunner, plan: &LaunchPlan) -> Result<StreamHandle> {
+    let arg_refs: Vec<&str> = plan.args.iter().map(String::as_str).collect();
+    let env_refs: Vec<(&str, &str)> = plan
+        .env
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    runner
+        .spawn_streaming(
+            &plan.program,
+            &arg_refs,
+            Some(plan.cwd.as_path()),
+            &env_refs,
+        )
+        .with_context(|| format!("failed to start session `{}`", plan.program))
+}
+
+/// Lock a late-spawned desktop session's handle slot, poison-recovering like
+/// [`lock`].
+fn lock_pending(
+    slot: &Mutex<Option<StreamHandle>>,
+) -> std::sync::MutexGuard<'_, Option<StreamHandle>> {
+    slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Lock a session's kill handle, recovering from a poisoned mutex (a panicked
@@ -1095,6 +1241,74 @@ fn drain_session(
     // `wait` reaps it (idempotent with the kill path) and yields exit success.
     let success = lock(&handle).wait();
     let terminal = if killed.load(Ordering::SeqCst) {
+        SessionState::Killed
+    } else {
+        SessionState::Exited(success)
+    };
+    sender.send_terminal_state(terminal);
+}
+
+/// The supervision loop of a Debug/Profile desktop session, run on its own std
+/// thread: resolve the app's dependency graph under `features`, then spawn
+/// `plan` (unless a stop landed first — see [`PendingStream`]) and drain it
+/// exactly as [`drain_session`] drains a desktop child spawned up front.
+///
+/// A resolve that fails ends the session with cargo's text as a
+/// [`Lines`](SessionEventKind::Lines) batch and
+/// [`Exited(false)`](SessionState::Exited), never spawning `cargo run`; a stop
+/// observed at any point before the spawn ends it [`Killed`](SessionState::Killed)
+/// instead, the resolve's own outcome notwithstanding.
+fn run_preflighted_session(
+    id: SessionId,
+    plan: LaunchPlan,
+    features: Vec<String>,
+    runner: Arc<dyn ProcessRunner + Send + Sync>,
+    pending: Arc<PendingStream>,
+    events: Sender<SessionEvent>,
+) {
+    let mut sender = SessionSender::new(events, id);
+    let mut state = SessionState::Configuring;
+    if sender.send_state(state.clone()).is_err() {
+        return;
+    }
+
+    // A stop that landed before this thread got going skips the resolve.
+    if !pending.is_killed() {
+        let resolved = {
+            let sender = &mut sender;
+            let mut on_line = |line: &str| {
+                let _ = sender.send_lines(vec![line.to_string()]);
+            };
+            lock_refresh::ensure_resolves(runner.as_ref(), &plan.cwd, &features, &mut on_line)
+        };
+        if let Err(err) = resolved
+            && !pending.is_killed()
+        {
+            let text = err.to_string();
+            let _ = sender.send_lines(text.lines().map(str::to_string).collect());
+            sender.send_terminal_state(SessionState::Exited(false));
+            return;
+        }
+    }
+
+    let lines = match pending.spawn(runner.as_ref(), &plan) {
+        Ok(Some(lines)) => lines,
+        Ok(None) => {
+            sender.send_terminal_state(SessionState::Killed);
+            return;
+        }
+        Err(err) => {
+            let _ = sender.send_lines(vec![format!("error: {err:#}")]);
+            sender.send_terminal_state(SessionState::Exited(false));
+            return;
+        }
+    };
+
+    if drain_receiver(&mut sender, &mut state, &lines).is_err() {
+        return;
+    }
+    let success = pending.wait();
+    let terminal = if pending.is_killed() {
         SessionState::Killed
     } else {
         SessionState::Exited(success)
@@ -1693,11 +1907,13 @@ mod tests {
     /// N concurrent sessions, each terminating independently.
     #[tokio::test]
     async fn start_launches_a_desktop_session_per_spec() {
-        let runner = FakeProcessRunner::new().with_stream(
-            "cargo run --features frust/perf-trace --features frust/devtools",
-            ["   Compiling app", "     Running `app`", "hello"],
-            true,
-        );
+        let runner = FakeProcessRunner::new()
+            .with(RESOLVE_KEY, resolved())
+            .with_stream(
+                DEBUG_DESKTOP_RUN,
+                ["   Compiling app", "     Running `app`", "hello"],
+                true,
+            );
         let (mut sup, mut rx) = Supervisor::new(Arc::new(runner));
         let a = sup.start(&desktop_spec("/tmp/a")).unwrap();
         let b = sup.start(&desktop_spec("/tmp/b")).unwrap();
@@ -2615,5 +2831,521 @@ mod tests {
             "a closed receiver must short-circuit the terminal send, took {:?}",
             started.elapsed()
         );
+    }
+
+    // ── Desktop dependency-graph resolve, off the calling thread ────────────
+
+    /// The prefix every Debug/Profile desktop resolve's argv starts with; the
+    /// fake runner matches it as a prefix, whatever the feature list.
+    const RESOLVE_KEY: &str = "cargo metadata --format-version 1";
+
+    /// The `cargo run` a Debug desktop spec rooted anywhere without a
+    /// manifest resolves to.
+    const DEBUG_DESKTOP_RUN: &str =
+        "cargo run --features frust/perf-trace --features frust/devtools";
+
+    /// A successful `cargo metadata` reply.
+    fn resolved() -> frust_drive::process::Output {
+        frust_drive::process::Output {
+            success: true,
+            stdout: "{}".to_string(),
+            stderr: String::new(),
+        }
+    }
+
+    /// A [`FakeProcessRunner`] whose `cargo metadata` resolve can be held
+    /// until the test releases it, and which records every invocation in
+    /// order (`stream <key>` for a blocking streamed call, `spawn <key>` for a
+    /// supervised child) plus the name of the thread each resolve ran on.
+    struct GatedRunner {
+        inner: FakeProcessRunner,
+        calls: Mutex<Vec<String>>,
+        resolve_threads: Mutex<Vec<String>>,
+        /// Replies to successive resolves, in order; once empty, `inner`
+        /// answers.
+        resolve_replies: Mutex<std::collections::VecDeque<frust_drive::process::Output>>,
+        /// Signalled as each resolve begins.
+        entered: Mutex<std::sync::mpsc::Sender<()>>,
+        /// When present, each resolve blocks on it until the test sends.
+        release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    }
+
+    /// The test's side of a [`GatedRunner`]'s gate.
+    struct Gate {
+        entered: std::sync::mpsc::Receiver<()>,
+        release: std::sync::mpsc::Sender<()>,
+    }
+
+    impl Gate {
+        /// Block until the resolve has begun on the session's thread.
+        fn await_resolve(&self) {
+            self.entered
+                .recv_timeout(RECV_TIMEOUT)
+                .expect("the resolve never began");
+        }
+
+        fn open(&self) {
+            let _ = self.release.send(());
+        }
+    }
+
+    impl GatedRunner {
+        /// A runner whose resolves block until [`Gate::open`].
+        fn gated(inner: FakeProcessRunner) -> (Arc<Self>, Gate) {
+            let (entered_tx, entered) = std::sync::mpsc::channel();
+            let (release, release_rx) = std::sync::mpsc::channel();
+            let runner = Self {
+                inner,
+                calls: Mutex::new(Vec::new()),
+                resolve_threads: Mutex::new(Vec::new()),
+                resolve_replies: Mutex::new(std::collections::VecDeque::new()),
+                entered: Mutex::new(entered_tx),
+                release: Mutex::new(Some(release_rx)),
+            };
+            (Arc::new(runner), Gate { entered, release })
+        }
+
+        /// A runner whose resolves answer at once.
+        fn open(inner: FakeProcessRunner) -> Arc<Self> {
+            let (runner, _gate) = Self::gated(inner);
+            *runner.release.lock().unwrap() = None;
+            runner
+        }
+
+        fn with_resolve_replies(
+            self: Arc<Self>,
+            replies: Vec<frust_drive::process::Output>,
+        ) -> Arc<Self> {
+            self.resolve_replies.lock().unwrap().extend(replies);
+            self
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        fn resolve_threads(&self) -> Vec<String> {
+            self.resolve_threads.lock().unwrap().clone()
+        }
+    }
+
+    impl ProcessRunner for GatedRunner {
+        fn run(&self, cmd: &str, args: &[&str]) -> Result<frust_drive::process::Output> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("run {}", invocation(cmd, args)));
+            self.inner.run(cmd, args)
+        }
+
+        fn run_streaming(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            cwd: Option<&std::path::Path>,
+            env: &[(&str, &str)],
+            on_line: &mut dyn FnMut(&str),
+        ) -> Result<frust_drive::process::Output> {
+            let key = invocation(cmd, args);
+            self.calls.lock().unwrap().push(format!("stream {key}"));
+            if key.starts_with(RESOLVE_KEY) {
+                self.resolve_threads
+                    .lock()
+                    .unwrap()
+                    .push(thread::current().name().unwrap_or_default().to_string());
+                let _ = self.entered.lock().unwrap().send(());
+                if let Some(release) = self.release.lock().unwrap().as_ref() {
+                    // Bounded, so a regression that resolves on the calling
+                    // thread fails the test instead of hanging the suite.
+                    release
+                        .recv_timeout(RECV_TIMEOUT)
+                        .map_err(|_| anyhow::anyhow!("the gate was never opened"))?;
+                }
+                if let Some(reply) = self.resolve_replies.lock().unwrap().pop_front() {
+                    return Ok(reply);
+                }
+            }
+            self.inner.run_streaming(cmd, args, cwd, env, on_line)
+        }
+
+        fn spawn_streaming(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            cwd: Option<&std::path::Path>,
+            env: &[(&str, &str)],
+        ) -> Result<StreamHandle> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("spawn {}", invocation(cmd, args)));
+            self.inner.spawn_streaming(cmd, args, cwd, env)
+        }
+    }
+
+    fn desktop_spec_in(mode: BuildMode) -> SessionSpec {
+        let mut spec = desktop_spec("/tmp/frust-tui-preflight-app");
+        spec.build.mode = mode;
+        spec
+    }
+
+    /// Every event for `id`, in order, through its terminal state.
+    async fn events_to_terminal(
+        rx: &mut Receiver<SessionEvent>,
+        id: SessionId,
+    ) -> Vec<SessionEventKind> {
+        let mut events = Vec::new();
+        loop {
+            let kind = next_for(rx, id).await.kind;
+            let done = matches!(&kind, SessionEventKind::State(s) if s.is_terminal());
+            events.push(kind);
+            if done {
+                return events;
+            }
+        }
+    }
+
+    fn lines_of(events: &[SessionEventKind]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|kind| match kind {
+                SessionEventKind::Lines(lines) => Some(lines.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
+    /// A Debug desktop `start` returns while the resolve is still blocked —
+    /// it runs on the session's own thread, never the caller's — and the
+    /// resolve runs once, under the plan's features, before `cargo run`.
+    #[tokio::test]
+    async fn a_debug_desktop_start_returns_before_the_resolve_and_resolves_once_first() {
+        let (runner, gate) = GatedRunner::gated(
+            FakeProcessRunner::new()
+                .with(RESOLVE_KEY, resolved())
+                .with_stream(DEBUG_DESKTOP_RUN, ["hello"], true),
+        );
+        let (mut sup, mut rx) = Supervisor::new(Arc::clone(&runner) as _);
+        let id = sup.start(&desktop_spec_in(BuildMode::Debug)).unwrap();
+
+        // `start` has returned and the resolve is underway but held: nothing
+        // has been spawned yet.
+        gate.await_resolve();
+        assert!(
+            runner
+                .calls()
+                .iter()
+                .all(|call| !call.starts_with("spawn ")),
+            "{:?}",
+            runner.calls()
+        );
+        gate.open();
+
+        let events = events_to_terminal(&mut rx, id).await;
+        assert_eq!(
+            events.first(),
+            Some(&SessionEventKind::State(SessionState::Configuring))
+        );
+        assert_eq!(
+            events.last(),
+            Some(&SessionEventKind::State(SessionState::Exited(true)))
+        );
+        assert!(lines_of(&events).contains(&"hello".to_string()));
+        assert_eq!(
+            runner.calls(),
+            vec![
+                format!(
+                    "stream {RESOLVE_KEY} --manifest-path /tmp/frust-tui-preflight-app/Cargo.toml \
+                     --features frust/perf-trace --features frust/devtools"
+                ),
+                format!("spawn {DEBUG_DESKTOP_RUN}"),
+            ]
+        );
+        assert_eq!(
+            runner.resolve_threads(),
+            vec![format!("frust-tui-session-{}", id.0)]
+        );
+    }
+
+    /// A Profile desktop session resolves under its own feature list, too.
+    #[tokio::test]
+    async fn a_profile_desktop_session_resolves_before_cargo_run() {
+        let run =
+            "cargo run --profile profile --features frust/perf-trace --features frust/devtools";
+        let runner = GatedRunner::open(
+            FakeProcessRunner::new()
+                .with(RESOLVE_KEY, resolved())
+                .with_stream(run, Vec::<&str>::new(), true),
+        );
+        let (mut sup, mut rx) = Supervisor::new(Arc::clone(&runner) as _);
+        let id = sup.start(&desktop_spec_in(BuildMode::Profile)).unwrap();
+
+        let (_lines, terminal) = drain_to_terminal(&mut rx, id).await;
+        assert_eq!(terminal, SessionState::Exited(true));
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert!(
+            calls[0].starts_with(&format!("stream {RESOLVE_KEY} ")),
+            "{calls:?}"
+        );
+        assert!(
+            calls[0].ends_with("--features frust/perf-trace --features frust/devtools"),
+            "{calls:?}"
+        );
+        assert_eq!(calls[1], format!("spawn {run}"));
+    }
+
+    /// A refresh of stale index entries is announced in the session tab as an
+    /// ordinary line batch, and the build then runs.
+    #[tokio::test]
+    async fn a_refreshed_resolve_announces_itself_as_a_session_line() {
+        let stale = frust_drive::process::Output {
+            success: false,
+            stdout: String::new(),
+            stderr: "error: failed to select a version for the requirement \
+                     `frust-devtools = \"^0.6.4\"`"
+                .to_string(),
+        };
+        let runner = GatedRunner::open(
+            FakeProcessRunner::new()
+                .with("cargo add", resolved())
+                .with_stream(DEBUG_DESKTOP_RUN, ["hello"], true),
+        )
+        .with_resolve_replies(vec![stale, resolved()]);
+        let (mut sup, mut rx) = Supervisor::new(Arc::clone(&runner) as _);
+        let id = sup.start(&desktop_spec_in(BuildMode::Debug)).unwrap();
+
+        let events = events_to_terminal(&mut rx, id).await;
+        let first_batch = events.iter().find_map(|kind| match kind {
+            SessionEventKind::Lines(lines) => Some(lines.clone()),
+            _ => None,
+        });
+        let first_batch = first_batch.expect("a refresh line batch");
+        assert_eq!(first_batch.len(), 1, "{first_batch:?}");
+        assert!(
+            first_batch[0].starts_with("refreshed stale crates.io index entries for "),
+            "{first_batch:?}"
+        );
+        assert_eq!(
+            events.last(),
+            Some(&SessionEventKind::State(SessionState::Exited(true)))
+        );
+        assert_eq!(
+            runner
+                .calls()
+                .iter()
+                .filter(|call| call.starts_with("spawn "))
+                .count(),
+            1
+        );
+    }
+
+    /// A graph that does not resolve ends the session with cargo's text as
+    /// session lines and `Exited(false)`; `cargo run` is never spawned.
+    #[tokio::test]
+    async fn a_failed_resolve_surfaces_its_text_and_never_spawns_cargo_run() {
+        let runner = GatedRunner::open(
+            FakeProcessRunner::new()
+                .with(
+                    RESOLVE_KEY,
+                    frust_drive::process::Output {
+                        success: false,
+                        stdout: String::new(),
+                        stderr: "error: the graph does not resolve\n  caused by: nothing"
+                            .to_string(),
+                    },
+                )
+                .with_stream(DEBUG_DESKTOP_RUN, ["hello"], true),
+        );
+        let (mut sup, mut rx) = Supervisor::new(Arc::clone(&runner) as _);
+        let id = sup.start(&desktop_spec_in(BuildMode::Debug)).unwrap();
+
+        let (lines, terminal) = drain_to_terminal(&mut rx, id).await;
+        assert_eq!(terminal, SessionState::Exited(false));
+        assert_eq!(
+            lines,
+            vec!["error: the graph does not resolve", "  caused by: nothing"]
+        );
+        assert!(
+            runner
+                .calls()
+                .iter()
+                .all(|call| !call.starts_with("spawn ")),
+            "{:?}",
+            runner.calls()
+        );
+    }
+
+    /// A `cargo run` that cannot be spawned once the graph resolves reaches
+    /// the session tab as an error line and `Exited(false)` — `start` itself
+    /// already returned.
+    #[tokio::test]
+    async fn a_spawn_failure_after_the_resolve_surfaces_as_a_session_line() {
+        let runner = GatedRunner::open(FakeProcessRunner::new().with(RESOLVE_KEY, resolved()));
+        let (mut sup, mut rx) = Supervisor::new(Arc::clone(&runner) as _);
+        let id = sup.start(&desktop_spec_in(BuildMode::Debug)).unwrap();
+
+        let (lines, terminal) = drain_to_terminal(&mut rx, id).await;
+        assert_eq!(terminal, SessionState::Exited(false));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("error: failed to start session `cargo`")),
+            "{lines:?}"
+        );
+    }
+
+    /// A stop during the resolve ends the session `Killed`, and `cargo run`
+    /// is never spawned once the resolve returns — no orphaned child.
+    #[tokio::test]
+    async fn a_stop_during_the_resolve_ends_killed_and_never_spawns_cargo_run() {
+        let (runner, gate) = GatedRunner::gated(
+            FakeProcessRunner::new()
+                .with(RESOLVE_KEY, resolved())
+                .with_hanging_stream(DEBUG_DESKTOP_RUN, Vec::<&str>::new()),
+        );
+        let (mut sup, mut rx) = Supervisor::new(Arc::clone(&runner) as _);
+        let id = sup.start(&desktop_spec_in(BuildMode::Debug)).unwrap();
+
+        gate.await_resolve();
+        sup.stop(id);
+        gate.open();
+
+        let (_lines, terminal) = drain_to_terminal(&mut rx, id).await;
+        assert_eq!(terminal, SessionState::Killed);
+        assert!(
+            runner
+                .calls()
+                .iter()
+                .all(|call| !call.starts_with("spawn ")),
+            "{:?}",
+            runner.calls()
+        );
+    }
+
+    /// A stop during a resolve that then fails still reports the stop.
+    #[tokio::test]
+    async fn a_stop_during_a_failing_resolve_still_ends_killed() {
+        let (runner, gate) = GatedRunner::gated(FakeProcessRunner::new().with(
+            RESOLVE_KEY,
+            frust_drive::process::Output {
+                success: false,
+                stdout: String::new(),
+                stderr: "error: the graph does not resolve".to_string(),
+            },
+        ));
+        let (mut sup, mut rx) = Supervisor::new(Arc::clone(&runner) as _);
+        let id = sup.start(&desktop_spec_in(BuildMode::Debug)).unwrap();
+
+        gate.await_resolve();
+        sup.stop(id);
+        gate.open();
+
+        let (lines, terminal) = drain_to_terminal(&mut rx, id).await;
+        assert_eq!(terminal, SessionState::Killed);
+        assert!(lines.is_empty(), "{lines:?}");
+    }
+
+    /// A stop after the spawn kills the running child exactly as a desktop
+    /// session spawned up front is killed.
+    #[tokio::test]
+    async fn a_stop_after_the_spawn_kills_the_child() {
+        let runner = GatedRunner::open(
+            FakeProcessRunner::new()
+                .with(RESOLVE_KEY, resolved())
+                .with_hanging_stream(DEBUG_DESKTOP_RUN, ["running"]),
+        );
+        let (mut sup, mut rx) = Supervisor::new(Arc::clone(&runner) as _);
+        let id = sup.start(&desktop_spec_in(BuildMode::Debug)).unwrap();
+
+        // The child's first line proves it was spawned and is being drained.
+        loop {
+            if let SessionEventKind::Lines(lines) = next_for(&mut rx, id).await.kind
+                && lines.iter().any(|l| l == "running")
+            {
+                break;
+            }
+        }
+        let started = Instant::now();
+        sup.stop(id);
+        let (_lines, terminal) = drain_to_terminal(&mut rx, id).await;
+        assert_eq!(terminal, SessionState::Killed);
+        assert!(started.elapsed() < PROMPT_STOP);
+    }
+
+    /// Quitting during a resolve (`stop_all`, then the supervisor's drop)
+    /// joins the session thread like any other: the drop waits for the
+    /// uninterruptible resolve, which then spawns nothing.
+    #[tokio::test]
+    async fn quitting_during_the_resolve_joins_without_spawning() {
+        let (runner, gate) = GatedRunner::gated(
+            FakeProcessRunner::new()
+                .with(RESOLVE_KEY, resolved())
+                .with_hanging_stream(DEBUG_DESKTOP_RUN, Vec::<&str>::new()),
+        );
+        let (mut sup, mut rx) = Supervisor::new(Arc::clone(&runner) as _);
+        let id = sup.start(&desktop_spec_in(BuildMode::Debug)).unwrap();
+        gate.await_resolve();
+
+        // Stopped before the gate opens, so the resolve returns into a
+        // stopped session; the drop then joins the thread.
+        sup.stop_all();
+        let dropper = thread::spawn(move || drop(sup));
+        gate.open();
+        let (_lines, terminal) = drain_to_terminal(&mut rx, id).await;
+        assert_eq!(terminal, SessionState::Killed);
+        dropper.join().expect("the drop joins the session thread");
+        assert!(
+            runner
+                .calls()
+                .iter()
+                .all(|call| !call.starts_with("spawn ")),
+            "{:?}",
+            runner.calls()
+        );
+    }
+
+    /// A Release desktop session resolves nothing and spawns at once.
+    #[tokio::test]
+    async fn a_release_desktop_session_never_resolves() {
+        let run = "cargo run --release --features lean";
+        let runner =
+            GatedRunner::open(FakeProcessRunner::new().with_stream(run, Vec::<&str>::new(), true));
+        let (mut sup, mut rx) = Supervisor::new(Arc::clone(&runner) as _);
+        let id = sup.start(&desktop_spec_in(BuildMode::Release)).unwrap();
+        // Spawned synchronously, before `start` returned.
+        assert_eq!(runner.calls(), vec![format!("spawn {run}")]);
+
+        let (_lines, terminal) = drain_to_terminal(&mut rx, id).await;
+        assert_eq!(terminal, SessionState::Exited(true));
+        assert_eq!(runner.calls(), vec![format!("spawn {run}")]);
+    }
+
+    /// A plan that cannot be resolved still fails `start` synchronously,
+    /// before any thread or resolve.
+    #[tokio::test]
+    async fn an_unresolvable_desktop_plan_still_fails_start() {
+        let root = std::env::temp_dir().join(format!(
+            "frust-tui-supervisor-ambiguous-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\n\
+             frust = { package = \"frust-ui\", version = \"0.6.0\" }\n\
+             ui = { package = \"frust-ui\", version = \"0.6.0\" }\n",
+        )
+        .unwrap();
+        let runner = GatedRunner::open(FakeProcessRunner::new());
+        let (mut sup, _rx) = Supervisor::new(Arc::clone(&runner) as _);
+        let mut spec = desktop_spec_in(BuildMode::Debug);
+        spec.project_root = root.clone();
+
+        assert!(sup.start(&spec).is_err());
+        assert!(runner.calls().is_empty(), "{:?}", runner.calls());
+        assert_eq!(sup.session_ids().count(), 0);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

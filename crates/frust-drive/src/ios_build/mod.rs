@@ -111,7 +111,8 @@ fn build_with_env(
     schemes::verify(runner, project_dir, &sc)?;
 
     let defines_b64 = encode_defines(&info.defines);
-    let features_b64 = resolve_features_b64(project_dir, info.mode, extra_features, on_line)?;
+    let features_b64 =
+        resolve_features_b64_preflighted(runner, project_dir, info.mode, extra_features, on_line)?;
 
     match target {
         IosArtifact::App {
@@ -238,19 +239,53 @@ fn preflight(runner: &dyn ProcessRunner, simulator: bool) -> Result<(), String> 
 ///   error here, before xcodebuild runs.
 ///
 /// Pure host-side logic (no Xcode), so it is unit-tested on every host.
+#[cfg(test)]
 pub(crate) fn resolve_features_b64(
     project_dir: &Path,
     mode: BuildMode,
     extra_features: &[String],
     on_line: &mut dyn FnMut(&str),
 ) -> Result<Option<String>> {
+    let features = resolve_features(project_dir, mode, extra_features, on_line)?;
+    let feature_refs: Vec<&str> = features.iter().map(String::as_str).collect();
+    Ok(encode_features(&feature_refs))
+}
+
+/// The facade-key-spelled cargo features for `mode` (see
+/// [`resolve_features_b64`] for the release-lean and key steps).
+fn resolve_features(
+    project_dir: &Path,
+    mode: BuildMode,
+    extra_features: &[String],
+    on_line: &mut dyn FnMut(&str),
+) -> Result<Vec<String>> {
     let (features, warning) =
         crate::cargo_manifest::resolve_release_features(project_dir, mode, extra_features);
     if let Some(warning) = warning {
         on_line(&warning);
     }
     let key = FacadeKey::resolve(project_dir).context("resolving the app's frust dependency")?;
-    let features: Vec<String> = features.iter().map(|feature| key.map(feature)).collect();
+    Ok(features.iter().map(|feature| key.map(feature)).collect())
+}
+
+/// [`resolve_features_b64`] after resolving the app's dependency graph under
+/// those features in this process: a Debug/Profile build's features pull in
+/// crates the app's lockfile may lack, and a stale index entry should surface
+/// as cargo's own text rather than from inside xcodebuild's run-script.
+/// Release adds no crate, so it skips the resolve. The one entry point both
+/// the `frust build` lane and the simulator run pipeline share.
+pub(crate) fn resolve_features_b64_preflighted(
+    runner: &dyn ProcessRunner,
+    project_dir: &Path,
+    mode: BuildMode,
+    extra_features: &[String],
+    on_line: &mut dyn FnMut(&str),
+) -> Result<Option<String>> {
+    let features = resolve_features(project_dir, mode, extra_features, on_line)?;
+    if mode != BuildMode::Release {
+        crate::lock_refresh::ensure_resolves(runner, project_dir, &features, on_line)
+            .map_err(|err| anyhow::anyhow!(err))?;
+    }
     let feature_refs: Vec<&str> = features.iter().map(String::as_str).collect();
     Ok(encode_features(&feature_refs))
 }
@@ -413,6 +448,7 @@ mod tests {
     /// Registers the preflight + `-list` fixtures every pipeline needs.
     fn base_runner() -> FakeProcessRunner {
         FakeProcessRunner::new()
+            .with("cargo metadata --format-version 1", ok("{}"))
             .with("xcode-select -p", ok("/Applications/Xcode.app\n"))
             .with(
                 "rustup target list --installed",

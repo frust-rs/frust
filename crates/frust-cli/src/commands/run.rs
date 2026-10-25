@@ -314,6 +314,32 @@ pub(crate) fn refresh_platform_wiring(
     }
 }
 
+/// Resolves the app's dependency graph under the `--features` the desktop
+/// `cargo run` plan carries, before that build starts: a Debug/Profile build
+/// pulls in frust crates the app's lockfile may lack, and a stale index entry
+/// fails here with cargo's own text and the one-line remedy. A refresh is
+/// announced on stdout. Release adds no crate, so it resolves nothing.
+fn preflight_desktop_resolve(
+    runner: &dyn ProcessRunner,
+    info: &BuildInfo,
+    plan: &DesktopPlan,
+    root: &Path,
+) -> Result<()> {
+    if info.mode == BuildMode::Release {
+        return Ok(());
+    }
+    let features: Vec<String> = plan
+        .args
+        .windows(2)
+        .filter(|pair| pair[0] == "--features")
+        .map(|pair| pair[1].clone())
+        .collect();
+    frust_drive::lock_refresh::ensure_resolves(runner, root, &features, &mut |line| {
+        println!("{line}")
+    })?;
+    Ok(())
+}
+
 /// Runs the desktop preview shell exactly like a bare `cargo run`,
 /// streaming its output rather than buffering it until
 /// exit. Reached either because no Android device is connected and no `-d`
@@ -370,11 +396,15 @@ fn run_desktop_fallback(
         // hot backend all keep today's relaunch loop exactly.
         let hot = !no_hot && info.mode == BuildMode::Debug && extra_features.is_empty();
         if hot && hooks.hot.is_some() {
+            // The hot session resolves its own (wider) feature list before
+            // its fat build, so this path does not resolve a second time.
             return run_desktop_hot(runner, info, &plan, &env, &cwd, hooks);
         }
+        preflight_desktop_resolve(runner, info, &plan, &cwd)?;
         return run_desktop_watch(runner, &plan, &env, &cwd, hooks);
     }
 
+    preflight_desktop_resolve(runner, info, &plan, &cwd)?;
     let mut on_line = |line: &str| println!("{line}");
     // `cwd` is `None` rather than `plan.cwd`: the plan's working directory IS
     // this process's current directory (that is what it was resolved from), so
@@ -2598,16 +2628,20 @@ mod tests {
         // only on cmd/args — see its doc comment), so this proves the desktop
         // fallback reaches `cargo run` at all; desktop_cargo_run_env's own
         // test above covers the env-pair construction itself.
-        let runner = FakeProcessRunner::new().with(
-            "cargo run --features frust/perf-trace --features frust/devtools",
-            Output {
-                success: true,
-                stdout: String::new(),
-                stderr: String::new(),
-            },
+        let runner = RecordingRunner::new(
+            FakeProcessRunner::new()
+                .with("cargo metadata --format-version 1", ok("{}"))
+                .with(
+                    "cargo run --features frust/perf-trace --features frust/devtools",
+                    Output {
+                        success: true,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    },
+                ),
         );
         let out = run_desktop_fallback(
-            &runner,
+            &*runner,
             &debug_info(),
             NO_EXTRA,
             false,
@@ -2616,6 +2650,43 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, 0);
+        // The dependency graph resolves once, first, under the features the
+        // build will use; `cargo run` follows.
+        let all = runner.all.lock().unwrap().clone();
+        assert_eq!(all.len(), 2, "{all:?}");
+        assert!(
+            all[0].starts_with("stream cargo metadata --format-version 1 --manifest-path ")
+                && all[0].ends_with("--features frust/perf-trace --features frust/devtools"),
+            "{all:?}"
+        );
+        assert!(all[1].starts_with("stream cargo run "), "{all:?}");
+    }
+
+    #[test]
+    fn run_desktop_fallback_does_not_resolve_a_release_build() {
+        let runner = RecordingRunner::new(FakeProcessRunner::new().with(
+            "cargo run --release",
+            Output {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        ));
+        let out = run_desktop_fallback(
+            &*runner,
+            &release_info(),
+            NO_EXTRA,
+            false,
+            false,
+            WatchHooks::fake(),
+        )
+        .unwrap();
+        assert_eq!(out, 0);
+        let all = runner.all.lock().unwrap().clone();
+        assert!(
+            all.iter().all(|call| !call.contains("cargo metadata")),
+            "{all:?}"
+        );
     }
 
     /// `--watch` combined with an explicit `-d <device>` that is a physical
@@ -4409,6 +4480,7 @@ mod tests {
                 "rustup target list --installed",
                 ok("aarch64-apple-ios-sim\nx86_64-apple-ios\n"),
             )
+            .with("cargo metadata --format-version 1", ok("{}"))
             .with("xcrun xcodebuild", ok("Build succeeded"))
             .with("xcrun simctl install FAKE-UDID", ok(""))
             .with(SIM_TERMINATE, ok(""))

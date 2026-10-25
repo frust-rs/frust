@@ -24,7 +24,7 @@ pub mod mcp;
 use std::sync::Arc;
 use std::time::Duration;
 
-use frust_drive::process::FakeProcessRunner;
+use frust_drive::process::{FakeProcessRunner, Output};
 use frust_mcp::SessionEngine;
 use frust_mcp::engine::{SessionId, SessionSnapshot};
 
@@ -50,12 +50,31 @@ pub const DEADLINE: Duration = Duration::from_secs(10);
 /// the fake runner.
 pub const TEST_PROJECT_ROOT: &str = "/tmp/frust-mcp-engine-test";
 
+/// The prefix of the `cargo metadata` resolve a Debug/Profile desktop launch
+/// runs before `cargo run` (`frust_drive::lock_refresh`). The fake runner
+/// matches it as a prefix, so one registration answers any feature list.
+pub const RESOLVE_INVOCATION: &str = "cargo metadata --format-version 1";
+
+/// A fake runner whose dependency-graph resolve succeeds — the base every
+/// scripted desktop launch builds on, since a Debug/Profile launch resolves
+/// before it spawns `cargo run` and an unscripted call fails the session.
+pub fn resolving_runner() -> FakeProcessRunner {
+    FakeProcessRunner::new().with(
+        RESOLVE_INVOCATION,
+        Output {
+            success: true,
+            stdout: "{}".to_string(),
+            stderr: String::new(),
+        },
+    )
+}
+
 /// An engine whose desktop launch replays `lines` and then hangs — a live
 /// session that only ends when something kills it, like a real preview.
 pub fn engine_with_hanging_desktop_stream(lines: Vec<String>) -> SessionEngine {
     SessionEngine::with_runner(
         TEST_PROJECT_ROOT,
-        Arc::new(FakeProcessRunner::new().with_hanging_stream(DEBUG_DESKTOP_INVOCATION, lines)),
+        Arc::new(resolving_runner().with_hanging_stream(DEBUG_DESKTOP_INVOCATION, lines)),
     )
 }
 
@@ -69,7 +88,7 @@ pub fn engine_with_two_desktop_streams(
     SessionEngine::with_runner(
         TEST_PROJECT_ROOT,
         Arc::new(
-            FakeProcessRunner::new()
+            resolving_runner()
                 .with_hanging_stream(DEBUG_DESKTOP_INVOCATION, debug_lines)
                 .with_hanging_stream(PROFILE_DESKTOP_INVOCATION, profile_lines),
         ),

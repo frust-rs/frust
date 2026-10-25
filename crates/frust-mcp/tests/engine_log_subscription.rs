@@ -23,11 +23,10 @@ mod common;
 
 use common::{
     DEADLINE, DEBUG_DESKTOP_INVOCATION, TEST_PROJECT_ROOT, await_snapshot,
-    engine_with_hanging_desktop_stream,
+    engine_with_hanging_desktop_stream, resolving_runner,
 };
 use frust_devtools_protocol::{format_discovery_line, redact_discovery_token};
 use frust_drive::build_info::BuildMode;
-use frust_drive::process::FakeProcessRunner;
 use frust_mcp::SessionEngine;
 use frust_mcp::engine::{LOG_SUBSCRIPTION_CAP, LogSubscription, RunTarget, SessionState};
 
@@ -40,11 +39,7 @@ const MARKER_PREFIX: &str = "[frust] ";
 fn engine_with_paced_desktop_stream(lines: Vec<(String, Duration)>) -> SessionEngine {
     SessionEngine::with_runner(
         TEST_PROJECT_ROOT,
-        Arc::new(FakeProcessRunner::new().with_stream_delayed(
-            DEBUG_DESKTOP_INVOCATION,
-            lines,
-            true,
-        )),
+        Arc::new(resolving_runner().with_stream_delayed(DEBUG_DESKTOP_INVOCATION, lines, true)),
     )
 }
 

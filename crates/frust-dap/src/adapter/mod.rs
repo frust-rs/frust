@@ -500,7 +500,7 @@ mod tests {
     use std::time::Duration;
 
     use frust_drive::build_info::BuildMode;
-    use frust_drive::process::{FakeProcessRunner, ProcessRunner};
+    use frust_drive::process::{FakeProcessRunner, Output, ProcessRunner};
     use frust_mcp::SessionEngine;
     use frust_mcp::engine::RunTarget;
     use tokio::io::{BufReader, DuplexStream};
@@ -685,22 +685,29 @@ mod tests {
         )
     }
 
+    /// A fake runner whose dependency-graph resolve succeeds: a Debug desktop
+    /// launch resolves before it spawns `cargo run`.
+    fn resolving_runner() -> FakeProcessRunner {
+        FakeProcessRunner::new().with(
+            "cargo metadata --format-version 1",
+            Output {
+                success: true,
+                stdout: "{}".to_string(),
+                stderr: String::new(),
+            },
+        )
+    }
+
     /// A runner whose desktop launch replays `lines` and then hangs — a live
     /// app that only ends when something kills it, like a real preview.
     fn hanging_desktop_runner(lines: &[&str]) -> Runner {
-        Arc::new(
-            FakeProcessRunner::new().with_hanging_stream(DEBUG_DESKTOP_INVOCATION, lines.to_vec()),
-        )
+        Arc::new(resolving_runner().with_hanging_stream(DEBUG_DESKTOP_INVOCATION, lines.to_vec()))
     }
 
     /// A runner whose desktop launch replays `lines` and then exits — an app
     /// that ends on its own.
     fn exiting_desktop_runner(lines: &[&str], success: bool) -> Runner {
-        Arc::new(FakeProcessRunner::new().with_stream(
-            DEBUG_DESKTOP_INVOCATION,
-            lines.to_vec(),
-            success,
-        ))
+        Arc::new(resolving_runner().with_stream(DEBUG_DESKTOP_INVOCATION, lines.to_vec(), success))
     }
 
     fn launch_arguments() -> Option<serde_json::Value> {

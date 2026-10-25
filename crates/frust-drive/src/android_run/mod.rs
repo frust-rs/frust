@@ -341,6 +341,20 @@ fn prepare_session_with(
     let key = FacadeKey::resolve(&project.root).context("resolving the app's frust dependency")?;
     let features: Vec<String> = features.iter().map(|feature| key.map(feature)).collect();
 
+    // A Debug/Profile build's features pull in crates an app's lockfile may
+    // lack; resolve them here, in this process, so a stale index entry
+    // surfaces as cargo's own text rather than from inside Gradle. A hot
+    // session's fat build adds the hot-patch feature, so it resolves that
+    // wider list.
+    if info.mode != BuildMode::Release {
+        let resolve_features = match native {
+            NativeLib::Gradle => features.clone(),
+            NativeLib::Staged(_) => info.mode.session_cargo_features_for(true, &key),
+        };
+        crate::lock_refresh::ensure_resolves(runner, &project.root, &resolve_features, on_line)
+            .map_err(|err| anyhow::anyhow!(err))?;
+    }
+
     let task = crate::android_build::tasks::task_name(&target, info.mode, info.flavor.as_deref());
     let feature_refs: Vec<&str> = features.iter().map(String::as_str).collect();
     let props =
@@ -1027,6 +1041,7 @@ mod tests {
         /// `android_build`'s device-less preflight).
         fn preflight_ok_runner() -> FakeProcessRunner {
             FakeProcessRunner::new()
+                .with("cargo metadata --format-version 1", ok("{}"))
                 .with(
                     "rustup target list --installed",
                     ok("aarch64-linux-android\n"),
@@ -2179,6 +2194,76 @@ mod tests {
             .err()
             .expect("the stage failure ends the pipeline");
             assert_eq!(err.to_string(), "the hot-patch fat build failed");
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// The dependency graph resolves before Gradle or the stage runs, once
+        /// per pipeline, under the list the build uses: a Gradle run resolves
+        /// the mode's mapped features, a hot session the wider hot list. The
+        /// scripted failure matches only that exact argv.
+        #[test]
+        fn the_graph_resolves_first_under_the_features_the_build_uses() {
+            let resolve = |dir: &Path, features: &str| {
+                format!(
+                    "cargo metadata --format-version 1 --manifest-path {} {features}",
+                    dir.join("Cargo.toml").display()
+                )
+            };
+            let failing = |key: String| {
+                preflight_ok_runner().with(
+                    key,
+                    Output {
+                        success: false,
+                        stdout: String::new(),
+                        stderr: "error: the graph does not resolve".to_string(),
+                    },
+                )
+            };
+
+            let dir = unique_project_dir("resolve-first");
+            let runner = failing(resolve(
+                &dir,
+                "--features frust/perf-trace --features frust/devtools",
+            ));
+            let err = prepare_session(
+                &runner,
+                &dir,
+                &device(),
+                &info(BuildMode::Debug, None),
+                NO_EXTRA,
+                &fake_env(),
+                &mut |_| {},
+                &AtomicBool::new(false),
+            )
+            .err()
+            .expect("the resolve failure ends the pipeline before Gradle");
+            assert_eq!(err.to_string(), "error: the graph does not resolve");
+
+            let runner = failing(resolve(
+                &dir,
+                "--features frust/perf-trace --features frust/devtools --features frust/hotpatch",
+            ));
+            let mut staged = false;
+            let mut stage = |_: &str, _: &mut dyn FnMut(&str)| -> Result<()> {
+                staged = true;
+                Ok(())
+            };
+            let err = prepare_session_with(
+                &runner,
+                &dir,
+                &device(),
+                &info(BuildMode::Debug, None),
+                NO_EXTRA,
+                &fake_env(),
+                &mut |_| {},
+                &AtomicBool::new(false),
+                NativeLib::Staged(&mut stage),
+                &mut None,
+            )
+            .err()
+            .expect("the resolve failure ends the hot pipeline before the stage");
+            assert_eq!(err.to_string(), "error: the graph does not resolve");
+            assert!(!staged);
             let _ = fs::remove_dir_all(&dir);
         }
 

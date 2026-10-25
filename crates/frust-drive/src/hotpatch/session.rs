@@ -109,6 +109,7 @@ use crate::devtools_client::{
 };
 use crate::doctor::{EnvLookup, RealEnv};
 use crate::facade_key::FacadeKey;
+use crate::lock_refresh;
 use crate::manifest::{self, HotpatchSection};
 use crate::process::{ProcessRunner, StreamHandle, TryRecvError};
 
@@ -1421,6 +1422,16 @@ pub fn start_desktop(
         manifest::load_optional(start.root).map_err(|err| unsupported(format!("{err:#}")))?;
     let budget = Budget::from_section(manifest.as_ref().and_then(|m| m.hotpatch.as_ref()));
     let key = FacadeKey::resolve(start.root).map_err(|err| unsupported(err.to_string()))?;
+
+    // Resolve the session's debug-only crates before any cargo call below
+    // reads the graph, so a stale index entry reports cargo's own text (and
+    // the one-line remedy) instead of a failed fat build.
+    let session_features = argv_features(start.info.mode.session_cargo_features(true), &key);
+    lock_refresh::ensure_resolves(runner, start.root, &session_features, on_line).map_err(
+        |err| StartError::FatBuildFailed {
+            diagnostics: vec![err.to_string()],
+        },
+    )?;
 
     // The fat build compiles for the host, so the graph is the host's: a
     // dependency gated to another platform is no edge of it.
@@ -4863,6 +4874,8 @@ mod tests {
     struct ScriptedRunner {
         runs: HashMap<String, Output>,
         streaming: Output,
+        /// The answer to the lock-refresh preflight's `cargo metadata`.
+        resolve: Output,
         calls: Mutex<Vec<Call>>,
     }
 
@@ -4919,6 +4932,11 @@ mod tests {
                     .collect(),
                 cwd.map(Path::to_path_buf),
             ));
+            // The lock-refresh preflight's resolve succeeds; `streaming` is
+            // the fat build's answer.
+            if cmd == "cargo" && args.first() == Some(&"metadata") {
+                return Ok(self.resolve.clone());
+            }
             for line in self.streaming.stdout.lines() {
                 on_line(line);
             }
@@ -4974,6 +4992,7 @@ mod tests {
             .into_iter()
             .collect(),
             streaming,
+            resolve: ok(String::new()),
             calls: Mutex::new(Vec::new()),
         };
         (root, target_dir, Arc::new(runner))
@@ -5142,15 +5161,50 @@ mod tests {
         );
         assert!(scope_dir.is_dir());
         assert_eq!(
-            runner.invocations()[..2],
+            runner.invocations()[..3],
             [
+                format!(
+                    "cargo metadata --format-version 1 --manifest-path {} --features frust/perf-trace --features frust/devtools --features frust/hotpatch",
+                    root.join("Cargo.toml").display()
+                ),
                 "rustc -vV".to_string(),
                 format!(
                     "cargo metadata --format-version 1 --manifest-path {} --filter-platform {TRIPLE}",
                     root.join("Cargo.toml").display()
                 ),
             ],
-            "the graph is the host triple's, read before anything is built"
+            "the dependency resolve comes first, then the host triple's graph, \
+             all read before anything is built"
+        );
+    }
+
+    #[test]
+    fn a_dependency_graph_that_does_not_resolve_stops_before_any_build() {
+        let (root, _, runner) = project("resolve-fails", Output::default());
+        let mut runner = runner;
+        Arc::get_mut(&mut runner).unwrap().resolve = Output {
+            success: false,
+            stdout: String::new(),
+            stderr: "error: the graph does not resolve\n".to_string(),
+        };
+        let err = start(
+            &runner,
+            &FakeEnv::new(),
+            &root,
+            &debug_info(),
+            &mut Vec::new(),
+        );
+        match err {
+            StartError::FatBuildFailed { diagnostics } => {
+                assert_eq!(diagnostics, ["error: the graph does not resolve\n"]);
+            }
+            other => panic!("expected the resolve failure, got {other:?}"),
+        }
+        let invocations = runner.invocations();
+        assert_eq!(invocations.len(), 1, "{invocations:?}");
+        assert!(
+            invocations[0].starts_with("cargo metadata --format-version 1 "),
+            "{invocations:?}"
         );
     }
 
@@ -5240,6 +5294,7 @@ mod tests {
                 success: true,
                 ..Output::default()
             },
+            resolve: ok(String::new()),
             calls: Mutex::new(Vec::new()),
         });
         let fingerprints = target_dir.join("debug").join(".fingerprint");
