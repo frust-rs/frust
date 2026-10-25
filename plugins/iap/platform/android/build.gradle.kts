@@ -34,13 +34,13 @@ android {
 
     // Both SDK levels mirror the app template's `app/build.gradle.kts`, the
     // `frust-embedding` module and the camera/secure-storage modules exactly
-    // (`compileSdk = 36`, `minSdk = 26`). A mismatch is a silent behavior
+    // (`compileSdk = 36`, `minSdk = 29`). A mismatch is a silent behavior
     // change, not a build error — keep them in lockstep (`docs/DEVELOPMENT.md`'s
     // Platform-Support Policy).
     compileSdk = 36
 
     defaultConfig {
-        minSdk = 26
+        minSdk = 29
 
         // The R8 keep rules for the JNI-referenced host and the
         // manifest-declared init provider travel WITH this module: a consuming
