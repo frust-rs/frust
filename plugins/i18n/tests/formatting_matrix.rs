@@ -221,12 +221,15 @@ fn registering_number_twice_fails_engine_construction() {
 #[test]
 fn minor_unit_money_formats_exactly_across_the_matrix() {
     // Exact ICU4X/CLDR output observed on 2.2.x; U+00A0 is CLDR's own space.
-    let expected: [(&str, &str, i64, &str); 25] = [
+    let expected: [(&str, &str, i64, &str); 27] = [
         ("en-US", "JPY", 1000, "¥1,000"),
         ("en-US", "THB", 12345, "THB\u{a0}123.45"),
         ("en-US", "VND", 50000, "₫50,000"),
         ("en-US", "USD", -1999, "-$19.99"),
         ("en-US", "KWD", 123456, "KWD\u{a0}123.456"),
+        // CLDR 49 gives IQD and COP zero digits: the minor value is the major value.
+        ("en-US", "IQD", 123456, "IQD\u{a0}123,456"),
+        ("en-US", "COP", 1000, "COP\u{a0}1,000"),
         ("th-TH", "JPY", 1000, "¥1,000"),
         ("th-TH", "THB", 12345, "฿123.45"),
         ("th-TH", "VND", 50000, "₫50,000"),
@@ -263,6 +266,8 @@ fn minor_unit_digits_matches_the_currency_tables() {
     assert_eq!(fmt::minor_unit_digits("JPY").expect("digits"), 0);
     assert_eq!(fmt::minor_unit_digits("THB").expect("digits"), 2);
     assert_eq!(fmt::minor_unit_digits("KWD").expect("digits"), 3);
+    assert_eq!(fmt::minor_unit_digits("IQD").expect("digits"), 0);
+    assert_eq!(fmt::minor_unit_digits("COP").expect("digits"), 0);
     assert!(fmt::minor_unit_digits("EU").is_err());
 }
 

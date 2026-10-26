@@ -438,7 +438,7 @@ and `length: "wide"|"short"|"narrow"`.
 
 Money held as integer minor units formats exactly with `fmt::currency_minor(&locale, 12345, "THB")?`
 (`"฿123.45"`; no `f64` on the path, so every `i64` is exact) and `fmt::minor_unit_digits("THB")?`
-(`2`); both share `currency`'s digit tables. In FTL pass the integer as a STRING, since Fluent
+(`2`); both take their digits from the same baked CLDR fraction data the formatter rounds with (so `IQD`/`COP` are 0, `KWD` 3), never a list of the crate's own. In FTL pass the integer as a STRING, since Fluent
 numbers are `f64`: `{ NUMBER($minor, style: "currency", currency: "THB", minorUnits: "true") }`.
 
 Instants render in a venue zone, not the device's, through `jiff`'s bundled tz database (no OS
