@@ -61,8 +61,8 @@ off this index — read this plus the one that covers what you are touching:
   - `frust-gpu`'s Android `import` zone — the hand-opened Vulkan device (`open_with_callback` +
     `create_device_from_hal`, `context.rs`), `import_hardware_buffer` (`create_texture_from_hal`,
     raw `ash`) and the `dlsym`-resolved `AHardwareBuffer_*` entries, each `# Safety`-noted, behind
-    the default-off `FRUST_ANDROID_HWBUFFER_IMPORT` knob. `frust-render`'s `native_import::android`
-    makes the one call into it (`NativeHandle::new` contract).
+    the default-off `FRUST_ANDROID_HWBUFFER_IMPORT` knob, plus a debug thread check. `frust-render`'s
+    `native_import::android` makes the one call into it (`NativeHandle::new` contract).
   - `frust-gpu`'s Apple `import::apple` zone — `Device::as_hal::<Metal>`, the `CVMetalTextureCache`
     calls, `CFRetained::from_raw`/`retain`, `texture_from_raw`/`create_texture_from_hal`, plus
     `unsafe impl Send for MetalImporter` and `Send + Sync for HeldFrame`.
@@ -113,11 +113,11 @@ off this index — read this plus the one that covers what you are touching:
     `#[unsafe(no_mangle)]`.
   - `frust-text`'s `src/oracle/{apple,android,fontconfig,dwrite,store}.rs` — OS font-fallback FFI:
     CoreText CF lifetimes (`CFRetained::cast_unchecked`, a `Send` wrapper for `CTFont`), NDK
-    `__system_property_get` (a `Send` wrapper for the matcher), `dlopen`ed fontconfig, hand-declared
-    DirectWrite COM vtables (named slot constants, a `ComPtr` guard), and the future mmap store.
-    `#![deny(unsafe_code)]` at `oracle/mod.rs`, per-file `#![allow(unsafe_code)]` + zone header, a
-    `// SAFETY:` note per block, and guard tests in `oracle/mod.rs` failing on any `unsafe` token
-    outside the zone (decision D-6).
+    `__system_property_get` (a `Send` wrapper for the matcher), hand-declared DirectWrite COM vtables
+    (named slot constants, a `ComPtr` guard); the `dlopen`ed fontconfig FFI and the mmap `store.rs`
+    are reserved zone files not yet written. `#![deny(unsafe_code)]` at `oracle/mod.rs`, per-file
+    `#![allow(unsafe_code)]` + zone header, a `// SAFETY:` note per block, and guard tests in
+    `oracle/mod.rs` failing on any `unsafe` token outside the zone.
 - **No unwind across FFI.** Every platform export routes through `frust-shell-common`'s `guard`
   helper (`catch_unwind` + log, returning a benign default) rather than unwinding into
   JVM-/Swift-owned stack frames — a panic crossing the FFI boundary is undefined behavior, not a
