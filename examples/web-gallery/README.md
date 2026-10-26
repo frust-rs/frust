@@ -407,7 +407,8 @@ panics there), so `scripts/ci/web-smoke.sh` boots the real build:
 ```
 scripts/ci/web-smoke.sh                                  # lenient
 FRUST_WEB_SMOKE_REQUIRE_SURFACE=1 scripts/ci/web-smoke.sh  # strict
-scripts/ci/web-smoke.sh --dist <dir>   # smoke a prebuilt tree (skips the build)
+scripts/ci/web-smoke.sh --dist <dir>   # smoke a prebuilt tree (skips the build; never written)
+scripts/ci/web-smoke.sh --out <dir>    # logs and screenshots go here (default: a kept mktemp dir)
 scripts/ci/web-smoke.sh --no-browser   # build, stage and bind only
 scripts/ci/web-smoke.sh --self-test    # exercise the log assertions on fixtures
 ```
@@ -421,7 +422,8 @@ It builds this crate for `wasm32-unknown-unknown`, runs `wasm-bindgen` (exactly
 (default) reports `no compatible GPU adapter` as a warning, for rigs with no
 SwiftShader adapter; **strict** additionally requires
 `frust: render surface online`. Exit codes: 0 pass, 1 assertion failure,
-2 usage or toolchain error. Screenshot paths are printed.
+2 usage or toolchain error. Screenshot and log paths are printed, and the out
+dir (`--out`, default a kept mktemp dir) is printed at the end for CI upload.
 
 This proves boot plus the first surface, not pixels. The `frust-testing`
 `webgl` golden gate remains the manual pixel-level gate.

@@ -4,10 +4,13 @@
 # headless Chrome, then asserts on the console log. `cargo check` cannot see a
 # wasm32 runtime panic (std::time::Instant::now() panics there); this can.
 #
-# Usage: scripts/ci/web-smoke.sh [--dist <dir>] [--no-browser] [--self-test]
+# Usage: scripts/ci/web-smoke.sh [--dist <dir>] [--out <dir>] [--no-browser] [--self-test]
 #   (no flags)    build, stage into a mktemp dir, serve, boot both arms, assert
 #   --dist <dir>  reuse a prebuilt tree (skips the build), e.g. the website's
-#                 staged static/preview/live/
+#                 staged static/preview/live/; the tree is only read, never written
+#   --out <dir>   where logs and screenshots go (default: a fresh mktemp dir;
+#                 it is always kept, and its path is printed at the end so CI
+#                 can upload it). Must not be inside the --dist tree.
 #   --no-browser  stop after staging (hosts without Chrome)
 #   --self-test   run the assertion function over fixture logs, then exit
 #
@@ -28,6 +31,8 @@
 # Environment: CHROME (binary; default first of google-chrome,
 # google-chrome-stable, chromium, chromium-browser), FRUST_WEB_SMOKE_BUDGET_MS
 # (virtual time budget, default 20000), FRUST_WEB_SMOKE_REQUIRE_SURFACE.
+# Each boot is wall-clock bounded by `timeout` or `gtimeout` when one is on
+# PATH; otherwise Chrome runs unwrapped and --virtual-time-budget still bounds it.
 # Proves boot + first surface, not pixels; the frust-testing webgl golden gate
 # stays the pixel-level gate. Exit: 0 pass, 1 assertion failure, 2 usage or
 # toolchain error.
@@ -39,6 +44,7 @@ QUERY_BASE="case=button&theme=light&embed=1&log=info"
 BUDGET="${FRUST_WEB_SMOKE_BUDGET_MS:-20000}"
 
 DIST=""
+OUT=""
 NO_BROWSER=0
 SELF_TEST=0
 TMP_DIRS=()
@@ -54,19 +60,22 @@ cleanup() {
 trap cleanup EXIT
 
 # check_log <logfile> <strict 0|1> <label>: prints findings, returns 0 on pass.
+# Matches are collected with `grep -m5` (stops reading early, no SIGPIPE from
+# a downstream head) and the sed/print step is tolerated, so a huge log cannot
+# turn a diagnostic pipe into a set -e / pipefail exit 141.
 check_log() {
   local log="$1" strict="$2" label="$3" fail=0
   local pat
   for pat in 'panicked at' 'RuntimeError' '[frust-web] FAIL'; do
     if grep -qF -- "$pat" "$log"; then
       echo "FAIL [$label]: log contains '$pat'"
-      grep -nF -- "$pat" "$log" | head -5 | sed 's/^/    /'
+      { grep -m5 -nF -- "$pat" "$log" | sed 's/^/    /'; } || true
       fail=1
     fi
   done
-  if grep -E ':ERROR:CONSOLE.*\[frust-web\]' "$log" >/dev/null; then
+  if grep -qE ':ERROR:CONSOLE.*\[frust-web\]' "$log"; then
     echo "FAIL [$label]: console.error-level [frust-web] line"
-    grep -nE ':ERROR:CONSOLE.*\[frust-web\]' "$log" | head -5 | sed 's/^/    /'
+    { grep -m5 -nE ':ERROR:CONSOLE.*\[frust-web\]' "$log" | sed 's/^/    /'; } || true
     fail=1
   fi
   if ! grep -qF '[frust-web] wasm module initialized' "$log"; then
@@ -126,9 +135,15 @@ self_test() {
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dist) [[ $# -ge 2 ]] || die "--dist needs a directory"; DIST="$2"; shift 2 ;;
+    --out) [[ $# -ge 2 ]] || die "--out needs a directory"; OUT="$2"; shift 2 ;;
     --no-browser) NO_BROWSER=1; shift ;;
     --self-test) SELF_TEST=1; shift ;;
-    -h|--help) sed -n '2,36p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)
+      # Print the leading comment block: from line 2 to the last line before the
+      # first non-comment line (derived, so the header can change freely).
+      end="$(awk 'NR>1 && !/^#/{print NR-1; exit}' "${BASH_SOURCE[0]}")"
+      sed -n "2,${end}p" "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      exit 0 ;;
     *) die "unknown argument '$1' (see --help)" ;;
   esac
 done
@@ -159,11 +174,20 @@ if [[ -z "$DIST" ]]; then
   DIST="$(mktemp -d)"; TMP_DIRS+=("$DIST")
   build_and_stage
 fi
+[[ -d "$DIST" ]] || die "dist directory '$DIST' does not exist"
 DIST="$(cd "$DIST" && pwd)"
 for f in index.html frust_web.js pkg/app.js pkg/app_bg.wasm; do
   [[ -f "$DIST/$f" ]] || die "dist $DIST is missing $f"
 done
 echo "web-smoke: dist staged at $DIST"
+
+# Artefacts never go into the dist tree: the website recipe ships every file
+# under static/preview/live/, so a supplied --dist must stay pristine.
+if [[ -n "$OUT" ]]; then
+  mkdir -p "$OUT"
+  OUT="$(cd "$OUT" && pwd)"
+  case "$OUT/" in "$DIST/"*) die "--out $OUT must not be inside the dist tree $DIST" ;; esac
+fi
 
 command -v python3 >/dev/null || die "python3 not found"
 PORT="$(python3 -c 'import socket
@@ -193,16 +217,32 @@ fi
 [[ -n "${CHROME:-}" ]] || die "no Chrome found (set CHROME, or use --no-browser)"
 STRICT="${FRUST_WEB_SMOKE_REQUIRE_SURFACE:-0}"
 
+if [[ -z "$OUT" ]]; then
+  OUT="$(mktemp -d)"
+fi
+
+# Per-boot wall-clock bound: timeout (GNU/Linux) or gtimeout (coreutils on
+# macOS) when present; stock macOS has neither, so run unwrapped and let
+# --virtual-time-budget bound the boot.
+TIMEOUT_CMD=()
+if command -v timeout >/dev/null; then
+  TIMEOUT_CMD=(timeout 120)
+elif command -v gtimeout >/dev/null; then
+  TIMEOUT_CMD=(gtimeout 120)
+else
+  echo "web-smoke: no timeout/gtimeout on PATH; running Chrome unwrapped (--virtual-time-budget still bounds each boot)"
+fi
+
 overall=0
 for arm in default webgl; do
   q="$QUERY_BASE"
   if [[ "$arm" == webgl ]]; then q="$q&arm=webgl"; fi
   url="http://127.0.0.1:$PORT/index.html?$q"
-  log="$DIST/smoke-$arm.log"
-  shot="$DIST/smoke-$arm.png"
+  log="$OUT/smoke-$arm.log"
+  shot="$OUT/smoke-$arm.png"
   echo "web-smoke: booting [$arm] $url"
   rc=0
-  timeout 120 "$CHROME" --headless=new --no-sandbox --disable-dev-shm-usage \
+  ${TIMEOUT_CMD[@]+"${TIMEOUT_CMD[@]}"} "$CHROME" --headless=new --no-sandbox --disable-dev-shm-usage \
     --use-gl=angle --use-angle=swiftshader-webgl --enable-unsafe-swiftshader \
     --ignore-gpu-blocklist --enable-logging=stderr --v=0 \
     --virtual-time-budget="$BUDGET" --window-size=400,300 \
@@ -212,4 +252,5 @@ for arm in default webgl; do
   echo "web-smoke: log [$arm]: $log"
   check_log "$log" "$STRICT" "$arm" || overall=1
 done
+echo "web-smoke: artifacts (logs, screenshots) in $OUT"
 exit "$overall"
