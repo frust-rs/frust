@@ -985,6 +985,10 @@ pub struct TextInputWidget {
     ///
     /// [`apply_style`]: Self::apply_style
     applied_style: TextStyle,
+    /// [`frust_text::default_locale_generation`] when `editor` was last built:
+    /// a change re-shapes untagged text under the new default, so `layout`
+    /// rebuilds the editor (like a late font registration).
+    applied_locale_generation: u64,
     placeholder: String,
     /// `None` = single-line; `Some(n)` = wrapped multi-line capped at `n`
     /// visible lines. Drives the wrap-width feed in `layout`, the height cap,
@@ -2176,6 +2180,7 @@ impl<State: 'static> View<State> for TextInputView<State> {
             style: style.clone(),
             text_style_explicit: self.text_style_explicit,
             applied_style: style,
+            applied_locale_generation: frust_text::default_locale_generation(),
             placeholder: self.placeholder.clone(),
             max_visible_lines: self.max_visible_lines,
             applied_wrap_width: None,
@@ -2364,7 +2369,12 @@ impl Widget for TextInputWidget {
         // what's currently installed (a theme swap, or a rebuild-invalidated
         // `style`/`text_style_explicit` — see `effective_style`/`apply_style`).
         let effective = self.effective_style(Theme::from_layout_ctx(ctx));
-        if fonts_changed || effective != self.applied_style {
+        let locale_generation = frust_text::default_locale_generation();
+        if fonts_changed
+            || effective != self.applied_style
+            || locale_generation != self.applied_locale_generation
+        {
+            self.applied_locale_generation = locale_generation;
             self.apply_style(effective);
         }
         // Catch-all mirror refresh: a rebuild-driven value/obscured change lands

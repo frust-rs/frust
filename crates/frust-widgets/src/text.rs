@@ -365,6 +365,7 @@ impl<State: 'static> View<State> for TextView {
             layout: None,
             laid_out_max_width: None,
             laid_out_style: None,
+            laid_out_locale_generation: 0,
         }
     }
 
@@ -448,6 +449,10 @@ pub struct TextWidget {
     /// change — still forces a re-shape (the layout-time-baked contract, see
     /// `docs/CODE_STANDARDS.md` Theming).
     laid_out_style: Option<TextStyle>,
+    /// [`frust_text::default_locale_generation`] when `layout` was shaped: the
+    /// app's default locale picks the face for untagged text, so a change
+    /// re-shapes without a view change.
+    laid_out_locale_generation: u64,
 }
 
 impl TextWidget {
@@ -506,9 +511,11 @@ impl Widget for TextWidget {
         // changes `style.color` (and a type-scale family swap changes an
         // opted-in `style.family`), which mismatches `laid_out_style` and
         // forces a re-shape even without a view change.
+        let locale_generation = frust_text::default_locale_generation();
         if let Some(cached) = &self.layout
             && self.laid_out_max_width == max_width
             && self.laid_out_style.as_ref() == Some(&style)
+            && self.laid_out_locale_generation == locale_generation
         {
             return bc.constrain(cached.size());
         }
@@ -525,6 +532,7 @@ impl Widget for TextWidget {
         self.layout = Some(layout);
         self.laid_out_max_width = max_width;
         self.laid_out_style = Some(style);
+        self.laid_out_locale_generation = locale_generation;
         size
     }
 
@@ -949,6 +957,26 @@ mod tests {
             "the rebuild must have re-shaped against the new max_lines(2), \
              not replayed the max_lines(1) cache"
         );
+    }
+
+    #[test]
+    fn a_default_locale_change_invalidates_the_cached_shape() {
+        // No test in this crate shapes under a changed default locale except this one, so
+        // the process-global slot needs no lock; it is restored before returning.
+        let bc = BoxConstraints::loose(Size::new(200.0, 200.0));
+        let view = text("\u{76f4}");
+        let mut widget = View::<()>::build(&view, &mut frust_core::BuildCtx::new(&mut 0u64));
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), None);
+        widget.layout(&mut lctx, &bc);
+        let before = frust_text::default_locale_generation();
+        frust_text::set_default_locale(Some("ja"));
+        let after = frust_text::default_locale_generation();
+        assert_ne!(before, after);
+        widget.layout(&mut lctx, &bc);
+        let laid_out = widget.laid_out_locale_generation;
+        frust_text::set_default_locale(None);
+        assert_eq!(laid_out, after, "the layout re-ran under the new default");
     }
 
     // --- Theme-swap regression ---

@@ -114,6 +114,8 @@ impl I18n {
         #[cfg(feature = "persistence")] prefs: Option<frust_shared_preferences::SharedPreferences>,
     ) -> Self {
         let (active, chain) = negotiate_active(&engine, requested);
+        #[cfg(feature = "frust-api")]
+        frust::authoring::text::set_default_locale(Some(&active.to_string()));
         Self {
             inner: Arc::new(Inner {
                 engine,
@@ -271,6 +273,8 @@ impl I18n {
         if let Some(prefs) = &self.inner.prefs {
             crate::persist::save(prefs, &requested_tag);
         }
+        #[cfg(feature = "frust-api")]
+        frust::authoring::text::set_default_locale(Some(&active.to_string()));
         self.inner.locale.set(active);
     }
 
@@ -450,10 +454,46 @@ only-en = English only";
     /// somewhere to store/find a value. Mirrors `clean-signals-frust`'s own
     /// `tests/support::setup` shape, minus the full `ReactiveRuntime`/
     /// `RenderRoot` machinery this signal-level test doesn't need.
-    fn ambient_owner() -> Owner {
+    ///
+    /// Also serialises the tests (every one builds an `I18n`, which writes the
+    /// process-global default-locale slot) and clears the slot on drop.
+    fn ambient_owner() -> AmbientOwner {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let owner = Owner::new();
         owner.set();
-        owner
+        AmbientOwner {
+            _owner: owner,
+            _guard: guard,
+        }
+    }
+
+    struct AmbientOwner {
+        _owner: Owner,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    #[cfg(feature = "frust-api")]
+    impl Drop for AmbientOwner {
+        fn drop(&mut self) {
+            frust::authoring::text::set_default_locale(None);
+        }
+    }
+
+    #[cfg(feature = "frust-api")]
+    #[test]
+    fn default_locale_follows_build_and_set_locale() {
+        let _owner = ambient_owner();
+        let i18n = I18n::new(build_set(), &[locale("de")]).expect("engine builds");
+        assert_eq!(
+            frust::authoring::text::default_locale().as_deref(),
+            Some("de")
+        );
+        i18n.set_locale(locale("en"));
+        assert_eq!(
+            frust::authoring::text::default_locale().as_deref(),
+            Some("en")
+        );
     }
 
     #[test]

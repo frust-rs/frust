@@ -882,6 +882,8 @@ pub mod authoring {
         /// is the return direction, used inside `frust-text` itself to build
         /// an `EditingState` back out of editor state.
         pub use frust_text::{byte_to_utf16, utf16_to_byte};
+        /// The app's default locale for untagged text (the Han language, the cache keys).
+        pub use frust_text::{default_locale, default_locale_generation, set_default_locale};
     }
 
     /// The renderer-agnostic display list, for widgets painting below `PaintScene`.
