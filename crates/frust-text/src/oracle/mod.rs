@@ -1363,12 +1363,11 @@ mod tests {
         }
     }
 
+    // The expected faces are macOS's installed fonts, and `apple` only exists on
+    // Apple targets: a compile-time gate, not a runtime skip.
+    #[cfg(target_os = "macos")]
     #[test]
     fn han_under_a_japanese_app_default_resolves_to_a_japanese_face() {
-        if !cfg!(target_os = "macos") {
-            println!("skipped: the expected faces are macOS 27's installed fonts");
-            return;
-        }
         use crate::locale::test_support::DefaultLocale;
         use crate::style::FontFamily;
         let _guard = DefaultLocale::set(None);
