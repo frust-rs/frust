@@ -2025,19 +2025,34 @@ mod tests {
                     "{what}: {} > {max_width}",
                     info.width
                 );
-                // Kerning against the dropped next character is part of the
-                // kept prefix's advance in the full shaping, not in the
-                // prefix shaped alone: compare within a kerning pair.
+                // Measure from the full layout's own shaping (the cut uses its
+                // advances, kerning against the dropped neighbour included),
+                // so the check holds for any font.
+                let full = cx.layout(line, &s, None);
+                let shaped = full.shaped();
+                let byte_of = |char_index: u32| {
+                    shaped
+                        .chars
+                        .get(char_index as usize)
+                        .map_or(line.len(), |c| c.byte_start as usize)
+                };
+                let mut kept_advance = 0.0f32;
+                let mut next_advance = None;
+                for g in &shaped.graphemes {
+                    if byte_of(g.chars.end) <= info.range.end {
+                        kept_advance += g.advance;
+                    } else {
+                        next_advance = Some(g.advance);
+                        break;
+                    }
+                }
                 assert!(
-                    (info.width - (cx.layout(kept, &s, None).size().width as f32 + ellipsis)).abs()
-                        < 0.75,
+                    (info.width - (kept_advance + ellipsis)).abs() < 0.01,
                     "{what}: the width is the kept prefix plus the ellipsis"
                 );
-                if let Some(next) = line[info.range.end..].chars().next() {
-                    let longer = &line[..info.range.end + next.len_utf8()];
-                    let longer = cx.layout(longer, &s, None).size().width as f32;
+                if let Some(next) = next_advance {
                     assert!(
-                        longer + ellipsis > max_width - 0.75,
+                        kept_advance + next + ellipsis > max_width - 0.01,
                         "{what}: one more character would still fit"
                     );
                 }
