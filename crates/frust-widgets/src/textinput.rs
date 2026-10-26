@@ -985,6 +985,20 @@ pub struct TextInputWidget {
     ///
     /// [`apply_style`]: Self::apply_style
     applied_style: TextStyle,
+    /// [`frust_text::default_locale_generation`] when `editor` was last built:
+    /// a change re-shapes untagged text under the new default, so `layout`
+    /// rebuilds the editor (like a late font registration).
+    applied_locale_generation: u64,
+    /// A late font registration `layout` has seen but not yet rebuilt for
+    /// (deferred while an editor-owned preedit is live).
+    fonts_pending: bool,
+    /// A rebuild trigger fired while a preedit was live: once the preedit ends
+    /// the field asks for a layout so the rebuild is not left waiting on an
+    /// unrelated one.
+    rebuild_deferred: bool,
+    /// How many times `apply_style` has rebuilt the editor.
+    #[cfg(test)]
+    editor_rebuilds: u32,
     placeholder: String,
     /// `None` = single-line; `Some(n)` = wrapped multi-line capped at `n`
     /// visible lines. Drives the wrap-width feed in `layout`, the height cap,
@@ -1331,15 +1345,17 @@ impl TextInputWidget {
     /// the themed color at the next `layout`) reconstructs the editor rather
     /// than mutating it in place.
     ///
-    /// A desktop-path IME preedit (parley's own `raw_compose`) does not survive
-    /// a mid-composition style swap — `ApplyEditingState` re-seeds it as a
-    /// platform-tracked composing region instead (still reported correctly by
-    /// `editing_state_utf16`/`editing_state_bytes`), a narrow, acceptable edge
-    /// case since changing `text_style` mid-keystroke-composition is not a
-    /// realistic app pattern.
+    /// A desktop-path IME preedit does not survive a style swap —
+    /// `ApplyEditingState` re-seeds it as a platform-tracked composing region
+    /// instead — so `layout` never calls this while the editor owns a preedit;
+    /// a platform-owned composing range survives it.
     fn apply_style(&mut self, style: TextStyle) {
         let state = self.editor.editing_state_bytes();
         self.editor = TextEditor::new(&style);
+        #[cfg(test)]
+        {
+            self.editor_rebuilds += 1;
+        }
         self.editor
             .apply(EditOp::ApplyEditingState(state), &mut self.text_ctx);
         self.applied_style = style;
@@ -1473,6 +1489,11 @@ impl TextInputWidget {
         }
         self.publish(ctx);
         ctx.request_redraw();
+        // A rebuild deferred by a preedit fires on the next layout: ask for
+        // one now that the preedit is gone.
+        if self.rebuild_deferred && !self.editor.has_preedit() {
+            ctx.request_layout();
+        }
     }
 
     /// Build the current editing state + caret (window coordinates) for the
@@ -2176,6 +2197,11 @@ impl<State: 'static> View<State> for TextInputView<State> {
             style: style.clone(),
             text_style_explicit: self.text_style_explicit,
             applied_style: style,
+            applied_locale_generation: frust_text::default_locale_generation(),
+            fonts_pending: false,
+            rebuild_deferred: false,
+            #[cfg(test)]
+            editor_rebuilds: 0,
             placeholder: self.placeholder.clone(),
             max_visible_lines: self.max_visible_lines,
             applied_wrap_width: None,
@@ -2357,15 +2383,34 @@ impl Widget for TextInputWidget {
         // when nothing is pending. On an actual registration the editor's own
         // retained parley layout is still shaped against the old faces, so it
         // has to be rebuilt: `apply_style` with the unchanged style does
-        // exactly that (and takes the masked mirror with it), carrying the same
-        // narrow mid-composition caveat a theme swap does — see `apply_style`.
-        let fonts_changed = self.text_ctx.sync_app_fonts();
+        // exactly that (and takes the masked mirror with it); an editor-owned
+        // preedit defers it, below.
+        if self.text_ctx.sync_app_fonts() {
+            self.fonts_pending = true;
+        }
         // Resolve the themed style and rebuild the editor if it drifted from
         // what's currently installed (a theme swap, or a rebuild-invalidated
         // `style`/`text_style_explicit` — see `effective_style`/`apply_style`).
         let effective = self.effective_style(Theme::from_layout_ctx(ctx));
-        if fonts_changed || effective != self.applied_style {
-            self.apply_style(effective);
+        let locale_generation = frust_text::default_locale_generation();
+        let rebuild_due = self.fonts_pending
+            || effective != self.applied_style
+            || locale_generation != self.applied_locale_generation;
+        // Every rebuild trigger waits out an editor-owned preedit: the rebuild
+        // would re-seed it as a platform range and the IME's next `Compose`
+        // would duplicate its text. The trigger stays pending (the font flag,
+        // the stale style, the stale generation) and fires on the first layout
+        // after the preedit ends. A platform-owned composing range survives
+        // the rebuild and does not defer.
+        if rebuild_due {
+            if self.editor.has_preedit() {
+                self.rebuild_deferred = true;
+            } else {
+                self.fonts_pending = false;
+                self.rebuild_deferred = false;
+                self.applied_locale_generation = locale_generation;
+                self.apply_style(effective);
+            }
         }
         // Catch-all mirror refresh: a rebuild-driven value/obscured change lands
         // before this pass, and everything measured below reads `display()`.
@@ -3175,6 +3220,217 @@ mod tests {
             modifiers,
             repeat: false,
         })
+    }
+
+    fn compose(
+        root: &mut RenderRoot<AppState, TextInputView<AppState>>,
+        state: &mut AppState,
+        text: &str,
+    ) {
+        root.event(
+            state,
+            &InputEvent::Ime(ImeEvent::Compose {
+                text: text.to_string(),
+                cursor: Some((text.len(), text.len())),
+            }),
+        );
+    }
+
+    #[test]
+    fn a_locale_change_preserves_text_caret_and_selection() {
+        let _slot = crate::text::locale_slot_test::writer();
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(
+            &mut state,
+            &InputEvent::Ime(ImeEvent::Commit("hello".into())),
+        );
+        let caret = widget(&root).editor.editing_state_bytes();
+        assert_eq!(caret.text, "hello");
+        root.event(&mut state, &named(NamedKey::End, Modifiers::default()));
+        let caret = widget(&root).editor.editing_state_bytes();
+        assert_eq!((caret.base, caret.extent), (5, 5));
+        frust_text::set_default_locale(Some("ko"));
+        root.layout(Size::new(300.0, 200.0));
+        let kept = widget(&root).editor.editing_state_bytes();
+        assert_eq!((kept.base, kept.extent), (5, 5), "the caret survives");
+        drag_select_all(&mut state, &mut root);
+        let before = widget(&root).editor.editing_state_bytes();
+        assert_ne!(before.base, before.extent, "a selection exists");
+        let generation = widget(&root).applied_locale_generation;
+
+        frust_text::set_default_locale(Some("ja"));
+        root.layout(Size::new(300.0, 200.0));
+
+        assert_ne!(
+            widget(&root).applied_locale_generation,
+            generation,
+            "rebuilt"
+        );
+        let after = widget(&root).editor.editing_state_bytes();
+        assert_eq!(after.text, "hello");
+        assert_eq!((after.base, after.extent), (before.base, before.extent));
+    }
+
+    #[test]
+    fn a_locale_change_during_a_preedit_waits_for_the_composition_to_end() {
+        let _slot = crate::text::locale_slot_test::writer();
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        compose(&mut root, &mut state, "ni");
+        let generation = widget(&root).applied_locale_generation;
+
+        frust_text::set_default_locale(Some("ja"));
+        root.layout(Size::new(300.0, 200.0));
+        assert_eq!(
+            widget(&root).applied_locale_generation,
+            generation,
+            "no rebuild while the preedit is live"
+        );
+        assert_eq!(widget(&root).editor.text(), "ni");
+
+        compose(&mut root, &mut state, "nih");
+        assert_eq!(
+            widget(&root).editor.text(),
+            "nih",
+            "the compose replaces, never duplicates"
+        );
+
+        let rebuilds = widget(&root).editor_rebuilds;
+        root.event(&mut state, &InputEvent::Ime(ImeEvent::Commit("nih".into())));
+        assert_eq!(widget(&root).editor.text(), "nih");
+        root.layout(Size::new(300.0, 200.0));
+        let rebuilt = widget(&root).applied_locale_generation;
+        assert_ne!(rebuilt, generation, "rebuilt once the composition ended");
+        assert_eq!(
+            widget(&root).editor_rebuilds,
+            rebuilds + 1,
+            "exactly one rebuild"
+        );
+        root.layout(Size::new(300.0, 200.0));
+        assert_eq!(widget(&root).applied_locale_generation, rebuilt);
+        assert_eq!(widget(&root).editor_rebuilds, rebuilds + 1, "and no more");
+        assert_eq!(widget(&root).editor.text(), "nih");
+    }
+
+    /// Starts a preedit, changes the locale, and checks the rebuild is held.
+    fn deferred_by_a_preedit() -> (AppState, RenderRoot<AppState, TextInputView<AppState>>, u32) {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        compose(&mut root, &mut state, "ni");
+        let rebuilds = widget(&root).editor_rebuilds;
+        frust_text::set_default_locale(Some("ja"));
+        root.layout(Size::new(300.0, 200.0));
+        assert_eq!(widget(&root).editor_rebuilds, rebuilds, "held");
+        assert!(widget(&root).rebuild_deferred);
+        (state, root, rebuilds)
+    }
+
+    #[test]
+    fn a_cancelled_composition_releases_the_deferred_rebuild() {
+        let _slot = crate::text::locale_slot_test::writer();
+        let (mut state, mut root, rebuilds) = deferred_by_a_preedit();
+        // The cancel: an empty compose retracts the preedit.
+        let outcome = root.event(
+            &mut state,
+            &InputEvent::Ime(ImeEvent::Compose {
+                text: String::new(),
+                cursor: None,
+            }),
+        );
+        assert!(outcome.handled);
+        assert_eq!(widget(&root).editor.text(), "");
+        root.layout(Size::new(300.0, 200.0));
+        assert_eq!(widget(&root).editor_rebuilds, rebuilds + 1);
+        assert!(!widget(&root).rebuild_deferred);
+    }
+
+    #[test]
+    fn a_blur_keeps_the_rebuild_deferred_until_the_composition_is_cleared() {
+        let _slot = crate::text::locale_slot_test::writer();
+        let (mut state, mut root, rebuilds) = deferred_by_a_preedit();
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 150.0));
+        assert!(!root.is_focus_active());
+        root.layout(Size::new(300.0, 200.0));
+        let still_composing = widget(&root).editor.has_preedit();
+        let expected = rebuilds + u32::from(!still_composing);
+        assert_eq!(
+            widget(&root).editor_rebuilds,
+            expected,
+            "a blur that leaves the preedit live keeps the rebuild held; one that clears it releases it"
+        );
+        // Refocus and cancel: the held rebuild fires in any case.
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(
+            &mut state,
+            &InputEvent::Ime(ImeEvent::Compose {
+                text: String::new(),
+                cursor: None,
+            }),
+        );
+        root.layout(Size::new(300.0, 200.0));
+        assert_eq!(widget(&root).editor_rebuilds, rebuilds + 1);
+    }
+
+    #[test]
+    fn a_late_font_registration_during_a_preedit_waits_for_the_composition_to_end() {
+        let _slot = crate::text::locale_slot_test::writer();
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        compose(&mut root, &mut state, "ni");
+        let rebuilds = widget(&root).editor_rebuilds;
+
+        let mut shell_ctx = frust_text::TextContext::new();
+        shell_ctx
+            .register_fonts(TUFFY.to_vec())
+            .expect("valid TTF bytes must register");
+        root.layout(Size::new(300.0, 200.0));
+        assert_eq!(widget(&root).editor_rebuilds, rebuilds, "held");
+        root.layout(Size::new(300.0, 200.0));
+        assert_eq!(widget(&root).editor_rebuilds, rebuilds, "still held");
+        compose(&mut root, &mut state, "nih");
+        assert_eq!(widget(&root).editor.text(), "nih", "never duplicated");
+
+        root.event(&mut state, &InputEvent::Ime(ImeEvent::Commit("nih".into())));
+        root.layout(Size::new(300.0, 200.0));
+        assert_eq!(widget(&root).editor_rebuilds, rebuilds + 1, "fires once");
+        assert_eq!(widget(&root).editor.text(), "nih");
+    }
+
+    #[test]
+    fn a_platform_owned_composing_range_does_not_defer_a_locale_rebuild() {
+        let _slot = crate::text::locale_slot_test::writer();
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(
+            &mut state,
+            &InputEvent::Ime(ImeEvent::ApplyEditingState(EditingState {
+                text: "hello".to_string(),
+                selection_base: 5,
+                selection_extent: 5,
+                composing_base: 2,
+                composing_extent: 5,
+            })),
+        );
+        assert!(
+            widget(&root)
+                .editor
+                .editing_state_bytes()
+                .composing
+                .is_some()
+        );
+        let rebuilds = widget(&root).editor_rebuilds;
+        frust_text::set_default_locale(Some("ja"));
+        root.layout(Size::new(300.0, 200.0));
+        assert_eq!(widget(&root).editor_rebuilds, rebuilds + 1);
+        let st = widget(&root).editor.editing_state_bytes();
+        assert_eq!(st.text, "hello");
+        assert_eq!(st.composing, Some(2..5), "the platform range survives");
     }
 
     #[test]
@@ -5391,6 +5647,9 @@ mod tests {
 
     #[test]
     fn app_registered_font_shapes_the_field_content() {
+        // The font registry is process-global; a registration must not land mid-way through a
+        // locale test's rebuild assertions.
+        let _slot = crate::text::locale_slot_test::reader();
         // The shell's construction-time drain, reproduced exactly.
         let mut shell_ctx = frust_text::TextContext::new();
         shell_ctx
@@ -5431,6 +5690,9 @@ mod tests {
 
     #[test]
     fn app_registered_font_shapes_the_placeholder() {
+        // The font registry is process-global; a registration must not land mid-way through a
+        // locale test's rebuild assertions.
+        let _slot = crate::text::locale_slot_test::reader();
         // The placeholder shapes on its own path (`text_ctx.layout` in `paint`,
         // not the editor's retained layout), so it needs its own coverage.
         let mut shell_ctx = frust_text::TextContext::new();
@@ -5449,6 +5711,9 @@ mod tests {
 
     #[test]
     fn font_registered_after_build_reshapes_the_field_at_the_next_layout() {
+        // The font registry is process-global; a registration must not land mid-way through a
+        // locale test's rebuild assertions.
+        let _slot = crate::text::locale_slot_test::reader();
         // The shells' *per-frame* late drain: a font can register after this
         // widget's private context was built. `layout`'s `sync_app_fonts` picks
         // it up and rebuilds the editor, whose retained parley layout would

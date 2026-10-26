@@ -130,7 +130,7 @@ pub(crate) struct CacheKey {
     pub(crate) script: ScriptTag,
     pub(crate) locale: Option<String>,
     /// For a Han cluster without a locale, the preferred Han language it is
-    /// asked under ([`super::preferred_han_language`]): the user can change it
+    /// asked under ([`super::default_han_language`]): the user can change it
     /// between launches, and a persisted answer computed under another one
     /// must not be served. `None` for every other key.
     pub(crate) han_preference: Option<String>,
@@ -147,7 +147,7 @@ impl CacheKey {
     pub(crate) fn from_request(req: &FallbackRequest) -> Self {
         let han = req.script.0 == *b"Hani" && req.locale.is_none();
         let preference = if han {
-            super::preferred_han_language()
+            super::default_han_language()
         } else {
             None
         };
@@ -155,7 +155,7 @@ impl CacheKey {
     }
 
     /// The key for `req` were `preference` the preferred Han language (tests
-    /// change it; [`Self::from_request`] reads the platform's).
+    /// change it; [`Self::from_request`] reads the app default's, else the platform's).
     pub(crate) fn under_han_preference(req: &FallbackRequest, preference: Option<&str>) -> Self {
         let han = req.script.0 == *b"Hani" && req.locale.is_none();
         let mut chars: Vec<char> = req.chars.chars().collect();
@@ -1585,7 +1585,31 @@ mod tests {
     }
 
     #[test]
+    fn a_changed_app_default_expires_only_the_han_answers() {
+        use crate::locale::test_support::DefaultLocale;
+        let mut han = request("\u{76f4}");
+        han.script = ScriptTag(*b"Hani");
+        let latin = request("a");
+        let _guard = DefaultLocale::set(Some("ja"));
+        let (ja_han, ja_latin) = (CacheKey::from_request(&han), CacheKey::from_request(&latin));
+        assert_eq!(ja_han.han_preference.as_deref(), Some("ja"));
+        crate::set_default_locale(Some("zh-Hant-TW"));
+        let (zh_han, zh_latin) = (CacheKey::from_request(&han), CacheKey::from_request(&latin));
+        assert_eq!(zh_han.han_preference.as_deref(), Some("zh-Hant"));
+        assert_ne!(ja_han, zh_han);
+        assert_ne!(ja_han.digest(), zh_han.digest());
+        assert_eq!(ja_latin, zh_latin, "a non-Han key ignores the app default");
+        // A non-Han default falls through to the platform list.
+        crate::set_default_locale(Some("en"));
+        assert_eq!(
+            CacheKey::from_request(&han).han_preference.as_deref(),
+            crate::oracle::preferred_han_language()
+        );
+    }
+
+    #[test]
     fn only_a_han_key_without_a_locale_carries_the_preference() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let mut han = request("\u{76f4}");
         han.script = ScriptTag(*b"Hani");
         let ja = CacheKey::under_han_preference(&han, Some("ja"));

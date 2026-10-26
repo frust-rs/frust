@@ -78,6 +78,7 @@ impl IosAppHandle {
         // The precedence ladder the poll resolves against lives beside its
         // helpers in `super::theme` (`IosAppHandle::poll_theme_override`).
         let mut theme_or_appearance_changed = self.poll_theme_override();
+        theme_or_appearance_changed |= self.poll_locale_default();
 
         // Poll the app-facing pending-font registry once per frame,
         // beside the theme poll above and before the pause/ready gate — the drain

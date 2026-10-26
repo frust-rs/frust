@@ -160,8 +160,8 @@ use frust_shell_common::font_registry::FontRegistryWatcher;
 use frust_shell_common::platform_view::FramePairing;
 use frust_shell_common::resample::{PointerResampler, ResampledPointer};
 use frust_shell_common::{
-    AppTree, FrameGate, PlatformViewState, ThemeOverrideWatcher, WindowMetricsPublisher,
-    sanitize_scale,
+    AppTree, FrameGate, LocaleDefaultWatcher, PlatformViewState, ThemeOverrideWatcher,
+    WindowMetricsPublisher, sanitize_scale,
 };
 use frust_text::TextContext;
 use frust_theme::{Brightness, Theme};
@@ -255,6 +255,8 @@ pub struct IosAppHandle {
     /// frame (see [`Self::poll_theme_override`]) — see
     /// `frust_shell_common::theme_override`'s module docs.
     theme_override: ThemeOverrideWatcher,
+    /// Polled by [`Self::poll_locale_default`] beside the theme override.
+    locale_default: LocaleDefaultWatcher,
     /// Whether an app-forced theme override is currently active. While `true`,
     /// [`Self::set_appearance`] must not flip `self.theme`'s brightness — the
     /// override wins entirely until `clear_app_theme` runs (see
@@ -478,6 +480,17 @@ pub struct IosAppHandle {
 }
 
 impl IosAppHandle {
+    /// Once-per-frame poll of the app's default locale. A change re-faces untagged text, and
+    /// widgets key their layout caches on its generation, so re-pushing the theme (LAYOUT | PAINT,
+    /// as for a late font registration) forces the pass. Returns whether it did, for the frame gate.
+    pub(super) fn poll_locale_default(&mut self) -> bool {
+        if self.locale_default.changed() {
+            self.push_theme();
+            return true;
+        }
+        false
+    }
+
     /// The sanitized display scale accesskit_ios needs to convert the logical-px
     /// semantics tree into the view's physical pixels.
     pub(crate) fn display_scale(&self) -> f64 {
@@ -611,6 +624,7 @@ impl IosAppHandle {
             recreate_failures: 0,
             theme,
             theme_override: ThemeOverrideWatcher::new(),
+            locale_default: LocaleDefaultWatcher::new(),
             theme_override_active: false,
             platform_brightness: Brightness::Light,
             // No OS reduced-motion report yet (Swift pushes one right after

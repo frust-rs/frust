@@ -73,6 +73,7 @@ pub(crate) struct ShapeKey {
     width: u32,
     variations: Vec<([u8; 4], u32)>,
     locale: Option<String>,
+    app_locale: Option<Arc<str>>,
     size: u32,
     color: [u32; 4],
     letter_spacing: u32,
@@ -96,6 +97,12 @@ impl ShapeKey {
                 .map(|&(tag, value)| (tag, value.to_bits()))
                 .collect(),
             locale: style.locale.clone(),
+            // The app default locale decides untagged Han fallback, so a style without a
+            // locale carries it; a style with one is independent of it.
+            app_locale: match style.locale {
+                Some(_) => None,
+                None => crate::default_locale(),
+            },
             size: style.size.to_bits(),
             color: style.color.components.map(f32::to_bits),
             letter_spacing: style.letter_spacing.to_bits(),
@@ -411,6 +418,37 @@ mod tests {
         ] {
             assert_ne!(plain, ShapeKey::new("hello", &varied), "{varied:?}");
         }
+    }
+
+    #[test]
+    fn key_follows_the_app_default_locale_only_without_a_style_locale() {
+        use crate::locale::test_support::DefaultLocale;
+        let base = TextStyle::new(16.0, Color::BLACK);
+        let tagged = base.clone().with_locale(Some("ko"));
+        let _guard = DefaultLocale::set(None);
+        let (plain_none, tagged_none) =
+            (ShapeKey::new("hello", &base), ShapeKey::new("x", &tagged));
+        crate::set_default_locale(Some("ja"));
+        let plain_ja = ShapeKey::new("hello", &base);
+        assert_ne!(plain_none, plain_ja);
+        assert_eq!(
+            plain_ja,
+            ShapeKey::new("hello", &base),
+            "a uniform default is stable"
+        );
+        assert_eq!(
+            tagged_none,
+            ShapeKey::new("x", &tagged),
+            "an explicit locale ignores it"
+        );
+        crate::set_default_locale(Some("zh-Hant"));
+        assert_ne!(plain_ja, ShapeKey::new("hello", &base));
+        crate::set_default_locale(Some("ja"));
+        assert_eq!(
+            plain_ja,
+            ShapeKey::new("hello", &base),
+            "switching back reuses entries"
+        );
     }
 
     #[test]

@@ -134,8 +134,9 @@ use frust_shell_common::font_registry::FontRegistryWatcher;
 use frust_shell_common::platform_view::FramePairing;
 use frust_shell_common::resample::{PointerResampler, ResampledPointer};
 use frust_shell_common::{
-    AppTree, FrameGate, PlatformViewState, ThemeOverrideWatcher, WindowMetricsPublisher,
-    default_theme, effective_brightness_for_platform_change, sanitize_scale,
+    AppTree, FrameGate, LocaleDefaultWatcher, PlatformViewState, ThemeOverrideWatcher,
+    WindowMetricsPublisher, default_theme, effective_brightness_for_platform_change,
+    sanitize_scale,
 };
 use frust_text::TextContext;
 use frust_theme::{Brightness, Theme};
@@ -225,6 +226,8 @@ pub struct AndroidAppHandle {
     /// frame (see [`Self::frame`]) — see
     /// `frust_shell_common::theme_override`'s module docs.
     theme_override: ThemeOverrideWatcher,
+    /// Polled with `theme_override`: a default-locale change re-lays out untagged text.
+    locale_default: LocaleDefaultWatcher,
     /// Whether an app-forced theme override is currently active. While `true`,
     /// [`Self::set_appearance`] must not flip `self.theme`'s brightness — the
     /// override wins entirely until `clear_app_theme` runs (see
@@ -713,6 +716,7 @@ impl AndroidAppHandle {
             insets: WindowInsets::default(),
             window_metrics,
             theme_override: ThemeOverrideWatcher::new(),
+            locale_default: LocaleDefaultWatcher::new(),
             theme_override_active: false,
             platform_brightness: Brightness::Light,
             // No OS reduced-motion report yet (Kotlin pushes one right after
@@ -955,6 +959,12 @@ impl AndroidAppHandle {
                 effective_reduce_motion(self.authored_reduce_motion, self.os_reduce_motion);
             self.theme = theme;
             self.theme_override_active = override_active;
+            self.push_theme();
+            return true;
+        }
+        // A default-locale change re-faces untagged text; widgets key their layout caches on its
+        // generation, so re-pushing the theme (LAYOUT | PAINT) forces the pass.
+        if self.locale_default.changed() {
             self.push_theme();
             return true;
         }

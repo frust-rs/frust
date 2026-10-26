@@ -1,0 +1,1809 @@
+//! [`TextEditor`]: the editing engine behind the `TextInput` widget and the
+//! platform IME bridges.
+//!
+//! The editor owns its text buffer, a [`Selection`] and the IME
+//! [`Composition`], and lays the buffer out through the same pipeline as
+//! [`crate::TextLayout`]: shaped by the context's shaping driver over the
+//! font oracle (through its shape cache, [`TextContext::shape`]) and broken
+//! into lines by the frust line layout. All mutation flows through
+//! [`TextEditor::apply`] (an [`EditOp`] plus a borrowed [`TextContext`]),
+//! and all readback is expressed in `kurbo`/`frust-scene` types plus the two
+//! editing-state DTOs defined here (scene-layer purity, see
+//! `docs/ARCHITECTURE.md`).
+//!
+//! The caret moves over graphemes, words and lines of the laid-out text
+//! ([`cursor`]: visual left/right across bidi runs, UAX #29 word boundaries,
+//! hit-testing); [`selection`] holds parley 0.11.1's selection rules and
+//! geometry, which every [`EditOp`] keeps (see its variants).
+//!
+//! # Two composition paths
+//!
+//! - **Desktop / winit** drives composition through the editor's own preedit
+//!   ([`EditOp::Compose`]/[`EditOp::FinishCompose`]/[`EditOp::ClearCompose`]):
+//!   the preedit text sits in the buffer and its range is reported as the
+//!   composing region.
+//! - **Android / iOS** own composition against a platform-side mirror buffer and
+//!   push the whole editing value ([`EditOp::ApplyEditingState`]) — a state-sync
+//!   model, not op-forwarding (the Flutter-canonical contract). On this path
+//!   the editor's preedit is *not* used: the platform is authoritative for the
+//!   composing region, so the editor tracks it purely for paint styling and
+//!   echoes it back out in the editing state. A value-equality short-circuit
+//!   guards the IMM feedback loop (re-applying an identical state is a no-op).
+//!
+//! # Coordinate / unit conventions
+//!
+//! Selection and composing offsets are **byte** offsets into the text buffer
+//! inside the editor and in [`EditingStateBytes`]; the platform bridges speak
+//! UTF-16 code-unit offsets, so [`EditingState`] (and the [`byte_to_utf16`] /
+//! [`utf16_to_byte`] helpers) do the conversion in one concentrated, tested
+//! place. Geometry is Y-down logical pixels.
+//!
+//! # Single-line vs. wrapped multi-line
+//!
+//! The editor is built with no wrapping width, so it is single-line by default
+//! (one visual line per hard break, horizontal overflow). Calling
+//! [`set_wrap_width(Some(px))`](TextEditor::set_wrap_width) switches it into a
+//! wrapped multi-line mode: text soft-wraps at `px`,
+//! [`layout_size`](TextEditor::layout_size) reports the full wrapped height, a
+//! literal newline can be inserted with [`EditOp::InsertNewline`], and the
+//! [`EditOp::MoveUp`]/[`EditOp::MoveDown`] vertical caret motions (no-ops while
+//! there is only one line) become real line-to-line motion. Passing `None`
+//! restores single-line mode. Selection/IME byte↔UTF-16 indexing is
+//! unaffected by newlines — a `'\n'` is one byte / one UTF-16 unit and flows
+//! through the same conversion helpers.
+//!
+//! # Alignment
+//!
+//! The editor lays its text out with `style.align`, as [`crate::TextLayout`]
+//! does: within the wrap width when one is set, and within the text's own
+//! width otherwise — so a single-line field renders identically for every
+//! alignment, and the default [`crate::TextAlign::Start`] is exactly the
+//! start-aligned layout the editor always had.
+
+mod compose;
+mod cursor;
+mod selection;
+
+use std::borrow::Cow;
+use std::ops::Range;
+use std::sync::Arc;
+
+use kurbo::{Affine, Point, Rect, Size};
+
+use frust_scene::GlyphRun;
+
+use crate::context::TextContext;
+use crate::context::shape::Shaped;
+use crate::layout::{LineTable, Paragraph, lay_out};
+use crate::style::TextStyle;
+use compose::Composition;
+use cursor::{Affinity, Cursor, EditLayout};
+use selection::Selection;
+
+/// A single editing command applied to a [`TextEditor`].
+///
+/// Movement variants carry a `select` flag: `false` moves the caret
+/// (collapsing any selection), `true` extends the selection to the new
+/// position.
+#[derive(Clone, Debug, PartialEq)]
+pub enum EditOp {
+    /// Insert text, replacing the current selection.
+    Insert(String),
+    /// Insert a literal newline (`'\n'`), replacing the current selection.
+    ///
+    /// Only meaningful in wrapped multi-line mode (see
+    /// [`TextEditor::set_wrap_width`]); a single-line field routes Enter to
+    /// submit instead of emitting this op.
+    InsertNewline,
+    /// Delete before the caret (Backspace), or the selection: one code point,
+    /// except a newline or an emoji, whose whole grapheme goes.
+    Backdelete,
+    /// Delete the grapheme after the caret (Delete/Forward-delete), or the
+    /// selection.
+    Delete,
+    /// Move/extend one grapheme left (visual order).
+    MoveLeft { select: bool },
+    /// Move/extend one grapheme right (visual order).
+    MoveRight { select: bool },
+    /// Move/extend one line up.
+    MoveUp { select: bool },
+    /// Move/extend one line down.
+    MoveDown { select: bool },
+    /// Move/extend one word left.
+    MoveWordLeft { select: bool },
+    /// Move/extend one word right.
+    MoveWordRight { select: bool },
+    /// Move/extend to the start of the line (Home).
+    Home { select: bool },
+    /// Move/extend to the end of the line (End).
+    End { select: bool },
+    /// Select the whole buffer.
+    SelectAll,
+    /// Collapse the selection to its focus (drop the anchor).
+    CollapseSelection,
+    /// Move the caret to (or extend the selection to) a layout-local point.
+    MoveToPoint { x: f32, y: f32, select: bool },
+    /// Select the word under a layout-local point (double-click / long-press).
+    SelectWordAtPoint { x: f32, y: f32 },
+    /// Begin/update an IME preedit with `text` and an optional caret range
+    /// (byte offsets *within* `text`). Desktop/winit composition path.
+    Compose {
+        text: String,
+        cursor: Option<(usize, usize)>,
+    },
+    /// Commit the current IME preedit into the buffer. Desktop/winit path.
+    FinishCompose,
+    /// Discard the current IME preedit. Desktop/winit path.
+    ClearCompose,
+    /// Replace the whole editing value from a platform mirror (Android/iOS
+    /// state-sync path). Byte offsets; see [`EditingStateBytes`].
+    ApplyEditingState(EditingStateBytes),
+}
+
+/// The editing value in **byte** offsets — the editor's native
+/// representation and the shape [`EditOp::ApplyEditingState`] consumes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EditingStateBytes {
+    /// The full text buffer (including any composing preedit).
+    pub text: String,
+    /// Selection anchor, byte offset into `text`.
+    pub base: usize,
+    /// Selection focus, byte offset into `text`.
+    pub extent: usize,
+    /// Composing (preedit) region as a byte range, or `None` when not
+    /// composing.
+    pub composing: Option<Range<usize>>,
+}
+
+/// The editing value in **UTF-16** code-unit offsets — the Flutter-canonical
+/// shape the Android/iOS bridges exchange (`-1` denotes "none").
+///
+/// Selection offsets are always valid (`base == extent` when the selection is
+/// collapsed to a caret). Composing offsets are `-1` when not composing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EditingState {
+    /// The full text buffer (including any composing preedit).
+    pub text: String,
+    /// Selection anchor, UTF-16 offset into `text`.
+    pub selection_base: i32,
+    /// Selection focus, UTF-16 offset into `text`.
+    pub selection_extent: i32,
+    /// Composing region start (UTF-16), or `-1` when not composing.
+    pub composing_base: i32,
+    /// Composing region end (UTF-16), or `-1` when not composing.
+    pub composing_extent: i32,
+}
+
+/// The editor's current layout: the shaping, its line table, and the caret
+/// units over both.
+struct View {
+    shaped: Arc<Shaped>,
+    lines: LineTable,
+    layout: EditLayout,
+}
+
+/// The editing engine: a text buffer, its selection and IME composition, and
+/// the laid-out text they are measured against.
+///
+/// Constructed once per focused `TextInput`; driven by [`apply`](Self::apply)
+/// and read back through the geometry / editing-state accessors. Glyph runs
+/// share [`crate::TextLayout`]'s converter.
+pub struct TextEditor {
+    text: String,
+    /// The one span style, as the line layout takes it.
+    styles: Arc<[TextStyle]>,
+    wrap_width: Option<f32>,
+    selection: Selection,
+    composition: Composition,
+    /// `None` until the first [`Self::apply`] or [`Self::set_wrap_width`].
+    view: Option<View>,
+}
+
+impl TextEditor {
+    /// Builds an empty single-line editor styled by `style`.
+    ///
+    /// Every knob on `style` applies, exactly as [`crate::TextContext::layout`]
+    /// applies it — `style.align` included (see the module docs). No wrapping
+    /// width is set.
+    pub fn new(style: &TextStyle) -> Self {
+        Self {
+            text: String::new(),
+            styles: Arc::from([style.clone()]),
+            wrap_width: None,
+            selection: Selection::default(),
+            composition: Composition::default(),
+            view: None,
+        }
+    }
+
+    /// Applies one editing command, shaping through `ctx`.
+    ///
+    /// The layout is refreshed whenever the text changes, so the geometry
+    /// accessors ([`cursor_rect`](Self::cursor_rect),
+    /// [`selection_rects`](Self::selection_rects),
+    /// [`to_scene_runs`](Self::to_scene_runs), …) observe up-to-date positions
+    /// without needing a context of their own.
+    pub fn apply(&mut self, op: EditOp, ctx: &mut TextContext) {
+        if let EditOp::ApplyEditingState(state) = &op
+            && self.editing_state_bytes() == *state
+        {
+            // Value-equality short-circuit: the IMM feedback-loop guard.
+            return;
+        }
+        if self.view.is_none() {
+            self.relayout(ctx);
+        }
+        match op {
+            EditOp::ApplyEditingState(state) => self.apply_editing_state(state, ctx),
+            EditOp::Insert(s) => self.replace_selection(&s, ctx),
+            EditOp::InsertNewline => self.replace_selection("\n", ctx),
+            EditOp::Backdelete => self.backdelete(ctx),
+            EditOp::Delete => self.delete(ctx),
+            EditOp::Compose { text, cursor } => self.set_compose(&text, cursor, ctx),
+            EditOp::FinishCompose => {
+                // The preedit is already in the buffer: committing only ends it.
+                let _ = self.composition.end_preedit();
+            }
+            EditOp::ClearCompose => self.clear_compose(ctx),
+            motion => {
+                let layout = self.layout();
+                let s = &self.selection;
+                let next = match motion {
+                    EditOp::MoveLeft { select } => s.previous_visual(layout, select),
+                    EditOp::MoveRight { select } => s.next_visual(layout, select),
+                    EditOp::MoveUp { select } => s.move_lines(layout, -1, select),
+                    EditOp::MoveDown { select } => s.move_lines(layout, 1, select),
+                    EditOp::MoveWordLeft { select } => s.previous_visual_word(layout, select),
+                    EditOp::MoveWordRight { select } => s.next_visual_word(layout, select),
+                    EditOp::Home { select } => s.line_start(layout, select),
+                    EditOp::End { select } => s.line_end(layout, select),
+                    EditOp::SelectAll => Selection::all(layout),
+                    EditOp::CollapseSelection => s.collapse(),
+                    EditOp::MoveToPoint { x, y, select: true } => s.extend_to_point(layout, x, y),
+                    EditOp::MoveToPoint {
+                        x,
+                        y,
+                        select: false,
+                    } => Selection::from_point(layout, x, y),
+                    EditOp::SelectWordAtPoint { x, y } => Selection::word_from_point(layout, x, y),
+                    // The editing ops are handled above.
+                    _ => *s,
+                };
+                self.selection = next;
+            }
+        }
+    }
+
+    /// Sets (or clears) the soft-wrap width, switching between wrapped
+    /// multi-line and single-line modes.
+    ///
+    /// `Some(px)` soft-wraps the text at `px` logical pixels and makes vertical
+    /// caret motion ([`EditOp::MoveUp`]/[`EditOp::MoveDown`]) and newline
+    /// insertion ([`EditOp::InsertNewline`]) meaningful; `None` restores the
+    /// single-line default. The layout is refreshed immediately so
+    /// [`layout_size`](Self::layout_size) and the geometry accessors observe the
+    /// new wrapping without waiting for the next [`apply`](Self::apply).
+    pub fn set_wrap_width(&mut self, width: Option<f32>, ctx: &mut TextContext) {
+        self.wrap_width = width;
+        self.relayout(ctx);
+    }
+
+    /// The number of visual lines in the current layout (1 for a single-line
+    /// field; more once wrapping or explicit newlines split it).
+    ///
+    /// Returns 0 before the first layout refresh.
+    pub fn line_count(&self) -> usize {
+        self.view.as_ref().map_or(0, |v| v.lines.lines.len())
+    }
+
+    /// The current buffer text, including any composing preedit.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// The selected text slice, or `None` if the selection is collapsed.
+    ///
+    /// Returns the `text()[min(base, extent)..max(base, extent)]` slice when
+    /// a non-collapsed selection exists. Returns `None` when the selection is
+    /// collapsed (`base == extent`).
+    ///
+    /// On a preedit/composing state, this operation is infallible (asserted in
+    /// debug, returns `None` in release if byte offsets are not valid char
+    /// boundaries). This mirrors Flutter's TextEditingValue.selection.textBefore
+    /// and textAfter derivatives on the selected slice.
+    pub fn selected_text(&self) -> Option<&str> {
+        let text = self.text();
+        let base = self.selection.anchor().index;
+        let extent = self.selection.focus().index;
+
+        if base == extent {
+            return None;
+        }
+
+        let start = base.min(extent);
+        let end = base.max(extent);
+
+        // Debug: assert char boundaries; release: return None if invalid.
+        #[cfg(debug_assertions)]
+        assert!(
+            text.is_char_boundary(start) && text.is_char_boundary(end),
+            "selected text byte offsets are not char boundaries: start={}, end={}, text.len()={}",
+            start,
+            end,
+            text.len()
+        );
+
+        #[cfg(not(debug_assertions))]
+        if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+            return None;
+        }
+
+        Some(&text[start..end])
+    }
+
+    /// The measured size of the laid-out text (Y-down logical pixels).
+    ///
+    /// Returns [`Size::ZERO`] before the first [`apply`](Self::apply) has
+    /// refreshed the layout.
+    pub fn layout_size(&self) -> Size {
+        match &self.view {
+            Some(view) => Size::new(f64::from(view.lines.width), f64::from(view.lines.height)),
+            None => Size::ZERO,
+        }
+    }
+
+    /// Whether the editor itself owns a live IME preedit (the desktop
+    /// `Compose` path). A platform-reported composing region is not one: it
+    /// survives a rebuild through [`EditOp::ApplyEditingState`]. Allocation-free.
+    pub fn has_preedit(&self) -> bool {
+        self.composition.preedit.is_some()
+    }
+
+    /// The current editing value in byte offsets.
+    pub fn editing_state_bytes(&self) -> EditingStateBytes {
+        EditingStateBytes {
+            text: self.text.clone(),
+            base: self.selection.anchor().index,
+            extent: self.selection.focus().index,
+            composing: self.composition.range(),
+        }
+    }
+
+    /// The current editing value in UTF-16 offsets (Flutter-canonical shape).
+    pub fn editing_state_utf16(&self) -> EditingState {
+        let text = self.text.as_str();
+        let (composing_base, composing_extent) = match self.composition.range() {
+            Some(range) => (
+                byte_to_utf16(text, range.start) as i32,
+                byte_to_utf16(text, range.end) as i32,
+            ),
+            None => (-1, -1),
+        };
+        EditingState {
+            text: text.to_string(),
+            selection_base: byte_to_utf16(text, self.selection.anchor().index) as i32,
+            selection_extent: byte_to_utf16(text, self.selection.focus().index) as i32,
+            composing_base,
+            composing_extent,
+        }
+    }
+
+    /// The caret rectangle at the current focus, `caret_width` wide.
+    ///
+    /// `None` when the caret is hidden (e.g. the IME requested it).
+    pub fn cursor_rect(&self, caret_width: f32) -> Option<Rect> {
+        self.composition.show_cursor.then(|| match &self.view {
+            Some(view) => self.selection.focus().geometry(&view.layout, caret_width),
+            None => Rect::ZERO,
+        })
+    }
+
+    /// The rectangles covering the current (non-collapsed) selection.
+    pub fn selection_rects(&self) -> Vec<Rect> {
+        let mut rects = Vec::new();
+        if let Some(view) = &self.view {
+            self.selection
+                .geometry_with(&view.layout, |rect| rects.push(rect));
+        }
+        rects
+    }
+
+    /// The area bounding the text currently being edited — a placement hint for
+    /// the platform IME candidate box.
+    ///
+    /// The preedit when composing, else the focused line's part of the
+    /// selection (or the caret), widened by about three characters each side
+    /// (clamped to the wrap width) so the candidate box need not jump as the
+    /// composition grows.
+    pub fn ime_cursor_area(&self) -> Rect {
+        let Some(view) = &self.view else {
+            return Rect::ZERO;
+        };
+        let layout = &view.layout;
+        let (area, focus) = if let Some(preedit) = self.composition.preedit.clone() {
+            let preedit = Selection::new(
+                Cursor::from_byte_index(layout, preedit.start, Affinity::Downstream),
+                Cursor::from_byte_index(layout, preedit.end, Affinity::Downstream),
+            );
+            let mut area: Option<Rect> = None;
+            preedit.geometry_with(layout, |rect| {
+                area = Some(area.map_or(rect, |a| a.union(rect)));
+            });
+            (
+                area.unwrap_or_else(|| preedit.focus().geometry(layout, 0.0)),
+                preedit.focus(),
+            )
+        } else {
+            let focus = self.selection.focus().geometry(layout, 0.0);
+            let mut area = focus;
+            self.selection.geometry_with(layout, |rect| {
+                if rect.y0 == focus.y0 {
+                    area = area.union(rect);
+                }
+            });
+            (area, self.selection.focus())
+        };
+        let [upstream, downstream] = focus.logical_units(layout);
+        let font_size = downstream
+            .or(upstream)
+            .map_or(self.styles[0].size, |u| layout.units[u].font_size);
+        // About three characters, at 0.6 of the font size each.
+        let inflate = 3.0 * 0.6 * f64::from(font_size);
+        let editor_width = self.wrap_width.map_or(f64::INFINITY, f64::from);
+        Rect::new(
+            (area.x0 - inflate).max(0.0),
+            area.y0,
+            (area.x1 + inflate).min(editor_width),
+            area.y1,
+        )
+    }
+
+    /// Converts the current layout into [`frust_scene::GlyphRun`]s at
+    /// `origin` (reusing [`crate::TextLayout`]'s converter).
+    ///
+    /// Empty before the first [`apply`](Self::apply).
+    pub fn to_scene_runs(&self, origin: Point) -> Vec<GlyphRun> {
+        let Some(view) = &self.view else {
+            return Vec::new();
+        };
+        if self.text.is_empty() {
+            // Only the sizing space of an empty text is shaped: nothing draws.
+            return Vec::new();
+        }
+        let paragraph = Paragraph::new(&view.shaped, &self.styles, None);
+        let mut runs = crate::convert::lines_to_scene_runs(&paragraph, &self.text, &view.lines);
+        let transform = Affine::translate((origin.x, origin.y));
+        for run in &mut runs {
+            run.transform = transform;
+        }
+        runs
+    }
+
+    /// The current caret layout (empty before the first refresh).
+    fn layout(&self) -> &EditLayout {
+        static EMPTY: std::sync::OnceLock<EditLayout> = std::sync::OnceLock::new();
+        match &self.view {
+            Some(view) => &view.layout,
+            None => EMPTY.get_or_init(EditLayout::default),
+        }
+    }
+
+    /// Re-shapes and re-breaks the buffer, keeping the selection inside it.
+    fn relayout(&mut self, ctx: &mut TextContext) {
+        let style = &self.styles[0];
+        // An empty text is sized by a space it never draws, as
+        // `TextContext::layout` sizes an empty label.
+        let shaped_text = if self.text.is_empty() {
+            " "
+        } else {
+            &self.text
+        };
+        let shaped = ctx.shape(shaped_text, style);
+        let lines = lay_out(
+            &Paragraph::new(&shaped, &self.styles, None),
+            self.wrap_width,
+            None,
+        );
+        let layout = EditLayout::new(self.text.len(), &shaped, &lines);
+        self.selection = self.selection.refresh(&layout);
+        // The old offsets were valid in the previous text only: floor any that
+        // fall inside a char of this one, so a later slice or splice never panics.
+        let floor = |mut i: usize| {
+            i = i.min(self.text.len());
+            while !self.text.is_char_boundary(i) {
+                i -= 1;
+            }
+            i
+        };
+        let (a, f) = (self.selection.anchor(), self.selection.focus());
+        if floor(a.index) != a.index || floor(f.index) != f.index {
+            self.selection = Selection::new(
+                Cursor::from_byte_index(&layout, floor(a.index), a.affinity),
+                Cursor::from_byte_index(&layout, floor(f.index), f.affinity),
+            );
+        }
+        self.view = Some(View {
+            shaped,
+            lines,
+            layout,
+        });
+    }
+
+    /// The caret at byte `index` (upstream at the text end).
+    fn cursor_at(&self, index: usize) -> Cursor {
+        Cursor::from_byte_index(self.layout(), index, Affinity::Downstream)
+    }
+
+    /// Replaces `range` of the buffer with `with`, keeping the preedit in
+    /// step, and lays the result out.
+    fn splice(&mut self, range: Range<usize>, with: &str, ctx: &mut TextContext) {
+        self.text.replace_range(range.clone(), with);
+        self.composition.replaced(range, with.len());
+        self.relayout(ctx);
+    }
+
+    /// Inserts `s` at the caret, or replaces the selection with it; the caret
+    /// lands after it (on the next line after a trailing newline).
+    fn replace_selection(&mut self, s: &str, ctx: &mut TextContext) {
+        let range = self.selection.text_range();
+        let start = range.start;
+        self.splice(range, s, ctx);
+        let affinity = if s.ends_with(['\n', '\r', '\u{2028}', '\u{2029}']) {
+            Affinity::Downstream
+        } else {
+            Affinity::Upstream
+        };
+        self.selection = Cursor::from_byte_index(self.layout(), start + s.len(), affinity).into();
+    }
+
+    /// Backspace: the selection, else the code point before the caret — or
+    /// the whole grapheme before it when that is a newline or an emoji
+    /// (parley 0.11.1's rule).
+    fn backdelete(&mut self, ctx: &mut TextContext) {
+        if !self.selection.is_collapsed() {
+            return self.replace_selection("", ctx);
+        }
+        let focus = self.selection.focus();
+        let layout = self.layout();
+        let Some(u) = focus.logical_units(layout)[0] else {
+            return;
+        };
+        let unit = &layout.units[u];
+        let end = focus.index;
+        let start = if unit.newline || unit.emoji {
+            unit.text.start
+        } else {
+            match self.text[..end].char_indices().next_back() {
+                Some((start, _)) => start,
+                None => return,
+            }
+        };
+        self.splice(start..end, "", ctx);
+        self.selection = Cursor::from_byte_index(self.layout(), start, Affinity::Downstream).into();
+    }
+
+    /// Forward delete: the selection, else the grapheme after the caret.
+    fn delete(&mut self, ctx: &mut TextContext) {
+        if !self.selection.is_collapsed() {
+            return self.replace_selection("", ctx);
+        }
+        let focus = self.selection.focus();
+        let layout = self.layout();
+        let Some(u) = focus.logical_units(layout)[1] else {
+            return;
+        };
+        let unit = &layout.units[u];
+        let range = focus.index.max(unit.text.start)..unit.text.end;
+        if !range.is_empty() {
+            self.splice(range, "", ctx);
+        }
+    }
+
+    /// The state-sync path: the platform's text, selection and composing
+    /// region, taken as given (an offset off a char boundary leaves the
+    /// selection as it was).
+    fn apply_editing_state(&mut self, state: EditingStateBytes, ctx: &mut TextContext) {
+        if self.text != state.text {
+            self.text = state.text;
+            self.composition.text_replaced();
+            self.relayout(ctx);
+            // The old selection's granularity base was refreshed by clamping
+            // only and may sit inside a char of the new text: drop it, keeping
+            // the (already floored) anchor and focus.
+            self.selection = Selection::new(self.selection.anchor(), self.selection.focus());
+        }
+        if self.text.is_char_boundary(state.base) && self.text.is_char_boundary(state.extent) {
+            self.selection =
+                Selection::new(self.cursor_at(state.base), self.cursor_at(state.extent));
+        }
+        self.composition.platform = state.composing;
+    }
+
+    /// Starts or updates the preedit with `text`, which replaces the current
+    /// preedit (or, starting a composition, the selection); `cursor` places
+    /// the selection within it, and `None` hides the caret at its start. An
+    /// empty `text` retracts the preedit.
+    fn set_compose(&mut self, text: &str, cursor: Option<(usize, usize)>, ctx: &mut TextContext) {
+        if text.is_empty() {
+            return self.clear_compose(ctx);
+        }
+        let range = self
+            .composition
+            .preedit
+            .clone()
+            .unwrap_or_else(|| self.selection.text_range());
+        let start = range.start;
+        self.text.replace_range(range, text);
+        self.composition
+            .set_preedit(start, text.len(), cursor.is_some());
+        self.relayout(ctx);
+        let within = |offset: usize| {
+            let mut offset = offset.min(text.len());
+            while !text.is_char_boundary(offset) {
+                offset -= 1;
+            }
+            start + offset
+        };
+        let (anchor, focus) = cursor.unwrap_or((0, 0));
+        self.selection = Selection::new(
+            self.cursor_at(within(anchor)),
+            self.cursor_at(within(focus)),
+        );
+    }
+
+    /// Drops the preedit's text, the caret landing where it started.
+    fn clear_compose(&mut self, ctx: &mut TextContext) {
+        if let Some(range) = self.composition.end_preedit() {
+            let start = range.start;
+            self.text.replace_range(range, "");
+            self.relayout(ctx);
+            self.selection = self.cursor_at(start).into();
+        }
+    }
+}
+
+/// Converts a byte offset into `text` to a UTF-16 code-unit offset.
+///
+/// Out-of-range offsets clamp to `text.len()`; an offset landing inside a
+/// multi-byte UTF-8 sequence snaps back to the enclosing char boundary.
+pub fn byte_to_utf16(text: &str, byte_idx: usize) -> usize {
+    let mut boundary = byte_idx.min(text.len());
+    while boundary > 0 && !text.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    text[..boundary].chars().map(char::len_utf16).sum()
+}
+
+/// Converts a UTF-16 code-unit offset into `text` to a byte offset.
+///
+/// Out-of-range offsets clamp to `text.len()`; an offset landing inside a
+/// surrogate pair snaps back to the start of the enclosing char.
+pub fn utf16_to_byte(text: &str, utf16_idx: usize) -> usize {
+    let mut units = 0usize;
+    for (byte_off, ch) in text.char_indices() {
+        if utf16_idx <= units {
+            return byte_off;
+        }
+        let next = units + ch.len_utf16();
+        if utf16_idx < next {
+            // Landing inside a surrogate pair: clamp to this char's start.
+            return byte_off;
+        }
+        units = next;
+    }
+    text.len()
+}
+
+/// Normalizes pasted text for insertion, handling line-ending differences.
+///
+/// This function prepares text from the clipboard or external sources by
+/// normalizing line endings according to the target field's mode:
+///
+/// - **Single-line mode** (`single_line: true`): removes every `'\r'` and `'\n'`
+///   entirely, denying multi-line input. This mirrors Flutter's
+///   [`singleLineFormatter`](https://api.flutter.dev/flutter/services/TextInputFormatter-class.html),
+///   which denies newlines to prevent multi-line input in fields like password
+///   fields or search boxes.
+/// - **Multi-line mode** (`single_line: false`): replaces `"\r\n"` and lone `'\r'`
+///   with `'\n'`, normalizing Windows and old Mac line endings to Unix. All other
+///   characters pass through unchanged.
+///
+/// Returns a `Cow::Borrowed` reference when the input text is unchanged;
+/// returns `Cow::Owned` when filtering has occurred.
+///
+/// This function performs no other filtering: no trimming, no stripping of
+/// control characters, no Unicode normalization. It is the caller's
+/// responsibility to apply additional validation if needed.
+pub fn sanitize_paste(text: &str, single_line: bool) -> Cow<'_, str> {
+    if single_line {
+        // Single-line: remove all CR and LF.
+        if text.contains('\r') || text.contains('\n') {
+            let sanitized = text.replace(['\r', '\n'], "");
+            Cow::Owned(sanitized)
+        } else {
+            Cow::Borrowed(text)
+        }
+    } else {
+        // Multi-line: normalize CRLF and lone CR to LF.
+        if text.contains('\r') {
+            // Replace CRLF with LF first, then lone CR with LF.
+            let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+            Cow::Owned(normalized)
+        } else {
+            Cow::Borrowed(text)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::style::{FontStyle, FontWeight};
+    use peniko::Color;
+
+    fn style() -> TextStyle {
+        TextStyle::new(24.0, Color::BLACK)
+    }
+
+    fn editor() -> (TextEditor, TextContext) {
+        (TextEditor::new(&style()), TextContext::new())
+    }
+
+    /// Emoji with an astral-plane code point (grinning face) — a UTF-16
+    /// surrogate pair, 4 UTF-8 bytes.
+    const EMOJI: &str = "\u{1F600}";
+    /// A ZWJ "family" sequence (man+ZWJ+woman+ZWJ+girl+ZWJ+boy).
+    const FAMILY: &str = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}";
+
+    #[test]
+    fn insert_appends_text_and_advances_caret() {
+        let (mut ed, mut cx) = editor();
+        ed.apply(EditOp::Insert("Hi".into()), &mut cx);
+        assert_eq!(ed.text(), "Hi");
+        let st = ed.editing_state_bytes();
+        assert_eq!(st.base, 2);
+        assert_eq!(st.extent, 2);
+    }
+
+    /// Replaces the whole text and selection through the state-sync path.
+    fn sync(ed: &mut TextEditor, cx: &mut TextContext, text: &str, base: usize, extent: usize) {
+        ed.apply(
+            EditOp::ApplyEditingState(EditingStateBytes {
+                text: text.into(),
+                base,
+                extent,
+                composing: None,
+            }),
+            cx,
+        );
+    }
+
+    #[test]
+    fn a_replaced_text_never_leaves_the_caret_inside_a_char() {
+        // (op, text left by it, caret left by it) after the caret is floored to 0 in "\u{e9}a".
+        let cases = [
+            (EditOp::Backdelete, "\u{e9}a", 0),
+            (EditOp::Delete, "a", 0),
+            (EditOp::Insert("x".into()), "x\u{e9}a", 1),
+        ];
+        for (op, text, caret) in cases {
+            let (mut ed, mut cx) = editor();
+            sync(&mut ed, &mut cx, "abc", 1, 1);
+            // 5 is off a boundary of "\u{e9}a" (and past its end): rejected, and
+            // the old caret (1, inside the 2-byte char) is floored.
+            sync(&mut ed, &mut cx, "\u{e9}a", 5, 5);
+            let st = ed.editing_state_bytes();
+            assert_eq!((st.base, st.extent), (0, 0));
+            ed.apply(op, &mut cx);
+            assert_eq!(ed.text(), text);
+            let st = ed.editing_state_bytes();
+            assert_eq!((st.base, st.extent), (caret, caret));
+        }
+    }
+
+    #[test]
+    fn a_shrunk_text_floors_an_in_range_offset_inside_a_char() {
+        // The old caret 1 is in range of "\u{e9}x" yet inside its first char:
+        // clamping alone would leave it there.
+        let (mut ed, mut cx) = editor();
+        sync(&mut ed, &mut cx, "abcd", 1, 1);
+        sync(&mut ed, &mut cx, "\u{e9}x", 1, 1);
+        let st = ed.editing_state_bytes();
+        assert_eq!((st.base, st.extent), (0, 0));
+        ed.apply(EditOp::Backdelete, &mut cx);
+        ed.apply(EditOp::Delete, &mut cx);
+        assert_eq!(ed.text(), "x");
+    }
+
+    #[test]
+    fn a_replaced_text_floors_both_ends_of_a_range_selection() {
+        let (mut ed, mut cx) = editor();
+        sync(&mut ed, &mut cx, "abcdef", 1, 4);
+        // "\u{e9}x\u{e9}": both old ends are inside a char; both are rejected.
+        sync(&mut ed, &mut cx, "\u{e9}x\u{e9}", 1, 4);
+        let st = ed.editing_state_bytes();
+        assert_eq!((st.base, st.extent), (0, 3));
+        assert_eq!(ed.selected_text(), Some("\u{e9}x"));
+
+        // A 4-byte emoji: offsets 1..3 are inside it.
+        let (mut ed, mut cx) = editor();
+        sync(&mut ed, &mut cx, "abcdef", 1, 3);
+        sync(&mut ed, &mut cx, &format!("{EMOJI}a"), 1, 3);
+        let st = ed.editing_state_bytes();
+        assert_eq!((st.base, st.extent), (0, 0));
+        ed.apply(EditOp::Backdelete, &mut cx);
+        assert_eq!(ed.text(), format!("{EMOJI}a"));
+        ed.apply(EditOp::Delete, &mut cx);
+        assert_eq!(ed.text(), "a");
+    }
+
+    #[test]
+    fn a_valid_selection_is_not_moved_by_relayout() {
+        let (mut ed, mut cx) = editor();
+        sync(&mut ed, &mut cx, "abc", 0, 0);
+        sync(&mut ed, &mut cx, "\u{e9}a", 0, 2);
+        let st = ed.editing_state_bytes();
+        assert_eq!((st.base, st.extent), (0, 2));
+        ed.set_wrap_width(Some(200.0), &mut cx);
+        ed.set_wrap_width(None, &mut cx);
+        let st = ed.editing_state_bytes();
+        assert_eq!((st.base, st.extent), (0, 2));
+    }
+
+    #[test]
+    fn a_word_drag_after_a_text_replacement_never_uses_a_stale_word_base() {
+        let (mut ed, mut cx) = editor();
+        ed.apply(EditOp::Insert("hi there".into()), &mut cx);
+        let at = |ed: &mut TextEditor, cx: &mut TextContext, n: usize| {
+            ed.apply(EditOp::Home { select: false }, cx);
+            for _ in 0..n {
+                ed.apply(EditOp::MoveRight { select: false }, cx);
+            }
+            ed.cursor_rect(1.0).expect("a caret")
+        };
+        let there = at(&mut ed, &mut cx, 5);
+        let hi = at(&mut ed, &mut cx, 1);
+        let y = there.center().y as f32;
+        ed.apply(
+            EditOp::SelectWordAtPoint {
+                x: there.x0 as f32,
+                y,
+            },
+            &mut cx,
+        );
+        assert_eq!(ed.selected_text(), Some("there"));
+        // Drag back over "hi": anchor 8 and focus 0 are on boundaries, the
+        // word base (3, 8) is not once the text below replaces this one.
+        ed.apply(
+            EditOp::MoveToPoint {
+                x: hi.x0 as f32,
+                y,
+                select: true,
+            },
+            &mut cx,
+        );
+        let st = ed.editing_state_bytes();
+        assert_eq!((st.base, st.extent), (8, 0));
+        // In this text anchor 8 and focus 0 are boundaries, but offset 3 (the
+        // old word's start) is inside the 2-byte char at 2..4; the offered
+        // caret 3 is rejected, so the old selection stays.
+        sync(&mut ed, &mut cx, "aa\u{e9} aaaaa aaaaa", 3, 3);
+        let st = ed.editing_state_bytes();
+        assert!(ed.text().is_char_boundary(st.base) && ed.text().is_char_boundary(st.extent));
+        for x in [500.0, 0.0, 500.0] {
+            ed.apply(EditOp::MoveToPoint { x, y, select: true }, &mut cx);
+            let st = ed.editing_state_bytes();
+            assert!(ed.text().is_char_boundary(st.base) && ed.text().is_char_boundary(st.extent));
+            let _ = ed.selected_text();
+        }
+    }
+
+    #[test]
+    fn backdelete_over_emoji_removes_whole_code_point() {
+        let (mut ed, mut cx) = editor();
+        ed.apply(EditOp::Insert(format!("a{EMOJI}")), &mut cx);
+        assert_eq!(ed.text(), format!("a{EMOJI}"));
+        ed.apply(EditOp::Backdelete, &mut cx);
+        // The 4-byte emoji is removed as a unit, not a single byte.
+        assert_eq!(ed.text(), "a");
+    }
+
+    #[test]
+    fn backdelete_over_zwj_sequence_removes_the_whole_grapheme() {
+        let (mut ed, mut cx) = editor();
+        ed.apply(EditOp::Insert(format!("x{FAMILY}")), &mut cx);
+        ed.apply(EditOp::Backdelete, &mut cx);
+        // An emoji grapheme goes whole (the ZWJ family is one grapheme), never
+        // leaving a dangling joiner behind.
+        assert_eq!(ed.text(), "x");
+        assert_eq!(ed.editing_state_bytes().extent, 1);
+    }
+
+    #[test]
+    fn backdelete_inside_a_non_emoji_grapheme_removes_one_code_point() {
+        let (mut ed, mut cx) = editor();
+        // e + COMBINING ACUTE ACCENT: one grapheme, two code points.
+        ed.apply(EditOp::Insert("ae\u{301}".into()), &mut cx);
+        ed.apply(EditOp::Backdelete, &mut cx);
+        assert_eq!(ed.text(), "ae", "only the combining mark goes");
+        ed.apply(EditOp::Insert("\u{301}".into()), &mut cx);
+        ed.apply(EditOp::MoveLeft { select: false }, &mut cx);
+        assert_eq!(
+            ed.editing_state_bytes().extent,
+            1,
+            "a caret move steps over the whole grapheme"
+        );
+        ed.apply(EditOp::Delete, &mut cx);
+        assert_eq!(ed.text(), "a", "forward delete takes the whole grapheme");
+    }
+
+    #[test]
+    fn backdelete_after_crlf_removes_both() {
+        let (mut ed, mut cx) = editor();
+        ed.set_wrap_width(Some(400.0), &mut cx);
+        ed.apply(EditOp::Insert("a\r\nb".into()), &mut cx);
+        ed.apply(EditOp::MoveLeft { select: false }, &mut cx);
+        ed.apply(EditOp::Backdelete, &mut cx);
+        assert_eq!(ed.text(), "ab", "a hard break's grapheme goes whole");
+    }
+
+    #[test]
+    fn forward_delete_removes_following_grapheme() {
+        let (mut ed, mut cx) = editor();
+        ed.apply(EditOp::Insert("abc".into()), &mut cx);
+        ed.apply(EditOp::Home { select: false }, &mut cx);
+        ed.apply(EditOp::Delete, &mut cx);
+        assert_eq!(ed.text(), "bc");
+    }
+
+    #[test]
+    fn move_left_right_adjust_caret_without_selecting() {
+        let (mut ed, mut cx) = editor();
+        ed.apply(EditOp::Insert("abc".into()), &mut cx);
+        ed.apply(EditOp::MoveLeft { select: false }, &mut cx);
+        assert_eq!(ed.editing_state_bytes().extent, 2);
+        let st = ed.editing_state_bytes();
+        assert_eq!(st.base, st.extent, "plain move must collapse the selection");
+        ed.apply(EditOp::MoveRight { select: false }, &mut cx);
+        assert_eq!(ed.editing_state_bytes().extent, 3);
+    }
+
+    #[test]
+    fn move_left_with_select_extends_selection() {
+        let (mut ed, mut cx) = editor();
+        ed.apply(EditOp::Insert("abc".into()), &mut cx);
+        ed.apply(EditOp::MoveLeft { select: true }, &mut cx);
+        let st = ed.editing_state_bytes();
+        assert_ne!(st.base, st.extent, "select variant must extend selection");
+        assert_eq!(st.base, 3);
+        assert_eq!(st.extent, 2);
+    }
+
+    #[test]
+    fn word_move_jumps_over_a_word() {
+        let (mut ed, mut cx) = editor();
+        ed.apply(EditOp::Insert("hello world".into()), &mut cx);
+        ed.apply(EditOp::Home { select: false }, &mut cx);
+        assert_eq!(ed.editing_state_bytes().extent, 0);
+        ed.apply(EditOp::MoveWordRight { select: false }, &mut cx);
+        let after = ed.editing_state_bytes().extent;
+        assert!(
+            after > 0 && after <= 6,
+            "word-right should land near the space, got {after}"
+        );
+    }
+
+    #[test]
+    fn home_and_end_move_to_line_bounds() {
+        let (mut ed, mut cx) = editor();
+        ed.apply(EditOp::Insert("hello".into()), &mut cx);
+        ed.apply(EditOp::Home { select: false }, &mut cx);
+        assert_eq!(ed.editing_state_bytes().extent, 0);
+        ed.apply(EditOp::End { select: false }, &mut cx);
+        assert_eq!(ed.editing_state_bytes().extent, 5);
+    }
+
+    #[test]
+    fn select_all_then_collapse() {
+        let (mut ed, mut cx) = editor();
+        ed.apply(EditOp::Insert("hello".into()), &mut cx);
+        ed.apply(EditOp::SelectAll, &mut cx);
+        let st = ed.editing_state_bytes();
+        assert_eq!(st.base.min(st.extent), 0);
+        assert_eq!(st.base.max(st.extent), 5);
+        ed.apply(EditOp::CollapseSelection, &mut cx);
+        let st = ed.editing_state_bytes();
+        assert_eq!(st.base, st.extent, "collapse must drop the anchor");
+    }
+
+    #[test]
+    fn insert_replaces_selection() {
+        let (mut ed, mut cx) = editor();
+        ed.apply(EditOp::Insert("hello".into()), &mut cx);
+        ed.apply(EditOp::SelectAll, &mut cx);
+        ed.apply(EditOp::Insert("bye".into()), &mut cx);
+        assert_eq!(ed.text(), "bye");
+    }
+
+    #[test]
+    fn compose_lifecycle_commit() {
+        let (mut ed, mut cx) = editor();
+        ed.apply(
+            EditOp::Compose {
+                text: "ni".into(),
+                cursor: Some((2, 2)),
+            },
+            &mut cx,
+        );
+        // Composing region is exposed in the editing state.
+        let st = ed.editing_state_bytes();
+        assert_eq!(st.composing, Some(0..2), "preedit range should be reported");
+        assert_eq!(ed.text(), "ni");
+        ed.apply(EditOp::FinishCompose, &mut cx);
+        let st = ed.editing_state_bytes();
+        assert_eq!(st.composing, None, "commit clears the composing region");
+        assert_eq!(ed.text(), "ni");
+    }
+
+    #[test]
+    fn compose_lifecycle_clear_reverts() {
+        let (mut ed, mut cx) = editor();
+        ed.apply(EditOp::Insert("a".into()), &mut cx);
+        ed.apply(
+            EditOp::Compose {
+                text: "xyz".into(),
+                cursor: None,
+            },
+            &mut cx,
+        );
+        assert_eq!(ed.text(), "axyz");
+        ed.apply(EditOp::ClearCompose, &mut cx);
+        // Clearing the preedit reverts to the pre-compose buffer.
+        assert_eq!(ed.text(), "a");
+        assert_eq!(ed.editing_state_bytes().composing, None);
+    }
+
+    #[test]
+    fn apply_editing_state_sets_text_selection_and_composing() {
+        let (mut ed, mut cx) = editor();
+        let state = EditingStateBytes {
+            text: "hello".into(),
+            base: 1,
+            extent: 3,
+            composing: Some(0..5),
+        };
+        ed.apply(EditOp::ApplyEditingState(state.clone()), &mut cx);
+        assert_eq!(ed.text(), "hello");
+        assert_eq!(ed.editing_state_bytes(), state);
+    }
+
+    #[test]
+    fn apply_editing_state_is_idempotent_and_short_circuits() {
+        let (mut ed, mut cx) = editor();
+        let state = EditingStateBytes {
+            text: "world".into(),
+            base: 2,
+            extent: 2,
+            composing: None,
+        };
+        ed.apply(EditOp::ApplyEditingState(state.clone()), &mut cx);
+        let first = ed.editing_state_bytes();
+        // Re-applying the identical state must be a no-op (feedback-loop guard).
+        ed.apply(EditOp::ApplyEditingState(state.clone()), &mut cx);
+        assert_eq!(ed.editing_state_bytes(), first);
+        assert_eq!(ed.editing_state_bytes(), state);
+    }
+
+    #[test]
+    fn apply_editing_state_selection_only_change_keeps_text() {
+        let (mut ed, mut cx) = editor();
+        ed.apply(
+            EditOp::ApplyEditingState(EditingStateBytes {
+                text: "abcd".into(),
+                base: 0,
+                extent: 0,
+                composing: None,
+            }),
+            &mut cx,
+        );
+        ed.apply(
+            EditOp::ApplyEditingState(EditingStateBytes {
+                text: "abcd".into(),
+                base: 1,
+                extent: 3,
+                composing: None,
+            }),
+            &mut cx,
+        );
+        let st = ed.editing_state_bytes();
+        assert_eq!(st.text, "abcd");
+        assert_eq!((st.base, st.extent), (1, 3));
+    }
+
+    #[test]
+    fn editing_state_utf16_converts_offsets_for_emoji() {
+        let (mut ed, mut cx) = editor();
+        // Buffer: "a😀" — 'a' = 1 byte / 1 unit, emoji = 4 bytes / 2 units.
+        ed.apply(
+            EditOp::ApplyEditingState(EditingStateBytes {
+                text: format!("a{EMOJI}"),
+                base: 5,
+                extent: 5,
+                composing: Some(1..5),
+            }),
+            &mut cx,
+        );
+        let st = ed.editing_state_utf16();
+        assert_eq!(st.selection_base, 3, "1 + 2 UTF-16 units");
+        assert_eq!(st.selection_extent, 3);
+        assert_eq!(st.composing_base, 1);
+        assert_eq!(st.composing_extent, 3);
+    }
+
+    #[test]
+    fn editing_state_utf16_reports_minus_one_when_not_composing() {
+        let (mut ed, mut cx) = editor();
+        ed.apply(EditOp::Insert("hi".into()), &mut cx);
+        let st = ed.editing_state_utf16();
+        assert_eq!(st.composing_base, -1);
+        assert_eq!(st.composing_extent, -1);
+    }
+
+    #[test]
+    fn cursor_and_selection_geometry_are_sane() {
+        let (mut ed, mut cx) = editor();
+        ed.apply(EditOp::Insert("hello".into()), &mut cx);
+
+        let caret = ed
+            .cursor_rect(2.0)
+            .expect("caret should exist after typing");
+        assert!(
+            caret.width() > 0.0,
+            "caret width should reflect the requested size"
+        );
+        assert!(caret.height() > 0.0, "caret should have positive height");
+
+        ed.apply(EditOp::SelectAll, &mut cx);
+        let rects = ed.selection_rects();
+        assert!(
+            !rects.is_empty(),
+            "a non-empty selection should yield rects"
+        );
+        for r in &rects {
+            assert!(
+                r.width() > 0.0 && r.height() > 0.0,
+                "selection rect must be non-degenerate: {r:?}"
+            );
+            assert!(r.x1 >= r.x0 && r.y1 >= r.y0, "rect must be ordered: {r:?}");
+        }
+
+        let ime = ed.ime_cursor_area();
+        assert!(
+            ime.x1 >= ime.x0 && ime.y1 >= ime.y0,
+            "ime area must be ordered"
+        );
+    }
+
+    #[test]
+    fn to_scene_runs_translates_by_origin_and_is_empty_when_fresh() {
+        let (mut ed, mut cx) = editor();
+        // Fresh editor: no layout refreshed yet.
+        assert!(ed.to_scene_runs(Point::ORIGIN).is_empty());
+
+        ed.apply(EditOp::Insert("Ag".into()), &mut cx);
+        let runs = ed.to_scene_runs(Point::new(10.0, 20.0));
+        assert!(!runs.is_empty(), "typed text should produce glyph runs");
+        for run in &runs {
+            assert_eq!(run.transform, kurbo::Affine::translate((10.0, 20.0)));
+        }
+    }
+
+    // --- conversion helper matrix ---
+
+    #[test]
+    fn byte_to_utf16_matrix() {
+        // ASCII
+        assert_eq!(byte_to_utf16("abc", 0), 0);
+        assert_eq!(byte_to_utf16("abc", 2), 2);
+        // é (U+00E9): 2 bytes, 1 UTF-16 unit
+        assert_eq!(byte_to_utf16("é", 0), 0);
+        assert_eq!(byte_to_utf16("é", 2), 1);
+        // Mid-char byte snaps back to the boundary.
+        assert_eq!(byte_to_utf16("é", 1), 0);
+        // Emoji: 4 bytes, 2 UTF-16 units.
+        assert_eq!(byte_to_utf16(EMOJI, 4), 2);
+        assert_eq!(byte_to_utf16(EMOJI, 2), 0, "mid-surrogate byte snaps back");
+        // ZWJ family: 25 bytes, 11 UTF-16 units (4 emoji × 2 + 3 ZWJ × 1).
+        assert_eq!(byte_to_utf16(FAMILY, FAMILY.len()), 11);
+        // Overflow clamps to the end.
+        assert_eq!(byte_to_utf16("abc", 99), 3);
+    }
+
+    #[test]
+    fn utf16_to_byte_matrix() {
+        // ASCII
+        assert_eq!(utf16_to_byte("abc", 0), 0);
+        assert_eq!(utf16_to_byte("abc", 2), 2);
+        // é
+        assert_eq!(utf16_to_byte("é", 1), 2);
+        // Emoji
+        assert_eq!(utf16_to_byte(EMOJI, 2), 4);
+        assert_eq!(
+            utf16_to_byte(EMOJI, 1),
+            0,
+            "mid-surrogate snaps to char start"
+        );
+        // ZWJ family: all 11 units -> full byte length.
+        assert_eq!(utf16_to_byte(FAMILY, 11), FAMILY.len());
+        // Overflow clamps to the end.
+        assert_eq!(utf16_to_byte("abc", 99), 3);
+    }
+
+    #[test]
+    fn conversion_helpers_round_trip_on_boundaries() {
+        for text in ["", "abc", "é", EMOJI, FAMILY, "aé😀b"] {
+            let mut byte = 0;
+            for ch in text.chars() {
+                let units = byte_to_utf16(text, byte);
+                assert_eq!(
+                    utf16_to_byte(text, units),
+                    byte,
+                    "round-trip failed at byte {byte} in {text:?}"
+                );
+                byte += ch.len_utf8();
+            }
+            // End boundary.
+            let units = byte_to_utf16(text, text.len());
+            assert_eq!(utf16_to_byte(text, units), text.len());
+        }
+    }
+
+    // --- editor/context style parity (task: TextStyle expansion) ---
+
+    #[test]
+    fn editor_letter_spacing_widens_layout_like_context_layout() {
+        // TextEditor::new's edit-style defaults must apply the same
+        // letter-spacing TextContext::layout does (see frust_text::tests
+        // in lib.rs for the equivalent context-side assertion).
+        let narrow_style = TextStyle::new(24.0, Color::BLACK);
+        let (mut narrow_ed, mut narrow_cx) = (TextEditor::new(&narrow_style), TextContext::new());
+        narrow_ed.apply(EditOp::Insert("Hello".into()), &mut narrow_cx);
+        let narrow_width = narrow_ed.layout_size().width;
+
+        let mut wide_style = TextStyle::new(24.0, Color::BLACK);
+        wide_style.letter_spacing = 20.0;
+        let (mut wide_ed, mut wide_cx) = (TextEditor::new(&wide_style), TextContext::new());
+        wide_ed.apply(EditOp::Insert("Hello".into()), &mut wide_cx);
+        let wide_width = wide_ed.layout_size().width;
+
+        assert!(
+            wide_width > narrow_width,
+            "the editor's own layout should widen with extra letter-spacing \
+             the same way TextContext::layout's does: {narrow_width} vs {wide_width}"
+        );
+    }
+
+    // --- wrapped multi-line mode (task: textinput-multiline) ---
+
+    #[test]
+    fn single_line_mode_keeps_one_line_and_grows_horizontally() {
+        // With no wrap width, a long string stays on a single visual line and
+        // the layout width reflects the whole run.
+        let (mut ed, mut cx) = editor();
+        ed.apply(
+            EditOp::Insert("the quick brown fox jumps over the lazy dog".into()),
+            &mut cx,
+        );
+        assert_eq!(ed.line_count(), 1, "single-line mode never wraps");
+        let one_line_h = ed.layout_size().height;
+        assert!(one_line_h > 0.0);
+        assert!(
+            ed.layout_size().width > 100.0,
+            "single line grows horizontally"
+        );
+    }
+
+    #[test]
+    fn wrap_width_produces_multiple_lines_and_grows_vertically() {
+        let (mut ed, mut cx) = editor();
+        ed.apply(
+            EditOp::Insert("the quick brown fox jumps over the lazy dog".into()),
+            &mut cx,
+        );
+        let single_h = ed.layout_size().height;
+
+        // Constrain to a narrow width: the same text must wrap onto >1 line and
+        // the reported layout height must grow accordingly.
+        ed.set_wrap_width(Some(60.0), &mut cx);
+        assert!(
+            ed.line_count() > 1,
+            "narrow wrap width splits the run into multiple lines, got {}",
+            ed.line_count()
+        );
+        assert!(
+            ed.layout_size().height > single_h,
+            "wrapped multi-line layout is taller than the single line: {single_h} -> {}",
+            ed.layout_size().height
+        );
+
+        // Clearing the wrap width collapses back to a single line.
+        ed.set_wrap_width(None, &mut cx);
+        assert_eq!(ed.line_count(), 1, "None restores single-line mode");
+    }
+
+    #[test]
+    fn insert_newline_splits_into_two_lines() {
+        let (mut ed, mut cx) = editor();
+        // A wrap width is what makes vertical layout meaningful; wide enough that
+        // only the explicit newline splits the text.
+        ed.set_wrap_width(Some(400.0), &mut cx);
+        ed.apply(EditOp::Insert("ab".into()), &mut cx);
+        ed.apply(EditOp::InsertNewline, &mut cx);
+        ed.apply(EditOp::Insert("cd".into()), &mut cx);
+        assert_eq!(ed.text(), "ab\ncd");
+        assert_eq!(ed.line_count(), 2, "the newline creates a second line");
+        // Caret sits after the last char (byte offset 5: 'a''b''\n''c''d').
+        assert_eq!(ed.editing_state_bytes().extent, 5);
+    }
+
+    #[test]
+    fn move_up_down_navigate_across_a_newline() {
+        let (mut ed, mut cx) = editor();
+        ed.set_wrap_width(Some(400.0), &mut cx);
+        ed.apply(EditOp::Insert("abc".into()), &mut cx);
+        ed.apply(EditOp::InsertNewline, &mut cx);
+        ed.apply(EditOp::Insert("xyz".into()), &mut cx);
+        // Caret on line 2, at its end (byte 7).
+        let bottom = ed.editing_state_bytes().extent;
+        assert_eq!(bottom, 7);
+
+        // MoveUp lands on line 1 (byte offset within [0, 3]).
+        ed.apply(EditOp::MoveUp { select: false }, &mut cx);
+        let up = ed.editing_state_bytes().extent;
+        assert!(up <= 3, "move-up crosses the newline onto line 1, got {up}");
+
+        // MoveDown returns to line 2 (byte offset >= 4, past the newline).
+        ed.apply(EditOp::MoveDown { select: false }, &mut cx);
+        let down = ed.editing_state_bytes().extent;
+        assert!(
+            down >= 4,
+            "move-down crosses the newline back onto line 2, got {down}"
+        );
+    }
+
+    #[test]
+    fn utf16_selection_indices_are_correct_across_a_newline() {
+        let (mut ed, mut cx) = editor();
+        ed.set_wrap_width(Some(400.0), &mut cx);
+        // Line 1 "a😀" (1 byte + 4 bytes / 1 + 2 UTF-16 units), newline (1/1),
+        // line 2 "b" — select the whole buffer.
+        ed.apply(
+            EditOp::ApplyEditingState(EditingStateBytes {
+                text: format!("a{EMOJI}\nb"),
+                base: 0,
+                extent: format!("a{EMOJI}\nb").len(),
+                composing: None,
+            }),
+            &mut cx,
+        );
+        assert_eq!(ed.line_count(), 2, "the newline still splits the layout");
+        let st = ed.editing_state_utf16();
+        // 1 (a) + 2 (emoji) + 1 (\n) + 1 (b) = 5 UTF-16 units.
+        assert_eq!(st.selection_base, 0);
+        assert_eq!(
+            st.selection_extent, 5,
+            "the newline counts as exactly one UTF-16 unit"
+        );
+    }
+
+    #[test]
+    fn editor_applies_weight_and_style_edit_defaults_without_panicking() {
+        let mut style = TextStyle::new(24.0, Color::BLACK);
+        style.weight = FontWeight::BOLD;
+        style.style = FontStyle::Italic;
+        let (mut ed, mut cx) = (TextEditor::new(&style), TextContext::new());
+        ed.apply(EditOp::Insert("Hi".into()), &mut cx);
+        assert!(
+            ed.layout_size().width > 0.0,
+            "bold+italic edit-style defaults should still shape text"
+        );
+    }
+
+    // --- selected_text ---
+
+    #[test]
+    fn selected_text_returns_none_when_collapsed() {
+        let (mut ed, mut cx) = editor();
+        ed.apply(EditOp::Insert("hello".into()), &mut cx);
+        ed.apply(EditOp::Home { select: false }, &mut cx);
+        // Caret is at start; selection is collapsed.
+        assert_eq!(ed.selected_text(), None);
+    }
+
+    #[test]
+    fn selected_text_returns_slice_with_forward_selection() {
+        let (mut ed, mut cx) = editor();
+        ed.apply(EditOp::Insert("hello".into()), &mut cx);
+        ed.apply(EditOp::Home { select: false }, &mut cx);
+        ed.apply(EditOp::MoveRight { select: true }, &mut cx);
+        ed.apply(EditOp::MoveRight { select: true }, &mut cx);
+        // Selection is "he" (bytes 0..2).
+        assert_eq!(ed.selected_text(), Some("he"));
+    }
+
+    #[test]
+    fn selected_text_returns_same_slice_with_backward_selection() {
+        let (mut ed, mut cx) = editor();
+        ed.apply(EditOp::Insert("hello".into()), &mut cx);
+        ed.apply(EditOp::End { select: false }, &mut cx);
+        ed.apply(EditOp::MoveLeft { select: true }, &mut cx);
+        ed.apply(EditOp::MoveLeft { select: true }, &mut cx);
+        // Backward selection from end (byte 5): two moves left lands at byte 3 = "lo".
+        assert_eq!(ed.selected_text(), Some("lo"));
+    }
+
+    #[test]
+    fn selected_text_spans_multi_byte_emoji_correctly() {
+        let (mut ed, mut cx) = editor();
+        // Insert text with an emoji in the middle.
+        ed.apply(EditOp::Insert(format!("a{EMOJI}b")), &mut cx);
+        // Select all.
+        ed.apply(EditOp::SelectAll, &mut cx);
+        // Full slice includes the emoji.
+        let selected = ed.selected_text().expect("full selection should exist");
+        assert_eq!(selected, format!("a{EMOJI}b"));
+    }
+
+    #[test]
+    fn selected_text_can_select_just_the_emoji() {
+        let (mut ed, mut cx) = editor();
+        // Buffer: "a😀b" — "a" is 1 byte, emoji is 4 bytes, "b" is 1 byte.
+        ed.apply(EditOp::Insert(format!("a{EMOJI}b")), &mut cx);
+        // Move to after "a" (byte 1), then extend right 1 char (the emoji).
+        ed.apply(EditOp::Home { select: false }, &mut cx);
+        ed.apply(EditOp::MoveRight { select: false }, &mut cx);
+        ed.apply(EditOp::MoveRight { select: true }, &mut cx);
+        // Selection is just the emoji (bytes 1..5).
+        assert_eq!(ed.selected_text(), Some(EMOJI));
+    }
+
+    // --- sanitize_paste ---
+
+    #[test]
+    fn sanitize_paste_single_line_removes_crlf() {
+        let result = sanitize_paste("a\r\nb\n", true);
+        assert_eq!(result, Cow::Borrowed::<str>("ab") as Cow<str>);
+        assert_eq!(result.as_ref(), "ab");
+    }
+
+    #[test]
+    fn sanitize_paste_single_line_removes_lone_cr() {
+        let result = sanitize_paste("a\rb", true);
+        assert_eq!(result.as_ref(), "ab");
+    }
+
+    #[test]
+    fn sanitize_paste_single_line_removes_lone_lf() {
+        let result = sanitize_paste("a\nb", true);
+        assert_eq!(result.as_ref(), "ab");
+    }
+
+    #[test]
+    fn sanitize_paste_multi_line_normalizes_crlf_and_cr() {
+        let result = sanitize_paste("a\r\nb\rc", false);
+        assert_eq!(result.as_ref(), "a\nb\nc");
+    }
+
+    #[test]
+    fn sanitize_paste_multi_line_keeps_existing_lf() {
+        let result = sanitize_paste("a\nb\nc", false);
+        assert_eq!(result, Cow::Borrowed("a\nb\nc"));
+    }
+
+    #[test]
+    fn sanitize_paste_returns_borrowed_when_unchanged() {
+        let text = "hello world";
+        let result_single = sanitize_paste(text, true);
+        assert_eq!(result_single, Cow::Borrowed(text));
+
+        let result_multi = sanitize_paste(text, false);
+        assert_eq!(result_multi, Cow::Borrowed(text));
+    }
+
+    #[test]
+    fn sanitize_paste_single_line_multiple_newlines() {
+        let result = sanitize_paste("line1\nline2\nline3", true);
+        assert_eq!(result.as_ref(), "line1line2line3");
+    }
+
+    #[test]
+    fn sanitize_paste_multi_line_complex_mixed_endings() {
+        // Mix of CRLF, lone CR, and lone LF.
+        let result = sanitize_paste("a\r\nb\rc\nd", false);
+        assert_eq!(result.as_ref(), "a\nb\nc\nd");
+    }
+
+    #[test]
+    fn sanitize_paste_empty_string() {
+        let result_single = sanitize_paste("", true);
+        assert_eq!(result_single, Cow::Borrowed(""));
+
+        let result_multi = sanitize_paste("", false);
+        assert_eq!(result_multi, Cow::Borrowed(""));
+    }
+
+    #[test]
+    fn sanitize_paste_only_newlines_single_line() {
+        let result = sanitize_paste("\r\n\n\r", true);
+        assert_eq!(result.as_ref(), "");
+    }
+
+    #[test]
+    fn sanitize_paste_preserves_other_whitespace() {
+        let text = "a  \t  b";
+        let result = sanitize_paste(text, true);
+        assert_eq!(result.as_ref(), text);
+    }
+
+    // --- the frust layout under the editor (task: TextEditor without PlainEditor) ---
+
+    /// The caret's left edge after each `op` until the caret stops moving
+    /// (at most 64 steps), with the byte offset it reached.
+    fn walk(ed: &mut TextEditor, cx: &mut TextContext, op: EditOp) -> Vec<(usize, f64)> {
+        let mut out = Vec::new();
+        for _ in 0..64 {
+            let before = ed.editing_state_bytes();
+            ed.apply(op.clone(), cx);
+            let after = ed.editing_state_bytes();
+            let x = ed.cursor_rect(1.0).expect("a caret").x0;
+            if after == before && out.last().is_some_and(|&(_, last)| last == x) {
+                break;
+            }
+            out.push((after.extent, x));
+        }
+        out
+    }
+
+    #[test]
+    fn left_and_right_move_visually_across_a_right_to_left_run() {
+        let text = "abc \u{5d0}\u{5d1}\u{5d2} def";
+        let (mut ed, mut cx) = editor();
+        ed.apply(EditOp::Insert(text.into()), &mut cx);
+        ed.apply(EditOp::Home { select: false }, &mut cx);
+        let right = walk(&mut ed, &mut cx, EditOp::MoveRight { select: false });
+        let xs: Vec<f64> = right.iter().map(|&(_, x)| x).collect();
+        assert!(
+            xs.windows(2).all(|w| w[0] < w[1]),
+            "every right step moves the caret right on screen: {right:?}"
+        );
+        let offsets: Vec<usize> = right.iter().map(|&(i, _)| i).collect();
+        assert_eq!(
+            offsets,
+            vec![1, 2, 3, 4, 8, 6, 4, 11, 12, 13, 14],
+            "the Hebrew run is crossed from its logical end to its start"
+        );
+        let left = walk(&mut ed, &mut cx, EditOp::MoveLeft { select: false });
+        let xs: Vec<f64> = left.iter().map(|&(_, x)| x).collect();
+        assert!(
+            xs.windows(2).all(|w| w[0] > w[1]),
+            "every left step moves the caret left on screen: {left:?}"
+        );
+        assert_eq!(left.last().map(|&(i, _)| i), Some(0));
+    }
+
+    #[test]
+    fn word_motion_follows_word_boundaries_not_line_break_opportunities() {
+        // Every Hangul syllable is a line-break opportunity, but a run of them
+        // is one word.
+        let (mut ed, mut cx) = editor();
+        let text = "\u{c548}\u{b155}\u{d558}\u{c138}\u{c694} \u{c138}\u{acc4}";
+        ed.apply(EditOp::Insert(text.into()), &mut cx);
+        ed.apply(EditOp::Home { select: false }, &mut cx);
+        ed.apply(EditOp::MoveWordRight { select: false }, &mut cx);
+        assert_eq!(ed.editing_state_bytes().extent, 15, "past the first word");
+        ed.apply(EditOp::MoveWordRight { select: false }, &mut cx);
+        assert_eq!(ed.editing_state_bytes().extent, text.len());
+        ed.apply(EditOp::MoveWordLeft { select: false }, &mut cx);
+        assert_eq!(
+            ed.editing_state_bytes().extent,
+            16,
+            "the second word's start"
+        );
+
+        // A katakana run is one word too, and ends at the change of script.
+        let (mut ed, mut cx) = editor();
+        let text = "\u{30c6}\u{30ad}\u{30b9}\u{30c8}\u{5165}\u{529b}";
+        ed.apply(EditOp::Insert(text.into()), &mut cx);
+        ed.apply(EditOp::Home { select: false }, &mut cx);
+        ed.apply(EditOp::MoveWordRight { select: false }, &mut cx);
+        assert_eq!(ed.editing_state_bytes().extent, 12, "the katakana word");
+    }
+
+    #[test]
+    fn select_word_at_point_selects_the_word_under_it() {
+        let (mut ed, mut cx) = editor();
+        ed.apply(EditOp::Insert("hello world".into()), &mut cx);
+        let caret = |ed: &mut TextEditor, cx: &mut TextContext, at: usize| {
+            ed.apply(EditOp::Home { select: false }, cx);
+            for _ in 0..at {
+                ed.apply(EditOp::MoveRight { select: false }, cx);
+            }
+            ed.cursor_rect(1.0).expect("a caret")
+        };
+        let inside = caret(&mut ed, &mut cx, 8);
+        let y = inside.center().y as f32;
+        ed.apply(
+            EditOp::SelectWordAtPoint {
+                x: inside.x0 as f32,
+                y,
+            },
+            &mut cx,
+        );
+        assert_eq!(ed.selected_text(), Some("world"));
+        // Dragging from the word extends by whole words.
+        ed.apply(
+            EditOp::MoveToPoint {
+                x: 1.0,
+                y,
+                select: true,
+            },
+            &mut cx,
+        );
+        assert_eq!(ed.selected_text(), Some("hello world"));
+    }
+
+    #[test]
+    fn the_compose_range_has_geometry_and_bounds_the_ime_area() {
+        let (mut ed, mut cx) = editor();
+        ed.apply(EditOp::Insert("ab".into()), &mut cx);
+        let caret = ed.cursor_rect(1.0).expect("a caret");
+        ed.apply(
+            EditOp::Compose {
+                text: "\u{304b}\u{306a}".into(),
+                cursor: Some((3, 3)),
+            },
+            &mut cx,
+        );
+        let st = ed.editing_state_bytes();
+        assert_eq!(st.composing, Some(2..8));
+        assert_eq!((st.base, st.extent), (5, 5), "the caret within the preedit");
+        let inside = ed.cursor_rect(1.0).expect("the IME placed a caret");
+        assert!(inside.x0 > caret.x0, "after the first preedit character");
+        let area = ed.ime_cursor_area();
+        assert!(
+            area.x0 <= caret.x0 && area.x1 > inside.x0,
+            "the IME area spans the preedit: {area:?} vs {caret:?}..{inside:?}"
+        );
+        assert!(
+            (area.y0, area.y1) == (inside.y0, inside.y1),
+            "the IME area is the line box"
+        );
+
+        // A preedit with no caret hides it; committing shows it again.
+        ed.apply(
+            EditOp::Compose {
+                text: "\u{304b}".into(),
+                cursor: None,
+            },
+            &mut cx,
+        );
+        assert_eq!(ed.editing_state_bytes().composing, Some(2..5));
+        assert!(ed.cursor_rect(1.0).is_none());
+        ed.apply(EditOp::FinishCompose, &mut cx);
+        assert!(ed.cursor_rect(1.0).is_some());
+        assert_eq!(ed.text(), "ab\u{304b}");
+        assert_eq!(ed.editing_state_bytes().composing, None);
+    }
+
+    #[test]
+    fn center_alignment_moves_the_caret() {
+        let centered = TextStyle {
+            align: crate::style::TextAlign::Center,
+            ..style()
+        };
+        let caret_at_start = |style: &TextStyle| {
+            let (mut ed, mut cx) = (TextEditor::new(style), TextContext::new());
+            ed.set_wrap_width(Some(300.0), &mut cx);
+            ed.apply(EditOp::Insert("Hi".into()), &mut cx);
+            ed.apply(EditOp::Home { select: false }, &mut cx);
+            ed.cursor_rect(2.0).expect("a caret")
+        };
+        let start = caret_at_start(&style());
+        let center = caret_at_start(&centered);
+        assert!(
+            start.x0.abs() < 1e-6,
+            "start-aligned text hugs the left edge"
+        );
+        assert!(
+            center.x0 > 100.0 && center.x0 < 150.0,
+            "centered text starts near the middle of the 300px line: {center:?}"
+        );
+        assert_eq!((start.y0, start.y1), (center.y0, center.y1));
+    }
+
+    #[test]
+    fn the_editor_draws_what_text_layout_draws() {
+        let (mut ed, mut cx) = editor();
+        let text = "Hello from Frust";
+        ed.apply(EditOp::Insert(text.into()), &mut cx);
+        // (font size, [(glyph id, x, y)]) per run.
+        type Glyphs = Vec<(f32, Vec<(u32, f32, f32)>)>;
+        let glyphs = |runs: Vec<GlyphRun>| -> Glyphs {
+            runs.into_iter()
+                .map(|r| {
+                    let glyphs = r.glyphs.iter().map(|g| (g.id, g.x, g.y)).collect();
+                    (r.font_size, glyphs)
+                })
+                .collect()
+        };
+        let ours = glyphs(ed.to_scene_runs(Point::ORIGIN));
+        let reference = glyphs(cx.layout(text, &style(), None).to_scene_runs(Point::ORIGIN));
+        assert!(!ours.is_empty());
+        assert_eq!(ours, reference);
+        assert_eq!(ed.layout_size(), cx.layout(text, &style(), None).size());
+    }
+
+    #[test]
+    fn the_editor_resolves_han_under_the_app_default_like_text_layout() {
+        use crate::locale::test_support::DefaultLocale;
+        let _guard = DefaultLocale::set(Some("ja"));
+        let (mut ed, mut cx) = editor();
+        let text = "\u{65e5}\u{672c}\u{8a9e}\u{306e}\u{30c6}\u{30ad}\u{30b9}\u{30c8}";
+        ed.apply(EditOp::Insert(text.into()), &mut cx);
+        let glyphs = |runs: Vec<GlyphRun>| -> Vec<Vec<u32>> {
+            runs.into_iter()
+                .map(|r| r.glyphs.iter().map(|g| g.id).collect())
+                .collect()
+        };
+        let ours = glyphs(ed.to_scene_runs(Point::ORIGIN));
+        let reference = glyphs(cx.layout(text, &style(), None).to_scene_runs(Point::ORIGIN));
+        assert!(!ours.is_empty());
+        assert_eq!(ours, reference);
+    }
+
+    #[test]
+    fn an_empty_editor_has_a_caret_one_line_high() {
+        let (mut ed, mut cx) = editor();
+        ed.apply(EditOp::SelectAll, &mut cx);
+        let caret = ed.cursor_rect(2.0).expect("a caret");
+        assert_eq!(caret.x0, 0.0);
+        assert!(caret.height() > 0.0);
+        assert_eq!(ed.line_count(), 1);
+        assert_eq!(ed.layout_size().width, 0.0);
+        // The caret is the quantized line box (ascent, descent and each leading
+        // half rounded), the layout height the unrounded line height: up to
+        // 1.5 px apart depending on the font's metrics (DejaVu, not SF).
+        assert!((ed.layout_size().height - caret.height()).abs() < 2.0);
+        assert!(ed.selection_rects().is_empty());
+    }
+
+    #[test]
+    fn move_up_and_down_keep_the_horizontal_position() {
+        let (mut ed, mut cx) = editor();
+        ed.set_wrap_width(Some(400.0), &mut cx);
+        ed.apply(EditOp::Insert("abcdef\nab\nabcdef".into()), &mut cx);
+        // Caret after "abcd" on the first line.
+        ed.apply(EditOp::MoveUp { select: false }, &mut cx);
+        ed.apply(EditOp::MoveUp { select: false }, &mut cx);
+        ed.apply(EditOp::Home { select: false }, &mut cx);
+        for _ in 0..4 {
+            ed.apply(EditOp::MoveRight { select: false }, &mut cx);
+        }
+        assert_eq!(ed.editing_state_bytes().extent, 4);
+        ed.apply(EditOp::MoveDown { select: false }, &mut cx);
+        assert_eq!(ed.editing_state_bytes().extent, 9, "the short line's end");
+        ed.apply(EditOp::MoveDown { select: false }, &mut cx);
+        assert_eq!(
+            ed.editing_state_bytes().extent,
+            14,
+            "back at the remembered column"
+        );
+        ed.apply(EditOp::MoveDown { select: true }, &mut cx);
+        let st = ed.editing_state_bytes();
+        assert_eq!(
+            (st.base, st.extent),
+            (14, 16),
+            "past the last line: its end"
+        );
+    }
+}

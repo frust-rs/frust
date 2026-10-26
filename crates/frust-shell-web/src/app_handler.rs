@@ -1284,8 +1284,8 @@ mod browser_loop {
     use frust_scene::{Scene, SceneBuilder};
     use frust_shell_common::font_registry::FontRegistryWatcher;
     use frust_shell_common::{
-        ThemeOverrideWatcher, WindowMetricsPublisher, anim_pacing_kill_switch_engaged,
-        default_theme,
+        LocaleDefaultWatcher, ThemeOverrideWatcher, WindowMetricsPublisher,
+        anim_pacing_kill_switch_engaged, default_theme,
     };
     use frust_text::TextContext;
     use frust_theme::Theme;
@@ -1601,6 +1601,7 @@ mod browser_loop {
         /// Polls the process-wide app-facing theme override slot once per
         /// frame, before rebuild.
         theme_override: ThemeOverrideWatcher,
+        locale_default: LocaleDefaultWatcher,
         /// Whether an app-forced theme override is active. While `true`, a
         /// `prefers-color-scheme` flip must not move `theme.brightness`.
         theme_override_active: bool,
@@ -1888,6 +1889,11 @@ mod browser_loop {
             // relayout `register_fonts` documents by re-pushing the active
             // theme (the same LAYOUT|PAINT contract a theme swap uses).
             if self.font_registry.drain_into(&mut self.text_ctx) {
+                self.root.set_theme(Box::new(self.theme.clone()));
+            }
+
+            // A default-locale change re-faces untagged text; the same re-push forces the pass.
+            if self.locale_default.changed() {
                 self.root.set_theme(Box::new(self.theme.clone()));
             }
 
@@ -2359,6 +2365,7 @@ mod browser_loop {
             theme: super::base_theme(default_theme()),
             theme_seeded: false,
             theme_override: ThemeOverrideWatcher::new(),
+            locale_default: LocaleDefaultWatcher::new(),
             theme_override_active: false,
             font_registry: FontRegistryWatcher::new(),
             window_metrics: WindowMetricsPublisher::new(),

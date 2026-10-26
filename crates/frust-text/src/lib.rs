@@ -1,24 +1,25 @@
-//! Parley 0.11 text pipeline for Frust.
+//! The Frust text pipeline.
 //!
-//! Wraps parley's font matching and layout into a small, renderer-agnostic
-//! surface: [`TextContext`] owns the heavyweight font/layout state,
-//! [`TextStyle`] carries the styling knobs (family/weight/style/size/color/
-//! letter-spacing/line-height — the M3 type-scale surface), and [`TextLayout`]
-//! is a finished, measurable block of text that converts into
-//! [`frust_scene::GlyphRun`]s. Only `kurbo`/`peniko`/`frust-scene` types
-//! appear in the public API — no vello, wgpu, or parley types leak through.
-//! The parley -> vello glyph coordinate contract lives in
-//! [`convert`].
+//! A small, renderer-agnostic surface over frust's own font matching,
+//! shaping and line layout: [`TextContext`] owns the heavyweight font and
+//! shaping state, [`TextStyle`] carries the styling knobs (family/weight/
+//! style/size/color/letter-spacing/line-height — the M3 type-scale surface),
+//! [`TextLayout`] is a finished, measurable block of text that converts into
+//! [`frust_scene::GlyphRun`]s, and [`TextEditor`] is the editing engine over
+//! the same layout. Only `kurbo`/`peniko`/`frust-scene` types appear in the
+//! public API — no vello, wgpu, or text-engine types leak through. The glyph
+//! coordinate contract lives in [`convert`].
 //!
 //! The font oracle (`oracle`, crate-internal) is frust's own font matching
 //! and fallback — app fonts, a platform backend per OS, a persistent fallback
-//! cache and a renderability filter — built beside parley's font context
-//! until it feeds the shaper. [`RenderCapabilities`] is its one public type.
+//! cache and a renderability filter — and feeds the shaper.
+//! [`RenderCapabilities`] is its one public type.
 
 mod context;
 mod convert;
 mod editor;
 mod layout;
+mod locale;
 mod oracle;
 mod shape_cache;
 mod style;
@@ -30,6 +31,7 @@ pub use editor::{
     utf16_to_byte,
 };
 pub use layout::TextLayout;
+pub use locale::{default_locale, default_locale_generation, set_default_locale};
 pub use oracle::RenderCapabilities;
 pub use shape_cache::ShapeCacheStats;
 pub use style::{
@@ -70,7 +72,7 @@ mod tests {
         assert!(
             size.width > 0.0 && size.height > 0.0,
             "expected non-zero size, got {size:?} — is a system font available? \
-             (parley GenericFamily::SystemUi failed to resolve)"
+             (the SystemUi family failed to resolve)"
         );
 
         let runs = layout.to_scene_runs(Point::ORIGIN);

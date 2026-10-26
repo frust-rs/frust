@@ -365,6 +365,7 @@ impl<State: 'static> View<State> for TextView {
             layout: None,
             laid_out_max_width: None,
             laid_out_style: None,
+            laid_out_locale_generation: 0,
         }
     }
 
@@ -448,6 +449,10 @@ pub struct TextWidget {
     /// change — still forces a re-shape (the layout-time-baked contract, see
     /// `docs/CODE_STANDARDS.md` Theming).
     laid_out_style: Option<TextStyle>,
+    /// [`frust_text::default_locale_generation`] when `layout` was shaped: the
+    /// app's default locale picks the face for untagged text, so a change
+    /// re-shapes without a view change.
+    laid_out_locale_generation: u64,
 }
 
 impl TextWidget {
@@ -506,9 +511,11 @@ impl Widget for TextWidget {
         // changes `style.color` (and a type-scale family swap changes an
         // opted-in `style.family`), which mismatches `laid_out_style` and
         // forces a re-shape even without a view change.
+        let locale_generation = frust_text::default_locale_generation();
         if let Some(cached) = &self.layout
             && self.laid_out_max_width == max_width
             && self.laid_out_style.as_ref() == Some(&style)
+            && self.laid_out_locale_generation == locale_generation
         {
             return bc.constrain(cached.size());
         }
@@ -525,6 +532,7 @@ impl Widget for TextWidget {
         self.layout = Some(layout);
         self.laid_out_max_width = max_width;
         self.laid_out_style = Some(style);
+        self.laid_out_locale_generation = locale_generation;
         size
     }
 
@@ -543,6 +551,38 @@ impl Widget for TextWidget {
         ctx.push_node(Role::Label, |node| {
             node.set_value(self.content.as_str());
         });
+    }
+}
+
+/// Serialises the tests that read the shape counters or write the process-global default-locale
+/// slot: every layout reads the slot, so a writer would otherwise skew a sibling's counts.
+///
+/// The rule: any test that asserts shape counts, generations or rebuild counts, or that registers
+/// fonts (every registration lands in the process-global app-font record and makes every
+/// `TextInput`'s `sync_app_fonts` report a change), takes [`reader`]; a test that writes the
+/// default-locale slot takes [`writer`].
+#[cfg(test)]
+pub(crate) mod locale_slot_test {
+    use std::sync::{Mutex, MutexGuard};
+
+    static LOCK: Mutex<()> = Mutex::new(());
+
+    /// Holds the lock for a test that asserts shape counts and never writes the slot.
+    pub(crate) fn reader() -> MutexGuard<'static, ()> {
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Holds the lock for a test that writes the slot; restores `None` on drop, panic included.
+    pub(crate) struct Writer(#[allow(dead_code)] MutexGuard<'static, ()>);
+
+    pub(crate) fn writer() -> Writer {
+        Writer(reader())
+    }
+
+    impl Drop for Writer {
+        fn drop(&mut self) {
+            frust_text::set_default_locale(None);
+        }
     }
 }
 
@@ -750,6 +790,7 @@ mod tests {
 
     #[test]
     fn unchanged_layout_pass_skips_reshaping_entirely() {
+        let _slot = locale_slot_test::reader();
         // The verified defect: `TextWidget::layout` re-shaped on every pass. Now
         // an unchanged pass reuses the cached `TextLayout` WITHOUT touching the
         // text context at all — observable as the shape cache seeing exactly one
@@ -778,6 +819,7 @@ mod tests {
 
     #[test]
     fn width_change_rebreaks_without_reshaping() {
+        let _slot = locale_slot_test::reader();
         // A width change breaks the widget-level skip (the cached width differs),
         // so it re-lays-out through the context — but the frust-text shape cache
         // reuses the shaping and re-runs line-breaking only.
@@ -951,6 +993,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_default_locale_change_invalidates_the_cached_shape() {
+        // The slot is process-global: the guard serialises this writer against the
+        // shape-count tests and restores `None` even if an assertion panics.
+        let _slot = locale_slot_test::writer();
+        let bc = BoxConstraints::loose(Size::new(200.0, 200.0));
+        let view = text("\u{76f4}");
+        let mut widget = View::<()>::build(&view, &mut frust_core::BuildCtx::new(&mut 0u64));
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), None);
+        widget.layout(&mut lctx, &bc);
+        let before = frust_text::default_locale_generation();
+        frust_text::set_default_locale(Some("ja"));
+        let after = frust_text::default_locale_generation();
+        assert_ne!(before, after);
+        widget.layout(&mut lctx, &bc);
+        let laid_out = widget.laid_out_locale_generation;
+        assert_eq!(laid_out, after, "the layout re-ran under the new default");
+    }
+
     // --- Theme-swap regression ---
     //
     // `effective_style` (above) resolves the themed color at LAYOUT time and
@@ -1037,12 +1099,16 @@ mod tests {
     /// bytes cannot be [`TUFFY`]'s (`textinput`'s unregistered-family control).
     const UNREGISTERED: &str = "Frust No Such Family";
 
-    /// A text context with the Tuffy test face registered.
-    fn tuffy_context() -> TextContext {
+    /// A text context with the Tuffy test face registered, and the slot lock
+    /// held for as long as the caller keeps the guard: the registration lands
+    /// in the process-global app-font record, which every `TextInput`'s
+    /// `sync_app_fonts` reads (see [`locale_slot_test`]).
+    fn tuffy_context() -> (TextContext, std::sync::MutexGuard<'static, ()>) {
+        let slot = locale_slot_test::reader();
         let mut tcx = TextContext::new();
         tcx.register_fonts(TUFFY.to_vec())
             .expect("the Tuffy test face registers");
-        tcx
+        (tcx, slot)
     }
 
     /// A neutral theme whose `body_large`/`label_large` slots name the given
@@ -1083,7 +1149,7 @@ mod tests {
 
     #[test]
     fn a_themed_family_resolves_the_theme_roles_family() {
-        let mut tcx = tuffy_context();
+        let (mut tcx, _slot) = tuffy_context();
         let body = text("Hello").themed_family(ThemeTextType::BodyLarge);
         let label = text("Hello").themed_family(ThemeTextType::LabelLarge);
 
@@ -1138,7 +1204,7 @@ mod tests {
         // The role names a family nothing registers; only the explicit
         // family can make these runs Tuffy.
         let theme = role_theme(UNREGISTERED, UNREGISTERED);
-        let mut tcx = tuffy_context();
+        let (mut tcx, _slot) = tuffy_context();
         let tuffy = FontFamily::named("Tuffy");
         let views = [
             text("Hello")
@@ -1168,7 +1234,7 @@ mod tests {
         // Color and family resolve independently: the explicit color keeps
         // its value AND the family still follows the role.
         let theme = role_theme("Tuffy", UNREGISTERED);
-        let mut tcx = tuffy_context();
+        let (mut tcx, _slot) = tuffy_context();
         let custom = Color::from_rgb8(1, 2, 3);
         let runs = painted_runs_in(
             &text("Hello")
@@ -1209,7 +1275,7 @@ mod tests {
         );
 
         // And what paints matches a text that never opted in at all.
-        let mut tcx = tuffy_context();
+        let (mut tcx, _slot) = tuffy_context();
         let opted_in = painted_runs_in(&view, None, &mut tcx);
         let never = painted_runs_in(&text("Hello"), None, &mut tcx);
         let faces = |runs: &[GlyphRun]| -> Vec<Vec<u8>> {
@@ -1223,7 +1289,7 @@ mod tests {
     #[test]
     fn changing_the_family_role_on_rebuild_invalidates_the_cached_shape() {
         let theme = role_theme(UNREGISTERED, "Tuffy");
-        let mut tcx = tuffy_context();
+        let (mut tcx, _slot) = tuffy_context();
         let bc = BoxConstraints::loose(Size::new(200.0, 100.0));
         let paint = |widget: &mut TextWidget, tcx: &mut TextContext| {
             let mut lctx =
@@ -1284,7 +1350,7 @@ mod tests {
         };
 
         let mut root: RenderRoot<(), TextView> = RenderRoot::new();
-        let mut tcx = tuffy_context();
+        let (mut tcx, _slot) = tuffy_context();
         root.set_theme(Box::new(role_theme(UNREGISTERED, UNREGISTERED)));
         root.rebuild(&mut logic, &mut ());
         let before = paint_faces(&mut root, &mut tcx);
