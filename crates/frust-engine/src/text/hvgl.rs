@@ -21,18 +21,23 @@
 //!
 //! # Opening the face in CoreText
 //!
-//! By PostScript name (name ID 6), read from the face's own `name` table. The
-//! two routes that would open the bytes themselves do not work for the face
-//! this exists for: `CTFontManagerCreateFontDescriptorsFromData` returns no
-//! descriptor at all for `PingFangUI.ttc`, and the file-URL route expands named
-//! instances, so its indices are not the collection's. A name is refused when
-//! it starts with a dot — CoreText resolves `.PingFang…`-style hidden names to
-//! a substitute (Times) rather than the face — and when the face CoreText hands
-//! back carries a different PostScript name from the one asked for. A refused
-//! face draws none of its glyphs, and every one of them is counted in
-//! [`CompiledFrame::skipped_glyphs`](crate::compile::CompiledFrame::skipped_glyphs):
-//! missing, never drawn in a wrong face. A target without CoreText refuses
-//! every face, so there an `hvgl` run is counted as skipped whole.
+//! By the PostScript name the run's handle carries
+//! ([`FontHandle::postscript_name`](frust_scene::FontHandle::postscript_name)):
+//! the text tier's font oracle already resolved which face a run draws with,
+//! so this module does not re-derive the name from the blob, and whether the
+//! face may be drawn at all (including a hidden, dot-prefixed one) was decided
+//! where the face was chosen. The two routes that would open the bytes
+//! themselves do not work for the face this exists for:
+//! `CTFontManagerCreateFontDescriptorsFromData` returns no descriptor at all
+//! for `PingFangUI.ttc`, and the file-URL route expands named instances, so its
+//! indices are not the collection's. A handle with no name cannot be opened: its
+//! glyphs are counted in
+//! [`CompiledFrame::skipped_glyphs`](crate::compile::CompiledFrame::skipped_glyphs),
+//! as are all of them on a target without CoreText.
+//!
+//! The face CoreText hands back is compared with the name asked for as a
+//! diagnostic only: a difference is logged once per face at `debug` level and
+//! counted ([`HvglOutlines::identity_mismatches`]), never a refusal.
 //!
 //! # Variation instances
 //!
@@ -52,15 +57,15 @@
 //! # The cache
 //!
 //! Outlines are retained in a least-recently-used cache bounded by entry count
-//! ([`MAX_CACHED_OUTLINES`]), keyed by the face's blob id and collection index
-//! — the pair `glifo` keys on — plus the glyph id and a [`VariationKey`] built
+//! ([`MAX_CACHED_OUTLINES`]), keyed by the open face (one per PostScript name)
+//! plus the glyph id and a [`VariationKey`] built
 //! from the run's coordinates, so one instance's outline is never served for
 //! another's. A glyph CoreText cannot supply is remembered as missing too, so a
 //! refusal is paid for once.
 
 use std::collections::{BTreeMap, HashMap};
 
-use frust_scene::GlyphRun;
+use frust_scene::{FontHandle, GlyphRun};
 use glifo::DrawSink as _;
 use kurbo::{Affine, BezPath, PathEl};
 use peniko::FontData;
@@ -73,8 +78,6 @@ const HVGL_TAG: [u8; 4] = *b"hvgl";
 /// The outline tables `skrifa` reads: a face carrying any of them is one
 /// `glifo` can draw on its own.
 const OUTLINE_TAGS: [[u8; 4]; 3] = [*b"glyf", *b"CFF ", *b"CFF2"];
-/// `name`, on the same terms.
-const NAME_TAG: [u8; 4] = *b"name";
 /// `fvar`, the face's variation axes.
 const FVAR_TAG: [u8; 4] = *b"fvar";
 /// `avar`, the face's per-axis normalization remapping.
@@ -90,14 +93,6 @@ const AVAR_HEADER_LEN: usize = 8;
 const F2DOT14_ONE: f64 = 16384.0;
 /// One 16.16 `Fixed` unit.
 const FIXED_ONE: f64 = 65536.0;
-/// The `name` table's PostScript-name record.
-const POSTSCRIPT_NAME_ID: u16 = 6;
-/// The longest PostScript name the OpenType `name` table allows.
-const MAX_POSTSCRIPT_NAME_LEN: usize = 63;
-/// A `name` table header's fixed length, ahead of its records.
-const NAME_HEADER_LEN: usize = 6;
-/// One `name` record: platform, encoding, language, name id, length, offset.
-const NAME_RECORD_LEN: usize = 12;
 
 /// How many glyph outlines the cache keeps.
 ///
@@ -165,10 +160,8 @@ impl VariationKey {
 /// One cached outline's identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct OutlineKey {
-    /// The face blob's process-unique id.
-    font_id: u64,
-    /// The face's index inside its collection.
-    face_index: u32,
+    /// The open face's process-unique id.
+    face: u64,
     /// The glyph.
     glyph_id: u32,
     /// The variation instance the outline was fetched at.
@@ -241,11 +234,10 @@ pub(crate) fn draw_run(
     sink: &mut EngineGlyphSink<'_>,
     outlines: &mut HvglOutlines,
 ) -> u32 {
-    let font = run.font.font();
-    let coords = run.font.normalized_coords();
+    let handle = &run.font;
     let mut unavailable = 0_u32;
     for glyph in &run.glyphs {
-        match outlines.outline(font, glyph.id, coords) {
+        match outlines.outline(handle, glyph.id) {
             GlyphOutline::Path { path, units_per_em } => {
                 sink.set_transform(glyph_transform(
                     transform,
@@ -308,20 +300,23 @@ impl HvglOutlines {
         self.outlines.capacity
     }
 
-    /// `glyph_id`'s outline in `font`'s face at the variation instance
-    /// `coords` names (normalized F2Dot14 values in `fvar` axis order; empty
+    /// How many faces CoreText resolved to a different PostScript name than
+    /// the one asked for, since the provider was built. A diagnostic, not a
+    /// refusal: such a face still draws.
+    pub(crate) fn identity_mismatches(&self) -> u32 {
+        self.faces.mismatches
+    }
+
+    /// `glyph_id`'s outline in `handle`'s face at the variation instance its
+    /// coordinates name (normalized F2Dot14 values in `fvar` axis order; empty
     /// for the default instance), fetched from CoreText on a cache miss.
     ///
     /// Coordinates on a face with no `fvar` axes name nothing to vary, and
     /// draw from the face as opened.
-    pub(crate) fn outline(
-        &mut self,
-        font: &FontData,
-        glyph_id: u32,
-        coords: &[i16],
-    ) -> GlyphOutline<'_> {
+    pub(crate) fn outline(&mut self, handle: &FontHandle, glyph_id: u32) -> GlyphOutline<'_> {
         let Self { faces, outlines } = self;
-        let Some(face) = faces.open(font) else {
+        let coords = handle.normalized_coords();
+        let Some(face) = faces.open(handle) else {
             return GlyphOutline::Unavailable;
         };
         let units_per_em = face.units_per_em;
@@ -331,8 +326,7 @@ impl HvglOutlines {
             VariationKey::of(coords)
         };
         let key = OutlineKey {
-            font_id: font.data.id(),
-            face_index: font.index,
+            face: face.id,
             glyph_id,
             variation,
         };
@@ -398,6 +392,9 @@ impl OutlineCache {
 
 /// One face open in CoreText.
 struct Face {
+    /// A process-unique id, which the outline cache keys on. A face evicted
+    /// and opened again is a new id; its old outlines age out of the cache.
+    id: u64,
     /// The CoreText face, opened at `units_per_em` points so its outlines are
     /// in font units — the face's default instance.
     ct: platform::CtFace,
@@ -606,25 +603,36 @@ enum FaceSlot {
     Refused,
 }
 
-/// The faces looked at most recently, keyed like `glifo`'s caches.
+/// The faces looked at most recently, keyed by PostScript name.
 #[derive(Default)]
 struct FaceTable {
-    /// `(blob id, index, slot, last use)` per face.
-    faces: Vec<(u64, u32, FaceSlot, u64)>,
+    /// `(PostScript name, slot, last use)` per face.
+    faces: Vec<(String, FaceSlot, u64)>,
     /// A use counter, for the least-recently-used replacement.
     uses: u64,
+    /// The next face id.
+    next_id: u64,
+    /// Faces whose CoreText PostScript name differed from the one asked for.
+    mismatches: u32,
 }
 
 impl FaceTable {
-    /// `font`'s face open in CoreText, opening it on first sight, or `None`
-    /// when it was refused.
-    fn open(&mut self, font: &FontData) -> Option<&mut Face> {
-        let id = font.data.id();
+    /// `handle`'s face open in CoreText, opening it on first sight, or `None`
+    /// when the handle names no face or it could not be opened.
+    fn open(&mut self, handle: &FontHandle) -> Option<&mut Face> {
+        let Some(name) = handle.postscript_name() else {
+            log::warn!(
+                "frust-engine: hvgl face {} carries no PostScript name; its glyphs are counted \
+                 as skipped",
+                handle.font().index,
+            );
+            return None;
+        };
         self.uses = self.uses.wrapping_add(1);
         let position = match self
             .faces
             .iter()
-            .position(|(face_id, index, ..)| *face_id == id && *index == font.index)
+            .position(|(face_name, ..)| face_name == name)
         {
             Some(position) => position,
             None => {
@@ -638,111 +646,68 @@ impl FaceTable {
                 {
                     self.faces.swap_remove(oldest);
                 }
-                self.faces.push((id, font.index, open_face(font), 0));
+                self.next_id = self.next_id.wrapping_add(1);
+                let slot = self.open_face(handle.font(), name);
+                self.faces.push((name.to_owned(), slot, 0));
                 self.faces.len().checked_sub(1)?
             }
         };
         let entry = self.faces.get_mut(position)?;
-        entry.3 = self.uses;
-        match &mut entry.2 {
+        entry.2 = self.uses;
+        match &mut entry.1 {
             FaceSlot::Open(face) => Some(face),
             FaceSlot::Refused => None,
         }
     }
-}
 
-/// `font`'s face opened in CoreText, or refused with a warning naming why.
-fn open_face(font: &FontData) -> FaceSlot {
-    match try_open_face(font) {
-        Ok(face) => FaceSlot::Open(face),
-        Err(reason) => {
-            log::warn!(
-                "frust-engine: hvgl face {} of font blob {} refused ({reason}); its glyphs are \
-                 counted as skipped",
-                font.index,
-                font.data.id(),
-            );
-            FaceSlot::Refused
+    /// `name`'s face opened in CoreText, or refused with a warning naming why.
+    fn open_face(&mut self, font: &FontData, name: &str) -> FaceSlot {
+        match try_open_face(font, name, self.next_id) {
+            Ok((face, resolved)) => {
+                // Identity is the text tier's call; a different face coming
+                // back is worth a line, never a refusal.
+                if resolved != name {
+                    self.mismatches = self.mismatches.saturating_add(1);
+                    log::debug!(
+                        "frust-engine: hvgl face '{name}' resolved by CoreText to '{resolved}'; \
+                         drawing it as resolved",
+                    );
+                }
+                FaceSlot::Open(face)
+            }
+            Err(reason) => {
+                log::warn!(
+                    "frust-engine: hvgl face '{name}' refused ({reason}); its glyphs are \
+                     counted as skipped",
+                );
+                FaceSlot::Refused
+            }
         }
     }
 }
 
-fn try_open_face(font: &FontData) -> Result<Face, String> {
+/// `name`'s face opened in CoreText over `font`'s metrics and axes, with the
+/// PostScript name CoreText resolved it to.
+fn try_open_face(font: &FontData, name: &str, id: u64) -> Result<(Face, String), String> {
     let data = font.data.data();
     let directory = table_directory(data, font.index).ok_or("no table directory")?;
     let units_per_em = head_units_per_em(data, directory)
         .filter(|units| *units > 0)
         .map(f64::from)
         .ok_or("no usable unitsPerEm")?;
-    let name = postscript_name(data, directory).ok_or("no PostScript name")?;
-    if name.starts_with('.') {
-        return Err(format!(
-            "'{name}' is a hidden system name, which CoreText resolves to a substitute face"
-        ));
-    }
-    if !is_postscript_name(&name) {
-        return Err(format!("'{name}' is not a valid PostScript name"));
-    }
-    let ct = platform::CtFace::open(&name, units_per_em)
+    let (ct, resolved) = platform::CtFace::open(name, units_per_em)
         .ok_or_else(|| format!("'{name}': {}", platform::UNAVAILABLE))?;
-    Ok(Face {
-        ct,
-        units_per_em,
-        axes: variation_axes(data, directory),
-        instances: Vec::new(),
-        uses: 0,
-    })
-}
-
-/// Whether `name` is a PostScript name as the `name` table defines one:
-/// 1-63 printable ASCII characters.
-fn is_postscript_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= MAX_POSTSCRIPT_NAME_LEN
-        && name.bytes().all(|byte| (b'!'..=b'~').contains(&byte))
-}
-
-/// The face's PostScript name (name ID 6), from a Unicode or Windows-Unicode
-/// record (UTF-16BE), else a Macintosh-Roman one.
-fn postscript_name(data: &[u8], directory: usize) -> Option<String> {
-    let record = table_record(data, directory, NAME_TAG)?;
-    let table = usize::try_from(read_u32(data, record.checked_add(8)?)?).ok()?;
-    let count = usize::from(read_u16(data, table.checked_add(2)?)?);
-    let strings = table.checked_add(usize::from(read_u16(data, table.checked_add(4)?)?))?;
-    let mut mac_roman = None;
-    for index in 0..count {
-        let at = table
-            .checked_add(NAME_HEADER_LEN)?
-            .checked_add(index.checked_mul(NAME_RECORD_LEN)?)?;
-        let platform = read_u16(data, at)?;
-        let encoding = read_u16(data, at.checked_add(2)?)?;
-        if read_u16(data, at.checked_add(6)?)? != POSTSCRIPT_NAME_ID {
-            continue;
-        }
-        let length = usize::from(read_u16(data, at.checked_add(8)?)?);
-        let start = strings.checked_add(usize::from(read_u16(data, at.checked_add(10)?)?))?;
-        let bytes = data.get(start..start.checked_add(length)?)?;
-        match (platform, encoding) {
-            (0, _) | (3, 1) => {
-                if bytes.len() % 2 != 0 {
-                    return None;
-                }
-                let units = bytes
-                    .as_chunks::<2>()
-                    .0
-                    .iter()
-                    .map(|pair| u16::from_be_bytes(*pair));
-                return char::decode_utf16(units)
-                    .collect::<Result<String, _>>()
-                    .ok();
-            }
-            // Only ASCII survives `is_postscript_name`, and Mac Roman agrees
-            // with ASCII there.
-            (1, 0) => mac_roman = Some(bytes.iter().copied().map(char::from).collect()),
-            _ => {}
-        }
-    }
-    mac_roman
+    Ok((
+        Face {
+            id,
+            ct,
+            units_per_em,
+            axes: variation_axes(data, directory),
+            instances: Vec::new(),
+            uses: 0,
+        },
+        resolved,
+    ))
 }
 
 /// What CoreText supplies for `glyph_id` of `face`.
@@ -785,8 +750,7 @@ mod platform {
     use objc2_core_text::{CTFont, CTFontDescriptor, CTFontOrientation, kCTFontVariationAttribute};
 
     /// Why [`CtFace::open`] refuses a face here.
-    pub(super) const UNAVAILABLE: &str =
-        "CoreText resolves that name to a different face, or to none";
+    pub(super) const UNAVAILABLE: &str = "CoreText cannot open that name";
 
     /// One face opened in CoreText, read-only.
     pub(super) struct CtFace {
@@ -811,21 +775,18 @@ mod platform {
     unsafe impl Sync for CtFace {}
 
     impl CtFace {
-        /// The installed face whose PostScript name is `name`, at
-        /// `units_per_em` points, or `None` when CoreText hands back any other
-        /// face for it (its substitute for a name it does not know).
-        pub(super) fn open(name: &str, units_per_em: f64) -> Option<Self> {
+        /// The face CoreText resolves `name` to, at `units_per_em` points, with
+        /// the PostScript name it actually carries (which differs from `name`
+        /// when CoreText substituted a face for a name it does not know).
+        pub(super) fn open(name: &str, units_per_em: f64) -> Option<(Self, String)> {
             let requested = CFString::from_str(name);
             // SAFETY: a null matrix is the documented "identity" argument.
             let font = unsafe { CTFont::with_name(&requested, units_per_em, core::ptr::null()) };
             // SAFETY: a getter on a live font.
             let resolved = unsafe { font.post_script_name() }.to_string();
-            if resolved != name {
-                return None;
-            }
             // SAFETY: a getter on a live font.
             let glyph_count = usize::try_from(unsafe { font.glyph_count() }).unwrap_or(0);
-            Some(Self { font, glyph_count })
+            Some((Self { font, glyph_count }, resolved))
         }
 
         /// A copy of this face at the variation instance `axes` names — each
@@ -954,7 +915,7 @@ mod platform {
 
     impl CtFace {
         /// Always `None`: there is no CoreText here.
-        pub(super) fn open(_name: &str, _units_per_em: f64) -> Option<Self> {
+        pub(super) fn open(_name: &str, _units_per_em: f64) -> Option<(Self, String)> {
             None
         }
 
@@ -1016,33 +977,13 @@ mod tests {
         head
     }
 
-    /// A `name` table with one PostScript-name record on `platform`/`encoding`.
-    fn name(platform: u16, encoding: u16, bytes: &[u8]) -> Vec<u8> {
-        let mut out = Vec::new();
-        out.extend(0_u16.to_be_bytes());
-        out.extend(1_u16.to_be_bytes());
-        out.extend(18_u16.to_be_bytes());
-        for field in [platform, encoding, 0, POSTSCRIPT_NAME_ID] {
-            out.extend(field.to_be_bytes());
-        }
-        out.extend(u16::try_from(bytes.len()).unwrap().to_be_bytes());
-        out.extend(0_u16.to_be_bytes());
-        out.extend(bytes);
-        out
-    }
-
-    fn utf16(text: &str) -> Vec<u8> {
-        text.encode_utf16().flat_map(u16::to_be_bytes).collect()
-    }
-
     fn font(bytes: Vec<u8>) -> FontData {
         FontData::new(Blob::new(Arc::new(bytes)), 0)
     }
 
     fn key(glyph_id: u32) -> OutlineKey {
         OutlineKey {
-            font_id: 1,
-            face_index: 0,
+            face: 1,
             glyph_id,
             variation: VariationKey::DEFAULT,
         }
@@ -1065,71 +1006,37 @@ mod tests {
         assert!(!font_needs_hvgl_provider(&font(b"not a font".to_vec())));
     }
 
-    #[test]
-    fn the_postscript_name_is_read_from_a_unicode_or_mac_roman_record() {
-        for (platform, encoding, bytes) in [
-            (3, 1, utf16("PingFangSC-Medium")),
-            (0, 3, utf16("PingFangSC-Medium")),
-            (1, 0, b"PingFangSC-Medium".to_vec()),
-        ] {
-            let data = sfnt(&[
-                (*b"head", head(1000)),
-                (NAME_TAG, name(platform, encoding, &bytes)),
-            ]);
-            let directory = table_directory(&data, 0).unwrap();
-            assert_eq!(
-                postscript_name(&data, directory).as_deref(),
-                Some("PingFangSC-Medium"),
-                "platform {platform} encoding {encoding}",
-            );
-        }
-        let odd = sfnt(&[
-            (*b"head", head(1000)),
-            (NAME_TAG, name(3, 1, &[0, b'A', 0])),
-        ]);
-        assert_eq!(
-            postscript_name(&odd, table_directory(&odd, 0).unwrap()),
-            None
-        );
-        // A record pointing past the blob reads as no name, not as a panic.
-        let mut truncated = name(3, 1, &utf16("Name"));
-        truncated.truncate(20);
-        let short = sfnt(&[(*b"head", head(1000)), (NAME_TAG, truncated)]);
-        assert_eq!(
-            postscript_name(&short, table_directory(&short, 0).unwrap()),
-            None
-        );
+    fn handle(bytes: Vec<u8>, name: Option<&str>) -> FontHandle {
+        FontHandle::new(font(bytes)).with_identity(name.map(Arc::from), false)
     }
 
     #[test]
-    fn only_printable_ascii_up_to_63_bytes_is_a_postscript_name() {
-        assert!(is_postscript_name("PingFangSC-Medium"));
-        assert!(!is_postscript_name(""));
-        assert!(!is_postscript_name("Ping Fang"));
-        assert!(!is_postscript_name("平方"));
-        assert!(!is_postscript_name(&"A".repeat(64)));
-    }
-
-    #[test]
-    fn hidden_and_nameless_faces_are_refused() {
-        let hidden = font(sfnt(&[
-            (*b"head", head(1000)),
-            (HVGL_TAG, vec![0; 8]),
-            (NAME_TAG, name(3, 1, &utf16(".PingFangUITextSC-Default"))),
-        ]));
-        let error = try_open_face(&hidden).err().unwrap();
-        assert!(error.contains("hidden"), "{error}");
-        let nameless = font(sfnt(&[(*b"head", head(1000)), (HVGL_TAG, vec![0; 8])]));
-        assert_eq!(
-            try_open_face(&nameless).err().as_deref(),
-            Some("no PostScript name")
+    fn a_handle_with_no_name_is_not_opened_and_a_name_is_not_derived_from_the_blob() {
+        // The blob carries no `name` table, and none is looked for.
+        let nameless = handle(
+            sfnt(&[(*b"head", head(1000)), (HVGL_TAG, vec![0; 8])]),
+            None,
         );
         let mut outlines = HvglOutlines::default();
         assert!(matches!(
-            outlines.outline(&hidden, 1, &[]),
+            outlines.outline(&nameless, 1),
             GlyphOutline::Unavailable
         ));
         assert_eq!(outlines.cached_outlines(), 0);
+        assert_eq!(outlines.identity_mismatches(), 0);
+    }
+
+    #[test]
+    fn a_blob_without_a_head_table_is_refused_once_per_name() {
+        let broken = handle(sfnt(&[(HVGL_TAG, vec![0; 8])]), Some("PingFangSC-Medium"));
+        let mut outlines = HvglOutlines::default();
+        for _ in 0..2 {
+            assert!(matches!(
+                outlines.outline(&broken, 1),
+                GlyphOutline::Unavailable
+            ));
+        }
+        assert_eq!(outlines.faces.faces.len(), 1);
     }
 
     #[test]
@@ -1339,8 +1246,9 @@ mod tests {
         assert!(variation_axes(&broken, table_directory(&broken, 0).unwrap()).is_empty());
     }
 
-    /// The face the macOS cases read: `PingFangSC-Medium` from the system
-    /// collection, or `None` when it is not installed.
+    /// The blob the macOS cases read: a variable `hvgl` face of the system
+    /// PingFang collection (the face's identity is the handle's name, not the
+    /// blob's), or `None` when it is not installed.
     #[cfg(target_os = "macos")]
     fn system_pingfang_sc() -> Option<FontData> {
         let data = [
@@ -1355,7 +1263,7 @@ mod tests {
             let font = FontData::new(blob.clone(), index);
             let data = font.data.data();
             let directory = table_directory(data, index)?;
-            (postscript_name(data, directory).as_deref() == Some("PingFangSC-Medium"))
+            (font_needs_hvgl_provider(&font) && !variation_axes(data, directory).is_empty())
                 .then_some(font)
         })
     }
@@ -1366,7 +1274,7 @@ mod tests {
     #[test]
     fn pingfang_outlines_follow_the_requested_weight() {
         let Some(font) = system_pingfang_sc() else {
-            println!("skipped: PingFangUI.ttc's PingFangSC-Medium is not installed");
+            println!("skipped: PingFangUI.ttc is not installed");
             return;
         };
         let data = font.data.data();
@@ -1382,7 +1290,10 @@ mod tests {
         let mut bounds_at = |normalized: i16| {
             let mut coords = vec![0_i16; axes.len()];
             coords[wght] = normalized;
-            match outlines.outline(&font, glyph, &coords) {
+            let handle = FontHandle::new(font.clone())
+                .with_normalized_coords(&coords)
+                .with_identity(Some(Arc::from("PingFangSC-Medium")), false);
+            match outlines.outline(&handle, glyph) {
                 GlyphOutline::Path { path, .. } => kurbo::Shape::bounding_box(path),
                 other => panic!("no outline at {normalized}: {other:?}"),
             }
@@ -1394,6 +1305,33 @@ mod tests {
         assert_ne!(light, default);
         assert!(heavy.width() > light.width(), "{light:?} vs {heavy:?}");
         assert_eq!(outlines.cached_outlines(), 3, "one entry per instance");
+        assert_eq!(
+            outlines.identity_mismatches(),
+            0,
+            "the name resolved as asked"
+        );
+    }
+
+    /// A name CoreText substitutes another face for is logged and counted, once
+    /// per face, and the face still draws: the text tier's word is final.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_face_coretext_resolves_differently_is_counted_once_and_still_draws() {
+        let Some(font) = system_pingfang_sc() else {
+            println!("skipped: PingFangUI.ttc is not installed");
+            return;
+        };
+        let handle = FontHandle::new(font)
+            .with_identity(Some(Arc::from(".FrustNoSuchHiddenFace-Regular")), true);
+        let mut outlines = HvglOutlines::default();
+        for _ in 0..3 {
+            // Whatever face CoreText substituted, glyph 1 is inside it.
+            assert!(
+                !matches!(outlines.outline(&handle, 1), GlyphOutline::Unavailable),
+                "the oracle's face is drawn, not refused"
+            );
+        }
+        assert_eq!(outlines.identity_mismatches(), 1);
     }
 
     #[test]

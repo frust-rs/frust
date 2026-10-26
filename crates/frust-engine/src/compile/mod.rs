@@ -802,6 +802,17 @@ impl SceneCompiler {
         self.hvgl_outlines.capacity()
     }
 
+    /// How many `hvgl` faces CoreText resolved to a different PostScript name
+    /// than the run's handle carried, since the compiler was built.
+    ///
+    /// A diagnostic only: the identity is the text tier's call, so such a face
+    /// is still drawn as CoreText resolved it. Each is also logged once at
+    /// `debug` level.
+    #[must_use]
+    pub fn hvgl_identity_mismatches(&self) -> u32 {
+        self.hvgl_outlines.identity_mismatches()
+    }
+
     /// Set how many threads generate a frame's strips, the calling thread
     /// included (see the `parallel` module). One — or zero, read as one — is the
     /// sequential walk: no planning pass, no helper thread.

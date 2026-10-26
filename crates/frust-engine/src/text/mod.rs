@@ -122,8 +122,9 @@
 //! the iOS Han fallback — gives `skrifa` nothing to read, and `glifo` would
 //! skip every one of its glyphs without counting them. Such a run is routed to
 //! outlines like a colour face and drawn by [`hvgl`] instead, from CoreText's
-//! own outlines on Apple targets; a glyph it cannot supply is counted as
-//! skipped.
+//! own outlines on Apple targets, opening the face by the PostScript name the
+//! run's handle carries (the text tier's oracle decided the face; this module
+//! only draws it); a glyph it cannot supply is counted as skipped.
 //!
 //! # The font gate
 //!
