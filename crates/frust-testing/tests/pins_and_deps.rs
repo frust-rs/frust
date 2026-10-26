@@ -385,6 +385,22 @@ fn all_lockfiles() -> Vec<PathBuf> {
     out
 }
 
+/// The fewest lockfiles the walk may find: the root plus 13 standalone
+/// workspaces today (14 in all). A walk that finds fewer has stopped reading
+/// the tree, and the lock-level guards below would pass vacuously.
+const MIN_LOCKFILES: usize = 10;
+
+/// [`all_lockfiles`], asserted to reach [`MIN_LOCKFILES`].
+fn walked_lockfiles() -> Vec<PathBuf> {
+    let locks = all_lockfiles();
+    assert!(
+        locks.len() >= MIN_LOCKFILES,
+        "lockfile walk found {} Cargo.lock file(s), fewer than {MIN_LOCKFILES}: {locks:?}",
+        locks.len()
+    );
+    locks
+}
+
 fn display_relative(path: &Path) -> String {
     path.strip_prefix(repo_root())
         .unwrap_or(path)
@@ -452,12 +468,7 @@ fn lock_packages_with_deps(path: &Path) -> Vec<(String, String, Vec<String>)> {
 
 #[test]
 fn g7_no_lockfile_resolves_parley() {
-    let locks = all_lockfiles();
-    assert!(
-        locks.len() > 1,
-        "lockfile walk found too few Cargo.lock files: {locks:?}"
-    );
-    for lock in &locks {
+    for lock in &walked_lockfiles() {
         let packages = lock_packages_with_deps(lock);
         assert!(
             packages.iter().all(|(name, _, _)| name != "parley"),
@@ -470,7 +481,7 @@ fn g7_no_lockfile_resolves_parley() {
 #[test]
 fn g7_parley_is_absent_and_the_font_stack_resolves_one_identity() {
     let root_lock = repo_root().join("Cargo.lock");
-    for lock in &all_lockfiles() {
+    for lock in &walked_lockfiles() {
         let packages = lock_packages_with_deps(lock);
         let relative = display_relative(lock);
         for name in ["parley_engine", "fontique", "parlance"] {
@@ -522,16 +533,16 @@ fn g7_fontique_row_has_default_features_off() {
 
 #[test]
 fn g7_every_manifest_naming_fontique_inherits_the_workspace_row() {
+    let root = repo_root().join("Cargo.toml");
     let manifests = all_manifests();
     let mut named = 0usize;
     let mut offenders = Vec::new();
     for manifest in &manifests {
         let table = parse_manifest(manifest);
-        // Skip the root `[workspace.dependencies]` table: that is the canonical
-        // row itself, asserted above, and it is the only one written without
-        // `workspace = true`.
+        let is_root = *manifest == root;
+        // Member dependency tables. `[workspace]` is skipped here and read below.
         visit_dependency_rows(
-            &toml::Value::Table(table),
+            &toml::Value::Table(table.clone()),
             ALL_DEP_TABLE_NAMES,
             true,
             &mut |alias: &str, row: &toml::Value| {
@@ -552,6 +563,34 @@ fn g7_every_manifest_naming_fontique_inherits_the_workspace_row() {
                 }
             },
         );
+        // `[workspace.dependencies]`. The root's own fontique row is the canonical
+        // one, asserted by g7_fontique_row_has_default_features_off; any other
+        // such row (a standalone workspace's) must match it, default-features off.
+        if let Some(workspace) = table.get("workspace") {
+            visit_dependency_rows(
+                workspace,
+                &["dependencies"],
+                false,
+                &mut |alias: &str, row: &toml::Value| {
+                    if effective_package(alias, row) != "fontique" || is_root {
+                        return;
+                    }
+                    named += 1;
+                    let default_off = row
+                        .as_table()
+                        .and_then(|table| table.get("default-features"))
+                        .and_then(toml::Value::as_bool)
+                        == Some(false);
+                    if !default_off {
+                        offenders.push(format!(
+                            "{}: `{alias}` is a second [workspace.dependencies] fontique row \
+                             without `default-features = false`",
+                            display_relative(manifest)
+                        ));
+                    }
+                },
+            );
+        }
     }
     assert!(
         named > 0,

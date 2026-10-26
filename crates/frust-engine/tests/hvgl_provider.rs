@@ -135,6 +135,25 @@ fn compile(compiler: &mut SceneCompiler, runs: Vec<GlyphRun>) -> CompiledFrame {
         .expect("an in-range scene compiles")
 }
 
+/// Asserts `runs` draw from their faces with no identity refusal: every face
+/// resolved to the name asked for, and none was nameless. Checked on a fresh
+/// compiler, since the counters live there.
+#[cfg(target_os = "macos")]
+fn assert_identity_clean(runs: &[GlyphRun]) {
+    let mut compiler = compiler();
+    compile(&mut compiler, runs.to_vec());
+    assert_eq!(
+        compiler.hvgl_identity_mismatches(),
+        0,
+        "a face resolved to another PostScript name, so its glyphs were refused"
+    );
+    assert_eq!(
+        compiler.hvgl_nameless_faces(),
+        0,
+        "a run's face carried no PostScript name"
+    );
+}
+
 /// `text` laid out through a fresh `TextContext` in `family` at `weight`, as
 /// scene runs inside the viewport.
 fn laid_out(ctx: &mut TextContext, family: &str, weight: FontWeight, text: &str) -> Vec<GlyphRun> {
@@ -305,7 +324,7 @@ mod macos {
     use objc2_core_text::CTFont;
     use peniko::{Blob, Color, FontData};
 
-    use super::{VIEWPORT, compile, compiler, laid_out, run, scene_of};
+    use super::{VIEWPORT, assert_identity_clean, compile, compiler, laid_out, run, scene_of};
 
     /// Where macOS keeps the PingFang collection. It moved into a private
     /// framework's reserved fonts; older releases kept it in `Fonts`.
@@ -483,7 +502,9 @@ mod macos {
         let Some(mut ctx) = text_context_resolves_pingfang() else {
             return;
         };
-        for run in laid_out(&mut ctx, "PingFang SC", FontWeight::SEMI_BOLD, "中") {
+        let runs = laid_out(&mut ctx, "PingFang SC", FontWeight::SEMI_BOLD, "中");
+        assert_identity_clean(&runs);
+        for run in runs {
             let name = run.font.postscript_name().expect("identified");
             assert!(name.starts_with("PingFang"), "{name}");
             assert!(!run.font.is_hidden());
@@ -717,7 +738,9 @@ mod macos {
     fn pingfang_han_glyphs_render_ink_through_the_gpu() {
         let Some(data) = pingfang() else { return };
         let glyphs = coretext_glyphs(FACE, TEXT);
-        let inked = inked_pixels(vec![run(face(&data, FACE), &glyphs)]);
+        let runs = vec![run(face(&data, FACE), &glyphs)];
+        assert_identity_clean(&runs);
+        let inked = inked_pixels(runs);
         // Three 24 px Han glyphs cover well over a hundred pixels between them.
         assert!(inked > 100, "only {inked} pixels carry ink");
     }
@@ -728,18 +751,12 @@ mod macos {
     fn pingfang_semibold_inks_more_than_light_through_the_gpu() {
         let Some(data) = pingfang() else { return };
         let mut ctx = text_context_resolves_pingfang();
-        let light = inked_pixels(pingfang_runs_at(
-            &data,
-            ctx.as_mut(),
-            FontWeight::LIGHT,
-            300.0,
-        ));
-        let semibold = inked_pixels(pingfang_runs_at(
-            &data,
-            ctx.as_mut(),
-            FontWeight::SEMI_BOLD,
-            600.0,
-        ));
+        let light_runs = pingfang_runs_at(&data, ctx.as_mut(), FontWeight::LIGHT, 300.0);
+        assert_identity_clean(&light_runs);
+        let light = inked_pixels(light_runs);
+        let semibold_runs = pingfang_runs_at(&data, ctx.as_mut(), FontWeight::SEMI_BOLD, 600.0);
+        assert_identity_clean(&semibold_runs);
+        let semibold = inked_pixels(semibold_runs);
         assert!(
             semibold > light,
             "weight 600 inks {semibold} pixels, weight 300 {light}"
