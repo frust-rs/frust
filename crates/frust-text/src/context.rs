@@ -545,10 +545,12 @@ impl TextContext {
     /// On overflow, [`TextOverflow::Clip`] only ever drops whole trailing
     /// lines; an overrun-only case (no extra lines to drop) is left
     /// untouched, since Clip never character-trims. [`TextOverflow::Ellipsis`]
-    /// does the same line drop, then cuts the last visible line's trailing
-    /// whitespace and whole atoms from its end until the line plus [`ELLIPSIS`]
-    /// fits `max_width` (see `crate::layout`'s truncation), never splitting a
-    /// grapheme; with no `max_width` the whole line is kept and marked.
+    /// does the same line drop, then refills the last visible line from the
+    /// text after it (past its soft-wrap point, up to the next mandatory
+    /// break) and keeps the longest grapheme-boundary prefix, whitespace at
+    /// the cut dropped, that fits `max_width` with [`ELLIPSIS`] (see
+    /// `crate::layout`'s truncation); with no `max_width` the whole line is
+    /// kept and marked.
     pub fn layout_bounded(
         &mut self,
         text: &str,
@@ -1993,6 +1995,70 @@ mod tests {
         );
     }
 
+    /// Asserts `line` capped to one line at `max_width` with an ellipsis keeps
+    /// the longest fitting prefix: the kept graphemes plus the ellipsis fit,
+    /// and one more grapheme would not. Returns the kept byte range.
+    fn assert_longest_fitting_prefix(
+        cx: &mut TextContext,
+        line: &str,
+        s: &TextStyle,
+        max_width: f32,
+    ) -> std::ops::Range<usize> {
+        let natural = cx.layout(line, s, None).size().width as f32;
+        let bounded = cx.layout_bounded(line, s, Some(max_width), Some(1), TextOverflow::Ellipsis);
+        let info = bounded.line_info(0).expect("one line");
+        let what = format!("{max_width}px of {line:?}");
+        if natural <= max_width {
+            assert_eq!(info.range, 0..line.len(), "{what}: fits untouched");
+            return info.range;
+        }
+        let ellipsis = cx.layout(&ELLIPSIS.to_string(), s, None).size().width as f32;
+        let kept = &line[info.range.clone()];
+        assert!(
+            info.width <= max_width || kept.is_empty(),
+            "{what}: {} > {max_width}",
+            info.width
+        );
+        // Measure from the full layout's own shaping (the cut uses its
+        // advances, kerning against the dropped neighbour included), so the
+        // check holds for any font and wherever the line first wrapped.
+        let full = cx.layout(line, s, None);
+        let shaped = full.shaped();
+        let byte_of = |char_index: u32| {
+            shaped
+                .chars
+                .get(char_index as usize)
+                .map_or(line.len(), |c| c.byte_start as usize)
+        };
+        // The next cut is one more grapheme plus any whitespace before it (a
+        // cut never ends on whitespace); none when only whitespace follows.
+        let mut kept_advance = 0.0f32;
+        let mut next_advance = None;
+        let mut gap = 0.0f32;
+        for g in &shaped.graphemes {
+            if byte_of(g.chars.end) <= info.range.end {
+                kept_advance += g.advance;
+                continue;
+            }
+            gap += g.advance;
+            if g.whitespace == shape::Whitespace::None {
+                next_advance = Some(gap);
+                break;
+            }
+        }
+        assert!(
+            (info.width - (kept_advance + ellipsis)).abs() < 0.01,
+            "{what}: the width is the kept prefix plus the ellipsis"
+        );
+        if let Some(next) = next_advance {
+            assert!(
+                kept_advance + next + ellipsis > max_width - 0.01,
+                "{what}: one more character would still fit"
+            );
+        }
+        info.range
+    }
+
     #[test]
     fn the_cut_keeps_the_longest_fitting_prefix() {
         // The cut is maximal: the kept atoms plus the ellipsis fit, and one
@@ -2009,55 +2075,59 @@ mod tests {
         for line in lines {
             for max_width in [12.0_f32, 40.0, 160.0, 400.0] {
                 let mut cx = test_cx();
-                let natural = cx.layout(line, &s, None).size().width as f32;
-                let bounded =
-                    cx.layout_bounded(line, &s, Some(max_width), Some(1), TextOverflow::Ellipsis);
-                let info = bounded.line_info(0).expect("one line");
-                let what = format!("{max_width}px of {line:?}");
-                if natural <= max_width {
-                    assert_eq!(info.range, 0..line.len(), "{what}: fits untouched");
-                    continue;
-                }
-                let ellipsis = cx.layout(&ELLIPSIS.to_string(), &s, None).size().width as f32;
-                let kept = &line[info.range.clone()];
-                assert!(
-                    info.width <= max_width || kept.is_empty(),
-                    "{what}: {} > {max_width}",
-                    info.width
-                );
-                // Measure from the full layout's own shaping (the cut uses its
-                // advances, kerning against the dropped neighbour included),
-                // so the check holds for any font.
-                let full = cx.layout(line, &s, None);
-                let shaped = full.shaped();
-                let byte_of = |char_index: u32| {
-                    shaped
-                        .chars
-                        .get(char_index as usize)
-                        .map_or(line.len(), |c| c.byte_start as usize)
-                };
-                let mut kept_advance = 0.0f32;
-                let mut next_advance = None;
-                for g in &shaped.graphemes {
-                    if byte_of(g.chars.end) <= info.range.end {
-                        kept_advance += g.advance;
-                    } else {
-                        next_advance = Some(g.advance);
-                        break;
-                    }
-                }
-                assert!(
-                    (info.width - (kept_advance + ellipsis)).abs() < 0.01,
-                    "{what}: the width is the kept prefix plus the ellipsis"
-                );
-                if let Some(next) = next_advance {
-                    assert!(
-                        kept_advance + next + ellipsis > max_width - 0.01,
-                        "{what}: one more character would still fit"
-                    );
-                }
+                assert_longest_fitting_prefix(&mut cx, line, &s, max_width);
             }
         }
+    }
+
+    #[test]
+    fn a_line_that_wraps_early_is_refilled_before_the_cut() {
+        // With the bundled subset (host-independent widths) the line's only
+        // wrap opportunity is after `He `: the long word overflows. The cut
+        // refills the line from that word rather than ending at `He…`.
+        let (mut cx, s) = noto_cx();
+        let line = "He Helloooooooooooooooooooooooooooooo";
+        let max_width = 150.0;
+        let wrapped = cx.layout(line, &s, Some(max_width));
+        let first = wrapped.line_info(0).expect("a first line").range;
+        assert_eq!(
+            first,
+            0..3,
+            "fixture sanity: the line wraps after `He ` at {max_width}px"
+        );
+        let kept = assert_longest_fitting_prefix(&mut cx, line, &s, max_width);
+        assert!(
+            kept.end > first.end,
+            "the cut reaches past the wrap point: kept {:?}",
+            &line[kept]
+        );
+        for width in [40.0_f32, 80.0, 220.0] {
+            assert_longest_fitting_prefix(&mut cx, line, &s, width);
+        }
+    }
+
+    #[test]
+    fn a_mandatory_break_stops_the_refill() {
+        let (mut cx, s) = noto_cx();
+        let text = "He Hello\nHelloooooooooooooooooooooooooooo";
+        let newline = text.find('\n').expect("a newline");
+        let bounded = cx.layout_bounded(text, &s, Some(400.0), Some(1), TextOverflow::Ellipsis);
+        assert_eq!(bounded.line_count(), 1);
+        assert_eq!(
+            bounded.line_info(0).expect("one line").range,
+            0..newline,
+            "the line ends at its own newline; nothing after it refills it"
+        );
+
+        // A wrapped first paragraph refills up to its newline at most.
+        let text = "He Helloooooooooooooooooooooooooooooooo\nHello";
+        let newline = text.find('\n').expect("a newline");
+        let bounded = cx.layout_bounded(text, &s, Some(150.0), Some(1), TextOverflow::Ellipsis);
+        let kept = bounded.line_info(0).expect("one line").range;
+        assert!(
+            kept.end > 3 && kept.end <= newline,
+            "the cut stays inside the first paragraph: {kept:?}"
+        );
     }
 
     #[test]
@@ -2077,10 +2147,28 @@ mod tests {
         let cut = glyphs_of(&bounded.to_scene_runs(kurbo::Point::ORIGIN));
         let ellipsis_glyphs = 1;
         assert!(cut.len() > ellipsis_glyphs);
+        let kept = &cut[..cut.len() - ellipsis_glyphs];
+        let ids = |glyphs: &[(u32, f32, f32)]| glyphs.iter().map(|g| g.0).collect::<Vec<_>>();
         assert_eq!(
-            &cut[..cut.len() - ellipsis_glyphs],
-            &full_glyphs[..cut.len() - ellipsis_glyphs],
-            "every kept glyph is the full layout's own"
+            ids(kept),
+            ids(&full_glyphs[..kept.len()]),
+            "every kept glyph is the full layout's own, in logical order"
+        );
+        // Up to the end of the full layout's own last visible line the glyphs
+        // sit where it put them; a refilled tail continues that line's pen.
+        let last_y = kept.last().map_or(0.0, |g| g.2);
+        let in_place = full_glyphs
+            .iter()
+            .take(kept.len())
+            .take_while(|g| g.2 <= last_y + 0.01)
+            .count();
+        assert_eq!(&kept[..in_place], &full_glyphs[..in_place]);
+        assert!(
+            kept[in_place.saturating_sub(1)..]
+                .windows(2)
+                .all(|w| w[0].1 < w[1].1 && (w[0].2 - w[1].2).abs() < 0.01),
+            "the refilled glyphs continue the last line: {:?}",
+            &kept[in_place.saturating_sub(1)..]
         );
     }
 

@@ -6,7 +6,8 @@
 //!
 //! 1. [`break`](self::r#break): greedy breaking into lines of atoms, optionally
 //!    capped at a line count;
-//! 2. [`truncate`]: the capped last line's native ellipsis cut;
+//! 2. [`truncate`]: the capped last line's native ellipsis cut, refilled
+//!    from the rest of its paragraph past its soft-wrap point;
 //! 3. per line, its items (maximal same-run atom spans) in logical order, and
 //!    [`reorder`] into visual order (UAX #9 L2);
 //! 4. [`metrics`]: line height, ascent/descent, hanging whitespace and the
@@ -237,6 +238,8 @@ pub(crate) fn lay_out(
         paragraph.overflow_wrap,
     );
     // The ellipsized line's index and its kept text's exclusive end cluster.
+    // The cut may extend the last line's atoms past its break (the refill);
+    // the cap already dropped every line after it, so none overlap.
     let mut ellipsized: Option<(usize, u32)> = None;
     if let (Some(cap), Some(last)) = (cap, broken.last_mut()) {
         last.reason = BreakReason::None;
@@ -428,9 +431,10 @@ impl TextLayout {
     }
 
     /// This layout capped at `max_lines` lines, the last one ending the
-    /// paragraph and, given an `ellipsis`, natively truncated to fit with it.
-    /// Re-breaks the same [`Shaped`]; earlier lines come out identical
-    /// (breaking is greedy).
+    /// paragraph and, given an `ellipsis`, natively truncated to fit with it
+    /// (refilled from the text after it up to the next mandatory break, so it
+    /// may end past where the uncapped layout wrapped it). Re-breaks the same
+    /// [`Shaped`]; earlier lines come out identical (breaking is greedy).
     pub(crate) fn truncated(&self, max_lines: usize, ellipsis: Option<Ellipsis>) -> Self {
         let cap = Cap {
             max_lines,

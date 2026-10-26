@@ -1,8 +1,12 @@
 //! Native ellipsis truncation of a capped paragraph's last visible line.
 //!
-//! The line's trailing whitespace (a hanging space, a newline) is dropped
-//! first, then graphemes from its logical end until the kept text plus the
-//! ellipsis fit the layout width. A cut sits on a grapheme boundary that is a
+//! The line is first refilled from the rest of its paragraph: the cut may
+//! reach past the line's own soft-wrap point over the atoms that follow it,
+//! up to (not including) the next mandatory break or the end of the text, as
+//! Skia and Flutter refill an ellipsized last line. The cut is then the
+//! longest prefix of that extent whose advance plus the ellipsis fits the
+//! layout width, with no whitespace at the cut (a hanging space, a newline,
+//! a space the refill crossed). A cut sits on a grapheme boundary that is a
 //! cluster boundary too, so it never splits a grapheme or a ligature, but it
 //! may fall inside an atom (a long URL is cut character by character, not
 //! word by word). Nothing is reshaped: the kept clusters keep the glyphs the
@@ -26,8 +30,12 @@ pub(crate) const ELLIPSIS: char = '\u{2026}';
 /// of the kept text (the line's atoms then end at the atom holding it, which
 /// may be only partly kept).
 ///
-/// The cut is the longest prefix of whole graphemes that fits, at a cluster
-/// boundary too: a word wider than the line is cut inside the word.
+/// The kept text is refilled from the atoms after the line up to the next
+/// mandatory break (see [`refill_end`]), so `line.atoms` may come out longer
+/// than the breaker cut it; every atom after it is dropped by the caller. The
+/// cut is the longest prefix of whole graphemes that fits and does not end in
+/// whitespace, at a cluster boundary too: a word wider than the line is cut
+/// inside the word.
 pub(crate) fn ellipsize(
     shaped: &Shaped,
     line: &mut BrokenLine,
@@ -35,10 +43,7 @@ pub(crate) fn ellipsize(
     ellipsis_advance: f32,
 ) -> u32 {
     let start = line.atoms.start;
-    let mut end = line.atoms.end;
-    while end > start && shaped.atoms[end - 1].whitespace != Whitespace::None {
-        end -= 1;
-    }
+    let end = refill_end(shaped, start, line.atoms.end);
     let first_cluster = shaped.atoms.get(start).map_or(0, |a| a.clusters.start);
     // Every position the cut may take, in logical order: (end cluster, kept
     // advance, end atom). Whole atoms sum exactly as the breaker sums them;
@@ -48,18 +53,24 @@ pub(crate) fn ellipsize(
     for (i, atom) in shaped.atoms[start..end].iter().enumerate() {
         let mut partial = atom_advance;
         for c in atom.clusters.clone() {
-            partial += shaped.clusters[c as usize].advance;
-            let char_end = shaped.clusters[c as usize].chars.end as usize;
+            let cluster = &shaped.clusters[c as usize];
+            partial += cluster.advance;
+            if cluster.whitespace != Whitespace::None {
+                continue;
+            }
+            if c + 1 == atom.clusters.end {
+                cuts.push((c + 1, atom_advance + atom.advance, start + i + 1));
+                continue;
+            }
             let on_grapheme = shaped
                 .chars
-                .get(char_end)
+                .get(cluster.chars.end as usize)
                 .is_none_or(|ch| ch.grapheme_start);
-            if on_grapheme && c + 1 < atom.clusters.end {
+            if on_grapheme {
                 cuts.push((c + 1, partial, start + i + 1));
             }
         }
         atom_advance += atom.advance;
-        cuts.push((atom.clusters.end, atom_advance, start + i + 1));
     }
     let fits = |advance: f32| max_width.is_none_or(|width| advance + ellipsis_advance <= width);
     let (end_cluster, advance, atoms_end) = match max_width {
@@ -74,13 +85,38 @@ pub(crate) fn ellipsize(
     end_cluster
 }
 
+/// The exclusive end atom the cut of a last visible line `start..end` may
+/// reach: the line's own end when it ends in a mandatory break, else the rest
+/// of its paragraph up to (not including) the next atom ending in one, or the
+/// end of the text.
+fn refill_end(shaped: &Shaped, start: usize, end: usize) -> usize {
+    let atoms = &shaped.atoms;
+    let ends_paragraph = end
+        .checked_sub(1)
+        .filter(|&last| last >= start)
+        .and_then(|last| atoms.get(last))
+        .is_some_and(|a| a.flags.mandatory_break_after);
+    if ends_paragraph {
+        return end;
+    }
+    let mut refill = end.min(atoms.len());
+    while atoms
+        .get(refill)
+        .is_some_and(|a| !a.flags.mandatory_break_after)
+    {
+        refill += 1;
+    }
+    refill
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::context::shape::{AtomFlags, ShapedAtom, ShapedChar, ShapedCluster};
 
     /// One char, cluster and grapheme per letter (`W` is 20 wide, the rest
-    /// 10); `|` ends an atom, otherwise every letter is its own atom.
+    /// 10); `|` ends an atom, otherwise every letter is its own atom. An atom
+    /// ending in `\n` has a mandatory break after it.
     fn build(spec: &str, grouped: bool) -> Shaped {
         let mut shaped = Shaped::default();
         let push_atom = |shaped: &mut Shaped, from: u32, to: u32| {
@@ -89,11 +125,16 @@ mod tests {
                 .map(|c| c.advance)
                 .sum();
             let whitespace = shaped.clusters[from as usize].whitespace;
+            let ends_in_newline =
+                shaped.clusters[to as usize - 1].whitespace == Whitespace::Newline;
             shaped.atoms.push(ShapedAtom {
                 chars: from..to,
                 clusters: from..to,
                 advance,
-                flags: AtomFlags::default(),
+                flags: AtomFlags {
+                    mandatory_break_after: ends_in_newline,
+                    ..AtomFlags::default()
+                },
                 whitespace,
             });
         };
@@ -210,5 +251,47 @@ mod tests {
             "`xa` (20) + 8 fits, but `a` and `b` share a grapheme"
         );
         assert_eq!(l.advance, 10.0);
+    }
+
+    #[test]
+    fn a_line_that_broke_early_is_refilled_from_the_next_atoms() {
+        // The breaker ended the line after `ab ` (the next word overflowed),
+        // but the cut reaches into `cdefg`: `ab cde` (60) + 8 fits 70.
+        let s = build("ab |cdefg", true);
+        let mut l = line(0..1);
+        let end = ellipsize(&s, &mut l, Some(70.0), 8.0);
+        assert_eq!(l.atoms, 0..2, "the line now ends inside the next atom");
+        assert_eq!(end, 6, "`ab cde` is six clusters");
+        assert_eq!(l.advance, 60.0);
+        assert_eq!(l.reason, BreakReason::None);
+    }
+
+    #[test]
+    fn the_refill_never_ends_the_cut_on_a_space_it_crossed() {
+        // `ab ` (30) + 8 fits 38 but ends in the space; `ab c` (40) does not.
+        let s = build("ab |cd", true);
+        let mut l = line(0..1);
+        let end = ellipsize(&s, &mut l, Some(38.0), 8.0);
+        assert_eq!(l.atoms, 0..1);
+        assert_eq!(end, 2, "the cut keeps `ab`, its space dropped");
+        assert_eq!(l.advance, 20.0);
+    }
+
+    #[test]
+    fn a_mandatory_break_stops_the_refill() {
+        let s = build("ab |cd|\n|efgh", true);
+        let mut l = line(0..1);
+        let end = ellipsize(&s, &mut l, Some(200.0), 8.0);
+        assert_eq!(l.atoms, 0..2, "the refill stops before the newline");
+        assert_eq!(end, 5, "`ab cd`, nothing of `efgh`");
+        assert_eq!(l.advance, 50.0);
+
+        let mut l = line(0..3);
+        let end = ellipsize(&s, &mut l, Some(200.0), 8.0);
+        assert_eq!(
+            (l.atoms.clone(), end),
+            (0..2, 5),
+            "a line ending in its own newline is not refilled past it"
+        );
     }
 }
