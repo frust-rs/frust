@@ -19,10 +19,13 @@ use icu_datetime::fieldsets::YMD;
 use icu_datetime::input::Date;
 use icu_datetime::{DateTimeFormatter, DateTimeFormatterPreferences};
 use icu_decimal::input::Decimal;
-use icu_experimental::dimension::units::formatter::{UnitsFormatter, UnitsFormatterPreferences};
+use icu_experimental::dimension::units::categorized_formatter::{
+    CategorizedFormatter, CategorizedUnitsFormatterPreferences,
+};
 use icu_experimental::dimension::units::options::{UnitsFormatterOptions, Width};
 use icu_experimental::displaynames::multi::LanguageDisplayNames;
 use icu_experimental::displaynames::{DisplayNamesOptions, DisplayNamesPreferences};
+use icu_experimental::measure::category::Duration;
 use icu_experimental::relativetime::options::{Numeric, RelativeTimeFormatterOptions};
 use icu_experimental::relativetime::{RelativeTimeFormatter, RelativeTimeFormatterPreferences};
 use icu_list::options::{ListFormatterOptions, ListLength};
@@ -37,7 +40,7 @@ fn id(tag: &str) -> LanguageIdentifier {
 /// `format(0, 1, -1, 2)` days with `Numeric::Auto`.
 fn relative_days(tag: &str, short: bool) -> Vec<String> {
     let mut options = RelativeTimeFormatterOptions::default();
-    options.numeric = Numeric::Auto;
+    options.numeric = Some(Numeric::Auto);
     let prefs = RelativeTimeFormatterPreferences::from(&id(tag));
     let formatter = if short {
         RelativeTimeFormatter::try_new_short_day(prefs, options)
@@ -55,8 +58,8 @@ fn relative_days(tag: &str, short: bool) -> Vec<String> {
 ///
 /// `en`, `ja`, `es` give the same words at short and long. `th` too, and its offset 2 is the
 /// special word "มะรืนนี้" (the day after tomorrow), not a numeric "in 2 days" pattern. `vi`
-/// differs: short is lower case for 0/1/-1 and "Ngày kia" is capitalised in both; long is
-/// capitalised throughout.
+/// was capitalised in places on CLDR 48 (long "Hôm nay", "Ngày kia"); CLDR 49 data is lower case
+/// throughout, short and long.
 #[test]
 fn relativetime_day_auto() {
     let expected: [(&str, [&str; 4], [&str; 4]); 5] = [
@@ -82,8 +85,8 @@ fn relativetime_day_auto() {
         ),
         (
             "vi",
-            ["hôm nay", "ngày mai", "hôm qua", "Ngày kia"],
-            ["Hôm nay", "Ngày mai", "Hôm qua", "Ngày kia"],
+            ["hôm nay", "ngày mai", "hôm qua", "ngày kia"],
+            ["hôm nay", "ngày mai", "hôm qua", "ngày kia"],
         ),
         (
             "ja",
@@ -103,9 +106,14 @@ fn relativetime_day_auto() {
 }
 
 fn unit(tag: &str, unit_id: &str, width: Width, value: &Decimal) -> String {
-    UnitsFormatter::try_new(
-        UnitsFormatterPreferences::from(&id(tag)),
-        unit_id,
+    let measure = match unit_id {
+        "hour" => Duration::hour(),
+        "minute" => Duration::minute(),
+        other => panic!("spike covers hour and minute only, not `{other}`"),
+    };
+    CategorizedFormatter::<Duration>::try_new_core(
+        CategorizedUnitsFormatterPreferences::from(&id(tag)),
+        measure,
         UnitsFormatterOptions::from(width),
     )
     .expect("unit data")
@@ -113,10 +121,8 @@ fn unit(tag: &str, unit_id: &str, width: Width, value: &Decimal) -> String {
     .to_string()
 }
 
-/// `"hour"` and `"minute"` are the accepted ids; the `"duration-"` prefixed forms are not.
-///
-/// The data lookup key is `<width>-<id>`, so `duration-hour` asks for `short-duration-hour`,
-/// which does not exist (`IdentifierNotFound`) in any of the five locales.
+/// `icu_experimental` 0.7 constructs units through typed categories (`Duration::hour()`), so the
+/// string-id rejection this spike once pinned is covered by `units_by_id` in the formatting matrix.
 ///
 /// Per locale, `[short, narrow, long]` for 1.5 then 90. Observed quirks: `vi` has one spelling
 /// for all widths; `ja` long equals short; `th` minute long equals short.
@@ -134,7 +140,7 @@ fn units_hour_minute() {
         ("th", "minute",
             ["1.5 นาท\u{e35}", "1.5นาท\u{e35}", "1.5 นาท\u{e35}"],
             ["90 นาท\u{e35}", "90นาท\u{e35}", "90 นาท\u{e35}"]),
-        ("vi", "hour", ["1,5 giờ", "1,5 giờ", "1,5 giờ"], ["90 giờ", "90 giờ", "90 giờ"]),
+        ("vi", "hour", ["1,5 tiếng", "1,5 tiếng", "1,5 tiếng"], ["90 tiếng", "90 tiếng", "90 tiếng"]),
         ("vi", "minute", ["1,5 phút", "1,5 phút", "1,5 phút"], ["90 phút", "90 phút", "90 phút"]),
         ("ja", "hour", ["1.5 時間", "1.5h", "1.5 時間"], ["90 時間", "90h", "90 時間"]),
         ("ja", "minute", ["1.5 分", "1.5m", "1.5 分"], ["90 分", "90m", "90 分"]),
@@ -154,17 +160,6 @@ fn units_hour_minute() {
                 big[i],
                 "{tag} {unit_id} {i} 90"
             );
-        }
-    }
-
-    for tag in ["en", "th", "vi", "ja", "es"] {
-        for unit_id in ["duration-hour", "duration-minute"] {
-            let result = UnitsFormatter::try_new(
-                UnitsFormatterPreferences::from(&id(tag)),
-                unit_id,
-                UnitsFormatterOptions::from(Width::Short),
-            );
-            assert!(result.is_err(), "{tag} {unit_id} must be rejected");
         }
     }
 }
@@ -230,14 +225,14 @@ fn medium_date(tag: &str, calendar: Option<CalendarAlgorithm>) -> String {
 
 /// 2026-10-13, `YMD::medium()`, calendar preference unset vs `Gregory`.
 ///
-/// Contradicts the plan: bare `th` (no region) is ALREADY Gregorian with no override ("2026"),
-/// because the Buddhist default is keyed on the Thai region. Only a region-bearing tag (`en-TH`,
-/// `th-TH`) formats in the Buddhist calendar by default ("2569 BE" for `en-TH`), and
+/// On the ICU4X 2.2 / CLDR 48 data bare `th` was Gregorian with no override ("2026"); on 2.4 /
+/// CLDR 49 it resolves to Thailand's Buddhist calendar ("2569") like the region-bearing tags
+/// (`en-TH`: "2569 BE"), and
 /// `Some(CalendarAlgorithm::Gregory)` forces 2026 there. `frust-i18n` passes bare language
 /// identifiers, so Thai users with a `th-TH` locale get Buddhist years today.
 #[test]
 fn thai_calendar_override() {
-    assert_eq!(medium_date("th", None), "13 ต.ค. 2026");
+    assert_eq!(medium_date("th", None), "13 ต.ค. 2569");
     assert_eq!(
         medium_date("th", Some(CalendarAlgorithm::Gregory)),
         "13 ต.ค. 2026"

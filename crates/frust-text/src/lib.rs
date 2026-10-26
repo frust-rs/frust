@@ -9,11 +9,17 @@
 //! appear in the public API — no vello, wgpu, or parley types leak through.
 //! The parley -> vello glyph coordinate contract lives in
 //! [`convert`].
+//!
+//! The font oracle (`oracle`, crate-internal) is frust's own font matching
+//! and fallback — app fonts, a platform backend per OS, a persistent fallback
+//! cache and a renderability filter — built beside parley's font context
+//! until it feeds the shaper. [`RenderCapabilities`] is its one public type.
 
 mod context;
 mod convert;
 mod editor;
 mod layout;
+mod oracle;
 mod shape_cache;
 mod style;
 
@@ -24,6 +30,7 @@ pub use editor::{
     utf16_to_byte,
 };
 pub use layout::TextLayout;
+pub use oracle::RenderCapabilities;
 pub use shape_cache::ShapeCacheStats;
 pub use style::{
     FamilyName, FontFamily, FontStyle, FontWeight, GenericSlot, LineHeight, TextAlign,

@@ -57,7 +57,8 @@ only (S1–S8, D1–D2 per `benchmarks/PROTOCOL.md`), not a framework showcase.
   (alongside `frust-scene`, `tree_arena`, `kurbo`, `peniko`, `accesskit`) rather than through the
   `frust-reactive` wrapper; this is the single sanctioned bypass of the reactive seam.
 - **`frust-paths` leaf charter** — depends only on `log`; every shell and plugin that needs a
-  data/cache directory calls into it rather than resolving paths itself.
+  data/cache directory calls into it rather than resolving paths itself (`frust-text`'s oracle
+  cache is a consumer: a leaf-only edge, no cycle).
 - **Tooling isolation** — `frust-cli`, `frust-drive`, `frust-tui`, `frust-mcp`, and `frust-dap`
   depend on NO framework crate EXCEPT the `frust-devtools-protocol` leaf (`serde`/`serde_json`
   only); otherwise they only shell out to `cargo`/platform toolchains. `frust-mcp` is a fourth

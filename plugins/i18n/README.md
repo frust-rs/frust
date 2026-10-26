@@ -290,8 +290,8 @@ app language stays fixed, only the user's region composes onto it):
    start) where CLDR regionalizes them — **and, surprisingly, the calendar system**: ICU4X's
    calendar default is keyed off the region, not the language, so `en-TH` still renders a
    Buddhist-era year (`"Oct 13, 2569 BE"`, not `"Oct 13, 2026"`) even though every month/weekday
-   name is English. A bare `th` tag has no region and is already Gregorian; only region-bearing
-   tags (`th-TH`, `en-TH`) are Buddhist by default. Pin Gregorian with
+   name is English. A bare `th` tag now resolves to Thailand's calendar as well (ICU4X 2.4 /
+   CLDR 49; it was Gregorian on the 2.2 data), so `th`, `th-TH` and `en-TH` are all Buddhist by default. Pin Gregorian with
    `DateTimeOptions { calendar: Some(Calendar::Gregorian), .. }` (§4e). This branch never
    adopts a requested tag's *language* — an app with no Thai `.ftl` catalog must never render UI
    text the user can't read, so only the region crosses the boundary (see `I18n::format_locale`'s
@@ -349,8 +349,8 @@ fmt::currency(&de, 9.99, "EUR")?;               // "9,99\u{a0}€" — U+00A0, C
 fmt::date(&de, CivilDate { year: 2024, month: 1, day: 31 }, DateLength::Medium)?; // "31.01.2024"
 // A Locale carries no -u-ca-/-u-hc- keywords, so the calendar and hour cycle travel in options
 // (`date_with`/`time_with`/`datetime_with`, and `*_in_zone_with`/`datetime_at_offset_with`):
-// th-TH unset -> "13 ต.ค. 2569"; calendar Gregorian -> "13 ต.ค. 2026" (bare `th` is Gregorian
-// either way: the Buddhist default is keyed on the TH region, not the language).
+// th-TH unset -> "13 ต.ค. 2569"; calendar Gregorian -> "13 ต.ค. 2026" (bare `th` is Buddhist
+// by default too since ICU4X 2.4 / CLDR 49).
 let opts = DateTimeOptions { calendar: Some(Calendar::Gregorian), hour_cycle: None };
 fmt::date_with(&"th-TH".parse()?, CivilDate { year: 2026, month: 10, day: 13 }, DateLength::Medium, &opts)?;
 ```
@@ -438,7 +438,7 @@ and `length: "wide"|"short"|"narrow"`.
 
 Money held as integer minor units formats exactly with `fmt::currency_minor(&locale, 12345, "THB")?`
 (`"฿123.45"`; no `f64` on the path, so every `i64` is exact) and `fmt::minor_unit_digits("THB")?`
-(`2`); both share `currency`'s digit tables. In FTL pass the integer as a STRING, since Fluent
+(`2`); both take their digits from the same baked CLDR fraction data the formatter rounds with (so `IQD`/`COP` are 0, `KWD` 3), never a list of the crate's own. In FTL pass the integer as a STRING, since Fluent
 numbers are `f64`: `{ NUMBER($minor, style: "currency", currency: "THB", minorUnits: "true") }`.
 
 Instants render in a venue zone, not the device's, through `jiff`'s bundled tz database (no OS
@@ -463,7 +463,7 @@ renders in UTC. The positional may be epoch seconds or an ISO string with `Z` or
 zone-less civil date cannot be re-zoned. Zone data adds the jiff tzdb to the binary — see
 `docs/LIMITATIONS.md`'s `i18n-tzdb-bundled-size`.
 
-Ranges (slot pills, booking windows) are hand-rolled, because ICU4X 2.2 has no interval
+Ranges (slot pills, booking windows) are hand-rolled, because ICU4X 2.4 exposes no interval
 formatter: `fmt::time_range`, `time_range_in_zone`, `date_range` and `datetime_range_in_zone`
 format both ends and join them with a per-language separator (` – ` for en/es/vi/th, `～` for ja,
 `–` for zh). In a 12-hour locale a shared day period is kept only on the last end:

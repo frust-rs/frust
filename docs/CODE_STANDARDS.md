@@ -12,14 +12,13 @@ off this index — read this plus the one that covers what you are touching:
 ## Language Idioms
 
 - **`unsafe` is confined to a small set of sanctioned platform-FFI boundaries.** Every other
-  crate (`frust-core`, `frust-scene`, `frust-text`, `frust-widgets`, `frust-shell-common`,
+  crate (`frust-core`, `frust-scene`, `frust-widgets`, `frust-shell-common`,
   `frust-shell-linux`, `frust-shell-web`, `frust`) stays `unsafe`-free, bar `frust-shell-desktop`'s
   one macOS-only block (listed below) — where Masonry/xilem-style code would reach for `unsafe`
-  downcasting, bound a trait on `Any` (e.g. `Widget: Any`) and downcast through `&mut dyn Any`;
-  the web shell's frame waker is a
-  capture-nothing closure over a `thread_local` `EventLoopProxy` slot (`WAKE_PROXY`). The
-  sanctioned zones are raw-pointer boundaries a GPU/platform shell or loader cannot avoid, each
-  isolated in one function/module with a `# Safety` doc comment:
+  downcasting, bound a trait on `Any` (e.g. `Widget: Any`) and downcast through `&mut dyn Any`; the
+  web shell's frame waker is a capture-nothing closure over a `thread_local` `EventLoopProxy` slot.
+  The sanctioned zones are boundaries a GPU/platform shell or loader cannot avoid, each isolated in
+  one function/module with a `# Safety` doc comment:
   - `frust-gpu`'s `create_android_surface`/`create_metal_surface` (`lifecycle.rs`) — turn a raw
     `ANativeWindow*`/`CAMetalLayer*` into a `wgpu::Surface`; `frust-render` only forwards it.
   - `frust-shell-android`'s `jni_glue` and `frust-shell-ios`'s `ffi_glue` modules — the FFI boundary
@@ -48,41 +47,36 @@ off this index — read this plus the one that covers what you are touching:
     `NSView` in `window_is_zoomed`; plus its `cfg(macos)` `title_buttons` AppKit section.
   - `frust-shell-windows`'s `win32_glue` module — three `SAFETY`-noted sites: `SetCurrentProcessExplicitAppUserModelID`,
     `TranslateAcceleratorW` in the accelerator hook, and muda's `Menu::init_for_hwnd`.
-  - `frust-plugin`'s `android` module — reconstructs the raw `JavaVM`/`jobject` handles plugins
-    need from `ndk-context`, one module, scoped `AttachGuard` per call.
-  - `frust-shared-preferences`'s `apple` backend — two `# Safety`-noted `setObject:forKey:` calls;
-    `frust-secure-storage`'s — a confined `as_cf` objc→`CFType` Keychain bridge.
-  - `frust-clipboard`'s `apple` backend — `UIPasteboard`'s `string`/`setString:`/`setItems_options:`
-    calls plus one `extern` static read (`UIPasteboardOptionLocalOnly`), each `# Safety`-noted.
-  - `frust-share`'s `apple` backend — three `SAFETY`-noted sites: `MainThreadMarker::new_unchecked()`
-    in the main-queue closure, `UIActivityViewController::initWithActivityItems_applicationActivities`,
-    and the subject `setValue_forKey` guarded by `respondsToSelector(setSubject:)`.
-  - `frust-url-launcher`'s `apple` backend — `MainThreadMarker::new_unchecked()` in the main-queue
-    hop and the one `openURL:options:completionHandler:` call objc2-ui-kit marks unsafe; its
-    `desktop` backend — the Windows `ShellExecuteW` call (`SAFETY`-noted).
+  - `frust-plugin`'s `android` module — rebuilds the raw `JavaVM`/`jobject` handles from
+    `ndk-context`, scoped `AttachGuard` per call.
+  - `frust-shared-preferences`'s `apple` backend — two `setObject:forKey:` calls; `frust-secure-storage`'s
+    — a confined `as_cf` objc→`CFType` Keychain bridge.
+  - `frust-clipboard`'s `apple` backend — `UIPasteboard` calls plus one `extern` static read
+    (`UIPasteboardOptionLocalOnly`), each `# Safety`-noted.
+  - `frust-share`'s `apple` backend — three `SAFETY`-noted sites: `MainThreadMarker::new_unchecked()`,
+    `UIActivityViewController` init, and the subject `setValue_forKey` (`respondsToSelector`-guarded).
+  - `frust-url-launcher`'s `apple` backend — `MainThreadMarker::new_unchecked()` plus the one
+    `openURL:options:completionHandler:` call; its `desktop` backend — Windows `ShellExecuteW`.
   - `frust-haptics`'s `apple` backend — one `MainThreadMarker::new_unchecked()` in a main-queue callback.
   - `frust-gpu`'s Android `import` zone — the hand-opened Vulkan device (`open_with_callback` +
     `create_device_from_hal`, `context.rs`), `import_hardware_buffer` (`create_texture_from_hal`,
     raw `ash`) and the `dlsym`-resolved `AHardwareBuffer_*` entries, each `# Safety`-noted, behind
-    the default-off `FRUST_ANDROID_HWBUFFER_IMPORT` knob, plus a debug thread check.
-    `frust-render`'s `native_import::android` makes the one call into it (`NativeHandle::new` contract).
+    the default-off `FRUST_ANDROID_HWBUFFER_IMPORT` knob, plus a debug thread check. `frust-render`'s
+    `native_import::android` makes the one call into it (`NativeHandle::new` contract).
   - `frust-gpu`'s Apple `import::apple` zone — `Device::as_hal::<Metal>`, the `CVMetalTextureCache`
-    create and `create_texture_from_image`, `CFRetained::from_raw`/`retain`,
-    `wgpu::hal::metal::Device::texture_from_raw` and `Device::create_texture_from_hal`, plus
-    `unsafe impl Send for MetalImporter` and `unsafe impl Send + Sync for HeldFrame`.
+    calls, `CFRetained::from_raw`/`retain`, `texture_from_raw`/`create_texture_from_hal`, plus
+    `unsafe impl Send for MetalImporter` and `Send + Sync for HeldFrame`.
     `frust-render`'s `native_import::apple` makes one forwarding call (`NativeHandle::new` contract).
   - `frust-plugin`'s `NativeHandle::new` and `TextureFrame::into_parts`, `frust-render`'s
     `SourceFrame::into_parts` (`unsafe fn`s; the bus's own call site is the SAFETY-noted block in
     `SourcePass::record`). The camera and video-player bridges each hold two `SAFETY`-noted sites:
-    the split and the renderer-twin `NativeHandle::new`. Their Apple producers build
-    `NativeHandle::new(CvPixelBuffer, ptr)` owning a +1 reference released in a single-call
-    release callback. `frust-video-player`'s Android backend: its constructor call, the
+    the split and the renderer-twin `NativeHandle::new`; Apple producers own a +1 reference
+    released in a single-call callback. `frust-video-player`'s Android backend: its constructor, the
     `AHardwareBuffer_*` NDK calls and a direct-buffer plane read.
-  - `frust-engine`'s Apple-only `text/hvgl.rs` — the CoreText calls (`CTFont::with_name`,
-    `post_script_name`, `glyph_count`, `path_for_glyph`, `bounding_rects_for_glyphs`, and the
-    `CTFontDescriptor::with_attributes`/`copy_with_attributes` variation-instance pair),
-    `CGPath::apply` with the `extern "C-unwind"` `push_element` callback, and `unsafe impl Send +
-    Sync for CtFace` (read-only; its SAFETY note cites Apple's Core Text thread-safety statement).
+  - `frust-engine`'s Apple-only `text/hvgl.rs` — the CoreText calls (font by name, glyph count and
+    paths, bounds, the variation-instance descriptor pair), `CGPath::apply` with the
+    `extern "C-unwind"` `push_element` callback, and `unsafe impl Send + Sync for CtFace`
+    (read-only; its SAFETY note cites Apple's Core Text thread-safety statement).
   - `frust-gpu`'s `RenderContext::create_pipeline_cache` — one call building a `wgpu::PipelineCache`
     from a shell-persisted, fingerprint-validated blob.
   - `frust-reactive`'s private `thread_policy::sys` — `gettid`/`getpriority`/`setpriority` (Linux)
@@ -112,12 +106,18 @@ off this index — read this plus the one that covers what you are touching:
     presentation-anchor class, one `MainThreadMarker::new_unchecked()`; each is `SAFETY`-noted, the
     completion body under `catch_unwind`. Its `android` backend, like `frust-iap`'s, holds only a
     JNI export's `#[unsafe(no_mangle)]`.
-  - `frust-hotpatch` — `patch.rs`: `load_patch_library` (`libloading`; initialisers run, so only a
-    library built for this process), `apply_patch` (a table for this exact executable, anchored on
-    `__frust_hotpatch_anchor`) and `get_jump_table` (the leaked, Release-published table);
-    `hot_fn.rs`: casting a table address to the hot function's signature; `anchor.rs`: image
-    lookup; `android.rs`: memfd + `android_dlopen_ext`. `frust-shell-common` calls the safe
-    `apply_from_devtools`; `frust::app!` emits only the anchor's `#[unsafe(no_mangle)]`.
+  - `frust-hotpatch` — `patch.rs` (`load_patch_library` via `libloading`, so only a library built
+    for this process; `apply_patch`; the leaked, Release-published `get_jump_table`), `hot_fn.rs`
+    (table address to hot-fn signature), `anchor.rs`, `android.rs` (memfd + `android_dlopen_ext`).
+    `frust-shell-common` calls the safe `apply_from_devtools`; `frust::app!` emits only the anchor's
+    `#[unsafe(no_mangle)]`.
+  - `frust-text`'s `src/oracle/{apple,android,fontconfig,dwrite,store}.rs` — OS font-fallback FFI:
+    CoreText CF lifetimes (`CFRetained::cast_unchecked`, a `Send` wrapper for `CTFont`), NDK
+    `__system_property_get` (a `Send` wrapper for the matcher), hand-declared DirectWrite COM vtables
+    (named slot constants, a `ComPtr` guard), `dlopen`ed fontconfig (`FcFontSort` per cluster); the
+    mmap `store.rs` is a reserved zone file not yet written. `#![deny(unsafe_code)]` at
+    `oracle/mod.rs`, per-file `#![allow(unsafe_code)]` + zone header, a `// SAFETY:` note per block,
+    and guard tests in `oracle/mod.rs` failing on any `unsafe` token outside the zone.
 - **No unwind across FFI.** Every platform export routes through `frust-shell-common`'s `guard`
   helper (`catch_unwind` + log, returning a benign default) rather than unwinding into
   JVM-/Swift-owned stack frames — a panic crossing the FFI boundary is undefined behavior, not a

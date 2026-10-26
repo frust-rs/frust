@@ -42,6 +42,21 @@ web-time = "1.1.0"
 console_log = "1.0.0"
 console_error_panic_hook = "0.1.7"
 parley = "0.11.1"
+# Exact pins (pre-1.0): frust-text's font-oracle shaping engine. fontique/parley_data 0.12.0 sit beside
+# parley 0.11.1's 0.11.1 copies until parley retires (expected duplicates).
+parley_engine = "=0.12.0"
+# No `system` feature: the oracle owns the OS backends, so fontique 0.12 never scans system fonts.
+fontique = { version = "=0.12.0", default-features = false }
+# Linux/BSD: parley 0.11.1's fontique copy must `dlopen` too — Cargo unifies the oracle's
+# yeslogic-fontconfig-sys/dlopen onto it and fontique 0.11 needs its own flag for that. Retires with parley.
+fontique011 = { package = "fontique", version = "=0.11.1", default-features = false, features = ["fontconfig-dlopen"] }
+# cmap/name/OS2 parsing for the app-font registry and coverage checks; must unify with the 0.41.0
+# skrifa 0.44 / glifo already lock (one read-fonts on every graph).
+read-fonts = { version = "0.41", default-features = false, features = ["std"] }
+# The Linux/BSD oracle backend's fontconfig binding; fontique 0.11.1's locked version, used `dlopen`.
+yeslogic-fontconfig-sys = "=6.0.1"
+# The DirectWrite oracle backend's raw-dylib linkage; the 0.2 line is already locked.
+windows-link = "0.2"
 peniko = "0.6.1"
 kurbo = "0.13.1"
 tree_arena = "0.2.0"
@@ -165,24 +180,23 @@ proc-macro2 = "1"
 quote = "1"
 syn = "2"
 trybuild = "1"
-# ICU4X formatting (frust-i18n `formatting`): held on the 2.2.x line frust-text's shaping stack already
-# resolves, so no duplicate ICU4X major enters (tripwire: `cargo tree -p frust-i18n --features formatting -d`).
-icu_decimal = "2.2"
-icu_datetime = "2.2"
-icu_plurals = "2.2"
-icu_list = "2.2"
-# Exact pin: an explicitly unstable pre-1.0 crate; 0.5.0 still resolves to the 2.2.x components
-# above (0.6.0 would pull 2.3.x).
-icu_experimental = "=0.5.0"
-# Named directly (no component above re-exports it); 2.3 is the line already locked via icu_provider,
-# so a 2.2 pin here would fork the graph.
-icu_locale_core = "2.3"
+# ICU4X formatting (frust-i18n `formatting`): held on the 2.4.x line, which parley_engine 0.12
+# (frust-text's shaping engine) requires at >=2.3; no duplicate ICU4X major may enter
+# (tripwire: `cargo tree -p frust-i18n --features formatting -d`).
+icu_decimal = "2.4"
+icu_datetime = "2.4"
+icu_plurals = "2.4"
+icu_list = "2.4"
+# Exact pin: an explicitly unstable pre-1.0 crate; 0.7.0 resolves to the 2.4.x components above.
+icu_experimental = "=0.7.0"
+# Named directly (no component above re-exports it); must sit on the same 2.4 line.
+icu_locale_core = "2.4"
 # Needed to construct icu_experimental's `CurrencyCode`; already locked, adds no crate. Retires with
 # icu_experimental.
 tinystr = "0.8"
 # Declared for its `sync` feature alone: `Arc` payloads make built formatters `Send + Sync` for
 # frust-i18n's process-wide cache (unification reaches frust-text's ICU4X crates too).
-icu_provider = { version = "2.3", default-features = false, features = ["sync"] }
+icu_provider = { version = "2.4", default-features = false, features = ["sync"] }
 # Exact pin: a small, young surface with no minor-version stability record.
 sys-locale = "=0.3.2"
 # frust-i18n zoned formatting only. Bundled tzdb: mobile targets have no reliable system zoneinfo.
