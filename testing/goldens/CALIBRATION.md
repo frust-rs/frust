@@ -226,3 +226,15 @@ holds the engine-vs-classic divergence to this file's Derived P2 budget as a
 hard per-case assertion, with per-case widenings recorded as reviewed
 `BAND_ESCALATIONS` rows citing this file's Legitimate Disagreements.
 `docs/TESTING.md`'s Comparison section references both.
+
+## Text stack move (2026-10-26)
+
+Branch `feature/text-own-stack-p5` at 21791f70. The text stack moved from
+parley to parley_engine plus the frust oracle, line layout and editor. The CPU
+text goldens are byte-identical across the move. The Metal
+`page-material-home` golden was re-baselined: about 1129 px (0.077%) differed
+before, confined to edge pixels of the four "Hello" chip labels with no
+reflow. The engine's glyph atlas keys on the font blob identity, and the
+oracle hands the engine a different blob of the same Roboto Flex bytes, so
+slot placement shifts. Only that case was regenerated; see the l-03 parity
+report.
