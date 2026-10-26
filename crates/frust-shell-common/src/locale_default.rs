@@ -45,8 +45,18 @@ impl Default for LocaleDefaultWatcher {
 mod tests {
     use super::*;
 
+    /// Restores the process-global slot to unset, panic included.
+    struct Restore;
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            frust_text::set_default_locale(None);
+        }
+    }
+
     #[test]
     fn reports_a_change_once() {
+        let _restore = Restore;
         // The slot is process-global; compare generations relative to this watcher only.
         let mut watcher = LocaleDefaultWatcher::new();
         assert!(!watcher.changed());

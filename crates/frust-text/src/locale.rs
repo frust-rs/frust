@@ -20,7 +20,9 @@ static SLOT: RwLock<Slot> = RwLock::new(Slot {
 
 /// Sets the app's default locale (a BCP 47 tag such as `ja` or `zh-Hant-TW`); `None`, or a tag
 /// that is empty once trimmed, clears it. The generation advances only when the value changes.
-/// Callable from any thread.
+/// The slot is read on the thread that shapes, so writers (the i18n plugin, the app) call this on
+/// that same thread (the UI thread). A write from another thread may pair one shaped paragraph or
+/// persisted answer with the previous locale's key.
 pub fn set_default_locale(locale: Option<&str>) {
     let tag = locale.map(str::trim).filter(|t| !t.is_empty());
     let mut slot = SLOT.write().unwrap_or_else(|e| e.into_inner());

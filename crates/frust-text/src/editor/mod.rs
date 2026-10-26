@@ -499,6 +499,22 @@ impl TextEditor {
         );
         let layout = EditLayout::new(self.text.len(), &shaped, &lines);
         self.selection = self.selection.refresh(&layout);
+        // The old offsets were valid in the previous text only: floor any that
+        // fall inside a char of this one, so a later slice or splice never panics.
+        let floor = |mut i: usize| {
+            i = i.min(self.text.len());
+            while !self.text.is_char_boundary(i) {
+                i -= 1;
+            }
+            i
+        };
+        let (a, f) = (self.selection.anchor(), self.selection.focus());
+        if floor(a.index) != a.index || floor(f.index) != f.index {
+            self.selection = Selection::new(
+                Cursor::from_byte_index(&layout, floor(a.index), a.affinity),
+                Cursor::from_byte_index(&layout, floor(f.index), f.affinity),
+            );
+        }
         self.view = Some(View {
             shaped,
             lines,
@@ -736,6 +752,56 @@ mod tests {
         let st = ed.editing_state_bytes();
         assert_eq!(st.base, 2);
         assert_eq!(st.extent, 2);
+    }
+
+    #[test]
+    fn a_replaced_text_never_leaves_the_caret_inside_a_char() {
+        for op in [
+            EditOp::Backdelete,
+            EditOp::Delete,
+            EditOp::Insert("x".into()),
+        ] {
+            let (mut ed, mut cx) = editor();
+            ed.apply(EditOp::Insert("abc".into()), &mut cx);
+            ed.apply(
+                EditOp::ApplyEditingState(EditingStateBytes {
+                    text: "abc".into(),
+                    base: 1,
+                    extent: 1,
+                    composing: None,
+                }),
+                &mut cx,
+            );
+            // 5 is off a boundary of "\u{e9}a" (and past its end): rejected.
+            ed.apply(
+                EditOp::ApplyEditingState(EditingStateBytes {
+                    text: "\u{e9}a".into(),
+                    base: 5,
+                    extent: 5,
+                    composing: None,
+                }),
+                &mut cx,
+            );
+            let st = ed.editing_state_bytes();
+            assert!(ed.text().is_char_boundary(st.base) && ed.text().is_char_boundary(st.extent));
+            ed.apply(op, &mut cx);
+        }
+        // Shrunk text with a rejected (mid-char) offset: the old caret is floored.
+        let (mut ed, mut cx) = editor();
+        ed.apply(EditOp::Insert("abcd".into()), &mut cx);
+        ed.apply(
+            EditOp::ApplyEditingState(EditingStateBytes {
+                text: "\u{e9}".into(),
+                base: 1,
+                extent: 1,
+                composing: None,
+            }),
+            &mut cx,
+        );
+        let st = ed.editing_state_bytes();
+        assert!(ed.text().is_char_boundary(st.base));
+        ed.apply(EditOp::Backdelete, &mut cx);
+        ed.apply(EditOp::Delete, &mut cx);
     }
 
     #[test]
