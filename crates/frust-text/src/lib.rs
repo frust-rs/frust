@@ -19,6 +19,7 @@ mod context;
 mod convert;
 mod editor;
 mod layout;
+mod locale;
 mod oracle;
 mod shape_cache;
 mod style;
@@ -30,6 +31,7 @@ pub use editor::{
     utf16_to_byte,
 };
 pub use layout::TextLayout;
+pub use locale::{default_locale, default_locale_generation, set_default_locale};
 pub use oracle::RenderCapabilities;
 pub use shape_cache::ShapeCacheStats;
 pub use style::{

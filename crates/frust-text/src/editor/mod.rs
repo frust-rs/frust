@@ -1584,6 +1584,24 @@ mod tests {
     }
 
     #[test]
+    fn the_editor_resolves_han_under_the_app_default_like_text_layout() {
+        use crate::locale::test_support::DefaultLocale;
+        let _guard = DefaultLocale::set(Some("ja"));
+        let (mut ed, mut cx) = editor();
+        let text = "\u{65e5}\u{672c}\u{8a9e}\u{306e}\u{30c6}\u{30ad}\u{30b9}\u{30c8}";
+        ed.apply(EditOp::Insert(text.into()), &mut cx);
+        let glyphs = |runs: Vec<GlyphRun>| -> Vec<Vec<u32>> {
+            runs.into_iter()
+                .map(|r| r.glyphs.iter().map(|g| g.id).collect())
+                .collect()
+        };
+        let ours = glyphs(ed.to_scene_runs(Point::ORIGIN));
+        let reference = glyphs(cx.layout(text, &style(), None).to_scene_runs(Point::ORIGIN));
+        assert!(!ours.is_empty());
+        assert_eq!(ours, reference);
+    }
+
+    #[test]
     fn an_empty_editor_has_a_caret_one_line_high() {
         let (mut ed, mut cx) = editor();
         ed.apply(EditOp::SelectAll, &mut cx);
