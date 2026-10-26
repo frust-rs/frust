@@ -122,11 +122,25 @@ pub(crate) struct Paragraph<'a> {
 }
 
 impl<'a> Paragraph<'a> {
+    /// # Panics
+    ///
+    /// When `styles` is empty: every character's style index (and the
+    /// ellipsis's) indexes it, so [`Self::style`] indexes directly and an
+    /// out-of-range index is a bug that panics rather than a silent remap.
     pub(crate) fn new(
         shaped: &'a Shaped,
         styles: &'a [TextStyle],
         ellipsis: Option<&'a Ellipsis>,
     ) -> Self {
+        assert!(!styles.is_empty(), "a paragraph has at least one style");
+        debug_assert!(
+            shaped
+                .runs
+                .iter()
+                .all(|r| usize::from(r.style_index) < styles.len())
+                && ellipsis.is_none_or(|e| usize::from(e.style_index) < styles.len()),
+            "a style index is out of range of the paragraph's styles"
+        );
         Self {
             shaped,
             styles,
@@ -162,10 +176,7 @@ impl<'a> Paragraph<'a> {
             (Source::Ellipsis, Some(e)) => e.style_index,
             _ => style_index,
         };
-        self.styles
-            .get(usize::from(index))
-            .or(self.styles.first())
-            .expect("a paragraph has at least one style")
+        &self.styles[usize::from(index)]
     }
 
     /// The run whose font metrics size `item`: its own, except that a run of
@@ -526,36 +537,6 @@ impl TextLayout {
             width: line.metrics.width(),
         })
     }
-
-    /// The paragraph's min-content width: its widest unbreakable run of
-    /// atoms, trailing whitespace excluded — the narrowest width it lays out
-    /// at with no line overflowing.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "the intrinsic-size measurement path is its caller"
-        )
-    )]
-    pub(crate) fn min_content_width(&self) -> f32 {
-        metrics::min_content_width(&self.shaped)
-    }
-
-    /// The paragraph's max-content width: its width laid out unbounded.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "the intrinsic-size measurement path is its caller"
-        )
-    )]
-    pub(crate) fn max_content_width(&self) -> f32 {
-        if self.max_width.is_none() && self.ellipsis.is_none() {
-            return self.lines.width;
-        }
-        let paragraph = Paragraph::new(&self.shaped, &self.styles, None);
-        lay_out(&paragraph, None, None).width
-    }
 }
 
 #[cfg(test)]
@@ -708,6 +689,27 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "a paragraph has at least one style")]
+    fn a_paragraph_with_no_styles_is_refused() {
+        let mut oracle = cover_all_oracle();
+        let shaped = ShapeContext::default().shape(&mut oracle, "Hello", &style(16.0));
+        let styles: [TextStyle; 0] = [];
+        let _ = Paragraph::new(&shaped, &styles, None);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "a style index is out of range")]
+    fn an_out_of_range_style_index_is_caught_at_construction() {
+        let mut oracle = cover_all_oracle();
+        let mut shaped = ShapeContext::default().shape(&mut oracle, "Hello", &style(16.0));
+        // One style, but a run that claims the second one.
+        shaped.runs[0].style_index = 1;
+        let styles = [style(16.0)];
+        let _ = Paragraph::new(&shaped, &styles, None);
+    }
+
+    #[test]
     fn a_long_word_overflows_unless_the_paragraph_wraps_anywhere() {
         let s = style(18.0);
         let mut oracle = cover_all_oracle();
@@ -726,21 +728,6 @@ mod tests {
         assert!(anywhere.lines.len() > 2);
         assert!(anywhere.lines[0].reason == BreakReason::Emergency);
         assert!(anywhere.width <= 40.0);
-    }
-
-    #[test]
-    fn intrinsic_widths_bound_the_layout() {
-        let layout = laid_out("Hello hello Hello", &style(18.0), Some(60.0));
-        let min = layout.min_content_width();
-        let max = layout.max_content_width();
-        assert!(min > 0.0 && min < max);
-        assert_eq!(
-            max,
-            laid_out("Hello hello Hello", &style(18.0), None)
-                .size()
-                .width as f32
-        );
-        assert!(layout.size().width as f32 >= min);
     }
 
     #[test]

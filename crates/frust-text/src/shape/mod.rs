@@ -23,14 +23,6 @@
 //! soft-wrap atoms without reshaping. An empty text shapes to an empty
 //! [`Shaped`].
 
-#![cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "the line layout over `Shaped` is its first production consumer"
-    )
-)]
-
 mod items;
 mod selector;
 
@@ -352,12 +344,14 @@ impl ShapeContext {
         self.convert(text, &itemized, complete)
     }
 
-    /// Analysis runs performed so far.
+    /// Analysis runs performed so far (cache tests only).
+    #[cfg(test)]
     pub(crate) fn analyses(&self) -> u64 {
         self.analyses
     }
 
-    /// Engine shaping passes performed so far.
+    /// Engine shaping passes performed so far (cache tests only).
+    #[cfg(test)]
     pub(crate) fn passes(&self) -> u64 {
         self.passes
     }
