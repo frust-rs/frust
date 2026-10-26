@@ -1,4 +1,4 @@
-//! Line metrics, and the paragraph's intrinsic widths.
+//! Line metrics.
 //!
 //! Per line, parley 0.11.1's `finish_line` rules over the line's items:
 //!
@@ -16,7 +16,7 @@
 //!   rounded separately, the leading's floor half above, the line top rounded.
 
 use super::{LineItem, Paragraph, Source};
-use crate::context::shape::{Shaped, Whitespace};
+use crate::context::shape::Whitespace;
 
 /// One line's vertical and horizontal metrics, in logical pixels.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -141,67 +141,4 @@ fn hanging(paragraph: &Paragraph<'_>, item: &LineItem) -> (f32, bool) {
         count += 1;
     }
     (advance, count == clusters.len())
-}
-
-/// The min-content width: the widest run of atoms with no wrap opportunity
-/// inside it (an unbreakable word, its trailing whitespace excluded).
-pub(crate) fn min_content_width(shaped: &Shaped) -> f32 {
-    let mut widest = 0.0f32;
-    let mut running = 0.0f32;
-    let mut trailing = 0.0f32;
-    let mut after_newline = false;
-    for atom in &shaped.atoms {
-        if atom.flags.soft_wrap_opportunity_before || after_newline {
-            widest = widest.max(running - trailing);
-            running = 0.0;
-            trailing = 0.0;
-        }
-        running += atom.advance;
-        if atom.whitespace == Whitespace::None {
-            trailing = 0.0;
-        } else {
-            trailing += atom.advance;
-        }
-        after_newline = atom.flags.mandatory_break_after;
-    }
-    widest.max(running - trailing).max(0.0)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::context::shape::{AtomFlags, ShapedAtom};
-
-    fn atom(advance: f32, whitespace: Whitespace, soft: bool) -> ShapedAtom {
-        ShapedAtom {
-            chars: 0..1,
-            clusters: 0..1,
-            advance,
-            flags: AtomFlags {
-                soft_wrap_opportunity_before: soft,
-                mandatory_break_after: whitespace == Whitespace::Newline,
-                ..AtomFlags::default()
-            },
-            whitespace,
-        }
-    }
-
-    #[test]
-    fn min_content_is_the_widest_word_without_its_trailing_space() {
-        let shaped = Shaped {
-            atoms: vec![
-                atom(10.0, Whitespace::None, false),
-                atom(10.0, Whitespace::None, false),
-                atom(4.0, Whitespace::Space, false),
-                atom(10.0, Whitespace::None, true),
-                atom(10.0, Whitespace::None, false),
-                atom(10.0, Whitespace::None, false),
-                atom(0.0, Whitespace::Newline, false),
-                atom(5.0, Whitespace::None, false),
-            ],
-            ..Shaped::default()
-        };
-        assert_eq!(min_content_width(&shaped), 30.0);
-        assert_eq!(min_content_width(&Shaped::default()), 0.0);
-    }
 }

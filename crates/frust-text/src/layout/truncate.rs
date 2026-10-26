@@ -11,6 +11,17 @@
 //! may fall inside an atom (a long URL is cut character by character, not
 //! word by word). Nothing is reshaped: the kept clusters keep the glyphs the
 //! paragraph was shaped with.
+//!
+//! What the cut is today: the shaping engine's atoms are already grapheme and
+//! cluster bounded, so the cut is per grapheme = per atom, and the line is
+//! refilled from the remaining text one atom at a time. The in-atom branch
+//! of [`ellipsize`] guards a future engine producing multi-grapheme atoms; the
+//! hand-built grouped-atom tests drive it, and a driver-shaped test asserts
+//! the longest-prefix property on real shaping.
+//!
+//! Accepted limitation: because nothing is reshaped, the last kept glyph keeps
+//! its contextual (joining) form and its kerning against the dropped neighbour,
+//! which a cursive script (Arabic) shows as a medial form before the ellipsis.
 //! When not even the bare ellipsis fits, it is drawn alone (a truncation is
 //! always visible); with no width bound the whole line is kept.
 //!
@@ -293,5 +304,57 @@ mod tests {
             (0..2, 5),
             "a line ending in its own newline is not refilled past it"
         );
+    }
+
+    /// A real driver-shaped token (the bundled NotoSans subset through
+    /// `ShapeContext`): at every width the cut is the longest whole-cluster
+    /// prefix whose advance plus the ellipsis fits, found by brute force.
+    #[test]
+    fn the_cut_is_the_longest_fitting_prefix_on_driver_shaped_text() {
+        use crate::context::shape::ShapeContext;
+        use crate::oracle::synthetic::SyntheticBackend;
+        use crate::oracle::{Oracle, RenderCapabilities};
+        use crate::style::{GenericSlot, TextStyle};
+        use peniko::{Blob, Color};
+
+        let blob =
+            Blob::from(include_bytes!("../../../../testing/fonts/NotoSans-Subset.ttf").to_vec());
+        let mut backend = SyntheticBackend::new("truncate-tests");
+        for slot in [GenericSlot::SystemUi, GenericSlot::SansSerif] {
+            backend.default_for(slot, &blob);
+        }
+        let all: String = (' '..='\u{FFFF}').collect();
+        backend.cover(&blob, &all);
+        let mut oracle = Oracle::new(Box::new(backend), RenderCapabilities::default(), None);
+        let text = "https://example.com/a/very/long/path/to/some/resource?query=value";
+        let shaped =
+            ShapeContext::default().shape(&mut oracle, text, &TextStyle::new(16.0, Color::BLACK));
+        let n = shaped.clusters.len();
+        assert!(n > 20 && !shaped.atoms.is_empty());
+        let total: f32 = shaped.clusters.iter().map(|c| c.advance).sum();
+        let ellipsis = 9.0f32;
+        let mut width = 1.0f32;
+        while width < total + ellipsis {
+            let mut l = BrokenLine {
+                atoms: 0..shaped.atoms.len().min(1),
+                reason: BreakReason::Regular,
+                advance: 0.0,
+                num_spaces: 0,
+            };
+            let end = ellipsize(&shaped, &mut l, Some(width), ellipsis) as usize;
+            let mut kept = 0usize;
+            let mut sum = 0.0f32;
+            for (i, c) in shaped.clusters.iter().enumerate() {
+                sum += c.advance;
+                if sum + ellipsis <= width {
+                    kept = i + 1;
+                } else {
+                    break;
+                }
+            }
+            assert_eq!(end, kept, "width {width}: longest fitting prefix");
+            assert!(l.atoms.end <= shaped.atoms.len());
+            width += 3.7;
+        }
     }
 }
