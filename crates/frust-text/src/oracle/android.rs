@@ -164,31 +164,19 @@ impl NdkFontBackend {
             .collect();
         let file = path.to_string_lossy().into_owned();
 
-        let has = |tag: &[u8; 4]| axes.iter().any(|a| &a.tag == tag);
-        let mut synth = Synthesis::default();
-        if has(b"wght") {
-            // Variable face: the caller applies the requested weight on the axis.
-            synth.variations.push(VariationSetting {
-                tag: *b"wght",
-                value: weight,
-            });
-        } else if weight >= 600.0 && actual_weight + 100.0 <= weight {
-            // No bold file for this script (CJK) or family (mono): faux bold.
-            synth.embolden = true;
-        }
-        if italic {
-            if has(b"ital") {
-                synth.variations.push(VariationSetting {
-                    tag: *b"ital",
-                    value: 1.0,
-                });
-            } else if !file_is_italic(&file) {
-                synth.skew = Some(FAUX_OBLIQUE_DEGREES);
-            }
-        }
+        let synth = decide_synthesis(
+            &Requested { weight, italic },
+            &Actual {
+                weight: actual_weight,
+                has_wght_axis: has_axis(&axes, b"wght"),
+                has_ital_axis: has_axis(&axes, b"ital"),
+                file_is_italic: file_is_italic(&file),
+            },
+        );
         log::debug!(
-            "ndk font match: {:?} -> {}#{} (w{} italic={} run={} axes={:?}) hint={:?}",
-            text,
+            "ndk font match: {} code points, script {} -> {}#{} (w{} italic={} run={} axes={:?}) hint={:?}",
+            text.chars().count(),
+            cluster_script(text),
             file,
             index,
             actual_weight,
@@ -204,15 +192,80 @@ impl NdkFontBackend {
         // The emoji colour format needs no field: the selector classifies COLR/CBDT/sbix
         // from the face's own tables (`face_facts`), so `emoji_format` stays a log aid.
         let mut source = FaceSource::path(path, index);
-        if synth != Synthesis::default() {
-            source.synthesis_hint = Some(synth);
-        }
+        // A decision was made, so the hint is always attached: `Some(default)` means "nothing
+        // needed" and, per `FaceSource`, replaces the oracle's generic rule instead of letting
+        // it fall back to emboldening.
+        source.synthesis_hint = Some(synth);
         Some(Matched {
             source,
             file,
             run_utf16: run,
         })
     }
+}
+
+/// A coarse script name for the cluster's first code point, for logs (never the characters).
+fn cluster_script(text: &str) -> &'static str {
+    match text.chars().next().map(u32::from) {
+        None => "none",
+        Some(0x0000..=0x024F) => "latin",
+        Some(0x0370..=0x03FF) => "greek",
+        Some(0x0400..=0x052F) => "cyrillic",
+        Some(0x0590..=0x05FF) => "hebrew",
+        Some(0x0600..=0x06FF) => "arabic",
+        Some(0x0900..=0x0DFF) => "indic",
+        Some(0x0E00..=0x0EFF) => "thai",
+        Some(0x1100..=0x11FF | 0xAC00..=0xD7AF) => "hangul",
+        Some(0x3040..=0x30FF) => "kana",
+        Some(0x3400..=0x9FFF | 0x20000..=0x2FFFF) => "han",
+        Some(0x1F000..=0x1FAFF | 0x2600..=0x27BF) => "emoji",
+        Some(_) => "other",
+    }
+}
+
+/// What the caller asked of the matcher.
+struct Requested {
+    weight: f32,
+    italic: bool,
+}
+
+/// What the matcher answered.
+struct Actual {
+    weight: f32,
+    has_wght_axis: bool,
+    has_ital_axis: bool,
+    file_is_italic: bool,
+}
+
+fn has_axis(axes: &[VariationSetting], tag: &[u8; 4]) -> bool {
+    axes.iter().any(|a| &a.tag == tag)
+}
+
+/// The pure synthesis decision: independent of slant for weight, so upright and italic asks at
+/// the same weight embolden identically.
+fn decide_synthesis(req: &Requested, actual: &Actual) -> Synthesis {
+    let mut synth = Synthesis::default();
+    if actual.has_wght_axis {
+        // Variable face: the caller applies the requested weight on the axis.
+        synth.variations.push(VariationSetting {
+            tag: *b"wght",
+            value: req.weight,
+        });
+    } else if req.weight >= 600.0 && actual.weight + 100.0 <= req.weight {
+        // No bold file for this script (CJK) or family (mono): faux bold.
+        synth.embolden = true;
+    }
+    if req.italic {
+        if actual.has_ital_axis {
+            synth.variations.push(VariationSetting {
+                tag: *b"ital",
+                value: 1.0,
+            });
+        } else if !actual.file_is_italic {
+            synth.skew = Some(FAUX_OBLIQUE_DEGREES);
+        }
+    }
+    synth
 }
 
 /// Whether the matched file is itself an italic design (`NotoSerif-Italic.ttf`).
@@ -260,8 +313,9 @@ impl Backend for NdkFontBackend {
             req.locale.as_deref(),
         )?;
         log::debug!(
-            "ndk font miss {:?}: {} us, {}#{}{}{}",
-            req.chars,
+            "ndk font miss ({} code points, script {}): {} us, {}#{}{}{}",
+            req.chars.chars().count(),
+            cluster_script(&req.chars),
             started.elapsed().as_micros(),
             matched.file,
             matched.source.index,
@@ -297,5 +351,56 @@ impl Backend for NdkFontBackend {
         system_property(c"ro.build.fingerprint")
             .map(|fp| format!("android:{fp}"))
             .unwrap_or_else(|| String::from("android-unknown"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn actual(weight: f32, wght: bool) -> Actual {
+        Actual {
+            weight,
+            has_wght_axis: wght,
+            has_ital_axis: false,
+            file_is_italic: false,
+        }
+    }
+
+    fn decide(weight: f32, italic: bool, a: &Actual) -> Synthesis {
+        decide_synthesis(&Requested { weight, italic }, a)
+    }
+
+    #[test]
+    fn upright_and_italic_embolden_alike() {
+        for (w, face_w) in [(500.0, 400.0), (700.0, 400.0), (600.0, 500.0)] {
+            let a = actual(face_w, false);
+            assert_eq!(
+                decide(w, false, &a).embolden,
+                decide(w, true, &a).embolden,
+                "weight {w} on {face_w}"
+            );
+        }
+    }
+
+    #[test]
+    fn variable_face_takes_axis() {
+        let s = decide(700.0, false, &actual(400.0, true));
+        assert!(!s.embolden);
+        assert_eq!(s.variation(*b"wght"), Some(700.0));
+    }
+
+    #[test]
+    fn static_lighter_face_emboldens_from_600() {
+        assert!(decide(700.0, false, &actual(400.0, false)).embolden);
+        assert!(decide(600.0, false, &actual(400.0, false)).embolden);
+    }
+
+    #[test]
+    fn five_hundred_on_regular_is_nothing_needed() {
+        assert_eq!(
+            decide(500.0, false, &actual(400.0, false)),
+            Synthesis::default()
+        );
     }
 }
