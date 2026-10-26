@@ -83,10 +83,16 @@ The repository already contains substantial non-pixel coverage:
   re-renders and byte-compares, proving same-host determinism only. Run via
   `scripts/widget-snapshots.sh`.
 - `examples/web-gallery`: the frust.dev website's live-preview app, rendering the same
-  `examples/gallery` case registry in-browser via `frust build web --release`. It carries
-  no automated coverage and is gated manually in a browser — see its README's "Browser
-  verification" section for the procedure, and its "Binary size" section for the artifact
-  measurement (deliberately not restated here, since it moves with every build).
+  `examples/gallery` case registry in-browser via `frust build web --release`.
+  `scripts/ci/web-smoke.sh` (the `web-smoke` CI job) boots it in headless Chrome on the default
+  and `arm=webgl` URLs and fails on any panic or missing `wasm module initialized` line; CI
+  (strict mode) also requires the render surface online. It proves boot + first surface, not
+  pixels: the `frust-testing` `webgl` golden suite below stays the manual pixel gate, and the
+  README's "Browser verification" section the manual procedure ("Binary size" holds the artifact
+  measurement, deliberately not restated here). The job depends on the runner image's Chrome and
+  a sha256-verified wasm-bindgen download, so a failure whose logs show neither a panic nor a
+  missing `wasm module initialized` line is an environment flake — re-run before investigating.
+  Its sibling gate `scripts/ci/wasm-time-check.sh` is described in [DEVELOPMENT.md](DEVELOPMENT.md).
 - `frust-cli` and `frust-drive`: command construction, project mutation,
   device selection, preflight, process supervision, and ignored scaffold/build
   end-to-end tests.
