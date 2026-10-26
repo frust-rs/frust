@@ -24,28 +24,44 @@ pub(crate) struct Calls(Arc<Mutex<CallLog>>);
 
 #[derive(Debug, Default)]
 struct CallLog {
-    resolves: usize,
-    last: Option<FallbackRequest>,
+    requests: Vec<FallbackRequest>,
 }
 
 impl Calls {
     /// How many times [`Backend::resolve`] ran.
     pub(crate) fn resolves(&self) -> usize {
-        self.0.lock().unwrap().resolves
+        self.0.lock().unwrap().requests.len()
     }
 
     /// The last request [`Backend::resolve`] saw.
     pub(crate) fn last_request(&self) -> Option<FallbackRequest> {
-        self.0.lock().unwrap().last.clone()
+        self.0.lock().unwrap().requests.last().cloned()
+    }
+
+    /// Every request [`Backend::resolve`] saw, in order.
+    pub(crate) fn requests(&self) -> Vec<FallbackRequest> {
+        self.0.lock().unwrap().requests.clone()
+    }
+
+    /// The named family each request led with (`None` for a generic-only
+    /// request), in order.
+    pub(crate) fn named_families(&self) -> Vec<Option<String>> {
+        self.requests()
+            .iter()
+            .map(|req| first_named(req).map(str::to_owned))
+            .collect()
     }
 }
 
 /// A backend answering from a scripted coverage map.
 ///
-/// `resolve` answers, in order: a [`Self::family`] entry named by the
-/// request's chain whose scripted characters cover the cluster, then the first
-/// [`Self::cover`] entry that does. The script may claim more than the face's
-/// `cmap` holds — that is how a test exercises the oracle's own coverage check.
+/// `resolve` answers like the platform backends do: only the request's
+/// *first* named family is consulted — a [`Self::family`] entry of that name
+/// whose scripted characters cover the cluster — and otherwise the first
+/// [`Self::cover`] entry that does (the OS cascade, whatever family that face
+/// is). Walking later families is the oracle's job. The script may claim more
+/// than the face's `cmap` holds — that is how a test exercises the oracle's own
+/// coverage check.
 #[derive(Debug)]
 pub(crate) struct SyntheticBackend {
     os_build_id: String,
@@ -92,9 +108,22 @@ impl SyntheticBackend {
 
     /// Scripts `blob` as the system default for `generic`.
     pub(crate) fn default_for(&mut self, generic: GenericSlot, blob: &Blob<u8>) {
-        self.defaults
-            .push((generic.into(), FaceSource::blob(blob.clone(), 0)));
+        self.default_with(generic, FaceSource::blob(blob.clone(), 0));
     }
+
+    /// Scripts `source` (coordinates and hint included) as the system default
+    /// for `generic`.
+    pub(crate) fn default_with(&mut self, generic: GenericSlot, source: FaceSource) {
+        self.defaults.push((generic.into(), source));
+    }
+}
+
+/// The request's first named family.
+fn first_named(req: &FallbackRequest) -> Option<&str> {
+    req.families.iter().find_map(|f| match f {
+        FamilyName::Named(name) => Some(name.as_str()),
+        FamilyName::Generic(_) => None,
+    })
 }
 
 /// Whether the scripted `claimed` characters cover `chars`.
@@ -107,23 +136,14 @@ fn claims(claimed: &str, chars: &str) -> bool {
 
 impl Backend for SyntheticBackend {
     fn resolve(&mut self, req: &FallbackRequest) -> Option<FaceSource> {
-        {
-            let mut log = self.calls.0.lock().unwrap();
-            log.resolves += 1;
-            log.last = Some(req.clone());
-        }
-        for family in &req.families {
-            let FamilyName::Named(name) = family else {
-                continue;
-            };
-            let name = name.to_lowercase();
-            if let Some((_, _, source)) = self
+        self.calls.0.lock().unwrap().requests.push(req.clone());
+        if let Some(name) = first_named(req).map(str::to_lowercase)
+            && let Some((_, _, source)) = self
                 .families
                 .iter()
                 .find(|(n, claimed, _)| *n == name && claims(claimed, &req.chars))
-            {
-                return Some(source.clone());
-            }
+        {
+            return Some(source.clone());
         }
         self.coverage
             .iter()
