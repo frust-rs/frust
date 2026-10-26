@@ -1,14 +1,15 @@
 //! [`TextStyle`]: the styling knobs applied uniformly to a laid-out string —
-//! family, weight, style (italic/oblique), size, color, letter-spacing, and
-//! line-height (the M3 type-scale surface).
+//! family, weight, style (italic/oblique), width, variation axes, locale, size,
+//! color, letter-spacing, and line-height (the M3 type-scale surface).
 //!
 //! Every type here is Frust-owned, not a parley re-export (scene-layer
-//! purity, see `docs/ARCHITECTURE.md`): [`FontFamily`]/[`FontWeight`]/
-//! [`FontStyle`]/[`LineHeight`] mirror parley 0.11's own semantics (see
-//! `parley::style`) so the conversion in [`crate::context`]/[`crate::editor`]
-//! is a straight match, but no parley type appears in this module's public
-//! API. Rich per-range styling and bundled/custom font registration are
-//! deferred.
+//! purity, see `docs/ARCHITECTURE.md`). [`FontFamily`]/[`FontWeight`]/
+//! [`FontStyle`]/[`LineHeight`] mirror parley 0.11's semantics so the
+//! `to_parley_*` converters below (the parley layout and editor paths) are a
+//! straight match; the frust shaping driver (`crate::context::shape`) reads
+//! these types directly and resolves [`LineHeight`] through
+//! [`LineHeight::resolve`], so no shaping-engine type appears here. Rich
+//! per-range styling is deferred.
 
 use peniko::Color;
 
@@ -242,6 +243,26 @@ impl Default for LineHeight {
     }
 }
 
+impl LineHeight {
+    /// The line height in logical pixels for a run at `font_size` whose face
+    /// has these metrics (`descent` as a positive distance below the
+    /// baseline): parley 0.11's rule, so both paths size lines identically.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the line layout over the shaping driver is its first caller"
+        )
+    )]
+    pub(crate) fn resolve(self, font_size: f32, ascent: f32, descent: f32, leading: f32) -> f32 {
+        match self {
+            Self::MetricsRelative(v) => (ascent + descent + leading) * v,
+            Self::FontSizeRelative(v) => font_size * v,
+            Self::Absolute(v) => v,
+        }
+    }
+}
+
 /// Styling applied uniformly to a laid-out string.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextStyle {
@@ -251,6 +272,16 @@ pub struct TextStyle {
     pub weight: FontWeight,
     /// Font style (upright/italic/oblique).
     pub style: FontStyle,
+    /// Font width as a ratio of normal (`1.0`), the CSS `font-stretch` scale:
+    /// a `wdth` axis takes it, otherwise the closest-width face is preferred.
+    pub width: f32,
+    /// Variation-axis settings (`(tag, value)`, e.g. `(*b"GRAD", 50.0)`),
+    /// applied over whatever weight/width/slant synthesis chose, in order; a
+    /// later setting of the same tag wins. Axes a face lacks are ignored.
+    pub variations: Vec<([u8; 4], f32)>,
+    /// BCP 47 locale of the text (`"ja"`, `"zh-Hant"`, ...): steers font
+    /// fallback, language-specific shaping and CJK line breaking.
+    pub locale: Option<String>,
     /// Font size in logical pixels.
     pub size: f32,
     /// Fill color for the glyphs.
@@ -273,16 +304,44 @@ impl TextStyle {
             ..Self::default()
         }
     }
+
+    /// This style at font width `width` (ratio of normal, `1.0`).
+    pub fn with_width(mut self, width: f32) -> Self {
+        self.width = width;
+        self
+    }
+
+    /// This style with one more variation-axis setting appended.
+    pub fn with_variation(mut self, tag: [u8; 4], value: f32) -> Self {
+        self.variations.push((tag, value));
+        self
+    }
+
+    /// This style with its variation-axis settings replaced by `variations`.
+    pub fn with_variations(mut self, variations: impl IntoIterator<Item = ([u8; 4], f32)>) -> Self {
+        self.variations = variations.into_iter().collect();
+        self
+    }
+
+    /// This style with the BCP 47 `locale` (`None` clears it).
+    pub fn with_locale(mut self, locale: Option<impl Into<String>>) -> Self {
+        self.locale = locale.map(Into::into);
+        self
+    }
 }
 
 impl Default for TextStyle {
-    /// System UI family, 400 weight, upright, 16px, opaque black, no extra
-    /// letter-spacing, the font's natural line height.
+    /// System UI family, 400 weight, upright, normal width, no variation
+    /// settings or locale, 16px, opaque black, no extra letter-spacing, the
+    /// font's natural line height.
     fn default() -> Self {
         Self {
             family: FontFamily::default(),
             weight: FontWeight::default(),
             style: FontStyle::default(),
+            width: 1.0,
+            variations: Vec::new(),
+            locale: None,
             size: 16.0,
             color: Color::BLACK,
             letter_spacing: 0.0,
@@ -294,8 +353,9 @@ impl Default for TextStyle {
 
 /// Converts a Frust [`FontFamily`] into parley's owned `'static`
 /// `FontFamily`. `pub(crate)` — parley types must not leak past the crate
-/// boundary (scene-layer purity); shared by [`crate::context`] and
-/// [`crate::editor`].
+/// boundary (scene-layer purity); shared by [`crate::context`]'s parley layout
+/// path and [`crate::editor`], and retired with them (the shaping driver walks
+/// the family chain through the font oracle instead).
 pub(crate) fn to_parley_family(family: &FontFamily) -> parley::FontFamily<'static> {
     match family {
         FontFamily::SystemUi => parley::GenericFamily::SystemUi.into(),
@@ -391,6 +451,36 @@ mod tests {
         assert_eq!(style.letter_spacing, 0.0);
         assert_eq!(style.line_height, LineHeight::MetricsRelative(1.0));
         assert_eq!(style.align, TextAlign::Start);
+        assert_eq!(style.width, 1.0);
+        assert!(style.variations.is_empty());
+        assert_eq!(style.locale, None);
+    }
+
+    #[test]
+    fn builder_setters_fill_width_variations_and_locale() {
+        let style = TextStyle::new(12.0, Color::BLACK)
+            .with_width(0.75)
+            .with_variation(*b"wght", 650.0)
+            .with_variation(*b"GRAD", 50.0)
+            .with_locale(Some("ja"));
+        assert_eq!(style.width, 0.75);
+        assert_eq!(style.variations, vec![(*b"wght", 650.0), (*b"GRAD", 50.0)]);
+        assert_eq!(style.locale.as_deref(), Some("ja"));
+        let style = style
+            .with_variations([(*b"ROND", 100.0)])
+            .with_locale(None::<String>);
+        assert_eq!(style.variations, vec![(*b"ROND", 100.0)]);
+        assert_eq!(style.locale, None);
+    }
+
+    #[test]
+    fn line_height_resolves_each_mode() {
+        let (ascent, descent, leading) = (14.0, 4.0, 2.0);
+        let resolve = |lh: LineHeight| lh.resolve(16.0, ascent, descent, leading);
+        assert_eq!(resolve(LineHeight::MetricsRelative(1.0)), 20.0);
+        assert_eq!(resolve(LineHeight::MetricsRelative(1.5)), 30.0);
+        assert_eq!(resolve(LineHeight::FontSizeRelative(2.0)), 32.0);
+        assert_eq!(resolve(LineHeight::Absolute(9.0)), 9.0);
     }
 
     #[test]

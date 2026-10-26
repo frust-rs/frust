@@ -15,6 +15,13 @@
 //! generic-fallback registration goes through the oracle's registry, which
 //! mirrors it into parley's collection ([`ParleyMirror`]).
 //!
+//! # The shaping driver
+//!
+//! [`shape`] is frust's own shaping path over the oracle: [`TextContext::shape`]
+//! returns a width-independent [`shape::Shaped`] through its own cache, beside
+//! the parley path [`TextContext::layout`] still takes. Declared here because
+//! the context owns its state.
+//!
 //! # App fonts across independent contexts
 //!
 //! A shell owns *the* context widgets shape through at layout time, but a
@@ -41,8 +48,10 @@
 //! The oracle's persistent font cache is placed by [`TextContext::builder`];
 //! unconfigured contexts honour `FRUST_TEXT_FONT_CACHE` in debug builds.
 
+use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parley::fontique::{Blob, GenericFamily};
@@ -52,11 +61,14 @@ use peniko::Brush;
 use crate::layout::TextLayout;
 use crate::oracle::registry::{FamilySummary, RegistryMirror};
 use crate::oracle::{self, CacheLocation, Oracle, RenderCapabilities};
-use crate::shape_cache::{DEFAULT_CAPACITY, ShapeCache, ShapeCacheStats, ShapeKey};
+use crate::shape_cache::{DEFAULT_CAPACITY, LayoutCache, ShapeCacheStats, ShapeKey, ShapedCache};
 use crate::style::{
     GenericSlot, TextOverflow, TextStyle, to_parley_align, to_parley_family, to_parley_line_height,
     to_parley_style, to_parley_weight,
 };
+
+#[path = "shape/mod.rs"]
+pub(crate) mod shape;
 
 /// The single character [`TextOverflow::Ellipsis`] appends/substitutes —
 /// U+2026 HORIZONTAL ELLIPSIS, one glyph rather than three ASCII periods.
@@ -243,7 +255,18 @@ pub struct TextContext {
     /// shaped layouts keyed by (text, style), so a width change re-runs
     /// line-breaking only and repeated content shapes once. See
     /// [`crate::shape_cache`].
-    shape_cache: ShapeCache,
+    shape_cache: LayoutCache,
+    /// The shaping driver's analyzer/shaper state ([`shape::ShapeContext`]).
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the line layout over `Shaped` is the driver's first production caller"
+        )
+    )]
+    shape_cx: shape::ShapeContext,
+    /// The shaping driver's cache: one [`shape::Shaped`] per (text, style).
+    shaped_cache: ShapedCache,
     /// The frust font oracle: platform backend, fallback cache, and this
     /// context's app-font registry (with its watermarks into the process-wide
     /// app-font and generic-fallback records).
@@ -268,6 +291,24 @@ fn push_style_defaults(builder: &mut parley::RangedBuilder<'_, Brush>, style: &T
     builder.push_default(StyleProperty::FontSize(style.size));
     builder.push_default(StyleProperty::FontWeight(to_parley_weight(style.weight)));
     builder.push_default(StyleProperty::FontStyle(to_parley_style(style.style)));
+    builder.push_default(StyleProperty::FontWidth(parley::FontWidth::from_ratio(
+        style.width,
+    )));
+    if !style.variations.is_empty() {
+        let variations: Vec<parley::FontVariation> = style
+            .variations
+            .iter()
+            .map(|&(tag, value)| parley::FontVariation::new(parley::setting::Tag::new(&tag), value))
+            .collect();
+        builder.push_default(StyleProperty::FontVariations(parley::FontVariations::List(
+            Cow::Owned(variations),
+        )));
+    }
+    if let Some(locale) = style.locale.as_deref() {
+        builder.push_default(StyleProperty::Locale(
+            parley::style::Language::parse(locale).ok(),
+        ));
+    }
     builder.push_default(StyleProperty::LetterSpacing(style.letter_spacing));
     builder.push_default(StyleProperty::LineHeight(to_parley_line_height(
         style.line_height,
@@ -520,7 +561,9 @@ impl TextContext {
         let mut cx = Self {
             font_ctx,
             layout_ctx: parley::LayoutContext::new(),
-            shape_cache: ShapeCache::new(DEFAULT_CAPACITY),
+            shape_cache: LayoutCache::new(DEFAULT_CAPACITY),
+            shape_cx: shape::ShapeContext::default(),
+            shaped_cache: ShapedCache::new(DEFAULT_CAPACITY),
             oracle,
             #[cfg(test)]
             measurements: 0,
@@ -549,7 +592,7 @@ impl TextContext {
     /// no-op distinction from [`crate::TextAlign::Start`] until `max_width`
     /// is bounded, since an unbounded line's width already equals its
     /// content). Applies here **and** on the width-change re-break path in
-    /// [`crate::shape_cache::ShapeCache::get`] — see that fn's docs.
+    /// [`crate::shape_cache::LayoutCache::get`] — see that fn's docs.
     pub fn layout(&mut self, text: &str, style: &TextStyle, max_width: Option<f32>) -> TextLayout {
         let key = ShapeKey::new(text, style);
 
@@ -572,7 +615,7 @@ impl TextContext {
         let mut layout = builder.build(text);
         layout.break_all_lines(max_width);
         // Both hardcoded-alignment sites (this one and the width-change
-        // re-break path in `ShapeCache::get`) must apply `style.align` — see
+        // re-break path in `LayoutCache::get`) must apply `style.align` — see
         // `to_parley_align`'s docs.
         layout.align(
             to_parley_align(style.align),
@@ -870,6 +913,38 @@ impl TextContext {
         self.shape_cache.stats()
     }
 
+    /// Shapes `text` with `style` through the frust shaping driver (fonts from
+    /// this context's oracle), width-independently and cached: a repeat of the
+    /// same (text, style) is served without analysis or shaping.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the line layout over `Shaped` is the driver's first production caller"
+        )
+    )]
+    pub(crate) fn shape(&mut self, text: &str, style: &TextStyle) -> Arc<shape::Shaped> {
+        let key = ShapeKey::new(text, style);
+        if let Some(shaped) = self.shaped_cache.get_shaped(&key) {
+            return shaped;
+        }
+        let shaped = Arc::new(self.shape_cx.shape(&mut self.oracle, text, style));
+        self.shaped_cache.insert_shaped(key, Arc::clone(&shaped));
+        shaped
+    }
+
+    /// The shaping driver's cache counters ([`Self::shape`]).
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the line layout over `Shaped` is the driver's first production caller"
+        )
+    )]
+    pub(crate) fn shaped_cache_stats(&self) -> ShapeCacheStats {
+        self.shaped_cache.stats()
+    }
+
     /// Registers font faces from raw bytes (TTF/OTF, or a TTC/OTC
     /// collection) so they resolve by family name via
     /// [`crate::FontFamily::named`]/[`crate::FontFamily::stack`].
@@ -955,7 +1030,8 @@ impl TextContext {
     /// calls this internally on success, so a caller registering fonts
     /// doesn't need to call it separately.
     pub fn clear_shape_cache(&mut self) {
-        self.shape_cache = ShapeCache::new(DEFAULT_CAPACITY);
+        self.shape_cache = LayoutCache::new(DEFAULT_CAPACITY);
+        self.shaped_cache = ShapedCache::new(DEFAULT_CAPACITY);
     }
 
     /// Borrows the parley font and layout contexts together, for constructing a
@@ -1223,7 +1299,9 @@ mod tests {
         let mut cx = TextContext {
             font_ctx,
             layout_ctx: parley::LayoutContext::new(),
-            shape_cache: ShapeCache::new(DEFAULT_CAPACITY),
+            shape_cache: LayoutCache::new(DEFAULT_CAPACITY),
+            shape_cx: shape::ShapeContext::default(),
+            shaped_cache: ShapedCache::new(DEFAULT_CAPACITY),
             oracle,
             #[cfg(test)]
             measurements: 0,
@@ -1327,6 +1405,85 @@ mod tests {
         assert_eq!(stats.shapes, 1, "shaping must run exactly once");
         assert_eq!(stats.line_breaks, 1, "the differing width re-breaks once");
         assert_eq!(stats.hits, 1, "the repeated width is a full reuse");
+    }
+
+    /// A context holding the bundled Latin subset as an app font, and its family.
+    fn noto_cx() -> (TextContext, TextStyle) {
+        let mut cx = test_cx();
+        let families = cx
+            .register_fonts(include_bytes!("../../../testing/fonts/NotoSans-Subset.ttf").to_vec())
+            .expect("the subset registers");
+        let s = TextStyle {
+            family: crate::FontFamily::named(families[0].name.clone()),
+            ..style(18.0)
+        };
+        (cx, s)
+    }
+
+    #[test]
+    fn the_shaped_cache_hit_skips_analysis_and_shaping() {
+        let (mut cx, s) = noto_cx();
+        let first = cx.shape("Hello, hello", &s);
+        let (analyses, passes) = (cx.shape_cx.analyses(), cx.shape_cx.passes());
+        assert_eq!((analyses, passes), (1, 1));
+        let again = cx.shape("Hello, hello", &s);
+        assert!(Arc::ptr_eq(&first, &again), "the cached value is shared");
+        assert_eq!(cx.shape_cx.analyses(), analyses, "a hit runs no analysis");
+        assert_eq!(cx.shape_cx.passes(), passes, "a hit runs no shaper");
+        let stats = cx.shaped_cache_stats();
+        assert_eq!((stats.shapes, stats.hits), (1, 1));
+        assert_eq!(
+            cx.shape_cache_stats(),
+            ShapeCacheStats::default(),
+            "the parley path's cache is separate"
+        );
+        cx.clear_shape_cache();
+        let _ = cx.shape("Hello, hello", &s);
+        assert_eq!(cx.shape_cx.passes(), passes + 1, "cleared → shaped again");
+    }
+
+    #[test]
+    fn the_driver_and_the_parley_path_pick_the_same_glyphs() {
+        let (mut cx, s) = noto_cx();
+        // Only characters the subset maps: fallback is where the two differ.
+        let text = "Hello, Hello";
+        let shaped = cx.shape(text, &s);
+        let ours: Vec<u32> = shaped.glyphs.iter().map(|g| g.id).collect();
+        let parley: Vec<u32> = cx
+            .layout(text, &s, None)
+            .to_scene_runs(kurbo::Point::ORIGIN)
+            .iter()
+            .flat_map(|run| run.glyphs.iter().map(|g| g.id))
+            .collect();
+        assert_eq!(ours, parley);
+        let width: f32 = shaped.runs.iter().map(|r| r.advance).sum();
+        let parley_width = cx.layout(text, &s, None).size().width as f32;
+        assert!(
+            (width - parley_width).abs() < 0.5,
+            "{width} vs {parley_width}"
+        );
+    }
+
+    #[test]
+    fn style_variations_reach_the_parley_path_too() {
+        let mut cx = test_cx();
+        let families = cx
+            .register_fonts(
+                include_bytes!("../../../plugins/beui/fonts/geist/Geist-Variable.ttf").to_vec(),
+            )
+            .expect("Geist registers");
+        let s = TextStyle {
+            family: crate::FontFamily::named(families[0].name.clone()),
+            ..style(18.0)
+        };
+        let plain = cx.layout("Hamburg", &s, None).size().width;
+        let heavy = s.clone().with_variation(*b"wght", 800.0);
+        assert_ne!(
+            ShapeKey::new("Hamburg", &s),
+            ShapeKey::new("Hamburg", &heavy)
+        );
+        let wide = cx.layout("Hamburg", &heavy, None).size().width;
+        assert!(wide > plain, "wght 800 widens Geist: {plain} vs {wide}");
     }
 
     #[test]
@@ -1526,7 +1683,7 @@ mod tests {
 
     #[test]
     fn alignment_survives_a_width_change_through_the_shape_cache_rebreak() {
-        // The resize regression the adversarial pass flagged: `ShapeCache::get`
+        // The resize regression the adversarial pass flagged: `LayoutCache::get`
         // had its own hardcoded `Alignment::Start` on the re-break path, so a
         // resized layout would silently revert to `Start` even though the
         // initial (from-scratch) layout in this fn correctly centered.
@@ -1537,7 +1694,7 @@ mod tests {
         let _ = cx.layout(TWO_LINES, &centered, Some(400.0));
 
         // Second pass at a different width: a shape-cache hit that re-breaks
-        // (not a fresh shape) — exactly the path `ShapeCache::get` owns.
+        // (not a fresh shape) — exactly the path `LayoutCache::get` owns.
         let x = line_min_x(&mut cx, TWO_LINES, &centered, 500.0);
         assert_eq!(x.len(), 2);
         assert!(
