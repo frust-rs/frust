@@ -7132,19 +7132,17 @@ the straddle is visible to users.
 ### `web-no-startup-spans` — the web shell records no startup span line
 
 **Observed** (evidence: `frust_shell_common::perf::SystemClock`/
-`StartupSpans` use `std::time::Instant`, which panics on
-`wasm32-unknown-unknown`): every other shell tier emits a one-time startup
-span line (rebuild/layout/paint/first-present timing) through that shared
-type; `frust-shell-web` cannot construct one without panicking on the very
-target it targets, so it emits none.
+`StartupSpans` are wasm-safe, backed by `web_time::Instant`; `browser_loop`
+in `frust-shell-web` constructs no `StartupSpans`): every other shell tier
+emits a one-time startup span line (rebuild/layout/paint/first-present
+timing) through that shared type; the web shell wires none, so it emits none.
 
 **Accepted because**: the browser tier's own `web_time::Instant`-based
 `perf::UiSpans` still covers per-frame rebuild/layout/paint cost every
 frame (see [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md)), so only the
 one-time startup line is missing, not ongoing frame telemetry.
 
-**Trigger for removal**: `frust_shell_common::perf::SystemClock`/
-`StartupSpans` gain a `web_time`-backed `wasm32` arm.
+**Trigger for removal**: `browser_loop` wires `StartupSpans`.
 
 ### `web-a11y-devtools` — the web shell has no accessibility tree and no devtools loopback
 

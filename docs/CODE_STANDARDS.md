@@ -477,23 +477,23 @@ Conventions for `Widget::semantics` (see `docs/CORE_ARCHITECTURE.md`'s `semantic
 ## Instrumentation & Frame-Gate Conventions
 
 - **Perf recording is always gated behind `perf::enabled()`, never unconditional.**
-  `frust-shell-common::perf`'s `FrameStats`/`StartupSpans` no-op internally when disabled,
-  but a shell should still read `perf::enabled()` once per frame into a local bool and gate
-  every `Instant::now()` read behind it (`bool::then(Instant::now)`) on FFI-sensitive paths
-  (Android/iOS) so a disabled build takes zero clock reads. Span names are `perf::SPAN_*`
-  consts, not string literals.
+  `frust-shell-common::perf`'s `FrameStats`/`StartupSpans` no-op when disabled, but a shell
+  should still read `perf::enabled()` once per frame into a local bool and gate every
+  `Instant::now()` read behind it (`bool::then(Instant::now)`) on FFI-sensitive paths
+  (Android/iOS) so a disabled build takes zero clock reads. Span names are `perf::SPAN_*` consts.
+- **Every crate in `frust-shell-web`'s wasm32 graph reads time through `web_time::Instant`,
+  never `std::time::Instant::now()`/`SystemTime::now()`** — both compile for
+  `wasm32-unknown-unknown` and panic at runtime. The `SystemTime` type stays std
+  (`fs::Metadata::modified()`); only `::now` is banned. Gate: `scripts/ci/wasm-time-check.sh`.
 - **Devtools frame-stats publish is deliberately outside the `perf::enabled()` gate.**
-  `FrameStats::record` fans out to the devtools frame-stats bus *before* checking
-  `perf::enabled()` — subscribing a devtools client is its own opt-in (gated by the
-  `devtools` cargo feature and the running service), not tied to `FRUST_TRACE`. Do not fold
-  the two gates together; they answer different questions (see
+  `FrameStats::record` fans out to the devtools bus *before* checking `perf::enabled()` —
+  subscribing a devtools client is its own opt-in (the `devtools` feature plus the running
+  service), not tied to `FRUST_TRACE`. Do not fold the two gates together (see
   [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md)).
 - **Frame-gate inputs default to must-run, never to skip.** A `FrameInputs` field with no
-  precise signal should stay `true`/fed conservatively rather than guessed `false` —
-  over-running costs a wasted frame, over-skipping drops real work (see
-  `docs/SHELLS_ARCHITECTURE.md`'s `frame_gate` module). `FRUST_NO_FRAME_GATE=1` (parsed like `FRUST_TRACE`)
-  forces every tick to `Run`; reach for it first when diagnosing a suspected stuck-UI
-  report.
+  precise signal stays `true`/fed conservatively, not guessed `false` — over-running costs a wasted frame, over-skipping drops real work (see
+  `docs/SHELLS_ARCHITECTURE.md`'s `frame_gate` module). `FRUST_NO_FRAME_GATE=1` forces every
+  tick to `Run`; try it first for a stuck-UI report.
 
 ## State & Reactivity Conventions
 
