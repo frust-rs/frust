@@ -352,6 +352,13 @@ impl TextEditor {
         }
     }
 
+    /// Whether the editor itself owns a live IME preedit (the desktop
+    /// `Compose` path). A platform-reported composing region is not one: it
+    /// survives a rebuild through [`EditOp::ApplyEditingState`]. Allocation-free.
+    pub fn has_preedit(&self) -> bool {
+        self.composition.preedit.is_some()
+    }
+
     /// The current editing value in byte offsets.
     pub fn editing_state_bytes(&self) -> EditingStateBytes {
         EditingStateBytes {
@@ -600,6 +607,10 @@ impl TextEditor {
             self.text = state.text;
             self.composition.text_replaced();
             self.relayout(ctx);
+            // The old selection's granularity base was refreshed by clamping
+            // only and may sit inside a char of the new text: drop it, keeping
+            // the (already floored) anchor and focus.
+            self.selection = Selection::new(self.selection.anchor(), self.selection.focus());
         }
         if self.text.is_char_boundary(state.base) && self.text.is_char_boundary(state.extent) {
             self.selection =
@@ -754,54 +765,137 @@ mod tests {
         assert_eq!(st.extent, 2);
     }
 
-    #[test]
-    fn a_replaced_text_never_leaves_the_caret_inside_a_char() {
-        for op in [
-            EditOp::Backdelete,
-            EditOp::Delete,
-            EditOp::Insert("x".into()),
-        ] {
-            let (mut ed, mut cx) = editor();
-            ed.apply(EditOp::Insert("abc".into()), &mut cx);
-            ed.apply(
-                EditOp::ApplyEditingState(EditingStateBytes {
-                    text: "abc".into(),
-                    base: 1,
-                    extent: 1,
-                    composing: None,
-                }),
-                &mut cx,
-            );
-            // 5 is off a boundary of "\u{e9}a" (and past its end): rejected.
-            ed.apply(
-                EditOp::ApplyEditingState(EditingStateBytes {
-                    text: "\u{e9}a".into(),
-                    base: 5,
-                    extent: 5,
-                    composing: None,
-                }),
-                &mut cx,
-            );
-            let st = ed.editing_state_bytes();
-            assert!(ed.text().is_char_boundary(st.base) && ed.text().is_char_boundary(st.extent));
-            ed.apply(op, &mut cx);
-        }
-        // Shrunk text with a rejected (mid-char) offset: the old caret is floored.
-        let (mut ed, mut cx) = editor();
-        ed.apply(EditOp::Insert("abcd".into()), &mut cx);
+    /// Replaces the whole text and selection through the state-sync path.
+    fn sync(ed: &mut TextEditor, cx: &mut TextContext, text: &str, base: usize, extent: usize) {
         ed.apply(
             EditOp::ApplyEditingState(EditingStateBytes {
-                text: "\u{e9}".into(),
-                base: 1,
-                extent: 1,
+                text: text.into(),
+                base,
+                extent,
                 composing: None,
             }),
+            cx,
+        );
+    }
+
+    #[test]
+    fn a_replaced_text_never_leaves_the_caret_inside_a_char() {
+        // (op, text left by it, caret left by it) after the caret is floored to 0 in "\u{e9}a".
+        let cases = [
+            (EditOp::Backdelete, "\u{e9}a", 0),
+            (EditOp::Delete, "a", 0),
+            (EditOp::Insert("x".into()), "x\u{e9}a", 1),
+        ];
+        for (op, text, caret) in cases {
+            let (mut ed, mut cx) = editor();
+            sync(&mut ed, &mut cx, "abc", 1, 1);
+            // 5 is off a boundary of "\u{e9}a" (and past its end): rejected, and
+            // the old caret (1, inside the 2-byte char) is floored.
+            sync(&mut ed, &mut cx, "\u{e9}a", 5, 5);
+            let st = ed.editing_state_bytes();
+            assert_eq!((st.base, st.extent), (0, 0));
+            ed.apply(op, &mut cx);
+            assert_eq!(ed.text(), text);
+            let st = ed.editing_state_bytes();
+            assert_eq!((st.base, st.extent), (caret, caret));
+        }
+    }
+
+    #[test]
+    fn a_shrunk_text_floors_an_in_range_offset_inside_a_char() {
+        // The old caret 1 is in range of "\u{e9}x" yet inside its first char:
+        // clamping alone would leave it there.
+        let (mut ed, mut cx) = editor();
+        sync(&mut ed, &mut cx, "abcd", 1, 1);
+        sync(&mut ed, &mut cx, "\u{e9}x", 1, 1);
+        let st = ed.editing_state_bytes();
+        assert_eq!((st.base, st.extent), (0, 0));
+        ed.apply(EditOp::Backdelete, &mut cx);
+        ed.apply(EditOp::Delete, &mut cx);
+        assert_eq!(ed.text(), "x");
+    }
+
+    #[test]
+    fn a_replaced_text_floors_both_ends_of_a_range_selection() {
+        let (mut ed, mut cx) = editor();
+        sync(&mut ed, &mut cx, "abcdef", 1, 4);
+        // "\u{e9}x\u{e9}": both old ends are inside a char; both are rejected.
+        sync(&mut ed, &mut cx, "\u{e9}x\u{e9}", 1, 4);
+        let st = ed.editing_state_bytes();
+        assert_eq!((st.base, st.extent), (0, 3));
+        assert_eq!(ed.selected_text(), Some("\u{e9}x"));
+
+        // A 4-byte emoji: offsets 1..3 are inside it.
+        let (mut ed, mut cx) = editor();
+        sync(&mut ed, &mut cx, "abcdef", 1, 3);
+        sync(&mut ed, &mut cx, &format!("{EMOJI}a"), 1, 3);
+        let st = ed.editing_state_bytes();
+        assert_eq!((st.base, st.extent), (0, 0));
+        ed.apply(EditOp::Backdelete, &mut cx);
+        assert_eq!(ed.text(), format!("{EMOJI}a"));
+        ed.apply(EditOp::Delete, &mut cx);
+        assert_eq!(ed.text(), "a");
+    }
+
+    #[test]
+    fn a_valid_selection_is_not_moved_by_relayout() {
+        let (mut ed, mut cx) = editor();
+        sync(&mut ed, &mut cx, "abc", 0, 0);
+        sync(&mut ed, &mut cx, "\u{e9}a", 0, 2);
+        let st = ed.editing_state_bytes();
+        assert_eq!((st.base, st.extent), (0, 2));
+        ed.set_wrap_width(Some(200.0), &mut cx);
+        ed.set_wrap_width(None, &mut cx);
+        let st = ed.editing_state_bytes();
+        assert_eq!((st.base, st.extent), (0, 2));
+    }
+
+    #[test]
+    fn a_word_drag_after_a_text_replacement_never_uses_a_stale_word_base() {
+        let (mut ed, mut cx) = editor();
+        ed.apply(EditOp::Insert("hi there".into()), &mut cx);
+        let at = |ed: &mut TextEditor, cx: &mut TextContext, n: usize| {
+            ed.apply(EditOp::Home { select: false }, cx);
+            for _ in 0..n {
+                ed.apply(EditOp::MoveRight { select: false }, cx);
+            }
+            ed.cursor_rect(1.0).expect("a caret")
+        };
+        let there = at(&mut ed, &mut cx, 5);
+        let hi = at(&mut ed, &mut cx, 1);
+        let y = there.center().y as f32;
+        ed.apply(
+            EditOp::SelectWordAtPoint {
+                x: there.x0 as f32,
+                y,
+            },
+            &mut cx,
+        );
+        assert_eq!(ed.selected_text(), Some("there"));
+        // Drag back over "hi": anchor 8 and focus 0 are on boundaries, the
+        // word base (3, 8) is not once the text below replaces this one.
+        ed.apply(
+            EditOp::MoveToPoint {
+                x: hi.x0 as f32,
+                y,
+                select: true,
+            },
             &mut cx,
         );
         let st = ed.editing_state_bytes();
-        assert!(ed.text().is_char_boundary(st.base));
-        ed.apply(EditOp::Backdelete, &mut cx);
-        ed.apply(EditOp::Delete, &mut cx);
+        assert_eq!((st.base, st.extent), (8, 0));
+        // In this text anchor 8 and focus 0 are boundaries, but offset 3 (the
+        // old word's start) is inside the 2-byte char at 2..4; the offered
+        // caret 3 is rejected, so the old selection stays.
+        sync(&mut ed, &mut cx, "aa\u{e9} aaaaa aaaaa", 3, 3);
+        let st = ed.editing_state_bytes();
+        assert!(ed.text().is_char_boundary(st.base) && ed.text().is_char_boundary(st.extent));
+        for x in [500.0, 0.0, 500.0] {
+            ed.apply(EditOp::MoveToPoint { x, y, select: true }, &mut cx);
+            let st = ed.editing_state_bytes();
+            assert!(ed.text().is_char_boundary(st.base) && ed.text().is_char_boundary(st.extent));
+            let _ = ed.selected_text();
+        }
     }
 
     #[test]
