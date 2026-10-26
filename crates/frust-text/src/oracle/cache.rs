@@ -843,13 +843,39 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
         file.write_all(bytes)?;
         file.sync_all()
     });
-    let result = written.and_then(|()| std::fs::rename(&temp, path));
+    let result = written.and_then(|()| rename_with_retry(&temp, path));
     if result.is_err() {
         let _ = std::fs::remove_file(&temp);
     } else {
         sync_dir(parent);
     }
     result
+}
+
+/// `rename` over the destination, retried on Windows: when two writers
+/// replace the same file at once, the loser's `MoveFileEx` answers "access
+/// denied" (or a sharing violation) for a moment even though nothing holds
+/// the file. Unix renames atomically and never retries.
+fn rename_with_retry(from: &Path, to: &Path) -> io::Result<()> {
+    const ATTEMPTS: u32 = 8;
+    let mut attempt = 0;
+    loop {
+        match std::fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(e) if cfg!(windows) && attempt + 1 < ATTEMPTS && is_transient_rename_error(&e) => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(1 << attempt.min(4)));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Windows `ERROR_ACCESS_DENIED` (5) or `ERROR_SHARING_VIOLATION` (32) on a
+/// rename: both transient while another process or thread replaces or
+/// opens the destination.
+fn is_transient_rename_error(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::PermissionDenied || e.raw_os_error() == Some(32)
 }
 
 /// Best-effort fsync of a directory so the rename itself is durable.
