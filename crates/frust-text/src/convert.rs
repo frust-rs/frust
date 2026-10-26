@@ -1,8 +1,10 @@
-//! parley layout -> `frust_scene` glyph-run conversion.
+//! Line table / parley layout -> `frust_scene` glyph-run conversion.
 //!
-//! This module owns the parley -> [`frust_scene::GlyphRun`] glyph-mapping
-//! contract — the one `frust-engine`'s text lowering (`text/`, built on
-//! `glifo`) consumes.
+//! This module owns the glyph-mapping contract `frust-engine`'s text lowering
+//! (`text/`, built on `glifo`) consumes: [`lines_to_scene_runs`] walks a
+//! [`crate::TextLayout`]'s line table over its [`Shaped`] paragraph, and
+//! [`layout_to_scene_runs`] walks a parley layout (the [`crate::TextEditor`]'s,
+//! until the editor moves onto the line layout too). Both emit the same shape.
 //!
 //! # Coordinate convention
 //!
@@ -10,34 +12,134 @@
 //! are exactly what `glifo`'s own `Glyph` (`x`/`y`, each documented "offset in
 //! run, relative to transform") expects:
 //!
-//! - `x` is the glyph's absolute horizontal position within its run, measured
-//!   from the run origin — parley's per-glyph advance offset plus the run's
-//!   `offset()` (the leading whitespace/indent before the first glyph). This is
-//!   the value produced by [`parley`]'s `positioned_glyphs()`.
-//! - `y` is the glyph's baseline-relative vertical position with the line
-//!   baseline already applied (again via `positioned_glyphs()`), so glyphs on
-//!   the same line share a `y` and successive lines get distinct, increasing
-//!   `y` values.
+//! - `x` is the glyph's absolute horizontal position within the layout: the
+//!   line's alignment offset plus the pen advance of every glyph (and every
+//!   justified space's stretch) before it in visual order, plus the glyph's
+//!   own offset from its pen position.
+//! - `y` is the line's baseline plus the glyph's own (Y-down) offset, so
+//!   glyphs on the same line share a `y` and successive lines get distinct,
+//!   increasing `y` values.
 //!
-//! The block-level placement (`origin`, passed by the widget) is **not** baked
-//! into the glyph coordinates; it lives on [`frust_scene::GlyphRun::transform`]
-//! as a translation. The render backend applies that transform to the whole
+//! One [`GlyphRun`] is emitted per (line, shaped run) span, split further
+//! where the span's characters change style (brush). The block-level
+//! placement (`origin`, passed by the widget) is **not** baked into the glyph
+//! coordinates; it lives on [`frust_scene::GlyphRun::transform`] as a
+//! translation. The render backend applies that transform to the whole
 //! run — the engine compiler composes it into the run's paint and its glyph
 //! outlines alike (`frust-engine`'s `compile_glyph_run`). Keeping origin in the
 //! transform (rather than added into every glyph) lets the scene builder compose
 //! ancestor transforms cheaply (see `frust_scene::SceneBuilder::draw_glyph_run`).
+//!
+//! # `.notdef` scan
+//!
+//! Every walk counts the visible-character glyphs that shaped to glyph 0 and
+//! warns once per font ([`notdef_glyph_count`]).
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use kurbo::{Affine, Point};
-use peniko::Brush;
+use peniko::{Brush, FontData};
 
 use frust_scene::{FontHandle, Glyph, GlyphRun};
 
-/// Walks every line's glyph runs, mapping each into a scene glyph run whose
-/// transform translates it to `origin`.
+use crate::context::shape::Shaped;
+use crate::layout::{ELLIPSIS, LineTable, Paragraph, Source};
+
+/// Walks `table`'s lines over `paragraph` (whose text is `text`), emitting
+/// glyph runs at the layout origin (an identity transform).
+pub(crate) fn lines_to_scene_runs(
+    paragraph: &Paragraph<'_>,
+    text: &str,
+    table: &LineTable,
+) -> Vec<GlyphRun> {
+    let transform = Affine::IDENTITY;
+    let mut ellipsis_text = [0u8; 4];
+    let ellipsis_text: &str = ELLIPSIS.encode_utf8(&mut ellipsis_text);
+    let mut runs = Vec::new();
+    let mut notdef = NotdefScan::default();
+
+    for line in &table.lines {
+        let baseline = line.metrics.baseline;
+        let mut pen = line.metrics.offset;
+        for item in &table.items[line.items.clone()] {
+            let shaped: &Shaped = paragraph.source(item.source);
+            let source_text = match item.source {
+                Source::Text => text,
+                Source::Ellipsis => ellipsis_text,
+            };
+            let run = &shaped.runs[item.run];
+            let face = &shaped.faces[run.face];
+            let data = FontData::new(face.blob.clone(), face.index);
+            // The variation instance the shaper chose (a requested weight on
+            // a variable face); all-zero coords name the default and are dropped.
+            let font = FontHandle::new(data.clone()).with_normalized_coords(&run.coords);
+            let mut current: Option<(u16, Vec<Glyph>)> = None;
+            let flush = |current: &mut Option<(u16, Vec<Glyph>)>, runs: &mut Vec<GlyphRun>| {
+                let Some((style, glyphs)) = current.take() else {
+                    return;
+                };
+                if glyphs.is_empty() {
+                    return;
+                }
+                let style = paragraph.style(item.source, style);
+                runs.push(GlyphRun {
+                    font: font.clone(),
+                    font_size: run.font_size,
+                    brush: Brush::Solid(style.color),
+                    transform,
+                    glyphs,
+                });
+            };
+            let clusters = item.clusters.clone();
+            let visual: Box<dyn Iterator<Item = usize>> = if item.bidi_level % 2 == 1 {
+                Box::new(clusters.rev())
+            } else {
+                Box::new(clusters)
+            };
+            for ci in visual {
+                let cluster = &shaped.clusters[ci];
+                let first = shaped.chars.get(cluster.chars.start as usize);
+                let style = first.map_or(0, |c| c.style_index);
+                if current.as_ref().is_some_and(|(s, _)| *s != style) {
+                    flush(&mut current, &mut runs);
+                }
+                let glyphs = &mut current.get_or_insert_with(|| (style, Vec::new())).1;
+                let ids =
+                    &shaped.glyphs[cluster.glyphs.start as usize..cluster.glyphs.end as usize];
+                for g in ids {
+                    glyphs.push(Glyph {
+                        id: g.id,
+                        x: pen + g.x,
+                        y: baseline + g.y,
+                    });
+                    pen += g.advance;
+                }
+                if ids.is_empty() {
+                    pen += cluster.advance;
+                }
+                if item.source == Source::Text && line.stretched.binary_search(&(ci as u32)).is_ok()
+                {
+                    pen += line.justify;
+                }
+                let ch = first
+                    .and_then(|c| source_text.get(c.byte_start as usize..))
+                    .and_then(|rest| rest.chars().next());
+                if let Some(ch) = ch {
+                    notdef.scan_cluster(&data, ch, ids.iter().map(|g| g.id));
+                }
+            }
+            flush(&mut current, &mut runs);
+        }
+    }
+
+    notdef.report();
+    runs
+}
+
+/// Walks every line's glyph runs of a parley layout, mapping each into a scene
+/// glyph run whose transform translates it to `origin`.
 ///
 /// Inline boxes (not used in v1) are skipped. An empty or run-less layout
 /// yields an empty vector.
@@ -54,9 +156,13 @@ pub(crate) fn layout_to_scene_runs(layout: &parley::Layout<Brush>, origin: Point
             };
 
             let run = glyph_run.run();
-            notdef.scan_run(run);
-            // The variation instance the shaper chose (a requested weight on
-            // a variable face); all-zero coords name the default and are dropped.
+            for cluster in run.clusters() {
+                notdef.scan_cluster(
+                    run.font(),
+                    cluster.source_char(),
+                    cluster.glyphs().map(|g| g.id),
+                );
+            }
             let font =
                 FontHandle::new(run.font().clone()).with_normalized_coords(run.normalized_coords());
             let font_size = run.font_size();
@@ -101,40 +207,40 @@ pub fn notdef_glyph_count() -> u64 {
 struct NotdefScan {
     /// Font identity -> (glyph count, up to 8 distinct affected characters).
     hits: Vec<(String, u64, Vec<char>)>,
+    /// The last font a hit was recorded for, and its identity: a run's
+    /// clusters share one font, so the name is read once per run.
+    last: Option<(FontData, String)>,
 }
 
 impl NotdefScan {
-    fn scan_run(&mut self, run: &parley::layout::Run<'_, Brush>) {
-        let mut count = 0u64;
-        let mut chars: Vec<char> = Vec::new();
-        for cluster in run.clusters() {
-            let ch = cluster.source_char();
-            if ch.is_whitespace() || ch.is_control() || is_format_char(ch) {
-                continue;
-            }
-            for g in cluster.glyphs() {
-                if g.id == 0 {
-                    count += 1;
-                    if chars.len() < 8 && !chars.contains(&ch) {
-                        chars.push(ch);
-                    }
-                }
-            }
+    /// Records the `.notdef` glyphs (`glyphs` holding id 0) of one cluster
+    /// whose first character is `ch`, drawn with `font`.
+    fn scan_cluster(&mut self, font: &FontData, ch: char, glyphs: impl Iterator<Item = u32>) {
+        if ch.is_whitespace() || ch.is_control() || is_format_char(ch) {
+            return;
         }
+        let count = glyphs.filter(|&id| id == 0).count() as u64;
         if count == 0 {
             return;
         }
-        let name = font_identity(run.font());
+        let name = match &self.last {
+            Some((last, name)) if last.data.id() == font.data.id() && last.index == font.index => {
+                name.clone()
+            }
+            _ => {
+                let name = font_identity(font);
+                self.last = Some((font.clone(), name.clone()));
+                name
+            }
+        };
         match self.hits.iter_mut().find(|h| h.0 == name) {
             Some(h) => {
                 h.1 += count;
-                for c in chars {
-                    if h.2.len() < 8 && !h.2.contains(&c) {
-                        h.2.push(c);
-                    }
+                if h.2.len() < 8 && !h.2.contains(&ch) {
+                    h.2.push(ch);
                 }
             }
-            None => self.hits.push((name, count, chars)),
+            None => self.hits.push((name, count, vec![ch])),
         }
     }
 
@@ -167,7 +273,7 @@ fn is_format_char(c: char) -> bool {
 
 /// Best-effort human name for a font: its `name` table full name (ID 4) or
 /// family (ID 1), else a size-based placeholder.
-fn font_identity(font: &parley::FontData) -> String {
+fn font_identity(font: &FontData) -> String {
     let data = font.data.as_ref();
     name_table_string(data, font.index)
         .unwrap_or_else(|| format!("unnamed font ({} bytes)", data.len()))
