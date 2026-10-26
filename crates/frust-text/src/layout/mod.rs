@@ -689,6 +689,27 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "a paragraph has at least one style")]
+    fn a_paragraph_with_no_styles_is_refused() {
+        let mut oracle = cover_all_oracle();
+        let shaped = ShapeContext::default().shape(&mut oracle, "Hello", &style(16.0));
+        let styles: [TextStyle; 0] = [];
+        let _ = Paragraph::new(&shaped, &styles, None);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "a style index is out of range")]
+    fn an_out_of_range_style_index_is_caught_at_construction() {
+        let mut oracle = cover_all_oracle();
+        let mut shaped = ShapeContext::default().shape(&mut oracle, "Hello", &style(16.0));
+        // One style, but a run that claims the second one.
+        shaped.runs[0].style_index = 1;
+        let styles = [style(16.0)];
+        let _ = Paragraph::new(&shaped, &styles, None);
+    }
+
+    #[test]
     fn a_long_word_overflows_unless_the_paragraph_wraps_anywhere() {
         let s = style(18.0);
         let mut oracle = cover_all_oracle();
