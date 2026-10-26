@@ -6,36 +6,1142 @@
 //! The CoreText oracle backend (macOS, iOS).
 //!
 //! Compiled only for `target_vendor = "apple"` (the cfg gate is on this module's `mod` line in
-//! `oracle/mod.rs`). A stub until o-02 fills it in: every question is a miss,
-//! so the oracle falls through to the app-font registry's generic fallbacks.
+//! `oracle/mod.rs`). Per miss: a base `CTFont` for the request (the chain's first family CoreText
+//! knows, else the generic slot's; weight/slant/width as `kCTFontTraitsAttribute`), then
+//! `CTFontCreateForStringWithLanguage` on the cluster. The answer's PostScript name and
+//! `kCTFontURLAttribute` become (file, face index) by a walk of only the file's TTC header, table
+//! directories, `name` and `fvar` tables: name ID 6, else the `fvar` named instance whose
+//! `postScriptNameID` matches. CoreText's own descriptor order is not the face index.
 //!
-//! Planned shape (s-02): `CTFontCreateForStringWithLanguage` per cluster, then the returned font's PostScript name and `kCTFontURLAttribute` map to (file, face index) by name ID 6 or an `fvar` named instance, with `CTFontCopyVariation` as the face's variation coordinates.
+//! Dot-prefixed (hidden) answers are returned with `hidden` set, never swapped for a sibling face.
+//! One exception: a hidden face with only `hvgl` glyph data is re-asked under a public base
+//! (Helvetica, same traits and locale), whose public answer replaces it. `CTFontCreateWithName` is
+//! never called: on a hidden name it returns Times.
 
 #![allow(unsafe_code)]
 
-use super::{Backend, FaceSource, FallbackRequest};
-use crate::style::GenericSlot;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+use objc2_core_foundation::{CFDictionary, CFNumber, CFRange, CFRetained, CFString, CFType, CFURL};
+use objc2_core_text::{
+    CTFont, CTFontDescriptor, CTFontSymbolicTraits, CTFontUIFontType, kCTFontFamilyNameAttribute,
+    kCTFontSlantTrait, kCTFontSymbolicTrait, kCTFontTraitsAttribute, kCTFontURLAttribute,
+    kCTFontWeightTrait, kCTFontWidthTrait,
+};
+use read_fonts::tables::fvar::Fvar;
+use read_fonts::tables::name::Name;
+use read_fonts::types::NameId;
+use read_fonts::{FontData, FontRead};
+
+use super::{Backend, FaceSource, FallbackRequest, VariationSetting};
+use crate::style::{FamilyName, FontStyle, GenericSlot};
+
+/// Point size of every base font. Only `opsz` depends on it, and `opsz` is dropped.
+const BASE_POINT_SIZE: f64 = 17.0;
+
+/// The public base a hidden `hvgl`-only answer is re-asked under.
+const PUBLIC_BASE_FAMILY: &str = "Helvetica";
+
+/// CoreText's "nothing installed covers this" face; treated as a miss.
+const LAST_RESORT: &str = "LastResort";
+
+/// Where the OS build lives on macOS and iOS alike.
+const SYSTEM_VERSION_PLIST: &str = "/System/Library/CoreServices/SystemVersion.plist";
+
+/// Largest `name`/`fvar` table the face walk reads; anything bigger is a corrupt directory.
+const MAX_TABLE_BYTES: u32 = 4 << 20;
+
+/// CSS weight to CoreText's normalized `kCTFontWeightTrait`, at AppKit's `NSFontWeight` stops.
+const WEIGHT_STOPS: [(f32, f32); 9] = [
+    (100.0, -0.8),
+    (200.0, -0.6),
+    (300.0, -0.4),
+    (400.0, 0.0),
+    (500.0, 0.23),
+    (600.0, 0.3),
+    (700.0, 0.4),
+    (800.0, 0.56),
+    (900.0, 0.62),
+];
+
+/// `kCTFontSlantTrait` is normalized so that 1.0 is 30 degrees.
+const SLANT_FULL_DEGREES: f32 = 30.0;
+
+/// The slant asked for italic, or for an oblique with no angle (CSS's 14 degrees).
+const DEFAULT_SLANT_DEGREES: f32 = 14.0;
+
+/// Requested weight/slant/width.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Traits {
+    weight: f32,
+    slant: FontStyle,
+    width: f32,
+}
+
+impl Traits {
+    fn of(req: &FallbackRequest) -> Self {
+        Self {
+            weight: req.weight.value(),
+            slant: req.slant,
+            width: req.width,
+        }
+    }
+
+    const REGULAR: Self = Self {
+        weight: 400.0,
+        slant: FontStyle::Normal,
+        width: 1.0,
+    };
+
+    fn normalized_weight(self) -> f64 {
+        let w = self.weight.clamp(100.0, 900.0);
+        for pair in WEIGHT_STOPS.windows(2) {
+            let ((w0, n0), (w1, n1)) = (pair[0], pair[1]);
+            if w <= w1 {
+                return f64::from(n0 + (n1 - n0) * (w - w0) / (w1 - w0));
+            }
+        }
+        f64::from(WEIGHT_STOPS[WEIGHT_STOPS.len() - 1].1)
+    }
+
+    fn slant_degrees(self) -> f32 {
+        match self.slant {
+            FontStyle::Normal => 0.0,
+            FontStyle::Italic => DEFAULT_SLANT_DEGREES,
+            FontStyle::Oblique(angle) => angle.unwrap_or(DEFAULT_SLANT_DEGREES),
+        }
+    }
+
+    /// Width ratio to `kCTFontWidthTrait` (-1 condensed .. 1 expanded): 0.5 and 2.0 are the ends.
+    fn normalized_width(self) -> f64 {
+        let w = self.width.clamp(0.5, 2.0);
+        let n = if w < 1.0 { (w - 1.0) / 0.5 } else { w - 1.0 };
+        f64::from(n)
+    }
+
+    fn symbolic(self) -> u32 {
+        let mut bits = 0;
+        if self.slant != FontStyle::Normal {
+            bits |= CTFontSymbolicTraits::TraitItalic.0;
+        }
+        if self.weight >= 600.0 {
+            bits |= CTFontSymbolicTraits::TraitBold.0;
+        }
+        bits
+    }
+
+    /// Hashable form for the base-font cache: weight, slant kind, slant angle, width.
+    fn key(self) -> (u32, u8, u32, u32) {
+        let kind = match self.slant {
+            FontStyle::Normal => 0,
+            FontStyle::Italic => 1,
+            FontStyle::Oblique(_) => 2,
+        };
+        (
+            self.weight.to_bits(),
+            kind,
+            self.slant_degrees().to_bits(),
+            self.width.to_bits(),
+        )
+    }
+}
+
+/// The safe wrappers around every CoreText call this backend makes. Every Create/Copy call returns
+/// a +1 reference that objc2 wraps in `CFRetained` (the Create rule: released once, on drop), and
+/// every borrowed argument is a live local that outlives its call.
+mod ct {
+    use super::*;
+
+    /// A CoreText font the backend owns; a clone is a `CFRetain`.
+    #[derive(Clone)]
+    pub(super) struct Font(CFRetained<CTFont>);
+
+    // SAFETY: Apple documents CoreText as thread-safe: "All individual functions in Core Text are
+    // thread-safe. Font objects (CTFont, CTFontDescriptor, and associated objects) can be used
+    // simultaneously by multiple operations, work queues, or threads." (Core Text Programming
+    // Guide, "Core Text Objects Are C-Language Opaque Types"). A `Font` is immutable: it is only
+    // read and used as a fallback base, and its `CFRelease` on drop is thread-safe too.
+    unsafe impl Send for Font {}
+
+    /// A descriptor naming `family` (when given) and `traits`.
+    fn descriptor(family: Option<&str>, traits: Traits) -> CFRetained<CTFontDescriptor> {
+        // SAFETY: reading immutable CoreText key constants.
+        let (weight_key, slant_key, width_key, symbolic_key, traits_key, family_key) = unsafe {
+            (
+                kCTFontWeightTrait,
+                kCTFontSlantTrait,
+                kCTFontWidthTrait,
+                kCTFontSymbolicTrait,
+                kCTFontTraitsAttribute,
+                kCTFontFamilyNameAttribute,
+            )
+        };
+        let weight = CFNumber::new_f64(traits.normalized_weight());
+        let slant = CFNumber::new_f64(f64::from(traits.slant_degrees() / SLANT_FULL_DEGREES));
+        let width = CFNumber::new_f64(traits.normalized_width());
+        let symbolic = CFNumber::new_i64(i64::from(traits.symbolic()));
+        let trait_dict = CFDictionary::<CFString, CFType>::from_slices(
+            &[weight_key, slant_key, width_key, symbolic_key],
+            &[
+                weight.as_ref(),
+                slant.as_ref(),
+                width.as_ref(),
+                symbolic.as_ref(),
+            ],
+        );
+        let family_name = family.map(CFString::from_str);
+        let mut keys: Vec<&CFString> = vec![traits_key];
+        let mut values: Vec<&CFType> = vec![trait_dict.as_ref()];
+        if let Some(name) = &family_name {
+            keys.push(family_key);
+            values.push(name.as_ref());
+        }
+        let attributes = CFDictionary::<CFString, CFType>::from_slices(&keys, &values);
+        // SAFETY: the dictionary maps CoreText attribute names to the types they document (a
+        // traits dictionary of CFNumbers, a family-name CFString); Create rule.
+        unsafe { CTFontDescriptor::with_attributes(attributes.as_opaque()) }
+    }
+
+    impl Font {
+        /// The system UI font for `language`, at `traits`.
+        pub(super) fn system_ui(language: Option<&str>, traits: Traits) -> Option<Self> {
+            let language = language.map(CFString::from_str);
+            // SAFETY: plain values and an optional live CFString; a null result stays `None`, a
+            // non-null one follows the Create rule.
+            let ui = unsafe {
+                CTFont::new_ui_font_for_language(
+                    CTFontUIFontType::System,
+                    BASE_POINT_SIZE,
+                    language.as_deref(),
+                )
+            }?;
+            if traits == Traits::REGULAR {
+                return Some(Self(ui));
+            }
+            let wanted = descriptor(None, traits);
+            // SAFETY: a live font and descriptor; size 0 and a null matrix keep the original's;
+            // Create rule.
+            let font = unsafe { ui.copy_with_attributes(0.0, core::ptr::null(), Some(&wanted)) };
+            Some(Self(font))
+        }
+
+        /// The installed `family` at `traits`, or `None` when CoreText matches another family.
+        pub(super) fn family(family: &str, traits: Traits) -> Option<Self> {
+            let wanted = descriptor(Some(family), traits);
+            // SAFETY: a live descriptor; a null matrix is the documented identity argument;
+            // Create rule.
+            let font = unsafe {
+                CTFont::with_font_descriptor(&wanted, BASE_POINT_SIZE, core::ptr::null())
+            };
+            let font = Self(font);
+            font.family_name()
+                .eq_ignore_ascii_case(family)
+                .then_some(font)
+        }
+
+        /// CoreText's face for `text` with this font as the base, under `language`.
+        pub(super) fn for_string(&self, text: &str, language: Option<&str>) -> Option<Self> {
+            let string = CFString::from_str(text);
+            let range = CFRange {
+                location: 0,
+                length: string.length(),
+            };
+            if range.length == 0 {
+                return None;
+            }
+            let language = language.map(CFString::from_str);
+            // SAFETY: a live font and string, a range inside the string, an optional live
+            // language string; Create rule.
+            let font = unsafe {
+                self.0
+                    .for_string_with_language(&string, range, language.as_deref())
+            };
+            Some(Self(font))
+        }
+
+        pub(super) fn postscript_name(&self) -> String {
+            // SAFETY: a getter on a live font; the copy follows the Create rule.
+            unsafe { self.0.post_script_name() }.to_string()
+        }
+
+        pub(super) fn family_name(&self) -> String {
+            // SAFETY: a getter on a live font; the copy follows the Create rule.
+            unsafe { self.0.family_name() }.to_string()
+        }
+
+        /// The font file (`kCTFontURLAttribute`), when the font has one.
+        pub(super) fn path(&self) -> Option<PathBuf> {
+            // SAFETY: reading an immutable CoreText constant, then a getter on a live font.
+            let value = unsafe { self.0.attribute(kCTFontURLAttribute) }?;
+            value.downcast::<CFURL>().ok()?.to_file_path()
+        }
+
+        /// `CTFontCopyVariation` as (axis tag, user value), in tag order.
+        pub(super) fn variation(&self) -> Vec<VariationSetting> {
+            // SAFETY: a getter on a live font; a null result (no axes) stays `None`.
+            let Some(dict) = (unsafe { self.0.variation() }) else {
+                return Vec::new();
+            };
+            // SAFETY: CTFontCopyVariation documents its dictionary as axis identifier
+            // (CFNumber) to axis value (CFNumber); the cast moves the same +1 reference.
+            let dict: CFRetained<CFDictionary<CFNumber, CFNumber>> =
+                unsafe { CFRetained::cast_unchecked(dict) };
+            let (tags, values) = dict.to_vecs();
+            let mut out: Vec<VariationSetting> = tags
+                .iter()
+                .zip(values.iter())
+                .filter_map(|(tag, value)| {
+                    let tag = u32::try_from(tag.as_i64()?).ok()?;
+                    Some(VariationSetting {
+                        tag: tag.to_be_bytes(),
+                        value: value.as_f64()? as f32,
+                    })
+                })
+                .collect();
+            out.sort_by_key(|v| v.tag);
+            out
+        }
+    }
+}
+
+use ct::Font;
+
+/// One face of a font file, as the tables-only walk read it.
+#[derive(Clone, Debug, Default)]
+struct FileFace {
+    /// Every name ID 6 string of the face.
+    postscript_names: Vec<String>,
+    /// The `fvar` named instances that carry a PostScript name.
+    instances: Vec<(String, Vec<VariationSetting>)>,
+    /// Glyph data only in `hvgl`: no `glyf`, `CFF ` or `CFF2`.
+    hvgl_only: bool,
+}
+
+/// A big-endian `u32` at `at`, if `bytes` holds it.
+fn be_u32(bytes: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_be_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+}
+
+fn be_u16(bytes: &[u8], at: usize) -> Option<u16> {
+    Some(u16::from_be_bytes(bytes.get(at..at + 2)?.try_into().ok()?))
+}
+
+fn read_at(file: &mut File, offset: u64, len: usize) -> Option<Vec<u8>> {
+    file.seek(SeekFrom::Start(offset)).ok()?;
+    let mut buf = vec![0; len];
+    file.read_exact(&mut buf).ok()?;
+    Some(buf)
+}
+
+/// Every string `name` holds for `id`.
+fn name_strings(name: &Name<'_>, id: NameId) -> Vec<String> {
+    let data = name.string_data();
+    let mut out: Vec<String> = Vec::new();
+    for record in name.name_record().iter().filter(|r| r.name_id() == id) {
+        if let Ok(string) = record.string(data) {
+            let string: String = string.chars().collect();
+            if !out.contains(&string) {
+                out.push(string);
+            }
+        }
+    }
+    out
+}
+
+/// Reads the faces of the font file at `path` from its TTC header, table directories and
+/// `name`/`fvar` tables only — never the glyph data.
+fn walk_file(path: &Path) -> Option<Vec<FileFace>> {
+    let mut file = File::open(path).ok()?;
+    let header = read_at(&mut file, 0, 12)?;
+    let offsets: Vec<u32> = if header.get(..4) == Some(b"ttcf".as_slice()) {
+        let count = be_u32(&header, 8)?.min(u32::from(u16::MAX));
+        let list = read_at(&mut file, 12, count as usize * 4)?;
+        (0..count as usize)
+            .filter_map(|i| be_u32(&list, i * 4))
+            .collect()
+    } else {
+        vec![0]
+    };
+    let mut tables: HashMap<(u32, u32), Vec<u8>> = HashMap::new();
+    let mut faces = Vec::with_capacity(offsets.len());
+    for offset in offsets {
+        let directory = read_at(&mut file, u64::from(offset), 12)?;
+        let count = usize::from(be_u16(&directory, 4)?);
+        let records = read_at(&mut file, u64::from(offset) + 12, count * 16)?;
+        let mut face = FileFace {
+            hvgl_only: true,
+            ..FileFace::default()
+        };
+        let (mut has_hvgl, mut name_at, mut fvar_at) = (false, None, None);
+        for record in records.as_chunks::<16>().0 {
+            let at = (be_u32(record, 8)?, be_u32(record, 12)?);
+            match &record[..4] {
+                b"glyf" | b"CFF " | b"CFF2" => face.hvgl_only = false,
+                b"hvgl" => has_hvgl = true,
+                b"name" => name_at = Some(at),
+                b"fvar" => fvar_at = Some(at),
+                _ => {}
+            }
+        }
+        face.hvgl_only &= has_hvgl;
+        let mut table = |at: Option<(u32, u32)>| -> Option<Vec<u8>> {
+            let at = at.filter(|(_, len)| *len <= MAX_TABLE_BYTES)?;
+            let bytes = match tables.entry(at) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    entry.insert(read_at(&mut file, u64::from(at.0), at.1 as usize)?)
+                }
+            };
+            Some(bytes.clone())
+        };
+        let name_bytes = table(name_at);
+        let fvar_bytes = table(fvar_at);
+        let Some(name) = name_bytes
+            .as_deref()
+            .and_then(|b| Name::read(FontData::new(b)).ok())
+        else {
+            faces.push(face);
+            continue;
+        };
+        face.postscript_names = name_strings(&name, NameId::POSTSCRIPT_NAME);
+        if let Some(fvar) = fvar_bytes
+            .as_deref()
+            .and_then(|b| Fvar::read(FontData::new(b)).ok())
+            && let (Ok(axes), Ok(instances)) = (fvar.axes(), fvar.instances())
+        {
+            for instance in instances.iter().flatten() {
+                let Some(id) = instance.post_script_name_id else {
+                    continue;
+                };
+                let coords = axes
+                    .iter()
+                    .zip(instance.coordinates)
+                    .map(|(axis, value)| VariationSetting {
+                        tag: axis.axis_tag().to_be_bytes(),
+                        value: value.get().to_f64() as f32,
+                    })
+                    .collect::<Vec<_>>();
+                for ps in name_strings(&name, id) {
+                    face.instances.push((ps, coords.clone()));
+                }
+            }
+        }
+        faces.push(face);
+    }
+    Some(faces)
+}
+
+/// Where a PostScript name lives: the face whose name ID 6 is `ps`, else the face with an `fvar`
+/// named instance called `ps` (with that instance's coordinates).
+fn locate(faces: &[FileFace], ps: &str) -> Option<(u32, Vec<VariationSetting>)> {
+    if let Some(index) = faces
+        .iter()
+        .position(|f| f.postscript_names.iter().any(|n| n == ps))
+    {
+        return Some((index as u32, Vec::new()));
+    }
+    faces.iter().enumerate().find_map(|(index, face)| {
+        face.instances
+            .iter()
+            .find(|(name, _)| name == ps)
+            .map(|(_, coords)| (index as u32, coords.clone()))
+    })
+}
+
+/// `coords` without `opsz` (the request carries no size).
+fn without_opsz(coords: Vec<VariationSetting>) -> Vec<VariationSetting> {
+    coords.into_iter().filter(|v| &v.tag != b"opsz").collect()
+}
+
+/// A PostScript name mapped to its face (cached per name).
+#[derive(Clone, Debug)]
+struct Mapped {
+    path: PathBuf,
+    index: u32,
+    /// The named instance's coordinates; empty for a name ID 6 match.
+    instance: Vec<VariationSetting>,
+    hidden: bool,
+    hvgl_only: bool,
+}
+
+/// Which family a base font is built from.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum BaseFamily {
+    SystemUi,
+    Named(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct BaseKey {
+    family: BaseFamily,
+    traits: (u32, u8, u32, u32),
+    /// Only the system UI font is built per language.
+    language: Option<String>,
+}
+
+/// The concrete families a non-UI generic slot is asked under, in preference order.
+fn generic_families(slot: GenericSlot) -> &'static [&'static str] {
+    match slot {
+        GenericSlot::SansSerif | GenericSlot::SystemUi => &["Helvetica"],
+        GenericSlot::Serif => &["Times", "Times New Roman"],
+        GenericSlot::Monospace => &["Menlo", "Courier"],
+        GenericSlot::Emoji => &["Apple Color Emoji"],
+    }
+}
+
+/// The backend's caches: base fonts, walked files and mapped PostScript names.
+#[derive(Default)]
+struct State {
+    bases: HashMap<BaseKey, Option<Font>>,
+    files: HashMap<PathBuf, Option<Vec<FileFace>>>,
+    names: HashMap<String, Option<Mapped>>,
+}
+
+impl State {
+    fn base(
+        &mut self,
+        family: BaseFamily,
+        traits: Traits,
+        language: Option<&str>,
+    ) -> Option<&Font> {
+        let language = (family == BaseFamily::SystemUi)
+            .then(|| language.map(str::to_owned))
+            .flatten();
+        let key = BaseKey {
+            family,
+            traits: traits.key(),
+            language,
+        };
+        self.bases
+            .entry(key)
+            .or_insert_with_key(|key| match &key.family {
+                BaseFamily::SystemUi => Font::system_ui(key.language.as_deref(), traits),
+                BaseFamily::Named(name) => Font::family(name, traits),
+            })
+            .as_ref()
+    }
+
+    /// The base for a generic slot: the UI font, or its first installed concrete family.
+    fn generic_base(
+        &mut self,
+        slot: GenericSlot,
+        traits: Traits,
+        language: Option<&str>,
+    ) -> Option<&Font> {
+        if slot == GenericSlot::SystemUi {
+            return self.base(BaseFamily::SystemUi, traits, language);
+        }
+        let family = generic_families(slot).iter().find(|f| {
+            self.base(BaseFamily::Named((**f).to_owned()), traits, None)
+                .is_some()
+        })?;
+        self.base(BaseFamily::Named((*family).to_owned()), traits, None)
+    }
+
+    /// `font`'s face, through the per-name cache.
+    fn map(&mut self, font: &Font) -> Option<Mapped> {
+        let ps = font.postscript_name();
+        if ps == LAST_RESORT {
+            return None;
+        }
+        if let Some(mapped) = self.names.get(&ps) {
+            return mapped.clone();
+        }
+        let mapped = font.path().and_then(|path| {
+            let faces = self
+                .files
+                .entry(path.clone())
+                .or_insert_with(|| walk_file(&path));
+            let (index, instance) = locate(faces.as_deref()?, &ps)?;
+            let hvgl_only = faces.as_deref()?.get(index as usize)?.hvgl_only;
+            Some(Mapped {
+                path,
+                index,
+                instance,
+                hidden: ps.starts_with('.'),
+                hvgl_only,
+            })
+        });
+        if mapped.is_none() {
+            log::debug!("frust-text: CoreText face {ps} maps to no face of its file");
+        }
+        self.names.insert(ps, mapped.clone());
+        mapped
+    }
+
+    /// The face answer for `font`: its mapped face at `CTFontCopyVariation`'s coordinates (else
+    /// the named instance's), `opsz` dropped.
+    fn answer(&mut self, font: &Font) -> Option<FaceSource> {
+        let mapped = self.map(font)?;
+        let live = font.variation();
+        let coords = if live.is_empty() {
+            mapped.instance
+        } else {
+            live
+        };
+        let mut source = FaceSource::path(mapped.path, mapped.index);
+        source.variations = without_opsz(coords);
+        source.postscript_name = Some(font.postscript_name());
+        source.hidden = mapped.hidden;
+        Some(source)
+    }
+
+    /// The base font the request's family chain names: its first named family CoreText has,
+    /// else its first generic slot (`SystemUi` when it names none).
+    fn request_base(&mut self, req: &FallbackRequest, traits: Traits) -> Option<&Font> {
+        let language = req.locale.as_deref();
+        let named = req.families.iter().find_map(|f| match f {
+            FamilyName::Named(name) => self
+                .base(BaseFamily::Named(name.clone()), traits, None)
+                .is_some()
+                .then(|| name.clone()),
+            FamilyName::Generic(_) => None,
+        });
+        match named {
+            Some(name) => self.base(BaseFamily::Named(name), traits, None),
+            None => {
+                let slot = req
+                    .generics()
+                    .first()
+                    .copied()
+                    .unwrap_or(GenericSlot::SystemUi);
+                self.generic_base(slot, traits, language)
+            }
+        }
+    }
+
+    /// The whole per-miss resolution, see the module docs.
+    fn resolve(&mut self, req: &FallbackRequest) -> Option<Resolution> {
+        let traits = Traits::of(req);
+        let language = req.locale.as_deref();
+        let first = self
+            .request_base(req, traits)?
+            .for_string(&req.chars, language)?;
+        let mapped = self.map(&first)?;
+        if mapped.hidden && mapped.hvgl_only {
+            let public = self
+                .base(
+                    BaseFamily::Named(PUBLIC_BASE_FAMILY.to_owned()),
+                    traits,
+                    None,
+                )
+                .and_then(|base| base.for_string(&req.chars, language));
+            if let Some(public) = public
+                && !public.postscript_name().starts_with('.')
+                && let Some(source) = self.answer(&public)
+            {
+                return Some(Resolution {
+                    source,
+                    reasked_from: Some(first.postscript_name()),
+                });
+            }
+        }
+        Some(Resolution {
+            source: self.answer(&first)?,
+            reasked_from: None,
+        })
+    }
+
+    fn default_family(&mut self, generic: GenericSlot) -> Option<FaceSource> {
+        if generic == GenericSlot::SystemUi {
+            let ui = self
+                .base(BaseFamily::SystemUi, Traits::REGULAR, None)?
+                .clone();
+            return self.answer(&ui);
+        }
+        let sample = if generic == GenericSlot::Emoji {
+            "\u{1F600}"
+        } else {
+            "a"
+        };
+        let found = self
+            .generic_base(generic, Traits::REGULAR, None)?
+            .for_string(sample, None)?;
+        self.answer(&found)
+    }
+}
+
+/// A resolved request, with the hidden name a public re-ask replaced.
+struct Resolution {
+    source: FaceSource,
+    reasked_from: Option<String>,
+}
+
+/// `ProductBuildVersion` from a `SystemVersion.plist` (XML) by text search.
+fn product_build_version(plist: &str) -> Option<&str> {
+    let (_, after) = plist.split_once("<key>ProductBuildVersion</key>")?;
+    let value = after.trim_start().strip_prefix("<string>")?;
+    let (value, _) = value.split_once("</string>")?;
+    let value = value.trim();
+    (!value.is_empty()).then_some(value)
+}
 
 /// Answers fallback questions through CoreText.
-#[derive(Debug, Default)]
-pub(crate) struct CoreTextBackend {}
+#[derive(Default)]
+pub(crate) struct CoreTextBackend {
+    state: RefCell<State>,
+}
+
+impl std::fmt::Debug for CoreTextBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let state = self.state.borrow();
+        f.debug_struct("CoreTextBackend")
+            .field("bases", &state.bases.len())
+            .field("files", &state.files.len())
+            .field("names", &state.names.len())
+            .finish()
+    }
+}
 
 impl CoreTextBackend {
     pub(crate) fn new() -> Self {
-        Self {}
+        Self::default()
+    }
+
+    fn resolve_traced(&mut self, req: &FallbackRequest) -> Option<Resolution> {
+        let started = Instant::now();
+        let resolution = self.state.get_mut().resolve(req);
+        if let Some(r) = &resolution {
+            log::debug!(
+                "coretext font miss {:?}: {} us, {:?} #{} {:?}{}",
+                req.chars,
+                started.elapsed().as_micros(),
+                r.source.postscript_name,
+                r.source.index,
+                r.source.location,
+                r.reasked_from
+                    .as_ref()
+                    .map(|h| format!(" (re-asked from {h})"))
+                    .unwrap_or_default(),
+            );
+        }
+        resolution
     }
 }
 
 impl Backend for CoreTextBackend {
-    fn resolve(&mut self, _req: &FallbackRequest) -> Option<FaceSource> {
-        None
+    fn resolve(&mut self, req: &FallbackRequest) -> Option<FaceSource> {
+        self.resolve_traced(req).map(|r| r.source)
     }
 
-    fn default_family(&self, _generic: GenericSlot) -> Option<FaceSource> {
-        None
+    fn default_family(&self, generic: GenericSlot) -> Option<FaceSource> {
+        self.state.borrow_mut().default_family(generic)
     }
 
     fn os_build_id(&self) -> String {
-        String::from("coretext-stub")
+        std::fs::read_to_string(SYSTEM_VERSION_PLIST)
+            .ok()
+            .as_deref()
+            .and_then(product_build_version)
+            .map(|build| format!("apple:{build}"))
+            .unwrap_or_else(|| String::from("apple-unknown"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use read_fonts::{FontRef, TableProvider};
+
+    use super::*;
+    use crate::oracle::{FaceLocation, Oracle, RenderCapabilities, ScriptTag};
+    use crate::style::{FontFamily, FontWeight};
+
+    /// The expectations below are macOS 27's installed fonts; elsewhere a test only says why it
+    /// skipped.
+    fn on_macos(test: &str) -> bool {
+        let here = cfg!(target_os = "macos");
+        if !here {
+            println!("{test}: skipped: the expected faces are macOS 27's installed fonts");
+        }
+        here
+    }
+
+    fn request(chars: &str, locale: Option<&str>) -> FallbackRequest {
+        let mut req = FallbackRequest::new(
+            chars,
+            ScriptTag::COMMON,
+            &FontFamily::SystemUi,
+            RenderCapabilities::default(),
+        );
+        req.locale = locale.map(str::to_owned);
+        req
+    }
+
+    fn path_of(source: &FaceSource) -> &Path {
+        match &source.location {
+            FaceLocation::Path(path) => path,
+            FaceLocation::Blob(_) => panic!("CoreText answers are paths"),
+        }
+    }
+
+    fn file_name(source: &FaceSource) -> String {
+        path_of(source)
+            .file_name()
+            .expect("a file name")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn ps(source: &FaceSource) -> &str {
+        source
+            .postscript_name
+            .as_deref()
+            .expect("a PostScript name")
+    }
+
+    fn has_opsz(source: &FaceSource) -> bool {
+        source.variations.iter().any(|v| &v.tag == b"opsz")
+    }
+
+    /// Resolves `chars` under `SystemUi`, printing the answer and the miss's time.
+    fn resolve(backend: &mut CoreTextBackend, chars: &str, locale: Option<&str>) -> Resolution {
+        let started = Instant::now();
+        let resolution = backend
+            .resolve_traced(&request(chars, locale))
+            .unwrap_or_else(|| panic!("{chars:?} {locale:?} resolves"));
+        let source = &resolution.source;
+        println!(
+            "{chars:?} {locale:?} -> {} #{} {} hidden={} coords={:?} re-asked from {:?} ({} us)",
+            file_name(source),
+            source.index,
+            ps(source),
+            source.hidden,
+            source
+                .variations
+                .iter()
+                .map(|v| (String::from_utf8_lossy(&v.tag).into_owned(), v.value))
+                .collect::<Vec<_>>(),
+            resolution.reasked_from,
+            started.elapsed().as_micros(),
+        );
+        resolution
+    }
+
+    /// `text`'s `cmap` glyph ids in `source`'s face.
+    fn glyph_ids(source: &FaceSource, text: &str) -> Vec<u32> {
+        let bytes = std::fs::read(path_of(source)).expect("the face's file is readable");
+        let font = FontRef::from_index(&bytes, source.index).expect("the face parses");
+        let cmap = font.cmap().expect("a cmap");
+        text.chars()
+            .map(|c| cmap.map_codepoint(c).map_or(0, |g| g.to_u32()))
+            .collect()
+    }
+
+    #[test]
+    fn han_under_system_ui_is_re_asked_to_the_public_pingfang_instance() {
+        if !on_macos("han_under_system_ui_is_re_asked_to_the_public_pingfang_instance") {
+            return;
+        }
+        let mut backend = CoreTextBackend::new();
+        let han = resolve(&mut backend, "\u{4e2d}\u{6587}", Some("zh-Hans"));
+        let reasked = han
+            .reasked_from
+            .as_deref()
+            .expect("the hvgl-only answer was re-asked");
+        assert!(reasked.starts_with(".PingFangUIText"), "{reasked}");
+        let source = han.source;
+        assert_eq!(file_name(&source), "PingFangUI.ttc");
+        assert_eq!(
+            source.index, 20,
+            "named instance #0 of face 20, PingFangSC-Medium"
+        );
+        assert_eq!(ps(&source), "PingFangSC-Regular");
+        assert!(!source.hidden);
+        assert!(!has_opsz(&source), "{:?}", source.variations);
+        let wght = source.variations.iter().find(|v| &v.tag == b"wght");
+        assert_eq!(wght.map(|v| v.value), Some(400.0));
+    }
+
+    #[test]
+    fn scripts_map_to_their_system_faces() {
+        if !on_macos("scripts_map_to_their_system_faces") {
+            return;
+        }
+        let mut backend = CoreTextBackend::new();
+
+        let latin = resolve(&mut backend, "Hello", None).source;
+        assert_eq!(file_name(&latin), "SFNS.ttf");
+        assert_eq!(
+            (latin.index, ps(&latin), latin.hidden),
+            (0, ".SFNS-Regular", true)
+        );
+        assert!(!has_opsz(&latin));
+
+        let ja = resolve(&mut backend, "\u{3072}\u{3089}\u{304c}\u{306a}", Some("ja")).source;
+        assert!(ps(&ja).starts_with(".HiraKakuInterface-"), "{}", ps(&ja));
+        assert!(
+            file_name(&ja).ends_with(" W4.ttc"),
+            "Hiragino Sans W4: {}",
+            file_name(&ja)
+        );
+        assert!(ja.hidden);
+
+        let thai = resolve(&mut backend, "\u{0e44}\u{0e17}\u{0e22}", Some("th-TH")).source;
+        assert_eq!(file_name(&thai), "ThonburiUI.ttc");
+        assert_eq!((ps(&thai), thai.hidden), (".ThonburiUI-Regular", true));
+
+        let arabic = resolve(
+            &mut backend,
+            "\u{0627}\u{0644}\u{0639}\u{0631}\u{0628}\u{064a}\u{0629}",
+            Some("ar"),
+        )
+        .source;
+        assert_eq!(file_name(&arabic), "SFArabic.ttf");
+        assert_eq!((ps(&arabic), arabic.hidden), (".SFArabic-Regular", true));
+
+        let emoji = resolve(&mut backend, "\u{1F600}", None).source;
+        assert_eq!(file_name(&emoji), "Apple Color Emoji.ttc");
+        assert_eq!(
+            (emoji.index, ps(&emoji), emoji.hidden),
+            (1, ".AppleColorEmojiUI", true)
+        );
+    }
+
+    #[test]
+    fn a_dot_prefixed_face_always_carries_the_hidden_flag() {
+        if !on_macos("a_dot_prefixed_face_always_carries_the_hidden_flag") {
+            return;
+        }
+        let mut backend = CoreTextBackend::new();
+        let samples = [
+            "Hello",
+            "\u{4e2d}\u{6587}",
+            "\u{7e41}\u{9ad4}",
+            "\u{3072}\u{3089}",
+            "\u{0e44}\u{0e17}",
+            "\u{0627}\u{0644}",
+            "\u{1F600}",
+            "\u{d55c}\u{ad6d}",
+            "\u{25CC}\u{0301}",
+        ];
+        let locales = [
+            None,
+            Some("en"),
+            Some("zh-Hans"),
+            Some("zh-Hant"),
+            Some("ja"),
+            Some("ar"),
+        ];
+        let (mut hidden, mut answers) = (0, 0);
+        for text in samples {
+            for locale in locales {
+                for (weight, slant) in [(400.0, FontStyle::Normal), (700.0, FontStyle::Italic)] {
+                    let mut req = request(text, locale);
+                    req.weight = FontWeight::new(weight);
+                    req.slant = slant;
+                    let Some(source) = backend.resolve(&req) else {
+                        continue;
+                    };
+                    answers += 1;
+                    let name = ps(&source);
+                    assert_eq!(
+                        source.hidden,
+                        name.starts_with('.'),
+                        "{text:?} {locale:?}: {name}"
+                    );
+                    hidden += usize::from(source.hidden);
+                    assert!(!has_opsz(&source), "{name}: {:?}", source.variations);
+                }
+            }
+        }
+        println!("{answers} answers, {hidden} hidden");
+        assert!(hidden > 0 && hidden < answers);
+    }
+
+    #[test]
+    fn cmap_glyph_ids_match_coretexts_recorded_ids() {
+        if !on_macos("cmap_glyph_ids_match_coretexts_recorded_ids") {
+            return;
+        }
+        let mut backend = CoreTextBackend::new();
+        let sf = resolve(&mut backend, "Hello", None).source;
+        assert_eq!(glyph_ids(&sf, "Hello"), [112, 676, 772, 772, 816]);
+        assert_eq!(glyph_ids(&sf, " "), [3]);
+        let pingfang = resolve(&mut backend, "\u{4e2d}\u{6587}", Some("zh-Hans")).source;
+        assert_eq!(glyph_ids(&pingfang, "\u{4e2d}\u{6587}"), [183, 302]);
+    }
+
+    #[test]
+    fn the_face_walk_reads_names_and_instances_only() {
+        if !on_macos("the_face_walk_reads_names_and_instances_only") {
+            return;
+        }
+        let mut backend = CoreTextBackend::new();
+        let pingfang = resolve(&mut backend, "\u{4e2d}\u{6587}", Some("zh-Hans")).source;
+        let started = Instant::now();
+        let faces = walk_file(path_of(&pingfang)).expect("PingFangUI.ttc walks");
+        println!(
+            "walked {} faces in {} us",
+            faces.len(),
+            started.elapsed().as_micros()
+        );
+        assert_eq!(faces.len(), 32);
+        assert!(
+            faces.iter().all(|f| f.hvgl_only),
+            "every PingFangUI face is hvgl-only"
+        );
+        let face = &faces[20];
+        assert!(
+            face.postscript_names
+                .iter()
+                .any(|n| n == "PingFangSC-Medium")
+        );
+        assert_eq!(
+            locate(&faces, "PingFangSC-Regular").map(|(i, _)| i),
+            Some(20)
+        );
+        let sfns = walk_file(Path::new("/System/Library/Fonts/SFNS.ttf")).expect("SFNS walks");
+        assert_eq!(sfns.len(), 1);
+        assert!(!sfns[0].hvgl_only, "SF has its own outlines");
+    }
+
+    /// The median and largest of `n` misses, each on a cluster no earlier miss asked.
+    fn time_misses(
+        backend: &mut CoreTextBackend,
+        n: u32,
+        cluster: impl Fn(u32) -> FallbackRequest,
+    ) -> (u128, u128) {
+        let mut times: Vec<Duration> = (0..n)
+            .map(|i| {
+                let req = cluster(i);
+                let started = Instant::now();
+                assert!(backend.resolve(&req).is_some(), "{:?}", req.chars);
+                started.elapsed()
+            })
+            .collect();
+        times.sort();
+        let median = times[times.len() / 2].as_micros();
+        (median, times[times.len() - 1].as_micros())
+    }
+
+    #[test]
+    fn per_miss_time_is_printed() {
+        if !on_macos("per_miss_time_is_printed") {
+            return;
+        }
+        let mut backend = CoreTextBackend::new();
+        let started = Instant::now();
+        let _ = backend.resolve(&request("\u{4e2d}\u{6587}", Some("zh-Hans")));
+        let cold = started.elapsed().as_micros();
+        println!("first miss (cold base font, cold PingFangUI.ttc walk): {cold} us");
+        let han = |i| {
+            let c = char::from_u32(0x4e10 + i).expect("a CJK ideograph");
+            request(&c.to_string(), Some("zh-Hans"))
+        };
+        let (median, max) = time_misses(&mut backend, 200, han);
+        println!(
+            "warm Han miss (two CreateForString, the hvgl re-ask): median {median} us, max {max} us"
+        );
+        let latin = |i| {
+            let c = char::from_u32(0x41 + i % 58).expect("ASCII");
+            let d = char::from_u32(0xc0 + i / 58).expect("Latin-1");
+            request(&format!("{c}{d}"), None)
+        };
+        let (median, max) = time_misses(&mut backend, 200, latin);
+        println!("warm Latin miss (one CreateForString): median {median} us, max {max} us");
+    }
+
+    #[test]
+    fn named_families_and_generic_defaults_resolve() {
+        if !on_macos("named_families_and_generic_defaults_resolve") {
+            return;
+        }
+        let mut backend = CoreTextBackend::new();
+        let mut req = request("abc", None);
+        req.families = vec![FamilyName::Named("Menlo".into())];
+        assert_eq!(
+            backend.resolve(&req).map(|s| ps(&s).to_owned()).as_deref(),
+            Some("Menlo-Regular")
+        );
+        req.families = vec![
+            FamilyName::Named("No Such Family 7f3a".into()),
+            FamilyName::Generic(GenericSlot::Serif),
+        ];
+        assert_eq!(
+            backend.resolve(&req).map(|s| ps(&s).to_owned()).as_deref(),
+            Some("Times-Roman")
+        );
+
+        for (slot, file, name, hidden) in [
+            (GenericSlot::SystemUi, "SFNS.ttf", ".SFNS-Regular", true),
+            (GenericSlot::SansSerif, "Helvetica.ttc", "Helvetica", false),
+            (GenericSlot::Serif, "Times.ttc", "Times-Roman", false),
+            (GenericSlot::Monospace, "Menlo.ttc", "Menlo-Regular", false),
+            (
+                GenericSlot::Emoji,
+                "Apple Color Emoji.ttc",
+                "AppleColorEmoji",
+                false,
+            ),
+        ] {
+            let source = backend
+                .default_family(slot)
+                .unwrap_or_else(|| panic!("{slot:?}"));
+            assert_eq!(
+                (file_name(&source).as_str(), ps(&source), source.hidden),
+                (file, name, hidden)
+            );
+        }
+    }
+
+    #[test]
+    fn a_cluster_nothing_covers_is_a_miss() {
+        if !on_macos("a_cluster_nothing_covers_is_a_miss") {
+            return;
+        }
+        // A noncharacter: CoreText answers LastResort.
+        assert!(
+            CoreTextBackend::new()
+                .resolve(&request("\u{fdd0}", None))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn the_oracle_accepts_the_hvgl_pingfang_answer() {
+        if !on_macos("the_oracle_accepts_the_hvgl_pingfang_answer") {
+            return;
+        }
+        let caps = RenderCapabilities::default();
+        let mut oracle = Oracle::new(Box::new(CoreTextBackend::new()), caps, None);
+        let mut req = request("\u{4e2d}\u{6587}", Some("zh-Hans"));
+        req.script = ScriptTag(*b"Hani");
+        let face = oracle
+            .resolve(&req)
+            .expect("PingFang is drawable through CoreText");
+        assert_eq!(
+            (face.index, face.postscript_name.as_deref(), face.hidden),
+            (20, Some("PingFangSC-Regular"), false)
+        );
+        assert_eq!(oracle.stats().refused, 0);
+    }
+
+    #[test]
+    fn the_os_build_comes_from_system_version_plist() {
+        let plist = "<dict>\n\t<key>ProductBuildVersion</key>\n\t<string>26A434</string>\n</dict>";
+        assert_eq!(product_build_version(plist), Some("26A434"));
+        assert_eq!(product_build_version("<dict></dict>"), None);
+        assert_eq!(
+            product_build_version("<key>ProductBuildVersion</key><string> </string>"),
+            None
+        );
+        let build = CoreTextBackend::new().os_build_id();
+        println!("os build: {build}");
+        if cfg!(target_os = "macos") {
+            assert!(
+                build.starts_with("apple:") && build.len() > "apple:".len(),
+                "{build}"
+            );
+        } else {
+            assert!(!build.is_empty());
+        }
     }
 }
