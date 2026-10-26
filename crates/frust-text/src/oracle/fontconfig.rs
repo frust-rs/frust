@@ -527,26 +527,41 @@ impl FontconfigBackend {
         let lib = self.lib.as_ref()?;
         let mut pattern = Pattern::new(lib)?;
         pattern.add_charset(&[c]);
-        // SAFETY: `FcObjectSetCreate` returns an owned object set (null on OOM, checked) that is
-        // destroyed exactly once below; `FC_FILE` is NUL-terminated and copied by
-        // `FcObjectSetAdd`. A null config selects the current configuration and `pattern.raw` is
-        // live for the call. The returned font set is owned here: `nfont` is read while it is
-        // live and it is destroyed exactly once with the matching destroy function.
-        unsafe {
-            let objects = (lib.0.FcObjectSetCreate)();
-            if objects.is_null() {
-                return None;
-            }
-            (lib.0.FcObjectSetAdd)(objects, FC_FILE.as_ptr());
-            let set = (lib.0.FcFontList)(ptr::null_mut(), pattern.raw, objects);
-            (lib.0.FcObjectSetDestroy)(objects);
-            if set.is_null() {
-                return None;
-            }
-            let count = usize::try_from((*set).nfont).unwrap_or(0);
-            (lib.0.FcFontSetDestroy)(set);
-            Some(count)
+        listed(lib, &pattern)
+    }
+
+    /// How many installed faces belong to `family`, by `FcFontList` over a family pattern (no
+    /// `fc-list` subprocess). `None` without fontconfig.
+    fn faces_in_family(&self, family: &str) -> Option<usize> {
+        let lib = self.lib.as_ref()?;
+        let mut pattern = Pattern::new(lib)?;
+        pattern.add_string(FC_FAMILY, family);
+        listed(lib, &pattern)
+    }
+}
+
+/// How many installed faces `FcFontList` lists for `pattern`.
+#[cfg(test)]
+fn listed(lib: &Library, pattern: &Pattern<'_>) -> Option<usize> {
+    // SAFETY: `FcObjectSetCreate` returns an owned object set (null on OOM, checked) that is
+    // destroyed exactly once below; `FC_FILE` is NUL-terminated and copied by
+    // `FcObjectSetAdd`. A null config selects the current configuration and `pattern.raw` is
+    // live for the call. The returned font set is owned here: `nfont` is read while it is
+    // live and it is destroyed exactly once with the matching destroy function.
+    unsafe {
+        let objects = (lib.0.FcObjectSetCreate)();
+        if objects.is_null() {
+            return None;
         }
+        (lib.0.FcObjectSetAdd)(objects, FC_FILE.as_ptr());
+        let set = (lib.0.FcFontList)(ptr::null_mut(), pattern.raw, objects);
+        (lib.0.FcObjectSetDestroy)(objects);
+        if set.is_null() {
+            return None;
+        }
+        let count = usize::try_from((*set).nfont).unwrap_or(0);
+        (lib.0.FcFontSetDestroy)(set);
+        Some(count)
     }
 }
 
@@ -588,11 +603,8 @@ mod tests {
         }
     }
 
-    fn family_installed(family: &str) -> bool {
-        std::process::Command::new("fc-list")
-            .arg(format!(":family={family}"))
-            .output()
-            .is_ok_and(|o| !o.stdout.is_empty())
+    fn family_installed(backend: &FontconfigBackend, family: &str) -> bool {
+        backend.faces_in_family(family).is_some_and(|n| n > 0)
     }
 
     #[test]
@@ -700,7 +712,7 @@ mod tests {
         let Some(mut b) = host() else { return };
         let req = request("\u{1F600}", vec![FamilyName::Generic(GenericSlot::Emoji)]);
         let answer = b.resolve(&req);
-        if family_installed("Noto Color Emoji") {
+        if family_installed(&b, "Noto Color Emoji") {
             let answer = answer.expect("emoji resolves");
             assert!(file_name(&answer).contains("emoji"), "{answer:?}");
         }
@@ -716,7 +728,7 @@ mod tests {
     #[test]
     fn installed_named_family_answers_itself() {
         let Some(mut b) = host() else { return };
-        if !family_installed("Noto Sans CJK JP") {
+        if !family_installed(&b, "Noto Sans CJK JP") {
             return;
         }
         let req = request(

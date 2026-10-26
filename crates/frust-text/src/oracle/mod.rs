@@ -180,10 +180,15 @@ impl ScriptTag {
 
 /// The language a fallback question is asked under: the request's explicit `locale`, else one
 /// derived from the cluster's `script` (kana `ja`, Hangul `ko`, Arabic `ar`, Hebrew `he`,
-/// Devanagari `hi`, Bengali `bn`, Thai `th`; Han the system's preferred Han language), else
-/// none. Pure in `(script, locale)` on a given machine, so the fallback cache key, which holds
-/// both, needs no extra field. Without a language CoreText's cascade answers kana from the
-/// symbols fallback instead of Hiragino.
+/// Devanagari `hi`, Bengali `bn`, Thai `th`; Han the first Han language of the platform's
+/// preference list, [`preferred_han_language`]), else none, so the OS applies its own cascade
+/// (CoreText the user's language preferences, fontconfig's `FcDefaultSubstitute` the process
+/// locale). Without a language CoreText's cascade answers kana from the symbols fallback
+/// instead of Hiragino.
+///
+/// Pure in `(script, locale)` within one process. The Han preference can change between
+/// launches, so a Han cache key without a locale carries it (`cache::CacheKey::han_preference`)
+/// and a persisted answer computed under another preference is asked again.
 pub(crate) fn language_for(script: ScriptTag, locale: Option<&str>) -> Option<&str> {
     if let Some(locale) = locale {
         return Some(locale);
@@ -191,7 +196,7 @@ pub(crate) fn language_for(script: ScriptTag, locale: Option<&str>) -> Option<&s
     match &script.0 {
         b"Hira" | b"Kana" => Some("ja"),
         b"Hang" => Some("ko"),
-        b"Hani" => Some(preferred_han_language()),
+        b"Hani" => preferred_han_language(),
         b"Arab" => Some("ar"),
         b"Hebr" => Some("he"),
         b"Deva" => Some("hi"),
@@ -201,50 +206,78 @@ pub(crate) fn language_for(script: ScriptTag, locale: Option<&str>) -> Option<&s
     }
 }
 
-/// The first of `zh-Hans`, `zh-Hant`, `ja`, `ko` among the system's preferred languages
-/// (`zh-Hans` when none, or off macOS), computed once.
-fn preferred_han_language() -> &'static str {
-    static HAN: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
-    HAN.get_or_init(|| {
-        #[cfg(target_os = "macos")]
-        {
-            let out = std::process::Command::new("/usr/bin/defaults")
-                .args(["read", "-g", "AppleLanguages"])
-                .output()
-                .ok()
-                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
-            if let Some(text) = out {
-                return han_language_of(&text);
-            }
-        }
-        "zh-Hans"
-    })
+/// The first Han language (`zh-Hans`, `zh-Hant`, `zh-HK`, `ja`, `ko`) among the platform's
+/// preferred languages ([`preferred_languages`]), read once per process; `None` when the list
+/// names none or the platform has no list, so a Han question carries no language and the OS
+/// cascade decides — never a constant.
+pub(crate) fn preferred_han_language() -> Option<&'static str> {
+    static HAN: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+    *HAN.get_or_init(|| han_language_in(preferred_languages().iter().map(String::as_str)))
 }
 
-/// The first Han language in a `defaults read AppleLanguages` listing (`"ja-JP"`, `"en-US"`,
-/// ...), else `zh-Hans`.
-#[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
-fn han_language_of(listing: &str) -> &'static str {
-    for tag in listing.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_')) {
-        let lower = tag.to_ascii_lowercase().replace('_', "-");
-        if lower.starts_with("zh-hant")
-            || lower.starts_with("zh-tw")
-            || lower.starts_with("zh-hk")
-            || lower.starts_with("zh-mo")
-        {
-            return "zh-Hant";
-        }
-        if lower.starts_with("zh") {
-            return "zh-Hans";
-        }
-        if lower.starts_with("ja") {
-            return "ja";
-        }
-        if lower.starts_with("ko") {
-            return "ko";
+/// The platform's preferred languages, most preferred first: Apple's
+/// `CFLocaleCopyPreferredLanguages` (macOS and iOS), Windows' `GetUserPreferredUILanguages`,
+/// Android's system locale properties. Empty on Linux and FreeBSD (fontconfig applies the
+/// process locale itself when no language is given) and on the web.
+fn preferred_languages() -> Vec<String> {
+    #[cfg(target_vendor = "apple")]
+    let languages = apple::preferred_languages();
+    #[cfg(windows)]
+    let languages = dwrite::preferred_ui_languages();
+    #[cfg(target_os = "android")]
+    let languages = android::system_locales();
+    #[cfg(not(any(target_vendor = "apple", windows, target_os = "android")))]
+    let languages = Vec::new();
+    languages
+}
+
+/// The Han language of the first tag in `tags` that names one, see [`han_language_of`].
+fn han_language_in<'a>(tags: impl IntoIterator<Item = &'a str>) -> Option<&'static str> {
+    tags.into_iter().find_map(han_language_of)
+}
+
+/// The Han language one BCP 47 (or POSIX, `zh_TW.UTF-8`) tag names, by exact subtag
+/// comparison: primary `ja` is `ja`, `ko` is `ko`; `zh` (and Cantonese `yue`) is decided by
+/// its script and region subtags: `Hans` is Simplified; else Cantonese or region `HK` is Hong
+/// Kong; else `Hant` or region `TW`/`MO` is Traditional; else Simplified. Any other primary
+/// subtag — `kok` (Konkani), `jam`, `en` — names none.
+fn han_language_of(tag: &str) -> Option<&'static str> {
+    let tag = tag.trim().split(['.', '@']).next().unwrap_or_default();
+    let mut subtags = tag.split(['-', '_']);
+    let primary = subtags.next().unwrap_or_default();
+    let cantonese = primary.eq_ignore_ascii_case("yue");
+    if primary.eq_ignore_ascii_case("ja") {
+        return Some("ja");
+    }
+    if primary.eq_ignore_ascii_case("ko") {
+        return Some("ko");
+    }
+    if !(primary.eq_ignore_ascii_case("zh") || cantonese) {
+        return None;
+    }
+    let (mut script, mut region) = (None, None);
+    for subtag in subtags {
+        let alpha = subtag.bytes().all(|b| b.is_ascii_alphabetic());
+        let digits = subtag.bytes().all(|b| b.is_ascii_digit());
+        match subtag.len() {
+            // A singleton opens an extension or private-use sequence.
+            1 => break,
+            4 if alpha && script.is_none() && region.is_none() => script = Some(subtag),
+            2 if alpha && region.is_none() => region = Some(subtag),
+            3 if digits && region.is_none() => region = Some(subtag),
+            _ => {}
         }
     }
-    "zh-Hans"
+    let is = |part: Option<&str>, value: &str| part.is_some_and(|p| p.eq_ignore_ascii_case(value));
+    Some(if is(script, "Hans") {
+        "zh-Hans"
+    } else if cantonese || is(region, "HK") {
+        "zh-HK"
+    } else if is(script, "Hant") || is(region, "TW") || is(region, "MO") {
+        "zh-Hant"
+    } else {
+        "zh-Hans"
+    })
 }
 
 /// One font-variation axis setting (`wght`, `wdth`, `ital`, `slnt`, `opsz`, ...).
@@ -819,11 +852,11 @@ impl Oracle {
 }
 
 impl Drop for Oracle {
-    /// The final flush (joins a background write still in flight).
+    /// The final write, handed to a background thread so dropping never waits for the disk
+    /// (a write still in flight lands first). Best effort: a process that exits right after
+    /// may lose it, so durability is [`Self::flush`]'s job — the shell's pause/quit hook.
     fn drop(&mut self) {
-        if let Err(err) = self.cache.persist() {
-            log::debug!("frust-text: font fallback cache not written: {err}");
-        }
+        self.cache.persist_in_background();
     }
 }
 
@@ -1098,7 +1131,62 @@ mod tests {
 
         assert!(oracle.resolve(&latin_request("ab")).is_some());
         drop(oracle);
-        assert!(file.exists(), "Drop is the final flush");
+        assert!(
+            cache::wait_for_file(&file, Duration::from_secs(10)),
+            "Drop hands off the final write"
+        );
+    }
+
+    #[test]
+    fn dropping_the_oracle_never_waits_for_an_in_flight_write() {
+        let dir = synthetic::TempDir::new("oracle-drop-detached");
+        let font = dir.write("a.ttf", &synthetic::FaceSpec::new("A").chars("ab").build());
+        let file = cache_file_in(dir.path());
+        let (backend, _) = backend_over(&font);
+        let mut oracle = Oracle::new(
+            Box::new(backend),
+            RenderCapabilities::default(),
+            Some(file.clone()),
+        );
+        oracle
+            .cache_mut()
+            .set_write_behind(1, Duration::from_secs(3600));
+        let release = oracle.cache_mut().hold_next_background_write();
+        assert!(oracle.resolve(&latin_request("a")).is_some());
+        // The writer is held; this answer stays dirty behind it.
+        assert!(oracle.resolve(&latin_request("b")).is_some());
+        assert!(oracle.cache().is_dirty());
+
+        // A joining Drop would wait here until `release` sends.
+        let started = std::time::Instant::now();
+        drop(oracle);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "drop returned while the write was still held"
+        );
+        assert!(!file.exists(), "nothing written while the writer is held");
+
+        release.send(()).unwrap();
+        let (backend, calls) = backend_over(&font);
+        assert!(cache::wait_for_file(&file, Duration::from_secs(10)));
+        // The final write follows the held one: both answers land.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let mut probe = cache::FallbackCache::new(16);
+            let stamp = cache::VersionStamp::current(String::from("build-1"));
+            if probe.attach_persistent(file.clone(), stamp) == cache::LoadOutcome::Loaded(2) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the final write landed"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let mut next = Oracle::new(Box::new(backend), RenderCapabilities::default(), Some(file));
+        assert!(next.resolve(&latin_request("a")).is_some());
+        assert!(next.resolve(&latin_request("b")).is_some());
+        assert_eq!(calls.resolves(), 0, "both answers reached the disk");
     }
 
     #[test]
@@ -1205,19 +1293,92 @@ mod tests {
             assert_eq!(language_for(tag(none), None), None);
         }
         assert_eq!(language_for(tag(b"Hira"), Some("zh-Hant")), Some("zh-Hant"));
-        let han = language_for(tag(b"Hani"), None).expect("Han has a language");
-        assert!(["zh-Hans", "zh-Hant", "ja", "ko"].contains(&han), "{han}");
         assert_eq!(language_for(tag(b"Hani"), Some("ko")), Some("ko"));
     }
 
     #[test]
-    fn han_language_follows_the_first_preferred_han_language() {
+    fn han_language_parsing_compares_whole_subtags() {
+        let cases = [
+            ("ja", Some("ja")),
+            ("ja-JP", Some("ja")),
+            ("KO-kr", Some("ko")),
+            ("ko_KR.UTF-8", Some("ko")),
+            ("zh", Some("zh-Hans")),
+            ("zh-CN", Some("zh-Hans")),
+            ("zh-Hans-US", Some("zh-Hans")),
+            ("zh-Hant", Some("zh-Hant")),
+            ("zh-Hant-TW", Some("zh-Hant")),
+            ("zh_TW", Some("zh-Hant")),
+            ("zh-MO", Some("zh-Hant")),
+            ("zh-HK", Some("zh-HK")),
+            ("zh-Hant-HK", Some("zh-HK")),
+            ("zh-Hans-HK", Some("zh-Hans")),
+            ("yue-Hant", Some("zh-HK")),
+            ("yue-Hans", Some("zh-Hans")),
+            ("zh-u-nu-hanidec", Some("zh-Hans")),
+            ("zh-x-hant", Some("zh-Hans")),
+            // Prefix look-alikes name no Han language.
+            ("kok-IN", None),
+            ("kok", None),
+            ("jam", None),
+            ("kos", None),
+            ("zha", None),
+            ("en-US", None),
+            ("th-TH", None),
+            ("", None),
+        ];
+        for (tag, expected) in cases {
+            assert_eq!(han_language_of(tag), expected, "{tag:?}");
+        }
+    }
+
+    #[test]
+    fn han_language_is_the_first_han_entry_of_the_preference_list() {
         assert_eq!(
-            han_language_of("(\n    \"en-US\",\n    \"ja-JP\",\n    \"zh-Hans-US\"\n)"),
-            "ja"
+            han_language_in(["en-US", "kok-IN", "ja-JP", "zh-Hans-US"]),
+            Some("ja")
         );
-        assert_eq!(han_language_of("(\"zh-Hant-TW\", \"en\")"), "zh-Hant");
-        assert_eq!(han_language_of("(\"ko-KR\")"), "ko");
-        assert_eq!(han_language_of("(\"en-US\")"), "zh-Hans");
+        assert_eq!(han_language_in(["zh-Hant-TW", "en"]), Some("zh-Hant"));
+        assert_eq!(han_language_in(["en-TH", "th-TH"]), None, "no constant");
+        assert_eq!(han_language_in([]), None);
+    }
+
+    #[test]
+    fn han_without_a_locale_follows_the_platform_preference_list() {
+        let languages = preferred_languages();
+        let expected = han_language_in(languages.iter().map(String::as_str));
+        assert_eq!(preferred_han_language(), expected, "{languages:?}");
+        assert_eq!(language_for(ScriptTag(*b"Hani"), None), expected);
+        if cfg!(target_vendor = "apple") {
+            assert!(
+                !languages.is_empty(),
+                "CFLocaleCopyPreferredLanguages lists at least one language"
+            );
+        }
+        if cfg!(any(target_os = "linux", target_os = "freebsd")) {
+            // fontconfig applies the process locale itself.
+            assert!(languages.is_empty(), "{languages:?}");
+            assert_eq!(language_for(ScriptTag(*b"Hani"), None), None);
+        }
+        println!("preferred languages {languages:?} -> Han {expected:?}");
+    }
+
+    #[test]
+    fn no_subprocess_is_spawned_by_frust_text() {
+        // Built with `concat!` so this file does not match its own scan.
+        let word = concat!("process", "::", "Command");
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut stack = vec![src];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("src is readable") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let text = std::fs::read_to_string(&path).expect("source is UTF-8");
+                    assert!(!text.contains(word), "{} spawns a process", path.display());
+                }
+            }
+        }
     }
 }

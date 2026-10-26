@@ -14,6 +14,9 @@
 //! exercises each one against a known string, the guard against the
 //! wrong-slot bug class), and a [`ComPtr`] guard that releases on drop.
 //!
+//! [`preferred_ui_languages`] reads the user's UI language list, from which `oracle/mod.rs`
+//! picks the Han language of a Han question that carries no locale (none: `en-US`, as before).
+//!
 //! The scale factor `MapCharacters` reports travels on `FaceSource::scale`. The
 //! PostScript name stays `None`: reading it needs `GetInformationalStrings`, a
 //! vtable slot this module does not declare, so it is not cheaply available.
@@ -45,6 +48,46 @@ struct OsVersionInfo {
     csd: [u16; 128],
 }
 windows_link::link!("ntdll.dll" "system" fn RtlGetVersion(info: *mut OsVersionInfo) -> i32);
+
+// `GetUserPreferredUILanguages` (kernel32), declared here like `RtlGetVersion` so no extra
+// windows-sys feature is needed. Writes a double-NUL-terminated list of language names.
+windows_link::link!("kernel32.dll" "system" fn GetUserPreferredUILanguages(flags: u32, count: *mut u32, buffer: *mut u16, len: *mut u32) -> i32);
+
+/// `MUI_LANGUAGE_NAME`: list language names (`ja-JP`), not LANGIDs.
+const MUI_LANGUAGE_NAME: u32 = 0x8;
+
+/// The user's preferred UI languages, most preferred first (`GetUserPreferredUILanguages`).
+pub(super) fn preferred_ui_languages() -> Vec<String> {
+    let (mut count, mut len) = (0u32, 0u32);
+    // SAFETY: a null buffer with a zero length is the documented size query; both out-pointers
+    // are live locals.
+    let ok = unsafe {
+        GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &mut count, ptr::null_mut(), &mut len)
+    };
+    if ok == 0 || len == 0 {
+        return Vec::new();
+    }
+    let mut buffer = vec![0u16; len as usize];
+    // SAFETY: `buffer` is writable for `len` UTF-16 units, the size the query reported, and
+    // both out-pointers are live locals; the call writes at most `len` units.
+    let ok = unsafe {
+        GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &mut count, buffer.as_mut_ptr(), &mut len)
+    };
+    if ok == 0 {
+        return Vec::new();
+    }
+    buffer.truncate(len as usize);
+    multi_sz(&buffer)
+}
+
+/// The strings of a double-NUL-terminated UTF-16 list.
+fn multi_sz(units: &[u16]) -> Vec<String> {
+    units
+        .split(|&unit| unit == 0)
+        .filter(|name| !name.is_empty())
+        .map(String::from_utf16_lossy)
+        .collect()
+}
 
 const IID_IDWRITEFACTORY2: GUID = GUID::from_u128(0x0439fc60_ca44_4994_8dee_3a9af7b732ec);
 const IID_IDWRITELOCALFONTFILELOADER: GUID =
@@ -1032,6 +1075,19 @@ mod tests {
     use super::*;
     use crate::oracle::{RenderCapabilities, ScriptTag};
     use crate::style::FontFamily;
+
+    #[test]
+    fn the_ui_language_list_parses_as_a_multi_string() {
+        let units: Vec<u16> = "ja-JP\0en-US\0\0".encode_utf16().collect();
+        assert_eq!(multi_sz(&units), ["ja-JP", "en-US"]);
+        assert!(multi_sz(&[0, 0]).is_empty());
+        let languages = preferred_ui_languages();
+        assert!(
+            !languages.is_empty(),
+            "Windows lists at least one UI language"
+        );
+        println!("preferred UI languages {languages:?}");
+    }
 
     /// Serialises tests: the live-pointer counter is process-global.
     static SERIAL: Mutex<()> = Mutex::new(());

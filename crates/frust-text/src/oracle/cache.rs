@@ -21,9 +21,9 @@
 //!
 //! Writes are write-behind ([`WRITE_BEHIND_ENTRIES`] new answers, or the first
 //! lookup after [`IDLE_FLUSH_AFTER`] without one), explicit
-//! ([`FallbackCache::persist`]) and final (the owner's `Drop`), each through a
-//! per-call temp file (PID + random nonce, mode `0600` on unix), fsync and
-//! rename.
+//! ([`FallbackCache::persist`]) and final (the owner's `Drop`, through
+//! [`FallbackCache::persist_in_background`]), each through a per-call temp file
+//! (PID + random nonce, mode `0600` on unix), fsync and rename.
 //!
 //! The two write-behind triggers fire inside a font lookup, so they never
 //! touch the disk there: the lookup snapshots the entries in memory and hands
@@ -33,6 +33,14 @@
 //! [`FallbackCache::persist`] stays synchronous: it joins the writer first,
 //! then writes anything newer on the caller's thread. A target without
 //! threads writes on the caller's thread.
+//!
+//! Dropping never waits for the disk: the final write runs on a detached
+//! thread after any write in flight, and the cache's own `Drop` detaches the
+//! writer. Durability is the explicit flush's job (a process that exits right
+//! after a drop may lose the final write). A failed background write is logged
+//! at `warn` once (later ones at `debug`), and each consecutive failure doubles
+//! the wait before the next write-behind; after [`MAX_WRITE_FAILURES`] in a
+//! row write-behind stops until an explicit flush succeeds.
 
 use std::collections::hash_map::RandomState;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -66,7 +74,13 @@ pub(crate) const PERSIST_FILE_NAME: &str = "font-fallback.json";
 /// Bumped whenever the serialised shape changes; a mismatch discards the file.
 /// 4: face entries carry `substitute`.
 /// 5: no shape change; answers persisted before the script-derived language hint must expire.
-const FORMAT_VERSION: u32 = 5;
+/// 6: no shape change; a Han key without a locale carries the preferred Han language, so the
+/// answers persisted under the constant `zh-Hans` must expire.
+const FORMAT_VERSION: u32 = 6;
+
+/// Consecutive failed background writes after which write-behind stops (an explicit flush
+/// still writes, and its success resumes it).
+pub(crate) const MAX_WRITE_FAILURES: u32 = 3;
 
 /// New answers since the last write that trigger a write-behind flush.
 ///
@@ -114,6 +128,11 @@ pub(crate) struct CacheKey {
     pub(crate) class: String,
     pub(crate) script: ScriptTag,
     pub(crate) locale: Option<String>,
+    /// For a Han cluster without a locale, the preferred Han language it is
+    /// asked under ([`super::preferred_han_language`]): the user can change it
+    /// between launches, and a persisted answer computed under another one
+    /// must not be served. `None` for every other key.
+    pub(crate) han_preference: Option<String>,
     /// [`crate::FontWeight`] value bits.
     pub(crate) weight: u32,
     pub(crate) slant: SlantKey,
@@ -125,6 +144,19 @@ pub(crate) struct CacheKey {
 
 impl CacheKey {
     pub(crate) fn from_request(req: &FallbackRequest) -> Self {
+        let han = req.script.0 == *b"Hani" && req.locale.is_none();
+        let preference = if han {
+            super::preferred_han_language()
+        } else {
+            None
+        };
+        Self::under_han_preference(req, preference)
+    }
+
+    /// The key for `req` were `preference` the preferred Han language (tests
+    /// change it; [`Self::from_request`] reads the platform's).
+    pub(crate) fn under_han_preference(req: &FallbackRequest, preference: Option<&str>) -> Self {
+        let han = req.script.0 == *b"Hani" && req.locale.is_none();
         let mut chars: Vec<char> = req.chars.chars().collect();
         chars.sort_unstable();
         chars.dedup();
@@ -132,6 +164,7 @@ impl CacheKey {
             class: chars.into_iter().collect(),
             script: req.script,
             locale: req.locale.clone(),
+            han_preference: preference.filter(|_| han).map(str::to_owned),
             weight: req.weight.value().to_bits(),
             slant: req.slant.into(),
             width: req.width.to_bits(),
@@ -159,11 +192,15 @@ impl CacheKey {
         h.bytes(b"frust-text fallback key");
         h.str(&self.class);
         h.bytes(&self.script.0);
-        match &self.locale {
-            None => h.bytes(&[0]),
-            Some(locale) => {
+        match (&self.locale, &self.han_preference) {
+            (None, None) => h.bytes(&[0]),
+            (Some(locale), _) => {
                 h.bytes(&[1]);
                 h.str(locale);
+            }
+            (None, Some(preference)) => {
+                h.bytes(&[2]);
+                h.str(preference);
             }
         }
         h.u32(self.weight);
@@ -414,6 +451,8 @@ pub(crate) struct CacheStats {
     pub(crate) evictions: usize,
     /// Persistent writes that reached the disk.
     pub(crate) writes: usize,
+    /// Write-behind writes that failed (background or, without threads, inline).
+    pub(crate) write_failures: usize,
     /// Loaded misses dropped because a font directory changed.
     pub(crate) expired_misses: usize,
     /// Loaded substitutes dropped because a font directory changed.
@@ -562,6 +601,10 @@ pub(crate) struct FallbackCache {
     load_time: Duration,
     stats: CacheStats,
     writer: Writer,
+    /// Write-behind failures in a row; reset by any write that reaches the disk.
+    failures: u32,
+    /// No write-behind before this instant (the back-off after a failure).
+    retry_after: Option<Instant>,
 }
 
 impl FallbackCache {
@@ -580,6 +623,8 @@ impl FallbackCache {
             load_time: Duration::ZERO,
             stats: CacheStats::default(),
             writer: Writer::default(),
+            failures: 0,
+            retry_after: None,
         }
     }
 
@@ -893,7 +938,7 @@ impl FallbackCache {
     /// writer and return without touching the disk. One write at a time — a
     /// trigger that finds the writer busy re-arms instead of waiting.
     fn write_behind(&mut self, trigger: &str) {
-        if self.writer_busy() || !self.dirty {
+        if self.writer_busy() || !self.dirty || self.backing_off() {
             self.rearm();
             return;
         }
@@ -925,11 +970,48 @@ impl FallbackCache {
             // No threads on this target (wasm32-unknown-unknown): write here.
             Err(_) => {
                 if let Err(err) = self.write_now() {
-                    log::debug!("frust-text: font fallback cache {trigger} write failed: {err}");
+                    self.record_failure(trigger, &err.to_string());
                     self.rearm();
                 }
             }
         }
+    }
+
+    /// Whether write-behind is held back after failures: suspended after
+    /// [`MAX_WRITE_FAILURES`] in a row, else until the back-off ends.
+    fn backing_off(&self) -> bool {
+        self.write_behind_suspended() || self.retry_after.is_some_and(|at| Instant::now() < at)
+    }
+
+    /// Whether [`MAX_WRITE_FAILURES`] write-behind failures in a row stopped
+    /// write-behind (until an explicit flush succeeds).
+    pub(crate) fn write_behind_suspended(&self) -> bool {
+        self.failures >= MAX_WRITE_FAILURES
+    }
+
+    /// Counts a failed write-behind, logs it (the first of a run at `warn`)
+    /// and backs off: each failure doubles the wait, from the idle interval.
+    fn record_failure(&mut self, trigger: &str, err: &str) {
+        self.failures = self.failures.saturating_add(1);
+        self.stats.write_failures += 1;
+        let path = self
+            .attached_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        log::log!(
+            failure_log_level(self.failures),
+            "frust-text: font fallback cache {path} {trigger} write failed: {err} \
+             (failure {} of {MAX_WRITE_FAILURES} before write-behind stops; later ones log at debug)",
+            self.failures,
+        );
+        self.retry_after = Some(Instant::now() + backoff(self.idle_after, self.failures));
+    }
+
+    /// A write reached the disk: the failure run is over.
+    fn record_success(&mut self) {
+        self.stats.writes += 1;
+        self.failures = 0;
+        self.retry_after = None;
     }
 
     /// Whether a background write is still running; a finished one is reaped
@@ -953,13 +1035,13 @@ impl FallbackCache {
         };
         let failure = match handle.join() {
             Ok(Ok(())) => {
-                self.stats.writes += 1;
+                self.record_success();
                 return;
             }
             Ok(Err(err)) => err.to_string(),
             Err(_) => String::from("the writer thread panicked"),
         };
-        log::debug!("frust-text: font fallback cache background write failed: {failure}");
+        self.record_failure("background", &failure);
         self.dirty = true;
         self.last_change = Some(Instant::now());
     }
@@ -1004,7 +1086,7 @@ impl FallbackCache {
         self.dirty = false;
         self.unwritten = 0;
         self.last_change = None;
-        self.stats.writes += 1;
+        self.record_success();
         Ok(())
     }
 
@@ -1022,14 +1104,80 @@ impl FallbackCache {
         self.try_attach();
         self.write_now()
     }
+
+    /// The owner's final write, without waiting: a thread joins the write in
+    /// flight (so the older snapshot can never land over this one), then
+    /// writes everything this cache holds. Best effort — the explicit
+    /// [`Self::persist`] is the durable path. Without threads it writes here.
+    pub(crate) fn persist_in_background(&mut self) {
+        let in_flight = self.writer.handle.take();
+        if self.dirty {
+            self.try_attach();
+        }
+        // Nothing newer than the write in flight: dropping its handle detaches it.
+        let Some(snapshot) = self.dirty.then(|| self.snapshot()).flatten() else {
+            return;
+        };
+        self.dirty = false;
+        if cfg!(target_family = "wasm") {
+            if let Err(err) = snapshot.write() {
+                log::debug!("frust-text: font fallback cache final write failed: {err}");
+            }
+            return;
+        }
+        let spawned = std::thread::Builder::new()
+            .name(String::from("frust-text-font-cache-final"))
+            .spawn(move || {
+                if let Some(handle) = in_flight {
+                    let _ = handle.join();
+                }
+                if let Err(err) = snapshot.write() {
+                    log::debug!("frust-text: font fallback cache final write failed: {err}");
+                }
+            });
+        if let Err(err) = spawned {
+            log::debug!("frust-text: font fallback cache final write skipped: {err}");
+        }
+    }
+}
+
+/// How loudly the `failures`-th write-behind failure in a row is logged: the
+/// first at `warn`, the rest at `debug`, so a read-only or full cache
+/// directory warns once.
+fn failure_log_level(failures: u32) -> log::Level {
+    if failures <= 1 {
+        log::Level::Warn
+    } else {
+        log::Level::Debug
+    }
+}
+
+/// The wait before the next write-behind after `failures` in a row:
+/// `idle_after` doubled per failure.
+fn backoff(idle_after: Duration, failures: u32) -> Duration {
+    idle_after.saturating_mul(1 << failures.min(16))
 }
 
 impl Drop for FallbackCache {
-    /// Joins a background write still in flight (the owner's final flush, if
-    /// any, has already run).
+    /// Detaches a background write still in flight: it finishes on its own,
+    /// and dropping never waits for the disk (the owner's final write, if any,
+    /// went through [`FallbackCache::persist_in_background`]).
     fn drop(&mut self) {
-        self.join_writer();
+        drop(self.writer.handle.take());
     }
+}
+
+/// Tests: waits up to `timeout` for `path` to exist (a detached write landing).
+#[cfg(test)]
+pub(crate) fn wait_for_file(path: &Path, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while !path.exists() {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    true
 }
 
 /// A temp-file name beside `path` that no other writer, in this process or
@@ -1196,6 +1344,7 @@ mod tests {
             class: "a".into(),
             script: ScriptTag(*b"Latn"),
             locale: Some("en".into()),
+            han_preference: None,
             weight: 400f32.to_bits(),
             slant: SlantKey::Normal,
             width: 1f32.to_bits(),
@@ -1388,6 +1537,68 @@ mod tests {
             cache.attach_persistent(file, stamp("build-1")),
             LoadOutcome::Invalidated("crate version")
         );
+    }
+
+    #[test]
+    fn a_changed_han_preference_expires_only_the_han_answers() {
+        let dir = TempDir::new("persist-han");
+        let font = dir.write("face.ttf", &FaceSpec::new("Face").chars("a").build());
+        let file = dir.path().join(PERSIST_FILE_NAME);
+        let mut han = request("\u{76f4}");
+        han.script = ScriptTag(*b"Hani");
+        let under = |preference| CacheKey::under_han_preference(&han, preference);
+        let mut cache = FallbackCache::new(16);
+        cache.attach_persistent(file.clone(), stamp("b"));
+        cache.insert(
+            under(Some("ja")),
+            CachedAnswer::Face(FaceSource::path(&font, 0)),
+        );
+        cache.insert(key("a"), CachedAnswer::Face(FaceSource::path(&font, 0)));
+        cache.persist().unwrap();
+
+        let mut next = FallbackCache::new(16);
+        assert_eq!(
+            next.attach_persistent(file, stamp("b")),
+            LoadOutcome::Loaded(2)
+        );
+        for changed in [Some("zh-Hant"), Some("ko"), None] {
+            assert_eq!(next.get(&under(changed)), None, "{changed:?}: asked again");
+        }
+        assert!(
+            next.get(&under(Some("ja"))).is_some(),
+            "the same preference hits"
+        );
+        assert!(
+            next.get(&key("a")).is_some(),
+            "a non-Han answer is unaffected"
+        );
+    }
+
+    #[test]
+    fn only_a_han_key_without_a_locale_carries_the_preference() {
+        let mut han = request("\u{76f4}");
+        han.script = ScriptTag(*b"Hani");
+        let ja = CacheKey::under_han_preference(&han, Some("ja"));
+        let zh = CacheKey::under_han_preference(&han, Some("zh-Hant"));
+        let none = CacheKey::under_han_preference(&han, None);
+        assert_ne!(ja.digest(), zh.digest());
+        assert_ne!(ja.digest(), none.digest());
+        assert_eq!(
+            CacheKey::from_request(&han).han_preference.as_deref(),
+            crate::oracle::preferred_han_language()
+        );
+        han.locale = Some(String::from("ja"));
+        assert_eq!(
+            CacheKey::under_han_preference(&han, Some("ko")),
+            CacheKey::under_han_preference(&han, None),
+            "an explicit locale wins over the preference"
+        );
+        let latin = request("a");
+        assert_eq!(
+            CacheKey::under_han_preference(&latin, Some("ja")),
+            CacheKey::from_request(&latin)
+        );
+        assert_eq!(CacheKey::from_request(&latin).han_preference, None);
     }
 
     #[test]
@@ -1638,8 +1849,8 @@ mod tests {
         assert_eq!(source.scale, Some(0.75));
 
         // Files written by the previous formats (plaintext keys, no dir stamps,
-        // no substitute flag) are discarded.
-        assert_eq!(FORMAT_VERSION, 5);
+        // no substitute flag, no Han-language stamp) are discarded.
+        assert_eq!(FORMAT_VERSION, 6);
         let text = std::fs::read_to_string(&file).unwrap();
         for previous in 1..FORMAT_VERSION {
             let old = text.replacen(
@@ -1746,7 +1957,132 @@ mod tests {
         cache.join_writer();
         assert!(cache.is_dirty(), "re-armed for the next flush");
         assert_eq!(cache.stats().writes, 0);
+        assert_eq!(cache.stats().write_failures, 1);
         assert!(cache.persist().is_err(), "the synchronous flush reports it");
+    }
+
+    #[test]
+    fn repeated_write_failures_back_off_then_stop_write_behind() {
+        let dir = TempDir::new("write-behind-backoff");
+        let blocker = dir.write("blocker", b"x");
+        let file = blocker.join(PERSIST_FILE_NAME);
+        let mut cache = FallbackCache::new(64);
+        cache.attach_persistent(file.clone(), stamp("b"));
+        // A zero idle interval makes every back-off zero, so each trigger may retry.
+        cache.set_write_behind(1, Duration::ZERO);
+        for (i, chars) in ["a", "b", "c", "d", "e", "f", "g", "h"].iter().enumerate() {
+            cache.insert(key(chars), CachedAnswer::Miss);
+            cache.join_writer();
+            let expected = (i + 1).min(MAX_WRITE_FAILURES as usize);
+            assert_eq!(cache.stats().write_failures, expected, "after {chars:?}");
+        }
+        assert!(cache.write_behind_suspended(), "no retry on every trigger");
+        assert!(cache.is_dirty());
+
+        // An explicit flush still tries, and its success resumes write-behind.
+        assert!(cache.persist().is_err());
+        std::fs::remove_file(&blocker).unwrap();
+        cache.persist().expect("the directory is writable again");
+        assert!(!cache.write_behind_suspended());
+        cache.insert(key("i"), CachedAnswer::Miss);
+        cache.join_writer();
+        assert_eq!(
+            cache.stats().writes,
+            2,
+            "the flush, then write-behind again"
+        );
+        assert_eq!(cache.stats().write_failures, MAX_WRITE_FAILURES as usize);
+    }
+
+    #[test]
+    fn a_failure_backs_off_the_next_write_behind() {
+        let dir = TempDir::new("write-behind-wait");
+        let blocker = dir.write("blocker", b"x");
+        let mut cache = FallbackCache::new(64);
+        cache.attach_persistent(blocker.join(PERSIST_FILE_NAME), stamp("b"));
+        cache.set_write_behind(1, Duration::from_secs(3600));
+        cache.insert(key("a"), CachedAnswer::Miss);
+        cache.join_writer();
+        assert_eq!(cache.stats().write_failures, 1);
+        // Within the back-off a trigger re-arms instead of writing again.
+        cache.insert(key("b"), CachedAnswer::Miss);
+        cache.insert(key("c"), CachedAnswer::Miss);
+        cache.join_writer();
+        assert_eq!(
+            cache.stats().write_failures,
+            1,
+            "no retry inside the back-off"
+        );
+        assert!(!cache.write_behind_suspended());
+    }
+
+    #[test]
+    fn the_first_failure_warns_and_the_back_off_doubles() {
+        assert_eq!(failure_log_level(1), log::Level::Warn);
+        for later in 2..=MAX_WRITE_FAILURES + 2 {
+            assert_eq!(failure_log_level(later), log::Level::Debug, "{later}");
+        }
+        let idle = Duration::from_secs(2);
+        assert_eq!(backoff(idle, 1), Duration::from_secs(4));
+        assert_eq!(backoff(idle, 2), Duration::from_secs(8));
+        assert_eq!(backoff(Duration::ZERO, 3), Duration::ZERO);
+        assert_eq!(backoff(Duration::MAX, 40), Duration::MAX, "saturates");
+    }
+
+    #[test]
+    fn dropping_the_cache_detaches_an_in_flight_write() {
+        let dir = TempDir::new("cache-drop-detached");
+        let file = dir.path().join(PERSIST_FILE_NAME);
+        let mut cache = FallbackCache::new(64);
+        cache.attach_persistent(file.clone(), stamp("b"));
+        cache.set_write_behind(1, Duration::from_secs(3600));
+        let release = cache.hold_next_background_write();
+        cache.insert(key("a"), CachedAnswer::Miss);
+        let started = Instant::now();
+        drop(cache);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a joining Drop would wait for the held writer"
+        );
+        assert!(!file.exists());
+        release.send(()).unwrap();
+        assert!(
+            wait_for_file(&file, Duration::from_secs(10)),
+            "the detached write still lands"
+        );
+    }
+
+    #[test]
+    fn the_background_final_write_lands_after_the_one_in_flight() {
+        let dir = TempDir::new("cache-final-write");
+        let file = dir.path().join(PERSIST_FILE_NAME);
+        let mut cache = FallbackCache::new(64);
+        cache.attach_persistent(file.clone(), stamp("b"));
+        cache.set_write_behind(1, Duration::from_secs(3600));
+        let release = cache.hold_next_background_write();
+        cache.insert(key("a"), CachedAnswer::Miss);
+        cache.insert(key("b"), CachedAnswer::Miss);
+        assert!(
+            cache.is_dirty(),
+            "the second answer waits behind the held write"
+        );
+        let started = Instant::now();
+        cache.persist_in_background();
+        drop(cache);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let mut reread = FallbackCache::new(64);
+            if reread.attach_persistent(file.clone(), stamp("b")) == LoadOutcome::Loaded(2) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the final write holds both answers"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     #[test]

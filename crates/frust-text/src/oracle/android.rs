@@ -19,6 +19,9 @@
 //! `hint::decide_synthesis` (cfg-free, so its tests run on every host); this file only fills
 //! its inputs from the match.
 //!
+//! [`system_locales`] reads the system locale properties, from which `oracle/mod.rs` picks the
+//! Han language of a Han question that carries no locale (none: the matcher gets no locale).
+//!
 //! The only `unsafe` here is the `__system_property_get` call behind [`system_property`], and
 //! the `Send` assertion on the matcher wrapper.
 
@@ -56,6 +59,24 @@ fn system_property(name: &CStr) -> Option<String> {
     // SAFETY: on a positive return the callee wrote a NUL-terminated string into `buf`.
     let value = unsafe { CStr::from_ptr(buf.as_ptr()) };
     Some(value.to_string_lossy().into_owned())
+}
+
+/// The system locales, most preferred first: `persist.sys.locale` (the user's choice, set once
+/// they change the language), then `ro.product.locale` (the build's default). Each may hold a
+/// comma-separated list; unset or unreadable properties contribute nothing.
+pub(super) fn system_locales() -> Vec<String> {
+    [c"persist.sys.locale", c"ro.product.locale"]
+        .into_iter()
+        .filter_map(system_property)
+        .flat_map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|tag| !tag.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 /// An `AFontMatcher` the backend owns exclusively.
