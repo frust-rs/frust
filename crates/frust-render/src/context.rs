@@ -630,7 +630,7 @@ pub(crate) async fn create_engine_surface(
     present_mode: wgpu::PresentMode,
     alpha: SurfaceAlphaRequest,
 ) -> Result<EngineSurface> {
-    let device_started = std::time::Instant::now();
+    let device_started = web_time::Instant::now();
     ctx.ensure_device(&surface).await?;
     let device_create = device_started.elapsed();
     // The capability gate's diagnosis is this crate's single fail-fast message

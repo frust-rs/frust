@@ -590,6 +590,7 @@ dependencies = [
  "peniko",
  "thiserror 2.0.20",
  "vello_common",
+ "web-time",
  "wgpu",
 ]
 
@@ -609,6 +610,7 @@ dependencies = [
  "objc2-core-video",
  "objc2-metal 0.3.2",
  "peniko",
+ "web-time",
  "wgpu",
 ]
 
@@ -643,6 +645,7 @@ dependencies = [
  "kurbo",
  "log",
  "peniko",
+ "web-time",
  "wgpu",
 ]
 
@@ -674,6 +677,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "web-time",
  "windows-link",
  "windows-sys 0.61.2",
  "yeslogic-fontconfig-sys",

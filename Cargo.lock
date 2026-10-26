@@ -2367,6 +2367,7 @@ dependencies = [
  "proptest",
  "thiserror 2.0.20",
  "vello_common",
+ "web-time",
  "wgpu",
 ]
 
@@ -2424,6 +2425,7 @@ dependencies = [
  "peniko",
  "pollster",
  "tempfile",
+ "web-time",
  "wgpu",
 ]
 
@@ -2666,6 +2668,7 @@ dependencies = [
  "log",
  "peniko",
  "pollster",
+ "web-time",
  "wgpu",
 ]
 
@@ -2783,6 +2786,7 @@ dependencies = [
  "log",
  "reactive_graph",
  "sha2",
+ "web-time",
 ]
 
 [[package]]
@@ -2952,6 +2956,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "web-time",
  "windows-link",
  "windows-sys 0.61.2",
  "yeslogic-fontconfig-sys",
