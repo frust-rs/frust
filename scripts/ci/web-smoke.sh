@@ -21,16 +21,27 @@
 # crates/frust-shell-web/platform/web), SERVE (python3 http.server, loopback
 # only, killed on exit), BOOT (two URLs: default arm and arm=webgl) and ASSERT.
 #
-# ASSERT, per URL: FAIL on `panicked at`, `RuntimeError`, `[frust-web] FAIL` or
-# an ERROR-level `[frust-web]` console line; REQUIRE
+# ASSERT, per URL: FAIL on `panicked at`, `RuntimeError` or a `[frust-web]`
+# console line carrying an Error (what frust_web.js's reportFailure prints:
+# `console.error("[frust-web]", err)` -> `[frust-web] TypeError: ...`); REQUIRE
 # `[frust-web] wasm module initialized`. With FRUST_WEB_SMOKE_REQUIRE_SURFACE=1
 # also REQUIRE `frust: render surface online` and FAIL on
 # `surface bring-up attempt 8/8 failed`; without it a `no compatible GPU
 # adapter` failure is only a WARN (rigs with no SwiftShader adapter).
 #
+# ADAPTER LADDER: a headless Chrome exposes a GPU adapter only with the right
+# flags, and the right flags differ per Chrome build (GitHub's runner image,
+# Debian's chromium, a laptop). Each arm is booted with the flag sets in
+# GPU_FLAG_SETS in order until one logs `render surface online`; the winning
+# set is printed, every attempt's log is kept, and the last attempt's log is
+# the one asserted. FRUST_WEB_SMOKE_GPU_FLAGS="<flags>" pins a single set.
+#
 # Environment: CHROME (binary; default first of google-chrome,
 # google-chrome-stable, chromium, chromium-browser), FRUST_WEB_SMOKE_BUDGET_MS
-# (virtual time budget, default 20000), FRUST_WEB_SMOKE_REQUIRE_SURFACE.
+# (virtual time budget per boot, default 20000), FRUST_WEB_SMOKE_REQUIRE_SURFACE,
+# FRUST_WEB_SMOKE_GPU_FLAGS, FRUST_WEB_SMOKE_NO_SANDBOX=1 (pass --no-sandbox;
+# implied when CI is set, since hosted runners and containers lack the user
+# namespaces Chrome's sandbox needs; local runs keep the sandbox).
 # Each boot is wall-clock bounded by `timeout` or `gtimeout` when one is on
 # PATH; otherwise Chrome runs unwrapped and --virtual-time-budget still bounds it.
 # Proves boot + first surface, not pixels; the frust-testing webgl golden gate
@@ -66,16 +77,19 @@ trap cleanup EXIT
 check_log() {
   local log="$1" strict="$2" label="$3" fail=0
   local pat
-  for pat in 'panicked at' 'RuntimeError' '[frust-web] FAIL'; do
+  for pat in 'panicked at' 'RuntimeError'; do
     if grep -qF -- "$pat" "$log"; then
       echo "FAIL [$label]: log contains '$pat'"
       { grep -m5 -nF -- "$pat" "$log" | sed 's/^/    /'; } || true
       fail=1
     fi
   done
-  if grep -qE ':ERROR:CONSOLE.*\[frust-web\]' "$log"; then
-    echo "FAIL [$label]: console.error-level [frust-web] line"
-    { grep -m5 -nE ':ERROR:CONSOLE.*\[frust-web\]' "$log" | sed 's/^/    /'; } || true
+  # reportFailure (frust_web.js) logs `console.error("[frust-web]", err)`, which
+  # Chrome prints as `[frust-web] <ErrorName>: <message>`; the severity tag in
+  # Chrome's stderr prefix is not relied on (Chromium 149 prints it as INFO).
+  if grep -qE '\[frust-web\] [A-Za-z]*Error\b' "$log"; then
+    echo "FAIL [$label]: [frust-web] reported an error"
+    { grep -m5 -nE '\[frust-web\] [A-Za-z]*Error\b' "$log" | sed 's/^/    /'; } || true
     fail=1
   fi
   if ! grep -qF '[frust-web] wasm module initialized' "$log"; then
@@ -116,6 +130,11 @@ self_test() {
     echo "${pre}[frust-web] wasm module initialized\", source: http://127.0.0.1/frust_web.js (268)"
     echo "${pre}frust: surface bring-up attempt 1/8 failed: frust-render: failed to create render surface: frust-gpu: no compatible GPU adapter: none\", source: x (1)"
   } >"$d/noadapter.log"
+  {
+    # reportFailure after a JS-side failure (module import, invalid ?module=):
+    # the real console shape is `[frust-web] <ErrorName>: <message>`.
+    echo "${pre}[frust-web] TypeError: Failed to fetch dynamically imported module\", source: http://127.0.0.1/frust_web.js (43)"
+  } >"$d/jsfail.log"
 
   expect() { # expect <want-rc> <file> <strict> <label>
     local got=0
@@ -128,6 +147,7 @@ self_test() {
   expect 0 clean.log 1 "clean, strict (accepted)"
   expect 0 noadapter.log 0 "no-adapter, lenient (accepted)"
   expect 1 noadapter.log 1 "no-adapter, strict (rejected)"
+  expect 1 jsfail.log 0 "reportFailure error line, lenient (rejected)"
   if [[ "$rc" == 0 ]]; then echo "self-test OK"; else echo "self-test FAILED"; fi
   return "$rc"
 }
@@ -183,20 +203,27 @@ echo "web-smoke: dist staged at $DIST"
 
 # Artefacts never go into the dist tree: the website recipe ships every file
 # under static/preview/live/, so a supplied --dist must stay pristine.
+command -v python3 >/dev/null || die "python3 not found"
 if [[ -n "$OUT" ]]; then
-  mkdir -p "$OUT"
-  OUT="$(cd "$OUT" && pwd)"
+  # Resolve without creating anything: a rejected --out must leave no trace.
+  OUT="$(python3 -c 'import os,sys; print(os.path.abspath(sys.argv[1]))' "$OUT")"
   case "$OUT/" in "$DIST/"*) die "--out $OUT must not be inside the dist tree $DIST" ;; esac
+  mkdir -p "$OUT"
 fi
 
-command -v python3 >/dev/null || die "python3 not found"
 PORT="$(python3 -c 'import socket
 s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
 python3 -m http.server "$PORT" --bind 127.0.0.1 --directory "$DIST" >/dev/null 2>&1 &
 SERVER_PID=$!
+# Readiness: our server must still be alive AND what answers on the port must
+# be our tree (the fetched index.html equals the staged file byte for byte), so
+# a stranger that grabbed the port in the bind-then-serve gap is not trusted.
 ready=0
 for _ in $(seq 1 50); do
-  if python3 -c "import urllib.request,sys; urllib.request.urlopen('http://127.0.0.1:$PORT/index.html', timeout=1)" 2>/dev/null; then
+  kill -0 "$SERVER_PID" 2>/dev/null || die "static server exited early (port 127.0.0.1:$PORT taken?)"
+  if python3 -c "import urllib.request,sys
+body=urllib.request.urlopen('http://127.0.0.1:$PORT/index.html', timeout=1).read()
+sys.exit(0 if body == open(sys.argv[1],'rb').read() else 1)" "$DIST/index.html" 2>/dev/null; then
     ready=1; break
   fi
   sleep 0.1
@@ -233,6 +260,43 @@ else
   echo "web-smoke: no timeout/gtimeout on PATH; running Chrome unwrapped (--virtual-time-budget still bounds each boot)"
 fi
 
+# Chrome's sandbox needs user namespaces that hosted runners and containers
+# lack; local runs keep it unless opted out.
+SANDBOX_FLAGS=()
+if [[ -n "${CI:-}" || "${FRUST_WEB_SMOKE_NO_SANDBOX:-0}" == 1 ]]; then
+  SANDBOX_FLAGS=(--no-sandbox)
+fi
+
+# Adapter flag ladder (see the header). Order: ANGLE-on-SwiftShader WebGL (the
+# documented unsafe fallback), plain SwiftShader GLES, SwiftShader Vulkan for
+# WebGPU, WebGPU with no backend hint, and finally no GPU flags at all (a host
+# with a real GPU, or a Chrome that no longer honours the SwiftShader flags).
+GPU_FLAG_SETS=(
+  "--use-gl=angle --use-angle=swiftshader-webgl --enable-unsafe-swiftshader"
+  "--use-gl=angle --use-angle=swiftshader --enable-unsafe-swiftshader"
+  "--enable-unsafe-webgpu --enable-features=Vulkan --use-vulkan=swiftshader --use-webgpu-adapter=swiftshader --use-angle=swiftshader --enable-unsafe-swiftshader"
+  "--enable-unsafe-webgpu"
+  ""
+)
+if [[ -n "${FRUST_WEB_SMOKE_GPU_FLAGS+x}" ]]; then
+  GPU_FLAG_SETS=("$FRUST_WEB_SMOKE_GPU_FLAGS")
+fi
+
+echo "web-smoke: chrome: $("$CHROME" --version 2>/dev/null || echo "$CHROME (version unknown)")"
+
+# boot <arm> <url> <log> <shot> <gpu flags...>: one headless boot, log asserted later.
+boot() {
+  local arm="$1" url="$2" log="$3" shot="$4"; shift 4
+  local rc=0
+  # shellcheck disable=SC2068 # the flag set is a deliberate word-split list
+  ${TIMEOUT_CMD[@]+"${TIMEOUT_CMD[@]}"} "$CHROME" --headless=new ${SANDBOX_FLAGS[@]+"${SANDBOX_FLAGS[@]}"} \
+    --disable-dev-shm-usage --ignore-gpu-blocklist $@ \
+    --enable-logging=stderr --v=0 \
+    --virtual-time-budget="$BUDGET" --window-size=400,300 \
+    --screenshot="$shot" "$url" >/dev/null 2>"$log" || rc=$?
+  if [[ "$rc" != 0 ]]; then echo "web-smoke: chrome exited $rc for [$arm] (log still asserted)"; fi
+}
+
 overall=0
 for arm in default webgl; do
   q="$QUERY_BASE"
@@ -240,14 +304,29 @@ for arm in default webgl; do
   url="http://127.0.0.1:$PORT/index.html?$q"
   log="$OUT/smoke-$arm.log"
   shot="$OUT/smoke-$arm.png"
-  echo "web-smoke: booting [$arm] $url"
-  rc=0
-  ${TIMEOUT_CMD[@]+"${TIMEOUT_CMD[@]}"} "$CHROME" --headless=new --no-sandbox --disable-dev-shm-usage \
-    --use-gl=angle --use-angle=swiftshader-webgl --enable-unsafe-swiftshader \
-    --ignore-gpu-blocklist --enable-logging=stderr --v=0 \
-    --virtual-time-budget="$BUDGET" --window-size=400,300 \
-    --screenshot="$shot" "$url" >/dev/null 2>"$log" || rc=$?
-  if [[ "$rc" != 0 ]]; then echo "web-smoke: chrome exited $rc for [$arm] (log still asserted)"; fi
+  n=0
+  winner=""
+  for flags in "${GPU_FLAG_SETS[@]}"; do
+    n=$((n + 1))
+    attempt_log="$OUT/smoke-$arm-$n.log"
+    attempt_shot="$OUT/smoke-$arm-$n.png"
+    echo "web-smoke: booting [$arm] attempt $n with adapter flags: ${flags:-<none>}"
+    # shellcheck disable=SC2086 # the flag set is a deliberate word-split list
+    boot "$arm" "$url" "$attempt_log" "$attempt_shot" $flags
+    cp -f "$attempt_log" "$log"; cp -f "$attempt_shot" "$shot" 2>/dev/null || true
+    if grep -qF 'frust: render surface online' "$attempt_log"; then
+      winner="${flags:-<none>}"
+      break
+    fi
+    # Only the adapter-less outcome is worth retrying with other flags; a
+    # panic or a missing init line is the same under every flag set.
+    if ! grep -qF 'no compatible GPU adapter' "$attempt_log"; then break; fi
+  done
+  if [[ -n "$winner" ]]; then
+    echo "web-smoke: [$arm] render surface online with adapter flags: $winner (attempt $n)"
+  else
+    echo "web-smoke: [$arm] no attempt brought a render surface online ($n flag set(s) tried)"
+  fi
   echo "web-smoke: screenshot [$arm]: $shot"
   echo "web-smoke: log [$arm]: $log"
   check_log "$log" "$STRICT" "$arm" || overall=1

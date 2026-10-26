@@ -16,6 +16,11 @@
 # To fix a failure: use `web_time::Instant` / `web_time::SystemTime` (same API, backed by
 # performance.now() in the browser, std on native) and add `web-time` to the crate's manifest.
 #
+# Scope: first-party lib code as the root workspace resolves features for these crates. Clock
+# reads inside registry crates (wgpu, parley_engine, ...) and behind features the root run does
+# not enable (perf-trace, devtools) are not linted; scripts/ci/web-smoke.sh, which boots the real
+# build, is the runtime backstop for those.
+#
 # --self-test additionally proves the lint fires on this toolchain for `use std::time::Instant;
 # Instant::now()` and for a fully qualified `std::time::Instant::now()` in a scratch crate, and that
 # the clean real graph passes.
@@ -56,8 +61,13 @@ while read -r name _ver path; do
     "$ROOT"/*) ;;
     *) continue ;;
   esac
-  # Only root-workspace members can be addressed with -p from the root.
-  cargo pkgid -p "$name" >/dev/null 2>&1 || continue
+  # Only root-workspace members can be addressed with -p from the root. A local
+  # crate the root cannot resolve (a standalone workspace pulled into the
+  # gallery, e.g. one on the root `exclude` list) must not slip through unlinted.
+  if ! cargo pkgid -p "$name" >/dev/null 2>&1; then
+    echo "error: $name ($path) is in the web-gallery wasm32 graph but is not a root-workspace member; make it one or lint it from its own workspace in this script" >&2
+    exit 2
+  fi
   crates+=("$name")
 done <<<"$tree_out"
 mapfile -t crates < <(printf '%s\n' "${crates[@]}" | sort -u)

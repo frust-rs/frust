@@ -425,6 +425,15 @@ SwiftShader adapter; **strict** additionally requires
 2 usage or toolchain error. Screenshot and log paths are printed, and the out
 dir (`--out`, default a kept mktemp dir) is printed at the end for CI upload.
 
+Which flags make a headless Chrome expose a GPU adapter differs per Chrome
+build, so each arm is booted with a ladder of adapter flag sets (SwiftShader
+WebGL, SwiftShader GLES, SwiftShader Vulkan for WebGPU, bare WebGPU, none)
+until one logs `render surface online`; the winning set is printed and every
+attempt's log is kept. `FRUST_WEB_SMOKE_GPU_FLAGS="<flags>"` pins one set.
+`--no-sandbox` is passed only when `CI` is set or
+`FRUST_WEB_SMOKE_NO_SANDBOX=1` (containers and hosted runners lack the user
+namespaces Chrome's sandbox needs); a local run keeps the sandbox.
+
 This proves boot plus the first surface, not pixels. The `frust-testing`
 `webgl` golden gate remains the manual pixel-level gate.
 

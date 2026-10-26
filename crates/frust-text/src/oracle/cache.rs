@@ -1188,7 +1188,11 @@ fn temp_name(path: &Path) -> OsString {
     let mut hasher = RandomState::new().build_hasher();
     hasher.write_u64(CALLS.fetch_add(1, Ordering::Relaxed));
     // The wall clock is only an extra nonce input; `SystemTime::now` panics on
-    // `wasm32-unknown-unknown`, so the wasm build leaves it out.
+    // `wasm32-unknown-unknown`, so the wasm build leaves it out. There the
+    // call counter plus the per-process `RandomState` seed still make the
+    // name unique: the browser build is single-threaded, and this write path
+    // is unreachable on it anyway (persistence is disabled on wasm, see
+    // `context::default_cache_location`).
     #[cfg(not(target_family = "wasm"))]
     {
         let now = std::time::SystemTime::now()
