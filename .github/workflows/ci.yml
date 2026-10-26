@@ -180,6 +180,61 @@ jobs:
         working-directory: ${{ matrix.dir }}
         run: ${{ matrix.gate }}
 
+  web-smoke:
+    # The browser tier (frust-rs/frust#127): the wasm32 clock tripwire, then a
+    # headless-Chrome boot of the web gallery in strict mode (the render surface
+    # must come online). No system packages: the wasm32 graph links nothing native.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
+      - name: Add the wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+      - name: Install wasm-bindgen-cli 0.2.128
+        # The workspace pin (docs/DEVELOPMENT.md, Version-Pin Policy). Installed from
+        # the release tarball and verified by sha256; never `cargo install` a
+        # floating version. The digest is from the release's
+        # wasm-bindgen-0.2.128-x86_64-unknown-linux-musl.tar.gz.sha256sum asset,
+        # fetched from https://github.com/rustwasm/wasm-bindgen/releases/download/0.2.128/.
+        env:
+          WASM_BINDGEN_SHA256: b51f0208fdff83515a787bd8ab9ac5865ed84dabb66d0c709957bb59793c645f
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/wasm-bindgen"
+          mkdir -p "$dir/bin"
+          curl -fsSL -o "$dir/wasm-bindgen.tar.gz" \
+            "https://github.com/rustwasm/wasm-bindgen/releases/download/0.2.128/wasm-bindgen-0.2.128-x86_64-unknown-linux-musl.tar.gz"
+          echo "$WASM_BINDGEN_SHA256  $dir/wasm-bindgen.tar.gz" | sha256sum -c -
+          tar -xzf "$dir/wasm-bindgen.tar.gz" -C "$dir"
+          install -m 0755 "$dir/wasm-bindgen-0.2.128-x86_64-unknown-linux-musl/wasm-bindgen" "$dir/bin/wasm-bindgen"
+          ver="$("$dir/bin/wasm-bindgen" --version | awk '{print $2}')"
+          [ "$ver" = "0.2.128" ] || { echo "::error::wasm-bindgen is $ver, expected 0.2.128"; exit 1; }
+          echo "$dir/bin" >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # The root workspace (wasm-time-check's clippy) and the gallery's own
+          # standalone workspace (web-smoke's build) keep separate target dirs.
+          workspaces: |
+            .
+            examples/web-gallery
+      - name: Clock tripwire (wasm32 graph)
+        run: scripts/ci/wasm-time-check.sh
+      - name: Boot smoke (headless Chrome, strict)
+        env:
+          CHROME: google-chrome
+          FRUST_WEB_SMOKE_REQUIRE_SURFACE: "1"
+        run: scripts/ci/web-smoke.sh --out "$RUNNER_TEMP/web-smoke"
+      - name: Upload the smoke logs and screenshots
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: web-smoke
+          path: ${{ runner.temp }}/web-smoke
+          if-no-files-found: warn
+          retention-days: 7
+
   hotpatch-feature-gate:
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -300,7 +355,7 @@ jobs:
   ci-ok:
     # The one required status check (.github/rulesets/main.json).
     if: always()
-    needs: [fmt, clippy, test, standalone, hotpatch-feature-gate, hotpatch-canary, hotpatch-windows, hygiene]
+    needs: [fmt, clippy, test, standalone, web-smoke, hotpatch-feature-gate, hotpatch-canary, hotpatch-windows, hygiene]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
