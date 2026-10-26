@@ -389,7 +389,7 @@ impl Backend for FontconfigBackend {
             weight: req.weight.value(),
             slant: req.slant,
             width: req.width,
-            lang: req.locale.as_deref().and_then(fc_lang),
+            lang: super::language_for(req.script, req.locale.as_deref()).and_then(fc_lang),
             color: generics.contains(&GenericSlot::Emoji),
         };
         let answer = self.answer(&query);

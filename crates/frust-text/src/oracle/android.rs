@@ -269,7 +269,7 @@ impl Backend for NdkFontBackend {
             &req.chars,
             req.weight.value(),
             italic,
-            req.locale.as_deref(),
+            super::language_for(req.script, req.locale.as_deref()),
         )?;
         log::debug!(
             "ndk font miss ({} code points, script {}): {} us, {}#{}{}{}",
