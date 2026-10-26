@@ -714,7 +714,7 @@ impl<P> VariantCache<P> {
 
         if !self.local.contains_key(&key) {
             #[cfg(feature = "perf-trace")]
-            let started = std::time::Instant::now();
+            let started = web_time::Instant::now();
             let built = self.resolve(key, desc, &compile);
             #[cfg(feature = "perf-trace")]
             {
@@ -938,7 +938,7 @@ impl<P> VariantCache<P> {
     /// `perf-trace`; a shutdown cannot overlap a wait on the same cache.
     fn wait_warm_up(&mut self, timeout: Duration) -> bool {
         #[cfg(feature = "perf-trace")]
-        let started = std::time::Instant::now();
+        let started = web_time::Instant::now();
         let inner = lock(&self.shared.inner);
         let (inner, _) = self
             .shared

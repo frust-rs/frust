@@ -12,6 +12,8 @@ categories.workspace = true
 readme = "README.md"
 
 [dependencies]
+# `std::time::Instant::now()` panics on wasm32; `web-time` is the drop-in winit 0.30 itself uses (std's `Instant` elsewhere).
+web-time = { workspace = true }
 # Backend-free: the unconditional `frust-gpu` edge below unions in the target's backend. Adding
 # backends here would re-union them across every target (see `crates/frust-gpu/Cargo.toml`).
 wgpu.workspace = true

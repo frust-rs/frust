@@ -51,7 +51,8 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
+use web_time::Instant;
 
 use serde::{Deserialize, Serialize};
 
@@ -1186,10 +1187,15 @@ fn temp_name(path: &Path) -> OsString {
     static CALLS: AtomicU64 = AtomicU64::new(0);
     let mut hasher = RandomState::new().build_hasher();
     hasher.write_u64(CALLS.fetch_add(1, Ordering::Relaxed));
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    hasher.write_u128(now);
+    // The wall clock is only an extra nonce input; `SystemTime::now` panics on
+    // `wasm32-unknown-unknown`, so the wasm build leaves it out.
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let now = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        hasher.write_u128(now);
+    }
     let mut name = OsString::from(".");
     name.push(path.file_name().unwrap_or_default());
     name.push(format!(

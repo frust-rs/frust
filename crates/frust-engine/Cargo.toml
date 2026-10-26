@@ -15,6 +15,8 @@ readme = "README.md"
 autobenches = false
 
 [dependencies]
+# `std::time::Instant::now()` panics on wasm32; `web-time` is the drop-in winit 0.30 itself uses (std's `Instant` elsewhere).
+web-time = { workspace = true }
 frust-gpu.workspace = true
 frust-scene.workspace = true
 vello_common.workspace = true

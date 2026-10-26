@@ -25,6 +25,8 @@ hotpatch = ["devtools", "frust-devtools/hotpatch", "dep:base64", "dep:frust-hotp
 gpu = []
 
 [dependencies]
+# `std::time::Instant::now()` panics on wasm32; `web-time` is the drop-in winit 0.30 itself uses (std's `Instant` elsewhere).
+web-time = { workspace = true }
 # No jni/ndk/winit and no FFI, so the crate compiles on every target. `frust-scene`/`frust-text` stay deps so the shells and the
 # erasure agree on the same versioned types.
 frust-core = { workspace = true }

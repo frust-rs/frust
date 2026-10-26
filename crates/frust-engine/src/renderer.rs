@@ -259,7 +259,8 @@
 use core::ops::Range;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Once};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 use frust_gpu::staging::{
     BUFFER_COPY_ALIGNMENT, StagingFrame, StagingRing, TEXTURE_COPY_ALIGNMENT,

@@ -39,7 +39,8 @@
 //! a shell reading a wall clock to time its own passes is exactly the kind
 //! of shell-facing responsibility this crate already carries alongside
 //! `theme_override`/`ffi_support`). Every recording API takes an
-//! already-measured [`std::time::Duration`] rather than reading a clock
+//! already-measured [`std::time::Duration`] (std's type on every
+//! target, wasm included) rather than reading a clock
 //! itself, and [`StartupSpans`] is generic over an injectable [`Clock`] —
 //! this crate's own logic stays fully host-testable without a real clock.
 //!
@@ -56,7 +57,8 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 #[cfg(feature = "perf-trace")]
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 /// Ring-buffer capacity for [`FrameStats`] — roughly 2 seconds of frames at
 /// 60Hz, enough for a stable rolling percentile without unbounded growth.
@@ -1412,8 +1414,9 @@ impl<F: FnMut() -> Duration> Clock for F {
     }
 }
 
-/// The production [`Clock`]: wraps [`std::time::Instant`], monotonic for
-/// the lifetime of the process.
+/// The production [`Clock`]: wraps [`web_time::Instant`] (std's `Instant` off
+/// wasm, which panics on `wasm32-unknown-unknown`), monotonic for the
+/// lifetime of the process.
 #[derive(Debug)]
 pub struct SystemClock {
     start: Instant,

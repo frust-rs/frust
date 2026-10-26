@@ -38,7 +38,8 @@ use core::ops::Range;
 use anyhow::{Result, anyhow};
 
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 use kurbo::Affine;
 
@@ -562,8 +563,8 @@ pub struct FirstSubmitBreakdown {
 #[cfg(feature = "perf-trace")]
 struct SubmitProbe {
     armed: bool,
-    encode_start: Option<std::time::Instant>,
-    queue_start: Option<std::time::Instant>,
+    encode_start: Option<web_time::Instant>,
+    queue_start: Option<web_time::Instant>,
     breakdown: FirstSubmitBreakdown,
 }
 
@@ -582,7 +583,7 @@ impl SubmitProbe {
         if self.armed {
             // Discard whatever earlier work (the install's warm-up) accrued.
             let _ = engine.take_pipeline_wait();
-            self.encode_start = Some(std::time::Instant::now());
+            self.encode_start = Some(web_time::Instant::now());
         }
     }
 
@@ -596,7 +597,7 @@ impl SubmitProbe {
 
     fn queue_begin(&mut self) {
         if self.armed {
-            self.queue_start = Some(std::time::Instant::now());
+            self.queue_start = Some(web_time::Instant::now());
         }
     }
 
@@ -1832,7 +1833,7 @@ impl SurfaceRenderer {
         if let Some(surface_texture) = presentable {
             #[cfg(feature = "perf-trace")]
             let present_start =
-                (measuring && self.first_submit.is_some()).then(std::time::Instant::now);
+                (measuring && self.first_submit.is_some()).then(web_time::Instant::now);
             ctx.device_handle().queue.present(surface_texture);
             #[cfg(feature = "perf-trace")]
             if let (Some(start), Some(breakdown)) = (present_start, self.first_submit.as_mut()) {
