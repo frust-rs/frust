@@ -37,7 +37,12 @@
 //! so every Han fallback list is empty and Han shapes to `.notdef`.
 //! [`append_han_fallbacks`] fills only the *empty* lists with Hiragino Sans (a
 //! partial-coverage stopgap; see LIMITATIONS id `ios-han-fallback-partial`).
+//!
+//! The oracle's persistent font cache is placed by [`TextContext::builder`];
+//! unconfigured contexts honour `FRUST_TEXT_FONT_CACHE` in debug builds.
 
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use parley::fontique::{Blob, GenericFamily};
@@ -46,7 +51,7 @@ use peniko::Brush;
 
 use crate::layout::TextLayout;
 use crate::oracle::registry::{FamilySummary, RegistryMirror};
-use crate::oracle::{self, Oracle, RenderCapabilities};
+use crate::oracle::{self, CacheLocation, Oracle, RenderCapabilities};
 use crate::shape_cache::{DEFAULT_CAPACITY, ShapeCache, ShapeCacheStats, ShapeKey};
 use crate::style::{
     GenericSlot, TextOverflow, TextStyle, to_parley_align, to_parley_family, to_parley_line_height,
@@ -329,15 +334,123 @@ fn proportional_estimate(span: usize, target: f32, measured: f32) -> usize {
 /// Where [`TextContext::new_with_timings`] spent its time (startup evidence).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NewTimings {
-    /// The font system's start-up: the oracle's construction, dominated by its
-    /// persistent fallback-cache read, plus — while parley still shapes —
-    /// `parley::FontContext::new`'s platform font-source scan.
+    /// The font system's start-up: the oracle's construction (its persistent
+    /// fallback cache is read later, at the first miss) plus — while parley
+    /// still shapes — `parley::FontContext::new`'s platform font-source scan.
     pub font_system: Duration,
     /// [`TextContext::sync_app_fonts`] — seeding the app fonts and generic fallbacks.
     pub app_sync: Duration,
 }
 
+/// The debug-build override for a context nobody configured: `off`, or an
+/// absolute directory to keep the font cache in.
+const FONT_CACHE_ENV: &str = "FRUST_TEXT_FONT_CACHE";
+
+/// Where a context's persistent font cache goes, as configured.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum FontCacheChoice {
+    /// The platform cache directory (or [`FONT_CACHE_ENV`]'s, in a debug build).
+    #[default]
+    Default,
+    Disabled,
+    Dir(PathBuf),
+}
+
+/// [`FONT_CACHE_ENV`]'s value as a choice; `None` when unset or unusable.
+fn env_font_cache(value: Option<&OsStr>) -> Option<FontCacheChoice> {
+    let value = value?;
+    if value == "off" {
+        return Some(FontCacheChoice::Disabled);
+    }
+    let dir = Path::new(value);
+    if dir.is_absolute() {
+        Some(FontCacheChoice::Dir(dir.to_path_buf()))
+    } else {
+        log::debug!("frust-text: {FONT_CACHE_ENV} ignored: not `off` or an absolute path");
+        None
+    }
+}
+
+/// The oracle's cache location for `choice`; only [`FontCacheChoice::Default`]
+/// consults the environment, and only in a debug build.
+fn cache_location(choice: FontCacheChoice) -> CacheLocation {
+    let choice = match choice {
+        FontCacheChoice::Default if cfg!(debug_assertions) => {
+            env_font_cache(std::env::var_os(FONT_CACHE_ENV).as_deref()).unwrap_or_default()
+        }
+        other => other,
+    };
+    match choice {
+        FontCacheChoice::Disabled => CacheLocation::Disabled,
+        FontCacheChoice::Dir(dir) => CacheLocation::File(oracle::cache_file_in(&dir)),
+        FontCacheChoice::Default => default_cache_location(),
+    }
+}
+
+/// An unconfigured context's location. This crate's own unit tests get a
+/// per-process scratch directory, so none reaches the user's cache; the web
+/// has no cache directory, so nothing is attempted there.
+fn default_cache_location() -> CacheLocation {
+    #[cfg(test)]
+    let location = CacheLocation::File(oracle::cache_file_in(
+        &std::env::temp_dir().join(format!("frust-text-test-font-cache-{}", std::process::id())),
+    ));
+    #[cfg(not(test))]
+    let location = if cfg!(target_family = "wasm") {
+        CacheLocation::Disabled
+    } else {
+        CacheLocation::platform()
+    };
+    location
+}
+
+/// Configures a [`TextContext`] before building it; see [`TextContext::builder`].
+#[derive(Clone, Debug, Default)]
+#[must_use]
+pub struct TextContextBuilder {
+    capabilities: RenderCapabilities,
+    font_cache: FontCacheChoice,
+}
+
+impl TextContextBuilder {
+    /// The glyph formats the engine draws (default: today's engine).
+    pub fn render_capabilities(mut self, capabilities: RenderCapabilities) -> Self {
+        self.capabilities = capabilities;
+        self
+    }
+
+    /// Keeps the font oracle's fallback cache in memory: nothing is read from
+    /// or written to disk. Tests use this.
+    pub fn without_font_cache(mut self) -> Self {
+        self.font_cache = FontCacheChoice::Disabled;
+        self
+    }
+
+    /// Keeps the persistent font cache in `dir` instead of the platform cache
+    /// directory (created at the first write).
+    pub fn font_cache_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.font_cache = FontCacheChoice::Dir(dir.into());
+        self
+    }
+
+    /// Builds the context; see [`TextContext::new`].
+    pub fn build(self) -> TextContext {
+        self.build_with_timings().0
+    }
+
+    /// [`Self::build`] that also reports where its time went.
+    pub fn build_with_timings(self) -> (TextContext, NewTimings) {
+        TextContext::build(self.capabilities, self.font_cache)
+    }
+}
+
 impl TextContext {
+    /// A builder for a context with non-default capabilities or font-cache
+    /// placement; [`Self::new`] is `TextContext::builder().build()`.
+    pub fn builder() -> TextContextBuilder {
+        TextContextBuilder::default()
+    }
+
     /// Builds a context with system fonts available, seeded with every app font
     /// registered so far.
     ///
@@ -364,13 +477,24 @@ impl TextContext {
     /// than today's default (see [`RenderCapabilities`]): the font oracle
     /// refuses faces the engine cannot draw rather than handing them to it.
     pub fn with_capabilities(capabilities: RenderCapabilities) -> Self {
-        Self::build(capabilities).0
+        Self::builder().render_capabilities(capabilities).build()
     }
 
     /// [`Self::new`] that also reports where its time went. `new` delegates
     /// here, so the work and its order are identical.
     pub fn new_with_timings() -> (Self, NewTimings) {
-        Self::build(RenderCapabilities::default())
+        Self::builder().build_with_timings()
+    }
+
+    /// Writes the font oracle's persistent fallback cache now if it holds
+    /// unwritten answers.
+    ///
+    /// The cache writes behind on its own (after a burst of new answers, or
+    /// once idle) and on drop, but a mobile app can be killed in the
+    /// background with neither: a shell calls this from its pause/background
+    /// hook. A no-op for a context built without a font cache.
+    pub fn flush_font_cache(&mut self) -> std::io::Result<()> {
+        self.oracle.flush()
     }
 
     /// What frust-engine can draw, as this context's font oracle assumes.
@@ -378,26 +502,21 @@ impl TextContext {
         self.oracle.capabilities()
     }
 
-    fn build(capabilities: RenderCapabilities) -> (Self, NewTimings) {
+    fn build(capabilities: RenderCapabilities, font_cache: FontCacheChoice) -> (Self, NewTimings) {
         let font_started = Instant::now();
         #[allow(unused_mut)]
         let mut font_ctx = parley::FontContext::new();
         #[cfg(target_vendor = "apple")]
         append_han_fallbacks(&mut font_ctx.collection, HAN_FALLBACK_CANDIDATES);
         let parley_scan = font_started.elapsed();
-        // Tests never touch the user's cache directory.
-        let persist = if cfg!(test) {
-            None
-        } else {
-            oracle::persistent_cache_path()
-        };
         let oracle_started = Instant::now();
-        let oracle = Oracle::new(oracle::platform_backend(), capabilities, persist);
-        let font_system = parley_scan + oracle_started.elapsed();
-        log::trace!(
-            "frust-text: font system {font_system:?} (oracle cache read {:?})",
-            oracle.cache_read_time()
+        let oracle = Oracle::with_cache_location(
+            oracle::platform_backend(),
+            capabilities,
+            cache_location(font_cache),
         );
+        let font_system = parley_scan + oracle_started.elapsed();
+        log::trace!("frust-text: font system {font_system:?}");
         let mut cx = Self {
             font_ctx,
             layout_ctx: parley::LayoutContext::new(),
@@ -865,6 +984,92 @@ mod tests {
     use peniko::Color;
     use std::sync::Mutex;
 
+    /// A context whose font cache stays in memory: the builder opt-out every
+    /// test here uses (the scratch-dir default is only the safety net).
+    fn test_cx() -> TextContext {
+        TextContext::builder().without_font_cache().build()
+    }
+
+    fn oracle_request(chars: &str) -> crate::oracle::FallbackRequest {
+        crate::oracle::FallbackRequest::new(
+            chars,
+            crate::oracle::ScriptTag(*b"Latn"),
+            &crate::FontFamily::SystemUi,
+            RenderCapabilities::default(),
+        )
+    }
+
+    #[test]
+    fn the_builder_opt_out_keeps_the_font_cache_in_memory() {
+        let mut cx = test_cx();
+        assert!(!cx.oracle.cache().is_persistent());
+        let _ = cx.oracle.resolve(&oracle_request("a"));
+        cx.flush_font_cache().expect("nothing to write");
+        assert!(cx.oracle.cache().attached_path().is_none());
+    }
+
+    #[test]
+    fn a_font_cache_dir_receives_the_cache_at_the_first_flush() {
+        let dir = oracle::synthetic::TempDir::new("context-cache-dir");
+        let cache_dir = dir.path().join("fonts");
+        let mut cx = TextContext::builder()
+            .font_cache_dir(&cache_dir)
+            .render_capabilities(RenderCapabilities::default())
+            .build();
+        assert!(cx.oracle.cache().is_persistent());
+        assert!(
+            cx.oracle.cache().attached_path().is_none(),
+            "resolved lazily"
+        );
+        // A face on a backend that knows "a", a cached miss on one that doesn't.
+        let _ = cx.oracle.resolve(&oracle_request("a"));
+        let file = oracle::cache_file_in(&cache_dir);
+        assert_eq!(cx.oracle.cache().attached_path(), Some(file.as_path()));
+        cx.flush_font_cache().expect("written");
+        assert!(file.exists());
+        assert!(!cx.oracle.cache().is_dirty());
+    }
+
+    #[test]
+    fn the_environment_override_parses_off_and_absolute_dirs_only() {
+        assert_eq!(env_font_cache(None), None);
+        assert_eq!(
+            env_font_cache(Some(OsStr::new("off"))),
+            Some(FontCacheChoice::Disabled)
+        );
+        let abs = std::env::temp_dir().join("frust-font-cache");
+        assert_eq!(
+            env_font_cache(Some(abs.as_os_str())),
+            Some(FontCacheChoice::Dir(abs.clone()))
+        );
+        assert_eq!(env_font_cache(Some(OsStr::new("relative/dir"))), None);
+        assert_eq!(env_font_cache(Some(OsStr::new(""))), None);
+    }
+
+    #[test]
+    fn explicit_choices_win_and_the_test_default_is_a_scratch_dir() {
+        assert!(matches!(
+            cache_location(FontCacheChoice::Disabled),
+            CacheLocation::Disabled
+        ));
+        let dir = std::env::temp_dir().join("chosen");
+        let CacheLocation::File(file) = cache_location(FontCacheChoice::Dir(dir.clone())) else {
+            panic!("an explicit directory is used as given");
+        };
+        assert_eq!(file, oracle::cache_file_in(&dir));
+        // Unless FRUST_TEXT_FONT_CACHE says otherwise, this crate's tests never
+        // resolve the user's cache directory.
+        if std::env::var_os(FONT_CACHE_ENV).is_none() {
+            let CacheLocation::File(file) = default_cache_location() else {
+                panic!("tests default to a scratch file");
+            };
+            assert!(file.starts_with(std::env::temp_dir()), "{}", file.display());
+            if let Some(user) = frust_paths::cache_dir() {
+                assert!(!file.starts_with(user), "{}", file.display());
+            }
+        }
+    }
+
     #[test]
     fn new_with_timings_builds_the_same_context_as_new() {
         let (mut timed, timings) = TextContext::new_with_timings();
@@ -912,16 +1117,16 @@ mod tests {
         };
 
         // A context that exists *before* the registration.
-        let mut older = TextContext::new();
+        let mut older = test_cx();
 
         // The shell's drain.
-        let mut shell = TextContext::new();
+        let mut shell = test_cx();
         shell
             .register_fonts(TUFFY.to_vec())
             .expect("valid TTF bytes must register");
 
         // A context built after it needs no explicit sync.
-        let mut later = TextContext::new();
+        let mut later = test_cx();
         assert!(
             !later.sync_app_fonts(),
             "a freshly built context is already current with the app-font record"
@@ -1068,7 +1273,7 @@ mod tests {
 
     #[test]
     fn a_registered_app_font_reaches_the_oracle_too() {
-        let mut cx = TextContext::new();
+        let mut cx = test_cx();
         let families = cx
             .register_fonts(TUFFY.to_vec())
             .expect("valid TTF bytes must register");
@@ -1096,7 +1301,7 @@ mod tests {
         let cx = TextContext::with_capabilities(caps);
         assert_eq!(cx.render_capabilities(), caps);
         assert_eq!(
-            TextContext::new().render_capabilities(),
+            test_cx().render_capabilities(),
             RenderCapabilities::default()
         );
     }
@@ -1107,7 +1312,7 @@ mod tests {
         // the same text+style at two different widths shapes exactly once; the
         // width change re-runs line-breaking only, and a repeated width is a
         // full reuse.
-        let mut cx = TextContext::new();
+        let mut cx = test_cx();
         let text = "Hello from Frust, the pure Rust mobile UI toolkit";
         let s = style(16.0);
 
@@ -1123,7 +1328,7 @@ mod tests {
 
     #[test]
     fn text_change_forces_a_fresh_shape() {
-        let mut cx = TextContext::new();
+        let mut cx = test_cx();
         let s = style(16.0);
         let _ = cx.layout("hello", &s, None);
         let _ = cx.layout("world", &s, None);
@@ -1136,7 +1341,7 @@ mod tests {
 
     #[test]
     fn style_and_color_changes_force_fresh_shapes() {
-        let mut cx = TextContext::new();
+        let mut cx = test_cx();
         let _ = cx.layout("hello", &style(16.0), None);
         // Size change.
         let _ = cx.layout("hello", &style(24.0), None);
@@ -1156,14 +1361,14 @@ mod tests {
         let texts = ["alpha beta", "gamma delta epsilon zeta eta"];
         let widths = [None, Some(60.0), Some(140.0)];
 
-        let mut cx = TextContext::new();
+        let mut cx = test_cx();
         for _round in 0..3 {
             for t in &texts {
                 for s in &styles {
                     for w in &widths {
                         let cached = cx.layout(t, s, *w).size();
                         // A pristine context shapes this exact combination fresh.
-                        let mut reference = TextContext::new();
+                        let mut reference = test_cx();
                         let fresh = reference.layout(t, s, *w).size();
                         assert_eq!(
                             cached, fresh,
@@ -1179,7 +1384,7 @@ mod tests {
 
     #[test]
     fn cache_is_bounded_and_evicts_least_recently_used() {
-        let mut cx = TextContext::new();
+        let mut cx = test_cx();
         let s = style(16.0);
         let overflow = 8;
         let n = DEFAULT_CAPACITY + overflow;
@@ -1264,7 +1469,7 @@ mod tests {
         // this is what catches the v1 defect where `Align(CENTER, text(..))`
         // centred only the block, leaving every line hugging the leading
         // edge.
-        let mut cx = TextContext::new();
+        let mut cx = test_cx();
         let max_width = 400.0;
 
         let start_x = line_min_x(
@@ -1322,7 +1527,7 @@ mod tests {
         // had its own hardcoded `Alignment::Start` on the re-break path, so a
         // resized layout would silently revert to `Start` even though the
         // initial (from-scratch) layout in this fn correctly centered.
-        let mut cx = TextContext::new();
+        let mut cx = test_cx();
         let centered = aligned_style(TextAlign::Center);
 
         // First pass: shapes and breaks from scratch at 400px.
@@ -1350,7 +1555,7 @@ mod tests {
         // The `ShapeKey` extension regression: two texts identical but for
         // alignment must shape (and render) independently, not share one
         // cache entry.
-        let mut cx = TextContext::new();
+        let mut cx = test_cx();
         let max_width = 400.0;
 
         let start_x = line_min_x(
@@ -1394,7 +1599,7 @@ mod tests {
         // Byte-for-byte parity: the default style's layout is unchanged from
         // before this retrofit (both hardcoded call sites now apply
         // `TextAlign::Start`, exactly what they hardcoded before).
-        let mut cx = TextContext::new();
+        let mut cx = test_cx();
         let default_x = line_min_x(&mut cx, TWO_LINES, &style(16.0), 400.0);
         let explicit_start_x =
             line_min_x(&mut cx, TWO_LINES, &aligned_style(TextAlign::Start), 400.0);
@@ -1431,7 +1636,7 @@ mod tests {
         // The zero-cost, unchanged-behavior contract: `max_lines: None`
         // delegates straight to `layout`, so no existing caller (none of
         // which pass `max_lines`) can regress.
-        let mut cx = TextContext::new();
+        let mut cx = test_cx();
         let s = style(16.0);
         let plain = cx.layout(WRAPPING_TEXT, &s, Some(200.0)).size();
         let bounded = cx
@@ -1444,7 +1649,7 @@ mod tests {
     fn single_line_fits_is_left_unmodified() {
         // "fits": comfortable width, well under the box — no truncation, no
         // ellipsis; byte-for-byte the same shape as a plain `layout` call.
-        let mut cx = TextContext::new();
+        let mut cx = test_cx();
         let s = style(16.0);
         let text = "short";
         let plain = cx.layout(text, &s, Some(400.0)).size();
@@ -1458,7 +1663,7 @@ mod tests {
     fn single_line_exact_fit_is_not_truncated() {
         // The `>` (not `>=`) boundary: a width equal to the line's own
         // natural width is a fit, not an overflow.
-        let mut cx = TextContext::new();
+        let mut cx = test_cx();
         let s = style(16.0);
         let text = "exact";
         let natural = cx.layout(text, &s, None).size().width;
@@ -1479,7 +1684,7 @@ mod tests {
     fn single_line_overflow_truncates_and_fits_the_bound() {
         // `max_lines(1)` forces a phrase that would otherwise soft-wrap onto
         // one truncated line.
-        let mut cx = TextContext::new();
+        let mut cx = test_cx();
         let s = style(16.0);
         let max_width = 80.0;
 
@@ -1507,7 +1712,7 @@ mod tests {
 
     #[test]
     fn max_lines_two_wrapped_truncates_only_the_last_visible_line() {
-        let mut cx = TextContext::new();
+        let mut cx = test_cx();
         let s = style(16.0);
         let max_width = 60.0;
 
@@ -1543,7 +1748,7 @@ mod tests {
 
     #[test]
     fn clip_drops_trailing_lines_without_touching_the_last_visible_line() {
-        let mut cx = TextContext::new();
+        let mut cx = test_cx();
         let s = style(16.0);
         let max_width = 60.0;
 
@@ -1587,7 +1792,7 @@ mod tests {
 
     #[test]
     fn ellipsis_wider_than_the_box_still_renders_without_panicking() {
-        let mut cx = TextContext::new();
+        let mut cx = test_cx();
         let s = style(16.0);
         // Narrower than a single glyph at this size — even a bare '…' can't
         // fit; the truncation walk must still return *something* rather than
@@ -1608,7 +1813,7 @@ mod tests {
 
     #[test]
     fn empty_string_is_not_truncated() {
-        let mut cx = TextContext::new();
+        let mut cx = test_cx();
         let s = style(16.0);
         let bounded = cx.layout_bounded("", &s, Some(80.0), Some(1), TextOverflow::Ellipsis);
         assert_eq!(bounded.size().width, 0.0);
@@ -1616,7 +1821,7 @@ mod tests {
 
     #[test]
     fn max_lines_zero_yields_an_empty_layout() {
-        let mut cx = TextContext::new();
+        let mut cx = test_cx();
         let s = style(16.0);
         let bounded = cx.layout_bounded(
             WRAPPING_TEXT,
@@ -1643,7 +1848,7 @@ mod tests {
     /// longest first) that the bounded seek approximates — the reference
     /// implementation for the seek's quality, kept only here.
     fn exhaustive_truncation(line: &str, s: &TextStyle, max_width: f32) -> String {
-        let mut cx = TextContext::new();
+        let mut cx = test_cx();
         let mut ends: Vec<usize> = line.char_indices().map(|(i, _)| i).collect();
         ends.push(line.len());
         for &end in ends.iter().rev() {
@@ -1660,7 +1865,7 @@ mod tests {
         // The O(n²)-on-the-UI-thread defect: one full shaping pass per
         // character of the overflowing line. The bound is a constant now, and
         // none of those measurements may reach the shape cache.
-        let mut cx = TextContext::new();
+        let mut cx = test_cx();
         let s = style(16.0);
         let token = long_token();
         let max_width = 80.0;
@@ -1693,7 +1898,7 @@ mod tests {
     fn the_truncation_walk_never_evicts_live_cache_entries() {
         // The cache-flush half of the same defect: with the LRU full, a
         // per-candidate insert evicted one live entry per character.
-        let mut cx = TextContext::new();
+        let mut cx = test_cx();
         let s = style(16.0);
         for i in 0..DEFAULT_CAPACITY {
             let _ = cx.layout(&format!("live entry {i}"), &s, None);
@@ -1733,7 +1938,7 @@ mod tests {
         let mut worst = 0;
         for line in lines {
             for max_width in [12.0_f32, 40.0, 160.0, 400.0] {
-                let mut cx = TextContext::new();
+                let mut cx = test_cx();
                 let line_width = cx.layout(line, &s, None).size().width as f32;
                 let got = cx.truncate_last_line(line, &s, max_width, line_width);
                 let want = exhaustive_truncation(line, &s, max_width);
@@ -1759,7 +1964,7 @@ mod tests {
         // returned candidate is always one measured as fitting. Forced here by
         // a line whose natural width lies about where the fitting prefix ends
         // (a deliberately misleading `line_width`).
-        let mut cx = TextContext::new();
+        let mut cx = test_cx();
         let s = style(16.0);
         let line = "iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW";
         let max_width = 60.0;
@@ -1788,7 +1993,7 @@ mod tests {
         // overflow rendered "Hello…" for `text("Hello\n").max_lines(1)`.
         let s = style(16.0);
         for overflow in [TextOverflow::Ellipsis, TextOverflow::Clip] {
-            let mut cx = TextContext::new();
+            let mut cx = test_cx();
             let plain = cx.layout("Hello", &s, Some(400.0));
             let fitting = plain.line_info(0).expect("one line").width;
             let with_ellipsis = cx
@@ -1834,7 +2039,7 @@ mod tests {
     fn a_trailing_newline_after_several_lines_is_discounted_too() {
         let s = style(16.0);
         for overflow in [TextOverflow::Ellipsis, TextOverflow::Clip] {
-            let mut cx = TextContext::new();
+            let mut cx = test_cx();
             let plain = cx.layout("A\nBB", &s, Some(400.0));
             let plain_last_width = plain.line_info(1).expect("two lines").width;
             let bounded = cx.layout_bounded("A\nBB\n", &s, Some(400.0), Some(2), overflow);
@@ -1863,7 +2068,7 @@ mod tests {
     #[test]
     fn a_real_extra_line_still_truncates_when_the_text_ends_in_a_newline() {
         // The discount must not swallow genuine overflow.
-        let mut cx = TextContext::new();
+        let mut cx = test_cx();
         let s = style(16.0);
         let clipped = cx.layout_bounded("A\nBB\n", &s, Some(400.0), Some(1), TextOverflow::Clip);
         assert_eq!(
@@ -1889,7 +2094,7 @@ mod tests {
     fn a_blank_line_inside_the_text_is_a_real_line() {
         // Only a *trailing* empty line is phantom: "a\n\nb" genuinely paints a
         // blank second line the caller asked for, so all three count.
-        let mut cx = TextContext::new();
+        let mut cx = test_cx();
         let s = style(16.0);
         let fits = cx.layout_bounded("a\n\nb", &s, Some(400.0), Some(3), TextOverflow::Ellipsis);
         assert_eq!(
@@ -1925,7 +2130,7 @@ mod tests {
         for text in texts {
             for overflow in [TextOverflow::Ellipsis, TextOverflow::Clip] {
                 for max_width in [20.0_f32, 70.0] {
-                    let mut cx = TextContext::new();
+                    let mut cx = test_cx();
                     let bounded = cx.layout_bounded(text, &s, Some(max_width), Some(1), overflow);
                     assert_eq!(bounded.line_count(), 1, "{text:?} at {max_width}px");
                     if overflow == TextOverflow::Ellipsis {
@@ -1947,7 +2152,7 @@ mod tests {
         // near-max-width candidate (see `max_lines_two_wrapped_...` above for
         // the width-tight case) — the same robust shape as this file's other
         // alignment tests (`TWO_LINES` at 400px).
-        let mut cx = TextContext::new();
+        let mut cx = test_cx();
         let text = "A\nBBBBBBBBBB\nCCCCCCCCCC";
         let max_width = 400.0;
 
@@ -1986,7 +2191,7 @@ mod tests {
 
     /// A system-less `TextContext` plus the JP subset face's family name.
     fn bare_cx() -> (TextContext, String, Vec<u8>) {
-        let mut cx = TextContext::new();
+        let mut cx = test_cx();
         cx.font_ctx.collection =
             parley::fontique::Collection::new(parley::fontique::CollectionOptions {
                 shared: false,
@@ -2102,7 +2307,7 @@ mod tests {
 
     /// Registers `bytes` in a system-less context; returns it and the family.
     fn systemless_cx(bytes: &[u8]) -> (TextContext, String) {
-        let mut cx = TextContext::new();
+        let mut cx = test_cx();
         cx.font_ctx.collection =
             parley::fontique::Collection::new(parley::fontique::CollectionOptions {
                 shared: false,

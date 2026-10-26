@@ -57,6 +57,14 @@ const SYSTEM_VERSION_PLIST: &str = "/System/Library/CoreServices/SystemVersion.p
 /// Largest `name`/`fvar` table the face walk reads; anything bigger is a corrupt directory.
 const MAX_TABLE_BYTES: u32 = 4 << 20;
 
+/// Total bytes one file's face walk may read (headers, directories, tables). PingFangUI.ttc, the
+/// largest system collection walked, reads well under 1 MiB; the cap stops a hostile or corrupt
+/// TTC header (up to 65535 face offsets) from turning one miss into a bulk read.
+const MAX_WALK_BYTES: u64 = 16 << 20;
+
+/// Distinct `name`/`fvar` tables one walk may read (a collection's faces often share them).
+const MAX_WALK_TABLES: usize = 256;
+
 /// CSS weight to CoreText's normalized `kCTFontWeightTrait`, at AppKit's `NSFontWeight` stops.
 const WEIGHT_STOPS: [(f32, f32); 9] = [
     (100.0, -0.8),
@@ -332,7 +340,52 @@ fn be_u16(bytes: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_be_bytes(bytes.get(at..at + 2)?.try_into().ok()?))
 }
 
-fn read_at(file: &mut File, offset: u64, len: usize) -> Option<Vec<u8>> {
+/// What one [`walk_file`] may still read.
+#[derive(Clone, Copy, Debug)]
+struct WalkBudget {
+    bytes: u64,
+    tables: usize,
+    /// A read was refused for want of budget.
+    exhausted: bool,
+}
+
+impl WalkBudget {
+    const DEFAULT: Self = Self::new(MAX_WALK_BYTES, MAX_WALK_TABLES);
+
+    const fn new(bytes: u64, tables: usize) -> Self {
+        Self {
+            bytes,
+            tables,
+            exhausted: false,
+        }
+    }
+
+    /// Charges `bytes` (and a table when `table`); `false`, marking the budget exhausted, when
+    /// it cannot pay.
+    fn charge(&mut self, bytes: u64, table: bool) -> bool {
+        let tables = if table {
+            self.tables.checked_sub(1)
+        } else {
+            Some(self.tables)
+        };
+        match (self.bytes.checked_sub(bytes), tables) {
+            (Some(left), Some(tables)) => {
+                (self.bytes, self.tables) = (left, tables);
+                true
+            }
+            _ => {
+                self.exhausted = true;
+                false
+            }
+        }
+    }
+}
+
+/// `len` bytes at `offset`, charged to `budget`; `None` past the file's end or the budget.
+fn read_at(file: &mut File, budget: &mut WalkBudget, offset: u64, len: usize) -> Option<Vec<u8>> {
+    if !budget.charge(len as u64, false) {
+        return None;
+    }
     file.seek(SeekFrom::Start(offset)).ok()?;
     let mut buf = vec![0; len];
     file.read_exact(&mut buf).ok()?;
@@ -355,13 +408,27 @@ fn name_strings(name: &Name<'_>, id: NameId) -> Vec<String> {
 }
 
 /// Reads the faces of the font file at `path` from its TTC header, table directories and
-/// `name`/`fvar` tables only — never the glyph data.
+/// `name`/`fvar` tables only — never the glyph data — within [`WalkBudget::DEFAULT`].
 fn walk_file(path: &Path) -> Option<Vec<FileFace>> {
+    let mut budget = WalkBudget::DEFAULT;
+    let faces = walk_file_within(path, &mut budget);
+    if budget.exhausted {
+        log::debug!(
+            "frust-text: face walk of {} exceeded its budget",
+            path.display()
+        );
+    }
+    faces
+}
+
+/// [`walk_file`] under an explicit budget; `None` when the file is unreadable, malformed, or
+/// needs more than `budget`.
+fn walk_file_within(path: &Path, budget: &mut WalkBudget) -> Option<Vec<FileFace>> {
     let mut file = File::open(path).ok()?;
-    let header = read_at(&mut file, 0, 12)?;
+    let header = read_at(&mut file, budget, 0, 12)?;
     let offsets: Vec<u32> = if header.get(..4) == Some(b"ttcf".as_slice()) {
         let count = be_u32(&header, 8)?.min(u32::from(u16::MAX));
-        let list = read_at(&mut file, 12, count as usize * 4)?;
+        let list = read_at(&mut file, budget, 12, count as usize * 4)?;
         (0..count as usize)
             .filter_map(|i| be_u32(&list, i * 4))
             .collect()
@@ -371,9 +438,9 @@ fn walk_file(path: &Path) -> Option<Vec<FileFace>> {
     let mut tables: HashMap<(u32, u32), Vec<u8>> = HashMap::new();
     let mut faces = Vec::with_capacity(offsets.len());
     for offset in offsets {
-        let directory = read_at(&mut file, u64::from(offset), 12)?;
+        let directory = read_at(&mut file, budget, u64::from(offset), 12)?;
         let count = usize::from(be_u16(&directory, 4)?);
-        let records = read_at(&mut file, u64::from(offset) + 12, count * 16)?;
+        let records = read_at(&mut file, budget, u64::from(offset) + 12, count * 16)?;
         let mut face = FileFace {
             hvgl_only: true,
             ..FileFace::default()
@@ -390,18 +457,28 @@ fn walk_file(path: &Path) -> Option<Vec<FileFace>> {
             }
         }
         face.hvgl_only &= has_hvgl;
-        let mut table = |at: Option<(u32, u32)>| -> Option<Vec<u8>> {
-            let at = at.filter(|(_, len)| *len <= MAX_TABLE_BYTES)?;
+        let mut table = |at: Option<(u32, u32)>| -> Result<Option<Vec<u8>>, ()> {
+            let Some(at) = at.filter(|(_, len)| *len <= MAX_TABLE_BYTES) else {
+                return Ok(None);
+            };
             let bytes = match tables.entry(at) {
                 Entry::Occupied(entry) => entry.into_mut(),
                 Entry::Vacant(entry) => {
-                    entry.insert(read_at(&mut file, u64::from(at.0), at.1 as usize)?)
+                    // An exhausted budget ends the walk; an unreadable table is a face without names.
+                    if !budget.charge(0, true) {
+                        return Err(());
+                    }
+                    match read_at(&mut file, budget, u64::from(at.0), at.1 as usize) {
+                        Some(bytes) => entry.insert(bytes),
+                        None if budget.exhausted => return Err(()),
+                        None => return Ok(None),
+                    }
                 }
             };
-            Some(bytes.clone())
+            Ok(Some(bytes.clone()))
         };
-        let name_bytes = table(name_at);
-        let fvar_bytes = table(fvar_at);
+        let name_bytes = table(name_at).ok()?;
+        let fvar_bytes = table(fvar_at).ok()?;
         let Some(name) = name_bytes
             .as_deref()
             .and_then(|b| Name::read(FontData::new(b)).ok())
@@ -708,9 +785,11 @@ impl CoreTextBackend {
         let started = Instant::now();
         let resolution = self.state.get_mut().resolve(req);
         if let Some(r) = &resolution {
+            // Never the characters themselves: log output can leave the device.
             log::debug!(
-                "coretext font miss {:?}: {} us, {:?} #{} {:?}{}",
-                req.chars,
+                "coretext font miss ({} code points, {}): {} us, {:?} #{} {:?}{}",
+                req.chars.chars().count(),
+                String::from_utf8_lossy(&req.script.0),
                 started.elapsed().as_micros(),
                 r.source.postscript_name,
                 r.source.index,
@@ -1122,6 +1201,65 @@ mod tests {
             (20, Some("PingFangSC-Regular"), false)
         );
         assert_eq!(oracle.stats().refused, 0);
+    }
+
+    #[test]
+    fn the_face_walk_stops_at_its_byte_and_table_budgets() {
+        use crate::oracle::synthetic::{FaceSpec, TempDir};
+        let dir = TempDir::new("apple-walk-budget");
+        let specs: Vec<FaceSpec> = ["A", "B", "C"]
+            .into_iter()
+            .map(|family| FaceSpec::new(family).chars("a"))
+            .collect();
+        let ttc = dir.write("three.ttc", &FaceSpec::collection(&specs));
+        let len = std::fs::metadata(&ttc).unwrap().len();
+
+        let mut ample = WalkBudget::new(len, 3);
+        let faces = walk_file_within(&ttc, &mut ample).expect("within budget");
+        assert_eq!(faces.len(), 3);
+        assert!(!ample.exhausted);
+
+        let mut two_tables = WalkBudget::new(len, 2);
+        assert!(walk_file_within(&ttc, &mut two_tables).is_none());
+        assert!(
+            two_tables.exhausted,
+            "the third distinct name table is refused"
+        );
+
+        let mut few_bytes = WalkBudget::new(64, MAX_WALK_TABLES);
+        assert!(walk_file_within(&ttc, &mut few_bytes).is_none());
+        assert!(few_bytes.exhausted, "the directories alone exceed 64 bytes");
+
+        // A header claiming 65535 faces is cut off by the byte budget, not walked.
+        let mut forged = std::fs::read(&ttc).unwrap();
+        forged[8..12].copy_from_slice(&u32::from(u16::MAX).to_be_bytes());
+        let forged = dir.write("forged.ttc", &forged);
+        let mut budget = WalkBudget::new(1024, MAX_WALK_TABLES);
+        assert!(walk_file_within(&forged, &mut budget).is_none());
+        assert!(budget.exhausted);
+        assert!(
+            walk_file(&forged).is_none(),
+            "a malformed collection maps nothing"
+        );
+    }
+
+    #[test]
+    fn the_default_walk_budget_fits_the_largest_system_collection() {
+        if !on_macos("the_default_walk_budget_fits_the_largest_system_collection") {
+            return;
+        }
+        let mut backend = CoreTextBackend::new();
+        let pingfang = resolve(&mut backend, "\u{4e2d}\u{6587}", Some("zh-Hans")).source;
+        let mut budget = WalkBudget::DEFAULT;
+        let faces = walk_file_within(path_of(&pingfang), &mut budget).expect("PingFangUI.ttc");
+        let used = MAX_WALK_BYTES - budget.bytes;
+        println!(
+            "PingFangUI.ttc: {} faces, {used} bytes, {} tables",
+            faces.len(),
+            MAX_WALK_TABLES - budget.tables
+        );
+        assert!(!budget.exhausted);
+        assert!(used < MAX_WALK_BYTES / 4, "{used} bytes leaves headroom");
     }
 
     #[test]

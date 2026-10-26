@@ -22,7 +22,7 @@
 //! - [`registry`]: the app-font registry (the process-wide app-font and
 //!   generic-fallback records, parsed per context with read-fonts).
 //! - [`cache`]: the in-memory LRU of system answers (misses included) and its
-//!   persistent, version-stamped copy under frust-paths' cache directory.
+//!   persistent, stamped, write-behind copy, placed by [`CacheLocation`].
 //! - [`selector`]: the resolve pipeline, coverage, renderability and synthesis.
 //! - One backend per platform, each cfg-gated on its `mod` line below
 //!   (`apple`, `android`, `fontconfig`, `dwrite`, `web`); `apple`, `android` and
@@ -70,7 +70,7 @@ mod web;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use peniko::Blob;
 use serde::{Deserialize, Serialize};
@@ -468,6 +468,10 @@ impl Backend for NoBackend {
 
 /// Where the persistent fallback cache lives for this process, if anywhere:
 /// `<frust-paths cache dir>/<app stem>/frust-text/font-fallback.json`.
+///
+/// `None` until frust-paths can answer — on Android, until the shell's
+/// `nativeInitPlatform` installed the app's directories — which is why
+/// [`CacheLocation::Lazy`] asks again at the cache's next miss or flush.
 pub(crate) fn persistent_cache_path() -> Option<PathBuf> {
     let base = frust_paths::cache_dir()?;
     Some(
@@ -475,6 +479,77 @@ pub(crate) fn persistent_cache_path() -> Option<PathBuf> {
             .join("frust-text")
             .join(cache::PERSIST_FILE_NAME),
     )
+}
+
+/// The persistent cache file inside an explicitly chosen directory.
+pub(crate) fn cache_file_in(dir: &Path) -> PathBuf {
+    dir.join(cache::PERSIST_FILE_NAME)
+}
+
+/// Where an [`Oracle`] keeps its persistent fallback cache.
+#[derive(Debug)]
+pub(crate) enum CacheLocation {
+    /// Memory only: nothing is read or written.
+    Disabled,
+    /// This file, read at the first miss or flush.
+    File(PathBuf),
+    /// The file this resolver names, asked at the first miss or flush and
+    /// again at later ones while it answers `None`.
+    Lazy(cache::PathResolver),
+}
+
+impl CacheLocation {
+    /// The platform default: [`persistent_cache_path`], resolved lazily.
+    pub(crate) fn platform() -> Self {
+        Self::Lazy(cache::PathResolver::new(persistent_cache_path))
+    }
+}
+
+/// The system and user font directories whose mtimes stamp the persistent
+/// cache, so installing or removing a font expires its cached misses. A
+/// directory's mtime changes when an entry directly inside it does; fonts in
+/// nested folders are covered by the OS build id and each face's file stamp.
+pub(crate) fn font_dirs() -> Vec<PathBuf> {
+    #[cfg_attr(
+        not(any(
+            target_vendor = "apple",
+            windows,
+            target_os = "linux",
+            target_os = "freebsd"
+        )),
+        allow(unused_mut)
+    )]
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let env_dir = |var: &str| {
+        std::env::var_os(var)
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+    };
+    #[cfg(target_os = "macos")]
+    {
+        dirs.push(PathBuf::from("/System/Library/Fonts"));
+        dirs.push(PathBuf::from("/Library/Fonts"));
+        dirs.extend(env_dir("HOME").map(|home| home.join("Library/Fonts")));
+    }
+    #[cfg(all(target_vendor = "apple", not(target_os = "macos")))]
+    dirs.push(PathBuf::from("/System/Library/Fonts"));
+    #[cfg(target_os = "android")]
+    dirs.extend(["/system/fonts", "/product/fonts", "/data/fonts/files"].map(PathBuf::from));
+    #[cfg(windows)]
+    {
+        let windir = env_dir("WINDIR").unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+        dirs.push(windir.join("Fonts"));
+        dirs.extend(env_dir("LOCALAPPDATA").map(|local| local.join(r"Microsoft\Windows\Fonts")));
+    }
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        // fontconfig rewrites its caches whenever the font set changes.
+        let user = env_dir("XDG_CACHE_HOME").or_else(|| env_dir("HOME").map(|h| h.join(".cache")));
+        dirs.extend(user.map(|cache| cache.join("fontconfig")));
+        dirs.push(PathBuf::from("/var/cache/fontconfig"));
+    }
+    let _ = env_dir;
+    dirs
 }
 
 /// Counters for the resolve pipeline, read by tests and perf traces.
@@ -542,7 +617,6 @@ pub(crate) struct Oracle {
     facts: HashMap<FaceKey, Option<FaceFacts>>,
     capabilities: RenderCapabilities,
     stats: OracleStats,
-    cache_read: Duration,
 }
 
 impl std::fmt::Debug for Oracle {
@@ -550,26 +624,44 @@ impl std::fmt::Debug for Oracle {
         f.debug_struct("Oracle")
             .field("capabilities", &self.capabilities)
             .field("stats", &self.stats)
-            .field("cache_read", &self.cache_read)
+            .field("cache_read", &self.cache.load_time())
             .finish_non_exhaustive()
     }
 }
 
 impl Oracle {
-    /// Builds an oracle over `backend`, loading the persistent cache from
-    /// `persist` when given (the load's duration is [`Self::cache_read_time`]).
+    /// Builds an oracle over `backend` whose persistent cache is the file
+    /// `persist` (read at the first miss), or memory only for `None`.
     pub(crate) fn new(
         backend: Box<dyn Backend>,
         capabilities: RenderCapabilities,
         persist: Option<PathBuf>,
     ) -> Self {
-        let started = Instant::now();
+        let location = match persist {
+            Some(path) => CacheLocation::File(path),
+            None => CacheLocation::Disabled,
+        };
+        Self::with_cache_location(backend, capabilities, location)
+    }
+
+    /// Builds an oracle over `backend` with its persistent cache at
+    /// `location`. Nothing is read here: the file is resolved and loaded at
+    /// the first cache miss or flush (see [`cache`]).
+    pub(crate) fn with_cache_location(
+        backend: Box<dyn Backend>,
+        capabilities: RenderCapabilities,
+        location: CacheLocation,
+    ) -> Self {
         let mut cache = cache::FallbackCache::new(cache::MEMORY_CAPACITY);
-        if let Some(path) = persist {
+        let resolver = match location {
+            CacheLocation::Disabled => None,
+            CacheLocation::File(path) => Some(cache::PathResolver::fixed(path)),
+            CacheLocation::Lazy(resolver) => Some(resolver),
+        };
+        if let Some(resolver) = resolver {
             let stamp = cache::VersionStamp::current(backend.os_build_id());
-            cache.attach_persistent(path, stamp);
+            cache.attach_lazy(resolver, stamp);
         }
-        let cache_read = started.elapsed();
         Self {
             backend,
             registry: AppFontRegistry::default(),
@@ -578,13 +670,13 @@ impl Oracle {
             facts: HashMap::new(),
             capabilities,
             stats: OracleStats::default(),
-            cache_read,
         }
     }
 
-    /// How long [`Self::new`] spent reading the persistent cache.
+    /// How long reading the persistent cache took (zero until the first miss
+    /// or flush has read it).
     pub(crate) fn cache_read_time(&self) -> Duration {
-        self.cache_read
+        self.cache.load_time()
     }
 
     /// The capabilities this oracle was built for (the default for requests).
@@ -612,13 +704,26 @@ impl Oracle {
         &self.store
     }
 
-    /// Writes the persistent cache now if it changed since the last write.
-    pub(crate) fn persist(&mut self) -> std::io::Result<()> {
+    /// The fallback cache, mutably (tests tune its write-behind triggers).
+    pub(crate) fn cache_mut(&mut self) -> &mut cache::FallbackCache {
+        &mut self.cache
+    }
+
+    /// Writes the persistent cache now if it changed since the last write —
+    /// the hook a shell calls when the app is paused or backgrounded, where
+    /// `Drop` may never run. Write-behind covers the time in between.
+    pub(crate) fn flush(&mut self) -> std::io::Result<()> {
         self.cache.persist()
+    }
+
+    /// [`Self::flush`].
+    pub(crate) fn persist(&mut self) -> std::io::Result<()> {
+        self.flush()
     }
 }
 
 impl Drop for Oracle {
+    /// The final flush.
     fn drop(&mut self) {
         if let Err(err) = self.cache.persist() {
             log::debug!("frust-text: font fallback cache not written: {err}");
@@ -804,6 +909,136 @@ mod tests {
         assert_eq!(backend.resolve(&req), None);
         assert_eq!(backend.default_family(GenericSlot::SansSerif), None);
         assert!(!backend.os_build_id().is_empty());
+    }
+
+    fn latin_request(chars: &str) -> FallbackRequest {
+        FallbackRequest::new(
+            chars,
+            ScriptTag(*b"Latn"),
+            &FontFamily::SystemUi,
+            RenderCapabilities::default(),
+        )
+    }
+
+    /// A synthetic backend answering `font` for "a" and "b", and its call log.
+    fn backend_over(font: &Path) -> (synthetic::SyntheticBackend, synthetic::Calls) {
+        let mut backend = synthetic::SyntheticBackend::new("build-1");
+        backend.cover_with(FaceSource::path(font, 0), "ab");
+        let calls = backend.calls();
+        (backend, calls)
+    }
+
+    #[test]
+    fn an_oracle_built_before_the_cache_dir_resolves_still_persists() {
+        use std::sync::{Arc, Mutex};
+        let dir = synthetic::TempDir::new("oracle-lazy");
+        let font = dir.write("a.ttf", &synthetic::FaceSpec::new("A").chars("ab").build());
+        let file = cache_file_in(&dir.path().join("cache"));
+        // Android: the context is built before `nativeInitPlatform`.
+        let installed: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+        let resolver = {
+            let installed = Arc::clone(&installed);
+            cache::PathResolver::new(move || installed.lock().unwrap().clone())
+        };
+        let (backend, _) = backend_over(&font);
+        let mut oracle = Oracle::with_cache_location(
+            Box::new(backend),
+            RenderCapabilities::default(),
+            CacheLocation::Lazy(resolver),
+        );
+        assert_eq!(oracle.cache_read_time(), Duration::ZERO, "nothing read yet");
+        assert!(oracle.resolve(&latin_request("a")).is_some());
+        assert!(oracle.cache().attached_path().is_none(), "no path yet");
+        *installed.lock().unwrap() = Some(file.clone());
+        oracle.flush().expect("written once the path resolves");
+        assert_eq!(oracle.cache().attached_path(), Some(file.as_path()));
+        drop(oracle);
+
+        let (backend, calls) = backend_over(&font);
+        let mut next = Oracle::new(Box::new(backend), RenderCapabilities::default(), Some(file));
+        assert!(next.resolve(&latin_request("a")).is_some());
+        assert_eq!(calls.resolves(), 0, "answered from the persistent cache");
+        assert!(
+            next.cache().attached_path().is_some(),
+            "read at the first miss"
+        );
+    }
+
+    #[test]
+    fn the_oracle_writes_behind_flushes_on_demand_and_on_drop() {
+        let dir = synthetic::TempDir::new("oracle-write-behind");
+        let font = dir.write("a.ttf", &synthetic::FaceSpec::new("A").chars("ab").build());
+        let file = cache_file_in(dir.path());
+        let open = || {
+            let (backend, _) = backend_over(&font);
+            let mut oracle = Oracle::new(
+                Box::new(backend),
+                RenderCapabilities::default(),
+                Some(file.clone()),
+            );
+            oracle
+                .cache_mut()
+                .set_write_behind(2, Duration::from_secs(3600));
+            oracle
+        };
+
+        let mut oracle = open();
+        assert!(oracle.resolve(&latin_request("a")).is_some());
+        assert!(!file.exists(), "one answer is below the threshold");
+        assert!(oracle.resolve(&latin_request("b")).is_some());
+        assert!(
+            file.exists(),
+            "the second answer wrote behind, no Drop needed"
+        );
+        std::fs::remove_file(&file).unwrap();
+
+        assert!(oracle.resolve(&latin_request("ж")).is_none());
+        oracle.flush().unwrap();
+        assert!(file.exists(), "an explicit flush writes the dirty cache");
+        std::fs::remove_file(&file).unwrap();
+        oracle.flush().unwrap();
+        assert!(!file.exists(), "a clean flush writes nothing");
+
+        assert!(oracle.resolve(&latin_request("ab")).is_some());
+        drop(oracle);
+        assert!(file.exists(), "Drop is the final flush");
+    }
+
+    #[test]
+    fn the_platform_location_is_resolved_lazily() {
+        // Constructing it asks frust-paths nothing; the resolver runs at first use.
+        assert!(matches!(CacheLocation::platform(), CacheLocation::Lazy(_)));
+        let path = persistent_cache_path();
+        if let Some(path) = path {
+            assert!(path.ends_with(Path::new("frust-text").join(cache::PERSIST_FILE_NAME)));
+        }
+    }
+
+    #[test]
+    fn a_disabled_cache_location_never_resolves_a_path() {
+        let mut oracle = Oracle::with_cache_location(
+            Box::new(NoBackend),
+            RenderCapabilities::default(),
+            CacheLocation::Disabled,
+        );
+        assert!(oracle.resolve(&latin_request("a")).is_none());
+        oracle.flush().unwrap();
+        assert!(!oracle.cache().is_persistent());
+        assert!(oracle.cache().attached_path().is_none());
+    }
+
+    #[test]
+    fn the_stamped_font_dirs_are_absolute_platform_directories() {
+        let dirs = font_dirs();
+        assert!(dirs.iter().all(|d| d.is_absolute()), "{dirs:?}");
+        if cfg!(target_os = "macos") {
+            for expected in ["/System/Library/Fonts", "/Library/Fonts"] {
+                assert!(dirs.contains(&PathBuf::from(expected)), "{dirs:?}");
+            }
+        }
+        if cfg!(target_family = "wasm") {
+            assert!(dirs.is_empty());
+        }
     }
 
     #[test]
