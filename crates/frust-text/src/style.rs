@@ -2,14 +2,12 @@
 //! family, weight, style (italic/oblique), width, variation axes, locale, size,
 //! color, letter-spacing, and line-height (the M3 type-scale surface).
 //!
-//! Every type here is Frust-owned, not a parley re-export (scene-layer
-//! purity, see `docs/ARCHITECTURE.md`). [`FontFamily`]/[`FontWeight`]/
-//! [`FontStyle`]/[`LineHeight`] mirror parley 0.11's semantics so the
-//! `to_parley_*` converters below (the parley layout and editor paths) are a
-//! straight match; the frust shaping driver (`crate::context::shape`) reads
-//! these types directly and resolves [`LineHeight`] through
-//! [`LineHeight::resolve`], so no shaping-engine type appears here. Rich
-//! per-range styling is deferred.
+//! Every type here is Frust-owned, not a re-export of a text engine's type
+//! (scene-layer purity, see `docs/ARCHITECTURE.md`). [`FontFamily`]/
+//! [`FontWeight`]/[`FontStyle`]/[`LineHeight`] keep parley 0.11's semantics;
+//! the frust shaping driver (`crate::context::shape`) reads these types
+//! directly and resolves [`LineHeight`] through [`LineHeight::resolve`], so no
+//! shaping-engine type appears here. Rich per-range styling is deferred.
 
 use peniko::Color;
 
@@ -24,8 +22,8 @@ pub enum FamilyName {
 
 /// Generic font families supported as fallback slots.
 ///
-/// This is a curated subset of parley's [`parley::GenericFamily`] covering
-/// the generic families Frust explicitly supports and exposes.
+/// This is a curated subset of the CSS generic families covering the ones
+/// Frust explicitly supports and exposes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GenericSlot {
     /// A monospace (fixed-width) font family.
@@ -43,10 +41,10 @@ pub enum GenericSlot {
 /// Font family selection.
 ///
 /// The default, [`FontFamily::SystemUi`], resolves to the platform UI font
-/// (e.g. San Francisco on macOS) via fontique's system collection with no
-/// registration required. [`FontFamily::Named`] is an ordered fallback stack
-/// of named families, tried in order; a name that doesn't resolve on the
-/// current platform falls back per parley's own fallback behavior — no error
+/// (e.g. San Francisco on macOS) via the font oracle's platform backend with
+/// no registration required. [`FontFamily::Named`] is an ordered fallback
+/// stack of named families, tried in order; a name that doesn't resolve on
+/// the current platform falls back per the oracle's fallback — no error
 /// surface is exposed here. [`FontFamily::NamedWithGeneric`] extends
 /// [`FontFamily::Named`] by allowing the stack to end with a generic
 /// fallback family (e.g. monospace, serif).
@@ -101,8 +99,8 @@ impl FontFamily {
 
 /// Visual weight of a font, on the standard 1-1000 CSS `font-weight` scale.
 ///
-/// Mirrors parley/fontique's `FontWeight` (see `parley::FontWeight`) without
-/// leaking the type itself past this crate's boundary.
+/// The CSS weight scale fontique's `FontWeight` uses, without leaking that
+/// type past this crate's boundary.
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
 pub struct FontWeight(f32);
 
@@ -145,7 +143,7 @@ impl Default for FontWeight {
 
 /// Visual slant of a font.
 ///
-/// Mirrors parley/fontique's `FontStyle` (see `parley::FontStyle`).
+/// The CSS slants fontique's `FontStyle` names.
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub enum FontStyle {
     /// An upright or "roman" style. Default.
@@ -162,15 +160,14 @@ pub enum FontStyle {
 /// Paragraph alignment: how each line is positioned within the layout's
 /// width.
 ///
-/// Mirrors parley's `Alignment` semantics (see `parley::layout::Alignment`)
-/// without leaking the parley type. Only meaningful when the layout is
-/// wrapped to a `max_width` ([`crate::TextContext::layout`]'s third
-/// argument) — an unbounded layout's line width already equals its content
-/// width, so every alignment renders identically to [`TextAlign::Start`].
+/// parley 0.11's `Alignment` semantics, without its type. Only meaningful
+/// when the layout is wrapped to a `max_width` ([`crate::TextContext::layout`]'s
+/// third argument, or [`crate::TextEditor::set_wrap_width`]) — an unbounded
+/// layout's line width already equals its content width, so every alignment
+/// renders identically to [`TextAlign::Start`].
 ///
-/// **Applies to [`crate::TextContext::layout`] only.** A live-edited
-/// [`crate::TextEditor`] (the engine behind `TextInput`) does not read this
-/// field — see that type's docs for why editable text is out of scope.
+/// Applies to [`crate::TextContext::layout`] and to a live-edited
+/// [`crate::TextEditor`] (the engine behind `TextInput`) alike.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum TextAlign {
     /// Leading edge of the line's text direction (left for LTR, right for
@@ -216,8 +213,7 @@ pub enum TextOverflow {
 
 /// Line height: how much vertical space each line of text occupies.
 ///
-/// Mirrors parley's `LineHeight` semantics (see `parley::LineHeight`)
-/// without leaking the parley type. M3's type scale specifies line heights
+/// parley 0.11's `LineHeight` semantics, without its type. M3's type scale specifies line heights
 /// in absolute logical pixels ([`LineHeight::Absolute`]);
 /// [`LineHeight::FontSizeRelative`] is the documented M3-friendly choice when
 /// a consistent, font-independent ratio is preferred instead.
@@ -351,91 +347,6 @@ impl Default for TextStyle {
     }
 }
 
-/// Converts a Frust [`FontFamily`] into parley's owned `'static`
-/// `FontFamily`. `pub(crate)` — parley types must not leak past the crate
-/// boundary (scene-layer purity); shared by [`crate::context`]'s parley layout
-/// path and [`crate::editor`], and retired with them (the shaping driver walks
-/// the family chain through the font oracle instead).
-pub(crate) fn to_parley_family(family: &FontFamily) -> parley::FontFamily<'static> {
-    match family {
-        FontFamily::SystemUi => parley::GenericFamily::SystemUi.into(),
-        FontFamily::Named(names) => {
-            let list: Vec<parley::FontFamilyName<'static>> = names
-                .iter()
-                .map(|name| parley::FontFamilyName::Named(name.clone().into()))
-                .collect();
-            parley::FontFamily::List(list.into())
-        }
-        FontFamily::NamedWithGeneric(families) => {
-            let list: Vec<parley::FontFamilyName<'static>> = families
-                .iter()
-                .map(|f| match f {
-                    FamilyName::Named(name) => parley::FontFamilyName::Named(name.clone().into()),
-                    FamilyName::Generic(slot) => {
-                        parley::FontFamilyName::Generic(generic_slot_to_parley(*slot))
-                    }
-                })
-                .collect();
-            parley::FontFamily::List(list.into())
-        }
-    }
-}
-
-/// Converts a Frust [`GenericSlot`] into parley's `GenericFamily`.
-/// `pub(crate)` — see [`to_parley_family`].
-fn generic_slot_to_parley(slot: GenericSlot) -> parley::GenericFamily {
-    match slot {
-        GenericSlot::Monospace => parley::GenericFamily::Monospace,
-        GenericSlot::SansSerif => parley::GenericFamily::SansSerif,
-        GenericSlot::Serif => parley::GenericFamily::Serif,
-        GenericSlot::SystemUi => parley::GenericFamily::SystemUi,
-        GenericSlot::Emoji => parley::GenericFamily::Emoji,
-    }
-}
-
-/// Converts a Frust [`FontWeight`] into parley's `FontWeight`. `pub(crate)`
-/// — see [`to_parley_family`].
-pub(crate) fn to_parley_weight(weight: FontWeight) -> parley::FontWeight {
-    parley::FontWeight::new(weight.0)
-}
-
-/// Converts a Frust [`FontStyle`] into parley's `FontStyle`. `pub(crate)`
-/// — see [`to_parley_family`].
-pub(crate) fn to_parley_style(style: FontStyle) -> parley::FontStyle {
-    match style {
-        FontStyle::Normal => parley::FontStyle::Normal,
-        FontStyle::Italic => parley::FontStyle::Italic,
-        FontStyle::Oblique(angle) => parley::FontStyle::Oblique(angle),
-    }
-}
-
-/// Converts a Frust [`LineHeight`] into parley's `LineHeight`.
-/// `pub(crate)` — see [`to_parley_family`].
-pub(crate) fn to_parley_line_height(line_height: LineHeight) -> parley::LineHeight {
-    match line_height {
-        LineHeight::MetricsRelative(v) => parley::LineHeight::MetricsRelative(v),
-        LineHeight::FontSizeRelative(v) => parley::LineHeight::FontSizeRelative(v),
-        LineHeight::Absolute(v) => parley::LineHeight::Absolute(v),
-    }
-}
-
-/// Converts a Frust [`TextAlign`] into parley's `layout::Alignment`.
-/// `pub(crate)` — see [`to_parley_family`]. Shared by [`crate::context`]
-/// (the initial shape+break) and [`crate::shape_cache`] (the width-change
-/// re-break path) — both must apply the same alignment, or a resized layout
-/// silently reverts to [`TextAlign::Start`] (see the shape cache's module
-/// docs).
-pub(crate) fn to_parley_align(align: TextAlign) -> parley::layout::Alignment {
-    match align {
-        TextAlign::Start => parley::layout::Alignment::Start,
-        TextAlign::End => parley::layout::Alignment::End,
-        TextAlign::Left => parley::layout::Alignment::Left,
-        TextAlign::Center => parley::layout::Alignment::Center,
-        TextAlign::Right => parley::layout::Alignment::Right,
-        TextAlign::Justify => parley::layout::Alignment::Justify,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -495,34 +406,6 @@ mod tests {
     }
 
     #[test]
-    fn to_parley_align_maps_every_variant() {
-        assert_eq!(
-            to_parley_align(TextAlign::Start),
-            parley::layout::Alignment::Start
-        );
-        assert_eq!(
-            to_parley_align(TextAlign::End),
-            parley::layout::Alignment::End
-        );
-        assert_eq!(
-            to_parley_align(TextAlign::Left),
-            parley::layout::Alignment::Left
-        );
-        assert_eq!(
-            to_parley_align(TextAlign::Center),
-            parley::layout::Alignment::Center
-        );
-        assert_eq!(
-            to_parley_align(TextAlign::Right),
-            parley::layout::Alignment::Right
-        );
-        assert_eq!(
-            to_parley_align(TextAlign::Justify),
-            parley::layout::Alignment::Justify
-        );
-    }
-
-    #[test]
     fn font_weight_consts_match_css_scale() {
         assert_eq!(FontWeight::THIN.value(), 100.0);
         assert_eq!(FontWeight::REGULAR.value(), 400.0);
@@ -553,78 +436,6 @@ mod tests {
                 assert_eq!(families[1], FamilyName::Generic(GenericSlot::Monospace));
             }
             _ => panic!("Expected NamedWithGeneric variant"),
-        }
-    }
-
-    #[test]
-    fn to_parley_family_named_then_generic() {
-        let family = FontFamily::stack_with_generic(["NoSuchFont"], GenericSlot::Monospace);
-        let parley_family = to_parley_family(&family);
-
-        // Verify it's a List (not a single GenericFamily)
-        match parley_family {
-            parley::FontFamily::List(_) => {
-                // Expected: the list should contain both the named font and the generic fallback
-            }
-            _ => panic!("Expected FontFamily::List variant"),
-        }
-    }
-
-    #[test]
-    fn generic_slot_maps_correctly_to_parley() {
-        let mono = generic_slot_to_parley(GenericSlot::Monospace);
-        assert_eq!(mono, parley::GenericFamily::Monospace);
-
-        let sans = generic_slot_to_parley(GenericSlot::SansSerif);
-        assert_eq!(sans, parley::GenericFamily::SansSerif);
-
-        let serif = generic_slot_to_parley(GenericSlot::Serif);
-        assert_eq!(serif, parley::GenericFamily::Serif);
-
-        let system = generic_slot_to_parley(GenericSlot::SystemUi);
-        assert_eq!(system, parley::GenericFamily::SystemUi);
-
-        let emoji = generic_slot_to_parley(GenericSlot::Emoji);
-        assert_eq!(emoji, parley::GenericFamily::Emoji);
-    }
-
-    /// Layout integration test: verify that a nonexistent font name followed by
-    /// a generic monospace fallback resolves to a monospace font. Monospace
-    /// fonts have equal character advance widths; we assert that 'i' and 'm'
-    /// have the same advance, which is true for monospace but not proportional
-    /// fonts.
-    #[test]
-    fn stack_with_generic_monospace_fallback_shapes_correctly() {
-        // Use a family name that almost certainly doesn't exist, ensuring
-        // the fallback must engage.
-        let family = FontFamily::stack_with_generic(
-            ["NonexistentFontFamilyName12345"],
-            GenericSlot::Monospace,
-        );
-
-        // Convert to parley's format and verify it contains both the named
-        // font and the generic fallback.
-        let parley_family = to_parley_family(&family);
-
-        // The list should be a multi-entry family list, not a single generic.
-        match parley_family {
-            parley::FontFamily::List(list) => {
-                // Should have at least 2 entries: the named font + the generic fallback.
-                assert!(
-                    list.len() >= 2,
-                    "expected at least 2 family entries (named + generic), got {}",
-                    list.len()
-                );
-                // The last entry should be the generic family (Generic, not Named).
-                if let Some(last) = list.last() {
-                    assert!(
-                        matches!(last, parley::FontFamilyName::Generic(_)),
-                        "expected last entry to be a generic family, got {:?}",
-                        last
-                    );
-                }
-            }
-            _ => panic!("expected FontFamily::List variant from stack_with_generic"),
         }
     }
 }

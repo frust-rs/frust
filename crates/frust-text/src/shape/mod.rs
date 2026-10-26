@@ -149,6 +149,9 @@ pub(crate) struct ShapedChar {
     /// Starts a grapheme (always true at a run's first character).
     pub(crate) grapheme_start: bool,
     pub(crate) word_boundary: bool,
+    /// The character has the `Emoji` or `Extended_Pictographic` property
+    /// (UTS #51): what makes the editor's backspace take a whole grapheme.
+    pub(crate) emoji: bool,
     /// A soft wrap opportunity precedes this character.
     pub(crate) soft_wrap_opportunity: bool,
     pub(crate) bidi_level: u8,
@@ -436,6 +439,7 @@ impl ShapeContext {
         let shaped = &self.shaped;
         let paragraph_level = self.analysis.paragraph_level().to_u8();
         let levels = self.analysis.bidi_levels();
+        let infos = self.analysis.char_info();
         let mut out = Shaped {
             text_len: text.len(),
             paragraph_level,
@@ -466,6 +470,9 @@ impl ShapeContext {
                 whitespace: Whitespace::of(c.whitespace),
                 grapheme_start: c.grapheme_start,
                 word_boundary: c.flags.is_word_boundary(),
+                emoji: infos
+                    .get(i)
+                    .is_some_and(|info| info.is_emoji_or_pictograph()),
                 soft_wrap_opportunity: c.flags.is_soft_wrap_opportunity(),
                 bidi_level: levels.get(i).map_or(paragraph_level, |l| l.to_u8()),
             })
