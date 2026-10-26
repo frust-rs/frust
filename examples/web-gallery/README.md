@@ -399,6 +399,33 @@ a bundled WebKit build, not shipping Safari, and was not substituted for
 it here since that would misrepresent the leg as covered). A real
 Safari 26 pass belongs to a macOS device gate.
 
+### Automated boot smoke
+
+`cargo check` cannot see a `wasm32` runtime panic (`std::time::Instant::now()`
+panics there), so `scripts/ci/web-smoke.sh` boots the real build:
+
+```
+scripts/ci/web-smoke.sh                                  # lenient
+FRUST_WEB_SMOKE_REQUIRE_SURFACE=1 scripts/ci/web-smoke.sh  # strict
+scripts/ci/web-smoke.sh --dist <dir>   # smoke a prebuilt tree (skips the build)
+scripts/ci/web-smoke.sh --no-browser   # build, stage and bind only
+scripts/ci/web-smoke.sh --self-test    # exercise the log assertions on fixtures
+```
+
+It builds this crate for `wasm32-unknown-unknown`, runs `wasm-bindgen` (exactly
+0.2.128) into a temp dist with the framework host page, serves it on
+127.0.0.1 and boots `index.html?case=button&theme=light&embed=1&log=info`
+(default arm and `&arm=webgl`) in headless Chrome, reading the console from
+`--enable-logging=stderr`. Both modes fail on a panic, a `RuntimeError`, a
+`[frust-web]` failure or a missing `wasm module initialized`. **Lenient**
+(default) reports `no compatible GPU adapter` as a warning, for rigs with no
+SwiftShader adapter; **strict** additionally requires
+`frust: render surface online`. Exit codes: 0 pass, 1 assertion failure,
+2 usage or toolchain error. Screenshot paths are printed.
+
+This proves boot plus the first surface, not pixels. The `frust-testing`
+`webgl` golden gate remains the manual pixel-level gate.
+
 ## Rig used for the milestone evidence below (prior task, w1-06)
 
 `docker exec frust-linux-native ...` — Chrome 151.0.7922.108 at
