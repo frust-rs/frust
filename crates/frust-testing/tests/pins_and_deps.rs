@@ -136,25 +136,60 @@ fn g5_engine_core_pins_carry_a_literal_exact_version() {
 /// guard protects (the same distinction `tests/deps.rs` draws the other way).
 const DEP_TABLE_NAMES: &[&str] = &["dependencies", "build-dependencies"];
 
-/// Every dependency name a manifest declares under `dependencies` or
-/// `build-dependencies` — plain or per-target (`target.'cfg(...)'.*`) — as a
-/// flat set. Dev-dependencies are never collected (see [`DEP_TABLE_NAMES`]).
-fn direct_dependency_names(value: &toml::Value, out: &mut BTreeSet<String>) {
+/// Every dependency-table name Cargo recognizes, dev included. The parley and
+/// fontique scans use this wider set: a dev-only edge still resolves a crate
+/// into the lock, so it can still reintroduce a retired identity.
+const ALL_DEP_TABLE_NAMES: &[&str] = &["dependencies", "dev-dependencies", "build-dependencies"];
+
+/// The package a dependency row resolves to: the `package` key when the row
+/// renames the crate (`alias = { package = "real", ... }`), otherwise the key.
+fn effective_package<'a>(alias: &'a str, row: &'a toml::Value) -> &'a str {
+    row.as_table()
+        .and_then(|table| table.get("package"))
+        .and_then(toml::Value::as_str)
+        .unwrap_or(alias)
+}
+
+/// Calls `visit(alias, row)` for every row under a dependency table named in
+/// `table_names` — plain or per-target (`target.'cfg(...)'.*`), reached by
+/// recursing through any other nested table. `[workspace.dependencies]` is
+/// reached too, unless `skip_workspace` is set.
+fn visit_dependency_rows(
+    value: &toml::Value,
+    table_names: &[&str],
+    skip_workspace: bool,
+    visit: &mut dyn FnMut(&str, &toml::Value),
+) {
     let toml::Value::Table(table) = value else {
         return;
     };
 
     for (key, child) in table {
-        if DEP_TABLE_NAMES.contains(&key.as_str()) {
+        if skip_workspace && key == "workspace" {
+            continue;
+        }
+        if table_names.contains(&key.as_str()) {
             if let toml::Value::Table(deps) = child {
-                out.extend(deps.keys().cloned());
+                for (alias, row) in deps {
+                    visit(alias, row);
+                }
             }
         } else {
-            // Recurse into `target.'cfg(...)'.<dep-table>` (and any other
-            // nested table) looking for more dependency tables further down.
-            direct_dependency_names(child, out);
+            visit_dependency_rows(child, table_names, skip_workspace, visit);
         }
     }
+}
+
+/// Every dependency name a manifest declares under `dependencies` or
+/// `build-dependencies` — plain or per-target — as a flat set. Each row
+/// contributes both its key and its `package` value, so a renamed row
+/// (`alias = { package = "x" }`) is seen under both names. Dev-dependencies
+/// are never collected (see [`DEP_TABLE_NAMES`]).
+fn direct_dependency_names(value: &toml::Value, out: &mut BTreeSet<String>) {
+    visit_dependency_rows(value, DEP_TABLE_NAMES, false, &mut |alias, row| {
+        out.insert(alias.to_string());
+        out.insert(effective_package(alias, row).to_string());
+    });
 }
 
 fn manifest_dependency_names(path: &Path) -> BTreeSet<String> {
@@ -305,9 +340,10 @@ fn assert_frust_gpu_edge_is_optional_and_non_default(manifest_path: &Path) {
 // G7: the parley crate is gone; fontique rides parley_engine
 // ---------------------------------------------------------------------
 
-/// Every `Cargo.toml` under `dir`, skipping build output, VCS state, the nested
-/// `workflow/` repo and scratch directories.
-fn all_manifests(dir: &Path, out: &mut Vec<PathBuf>) {
+/// Every file named `file_name` under `dir`, skipping build output, VCS state,
+/// the nested `workflow/` repo and scratch directories. The manifest walk and
+/// the lockfile walk share this, so both cover the same tree.
+fn files_named(dir: &Path, file_name: &str, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
@@ -322,45 +358,74 @@ fn all_manifests(dir: &Path, out: &mut Vec<PathBuf>) {
             ) {
                 continue;
             }
-            all_manifests(&path, out);
-        } else if name == "Cargo.toml" {
+            files_named(&path, file_name, out);
+        } else if name == file_name {
             out.push(path);
         }
     }
 }
 
+/// Every `Cargo.toml` in the repository (root, members, standalone workspaces).
+fn all_manifests() -> Vec<PathBuf> {
+    let root = repo_root();
+    let mut out = Vec::new();
+    files_named(&root, "Cargo.toml", &mut out);
+    out.sort();
+    out
+}
+
+/// Every `Cargo.lock` in the repository: the root lock plus each standalone
+/// workspace's own. Found by the same walk as the manifests, so a new
+/// standalone lock is covered without a hand-kept list.
+fn all_lockfiles() -> Vec<PathBuf> {
+    let root = repo_root();
+    let mut out = Vec::new();
+    files_named(&root, "Cargo.lock", &mut out);
+    out.sort();
+    out
+}
+
+fn display_relative(path: &Path) -> String {
+    path.strip_prefix(repo_root())
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
 #[test]
 fn g7_no_manifest_in_the_workspace_names_parley() {
-    let root = repo_root();
-    let mut manifests = Vec::new();
-    all_manifests(&root, &mut manifests);
+    let manifests = all_manifests();
     assert!(manifests.len() > 10, "manifest walk found too few files");
     for manifest in &manifests {
         let table = parse_manifest(manifest);
-        let mut names = BTreeSet::new();
-        direct_dependency_names(&toml::Value::Table(table.clone()), &mut names);
-        if let Some(ws) = table
-            .get("workspace")
-            .and_then(|w| w.get("dependencies"))
-            .and_then(toml::Value::as_table)
-        {
-            names.extend(ws.keys().cloned());
-        }
+        let mut offending = Vec::new();
+        visit_dependency_rows(
+            &toml::Value::Table(table),
+            ALL_DEP_TABLE_NAMES,
+            false,
+            &mut |alias: &str, row: &toml::Value| {
+                let package = effective_package(alias, row);
+                if alias == "parley" || package == "parley" {
+                    offending.push(format!("`{alias}` (package `{package}`)"));
+                }
+            },
+        );
         assert!(
-            !names.contains("parley"),
-            "{}: names `parley` — frust-text owns shaping and layout over parley_engine",
-            manifest.strip_prefix(&root).unwrap_or(manifest).display()
+            offending.is_empty(),
+            "{}: dependency row(s) {} name `parley` — frust-text owns shaping and layout \
+             over parley_engine",
+            display_relative(manifest),
+            offending.join(", ")
         );
     }
 }
 
-/// `(name, version, dependency names)` for every package in the root lock.
-fn lock_packages_with_deps() -> Vec<(String, String, Vec<String>)> {
-    let path = repo_root().join("Cargo.lock");
-    let lock = parse_manifest(&path);
+/// `(name, version, dependency names)` for every package in the lock at `path`.
+fn lock_packages_with_deps(path: &Path) -> Vec<(String, String, Vec<String>)> {
+    let lock = parse_manifest(path);
     lock.get("package")
         .and_then(toml::Value::as_array)
-        .expect("Cargo.lock has [[package]] entries")
+        .unwrap_or_else(|| panic!("{} has no [[package]] entries", display_relative(path)))
         .iter()
         .map(|p| {
             let field = |k: &str| {
@@ -386,31 +451,58 @@ fn lock_packages_with_deps() -> Vec<(String, String, Vec<String>)> {
 }
 
 #[test]
-fn g7_parley_is_absent_and_the_font_stack_resolves_one_identity() {
-    let packages = lock_packages_with_deps();
+fn g7_no_lockfile_resolves_parley() {
+    let locks = all_lockfiles();
     assert!(
-        packages.iter().all(|(name, _, _)| name != "parley"),
-        "Cargo.lock still resolves `parley`"
+        locks.len() > 1,
+        "lockfile walk found too few Cargo.lock files: {locks:?}"
     );
-    for name in ["parley_engine", "fontique", "parlance"] {
-        let versions: Vec<_> = packages
-            .iter()
-            .filter(|(n, _, _)| n == name)
-            .map(|(_, v, _)| v.as_str())
-            .collect();
-        assert_eq!(
-            versions.len(),
-            1,
-            "`{name}` must resolve one identity: {versions:?}"
+    for lock in &locks {
+        let packages = lock_packages_with_deps(lock);
+        assert!(
+            packages.iter().all(|(name, _, _)| name != "parley"),
+            "{} still resolves `parley` — frust-text owns shaping and layout over parley_engine",
+            display_relative(lock)
         );
     }
-    // fontique is reached only through parley_engine and frust-text's own font-data edge.
-    for (name, _, deps) in &packages {
-        if deps.iter().any(|d| d == "fontique") {
-            assert!(
-                matches!(name.as_str(), "parley_engine" | "frust-text"),
-                "`{name}` depends on fontique; only parley_engine and frust-text may"
-            );
+}
+
+#[test]
+fn g7_parley_is_absent_and_the_font_stack_resolves_one_identity() {
+    let root_lock = repo_root().join("Cargo.lock");
+    for lock in &all_lockfiles() {
+        let packages = lock_packages_with_deps(lock);
+        let relative = display_relative(lock);
+        for name in ["parley_engine", "fontique", "parlance"] {
+            let versions: Vec<&str> = packages
+                .iter()
+                .filter(|(n, _, _)| n == name)
+                .map(|(_, v, _)| v.as_str())
+                .collect();
+            // The root lock must resolve each font-stack crate exactly once.
+            // A standalone lock that never reaches the font stack has none, so
+            // only a split identity (two entries of one name) fails there.
+            if *lock == root_lock {
+                assert_eq!(
+                    versions.len(),
+                    1,
+                    "{relative}: `{name}` must resolve one identity: {versions:?}"
+                );
+            } else {
+                assert!(
+                    versions.len() <= 1,
+                    "{relative}: `{name}` resolves more than one identity: {versions:?}"
+                );
+            }
+        }
+        // fontique is reached only through parley_engine and frust-text's own font-data edge.
+        for (name, _, deps) in &packages {
+            if deps.iter().any(|d| d == "fontique") {
+                assert!(
+                    matches!(name.as_str(), "parley_engine" | "frust-text"),
+                    "{relative}: `{name}` depends on fontique; only parley_engine and frust-text may"
+                );
+            }
         }
     }
 }
@@ -425,5 +517,50 @@ fn g7_fontique_row_has_default_features_off() {
         row.get("default-features").and_then(toml::Value::as_bool),
         Some(false),
         "[workspace.dependencies].fontique must set default-features = false"
+    );
+}
+
+#[test]
+fn g7_every_manifest_naming_fontique_inherits_the_workspace_row() {
+    let manifests = all_manifests();
+    let mut named = 0usize;
+    let mut offenders = Vec::new();
+    for manifest in &manifests {
+        let table = parse_manifest(manifest);
+        // Skip the root `[workspace.dependencies]` table: that is the canonical
+        // row itself, asserted above, and it is the only one written without
+        // `workspace = true`.
+        visit_dependency_rows(
+            &toml::Value::Table(table),
+            ALL_DEP_TABLE_NAMES,
+            true,
+            &mut |alias: &str, row: &toml::Value| {
+                if effective_package(alias, row) != "fontique" {
+                    return;
+                }
+                named += 1;
+                let inherits = row
+                    .as_table()
+                    .and_then(|table| table.get("workspace"))
+                    .and_then(toml::Value::as_bool)
+                    == Some(true);
+                if !inherits {
+                    offenders.push(format!(
+                        "{}: `{alias}` names fontique without `workspace = true`",
+                        display_relative(manifest)
+                    ));
+                }
+            },
+        );
+    }
+    assert!(
+        named > 0,
+        "manifest walk found no manifest naming fontique — the scan is not reading the tree"
+    );
+    assert!(
+        offenders.is_empty(),
+        "fontique must come from the workspace row (a private row would bypass \
+         default-features = false):\n{}",
+        offenders.join("\n")
     );
 }
