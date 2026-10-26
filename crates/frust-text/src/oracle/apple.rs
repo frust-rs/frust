@@ -17,6 +17,9 @@
 //! One exception: a hidden face with only `hvgl` glyph data is re-asked under a public base
 //! (Helvetica, same traits and locale), whose public answer replaces it. `CTFontCreateWithName` is
 //! never called: on a hidden name it returns Times.
+//!
+//! [`preferred_languages`] reads the user's language list (`CFLocaleCopyPreferredLanguages`),
+//! from which `oracle/mod.rs` picks the Han language of a Han question that carries no locale.
 
 #![allow(unsafe_code)]
 
@@ -28,7 +31,9 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use objc2_core_foundation::{CFDictionary, CFNumber, CFRange, CFRetained, CFString, CFType, CFURL};
+use objc2_core_foundation::{
+    CFArray, CFDictionary, CFLocale, CFNumber, CFRange, CFRetained, CFString, CFType, CFURL,
+};
 use objc2_core_text::{
     CTFont, CTFontDescriptor, CTFontSymbolicTraits, CTFontUIFontType, kCTFontFamilyNameAttribute,
     kCTFontSlantTrait, kCTFontSymbolicTrait, kCTFontTraitsAttribute, kCTFontURLAttribute,
@@ -319,6 +324,24 @@ mod ct {
 }
 
 use ct::Font;
+
+/// The user's preferred languages, most preferred first (`CFLocaleCopyPreferredLanguages`): the
+/// System Settings list on macOS, the device's (or the app's own) list on iOS. Read once per
+/// process by `oracle/mod.rs`; no subprocess, no preferences file.
+pub(super) fn preferred_languages() -> Vec<String> {
+    let Some(languages) = CFLocale::preferred_languages() else {
+        return Vec::new();
+    };
+    // SAFETY: CFLocaleCopyPreferredLanguages documents a CFArray of CFStrings, so every element
+    // is a CoreFoundation object and viewing the array as one of `CFType` is sound; the cast
+    // moves the same +1 reference, and each element is still type-checked by `downcast` below.
+    let languages: CFRetained<CFArray<CFType>> = unsafe { CFRetained::cast_unchecked(languages) };
+    languages
+        .iter()
+        .filter_map(|language| language.downcast::<CFString>().ok())
+        .map(|language| language.to_string())
+        .collect()
+}
 
 /// One face of a font file, as the tables-only walk read it.
 #[derive(Clone, Debug, Default)]
@@ -1364,6 +1387,47 @@ mod tests {
             .any(|p| name.starts_with(p)),
             "{name}"
         );
+    }
+
+    #[test]
+    fn every_preferred_han_language_picks_its_own_face() {
+        if !on_macos("every_preferred_han_language_picks_its_own_face") {
+            return;
+        }
+        let mut backend = CoreTextBackend::new();
+        // 直 and 骨 differ in glyph shape between the Han regions.
+        for (language, prefixes) in [
+            ("zh-Hans", &["PingFangSC"][..]),
+            ("zh-Hant", &["PingFangTC"][..]),
+            ("zh-HK", &["PingFangHK"][..]),
+            (
+                "ja",
+                &["Hiragino", ".Hiragino", "HiraKaku", ".HiraKaku"][..],
+            ),
+            ("ko", &["AppleSDGothic", ".AppleSDGothic"][..]),
+        ] {
+            let mut req = scripted("\u{76f4}\u{9aa8}", b"Hani");
+            req.locale = Some(language.to_owned());
+            let face = backend.resolve(&req).expect("han resolves");
+            println!("han under {language} -> {}", ps(&face));
+            assert!(
+                prefixes.iter().any(|p| ps(&face).starts_with(p)),
+                "{language}: {}",
+                ps(&face)
+            );
+        }
+    }
+
+    #[test]
+    fn the_preferred_language_list_is_read_without_a_subprocess() {
+        let started = Instant::now();
+        let languages = preferred_languages();
+        println!(
+            "CFLocaleCopyPreferredLanguages -> {languages:?} ({} us)",
+            started.elapsed().as_micros()
+        );
+        assert!(!languages.is_empty());
+        assert!(languages.iter().all(|tag| !tag.is_empty()));
     }
 
     #[test]
