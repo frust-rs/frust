@@ -87,9 +87,6 @@ opt-level = "z"
 [profile.release.package.serde_json]
 opt-level = "z"
 
-[profile.release.package.roxmltree]
-opt-level = "z"
-
 [profile.release.package.fontique]
 opt-level = "z"
 
