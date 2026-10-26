@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Text pipeline for Frust: font matching, shaping and layout over parley, with renderer-agnostic styles and glyph runs."
+description = "Text pipeline for Frust: font matching, shaping and layout over the font oracle and parley_engine, with renderer-agnostic styles and glyph runs."
 repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
@@ -14,7 +14,7 @@ readme = "README.md"
 [dependencies]
 # `std::time::Instant::now()` panics on wasm32; `web-time` is the drop-in winit 0.30 itself uses (std's `Instant` elsewhere).
 web-time = { workspace = true }
-parley.workspace = true
+parlance.workspace = true
 # The font oracle's shaping engine and its font-data types (`src/oracle/` names neither: the
 # adapter over the oracle lives outside it). `std` only — `complex-scripts` stays off.
 parley_engine = { workspace = true, features = ["std"] }
@@ -48,5 +48,3 @@ windows-link.workspace = true
 # `dlopen`: no link-time libfontconfig requirement (a system without it simply gets no answers).
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 yeslogic-fontconfig-sys = { workspace = true, features = ["dlopen"] }
-# parley 0.11.1's fontique copy, switched to `dlopen` as well (feature unification; see the root row).
-fontique011.workspace = true

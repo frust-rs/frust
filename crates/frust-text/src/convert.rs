@@ -36,7 +36,7 @@
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use kurbo::Affine;
 use peniko::{Brush, FontData};
@@ -73,7 +73,12 @@ pub(crate) fn lines_to_scene_runs(
             let data = FontData::new(face.blob.clone(), face.index);
             // The variation instance the shaper chose (a requested weight on
             // a variable face); all-zero coords name the default and are dropped.
-            let font = FontHandle::new(data.clone()).with_normalized_coords(&run.coords);
+            // The face identity the oracle resolved (PostScript name, hidden
+            // flag), so the renderer opens the face the oracle chose rather
+            // than re-deriving who it is from the blob.
+            let font = FontHandle::new(data.clone())
+                .with_normalized_coords(&run.coords)
+                .with_identity(face.postscript_name.as_deref().map(Arc::from), face.hidden);
             let mut current: Option<(u16, Vec<Glyph>)> = None;
             let flush = |current: &mut Option<(u16, Vec<Glyph>)>, runs: &mut Vec<GlyphRun>| {
                 let Some((style, glyphs)) = current.take() else {

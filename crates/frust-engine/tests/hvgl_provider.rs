@@ -5,17 +5,20 @@
 //! outlines; everywhere else, and for a face CoreText cannot open faithfully,
 //! every glyph is counted as skipped and nothing is drawn. What is pinned:
 //!
-//! - **Off CoreText, or refused, an `hvgl` run is skipped whole.** A synthetic
-//!   `hvgl`-only face (a `head`, a `name` and an `hvgl` table, no outline
-//!   table) draws nothing and counts every glyph in `skipped_glyphs` — on
-//!   every target: a target without CoreText refuses every face, and on an
-//!   Apple target a hidden (dot-prefixed) name or a name CoreText resolves to
-//!   a different face is refused rather than drawn in the substitute.
+//! - **A run is skipped whole when it cannot be opened.** A synthetic
+//!   `hvgl`-only face (a `head` and an `hvgl` table, no outline table) whose
+//!   handle names no face draws nothing and counts every glyph in
+//!   `skipped_glyphs`, on every target; a target without CoreText cannot open
+//!   any face, so there a named one is skipped whole too.
+//! - **Identity is the text tier's call.** The engine opens the face by the
+//!   PostScript name the handle carries and refuses nothing on identity: a
+//!   handle with a hidden (dot-prefixed) name draws on Apple, and a name
+//!   CoreText resolves to another face is counted once as an identity mismatch
+//!   (and logged at `debug`), never refused.
 //! - **On macOS the system PingFang draws.** A run of 中文爱 in
 //!   `PingFangUI.ttc`'s `PingFangSC-Medium` face, glyph ids taken from
 //!   CoreText's own character map, produces one draw per glyph with real
-//!   coverage and skips nothing; the same glyphs in a dot-named face of the
-//!   same collection are skipped. The outline cache stays at its cap however
+//!   coverage and skips nothing. The outline cache stays at its cap however
 //!   many distinct glyphs are drawn. These cases print why and pass when the
 //!   collection is not installed.
 //! - **Through the GPU** (ignored by default, needs Metal): the same run read
@@ -29,10 +32,10 @@
 //!   coordinates, and none at the face's default weight. `glifo`'s route still
 //!   draws such a run exactly as it did before coordinates were carried.
 //! - **On macOS PingFang draws at the requested weight.** 中 at weights 300
-//!   and 600 in `PingFangSC-Medium` compiles to different coverage. The
-//!   coordinates come from `TextContext` when it resolves the `hvgl` face
-//!   itself; fontique 0.11.1 rejects every `hvgl` face, so at that pin the case
-//!   prints so and derives them from the face's `fvar`/`avar` instead.
+//!   and 600 in PingFang SC compiles to different coverage. The name and the
+//!   coordinates come from `TextContext` when its oracle resolves the `hvgl`
+//!   face itself; otherwise the case prints so and names the face and derives
+//!   the coordinates from its `fvar`/`avar`.
 
 use std::sync::Arc;
 
@@ -83,30 +86,13 @@ fn head(units_per_em: u16) -> Vec<u8> {
     head
 }
 
-/// A `name` table whose one record is a Windows-Unicode PostScript name.
-fn name_table(postscript_name: &str) -> Vec<u8> {
-    let bytes: Vec<u8> = postscript_name
-        .encode_utf16()
-        .flat_map(u16::to_be_bytes)
-        .collect();
-    let mut out = Vec::new();
-    for field in [0_u16, 1, 18, 3, 1, 0x409, 6] {
-        out.extend(field.to_be_bytes());
-    }
-    out.extend(u16::try_from(bytes.len()).expect("short").to_be_bytes());
-    out.extend(0_u16.to_be_bytes());
-    out.extend(bytes);
-    out
-}
-
-/// An `hvgl`-only face named `postscript_name`, with no outline table at all.
-fn synthetic_hvgl_face(postscript_name: &str) -> FontHandle {
-    let bytes = sfnt(&[
-        (*b"head", head(1000)),
-        (*b"hvgl", vec![0; 16]),
-        (*b"name", name_table(postscript_name)),
-    ]);
+/// An `hvgl`-only face with no outline table at all, identified as
+/// `postscript_name` (`None`: the handle names no face) the way the text
+/// tier's oracle identifies one.
+fn synthetic_hvgl_face(postscript_name: Option<&str>, hidden: bool) -> FontHandle {
+    let bytes = sfnt(&[(*b"head", head(1000)), (*b"hvgl", vec![0; 16])]);
     FontHandle::new(FontData::new(Blob::new(Arc::new(bytes)), 0))
+        .with_identity(postscript_name.map(Arc::from), hidden)
 }
 
 /// A run of `ids` on one baseline, inside the viewport.
@@ -147,6 +133,25 @@ fn compile(compiler: &mut SceneCompiler, runs: Vec<GlyphRun>) -> CompiledFrame {
     compiler
         .compile(&scene_of(runs), Affine::IDENTITY, VIEWPORT)
         .expect("an in-range scene compiles")
+}
+
+/// Asserts `runs` draw from their faces with no identity refusal: every face
+/// resolved to the name asked for, and none was nameless. Checked on a fresh
+/// compiler, since the counters live there.
+#[cfg(target_os = "macos")]
+fn assert_identity_clean(runs: &[GlyphRun]) {
+    let mut compiler = compiler();
+    compile(&mut compiler, runs.to_vec());
+    assert_eq!(
+        compiler.hvgl_identity_mismatches(),
+        0,
+        "a face resolved to another PostScript name, so its glyphs were refused"
+    );
+    assert_eq!(
+        compiler.hvgl_nameless_faces(),
+        0,
+        "a run's face carried no PostScript name"
+    );
 }
 
 /// `text` laid out through a fresh `TextContext` in `family` at `weight`, as
@@ -221,43 +226,64 @@ fn the_compiler_stays_send_and_sync_with_the_hvgl_provider_inside() {
     assert_send_sync::<SceneCompiler>();
 }
 
-/// A face named for nothing installed: off Apple there is no CoreText at all,
-/// and on Apple CoreText substitutes another face for an unknown name, which
-/// the provider refuses because its PostScript name differs.
+/// A handle that names no face cannot be opened: the engine does not derive a
+/// name from the blob. Its glyphs are counted as skipped, whole, on every
+/// target.
 #[test]
-fn an_hvgl_face_the_provider_cannot_open_is_skipped_whole_and_draws_nothing() {
+fn an_hvgl_handle_without_an_identity_is_skipped_whole_and_draws_nothing() {
     let mut compiler = compiler();
+    let face = synthetic_hvgl_face(None, false);
     for frame_index in 0..2 {
-        let frame = compile(
-            &mut compiler,
-            vec![run(
-                synthetic_hvgl_face("FrustNoSuchFace-Regular"),
-                &[1, 2, 3],
-            )],
-        );
+        let frame = compile(&mut compiler, vec![run(face.clone(), &[1, 2, 3])]);
         assert_eq!(frame.skipped_glyphs, 3, "frame {frame_index}");
         assert_eq!(frame.glyph_draws, 0, "frame {frame_index}");
         assert!(frame.draws().is_empty(), "frame {frame_index}");
         assert_eq!(frame.atlas_glyph_draws, 0, "frame {frame_index}");
     }
     assert_eq!(compiler.hvgl_cached_outlines(), 0);
+    assert_eq!(compiler.hvgl_identity_mismatches(), 0);
+    assert_eq!(
+        compiler.hvgl_nameless_faces(),
+        1,
+        "counted once, not per frame"
+    );
 }
 
-/// A dot-prefixed name is the shape of Apple's hidden system faces, which
-/// `CTFontCreateWithName` resolves to Times rather than the face.
+/// A dot-prefixed name is the shape of Apple's hidden system faces. CoreText
+/// cannot resolve a hidden name to the face (it hands back a substitute), so
+/// the engine refuses it: skipped, and counted once.
 #[test]
-fn a_dot_named_hvgl_face_is_refused_and_counted_as_skipped() {
+fn a_hidden_named_hvgl_handle_is_refused_when_coretext_substitutes() {
     let mut compiler = compiler();
     let frame = compile(
         &mut compiler,
         vec![run(
-            synthetic_hvgl_face(".PingFangUITextSC-Default"),
+            synthetic_hvgl_face(Some(".PingFangUITextSC-Default"), true),
             &[10, 11],
         )],
     );
-    assert_eq!(frame.skipped_glyphs, 2);
+    if cfg!(target_vendor = "apple") {
+        assert_eq!(compiler.hvgl_identity_mismatches(), 1);
+    } else {
+        assert_eq!(compiler.hvgl_identity_mismatches(), 0);
+    }
+    assert_eq!(frame.skipped_glyphs, 2, "never drawn from a substitute");
     assert_eq!(frame.glyph_draws, 0);
     assert!(frame.draws().is_empty());
+}
+
+/// An unknown name CoreText substitutes for is refused: the mismatch is
+/// counted once however many frames ask, and every glyph is skipped.
+#[cfg(target_vendor = "apple")]
+#[test]
+fn a_name_coretext_resolves_differently_is_counted_once_and_skipped() {
+    let mut compiler = compiler();
+    let face = synthetic_hvgl_face(Some("FrustNoSuchFace-Regular"), false);
+    for _ in 0..3 {
+        let frame = compile(&mut compiler, vec![run(face.clone(), &[10, 11])]);
+        assert_eq!(frame.skipped_glyphs, 2);
+    }
+    assert_eq!(compiler.hvgl_identity_mismatches(), 1);
 }
 
 /// The cap is a fixed constant, not zero: a compiler that kept nothing would
@@ -277,7 +303,7 @@ fn an_hvgl_run_is_skipped_identically_with_the_atlas_off() {
     compiler.set_image_residency(ImageResidency::disabled(AtlasBudget::MOBILE));
     let frame = compile(
         &mut compiler,
-        vec![run(synthetic_hvgl_face("FrustNoSuchFace-Bold"), &[4, 5])],
+        vec![run(synthetic_hvgl_face(None, false), &[4, 5])],
     );
     assert_eq!(frame.skipped_glyphs, 2);
     assert_eq!(frame.glyph_draws, 0);
@@ -298,7 +324,7 @@ mod macos {
     use objc2_core_text::CTFont;
     use peniko::{Blob, Color, FontData};
 
-    use super::{VIEWPORT, compile, compiler, laid_out, run, scene_of};
+    use super::{VIEWPORT, assert_identity_clean, compile, compiler, laid_out, run, scene_of};
 
     /// Where macOS keeps the PingFang collection. It moved into a private
     /// framework's reserved fonts; older releases kept it in `Fonts`.
@@ -333,40 +359,22 @@ mod macos {
         u32::from_be_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]])
     }
 
-    /// Every face of the collection `data`, as `(index, PostScript name)`.
-    fn postscript_names(data: &[u8]) -> Vec<(u32, String)> {
-        assert_eq!(&data[0..4], b"ttcf", "PingFangUI.ttc is a collection");
-        (0..be_u32(data, 8))
-            .filter_map(|index| {
-                let directory = be_u32(data, 12 + 4 * index as usize) as usize;
-                let tables = be_u16(data, directory + 4) as usize;
-                let name = (0..tables)
-                    .map(|table| directory + 12 + 16 * table)
-                    .find(|record| &data[*record..*record + 4] == b"name")?;
-                let table = be_u32(data, name + 8) as usize;
-                let strings = table + be_u16(data, table + 4) as usize;
-                (0..be_u16(data, table + 2) as usize)
-                    .map(|record| table + 6 + 12 * record)
-                    .find(|record| be_u16(data, *record) == 3 && be_u16(data, record + 6) == 6)
-                    .map(|record| {
-                        let start = strings + be_u16(data, record + 10) as usize;
-                        let len = be_u16(data, record + 8) as usize;
-                        let units: Vec<u16> = (0..len / 2)
-                            .map(|unit| be_u16(data, start + 2 * unit))
-                            .collect();
-                        (index, String::from_utf16_lossy(&units))
-                    })
+    /// A variable `hvgl` face of the collection `data`, identified as `name`
+    /// the way the oracle identifies it. The blob supplies the face's metrics
+    /// and axes; the name alone picks the face CoreText draws.
+    fn face_named(data: &Arc<Vec<u8>>, name: &str, hidden: bool) -> FontHandle {
+        let index = (0..be_u32(data, 8))
+            .find(|index| {
+                table(data, *index, b"hvgl").is_some() && table(data, *index, b"fvar").is_some()
             })
-            .collect()
+            .expect("PingFangUI.ttc carries a variable hvgl face");
+        FontHandle::new(FontData::new(Blob::new(data.clone()), index))
+            .with_identity(Some(Arc::from(name)), hidden)
     }
 
-    /// The face of `data` named `name`.
+    /// The public `PingFangSC-Medium` face of `data`.
     fn face(data: &Arc<Vec<u8>>, name: &str) -> FontHandle {
-        let (index, _) = postscript_names(data)
-            .into_iter()
-            .find(|(_, face)| face == name)
-            .unwrap_or_else(|| panic!("PingFangUI.ttc has no face named {name}"));
-        FontHandle::new(FontData::new(Blob::new(data.clone()), index))
+        face_named(data, name, false)
     }
 
     /// The table `tag` of the face at `index` in the font file `data` (a
@@ -440,7 +448,7 @@ mod macos {
 
     /// Runs of 中 in PingFang SC at `weight`, with the coordinates
     /// `TextContext` shapes them at when it resolves the `hvgl` face itself,
-    /// else (fontique rejecting `hvgl` faces) the face's own `fvar`/`avar`
+    /// else the face's own `fvar`/`avar`
     /// coordinates for that weight on a run of CoreText's glyph.
     fn pingfang_runs_at(
         data: &Arc<Vec<u8>>,
@@ -465,28 +473,46 @@ mod macos {
         )]
     }
 
-    /// Whether `TextContext` resolves PingFang SC to its `hvgl` face. At
-    /// fontique 0.11.1 it cannot: its scan rejects every face carrying `hvgl`.
-    fn text_context_resolves_pingfang(data: &Arc<Vec<u8>>) -> Option<TextContext> {
+    /// A `TextContext` that resolves PingFang SC to its `hvgl` face through
+    /// the system font oracle, with the face's identity on every run. Fonts
+    /// the caller registers carry no oracle identity, so none is registered:
+    /// the system face is the one the engine must draw by name.
+    fn text_context_resolves_pingfang() -> Option<TextContext> {
         let mut ctx = TextContext::new();
-        let _ = ctx.register_fonts(data.as_ref().clone());
         let resolved = laid_out(&mut ctx, "PingFang SC", FontWeight::LIGHT, "中")
             .iter()
             .all(|run| {
                 let font = run.font.font();
                 table(font.data.data(), font.index, b"hvgl").is_some()
+                    && run.font.postscript_name().is_some()
             });
         if !resolved {
             println!(
-                "TextContext leg skipped: fontique rejects hvgl faces at this pin, so PingFang \
-                 SC resolves to another face; the coordinates come from PingFang's fvar/avar"
+                "TextContext leg skipped: PingFang SC does not resolve to an identified hvgl \
+                 face here; the coordinates come from PingFang's fvar/avar"
             );
         }
         resolved.then_some(ctx)
     }
 
+    /// The oracle's identity reaches the run: the PostScript name of a public
+    /// face, not hidden.
+    #[test]
+    fn text_context_pingfang_runs_carry_the_oracles_identity() {
+        let Some(mut ctx) = text_context_resolves_pingfang() else {
+            return;
+        };
+        let runs = laid_out(&mut ctx, "PingFang SC", FontWeight::SEMI_BOLD, "中");
+        assert_identity_clean(&runs);
+        for run in runs {
+            let name = run.font.postscript_name().expect("identified");
+            assert!(name.starts_with("PingFang"), "{name}");
+            assert!(!run.font.is_hidden());
+        }
+    }
+
     fn pingfang_frame_at(data: &Arc<Vec<u8>>, weight: FontWeight, user: f64) -> CompiledFrame {
-        let mut ctx = text_context_resolves_pingfang(data);
+        let mut ctx = text_context_resolves_pingfang();
         let runs = pingfang_runs_at(data, ctx.as_mut(), weight, user);
         assert!(
             runs.iter()
@@ -511,15 +537,6 @@ mod macos {
             semibold.alphas(),
             "weights 300 and 600 draw different outlines"
         );
-    }
-
-    /// The first hidden (dot-named) face of `data`.
-    fn hidden_face(data: &Arc<Vec<u8>>) -> FontHandle {
-        let (index, _) = postscript_names(data)
-            .into_iter()
-            .find(|(_, face)| face.starts_with('.'))
-            .expect("PingFangUI.ttc carries hidden system faces");
-        FontHandle::new(FontData::new(Blob::new(data.clone()), index))
     }
 
     /// CoreText's own glyph ids for `text` in the installed face `name`.
@@ -581,16 +598,30 @@ mod macos {
         assert_eq!(frame.glyph_draws, 2);
     }
 
+    /// A hidden name CoreText substitutes a face for is refused: skipped and
+    /// counted once, never drawn from the substitute.
     #[test]
-    fn a_dot_named_pingfang_face_is_skipped_rather_than_drawn_in_a_substitute() {
+    fn a_hidden_named_pingfang_handle_is_refused_when_coretext_substitutes() {
         let Some(data) = pingfang() else { return };
         let glyphs = coretext_glyphs(FACE, TEXT);
         let mut compiler = compiler();
-        let frame = compile(&mut compiler, vec![run(hidden_face(&data), &glyphs)]);
-        assert_eq!(frame.skipped_glyphs, 3);
+        let hidden = face_named(&data, ".PingFangUITextSC-Default", true);
+        let frame = compile(&mut compiler, vec![run(hidden, &glyphs)]);
+        assert_eq!(frame.skipped_glyphs, glyphs.len() as u32);
         assert_eq!(frame.glyph_draws, 0);
-        assert!(frame.draws().is_empty());
-        assert_eq!(compiler.hvgl_cached_outlines(), 0);
+        assert_eq!(compiler.hvgl_identity_mismatches(), 1);
+    }
+
+    /// The identity check is silent when CoreText resolves the name asked for.
+    #[test]
+    fn a_resolved_pingfang_name_logs_no_identity_mismatch() {
+        let Some(data) = pingfang() else { return };
+        let mut compiler = compiler();
+        compile(
+            &mut compiler,
+            vec![run(face(&data, FACE), &coretext_glyphs(FACE, TEXT))],
+        );
+        assert_eq!(compiler.hvgl_identity_mismatches(), 0);
     }
 
     #[test]
@@ -707,7 +738,9 @@ mod macos {
     fn pingfang_han_glyphs_render_ink_through_the_gpu() {
         let Some(data) = pingfang() else { return };
         let glyphs = coretext_glyphs(FACE, TEXT);
-        let inked = inked_pixels(vec![run(face(&data, FACE), &glyphs)]);
+        let runs = vec![run(face(&data, FACE), &glyphs)];
+        assert_identity_clean(&runs);
+        let inked = inked_pixels(runs);
         // Three 24 px Han glyphs cover well over a hundred pixels between them.
         assert!(inked > 100, "only {inked} pixels carry ink");
     }
@@ -717,19 +750,13 @@ mod macos {
     #[ignore = "requires a GPU (Metal); run with `cargo test -p frust-engine --test hvgl_provider -- --ignored`"]
     fn pingfang_semibold_inks_more_than_light_through_the_gpu() {
         let Some(data) = pingfang() else { return };
-        let mut ctx = text_context_resolves_pingfang(&data);
-        let light = inked_pixels(pingfang_runs_at(
-            &data,
-            ctx.as_mut(),
-            FontWeight::LIGHT,
-            300.0,
-        ));
-        let semibold = inked_pixels(pingfang_runs_at(
-            &data,
-            ctx.as_mut(),
-            FontWeight::SEMI_BOLD,
-            600.0,
-        ));
+        let mut ctx = text_context_resolves_pingfang();
+        let light_runs = pingfang_runs_at(&data, ctx.as_mut(), FontWeight::LIGHT, 300.0);
+        assert_identity_clean(&light_runs);
+        let light = inked_pixels(light_runs);
+        let semibold_runs = pingfang_runs_at(&data, ctx.as_mut(), FontWeight::SEMI_BOLD, 600.0);
+        assert_identity_clean(&semibold_runs);
+        let semibold = inked_pixels(semibold_runs);
         assert!(
             semibold > light,
             "weight 600 inks {semibold} pixels, weight 300 {light}"

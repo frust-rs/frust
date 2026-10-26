@@ -25,6 +25,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::hash_map::Entry;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -601,6 +602,9 @@ struct State {
     bases: HashMap<BaseKey, Option<Font>>,
     files: HashMap<PathBuf, Option<Vec<FileFace>>>,
     names: HashMap<String, Option<Mapped>>,
+    /// The (script, language) pairs whose hidden hvgl-only answer had no public
+    /// re-ask: each is logged once at warn, repeats at debug.
+    unreasked_scripts: HashSet<([u8; 4], Option<String>)>,
 }
 
 impl State {
@@ -718,6 +722,15 @@ impl State {
 
     /// The whole per-miss resolution, see the module docs.
     fn resolve(&mut self, req: &FallbackRequest) -> Option<Resolution> {
+        self.resolve_via(req, PUBLIC_BASE_FAMILY)
+    }
+
+    /// [`State::resolve`], re-asking a hidden hvgl-only answer under `public_family`.
+    ///
+    /// A hidden hvgl-only face cannot be drawn by name, so when the re-ask finds no public
+    /// face (or only another hidden one) the answer is a miss, not the hidden face: the
+    /// selector moves on to its next candidate.
+    fn resolve_via(&mut self, req: &FallbackRequest, public_family: &str) -> Option<Resolution> {
         let traits = Traits::of(req);
         let language = language_for(req.script, req.locale.as_deref());
         let query = query_text(req);
@@ -727,11 +740,7 @@ impl State {
         let mapped = self.map(&first)?;
         if mapped.hidden && mapped.hvgl_only {
             let public = self
-                .base(
-                    BaseFamily::Named(PUBLIC_BASE_FAMILY.to_owned()),
-                    traits,
-                    None,
-                )
+                .base(BaseFamily::Named(public_family.to_owned()), traits, None)
                 .and_then(|base| base.for_string(&query, language));
             if let Some(public) = public
                 && !public.postscript_name().starts_with('.')
@@ -742,6 +751,22 @@ impl State {
                     reasked_from: Some(first.postscript_name()),
                 });
             }
+            let first_for_script = self
+                .unreasked_scripts
+                .insert((req.script.0, language.map(str::to_owned)));
+            if first_for_script {
+                log::warn!(
+                    "frust-text: hidden hvgl-only face {:?} has no public re-ask; a miss, not a \
+                     substitute (logged once per script and language)",
+                    first.postscript_name(),
+                );
+            } else {
+                log::debug!(
+                    "frust-text: hidden hvgl-only face {:?} has no public re-ask; a miss",
+                    first.postscript_name(),
+                );
+            }
+            return None;
         }
         Some(Resolution {
             source: self.answer(&first)?,
@@ -977,6 +1002,24 @@ mod tests {
         assert!(!has_opsz(&source), "{:?}", source.variations);
         let wght = source.variations.iter().find(|v| &v.tag == b"wght");
         assert_eq!(wght.map(|v| v.value), Some(400.0));
+    }
+
+    #[test]
+    fn a_hidden_hvgl_only_answer_whose_public_re_ask_fails_is_a_miss() {
+        if !on_macos("a_hidden_hvgl_only_answer_whose_public_re_ask_fails_is_a_miss") {
+            return;
+        }
+        let mut backend = CoreTextBackend::new();
+        let req = request("\u{4e2d}\u{6587}", Some("zh-Hans"));
+        let state = backend.state.get_mut();
+        assert!(
+            state.resolve_via(&req, "FrustNoSuchFamily").is_none(),
+            "the hidden face is not returned when the public re-ask fails"
+        );
+        let reasked = state
+            .resolve_via(&req, PUBLIC_BASE_FAMILY)
+            .expect("the normal re-ask still resolves");
+        assert!(!reasked.source.hidden);
     }
 
     #[test]

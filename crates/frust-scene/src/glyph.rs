@@ -21,19 +21,36 @@ use peniko::{Brush, FontData};
 /// coordinates the shaper chose (a requested weight on a variable face), in
 /// the face's `fvar` axis order; a renderer that honours them reads
 /// [`FontHandle::normalized_coords`].
+///
+/// The text tier also says which face this is: [`FontHandle::with_identity`]
+/// attaches the PostScript name and hidden flag its font oracle resolved the
+/// face to. A renderer that cannot read a face's outlines itself (CoreText for
+/// an `hvgl`-only face) opens it by that name; it does not re-derive the name
+/// from the blob, and draws only when the system honours exactly that name: a
+/// substituted face or a handle with no name is a counted refusal, so a hidden
+/// face draws only if the system resolves its hidden name.
 #[derive(Clone, Debug)]
 pub struct FontHandle {
     font: FontData,
     /// Normalized (F2Dot14) variation coordinates, `fvar` axis order; `None`
     /// for the default instance.
     coords: Option<Arc<[i16]>>,
+    /// The face's PostScript name as the text tier's oracle resolved it.
+    postscript_name: Option<Arc<str>>,
+    /// The oracle flagged the face system-private (a dot-prefixed name).
+    hidden: bool,
 }
 
 impl FontHandle {
     /// Wraps a `peniko::FontData` for use in a [`GlyphRun`], at the face's
     /// default variation instance.
     pub fn new(font: FontData) -> Self {
-        Self { font, coords: None }
+        Self {
+            font,
+            coords: None,
+            postscript_name: None,
+            hidden: false,
+        }
     }
 
     /// This handle at the variation instance `coords` names: normalized
@@ -47,6 +64,28 @@ impl FontHandle {
             .any(|coord| *coord != 0)
             .then(|| Arc::from(coords));
         self
+    }
+
+    /// This handle with the face identity the text tier resolved: the face's
+    /// PostScript name (`None` when the oracle reported none) and whether the
+    /// oracle flagged it system-private.
+    #[must_use]
+    pub fn with_identity(mut self, postscript_name: Option<Arc<str>>, hidden: bool) -> Self {
+        self.postscript_name = postscript_name;
+        self.hidden = hidden;
+        self
+    }
+
+    /// The face's PostScript name as the text tier resolved it; `None` for a
+    /// handle built without an identity.
+    pub fn postscript_name(&self) -> Option<&str> {
+        self.postscript_name.as_deref()
+    }
+
+    /// Whether the text tier flagged the face system-private (a dot-prefixed
+    /// name that name-based lookup cannot be trusted to resolve).
+    pub fn is_hidden(&self) -> bool {
+        self.hidden
     }
 
     /// Borrows the underlying `peniko::FontData`.
@@ -117,5 +156,28 @@ mod tests {
             let handle = varied.clone().with_normalized_coords(default);
             assert!(handle.normalized_coords().is_empty(), "{default:?}");
         }
+    }
+
+    #[test]
+    fn a_new_handle_has_no_identity() {
+        let handle = FontHandle::new(font());
+        assert_eq!(handle.postscript_name(), None);
+        assert!(!handle.is_hidden());
+    }
+
+    #[test]
+    fn identity_is_kept_alongside_the_coordinates_and_survives_clones() {
+        let name: Arc<str> = Arc::from(".PingFangUITextSC-Default");
+        let handle = FontHandle::new(font())
+            .with_normalized_coords(&[0, 8192])
+            .with_identity(Some(name), true);
+        let cloned = handle.clone();
+        assert_eq!(cloned.postscript_name(), Some(".PingFangUITextSC-Default"));
+        assert!(cloned.is_hidden());
+        assert_eq!(cloned.normalized_coords(), &[0, 8192]);
+        let renamed = handle.with_identity(None, false);
+        assert_eq!(renamed.postscript_name(), None);
+        assert!(!renamed.is_hidden());
+        assert_eq!(renamed.normalized_coords(), &[0, 8192]);
     }
 }

@@ -9,7 +9,7 @@ none — everything they need is here):
 | Unit | Development spoke | Holds |
 |------|-------------------|-------|
 | CORE | [CORE_DEVELOPMENT.md](CORE_DEVELOPMENT.md) | `reactive_graph`/`any_spawner`/`tokio`, `clean-signals`, `accesskit` pins |
-| RENDER | [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md) | `wgpu`, `image`, `vello_common`/`glifo`, `parley` pins |
+| RENDER | [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md) | `wgpu`, `image`, `vello_common`/`glifo`, `parley_engine`/`fontique`/`parlance` pins |
 | SHELLS | [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md) | deep-link and safe-area/keyboard/back manual tests; `muda`, `windows-sys` pins |
 | PLUGINS | [PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md) | per-plugin manual tests (shared-preferences, secure-storage, camera, IAP, file dialogs, …); `ndk-context`, `objc2*`, CameraX, OpenIAP, `keyring-core`, `arboard` (shared with the desktop shell), `rfd`, `reqwest`/`rustls`/`webpki-roots` pins |
 | CLI | [CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md) | template development; `notify` pin |
@@ -62,7 +62,7 @@ installed via its own `install()` call (see *Run*'s design-system-install gate b
 do carry one feature of their own: `frust-glyph`, `frust-material` and `frust-shadcn` each have
 `bundled-fonts`, default on — an app that sets `default-features = false` on that dependency
 compiles in no font bytes and its `install()` registers none, so text falls back to the platform's
-system faces through fontique (Roboto on Android). `frust-beui` and `frust-cupertino` are
+system faces through the font oracle (Roboto on Android). `frust-beui` and `frust-cupertino` are
 unaffected. **Widget-authoring test fixtures.** `frust-widgets`' non-default `test-support` feature
 compiles in GPU-free container-widget fixtures (`frust_widgets::test_support`) so an out-of-tree
 design system can test its own containers too; off by default in a normal app build.
@@ -438,7 +438,7 @@ touching it. The pin rows themselves — pin, rationale, tripwire — live with 
 
 | Pins | Owner |
 |------|-------|
-| `wgpu`, `image`, `vello_common`/`glifo`, `parley` | [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md) |
+| `wgpu`, `image`, `vello_common`/`glifo`, `parley_engine`/`fontique`/`parlance`, the oracle backends' `yeslogic-fontconfig-sys`/`windows-link` | [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md) |
 | `reactive_graph`/`any_spawner`/`tokio`, `clean-signals`, `accesskit` + adapters, `frust-hotpatch`'s crate-local `libloading`/`memmap2`/`memfd`/`subsecond-types` | [CORE_DEVELOPMENT.md](CORE_DEVELOPMENT.md) |
 | `ndk-context`, `objc2*` (Foundation/Security/LocalAuthentication/UIKit/QuartzCore/CoreText/CoreFoundation), `androidx.camera`, `openiap-google`/`OpenIAP`, `keyring-core`, `arboard` (one pin, three consumers — `frust-clipboard`, `frust-shell-desktop`'s clipboard route, `frust-tui` — so its row carries a tripwire per consumer), `rfd`, `fluent-rs`, `icu` (2.2/2.3), `icu_experimental`, `jiff`, `icu_list`, `sys-locale`, `reqwest`/`rustls`/`webpki-roots` | [PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md) |
 | `muda`, `windows-sys` (desktop shells' native menu-bar/Win32 bindings; `objc2-app-kit` rides the objc2 pin family above); web shell tier: `wasm-bindgen` (=0.2.128 exact — must equal the host `wasm-bindgen-cli`), `wasm-bindgen-futures`, `js-sys`/`web-sys`, `web-time` (every crate in the web graph, not only the shell), `console_log`, `console_error_panic_hook`, `wasm-bindgen-test` (=0.3.78 exact — crate-local, bumps in lockstep with `wasm-bindgen`) | [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md) |
@@ -466,7 +466,7 @@ The rules below bind every pin, wherever its row lives:
   committing**. Removal-only changes — nothing added, no range widened — may use `cargo build`
   instead (prunes orphaned entries); `cargo generate-lockfile` is for adding/widening; review the diff.
   **Carve-out for a duplicate-collapsing bump.** When a pin moves specifically to collapse a
-  duplicate (e.g. `parley` 0.11.1 aligning `skrifa`/`read-fonts` onto `glifo`'s copies),
+  duplicate (e.g. `parley_engine` aligning `skrifa`/`read-fonts` onto `glifo`'s copies),
   `cargo generate-lockfile` is the wrong tool — it re-resolves unrelated crates. Run `cargo update
   -p <crate> --precise <version>` from inside each of the eleven workspaces, then a plain
   `cargo metadata` there to pick up missing path-dep edges, and audit every lock diff's

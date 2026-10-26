@@ -41,19 +41,16 @@ web-time = "1.1.0"
 # stderr is a silent no-op in a browser: these route `log` and panics to the JS console.
 console_log = "1.0.0"
 console_error_panic_hook = "0.1.7"
-parley = "0.11.1"
-# Exact pins (pre-1.0): frust-text's font-oracle shaping engine. fontique/parley_data 0.12.0 sit beside
-# parley 0.11.1's 0.11.1 copies until parley retires (expected duplicates).
+# Exact pins (pre-1.0): frust-text's font-oracle shaping engine, its font-data types and the
+# `FontVariation`/`Tag` setting types (parley_engine and fontique do not re-export them).
 parley_engine = "=0.12.0"
+parlance = "=0.1.1"
 # No `system` feature: the oracle owns the OS backends, so fontique 0.12 never scans system fonts.
 fontique = { version = "=0.12.0", default-features = false }
-# Linux/BSD: parley 0.11.1's fontique copy must `dlopen` too — Cargo unifies the oracle's
-# yeslogic-fontconfig-sys/dlopen onto it and fontique 0.11 needs its own flag for that. Retires with parley.
-fontique011 = { package = "fontique", version = "=0.11.1", default-features = false, features = ["fontconfig-dlopen"] }
 # cmap/name/OS2 parsing for the app-font registry and coverage checks; must unify with the 0.41.0
 # skrifa 0.44 / glifo already lock (one read-fonts on every graph).
 read-fonts = { version = "0.41", default-features = false, features = ["std"] }
-# The Linux/BSD oracle backend's fontconfig binding; fontique 0.11.1's locked version, used `dlopen`.
+# The Linux/BSD oracle backend's fontconfig binding; used `dlopen`.
 yeslogic-fontconfig-sys = "=6.0.1"
 # The DirectWrite oracle backend's raw-dylib linkage; the 0.2 line is already locked.
 windows-link = "0.2"
@@ -301,7 +298,7 @@ panic = "abort"
 
 # BEGIN release cold-set opt-level overrides (generated: keep hand-synced)
 # "z" only for crates cold on the per-frame path (numbers: docs/PERFORMANCE_BASELINES.md). Kept at 3 by design:
-# frust-{engine,gpu,render,text}, harfrust, skrifa, read-fonts, zune-jpeg, parley, wgpu-{core,types,hal},
+# frust-{engine,gpu,render,text}, harfrust, skrifa, read-fonts, zune-jpeg, wgpu-{core,types,hal},
 # tokio, accesskit*, jni. Hand-synced across the nine manifests crates/frust-cli/tests/profile_sync.rs lists.
 
 [profile.release.package.naga]
@@ -317,9 +314,6 @@ opt-level = "z"
 opt-level = "z"
 
 [profile.release.package.serde_json]
-opt-level = "z"
-
-[profile.release.package.roxmltree]
 opt-level = "z"
 
 [profile.release.package.fontique]

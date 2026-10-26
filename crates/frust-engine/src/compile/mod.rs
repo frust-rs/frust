@@ -802,6 +802,23 @@ impl SceneCompiler {
         self.hvgl_outlines.capacity()
     }
 
+    /// How many `hvgl` faces CoreText resolved to a different PostScript name
+    /// than the run's handle carried, since the compiler was built.
+    ///
+    /// Each such face is refused (its glyphs are counted skipped) and warned
+    /// about once.
+    #[must_use]
+    pub fn hvgl_identity_mismatches(&self) -> u32 {
+        self.hvgl_outlines.identity_mismatches()
+    }
+
+    /// How many `hvgl` faces were refused because the run's handle carried no
+    /// PostScript name, since the compiler was built.
+    #[must_use]
+    pub fn hvgl_nameless_faces(&self) -> u32 {
+        self.hvgl_outlines.nameless_faces()
+    }
+
     /// Set how many threads generate a frame's strips, the calling thread
     /// included (see the `parallel` module). One — or zero, read as one — is the
     /// sequential walk: no planning pass, no helper thread.
