@@ -554,6 +554,33 @@ impl Widget for TextWidget {
     }
 }
 
+/// Serialises the tests that read the shape counters or write the process-global default-locale
+/// slot: every layout reads the slot, so a writer would otherwise skew a sibling's counts.
+#[cfg(test)]
+pub(crate) mod locale_slot_test {
+    use std::sync::{Mutex, MutexGuard};
+
+    static LOCK: Mutex<()> = Mutex::new(());
+
+    /// Holds the lock for a test that asserts shape counts and never writes the slot.
+    pub(crate) fn reader() -> MutexGuard<'static, ()> {
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Holds the lock for a test that writes the slot; restores `None` on drop, panic included.
+    pub(crate) struct Writer(#[allow(dead_code)] MutexGuard<'static, ()>);
+
+    pub(crate) fn writer() -> Writer {
+        Writer(reader())
+    }
+
+    impl Drop for Writer {
+        fn drop(&mut self) {
+            frust_text::set_default_locale(None);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -758,6 +785,7 @@ mod tests {
 
     #[test]
     fn unchanged_layout_pass_skips_reshaping_entirely() {
+        let _slot = locale_slot_test::reader();
         // The verified defect: `TextWidget::layout` re-shaped on every pass. Now
         // an unchanged pass reuses the cached `TextLayout` WITHOUT touching the
         // text context at all — observable as the shape cache seeing exactly one
@@ -786,6 +814,7 @@ mod tests {
 
     #[test]
     fn width_change_rebreaks_without_reshaping() {
+        let _slot = locale_slot_test::reader();
         // A width change breaks the widget-level skip (the cached width differs),
         // so it re-lays-out through the context — but the frust-text shape cache
         // reuses the shaping and re-runs line-breaking only.
@@ -961,8 +990,9 @@ mod tests {
 
     #[test]
     fn a_default_locale_change_invalidates_the_cached_shape() {
-        // No test in this crate shapes under a changed default locale except this one, so
-        // the process-global slot needs no lock; it is restored before returning.
+        // The slot is process-global: the guard serialises this writer against the
+        // shape-count tests and restores `None` even if an assertion panics.
+        let _slot = locale_slot_test::writer();
         let bc = BoxConstraints::loose(Size::new(200.0, 200.0));
         let view = text("\u{76f4}");
         let mut widget = View::<()>::build(&view, &mut frust_core::BuildCtx::new(&mut 0u64));
@@ -975,7 +1005,6 @@ mod tests {
         assert_ne!(before, after);
         widget.layout(&mut lctx, &bc);
         let laid_out = widget.laid_out_locale_generation;
-        frust_text::set_default_locale(None);
         assert_eq!(laid_out, after, "the layout re-ran under the new default");
     }
 

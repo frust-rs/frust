@@ -2370,10 +2370,13 @@ impl Widget for TextInputWidget {
         // `style`/`text_style_explicit` — see `effective_style`/`apply_style`).
         let effective = self.effective_style(Theme::from_layout_ctx(ctx));
         let locale_generation = frust_text::default_locale_generation();
-        if fonts_changed
-            || effective != self.applied_style
-            || locale_generation != self.applied_locale_generation
-        {
+        // A locale change waits out an active composition: the rebuild would
+        // drop the editor's preedit, and the IME's next `Compose` would then
+        // duplicate it. The generation stays stale, so the first layout after
+        // the composition ends rebuilds.
+        let composing = self.editor.editing_state_bytes().composing.is_some();
+        let locale_changed = locale_generation != self.applied_locale_generation && !composing;
+        if fonts_changed || effective != self.applied_style || locale_changed {
             self.applied_locale_generation = locale_generation;
             self.apply_style(effective);
         }
@@ -3185,6 +3188,92 @@ mod tests {
             modifiers,
             repeat: false,
         })
+    }
+
+    fn compose(
+        root: &mut RenderRoot<AppState, TextInputView<AppState>>,
+        state: &mut AppState,
+        text: &str,
+    ) {
+        root.event(
+            state,
+            &InputEvent::Ime(ImeEvent::Compose {
+                text: text.to_string(),
+                cursor: Some((text.len(), text.len())),
+            }),
+        );
+    }
+
+    #[test]
+    fn a_locale_change_preserves_text_caret_and_selection() {
+        let _slot = crate::text::locale_slot_test::writer();
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(
+            &mut state,
+            &InputEvent::Ime(ImeEvent::Commit("hello".into())),
+        );
+        let caret = widget(&root).editor.editing_state_bytes();
+        assert_eq!(caret.text, "hello");
+        root.event(&mut state, &named(NamedKey::End, Modifiers::default()));
+        let caret = widget(&root).editor.editing_state_bytes();
+        assert_eq!((caret.base, caret.extent), (5, 5));
+        frust_text::set_default_locale(Some("ko"));
+        root.layout(Size::new(300.0, 200.0));
+        let kept = widget(&root).editor.editing_state_bytes();
+        assert_eq!((kept.base, kept.extent), (5, 5), "the caret survives");
+        drag_select_all(&mut state, &mut root);
+        let before = widget(&root).editor.editing_state_bytes();
+        assert_ne!(before.base, before.extent, "a selection exists");
+        let generation = widget(&root).applied_locale_generation;
+
+        frust_text::set_default_locale(Some("ja"));
+        root.layout(Size::new(300.0, 200.0));
+
+        assert_ne!(
+            widget(&root).applied_locale_generation,
+            generation,
+            "rebuilt"
+        );
+        let after = widget(&root).editor.editing_state_bytes();
+        assert_eq!(after.text, "hello");
+        assert_eq!((after.base, after.extent), (before.base, before.extent));
+    }
+
+    #[test]
+    fn a_locale_change_during_a_preedit_waits_for_the_composition_to_end() {
+        let _slot = crate::text::locale_slot_test::writer();
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        compose(&mut root, &mut state, "ni");
+        let generation = widget(&root).applied_locale_generation;
+
+        frust_text::set_default_locale(Some("ja"));
+        root.layout(Size::new(300.0, 200.0));
+        assert_eq!(
+            widget(&root).applied_locale_generation,
+            generation,
+            "no rebuild while the preedit is live"
+        );
+        assert_eq!(widget(&root).editor.text(), "ni");
+
+        compose(&mut root, &mut state, "nih");
+        assert_eq!(
+            widget(&root).editor.text(),
+            "nih",
+            "the compose replaces, never duplicates"
+        );
+
+        root.event(&mut state, &InputEvent::Ime(ImeEvent::Commit("nih".into())));
+        assert_eq!(widget(&root).editor.text(), "nih");
+        root.layout(Size::new(300.0, 200.0));
+        let rebuilt = widget(&root).applied_locale_generation;
+        assert_ne!(rebuilt, generation, "rebuilt once the composition ended");
+        root.layout(Size::new(300.0, 200.0));
+        assert_eq!(widget(&root).applied_locale_generation, rebuilt);
+        assert_eq!(widget(&root).editor.text(), "nih");
     }
 
     #[test]
@@ -5401,6 +5490,9 @@ mod tests {
 
     #[test]
     fn app_registered_font_shapes_the_field_content() {
+        // The font registry is process-global; a registration must not land mid-way through a
+        // locale test's rebuild assertions.
+        let _slot = crate::text::locale_slot_test::reader();
         // The shell's construction-time drain, reproduced exactly.
         let mut shell_ctx = frust_text::TextContext::new();
         shell_ctx
@@ -5441,6 +5533,9 @@ mod tests {
 
     #[test]
     fn app_registered_font_shapes_the_placeholder() {
+        // The font registry is process-global; a registration must not land mid-way through a
+        // locale test's rebuild assertions.
+        let _slot = crate::text::locale_slot_test::reader();
         // The placeholder shapes on its own path (`text_ctx.layout` in `paint`,
         // not the editor's retained layout), so it needs its own coverage.
         let mut shell_ctx = frust_text::TextContext::new();
@@ -5459,6 +5554,9 @@ mod tests {
 
     #[test]
     fn font_registered_after_build_reshapes_the_field_at_the_next_layout() {
+        // The font registry is process-global; a registration must not land mid-way through a
+        // locale test's rebuild assertions.
+        let _slot = crate::text::locale_slot_test::reader();
         // The shells' *per-frame* late drain: a font can register after this
         // widget's private context was built. `layout`'s `sync_app_fonts` picks
         // it up and rebuilds the editor, whose retained parley layout would
