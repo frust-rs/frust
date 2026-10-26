@@ -16,6 +16,7 @@
 //!   `glifo`, and `vello_cpu_oracle` each carry a
 //!   literal `=` version — the engine-core render stack is exact-pinned,
 //!   pre-1.0 and unstable, per `docs/RENDER_DEVELOPMENT.md`'s Version Pins.
+//!   `parley_engine`, `parlance` and `fontique` (frust-text's font stack) are exact too.
 //!   (The legacy `vello_cpu` row — the cpu-tier fallback's own pin — was
 //!   retired alongside `frust-render`'s `cpu-tier` feature.)
 //! - **G7**: `frust-engine` never depends on `vello`/`vello_cpu`/
@@ -62,7 +63,14 @@ fn parse_manifest(path: &Path) -> toml::Table {
 /// (the retired cpu-tier fallback's own pin) is gone, not merely renamed:
 /// `vello_cpu_oracle` predates its retirement and stays the CPU oracle's own
 /// row.
-const EXACT_PINNED_ROWS: &[&str] = &["vello_common", "glifo", "vello_cpu_oracle"];
+const EXACT_PINNED_ROWS: &[&str] = &[
+    "vello_common",
+    "glifo",
+    "vello_cpu_oracle",
+    "parley_engine",
+    "parlance",
+    "fontique",
+];
 
 /// The version requirement string of `[workspace.dependencies].<name>`,
 /// whether the row is a bare string (`name = "=0.1.0"`) or a table
@@ -290,5 +298,132 @@ fn assert_frust_gpu_edge_is_optional_and_non_default(manifest_path: &Path) {
         "{}: [features].default must not enable `gpu`/`dep:frust-gpu` — the GPU substrate \
          seam must stay opt-in",
         relative.display()
+    );
+}
+
+// ---------------------------------------------------------------------
+// G7: the parley crate is gone; fontique rides parley_engine
+// ---------------------------------------------------------------------
+
+/// Every `Cargo.toml` under `dir`, skipping build output, VCS state, the nested
+/// `workflow/` repo and scratch directories.
+fn all_manifests(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if path.is_dir() {
+            if matches!(
+                name.as_ref(),
+                "target" | ".git" | "node_modules" | "workflow" | "tmp" | ".claude"
+            ) {
+                continue;
+            }
+            all_manifests(&path, out);
+        } else if name == "Cargo.toml" {
+            out.push(path);
+        }
+    }
+}
+
+#[test]
+fn g7_no_manifest_in_the_workspace_names_parley() {
+    let root = repo_root();
+    let mut manifests = Vec::new();
+    all_manifests(&root, &mut manifests);
+    assert!(manifests.len() > 10, "manifest walk found too few files");
+    for manifest in &manifests {
+        let table = parse_manifest(manifest);
+        let mut names = BTreeSet::new();
+        direct_dependency_names(&toml::Value::Table(table.clone()), &mut names);
+        if let Some(ws) = table
+            .get("workspace")
+            .and_then(|w| w.get("dependencies"))
+            .and_then(toml::Value::as_table)
+        {
+            names.extend(ws.keys().cloned());
+        }
+        assert!(
+            !names.contains("parley"),
+            "{}: names `parley` — frust-text owns shaping and layout over parley_engine",
+            manifest.strip_prefix(&root).unwrap_or(manifest).display()
+        );
+    }
+}
+
+/// `(name, version, dependency names)` for every package in the root lock.
+fn lock_packages_with_deps() -> Vec<(String, String, Vec<String>)> {
+    let path = repo_root().join("Cargo.lock");
+    let lock = parse_manifest(&path);
+    lock.get("package")
+        .and_then(toml::Value::as_array)
+        .expect("Cargo.lock has [[package]] entries")
+        .iter()
+        .map(|p| {
+            let field = |k: &str| {
+                p.get(k)
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or("")
+                    .to_string()
+            };
+            let deps = p
+                .get("dependencies")
+                .and_then(toml::Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(toml::Value::as_str)
+                        // "name version" when the lock disambiguates; else bare name.
+                        .map(|d| d.split(' ').next().unwrap_or(d).to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            (field("name"), field("version"), deps)
+        })
+        .collect()
+}
+
+#[test]
+fn g7_parley_is_absent_and_the_font_stack_resolves_one_identity() {
+    let packages = lock_packages_with_deps();
+    assert!(
+        packages.iter().all(|(name, _, _)| name != "parley"),
+        "Cargo.lock still resolves `parley`"
+    );
+    for name in ["parley_engine", "fontique", "parlance"] {
+        let versions: Vec<_> = packages
+            .iter()
+            .filter(|(n, _, _)| n == name)
+            .map(|(_, v, _)| v.as_str())
+            .collect();
+        assert_eq!(
+            versions.len(),
+            1,
+            "`{name}` must resolve one identity: {versions:?}"
+        );
+    }
+    // fontique is reached only through parley_engine and frust-text's own font-data edge.
+    for (name, _, deps) in &packages {
+        if deps.iter().any(|d| d == "fontique") {
+            assert!(
+                matches!(name.as_str(), "parley_engine" | "frust-text"),
+                "`{name}` depends on fontique; only parley_engine and frust-text may"
+            );
+        }
+    }
+}
+
+#[test]
+fn g7_fontique_row_has_default_features_off() {
+    let table = parse_manifest(&repo_root().join("Cargo.toml"));
+    let row = table["workspace"]["dependencies"]["fontique"]
+        .as_table()
+        .expect("fontique is a table row");
+    assert_eq!(
+        row.get("default-features").and_then(toml::Value::as_bool),
+        Some(false),
+        "[workspace.dependencies].fontique must set default-features = false"
     );
 }

@@ -29,7 +29,7 @@ mod selector;
 use std::ops::Range;
 
 use fontique::Language;
-use parley::setting::{FontVariation, Tag};
+use parlance::{FontVariation, Tag};
 use parley_engine::itemize::Item;
 use parley_engine::shape::Whitespace as EngineWhitespace;
 use parley_engine::{
