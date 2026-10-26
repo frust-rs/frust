@@ -145,7 +145,7 @@ static SHADER_EFFECTS_DISABLED_WARNING: Once = Once::new();
 /// rather than by sampling: a phase is tens to hundreds of microseconds and no
 /// sampling profiler rides along on a phone under a benchmark harness, while a
 /// lap is two clock reads. Under `perf-trace` a lap reads
-/// [`std::time::Instant`]; without it the type is zero-sized, [`Self::lap`]
+/// [`web_time::Instant`]; without it the type is zero-sized, [`Self::lap`]
 /// answers [`Duration::ZERO`] and no clock is read at all — the "zero clock
 /// reads in a disabled build" terms `docs/RENDER_DEVELOPMENT.md`'s perf-trace
 /// convention and `docs/PERFORMANCE_BASELINES.md`'s Release-lean note set for an
@@ -158,7 +158,7 @@ static SHADER_EFFECTS_DISABLED_WARNING: Once = Once::new();
 pub(crate) struct PhaseClock {
     /// When the phase now being timed began.
     #[cfg(feature = "perf-trace")]
-    last: std::time::Instant,
+    last: web_time::Instant,
 }
 
 impl PhaseClock {
@@ -167,7 +167,7 @@ impl PhaseClock {
     pub(crate) fn start() -> Self {
         Self {
             #[cfg(feature = "perf-trace")]
-            last: std::time::Instant::now(),
+            last: web_time::Instant::now(),
         }
     }
 
@@ -176,7 +176,7 @@ impl PhaseClock {
     pub(crate) fn lap(&mut self) -> Duration {
         #[cfg(feature = "perf-trace")]
         {
-            let now = std::time::Instant::now();
+            let now = web_time::Instant::now();
             // Saturating rather than `-`: a clock that went backwards across a
             // lap is a measurement artefact, and a zero span reports it far
             // better than a panicked frame would (E17).
