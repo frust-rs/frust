@@ -1210,20 +1210,34 @@ mod tests {
         for text in samples {
             let _ = sys.resolve(&request(text, "en-US"));
         }
-        let live_before = LIVE.load(Ordering::SeqCst);
-        let collection_refs = sys.collection.ref_count();
-        let fallback_refs = sys.fallback.ref_count();
-        let factory_refs = sys.factory.ref_count();
-        for i in 0..10_000 {
-            let _ = sys.resolve(&request(samples[i % samples.len()], "en-US"));
+        // `system()` is process-wide and `SERIAL` orders only this module's
+        // tests, so another test thread resolving through the Windows backend
+        // can hold a few transient guards and collection references at the
+        // instant a count is read. A real leak adds thousands of references
+        // over the loop and never yields an equal pair, so the measurement is
+        // retried until it reads the same counts before and after.
+        let counts = || {
+            (
+                LIVE.load(Ordering::SeqCst),
+                sys.collection.ref_count(),
+                sys.fallback.ref_count(),
+                sys.factory.ref_count(),
+            )
+        };
+        let mut last = None;
+        for _ in 0..5 {
+            let before = counts();
+            for i in 0..10_000 {
+                let _ = sys.resolve(&request(samples[i % samples.len()], "en-US"));
+            }
+            let after = counts();
+            if after == before {
+                return;
+            }
+            last = Some((before, after));
         }
-        assert_eq!(
-            LIVE.load(Ordering::SeqCst),
-            live_before,
-            "a ComPtr guard was leaked"
+        panic!(
+            "interfaces leaked across 10 000 resolves (live, collection, fallback, factory) before/after: {last:?}"
         );
-        assert_eq!(sys.collection.ref_count(), collection_refs);
-        assert_eq!(sys.fallback.ref_count(), fallback_refs);
-        assert_eq!(sys.factory.ref_count(), factory_refs);
     }
 }

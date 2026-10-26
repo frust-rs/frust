@@ -1064,8 +1064,11 @@ mod tests {
                 panic!("tests default to a scratch file");
             };
             assert!(file.starts_with(std::env::temp_dir()), "{}", file.display());
-            if let Some(user) = frust_paths::cache_dir() {
-                assert!(!file.starts_with(user), "{}", file.display());
+            // Never the platform cache file's directory. (A prefix test against
+            // `frust_paths::cache_dir()` is wrong on Windows, where the temp
+            // dir itself lives under the user's local app-data dir.)
+            if let Some(platform) = oracle::persistent_cache_path() {
+                assert_ne!(file.parent(), platform.parent(), "{}", file.display());
             }
         }
     }
