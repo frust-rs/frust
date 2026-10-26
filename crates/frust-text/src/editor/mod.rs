@@ -1592,7 +1592,10 @@ mod tests {
         assert!(caret.height() > 0.0);
         assert_eq!(ed.line_count(), 1);
         assert_eq!(ed.layout_size().width, 0.0);
-        assert!((ed.layout_size().height - caret.height()).abs() < 1.0);
+        // The caret is the quantized line box (ascent, descent and each leading
+        // half rounded), the layout height the unrounded line height: up to
+        // 1.5 px apart depending on the font's metrics (DejaVu, not SF).
+        assert!((ed.layout_size().height - caret.height()).abs() < 2.0);
         assert!(ed.selection_rects().is_empty());
     }
 
