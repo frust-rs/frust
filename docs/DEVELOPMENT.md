@@ -515,12 +515,12 @@ target?** `Package.swift`'s `platforms:` must stay **at or below** every consume
 
 ### Why Android is 29
 
-The floor moved from 26 in `ec68c13a`. It is set by the NDK system-font API (`AFontMatcher`, API 29)
-that the text stack's font oracle uses, so **lowering it is not a manifest-only change**: the oracle
-needs a pre-29 fallback first. The API-26 IME flag (`IME_FLAG_NO_PERSONALIZED_LEARNING`, an
-`imeOptions` bit older IMEs ignore silently) was the earlier lower bound; the IME contract in
-`crates/frust-core/src/event/ime.rs` holds at 29. No gate runs Android Lint — wiring `lintDebug` in
-is open work (*Verifying a floor change* below).
+The floor is set by the NDK system-font API (`AFontMatcher`, API 29) that the font oracle uses, so
+**lowering it is not a manifest-only change**: the oracle needs a pre-29 fallback first. The NDK link
+platform equals minSdk: the scaffold's `cargoNdkBuild` passes `--platform` from `minSdkValue`; the
+hot-patch builder's `API_LEVEL` (`crates/frust-drive/src/hotpatch/android.rs`) is a separate 29 —
+keep the two equal. The IME contract in `crates/frust-core/src/event/ime.rs` holds at 29. No gate
+runs Android Lint — wiring `lintDebug` in is open work (*Verifying a floor change* below).
 
 **Recorded follow-ups** the floor now unlocks, none adopted by this change:
 
