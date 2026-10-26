@@ -26,8 +26,9 @@ use peniko::{Brush, FontData};
 /// attaches the PostScript name and hidden flag its font oracle resolved the
 /// face to. A renderer that cannot read a face's outlines itself (CoreText for
 /// an `hvgl`-only face) opens it by that name; it does not re-derive the name
-/// from the blob, and whether such a face may be drawn at all was already
-/// decided where the face was chosen.
+/// from the blob, and draws only when the system honours exactly that name: a
+/// substituted face or a handle with no name is a counted refusal, so a hidden
+/// face draws only if the system resolves its hidden name.
 #[derive(Clone, Debug)]
 pub struct FontHandle {
     font: FontData,

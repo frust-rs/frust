@@ -7631,7 +7631,7 @@ or work around from inside the pty.
 ### `lean-android-hashbrown-split` — the lean Android release graph carries two `hashbrown` copies
 
 **Observed**: `hashbrown` resolves to two versions on the lean Android release graph —
-0.16.1 and 0.17.1. `parley`/`fontique` (and `frust-engine`'s vendored `vello_common`/`glifo`
+0.16.1 and 0.17.1. `parley_engine`/`fontique` (and `frust-engine`'s vendored `vello_common`/`glifo`
 stack) already sit on 0.17.1; the 0.16.1 copy is held down by `accesskit_consumer 0.38.0`,
 `gpu-allocator 0.28.0`, and `tree_arena 0.2.0`.
 

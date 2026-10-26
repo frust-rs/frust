@@ -213,11 +213,9 @@ fn the_compiler_stays_send_and_sync_with_the_hvgl_provider_inside() {
 #[test]
 fn an_hvgl_handle_without_an_identity_is_skipped_whole_and_draws_nothing() {
     let mut compiler = compiler();
+    let face = synthetic_hvgl_face(None, false);
     for frame_index in 0..2 {
-        let frame = compile(
-            &mut compiler,
-            vec![run(synthetic_hvgl_face(None, false), &[1, 2, 3])],
-        );
+        let frame = compile(&mut compiler, vec![run(face.clone(), &[1, 2, 3])]);
         assert_eq!(frame.skipped_glyphs, 3, "frame {frame_index}");
         assert_eq!(frame.glyph_draws, 0, "frame {frame_index}");
         assert!(frame.draws().is_empty(), "frame {frame_index}");
@@ -225,14 +223,18 @@ fn an_hvgl_handle_without_an_identity_is_skipped_whole_and_draws_nothing() {
     }
     assert_eq!(compiler.hvgl_cached_outlines(), 0);
     assert_eq!(compiler.hvgl_identity_mismatches(), 0);
+    assert_eq!(
+        compiler.hvgl_nameless_faces(),
+        1,
+        "counted once, not per frame"
+    );
 }
 
-/// A dot-prefixed name is the shape of Apple's hidden system faces. Whether
-/// such a face may be drawn was the oracle's decision; a handle that arrives
-/// with one is drawn, not refused. CoreText cannot resolve a hidden name to the
-/// face (it hands back a substitute), which the engine only counts.
+/// A dot-prefixed name is the shape of Apple's hidden system faces. CoreText
+/// cannot resolve a hidden name to the face (it hands back a substitute), so
+/// the engine refuses it: skipped, and counted once.
 #[test]
-fn a_hidden_named_hvgl_handle_is_not_refused_by_the_engine() {
+fn a_hidden_named_hvgl_handle_is_refused_when_coretext_substitutes() {
     let mut compiler = compiler();
     let frame = compile(
         &mut compiler,
@@ -242,30 +244,25 @@ fn a_hidden_named_hvgl_handle_is_not_refused_by_the_engine() {
         )],
     );
     if cfg!(target_vendor = "apple") {
-        assert_eq!(frame.skipped_glyphs, 0, "the oracle allowed it");
         assert_eq!(compiler.hvgl_identity_mismatches(), 1);
     } else {
-        assert_eq!(frame.skipped_glyphs, 2, "no CoreText to draw it with");
-        assert_eq!(frame.glyph_draws, 0);
-        assert!(frame.draws().is_empty());
+        assert_eq!(compiler.hvgl_identity_mismatches(), 0);
     }
+    assert_eq!(frame.skipped_glyphs, 2, "never drawn from a substitute");
+    assert_eq!(frame.glyph_draws, 0);
+    assert!(frame.draws().is_empty());
 }
 
-/// An unknown name is no longer refused on identity either: the mismatch is
-/// counted once however many frames draw it.
+/// An unknown name CoreText substitutes for is refused: the mismatch is
+/// counted once however many frames ask, and every glyph is skipped.
 #[cfg(target_vendor = "apple")]
 #[test]
-fn a_name_coretext_resolves_differently_is_counted_once_not_refused() {
+fn a_name_coretext_resolves_differently_is_counted_once_and_skipped() {
     let mut compiler = compiler();
+    let face = synthetic_hvgl_face(Some("FrustNoSuchFace-Regular"), false);
     for _ in 0..3 {
-        let frame = compile(
-            &mut compiler,
-            vec![run(
-                synthetic_hvgl_face(Some("FrustNoSuchFace-Regular"), false),
-                &[10, 11],
-            )],
-        );
-        assert_eq!(frame.skipped_glyphs, 0);
+        let frame = compile(&mut compiler, vec![run(face.clone(), &[10, 11])]);
+        assert_eq!(frame.skipped_glyphs, 2);
     }
     assert_eq!(compiler.hvgl_identity_mismatches(), 1);
 }
@@ -580,17 +577,17 @@ mod macos {
         assert_eq!(frame.glyph_draws, 2);
     }
 
-    /// A hidden name on a face the oracle allowed draws: the engine does not
-    /// second-guess it, and only counts that CoreText answered with another
-    /// face.
+    /// A hidden name CoreText substitutes a face for is refused: skipped and
+    /// counted once, never drawn from the substitute.
     #[test]
-    fn a_hidden_named_pingfang_handle_draws_when_the_oracle_allowed_it() {
+    fn a_hidden_named_pingfang_handle_is_refused_when_coretext_substitutes() {
         let Some(data) = pingfang() else { return };
         let glyphs = coretext_glyphs(FACE, TEXT);
         let mut compiler = compiler();
         let hidden = face_named(&data, ".PingFangUITextSC-Default", true);
         let frame = compile(&mut compiler, vec![run(hidden, &glyphs)]);
-        assert_eq!(frame.skipped_glyphs, 0);
+        assert_eq!(frame.skipped_glyphs, glyphs.len() as u32);
+        assert_eq!(frame.glyph_draws, 0);
         assert_eq!(compiler.hvgl_identity_mismatches(), 1);
     }
 
