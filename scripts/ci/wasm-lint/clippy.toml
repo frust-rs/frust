@@ -1,0 +1,10 @@
+# Config for scripts/ci/wasm-time-check.sh only, selected through CLIPPY_CONF_DIR. Never move it to
+# the repository root or a crate directory: clippy walks parent directories for its config, so it
+# would bind the native `cargo clippy --workspace` gate and every standalone workspace.
+disallowed-types = [
+    { path = "std::time::Instant", reason = "std::time::Instant::now() panics on wasm32-unknown-unknown (no clock); use web_time::Instant, see docs/CODE_STANDARDS.md", replacement = "web_time::Instant" },
+]
+disallowed-methods = [
+    { path = "std::time::Instant::now", reason = "panics on wasm32-unknown-unknown (no clock); use web_time::Instant::now, see docs/CODE_STANDARDS.md" },
+    { path = "std::time::SystemTime::now", reason = "panics on wasm32-unknown-unknown (no clock); use web_time::SystemTime::now, see docs/CODE_STANDARDS.md" },
+]
