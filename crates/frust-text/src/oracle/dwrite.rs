@@ -930,7 +930,7 @@ struct Resolved {
 
 impl System {
     fn resolve(&self, req: &FallbackRequest) -> Option<Resolved> {
-        let locale = req.locale.as_deref().unwrap_or("en-US");
+        let locale = super::language_for(req.script, req.locale.as_deref()).unwrap_or("en-US");
         let base: Option<Vec<u16>> = req.families.iter().find_map(|f| match f {
             crate::style::FamilyName::Named(name) => Some(utf16z(name)),
             crate::style::FamilyName::Generic(_) => None,

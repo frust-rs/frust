@@ -178,6 +178,75 @@ impl ScriptTag {
     pub(crate) const COMMON: Self = Self(*b"Zyyy");
 }
 
+/// The language a fallback question is asked under: the request's explicit `locale`, else one
+/// derived from the cluster's `script` (kana `ja`, Hangul `ko`, Arabic `ar`, Hebrew `he`,
+/// Devanagari `hi`, Bengali `bn`, Thai `th`; Han the system's preferred Han language), else
+/// none. Pure in `(script, locale)` on a given machine, so the fallback cache key, which holds
+/// both, needs no extra field. Without a language CoreText's cascade answers kana from the
+/// symbols fallback instead of Hiragino.
+pub(crate) fn language_for(script: ScriptTag, locale: Option<&str>) -> Option<&str> {
+    if let Some(locale) = locale {
+        return Some(locale);
+    }
+    match &script.0 {
+        b"Hira" | b"Kana" => Some("ja"),
+        b"Hang" => Some("ko"),
+        b"Hani" => Some(preferred_han_language()),
+        b"Arab" => Some("ar"),
+        b"Hebr" => Some("he"),
+        b"Deva" => Some("hi"),
+        b"Beng" => Some("bn"),
+        b"Thai" => Some("th"),
+        _ => None,
+    }
+}
+
+/// The first of `zh-Hans`, `zh-Hant`, `ja`, `ko` among the system's preferred languages
+/// (`zh-Hans` when none, or off macOS), computed once.
+fn preferred_han_language() -> &'static str {
+    static HAN: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    HAN.get_or_init(|| {
+        #[cfg(target_os = "macos")]
+        {
+            let out = std::process::Command::new("/usr/bin/defaults")
+                .args(["read", "-g", "AppleLanguages"])
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+            if let Some(text) = out {
+                return han_language_of(&text);
+            }
+        }
+        "zh-Hans"
+    })
+}
+
+/// The first Han language in a `defaults read AppleLanguages` listing (`"ja-JP"`, `"en-US"`,
+/// ...), else `zh-Hans`.
+#[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
+fn han_language_of(listing: &str) -> &'static str {
+    for tag in listing.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_')) {
+        let lower = tag.to_ascii_lowercase().replace('_', "-");
+        if lower.starts_with("zh-hant")
+            || lower.starts_with("zh-tw")
+            || lower.starts_with("zh-hk")
+            || lower.starts_with("zh-mo")
+        {
+            return "zh-Hant";
+        }
+        if lower.starts_with("zh") {
+            return "zh-Hans";
+        }
+        if lower.starts_with("ja") {
+            return "ja";
+        }
+        if lower.starts_with("ko") {
+            return "ko";
+        }
+    }
+    "zh-Hans"
+}
+
 /// One font-variation axis setting (`wght`, `wdth`, `ital`, `slnt`, `opsz`, ...).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct VariationSetting {
@@ -1119,5 +1188,36 @@ mod tests {
         assert!(store.load(&missing).is_none());
         assert!(store.load(&missing).is_none());
         assert_eq!(store.file_reads(), 2, "an unreadable path is read once too");
+    }
+
+    #[test]
+    fn language_for_prefers_the_locale_then_the_script() {
+        let tag = |t: &[u8; 4]| ScriptTag(*t);
+        assert_eq!(language_for(tag(b"Hira"), None), Some("ja"));
+        assert_eq!(language_for(tag(b"Kana"), None), Some("ja"));
+        assert_eq!(language_for(tag(b"Hang"), None), Some("ko"));
+        assert_eq!(language_for(tag(b"Arab"), None), Some("ar"));
+        assert_eq!(language_for(tag(b"Hebr"), None), Some("he"));
+        assert_eq!(language_for(tag(b"Deva"), None), Some("hi"));
+        assert_eq!(language_for(tag(b"Beng"), None), Some("bn"));
+        assert_eq!(language_for(tag(b"Thai"), None), Some("th"));
+        for none in [b"Latn", b"Grek", b"Cyrl", b"Zyyy"] {
+            assert_eq!(language_for(tag(none), None), None);
+        }
+        assert_eq!(language_for(tag(b"Hira"), Some("zh-Hant")), Some("zh-Hant"));
+        let han = language_for(tag(b"Hani"), None).expect("Han has a language");
+        assert!(["zh-Hans", "zh-Hant", "ja", "ko"].contains(&han), "{han}");
+        assert_eq!(language_for(tag(b"Hani"), Some("ko")), Some("ko"));
+    }
+
+    #[test]
+    fn han_language_follows_the_first_preferred_han_language() {
+        assert_eq!(
+            han_language_of("(\n    \"en-US\",\n    \"ja-JP\",\n    \"zh-Hans-US\"\n)"),
+            "ja"
+        );
+        assert_eq!(han_language_of("(\"zh-Hant-TW\", \"en\")"), "zh-Hant");
+        assert_eq!(han_language_of("(\"ko-KR\")"), "ko");
+        assert_eq!(han_language_of("(\"en-US\")"), "zh-Hans");
     }
 }
