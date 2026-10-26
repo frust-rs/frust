@@ -93,6 +93,8 @@ jobs:
             pkg-config
             # Text: yeslogic-fontconfig-sys (system font discovery) needs a pkg-config sysroot (docs/DEVELOPMENT.md, Test section)
             libfontconfig1-dev libfreetype-dev
+            # Text: the frust-text fontconfig backend's host tests resolve a CJK cluster through the system font set
+            fonts-droid-fallback
             # Wayland: wayland-sys (via winit and wgpu-hal) probes wayland-client through pkg-config
             libwayland-dev libxkbcommon-dev
             # X11: the desktop shells' windowing and clipboard (x11-dl, x11rb)
