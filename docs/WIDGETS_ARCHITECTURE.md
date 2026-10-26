@@ -358,18 +358,19 @@ only `rebuild_children`'s `view_of` (mixed/keyed lists) and `OverlaySlot` stay `
   explicit turbofish gains a `_` for the view type; `.collect()` into an iterator parameter needs `::<Vec<_>>()`.
 
 ### Reactive-Free Design
-`frust-widgets` contains no `reactive_graph` symbols — the crate is entirely signal-free. Reactive
-bridging lives in the CORE facade (`router_glue.rs`, `back_glue.rs`), keeping the widget set
-reusable; nav/navigator state is held in plain `Rc<Cell<_>>`/`Arc<Mutex<_>>`.
+`frust-widgets` is signal-free (no `reactive_graph` symbols); reactive bridging lives in the CORE
+facade (`router_glue.rs`, `back_glue.rs`), and nav state sits in plain `Rc<Cell<_>>`/`Arc<Mutex<_>>`.
 
 ### Icon Generation
 `crates/frust-widgets/src/icons/mod.rs` is **generated** by `scripts/gen_icons.py` from a hardcoded
-`STARTER_SET`; hand-edits are destroyed on the next run — expand the script's source list instead.
+`STARTER_SET`; hand-edits are lost on the next run — expand the script's list instead.
 
 ### Text Widget Alignment
-`TextInput`'s live-edited text is always start-aligned regardless of `TextStyle::align`: parley's
-`PlainEditor` exposes no alignment hook (a parley limitation, no per-field workaround).
-`TextView` honors `align`, `.max_lines` and `.overflow(TextOverflow)`.
+`TextInput` honours `TextStyle::align` within the wrap width on a multi-line field; a single-line
+field has no wrap width and draws as Start. `TextView` honors `align`, `.max_lines` and
+`.overflow(TextOverflow)`. `Text` and `TextInput` key their layout caches on the default-locale
+generation, so a locale switch re-faces untagged text; `TextInput` defers editor rebuilds (locale,
+font, theme) while an editor-owned preedit is live, firing them on the first layout after it ends.
 
 ### Text Selection and the Clipboard
 Four gestures reach a `TextInput`'s selection and only two raise the toolbar: a **stationary

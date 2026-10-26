@@ -280,6 +280,8 @@ tracked scope dirty nor wakes a frame. A new value therefore becomes visible onl
 rebuild, which the resize or inset change that produced it already drives. Delivery is
 pull-on-next-frame, not push; do not write code that assumes writing a context triggers a rebuild.
 (Signal writes are the reactive path and do wake — but only `deep_link` and `back` are signals.)
+The app default locale is not a context either: it is a `frust-text` process value read on the
+shaping thread (see [RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md)).
 
 A shell must still re-provide only on actual change, guarded by `WindowMetricsPublisher`'s check.
 The reason is cost at the FFI boundary, not a rebuild storm: an unconditional per-frame re-provide
