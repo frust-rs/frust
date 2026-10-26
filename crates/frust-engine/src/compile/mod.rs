@@ -805,12 +805,18 @@ impl SceneCompiler {
     /// How many `hvgl` faces CoreText resolved to a different PostScript name
     /// than the run's handle carried, since the compiler was built.
     ///
-    /// A diagnostic only: the identity is the text tier's call, so such a face
-    /// is still drawn as CoreText resolved it. Each is also logged once at
-    /// `debug` level.
+    /// Each such face is refused (its glyphs are counted skipped) and warned
+    /// about once.
     #[must_use]
     pub fn hvgl_identity_mismatches(&self) -> u32 {
         self.hvgl_outlines.identity_mismatches()
+    }
+
+    /// How many `hvgl` faces were refused because the run's handle carried no
+    /// PostScript name, since the compiler was built.
+    #[must_use]
+    pub fn hvgl_nameless_faces(&self) -> u32 {
+        self.hvgl_outlines.nameless_faces()
     }
 
     /// Set how many threads generate a frame's strips, the calling thread

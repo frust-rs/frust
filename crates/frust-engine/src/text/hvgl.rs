@@ -24,20 +24,25 @@
 //! By the PostScript name the run's handle carries
 //! ([`FontHandle::postscript_name`](frust_scene::FontHandle::postscript_name)):
 //! the text tier's font oracle already resolved which face a run draws with,
-//! so this module does not re-derive the name from the blob, and whether the
-//! face may be drawn at all (including a hidden, dot-prefixed one) was decided
-//! where the face was chosen. The two routes that would open the bytes
+//! so this module does not re-derive the name from the blob. The two routes that would open the bytes
 //! themselves do not work for the face this exists for:
 //! `CTFontManagerCreateFontDescriptorsFromData` returns no descriptor at all
 //! for `PingFangUI.ttc`, and the file-URL route expands named instances, so its
-//! indices are not the collection's. A handle with no name cannot be opened: its
-//! glyphs are counted in
+//! indices are not the collection's. A handle with no name cannot be opened, and
+//! neither can one whose name CoreText does not honour: its glyphs are counted in
 //! [`CompiledFrame::skipped_glyphs`](crate::compile::CompiledFrame::skipped_glyphs),
 //! as are all of them on a target without CoreText.
 //!
-//! The face CoreText hands back is compared with the name asked for as a
-//! diagnostic only: a difference is logged once per face at `debug` level and
-//! counted ([`HvglOutlines::identity_mismatches`]), never a refusal.
+//! # Drawability
+//!
+//! A run's glyph ids index the face the shaper chose, so they are drawn only
+//! from that face. The face CoreText hands back must carry exactly the
+//! PostScript name asked for; a substitute (a hidden, dot-prefixed face
+//! CoreText cannot resolve by name comes back as another font) is a refusal,
+//! cached like a face, warned once with the names escaped and counted
+//! ([`HvglOutlines::identity_mismatches`]). A nameless handle is refused the
+//! same way ([`HvglOutlines::nameless_faces`]). A hidden handle therefore
+//! draws only when CoreText honours its name.
 //!
 //! # Variation instances
 //!
@@ -57,8 +62,8 @@
 //! # The cache
 //!
 //! Outlines are retained in a least-recently-used cache bounded by entry count
-//! ([`MAX_CACHED_OUTLINES`]), keyed by the open face (one per PostScript name)
-//! plus the glyph id and a [`VariationKey`] built
+//! ([`MAX_CACHED_OUTLINES`]), keyed by the open face (one per PostScript name, blob
+//! id and face index) plus the glyph id and a [`VariationKey`] built
 //! from the run's coordinates, so one instance's outline is never served for
 //! another's. A glyph CoreText cannot supply is remembered as missing too, so a
 //! refusal is paid for once.
@@ -301,10 +306,15 @@ impl HvglOutlines {
     }
 
     /// How many faces CoreText resolved to a different PostScript name than
-    /// the one asked for, since the provider was built. A diagnostic, not a
-    /// refusal: such a face still draws.
+    /// the one asked for, since the provider was built. Each was refused.
     pub(crate) fn identity_mismatches(&self) -> u32 {
         self.faces.mismatches
+    }
+
+    /// How many faces were refused for carrying no PostScript name, since the
+    /// provider was built.
+    pub(crate) fn nameless_faces(&self) -> u32 {
+        self.faces.nameless
     }
 
     /// `glyph_id`'s outline in `handle`'s face at the variation instance its
@@ -603,37 +613,67 @@ enum FaceSlot {
     Refused,
 }
 
-/// The faces looked at most recently, keyed by PostScript name.
+/// What identifies one face the table has looked at: the PostScript name
+/// CoreText is asked for, plus the blob and collection index the glyph ids
+/// were shaped against. Two handles sharing a name but not a blob are two faces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FaceKey {
+    /// The handle's PostScript name; `None` for a nameless handle.
+    name: Option<String>,
+    /// The font blob's id.
+    blob: u64,
+    /// The face's index within the blob.
+    index: u32,
+}
+
+impl FaceKey {
+    fn of(handle: &FontHandle) -> Self {
+        let font = handle.font();
+        Self {
+            name: handle.postscript_name().map(str::to_owned),
+            blob: font.data.id(),
+            index: font.index,
+        }
+    }
+}
+
+/// `name` cut to at most [`LOGGED_NAME_BYTES`] bytes on a character boundary,
+/// for a log line (a name can come from the on-disk fallback cache).
+fn truncated(name: &str) -> &str {
+    let mut end = name.len().min(LOGGED_NAME_BYTES);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    &name[..end]
+}
+
+/// The longest name a log line carries.
+const LOGGED_NAME_BYTES: usize = 63;
+
+/// The faces looked at most recently, keyed by name, blob and index.
 #[derive(Default)]
 struct FaceTable {
-    /// `(PostScript name, slot, last use)` per face.
-    faces: Vec<(String, FaceSlot, u64)>,
+    /// `(key, slot, last use)` per face.
+    faces: Vec<(FaceKey, FaceSlot, u64)>,
     /// A use counter, for the least-recently-used replacement.
     uses: u64,
     /// The next face id.
     next_id: u64,
-    /// Faces whose CoreText PostScript name differed from the one asked for.
+    /// Faces whose CoreText PostScript name differed from the one asked for;
+    /// each was refused.
     mismatches: u32,
+    /// Faces whose handle carried no PostScript name; each was refused.
+    nameless: u32,
 }
 
 impl FaceTable {
     /// `handle`'s face open in CoreText, opening it on first sight, or `None`
-    /// when the handle names no face or it could not be opened.
+    /// when the face was refused (no name, a name CoreText does not honour
+    /// exactly, or one it could not open). A refusal is cached like a face.
     fn open(&mut self, handle: &FontHandle) -> Option<&mut Face> {
-        let Some(name) = handle.postscript_name() else {
-            log::warn!(
-                "frust-engine: hvgl face {} carries no PostScript name; its glyphs are counted \
-                 as skipped",
-                handle.font().index,
-            );
-            return None;
-        };
         self.uses = self.uses.wrapping_add(1);
-        let position = match self
-            .faces
-            .iter()
-            .position(|(face_name, ..)| face_name == name)
-        {
+        let key = FaceKey::of(handle);
+        let position = match self.faces.iter().position(|(face, ..)| *face == key) {
             Some(position) => position,
             None => {
                 if self.faces.len() >= MAX_OPEN_FACES
@@ -647,8 +687,8 @@ impl FaceTable {
                     self.faces.swap_remove(oldest);
                 }
                 self.next_id = self.next_id.wrapping_add(1);
-                let slot = self.open_face(handle.font(), name);
-                self.faces.push((name.to_owned(), slot, 0));
+                let slot = self.open_face(handle);
+                self.faces.push((key, slot, 0));
                 self.faces.len().checked_sub(1)?
             }
         };
@@ -660,25 +700,41 @@ impl FaceTable {
         }
     }
 
-    /// `name`'s face opened in CoreText, or refused with a warning naming why.
-    fn open_face(&mut self, font: &FontData, name: &str) -> FaceSlot {
-        match try_open_face(font, name, self.next_id) {
-            Ok((face, resolved)) => {
-                // Identity is the text tier's call; a different face coming
-                // back is worth a line, never a refusal.
-                if resolved != name {
-                    self.mismatches = self.mismatches.saturating_add(1);
-                    log::debug!(
-                        "frust-engine: hvgl face '{name}' resolved by CoreText to '{resolved}'; \
-                         drawing it as resolved",
-                    );
-                }
-                FaceSlot::Open(face)
+    /// `handle`'s face opened in CoreText, or refused with one warning.
+    ///
+    /// The glyph ids of a run are indices into the face the shaper chose, so
+    /// they may only be drawn from that face: the face CoreText hands back
+    /// must carry exactly the PostScript name asked for. A substitute (a
+    /// hidden, dot-prefixed face CoreText cannot resolve by name comes back as
+    /// another font) is a counted refusal, never drawn.
+    fn open_face(&mut self, handle: &FontHandle) -> FaceSlot {
+        let Some(name) = handle.postscript_name() else {
+            self.nameless = self.nameless.saturating_add(1);
+            log::warn!(
+                "frust-engine: hvgl face {} carries no PostScript name; its glyphs are counted \
+                 as skipped",
+                handle.font().index,
+            );
+            return FaceSlot::Refused;
+        };
+        let shown = truncated(name);
+        match try_open_face(handle.font(), name, self.next_id) {
+            Ok((_, resolved)) if resolved != name => {
+                self.mismatches = self.mismatches.saturating_add(1);
+                log::warn!(
+                    "frust-engine: hvgl face {shown:?} (hidden: {}) resolved by CoreText to \
+                     {:?}; its glyphs are counted as skipped",
+                    handle.is_hidden(),
+                    truncated(&resolved),
+                );
+                FaceSlot::Refused
             }
+            Ok((face, _)) => FaceSlot::Open(face),
             Err(reason) => {
                 log::warn!(
-                    "frust-engine: hvgl face '{name}' refused ({reason}); its glyphs are \
-                     counted as skipped",
+                    "frust-engine: hvgl face {shown:?} refused ({}); its glyphs are counted \
+                     as skipped",
+                    truncated(&reason),
                 );
                 FaceSlot::Refused
             }
@@ -1026,6 +1082,47 @@ mod tests {
         assert_eq!(outlines.identity_mismatches(), 0);
     }
 
+    /// A nameless handle is one cached refusal however often it is asked.
+    #[test]
+    fn a_nameless_handle_is_one_cached_refusal_with_stable_counters() {
+        let nameless = handle(
+            sfnt(&[(*b"head", head(1000)), (HVGL_TAG, vec![0; 8])]),
+            None,
+        );
+        let mut outlines = HvglOutlines::default();
+        for _ in 0..3 {
+            assert!(matches!(
+                outlines.outline(&nameless, 1),
+                GlyphOutline::Unavailable
+            ));
+        }
+        assert_eq!(outlines.faces.faces.len(), 1);
+        assert!(matches!(outlines.faces.faces[0].1, FaceSlot::Refused));
+        assert_eq!(outlines.nameless_faces(), 1);
+        assert_eq!(outlines.identity_mismatches(), 0);
+    }
+
+    /// Two blobs under one name are two faces.
+    #[test]
+    fn two_blobs_under_one_name_are_two_faces() {
+        let one = handle(sfnt(&[(HVGL_TAG, vec![0; 8])]), Some("SameName-Regular"));
+        let two = handle(sfnt(&[(HVGL_TAG, vec![1; 8])]), Some("SameName-Regular"));
+        let mut outlines = HvglOutlines::default();
+        outlines.outline(&one, 1);
+        outlines.outline(&two, 1);
+        outlines.outline(&one, 1);
+        assert_eq!(outlines.faces.faces.len(), 2);
+    }
+
+    #[test]
+    fn a_logged_name_is_cut_on_a_character_boundary() {
+        let long = "é".repeat(100);
+        let cut = truncated(&long);
+        assert!(cut.len() <= LOGGED_NAME_BYTES);
+        assert!(long.starts_with(cut));
+        assert_eq!(truncated("short"), "short");
+    }
+
     #[test]
     fn a_blob_without_a_head_table_is_refused_once_per_name() {
         let broken = handle(sfnt(&[(HVGL_TAG, vec![0; 8])]), Some("PingFangSC-Medium"));
@@ -1312,11 +1409,11 @@ mod tests {
         );
     }
 
-    /// A name CoreText substitutes another face for is logged and counted, once
-    /// per face, and the face still draws: the text tier's word is final.
+    /// A name CoreText substitutes another face for is refused: counted once
+    /// per face, never drawn from the substitute.
     #[cfg(target_os = "macos")]
     #[test]
-    fn a_face_coretext_resolves_differently_is_counted_once_and_still_draws() {
+    fn a_face_coretext_resolves_differently_is_counted_once_and_refused() {
         let Some(font) = system_pingfang_sc() else {
             println!("skipped: PingFangUI.ttc is not installed");
             return;
@@ -1325,10 +1422,9 @@ mod tests {
             .with_identity(Some(Arc::from(".FrustNoSuchHiddenFace-Regular")), true);
         let mut outlines = HvglOutlines::default();
         for _ in 0..3 {
-            // Whatever face CoreText substituted, glyph 1 is inside it.
             assert!(
-                !matches!(outlines.outline(&handle, 1), GlyphOutline::Unavailable),
-                "the oracle's face is drawn, not refused"
+                matches!(outlines.outline(&handle, 1), GlyphOutline::Unavailable),
+                "a substituted face is refused, not drawn"
             );
         }
         assert_eq!(outlines.identity_mismatches(), 1);
