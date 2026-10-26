@@ -180,13 +180,18 @@ impl ScriptTag {
 
 /// The language a fallback question is asked under: the request's explicit `locale`, else one
 /// derived from the cluster's `script` (kana `ja`, Hangul `ko`, Arabic `ar`, Hebrew `he`,
-/// Devanagari `hi`, Bengali `bn`, Thai `th`; Han the first Han language of the platform's
-/// preference list, [`preferred_han_language`]), else none, so the OS applies its own cascade
+/// Devanagari `hi`, Bengali `bn`, Thai `th`; Han the app default locale's Han language, else
+/// the first Han language of the platform's preference list, [`default_han_language`]), else
+/// none, so the OS applies its own cascade
 /// (CoreText the user's language preferences, fontconfig's `FcDefaultSubstitute` the process
 /// locale). Without a language CoreText's cascade answers kana from the symbols fallback
 /// instead of Hiragino.
 ///
-/// Pure in `(script, locale)` within one process. The Han preference can change between
+/// Precedence: explicit style locale > script-derived language > the app default locale's Han
+/// language ([`crate::set_default_locale`]; Han only, never kana, Latin or other scripts) > the
+/// platform preference list > none (the OS cascade).
+///
+/// Pure in `(script, locale)` while the app default locale is unchanged. The Han preference can change between
 /// launches, so a Han cache key without a locale carries it (`cache::CacheKey::han_preference`)
 /// and a persisted answer computed under another preference is asked again.
 pub(crate) fn language_for(script: ScriptTag, locale: Option<&str>) -> Option<&str> {
@@ -196,7 +201,7 @@ pub(crate) fn language_for(script: ScriptTag, locale: Option<&str>) -> Option<&s
     match &script.0 {
         b"Hira" | b"Kana" => Some("ja"),
         b"Hang" => Some("ko"),
-        b"Hani" => preferred_han_language(),
+        b"Hani" => default_han_language(),
         b"Arab" => Some("ar"),
         b"Hebr" => Some("he"),
         b"Deva" => Some("hi"),
@@ -204,6 +209,14 @@ pub(crate) fn language_for(script: ScriptTag, locale: Option<&str>) -> Option<&s
         b"Thai" => Some("th"),
         _ => None,
     }
+}
+
+/// The Han language an untagged Han cluster is asked under: the one the app default locale
+/// ([`crate::default_locale`]) names, else [`preferred_han_language`].
+pub(crate) fn default_han_language() -> Option<&'static str> {
+    crate::default_locale()
+        .and_then(|tag| han_language_of(&tag))
+        .or_else(preferred_han_language)
 }
 
 /// The first Han language (`zh-Hans`, `zh-Hant`, `zh-HK`, `ja`, `ko`) among the platform's
@@ -1296,6 +1309,109 @@ mod tests {
         assert_eq!(language_for(tag(b"Hani"), Some("ko")), Some("ko"));
     }
 
+    /// `language_for(Hani, None)` under app default `app` (the platform list stays whatever
+    /// this host has, so the cases below only assert what the app default alone decides).
+    fn han_under(app: Option<&str>) -> Option<&'static str> {
+        crate::set_default_locale(app);
+        default_han_language()
+    }
+
+    #[test]
+    fn the_app_default_locale_decides_untagged_han_before_the_platform_list() {
+        use crate::locale::test_support::DefaultLocale;
+        let _guard = DefaultLocale::set(None);
+        let platform = preferred_han_language();
+        assert_eq!(han_under(None), platform);
+        assert_eq!(han_under(Some("ja")), Some("ja"));
+        assert_eq!(han_under(Some("ja-JP")), Some("ja"));
+        assert_eq!(han_under(Some("ko")), Some("ko"));
+        assert_eq!(han_under(Some("zh-Hant-TW")), Some("zh-Hant"));
+        assert_eq!(han_under(Some("zh-Hans-CN")), Some("zh-Hans"));
+        assert_eq!(han_under(Some("yue")), Some("zh-HK"));
+        // A default that names no Han language falls through to the platform list.
+        assert_eq!(han_under(Some("en")), platform);
+        assert_eq!(han_under(Some("fr-CA")), platform);
+        crate::set_default_locale(Some("ja"));
+        assert_eq!(language_for(ScriptTag(*b"Hani"), None), Some("ja"));
+    }
+
+    #[test]
+    fn the_app_default_never_overrides_an_explicit_locale_or_the_script() {
+        use crate::locale::test_support::DefaultLocale;
+        let _guard = DefaultLocale::set(Some("en"));
+        let tag = |t: &[u8; 4]| ScriptTag(*t);
+        assert_eq!(language_for(tag(b"Hani"), Some("ko")), Some("ko"));
+        assert_eq!(
+            language_for(tag(b"Hira"), None),
+            Some("ja"),
+            "kana stay ja under en"
+        );
+        assert_eq!(language_for(tag(b"Kana"), None), Some("ja"));
+        assert_eq!(language_for(tag(b"Hang"), None), Some("ko"));
+        crate::set_default_locale(Some("zh-Hans"));
+        assert_eq!(
+            language_for(tag(b"Hira"), None),
+            Some("ja"),
+            "kana stay ja under zh"
+        );
+        for none in [b"Latn", b"Grek", b"Cyrl", b"Zyyy"] {
+            assert_eq!(
+                language_for(tag(none), None),
+                None,
+                "no app locale for non-Han"
+            );
+        }
+    }
+
+    #[test]
+    fn han_under_a_japanese_app_default_resolves_to_a_japanese_face() {
+        if !cfg!(target_os = "macos") {
+            println!("skipped: the expected faces are macOS 27's installed fonts");
+            return;
+        }
+        use crate::locale::test_support::DefaultLocale;
+        use crate::style::FontFamily;
+        let _guard = DefaultLocale::set(None);
+        let mut backend = apple::CoreTextBackend::new();
+        let mut face_of = |han: &str| {
+            let mut req = FallbackRequest::new(
+                han,
+                ScriptTag(*b"Hani"),
+                &FontFamily::SystemUi,
+                RenderCapabilities::default(),
+            );
+            req.locale = None;
+            let face = backend.resolve(&req).expect("Han resolves");
+            face.postscript_name.clone().unwrap_or_default()
+        };
+        let japanese = |name: &str| {
+            [
+                ".HiraKaku",
+                "HiraKaku",
+                "Hiragino",
+                ".Hiragino",
+                ".HiraMaru",
+                "HiraMin",
+            ]
+            .iter()
+            .any(|p| name.starts_with(p))
+        };
+        let text = "\u{65e5}\u{672c}\u{8a9e}";
+        crate::set_default_locale(Some("ja"));
+        for han in text.chars().map(String::from) {
+            let name = face_of(&han);
+            println!("app ja: {han} -> {name}");
+            assert!(japanese(&name), "{han}: {name}");
+        }
+        crate::set_default_locale(None);
+        for han in text.chars().map(String::from) {
+            println!(
+                "no default: {han} -> {} (the platform list decides)",
+                face_of(&han)
+            );
+        }
+    }
+
     #[test]
     fn han_language_parsing_compares_whole_subtags() {
         let cases = [
@@ -1345,6 +1461,7 @@ mod tests {
 
     #[test]
     fn han_without_a_locale_follows_the_platform_preference_list() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let languages = preferred_languages();
         let expected = han_language_in(languages.iter().map(String::as_str));
         assert_eq!(preferred_han_language(), expected, "{languages:?}");
