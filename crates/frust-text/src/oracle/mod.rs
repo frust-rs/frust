@@ -32,9 +32,10 @@
 //!
 //! # No FFI here
 //!
-//! frust-text is on CODE_STANDARDS' unsafe-free list, with one sanctioned
-//! zone (decision D-6): the `apple`, `android`, `fontconfig` and `dwrite`
-//! backend files, each opening it with `#![allow(unsafe_code)]`. [`FaceStore`]
+//! frust-text is not an unsafe-free crate: CODE_STANDARDS sanctions one zone,
+//! the `apple`, `android`, `fontconfig` and `dwrite` backend files plus the
+//! reserved `store` file, each opening it with `#![allow(unsafe_code)]`; the
+//! guard tests below keep everything else unsafe-free. [`FaceStore`]
 //! reads font files with `std::fs::read` (no memory mapping);
 //! [`FaceLocation::Blob`] lets a backend hand over an already-built buffer
 //! instead.

@@ -2,8 +2,10 @@
 //!
 //! # Order
 //!
-//! fontique's query order (each named family in chain order, then the
-//! generics, then the OS fallback cascade), with frust's caches in between:
+//! Close to fontique's query order (each named family in chain order, then the
+//! generics, then the OS fallback cascade), with frust's caches in between and
+//! one difference: a substitute the OS cascade produced inside a named-family
+//! request is used before the generic slots are asked.
 //!
 //! 1. **Each named family, in chain order.** A name the app registry holds is
 //!    answered by its app faces only: an app family shadows the system family
@@ -14,7 +16,8 @@
 //!    family and covers the cluster wins. A covering answer from another
 //!    family (the OS cascade substituting inside a family request) is held
 //!    back so later families stay reachable; the first one is used only when
-//!    no named family answers. App answers are never cached.
+//!    no named family answers, and then before step 2. App answers are never
+//!    cached.
 //! 2. **The generic request**: the chain's generic slots alone (`SystemUi`
 //!    when it names none), cached the same way. The backend answers from the
 //!    generic family and its OS cascade, then **its generic defaults** answer,
