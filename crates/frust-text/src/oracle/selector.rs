@@ -2,28 +2,37 @@
 //!
 //! # Order
 //!
-//! The same order fontique's query walks (named families first, then
-//! fallbacks), with frust's caches in between:
+//! fontique's query order (each named family in chain order, then the
+//! generics, then the OS fallback cascade), with frust's caches in between:
 //!
-//! 1. **App faces** named by the request's family chain, in chain order. App
-//!    answers are never cached: the registry is already in memory.
-//! 2. **The fallback cache**, keyed by the *system* request — the request with
-//!    every app-provided family removed, so an app face shadows a same-named
-//!    system family and registering one never serves a stale system answer.
-//!    A cached miss skips straight to step 5.
-//! 3. **The platform backend** for the system request.
-//! 4. **The backend's generic defaults** for the chain's generic slots
-//!    (`SystemUi` when it names none). Steps 3-4 record their outcome in the
-//!    cache, misses included.
-//! 5. **App generic fallbacks** (`register_generic_fallback`), appended after
+//! 1. **Each named family, in chain order.** A name the app registry holds is
+//!    answered by its app faces only: an app family shadows the system family
+//!    of the *same* name, never any other. Any other name is asked of the
+//!    backend with a derived request naming only that family (plus the
+//!    chain's generic slots, the base a backend falls back to), through the
+//!    fallback cache keyed by that request. The first answer that is the asked
+//!    family and covers the cluster wins. A covering answer from another
+//!    family (the OS cascade substituting inside a family request) is held
+//!    back so later families stay reachable; the first one is used only when
+//!    no named family answers. App answers are never cached.
+//! 2. **The generic request**: the chain's generic slots alone (`SystemUi`
+//!    when it names none), cached the same way. The backend answers from the
+//!    generic family and its OS cascade, then **its generic defaults** answer,
+//!    re-synthesised at the request's attributes (a default is built at
+//!    regular weight, so its own coordinates and hint are dropped).
+//! 3. **App generic fallbacks** (`register_generic_fallback`), appended after
 //!    the system's own generic answer exactly as fontique appended them.
 //!
 //! Every candidate must map each of the cluster's characters in its `cmap`
 //! (bar the [`coverage_exempt`] controls a shaper consumes through GSUB) and
 //! carry a glyph format the request's [`RenderCapabilities`] can draw. A
-//! refused face is counted and skipped, never substituted.
+//! refused face is counted and skipped, never substituted. Misses are cached
+//! per key too.
 
-use read_fonts::{FontRef, TableProvider, types::Tag};
+use read_fonts::{
+    FontRef, TableProvider,
+    types::{NameId, Tag},
+};
 
 use super::cache::{CacheKey, CachedAnswer};
 use super::registry::AppFace;
@@ -237,45 +246,132 @@ fn match_distance(attrs: &FaceAttrs, req: &FallbackRequest) -> f32 {
         + (attrs.width - req.width).abs() * 100.0
 }
 
+/// The variation axes a request's attributes decide.
+const STYLE_AXES: [[u8; 4]; 4] = [*b"wght", *b"wdth", *b"ital", *b"slnt"];
+
+/// A generic default re-targeted at the request: `default_family` answers at
+/// regular attributes, so its style coordinates and synthesis hint describe a
+/// regular match and are dropped for [`synthesize`] to recompute (other
+/// coordinates, `opsz` included, are kept).
+fn at_request_attributes(mut source: FaceSource) -> FaceSource {
+    source.synthesis_hint = None;
+    source.variations.retain(|v| !STYLE_AXES.contains(&v.tag));
+    source
+}
+
+/// Whether `face` belongs to family `name`: its PostScript name, or a family,
+/// typographic-family, WWS-family or PostScript `name` record in any language,
+/// equals `name` case-insensitively.
+fn is_family(face: &FaceRef, name: &str) -> bool {
+    let wanted = name.to_lowercase();
+    if face
+        .postscript_name
+        .as_deref()
+        .is_some_and(|ps| ps.to_lowercase() == wanted)
+    {
+        return true;
+    }
+    let Ok(font) = FontRef::from_index(face.blob.data(), face.index) else {
+        return false;
+    };
+    let Ok(table) = font.name() else {
+        return false;
+    };
+    let ids = [
+        NameId::FAMILY_NAME,
+        NameId::TYPOGRAPHIC_FAMILY_NAME,
+        NameId::WWS_FAMILY_NAME,
+        NameId::POSTSCRIPT_NAME,
+    ];
+    table
+        .name_record()
+        .iter()
+        .filter(|record| ids.contains(&record.name_id()))
+        .filter_map(|record| record.string(table.string_data()).ok())
+        .any(|string| string.chars().collect::<String>().to_lowercase() == wanted)
+}
+
+/// The request the backend is asked for one named family: that family, then
+/// the chain's generic slots (the base a backend falls back to when it lacks
+/// the family), so no later named family is in it.
+fn family_request(req: &FallbackRequest, name: &str) -> FallbackRequest {
+    let mut family = req.clone();
+    family.families = std::iter::once(FamilyName::Named(name.to_owned()))
+        .chain(
+            req.families
+                .iter()
+                .filter(|f| matches!(f, FamilyName::Generic(_)))
+                .cloned(),
+        )
+        .collect();
+    family
+}
+
+/// The request for the chain's generic slots alone (`SystemUi` when it names
+/// none): every chain with the same generics shares its cache entry.
+fn generic_request(req: &FallbackRequest) -> FallbackRequest {
+    let mut generic = req.clone();
+    generic.families = req
+        .generics()
+        .into_iter()
+        .map(FamilyName::Generic)
+        .collect();
+    generic
+}
+
+/// A named family's system answer.
+enum FamilyAnswer {
+    /// A face of the asked family.
+    Family(FaceRef),
+    /// A covering face of another family: the OS cascade substituting.
+    Substitute(FaceRef),
+}
+
+/// A backend question, asked on a cache miss.
+type Ask = fn(&mut Oracle, &FallbackRequest) -> Option<(FaceSource, FaceRef)>;
+
 impl Oracle {
     /// Resolves one cluster to a face, or `None` when nothing installed or
     /// registered can draw it. See the module docs for the order.
     pub(crate) fn resolve(&mut self, req: &FallbackRequest) -> Option<FaceRef> {
-        // 1. App faces named by the chain.
-        if let Some(face) = self.resolve_app_named(req) {
-            self.stats.app_hits += 1;
+        // 1. Each named family, in chain order.
+        let names: Vec<String> = req
+            .families
+            .iter()
+            .filter_map(|f| match f {
+                FamilyName::Named(name) => Some(name.clone()),
+                FamilyName::Generic(_) => None,
+            })
+            .collect();
+        let mut substitute = None;
+        for name in &names {
+            if self.registry.has_family(name) {
+                if let Some(face) = self.resolve_app_family(name, req) {
+                    self.stats.app_hits += 1;
+                    return Some(face);
+                }
+                // Shadowed: the system family of this name is never asked.
+                continue;
+            }
+            match self.resolve_system_family(name, req) {
+                Some(FamilyAnswer::Family(face)) => return Some(face),
+                Some(FamilyAnswer::Substitute(face)) => {
+                    substitute.get_or_insert(face);
+                }
+                None => {}
+            }
+        }
+        if substitute.is_some() {
+            return substitute;
+        }
+
+        // 2. The generic request: the backend, then its generic defaults.
+        let generic_req = generic_request(req);
+        if let Some(face) = self.through_cache(&generic_req, Self::ask_generic) {
             return Some(face);
         }
 
-        // 2-4. The system answer, through the cache.
-        let system_req = self.system_request(req);
-        let key = CacheKey::from_request(&system_req);
-        let cached = self.cache.get(&key);
-        let system = match cached {
-            Some(CachedAnswer::Face(source)) => {
-                self.stats.cache_hits += 1;
-                self.load_cached(&source, &system_req)
-            }
-            Some(CachedAnswer::Miss) => {
-                self.stats.cache_hits += 1;
-                None
-            }
-            None => {
-                self.stats.cache_misses += 1;
-                let answer = self.resolve_system(&system_req);
-                let entry = match &answer {
-                    Some((source, _)) => CachedAnswer::Face(source.clone()),
-                    None => CachedAnswer::Miss,
-                };
-                self.cache.insert(key, entry);
-                answer.map(|(_, face)| face)
-            }
-        };
-        if system.is_some() {
-            return system;
-        }
-
-        // 5. App generic fallbacks.
+        // 3. App generic fallbacks.
         for generic in req.generics() {
             if let Some(face) = self.resolve_app_generic(generic, req) {
                 self.stats.generic_hits += 1;
@@ -326,38 +422,57 @@ impl Oracle {
             })
     }
 
-    /// The request with every family the app registry provides removed: what
-    /// the system is asked, and what the cache is keyed by.
-    fn system_request(&self, req: &FallbackRequest) -> FallbackRequest {
-        let mut system = req.clone();
-        system.families.retain(|family| match family {
-            FamilyName::Named(name) => !self.registry.has_family(name),
-            FamilyName::Generic(_) => true,
-        });
-        system
-    }
-
-    /// Step 1: the chain's app families, in order; within a family, faces in
-    /// attribute-distance order.
-    fn resolve_app_named(&mut self, req: &FallbackRequest) -> Option<FaceRef> {
-        for family in &req.families {
-            let FamilyName::Named(name) = family else {
-                continue;
-            };
-            let mut faces: Vec<AppFace> = self.registry.faces_named(name).cloned().collect();
-            faces.sort_by(|a, b| {
-                match_distance(&a.facts.attrs, req).total_cmp(&match_distance(&b.facts.attrs, req))
-            });
-            for face in faces {
-                if let Some(found) = self.accept_app_face(&face, req) {
-                    return Some(found);
-                }
+    /// `req`'s system answer through the fallback cache, keyed by `req`;
+    /// `ask` runs on a miss and its outcome is cached, misses included.
+    fn through_cache(&mut self, req: &FallbackRequest, ask: Ask) -> Option<FaceRef> {
+        let key = CacheKey::from_request(req);
+        match self.cache.get(&key) {
+            Some(CachedAnswer::Face(source)) => {
+                self.stats.cache_hits += 1;
+                self.load_cached(&source, req)
+            }
+            Some(CachedAnswer::Miss) => {
+                self.stats.cache_hits += 1;
+                None
+            }
+            None => {
+                self.stats.cache_misses += 1;
+                let answer = ask(self, req);
+                let entry = match &answer {
+                    Some((source, _)) => CachedAnswer::Face(source.clone()),
+                    None => CachedAnswer::Miss,
+                };
+                self.cache.insert(key, entry);
+                answer.map(|(_, face)| face)
             }
         }
-        None
     }
 
-    /// Step 5 for one generic slot.
+    /// Step 1 for a name the app registry lacks: the backend's answer for that
+    /// family alone, sorted into the family itself or a cascade substitute.
+    fn resolve_system_family(&mut self, name: &str, req: &FallbackRequest) -> Option<FamilyAnswer> {
+        let family_req = family_request(req, name);
+        let face = self.through_cache(&family_req, Self::ask_family)?;
+        Some(if is_family(&face, name) {
+            FamilyAnswer::Family(face)
+        } else {
+            FamilyAnswer::Substitute(face)
+        })
+    }
+
+    /// Step 1 for a name the app registry holds: its faces in
+    /// attribute-distance order.
+    fn resolve_app_family(&mut self, name: &str, req: &FallbackRequest) -> Option<FaceRef> {
+        let mut faces: Vec<AppFace> = self.registry.faces_named(name).cloned().collect();
+        faces.sort_by(|a, b| {
+            match_distance(&a.facts.attrs, req).total_cmp(&match_distance(&b.facts.attrs, req))
+        });
+        faces
+            .iter()
+            .find_map(|face| self.accept_app_face(face, req))
+    }
+
+    /// Step 3 for one generic slot.
     fn resolve_app_generic(
         &mut self,
         generic: GenericSlot,
@@ -390,17 +505,26 @@ impl Oracle {
         })
     }
 
-    /// Steps 3-4: the backend's answer, then its generic defaults. Returns the
-    /// accepted source (for the cache) with the face it resolved to.
-    fn resolve_system(&mut self, req: &FallbackRequest) -> Option<(FaceSource, FaceRef)> {
+    /// A single-family request's backend answer (the accepted source, for the
+    /// cache, with the face it resolved to).
+    fn ask_family(&mut self, req: &FallbackRequest) -> Option<(FaceSource, FaceRef)> {
         self.stats.backend_calls += 1;
-        if let Some(source) = self.backend.resolve(req)
-            && let Some(face) = self.accept(&source, req)
-        {
-            return Some((source, face));
+        let source = self.backend.resolve(req)?;
+        let face = self.accept(&source, req)?;
+        Some((source, face))
+    }
+
+    /// Step 2 on a cache miss: the backend's answer for the generic request,
+    /// then its generic defaults at the request's attributes.
+    fn ask_generic(&mut self, req: &FallbackRequest) -> Option<(FaceSource, FaceRef)> {
+        if let Some(answer) = self.ask_family(req) {
+            return Some(answer);
         }
         for generic in req.generics() {
-            if let Some(source) = self.backend.default_family(generic)
+            if let Some(source) = self
+                .backend
+                .default_family(generic)
+                .map(at_request_attributes)
                 && let Some(face) = self.accept(&source, req)
             {
                 self.stats.generic_hits += 1;
@@ -892,5 +1016,202 @@ mod tests {
         let emoji = oracle.default_face(GenericSlot::Emoji).unwrap();
         assert_eq!(emoji.blob.id(), app.id());
         assert!(oracle.default_face(GenericSlot::Serif).is_none());
+    }
+
+    #[test]
+    fn an_earlier_system_family_beats_a_later_app_family() {
+        let segoe = Blob::from(FaceSpec::new("Segoe UI").chars("a").build());
+        let inter = Blob::from(FaceSpec::new("Inter").chars("a").build());
+        let mut backend = SyntheticBackend::new("b");
+        backend.family("Segoe UI", &segoe, "a");
+        let calls = backend.calls();
+        let mut oracle = oracle_over(backend);
+        oracle.registry_mut().insert_blob(&inter);
+        let chain = FontFamily::stack(["Segoe UI", "Inter"]);
+
+        let face = oracle.resolve(&req("a", b"Latn", &chain)).unwrap();
+        assert_eq!(face.blob.id(), segoe.id(), "chain order, not app-first");
+        assert_eq!(calls.resolves(), 1, "the backend is asked exactly once");
+        assert_eq!(calls.named_families(), [Some("Segoe UI".to_owned())]);
+        assert_eq!(oracle.stats().app_hits, 0);
+    }
+
+    #[test]
+    fn an_earlier_app_family_beats_a_later_system_family() {
+        let segoe = Blob::from(FaceSpec::new("Segoe UI").chars("a").build());
+        let inter = Blob::from(FaceSpec::new("Inter").chars("a").build());
+        let mut backend = SyntheticBackend::new("b");
+        backend.family("Segoe UI", &segoe, "a");
+        let calls = backend.calls();
+        let mut oracle = oracle_over(backend);
+        oracle.registry_mut().insert_blob(&inter);
+        let chain = FontFamily::stack(["Inter", "Segoe UI"]);
+
+        let face = oracle.resolve(&req("a", b"Latn", &chain)).unwrap();
+        assert_eq!(face.blob.id(), inter.id());
+        assert_eq!(calls.resolves(), 0);
+        assert_eq!(oracle.stats().app_hits, 1);
+    }
+
+    #[test]
+    fn a_later_system_family_answers_when_the_first_fails_coverage() {
+        // Scripted to claim "a" although its cmap only has "b".
+        let first = Blob::from(FaceSpec::new("First").chars("b").build());
+        let second = Blob::from(FaceSpec::new("Second").chars("a").build());
+        let mut backend = SyntheticBackend::new("b");
+        backend.family("First", &first, "ab");
+        backend.family("Second", &second, "a");
+        let calls = backend.calls();
+        let mut oracle = oracle_over(backend);
+        let chain = FontFamily::stack(["First", "Second"]);
+
+        let face = oracle.resolve(&req("a", b"Latn", &chain)).unwrap();
+        assert_eq!(
+            face.blob.id(),
+            second.id(),
+            "the second family is reachable"
+        );
+        assert_eq!(
+            calls.named_families(),
+            [Some("First".to_owned()), Some("Second".to_owned())],
+            "one request per family, each naming only its family"
+        );
+        assert_eq!(oracle.stats().uncovered, 1);
+
+        // Both per-family answers are cached under their own keys.
+        let again = oracle.resolve(&req("a", b"Latn", &chain)).unwrap();
+        assert_eq!(again.blob.id(), second.id());
+        assert_eq!(calls.resolves(), 2);
+        assert_eq!(oracle.cache().len(), 2);
+    }
+
+    #[test]
+    fn a_cascade_substitute_does_not_hide_a_later_family() {
+        let second = Blob::from(FaceSpec::new("Second").chars("a").build());
+        let cascade = Blob::from(FaceSpec::new("Cascade").chars("a").build());
+        let mut backend = SyntheticBackend::new("b");
+        backend.family("Second", &second, "a");
+        backend.cover(&cascade, "a");
+        let calls = backend.calls();
+        let mut oracle = oracle_over(backend);
+
+        // "First" is not installed: its request comes back from the cascade.
+        let chain = FontFamily::stack(["First", "Second"]);
+        let face = oracle.resolve(&req("a", b"Latn", &chain)).unwrap();
+        assert_eq!(face.blob.id(), second.id());
+
+        // With no named family answering, the first substitute is the answer,
+        // and the generic request is not needed.
+        let before = calls.resolves();
+        let chain = FontFamily::stack(["First", "Third"]);
+        let face = oracle.resolve(&req("a", b"Latn", &chain)).unwrap();
+        assert_eq!(face.blob.id(), cascade.id());
+        assert_eq!(
+            calls.named_families()[before..],
+            [Some("Third".to_owned())],
+            "\"First\" came from the cache, the generic request was not asked"
+        );
+    }
+
+    #[test]
+    fn app_shadowing_applies_to_the_same_name_only() {
+        let system_brand = Blob::from(FaceSpec::new("Brand").chars("ab").build());
+        let other = Blob::from(FaceSpec::new("Other").chars("b").build());
+        let app_brand = Blob::from(FaceSpec::new("Brand").chars("a").build());
+        let mut backend = SyntheticBackend::new("b");
+        backend.family("Brand", &system_brand, "ab");
+        backend.family("Other", &other, "b");
+        let calls = backend.calls();
+        let mut oracle = oracle_over(backend);
+        oracle.registry_mut().insert_blob(&app_brand);
+        let chain = FontFamily::stack(["Brand", "Other"]);
+
+        let face = oracle.resolve(&req("a", b"Latn", &chain)).unwrap();
+        assert_eq!(face.blob.id(), app_brand.id());
+        let face = oracle.resolve(&req("b", b"Latn", &chain)).unwrap();
+        assert_eq!(
+            face.blob.id(),
+            other.id(),
+            "a different name is still asked"
+        );
+        assert_eq!(
+            calls.named_families(),
+            [Some("Other".to_owned())],
+            "the shadowed system \"Brand\" is never asked"
+        );
+    }
+
+    #[test]
+    fn a_family_request_keeps_the_chain_generics_but_no_other_family() {
+        let mono = Blob::from(FaceSpec::new("Mono").chars("a").build());
+        let mut backend = SyntheticBackend::new("b");
+        backend.cover(&mono, "a");
+        let calls = backend.calls();
+        let mut oracle = oracle_over(backend);
+        let chain = FontFamily::stack_with_generic(["First", "Second"], GenericSlot::Monospace);
+        assert!(oracle.resolve(&req("a", b"Latn", &chain)).is_some());
+        let first = &calls.requests()[0];
+        assert_eq!(
+            first.families,
+            [
+                FamilyName::Named("First".into()),
+                FamilyName::Generic(GenericSlot::Monospace)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_generic_default_is_resynthesised_at_the_requested_attributes() {
+        // A variable default reported at its regular instance (CoreText's
+        // `CTFontCopyVariation` wght=400), plus an optical-size coordinate.
+        let variable = Blob::from(FaceSpec::new("Var UI").chars("a").axes(&[*b"wght"]).build());
+        // A static default with a regular-weight hint (Android matching at 400).
+        let static_serif = Blob::from(FaceSpec::new("Static Serif").chars("a").build());
+        let mut backend = SyntheticBackend::new("b");
+        backend.default_with(
+            GenericSlot::SystemUi,
+            FaceSource {
+                variations: vec![
+                    VariationSetting {
+                        tag: *b"wght",
+                        value: 400.0,
+                    },
+                    VariationSetting {
+                        tag: *b"opsz",
+                        value: 17.0,
+                    },
+                ],
+                ..FaceSource::blob(variable.clone(), 0)
+            },
+        );
+        backend.default_with(
+            GenericSlot::Serif,
+            FaceSource {
+                synthesis_hint: Some(Synthesis::default()),
+                ..FaceSource::blob(static_serif.clone(), 0)
+            },
+        );
+        let mut oracle = oracle_over(backend);
+
+        let mut bold = req("a", b"Latn", &FontFamily::SystemUi);
+        bold.weight = FontWeight::BOLD;
+        for _ in 0..2 {
+            let face = oracle.resolve(&bold).unwrap();
+            assert_eq!(face.blob.id(), variable.id());
+            assert_eq!(
+                face.synthesis.variation(*b"wght"),
+                Some(700.0),
+                "bold coords"
+            );
+            assert_eq!(face.synthesis.variation(*b"opsz"), Some(17.0));
+        }
+
+        let serif = FontFamily::stack_with_generic(Vec::<String>::new(), GenericSlot::Serif);
+        let mut bold = req("a", b"Latn", &serif);
+        bold.weight = FontWeight::BOLD;
+        let face = oracle.resolve(&bold).unwrap();
+        assert_eq!(face.blob.id(), static_serif.id());
+        assert!(face.synthesis.embolden, "faux bold, not the regular hint");
+        assert_eq!(oracle.stats().generic_hits, 2);
     }
 }
