@@ -24,12 +24,13 @@
 //! By the PostScript name the run's handle carries
 //! ([`FontHandle::postscript_name`](frust_scene::FontHandle::postscript_name)):
 //! the text tier's font oracle already resolved which face a run draws with,
-//! so this module does not re-derive the name from the blob. The two routes that would open the bytes
-//! themselves do not work for the face this exists for:
-//! `CTFontManagerCreateFontDescriptorsFromData` returns no descriptor at all
-//! for `PingFangUI.ttc`, and the file-URL route expands named instances, so its
-//! indices are not the collection's. A handle with no name cannot be opened, and
-//! neither can one whose name CoreText does not honour: its glyphs are counted in
+//! so this module does not re-derive the name from the blob. The two routes
+//! that would open the bytes themselves do not work for the face this exists
+//! for: `CTFontManagerCreateFontDescriptorsFromData` returns no descriptor at
+//! all for `PingFangUI.ttc`, and the file-URL route expands named instances, so
+//! its indices are not the collection's. A handle with no name cannot be
+//! opened, and neither can one whose name CoreText does not honour: its glyphs
+//! are counted in
 //! [`CompiledFrame::skipped_glyphs`](crate::compile::CompiledFrame::skipped_glyphs),
 //! as are all of them on a target without CoreText.
 //!
@@ -43,6 +44,11 @@
 //! ([`HvglOutlines::identity_mismatches`]). A nameless handle is refused the
 //! same way ([`HvglOutlines::nameless_faces`]). A hidden handle therefore
 //! draws only when CoreText honours its name.
+//!
+//! Refusals are remembered apart from the open faces, in a set of at most
+//! `MAX_REFUSED_FACES` (oldest out), so no refusal evicts a live face. One
+//! warning and one count go to each face while the set holds it; a refused
+//! face that has aged out of the set is counted again if a run asks for it.
 //!
 //! # Variation instances
 //!
@@ -68,7 +74,7 @@
 //! another's. A glyph CoreText cannot supply is remembered as missing too, so a
 //! refusal is paid for once.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use frust_scene::{FontHandle, GlyphRun};
 use glifo::DrawSink as _;
@@ -113,6 +119,10 @@ pub(crate) const MAX_CACHED_OUTLINES: usize = 1024;
 /// How many faces stay open in CoreText at once. A frame draws a handful of
 /// fallback faces; one evicted is simply opened again by name.
 const MAX_OPEN_FACES: usize = 16;
+
+/// How many refused faces are remembered at once, oldest out. Kept apart from
+/// the open faces, so no refusal evicts a live one.
+const MAX_REFUSED_FACES: usize = 256;
 
 /// How many variation instances of one face stay open at once. A screen uses
 /// a few weights of a family (regular, medium, semibold); one evicted is
@@ -278,7 +288,8 @@ impl Default for HvglOutlines {
 impl core::fmt::Debug for HvglOutlines {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("HvglOutlines")
-            .field("faces", &self.faces.faces.len())
+            .field("open_faces", &self.faces.open.len())
+            .field("refused_faces", &self.faces.refused.len())
             .field("outlines", &self.outlines.entries.len())
             .field("capacity", &self.outlines.capacity)
             .finish()
@@ -605,14 +616,6 @@ fn avar_maps(data: &[u8], directory: usize) -> Option<Vec<Vec<(f64, f64)>>> {
     Some(maps)
 }
 
-/// A face the provider has looked at: open, or refused for good.
-enum FaceSlot {
-    /// Opened in CoreText.
-    Open(Face),
-    /// Refused; its glyphs are counted as skipped.
-    Refused,
-}
-
 /// What identifies one face the table has looked at: the PostScript name
 /// CoreText is asked for, plus the blob and collection index the glyph ids
 /// were shaped against. Two handles sharing a name but not a blob are two faces.
@@ -627,6 +630,8 @@ struct FaceKey {
 }
 
 impl FaceKey {
+    /// The key for `handle`, owning a copy of its name. Built only when a face
+    /// is first stored, never on a lookup.
     fn of(handle: &FontHandle) -> Self {
         let font = handle.font();
         Self {
@@ -634,6 +639,15 @@ impl FaceKey {
             blob: font.data.id(),
             index: font.index,
         }
+    }
+
+    /// Whether this key names `handle`'s face, compared in place without
+    /// allocating.
+    fn matches(&self, handle: &FontHandle) -> bool {
+        let font = handle.font();
+        self.blob == font.data.id()
+            && self.index == font.index
+            && self.name.as_deref() == handle.postscript_name()
     }
 }
 
@@ -650,11 +664,15 @@ fn truncated(name: &str) -> &str {
 /// The longest name a log line carries.
 const LOGGED_NAME_BYTES: usize = 63;
 
-/// The faces looked at most recently, keyed by name, blob and index.
+/// The faces looked at most recently. Open faces and refusals are kept apart:
+/// the open faces are an LRU bounded by `MAX_OPEN_FACES`, the refusals a
+/// bounded set of their own, so churn among refusals never evicts a live face.
 #[derive(Default)]
 struct FaceTable {
-    /// `(key, slot, last use)` per face.
-    faces: Vec<(FaceKey, FaceSlot, u64)>,
+    /// `(key, face, last use)` per open face.
+    open: Vec<(FaceKey, Face, u64)>,
+    /// The keys of refused faces, oldest first, at most `MAX_REFUSED_FACES`.
+    refused: VecDeque<FaceKey>,
     /// A use counter, for the least-recently-used replacement.
     uses: u64,
     /// The next face id.
@@ -669,45 +687,56 @@ struct FaceTable {
 impl FaceTable {
     /// `handle`'s face open in CoreText, opening it on first sight, or `None`
     /// when the face was refused (no name, a name CoreText does not honour
-    /// exactly, or one it could not open). A refusal is cached like a face.
+    /// exactly, or one it could not open). A refusal is remembered until it
+    /// ages out of the refused set.
+    ///
+    /// A lookup allocates nothing: keys are compared in place.
     fn open(&mut self, handle: &FontHandle) -> Option<&mut Face> {
         self.uses = self.uses.wrapping_add(1);
-        let key = FaceKey::of(handle);
-        let position = match self.faces.iter().position(|(face, ..)| *face == key) {
-            Some(position) => position,
-            None => {
-                if self.faces.len() >= MAX_OPEN_FACES
-                    && let Some(oldest) = self
-                        .faces
-                        .iter()
-                        .enumerate()
-                        .min_by_key(|(_, (.., used))| *used)
-                        .map(|(position, _)| position)
-                {
-                    self.faces.swap_remove(oldest);
-                }
-                self.next_id = self.next_id.wrapping_add(1);
-                let slot = self.open_face(handle);
-                self.faces.push((key, slot, 0));
-                self.faces.len().checked_sub(1)?
-            }
-        };
-        let entry = self.faces.get_mut(position)?;
-        entry.2 = self.uses;
-        match &mut entry.1 {
-            FaceSlot::Open(face) => Some(face),
-            FaceSlot::Refused => None,
+        if let Some(position) = self.open.iter().position(|(key, ..)| key.matches(handle)) {
+            let entry = self.open.get_mut(position)?;
+            entry.2 = self.uses;
+            return Some(&mut entry.1);
         }
+        if self.refused.iter().any(|key| key.matches(handle)) {
+            return None;
+        }
+        self.next_id = self.next_id.wrapping_add(1);
+        let Some(face) = self.open_face(handle) else {
+            self.refuse(FaceKey::of(handle));
+            return None;
+        };
+        if self.open.len() >= MAX_OPEN_FACES
+            && let Some(oldest) = self
+                .open
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, (.., used))| *used)
+                .map(|(position, _)| position)
+        {
+            self.open.swap_remove(oldest);
+        }
+        self.open.push((FaceKey::of(handle), face, self.uses));
+        Some(&mut self.open.last_mut()?.1)
     }
 
-    /// `handle`'s face opened in CoreText, or refused with one warning.
+    /// Remembers `key` as refused, dropping the oldest refusal when the set is
+    /// full.
+    fn refuse(&mut self, key: FaceKey) {
+        if self.refused.len() >= MAX_REFUSED_FACES {
+            self.refused.pop_front();
+        }
+        self.refused.push_back(key);
+    }
+
+    /// `handle`'s face opened in CoreText, or `None` with one warning.
     ///
     /// The glyph ids of a run are indices into the face the shaper chose, so
     /// they may only be drawn from that face: the face CoreText hands back
     /// must carry exactly the PostScript name asked for. A substitute (a
     /// hidden, dot-prefixed face CoreText cannot resolve by name comes back as
     /// another font) is a counted refusal, never drawn.
-    fn open_face(&mut self, handle: &FontHandle) -> FaceSlot {
+    fn open_face(&mut self, handle: &FontHandle) -> Option<Face> {
         let Some(name) = handle.postscript_name() else {
             self.nameless = self.nameless.saturating_add(1);
             log::warn!(
@@ -715,7 +744,7 @@ impl FaceTable {
                  as skipped",
                 handle.font().index,
             );
-            return FaceSlot::Refused;
+            return None;
         };
         let shown = truncated(name);
         match try_open_face(handle.font(), name, self.next_id) {
@@ -727,32 +756,31 @@ impl FaceTable {
                     handle.is_hidden(),
                     truncated(&resolved),
                 );
-                FaceSlot::Refused
+                None
             }
-            Ok((face, _)) => FaceSlot::Open(face),
+            Ok((face, _)) => Some(face),
             Err(reason) => {
                 log::warn!(
-                    "frust-engine: hvgl face {shown:?} refused ({}); its glyphs are counted \
-                     as skipped",
-                    truncated(&reason),
+                    "frust-engine: hvgl face {shown:?} refused ({reason}); its glyphs are \
+                     counted as skipped",
                 );
-                FaceSlot::Refused
+                None
             }
         }
     }
 }
 
 /// `name`'s face opened in CoreText over `font`'s metrics and axes, with the
-/// PostScript name CoreText resolved it to.
-fn try_open_face(font: &FontData, name: &str, id: u64) -> Result<(Face, String), String> {
+/// PostScript name CoreText resolved it to. The error names no face: the caller
+/// logs the name once, escaped and truncated.
+fn try_open_face(font: &FontData, name: &str, id: u64) -> Result<(Face, String), &'static str> {
     let data = font.data.data();
     let directory = table_directory(data, font.index).ok_or("no table directory")?;
     let units_per_em = head_units_per_em(data, directory)
         .filter(|units| *units > 0)
         .map(f64::from)
         .ok_or("no usable unitsPerEm")?;
-    let (ct, resolved) = platform::CtFace::open(name, units_per_em)
-        .ok_or_else(|| format!("'{name}': {}", platform::UNAVAILABLE))?;
+    let (ct, resolved) = platform::CtFace::open(name, units_per_em).ok_or(platform::UNAVAILABLE)?;
     Ok((
         Face {
             id,
@@ -1096,8 +1124,8 @@ mod tests {
                 GlyphOutline::Unavailable
             ));
         }
-        assert_eq!(outlines.faces.faces.len(), 1);
-        assert!(matches!(outlines.faces.faces[0].1, FaceSlot::Refused));
+        assert!(outlines.faces.open.is_empty());
+        assert_eq!(outlines.faces.refused.len(), 1);
         assert_eq!(outlines.nameless_faces(), 1);
         assert_eq!(outlines.identity_mismatches(), 0);
     }
@@ -1111,7 +1139,7 @@ mod tests {
         outlines.outline(&one, 1);
         outlines.outline(&two, 1);
         outlines.outline(&one, 1);
-        assert_eq!(outlines.faces.faces.len(), 2);
+        assert_eq!(outlines.faces.refused.len(), 2);
     }
 
     #[test]
@@ -1133,7 +1161,81 @@ mod tests {
                 GlyphOutline::Unavailable
             ));
         }
-        assert_eq!(outlines.faces.faces.len(), 1);
+        assert_eq!(outlines.faces.refused.len(), 1);
+    }
+
+    /// Refusals sit outside the open-face LRU and are bounded: each refused
+    /// face is counted once while the set remembers it, and the set never
+    /// grows past its cap.
+    #[test]
+    fn refusals_are_remembered_outside_the_open_faces_and_bounded() {
+        let refused_face = || {
+            handle(
+                sfnt(&[(*b"head", head(1000)), (HVGL_TAG, vec![0; 8])]),
+                None,
+            )
+        };
+        let faces: Vec<FontHandle> = (0..MAX_REFUSED_FACES + 8).map(|_| refused_face()).collect();
+        let mut outlines = HvglOutlines::default();
+        for face in &faces[..MAX_REFUSED_FACES] {
+            outlines.outline(face, 1);
+        }
+        let remembered = u32::try_from(MAX_REFUSED_FACES).expect("small");
+        assert_eq!(outlines.nameless_faces(), remembered);
+        for face in &faces[..MAX_REFUSED_FACES] {
+            outlines.outline(face, 1);
+        }
+        assert_eq!(
+            outlines.nameless_faces(),
+            remembered,
+            "asked again, counted again"
+        );
+        assert_eq!(outlines.faces.refused.len(), MAX_REFUSED_FACES);
+        assert!(outlines.faces.open.is_empty());
+        for face in &faces[MAX_REFUSED_FACES..] {
+            outlines.outline(face, 1);
+        }
+        assert_eq!(outlines.faces.refused.len(), MAX_REFUSED_FACES);
+        assert_eq!(
+            outlines.nameless_faces(),
+            u32::try_from(faces.len()).expect("small"),
+            "each face past the cap is one new refusal"
+        );
+    }
+
+    /// An open face survives a churn of refusals: the refusals never evict it,
+    /// so it is not opened again and the counters do not move for it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_churn_of_refusals_never_evicts_an_open_face() {
+        let Some(font) = system_pingfang_sc() else {
+            println!("skipped: PingFangUI.ttc is not installed");
+            return;
+        };
+        let live = FontHandle::new(font).with_identity(Some(Arc::from("PingFangSC-Medium")), false);
+        let mut outlines = HvglOutlines::default();
+        assert!(matches!(
+            outlines.outline(&live, 289),
+            GlyphOutline::Path { .. }
+        ));
+        let live_id = outlines.faces.open[0].1.id;
+        for _ in 0..MAX_REFUSED_FACES + MAX_OPEN_FACES {
+            let refused = handle(
+                sfnt(&[(*b"head", head(1000)), (HVGL_TAG, vec![0; 8])]),
+                None,
+            );
+            outlines.outline(&refused, 1);
+        }
+        assert!(matches!(
+            outlines.outline(&live, 289),
+            GlyphOutline::Path { .. }
+        ));
+        assert_eq!(outlines.faces.open.len(), 1, "the live face is still open");
+        assert_eq!(
+            outlines.faces.open[0].1.id, live_id,
+            "and was not opened again"
+        );
+        assert_eq!(outlines.identity_mismatches(), 0);
     }
 
     #[test]

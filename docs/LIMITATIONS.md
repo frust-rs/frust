@@ -8507,7 +8507,9 @@ invalidates that layout. Startup is unaffected (the locale is set before the fir
 **Observed**: the engine opens `hvgl`-only faces (Apple's PingFang) by the PostScript name the font oracle
 resolved. Fonts registered through `TextContext::register_fonts` carry no oracle identity yet, so a
 registered `hvgl`-only face cannot be opened: its glyphs are skipped and counted in
-`CompiledFrame::skipped_glyphs`. Ordinary registered `glyf`/`CFF` faces are unaffected.
+`CompiledFrame::skipped_glyphs`. Ordinary registered `glyf`/`CFF` faces are unaffected. The font oracle's
+own fall-through is a miss, not a substitute: a hidden `hvgl`-only face whose public re-ask fails is passed
+over by the selector (logged at warn once per script and language), never drawn in its place.
 
 **Applies to**: apps registering an `hvgl`-only Apple system face. A filed follow-up gives registered
 faces an identity.

@@ -25,6 +25,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::hash_map::Entry;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -601,6 +602,9 @@ struct State {
     bases: HashMap<BaseKey, Option<Font>>,
     files: HashMap<PathBuf, Option<Vec<FileFace>>>,
     names: HashMap<String, Option<Mapped>>,
+    /// The (script, language) pairs whose hidden hvgl-only answer had no public
+    /// re-ask: each is logged once at warn, repeats at debug.
+    unreasked_scripts: HashSet<([u8; 4], Option<String>)>,
 }
 
 impl State {
@@ -747,10 +751,21 @@ impl State {
                     reasked_from: Some(first.postscript_name()),
                 });
             }
-            log::debug!(
-                "frust-text: hidden hvgl-only face {:?} has no public re-ask; a miss",
-                first.postscript_name(),
-            );
+            let first_for_script = self
+                .unreasked_scripts
+                .insert((req.script.0, language.map(str::to_owned)));
+            if first_for_script {
+                log::warn!(
+                    "frust-text: hidden hvgl-only face {:?} has no public re-ask; a miss, not a \
+                     substitute (logged once per script and language)",
+                    first.postscript_name(),
+                );
+            } else {
+                log::debug!(
+                    "frust-text: hidden hvgl-only face {:?} has no public re-ask; a miss",
+                    first.postscript_name(),
+                );
+            }
             return None;
         }
         Some(Resolution {
