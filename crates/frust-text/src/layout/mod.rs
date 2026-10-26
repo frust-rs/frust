@@ -236,12 +236,14 @@ pub(crate) fn lay_out(
         cap.map(|c| c.max_lines),
         paragraph.overflow_wrap,
     );
-    let mut ellipsized = None;
+    // The ellipsized line's index and its kept text's exclusive end cluster.
+    let mut ellipsized: Option<(usize, u32)> = None;
     if let (Some(cap), Some(last)) = (cap, broken.last_mut()) {
         last.reason = BreakReason::None;
         if cap.ellipsize && paragraph.ellipsis.is_some() {
-            truncate::ellipsize(shaped, last, max_width, paragraph.ellipsis_advance());
-            ellipsized = Some(broken.len() - 1);
+            let end_cluster =
+                truncate::ellipsize(shaped, last, max_width, paragraph.ellipsis_advance());
+            ellipsized = Some((broken.len() - 1, end_cluster));
         }
     }
 
@@ -250,9 +252,10 @@ pub(crate) fn lay_out(
     let mut previous: Option<LineMetrics> = None;
     for (index, line) in broken.iter().enumerate() {
         let start = table.items.len();
-        push_text_items(shaped, line, &mut table.items);
+        let cut = ellipsized.and_then(|(i, end)| (i == index).then_some(end));
+        push_text_items(shaped, line, cut, &mut table.items);
         let mut advance = line.advance;
-        if ellipsized == Some(index)
+        if cut.is_some()
             && let Some(ellipsis) = paragraph.ellipsis
         {
             for (run_index, run) in ellipsis.shaped.runs.iter().enumerate() {
@@ -279,7 +282,7 @@ pub(crate) fn lay_out(
         previous = Some(metrics);
         table.lines.push(Line {
             atoms: line.atoms.clone(),
-            text: text_range(shaped, line),
+            text: text_range(shaped, line, cut),
             items: start..table.items.len(),
             reason: line.reason,
             num_spaces: line.num_spaces,
@@ -305,7 +308,8 @@ pub(crate) fn lay_out(
 }
 
 /// Appends `line`'s text items in logical order: one per run its atoms touch.
-fn push_text_items(shaped: &Shaped, line: &BrokenLine, out: &mut Vec<LineItem>) {
+/// A `cut` ends the line's last item at that cluster, inside its last atom.
+fn push_text_items(shaped: &Shaped, line: &BrokenLine, cut: Option<u32>, out: &mut Vec<LineItem>) {
     let mut a = line.atoms.start;
     while a < line.atoms.end {
         let run_index = shaped
@@ -318,10 +322,16 @@ fn push_text_items(shaped: &Shaped, line: &BrokenLine, out: &mut Vec<LineItem>) 
         let end = line.atoms.end.min(run.atoms.end as usize).max(a + 1);
         let first = &shaped.atoms[a];
         let last = &shaped.atoms[end - 1];
+        let mut last_cluster = last.clusters.end;
+        if end == line.atoms.end
+            && let Some(cut) = cut
+        {
+            last_cluster = last_cluster.min(cut);
+        }
         out.push(LineItem {
             source: Source::Text,
             run: run_index,
-            clusters: first.clusters.start as usize..last.clusters.end as usize,
+            clusters: first.clusters.start as usize..last_cluster as usize,
             bidi_level: run.bidi_level,
         });
         a = end;
@@ -329,7 +339,7 @@ fn push_text_items(shaped: &Shaped, line: &BrokenLine, out: &mut Vec<LineItem>) 
 }
 
 /// `line`'s source byte range.
-fn text_range(shaped: &Shaped, line: &BrokenLine) -> Range<usize> {
+fn text_range(shaped: &Shaped, line: &BrokenLine, cut: Option<u32>) -> Range<usize> {
     let byte_of = |char_index: u32| {
         shaped
             .chars
@@ -344,7 +354,10 @@ fn text_range(shaped: &Shaped, line: &BrokenLine) -> Range<usize> {
             .and_then(|i| shaped.atoms.get(i)),
     ) {
         (Some(first), Some(last)) if !line.atoms.is_empty() => {
-            byte_of(first.chars.start)..byte_of(last.chars.end)
+            let end = cut
+                .and_then(|c| shaped.clusters.get((c as usize).checked_sub(1)?))
+                .map_or(last.chars.end, |c| c.chars.end.min(last.chars.end));
+            byte_of(first.chars.start)..byte_of(end)
         }
         (Some(first), _) => {
             let at = byte_of(first.chars.start);
