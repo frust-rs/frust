@@ -1,23 +1,29 @@
 //! A bounded, width-independent shape cache for laid-out text.
 //!
 //! Adapts SkParagraph's separation of **shaping** (font matching + glyph
-//! selection, width-independent) from **line-breaking** (width-dependent) to
-//! parley 0.11. A cached [`parley::Layout`] retains its shaped runs; a width
-//! change re-runs [`parley::Layout::break_all_lines`] (line-breaking only) on
-//! that cached layout rather than re-shaping from scratch.
+//! selection, width-independent) from **line-breaking** (width-dependent).
+//! One LRU machinery ([`ShapeCache`]) serves two value types:
 //!
-//! The cache is a bounded LRU (Flutter's SkParagraph precedent: 128 entries)
+//! - [`LaidOut`], what [`crate::TextContext::layout`] caches: the shaping
+//!   driver's [`Shaped`] paragraph plus the line table it was last broken
+//!   into. A width change re-runs the line layout (break, metrics, align) on
+//!   the cached [`Shaped`] — never re-shaping — and keeps the new table.
+//! - the driver's bare [`Shaped`] (`crate::context::shape`): width-free by
+//!   construction, so a hit is the whole answer and analysis/shaping are
+//!   skipped.
+//!
+//! Each cache is a bounded LRU (Flutter's SkParagraph precedent: 128 entries)
 //! with generation-based (`last_used` tick) eviction — no unbounded growth.
-//! No `parley` type appears in this module's public API (scene-layer purity);
-//! only [`ShapeCacheStats`] (plain counters) is exported.
+//! No shaping-engine type appears in this module's public API (scene-layer
+//! purity); only [`ShapeCacheStats`] (plain counters) is exported.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use peniko::Brush;
-
+use crate::context::shape::Shaped;
+use crate::layout::{LineTable, Paragraph, TextLayout, lay_out};
 use crate::style::{
     FamilyName, FontFamily, FontStyle, GenericSlot, LineHeight, TextAlign, TextStyle,
-    to_parley_align,
 };
 
 /// Default cache capacity, mirroring Flutter's SkParagraph LRU paragraph cache
@@ -31,7 +37,8 @@ pub(crate) const DEFAULT_CAPACITY: usize = 128;
 /// [`crate::TextContext::shape_cache_stats`].
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct ShapeCacheStats {
-    /// Full shaping passes performed (a cache miss — parley `build`).
+    /// Full shaping passes performed (a cache miss: the shaping driver's
+    /// analysis + shaping).
     pub shapes: u64,
     /// Line-break-only relayouts on an already-shaped cached entry (a width
     /// change with the shaping reused).
@@ -52,18 +59,20 @@ pub struct ShapeCacheStats {
 /// are never `NaN`, so bitwise keying is exact.
 ///
 /// `align` is part of the key even though alignment is applied *after*
-/// shaping (during line-breaking, not shaping) — parley bakes the aligned
-/// line positions into the cached [`parley::Layout`] itself
-/// ([`ShapeCache::get`] mutates the cached layout in place), so two texts
-/// differing only in alignment must not collide on the same cache entry: a
-/// collision would make the second text's request silently reuse and repaint
-/// the first text's aligned line positions.
+/// shaping (during line layout, not shaping) — the cached [`LaidOut`] keeps
+/// its aligned line table ([`LayoutCache::get`] replaces it in place on a
+/// width change), so two texts differing only in alignment must not collide
+/// on the same cache entry: a collision would make the second text's request
+/// silently reuse and repaint the first text's aligned line positions.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub(crate) struct ShapeKey {
     text: String,
     family: FamilyBits,
     weight: u32,
     slant: SlantBits,
+    width: u32,
+    variations: Vec<([u8; 4], u32)>,
+    locale: Option<String>,
     size: u32,
     color: [u32; 4],
     letter_spacing: u32,
@@ -80,6 +89,13 @@ impl ShapeKey {
             family: FamilyBits::from(&style.family),
             weight: style.weight.value().to_bits(),
             slant: SlantBits::from(style.style),
+            width: style.width.to_bits(),
+            variations: style
+                .variations
+                .iter()
+                .map(|&(tag, value)| (tag, value.to_bits()))
+                .collect(),
+            locale: style.locale.clone(),
             size: style.size.to_bits(),
             color: style.color.components.map(f32::to_bits),
             letter_spacing: style.letter_spacing.to_bits(),
@@ -160,26 +176,75 @@ impl From<LineHeight> for LineHeightBits {
     }
 }
 
-/// One cached shaped layout plus the width it was last line-broken at.
-struct Entry {
-    /// The shaped, line-broken, aligned parley layout.
-    layout: parley::Layout<Brush>,
-    /// The `max_width` `layout` is currently broken at — a differing request
-    /// re-breaks (line-breaking only).
+/// The layout path's cached value: a shaped paragraph, its styles, and the
+/// line table it was last broken into, at `broken_width`.
+pub(crate) struct LaidOut {
+    text: Arc<str>,
+    shaped: Arc<Shaped>,
+    styles: Arc<[TextStyle]>,
+    lines: Arc<LineTable>,
+    /// The `max_width` `lines` was broken at — a differing request re-breaks
+    /// (line layout only).
     broken_width: Option<f32>,
+}
+
+impl LaidOut {
+    /// Lays `shaped` (`text` in `style`) out at `max_width`.
+    pub(crate) fn new(
+        text: &str,
+        shaped: Arc<Shaped>,
+        style: &TextStyle,
+        max_width: Option<f32>,
+    ) -> Self {
+        let styles: Arc<[TextStyle]> = Arc::from([style.clone()]);
+        let lines = Arc::new(lay_out(
+            &Paragraph::new(&shaped, &styles, None),
+            max_width,
+            None,
+        ));
+        Self {
+            text: Arc::from(text),
+            shaped,
+            styles,
+            lines,
+            broken_width: max_width,
+        }
+    }
+
+    /// A [`TextLayout`] sharing this value's shaping and line table.
+    pub(crate) fn layout(&self) -> TextLayout {
+        TextLayout::new(
+            Arc::clone(&self.text),
+            Arc::clone(&self.shaped),
+            Arc::clone(&self.styles),
+            self.broken_width,
+            Arc::clone(&self.lines),
+        )
+    }
+}
+
+/// One cached value and its LRU stamp.
+struct Entry<V> {
+    value: V,
     /// Monotonic access tick for LRU eviction (higher = more recently used).
     last_used: u64,
 }
 
-/// A bounded LRU cache of shaped layouts, keyed width-independently.
-pub(crate) struct ShapeCache {
-    entries: HashMap<ShapeKey, Entry>,
+/// A bounded LRU cache of shaping results, keyed width-independently.
+pub(crate) struct ShapeCache<V> {
+    entries: HashMap<ShapeKey, Entry<V>>,
     capacity: usize,
     tick: u64,
     stats: ShapeCacheStats,
 }
 
-impl ShapeCache {
+/// The layout path's cache.
+pub(crate) type LayoutCache = ShapeCache<LaidOut>;
+
+/// The shaping driver's cache: one shared [`Shaped`] per (text, style).
+pub(crate) type ShapedCache = ShapeCache<Arc<Shaped>>;
+
+impl<V> ShapeCache<V> {
     pub(crate) fn new(capacity: usize) -> Self {
         Self {
             entries: HashMap::new(),
@@ -189,51 +254,18 @@ impl ShapeCache {
         }
     }
 
-    /// Looks up a cached shaped layout for `key`, re-breaking it to `max_width`
-    /// (line-breaking only, no re-shaping) when the cached break width differs.
-    ///
-    /// Returns a clone of the laid-out layout on a hit, or `None` on a miss (the
-    /// caller must shape, then [`insert`](Self::insert)). Records the hit /
-    /// line-break in [`ShapeCacheStats`] and refreshes the entry's LRU tick.
-    pub(crate) fn get(
-        &mut self,
-        key: &ShapeKey,
-        max_width: Option<f32>,
-    ) -> Option<parley::Layout<Brush>> {
+    /// The entry for `key`, its LRU tick refreshed; records nothing.
+    fn touch(&mut self, key: &ShapeKey) -> Option<&mut V> {
         self.tick += 1;
         let tick = self.tick;
-        // Disjoint field borrows: `entry` borrows `self.entries`, the stat
-        // bumps touch `self.stats` — the borrow checker allows this within one
-        // fn body (no method call re-borrows all of `self`).
         let entry = self.entries.get_mut(key)?;
         entry.last_used = tick;
-        if !same_width(entry.broken_width, max_width) {
-            entry.layout.break_all_lines(max_width);
-            // `key.align` (not a hardcoded `Start`): this is the width-change
-            // re-break path context.rs's initial shape+break call doesn't
-            // reach, so it must independently re-apply the same alignment or
-            // a resized layout silently reverts to `Start` — see `ShapeKey`'s
-            // docs.
-            entry.layout.align(
-                to_parley_align(key.align),
-                parley::layout::AlignmentOptions::default(),
-            );
-            entry.broken_width = max_width;
-            self.stats.line_breaks += 1;
-        } else {
-            self.stats.hits += 1;
-        }
-        Some(entry.layout.clone())
+        Some(&mut entry.value)
     }
 
-    /// Inserts a freshly shaped (and broken/aligned) layout, evicting the
-    /// least-recently-used entry first when at capacity. Records the shape.
-    pub(crate) fn insert(
-        &mut self,
-        key: ShapeKey,
-        layout: parley::Layout<Brush>,
-        broken_width: Option<f32>,
-    ) {
+    /// Stores a freshly shaped value, evicting the least-recently-used entry
+    /// first when at capacity. Records the shape.
+    fn store(&mut self, key: ShapeKey, value: V) {
         self.stats.shapes += 1;
         self.tick += 1;
         if self.entries.len() >= self.capacity
@@ -250,8 +282,7 @@ impl ShapeCache {
         self.entries.insert(
             key,
             Entry {
-                layout,
-                broken_width,
+                value,
                 last_used: self.tick,
             },
         );
@@ -260,6 +291,62 @@ impl ShapeCache {
     /// The current instrumentation counters.
     pub(crate) fn stats(&self) -> ShapeCacheStats {
         self.stats
+    }
+}
+
+impl LayoutCache {
+    /// Looks up a cached layout for `key`, re-running the line layout on its
+    /// cached [`Shaped`] at `max_width` (no re-shaping) when the cached break
+    /// width differs.
+    ///
+    /// Returns the layout on a hit, or `None` on a miss (the caller must
+    /// shape, then [`insert`](Self::insert)). Records the hit / line-break in
+    /// [`ShapeCacheStats`] and refreshes the entry's LRU tick.
+    pub(crate) fn get(&mut self, key: &ShapeKey, max_width: Option<f32>) -> Option<TextLayout> {
+        let entry = self.touch(key)?;
+        let rebroken = !same_width(entry.broken_width, max_width);
+        if rebroken {
+            // The cached styles carry `key.align`, so the re-broken table is
+            // aligned exactly as the initial layout was — see `ShapeKey`.
+            let paragraph = Paragraph::new(&entry.shaped, &entry.styles, None);
+            entry.lines = Arc::new(lay_out(&paragraph, max_width, None));
+            entry.broken_width = max_width;
+        }
+        let layout = entry.layout();
+        if rebroken {
+            self.stats.line_breaks += 1;
+        } else {
+            self.stats.hits += 1;
+        }
+        Some(layout)
+    }
+
+    /// Inserts a freshly shaped (and laid out) value, evicting the
+    /// least-recently-used entry first when at capacity. Records the shape.
+    pub(crate) fn insert(&mut self, key: ShapeKey, value: LaidOut) {
+        self.store(key, value);
+    }
+}
+
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the line layout over `Shaped` is the driver's first production caller"
+    )
+)]
+impl ShapedCache {
+    /// The cached [`Shaped`] for `key`, recording a hit; `None` on a miss
+    /// (the caller shapes, then [`insert_shaped`](Self::insert_shaped)).
+    pub(crate) fn get_shaped(&mut self, key: &ShapeKey) -> Option<Arc<Shaped>> {
+        let shaped = Arc::clone(self.touch(key)?);
+        self.stats.hits += 1;
+        Some(shaped)
+    }
+
+    /// Inserts a freshly shaped [`Shaped`], recording the shape.
+    pub(crate) fn insert_shaped(&mut self, key: ShapeKey, shaped: Arc<Shaped>) {
+        self.store(key, shaped);
     }
 }
 
@@ -311,6 +398,34 @@ mod tests {
             },
         );
         assert_ne!(start, center);
+    }
+
+    #[test]
+    fn key_distinguishes_width_variations_and_locale() {
+        let base = TextStyle::new(16.0, Color::BLACK);
+        let plain = ShapeKey::new("hello", &base);
+        for varied in [
+            base.clone().with_width(0.875),
+            base.clone().with_variation(*b"wght", 600.0),
+            base.clone().with_locale(Some("ja")),
+        ] {
+            assert_ne!(plain, ShapeKey::new("hello", &varied), "{varied:?}");
+        }
+    }
+
+    #[test]
+    fn the_shaped_cache_counts_hits_shapes_and_evictions() {
+        let mut cache = ShapedCache::new(2);
+        let shaped = Arc::new(Shaped::default());
+        assert!(cache.get_shaped(&key("a", 16.0)).is_none());
+        cache.insert_shaped(key("a", 16.0), Arc::clone(&shaped));
+        cache.insert_shaped(key("b", 16.0), Arc::clone(&shaped));
+        assert!(cache.get_shaped(&key("a", 16.0)).is_some());
+        cache.insert_shaped(key("c", 16.0), shaped);
+        assert!(cache.get_shaped(&key("b", 16.0)).is_none(), "LRU evicted");
+        let stats = cache.stats();
+        assert_eq!((stats.shapes, stats.hits, stats.evictions), (3, 1, 1));
+        assert_eq!(stats.line_breaks, 0, "a shaped value is width-free");
     }
 
     #[test]

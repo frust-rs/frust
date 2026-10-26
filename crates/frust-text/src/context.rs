@@ -1,19 +1,26 @@
-//! [`TextContext`]: the heavyweight, `!Sync` owner of parley's font and layout
-//! state.
+//! [`TextContext`]: the heavyweight, `!Sync` owner of the text pipeline's font
+//! and shaping state.
 //!
-//! Created once and threaded through the app/render loop. It holds
-//! a [`parley::FontContext`] (system font sources, loaded via fontique — Core
-//! Text on macOS with no registration) and a [`parley::LayoutContext`] scratch
-//! buffer reused across layout passes.
+//! Created once and threaded through the app/render loop. It owns the frust
+//! font oracle ([`crate::oracle::Oracle`], built with the platform backend for
+//! the target), the shaping driver's state, the shape cache, and — for the
+//! [`crate::TextEditor`] only, which still edits through parley — a
+//! [`parley::FontContext`] and [`parley::LayoutContext`].
 //!
-//! # The font oracle beside parley
+//! # Layout over the shaping driver
 //!
-//! It also owns the frust font oracle ([`crate::oracle::Oracle`], built with
-//! the platform backend for the target), which will replace fontique's
-//! collection as the shaper's font source. Until that switch both are live:
-//! parley still shapes through its own `FontContext`, and every app-font and
-//! generic-fallback registration goes through the oracle's registry, which
-//! mirrors it into parley's collection ([`ParleyMirror`]).
+//! [`TextContext::layout`] shapes through [`shape`] (frust's own shaping path
+//! over the oracle: a width-independent [`shape::Shaped`]) and lays it out with
+//! the frust line layout ([`crate::layout`]); [`TextContext::layout_bounded`]'s
+//! line cap and ellipsis are native to that layout. [`TextContext::shape`]
+//! returns the bare [`shape::Shaped`] through its own cache. The driver is
+//! declared here because the context owns its state.
+//!
+//! # The editor's parley collection
+//!
+//! Every app-font and generic-fallback registration goes through the
+//! oracle's registry, which mirrors it into parley's collection
+//! ([`ParleyMirror`]) so the editor resolves the same families.
 //!
 //! # App fonts across independent contexts
 //!
@@ -43,35 +50,26 @@
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parley::fontique::{Blob, GenericFamily};
-use parley::style::StyleProperty;
 use peniko::Brush;
 
-use crate::layout::TextLayout;
+use crate::layout::{ELLIPSIS, Ellipsis, TextLayout};
 use crate::oracle::registry::{FamilySummary, RegistryMirror};
 use crate::oracle::{self, CacheLocation, Oracle, RenderCapabilities};
-use crate::shape_cache::{DEFAULT_CAPACITY, ShapeCache, ShapeCacheStats, ShapeKey};
-use crate::style::{
-    GenericSlot, TextOverflow, TextStyle, to_parley_align, to_parley_family, to_parley_line_height,
-    to_parley_style, to_parley_weight,
+use crate::shape_cache::{
+    DEFAULT_CAPACITY, LaidOut, LayoutCache, ShapeCacheStats, ShapeKey, ShapedCache,
 };
+use crate::style::{GenericSlot, TextOverflow, TextStyle};
 
-/// The single character [`TextOverflow::Ellipsis`] appends/substitutes —
-/// U+2026 HORIZONTAL ELLIPSIS, one glyph rather than three ASCII periods.
-const ELLIPSIS: char = '\u{2026}';
+/// `to_parley_align` lost its last caller with the parley layout path; the
+/// converters in `style` are retired together with the editor's parley path.
+const _: fn(crate::style::TextAlign) -> parley::layout::Alignment = crate::style::to_parley_align;
 
-/// The hard cap on how many candidate measurements one
-/// [`TextContext::truncate_last_line`] call may perform.
-///
-/// The seek starts from a width-proportional estimate and normally converges
-/// in a handful of measurements; the cap is what makes the *worst* case a
-/// constant rather than a function of the line's length — an ellipsized
-/// 500-character session id can never cost 500 shaping passes on the UI
-/// thread. On exhaustion the longest candidate measured as fitting so far
-/// wins (see that fn's docs).
-const MAX_TRUNCATION_MEASUREMENTS: usize = 32;
+#[path = "shape/mod.rs"]
+pub(crate) mod shape;
 
 /// A font family registered via [`TextContext::register_fonts`], reported back
 /// to the caller so it can resolve widget styles against the exact name(s)
@@ -230,57 +228,39 @@ impl RegistryMirror for ParleyMirror<'_> {
     }
 }
 
-/// Owns parley's font matching and layout scratch state.
+/// Owns the font oracle, the shaping driver and the shape cache (plus the
+/// editor's parley contexts).
 ///
 /// This is deliberately not `Clone`/`Sync`: it is expensive per-instance state
-/// meant to be constructed once and borrowed mutably for each layout pass. The
-/// generic brush parameter is fixed to [`peniko::Brush`] so glyph runs carry the
-/// same paint vocabulary as [`frust_scene`].
+/// meant to be constructed once and borrowed mutably for each layout pass.
+/// Glyph runs carry [`peniko::Brush`], the same paint vocabulary as
+/// [`frust_scene`].
 pub struct TextContext {
+    /// The [`crate::TextEditor`]'s font collection (parley still edits).
     font_ctx: parley::FontContext,
+    /// The [`crate::TextEditor`]'s layout scratch.
     layout_ctx: parley::LayoutContext<Brush>,
-    /// Width-independent shape cache: a bounded LRU of
-    /// shaped layouts keyed by (text, style), so a width change re-runs
-    /// line-breaking only and repeated content shapes once. See
+    /// Width-independent shape cache: a bounded LRU of shaped paragraphs and
+    /// their line tables keyed by (text, style), so a width change re-runs
+    /// the line layout only and repeated content shapes once. See
     /// [`crate::shape_cache`].
-    shape_cache: ShapeCache,
+    shape_cache: LayoutCache,
+    /// The shaping driver's analyzer/shaper state ([`shape::ShapeContext`]).
+    shape_cx: shape::ShapeContext,
+    /// The shaping driver's cache: one [`shape::Shaped`] per (text, style).
+    shaped_cache: ShapedCache,
     /// The frust font oracle: platform backend, fallback cache, and this
     /// context's app-font registry (with its watermarks into the process-wide
     /// app-font and generic-fallback records).
     oracle: Oracle,
-    /// How many [`Self::measure_uncached`] passes this context has run — the
-    /// observable hook the truncation walk's measurement bound is asserted
-    /// against (an uncached measure is invisible to [`ShapeCacheStats`], which
-    /// is the whole point of it).
-    #[cfg(test)]
-    measurements: usize,
-}
-
-/// Pushes `style` onto a fresh parley builder as its default run properties.
-///
-/// Shared by the caching [`TextContext::layout`] and the throwaway
-/// [`TextContext::measure_uncached`] so the two can never drift into shaping
-/// the same string against different fonts.
-fn push_style_defaults(builder: &mut parley::RangedBuilder<'_, Brush>, style: &TextStyle) {
-    // SystemUi resolves to the platform UI font (e.g. San Francisco on
-    // macOS) with no registration.
-    builder.push_default(to_parley_family(&style.family));
-    builder.push_default(StyleProperty::FontSize(style.size));
-    builder.push_default(StyleProperty::FontWeight(to_parley_weight(style.weight)));
-    builder.push_default(StyleProperty::FontStyle(to_parley_style(style.style)));
-    builder.push_default(StyleProperty::LetterSpacing(style.letter_spacing));
-    builder.push_default(StyleProperty::LineHeight(to_parley_line_height(
-        style.line_height,
-    )));
-    builder.push_default(StyleProperty::Brush(Brush::Solid(style.color)));
 }
 
 /// The number of lines a layout actually puts content on, discounting the
-/// empty line parley emits after a text-terminating `'\n'`.
+/// empty line the line layout opens after a text-terminating `'\n'`.
 ///
-/// parley attributes a hard break's newline to the line it terminates and then
-/// opens a further, zero-width line for the caret position after it — so
-/// `"Hello\n"` reports two lines while painting one. Counting that phantom
+/// A hard break's newline belongs to the line it terminates, and a further,
+/// zero-width line follows for the caret position after it (as parley does)
+/// — so `"Hello\n"` reports two lines while painting one. Counting that phantom
 /// line as overflow is what made `text("Hello\n").max_lines(1)` render
 /// "Hello…": a false ellipsis on text that fits. Only a *trailing* empty line
 /// at `text_len` is discounted; an empty line in the middle of the text
@@ -296,47 +276,13 @@ fn visible_line_count(layout: &TextLayout, text_len: usize) -> usize {
     }
 }
 
-/// The truncation candidate for the prefix of `line_text` ending at byte
-/// `end`: that prefix plus [`ELLIPSIS`].
-///
-/// `end` is always one of `line_text`'s own `char_indices` boundaries, so the
-/// slice is in bounds by construction; `get` keeps an out-of-bounds/mid-char
-/// index a graceful degradation to the bare ellipsis rather than a panic.
-fn ellipsized(line_text: &str, end: usize) -> String {
-    format!("{}{ELLIPSIS}", line_text.get(..end).unwrap_or_default())
-}
-
-/// `span` scaled by `target / measured`, floored and clamped to `0..=span`.
-///
-/// The truncation seek's start estimate: `span` characters spanning `measured`
-/// pixels put roughly `span * target / measured` of them inside `target`. A
-/// degenerate `measured` (zero, negative, or non-finite — an unmeasurable
-/// line) falls back to the whole `span`, which merely starts the linear walk
-/// where an exhaustive longest-prefix-first scan would have.
-fn proportional_estimate(span: usize, target: f32, measured: f32) -> usize {
-    if measured <= 0.0 || !measured.is_finite() || !target.is_finite() {
-        return span;
-    }
-    if target <= 0.0 {
-        return 0;
-    }
-    let span_f = span as f64;
-    let estimate = (span_f * f64::from(target) / f64::from(measured)).floor();
-    if estimate <= 0.0 {
-        0
-    } else if estimate >= span_f {
-        span
-    } else {
-        estimate as usize
-    }
-}
-
 /// Where [`TextContext::new_with_timings`] spent its time (startup evidence).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NewTimings {
     /// The font system's start-up: the oracle's construction (its persistent
-    /// fallback cache is read later, at the first miss) plus — while parley
-    /// still shapes — `parley::FontContext::new`'s platform font-source scan.
+    /// fallback cache is read later, at the first miss) plus — while the
+    /// editor still uses parley — `parley::FontContext::new`'s platform
+    /// font-source scan.
     pub font_system: Duration,
     /// [`TextContext::sync_app_fonts`] — seeding the app fonts and generic fallbacks.
     pub app_sync: Duration,
@@ -520,10 +466,10 @@ impl TextContext {
         let mut cx = Self {
             font_ctx,
             layout_ctx: parley::LayoutContext::new(),
-            shape_cache: ShapeCache::new(DEFAULT_CAPACITY),
+            shape_cache: LayoutCache::new(DEFAULT_CAPACITY),
+            shape_cx: shape::ShapeContext::default(),
+            shaped_cache: ShapedCache::new(DEFAULT_CAPACITY),
             oracle,
-            #[cfg(test)]
-            measurements: 0,
         };
         let sync_started = Instant::now();
         cx.sync_app_fonts();
@@ -543,125 +489,68 @@ impl TextContext {
     /// layout scale is fixed at `1.0` here — physical-pixel scaling is applied
     /// downstream via the scene transform). Passing `None` produces a single
     /// unwrapped line per hard break in `text`. An empty `text` yields a layout
-    /// with no glyph runs and a near-zero size.
+    /// with no glyph runs, zero width and one line of the style's height.
     ///
-    /// `style.align` positions every line within the layout's width (a
-    /// no-op distinction from [`crate::TextAlign::Start`] until `max_width`
-    /// is bounded, since an unbounded line's width already equals its
-    /// content). Applies here **and** on the width-change re-break path in
-    /// [`crate::shape_cache::ShapeCache::get`] — see that fn's docs.
+    /// `style.align` positions every line within the layout's width (the
+    /// widest line's when `max_width` is unbounded). A word wider than
+    /// `max_width` overflows its line rather than breaking (parley's default).
+    ///
+    /// Shaping goes through the shape cache: the same (text, style) shapes
+    /// once, and a width change re-runs only the line layout on the cached
+    /// shaping ([`crate::shape_cache::LayoutCache::get`]).
     pub fn layout(&mut self, text: &str, style: &TextStyle, max_width: Option<f32>) -> TextLayout {
         let key = ShapeKey::new(text, style);
-
-        // Shape-cache fast path: reuse the shaped layout, re-running
-        // line-breaking only on a width change (never re-shaping). Shaping is
-        // width-independent, so `max_width` is not part of the key.
         if let Some(layout) = self.shape_cache.get(&key, max_width) {
-            return TextLayout::new(layout);
+            return layout;
         }
-
-        // Miss: shape from scratch, then cache the shaped/broken result.
-        //
-        // scale = 1.0: lay out in logical pixels; the render tier applies the
-        // device scale factor. quantize = true snaps advances for crisp glyphs.
-        let mut builder = self
-            .layout_ctx
-            .ranged_builder(&mut self.font_ctx, text, 1.0, true);
-        push_style_defaults(&mut builder, style);
-
-        let mut layout = builder.build(text);
-        layout.break_all_lines(max_width);
-        // Both hardcoded-alignment sites (this one and the width-change
-        // re-break path in `ShapeCache::get`) must apply `style.align` — see
-        // `to_parley_align`'s docs.
-        layout.align(
-            to_parley_align(style.align),
-            parley::layout::AlignmentOptions::default(),
-        );
-
-        self.shape_cache.insert(key, layout.clone(), max_width);
-        TextLayout::new(layout)
-    }
-
-    /// Measures `text` as one unwrapped line, **without touching the shape
-    /// cache** — no lookup, and crucially no insert.
-    ///
-    /// The truncation walk measures throwaway candidate strings that will
-    /// never be laid out again; routing them through [`Self::layout`] would
-    /// insert every one of them into the bounded LRU and evict that many live
-    /// entries app-wide — a whole-cache flush for a long line, on top of the
-    /// shaping cost. Shaping here is the same parley build [`Self::layout`]
-    /// performs minus the cache insert and the alignment pass (alignment moves
-    /// lines within a bounded width; it cannot change an unbounded line's
-    /// advance, which is all this returns).
-    fn measure_uncached(&mut self, text: &str, style: &TextStyle) -> f32 {
-        #[cfg(test)]
-        {
-            self.measurements += 1;
-        }
-        let mut builder = self
-            .layout_ctx
-            .ranged_builder(&mut self.font_ctx, text, 1.0, true);
-        push_style_defaults(&mut builder, style);
-        let mut layout = builder.build(text);
-        layout.break_all_lines(None);
-        layout.width()
-    }
-
-    /// How many uncached measurements ([`Self::measure_uncached`]) this
-    /// context has performed since it was built.
-    #[cfg(test)]
-    fn measurement_count(&self) -> usize {
-        self.measurements
+        // An empty text is sized by a space it never draws (parley's rule), so
+        // an empty label still occupies one line of its style's height.
+        let shaped_text = if text.is_empty() { " " } else { text };
+        let shaped = Arc::new(self.shape_cx.shape(&mut self.oracle, shaped_text, style));
+        let laid_out = LaidOut::new(text, shaped, style, max_width);
+        let layout = laid_out.layout();
+        self.shape_cache.insert(key, laid_out);
+        layout
     }
 
     /// Lays out `text` exactly like [`Self::layout`], then caps it to
     /// `max_lines` (when `Some`), applying `overflow` to whatever is cut.
     ///
-    /// `max_lines = None` delegates straight to [`Self::layout`] — the
-    /// zero-cost, behavior-unchanged path every existing caller keeps taking.
-    /// parley 0.11 has no native `max_lines`/ellipsis support, so a bounded
-    /// call does two *cached* shaping passes on the truncating path: once to
-    /// measure the full text, once more (in [`Self::layout`], so still
-    /// shape-cache-backed) to shape the truncated result — post-shaping
-    /// measure-and-truncate, not a parley feature. The ellipsis walk in
-    /// between adds only bounded, cache-invisible measurements
-    /// ([`Self::measure_uncached`]).
+    /// `max_lines = None` delegates straight to [`Self::layout`]. A bounded
+    /// call lays out the full text once (shape-cache backed) and, when it
+    /// overflows, re-runs the line layout on the same shaping with the line
+    /// cap: nothing is reshaped, and the earlier lines come out exactly as in
+    /// the full layout (breaking is greedy). An ellipsis is shaped once per
+    /// style, through the same cache.
     ///
     /// # Algorithm
     ///
-    /// A layout overflows `max_lines` in one of two ways parley itself
-    /// exposes no direct query for, so both are checked explicitly against
-    /// the full (untruncated) layout:
+    /// A layout overflows `max_lines` in one of two ways, both checked
+    /// against the full layout:
     /// - **extra lines**: line-breaking produced more than `max_lines`
     ///   *content* lines (wrapping, or `max_lines` hard `\n` breaks in the
     ///   source) — see [`visible_line_count`] for why the raw line count is
     ///   not that number when the text ends in `\n`.
-    /// - **an unbreakable overrun**: exactly `max_lines` lines came out, but
-    ///   the last visible one is itself wider than `max_width` — a run with
-    ///   no break opportunity (one long unspaced word) that parley lets
-    ///   overflow rather than force-break.
+    /// - **an overrun**: exactly `max_lines` lines came out, but the last
+    ///   visible one is itself wider than `max_width` — a run with no break
+    ///   opportunity (one long unspaced word) overflows rather than breaking.
     ///
     /// Neither condition holds → the text already fits (this is also why an
     /// exact-fit line, width `== max_width`, never gets truncated: the
-    /// comparison is a strict `>`); both overflow modes then return the full
-    /// layout as-is, *unless* `full` itself still carries the raw phantom
-    /// line parley opens after a terminal `'\n'` — in which case it's
-    /// reshaped with the trailing newline(s) stripped first, so a fitting
-    /// layout's reported line count and height always match what paints
-    /// (see [`visible_line_count`]).
+    /// comparison is a strict `>`), and the full layout is returned as-is,
+    /// *unless* it still carries the empty line opened after a terminal
+    /// `'\n'` — then that line is dropped, so a fitting layout's reported line
+    /// count and height always match what paints.
     ///
     /// On overflow, [`TextOverflow::Clip`] only ever drops whole trailing
-    /// lines — the source text is cut at the end of line `max_lines - 1`'s
-    /// span and reshaped; an unbreakable-overrun-only case (no extra lines
-    /// to drop) is left untouched, since Clip never character-trims.
-    /// [`TextOverflow::Ellipsis`] does the same line drop, then further
-    /// truncates the last visible line's own text via
-    /// [`Self::truncate_last_line`] and appends [`ELLIPSIS`], before
-    /// reshaping the whole (earlier lines + truncated last line) string —
-    /// which is also why earlier lines reliably survive verbatim: parley's
-    /// line-breaker is greedy/left-to-right, so shortening what follows a
-    /// line never changes how that line itself broke.
+    /// lines; an overrun-only case (no extra lines to drop) is left
+    /// untouched, since Clip never character-trims. [`TextOverflow::Ellipsis`]
+    /// does the same line drop, then refills the last visible line from the
+    /// text after it (past its soft-wrap point, up to the next mandatory
+    /// break) and keeps the longest grapheme-boundary prefix, whitespace at
+    /// the cut dropped, that fits `max_width` with [`ELLIPSIS`] (see
+    /// `crate::layout`'s truncation); with no `max_width` the whole line is
+    /// kept and marked.
     pub fn layout_bounded(
         &mut self,
         text: &str,
@@ -679,10 +568,9 @@ impl TextContext {
         }
 
         let full = self.layout(text, style, max_width);
-        let last_visible = max_lines - 1;
         let visible_lines = visible_line_count(&full, text.len());
         let has_extra_lines = visible_lines > max_lines;
-        let Some(last_line) = full.line_info(last_visible) else {
+        let Some(last_line) = full.line_info(max_lines - 1) else {
             // Fewer than `max_lines` lines exist at all: nothing overflowed.
             return full;
         };
@@ -690,174 +578,29 @@ impl TextContext {
 
         if !has_extra_lines && !width_overflows {
             if full.line_count() == visible_lines {
-                // No phantom trailing line to discount — `full`'s raw line
-                // count already matches what's painted.
                 return full;
             }
-            // The text fits, but `full` is parley's raw, undiscounted
-            // layout: it still counts the phantom line opened after a
-            // terminal `'\n'` in both its line count and its height (the
-            // sum of every raw line's height, `visible_line_count`'s docs)
-            // — so returning it unchanged reports a taller block than what
-            // actually paints. Reshape with the trailing newline(s)
-            // stripped — the same trim-then-reshape the `Clip` arm below
-            // performs — so the returned layout's line count and height
-            // match the visible content exactly.
-            let Some(cut) = text.get(..last_line.range.end) else {
-                return full;
-            };
-            return self.layout(cut.trim_end(), style, max_width);
+            // The text fits, but the full layout still counts the empty line
+            // after a terminal `'\n'` in its line count and height: cap it at
+            // the visible lines.
+            return full.truncated(visible_lines, None);
         }
 
         match overflow {
-            TextOverflow::Clip => {
-                if !has_extra_lines {
-                    // Only an unbreakable-run width overrun, no extra lines
-                    // to drop — Clip never character-trims a line.
-                    return full;
-                }
-                // `trim_end`: a line's own text range can include the very
-                // whitespace/`\n` that ends it (parley attributes a hard
-                // break's newline to the line it terminates), so a naive cut
-                // could leave a trailing `\n` in the reshaped text — which
-                // parley reads as *another* hard break, silently growing the
-                // line count back past `max_lines`.
-                //
-                // `get` (not `[..]`): the index is parley-derived, and a
-                // truncated layout is a far better failure mode for a caller
-                // than a panic if it ever stops landing on a char boundary of
-                // *this* string — see the fn docs' slicing contract.
-                let Some(cut) = text.get(..last_line.range.end) else {
-                    return full;
-                };
-                self.layout(cut.trim_end(), style, max_width)
-            }
+            TextOverflow::Clip if !has_extra_lines => full,
+            TextOverflow::Clip => full.truncated(max_lines, None),
             TextOverflow::Ellipsis => {
-                // See the `Clip` arm above for the `get` and `trim_end`
-                // rationale (a trailing `\n` must not survive into a reshaped
-                // fragment).
-                let (Some(before), Some(line_text)) = (
-                    text.get(..last_line.range.start),
-                    text.get(last_line.range.start..last_line.range.end),
-                ) else {
-                    return full;
+                let mut glyph = [0u8; 4];
+                let ellipsis = Ellipsis {
+                    shaped: Arc::clone(
+                        self.layout(ELLIPSIS.encode_utf8(&mut glyph), style, None)
+                            .shaped(),
+                    ),
+                    style_index: 0,
                 };
-                let line_text = line_text.trim_end();
-                let truncated_last = match max_width {
-                    Some(w) => self.truncate_last_line(line_text, style, w, last_line.width),
-                    // No width to truncate against — keep the whole line,
-                    // just mark it cut.
-                    None => format!("{line_text}{ELLIPSIS}"),
-                };
-                let final_text = format!("{before}{truncated_last}");
-                self.layout(&final_text, style, max_width)
+                full.truncated(max_lines, Some(ellipsis))
             }
         }
-    }
-
-    /// The [`TextOverflow::Ellipsis`] truncation walk: returns a prefix of
-    /// `line_text` (cut on a char boundary) plus `'…'`, measured alone as a
-    /// single unwrapped line to be no wider than `max_width`. Falls back to a
-    /// bare `'…'` if not even that fits (never returns an empty string with no
-    /// overflow marker at all). `line_width` is the line's already-measured
-    /// natural advance — the seek's scale reference, not a bound.
-    ///
-    /// # Bounded seek
-    ///
-    /// The walk *starts near the answer* rather than at one end: the ellipsis
-    /// is measured once, and the first candidate is the width-proportional
-    /// character estimate `chars * (max_width - ellipsis) / line_width`. One
-    /// proportional re-estimate from that candidate's own measured prefix
-    /// width follows (which lands a line mixing very narrow and very wide
-    /// glyphs within a few characters of the answer), and only then a linear,
-    /// one-character-at-a-time correction in whichever direction the probe
-    /// pointed.
-    ///
-    /// The correction stays *linear* deliberately: kerning/ligature reshaping
-    /// around a truncation point is not provably monotonic in every font, so a
-    /// binary search could converge one character off in an adversarial font.
-    /// This is the muxr `clipped_label` precedent's walk — only its starting
-    /// point is estimated instead of being the whole string.
-    ///
-    /// # Cost bound
-    ///
-    /// Every measurement goes through [`Self::measure_uncached`], and the walk
-    /// performs at most [`MAX_TRUNCATION_MEASUREMENTS`] of them. Both halves
-    /// matter: a longest-prefix-first scan of an unbreakable token (a URL,
-    /// hash, or session id wider than its box — the primary ellipsis case)
-    /// cost one *cached* shaping pass per character, i.e. `O(len²)` work on
-    /// the UI thread plus `len` inserts that evicted the shape cache's live
-    /// entries app-wide. On cap exhaustion the longest candidate measured as
-    /// fitting so far wins (the bare `'…'` in the worst case): the seek never
-    /// loops unbounded, and never returns a candidate it did not measure as
-    /// fitting.
-    fn truncate_last_line(
-        &mut self,
-        line_text: &str,
-        style: &TextStyle,
-        max_width: f32,
-        line_width: f32,
-    ) -> String {
-        let mut budget = MAX_TRUNCATION_MEASUREMENTS;
-
-        // The empty-prefix candidate first: it is both the fallback and the
-        // headroom every other candidate is measured against.
-        let ellipsis_width = self.measure_uncached(&ellipsized(line_text, 0), style);
-        budget -= 1;
-        if ellipsis_width > max_width {
-            // Even a bare ellipsis overflows — best effort, still signal the
-            // truncation rather than silently rendering nothing.
-            return ELLIPSIS.to_string();
-        }
-        let available = max_width - ellipsis_width;
-
-        // `ends[i]` is the byte length of the prefix holding the line's first
-        // `i` characters; `ends[longest]` is the whole line.
-        let mut ends: Vec<usize> = line_text.char_indices().map(|(i, _)| i).collect();
-        ends.push(line_text.len());
-        let longest = ends.len() - 1;
-
-        let mut cursor = proportional_estimate(longest, available, line_width);
-        let mut width = self.measure_uncached(&ellipsized(line_text, ends[cursor]), style);
-        budget -= 1;
-        // One re-estimate from what the probe actually measured, so a line
-        // whose glyph widths are nowhere near uniform still starts the linear
-        // walk close to the answer.
-        if budget > 0 && cursor > 0 {
-            let refined = proportional_estimate(cursor, available, width - ellipsis_width);
-            if refined != cursor {
-                cursor = refined;
-                width = self.measure_uncached(&ellipsized(line_text, ends[cursor]), style);
-                budget -= 1;
-            }
-        }
-
-        // The empty prefix is known to fit (checked above), so a fitting
-        // answer always exists no matter where the budget runs out.
-        let mut best = 0;
-        if width <= max_width {
-            best = cursor;
-            // Grow a character at a time while candidates keep fitting.
-            while best < longest && budget > 0 {
-                budget -= 1;
-                let next = best + 1;
-                if self.measure_uncached(&ellipsized(line_text, ends[next]), style) > max_width {
-                    break;
-                }
-                best = next;
-            }
-        } else {
-            // Shrink a character at a time until one fits.
-            while cursor > 0 && budget > 0 {
-                budget -= 1;
-                cursor -= 1;
-                if self.measure_uncached(&ellipsized(line_text, ends[cursor]), style) <= max_width {
-                    best = cursor;
-                    break;
-                }
-            }
-        }
-        ellipsized(line_text, ends[best])
     }
 
     /// The shape cache's instrumentation counters (shapes performed,
@@ -868,6 +611,38 @@ impl TextContext {
     /// type leaks through (scene-layer purity).
     pub fn shape_cache_stats(&self) -> ShapeCacheStats {
         self.shape_cache.stats()
+    }
+
+    /// Shapes `text` with `style` through the frust shaping driver (fonts from
+    /// this context's oracle), width-independently and cached: a repeat of the
+    /// same (text, style) is served without analysis or shaping.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "layout keeps its shaping in the layout cache; rich text is this one's caller"
+        )
+    )]
+    pub(crate) fn shape(&mut self, text: &str, style: &TextStyle) -> Arc<shape::Shaped> {
+        let key = ShapeKey::new(text, style);
+        if let Some(shaped) = self.shaped_cache.get_shaped(&key) {
+            return shaped;
+        }
+        let shaped = Arc::new(self.shape_cx.shape(&mut self.oracle, text, style));
+        self.shaped_cache.insert_shaped(key, Arc::clone(&shaped));
+        shaped
+    }
+
+    /// The shaping driver's cache counters ([`Self::shape`]).
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "layout keeps its shaping in the layout cache; rich text is this one's caller"
+        )
+    )]
+    pub(crate) fn shaped_cache_stats(&self) -> ShapeCacheStats {
+        self.shaped_cache.stats()
     }
 
     /// Registers font faces from raw bytes (TTF/OTF, or a TTC/OTC
@@ -955,7 +730,8 @@ impl TextContext {
     /// calls this internally on success, so a caller registering fonts
     /// doesn't need to call it separately.
     pub fn clear_shape_cache(&mut self) {
-        self.shape_cache = ShapeCache::new(DEFAULT_CAPACITY);
+        self.shape_cache = LayoutCache::new(DEFAULT_CAPACITY);
+        self.shaped_cache = ShapedCache::new(DEFAULT_CAPACITY);
     }
 
     /// Borrows the parley font and layout contexts together, for constructing a
@@ -981,8 +757,116 @@ impl Default for TextContext {
 mod tests {
     use super::*;
     use crate::shape_cache::DEFAULT_CAPACITY;
+    use crate::style::{LineHeight, TextAlign};
+    use parley::style::StyleProperty;
     use peniko::Color;
+    use std::borrow::Cow;
     use std::sync::Mutex;
+
+    /// Pushes `style` onto a parley builder as its default run properties:
+    /// the pre-switch parley layout path, kept as the parity reference.
+    fn push_style_defaults(builder: &mut parley::RangedBuilder<'_, Brush>, style: &TextStyle) {
+        use crate::style::{
+            to_parley_family, to_parley_line_height, to_parley_style, to_parley_weight,
+        };
+        builder.push_default(to_parley_family(&style.family));
+        builder.push_default(StyleProperty::FontSize(style.size));
+        builder.push_default(StyleProperty::FontWeight(to_parley_weight(style.weight)));
+        builder.push_default(StyleProperty::FontStyle(to_parley_style(style.style)));
+        builder.push_default(StyleProperty::FontWidth(parley::FontWidth::from_ratio(
+            style.width,
+        )));
+        if !style.variations.is_empty() {
+            let variations: Vec<parley::FontVariation> = style
+                .variations
+                .iter()
+                .map(|&(tag, value)| {
+                    parley::FontVariation::new(parley::setting::Tag::new(&tag), value)
+                })
+                .collect();
+            builder.push_default(StyleProperty::FontVariations(parley::FontVariations::List(
+                Cow::Owned(variations),
+            )));
+        }
+        if let Some(locale) = style.locale.as_deref() {
+            builder.push_default(StyleProperty::Locale(
+                parley::style::Language::parse(locale).ok(),
+            ));
+        }
+        builder.push_default(StyleProperty::LetterSpacing(style.letter_spacing));
+        builder.push_default(StyleProperty::LineHeight(to_parley_line_height(
+            style.line_height,
+        )));
+        builder.push_default(StyleProperty::Brush(Brush::Solid(style.color)));
+    }
+
+    /// `text` laid out by parley 0.11 over this context's parley collection,
+    /// exactly as `layout` did before the line layout replaced it.
+    fn parley_layout(
+        cx: &mut TextContext,
+        text: &str,
+        style: &TextStyle,
+        max_width: Option<f32>,
+    ) -> parley::Layout<Brush> {
+        let mut builder = cx
+            .layout_ctx
+            .ranged_builder(&mut cx.font_ctx, text, 1.0, true);
+        push_style_defaults(&mut builder, style);
+        let mut layout = builder.build(text);
+        layout.break_all_lines(max_width);
+        layout.align(
+            crate::style::to_parley_align(style.align),
+            parley::layout::AlignmentOptions::default(),
+        );
+        layout
+    }
+
+    /// Every glyph of `runs` as (id, x, y), in emission order.
+    fn glyphs_of(runs: &[frust_scene::GlyphRun]) -> Vec<(u32, f32, f32)> {
+        runs.iter()
+            .flat_map(|r| r.glyphs.iter().map(|g| (g.id, g.x, g.y)))
+            .collect()
+    }
+
+    /// Asserts the line layout and parley agree on `text`: the same glyphs,
+    /// each within half a pixel, and the same size.
+    fn assert_parley_parity(
+        cx: &mut TextContext,
+        text: &str,
+        style: &TextStyle,
+        max_width: Option<f32>,
+    ) {
+        let ours = cx.layout(text, style, max_width);
+        let reference = parley_layout(cx, text, style, max_width);
+        let what = format!("{text:?} at {max_width:?}, {:?}", style.align);
+        let mut a = glyphs_of(&ours.to_scene_runs(kurbo::Point::ORIGIN));
+        let mut b = glyphs_of(&crate::convert::layout_to_scene_runs(
+            &reference,
+            kurbo::Point::ORIGIN,
+        ));
+        // Order-independent: parley and the line layout may split a line's
+        // runs differently; positions are what must agree.
+        let key = |g: &(u32, f32, f32)| (g.2.to_bits(), g.1.to_bits(), g.0);
+        a.sort_by_key(key);
+        b.sort_by_key(key);
+        assert_eq!(a.len(), b.len(), "{what}: glyph count");
+        for (x, y) in a.iter().zip(&b) {
+            assert_eq!(x.0, y.0, "{what}: glyph ids {a:?} vs {b:?}");
+            assert!(
+                (x.1 - y.1).abs() <= 0.5 && (x.2 - y.2).abs() <= 0.5,
+                "{what}: glyph {x:?} vs parley {y:?}"
+            );
+        }
+        assert_eq!(ours.line_count(), reference.len(), "{what}: line count");
+        let size = ours.size();
+        assert!(
+            (size.width - f64::from(reference.width())).abs() <= 0.5
+                && (size.height - f64::from(reference.height())).abs() <= 0.5,
+            "{what}: size {size:?} vs parley {}x{}",
+            reference.width(),
+            reference.height()
+        );
+    }
 
     /// A context whose font cache stays in memory: the builder opt-out every
     /// test here uses (the scratch-dir default is only the safety net).
@@ -1223,10 +1107,10 @@ mod tests {
         let mut cx = TextContext {
             font_ctx,
             layout_ctx: parley::LayoutContext::new(),
-            shape_cache: ShapeCache::new(DEFAULT_CAPACITY),
+            shape_cache: LayoutCache::new(DEFAULT_CAPACITY),
+            shape_cx: shape::ShapeContext::default(),
+            shaped_cache: ShapedCache::new(DEFAULT_CAPACITY),
             oracle,
-            #[cfg(test)]
-            measurements: 0,
         };
         let layout = cx.layout("Hello", &style(20.0), None);
         let runs = layout.to_scene_runs(kurbo::Point::ORIGIN);
@@ -1329,6 +1213,218 @@ mod tests {
         assert_eq!(stats.hits, 1, "the repeated width is a full reuse");
     }
 
+    /// A context holding the bundled Latin subset as an app font, and its family.
+    fn noto_cx() -> (TextContext, TextStyle) {
+        let mut cx = test_cx();
+        let families = cx
+            .register_fonts(include_bytes!("../../../testing/fonts/NotoSans-Subset.ttf").to_vec())
+            .expect("the subset registers");
+        let s = TextStyle {
+            family: crate::FontFamily::named(families[0].name.clone()),
+            ..style(18.0)
+        };
+        (cx, s)
+    }
+
+    #[test]
+    fn the_shaped_cache_hit_skips_analysis_and_shaping() {
+        let (mut cx, s) = noto_cx();
+        let first = cx.shape("Hello, hello", &s);
+        let (analyses, passes) = (cx.shape_cx.analyses(), cx.shape_cx.passes());
+        assert_eq!((analyses, passes), (1, 1));
+        let again = cx.shape("Hello, hello", &s);
+        assert!(Arc::ptr_eq(&first, &again), "the cached value is shared");
+        assert_eq!(cx.shape_cx.analyses(), analyses, "a hit runs no analysis");
+        assert_eq!(cx.shape_cx.passes(), passes, "a hit runs no shaper");
+        let stats = cx.shaped_cache_stats();
+        assert_eq!((stats.shapes, stats.hits), (1, 1));
+        assert_eq!(
+            cx.shape_cache_stats(),
+            ShapeCacheStats::default(),
+            "the parley path's cache is separate"
+        );
+        cx.clear_shape_cache();
+        let _ = cx.shape("Hello, hello", &s);
+        assert_eq!(cx.shape_cx.passes(), passes + 1, "cleared → shaped again");
+    }
+
+    #[test]
+    fn the_driver_and_the_parley_path_pick_the_same_glyphs() {
+        let (mut cx, s) = noto_cx();
+        // Only characters the subset maps: fallback is where the two differ.
+        let text = "Hello, Hello";
+        let shaped = cx.shape(text, &s);
+        let ours: Vec<u32> = shaped.glyphs.iter().map(|g| g.id).collect();
+        let reference = parley_layout(&mut cx, text, &s, None);
+        let parley: Vec<u32> =
+            crate::convert::layout_to_scene_runs(&reference, kurbo::Point::ORIGIN)
+                .iter()
+                .flat_map(|run| run.glyphs.iter().map(|g| g.id))
+                .collect();
+        assert_eq!(ours, parley);
+        let width: f32 = shaped.runs.iter().map(|r| r.advance).sum();
+        let parley_width = reference.width();
+        assert!(
+            (width - parley_width).abs() < 0.5,
+            "{width} vs {parley_width}"
+        );
+    }
+
+    /// A context holding the bundled Latin and Arabic subsets as app fonts,
+    /// and a style whose family stack names the Latin face first.
+    fn bundled_cx(size: f32) -> (TextContext, TextStyle) {
+        let mut cx = test_cx();
+        let mut names = Vec::new();
+        for bytes in [
+            &include_bytes!("../../../testing/fonts/NotoSans-Subset.ttf")[..],
+            &include_bytes!("../../../testing/fonts/NotoSansArabic-Subset.ttf")[..],
+        ] {
+            let families = cx
+                .register_fonts(bytes.to_vec())
+                .expect("the subset registers");
+            names.push(families[0].name.clone());
+        }
+        let s = TextStyle {
+            family: crate::FontFamily::stack(names),
+            ..style(size)
+        };
+        (cx, s)
+    }
+
+    const ALIGNS: [TextAlign; 6] = [
+        TextAlign::Start,
+        TextAlign::End,
+        TextAlign::Left,
+        TextAlign::Center,
+        TextAlign::Right,
+        TextAlign::Justify,
+    ];
+
+    #[test]
+    fn the_line_layout_matches_parley_on_latin_text() {
+        // Only characters the subset maps (" ,Helo\u{e9}"), so both paths draw
+        // with the bundled face. 20px is narrower than every word: each
+        // overflows its own line.
+        let (mut cx, base) = bundled_cx(18.0);
+        let text = "Hello ello, Hell oleo Hello, Hole H\u{e9}llo Hello Hello eel";
+        for align in ALIGNS {
+            for width in [
+                None,
+                Some(400.0),
+                Some(150.0),
+                Some(97.0),
+                Some(60.0),
+                Some(20.0),
+            ] {
+                let s = TextStyle {
+                    align,
+                    ..base.clone()
+                };
+                assert_parley_parity(&mut cx, text, &s, width);
+            }
+        }
+        let variants = [
+            TextStyle {
+                letter_spacing: 2.0,
+                align: TextAlign::Justify,
+                ..base.clone()
+            },
+            TextStyle {
+                line_height: LineHeight::Absolute(31.0),
+                align: TextAlign::Center,
+                ..base.clone()
+            },
+            TextStyle {
+                line_height: LineHeight::FontSizeRelative(1.5),
+                align: TextAlign::End,
+                ..base.clone()
+            },
+        ];
+        for s in &variants {
+            for width in [None, Some(120.0)] {
+                assert_parley_parity(&mut cx, text, s, width);
+            }
+        }
+        for align in [TextAlign::Center, TextAlign::Justify] {
+            let s = TextStyle {
+                align,
+                ..base.clone()
+            };
+            assert_parley_parity(
+                &mut cx,
+                "Hello\nello Hello oleo\n\nHello  \n",
+                &s,
+                Some(110.0),
+            );
+            assert_parley_parity(&mut cx, "Hello  Hole   Hello", &s, Some(70.0));
+            // An empty text is one line of the style's height, as parley sizes it.
+            assert_parley_parity(&mut cx, "", &s, Some(70.0));
+            assert_parley_parity(&mut cx, "", &s, None);
+        }
+    }
+
+    #[test]
+    fn the_line_layout_matches_parley_on_rtl_and_mixed_text() {
+        let (mut cx, base) = bundled_cx(24.0);
+        let arabic = "\u{645}\u{631}\u{62d}\u{628}\u{627}";
+        let rtl = [arabic; 4].join(" ");
+        let mixed_ltr = format!("Hello {arabic} Hole {arabic}");
+        let mixed_rtl = format!("{arabic} Hello {arabic} Hole");
+        for align in ALIGNS {
+            let s = TextStyle {
+                align,
+                ..base.clone()
+            };
+            for text in [rtl.as_str(), mixed_ltr.as_str(), mixed_rtl.as_str()] {
+                for width in [None, Some(170.0), Some(110.0)] {
+                    assert_parley_parity(&mut cx, text, &s, width);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_width_change_relays_out_without_reshaping() {
+        let (mut cx, s) = noto_cx();
+        let text = "Hello hello, Hello hello Hello, hello";
+        let first = cx.layout(text, &s, Some(200.0));
+        let (analyses, passes) = (cx.shape_cx.analyses(), cx.shape_cx.passes());
+        for width in [Some(80.0), Some(120.0), None, Some(200.0)] {
+            let again = cx.layout(text, &s, width);
+            assert!(Arc::ptr_eq(again.shaped(), first.shaped()), "one shaping");
+        }
+        assert_eq!(
+            cx.shape_cx.analyses(),
+            analyses,
+            "no analysis on a width change"
+        );
+        assert_eq!(cx.shape_cx.passes(), passes, "no shaping on a width change");
+        let stats = cx.shape_cache_stats();
+        assert_eq!((stats.shapes, stats.line_breaks, stats.hits), (1, 4, 0));
+    }
+
+    #[test]
+    fn style_variations_reach_the_parley_path_too() {
+        let mut cx = test_cx();
+        let families = cx
+            .register_fonts(
+                include_bytes!("../../../plugins/beui/fonts/geist/Geist-Variable.ttf").to_vec(),
+            )
+            .expect("Geist registers");
+        let s = TextStyle {
+            family: crate::FontFamily::named(families[0].name.clone()),
+            ..style(18.0)
+        };
+        let plain = cx.layout("Hamburg", &s, None).size().width;
+        let heavy = s.clone().with_variation(*b"wght", 800.0);
+        assert_ne!(
+            ShapeKey::new("Hamburg", &s),
+            ShapeKey::new("Hamburg", &heavy)
+        );
+        let wide = cx.layout("Hamburg", &heavy, None).size().width;
+        assert!(wide > plain, "wght 800 widens Geist: {plain} vs {wide}");
+    }
+
     #[test]
     fn text_change_forces_a_fresh_shape() {
         let mut cx = test_cx();
@@ -1423,8 +1519,6 @@ mod tests {
     }
 
     // --- Paragraph alignment ---
-
-    use crate::style::TextAlign;
 
     /// A style at `align`, otherwise default.
     fn aligned_style(align: TextAlign) -> TextStyle {
@@ -1526,7 +1620,7 @@ mod tests {
 
     #[test]
     fn alignment_survives_a_width_change_through_the_shape_cache_rebreak() {
-        // The resize regression the adversarial pass flagged: `ShapeCache::get`
+        // The resize regression the adversarial pass flagged: `LayoutCache::get`
         // had its own hardcoded `Alignment::Start` on the re-break path, so a
         // resized layout would silently revert to `Start` even though the
         // initial (from-scratch) layout in this fn correctly centered.
@@ -1537,7 +1631,7 @@ mod tests {
         let _ = cx.layout(TWO_LINES, &centered, Some(400.0));
 
         // Second pass at a different width: a shape-cache hit that re-breaks
-        // (not a fresh shape) — exactly the path `ShapeCache::get` owns.
+        // (not a fresh shape) — exactly the path `LayoutCache::get` owns.
         let x = line_min_x(&mut cx, TWO_LINES, &centered, 500.0);
         assert_eq!(x.len(), 2);
         assert!(
@@ -1836,38 +1930,19 @@ mod tests {
         assert_eq!(bounded.size().width, 0.0);
     }
 
-    // --- Bounded ellipsis seek ---
+    // --- Native ellipsis truncation ---
 
     /// A 500-character unbreakable token: the primary ellipsis case (a URL,
-    /// hash, or session id far wider than its box), and the input the
-    /// pre-bound walk shaped once per character.
+    /// hash, or session id far wider than its box).
     fn long_token() -> String {
-        // Mixed-width characters, so the walk's proportional estimate can't
-        // be trivially exact.
+        // Mixed-width characters, so a proportional guess can't be exact.
         "aWi".repeat(167)[..500].to_string()
     }
 
-    /// The exhaustive longest-fitting-prefix scan (every char boundary,
-    /// longest first) that the bounded seek approximates — the reference
-    /// implementation for the seek's quality, kept only here.
-    fn exhaustive_truncation(line: &str, s: &TextStyle, max_width: f32) -> String {
-        let mut cx = test_cx();
-        let mut ends: Vec<usize> = line.char_indices().map(|(i, _)| i).collect();
-        ends.push(line.len());
-        for &end in ends.iter().rev() {
-            let candidate = format!("{}{ELLIPSIS}", &line[..end]);
-            if cx.layout(&candidate, s, None).size().width <= f64::from(max_width) {
-                return candidate;
-            }
-        }
-        ELLIPSIS.to_string()
-    }
-
     #[test]
-    fn a_long_unbreakable_token_truncates_within_the_measurement_cap() {
-        // The O(n²)-on-the-UI-thread defect: one full shaping pass per
-        // character of the overflowing line. The bound is a constant now, and
-        // none of those measurements may reach the shape cache.
+    fn a_long_unbreakable_token_truncates_with_two_shapes_and_no_eviction() {
+        // The full text and the ellipsis shape once each; the truncation
+        // itself re-breaks the cached shaping and measures nothing.
         let mut cx = test_cx();
         let s = style(16.0);
         let token = long_token();
@@ -1882,25 +1957,21 @@ mod tests {
             width <= max_width,
             "the truncated line must still fit the bound: {width} > {max_width}"
         );
-        assert!(
-            cx.measurement_count() <= MAX_TRUNCATION_MEASUREMENTS,
-            "the seek must stay inside its cap: {} measurements for a {}-char token",
-            cx.measurement_count(),
-            token.chars().count()
-        );
         let stats = cx.shape_cache_stats();
         assert_eq!(
             stats.shapes, 2,
-            "only the full and the final truncated layout may be cached — every \
-             candidate measurement is uncached"
+            "the token and the ellipsis shape once each"
         );
         assert_eq!(stats.evictions, 0);
+        let passes = cx.shape_cx.passes();
+        let _ = cx.layout_bounded(&token, &s, Some(60.0), Some(1), TextOverflow::Ellipsis);
+        assert_eq!(cx.shape_cx.passes(), passes, "a new width reshapes nothing");
     }
 
     #[test]
-    fn the_truncation_walk_never_evicts_live_cache_entries() {
-        // The cache-flush half of the same defect: with the LRU full, a
-        // per-candidate insert evicted one live entry per character.
+    fn the_truncation_never_evicts_live_cache_entries() {
+        // With the LRU full, only the two legitimate inserts (the full text
+        // and the ellipsis) may displace live entries.
         let mut cx = test_cx();
         let s = style(16.0);
         for i in 0..DEFAULT_CAPACITY {
@@ -1920,16 +1991,79 @@ mod tests {
             cx.shape_cache_stats().evictions - evictions_before,
             2,
             "a full cache may only lose the two entries the two legitimate \
-             (full + final) inserts displace"
+             (full + ellipsis) inserts displace"
         );
     }
 
+    /// Asserts `line` capped to one line at `max_width` with an ellipsis keeps
+    /// the longest fitting prefix: the kept graphemes plus the ellipsis fit,
+    /// and one more grapheme would not. Returns the kept byte range.
+    fn assert_longest_fitting_prefix(
+        cx: &mut TextContext,
+        line: &str,
+        s: &TextStyle,
+        max_width: f32,
+    ) -> std::ops::Range<usize> {
+        let natural = cx.layout(line, s, None).size().width as f32;
+        let bounded = cx.layout_bounded(line, s, Some(max_width), Some(1), TextOverflow::Ellipsis);
+        let info = bounded.line_info(0).expect("one line");
+        let what = format!("{max_width}px of {line:?}");
+        if natural <= max_width {
+            assert_eq!(info.range, 0..line.len(), "{what}: fits untouched");
+            return info.range;
+        }
+        let ellipsis = cx.layout(&ELLIPSIS.to_string(), s, None).size().width as f32;
+        let kept = &line[info.range.clone()];
+        assert!(
+            info.width <= max_width || kept.is_empty(),
+            "{what}: {} > {max_width}",
+            info.width
+        );
+        // Measure from the full layout's own shaping (the cut uses its
+        // advances, kerning against the dropped neighbour included), so the
+        // check holds for any font and wherever the line first wrapped.
+        let full = cx.layout(line, s, None);
+        let shaped = full.shaped();
+        let byte_of = |char_index: u32| {
+            shaped
+                .chars
+                .get(char_index as usize)
+                .map_or(line.len(), |c| c.byte_start as usize)
+        };
+        // The next cut is one more grapheme plus any whitespace before it (a
+        // cut never ends on whitespace); none when only whitespace follows.
+        let mut kept_advance = 0.0f32;
+        let mut next_advance = None;
+        let mut gap = 0.0f32;
+        for g in &shaped.graphemes {
+            if byte_of(g.chars.end) <= info.range.end {
+                kept_advance += g.advance;
+                continue;
+            }
+            gap += g.advance;
+            if g.whitespace == shape::Whitespace::None {
+                next_advance = Some(gap);
+                break;
+            }
+        }
+        assert!(
+            (info.width - (kept_advance + ellipsis)).abs() < 0.01,
+            "{what}: the width is the kept prefix plus the ellipsis"
+        );
+        if let Some(next) = next_advance {
+            assert!(
+                kept_advance + next + ellipsis > max_width - 0.01,
+                "{what}: one more character would still fit"
+            );
+        }
+        info.range
+    }
+
     #[test]
-    fn the_bounded_seek_matches_an_exhaustive_longest_prefix_scan() {
-        // The bound must not cost accuracy: the seek's cut is the same one the
-        // exhaustive scan finds, including for a line whose glyph widths are
-        // nowhere near uniform (the case a single proportional estimate would
-        // land far from).
+    fn the_cut_keeps_the_longest_fitting_prefix() {
+        // The cut is maximal: the kept atoms plus the ellipsis fit, and one
+        // more grapheme would not — including for a line whose glyph widths
+        // are nowhere near uniform.
         let s = style(16.0);
         let lines = [
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1938,53 +2072,103 @@ mod tests {
             "https://example.com/a/very/long/path?q=1",
             &long_token(),
         ];
-        let mut worst = 0;
         for line in lines {
             for max_width in [12.0_f32, 40.0, 160.0, 400.0] {
                 let mut cx = test_cx();
-                let line_width = cx.layout(line, &s, None).size().width as f32;
-                let got = cx.truncate_last_line(line, &s, max_width, line_width);
-                let want = exhaustive_truncation(line, &s, max_width);
-                assert_eq!(
-                    got, want,
-                    "bounded seek disagreed with the exhaustive scan for \
-                     {max_width}px of {line:?}"
-                );
-                worst = worst.max(cx.measurement_count());
+                assert_longest_fitting_prefix(&mut cx, line, &s, max_width);
             }
         }
-        // Comfortably inside the cap (12 on the reference host), so the
-        // agreement above is real convergence, not a capped coincidence.
+    }
+
+    #[test]
+    fn a_line_that_wraps_early_is_refilled_before_the_cut() {
+        // With the bundled subset (host-independent widths) the line's only
+        // wrap opportunity is after `He `: the long word overflows. The cut
+        // refills the line from that word rather than ending at `He…`.
+        let (mut cx, s) = noto_cx();
+        let line = "He Helloooooooooooooooooooooooooooooo";
+        let max_width = 150.0;
+        let wrapped = cx.layout(line, &s, Some(max_width));
+        let first = wrapped.line_info(0).expect("a first line").range;
+        assert_eq!(
+            first,
+            0..3,
+            "fixture sanity: the line wraps after `He ` at {max_width}px"
+        );
+        let kept = assert_longest_fitting_prefix(&mut cx, line, &s, max_width);
         assert!(
-            worst <= MAX_TRUNCATION_MEASUREMENTS,
-            "worst seek across the fixtures took {worst} measurements"
+            kept.end > first.end,
+            "the cut reaches past the wrap point: kept {:?}",
+            &line[kept]
+        );
+        for width in [40.0_f32, 80.0, 220.0] {
+            assert_longest_fitting_prefix(&mut cx, line, &s, width);
+        }
+    }
+
+    #[test]
+    fn a_mandatory_break_stops_the_refill() {
+        let (mut cx, s) = noto_cx();
+        let text = "He Hello\nHelloooooooooooooooooooooooooooo";
+        let newline = text.find('\n').expect("a newline");
+        let bounded = cx.layout_bounded(text, &s, Some(400.0), Some(1), TextOverflow::Ellipsis);
+        assert_eq!(bounded.line_count(), 1);
+        assert_eq!(
+            bounded.line_info(0).expect("one line").range,
+            0..newline,
+            "the line ends at its own newline; nothing after it refills it"
+        );
+
+        // A wrapped first paragraph refills up to its newline at most.
+        let text = "He Helloooooooooooooooooooooooooooooooo\nHello";
+        let newline = text.find('\n').expect("a newline");
+        let bounded = cx.layout_bounded(text, &s, Some(150.0), Some(1), TextOverflow::Ellipsis);
+        let kept = bounded.line_info(0).expect("one line").range;
+        assert!(
+            kept.end > 3 && kept.end <= newline,
+            "the cut stays inside the first paragraph: {kept:?}"
         );
     }
 
     #[test]
-    fn the_seek_returns_a_fitting_candidate_even_when_the_cap_is_exhausted() {
-        // Cap exhaustion is a quality fallback, never a correctness one: the
-        // returned candidate is always one measured as fitting. Forced here by
-        // a line whose natural width lies about where the fitting prefix ends
-        // (a deliberately misleading `line_width`).
+    fn a_truncated_line_shares_the_full_layouts_glyphs() {
+        // Nothing reshapes: the kept glyphs are the full line's own, in place.
         let mut cx = test_cx();
         let s = style(16.0);
-        let line = "iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW";
-        let max_width = 60.0;
-
-        let got = cx.truncate_last_line(line, &s, max_width, 1.0);
-
-        assert!(
-            cx.measurement_count() <= MAX_TRUNCATION_MEASUREMENTS,
-            "the cap binds even when the estimate is useless: {}",
-            cx.measurement_count()
+        let full = cx.layout(WRAPPING_TEXT, &s, Some(60.0));
+        let bounded = cx.layout_bounded(
+            WRAPPING_TEXT,
+            &s,
+            Some(60.0),
+            Some(2),
+            TextOverflow::Ellipsis,
         );
-        assert!(got.ends_with(ELLIPSIS));
-        let width = cx.layout(&got, &s, None).size().width;
+        let full_glyphs = glyphs_of(&full.to_scene_runs(kurbo::Point::ORIGIN));
+        let cut = glyphs_of(&bounded.to_scene_runs(kurbo::Point::ORIGIN));
+        let ellipsis_glyphs = 1;
+        assert!(cut.len() > ellipsis_glyphs);
+        let kept = &cut[..cut.len() - ellipsis_glyphs];
+        let ids = |glyphs: &[(u32, f32, f32)]| glyphs.iter().map(|g| g.0).collect::<Vec<_>>();
+        assert_eq!(
+            ids(kept),
+            ids(&full_glyphs[..kept.len()]),
+            "every kept glyph is the full layout's own, in logical order"
+        );
+        // Up to the end of the full layout's own last visible line the glyphs
+        // sit where it put them; a refilled tail continues that line's pen.
+        let last_y = kept.last().map_or(0.0, |g| g.2);
+        let in_place = full_glyphs
+            .iter()
+            .take(kept.len())
+            .take_while(|g| g.2 <= last_y + 0.01)
+            .count();
+        assert_eq!(&kept[..in_place], &full_glyphs[..in_place]);
         assert!(
-            width <= f64::from(max_width),
-            "a cap-exhausted seek must still return a measured-fitting candidate: \
-             {width} > {max_width}"
+            kept[in_place.saturating_sub(1)..]
+                .windows(2)
+                .all(|w| w[0].1 < w[1].1 && (w[0].2 - w[1].2).abs() < 0.01),
+            "the refilled glyphs continue the last line: {:?}",
+            &kept[in_place.saturating_sub(1)..]
         );
     }
 
@@ -2029,11 +2213,6 @@ mod tests {
                 "{overflow:?}: parley's phantom trailing line must not inflate \
                  the reported height — a text ending in one newline, capped to \
                  one line, must paint and measure exactly one line tall"
-            );
-            assert_eq!(
-                cx.measurement_count(),
-                0,
-                "{overflow:?}: a fitting line must not enter the truncation walk"
             );
         }
     }
@@ -2104,11 +2283,6 @@ mod tests {
             fits.line_count(),
             3,
             "three content lines (one blank) fit max_lines(3) untouched"
-        );
-        assert_eq!(
-            cx.measurement_count(),
-            0,
-            "no truncation walk for text that fits"
         );
 
         let capped = cx.layout_bounded("a\n\nb", &s, Some(400.0), Some(2), TextOverflow::Clip);
@@ -2245,8 +2419,9 @@ mod tests {
                 .collect();
             assert_eq!(got, vec![id], "locale {loc:?}");
         }
-        let layout = cx.layout("日本語", &style(16.0), None);
-        let runs = layout.to_scene_runs(kurbo::Point::ORIGIN);
+        // Through parley: the editor's path, the one these fallbacks serve.
+        let layout = parley_layout(&mut cx, "日本語", &style(16.0), None);
+        let runs = crate::convert::layout_to_scene_runs(&layout, kurbo::Point::ORIGIN);
         let glyphs: Vec<_> = runs.iter().flat_map(|r| r.glyphs.iter()).collect();
         assert!(!glyphs.is_empty());
         assert!(
@@ -2308,7 +2483,9 @@ mod tests {
         fn flush(&self) {}
     }
 
-    /// Registers `bytes` in a system-less context; returns it and the family.
+    /// Registers `bytes` in a system-less context (an oracle over a backend
+    /// with no fonts, and a parley collection without system fonts); returns
+    /// it and the family.
     fn systemless_cx(bytes: &[u8]) -> (TextContext, String) {
         let mut cx = test_cx();
         cx.font_ctx.collection =
@@ -2316,12 +2493,15 @@ mod tests {
                 shared: false,
                 system_fonts: false,
             });
-        let id = cx
-            .font_ctx
-            .collection
-            .register_fonts(Blob::from(bytes.to_vec()), None)[0]
-            .0;
+        let blob = Blob::from(bytes.to_vec());
+        let id = cx.font_ctx.collection.register_fonts(blob.clone(), None)[0].0;
         let name = cx.font_ctx.collection.family_name(id).unwrap().to_owned();
+        cx.oracle = Oracle::new(
+            Box::new(oracle::synthetic::SyntheticBackend::new("systemless")),
+            RenderCapabilities::default(),
+            None,
+        );
+        cx.oracle.registry_mut().insert_blob(&blob);
         (cx, name)
     }
 

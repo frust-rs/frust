@@ -1,7 +1,8 @@
 //! The browser oracle backend (`wasm32`).
 //!
-//! Compiled only for `target_family = "wasm"` (the cfg gate is on this module's `mod` line in
-//! `oracle/mod.rs`).
+//! The platform backend only for `target_family = "wasm"` (the cfg gate is on this module's `mod`
+//! line in `oracle/mod.rs`); host test builds compile it too, so the unit tests below run on every
+//! host and in CI, not only under a wasm runner.
 //!
 //! # No system fonts in a browser
 //!
@@ -59,5 +60,57 @@ impl Backend for WebBackend {
 
     fn os_build_id(&self) -> String {
         String::from(env!("CARGO_PKG_VERSION"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::oracle::{RenderCapabilities, ScriptTag};
+    use crate::style::{FamilyName, FontFamily, FontStyle, FontWeight};
+
+    #[test]
+    fn every_question_answers_none() {
+        let mut backend = WebBackend::new();
+        let caps = RenderCapabilities::default();
+        let mut requests = vec![
+            FallbackRequest::new("Hello", ScriptTag(*b"Latn"), &FontFamily::SystemUi, caps),
+            FallbackRequest::new("\u{4E2D}", ScriptTag(*b"Hani"), &FontFamily::SystemUi, caps),
+            FallbackRequest::new(
+                "\u{1F600}",
+                ScriptTag::COMMON,
+                &FontFamily::stack_with_generic(Vec::<String>::new(), GenericSlot::Emoji),
+                caps,
+            ),
+            FallbackRequest::new("a", ScriptTag(*b"Latn"), &FontFamily::named("Inter"), caps),
+        ];
+        let mut styled = requests[0].clone();
+        styled.weight = FontWeight::BOLD;
+        styled.slant = FontStyle::Italic;
+        styled.locale = Some(String::from("ja"));
+        styled.families = vec![FamilyName::Generic(GenericSlot::Monospace)];
+        requests.push(styled);
+        for req in &requests {
+            assert_eq!(backend.resolve(req), None, "{req:?}");
+        }
+        for slot in [
+            GenericSlot::Monospace,
+            GenericSlot::SansSerif,
+            GenericSlot::Serif,
+            GenericSlot::SystemUi,
+            GenericSlot::Emoji,
+        ] {
+            assert_eq!(backend.default_family(slot), None, "{slot:?}");
+        }
+    }
+
+    #[test]
+    fn os_build_id_is_the_crate_version_and_stable() {
+        let backend = WebBackend::new();
+        let id = backend.os_build_id();
+        assert!(!id.is_empty());
+        assert_eq!(id, env!("CARGO_PKG_VERSION"));
+        assert_eq!(id, WebBackend::default().os_build_id());
+        assert_eq!(id, backend.os_build_id(), "asking again changes nothing");
     }
 }

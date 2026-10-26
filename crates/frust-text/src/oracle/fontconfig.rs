@@ -14,15 +14,17 @@
 //! families, weight, slant, width, the locale's language, and the cluster's code points as a
 //! charset), runs `FcConfigSubstitute` + `FcDefaultSubstitute`, and asks `FcFontSort` for the
 //! coverage-ranked candidate set (`trim = true`). Each candidate goes through
-//! `FcFontRenderPrepare` and its charset is tested for every code point of the cluster; the first
-//! full match becomes the [`FaceSource`] (`FC_FILE`, `FC_INDEX`, and `FC_POSTSCRIPT_NAME` when
-//! present, so the selector can tell the asked family from a substitute).
+//! `FcFontRenderPrepare` and its charset is tested for every code point of the cluster (a
+//! candidate without a charset is skipped, never taken as covering); the first full match becomes
+//! the [`FaceSource`] (`FC_FILE`, `FC_INDEX`, and `FC_POSTSCRIPT_NAME` when present, so the
+//! selector can tell the asked family from a substitute).
 //!
 //! Synthesis: this backend never reads `FC_EMBOLDEN` / `FC_MATRIX`, so every answer carries
 //! `synthesis_hint: None` (the oracle applies its own weight/slant rule); it never mixes the two.
 //! A variable font's named instance is a later refinement, so `variations` stays empty.
 //!
-//! Logging prints the cluster's code-point count and a coarse script, never its characters.
+//! Logging prints the cluster's code-point count and the request's script tag, never its
+//! characters.
 
 #![allow(unsafe_code)]
 
@@ -338,7 +340,9 @@ impl FontconfigBackend {
             let Some(prepared) = sorted.prepare(&pattern, i) else {
                 continue;
             };
-            if prepared.covers(&query.chars) == Some(false) {
+            // No charset is not coverage: only a candidate whose charset holds every code
+            // point is an answer.
+            if prepared.covers(&query.chars) != Some(true) {
                 continue;
             }
             let Some(file) = prepared.string(FC_FILE) else {
@@ -385,14 +389,14 @@ impl Backend for FontconfigBackend {
             weight: req.weight.value(),
             slant: req.slant,
             width: req.width,
-            lang: req.locale.as_deref().and_then(fc_lang),
+            lang: super::language_for(req.script, req.locale.as_deref()).and_then(fc_lang),
             color: generics.contains(&GenericSlot::Emoji),
         };
         let answer = self.answer(&query);
         log::debug!(
             "fontconfig match: {} code points, script {} -> {} ({} us)",
             req.chars.chars().count(),
-            cluster_script(&req.chars),
+            String::from_utf8_lossy(&req.script.0),
             if answer.is_some() { "hit" } else { "miss" },
             started.elapsed().as_micros(),
         );
@@ -514,22 +518,50 @@ fn os_release_identity(text: &str) -> String {
     parts.join(":")
 }
 
-/// A coarse script name for the cluster's first code point, for logs (never the characters).
-fn cluster_script(text: &str) -> &'static str {
-    match text.chars().next().map(u32::from) {
-        None => "none",
-        Some(0x0000..=0x024F) => "latin",
-        Some(0x0370..=0x03FF) => "greek",
-        Some(0x0400..=0x052F) => "cyrillic",
-        Some(0x0590..=0x05FF) => "hebrew",
-        Some(0x0600..=0x06FF) => "arabic",
-        Some(0x0900..=0x0DFF) => "indic",
-        Some(0x0E00..=0x0EFF) => "thai",
-        Some(0x1100..=0x11FF | 0xAC00..=0xD7AF) => "hangul",
-        Some(0x3040..=0x30FF) => "kana",
-        Some(0x3400..=0x9FFF | 0x20000..=0x2FFFF) => "han",
-        Some(0x1F000..=0x1FAFF | 0x2600..=0x27BF) => "emoji",
-        Some(_) => "other",
+#[cfg(test)]
+impl FontconfigBackend {
+    /// How many installed faces cover code point `c`, by `FcFontList` over a charset pattern —
+    /// a precondition independent of [`Self::answer`]'s sort-and-prepare path, so a host test
+    /// can tell "no face covers this here" from a backend bug. `None` without fontconfig.
+    fn faces_covering(&self, c: u32) -> Option<usize> {
+        let lib = self.lib.as_ref()?;
+        let mut pattern = Pattern::new(lib)?;
+        pattern.add_charset(&[c]);
+        listed(lib, &pattern)
+    }
+
+    /// How many installed faces belong to `family`, by `FcFontList` over a family pattern (no
+    /// `fc-list` subprocess). `None` without fontconfig.
+    fn faces_in_family(&self, family: &str) -> Option<usize> {
+        let lib = self.lib.as_ref()?;
+        let mut pattern = Pattern::new(lib)?;
+        pattern.add_string(FC_FAMILY, family);
+        listed(lib, &pattern)
+    }
+}
+
+/// How many installed faces `FcFontList` lists for `pattern`.
+#[cfg(test)]
+fn listed(lib: &Library, pattern: &Pattern<'_>) -> Option<usize> {
+    // SAFETY: `FcObjectSetCreate` returns an owned object set (null on OOM, checked) that is
+    // destroyed exactly once below; `FC_FILE` is NUL-terminated and copied by
+    // `FcObjectSetAdd`. A null config selects the current configuration and `pattern.raw` is
+    // live for the call. The returned font set is owned here: `nfont` is read while it is
+    // live and it is destroyed exactly once with the matching destroy function.
+    unsafe {
+        let objects = (lib.0.FcObjectSetCreate)();
+        if objects.is_null() {
+            return None;
+        }
+        (lib.0.FcObjectSetAdd)(objects, FC_FILE.as_ptr());
+        let set = (lib.0.FcFontList)(ptr::null_mut(), pattern.raw, objects);
+        (lib.0.FcObjectSetDestroy)(objects);
+        if set.is_null() {
+            return None;
+        }
+        let count = usize::try_from((*set).nfont).unwrap_or(0);
+        (lib.0.FcFontSetDestroy)(set);
+        Some(count)
     }
 }
 
@@ -571,11 +603,8 @@ mod tests {
         }
     }
 
-    fn family_installed(family: &str) -> bool {
-        std::process::Command::new("fc-list")
-            .arg(format!(":family={family}"))
-            .output()
-            .is_ok_and(|o| !o.stdout.is_empty())
+    fn family_installed(backend: &FontconfigBackend, family: &str) -> bool {
+        backend.faces_in_family(family).is_some_and(|n| n > 0)
     }
 
     #[test]
@@ -590,16 +619,92 @@ mod tests {
         assert!(answer.postscript_name.is_some());
     }
 
+    /// The answer's PostScript name plus every family, full and PostScript `name` record of
+    /// its file, lower-cased, for the "looks CJK" check.
+    fn face_names(source: &FaceSource) -> Vec<String> {
+        use read_fonts::{FontRef, TableProvider, types::NameId};
+        let mut names: Vec<String> = source.postscript_name.iter().cloned().collect();
+        let FaceLocation::Path(path) = &source.location else {
+            panic!("expected a path");
+        };
+        let bytes = std::fs::read(path).expect("the answered file is readable");
+        if let Ok(table) = FontRef::from_index(&bytes, source.index).and_then(|f| f.name()) {
+            let ids = [
+                NameId::FAMILY_NAME,
+                NameId::TYPOGRAPHIC_FAMILY_NAME,
+                NameId::FULL_NAME,
+                NameId::POSTSCRIPT_NAME,
+            ];
+            names.extend(
+                table
+                    .name_record()
+                    .iter()
+                    .filter(|record| ids.contains(&record.name_id()))
+                    .filter_map(|record| record.string(table.string_data()).ok())
+                    .map(|string| string.chars().collect::<String>()),
+            );
+        }
+        names.iter().map(|n| n.to_lowercase()).collect()
+    }
+
+    /// Name fragments of the Han-covering families a Linux host ships (Noto/Source Han CJK,
+    /// Droid Sans Fallback, WenQuanYi, AR PL, IPA, Takao, VL Gothic, Sarasa, ...).
+    const CJK_MARKERS: [&str; 22] = [
+        "cjk",
+        "droid sans fallback",
+        "droidsansfallback",
+        "wenquanyi",
+        "wqy",
+        "source han",
+        "sourcehan",
+        "noto sans sc",
+        "noto sans tc",
+        "noto sans jp",
+        "noto sans kr",
+        "noto serif sc",
+        "notosanssc",
+        "notosansjp",
+        "ar pl",
+        "uming",
+        "ukai",
+        "ipa",
+        "takao",
+        "vl gothic",
+        "sarasa",
+        "unifont",
+    ];
+
     #[test]
-    fn han_resolves_to_a_covering_face() {
+    fn han_resolves_to_a_cjk_face() {
         let Some(mut b) = host() else { return };
-        let mut req = generic("中文");
-        req.locale = Some(String::from("zh-Hans"));
-        // Whichever Han-covering face the host's configuration prefers (Noto CJK, Droid
-        // Sans Fallback, ...); the charset test inside the backend guarantees coverage.
-        assert!(b.resolve(&req).is_some());
-        req.locale = Some(String::from("ja"));
-        assert!(b.resolve(&req).is_some());
+        // The precondition comes from `FcFontList`, not from `resolve()`: a backend bug that
+        // misses Han must fail here, never skip.
+        let covering = b.faces_covering(0x4E2D).expect("FcFontList answers");
+        if covering == 0 {
+            eprintln!("skipping: no installed face covers U+4E2D");
+            return;
+        }
+        let mut req = generic("\u{4E2D}\u{6587}");
+        for locale in ["zh-Hans", "ja"] {
+            req.locale = Some(String::from(locale));
+            let answer = b
+                .resolve(&req)
+                .unwrap_or_else(|| panic!("{covering} faces cover U+4E2D, yet {locale} missed"));
+            let names = face_names(&answer);
+            assert!(
+                names
+                    .iter()
+                    .any(|name| CJK_MARKERS.iter().any(|marker| name.contains(marker))),
+                "{locale}: the Han answer does not look CJK: {names:?} ({answer:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn a_code_point_no_face_has_lists_nothing() {
+        let Some(b) = host() else { return };
+        assert_eq!(b.faces_covering(0x10_FFFD), Some(0));
+        assert!(b.faces_covering(u32::from('a')).is_some_and(|n| n > 0));
     }
 
     #[test]
@@ -607,7 +712,7 @@ mod tests {
         let Some(mut b) = host() else { return };
         let req = request("\u{1F600}", vec![FamilyName::Generic(GenericSlot::Emoji)]);
         let answer = b.resolve(&req);
-        if family_installed("Noto Color Emoji") {
+        if family_installed(&b, "Noto Color Emoji") {
             let answer = answer.expect("emoji resolves");
             assert!(file_name(&answer).contains("emoji"), "{answer:?}");
         }
@@ -623,7 +728,7 @@ mod tests {
     #[test]
     fn installed_named_family_answers_itself() {
         let Some(mut b) = host() else { return };
-        if !family_installed("Noto Sans CJK JP") {
+        if !family_installed(&b, "Noto Sans CJK JP") {
             return;
         }
         let req = request(

@@ -29,10 +29,10 @@ thiserror.workspace = true
 log.workspace = true
 
 # Oracle backends (`src/oracle/{apple,android,dwrite,fontconfig}.rs`). The objc2* rows are direct
-# `version` rows with minimal features, as frust-engine's: Cargo refuses `default-features = false`
-# on a workspace-inherited objc2* row.
+# `version` rows with minimal features, as frust-engine's (Cargo refuses `default-features = false`
+# on an inherited objc2* row); `CFLocale` + `CFArray` read the preferred languages for the Han face.
 [target.'cfg(target_vendor = "apple")'.dependencies]
-objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFString", "CFURL", "CFNumber", "CFDictionary"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFString", "CFURL", "CFNumber", "CFDictionary", "CFArray", "CFLocale"] }
 objc2-core-text = { version = "0.3", default-features = false, features = ["std", "CTFont", "CTFontDescriptor", "CTFontTraits"] }
 
 # `api-level-29`: the NDK system-font API (`ASystemFontIterator`/`AFontMatcher`) is API 29.

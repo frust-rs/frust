@@ -17,6 +17,9 @@
 //! One exception: a hidden face with only `hvgl` glyph data is re-asked under a public base
 //! (Helvetica, same traits and locale), whose public answer replaces it. `CTFontCreateWithName` is
 //! never called: on a hidden name it returns Times.
+//!
+//! [`preferred_languages`] reads the user's language list (`CFLocaleCopyPreferredLanguages`),
+//! from which `oracle/mod.rs` picks the Han language of a Han question that carries no locale.
 
 #![allow(unsafe_code)]
 
@@ -28,7 +31,9 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use objc2_core_foundation::{CFDictionary, CFNumber, CFRange, CFRetained, CFString, CFType, CFURL};
+use objc2_core_foundation::{
+    CFArray, CFDictionary, CFLocale, CFNumber, CFRange, CFRetained, CFString, CFType, CFURL,
+};
 use objc2_core_text::{
     CTFont, CTFontDescriptor, CTFontSymbolicTraits, CTFontUIFontType, kCTFontFamilyNameAttribute,
     kCTFontSlantTrait, kCTFontSymbolicTrait, kCTFontTraitsAttribute, kCTFontURLAttribute,
@@ -39,7 +44,7 @@ use read_fonts::tables::name::Name;
 use read_fonts::types::NameId;
 use read_fonts::{FontData, FontRead};
 
-use super::{Backend, FaceSource, FallbackRequest, VariationSetting};
+use super::{Backend, FaceSource, FallbackRequest, VariationSetting, language_for};
 use crate::style::{FamilyName, FontStyle, GenericSlot};
 
 /// Point size of every base font. Only `opsz` depends on it, and `opsz` is dropped.
@@ -319,6 +324,24 @@ mod ct {
 }
 
 use ct::Font;
+
+/// The user's preferred languages, most preferred first (`CFLocaleCopyPreferredLanguages`): the
+/// System Settings list on macOS, the device's (or the app's own) list on iOS. Read once per
+/// process by `oracle/mod.rs`; no subprocess, no preferences file.
+pub(super) fn preferred_languages() -> Vec<String> {
+    let Some(languages) = CFLocale::preferred_languages() else {
+        return Vec::new();
+    };
+    // SAFETY: CFLocaleCopyPreferredLanguages documents a CFArray of CFStrings, so every element
+    // is a CoreFoundation object and viewing the array as one of `CFType` is sound; the cast
+    // moves the same +1 reference, and each element is still type-checked by `downcast` below.
+    let languages: CFRetained<CFArray<CFType>> = unsafe { CFRetained::cast_unchecked(languages) };
+    languages
+        .iter()
+        .filter_map(|language| language.downcast::<CFString>().ok())
+        .map(|language| language.to_string())
+        .collect()
+}
 
 /// One face of a font file, as the tables-only walk read it.
 #[derive(Clone, Debug, Default)]
@@ -672,7 +695,7 @@ impl State {
     /// The base font the request's family chain names: its first named family CoreText has,
     /// else its first generic slot (`SystemUi` when it names none).
     fn request_base(&mut self, req: &FallbackRequest, traits: Traits) -> Option<&Font> {
-        let language = req.locale.as_deref();
+        let language = language_for(req.script, req.locale.as_deref());
         let named = req.families.iter().find_map(|f| match f {
             FamilyName::Named(name) => self
                 .base(BaseFamily::Named(name.clone()), traits, None)
@@ -696,10 +719,11 @@ impl State {
     /// The whole per-miss resolution, see the module docs.
     fn resolve(&mut self, req: &FallbackRequest) -> Option<Resolution> {
         let traits = Traits::of(req);
-        let language = req.locale.as_deref();
+        let language = language_for(req.script, req.locale.as_deref());
+        let query = query_text(req);
         let first = self
             .request_base(req, traits)?
-            .for_string(&req.chars, language)?;
+            .for_string(&query, language)?;
         let mapped = self.map(&first)?;
         if mapped.hidden && mapped.hvgl_only {
             let public = self
@@ -708,7 +732,7 @@ impl State {
                     traits,
                     None,
                 )
-                .and_then(|base| base.for_string(&req.chars, language));
+                .and_then(|base| base.for_string(&query, language));
             if let Some(public) = public
                 && !public.postscript_name().starts_with('.')
                 && let Some(source) = self.answer(&public)
@@ -741,6 +765,22 @@ impl State {
             .generic_base(generic, Traits::REGULAR, None)?
             .for_string(sample, None)?;
         self.answer(&found)
+    }
+}
+
+/// The text CoreText is asked about. Danda and double danda (U+0964, U+0965) are shared by the
+/// Indic scripts and CoreText ignores the language for them (it answers `.SFBangla`), so a
+/// danda-only Devanagari cluster is asked with a Devanagari letter before it, which the
+/// cascade resolves to the Devanagari face that also covers the danda.
+fn query_text(req: &FallbackRequest) -> std::borrow::Cow<'_, str> {
+    let danda_only = req
+        .chars
+        .chars()
+        .all(|c| matches!(c, '\u{0964}' | '\u{0965}'));
+    if req.script.0 == *b"Deva" && danda_only && !req.chars.is_empty() {
+        std::borrow::Cow::Owned(format!("\u{0905}{}", req.chars))
+    } else {
+        std::borrow::Cow::Borrowed(&req.chars)
     }
 }
 
@@ -1281,5 +1321,132 @@ mod tests {
         } else {
             assert!(!build.is_empty());
         }
+    }
+
+    /// A request with a cluster script, no locale.
+    fn scripted(chars: &str, script: &[u8; 4]) -> FallbackRequest {
+        let mut req = request(chars, None);
+        req.script = ScriptTag(*script);
+        req
+    }
+
+    #[test]
+    fn kana_without_a_locale_resolve_to_hiragino() {
+        if !on_macos("kana_without_a_locale_resolve_to_hiragino") {
+            return;
+        }
+        let mut backend = CoreTextBackend::new();
+        let kana = backend
+            .resolve(&scripted(
+                "\u{306e}\u{30c6}\u{30ad}\u{30b9}\u{30c8}",
+                b"Hira",
+            ))
+            .expect("kana resolve");
+        let name = ps(&kana);
+        println!("kana -> {name}");
+        // Hiragino is hidden (`.HiraKakuInterface-W4`) or public (`HiraginoSans-W4`); a Mac
+        // without either must still not land on the symbols fallback.
+        let hiragino = [
+            "Hiragino",
+            ".Hiragino",
+            "HiraKaku",
+            ".HiraKaku",
+            ".HiraMaru",
+            "HiraMin",
+        ]
+        .iter()
+        .any(|p| name.starts_with(p));
+        assert!(
+            hiragino || !name.starts_with(".CJKSymbolsFallback"),
+            "{name}"
+        );
+        assert!(hiragino, "kana resolved to {name}, not a Hiragino face");
+    }
+
+    #[test]
+    fn han_without_a_locale_resolves_to_a_cjk_face() {
+        if !on_macos("han_without_a_locale_resolves_to_a_cjk_face") {
+            return;
+        }
+        let mut backend = CoreTextBackend::new();
+        let han = backend
+            .resolve(&scripted("\u{65e5}\u{672c}\u{8a9e}", b"Hani"))
+            .expect("han resolves");
+        println!("han -> {}", ps(&han));
+        let name = ps(&han);
+        assert!(
+            [
+                "PingFang",
+                "Hiragino",
+                ".PingFang",
+                ".Hiragino",
+                "STHeiti",
+                "AppleSDGothic"
+            ]
+            .iter()
+            .any(|p| name.starts_with(p)),
+            "{name}"
+        );
+    }
+
+    #[test]
+    fn every_preferred_han_language_picks_its_own_face() {
+        if !on_macos("every_preferred_han_language_picks_its_own_face") {
+            return;
+        }
+        let mut backend = CoreTextBackend::new();
+        // 直 and 骨 differ in glyph shape between the Han regions.
+        for (language, prefixes) in [
+            ("zh-Hans", &["PingFangSC"][..]),
+            ("zh-Hant", &["PingFangTC"][..]),
+            ("zh-HK", &["PingFangHK"][..]),
+            (
+                "ja",
+                &["Hiragino", ".Hiragino", "HiraKaku", ".HiraKaku"][..],
+            ),
+            ("ko", &["AppleSDGothic", ".AppleSDGothic"][..]),
+        ] {
+            let mut req = scripted("\u{76f4}\u{9aa8}", b"Hani");
+            req.locale = Some(language.to_owned());
+            let face = backend.resolve(&req).expect("han resolves");
+            println!("han under {language} -> {}", ps(&face));
+            assert!(
+                prefixes.iter().any(|p| ps(&face).starts_with(p)),
+                "{language}: {}",
+                ps(&face)
+            );
+        }
+    }
+
+    #[test]
+    fn the_preferred_language_list_is_read_without_a_subprocess() {
+        let started = Instant::now();
+        let languages = preferred_languages();
+        println!(
+            "CFLocaleCopyPreferredLanguages -> {languages:?} ({} us)",
+            started.elapsed().as_micros()
+        );
+        assert!(!languages.is_empty());
+        assert!(languages.iter().all(|tag| !tag.is_empty()));
+    }
+
+    #[test]
+    fn a_danda_in_devanagari_matches_its_neighbours() {
+        if !on_macos("a_danda_in_devanagari_matches_its_neighbours") {
+            return;
+        }
+        let mut backend = CoreTextBackend::new();
+        let danda = backend
+            .resolve(&scripted("\u{0964}", b"Deva"))
+            .expect("danda resolves");
+        let letters = backend
+            .resolve(&scripted(
+                "\u{0928}\u{092e}\u{0938}\u{094d}\u{0924}\u{0947}",
+                b"Deva",
+            ))
+            .expect("devanagari resolves");
+        println!("danda -> {}, letters -> {}", ps(&danda), ps(&letters));
+        assert!(!ps(&danda).contains("Bangla"), "{}", ps(&danda));
+        assert_eq!(ps(&danda), ps(&letters));
     }
 }
