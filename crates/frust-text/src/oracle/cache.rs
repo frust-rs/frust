@@ -14,13 +14,25 @@
 //! header carries a [`VersionStamp`] (OS build id, crate version), the size +
 //! mtime of every font file an entry names, and the font directories' mtimes.
 //! A version or file mismatch, or a face whose file is not stamped, discards
-//! the whole file; a font-directory change drops only the misses. Blob faces
-//! are never written.
+//! the whole file; a font-directory change drops the misses and the
+//! *substitutes* (a face that answered a named-family request but is not that
+//! family, so installing the family must be noticed), and keeps every other
+//! face, which its own file stamp validates. Blob faces are never written.
 //!
 //! Writes are write-behind ([`WRITE_BEHIND_ENTRIES`] new answers, or the first
 //! lookup after [`IDLE_FLUSH_AFTER`] without one), explicit
 //! ([`FallbackCache::persist`]) and final (the owner's `Drop`), each through a
-//! per-call temp file (PID + random nonce), fsync and rename.
+//! per-call temp file (PID + random nonce, mode `0600` on unix), fsync and
+//! rename.
+//!
+//! The two write-behind triggers fire inside a font lookup, so they never
+//! touch the disk there: the lookup snapshots the entries in memory and hands
+//! the snapshot to a background writer thread, which stamps the font files,
+//! serialises, writes and fsyncs. One write is in flight at a time — a trigger
+//! that finds the writer busy re-arms instead of waiting. An explicit
+//! [`FallbackCache::persist`] stays synchronous: it joins the writer first,
+//! then writes anything newer on the caller's thread. A target without
+//! threads writes on the caller's thread.
 
 use std::collections::hash_map::RandomState;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -30,6 +42,7 @@ use std::hash::{BuildHasher, Hasher};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -51,7 +64,8 @@ pub(crate) const MEMORY_CAPACITY: usize = 4096;
 pub(crate) const PERSIST_FILE_NAME: &str = "font-fallback.json";
 
 /// Bumped whenever the serialised shape changes; a mismatch discards the file.
-const FORMAT_VERSION: u32 = 3;
+/// 4: face entries carry `substitute`.
+const FORMAT_VERSION: u32 = 4;
 
 /// New answers since the last write that trigger a write-behind flush.
 ///
@@ -335,8 +349,36 @@ enum PersistedAnswer {
         postscript_name: Option<String>,
         hidden: bool,
         scale: Option<f32>,
+        /// Not the family the request named (see [`FallbackCache::insert_entry`]):
+        /// expires with the misses.
+        substitute: bool,
     },
     Miss,
+}
+
+impl PersistedAnswer {
+    /// The on-disk form of an in-memory answer; `None` for a blob face, which
+    /// is never written.
+    fn of(answer: &CachedAnswer, substitute: bool) -> Option<Self> {
+        Some(match answer {
+            CachedAnswer::Miss => Self::Miss,
+            CachedAnswer::Face(source) => {
+                let FaceLocation::Path(path) = &source.location else {
+                    return None;
+                };
+                Self::Face {
+                    path: path.clone(),
+                    index: source.index,
+                    variations: source.variations.clone(),
+                    synthesis_hint: source.synthesis_hint.clone(),
+                    postscript_name: source.postscript_name.clone(),
+                    hidden: source.hidden,
+                    scale: source.scale,
+                    substitute,
+                }
+            }
+        })
+    }
 }
 
 /// The persistent file's shape.
@@ -373,6 +415,8 @@ pub(crate) struct CacheStats {
     pub(crate) writes: usize,
     /// Loaded misses dropped because a font directory changed.
     pub(crate) expired_misses: usize,
+    /// Loaded substitutes dropped because a font directory changed.
+    pub(crate) expired_substitutes: usize,
 }
 
 /// Resolves the persistent file's path on first use; `None` means "not yet"
@@ -425,7 +469,76 @@ enum Persist {
 struct Slot {
     key: Option<CacheKey>,
     answer: CachedAnswer,
+    /// A face that is not the family its request named (see
+    /// [`FallbackCache::insert_entry`]).
+    substitute: bool,
     tick: u64,
+}
+
+/// Everything one write needs, detached from the cache: built in memory on
+/// the caller's thread, then stamped, serialised and written wherever it runs.
+#[derive(Debug)]
+struct Snapshot {
+    path: PathBuf,
+    stamp: VersionStamp,
+    dirs: Vec<DirStamp>,
+    /// Least recently used first.
+    entries: Vec<(u64, PersistedAnswer)>,
+}
+
+impl Snapshot {
+    /// Stamps every font file the entries name (an entry whose file cannot be
+    /// stamped is left out), serialises and writes atomically.
+    fn write(self) -> io::Result<()> {
+        let mut files: Vec<FileStamp> = Vec::new();
+        let mut stamped: HashSet<PathBuf> = HashSet::new();
+        let mut unstampable: HashSet<PathBuf> = HashSet::new();
+        let entries: Vec<(u64, PersistedAnswer)> = self
+            .entries
+            .into_iter()
+            .filter(|(_, answer)| match answer {
+                PersistedAnswer::Miss => true,
+                PersistedAnswer::Face { path, .. } => {
+                    if stamped.contains(path) {
+                        return true;
+                    }
+                    if unstampable.contains(path) {
+                        return false;
+                    }
+                    match FileStamp::of(path) {
+                        Some(stamp) => {
+                            stamped.insert(path.clone());
+                            files.push(stamp);
+                            true
+                        }
+                        None => {
+                            unstampable.insert(path.clone());
+                            false
+                        }
+                    }
+                }
+            })
+            .collect();
+        let persisted = PersistedCache {
+            format: FORMAT_VERSION,
+            stamp: self.stamp,
+            dirs: self.dirs,
+            files,
+            entries,
+        };
+        let json = serde_json::to_vec(&persisted).map_err(io::Error::other)?;
+        write_atomically(&self.path, &json)
+    }
+}
+
+/// The background write in flight, if any.
+#[derive(Debug, Default)]
+struct Writer {
+    handle: Option<JoinHandle<io::Result<()>>>,
+    /// Tests: the next background write waits for a message (or the sender's
+    /// drop) before it touches the disk.
+    #[cfg(test)]
+    gate: Option<std::sync::mpsc::Receiver<()>>,
 }
 
 /// The bounded LRU plus its optional persistent copy.
@@ -447,6 +560,7 @@ pub(crate) struct FallbackCache {
     idle_after: Duration,
     load_time: Duration,
     stats: CacheStats,
+    writer: Writer,
 }
 
 impl FallbackCache {
@@ -464,6 +578,7 @@ impl FallbackCache {
             idle_after: IDLE_FLUSH_AFTER,
             load_time: Duration::ZERO,
             stats: CacheStats::default(),
+            writer: Writer::default(),
         }
     }
 
@@ -508,6 +623,11 @@ impl FallbackCache {
     /// The answer for `key`, marking it most recently used. An in-memory miss
     /// first attaches a pending persistent copy and looks again.
     pub(crate) fn get(&mut self, key: &CacheKey) -> Option<CachedAnswer> {
+        self.get_entry(key).map(|(answer, _)| answer)
+    }
+
+    /// [`Self::get`], with whether the answer was recorded as a substitute.
+    pub(crate) fn get_entry(&mut self, key: &CacheKey) -> Option<(CachedAnswer, bool)> {
         let digest = key.digest();
         let mut found = self.lookup(digest, key);
         if found.is_none() && self.try_attach() {
@@ -522,7 +642,7 @@ impl FallbackCache {
         found
     }
 
-    fn lookup(&mut self, digest: u64, key: &CacheKey) -> Option<CachedAnswer> {
+    fn lookup(&mut self, digest: u64, key: &CacheKey) -> Option<(CachedAnswer, bool)> {
         self.tick += 1;
         let tick = self.tick;
         let slot = self.entries.get_mut(&digest)?;
@@ -532,21 +652,30 @@ impl FallbackCache {
             None => slot.key = Some(key.clone()),
         }
         let old = std::mem::replace(&mut slot.tick, tick);
-        let answer = slot.answer.clone();
+        let found = (slot.answer.clone(), slot.substitute);
         self.order.remove(&old);
         self.order.insert(tick, digest);
-        Some(answer)
+        Some(found)
     }
 
     /// Records `answer` for `key`, evicting the least recently used entry when
     /// over capacity, and writes behind once enough answers accumulated.
     pub(crate) fn insert(&mut self, key: CacheKey, answer: CachedAnswer) {
+        self.insert_entry(key, answer, false);
+    }
+
+    /// [`Self::insert`], marking whether the answer is a *substitute*: a face
+    /// that answered a named-family request but is not that family (the OS
+    /// cascade substituting). A substitute expires like a miss when a font
+    /// directory changes, so installing the asked family is noticed.
+    pub(crate) fn insert_entry(&mut self, key: CacheKey, answer: CachedAnswer, substitute: bool) {
         self.tick += 1;
         let tick = self.tick;
         let digest = key.digest();
         let slot = Slot {
             key: Some(key),
             answer,
+            substitute,
             tick,
         };
         if let Some(old) = self.entries.insert(digest, slot) {
@@ -559,7 +688,7 @@ impl FallbackCache {
         if self.is_persistent() {
             self.last_change = Some(Instant::now());
             if self.unwritten >= self.write_behind {
-                self.flush_quietly("write-behind");
+                self.write_behind("write-behind");
             }
         }
     }
@@ -576,11 +705,11 @@ impl FallbackCache {
 
     /// Adds loaded entries as *older* than everything already in memory (an
     /// answer computed this process wins over its on-disk copy).
-    fn merge_older(&mut self, loaded: Vec<(u64, CachedAnswer)>) {
+    fn merge_older(&mut self, loaded: Vec<(u64, CachedAnswer, bool)>) {
         let existing: Vec<u64> = self.order.values().copied().collect();
         let mut order = BTreeMap::new();
         let mut tick = 0;
-        for (digest, answer) in loaded {
+        for (digest, answer, substitute) in loaded {
             if self.entries.contains_key(&digest) {
                 continue;
             }
@@ -588,6 +717,7 @@ impl FallbackCache {
             let slot = Slot {
                 key: None,
                 answer,
+                substitute,
                 tick,
             };
             self.entries.insert(digest, slot);
@@ -685,10 +815,18 @@ impl FallbackCache {
         if !all_stamped {
             return LoadOutcome::Invalidated("unstamped face path");
         }
-        let expire_misses = persisted.dirs != dirs;
+        // A font-directory change expires what an install can change: the
+        // misses, and the substitutes (the asked family may now be installed).
+        let expire = persisted.dirs != dirs;
         let mut loaded = Vec::with_capacity(persisted.entries.len());
         for (digest, answer) in persisted.entries {
-            let answer = match answer {
+            let entry = match answer {
+                PersistedAnswer::Face {
+                    substitute: true, ..
+                } if expire => {
+                    self.stats.expired_substitutes += 1;
+                    continue;
+                }
                 PersistedAnswer::Face {
                     path,
                     index,
@@ -697,34 +835,38 @@ impl FallbackCache {
                     postscript_name,
                     hidden,
                     scale,
-                } => CachedAnswer::Face(FaceSource {
-                    location: FaceLocation::Path(path),
-                    index,
-                    variations,
-                    synthesis_hint,
-                    postscript_name,
-                    hidden,
-                    scale,
-                }),
-                PersistedAnswer::Miss if expire_misses => {
+                    substitute,
+                } => (
+                    CachedAnswer::Face(FaceSource {
+                        location: FaceLocation::Path(path),
+                        index,
+                        variations,
+                        synthesis_hint,
+                        postscript_name,
+                        hidden,
+                        scale,
+                    }),
+                    substitute,
+                ),
+                PersistedAnswer::Miss if expire => {
                     self.stats.expired_misses += 1;
                     continue;
                 }
-                PersistedAnswer::Miss => CachedAnswer::Miss,
+                PersistedAnswer::Miss => (CachedAnswer::Miss, false),
             };
-            loaded.push((digest, answer));
+            loaded.push((digest, entry.0, entry.1));
         }
         let count = loaded.len();
         self.merge_older(loaded);
-        if expire_misses {
-            // Rewrite with the new directory stamps and without the misses.
+        if expire {
+            // Rewrite with the new directory stamps, without the expired entries.
             self.dirty = true;
             self.last_change = Some(Instant::now());
         }
         LoadOutcome::Loaded(count)
     }
 
-    /// Flushes when dirty and no answer arrived for the idle interval.
+    /// Writes behind when dirty and no answer arrived for the idle interval.
     fn flush_if_idle(&mut self) {
         if !self.dirty {
             return;
@@ -732,79 +874,160 @@ impl FallbackCache {
         if let Some(last) = self.last_change
             && last.elapsed() >= self.idle_after
         {
-            self.flush_quietly("idle");
+            self.write_behind("idle");
         }
     }
 
-    /// A background-trigger flush: failures are logged, and a flush that
-    /// could not write (an error, or a path not yet resolvable) re-arms both
-    /// triggers rather than retrying on every call.
-    fn flush_quietly(&mut self, trigger: &str) {
-        if let Err(err) = self.persist() {
-            log::debug!("frust-text: font fallback cache {trigger} write failed: {err}");
-        }
+    /// Re-arms both triggers after a trigger that could not write (the writer
+    /// busy, a path not yet resolvable, an error), rather than retrying on
+    /// every call.
+    fn rearm(&mut self) {
         if self.dirty {
             self.unwritten = 0;
             self.last_change = Some(Instant::now());
         }
     }
 
-    /// Writes the persistent copy if one is bound (resolving a pending path
-    /// first) and anything changed since it was loaded or last written. A
-    /// no-op otherwise; an unresolved path leaves the cache dirty.
-    pub(crate) fn persist(&mut self) -> io::Result<()> {
-        if !self.dirty {
-            return Ok(());
+    /// A trigger fired inside a lookup: hand a snapshot to the background
+    /// writer and return without touching the disk. One write at a time — a
+    /// trigger that finds the writer busy re-arms instead of waiting.
+    fn write_behind(&mut self, trigger: &str) {
+        if self.writer_busy() || !self.dirty {
+            self.rearm();
+            return;
         }
         self.try_attach();
-        let Persist::Attached(persistence) = &self.persist else {
-            return Ok(());
+        let Some(snapshot) = self.snapshot() else {
+            self.rearm();
+            return;
         };
-        let mut files: Vec<FileStamp> = Vec::new();
-        let mut entries = Vec::with_capacity(self.order.len());
-        for digest in self.order.values() {
-            let Some(slot) = self.entries.get(digest) else {
-                continue;
-            };
-            let persisted = match &slot.answer {
-                CachedAnswer::Miss => PersistedAnswer::Miss,
-                CachedAnswer::Face(source) => {
-                    let FaceLocation::Path(path) = &source.location else {
-                        continue;
-                    };
-                    if !files.iter().any(|f| &f.path == path) {
-                        let Some(stamp) = FileStamp::of(path) else {
-                            continue;
-                        };
-                        files.push(stamp);
-                    }
-                    PersistedAnswer::Face {
-                        path: path.clone(),
-                        index: source.index,
-                        variations: source.variations.clone(),
-                        synthesis_hint: source.synthesis_hint.clone(),
-                        postscript_name: source.postscript_name.clone(),
-                        hidden: source.hidden,
-                        scale: source.scale,
-                    }
+        #[cfg(test)]
+        let gate = self.writer.gate.take();
+        let spawned = std::thread::Builder::new()
+            .name(String::from("frust-text-font-cache"))
+            .spawn(move || {
+                #[cfg(test)]
+                if let Some(gate) = gate {
+                    let _ = gate.recv();
                 }
-            };
-            entries.push((*digest, persisted));
+                snapshot.write()
+            });
+        match spawned {
+            Ok(handle) => {
+                self.writer.handle = Some(handle);
+                // The snapshot holds everything so far; a later answer
+                // dirties the cache again.
+                self.dirty = false;
+                self.unwritten = 0;
+                self.last_change = None;
+            }
+            // No threads on this target (wasm32-unknown-unknown): write here.
+            Err(_) => {
+                if let Err(err) = self.write_now() {
+                    log::debug!("frust-text: font fallback cache {trigger} write failed: {err}");
+                    self.rearm();
+                }
+            }
         }
-        let persisted = PersistedCache {
-            format: FORMAT_VERSION,
+    }
+
+    /// Whether a background write is still running; a finished one is reaped
+    /// (its outcome recorded) without blocking.
+    fn writer_busy(&mut self) -> bool {
+        match &self.writer.handle {
+            Some(handle) if !handle.is_finished() => true,
+            Some(_) => {
+                self.join_writer();
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// Waits for the background write in flight, if any, and records its
+    /// outcome: a failed write leaves the cache dirty for the next flush.
+    pub(crate) fn join_writer(&mut self) {
+        let Some(handle) = self.writer.handle.take() else {
+            return;
+        };
+        let failure = match handle.join() {
+            Ok(Ok(())) => {
+                self.stats.writes += 1;
+                return;
+            }
+            Ok(Err(err)) => err.to_string(),
+            Err(_) => String::from("the writer thread panicked"),
+        };
+        log::debug!("frust-text: font fallback cache background write failed: {failure}");
+        self.dirty = true;
+        self.last_change = Some(Instant::now());
+    }
+
+    /// Tests: holds the next background write until the returned sender sends
+    /// (or is dropped), so a test can observe a trigger returning first.
+    #[cfg(test)]
+    pub(crate) fn hold_next_background_write(&mut self) -> std::sync::mpsc::Sender<()> {
+        let (release, gate) = std::sync::mpsc::channel();
+        self.writer.gate = Some(gate);
+        release
+    }
+
+    /// The entries as they would be written, or `None` while no persistent
+    /// file is attached. Memory only: no disk access.
+    fn snapshot(&self) -> Option<Snapshot> {
+        let Persist::Attached(persistence) = &self.persist else {
+            return None;
+        };
+        let entries = self
+            .order
+            .values()
+            .filter_map(|digest| {
+                let slot = self.entries.get(digest)?;
+                Some((*digest, PersistedAnswer::of(&slot.answer, slot.substitute)?))
+            })
+            .collect();
+        Some(Snapshot {
+            path: persistence.path.clone(),
             stamp: persistence.stamp.clone(),
             dirs: persistence.dirs.clone(),
-            files,
             entries,
+        })
+    }
+
+    /// Writes the attached copy on this thread (nothing without one).
+    fn write_now(&mut self) -> io::Result<()> {
+        let Some(snapshot) = self.snapshot() else {
+            return Ok(());
         };
-        let json = serde_json::to_vec(&persisted).map_err(io::Error::other)?;
-        write_atomically(&persistence.path, &json)?;
+        snapshot.write()?;
         self.dirty = false;
         self.unwritten = 0;
         self.last_change = None;
         self.stats.writes += 1;
         Ok(())
+    }
+
+    /// Writes the persistent copy if one is bound (resolving a pending path
+    /// first) and anything changed since it was loaded or last written. A
+    /// no-op otherwise; an unresolved path leaves the cache dirty.
+    ///
+    /// Synchronous: a background write in flight is joined first (so it can
+    /// never land after, and over, this one), then the write runs here.
+    pub(crate) fn persist(&mut self) -> io::Result<()> {
+        self.join_writer();
+        if !self.dirty {
+            return Ok(());
+        }
+        self.try_attach();
+        self.write_now()
+    }
+}
+
+impl Drop for FallbackCache {
+    /// Joins a background write still in flight (the owner's final flush, if
+    /// any, has already run).
+    fn drop(&mut self) {
+        self.join_writer();
     }
 }
 
@@ -839,7 +1062,7 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
         .unwrap_or(Path::new("."));
     std::fs::create_dir_all(parent)?;
     let temp = parent.join(temp_name(path));
-    let written = File::create_new(&temp).and_then(|mut file| {
+    let written = create_private(&temp).and_then(|mut file| {
         file.write_all(bytes)?;
         file.sync_all()
     });
@@ -850,6 +1073,19 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
         sync_dir(parent);
     }
     result
+}
+
+/// Creates `path`, which must not exist, readable and writable by the owner
+/// only on unix (`0600`: the cache lists which fonts answered which lookups).
+fn create_private(path: &Path) -> io::Result<File> {
+    let mut options = File::options();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
 }
 
 /// `rename` over the destination, retried on Windows: when two writers
@@ -1263,6 +1499,81 @@ mod tests {
     }
 
     #[test]
+    fn a_font_directory_change_expires_substitutes_with_the_misses() {
+        let dir = TempDir::new("persist-substitutes");
+        let fonts = dir.path().join("user-fonts");
+        let watched = || stamp("b").with_font_dirs(vec![fonts.clone()]);
+        let family = dir.write("family.ttf", &FaceSpec::new("Inter").chars("a").build());
+        let cascade = dir.write("cascade.ttf", &FaceSpec::new("Cascade").chars("b").build());
+        let file = dir.path().join(PERSIST_FILE_NAME);
+        let mut cache = FallbackCache::new(16);
+        cache.attach_persistent(file.clone(), watched());
+        cache.insert_entry(
+            key("a"),
+            CachedAnswer::Face(FaceSource::path(&family, 0)),
+            false,
+        );
+        cache.insert_entry(
+            key("b"),
+            CachedAnswer::Face(FaceSource::path(&cascade, 0)),
+            true,
+        );
+        cache.insert(key("c"), CachedAnswer::Miss);
+        cache.persist().unwrap();
+
+        // Unchanged directories: all three survive, the flag included.
+        let mut same = FallbackCache::new(16);
+        assert_eq!(
+            same.attach_persistent(file.clone(), watched()),
+            LoadOutcome::Loaded(3)
+        );
+        assert!(matches!(
+            same.get_entry(&key("b")),
+            Some((CachedAnswer::Face(_), true))
+        ));
+        assert!(matches!(
+            same.get_entry(&key("a")),
+            Some((CachedAnswer::Face(_), false))
+        ));
+
+        // A font install: the substitute and the miss are asked again.
+        std::fs::create_dir_all(&fonts).unwrap();
+        let mut changed = FallbackCache::new(16);
+        assert_eq!(
+            changed.attach_persistent(file, watched()),
+            LoadOutcome::Loaded(1)
+        );
+        let stats = changed.stats();
+        assert_eq!((stats.expired_misses, stats.expired_substitutes), (1, 1));
+        assert_eq!(changed.get(&key("b")), None, "the substitute expired");
+        assert_eq!(changed.get(&key("c")), None, "the miss expired");
+        assert!(
+            matches!(changed.get(&key("a")), Some(CachedAnswer::Face(_))),
+            "the asked family's own answer is kept"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_cache_file_is_private_to_its_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new("persist-mode");
+        let file = dir.path().join("cache").join(PERSIST_FILE_NAME);
+        let mut cache = FallbackCache::new(16);
+        cache.attach_persistent(file.clone(), stamp("b"));
+        cache.insert(key("a"), CachedAnswer::Miss);
+        cache.persist().unwrap();
+        let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+
+        // The temp file is created 0600 and the rename keeps the mode.
+        let other = dir.path().join("other.json");
+        write_atomically(&other, b"{}").unwrap();
+        let mode = std::fs::metadata(&other).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+    }
+
+    #[test]
     fn a_corrupt_or_old_format_file_is_discarded_and_rewritten() {
         let dir = TempDir::new("persist-corrupt");
         let file = dir.write("cache.json", b"{not json");
@@ -1325,9 +1636,9 @@ mod tests {
         assert!(source.hidden);
         assert_eq!(source.scale, Some(0.75));
 
-        // Files written by the previous formats (plaintext keys, no dir stamps)
-        // are discarded.
-        assert_eq!(FORMAT_VERSION, 3);
+        // Files written by the previous formats (plaintext keys, no dir stamps,
+        // no substitute flag) are discarded.
+        assert_eq!(FORMAT_VERSION, 4);
         let text = std::fs::read_to_string(&file).unwrap();
         for previous in 1..FORMAT_VERSION {
             let old = text.replacen(
@@ -1373,12 +1684,68 @@ mod tests {
         cache.insert(key("b"), CachedAnswer::Miss);
         assert!(!file.exists(), "below the threshold nothing is written");
         cache.insert(key("c"), CachedAnswer::Miss);
-        assert!(file.exists(), "the third answer writes behind");
+        assert!(!cache.is_dirty(), "the third answer handed a snapshot off");
+        cache.join_writer();
+        assert!(file.exists(), "the background writer wrote it");
         assert_eq!(cache.stats().writes, 1);
-        assert!(!cache.is_dirty());
         cache.insert(key("d"), CachedAnswer::Miss);
+        cache.join_writer();
         assert_eq!(cache.stats().writes, 1, "the counter restarted");
         assert_eq!(WRITE_BEHIND_ENTRIES, 32);
+    }
+
+    #[test]
+    fn a_write_behind_trigger_returns_before_the_file_exists() {
+        let dir = TempDir::new("write-behind-background");
+        let file = dir.path().join(PERSIST_FILE_NAME);
+        let mut cache = FallbackCache::new(64);
+        cache.attach_persistent(file.clone(), stamp("b"));
+        cache.set_write_behind(1, Duration::from_secs(3600));
+        let release = cache.hold_next_background_write();
+
+        // The trigger fires inside the insert (a lookup's cache fill) and
+        // returns while the writer is still held: nothing is on disk yet.
+        cache.insert(key("a"), CachedAnswer::Miss);
+        assert!(!file.exists(), "the lookup did not wait for the disk");
+        assert!(!cache.is_dirty(), "the snapshot was handed off");
+
+        // A second trigger while the writer is busy re-arms, never blocks.
+        cache.insert(key("b"), CachedAnswer::Miss);
+        assert!(cache.is_dirty(), "the busy writer left this answer pending");
+        assert!(!file.exists());
+        assert_eq!(cache.stats().writes, 0);
+
+        // The explicit flush joins the background write, then writes the rest.
+        release.send(()).unwrap();
+        cache.persist().unwrap();
+        assert!(file.exists());
+        assert!(!cache.is_dirty());
+        assert_eq!(
+            cache.stats().writes,
+            2,
+            "the background write and the flush"
+        );
+        let mut reread = FallbackCache::new(64);
+        assert_eq!(
+            reread.attach_persistent(file, stamp("b")),
+            LoadOutcome::Loaded(2)
+        );
+    }
+
+    #[test]
+    fn a_failed_background_write_leaves_the_cache_dirty() {
+        let dir = TempDir::new("write-behind-failure");
+        // The cache file's parent is a regular file: every write fails.
+        let blocker = dir.write("blocker", b"x");
+        let file = blocker.join(PERSIST_FILE_NAME);
+        let mut cache = FallbackCache::new(64);
+        cache.attach_persistent(file, stamp("b"));
+        cache.set_write_behind(1, Duration::from_secs(3600));
+        cache.insert(key("a"), CachedAnswer::Miss);
+        cache.join_writer();
+        assert!(cache.is_dirty(), "re-armed for the next flush");
+        assert_eq!(cache.stats().writes, 0);
+        assert!(cache.persist().is_err(), "the synchronous flush reports it");
     }
 
     #[test]
@@ -1393,8 +1760,13 @@ mod tests {
         assert!(!file.exists(), "not idle yet");
         std::thread::sleep(Duration::from_millis(350));
         assert_eq!(cache.get(&key("a")), Some(CachedAnswer::Miss));
-        assert!(file.exists(), "the next lookup after the interval writes");
-        assert!(!cache.is_dirty());
+        assert!(
+            !cache.is_dirty(),
+            "the next lookup after the interval wrote behind"
+        );
+        cache.join_writer();
+        assert!(file.exists());
+        assert_eq!(cache.stats().writes, 1);
     }
 
     #[test]

@@ -22,11 +22,15 @@
 //! - [`registry`]: the app-font registry (the process-wide app-font and
 //!   generic-fallback records, parsed per context with read-fonts).
 //! - [`cache`]: the in-memory LRU of system answers (misses included) and its
-//!   persistent, stamped, write-behind copy, placed by [`CacheLocation`].
+//!   persistent, stamped copy, written behind on a background writer thread
+//!   and placed by [`CacheLocation`].
 //! - [`selector`]: the resolve pipeline, coverage, renderability and synthesis.
+//! - `hint`: the Android matcher's pure synthesis decision, compiled on every
+//!   target so its tests run on every host.
 //! - One backend per platform, each cfg-gated on its `mod` line below
 //!   (`apple`, `android`, `fontconfig`, `dwrite`, `web`); `apple`, `android`,
-//!   `dwrite` and `fontconfig` ask the OS; `web` answers `None` by design.
+//!   `dwrite` and `fontconfig` ask the OS; `web` answers `None` by design (and
+//!   is compiled on every host under `cfg(test)` so its tests run there too).
 //! - `synthetic` (tests only): a scripted backend over in-memory faces.
 //!
 //! # No FFI here
@@ -52,6 +56,14 @@
 )]
 
 pub(crate) mod cache;
+#[cfg_attr(
+    not(any(test, target_os = "android")),
+    allow(
+        dead_code,
+        reason = "only the Android backend consumes the hint decision"
+    )
+)]
+mod hint;
 pub(crate) mod registry;
 mod selector;
 #[cfg(test)]
@@ -65,7 +77,9 @@ mod apple;
 mod dwrite;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod fontconfig;
-#[cfg(target_family = "wasm")]
+// The web backend is the platform backend on wasm only (see `platform_backend`);
+// host test builds compile it too, so its unit tests run in CI.
+#[cfg(any(target_family = "wasm", test))]
 mod web;
 
 use std::collections::HashMap;
@@ -571,6 +585,15 @@ pub(crate) struct OracleStats {
     pub(crate) uncovered: usize,
     /// Requests nothing could answer.
     pub(crate) unresolved: usize,
+    /// Named-family answers demoted to a substitute: a covering face of
+    /// another family (the OS cascade substituting inside a family request),
+    /// held back behind the generic step. Counted per resolve.
+    pub(crate) substitutes: usize,
+    /// Answers served by a held-back substitute (nothing else covered).
+    pub(crate) substitute_hits: usize,
+    /// Resolves whose chain named more system families than
+    /// `selector::MAX_FAMILY_PROBES`, so the later ones were not asked.
+    pub(crate) probe_cap_hits: usize,
 }
 
 /// Per-face facts the selector reads once per face.
@@ -712,6 +735,10 @@ impl Oracle {
     /// Writes the persistent cache now if it changed since the last write —
     /// the hook a shell calls when the app is paused or backgrounded, where
     /// `Drop` may never run. Write-behind covers the time in between.
+    ///
+    /// Synchronous: a background write still in flight is joined first, then
+    /// anything newer is written on this thread, so on return the file holds
+    /// every answer this oracle has.
     pub(crate) fn flush(&mut self) -> std::io::Result<()> {
         self.cache.persist()
     }
@@ -723,7 +750,7 @@ impl Oracle {
 }
 
 impl Drop for Oracle {
-    /// The final flush.
+    /// The final flush (joins a background write still in flight).
     fn drop(&mut self) {
         if let Err(err) = self.cache.persist() {
             log::debug!("frust-text: font fallback cache not written: {err}");
@@ -986,6 +1013,7 @@ mod tests {
         assert!(oracle.resolve(&latin_request("a")).is_some());
         assert!(!file.exists(), "one answer is below the threshold");
         assert!(oracle.resolve(&latin_request("b")).is_some());
+        oracle.cache_mut().join_writer();
         assert!(
             file.exists(),
             "the second answer wrote behind, no Drop needed"
@@ -1002,6 +1030,42 @@ mod tests {
         assert!(oracle.resolve(&latin_request("ab")).is_some());
         drop(oracle);
         assert!(file.exists(), "Drop is the final flush");
+    }
+
+    #[test]
+    fn a_lookup_never_waits_for_the_disk_and_flush_completes_the_write() {
+        let dir = synthetic::TempDir::new("oracle-background-write");
+        let font = dir.write("a.ttf", &synthetic::FaceSpec::new("A").chars("ab").build());
+        let file = cache_file_in(dir.path());
+        let (backend, _) = backend_over(&font);
+        let mut oracle = Oracle::new(
+            Box::new(backend),
+            RenderCapabilities::default(),
+            Some(file.clone()),
+        );
+        oracle
+            .cache_mut()
+            .set_write_behind(1, Duration::from_secs(3600));
+        let release = oracle.cache_mut().hold_next_background_write();
+
+        // The lookup fills the cache, fires the write-behind trigger and
+        // returns while the writer is held.
+        assert!(oracle.resolve(&latin_request("a")).is_some());
+        assert!(!file.exists(), "the lookup returned before the write");
+        assert!(oracle.resolve(&latin_request("b")).is_some());
+        assert!(!file.exists());
+
+        release.send(()).unwrap();
+        oracle.flush().unwrap();
+        assert!(file.exists(), "flush joined the writer and wrote the rest");
+        assert!(!oracle.cache().is_dirty());
+        drop(oracle);
+
+        let (backend, calls) = backend_over(&font);
+        let mut next = Oracle::new(Box::new(backend), RenderCapabilities::default(), Some(file));
+        assert!(next.resolve(&latin_request("a")).is_some());
+        assert!(next.resolve(&latin_request("b")).is_some());
+        assert_eq!(calls.resolves(), 0, "both answers reached the disk");
     }
 
     #[test]
