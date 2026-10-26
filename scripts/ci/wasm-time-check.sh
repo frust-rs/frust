@@ -88,6 +88,10 @@ clippy_real() {
 
 if [ "$self_test" -eq 1 ]; then
   mkdir -p "$SCRATCH/probe/src"
+  # The scratch crate lives outside the repository, where rustup would pick the
+  # host's default toolchain (which need not carry the wasm32 target, and whose
+  # clippy need not match); the repository's pin travels with the probe.
+  cp "$ROOT/rust-toolchain.toml" "$SCRATCH/probe/"
   cat >"$SCRATCH/probe/Cargo.toml" <<'TOML'
 [workspace]
 
