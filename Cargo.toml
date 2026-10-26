@@ -298,7 +298,7 @@ panic = "abort"
 
 # BEGIN release cold-set opt-level overrides (generated: keep hand-synced)
 # "z" only for crates cold on the per-frame path (numbers: docs/PERFORMANCE_BASELINES.md). Kept at 3 by design:
-# frust-{engine,gpu,render,text}, harfrust, skrifa, read-fonts, zune-jpeg, parley, wgpu-{core,types,hal},
+# frust-{engine,gpu,render,text}, harfrust, skrifa, read-fonts, zune-jpeg, wgpu-{core,types,hal},
 # tokio, accesskit*, jni. Hand-synced across the nine manifests crates/frust-cli/tests/profile_sync.rs lists.
 
 [profile.release.package.naga]
@@ -314,9 +314,6 @@ opt-level = "z"
 opt-level = "z"
 
 [profile.release.package.serde_json]
-opt-level = "z"
-
-[profile.release.package.roxmltree]
 opt-level = "z"
 
 [profile.release.package.fontique]
