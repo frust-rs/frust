@@ -1212,17 +1212,19 @@ mod tests {
         }
         // `system()` is process-wide and `SERIAL` orders only this module's
         // tests, so another test thread resolving through the Windows backend
-        // can hold a few transient guards and collection references at the
-        // instant a count is read. A real leak adds thousands of references
-        // over the loop and never yields an equal pair, so the measurement is
-        // retried until it reads the same counts before and after.
-        let counts = || {
-            (
-                LIVE.load(Ordering::SeqCst),
-                sys.collection.ref_count(),
-                sys.fallback.ref_count(),
-                sys.factory.ref_count(),
-            )
+        // holds a few transient guards and collection references at the
+        // instant a count is read (observed: one in flight at either sample).
+        // A real leak adds thousands of references over the loop, so each
+        // counter may drift by a handful between the samples, and the
+        // measurement is retried when it drifts by more.
+        const TOLERANCE: i64 = 8;
+        let counts = || -> [i64; 4] {
+            [
+                LIVE.load(Ordering::SeqCst) as i64,
+                i64::from(sys.collection.ref_count()),
+                i64::from(sys.fallback.ref_count()),
+                i64::from(sys.factory.ref_count()),
+            ]
         };
         let mut last = None;
         for _ in 0..5 {
@@ -1231,7 +1233,11 @@ mod tests {
                 let _ = sys.resolve(&request(samples[i % samples.len()], "en-US"));
             }
             let after = counts();
-            if after == before {
+            if before
+                .iter()
+                .zip(&after)
+                .all(|(b, a)| (a - b).abs() <= TOLERANCE)
+            {
                 return;
             }
             last = Some((before, after));
