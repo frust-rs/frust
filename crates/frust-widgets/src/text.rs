@@ -556,6 +556,11 @@ impl Widget for TextWidget {
 
 /// Serialises the tests that read the shape counters or write the process-global default-locale
 /// slot: every layout reads the slot, so a writer would otherwise skew a sibling's counts.
+///
+/// The rule: any test that asserts shape counts, generations or rebuild counts, or that registers
+/// fonts (every registration lands in the process-global app-font record and makes every
+/// `TextInput`'s `sync_app_fonts` report a change), takes [`reader`]; a test that writes the
+/// default-locale slot takes [`writer`].
 #[cfg(test)]
 pub(crate) mod locale_slot_test {
     use std::sync::{Mutex, MutexGuard};
@@ -1094,12 +1099,16 @@ mod tests {
     /// bytes cannot be [`TUFFY`]'s (`textinput`'s unregistered-family control).
     const UNREGISTERED: &str = "Frust No Such Family";
 
-    /// A text context with the Tuffy test face registered.
-    fn tuffy_context() -> TextContext {
+    /// A text context with the Tuffy test face registered, and the slot lock
+    /// held for as long as the caller keeps the guard: the registration lands
+    /// in the process-global app-font record, which every `TextInput`'s
+    /// `sync_app_fonts` reads (see [`locale_slot_test`]).
+    fn tuffy_context() -> (TextContext, std::sync::MutexGuard<'static, ()>) {
+        let slot = locale_slot_test::reader();
         let mut tcx = TextContext::new();
         tcx.register_fonts(TUFFY.to_vec())
             .expect("the Tuffy test face registers");
-        tcx
+        (tcx, slot)
     }
 
     /// A neutral theme whose `body_large`/`label_large` slots name the given
@@ -1140,7 +1149,7 @@ mod tests {
 
     #[test]
     fn a_themed_family_resolves_the_theme_roles_family() {
-        let mut tcx = tuffy_context();
+        let (mut tcx, _slot) = tuffy_context();
         let body = text("Hello").themed_family(ThemeTextType::BodyLarge);
         let label = text("Hello").themed_family(ThemeTextType::LabelLarge);
 
@@ -1195,7 +1204,7 @@ mod tests {
         // The role names a family nothing registers; only the explicit
         // family can make these runs Tuffy.
         let theme = role_theme(UNREGISTERED, UNREGISTERED);
-        let mut tcx = tuffy_context();
+        let (mut tcx, _slot) = tuffy_context();
         let tuffy = FontFamily::named("Tuffy");
         let views = [
             text("Hello")
@@ -1225,7 +1234,7 @@ mod tests {
         // Color and family resolve independently: the explicit color keeps
         // its value AND the family still follows the role.
         let theme = role_theme("Tuffy", UNREGISTERED);
-        let mut tcx = tuffy_context();
+        let (mut tcx, _slot) = tuffy_context();
         let custom = Color::from_rgb8(1, 2, 3);
         let runs = painted_runs_in(
             &text("Hello")
@@ -1266,7 +1275,7 @@ mod tests {
         );
 
         // And what paints matches a text that never opted in at all.
-        let mut tcx = tuffy_context();
+        let (mut tcx, _slot) = tuffy_context();
         let opted_in = painted_runs_in(&view, None, &mut tcx);
         let never = painted_runs_in(&text("Hello"), None, &mut tcx);
         let faces = |runs: &[GlyphRun]| -> Vec<Vec<u8>> {
@@ -1280,7 +1289,7 @@ mod tests {
     #[test]
     fn changing_the_family_role_on_rebuild_invalidates_the_cached_shape() {
         let theme = role_theme(UNREGISTERED, "Tuffy");
-        let mut tcx = tuffy_context();
+        let (mut tcx, _slot) = tuffy_context();
         let bc = BoxConstraints::loose(Size::new(200.0, 100.0));
         let paint = |widget: &mut TextWidget, tcx: &mut TextContext| {
             let mut lctx =
@@ -1341,7 +1350,7 @@ mod tests {
         };
 
         let mut root: RenderRoot<(), TextView> = RenderRoot::new();
-        let mut tcx = tuffy_context();
+        let (mut tcx, _slot) = tuffy_context();
         root.set_theme(Box::new(role_theme(UNREGISTERED, UNREGISTERED)));
         root.rebuild(&mut logic, &mut ());
         let before = paint_faces(&mut root, &mut tcx);
