@@ -2332,14 +2332,14 @@ reactive" note.
 
 ---
 
-### `i18n-rtl-unverified` — Parley's intra-line bidi behavior with FSI/PDI marks is unverified
+### `i18n-rtl-unverified` — intra-line bidi behavior with FSI/PDI marks is device-unverified
 
 **Observed**: this framework's widget layout is LTR, and nothing in it has been
 device-verified rendering right-to-left content. `LocaleSet`'s default bidi isolation wraps
 every interpolated placeable in FSI/PDI marks (`U+2068`/`U+2069`) specifically so an RTL
-argument cannot reorder the surrounding text — but how Parley's own intra-line bidi algorithm
-actually handles those marks alongside mixed-direction text has not been exercised on a
-device.
+argument cannot reorder the surrounding text — but how the text stack's bidi (`parley_engine`'s
+levels plus frust's own L2 reorder in `frust-text`'s `layout/`) handles those marks alongside
+mixed-direction text has not been exercised on a device, unless the c-04 device gate covers it.
 
 **Applies to**: any message interpolating an RTL argument into an LTR (or mixed) message,
 pending the device gate the `i18n` manual test owes (`docs/PLUGINS_DEVELOPMENT.md`).
@@ -5522,37 +5522,6 @@ half its roles plus a visibly different error red.
 
 ---
 
-### `frust-text-no-variable-font-axes` — no seam for variable-font axes beyond weight
-
-**Observed**: `frust-text::TextStyle` carries no variations/width field
-(`crates/frust-text/src/style.rs:246-264`), and the parley translation pushes
-only `FontWeight`/`FontStyle`/`FontSize`/`LetterSpacing`/`LineHeight` as
-default run properties — no `FontVariations` or `FontWidth`
-(`crates/frust-text/src/context.rs:129-137`) — even though the pinned parley
-0.11.0 supports both (`style/mod.rs:77,85`). This is a seam gap in
-frust-text, not a limitation of the underlying shaping engine.
-
-**Applies to**: any catalog or app wanting to drive a variable font's `wdth`
-(width) or custom axes (e.g. Roboto Flex's `GRAD`/`ROND`) from `TextStyle`.
-Concretely, `frust_material`'s M3E emphasized type scale approximates the
-reference's uniform `wght600+GRAD50` axis preset with a per-role weight
-step-up instead, and wdth/ROND-based type styles (Condensed/Wide/Round) are
-unexpressible — a future material3-demo theme page degrades to a plain
-Regular/Emphasized toggle.
-
-**Why accepted**: out of scope for the Material 3 Expressive Phase 1
-foundations work, which spiked the gap rather than closing it (adding the
-seam is a `frust-text` API change, not a `frust_material` one). Deferred to
-whichever future work needs the axis, tracked here so the degrade is
-discoverable rather than silently baked into the type scale.
-
-**Evidence**: `crates/frust-text/src/style.rs:246-264` (`TextStyle`, no
-variations/width field); `crates/frust-text/src/context.rs:129-137`
-(`push_style_defaults`, no `FontVariations`/`FontWidth` push); pinned
-parley 0.11.0 `style/mod.rs:77,85`.
-
----
-
 ### `material-elevation-single-shadow-layer` — M3E's two-layer shadow model collapses to one `ShadowSpec` per level
 
 **Observed**: the Material 3 Expressive reference elevation model pairs a key
@@ -7265,9 +7234,10 @@ have.
 
 **Observed** (evidence: `crates/frust-shell-web/src/fonts.rs`;
 `crates/frust-text/src/context.rs`'s `register_generic_fallback`, re-exported
-from `lib.rs`): fontique 0.11.0 ships a "Dummy system font backend for
-targets like wasm32-unknown-unknown" whose generic-family map is empty, so a
-generic `FontFamily` slot resolves no glyph on the web tier by default.
+from `lib.rs`): a browser exposes no font files and no
+installed-family list, so the web oracle backend (`oracle/web.rs`) never answers a
+question and a generic `FontFamily` slot resolves no glyph on the web tier by
+default; only app-registered faces and generic fallbacks answer.
 `frust-text` now exposes `register_generic_fallback`, applied by every
 `TextContext` through `sync_app_fonts`; `frust-shell-web`'s
 `install_default_fonts` calls it once at start-up with a bundled Inter
@@ -8496,16 +8466,50 @@ is correct.
 
 ---
 
-### `ios-han-fallback-partial` — iOS Han text has a partial system fallback; uncovered characters render as `.notdef`
+### `text-ellipsis-cursive-truncation` — a native ellipsis cut in a cursive script keeps the joining form
 
-**Observed**: iOS's system Han font (PingFangUI) is hvgl-only (fontations cannot read it; fontique 0.11.1 rejects it), and the Heiti family fontique's CoreText fallback asks for is absent on iOS, so Han had no readable fallback. Since `1df2b6a4` (`crates/frust-text/src/context.rs`, `append_han_fallbacks`), Hiragino Sans, then Hiragino Kaku Gothic ProN, fill each empty Han fallback list on Apple targets; a non-empty list is never overridden. Measured on the iOS 27 runtime: all S6 kanji, Big5 level-1 96.8%, GB2312 level-1 71.4% and level-2 57.9%. Simplified and Traditional Chinese get Japanese glyph shapes. Uncovered characters still render as `.notdef` bars; since `040058f9` (`crates/frust-text/src/convert.rs`) a warn-once log names the font, the count and up to 8 characters, and `frust_text::notdef_glyph_count()` reports the total. The frust-side PingFang route has landed (`992d3941` merged as `5bff2766`, `6e869a87` merged as `8a391343`: `frust-engine` draws hvgl-only faces from CoreText outlines at the run's variation instance) and is pending the upstream fontique opt-in (Phase 2 of the Route-A plan, `fplan_000001a169de5970nE5v2LaC`); until the atlas follow-up, hvgl glyphs are drawn as outlines every frame, never atlas-cached, roughly 2.8-4.9x slower per frame than an atlas face (research `rsa_000001a16ae1d5ea2ugsYVTA`).
+**Observed**: `TextOverflow::Ellipsis` cuts the last visible line at a grapheme boundary that is also a
+cluster boundary and does not reshape (`frust-text`'s `layout/truncate.rs`), so the last kept glyph keeps
+its contextual (joining) form and its kerning against the dropped neighbour. In a cursive script (Arabic)
+a cut inside a word shows a medial form before the ellipsis.
 
-**Applies to**: iOS apps rendering Han text outside the Japanese set. macOS is unaffected (Heiti SC/TC ships there).
+**Applies to**: capped text (`.max_lines` with an ellipsis) whose cut falls inside a cursive-script word.
 
-**Workaround**: register a Han-capable font with `TextContext::register_fonts` and select it by `FontFamily::Named`; `frust_text::register_generic_fallback` is the seam for generic slots.
+**Why accepted**: `layout/` never reshapes (a width change re-runs line layout on the cached shaping
+result), and the cut is part of that pass.
 
-**Why accepted**: full coverage (CoreText outlines for hvgl PingFang, or Apple's PingFang asset) is still being evaluated; the stopgap beats the empty fallback it replaced.
+**Trigger for removal**: reshaping the kept prefix of the cut word.
 
-**Trigger for removal**: an iOS route rendering PingFang as the Han fallback, measured to cover the S6 corpus.
+**Evidence**: the module doc of `crates/frust-text/src/layout/truncate.rs`.
 
-**Evidence**: `rsa_000001a1685a4a91k9NhUoKn` (Zabin research); `fplan_000001a1685a6aa9Ex9nuzzW` Phase 2; frust-rs/frust#119.
+---
+
+### `text-runtime-locale-switch-plugin-layouts` — plugin widgets with their own `TextLayout` do not re-face on a runtime locale switch
+
+**Observed**: `Text` and `TextInput` key their layout caches on `frust_text::default_locale_generation`, and
+the shells re-push the theme when it changes. A plugin widget that keeps its own `TextLayout` does not read
+the generation, so an untagged Han string it draws keeps the previous locale's face until something else
+invalidates that layout. Startup is unaffected (the locale is set before the first layout).
+
+**Applies to**: plugin-tier widgets that cache a `TextLayout` themselves, on a runtime locale switch.
+
+**Workaround**: key the widget's layout cache on `frust_text::default_locale_generation()`
+(re-exported as `frust::authoring::text`).
+
+**Why accepted**: the framework widgets cover the common path.
+
+**Evidence**: `crates/frust-widgets/src/text.rs` and `crates/frust-shell-common/src/locale_default.rs`.
+
+---
+
+### `text-registered-hvgl-face-skipped` — a face registered through `register_fonts` has no oracle identity yet
+
+**Observed**: the engine opens `hvgl`-only faces (Apple's PingFang) by the PostScript name the font oracle
+resolved. Fonts registered through `TextContext::register_fonts` carry no oracle identity yet, so a
+registered `hvgl`-only face cannot be opened: its glyphs are skipped and counted in
+`CompiledFrame::skipped_glyphs`. Ordinary registered `glyf`/`CFF` faces are unaffected.
+
+**Applies to**: apps registering an `hvgl`-only Apple system face. A filed follow-up gives registered
+faces an identity.
+
+**Evidence**: `crates/frust-engine/src/text/hvgl.rs`.

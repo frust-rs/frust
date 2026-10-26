@@ -29,14 +29,13 @@ The repo-root `.cargo/config.toml` adds three linker flags on all four Android t
 | 2026-10-07 | 0.7 erasure-free app code: main 721ab1e0 → feature/erasure-free-apps b2a41334 | i5-12600 Linux | material3-demo | 14,643,024 B → 14,658,576 B (+15,552 B = +0.11 %; bar ≤ 2 %) | 14,643,352 B → 14,658,904 B | – |
 | 2026-10-07 | main 721ab1e0 → b2a41334 | i5-12600 Linux | frust-gallery + material3demo (lib + bin, `cargo build --timings`) | – | – | frust-gallery 14.42 s → 13.74 s (−4.7 %; runs 17.687 / 14.333 / 14.421 s → 13.749 / 13.740 / 13.725 s; unit 14.22 s → 13.54 s); material3demo 129.02 s → 125.77 s (−2.5 %; runs 128.554 / 131.012 / 129.016 s → 128.826 / 125.771 / 124.955 s; unit 128.81 s → 125.55 s); bar ≤ 10 % |
 | 2026-10-26 | `--pack-dyn-relocs=android` → `relr` + `--use-android-relr-tags` (DT_ANDROID_RELR, API 28+; 395c4a41 → task/g-03b, tags fixed in task/g-04; `cd examples/huddle && cargo ndk -t arm64-v8a build --release --features lean`, size by `wc -c` of `build/rust/aarch64-linux-android/release/libhuddle.so`; one run each, build time not measured) | MacBook (arm64, NDK 28.2.13676358) | huddle, lean arm64-v8a | 9,456,544 B → 9,408,480 B (−48,064 B = −0.51 %) | same file (`strip = "symbols"`) | – |
+| 2026-10-27 | text-stack size swap (parley removed; frust oracle + layout + editor over `parley_engine`; main f8163117 → the Phase 5 branch, numbers owed by c-04) | – | – | – | – | – (placeholder: c-04 supplies the stripped/unstripped size and clean-rebuild numbers) |
 
 The 2026-10-07 rows were taken with the host otherwise idle except for the first frust-gallery run on each side, which overlapped the tail of a preceding gate run (1-min load 7.97 base / 5.93 head at that run, 1.1–2.1 for the material3demo runs); medians are unaffected by the one slow outlier. Sizes come from separate detached worktrees and `CARGO_TARGET_DIR`s (`target-size-base`/`target-size-head`). The 2 % size and 10 % build-time figures are report thresholds — data points that trigger a note to the approver, not gates.
 
 The unstripped figure is within 328 B of the stripped one because `strip = "symbols"` already strips
 the release profile. Each side was built in its own detached worktree and target dir (rustc 1.98.1,
 cargo-ndk 4.1.2, NDK 28.2.13676358; wall time by bash `time`, unit time from the `--timings` report).
-Method deviations: the base-side material3demo runs 2 and 3 overlapped a ~40 s unrelated test build
-and the head-side frust-gallery run 1 a short formatting check; medians are reported, so neither changes the figure.
 
 ### frust-file-dialogs (rfd) cost
 

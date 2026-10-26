@@ -73,10 +73,10 @@ off this index — read this plus the one that covers what you are touching:
     the split and the renderer-twin `NativeHandle::new`; Apple producers own a +1 reference
     released in a single-call callback. `frust-video-player`'s Android backend: its constructor, the
     `AHardwareBuffer_*` NDK calls and a direct-buffer plane read.
-  - `frust-engine`'s Apple-only `text/hvgl.rs` — the CoreText calls (font by name, glyph count and
-    paths, bounds, the variation-instance descriptor pair), `CGPath::apply` with the
-    `extern "C-unwind"` `push_element` callback, and `unsafe impl Send + Sync for CtFace`
-    (read-only; its SAFETY note cites Apple's Core Text thread-safety statement).
+  - `frust-engine`'s Apple-only `text/hvgl.rs` — the CoreText calls (font by the oracle's
+    PostScript name, glyph count and paths, bounds, the variation-instance descriptor pair),
+    `CGPath::apply` with the `extern "C-unwind"` `push_element` callback, and `unsafe impl Send +
+    Sync for CtFace` (read-only; its SAFETY note cites Apple's Core Text thread-safety statement).
   - `frust-gpu`'s `RenderContext::create_pipeline_cache` — one call building a `wgpu::PipelineCache`
     from a shell-persisted, fingerprint-validated blob.
   - `frust-reactive`'s private `thread_policy::sys` — `gettid`/`getpriority`/`setpriority` (Linux)
@@ -111,13 +111,13 @@ off this index — read this plus the one that covers what you are touching:
     (table address to hot-fn signature), `anchor.rs`, `android.rs` (memfd + `android_dlopen_ext`).
     `frust-shell-common` calls the safe `apply_from_devtools`; `frust::app!` emits only the anchor's
     `#[unsafe(no_mangle)]`.
-  - `frust-text`'s `src/oracle/{apple,android,fontconfig,dwrite,store}.rs` — OS font-fallback FFI:
-    CoreText CF lifetimes (`CFRetained::cast_unchecked`, a `Send` wrapper for `CTFont`), NDK
-    `__system_property_get` (a `Send` wrapper for the matcher), hand-declared DirectWrite COM vtables
-    (named slot constants, a `ComPtr` guard), `dlopen`ed fontconfig (`FcFontSort` per cluster); the
-    mmap `store.rs` is a reserved zone file not yet written. `#![deny(unsafe_code)]` at
-    `oracle/mod.rs`, per-file `#![allow(unsafe_code)]` + zone header, a `// SAFETY:` note per block,
-    and guard tests in `oracle/mod.rs` failing on any `unsafe` token outside the zone.
+  - `frust-text`'s four oracle zones, `src/oracle/{apple,android,fontconfig,dwrite}.rs` — OS
+    font-fallback FFI: CoreText and CFLocale CF lifetimes (`CFRetained::cast_unchecked`, a `Send`
+    wrapper for `CTFont`), the NDK matcher (`Send` wrapper) plus `__system_property_get`,
+    `dlopen`ed fontconfig (`FcFontSort` per cluster), hand-declared DirectWrite COM vtables (named
+    slot constants, a `ComPtr` guard). `#![deny(unsafe_code)]` at `oracle/mod.rs`, per-file
+    `#![allow(unsafe_code)]` + zone header, a `// SAFETY:` note per block, and guard tests in
+    `oracle/mod.rs` failing on any `unsafe` token outside the zone.
 - **No unwind across FFI.** Every platform export routes through `frust-shell-common`'s `guard`
   helper (`catch_unwind` + log, returning a benign default) rather than unwinding into
   JVM-/Swift-owned stack frames — a panic crossing the FFI boundary is undefined behavior, not a
@@ -560,6 +560,8 @@ design-system installation are the WIDGETS unit's rules — [WIDGETS_CODE_STANDA
 - **`#[ignore = "<reason>"]` for GPU-dependent or slow end-to-end tests.** The reason string
   must say how to run it (`cargo test -p ... --ignored`) and why it's excluded by default
   (needs a real GPU; compiles a full generated dependency graph; etc.).
+- **Process-global text state in `frust-widgets` tests**: ones asserting shape counts, generations
+  or rebuild counts, or registering fonts, take `locale_slot_test::reader()`; slot writers `writer()`.
 - **Recording fakes for paint assertions**: a minimal `PaintScene` impl pushing `(origin,
   size)`/`(origin, text)` tuples into `Vec`s lets widget `layout`/`paint` behavior be
   asserted without any GPU dependency.

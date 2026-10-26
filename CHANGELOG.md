@@ -77,9 +77,20 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `frust-hotpatch`, `frust-devtools` and `frust-devtools-protocol`; an existing app can opt in with
   the one line `frust-debug = ["frust/perf-trace", "frust/devtools", "frust/hotpatch"]` in
   `[features]` (its own dependency key if it renamed `frust`).
+- `TextStyle` variation settings and width, `RenderCapabilities` (what the renderer can draw,
+  filtering font-fallback candidates), and `TextEditor::has_preedit`.
+- The app default locale, the language of untagged text: `frust_text::set_default_locale`,
+  `default_locale` and `default_locale_generation`, re-exported as `frust::authoring::text` and
+  written by `frust-i18n`'s active locale. Shells re-lay-out on a change; `Text` and `TextInput`
+  key their layout caches on its generation.
 
 ### Changed
 
+- The `frust-text` stack is frust's own: a font oracle (CoreText, the NDK font matcher, fontconfig,
+  DirectWrite, the web backend), a shaping driver over `parley_engine`, frust's line layout with
+  native max-lines and ellipsis, and frust's own editor. `TextEditor` no longer sits on parley's
+  `PlainEditor`: backspace over an emoji grapheme removes the whole grapheme, and editors honour
+  alignment within the wrap width.
 - `DesktopConfig` gained two fields, `decorations` and `title_buttons`. Builder construction is
   unaffected, and the hand-written `Default` behaves as before; struct-literal construction needs
   the new fields.
@@ -106,6 +117,10 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 - In the TUI, a Debug/Profile desktop session that cannot spawn `cargo run` reports it in the
   session tab instead of a toast.
 
+### Removed
+
+- The `parley` dependency, and the Hiragino Han stopgap for iOS.
+
 ### Fixed
 
 - macOS overlays follow the window's backing scale: a move between a 2x and a 1x display
@@ -113,12 +128,9 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 - `frust-url-launcher`: `UrlLauncherError::NoHandler` reads "no handler for this URL on this
   device" instead of naming only `http`/`https`, since `open_maps_native` returns it for native
   map schemes on desktop.
-- iOS Han text no longer draws as striped boxes for every character: on Apple targets
-  `TextContext` falls back to Hiragino Sans when fontique finds no Han fallback (iOS's PingFang
-  is unreadable to fontique). Coverage is partial: some Simplified-only characters still draw as
-  `.notdef` (`ios-han-fallback-partial`). `frust-text` now logs a warning once per font when
-  visible text shapes to `.notdef`, and `frust_text::notdef_glyph_count()` reports the process
-  total.
+- iOS Han text draws in PingFang at the requested weight, Japanese kana draw in Hiragino, and
+  untagged kanji follow the app locale. `frust-text` logs a warning once per font when visible text
+  shapes to `.notdef`, and `frust_text::notdef_glyph_count()` reports the process total.
 - The first Debug/Profile or hot build after a frust release no longer fails with `failed to select
   a version for the requirement frust-hotpatch/frust-devtools ...` when the machine's crates.io
   index cache predates the release: the CLI, TUI and MCP server run a cargo-resolve preflight
