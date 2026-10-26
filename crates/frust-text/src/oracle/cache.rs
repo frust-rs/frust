@@ -65,7 +65,8 @@ pub(crate) const PERSIST_FILE_NAME: &str = "font-fallback.json";
 
 /// Bumped whenever the serialised shape changes; a mismatch discards the file.
 /// 4: face entries carry `substitute`.
-const FORMAT_VERSION: u32 = 4;
+/// 5: no shape change; answers persisted before the script-derived language hint must expire.
+const FORMAT_VERSION: u32 = 5;
 
 /// New answers since the last write that trigger a write-behind flush.
 ///
@@ -1638,7 +1639,7 @@ mod tests {
 
         // Files written by the previous formats (plaintext keys, no dir stamps,
         // no substitute flag) are discarded.
-        assert_eq!(FORMAT_VERSION, 4);
+        assert_eq!(FORMAT_VERSION, 5);
         let text = std::fs::read_to_string(&file).unwrap();
         for previous in 1..FORMAT_VERSION {
             let old = text.replacen(
