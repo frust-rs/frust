@@ -972,7 +972,7 @@ mod tests {
             source_cache: Default::default(),
         };
         let mut oracle = Oracle::new(
-            oracle::platform_backend(),
+            Box::new(oracle::synthetic::SyntheticBackend::new("systemless")),
             RenderCapabilities::default(),
             None,
         );
@@ -1002,7 +1002,7 @@ mod tests {
                 .is_none(),
             "Monospace must stay unmapped — only SystemUi/SansSerif were requested"
         );
-        // The oracle sees the same face (the platform backends are stubs, so
+        // The oracle sees the same face (the synthetic backend answers nothing, so
         // the app generic fallback is the answer).
         let face = oracle
             .default_face(GenericSlot::SystemUi)
