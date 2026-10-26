@@ -114,10 +114,10 @@ off this index — read this plus the one that covers what you are touching:
   - `frust-text`'s `src/oracle/{apple,android,fontconfig,dwrite,store}.rs` — OS font-fallback FFI:
     CoreText CF lifetimes (`CFRetained::cast_unchecked`, a `Send` wrapper for `CTFont`), NDK
     `__system_property_get` (a `Send` wrapper for the matcher), hand-declared DirectWrite COM vtables
-    (named slot constants, a `ComPtr` guard); the `dlopen`ed fontconfig FFI and the mmap `store.rs`
-    are reserved zone files not yet written. `#![deny(unsafe_code)]` at `oracle/mod.rs`, per-file
-    `#![allow(unsafe_code)]` + zone header, a `// SAFETY:` note per block, and guard tests in
-    `oracle/mod.rs` failing on any `unsafe` token outside the zone.
+    (named slot constants, a `ComPtr` guard), `dlopen`ed fontconfig (`FcFontSort` per cluster); the
+    mmap `store.rs` is a reserved zone file not yet written. `#![deny(unsafe_code)]` at
+    `oracle/mod.rs`, per-file `#![allow(unsafe_code)]` + zone header, a `// SAFETY:` note per block,
+    and guard tests in `oracle/mod.rs` failing on any `unsafe` token outside the zone.
 - **No unwind across FFI.** Every platform export routes through `frust-shell-common`'s `guard`
   helper (`catch_unwind` + log, returning a benign default) rather than unwinding into
   JVM-/Swift-owned stack frames — a panic crossing the FFI boundary is undefined behavior, not a

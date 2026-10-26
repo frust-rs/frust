@@ -25,9 +25,8 @@
 //!   persistent, stamped, write-behind copy, placed by [`CacheLocation`].
 //! - [`selector`]: the resolve pipeline, coverage, renderability and synthesis.
 //! - One backend per platform, each cfg-gated on its `mod` line below
-//!   (`apple`, `android`, `fontconfig`, `dwrite`, `web`); `apple`, `android` and
-//!   `dwrite` ask the OS, `web` answers `None` by design, and `fontconfig` is a
-//!   stub until its card fills it in.
+//!   (`apple`, `android`, `fontconfig`, `dwrite`, `web`); `apple`, `android`,
+//!   `dwrite` and `fontconfig` ask the OS; `web` answers `None` by design.
 //! - `synthetic` (tests only): a scripted backend over in-memory faces.
 //!
 //! # No FFI here

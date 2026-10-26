@@ -46,3 +46,5 @@ windows-link.workspace = true
 # `dlopen`: no link-time libfontconfig requirement (a system without it simply gets no answers).
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 yeslogic-fontconfig-sys = { workspace = true, features = ["dlopen"] }
+# parley 0.11.1's fontique copy, switched to `dlopen` as well (feature unification; see the root row).
+fontique011.workspace = true

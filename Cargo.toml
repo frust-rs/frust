@@ -47,6 +47,9 @@ parley = "0.11.1"
 parley_engine = "=0.12.0"
 # No `system` feature: the oracle owns the OS backends, so fontique 0.12 never scans system fonts.
 fontique = { version = "=0.12.0", default-features = false }
+# Linux/BSD: parley 0.11.1's fontique copy must `dlopen` too — Cargo unifies the oracle's
+# yeslogic-fontconfig-sys/dlopen onto it and fontique 0.11 needs its own flag for that. Retires with parley.
+fontique011 = { package = "fontique", version = "=0.11.1", default-features = false, features = ["fontconfig-dlopen"] }
 # cmap/name/OS2 parsing for the app-font registry and coverage checks; must unify with the 0.41.0
 # skrifa 0.44 / glifo already lock (one read-fonts on every graph).
 read-fonts = { version = "0.41", default-features = false, features = ["std"] }
