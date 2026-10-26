@@ -75,6 +75,7 @@ pub mod frame_gate;
 /// this crate names no GPU type (see the module's own docs).
 #[cfg(feature = "gpu")]
 pub mod gpu;
+mod locale_default;
 pub mod overlay;
 pub mod perf;
 pub mod platform_view;
@@ -93,6 +94,7 @@ pub use ffi_support::{
 pub use frame_gate::{
     FrameDecision, FrameGate, FrameInputs, FramePacing, anim_pacing_kill_switch_engaged,
 };
+pub use locale_default::LocaleDefaultWatcher;
 pub use platform_view::{PlatformViewState, ViewCommand};
 pub use render_split::{
     Ack, AckWaiter, FrameMeta, NO_RENDER_THREAD_VAR, RenderBatch, RenderCommand, RenderEvent,

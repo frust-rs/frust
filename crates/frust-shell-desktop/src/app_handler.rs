@@ -64,7 +64,7 @@ use frust_scene::{Scene, SceneBuilder};
 use frust_shell_common::font_registry::FontRegistryWatcher;
 use frust_shell_common::perf::UiSpans;
 use frust_shell_common::{
-    SurfaceSize, ThemeOverrideWatcher, WindowMetricsPublisher, default_theme,
+    LocaleDefaultWatcher, SurfaceSize, ThemeOverrideWatcher, WindowMetricsPublisher, default_theme,
     effective_brightness_for_platform_change, render_thread_enabled,
 };
 use frust_text::TextContext;
@@ -1070,6 +1070,7 @@ where
         // resolution (`resumed`'s seed) counts as a change and fires the hook.
         brightness_notified: None,
         theme_override: ThemeOverrideWatcher::new(),
+        locale_default: LocaleDefaultWatcher::new(),
         theme_override_active: false,
         font_registry: FontRegistryWatcher::new(),
         paced_wake: None,
@@ -2138,6 +2139,8 @@ struct ShellHandler<State: 'static, Build, V: View<State>, E> {
     /// frame, before rebuild in `RedrawRequested` — see
     /// `frust_shell_common::theme_override`'s module docs.
     theme_override: ThemeOverrideWatcher,
+    /// Polled beside `theme_override`: a default-locale change re-lays out untagged text.
+    locale_default: LocaleDefaultWatcher,
     /// Whether an app-forced theme override is currently active. While `true`,
     /// `WindowEvent::ThemeChanged` must not flip `self.theme`'s brightness —
     /// the override wins entirely until `clear_app_theme` runs (see
@@ -3576,6 +3579,13 @@ where
                 // the new faces this frame. When nothing is pending this is one
                 // cheap `Mutex` check returning an empty `Vec` (no allocation).
                 if self.font_registry.drain_into(&mut self.text_ctx) {
+                    self.root.set_theme(Box::new(self.theme.clone()));
+                }
+
+                // A default-locale change (`frust_text::set_default_locale`) re-faces untagged
+                // text; widgets key their layout caches on its generation, so the same theme
+                // re-push forces the pass.
+                if self.locale_default.changed() {
                     self.root.set_theme(Box::new(self.theme.clone()));
                 }
 
