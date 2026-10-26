@@ -7,7 +7,10 @@
 //!
 //! On disk: a JSON copy bound eagerly ([`FallbackCache::attach_persistent`]) or
 //! at the first in-memory miss or flush ([`FallbackCache::attach_lazy`]), keyed
-//! by digest only, so no cluster text, locale or family name is written. Its
+//! by digest only, so no cluster text, locale or family name is written in
+//! the clear. The digest is unsalted over a small input space, so it is
+//! pseudonymous, not secret: a dictionary pass over code points, locales and
+//! weights recovers which keys were looked up. Its
 //! header carries a [`VersionStamp`] (OS build id, crate version), the size +
 //! mtime of every font file an entry names, and the font directories' mtimes.
 //! A version or file mismatch, or a face whose file is not stamped, discards
@@ -129,9 +132,13 @@ impl CacheKey {
         }
     }
 
-    /// A non-reversible, process- and toolchain-stable 64-bit hash of every
-    /// field: the persistent file's key. Not std's `DefaultHasher`, whose
-    /// algorithm may change between Rust releases.
+    /// The persistent file's key: a process- and toolchain-stable 64-bit
+    /// hash of every field.
+    ///
+    /// Unsalted and over a small input space, so it hides the key from a
+    /// casual read, not from a dictionary pass (pseudonymous, not secret).
+    /// Not std's `DefaultHasher`, whose algorithm may change between Rust
+    /// releases.
     pub(crate) fn digest(&self) -> u64 {
         let mut h = StableHasher::new();
         h.bytes(b"frust-text fallback key");
