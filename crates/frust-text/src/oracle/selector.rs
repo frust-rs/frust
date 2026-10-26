@@ -2,10 +2,9 @@
 //!
 //! # Order
 //!
-//! Close to fontique's query order (each named family in chain order, then the
-//! generics, then the OS fallback cascade), with frust's caches in between and
-//! one difference: a substitute the OS cascade produced inside a named-family
-//! request is used before the generic slots are asked.
+//! fontique's (and CSS's) query order — each named family in chain order,
+//! then the generics, then whatever the OS cascade substituted — with frust's
+//! caches in between.
 //!
 //! 1. **Each named family, in chain order.** A name the app registry holds is
 //!    answered by its app faces only: an app family shadows the system family
@@ -14,10 +13,11 @@
 //!    chain's generic slots, the base a backend falls back to), through the
 //!    fallback cache keyed by that request. The first answer that is the asked
 //!    family and covers the cluster wins. A covering answer from another
-//!    family (the OS cascade substituting inside a family request) is held
-//!    back so later families stay reachable; the first one is used only when
-//!    no named family answers, and then before step 2. App answers are never
-//!    cached.
+//!    family (the OS cascade substituting inside a family request) is a
+//!    *substitute*: demoted (counted, logged once per cache fill), held back so
+//!    later families stay reachable, and used only at step 4. At most
+//!    [`MAX_FAMILY_PROBES`] system families are asked per resolve. App answers
+//!    are never cached.
 //! 2. **The generic request**: the chain's generic slots alone (`SystemUi`
 //!    when it names none), cached the same way. The backend answers from the
 //!    generic family and its OS cascade, then **its generic defaults** answer,
@@ -25,12 +25,15 @@
 //!    regular weight, so its own coordinates and hint are dropped).
 //! 3. **App generic fallbacks** (`register_generic_fallback`), appended after
 //!    the system's own generic answer exactly as fontique appended them.
+//! 4. **The first held-back substitute**, when neither a named family nor the
+//!    generic steps cover the cluster.
 //!
 //! Every candidate must map each of the cluster's characters in its `cmap`
 //! (bar the [`coverage_exempt`] controls a shaper consumes through GSUB) and
 //! carry a glyph format the request's [`RenderCapabilities`] can draw. A
 //! refused face is counted and skipped, never substituted. Misses are cached
-//! per key too.
+//! per key too; a cached substitute is flagged as one, so it expires with the
+//! misses when a font directory changes (see [`super::cache`]).
 
 use read_fonts::{
     FontRef, TableProvider,
@@ -333,6 +336,15 @@ enum FamilyAnswer {
 /// A backend question, asked on a cache miss.
 type Ask = fn(&mut Oracle, &FallbackRequest) -> Option<(FaceSource, FaceRef)>;
 
+/// The most system families one resolve asks the backend for (step 1); app
+/// families do not count. Every named system family is one probe whether the
+/// cache or the backend answers it, so a chain resolves the same cold and
+/// warm. A chain naming more is cut there (counted in
+/// `OracleStats::probe_cap_hits`); its generics still answer. CSS stacks
+/// rarely name more than a handful of families, and each probe on a cold
+/// cache is an OS font query.
+pub(crate) const MAX_FAMILY_PROBES: usize = 8;
+
 impl Oracle {
     /// Resolves one cluster to a face, or `None` when nothing installed or
     /// registered can draw it. See the module docs for the order.
@@ -347,6 +359,8 @@ impl Oracle {
             })
             .collect();
         let mut substitute = None;
+        let mut probes = 0;
+        let mut capped = false;
         for name in &names {
             if self.registry.has_family(name) {
                 if let Some(face) = self.resolve_app_family(name, req) {
@@ -356,6 +370,12 @@ impl Oracle {
                 // Shadowed: the system family of this name is never asked.
                 continue;
             }
+            if probes == MAX_FAMILY_PROBES {
+                // Later app families stay reachable; no more system ones.
+                capped = true;
+                continue;
+            }
+            probes += 1;
             match self.resolve_system_family(name, req) {
                 Some(FamilyAnswer::Family(face)) => return Some(face),
                 Some(FamilyAnswer::Substitute(face)) => {
@@ -364,13 +384,17 @@ impl Oracle {
                 None => {}
             }
         }
-        if substitute.is_some() {
-            return substitute;
+        if capped {
+            self.stats.probe_cap_hits += 1;
+            log::debug!(
+                "frust-text: a font chain names more than {MAX_FAMILY_PROBES} system families; \
+                 the later ones were not asked"
+            );
         }
 
         // 2. The generic request: the backend, then its generic defaults.
         let generic_req = generic_request(req);
-        if let Some(face) = self.through_cache(&generic_req, Self::ask_generic) {
+        if let Some((face, _)) = self.through_cache(&generic_req, Self::ask_generic, None) {
             return Some(face);
         }
 
@@ -380,6 +404,12 @@ impl Oracle {
                 self.stats.generic_hits += 1;
                 return Some(face);
             }
+        }
+
+        // 4. A substitute, when nothing above covered the cluster.
+        if substitute.is_some() {
+            self.stats.substitute_hits += 1;
+            return substitute;
         }
         self.stats.unresolved += 1;
         None
@@ -426,27 +456,45 @@ impl Oracle {
     }
 
     /// `req`'s system answer through the fallback cache, keyed by `req`;
-    /// `ask` runs on a miss and its outcome is cached, misses included.
-    fn through_cache(&mut self, req: &FallbackRequest, ask: Ask) -> Option<FaceRef> {
+    /// `ask` runs on a miss and its outcome is cached, misses included. For a
+    /// named-family request (`family`), a fresh answer that is not that family
+    /// is cached as a substitute; the flag comes back with the face (`true`:
+    /// a substitute), so a cache hit never re-reads the face's names.
+    fn through_cache(
+        &mut self,
+        req: &FallbackRequest,
+        ask: Ask,
+        family: Option<&str>,
+    ) -> Option<(FaceRef, bool)> {
         let key = CacheKey::from_request(req);
-        match self.cache.get(&key) {
-            Some(CachedAnswer::Face(source)) => {
+        match self.cache.get_entry(&key) {
+            Some((CachedAnswer::Face(source), substitute)) => {
                 self.stats.cache_hits += 1;
                 self.load_cached(&source, req)
+                    .map(|face| (face, substitute))
             }
-            Some(CachedAnswer::Miss) => {
+            Some((CachedAnswer::Miss, _)) => {
                 self.stats.cache_hits += 1;
                 None
             }
             None => {
                 self.stats.cache_misses += 1;
-                let answer = ask(self, req);
-                let entry = match &answer {
-                    Some((source, _)) => CachedAnswer::Face(source.clone()),
-                    None => CachedAnswer::Miss,
+                let Some((source, face)) = ask(self, req) else {
+                    self.cache.insert(key, CachedAnswer::Miss);
+                    return None;
                 };
-                self.cache.insert(key, entry);
-                answer.map(|(_, face)| face)
+                let substitute = family.is_some_and(|name| !is_family(&face, name));
+                if substitute {
+                    log::debug!(
+                        "frust-text: family {:?} answered by another family ({}): demoted to a \
+                         substitute behind the generic step",
+                        family.unwrap_or_default(),
+                        face.postscript_name.as_deref().unwrap_or("unnamed face"),
+                    );
+                }
+                self.cache
+                    .insert_entry(key, CachedAnswer::Face(source), substitute);
+                Some((face, substitute))
             }
         }
     }
@@ -455,11 +503,12 @@ impl Oracle {
     /// family alone, sorted into the family itself or a cascade substitute.
     fn resolve_system_family(&mut self, name: &str, req: &FallbackRequest) -> Option<FamilyAnswer> {
         let family_req = family_request(req, name);
-        let face = self.through_cache(&family_req, Self::ask_family)?;
-        Some(if is_family(&face, name) {
-            FamilyAnswer::Family(face)
-        } else {
+        let (face, substitute) = self.through_cache(&family_req, Self::ask_family, Some(name))?;
+        Some(if substitute {
+            self.stats.substitutes += 1;
             FamilyAnswer::Substitute(face)
+        } else {
+            FamilyAnswer::Family(face)
         })
     }
 
@@ -1103,17 +1152,154 @@ mod tests {
         let face = oracle.resolve(&req("a", b"Latn", &chain)).unwrap();
         assert_eq!(face.blob.id(), second.id());
 
-        // With no named family answering, the first substitute is the answer,
-        // and the generic request is not needed.
+        // With no named family answering, the generic request IS asked before
+        // a held-back substitute is used (fontique / CSS order).
         let before = calls.resolves();
         let chain = FontFamily::stack(["First", "Third"]);
         let face = oracle.resolve(&req("a", b"Latn", &chain)).unwrap();
         assert_eq!(face.blob.id(), cascade.id());
         assert_eq!(
             calls.named_families()[before..],
-            [Some("Third".to_owned())],
-            "\"First\" came from the cache, the generic request was not asked"
+            [Some("Third".to_owned()), None],
+            "\"First\" came from the cache, then \"Third\" and the generic request were asked"
         );
+        let stats = oracle.stats();
+        assert_eq!(stats.substitutes, 3, "First (twice) and Third were demoted");
+        assert_eq!(stats.substitute_hits, 0, "the generic request answered");
+    }
+
+    #[test]
+    fn the_generic_request_beats_a_held_back_substitute() {
+        // An installed Menlo lacks Han: the OS cascades from it to Cascade Han.
+        let menlo = Blob::from(FaceSpec::new("Menlo").chars("a").build());
+        let cascade = Blob::from(FaceSpec::new("Cascade Han").chars("中").build());
+        let generic = Blob::from(FaceSpec::new("Generic Han").chars("中").build());
+        let mut backend = SyntheticBackend::new("b");
+        backend.family("Menlo", &menlo, "a");
+        backend.cascade_for("Menlo", &cascade, "中");
+        backend.cover(&generic, "中");
+        let calls = backend.calls();
+        let mut oracle = oracle_over(backend);
+        let chain = FontFamily::stack_with_generic(["Menlo"], GenericSlot::Monospace);
+
+        for _ in 0..2 {
+            let face = oracle.resolve(&req("中", b"Hani", &chain)).unwrap();
+            assert_eq!(face.blob.id(), generic.id(), "generics before the cascade");
+        }
+        assert_eq!(
+            calls.named_families(),
+            [Some("Menlo".to_owned()), None],
+            "each request asked once, then cached"
+        );
+        let stats = oracle.stats();
+        assert_eq!(stats.substitutes, 2, "demoted on the fill and on the hit");
+        assert_eq!(stats.substitute_hits, 0);
+        // The family's own answer is not a substitute.
+        assert_eq!(
+            oracle
+                .resolve(&req("a", b"Latn", &chain))
+                .unwrap()
+                .blob
+                .id(),
+            menlo.id()
+        );
+        assert_eq!(oracle.stats().substitutes, 2);
+    }
+
+    #[test]
+    fn an_app_generic_fallback_beats_a_held_back_substitute() {
+        let cascade = Blob::from(FaceSpec::new("Cascade").chars("a").build());
+        let app_generic = Blob::from(FaceSpec::new("App Sans").chars("a").build());
+        let mut backend = SyntheticBackend::new("b");
+        backend.cascade_for("Brand", &cascade, "a");
+        let mut oracle = oracle_over(backend);
+        oracle
+            .registry_mut()
+            .insert_generic(&app_generic, &[GenericSlot::SansSerif]);
+        let chain = FontFamily::stack_with_generic(["Brand"], GenericSlot::SansSerif);
+        let face = oracle.resolve(&req("a", b"Latn", &chain)).unwrap();
+        assert_eq!(face.blob.id(), app_generic.id());
+        assert_eq!(oracle.stats().substitute_hits, 0);
+    }
+
+    #[test]
+    fn a_substitute_answers_when_nothing_else_covers() {
+        let cascade = Blob::from(FaceSpec::new("Cascade").chars("a").build());
+        let mut backend = SyntheticBackend::new("b");
+        backend.cascade_for("Brand", &cascade, "a");
+        let calls = backend.calls();
+        let mut oracle = oracle_over(backend);
+        let chain = FontFamily::named("Brand");
+        let face = oracle.resolve(&req("a", b"Latn", &chain)).unwrap();
+        assert_eq!(face.blob.id(), cascade.id(), "the last resort");
+        assert_eq!(calls.named_families(), [Some("Brand".to_owned()), None]);
+        let stats = oracle.stats();
+        assert_eq!((stats.substitutes, stats.substitute_hits), (1, 1));
+        assert_eq!(stats.unresolved, 0);
+    }
+
+    #[test]
+    fn a_substitute_is_flagged_in_the_cache_and_the_family_is_not() {
+        let inter = Blob::from(FaceSpec::new("Inter").chars("a").build());
+        let cascade = Blob::from(FaceSpec::new("Cascade").chars("b").build());
+        let mut backend = SyntheticBackend::new("b");
+        backend.family("Inter", &inter, "a");
+        backend.cascade_for("Inter", &cascade, "b");
+        let mut oracle = oracle_over(backend);
+        let chain = FontFamily::named("Inter");
+        let _ = oracle.resolve(&req("a", b"Latn", &chain));
+        let _ = oracle.resolve(&req("b", b"Latn", &chain));
+        let flag = |oracle: &mut Oracle, chars: &str| {
+            let family_req = family_request(&req(chars, b"Latn", &chain), "Inter");
+            oracle
+                .cache_mut()
+                .get_entry(&CacheKey::from_request(&family_req))
+                .map(|(_, substitute)| substitute)
+        };
+        assert_eq!(flag(&mut oracle, "a"), Some(false));
+        assert_eq!(flag(&mut oracle, "b"), Some(true));
+        // The generic request's answer is never a substitute.
+        let generic_key = CacheKey::from_request(&generic_request(&req("b", b"Latn", &chain)));
+        assert!(matches!(
+            oracle.cache_mut().get_entry(&generic_key),
+            Some((_, false))
+        ));
+    }
+
+    #[test]
+    fn named_family_probes_are_capped_per_chain() {
+        let late = Blob::from(FaceSpec::new("Late").chars("a").build());
+        let app = Blob::from(FaceSpec::new("App Late").chars("a").build());
+        let mut backend = SyntheticBackend::new("b");
+        backend.family("Late", &late, "a");
+        let calls = backend.calls();
+        let mut oracle = oracle_over(backend);
+        oracle.registry_mut().insert_blob(&app);
+        let mut names: Vec<String> = (0..MAX_FAMILY_PROBES)
+            .map(|i| format!("Absent {i}"))
+            .collect();
+        names.push("Late".to_owned());
+        let chain = FontFamily::stack(names.clone());
+
+        // Nine system families: the ninth ("Late") is never asked.
+        assert!(oracle.resolve(&req("a", b"Latn", &chain)).is_none());
+        let named = calls.named_families();
+        assert_eq!(named.len(), MAX_FAMILY_PROBES + 1, "{named:?}");
+        assert_eq!(named[MAX_FAMILY_PROBES], None, "then the generic request");
+        assert!(!named.contains(&Some("Late".to_owned())));
+        assert_eq!(oracle.stats().probe_cap_hits, 1);
+
+        // A warm cache cuts at the same place: cold and warm agree.
+        assert!(oracle.resolve(&req("a", b"Latn", &chain)).is_none());
+        assert_eq!(calls.resolves(), MAX_FAMILY_PROBES + 1, "all cached");
+        assert_eq!(oracle.stats().probe_cap_hits, 2);
+
+        // App families are not probes: one past the cap still answers.
+        names.push("App Late".to_owned());
+        let chain = FontFamily::stack(names);
+        let face = oracle.resolve(&req("a", b"Latn", &chain)).unwrap();
+        assert_eq!(face.blob.id(), app.id());
+        assert_eq!(MAX_FAMILY_PROBES, 8);
     }
 
     #[test]

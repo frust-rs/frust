@@ -57,15 +57,17 @@ impl Calls {
 ///
 /// `resolve` answers like the platform backends do: only the request's
 /// *first* named family is consulted — a [`Self::family`] entry of that name
-/// whose scripted characters cover the cluster — and otherwise the first
-/// [`Self::cover`] entry that does (the OS cascade, whatever family that face
-/// is). Walking later families is the oracle's job. The script may claim more
+/// whose scripted characters cover the cluster, else a [`Self::cascade_for`]
+/// entry of that name (the OS cascading from that family to another) — and
+/// otherwise the first [`Self::cover`] entry that does (the OS cascade,
+/// whatever family that face is). Walking later families is the oracle's job. The script may claim more
 /// than the face's `cmap` holds — that is how a test exercises the oracle's own
 /// coverage check.
 #[derive(Debug)]
 pub(crate) struct SyntheticBackend {
     os_build_id: String,
     families: Vec<(String, String, FaceSource)>,
+    cascades: Vec<(String, String, FaceSource)>,
     coverage: Vec<(String, FaceSource)>,
     defaults: Vec<(GenericKey, FaceSource)>,
     calls: Calls,
@@ -76,6 +78,7 @@ impl SyntheticBackend {
         Self {
             os_build_id: os_build_id.to_owned(),
             families: Vec::new(),
+            cascades: Vec::new(),
             coverage: Vec::new(),
             defaults: Vec::new(),
             calls: Calls::default(),
@@ -100,6 +103,17 @@ impl SyntheticBackend {
     /// Scripts `blob` as the installed family `name`, covering `chars`.
     pub(crate) fn family(&mut self, name: &str, blob: &Blob<u8>, chars: &str) {
         self.families.push((
+            name.to_lowercase(),
+            chars.to_owned(),
+            FaceSource::blob(blob.clone(), 0),
+        ));
+    }
+
+    /// Scripts `blob` as what a request naming family `name` cascades to for
+    /// `chars` (CoreText cascading from an installed Menlo that lacks the
+    /// cluster): a face of another family, answered only to that request.
+    pub(crate) fn cascade_for(&mut self, name: &str, blob: &Blob<u8>, chars: &str) {
+        self.cascades.push((
             name.to_lowercase(),
             chars.to_owned(),
             FaceSource::blob(blob.clone(), 0),
@@ -141,6 +155,7 @@ impl Backend for SyntheticBackend {
             && let Some((_, _, source)) = self
                 .families
                 .iter()
+                .chain(&self.cascades)
                 .find(|(n, claimed, _)| *n == name && claims(claimed, &req.chars))
         {
             return Some(source.clone());

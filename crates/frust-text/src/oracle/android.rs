@@ -15,7 +15,9 @@
 //! families, so named (app) families are never asked of it. The matched weight/italic become a
 //! synthesis hint: a face with a `wght` axis (variable Roboto) takes the requested weight, a
 //! face lighter than requested without one (CJK bold, mono bold) is faux bold, and an upright
-//! face asked for italic takes `ital` or a faux oblique.
+//! face asked for italic takes `ital` or a faux oblique. That decision is the pure
+//! `hint::decide_synthesis` (cfg-free, so its tests run on every host); this file only fills
+//! its inputs from the match.
 //!
 //! The only `unsafe` here is the `__system_property_get` call behind [`system_property`], and
 //! the `Send` assertion on the matcher wrapper.
@@ -28,14 +30,12 @@ use std::time::Instant;
 
 use ndk::font::{FamilyVariant, FontMatcher, FontWeight};
 
-use super::{Backend, FaceSource, FallbackRequest, Synthesis, VariationSetting};
+use super::hint::{Actual, Requested, decide_synthesis};
+use super::{Backend, FaceSource, FallbackRequest, VariationSetting};
 use crate::style::{FontStyle, GenericSlot};
 
 /// Android's `PROP_VALUE_MAX`: the longest property value, including the NUL.
 const PROP_VALUE_MAX: usize = 92;
-
-/// Faux-oblique angle (degrees) for an upright face asked for italic.
-const FAUX_OBLIQUE_DEGREES: f32 = 14.0;
 
 unsafe extern "C" {
     /// bionic's `__system_property_get(name, value)`: copies the NUL-terminated value (at most
@@ -223,49 +223,8 @@ fn cluster_script(text: &str) -> &'static str {
     }
 }
 
-/// What the caller asked of the matcher.
-struct Requested {
-    weight: f32,
-    italic: bool,
-}
-
-/// What the matcher answered.
-struct Actual {
-    weight: f32,
-    has_wght_axis: bool,
-    has_ital_axis: bool,
-    file_is_italic: bool,
-}
-
 fn has_axis(axes: &[VariationSetting], tag: &[u8; 4]) -> bool {
     axes.iter().any(|a| &a.tag == tag)
-}
-
-/// The pure synthesis decision: independent of slant for weight, so upright and italic asks at
-/// the same weight embolden identically.
-fn decide_synthesis(req: &Requested, actual: &Actual) -> Synthesis {
-    let mut synth = Synthesis::default();
-    if actual.has_wght_axis {
-        // Variable face: the caller applies the requested weight on the axis.
-        synth.variations.push(VariationSetting {
-            tag: *b"wght",
-            value: req.weight,
-        });
-    } else if req.weight >= 600.0 && actual.weight + 100.0 <= req.weight {
-        // No bold file for this script (CJK) or family (mono): faux bold.
-        synth.embolden = true;
-    }
-    if req.italic {
-        if actual.has_ital_axis {
-            synth.variations.push(VariationSetting {
-                tag: *b"ital",
-                value: 1.0,
-            });
-        } else if !actual.file_is_italic {
-            synth.skew = Some(FAUX_OBLIQUE_DEGREES);
-        }
-    }
-    synth
 }
 
 /// Whether the matched file is itself an italic design (`NotoSerif-Italic.ttf`).
@@ -358,49 +317,34 @@ impl Backend for NdkFontBackend {
 mod tests {
     use super::*;
 
-    fn actual(weight: f32, wght: bool) -> Actual {
-        Actual {
-            weight,
-            has_wght_axis: wght,
-            has_ital_axis: false,
-            file_is_italic: false,
-        }
-    }
-
-    fn decide(weight: f32, italic: bool, a: &Actual) -> Synthesis {
-        decide_synthesis(&Requested { weight, italic }, a)
-    }
-
+    /// The M5 contract: every successful match carries `Some(hint)` (`Some(default)` meaning
+    /// "nothing needed"), so the oracle never falls back to its own rule for an NDK answer.
     #[test]
-    fn upright_and_italic_embolden_alike() {
-        for (w, face_w) in [(500.0, 400.0), (700.0, 400.0), (600.0, 500.0)] {
-            let a = actual(face_w, false);
-            assert_eq!(
-                decide(w, false, &a).embolden,
-                decide(w, true, &a).embolden,
-                "weight {w} on {face_w}"
+    fn a_successful_match_always_attaches_a_hint() {
+        let mut backend = NdkFontBackend::new();
+        let mut matched = 0;
+        for (family, text, weight, italic) in [
+            (c"sans-serif", "H", 400.0, false),
+            (c"sans-serif", "H", 700.0, true),
+            (c"serif", "H", 500.0, false),
+            (c"monospace", "H", 700.0, false),
+            (c"sans-serif", "\u{4E2D}", 700.0, false),
+            (c"sans-serif", "\u{1F600}", 400.0, true),
+        ] {
+            let Some(m) = backend.match_text(family, text, weight, italic, None) else {
+                continue;
+            };
+            matched += 1;
+            assert!(
+                m.source.synthesis_hint.is_some(),
+                "{family:?} w{weight} italic={italic}: no hint on {}",
+                m.file
             );
         }
-    }
-
-    #[test]
-    fn variable_face_takes_axis() {
-        let s = decide(700.0, false, &actual(400.0, true));
-        assert!(!s.embolden);
-        assert_eq!(s.variation(*b"wght"), Some(700.0));
-    }
-
-    #[test]
-    fn static_lighter_face_emboldens_from_600() {
-        assert!(decide(700.0, false, &actual(400.0, false)).embolden);
-        assert!(decide(600.0, false, &actual(400.0, false)).embolden);
-    }
-
-    #[test]
-    fn five_hundred_on_regular_is_nothing_needed() {
-        assert_eq!(
-            decide(500.0, false, &actual(400.0, false)),
-            Synthesis::default()
-        );
+        assert!(matched > 0, "the matcher answered nothing");
+        let default = backend
+            .default_family(GenericSlot::SansSerif)
+            .expect("a sans-serif default");
+        assert!(default.synthesis_hint.is_some());
     }
 }
