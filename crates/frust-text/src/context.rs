@@ -3,9 +3,7 @@
 //!
 //! Created once and threaded through the app/render loop. It owns the frust
 //! font oracle ([`crate::oracle::Oracle`], built with the platform backend for
-//! the target), the shaping driver's state, the shape cache, and — for the
-//! [`crate::TextEditor`] only, which still edits through parley — a
-//! [`parley::FontContext`] and [`parley::LayoutContext`].
+//! the target), the shaping driver's state and the shape caches.
 //!
 //! # Layout over the shaping driver
 //!
@@ -13,14 +11,9 @@
 //! over the oracle: a width-independent [`shape::Shaped`]) and lays it out with
 //! the frust line layout ([`crate::layout`]); [`TextContext::layout_bounded`]'s
 //! line cap and ellipsis are native to that layout. [`TextContext::shape`]
-//! returns the bare [`shape::Shaped`] through its own cache. The driver is
+//! returns the bare [`shape::Shaped`] through its own cache — the
+//! [`crate::TextEditor`]'s path, which breaks the lines itself. The driver is
 //! declared here because the context owns its state.
-//!
-//! # The editor's parley collection
-//!
-//! Every app-font and generic-fallback registration goes through the
-//! oracle's registry, which mirrors it into parley's collection
-//! ([`ParleyMirror`]) so the editor resolves the same families.
 //!
 //! # App fonts across independent contexts
 //!
@@ -33,17 +26,9 @@
 //! # Generic-family fallback registry
 //!
 //! The registry's generic-fallback record is the process-wide counterpart for
-//! the *generic* font-family map (fontique's `SystemUi`/`SansSerif`/
-//! `Monospace`/`Serif`/`Emoji` slots) rather than a named family — see
+//! the *generic* font-family map (the `SystemUi`/`SansSerif`/`Monospace`/
+//! `Serif`/`Emoji` slots) rather than a named family — see
 //! [`register_generic_fallback`] for why a host needs this seam on `wasm32`.
-//!
-//! # Han fallback on Apple targets
-//!
-//! iOS's own Han font (PingFangUI) is hvgl-only, which fontique rejects, and
-//! fontique's CoreText fallback hack asks for Heiti, which iOS does not ship,
-//! so every Han fallback list is empty and Han shapes to `.notdef`.
-//! [`append_han_fallbacks`] fills only the *empty* lists with Hiragino Sans (a
-//! partial-coverage stopgap; see LIMITATIONS id `ios-han-fallback-partial`).
 //!
 //! The oracle's persistent font cache is placed by [`TextContext::builder`];
 //! unconfigured contexts honour `FRUST_TEXT_FONT_CACHE` in debug builds.
@@ -53,8 +38,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use parley::fontique::{Blob, GenericFamily};
-use peniko::Brush;
+use peniko::Blob;
 
 use crate::layout::{ELLIPSIS, Ellipsis, TextLayout};
 use crate::oracle::registry::{FamilySummary, RegistryMirror};
@@ -64,20 +48,16 @@ use crate::shape_cache::{
 };
 use crate::style::{GenericSlot, TextOverflow, TextStyle};
 
-/// `to_parley_align` lost its last caller with the parley layout path; the
-/// converters in `style` are retired together with the editor's parley path.
-const _: fn(crate::style::TextAlign) -> parley::layout::Alignment = crate::style::to_parley_align;
-
 #[path = "shape/mod.rs"]
 pub(crate) mod shape;
 
 /// A font family registered via [`TextContext::register_fonts`], reported back
 /// to the caller so it can resolve widget styles against the exact name(s)
-/// fontique assigned.
+/// the registry assigned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisteredFamily {
-    /// The family name fontique resolved the registered face(s) into (from
-    /// the font's own `name` table, or an override).
+    /// The family name the registered face(s) resolve by (the font's own
+    /// `name` table: its typographic family, else its family).
     pub name: String,
     /// How many faces (weights/styles) were registered into this family from
     /// the supplied data.
@@ -97,149 +77,53 @@ pub enum FontError {
 /// family slot in `generics`, applied to every [`TextContext`] — existing,
 /// on its next [`TextContext::sync_app_fonts`], and future, seeded for free
 /// by [`TextContext::new`] — through the oracle's registry, which records it
-/// process-wide and mirrors it into parley's collection via
-/// `fontique::Collection::append_generic_families`.
+/// process-wide.
 ///
 /// # Why this exists
 ///
-/// [`TextContext::new`] builds `parley::FontContext::new()`'s fontique
-/// collection with the platform's real system-font backend on every target
-/// except `wasm32-unknown-unknown`, where fontique falls back to a dummy
-/// backend whose generic-family map is empty: [`crate::FontFamily::SystemUi`]
-/// (this crate's default family) and any bare [`GenericSlot`] then resolve to
+/// On `wasm32-unknown-unknown` the platform has no system-font backend, so
+/// the generic-family map is empty: [`crate::FontFamily::SystemUi`] (this
+/// crate's default family) and any bare [`GenericSlot`] then resolve to
 /// nothing and shape zero glyph runs. This function is the seam a host (a
 /// shell) calls once at startup with a bundled face to give a generic slot
 /// something to resolve to on that target; a platform whose backend already
 /// populates the generic map is unaffected unless it opts in too, since the
-/// registered face is only ever *appended* — never a replacement.
+/// registered face is only ever *added* to the slot — never a replacement.
 ///
 /// A stack that names a concrete family
 /// ([`crate::FontFamily::Named`]/[`crate::FontFamily::NamedWithGeneric`],
 /// registered via [`TextContext::register_fonts`]) still resolves before a
 /// generic fallback, since a named lookup is always tried first.
 ///
-/// No-op (records nothing) when `generics` is empty. Bytes fontique cannot
-/// parse into any face register zero families when eventually applied, so
-/// this is a harmless no-op then too — the same "no error surface" contract
+/// No-op (records nothing) when `generics` is empty. Bytes with no parseable
+/// face register zero families when eventually applied, so this is a
+/// harmless no-op then too — the same "no error surface" contract
 /// [`TextContext::sync_app_fonts`] already follows for app fonts.
 pub fn register_generic_fallback(data: Vec<u8>, generics: &[GenericSlot]) {
     oracle::registry::record_generic_fallback(data, generics);
 }
 
-/// Family names tried, in order, as the Han fallback on Apple targets.
-#[cfg(target_vendor = "apple")]
-const HAN_FALLBACK_CANDIDATES: &[&str] = &["Hiragino Sans", "Hiragino Kaku Gothic ProN"];
+/// The registry's second collection: there is none — the oracle is the only
+/// font collection a context has.
+struct NoMirror;
 
-/// The Han-capable fallback keys: script `Hani` with no locale and each CJK
-/// locale fontique tracks, plus `Hant`/`Hans` for scripts that distinguish them.
-const HAN_FALLBACK_KEYS: &[([u8; 4], Option<&str>)] = &[
-    (*b"Hani", None),
-    (*b"Hani", Some("zh-Hans")),
-    (*b"Hani", Some("zh-CN")),
-    (*b"Hani", Some("zh-Hant")),
-    (*b"Hani", Some("zh-TW")),
-    (*b"Hani", Some("zh-HK")),
-    (*b"Hani", Some("ja")),
-    (*b"Hant", None),
-    (*b"Hans", None),
-];
-
-/// Appends the first installed family of `candidates` to every Han fallback
-/// key whose list is currently empty, returning how many keys were filled.
-///
-/// A non-empty list is never touched (macOS's Heiti, or a parsable PingFang,
-/// keeps its answer). When no candidate is installed this changes nothing and
-/// logs at debug level. Target-independent so host tests exercise it.
-#[cfg_attr(not(target_vendor = "apple"), allow(dead_code))]
-pub(crate) fn append_han_fallbacks(
-    collection: &mut parley::fontique::Collection,
-    candidates: &[&str],
-) -> usize {
-    use parley::fontique::{FallbackKey, Language, Script};
-    let family = candidates
-        .iter()
-        .find_map(|name| collection.family_by_name(name))
-        .map(|info| info.id());
-    let Some(family) = family else {
-        log::debug!("frust-text: no Han fallback family installed (tried {candidates:?})");
-        return 0;
-    };
-    let mut filled = 0;
-    for &(script, locale) in HAN_FALLBACK_KEYS {
-        let script = Script::from_bytes(script);
-        let locale = locale.and_then(|l| Language::parse(l).ok());
-        let key = FallbackKey::new(script, locale.as_ref());
-        if collection.fallback_families(key).next().is_none()
-            && collection.append_fallbacks(key, std::iter::once(family))
-        {
-            filled += 1;
-        }
+impl RegistryMirror for NoMirror {
+    fn app_font(&mut self, _blob: &Blob<u8>) -> Vec<FamilySummary> {
+        Vec::new()
     }
-    filled
-}
 
-/// Converts a Frust [`GenericSlot`] into parley's `GenericFamily` — the
-/// [`register_generic_fallback`] seam's own copy of
-/// `crate::style::generic_slot_to_parley` (private to that module), so this
-/// module still speaks only [`GenericSlot`] outward.
-fn generic_slot_to_parley(slot: GenericSlot) -> GenericFamily {
-    match slot {
-        GenericSlot::Monospace => GenericFamily::Monospace,
-        GenericSlot::SansSerif => GenericFamily::SansSerif,
-        GenericSlot::Serif => GenericFamily::Serif,
-        GenericSlot::SystemUi => GenericFamily::SystemUi,
-        GenericSlot::Emoji => GenericFamily::Emoji,
+    fn generic_fallback(&mut self, _blob: &Blob<u8>, _generics: &[GenericSlot]) -> bool {
+        false
     }
 }
 
-/// Mirrors the oracle registry's registrations into parley's fontique
-/// collection, which still does the shaping until the oracle feeds the shaper.
-pub(crate) struct ParleyMirror<'a>(pub(crate) &'a mut parley::FontContext);
-
-impl RegistryMirror for ParleyMirror<'_> {
-    fn app_font(&mut self, blob: &Blob<u8>) -> Vec<FamilySummary> {
-        let collection = &mut self.0.collection;
-        let registered = collection.register_fonts(blob.clone(), None);
-        registered
-            .into_iter()
-            .map(|(family_id, faces)| FamilySummary {
-                name: collection
-                    .family_name(family_id)
-                    .unwrap_or_default()
-                    .to_string(),
-                face_count: faces.len(),
-            })
-            .collect()
-    }
-
-    fn generic_fallback(&mut self, blob: &Blob<u8>, generics: &[GenericSlot]) -> bool {
-        let collection = &mut self.0.collection;
-        let mut applied = false;
-        for (family_id, _faces) in collection.register_fonts(blob.clone(), None) {
-            applied = true;
-            for &generic in generics {
-                collection.append_generic_families(
-                    generic_slot_to_parley(generic),
-                    std::iter::once(family_id),
-                );
-            }
-        }
-        applied
-    }
-}
-
-/// Owns the font oracle, the shaping driver and the shape cache (plus the
-/// editor's parley contexts).
+/// Owns the font oracle, the shaping driver and the shape caches.
 ///
 /// This is deliberately not `Clone`/`Sync`: it is expensive per-instance state
 /// meant to be constructed once and borrowed mutably for each layout pass.
 /// Glyph runs carry [`peniko::Brush`], the same paint vocabulary as
 /// [`frust_scene`].
 pub struct TextContext {
-    /// The [`crate::TextEditor`]'s font collection (parley still edits).
-    font_ctx: parley::FontContext,
-    /// The [`crate::TextEditor`]'s layout scratch.
-    layout_ctx: parley::LayoutContext<Brush>,
     /// Width-independent shape cache: a bounded LRU of shaped paragraphs and
     /// their line tables keyed by (text, style), so a width change re-runs
     /// the line layout only and repeated content shapes once. See
@@ -247,7 +131,8 @@ pub struct TextContext {
     shape_cache: LayoutCache,
     /// The shaping driver's analyzer/shaper state ([`shape::ShapeContext`]).
     shape_cx: shape::ShapeContext,
-    /// The shaping driver's cache: one [`shape::Shaped`] per (text, style).
+    /// The shaping driver's cache: one [`shape::Shaped`] per (text, style),
+    /// the [`crate::TextEditor`]'s shaping.
     shaped_cache: ShapedCache,
     /// The frust font oracle: platform backend, fallback cache, and this
     /// context's app-font registry (with its watermarks into the process-wide
@@ -280,9 +165,7 @@ fn visible_line_count(layout: &TextLayout, text_len: usize) -> usize {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NewTimings {
     /// The font system's start-up: the oracle's construction (its persistent
-    /// fallback cache is read later, at the first miss) plus — while the
-    /// editor still uses parley — `parley::FontContext::new`'s platform
-    /// font-source scan.
+    /// fallback cache is read later, at the first miss).
     pub font_system: Duration,
     /// [`TextContext::sync_app_fonts`] — seeding the app fonts and generic fallbacks.
     pub app_sync: Duration,
@@ -400,9 +283,9 @@ impl TextContext {
     /// Builds a context with system fonts available, seeded with every app font
     /// registered so far.
     ///
-    /// [`parley::FontContext::new`] populates the fontique source collection from
-    /// the platform (Core Text on macOS); no manual font registration is
-    /// required for the default [`crate::FontFamily::SystemUi`] to resolve.
+    /// The oracle's platform backend answers from the system's fonts (Core
+    /// Text on Apple targets); no manual font registration is required for the
+    /// default [`crate::FontFamily::SystemUi`] to resolve.
     ///
     /// The seeding step ([`Self::sync_app_fonts`]) is what makes a *private*
     /// context (a `TextInput`'s) shape with the same app fonts the shell-owned
@@ -449,23 +332,15 @@ impl TextContext {
     }
 
     fn build(capabilities: RenderCapabilities, font_cache: FontCacheChoice) -> (Self, NewTimings) {
-        let font_started = Instant::now();
-        #[allow(unused_mut)]
-        let mut font_ctx = parley::FontContext::new();
-        #[cfg(target_vendor = "apple")]
-        append_han_fallbacks(&mut font_ctx.collection, HAN_FALLBACK_CANDIDATES);
-        let parley_scan = font_started.elapsed();
         let oracle_started = Instant::now();
         let oracle = Oracle::with_cache_location(
             oracle::platform_backend(),
             capabilities,
             cache_location(font_cache),
         );
-        let font_system = parley_scan + oracle_started.elapsed();
+        let font_system = oracle_started.elapsed();
         log::trace!("frust-text: font system {font_system:?}");
         let mut cx = Self {
-            font_ctx,
-            layout_ctx: parley::LayoutContext::new(),
             shape_cache: LayoutCache::new(DEFAULT_CAPACITY),
             shape_cx: shape::ShapeContext::default(),
             shaped_cache: ShapedCache::new(DEFAULT_CAPACITY),
@@ -615,14 +490,8 @@ impl TextContext {
 
     /// Shapes `text` with `style` through the frust shaping driver (fonts from
     /// this context's oracle), width-independently and cached: a repeat of the
-    /// same (text, style) is served without analysis or shaping.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "layout keeps its shaping in the layout cache; rich text is this one's caller"
-        )
-    )]
+    /// same (text, style) is served without analysis or shaping. The
+    /// [`crate::TextEditor`] shapes through here on every edit.
     pub(crate) fn shape(&mut self, text: &str, style: &TextStyle) -> Arc<shape::Shaped> {
         let key = ShapeKey::new(text, style);
         if let Some(shaped) = self.shaped_cache.get_shaped(&key) {
@@ -638,7 +507,7 @@ impl TextContext {
         not(test),
         allow(
             dead_code,
-            reason = "layout keeps its shaping in the layout cache; rich text is this one's caller"
+            reason = "the shaping cache's counters are read by tests only"
         )
     )]
     pub(crate) fn shaped_cache_stats(&self) -> ShapeCacheStats {
@@ -650,20 +519,17 @@ impl TextContext {
     /// [`crate::FontFamily::named`]/[`crate::FontFamily::stack`].
     ///
     /// Registers into the font oracle's app-font registry (parsed with
-    /// read-fonts), which mirrors the bytes into parley's fontique collection
-    /// ([`parley::fontique::Collection::register_fonts`]) while parley still
-    /// shapes. A registered family **shadows** a same-named system family in
-    /// both (fontique 0.11: the registered map is checked before the system
-    /// map; the oracle: app faces before the system, and a provided family is
-    /// never asked of the system), so bundling a family already present on the
-    /// platform (e.g. "Roboto") deterministically wins over the platform's own
-    /// copy. The returned names are fontique's when it registered the bytes.
+    /// read-fonts). A registered family **shadows** a same-named system
+    /// family (app faces are consulted before the system, and a provided
+    /// family is never asked of the system), so bundling a family already
+    /// present on the platform (e.g. "Roboto") deterministically wins over the
+    /// platform's own copy.
     ///
     /// Always clears the shape cache on success — a same-named registered
     /// family changes shaping without changing the cache key, so any layout
     /// shaped before this call could otherwise be served stale. Returns
     /// [`FontError::NoFacesFound`] (no panic) for invalid/empty data, an
-    /// empty byte slice, or bytes with no faces fontique can parse.
+    /// empty byte slice, or bytes with no parseable face.
     ///
     /// **Caller-visible relayout contract**: registering fonts after a shell
     /// has already laid out text does not retroactively re-shape anything
@@ -683,7 +549,7 @@ impl TextContext {
         let families = self
             .oracle
             .registry_mut()
-            .register(blob, &mut ParleyMirror(&mut self.font_ctx))
+            .register(blob, &mut NoMirror)
             .map_err(|_| FontError::NoFacesFound)?
             .into_iter()
             .map(|family| RegisteredFamily {
@@ -708,13 +574,10 @@ impl TextContext {
     ///
     /// A `true` return carries the same caller-visible relayout contract as
     /// [`Self::register_fonts`]: this context's shape cache is cleared, but a
-    /// layout retained *outside* it (a [`crate::TextEditor`]'s parley layout)
-    /// must be re-shaped by its owner.
+    /// layout retained *outside* it (a [`crate::TextEditor`]'s, until its next
+    /// edit) must be re-shaped by its owner.
     pub fn sync_app_fonts(&mut self) -> bool {
-        let applied = self
-            .oracle
-            .registry_mut()
-            .sync(&mut ParleyMirror(&mut self.font_ctx));
+        let applied = self.oracle.registry_mut().sync(&mut NoMirror);
         if applied {
             self.clear_shape_cache();
         }
@@ -733,18 +596,6 @@ impl TextContext {
         self.shape_cache = LayoutCache::new(DEFAULT_CAPACITY);
         self.shaped_cache = ShapedCache::new(DEFAULT_CAPACITY);
     }
-
-    /// Borrows the parley font and layout contexts together, for constructing a
-    /// transient [`parley::PlainEditorDriver`] in [`crate::TextEditor::apply`].
-    ///
-    /// Returned as a tuple so a single mutable borrow of `self` yields both
-    /// contexts the driver's borrow-triple needs. `pub(crate)` — parley types
-    /// must not leak past the crate boundary (scene-layer purity).
-    pub(crate) fn driver_contexts(
-        &mut self,
-    ) -> (&mut parley::FontContext, &mut parley::LayoutContext<Brush>) {
-        (&mut self.font_ctx, &mut self.layout_ctx)
-    }
 }
 
 impl Default for TextContext {
@@ -757,115 +608,15 @@ impl Default for TextContext {
 mod tests {
     use super::*;
     use crate::shape_cache::DEFAULT_CAPACITY;
-    use crate::style::{LineHeight, TextAlign};
-    use parley::style::StyleProperty;
+    use crate::style::TextAlign;
     use peniko::Color;
-    use std::borrow::Cow;
     use std::sync::Mutex;
-
-    /// Pushes `style` onto a parley builder as its default run properties:
-    /// the pre-switch parley layout path, kept as the parity reference.
-    fn push_style_defaults(builder: &mut parley::RangedBuilder<'_, Brush>, style: &TextStyle) {
-        use crate::style::{
-            to_parley_family, to_parley_line_height, to_parley_style, to_parley_weight,
-        };
-        builder.push_default(to_parley_family(&style.family));
-        builder.push_default(StyleProperty::FontSize(style.size));
-        builder.push_default(StyleProperty::FontWeight(to_parley_weight(style.weight)));
-        builder.push_default(StyleProperty::FontStyle(to_parley_style(style.style)));
-        builder.push_default(StyleProperty::FontWidth(parley::FontWidth::from_ratio(
-            style.width,
-        )));
-        if !style.variations.is_empty() {
-            let variations: Vec<parley::FontVariation> = style
-                .variations
-                .iter()
-                .map(|&(tag, value)| {
-                    parley::FontVariation::new(parley::setting::Tag::new(&tag), value)
-                })
-                .collect();
-            builder.push_default(StyleProperty::FontVariations(parley::FontVariations::List(
-                Cow::Owned(variations),
-            )));
-        }
-        if let Some(locale) = style.locale.as_deref() {
-            builder.push_default(StyleProperty::Locale(
-                parley::style::Language::parse(locale).ok(),
-            ));
-        }
-        builder.push_default(StyleProperty::LetterSpacing(style.letter_spacing));
-        builder.push_default(StyleProperty::LineHeight(to_parley_line_height(
-            style.line_height,
-        )));
-        builder.push_default(StyleProperty::Brush(Brush::Solid(style.color)));
-    }
-
-    /// `text` laid out by parley 0.11 over this context's parley collection,
-    /// exactly as `layout` did before the line layout replaced it.
-    fn parley_layout(
-        cx: &mut TextContext,
-        text: &str,
-        style: &TextStyle,
-        max_width: Option<f32>,
-    ) -> parley::Layout<Brush> {
-        let mut builder = cx
-            .layout_ctx
-            .ranged_builder(&mut cx.font_ctx, text, 1.0, true);
-        push_style_defaults(&mut builder, style);
-        let mut layout = builder.build(text);
-        layout.break_all_lines(max_width);
-        layout.align(
-            crate::style::to_parley_align(style.align),
-            parley::layout::AlignmentOptions::default(),
-        );
-        layout
-    }
 
     /// Every glyph of `runs` as (id, x, y), in emission order.
     fn glyphs_of(runs: &[frust_scene::GlyphRun]) -> Vec<(u32, f32, f32)> {
         runs.iter()
             .flat_map(|r| r.glyphs.iter().map(|g| (g.id, g.x, g.y)))
             .collect()
-    }
-
-    /// Asserts the line layout and parley agree on `text`: the same glyphs,
-    /// each within half a pixel, and the same size.
-    fn assert_parley_parity(
-        cx: &mut TextContext,
-        text: &str,
-        style: &TextStyle,
-        max_width: Option<f32>,
-    ) {
-        let ours = cx.layout(text, style, max_width);
-        let reference = parley_layout(cx, text, style, max_width);
-        let what = format!("{text:?} at {max_width:?}, {:?}", style.align);
-        let mut a = glyphs_of(&ours.to_scene_runs(kurbo::Point::ORIGIN));
-        let mut b = glyphs_of(&crate::convert::layout_to_scene_runs(
-            &reference,
-            kurbo::Point::ORIGIN,
-        ));
-        // Order-independent: parley and the line layout may split a line's
-        // runs differently; positions are what must agree.
-        let key = |g: &(u32, f32, f32)| (g.2.to_bits(), g.1.to_bits(), g.0);
-        a.sort_by_key(key);
-        b.sort_by_key(key);
-        assert_eq!(a.len(), b.len(), "{what}: glyph count");
-        for (x, y) in a.iter().zip(&b) {
-            assert_eq!(x.0, y.0, "{what}: glyph ids {a:?} vs {b:?}");
-            assert!(
-                (x.1 - y.1).abs() <= 0.5 && (x.2 - y.2).abs() <= 0.5,
-                "{what}: glyph {x:?} vs parley {y:?}"
-            );
-        }
-        assert_eq!(ours.line_count(), reference.len(), "{what}: line count");
-        let size = ours.size();
-        assert!(
-            (size.width - f64::from(reference.width())).abs() <= 0.5
-                && (size.height - f64::from(reference.height())).abs() <= 0.5,
-            "{what}: size {size:?} vs parley {}x{}",
-            reference.width(),
-            reference.height()
-        );
     }
 
     /// A context whose font cache stays in memory: the builder opt-out every
@@ -1031,16 +782,14 @@ mod tests {
         );
     }
 
-    /// The generic-fallback registry, exercised against a collection built
-    /// with `system_fonts: false` — the same empty-generic-family-map shape
-    /// `wasm32`'s dummy fontique backend has (see
-    /// [`register_generic_fallback`]'s docs) — since a real host's system
-    /// collection already has a resolvable `SystemUi`, so it could never
+    /// The generic-fallback registry, exercised against an oracle whose
+    /// backend has no fonts at all — the empty-generic-family-map shape
+    /// `wasm32` has (see [`register_generic_fallback`]'s docs) — since a real
+    /// host's system backend already resolves `SystemUi`, so it could never
     /// reproduce the defect this seam fixes.
     #[test]
     fn generic_fallback_maps_requested_slots_and_is_idempotent() {
         use crate::oracle::registry::PendingGenericFallback;
-        use parley::fontique::{Collection, CollectionOptions, GenericFamily};
 
         // Entries built locally, driven straight through the registry's
         // `apply_generic_entries` rather than the real
@@ -1054,90 +803,60 @@ mod tests {
             generics: vec![GenericSlot::SystemUi, GenericSlot::SansSerif],
         }];
 
-        // A systemless collection: fontique's own stand-in for the wasm32
-        // dummy backend's empty generic-family map.
-        let mut font_ctx = parley::FontContext {
-            collection: Collection::new(CollectionOptions {
-                system_fonts: false,
-                ..Default::default()
-            }),
-            source_cache: Default::default(),
-        };
-        let mut oracle = Oracle::new(
+        let mut cx = test_cx();
+        cx.oracle = Oracle::new(
             Box::new(oracle::synthetic::SyntheticBackend::new("systemless")),
             RenderCapabilities::default(),
             None,
         );
-
-        let applied = oracle
+        let applied = cx
+            .oracle
             .registry_mut()
-            .apply_generic_entries(&entries, &mut ParleyMirror(&mut font_ctx));
+            .apply_generic_entries(&entries, &mut NoMirror);
         assert!(
             applied,
             "registering a parseable face must report at least one applied family"
         );
 
-        let system_ui: Vec<_> = font_ctx
-            .collection
-            .generic_families(GenericFamily::SystemUi)
-            .collect();
-        assert_eq!(
-            system_ui.len(),
-            1,
-            "SystemUi must resolve to exactly the registered fallback face"
-        );
-        assert!(
-            font_ctx
-                .collection
-                .generic_families(GenericFamily::Monospace)
-                .next()
-                .is_none(),
-            "Monospace must stay unmapped — only SystemUi/SansSerif were requested"
-        );
-        // The oracle sees the same face (the synthetic backend answers nothing, so
-        // the app generic fallback is the answer).
-        let face = oracle
+        // The synthetic backend answers nothing, so the app generic fallback
+        // is the answer — for the requested slots only.
+        let face = cx
+            .oracle
             .default_face(GenericSlot::SystemUi)
             .expect("the oracle resolves SystemUi to the registered fallback");
         assert_eq!(face.blob.data(), TUFFY);
-        assert!(oracle.default_face(GenericSlot::Monospace).is_none());
+        assert!(
+            cx.oracle.default_face(GenericSlot::Monospace).is_none(),
+            "Monospace must stay unmapped — only SystemUi/SansSerif were requested"
+        );
 
         // The defect under test: SystemUi-styled text on an otherwise-empty
         // system collection must still shape into glyph runs.
-        let mut cx = TextContext {
-            font_ctx,
-            layout_ctx: parley::LayoutContext::new(),
-            shape_cache: LayoutCache::new(DEFAULT_CAPACITY),
-            shape_cx: shape::ShapeContext::default(),
-            shaped_cache: ShapedCache::new(DEFAULT_CAPACITY),
-            oracle,
-        };
-        let layout = cx.layout("Hello", &style(20.0), None);
+        let layout = cx.layout("0123", &style(20.0), None);
         let runs = layout.to_scene_runs(kurbo::Point::ORIGIN);
         assert!(
             !runs.is_empty(),
             "SystemUi text must shape with the registered fallback face even \
-             when the system font collection is empty"
+             when the system has no fonts"
         );
 
         // Idempotence: a second apply with nothing new pending must not
-        // re-append the same family into the generic-family list.
+        // re-append the same face to the slot.
         let applied_again = cx
             .oracle
             .registry_mut()
-            .apply_generic_entries(&entries, &mut ParleyMirror(&mut cx.font_ctx));
+            .apply_generic_entries(&entries, &mut NoMirror);
         assert!(
             !applied_again,
             "nothing new is pending — a repeat apply must be a no-op"
         );
-        let system_ui_after: Vec<_> = cx
-            .font_ctx
-            .collection
-            .generic_families(GenericFamily::SystemUi)
-            .collect();
         assert_eq!(
-            system_ui_after, system_ui,
-            "a repeat apply must not double-register the fallback family"
+            cx.oracle
+                .registry_mut()
+                .generic_faces(GenericSlot::SystemUi)
+                .count(),
+            1,
+            "a repeat apply must not double-register the fallback face"
         );
     }
 
@@ -1241,146 +960,11 @@ mod tests {
         assert_eq!(
             cx.shape_cache_stats(),
             ShapeCacheStats::default(),
-            "the parley path's cache is separate"
+            "the layout cache is separate"
         );
         cx.clear_shape_cache();
         let _ = cx.shape("Hello, hello", &s);
         assert_eq!(cx.shape_cx.passes(), passes + 1, "cleared → shaped again");
-    }
-
-    #[test]
-    fn the_driver_and_the_parley_path_pick_the_same_glyphs() {
-        let (mut cx, s) = noto_cx();
-        // Only characters the subset maps: fallback is where the two differ.
-        let text = "Hello, Hello";
-        let shaped = cx.shape(text, &s);
-        let ours: Vec<u32> = shaped.glyphs.iter().map(|g| g.id).collect();
-        let reference = parley_layout(&mut cx, text, &s, None);
-        let parley: Vec<u32> =
-            crate::convert::layout_to_scene_runs(&reference, kurbo::Point::ORIGIN)
-                .iter()
-                .flat_map(|run| run.glyphs.iter().map(|g| g.id))
-                .collect();
-        assert_eq!(ours, parley);
-        let width: f32 = shaped.runs.iter().map(|r| r.advance).sum();
-        let parley_width = reference.width();
-        assert!(
-            (width - parley_width).abs() < 0.5,
-            "{width} vs {parley_width}"
-        );
-    }
-
-    /// A context holding the bundled Latin and Arabic subsets as app fonts,
-    /// and a style whose family stack names the Latin face first.
-    fn bundled_cx(size: f32) -> (TextContext, TextStyle) {
-        let mut cx = test_cx();
-        let mut names = Vec::new();
-        for bytes in [
-            &include_bytes!("../../../testing/fonts/NotoSans-Subset.ttf")[..],
-            &include_bytes!("../../../testing/fonts/NotoSansArabic-Subset.ttf")[..],
-        ] {
-            let families = cx
-                .register_fonts(bytes.to_vec())
-                .expect("the subset registers");
-            names.push(families[0].name.clone());
-        }
-        let s = TextStyle {
-            family: crate::FontFamily::stack(names),
-            ..style(size)
-        };
-        (cx, s)
-    }
-
-    const ALIGNS: [TextAlign; 6] = [
-        TextAlign::Start,
-        TextAlign::End,
-        TextAlign::Left,
-        TextAlign::Center,
-        TextAlign::Right,
-        TextAlign::Justify,
-    ];
-
-    #[test]
-    fn the_line_layout_matches_parley_on_latin_text() {
-        // Only characters the subset maps (" ,Helo\u{e9}"), so both paths draw
-        // with the bundled face. 20px is narrower than every word: each
-        // overflows its own line.
-        let (mut cx, base) = bundled_cx(18.0);
-        let text = "Hello ello, Hell oleo Hello, Hole H\u{e9}llo Hello Hello eel";
-        for align in ALIGNS {
-            for width in [
-                None,
-                Some(400.0),
-                Some(150.0),
-                Some(97.0),
-                Some(60.0),
-                Some(20.0),
-            ] {
-                let s = TextStyle {
-                    align,
-                    ..base.clone()
-                };
-                assert_parley_parity(&mut cx, text, &s, width);
-            }
-        }
-        let variants = [
-            TextStyle {
-                letter_spacing: 2.0,
-                align: TextAlign::Justify,
-                ..base.clone()
-            },
-            TextStyle {
-                line_height: LineHeight::Absolute(31.0),
-                align: TextAlign::Center,
-                ..base.clone()
-            },
-            TextStyle {
-                line_height: LineHeight::FontSizeRelative(1.5),
-                align: TextAlign::End,
-                ..base.clone()
-            },
-        ];
-        for s in &variants {
-            for width in [None, Some(120.0)] {
-                assert_parley_parity(&mut cx, text, s, width);
-            }
-        }
-        for align in [TextAlign::Center, TextAlign::Justify] {
-            let s = TextStyle {
-                align,
-                ..base.clone()
-            };
-            assert_parley_parity(
-                &mut cx,
-                "Hello\nello Hello oleo\n\nHello  \n",
-                &s,
-                Some(110.0),
-            );
-            assert_parley_parity(&mut cx, "Hello  Hole   Hello", &s, Some(70.0));
-            // An empty text is one line of the style's height, as parley sizes it.
-            assert_parley_parity(&mut cx, "", &s, Some(70.0));
-            assert_parley_parity(&mut cx, "", &s, None);
-        }
-    }
-
-    #[test]
-    fn the_line_layout_matches_parley_on_rtl_and_mixed_text() {
-        let (mut cx, base) = bundled_cx(24.0);
-        let arabic = "\u{645}\u{631}\u{62d}\u{628}\u{627}";
-        let rtl = [arabic; 4].join(" ");
-        let mixed_ltr = format!("Hello {arabic} Hole {arabic}");
-        let mixed_rtl = format!("{arabic} Hello {arabic} Hole");
-        for align in ALIGNS {
-            let s = TextStyle {
-                align,
-                ..base.clone()
-            };
-            for text in [rtl.as_str(), mixed_ltr.as_str(), mixed_rtl.as_str()] {
-                for width in [None, Some(170.0), Some(110.0)] {
-                    assert_parley_parity(&mut cx, text, &s, width);
-                }
-            }
-        }
     }
 
     #[test]
@@ -1404,7 +988,7 @@ mod tests {
     }
 
     #[test]
-    fn style_variations_reach_the_parley_path_too() {
+    fn style_variations_widen_the_layout() {
         let mut cx = test_cx();
         let families = cx
             .register_fonts(
@@ -2366,106 +1950,6 @@ mod tests {
         );
     }
 
-    /// A system-less `TextContext` plus the JP subset face's family name.
-    fn bare_cx() -> (TextContext, String, Vec<u8>) {
-        let mut cx = test_cx();
-        cx.font_ctx.collection =
-            parley::fontique::Collection::new(parley::fontique::CollectionOptions {
-                shared: false,
-                system_fonts: false,
-            });
-        let bytes = include_bytes!("../../../testing/fonts/NotoSansJP-Subset.otf").to_vec();
-        let registered = cx
-            .font_ctx
-            .collection
-            .register_fonts(Blob::from(bytes.clone()), None);
-        let id = registered[0].0;
-        let name = cx.font_ctx.collection.family_name(id).unwrap().to_owned();
-        (cx, name, bytes)
-    }
-
-    fn han_key(locale: Option<&str>) -> parley::fontique::FallbackKey {
-        let locale = locale.and_then(|l| parley::fontique::Language::parse(l).ok());
-        parley::fontique::FallbackKey::new(
-            parley::fontique::Script::from_bytes(*b"Hani"),
-            locale.as_ref(),
-        )
-    }
-
-    #[test]
-    fn han_fallback_fills_empty_keys_and_han_text_shapes() {
-        let (mut cx, name, _) = bare_cx();
-        let id = cx.font_ctx.collection.family_id(&name).unwrap();
-        assert!(
-            cx.font_ctx
-                .collection
-                .fallback_families(han_key(None))
-                .next()
-                .is_none()
-        );
-        let filled = append_han_fallbacks(&mut cx.font_ctx.collection, &["No Such Family", &name]);
-        assert!(filled > 0);
-        for loc in [
-            None,
-            Some("zh-CN"),
-            Some("zh-TW"),
-            Some("zh-HK"),
-            Some("ja"),
-        ] {
-            let got: Vec<_> = cx
-                .font_ctx
-                .collection
-                .fallback_families(han_key(loc))
-                .collect();
-            assert_eq!(got, vec![id], "locale {loc:?}");
-        }
-        // Through parley: the editor's path, the one these fallbacks serve.
-        let layout = parley_layout(&mut cx, "日本語", &style(16.0), None);
-        let runs = crate::convert::layout_to_scene_runs(&layout, kurbo::Point::ORIGIN);
-        let glyphs: Vec<_> = runs.iter().flat_map(|r| r.glyphs.iter()).collect();
-        assert!(!glyphs.is_empty());
-        assert!(
-            glyphs.iter().all(|g| g.id != 0),
-            "Han must not shape to .notdef"
-        );
-    }
-
-    #[test]
-    fn han_fallback_leaves_non_empty_lists_untouched() {
-        let (mut cx, name, bytes) = bare_cx();
-        let other = cx.font_ctx.collection.register_fonts(
-            Blob::from(bytes),
-            Some(parley::fontique::FontInfoOverride {
-                family_name: Some("Pre Existing"),
-                ..Default::default()
-            }),
-        )[0]
-        .0;
-        let key = han_key(Some("ja"));
-        cx.font_ctx
-            .collection
-            .set_fallbacks(key, std::iter::once(other));
-        append_han_fallbacks(&mut cx.font_ctx.collection, &[&name]);
-        let got: Vec<_> = cx.font_ctx.collection.fallback_families(key).collect();
-        assert_eq!(got, vec![other]);
-    }
-
-    #[test]
-    fn han_fallback_with_no_installed_candidate_changes_nothing() {
-        let (mut cx, _, _) = bare_cx();
-        assert_eq!(
-            append_han_fallbacks(&mut cx.font_ctx.collection, &["Nope", "Also Nope"]),
-            0
-        );
-        assert!(
-            cx.font_ctx
-                .collection
-                .fallback_families(han_key(None))
-                .next()
-                .is_none()
-        );
-    }
-
     // --- .notdef detection (system fonts off so host Han fonts never cover) ---
 
     struct WarnCapture;
@@ -2484,25 +1968,19 @@ mod tests {
     }
 
     /// Registers `bytes` in a system-less context (an oracle over a backend
-    /// with no fonts, and a parley collection without system fonts); returns
-    /// it and the family.
+    /// with no fonts); returns it and the family.
     fn systemless_cx(bytes: &[u8]) -> (TextContext, String) {
         let mut cx = test_cx();
-        cx.font_ctx.collection =
-            parley::fontique::Collection::new(parley::fontique::CollectionOptions {
-                shared: false,
-                system_fonts: false,
-            });
-        let blob = Blob::from(bytes.to_vec());
-        let id = cx.font_ctx.collection.register_fonts(blob.clone(), None)[0].0;
-        let name = cx.font_ctx.collection.family_name(id).unwrap().to_owned();
         cx.oracle = Oracle::new(
             Box::new(oracle::synthetic::SyntheticBackend::new("systemless")),
             RenderCapabilities::default(),
             None,
         );
-        cx.oracle.registry_mut().insert_blob(&blob);
-        (cx, name)
+        let families = cx
+            .oracle
+            .registry_mut()
+            .insert_blob(&Blob::from(bytes.to_vec()));
+        (cx, families[0].name.clone())
     }
 
     fn walk(cx: &mut TextContext, family: &str, text: &str) {

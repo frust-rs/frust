@@ -1,10 +1,9 @@
-//! Line table / parley layout -> `frust_scene` glyph-run conversion.
+//! Line table -> `frust_scene` glyph-run conversion.
 //!
 //! This module owns the glyph-mapping contract `frust-engine`'s text lowering
-//! (`text/`, built on `glifo`) consumes: [`lines_to_scene_runs`] walks a
-//! [`crate::TextLayout`]'s line table over its [`Shaped`] paragraph, and
-//! [`layout_to_scene_runs`] walks a parley layout (the [`crate::TextEditor`]'s,
-//! until the editor moves onto the line layout too). Both emit the same shape.
+//! (`text/`, built on `glifo`) consumes: [`lines_to_scene_runs`] walks a line
+//! table over its [`Shaped`] paragraph — a [`crate::TextLayout`]'s and a
+//! [`crate::TextEditor`]'s alike.
 //!
 //! # Coordinate convention
 //!
@@ -39,7 +38,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use kurbo::{Affine, Point};
+use kurbo::Affine;
 use peniko::{Brush, FontData};
 
 use frust_scene::{FontHandle, Glyph, GlyphRun};
@@ -131,60 +130,6 @@ pub(crate) fn lines_to_scene_runs(
                 }
             }
             flush(&mut current, &mut runs);
-        }
-    }
-
-    notdef.report();
-    runs
-}
-
-/// Walks every line's glyph runs of a parley layout, mapping each into a scene
-/// glyph run whose transform translates it to `origin`.
-///
-/// Inline boxes (not used in v1) are skipped. An empty or run-less layout
-/// yields an empty vector.
-pub(crate) fn layout_to_scene_runs(layout: &parley::Layout<Brush>, origin: Point) -> Vec<GlyphRun> {
-    let transform = Affine::translate((origin.x, origin.y));
-    let mut runs = Vec::new();
-    let mut notdef = NotdefScan::default();
-
-    for line in layout.lines() {
-        for item in line.items() {
-            let parley::layout::PositionedLayoutItem::GlyphRun(glyph_run) = item else {
-                // InlineBox — not emitted in v1.
-                continue;
-            };
-
-            let run = glyph_run.run();
-            for cluster in run.clusters() {
-                notdef.scan_cluster(
-                    run.font(),
-                    cluster.source_char(),
-                    cluster.glyphs().map(|g| g.id),
-                );
-            }
-            let font =
-                FontHandle::new(run.font().clone()).with_normalized_coords(run.normalized_coords());
-            let font_size = run.font_size();
-            // Per-run brush resolved from the pushed `StyleProperty::Brush`.
-            let brush = glyph_run.style().brush.clone();
-
-            let glyphs: Vec<Glyph> = glyph_run
-                .positioned_glyphs()
-                .map(|g| Glyph {
-                    id: g.id,
-                    x: g.x,
-                    y: g.y,
-                })
-                .collect();
-
-            runs.push(GlyphRun {
-                font,
-                font_size,
-                brush,
-                transform,
-                glyphs,
-            });
         }
     }
 
@@ -483,12 +428,9 @@ mod tests {
 
     #[test]
     fn font_identity_falls_back_to_size_placeholder() {
-        let junk = parley::FontData::new(parley::fontique::Blob::from(vec![1u8, 2, 3, 4, 5]), 0);
+        let junk = FontData::new(peniko::Blob::from(vec![1u8, 2, 3, 4, 5]), 0);
         assert_eq!(font_identity(&junk), "unnamed font (5 bytes)");
-        let named = parley::FontData::new(
-            parley::fontique::Blob::from(font(&[(3, 4, utf16("Real"))])),
-            0,
-        );
+        let named = FontData::new(peniko::Blob::from(font(&[(3, 4, utf16("Real"))])), 0);
         assert_eq!(font_identity(&named), "Real");
     }
 }
