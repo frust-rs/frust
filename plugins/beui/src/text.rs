@@ -546,6 +546,8 @@ mod tests {
 
     #[test]
     fn a_theme_swap_reshapes_a_themed_run_in_the_new_face() {
+        // Reader of the locale slot: a concurrent locale flip would add a reshape to the counts below.
+        let _slot = LOCALE_SLOT.lock().unwrap_or_else(|e| e.into_inner());
         let mut tcx = typeface_probe::text_context();
         let mut run = LabelRun::new("Ship");
         let mut label = Label::new("Email");
