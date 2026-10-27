@@ -21,13 +21,18 @@
 //! emoji table format Android system fonts typically use) has **not** been
 //! verified on-device — that remains a device-truth item.
 
-use frust_text::{TextContext, TextStyle};
+use frust_text::{FontFamily, TextContext, TextStyle};
 use kurbo::Point;
 use peniko::Color;
 
 fn style(size: f32) -> TextStyle {
     TextStyle::new(size, Color::BLACK)
 }
+
+/// The bundled COLRv1 emoji subset (U+1F600 only), renamed so it cannot
+/// collide with a host font.
+const SUBSET: &[u8] = include_bytes!("../../../testing/fonts/NotoEmoji-COLRv1-Subset.ttf");
+const SUBSET_FAMILY: &str = "Frust Test Emoji COLR";
 
 /// `.notdef` is glyph id 0 by TrueType/OpenType convention — the tofu-box
 /// glyph a font falls back to when it has no outline/bitmap for a codepoint.
@@ -69,14 +74,20 @@ fn emoji_cluster_engages_fallback_font_with_real_glyphs() {
     let runs = mixed.to_scene_runs(Point::ORIGIN);
     assert!(!runs.is_empty(), "expected glyph runs for mixed text+emoji");
 
-    let emoji_run = runs
-        .iter()
-        .find(|run| *run.font.font() != text_font)
-        .expect(
-            "expected at least one run in the mixed string to resolve to a \
-             font different from the plain-text font -- fallback did not \
-             engage for the emoji cluster",
-        );
+    let Some(emoji_run) = runs.iter().find(|run| *run.font.font() != text_font) else {
+        // macOS always ships Apple Color Emoji: no fallback there is a failure.
+        // Elsewhere the host may carry no emoji font at all (the bundled
+        // subset test above covers registered fallback on every host).
+        if cfg!(target_os = "macos") {
+            panic!(
+                "expected at least one run in the mixed string to resolve to a \
+                 font different from the plain-text font -- fallback did not \
+                 engage for the emoji cluster"
+            );
+        }
+        println!("SKIPPED (1): no host emoji font resolves; system emoji fallback not exercised");
+        return;
+    };
 
     assert!(
         !emoji_run.glyphs.is_empty(),
@@ -110,6 +121,46 @@ fn emoji_cluster_engages_fallback_font_with_real_glyphs() {
              contain \"Emoji\" (i.e. CoreText resolved Apple Color Emoji \
              specifically), got {family:?}"
         );
+    }
+}
+
+/// Host-independent: the bundled subset, registered with the context, serves
+/// an emoji cluster that the plain-text font cannot, with real glyphs. The
+/// subset names its own family in the style so no host emoji font is needed.
+#[test]
+fn registered_subset_serves_emoji_cluster_with_real_glyphs() {
+    let mut cx = TextContext::new();
+    let families = cx
+        .register_fonts(SUBSET.to_vec())
+        .expect("the bundled emoji subset registers");
+    assert!(
+        families.iter().any(|f| f.name == SUBSET_FAMILY),
+        "expected family {SUBSET_FAMILY:?}, got {:?}",
+        families.iter().map(|f| &f.name).collect::<Vec<_>>()
+    );
+
+    let text_runs = cx
+        .layout("hi", &style(24.0), None)
+        .to_scene_runs(Point::ORIGIN);
+    let text_font = text_runs
+        .first()
+        .expect("expected a glyph run for plain text \"hi\"")
+        .font
+        .font()
+        .clone();
+
+    let mut emoji_style = style(24.0);
+    emoji_style.family = FontFamily::named(SUBSET_FAMILY);
+    let runs = cx
+        .layout("hi \u{1F600}", &emoji_style, None)
+        .to_scene_runs(Point::ORIGIN);
+    let emoji_run = runs
+        .iter()
+        .find(|run| *run.font.font() != text_font)
+        .expect("the registered emoji subset did not serve the emoji cluster");
+    assert!(!emoji_run.glyphs.is_empty(), "the emoji run has no glyphs");
+    for glyph in &emoji_run.glyphs {
+        assert_ne!(glyph.id, NOTDEF_GLYPH_ID, "emoji glyph resolved to .notdef");
     }
 }
 
