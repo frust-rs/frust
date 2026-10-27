@@ -7,8 +7,9 @@ target-dir = "build/rust"
 # Android link flags (packed relocations, identical-code folding) read by `cargo ndk` and
 # Gradle without RUSTFLAGS injection; a caller's `RUSTFLAGS` replaces them. RELR with the Android-private tags (DT_ANDROID_RELR, API 28+, below the floor of 29); the standard DT_RELR tags need API 30 and must not be used until the floor is 30.
 
-# The `[target.*]` tables are compared with the repo root's `.cargo/config.toml`
-# (`crates/frust-cli/tests/profile_sync.rs`); `[build]` above is local to this example.
+# The `[target.*]` tables mirror the repo root's `.cargo/config.toml` by convention; no test
+# guards this file (`crates/frust-cli/tests/profile_sync.rs` compares only the root and the
+# app template), and `[build]` above is local to this example.
 [target.aarch64-linux-android]
 rustflags = ["-C", "link-arg=-Wl,--pack-dyn-relocs=relr", "-C", "link-arg=-Wl,--use-android-relr-tags", "-C", "link-arg=-Wl,--icf=all"]
 
