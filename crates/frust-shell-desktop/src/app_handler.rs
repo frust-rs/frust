@@ -2644,11 +2644,6 @@ where
         self.runtime.with_owner(move || provide_context(metrics));
     }
 
-    /// Re-provide [`WindowState`](frust_core::WindowState) under the root owner, but only
-    /// when it differs from the last one provided (the [`push_window_metrics`] guard).
-    /// Returns whether it re-provided; like that guard it requests no redraw itself.
-    ///
-    /// [`push_window_metrics`]: ShellHandler::push_window_metrics
     /// Derive the Flutter lifecycle target from the tracked flags and push it. UI thread only.
     fn sync_app_lifecycle(&mut self) {
         let minimized = self
@@ -2663,6 +2658,11 @@ where
         ));
     }
 
+    /// Re-provide [`WindowState`](frust_core::WindowState) under the root owner, but only
+    /// when it differs from the last one provided (the [`push_window_metrics`] guard).
+    /// Returns whether it re-provided; like that guard it requests no redraw itself.
+    ///
+    /// [`push_window_metrics`]: ShellHandler::push_window_metrics
     fn publish_window_state(&mut self) -> bool {
         let Some(window) = self.window.as_deref() else {
             return false;
