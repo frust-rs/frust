@@ -16,6 +16,12 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Added
 
+- `frust-i18n` on CLDR 49: `th`, `th-TH` and `en-TH` keep the Buddhist-era default (pin Gregorian
+  per call with `DateTimeOptions { calendar: Some(Calendar::Gregorian), .. }`); JPY renders `JP¥`
+  in fr-FR/es-ES, `¥` in en-US and `￥` in ja-JP; Vietnamese hours read `tiếng`. `fmt::bridge::Cache`
+  is one bounded LRU shared with the currency formatters, `fraction_fallbacks()` counts fallbacks to
+  two fraction digits, and English `km`/`m` at Long width stay short
+  (`i18n-long-unit-width-short`).
 - `frust::texture::request_frame`: a producer that has a new frame owes the shell one frame, so an
   idle `texture_view` stays live without a ticker. `TextureSink::set_waker` (`SinkWaker`) runs
   after every push; the camera and video-player bridges install `request_frame` there while their
