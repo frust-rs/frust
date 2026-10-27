@@ -155,6 +155,16 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   index cache predates the release: the CLI, TUI and MCP server run a cargo-resolve preflight
   (`frust_drive::lock_refresh`) that refreshes those index entries (manifest untouched) and
   otherwise prints the exact remedy.
+- Text hardening, phase 2: a `TextInput` IME `Commit` leaves the caret at the end of the committed
+  text; the glyph, material, beui, shadcn and native-widgets plugin widgets re-face cached
+  `TextLayout`s on a runtime locale switch (generation-stamped, explicit-locale styles exempt);
+  faces registered through `register_fonts` carry a PostScript name and hidden flag, and the `hvgl`
+  route refuses a face whose bytes disagree with the CoreText face (`bytes_mismatches`); the font
+  oracle pins one Han preference per resolve, stamps the Linux cache with the process locale,
+  counts and reaps failed or stale cache writes and loads the persisted copy once per process; the
+  shells flush the font cache on background transitions (`frust-shell-common::locale_default`).
+  Retires the `text-runtime-locale-switch-plugin-layouts` and `text-registered-hvgl-face-skipped`
+  limitations.
 
 ## 0.6.3 — 2026-10-20
 

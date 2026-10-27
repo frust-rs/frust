@@ -355,7 +355,7 @@ pub struct TextAnimationWidget {
     /// The shaped run the whole-run variants paint, plus what it was shaped
     /// from. `None` until the first `layout` with a text context.
     run: Option<TextLayout>,
-    shaped: Option<(String, TextStyle)>,
+    shaped: Option<(String, TextStyle, u64)>,
     /// The string the scramble wants shaped next — written by `paint`, consumed
     /// by `layout`.
     display: String,
@@ -543,10 +543,11 @@ impl Widget for TextAnimationWidget {
         } else {
             self.content.clone()
         };
-        if self.shaped.as_ref() != Some(&(wanted.clone(), style.clone())) {
+        let generation = crate::text::locale_generation(&style);
+        if self.shaped.as_ref() != Some(&(wanted.clone(), style.clone(), generation)) {
             let text_ctx = ctx.text_context::<TextContext>();
             self.run = Some(text_ctx.layout(&wanted, &style, None));
-            self.shaped = Some((wanted, style));
+            self.shaped = Some((wanted, style, generation));
         }
         let measured = self.run.as_ref().map_or(Size::ZERO, |run| run.size());
         bc.constrain(measured)

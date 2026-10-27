@@ -1249,3 +1249,24 @@ pub(crate) fn render_scene(
         (encode_time, startup_retired)
     })
 }
+
+/// The backgrounding font-cache flush: once per background transition, however many UIKit
+/// callbacks report it.
+static BACKGROUND_FLUSH: frust_shell_common::BackgroundFlush =
+    frust_shell_common::BackgroundFlush::new();
+
+impl super::IosAppHandle {
+    /// Lands the font oracle's unwritten answers before the app suspends. Called by `frust_pause`
+    /// *after* the render barrier, so it spends only what is left of the system's
+    /// background-transition grace (see [`PAUSE_BARRIER_DEADLINE`]); a clean cache is a no-op and a
+    /// dirty one is one small file write. Lives here, a descendant of the module that owns the
+    /// private `text_ctx`.
+    pub(crate) fn flush_font_cache_on_background(&mut self) {
+        BACKGROUND_FLUSH.went_to_background(&mut [&mut self.text_ctx]);
+    }
+
+    /// Re-arms [`Self::flush_font_cache_on_background`] for the next background transition.
+    pub(crate) fn font_cache_foregrounded(&mut self) {
+        BACKGROUND_FLUSH.came_to_foreground();
+    }
+}

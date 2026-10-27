@@ -71,6 +71,7 @@
 //! state should follow the baseline `Button`'s 0.38 disabled-opacity
 //! convention, the same note `toggle`'s docs leave for itself.
 
+use crate::badge::LayoutGuard;
 use std::rc::Rc;
 
 use frust::authoring::text::{
@@ -196,7 +197,7 @@ fn ring_radius(theme: Option<&Theme>, size: Size) -> f64 {
 struct GlyphLabel {
     content: String,
     layout: Option<TextLayout>,
-    laid_out_style: Option<TextStyle>,
+    guard: LayoutGuard,
 }
 
 impl GlyphLabel {
@@ -204,7 +205,7 @@ impl GlyphLabel {
         Self {
             content: content.into(),
             layout: None,
-            laid_out_style: None,
+            guard: LayoutGuard::default(),
         }
     }
 
@@ -225,7 +226,7 @@ impl GlyphLabel {
     /// layout-time-baked-color contract, see the module docs).
     fn layout(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> Size {
         if let Some(cached) = &self.layout
-            && self.laid_out_style.as_ref() == Some(style)
+            && self.guard.matches(style, None)
         {
             return cached.size();
         }
@@ -233,7 +234,7 @@ impl GlyphLabel {
         let laid = text_ctx.layout(&self.content, style, None);
         let size = laid.size();
         self.layout = Some(laid);
-        self.laid_out_style = Some(style.clone());
+        self.guard.record(style, None);
         size
     }
 

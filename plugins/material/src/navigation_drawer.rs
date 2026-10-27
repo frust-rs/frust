@@ -188,6 +188,7 @@ use frust::{FrameTime, NavigatorController, PopResult, Spring, SpringDesc, Theme
 use kurbo::{Point, Rect, Size, Vec2};
 use peniko::{Brush, Color};
 
+use crate::badge::locale_stamp;
 use crate::overlay::{
     OverlayExtent, OverlayLimit, OverlayModalConfig, OverlayModalContent, OverlayModalView,
     OverlayModalWidget, OverlaySide, overlay_modal, show_overlay_modal,
@@ -495,7 +496,7 @@ fn type_style(themed: Option<&TextStyle>, token: TypeToken) -> TextStyle {
 struct Run {
     content: String,
     layout: Option<TextLayout>,
-    shaped_for: Option<(TextStyle, Option<f64>)>,
+    shaped_for: Option<(TextStyle, Option<f64>, u64)>,
 }
 
 impl Run {
@@ -522,7 +523,8 @@ impl Run {
     /// Shape (or reuse) the run, fitted to `max_width` as a single ellipsized
     /// line when one is given.
     fn shape(&mut self, ctx: &mut LayoutCtx, style: &TextStyle, max_width: Option<f64>) -> Size {
-        let key = (style.clone(), max_width);
+        // The key carries the locale generation, so a default-locale change reshapes.
+        let key = (style.clone(), max_width, locale_stamp(style));
         if let Some(layout) = &self.layout
             && self.shaped_for.as_ref() == Some(&key)
         {

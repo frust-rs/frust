@@ -862,6 +862,14 @@ impl SceneCompiler {
         self.hvgl_outlines.nameless_faces()
     }
 
+    /// How many `hvgl` faces were refused because the run's font bytes and
+    /// the CoreText face its PostScript name opened disagree (glyph count,
+    /// `unitsPerEm` or `fvar` axes), since the compiler was built.
+    #[must_use]
+    pub fn hvgl_bytes_mismatches(&self) -> u32 {
+        self.hvgl_outlines.bytes_mismatches()
+    }
+
     /// Set how many threads generate a frame's strips, the calling thread
     /// included (see the `parallel` module). One — or zero, read as one — is the
     /// sequential walk: no planning pass, no helper thread.

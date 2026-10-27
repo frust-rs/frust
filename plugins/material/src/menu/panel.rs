@@ -89,6 +89,7 @@ use super::{
     MENU_SUBMENU_GAP, MENU_SUPPORTING_V_PADDING, MENU_SURFACE_H_PADDING, MENU_SURFACE_V_PADDING,
     MenuColorStyle, MenuColors, SELECTED_CHECK_SCALE, container_radius, item_radius,
 };
+use crate::badge::locale_stamp;
 use crate::icons;
 use crate::interaction::InteractionState;
 use crate::overlay::{OverlayElevation, shadow};
@@ -108,9 +109,9 @@ struct Run {
     content: String,
     layout: Option<TextLayout>,
     /// The `(style, max_width)` the cached `layout` was shaped for.
-    shaped_for: Option<(TextStyle, Option<f64>)>,
+    shaped_for: Option<(TextStyle, Option<f64>, u64)>,
     /// The `(style, width)` of the last natural (unconstrained) measurement.
-    natural: Option<(TextStyle, f64)>,
+    natural: Option<(TextStyle, f64, u64)>,
 }
 
 impl Run {
@@ -126,14 +127,16 @@ impl Run {
 
     /// The run's width with nothing constraining it.
     fn natural_width(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> f64 {
-        if let Some((cached, width)) = &self.natural
+        let stamp = locale_stamp(style);
+        if let Some((cached, width, cached_stamp)) = &self.natural
             && cached == style
+            && *cached_stamp == stamp
         {
             return *width;
         }
         let text_ctx = ctx.text_context::<TextContext>();
         let width = text_ctx.layout(&self.content, style, None).size().width;
-        self.natural = Some((style.clone(), width));
+        self.natural = Some((style.clone(), width, stamp));
         width
     }
 
@@ -143,7 +146,8 @@ impl Run {
     /// A fitted run is a **single ellipsized line** — the reference's rows are
     /// `maxLines: 1, overflow: ellipsis` throughout (`m3e_menu_item.dart:135`).
     fn shape(&mut self, ctx: &mut LayoutCtx, style: &TextStyle, max_width: f64) -> Size {
-        let key = (style.clone(), Some(max_width));
+        // The key carries the locale generation, so a default-locale change reshapes.
+        let key = (style.clone(), Some(max_width), locale_stamp(style));
         if let Some(cached) = &self.layout
             && self.shaped_for.as_ref() == Some(&key)
         {

@@ -32,6 +32,7 @@ use super::overflow::max_scroll;
 use super::{
     ButtonShape, ButtonSize, ButtonVariant, ButtonWidget, IconAlignment, OverflowStrategy,
 };
+use crate::badge::locale_stamp;
 use crate::interaction::{
     DISABLED_CONTAINER_OPACITY, DISABLED_CONTENT_OPACITY, HapticSignal, InteractionState,
     MaterialHaptics,
@@ -603,6 +604,10 @@ pub(super) struct LabelRun {
     shaped_for: Option<(TextStyle, Option<f64>)>,
     /// The `(style, width)` of the last natural (unconstrained) measurement.
     natural: Option<(TextStyle, f64)>,
+    /// The locale generation `layout` was shaped under.
+    stamp: u64,
+    /// The locale generation `natural` was measured under.
+    natural_stamp: u64,
 }
 
 impl LabelRun {
@@ -613,6 +618,8 @@ impl LabelRun {
             layout: None,
             shaped_for: None,
             natural: None,
+            stamp: 0,
+            natural_stamp: 0,
         }
     }
 
@@ -634,13 +641,16 @@ impl LabelRun {
 
     /// The run's width with nothing constraining it.
     pub(super) fn natural_width(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> f64 {
+        let stamp = locale_stamp(style);
         if let Some((cached_style, width)) = &self.natural
             && cached_style == style
+            && self.natural_stamp == stamp
         {
             return *width;
         }
         let text_ctx = ctx.text_context::<TextContext>();
         let width = text_ctx.layout(&self.content, style, None).size().width;
+        self.natural_stamp = stamp;
         self.natural = Some((style.clone(), width));
         width
     }
@@ -660,8 +670,10 @@ impl LabelRun {
         max_width: Option<f64>,
     ) -> Size {
         let key = (style.clone(), max_width);
+        let stamp = locale_stamp(style);
         if let Some(cached) = &self.layout
             && self.shaped_for.as_ref() == Some(&key)
+            && self.stamp == stamp
         {
             return cached.size();
         }
@@ -678,6 +690,7 @@ impl LabelRun {
         };
         let size = laid.size();
         self.layout = Some(laid);
+        self.stamp = stamp;
         self.shaped_for = Some(key);
         size
     }

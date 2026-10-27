@@ -81,6 +81,7 @@
 //! build and has no themed-family seam, so the field keeps an explicit IBM
 //! Plex Mono stack and does not follow a theme swap.
 
+use crate::badge::LayoutGuard;
 use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
@@ -480,7 +481,7 @@ pub fn show_command_palette<State, B, R>(
 struct GlyphLabel {
     content: String,
     layout: Option<TextLayout>,
-    laid_out_style: Option<TextStyle>,
+    guard: LayoutGuard,
 }
 
 impl GlyphLabel {
@@ -488,13 +489,13 @@ impl GlyphLabel {
         Self {
             content: content.into(),
             layout: None,
-            laid_out_style: None,
+            guard: LayoutGuard::default(),
         }
     }
 
     fn layout(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> Size {
         if let Some(cached) = &self.layout
-            && self.laid_out_style.as_ref() == Some(style)
+            && self.guard.matches(style, None)
         {
             return cached.size();
         }
@@ -502,7 +503,7 @@ impl GlyphLabel {
         let laid = text_ctx.layout(&self.content, style, None);
         let size = laid.size();
         self.layout = Some(laid);
-        self.laid_out_style = Some(style.clone());
+        self.guard.record(style, None);
         size
     }
 

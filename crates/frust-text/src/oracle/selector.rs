@@ -43,8 +43,8 @@ use read_fonts::{
 use super::cache::{CacheKey, CachedAnswer};
 use super::registry::AppFace;
 use super::{
-    DrawFormats, FaceAttrs, FaceFacts, FaceKey, FaceRef, FaceSource, FallbackRequest, Oracle,
-    RenderCapabilities, Synthesis, VariationSetting,
+    DrawFormats, FaceAttrs, FaceFacts, FaceKey, FaceRef, FaceSource, FallbackRequest, HanSnapshot,
+    Oracle, RenderCapabilities, Synthesis, VariationSetting,
 };
 use crate::style::{FamilyName, FontStyle, GenericSlot};
 
@@ -349,6 +349,10 @@ impl Oracle {
     /// Resolves one cluster to a face, or `None` when nothing installed or
     /// registered can draw it. See the module docs for the order.
     pub(crate) fn resolve(&mut self, req: &FallbackRequest) -> Option<FaceRef> {
+        // An untagged Han cluster reads the Han preference once: every cache key below and every
+        // backend question (through `language_for`) sees this one value.
+        let snapshot = (req.script.0 == *b"Hani" && req.locale.is_none()).then(HanSnapshot::take);
+        let han = snapshot.as_ref().and_then(HanSnapshot::language);
         // 1. Each named family, in chain order.
         let names: Vec<String> = req
             .families
@@ -376,7 +380,7 @@ impl Oracle {
                 continue;
             }
             probes += 1;
-            match self.resolve_system_family(name, req) {
+            match self.resolve_system_family(name, req, han) {
                 Some(FamilyAnswer::Family(face)) => return Some(face),
                 Some(FamilyAnswer::Substitute(face)) => {
                     substitute.get_or_insert(face);
@@ -394,7 +398,7 @@ impl Oracle {
 
         // 2. The generic request: the backend, then its generic defaults.
         let generic_req = generic_request(req);
-        if let Some((face, _)) = self.through_cache(&generic_req, Self::ask_generic, None) {
+        if let Some((face, _)) = self.through_cache(&generic_req, Self::ask_generic, None, han) {
             return Some(face);
         }
 
@@ -450,8 +454,8 @@ impl Oracle {
                 blob: face.blob,
                 index: face.index,
                 synthesis: Synthesis::default(),
-                postscript_name: None,
-                hidden: false,
+                postscript_name: face.postscript_name,
+                hidden: face.hidden,
             })
     }
 
@@ -459,14 +463,17 @@ impl Oracle {
     /// `ask` runs on a miss and its outcome is cached, misses included. For a
     /// named-family request (`family`), a fresh answer that is not that family
     /// is cached as a substitute; the flag comes back with the face (`true`:
-    /// a substitute), so a cache hit never re-reads the face's names.
+    /// a substitute), so a cache hit never re-reads the face's names. `han` is
+    /// the resolve's Han-preference snapshot, the one value both the key and
+    /// `ask` see.
     fn through_cache(
         &mut self,
         req: &FallbackRequest,
         ask: Ask,
         family: Option<&str>,
+        han: Option<&str>,
     ) -> Option<(FaceRef, bool)> {
-        let key = CacheKey::from_request(req);
+        let key = CacheKey::under_han_preference(req, han);
         match self.cache.get_entry(&key) {
             Some((CachedAnswer::Face(source), substitute)) => {
                 self.stats.cache_hits += 1;
@@ -501,9 +508,15 @@ impl Oracle {
 
     /// Step 1 for a name the app registry lacks: the backend's answer for that
     /// family alone, sorted into the family itself or a cascade substitute.
-    fn resolve_system_family(&mut self, name: &str, req: &FallbackRequest) -> Option<FamilyAnswer> {
+    fn resolve_system_family(
+        &mut self,
+        name: &str,
+        req: &FallbackRequest,
+        han: Option<&str>,
+    ) -> Option<FamilyAnswer> {
         let family_req = family_request(req, name);
-        let (face, substitute) = self.through_cache(&family_req, Self::ask_family, Some(name))?;
+        let (face, substitute) =
+            self.through_cache(&family_req, Self::ask_family, Some(name), han)?;
         Some(if substitute {
             self.stats.substitutes += 1;
             FamilyAnswer::Substitute(face)
@@ -552,8 +565,8 @@ impl Oracle {
             blob: face.blob.clone(),
             index: face.index,
             synthesis: synthesize(&face.facts.attrs, req.weight.value(), req.slant, req.width),
-            postscript_name: None,
-            hidden: false,
+            postscript_name: face.postscript_name.clone(),
+            hidden: face.hidden,
         })
     }
 
@@ -738,6 +751,39 @@ mod tests {
         }
         assert_eq!(oracle.stats().app_hits, 3);
         assert_eq!(oracle.cache().len(), 0);
+    }
+
+    /// A registered face carries its PostScript name and hidden flag onto the
+    /// face the selector answers — through a named family and through a
+    /// registered generic fallback alike — as a system face does.
+    #[test]
+    fn a_registered_face_answers_with_its_postscript_name() {
+        let noto =
+            Blob::from(include_bytes!("../../../../testing/fonts/NotoSans-Subset.ttf").to_vec());
+        let mut oracle = oracle_over(SyntheticBackend::new("b"));
+        oracle.registry_mut().insert_blob(&noto);
+        oracle
+            .registry_mut()
+            .insert_generic(&noto, &[GenericSlot::Serif]);
+        let face = oracle
+            .resolve(&req("H", b"Latn", &FontFamily::named("Noto Sans")))
+            .expect("the registered family covers H");
+        assert_eq!(face.blob.id(), noto.id());
+        assert_eq!(face.postscript_name.as_deref(), Some("NotoSans-Regular"));
+        assert!(!face.hidden);
+        let generic = oracle
+            .resolve(&req(
+                "H",
+                b"Latn",
+                &FontFamily::NamedWithGeneric(vec![FamilyName::Generic(GenericSlot::Serif)]),
+            ))
+            .expect("the registered generic covers H");
+        assert_eq!(generic.postscript_name.as_deref(), Some("NotoSans-Regular"));
+        let default = oracle
+            .default_face(GenericSlot::Serif)
+            .expect("the registered generic is the default");
+        assert_eq!(default.postscript_name.as_deref(), Some("NotoSans-Regular"));
+        assert!(!default.hidden);
     }
 
     #[test]
@@ -1402,5 +1448,72 @@ mod tests {
         assert_eq!(face.blob.id(), static_serif.id());
         assert!(face.synthesis.embolden, "faux bold, not the regular hint");
         assert_eq!(oracle.stats().generic_hits, 2);
+    }
+
+    /// A backend whose every question first rewrites the app default locale —
+    /// another writer landing between the cache key and the backend read — and
+    /// records the Han language it was asked under.
+    struct SwitchingBackend {
+        face: Blob<u8>,
+        switch_to: &'static str,
+        asked: std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>,
+    }
+
+    impl super::super::Backend for SwitchingBackend {
+        fn resolve(&mut self, req: &FallbackRequest) -> Option<FaceSource> {
+            crate::set_default_locale(Some(self.switch_to));
+            let language = super::super::language_for(req.script, req.locale.as_deref());
+            self.asked.lock().unwrap().push(language.map(str::to_owned));
+            Some(FaceSource::blob(self.face.clone(), 0))
+        }
+        fn default_family(&self, _generic: GenericSlot) -> Option<FaceSource> {
+            None
+        }
+        fn os_build_id(&self) -> String {
+            String::from("b")
+        }
+    }
+
+    #[test]
+    fn a_preference_change_mid_resolve_stores_the_answer_under_the_snapshot_key() {
+        use crate::locale::test_support::DefaultLocale;
+        let _guard = DefaultLocale::set(Some("ja"));
+        let han = Blob::from(FaceSpec::new("Han").chars("\u{76f4}").build());
+        let asked = std::sync::Arc::default();
+        let backend = SwitchingBackend {
+            face: han.clone(),
+            switch_to: "zh-Hant-TW",
+            asked: std::sync::Arc::clone(&asked),
+        };
+        let mut oracle = Oracle::new(Box::new(backend), caps(), None);
+        let request = req("\u{76f4}", b"Hani", &FontFamily::SystemUi);
+        let face = oracle.resolve(&request).expect("the Han face answers");
+        assert_eq!(face.blob.id(), han.id());
+        assert_eq!(
+            *asked.lock().unwrap(),
+            [Some(String::from("ja"))],
+            "the backend was asked under the resolve's snapshot, not the new default"
+        );
+        assert_eq!(crate::default_locale().as_deref(), Some("zh-Hant-TW"));
+
+        let generic = generic_request(&request);
+        let under = |preference| CacheKey::under_han_preference(&generic, preference);
+        assert!(
+            oracle.cache.get(&under(Some("ja"))).is_some(),
+            "stored under the snapshot's key"
+        );
+        assert_eq!(
+            oracle.cache.get(&under(Some("zh-Hant"))),
+            None,
+            "never under the key of the preference that landed mid-resolve"
+        );
+
+        // The next resolve snapshots the new preference and asks again under it.
+        assert!(oracle.resolve(&request).is_some());
+        assert_eq!(
+            *asked.lock().unwrap(),
+            [Some(String::from("ja")), Some(String::from("zh-Hant"))]
+        );
+        assert!(oracle.cache.get(&under(Some("zh-Hant"))).is_some());
     }
 }

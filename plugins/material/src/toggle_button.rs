@@ -228,6 +228,7 @@ use kurbo::{Point, Rect, RoundedRect, RoundedRectRadii, Shape, Size};
 use peniko::{Brush, Color};
 
 use crate::ButtonVariant;
+use crate::badge::locale_stamp;
 use crate::interaction::{
     DISABLED_CONTAINER_OPACITY, DISABLED_CONTENT_OPACITY, HapticSignal, InteractionState,
     MaterialHaptics,
@@ -872,7 +873,7 @@ impl ShapeMotion {
 struct LabelRun {
     content: String,
     layout: Option<TextLayout>,
-    shaped_for: Option<TextStyle>,
+    shaped_for: Option<(TextStyle, u64)>,
 }
 
 impl LabelRun {
@@ -899,8 +900,9 @@ impl LabelRun {
     /// Shape (or reuse) the run in `style` at its natural width, returning its
     /// measured size. Nothing but the style can invalidate it.
     fn shape(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> Size {
+        let stamp = locale_stamp(style);
         if let Some(cached) = &self.layout
-            && self.shaped_for.as_ref() == Some(style)
+            && matches!(&self.shaped_for, Some((s, g)) if s == style && *g == stamp)
         {
             return cached.size();
         }
@@ -908,7 +910,7 @@ impl LabelRun {
         let laid = text_ctx.layout(&self.content, style, None);
         let size = laid.size();
         self.layout = Some(laid);
-        self.shaped_for = Some(style.clone());
+        self.shaped_for = Some((style.clone(), stamp));
         size
     }
 
