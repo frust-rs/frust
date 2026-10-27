@@ -1,0 +1,14 @@
+{
+  "backend": "engine-vulkan-nvidia-t400",
+  "adapter": "frust-engine filter family harness",
+  "driver": "",
+  "os": "linux",
+  "frust_commit": "449c0eb9f8e2b6e9fae2d6aeecb50641acd2bb35",
+  "case": "filter-blur-clipped",
+  "tolerance": {
+    "channel": 24,
+    "alpha": 24,
+    "diff_pixels": 0
+  },
+  "timestamp": "2026-10-27T16:25:54Z"
+}
