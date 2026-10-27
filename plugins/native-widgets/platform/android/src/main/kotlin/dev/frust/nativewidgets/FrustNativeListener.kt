@@ -81,8 +81,9 @@ class FrustNativeListener(private val slotId: Long) :
 
     /**
      * `detail` packs `progress` — **platform-space**, zero-based (Rust adds
-     * the control's own `min` back; `SeekBar.setMin` needs API 26 and this
-     * plugin's floor is 24) — in the low 32 bits, and `fromUser` in bit 32.
+     * the control's own `min` back; the Slider keeps the shared
+     * zero-based wire plan although this plugin's floor, 29, would allow
+     * `SeekBar.setMin`) — in the low 32 bits, and `fromUser` in bit 32.
      * See the Rust side's `pack_value_changed`/`unpack_value_changed`.
      */
     override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {

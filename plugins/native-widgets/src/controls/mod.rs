@@ -362,8 +362,9 @@ pub(crate) enum Setter<'a> {
 
     /// `ProgressBar.setMax(int)` / `UIStepper.setMaximumValue:` /
     /// `NSStepper.setMaxValue:` — **[`Tier::Cheap`]**. Platform-space span
-    /// (`max - min`), since `SeekBar.setMin` needs API 26 (written when this
-    /// crate's floor was 24; the floor is now 29). Reused by `Stepper` for the same reason [`Self::Progress`]
+    /// (`max - min`), kept zero-based by the shared plan (see the slider module doc;
+    /// `SeekBar.setMin` is available at the 29 floor but the Kotlin side does
+    /// not expose it). Reused by `Stepper` for the same reason [`Self::Progress`]
     /// documents.
     Max(i32),
 

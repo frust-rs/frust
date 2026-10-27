@@ -1,7 +1,7 @@
 //! [`Selection`]: an anchor and a focus [`Cursor`], and what the editor's
 //! selection commands do with them.
 //!
-//! The rules are parley 0.11.1's: a plain move collapses the selection (a
+//! The rules (derived from parley 0.11.1's selection): a plain move collapses the selection (a
 //! left/right move of a non-collapsed selection collapses it to its visually
 //! leading/trailing end), an extending move keeps the anchor; up/down keeps a
 //! sticky horizontal position across repeated moves; a word selection made

@@ -826,7 +826,8 @@ mod tests {
         assert!(dest.join("assets/.gitkeep").exists());
         // The Android link-flags file: a dot-directory manifest entry
         // (`.cargo/config.toml`), carried verbatim so a scaffolded app
-        // inherits `--pack-dyn-relocs=android`/`--icf=all` unchanged from the
+        // inherits `--pack-dyn-relocs=relr`, `--use-android-relr-tags` and
+        // `--icf=all` unchanged from the
         // embedded template this crate owns. Structural agreement between
         // the template and this checkout's own root `.cargo/config.toml` is
         // a separate concern this crate has no reach into — it is

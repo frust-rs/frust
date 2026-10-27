@@ -21,6 +21,7 @@ mod editor;
 mod layout;
 mod locale;
 mod oracle;
+mod shape;
 mod shape_cache;
 mod style;
 

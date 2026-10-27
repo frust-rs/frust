@@ -9,8 +9,8 @@
 //!
 //! [`ShapeContext::shape_spans`] itemizes the spans (`items`), analyzes the
 //! text (base direction auto, per-span line-break language), shapes each item
-//! and applies letter/word spacing per cluster where parley 0.11's
-//! `LayoutData::finish` did. The engine takes variation coordinates per item,
+//! and applies letter/word spacing per cluster as the retired parley 0.11
+//! layout finish step did. The engine takes variation coordinates per item,
 //! not per face (its synthesis type has no public constructor), so a face
 //! whose synthesis changes it (a variable face off its default weight) gets
 //! them in a second pass: items split at the first pass's face changes, each
