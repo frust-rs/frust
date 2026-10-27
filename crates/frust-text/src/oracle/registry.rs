@@ -160,27 +160,45 @@ fn english_or_first(name: &Name<'_>, id: NameId) -> Option<String> {
 /// face's default coordinates (the instance the face draws as unvaried — how a
 /// collection face that is one of a variable family's named instances is
 /// named). The first public (not dot-prefixed) candidate wins, else the first
-/// at all: a public name is one CoreText can open the face by, and for the
-/// default instance both name the same outlines.
+/// at all: a public name is one CoreText can open the face by. After those,
+/// every other named instance's name is a candidate, in `fvar` order: any
+/// named instance of the face opens the same outlines in CoreText (the handle's
+/// coordinates select the instance, which the `hvgl` provider applies), so
+/// the first public one names a face whose name ID 6 and default instance are
+/// both hidden.
 fn postscript_name(font: &FontRef<'_>, name: &Name<'_>) -> Option<String> {
     let id6 = english_or_first(name, NameId::POSTSCRIPT_NAME);
-    let instance = font.fvar().ok().and_then(|fvar| {
-        let axes = fvar.axes().ok()?;
-        fvar.instances()
-            .ok()?
-            .iter()
-            .flatten()
-            .find_map(|instance| {
-                let id = instance.post_script_name_id?;
+    let (default_instance, other_instances) = font
+        .fvar()
+        .ok()
+        .and_then(|fvar| {
+            let axes = fvar.axes().ok()?;
+            let mut default_instance = None;
+            let mut others = Vec::new();
+            for instance in fvar.instances().ok()?.iter().flatten() {
+                let Some(id) = instance.post_script_name_id else {
+                    continue;
+                };
                 let at_default = instance.coordinates.len() == axes.len()
                     && axes
                         .iter()
                         .zip(instance.coordinates)
                         .all(|(axis, value)| value.get() == axis.default_value());
-                at_default.then(|| english_or_first(name, id)).flatten()
-            })
-    });
-    let candidates = [id6, instance];
+                let Some(found) = english_or_first(name, id) else {
+                    continue;
+                };
+                if at_default && default_instance.is_none() {
+                    default_instance = Some(found);
+                } else {
+                    others.push(found);
+                }
+            }
+            Some((default_instance, others))
+        })
+        .unwrap_or_default();
+    let candidates = [id6, default_instance]
+        .into_iter()
+        .chain(other_instances.into_iter().map(Some));
     let mut named = candidates.into_iter().flatten().filter(|n| !n.is_empty());
     let first = named.next()?;
     if !first.starts_with('.') {
@@ -613,6 +631,28 @@ mod tests {
             Some(".VarUI-Regular")
         );
         assert!(all_hidden.hidden);
+    }
+
+    /// A collection-style face whose name ID 6 and default-instance name are
+    /// hidden is named by the first public name among its other instances.
+    #[test]
+    fn a_hidden_default_is_named_by_the_first_public_instance() {
+        let face = only_face(sfnt(&[
+            (*b"fvar", wght_fvar(&[(400, 256), (500, 257), (700, 258)])),
+            (*b"glyf", vec![0; 4]),
+            (
+                *b"name",
+                name_table(&[
+                    (1, "Var"),
+                    (6, ".VarUI-Default"),
+                    (256, ".VarUI-Regular"),
+                    (257, "Var-Medium"),
+                    (258, "Var-Bold"),
+                ]),
+            ),
+        ]));
+        assert_eq!(face.postscript_name.as_deref(), Some("Var-Medium"));
+        assert!(!face.hidden);
     }
 
     #[test]

@@ -409,8 +409,9 @@ mod macos {
     }
 
     /// The index of the collection `data`'s variable `hvgl` face that
-    /// [`FACE`] is: the one whose `maxp` glyph count is CoreText's for that
-    /// name, else the first variable `hvgl` face.
+    /// [`FACE`] is: the first whose name table carries it and whose `maxp`
+    /// glyph count is CoreText's for that name, else the first of that glyph
+    /// count, else the first variable `hvgl` face.
     fn face_index(data: &[u8]) -> u32 {
         let variable: Vec<u32> = (0..be_u32(data, 8))
             .filter(|index| {
@@ -418,13 +419,27 @@ mod macos {
             })
             .collect();
         let installed = coretext_glyph_count(FACE);
+        // Every PingFang face holds the same glyph count, so the count alone
+        // would pick the first (a hidden `.PingFangUIText…` face). Prefer the
+        // face whose name table carries [`FACE`] itself (UTF-16BE; a public
+        // name is not a substring of its hidden `.`-prefixed twin at an even offset).
+        let named = |index: &u32| {
+            table(data, *index, b"name").is_some_and(|(name, length)| {
+                let utf16: Vec<u8> = FACE.bytes().flat_map(|byte| [0, byte]).collect();
+                data[name..name + length]
+                    .windows(utf16.len())
+                    .any(|window| window == utf16)
+            })
+        };
+        let same_count = |index: &u32| {
+            table(data, *index, b"maxp")
+                .is_some_and(|(maxp, _)| usize::from(be_u16(data, maxp + 4)) == installed)
+        };
         variable
             .iter()
             .copied()
-            .find(|index| {
-                table(data, *index, b"maxp")
-                    .is_some_and(|(maxp, _)| usize::from(be_u16(data, maxp + 4)) == installed)
-            })
+            .find(|index| named(index) && same_count(index))
+            .or_else(|| variable.iter().copied().find(same_count))
             .or(variable.first().copied())
             .expect("PingFangUI.ttc carries a variable hvgl face")
     }

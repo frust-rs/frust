@@ -50,8 +50,11 @@
 //! differ from the installed face's would pass by name and draw the installed
 //! outlines under the wrong ids. So before a face opened by name is used, the
 //! handle's bytes and the CoreText face must agree on their glyph count
-//! (`maxp.numGlyphs` against `CTFontGetGlyphCount`), their `unitsPerEm` and
-//! their `fvar` axis tags, in order ([`FaceShape`]). A disagreement is a
+//! (`maxp.numGlyphs` against `CTFontGetGlyphCount`) and their `fvar` axis
+//! tags, in order ([`FaceShape`]). `unitsPerEm` is deliberately not compared:
+//! CoreText reports a normalized value for an `hvgl` face (1000 for PingFang
+//! where `head.unitsPerEm` is 1028), so it is no identity signal; the
+//! provider's own scaling still reads `head.unitsPerEm`. A disagreement is a
 //! refusal like the others, warned once with the name escaped and counted
 //! ([`HvglOutlines::bytes_mismatches`]). The handle does not say whether its
 //! bytes are a registered copy or the installed file the oracle mapped the
@@ -346,7 +349,7 @@ impl HvglOutlines {
     }
 
     /// How many faces were refused because their bytes and the CoreText face
-    /// their name opened disagree (glyph count, `unitsPerEm` or `fvar` axes),
+    /// their name opened disagree (glyph count or `fvar` axes),
     /// since the provider was built.
     pub(crate) fn bytes_mismatches(&self) -> u32 {
         self.faces.bytes_mismatches
@@ -653,12 +656,15 @@ fn maxp_num_glyphs(data: &[u8], directory: usize) -> Option<usize> {
 
 /// What a face's bytes and the CoreText face opened by its name must agree
 /// on before the bytes' glyph ids are drawn from CoreText's outlines.
+///
+/// `unitsPerEm` is not part of it: CoreText reports a normalized
+/// `CTFontGetUnitsPerEm` for an `hvgl` face (1000 for PingFang, whose
+/// `head.unitsPerEm` is 1028), so the two never compare equal on a genuine
+/// installed face.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FaceShape {
     /// The glyph count; `None` when the bytes carry no readable `maxp`.
     glyph_count: Option<usize>,
-    /// `unitsPerEm`; `None` when the bytes carry no usable `head`.
-    units_per_em: Option<u32>,
     /// The `fvar` axis tags, in axis order; empty for a face that does not
     /// vary.
     axis_tags: Vec<u32>,
@@ -671,13 +677,11 @@ impl FaceShape {
         let Some(directory) = table_directory(data, font.index) else {
             return Self {
                 glyph_count: None,
-                units_per_em: None,
                 axis_tags: Vec::new(),
             };
         };
         Self {
             glyph_count: maxp_num_glyphs(data, directory),
-            units_per_em: head_units_per_em(data, directory).map(u32::from),
             axis_tags: axis_tags(fvar_axes(data, directory)),
         }
     }
@@ -687,7 +691,6 @@ impl FaceShape {
         let fvar = face.table(FVAR_TAG);
         Self {
             glyph_count: Some(face.glyph_count()),
-            units_per_em: Some(face.units_per_em()),
             axis_tags: axis_tags(fvar.as_deref().and_then(|table| fvar_axes_at(table, 0))),
         }
     }
@@ -700,13 +703,6 @@ impl FaceShape {
                 "glyph count {} in the bytes, {} in CoreText's face",
                 or_none(self.glyph_count),
                 or_none(installed.glyph_count),
-            ));
-        }
-        if self.units_per_em != installed.units_per_em {
-            return Some(format!(
-                "unitsPerEm {} in the bytes, {} in CoreText's face",
-                or_none(self.units_per_em),
-                or_none(installed.units_per_em),
             ));
         }
         if self.axis_tags != installed.axis_tags {
@@ -1067,12 +1063,6 @@ mod platform {
             self.glyph_count
         }
 
-        /// The face's design units per em (`CTFontGetUnitsPerEm`).
-        pub(super) fn units_per_em(&self) -> u32 {
-            // SAFETY: a getter on a live font.
-            unsafe { self.font.units_per_em() }
-        }
-
         /// A copy of the face's table `tag` (`CTFontCopyTable`); `None` when
         /// the face has no such table.
         pub(super) fn table(&self, tag: [u8; 4]) -> Option<Vec<u8>> {
@@ -1185,11 +1175,6 @@ mod platform {
 
         /// Unreachable — no `CtFace` exists on this target.
         pub(super) fn glyph_count(&self) -> usize {
-            match *self {}
-        }
-
-        /// Unreachable — no `CtFace` exists on this target.
-        pub(super) fn units_per_em(&self) -> u32 {
             match *self {}
         }
 
@@ -1794,7 +1779,6 @@ mod tests {
             shape,
             FaceShape {
                 glyph_count: Some(300),
-                units_per_em: Some(2048),
                 axis_tags: vec![u32::from_be_bytes(*b"wght"), u32::from_be_bytes(*b"HGHT")],
             }
         );
@@ -1812,7 +1796,7 @@ mod tests {
         assert_eq!(bare.glyph_count, None, "no maxp, no glyph count");
         assert!(bare.axis_tags.is_empty());
         assert_eq!(
-            FaceShape::of_bytes(&font(b"not a font".to_vec())).units_per_em,
+            FaceShape::of_bytes(&font(b"not a font".to_vec())).glyph_count,
             None
         );
     }
@@ -1821,7 +1805,6 @@ mod tests {
     fn faces_agree_only_on_every_field() {
         let bytes = FaceShape {
             glyph_count: Some(300),
-            units_per_em: Some(1000),
             axis_tags: vec![u32::from_be_bytes(*b"wght")],
         };
         assert_eq!(bytes.disagreement(&bytes.clone()), None);
@@ -1843,15 +1826,6 @@ mod tests {
         assert!(
             unknown.disagreement(&bytes).is_some(),
             "a missing maxp never agrees"
-        );
-        let units = FaceShape {
-            units_per_em: Some(2048),
-            ..bytes.clone()
-        };
-        assert!(
-            bytes
-                .disagreement(&units)
-                .is_some_and(|why| why.contains("unitsPerEm"))
         );
         let reordered = FaceShape {
             axis_tags: vec![u32::from_be_bytes(*b"wdth"), u32::from_be_bytes(*b"wght")],
