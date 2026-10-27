@@ -176,7 +176,7 @@ use crate::compile::{CompiledFrame, DepthCounter};
 use crate::config;
 
 pub(crate) use atlas_policy::AtlasPolicy;
-pub(crate) use atlas_policy::{RunKey, RunRoute};
+pub(crate) use atlas_policy::{OutlineReason, RunKey, RunRoute};
 
 use atlas_policy::{ResidentAnswer, ResidentIdentity};
 
@@ -349,13 +349,8 @@ pub(crate) fn lower_glyph_run(
     // Computed from the same helpers the route key and the resident plan use,
     // so the amount `glifo` keys on is the amount they key on.
     let oblique = atlas_policy::oblique_transform(run);
-    let drawn_size = if oblique.is_some() && !hint {
-        // An unhinted skewed run is not absorbed: drawn at its nominal size
-        // under the full transform.
-        run.font_size
-    } else {
-        atlas_policy::drawn_font_size(run.font_size, transform)
-    };
+    let drawn_size =
+        atlas_policy::run_drawn_size(run.font_size, transform, hint, oblique.is_some());
     let embolden = atlas_policy::embolden_for(atlas_policy::embolden_per_side(
         run.font.embolden(),
         drawn_size,
@@ -461,11 +456,10 @@ impl<'r> ResidentPlan<'r> {
         if atlas_policy::oblique_synthesis(run) {
             return None;
         }
-        let size = run.font_size * (full.as_coeffs()[3] as f32);
+        let [_, _, t_c, t_d, t_e, t_f] = full.as_coeffs();
+        let size = atlas_policy::run_drawn_size(run.font_size, full, hint, false);
         let embolden = atlas_policy::embolden_per_side(run.font.embolden(), size);
         let synthesis = atlas_policy::Synthesis::new(run.font.normalized_coords(), embolden)?;
-        let [_, _, t_c, t_d, t_e, t_f] = full.as_coeffs();
-        let size = run.font_size * t_d as f32;
         // `glifo` caches only at or under its ceiling, which a NaN size is
         // not.
         if size.is_nan() || size > atlas_policy::MAX_CACHED_FONT_SIZE {
