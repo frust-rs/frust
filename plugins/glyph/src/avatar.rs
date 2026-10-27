@@ -31,6 +31,7 @@
 //! purely visual instance so it contributes no semantics node instead of the
 //! default `Role::Image` initials label.
 
+use crate::badge::LayoutGuard;
 use frust::authoring::Role;
 use frust::authoring::text::{
     FontFamily, FontWeight, GenericSlot, TextContext, TextLayout, TextStyle,
@@ -162,8 +163,7 @@ impl AvatarView {
 struct GlyphLabel {
     content: String,
     layout: Option<TextLayout>,
-    laid_out_style: Option<TextStyle>,
-    laid_out_max_width: Option<f32>,
+    guard: LayoutGuard,
 }
 
 impl GlyphLabel {
@@ -171,8 +171,7 @@ impl GlyphLabel {
         Self {
             content: content.into(),
             layout: None,
-            laid_out_style: None,
-            laid_out_max_width: None,
+            guard: LayoutGuard::default(),
         }
     }
 
@@ -186,8 +185,7 @@ impl GlyphLabel {
 
     fn layout(&mut self, ctx: &mut LayoutCtx, style: &TextStyle, max_width: Option<f32>) -> Size {
         if let Some(cached) = &self.layout
-            && self.laid_out_max_width == max_width
-            && self.laid_out_style.as_ref() == Some(style)
+            && self.guard.matches(style, max_width)
         {
             return cached.size();
         }
@@ -195,8 +193,7 @@ impl GlyphLabel {
         let laid = text_ctx.layout(&self.content, style, max_width);
         let size = laid.size();
         self.layout = Some(laid);
-        self.laid_out_style = Some(style.clone());
-        self.laid_out_max_width = max_width;
+        self.guard.record(style, max_width);
         size
     }
 

@@ -28,6 +28,7 @@
 //! Unthemed, each falls back to the literal Glyph **dark** constant (each
 //! family to the matching Glyph stack).
 
+use crate::badge::LayoutGuard;
 use std::rc::Rc;
 
 use frust::authoring::text::{
@@ -175,8 +176,7 @@ impl<State: 'static> GlyphListView<State> {
 struct GlyphLabel {
     content: String,
     layout: Option<TextLayout>,
-    laid_out_style: Option<TextStyle>,
-    laid_out_max_width: Option<f32>,
+    guard: LayoutGuard,
 }
 
 impl GlyphLabel {
@@ -184,15 +184,13 @@ impl GlyphLabel {
         Self {
             content: content.into(),
             layout: None,
-            laid_out_style: None,
-            laid_out_max_width: None,
+            guard: LayoutGuard::default(),
         }
     }
 
     fn layout(&mut self, ctx: &mut LayoutCtx, style: &TextStyle, max_width: Option<f32>) -> Size {
         if let Some(cached) = &self.layout
-            && self.laid_out_max_width == max_width
-            && self.laid_out_style.as_ref() == Some(style)
+            && self.guard.matches(style, max_width)
         {
             return cached.size();
         }
@@ -200,8 +198,7 @@ impl GlyphLabel {
         let laid = text_ctx.layout(&self.content, style, max_width);
         let size = laid.size();
         self.layout = Some(laid);
-        self.laid_out_style = Some(style.clone());
-        self.laid_out_max_width = max_width;
+        self.guard.record(style, max_width);
         size
     }
 
