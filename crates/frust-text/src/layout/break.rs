@@ -1,6 +1,6 @@
 //! Greedy line breaking over a [`Shaped`] paragraph's atoms.
 //!
-//! The rules are parley 0.11.1's `BreakLines::break_next`, applied per atom
+//! The rules (derived from parley 0.11.1's `BreakLines::break_next`) apply per atom
 //! (the smallest span bounded by both a grapheme and a cluster boundary, so a
 //! line never splits a grapheme or a ligature):
 //!
@@ -12,7 +12,7 @@
 //!   trailing whitespace, see `super::metrics`);
 //! - otherwise the line reverts to the last soft wrap opportunity;
 //! - with no soft wrap opportunity on the line, [`OverflowWrap`] decides: under
-//!   `Normal` (parley's default, and the only mode a [`crate::TextStyle`] can ask
+//!   `Normal` (the default, and the only mode a [`crate::TextStyle`] can ask
 //!   for today) the word overflows the line; under `Anywhere` the line reverts
 //!   to the last atom marked safe to break before (never set by the shaping
 //!   driver today, so a dead branch kept for when the engine reports it), else
@@ -25,12 +25,12 @@
 
 use std::ops::Range;
 
-use crate::context::shape::Shaped;
+use crate::shape::Shaped;
 
 /// What a line does with a word wider than itself (CSS `overflow-wrap`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum OverflowWrap {
-    /// The word overflows the line (parley 0.11.1's default, which apps lay
+    /// The word overflows the line (the default, which apps lay
     /// out against: a clipped or ellipsized long token).
     #[default]
     Normal,
@@ -65,7 +65,7 @@ pub(crate) struct BrokenLine {
     /// a hanging space included.
     pub(crate) advance: f32,
     /// Spaces a justified line may stretch: those that fitted, less a final
-    /// space on a regular break (parley's rule).
+    /// space on a regular break (the justification rule).
     pub(crate) num_spaces: usize,
 }
 
@@ -82,8 +82,8 @@ struct Mark {
 /// word wider than the line does.
 ///
 /// Always yields at least one line (an empty text is one empty line), and a
-/// text ending in a newline gets a final empty line after it, as parley opens
-/// one for the caret, unless the line cap stops first.
+/// text ending in a newline gets a final empty line after it, as the caret
+/// needs one, unless the line cap stops first.
 pub(crate) fn break_lines(
     shaped: &Shaped,
     max_advance: Option<f32>,
@@ -202,7 +202,7 @@ fn ends_in_space(shaped: &Shaped, end: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::shape::{AtomFlags, ShapedAtom, ShapedCluster, Whitespace};
+    use crate::shape::{AtomFlags, ShapedAtom, ShapedCluster, Whitespace};
 
     /// A synthetic paragraph: `words` separated by single spaces, every
     /// letter `letter` wide and every space `space` wide, one cluster per atom.

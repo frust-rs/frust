@@ -13,7 +13,8 @@
 //! switching to `setMin` would change the wire plan (`Setter::Max` stops being
 //! a span, `Setter::Progress` stops being an offset, and `decode_event` stops
 //! adding `min` back), which is a behavioural refactor with no user-visible
-//! gain. Revisit only with a reason beyond tidiness.
+//! gain; the Kotlin listener and chrome do not expose `setMin` either.
+//! Revisit only with a reason beyond tidiness.
 //!
 //! The control maps the app's `[min, max]` onto the platform's
 //! `[0, max - min]`: the plan emits

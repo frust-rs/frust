@@ -8,8 +8,8 @@
 //!
 //! [`Cursor`] is a byte offset with an [`Affinity`]: which side of a
 //! boundary the caret belongs to where one byte offset has two visual
-//! positions (a soft line break, a bidi run boundary). Motion follows parley
-//! 0.11.1's editor rules unit for unit:
+//! positions (a soft line break, a bidi run boundary). Motion follows frust's
+//! own editor rules (derived from parley 0.11.1's editor):
 //!
 //! - left/right is **visual** ([`Cursor::previous_visual`]/
 //!   [`Cursor::next_visual`]): the unit beside the caret on screen, so a
@@ -29,8 +29,8 @@ use std::ops::Range;
 
 use kurbo::Rect;
 
-use crate::context::shape::{Shaped, Whitespace};
 use crate::layout::{LineTable, Source};
+use crate::shape::{Shaped, Whitespace};
 
 /// Which side of a position the caret is attached to.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -178,7 +178,7 @@ impl EditLayout {
                     .get(line.atoms.end - 1)
                     .is_some_and(|a| a.flags.mandatory_break_after);
             let m = &line.metrics;
-            // The line box: parley 0.11.1's quantized block coordinates.
+            // The line box: quantized block coordinates (ascent and descent rounded).
             let (ascent, descent) = (m.ascent.round(), m.descent.round());
             let leading = m.line_height - (ascent + descent);
             let above = (leading * 0.5).floor();
