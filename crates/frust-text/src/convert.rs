@@ -43,7 +43,7 @@ use peniko::{Brush, FontData};
 
 use frust_scene::{FontHandle, Glyph, GlyphRun};
 
-use crate::context::shape::Shaped;
+use crate::context::shape::{Shaped, ShapedFace, faux_bold_em_fraction};
 use crate::layout::{ELLIPSIS, LineTable, Paragraph, Source};
 
 /// Walks `table`'s lines over `paragraph` (whose text is `text`), emitting
@@ -76,9 +76,7 @@ pub(crate) fn lines_to_scene_runs(
             // The face identity the oracle resolved (PostScript name, hidden
             // flag), so the renderer opens the face the oracle chose rather
             // than re-deriving who it is from the blob.
-            let font = FontHandle::new(data.clone())
-                .with_normalized_coords(&run.coords)
-                .with_identity(face.postscript_name.as_deref().map(Arc::from), face.hidden);
+            let font = font_handle(data.clone(), &run.coords, face, run.font_size);
             let mut current: Option<(u16, Vec<Glyph>)> = None;
             let flush = |current: &mut Option<(u16, Vec<Glyph>)>, runs: &mut Vec<GlyphRun>| {
                 let Some((style, glyphs)) = current.take() else {
@@ -144,6 +142,29 @@ pub(crate) fn lines_to_scene_runs(
 
 static NOTDEF_TOTAL: AtomicU64 = AtomicU64::new(0);
 static NOTDEF_WARNED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+/// The handle a run draws with: the font, the variation instance the shaper
+/// chose (all-zero coords name the default and are dropped), the oracle's face
+/// identity (PostScript name, hidden flag) so the renderer opens the face the
+/// oracle chose, and the synthesis the oracle decided (faux-bold stroke as an
+/// em fraction at `font_size`, faux-oblique degrees; zero when the face
+/// satisfies the request itself).
+pub(crate) fn font_handle(
+    data: FontData,
+    coords: &[i16],
+    face: &ShapedFace,
+    font_size: f32,
+) -> FontHandle {
+    let embolden = if face.embolden {
+        faux_bold_em_fraction(font_size)
+    } else {
+        0.0
+    };
+    FontHandle::new(data)
+        .with_normalized_coords(coords)
+        .with_identity(face.postscript_name.as_deref().map(Arc::from), face.hidden)
+        .with_synthesis(embolden, face.skew.unwrap_or(0.0))
+}
 
 /// Process-wide count of visible-text glyphs that shaped to glyph 0
 /// (`.notdef`) in layouts walked into scene runs. Each memoized layout walk

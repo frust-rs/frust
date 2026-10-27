@@ -43,6 +43,22 @@ use crate::style::TextStyle;
 use items::{Itemized, itemize};
 use selector::{Adapter, SelectorState, StyleQuery};
 
+/// Faux-bold stroke, as a fraction of the em, for a face the oracle decided to
+/// embolden at `font_size` logical pixels.
+///
+/// Reference is Skia's fake bold: about 1/24 em at sizes up to 9 px, sliding
+/// linearly to 1/32 em at 36 px and above, so small text gets proportionally
+/// more weight to stay legible and large text does not look blobby. The
+/// interpolation is kept (rather than one constant) so the strength matches
+/// what Android and Flutter users see from synthetic bold; the renderer reads
+/// the resulting em fraction off the handle and needs no size rule of its own.
+pub(crate) fn faux_bold_em_fraction(font_size: f32) -> f32 {
+    const SMALL: f32 = 1.0 / 24.0;
+    const LARGE: f32 = 1.0 / 32.0;
+    let t = ((font_size - 9.0) / (36.0 - 9.0)).clamp(0.0, 1.0);
+    SMALL + (LARGE - SMALL) * if t.is_nan() { 0.0 } else { t }
+}
+
 /// A face a [`ShapedRun`] draws with, as the oracle chose it.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ShapedFace {
@@ -904,6 +920,68 @@ mod tests {
         let shaped = cx.shape(&mut oracle, "", &style(16.0));
         assert!(shaped.complete && shaped.runs.is_empty());
         assert_eq!(cx.analyses(), 0);
+    }
+
+    fn handle_for(oracle: &mut Oracle, style: &TextStyle) -> frust_scene::FontHandle {
+        let mut cx = ShapeContext::default();
+        let shaped = cx.shape(oracle, "Hamburg", style);
+        let run = &shaped.runs[0];
+        crate::convert::font_handle(
+            peniko::FontData::new(shaped.faces[run.face].blob.clone(), 0),
+            &run.coords,
+            &shaped.faces[run.face],
+            run.font_size,
+        )
+    }
+
+    #[test]
+    fn faux_bold_amount_follows_skia_interpolation() {
+        assert_eq!(faux_bold_em_fraction(9.0), 1.0 / 24.0);
+        assert_eq!(faux_bold_em_fraction(2.0), 1.0 / 24.0);
+        assert_eq!(faux_bold_em_fraction(36.0), 1.0 / 32.0);
+        assert_eq!(faux_bold_em_fraction(90.0), 1.0 / 32.0);
+        let mid = faux_bold_em_fraction(20.0);
+        assert!(mid < 1.0 / 24.0 && mid > 1.0 / 32.0);
+    }
+
+    #[test]
+    fn handle_carries_embolden_for_a_static_face_asked_for_bold() {
+        let (mut oracle, _) = oracle_with(NOTO_SANS);
+        let bold = TextStyle {
+            weight: FontWeight::BOLD,
+            ..style(16.0)
+        };
+        let handle = handle_for(&mut oracle, &bold);
+        assert!(handle.embolden() > 0.0);
+        assert!(handle.normalized_coords().is_empty());
+        let plain = handle_for(&mut oracle, &style(16.0));
+        assert_eq!((plain.embolden(), plain.skew_degrees()), (0.0, 0.0));
+        assert!(plain.normalized_coords().is_empty());
+    }
+
+    #[test]
+    fn handle_on_a_variable_face_has_coords_and_no_embolden() {
+        let mut oracle = geist_oracle();
+        let bold = TextStyle {
+            family: FontFamily::named("Geist"),
+            weight: FontWeight::BOLD,
+            ..style(16.0)
+        };
+        let handle = handle_for(&mut oracle, &bold);
+        assert!(!handle.normalized_coords().is_empty());
+        assert_eq!(handle.embolden(), 0.0);
+    }
+
+    #[test]
+    fn handle_skews_an_italic_ask_on_an_upright_face() {
+        let (mut oracle, _) = oracle_with(NOTO_SANS);
+        let italic = TextStyle {
+            style: crate::style::FontStyle::Italic,
+            ..style(16.0)
+        };
+        let handle = handle_for(&mut oracle, &italic);
+        assert_eq!(handle.skew_degrees(), 14.0);
+        assert_eq!(handle.embolden(), 0.0);
     }
 
     #[test]
