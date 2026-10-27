@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  `ACCESS_NETWORK_STATE` is what `ConnectivityManager.registerDefaultNetworkCallback`
+  and `getNetworkCapabilities` require. It is a normal, install-time permission
+  (no runtime prompt), and the Android manifest merger folds it into every app
+  that depends on `:frust-connectivity`, so a consuming app never edits its own
+  AndroidManifest.xml for it — the plugin README states the same contract.
+
+  The provider below is how `FrustConnectivityHost` obtains an application
+  `Context` before any Activity exists, the `plugins/iap` / `plugins/camera`
+  init-provider shape: a no-op `ContentProvider` whose `onCreate` runs at
+  process start. `${applicationId}` is substituted at manifest-merge time, so
+  the authority is unique per consuming app; `exported="false"` because it
+  exposes no data and nothing outside the app may reach it.
+
+  No `package` attribute: AGP takes the module's package from
+  `android.namespace` in `build.gradle.kts` (`dev.frust.connectivity`).
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <application>
+        <provider
+            android:name="dev.frust.connectivity.FrustConnectivityInitProvider"
+            android:authorities="${applicationId}.frustconnectivityinit"
+            android:exported="false"
+            android:multiprocess="false" />
+    </application>
+
+</manifest>
