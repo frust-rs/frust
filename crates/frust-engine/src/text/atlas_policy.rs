@@ -596,12 +596,13 @@ pub(crate) fn drawn_font_size(size: f32, transform: Affine) -> f32 {
 /// before the draw scale `draw_size / cache_size` is applied:
 ///
 /// - HINTED (`hinting_instance` is set, which `glifo` does when the run's
-///   transform is a positive uniform scale without vertical skew): the
-///   outline is cached at the device size, with no further scale, so the
-///   stroke is in device pixels. The basis is the drawn size
-///   ([`drawn_font_size`]). A hinted oblique run is still absorbed (the
-///   horizontal skew rides in the glyph transform), so oblique does not change
-///   the basis.
+///   transform is a positive uniform scale without *vertical* skew,
+///   [`hinted_absorbed_scale`] — a horizontal skew is still hinted): the
+///   outline is cached at the device size `font_size * d`, with no further
+///   scale, so the stroke is in device pixels. The basis is that size. A
+///   hinted oblique run is still absorbed (the oblique skew is horizontal), so
+///   oblique does not change the basis. Note this is a looser predicate than
+///   [`absorbed_scale`], which gates the atlas and so rejects every skew.
 /// - UNHINTED (every run of the mobile tier, `hint(false)`, and any hinted run
 ///   whose transform `glifo` cannot absorb): the outline is cached at the
 ///   face's `unitsPerEm` and scaled to the draw size afterwards, so the stroke
@@ -617,11 +618,30 @@ pub(crate) fn drawn_font_size(size: f32, transform: Affine) -> f32 {
 /// resident plan, so the embolden bits each derives are the same.
 #[must_use]
 pub(crate) fn embolden_basis(size: f32, transform: Affine, hinted: bool, upem: f32) -> f32 {
-    if hinted && absorbed_scale(transform).is_some() {
-        drawn_font_size(size, transform)
-    } else {
-        upem
+    match hinted.then(|| hinted_absorbed_scale(transform)).flatten() {
+        // `glifo`'s `vertical_font_size`: `run.font_size * t_d`, in `f32`.
+        Some(scale) => size * scale as f32,
+        None => upem,
     }
+}
+
+/// `glifo`'s *hinted* absorption predicate
+/// (`is_positive_uniform_scale_without_vertical_skew`, `util.rs`): a positive
+/// uniform scale with no vertical skew. Unlike [`absorbed_scale`] it admits a
+/// horizontal skew (`c`), because `glifo` hints vertically only. Returns the
+/// vertical coefficient `d`, which `glifo` multiplies the font size by.
+///
+/// The run's own transform is enough to decide it: `glifo` multiplies a glyph
+/// transform onto it, and the only glyph transform this tier sets is the
+/// horizontal skew of synthetic oblique, which leaves `b` and `d` unchanged.
+#[must_use]
+pub(crate) fn hinted_absorbed_scale(transform: Affine) -> Option<f64> {
+    let [a, b, c, d, _, _] = transform.as_coeffs();
+    if !(a.is_finite() && b.is_finite() && c.is_finite() && d.is_finite()) {
+        return None;
+    }
+    let uniform = (a - d).abs() <= NEARLY_ZERO && a > 0.0 && d > 0.0;
+    (uniform && b.abs() <= NEARLY_ZERO).then_some(d)
 }
 
 /// What a run is drawn with beyond its font and size: the variation
@@ -2712,6 +2732,21 @@ mod resident_run_tests {
         // A transform `glifo` cannot absorb cannot be hinted either.
         let skewed = Affine::skew(0.4, 0.4);
         assert_eq!(embolden_basis(16.0, skewed, true, 1000.0), 1000.0);
+        // A horizontal-only shear is still hinted by `glifo`: device basis.
+        let sheared = Affine::new([1.0, 0.0, 0.3, 1.0, 0.0, 0.0]);
+        assert_eq!(embolden_basis(16.0, sheared, true, 1000.0), 16.0);
+        let sheared_twice = Affine::new([2.0, 0.0, 0.3, 2.0, 5.0, 7.0]);
+        assert_eq!(embolden_basis(16.0, sheared_twice, true, 1000.0), 32.0);
+        assert_eq!(embolden_basis(16.0, sheared, false, 1000.0), 1000.0);
+        // A rotation or a vertical skew is not: font units.
+        let rotated = Affine::rotate(0.3);
+        assert_eq!(embolden_basis(16.0, rotated, true, 1000.0), 1000.0);
+        let vertical = Affine::new([1.0, 0.3, 0.0, 1.0, 0.0, 0.0]);
+        assert_eq!(embolden_basis(16.0, vertical, true, 1000.0), 1000.0);
+        assert_eq!(
+            hinted_absorbed_scale(Affine::new([1.0, 0.0, f64::NAN, 1.0, 0.0, 0.0])),
+            None
+        );
     }
 }
 

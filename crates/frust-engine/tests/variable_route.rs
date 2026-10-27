@@ -178,6 +178,44 @@ fn faux_bold_weight_is_comparable_hinted_and_unhinted() {
     );
 }
 
+/// `glifo` still hints a run under a horizontal-only shear (it hints
+/// vertically only), so the faux-bold stroke is measured in device pixels
+/// there too. A shear preserves area, so the sheared faux-bold run inks about
+/// what the unsheared one does — not the blob a font-unit stroke would make.
+#[test]
+fn hinted_faux_bold_under_a_horizontal_shear_keeps_its_weight() {
+    let (mut ctx, family) = context_with(STATIC_FONT);
+    let regular = hello(&mut ctx, &family);
+    let bold = faux_bold(&regular);
+    let sheared = Affine::new([1.0, 0.0, 0.25, 1.0, 0.0, 0.0]);
+    let ink_under = |runs: &[GlyphRun], transform: Affine| {
+        let mut compiler = strip_compiler();
+        compiler.set_hint_text(true);
+        let frame = compiler
+            .compile(&scene_of(runs), transform, VIEWPORT)
+            .expect("an in-range scene compiles");
+        assert!(frame.glyph_draws > 0, "the run drew nothing");
+        ink(&frame)
+    };
+    let (upright_bold, sheared_bold) = (
+        ink_under(&bold, Affine::IDENTITY),
+        ink_under(&bold, sheared),
+    );
+    let sheared_regular = ink_under(&regular, sheared);
+    eprintln!(
+        "hinted faux bold ink upright {upright_bold}, sheared {sheared_bold}; sheared regular {sheared_regular}"
+    );
+    let ratio = sheared_bold as f64 / upright_bold as f64;
+    assert!(
+        (0.8..=1.25).contains(&ratio),
+        "sheared/upright faux bold {ratio}"
+    );
+    assert!(
+        sheared_bold as f64 >= sheared_regular as f64 * 1.25,
+        "sheared faux bold {sheared_bold} vs regular {sheared_regular}"
+    );
+}
+
 /// Two runs of one blob and one glyph sequence that differ only in weight are
 /// two cache identities: the bold one is not drawn out of the regular one's
 /// resident record, and each is resident with its own.
