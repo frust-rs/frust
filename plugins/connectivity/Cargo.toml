@@ -1,0 +1,38 @@
+[package]
+name = "frust-connectivity"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Default-network availability and change events for Frust apps: Android ConnectivityManager and Apple Network.framework."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[dependencies]
+log = { workspace = true }
+
+# `jni` for the plugin's own JNI export and `FrustConnectivityHost` calls; `frust-plugin` (the
+# only `frust-*` dependency a platform plugin may have, docs/PLUGINS_CODE_STANDARDS.md) for
+# `with_jni_env`. Android-only: no other arm reaches the JVM.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { workspace = true }
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.6.3" }
+
+# Network.framework's `nw_path_monitor` is plain C, declared by hand in `src/apple.rs`: no
+# objc2 binding crate.
+[target.'cfg(any(target_os = "ios", target_os = "macos"))'.dependencies]
+# Builds the path-update handler block. Direct dependency, as in camera/auth-session: there is
+# no `[workspace.dependencies]` row, so the `0.6` literal repeats per crate.
+block2 = { version = "0.6", default-features = false, features = ["std"] }
+# The serial queue the monitor reports on. Literal, not `workspace = true`: the root row is a
+# plain string and cannot narrow features; the list matches haptics/auth-session/url-launcher.
+dispatch2 = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "objc2",
+] }
+
+# Every other target (Linux, Windows, web): no dependency. `src/noop.rs` never reports.
