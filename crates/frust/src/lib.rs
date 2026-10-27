@@ -1743,6 +1743,66 @@ pub use frust_reactive::{RwSignal, on_cleanup, provide_context, use_context};
 /// navigation without a real platform link.
 pub use frust_reactive::{DeepLink, DeepLinks, deep_links, push_deep_link};
 
+/// The **app-lifecycle** surface (`frust-reactive`'s process-wide lifecycle source — see
+/// its module docs), with Flutter's `AppLifecycleState`/`AppLifecycleListener` semantics: a
+/// shell reports host states via [`push_app_lifecycle`] (which generates Flutter's
+/// intermediate steps — `Resumed` to `Paused` passes `Inactive` and `Hidden`) and asks a
+/// cancelable desktop exit via [`request_app_exit`]. App code reads [`app_lifecycle()`]'s
+/// tracked [`AppLifecycle::state`] in a `build`, or keeps an [`AppLifecycleListener`]
+/// alive — its callbacks run synchronously on the UI thread, so hand work off, never block.
+///
+/// ```no_run
+/// use std::sync::mpsc::{Sender, channel};
+///
+/// use frust::{AppExitResponse, AppLifecycleListener, Component, View, app_lifecycle, text};
+///
+/// enum Wake {
+///     Foregrounded,
+/// }
+///
+/// struct AppState {
+///     _lifecycle: AppLifecycleListener,
+/// }
+///
+/// #[derive(Default)]
+/// struct Editor;
+///
+/// impl Component for Editor {
+///     type State = AppState;
+///
+///     fn init(&self) -> AppState {
+///         let (tx, _rx) = channel();
+///         AppState { _lifecycle: Self::lifecycle(tx) }
+///     }
+///
+///     fn build(&self, _state: &mut AppState) -> impl View<AppState> {
+///         // A tracked read: this rebuild re-runs on every lifecycle step.
+///         text(format!("{:?}", app_lifecycle().state()))
+///     }
+/// }
+///
+/// impl Editor {
+///     fn lifecycle(tx: Sender<Wake>) -> AppLifecycleListener {
+///         AppLifecycleListener::new()
+///             .on_restart(move || {
+///                 let _ = tx.send(Wake::Foregrounded);
+///             })
+///             .on_exit_requested(|| {
+///                 if Self::dirty() { AppExitResponse::Cancel } else { AppExitResponse::Exit }
+///             })
+///     }
+///
+///     fn dirty() -> bool {
+///         false
+///     }
+/// }
+/// # let _ = Editor;
+/// ```
+pub use frust_reactive::{
+    AppExitResponse, AppLifecycle, AppLifecycleListener, AppLifecycleState, app_lifecycle,
+    push_app_lifecycle, request_app_exit,
+};
+
 /// The Android back-press source (`frust-reactive`'s
 /// process-wide back source — see its `back` module docs). A mobile shell
 /// delivers a hardware/gesture back press via [`push_back_press`], and the
