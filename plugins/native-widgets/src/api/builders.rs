@@ -273,6 +273,19 @@ struct BannerText {
     layout: Option<TextLayout>,
     laid_out_style: Option<TextStyle>,
     laid_out_max_width: Option<f32>,
+    laid_out_locale: u64,
+}
+
+/// The app-locale generation a layout shaped in `style` depends on: the live
+/// default-locale generation for an untagged style, a constant for a style
+/// carrying its own locale (the default never touches it). Caches store it
+/// beside the style key and reuse only on equality.
+fn locale_generation(style: &TextStyle) -> u64 {
+    if style.locale.is_some() {
+        0
+    } else {
+        frust::authoring::text::default_locale_generation()
+    }
 }
 
 impl BannerText {
@@ -282,6 +295,7 @@ impl BannerText {
             layout: None,
             laid_out_style: None,
             laid_out_max_width: None,
+            laid_out_locale: 0,
         }
     }
 
@@ -297,6 +311,7 @@ impl BannerText {
         if let Some(cached) = &self.layout
             && self.laid_out_max_width == max_width
             && self.laid_out_style.as_ref() == Some(style)
+            && self.laid_out_locale == locale_generation(style)
         {
             return cached.size();
         }
@@ -307,6 +322,7 @@ impl BannerText {
         self.layout = Some(laid);
         self.laid_out_style = Some(style.clone());
         self.laid_out_max_width = max_width;
+        self.laid_out_locale = locale_generation(style);
         size
     }
 
@@ -2725,6 +2741,71 @@ mod tests {
     fn build_any<State: 'static>(view: AnyView<State>) -> Box<dyn Widget> {
         let mut counter = 0u64;
         view.build(&mut BuildCtx::new(&mut counter))
+    }
+
+    /// Serialises the tests that write the process-global default-locale slot.
+    static LOCALE_SLOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Holds the slot lock and restores `None` on drop, panic included.
+    struct LocaleWriter(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+    fn locale_writer() -> LocaleWriter {
+        LocaleWriter(LOCALE_SLOT.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    impl Drop for LocaleWriter {
+        fn drop(&mut self) {
+            frust::authoring::text::set_default_locale(None);
+        }
+    }
+
+    /// `(shapes, hits)` the text context has seen so far.
+    fn shape_counts(tcx: &TextContext) -> (u64, u64) {
+        let stats = tcx.shape_cache_stats();
+        (stats.shapes, stats.hits)
+    }
+
+    #[test]
+    fn banner_text_follows_the_app_locale_generation() {
+        let _slot = locale_writer();
+        let style = TextStyle::new(14.0, Color::BLACK);
+        let mut banner = BannerText::new("Refused");
+        let mut tcx = TextContext::new();
+        {
+            let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+            banner.layout(&mut lctx, &style, Some(200.0));
+            banner.layout(&mut lctx, &style, Some(200.0));
+        }
+        let settled = shape_counts(&tcx);
+        assert_eq!(settled.1, 0, "an unchanged generation reuses the run");
+
+        frust::authoring::text::set_default_locale(Some("ja"));
+        {
+            let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+            banner.layout(&mut lctx, &style, Some(200.0));
+        }
+        let rebuilt = shape_counts(&tcx);
+        assert!(
+            rebuilt.0 + rebuilt.1 > settled.0 + settled.1,
+            "a locale change rebuilds the run"
+        );
+
+        let tagged = style.clone().with_locale(Some("fr"));
+        {
+            let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+            banner.layout(&mut lctx, &tagged, Some(200.0));
+        }
+        let before = shape_counts(&tcx);
+        frust::authoring::text::set_default_locale(Some("ko"));
+        {
+            let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+            banner.layout(&mut lctx, &tagged, Some(200.0));
+        }
+        assert_eq!(
+            shape_counts(&tcx),
+            before,
+            "an explicit locale stays cached"
+        );
     }
 
     // --- params_json snapshots, one per control (no theme) -------------------
