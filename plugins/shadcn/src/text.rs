@@ -72,12 +72,25 @@ pub(crate) fn themed_family(
 /// constant keeps the shape cache from missing on a color change.
 pub(crate) const SHAPING_INK: Color = Color::BLACK;
 
+/// The app-locale generation a layout shaped in `style` depends on: the live
+/// default-locale generation for an untagged style, a constant for a style
+/// carrying its own locale (the default never touches it). Caches store it
+/// beside the style key and reuse only on equality.
+fn locale_generation(style: &TextStyle) -> u64 {
+    if style.locale.is_some() {
+        0
+    } else {
+        frust::authoring::text::default_locale_generation()
+    }
+}
+
 /// A cached, lazily-shaped text run whose color is baked into the shaped
 /// layout.
 pub(crate) struct Label {
     content: String,
     layout: Option<TextLayout>,
     shaped_style: Option<TextStyle>,
+    shaped_locale: u64,
 }
 
 impl Label {
@@ -87,6 +100,7 @@ impl Label {
             content: content.into(),
             layout: None,
             shaped_style: None,
+            shaped_locale: 0,
         }
     }
 
@@ -115,6 +129,7 @@ impl Label {
     pub(crate) fn layout(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> Size {
         if let Some(cached) = &self.layout
             && self.shaped_style.as_ref() == Some(style)
+            && self.shaped_locale == locale_generation(style)
         {
             return cached.size();
         }
@@ -123,6 +138,7 @@ impl Label {
         let size = laid.size();
         self.layout = Some(laid);
         self.shaped_style = Some(style.clone());
+        self.shaped_locale = locale_generation(style);
         size
     }
 
@@ -148,6 +164,7 @@ pub(crate) struct LabelRun {
     content: String,
     layout: Option<TextLayout>,
     laid_out_style: Option<TextStyle>,
+    laid_out_locale: u64,
 }
 
 impl LabelRun {
@@ -157,6 +174,7 @@ impl LabelRun {
             content: content.into(),
             layout: None,
             laid_out_style: None,
+            laid_out_locale: 0,
         }
     }
 
@@ -173,6 +191,7 @@ impl LabelRun {
     pub(crate) fn layout(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> Size {
         if let Some(cached) = &self.layout
             && self.laid_out_style.as_ref() == Some(style)
+            && self.laid_out_locale == locale_generation(style)
         {
             return cached.size();
         }
@@ -181,6 +200,7 @@ impl LabelRun {
         let size = laid.size();
         self.layout = Some(laid);
         self.laid_out_style = Some(style.clone());
+        self.laid_out_locale = locale_generation(style);
         size
     }
 
@@ -264,6 +284,83 @@ mod tests {
 
     fn style(size: f32, ink: Color) -> TextStyle {
         TextStyle::new(size, ink)
+    }
+
+    /// Serialises the tests that write the process-global default-locale slot.
+    static LOCALE_SLOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Holds the slot lock and restores `None` on drop, panic included.
+    struct LocaleWriter(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+    fn locale_writer() -> LocaleWriter {
+        LocaleWriter(LOCALE_SLOT.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    impl Drop for LocaleWriter {
+        fn drop(&mut self) {
+            frust::authoring::text::set_default_locale(None);
+        }
+    }
+
+    /// `(shapes, hits)` the text context has seen so far.
+    fn shape_counts(tcx: &TextContext) -> (u64, u64) {
+        let stats = tcx.shape_cache_stats();
+        (stats.shapes, stats.hits)
+    }
+
+    #[test]
+    fn cached_runs_follow_the_app_locale_generation() {
+        let _slot = locale_writer();
+        let style = style(14.0, SHAPING_INK);
+        let mut label = Label::new("Save");
+        let mut run = LabelRun::new("Save");
+        let mut tcx = TextContext::new();
+        {
+            let mut ctx = LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), None);
+            label.layout(&mut ctx, &style);
+            run.layout(&mut ctx, &style);
+        }
+        let settled = shape_counts(&tcx);
+        {
+            let mut ctx = LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), None);
+            label.layout(&mut ctx, &style);
+            run.layout(&mut ctx, &style);
+        }
+        assert_eq!(
+            shape_counts(&tcx),
+            settled,
+            "an unchanged generation reuses both runs"
+        );
+
+        frust::authoring::text::set_default_locale(Some("ja"));
+        {
+            let mut ctx = LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), None);
+            label.layout(&mut ctx, &style);
+            run.layout(&mut ctx, &style);
+        }
+        let rebuilt = shape_counts(&tcx);
+        assert!(
+            rebuilt.0 + rebuilt.1 >= settled.0 + settled.1 + 2,
+            "a locale change rebuilds both runs"
+        );
+
+        // A style with its own locale ignores the app default.
+        let tagged = style.clone().with_locale(Some("fr"));
+        {
+            let mut ctx = LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), None);
+            label.layout(&mut ctx, &tagged);
+        }
+        let before = shape_counts(&tcx);
+        frust::authoring::text::set_default_locale(Some("ko"));
+        {
+            let mut ctx = LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), None);
+            label.layout(&mut ctx, &tagged);
+        }
+        assert_eq!(
+            shape_counts(&tcx),
+            before,
+            "an explicit locale stays cached"
+        );
     }
 
     #[test]

@@ -296,7 +296,7 @@ pub fn tool_approval_parameter(
 pub(crate) struct WrappedRun {
     content: String,
     layout: Option<TextLayout>,
-    shaped: Option<(TextStyle, u32)>,
+    shaped: Option<(TextStyle, u32, u64)>,
     /// Whether the last [`layout`](Self::layout) pass produced a line wider
     /// than the `max_width` it was given — an unbreakable single token (no
     /// space to wrap on) that a caller's clip cuts off rather than fully
@@ -325,7 +325,11 @@ impl WrappedRun {
         max_width: f64,
     ) -> Size {
         let width = max_width.max(0.0) as f32;
-        let key = (style.clone(), width.to_bits());
+        let key = (
+            style.clone(),
+            width.to_bits(),
+            crate::text::locale_generation(style),
+        );
         if let Some(cached) = &self.layout
             && self.shaped.as_ref() == Some(&key)
         {

@@ -221,7 +221,7 @@ pub struct StreamingResponseWidget {
     color: Option<Color>,
     /// The wrapped body run, plus what it was shaped from (text, style, width).
     run: Option<TextLayout>,
-    shaped: Option<(String, TextStyle, f64)>,
+    shaped: Option<(String, TextStyle, f64, u64)>,
     /// How many glyphs of the shaped run have finished revealing. Everything
     /// past this is the run currently fading in.
     settled_glyphs: usize,
@@ -452,7 +452,12 @@ impl Widget for StreamingResponseWidget {
             f64::INFINITY
         };
 
-        let key = (self.content.clone(), style.clone(), width);
+        let key = (
+            self.content.clone(),
+            style.clone(),
+            width,
+            crate::text::locale_generation(&style),
+        );
         if self.shaped.as_ref() != Some(&key) {
             let max_width = width.is_finite().then_some(width as f32);
             let text_ctx = ctx.text_context::<TextContext>();
