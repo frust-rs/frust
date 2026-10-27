@@ -450,8 +450,8 @@ impl Oracle {
                 blob: face.blob,
                 index: face.index,
                 synthesis: Synthesis::default(),
-                postscript_name: None,
-                hidden: false,
+                postscript_name: face.postscript_name,
+                hidden: face.hidden,
             })
     }
 
@@ -552,8 +552,8 @@ impl Oracle {
             blob: face.blob.clone(),
             index: face.index,
             synthesis: synthesize(&face.facts.attrs, req.weight.value(), req.slant, req.width),
-            postscript_name: None,
-            hidden: false,
+            postscript_name: face.postscript_name.clone(),
+            hidden: face.hidden,
         })
     }
 
@@ -738,6 +738,39 @@ mod tests {
         }
         assert_eq!(oracle.stats().app_hits, 3);
         assert_eq!(oracle.cache().len(), 0);
+    }
+
+    /// A registered face carries its PostScript name and hidden flag onto the
+    /// face the selector answers — through a named family and through a
+    /// registered generic fallback alike — as a system face does.
+    #[test]
+    fn a_registered_face_answers_with_its_postscript_name() {
+        let noto =
+            Blob::from(include_bytes!("../../../../testing/fonts/NotoSans-Subset.ttf").to_vec());
+        let mut oracle = oracle_over(SyntheticBackend::new("b"));
+        oracle.registry_mut().insert_blob(&noto);
+        oracle
+            .registry_mut()
+            .insert_generic(&noto, &[GenericSlot::Serif]);
+        let face = oracle
+            .resolve(&req("H", b"Latn", &FontFamily::named("Noto Sans")))
+            .expect("the registered family covers H");
+        assert_eq!(face.blob.id(), noto.id());
+        assert_eq!(face.postscript_name.as_deref(), Some("NotoSans-Regular"));
+        assert!(!face.hidden);
+        let generic = oracle
+            .resolve(&req(
+                "H",
+                b"Latn",
+                &FontFamily::NamedWithGeneric(vec![FamilyName::Generic(GenericSlot::Serif)]),
+            ))
+            .expect("the registered generic covers H");
+        assert_eq!(generic.postscript_name.as_deref(), Some("NotoSans-Regular"));
+        let default = oracle
+            .default_face(GenericSlot::Serif)
+            .expect("the registered generic is the default");
+        assert_eq!(default.postscript_name.as_deref(), Some("NotoSans-Regular"));
+        assert!(!default.hidden);
     }
 
     #[test]
