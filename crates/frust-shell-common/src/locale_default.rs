@@ -68,7 +68,8 @@ impl FontCacheFlush for TextContext {
 /// enter-background, a desktop focus loss then `suspended`) flush once: a repeat before the
 /// foreground is ignored. The flush is the existing contract (a clean cache is a no-op; a dirty one
 /// writes synchronously), and all contexts of a process share one cache copy, so one call per
-/// context is bounded by one small file write.
+/// context is bounded by one small file write. A flush through any one context writes every
+/// answer the process holds that is not yet on disk, whichever context recorded it.
 ///
 /// Interior-atomic and `const`-constructible so a shell without a spare handle field can keep it in a
 /// `static`.
