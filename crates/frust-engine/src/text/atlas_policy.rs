@@ -536,31 +536,24 @@ pub(crate) fn quantize_font_size(size: f32) -> Option<f32> {
     (quantized > 0.0 && quantized.is_finite()).then_some(quantized)
 }
 
-/// Whether a handle's faux-oblique angle is drawn at all: the one switch for
-/// synthetic oblique. A run it applies to is drawn with a skewing glyph
-/// transform, and is routed to outlines every frame (`glifo` caches no run
-/// whose transform skews, and an upright entry must never be probed for it).
-/// Off, an obliqued face draws upright, as it did before the angle was
-/// carried.
-///
-/// Revisit trigger: if a device trace shows the outline route above 1 ms per
-/// frame for faux-italic text, cache skewed outlines under a skew-aware key or
-/// turn this switch off. The cost is observable per frame as
-/// `CompiledFrame::synthetic_oblique_runs`.
-pub(crate) const OBLIQUE_SYNTHESIS: bool = true;
-
-/// Whether `run` is drawn with synthetic oblique.
+/// Whether `run` is drawn with synthetic oblique, given the compiler's switch
+/// (`SceneCompiler::set_synthetic_oblique`, off by default). A run it applies
+/// to is drawn with a skewing glyph transform, and is routed to outlines every
+/// frame (`glifo` caches no run whose transform skews, and an upright entry
+/// must never be probed for it). Off, an obliqued face draws upright and is
+/// cached like any upright run, as it did before the angle was carried.
 #[must_use]
-pub(crate) fn oblique_synthesis(run: &frust_scene::GlyphRun) -> bool {
-    OBLIQUE_SYNTHESIS && run.font.skew_degrees() != 0.0
+pub(crate) fn oblique_synthesis(run: &frust_scene::GlyphRun, enabled: bool) -> bool {
+    enabled && run.font.skew_degrees() != 0.0
 }
 
 /// The glyph transform that leans `run`'s glyphs, when it has synthetic
-/// oblique. The outline is flipped to layout space (y down) before this is
-/// applied, so a rightward lean of the top is a negative shear.
+/// oblique (see [`oblique_synthesis`]). The outline is flipped to layout space
+/// (y down) before this is applied, so a rightward lean of the top is a
+/// negative shear.
 #[must_use]
-pub(crate) fn oblique_transform(run: &frust_scene::GlyphRun) -> Option<Affine> {
-    oblique_synthesis(run)
+pub(crate) fn oblique_transform(run: &frust_scene::GlyphRun, enabled: bool) -> Option<Affine> {
+    oblique_synthesis(run, enabled)
         .then(|| Affine::skew(-f64::from(run.font.skew_degrees()).to_radians().tan(), 0.0))
 }
 
@@ -569,17 +562,16 @@ pub(crate) fn oblique_transform(run: &frust_scene::GlyphRun) -> Option<Affine> {
 /// the key stays `Copy` and allocation-free, and no real UI face comes close.
 pub(crate) const MAX_KEYED_AXES: usize = 8;
 
-/// The faux-bold stroke, per side and in device pixels, a run of `fraction`
-/// em is drawn with at `device_size` pixels per em.
+/// The faux-bold stroke, per side, a run of `fraction` em is drawn with when
+/// the stroke is a fraction of `basis` (see [`embolden_basis`]).
 ///
 /// `fraction` is the whole added stroke width as a fraction of the em (see
 /// `FontHandle::embolden`), so each side of the outline grows by half of it.
-/// `glifo` expands the outline it has already scaled to `device_size`, which
-/// is why the amount is in device pixels. Zero when there is no synthesis, or
-/// when the size is not a finite positive number.
+/// Zero when there is no synthesis, or when the basis is not a finite positive
+/// number.
 #[must_use]
-pub(crate) fn embolden_per_side(fraction: f32, device_size: f32) -> f32 {
-    let amount = fraction * device_size * 0.5;
+pub(crate) fn embolden_per_side(fraction: f32, basis: f32) -> f32 {
+    let amount = fraction * basis * 0.5;
     if amount.is_finite() && amount > 0.0 {
         amount
     } else {
@@ -591,36 +583,44 @@ pub(crate) fn embolden_per_side(fraction: f32, device_size: f32) -> f32 {
 /// transform's absorbed scale multiplied in, in `f32` exactly as `glifo`
 /// multiplies it, or `size` itself when the transform is not absorbed and the
 /// outline is drawn at its nominal size under the full transform.
-///
-/// One function for the lowering, the route key and the resident plan, so the
-/// embolden amount they each derive is the same bits.
 #[must_use]
 pub(crate) fn drawn_font_size(size: f32, transform: Affine) -> f32 {
     absorbed_scale(transform).map_or(size, |scale| size * scale as f32)
 }
 
-/// The size a run's outlines are drawn at, which is what its faux-bold stroke
-/// is a fraction of.
+/// The length a run's faux-bold stroke is a fraction of: the unit the amount
+/// handed to `glifo` is measured in.
 ///
-/// [`drawn_font_size`], except for one case: an `oblique` run that is not
-/// `hinted`. `glifo` does not absorb the scale of a run drawn through a glyph
-/// transform without hinting, so such a run is drawn at its nominal `font_size`
-/// under the full transform, and the stroke follows that size rather than the
-/// device one. Hinted runs, and every upright run, take the absorbed size.
+/// `glifo` (`GlyphScaleProperties::new`, `glyph.rs`) caches an outline at one
+/// of two sizes, and applies `FontEmbolden` to the outline *at that size*
+/// before the draw scale `draw_size / cache_size` is applied:
 ///
-/// One function for the lowering, the route key and the resident plan, so the
-/// embolden amount each derives is the same bits.
+/// - HINTED (`hinting_instance` is set, which `glifo` does when the run's
+///   transform is a positive uniform scale without vertical skew): the
+///   outline is cached at the device size, with no further scale, so the
+///   stroke is in device pixels. The basis is the drawn size
+///   ([`drawn_font_size`]). A hinted oblique run is still absorbed (the
+///   horizontal skew rides in the glyph transform), so oblique does not change
+///   the basis.
+/// - UNHINTED (every run of the mobile tier, `hint(false)`, and any hinted run
+///   whose transform `glifo` cannot absorb): the outline is cached at the
+///   face's `unitsPerEm` and scaled to the draw size afterwards, so the stroke
+///   is in font units and the scale turns `fraction * upem` into
+///   `fraction * draw_size` on screen. The basis is `upem`. Oblique or not
+///   changes nothing at this level: a skew only changes the draw transform,
+///   never the cache size, and whether the scale was absorbed
+///   (`AbsorbScaleUnhinted`) or left in the transform (`Direct`) only changes
+///   where `draw_size / upem` is applied.
+///
+/// `upem` is the face's units-per-em ([`FaceFacts::upem`](super::FaceFacts)),
+/// read once per face. One function for the lowering, the route key and the
+/// resident plan, so the embolden bits each derives are the same.
 #[must_use]
-pub(crate) fn run_drawn_size(
-    font_size: f32,
-    transform: Affine,
-    hinted: bool,
-    oblique: bool,
-) -> f32 {
-    if oblique && !hinted {
-        font_size
+pub(crate) fn embolden_basis(size: f32, transform: Affine, hinted: bool, upem: f32) -> f32 {
+    if hinted && absorbed_scale(transform).is_some() {
+        drawn_font_size(size, transform)
     } else {
-        drawn_font_size(font_size, transform)
+        upem
     }
 }
 
@@ -974,20 +974,21 @@ impl RunKey {
     /// ten-thousand-glyph run costs no allocation of its own (see
     /// [`DistinctGlyphs`]).
     #[must_use]
-    pub(crate) fn for_run(
+    pub(crate) fn for_run_with(
         run: &frust_scene::GlyphRun,
         transform: Affine,
         hinted: bool,
         color_font: bool,
         context_color: AlphaColor<Srgb>,
         seen: &mut impl DistinctGlyphs,
+        basis: RunBasis,
     ) -> Self {
         let font = run.font.font();
         let distinct = seen.count_distinct(run.glyphs.iter().map(|glyph| glyph.id));
-        let oblique = oblique_synthesis(run);
+        let oblique = oblique_synthesis(run, basis.synthetic_oblique);
         let embolden = embolden_per_side(
             run.font.embolden(),
-            run_drawn_size(run.font_size, transform, hinted, oblique),
+            embolden_basis(run.font_size, transform, hinted, basis.upem),
         );
         Self {
             font_id: font.data.id(),
@@ -1002,6 +1003,43 @@ impl RunKey {
             oblique,
         }
     }
+
+    /// [`Self::for_run_with`] for a run with no faux bold and no synthetic
+    /// oblique, which needs neither the face's units-per-em nor the switch.
+    #[cfg(test)]
+    pub(crate) fn for_run(
+        run: &frust_scene::GlyphRun,
+        transform: Affine,
+        hinted: bool,
+        color_font: bool,
+        context_color: AlphaColor<Srgb>,
+        seen: &mut impl DistinctGlyphs,
+    ) -> Self {
+        debug_assert!(run.font.embolden() == 0.0, "use for_run_with for faux bold");
+        let basis = RunBasis {
+            upem: 0.0,
+            synthetic_oblique: false,
+        };
+        Self::for_run_with(
+            run,
+            transform,
+            hinted,
+            color_font,
+            context_color,
+            seen,
+            basis,
+        )
+    }
+}
+
+/// What a [`RunKey`] needs beyond the run itself, both owned by the caller:
+/// the face's units-per-em and the compiler's synthetic-oblique switch.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RunBasis {
+    /// The face's units-per-em (see [`embolden_basis`]).
+    pub(crate) upem: f32,
+    /// `SceneCompiler::synthetic_oblique_enabled`.
+    pub(crate) synthetic_oblique: bool,
 }
 
 /// Scratch a run's distinct glyph ids are counted in — what
@@ -2663,14 +2701,17 @@ mod resident_run_tests {
         assert!(Synthesis::new(&[0; MAX_KEYED_AXES + 1], 0.0).is_none());
     }
 
-    /// Only an unhinted oblique run departs from the absorbed size.
+    /// A hinted run's stroke is measured in drawn pixels, an unhinted one's
+    /// in font units, oblique or not.
     #[test]
-    fn the_drawn_size_departs_only_for_unhinted_oblique() {
+    fn the_embolden_basis_is_the_drawn_size_hinted_and_upem_unhinted() {
         let twice = Affine::scale(2.0);
-        assert_eq!(run_drawn_size(16.0, twice, false, false), 32.0);
-        assert_eq!(run_drawn_size(16.0, twice, true, false), 32.0);
-        assert_eq!(run_drawn_size(16.0, twice, true, true), 32.0);
-        assert_eq!(run_drawn_size(16.0, twice, false, true), 16.0);
+        assert_eq!(embolden_basis(16.0, twice, true, 1000.0), 32.0);
+        assert_eq!(embolden_basis(16.0, twice, false, 1000.0), 1000.0);
+        assert_eq!(embolden_basis(16.0, twice, false, 2048.0), 2048.0);
+        // A transform `glifo` cannot absorb cannot be hinted either.
+        let skewed = Affine::skew(0.4, 0.4);
+        assert_eq!(embolden_basis(16.0, skewed, true, 1000.0), 1000.0);
     }
 }
 

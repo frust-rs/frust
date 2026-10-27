@@ -11,8 +11,12 @@
 //!   served from its record.
 //! - **A static face asked for 700 inks more than the same face at 400**
 //!   (faux bold).
-//! - **Faux oblique leans the right way and is never cached**: the run is
-//!   routed to outlines, and its ink differs from the upright run's.
+//! - **Faux oblique is off by default** (`set_synthetic_oblique`): an italic
+//!   request on a static face draws upright and caches like any upright run.
+//!   Switched on, it leans and is never cached: the run is routed to
+//!   outlines, and its ink differs from the upright run's.
+//! - **Faux bold is as heavy unhinted as hinted**: `glifo` sizes an unhinted
+//!   stroke in font units, so the engine measures it against `unitsPerEm`.
 //!
 //! The GPU variant (ignored by default, needs Metal) repeats the weight
 //! comparison on a headless target:
@@ -70,6 +74,13 @@ fn strip_compiler() -> SceneCompiler {
     compiler
 }
 
+/// [`strip_compiler`] with synthetic oblique switched on.
+fn oblique_strip_compiler() -> SceneCompiler {
+    let mut compiler = strip_compiler();
+    compiler.set_synthetic_oblique(true);
+    compiler
+}
+
 fn compile(compiler: &mut SceneCompiler, runs: &[GlyphRun]) -> CompiledFrame {
     compiler
         .compile(&scene_of(runs), Affine::IDENTITY, VIEWPORT)
@@ -103,16 +114,68 @@ fn a_variable_face_at_700_inks_more_than_at_400() {
 #[test]
 fn a_faux_bold_static_face_inks_more_than_its_regular_run() {
     let (mut ctx, family) = context_with(STATIC_FONT);
-    let regular = laid_out(&mut ctx, &family, FontWeight::REGULAR);
-    let bold = laid_out(&mut ctx, &family, FontWeight::BOLD);
+    let regular = hello(&mut ctx, &family);
+    let bold = faux_bold(&regular);
     assert_eq!(regular[0].font.embolden(), 0.0);
-    assert!(
-        bold[0].font.embolden() > 0.0,
-        "the 700 request is synthetic"
-    );
+    assert!(bold[0].font.embolden() > 0.0, "the run is synthetic bold");
     let (regular_ink, bold_ink) = (ink_of(&regular), ink_of(&bold));
     println!("static regular: {regular_ink}, faux bold: {bold_ink}");
     assert!(bold_ink > regular_ink, "{bold_ink} vs {regular_ink}");
+}
+
+/// The handle `laid_out` gives a 700 request on this face, applied to `runs`.
+fn faux_bold(runs: &[GlyphRun]) -> Vec<GlyphRun> {
+    runs.iter()
+        .map(|run| GlyphRun {
+            font: FontHandle::clone(&run.font).with_synthesis(faux_bold_fraction(), 0.0),
+            ..run.clone()
+        })
+        .collect()
+}
+
+/// The em fraction `frust_text` synthesizes for bold on a face without one.
+fn faux_bold_fraction() -> f32 {
+    let (mut ctx, family) = context_with(STATIC_FONT);
+    laid_out(&mut ctx, &family, FontWeight::BOLD)[0]
+        .font
+        .embolden()
+}
+
+/// Ink of `runs` at 1x with hinting `hint`, through the strip path.
+fn hinted_ink(runs: &[GlyphRun], hint: bool) -> u64 {
+    let mut compiler = strip_compiler();
+    compiler.set_hint_text(hint);
+    let frame = compile(&mut compiler, runs);
+    assert!(frame.glyph_draws > 0, "the run drew nothing");
+    ink(&frame)
+}
+
+/// `glifo` expands an unhinted outline at the face's `unitsPerEm` and a hinted
+/// one at the device size; the engine's basis follows, so faux bold is as heavy
+/// in both modes. The four ink numbers are printed.
+#[test]
+fn faux_bold_weight_is_comparable_hinted_and_unhinted() {
+    let (mut ctx, family) = context_with(STATIC_FONT);
+    let regular = hello(&mut ctx, &family);
+    let bold = faux_bold(&regular);
+    let (unhinted_regular, unhinted_bold) = (hinted_ink(&regular, false), hinted_ink(&bold, false));
+    let (hinted_regular, hinted_bold) = (hinted_ink(&regular, true), hinted_ink(&bold, true));
+    eprintln!(
+        "ink unhinted regular {unhinted_regular} bold {unhinted_bold}; hinted regular {hinted_regular} bold {hinted_bold}"
+    );
+    let gain = |bold: u64, regular: u64| bold as f64 / regular as f64 - 1.0;
+    let (unhinted_gain, hinted_gain) = (
+        gain(unhinted_bold, unhinted_regular),
+        gain(hinted_bold, hinted_regular),
+    );
+    eprintln!("gain unhinted {unhinted_gain:.3}, hinted {hinted_gain:.3}");
+    assert!(unhinted_gain >= 0.25, "unhinted gain {unhinted_gain}");
+    assert!(hinted_gain >= 0.25, "hinted gain {hinted_gain}");
+    let ratio = unhinted_gain / hinted_gain;
+    assert!(
+        (0.5..=2.0).contains(&ratio),
+        "unhinted {unhinted_gain} vs hinted {hinted_gain}"
+    );
 }
 
 /// Two runs of one blob and one glyph sequence that differ only in weight are
@@ -168,7 +231,7 @@ fn a_faux_oblique_run_is_drawn_as_skewed_outlines_and_never_resident() {
         .collect();
     let (upright_frame, skewed_frame) = (
         compile(&mut strip_compiler(), &upright),
-        compile(&mut strip_compiler(), &skewed),
+        compile(&mut oblique_strip_compiler(), &skewed),
     );
     assert!(skewed_frame.glyph_draws > 0);
     assert_ne!(upright_frame.alphas(), skewed_frame.alphas());
@@ -176,11 +239,48 @@ fn a_faux_oblique_run_is_drawn_as_skewed_outlines_and_never_resident() {
     let mut compiler = SceneCompiler::new(VIEWPORT.0, VIEWPORT.1);
     compiler.set_glyph_quads(true);
     compiler.set_glyph_run_cache(true);
+    compiler.set_synthetic_oblique(true);
     for _ in 0..6 {
         let frame = compile(&mut compiler, &skewed);
         assert_eq!(frame.resident_glyph_runs, 0);
         assert_eq!(frame.atlas_glyph_draws, 0, "a skewed run is not cached");
     }
+}
+
+/// With the default (synthetic oblique off) an italic request on a static face
+/// draws upright: the same pixels as the upright run, cached in the atlas by
+/// frame 3, and never counted as a synthetic-oblique run.
+#[test]
+fn an_italic_request_draws_upright_and_caches_by_default() {
+    let (mut ctx, family) = context_with(STATIC_FONT);
+    let upright = hello(&mut ctx, &family);
+    let skewed: Vec<GlyphRun> = upright
+        .iter()
+        .map(|run| GlyphRun {
+            font: FontHandle::clone(&run.font).with_synthesis(0.0, 14.0),
+            ..run.clone()
+        })
+        .collect();
+    assert!(skewed.iter().all(|run| run.font.skew_degrees() > 0.0));
+    assert!(!SceneCompiler::new(VIEWPORT.0, VIEWPORT.1).synthetic_oblique_enabled());
+    assert_eq!(
+        compile(&mut strip_compiler(), &upright).alphas(),
+        compile(&mut strip_compiler(), &skewed).alphas(),
+        "an obliqued face draws upright when the switch is off"
+    );
+
+    let mut compiler = SceneCompiler::new(VIEWPORT.0, VIEWPORT.1);
+    compiler.set_glyph_quads(true);
+    compiler.set_glyph_run_cache(true);
+    let mut frames = Vec::new();
+    for _ in 0..3 {
+        frames.push(compile(&mut compiler, &skewed));
+    }
+    assert!(frames.iter().all(|frame| frame.synthetic_oblique_runs == 0));
+    assert!(
+        frames[2].atlas_glyph_draws > 0,
+        "the italic request never reached the atlas"
+    );
 }
 
 /// A screen-sized paragraph: 45 lines of Latin text at 14 px.
@@ -232,6 +332,7 @@ fn an_italic_paragraph_is_counted_as_outline_runs_every_frame() {
     assert!(upright.iter().all(|run| run.font.skew_degrees() == 0.0));
 
     let mut compiler = screen_compiler();
+    compiler.set_synthetic_oblique(true);
     for frame_index in 0..3 {
         let frame = compile_screen(&mut compiler, &italic);
         assert_eq!(
@@ -262,6 +363,7 @@ fn an_italic_paragraph_compile_cost_is_bounded() {
     let upright = paragraph(&mut ctx, &family, FontStyle::Normal);
     let measure = |runs: &[GlyphRun]| {
         let mut compiler = screen_compiler();
+        compiler.set_synthetic_oblique(true);
         // Settle first, so upright is timed on its steady-state path.
         for _ in 0..4 {
             compile_screen(&mut compiler, runs);
@@ -300,8 +402,7 @@ fn hello(ctx: &mut TextContext, family: &str) -> Vec<GlyphRun> {
 ///
 /// Hinted, the stroke is a fixed fraction of the drawn size, so the share of
 /// ink it adds holds as the scale doubles. Unhinted, the stroke is asserted
-/// only to be present: `glifo` expands an unhinted outline at the font's own
-/// units, so the added ink is small (see the printed numbers).
+/// only to be present here; its weight is `faux_bold_weight_is_comparable_*`.
 #[test]
 fn faux_bold_and_oblique_under_a_2x_transform_is_emboldened() {
     let (mut ctx, family) = context_with(STATIC_FONT);
@@ -320,6 +421,7 @@ fn faux_bold_and_oblique_under_a_2x_transform_is_emboldened() {
     for hint in [false, true] {
         let ink_at = |runs: &[GlyphRun], scale: f64| {
             let mut compiler = SceneCompiler::new(VIEWPORT.0 * 2, VIEWPORT.1 * 2);
+            compiler.set_synthetic_oblique(true);
             compiler.set_image_residency(ImageResidency::disabled(AtlasBudget::MOBILE));
             compiler.set_hint_text(hint);
             let frame = compiler
@@ -529,8 +631,9 @@ mod gpu {
     #[ignore = "requires a GPU (Metal); run with `cargo test -p frust-engine --test variable_route -- --ignored`"]
     fn a_faux_bold_static_face_inks_more_through_the_gpu() {
         let (mut ctx, family) = context_with(STATIC_FONT);
-        let regular = inked(&pixels(&laid_out(&mut ctx, &family, FontWeight::REGULAR)));
-        let bold = inked(&pixels(&laid_out(&mut ctx, &family, FontWeight::BOLD)));
+        let regular_runs = hello(&mut ctx, &family);
+        let regular = inked(&pixels(&regular_runs));
+        let bold = inked(&pixels(&faux_bold(&regular_runs)));
         println!("gpu static regular: {regular}, faux bold: {bold}");
         assert!(
             bold > regular,
@@ -538,12 +641,12 @@ mod gpu {
         );
     }
 
-    /// A faux-oblique run leans right: its ink's horizontal centre of mass is
-    /// further right in the top half than in the bottom half, by more than the
-    /// upright run's.
+    /// Synthetic oblique is off by default, and the renderer exposes no switch
+    /// for its compiler, so an obliqued run renders upright: its ink's lean
+    /// matches the upright run's.
     #[test]
     #[ignore = "requires a GPU (Metal); run with `cargo test -p frust-engine --test variable_route -- --ignored`"]
-    fn a_faux_oblique_run_leans_right_through_the_gpu() {
+    fn a_faux_oblique_run_renders_upright_through_the_gpu_by_default() {
         let (mut ctx, family) = context_with(STATIC_FONT);
         let upright = laid_out(&mut ctx, &family, FontWeight::REGULAR);
         let skewed: Vec<GlyphRun> = upright
@@ -570,6 +673,9 @@ mod gpu {
         };
         let (flat, leaning) = (lean(&pixels(&upright)), lean(&pixels(&skewed)));
         println!("gpu lean upright: {flat:.3}, oblique: {leaning:.3}");
-        assert!(leaning > flat + 1.0, "oblique {leaning}, upright {flat}");
+        assert!(
+            (leaning - flat).abs() < 0.25,
+            "oblique {leaning}, upright {flat}"
+        );
     }
 }
