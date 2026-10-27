@@ -22,9 +22,10 @@ use frust_engine::cache::images::ImageResidency;
 use frust_engine::compile::CompiledFrame;
 use frust_engine::{AtlasBudget, SceneCompiler};
 use frust_scene::{FontHandle, GlyphRun, Scene, SceneBuilder};
-use frust_text::{FontFamily, FontWeight, TextContext, TextStyle};
+use frust_text::{FontFamily, FontStyle, FontWeight, TextContext, TextStyle};
 use kurbo::{Affine, Point};
 use peniko::Color;
+use std::time::Instant;
 
 const VIEWPORT: (u16, u16) = (160, 64);
 const FONT_SIZE: f32 = 24.0;
@@ -179,6 +180,246 @@ fn a_faux_oblique_run_is_drawn_as_skewed_outlines_and_never_resident() {
         let frame = compile(&mut compiler, &skewed);
         assert_eq!(frame.resident_glyph_runs, 0);
         assert_eq!(frame.atlas_glyph_draws, 0, "a skewed run is not cached");
+    }
+}
+
+/// A screen-sized paragraph: 45 lines of Latin text at 14 px.
+const SCREEN: (u16, u16) = (480, 1000);
+
+fn paragraph(ctx: &mut TextContext, family: &str, style: FontStyle) -> Vec<GlyphRun> {
+    let text = (0..45)
+        .map(|_| "Hello, Hello Hello, Hello Hello")
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut text_style = TextStyle::new(14.0, Color::BLACK);
+    text_style.family = FontFamily::named(family);
+    text_style.style = style;
+    ctx.layout(&text, &text_style, None)
+        .to_scene_runs(Point::new(8.0, 8.0))
+}
+
+fn screen_compiler() -> SceneCompiler {
+    let mut compiler = SceneCompiler::new(SCREEN.0, SCREEN.1);
+    compiler.set_glyph_quads(true);
+    compiler.set_glyph_run_cache(true);
+    compiler
+}
+
+fn compile_screen(compiler: &mut SceneCompiler, runs: &[GlyphRun]) -> CompiledFrame {
+    compiler
+        .compile(&scene_of(runs), Affine::IDENTITY, SCREEN)
+        .expect("an in-range scene compiles")
+}
+
+fn median(mut samples: Vec<f64>) -> f64 {
+    samples.sort_by(f64::total_cmp);
+    samples[samples.len() / 2]
+}
+
+/// The cost of faux-italic text is observable and bounded: every skewed run
+/// is counted as an outline run on every frame and none reaches the atlas,
+/// while the same paragraph upright settles into it.
+#[test]
+fn an_italic_paragraph_is_counted_as_outline_runs_every_frame() {
+    let (mut ctx, family) = context_with(STATIC_FONT);
+    let italic = paragraph(&mut ctx, &family, FontStyle::Italic);
+    let upright = paragraph(&mut ctx, &family, FontStyle::Normal);
+    assert!(italic.len() >= 40, "{} runs", italic.len());
+    assert!(
+        italic.iter().all(|run| run.font.skew_degrees() > 0.0),
+        "the italic request is synthesized as a skew"
+    );
+    assert!(upright.iter().all(|run| run.font.skew_degrees() == 0.0));
+
+    let mut compiler = screen_compiler();
+    for frame_index in 0..3 {
+        let frame = compile_screen(&mut compiler, &italic);
+        assert_eq!(
+            frame.synthetic_oblique_runs as usize,
+            italic.len(),
+            "frame {frame_index}"
+        );
+        assert_eq!(frame.atlas_glyph_draws, 0, "frame {frame_index}");
+        assert_eq!(frame.resident_glyph_runs, 0, "frame {frame_index}");
+        assert_eq!(frame.variation_axes_outline_runs, 0);
+    }
+
+    let mut compiler = screen_compiler();
+    let mut settled = compile_screen(&mut compiler, &upright);
+    for _ in 0..2 {
+        settled = compile_screen(&mut compiler, &upright);
+    }
+    assert_eq!(settled.synthetic_oblique_runs, 0);
+    assert!(settled.atlas_glyph_draws > 0, "upright text never settled");
+}
+
+/// Prints the per-frame CPU compile cost of italic against upright text, and
+/// asserts only a generous ceiling.
+#[test]
+fn an_italic_paragraph_compile_cost_is_bounded() {
+    let (mut ctx, family) = context_with(STATIC_FONT);
+    let italic = paragraph(&mut ctx, &family, FontStyle::Italic);
+    let upright = paragraph(&mut ctx, &family, FontStyle::Normal);
+    let measure = |runs: &[GlyphRun]| {
+        let mut compiler = screen_compiler();
+        // Settle first, so upright is timed on its steady-state path.
+        for _ in 0..4 {
+            compile_screen(&mut compiler, runs);
+        }
+        let samples = (0..24)
+            .map(|_| {
+                let start = Instant::now();
+                compile_screen(&mut compiler, runs);
+                start.elapsed().as_secs_f64() * 1000.0
+            })
+            .collect::<Vec<_>>();
+        median(samples)
+    };
+    let (italic_ms, upright_ms) = (measure(&italic), measure(&upright));
+    eprintln!(
+        "per-frame compile median over 24 frames: italic {italic_ms:.3} ms, upright {upright_ms:.3} ms ({:.1}x)",
+        italic_ms / upright_ms
+    );
+    assert!(
+        italic_ms < upright_ms * 20.0,
+        "italic {italic_ms} ms vs upright {upright_ms} ms"
+    );
+}
+
+/// One short run of glyphs the static face really has, so no system fallback
+/// face (machine-dependent) joins the measurement.
+fn hello(ctx: &mut TextContext, family: &str) -> Vec<GlyphRun> {
+    let mut style = TextStyle::new(FONT_SIZE, Color::BLACK);
+    style.family = FontFamily::named(family);
+    ctx.layout("Hello, Hello", &style, None)
+        .to_scene_runs(Point::new(8.0, 8.0))
+}
+
+/// A run that is both faux bold and faux oblique, drawn under a 2x uniform
+/// transform, is emboldened by the amount of the size it is drawn at.
+///
+/// Hinted, the stroke is a fixed fraction of the drawn size, so the share of
+/// ink it adds holds as the scale doubles. Unhinted, the stroke is asserted
+/// only to be present: `glifo` expands an unhinted outline at the font's own
+/// units, so the added ink is small (see the printed numbers).
+#[test]
+fn faux_bold_and_oblique_under_a_2x_transform_is_emboldened() {
+    let (mut ctx, family) = context_with(STATIC_FONT);
+    let upright = hello(&mut ctx, &family);
+    assert_eq!(upright.len(), 1, "the face covers the text");
+    let with = |embolden: f32| -> Vec<GlyphRun> {
+        upright
+            .iter()
+            .map(|run| GlyphRun {
+                font: FontHandle::clone(&run.font).with_synthesis(embolden, 14.0),
+                ..run.clone()
+            })
+            .collect()
+    };
+    let (plain, bold) = (with(0.0), with(0.04));
+    for hint in [false, true] {
+        let ink_at = |runs: &[GlyphRun], scale: f64| {
+            let mut compiler = SceneCompiler::new(VIEWPORT.0 * 2, VIEWPORT.1 * 2);
+            compiler.set_image_residency(ImageResidency::disabled(AtlasBudget::MOBILE));
+            compiler.set_hint_text(hint);
+            let frame = compiler
+                .compile(
+                    &scene_of(runs),
+                    Affine::scale(scale),
+                    (VIEWPORT.0 * 2, VIEWPORT.1 * 2),
+                )
+                .expect("compiles");
+            assert!(frame.glyph_draws > 0);
+            ink(&frame)
+        };
+        let share = |scale: f64| {
+            let (plain, bold) = (ink_at(&plain, scale), ink_at(&bold, scale));
+            assert!(bold > plain, "hint {hint}: no embolden at {scale}x");
+            (bold - plain) as f64 / plain as f64
+        };
+        let (share_1x, share_2x) = (share(1.0), share(2.0));
+        eprintln!("hint {hint}: embolden adds {share_1x:.4} of the ink at 1x, {share_2x:.4} at 2x");
+        if hint {
+            // The scale is absorbed into the font size, so the 24 px run under
+            // 2x is the 48 px run under 1x: same stroke, same ink.
+            let doubled: Vec<GlyphRun> = bold
+                .iter()
+                .map(|run| {
+                    let [a, b, c, d, e, f] = run.transform.as_coeffs();
+                    GlyphRun {
+                        font_size: run.font_size * 2.0,
+                        transform: Affine::new([a, b, c, d, e * 2.0, f * 2.0]),
+                        glyphs: run
+                            .glyphs
+                            .iter()
+                            .map(|glyph| frust_scene::Glyph {
+                                id: glyph.id,
+                                x: glyph.x * 2.0,
+                                y: glyph.y * 2.0,
+                            })
+                            .collect(),
+                        ..run.clone()
+                    }
+                })
+                .collect();
+            let (at_2x, at_48) = (ink_at(&bold, 2.0), ink_at(&doubled, 1.0));
+            eprintln!("hint {hint}: 24 px under 2x inks {at_2x}, 48 px under 1x {at_48}");
+            let gap = at_2x.abs_diff(at_48) as f64 / at_48 as f64;
+            assert!(gap < 0.02, "embolden did not follow the drawn size: {gap}");
+        }
+    }
+}
+
+/// A faux-bold run under a 2x transform computes the same stroke in the route
+/// key and in the resident identity: it settles into the resident cache, which
+/// a disagreement between the two would prevent.
+#[test]
+fn a_faux_bold_run_under_a_2x_transform_becomes_resident() {
+    let (mut ctx, family) = context_with(STATIC_FONT);
+    let bold = hello(&mut ctx, &family)
+        .into_iter()
+        .map(|run| GlyphRun {
+            font: FontHandle::clone(&run.font).with_synthesis(0.04, 0.0),
+            ..run
+        })
+        .collect::<Vec<_>>();
+    for hint in [false, true] {
+        let mut compiler = SceneCompiler::new(VIEWPORT.0, VIEWPORT.1);
+        compiler.set_glyph_quads(true);
+        compiler.set_glyph_run_cache(true);
+        compiler.set_hint_text(hint);
+        let mut resident = 0;
+        for _ in 0..6 {
+            resident = compiler
+                .compile(&scene_of(&bold), Affine::scale(2.0), VIEWPORT)
+                .expect("compiles")
+                .resident_glyph_runs;
+        }
+        assert!(resident > 0, "hint {hint}: never resident at 2x");
+    }
+}
+
+/// A face reporting more coordinates than the key holds is drawn as outlines
+/// and counted.
+#[test]
+fn a_face_with_more_than_eight_axes_is_counted_as_an_outline_run() {
+    let (mut ctx, family) = context_with(VARIABLE_FONT);
+    let runs: Vec<GlyphRun> = laid_out(&mut ctx, &family, FontWeight::REGULAR)
+        .into_iter()
+        .map(|run| GlyphRun {
+            font: FontHandle::clone(&run.font)
+                .with_normalized_coords(&[0, 0, 0, 0, 0, 0, 0, 0, 1024]),
+            ..run
+        })
+        .collect();
+    let mut compiler = SceneCompiler::new(VIEWPORT.0, VIEWPORT.1);
+    compiler.set_glyph_quads(true);
+    compiler.set_glyph_run_cache(true);
+    for _ in 0..3 {
+        let frame = compile(&mut compiler, &runs);
+        assert_eq!(frame.variation_axes_outline_runs as usize, runs.len());
+        assert_eq!(frame.atlas_glyph_draws, 0);
+        assert!(frame.glyph_draws > 0);
     }
 }
 

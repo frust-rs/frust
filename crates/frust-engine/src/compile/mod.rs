@@ -107,7 +107,7 @@ use crate::filters::{Backdrop, MAX_BACKDROPS_PER_FRAME, backdrop_region, backdro
 use crate::text::hvgl::HvglOutlines;
 use crate::text::{
     AtlasPolicy, FontFacts, GlyphQuadScratch, GlyphQuadTargets, GlyphRunRouting, GlyphRunTargets,
-    RunKey, RunRoute, context_paint, glyph_atlas_policy, lower_glyph_run,
+    OutlineReason, RunKey, RunRoute, context_paint, glyph_atlas_policy, lower_glyph_run,
 };
 
 /// Curve-flattening tolerance, in device pixels.
@@ -453,6 +453,20 @@ pub struct CompiledFrame {
     /// inserted entries and dirtied a page while reporting zero here. That
     /// question is [`SceneCompiler::glyph_replay_pending`]'s.
     pub atlas_glyph_draws: u32,
+    /// How many glyph runs were drawn as outlines because they are
+    /// faux-obliqued (`OutlineReason::SyntheticOblique`).
+    ///
+    /// Observational, and the measure of what faux-italic text costs: such a
+    /// run is re-tessellated every frame, never cached and never resident.
+    /// Counted only when the atlas policy is active (a process with the atlas
+    /// switched off routes every run as disabled first).
+    pub synthetic_oblique_runs: u32,
+    /// How many glyph runs were drawn as outlines because their face has more
+    /// variation axes than the cache key holds (`OutlineReason::VariationAxes`,
+    /// more than `MAX_KEYED_AXES`).
+    ///
+    /// Observational, like [`synthetic_oblique_runs`](Self::synthetic_oblique_runs).
+    pub variation_axes_outline_runs: u32,
     /// Where each of this frame's atlas-sampled glyphs lives, one entry per
     /// atlas draw (see [`GlyphSlot`]).
     pub glyph_slots: Vec<GlyphSlot>,
@@ -1183,6 +1197,8 @@ impl SceneCompiler {
             glyph_draws: 0,
             skipped_glyphs: 0,
             atlas_glyph_draws: 0,
+            synthetic_oblique_runs: 0,
+            variation_axes_outline_runs: 0,
             glyph_slots: Vec::new(),
             glyph_quads: Vec::new(),
             glyph_run_paints: Vec::new(),
@@ -1867,6 +1883,16 @@ impl SceneCompiler {
         // through. A run it refused reaches `glifo` with no cache at all, which
         // is the outline path unchanged rather than a cache that declines every
         // lookup — those are the same pixels but not the same work.
+        match route {
+            Some(RunRoute::Outline(OutlineReason::SyntheticOblique)) => {
+                frame.synthetic_oblique_runs = frame.synthetic_oblique_runs.saturating_add(1);
+            }
+            Some(RunRoute::Outline(OutlineReason::VariationAxes)) => {
+                frame.variation_axes_outline_runs =
+                    frame.variation_axes_outline_runs.saturating_add(1);
+            }
+            _ => {}
+        }
         let atlas = match route {
             Some(RunRoute::Atlas(_)) => Some((glyph_atlas, images.allocator_mut())),
             Some(RunRoute::Outline(_)) | None => None,

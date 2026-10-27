@@ -542,6 +542,11 @@ pub(crate) fn quantize_font_size(size: f32) -> Option<f32> {
 /// whose transform skews, and an upright entry must never be probed for it).
 /// Off, an obliqued face draws upright, as it did before the angle was
 /// carried.
+///
+/// Revisit trigger: if a device trace shows the outline route above 1 ms per
+/// frame for faux-italic text, cache skewed outlines under a skew-aware key or
+/// turn this switch off. The cost is observable per frame as
+/// `CompiledFrame::synthetic_oblique_runs`.
 pub(crate) const OBLIQUE_SYNTHESIS: bool = true;
 
 /// Whether `run` is drawn with synthetic oblique.
@@ -592,6 +597,31 @@ pub(crate) fn embolden_per_side(fraction: f32, device_size: f32) -> f32 {
 #[must_use]
 pub(crate) fn drawn_font_size(size: f32, transform: Affine) -> f32 {
     absorbed_scale(transform).map_or(size, |scale| size * scale as f32)
+}
+
+/// The size a run's outlines are drawn at, which is what its faux-bold stroke
+/// is a fraction of.
+///
+/// [`drawn_font_size`], except for one case: an `oblique` run that is not
+/// `hinted`. `glifo` does not absorb the scale of a run drawn through a glyph
+/// transform without hinting, so such a run is drawn at its nominal `font_size`
+/// under the full transform, and the stroke follows that size rather than the
+/// device one. Hinted runs, and every upright run, take the absorbed size.
+///
+/// One function for the lowering, the route key and the resident plan, so the
+/// embolden amount each derives is the same bits.
+#[must_use]
+pub(crate) fn run_drawn_size(
+    font_size: f32,
+    transform: Affine,
+    hinted: bool,
+    oblique: bool,
+) -> f32 {
+    if oblique && !hinted {
+        font_size
+    } else {
+        drawn_font_size(font_size, transform)
+    }
 }
 
 /// What a run is drawn with beyond its font and size: the variation
@@ -954,9 +984,10 @@ impl RunKey {
     ) -> Self {
         let font = run.font.font();
         let distinct = seen.count_distinct(run.glyphs.iter().map(|glyph| glyph.id));
+        let oblique = oblique_synthesis(run);
         let embolden = embolden_per_side(
             run.font.embolden(),
-            drawn_font_size(run.font_size, transform),
+            run_drawn_size(run.font_size, transform, hinted, oblique),
         );
         Self {
             font_id: font.data.id(),
@@ -968,7 +999,7 @@ impl RunKey {
             color_font,
             context_color,
             synthesis: Synthesis::new(run.font.normalized_coords(), embolden),
-            oblique: oblique_synthesis(run),
+            oblique,
         }
     }
 }
@@ -2195,7 +2226,8 @@ impl Hasher for RunHashHasher {
 /// first for every glyph: the run's absorbed size and hinting, the bucket's
 /// own fractional offset (which quantizes back to the bucket), black as the
 /// context colour (an outline's ink is the tint, never the key), the run's
-/// own embolden and variation coordinates, which the lowering hands `glifo`. `black` is black packed, computed once by the caller.
+/// own embolden and variation coordinates, which the lowering hands `glifo`.
+/// `black` is black packed, computed once by the caller.
 fn outline_key(
     identity: &ResidentIdentity,
     glyph_id: u32,
@@ -2629,6 +2661,16 @@ mod resident_run_tests {
     fn too_many_axes_are_not_keyed() {
         assert!(Synthesis::new(&[0; MAX_KEYED_AXES], 0.0).is_some());
         assert!(Synthesis::new(&[0; MAX_KEYED_AXES + 1], 0.0).is_none());
+    }
+
+    /// Only an unhinted oblique run departs from the absorbed size.
+    #[test]
+    fn the_drawn_size_departs_only_for_unhinted_oblique() {
+        let twice = Affine::scale(2.0);
+        assert_eq!(run_drawn_size(16.0, twice, false, false), 32.0);
+        assert_eq!(run_drawn_size(16.0, twice, true, false), 32.0);
+        assert_eq!(run_drawn_size(16.0, twice, true, true), 32.0);
+        assert_eq!(run_drawn_size(16.0, twice, false, true), 16.0);
     }
 }
 
