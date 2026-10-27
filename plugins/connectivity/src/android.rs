@@ -32,11 +32,11 @@
 //!   itself the default network.
 //! - `onAvailable` only records the network (capabilities may not be known
 //!   yet); `onCapabilitiesChanged` reports usable or unusable; `onLost` of the
-//!   tracked default reports unusable. On a Wi-Fi↔cellular switch the new
-//!   network's `onCapabilitiesChanged` reports (repeats are collapsed by the
-//!   state machine), so one `Available`; the old
-//!   network's later `onLost`, if one comes, is not the tracked one and
-//!   reports nothing.
+//!   tracked default reports unusable.
+//! - On a Wi-Fi↔cellular switch, the new network's `onCapabilitiesChanged`
+//!   reports. Repeated reports of the same network are collapsed by the state
+//!   machine, so each switch yields one `Available`. The old network's later
+//!   `onLost`, if one comes, is not the tracked network and reports nothing.
 //!
 //! # Seeding the first report (R2)
 //!
