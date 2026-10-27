@@ -25,10 +25,15 @@
 //!
 //! Logging prints the cluster's code-point count and the request's script tag, never its
 //! characters.
+//!
+//! A question without a language (no style locale, no script hint, no app default locale) leaves
+//! `FC_LANG` to `FcDefaultSubstitute`, which fills it from the process locale. No cache key
+//! carries that, so the build id does ([`process_locale`]): a launch under another locale expires
+//! the persisted answers instead of serving the previous locale's Han faces.
 
 #![allow(unsafe_code)]
 
-use std::ffi::{CStr, CString, c_char, c_int};
+use std::ffi::{CStr, CString, OsString, c_char, c_int};
 use std::path::PathBuf;
 use std::ptr;
 use std::time::Instant;
@@ -311,7 +316,8 @@ impl FontconfigBackend {
     /// A backend over the library named `soname` (tests point this at a bogus name).
     fn with_soname(soname: &str) -> Self {
         let lib = Library::open(soname);
-        let build_id = build_id(lib.as_ref().map(Library::version));
+        let locale = process_locale(|name| std::env::var_os(name));
+        let build_id = build_id(lib.as_ref().map(Library::version), &locale);
         Self { lib, build_id }
     }
 
@@ -491,15 +497,34 @@ fn fc_lang(locale: &str) -> Option<String> {
     }
 }
 
-/// A stable identity of the font stack: the OS release plus fontconfig's version. Never the
-/// fontconfig cache mtime (`font_dirs()` stamps those directories already).
-fn build_id(fc_version: Option<i32>) -> String {
+/// A stable identity of the font stack: the OS release, the process locale fontconfig applies
+/// to a question without a language (as a stable hash: the cache file names no locale in the
+/// clear) and fontconfig's version. Never the fontconfig cache mtime (`font_dirs()` stamps those
+/// directories already).
+fn build_id(fc_version: Option<i32>, locale: &str) -> String {
     let os = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
     format!(
-        "fontconfig:{}:fc{}",
+        "fontconfig:{}:lang{:016x}:fc{}",
         os_release_identity(&os),
+        super::cache::stable_hash(locale),
         fc_version.map_or_else(|| String::from("none"), |v| v.to_string())
     )
+}
+
+/// The locale `FcDefaultSubstitute` fills `FC_LANG` from, read as fontconfig's
+/// `FcGetDefaultLangs` reads it: the first non-empty of `FC_LANG`, `LC_ALL`, `LC_CTYPE` (skipped
+/// when it is a bare `UTF-8` codeset) and `LANG`, else fontconfig's `en`. `var` reads one
+/// environment variable. fontconfig reads it once per process, so the backend does too.
+fn process_locale(var: impl Fn(&str) -> Option<OsString>) -> String {
+    ["FC_LANG", "LC_ALL", "LC_CTYPE", "LANG"]
+        .into_iter()
+        .filter_map(|name| {
+            let value = var(name)?.to_string_lossy().trim().to_owned();
+            let codeset_only = name == "LC_CTYPE" && value.eq_ignore_ascii_case("UTF-8");
+            (!value.is_empty() && !codeset_only).then_some(value)
+        })
+        .next()
+        .unwrap_or_else(|| String::from("en"))
 }
 
 /// `ID`, `VERSION_ID` and `BUILD_ID` of an os-release file, joined (`-` when absent).
@@ -793,6 +818,71 @@ mod tests {
         let Some(b) = host() else { return };
         assert_eq!(b.os_build_id(), FontconfigBackend::new().os_build_id());
         assert!(b.os_build_id().starts_with("fontconfig:"));
+    }
+
+    /// An environment reader over `vars`.
+    fn env_of(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {
+        let vars: Vec<(String, String)> = vars
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        move |name| {
+            vars.iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| OsString::from(v))
+        }
+    }
+
+    #[test]
+    fn the_process_locale_follows_fontconfigs_precedence() {
+        assert_eq!(process_locale(env_of(&[])), "en", "fontconfig's default");
+        assert_eq!(
+            process_locale(env_of(&[("LANG", "ja_JP.UTF-8")])),
+            "ja_JP.UTF-8"
+        );
+        let all = [
+            ("LANG", "ja_JP.UTF-8"),
+            ("LC_CTYPE", "zh_TW.UTF-8"),
+            ("LC_ALL", "ko_KR.UTF-8"),
+            ("FC_LANG", "zh-cn"),
+        ];
+        assert_eq!(process_locale(env_of(&all)), "zh-cn");
+        assert_eq!(process_locale(env_of(&all[..3])), "ko_KR.UTF-8");
+        assert_eq!(process_locale(env_of(&all[..2])), "zh_TW.UTF-8");
+        // Empty values and a codeset-only LC_CTYPE fall through.
+        assert_eq!(
+            process_locale(env_of(&[
+                ("LC_ALL", " "),
+                ("LC_CTYPE", "UTF-8"),
+                ("LANG", "zh_HK.UTF-8")
+            ])),
+            "zh_HK.UTF-8"
+        );
+    }
+
+    #[test]
+    fn the_build_id_changes_with_lang() {
+        let ja = build_id(
+            Some(21500),
+            &process_locale(env_of(&[("LANG", "ja_JP.UTF-8")])),
+        );
+        let zh = build_id(
+            Some(21500),
+            &process_locale(env_of(&[("LANG", "zh_CN.UTF-8")])),
+        );
+        assert_ne!(ja, zh, "a LANG change expires the persisted answers");
+        assert_eq!(
+            ja,
+            build_id(Some(21500), "ja_JP.UTF-8"),
+            "the same locale is the same id"
+        );
+        assert!(!ja.contains("ja_JP"), "no locale in the clear: {ja}");
+        // The backend stamps the locale this process runs under.
+        let b = FontconfigBackend::with_soname("libfrust-no-such-fontconfig.so.0");
+        assert_eq!(
+            b.os_build_id(),
+            build_id(None, &process_locale(|name| std::env::var_os(name)))
+        );
     }
 
     #[test]

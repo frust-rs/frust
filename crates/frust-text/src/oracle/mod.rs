@@ -22,7 +22,8 @@
 //! - [`registry`]: the app-font registry (the process-wide app-font and
 //!   generic-fallback records, parsed per context with read-fonts).
 //! - [`cache`]: the in-memory LRU of system answers (misses included) and its
-//!   persistent, stamped copy, written behind on a background writer thread
+//!   persistent, stamped copy — loaded once per process and shared by every
+//!   oracle on the same file — written behind on a background writer thread
 //!   and placed by [`CacheLocation`].
 //! - [`selector`]: the resolve pipeline, coverage, renderability and synthesis.
 //! - `hint`: the Android matcher's pure synthesis decision, compiled on every
@@ -193,7 +194,9 @@ impl ScriptTag {
 ///
 /// Pure in `(script, locale)` while the app default locale is unchanged. The Han preference can change between
 /// launches, so a Han cache key without a locale carries it (`cache::CacheKey::han_preference`)
-/// and a persisted answer computed under another preference is asked again.
+/// and a persisted answer computed under another preference is asked again. Inside one
+/// [`Oracle::resolve`] the Han language is the resolve's [`HanSnapshot`], so the cache key and
+/// every backend question agree even when the app default changes mid-resolve.
 pub(crate) fn language_for(script: ScriptTag, locale: Option<&str>) -> Option<&str> {
     if let Some(locale) = locale {
         return Some(locale);
@@ -212,11 +215,64 @@ pub(crate) fn language_for(script: ScriptTag, locale: Option<&str>) -> Option<&s
 }
 
 /// The Han language an untagged Han cluster is asked under: the one the app default locale
-/// ([`crate::default_locale`]) names, else [`preferred_han_language`].
+/// ([`crate::default_locale`]) names, else [`preferred_han_language`]. While a [`HanSnapshot`] is
+/// held on this thread, the snapshot's value.
 pub(crate) fn default_han_language() -> Option<&'static str> {
+    PINNED_HAN
+        .with(std::cell::Cell::get)
+        .unwrap_or_else(current_han_language)
+}
+
+/// [`default_han_language`] read from the slot now, ignoring any pin.
+fn current_han_language() -> Option<&'static str> {
     crate::default_locale()
         .and_then(|tag| han_language_of(&tag))
         .or_else(preferred_han_language)
+}
+
+thread_local! {
+    /// The Han language the resolve running on this thread snapshotted (`None`: no snapshot).
+    static PINNED_HAN: std::cell::Cell<Option<Option<&'static str>>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// One resolve's reading of the Han preference, pinned on this thread until dropped.
+///
+/// The app default locale is a process-wide slot another thread may write. A resolve reads it
+/// once, here, and both the cache key ([`cache::CacheKey::under_han_preference`]) and every
+/// backend question ([`language_for`], [`default_han_language`]) see that one value, so an
+/// answer computed under one preference is never stored under another's key. A snapshot taken
+/// while one is already held reuses it; dropping restores the previous pin.
+pub(crate) struct HanSnapshot {
+    language: Option<&'static str>,
+    previous: Option<Option<&'static str>>,
+    /// Thread-bound: the pin lives in a thread-local.
+    _thread: std::marker::PhantomData<*const ()>,
+}
+
+impl HanSnapshot {
+    /// Reads the Han preference once (or reuses the snapshot already held) and pins it.
+    pub(crate) fn take() -> Self {
+        let previous = PINNED_HAN.with(std::cell::Cell::get);
+        let language = previous.unwrap_or_else(current_han_language);
+        PINNED_HAN.with(|pin| pin.set(Some(language)));
+        Self {
+            language,
+            previous,
+            _thread: std::marker::PhantomData,
+        }
+    }
+
+    /// The snapshotted Han language.
+    pub(crate) fn language(&self) -> Option<&'static str> {
+        self.language
+    }
+}
+
+impl Drop for HanSnapshot {
+    fn drop(&mut self) {
+        PINNED_HAN.with(|pin| pin.set(self.previous));
+    }
 }
 
 /// The first Han language (`zh-Hans`, `zh-Hant`, `zh-HK`, `ja`, `ko`) among the platform's
@@ -540,8 +596,9 @@ pub(crate) trait Backend: Send {
     fn resolve(&mut self, req: &FallbackRequest) -> Option<FaceSource>;
     /// The system's default face for a generic slot.
     fn default_family(&self, generic: GenericSlot) -> Option<FaceSource>;
-    /// Identifies the installed OS build; any change invalidates the
-    /// persistent cache wholesale.
+    /// Identifies the installed OS build (and anything else every answer
+    /// depends on that no cache key carries — fontconfig's process locale);
+    /// any change invalidates the persistent cache wholesale.
     fn os_build_id(&self) -> String;
 }
 
@@ -1333,6 +1390,39 @@ mod tests {
         assert_eq!(han_under(Some("fr-CA")), platform);
         crate::set_default_locale(Some("ja"));
         assert_eq!(language_for(ScriptTag(*b"Hani"), None), Some("ja"));
+    }
+
+    #[test]
+    fn a_han_snapshot_pins_one_reading_until_dropped() {
+        use crate::locale::test_support::DefaultLocale;
+        let _guard = DefaultLocale::set(Some("ja"));
+        let hani = ScriptTag(*b"Hani");
+        let snapshot = HanSnapshot::take();
+        assert_eq!(snapshot.language(), Some("ja"));
+        crate::set_default_locale(Some("ko"));
+        assert_eq!(
+            default_han_language(),
+            Some("ja"),
+            "the slot write is not seen"
+        );
+        assert_eq!(language_for(hani, None), Some("ja"));
+        assert_eq!(language_for(hani, Some("zh-Hant")), Some("zh-Hant"));
+        {
+            let nested = HanSnapshot::take();
+            assert_eq!(
+                nested.language(),
+                Some("ja"),
+                "a nested snapshot reuses the pin"
+            );
+        }
+        assert_eq!(default_han_language(), Some("ja"), "still pinned");
+        // Another thread has no pin: it reads the slot.
+        assert_eq!(
+            std::thread::spawn(default_han_language).join().unwrap(),
+            Some("ko")
+        );
+        drop(snapshot);
+        assert_eq!(default_han_language(), Some("ko"), "unpinned on drop");
     }
 
     #[test]
