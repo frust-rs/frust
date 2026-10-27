@@ -310,6 +310,21 @@ open class FrustActivity : ComponentActivity() {
         surfaceView.onDeepLink(intent.data?.toString())
     }
 
+    override fun onStart() {
+        super.onStart()
+        surfaceView.onStart()
+    }
+
+    override fun onStop() {
+        surfaceView.onStop()
+        super.onStop()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        surfaceView.onActivityWindowFocusChanged(hasFocus)
+    }
+
     override fun onResume() {
         super.onResume()
         surfaceView.onResume()

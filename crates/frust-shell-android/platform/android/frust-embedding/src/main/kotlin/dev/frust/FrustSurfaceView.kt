@@ -311,6 +311,12 @@ class FrustSurfaceView(
     // density to get logical coordinates.
     private external fun nativeOnTouch(handle: Long, action: Int, pointerId: Int, x: Float, y: Float)
 
+    private external fun nativeOnStart(handle: Long)
+
+    private external fun nativeOnStop(handle: Long)
+
+    private external fun nativeOnWindowFocusChanged(handle: Long, hasFocus: Boolean)
+
     private external fun nativeOnResume(handle: Long)
 
     private external fun nativeOnPause(handle: Long)
@@ -2007,10 +2013,34 @@ class FrustSurfaceView(
         }
     }
 
+    /** Called by `FrustActivity.onStart` — feeds the lifecycle state machine. */
+    fun onStart() {
+        if (handle != 0L) {
+            nativeOnStart(handle)
+        }
+    }
+
+    /** Called by `FrustActivity.onStop` — feeds the lifecycle state machine. */
+    fun onStop() {
+        if (handle != 0L) {
+            nativeOnStop(handle)
+        }
+    }
+
+    /** Called by `FrustActivity.onWindowFocusChanged` — feeds the lifecycle state machine. */
+    fun onActivityWindowFocusChanged(hasFocus: Boolean) {
+        if (handle != 0L) {
+            nativeOnWindowFocusChanged(handle, hasFocus)
+        }
+    }
+
     /** Called by `MainActivity.onResume` — starts the Choreographer loop. */
     fun onResume() {
         running = true
         if (handle != 0L) {
+            // Focus may have been gained before the handle existed; sync it first
+            // (it does not push until the activity is started).
+            nativeOnWindowFocusChanged(handle, hasWindowFocus())
             nativeOnResume(handle)
         }
         // Reduce motion: re-read on every foreground and (re)arm the observer.

@@ -2272,9 +2272,47 @@ pub fn native_on_touch(handle: jlong, action: jint, pointer_id: jint, x: jfloat,
 static BACKGROUND_FLUSH: frust_shell_common::BackgroundFlush =
     frust_shell_common::BackgroundFlush::new();
 
-/// `nativeOnResume`: activity resumed. Bookkeeping only in v0 — the Choreographer
-/// loop is started/stopped in Kotlin — plus re-allowing the performance-hint
-/// session [`native_on_pause`] closed (it reopens on the next continuous frame).
+/// `nativeOnStart`: activity started. Updates the lifecycle facts and pushes the
+/// derived [`AppLifecycleState`](frust_reactive::AppLifecycleState).
+pub fn native_on_start(handle: jlong) {
+    guard("nativeOnStart", (), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        if unsafe { handle_mut(handle) }.is_some() {
+            crate::lifecycle::apply(|f| f.started = true, |_| true);
+        }
+    });
+}
+
+/// `nativeOnStop`: activity stopped. Updates the lifecycle facts and pushes the
+/// derived state (`Paused`; the state machine synthesizes `Hidden` on the way).
+pub fn native_on_stop(handle: jlong) {
+    guard("nativeOnStop", (), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        if unsafe { handle_mut(handle) }.is_some() {
+            crate::lifecycle::apply(|f| f.started = false, |_| true);
+        }
+    });
+}
+
+/// `nativeOnWindowFocusChanged`: the window gained or lost input focus (a
+/// notification shade, system dialog, or unfocused split-screen half). Updates
+/// the facts; pushes only once started, so a focus event racing ahead of
+/// `onStart` cannot publish `Paused` ahead of the real first state.
+pub fn native_on_window_focus_changed(handle: jlong, has_focus: jboolean) {
+    guard("nativeOnWindowFocusChanged", (), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        if unsafe { handle_mut(handle) }.is_some() {
+            crate::lifecycle::apply(|f| f.window_focused = has_focus, |f| f.started);
+        }
+    });
+}
+
+/// `nativeOnResume`: activity resumed. The Choreographer loop is started/stopped
+/// in Kotlin; here the performance-hint session [`native_on_pause`] closed is
+/// re-allowed (it reopens on the next continuous frame), then the derived
+/// lifecycle state is pushed AFTER that foreground work. `onResume` implies the
+/// activity is started, so the facts record that even when `onStart` ran before
+/// the native handle existed.
 pub fn native_on_resume(handle: jlong) {
     guard("nativeOnResume", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
@@ -2282,22 +2320,29 @@ pub fn native_on_resume(handle: jlong) {
             log::debug!("frust-shell-android: onResume");
             BACKGROUND_FLUSH.came_to_foreground();
             crate::adpf::resume();
+            crate::lifecycle::apply(
+                |f| {
+                    f.started = true;
+                    f.resumed = true;
+                },
+                |_| true,
+            );
         }
     });
 }
 
-/// `nativeOnPause`: activity paused. Bookkeeping only in v0 (see
-/// [`native_on_resume`]), plus hiding every
-/// currently-visible platform-view slot: a backgrounded app's native
-/// sibling views should disappear with it rather than linger on top of
-/// whatever now shows behind the (possibly composited-away) frust surface.
-/// It also closes the performance-hint session: a paused activity runs no
-/// frame loop to hint for.
+/// `nativeOnPause`: activity paused. Pushes the derived lifecycle state BEFORE
+/// the suspend work, then hides every currently-visible platform-view slot: a
+/// backgrounded app's native sibling views should disappear with it rather than
+/// linger on top of whatever now shows behind the (possibly composited-away)
+/// frust surface. It also closes the performance-hint session: a paused activity
+/// runs no frame loop to hint for.
 pub fn native_on_pause(handle: jlong) {
     guard("nativeOnPause", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
             log::debug!("frust-shell-android: onPause");
+            crate::lifecycle::apply(|f| f.resumed = false, |_| true);
             app.suspend_platform_views();
             crate::adpf::suspend();
             // A process killed in the background loses the session's unwritten font answers.
@@ -2313,6 +2358,12 @@ pub fn native_on_destroy(handle: jlong) {
         if !crate::ffi_support::handle_is_live(handle) {
             return;
         }
+        // Finishing the activity detaches: push while the app is still alive so
+        // listeners observe `Detached`. The existing `nativeOnDestroy` is the
+        // teardown path, so no separate native hook is added. A recreate starts
+        // from clean facts.
+        crate::lifecycle::apply(|f| f.destroyed = true, |_| true);
+        crate::lifecycle::reset();
         // SAFETY: `handle` was produced by `Box::into_raw` in `create_handle` and
         // is reclaimed exactly once here; the JVM zeroes its copy afterwards so it
         // is never passed back in.
