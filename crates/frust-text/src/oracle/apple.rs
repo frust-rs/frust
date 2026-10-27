@@ -279,6 +279,41 @@ mod ct {
             Some(Self(font))
         }
 
+        /// The installed face CoreText opens by `name` (a hidden name it cannot resolve comes
+        /// back as another face: callers check `postscript_name`).
+        #[cfg(test)]
+        pub(super) fn with_name(name: &str) -> Self {
+            // SAFETY: a live string; a null matrix is the documented identity argument; Create
+            // rule.
+            Self(unsafe {
+                CTFont::with_name(
+                    &CFString::from_str(name),
+                    BASE_POINT_SIZE,
+                    core::ptr::null(),
+                )
+            })
+        }
+
+        /// CoreText's own glyph ids for `text` (`CTFontGetGlyphsForCharacters`), 0 where it maps
+        /// nothing; one per UTF-16 unit, so `text` should be BMP-only.
+        #[cfg(test)]
+        pub(super) fn glyph_ids(&self, text: &str) -> Vec<u32> {
+            let mut units: Vec<u16> = text.encode_utf16().collect();
+            let mut glyphs = vec![0_u16; units.len()];
+            if units.is_empty() {
+                return Vec::new();
+            }
+            // SAFETY: both buffers hold `units.len()` elements and outlive the call.
+            unsafe {
+                self.0.glyphs_for_characters(
+                    core::ptr::NonNull::new(units.as_mut_ptr()).expect("non-empty"),
+                    core::ptr::NonNull::new(glyphs.as_mut_ptr()).expect("non-empty"),
+                    units.len() as isize,
+                )
+            };
+            glyphs.into_iter().map(u32::from).collect()
+        }
+
         pub(super) fn postscript_name(&self) -> String {
             // SAFETY: a getter on a live font; the copy follows the Create rule.
             unsafe { self.0.post_script_name() }.to_string()
@@ -890,6 +925,8 @@ impl Backend for CoreTextBackend {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use read_fonts::{FontRef, TableProvider};
@@ -898,14 +935,54 @@ mod tests {
     use crate::oracle::{FaceLocation, Oracle, RenderCapabilities, ScriptTag};
     use crate::style::{FontFamily, FontWeight};
 
-    /// The expectations below are macOS 27's installed fonts; elsewhere a test only says why it
-    /// skipped.
-    fn on_macos(test: &str) -> bool {
-        let here = cfg!(target_os = "macos");
-        if !here {
-            println!("{test}: skipped: the expected faces are macOS 27's installed fonts");
-        }
-        here
+    /// Skips announced so far; a test that cannot run bumps it instead of passing silently.
+    static SKIPS: AtomicUsize = AtomicUsize::new(0);
+
+    /// How many tests skipped for a missing host precondition.
+    fn skips() -> usize {
+        SKIPS.load(Ordering::SeqCst)
+    }
+
+    /// The first missing precondition of the macOS-installed-face tests, else `None`: this is
+    /// macOS, CoreText answers a Han cluster from a `PingFangUI.ttc` collection, and that
+    /// collection holds the face named `PingFangSC-Regular`.
+    fn missing_precondition() -> Option<String> {
+        static CHECK: OnceLock<Option<String>> = OnceLock::new();
+        CHECK
+            .get_or_init(|| {
+                if !cfg!(target_os = "macos") {
+                    return Some("not macOS; the expected faces are macOS system fonts".into());
+                }
+                let mut backend = CoreTextBackend::new();
+                let Some(han) = backend.resolve(&request("\u{4e2d}\u{6587}", Some("zh-Hans")))
+                else {
+                    return Some("CoreText resolves no Han face for zh-Hans".into());
+                };
+                let FaceLocation::Path(path) = &han.location else {
+                    return Some("CoreText answered a blob, not a path".into());
+                };
+                if path.file_name().is_none_or(|n| n != "PingFangUI.ttc") || !path.exists() {
+                    return Some(format!(
+                        "the PingFang collection is absent (CoreText answered {})",
+                        path.display()
+                    ));
+                }
+                let named = walk_file(path)
+                    .is_some_and(|faces| locate(&faces, "PingFangSC-Regular").is_some());
+                (!named).then(|| "PingFangUI.ttc has no PingFangSC-Regular face".into())
+            })
+            .clone()
+    }
+
+    /// True when the host has what `test` needs; otherwise prints one counted
+    /// `SKIPPED (n)` line naming the missing precondition and returns false.
+    fn host_ready(test: &str) -> bool {
+        let Some(missing) = missing_precondition() else {
+            return true;
+        };
+        let n = SKIPS.fetch_add(1, Ordering::SeqCst) + 1;
+        println!("SKIPPED ({n}): {test}: {missing}");
+        false
     }
 
     fn request(chars: &str, locale: Option<&str>) -> FallbackRequest {
@@ -981,7 +1058,7 @@ mod tests {
 
     #[test]
     fn han_under_system_ui_is_re_asked_to_the_public_pingfang_instance() {
-        if !on_macos("han_under_system_ui_is_re_asked_to_the_public_pingfang_instance") {
+        if !host_ready("han_under_system_ui_is_re_asked_to_the_public_pingfang_instance") {
             return;
         }
         let mut backend = CoreTextBackend::new();
@@ -993,9 +1070,13 @@ mod tests {
         assert!(reasked.starts_with(".PingFangUIText"), "{reasked}");
         let source = han.source;
         assert_eq!(file_name(&source), "PingFangUI.ttc");
+        let faces = walk_file(path_of(&source)).expect("PingFangUI.ttc walks");
+        let regular = locate(&faces, "PingFangSC-Regular")
+            .map(|(i, _)| i)
+            .expect("the collection names PingFangSC-Regular");
         assert_eq!(
-            source.index, 20,
-            "named instance #0 of face 20, PingFangSC-Medium"
+            source.index, regular,
+            "the face CoreText's answer maps to, found by name in the file"
         );
         assert_eq!(ps(&source), "PingFangSC-Regular");
         assert!(!source.hidden);
@@ -1006,7 +1087,7 @@ mod tests {
 
     #[test]
     fn a_hidden_hvgl_only_answer_whose_public_re_ask_fails_is_a_miss() {
-        if !on_macos("a_hidden_hvgl_only_answer_whose_public_re_ask_fails_is_a_miss") {
+        if !host_ready("a_hidden_hvgl_only_answer_whose_public_re_ask_fails_is_a_miss") {
             return;
         }
         let mut backend = CoreTextBackend::new();
@@ -1024,7 +1105,7 @@ mod tests {
 
     #[test]
     fn scripts_map_to_their_system_faces() {
-        if !on_macos("scripts_map_to_their_system_faces") {
+        if !host_ready("scripts_map_to_their_system_faces") {
             return;
         }
         let mut backend = CoreTextBackend::new();
@@ -1069,7 +1150,7 @@ mod tests {
 
     #[test]
     fn a_dot_prefixed_face_always_carries_the_hidden_flag() {
-        if !on_macos("a_dot_prefixed_face_always_carries_the_hidden_flag") {
+        if !host_ready("a_dot_prefixed_face_always_carries_the_hidden_flag") {
             return;
         }
         let mut backend = CoreTextBackend::new();
@@ -1120,20 +1201,35 @@ mod tests {
 
     #[test]
     fn cmap_glyph_ids_match_coretexts_recorded_ids() {
-        if !on_macos("cmap_glyph_ids_match_coretexts_recorded_ids") {
+        if !host_ready("cmap_glyph_ids_match_coretexts_recorded_ids") {
             return;
         }
+        // The oracle's `cmap` walk must agree with CoreText's own mapping for the same face.
+        // CoreText is asked, not a recorded list: glyph ids differ between macOS releases.
         let mut backend = CoreTextBackend::new();
         let sf = resolve(&mut backend, "Hello", None).source;
-        assert_eq!(glyph_ids(&sf, "Hello"), [112, 676, 772, 772, 816]);
-        assert_eq!(glyph_ids(&sf, " "), [3]);
-        let pingfang = resolve(&mut backend, "\u{4e2d}\u{6587}", Some("zh-Hans")).source;
-        assert_eq!(glyph_ids(&pingfang, "\u{4e2d}\u{6587}"), [183, 302]);
+        // The SF answer is hidden, and CoreText resolves no hidden name, so its face is the
+        // system UI font's answer for the same text, checked to be the same face.
+        let sf_ct = ct::Font::system_ui(None, Traits::REGULAR)
+            .and_then(|ui| ui.for_string("Hello", None))
+            .expect("CoreText answers Latin");
+        assert_eq!(sf_ct.postscript_name(), ps(&sf));
+        let hello = glyph_ids(&sf, "Hello");
+        assert!(hello.iter().all(|&id| id != 0), "{hello:?}");
+        assert_eq!(hello, sf_ct.glyph_ids("Hello"));
+        assert_eq!(glyph_ids(&sf, " "), sf_ct.glyph_ids(" "));
+        let han_text = "\u{4e2d}\u{6587}";
+        let pingfang = resolve(&mut backend, han_text, Some("zh-Hans")).source;
+        let pingfang_ct = ct::Font::with_name(ps(&pingfang));
+        assert_eq!(pingfang_ct.postscript_name(), ps(&pingfang));
+        let han = glyph_ids(&pingfang, han_text);
+        assert!(han.iter().all(|&id| id != 0), "{han:?}");
+        assert_eq!(han, pingfang_ct.glyph_ids(han_text));
     }
 
     #[test]
     fn the_face_walk_reads_names_and_instances_only() {
-        if !on_macos("the_face_walk_reads_names_and_instances_only") {
+        if !host_ready("the_face_walk_reads_names_and_instances_only") {
             return;
         }
         let mut backend = CoreTextBackend::new();
@@ -1145,21 +1241,19 @@ mod tests {
             faces.len(),
             started.elapsed().as_micros()
         );
-        assert_eq!(faces.len(), 32);
         assert!(
             faces.iter().all(|f| f.hvgl_only),
             "every PingFangUI face is hvgl-only"
         );
-        let face = &faces[20];
+        let (index, _) = locate(&faces, "PingFangSC-Regular").expect("PingFangSC-Regular");
+        let face = &faces[index as usize];
         assert!(
             face.postscript_names
                 .iter()
-                .any(|n| n == "PingFangSC-Medium")
+                .any(|n| n == "PingFangSC-Medium"),
+            "the regular instance lives in the Medium face"
         );
-        assert_eq!(
-            locate(&faces, "PingFangSC-Regular").map(|(i, _)| i),
-            Some(20)
-        );
+        assert_eq!(index, pingfang.index, "CoreText's answer is the same face");
         let sfns = walk_file(Path::new("/System/Library/Fonts/SFNS.ttf")).expect("SFNS walks");
         assert_eq!(sfns.len(), 1);
         assert!(!sfns[0].hvgl_only, "SF has its own outlines");
@@ -1186,7 +1280,7 @@ mod tests {
 
     #[test]
     fn per_miss_time_is_printed() {
-        if !on_macos("per_miss_time_is_printed") {
+        if !host_ready("per_miss_time_is_printed") {
             return;
         }
         let mut backend = CoreTextBackend::new();
@@ -1213,7 +1307,7 @@ mod tests {
 
     #[test]
     fn named_families_and_generic_defaults_resolve() {
-        if !on_macos("named_families_and_generic_defaults_resolve") {
+        if !host_ready("named_families_and_generic_defaults_resolve") {
             return;
         }
         let mut backend = CoreTextBackend::new();
@@ -1256,7 +1350,7 @@ mod tests {
 
     #[test]
     fn a_cluster_nothing_covers_is_a_miss() {
-        if !on_macos("a_cluster_nothing_covers_is_a_miss") {
+        if !host_ready("a_cluster_nothing_covers_is_a_miss") {
             return;
         }
         // A noncharacter: CoreText answers LastResort.
@@ -1269,7 +1363,7 @@ mod tests {
 
     #[test]
     fn the_oracle_accepts_the_hvgl_pingfang_answer() {
-        if !on_macos("the_oracle_accepts_the_hvgl_pingfang_answer") {
+        if !host_ready("the_oracle_accepts_the_hvgl_pingfang_answer") {
             return;
         }
         let caps = RenderCapabilities::default();
@@ -1279,9 +1373,12 @@ mod tests {
         let face = oracle
             .resolve(&req)
             .expect("PingFang is drawable through CoreText");
+        let expected = CoreTextBackend::new()
+            .resolve(&req)
+            .expect("the backend answers the same question");
         assert_eq!(
             (face.index, face.postscript_name.as_deref(), face.hidden),
-            (20, Some("PingFangSC-Regular"), false)
+            (expected.index, Some("PingFangSC-Regular"), false)
         );
         assert_eq!(oracle.stats().refused, 0);
     }
@@ -1328,7 +1425,7 @@ mod tests {
 
     #[test]
     fn the_default_walk_budget_fits_the_largest_system_collection() {
-        if !on_macos("the_default_walk_budget_fits_the_largest_system_collection") {
+        if !host_ready("the_default_walk_budget_fits_the_largest_system_collection") {
             return;
         }
         let mut backend = CoreTextBackend::new();
@@ -1375,7 +1472,7 @@ mod tests {
 
     #[test]
     fn kana_without_a_locale_resolve_to_hiragino() {
-        if !on_macos("kana_without_a_locale_resolve_to_hiragino") {
+        if !host_ready("kana_without_a_locale_resolve_to_hiragino") {
             return;
         }
         let mut backend = CoreTextBackend::new();
@@ -1408,7 +1505,7 @@ mod tests {
 
     #[test]
     fn han_without_a_locale_resolves_to_a_cjk_face() {
-        if !on_macos("han_without_a_locale_resolves_to_a_cjk_face") {
+        if !host_ready("han_without_a_locale_resolves_to_a_cjk_face") {
             return;
         }
         let mut backend = CoreTextBackend::new();
@@ -1434,7 +1531,7 @@ mod tests {
 
     #[test]
     fn every_preferred_han_language_picks_its_own_face() {
-        if !on_macos("every_preferred_han_language_picks_its_own_face") {
+        if !host_ready("every_preferred_han_language_picks_its_own_face") {
             return;
         }
         let mut backend = CoreTextBackend::new();
@@ -1475,7 +1572,7 @@ mod tests {
 
     #[test]
     fn a_danda_in_devanagari_matches_its_neighbours() {
-        if !on_macos("a_danda_in_devanagari_matches_its_neighbours") {
+        if !host_ready("a_danda_in_devanagari_matches_its_neighbours") {
             return;
         }
         let mut backend = CoreTextBackend::new();
@@ -1491,5 +1588,23 @@ mod tests {
         println!("danda -> {}, letters -> {}", ps(&danda), ps(&letters));
         assert!(!ps(&danda).contains("Bangla"), "{}", ps(&danda));
         assert_eq!(ps(&danda), ps(&letters));
+    }
+
+    /// Reports the skip counter so a fully skipped run is visible in the output. Tests run in
+    /// parallel, so the count is what had been announced by now; when the host is ready no test
+    /// can have skipped, which is asserted.
+    #[test]
+    fn zz_skip_summary() {
+        let missing = missing_precondition();
+        match &missing {
+            None => {
+                println!("SKIP SUMMARY: 0 skipped, the host has every precondition");
+                assert_eq!(skips(), 0, "a ready host never skips");
+            }
+            Some(why) => println!(
+                "SKIP SUMMARY: {} skipped so far; every host-dependent test skips here: {why}",
+                skips()
+            ),
+        }
     }
 }

@@ -13,8 +13,8 @@
 //!
 //! The caret moves over graphemes, words and lines of the laid-out text
 //! ([`cursor`]: visual left/right across bidi runs, UAX #29 word boundaries,
-//! hit-testing); [`selection`] holds parley 0.11.1's selection rules and
-//! geometry, which every [`EditOp`] keeps (see its variants).
+//! hit-testing); [`selection`] holds the selection rules and
+//! geometry (derived from parley 0.11.1's editor), which every [`EditOp`] keeps (see its variants).
 //!
 //! # Two composition paths
 //!
@@ -73,8 +73,8 @@ use kurbo::{Affine, Point, Rect, Size};
 use frust_scene::GlyphRun;
 
 use crate::context::TextContext;
-use crate::context::shape::Shaped;
 use crate::layout::{LineTable, Paragraph, lay_out};
+use crate::shape::Shaped;
 use crate::style::TextStyle;
 use compose::Composition;
 use cursor::{Affinity, Cursor, EditLayout};
@@ -558,7 +558,7 @@ impl TextEditor {
 
     /// Backspace: the selection, else the code point before the caret — or
     /// the whole grapheme before it when that is a newline or an emoji
-    /// (parley 0.11.1's rule).
+    /// (frust's editing rule).
     fn backdelete(&mut self, ctx: &mut TextContext) {
         if !self.selection.is_collapsed() {
             return self.replace_selection("", ctx);

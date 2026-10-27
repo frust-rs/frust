@@ -23,6 +23,14 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   once and `fraction_fallbacks()` counts every fallback to two digits; a test fails naming any baked
   currency whose rounding is not R1; English `km`/`m` at Long width stay short
   (`i18n-long-unit-width-short`).
+- Text-hardening phase 4: macOS oracle tests and the system emoji-fallback test check their real
+  precondition and print a counted skip instead of returning early; a bundled COLRv1 emoji subset
+  exercises emoji fallback on every host. The Linux T400 golden class grows from 33 to 70 pairs
+  (`page-material-home`'s escalation row now names the re-measured 183, no margin). Optional
+  macOS/Windows text-oracle CI legs and an Android RELR tag guard job run outside `ci-ok`;
+  hot-patch Android `.so` links use `--pack-dyn-relocs=relr --use-android-relr-tags`; hygiene
+  clean-ups (parley attributions, `mod shape`, native-widgets 29-floor comments, scaffold RELR
+  comment). The `-P 26` NDK gate references in the plugin docs are now `-P 29`.
 - `frust::texture::request_frame`: a producer that has a new frame owes the shell one frame, so an
   idle `texture_view` stays live without a ticker. `TextureSink::set_waker` (`SinkWaker`) runs
   after every push; the camera and video-player bridges install `request_frame` there while their

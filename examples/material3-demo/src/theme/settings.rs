@@ -45,8 +45,7 @@
 //! # Type styles
 //!
 //! The reference offers seven Roboto Flex axis presets (Condensed, Wide,
-//! Round, ...). `frust-text` exposes no variable-axis seam beyond weight
-//! (`docs/LIMITATIONS.md`'s `frust-text-no-variable-font-axes`), so this
+//! Round, ...). `frust-text` exposes no variable-axis seam beyond weight, so this
 //! picker carries the two the type scale can actually express: the baseline
 //! scale and its emphasized companion.
 //!

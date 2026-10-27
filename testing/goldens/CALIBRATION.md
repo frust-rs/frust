@@ -238,3 +238,23 @@ reflow. The engine's glyph atlas keys on the font blob identity, and the
 oracle hands the engine a different blob of the same Roboto Flex bytes, so
 slot placement shifts. Only that case was regenerated; see the l-03 parity
 report.
+
+## T400 promotion (2026-10-27)
+
+Branch `feature/text-hardening-p4` at 449c0eb9 (main after the weights and
+synthesis phase), NVIDIA T400 4GB, driver 610.57.04, Vulkan. The
+`engine-vulkan-nvidia-t400` class went from 33 reviewed pairs to 70: every
+scoped case in `PHASE_CASES` now has a T400 baseline. The 33 pre-existing PNGs
+are byte-identical to the previous promotion (only their sidecars would have
+changed, and that churn was reverted). The 37 new pairs were written by one
+`UPDATE_GOLDENS=1` run, each reviewed against its CPU-arm sibling, with the
+measured max channel delta recorded in the promotion commit.
+
+`page-material-home` sits on its escalation edge. Its hint-policy row named
+the measured `[174,169,172,0]` with no margin (decision: rows name the measured
+number). After the engine began applying variation coordinates and synthesis
+on the glifo route, the same case measures `[181,176,183,0]` on this host: 3 px
+on one text-label row (y=828), light CPU pixels against dark engine pixels, a
+hinting-edge shift. The row now names 183, again with no margin. The next move
+of this case is a real change to investigate, not a flake: compare it with the
+`34ba0fd5` baseline (where the row still held at 174) before widening anything.

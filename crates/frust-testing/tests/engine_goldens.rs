@@ -395,12 +395,14 @@ const ESCALATIONS: &[(&str, Tolerance, &str)] = &[
     (
         "page-material-home",
         Tolerance {
-            channel: 174,
+            channel: 183,
             alpha: 2,
             diff_pixels: 0,
         },
-        "hint-policy row (see this table's module docs): measured max delta [174,169,172,0], 2153 \
-         px (0.1465%) of an 824x1784 catalog page, confined to its own text labels",
+        "hint-policy row (see this table's module docs): measured max delta [181,176,183,0] on the \
+         T400 after the engine applies variation coords and synthesis (the pre-synthesis row was \
+         [174,169,172,0]), 2153 px (0.1465%) of an 824x1784 catalog page, confined to its own text \
+         labels",
     ),
     (
         "page-material-dialog",

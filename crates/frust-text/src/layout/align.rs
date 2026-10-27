@@ -1,6 +1,7 @@
 //! Paragraph alignment: each line's start offset, and justification.
 //!
-//! parley 0.11.1's `align` with `align_when_overflowing: false`:
+//! Alignment (derived from parley 0.11.1's `align`, with overflowing lines
+//! never re-aligned):
 //!
 //! - the alignment width is the layout's `max_width`, or the widest line's
 //!   width when unbounded;
@@ -12,7 +13,7 @@
 //! - `Justify` spreads the free space over the line's stretchable spaces,
 //!   except on a paragraph's last line, after a newline, or with no spaces
 //!   (those start-align). The spaces stretched are the first `num_spaces` in
-//!   parley's walk: items in visual order (reversed for a right-to-left
+//!   the walk over items in visual order (reversed for a right-to-left
 //!   paragraph), each right-to-left item's clusters from its logical end.
 
 use super::r#break::BreakReason;

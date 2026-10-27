@@ -34,3 +34,8 @@ android/app/src/main/jniLibs/
 
 # Machine-local Android SDK path + CLI-written version stamps.
 android/local.properties
+
+# The machine-local Swift package symlinks `platform_wiring` maintains
+# (`ios/FrustEmbedding`, and one per plugin package).
+/ios/FrustEmbedding
+/ios/Frust*

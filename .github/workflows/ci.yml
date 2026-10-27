@@ -335,6 +335,115 @@ jobs:
             exit 1
           fi
 
+  text-oracle-macos:
+    # The Apple (CoreText) text-oracle backend and the engine's hvgl provider
+    # tests, which no other job runs. GPU-dependent tests are #[ignore] and stay
+    # ignored. Outside `ci-ok`'s needs: it is advisory, and it only builds when the
+    # change touches the paths it covers (the scope step below).
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Does this change touch the oracle paths
+        id: scope
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
+        run: |
+          # An unusable base (a new branch's all-zero `before`) runs the leg.
+          if changed="$(git diff --name-only "$BASE" HEAD -- crates/frust-text crates/frust-engine crates/frust-scene 2>/dev/null)" && [ -z "$changed" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install the pinned toolchain
+        if: steps.scope.outputs.run == 'true'
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: steps.scope.outputs.run == 'true'
+      - name: frust-text (CoreText oracle)
+        if: steps.scope.outputs.run == 'true'
+        run: cargo test -p frust-text --locked
+      - name: frust-engine hvgl provider
+        if: steps.scope.outputs.run == 'true'
+        run: cargo test -p frust-engine --test hvgl_provider --locked
+
+  text-oracle-windows:
+    # The DirectWrite text-oracle backend (`oracle/dwrite.rs`), which no other job
+    # runs. Outside `ci-ok`'s needs, and path-scoped like the macOS leg.
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Does this change touch the oracle paths
+        id: scope
+        shell: bash
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
+        run: |
+          # An unusable base (a new branch's all-zero `before`) runs the leg.
+          if changed="$(git diff --name-only "$BASE" HEAD -- crates/frust-text crates/frust-engine crates/frust-scene 2>/dev/null)" && [ -z "$changed" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install the pinned toolchain
+        if: steps.scope.outputs.run == 'true'
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: steps.scope.outputs.run == 'true'
+      - name: frust-text (DirectWrite oracle)
+        if: steps.scope.outputs.run == 'true'
+        run: cargo test -p frust-text --locked
+
+  android-relr-guard:
+    # No other job links an Android shared object, so this one builds the
+    # benchmark app's arm64 cdylib with the repo's Android link flags (the root
+    # .cargo/config.toml) and checks its dynamic section: packed relocations must
+    # use the Android-private tags (DT_ANDROID_RELR, API 28+) and never the
+    # standard DT_RELR/DT_RELRSZ/DT_RELRENT tags, which need API 30 (the app's
+    # floor is 29). Outside `ci-ok`'s needs.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
+      - name: Add the Android target
+        run: rustup target add aarch64-linux-android
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: benchmarks/frust_bench
+      - name: Build the arm64 cdylib
+        working-directory: benchmarks/frust_bench
+        run: |
+          set -euo pipefail
+          bin="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$bin/aarch64-linux-android29-clang"
+          export CC_aarch64_linux_android="$bin/aarch64-linux-android29-clang"
+          export AR_aarch64_linux_android="$bin/llvm-ar"
+          cargo build --locked --lib --target aarch64-linux-android
+      - name: DT_ANDROID_RELR guard
+        working-directory: benchmarks/frust_bench
+        run: |
+          set -euo pipefail
+          readelf="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          so="$(find . -path '*aarch64-linux-android/debug/libfrustbench.so' | head -n 1)"
+          [ -n "$so" ] || { echo "::error::libfrustbench.so was not built"; exit 1; }
+          dyn="$("$readelf" -d "$so")"
+          echo "$dyn"
+          if echo "$dyn" | grep -Eq '\((RELR|RELRSZ|RELRENT)\)'; then
+            echo "::error::$so carries standard DT_RELR tags (need API 30); use --use-android-relr-tags"
+            exit 1
+          fi
+          if ! echo "$dyn" | grep -q '(ANDROID_RELR)'; then
+            echo "::error::$so has no DT_ANDROID_RELR; check --pack-dyn-relocs=relr and --use-android-relr-tags"
+            exit 1
+          fi
+
   hygiene:
     runs-on: ubuntu-latest
     timeout-minutes: 15
