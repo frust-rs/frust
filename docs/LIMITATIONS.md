@@ -8518,16 +8518,18 @@ faces an identity.
 
 ---
 
-### `text-faux-oblique-uncached` — synthetic-italic runs draw as outlines every frame
+### `text-faux-oblique-off` — synthetic italic is off by default; opting in draws outlines every frame
 
-**Observed**: a run whose face has no italic and so is skewed (faux oblique) never enters the glyph
-atlas or the resident-run cache; it draws as outlines each frame. The Pixel 5 weight probe (four
-44 px rows, two of them faux oblique on Roboto) measured an encode median of 32.0 us before and
-after, so no delta shows on static text; animated or large skewed text pays the outline cost.
+**Observed**: an italic request on a face with no italic or slant axis draws upright.
+`SceneCompiler::set_synthetic_oblique(true)` opts in, and skewed runs then never enter the glyph atlas or the
+resident-run cache: they draw as outlines every frame. Measured on scene S6 with an all-italic corpus
+(Apple M4), submit time rose from 0.38 ms to 1.88 ms per frame. `EngineRenderer` does not yet forward
+the switch, so the opt-in is engine-level only.
 
-**Applies to**: any target drawing synthesized italic through the `glifo` route.
+**Applies to**: any target drawing italic text from a face without a real italic or slant axis.
 
-**Workaround**: use a face with a real italic; or turn the skew off with
-`atlas_policy::OBLIQUE_SYNTHESIS`, which leaves such runs upright.
+**Workaround**: use a face with a real italic or a slant axis, which stays on the atlas route;
+`CompiledFrame::synthetic_oblique_runs` counts the skewed runs when the switch is on.
 
-**Evidence**: Pixel 5 weight probe; `crates/frust-engine/src/text/atlas_policy.rs`.
+**Evidence**: Apple M4 S6 all-italic measurement; Pixel 5 faux-oblique probe rows leaned with the switch
+on; `crates/frust-engine/src/compile/mod.rs`.
