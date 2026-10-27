@@ -325,28 +325,34 @@ macro_rules! ios_app {
             $crate::ffi_glue::selection_toolbar_json(handle)
         }
 
-        /// `frust_pause`: app backgrounded — stop submitting frames.
+        /// `frust_pause`: app resigned active (`willResignActive`) — push the
+        /// `Inactive` lifecycle state, then stop submitting frames.
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         pub extern "C" fn frust_pause(handle: *mut ::core::ffi::c_void) {
             $crate::ffi_glue::pause(handle)
         }
 
-        /// `frust_resume`: app foregrounded — resume submitting frames.
+        /// `frust_resume`: app became active (`didBecomeActive`) — resume
+        /// submitting frames, then push the `Resumed` lifecycle state.
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         pub extern "C" fn frust_resume(handle: *mut ::core::ffi::c_void) {
             $crate::ffi_glue::resume(handle)
         }
 
-        /// `frust_did_enter_background`: push the `Paused` lifecycle state.
+        /// `frust_did_enter_background`: `didEnterBackground` — push the `Paused`
+        /// lifecycle state (`Hidden` is synthesized first). Frame submission was
+        /// already stopped by `frust_pause`.
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         pub extern "C" fn frust_did_enter_background(handle: *mut ::core::ffi::c_void) {
             $crate::ffi_glue::did_enter_background(handle)
         }
 
-        /// `frust_will_enter_foreground`: push the `Inactive` lifecycle state.
+        /// `frust_will_enter_foreground`: `willEnterForeground` — push the
+        /// `Inactive` lifecycle state (`Hidden` is synthesized, so `on_restart`
+        /// then `on_show` fire). `didBecomeActive` follows with `frust_resume`.
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         pub extern "C" fn frust_will_enter_foreground(handle: *mut ::core::ffi::c_void) {
