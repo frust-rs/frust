@@ -29,7 +29,7 @@ use peniko::{Brush, FontData};
 /// from the blob, and draws only when the system honours exactly that name: a
 /// substituted face or a handle with no name is a counted refusal, so a hidden
 /// face draws only if the system resolves its hidden name.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FontHandle {
     font: FontData,
     /// Normalized (F2Dot14) variation coordinates, `fvar` axis order; `None`
@@ -39,6 +39,10 @@ pub struct FontHandle {
     postscript_name: Option<Arc<str>>,
     /// The oracle flagged the face system-private (a dot-prefixed name).
     hidden: bool,
+    /// Faux-bold stroke as a fraction of the em; `0.0` for none.
+    embolden: f32,
+    /// Faux-oblique slant in degrees; `0.0` for none.
+    skew_degrees: f32,
 }
 
 impl FontHandle {
@@ -50,6 +54,8 @@ impl FontHandle {
             coords: None,
             postscript_name: None,
             hidden: false,
+            embolden: 0.0,
+            skew_degrees: 0.0,
         }
     }
 
@@ -74,6 +80,36 @@ impl FontHandle {
         self.postscript_name = postscript_name;
         self.hidden = hidden;
         self
+    }
+
+    /// This handle with the synthesis the text tier decided for a face that
+    /// lacks the requested weight or slant: `embolden` is the faux-bold stroke
+    /// as a fraction of the em, `skew_degrees` the faux-oblique angle. Zero
+    /// (or a non-finite or negative `embolden`) means none. Both take part in
+    /// equality, so differently synthesized handles are different faces.
+    #[must_use]
+    pub fn with_synthesis(mut self, embolden: f32, skew_degrees: f32) -> Self {
+        self.embolden = if embolden.is_finite() && embolden > 0.0 {
+            embolden
+        } else {
+            0.0
+        };
+        self.skew_degrees = if skew_degrees.is_finite() {
+            skew_degrees
+        } else {
+            0.0
+        };
+        self
+    }
+
+    /// Faux-bold stroke as a fraction of the em; `0.0` for none.
+    pub fn embolden(&self) -> f32 {
+        self.embolden
+    }
+
+    /// Faux-oblique slant in degrees; `0.0` for none.
+    pub fn skew_degrees(&self) -> f32 {
+        self.skew_degrees
     }
 
     /// The face's PostScript name as the text tier resolved it; `None` for a
@@ -140,6 +176,23 @@ mod tests {
 
     fn font() -> FontData {
         FontData::new(Blob::new(Arc::new(vec![0_u8; 4])), 0)
+    }
+
+    #[test]
+    fn synthesis_defaults_to_none_and_takes_part_in_equality() {
+        let plain = FontHandle::new(font());
+        assert_eq!((plain.embolden(), plain.skew_degrees()), (0.0, 0.0));
+        let bold = plain.clone().with_synthesis(0.04, 0.0);
+        let oblique = plain.clone().with_synthesis(0.0, 14.0);
+        assert_eq!(bold.embolden(), 0.04);
+        assert_eq!(oblique.skew_degrees(), 14.0);
+        assert_eq!(plain, plain.clone());
+        assert_ne!(plain, bold);
+        assert_ne!(plain, oblique);
+        assert_ne!(bold, oblique);
+        assert_eq!(bold, bold.clone());
+        let bad = plain.clone().with_synthesis(f32::NAN, f32::INFINITY);
+        assert_eq!(bad, plain);
     }
 
     #[test]
