@@ -176,6 +176,7 @@ use frust::authoring::{
 };
 use frust::{Color, IconData, SpringDesc, Theme};
 
+use crate::badge::locale_stamp;
 use crate::interaction::DISABLED_CONTENT_OPACITY;
 use crate::overlay::{
     AnchoredOverlayView, AnchoredOverlayWidget, OVERLAY_ANCHOR_GAP, OverlayAlign, OverlayAnchor,
@@ -552,9 +553,9 @@ pub(crate) struct Run {
     pub(crate) content: String,
     layout: Option<TextLayout>,
     /// The `(style, max_width)` the cached `layout` was shaped for.
-    shaped_for: Option<(TextStyle, Option<f64>)>,
+    shaped_for: Option<(TextStyle, Option<f64>, u64)>,
     /// The `(style, width)` of the last natural (unconstrained) measurement.
-    natural: Option<(TextStyle, f64)>,
+    natural: Option<(TextStyle, f64, u64)>,
 }
 
 impl Run {
@@ -570,14 +571,16 @@ impl Run {
 
     /// The run's width with nothing constraining it.
     pub(crate) fn natural_width(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> f64 {
-        if let Some((cached, width)) = &self.natural
+        let stamp = locale_stamp(style);
+        if let Some((cached, width, cached_stamp)) = &self.natural
             && cached == style
+            && *cached_stamp == stamp
         {
             return *width;
         }
         let text_ctx = ctx.text_context::<TextContext>();
         let width = text_ctx.layout(&self.content, style, None).size().width;
-        self.natural = Some((style.clone(), width));
+        self.natural = Some((style.clone(), width, stamp));
         width
     }
 
@@ -588,7 +591,8 @@ impl Run {
     /// is `overflow: TextOverflow.ellipsis` (`m3e_dropdown_menu_field.dart:163`)
     /// and its rows are single-line `Text`s inside an `Expanded`.
     pub(crate) fn shape(&mut self, ctx: &mut LayoutCtx, style: &TextStyle, max_width: f64) -> Size {
-        let key = (style.clone(), Some(max_width));
+        // The key carries the locale generation, so a default-locale change reshapes.
+        let key = (style.clone(), Some(max_width), locale_stamp(style));
         if let Some(cached) = &self.layout
             && self.shaped_for.as_ref() == Some(&key)
         {

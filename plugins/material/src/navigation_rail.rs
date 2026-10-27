@@ -227,6 +227,7 @@ use frust::{
 use kurbo::{Point, Rect, Size};
 use peniko::{Brush, Color};
 
+use crate::badge::locale_stamp;
 use crate::fab::{FabColor, FabSize, extended_fab, fab};
 use crate::icon_button::icon_button;
 use crate::overlay::{OVERLAY_SCRIM_ALPHA, finite_or_zero};
@@ -692,7 +693,7 @@ impl<State: 'static> RailFab<State> {
 struct TextRun {
     content: String,
     layout: Option<TextLayout>,
-    shaped_for: Option<(TextStyle, Option<f64>)>,
+    shaped_for: Option<(TextStyle, Option<f64>, u64)>,
 }
 
 impl TextRun {
@@ -720,7 +721,8 @@ impl TextRun {
     /// ellipsized line** when one is given — the reference's every label
     /// carries `maxLines: 1, overflow: TextOverflow.ellipsis`.
     fn shape(&mut self, ctx: &mut LayoutCtx, style: &TextStyle, max_width: Option<f64>) -> Size {
-        let key = (style.clone(), max_width);
+        // The key carries the locale generation, so a default-locale change reshapes.
+        let key = (style.clone(), max_width, locale_stamp(style));
         if let Some(layout) = &self.layout
             && self.shaped_for.as_ref() == Some(&key)
         {

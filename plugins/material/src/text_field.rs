@@ -139,6 +139,7 @@ use kurbo::{Point, RoundedRect, Shape, Size};
 use peniko::{Brush, Color};
 
 use super::interaction::{DISABLED_CONTAINER_OPACITY, DISABLED_CONTENT_OPACITY};
+use crate::badge::locale_stamp;
 use crate::tokens::{MaterialDimensions, MaterialMotion};
 
 /// Decoration-box height, in logical px (`M3ETextFieldTheme.minHeight`). The
@@ -402,7 +403,7 @@ impl<State: 'static> TextFieldView<State> {
 struct Run {
     content: String,
     layout: Option<TextLayout>,
-    shaped_style: Option<TextStyle>,
+    shaped_style: Option<(TextStyle, u64)>,
 }
 
 impl Run {
@@ -438,8 +439,9 @@ impl Run {
 
     /// Shape (or reuse) the run in `style` and return its measured size.
     fn layout(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> Size {
+        let stamp = locale_stamp(style);
         if let Some(cached) = &self.layout
-            && self.shaped_style.as_ref() == Some(style)
+            && matches!(&self.shaped_style, Some((s, g)) if s == style && *g == stamp)
         {
             return cached.size();
         }
@@ -447,7 +449,7 @@ impl Run {
         let laid = text_ctx.layout(&self.content, style, None);
         let size = laid.size();
         self.layout = Some(laid);
-        self.shaped_style = Some(style.clone());
+        self.shaped_style = Some((style.clone(), stamp));
         size
     }
 
@@ -1019,6 +1021,48 @@ mod tests {
     use frust::{Brightness, FrameTime};
     use frust_core::RenderRoot;
     use std::any::Any;
+
+    // ---- The label layout follows the app-locale generation -------------------
+
+    /// Shape a fresh run with `style` twice around `change`, returning how many layout requests
+    /// the text context served after the first shape and after the second.
+    fn passes_around(style: &TextStyle, change: impl FnOnce()) -> (u64, u64) {
+        use crate::badge::locale_slot_test::passes;
+        let mut tcx = TextContext::new();
+        let mut run = Run::new("Label");
+        let mut ctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        run.layout(&mut ctx, style);
+        let first = passes(ctx.text_context::<TextContext>());
+        change();
+        run.layout(&mut ctx, style);
+        (first, passes(ctx.text_context::<TextContext>()))
+    }
+
+    #[test]
+    fn label_layout_is_reused_at_an_unchanged_locale_generation() {
+        let _slot = crate::badge::locale_slot_test::writer();
+        let (first, second) = passes_around(&TextStyle::new(14.0, Color::BLACK), || {});
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn label_layout_rebuilds_after_the_default_locale_changes() {
+        let _slot = crate::badge::locale_slot_test::writer();
+        let (first, second) = passes_around(&TextStyle::new(14.0, Color::BLACK), || {
+            frust::authoring::text::set_default_locale(Some("ja"));
+        });
+        assert_eq!(second, first + 1);
+    }
+
+    #[test]
+    fn label_layout_with_an_explicit_locale_is_not_rebuilt() {
+        let _slot = crate::badge::locale_slot_test::writer();
+        let style = TextStyle::new(14.0, Color::BLACK).with_locale(Some("en"));
+        let (first, second) = passes_around(&style, || {
+            frust::authoring::text::set_default_locale(Some("ja"));
+        });
+        assert_eq!(first, second);
+    }
 
     /// The window every harness lays out in.
     const WINDOW: Size = Size::new(320.0, 160.0);

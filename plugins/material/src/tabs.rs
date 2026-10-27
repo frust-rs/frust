@@ -159,6 +159,7 @@ use frust::{AnimationController, FrameTime, IconData, IconSource, SpringDesc, Th
 use kurbo::{Affine, BezPath, Point, Rect, Size, Vec2};
 use peniko::{Brush, Color};
 
+use crate::badge::locale_stamp;
 use crate::interaction::{
     DISABLED_CONTENT_OPACITY, HapticSignal, InteractionState, MaterialHaptics,
 };
@@ -344,7 +345,7 @@ fn same_icon_source(a: Option<IconSource>, b: Option<IconSource>) -> bool {
 struct LabelRun {
     content: String,
     layout: Option<TextLayout>,
-    shaped_for: Option<TextStyle>,
+    shaped_for: Option<(TextStyle, u64)>,
 }
 
 impl LabelRun {
@@ -369,8 +370,9 @@ impl LabelRun {
     }
 
     fn shape(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> Size {
+        let stamp = locale_stamp(style);
         if let Some(cached) = &self.layout
-            && self.shaped_for.as_ref() == Some(style)
+            && matches!(&self.shaped_for, Some((s, g)) if s == style && *g == stamp)
         {
             return cached.size();
         }
@@ -378,7 +380,7 @@ impl LabelRun {
         let laid = text_ctx.layout(&self.content, style, None);
         let size = laid.size();
         self.layout = Some(laid);
-        self.shaped_for = Some(style.clone());
+        self.shaped_for = Some((style.clone(), stamp));
         size
     }
 
@@ -1096,6 +1098,48 @@ mod tests {
     use super::*;
     use frust::authoring::{PointerButton, PointerEvent};
     use std::any::Any;
+
+    // ---- The label layout follows the app-locale generation -------------------
+
+    /// Shape a fresh run with `style` twice around `change`, returning how many layout requests
+    /// the text context served after the first shape and after the second.
+    fn passes_around(style: &TextStyle, change: impl FnOnce()) -> (u64, u64) {
+        use crate::badge::locale_slot_test::passes;
+        let mut tcx = TextContext::new();
+        let mut run = LabelRun::new("One".to_string());
+        let mut ctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        run.shape(&mut ctx, style);
+        let first = passes(ctx.text_context::<TextContext>());
+        change();
+        run.shape(&mut ctx, style);
+        (first, passes(ctx.text_context::<TextContext>()))
+    }
+
+    #[test]
+    fn label_layout_is_reused_at_an_unchanged_locale_generation() {
+        let _slot = crate::badge::locale_slot_test::writer();
+        let (first, second) = passes_around(&TextStyle::new(14.0, Color::BLACK), || {});
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn label_layout_rebuilds_after_the_default_locale_changes() {
+        let _slot = crate::badge::locale_slot_test::writer();
+        let (first, second) = passes_around(&TextStyle::new(14.0, Color::BLACK), || {
+            frust::authoring::text::set_default_locale(Some("ja"));
+        });
+        assert_eq!(second, first + 1);
+    }
+
+    #[test]
+    fn label_layout_with_an_explicit_locale_is_not_rebuilt() {
+        let _slot = crate::badge::locale_slot_test::writer();
+        let style = TextStyle::new(14.0, Color::BLACK).with_locale(Some("en"));
+        let (first, second) = passes_around(&style, || {
+            frust::authoring::text::set_default_locale(Some("ja"));
+        });
+        assert_eq!(first, second);
+    }
 
     fn ft_secs(s: f64) -> FrameTime {
         FrameTime::from_nanos((s * 1_000_000_000.0) as u64)

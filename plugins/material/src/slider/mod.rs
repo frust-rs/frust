@@ -116,6 +116,7 @@ use frust::{AnimationController, Curve, IconData, IconSource, Theme};
 use kurbo::{Affine, Point, RoundedRect, Shape, Size, Vec2};
 use peniko::{Brush, Color};
 
+use crate::badge::locale_stamp;
 use crate::interaction::{HapticSignal, InteractionState, MaterialHaptics};
 use crate::press::presses;
 
@@ -372,7 +373,7 @@ impl Overrides {
 struct Run {
     content: String,
     layout: Option<TextLayout>,
-    shaped_style: Option<TextStyle>,
+    shaped_style: Option<(TextStyle, u64)>,
 }
 
 impl Run {
@@ -398,12 +399,15 @@ impl Run {
 
     /// Shape (or reuse) the run in `style`.
     fn layout(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) {
-        if self.layout.is_some() && self.shaped_style.as_ref() == Some(style) {
+        let stamp = locale_stamp(style);
+        if self.layout.is_some()
+            && matches!(&self.shaped_style, Some((s, g)) if s == style && *g == stamp)
+        {
             return;
         }
         let text_ctx = ctx.text_context::<TextContext>();
         self.layout = Some(text_ctx.layout(&self.content, style, None));
-        self.shaped_style = Some(style.clone());
+        self.shaped_style = Some((style.clone(), stamp));
     }
 
     /// Paint the run at `origin` in `color`. A run never laid out paints
