@@ -2118,12 +2118,16 @@ impl TextInputWidget {
                     return EventResult::Handled;
                 }
                 // Commit the given text via the compose machinery so it replaces
-                // any active preedit and lands at the caret in one edit.
+                // any active preedit and lands at the caret in one edit. The
+                // caret goes to the END of the committed text: a `Compose` with
+                // no cursor collapses to the start of the range, which would
+                // leave the caret before text the user just committed.
                 let before = self.editor.text().to_string();
+                let end = s.len();
                 self.editor.apply(
                     EditOp::Compose {
                         text: s.clone(),
-                        cursor: None,
+                        cursor: Some((end, end)),
                     },
                     &mut self.text_ctx,
                 );
@@ -3920,6 +3924,112 @@ mod tests {
 
         assert_eq!(widget(&root).editor.text(), "ni");
         assert_eq!(state.value, "ni");
+    }
+
+    #[test]
+    fn ime_commit_into_an_empty_field_leaves_the_caret_at_its_end() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+
+        root.event(
+            &mut state,
+            &InputEvent::Ime(ImeEvent::Commit("\u{306b}".to_string())),
+        );
+
+        assert_eq!(widget(&root).editor.text(), "\u{306b}");
+        let st = widget(&root).editor.editing_state_bytes();
+        assert_eq!(
+            st.base,
+            "\u{306b}".len(),
+            "caret after the commit, in bytes"
+        );
+        assert_eq!(st.extent, "\u{306b}".len());
+        let utf16 = widget(&root).editor.editing_state_utf16();
+        assert_eq!((utf16.selection_base, utf16.selection_extent), (1, 1));
+        assert_eq!(state.value, "\u{306b}");
+    }
+
+    #[test]
+    fn ime_commit_mid_text_places_the_caret_after_the_committed_text() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(
+            &mut state,
+            &InputEvent::Ime(ImeEvent::Commit("abcd".to_string())),
+        );
+        // Caret after 'b': "ab|cd".
+        root.event(
+            &mut state,
+            &named(NamedKey::ArrowLeft, Modifiers::default()),
+        );
+        root.event(
+            &mut state,
+            &named(NamedKey::ArrowLeft, Modifiers::default()),
+        );
+
+        root.event(
+            &mut state,
+            &InputEvent::Ime(ImeEvent::Commit("xy".to_string())),
+        );
+
+        assert_eq!(
+            widget(&root).editor.text(),
+            "abxycd",
+            "surrounding text intact"
+        );
+        let utf16 = widget(&root).editor.editing_state_utf16();
+        assert_eq!(
+            (utf16.selection_base, utf16.selection_extent),
+            (4, 4),
+            "caret after the committed 'xy'"
+        );
+        assert_eq!(state.value, "abxycd");
+    }
+
+    #[test]
+    fn ime_commit_replacing_a_preedit_leaves_the_caret_at_its_end() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        compose(&mut root, &mut state, "\u{306b}\u{3093}");
+        assert!(widget(&root).editor.has_preedit(), "the preedit is live");
+
+        root.event(
+            &mut state,
+            &InputEvent::Ime(ImeEvent::Commit("\u{306b}\u{3093}\u{3054}".to_string())),
+        );
+
+        assert_eq!(widget(&root).editor.text(), "\u{306b}\u{3093}\u{3054}");
+        assert_eq!(widget(&root).editor.editing_state_bytes().composing, None);
+        let utf16 = widget(&root).editor.editing_state_utf16();
+        assert_eq!(
+            (utf16.selection_base, utf16.selection_extent),
+            (3, 3),
+            "caret after 'にんご', not at the start of the preedit"
+        );
+    }
+
+    #[test]
+    fn typing_after_an_ime_commit_continues_at_the_end() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(
+            &mut state,
+            &InputEvent::Ime(ImeEvent::Commit("ni".to_string())),
+        );
+        root.event(&mut state, &ch("h"));
+        assert_eq!(widget(&root).editor.text(), "nih");
+
+        root.event(
+            &mut state,
+            &InputEvent::Ime(ImeEvent::Commit("ao".to_string())),
+        );
+        root.event(&mut state, &ch("!"));
+        assert_eq!(widget(&root).editor.text(), "nihao!");
+        assert_eq!(state.value, "nihao!");
     }
 
     #[test]
