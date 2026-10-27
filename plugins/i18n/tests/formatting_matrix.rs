@@ -80,6 +80,7 @@ fn a_zero_minor_unit_currency_rounds_away_its_fraction_everywhere() {
         ("en-US", "¥10"),
         ("de-DE", "10\u{a0}¥"),
         ("fr-FR", "10\u{a0}JP¥"),
+        ("es-ES", "10\u{a0}JP¥"),
         ("ja-JP", "￥10"),
     ];
 
@@ -1048,6 +1049,27 @@ fn the_buddhist_default_is_keyed_on_the_region_and_the_calendar_option_overrides
             pinned,
             "{tag} gregorian"
         );
+    }
+}
+
+#[test]
+fn the_buddhist_default_holds_for_datetimes_and_gregorian_escapes_it() {
+    let gregorian = calendar_option(Calendar::Gregorian);
+    let at = CivilTime {
+        hour: 14,
+        minute: 5,
+        second: 0,
+    };
+    let rows = [("th", "2569"), ("th-TH", "2569"), ("en-TH", "2569")];
+
+    for (tag, year) in rows {
+        let default = fmt::datetime(&locale(tag), OCT_13, at, DateLength::Medium).expect("formats");
+        let pinned = fmt::datetime_with(&locale(tag), OCT_13, at, DateLength::Medium, &gregorian)
+            .expect("formats");
+        assert!(default.contains(year), "{tag} default: {default}");
+        assert!(!default.contains("2026"), "{tag} default: {default}");
+        assert!(pinned.contains("2026"), "{tag} gregorian: {pinned}");
+        assert!(!pinned.contains(year), "{tag} gregorian: {pinned}");
     }
 }
 

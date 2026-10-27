@@ -270,6 +270,12 @@ fn key(locale: &Locale, length: DateLength, options: &DateTimeOptions) -> Key {
 
 /// The ICU4X preferences bag for `locale`, with `options` applied.
 ///
+/// The calendar is deliberately left to ICU4X when `options.calendar` is
+/// `None`: on CLDR 49 `th`, `th-TH` and `en-TH` all default to the Buddhist
+/// calendar. That is a recorded choice (it is what a Thai reader expects), not
+/// an accident; `Calendar::Gregorian` is the per-call escape, since a
+/// [`Locale`] cannot carry `-u-ca-`.
+///
 /// # Errors
 ///
 /// [`I18nError::Format`] for an hour cycle ICU4X cannot express.

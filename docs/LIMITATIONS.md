@@ -2318,8 +2318,8 @@ in-process notification is delivered either way.
 **Applies to**: every platform. A shell-forwarded locale-change event (the seam an app could
 subscribe through instead of polling) is deferred, not shipped.
 
-The same surprise applies to the calendar: the `en-TH` Buddhist-era year is keyed on the TH
-region (a bare `th` is Gregorian), and a call can now override it with
+The same surprise applies to the calendar: on CLDR 49 a bare `th`, `th-TH` and `en-TH` all
+default to the Buddhist-era year, and a call pins Gregorian with
 `DateTimeOptions { calendar: Some(Calendar::Gregorian), .. }` or `DATETIME(calendar: "gregory")`.
 
 **Why accepted**: v1 scope — detection is a deliberately uncached, re-query-on-demand read
@@ -2378,6 +2378,27 @@ and `fmt/number.rs` (its `percent` formatter shares the same `icu_experimental` 
 **Evidence**: `plugins/i18n/src/fmt/currency.rs`'s module doc and `ZERO_DIGIT`/`THREE_DIGIT`
 tables; `plugins/i18n/src/fmt/number.rs`'s module doc ("percent rides `icu_experimental`, like
 currency").
+
+---
+
+### `i18n-long-unit-width-short` — English length units at Long width render the short form
+
+**Observed**: `fmt::units` at `Width::Long` renders English `km` and `m` as `2 km` and `2 m`,
+not `2 kilometers` / `2 meters`. ICU4X 2.4 / `icu_experimental` 0.7.0 itself returns the short
+form for these units at Long width (checked through its typed `CategorizedFormatter<Length>`),
+so frust's width and locale mapping is correct and passes it through.
+
+**Applies to**: `en` (and locales inheriting it) for the length units `km` and `m`; other
+locales and units are not known to be affected.
+
+**Workaround**: spell the unit in the message text, or format the number with `fmt::number` and
+append the localized unit name.
+
+**Why accepted**: an upstream CLDR data gap, not a frust fault; an in-crate override table would
+duplicate ICU data. The `formatting_matrix` `2 km` Long pin records the current output and is
+revisited on an ICU4X bump.
+
+**Evidence**: `plugins/i18n/tests/units_width.rs`; `plugins/i18n/tests/formatting_matrix.rs`.
 
 ---
 
