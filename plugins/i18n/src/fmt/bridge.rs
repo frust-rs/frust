@@ -29,6 +29,12 @@
 //! build is wasted work, never a wrong answer, which is why this is not
 //! serialized behind a write lock for the whole build.
 //!
+//! The cache is bounded ([`DEFAULT_CAPACITY`], least recently used evicted
+//! first) so a caller cycling through arbitrary key combinations cannot grow
+//! it without limit; an evicted formatter is rebuilt on its next use. The
+//! locale memo above holds one small identifier per distinct locale an app
+//! ever formats with, which is bounded by the locales it ships and negotiates.
+//!
 //! Both locks recover from poisoning (`PoisonError::into_inner`) instead of
 //! unwrapping: a panic elsewhere must not turn every later formatting call
 //! into a panic of its own, and nothing this module stores can be left
@@ -36,6 +42,7 @@
 
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, PoisonError, RwLock};
 
 use icu_locale_core::LanguageIdentifier;
@@ -80,24 +87,53 @@ fn parse(locale: &Locale) -> LanguageIdentifier {
     }
 }
 
-/// A build-once map of constructed ICU4X formatters.
+/// The most entries a [`Cache::new`] cache keeps before it evicts.
+///
+/// Generous next to what an app uses (a handful of locales times a few
+/// lengths and styles), small enough that a caller cycling through arbitrary
+/// keys cannot grow a cache without limit.
+pub(super) const DEFAULT_CAPACITY: usize = 256;
+
+/// A bounded, build-once map of constructed ICU4X formatters.
 ///
 /// `K` is whatever fully determines a formatter — a locale, or a locale
 /// paired with a length — and `V` the formatter itself. See this module's
 /// header for the locking contract.
+///
+/// At most `capacity` entries are kept; inserting past that evicts the least
+/// recently used one, which is simply rebuilt on its next use. Recency is an
+/// atomic tick stamped on every hit, so a hit still takes only the read lock.
 pub(super) struct Cache<K, V> {
-    entries: RwLock<HashMap<K, Arc<V>>>,
+    capacity: usize,
+    clock: AtomicU64,
+    entries: RwLock<HashMap<K, Entry<V>>>,
+}
+
+struct Entry<V> {
+    value: Arc<V>,
+    last_used: AtomicU64,
 }
 
 impl<K: Clone + Eq + Hash, V> Cache<K, V> {
-    /// An empty cache.
+    /// An empty cache holding at most [`DEFAULT_CAPACITY`] entries.
     ///
     /// Not `const` (`HashMap::new` isn't either), so every user wraps this in
     /// a `LazyLock` rather than a bare `static`.
     pub(super) fn new() -> Self {
+        Self::with_capacity(DEFAULT_CAPACITY)
+    }
+
+    /// An empty cache holding at most `capacity` entries (at least one).
+    pub(super) fn with_capacity(capacity: usize) -> Self {
         Self {
+            capacity: capacity.max(1),
+            clock: AtomicU64::new(0),
             entries: RwLock::new(HashMap::new()),
         }
+    }
+
+    fn tick(&self) -> u64 {
+        self.clock.fetch_add(1, Ordering::Relaxed)
     }
 
     /// The formatter for `key`, building it through `build` on a miss.
@@ -115,15 +151,38 @@ impl<K: Clone + Eq + Hash, V> Cache<K, V> {
             .unwrap_or_else(PoisonError::into_inner)
             .get(key)
         {
-            return Ok(Arc::clone(found));
+            found.last_used.store(self.tick(), Ordering::Relaxed);
+            return Ok(Arc::clone(&found.value));
         }
 
         let built = Arc::new(build()?);
-        self.entries
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(key.clone(), Arc::clone(&built));
+        let mut entries = self.entries.write().unwrap_or_else(PoisonError::into_inner);
+        entries.insert(
+            key.clone(),
+            Entry {
+                value: Arc::clone(&built),
+                last_used: AtomicU64::new(self.tick()),
+            },
+        );
+        if entries.len() > self.capacity {
+            let oldest = entries
+                .iter()
+                .filter(|(held, _)| *held != key)
+                .min_by_key(|(_, entry)| entry.last_used.load(Ordering::Relaxed))
+                .map(|(held, _)| held.clone());
+            if let Some(oldest) = oldest {
+                entries.remove(&oldest);
+            }
+        }
         Ok(built)
+    }
+
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.entries
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
     }
 }
 
@@ -173,5 +232,27 @@ mod tests {
 
         assert!(cache.get_or_build(&1, || Err("nope")).is_err());
         assert_eq!(*cache.get_or_build::<()>(&1, || Ok(7)).expect("retries"), 7);
+    }
+
+    #[test]
+    fn a_cache_is_bounded_and_evicts_least_recently_used() {
+        let cache: Cache<u32, u32> = Cache::with_capacity(3);
+        let build = |value: u32| move || Ok::<_, ()>(value);
+
+        for key in 0..3 {
+            cache.get_or_build(&key, build(key)).unwrap();
+        }
+        // Touch 0 so 1 is the oldest, then overflow.
+        cache.get_or_build(&0, build(99)).unwrap();
+        cache.get_or_build(&3, build(3)).unwrap();
+
+        assert_eq!(cache.len(), 3);
+        assert_eq!(*cache.get_or_build(&0, build(99)).unwrap(), 0, "0 survived");
+        assert_eq!(*cache.get_or_build(&1, build(11)).unwrap(), 11, "1 evicted");
+
+        for key in 10..100 {
+            cache.get_or_build(&key, build(key)).unwrap();
+        }
+        assert_eq!(cache.len(), 3);
     }
 }
