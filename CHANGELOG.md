@@ -19,7 +19,7 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 - Text-hardening phase 4: macOS oracle tests and the system emoji-fallback test check their real
   precondition and print a counted skip instead of returning early; a bundled COLRv1 emoji subset
   exercises emoji fallback on every host. The Linux T400 golden class grows from 33 to 70 pairs
-  (`page-material-home` escalation row now names the re-measured value, no margin). Optional
+  (`page-material-home`'s escalation row now names the re-measured 183, no margin). Optional
   macOS/Windows text-oracle CI legs and an Android RELR tag guard job run outside `ci-ok`;
   hot-patch Android `.so` links use `--pack-dyn-relocs=relr --use-android-relr-tags`; hygiene
   clean-ups (parley attributions, `mod shape`, native-widgets 29-floor comments, scaffold RELR

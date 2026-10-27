@@ -73,7 +73,7 @@ The accepted-limitation register is `docs/LIMITATIONS.md` in the frust repositor
 ## 5. Android and iOS builds
 
 `ring` compiles C, so the Android compile gate is
-`cargo ndk -t arm64-v8a -P 26 check -p frust-network-image` (the plain `cargo check --target`
+`cargo ndk -t arm64-v8a -P 29 check -p frust-network-image` (the plain `cargo check --target`
 form works with `--no-default-features`). iOS: `cargo check --target aarch64-apple-ios-sim -p
 frust-network-image`. A device walkthrough is the playground's **Images** page.
 
