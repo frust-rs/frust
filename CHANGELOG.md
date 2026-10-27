@@ -19,8 +19,9 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 - `frust-i18n` on CLDR 49: `th`, `th-TH` and `en-TH` keep the Buddhist-era default (pin Gregorian
   per call with `DateTimeOptions { calendar: Some(Calendar::Gregorian), .. }`); JPY renders `JP¥`
   in fr-FR/es-ES, `¥` in en-US and `￥` in ja-JP; Vietnamese hours read `tiếng`. `fmt::bridge::Cache`
-  is one bounded LRU shared with the currency formatters, `fraction_fallbacks()` counts fallbacks to
-  two fraction digits, and English `km`/`m` at Long width stay short
+  is one bounded LRU shared with the currency formatters; a failed currency-fraction data load warns
+  once and `fraction_fallbacks()` counts every fallback to two digits; a test fails naming any baked
+  currency whose rounding is not R1; English `km`/`m` at Long width stay short
   (`i18n-long-unit-width-short`).
 - `frust::texture::request_frame`: a producer that has a new frame owes the shell one frame, so an
   idle `texture_view` stays live without a ticker. `TextureSink::set_waker` (`SinkWaker`) runs
