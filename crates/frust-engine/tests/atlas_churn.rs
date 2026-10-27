@@ -139,6 +139,8 @@ fn scaled_run_key(font_id: u64, size: f32, transform: Affine) -> RunKey {
         hinted: false,
         color_font: false,
         context_color: BLACK,
+        synthesis: Some(atlas_policy::Synthesis::NONE),
+        oblique: false,
     }
 }
 
