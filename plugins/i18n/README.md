@@ -291,7 +291,8 @@ app language stays fixed, only the user's region composes onto it):
    calendar default is keyed off the region, not the language, so `en-TH` still renders a
    Buddhist-era year (`"Oct 13, 2569 BE"`, not `"Oct 13, 2026"`) even though every month/weekday
    name is English. A bare `th` tag now resolves to Thailand's calendar as well (ICU4X 2.4 /
-   CLDR 49; it was Gregorian on the 2.2 data), so `th`, `th-TH` and `en-TH` are all Buddhist by default. Pin Gregorian with
+   CLDR 49; it was Gregorian on the 2.2 data), so `th`, `th-TH` and `en-TH` are all Buddhist by
+   default. That default is kept on purpose; pin Gregorian per call with
    `DateTimeOptions { calendar: Some(Calendar::Gregorian), .. }` (§4e). This branch never
    adopts a requested tag's *language* — an app with no Thai `.ftl` catalog must never render UI
    text the user can't read, so only the region crosses the boundary (see `I18n::format_locale`'s
@@ -712,6 +713,9 @@ list `docs/PLUGINS_DEVELOPMENT.md`'s i18n section tracks — keep both in sync):
 - **th-TH calendar.** With `th-TH` requested over an English-only bundle set, a date shows the
   Buddhist-era year by default and the Gregorian year with `DateTimeOptions { calendar:
   Some(Calendar::Gregorian), .. }` or `DATETIME(calendar: "gregory")`.
+- **CLDR 49 outputs are accepted as-is.** `fr-FR` and `es-ES` render JPY as `JP¥` (not the ISO
+  code), `en-US` as `¥` and `ja-JP` as `￥`; Vietnamese durations read `tiếng` for hours and
+  relative days are lowercase. These are CLDR data, pinned in the test matrix, with no override layer.
 - **Compact numbers.** `NumberOptions { notation: Notation::Compact(..), .. }` and `{ NUMBER($n, notation:
   "compact") }` render `1.2K` / `1.2 thousand` in en and `1.2万` in ja, matching §4e.
 - **Material strings switch.** In the playground, change the language with the locale switcher

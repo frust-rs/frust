@@ -36,8 +36,9 @@
 //!
 //! # The formatter cache is bounded
 //!
-//! Formatters are cached per `(locale, currency)` in a [`BoundedCache`] of at
-//! most [`CACHE_CAPACITY`] entries, least-recently-used evicted first, so a
+//! Formatters are cached per `(locale, currency)` in a [`Cache`] (the shared bounded
+//! formatter cache) of at most [`CACHE_CAPACITY`] entries, least-recently-used
+//! evicted first, so a
 //! caller cycling through arbitrary locale/currency pairs cannot grow it
 //! without limit. An evicted pair is simply rebuilt on its next use.
 //!
@@ -51,7 +52,8 @@
 //! this crate has no source for. Callers that need registry-level validation
 //! do it before calling.
 
-use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use icu_decimal::DecimalFormatter;
 use icu_decimal::input::Decimal;
@@ -65,14 +67,15 @@ use tinystr::TinyAsciiStr;
 
 use crate::{I18nError, Locale};
 
-use super::bridge;
+use super::bridge::{self, Cache};
 use super::number;
 
 /// The number of ASCII letters in an ISO 4217 code.
 const CODE_LEN: usize = 3;
 
 /// CLDR's default when the data cannot be loaded at all (it is baked in, so
-/// this is unreachable in practice).
+/// this is unreachable in practice). Using it is never silent: the failed load
+/// logs a warning once and every fallback is counted ([`fraction_fallbacks`]).
 const DEFAULT_DIGITS: i16 = 2;
 
 /// The most `(locale, currency)` formatters kept alive at once.
@@ -80,68 +83,35 @@ const CACHE_CAPACITY: usize = 64;
 
 /// The baked CLDR fraction data, loaded once.
 static FRACTIONS: LazyLock<Option<DataPayload<CurrencyFractionsV1>>> = LazyLock::new(|| {
-    DataProvider::<CurrencyFractionsV1>::load(&icu_experimental::provider::Baked, {
-        DataRequest::default()
-    })
-    .ok()
-    .map(|response| response.payload)
+    match DataProvider::<CurrencyFractionsV1>::load(
+        &icu_experimental::provider::Baked,
+        DataRequest::default(),
+    ) {
+        Ok(response) => Some(response.payload),
+        Err(error) => {
+            log::warn!(
+                "frust-i18n: the baked currency fraction data failed to load ({error}) \
+                 — every currency is treated as {DEFAULT_DIGITS} fraction digits"
+            );
+            None
+        }
+    }
 });
+
+/// How many times a digit lookup took [`DEFAULT_DIGITS`] because the fraction
+/// data was unavailable.
+static FRACTION_FALLBACKS: AtomicU64 = AtomicU64::new(0);
+
+/// The count of digit lookups that fell back to [`DEFAULT_DIGITS`].
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) fn fraction_fallbacks() -> u64 {
+    FRACTION_FALLBACKS.load(Ordering::Relaxed)
+}
 
 type Formatter = CurrencyFormatter<DecimalFormatter>;
 
-static CURRENCIES: LazyLock<BoundedCache<(Locale, CurrencyType), Formatter>> =
-    LazyLock::new(|| BoundedCache::new(CACHE_CAPACITY));
-
-/// A least-recently-used cache holding at most `capacity` entries.
-///
-/// The lock covers only the lookup and the insert, never a build or a format;
-/// two threads racing a cold key both build and one insert wins, which is
-/// wasted work and never a wrong answer.
-struct BoundedCache<K, V> {
-    capacity: usize,
-    /// Most recently used last.
-    entries: Mutex<Vec<(K, Arc<V>)>>,
-}
-
-impl<K: Clone + Eq, V> BoundedCache<K, V> {
-    fn new(capacity: usize) -> Self {
-        Self {
-            capacity,
-            entries: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn get_or_build<E>(&self, key: &K, build: impl FnOnce() -> Result<V, E>) -> Result<Arc<V>, E> {
-        {
-            let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Some(index) = entries.iter().position(|(held, _)| held == key) {
-                let hit = entries.remove(index);
-                let found = Arc::clone(&hit.1);
-                entries.push(hit);
-                return Ok(found);
-            }
-        }
-
-        let built = Arc::new(build()?);
-        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(index) = entries.iter().position(|(held, _)| held == key) {
-            entries.remove(index);
-        }
-        entries.push((key.clone(), Arc::clone(&built)));
-        if entries.len() > self.capacity {
-            entries.remove(0);
-        }
-        Ok(built)
-    }
-
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.entries
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .len()
-    }
-}
+static CURRENCIES: LazyLock<Cache<(Locale, CurrencyType), Formatter>> =
+    LazyLock::new(|| Cache::with_capacity(CACHE_CAPACITY));
 
 /// Formats `amount` as `iso_code` in `locale`'s currency pattern.
 ///
@@ -226,9 +196,18 @@ fn parse_code(iso_code: &str) -> Result<CurrencyType, I18nError> {
 /// The digits the formatter keeps for `code`: its baked CLDR fraction data,
 /// the data's default for an unlisted code.
 fn fraction_digits(code: &CurrencyType) -> i16 {
-    FRACTIONS.as_ref().map_or(DEFAULT_DIGITS, |payload| {
-        i16::from(payload.get().resolve(*code).digits)
-    })
+    digits_from(FRACTIONS.as_ref(), code)
+}
+
+/// [`fraction_digits`] over an explicit payload; `None` is the counted fallback.
+fn digits_from(payload: Option<&DataPayload<CurrencyFractionsV1>>, code: &CurrencyType) -> i16 {
+    match payload {
+        Some(payload) => i16::from(payload.get().resolve(*code).digits),
+        None => {
+            FRACTION_FALLBACKS.fetch_add(1, Ordering::Relaxed);
+            DEFAULT_DIGITS
+        }
+    }
 }
 
 #[cfg(test)]
@@ -331,6 +310,40 @@ mod tests {
     }
 
     #[test]
+    fn no_baked_currency_uses_a_rounding_increment_other_than_one() {
+        let payload = FRACTIONS.as_ref().expect("baked fraction data loads");
+        let data: &CurrencyFractions<'_> = payload.get();
+
+        let mut offenders = Vec::new();
+        for key in data.fractions.iter_keys() {
+            let code = key.try_into_tinystr().expect("valid code");
+            let info = data.resolve(parse_code(code.as_str()).expect("data code parses"));
+            if info.rounding != Rounding::R1 {
+                offenders.push(format!("{} ({:?})", code.as_str(), info.rounding));
+            }
+        }
+        assert_eq!(
+            data.default.rounding,
+            Rounding::R1,
+            "the default rounding is no longer R1"
+        );
+        assert!(
+            offenders.is_empty(),
+            "currency rounding beyond R1 is not modelled, but CLDR now lists: {}",
+            offenders.join(", ")
+        );
+    }
+
+    #[test]
+    fn a_missing_fraction_payload_falls_back_to_two_digits_and_is_counted() {
+        let usd = parse_code("USD").unwrap();
+        let before = fraction_fallbacks();
+
+        assert_eq!(digits_from(None, &usd), DEFAULT_DIGITS);
+        assert!(fraction_fallbacks() > before);
+    }
+
+    #[test]
     fn currency_minor_is_exact_where_cldr_49_disagrees_with_old_lists() {
         let en = locale("en-US");
 
@@ -340,28 +353,6 @@ mod tests {
         );
         assert_eq!(currency_minor(&en, 1_000, "COP").unwrap(), "COP\u{a0}1,000");
         assert_eq!(format("en-US", 1000.5, "COP"), "COP\u{a0}1,001");
-    }
-
-    #[test]
-    fn the_cache_is_bounded_and_evicts_least_recently_used() {
-        let cache: BoundedCache<u32, u32> = BoundedCache::new(3);
-        let build = |value: u32| move || Ok::<_, ()>(value);
-
-        for key in 0..3 {
-            cache.get_or_build(&key, build(key)).unwrap();
-        }
-        // Touch 0 so 1 is the oldest, then overflow.
-        cache.get_or_build(&0, build(99)).unwrap();
-        cache.get_or_build(&3, build(3)).unwrap();
-
-        assert_eq!(cache.len(), 3);
-        assert_eq!(*cache.get_or_build(&0, build(99)).unwrap(), 0, "0 survived");
-        assert_eq!(*cache.get_or_build(&1, build(11)).unwrap(), 11, "1 evicted");
-
-        for key in 10..100 {
-            cache.get_or_build(&key, build(key)).unwrap();
-        }
-        assert_eq!(cache.len(), 3);
     }
 
     #[test]
