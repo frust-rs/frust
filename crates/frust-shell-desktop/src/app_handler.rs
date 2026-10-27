@@ -59,7 +59,10 @@ use frust_core::event::{
 use frust_core::input::WHEEL_LINE_PX;
 use frust_core::insets::WindowInsets;
 use frust_core::view::View;
-use frust_reactive::{FrameWaker, ReactiveRuntime, TrackedScope, provide_context};
+use frust_reactive::{
+    AppLifecycleState, FrameWaker, ReactiveRuntime, TrackedScope, provide_context,
+    push_app_lifecycle,
+};
 use frust_scene::{Scene, SceneBuilder};
 use frust_shell_common::font_registry::FontRegistryWatcher;
 use frust_shell_common::perf::UiSpans;
@@ -1067,6 +1070,9 @@ where
         // brightness never leaks into a light-preference platform).
         theme: base_theme(default_theme()),
         theme_seeded: false,
+        window_focused: false,
+        window_occluded: false,
+        suspended: false,
         // No brightness reported to the extension yet, so the first
         // resolution (`resumed`'s seed) counts as a change and fires the hook.
         brightness_notified: None,
@@ -2133,6 +2139,12 @@ struct ShellHandler<State: 'static, Build, V: View<State>, E> {
     /// Whether the initial theme has been pushed to the render root / context
     /// yet — seeded once in the first `resumed`, before the first rebuild.
     theme_seeded: bool,
+    /// Window focus, from `WindowEvent::Focused` (seeded in `resumed`); feeds the lifecycle target.
+    window_focused: bool,
+    /// Window occlusion, from `WindowEvent::Occluded`; feeds the lifecycle target.
+    window_occluded: bool,
+    /// Between `suspended` and the next `resumed`; the whole app counts as hidden.
+    suspended: bool,
     /// The brightness last reported through
     /// [`DesktopExtensions::on_theme_brightness_changed`], `None` before the
     /// first report. The change gate behind that hook's "fires only when the
@@ -2632,6 +2644,20 @@ where
         self.runtime.with_owner(move || provide_context(metrics));
     }
 
+    /// Derive the Flutter lifecycle target from the tracked flags and push it. UI thread only.
+    fn sync_app_lifecycle(&mut self) {
+        let minimized = self
+            .window
+            .as_deref()
+            .and_then(|w| w.is_minimized())
+            .unwrap_or(false);
+        push_app_lifecycle(desktop_lifecycle_target(
+            self.window_focused,
+            self.window_occluded || minimized,
+            self.suspended,
+        ));
+    }
+
     /// Re-provide [`WindowState`](frust_core::WindowState) under the root owner, but only
     /// when it differs from the last one provided (the [`push_window_metrics`] guard).
     /// Returns whether it re-provided; like that guard it requests no redraw itself.
@@ -3118,6 +3144,11 @@ where
             self.platform_views.on_surface_recreated();
         }
 
+        // Window exists: seed the focus flag and push the initial lifecycle target.
+        self.suspended = false;
+        self.window_focused = window.has_focus();
+        self.sync_app_lifecycle();
+
         // Seed the theme once, before the first rebuild: read the window's
         // reported light/dark preference into the M3 baseline, then push it to
         // the render root and the reactive context (`apply_theme` also requests
@@ -3154,6 +3185,9 @@ where
         // the split path this is a barriered `SurfaceDestroyed` — the shell
         // blocks until the render thread has released its surface resources.
         self.executor.destroy_surface();
+        // Suspension counts as all-hidden; `resumed` re-derives.
+        self.suspended = true;
+        self.sync_app_lifecycle();
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
@@ -3847,6 +3881,8 @@ where
             // The adapter saw it above; app code needs the new `focused` flag, and a focus
             // change produces no frame of its own.
             WindowEvent::Focused(focused) => {
+                self.window_focused = focused;
+                self.sync_app_lifecycle();
                 font_cache_transition(&self.background_flush, &mut self.text_ctx, !focused);
                 if self.publish_window_state() {
                     window.request_redraw();
@@ -3855,7 +3891,9 @@ where
 
             // macOS reports miniaturize and restore as occlusion, not as a resize, so
             // `minimized` is republished here; a redraw only when the state changed.
-            WindowEvent::Occluded(_) => {
+            WindowEvent::Occluded(occluded) => {
+                self.window_occluded = occluded;
+                self.sync_app_lifecycle();
                 let changed = self.publish_window_state();
                 if changed {
                     window.request_redraw();
@@ -3864,6 +3902,21 @@ where
 
             _ => {}
         }
+    }
+}
+
+/// Flutter's desktop mapping: `Resumed` while any window is focused, else `Hidden` when every
+/// window is occluded or minimized (or the app is suspended), else `Inactive`. Desktop never
+/// reports `Paused` or `Detached`.
+fn desktop_lifecycle_target(focused: bool, hidden: bool, suspended: bool) -> AppLifecycleState {
+    if suspended {
+        AppLifecycleState::Hidden
+    } else if focused {
+        AppLifecycleState::Resumed
+    } else if hidden {
+        AppLifecycleState::Hidden
+    } else {
+        AppLifecycleState::Inactive
     }
 }
 
@@ -3892,6 +3945,17 @@ fn layout_needed(needs_layout: bool, laid_out_for: Option<Size>, logical: Size) 
 
 #[cfg(test)]
 mod tests {
+    use super::{AppLifecycleState as S, desktop_lifecycle_target as target};
+
+    #[test]
+    fn desktop_lifecycle_mapping() {
+        assert_eq!(target(true, false, false), S::Resumed);
+        assert_eq!(target(true, true, false), S::Resumed);
+        assert_eq!(target(false, false, false), S::Inactive);
+        assert_eq!(target(false, true, false), S::Hidden);
+        assert_eq!(target(true, false, true), S::Hidden);
+    }
+
     #[test]
     fn font_cache_flushes_once_per_background_edge_and_not_on_foreground() {
         use frust_shell_common::{BackgroundFlush, FontCacheFlush};
