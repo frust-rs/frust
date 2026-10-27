@@ -225,9 +225,9 @@ use std::hash::{BuildHasherDefault, Hasher};
 
 use glifo::{
     AtlasConfig, AtlasSlot, FontEmbolden, GlyphAtlas, GlyphCacheConfig, GlyphCacheKey, ImageCache,
-    PendingClearRect, RasterMetrics,
+    NormalizedCoord, PendingClearRect, RasterMetrics,
 };
-use kurbo::Affine;
+use kurbo::{Affine, Diagonal2};
 use peniko::color::palette::css::BLACK;
 use peniko::color::{AlphaColor, Srgb};
 
@@ -536,6 +536,181 @@ pub(crate) fn quantize_font_size(size: f32) -> Option<f32> {
     (quantized > 0.0 && quantized.is_finite()).then_some(quantized)
 }
 
+/// Whether `run` is drawn with synthetic oblique, given the compiler's switch
+/// (`SceneCompiler::set_synthetic_oblique`, off by default). A run it applies
+/// to is drawn with a skewing glyph transform, and is routed to outlines every
+/// frame (`glifo` caches no run whose transform skews, and an upright entry
+/// must never be probed for it). Off, an obliqued face draws upright and is
+/// cached like any upright run, as it did before the angle was carried.
+#[must_use]
+pub(crate) fn oblique_synthesis(run: &frust_scene::GlyphRun, enabled: bool) -> bool {
+    enabled && run.font.skew_degrees() != 0.0
+}
+
+/// The glyph transform that leans `run`'s glyphs, when it has synthetic
+/// oblique (see [`oblique_synthesis`]). The outline is flipped to layout space
+/// (y down) before this is applied, so a rightward lean of the top is a
+/// negative shear.
+#[must_use]
+pub(crate) fn oblique_transform(run: &frust_scene::GlyphRun, enabled: bool) -> Option<Affine> {
+    oblique_synthesis(run, enabled)
+        .then(|| Affine::skew(-f64::from(run.font.skew_degrees()).to_radians().tan(), 0.0))
+}
+
+/// The most variation axes a cached run's key holds inline. A face with more
+/// axes than this is drawn as outlines ([`OutlineReason::VariationAxes`]):
+/// the key stays `Copy` and allocation-free, and no real UI face comes close.
+pub(crate) const MAX_KEYED_AXES: usize = 8;
+
+/// The faux-bold stroke, per side, a run of `fraction` em is drawn with when
+/// the stroke is a fraction of `basis` (see [`embolden_basis`]).
+///
+/// `fraction` is the whole added stroke width as a fraction of the em (see
+/// `FontHandle::embolden`), so each side of the outline grows by half of it.
+/// Zero when there is no synthesis, or when the basis is not a finite positive
+/// number.
+#[must_use]
+pub(crate) fn embolden_per_side(fraction: f32, basis: f32) -> f32 {
+    let amount = fraction * basis * 0.5;
+    if amount.is_finite() && amount > 0.0 {
+        amount
+    } else {
+        0.0
+    }
+}
+
+/// The size `glifo` draws a run's outlines at: `size` with the run
+/// transform's absorbed scale multiplied in, in `f32` exactly as `glifo`
+/// multiplies it, or `size` itself when the transform is not absorbed and the
+/// outline is drawn at its nominal size under the full transform.
+#[must_use]
+pub(crate) fn drawn_font_size(size: f32, transform: Affine) -> f32 {
+    absorbed_scale(transform).map_or(size, |scale| size * scale as f32)
+}
+
+/// The length a run's faux-bold stroke is a fraction of: the unit the amount
+/// handed to `glifo` is measured in.
+///
+/// `glifo` (`GlyphScaleProperties::new`, `glyph.rs`) caches an outline at one
+/// of two sizes, and applies `FontEmbolden` to the outline *at that size*
+/// before the draw scale `draw_size / cache_size` is applied:
+///
+/// - HINTED (`hinting_instance` is set, which `glifo` does when the run's
+///   transform is a positive uniform scale without *vertical* skew,
+///   [`hinted_absorbed_scale`] — a horizontal skew is still hinted): the
+///   outline is cached at the device size `font_size * d`, with no further
+///   scale, so the stroke is in device pixels. The basis is that size. A
+///   hinted oblique run is still absorbed (the oblique skew is horizontal), so
+///   oblique does not change the basis. Note this is a looser predicate than
+///   [`absorbed_scale`], which gates the atlas and so rejects every skew.
+/// - UNHINTED (every run of the mobile tier, `hint(false)`, and any hinted run
+///   whose transform `glifo` cannot absorb): the outline is cached at the
+///   face's `unitsPerEm` and scaled to the draw size afterwards, so the stroke
+///   is in font units and the scale turns `fraction * upem` into
+///   `fraction * draw_size` on screen. The basis is `upem`. Oblique or not
+///   changes nothing at this level: a skew only changes the draw transform,
+///   never the cache size, and whether the scale was absorbed
+///   (`AbsorbScaleUnhinted`) or left in the transform (`Direct`) only changes
+///   where `draw_size / upem` is applied.
+///
+/// `upem` is the face's units-per-em ([`FaceFacts::upem`](super::FaceFacts)),
+/// read once per face. One function for the lowering, the route key and the
+/// resident plan, so the embolden bits each derives are the same.
+#[must_use]
+pub(crate) fn embolden_basis(size: f32, transform: Affine, hinted: bool, upem: f32) -> f32 {
+    match hinted.then(|| hinted_absorbed_scale(transform)).flatten() {
+        // `glifo`'s `vertical_font_size`: `run.font_size * t_d`, in `f32`.
+        Some(scale) => size * scale as f32,
+        None => upem,
+    }
+}
+
+/// `glifo`'s *hinted* absorption predicate
+/// (`is_positive_uniform_scale_without_vertical_skew`, `util.rs`): a positive
+/// uniform scale with no vertical skew. Unlike [`absorbed_scale`] it admits a
+/// horizontal skew (`c`), because `glifo` hints vertically only. Returns the
+/// vertical coefficient `d`, which `glifo` multiplies the font size by.
+///
+/// The run's own transform is enough to decide it: `glifo` multiplies a glyph
+/// transform onto it, and the only glyph transform this tier sets is the
+/// horizontal skew of synthetic oblique, which leaves `b` and `d` unchanged.
+#[must_use]
+pub(crate) fn hinted_absorbed_scale(transform: Affine) -> Option<f64> {
+    let [a, b, c, d, _, _] = transform.as_coeffs();
+    if !(a.is_finite() && b.is_finite() && c.is_finite() && d.is_finite()) {
+        return None;
+    }
+    let uniform = (a - d).abs() <= NEARLY_ZERO && a > 0.0 && d > 0.0;
+    (uniform && b.abs() <= NEARLY_ZERO).then_some(d)
+}
+
+/// What a run is drawn with beyond its font and size: the variation
+/// coordinates and the faux-bold stroke. Both reach `glifo`'s own outline key,
+/// so both are part of every key built here, and two runs differing in either
+/// never share a cache record.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Synthesis {
+    /// How many of `coords` are in use.
+    axes: u8,
+    /// The run's normalized coordinates, inline.
+    coords: [NormalizedCoord; MAX_KEYED_AXES],
+    /// The per-side embolden amount's `f32` bits (see [`embolden_per_side`]).
+    embolden_bits: u32,
+}
+
+impl Synthesis {
+    /// No coordinates and no embolden: the face's default instance.
+    pub(crate) const NONE: Self = Self {
+        axes: 0,
+        coords: [0; MAX_KEYED_AXES],
+        embolden_bits: 0,
+    };
+
+    /// The synthesis for `coords` and a per-side `embolden` amount, or `None`
+    /// when there are more axes than a key holds.
+    #[must_use]
+    pub(crate) fn new(coords: &[NormalizedCoord], embolden: f32) -> Option<Self> {
+        if coords.len() > MAX_KEYED_AXES {
+            return None;
+        }
+        let mut inline = [0; MAX_KEYED_AXES];
+        inline[..coords.len()].copy_from_slice(coords);
+        Some(Self {
+            axes: coords.len() as u8,
+            coords: inline,
+            embolden_bits: embolden.max(0.0).to_bits(),
+        })
+    }
+
+    /// The coordinates in use.
+    #[must_use]
+    pub(crate) fn coords(&self) -> &[NormalizedCoord] {
+        &self.coords[..usize::from(self.axes)]
+    }
+
+    /// The embolden `glifo` is handed and keys on.
+    #[must_use]
+    pub(crate) fn embolden(&self) -> FontEmbolden {
+        embolden_for(f32::from_bits(self.embolden_bits))
+    }
+
+    fn same(&self, other: &Self) -> bool {
+        self.embolden_bits == other.embolden_bits && self.coords() == other.coords()
+    }
+}
+
+/// The symmetric stroke `glifo` expands an outline by: the same amount
+/// horizontally and vertically, with its default miter joins. The default (no
+/// expansion) when `per_side` is zero.
+#[must_use]
+pub(crate) fn embolden_for(per_side: f32) -> FontEmbolden {
+    if per_side > 0.0 {
+        FontEmbolden::new(Diagonal2::new(f64::from(per_side), f64::from(per_side)))
+    } else {
+        FontEmbolden::default()
+    }
+}
+
 /// Why a glyph is drawn as outline strips rather than sampled from the atlas.
 ///
 /// Every variant is a *route*, never a failure: the glyph is still drawn, by
@@ -575,6 +750,13 @@ pub(crate) enum OutlineReason {
     /// Asked outside the frame's collect phase, so there was nothing to collect
     /// into (see this module's doc).
     NotCollecting,
+    /// The run is synthetically obliqued. `glifo` caches no run whose
+    /// transform skews, and an upright entry of the same glyph must never be
+    /// probed for it, so it is drawn as outlines every frame.
+    SyntheticOblique,
+    /// The face's variation instance has more axes than a key holds inline
+    /// ([`MAX_KEYED_AXES`]).
+    VariationAxes,
 }
 
 /// A run the policy will cache, reduced to everything its glyph keys need.
@@ -598,6 +780,8 @@ pub(crate) struct AtlasRun {
     distinct_glyphs: u32,
     /// Whether the run's outlines are hinted.
     hinted: bool,
+    /// The variation coordinates and faux-bold stroke the run is drawn with.
+    synthesis: Synthesis,
     /// The context colour a COLR glyph resolves against.
     context_color: AlphaColor<Srgb>,
     /// `context_color` premultiplied and packed, which is the form
@@ -626,10 +810,10 @@ impl AtlasRun {
     /// expose. Quantizing it here as well would either duplicate that constant
     /// or disagree with it.
     ///
-    /// No synthetic embolden and no variation coordinates, matching what
-    /// `super::lower_glyph_run` states explicitly when it builds the run:
-    /// the classic tier drops parley's synthesis, so a key claiming otherwise
-    /// would name a glyph the engine never draws.
+    /// The embolden and coordinates are the run's own, the ones
+    /// `super::lower_glyph_run` hands `glifo` for it, so a key names the glyph
+    /// the engine draws: a bold and a regular run of one blob never share an
+    /// entry.
     #[must_use]
     pub(crate) fn key(&self, glyph_id: u32, fractional_x: f32) -> GlyphCacheKey {
         GlyphCacheKey::new(
@@ -641,8 +825,8 @@ impl AtlasRun {
             fractional_x,
             self.context_color,
             self.context_color_packed,
-            FontEmbolden::default(),
-            &[],
+            self.synthesis.embolden(),
+            bytemuck::cast_slice(self.synthesis.coords()),
         )
     }
 }
@@ -769,6 +953,12 @@ pub(crate) struct RunKey {
     pub(crate) color_font: bool,
     /// The context colour a COLR glyph resolves against.
     pub(crate) context_color: AlphaColor<Srgb>,
+    /// The variation coordinates and faux-bold stroke the run is drawn with,
+    /// or `None` when it has more axes than a key holds.
+    pub(crate) synthesis: Option<Synthesis>,
+    /// Whether the run is synthetically obliqued: a *routing* input, which
+    /// sends it to outlines.
+    pub(crate) oblique: bool,
 }
 
 impl RunKey {
@@ -804,16 +994,22 @@ impl RunKey {
     /// ten-thousand-glyph run costs no allocation of its own (see
     /// [`DistinctGlyphs`]).
     #[must_use]
-    pub(crate) fn for_run(
+    pub(crate) fn for_run_with(
         run: &frust_scene::GlyphRun,
         transform: Affine,
         hinted: bool,
         color_font: bool,
         context_color: AlphaColor<Srgb>,
         seen: &mut impl DistinctGlyphs,
+        basis: RunBasis,
     ) -> Self {
         let font = run.font.font();
         let distinct = seen.count_distinct(run.glyphs.iter().map(|glyph| glyph.id));
+        let oblique = oblique_synthesis(run, basis.synthetic_oblique);
+        let embolden = embolden_per_side(
+            run.font.embolden(),
+            embolden_basis(run.font_size, transform, hinted, basis.upem),
+        );
         Self {
             font_id: font.data.id(),
             font_index: font.index,
@@ -823,8 +1019,47 @@ impl RunKey {
             hinted,
             color_font,
             context_color,
+            synthesis: Synthesis::new(run.font.normalized_coords(), embolden),
+            oblique,
         }
     }
+
+    /// [`Self::for_run_with`] for a run with no faux bold and no synthetic
+    /// oblique, which needs neither the face's units-per-em nor the switch.
+    #[cfg(test)]
+    pub(crate) fn for_run(
+        run: &frust_scene::GlyphRun,
+        transform: Affine,
+        hinted: bool,
+        color_font: bool,
+        context_color: AlphaColor<Srgb>,
+        seen: &mut impl DistinctGlyphs,
+    ) -> Self {
+        debug_assert!(run.font.embolden() == 0.0, "use for_run_with for faux bold");
+        let basis = RunBasis {
+            upem: 0.0,
+            synthetic_oblique: false,
+        };
+        Self::for_run_with(
+            run,
+            transform,
+            hinted,
+            color_font,
+            context_color,
+            seen,
+            basis,
+        )
+    }
+}
+
+/// What a [`RunKey`] needs beyond the run itself, both owned by the caller:
+/// the face's units-per-em and the compiler's synthetic-oblique switch.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RunBasis {
+    /// The face's units-per-em (see [`embolden_basis`]).
+    pub(crate) upem: f32,
+    /// `SceneCompiler::synthetic_oblique_enabled`.
+    pub(crate) synthetic_oblique: bool,
 }
 
 /// Scratch a run's distinct glyph ids are counted in — what
@@ -1291,6 +1526,12 @@ impl AtlasPolicy {
         if run.color_font {
             return RunRoute::Outline(OutlineReason::ColorFont);
         }
+        if run.oblique {
+            return RunRoute::Outline(OutlineReason::SyntheticOblique);
+        }
+        let Some(synthesis) = run.synthesis else {
+            return RunRoute::Outline(OutlineReason::VariationAxes);
+        };
         let Some(device_size) = device_font_size(run.font_size, run.transform) else {
             return RunRoute::Outline(OutlineReason::TransformUncacheable);
         };
@@ -1332,6 +1573,7 @@ impl AtlasPolicy {
             size,
             distinct_glyphs: run.distinct_glyphs,
             hinted: run.hinted,
+            synthesis,
             context_color: run.context_color,
             context_color_packed: pack_context_color(run.context_color),
         })
@@ -1889,6 +2131,8 @@ pub(crate) struct ResidentIdentity {
     pub(crate) size: f32,
     /// Whether the run's outlines are hinted.
     pub(crate) hinted: bool,
+    /// The variation coordinates and faux-bold stroke the run is drawn with.
+    pub(crate) synthesis: Synthesis,
 }
 
 /// One glyph of a run about to be resolved: its id, and the subpixel bucket
@@ -1969,6 +2213,7 @@ impl ResidentRun {
             && self.identity.font_index == identity.font_index
             && self.identity.size.to_bits() == identity.size.to_bits()
             && self.identity.hinted == identity.hinted
+            && self.identity.synthesis.same(&identity.synthesis)
             && self.ids.len() == placed.len()
             && self
                 .ids
@@ -2001,6 +2246,10 @@ fn run_hash(identity: &ResidentIdentity, placed: &[PlacedGlyph]) -> u64 {
     hash = mix(hash, u64::from(identity.font_index));
     hash = mix(hash, u64::from(identity.size.to_bits()));
     hash = mix(hash, u64::from(identity.hinted));
+    hash = mix(hash, u64::from(identity.synthesis.embolden_bits));
+    for coord in identity.synthesis.coords() {
+        hash = mix(hash, u64::from(*coord as u16));
+    }
     hash = mix(hash, placed.len() as u64);
     for glyph in placed {
         hash = mix(hash, u64::from(glyph.id));
@@ -2034,9 +2283,9 @@ impl Hasher for RunHashHasher {
 /// Built field for field as `glifo` builds it for the outline probe it makes
 /// first for every glyph: the run's absorbed size and hinting, the bucket's
 /// own fractional offset (which quantizes back to the bucket), black as the
-/// context colour (an outline's ink is the tint, never the key), no synthetic
-/// embolden and no variation coordinates — the two the lowering states
-/// explicitly. `black` is black packed, computed once by the caller.
+/// context colour (an outline's ink is the tint, never the key), the run's
+/// own embolden and variation coordinates, which the lowering hands `glifo`.
+/// `black` is black packed, computed once by the caller.
 fn outline_key(
     identity: &ResidentIdentity,
     glyph_id: u32,
@@ -2052,8 +2301,8 @@ fn outline_key(
         glifo::atlas::key::subpixel_offset(bucket),
         BLACK,
         black,
-        FontEmbolden::default(),
-        &[],
+        identity.synthesis.embolden(),
+        bytemuck::cast_slice(identity.synthesis.coords()),
     )
 }
 
@@ -2324,6 +2573,7 @@ mod resident_run_tests {
             font_index: 0,
             size: 16.0,
             hinted: false,
+            synthesis: Synthesis::NONE,
         };
         let black = pack_context_color(BLACK);
         for step in -4096_i32..4096 {
@@ -2373,6 +2623,7 @@ mod resident_run_tests {
             font_index: 0,
             size: 16.0,
             hinted: false,
+            synthesis: Synthesis::NONE,
         };
         let placed = [PlacedGlyph { id: 3, bucket: 1 }];
         let mut slots = Vec::new();
@@ -2397,6 +2648,7 @@ mod resident_run_tests {
             font_index: 0,
             size: 16.0,
             hinted: false,
+            synthesis: Synthesis::NONE,
         };
         for serial in 0..(MAX_RESIDENT_RUNS as u32 * 3) {
             let frame = u64::from(serial / 10);
@@ -2426,6 +2678,75 @@ mod resident_run_tests {
             .collect();
         let hash = run_hash(&identity, &huge);
         assert!(runs.open(hash, identity, &huge, 10_000).is_none());
+    }
+
+    /// Runs differing in variation coordinates or embolden never share a
+    /// resident record, a hash, or a glyph cache key's coordinates.
+    #[test]
+    fn synthesis_separates_resident_identities_and_glyph_keys() {
+        let base = ResidentIdentity {
+            font_id: 1,
+            font_index: 0,
+            size: 16.0,
+            hinted: false,
+            synthesis: Synthesis::NONE,
+        };
+        let bold_axis = ResidentIdentity {
+            synthesis: Synthesis::new(&[8192], 0.0).unwrap(),
+            ..base
+        };
+        let faux_bold = ResidentIdentity {
+            synthesis: Synthesis::new(&[], 0.4).unwrap(),
+            ..base
+        };
+        let placed = [PlacedGlyph { id: 5, bucket: 0 }];
+        let base_hash = run_hash(&base, &placed);
+        assert_ne!(base_hash, run_hash(&bold_axis, &placed));
+        assert_ne!(base_hash, run_hash(&faux_bold, &placed));
+        let record = ResidentRun::new(base, &placed, 0);
+        assert!(record.matches(&base, &placed));
+        assert!(!record.matches(&bold_axis, &placed));
+        assert!(!record.matches(&faux_bold, &placed));
+        let black = pack_context_color(BLACK);
+        let key = |identity: &ResidentIdentity| outline_key(identity, 5, 0, black);
+        assert!(key(&base).var_coords.is_empty());
+        assert_eq!(key(&bold_axis).var_coords.len(), 1);
+        assert_ne!(key(&base), key(&faux_bold));
+    }
+
+    /// Too many axes for the inline key is refused, not truncated.
+    #[test]
+    fn too_many_axes_are_not_keyed() {
+        assert!(Synthesis::new(&[0; MAX_KEYED_AXES], 0.0).is_some());
+        assert!(Synthesis::new(&[0; MAX_KEYED_AXES + 1], 0.0).is_none());
+    }
+
+    /// A hinted run's stroke is measured in drawn pixels, an unhinted one's
+    /// in font units, oblique or not.
+    #[test]
+    fn the_embolden_basis_is_the_drawn_size_hinted_and_upem_unhinted() {
+        let twice = Affine::scale(2.0);
+        assert_eq!(embolden_basis(16.0, twice, true, 1000.0), 32.0);
+        assert_eq!(embolden_basis(16.0, twice, false, 1000.0), 1000.0);
+        assert_eq!(embolden_basis(16.0, twice, false, 2048.0), 2048.0);
+        // A transform `glifo` cannot absorb cannot be hinted either.
+        let skewed = Affine::skew(0.4, 0.4);
+        assert_eq!(embolden_basis(16.0, skewed, true, 1000.0), 1000.0);
+        // A horizontal-only shear is still hinted by `glifo`: device basis.
+        let sheared = Affine::new([1.0, 0.0, 0.3, 1.0, 0.0, 0.0]);
+        assert_eq!(embolden_basis(16.0, sheared, true, 1000.0), 16.0);
+        let sheared_twice = Affine::new([2.0, 0.0, 0.3, 2.0, 5.0, 7.0]);
+        assert_eq!(embolden_basis(16.0, sheared_twice, true, 1000.0), 32.0);
+        assert_eq!(embolden_basis(16.0, sheared, false, 1000.0), 1000.0);
+        // A rotation or a vertical skew is not: font units.
+        let rotated = Affine::rotate(0.3);
+        assert_eq!(embolden_basis(16.0, rotated, true, 1000.0), 1000.0);
+        let vertical = Affine::new([1.0, 0.3, 0.0, 1.0, 0.0, 0.0]);
+        assert_eq!(embolden_basis(16.0, vertical, true, 1000.0), 1000.0);
+        assert_eq!(
+            hinted_absorbed_scale(Affine::new([1.0, 0.0, f64::NAN, 1.0, 0.0, 0.0])),
+            None
+        );
     }
 }
 

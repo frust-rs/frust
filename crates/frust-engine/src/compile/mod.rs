@@ -107,7 +107,7 @@ use crate::filters::{Backdrop, MAX_BACKDROPS_PER_FRAME, backdrop_region, backdro
 use crate::text::hvgl::HvglOutlines;
 use crate::text::{
     AtlasPolicy, FontFacts, GlyphQuadScratch, GlyphQuadTargets, GlyphRunRouting, GlyphRunTargets,
-    RunKey, RunRoute, context_paint, glyph_atlas_policy, lower_glyph_run,
+    OutlineReason, RunBasis, RunKey, RunRoute, context_paint, glyph_atlas_policy, lower_glyph_run,
 };
 
 /// Curve-flattening tolerance, in device pixels.
@@ -453,6 +453,20 @@ pub struct CompiledFrame {
     /// inserted entries and dirtied a page while reporting zero here. That
     /// question is [`SceneCompiler::glyph_replay_pending`]'s.
     pub atlas_glyph_draws: u32,
+    /// How many glyph runs were drawn as outlines because they are
+    /// faux-obliqued (`OutlineReason::SyntheticOblique`).
+    ///
+    /// Observational, and the measure of what faux-italic text costs: such a
+    /// run is re-tessellated every frame, never cached and never resident.
+    /// Counted only when the atlas policy is active (a process with the atlas
+    /// switched off routes every run as disabled first).
+    pub synthetic_oblique_runs: u32,
+    /// How many glyph runs were drawn as outlines because their face has more
+    /// variation axes than the cache key holds (`OutlineReason::VariationAxes`,
+    /// more than `MAX_KEYED_AXES`).
+    ///
+    /// Observational, like [`synthetic_oblique_runs`](Self::synthetic_oblique_runs).
+    pub variation_axes_outline_runs: u32,
     /// Where each of this frame's atlas-sampled glyphs lives, one entry per
     /// atlas draw (see [`GlyphSlot`]).
     pub glyph_slots: Vec<GlyphSlot>,
@@ -636,6 +650,9 @@ pub struct SceneCompiler {
     /// `FRUST_ENGINE_NO_GLYPH_RUN_CACHE` is set; [`Self::set_glyph_run_cache`]
     /// decides it per compiler.
     glyph_run_cache: bool,
+    /// Whether an obliqued face is drawn leaned; off by default.
+    /// [`Self::set_synthetic_oblique`] has the measurement behind that.
+    synthetic_oblique: bool,
     /// The font gate's answers for the faces drawn most recently, so a frame
     /// of many short runs reads each face's table directory once (see
     /// [`crate::text::FontFacts`]).
@@ -746,6 +763,32 @@ impl SceneCompiler {
     /// quads off turns it off too.
     pub fn set_glyph_run_cache(&mut self, enabled: bool) {
         self.glyph_run_cache = enabled;
+    }
+
+    /// Set whether a face with an oblique angle (`FontHandle::skew_degrees`,
+    /// a static face asked for italic that lacks it) is drawn leaned by a
+    /// skewing glyph transform. Takes effect from the next run.
+    ///
+    /// Off by default. `glifo` caches no run whose transform skews, so a
+    /// leaned run is routed to outlines every frame
+    /// (`CompiledFrame::synthetic_oblique_runs` counts them). Measured on an
+    /// Apple M4 (gate `r1-faux-oblique-cost-macos`), a scenario with its whole
+    /// corpus in faux italic costs +1.5 ms per frame in submit (encode 0.010 to
+    /// 0.041 ms, submit 0.380 to 1.880 ms), far past the 5% budget decision D2
+    /// allows. Off, such a run draws upright and is cached like any upright
+    /// run.
+    ///
+    /// Revisit trigger: turn it on by default only once leaned outlines are
+    /// cached under a skew-aware key and the italic-corpus cost is within 5%
+    /// of the upright one on the same device.
+    pub fn set_synthetic_oblique(&mut self, enabled: bool) {
+        self.synthetic_oblique = enabled;
+    }
+
+    /// Whether faces with an oblique angle are drawn leaned.
+    #[must_use]
+    pub fn synthetic_oblique_enabled(&self) -> bool {
+        self.synthetic_oblique
     }
 
     /// Whether glyph runs may be drawn out of the resident-run cache.
@@ -889,6 +932,7 @@ impl SceneCompiler {
             glyph_quads: !config::glyph_quads_disabled(),
             glyph_quad_scratch: GlyphQuadScratch::default(),
             glyph_run_cache: !config::glyph_run_cache_disabled(),
+            synthetic_oblique: false,
             font_facts: FontFacts::default(),
             hvgl_outlines: HvglOutlines::default(),
             hint_text: false,
@@ -1183,6 +1227,8 @@ impl SceneCompiler {
             glyph_draws: 0,
             skipped_glyphs: 0,
             atlas_glyph_draws: 0,
+            synthetic_oblique_runs: 0,
+            variation_axes_outline_runs: 0,
             glyph_slots: Vec::new(),
             glyph_quads: Vec::new(),
             glyph_run_paints: Vec::new(),
@@ -1753,13 +1799,17 @@ impl SceneCompiler {
                     // colour face is: its glyphs are drawn by the `hvgl`
                     // provider, never cached by `glifo`.
                     let facts = self.font_facts.of(run.font.font());
-                    let key = RunKey::for_run(
+                    let key = RunKey::for_run_with(
                         run,
                         root * retained_stack.correction() * run.transform,
                         self.hint_text,
                         facts.color || facts.hvgl,
                         context_color,
                         &mut self.run_glyph_ids,
+                        RunBasis {
+                            upem: f32::from(facts.upem),
+                            synthetic_oblique: self.synthetic_oblique,
+                        },
                     );
                     let route = self.glyph_atlas.classify_run(&key);
                     self.run_routes.push(route);
@@ -1846,6 +1896,8 @@ impl SceneCompiler {
         // fields would fight the borrow checker for no reason.
         let hint_text = self.hint_text;
         let glyph_run_cache = self.glyph_run_cache;
+        let synthetic_oblique = self.synthetic_oblique;
+        let upem = f32::from(facts.upem);
         let hvgl_face = facts.hvgl;
         // Destructured rather than passed as `self`, because the sink borrows
         // the generator and the clip stack mutably while the glyph caches, the
@@ -1867,6 +1919,16 @@ impl SceneCompiler {
         // through. A run it refused reaches `glifo` with no cache at all, which
         // is the outline path unchanged rather than a cache that declines every
         // lookup — those are the same pixels but not the same work.
+        match route {
+            Some(RunRoute::Outline(OutlineReason::SyntheticOblique)) => {
+                frame.synthetic_oblique_runs = frame.synthetic_oblique_runs.saturating_add(1);
+            }
+            Some(RunRoute::Outline(OutlineReason::VariationAxes)) => {
+                frame.variation_axes_outline_runs =
+                    frame.variation_axes_outline_runs.saturating_add(1);
+            }
+            _ => {}
+        }
         let atlas = match route {
             Some(RunRoute::Atlas(_)) => Some((glyph_atlas, images.allocator_mut())),
             Some(RunRoute::Outline(_)) | None => None,
@@ -1890,6 +1952,8 @@ impl SceneCompiler {
                 resident: glyph_run_cache,
                 quads,
                 hvgl_face,
+                synthetic_oblique,
+                upem,
             },
             GlyphRunTargets {
                 generator,

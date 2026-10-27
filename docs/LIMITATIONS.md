@@ -8515,3 +8515,21 @@ over by the selector (logged at warn once per script and language), never drawn 
 faces an identity.
 
 **Evidence**: `crates/frust-engine/src/text/hvgl.rs`.
+
+---
+
+### `text-faux-oblique-off` — synthetic italic is off by default; opting in draws outlines every frame
+
+**Observed**: an italic request on a face with no italic or slant axis draws upright.
+`SceneCompiler::set_synthetic_oblique(true)` opts in, and skewed runs then never enter the glyph atlas or the
+resident-run cache: they draw as outlines every frame. Measured on scene S6 with an all-italic corpus
+(Apple M4), submit time rose from 0.38 ms to 1.88 ms per frame. `EngineRenderer` does not yet forward
+the switch, so the opt-in is engine-level only.
+
+**Applies to**: any target drawing italic text from a face without a real italic or slant axis.
+
+**Workaround**: use a face with a real italic or a slant axis, which stays on the atlas route;
+`CompiledFrame::synthetic_oblique_runs` counts the skewed runs when the switch is on.
+
+**Evidence**: Apple M4 S6 all-italic measurement; Pixel 5 faux-oblique probe rows leaned with the switch
+on; `crates/frust-engine/src/compile/mod.rs`.
