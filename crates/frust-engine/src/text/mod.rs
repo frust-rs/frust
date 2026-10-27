@@ -33,10 +33,11 @@
 //! - **Faux bold**, for a static face asked for a weight it lacks: the handle's
 //!   em fraction is the whole added stroke width, so
 //!   [`atlas_policy::embolden_per_side`] grows each side of the outline by half
-//!   of it times the size the outline is drawn at, as a symmetric
-//!   [`FontEmbolden`] (the same amount horizontally and vertically).
-//! - **Faux oblique**, behind the single switch
-//!   [`atlas_policy::OBLIQUE_SYNTHESIS`]: a skewing glyph transform. `glifo`
+//!   of it times [`atlas_policy::embolden_basis`] (the drawn size when hinted,
+//!   the face's units-per-em when unhinted), as a symmetric [`FontEmbolden`]
+//!   (the same amount horizontally and vertically).
+//! - **Faux oblique**, behind the compiler switch
+//!   `SceneCompiler::set_synthetic_oblique` (off by default): a skewing glyph transform. `glifo`
 //!   caches no skewed run, so such a run is never offered the atlas or the
 //!   resident-run path and is drawn as outlines every frame.
 //!
@@ -176,7 +177,7 @@ use crate::compile::{CompiledFrame, DepthCounter};
 use crate::config;
 
 pub(crate) use atlas_policy::AtlasPolicy;
-pub(crate) use atlas_policy::{OutlineReason, RunKey, RunRoute};
+pub(crate) use atlas_policy::{OutlineReason, RunBasis, RunKey, RunRoute};
 
 use atlas_policy::{ResidentAnswer, ResidentIdentity};
 
@@ -228,6 +229,12 @@ pub(crate) struct GlyphRunRouting<'a> {
     /// ([`hvgl::font_needs_hvgl_provider`]), so its glyphs are filled from
     /// [`hvgl`] rather than handed to `glifo`.
     pub(crate) hvgl_face: bool,
+    /// Whether a face with an oblique angle is drawn leaned
+    /// ([`SceneCompiler::set_synthetic_oblique`](crate::compile::SceneCompiler::set_synthetic_oblique)).
+    pub(crate) synthetic_oblique: bool,
+    /// The face's units-per-em ([`FaceFacts::upem`]), the basis of an unhinted
+    /// run's faux-bold stroke (see [`atlas_policy::embolden_basis`]).
+    pub(crate) upem: f32,
 }
 
 /// Draw `run` into `targets`, painted with the already-encoded `paint`.
@@ -281,6 +288,8 @@ pub(crate) fn lower_glyph_run(
         resident,
         quads,
         hvgl_face,
+        synthetic_oblique,
+        upem,
     } = routing;
     let GlyphRunTargets {
         generator,
@@ -312,7 +321,7 @@ pub(crate) fn lower_glyph_run(
     let context = context_paint(context_brush);
     // Planned before the sink takes the context paint over.
     let plan = if resident && atlas.is_some() && quads.is_some() {
-        ResidentPlan::new(run, transform, hint, &context)
+        ResidentPlan::new(run, transform, hint, &context, synthetic_oblique, upem)
     } else {
         None
     };
@@ -348,12 +357,10 @@ pub(crate) fn lower_glyph_run(
     };
     // Computed from the same helpers the route key and the resident plan use,
     // so the amount `glifo` keys on is the amount they key on.
-    let oblique = atlas_policy::oblique_transform(run);
-    let drawn_size =
-        atlas_policy::run_drawn_size(run.font_size, transform, hint, oblique.is_some());
+    let oblique = atlas_policy::oblique_transform(run, synthetic_oblique);
     let embolden = atlas_policy::embolden_for(atlas_policy::embolden_per_side(
         run.font.embolden(),
-        drawn_size,
+        atlas_policy::embolden_basis(run.font_size, transform, hint, upem),
     ));
     let builder = GlyphRunBuilder::new(
         run.font.font().clone(),
@@ -441,6 +448,8 @@ impl<'r> ResidentPlan<'r> {
         transform: Affine,
         hint: bool,
         context: &PaintType,
+        synthetic_oblique: bool,
+        upem: f32,
     ) -> Option<Self> {
         // `glifo` tints a cached outline with the context colour and caches
         // none under any other paint.
@@ -453,12 +462,15 @@ impl<'r> ResidentPlan<'r> {
         atlas_policy::absorbed_scale(full)?;
         // A skewed run is never resident: `glifo` caches none, and an upright
         // record of the same glyphs must not be replayed for it.
-        if atlas_policy::oblique_synthesis(run) {
+        if atlas_policy::oblique_synthesis(run, synthetic_oblique) {
             return None;
         }
         let [_, _, t_c, t_d, t_e, t_f] = full.as_coeffs();
-        let size = atlas_policy::run_drawn_size(run.font_size, full, hint, false);
-        let embolden = atlas_policy::embolden_per_side(run.font.embolden(), size);
+        let size = atlas_policy::drawn_font_size(run.font_size, full);
+        let embolden = atlas_policy::embolden_per_side(
+            run.font.embolden(),
+            atlas_policy::embolden_basis(run.font_size, full, hint, upem),
+        );
         let synthesis = atlas_policy::Synthesis::new(run.font.normalized_coords(), embolden)?;
         // `glifo` caches only at or under its ceiling, which a NaN size is
         // not.
@@ -563,6 +575,9 @@ pub(crate) struct FaceFacts {
     pub(crate) color: bool,
     /// [`hvgl::font_needs_hvgl_provider`]'s answer.
     pub(crate) hvgl: bool,
+    /// The face's units-per-em (`0` when unreadable): the basis of
+    /// an unhinted run's faux-bold stroke.
+    pub(crate) upem: u16,
 }
 
 /// How many faces [`FontFacts`] remembers: a frame of mixed scripts draws a
@@ -603,6 +618,7 @@ impl FontFacts {
             readable: font_is_readable(font),
             color: font_has_color_glyphs(font),
             hvgl: hvgl::font_needs_hvgl_provider(font),
+            upem: font_units_per_em(font),
         };
         if let Some(slot) = self
             .faces
@@ -662,6 +678,14 @@ pub(crate) fn font_is_readable(font: &FontData) -> bool {
     table_directory(data, font.index)
         .and_then(|directory| head_units_per_em(data, directory))
         .is_some_and(|units_per_em| units_per_em > 0)
+}
+
+/// `font`'s units-per-em, or `0` when there is no readable `head` table.
+fn font_units_per_em(font: &FontData) -> u16 {
+    let data = font.data.data();
+    table_directory(data, font.index)
+        .and_then(|directory| head_units_per_em(data, directory))
+        .unwrap_or(0)
 }
 
 /// Where `index`'s table directory starts inside `data`, or `None` when the
