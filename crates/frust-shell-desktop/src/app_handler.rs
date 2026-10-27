@@ -1031,6 +1031,7 @@ where
         },
         laid_out_for: None,
         text_ctx: TextContext::new(),
+        background_flush: frust_shell_common::BackgroundFlush::new(),
         executor,
         scene: Scene::new(),
         platform_views: DesktopPlatformViews::new(),
@@ -2025,6 +2026,10 @@ struct ShellHandler<State: 'static, Build, V: View<State>, E> {
     /// first); a mismatch (resize or scale change) forces layout despite clean flags.
     laid_out_for: Option<Size>,
     text_ctx: TextContext,
+    /// The once-per-transition font-cache flush ([`font_cache_transition`]): written on `suspended`
+    /// and on losing focus (winit rarely emits `suspended` on a desktop, so focus loss is the point
+    /// that fires in practice), re-armed on `resumed` and on regaining focus.
+    background_flush: frust_shell_common::BackgroundFlush,
     /// The frame executor: either the render-thread split or
     /// the single-thread fallback, chosen once at startup from the
     /// `FRUST_NO_RENDER_THREAD` kill switch. Owns the `RenderContext` +
@@ -3019,6 +3024,7 @@ where
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        font_cache_transition(&self.background_flush, &mut self.text_ctx, false);
         // The window is created once and reused; the surface, by contrast, is
         // (re)created here every time we resume — `suspended()` tears it down,
         // mirroring Android's surfaceDestroyed/surfaceCreated so the §8.1
@@ -3137,6 +3143,8 @@ where
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        // The app is going away without a quit hook: land the font cache's unwritten answers.
+        font_cache_transition(&self.background_flush, &mut self.text_ctx, true);
         // Hosted native views go before the surface they were composited with,
         // while the window is still intact for the host to detach them from. The
         // matching replay is queued in `resumed`, which is the only way back.
@@ -3838,7 +3846,8 @@ where
 
             // The adapter saw it above; app code needs the new `focused` flag, and a focus
             // change produces no frame of its own.
-            WindowEvent::Focused(_) => {
+            WindowEvent::Focused(focused) => {
+                font_cache_transition(&self.background_flush, &mut self.text_ctx, !focused);
                 if self.publish_window_state() {
                     window.request_redraw();
                 }
@@ -3858,6 +3867,22 @@ where
     }
 }
 
+/// Drives the font-cache flush hook for one lifecycle edge: `backgrounded` flushes once for the
+/// transition (a repeat before the foreground is ignored), `false` only re-arms. Returns how many
+/// contexts flushed.
+fn font_cache_transition(
+    hook: &frust_shell_common::BackgroundFlush,
+    cx: &mut dyn frust_shell_common::FontCacheFlush,
+    backgrounded: bool,
+) -> usize {
+    if backgrounded {
+        hook.went_to_background(&mut [cx])
+    } else {
+        hook.came_to_foreground();
+        0
+    }
+}
+
 /// Whether a running frame must call `layout`: the drained change flags need
 /// it, or no layout has run yet, or the logical window size (resize / scale
 /// change) differs from the one the last pass used.
@@ -3867,6 +3892,29 @@ fn layout_needed(needs_layout: bool, laid_out_for: Option<Size>, logical: Size) 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn font_cache_flushes_once_per_background_edge_and_not_on_foreground() {
+        use frust_shell_common::{BackgroundFlush, FontCacheFlush};
+        struct Count(usize);
+        impl FontCacheFlush for Count {
+            fn flush_font_cache(&mut self) -> std::io::Result<()> {
+                self.0 += 1;
+                Ok(())
+            }
+        }
+        let hook = BackgroundFlush::new();
+        let mut cx = Count(0);
+        // `suspended` and a focus loss both report the same background.
+        assert_eq!(super::font_cache_transition(&hook, &mut cx, true), 1);
+        assert_eq!(super::font_cache_transition(&hook, &mut cx, true), 0);
+        assert_eq!(cx.0, 1);
+        // `resumed` / regained focus flush nothing.
+        assert_eq!(super::font_cache_transition(&hook, &mut cx, false), 0);
+        assert_eq!(cx.0, 1);
+        assert_eq!(super::font_cache_transition(&hook, &mut cx, true), 1);
+        assert_eq!(cx.0, 2);
+    }
+
     #[test]
     fn layout_gate_idles_when_static() {
         use super::layout_needed;

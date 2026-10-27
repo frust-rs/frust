@@ -165,7 +165,7 @@ pub struct AndroidAppHandle {
     /// fallback ([`FrameExecutor::Inline`], `FRUST_NO_RENDER_THREAD`) where the
     /// renderer lives on this UI thread. Chosen once at construction.
     executor: FrameExecutor,
-    text_ctx: TextContext,
+    pub(crate) text_ctx: TextContext,
     /// Polls the process-wide app-facing pending-font registry
     /// (`frust::register_app_fonts`) once per frame (see [`Self::frame`],
     /// beside the theme-override poll) — draining any late registration into
