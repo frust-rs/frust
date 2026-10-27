@@ -358,6 +358,20 @@ open class FrustViewController: UIViewController {
             name: UIApplication.didBecomeActiveNotification,
             object: nil
         )
+        // App-lifecycle states (Flutter iOS mapping): the two process-wide
+        // transitions that bracket background. Removed with the rest in deinit.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(appDidEnterBackground),
+            name: UIApplication.didEnterBackgroundNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(appWillEnterForeground),
+            name: UIApplication.willEnterForegroundNotification,
+            object: nil
+        )
 
         // Insets: the keyboard's occlusion isn't part of `UIView.safeAreaInsets`, so
         // it's tracked separately via these notifications and recombined
@@ -1321,6 +1335,14 @@ open class FrustViewController: UIViewController {
     @objc private func appWillResignActive() {
         displayLink?.isPaused = true
         if let handle { frust_pause(handle) }
+    }
+
+    @objc private func appDidEnterBackground() {
+        if let handle { frust_did_enter_background(handle) }
+    }
+
+    @objc private func appWillEnterForeground() {
+        if let handle { frust_will_enter_foreground(handle) }
     }
 
     @objc private func appDidBecomeActive() {
