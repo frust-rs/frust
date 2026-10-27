@@ -575,6 +575,15 @@ struct SharedFile {
     final_warned: AtomicBool,
 }
 
+impl SharedFile {
+    /// Whether the copy on disk is behind the merged entries: some attached
+    /// cache (not necessarily the asking one) added or changed an answer
+    /// since the last write.
+    fn behind(&self) -> bool {
+        lock(&self.entries).generation > self.written.load(Ordering::Acquire)
+    }
+}
+
 /// The shared copy's entries: a bounded LRU like a cache's own, over the
 /// on-disk form.
 #[derive(Debug, Default)]
@@ -1385,7 +1394,8 @@ impl FallbackCache {
     }
 
     /// Writes the persistent copy if one is bound (resolving a pending path
-    /// first) and anything changed since it was loaded or last written. A
+    /// first) and anything changed since it was loaded or last written, by
+    /// this cache or by any other attached to the same file. A
     /// no-op otherwise; an unresolved path leaves the cache dirty.
     ///
     /// Synchronous: a background write in flight is joined first (so it can
@@ -1393,7 +1403,13 @@ impl FallbackCache {
     pub(crate) fn persist(&mut self) -> io::Result<()> {
         self.join_writer();
         if !self.dirty {
-            return Ok(());
+            // Nothing of this cache's own is unwritten, but another cache
+            // attached to the same file may have merged answers the disk
+            // lacks: the final flush writes those too.
+            return match &self.persist {
+                Persist::Attached(shared) if shared.behind() => self.write_now(),
+                _ => Ok(()),
+            };
         }
         self.try_attach();
         self.write_now()

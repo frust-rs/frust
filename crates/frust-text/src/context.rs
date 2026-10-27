@@ -712,6 +712,49 @@ mod tests {
     }
 
     #[test]
+    fn the_final_flush_writes_answers_another_context_recorded() {
+        let dir = oracle::synthetic::TempDir::new("context-flush-any");
+        let cache_dir = dir.path().join("fonts");
+        let build = || TextContext::builder().font_cache_dir(&cache_dir).build();
+        let (mut a, mut b) = (build(), build());
+        let (x, y) = (oracle_request("a"), oracle_request("\u{0436}"));
+        let file = oracle::cache_file_in(&cache_dir);
+
+        // B records and writes one answer; A attaches to the file by reading it.
+        let _ = b.oracle.resolve(&x);
+        b.flush_font_cache().expect("written");
+        let _ = a.oracle.resolve(&x);
+        assert_eq!(a.oracle.stats().backend_calls, 0, "A recorded nothing");
+        assert!(!a.oracle.cache().is_dirty());
+
+        // Nothing behind: A's flush writes nothing.
+        let before = std::fs::metadata(&file)
+            .and_then(|m| m.modified())
+            .expect("mtime");
+        a.flush_font_cache().expect("no-op");
+        let after = std::fs::metadata(&file)
+            .and_then(|m| m.modified())
+            .expect("mtime");
+        assert_eq!(before, after, "a flush with nothing behind writes nothing");
+
+        // B records a second answer and never flushes; A's flush writes it.
+        let _ = b.oracle.resolve(&y);
+        assert!(!a.oracle.cache().is_dirty(), "A itself recorded nothing");
+        a.flush_font_cache().expect("written");
+
+        let stamp = oracle::cache::VersionStamp::current(oracle::platform_backend().os_build_id());
+        let mut disk = oracle::cache::FallbackCache::new(16);
+        assert_eq!(
+            disk.attach_persistent(file, stamp),
+            oracle::cache::LoadOutcome::Loaded(2)
+        );
+        for request in [&x, &y] {
+            let key = oracle::cache::CacheKey::from_request(request);
+            assert!(disk.get(&key).is_some(), "{:?} is on disk", request.chars);
+        }
+    }
+
+    #[test]
     fn the_environment_override_parses_off_and_absolute_dirs_only() {
         assert_eq!(env_font_cache(None), None);
         assert_eq!(
