@@ -15,6 +15,14 @@
 //!   handle with a hidden (dot-prefixed) name draws on Apple, and a name
 //!   CoreText resolves to another face is counted once as an identity mismatch
 //!   (and logged at `debug`), never refused.
+//! - **The bytes must be the face the name opens.** A blob carrying the name
+//!   `PingFangSC-Medium` whose glyph count differs from the installed face's
+//!   (a copy with `maxp` patched) is refused and counted once as a bytes
+//!   mismatch, whether the handle is built by hand or laid out from a
+//!   registered font. A registered, unpatched copy of the installed face draws
+//!   from CoreText under its own registered identity (the PostScript name the
+//!   text tier's registry reads from its `name` table) with no refusal of any
+//!   kind. Off macOS these cases print why and pass.
 //! - **On macOS the system PingFang draws.** A run of 中文爱 in
 //!   `PingFangUI.ttc`'s `PingFangSC-Medium` face, glyph ids taken from
 //!   CoreText's own character map, produces one draw per glyph with real
@@ -152,6 +160,11 @@ fn assert_identity_clean(runs: &[GlyphRun]) {
         0,
         "a run's face carried no PostScript name"
     );
+    assert_eq!(
+        compiler.hvgl_bytes_mismatches(),
+        0,
+        "a run's bytes disagree with the face CoreText opened by its name"
+    );
 }
 
 /// `text` laid out through a fresh `TextContext` in `family` at `weight`, as
@@ -241,6 +254,7 @@ fn an_hvgl_handle_without_an_identity_is_skipped_whole_and_draws_nothing() {
     }
     assert_eq!(compiler.hvgl_cached_outlines(), 0);
     assert_eq!(compiler.hvgl_identity_mismatches(), 0);
+    assert_eq!(compiler.hvgl_bytes_mismatches(), 0);
     assert_eq!(
         compiler.hvgl_nameless_faces(),
         1,
@@ -269,6 +283,42 @@ fn a_hidden_named_hvgl_handle_is_refused_when_coretext_substitutes() {
     assert_eq!(frame.skipped_glyphs, 2, "never drawn from a substitute");
     assert_eq!(frame.glyph_draws, 0);
     assert!(frame.draws().is_empty());
+    assert_eq!(
+        compiler.hvgl_bytes_mismatches(),
+        0,
+        "the name is checked before the bytes"
+    );
+}
+
+/// A registered copy of the installed PingFang face draws from CoreText with
+/// no refusal (macOS; a printed skip elsewhere).
+#[test]
+fn a_registered_copy_of_the_installed_face_draws_from_coretext() {
+    #[cfg(target_os = "macos")]
+    macos::a_registered_copy_of_the_installed_face_draws_from_coretext();
+    #[cfg(not(target_os = "macos"))]
+    println!("skipped: needs macOS's PingFang and CoreText");
+}
+
+/// The same registered copy, through the GPU: ink and no refusal (macOS; a
+/// printed skip elsewhere).
+#[test]
+#[ignore = "requires a GPU (Metal); run with `cargo test -p frust-engine --test hvgl_provider -- --ignored`"]
+fn a_registered_copy_of_the_installed_face_renders_ink_through_the_gpu() {
+    #[cfg(target_os = "macos")]
+    macos::a_registered_copy_of_the_installed_face_renders_ink_through_the_gpu();
+    #[cfg(not(target_os = "macos"))]
+    println!("skipped: needs macOS's PingFang, CoreText and Metal");
+}
+
+/// Bytes carrying the installed face's name but another glyph count are
+/// refused and counted once (macOS; a printed skip elsewhere).
+#[test]
+fn bytes_whose_glyph_count_differs_from_the_named_face_are_refused_once() {
+    #[cfg(target_os = "macos")]
+    macos::bytes_whose_glyph_count_differs_from_the_named_face_are_refused_once();
+    #[cfg(not(target_os = "macos"))]
+    println!("skipped: needs macOS's PingFang and CoreText");
 }
 
 /// An unknown name CoreText substitutes for is refused: the mismatch is
@@ -358,17 +408,196 @@ mod macos {
         u32::from_be_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]])
     }
 
-    /// A variable `hvgl` face of the collection `data`, identified as `name`
-    /// the way the oracle identifies it. The blob supplies the face's metrics
-    /// and axes; the name alone picks the face CoreText draws.
-    fn face_named(data: &Arc<Vec<u8>>, name: &str, hidden: bool) -> FontHandle {
-        let index = (0..be_u32(data, 8))
-            .find(|index| {
+    /// The index of the collection `data`'s variable `hvgl` face that
+    /// [`FACE`] is: the one whose `maxp` glyph count is CoreText's for that
+    /// name, else the first variable `hvgl` face.
+    fn face_index(data: &[u8]) -> u32 {
+        let variable: Vec<u32> = (0..be_u32(data, 8))
+            .filter(|index| {
                 table(data, *index, b"hvgl").is_some() && table(data, *index, b"fvar").is_some()
             })
-            .expect("PingFangUI.ttc carries a variable hvgl face");
-        FontHandle::new(FontData::new(Blob::new(data.clone()), index))
+            .collect();
+        let installed = coretext_glyph_count(FACE);
+        variable
+            .iter()
+            .copied()
+            .find(|index| {
+                table(data, *index, b"maxp")
+                    .is_some_and(|(maxp, _)| usize::from(be_u16(data, maxp + 4)) == installed)
+            })
+            .or(variable.first().copied())
+            .expect("PingFangUI.ttc carries a variable hvgl face")
+    }
+
+    /// How many glyphs CoreText's face `name` holds.
+    fn coretext_glyph_count(name: &str) -> usize {
+        // SAFETY: a null matrix is the documented identity argument.
+        let font = unsafe { CTFont::with_name(&CFString::from_str(name), 24.0, std::ptr::null()) };
+        // SAFETY: a getter on a live font.
+        usize::try_from(unsafe { font.glyph_count() }).unwrap_or(0)
+    }
+
+    /// The variable `hvgl` face of the collection `data` that [`FACE`] is,
+    /// identified as `name` the way the oracle identifies it. The blob
+    /// supplies the face's metrics and axes; the name alone picks the face
+    /// CoreText draws.
+    fn face_named(data: &Arc<Vec<u8>>, name: &str, hidden: bool) -> FontHandle {
+        FontHandle::new(FontData::new(Blob::new(data.clone()), face_index(data)))
             .with_identity(Some(Arc::from(name)), hidden)
+    }
+
+    /// The face at `index` of the font file `data`, as a single-face font
+    /// file of its own: every table copied, 4-aligned, offsets rewritten.
+    fn single_face(data: &[u8], index: u32) -> Vec<u8> {
+        let directory = if &data[0..4] == b"ttcf" {
+            be_u32(data, 12 + 4 * index as usize) as usize
+        } else {
+            0
+        };
+        let count = be_u16(data, directory + 4) as usize;
+        let mut out = data[directory..directory + 12].to_vec();
+        let mut tables = Vec::new();
+        let mut offset = 12 + 16 * count;
+        for record in (0..count).map(|table| directory + 12 + 16 * table) {
+            let (at, length) = (
+                be_u32(data, record + 8) as usize,
+                be_u32(data, record + 12) as usize,
+            );
+            out.extend(&data[record..record + 8]);
+            out.extend(u32::try_from(offset).expect("small").to_be_bytes());
+            out.extend(&data[record + 12..record + 16]);
+            tables.extend(&data[at..at + length]);
+            let padded = length.div_ceil(4) * 4;
+            tables.resize(tables.len() + padded - length, 0);
+            offset += padded;
+        }
+        out.extend(tables);
+        out
+    }
+
+    /// `face` (a single-face file) with the first two characters of every
+    /// family-name record (name IDs 1 and 16) replaced by `prefix`, so that
+    /// registering it shadows no installed family — the record of registered
+    /// fonts is process-wide and never drained, so a registered `PingFang
+    /// SC` would answer every later case of this binary. The PostScript name
+    /// (name ID 6) is untouched.
+    fn renamed(mut face: Vec<u8>, prefix: [u8; 2]) -> Vec<u8> {
+        let (name, _) = table(&face, 0, b"name").expect("a name table");
+        let count = be_u16(&face, name + 2) as usize;
+        let storage = name + be_u16(&face, name + 4) as usize;
+        for record in (0..count).map(|record| name + 6 + 12 * record) {
+            let (platform, id) = (be_u16(&face, record), be_u16(&face, record + 6));
+            let length = be_u16(&face, record + 8) as usize;
+            let at = storage + be_u16(&face, record + 10) as usize;
+            if id != 1 && id != 16 {
+                continue;
+            }
+            if platform == 1 && length >= 2 {
+                // Mac Roman: one byte per character.
+                face[at..at + 2].copy_from_slice(&prefix);
+            } else if platform != 1 && length >= 4 {
+                // UTF-16BE.
+                face[at..at + 4].copy_from_slice(&[0, prefix[0], 0, prefix[1]]);
+            }
+        }
+        face
+    }
+
+    /// `face` (a single-face file) with its `maxp.numGlyphs` lowered by one.
+    fn with_one_glyph_fewer(mut face: Vec<u8>) -> Vec<u8> {
+        let (maxp, _) = table(&face, 0, b"maxp").expect("a maxp table");
+        let count = be_u16(&face, maxp + 4);
+        face[maxp + 4..maxp + 6].copy_from_slice(&(count - 1).to_be_bytes());
+        face
+    }
+
+    /// [`TEXT`] laid out in the face `bytes` registers into a fresh
+    /// `TextContext`, as scene runs. Every run must come from the registered
+    /// copy (its blob is exactly `bytes` long) and carry the identity the
+    /// registry read from its `name` table.
+    fn registered_runs(bytes: Vec<u8>) -> Vec<GlyphRun> {
+        let length = bytes.len();
+        let mut ctx = TextContext::new();
+        let families = ctx.register_fonts(bytes).expect("the copy registers");
+        let runs = laid_out(&mut ctx, &families[0].name, FontWeight::REGULAR, TEXT);
+        assert!(!runs.is_empty());
+        for run in &runs {
+            let font = run.font.font();
+            assert_eq!(
+                font.data.data().len(),
+                length,
+                "the run draws from the registered copy"
+            );
+            assert!(table(font.data.data(), font.index, b"hvgl").is_some());
+            let name = run
+                .font
+                .postscript_name()
+                .expect("a registered face carries its PostScript name");
+            println!(
+                "registered face: {name:?} (hidden: {})",
+                run.font.is_hidden()
+            );
+        }
+        runs
+    }
+
+    /// A registered, unpatched copy of the installed face [`FACE`] is.
+    fn registered_copy(data: &[u8]) -> Vec<GlyphRun> {
+        registered_runs(renamed(single_face(data, face_index(data)), *b"Zz"))
+    }
+
+    pub(super) fn a_registered_copy_of_the_installed_face_draws_from_coretext() {
+        let Some(data) = pingfang() else { return };
+        let runs = registered_copy(&data);
+        assert_identity_clean(&runs);
+        let glyphs: usize = runs.iter().map(|run| run.glyphs.len()).sum();
+        let mut compiler = compiler();
+        let frame = compile(&mut compiler, runs);
+        assert_eq!(frame.skipped_glyphs, 0);
+        assert_eq!(frame.glyph_draws as usize, glyphs);
+        assert!(frame.alphas().iter().any(|alpha| *alpha != 0));
+    }
+
+    pub(super) fn a_registered_copy_of_the_installed_face_renders_ink_through_the_gpu() {
+        let Some(data) = pingfang() else { return };
+        let runs = registered_copy(&data);
+        assert_identity_clean(&runs);
+        let inked = inked_pixels(runs);
+        assert!(inked > 100, "only {inked} pixels carry ink");
+    }
+
+    pub(super) fn bytes_whose_glyph_count_differs_from_the_named_face_are_refused_once() {
+        let Some(data) = pingfang() else { return };
+        let patched = with_one_glyph_fewer(single_face(&data, face_index(&data)));
+        // By hand: the handle names `PingFangSC-Medium` outright.
+        let by_hand = FontHandle::new(FontData::new(Blob::new(Arc::new(patched.clone())), 0))
+            .with_identity(Some(Arc::from(FACE)), false);
+        let glyphs = coretext_glyphs(FACE, TEXT);
+        let mut hand = compiler();
+        for frame_index in 0..3 {
+            let frame = compile(&mut hand, vec![run(by_hand.clone(), &glyphs)]);
+            assert_eq!(
+                frame.skipped_glyphs,
+                glyphs.len() as u32,
+                "frame {frame_index}"
+            );
+            assert_eq!(frame.glyph_draws, 0, "frame {frame_index}");
+        }
+        assert_eq!(hand.hvgl_bytes_mismatches(), 1, "counted once");
+        assert_eq!(hand.hvgl_identity_mismatches(), 0);
+        assert_eq!(hand.hvgl_nameless_faces(), 0);
+
+        // Registered: the identity the registry read, the same refusal.
+        let runs = registered_runs(renamed(patched, *b"Zy"));
+        let glyphs: u32 = runs.iter().map(|run| run.glyphs.len() as u32).sum();
+        let mut registered = compiler();
+        for _ in 0..3 {
+            let frame = compile(&mut registered, runs.clone());
+            assert_eq!(frame.skipped_glyphs, glyphs);
+            assert_eq!(frame.glyph_draws, 0);
+        }
+        assert_eq!(registered.hvgl_bytes_mismatches(), 1, "counted once");
+        assert_eq!(registered.hvgl_identity_mismatches(), 0);
     }
 
     /// The public `PingFangSC-Medium` face of `data`.
@@ -473,9 +702,9 @@ mod macos {
     }
 
     /// A `TextContext` that resolves PingFang SC to its `hvgl` face through
-    /// the system font oracle, with the face's identity on every run. Fonts
-    /// the caller registers carry no oracle identity, so none is registered:
-    /// the system face is the one the engine must draw by name.
+    /// the system font oracle, with the face's identity on every run. None is
+    /// registered: the system face is the one the engine must draw by name
+    /// (a registered copy is [`registered_copy`]'s case).
     fn text_context_resolves_pingfang() -> Option<TextContext> {
         let mut ctx = TextContext::new();
         let resolved = laid_out(&mut ctx, "PingFang SC", FontWeight::LIGHT, "中")
