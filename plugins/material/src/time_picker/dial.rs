@@ -80,6 +80,7 @@ use frust::{Color, Theme};
 use kurbo::{Point, Rect, Size};
 
 use super::{TimeOfDay, TimePickerMode, TimePickerStrings};
+use crate::badge::locale_stamp;
 use crate::interaction::{HapticSignal, MaterialHaptics};
 use crate::press::presses;
 use crate::strings::MaterialStrings;
@@ -378,6 +379,8 @@ struct Run {
     weight: FontWeight,
     /// The family the cached layout was shaped in.
     family: FontFamily,
+    /// The locale generation `layout` was shaped under ([`locale_stamp`]).
+    stamp: u64,
     layout: Option<TextLayout>,
 }
 
@@ -388,6 +391,7 @@ impl Run {
             size,
             weight,
             family: FontFamily::default(),
+            stamp: 0,
             layout: None,
         }
     }
@@ -414,13 +418,17 @@ impl Run {
             self.family = family.clone();
             self.layout = None;
         }
-        if let Some(layout) = &self.layout {
+        let style = self.style();
+        let stamp = locale_stamp(&style);
+        if let Some(layout) = &self.layout
+            && self.stamp == stamp
+        {
             return layout.size();
         }
-        let style = self.style();
         let text_ctx = ctx.text_context::<TextContext>();
         let laid = text_ctx.layout(&self.content, &style, None);
         let size = laid.size();
+        self.stamp = stamp;
         self.layout = Some(laid);
         size
     }
@@ -1287,6 +1295,7 @@ mod tests {
 
     #[test]
     fn a_theme_swap_reshapes_the_cached_runs() {
+        let _slot = crate::badge::locale_slot_test::reader();
         let (mut widget, mut tcx) = mount(TimeOfDay::new(10, 30), false);
         let first = theme_with("Swap A", "Swap A");
         layout_themed(&mut widget, &mut tcx, Some(&first));

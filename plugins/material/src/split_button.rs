@@ -191,6 +191,7 @@ use frust::authoring::{
 use frust::{AnimationController, Curve, FrameTime, IconData, SpringDesc, Theme};
 use kurbo::{Affine, BezPath, RoundedRect, RoundedRectRadii, Shape, Vec2};
 
+use crate::badge::locale_stamp;
 use crate::icons;
 use crate::interaction::{
     DISABLED_CONTAINER_OPACITY, DISABLED_CONTENT_OPACITY, HapticSignal, InteractionState,
@@ -1042,8 +1043,8 @@ fn focus_ring_rrect(size: Size, radii: CornerRadii) -> RoundedRect {
 struct LabelRun {
     content: String,
     layout: Option<TextLayout>,
-    shaped_for: Option<(TextStyle, Option<f64>)>,
-    natural: Option<(TextStyle, f64)>,
+    shaped_for: Option<(TextStyle, Option<f64>, u64)>,
+    natural: Option<(TextStyle, f64, u64)>,
 }
 
 impl LabelRun {
@@ -1070,19 +1071,21 @@ impl LabelRun {
     }
 
     fn natural_width(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> f64 {
-        if let Some((cached_style, width)) = &self.natural
+        let stamp = locale_stamp(style);
+        if let Some((cached_style, width, cached_stamp)) = &self.natural
             && cached_style == style
+            && *cached_stamp == stamp
         {
             return *width;
         }
         let text_ctx = ctx.text_context::<TextContext>();
         let width = text_ctx.layout(&self.content, style, None).size().width;
-        self.natural = Some((style.clone(), width));
+        self.natural = Some((style.clone(), width, stamp));
         width
     }
 
     fn shape(&mut self, ctx: &mut LayoutCtx, style: &TextStyle, max_width: Option<f64>) -> Size {
-        let key = (style.clone(), max_width);
+        let key = (style.clone(), max_width, locale_stamp(style));
         if let Some(cached) = &self.layout
             && self.shaped_for.as_ref() == Some(&key)
         {

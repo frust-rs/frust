@@ -19,7 +19,7 @@ use std::sync::Mutex;
 use peniko::Blob;
 use read_fonts::tables::name::Name;
 use read_fonts::types::NameId;
-use read_fonts::{FileRef, TableProvider};
+use read_fonts::{FileRef, FontRef, TableProvider};
 
 use super::selector::face_facts;
 use super::{FaceFacts, GenericKey};
@@ -117,6 +117,13 @@ pub(crate) struct AppFace {
     /// the first record — fontique's naming rule, so names match).
     pub(crate) family: String,
     pub(crate) facts: FaceFacts,
+    /// The face's PostScript name, read the way the Apple oracle reads a
+    /// system face's (see [`postscript_name`]); `None` when the face names
+    /// none. A renderer that opens a face by name (CoreText, for an
+    /// `hvgl`-only face) needs it.
+    pub(crate) postscript_name: Option<String>,
+    /// The name is system-private: it starts with `.`.
+    pub(crate) hidden: bool,
 }
 
 /// The `name` table string for `id`: the US-English record, else a
@@ -146,6 +153,60 @@ fn english_or_first(name: &Name<'_>, id: NameId) -> Option<String> {
     Some(string.chars().collect())
 }
 
+/// The PostScript name `font`'s face is known by, from its `name` table.
+///
+/// The candidates, as the Apple oracle's face walk reads them: the face's
+/// name ID 6, then the PostScript name of the `fvar` named instance at the
+/// face's default coordinates (the instance the face draws as unvaried — how a
+/// collection face that is one of a variable family's named instances is
+/// named). The first public (not dot-prefixed) candidate wins, else the first
+/// at all: a public name is one CoreText can open the face by. After those,
+/// every other named instance's name is a candidate, in `fvar` order: any
+/// named instance of the face opens the same outlines in CoreText (the handle's
+/// coordinates select the instance, which the `hvgl` provider applies), so
+/// the first public one names a face whose name ID 6 and default instance are
+/// both hidden.
+fn postscript_name(font: &FontRef<'_>, name: &Name<'_>) -> Option<String> {
+    let id6 = english_or_first(name, NameId::POSTSCRIPT_NAME);
+    let (default_instance, other_instances) = font
+        .fvar()
+        .ok()
+        .and_then(|fvar| {
+            let axes = fvar.axes().ok()?;
+            let mut default_instance = None;
+            let mut others = Vec::new();
+            for instance in fvar.instances().ok()?.iter().flatten() {
+                let Some(id) = instance.post_script_name_id else {
+                    continue;
+                };
+                let at_default = instance.coordinates.len() == axes.len()
+                    && axes
+                        .iter()
+                        .zip(instance.coordinates)
+                        .all(|(axis, value)| value.get() == axis.default_value());
+                let Some(found) = english_or_first(name, id) else {
+                    continue;
+                };
+                if at_default && default_instance.is_none() {
+                    default_instance = Some(found);
+                } else {
+                    others.push(found);
+                }
+            }
+            Some((default_instance, others))
+        })
+        .unwrap_or_default();
+    let candidates = [id6, default_instance]
+        .into_iter()
+        .chain(other_instances.into_iter().map(Some));
+    let mut named = candidates.into_iter().flatten().filter(|n| !n.is_empty());
+    let first = named.next()?;
+    if !first.starts_with('.') {
+        return Some(first);
+    }
+    Some(named.find(|n| !n.starts_with('.')).unwrap_or(first))
+}
+
 /// Every face in `blob` (one, or each face of a collection) that has a family
 /// name.
 fn parse_faces(blob: &Blob<u8>) -> Vec<AppFace> {
@@ -166,11 +227,17 @@ fn parse_faces(blob: &Blob<u8>) -> Vec<AppFace> {
         let (Some(family), Ok(index)) = (family, u32::try_from(index)) else {
             continue;
         };
+        let postscript_name = postscript_name(&font, &name);
+        let hidden = postscript_name
+            .as_deref()
+            .is_some_and(|n| n.starts_with('.'));
         faces.push(AppFace {
             blob: blob.clone(),
             index,
             family,
             facts: face_facts(&font),
+            postscript_name,
+            hidden,
         });
     }
     faces
@@ -404,6 +471,188 @@ mod tests {
         assert_eq!((a[0].index, a[1].index), (0, 1));
         assert_eq!(a[0].facts.attrs.weight, 700.0);
         assert_eq!(a[1].facts.attrs.style, FontStyle::Italic);
+    }
+
+    const NOTO_SANS: &[u8] = include_bytes!("../../../../testing/fonts/NotoSans-Subset.ttf");
+
+    /// A single-face sfnt holding `tables` (tag, bytes), table data 4-aligned.
+    fn sfnt(tables: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
+        let count = u16::try_from(tables.len()).expect("few tables");
+        let mut out = vec![0x00, 0x01, 0x00, 0x00];
+        out.extend(count.to_be_bytes());
+        out.extend([0; 6]);
+        let mut offset = 12 + 16 * tables.len();
+        let mut data = Vec::new();
+        for (tag, bytes) in tables {
+            out.extend(tag);
+            out.extend([0; 4]);
+            out.extend(u32::try_from(offset).expect("small").to_be_bytes());
+            out.extend(u32::try_from(bytes.len()).expect("small").to_be_bytes());
+            let padded = bytes.len().div_ceil(4) * 4;
+            data.extend(bytes);
+            data.resize(data.len() + padded - bytes.len(), 0);
+            offset += padded;
+        }
+        out.extend(data);
+        out
+    }
+
+    /// A `name` table of `(name id, string)` Windows US-English records.
+    fn name_table(records: &[(u16, &str)]) -> Vec<u8> {
+        let count = u16::try_from(records.len()).expect("few records");
+        let mut head = Vec::new();
+        let mut strings = Vec::new();
+        for field in [0, count, 6 + 12 * count] {
+            head.extend(field.to_be_bytes());
+        }
+        for (id, string) in records {
+            let utf16: Vec<u8> = string.encode_utf16().flat_map(u16::to_be_bytes).collect();
+            let length = u16::try_from(utf16.len()).expect("short");
+            let offset = u16::try_from(strings.len()).expect("short");
+            for field in [3, 1, 0x0409, *id, length, offset] {
+                head.extend(field.to_be_bytes());
+            }
+            strings.extend(utf16);
+        }
+        head.extend(strings);
+        head
+    }
+
+    /// An `fvar` of one `wght` axis (100..900, default 400) and a named
+    /// instance per `(weight, PostScript name id)`.
+    fn wght_fvar(instances: &[(i32, u16)]) -> Vec<u8> {
+        let count = u16::try_from(instances.len()).expect("few instances");
+        let mut out = Vec::new();
+        // Version 1.0, axes at 16, reserved 2, one 20-byte axis, `count`
+        // instances of 4 + 4 + 2 bytes (the PostScript name id included).
+        for field in [1_u16, 0, 16, 2, 1, 20, count, 10] {
+            out.extend(field.to_be_bytes());
+        }
+        out.extend(b"wght");
+        for value in [100_i32, 400, 900] {
+            out.extend((value << 16).to_be_bytes());
+        }
+        out.extend([0, 0, 1, 0]);
+        for (weight, ps_id) in instances {
+            out.extend([0, 2, 0, 0]);
+            out.extend((weight << 16).to_be_bytes());
+            out.extend(ps_id.to_be_bytes());
+        }
+        out
+    }
+
+    /// The one face `bytes` registers.
+    fn only_face(bytes: Vec<u8>) -> AppFace {
+        let mut registry = AppFontRegistry::default();
+        registry.insert_blob(&Blob::from(bytes));
+        assert_eq!(registry.face_count(), 1);
+        registry.faces.remove(0)
+    }
+
+    #[test]
+    fn a_registered_face_reports_its_postscript_name() {
+        let face = only_face(NOTO_SANS.to_vec());
+        assert_eq!(face.postscript_name.as_deref(), Some("NotoSans-Regular"));
+        assert!(!face.hidden, "a public name is not hidden");
+        // A face whose `name` table carries no PostScript name has none.
+        let nameless = only_face(FaceSpec::new("No PS").chars("a").build());
+        assert_eq!(nameless.postscript_name, None);
+        assert!(!nameless.hidden);
+    }
+
+    /// Only a dot-prefixed name is hidden: the same face with each name ID 6
+    /// string's first character patched to `.` flips the flag, nothing else.
+    #[test]
+    fn only_a_dot_name_is_hidden() {
+        let mut bytes = NOTO_SANS.to_vec();
+        let patches: Vec<(usize, bool)> = {
+            let font = FontRef::new(&bytes).expect("a face");
+            let name = font.name().expect("a name table");
+            let table = font
+                .table_data(read_fonts::types::Tag::new(b"name"))
+                .expect("a name table");
+            let table_at = table.as_bytes().as_ptr() as usize - bytes.as_ptr() as usize;
+            let storage = table_at + usize::from(name.storage_offset());
+            name.name_record()
+                .iter()
+                .filter(|record| record.name_id() == NameId::POSTSCRIPT_NAME)
+                .map(|record| {
+                    let offset = usize::try_from(record.string_offset().to_u32()).expect("small");
+                    let at = storage + offset;
+                    // Windows and Unicode records are UTF-16BE; Mac Roman is
+                    // one byte per character.
+                    (at, record.platform_id() != 1)
+                })
+                .collect()
+        };
+        assert!(!patches.is_empty(), "the face carries name ID 6");
+        for (at, utf16) in patches {
+            if utf16 {
+                bytes[at] = 0;
+                bytes[at + 1] = b'.';
+            } else {
+                bytes[at] = b'.';
+            }
+        }
+        let face = only_face(bytes);
+        assert_eq!(face.postscript_name.as_deref(), Some(".otoSans-Regular"));
+        assert!(face.hidden);
+    }
+
+    /// The named instance at the face's default coordinates names a face with
+    /// no name ID 6, and a public instance name beats a hidden name ID 6.
+    #[test]
+    fn a_variable_face_is_named_by_its_default_instance() {
+        let face = |records: &[(u16, &str)]| {
+            only_face(sfnt(&[
+                (*b"fvar", wght_fvar(&[(700, 257), (400, 256)])),
+                (*b"glyf", vec![0; 4]),
+                (*b"name", name_table(records)),
+            ]))
+        };
+        let names = [(1, "Var"), (256, "Var-Regular"), (257, "Var-Bold")];
+        let unnamed = face(&names);
+        assert_eq!(unnamed.postscript_name.as_deref(), Some("Var-Regular"));
+        assert!(!unnamed.hidden);
+
+        let hidden_id6 = face(&[names[0], (6, ".VarUI-Regular"), names[1], names[2]]);
+        assert_eq!(hidden_id6.postscript_name.as_deref(), Some("Var-Regular"));
+        assert!(!hidden_id6.hidden);
+
+        let public_id6 = face(&[names[0], (6, "VarFace-Regular"), names[1], names[2]]);
+        assert_eq!(
+            public_id6.postscript_name.as_deref(),
+            Some("VarFace-Regular")
+        );
+
+        let all_hidden = face(&[(1, "Var"), (6, ".VarUI-Regular"), (256, ".VarUI-Text")]);
+        assert_eq!(
+            all_hidden.postscript_name.as_deref(),
+            Some(".VarUI-Regular")
+        );
+        assert!(all_hidden.hidden);
+    }
+
+    /// A collection-style face whose name ID 6 and default-instance name are
+    /// hidden is named by the first public name among its other instances.
+    #[test]
+    fn a_hidden_default_is_named_by_the_first_public_instance() {
+        let face = only_face(sfnt(&[
+            (*b"fvar", wght_fvar(&[(400, 256), (500, 257), (700, 258)])),
+            (*b"glyf", vec![0; 4]),
+            (
+                *b"name",
+                name_table(&[
+                    (1, "Var"),
+                    (6, ".VarUI-Default"),
+                    (256, ".VarUI-Regular"),
+                    (257, "Var-Medium"),
+                    (258, "Var-Bold"),
+                ]),
+            ),
+        ]));
+        assert_eq!(face.postscript_name.as_deref(), Some("Var-Medium"));
+        assert!(!face.hidden);
     }
 
     #[test]

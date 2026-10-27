@@ -45,6 +45,19 @@
 //! same way ([`HvglOutlines::nameless_faces`]). A hidden handle therefore
 //! draws only when CoreText honours its name.
 //!
+//! A name is not enough on its own: an app can register its own copy of a
+//! face under a system face's PostScript name, and a copy whose glyph ids
+//! differ from the installed face's would pass by name and draw the installed
+//! outlines under the wrong ids. So before a face opened by name is used, the
+//! handle's bytes and the CoreText face must agree on their glyph count
+//! (`maxp.numGlyphs` against `CTFontGetGlyphCount`), their `unitsPerEm` and
+//! their `fvar` axis tags, in order ([`FaceShape`]). A disagreement is a
+//! refusal like the others, warned once with the name escaped and counted
+//! ([`HvglOutlines::bytes_mismatches`]). The handle does not say whether its
+//! bytes are a registered copy or the installed file the oracle mapped the
+//! name to, so every face is checked when it is first opened: two getters and
+//! one copy of the installed face's `fvar` table, once per open.
+//!
 //! Refusals are remembered apart from the open faces, in a set of at most
 //! `MAX_REFUSED_FACES` (oldest out), so no refusal evicts a live face. One
 //! warning and one count go to each face while the set holds it; a refused
@@ -91,6 +104,10 @@ const HVGL_TAG: [u8; 4] = *b"hvgl";
 const OUTLINE_TAGS: [[u8; 4]; 3] = [*b"glyf", *b"CFF ", *b"CFF2"];
 /// `fvar`, the face's variation axes.
 const FVAR_TAG: [u8; 4] = *b"fvar";
+/// `maxp`, whose `numGlyphs` is the face's glyph count.
+const MAXP_TAG: [u8; 4] = *b"maxp";
+/// Where `numGlyphs` sits in a `maxp` table (either version).
+const MAXP_NUM_GLYPHS: usize = 4;
 /// `avar`, the face's per-axis normalization remapping.
 const AVAR_TAG: [u8; 4] = *b"avar";
 /// An `fvar` header's fixed length, ahead of its axis records.
@@ -328,6 +345,13 @@ impl HvglOutlines {
         self.faces.nameless
     }
 
+    /// How many faces were refused because their bytes and the CoreText face
+    /// their name opened disagree (glyph count, `unitsPerEm` or `fvar` axes),
+    /// since the provider was built.
+    pub(crate) fn bytes_mismatches(&self) -> u32 {
+        self.faces.bytes_mismatches
+    }
+
     /// `glyph_id`'s outline in `handle`'s face at the variation instance its
     /// coordinates name (normalized F2Dot14 values in `fvar` axis order; empty
     /// for the default instance), fetched from CoreText on a cache miss.
@@ -560,7 +584,12 @@ fn table_start(data: &[u8], directory: usize, tag: [u8; 4]) -> Option<usize> {
 
 /// The `fvar` axis records, without their `avar` maps.
 fn fvar_axes(data: &[u8], directory: usize) -> Option<Vec<Axis>> {
-    let table = table_start(data, directory, FVAR_TAG)?;
+    fvar_axes_at(data, table_start(data, directory, FVAR_TAG)?)
+}
+
+/// The axis records of the `fvar` table starting at `table` in `data` — a
+/// face's, or a table CoreText copied out on its own (at 0).
+fn fvar_axes_at(data: &[u8], table: usize) -> Option<Vec<Axis>> {
     if data.len() < table.checked_add(FVAR_HEADER_LEN)? {
         return None;
     }
@@ -614,6 +643,103 @@ fn avar_maps(data: &[u8], directory: usize) -> Option<Vec<Vec<(f64, f64)>>> {
         maps.push(map);
     }
     Some(maps)
+}
+
+/// `maxp.numGlyphs`: how many glyphs the face's bytes hold.
+fn maxp_num_glyphs(data: &[u8], directory: usize) -> Option<usize> {
+    let table = table_start(data, directory, MAXP_TAG)?;
+    read_u16(data, table.checked_add(MAXP_NUM_GLYPHS)?).map(usize::from)
+}
+
+/// What a face's bytes and the CoreText face opened by its name must agree
+/// on before the bytes' glyph ids are drawn from CoreText's outlines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FaceShape {
+    /// The glyph count; `None` when the bytes carry no readable `maxp`.
+    glyph_count: Option<usize>,
+    /// `unitsPerEm`; `None` when the bytes carry no usable `head`.
+    units_per_em: Option<u32>,
+    /// The `fvar` axis tags, in axis order; empty for a face that does not
+    /// vary.
+    axis_tags: Vec<u32>,
+}
+
+impl FaceShape {
+    /// The shape `font`'s bytes declare.
+    fn of_bytes(font: &FontData) -> Self {
+        let data = font.data.data();
+        let Some(directory) = table_directory(data, font.index) else {
+            return Self {
+                glyph_count: None,
+                units_per_em: None,
+                axis_tags: Vec::new(),
+            };
+        };
+        Self {
+            glyph_count: maxp_num_glyphs(data, directory),
+            units_per_em: head_units_per_em(data, directory).map(u32::from),
+            axis_tags: axis_tags(fvar_axes(data, directory)),
+        }
+    }
+
+    /// The shape of the face CoreText opened.
+    fn of_installed(face: &platform::CtFace) -> Self {
+        let fvar = face.table(FVAR_TAG);
+        Self {
+            glyph_count: Some(face.glyph_count()),
+            units_per_em: Some(face.units_per_em()),
+            axis_tags: axis_tags(fvar.as_deref().and_then(|table| fvar_axes_at(table, 0))),
+        }
+    }
+
+    /// Where `installed` disagrees with these bytes, for the warning; `None`
+    /// when the two agree on every field.
+    fn disagreement(&self, installed: &Self) -> Option<String> {
+        if self.glyph_count != installed.glyph_count {
+            return Some(format!(
+                "glyph count {} in the bytes, {} in CoreText's face",
+                or_none(self.glyph_count),
+                or_none(installed.glyph_count),
+            ));
+        }
+        if self.units_per_em != installed.units_per_em {
+            return Some(format!(
+                "unitsPerEm {} in the bytes, {} in CoreText's face",
+                or_none(self.units_per_em),
+                or_none(installed.units_per_em),
+            ));
+        }
+        if self.axis_tags != installed.axis_tags {
+            return Some(format!(
+                "fvar axes [{}] in the bytes, [{}] in CoreText's face",
+                tag_list(&self.axis_tags),
+                tag_list(&installed.axis_tags),
+            ));
+        }
+        None
+    }
+}
+
+/// `value` for a log line, `none` when absent.
+fn or_none(value: Option<impl core::fmt::Display>) -> String {
+    value.map_or_else(|| "none".to_owned(), |value| value.to_string())
+}
+
+/// The tags of `axes`, in axis order (none for a face without `fvar`).
+fn axis_tags(axes: Option<Vec<Axis>>) -> Vec<u32> {
+    axes.unwrap_or_default()
+        .iter()
+        .map(|axis| axis.tag)
+        .collect()
+}
+
+/// `tags` as escaped four-character codes, for a log line: the bytes come
+/// from a font, so nothing in them is trusted to be printable.
+fn tag_list(tags: &[u32]) -> String {
+    tags.iter()
+        .map(|tag| tag.to_be_bytes().escape_ascii().to_string())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// What identifies one face the table has looked at: the PostScript name
@@ -682,6 +808,9 @@ struct FaceTable {
     mismatches: u32,
     /// Faces whose handle carried no PostScript name; each was refused.
     nameless: u32,
+    /// Faces whose bytes disagreed with the CoreText face their name opened;
+    /// each was refused.
+    bytes_mismatches: u32,
 }
 
 impl FaceTable {
@@ -735,7 +864,9 @@ impl FaceTable {
     /// they may only be drawn from that face: the face CoreText hands back
     /// must carry exactly the PostScript name asked for. A substitute (a
     /// hidden, dot-prefixed face CoreText cannot resolve by name comes back as
-    /// another font) is a counted refusal, never drawn.
+    /// another font) is a counted refusal, never drawn. So is a face whose
+    /// bytes disagree with the face CoreText opened by that name
+    /// ([`FaceShape`]): the name matched, the glyph ids may not.
     fn open_face(&mut self, handle: &FontHandle) -> Option<Face> {
         let Some(name) = handle.postscript_name() else {
             self.nameless = self.nameless.saturating_add(1);
@@ -758,7 +889,21 @@ impl FaceTable {
                 );
                 None
             }
-            Ok((face, _)) => Some(face),
+            Ok((face, _)) => {
+                let installed = FaceShape::of_installed(&face.ct);
+                match FaceShape::of_bytes(handle.font()).disagreement(&installed) {
+                    None => Some(face),
+                    Some(disagreement) => {
+                        self.bytes_mismatches = self.bytes_mismatches.saturating_add(1);
+                        log::warn!(
+                            "frust-engine: hvgl face {shown:?} does not match the face CoreText \
+                             opens by that name ({disagreement}); its glyphs are counted as \
+                             skipped",
+                        );
+                        None
+                    }
+                }
+            }
             Err(reason) => {
                 log::warn!(
                     "frust-engine: hvgl face {shown:?} refused ({reason}); its glyphs are \
@@ -831,7 +976,9 @@ mod platform {
     use kurbo::{PathEl, Point};
     use objc2_core_foundation::{CFDictionary, CFNumber, CFRetained, CFString, CFType};
     use objc2_core_graphics::{CGPath, CGPathElement, CGPathElementType};
-    use objc2_core_text::{CTFont, CTFontDescriptor, CTFontOrientation, kCTFontVariationAttribute};
+    use objc2_core_text::{
+        CTFont, CTFontDescriptor, CTFontOrientation, CTFontTableOptions, kCTFontVariationAttribute,
+    };
 
     /// Why [`CtFace::open`] refuses a face here.
     pub(super) const UNAVAILABLE: &str = "CoreText cannot open that name";
@@ -913,6 +1060,29 @@ mod platform {
         /// Whether `glyph_id` names a glyph of the face.
         pub(super) fn contains(&self, glyph_id: u32) -> bool {
             u16::try_from(glyph_id).is_ok_and(|glyph| usize::from(glyph) < self.glyph_count)
+        }
+
+        /// How many glyphs the face holds (`CTFontGetGlyphCount`).
+        pub(super) fn glyph_count(&self) -> usize {
+            self.glyph_count
+        }
+
+        /// The face's design units per em (`CTFontGetUnitsPerEm`).
+        pub(super) fn units_per_em(&self) -> u32 {
+            // SAFETY: a getter on a live font.
+            unsafe { self.font.units_per_em() }
+        }
+
+        /// A copy of the face's table `tag` (`CTFontCopyTable`); `None` when
+        /// the face has no such table.
+        pub(super) fn table(&self, tag: [u8; 4]) -> Option<Vec<u8>> {
+            // SAFETY: a copy from a live font; the returned data follows the
+            // Create rule and `CFRetained` releases it.
+            let data = unsafe {
+                self.font
+                    .table(u32::from_be_bytes(tag), CTFontTableOptions::NoOptions)
+            }?;
+            Some(data.to_vec())
         }
 
         /// `glyph_id`'s outline in font units, y up, as path elements; `None`
@@ -1010,6 +1180,21 @@ mod platform {
 
         /// Unreachable — no `CtFace` exists on this target.
         pub(super) fn contains(&self, _glyph_id: u32) -> bool {
+            match *self {}
+        }
+
+        /// Unreachable — no `CtFace` exists on this target.
+        pub(super) fn glyph_count(&self) -> usize {
+            match *self {}
+        }
+
+        /// Unreachable — no `CtFace` exists on this target.
+        pub(super) fn units_per_em(&self) -> u32 {
+            match *self {}
+        }
+
+        /// Unreachable — no `CtFace` exists on this target.
+        pub(super) fn table(&self, _tag: [u8; 4]) -> Option<Vec<u8>> {
             match *self {}
         }
 
@@ -1445,9 +1630,10 @@ mod tests {
         assert!(variation_axes(&broken, table_directory(&broken, 0).unwrap()).is_empty());
     }
 
-    /// The blob the macOS cases read: a variable `hvgl` face of the system
-    /// PingFang collection (the face's identity is the handle's name, not the
-    /// blob's), or `None` when it is not installed.
+    /// The blob the macOS cases read: the variable `hvgl` face of the system
+    /// PingFang collection that `PingFangSC-Medium` is (its bytes agree with
+    /// the face CoreText opens by that name; else the first variable `hvgl`
+    /// face), or `None` when the collection is not installed.
     #[cfg(target_os = "macos")]
     fn system_pingfang_sc() -> Option<FontData> {
         let data = [
@@ -1458,13 +1644,66 @@ mod tests {
         .find_map(|path| std::fs::read(path).ok())?;
         let count = read_u32(&data, 8)?;
         let blob = Blob::new(Arc::new(data));
-        (0..count).find_map(|index| {
-            let font = FontData::new(blob.clone(), index);
-            let data = font.data.data();
-            let directory = table_directory(data, index)?;
-            (font_needs_hvgl_provider(&font) && !variation_axes(data, directory).is_empty())
-                .then_some(font)
-        })
+        let variable: Vec<FontData> = (0..count)
+            .filter_map(|index| {
+                let font = FontData::new(blob.clone(), index);
+                let data = font.data.data();
+                let directory = table_directory(data, index)?;
+                (font_needs_hvgl_provider(&font) && !variation_axes(data, directory).is_empty())
+                    .then_some(font)
+            })
+            .collect();
+        let installed = platform::CtFace::open("PingFangSC-Medium", 1000.0)
+            .map(|(face, _)| FaceShape::of_installed(&face));
+        variable
+            .iter()
+            .find(|font| {
+                installed
+                    .as_ref()
+                    .is_some_and(|shape| FaceShape::of_bytes(font).disagreement(shape).is_none())
+            })
+            .or(variable.first())
+            .cloned()
+    }
+
+    /// A copy of `font`'s blob with its `maxp.numGlyphs` lowered by one.
+    #[cfg(target_os = "macos")]
+    fn with_one_glyph_fewer(font: &FontData) -> FontData {
+        let mut data = font.data.data().to_vec();
+        let directory = table_directory(&data, font.index).expect("a directory");
+        let at = table_start(&data, directory, MAXP_TAG).expect("a maxp") + MAXP_NUM_GLYPHS;
+        let count = read_u16(&data, at).expect("numGlyphs");
+        data[at..at + 2].copy_from_slice(&(count - 1).to_be_bytes());
+        FontData::new(Blob::new(Arc::new(data)), font.index)
+    }
+
+    /// A face whose bytes disagree with the CoreText face its name opens is
+    /// refused: counted once as a bytes mismatch, not as an identity one,
+    /// and never drawn. The unpatched bytes draw.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_face_whose_bytes_disagree_with_coretext_is_counted_once_and_refused() {
+        let Some(font) = system_pingfang_sc() else {
+            println!("skipped: PingFangUI.ttc is not installed");
+            return;
+        };
+        let name = Some(Arc::from("PingFangSC-Medium"));
+        let mut outlines = HvglOutlines::default();
+        let genuine = FontHandle::new(font.clone()).with_identity(name.clone(), false);
+        assert!(matches!(
+            outlines.outline(&genuine, 289),
+            GlyphOutline::Path { .. }
+        ));
+        assert_eq!(outlines.bytes_mismatches(), 0, "the installed bytes agree");
+        let patched = FontHandle::new(with_one_glyph_fewer(&font)).with_identity(name, false);
+        for _ in 0..3 {
+            assert!(matches!(
+                outlines.outline(&patched, 289),
+                GlyphOutline::Unavailable
+            ));
+        }
+        assert_eq!(outlines.bytes_mismatches(), 1);
+        assert_eq!(outlines.identity_mismatches(), 0);
     }
 
     /// The light and semibold instances of PingFang SC's `中` have different
@@ -1530,6 +1769,106 @@ mod tests {
             );
         }
         assert_eq!(outlines.identity_mismatches(), 1);
+    }
+
+    /// A `maxp` table (version 0.5) of `num_glyphs`.
+    fn maxp(num_glyphs: u16) -> Vec<u8> {
+        let mut maxp = vec![0x00, 0x00, 0x50, 0x00];
+        maxp.extend(num_glyphs.to_be_bytes());
+        maxp
+    }
+
+    #[test]
+    fn a_face_shape_is_read_from_maxp_head_and_fvar() {
+        let tables = [
+            (*b"head", head(2048)),
+            (
+                FVAR_TAG,
+                fvar(&[(b"wght", 100.0, 400.0, 900.0), (b"HGHT", 0.0, 0.0, 1.0)]),
+            ),
+            (HVGL_TAG, vec![0; 8]),
+            (MAXP_TAG, maxp(300)),
+        ];
+        let shape = FaceShape::of_bytes(&font(sfnt(&tables)));
+        assert_eq!(
+            shape,
+            FaceShape {
+                glyph_count: Some(300),
+                units_per_em: Some(2048),
+                axis_tags: vec![u32::from_be_bytes(*b"wght"), u32::from_be_bytes(*b"HGHT")],
+            }
+        );
+        // The `fvar` CoreText copies out on its own reads the same tags.
+        let fvar_table = &tables[1].1;
+        assert_eq!(
+            axis_tags(fvar_axes_at(fvar_table, 0)),
+            shape.axis_tags,
+            "a standalone fvar parses like the face's"
+        );
+        let bare = FaceShape::of_bytes(&font(sfnt(&[
+            (*b"head", head(1000)),
+            (HVGL_TAG, vec![0; 8]),
+        ])));
+        assert_eq!(bare.glyph_count, None, "no maxp, no glyph count");
+        assert!(bare.axis_tags.is_empty());
+        assert_eq!(
+            FaceShape::of_bytes(&font(b"not a font".to_vec())).units_per_em,
+            None
+        );
+    }
+
+    #[test]
+    fn faces_agree_only_on_every_field() {
+        let bytes = FaceShape {
+            glyph_count: Some(300),
+            units_per_em: Some(1000),
+            axis_tags: vec![u32::from_be_bytes(*b"wght")],
+        };
+        assert_eq!(bytes.disagreement(&bytes.clone()), None);
+        let fewer = FaceShape {
+            glyph_count: Some(299),
+            ..bytes.clone()
+        };
+        assert!(
+            bytes
+                .disagreement(&fewer)
+                .is_some_and(|why| why.contains("glyph count 300") && why.contains("299")),
+            "{:?}",
+            bytes.disagreement(&fewer)
+        );
+        let unknown = FaceShape {
+            glyph_count: None,
+            ..bytes.clone()
+        };
+        assert!(
+            unknown.disagreement(&bytes).is_some(),
+            "a missing maxp never agrees"
+        );
+        let units = FaceShape {
+            units_per_em: Some(2048),
+            ..bytes.clone()
+        };
+        assert!(
+            bytes
+                .disagreement(&units)
+                .is_some_and(|why| why.contains("unitsPerEm"))
+        );
+        let reordered = FaceShape {
+            axis_tags: vec![u32::from_be_bytes(*b"wdth"), u32::from_be_bytes(*b"wght")],
+            ..bytes.clone()
+        };
+        assert!(
+            bytes
+                .disagreement(&reordered)
+                .is_some_and(|why| why.contains("[wght]") && why.contains("[wdth wght]"))
+        );
+        let flat = FaceShape {
+            axis_tags: Vec::new(),
+            ..bytes.clone()
+        };
+        assert!(bytes.disagreement(&flat).is_some(), "axis counts differ");
+        // An unprintable tag is escaped, not written raw.
+        assert_eq!(tag_list(&[0x0a00_6869]), "\\n\\x00hi");
     }
 
     #[test]

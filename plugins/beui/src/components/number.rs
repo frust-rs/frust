@@ -292,7 +292,7 @@ pub struct NumberWidget {
     /// The ten shaped digits, and one shaped run per literal slot.
     digits: Vec<TextLayout>,
     literals: Vec<Option<TextLayout>>,
-    shaped: Option<(Vec<NumberSlot>, TextStyle)>,
+    shaped: Option<(Vec<NumberSlot>, TextStyle, u64)>,
     /// The digit cell's width and the column's slide pitch, both measured from
     /// the shaped digits.
     cell: Size,
@@ -510,7 +510,8 @@ impl Widget for NumberWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let theme = Theme::from_layout_ctx(ctx);
         let style = self.run_style(theme, self.ink(theme));
-        if self.shaped.as_ref() != Some(&(self.slots.clone(), style.clone())) {
+        let generation = crate::text::locale_generation(&style);
+        if self.shaped.as_ref() != Some(&(self.slots.clone(), style.clone(), generation)) {
             let text_ctx = ctx.text_context::<TextContext>();
             self.digits = (0..DIGITS)
                 .map(|digit| text_ctx.layout(&digit.to_string(), &style, None))
@@ -523,7 +524,7 @@ impl Widget for NumberWidget {
                     NumberSlot::Literal(c) => Some(text_ctx.layout(&c.to_string(), &style, None)),
                 })
                 .collect();
-            self.shaped = Some((self.slots.clone(), style));
+            self.shaped = Some((self.slots.clone(), style, generation));
             let widest = self
                 .digits
                 .iter()

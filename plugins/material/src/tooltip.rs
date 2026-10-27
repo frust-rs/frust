@@ -191,6 +191,7 @@ use frust::authoring::{
 };
 use frust::{AnimationController, FrameTime, GestureDetector, Theme};
 
+use crate::badge::locale_stamp;
 use crate::button::text_button;
 use crate::overlay::{
     ANCHORED_ENTER_SCALE, OverlayAlign, OverlayAnchor, OverlayContainer, OverlayElevation,
@@ -572,6 +573,8 @@ struct TooltipTextRun {
     content: String,
     /// The style the cached layout was shaped with.
     style: TextStyle,
+    /// The locale generation `layout` was shaped under ([`locale_stamp`]).
+    stamp: u64,
     layout: Option<TextLayout>,
 }
 
@@ -580,6 +583,7 @@ impl TooltipTextRun {
         Self {
             content: String::new(),
             style: TextStyle::default(),
+            stamp: 0,
             layout: None,
         }
     }
@@ -596,12 +600,16 @@ impl TooltipTextRun {
             self.style = style.clone();
             self.layout = None;
         }
-        if let Some(layout) = &self.layout {
+        let stamp = locale_stamp(&self.style);
+        if let Some(layout) = &self.layout
+            && self.stamp == stamp
+        {
             return layout.size();
         }
         let text_ctx = ctx.text_context::<TextContext>();
         let laid = text_ctx.layout(&self.content, &self.style, Some(max_width as f32));
         let size = laid.size();
+        self.stamp = stamp;
         self.layout = Some(laid);
         size
     }
@@ -1809,6 +1817,7 @@ mod tests {
 
     #[test]
     fn a_theme_swap_reshapes_the_cached_panel_runs() {
+        let _slot = crate::badge::locale_slot_test::reader();
         let probe_a = || FontFamily::named("Tooltip Swap Probe A");
         let probe_b = || FontFamily::named("Tooltip Swap Probe B");
         let first = theme_with(probe_a(), probe_a(), probe_a());

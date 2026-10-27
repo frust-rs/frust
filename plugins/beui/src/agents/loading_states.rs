@@ -431,11 +431,11 @@ pub struct LoadingStatesWidget {
     display: String,
     /// The shaped status run, plus what it was shaped from.
     run: Option<TextLayout>,
-    shaped: Option<(String, TextStyle)>,
+    shaped: Option<(String, TextStyle, u64)>,
     /// The shaped elapsed timer, plus what it was shaped from
     /// ([`Progress`](LoadingStatesVariant::Progress) only).
     timer: Option<TextLayout>,
-    timer_shaped: Option<(String, TextStyle)>,
+    timer_shaped: Option<(String, TextStyle, u64)>,
     /// The timer text `paint` last computed and `layout` owes a shape for.
     timer_text: String,
     /// The width the widest phrase reserves, so cycling never resizes the row.
@@ -733,10 +733,11 @@ impl Widget for LoadingStatesWidget {
         let mut text_size = Size::ZERO;
         if self.variant.has_text() {
             let wanted = self.display.clone();
-            if self.shaped.as_ref() != Some(&(wanted.clone(), style.clone())) {
+            let generation = crate::text::locale_generation(&style);
+            if self.shaped.as_ref() != Some(&(wanted.clone(), style.clone(), generation)) {
                 let text_ctx = ctx.text_context::<TextContext>();
                 self.run = Some(text_ctx.layout(&wanted, &style, None));
-                self.shaped = Some((wanted, style.clone()));
+                self.shaped = Some((wanted, style.clone(), generation));
             }
             text_size = self.run.as_ref().map_or(Size::ZERO, TextLayout::size);
         }
@@ -761,10 +762,13 @@ impl Widget for LoadingStatesWidget {
         let mut timer_size = Size::ZERO;
         if self.variant == LoadingStatesVariant::Progress {
             let wanted = self.timer_text.clone();
-            if self.timer_shaped.as_ref() != Some(&(wanted.clone(), timer_style.clone())) {
+            let generation = crate::text::locale_generation(&timer_style);
+            if self.timer_shaped.as_ref()
+                != Some(&(wanted.clone(), timer_style.clone(), generation))
+            {
                 let text_ctx = ctx.text_context::<TextContext>();
                 self.timer = Some(text_ctx.layout(&wanted, &timer_style, None));
-                self.timer_shaped = Some((wanted, timer_style));
+                self.timer_shaped = Some((wanted, timer_style, generation));
             }
             timer_size = self.timer.as_ref().map_or(Size::ZERO, TextLayout::size);
         }

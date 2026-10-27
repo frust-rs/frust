@@ -1855,6 +1855,8 @@ pub fn pause(handle: *mut c_void) {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
             app.pause();
+            // After the render barrier, so no GPU work is in flight while the write runs.
+            app.flush_font_cache_on_background();
         }
     });
 }
@@ -1866,6 +1868,7 @@ pub fn resume(handle: *mut c_void) {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
             app.resume();
+            app.font_cache_foregrounded();
         }
         // While backgrounded, CADisplayLink is paused so nothing pumps and
         // tokio timers stall (accepted gap — see `ReactiveRuntime::pump_local`

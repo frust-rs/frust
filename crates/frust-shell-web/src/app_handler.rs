@@ -1331,6 +1331,13 @@ mod browser_loop {
     pub enum ShellUserEvent {
         /// A tracked signal was written; rebuild and repaint.
         SignalsDirty,
+        /// The page went away or hid (`pagehide`, `visibilitychange` to hidden): the font cache
+        /// flush point. A browser keeps no font cache file today (the web tier's cache is
+        /// disabled), so this lands as a no-op flush, but the hook is wired so the answer cannot
+        /// silently regress when a persistent web cache arrives.
+        PageHidden,
+        /// The page is visible again (`visibilitychange` to visible, `pageshow`): re-arms the flush.
+        PageShown,
     }
 
     thread_local! {
@@ -1375,6 +1382,51 @@ mod browser_loop {
                 }
             });
         })
+    }
+
+    /// Forwards the page lifecycle edges to the loop as [`ShellUserEvent`]s: `pagehide` and
+    /// `visibilitychange` (to hidden) are the last reliable points to run code before a tab is
+    /// discarded. The closures live as long as the page, so they are leaked once, here.
+    fn install_page_lifecycle_listeners() {
+        use wasm_bindgen::JsCast;
+        use wasm_bindgen::closure::Closure;
+
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let send = |event: ShellUserEvent| {
+            WAKE_PROXY.with(|slot| {
+                if let Some(proxy) = slot.borrow().as_ref() {
+                    let _ = proxy.send_event(event);
+                }
+            });
+        };
+        let hide =
+            Closure::<dyn FnMut(web_sys::Event)>::new(move |_| send(ShellUserEvent::PageHidden));
+        let show =
+            Closure::<dyn FnMut(web_sys::Event)>::new(move |_| send(ShellUserEvent::PageShown));
+        let visibility = {
+            let document = window.document();
+            Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+                let hidden = document.as_ref().is_some_and(|d| d.hidden());
+                send(if hidden {
+                    ShellUserEvent::PageHidden
+                } else {
+                    ShellUserEvent::PageShown
+                });
+            })
+        };
+        let _ = window.add_event_listener_with_callback("pagehide", hide.as_ref().unchecked_ref());
+        let _ = window.add_event_listener_with_callback("pageshow", show.as_ref().unchecked_ref());
+        if let Some(document) = window.document() {
+            let _ = document.add_event_listener_with_callback(
+                "visibilitychange",
+                visibility.as_ref().unchecked_ref(),
+            );
+        }
+        hide.forget();
+        show.forget();
+        visibility.forget();
     }
 
     /// The shared home of the frame executor, which does not exist until an
@@ -1579,6 +1631,8 @@ mod browser_loop {
         /// first); a mismatch (resize or scale change) forces layout despite clean flags.
         laid_out_for: Option<Size>,
         text_ctx: TextContext,
+        /// Once-per-transition font-cache flush on `pagehide` / hidden (see [`ShellUserEvent::PageHidden`]).
+        background_flush: frust_shell_common::BackgroundFlush,
         /// The frame executor, absent until its `async` bring-up lands — see
         /// [`SurfaceSlot`].
         surface: Rc<SurfaceSlot>,
@@ -2053,6 +2107,11 @@ mod browser_loop {
                         window.request_redraw();
                     }
                 }
+                ShellUserEvent::PageHidden => {
+                    self.background_flush
+                        .went_to_background(&mut [&mut self.text_ctx]);
+                }
+                ShellUserEvent::PageShown => self.background_flush.came_to_foreground(),
             }
         }
 
@@ -2331,6 +2390,7 @@ mod browser_loop {
 
         let waker = install_wake_proxy(event_loop.create_proxy());
         let runtime = ReactiveRuntime::init(waker);
+        install_page_lifecycle_listeners();
 
         // Ahead of `TextContext::new()` below: registers this tier's bundled
         // default face as the `SystemUi`/`SansSerif` generic-family fallback,
@@ -2357,6 +2417,7 @@ mod browser_loop {
             },
             laid_out_for: None,
             text_ctx: TextContext::new(),
+            background_flush: frust_shell_common::BackgroundFlush::new(),
             surface: Rc::new(SurfaceSlot::default()),
             scene: Scene::new(),
             window: None,

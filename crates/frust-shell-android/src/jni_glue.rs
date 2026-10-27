@@ -2268,6 +2268,10 @@ pub fn native_on_touch(handle: jlong, action: jint, pointer_id: jint, x: jfloat,
     });
 }
 
+/// Once per background transition, however many lifecycle callbacks report it.
+static BACKGROUND_FLUSH: frust_shell_common::BackgroundFlush =
+    frust_shell_common::BackgroundFlush::new();
+
 /// `nativeOnResume`: activity resumed. Bookkeeping only in v0 — the Choreographer
 /// loop is started/stopped in Kotlin — plus re-allowing the performance-hint
 /// session [`native_on_pause`] closed (it reopens on the next continuous frame).
@@ -2276,6 +2280,7 @@ pub fn native_on_resume(handle: jlong) {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if unsafe { handle_mut(handle) }.is_some() {
             log::debug!("frust-shell-android: onResume");
+            BACKGROUND_FLUSH.came_to_foreground();
             crate::adpf::resume();
         }
     });
@@ -2295,6 +2300,8 @@ pub fn native_on_pause(handle: jlong) {
             log::debug!("frust-shell-android: onPause");
             app.suspend_platform_views();
             crate::adpf::suspend();
+            // A process killed in the background loses the session's unwritten font answers.
+            BACKGROUND_FLUSH.went_to_background(&mut [&mut app.text_ctx]);
         }
     });
 }
