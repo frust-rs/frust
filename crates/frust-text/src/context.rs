@@ -667,6 +667,51 @@ mod tests {
     }
 
     #[test]
+    fn two_contexts_over_one_cache_dir_share_their_answers() {
+        let dir = oracle::synthetic::TempDir::new("context-shared-cache");
+        let cache_dir = dir.path().join("fonts");
+        let build = || TextContext::builder().font_cache_dir(&cache_dir).build();
+        // Two contexts, as a shell's and a text input's private one.
+        let (mut one, mut two) = (build(), build());
+        let a = oracle_request("a");
+        let b = oracle_request("\u{0436}");
+
+        let _ = one.oracle.resolve(&a);
+        assert_eq!(one.oracle.stats().backend_calls, 1);
+        one.flush_font_cache().expect("written");
+        let _ = two.oracle.resolve(&a);
+        assert_eq!(
+            two.oracle.stats().backend_calls,
+            0,
+            "the second context is answered by the first one's write-back"
+        );
+        assert_eq!(two.oracle.stats().cache_hits, 1);
+
+        let _ = two.oracle.resolve(&b);
+        assert_eq!(two.oracle.stats().backend_calls, 1);
+        two.flush_font_cache().expect("written");
+        let _ = one.oracle.resolve(&b);
+        assert_eq!(
+            one.oracle.stats().backend_calls,
+            1,
+            "and the first by the second's"
+        );
+
+        // The file holds both answers: an independent reader finds them.
+        let file = oracle::cache_file_in(&cache_dir);
+        let stamp = oracle::cache::VersionStamp::current(oracle::platform_backend().os_build_id());
+        let mut disk = oracle::cache::FallbackCache::new(16);
+        assert_eq!(
+            disk.attach_persistent(file, stamp),
+            oracle::cache::LoadOutcome::Loaded(2)
+        );
+        for request in [&a, &b] {
+            let key = oracle::cache::CacheKey::from_request(request);
+            assert!(disk.get(&key).is_some(), "{:?} is on disk", request.chars);
+        }
+    }
+
+    #[test]
     fn the_environment_override_parses_off_and_absolute_dirs_only() {
         assert_eq!(env_font_cache(None), None);
         assert_eq!(
