@@ -38,6 +38,12 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
 objc2-core-text = { version = "0.3", default-features = false, features = ["std", "CTFont", "CTFontDescriptor", "CTFontTraits"] }
 
 # `api-level-29`: the NDK system-font API (`ASystemFontIterator`/`AFontMatcher`) is API 29.
+
+# Tests only: `CTFontGetGlyphsForCharacters` (CoreText's own cmap answer, compared with the oracle's
+# walk in `oracle/apple.rs`) is behind objc2-core-text's `objc2-core-graphics` feature. Same version
+# requirement as the row above; dev-only, so no production build gains the feature.
+[target.'cfg(target_vendor = "apple")'.dev-dependencies]
+objc2-core-text = { version = "0.3", default-features = false, features = ["objc2-core-graphics"] }
 [target.'cfg(target_os = "android")'.dependencies]
 ndk = { workspace = true, features = ["api-level-29"] }
 

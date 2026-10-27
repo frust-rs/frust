@@ -279,6 +279,41 @@ mod ct {
             Some(Self(font))
         }
 
+        /// The installed face CoreText opens by `name` (a hidden name it cannot resolve comes
+        /// back as another face: callers check `postscript_name`).
+        #[cfg(test)]
+        pub(super) fn with_name(name: &str) -> Self {
+            // SAFETY: a live string; a null matrix is the documented identity argument; Create
+            // rule.
+            Self(unsafe {
+                CTFont::with_name(
+                    &CFString::from_str(name),
+                    BASE_POINT_SIZE,
+                    core::ptr::null(),
+                )
+            })
+        }
+
+        /// CoreText's own glyph ids for `text` (`CTFontGetGlyphsForCharacters`), 0 where it maps
+        /// nothing; one per UTF-16 unit, so `text` should be BMP-only.
+        #[cfg(test)]
+        pub(super) fn glyph_ids(&self, text: &str) -> Vec<u32> {
+            let mut units: Vec<u16> = text.encode_utf16().collect();
+            let mut glyphs = vec![0_u16; units.len()];
+            if units.is_empty() {
+                return Vec::new();
+            }
+            // SAFETY: both buffers hold `units.len()` elements and outlive the call.
+            unsafe {
+                self.0.glyphs_for_characters(
+                    core::ptr::NonNull::new(units.as_mut_ptr()).expect("non-empty"),
+                    core::ptr::NonNull::new(glyphs.as_mut_ptr()).expect("non-empty"),
+                    units.len() as isize,
+                )
+            };
+            glyphs.into_iter().map(u32::from).collect()
+        }
+
         pub(super) fn postscript_name(&self) -> String {
             // SAFETY: a getter on a live font; the copy follows the Create rule.
             unsafe { self.0.post_script_name() }.to_string()
@@ -1169,12 +1204,27 @@ mod tests {
         if !host_ready("cmap_glyph_ids_match_coretexts_recorded_ids") {
             return;
         }
+        // The oracle's `cmap` walk must agree with CoreText's own mapping for the same face.
+        // CoreText is asked, not a recorded list: glyph ids differ between macOS releases.
         let mut backend = CoreTextBackend::new();
         let sf = resolve(&mut backend, "Hello", None).source;
-        assert_eq!(glyph_ids(&sf, "Hello"), [112, 676, 772, 772, 816]);
-        assert_eq!(glyph_ids(&sf, " "), [3]);
-        let pingfang = resolve(&mut backend, "\u{4e2d}\u{6587}", Some("zh-Hans")).source;
-        assert_eq!(glyph_ids(&pingfang, "\u{4e2d}\u{6587}"), [183, 302]);
+        // The SF answer is hidden, and CoreText resolves no hidden name, so its face is the
+        // system UI font's answer for the same text, checked to be the same face.
+        let sf_ct = ct::Font::system_ui(None, Traits::REGULAR)
+            .and_then(|ui| ui.for_string("Hello", None))
+            .expect("CoreText answers Latin");
+        assert_eq!(sf_ct.postscript_name(), ps(&sf));
+        let hello = glyph_ids(&sf, "Hello");
+        assert!(hello.iter().all(|&id| id != 0), "{hello:?}");
+        assert_eq!(hello, sf_ct.glyph_ids("Hello"));
+        assert_eq!(glyph_ids(&sf, " "), sf_ct.glyph_ids(" "));
+        let han_text = "\u{4e2d}\u{6587}";
+        let pingfang = resolve(&mut backend, han_text, Some("zh-Hans")).source;
+        let pingfang_ct = ct::Font::with_name(ps(&pingfang));
+        assert_eq!(pingfang_ct.postscript_name(), ps(&pingfang));
+        let han = glyph_ids(&pingfang, han_text);
+        assert!(han.iter().all(|&id| id != 0), "{han:?}");
+        assert_eq!(han, pingfang_ct.glyph_ids(han_text));
     }
 
     #[test]
