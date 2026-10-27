@@ -101,6 +101,7 @@
 use std::rc::Rc;
 use std::time::Duration;
 
+use crate::badge::LayoutGuard;
 use frust::Theme;
 use frust::authoring::Role;
 use frust::authoring::text::{
@@ -465,8 +466,7 @@ pub enum TitlePosition {
 struct ShapedRun {
     content: String,
     layout: Option<TextLayout>,
-    laid_style: Option<TextStyle>,
-    laid_max_width: Option<f32>,
+    guard: LayoutGuard,
 }
 
 impl ShapedRun {
@@ -474,15 +474,13 @@ impl ShapedRun {
         Self {
             content: content.into(),
             layout: None,
-            laid_style: None,
-            laid_max_width: None,
+            guard: LayoutGuard::default(),
         }
     }
 
     fn layout(&mut self, ctx: &mut LayoutCtx, style: &TextStyle, max_width: Option<f32>) -> Size {
         if let Some(cached) = &self.layout
-            && self.laid_max_width == max_width
-            && self.laid_style.as_ref() == Some(style)
+            && self.guard.matches(style, max_width)
         {
             return cached.size();
         }
@@ -490,8 +488,7 @@ impl ShapedRun {
         let laid = text_ctx.layout(&self.content, style, max_width);
         let size = laid.size();
         self.layout = Some(laid);
-        self.laid_style = Some(style.clone());
-        self.laid_max_width = max_width;
+        self.guard.record(style, max_width);
         size
     }
 
@@ -1835,6 +1832,54 @@ impl AppBarWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Total shaping-cache lookups so far: unchanged while a cached layout is
+    /// reused, advanced by every rebuild.
+    fn lookups(tcx: &TextContext) -> u64 {
+        let s = tcx.shape_cache_stats();
+        s.shapes + s.line_breaks + s.hits
+    }
+
+    #[test]
+    fn cached_layout_follows_the_app_locale_generation() {
+        use crate::badge::locale_test::DefaultLocale;
+        let _locale = DefaultLocale::set(None);
+        let mut tcx = TextContext::new();
+        let mut run = ShapedRun::new("Title");
+        let style = TextStyle::default();
+        let width = Some(200.0);
+
+        let pass = |run: &mut ShapedRun, style: &TextStyle, tcx: &mut TextContext| {
+            let mut lctx = LayoutCtx::with_text_context(tcx as &mut dyn std::any::Any);
+            run.layout(&mut lctx, style, width);
+        };
+
+        pass(&mut run, &style, &mut tcx);
+        let built = lookups(&tcx);
+        assert!(built > 0);
+
+        // Same style, width and generation: the cached layout is reused.
+        pass(&mut run, &style, &mut tcx);
+        assert_eq!(lookups(&tcx), built);
+
+        // A locale switch advances the generation: the next pass rebuilds.
+        frust::authoring::text::set_default_locale(Some("ja"));
+        pass(&mut run, &style, &mut tcx);
+        let rebuilt = lookups(&tcx);
+        assert!(rebuilt > built);
+
+        // ...and is then cached again at the new generation.
+        pass(&mut run, &style, &mut tcx);
+        assert_eq!(lookups(&tcx), rebuilt);
+
+        // An explicit-locale style does not follow the generation.
+        let tagged = style.clone().with_locale(Some("de"));
+        pass(&mut run, &tagged, &mut tcx);
+        let tagged_built = lookups(&tcx);
+        frust::authoring::text::set_default_locale(Some("ko"));
+        pass(&mut run, &tagged, &mut tcx);
+        assert_eq!(lookups(&tcx), tagged_built);
+    }
     use frust::authoring::text::TextContext;
     use frust::authoring::{BuildCtx, PointerButton, PointerEvent, WindowEdgeInsets, WindowInsets};
     use frust_core::RenderRoot;

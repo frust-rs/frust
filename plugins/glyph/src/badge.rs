@@ -169,6 +169,62 @@ impl BadgeView {
     }
 }
 
+/// The cache key behind every glyph label's retained [`TextLayout`]: the style
+/// and wrap width it was shaped at, plus the app default-locale generation
+/// (`frust::authoring::text::default_locale_generation`) current when it was shaped. A
+/// runtime locale switch advances the generation, so untagged text re-shapes
+/// on the next layout pass; a style carrying an explicit locale is exempt
+/// because the shape cache keys it by that locale.
+#[derive(Default)]
+pub(crate) struct LayoutGuard {
+    style: Option<TextStyle>,
+    max_width: Option<f32>,
+    generation: u64,
+}
+
+impl LayoutGuard {
+    /// Whether a layout recorded under this guard is still valid for
+    /// `style` / `max_width` at the current locale generation.
+    pub(crate) fn matches(&self, style: &TextStyle, max_width: Option<f32>) -> bool {
+        self.max_width == max_width
+            && self.style.as_ref() == Some(style)
+            && (style.locale.is_some()
+                || self.generation == frust::authoring::text::default_locale_generation())
+    }
+
+    /// Record the inputs a fresh layout was produced from.
+    pub(crate) fn record(&mut self, style: &TextStyle, max_width: Option<f32>) {
+        self.style = Some(style.clone());
+        self.max_width = max_width;
+        self.generation = frust::authoring::text::default_locale_generation();
+    }
+}
+
+/// Serialises the glyph tests that write the process-global default locale.
+#[cfg(test)]
+pub(crate) mod locale_test {
+    use std::sync::{Mutex, MutexGuard};
+
+    static LOCK: Mutex<()> = Mutex::new(());
+
+    /// Holds the lock and restores `None` on drop.
+    pub(crate) struct DefaultLocale(#[allow(dead_code)] MutexGuard<'static, ()>);
+
+    impl DefaultLocale {
+        pub(crate) fn set(locale: Option<&str>) -> Self {
+            let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            frust::authoring::text::set_default_locale(locale);
+            Self(guard)
+        }
+    }
+
+    impl Drop for DefaultLocale {
+        fn drop(&mut self) {
+            frust::authoring::text::set_default_locale(None);
+        }
+    }
+}
+
 /// A minimal retained text run: shapes lazily during layout and paints via
 /// glyph runs. A self-contained mirror of `crate::text::TextWidget`'s cache
 /// shape (see the module docs for why `Badge`/`Tag`/`Alert` don't nest a
@@ -176,8 +232,7 @@ impl BadgeView {
 struct GlyphLabel {
     content: String,
     layout: Option<TextLayout>,
-    laid_out_style: Option<TextStyle>,
-    laid_out_max_width: Option<f32>,
+    guard: LayoutGuard,
 }
 
 impl GlyphLabel {
@@ -185,8 +240,7 @@ impl GlyphLabel {
         Self {
             content: content.into(),
             layout: None,
-            laid_out_style: None,
-            laid_out_max_width: None,
+            guard: LayoutGuard::default(),
         }
     }
 
@@ -206,8 +260,7 @@ impl GlyphLabel {
     /// color contract, see the module docs).
     fn layout(&mut self, ctx: &mut LayoutCtx, style: &TextStyle, max_width: Option<f32>) -> Size {
         if let Some(cached) = &self.layout
-            && self.laid_out_max_width == max_width
-            && self.laid_out_style.as_ref() == Some(style)
+            && self.guard.matches(style, max_width)
         {
             return cached.size();
         }
@@ -215,8 +268,7 @@ impl GlyphLabel {
         let laid = text_ctx.layout(&self.content, style, max_width);
         let size = laid.size();
         self.layout = Some(laid);
-        self.laid_out_style = Some(style.clone());
-        self.laid_out_max_width = max_width;
+        self.guard.record(style, max_width);
         size
     }
 
@@ -456,6 +508,54 @@ impl Widget for BadgeWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Total shaping-cache lookups so far: unchanged while a cached layout is
+    /// reused, advanced by every rebuild.
+    fn lookups(tcx: &TextContext) -> u64 {
+        let s = tcx.shape_cache_stats();
+        s.shapes + s.line_breaks + s.hits
+    }
+
+    #[test]
+    fn cached_layout_follows_the_app_locale_generation() {
+        use crate::badge::locale_test::DefaultLocale;
+        let _locale = DefaultLocale::set(None);
+        let mut tcx = TextContext::new();
+        let mut run = GlyphLabel::new("Connected");
+        let style = TextStyle::default();
+        let width = Some(200.0);
+
+        let pass = |run: &mut GlyphLabel, style: &TextStyle, tcx: &mut TextContext| {
+            let mut lctx = LayoutCtx::with_text_context(tcx as &mut dyn std::any::Any);
+            run.layout(&mut lctx, style, width);
+        };
+
+        pass(&mut run, &style, &mut tcx);
+        let built = lookups(&tcx);
+        assert!(built > 0);
+
+        // Same style, width and generation: the cached layout is reused.
+        pass(&mut run, &style, &mut tcx);
+        assert_eq!(lookups(&tcx), built);
+
+        // A locale switch advances the generation: the next pass rebuilds.
+        frust::authoring::text::set_default_locale(Some("ja"));
+        pass(&mut run, &style, &mut tcx);
+        let rebuilt = lookups(&tcx);
+        assert!(rebuilt > built);
+
+        // ...and is then cached again at the new generation.
+        pass(&mut run, &style, &mut tcx);
+        assert_eq!(lookups(&tcx), rebuilt);
+
+        // An explicit-locale style does not follow the generation.
+        let tagged = style.clone().with_locale(Some("de"));
+        pass(&mut run, &tagged, &mut tcx);
+        let tagged_built = lookups(&tcx);
+        frust::authoring::text::set_default_locale(Some("ko"));
+        pass(&mut run, &tagged, &mut tcx);
+        assert_eq!(lookups(&tcx), tagged_built);
+    }
     use frust::Brightness;
     use std::any::Any;
 
