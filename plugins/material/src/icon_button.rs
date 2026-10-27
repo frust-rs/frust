@@ -215,6 +215,7 @@ use frust::authoring::{
 use kurbo::{Point, RoundedRect, Shape, Size};
 use peniko::{Brush, Color};
 
+use crate::badge::locale_stamp;
 use crate::button::motion::{ContentPadding, RadiusPaddingMotion};
 use crate::interaction::{HapticSignal, InteractionState, MaterialHaptics};
 use crate::press::presses;
@@ -601,6 +602,8 @@ struct BadgeRun {
     content: String,
     /// The style the cached layout was shaped with.
     style: TextStyle,
+    /// The locale generation `layout` was shaped under ([`locale_stamp`]).
+    stamp: u64,
     layout: Option<TextLayout>,
 }
 
@@ -622,6 +625,7 @@ impl BadgeRun {
         Self {
             content: String::new(),
             style: badge_style(None),
+            stamp: 0,
             layout: None,
         }
     }
@@ -639,12 +643,16 @@ impl BadgeRun {
             self.style = style.clone();
             self.layout = None;
         }
-        if let Some(layout) = &self.layout {
+        let stamp = locale_stamp(&self.style);
+        if let Some(layout) = &self.layout
+            && self.stamp == stamp
+        {
             return layout.size();
         }
         let text_ctx = ctx.text_context::<TextContext>();
         let laid = text_ctx.layout(&self.content, &self.style, None);
         let size = laid.size();
+        self.stamp = stamp;
         self.layout = Some(laid);
         size
     }
@@ -1865,6 +1873,7 @@ mod tests {
 
     #[test]
     fn a_theme_swap_reshapes_the_cached_badge_label() {
+        let _slot = crate::badge::locale_slot_test::reader();
         let view = icon_button::<(), _>(leaf_any(24.0, 24.0), |_| {}).badge(BadgeValue::Count(7));
         let mut widget = build(&view);
         let mut tcx = TextContext::new();

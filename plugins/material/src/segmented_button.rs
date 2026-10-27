@@ -177,6 +177,7 @@ use frust::{IconData, IconSource, ShapeScale, Theme};
 use kurbo::{Affine, BezPath, Point, Rect, RoundedRect, Shape, Size, Vec2};
 use peniko::{Brush, Color};
 
+use crate::badge::locale_stamp;
 use crate::interaction::{HapticSignal, InteractionState, MaterialHaptics};
 use crate::press::presses;
 
@@ -377,7 +378,7 @@ fn label_style(theme: Option<&Theme>) -> TextStyle {
 struct LabelRun {
     content: String,
     layout: Option<TextLayout>,
-    shaped_for: Option<TextStyle>,
+    shaped_for: Option<(TextStyle, u64)>,
 }
 
 impl LabelRun {
@@ -402,8 +403,9 @@ impl LabelRun {
     }
 
     fn shape(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> Size {
+        let stamp = locale_stamp(style);
         if let Some(cached) = &self.layout
-            && self.shaped_for.as_ref() == Some(style)
+            && matches!(&self.shaped_for, Some((s, g)) if s == style && *g == stamp)
         {
             return cached.size();
         }
@@ -411,7 +413,7 @@ impl LabelRun {
         let laid = text_ctx.layout(&self.content, style, None);
         let size = laid.size();
         self.layout = Some(laid);
-        self.shaped_for = Some(style.clone());
+        self.shaped_for = Some((style.clone(), stamp));
         size
     }
 

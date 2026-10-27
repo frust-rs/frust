@@ -439,6 +439,9 @@ impl RunStyles {
 struct Runs {
     /// The styles every cached run below was shaped with.
     styles: RunStyles,
+    /// The default-locale generation the runs below were shaped under; a run whose style names
+    /// its own locale ignores it (see `crate::badge::locale_stamp`).
+    generation: u64,
     /// `"1"`..`"31"`, indexed by `day - 1`; shared by both months during a slide.
     days: Vec<Option<TextLayout>>,
     /// The seven weekday initials, in *column* order (already rotated by
@@ -455,6 +458,7 @@ impl Runs {
     fn new() -> Self {
         Self {
             styles: RunStyles::resolve(None),
+            generation: frust::authoring::text::default_locale_generation(),
             days: (0..31).map(|_| None).collect(),
             weekdays: Vec::new(),
             header: None,
@@ -472,16 +476,21 @@ impl Runs {
     /// Adopt this layout pass's `styles`, dropping only the runs shaped in a
     /// style that changed.
     fn set_styles(&mut self, styles: RunStyles) {
-        if self.styles.day != styles.day {
+        let generation = frust::authoring::text::default_locale_generation();
+        let moved = self.generation != generation;
+        self.generation = generation;
+        // A style that names its own locale never reads the slot, so only the untagged ones follow it.
+        let follows = |style: &TextStyle| style.locale.is_none();
+        if self.styles.day != styles.day || (moved && follows(&styles.day)) {
             self.days.iter_mut().for_each(|day| *day = None);
         }
-        if self.styles.weekday != styles.weekday {
+        if self.styles.weekday != styles.weekday || (moved && follows(&styles.weekday)) {
             self.weekdays.clear();
         }
-        if self.styles.header != styles.header {
+        if self.styles.header != styles.header || (moved && follows(&styles.header)) {
             self.header = None;
         }
-        if self.styles.year != styles.year {
+        if self.styles.year != styles.year || (moved && follows(&styles.year)) {
             self.years.clear();
         }
         self.styles = styles;
@@ -1654,6 +1663,7 @@ mod tests {
 
     #[test]
     fn a_theme_swap_reshapes_exactly_the_runs_whose_role_changed() {
+        let _slot = crate::badge::locale_slot_test::reader();
         let mut widget = build(&view(DatePickerState::new(None, d(2026, 8, 20))));
         let mut tcx = TextContext::new();
         let first = theme_with("Swap A", "Swap A", "Swap A", "Swap A");

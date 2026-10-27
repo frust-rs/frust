@@ -186,6 +186,7 @@ use frust::{AnimationController, IconData, Theme};
 use kurbo::{Affine, Point, Rect, Size, Vec2};
 use peniko::{Brush, Color};
 
+use crate::badge::locale_stamp;
 use crate::icons;
 use crate::press::presses;
 use crate::strings::MaterialStrings;
@@ -327,6 +328,8 @@ struct TextRun {
     content: String,
     /// The style the cached layout was shaped with.
     style: TextStyle,
+    /// The locale generation `layout` was shaped under ([`locale_stamp`]).
+    stamp: u64,
     layout: Option<TextLayout>,
 }
 
@@ -335,6 +338,7 @@ impl TextRun {
         Self {
             content: String::new(),
             style: TextStyle::default(),
+            stamp: 0,
             layout: None,
         }
     }
@@ -353,12 +357,16 @@ impl TextRun {
             self.style = style.clone();
             self.layout = None;
         }
-        if let Some(layout) = &self.layout {
+        let stamp = locale_stamp(&self.style);
+        if let Some(layout) = &self.layout
+            && self.stamp == stamp
+        {
             return layout.size();
         }
         let text_ctx = ctx.text_context::<TextContext>();
         let laid = text_ctx.layout(&self.content, &self.style, None);
         let size = laid.size();
+        self.stamp = stamp;
         self.layout = Some(laid);
         size
     }
@@ -1885,6 +1893,7 @@ mod tests {
 
     #[test]
     fn a_theme_swap_reshapes_the_cached_runs() {
+        let _slot = crate::badge::locale_slot_test::reader();
         let mut w = host_with_action();
         let mut tcx = TextContext::new();
         let probe_a = || FontFamily::named("Snackbar Swap Probe A");

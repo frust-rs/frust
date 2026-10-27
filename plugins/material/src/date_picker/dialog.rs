@@ -97,6 +97,7 @@ use super::{
     ACTIONS_MIN_HEIGHT, DIALOG_PORTRAIT_CALENDAR_WIDTH, DIALOG_PORTRAIT_INPUT_WIDTH,
     DatePickerState, DatePickerStrings, HEADER_PORTRAIT_HEIGHT, OnDatePickerChange,
 };
+use crate::badge::locale_stamp;
 use crate::button::{button, text_button};
 use crate::divider::divider;
 use crate::icon_button::icon_button;
@@ -595,6 +596,8 @@ struct HeaderRun {
     weight: FontWeight,
     /// The family the cached layout was shaped in.
     family: FontFamily,
+    /// The locale generation `layout` was shaped under ([`locale_stamp`]).
+    stamp: u64,
     layout: Option<TextLayout>,
 }
 
@@ -605,6 +608,7 @@ impl HeaderRun {
             size,
             weight,
             family: FontFamily::default(),
+            stamp: 0,
             layout: None,
         }
     }
@@ -640,16 +644,20 @@ impl HeaderRun {
             self.family = family.clone();
             self.layout = None;
         }
-        if let Some(layout) = &self.layout {
+        let style = self.style();
+        let stamp = locale_stamp(&style);
+        if let Some(layout) = &self.layout
+            && self.stamp == stamp
+        {
             return layout.size();
         }
-        let style = self.style();
         let laid = ctx.text_context::<TextContext>().layout(
             &self.content,
             &style,
             Some(max_width.max(0.0) as f32),
         );
         let size = laid.size();
+        self.stamp = stamp;
         self.layout = Some(laid);
         size
     }
@@ -1384,6 +1392,7 @@ mod tests {
 
     #[test]
     fn a_theme_swap_reshapes_the_cached_header_runs() {
+        let _slot = crate::badge::locale_slot_test::reader();
         let mut w = build_header_panel();
         let mut tcx = TextContext::new();
         let first = theme_with_header(
