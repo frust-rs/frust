@@ -46,8 +46,8 @@ impl Default for LocaleDefaultWatcher {
 
 /// What the background hook flushes: a text context's persistent font cache.
 ///
-/// [`TextContext`] is the one real implementor; the trait exists so the hook's once-per-transition
-/// rule is testable with a counting stand-in.
+/// [`TextContext`] is the only type that implements it in the tree; the trait exists so the hook's
+/// once-per-transition rule is testable with a counting stand-in.
 pub trait FontCacheFlush {
     /// Writes unwritten font-oracle answers now ([`TextContext::flush_font_cache`]).
     fn flush_font_cache(&mut self) -> io::Result<()>;
