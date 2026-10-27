@@ -58,7 +58,7 @@ frust-oauth-native = { path = "../../plugins/oauth-native" }
 frust-database = { path = "../../plugins/database" }
 
 # Default features: the reqwest/rustls fetcher behind `NetworkImages::install()`, so the Images page
-# reaches real hosts. Pulls `ring` (the Android check needs `cargo ndk -P 26`).
+# reaches real hosts. Pulls `ring` (the Android check needs `cargo ndk -P 29`).
 frust-network-image = { path = "../../plugins/network-image" }
 frust-file-dialogs = { path = "../../plugins/file-dialogs" }
 

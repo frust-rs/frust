@@ -8203,7 +8203,7 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 ### `network-image-android-gate-needs-ndk` — the Android compile gate for the network image plugin needs the NDK C compiler
 
-**Observed**: `cargo check --target aarch64-linux-android -p frust-network-image` with default features fails without the NDK toolchain on `PATH` because `ring` compiles C. The gate is `cargo ndk -t arm64-v8a -P 26 check -p frust-network-image`; `examples/playground` links `ring` through the plugin's default feature, so its Android check takes the same form. The plain target check works only with `--no-default-features`.
+**Observed**: `cargo check --target aarch64-linux-android -p frust-network-image` with default features fails without the NDK toolchain on `PATH` because `ring` compiles C. The gate is `cargo ndk -t arm64-v8a -P 29 check -p frust-network-image`; `examples/playground` links `ring` through the plugin's default feature, so its Android check takes the same form. The plain target check works only with `--no-default-features`.
 
 **Applies to**: contributors and CI running the Android compile gates without `cargo-ndk`.
 

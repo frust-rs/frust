@@ -45,6 +45,19 @@ T0-T1 tests should make visual failures diagnosable. A golden should not be the
 only proof that a button fires, a route pops, an IME state reconciles, or a
 surface-loss transition is legal.
 
+### Host-dependent tests
+
+A test that needs a host facility (macOS CoreText, a system emoji font) checks its
+real precondition, not just the OS, and when it is missing prints one `SKIPPED (n): <missing
+precondition>` line and passes. The macOS oracle tests in `crates/frust-text/src/oracle/apple.rs`
+check that the PingFang collection is present and that CoreText resolves the named face, and a
+summary test reads the `skips()` counter so a fully skipped run is visible. The system-fallback
+test in `crates/frust-text/tests/emoji.rs` skips this way on hosts with no emoji font, while a
+host-independent test registers the bundled `testing/fonts/NotoEmoji-COLRv1-Subset.ttf` through
+`TextContext::register_fonts` so the emoji path is always exercised. This differs from
+`#[ignore]`, which marks GPU or slow tests that never run by default and are opted into with
+`--ignored`; a counted skip runs everywhere and reports what it did not cover.
+
 ---
 
 ## Current Coverage
@@ -485,6 +498,20 @@ runs must never write expected files. A baseline change is reviewed with its
 expected/actual/diff artifacts and a reason. Store PNGs and compact metadata,
 not opaque driver caches. Never promote output from a machine that failed the
 adapter/font/environment preflight.
+
+Promoting a class on the Linux T400 (`testing/goldens/engine-vulkan-nvidia-t400`):
+
+```
+WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=T400 FRUST_GOLDEN_EXPECT_ADAPTER=T400 \
+  UPDATE_GOLDENS=1 cargo test -p frust-testing --test engine_goldens -- --ignored --test-threads=1
+```
+
+`UPDATE_GOLDENS=1` writes every scoped case that passes the probes and the cross-arm comparison;
+there is no per-case filter (a libtest name filter runs nothing). Review the new pairs, revert
+the sidecar commit/timestamp churn on cases whose PNG is byte-identical, then re-run without
+`UPDATE_GOLDENS`. Escalation rows name the measured number with no margin:
+`page-material-home` sits on its red-channel edge, so any later drift is a real change to
+investigate, not a flake. `testing/goldens/CALIBRATION.md` records the measurements.
 
 ---
 
