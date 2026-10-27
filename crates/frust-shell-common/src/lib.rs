@@ -94,7 +94,7 @@ pub use ffi_support::{
 pub use frame_gate::{
     FrameDecision, FrameGate, FrameInputs, FramePacing, anim_pacing_kill_switch_engaged,
 };
-pub use locale_default::LocaleDefaultWatcher;
+pub use locale_default::{BackgroundFlush, FontCacheFlush, LocaleDefaultWatcher};
 pub use platform_view::{PlatformViewState, ViewCommand};
 pub use render_split::{
     Ack, AckWaiter, FrameMeta, NO_RENDER_THREAD_VAR, RenderBatch, RenderCommand, RenderEvent,
