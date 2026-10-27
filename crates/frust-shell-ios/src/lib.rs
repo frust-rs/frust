@@ -339,6 +339,20 @@ macro_rules! ios_app {
             $crate::ffi_glue::resume(handle)
         }
 
+        /// `frust_did_enter_background`: push the `Paused` lifecycle state.
+        #[cfg(target_os = "ios")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn frust_did_enter_background(handle: *mut ::core::ffi::c_void) {
+            $crate::ffi_glue::did_enter_background(handle)
+        }
+
+        /// `frust_will_enter_foreground`: push the `Inactive` lifecycle state.
+        #[cfg(target_os = "ios")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn frust_will_enter_foreground(handle: *mut ::core::ffi::c_void) {
+            $crate::ffi_glue::will_enter_foreground(handle)
+        }
+
         /// `frust_destroy`: release the native handle (and its surface).
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]

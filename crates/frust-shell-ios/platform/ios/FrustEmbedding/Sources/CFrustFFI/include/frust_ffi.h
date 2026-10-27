@@ -54,6 +54,10 @@ uint8_t frust_render_frame(void *handle, uint64_t timestamp_ns);
 void  frust_dispatch_touch(void *handle, uint32_t phase, uint32_t pointer_id, float x, float y);
 void  frust_pause(void *handle);
 void  frust_resume(void *handle);
+// App lifecycle pushes (Flutter iOS mapping): didEnterBackground -> Paused,
+// willEnterForeground -> Inactive. Pause/resume above push Inactive/Resumed.
+void  frust_did_enter_background(void *handle);
+void  frust_will_enter_foreground(void *handle);
 void  frust_destroy(void *handle);
 
 // Text input. The Swift `FrustView` adopts the full
