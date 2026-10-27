@@ -21,16 +21,31 @@
 //! invention that two paths could disagree about. A run's glyphs convert the
 //! same way: `{id, x, y}` on both sides, mapped one for one.
 //!
-//! # Parity with the classic tier
+//! # Synthesis the run carries
 //!
-//! `frust-text` drops parley's synthesis when it builds a run — no synthetic
-//! oblique, no synthetic bold, no variation coordinates — so the run this
-//! module builds states that explicitly rather than inheriting whatever
-//! `glifo`'s defaults happen to be: no normalized coordinates, and the default
-//! (no-op) embolden. Hinting is the one knob set *against* the default:
-//! `glifo` hints by default, the classic tier does not hint at all, and a
-//! hinted outline lands on different pixels — so a run built here states its
-//! own hinting choice explicitly too, rather than inheriting `glifo`'s.
+//! The run's [`FontHandle`](frust_scene::FontHandle) says how its face was
+//! chosen, and the run this module builds states all of it explicitly rather
+//! than inheriting whatever `glifo`'s defaults happen to be:
+//!
+//! - **Variation coordinates**, handed to `glifo` as they are
+//!   (`normalized_coords`), so a weight-700 run of a variable face is drawn at
+//!   700 and not at the default instance.
+//! - **Faux bold**, for a static face asked for a weight it lacks: the handle's
+//!   em fraction is the whole added stroke width, so
+//!   [`atlas_policy::embolden_per_side`] grows each side of the outline by half
+//!   of it times the size the outline is drawn at, as a symmetric
+//!   [`FontEmbolden`] (the same amount horizontally and vertically).
+//! - **Faux oblique**, behind the single switch
+//!   [`atlas_policy::OBLIQUE_SYNTHESIS`]: a skewing glyph transform. `glifo`
+//!   caches no skewed run, so such a run is never offered the atlas or the
+//!   resident-run path and is drawn as outlines every frame.
+//!
+//! Coordinates and embolden are folded into every cache key the atlas policy
+//! builds (see [`atlas_policy::Synthesis`]), because `glifo` folds them into
+//! its own. Hinting is the one knob set *against* the default: `glifo` hints by
+//! default, the classic tier does not hint at all, and a hinted outline lands
+//! on different pixels — so a run built here states its own hinting choice
+//! explicitly too, rather than inheriting `glifo`'s.
 //!
 //! # The hinting policy, split in two
 //!
@@ -146,7 +161,7 @@ pub(crate) mod backend;
 pub(crate) mod color;
 pub(crate) mod hvgl;
 
-use glifo::{AtlasCacher, FontEmbolden, Glyph, GlyphPrepCache, GlyphRunBuilder, ImageCache};
+use glifo::{AtlasCacher, Glyph, GlyphPrepCache, GlyphRunBuilder, ImageCache};
 use kurbo::{Affine, Point, Vec2};
 use peniko::FontData;
 use peniko::color::{AlphaColor, Srgb};
@@ -331,7 +346,21 @@ pub(crate) fn lower_glyph_run(
         Some((policy, images)) => AtlasCacher::Enabled(policy.atlas_mut(), images),
         None => AtlasCacher::Disabled,
     };
-    GlyphRunBuilder::new(
+    // Computed from the same helpers the route key and the resident plan use,
+    // so the amount `glifo` keys on is the amount they key on.
+    let oblique = atlas_policy::oblique_transform(run);
+    let drawn_size = if oblique.is_some() && !hint {
+        // An unhinted skewed run is not absorbed: drawn at its nominal size
+        // under the full transform.
+        run.font_size
+    } else {
+        atlas_policy::drawn_font_size(run.font_size, transform)
+    };
+    let embolden = atlas_policy::embolden_for(atlas_policy::embolden_per_side(
+        run.font.embolden(),
+        drawn_size,
+    ));
+    let builder = GlyphRunBuilder::new(
         run.font.font().clone(),
         transform,
         // The brush's own transform relative to the run: the display list has
@@ -341,10 +370,14 @@ pub(crate) fn lower_glyph_run(
         EngineTextBackend::new(&mut sink, prep, cacher),
     )
     .font_size(run.font_size)
-    .font_embolden(FontEmbolden::default())
-    .normalized_coords(&[])
-    .hint(hint)
-    .fill_glyphs(run.glyphs.iter().map(|glyph| Glyph {
+    .font_embolden(embolden)
+    .normalized_coords(run.font.normalized_coords())
+    .hint(hint);
+    let builder = match oblique {
+        Some(skew) => builder.glyph_transform(skew),
+        None => builder,
+    };
+    builder.fill_glyphs(run.glyphs.iter().map(|glyph| Glyph {
         id: glyph.id,
         x: glyph.x,
         y: glyph.y,
@@ -423,6 +456,14 @@ impl<'r> ResidentPlan<'r> {
         // before deciding anything.
         let full = transform * Affine::IDENTITY;
         atlas_policy::absorbed_scale(full)?;
+        // A skewed run is never resident: `glifo` caches none, and an upright
+        // record of the same glyphs must not be replayed for it.
+        if atlas_policy::oblique_synthesis(run) {
+            return None;
+        }
+        let size = run.font_size * (full.as_coeffs()[3] as f32);
+        let embolden = atlas_policy::embolden_per_side(run.font.embolden(), size);
+        let synthesis = atlas_policy::Synthesis::new(run.font.normalized_coords(), embolden)?;
         let [_, _, t_c, t_d, t_e, t_f] = full.as_coeffs();
         let size = run.font_size * t_d as f32;
         // `glifo` caches only at or under its ceiling, which a NaN size is
@@ -446,6 +487,7 @@ impl<'r> ResidentPlan<'r> {
                 font_index: font.index,
                 size,
                 hinted: hint,
+                synthesis,
             },
             color: *color,
         })

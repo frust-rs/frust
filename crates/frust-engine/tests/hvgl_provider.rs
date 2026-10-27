@@ -29,8 +29,8 @@
 //!
 //! - **`TextContext` carries them.** A variable `glyf` face laid out at
 //!   weights 300 and 600 yields runs whose handles carry distinct
-//!   coordinates, and none at the face's default weight. `glifo`'s route still
-//!   draws such a run exactly as it did before coordinates were carried.
+//!   coordinates, and none at the face's default weight. `glifo`'s route draws
+//!   such a run at those coordinates (see `variable_route.rs`).
 //! - **On macOS PingFang draws at the requested weight.** 中 at weights 300
 //!   and 600 in PingFang SC compiles to different coverage. The name and the
 //!   coordinates come from `TextContext` when its oracle resolves the `hvgl`
@@ -197,10 +197,10 @@ fn text_context_runs_carry_the_variation_coordinates_they_were_shaped_at() {
     );
 }
 
-/// `glifo`'s route is not handed the coordinates: a run carrying them draws
-/// exactly what the same run without them draws.
+/// `glifo`'s route is handed the coordinates: a run carrying them draws
+/// differently from the same run at the default instance.
 #[test]
-fn a_glifo_run_draws_the_same_with_or_without_coordinates() {
+fn a_glifo_run_draws_differently_with_coordinates() {
     let (mut ctx, family) = variable_font_context();
     let varied = laid_out(&mut ctx, &family, FontWeight::SEMI_BOLD, "Hamburg");
     assert!(!varied[0].font.normalized_coords().is_empty());
@@ -216,8 +216,7 @@ fn a_glifo_run_draws_the_same_with_or_without_coordinates() {
     assert!(varied_frame.glyph_draws > 0);
     assert_eq!(varied_frame.glyph_draws, plain_frame.glyph_draws);
     assert_eq!(varied_frame.skipped_glyphs, plain_frame.skipped_glyphs);
-    assert_eq!(varied_frame.alphas(), plain_frame.alphas());
-    assert_eq!(varied_frame.strip_buf(), plain_frame.strip_buf());
+    assert_ne!(varied_frame.alphas(), plain_frame.alphas());
 }
 
 #[test]
