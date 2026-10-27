@@ -8484,40 +8484,6 @@ result), and the cut is part of that pass.
 
 ---
 
-### `text-runtime-locale-switch-plugin-layouts` — plugin widgets with their own `TextLayout` do not re-face on a runtime locale switch
-
-**Observed**: `Text` and `TextInput` key their layout caches on `frust_text::default_locale_generation`, and
-the shells re-push the theme when it changes. A plugin widget that keeps its own `TextLayout` does not read
-the generation, so an untagged Han string it draws keeps the previous locale's face until something else
-invalidates that layout. Startup is unaffected (the locale is set before the first layout).
-
-**Applies to**: plugin-tier widgets that cache a `TextLayout` themselves, on a runtime locale switch.
-
-**Workaround**: key the widget's layout cache on `frust_text::default_locale_generation()`
-(re-exported as `frust::authoring::text`).
-
-**Why accepted**: the framework widgets cover the common path.
-
-**Evidence**: `crates/frust-widgets/src/text.rs` and `crates/frust-shell-common/src/locale_default.rs`.
-
----
-
-### `text-registered-hvgl-face-skipped` — a face registered through `register_fonts` has no oracle identity yet
-
-**Observed**: the engine opens `hvgl`-only faces (Apple's PingFang) by the PostScript name the font oracle
-resolved. Fonts registered through `TextContext::register_fonts` carry no oracle identity yet, so a
-registered `hvgl`-only face cannot be opened: its glyphs are skipped and counted in
-`CompiledFrame::skipped_glyphs`. Ordinary registered `glyf`/`CFF` faces are unaffected. The font oracle's
-own fall-through is a miss, not a substitute: a hidden `hvgl`-only face whose public re-ask fails is passed
-over by the selector (logged at warn once per script and language), never drawn in its place.
-
-**Applies to**: apps registering an `hvgl`-only Apple system face. A filed follow-up gives registered
-faces an identity.
-
-**Evidence**: `crates/frust-engine/src/text/hvgl.rs`.
-
----
-
 ### `text-faux-oblique-off` — synthetic italic is off by default; opting in draws outlines every frame
 
 **Observed**: an italic request on a face with no italic or slant axis draws upright.
