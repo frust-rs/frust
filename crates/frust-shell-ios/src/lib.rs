@@ -359,6 +359,17 @@ macro_rules! ios_app {
             $crate::ffi_glue::will_enter_foreground(handle)
         }
 
+        /// `frust_sync_lifecycle`: seed the lifecycle state right after
+        /// `frust_init` from `UIApplication.applicationState` — `0` = active
+        /// (`Resumed`), `1` = inactive (`Inactive`), `2` = background (`Paused`).
+        /// Covers launches and presentations whose lifecycle callbacks fired
+        /// before the handle existed. Other values are ignored.
+        #[cfg(target_os = "ios")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn frust_sync_lifecycle(handle: *mut ::core::ffi::c_void, state: i32) {
+            $crate::ffi_glue::sync_lifecycle(handle, state)
+        }
+
         /// `frust_destroy`: release the native handle (and its surface).
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]

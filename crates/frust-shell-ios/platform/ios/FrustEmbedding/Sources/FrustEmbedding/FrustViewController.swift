@@ -571,6 +571,16 @@ open class FrustViewController: UIViewController {
             // `handle` existed, so `pushInsets()`'s guard silently dropped
             // it; push once explicitly now that a handle is live.
             pushInsets()
+            // Seed the lifecycle state from the app's current state. The
+            // observers above only act once a handle exists, so a launch or
+            // presentation that already became active before this first
+            // layout would otherwise stay Detached until the next resign.
+            switch UIApplication.shared.applicationState {
+            case .active: frust_sync_lifecycle(handle, 0)
+            case .inactive: frust_sync_lifecycle(handle, 1)
+            case .background: frust_sync_lifecycle(handle, 2)
+            @unknown default: break
+            }
             // Stand up the platform-view host now that a handle exists:
             // it hosts native sibling views and is
             // polled from `renderFrame` after each `frust_render_frame`.

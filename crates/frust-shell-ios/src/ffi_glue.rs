@@ -1919,6 +1919,33 @@ pub fn will_enter_foreground(handle: *mut c_void) {
     });
 }
 
+/// `frust_sync_lifecycle`: seed the lifecycle state from the host's current
+/// `UIApplication.applicationState` once the handle exists. `state` is `0` =
+/// active (`Resumed`), `1` = inactive (`Inactive`), `2` = background
+/// (`Paused`); any other value is ignored. Pushes the mapped state then pumps,
+/// like the observer entry points, so a launch or presentation that happened
+/// before `frust_init` (when the lifecycle observers had no handle to act on)
+/// is not left `Detached`. Render submission is untouched. A missing handle is
+/// a no-op.
+pub fn sync_lifecycle(handle: *mut c_void, state: i32) {
+    guard("frust_sync_lifecycle", (), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        if unsafe { handle_mut(handle) }.is_some() {
+            let lifecycle = match state {
+                0 => AppLifecycleState::Resumed,
+                1 => AppLifecycleState::Inactive,
+                2 => AppLifecycleState::Paused,
+                _ => {
+                    log::debug!("frust_sync_lifecycle: ignoring unknown state {state}");
+                    return;
+                }
+            };
+            push_app_lifecycle(lifecycle);
+            pump_reactive();
+        }
+    });
+}
+
 /// `frust_set_appearance`: flip the app's theme brightness (a dark-mode
 /// change reported via `traitCollectionDidChange`), re-publishing it through
 /// both delivery paths (mirrors the desktop shell's `apply_theme`). `dark` is
