@@ -243,7 +243,17 @@ object FrustConnectivityHost {
         override fun onLost(network: Network) {
             try {
                 if (network != this.network) return
-                Log.d(TAG, "frust-connectivity: default network lost (last capabilities: $capabilities)")
+                val last = capabilities
+                if (last != null) {
+                    Log.d(
+                        TAG,
+                        "frust-connectivity: default network lost (transport=${transportCode(last)}, " +
+                            "validated=${last.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)}, " +
+                            "notMetered=${last.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)})",
+                    )
+                } else {
+                    Log.d(TAG, "frust-connectivity: default network lost (capabilities not yet known)")
+                }
                 this.network = null
                 capabilities = null
                 reportUnusable()

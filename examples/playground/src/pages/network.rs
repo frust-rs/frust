@@ -81,10 +81,12 @@ impl Component for NetworkPage {
         };
         let block_exit = Arc::new(AtomicBool::new(false));
         let log = RwSignal::new(Vec::new());
-        let current = RwSignal::new(Connectivity::current());
 
         let lifecycle = Self::lifecycle(&sink, &block_exit);
+        // Registered before the first `Connectivity::current()` read, so the
+        // monitor's `initial: true` report reaches this listener.
         let connectivity = Self::connectivity(&sink);
+        let current = RwSignal::new(Connectivity::current());
         Self::drain(rx, log, current);
 
         NetworkPageState {
