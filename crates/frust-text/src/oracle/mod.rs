@@ -1350,6 +1350,7 @@ mod tests {
 
     #[test]
     fn language_for_prefers_the_locale_then_the_script() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let tag = |t: &[u8; 4]| ScriptTag(*t);
         assert_eq!(language_for(tag(b"Hira"), None), Some("ja"));
         assert_eq!(language_for(tag(b"Kana"), None), Some("ja"));

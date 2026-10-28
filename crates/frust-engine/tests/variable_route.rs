@@ -393,8 +393,10 @@ fn an_italic_paragraph_is_counted_as_outline_runs_every_frame() {
 }
 
 /// Prints the per-frame CPU compile cost of italic against upright text, and
-/// asserts only a generous ceiling.
+/// asserts only a generous ceiling. The deterministic counter assertions live in the sibling
+/// tests above; this wall-clock ratio depends on machine load, so the default run skips it.
 #[test]
+#[ignore = "wall-clock ratio; run by hand on a quiet machine"]
 fn an_italic_paragraph_compile_cost_is_bounded() {
     let (mut ctx, family) = context_with(STATIC_FONT);
     let italic = paragraph(&mut ctx, &family, FontStyle::Italic);

@@ -379,6 +379,7 @@ mod tests {
 
     #[test]
     fn key_ignores_width_but_distinguishes_text_and_style() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         // Width is not part of the key (shaping is width-independent).
         assert_eq!(key("hello", 16.0), key("hello", 16.0));
         // Text and style still distinguish keys.
@@ -388,6 +389,7 @@ mod tests {
 
     #[test]
     fn key_distinguishes_alignment() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         // Two texts identical but for alignment must not collide in the
         // cache — see `ShapeKey`'s docs on why `align` is part of the key.
         let start = ShapeKey::new(
@@ -409,6 +411,7 @@ mod tests {
 
     #[test]
     fn key_distinguishes_width_variations_and_locale() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let base = TextStyle::new(16.0, Color::BLACK);
         let plain = ShapeKey::new("hello", &base);
         for varied in [
@@ -453,6 +456,7 @@ mod tests {
 
     #[test]
     fn the_shaped_cache_counts_hits_shapes_and_evictions() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let mut cache = ShapedCache::new(2);
         let shaped = Arc::new(Shaped::default());
         assert!(cache.get_shaped(&key("a", 16.0)).is_none());

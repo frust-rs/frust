@@ -1004,6 +1004,7 @@ mod tests {
 
     #[test]
     fn same_text_two_widths_shapes_once() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         // The core claim: shaping is width-independent. Laying out
         // the same text+style at two different widths shapes exactly once; the
         // width change re-runs line-breaking only, and a repeated width is a
@@ -1037,6 +1038,7 @@ mod tests {
 
     #[test]
     fn the_shaped_cache_hit_skips_analysis_and_shaping() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let (mut cx, s) = noto_cx();
         let first = cx.shape("Hello, hello", &s);
         let (analyses, passes) = (cx.shape_cx.analyses(), cx.shape_cx.passes());
@@ -1059,6 +1061,7 @@ mod tests {
 
     #[test]
     fn a_width_change_relays_out_without_reshaping() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let (mut cx, s) = noto_cx();
         let text = "Hello hello, Hello hello Hello, hello";
         let first = cx.layout(text, &s, Some(200.0));
@@ -1079,6 +1082,7 @@ mod tests {
 
     #[test]
     fn style_variations_widen_the_layout() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let mut cx = test_cx();
         let families = cx
             .register_fonts(
@@ -1101,6 +1105,7 @@ mod tests {
 
     #[test]
     fn text_change_forces_a_fresh_shape() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let mut cx = test_cx();
         let s = style(16.0);
         let _ = cx.layout("hello", &s, None);
@@ -1114,6 +1119,7 @@ mod tests {
 
     #[test]
     fn style_and_color_changes_force_fresh_shapes() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let mut cx = test_cx();
         let _ = cx.layout("hello", &style(16.0), None);
         // Size change.
@@ -1127,6 +1133,7 @@ mod tests {
 
     #[test]
     fn invalidation_correct_across_all_mutation_orders() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         // Property-style: whatever the interleaving of text/style/width, every
         // layout the cache returns matches a freshly-shaped reference — the
         // stale-text/style/width failure mode is what this kills.
@@ -1157,6 +1164,7 @@ mod tests {
 
     #[test]
     fn cache_is_bounded_and_evicts_least_recently_used() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let mut cx = test_cx();
         let s = style(16.0);
         let overflow = 8;
@@ -1294,6 +1302,7 @@ mod tests {
 
     #[test]
     fn alignment_survives_a_width_change_through_the_shape_cache_rebreak() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         // The resize regression the adversarial pass flagged: `LayoutCache::get`
         // had its own hardcoded `Alignment::Start` on the re-break path, so a
         // resized layout would silently revert to `Start` even though the
@@ -1323,6 +1332,7 @@ mod tests {
 
     #[test]
     fn same_text_different_alignment_does_not_collide_in_the_shape_cache() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         // The `ShapeKey` extension regression: two texts identical but for
         // alignment must shape (and render) independently, not share one
         // cache entry.
@@ -1615,6 +1625,7 @@ mod tests {
 
     #[test]
     fn a_long_unbreakable_token_truncates_with_two_shapes_and_no_eviction() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         // The full text and the ellipsis shape once each; the truncation
         // itself re-breaks the cached shaping and measures nothing.
         let mut cx = test_cx();
@@ -1644,6 +1655,7 @@ mod tests {
 
     #[test]
     fn the_truncation_never_evicts_live_cache_entries() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         // With the LRU full, only the two legitimate inserts (the full text
         // and the ellipsis) may displace live entries.
         let mut cx = test_cx();
