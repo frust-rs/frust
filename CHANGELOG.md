@@ -6,6 +6,16 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ## Unreleased
 
+A patch release (the 0.6.x line continues) whose source-affecting changes are three: Android `minSdk`
+is 29 (Breaking), `TextStyle` gained the public fields `width`, `variations` and `locale`, and
+`DesktopConfig` gained `decorations` and `title_buttons` (the Changed list gives each struct-literal
+migration). Everything else is additive or internal.
+
+The text stack is frust's own (a font oracle, a shaping driver over `parley_engine`, frust's line
+layout and editor), the app has a Flutter-parity lifecycle and a `frust-connectivity` plugin, desktop
+apps can draw their own title bar, `frust-i18n` moves to CLDR 49 with a localized Material strings
+bridge, and the wasm32 browser boot no longer panics on a clock read.
+
 ### Breaking
 
 - Android `minSdk` is now 29 (Android 10), up from 26, in the embedding, every plugin module, the
@@ -88,7 +98,7 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `MaterialStrings` tables for en, th, vi, ja, es, de and fr (CLDR month and weekday names) and
   `provide_localized_strings`, `localized_theme` and `material_strings_for`. The non-English
   tables are machine-drafted (`material-strings-machine-drafted-locales`).
-- The registry lists `frust-material-i18n` as its twenty-third plugin entry in the Add Plugin picker.
+- The registry lists `frust-material-i18n` as its twenty-fourth plugin entry in the Add Plugin picker.
 - `examples/playground` (locale switcher) and `examples/material3-demo` (language toggle on the
   theme settings page) demonstrate the localized Material strings.
 
@@ -107,6 +117,10 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `frust-hotpatch`, `frust-devtools` and `frust-devtools-protocol`; an existing app can opt in with
   the one line `frust-debug = ["frust/perf-trace", "frust/devtools", "frust/hotpatch"]` in
   `[features]` (its own dependency key if it renamed `frust`).
+- `frust-engine`: `SceneCompiler::set_synthetic_oblique`, a runtime switch for faux oblique, off by
+  default (an italic request on a face with no italic stays upright). `FontHandle` carries the
+  shaped synthesis (embolden em fraction and skew degrees) that `frust-text` sets from the shaped
+  face.
 - `TextStyle` variation settings and width, `RenderCapabilities` (what the renderer can draw,
   filtering font-fallback candidates), and `TextEditor::has_preedit`.
 - The app default locale, the language of untagged text: `frust_text::set_default_locale`,
@@ -121,9 +135,25 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   native max-lines and ellipsis, and frust's own editor. `TextEditor` no longer sits on parley's
   `PlainEditor`: backspace over an emoji grapheme removes the whole grapheme, and editors honour
   alignment within the wrap width.
-- `DesktopConfig` gained two fields, `decorations` and `title_buttons`. Builder construction is
-  unaffected, and the hand-written `Default` behaves as before; struct-literal construction needs
-  the new fields.
+- `DesktopConfig` gained two public fields, `decorations` and `title_buttons`. Builder construction
+  is unaffected, and the hand-written `Default` behaves as before. Migration: a struct literal adds
+  `..DesktopConfig::default()` (or the builders `with_decorations` and `with_title_buttons`).
+- `TextStyle` (re-exported through `frust::authoring::text`) gained three public fields: `width:
+  f32`, `variations: Vec<([u8; 4], f32)>` and `locale: Option<String>`. Migration: a struct
+  literal adds `..TextStyle::default()` (or starts from `TextStyle::new(size, color)` and chains
+  `with_width`, `with_variation`, `with_variations` and `with_locale`); an exhaustive destructure
+  adds the fields.
+- Native ellipsis cuts at grapheme boundaries, and an ellipsized last line refills from the text
+  before the cut (a URL that wrapped early no longer ends at `https://…` far short of the bound).
+- `TextEditor` floors the selection to a char boundary after a whole-text replacement and drops a
+  stale word-selection base; `TextInput` defers a rebuild caused by a locale change while an IME
+  composition is active.
+- The app template's `.cargo/config.toml` links the Android targets with
+  `--pack-dyn-relocs=relr` and `--use-android-relr-tags` (was `=android`). An existing app may copy
+  the rows; the Android-private tags let API 28/29 bionic apply the relative relocations.
+- The text shaping engine is `parley_engine` 0.12 with `fontique` 0.12 (no system font scan; the
+  oracle owns the OS backends), pinned exactly in the root `Cargo.toml`, with ICU4X held on 2.4
+  and `icu_experimental` 0.7.0, replacing `parley` 0.11.
 - Overlay withdraw never blocks the UI thread on Android, iOS or macOS. All three hosts share one
   overlay table; a layer comes back only after its surface dropped. On iOS `frust_overlay_detach`
   returns at once, so a host keeps a detached view hidden until `frust_overlay_take_released`
@@ -153,6 +183,13 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Fixed
 
+- The wasm32 browser boot no longer panics with "time not implemented on this platform":
+  `frust-text`, `frust-render`, `frust-engine`, `frust-gpu` and `frust-shell-common` read time
+  through `web_time::Instant` (a plain re-export of std, so zero-cost on native). New gates:
+  `scripts/ci/wasm-time-check.sh` (a clippy tripwire against std clock reads in the wasm32 browser
+  graph) and `scripts/ci/web-smoke.sh` (a headless-Chrome boot of the web gallery; the `ci.yml` job
+  `web-smoke`).
+
 - Bold on variable system faces (Android Roboto, macOS SF) and CJK faux bold now render at the
   requested weight: the engine draws glyphs at the face's variation instance and synthesized
   embolden, and the glyph atlas keys by instance. Faux italic on a face with no italic stays
@@ -176,8 +213,9 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   faces registered through `register_fonts` carry a PostScript name and hidden flag, and the `hvgl`
   route refuses a face whose bytes disagree with the CoreText face (`bytes_mismatches`); the font
   oracle pins one Han preference per resolve, stamps the Linux cache with the process locale,
-  counts and reaps failed or stale cache writes and loads the persisted copy once per process; the
-  shells flush the font cache on background transitions (`frust-shell-common::locale_default`).
+  counts and reaps failed or stale cache writes and loads the persisted copy once per process
+  (debug builds of an unconfigured context honour `FRUST_TEXT_FONT_CACHE`, `off` or an absolute
+  directory); the shells flush the font cache on background transitions (`frust-shell-common::locale_default`).
   Retires the `text-runtime-locale-switch-plugin-layouts` and `text-registered-hvgl-face-skipped`
   limitations.
 
