@@ -27,7 +27,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how CORE relates to the other units.
 | `frust-scene::glyph` / `shader` | Carries shaped text and opaque WGSL shader handles from `frust-text` through the `Scene` |
 | `frust-reactive::runtime` | Process-wide `ReactiveRuntime`: background executor, root `Owner`, and the `FrameWaker` rebuild-wake bridge |
 | `frust-reactive::tracked` | `TrackedScope` — dependency tracking that wakes the shell when a tracked signal it read later changes |
-| `frust-reactive::task` / `deep_link` / `back` | `AsyncValue`/`use_task` heavy-work idiom, plus process-wide deep-link and back-press event sources — each delivered `DeepLink` carries a monotonic per-process `sequence`; consumers dedupe a delivery by comparing `sequence`, not the URL text |
+| `frust-reactive::task` / `deep_link` / `back` / `app_lifecycle` | `AsyncValue`/`use_task` heavy-work idiom, plus process-wide deep-link, back-press and app-lifecycle sources (`app_lifecycle` is a Flutter-parity state machine, see App Lifecycle) — each delivered `DeepLink` carries a monotonic per-process `sequence`; consumers dedupe a delivery by comparing `sequence`, not the URL text |
 | `frust-paths::lib` | Per-platform data/cache-dir resolution (including a macOS legacy-XDG read-through fallback and an Android install slot the Android shell fills from `Context.getFilesDir()`/`getCacheDir()` at `nativeInitPlatform`) and an atomic-write helper for desktop and mobile shells |
 | `frust::lib` (facade) | Curates core/widgets/theme/reactive/shells into one flat API via `app!`/`run`/`Component`, plus `frust::authoring` — the widget-authoring vocabulary (trait lifecycle, child/event plumbing, geometry) an app needs to implement its own `View`/`Widget` pair without a direct dependency on `frust-core`/`frust-scene`/`frust-text`/`kurbo`/`peniko` |
 
@@ -242,11 +242,26 @@ the facade/plugin boundary described in the index; CORE itself never depends on 
   cannot swap. Core carries no serde or devtools-specific knowledge; the DEVTOOLS unit owns
   turning the snapshot into wire types (see DEVTOOLS_ARCHITECTURE.md).
 
+## App Lifecycle
+
+`frust-reactive::app_lifecycle` is the process-wide app-lifecycle source, a Flutter-parity state
+machine beside deep links and back. `AppLifecycleState` is ordered `Detached`, `Resumed`,
+`Inactive`, `Hidden`, `Paused`. Each shell derives a target and calls `push_app_lifecycle`
+(shell-facing, UI-thread-only); like Flutter's binding it generates the intermediate steps between
+the current state and the target, so a listener sees every hop. `app_lifecycle().state()` is a
+tracked `RwSignal` read; an atomic process mirror also answers before the runtime is initialised.
+
+`AppLifecycleListener` registers per-transition callbacks (`on_show`, `on_resume`, `on_hide`,
+`on_inactive`, `on_pause`, `on_restart`, `on_detach`, then `on_state_change`) that run synchronously
+on the UI thread. `request_app_exit` asks every `on_exit_requested` listener without
+short-circuiting; any `AppExitResponse::Cancel` cancels the exit. Which shells push which states,
+and which exits are asked, is in [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md).
+
 ## Window Metrics and Context Delivery
 
 `WindowMetrics` (logical size, device-pixel scale, derived orientation, and window insets) is
 delivered via `provide_context` as a **plain value, not a signal** — exactly like `Theme` and
-`WindowInsets` already are. Only `deep_link` and `back` are true `RwSignal`s in the host-signal
+`WindowInsets` already are. Only `deep_link`, `back` and `app_lifecycle` are true `RwSignal`s in the host-signal
 layer; theme, insets, and now metrics are re-provided plain values each time they change. A widget
 or component reads them inside `Component::build` via `use_context::<WindowMetrics>()` without any
 signal subscription. `WindowMetrics.insets` carries the window-control corners too; a corner change
@@ -279,7 +294,7 @@ notifies nothing — and `use_context` creates no subscription, so a metrics wri
 tracked scope dirty nor wakes a frame. A new value therefore becomes visible only on the **next**
 rebuild, which the resize or inset change that produced it already drives. Delivery is
 pull-on-next-frame, not push; do not write code that assumes writing a context triggers a rebuild.
-(Signal writes are the reactive path and do wake — but only `deep_link` and `back` are signals.)
+(Signal writes are the reactive path and do wake — but only `deep_link`, `back` and `app_lifecycle` are signals.)
 The app default locale is not a context either: it is a `frust-text` process value read on the
 shaping thread (see [RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md)).
 

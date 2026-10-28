@@ -7,7 +7,7 @@ substrate, in two halves with opposite directions: the Android platform-handle s
 (JavaVM/Context) a shell writes and a JNI-reaching plugin reads, and the desktop view-factory
 registry a plugin writes and a desktop shell reads. On top of it sit the independent
 OS-capability plugins — `shared-preferences`, `secure-storage`, `camera`, `clipboard`, `haptics`,
-`iap`, `video-player`, `url-launcher`, `auth-session`, `share`, and `file-dialogs` — each exposing one platform-independent
+`iap`, `video-player`, `url-launcher`, `auth-session`, `share`, `file-dialogs`, and `connectivity` — each exposing one platform-independent
 public API behind a per-platform backend. `url-launcher` opens an absolute `http`/`https` URL in the
 platform's default external browser, fire-and-forget, over Android `ACTION_VIEW`, iOS
 `openURL:options:completionHandler:`, or a desktop opener — the launch half of an RFC 8252 OAuth
@@ -70,6 +70,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how PLUGINS relates to the other unit
 | `plugins/camera` | Camera capability (permission, still capture, image stream, barcode/QR decode, torch) over CameraX (Android) or AVFoundation (Apple); preview surfaces as a native platform-view slot, or opt-in as a texture (`preview_texture`; Android producer = a second RGBA_8888 `ImageAnalysis`, CPU copy only; Apple producer = a second 32BGRA `AVCaptureVideoDataOutput` with late frames dropped, handed on as a zero-copy `CVPixelBuffer` when the importer is installed, rotated upright and front-mirrored on iOS but neither on macOS; a device may refuse the second output while an image stream runs, leaving the mailbox empty) |
 | `plugins/clipboard` | Synchronous plain-text clipboard over Android `ClipboardManager` (10+ returns nothing to an unfocused reader), iOS `UIPasteboard` (14+ shows a one-time paste banner), or desktop `arboard` (X11 clipboard content dies with the owning process unless a clipboard manager adopts it) |
 | `plugins/haptics` | Fire-and-forget haptic effects over Android `Vibrator`/`VibrationEffect` or iOS `UI*FeedbackGenerator`; desktop is unavailable by design (no first-class API to route to) |
+| `plugins/connectivity` | Network reachability events (`Available`/`Lost`, a current-path query) over a process-wide monitor: Android `ConnectivityManager.registerDefaultNetworkCallback` (a network counts only with `INTERNET`+`VALIDATED`; Kotlin `FrustConnectivityHost` plus JNI) or Network.framework `nw_path_monitor` called from Rust (`src/apple.rs`); Linux, Windows and web are no-ops |
 | `plugins/iap` | In-app purchases and subscriptions (products, purchases, restore, deep-link to subscription management) over Play Billing (`openiap-google`) or StoreKit 2 (`FrustIap` Swift glue), both speaking OpenIAP 3.0.1; desktop is a v1 deferral, not a capability gap |
 | `plugins/video-player` | Video playback (file, bundled-asset, `http(s)` and HLS sources; play/pause/seek/rate/volume/loop; lifecycle state and events) over Media3 ExoPlayer on Android or AVPlayer on iOS and macOS; the picture is a native platform-view slot (`VideoOutput::NativeView`, the default) or opt-in `VideoOutput::Texture` frames the scene paints: on Android a GLES copy on its own GL thread writes each decoded frame into an RGBA_8888 `ImageReader`, handed on as a zero-copy `AHardwareBuffer` when the importer is installed and API ≥ 29, else a CPU copy; on iOS and macOS an `AVPlayerItemVideoOutput` (32BGRA, IOSurface-backed) polled by a dispatch timer on the session's queue, handed on as a zero-copy `CVPixelBuffer` when the importer is installed, else a CPU swizzle copy (the Info log names the path); web has no texture producer |
 | `plugins/url-launcher` | Fire-and-forget launch of an absolute http/https URL in the platform's default external browser over Android `ACTION_VIEW` (application-`Context` + `NEW_TASK`), iOS `openURL:options:completionHandler:` (async main-queue bounce), or desktop `xdg-open` / `open` / `ShellExecuteW`; the launch half of an RFC 8252 OAuth round trip — completion returns through `frust::deep_links()`; `Maps` builds Apple/Google Maps https URLs and `open_maps_native` opens an allowlisted `geo:`/`maps:`/`comgooglemaps:`/`google.navigation:` URL |
@@ -104,6 +105,7 @@ preview or a `frust build macos|windows|linux`. See
 | `camera` | macOS-native only | AVFoundation (macOS, sharing the Apple arm with iOS); no backend at all on Linux/Windows; no texture mode on desktop |
 | `clipboard` | generic-desktop | `arboard` on macOS, Linux, and Windows alike — macOS shares this arm rather than its own Apple `UIPasteboard` one (UIKit-only) |
 | `haptics` | unavailable-by-design | no first-class OS API to route to, on macOS, Linux, or Windows |
+| `connectivity` | no-op | Linux/Windows (and web) never report; iOS and macOS share the `nw_path_monitor` arm |
 | `iap` | deferred (v1) | dependency-free, always-erroring stub on macOS, Linux, and Windows — mobile-first scope, not a capability gap (`iap-desktop-unavailable-v1` in [LIMITATIONS.md](LIMITATIONS.md)) |
 | `video-player` | macOS-native (Mode A) via the desktop platform-view host | AVPlayer (macOS, sharing the Apple arm with iOS), its `NSView` hosted above the window's content view by the desktop shell; Windows and Linux have no backend at all (`video-web-windows-linux-unavailable-v1` in [LIMITATIONS.md](LIMITATIONS.md)); opt-in texture mode on macOS uses the shared Apple `AVPlayerItemVideoOutput` producer (32BGRA, IOSurface-backed, zero-copy `CVPixelBuffer` when the importer is installed), and Linux/Windows have none |
 | `url-launcher` | generic-desktop | `xdg-open` (Linux), `open` (macOS), `ShellExecuteW` (Windows); desktop receives no deep links, so an OAuth round trip needs a typed-code fallback; native map schemes: `NoHandler` on desktop, `Maps::directions` is the https path |
@@ -220,6 +222,13 @@ host-payload excerpts embedded in error strings are capped at `PAYLOAD_EXCERPT_B
 `frust-reactive`'s `spawn_blocking` is the documented pairing for every plugin's blocking or gated
 call (biometric prompts, camera permission/capture, every `iap` store round trip except
 `request_purchase`/`set_purchase_listener`) — see [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md).
+
+`connectivity` has the narrowest edges: Android needs `jni` + `frust-plugin`, Apple needs `block2` +
+`dispatch2` (the monitor itself is hand-declared C), and there is no `frust` facade edge. One
+process-wide monitor starts once via `OnceLock`. A dedup state machine (`src/state.rs`) folds each
+`RawReport` into `Available`/`Lost`; an initial unusable report emits nothing. Delivery runs on a
+single plugin-owned `frust-connectivity-events` thread behind a `sync_channel(64)` that drops the
+newest event when a listener falls behind.
 
 ## Design-System Plugins
 

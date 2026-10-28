@@ -472,42 +472,34 @@ hidden slot) are in [LIMITATIONS.md](LIMITATIONS.md) § `apple-overlay-limits`.
   window at `makeWindowRootViewController(hosting:)` (default: that controller; a plugin may re-root).
 - **Android edge-to-edge:** `FrustActivity`, not the manifest theme, owns edge-to-edge — `onCreate`
   calls androidx `enableEdgeToEdge` with transparent `SystemBarStyle`s, then on API < 35 adds
-  `FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS` and (API 29+) clears the bar contrast scrim, so transparent
-  bars and real insets arrive regardless of the manifest theme; API 35+ enforces it platform-side.
-  A legacy theme (missing `windowDrawsSystemBarBackgrounds`) keeps working but logs one warning
-  naming the migration recipe ([SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md)).
+  `FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS` and (API 29+) clears the bar contrast scrim; API 35+ enforces
+  it platform-side. A legacy theme keeps working but logs one warning naming the migration recipe
+  ([SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md)).
 - **Theme and brightness** reach widgets through `RenderRoot::set_theme` and app code through a
-  re-provide under the root owner; on desktop a third path fires the per-OS brightness hook, gated
-  on the resolved brightness actually moving so an override swapping one dark theme for another
-  fires nothing. Android also reads the resolved brightness back over JNI after every appearance
-  change and on any frame whose `nativeFrameSync` word reports a flip, so a Rust-forced theme reaches
-  the status bar.
-- **Accessibility:** `frust-core`'s semantics pass reports `bounds` in logical pixels while accesskit
-  expects physical ones, so the desktop shell's `build_tree_update` stamps a root
-  `Affine::scale(window.scale_factor())` onto the `TreeUpdate` (left `None` at scale 1.0). The
-  mobile shells own their own bridges (`accesskit_android`, `accesskit_ios`).
+  re-provide under the root owner; desktop also fires the per-OS brightness hook, gated on the
+  resolved brightness actually moving. Android reads the resolved brightness back over JNI after
+  every appearance change and on any frame whose `nativeFrameSync` word reports a flip.
+- **Accessibility:** `frust-core` semantics report `bounds` in logical pixels but accesskit expects
+  physical ones, so desktop `build_tree_update` stamps a root `Affine::scale(scale_factor)` onto
+  the `TreeUpdate` (`None` at 1.0). Mobile shells own their bridges (`accesskit_android`,
+  `accesskit_ios`).
 - **Reduced motion** is the one host signal whose sensor is not the appearance sensor: Android
   watches the animator duration scale (`ContentObserver` plus an `onResume` re-read), iOS the UIKit
-  notification plus an activation re-read, desktop has no source (winit exposes nothing). Delivery
-  bypasses the theme-override path, which would latch an override and pin brightness; each shell
-  edits the motion field directly and marks appearance dirty so the gate cannot skip the tick.
+  notification plus an activation re-read, desktop has no source. Delivery bypasses the
+  theme-override path (which would pin brightness); each shell edits the motion field directly and
+  marks appearance dirty so the gate cannot skip the tick.
 - **IME content type:** each focused widget publishes a content type (Normal/Password/
   NoSuggestions/Terminal) and each shell destructures the editing state into its platform's
-  payload — Android into `EditorInfo` input-type and IME flags (restarting the connection when the
-  type changes on a steady-focused field), iOS into the `UITextInputTraits` matrix over its shared
-  responder (every managed trait assigned in every arm), desktop into winit's `ImePurpose`, a
-  cosmetic hint on Wayland only and never a secure-text-entry boundary. Both mobile shells
-  reconcile the platform's IME mirror on a per-frame poll behind a divergence guard. The iOS Swift
-  half remains compile- and device-unverified on the Linux build host — see
-  [LIMITATIONS.md](LIMITATIONS.md) `ime-ios-content-type-unverified`.
-- **Cursor:** desktop reads `RenderRoot::cursor()` after every event dispatch, beside
-  `sync_ime` (`ShellHandler::sync_cursor`), and applies it via winit's `Window::set_cursor` only
-  when it differs from the shape last pushed. `winit_cursor_for` (`frust-shell-desktop`) is the one
-  platform touch point mapping the framework's `CursorIcon` onto winit's own vocabulary; a mobile
-  shell never reads the resolved value. Web carries the identical request/resolve contract and a
-  real implementation (winit's web backend writes the canvas's CSS `cursor` property), unlike its
-  semantics/devtools seams below. See [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md)'s Hover
-  and Cursor section.
+  payload — Android `EditorInfo` flags (restarting the connection when the type changes), iOS the
+  `UITextInputTraits` matrix over its shared responder, desktop winit's `ImePurpose` (a cosmetic
+  hint on Wayland only, never a secure-text-entry boundary). Both mobile shells reconcile the IME
+  mirror on a per-frame poll behind a divergence guard. The iOS Swift half is device-unverified —
+  see [LIMITATIONS.md](LIMITATIONS.md) `ime-ios-content-type-unverified`.
+- **Cursor:** desktop reads `RenderRoot::cursor()` after every event dispatch
+  (`ShellHandler::sync_cursor`) and applies it via winit's `Window::set_cursor` only when it
+  differs from the last shape pushed; `winit_cursor_for` is the one mapping from the framework's
+  `CursorIcon`. Mobile shells never read it; web has a real implementation (winit writes the
+  canvas's CSS `cursor`). See [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md)'s Hover and Cursor.
 - **Clipboard:** the framework side is two one-shot slots plus one inbound verb —
   `AppTree::take_clipboard_write`/`take_paste_request`, drained after a dispatch, and
   `InputEvent::EditCommand`, dispatched back. [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md) owns
@@ -516,25 +508,20 @@ hidden slot) are in [LIMITATIONS.md](LIMITATIONS.md) § `apple-overlay-limits`.
   paste request is drained and dropped when that session has gone. Desktop and Android read
   asynchronously; iOS reads synchronously.
   **Desktop** serialises both operations on one lazily spawned worker thread owning the process's
-  single `arboard::Clipboard`, because on X11/Wayland a copy is served *live* by the process that
-  claimed the selection and a read can block for as long as that owner takes to answer — so the read
-  cannot run on the event loop. A finished read returns through the event-loop proxy as a fresh
-  top-level dispatch; an outstanding read absorbs a later request rather than queuing a second,
-  re-pointed at the most recent asker.
-  **Web** cannot go through winit, because a browser grants clipboard access only to the focused
-  editable: the hidden IME overlay (see Web IME bridge) carries the `copy`/`cut`/`paste`
-  listeners. An app- or toolbar-driven access uses `navigator.clipboard`, undefined outside a
-  secure context (warns once; the keyboard path is unaffected).
-  **Android** owns the clipboard on the JVM side, so the channel is a JNI trio: the Kotlin view
-  drains the write/paste slots on frames `nativeFrameSync` flags and pushes verbs back through two
-  host routes (the IME's context-menu action and hardware `Ctrl+C`/`X`/`V`/`A`), both gated on a
-  focused editable. See [LIMITATIONS.md](LIMITATIONS.md) for the focus and toast quirks this route
-  works around.
+  single `arboard::Clipboard` (on X11/Wayland a read can block as long as the selection owner
+  takes, so it cannot run on the event loop); a finished read returns through the event-loop proxy
+  as a fresh top-level dispatch, and an outstanding read absorbs a later request rather than
+  queuing a second.
+  **Web** cannot go through winit (a browser grants clipboard access only to the focused editable):
+  the hidden IME overlay carries the `copy`/`cut`/`paste` listeners; app- or toolbar-driven access
+  uses `navigator.clipboard`, undefined outside a secure context (warns once).
+  **Android** owns the clipboard on the JVM side: the Kotlin view drains the write/paste slots on
+  frames `nativeFrameSync` flags and pushes verbs back through two host routes (the IME context
+  menu and hardware `Ctrl+C`/`X`/`V`/`A`), both gated on a focused editable.
   **iOS** locks the `Native` toolbar policy at start-up (a later `set_selection_toolbar_policy` is
-  refused) because `UIPasteboard.general.string`'s paste-notice exemption applies only to a
-  system-initiated read, which only UIKit's own edit menu provides; the framework's view is the
-  app's single responder for that menu and for hardware `Cmd+C`/`X`/`V`/`A`, and its read runs
-  synchronously inside `paste(_:)`. Both mobile clipboard paths are device-unverified.
+  refused): `UIPasteboard`'s paste-notice exemption applies only to a system-initiated read, which
+  only UIKit's edit menu provides, and that read runs synchronously inside `paste(_:)`. Both mobile
+  clipboard paths are device-unverified; see [LIMITATIONS.md](LIMITATIONS.md).
 - **Web IME bridge:** winit's web backend never emits `WindowEvent::Ime` (upstream issue 4424 is
   open), so `frust-shell-web::ime` bypasses it with one hidden `<input id="frust-ime-overlay">`
   under `document.body`, opened when the focused widget publishes an active `ImeState` and removed
@@ -547,10 +534,9 @@ hidden slot) are in [LIMITATIONS.md](LIMITATIONS.md) § `apple-overlay-limits`.
   mobile soft keyboard), whose edit is taken from the `input` behind it. A soft keyboard's
   Backspace is the known gap. The same element is the page's clipboard surface. Device-unverified —
   see [LIMITATIONS.md](LIMITATIONS.md) `web-ime-residual-gaps`.
-- **Web host signals with no browser counterpart:** accessibility (AccessKit ships no web
-  adapter) and the in-app devtools UI-thread hop (a `wasm32` build has no sockets, so
-  `frust-shell-web` forwards no `devtools` feature) are each a documented no-op
-  (`push_semantics`/`pump_devtools` in `crates/frust-shell-web/src/app_handler.rs`). See
+- **Web host signals with no browser counterpart:** accessibility (no AccessKit web adapter) and
+  the devtools UI-thread hop (`wasm32` has no sockets) are documented no-ops (`push_semantics`/
+  `pump_devtools` in `crates/frust-shell-web/src/app_handler.rs`); see
   [LIMITATIONS.md](LIMITATIONS.md) `web-a11y-devtools`.
 - **Surface-mode resolution:** each mobile shell resolves the host's declared translucency mode
   against actual surface capabilities at configure time and republishes the verdict every frame.
