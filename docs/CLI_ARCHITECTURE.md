@@ -307,7 +307,7 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
   `ios/<Package>`). The
   registry holds twenty-four top-level entries, including the four design-system plugins (`glyph`/
   `material`/`cupertino`/`shadcn` — `beui` is still absent by design) — the TUI's Add Plugin dialog
-  lists all twenty-four. The newest are `connectivity` (an OS-capability entry), `share` (an OS-capability entry), `qr` and `file-dialogs`
+  lists all twenty-four. The newest are `connectivity` and `share` (OS-capability entries), `qr` and `file-dialogs`
   (both `CargoDep`-only, like the design systems); `network-image` is likewise `CargoDep`-only with an optional
   `webp` feature; `oauth-native` is likewise a pure-Rust, `CargoDep`-only OAuth 2.0
   native-app helper sitting beside `auth-session` (PKCE S256, `state`, authorization URL, and
