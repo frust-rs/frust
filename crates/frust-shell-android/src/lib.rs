@@ -80,6 +80,11 @@ mod sync_tail;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod adpf;
 
+// The activity-lifecycle derivation: pure facts → `AppLifecycleState`, host-tested;
+// the process-wide holder inside it is Android-only.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod lifecycle;
+
 #[cfg(target_os = "android")]
 mod app;
 #[cfg(target_os = "android")]
@@ -280,7 +285,42 @@ macro_rules! android_app {
             $crate::jni_glue::native_on_touch(handle, action, pointer_id, x, y)
         }
 
-        /// JNI `nativeOnResume`: activity resumed (bookkeeping only in v0).
+        /// JNI `nativeOnStart`: activity started; pushes the derived lifecycle state.
+        #[unsafe(no_mangle)]
+        pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeOnStart<'local>(
+            _env: $crate::__jni::EnvUnowned<'local>,
+            _class: $crate::__jni::JClass<'local>,
+            handle: $crate::__jni::jlong,
+        ) {
+            $crate::jni_glue::native_on_start(handle)
+        }
+
+        /// JNI `nativeOnStop`: activity stopped; pushes the derived lifecycle state.
+        #[unsafe(no_mangle)]
+        pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeOnStop<'local>(
+            _env: $crate::__jni::EnvUnowned<'local>,
+            _class: $crate::__jni::JClass<'local>,
+            handle: $crate::__jni::jlong,
+        ) {
+            $crate::jni_glue::native_on_stop(handle)
+        }
+
+        /// JNI `nativeOnWindowFocusChanged`: window focus gained/lost; pushes the
+        /// derived lifecycle state.
+        #[unsafe(no_mangle)]
+        pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeOnWindowFocusChanged<
+            'local,
+        >(
+            _env: $crate::__jni::EnvUnowned<'local>,
+            _class: $crate::__jni::JClass<'local>,
+            handle: $crate::__jni::jlong,
+            has_focus: $crate::__jni::jboolean,
+        ) {
+            $crate::jni_glue::native_on_window_focus_changed(handle, has_focus)
+        }
+
+        /// JNI `nativeOnResume`: activity resumed; pushes the derived lifecycle
+        /// state after the foreground work.
         #[unsafe(no_mangle)]
         pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeOnResume<'local>(
             _env: $crate::__jni::EnvUnowned<'local>,
@@ -290,7 +330,7 @@ macro_rules! android_app {
             $crate::jni_glue::native_on_resume(handle)
         }
 
-        /// JNI `nativeOnPause`: activity paused (bookkeeping only in v0).
+        /// JNI `nativeOnPause`: activity paused; pushes the derived lifecycle state before the suspend work.
         #[unsafe(no_mangle)]
         pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeOnPause<'local>(
             _env: $crate::__jni::EnvUnowned<'local>,
@@ -308,6 +348,20 @@ macro_rules! android_app {
             handle: $crate::__jni::jlong,
         ) {
             $crate::jni_glue::native_on_destroy(handle)
+        }
+
+        /// JNI `nativeSyncLifecycle`: replays the started, resumed and window-focus
+        /// facts onto a handle created after the activity callbacks ran.
+        #[unsafe(no_mangle)]
+        pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeSyncLifecycle<'local>(
+            _env: $crate::__jni::EnvUnowned<'local>,
+            _class: $crate::__jni::JClass<'local>,
+            handle: $crate::__jni::jlong,
+            started: $crate::__jni::jboolean,
+            resumed: $crate::__jni::jboolean,
+            focused: $crate::__jni::jboolean,
+        ) {
+            $crate::jni_glue::native_sync_lifecycle(handle, started, resumed, focused)
         }
 
         /// JNI `nativeImeApply`: push a whole platform editing state into the

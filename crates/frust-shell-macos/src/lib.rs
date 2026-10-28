@@ -26,19 +26,23 @@
 //! Two quit routes exist, and they are not the same path:
 //!
 //! - **A window close that quits** (`quit_on_last_window_closed = true`, the
-//!   default) returns `CloseAction::Exit`, so the shared core exits its event
-//!   loop, `run_app` returns, and the frame executor drops — the render thread
-//!   joins after a final present and its best-effort pipeline-cache persist.
-//!   That is the desktop core's own clean-shutdown path, unchanged by this
-//!   crate.
-//! - **The standard Quit item and ⌘Q** are AppKit's own `terminate:`, because
-//!   they must work while this shell's window is hidden and no frame is being
-//!   produced — a Quit routed through the per-frame pump would do nothing in
-//!   exactly the state the macOS convention creates. `winit`'s application
-//!   delegate still turns AppKit's termination into a `LoopExiting` dispatch,
-//!   but the executor's `Drop` does not run on that route (the pipeline-cache
-//!   write it guards is a documented no-op on macOS anyway — Metal exposes no
-//!   pipeline cache; see `frust-shell-desktop`'s `cache` module).
+//!   default) returns `CloseAction::Exit`; the shared core first asks the app
+//!   through `on_exit_requested` and keeps the window open on `Cancel`. On
+//!   `Exit` it leaves its event loop, `run_app` returns, and the frame executor
+//!   drops — the render thread joins after a final present and its best-effort
+//!   pipeline-cache persist. That is the desktop core's own clean-shutdown path,
+//!   unchanged by this crate.
+//! - **The app-menu Quit (⌘Q)** is a frust item, `frust.app.quit`, not AppKit's
+//!   predefined `terminate:`. `muda` runs its handler synchronously on the AppKit
+//!   main thread, so the item still works while this shell's window is hidden and
+//!   no frame is being produced. It asks `frust_reactive::request_app_exit()`; on
+//!   `Exit` it calls `-[NSApplication terminate:]`, the route the predefined item
+//!   took, so `winit`'s application delegate still turns the termination into a
+//!   `LoopExiting` dispatch. On `Cancel` nothing happens. Dock Quit, logout or
+//!   shutdown and force quit still arrive through that delegate and are not asked.
+//!   The executor's `Drop` does not run on that route (the pipeline-cache write it
+//!   guards is a documented no-op on macOS anyway — Metal exposes no pipeline
+//!   cache; see `frust-shell-desktop`'s `cache` module).
 //!
 //! Neither route calls `std::process::exit`.
 //!

@@ -14,7 +14,7 @@ neutral backdrop for the capabilities under test.
 
 A Material `app_bar` (a plug brand mark, the title, and the
 brightness / reduce-motion / animations toggles) sits above the
-`pattern_switcher`-hosted section body, selecting between eighteen sections
+`pattern_switcher`-hosted section body, selecting between nineteen sections
 through one of two responsive navigation shapes (`use_context::<WindowMetrics>()`
 against a 600px width breakpoint — `pages::responsive`'s own named-breakpoint
 convention, applied to the shell itself):
@@ -22,7 +22,7 @@ convention, applied to the shell itself):
 - **Narrow** (< 600px, e.g. a phone): a bottom `navigation_bar` shows the
   first five sections directly, plus a trailing "More" destination that opens
   an overlay listing every section.
-- **Wide** (≥ 600px, e.g. a desktop window): a side rail lists all eighteen
+- **Wide** (≥ 600px, e.g. a desktop window): a side rail lists all nineteen
   sections directly, in a column beside the page body — nothing is ever
   behind an overflow menu at this width.
 
@@ -175,6 +175,15 @@ The sections, in order:
     while one has focus, and it types `?` as text; an open palette masks them,
     filter focused or not. A bare Escape blurs a focused filter and is declined,
     so the modal's close hook takes the same press.
+19. **Network** — the lifecycle and connectivity gate harness. It shows the live
+    `AppLifecycleState`, `Connectivity::current()` (refreshed on every event),
+    and a newest-first log (50 rows, ms since the page mounted) of every
+    `AppLifecycleListener` callback (including `on_exit_requested`) and every
+    `ConnectivityEvent`. A "Block exit" checkbox makes `on_exit_requested`
+    return `Cancel` (the close button and macOS ⌘Q are cancelled and logged).
+    Each row is also written once to the platform log with the prefix
+    `frust-gate network:`, so `adb logcat`, the iOS unified log or the macOS
+    console can be grepped.
 
 The Terminal fixtures live in [`fixtures/terminal/`](fixtures/terminal/README.md)
 (bytes + the deterministic generator that produced them, embedded with

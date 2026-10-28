@@ -1280,7 +1280,7 @@ mod browser_loop {
     use frust_core::event::{CursorIcon, InputEvent, PointerPhase};
     use frust_core::view::View;
     use frust_core::{FrameTime, RenderRoot};
-    use frust_reactive::{FrameWaker, ReactiveRuntime, TrackedScope};
+    use frust_reactive::{FrameWaker, ReactiveRuntime, TrackedScope, push_app_lifecycle};
     use frust_scene::{Scene, SceneBuilder};
     use frust_shell_common::font_registry::FontRegistryWatcher;
     use frust_shell_common::{
@@ -1338,6 +1338,10 @@ mod browser_loop {
         PageHidden,
         /// The page is visible again (`visibilitychange` to visible, `pageshow`): re-arms the flush.
         PageShown,
+        /// The window gained focus (`focus`): feeds the Flutter lifecycle target.
+        WindowFocused,
+        /// The window lost focus (`blur`): feeds the Flutter lifecycle target.
+        WindowBlurred,
     }
 
     thread_local! {
@@ -1424,9 +1428,17 @@ mod browser_loop {
                 visibility.as_ref().unchecked_ref(),
             );
         }
+        let focus =
+            Closure::<dyn FnMut(web_sys::Event)>::new(move |_| send(ShellUserEvent::WindowFocused));
+        let blur =
+            Closure::<dyn FnMut(web_sys::Event)>::new(move |_| send(ShellUserEvent::WindowBlurred));
+        let _ = window.add_event_listener_with_callback("focus", focus.as_ref().unchecked_ref());
+        let _ = window.add_event_listener_with_callback("blur", blur.as_ref().unchecked_ref());
         hide.forget();
         show.forget();
         visibility.forget();
+        focus.forget();
+        blur.forget();
     }
 
     /// The shared home of the frame executor, which does not exist until an
@@ -1633,6 +1645,10 @@ mod browser_loop {
         text_ctx: TextContext,
         /// Once-per-transition font-cache flush on `pagehide` / hidden (see [`ShellUserEvent::PageHidden`]).
         background_flush: frust_shell_common::BackgroundFlush,
+        /// Whether the page is hidden (tracked from `PageHidden`/`PageShown`); feeds the lifecycle target.
+        page_hidden: bool,
+        /// Whether the window has focus (tracked from `focus`/`blur`); feeds the lifecycle target.
+        window_focused: bool,
         /// The frame executor, absent until its `async` bring-up lands — see
         /// [`SurfaceSlot`].
         surface: Rc<SurfaceSlot>,
@@ -1703,6 +1719,14 @@ mod browser_loop {
         V: View<State>,
         Build: FnMut(&mut State) -> V + 'static,
     {
+        /// Push the Flutter lifecycle target derived from page visibility and window focus.
+        fn sync_app_lifecycle(&self) {
+            push_app_lifecycle(super::web_lifecycle_target(
+                self.page_hidden,
+                self.window_focused,
+            ));
+        }
+
         /// Deliver one mapped input event to the tree under the reactive
         /// root `Owner` ([`super::event_under_owner`]), re-sync the two
         /// per-event seams every dispatch can move (the IME overlay,
@@ -2108,10 +2132,24 @@ mod browser_loop {
                     }
                 }
                 ShellUserEvent::PageHidden => {
+                    self.page_hidden = true;
+                    self.sync_app_lifecycle();
                     self.background_flush
                         .went_to_background(&mut [&mut self.text_ctx]);
                 }
-                ShellUserEvent::PageShown => self.background_flush.came_to_foreground(),
+                ShellUserEvent::PageShown => {
+                    self.page_hidden = false;
+                    self.sync_app_lifecycle();
+                    self.background_flush.came_to_foreground();
+                }
+                ShellUserEvent::WindowFocused => {
+                    self.window_focused = true;
+                    self.sync_app_lifecycle();
+                }
+                ShellUserEvent::WindowBlurred => {
+                    self.window_focused = false;
+                    self.sync_app_lifecycle();
+                }
             }
         }
 
@@ -2391,6 +2429,12 @@ mod browser_loop {
         let waker = install_wake_proxy(event_loop.create_proxy());
         let runtime = ReactiveRuntime::init(waker);
         install_page_lifecycle_listeners();
+        // Initial lifecycle target from the document's current visibility and focus.
+        let (page_hidden, window_focused) = web_sys::window()
+            .and_then(|w| w.document())
+            .map(|d| (d.hidden(), d.has_focus().unwrap_or(false)))
+            .unwrap_or((false, true));
+        push_app_lifecycle(super::web_lifecycle_target(page_hidden, window_focused));
 
         // Ahead of `TextContext::new()` below: registers this tier's bundled
         // default face as the `SystemUi`/`SansSerif` generic-family fallback,
@@ -2418,6 +2462,8 @@ mod browser_loop {
             laid_out_for: None,
             text_ctx: TextContext::new(),
             background_flush: frust_shell_common::BackgroundFlush::new(),
+            page_hidden,
+            window_focused,
             surface: Rc::new(SurfaceSlot::default()),
             scene: Scene::new(),
             window: None,
@@ -2471,11 +2517,37 @@ mod browser_loop {
     }
 }
 
+/// Flutter's web mapping: `Hidden` when the document is hidden, else `Resumed` with window
+/// focus, else `Inactive`. Web never reports `Paused` or `Detached`.
+#[cfg(any(target_arch = "wasm32", test))]
+fn web_lifecycle_target(
+    page_hidden: bool,
+    window_focused: bool,
+) -> frust_reactive::AppLifecycleState {
+    use frust_reactive::AppLifecycleState as S;
+    if page_hidden {
+        S::Hidden
+    } else if window_focused {
+        S::Resumed
+    } else {
+        S::Inactive
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 pub use browser_loop::{ShellUserEvent, run_app, spawn_app};
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn web_lifecycle_mapping() {
+        use frust_reactive::AppLifecycleState as S;
+        assert_eq!(super::web_lifecycle_target(true, true), S::Hidden);
+        assert_eq!(super::web_lifecycle_target(true, false), S::Hidden);
+        assert_eq!(super::web_lifecycle_target(false, true), S::Resumed);
+        assert_eq!(super::web_lifecycle_target(false, false), S::Inactive);
+    }
+
     use crate::ime::DomEditEvent;
 
     use super::{

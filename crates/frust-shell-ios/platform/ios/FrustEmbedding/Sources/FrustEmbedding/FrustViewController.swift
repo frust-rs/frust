@@ -358,6 +358,20 @@ open class FrustViewController: UIViewController {
             name: UIApplication.didBecomeActiveNotification,
             object: nil
         )
+        // App-lifecycle states (Flutter iOS mapping): the two process-wide
+        // transitions that bracket background. Removed with the rest in deinit.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(appDidEnterBackground),
+            name: UIApplication.didEnterBackgroundNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(appWillEnterForeground),
+            name: UIApplication.willEnterForegroundNotification,
+            object: nil
+        )
 
         // Insets: the keyboard's occlusion isn't part of `UIView.safeAreaInsets`, so
         // it's tracked separately via these notifications and recombined
@@ -557,6 +571,16 @@ open class FrustViewController: UIViewController {
             // `handle` existed, so `pushInsets()`'s guard silently dropped
             // it; push once explicitly now that a handle is live.
             pushInsets()
+            // Seed the lifecycle state from the app's current state. The
+            // observers above only act once a handle exists, so a launch or
+            // presentation that already became active before this first
+            // layout would otherwise stay Detached until the next resign.
+            switch UIApplication.shared.applicationState {
+            case .active: frust_sync_lifecycle(handle, 0)
+            case .inactive: frust_sync_lifecycle(handle, 1)
+            case .background: frust_sync_lifecycle(handle, 2)
+            @unknown default: break
+            }
             // Stand up the platform-view host now that a handle exists:
             // it hosts native sibling views and is
             // polled from `renderFrame` after each `frust_render_frame`.
@@ -1321,6 +1345,14 @@ open class FrustViewController: UIViewController {
     @objc private func appWillResignActive() {
         displayLink?.isPaused = true
         if let handle { frust_pause(handle) }
+    }
+
+    @objc private func appDidEnterBackground() {
+        if let handle { frust_did_enter_background(handle) }
+    }
+
+    @objc private func appWillEnterForeground() {
+        if let handle { frust_will_enter_foreground(handle) }
     }
 
     @objc private func appDidBecomeActive() {

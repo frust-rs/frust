@@ -70,6 +70,21 @@ gradle.lifecycle.beforeProject {
     }
 }
 
+// frust-connectivity: the same include/projectDir/build-dir-redirect trio as
+// `:frust-camera` above, and exactly what `frust-drive::plugin::apply_gradle_module`
+// writes for this plugin's `Contribution::GradleModule`. Carried in-tree
+// because playground is a committed example, not a generated project.
+// `src/pages/network.rs`'s "Network" section drives it.
+include(":frust-connectivity")
+project(":frust-connectivity").projectDir =
+    file("../../../plugins/connectivity/platform/android")
+
+gradle.lifecycle.beforeProject {
+    if (path == ":frust-connectivity") {
+        layout.buildDirectory.set(rootDir.resolve("../build/android/frust-connectivity"))
+    }
+}
+
 // frust-video-player: the same include/projectDir/build-dir-redirect trio as
 // `:frust-camera` above, and exactly what `frust-drive::plugin::apply_gradle_module`
 // writes for this plugin's `Contribution::GradleModule`. Carried in-tree

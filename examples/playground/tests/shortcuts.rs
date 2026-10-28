@@ -234,9 +234,8 @@ fn named(k: NamedKey) -> Key {
 }
 
 #[test]
-fn the_shortcuts_section_is_the_last_label() {
+fn the_shortcuts_section_label_is_at_its_index() {
     assert_eq!(SECTION_LABELS[SECTION], "Shortcuts");
-    assert_eq!(SECTION_LABELS.len(), SECTION + 1);
 }
 
 #[test]

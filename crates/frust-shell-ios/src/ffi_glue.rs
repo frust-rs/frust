@@ -68,7 +68,7 @@ use anyhow::{Context, Result, bail};
 use frust_core::event::{EditCommand, EditingState, ImeContentType, ImeState};
 use frust_core::selection_toolbar::{SelectionToolbarPolicy, lock_selection_toolbar_policy};
 use frust_reactive::thread_policy::{ThreadClass, ThreadClassOutcome, set_current_thread_class};
-use frust_reactive::{ReactiveRuntime, push_deep_link};
+use frust_reactive::{AppLifecycleState, ReactiveRuntime, push_app_lifecycle, push_deep_link};
 use frust_render::{RenderContext, SurfaceAlphaRequest, SurfacePhase, SurfaceRenderer};
 use frust_scene::Scene;
 use frust_shell_common::perf::{self, FrameStats, StartupSpans};
@@ -1848,12 +1848,23 @@ fn ime_state_to_json(state: Option<ImeState>) -> String {
     }
 }
 
-/// `frust_pause`: app backgrounded — stop submitting frames (see
-/// [`IosAppHandle::pause`]).
+/// `frust_pause`: the app resigned active (`willResignActive`: Control Center,
+/// app switcher, call banner, or the first half of going to the background) —
+/// push the Flutter-parity `Inactive` lifecycle state, then stop submitting
+/// frames (see [`IosAppHandle::pause`]). The render semantics are unchanged.
+///
+/// iOS lifecycle mapping (Flutter's): `willResignActive` → `Inactive` (this),
+/// `didEnterBackground` → `Paused` ([`did_enter_background`]; `Hidden` is
+/// synthesized by `push_app_lifecycle`), `willEnterForeground` → `Inactive`
+/// ([`will_enter_foreground`]; `Hidden` is synthesized so `on_restart` then
+/// `on_show` fire), `didBecomeActive` → `Resumed` ([`resume`]). iOS never
+/// pushes `Detached` and never calls `request_app_exit` (no app-initiated
+/// exit; the OS terminates the process without notice).
 pub fn pause(handle: *mut c_void) {
     guard("frust_pause", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
+            push_app_lifecycle(AppLifecycleState::Inactive);
             app.pause();
             // After the render barrier, so no GPU work is in flight while the write runs.
             app.flush_font_cache_on_background();
@@ -1861,14 +1872,16 @@ pub fn pause(handle: *mut c_void) {
     });
 }
 
-/// `frust_resume`: app foregrounded — resume submitting frames (see
-/// [`IosAppHandle::resume`]).
+/// `frust_resume`: the app became active (`didBecomeActive`) — resume
+/// submitting frames (see [`IosAppHandle::resume`]) and push the
+/// Flutter-parity `Resumed` lifecycle state before the reactive pump.
 pub fn resume(handle: *mut c_void) {
     guard("frust_resume", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
             app.resume();
             app.font_cache_foregrounded();
+            push_app_lifecycle(AppLifecycleState::Resumed);
         }
         // While backgrounded, CADisplayLink is paused so nothing pumps and
         // tokio timers stall (accepted gap — see `ReactiveRuntime::pump_local`
@@ -1876,6 +1889,60 @@ pub fn resume(handle: *mut c_void) {
         // immediately on foreground instead of waiting for the next
         // `frust_render_frame` tick.
         pump_reactive();
+    });
+}
+
+/// `frust_did_enter_background`: `didEnterBackground` — push `Paused`
+/// (`Hidden` is synthesized on the way), then pump so listener-queued work
+/// runs. Render pause already happened on `willResignActive`. A missing
+/// handle is a no-op.
+pub fn did_enter_background(handle: *mut c_void) {
+    guard("frust_did_enter_background", (), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        if unsafe { handle_mut(handle) }.is_some() {
+            push_app_lifecycle(AppLifecycleState::Paused);
+            pump_reactive();
+        }
+    });
+}
+
+/// `frust_will_enter_foreground`: `willEnterForeground` — push `Inactive`
+/// (`Hidden` is synthesized, so `on_restart` then `on_show` fire), then pump.
+/// `didBecomeActive` follows with `Resumed`. A missing handle is a no-op.
+pub fn will_enter_foreground(handle: *mut c_void) {
+    guard("frust_will_enter_foreground", (), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        if unsafe { handle_mut(handle) }.is_some() {
+            push_app_lifecycle(AppLifecycleState::Inactive);
+            pump_reactive();
+        }
+    });
+}
+
+/// `frust_sync_lifecycle`: seed the lifecycle state from the host's current
+/// `UIApplication.applicationState` once the handle exists. `state` is `0` =
+/// active (`Resumed`), `1` = inactive (`Inactive`), `2` = background
+/// (`Paused`); any other value is ignored. Pushes the mapped state then pumps,
+/// like the observer entry points, so a launch or presentation that happened
+/// before `frust_init` (when the lifecycle observers had no handle to act on)
+/// is not left `Detached`. Render submission is untouched. A missing handle is
+/// a no-op.
+pub fn sync_lifecycle(handle: *mut c_void, state: i32) {
+    guard("frust_sync_lifecycle", (), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        if unsafe { handle_mut(handle) }.is_some() {
+            let lifecycle = match state {
+                0 => AppLifecycleState::Resumed,
+                1 => AppLifecycleState::Inactive,
+                2 => AppLifecycleState::Paused,
+                _ => {
+                    log::debug!("frust_sync_lifecycle: ignoring unknown state {state}");
+                    return;
+                }
+            };
+            push_app_lifecycle(lifecycle);
+            pump_reactive();
+        }
     });
 }
 

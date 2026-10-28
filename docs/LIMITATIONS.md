@@ -8520,3 +8520,115 @@ the switch, so the opt-in is engine-level only.
 
 **Evidence**: Apple M4 S6 all-italic measurement; Pixel 5 faux-oblique probe rows leaned with the switch
 on; `crates/frust-engine/src/compile/mod.rs`.
+
+---
+
+### `connectivity-background-delivery` — no connectivity events arrive while the app is suspended
+
+**Observed**: while the app is suspended (iOS) or frozen or cached (Android), the OS delivers no network callbacks, so a network change made then produces no `ConnectivityEvent`. A loss followed by a regain while suspended can produce no event at all, and the first event after the app returns may already describe a newer network than the last one the app saw.
+
+**Applies to**: iOS and Android.
+
+**Workaround**: register `AppLifecycleListener` `on_restart` and `on_resume` callbacks and re-read `Connectivity::current()` in them, as the crate docs prescribe, instead of trusting the last event.
+
+**Why accepted**: the OS withholds network callbacks from a suspended process, and the crate cannot receive them then.
+
+**Evidence**: `plugins/connectivity/src/lib.rs` (*No events in the background*); `plugins/connectivity/src/apple.rs` (*Suspension, entitlements, linking*).
+
+---
+
+### `connectivity-apple-synthetic-network-id` — two Wi-Fi networks on one interface look like one network
+
+**Observed**: Network.framework exposes no stable network identity, so on iOS and macOS `NetworkId` is synthetic: the preferred interface's index with its interface type. Two Wi-Fi networks on the same interface share an id and a transport, so a move from one access point to another emits no `Available`, unless the path goes unusable in between. `current()` then keeps the previous `NetworkPath`, with only its `expensive` and `constrained` flags refreshed. This is derived from the translation and dedup code and has not been measured on a device.
+
+**Applies to**: iOS and macOS. Android's `NetworkId` is the platform's `networkHandle`, which is per network.
+
+**Workaround**: none in the crate. An app that must notice an access-point change treats the connectivity state as a hint and checks reachability itself.
+
+**Why accepted**: Apple publishes no per-network identifier to key on, and the interface is the only stable handle the framework offers.
+
+**Evidence**: `plugins/connectivity/src/apple.rs` (*Translation*); `plugins/connectivity/src/state.rs` (*Rules*).
+
+---
+
+### `connectivity-vpn-transport-other` — a VPN hides the link beneath it as `Transport::Other`
+
+**Observed**: the Android host checks `TRANSPORT_VPN` before any other transport, so a VPN network is reported as `Transport::Other`, and the Wi-Fi or cellular link beneath it is not reported. On Apple, a path that uses no Wi-Fi, cellular or wired interface (a VPN-only or loopback path) is `Other` too.
+
+**Applies to**: Android, and Apple paths of that kind. Any transport the platform does not name also maps to `Other`.
+
+**Workaround**: `NetworkPath::expensive` and `constrained` still describe the default network. An app that needs the underlying link type under a VPN cannot read it through this crate.
+
+**Why accepted**: the VPN is the default network the OS reports, and the crate reports that network as the platform names it rather than guessing the link beneath it.
+
+**Evidence**: `plugins/connectivity/platform/android/src/main/kotlin/dev/frust/connectivity/FrustConnectivityHost.kt` (the `TRANSPORT_VPN` check); `plugins/connectivity/src/apple.rs` (*Translation*).
+
+---
+
+### `connectivity-android-validated-only` — a network Android has not validated reads as no network
+
+**Observed**: on Android a network is usable only with both `INTERNET` and `VALIDATED`. A Wi-Fi network that is connected but not yet validated, or one that never validates (a captive portal, say), produces no `Available`, and `Connectivity::current()` answers `None`, the same answer as offline.
+
+**Applies to**: Android only. Apple paths count as usable on Network.framework's `satisfied` status instead.
+
+**Workaround**: treat `None` as "no validated network", not "offline", and run the app's own reachability check before a network-dependent step on a captive network.
+
+**Why accepted**: `VALIDATED` is the OS's own verdict on whether the network reaches the internet. The crate reports that verdict rather than running a second probe.
+
+**Evidence**: `plugins/connectivity/src/android.rs` (*What the host reports*); `plugins/connectivity/src/lib.rs` (*What it reports*).
+
+---
+
+### `app-lifecycle-ui-thread-callbacks` — lifecycle callbacks run on the UI thread, inside the platform callback
+
+**Observed**: every `AppLifecycleListener` callback runs synchronously on the UI thread, inside the shell's platform callback (`onPause`, `applicationDidEnterBackground`, a winit event). A callback that blocks stalls that platform callback and the UI thread with it. A panic is caught and logged, and the remaining callbacks still run.
+
+**Applies to**: every app that registers an `AppLifecycleListener`.
+
+**Workaround**: inside a callback, hand the work off (a channel send, `spawn`) and return. `on_exit_requested` is answered on the spot, so decide there and hand slow work off.
+
+**Why accepted**: the platform callback that delivers a lifecycle step returns to the OS only after the app has run it, and a close or Quit that asked for an exit must be decided before it returns. A deferred answer, as Flutter's `Future` allows, cannot meet that.
+
+**Evidence**: `crates/frust-reactive/src/app_lifecycle.rs` (module docs *Thread contract*; `request_app_exit`).
+
+---
+
+### `app-lifecycle-exit-request-desktop-only` — the exit request is asked only for a desktop close and the macOS and Windows Quit
+
+**Observed**: `on_exit_requested` is asked for a desktop window close (including `WindowCommand::RequestClose`) and for the macOS and Windows menu Quit. It is never asked on Android, iOS or web. It is also not asked for a macOS Dock Quit, logout or shutdown, or a force quit: those reach the platform's application delegate, which does not route through the request. The answer is synchronous, unlike Flutter's `Future`.
+
+**Applies to**: desktop only.
+
+**Workaround**: on desktop, an app-initiated quit sends `WindowCommand::RequestClose`, which takes the close path and asks first. On mobile and web there is no cancelable exit to call.
+
+**Why accepted**: Android and iOS exits are the OS's to decide and are not cancelable (`lifecycle.rs`, `ffi_glue.rs`), and a Dock, logout or force quit belongs to the OS. The request covers the exits frust owns.
+
+**Evidence**: `crates/frust-shell-desktop/src/app_handler.rs` (`resolve_close_action`); `crates/frust-shell-macos/src/menu.rs` (*Quit is the exception*); `crates/frust-shell-windows/src/win32_glue.rs` (`post_close`); `crates/frust-core/src/window_control.rs` (`WindowCommand::RequestClose`).
+
+---
+
+### `app-lifecycle-no-exit-application` — the app cannot end the process itself
+
+**Observed**: Flutter's `exitApplication(AppExitType)` has no frust counterpart. No `frust::` API lets app code end the process or the activity. The only app-initiated close is `WindowCommand::RequestClose` on desktop, which closes a window through the normal close path.
+
+**Applies to**: every platform.
+
+**Workaround**: on desktop, call `push_window_command(WindowCommand::RequestClose)`, which asks `on_exit_requested` first. On mobile, return control to the OS.
+
+**Why accepted**: no mobile shell exposes an app-driven exit, and a desktop exit that skipped the close path would also skip the cancelable answer `on_exit_requested` exists to give.
+
+**Evidence**: `crates/frust/src/lib.rs` (`push_window_command` and `WindowCommand::RequestClose` docs); `crates/frust-reactive/src/app_lifecycle.rs` (module docs).
+
+---
+
+### `app-lifecycle-ios-no-detached` — iOS never reaches `Detached`
+
+**Observed**: the iOS shell pushes `Inactive`, `Paused` and `Resumed`, with `Hidden` synthesized between them. It never pushes `Detached`, so `on_detach` and an `on_state_change` for `Detached` never fire on iOS. The last state an iOS app is told about is `Paused`, the last state iOS announces before it may end the process.
+
+**Applies to**: iOS only. Android pushes `Detached` from `onDestroy`.
+
+**Workaround**: do teardown in `on_pause`, not in `on_detach`.
+
+**Why accepted**: iOS gives the shell no notice before a process is ended, so there is no event to derive `Detached` from.
+
+**Evidence**: `crates/frust-shell-ios/src/ffi_glue.rs` (the `pause` lifecycle mapping doc); `crates/frust-shell-android/src/lifecycle.rs` (`LifecycleFlags::target`); `crates/frust-shell-android/src/jni_glue.rs` (`destroyed` set in the `onDestroy` path).

@@ -1,4 +1,4 @@
-//! The static plugin registry (v1) — twenty-three entries mirroring `plugins/`:
+//! The static plugin registry (v1) — twenty-four entries mirroring `plugins/`:
 //! `shared-preferences` (dependency only), `secure-storage` (dependency plus
 //! an optional `biometric-gate` feature wiring in the plugin's own Android
 //! library module and the iOS plist key its README documents),
@@ -664,6 +664,31 @@ const SHARE: PluginSpec = PluginSpec {
     requires_sibling: None,
 };
 
+/// `connectivity`'s base contributions: a Cargo dependency, the plugin's own
+/// Android library module, and the `Network` system framework (`NWPathMonitor`)
+/// for iOS/macOS. No `ManifestPermission`: `ACCESS_NETWORK_STATE` rides the
+/// module's own `AndroidManifest.xml`, folded in by the manifest merger (the
+/// same rule camera's `CAMERA` follows). No `PlistEntry`: no usage string.
+const CONNECTIVITY_BASE: &[Contribution] = &[
+    Contribution::CargoDep {
+        name: "frust-connectivity",
+    },
+    Contribution::GradleModule {
+        gradle_name: ":frust-connectivity",
+        rel_path: "plugins/connectivity/platform/android",
+    },
+    Contribution::IosFramework { name: "Network" },
+];
+
+const CONNECTIVITY: PluginSpec = PluginSpec {
+    id: "connectivity",
+    summary: "Default-network availability and change events (Android, iOS, macOS)",
+    crate_dir: "connectivity",
+    base: CONNECTIVITY_BASE,
+    optional_features: &[],
+    requires_sibling: None,
+};
+
 /// `qr`'s single base contribution: a Cargo dependency only (platform-free
 /// canvas widget; no permission, plist key or setup call).
 const QR_BASE: &[Contribution] = &[Contribution::CargoDep { name: "frust-qr" }];
@@ -736,6 +761,7 @@ pub fn known_plugins() -> Vec<PluginSpec> {
         SHADCN,
         NETWORK_IMAGE,
         SHARE,
+        CONNECTIVITY,
         QR,
         FILE_DIALOGS,
         MATERIAL_I18N,
@@ -758,7 +784,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
-    fn registry_lists_the_twenty_three_v1_plugins() {
+    fn registry_lists_the_twenty_four_v1_plugins() {
         let ids: Vec<&str> = known_plugins().iter().map(|p| p.id).collect();
         assert_eq!(
             ids,
@@ -783,6 +809,7 @@ mod tests {
                 "shadcn",
                 "network-image",
                 "share",
+                "connectivity",
                 "qr",
                 "file-dialogs",
                 "material-i18n",
@@ -1113,6 +1140,43 @@ mod tests {
                 .any(|c| matches!(c, Contribution::ManifestPermission { .. })),
             "iap must add no ManifestPermission — com.android.vending.BILLING \
              arrives transitively from the openiap-google Play Billing AAR"
+        );
+    }
+
+    /// The `connectivity` entry's base contributions, exactly
+    /// [`CONNECTIVITY_BASE`]'s own list: Cargo dependency, Android library
+    /// module, `Network` framework; no permission or plist entry.
+    #[test]
+    fn connectivity_base_contributions_match_the_final_accounting() {
+        let spec = find_plugin("connectivity").unwrap();
+        assert!(spec.optional_features.is_empty());
+        assert_eq!(spec.requires_sibling, None);
+
+        assert_eq!(spec.base.len(), 3);
+        assert!(matches!(
+            spec.base[0],
+            Contribution::CargoDep {
+                name: "frust-connectivity"
+            }
+        ));
+        assert!(matches!(
+            spec.base[1],
+            Contribution::GradleModule {
+                gradle_name: ":frust-connectivity",
+                rel_path: "plugins/connectivity/platform/android",
+            }
+        ));
+        assert!(matches!(
+            spec.base[2],
+            Contribution::IosFramework { name: "Network" }
+        ));
+        assert!(
+            !spec.base.iter().any(|c| matches!(
+                c,
+                Contribution::ManifestPermission { .. } | Contribution::PlistEntry { .. }
+            )),
+            "connectivity adds no ManifestPermission (the module manifest carries \
+             ACCESS_NETWORK_STATE) and no PlistEntry"
         );
     }
 

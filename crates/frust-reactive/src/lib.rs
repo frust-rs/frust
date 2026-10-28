@@ -9,7 +9,9 @@
 //! into (see [`push_deep_link`]/[`deep_links`]), the process-wide Android
 //! back-press source next to it (see [`push_back_press`]/[`back_presses`] and
 //! the `handles_back` flag), and the process-wide desktop menu-activation
-//! source beside those (see [`push_menu_event`]/[`menu_events`]). A process-wide
+//! source beside those (see [`push_menu_event`]/[`menu_events`]), plus the process-wide
+//! app-lifecycle source with Flutter's lifecycle semantics (see
+//! [`push_app_lifecycle`]/[`app_lifecycle`]/[`AppLifecycleListener`]). A process-wide
 //! signals-dirty flag (`ReactiveRuntime::take_signals_dirty`), tripped by
 //! [`TrackedScope`]'s dirty path, lets a shell ask synchronously and cheaply
 //! once per frame "did any tracked signal change since I last asked" — the
@@ -24,6 +26,7 @@
 //! dependency. Shells own the wake-up wiring and call [`ReactiveRuntime::init`]
 //! (once, on the UI thread) and [`ReactiveRuntime::pump_local`] each frame.
 
+mod app_lifecycle;
 mod back;
 mod deep_link;
 mod executor;
@@ -33,6 +36,10 @@ mod task;
 pub mod thread_policy;
 mod tracked;
 
+pub use app_lifecycle::{
+    AppExitResponse, AppLifecycle, AppLifecycleListener, AppLifecycleState, app_lifecycle,
+    push_app_lifecycle, request_app_exit,
+};
 pub use back::{
     BackPresses, CanPopRegistration, back_presses, clear_can_pop_provider, handles_back,
     push_back_press, set_can_pop_provider, set_handles_back,

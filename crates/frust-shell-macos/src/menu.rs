@@ -12,12 +12,21 @@
 //! still gets a conventional menu bar with a working ⌘Q, and an app that
 //! declares one never has to hand-roll the standard items.
 //!
-//! Everything in the application menu is a `muda` *predefined* item, which on
-//! macOS maps to the platform's own selector (`terminate:`, `hide:`,
-//! `orderFrontStandardAboutPanel:`). Those are performed by AppKit itself and
-//! report no activation — which is exactly why they keep working while this
-//! shell's window is hidden and no frame is being produced (see the pump note
-//! below).
+//! Most of the application menu is `muda` *predefined* items, which on macOS
+//! map to the platform's own selector (`hide:`, `orderFrontStandardAboutPanel:`).
+//! Those are performed by AppKit itself and report no activation — which is
+//! exactly why they keep working while this shell's window is hidden and no
+//! frame is being produced (see the pump note below).
+//!
+//! **Quit is the exception.** It is a frust-owned item ([`QUIT_ID`]) so the app
+//! can cancel it (`frust_reactive::on_exit_requested`). `muda` runs its handler
+//! synchronously on the AppKit main thread — which is the UI thread here — so
+//! the activation is answered *right there*, never through the pump queue: ⌘Q
+//! therefore still works while the window is hidden and no frame is produced.
+//! On `Exit` it performs `-[NSApplication terminate:]`, exactly what the
+//! predefined item did; on `Cancel` nothing happens. Only this menu Quit (and the
+//! window close button) is cancelable: Dock Quit, logout/shutdown and force quit
+//! arrive through the `NSApplicationDelegate` winit owns and are not asked.
 //!
 //! # Push, not poll: why activations do not go through `MenuEvent::receiver`
 //!
@@ -237,6 +246,16 @@ fn collect_into(spec: &MenuSpec, ids: &mut BTreeSet<String>) {
     }
 }
 
+/// The id of the frust-owned application-menu Quit item. Handled directly on the
+/// main thread (see the module docs); never queued for the pump and never reported
+/// to app code as a menu event.
+pub(crate) const QUIT_ID: &str = "frust.app.quit";
+
+/// Whether the app's answer to an exit request lets the Quit proceed.
+pub(crate) fn quit_proceeds(response: frust_reactive::AppExitResponse) -> bool {
+    response == frust_reactive::AppExitResponse::Exit
+}
+
 /// The label for the standard About item — macOS spells it "About <App>".
 pub(crate) fn about_label(app_name: &str) -> String {
     format!("About {app_name}")
@@ -268,7 +287,7 @@ mod platform {
     use muda::accelerator::Accelerator;
     use muda::{IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 
-    use super::{about_label, bridge, hide_label, quit_label};
+    use super::{QUIT_ID, about_label, bridge, hide_label, quit_label, quit_proceeds};
 
     /// Route `muda`'s activations into this crate's queue, exactly once per
     /// process.
@@ -280,9 +299,39 @@ mod platform {
         static INSTALLED: Once = Once::new();
         INSTALLED.call_once(|| {
             MenuEvent::set_event_handler(Some(|event: MenuEvent| {
-                bridge().submit(event.id.as_ref());
+                if event.id.as_ref() == QUIT_ID {
+                    on_quit_activated();
+                } else {
+                    bridge().submit(event.id.as_ref());
+                }
             }));
         });
+    }
+
+    /// Answer a Quit activation on the spot (see the module docs): ask the app, and
+    /// terminate only if it does not cancel.
+    ///
+    /// `muda` calls this synchronously from AppKit's menu dispatch on the main
+    /// thread, so `request_app_exit` runs on the UI thread. A panic must not unwind
+    /// into AppKit; it is swallowed and logged, and the quit is then not performed.
+    fn on_quit_activated() {
+        let outcome = std::panic::catch_unwind(|| {
+            if quit_proceeds(frust_reactive::request_app_exit()) {
+                if !crate::appkit_glue::terminate_app() {
+                    log::error!("frust-shell-macos: Quit activated off the main thread; ignored");
+                }
+            } else {
+                log::debug!("Quit cancelled by an on_exit_requested listener");
+            }
+        });
+        if outcome.is_err() {
+            log::error!("frust-shell-macos: panic while handling Quit; the app keeps running");
+        }
+    }
+
+    /// The frust-owned Quit item: `label`, ⌘Q, enabled.
+    fn quit_item(label: &str) -> MenuItem {
+        MenuItem::with_id(QUIT_ID, label, true, parse_accelerator("CmdOrCtrl+Q"))
     }
 
     /// Build the menu bar and make it `NSApp`'s main menu, returning the menu
@@ -341,7 +390,7 @@ mod platform {
             &PredefinedMenuItem::hide_others(None),
             &PredefinedMenuItem::show_all(None),
             &PredefinedMenuItem::separator(),
-            &PredefinedMenuItem::quit(Some(quit.as_str())),
+            &quit_item(quit.as_str()),
         ])?;
         Ok(app_menu)
     }
@@ -364,6 +413,11 @@ mod platform {
                     accelerator,
                 ))
             }
+            // An app-declared Quit role is cancelable too: same frust-owned item.
+            MenuItemSpec::Role {
+                role: MenuRole::Quit,
+                label,
+            } => container.append_item(&quit_item(label.as_deref().unwrap_or("Quit"))),
             MenuItemSpec::Role { role, label } => {
                 container.append_item(&predefined(*role, label.as_deref()))
             }
@@ -388,6 +442,7 @@ mod platform {
             MenuRole::ShowAll => PredefinedMenuItem::show_all(label),
             MenuRole::Minimize => PredefinedMenuItem::minimize(label),
             MenuRole::CloseWindow => PredefinedMenuItem::close_window(label),
+            // Routed to the frust-owned item by `append`; kept for exhaustiveness.
             MenuRole::Quit => PredefinedMenuItem::quit(label),
         }
     }
@@ -628,6 +683,21 @@ mod tests {
         let out = drained(&bridge);
         assert_eq!(out.len(), MAX_PENDING);
         assert_eq!(out.last().map(String::as_str), Some("newest"));
+    }
+
+    #[test]
+    fn only_an_exit_answer_lets_quit_proceed() {
+        use frust_reactive::AppExitResponse;
+        assert!(quit_proceeds(AppExitResponse::Exit));
+        assert!(!quit_proceeds(AppExitResponse::Cancel));
+    }
+
+    #[test]
+    fn the_quit_id_is_not_a_declarable_app_item() {
+        // A spec cannot collide with it by accident: ids are app-chosen, and the
+        // reserved one is namespaced under `frust.`.
+        assert!(QUIT_ID.starts_with("frust."));
+        assert!(!collect_app_item_ids(None).contains(QUIT_ID));
     }
 
     #[test]

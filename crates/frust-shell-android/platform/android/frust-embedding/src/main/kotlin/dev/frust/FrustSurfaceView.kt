@@ -311,9 +311,19 @@ class FrustSurfaceView(
     // density to get logical coordinates.
     private external fun nativeOnTouch(handle: Long, action: Int, pointerId: Int, x: Float, y: Float)
 
+    private external fun nativeOnStart(handle: Long)
+
+    private external fun nativeOnStop(handle: Long)
+
+    private external fun nativeOnWindowFocusChanged(handle: Long, hasFocus: Boolean)
+
     private external fun nativeOnResume(handle: Long)
 
     private external fun nativeOnPause(handle: Long)
+
+    // Replays the activity's started / resumed / window-focus facts onto a
+    // handle created after those callbacks ran (see [surfaceCreated]).
+    private external fun nativeSyncLifecycle(handle: Long, started: Boolean, resumed: Boolean, focused: Boolean)
 
     private external fun nativeOnDestroy(handle: Long)
 
@@ -550,6 +560,13 @@ class FrustSurfaceView(
 
     /** Whether the Choreographer frame loop should keep re-posting itself. */
     private var running = false
+
+    /**
+     * Between `onStart` and `onStop`. Tracked even while [handle] is 0, because
+     * a cold start runs `onStart` before [surfaceCreated] creates the handle;
+     * [surfaceCreated] replays it through [nativeSyncLifecycle].
+     */
+    private var activityStarted = false
 
     /**
      * A deep link delivered (by `MainActivity`) before [nativeInit] has
@@ -1005,6 +1022,11 @@ class FrustSurfaceView(
                 // foreground), but it fires before this handle exists on a cold
                 // start, so its push was a no-op.
                 pushReduceMotion()
+                // Replay the lifecycle facts the activity hooks dropped while no
+                // handle existed. A cold start runs onStart, onResume and window
+                // focus before this point, so without it the state stays Detached
+                // until the first transition.
+                nativeSyncLifecycle(handle, activityStarted, running, hasWindowFocus())
                 // Attach the accesskit accessibility adapter to this view.
                 // Best-effort: the native side isolates any
                 // failure in its own guard, so a missing delegate class or JNI
@@ -2007,10 +2029,36 @@ class FrustSurfaceView(
         }
     }
 
+    /** Called by `FrustActivity.onStart` — feeds the lifecycle state machine. */
+    fun onStart() {
+        activityStarted = true
+        if (handle != 0L) {
+            nativeOnStart(handle)
+        }
+    }
+
+    /** Called by `FrustActivity.onStop` — feeds the lifecycle state machine. */
+    fun onStop() {
+        activityStarted = false
+        if (handle != 0L) {
+            nativeOnStop(handle)
+        }
+    }
+
+    /** Called by `FrustActivity.onWindowFocusChanged` — feeds the lifecycle state machine. */
+    fun onActivityWindowFocusChanged(hasFocus: Boolean) {
+        if (handle != 0L) {
+            nativeOnWindowFocusChanged(handle, hasFocus)
+        }
+    }
+
     /** Called by `MainActivity.onResume` — starts the Choreographer loop. */
     fun onResume() {
         running = true
         if (handle != 0L) {
+            // Focus may have been gained before the handle existed; sync it first
+            // (it does not push until the activity is started).
+            nativeOnWindowFocusChanged(handle, hasWindowFocus())
             nativeOnResume(handle)
         }
         // Reduce motion: re-read on every foreground and (re)arm the observer.
