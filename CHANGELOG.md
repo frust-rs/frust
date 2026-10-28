@@ -16,6 +16,21 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Added
 
+- The Flutter-parity app lifecycle: `frust::AppLifecycleState { Detached, Resumed, Inactive, Hidden,
+  Paused }`, `frust::AppLifecycleListener` (`on_show`, `on_resume`, `on_hide`, `on_inactive`,
+  `on_pause`, `on_restart`, `on_detach`, `on_state_change`, `on_exit_requested`) with the intermediate
+  steps generated as in Flutter, `frust::AppExitResponse` and `frust::app_lifecycle()`. The Android
+  shell pushes the state from new `onStart`/`onStop`/`onWindowFocusChanged`/`onDestroy` hooks, the iOS
+  shell from new `didEnterBackground`/`willEnterForeground` observers (additive C exports
+  `frust_did_enter_background` and `frust_will_enter_foreground` in `frust_ffi.h`), and the desktop and
+  web shells from their window state. Desktop window close and the macOS and Windows menu Quit ask
+  `on_exit_requested` first. The macOS app-menu Quit is now a frust item (`frust.app.quit`) instead of
+  AppKit's predefined `terminate:`, and it asks the same way.
+- The new `frust-connectivity` plugin crate: `Connectivity::set_listener` and `Connectivity::current`
+  report the default network as `ConnectivityEvent::{Available { path, initial }, Lost}`, with
+  `NetworkPath`, `NetworkId` and `Transport`. Android uses the default-network callback (its
+  `ACCESS_NETWORK_STATE` permission comes from the plugin's manifest), iOS and macOS use
+  Network.framework, and other platforms are a no-op. The TUI Add Plugin picker lists `connectivity`.
 - `frust-i18n` on CLDR 49: `th`, `th-TH` and `en-TH` keep the Buddhist-era default (pin Gregorian
   per call with `DateTimeOptions { calendar: Some(Calendar::Gregorian), .. }`); JPY renders `JP¥`
   in fr-FR/es-ES, `¥` in en-US and `￥` in ja-JP; Vietnamese hours read `tiếng`. `fmt::bridge::Cache`
