@@ -13,14 +13,14 @@ readme = "README.md"
 
 [dependencies]
 # Published as frust-ui, imported as frust: crates.io `frust` belongs to another project (https://github.com/lloydmeta/frunk/issues/258).
-frust = { package = "frust-ui", path = "../../crates/frust", version = "0.6.3" }
-frust-material = { path = "../material", version = "0.6.3" }
-frust-i18n = { path = "../i18n", version = "0.6.3" }
+frust = { package = "frust-ui", path = "../../crates/frust", version = "0.6.4" }
+frust-material = { path = "../material", version = "0.6.4" }
+frust-i18n = { path = "../i18n", version = "0.6.4" }
 # Month and weekday names come straight from CLDR through the same ICU4X pins frust-i18n uses.
 icu_datetime = { workspace = true }
 icu_locale_core = { workspace = true }
 
 [dev-dependencies]
-frust-core = { path = "../../crates/frust-core", version = "0.6.3", features = ["test-support"] }
-frust-widgets = { path = "../../crates/frust-widgets", version = "0.6.3", features = ["test-support"] }
+frust-core = { path = "../../crates/frust-core", version = "0.6.4", features = ["test-support"] }
+frust-widgets = { path = "../../crates/frust-widgets", version = "0.6.4", features = ["test-support"] }
 frust-reactive = { workspace = true }

@@ -19,7 +19,7 @@ log = { workspace = true }
 # `with_jni_env`. Android-only: no other arm reaches the JVM.
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { workspace = true }
-frust-plugin = { path = "../../crates/frust-plugin", version = "0.6.3" }
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.6.4" }
 
 # Network.framework's `nw_path_monitor` is plain C, declared by hand in `src/apple.rs`: no
 # objc2 binding crate.
