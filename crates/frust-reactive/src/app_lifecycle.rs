@@ -320,7 +320,7 @@ fn guarded<R>(name: &str, f: impl FnOnce() -> R) -> Option<R> {
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(value) => Some(value),
         Err(payload) => {
-            eprintln!(
+            log::error!(
                 "frust-reactive: an AppLifecycleListener {name} callback panicked ({}); the \
                  panic was caught and the remaining callbacks still run",
                 panic_message(&*payload)
@@ -371,11 +371,10 @@ fn push(rt: Option<&ReactiveRuntime>, target: AppLifecycleState) {
         MIRROR.store(step.index() as u8, Ordering::SeqCst);
         match rt {
             Some(rt) => signal(rt).set(step),
-            None if cfg!(debug_assertions) => eprintln!(
+            None => log::debug!(
                 "frust-reactive: push_app_lifecycle({step:?}) before ReactiveRuntime::init — \
                  the mirror and listeners saw it; the signal is seeded from it once created"
             ),
-            None => {}
         }
         for slot in snapshot() {
             if let Some((name, hook)) = live(&slot, |c| transition_hook(c, previous, step)) {
@@ -395,8 +394,9 @@ fn push(rt: Option<&ReactiveRuntime>, target: AppLifecycleState) {
 ///
 /// Every registered `on_exit_requested` is called, in registration order, without
 /// short-circuiting; the answer is `Cancel` if any returned `Cancel`, else `Exit` (also
-/// with no handler). A panicking handler is logged and counts as `Exit`. Unlike Flutter's
-/// `Future`, this is synchronous: decide on the spot and hand slow work off.
+/// with no handler). A panicking handler is logged at error level and counts as `Exit`, so
+/// a buggy guard can never trap the user. Unlike Flutter's `Future`, this is synchronous:
+/// decide on the spot and hand slow work off.
 pub fn request_app_exit() -> AppExitResponse {
     assert_ui_thread("request_app_exit");
     let mut response = AppExitResponse::Exit;
