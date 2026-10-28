@@ -58,6 +58,10 @@ void  frust_resume(void *handle);
 // willEnterForeground -> Inactive. Pause/resume above push Inactive/Resumed.
 void  frust_did_enter_background(void *handle);
 void  frust_will_enter_foreground(void *handle);
+// Seeds the lifecycle state after frust_init from UIApplication.applicationState:
+// state 0 = active (Resumed), 1 = inactive (Inactive), 2 = background (Paused).
+// Other values are ignored.
+void  frust_sync_lifecycle(void *handle, int32_t state);
 void  frust_destroy(void *handle);
 
 // Text input. The Swift `FrustView` adopts the full
