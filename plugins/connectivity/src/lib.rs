@@ -24,8 +24,10 @@
 //! per process, never stopped. A usable first report after it starts is the
 //! one marked `initial: true`; a device that starts offline emits nothing
 //! until a network appears, and that `Available` has `initial: false`. A
-//! listener registered later receives only later transitions, so read
-//! [`Connectivity::current`] for the state at registration time.
+//! listener registered later receives only later transitions (an event is
+//! delivered only to listeners registered when it was emitted, even while it
+//! is still queued), so read [`Connectivity::current`] for the state at
+//! registration time.
 //!
 //! ```
 //! use std::sync::mpsc;
@@ -56,7 +58,14 @@
 //! queue is bounded and a full queue drops the newest event with a logged
 //! warning, while [`Connectivity::current`] stays correct. A listener may
 //! register another listener or drop a [`ListenerHandle`] from inside its
-//! callback; a listener panic is caught and logged.
+//! callback; a listener panic is caught and logged. A handle dropped while a
+//! fan-out is in flight may still see that one event.
+//!
+//! # Resync after dropped events
+//!
+//! Drop-newest means a missed event is never replayed. After a queue-full
+//! warning in the log, or after resuming from the background, call
+//! [`Connectivity::current`] to resync rather than trusting the event stream.
 //!
 //! # No events in the background
 //!

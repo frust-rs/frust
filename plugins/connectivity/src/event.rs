@@ -16,6 +16,12 @@
 //!
 //! - **Never the UI thread and never the caller's.** Whatever thread a
 //!   platform reports on, listeners run on this one.
+//! - **A listener sees only events emitted after it registered.** Every
+//!   registration takes the next value of a monotonically increasing
+//!   sequence, and [`emit`] stamps each queued event with the sequence that
+//!   is current at that moment. Delivery skips any listener whose sequence
+//!   is not below the stamp, so a listener registered while an earlier event
+//!   still waits in the queue never receives it.
 //! - **Delivery order is enqueue order**, and every listener sees an event in
 //!   registration order. A `Lost` and the `Available` that follows it must
 //!   never race, so there is one FIFO consumer, never a thread per event.
@@ -30,8 +36,8 @@
 //!
 //! # Lock strategy
 //!
-//! The registry lock is held only to register, unregister, or snapshot the
-//! listener list — never while a listener runs. A listener may therefore
+//! The registry lock is held only to register, unregister, stamp an emit, or
+//! snapshot the listener list — never while a listener runs. A listener may therefore
 //! register another listener or drop a handle (its own included) from inside
 //! its callback. A listener panic is caught and logged so the one consumer
 //! keeps running; the registry lock recovers from poisoning the same way.
@@ -49,8 +55,13 @@ use crate::ConnectivityEvent;
 
 type Listener = Arc<dyn Fn(ConnectivityEvent) + Send + Sync>;
 
+/// One registered listener: its registration sequence and the callback.
+type Entry = (u64, Listener);
+
 struct Registry {
-    listeners: Vec<(u64, Listener)>,
+    listeners: Vec<Entry>,
+    /// The sequence the next registration takes; also the stamp an emitted
+    /// event carries, since every listener registered so far holds a lower one.
     next_id: u64,
 }
 
@@ -76,6 +87,10 @@ fn registry() -> MutexGuard<'static, Registry> {
 /// `let _ = Connectivity::set_listener(cb);` therefore unregisters on the very
 /// next statement. Store the handle for as long as the listener should live.
 /// Dropping it from inside a callback is supported.
+///
+/// A drop takes effect for events not yet fanned out. A fan-out already in
+/// flight holds its own snapshot of the listeners, so the dropped listener may
+/// still be invoked once more for the event being delivered at that moment.
 #[must_use = "dropping the handle unregisters the listener immediately"]
 #[derive(Debug)]
 pub struct ListenerHandle {
@@ -112,7 +127,9 @@ const THREAD_NAME: &str = "frust-connectivity-events";
 
 #[cfg_attr(not(test), allow(dead_code))]
 enum Delivery {
-    Event(ConnectivityEvent),
+    /// An event with the registration sequence current when it was emitted:
+    /// only listeners registered below it receive the event.
+    Event(ConnectivityEvent, u64),
     #[cfg(test)]
     Barrier(mpsc::Sender<()>),
 }
@@ -123,8 +140,8 @@ impl Delivery {
     #[cfg_attr(not(test), allow(dead_code))]
     fn kind(&self) -> &'static str {
         match self {
-            Self::Event(ConnectivityEvent::Available { .. }) => "available",
-            Self::Event(ConnectivityEvent::Lost) => "lost",
+            Self::Event(ConnectivityEvent::Available { .. }, _) => "available",
+            Self::Event(ConnectivityEvent::Lost, _) => "lost",
             #[cfg(test)]
             Self::Barrier(_) => "barrier",
         }
@@ -143,8 +160,8 @@ fn queue() -> &'static SyncSender<Delivery> {
             .spawn(move || {
                 for delivery in receiver {
                     match delivery {
-                        Delivery::Event(event) => {
-                            if catch_unwind(AssertUnwindSafe(|| fan_out(event))).is_err() {
+                        Delivery::Event(event, stamp) => {
+                            if catch_unwind(AssertUnwindSafe(|| fan_out(event, stamp))).is_err() {
                                 log::warn!(
                                     "frust-connectivity: the delivery thread caught a panic while \
                                      dispatching an event; delivery continues"
@@ -173,7 +190,8 @@ fn queue() -> &'static SyncSender<Delivery> {
 /// Queue `event` for every registered listener, without blocking.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn emit(event: ConnectivityEvent) {
-    send(Delivery::Event(event));
+    let stamp = registry().next_id;
+    send(Delivery::Event(event, stamp));
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -200,10 +218,11 @@ fn send(delivery: Delivery) -> bool {
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-fn fan_out(event: ConnectivityEvent) {
+fn fan_out(event: ConnectivityEvent, stamp: u64) {
     let listeners: Vec<Listener> = registry()
         .listeners
         .iter()
+        .filter(|(id, _)| *id < stamp)
         .map(|(_, listener)| Arc::clone(listener))
         .collect();
     for listener in listeners {
@@ -253,6 +272,62 @@ mod tests {
         let _handle = register(Box::new(move |event| tx.send(event).unwrap()));
         deliver(ConnectivityEvent::Lost);
         assert_eq!(rx.try_recv().unwrap(), ConnectivityEvent::Lost);
+    }
+
+    /// Park the delivery thread inside a first listener, run `during` while
+    /// events are queued behind it, then release and flush.
+    fn with_parked_consumer(during: impl FnOnce()) {
+        let parked = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let once = std::sync::Once::new();
+        let _parker = {
+            let parked = Arc::clone(&parked);
+            let release = Arc::clone(&release);
+            register(Box::new(move |_| {
+                once.call_once(|| {
+                    parked.wait();
+                    release.wait();
+                });
+            }))
+        };
+        emit(ConnectivityEvent::Lost);
+        parked.wait();
+        during();
+        release.wait();
+        flush();
+    }
+
+    #[test]
+    fn a_listener_registered_after_an_emit_does_not_receive_that_event() {
+        let _guard = test_guard();
+        let (tx, rx) = mpsc::channel();
+        let mut late = None;
+        with_parked_consumer(|| {
+            emit(ConnectivityEvent::Lost);
+            late = Some(register(Box::new(move |event| tx.send(event).unwrap())));
+        });
+        assert!(
+            rx.try_recv().is_err(),
+            "an event emitted before registration is never delivered to it"
+        );
+        deliver(ConnectivityEvent::Lost);
+        assert_eq!(rx.try_recv().unwrap(), ConnectivityEvent::Lost);
+        drop(late);
+    }
+
+    #[test]
+    fn a_listener_registered_before_an_emit_receives_it_while_queued() {
+        let _guard = test_guard();
+        let (tx, rx) = mpsc::channel();
+        let early = register(Box::new(move |event| tx.send(event).unwrap()));
+        with_parked_consumer(|| emit(ConnectivityEvent::Lost));
+        let received: Vec<_> = rx.try_iter().collect();
+        assert_eq!(
+            received.len(),
+            2,
+            "both the parked event and the queued one reach it"
+        );
+        drop(early);
     }
 
     #[test]
@@ -367,13 +442,13 @@ mod tests {
         parked.wait();
         for index in 0..QUEUE_CAPACITY {
             assert!(
-                send(Delivery::Event(ConnectivityEvent::Lost)),
+                send(Delivery::Event(ConnectivityEvent::Lost, u64::MAX)),
                 "event {index} fits inside the bound"
             );
         }
         for _ in 0..4 {
             assert!(
-                !send(Delivery::Event(ConnectivityEvent::Lost)),
+                !send(Delivery::Event(ConnectivityEvent::Lost, u64::MAX)),
                 "the bound is enforced rather than the queue growing"
             );
         }
