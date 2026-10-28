@@ -5,6 +5,13 @@
 //! derived target through [`frust_reactive::push_app_lifecycle`], which dedups
 //! and synthesizes the intermediate steps (`Inactive → Hidden → Paused` and
 //! back). Android never requests an app exit — exits are not cancelable.
+//!
+//! Destroy holds the process in `Detached`. An unhandled config change (locale,
+//! font scale, multi-window) or a relaunch recreates the activity in the same
+//! process, and its start-up callbacks would derive `Inactive` before the window
+//! has focus, publishing a false `Resumed`. So after `onDestroy` the process is
+//! held: pushes stay silent until the recreated activity is actually resumed and
+//! focused, the same as a first launch. See [`should_push`].
 
 /// The states the Android mapping can target (a subset of
 /// `frust_reactive::AppLifecycleState`; `Hidden` is synthesized by the state
@@ -74,40 +81,69 @@ impl LifecycleFlags {
     }
 }
 
+/// Whether a derived `target` may be published now.
+///
+/// While `held_after_detach` is set (the activity was destroyed and its recreate
+/// has not yet resumed and gained focus), only `Resumed` publishes. The recreated
+/// activity passes through `Paused` and `Inactive` during its start-up callbacks,
+/// and publishing those would surface a state the user never saw. Once a push
+/// goes out the hold clears, and every target publishes as usual.
+pub(crate) fn should_push(held_after_detach: bool, target: Target) -> bool {
+    !held_after_detach || target == Target::Resumed
+}
+
 #[cfg(target_os = "android")]
 mod process {
     use std::sync::Mutex;
 
-    use super::LifecycleFlags;
+    use super::{LifecycleFlags, should_push};
 
-    /// Process-wide facts; only the UI thread touches them (the mutex is for
-    /// `static` soundness, never contended).
-    static FLAGS: Mutex<LifecycleFlags> = Mutex::new(LifecycleFlags {
-        started: false,
-        resumed: false,
-        window_focused: false,
-        destroyed: false,
+    /// The process-wide facts plus the publish hold.
+    struct State {
+        flags: LifecycleFlags,
+        /// Set by [`reset`] after the `Detached` push, cleared by the next push.
+        held_after_detach: bool,
+    }
+
+    /// Process-wide lifecycle state; only the UI thread touches it (the mutex is
+    /// for `static` soundness, never contended).
+    static STATE: Mutex<State> = Mutex::new(State {
+        flags: LifecycleFlags {
+            started: false,
+            resumed: false,
+            window_focused: false,
+            destroyed: false,
+        },
+        held_after_detach: false,
     });
 
-    /// Apply `update` to the facts, push the derived target unless `gate`
-    /// rejects the new facts, and return nothing.
+    /// Apply `update` to the facts, then push the derived target when `gate`
+    /// accepts the new facts and [`should_push`] allows it. Returns nothing.
     pub(crate) fn apply(
         update: impl FnOnce(&mut LifecycleFlags),
         gate: impl FnOnce(&LifecycleFlags) -> bool,
     ) {
         let target = {
-            let mut flags = FLAGS.lock().unwrap_or_else(|e| e.into_inner());
-            update(&mut flags);
-            gate(&flags).then(|| flags.target())
+            let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+            update(&mut state.flags);
+            let target = state.flags.target();
+            let push = gate(&state.flags) && should_push(state.held_after_detach, target);
+            if push {
+                state.held_after_detach = false;
+            }
+            push.then_some(target)
         };
         if let Some(target) = target {
             frust_reactive::push_app_lifecycle(target.into());
         }
     }
 
-    /// Forget the facts (the activity was destroyed; a recreate starts clean).
+    /// Forget the facts (the activity was destroyed; a recreate starts clean) and
+    /// hold pushes until the recreated activity is really resumed and focused.
     pub(crate) fn reset() {
-        *FLAGS.lock().unwrap_or_else(|e| e.into_inner()) = LifecycleFlags::default();
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.flags = LifecycleFlags::default();
+        state.held_after_detach = true;
     }
 
     /// Replace the facts with a fresh read of the activity, then push the derived
@@ -202,5 +238,36 @@ mod tests {
         let fresh = LifecycleFlags::synced(true, true, true);
         assert!(!fresh.destroyed);
         assert_eq!(fresh.target(), Resumed);
+    }
+
+    #[test]
+    fn held_after_detach_publishes_only_resumed() {
+        // A recreated activity passes through these during start-up; none may publish.
+        assert!(!should_push(true, Detached));
+        assert!(!should_push(true, Paused));
+        assert!(!should_push(true, Inactive));
+        assert!(should_push(true, Resumed));
+    }
+
+    #[test]
+    fn not_held_publishes_every_target() {
+        assert!(should_push(false, Detached));
+        assert!(should_push(false, Paused));
+        assert!(should_push(false, Inactive));
+        assert!(should_push(false, Resumed));
+    }
+
+    #[test]
+    fn recreate_start_up_walk_publishes_one_resume() {
+        // Recreate: onStart, onResume and surfaceCreated (unfocused) derive Inactive;
+        // focus lands last and derives Resumed. Only that final target publishes.
+        let held = true;
+        let walk = [
+            LifecycleFlags::synced(true, false, false).target(),
+            LifecycleFlags::synced(true, true, false).target(),
+            LifecycleFlags::synced(true, true, true).target(),
+        ];
+        let published: Vec<Target> = walk.into_iter().filter(|t| should_push(held, *t)).collect();
+        assert_eq!(published, vec![Resumed]);
     }
 }

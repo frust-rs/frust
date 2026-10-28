@@ -2382,7 +2382,7 @@ pub fn native_on_destroy(handle: jlong) {
         // Finishing the activity detaches: push while the app is still alive so
         // listeners observe `Detached`. The existing `nativeOnDestroy` is the
         // teardown path, so no separate native hook is added. A recreate starts
-        // from clean facts.
+        // from clean facts, and `reset` holds pushes until it is really resumed.
         crate::lifecycle::apply(|f| f.destroyed = true, |_| true);
         crate::lifecycle::reset();
         // SAFETY: `handle` was produced by `Box::into_raw` in `create_handle` and
