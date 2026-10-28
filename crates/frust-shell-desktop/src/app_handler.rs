@@ -60,7 +60,7 @@ use frust_core::input::WHEEL_LINE_PX;
 use frust_core::insets::WindowInsets;
 use frust_core::view::View;
 use frust_reactive::{
-    AppLifecycleState, FrameWaker, ReactiveRuntime, TrackedScope, provide_context,
+    AppExitResponse, AppLifecycleState, FrameWaker, ReactiveRuntime, TrackedScope, provide_context,
     push_app_lifecycle,
 };
 use frust_scene::{Scene, SceneBuilder};
@@ -2701,8 +2701,16 @@ where
         // The final window-state save runs before the extension decides,
         // while the window still reports its real geometry.
         self.save_window_state(None);
-        match self.extensions.on_close_requested() {
-            CloseAction::Exit => {
+        // Only an exiting close is a cancelable exit and is asked; the macOS
+        // hide-on-close (`KeepRunning`) is not an exit and never reaches the app.
+        let action = resolve_close_action(self.extensions.on_close_requested(), || {
+            frust_reactive::request_app_exit()
+        });
+        match action {
+            ResolvedClose::Cancelled => {
+                log::debug!("exit cancelled by an on_exit_requested listener; keeping the window");
+            }
+            ResolvedClose::Exit => {
                 // The window is about to be destroyed: let the host tear
                 // its hosted views out of a hierarchy that still exists,
                 // rather than leaving them to be dropped with it.
@@ -2714,7 +2722,7 @@ where
             // here would strand the host with nothing to restore on
             // reopen, since no surface is re-created on that path to
             // replay them.
-            CloseAction::KeepRunning => {}
+            ResolvedClose::KeepRunning => {}
         }
     }
 
@@ -3943,8 +3951,60 @@ fn layout_needed(needs_layout: bool, laid_out_for: Option<Size>, logical: Size) 
     needs_layout || laid_out_for != Some(logical)
 }
 
+/// What a close request amounts to once the app has had its say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResolvedClose {
+    /// Proceed with the exit: tear down platform views, then leave the loop.
+    Exit,
+    /// The app answered `Cancel`: do nothing, the window stays as it was.
+    Cancelled,
+    /// The extension handled the request without exiting (macOS hide-on-close).
+    KeepRunning,
+}
+
+/// Combine the extension's [`CloseAction`] with the app's [`AppExitResponse`].
+///
+/// `ask` runs only for [`CloseAction::Exit`]: a hide-on-close is not an exit and is
+/// never put to the app. Exits that bypass `CloseRequested` (Dock Quit, logout or
+/// shutdown, force quit) arrive through the platform's own application delegate and
+/// are not cancelable, so they are not asked either.
+fn resolve_close_action(
+    action: CloseAction,
+    ask: impl FnOnce() -> AppExitResponse,
+) -> ResolvedClose {
+    match action {
+        CloseAction::KeepRunning => ResolvedClose::KeepRunning,
+        CloseAction::Exit => match ask() {
+            AppExitResponse::Exit => ResolvedClose::Exit,
+            AppExitResponse::Cancel => ResolvedClose::Cancelled,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::{AppExitResponse, CloseAction, ResolvedClose, resolve_close_action};
+
+    #[test]
+    fn a_cancel_answer_keeps_an_exiting_close_open() {
+        let resolved = resolve_close_action(CloseAction::Exit, || AppExitResponse::Cancel);
+        assert_eq!(resolved, ResolvedClose::Cancelled);
+    }
+
+    #[test]
+    fn an_exit_answer_proceeds_with_an_exiting_close() {
+        let resolved = resolve_close_action(CloseAction::Exit, || AppExitResponse::Exit);
+        assert_eq!(resolved, ResolvedClose::Exit);
+    }
+
+    #[test]
+    fn a_hide_on_close_is_never_put_to_the_app() {
+        let resolved = resolve_close_action(CloseAction::KeepRunning, || {
+            panic!("a non-exit close must not ask the app")
+        });
+        assert_eq!(resolved, ResolvedClose::KeepRunning);
+    }
+
     use super::{AppLifecycleState as S, desktop_lifecycle_target as target};
 
     #[test]
