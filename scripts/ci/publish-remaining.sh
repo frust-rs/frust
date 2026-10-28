@@ -246,7 +246,10 @@ main() {
   for m in ${missing_standalone[@]+"${missing_standalone[@]}"}; do
     printf '%s\n' "${m%@*}"
   done
-  if [ "${#new_crates[@]}" -gt 0 ]; then
+  # Listing mode prints the labelled block here; publish mode prints it once,
+  # at the end, where it opens the exit-3 block the workflow and RELEASING.md
+  # describe (cargo's own output would otherwise sit between the two halves).
+  if [ "${#new_crates[@]}" -gt 0 ] && [ "$publish" -eq 0 ]; then
     print_new_crates "${new_crates[@]}"
   fi
   [ "$publish" -eq 1 ] || return 0
@@ -275,6 +278,7 @@ main() {
   # New crates are never published here: Trusted Publishing cannot create a
   # crate. Exit 3 tells the workflow a maintainer's first publish is needed.
   if [ "${#new_crates[@]}" -gt 0 ]; then
+    print_new_crates "${new_crates[@]}"
     print_first_publish_steps "${new_crates[@]}"
     return 3
   fi
@@ -338,8 +342,12 @@ frust-newer@0.1.0" "$err"
   check "published set" "publish --locked -p frust-bumped
 publish --locked --manifest-path fixture/Cargo.toml" "$(cat "$tmp/published")"
   case "$err" in
-    *"cargo publish -p frust-fresh --locked"*"cargo owner --add github:frust-rs:owners frust-fresh"*"cargo publish -p frust-newer --locked"*) ;;
-    *) echo "FAIL publish stderr lacks the first-publish commands" >&2; failures=$((failures + 1)) ;;
+    *"new crates (need a maintainer's first publish from the tag):"*"cargo publish -p frust-fresh --locked"*"cargo owner --add github:frust-rs:owners frust-fresh"*"cargo publish -p frust-newer --locked"*) ;;
+    *) echo "FAIL publish stderr lacks the labelled block or the first-publish commands" >&2; failures=$((failures + 1)) ;;
+  esac
+  case "$err" in
+    *"new crates (need a maintainer's first publish from the tag):"*"new crates (need a maintainer's first publish from the tag):"*)
+      echo "FAIL publish stderr prints the new-crates block twice" >&2; failures=$((failures + 1)) ;;
   esac
   case "$err" in
     *"cargo publish -p frust-bumped"* | *"cargo publish -p frust-old"*)
@@ -362,7 +370,7 @@ publish --locked --manifest-path fixture/Cargo.toml" "$(cat "$tmp/published")"
   expect_fail() { # description
     : > "$tmp/published"
     missing=(); new_crates=(); missing_standalone=()
-    set -e
+    set +e
     code=0
     out="$( (main) 2> "$tmp/err")" || code=$?
     set -e
