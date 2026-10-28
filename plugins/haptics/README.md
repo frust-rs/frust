@@ -63,10 +63,11 @@ platforms ship a first-class API for:
 
 `VibrationEffect.createPredefined(int)` (the `EFFECT_TICK`/`EFFECT_CLICK`/
 `EFFECT_HEAVY_CLICK` constants) requires API 29. This workspace's Android
-floor is API 29 (`frust-embedding`'s `minSdk`), so the predefined effects are
-always available. For a floor below 29 (unreachable at frust's floor; the arm
-is kept), `SelectionClick`/`ImpactLight`/`ImpactHeavy` fall back to
-`VibrationEffect.createOneShot(long, int)` (API 26) — a duration/amplitude pair standing in for the
+floor is API 29 (Android 10; `frust-embedding`'s `minSdk`), so the predefined
+effects are always available. For a floor below 29 (unreachable at frust's
+floor; the arm is kept), `SelectionClick`/`ImpactLight`/`ImpactHeavy` fall back to
+`VibrationEffect.createOneShot(long, int)` (API 26, the level `createOneShot`
+itself needs, not a floor) — a duration/amplitude pair standing in for the
 missing predefined effect, tuned so the three impact intensities stay
 distinguishable from each other on hardware with amplitude control (and
 degrade to one fixed strength, never an error, on hardware without it).
