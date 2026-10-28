@@ -1935,7 +1935,10 @@ pub fn sync_lifecycle(handle: *mut c_void, state: i32) {
                 0 => AppLifecycleState::Resumed,
                 1 => AppLifecycleState::Inactive,
                 2 => AppLifecycleState::Paused,
-                _ => return,
+                _ => {
+                    log::debug!("frust_sync_lifecycle: ignoring unknown state {state}");
+                    return;
+                }
             };
             push_app_lifecycle(lifecycle);
             pump_reactive();
