@@ -57,7 +57,7 @@ use std::sync::Arc;
 use objc2::rc::Retained;
 use objc2::runtime::{NSObject, NSObjectProtocol};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
-use objc2_app_kit::{NSApplicationDidBecomeActiveNotification, NSView};
+use objc2_app_kit::{NSApplication, NSApplicationDidBecomeActiveNotification, NSView};
 use objc2_foundation::{NSBundle, NSNotification, NSNotificationCenter, NSString};
 
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -227,4 +227,17 @@ pub(crate) fn window_is_zoomed(window: &Window) -> Option<bool> {
             && close(frame.size.width, visible.size.width)
             && close(frame.size.height, visible.size.height),
     )
+}
+
+/// Terminate the app the way the predefined Quit item did: `-[NSApplication terminate:]`.
+///
+/// winit's delegate then ends the event loop, so `run_app` returns and the pipeline cache
+/// persists as on any other exit. Returns `false` off the main thread, where AppKit may not
+/// be touched and nothing was done. Safe bindings throughout, so this adds no `unsafe` site.
+pub(crate) fn terminate_app() -> bool {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return false;
+    };
+    NSApplication::sharedApplication(mtm).terminate(None);
+    true
 }
