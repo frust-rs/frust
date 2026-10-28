@@ -9,6 +9,14 @@
 # OIDC-exchanged token lives thirty minutes, and `publish-remaining.sh` only
 # publishes what the index does not list yet, so a run that stops on the
 # crates.io rate limit (or outlives the token) is re-run and resumes.
+#
+# The publish step has three outcomes. Exit 0: every package is on the index
+# and `github-release` runs. Exit 1: cargo failed (or the rate limit outlasted
+# the retries) and the job ends. Exit 3: only brand-new crates remain; Trusted
+# Publishing cannot create a crate, so a maintainer first-publishes each one
+# from the tag (the commands are printed in the log), then re-runs this
+# workflow. The job fails on exit 3, so `github-release` runs only on that
+# re-run.
 
 name: Release
 
@@ -96,17 +104,24 @@ jobs:
       # crates.io accepts a burst of 30 version updates, then one a minute;
       # publish-remaining.sh stops at that limit (exit 1, "rate limit" on
       # stderr) and resumes with the remainder, so retry it a minute apart.
-      # Any other failure ends the job.
+      # Exit 3 means the existing crates are published but new crates need a
+      # maintainer's first publish: print the block and fail the job. Any other
+      # failure ends the job.
       - name: Publish what the index does not list yet
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: |
           for attempt in $(seq 1 40); do
-            if scripts/ci/publish-remaining.sh --publish --no-verify 2> publish-stderr.log; then
-              cat publish-stderr.log >&2
+            status=0
+            scripts/ci/publish-remaining.sh --publish --no-verify 2> publish-stderr.log || status=$?
+            cat publish-stderr.log >&2
+            if [ "$status" -eq 0 ]; then
               exit 0
             fi
-            cat publish-stderr.log >&2
+            if [ "$status" -eq 3 ]; then
+              echo "::error::new crates need a maintainer's first publish; run the commands above from the tag, then re-run this workflow"
+              exit 1
+            fi
             grep -q -i 'rate limit' publish-stderr.log || exit 1
             echo "attempt $attempt stopped on the rate limit; retrying in 65 s" >&2
             sleep 65

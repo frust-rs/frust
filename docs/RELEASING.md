@@ -58,6 +58,7 @@ Members with `publish = false` (`frust-testing`, the demo and gallery packages) 
 5. Tag the bump commit: `git tag -a vX.Y.Z -m "Frust X.Y.Z"`, then `git push origin vX.Y.Z`.
 6. The tag runs `.github/workflows/release.yml`, which publishes and creates the GitHub release
    (see "First release and Trusted Publishing"). Watch the run; re-run a failed `publish` job.
+   If it ends with exit 3 naming new crates, do "New crates" below, then re-run the job.
 7. Edit the GitHub release's generated notes into a summary of the changes since the previous tag.
    Copy the notes from `CHANGELOG.md`'s section for the tag; the bump commit (step 3) moves the
    Unreleased heading to the version.
@@ -106,9 +107,22 @@ exists. After a crate exists, its settings on crates.io name this repository, th
 the licence copies are in sync and that every package builds as published; `publish` exchanges
 the GitHub OIDC identity for a short-lived token (`rust-lang/crates-io-auth-action`, 30 minutes)
 and runs `scripts/ci/publish-remaining.sh --publish --no-verify`, retrying a minute apart while it
-stops on the update rate limit (all 47 packages take about 20 minutes); a run that fails anyway —
+stops on the update rate limit (every workspace package takes about 20 minutes); a run that fails anyway —
 its token lapsed, say — is re-run and resumes. `github-release` then creates the release with
 generated notes.
+
+### New crates
+
+The tag run publishes every existing crate, then ends with exit 3 and a stderr block beginning
+`new crates (need a maintainer's first publish from the tag):`, naming each `<name>@<version>`.
+For each, from a `vX.Y.Z` checkout, the maintainer:
+
+1. publishes it with `cargo publish -p <crate> --locked` (its dependencies are already on the index);
+2. configures the Trusted Publisher on crates.io: repository `frust-rs/frust`, workflow
+   `release.yml`, environment `release`;
+3. adds the owners team: `cargo owner --add github:frust-rs:owners <crate>`.
+
+Then re-run the failed `publish` job so `github-release` runs.
 
 ### Ownership
 

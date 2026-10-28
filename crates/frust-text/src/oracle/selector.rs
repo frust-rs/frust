@@ -693,6 +693,7 @@ mod tests {
 
     #[test]
     fn hello_chinese_resolves_per_cluster_to_the_expected_faces() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let latin = Blob::from(FaceSpec::new("Synthetic Sans").chars("Helo ").build());
         let han = Blob::from(FaceSpec::new("Synthetic Han").chars("中文").build());
         let mut backend = SyntheticBackend::new("build-1");
@@ -720,6 +721,7 @@ mod tests {
 
     #[test]
     fn hits_and_misses_are_both_cached() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let latin = Blob::from(FaceSpec::new("Synthetic Sans").chars("a").build());
         let mut backend = SyntheticBackend::new("b");
         backend.cover(&latin, "a");
@@ -742,6 +744,7 @@ mod tests {
 
     #[test]
     fn app_answers_are_never_cached() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let app = Blob::from(FaceSpec::new("Brand").chars("a").build());
         let mut oracle = oracle_over(SyntheticBackend::new("b"));
         oracle.registry_mut().insert_blob(&app);
@@ -758,6 +761,7 @@ mod tests {
     /// registered generic fallback alike — as a system face does.
     #[test]
     fn a_registered_face_answers_with_its_postscript_name() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let noto =
             Blob::from(include_bytes!("../../../../testing/fonts/NotoSans-Subset.ttf").to_vec());
         let mut oracle = oracle_over(SyntheticBackend::new("b"));
@@ -788,6 +792,7 @@ mod tests {
 
     #[test]
     fn the_persistent_cache_answers_the_next_run_without_the_backend() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let dir = TempDir::new("oracle-persist");
         let font = dir.write("latin.ttf", &FaceSpec::new("Latin").chars("a").build());
         let file = dir
@@ -830,6 +835,7 @@ mod tests {
 
     #[test]
     fn resolve_order_is_app_then_cache_then_backend_then_generic() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let app = Blob::from(FaceSpec::new("Brand").chars("ab").build());
         let system = Blob::from(FaceSpec::new("System").chars("abc").build());
         let generic = Blob::from(FaceSpec::new("Generic").chars("abcd").build());
@@ -872,6 +878,7 @@ mod tests {
 
     #[test]
     fn app_faces_shadow_system_faces_of_the_same_family() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let system_helvetica = Blob::from(FaceSpec::new("Helvetica").chars("AB").build());
         let app_helvetica = Blob::from(FaceSpec::new("Helvetica").chars("A").build());
         let mut backend = SyntheticBackend::new("b");
@@ -904,6 +911,7 @@ mod tests {
 
     #[test]
     fn a_face_the_engine_cannot_draw_is_refused_and_counted() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let hvgl_only = Blob::from(FaceSpec::new("PingFang UI").chars("中").hvgl_only().build());
         let mut backend = SyntheticBackend::new("b");
         backend.cover(&hvgl_only, "中");
@@ -924,6 +932,7 @@ mod tests {
 
     #[test]
     fn a_backend_answer_missing_a_character_is_uncovered() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let partial = Blob::from(FaceSpec::new("Partial").chars("a").build());
         let mut backend = SyntheticBackend::new("b");
         // Scripted to claim "ab" although its cmap only has "a".
@@ -945,6 +954,7 @@ mod tests {
 
     #[test]
     fn synthesis_fakes_bold_and_oblique_on_a_static_face() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let regular = Blob::from(FaceSpec::new("Static").chars("a").build());
         let mut backend = SyntheticBackend::new("b");
         backend.cover(&regular, "a");
@@ -967,6 +977,7 @@ mod tests {
 
     #[test]
     fn synthesis_uses_axes_on_a_variable_face() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let attrs = FaceAttrs {
             has_wght: true,
             has_ital: true,
@@ -999,6 +1010,7 @@ mod tests {
 
     #[test]
     fn synthesis_parsed_from_real_tables() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let face = FaceSpec::new("Var")
             .chars("a")
             .weight(300)
@@ -1014,6 +1026,7 @@ mod tests {
 
     #[test]
     fn a_backend_synthesis_hint_is_honoured() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let cjk = Blob::from(FaceSpec::new("Noto Sans CJK").chars("中").build());
         let hint = Synthesis {
             embolden: true,
@@ -1052,6 +1065,7 @@ mod tests {
 
     #[test]
     fn a_hidden_face_passes_through_with_its_flag_and_name() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let hidden = Blob::from(FaceSpec::new(".Hidden Sans").chars("a").build());
         let mut backend = SyntheticBackend::new("b");
         backend.cover_with(
@@ -1078,6 +1092,7 @@ mod tests {
 
     #[test]
     fn a_collection_face_index_is_honoured() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let dir = TempDir::new("ttc");
         let ttc = FaceSpec::collection(&[
             FaceSpec::new("CJK JP").chars("文"),
@@ -1101,6 +1116,7 @@ mod tests {
 
     #[test]
     fn default_face_prefers_the_system_then_app_generics() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let system = Blob::from(FaceSpec::new("System Mono").chars("a").build());
         let app = Blob::from(FaceSpec::new("App Emoji").chars("a").build());
         let mut backend = SyntheticBackend::new("b");
@@ -1118,6 +1134,7 @@ mod tests {
 
     #[test]
     fn an_earlier_system_family_beats_a_later_app_family() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let segoe = Blob::from(FaceSpec::new("Segoe UI").chars("a").build());
         let inter = Blob::from(FaceSpec::new("Inter").chars("a").build());
         let mut backend = SyntheticBackend::new("b");
@@ -1136,6 +1153,7 @@ mod tests {
 
     #[test]
     fn an_earlier_app_family_beats_a_later_system_family() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let segoe = Blob::from(FaceSpec::new("Segoe UI").chars("a").build());
         let inter = Blob::from(FaceSpec::new("Inter").chars("a").build());
         let mut backend = SyntheticBackend::new("b");
@@ -1153,6 +1171,7 @@ mod tests {
 
     #[test]
     fn a_later_system_family_answers_when_the_first_fails_coverage() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         // Scripted to claim "a" although its cmap only has "b".
         let first = Blob::from(FaceSpec::new("First").chars("b").build());
         let second = Blob::from(FaceSpec::new("Second").chars("a").build());
@@ -1185,6 +1204,7 @@ mod tests {
 
     #[test]
     fn a_cascade_substitute_does_not_hide_a_later_family() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let second = Blob::from(FaceSpec::new("Second").chars("a").build());
         let cascade = Blob::from(FaceSpec::new("Cascade").chars("a").build());
         let mut backend = SyntheticBackend::new("b");
@@ -1216,6 +1236,7 @@ mod tests {
 
     #[test]
     fn the_generic_request_beats_a_held_back_substitute() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         // An installed Menlo lacks Han: the OS cascades from it to Cascade Han.
         let menlo = Blob::from(FaceSpec::new("Menlo").chars("a").build());
         let cascade = Blob::from(FaceSpec::new("Cascade Han").chars("中").build());
@@ -1254,6 +1275,7 @@ mod tests {
 
     #[test]
     fn an_app_generic_fallback_beats_a_held_back_substitute() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let cascade = Blob::from(FaceSpec::new("Cascade").chars("a").build());
         let app_generic = Blob::from(FaceSpec::new("App Sans").chars("a").build());
         let mut backend = SyntheticBackend::new("b");
@@ -1270,6 +1292,7 @@ mod tests {
 
     #[test]
     fn a_substitute_answers_when_nothing_else_covers() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let cascade = Blob::from(FaceSpec::new("Cascade").chars("a").build());
         let mut backend = SyntheticBackend::new("b");
         backend.cascade_for("Brand", &cascade, "a");
@@ -1286,6 +1309,7 @@ mod tests {
 
     #[test]
     fn a_substitute_is_flagged_in_the_cache_and_the_family_is_not() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let inter = Blob::from(FaceSpec::new("Inter").chars("a").build());
         let cascade = Blob::from(FaceSpec::new("Cascade").chars("b").build());
         let mut backend = SyntheticBackend::new("b");
@@ -1314,6 +1338,7 @@ mod tests {
 
     #[test]
     fn named_family_probes_are_capped_per_chain() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let late = Blob::from(FaceSpec::new("Late").chars("a").build());
         let app = Blob::from(FaceSpec::new("App Late").chars("a").build());
         let mut backend = SyntheticBackend::new("b");
@@ -1350,6 +1375,7 @@ mod tests {
 
     #[test]
     fn app_shadowing_applies_to_the_same_name_only() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let system_brand = Blob::from(FaceSpec::new("Brand").chars("ab").build());
         let other = Blob::from(FaceSpec::new("Other").chars("b").build());
         let app_brand = Blob::from(FaceSpec::new("Brand").chars("a").build());
@@ -1378,6 +1404,7 @@ mod tests {
 
     #[test]
     fn a_family_request_keeps_the_chain_generics_but_no_other_family() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let mono = Blob::from(FaceSpec::new("Mono").chars("a").build());
         let mut backend = SyntheticBackend::new("b");
         backend.cover(&mono, "a");
@@ -1397,6 +1424,7 @@ mod tests {
 
     #[test]
     fn a_generic_default_is_resynthesised_at_the_requested_attributes() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         // A variable default reported at its regular instance (CoreText's
         // `CTFontCopyVariation` wght=400), plus an optical-size coordinate.
         let variable = Blob::from(FaceSpec::new("Var UI").chars("a").axes(&[*b"wght"]).build());

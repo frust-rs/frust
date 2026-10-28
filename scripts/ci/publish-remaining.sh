@@ -3,7 +3,10 @@
 # and optionally publish them.
 #
 # Usage: scripts/ci/publish-remaining.sh [--publish] [--no-verify] [--dry-run]
+#        scripts/ci/publish-remaining.sh --self-test
 #   (no flags)    print the unpublished packages, one `name@version` per line
+#                 on stdout; brand-new crates (see below) are listed on stderr
+#                 in a labelled block instead
 #   --publish     run `cargo publish` for exactly those packages (cargo orders
 #                 them by dependency and waits for each to reach the index)
 #   --no-verify   with --publish: skip the verification build of each workspace
@@ -11,9 +14,25 @@
 #   --dry-run     with --publish: pass --dry-run to cargo (nothing is uploaded);
 #                 the standalone packages are reported as not verifiable
 #                 instead of attempted, see below
+#   --self-test   offline: swap the index lookup and the package enumeration
+#                 for a fixture and assert the three lists and the exit code;
+#                 no network, no cargo
 #
 # A package counts as published when the crates.io sparse index lists its
-# version. crates.io rate-limits new crates (a burst, then one per ten
+# version. An index 404 means the crate itself was never published: such a
+# NEW crate is kept apart from a missing version of an existing crate, because
+# Trusted Publishing can only be configured for a crate that already exists, so
+# CI cannot create one. `--publish` therefore publishes only existing crates
+# (the workspace batch, then the standalone package) and never a new crate.
+#
+# Exit codes with --publish:
+#   0  everything is on the index (or was just published)
+#   1  cargo failed, or the crates.io rate limit stopped it (the message says
+#      "rate limit"); re-running resumes with the remainder
+#   3  the existing crates are up but new crates remain: a maintainer must
+#      first-publish them from the `vX.Y.Z` checkout (the commands are printed
+#      on stderr); re-run afterwards. Distinct from 1 so CI can tell them apart.
+# (2 is a usage error.) crates.io rate-limits new crates (a burst, then one per ten
 # minutes): when cargo stops on that limit this script exits 1 after printing
 # the packages still missing and the retry time from cargo's message, so
 # re-running it later resumes with the remainder. With nothing left to publish
@@ -26,6 +45,7 @@
 # build: its `frust-ui` dependency is a path dependency with a version, which
 # cargo resolves from the registry, so it can only be packaged once the
 # workspace packages are up — which is also why a dry run skips it.
+
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -34,6 +54,7 @@ cd "$root"
 standalone_manifests=(plugins/clean-signals-frust/Cargo.toml)
 
 publish=0
+self_test=0
 verify_flag=()
 dry_run_flag=()
 while [ "$#" -gt 0 ]; do
@@ -41,6 +62,7 @@ while [ "$#" -gt 0 ]; do
     --publish) publish=1 ;;
     --no-verify) verify_flag=(--no-verify) ;;
     --dry-run) dry_run_flag=(--dry-run) ;;
+    --self-test) self_test=1 ;;
     *) echo "error: unknown argument: $1" >&2; exit 2 ;;
   esac
   shift
@@ -71,59 +93,96 @@ for p in json.load(sys.stdin)["packages"]:
 ' | sort
 }
 
-# Whether the index already lists `name@version`. A 404 means the crate has
-# never been published; any other failure (network, 5xx) aborts, because
-# treating it as "not published" would misreport every package as missing.
-published() {
+# Prints how the index sees `name@version`: `published` (version listed),
+# `missing` (crate exists, version absent) or `new` (HTTP 404: the crate was
+# never published). Any other failure (network, 5xx) aborts, because treating
+# it as "not published" would misreport every package.
+index_status() {
   local name="$1" version="$2" body code
   body="$(curl -sS -A "$user_agent" -w '\n%{http_code}' "$(index_url "$name")" 2>&1)" || {
     echo "error: index lookup for $name failed: ${body##*$'\n'}" >&2; exit 1; }
   code="${body##*$'\n'}"
   body="${body%$'\n'*}"
   case "$code" in
-    200) printf '%s\n' "$body" | grep -q "\"vers\":\"$version\"" ;;
-    404) return 1 ;;
+    200)
+      if printf '%s\n' "$body" | grep -q "\"vers\":\"$version\""; then
+        echo published
+      else
+        echo missing
+      fi ;;
+    404) echo new ;;
     *) echo "error: index lookup for $name returned HTTP $code" >&2; exit 1 ;;
   esac
 }
 
+# The three lists, filled by `classify`:
+#   missing             name@version of existing crates lacking this version
+#   new_crates          name@version of crates the index has never seen
+#   missing_standalone  name@version@manifest of existing standalone crates
+#                       lacking this version (published last)
+missing=()
+new_crates=()
+missing_standalone=()
+
 # Enumerations are captured first so an enumeration failure aborts under
 # `set -e` (a here-document's command substitution would swallow it).
-workspace_packages="$(publishable)"
-missing=()
-while read -r name version; do
-  [ -n "$name" ] || continue
-  published "$name" "$version" || missing+=("$name@$version")
-done <<EOT
+classify() {
+  local workspace_packages standalone_packages manifest name version status
+  workspace_packages="$(publishable)"
+  while read -r name version; do
+    [ -n "$name" ] || continue
+    status="$(index_status "$name" "$version")"
+    case "$status" in
+      missing) missing+=("$name@$version") ;;
+      new) new_crates+=("$name@$version") ;;
+    esac
+  done <<EOT
 $workspace_packages
 EOT
 
-# `name@version@manifest` per standalone package not on the index yet.
-missing_standalone=()
-for manifest in "${standalone_manifests[@]}"; do
-  standalone_packages="$(publishable "$manifest")"
-  while read -r name version; do
-    [ -n "$name" ] || continue
-    published "$name" "$version" || missing_standalone+=("$name@$version@$manifest")
-  done <<EOT
+  for manifest in "${standalone_manifests[@]}"; do
+    standalone_packages="$(publishable "$manifest")"
+    while read -r name version; do
+      [ -n "$name" ] || continue
+      status="$(index_status "$name" "$version")"
+      case "$status" in
+        missing) missing_standalone+=("$name@$version@$manifest") ;;
+        new) new_crates+=("$name@$version") ;;
+      esac
+    done <<EOT
 $standalone_packages
 EOT
-done
+  done
+}
 
-if [ "${#missing[@]}" -eq 0 ] && [ "${#missing_standalone[@]}" -eq 0 ]; then
-  [ "$publish" -eq 1 ] && echo "nothing left to publish" >&2
-  exit 0
-fi
+# The block a maintainer acts on: the labelled list, which listing mode and
+# the exit-3 path both print.
+print_new_crates() {
+  local m
+  echo "new crates (need a maintainer's first publish from the tag):" >&2
+  for m in "$@"; do
+    printf '%s\n' "$m" >&2
+  done
+}
 
-# Empty arrays expand with `${arr[@]+"${arr[@]}"}`: bash before 4.4 treats a
-# bare `"${arr[@]}"` on an empty array as an unbound variable under `set -u`.
-for m in ${missing[@]+"${missing[@]}"}; do
-  printf '%s\n' "$m"
-done
-for m in ${missing_standalone[@]+"${missing_standalone[@]}"}; do
-  printf '%s\n' "${m%@*}"
-done
-[ "$publish" -eq 1 ] || exit 0
+# The exact commands for the exit-3 path, run from a `vX.Y.Z` checkout.
+print_first_publish_steps() {
+  local m crate
+  echo "" >&2
+  echo "A maintainer publishes each new crate once, from a checkout of the release tag" >&2
+  echo "(its dependencies are on the index by now). For each crate:" >&2
+  for m in "$@"; do
+    crate="${m%@*}"
+    echo "" >&2
+    echo "  # $m" >&2
+    echo "  cargo publish -p $crate --locked" >&2
+    echo "  # then on crates.io, crate settings > Trusted Publishing: add a GitHub publisher" >&2
+    echo "  #   repository frust-rs/frust, workflow release.yml, environment release" >&2
+    echo "  cargo owner --add github:frust-rs:owners $crate" >&2
+  done
+  echo "" >&2
+  echo "Then re-run the release workflow for the tag." >&2
+}
 
 # Runs one `cargo publish` invocation; on failure prints the reason, the
 # remainder, and exits 1 so a re-run resumes.
@@ -150,24 +209,150 @@ run_publish() {
   rm -f "$log"
 }
 
-if [ "${#missing[@]}" -gt 0 ]; then
-  args=(publish --locked ${verify_flag[@]+"${verify_flag[@]}"} ${dry_run_flag[@]+"${dry_run_flag[@]}"})
-  for m in "${missing[@]}"; do
-    args+=(-p "${m%@*}")
+main() {
+  local m args
+  classify
+
+  if [ "${#missing[@]}" -eq 0 ] && [ "${#missing_standalone[@]}" -eq 0 ] \
+    && [ "${#new_crates[@]}" -eq 0 ]; then
+    [ "$publish" -eq 1 ] && echo "nothing left to publish" >&2
+    return 0
+  fi
+
+  # Empty arrays expand with `${arr[@]+"${arr[@]}"}`: bash before 4.4 treats a
+  # bare `"${arr[@]}"` on an empty array as an unbound variable under `set -u`.
+  for m in ${missing[@]+"${missing[@]}"}; do
+    printf '%s\n' "$m"
   done
-  run_publish "${args[@]}"
+  for m in ${missing_standalone[@]+"${missing_standalone[@]}"}; do
+    printf '%s\n' "${m%@*}"
+  done
+  if [ "${#new_crates[@]}" -gt 0 ]; then
+    print_new_crates "${new_crates[@]}"
+  fi
+  [ "$publish" -eq 1 ] || return 0
+
+  if [ "${#missing[@]}" -gt 0 ]; then
+    args=(publish --locked ${verify_flag[@]+"${verify_flag[@]}"} ${dry_run_flag[@]+"${dry_run_flag[@]}"})
+    for m in "${missing[@]}"; do
+      args+=(-p "${m%@*}")
+    done
+    run_publish "${args[@]}"
+  fi
+
+  # The standalone packages go last, after every workspace package is up, and
+  # always with the verification build: that build is the only check they get
+  # before the irreversible upload. A dry run cannot do it at all — their
+  # `frust-ui` dependency is resolved from the registry, where this version
+  # does not exist until a real run has uploaded the workspace packages.
+  for m in ${missing_standalone[@]+"${missing_standalone[@]}"}; do
+    if [ "${#dry_run_flag[@]}" -gt 0 ]; then
+      echo "${m%@*}: not verifiable in a dry run (its frust-ui dependency is resolved from the registry); a real run publishes it last" >&2
+      continue
+    fi
+    run_publish publish --locked --manifest-path "${m##*@}"
+  done
+
+  # New crates are never published here: Trusted Publishing cannot create a
+  # crate. Exit 3 tells the workflow a maintainer's first publish is needed.
+  if [ "${#new_crates[@]}" -gt 0 ]; then
+    print_new_crates "${new_crates[@]}"
+    print_first_publish_steps "${new_crates[@]}"
+    return 3
+  fi
+  return 0
+}
+
+# Offline check: the fixture replaces the package enumeration and the index
+# lookup, and `run_publish` only records what it would have published. Nothing
+# touches the network or cargo.
+self_test_main() {
+  local failures=0 tmp out err code
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/publish-remaining-selftest.XXXXXX")"
+
+  publishable() {
+    if [ -n "${1:-}" ]; then
+      echo "frust-standalone 1.0.0"
+    else
+      printf '%s\n' "frust-old 1.0.0" "frust-fresh 1.0.0" "frust-bumped 2.0.0" \
+        "frust-newer 0.1.0"
+    fi
+  }
+  index_status() {
+    case "$1" in
+      frust-old) echo published ;;
+      frust-bumped) echo missing ;;
+      frust-fresh | frust-newer) echo new ;;
+      frust-standalone) echo missing ;;
+      *) echo "self-test: unexpected lookup $1" >&2; exit 1 ;;
+    esac
+  }
+  run_publish() { echo "$*" >> "$tmp/published"; }
+  standalone_manifests=(fixture/Cargo.toml)
+
+  check() { # description expected actual
+    if [ "$2" != "$3" ]; then
+      echo "FAIL $1: expected [$2] got [$3]" >&2
+      failures=$((failures + 1))
+    fi
+  }
+
+  # Listing mode: three lists, exit 0.
+  publish=0
+  set +e
+  out="$( (main) 2> "$tmp/err")"; code=$?
+  set -e
+  err="$(cat "$tmp/err")"
+  check "listing exit" 0 "$code"
+  check "listing stdout" "frust-bumped@2.0.0
+frust-standalone@1.0.0" "$out"
+  check "listing stderr" "new crates (need a maintainer's first publish from the tag):
+frust-fresh@1.0.0
+frust-newer@0.1.0" "$err"
+
+  # Publish mode: existing crates only, then exit 3.
+  publish=1
+  set +e
+  out="$( (main) 2> "$tmp/err")"; code=$?
+  set -e
+  err="$(cat "$tmp/err")"
+  check "publish exit" 3 "$code"
+  check "published set" "publish --locked -p frust-bumped
+publish --locked --manifest-path fixture/Cargo.toml" "$(cat "$tmp/published")"
+  case "$err" in
+    *"cargo publish -p frust-fresh --locked"*"cargo owner --add github:frust-rs:owners frust-fresh"*"cargo publish -p frust-newer --locked"*) ;;
+    *) echo "FAIL publish stderr lacks the first-publish commands" >&2; failures=$((failures + 1)) ;;
+  esac
+  case "$err" in
+    *"cargo publish -p frust-bumped"* | *"cargo publish -p frust-old"*)
+      echo "FAIL publish stderr names an existing crate" >&2; failures=$((failures + 1)) ;;
+  esac
+
+  # Nothing new: exit 0. Only published crates: exit 0.
+  # shellcheck disable=SC2329  # invoked indirectly by main via classify
+  publishable() { echo "frust-old 1.0.0"; }
+  : > "$tmp/published"
+  set +e
+  out="$( (main) 2> "$tmp/err")"; code=$?
+  set -e
+  check "all-published exit" 0 "$code"
+  check "all-published published-set" "" "$(cat "$tmp/published")"
+
+  rm -rf "$tmp"
+  if [ "$failures" -ne 0 ]; then
+    echo "self-test: $failures check(s) failed" >&2
+    return 1
+  fi
+  echo "self-test: ok" >&2
+}
+
+if [ "$self_test" -eq 1 ]; then
+  self_test_main
+  exit $?
 fi
 
-# The standalone packages go last, after every workspace package is up, and
-# always with the verification build: that build is the only check they get
-# before the irreversible upload. A dry run cannot do it at all — their
-# `frust-ui` dependency is resolved from the registry, where this version
-# does not exist until a real run has uploaded the workspace packages.
-for m in ${missing_standalone[@]+"${missing_standalone[@]}"}; do
-  if [ "${#dry_run_flag[@]}" -gt 0 ]; then
-    echo "${m%@*}: not verifiable in a dry run (its frust-ui dependency is resolved from the registry); a real run publishes it last" >&2
-    continue
-  fi
-  run_publish publish --locked --manifest-path "${m##*@}"
-done
-exit 0
+# `|| code=$?` keeps `set -e` from ending the script before the exit code of
+# `main` (0, or 3 for new crates) is passed on.
+code=0
+main || code=$?
+exit "$code"
