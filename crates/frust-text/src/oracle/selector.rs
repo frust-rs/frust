@@ -693,6 +693,7 @@ mod tests {
 
     #[test]
     fn hello_chinese_resolves_per_cluster_to_the_expected_faces() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let latin = Blob::from(FaceSpec::new("Synthetic Sans").chars("Helo ").build());
         let han = Blob::from(FaceSpec::new("Synthetic Han").chars("中文").build());
         let mut backend = SyntheticBackend::new("build-1");
@@ -720,6 +721,7 @@ mod tests {
 
     #[test]
     fn hits_and_misses_are_both_cached() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let latin = Blob::from(FaceSpec::new("Synthetic Sans").chars("a").build());
         let mut backend = SyntheticBackend::new("b");
         backend.cover(&latin, "a");
@@ -742,6 +744,7 @@ mod tests {
 
     #[test]
     fn app_answers_are_never_cached() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let app = Blob::from(FaceSpec::new("Brand").chars("a").build());
         let mut oracle = oracle_over(SyntheticBackend::new("b"));
         oracle.registry_mut().insert_blob(&app);
@@ -758,6 +761,7 @@ mod tests {
     /// registered generic fallback alike — as a system face does.
     #[test]
     fn a_registered_face_answers_with_its_postscript_name() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let noto =
             Blob::from(include_bytes!("../../../../testing/fonts/NotoSans-Subset.ttf").to_vec());
         let mut oracle = oracle_over(SyntheticBackend::new("b"));
@@ -788,6 +792,7 @@ mod tests {
 
     #[test]
     fn the_persistent_cache_answers_the_next_run_without_the_backend() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let dir = TempDir::new("oracle-persist");
         let font = dir.write("latin.ttf", &FaceSpec::new("Latin").chars("a").build());
         let file = dir
@@ -830,6 +835,7 @@ mod tests {
 
     #[test]
     fn resolve_order_is_app_then_cache_then_backend_then_generic() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let app = Blob::from(FaceSpec::new("Brand").chars("ab").build());
         let system = Blob::from(FaceSpec::new("System").chars("abc").build());
         let generic = Blob::from(FaceSpec::new("Generic").chars("abcd").build());
@@ -872,6 +878,7 @@ mod tests {
 
     #[test]
     fn app_faces_shadow_system_faces_of_the_same_family() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let system_helvetica = Blob::from(FaceSpec::new("Helvetica").chars("AB").build());
         let app_helvetica = Blob::from(FaceSpec::new("Helvetica").chars("A").build());
         let mut backend = SyntheticBackend::new("b");
@@ -904,6 +911,7 @@ mod tests {
 
     #[test]
     fn a_face_the_engine_cannot_draw_is_refused_and_counted() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let hvgl_only = Blob::from(FaceSpec::new("PingFang UI").chars("中").hvgl_only().build());
         let mut backend = SyntheticBackend::new("b");
         backend.cover(&hvgl_only, "中");
@@ -924,6 +932,7 @@ mod tests {
 
     #[test]
     fn a_backend_answer_missing_a_character_is_uncovered() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let partial = Blob::from(FaceSpec::new("Partial").chars("a").build());
         let mut backend = SyntheticBackend::new("b");
         // Scripted to claim "ab" although its cmap only has "a".
@@ -945,6 +954,7 @@ mod tests {
 
     #[test]
     fn synthesis_fakes_bold_and_oblique_on_a_static_face() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let regular = Blob::from(FaceSpec::new("Static").chars("a").build());
         let mut backend = SyntheticBackend::new("b");
         backend.cover(&regular, "a");
@@ -967,6 +977,7 @@ mod tests {
 
     #[test]
     fn synthesis_uses_axes_on_a_variable_face() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let attrs = FaceAttrs {
             has_wght: true,
             has_ital: true,
@@ -999,6 +1010,7 @@ mod tests {
 
     #[test]
     fn synthesis_parsed_from_real_tables() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let face = FaceSpec::new("Var")
             .chars("a")
             .weight(300)
@@ -1014,6 +1026,7 @@ mod tests {
 
     #[test]
     fn a_backend_synthesis_hint_is_honoured() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let cjk = Blob::from(FaceSpec::new("Noto Sans CJK").chars("中").build());
         let hint = Synthesis {
             embolden: true,
@@ -1052,6 +1065,7 @@ mod tests {
 
     #[test]
     fn a_hidden_face_passes_through_with_its_flag_and_name() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let hidden = Blob::from(FaceSpec::new(".Hidden Sans").chars("a").build());
         let mut backend = SyntheticBackend::new("b");
         backend.cover_with(
@@ -1078,6 +1092,7 @@ mod tests {
 
     #[test]
     fn a_collection_face_index_is_honoured() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let dir = TempDir::new("ttc");
         let ttc = FaceSpec::collection(&[
             FaceSpec::new("CJK JP").chars("文"),

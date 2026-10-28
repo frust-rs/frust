@@ -638,6 +638,7 @@ mod tests {
 
     #[test]
     fn the_builder_opt_out_keeps_the_font_cache_in_memory() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let mut cx = test_cx();
         assert!(!cx.oracle.cache().is_persistent());
         let _ = cx.oracle.resolve(&oracle_request("a"));
@@ -647,6 +648,7 @@ mod tests {
 
     #[test]
     fn a_font_cache_dir_receives_the_cache_at_the_first_flush() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let dir = oracle::synthetic::TempDir::new("context-cache-dir");
         let cache_dir = dir.path().join("fonts");
         let mut cx = TextContext::builder()
@@ -669,6 +671,7 @@ mod tests {
 
     #[test]
     fn two_contexts_over_one_cache_dir_share_their_answers() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let dir = oracle::synthetic::TempDir::new("context-shared-cache");
         let cache_dir = dir.path().join("fonts");
         let build = || TextContext::builder().font_cache_dir(&cache_dir).build();
@@ -714,6 +717,7 @@ mod tests {
 
     #[test]
     fn the_final_flush_writes_answers_another_context_recorded() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let dir = oracle::synthetic::TempDir::new("context-flush-any");
         let cache_dir = dir.path().join("fonts");
         let build = || TextContext::builder().font_cache_dir(&cache_dir).build();
@@ -757,6 +761,7 @@ mod tests {
 
     #[test]
     fn the_environment_override_parses_off_and_absolute_dirs_only() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         assert_eq!(env_font_cache(None), None);
         assert_eq!(
             env_font_cache(Some(OsStr::new("off"))),
@@ -773,6 +778,7 @@ mod tests {
 
     #[test]
     fn explicit_choices_win_and_the_test_default_is_a_scratch_dir() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         assert!(matches!(
             cache_location(FontCacheChoice::Disabled),
             CacheLocation::Disabled
@@ -800,6 +806,7 @@ mod tests {
 
     #[test]
     fn new_with_timings_builds_the_same_context_as_new() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let (mut timed, timings) = TextContext::new_with_timings();
         let mut plain = TextContext::new();
         let style = style(16.0);
@@ -834,6 +841,7 @@ mod tests {
 
     #[test]
     fn an_app_font_reaches_contexts_built_later_and_older_ones_on_sync() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         // The seam under test: `register_fonts` is what a shell's
         // font drain calls, and a widget-owned context (a `TextInput`'s) is
         // built from `new()` long after that drain. Both legs below are
@@ -879,6 +887,7 @@ mod tests {
     /// reproduce the defect this seam fixes.
     #[test]
     fn generic_fallback_maps_requested_slots_and_is_idempotent() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         use crate::oracle::registry::PendingGenericFallback;
 
         // Entries built locally, driven straight through the registry's
@@ -952,6 +961,7 @@ mod tests {
 
     #[test]
     fn register_generic_fallback_is_a_noop_with_no_generics() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         // Deliberately the *empty-generics* case only: `register_generic_fallback`
         // writes to the process-wide, never-drained generic-fallback record,
         // so a call naming a real slot here would keep applying for the rest of
@@ -969,6 +979,7 @@ mod tests {
 
     #[test]
     fn a_registered_app_font_reaches_the_oracle_too() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let mut cx = test_cx();
         let families = cx
             .register_fonts(TUFFY.to_vec())
@@ -990,6 +1001,7 @@ mod tests {
 
     #[test]
     fn with_capabilities_reaches_the_oracle() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let caps = RenderCapabilities {
             bitmap: false,
             ..RenderCapabilities::default()
@@ -1244,6 +1256,7 @@ mod tests {
 
     #[test]
     fn center_and_right_align_position_wrapped_lines_correctly() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         // Asserts on per-line origins, not on the style merely being set —
         // this is what catches the v1 defect where `Align(CENTER, text(..))`
         // centred only the block, leaving every line hugging the leading
@@ -1377,6 +1390,7 @@ mod tests {
 
     #[test]
     fn default_alignment_matches_pre_findings_39_start_behavior() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         // Byte-for-byte parity: the default style's layout is unchanged from
         // before this retrofit (both hardcoded call sites now apply
         // `TextAlign::Start`, exactly what they hardcoded before).
@@ -1414,6 +1428,7 @@ mod tests {
 
     #[test]
     fn layout_bounded_with_no_max_lines_matches_plain_layout() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         // The zero-cost, unchanged-behavior contract: `max_lines: None`
         // delegates straight to `layout`, so no existing caller (none of
         // which pass `max_lines`) can regress.
@@ -1428,6 +1443,7 @@ mod tests {
 
     #[test]
     fn single_line_fits_is_left_unmodified() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         // "fits": comfortable width, well under the box — no truncation, no
         // ellipsis; byte-for-byte the same shape as a plain `layout` call.
         let mut cx = test_cx();
@@ -1442,6 +1458,7 @@ mod tests {
 
     #[test]
     fn single_line_exact_fit_is_not_truncated() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         // The `>` (not `>=`) boundary: a width equal to the line's own
         // natural width is a fit, not an overflow.
         let mut cx = test_cx();
@@ -1463,6 +1480,7 @@ mod tests {
 
     #[test]
     fn single_line_overflow_truncates_and_fits_the_bound() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         // `max_lines(1)` forces a phrase that would otherwise soft-wrap onto
         // one truncated line.
         let mut cx = test_cx();
@@ -1493,6 +1511,7 @@ mod tests {
 
     #[test]
     fn max_lines_two_wrapped_truncates_only_the_last_visible_line() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let mut cx = test_cx();
         let s = style(16.0);
         let max_width = 60.0;
@@ -1529,6 +1548,7 @@ mod tests {
 
     #[test]
     fn clip_drops_trailing_lines_without_touching_the_last_visible_line() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let mut cx = test_cx();
         let s = style(16.0);
         let max_width = 60.0;
@@ -1573,6 +1593,7 @@ mod tests {
 
     #[test]
     fn ellipsis_wider_than_the_box_still_renders_without_panicking() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let mut cx = test_cx();
         let s = style(16.0);
         // Narrower than a single glyph at this size — even a bare '…' can't
@@ -1594,6 +1615,7 @@ mod tests {
 
     #[test]
     fn empty_string_is_not_truncated() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let mut cx = test_cx();
         let s = style(16.0);
         let bounded = cx.layout_bounded("", &s, Some(80.0), Some(1), TextOverflow::Ellipsis);
@@ -1602,6 +1624,7 @@ mod tests {
 
     #[test]
     fn max_lines_zero_yields_an_empty_layout() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let mut cx = test_cx();
         let s = style(16.0);
         let bounded = cx.layout_bounded(
@@ -1747,6 +1770,7 @@ mod tests {
 
     #[test]
     fn the_cut_keeps_the_longest_fitting_prefix() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         // The cut is maximal: the kept atoms plus the ellipsis fit, and one
         // more grapheme would not — including for a line whose glyph widths
         // are nowhere near uniform.
@@ -1768,6 +1792,7 @@ mod tests {
 
     #[test]
     fn a_line_that_wraps_early_is_refilled_before_the_cut() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         // With the bundled subset (host-independent widths) the line's only
         // wrap opportunity is after `He `: the long word overflows. The cut
         // refills the line from that word rather than ending at `He…`.
@@ -1794,6 +1819,7 @@ mod tests {
 
     #[test]
     fn a_mandatory_break_stops_the_refill() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let (mut cx, s) = noto_cx();
         let text = "He Hello\nHelloooooooooooooooooooooooooooo";
         let newline = text.find('\n').expect("a newline");
@@ -1818,6 +1844,7 @@ mod tests {
 
     #[test]
     fn a_truncated_line_shares_the_full_layouts_glyphs() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         // Nothing reshapes: the kept glyphs are the full line's own, in place.
         let mut cx = test_cx();
         let s = style(16.0);
@@ -1862,6 +1889,7 @@ mod tests {
 
     #[test]
     fn a_text_terminating_newline_is_not_an_extra_line() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         // parley opens a zero-width line after a terminal '\n'; counting it as
         // overflow rendered "Hello…" for `text("Hello\n").max_lines(1)`.
         let s = style(16.0);
@@ -1905,6 +1933,7 @@ mod tests {
 
     #[test]
     fn a_trailing_newline_after_several_lines_is_discounted_too() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let s = style(16.0);
         for overflow in [TextOverflow::Ellipsis, TextOverflow::Clip] {
             let mut cx = test_cx();
@@ -1935,6 +1964,7 @@ mod tests {
 
     #[test]
     fn a_real_extra_line_still_truncates_when_the_text_ends_in_a_newline() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         // The discount must not swallow genuine overflow.
         let mut cx = test_cx();
         let s = style(16.0);
@@ -1960,6 +1990,7 @@ mod tests {
 
     #[test]
     fn a_blank_line_inside_the_text_is_a_real_line() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         // Only a *trailing* empty line is phantom: "a\n\nb" genuinely paints a
         // blank second line the caller asked for, so all three count.
         let mut cx = test_cx();
@@ -1982,6 +2013,7 @@ mod tests {
 
     #[test]
     fn multi_byte_text_truncates_on_char_boundaries_without_panicking() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         // Every byte index in the truncation path is parley-derived or
         // char-boundary-derived; a mid-char slice would panic on this input.
         let s = style(16.0);
@@ -2010,6 +2042,7 @@ mod tests {
 
     #[test]
     fn ellipsis_truncation_preserves_center_alignment() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         // Hard-broken lines with generous width headroom, so the centering
         // offset can't be swamped by the truncation search converging on a
         // near-max-width candidate (see `max_lines_two_wrapped_...` above for
@@ -2111,6 +2144,7 @@ mod tests {
     // lets one leg's increments land inside another's window.
     #[test]
     fn notdef_counts_and_warns_once() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let _ = log::set_logger(&WarnCapture);
         log::set_max_level(log::LevelFilter::Warn);
 

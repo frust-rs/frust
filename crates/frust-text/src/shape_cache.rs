@@ -472,6 +472,7 @@ mod tests {
 
     #[test]
     fn same_width_compares_optionals_bitwise() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         assert!(same_width(None, None));
         assert!(same_width(Some(80.0), Some(80.0)));
         assert!(!same_width(Some(80.0), None));

@@ -50,21 +50,22 @@ pub(crate) mod test_support {
 
     static LOCK: Mutex<()> = Mutex::new(());
 
-    /// Holds the test lock and restores `None` on drop.
-    pub(crate) struct DefaultLocale(#[allow(dead_code)] MutexGuard<'static, ()>);
+    /// Holds the test lock and restores the value found at `set` on drop.
+    pub(crate) struct DefaultLocale(#[allow(dead_code)] MutexGuard<'static, ()>, Option<String>);
 
     impl DefaultLocale {
         /// Takes the lock and sets the default locale to `locale`.
         pub(crate) fn set(locale: Option<&str>) -> Self {
             let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let previous = super::default_locale().map(|tag| tag.to_string());
             super::set_default_locale(locale);
-            Self(guard)
+            Self(guard, previous)
         }
     }
 
     impl Drop for DefaultLocale {
         fn drop(&mut self) {
-            super::set_default_locale(None);
+            super::set_default_locale(self.1.as_deref());
         }
     }
 }

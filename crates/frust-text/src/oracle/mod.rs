@@ -955,6 +955,7 @@ mod tests {
 
     #[test]
     fn the_oracle_names_no_shaping_engine_type() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         // Built with `concat!` so this file does not match its own scan.
         let forbidden = [
             concat!("parley", "_engine"),
@@ -1011,6 +1012,7 @@ mod tests {
 
     #[test]
     fn no_unsafe_token_outside_the_zone() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         for (path, text) in oracle_sources() {
             if is_zone(&path) {
                 continue;
@@ -1029,6 +1031,7 @@ mod tests {
 
     #[test]
     fn every_zone_file_opens_the_zone_with_a_header() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let zone_files: Vec<_> = oracle_sources()
             .into_iter()
             .filter(|(path, _)| is_zone(path))
@@ -1060,6 +1063,7 @@ mod tests {
 
     #[test]
     fn the_unsafe_token_scan_matches_whole_words_only() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         assert!(has_unsafe_token(concat!("un", "safe { f() }")));
         assert!(has_unsafe_token(concat!("pub ", "un", "safe fn f()")));
         assert!(!has_unsafe_token("#![deny(unsafe_code)]"));
@@ -1068,6 +1072,7 @@ mod tests {
 
     #[test]
     fn default_capabilities_match_todays_engine() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let caps = RenderCapabilities::default();
         assert!(caps.outlines && caps.colr && caps.bitmap);
         assert_eq!(caps.hvgl_via_coretext, cfg!(target_vendor = "apple"));
@@ -1080,12 +1085,14 @@ mod tests {
 
     #[test]
     fn the_platform_backend_constructs_and_names_the_os_build() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let backend = platform_backend();
         assert!(!backend.os_build_id().is_empty());
     }
 
     #[test]
     fn face_source_new_defaults_the_os_facts() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let src = FaceSource::new(FaceLocation::Path(PathBuf::from("a.ttf")), 3);
         assert_eq!(src.index, 3);
         assert!(src.variations.is_empty());
@@ -1098,6 +1105,7 @@ mod tests {
     #[cfg(target_family = "wasm")]
     #[test]
     fn the_platform_stub_backend_answers_nothing() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let mut backend = platform_backend();
         let req = FallbackRequest::new(
             "a",
@@ -1129,6 +1137,7 @@ mod tests {
 
     #[test]
     fn an_oracle_built_before_the_cache_dir_resolves_still_persists() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         use std::sync::{Arc, Mutex};
         let dir = synthetic::TempDir::new("oracle-lazy");
         let font = dir.write("a.ttf", &synthetic::FaceSpec::new("A").chars("ab").build());
@@ -1165,6 +1174,7 @@ mod tests {
 
     #[test]
     fn the_oracle_writes_behind_flushes_on_demand_and_on_drop() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let dir = synthetic::TempDir::new("oracle-write-behind");
         let font = dir.write("a.ttf", &synthetic::FaceSpec::new("A").chars("ab").build());
         let file = cache_file_in(dir.path());
@@ -1209,6 +1219,7 @@ mod tests {
 
     #[test]
     fn dropping_the_oracle_never_waits_for_an_in_flight_write() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let dir = synthetic::TempDir::new("oracle-drop-detached");
         let font = dir.write("a.ttf", &synthetic::FaceSpec::new("A").chars("ab").build());
         let file = cache_file_in(dir.path());
@@ -1261,6 +1272,7 @@ mod tests {
 
     #[test]
     fn a_lookup_never_waits_for_the_disk_and_flush_completes_the_write() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let dir = synthetic::TempDir::new("oracle-background-write");
         let font = dir.write("a.ttf", &synthetic::FaceSpec::new("A").chars("ab").build());
         let file = cache_file_in(dir.path());
@@ -1297,6 +1309,7 @@ mod tests {
 
     #[test]
     fn the_platform_location_is_resolved_lazily() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         // Constructing it asks frust-paths nothing; the resolver runs at first use.
         assert!(matches!(CacheLocation::platform(), CacheLocation::Lazy(_)));
         let path = persistent_cache_path();
@@ -1307,6 +1320,7 @@ mod tests {
 
     #[test]
     fn a_disabled_cache_location_never_resolves_a_path() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let mut oracle = Oracle::with_cache_location(
             Box::new(NoBackend),
             RenderCapabilities::default(),
@@ -1320,6 +1334,7 @@ mod tests {
 
     #[test]
     fn the_stamped_font_dirs_are_absolute_platform_directories() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let dirs = font_dirs();
         assert!(dirs.iter().all(|d| d.is_absolute()), "{dirs:?}");
         if cfg!(target_os = "macos") {
@@ -1334,6 +1349,7 @@ mod tests {
 
     #[test]
     fn face_store_reads_a_file_once() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let dir = synthetic::TempDir::new("store");
         let path = dir.write("a.ttf", &synthetic::FaceSpec::new("A").chars("a").build());
         let mut store = FaceStore::default();
@@ -1504,6 +1520,7 @@ mod tests {
 
     #[test]
     fn han_language_parsing_compares_whole_subtags() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let cases = [
             ("ja", Some("ja")),
             ("ja-JP", Some("ja")),
@@ -1540,6 +1557,7 @@ mod tests {
 
     #[test]
     fn han_language_is_the_first_han_entry_of_the_preference_list() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         assert_eq!(
             han_language_in(["en-US", "kok-IN", "ja-JP", "zh-Hans-US"]),
             Some("ja")
@@ -1572,6 +1590,7 @@ mod tests {
 
     #[test]
     fn no_subprocess_is_spawned_by_frust_text() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
         // Built with `concat!` so this file does not match its own scan.
         let word = concat!("process", "::", "Command");
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
