@@ -453,6 +453,8 @@ jobs:
           fetch-depth: 0
       - name: Commit-hygiene guard self-test
         run: scripts/ci/commit-hygiene.sh --self-test
+      - name: Publish-remaining self-test
+        run: scripts/ci/publish-remaining.sh --self-test
       - name: Check this pull request's commits
         if: ${{ github.event_name == 'pull_request' }}
         run: scripts/ci/commit-hygiene.sh origin/${{ github.base_ref }}..HEAD
