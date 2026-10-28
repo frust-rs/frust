@@ -1504,6 +1504,7 @@ dependencies = [
  "any_spawner",
  "futures",
  "libc",
+ "log",
  "reactive_graph",
  "tokio",
  "wasm-bindgen-futures",

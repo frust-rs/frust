@@ -17,6 +17,9 @@ readme = "README.md"
 reactive_graph = { workspace = true }
 any_spawner = { workspace = true }
 futures = "0.3"
+# Lifecycle-callback panics and the pre-init push skip log through `log`: stderr never
+# reaches logcat or os_log, so a silent panic would hide a broken unsaved-work guard.
+log = { workspace = true }
 
 # wasm32 has no OS threads or mio reactor, so these tokio features fail to compile there (see
 # `src/runtime.rs` for the wasm arm and what it cannot do yet).
