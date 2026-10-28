@@ -44,8 +44,8 @@ cargo build --workspace --locked
 ```
 
 `--locked` must always pass — it is part of the verify gate below and is how manifest/lockfile drift
-is caught. It is not this workspace's rule alone: eleven workspaces are held to it — this root plus
-the ten standalone ones a pin move keeps current — and such a move regenerates all eleven lockfiles
+is caught. It is not this workspace's rule alone: fourteen lockfiles are held to it — this root plus
+the thirteen standalone workspaces (`benchmarks/frust_bench`, `testing/hotpatch-canary`, `plugins/clean-signals-frust`, and ten under `examples/`: `design-system-sample`, `glyph-catalog`, `hotpatch-spike`, `huddle`, `material3-demo`, `native-widgets-demo`, `playground`, `shadertoy`, `web-gallery`, `web-spike`) a pin move keeps current — and such a move regenerates all fourteen lockfiles
 with targeted per-crate updates rather than a blind re-resolve (see *Version-Pin Policy*). **Dev-profile
 shader-stack overrides.** The five manifests the `profile_sync` tripwire checks (root `Cargo.toml`,
 `crates/frust-drive/templates/app/Cargo.toml.tmpl`, `examples/huddle/Cargo.toml`, `examples/glyph-catalog/Cargo.toml`,
@@ -468,7 +468,7 @@ The rules below bind every pin, wherever its row lives:
   **Carve-out for a duplicate-collapsing bump.** When a pin moves specifically to collapse a
   duplicate (e.g. `parley_engine` aligning `skrifa`/`read-fonts` onto `glifo`'s copies),
   `cargo generate-lockfile` is the wrong tool — it re-resolves unrelated crates. Run `cargo update
-  -p <crate> --precise <version>` from inside each of the eleven workspaces, then a plain
+  -p <crate> --precise <version>` from inside each of the fourteen workspaces, then a plain
   `cargo metadata` there to pick up missing path-dep edges, and audit every lock diff's
   `name`/`version` lines.
 - **wgpu's GPU backends route per target; the `30.0.1` pin stays workspace-owned.** The
