@@ -1252,7 +1252,7 @@ dependencies = [
 
 [[package]]
 name = "frust-auth-session"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "block2 0.6.2",
  "dispatch2",
@@ -1269,7 +1269,7 @@ dependencies = [
 
 [[package]]
 name = "frust-camera"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "block2 0.6.2",
  "dispatch2",
@@ -1289,7 +1289,7 @@ dependencies = [
 
 [[package]]
 name = "frust-clipboard"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "arboard",
  "frust-plugin",
@@ -1302,7 +1302,7 @@ dependencies = [
 
 [[package]]
 name = "frust-connectivity"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "block2 0.6.2",
  "dispatch2",
@@ -1313,7 +1313,7 @@ dependencies = [
 
 [[package]]
 name = "frust-core"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "accesskit",
  "frust-scene",
@@ -1326,7 +1326,7 @@ dependencies = [
 
 [[package]]
 name = "frust-database"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "frust-paths",
  "log",
@@ -1336,7 +1336,7 @@ dependencies = [
 
 [[package]]
 name = "frust-engine"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "bytemuck",
  "frust-gpu",
@@ -1356,7 +1356,7 @@ dependencies = [
 
 [[package]]
 name = "frust-file-dialogs"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "rfd",
  "thiserror 2.0.20",
@@ -1364,7 +1364,7 @@ dependencies = [
 
 [[package]]
 name = "frust-gpu"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "android_system_properties",
  "anyhow",
@@ -1384,7 +1384,7 @@ dependencies = [
 
 [[package]]
 name = "frust-i18n"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "fluent-bundle",
  "fluent-langneg",
@@ -1411,7 +1411,7 @@ dependencies = [
 
 [[package]]
 name = "frust-i18n-macros"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "fluent-syntax",
  "proc-macro2",
@@ -1422,7 +1422,7 @@ dependencies = [
 
 [[package]]
 name = "frust-material"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "frust-ui",
  "kurbo",
@@ -1431,7 +1431,7 @@ dependencies = [
 
 [[package]]
 name = "frust-material-i18n"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "frust-i18n",
  "frust-material",
@@ -1442,7 +1442,7 @@ dependencies = [
 
 [[package]]
 name = "frust-network-image"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "frust-paths",
  "frust-ui",
@@ -1460,7 +1460,7 @@ dependencies = [
 
 [[package]]
 name = "frust-oauth-native"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "base64 0.22.1",
  "getrandom 0.3.4",
@@ -1474,14 +1474,14 @@ dependencies = [
 
 [[package]]
 name = "frust-paths"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "log",
 ]
 
 [[package]]
 name = "frust-plugin"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "jni 0.22.4",
  "ndk-context",
@@ -1490,7 +1490,7 @@ dependencies = [
 
 [[package]]
 name = "frust-qr"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "frust-ui",
  "qrcode",
@@ -1499,7 +1499,7 @@ dependencies = [
 
 [[package]]
 name = "frust-reactive"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "any_spawner",
  "futures",
@@ -1512,7 +1512,7 @@ dependencies = [
 
 [[package]]
 name = "frust-render"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "android_system_properties",
  "anyhow",
@@ -1528,7 +1528,7 @@ dependencies = [
 
 [[package]]
 name = "frust-scene"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "kurbo",
  "peniko",
@@ -1536,7 +1536,7 @@ dependencies = [
 
 [[package]]
 name = "frust-share"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "dispatch2",
  "frust-clipboard",
@@ -1551,7 +1551,7 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-android"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "accesskit_android",
  "android_logger",
@@ -1577,7 +1577,7 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-common"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "frust-core",
  "frust-scene",
@@ -1590,7 +1590,7 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-desktop"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "accesskit_winit",
  "anyhow",
@@ -1612,7 +1612,7 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-ios"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "accesskit",
  "accesskit_ios",
@@ -1634,7 +1634,7 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-linux"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "frust-shell-desktop",
  "log",
@@ -1643,7 +1643,7 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-macos"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "frust-plugin",
  "frust-reactive",
@@ -1660,7 +1660,7 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-web"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "console_error_panic_hook",
  "console_log",
@@ -1684,7 +1684,7 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-windows"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "frust-reactive",
  "frust-shell-desktop",
@@ -1697,7 +1697,7 @@ dependencies = [
 
 [[package]]
 name = "frust-text"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "fontique",
  "frust-paths",
@@ -1722,7 +1722,7 @@ dependencies = [
 
 [[package]]
 name = "frust-theme"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "frust-core",
  "frust-text",
@@ -1731,7 +1731,7 @@ dependencies = [
 
 [[package]]
 name = "frust-ui"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "any_spawner",
  "anyhow",
@@ -1761,7 +1761,7 @@ dependencies = [
 
 [[package]]
 name = "frust-url-launcher"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "dispatch2",
  "frust-plugin",
@@ -1775,7 +1775,7 @@ dependencies = [
 
 [[package]]
 name = "frust-video-player"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "block2 0.6.2",
  "dispatch2",
@@ -1796,7 +1796,7 @@ dependencies = [
 
 [[package]]
 name = "frust-widgets"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "frust-core",
  "frust-scene",

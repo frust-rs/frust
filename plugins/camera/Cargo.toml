@@ -27,12 +27,12 @@ log = { workspace = true }
 
 # Unconditional per the platform-plugin charter: no other `frust-*` dependency
 # (`docs/CODE_STANDARDS.md` Plugin Conventions).
-frust-plugin = { path = "../../crates/frust-plugin", version = "0.6.3" }
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.6.4" }
 
 # `frust-api`'s preview-texture bridge (`src/texture.rs`). Literal `path`: the root `frust` entry
 # sets no `default-features`, so a member cannot override it (as in plugins/video-player).
 # Published as frust-ui, imported as frust (https://github.com/lloydmeta/frunk/issues/258).
-frust = { package = "frust-ui", path = "../../crates/frust", version = "0.6.3", default-features = false, optional = true }
+frust = { package = "frust-ui", path = "../../crates/frust", version = "0.6.4", default-features = false, optional = true }
 
 # Unconditional, unlike the FFI deps below: `barcode` decodes from a frame,
 # never a camera backend, so it builds on every target (feature trim: root

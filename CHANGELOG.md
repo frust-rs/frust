@@ -6,6 +6,8 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ## Unreleased
 
+## 0.6.4 — 2026-10-28
+
 A patch release (the 0.6.x line continues) whose source-affecting changes are three: Android `minSdk`
 is 29 (Breaking), `TextStyle` gained the public fields `width`, `variations` and `locale`, and
 `DesktopConfig` gained `decorations` and `title_buttons` (the Changed list gives each struct-literal
