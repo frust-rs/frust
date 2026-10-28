@@ -195,6 +195,8 @@ dependencies {
     implementation(project(":frust-embedding"))
     // frust:plugin-dependencies — plugin-contributed dependencies go below.
     implementation(project(":frust-camera"))
+    // frust-connectivity: `ConnectivityManager` default-network host for the "Network" section.
+    implementation(project(":frust-connectivity"))
     // frust-video-player: the session host (`FrustVideoPlayerHost`) + the
     // SurfaceView-backed picture factory (`VideoPlayerViewFactory`) —
     // `src/pages/video_player.rs`'s "Video" section.

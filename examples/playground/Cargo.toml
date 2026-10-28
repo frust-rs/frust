@@ -33,6 +33,9 @@ log = "0.4"
 # Default features required: the `frust-api` preview-texture bridge (`preview_texture_output`).
 frust-camera = { path = "../../plugins/camera" }
 
+# The Network page: default-network availability and change events next to the lifecycle log.
+frust-connectivity = { path = "../../plugins/connectivity" }
+
 # Default features required: the `frust-api` hooks and the ICU4X `formatting` that `locales/*/main.ftl` uses.
 frust-i18n = { path = "../../plugins/i18n" }
 

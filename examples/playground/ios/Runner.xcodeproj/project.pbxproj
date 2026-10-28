@@ -272,6 +272,8 @@
 					UIKit,
 					"-framework",
 					AuthenticationServices,
+					"-framework",
+					Network,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "it.f0x.playground";
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -312,6 +314,8 @@
 					UIKit,
 					"-framework",
 					AuthenticationServices,
+					"-framework",
+					Network,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "it.f0x.playground";
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -353,6 +357,8 @@
 					UIKit,
 					"-framework",
 					AuthenticationServices,
+					"-framework",
+					Network,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "it.f0x.playground";
 				PRODUCT_NAME = "$(TARGET_NAME)";
