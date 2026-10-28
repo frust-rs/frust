@@ -60,6 +60,18 @@ impl LifecycleFlags {
             Target::Inactive
         }
     }
+
+    /// Facts read from the activity in one go, with `destroyed` clear. Used when
+    /// a native handle is created after the activity callbacks already ran, so
+    /// the replayed facts stand in for the hooks that were dropped.
+    pub(crate) fn synced(started: bool, resumed: bool, window_focused: bool) -> Self {
+        Self {
+            started,
+            resumed,
+            window_focused,
+            destroyed: false,
+        }
+    }
 }
 
 #[cfg(target_os = "android")]
@@ -97,10 +109,20 @@ mod process {
     pub(crate) fn reset() {
         *FLAGS.lock().unwrap_or_else(|e| e.into_inner()) = LifecycleFlags::default();
     }
+
+    /// Replace the facts with a fresh read of the activity, then push the derived
+    /// target unconditionally (no gate), so a handle created after `onStart` and
+    /// `onResume` reports the real state instead of staying `Detached`.
+    pub(crate) fn sync(started: bool, resumed: bool, window_focused: bool) {
+        apply(
+            |f| *f = LifecycleFlags::synced(started, resumed, window_focused),
+            |_| true,
+        );
+    }
 }
 
 #[cfg(target_os = "android")]
-pub(crate) use process::{apply, reset};
+pub(crate) use process::{apply, reset, sync};
 
 #[cfg(test)]
 mod tests {
@@ -155,5 +177,30 @@ mod tests {
         assert_eq!(flags(true, false, false, false).target(), Inactive);
         assert_eq!(flags(true, true, false, false).target(), Inactive);
         assert_eq!(flags(true, true, true, false).target(), Resumed);
+    }
+
+    #[test]
+    fn synced_cold_start_is_resumed_not_detached() {
+        // A cold start: onStart, onResume and focus ran before the handle existed.
+        // The replayed read must derive Resumed, not the Detached a dropped hook left.
+        assert_eq!(LifecycleFlags::synced(true, true, true).target(), Resumed);
+    }
+
+    #[test]
+    fn synced_partial_reads_derive_inactive_or_paused() {
+        // Started and resumed but no window focus yet: Inactive.
+        assert_eq!(LifecycleFlags::synced(true, true, false).target(), Inactive);
+        // Started but paused (after onPause, before onStop): Inactive.
+        assert_eq!(LifecycleFlags::synced(true, false, true).target(), Inactive);
+        // Not started at all: Paused.
+        assert_eq!(LifecycleFlags::synced(false, false, false).target(), Paused);
+    }
+
+    #[test]
+    fn synced_clears_destroyed() {
+        // A stale destroyed fact must not survive a fresh read of a live activity.
+        let fresh = LifecycleFlags::synced(true, true, true);
+        assert!(!fresh.destroyed);
+        assert_eq!(fresh.target(), Resumed);
     }
 }
