@@ -321,6 +321,10 @@ class FrustSurfaceView(
 
     private external fun nativeOnPause(handle: Long)
 
+    // Replays the activity's started / resumed / window-focus facts onto a
+    // handle created after those callbacks ran (see [surfaceCreated]).
+    private external fun nativeSyncLifecycle(handle: Long, started: Boolean, resumed: Boolean, focused: Boolean)
+
     private external fun nativeOnDestroy(handle: Long)
 
     // IME state-sync exports. Indices are UTF-16 code units
@@ -556,6 +560,13 @@ class FrustSurfaceView(
 
     /** Whether the Choreographer frame loop should keep re-posting itself. */
     private var running = false
+
+    /**
+     * Between `onStart` and `onStop`. Tracked even while [handle] is 0, because
+     * a cold start runs `onStart` before [surfaceCreated] creates the handle;
+     * [surfaceCreated] replays it through [nativeSyncLifecycle].
+     */
+    private var activityStarted = false
 
     /**
      * A deep link delivered (by `MainActivity`) before [nativeInit] has
@@ -1011,6 +1022,11 @@ class FrustSurfaceView(
                 // foreground), but it fires before this handle exists on a cold
                 // start, so its push was a no-op.
                 pushReduceMotion()
+                // Replay the lifecycle facts the activity hooks dropped while no
+                // handle existed. A cold start runs onStart, onResume and window
+                // focus before this point, so without it the state stays Detached
+                // until the first transition.
+                nativeSyncLifecycle(handle, activityStarted, running, hasWindowFocus())
                 // Attach the accesskit accessibility adapter to this view.
                 // Best-effort: the native side isolates any
                 // failure in its own guard, so a missing delegate class or JNI
@@ -2015,6 +2031,7 @@ class FrustSurfaceView(
 
     /** Called by `FrustActivity.onStart` — feeds the lifecycle state machine. */
     fun onStart() {
+        activityStarted = true
         if (handle != 0L) {
             nativeOnStart(handle)
         }
@@ -2022,6 +2039,7 @@ class FrustSurfaceView(
 
     /** Called by `FrustActivity.onStop` — feeds the lifecycle state machine. */
     fun onStop() {
+        activityStarted = false
         if (handle != 0L) {
             nativeOnStop(handle)
         }

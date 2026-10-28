@@ -350,6 +350,20 @@ macro_rules! android_app {
             $crate::jni_glue::native_on_destroy(handle)
         }
 
+        /// JNI `nativeSyncLifecycle`: replays the started, resumed and window-focus
+        /// facts onto a handle created after the activity callbacks ran.
+        #[unsafe(no_mangle)]
+        pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeSyncLifecycle<'local>(
+            _env: $crate::__jni::EnvUnowned<'local>,
+            _class: $crate::__jni::JClass<'local>,
+            handle: $crate::__jni::jlong,
+            started: $crate::__jni::jboolean,
+            resumed: $crate::__jni::jboolean,
+            focused: $crate::__jni::jboolean,
+        ) {
+            $crate::jni_glue::native_sync_lifecycle(handle, started, resumed, focused)
+        }
+
         /// JNI `nativeImeApply`: push a whole platform editing state into the
         /// focused widget (the mobile IME state-sync path).
         ///

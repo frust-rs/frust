@@ -2351,6 +2351,27 @@ pub fn native_on_pause(handle: jlong) {
     });
 }
 
+/// `nativeSyncLifecycle`: replays the activity's started, resumed and window-focus
+/// facts onto a handle created after those callbacks ran. A cold start runs
+/// `onStart`/`onResume`/focus before `surfaceCreated` makes the handle, so the
+/// hooks were dropped and the state would stay `Detached`. This runs no ADPF,
+/// background-flush or platform-view work: it sets the facts and pushes the
+/// derived lifecycle state once.
+pub fn native_sync_lifecycle(
+    handle: jlong,
+    started: jboolean,
+    resumed: jboolean,
+    focused: jboolean,
+) {
+    guard("nativeSyncLifecycle", (), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        if unsafe { handle_mut(handle) }.is_some() {
+            log::debug!("frust-shell-android: syncLifecycle");
+            crate::lifecycle::sync(started, resumed, focused);
+        }
+    });
+}
+
 /// `nativeOnDestroy`: reclaim and drop the boxed handle. Idempotent from the
 /// JVM's side because Kotlin zeroes its `handle` right after calling this.
 pub fn native_on_destroy(handle: jlong) {
