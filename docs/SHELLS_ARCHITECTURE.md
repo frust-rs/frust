@@ -240,8 +240,8 @@ platform's menu vocabulary — and must not diverge in behavior.
 Two macOS shapes are load-bearing. **Reopen** is observed through
 `NSApplicationDidBecomeActiveNotification` on a notification observer registered beside winit's
 delegate, because winit owns `NSApplication`'s delegate and `applicationShouldHandleReopen:` is
-therefore unreachable. **Quit** stays on AppKit's own `terminate:` for both ⌘Q and the menu item,
-because it must work while the window is hidden and no frames are produced — so that route skips the
+therefore unreachable. **Quit** is a frust-owned item answered synchronously on the main thread (so it works while the
+window is hidden and no frames are produced) that ends in AppKit's `terminate:`, which skips the
 whole handler `Drop` chain. Both carry accepted limitations
 (`desktop-macos-reopen-gap-already-active`, `desktop-macos-quit-skips-executor-drop`,
 and `desktop-macos-app-menu-title-process-name` for the unbundled menu title) in
@@ -268,8 +268,7 @@ compilation on adapters that advertise `PIPELINE_CACHE` — in wgpu 30.0.1 any V
 Loading is unconditional file I/O at startup on every desktop OS and reads through to a legacy
 macOS cache base when the current file is absent (inert: no save ever fires there). The whole
 path is best-effort: startup never fails on cache I/O. See [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md).
-It persists right after each surface install; every shell's first frame meets the engine's warm-up
-through `FRUST_FIRST_FRAME_WARM_UP` (default `steal`; RENDER_ARCHITECTURE.md's `frust-render::renderer`).
+It persists right after each surface install.
 
 ### Mobile frame path
 
@@ -279,16 +278,12 @@ rebuild → layout → paint → present. Android drives it from a Choreographer
 CADisplayLink tick. Every shell gates layout on the drained change flags or a force (first layout,
 surface size/scale change, iOS surface reinstall); the frame gate alone decides whether a frame runs.
 
-With overlays on (Android, iOS), the UI thread ingests through `ingest_scene` and each frame carries its
-cut ranges to the render thread, whose tail adds a segmented submit; see Native-view hosting.
-
 `focus_or_ime_changed` is an *edge* (from a focus/IME generation counter, cached per handle,
 committed only on a frame that actually runs), not a level: a steady focus session neither forces
 a frame every tick nor blocks pacing, so a paced (`CosmeticLoop`) frame like a blinking caret
 throttles to the theme's `cosmetic_loop_rate` even while focused, while a focus/IME transition
-forces exactly one frame. `deferred_callbacks_pending` is the other
-run-forcing input, a peek at CORE's pending-result-flush flag so a Housekeeping flush owed with
-nothing else dirty still runs its frame.
+forces exactly one frame. `deferred_callbacks_pending` is the other run-forcing input, a peek at
+CORE's pending-result-flush flag so a Housekeeping flush owed with nothing else dirty still runs.
 
 **Per-request paced interval:** a paced request may name its own cadence, reaching the shell as
 `PaintOutcome::paced_interval` — core's MIN-fold across every paced request in the pass. Each
@@ -335,9 +330,8 @@ caller (no `pollster::block_on`, which would block the page's one JS thread) and
 page's `requestAdapter()`, which can spuriously answer `null` (a GPU-process warm-up race). There
 is no pipeline-cache I/O: a page has no filesystem, so the renderer starts on an empty cache.
 
-The tier's gate vehicle is the standalone [examples/web-gallery](../examples/web-gallery)
-workspace — a `frust::web_app!` app exercising input, theme-follow, resize/DPR and repaint in the
-browser; see its README for the evidence.
+The tier's gate vehicle is the standalone [examples/web-gallery](../examples/web-gallery) workspace
+(`frust::web_app!`: input, theme-follow, resize/DPR, repaint); its README holds the evidence.
 
 ### Native-view hosting
 
@@ -386,17 +380,13 @@ kept). The overlay lock is never held across the main-surface acquire or a prese
 `surfaceDestroyed` never waits: an idle overlay's surface and window are released before it
 returns, one out for a frame at that frame's land, so that frame may present into a destroyed
 window (the present fails; the table's `ANativeWindow` reference keeps the object valid —
-`android-overlay-withdraw-after-return`). A cut the overlay cannot serve stays on main
-(`overlay-unservable-content-stays-on-main`). The render tail encodes segmented, submits once
-(`submit_segmented_deferred`) and presents main, then overlays; a `frust-overlay skew` line logs
+`android-overlay-withdraw-after-return`). The render tail presents main, then overlays; a `frust-overlay skew` line logs
 every 120 frames. On-top overlays sit above every native view, so frust content interleaved between two slots covers
 the later one (`android-overlays-cover-later-slots`).
 **Apple overlay hosts.** The differ, the `overlay`/`disposeOverlay` ops (byte-identical to
 Android's) and the `FRUST_OVERLAYS` resolution are shared; Android's `media` value means plain
-on. Ranges travel in the frame (`PaintedScene.overlay_cuts`), which is encoded segmented and
-submitted once (`submit_segmented_deferred`); main presents first, then overlays bottom to top.
-Each overlay view sits directly above its own slot's view, so interleaved content stays under a
-later native control.
+on. Ranges travel in the frame (`PaintedScene.overlay_cuts`); overlays present bottom to top after
+main. Each overlay view sits directly above its own slot's view, so interleaved content stays under a later native control.
 - **iOS:** one `FrustOverlayView` per overlay (own non-opaque `CAMetalLayer`, user interaction
   off, `presentsWithTransaction` mirroring the main layer), Mode A only (Mode B logs and ignores
   the ops), on the render-thread split; the layer is a sublayer of the view, sized on the main
@@ -417,9 +407,7 @@ later native control.
   `ShellUserEvent::OverlaysReleased` or the next drain; `on_platform_view_commands` may therefore
   be called with an empty batch while releases are pending or after a scale change, and
   `NativeViewOps::sync_overlay_scale` re-applies the backing scale so overlays stay sharp across
-  2x/1x moves. The core's `after_paint` runs `ingest_scene`; `render.rs` encodes segmented, submits
-  once and presents main then overlays. The main layer is a sublayer of winit's view, so hosted
-  views and overlays sit above it.
+  2x/1x moves. The main layer is a sublayer of winit's view, so hosted views and overlays sit above it.
 
 **Texture wake.** A push into a registered texture sink owes the shell a frame
 (`frust::texture::request_frame`; see [RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md)). The mobile
@@ -447,8 +435,7 @@ hidden slot) are in [LIMITATIONS.md](LIMITATIONS.md) § `apple-overlay-limits`.
   uses the same **lowest-currently-free-slot** rule — taken on `Down`, freed on `Up`/`Cancel`,
   never renumbering a live slot — implemented independently by Android's `TouchSlotMap`
   (`frust-shell-android::ffi_support`), iOS `FrustView`'s `freeSlots` and the web `TouchTracker`'s
-  `free_slots`. Android's entry is `nativeOnTouch`, iOS's `frust_dispatch_touch`; the web `TouchTracker`
-  has no resampler.
+  `free_slots`. Entries: `nativeOnTouch` (Android), `frust_dispatch_touch` (iOS); web has no resampler.
 - **Desktop scale gestures:** ctrl+wheel (Linux/Windows) or ⌘+wheel (macOS) maps to
   `InputEvent::Scale` at the cursor, `scale_delta = exp(WHEEL_SCALE_RATE_PER_LINE × lines)` (0.1,
   ~10% per notch); a plain wheel stays `Scroll`. Winit's `PinchGesture` (macOS only at this pin)
@@ -459,8 +446,21 @@ hidden slot) are in [LIMITATIONS.md](LIMITATIONS.md) § `apple-overlay-limits`.
   everything" signal, so only a hover's first arrival dispatches (`Hover`, empty `paths`) and a
   `FileDropAccumulator` batches one drop's files into a single `Drop`. `position` is the last known
   cursor position (a `FileHoverLatch` re-dispatches `Hover` on each `CursorMoved`);
-  `HoveredFileCancelled`, `CursorLeft` and any real mouse button each unlatch and dispatch one
-  `Cancel`. Core follows every `Drop`/`Cancel` with its `FileDropPhase::Ended` broadcast.
+  `HoveredFileCancelled`, `CursorLeft` and any real mouse button each unlatch and dispatch one `Cancel`.
+- **App lifecycle:** each shell pushes `AppLifecycleState` via `frust_reactive::push_app_lifecycle`
+  (state machine: [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md) § App Lifecycle):
+
+  | Shell | Push site | Mapping |
+  |---|---|---|
+  | Android | `lifecycle.rs` `LifecycleFlags::target`, driven by `jni_glue` `native_on_start/stop/resume/pause/window_focus_changed` | `native_on_destroy`→Detached; !started→Paused; started+resumed+focused→Resumed; else Inactive |
+  | iOS | `ffi_glue` pause/resume plus `frust_did_enter_background`/`frust_will_enter_foreground` | willResignActive→Inactive; didEnterBackground→Paused; willEnterForeground→Inactive; didBecomeActive→Resumed; never Detached |
+  | Desktop | `app_handler.rs` `sync_app_lifecycle` | any window focused→Resumed; all occluded/minimized or `suspended`→Hidden; else Inactive; never Paused/Detached |
+  | Web | `frust-shell-web` `app_handler.rs` | document hidden→Hidden; window focused→Resumed; else Inactive |
+
+  **Cancelable exit** (`request_app_exit`): desktop `handle_close_requested` asks only when
+  `resolve_close_action` yields `CloseAction::Exit`; macOS app-menu Quit is the frust item
+  `frust.app.quit` (`QUIT_ID`); Windows menu Quit posts `WM_CLOSE`, becoming `CloseRequested`. Not
+  asked: macOS Dock Quit, logout/shutdown, force quit, Android, iOS, web.
 - **Window metrics** (logical size, scale, derived orientation, insets snapshot) are published
   from the points where the window's shape changes, guarded by `WindowMetricsPublisher` against
   per-frame churn (see [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md)). Desktop seeds insets as the
@@ -586,7 +586,7 @@ The desktop tier is unevenly proven, and the gap is tracked rather than assumed 
 | OS | Proven |
 |---|---|
 | **macOS** | Runtime-verified on hardware: real windows, the app-named menu bar, ⌘Q by both menu and accelerator, Hide/Show All, and close-then-Dock-click reopen |
-| **Windows** | Runtime-verified on hardware: titlebar/taskbar icon, AppUserModelID identity, titlebar theming, menu-bar activation delivery, accelerators, and quit. Two Win32 menu rules are documented at their `menu.rs` sites: muda's predefined quit dead-ends under winit's pump, and an accelerator enters the `HACCEL` only if its submenu is attached before the item is appended |
+| **Windows** | Runtime-verified on hardware: titlebar/taskbar icon, AppUserModelID identity, titlebar theming, menu-bar activation delivery, accelerators, and quit. An accelerator enters the `HACCEL` only if its submenu is attached before the item is appended (documented at its `menu.rs` site) |
 | **Linux** | Proven by cross-target compilation only, plus every native call site read against its vendored source. Owed: a non-headless `app_id`/icon pass. See [LIMITATIONS.md](LIMITATIONS.md) `desktop-shells-runtime-unverified` and `desktop-windows-titlebar-theme-revert` |
 | **Decorations / window commands** | Linux (X11, Wayland), Windows and macOS gates all passed (SHELLS_DEVELOPMENT.md § Decorations and window commands); open: `desktop-windows-menu-bar-undecorated-unverified` |
 
