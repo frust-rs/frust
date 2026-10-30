@@ -88,6 +88,12 @@ The repository already contains substantial non-pixel coverage:
   triptych/JSON failure artifacts under `target/frust-testing/`, and the
   committed `testing/goldens/cpu/` class (unit, adversarial, widget, page, and
   text cases, incl. `examples/material3-demo`'s standalone page goldens).
+  The adversarial corpus also has an `#[ignore]`d real-GPU arm in
+  `crates/frust-testing/tests/adversarial.rs`: every `adv-*` case through `EngineOracle`
+  (no panic, no validation error, a rendered/refused/CPU-only outcome per case) plus the
+  `adv-5k-layers` bounded-memory assertion on the engine path; it commits no golden. Run it with
+  `WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=T400 FRUST_GOLDEN_EXPECT_ADAPTER=T400 cargo test -p
+  frust-testing --locked --test adversarial -- --ignored --test-threads=1`.
 - `examples/gallery` (package `frust-gallery`): a hand-authored widget/page case registry, a
   dev-only root workspace member shared by the website's static snapshot generator and the
   browser gallery below. `crates/frust-testing`'s `widget-snapshots` bin walks it through the
