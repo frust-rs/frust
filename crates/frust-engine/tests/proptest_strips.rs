@@ -41,10 +41,12 @@
 //! the amount of geometry produced before any culling happens. Their huge
 //! finite magnitudes are pinned deterministically instead: the bounded-compile
 //! regressions below compile every curve-carrying command at `1e20` through
-//! `1e300` against a time and an allocation ceiling. One lowering stays out of
-//! that bound — a dash pattern is expanded into sub-paths before any culling,
-//! so a dash period of `0.1` over a path `1e18` long never returns, and the
-//! generator pairs dashes with arbitrary paths.
+//! `1e300` against a time and an allocation ceiling. Dashes are inside that
+//! bound too: an oversized dashed stroke has only the stretch near the viewport
+//! dashed, and strokes solid where its pattern is sub-pixel on screen or would
+//! break that stretch into too many dashes, so a dash period of `0.1` over a
+//! path `1e18` long compiles in milliseconds; the bounded-dash regressions
+//! below pin it, and the generator pairs dashes with arbitrary paths.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -1028,6 +1030,12 @@ const MAGNITUDE_TIME_LIMIT: Duration = Duration::from_millis(250);
 /// within [`MAGNITUDE_TIME_LIMIT`], inside [`allocation_bound`] of its command
 /// count, and with well-packed strips.
 fn assert_compiles_within_bounds(case: &str, ops: &[Op], root: Affine) {
+    compile_within_bounds(case, ops, root);
+}
+
+/// [`assert_compiles_within_bounds`], handing back the frame for the caller to
+/// check what it draws.
+fn compile_within_bounds(case: &str, ops: &[Op], root: Affine) -> CompiledFrame {
     let scene = scene_of(ops);
     let commands = scene.commands().len();
     let mut compiler = SceneCompiler::new(VIEWPORT.0, VIEWPORT.1);
@@ -1049,6 +1057,7 @@ fn assert_compiles_within_bounds(case: &str, ops: &[Op], root: Affine) {
     );
     let failures = strip_packing_failures(&frame);
     assert!(failures.is_empty(), "{case}: {}", failures.join("\n"));
+    frame
 }
 
 /// The rectangle `(-size, 0) .. (size, 2 * size)`: under radii of `size` it
@@ -1173,6 +1182,217 @@ fn nested_scales_reaching_extreme_magnitudes_compile_within_bounds() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Bounded dashes
+// ---------------------------------------------------------------------------
+
+/// The coverage every draw of `frame` leaves on pixel row `y`, the largest
+/// over all draws, read from the strips: a strip's alphas are stored a column
+/// of [`Tile::HEIGHT`] rows at a time, and a strip flagged `fill_gap` covers
+/// the whole gap back to the previous strip of its row.
+fn row_coverage(frame: &CompiledFrame, y: u16) -> [u8; VIEWPORT.0 as usize] {
+    let mut row = [0_u8; VIEWPORT.0 as usize];
+    let strips = frame.strip_buf();
+    let alphas = frame.alphas();
+    let tile_row = y - y % Tile::HEIGHT;
+    let offset = usize::from(y - tile_row);
+    for draw in frame.draws() {
+        let run = &strips[draw.strip_range.clone()];
+        let mut previous_end: Option<u16> = None;
+        for pair in run.windows(2) {
+            let (strip, next) = (&pair[0], &pair[1]);
+            if strip.is_sentinel() || strip.y != tile_row {
+                previous_end = None;
+                continue;
+            }
+            if let Some(end) = previous_end.filter(|_| strip.fill_gap()) {
+                for x in end..strip.x {
+                    if let Some(pixel) = row.get_mut(usize::from(x)) {
+                        *pixel = 255;
+                    }
+                }
+            }
+            let width = strip.width_to(next);
+            for column in 0..width {
+                let index = strip.alpha_idx() as usize
+                    + usize::from(column) * usize::from(Tile::HEIGHT)
+                    + offset;
+                let x = usize::from(strip.x + column);
+                if let (Some(pixel), Some(&alpha)) = (row.get_mut(x), alphas.get(index)) {
+                    *pixel = (*pixel).max(alpha);
+                }
+            }
+            previous_end = Some(strip.x + width);
+        }
+    }
+    row
+}
+
+/// A stroke of `path` `width` units wide, dashed by `dash`.
+fn dashed(path: BezPath, width: f64, dash: DashPattern) -> Op {
+    Op::StrokePath {
+        path,
+        width,
+        dash: Some(dash),
+        brush: red(),
+    }
+}
+
+/// A horizontal line `2 * size` long whose middle sits at the viewport's
+/// centre once drawn under `root`, with `y` its user-space row.
+fn long_line(size: f64, y: f64) -> BezPath {
+    let mut path = BezPath::new();
+    path.move_to((-size, y));
+    path.line_to((size, y));
+    path
+}
+
+/// A cubic `2 * size` long whose control points all lie on row 32: a single
+/// curve element whose device image is exactly the viewport's middle row, so
+/// what its stroke draws there does not depend on how its points round.
+fn long_flat_cubic(size: f64) -> BezPath {
+    let mut path = BezPath::new();
+    path.move_to((-size, 32.0));
+    path.curve_to((-0.3 * size, 32.0), (0.5 * size, 32.0), (size, 32.0));
+    path
+}
+
+/// Asserts that the two pixel rows a 2-pixel stroke along row 32 covers are
+/// covered across the whole viewport, and the rows beyond them not at all.
+fn assert_solid_band(case: &str, frame: &CompiledFrame) {
+    for y in [31, 32] {
+        let row = row_coverage(frame, y);
+        assert!(
+            row.iter().all(|&alpha| alpha >= 250),
+            "{case}: row {y} must be covered solid, got {row:?}"
+        );
+    }
+    for y in [29, 34] {
+        let row = row_coverage(frame, y);
+        assert!(
+            row.iter().all(|&alpha| alpha == 0),
+            "{case}: row {y} lies outside the stroke, got {row:?}"
+        );
+    }
+}
+
+/// A dash period of `0.1` over a path `1e18` long — the input that used to
+/// keep the compiler dashing for ever — compiles within the time and
+/// allocation bounds, as a straight line and as a single cubic, and strokes
+/// solid: a tenth of a pixel is below the sub-pixel threshold.
+#[test]
+fn a_tenth_unit_dash_over_a_1e18_long_path_compiles_within_bounds_and_strokes_solid() {
+    let dash = DashPattern::new(0.05, 0.05);
+    for (shape, path) in [
+        ("line", long_line(1e18, 32.0)),
+        ("cubic", long_flat_cubic(1e18)),
+    ] {
+        let case = format!("0.1-period dash over a 1e18 {shape}");
+        let frame = compile_within_bounds(&case, &[dashed(path, 2.0, dash)], Affine::IDENTITY);
+        assert_solid_band(&case, &frame);
+    }
+    let case = "0.1-period dash over a 1e18 circle";
+    let frame = compile_within_bounds(
+        case,
+        &[dashed(straddling_circle(1e18), 2.0, dash)],
+        Affine::IDENTITY,
+    );
+    assert_eq!(frame.draws().len(), 1, "{case}: the stroke must draw");
+}
+
+/// An ordinary 8-unit dash pattern over a 2-unit line drawn under a 1e18
+/// scale: the viewport sees a 64-pixel stretch around the line's middle, one
+/// unit along it. The phase carried across the skipped first unit decides
+/// what it shows — a dash covering that unit draws a solid band, a gap there
+/// draws nothing, and a phase that moves a dash over it draws the band again.
+#[test]
+fn an_ordinary_dash_under_a_1e18_scale_carries_its_phase_to_the_viewport() {
+    let root = Affine::translate((32.0, 32.0)) * Affine::scale(1e18);
+    let width = 2e-18;
+    let cases = [
+        ("dash over the middle", DashPattern::new(1.5, 6.5), true),
+        ("gap over the middle", DashPattern::new(0.5, 7.5), false),
+        (
+            "phase moving a dash over the middle",
+            DashPattern::new(0.5, 7.5).with_phase(-0.75),
+            true,
+        ),
+    ];
+    for (case, dash, covered) in cases {
+        let frame = compile_within_bounds(case, &[dashed(long_line(1.0, 0.0), width, dash)], root);
+        if covered {
+            assert_solid_band(case, &frame);
+        } else {
+            assert!(
+                frame.draws().is_empty(),
+                "{case}: nothing is visible, got a draw"
+            );
+        }
+    }
+}
+
+/// A dash count past the per-run ceiling on a visible path strokes solid: a
+/// stroke two million units wide keeps millions of units of a 1e18-long line
+/// near the viewport, millions of 2-pixel periods, and covers the whole
+/// viewport instead of dashing them all.
+#[test]
+fn a_dash_count_past_the_ceiling_strokes_the_visible_path_solid() {
+    let case = "2-period dash over a 1e18 line, 2e6 wide";
+    let ops = [dashed(
+        long_line(1e18, 32.0),
+        2e6,
+        DashPattern::new(1.0, 1.0),
+    )];
+    let frame = compile_within_bounds(case, &ops, Affine::IDENTITY);
+    for y in 0..VIEWPORT.1 {
+        let row = row_coverage(&frame, y);
+        assert!(
+            row.iter().all(|&alpha| alpha >= 250),
+            "{case}: row {y} must be covered solid, got {row:?}"
+        );
+    }
+}
+
+/// A sub-pixel device period strokes solid: a `1e-6` period, which
+/// `DashPattern::is_effective` already strikes out, and a `0.3` period, which
+/// it keeps but which lands below the sub-pixel threshold on screen, over a
+/// 1e18-long line under the identity.
+#[test]
+fn a_sub_pixel_device_period_strokes_solid() {
+    for (case, dash) in [
+        ("1e-6 period", DashPattern::new(5e-7, 5e-7)),
+        ("0.3 period", DashPattern::new(0.15, 0.15)),
+    ] {
+        let frame = compile_within_bounds(
+            case,
+            &[dashed(long_line(1e18, 32.0), 2.0, dash)],
+            Affine::IDENTITY,
+        );
+        assert_solid_band(case, &frame);
+    }
+}
+
+/// The control for the regressions above: a pixel-sized pattern over the
+/// same 1e18-long line still dashes the stretch the viewport shows, leaving
+/// gaps in the band.
+#[test]
+fn a_1e18_long_dashed_line_still_dashes_its_visible_stretch() {
+    let case = "8-period dash over a 1e18 line";
+    let ops = [dashed(
+        long_line(1e18, 32.0),
+        2.0,
+        DashPattern::new(4.0, 4.0),
+    )];
+    let frame = compile_within_bounds(case, &ops, Affine::IDENTITY);
+    let row = row_coverage(&frame, 31);
+    let covered = row.iter().filter(|&&alpha| alpha >= 250).count();
+    let empty = row.iter().filter(|&&alpha| alpha == 0).count();
+    assert!(
+        covered >= 16 && empty >= 8,
+        "{case}: the band must alternate dashes and gaps, got {row:?}"
+    );
 }
 
 /// The counting allocator actually counts — the allocation property is worth

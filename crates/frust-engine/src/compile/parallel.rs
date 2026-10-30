@@ -65,11 +65,11 @@ use vello_common::strip::Strip;
 use vello_common::strip_generator::{GenerationMode, StripGenerator, StripStorage};
 
 use super::blur_rrect::inflated_bounds;
-use super::cull::{generate_fill, generate_stroke, rounded_rect_elements};
+use super::cull::{generate_dashed_stroke, generate_fill, generate_stroke, rounded_rect_elements};
 use super::layers::RetainedStack;
 use super::{
-    FLATTEN_TOLERANCE, check_finite, command_on_grid, dash_path, fast_rect, retained_entry,
-    round_stroke, rounded_rect_radii,
+    FLATTEN_TOLERANCE, check_finite, command_on_grid, fast_rect, retained_entry, round_stroke,
+    rounded_rect_radii,
 };
 
 /// The most threads a frame's strip generation runs on, the calling thread
@@ -344,20 +344,15 @@ impl<'a> Geometry<'a> {
             } => {
                 let stroke = round_stroke(width);
                 // A dash pattern is expanded into its own sub-paths before the
-                // stroker runs, the same lowering the display list's other
-                // consumers apply: the pattern never reaches a backend's own
-                // dash support, so every rasterizer sees the identical
-                // geometry.
+                // stroker runs and never reaches a backend's own dash support.
+                // A stroke that fits the split extent is expanded by the same
+                // lowering the display list's other consumers apply, so every
+                // rasterizer sees the identical geometry; a larger one has
+                // only its visible stretch dashed (see the cull module).
                 match dash {
                     Some(dash) => {
-                        let dashed = dash_path(path, dash);
-                        generate_stroke(
-                            generator,
-                            dashed.iter(),
-                            &stroke,
-                            transform,
-                            storage,
-                            clip,
+                        generate_dashed_stroke(
+                            generator, path, dash, &stroke, transform, storage, clip,
                         );
                     }
                     None => {

@@ -54,23 +54,26 @@
 //! no subdivisions. Typical UI geometry never splits and passes through
 //! untouched.
 //!
-//! Strokes and rounded rectangles add an expansion step ahead of the split;
-//! [`generate_stroke`] and [`rounded_rect_elements`] state how each is bounded
-//! and how accurate it stays. `docs/RENDER_ARCHITECTURE.md` places this pass
-//! in the frame path.
+//! Strokes and rounded rectangles add an expansion step ahead of the split,
+//! and dashed strokes a clip of the centerline ahead of the dash lowering;
+//! [`generate_stroke`], [`generate_dashed_stroke`] and [`rounded_rect_elements`]
+//! state how each is bounded and how accurate it stays.
+//! `docs/RENDER_ARCHITECTURE.md` places this pass in the frame path.
 
 use std::f64::consts::SQRT_2;
 
 use kurbo::{
-    Affine, Cap, Join, PathEl, Point, Rect, RoundedRect, RoundedRectPathIter, Shape, Stroke,
-    StrokeCtx, StrokeOpts,
+    Affine, BezPath, Cap, CubicBez, Join, ParamCurveArclen, PathEl, Point, QuadBez, Rect,
+    RoundedRect, RoundedRectPathIter, Shape, Stroke, StrokeCtx, StrokeOpts,
 };
 use peniko::Fill;
+
+use frust_scene::DashPattern;
 
 use vello_common::clip::PathDataRef;
 use vello_common::strip_generator::{StripGenerator, StripStorage};
 
-use super::FLATTEN_TOLERANCE;
+use super::{FLATTEN_TOLERANCE, dash_path, well_formed};
 
 /// Device pixels added to every side of the viewport before culling
 /// decisions. It must cover the flattener's own cull rectangle, which rounds
@@ -107,6 +110,27 @@ const STROKE_RELATIVE_TOLERANCE: f64 = 1.0 / (1_u64 << 40) as f64;
 /// Smallest tolerance a rounded rectangle's corner arcs are approximated at,
 /// as a fraction of its largest radius: `2^-64`.
 const ARC_RELATIVE_TOLERANCE: f64 = 1.0 / (1_u128 << 64) as f64;
+
+/// Smallest device-space dash period, in pixels, an oversized dashed stroke is
+/// still broken into dashes at; below it the stroke is drawn solid. Half a
+/// pixel: a cycle that fits in half a pixel rasterizes as an even partial
+/// coverage, not as visible dashes, and a real UI period — a few logical
+/// pixels at a device scale of one or more — sits several times above it.
+pub(crate) const MIN_DEVICE_DASH_PERIOD: f64 = 0.5;
+
+/// Most dashes one kept run of an oversized dashed stroke is broken into,
+/// estimated from its control-polygon length; a run past it is drawn solid.
+/// A kept run spans at most a few split extents of the viewport, so a real UI
+/// pattern — a 4K-wide viewport's run at a 2-pixel period is under 20 000
+/// dashes — stays well below it, while geometry kept only because the split
+/// hit its depth cap, at magnitudes no screen shows, cannot dash without bound.
+pub(crate) const MAX_DASHES_PER_RUN: f64 = 65_536.0;
+
+/// The accuracy, as a fraction of a piece's control-polygon length, an
+/// oversized dashed stroke measures arc length at to carry its dash phase.
+/// kurbo's own error estimate for its first quadrature never exceeds
+/// `3.5e-3` of that length, so the measure never subdivides at any magnitude.
+const DASH_ARCLEN_RELATIVE_ACCURACY: f64 = 1.0 / 256.0;
 
 /// The device rectangle a split decides against, and the control-hull extent
 /// past which a piece reaching that rectangle is halved.
@@ -669,6 +693,457 @@ fn stroke_device_extent(
     device.width().max(device.height())
 }
 
+/// Generate the strips for `path` stroked with `stroke` and broken into
+/// dashes by an effective `dash`, under `transform`.
+///
+/// A stroke whose [`stroke_device_extent`] — of the undashed path — is within
+/// the cull viewport's split extent is dashed by [`dash_path`] over its whole
+/// length and handed to [`generate_stroke`], exactly as every other consumer
+/// of the display list lowers it. A larger one is lowered by
+/// [`dash_visible_stretch`], whose cost is bounded by the number of input
+/// elements for every finite input, and its result goes to [`generate_stroke`]
+/// in turn.
+pub(crate) fn generate_dashed_stroke(
+    generator: &mut StripGenerator,
+    path: &BezPath,
+    dash: DashPattern,
+    stroke: &Stroke,
+    transform: Affine,
+    storage: &mut StripStorage,
+    clip: Option<PathDataRef<'_>>,
+) {
+    let region = SplitRegion::around(cull_viewport(generator, clip.as_ref()));
+    let dashed = dash_within(path, dash, stroke, transform, region);
+    generate_stroke(generator, dashed.iter(), stroke, transform, storage, clip);
+}
+
+/// `path` broken into the dashes of `dash`: by [`dash_path`] when its stroke
+/// fits the split extent of `region`, the cull viewport's own, and by
+/// [`dash_visible_stretch`] otherwise.
+fn dash_within(
+    path: &BezPath,
+    dash: DashPattern,
+    stroke: &Stroke,
+    transform: Affine,
+    region: SplitRegion,
+) -> BezPath {
+    if stroke_device_extent(path.iter(), stroke, transform) <= region.split_extent {
+        dash_path(path, dash)
+    } else {
+        dash_visible_stretch(path, dash, stroke, transform, region)
+    }
+}
+
+/// Dashes only the stretch of an oversized stroke's centerline that can reach
+/// the expanded viewport, carrying the dash phase across the rest.
+///
+/// 1. **The centerline is clipped** against the expanded viewport inflated by
+///    the stroke's device reach — the rectangle [`generate_stroke`]'s
+///    oversized branch clips against. A curve is halved as in
+///    [`ViewportSplit`], a piece still oversized at [`MAX_SPLIT_DEPTH`]
+///    becoming its chord; a line, chord or not, is trimmed by bisection with
+///    no depth cap. A piece wholly beyond one edge is skipped: no stroke of it,
+///    cap or join included, reaches the expanded viewport. Consecutive kept
+///    pieces form a run, dashed as its own subpath; a dash a skip cuts gains a
+///    cap at the cut, which lies beyond the expanded viewport as well.
+/// 2. **The phase is carried.** A run starts at the dash offset its subpath's
+///    travelled arc length gives it, each piece measured at
+///    [`DASH_ARCLEN_RELATIVE_ACCURACY`] of its control-polygon length — by
+///    kurbo's own estimate, far tighter for a smooth piece, exact for a line —
+///    so a run is out of phase by at most that fraction of the polygon length
+///    before it. The error moves where dashes fall, never whether the stroke
+///    draws or how wide. A travelled length that overflows starts the run at
+///    the pattern's own phase.
+/// 3. **Dashing is capped.** When the pattern's device period — its period
+///    times the transform's largest stretch — is below
+///    [`MIN_DEVICE_DASH_PERIOD`], or a run's control-polygon length is more
+///    than [`MAX_DASHES_PER_RUN`] periods, the run is stroked solid: its
+///    coverage loses the pattern's duty cycle and becomes the solid stroke's.
+///
+/// A subpath nothing was skipped from is one run and keeps its closing
+/// segment, so it dashes as [`dash_path`] dashes it. A closed subpath with a
+/// skip is dashed open at its start: where kurbo joins its last dash to its
+/// first, the two meet there with a cap each, the same coverage under the
+/// round caps and joins every display-list stroke has.
+fn dash_visible_stretch(
+    path: &BezPath,
+    dash: DashPattern,
+    stroke: &Stroke,
+    transform: Affine,
+    region: SplitRegion,
+) -> BezPath {
+    let reach = stroke_reach(stroke);
+    let [a, b, c, d, _, _] = transform.as_coeffs();
+    let region = region.inflate(reach * (a.abs() + c.abs()), reach * (b.abs() + d.abs()));
+    let mut lowering = DashLowering::new(dash, transform, region);
+
+    let source = well_formed(path.iter());
+    let mut start = Point::ZERO;
+    let mut current = Point::ZERO;
+    for el in source.iter() {
+        let span = match el {
+            PathEl::MoveTo(p) => {
+                lowering.end_subpath(false);
+                start = p;
+                current = p;
+                continue;
+            }
+            PathEl::ClosePath => {
+                if current != start {
+                    lowering.segment(Span::line(current, start));
+                }
+                current = start;
+                lowering.end_subpath(true);
+                continue;
+            }
+            PathEl::LineTo(p) => Span::line(current, p),
+            PathEl::QuadTo(p1, p2) => Span::curve(Piece::quad(current, p1, p2)),
+            PathEl::CurveTo(p1, p2, p3) => Span::curve(Piece::cubic(current, p1, p2, p3)),
+        };
+        current = span.piece.end();
+        lowering.segment(span);
+    }
+    lowering.end_subpath(false);
+    well_formed(lowering.out.iter())
+}
+
+/// The largest factor the linear part of `transform` stretches any direction
+/// by: its largest singular value, in closed form.
+fn largest_stretch(transform: Affine) -> f64 {
+    let [a, b, c, d, _, _] = transform.as_coeffs();
+    0.5 * ((a + d).hypot(b - c) + (a - d).hypot(b + c))
+}
+
+/// One element of a dashed centerline awaiting a keep-or-skip decision: a
+/// curve piece, or a line held as the quadratic with its control point at the
+/// midpoint, whose halving is the line's own.
+#[derive(Clone, Copy, Debug)]
+struct Span {
+    piece: Piece,
+    line: bool,
+}
+
+impl Span {
+    const EMPTY: Self = Self {
+        piece: Piece::EMPTY,
+        line: false,
+    };
+
+    fn line(p0: Point, p1: Point) -> Self {
+        Self {
+            piece: Piece::quad(p0, p0.midpoint(p1), p1),
+            line: true,
+        }
+    }
+
+    fn curve(piece: Piece) -> Self {
+        Self { piece, line: false }
+    }
+
+    fn halve(self) -> (Self, Self) {
+        let (first, second) = self.piece.halve();
+        (
+            Self {
+                piece: first,
+                ..self
+            },
+            Self {
+                piece: second,
+                ..self
+            },
+        )
+    }
+
+    fn to_el(self) -> PathEl {
+        if self.line {
+            PathEl::LineTo(self.piece.end())
+        } else {
+            self.piece.to_el()
+        }
+    }
+
+    /// The length of the control polygon, an upper bound on the arc length.
+    fn polygon_length(&self) -> f64 {
+        if self.line {
+            return (self.piece.end() - self.piece.pts[0]).hypot();
+        }
+        self.piece
+            .points()
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).hypot())
+            .sum()
+    }
+
+    /// The arc length at [`DASH_ARCLEN_RELATIVE_ACCURACY`] of the polygon
+    /// length; a degenerate or overflowing polygon measures as its own length.
+    fn arclen(&self) -> f64 {
+        let polygon = self.polygon_length();
+        if self.line || polygon == 0.0 || !polygon.is_finite() {
+            return polygon;
+        }
+        let accuracy = DASH_ARCLEN_RELATIVE_ACCURACY * polygon;
+        let [p0, p1, p2, p3] = self.piece.pts;
+        if self.piece.cubic {
+            CubicBez::new(p0, p1, p2, p3).arclen(accuracy)
+        } else {
+            QuadBez::new(p0, p1, p2).arclen(accuracy)
+        }
+    }
+}
+
+/// Most halvings one line is trimmed by: enough to take any finite `f64`
+/// length down to the smallest subnormal, so the bound is never what stops a
+/// trim short of the split extent.
+const LINE_TRIM_STEPS: usize = 2100;
+
+/// What happens to one piece of a dashed centerline.
+#[derive(Clone, Copy, Debug)]
+enum Fate {
+    Skip,
+    Keep,
+    Split,
+}
+
+/// The running state of [`dash_visible_stretch`]: the run being gathered,
+/// the arc length travelled along the current subpath, and the output.
+struct DashLowering {
+    pattern: [f64; 2],
+    phase: f64,
+    period: f64,
+    /// Whether the pattern's device period is below [`MIN_DEVICE_DASH_PERIOD`].
+    sub_pixel: bool,
+    transform: Affine,
+    region: SplitRegion,
+    run: BezPath,
+    run_polygon: f64,
+    run_offset: f64,
+    travelled: f64,
+    skipped: bool,
+    out: BezPath,
+}
+
+impl DashLowering {
+    fn new(dash: DashPattern, transform: Affine, region: SplitRegion) -> Self {
+        let period = dash.on + dash.off;
+        let device_period = period * largest_stretch(transform);
+        Self {
+            pattern: [dash.on, dash.off],
+            phase: dash.phase,
+            period,
+            sub_pixel: device_period.is_nan() || device_period < MIN_DEVICE_DASH_PERIOD,
+            transform,
+            region,
+            run: BezPath::new(),
+            run_polygon: 0.0,
+            run_offset: 0.0,
+            travelled: 0.0,
+            skipped: false,
+            out: BezPath::new(),
+        }
+    }
+
+    /// Whether `span` is skipped, kept or halved further.
+    fn fate(&self, span: &Span) -> Fate {
+        let device = span.piece.mapped(self.transform);
+        if device.is_outside(self.region.bounds) {
+            Fate::Skip
+        } else if device.extent() > self.region.split_extent {
+            Fate::Split
+        } else {
+            // A non-finite extent never splits, as in [`ViewportSplit`].
+            Fate::Keep
+        }
+    }
+
+    /// Skips or keeps `span` whole; a piece that still needs a split is kept.
+    fn settle(&mut self, span: &Span, fate: Fate) {
+        match fate {
+            Fate::Skip => self.skip(span),
+            Fate::Keep | Fate::Split => self.keep(span),
+        }
+    }
+
+    /// Splits one element against the region and keeps or skips each piece,
+    /// in curve order. A curve is halved on a fixed-capacity stack; a piece
+    /// that would still need a split at [`MAX_SPLIT_DEPTH`] is replaced by its
+    /// chord, as [`ViewportSplit`] replaces it and to the accuracy the module
+    /// docs derive. A line, chord or not, goes to [`Self::line`].
+    fn segment(&mut self, span: Span) {
+        if span.line {
+            self.line(span.piece.pts[0], span.piece.end());
+            return;
+        }
+        let mut stack = [Span::EMPTY; STACK_CAPACITY];
+        let mut len = 0;
+        let mut next = Some(span);
+        while let Some(span) = next.take() {
+            let fate = self.fate(&span);
+            if !matches!(fate, Fate::Split) {
+                self.settle(&span, fate);
+            } else if span.piece.depth < MAX_SPLIT_DEPTH && len + 1 < STACK_CAPACITY {
+                let (first, second) = span.halve();
+                if let Some(slot) = stack.get_mut(len) {
+                    *slot = second;
+                    len += 1;
+                }
+                next = Some(first);
+                continue;
+            } else {
+                self.line(span.piece.pts[0], span.piece.end());
+            }
+            if len > 0 {
+                len -= 1;
+                next = stack.get(len).copied();
+            }
+        }
+    }
+
+    /// Splits a line against the region with no stack and no depth cap short
+    /// of [`LINE_TRIM_STEPS`], so a line of any length keeps only the stretch
+    /// near the region. A straight piece neither of whose halves lies wholly
+    /// beyond one edge has its midpoint inside the region, and from a point
+    /// inside it the kept stretch grows towards each end by bisection.
+    fn line(&mut self, p0: Point, p1: Point) {
+        let (mut a, mut b) = (p0, p1);
+        let mut suffix = 0.0;
+        for _ in 0..LINE_TRIM_STEPS {
+            let span = Span::line(a, b);
+            let fate = self.fate(&span);
+            if !matches!(fate, Fate::Split) {
+                self.settle(&span, fate);
+                self.skip_length(suffix);
+                return;
+            }
+            let m = a.midpoint(b);
+            let (left, right) = (Span::line(a, m), Span::line(m, b));
+            if matches!(self.fate(&left), Fate::Skip) {
+                self.skip(&left);
+                a = m;
+            } else if matches!(self.fate(&right), Fate::Skip) {
+                suffix += right.arclen();
+                b = m;
+            } else {
+                self.trim_towards(a, m);
+                self.trim_from(m, b);
+                self.skip_length(suffix);
+                return;
+            }
+        }
+        self.keep(&Span::line(a, b));
+        self.skip_length(suffix);
+    }
+
+    /// Keeps or skips the line `a`–`end`, `end` inside the region: pieces
+    /// wholly beyond an edge are skipped from `a` on, the rest is kept.
+    fn trim_towards(&mut self, a: Point, end: Point) {
+        let (mut a, mut b) = (a, end);
+        let mut fate = Fate::Keep;
+        for _ in 0..LINE_TRIM_STEPS {
+            fate = self.fate(&Span::line(a, b));
+            if !matches!(fate, Fate::Split) {
+                break;
+            }
+            let q = a.midpoint(b);
+            let head = Span::line(a, q);
+            if matches!(self.fate(&head), Fate::Skip) {
+                self.skip(&head);
+                a = q;
+            } else {
+                b = q;
+            }
+        }
+        self.settle(&Span::line(a, b), fate);
+        if b != end {
+            self.keep(&Span::line(b, end));
+        }
+    }
+
+    /// Keeps or skips the line `start`–`b`, `start` inside the region: the
+    /// stretch from `start` is kept, pieces wholly beyond an edge towards `b`
+    /// are skipped.
+    fn trim_from(&mut self, start: Point, b: Point) {
+        let (mut a, mut b) = (start, b);
+        let mut suffix = 0.0;
+        let mut fate = Fate::Keep;
+        for _ in 0..LINE_TRIM_STEPS {
+            fate = self.fate(&Span::line(a, b));
+            if !matches!(fate, Fate::Split) {
+                break;
+            }
+            let q = a.midpoint(b);
+            let tail = Span::line(q, b);
+            if matches!(self.fate(&tail), Fate::Skip) {
+                suffix += tail.arclen();
+                b = q;
+            } else {
+                a = q;
+            }
+        }
+        if a != start {
+            self.keep(&Span::line(start, a));
+        }
+        self.settle(&Span::line(a, b), fate);
+        self.skip_length(suffix);
+    }
+
+    fn keep(&mut self, span: &Span) {
+        if self.run.elements().is_empty() {
+            self.run.move_to(span.piece.pts[0]);
+            self.run_offset = self.travelled;
+        }
+        self.run.push(span.to_el());
+        self.run_polygon += span.polygon_length();
+        self.travelled += span.arclen();
+    }
+
+    fn skip(&mut self, span: &Span) {
+        self.skip_length(span.arclen());
+    }
+
+    /// Skips `length` of arc; nothing when it is zero.
+    fn skip_length(&mut self, length: f64) {
+        if length == 0.0 {
+            return;
+        }
+        self.flush_run(false);
+        self.skipped = true;
+        self.travelled += length;
+    }
+
+    /// Ends the current subpath; `closed` when it ended in a `ClosePath`.
+    fn end_subpath(&mut self, closed: bool) {
+        self.flush_run(closed && !self.skipped);
+        self.travelled = 0.0;
+        self.skipped = false;
+    }
+
+    /// Emits the gathered run, dashed from its offset or solid past the caps,
+    /// closed when it is a whole closed subpath.
+    fn flush_run(&mut self, close: bool) {
+        if self.run.elements().is_empty() {
+            return;
+        }
+        if close {
+            self.run.close_path();
+        }
+        let dashes = self.run_polygon / self.period;
+        let solid = self.sub_pixel || dashes.is_nan() || dashes > MAX_DASHES_PER_RUN;
+        if solid {
+            self.out.extend(self.run.iter());
+        } else {
+            let offset = if self.run_offset.is_finite() {
+                self.phase.rem_euclid(self.period) + self.run_offset.rem_euclid(self.period)
+            } else {
+                self.phase
+            };
+            self.out
+                .extend(kurbo::dash(self.run.iter(), offset, &self.pattern));
+        }
+        self.run.truncate(0);
+        self.run_polygon = 0.0;
+    }
+}
+
 /// The elements of `shape`, its corner arcs approximated at
 /// [`FLATTEN_TOLERANCE`] raised to at least [`ARC_RELATIVE_TOLERANCE`] of its
 /// largest radius.
@@ -696,6 +1171,7 @@ mod tests {
     use super::*;
     use std::time::{Duration, Instant};
 
+    use frust_scene::DashPattern;
     use kurbo::{
         BezPath, Circle, CubicBez, ParamCurve, ParamCurveNearest, PathSeg, QuadBez,
         RoundedRectRadii,
@@ -1314,6 +1790,359 @@ mod tests {
             });
         }
         winding
+    }
+
+    // -----------------------------------------------------------------------
+    // Dashed strokes
+    // -----------------------------------------------------------------------
+
+    fn round(width: f64) -> Stroke {
+        Stroke::new(width)
+            .with_join(Join::Round)
+            .with_caps(Cap::Round)
+    }
+
+    /// Each subpath of `path` as its start and end point.
+    fn subpath_ends(path: &BezPath) -> Vec<(Point, Point)> {
+        let mut ends = Vec::new();
+        let mut start = None;
+        let mut current = Point::ZERO;
+        for el in path.iter() {
+            match el {
+                PathEl::MoveTo(p) => {
+                    if let Some(s) = start.replace(p) {
+                        ends.push((s, current));
+                    }
+                    current = p;
+                }
+                PathEl::ClosePath => current = start.unwrap_or(current),
+                other => current = other.end_point().unwrap_or(current),
+            }
+        }
+        if let Some(s) = start {
+            ends.push((s, current));
+        }
+        ends
+    }
+
+    fn inside(rect: Rect, p: Point) -> bool {
+        p.x > rect.x0 && p.x < rect.x1 && p.y > rect.y0 && p.y < rect.y1
+    }
+
+    fn strips_of(generate: impl FnOnce(&mut StripGenerator, &mut StripStorage)) -> StripStorage {
+        let mut generator =
+            StripGenerator::new(STROKE_VIEWPORT.0, STROKE_VIEWPORT.1, Level::baseline());
+        let mut storage = StripStorage::new(GenerationMode::Append);
+        generate(&mut generator, &mut storage);
+        storage
+    }
+
+    /// Dashed strokes that fit the split extent — a polyline, a curve, a
+    /// closed shape, under the identity, a scale and a rotation — lower to
+    /// exactly `dash_path`'s elements and generate exactly the strips the
+    /// whole-path lowering does.
+    #[test]
+    fn the_gate_keeps_ordinary_dashed_strokes_bit_identical() {
+        let region = stroke_region();
+        let mut poly = BezPath::new();
+        poly.move_to((2.0, 3.0));
+        poly.line_to((60.0, 10.0));
+        poly.line_to((20.0, 61.5));
+        let mut curve = BezPath::new();
+        curve.move_to((-10.0, 40.0));
+        curve.curve_to((10.0, -30.0), (50.0, 90.0), (70.0, 20.0));
+        curve.quad_to((30.0, 30.0), (5.0, 5.0));
+        let ring = Circle::new((32.0, 32.0), 20.0).to_path(0.1);
+        let transforms = [
+            Affine::IDENTITY,
+            Affine::scale(1.75),
+            Affine::translate((32.0, 32.0))
+                * Affine::rotate(0.4)
+                * Affine::translate((-32.0, -32.0)),
+        ];
+        let patterns = [
+            DashPattern::new(4.0, 2.0),
+            DashPattern::new(1.0, 7.0).with_phase(-3.25),
+            DashPattern::new(13.0, 0.5).with_phase(40.0),
+        ];
+        for path in [&poly, &curve, &ring] {
+            for transform in transforms {
+                for dash in patterns {
+                    let stroke = round(2.0);
+                    assert!(
+                        stroke_device_extent(path.iter(), &stroke, transform)
+                            <= region.split_extent
+                    );
+                    let expected = dash_path(path, dash);
+                    let actual = dash_within(path, dash, &stroke, transform, region);
+                    assert_eq!(actual.elements().len(), expected.elements().len());
+                    for (a, e) in actual.iter().zip(expected.iter()) {
+                        assert!(same_kind(a, e), "{a:?} vs {e:?}");
+                        assert_eq!(el_bits(a), el_bits(e), "{a:?} vs {e:?}");
+                    }
+
+                    let bounded = strips_of(|generator, storage| {
+                        generate_dashed_stroke(
+                            generator, path, dash, &stroke, transform, storage, None,
+                        );
+                    });
+                    let whole = strips_of(|generator, storage| {
+                        generate_stroke(
+                            generator,
+                            expected.iter(),
+                            &stroke,
+                            transform,
+                            storage,
+                            None,
+                        );
+                    });
+                    assert_eq!(bounded.strips, whole.strips, "{dash:?} under {transform:?}");
+                    assert_eq!(bounded.alphas, whole.alphas, "{dash:?} under {transform:?}");
+                }
+            }
+        }
+    }
+
+    /// Largest distance between a dash end inside the viewport and the same
+    /// end in the whole-path lowering, as a fraction of the path's length: the
+    /// phase a run starts at is carried across the skipped length, exact for a
+    /// line up to rounding and within the relative arc-length accuracy for a
+    /// curve, which for a smooth one is far tighter than its bound.
+    const PHASE_TOLERANCE: f64 = 1e-8;
+
+    /// A dashed stroke crossing the viewport edge from far outside keeps,
+    /// inside the viewport, exactly the dashes the whole-path lowering puts
+    /// there: the same number, each end within [`PHASE_TOLERANCE`].
+    #[test]
+    fn dashes_inside_the_viewport_match_the_whole_path_lowering() {
+        let region = stroke_region();
+        let viewport = Rect::new(
+            0.0,
+            0.0,
+            f64::from(STROKE_VIEWPORT.0),
+            f64::from(STROKE_VIEWPORT.1),
+        );
+        let mut line = BezPath::new();
+        line.move_to((-20_000.0, 30.5));
+        line.line_to((20_000.0, 34.5));
+        let mut corner = BezPath::new();
+        corner.move_to((-9_000.0, -9_000.0));
+        corner.line_to((32.0, 32.0));
+        corner.line_to((9_000.0, 4.0));
+        // An arc of radius 4000 whose top crosses the viewport's middle row,
+        // entered from far below the viewport on both sides.
+        let arc = Affine::translate((32.0, 4032.0)) * Circle::new((0.0, 0.0), 4000.0).to_path(1e-3);
+        let patterns = [
+            DashPattern::new(6.0, 4.0).with_phase(1.5),
+            DashPattern::new(1.0, 2.0).with_phase(-17.0),
+            DashPattern::new(3.0, 9.5),
+        ];
+        for (name, path) in [("line", &line), ("corner", &corner), ("arc", &arc)] {
+            for dash in patterns {
+                let stroke = round(2.0);
+                assert!(
+                    stroke_device_extent(path.iter(), &stroke, Affine::IDENTITY)
+                        > region.split_extent,
+                    "{name} must take the bounded lowering"
+                );
+                let whole = subpath_ends(&dash_path(path, dash));
+                let bounded_path = dash_within(path, dash, &stroke, Affine::IDENTITY, region);
+                let bounded = subpath_ends(&bounded_path);
+                assert!(
+                    bounded.len() * 20 < whole.len(),
+                    "{name}: {} dashes kept of {}",
+                    bounded.len(),
+                    whole.len()
+                );
+                let visible = |ends: &[(Point, Point)]| -> Vec<(Point, Point)> {
+                    ends.iter()
+                        .copied()
+                        .filter(|&(a, b)| inside(viewport, a) && inside(viewport, b))
+                        .collect()
+                };
+                let (whole, bounded) = (visible(&whole), visible(&bounded));
+                assert!(
+                    !whole.is_empty(),
+                    "{name}: no dash ends inside the viewport"
+                );
+                assert_eq!(whole.len(), bounded.len(), "{name} {dash:?}");
+                let tolerance = PHASE_TOLERANCE * path.perimeter(1e-3);
+                for (w, b) in whole.iter().zip(&bounded) {
+                    let error = (w.0 - b.0).hypot().max((w.1 - b.1).hypot());
+                    assert!(
+                        error <= tolerance,
+                        "{name} {dash:?}: dash {w:?} kept as {b:?}, {error:e} apart"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A closed subpath the clip skips nothing of — every piece within reach
+    /// of a stroke as wide as the shape — is one closed run, dashed exactly as
+    /// `dash_path` dashes it.
+    #[test]
+    fn a_wholly_kept_closed_subpath_dashes_as_the_whole_path_lowering() {
+        let region = stroke_region();
+        let ring = Circle::new((32.0, 32.0), 300.0).to_path(0.1);
+        let stroke = round(2000.0);
+        assert!(stroke_device_extent(ring.iter(), &stroke, Affine::IDENTITY) > region.split_extent);
+        for dash in [
+            DashPattern::new(40.0, 25.0).with_phase(7.0),
+            DashPattern::new(5000.0, 1.0),
+        ] {
+            let expected = dash_path(&ring, dash);
+            let actual = dash_within(&ring, dash, &stroke, Affine::IDENTITY, region);
+            assert_eq!(
+                actual.elements().len(),
+                expected.elements().len(),
+                "{dash:?}"
+            );
+            for (a, e) in actual.iter().zip(expected.iter()) {
+                assert!(same_kind(a, e), "{a:?} vs {e:?}");
+                assert_eq!(el_bits(a), el_bits(e), "{a:?} vs {e:?}");
+            }
+        }
+    }
+
+    /// A pattern whose device period is under [`MIN_DEVICE_DASH_PERIOD`] —
+    /// effective in user space, sub-pixel on screen — strokes the kept run
+    /// solid: one subpath, both ends outside the expanded viewport.
+    #[test]
+    fn a_sub_pixel_device_period_strokes_the_kept_run_solid() {
+        let region = stroke_region();
+        let mut line = BezPath::new();
+        line.move_to((-20_000.0, 32.0));
+        line.line_to((20_000.0, 32.0));
+        let stroke = round(2.0);
+        for (dash, transform) in [
+            (DashPattern::new(0.15, 0.15), Affine::IDENTITY),
+            (
+                DashPattern::new(2.0, 2.0),
+                Affine::translate((32.0, 30.0)) * Affine::scale(1.0 / 16.0),
+            ),
+        ] {
+            let device_period = (dash.on + dash.off) * largest_stretch(transform);
+            assert!(device_period < MIN_DEVICE_DASH_PERIOD, "{device_period}");
+            let dashed = dash_within(&line, dash, &stroke, transform, region);
+            let ends = subpath_ends(&dashed);
+            assert_eq!(ends.len(), 1, "{dash:?} under {transform:?}: {ends:?}");
+            let (a, b) = ends[0];
+            assert!(!inside(region.bounds, transform * a), "{a:?}");
+            assert!(!inside(region.bounds, transform * b), "{b:?}");
+        }
+    }
+
+    /// A centerline of any length keeps only the dashes near the viewport. A
+    /// line is trimmed with no depth cap and a curve piece the split leaves
+    /// oversized at its depth cap is trimmed as its chord, so a 1e300-unit
+    /// line or curve dashes a stretch a few split extents long, every dash
+    /// end within it.
+    #[test]
+    fn a_centerline_of_any_length_dashes_only_its_visible_stretch() {
+        let region = stroke_region();
+        let stroke = round(2.0);
+        let reach = region.bounds.inflate(1.0, 1.0);
+        let stretch = reach.inflate(region.split_extent, region.split_extent);
+        for size in [1e18, 1e100, 1e300] {
+            for (shape, path) in stroke_centerlines(size) {
+                let started = Instant::now();
+                let dashed = dash_within(
+                    &path,
+                    DashPattern::new(1.0, 1.0),
+                    &stroke,
+                    Affine::IDENTITY,
+                    region,
+                );
+                assert!(started.elapsed() < STROKE_TIME_LIMIT);
+                let ends = subpath_ends(&dashed);
+                let case = format!("a {size:e} {shape}");
+                assert!(ends.len() > 32, "{case} must dash: {} dashes", ends.len());
+                assert!(ends.len() < 2000, "{case} kept {} dashes", ends.len());
+                for (a, b) in ends {
+                    assert!(
+                        inside(stretch, a) && inside(stretch, b),
+                        "{case}: {a:?}-{b:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A kept run longer than [`MAX_DASHES_PER_RUN`] periods strokes solid: a
+    /// stroke two million units wide reaches far enough to keep millions of
+    /// units of a 1e18-unit line or curve, a run no pixel-sized pattern dashes
+    /// in bounded time.
+    #[test]
+    fn a_run_past_the_dash_ceiling_strokes_solid() {
+        let region = stroke_region();
+        let stroke = round(2e6);
+        for (shape, path) in stroke_centerlines(1e18) {
+            let started = Instant::now();
+            let dashed = dash_within(
+                &path,
+                DashPattern::new(1.0, 1.0),
+                &stroke,
+                Affine::IDENTITY,
+                region,
+            );
+            assert!(started.elapsed() < STROKE_TIME_LIMIT, "{shape}");
+            let runs = subpath_ends(&dashed).len();
+            assert!((1..=4).contains(&runs), "{shape}: {runs} subpaths");
+            assert!(dashed.elements().len() < 2000, "{shape}: {dashed:?}");
+        }
+    }
+
+    /// The bounded lowering's own cost: lines, curves and closed shapes at
+    /// every magnitude to 1e300, thin and as wide as the geometry, with
+    /// patterns from a tenth of a unit to one well above the geometry, lower
+    /// to a bounded output in bounded time.
+    #[test]
+    fn dashing_an_oversized_stroke_is_bounded_at_any_magnitude() {
+        let region = stroke_region();
+        let limit = STROKE_OUTLINE_LIMIT;
+        for size in [1e6, 1e18, 1e40, 1e100, 1e300] {
+            let mut closed = BezPath::new();
+            closed.move_to((-size, 0.0));
+            closed.curve_to(
+                (size, 3.0 * size),
+                (256.0 / 3.0 - size, 64.0 - 3.0 * size),
+                (size, 64.0),
+            );
+            closed.line_to((size, 2.0 * size));
+            closed.close_path();
+            let mut shapes: Vec<(&str, BezPath)> = stroke_centerlines(size).into_iter().collect();
+            shapes.push(("closed", closed));
+            for (shape, path) in &shapes {
+                for width in [2.0, size] {
+                    for period in [0.1, 1.0, 8.0, 1e3] {
+                        let dash = DashPattern::new(0.5 * period, 0.5 * period).with_phase(0.3);
+                        let stroke = round(width);
+                        let started = Instant::now();
+                        let dashed = dash_within(path, dash, &stroke, Affine::IDENTITY, region);
+                        let elapsed = started.elapsed();
+                        let case = format!("{shape} at {size:e}, width {width:e}, period {period}");
+                        assert!(elapsed < STROKE_TIME_LIMIT, "{case} took {elapsed:?}");
+                        assert!(
+                            dashed.elements().len() <= limit,
+                            "{case} dashed to {} elements",
+                            dashed.elements().len()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn largest_stretch_is_the_largest_singular_value() {
+        assert_eq!(largest_stretch(Affine::IDENTITY), 1.0);
+        assert!((largest_stretch(Affine::scale_non_uniform(3.0, -0.5)) - 3.0).abs() < 1e-12);
+        assert!((largest_stretch(Affine::rotate(0.7) * Affine::scale(2.5)) - 2.5).abs() < 1e-12);
+        // A shear [[1, 1], [0, 1]] stretches by the golden ratio.
+        let shear = Affine::new([1.0, 0.0, 1.0, 1.0, 0.0, 0.0]);
+        assert!((largest_stretch(shear) - (1.0 + 5.0_f64.sqrt()) / 2.0).abs() < 1e-12);
+        assert_eq!(largest_stretch(Affine::scale(0.0)), 0.0);
     }
 
     // -----------------------------------------------------------------------
