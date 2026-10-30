@@ -6210,9 +6210,9 @@ a piece's control-polygon length, which moves where dashes fall, not whether
 the stroke draws). A run is stroked solid, losing the pattern's duty cycle,
 when the device period (period times the transform's largest singular value) is
 under `MIN_DEVICE_DASH_PERIOD` (0.5 px) or the run holds more than
-`MAX_DASHES_PER_RUN` (65 536) periods. A stroke's outline stays within 0.25 px
-of the centerline under any affine until its device reach passes about 3e10
-pixels.
+`MAX_DASHES_PER_RUN` (65 536) periods. An oversized stroke is expanded at a
+device-space tolerance, so its outline stays within 0.25 px of the exact outline
+under any affine until its device reach passes about 3e10 pixels.
 
 **Trigger for removal**: a widget-visible need for a drawn-anyway fallback
 semantics for non-finite input appears (none identified today).
