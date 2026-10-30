@@ -128,13 +128,15 @@ const ARC_RELATIVE_TOLERANCE: f64 = 1.0 / (1_u128 << 64) as f64;
 /// pixels at a device scale of one or more — sits several times above it.
 pub(crate) const MIN_DEVICE_DASH_PERIOD: f64 = 0.5;
 
-/// Most dashes one kept run of an oversized dashed stroke is broken into,
-/// estimated from its control-polygon length; a run past it is drawn solid.
-/// A kept run spans at most a few split extents of the viewport, so a real UI
-/// pattern — a 4K-wide viewport's run at a 2-pixel period is under 20 000
-/// dashes — stays well below it, while geometry kept only because the split
-/// hit its depth cap, at magnitudes no screen shows, cannot dash without bound.
-pub(crate) const MAX_DASHES_PER_RUN: f64 = 65_536.0;
+/// Most dashes one path element — a line, quad or cubic, or a kept span of
+/// one in the capped lowering — is broken into, estimated as its
+/// control-polygon length over the pattern period. The bound is per element,
+/// so a path's total is at most its element count times this budget; a run of
+/// many on-screen elements stays dashed, and only an element that is itself
+/// absurdly long for its period is stroked solid. A real UI pattern sits far
+/// below it: a 4K-wide line at a 2-pixel period is under 2 000 dashes, and a
+/// span the split kept is at most a few split extents long.
+pub(crate) const MAX_DASHES_PER_ELEMENT: f64 = 65_536.0;
 
 /// The accuracy, as a fraction of a piece's control-polygon length, an
 /// oversized dashed stroke measures arc length at to carry its dash phase.
@@ -789,13 +791,12 @@ pub(crate) fn generate_dashed_stroke(
     generate_stroke(generator, dashed.iter(), stroke, transform, storage, clip);
 }
 
-/// `path` broken into the dashes of `dash`: by [`dash_path`] when its stroke
-/// [`fits_the_stroker`] in `region`, the cull viewport's own, and by
-/// [`dash_visible_stretch`] otherwise. The gate is the predicate
-/// [`generate_stroke`] takes, so a dashed stroke is lowered whole only where
-/// the stroker would take it whole: a stroke within the split extent on screen
-/// but past [`STROKER_EXTENT_CEILING`] in user space never reaches
-/// [`dash_path`], which would iterate every one of its periods.
+/// `path` broken into the dashes of `dash`: by [`dash_path`] only when its
+/// stroke [`fits_the_stroker`] in `region`, the pattern's device period is at
+/// least [`MIN_DEVICE_DASH_PERIOD`] and no element exceeds
+/// [`MAX_DASHES_PER_ELEMENT`] periods, and by [`dash_visible_stretch`]
+/// otherwise. Extents alone never decide: [`dash_path`] iterates every period
+/// of an element, so a fine period over a long on-screen line is refused.
 fn dash_within(
     path: &BezPath,
     dash: DashPattern,
@@ -803,11 +804,43 @@ fn dash_within(
     transform: Affine,
     region: SplitRegion,
 ) -> BezPath {
-    if fits_the_stroker(path.iter(), stroke, transform, region) {
+    let period = dash.on + dash.off;
+    let device_period = period * largest_stretch(transform);
+    if fits_the_stroker(path.iter(), stroke, transform, region)
+        && device_period >= MIN_DEVICE_DASH_PERIOD
+        && within_dash_budget(path, period)
+    {
         dash_path(path, dash)
     } else {
         dash_visible_stretch(path, dash, stroke, transform, region)
     }
+}
+
+/// Whether every element of `path` is at most [`MAX_DASHES_PER_ELEMENT`]
+/// `period`s of control polygon; a non-finite estimate fails.
+fn within_dash_budget(path: &BezPath, period: f64) -> bool {
+    let limit = MAX_DASHES_PER_ELEMENT * period;
+    let mut start = Point::ZERO;
+    let mut current = Point::ZERO;
+    for el in path.iter() {
+        let span = match el {
+            PathEl::MoveTo(p) => {
+                start = p;
+                current = p;
+                continue;
+            }
+            PathEl::ClosePath => Span::line(current, start),
+            PathEl::LineTo(p) => Span::line(current, p),
+            PathEl::QuadTo(p1, p2) => Span::curve(Piece::quad(current, p1, p2)),
+            PathEl::CurveTo(p1, p2, p3) => Span::curve(Piece::cubic(current, p1, p2, p3)),
+        };
+        let length = span.polygon_length();
+        if length.is_nan() || length > limit {
+            return false;
+        }
+        current = span.piece.end();
+    }
+    true
 }
 
 /// Dashes only the stretch of an oversized stroke's centerline that can reach
@@ -830,11 +863,10 @@ fn dash_within(
 ///    before it. The error moves where dashes fall, never whether the stroke
 ///    draws or how wide. A travelled length that overflows starts the run at
 ///    the pattern's own phase.
-/// 3. **Dashing is capped.** When the pattern's device period — its period
-///    times the transform's largest stretch — is below
-///    [`MIN_DEVICE_DASH_PERIOD`], or a run's control-polygon length is more
-///    than [`MAX_DASHES_PER_RUN`] periods, the run is stroked solid: its
-///    coverage loses the pattern's duty cycle and becomes the solid stroke's.
+/// 3. **Dashing is capped.** A run is stroked solid, losing the pattern's
+///    duty cycle, when the pattern's device period is below
+///    [`MIN_DEVICE_DASH_PERIOD`] or any span kept in it exceeds
+///    [`MAX_DASHES_PER_ELEMENT`] periods.
 ///
 /// A subpath nothing was skipped from is one run and keeps its closing
 /// segment, so it dashes as [`dash_path`] dashes it. A closed subpath with a
@@ -991,7 +1023,8 @@ struct DashLowering {
     transform: Affine,
     region: SplitRegion,
     run: BezPath,
-    run_polygon: f64,
+    /// Whether a span kept in the current run exceeds the dash budget.
+    over_budget: bool,
     run_offset: f64,
     travelled: f64,
     skipped: bool,
@@ -1010,7 +1043,7 @@ impl DashLowering {
             transform,
             region,
             run: BezPath::new(),
-            run_polygon: 0.0,
+            over_budget: false,
             run_offset: 0.0,
             travelled: 0.0,
             skipped: false,
@@ -1168,7 +1201,8 @@ impl DashLowering {
             self.run_offset = self.travelled;
         }
         self.run.push(span.to_el());
-        self.run_polygon += span.polygon_length();
+        let dashes = span.polygon_length() / self.period;
+        self.over_budget |= dashes.is_nan() || dashes > MAX_DASHES_PER_ELEMENT;
         self.travelled += span.arclen();
     }
 
@@ -1202,9 +1236,7 @@ impl DashLowering {
         if close {
             self.run.close_path();
         }
-        let dashes = self.run_polygon / self.period;
-        let solid = self.sub_pixel || dashes.is_nan() || dashes > MAX_DASHES_PER_RUN;
-        if solid {
+        if self.sub_pixel || self.over_budget {
             self.out.extend(self.run.iter());
         } else {
             let offset = if self.run_offset.is_finite() {
@@ -1216,7 +1248,7 @@ impl DashLowering {
                 .extend(kurbo::dash(self.run.iter(), offset, &self.pattern));
         }
         self.run.truncate(0);
-        self.run_polygon = 0.0;
+        self.over_budget = false;
     }
 }
 
@@ -2573,23 +2605,30 @@ mod tests {
         // Under a scale of one or less the stroker's tolerance is a quarter
         // unit, so its ceiling sits at 2^30 units of centerline. Just inside it
         // a line dashes whole, as `dash_path` lowers it; just past it the
-        // bounded lowering takes over. The shrink keeps both lines a sub-pixel
-        // period on screen, and the dash period keeps the whole-path lowering
-        // to a few dozen dashes.
+        // bounded lowering takes over. The shrink puts both lines a couple of
+        // hundred pixels long on screen, within the split extent, and the
+        // dash period is a few pixels and a hundred dashes a line, so the
+        // ceiling alone decides.
         let ceiling = STROKER_EXTENT_CEILING * STROKE_TOLERANCE;
-        let shrink = Affine::scale(1e-12);
-        let dash = DashPattern::new(ceiling / 64.0, ceiling / 64.0);
+        let shrink = Affine::scale(2e-7);
+        let dash = DashPattern::new(ceiling / 256.0, ceiling / 256.0);
         let zero = Stroke::new(0.0);
         for (length, whole) in [(0.999 * ceiling, true), (1.001 * ceiling, false)] {
             let mut line = BezPath::new();
             line.move_to((0.0, 0.0));
             line.line_to((length, 0.0));
+            // Both lowerings dash a line this short on screen alike, so the
+            // ceiling is pinned by the gate's own predicate.
+            assert_eq!(
+                whole,
+                fits_the_stroker(line.iter(), &zero, shrink, region),
+                "{length:e}-unit line"
+            );
             let expected = if whole {
                 dash_path(&line, dash)
             } else {
                 dash_visible_stretch(&line, dash, &zero, shrink, region)
             };
-            assert_eq!(whole, expected.elements().len() > 2, "{length:e}-unit line");
             let actual = dash_within(&line, dash, &zero, shrink, region);
             assert_eq!(actual.elements().len(), expected.elements().len());
             for (a, e) in actual.iter().zip(expected.iter()) {
@@ -2635,9 +2674,9 @@ mod tests {
         }
     }
 
-    /// A kept run longer than [`MAX_DASHES_PER_RUN`] periods strokes solid: a
+    /// A kept span longer than [`MAX_DASHES_PER_ELEMENT`] periods strokes solid: a
     /// stroke two million units wide reaches far enough to keep millions of
-    /// units of a 1e18-unit line or curve, a run no pixel-sized pattern dashes
+    /// units of a 1e18-unit line or curve, a span no pixel-sized pattern dashes
     /// in bounded time.
     #[test]
     fn a_run_past_the_dash_ceiling_strokes_solid() {
@@ -2697,6 +2736,116 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// A fine period over a long line that fits the stroker on screen is
+    /// refused by the whole-path gate: its device period is under
+    /// [`MIN_DEVICE_DASH_PERIOD`] or an element exceeds the dash budget, so it
+    /// strokes solid in bounded time; at the budget's boundary the gate flips.
+    #[test]
+    fn the_dash_gate_refuses_a_fine_period_over_a_long_on_screen_line() {
+        let solid = |dashed: &BezPath, path: &BezPath, case: &str| {
+            assert_eq!(dashed.elements().len(), path.elements().len(), "{case}");
+            for (a, e) in dashed.iter().zip(path.iter()) {
+                assert!(same_kind(a, e), "{case}: {a:?} vs {e:?}");
+                assert_eq!(el_bits(a), el_bits(e), "{case}: {a:?} vs {e:?}");
+            }
+        };
+        let line = |length: f64| {
+            let mut line = BezPath::new();
+            line.move_to((0.0, 0.0));
+            line.line_to((length, 0.0));
+            line
+        };
+
+        // Counterexample A: on screen the line is about 7000 pixels, within
+        // the split extent of a 1920x1080 viewport.
+        let region = SplitRegion::around(Rect::new(0.0, 0.0, 1920.0, 1080.0));
+        let transform = Affine::scale(7e-6);
+        let stroke = round(1.0);
+        let path = line(1e9);
+        assert!(fits_the_stroker(path.iter(), &stroke, transform, region));
+        let started = Instant::now();
+        let dashed = dash_within(
+            &path,
+            DashPattern::new(0.05, 0.05),
+            &stroke,
+            transform,
+            region,
+        );
+        let elapsed = started.elapsed();
+        assert!(elapsed < STROKE_TIME_LIMIT, "took {elapsed:?}");
+        solid(&dashed, &path, "fine period");
+
+        // Per element: a device period under half a pixel, and over budget.
+        let region = stroke_region();
+        let short = line(2.0);
+        let dash = DashPattern::new(5e-6, 5e-6);
+        assert!(fits_the_stroker(
+            short.iter(),
+            &round(1.0),
+            Affine::IDENTITY,
+            region
+        ));
+        let dashed = dash_within(&short, dash, &round(1.0), Affine::IDENTITY, region);
+        solid(&dashed, &short, "over budget");
+
+        // The boundary: a device period at the minimum, an element just under
+        // and just over the budget, in a region big enough to hold either.
+        let region = SplitRegion::around(Rect::new(0.0, 0.0, 20_000.0, 20_000.0));
+        let period = MIN_DEVICE_DASH_PERIOD;
+        let dash = DashPattern::new(0.5 * period, 0.5 * period);
+        let stroke = Stroke::new(0.0);
+        for (factor, whole) in [(0.999, true), (1.001, false)] {
+            let path = line(factor * MAX_DASHES_PER_ELEMENT * period);
+            assert!(fits_the_stroker(
+                path.iter(),
+                &stroke,
+                Affine::IDENTITY,
+                region
+            ));
+            let actual = dash_within(&path, dash, &stroke, Affine::IDENTITY, region);
+            if whole {
+                let expected = dash_path(&path, dash);
+                assert_eq!(actual.elements().len(), expected.elements().len());
+                for (a, e) in actual.iter().zip(expected.iter()) {
+                    assert_eq!(el_bits(a), el_bits(e), "{a:?} vs {e:?}");
+                }
+            } else {
+                solid(&actual, &path, "just over budget");
+            }
+        }
+    }
+
+    /// A dense zig-zag whose end lines reach far off screen keeps its dashes:
+    /// the dash budget is per element, so the many on-screen segments do not
+    /// add up to a solid run.
+    #[test]
+    fn a_dense_on_screen_polyline_keeps_its_dashes_past_the_viewport() {
+        let region = SplitRegion::around(Rect::new(0.0, 0.0, 1920.0, 1080.0));
+        let mut path = BezPath::new();
+        path.move_to((-10_000.0, 400.0));
+        for i in 0..2000 {
+            let y = if i % 2 == 0 { 100.0 } else { 700.0 };
+            path.line_to((f64::from(i) * 0.5, y));
+        }
+        path.line_to((20_000.0, 400.0));
+        let stroke = round(2.0);
+        let dash = DashPattern::new(4.0, 4.0);
+        assert!(stroke_device_extent(path.iter(), &stroke, Affine::IDENTITY) > region.split_extent);
+        let started = Instant::now();
+        let dashed = dash_within(&path, dash, &stroke, Affine::IDENTITY, region);
+        assert!(started.elapsed() < STROKE_TIME_LIMIT * 4);
+        let ends = subpath_ends(&dashed);
+        assert!(ends.len() > 10_000, "{} subpaths", ends.len());
+        assert!(ends.len() < 200_000, "{} subpaths", ends.len());
+        let stretch = region
+            .bounds
+            .inflate(region.split_extent, region.split_extent)
+            .inflate(2.0, 2.0);
+        for (a, b) in ends {
+            assert!(inside(stretch, a) && inside(stretch, b), "{a:?}-{b:?}");
         }
     }
 

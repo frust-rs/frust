@@ -1579,6 +1579,38 @@ fn a_1e18_long_dashed_line_still_dashes_its_visible_stretch() {
     );
 }
 
+/// Counterexample B of the dash gate: a line 300 pixels long on screen — within
+/// the split extent and, in user space, under the stroker's ceiling — dashed
+/// at a user-space period of `0.1`, a ten-millionth of a pixel. A gate that
+/// weighed only extents would hand the whole line to the whole-path dasher,
+/// which iterates its three billion periods; the period-aware gate strokes it
+/// solid. The same geometry at a period of 8 pixels still alternates.
+#[test]
+fn a_fine_dash_period_over_a_long_on_screen_line_compiles_within_bounds() {
+    let root = Affine::translate((-10.0, 32.0)) * Affine::scale(1e-6);
+    let line = || {
+        let mut path = BezPath::new();
+        path.move_to((0.0, 0.0));
+        path.line_to((3e8, 0.0));
+        path
+    };
+
+    let fine = [dashed(line(), 2e6, DashPattern::new(0.05, 0.05))];
+    let frame = compile_within_bounds("0.1-period dash over a 300-pixel line", &fine, root);
+    assert_solid_band("0.1-period dash over a 300-pixel line", &frame);
+
+    let case = "8-pixel period over a 300-pixel line";
+    let ordinary = [dashed(line(), 2e6, DashPattern::new(4e6, 4e6))];
+    let frame = compile_within_bounds(case, &ordinary, root);
+    let row = row_coverage(&frame, 31);
+    let covered = row.iter().filter(|&&alpha| alpha >= 250).count();
+    let empty = row.iter().filter(|&&alpha| alpha == 0).count();
+    assert!(
+        covered >= 16 && empty >= 8,
+        "{case}: the band must alternate dashes and gaps, got {row:?}"
+    );
+}
+
 /// The counting allocator actually counts — the allocation property is worth
 /// exactly as much as this.
 #[test]
