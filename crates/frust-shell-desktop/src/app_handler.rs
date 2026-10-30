@@ -51,8 +51,6 @@ use frust_core::FrameTime;
 use frust_core::RenderRoot;
 use frust_core::SemanticsUpdate;
 use frust_core::accesskit::TreeUpdate;
-#[cfg(test)]
-use frust_core::accesskit::{Tree, TreeId};
 use frust_core::event::{
     CursorIcon, EditCommand, EventOutcome, FileDropEvent, FileDropPhase, ImeContentType, ImeEvent,
     InputEvent, Key, KeyEvent, Modifiers, NamedKey, PointerButton, PointerEvent, PointerPhase,
@@ -4037,20 +4035,20 @@ mod tests {
         ClipboardAccess, ClipboardError, ClipboardFailure, ClipboardRequest, ClipboardWarnings,
         ComposeLatch, DesktopConfig, DesktopExtensions, ElementState, FileDropAccumulator,
         FileHoverLatch, Ime, ImeSync, LogicalSize, MouseScrollDelta, NoExtensions, PasteText,
-        ShellUserEvent, Tree, TreeId, WHEEL_SCALE_RATE_PER_LINE, WindowKnobSource, WinitCursorIcon,
-        WinitKey, WinitNamedKey, WinitTheme, apply_window_size, base_theme,
-        brightness_change_to_notify, brightness_from_winit, build_tree_update, clipboard_loop,
-        clipboard_warning, cursor_change_to_apply, default_theme, finish,
-        follow_platform_brightness, ime_purpose_for, map_gesture_phase, map_key_event,
-        map_modifiers, map_mouse_button, map_named_key, map_scroll_delta, map_wheel_scale_delta,
-        mouse_button_should_dispatch, parse_window_maximized, paste_answer_dispatch,
-        paste_input_event, physical_to_logical, resolved_window_knob, theme_after_override_poll,
-        wheel_zoom_chord_held, window_attributes, winit_cursor_for,
+        ShellUserEvent, WHEEL_SCALE_RATE_PER_LINE, WindowKnobSource, WinitCursorIcon, WinitKey,
+        WinitNamedKey, WinitTheme, apply_window_size, base_theme, brightness_change_to_notify,
+        brightness_from_winit, build_tree_update, clipboard_loop, clipboard_warning,
+        cursor_change_to_apply, default_theme, finish, follow_platform_brightness, ime_purpose_for,
+        map_gesture_phase, map_key_event, map_modifiers, map_mouse_button, map_named_key,
+        map_scroll_delta, map_wheel_scale_delta, mouse_button_should_dispatch,
+        parse_window_maximized, paste_answer_dispatch, paste_input_event, physical_to_logical,
+        resolved_window_knob, theme_after_override_poll, wheel_zoom_chord_held, window_attributes,
+        winit_cursor_for,
     };
     use crate::config::Decorations;
     use frust_core::SemanticsUpdate;
     use frust_core::accesskit::{
-        Affine as AccessKitAffine, Node, NodeId, Rect as AccessKitRect, Role,
+        Affine as AccessKitAffine, Node, NodeId, Rect as AccessKitRect, Role, Tree, TreeId,
     };
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
