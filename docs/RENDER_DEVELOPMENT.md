@@ -200,10 +200,10 @@ WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=<gpu> FRUST_GOLDEN_EXPECT_ADAPTER=<gpu> \
   cargo test -p frust-testing --test engine_goldens --test alpha_polarity -- --ignored
 
 # Diagnostic only — never a gate:
-cargo bench -p frust-engine -- --quick
+cargo bench -p frust-engine -- --quick   # compile/glyph_outlines_1000 isolates ViewportSplit's per-construction cost
 ```
 
-`compile/cull.rs` bounds flattening work for every finite input (dash expansion excepted), so the host-only arm's
+`compile/cull.rs` bounds flattening work for every finite input, so the host-only arm's
 `tests/proptest_strips.rs` allocation property is bounded; seeds 100/107/263/386 replay as pinned regressions
 (`the_allocation_property_holds_for_the_pinned_seeds`). Iterate with a scoped run —
 `cargo test -p frust-engine --test <file>` or `cargo test -p frust-engine --lib <path>` — which is also how the

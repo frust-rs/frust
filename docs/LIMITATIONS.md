@@ -6202,8 +6202,17 @@ is exact to the flattening tolerance up to the device extent `cull.rs` states
 (about 9.3e27 pixels for a fill; a stroke's device reach about 3e10 pixels);
 past it a depth-capped piece is drawn as its chord, with error confined to
 that piece, and near `f32`'s range cost stays bounded but drawing is no longer
-faithful. One case stays unbounded: a dash pattern is expanded into sub-paths
-before any culling, so a tiny dash period over a huge path never returns.
+faithful. A dashed stroke is bounded the same way: the stroke is dashed whole
+only where the undashed stroke `fits_the_stroker`; a larger one is dashed only
+along the stretch that can reach the expanded viewport, the pattern's phase
+carried across the skipped length (to within `DASH_ARCLEN_RELATIVE_ACCURACY` of
+a piece's control-polygon length, which moves where dashes fall, not whether
+the stroke draws). A run is stroked solid, losing the pattern's duty cycle,
+when the device period (period times the transform's largest singular value) is
+under `MIN_DEVICE_DASH_PERIOD` (0.5 px) or the run holds more than
+`MAX_DASHES_PER_RUN` (65 536) periods. A stroke's outline stays within 0.25 px
+of the centerline under any affine until its device reach passes about 3e10
+pixels.
 
 **Trigger for removal**: a widget-visible need for a drawn-anyway fallback
 semantics for non-finite input appears (none identified today).
