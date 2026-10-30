@@ -6202,15 +6202,18 @@ is exact to the flattening tolerance up to the device extent `cull.rs` states
 (about 9.3e27 pixels for a fill; a stroke's device reach about 3e10 pixels);
 past it a depth-capped piece is drawn as its chord, with error confined to
 that piece, and near `f32`'s range cost stays bounded but drawing is no longer
-faithful. A dashed stroke is bounded the same way: the stroke is dashed whole
-only where the undashed stroke `fits_the_stroker`; a larger one is dashed only
-along the stretch that can reach the expanded viewport, the pattern's phase
-carried across the skipped length (to within `DASH_ARCLEN_RELATIVE_ACCURACY` of
-a piece's control-polygon length, which moves where dashes fall, not whether
-the stroke draws). A run is stroked solid, losing the pattern's duty cycle,
-when the device period (period times the transform's largest singular value) is
-under `MIN_DEVICE_DASH_PERIOD` (0.5 px) or the run holds more than
-`MAX_DASHES_PER_RUN` (65 536) periods. An oversized stroke is expanded at a
+faithful. A dashed stroke is bounded the same way: it is dashed whole only
+where the undashed stroke `fits_the_stroker`, its device period (period times
+the transform's largest singular value) is at least `MIN_DEVICE_DASH_PERIOD`
+(0.5 px) and no element exceeds `MAX_DASHES_PER_ELEMENT` (65 536) periods;
+otherwise it takes the bounded lowering, which dashes only the stretch that can
+reach the expanded viewport, the pattern's phase carried across the skipped
+length (to within `DASH_ARCLEN_RELATIVE_ACCURACY` of a piece's control-polygon
+length, which moves where dashes fall, not whether the stroke draws). There a
+run is stroked solid, losing the pattern's duty cycle, when the device period
+is under `MIN_DEVICE_DASH_PERIOD` or an element is longer than
+`MAX_DASHES_PER_ELEMENT` periods; total dash work is bounded by elements times
+that budget. An oversized stroke is expanded at a
 device-space tolerance, so its outline stays within 0.25 px of the exact outline
 under any affine until its device reach passes about 3e10 pixels.
 
