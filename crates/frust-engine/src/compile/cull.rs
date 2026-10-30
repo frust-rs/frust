@@ -131,9 +131,10 @@ pub(crate) const MIN_DEVICE_DASH_PERIOD: f64 = 0.5;
 /// Most dashes one path element — a line, quad or cubic, or a kept span of
 /// one in the capped lowering — is broken into, estimated as its
 /// control-polygon length over the pattern period. The bound is per element,
-/// so a path's total is at most its element count times this budget; a run of
-/// many on-screen elements stays dashed, and only an element that is itself
-/// absurdly long for its period is stroked solid. A real UI pattern sits far
+/// so a path's total is at most its kept spans — a bounded few per element —
+/// times this budget; a run of many on-screen elements stays dashed, and a run
+/// is stroked solid only when one of its spans is itself absurdly long for its
+/// period. A real UI pattern sits far
 /// below it: a 4K-wide line at a 2-pixel period is under 2 000 dashes, and a
 /// span the split kept is at most a few split extents long.
 pub(crate) const MAX_DASHES_PER_ELEMENT: f64 = 65_536.0;
@@ -771,11 +772,12 @@ fn stroke_bounds(path: impl Iterator<Item = PathEl>, stroke: &Stroke) -> Option<
 /// Generate the strips for `path` stroked with `stroke` and broken into
 /// dashes by an effective `dash`, under `transform`.
 ///
-/// A stroke that [`fits_the_stroker`] — of the undashed path — is dashed by
-/// [`dash_path`] over its whole length and handed to [`generate_stroke`],
-/// exactly as every other consumer of the display list lowers it. A larger one
-/// is lowered by [`dash_visible_stretch`], whose cost is bounded by the number
-/// of input elements for every finite input, and its result goes to
+/// A stroke that [`fits_the_stroker`] — of the undashed path — and keeps every
+/// element within [`MAX_DASHES_PER_ELEMENT`] periods is dashed by [`dash_path`]
+/// over its whole length and handed to [`generate_stroke`], exactly as every
+/// other consumer of the display list lowers it. Any other is lowered by
+/// [`dash_visible_stretch`], whose cost is bounded by the number of input
+/// elements for every finite input, and its result goes to
 /// [`generate_stroke`] in turn.
 pub(crate) fn generate_dashed_stroke(
     generator: &mut StripGenerator,
@@ -792,11 +794,13 @@ pub(crate) fn generate_dashed_stroke(
 }
 
 /// `path` broken into the dashes of `dash`: by [`dash_path`] only when its
-/// stroke [`fits_the_stroker`] in `region`, the pattern's device period is at
-/// least [`MIN_DEVICE_DASH_PERIOD`] and no element exceeds
+/// stroke [`fits_the_stroker`] in `region` and no element exceeds
 /// [`MAX_DASHES_PER_ELEMENT`] periods, and by [`dash_visible_stretch`]
 /// otherwise. Extents alone never decide: [`dash_path`] iterates every period
-/// of an element, so a fine period over a long on-screen line is refused.
+/// of an element, so a fine period over a long on-screen line is refused. A
+/// stroke that passes both is dashed whole whatever its period looks like on
+/// screen, as every other consumer of the display list dashes it;
+/// [`MIN_DEVICE_DASH_PERIOD`] applies only in the bounded lowering.
 fn dash_within(
     path: &BezPath,
     dash: DashPattern,
@@ -805,10 +809,7 @@ fn dash_within(
     region: SplitRegion,
 ) -> BezPath {
     let period = dash.on + dash.off;
-    let device_period = period * largest_stretch(transform);
-    if fits_the_stroker(path.iter(), stroke, transform, region)
-        && device_period >= MIN_DEVICE_DASH_PERIOD
-        && within_dash_budget(path, period)
+    if fits_the_stroker(path.iter(), stroke, transform, region) && within_dash_budget(path, period)
     {
         dash_path(path, dash)
     } else {
@@ -2740,9 +2741,9 @@ mod tests {
     }
 
     /// A fine period over a long line that fits the stroker on screen is
-    /// refused by the whole-path gate: its device period is under
-    /// [`MIN_DEVICE_DASH_PERIOD`] or an element exceeds the dash budget, so it
-    /// strokes solid in bounded time; at the budget's boundary the gate flips.
+    /// refused by the whole-path gate: an element exceeds the dash budget, so
+    /// it takes the bounded lowering and strokes solid in bounded time; at the
+    /// budget's boundary the gate flips.
     #[test]
     fn the_dash_gate_refuses_a_fine_period_over_a_long_on_screen_line() {
         let solid = |dashed: &BezPath, path: &BezPath, case: &str| {
@@ -2778,7 +2779,7 @@ mod tests {
         assert!(elapsed < STROKE_TIME_LIMIT, "took {elapsed:?}");
         solid(&dashed, &path, "fine period");
 
-        // Per element: a device period under half a pixel, and over budget.
+        // Per element: a short line whose period puts it far over budget.
         let region = stroke_region();
         let short = line(2.0);
         let dash = DashPattern::new(5e-6, 5e-6);
