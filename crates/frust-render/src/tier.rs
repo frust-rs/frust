@@ -34,11 +34,15 @@ pub struct EngineCaps {
     pub adapter_name: String,
 }
 
-/// The pre-rename name of [`EngineCaps`], kept for one release.
+/// The pre-rename name of [`EngineCaps`], kept through the 0.6 line and
+/// removed in 0.7.
 ///
 /// Renamed because `frust_gpu::TierCaps` is a different, adapter-probed type
 /// with the same name, and the two were being confused at call sites.
-#[deprecated(note = "renamed to `EngineCaps`; `frust_gpu::TierCaps` is a different type")]
+#[deprecated(
+    since = "0.6.4",
+    note = "renamed to `EngineCaps` (`frust_gpu::TierCaps` is a different type); removed in 0.7"
+)]
 pub type TierCaps = EngineCaps;
 
 /// The [`wgpu::DownlevelFlags`] the engine (`frust-engine`) cannot run

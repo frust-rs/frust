@@ -106,6 +106,9 @@ pub use renderer::{DeferredPresent, InstallTimings, ResidentPage, ResidentPages,
 // result types, the selection function, the env-var name and the override
 // parsers are all gone from this surface along with the choice they
 // described.
-#[allow(deprecated, reason = "the alias is re-exported for one release")]
+#[allow(
+    deprecated,
+    reason = "the alias is re-exported through the 0.6 line and removed in 0.7"
+)]
 pub use tier::TierCaps;
 pub use tier::{ENGINE_REQUIRED_DOWNLEVEL_FLAGS, EngineCaps, EngineUnsupported, engine_support};
