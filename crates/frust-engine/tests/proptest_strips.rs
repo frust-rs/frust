@@ -41,10 +41,12 @@
 //! the amount of geometry produced before any culling happens. Their huge
 //! finite magnitudes are pinned deterministically instead: the bounded-compile
 //! regressions below compile every curve-carrying command at `1e20` through
-//! `1e300` against a time and an allocation ceiling. One lowering stays out of
-//! that bound — a dash pattern is expanded into sub-paths before any culling,
-//! so a dash period of `0.1` over a path `1e18` long never returns, and the
-//! generator pairs dashes with arbitrary paths.
+//! `1e300` against a time and an allocation ceiling. Dashes are inside that
+//! bound too: an oversized dashed stroke has only the stretch near the viewport
+//! dashed, and strokes solid where its pattern is sub-pixel on screen or would
+//! break that stretch into too many dashes, so a dash period of `0.1` over a
+//! path `1e18` long compiles in milliseconds; the bounded-dash regressions
+//! below pin it, and the generator pairs dashes with arbitrary paths.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -55,12 +57,14 @@ use frust_engine::{CompiledFrame, EngineError, SceneCompiler};
 use frust_scene::{
     CornerRadii, DashPattern, FontHandle, Glyph, GlyphRun, Scene, SceneBuilder, ShaderProgram,
 };
-use kurbo::{Affine, BezPath, Circle, Point, Rect, Shape};
+use kurbo::{Affine, BezPath, Cap, Circle, Join, Point, Rect, Shape, Stroke};
 use peniko::color::palette::css::{BLUE, GREEN, RED};
 use peniko::{Blob, Brush, Color, FontData, Gradient, ImageAlphaType, ImageData, ImageFormat};
 use proptest::prelude::*;
 use proptest::test_runner::{RngSeed, TestRunner};
+use vello_common::fearless_simd::Level;
 use vello_common::strip::Strip;
+use vello_common::strip_generator::{GenerationMode, StripGenerator, StripStorage};
 use vello_common::tile::Tile;
 
 /// Viewport every case compiles against. Small on purpose: the properties are
@@ -1028,6 +1032,12 @@ const MAGNITUDE_TIME_LIMIT: Duration = Duration::from_millis(250);
 /// within [`MAGNITUDE_TIME_LIMIT`], inside [`allocation_bound`] of its command
 /// count, and with well-packed strips.
 fn assert_compiles_within_bounds(case: &str, ops: &[Op], root: Affine) {
+    compile_within_bounds(case, ops, root);
+}
+
+/// [`assert_compiles_within_bounds`], handing back the frame for the caller to
+/// check what it draws.
+fn compile_within_bounds(case: &str, ops: &[Op], root: Affine) -> CompiledFrame {
     let scene = scene_of(ops);
     let commands = scene.commands().len();
     let mut compiler = SceneCompiler::new(VIEWPORT.0, VIEWPORT.1);
@@ -1049,6 +1059,7 @@ fn assert_compiles_within_bounds(case: &str, ops: &[Op], root: Affine) {
     );
     let failures = strip_packing_failures(&frame);
     assert!(failures.is_empty(), "{case}: {}", failures.join("\n"));
+    frame
 }
 
 /// The rectangle `(-size, 0) .. (size, 2 * size)`: under radii of `size` it
@@ -1173,6 +1184,431 @@ fn nested_scales_reaching_extreme_magnitudes_compile_within_bounds() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Strokes huge in user space only
+// ---------------------------------------------------------------------------
+
+/// A round-joined stroke of a cubic and a corner through the viewport, its
+/// path and width `size` times the pixels it covers once drawn under
+/// `Affine::scale(1 / size)`: the same 3-pixel stroke on screen at any size.
+fn shrunk_stroke(size: f64) -> Vec<Op> {
+    let at = |x: f64, y: f64| Point::new(x * size, y * size);
+    let mut path = BezPath::new();
+    path.move_to(at(8.0, 40.0));
+    path.curve_to(at(8.0, -10.0), at(60.0, 70.0), at(56.0, 14.0));
+    path.line_to(at(20.0, 20.0));
+    vec![Op::StrokePath {
+        path,
+        width: 3.0 * size,
+        dash: None,
+        brush: red(),
+    }]
+}
+
+/// Largest per-pixel coverage difference, out of 255, a stroke huge only in
+/// user space may show against the same stroke at unit scale. Its expansion
+/// tolerance is the unit-scale one scaled by the same factor as the path, so
+/// the two agree up to rounding; expanded at a quarter of a user unit
+/// instead, as `vello_common`'s stroker would, they differ by up to 88.
+const SHRUNK_STROKE_PIXEL_TOLERANCE: u8 = 4;
+
+/// Largest magnitude whose squared lengths stay finite in `f64`. kurbo's
+/// stroker forms those squares, so a stroke past it draws nothing on any
+/// path, and only its bounds are checked.
+const SQUARED_LENGTH_LIMIT: f64 = 1e150;
+
+/// A stroke `1e20` to `1e300` user units across, on screen a few dozen pixels
+/// under a scale that small: the device extent alone would leave it on
+/// `vello_common`'s stroker, which expands at a quarter of a user unit there.
+/// It compiles within the time and allocation bounds, and up to
+/// [`SQUARED_LENGTH_LIMIT`] covers what the same stroke drawn at unit scale
+/// covers.
+#[test]
+fn a_huge_user_space_stroke_under_a_tiny_scale_compiles_within_bounds() {
+    let reference =
+        compile_within_bounds("unit-scale stroke", &shrunk_stroke(1.0), Affine::IDENTITY);
+    for size in MAGNITUDES {
+        let case = format!("{size:e}-unit stroke under a {:e} scale", 1.0 / size);
+        let frame = compile_within_bounds(&case, &shrunk_stroke(size), Affine::scale(1.0 / size));
+        if size > SQUARED_LENGTH_LIMIT {
+            continue;
+        }
+        for y in 0..VIEWPORT.1 {
+            let expected = row_coverage(&reference, y);
+            let actual = row_coverage(&frame, y);
+            let worst = expected
+                .iter()
+                .zip(&actual)
+                .map(|(e, a)| e.abs_diff(*a))
+                .max()
+                .unwrap_or(0);
+            assert!(
+                worst <= SHRUNK_STROKE_PIXEL_TOLERANCE,
+                "{case}: row {y} differs by {worst}: {actual:?} vs {expected:?}"
+            );
+        }
+    }
+}
+
+/// A 2-pixel band along row 32 of the viewport, `128 * size` units long
+/// through the middle of it, dashed by `dash`: the dash twin of
+/// [`shrunk_stroke`]'s geometry, drawn under `translate(32, 0) * scale(1 / size)`.
+fn shrunk_dashed_band(size: f64, dash: Option<DashPattern>) -> Vec<Op> {
+    let mut path = BezPath::new();
+    path.move_to((-64.0 * size, 32.0 * size));
+    path.line_to((64.0 * size, 32.0 * size));
+    vec![Op::StrokePath {
+        path,
+        width: 2.0 * size,
+        dash,
+        brush: red(),
+    }]
+}
+
+/// The dash twin of [`a_huge_user_space_stroke_under_a_tiny_scale_compiles_within_bounds`]:
+/// a dashed band huge only in user space compiles within the time and
+/// allocation bounds at every magnitude. A pattern of 4 pixels on and off
+/// keeps the dashes the same band shows drawn at unit scale, up to
+/// [`SQUARED_LENGTH_LIMIT`]. A pattern of 4 user units is `8 / size` pixels a
+/// period, sub-pixel, so the visible stretch strokes solid, the same 2-pixel
+/// band; a whole-path lowering would iterate every one of its periods.
+#[test]
+fn a_huge_user_space_dashed_stroke_under_a_tiny_scale_compiles_within_bounds() {
+    let root_at = |size: f64| Affine::translate((32.0, 0.0)) * Affine::scale(1.0 / size);
+    let reference = compile_within_bounds(
+        "unit-scale dashed band",
+        &shrunk_dashed_band(1.0, Some(DashPattern::new(4.0, 4.0))),
+        root_at(1.0),
+    );
+    for size in MAGNITUDES {
+        let case = format!(
+            "4-pixel dashes of a {size:e}-unit band under a {:e} scale",
+            1.0 / size
+        );
+        let frame = compile_within_bounds(
+            &case,
+            &shrunk_dashed_band(size, Some(DashPattern::new(4.0 * size, 4.0 * size))),
+            root_at(size),
+        );
+        if size <= SQUARED_LENGTH_LIMIT {
+            for y in 0..VIEWPORT.1 {
+                let expected = row_coverage(&reference, y);
+                let actual = row_coverage(&frame, y);
+                let worst = expected
+                    .iter()
+                    .zip(&actual)
+                    .map(|(e, a)| e.abs_diff(*a))
+                    .max()
+                    .unwrap_or(0);
+                assert!(
+                    worst <= SHRUNK_STROKE_PIXEL_TOLERANCE,
+                    "{case}: row {y} differs by {worst}: {actual:?} vs {expected:?}"
+                );
+            }
+        }
+
+        let case = format!(
+            "sub-pixel dashes of a {size:e}-unit band under a {:e} scale",
+            1.0 / size
+        );
+        let frame = compile_within_bounds(
+            &case,
+            &shrunk_dashed_band(size, Some(DashPattern::new(4.0, 4.0))),
+            root_at(size),
+        );
+        if size <= SQUARED_LENGTH_LIMIT {
+            assert_solid_band(&case, &frame);
+        }
+    }
+}
+
+/// A zoomed-out ordinary stroke — a 4000-unit path drawn at a quarter scale
+/// on a 1024-pixel viewport — stays on `vello_common`'s stroker: the frame
+/// carries exactly the strips and coverage that stroker generates for it
+/// directly.
+#[test]
+fn a_zoomed_out_ordinary_stroke_stays_on_the_stroker() {
+    const LARGE: (u16, u16) = (1024, 1024);
+    let mut path = BezPath::new();
+    path.move_to((0.0, 0.0));
+    path.curve_to((4000.0, 0.0), (0.0, 4000.0), (4000.0, 4000.0));
+    path.line_to((0.0, 4000.0));
+    path.close_path();
+    let width = 6.0;
+    let root = Affine::translate((8.0, 8.0)) * Affine::scale(0.25);
+
+    let scene = scene_of(&[Op::StrokePath {
+        path: path.clone(),
+        width,
+        dash: None,
+        brush: red(),
+    }]);
+    let mut compiler = SceneCompiler::new(LARGE.0, LARGE.1);
+    let frame = compiler
+        .compile(&scene, root, LARGE)
+        .unwrap_or_else(|error| panic!("refused with {error:?}"));
+    let [draw] = frame.draws() else {
+        panic!("one stroke draws once, got {} draws", frame.draws().len());
+    };
+
+    let level = Level::try_detect().unwrap_or(Level::baseline());
+    let mut generator = StripGenerator::new(LARGE.0, LARGE.1, level);
+    let mut storage = StripStorage::new(GenerationMode::Append);
+    let stroke = Stroke::new(width)
+        .with_caps(Cap::Round)
+        .with_join(Join::Round);
+    generator.generate_stroked_path(path.iter(), &stroke, root, None, &mut storage, None);
+
+    assert_eq!(
+        &frame.strip_buf()[draw.strip_range.clone()],
+        storage.strips.as_slice()
+    );
+    assert_eq!(frame.alphas(), storage.alphas.as_slice());
+}
+
+// ---------------------------------------------------------------------------
+// Bounded dashes
+// ---------------------------------------------------------------------------
+
+/// The coverage every draw of `frame` leaves on pixel row `y`, the largest
+/// over all draws, read from the strips: a strip's alphas are stored a column
+/// of [`Tile::HEIGHT`] rows at a time, and a strip flagged `fill_gap` covers
+/// the whole gap back to the previous strip of its row.
+fn row_coverage(frame: &CompiledFrame, y: u16) -> [u8; VIEWPORT.0 as usize] {
+    let mut row = [0_u8; VIEWPORT.0 as usize];
+    let strips = frame.strip_buf();
+    let alphas = frame.alphas();
+    let tile_row = y - y % Tile::HEIGHT;
+    let offset = usize::from(y - tile_row);
+    for draw in frame.draws() {
+        let run = &strips[draw.strip_range.clone()];
+        let mut previous_end: Option<u16> = None;
+        for pair in run.windows(2) {
+            let (strip, next) = (&pair[0], &pair[1]);
+            if strip.is_sentinel() || strip.y != tile_row {
+                previous_end = None;
+                continue;
+            }
+            if let Some(end) = previous_end.filter(|_| strip.fill_gap()) {
+                for x in end..strip.x {
+                    if let Some(pixel) = row.get_mut(usize::from(x)) {
+                        *pixel = 255;
+                    }
+                }
+            }
+            let width = strip.width_to(next);
+            for column in 0..width {
+                let index = strip.alpha_idx() as usize
+                    + usize::from(column) * usize::from(Tile::HEIGHT)
+                    + offset;
+                let x = usize::from(strip.x + column);
+                if let (Some(pixel), Some(&alpha)) = (row.get_mut(x), alphas.get(index)) {
+                    *pixel = (*pixel).max(alpha);
+                }
+            }
+            previous_end = Some(strip.x + width);
+        }
+    }
+    row
+}
+
+/// A stroke of `path` `width` units wide, dashed by `dash`.
+fn dashed(path: BezPath, width: f64, dash: DashPattern) -> Op {
+    Op::StrokePath {
+        path,
+        width,
+        dash: Some(dash),
+        brush: red(),
+    }
+}
+
+/// A horizontal line `2 * size` long whose middle sits at the viewport's
+/// centre once drawn under `root`, with `y` its user-space row.
+fn long_line(size: f64, y: f64) -> BezPath {
+    let mut path = BezPath::new();
+    path.move_to((-size, y));
+    path.line_to((size, y));
+    path
+}
+
+/// A cubic `2 * size` long whose control points all lie on row 32: a single
+/// curve element whose device image is exactly the viewport's middle row, so
+/// what its stroke draws there does not depend on how its points round.
+fn long_flat_cubic(size: f64) -> BezPath {
+    let mut path = BezPath::new();
+    path.move_to((-size, 32.0));
+    path.curve_to((-0.3 * size, 32.0), (0.5 * size, 32.0), (size, 32.0));
+    path
+}
+
+/// Asserts that the two pixel rows a 2-pixel stroke along row 32 covers are
+/// covered across the whole viewport, and the rows beyond them not at all.
+fn assert_solid_band(case: &str, frame: &CompiledFrame) {
+    for y in [31, 32] {
+        let row = row_coverage(frame, y);
+        assert!(
+            row.iter().all(|&alpha| alpha >= 250),
+            "{case}: row {y} must be covered solid, got {row:?}"
+        );
+    }
+    for y in [29, 34] {
+        let row = row_coverage(frame, y);
+        assert!(
+            row.iter().all(|&alpha| alpha == 0),
+            "{case}: row {y} lies outside the stroke, got {row:?}"
+        );
+    }
+}
+
+/// A dash period of `0.1` over a path `1e18` long — the input that used to
+/// keep the compiler dashing for ever — compiles within the time and
+/// allocation bounds, as a straight line and as a single cubic, and strokes
+/// solid: a tenth of a pixel is below the sub-pixel threshold.
+#[test]
+fn a_tenth_unit_dash_over_a_1e18_long_path_compiles_within_bounds_and_strokes_solid() {
+    let dash = DashPattern::new(0.05, 0.05);
+    for (shape, path) in [
+        ("line", long_line(1e18, 32.0)),
+        ("cubic", long_flat_cubic(1e18)),
+    ] {
+        let case = format!("0.1-period dash over a 1e18 {shape}");
+        let frame = compile_within_bounds(&case, &[dashed(path, 2.0, dash)], Affine::IDENTITY);
+        assert_solid_band(&case, &frame);
+    }
+    let case = "0.1-period dash over a 1e18 circle";
+    let frame = compile_within_bounds(
+        case,
+        &[dashed(straddling_circle(1e18), 2.0, dash)],
+        Affine::IDENTITY,
+    );
+    assert_eq!(frame.draws().len(), 1, "{case}: the stroke must draw");
+}
+
+/// An ordinary 8-unit dash pattern over a 2-unit line drawn under a 1e18
+/// scale: the viewport sees a 64-pixel stretch around the line's middle, one
+/// unit along it. The phase carried across the skipped first unit decides
+/// what it shows — a dash covering that unit draws a solid band, a gap there
+/// draws nothing, and a phase that moves a dash over it draws the band again.
+#[test]
+fn an_ordinary_dash_under_a_1e18_scale_carries_its_phase_to_the_viewport() {
+    let root = Affine::translate((32.0, 32.0)) * Affine::scale(1e18);
+    let width = 2e-18;
+    let cases = [
+        ("dash over the middle", DashPattern::new(1.5, 6.5), true),
+        ("gap over the middle", DashPattern::new(0.5, 7.5), false),
+        (
+            "phase moving a dash over the middle",
+            DashPattern::new(0.5, 7.5).with_phase(-0.75),
+            true,
+        ),
+    ];
+    for (case, dash, covered) in cases {
+        let frame = compile_within_bounds(case, &[dashed(long_line(1.0, 0.0), width, dash)], root);
+        if covered {
+            assert_solid_band(case, &frame);
+        } else {
+            assert!(
+                frame.draws().is_empty(),
+                "{case}: nothing is visible, got a draw"
+            );
+        }
+    }
+}
+
+/// A dash count past the per-run ceiling on a visible path strokes solid: a
+/// stroke two million units wide keeps millions of units of a 1e18-long line
+/// near the viewport, millions of 2-pixel periods, and covers the whole
+/// viewport instead of dashing them all.
+#[test]
+fn a_dash_count_past_the_ceiling_strokes_the_visible_path_solid() {
+    let case = "2-period dash over a 1e18 line, 2e6 wide";
+    let ops = [dashed(
+        long_line(1e18, 32.0),
+        2e6,
+        DashPattern::new(1.0, 1.0),
+    )];
+    let frame = compile_within_bounds(case, &ops, Affine::IDENTITY);
+    for y in 0..VIEWPORT.1 {
+        let row = row_coverage(&frame, y);
+        assert!(
+            row.iter().all(|&alpha| alpha >= 250),
+            "{case}: row {y} must be covered solid, got {row:?}"
+        );
+    }
+}
+
+/// A sub-pixel device period strokes solid: a `1e-6` period, which
+/// `DashPattern::is_effective` already strikes out, and a `0.3` period, which
+/// it keeps but which lands below the sub-pixel threshold on screen, over a
+/// 1e18-long line under the identity.
+#[test]
+fn a_sub_pixel_device_period_strokes_solid() {
+    for (case, dash) in [
+        ("1e-6 period", DashPattern::new(5e-7, 5e-7)),
+        ("0.3 period", DashPattern::new(0.15, 0.15)),
+    ] {
+        let frame = compile_within_bounds(
+            case,
+            &[dashed(long_line(1e18, 32.0), 2.0, dash)],
+            Affine::IDENTITY,
+        );
+        assert_solid_band(case, &frame);
+    }
+}
+
+/// The control for the regressions above: a pixel-sized pattern over the
+/// same 1e18-long line still dashes the stretch the viewport shows, leaving
+/// gaps in the band.
+#[test]
+fn a_1e18_long_dashed_line_still_dashes_its_visible_stretch() {
+    let case = "8-period dash over a 1e18 line";
+    let ops = [dashed(
+        long_line(1e18, 32.0),
+        2.0,
+        DashPattern::new(4.0, 4.0),
+    )];
+    let frame = compile_within_bounds(case, &ops, Affine::IDENTITY);
+    let row = row_coverage(&frame, 31);
+    let covered = row.iter().filter(|&&alpha| alpha >= 250).count();
+    let empty = row.iter().filter(|&&alpha| alpha == 0).count();
+    assert!(
+        covered >= 16 && empty >= 8,
+        "{case}: the band must alternate dashes and gaps, got {row:?}"
+    );
+}
+
+/// Counterexample B of the dash gate: a line 300 pixels long on screen — within
+/// the split extent and, in user space, under the stroker's ceiling — dashed
+/// at a user-space period of `0.1`, a ten-millionth of a pixel. A gate that
+/// weighed only extents would hand the whole line to the whole-path dasher,
+/// which iterates its three billion periods; the period-aware gate strokes it
+/// solid. The same geometry at a period of 8 pixels still alternates.
+#[test]
+fn a_fine_dash_period_over_a_long_on_screen_line_compiles_within_bounds() {
+    let root = Affine::translate((-10.0, 32.0)) * Affine::scale(1e-6);
+    let line = || {
+        let mut path = BezPath::new();
+        path.move_to((0.0, 0.0));
+        path.line_to((3e8, 0.0));
+        path
+    };
+
+    let fine = [dashed(line(), 2e6, DashPattern::new(0.05, 0.05))];
+    let frame = compile_within_bounds("0.1-period dash over a 300-pixel line", &fine, root);
+    assert_solid_band("0.1-period dash over a 300-pixel line", &frame);
+
+    let case = "8-pixel period over a 300-pixel line";
+    let ordinary = [dashed(line(), 2e6, DashPattern::new(4e6, 4e6))];
+    let frame = compile_within_bounds(case, &ordinary, root);
+    let row = row_coverage(&frame, 31);
+    let covered = row.iter().filter(|&&alpha| alpha >= 250).count();
+    let empty = row.iter().filter(|&&alpha| alpha == 0).count();
+    assert!(
+        covered >= 16 && empty >= 8,
+        "{case}: the band must alternate dashes and gaps, got {row:?}"
+    );
 }
 
 /// The counting allocator actually counts — the allocation property is worth

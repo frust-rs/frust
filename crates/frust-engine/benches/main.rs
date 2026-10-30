@@ -17,7 +17,7 @@ mod scenes;
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 
-use kurbo::{Affine, Point, Shape};
+use kurbo::{Affine, BezPath, Point, Shape};
 use peniko::color::{ColorSpaceTag, DynamicColor, HueDirection};
 use peniko::{
     Brush, Color, ColorStop, ColorStops, Fill, Gradient, GradientKind, LinearGradientPosition,
@@ -30,7 +30,7 @@ use vello_common::strip_generator::{GenerationMode, StripGenerator, StripStorage
 use frust_engine::gpu::{GpuStrip, StripDraw};
 use frust_engine::{SceneCompiler, encode_brush};
 
-use frust_scene::Scene;
+use frust_scene::{Scene, SceneBuilder};
 use scenes::{
     BenchText, PHONE_VIEWPORT, S1Parts, S6_WIDTHS, S6Parts, VIEWPORT, glyph_run_placeholder,
     icon_set, rect_page, s5_like,
@@ -42,6 +42,32 @@ const RECT_COUNT: usize = 200;
 const ICON_COUNT: usize = 50;
 /// Number of glyphs in the compile group's reserved placeholder run.
 const GLYPH_COUNT: usize = 400;
+
+/// Number of glyph-sized outlines in the compile group's curve-heavy fill.
+const OUTLINE_COUNT: usize = 1000;
+
+/// `count` small (about 12 px) closed outlines mixing quadratic and cubic
+/// segments, laid out on a grid inside [`VIEWPORT`]: every fill builds one
+/// curve-capable `ViewportSplit`, and none is large enough to split, so the
+/// scene isolates the per-construction cost of that adapter.
+fn glyph_outlines(count: usize) -> Scene {
+    let mut scene = Scene::new();
+    let mut builder = SceneBuilder::new(&mut scene);
+    let columns = 40usize;
+    for i in 0..count {
+        let x = 8.0 + (i % columns) as f64 * 24.0;
+        let y = 8.0 + (i / columns) as f64 * 24.0;
+        let mut path = BezPath::new();
+        path.move_to((x, y + 6.0));
+        path.quad_to((x, y), (x + 6.0, y));
+        path.curve_to((x + 10.0, y), (x + 12.0, y + 4.0), (x + 12.0, y + 8.0));
+        path.quad_to((x + 12.0, y + 12.0), (x + 6.0, y + 12.0));
+        path.curve_to((x + 2.0, y + 12.0), (x, y + 10.0), (x, y + 6.0));
+        path.close_path();
+        builder.fill_path(path, Brush::Solid(Color::from_rgba8(20, 20, 20, 255)));
+    }
+    scene
+}
 
 /// `SceneCompiler::compile` over the three fixed-size fixtures the task
 /// names: a rectangle-heavy page, a path-heavy icon set, and a glyph-run
@@ -81,6 +107,20 @@ fn compile_group(c: &mut Criterion) {
         b.iter(|| {
             let frame = compiler
                 .compile(black_box(&glyphs), Affine::IDENTITY, VIEWPORT)
+                .expect("fixture scene compiles");
+            black_box(frame.draws().len());
+        });
+    });
+
+    // Fill-heavy: many small mixed quad/cubic outlines, none needing a
+    // viewport split — exposes the fixed cost of constructing a
+    // `ViewportSplit` per curve-capable fill.
+    let outlines = glyph_outlines(OUTLINE_COUNT);
+    group.bench_function("glyph_outlines_1000", |b| {
+        let mut compiler = SceneCompiler::new(VIEWPORT.0, VIEWPORT.1);
+        b.iter(|| {
+            let frame = compiler
+                .compile(black_box(&outlines), Affine::IDENTITY, VIEWPORT)
                 .expect("fixture scene compiles");
             black_box(frame.draws().len());
         });
