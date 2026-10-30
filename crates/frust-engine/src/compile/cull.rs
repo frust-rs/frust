@@ -103,9 +103,19 @@ const STACK_CAPACITY: usize = MAX_SPLIT_DEPTH as usize + 1;
 /// before dividing it by the transform's scale to work in user space.
 const STROKE_TOLERANCE: f64 = 0.25;
 
-/// Smallest tolerance an oversized stroke is expanded at, as a fraction of
-/// the larger of the stroke's reach and its largest curve piece: `2^-40`.
+/// Smallest device-space tolerance an oversized stroke is expanded at, as a
+/// fraction of the larger of the stroke's device reach and its largest kept
+/// curve piece's device extent: `2^-40`.
 const STROKE_RELATIVE_TOLERANCE: f64 = 1.0 / (1_u64 << 40) as f64;
+
+/// Largest stroke, in multiples of the user-space tolerance `vello_common`'s
+/// stroker would expand it at, that is left to that stroker: `2^32`. A stroke
+/// within the split extent at a scale of one or more spans under `2^17`
+/// tolerances even on an 8K display, and below a scale of one the tolerance
+/// is a quarter unit, so a zoomed-out 4000-unit page spans `2^14`: only a
+/// stroke many orders of magnitude larger in user space than anything it
+/// shows reaches the ceiling.
+const STROKER_EXTENT_CEILING: f64 = (1_u64 << 32) as f64;
 
 /// Smallest tolerance a rounded rectangle's corner arcs are approximated at,
 /// as a fraction of its largest radius: `2^-64`.
@@ -514,8 +524,10 @@ pub(crate) fn generate_fill(
 /// first, and the sub-path count that lowering produces is its own.
 ///
 /// A stroke whose [`stroke_device_extent`] is within the cull viewport's split
-/// extent goes to the generator's own stroker unchanged: its expansion
-/// flattens at on-screen cost already. A larger one is expanded here, in user
+/// extent, and whose user-space extent is within [`STROKER_EXTENT_CEILING`]
+/// times the tolerance the generator's own stroker expands it at
+/// ([`stroker_tolerance`]), goes to that stroker unchanged: its expansion
+/// flattens at on-screen cost already. Any other is expanded here, in user
 /// space, and the expansion is filled through [`generate_fill`]:
 ///
 /// 1. **The centerline is clipped.** It goes through the same split, in user
@@ -527,17 +539,21 @@ pub(crate) fn generate_fill(
 ///    expanded viewport, so no coverage inside it changes. What reaches the
 ///    expander near the viewport is a bounded number of curve pieces no larger
 ///    than the inflated rectangle's split extent, plus lines.
-/// 2. **The expansion tolerance is floored.** kurbo expands at the tolerance
-///    `vello_common`'s stroker would use, `0.25 / max(|a|, |d|, 1)` user units,
-///    raised to at least `2^-40` times the larger of the stroke's user-space
-///    reach and its largest remaining curve piece. Each element's expansion is
-///    then a scale-free problem of bounded relative size, so its output has a
-///    fixed ceiling at any magnitude. Under a similarity transform the floor
-///    stays below the 0.25-pixel tolerance — the outline is as exact as
-///    vello's own — until the stroke's device reach passes about 3e10 pixels,
-///    since a kept piece spans at most four inflated viewports, each about
-///    twice the reach across. Beyond that the outline error is at most `2^-40`
-///    of the larger of the device reach and the kept piece's device size.
+/// 2. **The expansion tolerance is set in device space.** It is 0.25 pixel,
+///    raised to at least `2^-40` of the larger of the stroke's device reach —
+///    its user-space reach times the transform's largest stretch `σ` — and
+///    the largest remaining curve piece's device extent, and kurbo expands at
+///    that divided by `σ`, in user units. No direction stretches by more than
+///    `σ`, so under every affine transform the outline lies within that many
+///    device pixels of the exact one: within 0.25 pixel — vello's own
+///    accuracy under a similarity transform — until the device reach passes
+///    about 3e10 pixels, since a kept piece spans at most four inflated
+///    viewports, each about twice the reach across, and within `2^-40` of the
+///    larger of the device reach and the kept piece's device extent beyond
+///    that. The user-space tolerance is never below `2^-40` of the user-space
+///    reach, and kurbo fits each element's offsets and arcs with a bounded
+///    number of curves at any tolerance, so the outline has a fixed ceiling
+///    per element at any magnitude.
 ///
 /// The cost of the whole branch is therefore bounded by the number of input
 /// elements, for every finite input, and the clip changes nothing a frame
@@ -557,7 +573,7 @@ pub(crate) fn generate_stroke<I>(
     let path = path.into_iter();
     let region = SplitRegion::around(cull_viewport(generator, clip.as_ref()));
 
-    if stroke_device_extent(path.clone(), stroke, transform) <= region.split_extent {
+    if fits_the_stroker(path.clone(), stroke, transform, region) {
         generator.generate_stroked_path(path, stroke, transform, None, storage, clip);
         return;
     }
@@ -573,8 +589,34 @@ pub(crate) fn generate_stroke<I>(
     );
 }
 
+/// Whether a stroke of `path` goes to `vello_common`'s own stroker: its
+/// [`stroke_device_extent`] is within the split extent of `region`, the cull
+/// viewport's own, and the larger side of its user-space box — the control
+/// box widened by [`stroke_reach`] — is within [`STROKER_EXTENT_CEILING`]
+/// times [`stroker_tolerance`]. A path with no points fits.
+fn fits_the_stroker(
+    path: impl Iterator<Item = PathEl>,
+    stroke: &Stroke,
+    transform: Affine,
+    region: SplitRegion,
+) -> bool {
+    let Some(bounds) = stroke_bounds(path, stroke) else {
+        return true;
+    };
+    device_extent(bounds, transform) <= region.split_extent
+        && bounds.width().max(bounds.height())
+            <= STROKER_EXTENT_CEILING * stroker_tolerance(transform)
+}
+
+/// The user-space tolerance `vello_common`'s stroker expands a stroke drawn
+/// under `transform` at: `0.25 / max(|a|, |d|, 1)`.
+fn stroker_tolerance(transform: Affine) -> f64 {
+    let [a, _, _, d, _, _] = transform.as_coeffs();
+    STROKE_TOLERANCE / a.abs().max(d.abs()).max(1.0)
+}
+
 /// Expands a stroke too large for `vello_common`'s stroker into `expanded`,
-/// in user space, by the clipped-centerline and floored-tolerance scheme
+/// in user space, by the clipped-centerline and device-space tolerance scheme
 /// [`generate_stroke`] describes. `region` is the cull viewport's own.
 fn expand_oversized_stroke<I>(
     path: I,
@@ -585,11 +627,26 @@ fn expand_oversized_stroke<I>(
 ) where
     I: Iterator<Item = PathEl> + Clone,
 {
+    expand_stroke_at(path, stroke, transform, region, STROKE_TOLERANCE, expanded);
+}
+
+/// [`expand_oversized_stroke`] with `base` pixels in place of
+/// [`STROKE_TOLERANCE`] as the device-space tolerance the floor raises.
+fn expand_stroke_at<I>(
+    path: I,
+    stroke: &Stroke,
+    transform: Affine,
+    region: SplitRegion,
+    base: f64,
+    expanded: &mut StrokeCtx,
+) where
+    I: Iterator<Item = PathEl> + Clone,
+{
     let reach = stroke_reach(stroke);
     let [a, b, c, d, _, _] = transform.as_coeffs();
     let region = region.inflate(reach * (a.abs() + c.abs()), reach * (b.abs() + d.abs()));
     let centerline = ViewportSplit::centerline(path, transform, region);
-    let tolerance = expansion_tolerance(centerline.clone(), reach, transform);
+    let tolerance = expansion_tolerance(centerline.clone(), reach, transform, base);
     kurbo::stroke_with(
         centerline,
         stroke,
@@ -600,15 +657,21 @@ fn expand_oversized_stroke<I>(
 }
 
 /// The user-space tolerance an oversized stroke's clipped `centerline` is
-/// expanded at: `vello_common`'s own, floored at [`STROKE_RELATIVE_TOLERANCE`]
-/// of the larger of `reach` and the largest curve piece's extent. A size that
-/// overflows yields the largest finite tolerance rather than an infinite one.
+/// expanded at: `base` device pixels, floored at [`STROKE_RELATIVE_TOLERANCE`]
+/// of the larger of the device reach — `reach` times the [`largest_stretch`]
+/// of `transform` — and the largest curve piece's device extent, divided by
+/// that stretch. A tolerance that overflows, or a transform that stretches
+/// nothing, yields the largest finite tolerance rather than an infinite one.
 fn expansion_tolerance(
     centerline: impl Iterator<Item = PathEl>,
     reach: f64,
     transform: Affine,
+    base: f64,
 ) -> f64 {
-    let mut size = reach;
+    let [a, b, c, d, _, _] = transform.as_coeffs();
+    let linear = Affine::new([a, b, c, d, 0.0, 0.0]);
+    let stretch = largest_stretch(transform);
+    let mut size = reach * stretch;
     let mut start = Point::ZERO;
     let mut current = Point::ZERO;
     for el in centerline {
@@ -630,13 +693,11 @@ fn expansion_tolerance(
             PathEl::CurveTo(p1, p2, p3) => Piece::cubic(current, p1, p2, p3),
         };
         current = piece.end();
-        size = size.max(piece.extent());
+        size = size.max(piece.mapped(linear).extent());
     }
 
-    let [a, _, _, d, _, _] = transform.as_coeffs();
-    let tolerance =
-        (STROKE_TOLERANCE / a.abs().max(d.abs()).max(1.0)).max(STROKE_RELATIVE_TOLERANCE * size);
-    if tolerance.is_finite() {
+    let tolerance = base.max(STROKE_RELATIVE_TOLERANCE * size) / stretch;
+    if tolerance.is_finite() && tolerance > 0.0 {
         tolerance
     } else {
         f64::MAX
@@ -666,6 +727,20 @@ fn stroke_device_extent(
     stroke: &Stroke,
     transform: Affine,
 ) -> f64 {
+    stroke_bounds(path, stroke).map_or(0.0, |bounds| device_extent(bounds, transform))
+}
+
+/// The larger side of the device-space box bounding user-space `bounds`
+/// under `transform`.
+fn device_extent(bounds: Rect, transform: Affine) -> f64 {
+    let device = transform.transform_rect_bbox(bounds);
+    device.width().max(device.height())
+}
+
+/// The user-space box bounding everything a stroke of `path` can cover: its
+/// control box widened by [`stroke_reach`] on every side. `None` for a path
+/// with no points.
+fn stroke_bounds(path: impl Iterator<Item = PathEl>, stroke: &Stroke) -> Option<Rect> {
     let mut control: Option<Rect> = None;
     let mut include = |p: Point| {
         control = Some(control.map_or(Rect::from_points(p, p), |r| r.union_pt(p)));
@@ -685,12 +760,8 @@ fn stroke_device_extent(
             PathEl::ClosePath => {}
         }
     }
-    let Some(control) = control else {
-        return 0.0;
-    };
     let reach = stroke_reach(stroke);
-    let device = transform.transform_rect_bbox(control.inflate(reach, reach));
-    device.width().max(device.height())
+    control.map(|control| control.inflate(reach, reach))
 }
 
 /// Generate the strips for `path` stroked with `stroke` and broken into
@@ -1174,10 +1245,11 @@ mod tests {
     use frust_scene::DashPattern;
     use kurbo::{
         BezPath, Circle, CubicBez, ParamCurve, ParamCurveNearest, PathSeg, QuadBez,
-        RoundedRectRadii,
+        RoundedRectRadii, Vec2,
     };
     use vello_common::fearless_simd::Level;
     use vello_common::strip_generator::GenerationMode;
+    use vello_common::tile::Tile;
 
     const VIEWPORT: Rect = Rect::new(0.0, 0.0, 800.0, 600.0);
 
@@ -1790,6 +1862,432 @@ mod tests {
             });
         }
         winding
+    }
+
+    /// Asserts that `outline`, a device-space stroke outline, covers each of
+    /// `samples` exactly when the true stroke does — when its `offset` from the
+    /// centerline is under `half_width` — skipping a sample within
+    /// [`BAND_MARGIN`] of the band's edge.
+    fn assert_band(
+        case: &str,
+        outline: &BezPath,
+        samples: impl IntoIterator<Item = Point>,
+        offset: impl Fn(Point) -> f64,
+        half_width: f64,
+    ) {
+        for p in samples {
+            let distance = offset(p);
+            if (distance - half_width).abs() < BAND_MARGIN {
+                continue;
+            }
+            let inside = far_safe_winding(outline, p) != 0;
+            assert_eq!(inside, distance < half_width, "{case}, at {p:?}");
+        }
+    }
+
+    /// How far inside or outside a stroke band a sampled point must lie to be
+    /// checked: the 0.25-pixel outline bound plus a margin for the sample.
+    const BAND_MARGIN: f64 = 0.3;
+
+    /// The traced anisotropic counterexample: under a `1e10 × 1` scale, a
+    /// cubic `1e4` units tall and a few billionths wide, whose device image is
+    /// an arch 30 pixels deep, carries a stroke `2e-10` units wide — one pixel
+    /// of device reach either side. A floor measured in user space is a few
+    /// billionths of a unit across a kept piece thousands of units tall, which
+    /// the `1e10` stretch makes tens of pixels and kurbo's collinearity test
+    /// turns into the piece's chord, pixels off the arch; measured in device
+    /// space the band stays where the arch is, wherever the viewport sits
+    /// along it.
+    #[test]
+    fn an_anisotropic_stroke_keeps_its_band_within_the_device_bound() {
+        let viewport = Rect::new(0.0, 0.0, 1024.0, 1024.0);
+        let region = SplitRegion::around(viewport);
+        let mut arch = BezPath::new();
+        arch.move_to((0.0, -5000.0));
+        arch.curve_to((4e-9, -5000.0), (4e-9, 5000.0), (0.0, 5000.0));
+        for shift in [512.0, 2000.0, 3500.0] {
+            let transform =
+                Affine::translate((500.0, shift)) * Affine::scale_non_uniform(1e10, 1.0);
+            let device = CubicBez::new(
+                transform * Point::new(0.0, -5000.0),
+                transform * Point::new(4e-9, -5000.0),
+                transform * Point::new(4e-9, 5000.0),
+                transform * Point::new(0.0, 5000.0),
+            );
+            // The arch is monotonic in y, so a row's centerline point is the
+            // one bisection on y finds; across the viewport the arch moves
+            // under a hundredth of a pixel sideways per row, so its band spans
+            // one pixel either side of that point, well inside the margin.
+            let centerline_x = |y: f64| {
+                let (mut t0, mut t1) = (0.0, 1.0);
+                for _ in 0..80 {
+                    let t = 0.5 * (t0 + t1);
+                    if device.eval(t).y < y {
+                        t0 = t;
+                    } else {
+                        t1 = t;
+                    }
+                }
+                device.eval(0.5 * (t0 + t1)).x
+            };
+            let samples: Vec<Point> = (0..64)
+                .flat_map(|row| {
+                    let y = f64::from(row) * 16.0 + 3.7;
+                    let x = centerline_x(y);
+                    (0..=48).map(move |step| Point::new(x - 6.0 + f64::from(step) * 0.25, y))
+                })
+                .collect();
+            for (style, base) in stroke_styles() {
+                let stroke = Stroke {
+                    width: 2e-10,
+                    ..base.clone()
+                };
+                assert!(
+                    !fits_the_stroker(arch.iter(), &stroke, transform, region),
+                    "{style} must take the oversized branch"
+                );
+                let mut expanded = StrokeCtx::default();
+                expand_oversized_stroke(arch.iter(), &stroke, transform, region, &mut expanded);
+                let outline = transform * expanded.output().clone();
+                assert_band(
+                    &format!("{style} stroke of the 1e10 × 1 arch shifted {shift}"),
+                    &outline,
+                    samples.iter().copied(),
+                    |p| (p.x - centerline_x(p.y)).abs(),
+                    1.0,
+                );
+            }
+        }
+    }
+
+    /// A thin stroke along a huge parabola turned 45 degrees keeps its band:
+    /// the transform's coefficients are each `1/√2` of its stretch, so a
+    /// tolerance derived from them alone would exceed the 0.25-pixel bound.
+    #[test]
+    fn a_rotated_thin_stroke_of_a_huge_curve_keeps_its_band_inside_the_viewport() {
+        let region = stroke_region();
+        let mut parabola = BezPath::new();
+        parabola.move_to((-1.0, 1.0));
+        parabola.quad_to((0.0, -1.0), (1.0, 1.0));
+        let turn = std::f64::consts::FRAC_PI_4;
+        let direction = Vec2::new(turn.cos(), turn.sin());
+        for scale in [1e9, 1e20, 1e25] {
+            let transform =
+                Affine::translate((32.0, 32.0)) * Affine::rotate(turn) * Affine::scale(scale);
+            let half_width = 1.5;
+            for (style, base) in stroke_styles() {
+                let stroke = Stroke {
+                    width: 2.0 * half_width / scale,
+                    ..base.clone()
+                };
+                assert!(!fits_the_stroker(
+                    parabola.iter(),
+                    &stroke,
+                    transform,
+                    region
+                ));
+                let mut expanded = StrokeCtx::default();
+                expand_oversized_stroke(parabola.iter(), &stroke, transform, region, &mut expanded);
+                let outline = transform * expanded.output().clone();
+                let samples = (0..=64).flat_map(|ix| {
+                    (0..=64).map(move |iy| {
+                        Point::new(f64::from(ix) + 0.37, f64::from(iy) * 0.98 + 0.11)
+                    })
+                });
+                assert_band(
+                    &format!("{style} stroke at scale {scale:e}, turned 45 degrees"),
+                    &outline,
+                    samples,
+                    |p| direction.cross(p - Point::new(32.0, 32.0)).abs(),
+                    half_width,
+                );
+            }
+        }
+    }
+
+    /// Oversized strokes under strongly anisotropic and sheared transforms
+    /// expand to a bounded outline in bounded time, at magnitudes up to 1e300:
+    /// the tolerance follows the device size, so a stretch of `1e10` along one
+    /// axis and `1e-10` along the other leaves the expansion bounded.
+    #[test]
+    fn oversized_strokes_under_anisotropic_transforms_expand_at_bounded_cost() {
+        let region = stroke_region();
+        let mut generator =
+            StripGenerator::new(STROKE_VIEWPORT.0, STROKE_VIEWPORT.1, Level::baseline());
+        let transforms = [
+            Affine::scale_non_uniform(1e10, 1.0),
+            Affine::scale_non_uniform(1.0, 1e-10),
+            Affine::rotate(0.3) * Affine::scale_non_uniform(1e10, 1e-10),
+            Affine::new([1.0, 0.0, 1e10, 1.0, 0.0, 0.0]),
+        ];
+        for size in [1e20, 1e100, 1e300] {
+            for transform in transforms {
+                for (style, base) in stroke_styles() {
+                    for width in [2.0, size] {
+                        let stroke = Stroke {
+                            width,
+                            ..base.clone()
+                        };
+                        for (shape, path) in stroke_centerlines(size) {
+                            let case = format!(
+                                "{style} {shape} at {size:e}, width {width:e}, under {transform:?}"
+                            );
+                            let started = Instant::now();
+                            let mut expanded = StrokeCtx::default();
+                            expand_oversized_stroke(
+                                path.iter(),
+                                &stroke,
+                                transform,
+                                region,
+                                &mut expanded,
+                            );
+                            let outline = expanded.output().elements().len();
+                            let mut storage = StripStorage::new(GenerationMode::Append);
+                            generate_stroke(
+                                &mut generator,
+                                path.iter(),
+                                &stroke,
+                                transform,
+                                &mut storage,
+                                None,
+                            );
+                            let elapsed = started.elapsed();
+                            assert!(
+                                outline <= STROKE_OUTLINE_LIMIT,
+                                "{case} expanded to {outline} elements"
+                            );
+                            assert!(elapsed < STROKE_TIME_LIMIT, "{case} took {elapsed:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The stroker keeps every stroke it handled before the user-space
+    /// ceiling — a 4000-unit path zoomed out to a quarter on a large viewport,
+    /// a viewport-sized one at a device scale of three — and gives up one whose
+    /// user-space extent is past [`STROKER_EXTENT_CEILING`] of its tolerance
+    /// however small it is on screen, the ceiling itself pinned on either side.
+    #[test]
+    fn the_stroker_keeps_ordinary_strokes_and_gives_up_huge_user_space_ones() {
+        let large = SplitRegion::around(Rect::new(0.0, 0.0, 1920.0, 1080.0));
+        let mut zoomed_out = BezPath::new();
+        zoomed_out.move_to((0.0, 0.0));
+        zoomed_out.curve_to((4000.0, 0.0), (0.0, 4000.0), (4000.0, 4000.0));
+        zoomed_out.line_to((0.0, 4000.0));
+        assert!(fits_the_stroker(
+            zoomed_out.iter(),
+            &round(4.0),
+            Affine::scale(0.25),
+            large
+        ));
+        let region = stroke_region();
+        let mut on_screen = BezPath::new();
+        on_screen.move_to((1.0, 1.0));
+        on_screen.quad_to((20.0, 0.0), (20.0, 20.0));
+        assert!(fits_the_stroker(
+            on_screen.iter(),
+            &round(1.0),
+            Affine::scale(3.0),
+            region
+        ));
+
+        let huge = 1e100;
+        let tiny = Affine::scale(1.0 / huge);
+        for (_, path) in stroke_centerlines(huge) {
+            assert!(stroke_device_extent(path.iter(), &round(huge), tiny) <= region.split_extent);
+            assert!(!fits_the_stroker(path.iter(), &round(huge), tiny, region));
+        }
+
+        // Under the identity the stroker's tolerance is 0.25 units, so the
+        // ceiling sits at a user-space extent of 2^30 units: a line just
+        // inside it keeps the stroker under a scale that leaves it a
+        // thousandth of a pixel on screen, one just past it does not.
+        let ceiling = STROKER_EXTENT_CEILING * STROKE_TOLERANCE;
+        let shrink = Affine::scale(1e-12);
+        for (length, fits) in [(0.999 * ceiling, true), (1.001 * ceiling, false)] {
+            let mut line = BezPath::new();
+            line.move_to((0.0, 0.0));
+            line.line_to((length, 0.0));
+            assert_eq!(
+                fits_the_stroker(line.iter(), &Stroke::new(0.0), shrink, region),
+                fits,
+                "a {length:e}-unit line"
+            );
+        }
+    }
+
+    /// The coverage `storage` leaves on each pixel of the stroke viewport,
+    /// row-major, read from its strips: a strip's alphas are stored a column
+    /// of [`Tile::HEIGHT`] rows at a time, and a strip flagged `fill_gap`
+    /// covers the whole gap back to the previous strip of its row.
+    fn coverage(storage: &StripStorage) -> Vec<u8> {
+        let width = usize::from(STROKE_VIEWPORT.0);
+        let height = usize::from(STROKE_VIEWPORT.1);
+        let rows = usize::from(Tile::HEIGHT);
+        let mut pixels = vec![0_u8; width * height];
+        let mut set = |x: usize, y: usize, alpha: u8| {
+            if x < width && y < height {
+                let pixel = &mut pixels[y * width + x];
+                *pixel = (*pixel).max(alpha);
+            }
+        };
+        let mut previous_end: Option<(u16, u16)> = None;
+        for pair in storage.strips.windows(2) {
+            let (strip, next) = (&pair[0], &pair[1]);
+            if strip.is_sentinel() {
+                previous_end = None;
+                continue;
+            }
+            if let Some((_, end)) = previous_end.filter(|&(y, _)| y == strip.y && strip.fill_gap())
+            {
+                for x in end..strip.x {
+                    for row in 0..rows {
+                        set(usize::from(x), usize::from(strip.y) + row, 255);
+                    }
+                }
+            }
+            let strip_width = strip.width_to(next);
+            for column in 0..usize::from(strip_width) {
+                for row in 0..rows {
+                    let index = strip.alpha_idx() as usize + column * rows + row;
+                    if let Some(&alpha) = storage.alphas.get(index) {
+                        set(
+                            usize::from(strip.x) + column,
+                            usize::from(strip.y) + row,
+                            alpha,
+                        );
+                    }
+                }
+            }
+            previous_end = Some((strip.y, strip.x + strip_width));
+        }
+        pixels
+    }
+
+    /// Largest per-pixel coverage difference, out of 255, the oversized branch
+    /// may show against `vello_common`'s stroker on a stroke both can draw.
+    const PARITY_PIXEL_TOLERANCE: u8 = 4;
+
+    /// Largest total coverage difference, in pixels, the oversized branch may
+    /// show against `vello_common`'s stroker on a stroke both can draw.
+    const PARITY_AREA_TOLERANCE: f64 = 0.5;
+
+    /// Moderate round-joined, round-capped strokes — a polyline, a curve and
+    /// a self-intersecting loop, at three widths — each drawn by
+    /// `vello_common`'s stroker and, forced, by the oversized branch at a
+    /// `base` device tolerance, under the identity, a uniform scale of three
+    /// and a 30-degree rotation. Yields the case name and whether the two
+    /// coverages agree within the parity tolerances.
+    fn stroker_parity(base: f64) -> Vec<(String, bool)> {
+        let mut polyline = BezPath::new();
+        polyline.move_to((6.0, 50.0));
+        polyline.line_to((20.0, 8.0));
+        polyline.line_to((34.0, 44.0));
+        polyline.line_to((56.0, 12.0));
+        let mut curve = BezPath::new();
+        curve.move_to((8.0, 40.0));
+        curve.curve_to((8.0, -10.0), (60.0, 70.0), (56.0, 14.0));
+        curve.quad_to((40.0, 60.0), (20.0, 20.0));
+        let mut ring = BezPath::new();
+        ring.move_to((10.0, 32.0));
+        ring.curve_to((70.0, -20.0), (70.0, 84.0), (10.0, 32.0));
+        let centre = Affine::translate((32.0, 32.0));
+        let transforms = [
+            ("the identity", Affine::IDENTITY),
+            (
+                "a scale of 3",
+                centre * Affine::scale(3.0) * centre.inverse(),
+            ),
+            (
+                "a 30-degree rotation",
+                centre * Affine::rotate(30_f64.to_radians()) * centre.inverse(),
+            ),
+        ];
+        let region = stroke_region();
+        let mut cases = Vec::new();
+        for (name, transform) in transforms {
+            for (shape, path) in [("polyline", &polyline), ("curve", &curve), ("loop", &ring)] {
+                for width in [1.0, 3.0, 8.0] {
+                    let stroke = round(width);
+                    let stroker = coverage(&strips_of(|generator, storage| {
+                        generator.generate_stroked_path(
+                            path.iter(),
+                            &stroke,
+                            transform,
+                            None,
+                            storage,
+                            None,
+                        );
+                    }));
+                    let oversized = coverage(&strips_of(|generator, storage| {
+                        let mut expanded = StrokeCtx::default();
+                        expand_stroke_at(
+                            path.iter(),
+                            &stroke,
+                            transform,
+                            region,
+                            base,
+                            &mut expanded,
+                        );
+                        generate_fill(
+                            generator,
+                            expanded.output().iter(),
+                            transform,
+                            storage,
+                            None,
+                        );
+                    }));
+                    let pixel = stroker
+                        .iter()
+                        .zip(&oversized)
+                        .map(|(a, b)| a.abs_diff(*b))
+                        .max()
+                        .unwrap_or(0);
+                    let area = stroker
+                        .iter()
+                        .zip(&oversized)
+                        .map(|(a, b)| f64::from(a.abs_diff(*b)))
+                        .sum::<f64>()
+                        / 255.0;
+                    cases.push((
+                        format!("{shape} {width} wide under {name}: {pixel}/255, {area:.3} px"),
+                        pixel <= PARITY_PIXEL_TOLERANCE && area <= PARITY_AREA_TOLERANCE,
+                    ));
+                }
+            }
+        }
+        cases
+    }
+
+    /// [`STROKE_TOLERANCE`] and the oversized branch's use of it copy a
+    /// private `vello_common` rule. On every stroke both can draw, the branch
+    /// forced at that tolerance covers what `vello_common`'s stroker covers,
+    /// within [`PARITY_PIXEL_TOLERANCE`] per pixel and
+    /// [`PARITY_AREA_TOLERANCE`] in total.
+    #[test]
+    fn the_oversized_branch_matches_the_stroker_on_moderate_strokes() {
+        for (case, agrees) in stroker_parity(STROKE_TOLERANCE) {
+            assert!(agrees, "{case}");
+        }
+    }
+
+    /// The negative control for the parity test: four times the copied
+    /// tolerance draws curves that disagree with `vello_common`'s stroker past
+    /// the parity tolerances under each transform, so the test would catch
+    /// that copy drifting.
+    #[test]
+    fn the_stroker_parity_test_fails_for_four_times_the_tolerance() {
+        let cases = stroker_parity(4.0 * STROKE_TOLERANCE);
+        for transform in ["the identity", "a scale of 3", "a 30-degree rotation"] {
+            assert!(
+                cases
+                    .iter()
+                    .any(|(case, agrees)| case.contains(transform) && !agrees),
+                "nothing under {transform} disagrees: {cases:?}"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------

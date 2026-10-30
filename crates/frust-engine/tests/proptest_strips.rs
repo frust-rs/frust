@@ -57,12 +57,14 @@ use frust_engine::{CompiledFrame, EngineError, SceneCompiler};
 use frust_scene::{
     CornerRadii, DashPattern, FontHandle, Glyph, GlyphRun, Scene, SceneBuilder, ShaderProgram,
 };
-use kurbo::{Affine, BezPath, Circle, Point, Rect, Shape};
+use kurbo::{Affine, BezPath, Cap, Circle, Join, Point, Rect, Shape, Stroke};
 use peniko::color::palette::css::{BLUE, GREEN, RED};
 use peniko::{Blob, Brush, Color, FontData, Gradient, ImageAlphaType, ImageData, ImageFormat};
 use proptest::prelude::*;
 use proptest::test_runner::{RngSeed, TestRunner};
+use vello_common::fearless_simd::Level;
 use vello_common::strip::Strip;
+use vello_common::strip_generator::{GenerationMode, StripGenerator, StripStorage};
 use vello_common::tile::Tile;
 
 /// Viewport every case compiles against. Small on purpose: the properties are
@@ -1182,6 +1184,116 @@ fn nested_scales_reaching_extreme_magnitudes_compile_within_bounds() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Strokes huge in user space only
+// ---------------------------------------------------------------------------
+
+/// A round-joined stroke of a cubic and a corner through the viewport, its
+/// path and width `size` times the pixels it covers once drawn under
+/// `Affine::scale(1 / size)`: the same 3-pixel stroke on screen at any size.
+fn shrunk_stroke(size: f64) -> Vec<Op> {
+    let at = |x: f64, y: f64| Point::new(x * size, y * size);
+    let mut path = BezPath::new();
+    path.move_to(at(8.0, 40.0));
+    path.curve_to(at(8.0, -10.0), at(60.0, 70.0), at(56.0, 14.0));
+    path.line_to(at(20.0, 20.0));
+    vec![Op::StrokePath {
+        path,
+        width: 3.0 * size,
+        dash: None,
+        brush: red(),
+    }]
+}
+
+/// Largest per-pixel coverage difference, out of 255, a stroke huge only in
+/// user space may show against the same stroke at unit scale. Its expansion
+/// tolerance is the unit-scale one scaled by the same factor as the path, so
+/// the two agree up to rounding; expanded at a quarter of a user unit
+/// instead, as `vello_common`'s stroker would, they differ by up to 88.
+const SHRUNK_STROKE_PIXEL_TOLERANCE: u8 = 4;
+
+/// Largest magnitude whose squared lengths stay finite in `f64`. kurbo's
+/// stroker forms those squares, so a stroke past it draws nothing on any
+/// path, and only its bounds are checked.
+const SQUARED_LENGTH_LIMIT: f64 = 1e150;
+
+/// A stroke `1e20` to `1e300` user units across, on screen a few dozen pixels
+/// under a scale that small: the device extent alone would leave it on
+/// `vello_common`'s stroker, which expands at a quarter of a user unit there.
+/// It compiles within the time and allocation bounds, and up to
+/// [`SQUARED_LENGTH_LIMIT`] covers what the same stroke drawn at unit scale
+/// covers.
+#[test]
+fn a_huge_user_space_stroke_under_a_tiny_scale_compiles_within_bounds() {
+    let reference =
+        compile_within_bounds("unit-scale stroke", &shrunk_stroke(1.0), Affine::IDENTITY);
+    for size in MAGNITUDES {
+        let case = format!("{size:e}-unit stroke under a {:e} scale", 1.0 / size);
+        let frame = compile_within_bounds(&case, &shrunk_stroke(size), Affine::scale(1.0 / size));
+        if size > SQUARED_LENGTH_LIMIT {
+            continue;
+        }
+        for y in 0..VIEWPORT.1 {
+            let expected = row_coverage(&reference, y);
+            let actual = row_coverage(&frame, y);
+            let worst = expected
+                .iter()
+                .zip(&actual)
+                .map(|(e, a)| e.abs_diff(*a))
+                .max()
+                .unwrap_or(0);
+            assert!(
+                worst <= SHRUNK_STROKE_PIXEL_TOLERANCE,
+                "{case}: row {y} differs by {worst}: {actual:?} vs {expected:?}"
+            );
+        }
+    }
+}
+
+/// A zoomed-out ordinary stroke — a 4000-unit path drawn at a quarter scale
+/// on a 1024-pixel viewport — stays on `vello_common`'s stroker: the frame
+/// carries exactly the strips and coverage that stroker generates for it
+/// directly.
+#[test]
+fn a_zoomed_out_ordinary_stroke_stays_on_the_stroker() {
+    const LARGE: (u16, u16) = (1024, 1024);
+    let mut path = BezPath::new();
+    path.move_to((0.0, 0.0));
+    path.curve_to((4000.0, 0.0), (0.0, 4000.0), (4000.0, 4000.0));
+    path.line_to((0.0, 4000.0));
+    path.close_path();
+    let width = 6.0;
+    let root = Affine::translate((8.0, 8.0)) * Affine::scale(0.25);
+
+    let scene = scene_of(&[Op::StrokePath {
+        path: path.clone(),
+        width,
+        dash: None,
+        brush: red(),
+    }]);
+    let mut compiler = SceneCompiler::new(LARGE.0, LARGE.1);
+    let frame = compiler
+        .compile(&scene, root, LARGE)
+        .unwrap_or_else(|error| panic!("refused with {error:?}"));
+    let [draw] = frame.draws() else {
+        panic!("one stroke draws once, got {} draws", frame.draws().len());
+    };
+
+    let level = Level::try_detect().unwrap_or(Level::baseline());
+    let mut generator = StripGenerator::new(LARGE.0, LARGE.1, level);
+    let mut storage = StripStorage::new(GenerationMode::Append);
+    let stroke = Stroke::new(width)
+        .with_caps(Cap::Round)
+        .with_join(Join::Round);
+    generator.generate_stroked_path(path.iter(), &stroke, root, None, &mut storage, None);
+
+    assert_eq!(
+        &frame.strip_buf()[draw.strip_range.clone()],
+        storage.strips.as_slice()
+    );
+    assert_eq!(frame.alphas(), storage.alphas.as_slice());
 }
 
 // ---------------------------------------------------------------------------
