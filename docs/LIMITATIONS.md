@@ -6314,7 +6314,9 @@ wraps it in its own routing policy rather than trusting the defaults: the
 policy decides *which runs are offered* — keyed on the quantized (1/4-px)
 **device-space** size, the same `font_size × absorbed-uniform-scale` quantity
 glifo keys — and routes to outline strips any run whose device size changed
-inside an 8-frame window, any run above the size ceiling, any COLR-carrying
+inside an 8-frame window (a size that has once held still stays remembered for 600
+frames, at most 16 per font, so two sizes alternating slower than the window each pay it once
+and then both cache, while a sweep of ever-new sizes keeps animating), any run above the size ceiling, any COLR-carrying
 face (the tier cannot replay glifo's recorded COLR command stream and glifo
 offers no way to withdraw entries afterwards), any transform glifo will not
 absorb as a positive uniform scale, and any run whose demand would push the
@@ -6327,7 +6329,8 @@ deltas, not a texel guarantee: glifo exposes no release-build way to price
 the resident population, a glyph wider than its em is under-charged (the
 packer still refuses independently), and a run is charged its distinct glyph
 ids at admission, so subpixel-bucket variants can overshoot by that factor.
-glifo's `PendingClearRect`s and recorded page replays are re-offered every
+The atlas pass reports a glyph it could not place as `unrasterizable` (no raster) or `no_room`
+(the insert was refused) separately. glifo's `PendingClearRect`s and recorded page replays are re-offered every
 frame until the renderer acknowledges they were serviced, and glifo's
 eviction pass is deferred only while an unreplayed recording has outlived
 the entry-age window (a serial-based check — younger recordings name nothing

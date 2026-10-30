@@ -482,10 +482,10 @@ hidden slot) are in [LIMITATIONS.md](LIMITATIONS.md) § `apple-overlay-limits`.
   fires nothing. Android also reads the resolved brightness back over JNI after every appearance
   change and on any frame whose `nativeFrameSync` word reports a flip, so a Rust-forced theme reaches
   the status bar.
-- **Accessibility:** `frust-core`'s semantics pass reports `bounds` in logical pixels while accesskit
-  expects physical ones, so the desktop shell's `build_tree_update` stamps a root
-  `Affine::scale(window.scale_factor())` onto the `TreeUpdate` (left `None` at scale 1.0). The
-  mobile shells own their own bridges (`accesskit_android`, `accesskit_ios`).
+- **Accessibility:** `frust-core` reports semantics `bounds` in logical pixels, accesskit wants physical:
+  all three shells push one assembly, `frust-shell-common`'s `build_tree_update` / `tree_update_from_parts`,
+  whose root carries `Affine::scale(sanitize_scale(scale))` (none at 1.0) — window scale factor on desktop,
+  display scale on iOS, the frame's density on Android (`accesskit_android`, `accesskit_ios` do the delivery).
 - **Reduced motion** is the one host signal whose sensor is not the appearance sensor: Android
   watches the animator duration scale (`ContentObserver` plus an `onResume` re-read), iOS the UIKit
   notification plus an activation re-read, desktop has no source (winit exposes nothing). Delivery

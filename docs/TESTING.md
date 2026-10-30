@@ -857,8 +857,7 @@ user content into golden artifacts or CI logs.
 
 Performance claims use `benchmarks/PROTOCOL.md`; a golden run is not a
 benchmark. Do not infer performance from screenshot completion time.
-`benchmarks/harness/ab_matrix.sh --tier engine` drives the render-arm gate (`engine` is a labelled
-synonym of the script's own `default` arm — there is only one renderer now) across a caller-chosen
+`benchmarks/harness/ab_matrix.sh --raw-label <name>` drives the render gate (one `default` arm; raw series land under `<raw-root>/<device>/<label>/<arm>/<scenario>/`, `--force` overwrites a committed cell) across a caller-chosen
 `--scenarios` subset of S1-S8 — see `docs/RENDER_DEVELOPMENT.md`; the recorded tier A/B numbers
 live in git history (`git show f64be636:benchmarks/RESULTS.md`), since `benchmarks/RESULTS.md` holds
 only the Frust-vs-Flutter matrix (driven by `benchmarks/harness/matrix.sh`).
