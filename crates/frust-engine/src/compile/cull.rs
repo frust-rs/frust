@@ -523,7 +523,7 @@ pub(crate) fn generate_fill(
 /// `stroke` carries no dash pattern: a caller lowers dashes into sub-paths
 /// first, and the sub-path count that lowering produces is its own.
 ///
-/// A stroke whose [`stroke_device_extent`] is within the cull viewport's split
+/// A stroke whose device extent is within the cull viewport's split
 /// extent, and whose user-space extent is within [`STROKER_EXTENT_CEILING`]
 /// times the tolerance the generator's own stroker expands it at
 /// ([`stroker_tolerance`]), goes to that stroker unchanged: its expansion
@@ -590,7 +590,7 @@ pub(crate) fn generate_stroke<I>(
 }
 
 /// Whether a stroke of `path` goes to `vello_common`'s own stroker: its
-/// [`stroke_device_extent`] is within the split extent of `region`, the cull
+/// device extent is within the split extent of `region`, the cull
 /// viewport's own, and the larger side of its user-space box — the control
 /// box widened by [`stroke_reach`] — is within [`STROKER_EXTENT_CEILING`]
 /// times [`stroker_tolerance`]. A path with no points fits.
@@ -721,7 +721,9 @@ fn stroke_reach(stroke: &Stroke) -> f64 {
 
 /// The larger side of the device-space box bounding everything a stroke of
 /// `path` can cover: its control box widened by [`stroke_reach`] on every
-/// side, under `transform`. Zero for a path with no points.
+/// side, under `transform`. Zero for a path with no points. The gates decide
+/// on [`fits_the_stroker`]; the tests measure a stroke's screen size with this.
+#[cfg(test)]
 fn stroke_device_extent(
     path: impl Iterator<Item = PathEl>,
     stroke: &Stroke,
@@ -767,13 +769,12 @@ fn stroke_bounds(path: impl Iterator<Item = PathEl>, stroke: &Stroke) -> Option<
 /// Generate the strips for `path` stroked with `stroke` and broken into
 /// dashes by an effective `dash`, under `transform`.
 ///
-/// A stroke whose [`stroke_device_extent`] — of the undashed path — is within
-/// the cull viewport's split extent is dashed by [`dash_path`] over its whole
-/// length and handed to [`generate_stroke`], exactly as every other consumer
-/// of the display list lowers it. A larger one is lowered by
-/// [`dash_visible_stretch`], whose cost is bounded by the number of input
-/// elements for every finite input, and its result goes to [`generate_stroke`]
-/// in turn.
+/// A stroke that [`fits_the_stroker`] — of the undashed path — is dashed by
+/// [`dash_path`] over its whole length and handed to [`generate_stroke`],
+/// exactly as every other consumer of the display list lowers it. A larger one
+/// is lowered by [`dash_visible_stretch`], whose cost is bounded by the number
+/// of input elements for every finite input, and its result goes to
+/// [`generate_stroke`] in turn.
 pub(crate) fn generate_dashed_stroke(
     generator: &mut StripGenerator,
     path: &BezPath,
@@ -789,8 +790,12 @@ pub(crate) fn generate_dashed_stroke(
 }
 
 /// `path` broken into the dashes of `dash`: by [`dash_path`] when its stroke
-/// fits the split extent of `region`, the cull viewport's own, and by
-/// [`dash_visible_stretch`] otherwise.
+/// [`fits_the_stroker`] in `region`, the cull viewport's own, and by
+/// [`dash_visible_stretch`] otherwise. The gate is the predicate
+/// [`generate_stroke`] takes, so a dashed stroke is lowered whole only where
+/// the stroker would take it whole: a stroke within the split extent on screen
+/// but past [`STROKER_EXTENT_CEILING`] in user space never reaches
+/// [`dash_path`], which would iterate every one of its periods.
 fn dash_within(
     path: &BezPath,
     dash: DashPattern,
@@ -798,7 +803,7 @@ fn dash_within(
     transform: Affine,
     region: SplitRegion,
 ) -> BezPath {
-    if stroke_device_extent(path.iter(), stroke, transform) <= region.split_extent {
+    if fits_the_stroker(path.iter(), stroke, transform, region) {
         dash_path(path, dash)
     } else {
         dash_visible_stretch(path, dash, stroke, transform, region)
@@ -2528,6 +2533,69 @@ mod tests {
             let (a, b) = ends[0];
             assert!(!inside(region.bounds, transform * a), "{a:?}");
             assert!(!inside(region.bounds, transform * b), "{b:?}");
+        }
+    }
+
+    /// The dash gate gives up a dashed stroke the stroker gives up, however
+    /// small it is on screen. Each centerline of `1e100` units, dashed at 4
+    /// units and stroked `1e100` wide under a scale of `1e-100`, is 8e-100
+    /// pixels a period, so its kept runs strike solid, and it lowers in time:
+    /// the whole-path lowering would iterate about `1e100` of its periods. The
+    /// ceiling itself is pinned for a dashed line: just inside it the stroke
+    /// is dashed whole, just past it by the bounded lowering.
+    #[test]
+    fn the_dash_gate_gives_up_huge_user_space_strokes() {
+        let region = stroke_region();
+        let huge = 1e100;
+        let tiny = Affine::scale(1.0 / huge);
+        let stroke = round(huge);
+        let dash = DashPattern::new(4.0, 4.0);
+        for (shape, path) in stroke_centerlines(huge) {
+            assert!(
+                !fits_the_stroker(path.iter(), &stroke, tiny, region),
+                "{shape}"
+            );
+            let started = Instant::now();
+            let dashed = dash_within(&path, dash, &stroke, tiny, region);
+            let elapsed = started.elapsed();
+            assert!(elapsed < STROKE_TIME_LIMIT, "{shape} took {elapsed:?}");
+            assert!(dashed.elements().len() <= STROKE_OUTLINE_LIMIT, "{shape}");
+            // Each shape is about two pixels across on screen, so its whole
+            // centerline is one kept run, and it strokes solid: the lowering
+            // is the centerline itself, element for element.
+            assert_eq!(dashed.elements().len(), path.elements().len(), "{shape}");
+            for (a, e) in dashed.iter().zip(path.iter()) {
+                assert!(same_kind(a, e), "{shape}: {a:?} vs {e:?}");
+                assert_eq!(el_bits(a), el_bits(e), "{shape}: {a:?} vs {e:?}");
+            }
+        }
+
+        // Under a scale of one or less the stroker's tolerance is a quarter
+        // unit, so its ceiling sits at 2^30 units of centerline. Just inside it
+        // a line dashes whole, as `dash_path` lowers it; just past it the
+        // bounded lowering takes over. The shrink keeps both lines a sub-pixel
+        // period on screen, and the dash period keeps the whole-path lowering
+        // to a few dozen dashes.
+        let ceiling = STROKER_EXTENT_CEILING * STROKE_TOLERANCE;
+        let shrink = Affine::scale(1e-12);
+        let dash = DashPattern::new(ceiling / 64.0, ceiling / 64.0);
+        let zero = Stroke::new(0.0);
+        for (length, whole) in [(0.999 * ceiling, true), (1.001 * ceiling, false)] {
+            let mut line = BezPath::new();
+            line.move_to((0.0, 0.0));
+            line.line_to((length, 0.0));
+            let expected = if whole {
+                dash_path(&line, dash)
+            } else {
+                dash_visible_stretch(&line, dash, &zero, shrink, region)
+            };
+            assert_eq!(whole, expected.elements().len() > 2, "{length:e}-unit line");
+            let actual = dash_within(&line, dash, &zero, shrink, region);
+            assert_eq!(actual.elements().len(), expected.elements().len());
+            for (a, e) in actual.iter().zip(expected.iter()) {
+                assert!(same_kind(a, e), "{a:?} vs {e:?}");
+                assert_eq!(el_bits(a), el_bits(e), "{a:?} vs {e:?}");
+            }
         }
     }
 

@@ -1252,6 +1252,78 @@ fn a_huge_user_space_stroke_under_a_tiny_scale_compiles_within_bounds() {
     }
 }
 
+/// A 2-pixel band along row 32 of the viewport, `128 * size` units long
+/// through the middle of it, dashed by `dash`: the dash twin of
+/// [`shrunk_stroke`]'s geometry, drawn under `translate(32, 0) * scale(1 / size)`.
+fn shrunk_dashed_band(size: f64, dash: Option<DashPattern>) -> Vec<Op> {
+    let mut path = BezPath::new();
+    path.move_to((-64.0 * size, 32.0 * size));
+    path.line_to((64.0 * size, 32.0 * size));
+    vec![Op::StrokePath {
+        path,
+        width: 2.0 * size,
+        dash,
+        brush: red(),
+    }]
+}
+
+/// The dash twin of [`a_huge_user_space_stroke_under_a_tiny_scale_compiles_within_bounds`]:
+/// a dashed band huge only in user space compiles within the time and
+/// allocation bounds at every magnitude. A pattern of 4 pixels on and off
+/// keeps the dashes the same band shows drawn at unit scale, up to
+/// [`SQUARED_LENGTH_LIMIT`]. A pattern of 4 user units is `8 / size` pixels a
+/// period, sub-pixel, so the visible stretch strokes solid, the same 2-pixel
+/// band; a whole-path lowering would iterate every one of its periods.
+#[test]
+fn a_huge_user_space_dashed_stroke_under_a_tiny_scale_compiles_within_bounds() {
+    let root_at = |size: f64| Affine::translate((32.0, 0.0)) * Affine::scale(1.0 / size);
+    let reference = compile_within_bounds(
+        "unit-scale dashed band",
+        &shrunk_dashed_band(1.0, Some(DashPattern::new(4.0, 4.0))),
+        root_at(1.0),
+    );
+    for size in MAGNITUDES {
+        let case = format!(
+            "4-pixel dashes of a {size:e}-unit band under a {:e} scale",
+            1.0 / size
+        );
+        let frame = compile_within_bounds(
+            &case,
+            &shrunk_dashed_band(size, Some(DashPattern::new(4.0 * size, 4.0 * size))),
+            root_at(size),
+        );
+        if size <= SQUARED_LENGTH_LIMIT {
+            for y in 0..VIEWPORT.1 {
+                let expected = row_coverage(&reference, y);
+                let actual = row_coverage(&frame, y);
+                let worst = expected
+                    .iter()
+                    .zip(&actual)
+                    .map(|(e, a)| e.abs_diff(*a))
+                    .max()
+                    .unwrap_or(0);
+                assert!(
+                    worst <= SHRUNK_STROKE_PIXEL_TOLERANCE,
+                    "{case}: row {y} differs by {worst}: {actual:?} vs {expected:?}"
+                );
+            }
+        }
+
+        let case = format!(
+            "sub-pixel dashes of a {size:e}-unit band under a {:e} scale",
+            1.0 / size
+        );
+        let frame = compile_within_bounds(
+            &case,
+            &shrunk_dashed_band(size, Some(DashPattern::new(4.0, 4.0))),
+            root_at(size),
+        );
+        if size <= SQUARED_LENGTH_LIMIT {
+            assert_solid_band(&case, &frame);
+        }
+    }
+}
+
 /// A zoomed-out ordinary stroke — a 4000-unit path drawn at a quarter scale
 /// on a 1024-pixel viewport — stays on `vello_common`'s stroker: the frame
 /// carries exactly the strips and coverage that stroker generates for it
