@@ -167,14 +167,59 @@ fn g2_headless_target_usage_excludes_storage_binding() {
 }
 
 // ---------------------------------------------------------------------
-// E17: no unwrap()/expect(/panic!( outside #[cfg(test)] under
+// E17: no unwrap()/expect(/panic-family/assert-family macro outside #[cfg(test)] under
 // src/{cache,compile,gpu,schedule,renderer}.rs
 // ---------------------------------------------------------------------
 
 /// Substrings that fail this guard wherever they appear in production code.
 /// Deliberately literal (not a parser): `unwrap()` (no arguments — an
-/// `unwrap_or`/`unwrap_or_else` never matches), `expect(`, and `panic!(`.
-const BANNED_NEEDLES: &[&str] = &["unwrap()", ".expect(", "panic!("];
+/// `unwrap_or`/`unwrap_or_else` never matches), `.expect(`, `panic!(`,
+/// `unreachable!(`, `todo!(`, `unimplemented!(`, and the release-active
+/// assertions `assert!(`, `assert_eq!(`, `assert_ne!(`.
+///
+/// `debug_assert!(` and its `_eq`/`_ne` forms stay allowed on purpose: they
+/// compile out of release builds, so they cannot panic a shipped render path
+/// (see [`needle_hits`] for how the `debug_` prefix is excluded). Likewise a
+/// compile-time assertion (`const _: () = assert!(..)`, or `const { assert!(..) }`)
+/// fails the build, never a frame, so it is allowed.
+///
+/// Known gap: there is no `[` needle. Slice and array indexing can panic, but
+/// has no cheap textual rule that does not drown in false positives (every
+/// type, attribute and array literal contains a bracket); indexing on render
+/// paths is left to review and to clippy's `indexing_slicing` where enabled.
+const BANNED_NEEDLES: &[&str] = &[
+    "unwrap()",
+    ".expect(",
+    "panic!(",
+    "unreachable!(",
+    "todo!(",
+    "unimplemented!(",
+    "assert!(",
+    "assert_eq!(",
+    "assert_ne!(",
+];
+
+/// Whether `line` contains `needle` as a banned use. An `assert*!(` needle only
+/// counts when the character before it is not part of an identifier, so
+/// `debug_assert!(` (and any other `*_assert!(` macro) is not a hit, and a line
+/// that opens a `const` item or `const { .. }` block is evaluated at compile
+/// time, so its assertions never run on a render path.
+fn needle_hits(line: &str, needle: &str) -> bool {
+    let guard_prefix = needle.starts_with("assert");
+    if guard_prefix {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("const _:") || trimmed.contains("const {") {
+            return false;
+        }
+    }
+    line.match_indices(needle).any(|(at, _)| {
+        !guard_prefix
+            || !line[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|prev| prev.is_alphanumeric() || prev == '_')
+    })
+}
 
 /// Every `.rs` file directly under `dir` and every subdirectory, or an empty
 /// list when `dir` does not exist — the same "not-yet-added is a clean scan"
@@ -258,7 +303,7 @@ fn e17_engine_render_paths_never_unwrap_expect_or_panic_outside_tests() {
             .unwrap_or_else(|err| panic!("reading {}: {err}", path.display()));
         for (i, line) in production_lines(&contents) {
             for needle in BANNED_NEEDLES {
-                if line.contains(needle) {
+                if needle_hits(line, needle) {
                     failures.push(format!(
                         "{}:{}: `{needle}` outside #[cfg(test)] — E17 requires every rendering \
                          path to return an error rather than panic: {}",
@@ -277,6 +322,36 @@ fn e17_engine_render_paths_never_unwrap_expect_or_panic_outside_tests() {
         failures.len(),
         failures.join("\n")
     );
+}
+
+#[test]
+fn e17_widened_needles_flag_release_panics_and_spare_debug_and_const_asserts() {
+    for hit in [
+        "    assert!(ok);",
+        "    assert_eq!(a, b);",
+        "    assert_ne!(a, b);",
+        "    unreachable!(\"x\")",
+        "    todo!()",
+        "    unimplemented!()",
+        "    x = (assert!(ok), 1);",
+    ] {
+        assert!(
+            BANNED_NEEDLES.iter().any(|n| needle_hits(hit, n)),
+            "{hit} must be flagged"
+        );
+    }
+    for spared in [
+        "    debug_assert!(ok);",
+        "    debug_assert_eq!(a, b);",
+        "    debug_assert_ne!(a, b);",
+        "const _: () = assert!(N > 0);",
+        "    const { assert!(N > 0) };",
+    ] {
+        assert!(
+            !BANNED_NEEDLES.iter().any(|n| needle_hits(spared, n)),
+            "{spared} must be allowed"
+        );
+    }
 }
 
 #[test]

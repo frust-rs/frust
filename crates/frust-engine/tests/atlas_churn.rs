@@ -1041,7 +1041,7 @@ fn a_static_page_uploads_on_its_first_frame_and_does_nothing_on_its_second() {
         "one upload per distinct glyph; `Hello`'s two `l`s share a key"
     );
     assert!(first.clears.is_empty(), "nothing has been evicted yet");
-    assert_eq!(first.refused, 0);
+    assert_eq!(first.refused(), 0);
     engine.end_frame(&mut images);
 
     // The whole point of the cache: the second frame of an unchanged page is
@@ -1093,7 +1093,11 @@ fn ten_thousand_frames_of_an_animated_size_keep_the_cache_bounded() {
         collect_hello(&mut engine, static_font, 16.0);
         let pass = engine.build(&mut images, raster);
         uploads += pass.uploads.len();
-        assert_eq!(pass.refused, 0, "a 2048-square page is not under pressure");
+        assert_eq!(
+            pass.refused(),
+            0,
+            "a 2048-square page is not under pressure"
+        );
         engine.end_frame(&mut images);
 
         worst_entries = worst_entries.max(engine.entry_count());
@@ -1346,18 +1350,18 @@ fn a_full_atlas_falls_back_to_outlines_rather_than_dropping_a_glyph() {
     let pass = engine.build(&mut images, raster);
 
     assert!(
-        pass.refused > 0,
+        pass.refused() > 0,
         "fixture precondition: a 64-square page cannot hold 32 glyphs at 48 px"
     );
     assert_eq!(
-        pass.uploads.len() + pass.refused as usize,
+        pass.uploads.len() + pass.refused() as usize,
         keys.len(),
         "every collected glyph is either allocated or refused, never lost"
     );
     // A refused glyph resolves to no slot, which is the same answer an
     // uncollected one gives, and is what routes it back to outline strips.
     let unresolved = keys.iter().filter(|key| engine.slot(key).is_none()).count();
-    assert_eq!(unresolved, pass.refused as usize);
+    assert_eq!(unresolved, pass.refused() as usize);
     engine.end_frame(&mut images);
 }
 
@@ -1619,7 +1623,8 @@ fn glyphs_and_images_are_held_against_one_shared_layer_budget() {
 
     assert!(pass.uploads.is_empty(), "the image took the whole budget");
     assert_eq!(
-        pass.refused, 4,
+        pass.refused(),
+        4,
         "every collected glyph is refused against the shared ceiling rather \
          than allocated out of a private one"
     );

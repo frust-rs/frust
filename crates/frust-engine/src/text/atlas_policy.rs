@@ -214,8 +214,12 @@
               caller; the per-glyph half — `collect_glyph`, `slot`, \
               `GlyphUpload` and `AtlasPass::uploads` — is host-tested but \
               unreachable while `glifo` owns the allocation, since it keys and \
-              rasterizes every cached glyph itself (see `atlas_mut`); and the \
-              readings of the budget — `entry_ceiling_at`, `max_entries`, \
+              rasterizes every cached glyph itself (see `atlas_mut`). It is \
+              reserved, not abandoned, for the planned frust-side hvgl atlas \
+              insert (the Text/Han follow-ups plan's `ha-01`, still \
+              unapproved), where frust rasterizes a glyph `glifo` cannot and \
+              must therefore collect, measure and place it itself; retire it \
+              if that card is dropped. The readings of the budget — `entry_ceiling_at`, `max_entries`, \
               `texel_budget`, `resident_texels` — are reporting rather than \
               routing, so only the cases read them"
 )]
@@ -258,6 +262,18 @@ pub(crate) const SIZE_QUANTUM: f32 = 0.25;
 /// frame. Only an observed *change* opens the window, so the ordinary case —
 /// static text — uploads on frame one and hits on frame two.
 pub(crate) const SETTLE_FRAMES: u64 = 8;
+
+/// Frames a size that has once held still is remembered as settled.
+///
+/// A size recurring less often than this is treated as new when it returns
+/// (and pays one settle window), which bounds the memory a long session spends
+/// on sizes it has stopped using. Ten seconds at 60 Hz.
+pub(crate) const SETTLED_MEMORY_FRAMES: u64 = 600;
+
+/// Most settled sizes remembered per font; the least recently seen is dropped
+/// first. A sweep cannot fill this, because a size only settles on a frame its
+/// font is not animating.
+pub(crate) const MAX_SETTLED_SIZES: usize = 16;
 
 /// Frames an unused entry survives before `glifo`'s LRU reaps it.
 ///
@@ -719,7 +735,8 @@ pub(crate) fn embolden_for(per_side: f32) -> FontEmbolden {
 /// application decision, and a disabled atlas is the operator's own doing.
 ///
 /// One route has no variant here, because it is not decided per run: a glyph
-/// the atlas had no room for is counted by [`AtlasPass::refused`] and resolves
+/// the atlas had no room for is counted by [`AtlasPass::no_room`] (and one with
+/// nothing to rasterize by [`AtlasPass::unrasterizable`]) and resolves
 /// to no slot, so the scene pass draws it as outlines on the same terms as an
 /// uncollected one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -896,13 +913,23 @@ pub(crate) struct AtlasPass {
     pub(crate) clears: Vec<PendingClearRect>,
     /// Glyphs allocated this frame, in the order they were collected.
     pub(crate) uploads: Vec<GlyphUpload>,
+    /// Collected glyphs with nothing to rasterize (a space, an outline that
+    /// produced no coverage): the measuring callback answered `None`. Nothing
+    /// is wrong and no remedy exists; they resolve to no slot.
+    pub(crate) unrasterizable: u32,
     /// Collected glyphs the atlas had no room for. They were routed
     /// [`GlyphRoute::Pending`] during the walk and resolve to no slot, so the
-    /// scene pass draws them as outlines.
-    pub(crate) refused: u32,
+    /// scene pass draws them as outlines. A non-zero count is atlas pressure.
+    pub(crate) no_room: u32,
 }
 
 impl AtlasPass {
+    /// Glyphs the pass declined for either reason, summed.
+    #[must_use]
+    pub(crate) fn refused(&self) -> u32 {
+        self.unrasterizable.saturating_add(self.no_room)
+    }
+
     /// Whether this pass has nothing to do, and so can be skipped whole.
     #[must_use]
     pub(crate) fn is_empty(&self) -> bool {
@@ -1107,6 +1134,13 @@ struct FontSizes {
     /// size's `f32` bit pattern. Pruned every frame, so its size is bounded by
     /// how many distinct sizes the last [`SETTLE_FRAMES`] frames actually used.
     sizes: HashMap<u32, u64>,
+    /// Last frame each size was drawn on a frame this font was *not*
+    /// animating, keyed like `sizes`. A size in here has already held still
+    /// once, so its return is a recurrence rather than a change: this is what
+    /// lets two sizes that alternate slower than [`SETTLE_FRAMES`] both settle
+    /// instead of each one's return re-opening the window. Bounded by
+    /// [`SETTLED_MEMORY_FRAMES`] and [`MAX_SETTLED_SIZES`].
+    settled: HashMap<u32, u64>,
 }
 
 /// Which phase of the two-phase frame the policy is in.
@@ -1752,7 +1786,8 @@ impl AtlasPolicy {
         let mut pass = AtlasPass {
             clears: self.clears.clone(),
             uploads: Vec::new(),
-            refused: 0,
+            unrasterizable: 0,
+            no_room: 0,
         };
 
         // Taken out of `self` so the loop can hold the atlas mutably while
@@ -1760,7 +1795,7 @@ impl AtlasPolicy {
         let mut pending = std::mem::take(&mut self.pending);
         for key in pending.drain(..) {
             let Some(metrics) = raster(&key) else {
-                pass.refused = pass.refused.saturating_add(1);
+                pass.unrasterizable = pass.unrasterizable.saturating_add(1);
                 continue;
             };
             match self.atlas.insert_entry(images, key.clone(), metrics) {
@@ -1775,7 +1810,7 @@ impl AtlasPolicy {
                     self.charged_entries = self.charged_entries.saturating_add(1);
                     pass.uploads.push(GlyphUpload { key, slot });
                 }
-                None => pass.refused = pass.refused.saturating_add(1),
+                None => pass.no_room = pass.no_room.saturating_add(1),
             }
         }
         self.pending = pending;
@@ -2013,17 +2048,40 @@ impl AtlasPolicy {
     /// other one, is the change signal: the font is being drawn at a size it was
     /// not being drawn at recently. A font tracked at nothing at all is a first
     /// appearance, not a change, which is why static text caches on frame one.
+    ///
+    /// A size that has already held still once (see `FontSizes::settled`) is
+    /// not a change when it returns, whatever the tracked set looks like: two
+    /// sizes alternating every N > [`SETTLE_FRAMES`] frames each pay one window
+    /// the first time, then both cache. Without that memory each size's
+    /// record is pruned while the other is tracked, so every return re-opens
+    /// the window forever.
     fn observe_size(&mut self, font: FontKey, size: f32) -> bool {
         let frame = self.frame;
         let bits = size.to_bits();
         let entry = self.fonts.entry(font).or_default();
 
-        if !entry.sizes.contains_key(&bits) && !entry.sizes.is_empty() {
+        if !entry.sizes.contains_key(&bits)
+            && !entry.sizes.is_empty()
+            && !entry.settled.contains_key(&bits)
+        {
             entry.animating_until = frame.saturating_add(SETTLE_FRAMES);
         }
         entry.sizes.insert(bits, frame);
 
-        frame <= entry.animating_until
+        let animating = frame <= entry.animating_until;
+        if !animating {
+            entry.settled.insert(bits, frame);
+            if entry.settled.len() > MAX_SETTLED_SIZES
+                && let Some(oldest) = entry
+                    .settled
+                    .iter()
+                    .min_by_key(|(_, seen)| **seen)
+                    .map(|(bits, _)| *bits)
+            {
+                entry.settled.remove(&oldest);
+            }
+        }
+        animating
     }
 
     /// Drop size records older than the settle window, and fonts left with
@@ -2040,7 +2098,9 @@ impl AtlasPolicy {
         self.fonts.retain(|_, font| {
             font.sizes
                 .retain(|_, last_seen| frame.saturating_sub(*last_seen) <= SETTLE_FRAMES);
-            !font.sizes.is_empty() || frame <= font.animating_until
+            font.settled
+                .retain(|_, last_seen| frame.saturating_sub(*last_seen) <= SETTLED_MEMORY_FRAMES);
+            !font.sizes.is_empty() || !font.settled.is_empty() || frame <= font.animating_until
         });
     }
 }
@@ -2826,5 +2886,108 @@ mod trace_tests {
         let second = frame(&mut policy, &mut images);
         assert_eq!(second, 0, "the resident run must hit");
         assert_eq!(policy.trace().glyph_misses, 0);
+    }
+}
+
+#[cfg(test)]
+mod settle_tests {
+    use super::*;
+    use vello_common::multi_atlas::AllocationStrategy;
+
+    fn run_key(size: f32) -> RunKey {
+        RunKey {
+            font_id: 0x5e77_1e01,
+            font_index: 0,
+            font_size: size,
+            distinct_glyphs: 3,
+            transform: Affine::IDENTITY,
+            hinted: false,
+            color_font: false,
+            context_color: AlphaColor::<Srgb>::new([0.0, 0.0, 0.0, 1.0]),
+            synthesis: Some(Synthesis::NONE),
+            oblique: false,
+        }
+    }
+
+    /// Whether one frame drawing the font at `size` routes to the atlas.
+    fn cached(policy: &mut AtlasPolicy, images: &mut ImageCache, size: f32) -> bool {
+        policy.begin_frame();
+        let route = policy.classify_run(&run_key(size));
+        let cached = route.atlas().is_some();
+        policy.build(images, |_| None);
+        policy.acknowledge_clears();
+        policy.end_frame(images);
+        policy.acknowledge_replay();
+        cached
+    }
+
+    /// Two sizes that alternate every ten frames (more than [`SETTLE_FRAMES`])
+    /// each pay one settle window and then both reach the atlas for good; the
+    /// window is not re-opened by every return.
+    #[test]
+    fn two_sizes_alternating_slower_than_the_settle_window_both_cache() {
+        let mut images = ImageCache::new_with_config(AtlasConfig {
+            initial_atlas_count: 0,
+            max_atlases: 4,
+            atlas_size: (1024, 1024),
+            auto_grow: true,
+            allocation_strategy: AllocationStrategy::FirstFit,
+        });
+        let mut policy = AtlasPolicy::new(&images, false);
+        let period = 10_u64;
+        assert!(period > SETTLE_FRAMES);
+
+        let sizes = [16.0_f32, 24.0];
+        let mut cached_by_block = Vec::new();
+        for block in 0..8_u64 {
+            let size = sizes[(block % 2) as usize];
+            let mut cached_frames = 0;
+            for _ in 0..period {
+                if cached(&mut policy, &mut images, size) {
+                    cached_frames += 1;
+                }
+            }
+            cached_by_block.push(cached_frames);
+        }
+
+        // Block 0 is a first appearance: cached throughout. Block 1 is the
+        // first change: it pays one window. From block 2 on, each size is a
+        // recurrence of one that already held still.
+        assert_eq!(cached_by_block[0], period);
+        assert!(cached_by_block[1] < period && cached_by_block[1] > 0);
+        for (block, frames) in cached_by_block.iter().enumerate().skip(2) {
+            assert_eq!(
+                *frames, period,
+                "block {block} must cache from its first frame"
+            );
+        }
+    }
+
+    /// A sweep through ever-new sizes still reads as an animation, and the
+    /// settled memory stays within its bound.
+    #[test]
+    fn a_sweep_still_animates_and_the_settled_memory_is_bounded() {
+        let mut images = ImageCache::new_with_config(AtlasConfig {
+            initial_atlas_count: 0,
+            max_atlases: 4,
+            atlas_size: (1024, 1024),
+            auto_grow: true,
+            allocation_strategy: AllocationStrategy::FirstFit,
+        });
+        let mut policy = AtlasPolicy::new(&images, false);
+        let mut cached_frames = 0;
+        for step in 0..400_u32 {
+            let size = 12.0 + step as f32 * SIZE_QUANTUM;
+            if cached(&mut policy, &mut images, size) {
+                cached_frames += 1;
+            }
+        }
+        assert_eq!(cached_frames, 1, "only the first appearance is cached");
+        assert!(
+            policy
+                .fonts
+                .values()
+                .all(|font| font.settled.len() <= MAX_SETTLED_SIZES)
+        );
     }
 }

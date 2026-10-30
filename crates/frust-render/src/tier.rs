@@ -14,7 +14,7 @@
 //! [`engine_support`] checks a real adapter's downlevel flags against
 //! [`ENGINE_REQUIRED_DOWNLEVEL_FLAGS`] and refuses one that cannot run the
 //! engine, with the diagnosis its caller fails fast on. It is pure decision
-//! logic over [`TierCaps`] (a plain struct a caller builds from a real
+//! logic over [`EngineCaps`] (a plain struct a caller builds from a real
 //! `wgpu::Adapter`'s downlevel flags + name), so it is unit-testable with fake
 //! caps and needs no GPU — mirroring `context.rs`'s split of pure decision vs.
 //! platform lookup (e.g. `effective_instance_flags`/`is_android_emulator`).
@@ -27,12 +27,19 @@
 /// (`context::create_engine_surface`), but constructible by hand in tests with
 /// no GPU.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TierCaps {
+pub struct EngineCaps {
     /// The adapter's `wgpu::DownlevelCapabilities::flags`.
     pub downlevel_flags: wgpu::DownlevelFlags,
     /// The adapter's `wgpu::AdapterInfo::name`, used only for diagnostics.
     pub adapter_name: String,
 }
+
+/// The pre-rename name of [`EngineCaps`], kept for one release.
+///
+/// Renamed because `frust_gpu::TierCaps` is a different, adapter-probed type
+/// with the same name, and the two were being confused at call sites.
+#[deprecated(note = "renamed to `EngineCaps`; `frust_gpu::TierCaps` is a different type")]
+pub type TierCaps = EngineCaps;
 
 /// The [`wgpu::DownlevelFlags`] the engine (`frust-engine`) cannot run
 /// without: **none of them**.
@@ -90,7 +97,7 @@ impl std::error::Error for EngineUnsupported {}
 /// injected `required` set instead.
 fn engine_support_with(
     required: wgpu::DownlevelFlags,
-    caps: &TierCaps,
+    caps: &EngineCaps,
 ) -> Result<(), EngineUnsupported> {
     let missing_flags = required - caps.downlevel_flags;
     if missing_flags.is_empty() {
@@ -110,7 +117,7 @@ fn engine_support_with(
 /// arm is kept (rather than assumed away) so a flag ever added to the constant
 /// is honoured here without a second edit, and so the diagnosis for an adapter
 /// that genuinely cannot run the engine lives in one place.
-pub fn engine_support(caps: &TierCaps) -> Result<(), EngineUnsupported> {
+pub fn engine_support(caps: &EngineCaps) -> Result<(), EngineUnsupported> {
     engine_support_with(ENGINE_REQUIRED_DOWNLEVEL_FLAGS, caps)
 }
 
@@ -118,8 +125,8 @@ pub fn engine_support(caps: &TierCaps) -> Result<(), EngineUnsupported> {
 mod tests {
     use super::*;
 
-    fn caps(flags: wgpu::DownlevelFlags) -> TierCaps {
-        TierCaps {
+    fn caps(flags: wgpu::DownlevelFlags) -> EngineCaps {
+        EngineCaps {
             downlevel_flags: flags,
             adapter_name: "fake adapter".to_string(),
         }
