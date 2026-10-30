@@ -55,6 +55,12 @@ pub(super) struct AndroidA11y {
     /// skips reassembling+re-pushing an unchanged tree (via
     /// [`AppTree::semantics_if_changed`](frust_shell_common::AppTree::semantics_if_changed)).
     last_pushed_gen: u64,
+    /// The sanitised density the last pushed tree's root was scaled by. A
+    /// density change rides `surfaceChanged` without bumping the semantics
+    /// generation, so a push is forced whenever this differs from the frame's
+    /// density; otherwise TalkBack's focus rects would keep the old scale
+    /// until some unrelated semantics change.
+    last_pushed_scale: f64,
 }
 
 impl AndroidA11y {
@@ -86,6 +92,7 @@ impl AndroidA11y {
             pending_actions,
             tree_snapshot,
             last_pushed_gen: 0,
+            last_pushed_scale: 0.0,
         }
     }
 }
@@ -200,7 +207,8 @@ impl AndroidAppHandle {
     /// so node bounds are valid.
     ///
     /// Gated twice over: the [`AppTree::semantics_if_changed`](frust_shell_common::AppTree::semantics_if_changed)
-    /// generation check skips reassembling an unchanged tree here, and the
+    /// generation check skips reassembling an unchanged tree here (a density
+    /// change, which moves no generation, forces the walk instead), and the
     /// adapter's own `update_if_active` is a cheap no-op until a screen reader
     /// activates. The assembled tree is also snapshotted for a late-activating
     /// screen reader's `request_initial_tree`, so it sees real content rather
@@ -210,21 +218,30 @@ impl AndroidAppHandle {
     pub(super) fn publish_semantics(&mut self) {
         // Cheap generation gate first (immutable `a11y` borrow, released before
         // the `&mut self.app` call below).
-        let last_gen = match self.a11y.as_ref() {
-            Some(a11y) => a11y.last_pushed_gen,
+        let (last_gen, last_scale) = match self.a11y.as_ref() {
+            Some(a11y) => (a11y.last_pushed_gen, a11y.last_pushed_scale),
             None => return,
         };
-        let Some(update) = self.app.semantics_if_changed(last_gen) else {
-            return; // tree unchanged since the last push
+        let scale = sanitize_scale(self.scale);
+        // A density change does not move the generation, so it forces the
+        // walk itself: the same nodes with a new root transform.
+        let update = if scale == last_scale {
+            self.app.semantics_if_changed(last_gen)
+        } else {
+            Some(self.app.semantics())
+        };
+        let Some(update) = update else {
+            return; // tree and density unchanged since the last push
         };
         let current_gen = self.app.semantics_generation();
-        let tree_update = tree_update_from_semantics(update, sanitize_scale(self.scale));
+        let tree_update = tree_update_from_semantics(update, scale);
         if let Some(a11y) = self.a11y.as_mut() {
             if let Ok(mut slot) = a11y.tree_snapshot.lock() {
                 *slot = Some(tree_update.clone());
             }
             a11y.adapter.update_if_active(move || tree_update);
             a11y.last_pushed_gen = current_gen;
+            a11y.last_pushed_scale = scale;
         }
     }
 }

@@ -45,6 +45,10 @@ pub fn tree_update_from_parts(
     focus: NodeId,
     scale: f64,
 ) -> TreeUpdate {
+    debug_assert!(
+        scale.is_finite() && scale > 0.0,
+        "a11y root scale must be sanitised by the caller, got {scale}"
+    );
     if scale != 1.0
         && let Some((_, root_node)) = nodes.iter_mut().find(|(id, _)| *id == root)
     {
