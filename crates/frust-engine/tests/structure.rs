@@ -1,4 +1,4 @@
-//! Structural guards G1, G2, and E17: design-rule tripwires over the engine
+//! Structural guards G1, G2, E17, and BF: design-rule tripwires over the engine
 //! crate's shape rather than its runtime behavior. Host-only — no GPU device
 //! or adapter is created anywhere in this file.
 //!
@@ -22,6 +22,9 @@
 //!   and `text/`. Conditionally scanned when present: `renderer.rs` and
 //!   `schedule/` — these stay unscanned until merge, then the guard becomes
 //!   load-bearing with no edit needed here.
+//! - **BF**: every curve-capable fill, stroke and clip reaches `vello_common`
+//!   through `compile/cull.rs`; the scan and its allow-lists are in the BF
+//!   section below.
 
 use std::path::{Path, PathBuf};
 
@@ -293,4 +296,477 @@ fn e17_scan_currently_covers_at_least_cache_compile_effects_filters_gpu_and_text
             "the E17 scan covers no .rs file under src/{name}/: {files:?}"
         );
     }
+}
+
+// ---------------------------------------------------------------------
+// BF: curve-capable paths reach vello_common only through compile/cull.rs
+// ---------------------------------------------------------------------
+
+// The bounded-flatten contract: every curve-capable fill, stroke and clip
+// reaches `vello_common`'s strip generator through `compile/cull.rs`
+// (`generate_fill`, `generate_stroke` and `ViewportSplit`), which culls the
+// path to the viewport before it is flattened. Two shapes may bypass those
+// wrappers, and the scan accepts only these: a `kurbo::Rect` filled as a path,
+// because its four straight edges flatten at a fixed cost however large the
+// rectangle is; and a `ViewportSplit` pushed as a clip mask, because that
+// pushed path is the pre-pass itself. Anything else must be routed through
+// `cull.rs`, or the allow-lists below extended deliberately.
+
+/// The one file allowed to call the raw strip generator and its clip context.
+/// Excluded from the scan by name.
+const CULL_FILE: &str = "compile/cull.rs";
+
+/// One accepted raw `generate_filled_path(` call shape: its path argument is
+/// `<receiver>.path_elements(..)`, and `receiver` is a `kurbo::Rect` at each of
+/// the `count` sites in `file`. A new site on the same receiver changes the
+/// count and fails the guard until its author reviews it.
+struct RectFillSite {
+    file: &'static str,
+    receiver: &'static str,
+    count: usize,
+}
+
+const ALLOWED_RECT_FILL_SITES: &[RectFillSite] = &[
+    // `Geometry::RectPath`, the rectangle geometry arm.
+    RectFillSite {
+        file: "compile/parallel.rs",
+        receiver: "rect",
+        count: 1,
+    },
+    // The clear hole punch: `StagedPunch::device`.
+    RectFillSite {
+        file: "compile/mod.rs",
+        receiver: "punch.device",
+        count: 1,
+    },
+    // A glyph's slot `area`.
+    RectFillSite {
+        file: "text/backend.rs",
+        receiver: "area",
+        count: 1,
+    },
+    // A COLR `LayerShape::Rect` (`let rect = *rect`) and an atlas glyph's
+    // `fill_rect(&Rect)`.
+    RectFillSite {
+        file: "text/backend.rs",
+        receiver: "rect",
+        count: 2,
+    },
+];
+
+/// `(file, receiver)` pairs that name a vello `ClipContext`. Every `push_clip(`
+/// on one must take a `ViewportSplit::new(..)` path. The engine has exactly
+/// one: the clip-mask stack.
+const VELLO_CLIP_CONTEXTS: &[(&str, &str)] = &[("compile/clip.rs", "self.masks")];
+
+/// `(file, receiver)` pairs whose `push_clip(` is frust-owned, not vello's: the
+/// clip-group stack, the COLR bracket bookkeeping, and the frust scene builder.
+const FRUST_OWNED_PUSH_CLIP: &[(&str, &str)] = &[
+    ("compile/mod.rs", "self.groups"),
+    ("text/backend.rs", "self.color"),
+    ("renderer.rs", "b"),
+];
+
+/// What the bounded-flatten scan found across the engine sources.
+#[derive(Default)]
+struct BoundedFlatten {
+    /// Every file the scanner read, as `src/`-relative paths.
+    files_seen: Vec<String>,
+    /// Every accepted `generate_filled_path` site, as `(file, receiver)`.
+    rect_fills: Vec<(String, String)>,
+    /// Human-readable `file:line: reason` violations.
+    violations: Vec<String>,
+}
+
+/// `src/`-relative path with `/` separators, so allow-list keys are the same
+/// on every host.
+fn src_relative(path: &Path) -> String {
+    path.strip_prefix(engine_root().join("src"))
+        .unwrap_or_else(|_| panic!("{} is not under the engine's src/", path.display()))
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+/// Every `.rs` file under `src/` except [`CULL_FILE`].
+fn bounded_flatten_scanned_files() -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    rust_files_recursive(&engine_root().join("src"), &mut files);
+    files.retain(|path| src_relative(path) != CULL_FILE);
+    files.sort();
+    files
+}
+
+fn is_ident_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// Byte offsets of every call `name(` in `text`: the name must not be part of
+/// a longer identifier, and a `fn name(` definition is not a call.
+fn call_offsets(text: &str, name: &str) -> Vec<usize> {
+    let needle = format!("{name}(");
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(found) = text[from..].find(&needle) {
+        let at = from + found;
+        from = at + needle.len();
+        if text[..at].chars().next_back().is_some_and(is_ident_char) {
+            continue;
+        }
+        let is_definition = text[..at]
+            .trim_end()
+            .strip_suffix("fn")
+            .is_some_and(|rest| !rest.chars().next_back().is_some_and(is_ident_char));
+        if !is_definition {
+            out.push(at);
+        }
+    }
+    out
+}
+
+/// The argument text after the `(` at `open`, up to the first top-level `,`
+/// or closing bracket, trimmed.
+fn first_arg(text: &str, open: usize) -> &str {
+    let body = &text[open + 1..];
+    let mut depth = 0usize;
+    for (i, c) in body.char_indices() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' if depth == 0 => return body[..i].trim(),
+            ')' | ']' | '}' => depth -= 1,
+            ',' if depth == 0 => return body[..i].trim(),
+            _ => {}
+        }
+    }
+    body.trim()
+}
+
+/// Whether the `(` at byte `open` of `s` closes on the last byte of `s`.
+fn closes_at_end(s: &str, open: usize) -> bool {
+    let mut depth = 0usize;
+    for (i, c) in s[open..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return open + i + 1 == s.len();
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// The receiver `r` of a whole-argument `r.path_elements(..)` expression, or
+/// `None` when the argument is anything else (including a chained call after
+/// the `path_elements(..)`).
+fn path_elements_receiver(arg: &str) -> Option<&str> {
+    const CALL: &str = ".path_elements(";
+    let idx = arg.find(CALL)?;
+    let receiver = &arg[..idx];
+    let well_formed = !receiver.is_empty()
+        && receiver
+            .split('.')
+            .all(|seg| !seg.is_empty() && seg.chars().all(is_ident_char));
+    (well_formed && closes_at_end(arg, idx + CALL.len() - 1)).then_some(receiver)
+}
+
+/// The receiver of the method call whose `.name(` starts at byte `at`, read
+/// backwards through whitespace so a chain split across lines still resolves.
+/// `None` when the call has no dotted-identifier receiver (a free function, a
+/// `Type::name(` path, or a call on a bracketed expression).
+fn method_receiver(text: &str, at: usize) -> Option<&str> {
+    let head = text[..at].trim_end().strip_suffix('.')?.trim_end();
+    let start = head
+        .char_indices()
+        .rev()
+        .find(|&(_, c)| !(is_ident_char(c) || c == '.'))
+        .map_or(0, |(i, c)| i + c.len_utf8());
+    let receiver = &head[start..];
+    let well_formed = !receiver.is_empty()
+        && receiver
+            .split('.')
+            .all(|seg| !seg.is_empty() && seg.chars().all(is_ident_char));
+    well_formed.then_some(receiver)
+}
+
+fn is_viewport_split(arg: &str) -> bool {
+    arg.starts_with("ViewportSplit::new(") && closes_at_end(arg, "ViewportSplit::new".len())
+}
+
+fn listed(list: &[(&str, &str)], file: &str, receiver: &str) -> bool {
+    list.iter().any(|&(f, r)| f == file && r == receiver)
+}
+
+fn listed_rect_fill(file: &str, receiver: &str) -> bool {
+    ALLOWED_RECT_FILL_SITES
+        .iter()
+        .any(|site| site.file == file && site.receiver == receiver)
+}
+
+/// Scan one file's production text (test modules and comment-only lines
+/// excluded, as for E17) and record its bounded-flatten sites into `scan`.
+/// `rel` is the file's `src/`-relative path; [`CULL_FILE`] is never passed in.
+fn scan_bounded_flatten(rel: &str, contents: &str, scan: &mut BoundedFlatten) {
+    scan.files_seen.push(rel.to_owned());
+
+    let lines = production_lines(contents);
+    let mut text = String::new();
+    let mut starts = Vec::with_capacity(lines.len());
+    for (_, line) in &lines {
+        starts.push(text.len());
+        text.push_str(line);
+        text.push('\n');
+    }
+    let line_of = |at: usize| {
+        let idx = starts
+            .partition_point(|&start| start <= at)
+            .saturating_sub(1);
+        lines.get(idx).map_or(0, |(i, _)| i + 1)
+    };
+
+    // (a) No stroke reaches the raw generator outside cull.rs.
+    for at in call_offsets(&text, "generate_stroked_path") {
+        scan.violations.push(format!(
+            "{rel}:{}: generate_stroked_path outside compile/cull.rs — a stroke must go \
+             through cull::generate_stroke",
+            line_of(at)
+        ));
+    }
+
+    // (b) A raw fill is accepted only as `<rect>.path_elements(..)` on a
+    // receiver listed in ALLOWED_RECT_FILL_SITES.
+    let fill_name = "generate_filled_path";
+    for at in call_offsets(&text, fill_name) {
+        let line = line_of(at);
+        let arg = first_arg(&text, at + fill_name.len());
+        match path_elements_receiver(arg) {
+            Some(receiver) if listed_rect_fill(rel, receiver) => {
+                scan.rect_fills.push((rel.to_owned(), receiver.to_owned()));
+            }
+            Some(receiver) => scan.violations.push(format!(
+                "{rel}:{line}: generate_filled_path on `{receiver}.path_elements(..)`, but \
+                 `{receiver}` is not a Rect in ALLOWED_RECT_FILL_SITES — route the path \
+                 through cull::generate_fill"
+            )),
+            None => scan.violations.push(format!(
+                "{rel}:{line}: generate_filled_path whose path argument is not \
+                 `<rect>.path_elements(..)` — route the path through cull::generate_fill"
+            )),
+        }
+    }
+
+    // (c) A vello ClipContext takes only a ViewportSplit; a frust-owned
+    // push_clip is listed by receiver; any other receiver fails closed.
+    for at in call_offsets(&text, "push_clip") {
+        let line = line_of(at);
+        let Some(receiver) = method_receiver(&text, at) else {
+            scan.violations.push(format!(
+                "{rel}:{line}: push_clip without a named receiver — the guard cannot tell a \
+                 vello ClipContext from a frust-owned push_clip"
+            ));
+            continue;
+        };
+        if listed(VELLO_CLIP_CONTEXTS, rel, receiver) {
+            let arg = first_arg(&text, at + "push_clip".len());
+            if !is_viewport_split(arg) {
+                scan.violations.push(format!(
+                    "{rel}:{line}: vello ClipContext `{receiver}.push_clip(..)` takes a path \
+                     that is not `ViewportSplit::new(..)` — clip paths go through the cull \
+                     pre-pass"
+                ));
+            }
+        } else if !listed(FRUST_OWNED_PUSH_CLIP, rel, receiver) {
+            scan.violations.push(format!(
+                "{rel}:{line}: push_clip on `{receiver}` is not classified — add it to \
+                 VELLO_CLIP_CONTEXTS (vello, must be ViewportSplit) or FRUST_OWNED_PUSH_CLIP \
+                 (frust-owned)"
+            ));
+        }
+    }
+}
+
+/// Run the scan over every file in [`bounded_flatten_scanned_files`].
+fn run_bounded_flatten_scan() -> BoundedFlatten {
+    let mut scan = BoundedFlatten::default();
+    for path in bounded_flatten_scanned_files() {
+        let rel = src_relative(&path);
+        let contents = std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("reading {}: {err}", path.display()));
+        scan_bounded_flatten(&rel, &contents, &mut scan);
+    }
+    scan
+}
+
+#[test]
+fn bf_engine_sources_route_curve_capable_paths_through_cull() {
+    let mut scan = run_bounded_flatten_scan();
+
+    // Each allow-list entry must match exactly `count` sites: a removed site
+    // or a new one on the same receiver fails here, not silently.
+    for site in ALLOWED_RECT_FILL_SITES {
+        let found = scan
+            .rect_fills
+            .iter()
+            .filter(|(file, receiver)| file == site.file && receiver == site.receiver)
+            .count();
+        if found != site.count {
+            scan.violations.push(format!(
+                "ALLOWED_RECT_FILL_SITES expects {} `{}.path_elements(..)` fill site(s) in {}, \
+                 found {found} — review the site and update the count deliberately",
+                site.count, site.receiver, site.file
+            ));
+        }
+    }
+
+    assert!(
+        scan.violations.is_empty(),
+        "bounded-flatten contract violated ({} hit(s)):\n{}",
+        scan.violations.len(),
+        scan.violations.join("\n")
+    );
+}
+
+#[test]
+fn bf_scan_sees_every_scanned_file_and_every_listed_file() {
+    let scan = run_bounded_flatten_scan();
+    let expected: Vec<String> = bounded_flatten_scanned_files()
+        .iter()
+        .map(|path| src_relative(path))
+        .collect();
+    assert!(
+        !expected.is_empty(),
+        "the BF scan covers no .rs file under src/"
+    );
+    assert_eq!(
+        scan.files_seen, expected,
+        "the BF scan must read every .rs file under src/ except compile/cull.rs"
+    );
+    assert!(
+        engine_root().join("src").join(CULL_FILE).is_file(),
+        "{CULL_FILE} must exist, so its exclusion is by name and not vacuous"
+    );
+    for name in ["compile", "text"] {
+        assert!(
+            expected
+                .iter()
+                .any(|rel| rel.starts_with(&format!("{name}/"))),
+            "the BF scan covers no .rs file under src/{name}/"
+        );
+    }
+    let listed_files = ALLOWED_RECT_FILL_SITES
+        .iter()
+        .map(|site| site.file)
+        .chain(VELLO_CLIP_CONTEXTS.iter().map(|&(file, _)| file))
+        .chain(FRUST_OWNED_PUSH_CLIP.iter().map(|&(file, _)| file));
+    for file in listed_files {
+        assert!(
+            expected.iter().any(|rel| rel == file),
+            "{file} is on a BF allow-list but is not scanned"
+        );
+    }
+}
+
+/// Violations the scanner reports for `src` as if it were `rel`.
+fn bf_violations_in(rel: &str, src: &str) -> Vec<String> {
+    let mut scan = BoundedFlatten::default();
+    scan_bounded_flatten(rel, src, &mut scan);
+    scan.violations
+}
+
+#[test]
+fn bf_negative_control_direct_bezpath_fill_is_a_violation() {
+    let src = r#"
+fn paint(generator: &mut StripGenerator, path: &BezPath) {
+    generator.generate_filled_path(path.iter(), Fill::NonZero, Affine::IDENTITY, None, storage, clip);
+}
+"#;
+    let violations = bf_violations_in("text/backend.rs", src);
+    assert_eq!(violations.len(), 1, "{violations:?}");
+    assert!(
+        violations[0].starts_with("text/backend.rs:3:"),
+        "{violations:?}"
+    );
+}
+
+#[test]
+fn bf_negative_control_direct_stroke_is_a_violation() {
+    let src = "fn stroke(g: &mut StripGenerator, p: &BezPath) {\n    \
+               g.generate_stroked_path(p, &stroke, Affine::IDENTITY, None, storage, clip);\n}\n";
+    let violations = bf_violations_in("text/backend.rs", src);
+    assert_eq!(violations.len(), 1, "{violations:?}");
+    assert!(
+        violations[0].starts_with("text/backend.rs:2:"),
+        "{violations:?}"
+    );
+}
+
+#[test]
+fn bf_rect_fill_on_a_listed_site_passes() {
+    let src = "fn rect_path(g: &mut StripGenerator, rect: Rect) {\n    \
+               g.generate_filled_path(\n        rect.path_elements(FLATTEN_TOLERANCE),\n        \
+               Fill::NonZero,\n    );\n}\n";
+    assert!(bf_violations_in("compile/parallel.rs", src).is_empty());
+}
+
+#[test]
+fn bf_rect_fill_outside_the_allow_list_is_a_violation() {
+    let src = "fn rect_path(g: &mut StripGenerator, rect: Rect) {\n    \
+               g.generate_filled_path(\n        rect.path_elements(FLATTEN_TOLERANCE),\n        \
+               Fill::NonZero,\n    );\n}\n";
+    let violations = bf_violations_in("compile/layers.rs", src);
+    assert_eq!(violations.len(), 1, "{violations:?}");
+}
+
+#[test]
+fn bf_rect_fill_with_a_chained_path_argument_is_a_violation() {
+    let src = "fn rect_path(g: &mut StripGenerator, rect: Rect) {\n    \
+               g.generate_filled_path(rect.path_elements(X).into_iter(), Fill::NonZero);\n}\n";
+    let violations = bf_violations_in("compile/parallel.rs", src);
+    assert_eq!(violations.len(), 1, "{violations:?}");
+}
+
+#[test]
+fn bf_viewport_split_clip_on_the_mask_stack_passes() {
+    let src = "fn push_mask(&mut self, path: P, transform: Affine) {\n    \
+               self.masks.push_clip(\n        ViewportSplit::new(path, transform, viewport),\n        \
+               generator,\n    );\n}\n";
+    assert!(bf_violations_in("compile/clip.rs", src).is_empty());
+}
+
+#[test]
+fn bf_bezpath_clip_on_the_mask_stack_is_a_violation() {
+    let src = "fn push_mask(&mut self, path: &BezPath) {\n    \
+               self.masks.push_clip(path.iter(), generator, Fill::NonZero);\n}\n";
+    let violations = bf_violations_in("compile/clip.rs", src);
+    assert_eq!(violations.len(), 1, "{violations:?}");
+}
+
+#[test]
+fn bf_frust_owned_group_push_clip_split_across_lines_passes() {
+    let src = "fn push(&mut self, path: &BezPath) {\n    \
+               self.groups\n        .push_clip(transform.transform_rect_bbox(path.bounding_box()));\n}\n";
+    assert!(bf_violations_in("compile/mod.rs", src).is_empty());
+}
+
+#[test]
+fn bf_unclassified_push_clip_receiver_fails_closed() {
+    let src = "fn push(&mut self, path: &BezPath) {\n    self.cache.push_clip(path.iter());\n}\n";
+    let violations = bf_violations_in("compile/mod.rs", src);
+    assert_eq!(violations.len(), 1, "{violations:?}");
+}
+
+#[test]
+fn bf_definitions_and_test_modules_are_not_sites() {
+    let src = "pub(crate) fn push_clip(&mut self, path: &BezPath) {}\n\
+               #[cfg(test)]\nmod tests {\n    \
+               fn t(g: &mut G) { g.generate_stroked_path(p); self.masks.push_clip(p); }\n}\n";
+    assert!(bf_violations_in("compile/clip.rs", src).is_empty());
+}
+
+#[test]
+fn bf_longer_identifiers_are_not_sites() {
+    let src = "fn f(g: &mut G, p: &BezPath) {\n    g.my_generate_filled_path(p.iter());\n}\n";
+    assert!(bf_violations_in("text/backend.rs", src).is_empty());
 }
