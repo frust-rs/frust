@@ -6330,7 +6330,7 @@ the resident population, a glyph wider than its em is under-charged (the
 packer still refuses independently), and a run is charged its distinct glyph
 ids at admission, so subpixel-bucket variants can overshoot by that factor.
 The atlas pass reports a glyph it could not place as `unrasterizable` (no raster) or `no_room`
-(the insert was refused) separately. glifo's `PendingClearRect`s and recorded page replays are re-offered every
+(the insert was refused) separately; its own per-glyph insert half stays host-tested but unreachable while glifo allocates, reserved for the planned frust-side hvgl insert. glifo's `PendingClearRect`s and recorded page replays are re-offered every
 frame until the renderer acknowledges they were serviced, and glifo's
 eviction pass is deferred only while an unreplayed recording has outlived
 the entry-age window (a serial-based check — younger recordings name nothing
