@@ -15,7 +15,9 @@
 use std::ffi::c_void;
 use std::fmt::Write as _;
 
-use accesskit::{Node, NodeId, Tree, TreeId, TreeUpdate};
+use accesskit::{Node, NodeId, TreeUpdate};
+#[cfg(test)]
+use accesskit::{Tree, TreeId};
 use frust_render::SurfacePhase;
 
 /// Assemble an `accesskit::TreeUpdate` from the flat pieces of a
@@ -28,19 +30,13 @@ use frust_render::SurfacePhase;
 /// `cargo test --workspace` on the host, even though the `accesskit_ios` adapter
 /// that consumes the result is only ever compiled for iOS.
 ///
-/// v1 pushes the **whole tree every update** (allowed because our node ids are
-/// stable across frames), so:
-/// - `tree` is always `Some(Tree::new(root))` (the whole-tree metadata accesskit
-///   requires on every full update);
-/// - `tree_id` is [`TreeId::ROOT`] — Frust exposes a single root tree, no
-///   subtrees;
-/// - `focus` is the caller's already-resolved focus id
-///   (`SemanticsUpdate::focus_id()` — the focused node, or the root when nothing
-///   is focused, since accesskit's `focus` is non-optional).
-///
-/// `nodes` is moved through unchanged — our semantics pass already produces the
-/// exact `Vec<(NodeId, Node)>` shape `TreeUpdate` wants — except for the root's
-/// transform.
+/// The assembly itself is the shared
+/// [`frust_shell_common::tree_update_from_parts`], so all three shells push the
+/// same shape: the whole tree every update (node ids are stable across frames),
+/// `tree` rooted at `root`, `tree_id` `ROOT`, and `focus` as the caller's
+/// already-resolved focus id (`SemanticsUpdate::focus_id()` — the focused node,
+/// or the root when nothing is focused). `nodes` is moved through unchanged
+/// except for the root's transform.
 ///
 /// # Coordinate contract
 ///
@@ -50,31 +46,15 @@ use frust_render::SurfacePhase;
 /// conversion is one `Affine::scale(scale)` transform on the root: accesskit
 /// applies ancestor transforms to every descendant's bounding box and
 /// `accesskit_ios` inverts it for hit-testing. Raw node bounds stay logical.
-/// At `scale == 1.0` (or with no root in `nodes`) nothing is touched.
+/// At `scale == 1.0` (or with no root in `nodes`) nothing is touched. `scale`
+/// must already be `sanitize_scale`d.
 pub(crate) fn build_tree_update(
-    mut nodes: Vec<(NodeId, Node)>,
+    nodes: Vec<(NodeId, Node)>,
     root: NodeId,
     focus: NodeId,
     scale: f64,
 ) -> TreeUpdate {
-    apply_root_scale(&mut nodes, root, scale);
-    TreeUpdate {
-        nodes,
-        tree: Some(Tree::new(root)),
-        tree_id: TreeId::ROOT,
-        focus,
-    }
-}
-
-/// Set the root node's transform to the display scale (no-op at 1.0 or when the
-/// root is absent).
-fn apply_root_scale(nodes: &mut [(NodeId, Node)], root: NodeId, scale: f64) {
-    if scale == 1.0 {
-        return;
-    }
-    if let Some((_, node)) = nodes.iter_mut().find(|(id, _)| *id == root) {
-        node.set_transform(accesskit::Affine::scale(scale));
-    }
+    frust_shell_common::tree_update_from_parts(nodes, root, focus, scale)
 }
 
 /// Whether an opaque handle from the Swift side is the null sentinel.
