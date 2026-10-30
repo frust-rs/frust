@@ -16,7 +16,7 @@
 //! [`SurfaceRenderer::on_surface_created`] takes a `wgpu::SurfaceTarget` (the
 //! shell must hand over a window). There is no renderer to select: the engine
 //! is the only one this crate contains, so what was a tier probe is now a
-//! plain capability gate ([`engine_support`] over [`TierCaps`], against
+//! plain capability gate ([`engine_support`] over [`EngineCaps`], against
 //! [`ENGINE_REQUIRED_DOWNLEVEL_FLAGS`]) that refuses an adapter which cannot
 //! run it. The cargo feature that gated the engine, the env-var/CLI override
 //! that picked a renderer, and the vello-classic/`vello_cpu` tiers they chose
@@ -106,4 +106,9 @@ pub use renderer::{DeferredPresent, InstallTimings, ResidentPage, ResidentPages,
 // result types, the selection function, the env-var name and the override
 // parsers are all gone from this surface along with the choice they
 // described.
-pub use tier::{ENGINE_REQUIRED_DOWNLEVEL_FLAGS, EngineUnsupported, TierCaps, engine_support};
+#[allow(
+    deprecated,
+    reason = "the alias is re-exported through the 0.6 line and removed in 0.7"
+)]
+pub use tier::TierCaps;
+pub use tier::{ENGINE_REQUIRED_DOWNLEVEL_FLAGS, EngineCaps, EngineUnsupported, engine_support};

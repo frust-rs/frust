@@ -6314,37 +6314,43 @@ wraps it in its own routing policy rather than trusting the defaults: the
 policy decides *which runs are offered* — keyed on the quantized (1/4-px)
 **device-space** size, the same `font_size × absorbed-uniform-scale` quantity
 glifo keys — and routes to outline strips any run whose device size changed
-inside an 8-frame window, any run above the size ceiling, any COLR-carrying
-face (the tier cannot replay glifo's recorded COLR command stream and glifo
-offers no way to withdraw entries afterwards), any transform glifo will not
-absorb as a positive uniform scale, and any run whose demand would push the
-resident population past the glyph texel budget. That budget is one running
-total — every resident entry charged a per-entry texel cost at its own size,
-rationed against the glyph share of the array (so no size class's refusal
-depends on another's counts, and mixed sizes bound additively) — and it is a
-deliberate **over-estimate maintained incrementally** from admit/evict
-deltas, not a texel guarantee: glifo exposes no release-build way to price
-the resident population, a glyph wider than its em is under-charged (the
-packer still refuses independently), and a run is charged its distinct glyph
-ids at admission, so subpixel-bucket variants can overshoot by that factor.
-glifo's `PendingClearRect`s and recorded page replays are re-offered every
-frame until the renderer acknowledges they were serviced, and glifo's
-eviction pass is deferred only while an unreplayed recording has outlived
-the entry-age window (a serial-based check — younger recordings name nothing
-reapable), so a dropped frame loses nothing and a recorded command cannot
-outlive its slot.
-Glyphs share one `ImageCache` allocator with images so slot ids and
-rectangles cannot collide. `FRUST_ENGINE_NO_ATLAS` routes every glyph to the
-outline path — a correct, slower, tested fallback. A 200-frame scale-animated
-wired-path test bounds resident entries and keeps images resident, and the
-atlas-drawn and outline paths are byte-identical for a whole-pixel-placed run
-on the T400 reference adapter.
-The resident glyph-run cache (`ResidentRuns`) goes further than the policy: it restates glifo
-0.3.0's private placement arithmetic (transform composition, `quantize_subpixel`, the black
-outline-key colour) and mirrors `maintain`'s eviction schedule, which is part of why glifo is
-exact-pinned — a bump must re-run the bucket unit test, `tests/glyph_run_cache.rs` and the
-`tests/glyph_quads.rs` GPU byte-identity suite. A mispredicted eviction makes the cache forget every
-record, which costs one frame of probes, never a pixel.
+inside an 8-frame window (a size that has once held still stays remembered for
+600 frames, at most 16 per font, so two sizes alternating slower than the
+window each pay it once and then both cache, while a sweep of ever-new sizes
+keeps animating), any run above the size ceiling, any COLR-carrying face (the
+tier cannot replay glifo's recorded COLR command stream and glifo offers no
+way to withdraw entries afterwards), any transform glifo will not absorb as a
+positive uniform scale, and any run whose demand would push the resident
+population past the glyph texel budget. That budget is one running total —
+every resident entry charged a per-entry texel cost at its own size, rationed
+against the glyph share of the array (so no size class's refusal depends on
+another's counts, and mixed sizes bound additively) — and it is a deliberate
+**over-estimate maintained incrementally** from admit/evict deltas, not a
+texel guarantee: glifo exposes no release-build way to price the resident
+population, a glyph wider than its em is under-charged (the packer still
+refuses independently), and a run is charged its distinct glyph ids at
+admission, so subpixel-bucket variants can overshoot by that factor. The atlas
+pass reports a glyph it could not place as `unrasterizable` (no raster) or
+`no_room` (the insert was refused) separately; its own per-glyph insert half
+stays host-tested but unreachable while glifo allocates, reserved for the
+planned frust-side hvgl insert. glifo's `PendingClearRect`s and recorded page
+replays are re-offered every frame until the renderer acknowledges they were
+serviced, and glifo's eviction pass is deferred only while an unreplayed
+recording has outlived the entry-age window (a serial-based check — younger
+recordings name nothing reapable), so a dropped frame loses nothing and a
+recorded command cannot outlive its slot. Glyphs share one `ImageCache`
+allocator with images so slot ids and rectangles cannot collide.
+`FRUST_ENGINE_NO_ATLAS` routes every glyph to the outline path — a correct,
+slower, tested fallback. A 200-frame scale-animated wired-path test bounds
+resident entries and keeps images resident, and the atlas-drawn and outline
+paths are byte-identical for a whole-pixel-placed run on the T400 reference
+adapter. The resident glyph-run cache (`ResidentRuns`) goes further than the
+policy: it restates glifo 0.3.0's private placement arithmetic (transform
+composition, `quantize_subpixel`, the black outline-key colour) and mirrors
+`maintain`'s eviction schedule, which is part of why glifo is exact-pinned — a
+bump must re-run the bucket unit test, `tests/glyph_run_cache.rs` and the
+`tests/glyph_quads.rs` GPU byte-identity suite. A mispredicted eviction makes
+the cache forget every record, which costs one frame of probes, never a pixel.
 
 **Accepted because**: the outline fallback is always live (animating sizes,
 oversized glyphs, refused allocations, the kill switch all take it), so an

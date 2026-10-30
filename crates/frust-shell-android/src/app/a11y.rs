@@ -9,8 +9,9 @@ use accesskit_android::InjectingAdapter;
 use accesskit_android::jni as ak_jni;
 use frust_core::SemanticsUpdate;
 use frust_core::accesskit::{
-    Action, ActionHandler, ActionRequest, ActivationHandler, NodeId, Tree, TreeId, TreeUpdate,
+    Action, ActionHandler, ActionRequest, ActivationHandler, NodeId, TreeUpdate,
 };
+use frust_shell_common::{sanitize_scale, tree_update_from_parts};
 
 use super::AndroidAppHandle;
 use super::input::under_root_owner;
@@ -54,6 +55,12 @@ pub(super) struct AndroidA11y {
     /// skips reassembling+re-pushing an unchanged tree (via
     /// [`AppTree::semantics_if_changed`](frust_shell_common::AppTree::semantics_if_changed)).
     last_pushed_gen: u64,
+    /// The sanitised density the last pushed tree's root was scaled by. A
+    /// density change rides `surfaceChanged` without bumping the semantics
+    /// generation, so a push is forced whenever this differs from the frame's
+    /// density; otherwise TalkBack's focus rects would keep the old scale
+    /// until some unrelated semantics change.
+    last_pushed_scale: f64,
 }
 
 impl AndroidA11y {
@@ -85,6 +92,7 @@ impl AndroidA11y {
             pending_actions,
             tree_snapshot,
             last_pushed_gen: 0,
+            last_pushed_scale: 0.0,
         }
     }
 }
@@ -121,20 +129,20 @@ impl ActionHandler for ForgeActionHandler {
     }
 }
 
-/// Assemble an accesskit [`TreeUpdate`] from a [`SemanticsUpdate`].
+/// Assemble an accesskit [`TreeUpdate`] from a [`SemanticsUpdate`] via the
+/// shared [`tree_update_from_parts`], with the root carrying
+/// `Affine::scale(scale)`.
 ///
-/// v1 always publishes the whole tree (`RenderRoot::semantics` recomputes it in
-/// full): every node is a "new or changed" entry, `tree` names the root, and
-/// `focus` is the focused node or the root fallback
-/// ([`SemanticsUpdate::focus_id`]). `tree_id` is always [`TreeId::ROOT`] — this
-/// shell drives a single, non-subtree accessibility tree.
-fn tree_update_from_semantics(update: &SemanticsUpdate) -> TreeUpdate {
-    TreeUpdate {
-        nodes: update.nodes.clone(),
-        tree: Some(Tree::new(update.root)),
-        tree_id: TreeId::ROOT,
-        focus: update.focus_id(),
-    }
+/// Semantics bounds are logical px, but `accesskit_android` reports
+/// `AccessibilityNodeInfo` bounds and reads hover points in the view's physical
+/// px, so the density must be stamped on the root. `scale` is the
+/// [`sanitize_scale`]d density the frame used for layout and paint. v1 always
+/// publishes the whole tree: every node is a "new or changed" entry, `tree`
+/// names the root, and `focus` is the focused node or the root fallback
+/// ([`SemanticsUpdate::focus_id`]).
+fn tree_update_from_semantics(update: SemanticsUpdate, scale: f64) -> TreeUpdate {
+    let focus = update.focus_id();
+    tree_update_from_parts(update.nodes, update.root, focus, scale)
 }
 
 impl AndroidAppHandle {
@@ -199,29 +207,41 @@ impl AndroidAppHandle {
     /// so node bounds are valid.
     ///
     /// Gated twice over: the [`AppTree::semantics_if_changed`](frust_shell_common::AppTree::semantics_if_changed)
-    /// generation check skips reassembling an unchanged tree here, and the
+    /// generation check skips reassembling an unchanged tree here (a density
+    /// change, which moves no generation, forces the walk instead), and the
     /// adapter's own `update_if_active` is a cheap no-op until a screen reader
     /// activates. The assembled tree is also snapshotted for a late-activating
     /// screen reader's `request_initial_tree`, so it sees real content rather
-    /// than the adapter's placeholder window.
+    /// than the adapter's placeholder window. Its root carries the same
+    /// `sanitize_scale`d density the frame laid out and painted with, so
+    /// TalkBack's focus rects land in physical px.
     pub(super) fn publish_semantics(&mut self) {
         // Cheap generation gate first (immutable `a11y` borrow, released before
         // the `&mut self.app` call below).
-        let last_gen = match self.a11y.as_ref() {
-            Some(a11y) => a11y.last_pushed_gen,
+        let (last_gen, last_scale) = match self.a11y.as_ref() {
+            Some(a11y) => (a11y.last_pushed_gen, a11y.last_pushed_scale),
             None => return,
         };
-        let Some(update) = self.app.semantics_if_changed(last_gen) else {
-            return; // tree unchanged since the last push
+        let scale = sanitize_scale(self.scale);
+        // A density change does not move the generation, so it forces the
+        // walk itself: the same nodes with a new root transform.
+        let update = if scale == last_scale {
+            self.app.semantics_if_changed(last_gen)
+        } else {
+            Some(self.app.semantics())
+        };
+        let Some(update) = update else {
+            return; // tree and density unchanged since the last push
         };
         let current_gen = self.app.semantics_generation();
-        let tree_update = tree_update_from_semantics(&update);
+        let tree_update = tree_update_from_semantics(update, scale);
         if let Some(a11y) = self.a11y.as_mut() {
             if let Ok(mut slot) = a11y.tree_snapshot.lock() {
                 *slot = Some(tree_update.clone());
             }
             a11y.adapter.update_if_active(move || tree_update);
             a11y.last_pushed_gen = current_gen;
+            a11y.last_pushed_scale = scale;
         }
     }
 }
@@ -240,25 +260,35 @@ impl AndroidAppHandle {
 mod tests {
     use super::tree_update_from_semantics;
     use frust_core::SemanticsUpdate;
-    use frust_core::accesskit::{Node, NodeId, Role, Tree, TreeId};
+    use frust_core::accesskit::{Affine, Node, NodeId, Rect, Role, Tree, TreeId};
+
+    /// A Pixel 5's display density: the scale the root must carry so a logical
+    /// rect becomes the physical one `accesskit_android` reports.
+    const PIXEL_5_DENSITY: f64 = 2.75;
 
     #[test]
     fn tree_update_carries_nodes_root_and_focused_node() {
-        let nodes = vec![
-            (NodeId(1), Node::new(Role::Window)),
-            (NodeId(5), Node::new(Role::Button)),
-        ];
+        let mut button = Node::new(Role::Button);
+        button.set_bounds(Rect::new(16.0, 24.0, 120.0, 72.0));
+        let nodes = vec![(NodeId(1), Node::new(Role::Window)), (NodeId(5), button)];
         let update = SemanticsUpdate {
             nodes: nodes.clone(),
             root: NodeId(1),
             focus: Some(NodeId(5)),
         };
-        let tree_update = tree_update_from_semantics(&update);
-        assert_eq!(tree_update.nodes, nodes);
+        let tree_update = tree_update_from_semantics(update, PIXEL_5_DENSITY);
+        assert_eq!(tree_update.nodes.len(), 2);
         assert_eq!(tree_update.tree, Some(Tree::new(NodeId(1))));
         assert_eq!(tree_update.tree_id, TreeId::ROOT);
         // A focused node is reported directly.
         assert_eq!(tree_update.focus, NodeId(5));
+        // The root alone carries the density; the child keeps its logical
+        // bounds and inherits the root's transform.
+        let (_, root) = &tree_update.nodes[0];
+        let (_, child) = &tree_update.nodes[1];
+        assert_eq!(root.transform(), Some(&Affine::scale(PIXEL_5_DENSITY)));
+        assert_eq!(child.transform(), None);
+        assert_eq!(child, &nodes[1].1);
     }
 
     #[test]
@@ -268,9 +298,13 @@ mod tests {
             root: NodeId(1),
             focus: None,
         };
-        let tree_update = tree_update_from_semantics(&update);
+        let tree_update = tree_update_from_semantics(update, PIXEL_5_DENSITY);
         // accesskit requires a non-optional focus target; the root is the
         // conventional fallback (`SemanticsUpdate::focus_id`).
         assert_eq!(tree_update.focus, NodeId(1));
+        assert_eq!(
+            tree_update.nodes[0].1.transform(),
+            Some(&Affine::scale(PIXEL_5_DENSITY))
+        );
     }
 }

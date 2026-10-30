@@ -88,6 +88,12 @@ The repository already contains substantial non-pixel coverage:
   triptych/JSON failure artifacts under `target/frust-testing/`, and the
   committed `testing/goldens/cpu/` class (unit, adversarial, widget, page, and
   text cases, incl. `examples/material3-demo`'s standalone page goldens).
+  The adversarial corpus also has an `#[ignore]`d real-GPU arm in
+  `crates/frust-testing/tests/adversarial.rs`: every `adv-*` case through `EngineOracle`
+  (no panic, no validation error, a rendered/refused/CPU-only outcome per case) plus the
+  `adv-5k-layers` bounded-memory assertion on the engine path; it commits no golden. Run it with
+  `WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=T400 FRUST_GOLDEN_EXPECT_ADAPTER=T400 cargo test -p
+  frust-testing --locked --test adversarial -- --ignored --test-threads=1`.
 - `examples/gallery` (package `frust-gallery`): a hand-authored widget/page case registry, a
   dev-only root workspace member shared by the website's static snapshot generator and the
   browser gallery below. `crates/frust-testing`'s `widget-snapshots` bin walks it through the
@@ -851,8 +857,7 @@ user content into golden artifacts or CI logs.
 
 Performance claims use `benchmarks/PROTOCOL.md`; a golden run is not a
 benchmark. Do not infer performance from screenshot completion time.
-`benchmarks/harness/ab_matrix.sh --tier engine` drives the render-arm gate (`engine` is a labelled
-synonym of the script's own `default` arm — there is only one renderer now) across a caller-chosen
+`benchmarks/harness/ab_matrix.sh --raw-label <name>` drives the render gate (one `default` arm; raw series land under `<raw-root>/<device>/<label>/<arm>/<scenario>/`, `--force` overwrites a committed cell) across a caller-chosen
 `--scenarios` subset of S1-S8 — see `docs/RENDER_DEVELOPMENT.md`; the recorded tier A/B numbers
 live in git history (`git show f64be636:benchmarks/RESULTS.md`), since `benchmarks/RESULTS.md` holds
 only the Frust-vs-Flutter matrix (driven by `benchmarks/harness/matrix.sh`).

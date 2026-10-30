@@ -7,14 +7,15 @@
 # The FRUST_AA_MODE x FRUST_RENDER_SCALE matrix this script was built around
 # is GONE: both knobs were vello-classic measurement instruments, and they
 # were deleted with vello itself when the engine tier became the only
-# renderer. What survives is the `--tier` axis plus the kept-run accounting,
-# sanitized capture, raw-copy and device wake/lock machinery below.
+# renderer. What survives is one render arm (the app's ordinary build, filed
+# as `default`) plus the kept-run accounting, sanitized capture, raw-copy and
+# device wake/lock machinery below.
 #
 # For every cell in the matrix, in this order:
 #
 #   1. Build benchmarks/frust_bench (from its own directory — it is a
 #      standalone workspace, see the repo root CLAUDE.md):
-#        <frust> build apk --profile --define FRUST_TRACE_RAW=1 <arm args>
+#        <frust> build apk --profile --define FRUST_TRACE_RAW=1
 #      `<frust>` is the frust CLI binary — `target/debug/frust` at the repo
 #      root, built by `cargo build -p frust-cli` there (this script never
 #      builds the CLI itself; see `--frust` below).
@@ -83,25 +84,22 @@
 # run.sh's own `run-NN.log` files, a `stats.txt` capturing the run.sh
 # stdout tail that carries stats.py's `p50=`/`p95=` table, and the nav
 # column's sanitized `logcat-frust-perf.log` — is copied into
-# `benchmarks/raw/<device-name>/<group>/<cell>/<scenario>/`
-# (nav: `.../<cell>/nav/logcat-frust-perf.log`) — `<group>` is `fine-floor`
-# for a run without --tier and `tier` for one with it (the `fine-floor`
-# name is historical, kept so the already-committed raw tree is not
-# orphaned), `<cell>` is the arm label above; `<device-name>` from
-# `--device-name` (default raw root: `<repo>/benchmarks/raw`, overridable
-# via `--raw-root`), so RESULTS.md's Fine-floor A/B table can cite the
-# exact committed files backing each cell (PROTOCOL §10's "raw series
-# committed alongside the computed table" rule).
+# `benchmarks/raw/<device-name>/<label>/<arm>/<scenario>/`
+# (nav: `.../<label>/<arm>/nav/logcat-frust-perf.log`). `<device-name>` comes
+# from `--device-name` (default raw root: `<repo>/benchmarks/raw`, overridable
+# via `--raw-root`), so RESULTS.md's A/B tables can cite the exact committed
+# files backing each cell (PROTOCOL §10's "raw series committed alongside the
+# computed table" rule). `<label>` is the run label (`--raw-label`, alias
+# `--raw-group`; default: today's date, YYYY-MM-DD) and `<arm>` is the render
+# arm, `default` — the only arm, since the renderer is not selectable. A
+# labelled series (e.g. `--raw-label wgpu31` for a renderer-dependency bump)
+# files beside the others without touching them.
 #
-# A `--tier` run's scenario cells ALSO copy each captured run's
-# `run-NN.pss_before.txt`/`run-NN.pss_after.txt` (run.sh's own `dumpsys
-# meminfo` snapshots, benchmarks/.gitignore's documented `*.pss_*.txt`
-# raw-artifact class) alongside `run-NN.log` — best-effort, whichever
-# exist, never required (run.sh's own capture already is: a missing
-# snapshot is the ordinary "not yet running"/"capture failed" outcome, not
-# an error) — the source `gpu_graphics_stats`'s `Graphics (MB)` figure is
-# computed from. A fine-floor run (no --tier) copies neither, unchanged
-# from before this axis existed.
+# A committed cell (`<raw-root>/<device-name>/<label>/<arm>/`) is never
+# overwritten silently. If that directory already holds files, the run refuses
+# before any build, install or device touch, unless `--force` is passed.
+# `--force` replaces each scenario/nav directory the run publishes and leaves
+# the rest of the cell alone.
 #
 # Each cell's artifacts are first assembled in a staging directory under --out
 # (`<out>/stage/<cell>/<sub>`, cleared per copy), every `cp` is
@@ -110,7 +108,7 @@
 # documents as its pre-commit rule runs over the STAGED copy, and only a
 # copy that passes is moved into the committed tree: the destination cell
 # directory — built from the RESOLVED raw root and asserted to be exactly
-# `<raw-root>/<device-name>/<group>/<cell>/<sub>`, nothing else
+# `<raw-root>/<device-name>/<label>/<cell>/<sub>`, nothing else
 # — is `rm -rf`'d immediately before the move (a rerun over a stale cell
 # never leaves a prior run's files mixed in with the new ones). A rejected
 # copy therefore never touches `benchmarks/raw/` at all, and a SKIPPED
@@ -146,15 +144,8 @@
 # purpose — awake, no keyguard showing — is left alone), and never under
 # --dry-run.
 #
-# Emits a Markdown table — column `tier`, one p50/p95 column pair per
-# `--scenarios` entry (a
-# `--tier` run additionally carries that scenario's `gpu_total p50`/
-# `gpu_total p95`/`Graphics (MB)` columns — the v4 raw-format GPU-pass
-# percentiles and the post-run `dumpsys meminfo` Graphics-PSS mean,
-# `n/a` when no kept frame carries a `gpu_q=1` reading or no kept run's
-# snapshot parsed a Graphics row; see `gpu_graphics_stats` below — a
-# fine-floor run, no --tier, grows neither, unchanged from before this
-# axis existed), `nav total_p50`, `nav submit_p95` — to stdout and to
+# Emits a Markdown table — column `arm`, one p50/p95 column pair per
+# `--scenarios` entry, then `nav total_p50`, `nav submit_p95` — to stdout and to
 # `<out>/ab_matrix.md`; each finished cell's row is ALSO appended to
 # `<out>/ab_matrix.rows.md` the moment it is measured, so a run that ends
 # early (a hard failure in a later cell, Ctrl-C) never loses the cells
@@ -166,7 +157,7 @@
 # (PROTOCOL §7's v4 note) — every arm here is direct-to-surface now, so a
 # comparison against a pre-engine blit-arm capture must read the columns
 # immune to the remap: this table's own p50/p95 (total_us, the summed
-# column) and, when present, gpu_total.
+# column).
 # Ctrl-C/SIGTERM STOPS the matrix — no further cell is built, installed or
 # run — and exits 130/143. Transient build/install/command output
 # (including a nav run's `*.monkey.txt` launch capture — kept for
@@ -177,7 +168,7 @@
 # performs the device-lock step above.
 #
 # Usage: ab_matrix.sh --device <serial> [--device-name <slug>]
-#                      [--tier engine]
+#                      [--raw-label <name>] [--force]
 #                      [--scenarios s1,s2,s4] [--runs 12] [--duration 30]
 #                      [--quick] [--frust <path>] [--raw-root <dir>]
 #                      [--taps 540,472,540,734,540,996] [--out <dir>]
@@ -188,41 +179,25 @@
 #                      `adb -s <serial> ...` command lines it would issue).
 #   --device-name <slug>  lowercase device slug (`[a-z0-9_]+`, e.g.
 #                      `pixel5`) used to file this run's raw series under
-#                      `benchmarks/raw/<slug>/fine-floor/...` — required
+#                      `benchmarks/raw/<slug>/<label>/default/...` — required
 #                      for a live run; may be omitted under --dry-run (a
 #                      placeholder is printed instead).
-#   --tier <csv>       render arms to sweep. Omitted entirely by default —
-#                      the matrix then runs ONE cell, the app's ordinary
-#                      default build (which is an engine build: `frust-render`
-#                      contains no other renderer), filed under
-#                      `<raw-root>/<device>/fine-floor/default/`. Passing it
-#                      turns on the tier axis: the run files its raw series
-#                      under `<raw-root>/<device>/tier/<cell>/` instead (so a
-#                      tier sweep never overwrites a default-arm cell) and the
-#                      table grows the per-scenario gpu_total/Graphics
-#                      columns. Values (validated up front):
-#                        default       the app's ordinary build, no arm-
-#                                      specific build args. Cell label
-#                                      `default`.
-#                        engine        a LABELLED SYNONYM of `default`: the
-#                                      frust-owned `frust-engine` strip
-#                                      pipeline is what an ordinary build
-#                                      already runs, so this arm passes the
-#                                      same (empty) build args and differs
-#                                      only in its cell label `engine`, kept
-#                                      so RESULTS.md's existing `engine` cell
-#                                      names stay stable. The feature +
-#                                      env-var define this arm used to pass
-#                                      named a tier selection that no longer
-#                                      exists and would now be rejected by
-#                                      cargo.
-#                      The vello-classic `classic` arm is GONE with the
-#                      renderer it named. The axis is kept, one renderer wide
-#                      today, as the seam a second arm plugs into.
+#   --raw-label <name> label for this run's committed raw series: the
+#                      directory between <device-name> and the arm, i.e.
+#                      `benchmarks/raw/<device>/<label>/default/...`. Must
+#                      match [A-Za-z0-9][A-Za-z0-9._-]*. Default: today's date
+#                      (YYYY-MM-DD). `--raw-group <name>` is accepted as an
+#                      alias (the spelling a renderer-dependency card uses);
+#                      both at once must agree. Two labels are two series:
+#                      one never overwrites another's cells.
+#   --force            replace a committed cell (`<device>/<label>/default/`)
+#                      that already holds files. Without it the run exits 2,
+#                      before any build or device touch, when that directory
+#                      is non-empty. See the raw-series note above.
 #   --scenarios <csv>  benchmarks/frust_bench scenario ids to run per cell,
 #                      passed through to run.sh (default: s1,s2,s4). Each
 #                      value must be one of s1..s8, d1, d2, validated up
-#                      front (same posture as --tier).
+#                      front (same posture as the other validated lists).
 #   --runs <n>         runs per scenario, passed to run.sh (default: 12 —
 #                      PROTOCOL §4's own >=10-kept-run convention at the
 #                      stock DISCARD_FIRST=2, i.e. 10 kept; see --quick
@@ -306,14 +281,14 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." >/dev/null 2>&1 && pwd)"
 
 DEVICE=""
 DEVICE_NAME=""
-# The tier axis is OFF unless --tier is passed: TIER_AXIS gates the
-# `tier` raw-series group, the gpu_total/Graphics columns and their
-# pss_*.txt raw-series copy. --quick and the PROTOCOL §4 default below, and
-# the emitted table's deviation note and arm-remap footer, are NOT gated by
-# TIER_AXIS — they apply to every run (see the --runs/--duration/--quick
-# docs above).
-TIER_LIST="default"
-TIER_AXIS=0
+# The one render arm. The renderer is not selectable (frust-engine is the only
+# renderer frust-render contains), so every run is one cell: the app's ordinary
+# build, filed under the arm name `default`.
+ARM="default"
+# Raw-series label (--raw-label / --raw-group) and overwrite switch (--force).
+# RAW_LABEL is defaulted to today's date once the arguments are parsed.
+RAW_LABEL=""
+FORCE=0
 SCENARIOS_LIST="s1,s2,s4"
 # RUNS/DURATION are resolved below (after DISCARD_FIRST is derived) from
 # either PROTOCOL §4's own convention or --quick's — left unset here so
@@ -368,6 +343,22 @@ usage() {
   sed -n "2,$(($(grep -n '^set -uo pipefail' "$0" | head -n1 | cut -d: -f1) - 1))p" "$0"
 }
 
+# take_raw_label <flag> <value> — --raw-label and --raw-group name the same
+# committed directory segment; two different values on one command line are
+# refused rather than letting the last one silently win.
+take_raw_label() {
+  local flag="$1" value="$2"
+  if [ -z "${value}" ]; then
+    echo "error: ${flag} requires a non-empty label" >&2
+    exit 2
+  fi
+  if [ -n "${RAW_LABEL}" ] && [ "${RAW_LABEL}" != "${value}" ]; then
+    echo "error: --raw-label and --raw-group given different values ('${RAW_LABEL}' and '${value}') — they name the same directory" >&2
+    exit 2
+  fi
+  RAW_LABEL="${value}"
+}
+
 # --- Arg parsing ------------------------------------------------------
 
 while [ $# -gt 0 ]; do
@@ -390,15 +381,17 @@ while [ $# -gt 0 ]; do
       DEVICE_NAME="${1#--device-name=}"
       shift
       ;;
-    --tier)
-      [ $# -ge 2 ] || { echo "error: --tier requires a value" >&2; exit 2; }
-      TIER_LIST="$2"
-      TIER_AXIS=1
+    --raw-label|--raw-group)
+      [ $# -ge 2 ] || { echo "error: $1 requires a value" >&2; exit 2; }
+      take_raw_label "$1" "$2"
       shift 2
       ;;
-    --tier=*)
-      TIER_LIST="${1#--tier=}"
-      TIER_AXIS=1
+    --raw-label=*|--raw-group=*)
+      take_raw_label "${1%%=*}" "${1#*=}"
+      shift
+      ;;
+    --force)
+      FORCE=1
       shift
       ;;
     --scenarios)
@@ -500,10 +493,34 @@ if [ -n "${DEVICE_NAME}" ] && ! [[ "${DEVICE_NAME}" =~ ^[a-z0-9_]+$ ]]; then
   exit 2
 fi
 if [ "${DRY_RUN}" -eq 0 ] && [ -z "${DEVICE_NAME}" ]; then
-  echo "error: --device-name <slug> is required for a live run (e.g. pixel5) — it names the benchmarks/raw/<slug>/fine-floor/... directory this run's sanitized raw series is copied into. Pass --dry-run to preview without one." >&2
+  echo "error: --device-name <slug> is required for a live run (e.g. pixel5) — it names the benchmarks/raw/<slug>/<label>/default/... directory this run's sanitized raw series is copied into. Pass --dry-run to preview without one." >&2
   exit 2
 fi
 DEVICE_NAME_DISPLAY="${DEVICE_NAME:-<device-name>}"
+
+# The raw-series label: the directory segment a run files under (header:
+# raw-series note). Defaults to today's date.
+if [ -z "${RAW_LABEL}" ]; then
+  RAW_LABEL="$(date +%F)"
+fi
+if ! [[ "${RAW_LABEL}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+  echo "error: --raw-label must start with a letter or digit and use only [A-Za-z0-9._-] (it names a committed raw-series directory), got '${RAW_LABEL}'" >&2
+  exit 2
+fi
+
+# refuse_existing_cell — the overwrite guard (header: raw-series note). A
+# committed cell that already holds files is refused before any build,
+# install or device touch, unless --force was given. A dry run without a
+# --device-name checks nothing: its <device-name> is only a placeholder.
+refuse_existing_cell() {
+  local cell_root="${RAW_ROOT}/${DEVICE_NAME}/${RAW_LABEL}/${ARM}"
+  [ -n "${DEVICE_NAME}" ] || return 0
+  if [ "${FORCE}" -eq 0 ] && [ -d "${cell_root}" ] && [ -n "$(ls -A "${cell_root}" 2>/dev/null)" ]; then
+    echo "error: ${cell_root} already holds committed raw series — refusing to overwrite label '${RAW_LABEL}' (arm '${ARM}', device '${DEVICE_NAME}'). Pass a different --raw-label, or --force to replace the cell." >&2
+    exit 2
+  fi
+}
+refuse_existing_cell
 
 # DISCARD_FIRST: derived from stats.py's own DEFAULT_DISCARD_FIRST rather
 # than hand-duplicated as a literal here — a future PROTOCOL change to that
@@ -584,40 +601,9 @@ fi
 # --- Split CSV inputs into arrays --------------------------------------
 
 IFS=',' read -r -a SCENARIO_ARR <<<"${SCENARIOS_LIST}"
-IFS=',' read -r -a TIER_ARR <<<"${TIER_LIST}"
-
-if [ "${#TIER_ARR[@]}" -eq 0 ]; then
-  echo "error: --tier produced an empty list" >&2
-  exit 2
-fi
 if [ "${#SCENARIO_ARR[@]}" -eq 0 ]; then
   echo "error: --scenarios produced an empty list" >&2
   exit 2
-fi
-
-# --tier: each value must be one of the arms the header documents.
-# Deliberately NOT case-folded: the value is used verbatim as a cell label
-# (and so as a committed raw-series directory name), and two spellings of
-# one arm would file two cells for the same build.
-for tier in "${TIER_ARR[@]}"; do
-  case "${tier}" in
-    default|engine) ;;
-    *)
-      echo "error: --tier value '${tier}' is not one of default, engine" >&2
-      exit 2
-      ;;
-  esac
-done
-
-# The raw-series group segment: a tier sweep files under `tier/`, a run
-# without --tier keeps writing the pre-existing `fine-floor/` tree (a
-# historical name, kept so the committed tree is not orphaned). Only
-# ever one of these two literals — assert_raw_cell_dir builds the one
-# `rm -rf` this script performs out of it.
-if [ "${TIER_AXIS}" -eq 1 ]; then
-  RAW_GROUP="tier"
-else
-  RAW_GROUP="fine-floor"
 fi
 
 # --scenarios: each value must be a declared benchmarks/frust_bench
@@ -632,6 +618,14 @@ for scenario in "${SCENARIO_ARR[@]}"; do
       ;;
   esac
 done
+
+# --scenarios: a scenario listed twice would publish its raw series twice over
+# the same cell, so it is refused rather than letting the second run win.
+dup_scenarios="$(printf '%s\n' "${SCENARIO_ARR[@]}" | sort | uniq -d)"
+if [ -n "${dup_scenarios}" ]; then
+  echo "error: --scenarios lists a scenario more than once: ${dup_scenarios//$'\n'/, }" >&2
+  exit 2
+fi
 
 # --taps: exactly six comma-separated non-negative integers -> three (x,y)
 # pairs, TAP_X[0..2] / TAP_Y[0..2].
@@ -770,7 +764,7 @@ if [ "${DRY_RUN}" -eq 0 ]; then
   esac
 
   echo "Output directory: ${OUT_DIR}"
-  echo "Raw series root: ${RAW_ROOT_ABS}/${DEVICE_NAME}/${RAW_GROUP}/"
+  echo "Raw series root: ${RAW_ROOT_ABS}/${DEVICE_NAME}/${RAW_LABEL}/${ARM}/"
 else
   # A dry run resolves nothing and writes nothing: the cell paths it prints
   # use --raw-root as given.
@@ -796,21 +790,14 @@ print_cmd() {
   echo "  ${label}$*"
 }
 
-# cell_label <tier> — the cell's directory name and table identity: the arm
-# name itself, which is `default` for a run without --tier.
-cell_label() {
-  echo "$1"
-}
-
 # raw_cell_dir <cell> <sub> — echoes
-# <raw-root-abs>/<device-name>/<group>/<cell>/<sub> (sub is a scenario id,
-# or "nav"; <group> is `fine-floor` or `tier`, <cell> comes from
-# cell_label), built from the RESOLVED raw root. Uses the display
-# placeholder for <device-name> when none was given (--dry-run only — a
-# live run requires --device-name).
+# <raw-root-abs>/<device-name>/<label>/<cell>/<sub> (<cell> is the arm name,
+# `default`; <sub> is a scenario id, or "nav"; <label> is --raw-label), built
+# from the RESOLVED raw root. Uses the display placeholder for <device-name>
+# when none was given (--dry-run only — a live run requires --device-name).
 raw_cell_dir() {
   local cell="$1" sub="$2"
-  echo "${RAW_ROOT_ABS}/${DEVICE_NAME_DISPLAY}/${RAW_GROUP}/${cell}/${sub}"
+  echo "${RAW_ROOT_ABS}/${DEVICE_NAME_DISPLAY}/${RAW_LABEL}/${cell}/${sub}"
 }
 
 # stage_cell_dir <cell> <sub> — echoes the staging directory under --out a
@@ -824,14 +811,14 @@ stage_cell_dir() {
 
 # assert_raw_cell_dir <dir> — dies unless <dir> is exactly one cell
 # directory under the RESOLVED raw root —
-# <raw-root-abs>/<device-name>/<group>/<cell>/<sub>: four non-empty
-# segments below the root, the group segment exactly the `fine-floor`/
-# `tier` literal this run resolved, every segment drawn from
+# <raw-root-abs>/<device-name>/<label>/<cell>/<sub>: four non-empty
+# segments below the root, the label segment exactly the --raw-label this
+# run resolved, every segment drawn from
 # [A-Za-z0-9._-] (no glob metacharacter, no whitespace), no `..` segment
 # anywhere, an absolute root.
 # Called by publish_cell immediately before its `rm -rf`, the only
 # recursive delete this script performs, which must never be pointed
-# anywhere else whatever --raw-root, --device-name, --tier or the matrix
+# anywhere else whatever --raw-root, --device-name, --raw-label or the matrix
 # values were.
 assert_raw_cell_dir() {
   local dir="$1" rel slashes seg
@@ -843,24 +830,22 @@ assert_raw_cell_dir() {
   case "${dir}" in
     *'/../'*|*'/..'|'../'*|'..') die "refusing to touch '${dir}': the path contains a '..' segment" ;;
   esac
-  case "${RAW_GROUP}" in
-    fine-floor|tier) ;;
-    *) die "assert_raw_cell_dir: unexpected raw-series group '${RAW_GROUP}'" ;;
-  esac
+  [[ "${RAW_LABEL}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
+    || die "assert_raw_cell_dir: unexpected raw-series label '${RAW_LABEL}'"
   case "${dir}" in
-    "${RAW_ROOT_ABS}"/*/"${RAW_GROUP}"/*/*) ;;
-    *) die "refusing to touch '${dir}': not of the form ${RAW_ROOT_ABS}/<device-name>/${RAW_GROUP}/<cell>/<sub>" ;;
+    "${RAW_ROOT_ABS}"/*/"${RAW_LABEL}"/*/*) ;;
+    *) die "refusing to touch '${dir}': not of the form ${RAW_ROOT_ABS}/<device-name>/${RAW_LABEL}/<cell>/<sub>" ;;
   esac
   rel="${dir#"${RAW_ROOT_ABS}"/}"
   case "${rel}" in
     *//*|/*|*/) die "refusing to touch '${dir}': empty path segment in '${rel}'" ;;
   esac
   slashes="${rel//[^\/]/}"
-  [ "${#slashes}" -eq 3 ] || die "refusing to touch '${dir}': expected exactly <device-name>/${RAW_GROUP}/<cell>/<sub> below ${RAW_ROOT_ABS}, got '${rel}'"
+  [ "${#slashes}" -eq 3 ] || die "refusing to touch '${dir}': expected exactly <device-name>/${RAW_LABEL}/<cell>/<sub> below ${RAW_ROOT_ABS}, got '${rel}'"
   # Every segment from a conservative charset: no glob metacharacter, no
   # whitespace, nothing shell-special (parent traversal is already refused
   # by the `..` check above). The cell label is built from
-  # --tier and the device name, both validated up front, so
+  # --raw-label and the device name, both validated up front, so
   # this is belt-and-braces on the one path this script deletes.
   local IFS='/'
   for seg in ${rel}; do
@@ -877,6 +862,9 @@ assert_raw_cell_dir() {
 publish_cell() {
   local stage_dir="$1" cell_dir="$2" parent
   assert_raw_cell_dir "${cell_dir}"
+  if [ "${FORCE}" -eq 0 ] && [ -e "${cell_dir}" ]; then
+    die "refusing to overwrite existing ${cell_dir} without --force"
+  fi
   rm -rf "${cell_dir}"
   parent="$(dirname "${cell_dir}")"
   mkdir -p "${parent}" || die "mkdir -p ${parent} failed"
@@ -898,12 +886,6 @@ publish_cell() {
 #     produce), AND run-01.log..run-<runs>.log plus stats.txt are all
 #     present;
 #   - kind=nav: logcat-frust-perf.log is present.
-# A --tier run's copy_scenario_raw ALSO stages each captured run's
-# run-NN.pss_before.txt/run-NN.pss_after.txt (see that function) — NOT
-# checked here: their `.txt` name never matches the `*.log` glob above
-# (dumpsys meminfo output is not a perf/marker line, so no whitelist for
-# it exists in this function), and they are copied best-effort, so their
-# presence is never required the way run-NN.log's is.
 # benchmarks/.gitignore's own pss content check ("scan *.pss_*.txt for any
 # package identifier other than it.f0x.*bench") is a separate pre-commit
 # check run by hand, not part of this function.
@@ -948,28 +930,17 @@ self_check_raw_dir() {
 # run.sh stdout tail carrying stats.py's p50=/p95= table) in the cell's
 # staging directory (cleared first), runs the raw-series sanitization
 # self-check THERE, and only then publishes the cell into
-# <raw-root-abs>/<device-name>/<group>/<cell>/<scenario>/ (see
+# <raw-root-abs>/<device-name>/<label>/<cell>/<scenario>/ (see
 # publish_cell). Only ever called for a non-SKIPPED scenario result (see
 # the run loop) — every cp is checked, and a missing expected artifact
 # fails the self-check before anything is published.
 #
-# A --tier run (TIER_AXIS=1) ALSO stages each captured run's
-# run-NN.pss_before.txt/run-NN.pss_after.txt (run.sh's own `dumpsys
-# meminfo` snapshots, benchmarks/.gitignore's documented `*.pss_*.txt`
-# raw-artifact class) — best-effort, whichever exist, never required (see
-# self_check_raw_dir's own note): gpu_graphics_stats' Graphics (MB) figure
-# is computed from the published run-NN.pss_after.txt files. A fine-floor
-# run (no --tier) copies neither, unchanged from before this axis existed.
 copy_scenario_raw() {
   local scenario="$1" cell="$2" scen_out="$3" runsh_log="$4" cell_dir stage_dir
   cell_dir="$(raw_cell_dir "${cell}" "${scenario}")"
   stage_dir="$(stage_cell_dir "${cell}" "${scenario}")"
   if [ "${DRY_RUN}" -eq 1 ]; then
-    if [ "${TIER_AXIS}" -eq 1 ]; then
-      print_cmd "" "rm -rf ${stage_dir} && mkdir -p ${stage_dir} && cp ${scen_out}/run-*.log ${stage_dir}/ && cp ${scen_out}/run-*.pss_before.txt ${scen_out}/run-*.pss_after.txt ${stage_dir}/ (best-effort, whichever exist) && sed -n '/^-- stats.py/,\$p' ${runsh_log} > ${stage_dir}/stats.txt && self-check ${stage_dir} && rm -rf ${cell_dir} && mv ${stage_dir} ${cell_dir}" >&2
-    else
-      print_cmd "" "rm -rf ${stage_dir} && mkdir -p ${stage_dir} && cp ${scen_out}/run-*.log ${stage_dir}/ && sed -n '/^-- stats.py/,\$p' ${runsh_log} > ${stage_dir}/stats.txt && self-check ${stage_dir} && rm -rf ${cell_dir} && mv ${stage_dir} ${cell_dir}" >&2
-    fi
+    print_cmd "" "rm -rf ${stage_dir} && mkdir -p ${stage_dir} && cp ${scen_out}/run-*.log ${stage_dir}/ && sed -n '/^-- stats.py/,\$p' ${runsh_log} > ${stage_dir}/stats.txt && self-check ${stage_dir} && rm -rf ${cell_dir} && mv ${stage_dir} ${cell_dir}" >&2
     return 0
   fi
   rm -rf "${stage_dir}"
@@ -982,12 +953,6 @@ copy_scenario_raw() {
   done
   if [ "${copied}" -eq 0 ]; then
     echo "note: no sanitized run-NN.log files found under ${scen_out} — nothing staged for ${cell_dir}" >&2
-  fi
-  if [ "${TIER_AXIS}" -eq 1 ]; then
-    for f in "${scen_out}"/run-*.pss_before.txt "${scen_out}"/run-*.pss_after.txt; do
-      [ -e "${f}" ] || continue
-      cp "${f}" "${stage_dir}/" || die "cp ${f} -> ${stage_dir}/ failed"
-    done
   fi
   if [ -f "${runsh_log}" ]; then
     sed -n '/^-- stats.py/,$p' "${runsh_log}" >"${stage_dir}/stats.txt" || die "writing ${stage_dir}/stats.txt failed"
@@ -1003,7 +968,7 @@ copy_scenario_raw() {
 # log (see run_nav) as logcat-frust-perf.log in the cell's staging
 # directory (cleared first), runs the raw-series sanitization self-check
 # THERE, and only then publishes the cell into
-# <raw-root-abs>/<device-name>/<group>/<cell>/nav/ (see
+# <raw-root-abs>/<device-name>/<label>/<cell>/nav/ (see
 # publish_cell). Only ever called for a non-SKIPPED nav result (see the
 # run loop) — the cp is checked, and a missing expected artifact fails the
 # self-check before anything is published.
@@ -1026,111 +991,24 @@ copy_nav_raw() {
   publish_cell "${stage_dir}" "${cell_dir}"
 }
 
-# gpu_graphics_stats <scenario> <scen_out> — echoes
-# "<gpu_p50_ms> <gpu_p95_ms> <gpu_n> <graphics_mb> <graphics_n>" for one
-# scenario's KEPT runs under <scen_out> — the v4 gpu_total_us percentiles
-# (stats.py's own gpu_spans, PROTOCOL §7's v4 note) and the Graphics-PSS
-# mean (stats.py's own mean_graphics_mb) behind the emitted table's
-# "<SCEN> gpu_total p50/p95"/"<SCEN> Graphics (MB)" columns. ONLY ever
-# called under --tier (TIER_AXIS=1, see the header's Raw-series output
-# note) — a fine-floor run never calls this.
-#
-# gpu_p50_ms/gpu_p95_ms read "n/a" (gpu_n "0") when no kept frame carries a
-# gpu_q=1 reading — the ordinary case for a build with no GPU timer
-# (a non-perf-trace build, or an adapter without TIMESTAMP_QUERY; see
-# PROTOCOL.md's v4 note), never treated as a failure.
-# graphics_mb/graphics_n read "n/a"/"0" the same way when no kept run's
-# POST-run dumpsys meminfo snapshot (run-NN.pss_after.txt) parsed a
-# Graphics row (run.sh's own capture is best-effort).
-#
-# Computed via stats.py's OWN functions — load_run_frames/
-# discard_first_runs/gpu_spans/_nearest_rank_percentile/mean_graphics_mb,
-# imported and reused, exactly the convention RESULTS.md's baseline
-# section already established for its by-hand encode+submit p50/
-# Graphics (MB) figures — never reimplemented here. Never fails the matrix
-# (see header): python3 itself is already a hard startup requirement (Tool
-# checks above), so any other error here degrades to the same "n/a" this
-# function reports for "nothing parsed" rather than aborting the run — the
-# scenario's own p50/p95 already succeeded (run_scenario) by the time this
-# is called. Same stdout/stderr split as run_scenario/run_nav: progress
-# goes to stderr, ONLY the result line goes to stdout.
-gpu_graphics_stats() {
-  local scenario="$1" scen_out="$2"
-  print_cmd "" "python3 -c '<gpu_total_us + Graphics-PSS percentile computation over ${scen_out}, discard-first ${DISCARD_FIRST}, via stats.py load_run_frames/discard_first_runs/gpu_spans/_nearest_rank_percentile/mean_graphics_mb>'" >&2
-  if [ "${DRY_RUN}" -eq 1 ]; then
-    echo "n/a n/a 0 n/a 0"
-    return 0
-  fi
-  python3 - "${scenario}" "${scen_out}" "${DISCARD_FIRST}" "${HARNESS_DIR}" <<'PYEOF' 2>/dev/null || echo "n/a n/a 0 n/a 0"
-import sys
-from pathlib import Path
-
-scenario, scen_out, discard_first, harness_dir = sys.argv[1:5]
-discard_first = int(discard_first)
-sys.path.insert(0, harness_dir)
-import stats
-
-scen_out_path = Path(scen_out)
-logs = sorted(scen_out_path.glob("run-*.log"))
-runs = [stats.load_run_frames(p, scenario) for p in logs]
-frames = stats.discard_first_runs(runs, discard_first)
-
-gpu_vals = []
-for f in frames:
-    if f.skipped:
-        continue
-    spans = stats.gpu_spans(f)
-    if spans is None:
-        continue
-    v = spans.get("gpu_total_us")
-    if v is not None:
-        gpu_vals.append(v)
-gpu_vals.sort()
-if gpu_vals:
-    p50 = stats._nearest_rank_percentile(gpu_vals, 50) / 1000
-    p95 = stats._nearest_rank_percentile(gpu_vals, 95) / 1000
-    gpu_out = f"{p50:.2f} {p95:.2f} {len(gpu_vals)}"
-else:
-    gpu_out = "n/a n/a 0"
-
-pss_files = sorted(scen_out_path.glob("run-*.pss_after.txt"))
-kept_pss = pss_files[discard_first:] if len(pss_files) > discard_first else pss_files
-mean_mb, samples = stats.mean_graphics_mb(kept_pss)
-if samples:
-    gfx_out = f"{mean_mb:.2f} {samples}"
-else:
-    gfx_out = "n/a 0"
-
-print(f"{gpu_out} {gfx_out}")
-PYEOF
-}
-
 # emit_table <status-line> — the Markdown table over whatever TABLE_ROWS
 # holds so far, to stdout: called once at the end of a completed matrix
 # (empty status line) and, with a PARTIAL status line, by the EXIT trap
 # when the run ends early with rows already measured (see cleanup).
 emit_table() {
   local status="$1" header sep scenario upper row
-  header="| Tier |"
+  header="| Arm |"
   sep="|---|"
   for scenario in "${SCENARIO_ARR[@]}"; do
     upper="$(printf '%s' "${scenario}" | tr '[:lower:]' '[:upper:]')"
     header="${header} ${upper} p50 (ms) | ${upper} p95 (ms) |"
     sep="${sep}---|---|"
-    if [ "${TIER_AXIS}" -eq 1 ]; then
-      header="${header} ${upper} gpu_total p50 (ms) | ${upper} gpu_total p95 (ms) | ${upper} Graphics (MB) |"
-      sep="${sep}---|---|---|"
-    fi
   done
   header="${header} nav total_p50 (ms) | nav submit_p95 (ms) |"
   sep="${sep}---|---|"
 
   echo
-  if [ "${TIER_AXIS}" -eq 1 ]; then
-    echo "## Render-tier A/B matrix (--tier ${TIER_LIST}) — device ${DEVICE}"
-  else
-    echo "## Render A/B matrix (default arm) — device ${DEVICE}"
-  fi
+  echo "## Render A/B matrix (default arm) — device ${DEVICE}"
   echo
   if [ -n "${status}" ]; then
     echo "${status}"
@@ -1152,19 +1030,6 @@ emit_table() {
     echo "${row}"
   done
   echo
-  if [ "${TIER_AXIS}" -eq 1 ]; then
-    echo "GPU/Graphics note: <SCEN> gpu_total p50/p95 are computed from each"
-    echo "kept run's gpu_total_us field (stats.py's gpu_spans, the v4 raw"
-    echo "format) and read n/a when no kept frame carries a gpu_q=1 reading —"
-    echo "the ordinary case off a build with no GPU timer (a non-perf-trace"
-    echo "build, or an adapter without TIMESTAMP_QUERY; see"
-    echo "PROTOCOL.md's v4 note), not a failure. <SCEN> Graphics (MB) averages"
-    echo "the Graphics PSS row of each kept run's POST-run dumpsys meminfo"
-    echo "snapshot (run.sh's own pss_after capture; pss_before is always"
-    echo "empty — the app is force-stopped ahead of every run) and reads n/a"
-    echo "the same way when no snapshot parsed."
-    echo
-  fi
   echo "Nav-basis note: the nav columns come from ONE push/pop pass per cell"
   echo "(no repeated runs, nothing discarded as warm-up) — they report"
   echo "material3-demo's own in-process rolling percentiles off the LAST"
@@ -1172,11 +1037,7 @@ emit_table() {
   echo "sample like the scenario columns above."
   echo
   echo "Percentiles are computed over the KEPT runs (${KEPT} of ${RUNS}; the first ${DISCARD_FIRST} are discarded as warm-up per PROTOCOL §4) — scenario columns only; see the nav-basis note above for the nav columns."
-  if [ "${TIER_AXIS}" -eq 1 ]; then
-    echo "Raw series (sanitized run-NN.log/stats.txt/run-NN.pss_before.txt/run-NN.pss_after.txt per scenario, sanitized nav logcat) copied under ${RAW_ROOT}/${DEVICE_NAME}/${RAW_GROUP}/."
-  else
-    echo "Raw series (sanitized run-NN.log/stats.txt per scenario, sanitized nav logcat) copied under ${RAW_ROOT}/${DEVICE_NAME}/${RAW_GROUP}/."
-  fi
+  echo "Raw series (sanitized run-NN.log/stats.txt per scenario, sanitized nav logcat) copied under ${RAW_ROOT}/${DEVICE_NAME}/${RAW_LABEL}/${ARM}/."
   echo
   echo "Encode/submit arm-remap caveat (always stated here — PROTOCOL §7's v4"
   echo "note): encode_us and submit_us are NOT the same instrument on every"
@@ -1188,66 +1049,24 @@ emit_table() {
   echo "and acquire_us followed it — so do not compare encode_us or submit_us"
   echo "alone against one. Compare on the columns immune to the remap: this"
   echo "table's own p50/p95 (total_us, the summed column — every CPU pass plus"
-  echo "acquire/submit) and, when present, the gpu_total columns above"
-  echo "(measured on the GPU's own clock, untouched by which CPU call the"
-  echo "recording happened inside)."
+  echo "acquire/submit)."
 }
 
-# tier_build_args <tier> — echoes the arm-specific tail of the `frust build
-# apk` command line, one argument per line (the caller reads it into an
-# array, so a value never re-splits on whitespace):
-#
-#   default       (nothing — the app's ordinary build)
-#   engine        (nothing — same build, kept only for its cell label)
-#
-# Both arms are empty today. The renderer is no longer selectable: the
-# frust-engine strip pipeline is the only one `frust-render` contains, so the
-# feature + env-var define the `engine` arm used to pass name a choice that
-# does not exist any more (cargo would reject the feature outright). The arm
-# survives as a labelled synonym so RESULTS.md's `engine` cells keep their
-# names, and this function stays the seam a genuinely different second arm
-# would plug its build args into. `--define FRUST_TRACE_RAW=1` is common to
-# every arm and stays on the caller's line.
-tier_build_args() {
-  local tier="$1"
-  case "${tier}" in
-    default)
-      ;;
-    engine)
-      ;;
-    *)
-      die "tier_build_args: unknown tier '${tier}'"
-      ;;
-  esac
-}
-
-# tier_build_desc <tier> — the human-readable arm summary the per-build
-# progress line carries, matching what tier_build_args passes.
-tier_build_desc() {
-  case "$1" in
-    default) echo "default build (no arm flags)" ;;
-    engine) echo "engine arm — same default build, labelled cell" ;;
-    *) die "tier_build_desc: unknown tier '$1'" ;;
-  esac
-}
-
-# build_apk <label> <app-dir> <tier> <log> — runs (or, under --dry-run, only
-# prints) `<frust> build apk --profile --define ...` from <app-dir>, with the
-# arm's own defines/features from tier_build_args. A build failure is a hard,
-# loud failure of the whole matrix — never a SKIPPED cell (see header).
+# build_apk <label> <app-dir> <log> — runs (or, under --dry-run, only prints)
+# `<frust> build apk --profile --define FRUST_TRACE_RAW=1` from <app-dir>. This
+# is the app's ordinary build with no arm-specific args: the renderer is not
+# selectable. A build failure is a hard, loud failure of the whole matrix —
+# never a SKIPPED cell (see header).
 build_apk() {
-  local label="$1" app_dir="$2" tier="$3" log="$4"
-  local -a tier_args=()
-  mapfile -t tier_args < <(tier_build_args "${tier}")
-  echo "-- ${label}: build ($(tier_build_desc "${tier}")) --"
-  print_cmd "(cd ${app_dir} && " "${FRUST_BIN} build apk --profile --define FRUST_TRACE_RAW=1 ${tier_args[*]})"
+  local label="$1" app_dir="$2" log="$3"
+  echo "-- ${label}: build (${ARM} arm, ordinary build) --"
+  print_cmd "(cd ${app_dir} && " "${FRUST_BIN} build apk --profile --define FRUST_TRACE_RAW=1)"
   if [ "${DRY_RUN}" -eq 1 ]; then
     return 0
   fi
   if ! ( cd "${app_dir}" && "${FRUST_BIN}" build apk --profile \
-      --define "FRUST_TRACE_RAW=1" \
-      "${tier_args[@]}" ) >"${log}" 2>&1; then
-    echo "error: ${label} build failed (tier=${tier}) — see ${log}" >&2
+      --define "FRUST_TRACE_RAW=1" ) >"${log}" 2>&1; then
+    echo "error: ${label} build failed — see ${log}" >&2
     exit 1
   fi
 }
@@ -1490,22 +1309,17 @@ wake_and_unlock_device() {
   fi
 }
 
-# --- Cell enumeration ----------------------------------------------------
+# --- Cell ----------------------------------------------------------------
 #
-# One entry per matrix cell — one per `--tier` arm, in the order given (a
-# run without --tier is the single `default` arm).
-declare -a CELL_SPECS=()
-for tier in "${TIER_ARR[@]}"; do
-  CELL_SPECS+=("${tier}")
-done
-CELL_TOTAL="${#CELL_SPECS[@]}"
+# One cell per run: the single `default` arm (see ARM above).
+CELL_TOTAL=1
 
-# cell_banner <n> <tier> — the per-cell progress heading.
+# cell_banner <n> <arm> — the per-cell progress heading.
 cell_banner() {
-  echo "=== cell $1: tier=$2 (kept ${KEPT} of ${RUNS} runs) ==="
+  echo "=== cell $1: arm=$2 (kept ${KEPT} of ${RUNS} runs) ==="
 }
 
-# table_row_prefix <tier> — the leading identity column of a table row,
+# table_row_prefix <arm> — the leading identity column of a table row,
 # matching emit_table's header.
 table_row_prefix() {
   echo "| $1 |"
@@ -1517,7 +1331,7 @@ if [ "${DRY_RUN}" -eq 1 ]; then
   echo "== ab_matrix.sh --dry-run =="
   echo "device: ${DEVICE} (never queried — --dry-run touches no device)"
   echo "device-name: ${DEVICE_NAME_DISPLAY}  raw-root: ${RAW_ROOT}"
-  echo "tier: ${TIER_LIST}  (raw-series group: ${RAW_GROUP}; one cell per arm)"
+  echo "arm: ${ARM}  raw-label: ${RAW_LABEL}  (one cell; $( [ "${FORCE}" -eq 1 ] && echo "an existing cell is replaced (--force)" || echo "an existing cell is refused (no --force)" ))"
   echo "scenarios: ${SCENARIOS_LIST}"
   echo "runs: ${RUNS}  duration: ${DURATION}s  frust: ${FRUST_BIN}$( [ "${QUICK}" -eq 1 ] && echo '  (--quick)' )"
   echo "kept ${KEPT} of ${RUNS} runs per scenario (first ${DISCARD_FIRST} discarded as warm-up per PROTOCOL §4)"
@@ -1530,34 +1344,23 @@ if [ "${DRY_RUN}" -eq 1 ]; then
   fi
   echo "nav basis: ONE push/pop pass per cell (no repeated runs, nothing discarded) — nav total_p50/nav submit_p95 come from the last frust-perf frame summary's own n=<frames> window, not the kept-run accounting above"
   echo "taps: ${TAPS}"
-  if [ "${TIER_AXIS}" -eq 1 ]; then
-    echo "gpu_total/Graphics columns: computed per scenario from stats.py's gpu_spans/mean_graphics_mb over each cell's kept runs (n/a when no gpu_q=1 reading or no Graphics PSS snapshot parsed)"
-  fi
-  echo "arm-remap caveat (always in the emitted table's footer): every arm here is direct-to-surface, so the GPU render lands in submit_us and encode_us carries only the scene copy (PROTOCOL §7's v4 note) — against a pre-engine blit-arm capture, compare via the p50/p95 (total_us) / gpu_total columns instead"
+  echo "arm-remap caveat (always in the emitted table's footer): every arm here is direct-to-surface, so the GPU render lands in submit_us and encode_us carries only the scene copy (PROTOCOL §7's v4 note) — against a pre-engine blit-arm capture, compare via the p50/p95 (total_us) columns instead"
   echo
   wake_and_unlock_device
   echo
-  cell=0
-  for spec in "${CELL_SPECS[@]}"; do
-    tier="${spec}"
-    cell=$((cell + 1))
-    label="$(cell_label "${tier}")"
-    cell_banner "${cell}" "${tier}"
-    build_apk "frust_bench" "${FRUST_BENCH_DIR}" "${tier}" "/dev/null"
-    install_apk "frust_bench" "$(frust_bench_apk_path)" "/dev/null"
-    for scenario in "${SCENARIO_ARR[@]}"; do
-      run_scenario "${scenario}" "/dev/null" "/dev/null" >/dev/null
-      copy_scenario_raw "${scenario}" "${label}" "/dev/null" "/dev/null"
-      if [ "${TIER_AXIS}" -eq 1 ]; then
-        gpu_graphics_stats "${scenario}" "/dev/null" >/dev/null
-      fi
-    done
-    build_apk "material3-demo" "${MATERIAL3_DEMO_DIR}" "${tier}" "/dev/null"
-    install_apk "material3-demo" "$(material3_demo_apk_path)" "/dev/null"
-    run_nav "/dev/null" >/dev/null
-    copy_nav_raw "${label}" "/dev/null"
-    echo
+  cell=1
+  cell_banner "${cell}" "${ARM}"
+  build_apk "frust_bench" "${FRUST_BENCH_DIR}" "/dev/null"
+  install_apk "frust_bench" "$(frust_bench_apk_path)" "/dev/null"
+  for scenario in "${SCENARIO_ARR[@]}"; do
+    run_scenario "${scenario}" "/dev/null" "/dev/null" >/dev/null
+    copy_scenario_raw "${scenario}" "${ARM}" "/dev/null" "/dev/null"
   done
+  build_apk "material3-demo" "${MATERIAL3_DEMO_DIR}" "/dev/null"
+  install_apk "material3-demo" "$(material3_demo_apk_path)" "/dev/null"
+  run_nav "/dev/null" >/dev/null
+  copy_nav_raw "${ARM}" "/dev/null"
+  echo
   echo "Dry run complete — ${cell} cell(s), 0 devices touched, nothing written to disk."
   exit 0
 fi
@@ -1568,83 +1371,64 @@ fi
 
 wake_and_unlock_device
 
-cell=0
-for spec in "${CELL_SPECS[@]}"; do
-  tier="${spec}"
-  cell=$((cell + 1))
-  label="$(cell_label "${tier}")"
-  echo
-  cell_banner "${cell}" "${tier}"
+cell=1
+echo
+cell_banner "${cell}" "${ARM}"
 
-  build_apk "frust_bench" "${FRUST_BENCH_DIR}" "${tier}" \
-    "${OUT_DIR}/build/frust_bench-${label}.log"
-  install_apk "frust_bench" "$(frust_bench_apk_path)" \
-    "${OUT_DIR}/install/frust_bench-${label}.log"
+build_apk "frust_bench" "${FRUST_BENCH_DIR}" \
+  "${OUT_DIR}/build/frust_bench-${ARM}.log"
+install_apk "frust_bench" "$(frust_bench_apk_path)" \
+  "${OUT_DIR}/install/frust_bench-${ARM}.log"
 
-  row="$(table_row_prefix "${tier}")"
-  for scenario in "${SCENARIO_ARR[@]}"; do
-    scen_out="${OUT_DIR}/scenarios/${scenario}-${label}"
-    runsh_log="${OUT_DIR}/scenarios/${scenario}-${label}.runsh.log"
-    result="$(run_scenario "${scenario}" "${scen_out}" "${runsh_log}")"
-    if [[ "${result}" == SKIPPED* ]]; then
-      echo "${scenario}: ${result}"
-      echo "raw: not copied (SKIPPED)"
-      row="${row} SKIPPED | SKIPPED |"
-      if [ "${TIER_AXIS}" -eq 1 ]; then
-        row="${row} n/a | n/a | n/a |"
-      fi
-    else
-      copy_scenario_raw "${scenario}" "${label}" "${scen_out}" "${runsh_log}"
-      p50="$(printf '%s' "${result}" | cut -d' ' -f1)"
-      p95="$(printf '%s' "${result}" | cut -d' ' -f2)"
-      row="${row} ${p50} | ${p95} |"
-      if [ "${TIER_AXIS}" -eq 1 ]; then
-        gpu_gfx="$(gpu_graphics_stats "${scenario}" "${scen_out}")"
-        gpu_p50="$(printf '%s' "${gpu_gfx}" | cut -d' ' -f1)"
-        gpu_p95="$(printf '%s' "${gpu_gfx}" | cut -d' ' -f2)"
-        gpu_n="$(printf '%s' "${gpu_gfx}" | cut -d' ' -f3)"
-        gfx_mb="$(printf '%s' "${gpu_gfx}" | cut -d' ' -f4)"
-        gfx_n="$(printf '%s' "${gpu_gfx}" | cut -d' ' -f5)"
-        echo "${scenario}: gpu_total p50=${gpu_p50}ms p95=${gpu_p95}ms (n=${gpu_n} readings)  Graphics=${gfx_mb}MB (n=${gfx_n} snapshots)"
-        row="${row} ${gpu_p50} | ${gpu_p95} | ${gfx_mb} |"
-      fi
-    fi
-  done
-
-  build_apk "material3-demo" "${MATERIAL3_DEMO_DIR}" "${tier}" \
-    "${OUT_DIR}/build/material3demo-${label}.log"
-  install_apk "material3-demo" "$(material3_demo_apk_path)" \
-    "${OUT_DIR}/install/material3demo-${label}.log"
-
-  nav_log="${OUT_DIR}/nav/${label}.log"
-  nav_result="$(run_nav "${nav_log}")"
-  if [[ "${nav_result}" == SKIPPED* ]]; then
-    echo "nav: ${nav_result}"
+row="$(table_row_prefix "${ARM}")"
+for scenario in "${SCENARIO_ARR[@]}"; do
+  scen_out="${OUT_DIR}/scenarios/${scenario}-${ARM}"
+  runsh_log="${OUT_DIR}/scenarios/${scenario}-${ARM}.runsh.log"
+  result="$(run_scenario "${scenario}" "${scen_out}" "${runsh_log}")"
+  if [[ "${result}" == SKIPPED* ]]; then
+    echo "${scenario}: ${result}"
     echo "raw: not copied (SKIPPED)"
     row="${row} SKIPPED | SKIPPED |"
   else
-    copy_nav_raw "${label}" "${nav_log}"
-    nav_total_p50="$(printf '%s' "${nav_result}" | cut -d' ' -f1)"
-    nav_submit_p95="$(printf '%s' "${nav_result}" | cut -d' ' -f2)"
-    nav_frame_n="$(printf '%s' "${nav_result}" | cut -d' ' -f4)"
-    echo "nav: total_p50=${nav_total_p50} submit_p95=${nav_submit_p95} over n=${nav_frame_n} frames"
-    row="${row} ${nav_total_p50} | ${nav_submit_p95} |"
+    copy_scenario_raw "${scenario}" "${ARM}" "${scen_out}" "${runsh_log}"
+    p50="$(printf '%s' "${result}" | cut -d' ' -f1)"
+    p95="$(printf '%s' "${result}" | cut -d' ' -f2)"
+    row="${row} ${p50} | ${p95} |"
   fi
-
-  TABLE_ROWS+=("${row}")
-  # Durable the moment it exists: a later hard failure or a signal must
-  # not cost the cells already measured (the EXIT trap also prints them).
-  printf '%s\n' "${row}" >>"${OUT_DIR}/ab_matrix.rows.md" \
-    || echo "warning: could not append the row to ${OUT_DIR}/ab_matrix.rows.md" >&2
 done
+
+build_apk "material3-demo" "${MATERIAL3_DEMO_DIR}" \
+  "${OUT_DIR}/build/material3demo-${ARM}.log"
+install_apk "material3-demo" "$(material3_demo_apk_path)" \
+  "${OUT_DIR}/install/material3demo-${ARM}.log"
+
+nav_log="${OUT_DIR}/nav/${ARM}.log"
+nav_result="$(run_nav "${nav_log}")"
+if [[ "${nav_result}" == SKIPPED* ]]; then
+  echo "nav: ${nav_result}"
+  echo "raw: not copied (SKIPPED)"
+  row="${row} SKIPPED | SKIPPED |"
+else
+  copy_nav_raw "${ARM}" "${nav_log}"
+  nav_total_p50="$(printf '%s' "${nav_result}" | cut -d' ' -f1)"
+  nav_submit_p95="$(printf '%s' "${nav_result}" | cut -d' ' -f2)"
+  nav_frame_n="$(printf '%s' "${nav_result}" | cut -d' ' -f4)"
+  echo "nav: total_p50=${nav_total_p50} submit_p95=${nav_submit_p95} over n=${nav_frame_n} frames"
+  row="${row} ${nav_total_p50} | ${nav_submit_p95} |"
+fi
+
+TABLE_ROWS+=("${row}")
+# Durable the moment it exists: a later hard failure or a signal must
+# not cost the cells already measured (the EXIT trap also prints them).
+printf '%s\n' "${row}" >>"${OUT_DIR}/ab_matrix.rows.md" \
+  || echo "warning: could not append the row to ${OUT_DIR}/ab_matrix.rows.md" >&2
 
 # --- Emit the Markdown table ----------------------------------------------
 
 emit_table "" | tee "${OUT_DIR}/ab_matrix.md"
 MATRIX_DONE=1
 
-
 echo
 echo "Matrix complete — ${cell} cell(s). Table written to ${OUT_DIR}/ab_matrix.md"
 echo "Transient build/install/scenario/nav logs are under ${OUT_DIR}/"
-echo "Sanitized raw series copied under ${RAW_ROOT}/${DEVICE_NAME}/${RAW_GROUP}/"
+echo "Sanitized raw series copied under ${RAW_ROOT}/${DEVICE_NAME}/${RAW_LABEL}/${ARM}/"

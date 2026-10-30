@@ -1041,7 +1041,7 @@ fn a_static_page_uploads_on_its_first_frame_and_does_nothing_on_its_second() {
         "one upload per distinct glyph; `Hello`'s two `l`s share a key"
     );
     assert!(first.clears.is_empty(), "nothing has been evicted yet");
-    assert_eq!(first.refused, 0);
+    assert_eq!(first.refused(), 0);
     engine.end_frame(&mut images);
 
     // The whole point of the cache: the second frame of an unchanged page is
@@ -1093,7 +1093,11 @@ fn ten_thousand_frames_of_an_animated_size_keep_the_cache_bounded() {
         collect_hello(&mut engine, static_font, 16.0);
         let pass = engine.build(&mut images, raster);
         uploads += pass.uploads.len();
-        assert_eq!(pass.refused, 0, "a 2048-square page is not under pressure");
+        assert_eq!(
+            pass.refused(),
+            0,
+            "a 2048-square page is not under pressure"
+        );
         engine.end_frame(&mut images);
 
         worst_entries = worst_entries.max(engine.entry_count());
@@ -1346,18 +1350,68 @@ fn a_full_atlas_falls_back_to_outlines_rather_than_dropping_a_glyph() {
     let pass = engine.build(&mut images, raster);
 
     assert!(
-        pass.refused > 0,
+        pass.no_room > 0,
         "fixture precondition: a 64-square page cannot hold 32 glyphs at 48 px"
     );
     assert_eq!(
-        pass.uploads.len() + pass.refused as usize,
+        pass.unrasterizable, 0,
+        "every glyph here rasterizes; the refusals are room"
+    );
+    assert_eq!(
+        pass.uploads.len() + pass.refused() as usize,
         keys.len(),
         "every collected glyph is either allocated or refused, never lost"
     );
     // A refused glyph resolves to no slot, which is the same answer an
     // uncollected one gives, and is what routes it back to outline strips.
     let unresolved = keys.iter().filter(|key| engine.slot(key).is_none()).count();
-    assert_eq!(unresolved, pass.refused as usize);
+    assert_eq!(unresolved, pass.refused() as usize);
+    engine.end_frame(&mut images);
+}
+
+/// A glyph the measuring callback cannot rasterize is counted apart from one
+/// the atlas has no room for: it resolves to no slot like a refusal, but it
+/// is not atlas pressure and `no_room` stays at zero.
+#[test]
+fn an_unrasterizable_glyph_is_counted_apart_from_a_refused_insert() {
+    let mut images = ImageCache::new_with_config(AtlasConfig {
+        initial_atlas_count: 0,
+        max_atlases: 4,
+        atlas_size: (1024, 1024),
+        auto_grow: true,
+        allocation_strategy: AllocationStrategy::FirstFit,
+    });
+    let mut engine = AtlasPolicy::new(&images, false);
+    let font = next_font();
+
+    engine.begin_frame();
+    let route = engine.classify_run(&run_key(font, 16.0));
+    let run = *route.atlas().expect("a first appearance is cached");
+    let mut keys = Vec::new();
+    for glyph in HELLO {
+        assert_eq!(engine.collect_glyph(&run, glyph, 0.0), GlyphRoute::Pending);
+        keys.push(run.key(glyph, 0.0));
+    }
+    // Nothing to rasterize: a space, or an outline with no coverage.
+    let pass = engine.build(&mut images, |_| None);
+
+    // `HELLO` repeats a glyph id; a key is collected once however often it recurs.
+    let distinct = HELLO.iter().collect::<HashSet<_>>().len() as u32;
+    assert!(pass.uploads.is_empty(), "nothing was placed");
+    assert_eq!(pass.unrasterizable, distinct);
+    assert_eq!(
+        pass.no_room, 0,
+        "a 1024-square page had room; none was asked for"
+    );
+    assert_eq!(
+        pass.refused(),
+        distinct,
+        "the sum still reports every unplaced glyph"
+    );
+    assert!(
+        keys.iter().all(|key| engine.slot(key).is_none()),
+        "an unrasterizable glyph resolves to no slot, like a refused one"
+    );
     engine.end_frame(&mut images);
 }
 
@@ -1619,10 +1673,11 @@ fn glyphs_and_images_are_held_against_one_shared_layer_budget() {
 
     assert!(pass.uploads.is_empty(), "the image took the whole budget");
     assert_eq!(
-        pass.refused, 4,
-        "every collected glyph is refused against the shared ceiling rather \
-         than allocated out of a private one"
+        pass.no_room, 4,
+        "every collected glyph is refused for room against the shared ceiling \
+         rather than allocated out of a private one"
     );
+    assert_eq!(pass.unrasterizable, 0);
     assert_eq!(
         residency.layers(),
         1,

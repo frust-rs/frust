@@ -13,6 +13,34 @@
 //! [`frust_testing::corpus::adversarial::adversarial_cases`] instead of the
 //! unit corpus — see that file's module docs for the policy rationale this
 //! one does not repeat, including where the GPU half of the coverage lives.
+//!
+//! # The GPU arm
+//!
+//! Retiring the classic (vello) oracle dropped the only GPU execution of this
+//! hostile corpus, so two `#[ignore]`d tests run it through
+//! [`EngineOracle`] on a real adapter: [`engine_renders_or_refuses_every_adversarial_case`]
+//! (no panic, no wgpu validation error, a recorded rendered / refused /
+//! CPU-only outcome per case) and
+//! [`five_thousand_nested_layers_stay_within_a_bounded_memory_budget_on_the_engine`]
+//! (the same counting-allocator budget as the CPU arm; `adv-5k-layers` is
+//! refused by the engine's scheduler on the T400, so it bounds the refusal
+//! path). The arm asserts
+//! outcomes and memory, never pixels, so it commits no golden: pixel parity
+//! with the CPU arm for the scoped cases lives in `tests/engine_goldens.rs`.
+//! Cases are routed by `CaseSpec::skip` against the oracle's golden-class id,
+//! exactly as the engine goldens route them; no adversarial case exceeds the
+//! adapter's texture limits by construction (the largest frame is the 64-px
+//! family, and `adv-huge-image` is a 5,000-px source image drawn into a 64-px frame),
+//! so none is CPU-only for size. A case that skips the engine class is
+//! reported as CPU-only with its `skip` entry as the reason.
+//!
+//! ```text
+//! WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=T400 FRUST_GOLDEN_EXPECT_ADAPTER=T400 \
+//!   cargo test -p frust-testing --locked --test adversarial -- --ignored --test-threads=1
+//! ```
+//!
+//! `--test-threads=1` is required: several devices opened at once hang the
+//! NVIDIA driver.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -25,6 +53,7 @@ use frust_testing::frame::foreign_font_runs;
 use frust_testing::golden::{compare_golden, goldens_root, update_goldens_enabled};
 use frust_testing::meta::GoldenMeta;
 use frust_testing::oracle_cpu::CpuOracle;
+use frust_testing::oracle_engine::{EngineOracle, EngineOracleOptions};
 use frust_testing::render::SceneRenderer;
 
 /// The golden class the CPU oracle's baselines live in
@@ -455,6 +484,177 @@ fn five_thousand_nested_layers_stay_within_a_bounded_memory_budget() {
             rss_delta <= LAYER_RSS_BUDGET_KIB,
             "rendering adv-5k-layers grew process peak RSS by {rss_delta} KiB (before {before} \
              KiB, after {after} KiB), over the {LAYER_RSS_BUDGET_KIB} KiB cross-check budget"
+        );
+    }
+}
+
+// --- The GPU arm ------------------------------------------------------------
+
+/// What one adversarial case did on the engine oracle.
+#[derive(Debug)]
+enum EngineOutcome {
+    /// The engine produced a frame of the requested size.
+    Rendered,
+    /// The engine returned a refusal (`Err`) without panicking.
+    Refused(String),
+    /// The case's `skip` set names the engine's golden class.
+    CpuOnly,
+}
+
+impl EngineOutcome {
+    /// The table cell printed for this outcome.
+    fn describe(&self) -> String {
+        match self {
+            Self::Rendered => "rendered".to_string(),
+            Self::Refused(reason) => format!("refused: {reason}"),
+            Self::CpuOnly => "cpu-only".to_string(),
+        }
+    }
+}
+
+/// Renders `case` on `oracle`, converting a panic into an `Err` so one
+/// hostile case cannot hide the outcomes of the rest.
+fn engine_outcome(oracle: &mut EngineOracle, case: &CorpusCase) -> Result<EngineOutcome, String> {
+    let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        render_case(&mut *oracle, case)
+    }));
+    match run {
+        Err(payload) => {
+            let message = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_string()))
+                .unwrap_or_else(|| "<non-string panic payload>".to_string());
+            Err(format!("panicked: {message}"))
+        }
+        Ok(Ok(None)) => Ok(EngineOutcome::CpuOnly),
+        Ok(Ok(Some(image))) => {
+            let spec = case.render_spec();
+            if image.width == spec.width && image.height == spec.height {
+                Ok(EngineOutcome::Rendered)
+            } else {
+                Err(format!(
+                    "rendered {}x{}, asked for {}x{}",
+                    image.width, image.height, spec.width, spec.height
+                ))
+            }
+        }
+        Ok(Err(err)) => {
+            let text = format!("{err:#}");
+            // A deliberate engine refusal is an outcome; a wgpu validation
+            // error or any other failure is a defect in the frame it built.
+            if text.contains("the frame was refused") {
+                Ok(EngineOutcome::Refused(text))
+            } else {
+                Err(format!("failed outside the engine's refusal path: {text}"))
+            }
+        }
+    }
+}
+
+/// Every adversarial case through [`EngineOracle`] on a real GPU: none may
+/// panic or raise a wgpu validation error, and each case's outcome (rendered,
+/// refused, or CPU-only) is printed as the table the task summary records.
+///
+/// Run with the command in the module docs; `--test-threads=1` is mandatory.
+#[test]
+#[ignore = "requires a GPU; run locally with `cargo test -p frust-testing --test adversarial -- --ignored --test-threads=1`"]
+fn engine_renders_or_refuses_every_adversarial_case() {
+    let _serialized = render_lock();
+    run_on_oversized_stack(|| {
+        let mut oracle = EngineOracle::new(&EngineOracleOptions::default())
+            .unwrap_or_else(|err| panic!("no engine oracle on this host: {err:#}"));
+        println!(
+            "adversarial (engine): adapter {} class `{}`",
+            oracle.adapter_meta(),
+            oracle.id()
+        );
+        let mut failures = Vec::new();
+        for case in adversarial_cases() {
+            match engine_outcome(&mut oracle, &case) {
+                Ok(outcome) => println!(
+                    "adversarial (engine): {:<28} {}",
+                    case.spec.name,
+                    outcome.describe()
+                ),
+                Err(message) => {
+                    println!(
+                        "adversarial (engine): {:<28} FAILED {message}",
+                        case.spec.name
+                    );
+                    failures.push(format!("[{}] {message}", case.spec.name));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} adversarial case(s) misbehaved on the engine:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    });
+}
+
+/// `adv-5k-layers` on the engine: the same counting-allocator and peak-RSS
+/// budgets as the CPU arm, measured around the render only (adapter, device
+/// and pipeline warm-up are built before the baseline is taken).
+///
+/// On the T400 the engine REFUSES this frame up front (its simple scheduler
+/// serves a 4-deep isolated-layer chain), so the budget here bounds the
+/// compile-and-refuse path: a refusal must stay O(depth) in memory too.
+#[test]
+#[ignore = "requires a GPU; run locally with `cargo test -p frust-testing --test adversarial -- --ignored --test-threads=1`"]
+fn five_thousand_nested_layers_stay_within_a_bounded_memory_budget_on_the_engine() {
+    let case = adversarial_cases()
+        .into_iter()
+        .find(|case| case.spec.name == "adv-5k-layers")
+        .expect("adv-5k-layers must exist in the adversarial corpus");
+
+    let _serialized = render_lock();
+    let (delta, rss_delta) = {
+        let (tx, rx) = std::sync::mpsc::channel();
+        run_on_oversized_stack(move || {
+            let mut oracle = EngineOracle::new(&EngineOracleOptions::default())
+                .unwrap_or_else(|err| panic!("no engine oracle on this host: {err:#}"));
+            let baseline_current = CURRENT_BYTES.load(Ordering::Relaxed);
+            PEAK_BYTES.store(baseline_current, Ordering::Relaxed);
+            let rss_before = peak_rss_kib();
+            let outcome = engine_outcome(&mut oracle, &case);
+            let peak = PEAK_BYTES.load(Ordering::Relaxed);
+            let rss_after = peak_rss_kib();
+            println!(
+                "adversarial (engine): adv-5k-layers {}",
+                outcome
+                    .as_ref()
+                    .map_or_else(Clone::clone, EngineOutcome::describe)
+            );
+            let outcome = outcome.unwrap_or_else(|msg| panic!("adv-5k-layers: {msg}"));
+            assert!(
+                !matches!(outcome, EngineOutcome::CpuOnly),
+                "adv-5k-layers must run on the engine"
+            );
+            let rss_delta = match (rss_before, rss_after) {
+                (Some(b), Some(a)) => Some(a.saturating_sub(b)),
+                _ => None,
+            };
+            tx.send((peak.saturating_sub(baseline_current), rss_delta))
+                .expect("result channel");
+        });
+        rx.recv().expect("the render thread reports its peaks")
+    };
+    println!(
+        "adversarial (engine): adv-5k-layers heap delta {delta} B, RSS delta {rss_delta:?} KiB"
+    );
+    assert!(
+        delta <= LAYER_MEMORY_BUDGET_BYTES,
+        "rendering adv-5k-layers on the engine peaked at {delta} bytes above baseline, over the \
+         {LAYER_MEMORY_BUDGET_BYTES}-byte budget"
+    );
+    if let Some(rss_delta) = rss_delta {
+        assert!(
+            rss_delta <= LAYER_RSS_BUDGET_KIB,
+            "rendering adv-5k-layers on the engine grew peak RSS by {rss_delta} KiB, over the \
+             {LAYER_RSS_BUDGET_KIB} KiB cross-check budget"
         );
     }
 }

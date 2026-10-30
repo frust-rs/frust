@@ -50,7 +50,7 @@ use anyhow::Result;
 use frust_core::FrameTime;
 use frust_core::RenderRoot;
 use frust_core::SemanticsUpdate;
-use frust_core::accesskit::{Tree, TreeId, TreeUpdate};
+use frust_core::accesskit::TreeUpdate;
 use frust_core::event::{
     CursorIcon, EditCommand, EventOutcome, FileDropEvent, FileDropPhase, ImeContentType, ImeEvent,
     InputEvent, Key, KeyEvent, Modifiers, NamedKey, PointerButton, PointerEvent, PointerPhase,
@@ -2868,42 +2868,16 @@ fn event_under_owner<State: 'static, V: View<State>>(
     runtime.with_owner(|| root.event(state, event))
 }
 
-/// Build an accesskit [`TreeUpdate`] from one [`RenderRoot::semantics`] pull:
-/// a full-tree push every time (stable node ids make this valid
-/// — see `frust_core::semantics`'s module docs), rooted with
-/// [`TreeId::ROOT`] and the update's already-root-defaulted focus id
-/// ([`SemanticsUpdate::focus_id`]). Pure and unit-testable without a live
-/// window/adapter.
-///
-/// # HiDPI: stamping the root transform
-///
-/// `RenderRoot::semantics` (`frust_core`'s `SemanticsCtx::bounds`) reports
-/// every node's `bounds` in LOGICAL pixels — the widget tree's own layout
-/// unit, the same one `RedrawRequested` lays out in before scaling the scene
-/// for paint. AccessKit itself expects PHYSICAL pixels: accesskit's
-/// `Node::transform` doc reads "AccessKit expects the final transformed
-/// coordinates to be relative to the origin of the tree's container (e.g.
-/// window), in physical pixels, with the y coordinate being top-down." The
-/// same doc says a node's `bounds` sit "in the coordinate space of the
-/// nearest ancestor with a non-`None` transform", so stamping a single
-/// `Affine::scale(scale)` on the ROOT node converts the whole tree — no
-/// per-node rescale needed. At `scale == 1.0` (the Linux/X11 default) this is
-/// a no-op: accesskit's own guidance is to leave `transform` as `None`
-/// ("This should be `None` if it would be set to the identity transform")
-/// rather than stamp an explicit identity, so the root is left untouched.
+/// Build an accesskit [`TreeUpdate`] from one [`RenderRoot::semantics`] pull
+/// through the shared [`frust_shell_common::build_tree_update`]: a full-tree
+/// push rooted with [`TreeUpdate::tree_id`] `ROOT` and the update's
+/// already-root-defaulted focus id, with `Affine::scale(scale)` stamped on the
+/// root so the logical semantics bounds reach AccessKit in physical pixels (no
+/// transform at `scale == 1.0`). `scale` is winit's `Window::scale_factor`,
+/// which is always finite and strictly positive — the shared helper's
+/// sanitised-scale contract.
 fn build_tree_update(update: &SemanticsUpdate, scale: f64) -> TreeUpdate {
-    let mut nodes = update.nodes.clone();
-    if scale != 1.0
-        && let Some((_, root_node)) = nodes.iter_mut().find(|(id, _)| *id == update.root)
-    {
-        root_node.set_transform(Box::new(frust_core::accesskit::Affine::scale(scale)));
-    }
-    TreeUpdate {
-        nodes,
-        tree: Some(Tree::new(update.root)),
-        tree_id: TreeId::ROOT,
-        focus: update.focus_id(),
-    }
+    frust_shell_common::build_tree_update(update, scale)
 }
 
 /// The devtools UI-thread view of this shell (see
@@ -4061,20 +4035,20 @@ mod tests {
         ClipboardAccess, ClipboardError, ClipboardFailure, ClipboardRequest, ClipboardWarnings,
         ComposeLatch, DesktopConfig, DesktopExtensions, ElementState, FileDropAccumulator,
         FileHoverLatch, Ime, ImeSync, LogicalSize, MouseScrollDelta, NoExtensions, PasteText,
-        ShellUserEvent, Tree, TreeId, WHEEL_SCALE_RATE_PER_LINE, WindowKnobSource, WinitCursorIcon,
-        WinitKey, WinitNamedKey, WinitTheme, apply_window_size, base_theme,
-        brightness_change_to_notify, brightness_from_winit, build_tree_update, clipboard_loop,
-        clipboard_warning, cursor_change_to_apply, default_theme, finish,
-        follow_platform_brightness, ime_purpose_for, map_gesture_phase, map_key_event,
-        map_modifiers, map_mouse_button, map_named_key, map_scroll_delta, map_wheel_scale_delta,
-        mouse_button_should_dispatch, parse_window_maximized, paste_answer_dispatch,
-        paste_input_event, physical_to_logical, resolved_window_knob, theme_after_override_poll,
-        wheel_zoom_chord_held, window_attributes, winit_cursor_for,
+        ShellUserEvent, WHEEL_SCALE_RATE_PER_LINE, WindowKnobSource, WinitCursorIcon, WinitKey,
+        WinitNamedKey, WinitTheme, apply_window_size, base_theme, brightness_change_to_notify,
+        brightness_from_winit, build_tree_update, clipboard_loop, clipboard_warning,
+        cursor_change_to_apply, default_theme, finish, follow_platform_brightness, ime_purpose_for,
+        map_gesture_phase, map_key_event, map_modifiers, map_mouse_button, map_named_key,
+        map_scroll_delta, map_wheel_scale_delta, mouse_button_should_dispatch,
+        parse_window_maximized, paste_answer_dispatch, paste_input_event, physical_to_logical,
+        resolved_window_knob, theme_after_override_poll, wheel_zoom_chord_held, window_attributes,
+        winit_cursor_for,
     };
     use crate::config::Decorations;
     use frust_core::SemanticsUpdate;
     use frust_core::accesskit::{
-        Affine as AccessKitAffine, Node, NodeId, Rect as AccessKitRect, Role,
+        Affine as AccessKitAffine, Node, NodeId, Rect as AccessKitRect, Role, Tree, TreeId,
     };
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};

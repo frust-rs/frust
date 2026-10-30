@@ -310,7 +310,7 @@ fn create_readable_root(
 /// Both happen once per surface episode on every shipping platform, and the
 /// answer is a pure function of the adapter either way.
 fn check_engine_support(adapter: &wgpu::Adapter) -> Result<()> {
-    let caps = crate::tier::TierCaps {
+    let caps = crate::tier::EngineCaps {
         downlevel_flags: adapter.get_downlevel_capabilities().flags,
         adapter_name: adapter.get_info().name,
     };

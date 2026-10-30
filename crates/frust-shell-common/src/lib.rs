@@ -45,7 +45,10 @@
 //! names no GPU type — see the module's own docs. The [`overlay`] module is
 //! the shells' shared overlay-surface core: the layer/surface table whose
 //! withdraw never blocks, the `FRUST_OVERLAYS` switch, the frame-request
-//! latch, cut assembly and the present-skew window.
+//! latch, cut assembly and the present-skew window. [`build_tree_update`]
+//! (with its owned-pieces form [`tree_update_from_parts`]) is the one
+//! semantics → accesskit tree assembly every shell pushes, stamping the
+//! logical→physical scale on the root node.
 //!
 //! This crate is deliberately platform-free: it depends on `frust-core`
 //! (retained tree / `RenderRoot`) plus `frust-scene`/`frust-text`/
@@ -56,6 +59,7 @@
 //! raw-window handling) and reuses this crate rather than duplicating the
 //! plumbing.
 
+mod a11y;
 mod app_tree;
 /// The in-app devtools service's shell side — the [`DevtoolsUi`](devtools::DevtoolsUi)
 /// hop seam, the process-wide [`start`](devtools::start)/[`pump`](devtools::pump)
@@ -86,6 +90,7 @@ mod system_ui;
 mod theme_default;
 mod theme_override;
 
+pub use a11y::{build_tree_update, tree_update_from_parts};
 pub use app_tree::{AppTree, new_boxed_app, new_boxed_app_with};
 pub use ffi_support::{
     WindowMetricsPublisher, guard, logical_corner_insets, logical_insets, logical_size,

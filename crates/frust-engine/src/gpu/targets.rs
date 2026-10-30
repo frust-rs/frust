@@ -145,29 +145,6 @@ pub fn atlas_layer_config(
     GpuConfig::new(page.0, page.1, alphas_tex_width, encoded_paints_tex_width)
 }
 
-/// Whether an atlas page of `page` texels can be a render attachment on
-/// `caps`' adapter.
-///
-/// The atlas is not pooled, so it never passes through
-/// [`IntermediateTargets::acquire`]'s own ceiling check — but a page is still a
-/// texture a driver has to accept, and the budgets
-/// [`crate::cache::images::AtlasBudget`] hands out are chosen without the
-/// adapter in view. This is the check a caller makes once, at the point it
-/// decides a page size, rather than discovering the refusal as a device error
-/// on the first frame that misses a glyph.
-///
-/// The adapter's own `max_texture_dimension_2d` is the bound, not
-/// [`MAX_INTERMEDIATE_DIMENSION`]: that ceiling is a transient-memory decision
-/// about targets allocated per frame, and an atlas page is allocated once and
-/// lives for the renderer.
-#[must_use]
-pub fn atlas_page_fits(caps: &TierCaps, page: (u32, u32)) -> bool {
-    page.0 > 0
-        && page.1 > 0
-        && page.0 <= caps.max_texture_dimension_2d
-        && page.1 <= caps.max_texture_dimension_2d
-}
-
 /// Texels per row of the filter-data texture.
 ///
 /// Sixteen [`super::RESOURCE_TEXTURE_FORMAT`] texels is exactly 256 bytes,
@@ -496,32 +473,6 @@ mod tests {
             config.encoded_paints_tex_width_bits, 0,
             "a 1-texel stand-in reconstructs as `1 << 0`"
         );
-    }
-
-    #[test]
-    fn a_page_past_the_adapters_own_limit_does_not_fit() {
-        let mut caps = caps();
-        caps.max_texture_dimension_2d = 2048;
-
-        assert!(atlas_page_fits(&caps, (2048, 2048)));
-        assert!(!atlas_page_fits(&caps, (4096, 1024)));
-        assert!(!atlas_page_fits(&caps, (1024, 4096)));
-        // A degenerate page is not a page: nothing can be allocated in it, and
-        // a zero-extent attachment is a device error rather than an empty pass.
-        assert!(!atlas_page_fits(&caps, (0, 1024)));
-        assert!(!atlas_page_fits(&caps, (1024, 0)));
-    }
-
-    #[test]
-    fn the_atlas_pages_ceiling_is_the_adapters_rather_than_the_transient_cap() {
-        let mut caps = caps();
-        caps.max_texture_dimension_2d = 16384;
-
-        // The pool refuses this; the atlas does not, because a page is
-        // allocated once for the renderer rather than per frame.
-        const { assert!(MAX_INTERMEDIATE_DIMENSION < 16384) };
-        assert!(atlas_page_fits(&caps, (16384, 16384)));
-        assert_eq!(max_texture_size(&caps), MAX_INTERMEDIATE_DIMENSION);
     }
 
     #[test]

@@ -252,7 +252,7 @@ impl HeadlessRenderer {
         // The same capability gate the surface path asks at surface creation,
         // so a headless render can never pass on an adapter the app itself
         // would refuse — and it refuses in the identical words.
-        let caps = crate::tier::TierCaps {
+        let caps = crate::tier::EngineCaps {
             downlevel_flags: adapter.get_downlevel_capabilities().flags,
             adapter_name: meta.adapter.clone(),
         };

@@ -498,7 +498,7 @@ impl WebGl2Harness {
         // the same position `HeadlessRenderer::new` asks it: an adapter the
         // engine cannot drive is refused HERE, before it can produce a pixel,
         // and in the identical words.
-        frust_render::engine_support(&frust_render::TierCaps {
+        frust_render::engine_support(&frust_render::EngineCaps {
             downlevel_flags: adapter.get_downlevel_capabilities().flags,
             adapter_name: info.name.clone(),
         })

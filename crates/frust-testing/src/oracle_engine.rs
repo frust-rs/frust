@@ -389,14 +389,22 @@ impl SceneRenderer for EngineOracle {
         // Drained before the pixels are read: a wrong bind group, a mismatched
         // attachment or an out-of-range draw names itself here, where a pixel
         // mismatch would only say that something went wrong.
+        // Validation outranks refusal: a frame the engine turned down must
+        // also have left the device clean, so a refused frame that raised a
+        // validation error is reported as the error, not as a clean refusal
+        // (the adversarial arm classifies on the refusal phrase alone).
         let validation = drain_error_scope(&self.device, scope);
-        encoded
-            .map_err(|err| anyhow!("frust-testing engine oracle: the frame was refused: {err}"))?;
         if let Some(error) = validation {
+            let also = match &encoded {
+                Ok(_) => String::new(),
+                Err(err) => format!(" (the engine also turned the frame down: {err})"),
+            };
             return Err(anyhow!(
-                "frust-testing engine oracle: wgpu validation error during render: {error}"
+                "frust-testing engine oracle: wgpu validation error during render{also}: {error}"
             ));
         }
+        encoded
+            .map_err(|err| anyhow!("frust-testing engine oracle: the frame was refused: {err}"))?;
 
         let target = self
             .target
