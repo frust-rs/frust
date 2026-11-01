@@ -657,7 +657,7 @@ fn live_page(face: usize) -> impl View<CatalogState> {
         fab(frust::icons::PANE_MARK, |s: &mut CatalogState| {
             s.switcher_open.set(true);
         })
-        .label("Switch server"),
+        .tooltip("Switch server"),
     )
 }
 
