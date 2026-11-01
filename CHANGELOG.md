@@ -8,6 +8,10 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Added
 
+- frust facade re-exports the pinch vocabulary (`pinch_detector`, `PinchDetectorView`,
+  `PinchDetectorWidget`, `PinchRecognizer`, `PINCH_SLOP`) and the scale/contact event types
+  (`ScaleEvent`, `ScalePhase`, `PointerId`), also under `frust::authoring`; closes the gap recorded
+  against 0.6.3's `pan_zoom`/`canvas` additions.
 - `frust_glyph::fab`, a Glyph `FloatingActionButton`-shaped action button that fits
   `scaffold(..).fab(..)`. It has `.mini(..)`, `.label(..)` (the accessible name) and `.disabled(..)`
   variants and rests on the new `floating()` elevation token, which sits between elevation levels
