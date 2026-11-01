@@ -11,13 +11,17 @@
 //! `examples/huddle`'s page functions use. `build` only ever *reads* those
 //! signals (subscribing); every *write* happens in an event handler.
 //!
-//! The last section, "Card switcher", is the app-switcher stage
-//! ([`demo_card_switcher`]); its state lives on [`CatalogState`] because the
-//! Android back handler and the handshake both need it from outside a build.
+//! The last section, "Card switcher", is a short description plus a launch
+//! button: the app-switcher demo itself ([`switcher_stage`]) takes over the
+//! whole window (see `lib.rs`'s `shell_page`) so the live page is real-size
+//! under the transform. Its state lives on [`CatalogState`] because the
+//! Android back handler, the handshake and the shell all need it from outside
+//! a build.
 //!
 //! Originally a stub scaffold placeholder honoring the page-fn contract in
 //! `pages/mod.rs`.
 
+use frust::motion::animated_opacity;
 use frust::motion::patterns::{FadeScale, FadeThrough, SharedAxis};
 use frust::motion::switcher::pattern_switcher;
 use frust::scaffold;
@@ -481,28 +485,21 @@ fn demo_boot() -> FlexChild<CatalogState> {
 /// strip position is its index here (the live face's position is
 /// `switcher_live`, the peers are the other three in order).
 const HOSTS: [&str; 4] = ["devbox", "staging", "new-host", "prod-eu"];
-/// The stage frame. A fixed-size frame (not a route, not a scroll child): the
-/// shell wraps this page in a vertical `scroll_view`, and the strip's
-/// horizontal drags must reach the stage. The strip reads the horizontal axis
-/// only and registers nothing with an enclosing scroll surface (nested claims
-/// are a Down-time snapshot, LIMITATIONS `scroll-physics-claim-down-snapshot`),
-/// so a stage sized to a phone screen, with a horizontal-only gesture, sits
-/// inside the page without fighting it. 402:874 is the reference phone.
-const STAGE_W: f64 = 300.0;
-const STAGE_H: f64 = STAGE_W * 874.0 / 402.0;
-/// Past this stage width the design uses the tablet card scale.
+/// Past this window width the design uses the tablet card scale.
 const TABLET_WIDTH: f64 = 840.0;
 const TABLET_CARD_SCALE: f64 = 0.58;
+/// Opacity of the cached peer face (a dimmed, stale snapshot).
+const PEER_DIM: f64 = 0.6;
 /// How long after a tap the demo performs handshake step 4. The pattern has no
 /// completion callback by design; muxr performs step 4 when its server dial
 /// completes. The demo uses a fixed delay: it lets the centring tween finish
 /// and the grow reach (near) full screen, then closes the stage.
 const SWAP_DELAY: std::time::Duration = std::time::Duration::from_millis(450);
 
-/// The card scale for a stage of `stage_width`: `Some(0.58)` on a tablet-wide
-/// stage, `None` (the pattern's default) otherwise.
-fn card_scale_for(stage_width: f64) -> Option<f64> {
-    (stage_width > TABLET_WIDTH).then_some(TABLET_CARD_SCALE)
+/// The card scale for a window of `window_width`: `Some(0.58)` on a
+/// tablet-wide window, `None` (the pattern's default 0.62) otherwise.
+pub(crate) fn card_scale_for(window_width: f64) -> Option<f64> {
+    (window_width > TABLET_WIDTH).then_some(TABLET_CARD_SCALE)
 }
 
 /// The face id of peer `peer` when `live` is the live face (peers are every
@@ -597,14 +594,25 @@ fn face_label(face: usize) -> impl View<CatalogState> {
 }
 
 /// The fake app page shown live: an app bar titled with the host, a list of
-/// three rows, and the Glyph fab that opens the switcher.
+/// three rows, and the Glyph fab that opens the switcher. The app bar's
+/// trailing "Exit demo" action leaves the full-screen demo.
 fn live_page(face: usize) -> impl View<CatalogState> {
     scaffold(glyph_list::<CatalogState>(vec![
         glyph_list_item("$", "deploy").sub("main").meta("2m ago"),
         glyph_list_item("#", "logs").sub("tail -f").meta("live"),
         glyph_list_item("~", "shell").sub("zsh").meta("idle"),
     ]))
-    .app_bar(app_bar::<CatalogState>(HOSTS[face]))
+    .app_bar(
+        app_bar::<CatalogState>(HOSTS[face]).actions((button(
+            "Exit demo",
+            |s: &mut CatalogState| {
+                s.switcher_open.set(false);
+                s.switcher_expanding.set(None);
+                s.switcher_fullscreen.set(false);
+            },
+        )
+        .small(),)),
+    )
     .fab(fab(frust::icons::PANE_MARK, |s: &mut CatalogState| {
         s.switcher_open.set(true);
     }))
@@ -646,22 +654,29 @@ fn peer_face_view(face: usize) -> impl View<CatalogState> {
         .app_bar(app_bar::<CatalogState>(HOSTS[face]))
 }
 
-/// 12 card switcher: a fixed-size stage holding `frust_glyph::card_switcher`.
+/// The card-switcher demo stage: `frust_glyph::card_switcher` over the fake
+/// live page, sized by its parent (the shell gives it the whole window).
 ///
 /// Tap the stack fab to open the strip; swipe between cards; tapping a peer
 /// centres it, calls `on_select` (handshake step 2: `.expanding(Some(i))`) and
 /// the demo schedules step 4 ([`SWAP_DELAY`] later, on the local task queue:
 /// that face becomes live, `.expanding(None)`, `open = false`). Tapping the
-/// centred card, the scrim, the close chip or Android back closes the stage.
-fn demo_card_switcher(state: &CatalogState) -> FlexChild<CatalogState> {
+/// centred card, the scrim, the close chip or Android back closes the strip.
+/// The cached peer face is dimmed to 0.6 with `animated_opacity`; the card
+/// scale follows [`card_scale_for`] of the window width the shell measured.
+pub(crate) fn switcher_stage(state: &CatalogState) -> impl View<CatalogState> + use<> {
     let open = state.switcher_open.get();
     let expanding = state.switcher_expanding.get();
     let live = state.switcher_live.get().min(HOSTS.len() - 1);
+    let window_width = state.window_width.get();
 
     let peers: Vec<_> = (0..HOSTS.len() - 1)
         .map(|i| {
             let face = peer_face(live, i);
-            peer_card(peer_face_view(face)).label(face_label(face))
+            // Faces 2 (never connected) and 3 (failed) are not cached; only the
+            // cached face is dimmed.
+            let alpha = if face >= 2 { 1.0 } else { PEER_DIM };
+            peer_card(animated_opacity(alpha, peer_face_view(face))).label(face_label(face))
         })
         .collect();
 
@@ -695,20 +710,33 @@ fn demo_card_switcher(state: &CatalogState) -> FlexChild<CatalogState> {
             .semantic_label("close"),
         )))
         .back(&state.switcher_back);
-    if let Some(scale) = card_scale_for(STAGE_W) {
+    if let Some(scale) = card_scale_for(window_width) {
         stage = stage.card_scale(scale);
     }
+    stage
+}
 
+/// 12 card switcher: a description and the launch button. The demo itself is
+/// full-window (see [`switcher_stage`]); the old 300 px miniature is removed
+/// because it could neither measure real-size scaling nor reach the 840 px
+/// tablet rule.
+fn demo_card_switcher() -> FlexChild<CatalogState> {
     block(vec![
         inflexible(label("12 Card switcher")),
         inflexible(caption(
-            "Tap the stack fab: swipe, tap a peer to expand it into the live page, tap the centred card, the scrim or close to dismiss.",
+            "Full-screen app switcher: the live page scales about the window centre, peers peek at the real screen edges, and a wide window (> 840 px) uses the 0.58 tablet card scale.",
         )),
         inflexible(caption(
-            "Fixed 300 px frame (not a scroll child): horizontal drags reach the strip. Step 4 of the handshake runs 450 ms after the tap.",
+            "Tap the stack fab to open, swipe, tap a peer to expand it into the live page (step 4 runs 450 ms later), tap the centred card or close to dismiss. \"Exit demo\" in the app bar returns here.",
         )),
         gap(6.0),
-        inflexible(SizedBox(Some(STAGE_W), Some(STAGE_H)).child(stage)),
+        inflexible(button(
+            "Open full-screen switcher demo",
+            |s: &mut CatalogState| {
+                s.switcher_open.set(false);
+                s.switcher_fullscreen.set(true);
+            },
+        )),
     ])
 }
 
@@ -746,7 +774,7 @@ pub fn page(state: &CatalogState) -> impl View<CatalogState> {
         .push(gap(8.0))
         .push(demo_boot())
         .push(gap(8.0))
-        .push(demo_card_switcher(state))
+        .push(demo_card_switcher())
 }
 
 #[cfg(test)]
@@ -796,9 +824,12 @@ mod tests {
     fn page_builds_closed_open_and_expanding() {
         let (_owner, state) = setup();
         let _ = page(&state);
+        let _ = switcher_stage(&state);
         state.switcher_open.set(true);
         let _ = page(&state);
+        let _ = switcher_stage(&state);
         state.switcher_expanding.set(Some(1));
         let _ = page(&state);
+        let _ = switcher_stage(&state);
     }
 }
