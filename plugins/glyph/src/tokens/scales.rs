@@ -349,20 +349,6 @@ pub fn glass() -> GlassScale {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn floating_level_sits_between_level3_and_level4() {
-        let f = floating();
-        let e = elevation();
-        assert_eq!(f.shadow_dark.y_offset, 6.0);
-        assert_eq!(f.shadow_dark.blur_std_dev, 16.0);
-        assert_eq!(f.shadow_dark.color_alpha, 0.35);
-        assert_eq!(f.shadow_light.color_alpha, 0.11);
-        assert!(f.shadow_dark.color_alpha > e.level3.shadow_dark.color_alpha);
-        assert!(f.shadow_dark.color_alpha < e.level4.shadow_dark.color_alpha);
-        assert!(f.shadow_light.color_alpha > e.level3.shadow_light.color_alpha);
-        assert!(f.shadow_light.color_alpha < e.level4.shadow_light.color_alpha);
-    }
-
     use super::*;
     use frust::Color;
 
@@ -465,6 +451,20 @@ mod tests {
         assert_eq!(e.level5.shadow_dark.blur_std_dev, 60.0);
         assert_eq!(e.level5.shadow_dark.color_alpha, 0.50);
         assert_eq!(e.level5.shadow_light.color_alpha, 0.18);
+    }
+
+    #[test]
+    fn floating_level_sits_between_level3_and_level4() {
+        let f = floating();
+        let e = elevation();
+        assert_eq!(f.shadow_dark.y_offset, 6.0);
+        assert_eq!(f.shadow_dark.blur_std_dev, 16.0);
+        assert_eq!(f.shadow_dark.color_alpha, 0.35);
+        assert_eq!(f.shadow_light.color_alpha, 0.11);
+        assert!(f.shadow_dark.color_alpha > e.level3.shadow_dark.color_alpha);
+        assert!(f.shadow_dark.color_alpha < e.level4.shadow_dark.color_alpha);
+        assert!(f.shadow_light.color_alpha > e.level3.shadow_light.color_alpha);
+        assert!(f.shadow_light.color_alpha < e.level4.shadow_light.color_alpha);
     }
 
     #[test]
