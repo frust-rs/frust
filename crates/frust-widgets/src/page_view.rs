@@ -2,106 +2,26 @@
 //! `PageController` (`widgets/page_view.dart`) over the horizontal scroll
 //! surface and [`PageSnap`].
 //!
-//! | Flutter              | frust                                   |
-//! |----------------------|-----------------------------------------|
-//! | `PageView`           | [`page_view`] → [`PageView`]            |
-//! | `PageController`     | [`PageController`]                      |
-//! | `PageScrollPhysics`  | [`PageSnap`] (the default physics)      |
-//! | `scrollDirection`    | [`PageView::axis`]                      |
-//! | `padEnds`            | [`PageView::pad_ends`]                  |
-//! | `onPageChanged`      | [`PageView::on_page_changed`]           |
-//! | `viewportFraction`   | [`PageController::viewport_fraction`]   |
-//! | `initialPage`        | [`PageController::initial_page`]        |
-//! | `page`               | [`PageController::page`]                |
-//! | `jumpToPage`         | [`PageController::jump_to_page`]        |
-//! | `animateToPage`      | [`PageController::animate_to_page`]     |
+//! Every page is laid out tight at `page_extent` (the viewport's main-axis
+//! extent × [`PageController::viewport_fraction`]) and placed back to back with
+//! no gap, so page `i` is current at offset `i × page_extent`.
+//! [`PageView::pad_ends`] (default) pads both ends so the end pages can centre.
 //!
-//! # Layout
+//! A [`PageView`] composes [`custom_scroll_view`] under the sliver
+//! [`ViewportWidget`] with one crate-private sliver, rather than embedding a
+//! bare scroll core, so the viewport's axis-aware nested-claim rule stays intact.
+//! [`PageController`] wraps a [`ScrollController`]; page commands are recorded
+//! in pages and applied at the next layout or paint. Under `motion.reduce_motion`
+//! [`PageController::animate_to_page`] lands in one frame.
 //!
-//! Every page is laid out tight at `page_extent` along the scroll axis — the
-//! viewport's main-axis extent × [`PageController::viewport_fraction`] — and
-//! the full cross axis, and pages are placed back to back at a stride of
-//! `page_extent`: there is no gap, exactly as in Flutter, so spacing between
-//! pages is each page's own padding. With [`PageView::pad_ends`] (the
-//! default) the run is padded by `(viewport − page_extent) / 2` at both ends,
-//! so the first and last pages can sit centred. Either way page `i` is
-//! current at scroll offset `i × page_extent`, which is exactly where
-//! [`PageSnap`] lands a release. Pages paint in order and hit-test in order.
+//! [`PageView::on_page_changed`] fires once per **settled** page change (the
+//! initial page is recorded, not reported), where Flutter fires mid-drag; a
+//! change seen at layout or paint is reported by the next `Housekeeping`.
 //!
-//! # Composition: the sliver viewport, not a second scroll core
-//!
-//! A [`PageView`] composes [`custom_scroll_view`] — the shared scroll core
-//! (`scroll_core.rs`'s `ScrollSurfaceCore`) under the sliver
-//! [`ViewportWidget`] — with one crate-private sliver that lays the pages
-//! out. The viewport is held inline in [`PageViewWidget`] (the
-//! [`shortcuts`](crate::shortcuts) wrapper's shape), not in a pod, so the
-//! page view adds no tree level and the viewport's hit testing, pointer
-//! capture and [`TOUCH_SLOP`](frust_core::TOUCH_SLOP) takeover (a drag past
-//! the slop cancels a tap child) run unchanged.
-//!
-//! The alternative — embedding a `ScrollSurfaceCore` directly, as the
-//! viewport itself does — was rejected because the viewport's **axis-aware
-//! nested-claim** rule (`viewport.rs`'s *Axis*) lives in that module alone:
-//! a page view built on a bare core would make a vertical list it sits in
-//! defer vertical drags to a horizontal pager. Composing keeps the claim
-//! logic intact, and the sliver is told the viewport's main-axis extent by
-//! the sliver protocol itself
-//! ([`SliverConstraints::viewport_main_axis_extent`]), which is what a page
-//! extent is a fraction of. The wrapper only reads the core (crate-internal)
-//! to tell when the surface is at rest.
-//!
-//! # `on_page_changed` fires on settle
-//!
-//! [`PageView::on_page_changed`] fires once per **settled** page change: when
-//! the surface comes to rest — no finger down, no drag, fling, release spring,
-//! edge settle or controller tween in flight — on a page other than the one
-//! last reported. The page is the scroll offset over `page_extent`, rounded.
-//! A drag that passes a boundary and springs back fires nothing; a fling onto
-//! the next page fires once, when the spring lands; a jump fires when it
-//! applies. The page a view first rests on (its initial page) is recorded,
-//! not reported. Flutter fires `onPageChanged` mid-drag whenever the rounded
-//! page changes; this port fires on settle instead, so an app reacting to it
-//! (loading the page's data, updating an indicator) never sees a page the user
-//! did not land on.
-//!
-//! A change observed during an event is reported in that event. One observed
-//! at layout or paint, which carry no `&mut State`, is reported by the next
-//! frame's `Housekeeping` broadcast
-//! ([`frust_core::mark_pending_result_flush`]), the scroll core's own
-//! programmatic-notification route.
-//!
-//! # Controller
-//!
-//! [`PageController`] is a newtype over a [`ScrollController`] plus a small
-//! shared page state (initial page, viewport fraction, queued page commands),
-//! not a second handle kind: the view attaches the inner [`ScrollController`]
-//! to its viewport, so the offset, `is_animating` and
-//! [`ScrollController::on_change`] the controller exposes are the viewport's
-//! own, always in sync. Page commands are recorded in pages and converted to
-//! offsets by the attached view against the page extent it measured, at its
-//! next layout or paint — the same "recorded, not applied" contract the
-//! scroll controller has. Clones share one state, as [`ScrollController`]
-//! clones do. Under the theme's `motion.reduce_motion`,
-//! [`PageController::animate_to_page`] lands in one frame: the scroll core
-//! collapses a reduced-motion tween into a jump.
-//!
-//! # v1 limits
-//!
-//! * **Eager children.** Every page is built, laid out and kept alive up
-//!   front — there is no `PageView.builder`, so the page count should stay
-//!   small (an onboarding flow, a carousel). Paint and semantics skip pages
-//!   outside the viewport.
-//! * **No `keepPage`.** Nothing is written to page storage; a page view built
-//!   fresh starts at [`PageController::initial_page`].
-//! * **No `PageView.custom`, `reverse` or `allowImplicitScrolling`.**
-//! * **A bounded main axis.** Under an unbounded main axis the viewport
-//!   shrink-wraps and the pages have no extent to be a fraction of; they are
-//!   laid out at zero extent.
-//!
-//! **A live, full-size page is not a page view use case** (decision D3): a
-//! page view is for a set of eager, swipeable pages. Switching between full
-//! screens that each keep their own live state is a navigator or an indexed
-//! stack's job, not this widget's.
+//! v1 limits: eager children (no builder, `keepPage`, `custom`, `reverse` or
+//! `allowImplicitScrolling`) and a bounded main axis. A live, full-size page is
+//! a navigator's or indexed stack's job, not this widget's. Flutter-parity
+//! table: `docs/WIDGETS_ARCHITECTURE.md`.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;

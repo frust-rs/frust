@@ -2,125 +2,26 @@
 //! rounded card over a scrim, with a label row, page dots and an action bar
 //! around it, and peer cards beside it on a horizontal strip.
 //!
-//! # Composition
+//! The live child keeps the full constraints and is only *transformed*
+//! ([`ChildPod::set_transform`]), so paint, hit tests and events follow the
+//! shrunken card while the page keeps its layout and state. Closed, the child
+//! paints plainly: no transform, clip, shadow or scrim.
 //!
-//! One wrapper owns the whole stage. The live child keeps the full constraints
-//! and is only *transformed*: [`ChildPod::set_transform`] scales it about its
-//! centre, so paint, hit tests and event localisation follow the shrunken card
-//! while the page keeps its layout and state. With open progress `p`
-//! (`0` closed, `1` open) the scale is `1 → card_scale`, the on-screen corner
-//! radius `0 → card_radius`, and the stage paints, in parent space: the scrim
-//! over the whole stage, then for each card on the strip its drop shadow, a
-//! rounded clip at its on-screen rect and the transformed card, then the
-//! slots: a label row `label_gap` above each card, the dots `dots_gap` below
-//! the strip, and the action bar flush with the bottom edge (it consumes its
-//! own window inset: wrap it in `safe_area`). Labels and dots fade in over the
-//! last 40 % of `p`, the bar over the first 40 %. Clip and shadow stay in
-//! parent space because a clip radius is recorded in pre-transform space.
-//! Closed, the child paints plainly: no transform, clip, shadow or scrim.
+//! The live card and the [`peers`](CardSwitcherView::peers) form one strip at
+//! [`live_index`](CardSwitcherView::live_index), snapped by [`PageSnap::extent`].
 //!
-//! # The strip
-//!
-//! The live card and the [`peers`](CardSwitcherView::peers) form one strip of
-//! `N = peers + 1` cards, the live card at
-//! [`live_index`](CardSwitcherView::live_index). Every card (the live child and
-//! each peer face) is laid out at the full stage size and shown under the same
-//! transform, `translate(c_k)·scale(s)·translate(−c)`, so neighbours peek in at
-//! both edges. Open, the stride is `stage_w × card_scale + gap`, card `k`'s
-//! centre sits at `stage_cx + k × stride − offset`, and the strip scrolls over
-//! `[0, (N − 1) × stride]`. Over the open ramp the whole strip scales with the
-//! live card (the stride is `stage_w × s + gap` at scale `s`), so the peers
-//! slide in from beyond the edges and never overlap a card; they fade in on the
-//! labels' window. Closing, the strip eases back to the live card, so the page
-//! always grows back into place.
-//!
-//! The card nearest the centre is drawn at full opacity and the others fade
-//! toward `peer_alpha` with their distance from the centre, in strides, so a
-//! drag cross-fades continuously.
-//!
-//! The strip scrolls on the crate's scroll surface core (`scroll_core.rs`),
-//! with [`PageSnap::extent`] at the stride over [`default_physics`](crate::physics::default_physics):
-//! drags take over past `TOUCH_SLOP`, a release snaps to the nearest card
-//! biased by the fling, and a drag past the first or last card overscrolls and
-//! springs back under the platform physics. It reads the horizontal axis only;
-//! a vertical drag on the strip moves nothing. Wheel input does not scroll it.
-//! The strip registers nothing with an enclosing scroll surface's nested-claim
-//! cell: the stage wraps the whole page, so there is nothing to nest in, and a
-//! stage placed inside a scroll view does not make that view defer to it.
-//!
-//! # Input
-//!
-//! While the stage is open or animating no pointer event reaches the live
-//! child, a peer face or a peer label. Settled open, a press on the card row
-//! (the band the cards span, gaps included) goes to the strip:
-//!
-//! * a drag scrolls it and never selects anything; selection is tap-only;
-//! * a tap on the centred live card calls `on_close`;
-//! * a tap on any other card centres it on a tween, then calls `on_select`
-//!   with its **peer** index (or `on_close`, for the live card) once the strip
-//!   rests there; a card already centred answers at once;
-//! * a tap in the row but on no card (a gap, the margins) calls `on_close`.
-//!
-//! A tap is a press and release the strip did not take over. A press that lands
-//! while the strip is still moving (a release spring, an edge settle) catches
-//! it; if it then releases without dragging, it is not a tap, and the strip
-//! springs to the nearest card instead. **A tap during a tap's centring tween
-//! is ignored**: from the tap until its callback fires, every pointer event in
-//! the stage is swallowed, so neither a second tap nor a drag can redirect the
-//! selection in flight.
-//!
-//! Outside the card row, a press calls `on_close` at once (the scrim), unless a
-//! slot takes it; every other pointer event in the stage's bounds is
-//! swallowed. During the open and close ramps the row is not live: a press and
-//! release on the live card calls `on_close`, and a press elsewhere calls it at
-//! once. Blocking covers only the stage's own bounds, so wrap the whole shell
-//! page, not a body under app chrome. Key and IME routing is untouched. Opening
-//! cancels the child's capture and clears its focus link; closing restores the
-//! link when focus still runs through the stage.
-//!
-//! A callback that comes due during a paint (a centring tween landing) is
-//! delivered by the next frame's `Housekeeping` event, the scroll core's own
-//! route for a paint-time notification.
-//!
-//! # Expanding a card
+//! Input blocking: while the stage is open or animating no pointer event
+//! reaches the live child or a peer. Settled open, a tap on the centred live
+//! card or off any card calls `on_close`; a tap on another card centres it,
+//! then calls `on_select` with its peer index. Only during the OPEN ramp does a
+//! press call `on_close`; the close ramp swallows pointer input. Wrap the whole
+//! shell page, not a body under app chrome.
 //!
 //! [`expanding(Some(i))`](CardSwitcherView::expanding) grows peer `i` into the
-//! page. The strip first centres card `i` (on the centring tween, unless it
-//! already rests there), then runs the `close_timing` ramp on that card alone:
-//! its scale goes `card_scale → 1` about the stage centre, its radius
-//! `card_radius → 0` and its shadow fades, while every other card, the labels,
-//! the dots and the bar fade out as the ramp passes `0.8`
-//! (`alpha = clamp((0.8 − p) / 0.4)`). Pointer input is swallowed from the
-//! request until the stage closes or the request is withdrawn. When the ramp
-//! completes the stage holds that pose and does nothing else: swapping the
-//! live content is the app's move. The handshake:
-//!
-//! 1. the user taps peer `i`; the strip centres it and calls `on_select(i)`;
-//! 2. the app records the choice and rebuilds with `.expanding(Some(i))`;
-//! 3. the stage grows card `i` to full screen and holds;
-//! 4. the app rebuilds with `open = false`, the chosen page as the live child,
-//!    `.live_index` at that card's strip position (keep the strip order) and
-//!    `.expanding(None)`.
-//!
-//! Step 4 may come at any time after step 2. The close continues from the
-//! expansion's progress: after a completed expansion the stage is closed at
-//! once and the new live child paints plainly where the face was; mid-ramp the
-//! close finishes the grow from the current scale. Withdrawing the request
-//! while still open (`.expanding(None)`) reverses the ramp.
-//!
-//! # Reduced motion
-//!
-//! Under `theme.motion.reduce_motion` the scale and radius jump to the target
-//! pose on the first paint, and only the alphas (scrim, shadow, slots, peers)
-//! run, as a 120 ms linear fade, whatever `open_timing`/`close_timing` say. The
-//! peers appear at their final positions. The centring tween collapses to a
-//! jump, a drag release still snaps, and an expansion jumps its geometry and
-//! fades its alphas.
-//!
-//! # Flutter
-//!
-//! No direct analog; `OpenContainer` (the `animations` package) and `Hero` are
-//! the nearest.
+//! page and holds; the app then rebuilds with `open = false`, the chosen page
+//! live and `.expanding(None)`. Under `theme.motion.reduce_motion` the scale
+//! and radius jump and only the alphas run, as a 120 ms linear fade. Detail:
+//! `docs/WIDGETS_ARCHITECTURE.md`.
 
 use std::any::Any;
 use std::rc::Rc;
@@ -915,10 +816,11 @@ impl Strip {
     }
 
     /// Follow the stage size, card scale and gap: a new stride rescales the
-    /// position (keeping the card it shows), installs the snap at that stride
-    /// and restarts whatever motion was measured in the old one. Then apply an
-    /// owed recentre and, at rest, keep the position in range. Runs at every
-    /// layout and paint.
+    /// offset to the same fractional page, installs the snap at that stride and
+    /// stops post-release motion (spring, fling); only a pending tap tween or
+    /// an unopened expansion's centring restarts, and the next gesture end
+    /// re-settles. Then apply an owed recentre and, at rest, keep the position
+    /// in range. Runs at every layout and paint.
     fn prepare(&mut self, stage: Size, card_scale: f64) {
         self.stage = stage;
         self.card_scale = card_scale;
