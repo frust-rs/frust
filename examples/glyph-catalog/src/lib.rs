@@ -148,6 +148,21 @@ pub struct CatalogState {
     /// that module's "Reduced motion" docs) OR it into their own local
     /// `reduce` check instead of adding a second gating flag.
     pub animations_enabled: RwSignal<bool>,
+    /// Whether the Motion page's card-switcher demo stage is open (the
+    /// stage shows its strip instead of the live page). A signal, not a plain
+    /// `bool`, so the stateless Android-back handler in
+    /// [`switcher_back`](Self::switcher_back) can close the stage too.
+    pub switcher_open: RwSignal<bool>,
+    /// Handshake step 2 of the card-switcher demo: the peer index growing into
+    /// the live page, `None` outside a selection. See `pages::motion`.
+    pub switcher_expanding: RwSignal<Option<usize>>,
+    /// Which fake server face (index into the demo's four faces) is currently
+    /// the live page of the card-switcher demo.
+    pub switcher_live: RwSignal<usize>,
+    /// The card-switcher demo's back handle, created once here (it needs the
+    /// reactive runtime, so never inside a `View::build`); its `on_back`
+    /// closes the stage through [`switcher_open`](Self::switcher_open).
+    pub switcher_back: frust_glyph::SwitcherBack,
 }
 
 impl CatalogState {
@@ -155,6 +170,7 @@ impl CatalogState {
     /// dark-first default), motion on, an empty toast queue, and a fresh
     /// navigator controller.
     pub fn new() -> Self {
+        let switcher_open = RwSignal::new(false);
         CatalogState {
             brightness: RwSignal::new(Brightness::Dark),
             reduce_motion: RwSignal::new(false),
@@ -164,6 +180,10 @@ impl CatalogState {
             nav: NavigatorController::new(),
             elevated: RwSignal::new(false),
             animations_enabled: RwSignal::new(true),
+            switcher_open,
+            switcher_expanding: RwSignal::new(None),
+            switcher_live: RwSignal::new(0),
+            switcher_back: frust_glyph::SwitcherBack::new(move || switcher_open.set(false)),
         }
     }
 }

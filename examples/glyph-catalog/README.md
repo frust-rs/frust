@@ -39,8 +39,8 @@ transition:
 7. **Motion** — all 11 reference motion demos (press feedback, toggle spring,
    tab indicator, accordion height, modal, bottom sheet, command palette,
    toast, staggered log reveal, a composable screen-transition picker, and a
-   boot sequence), plus a live `theme.motion` duration/easing token table and
-   a reduced-motion status note.
+   boot sequence), a **card switcher** stage (12), plus a live `theme.motion`
+   duration/easing token table and a reduced-motion status note.
 8. **Interactions** — eight moments tied to a simulated muxr event stream: a
    connection heartbeat, a session-attach card morph, a new-session boot
    sequence, a token-revoke character scramble, a long-press charge ring, a
@@ -214,8 +214,36 @@ with reason (see each page's own module docs for the full rationale).
 | 09 | Staggered log reveal | ✓ |
 | 10 | Screen transition (+ composable pattern picker: FadeThrough / SharedAxis::X / FadeScale / GlyphSlide) | ✓ |
 | 11 | Boot sequence | ✓, at `term_block`'s standard ~90ms/line stagger — N/A for the reference's slower ~260ms/line cadence: no custom `GlyphStagger { per_item_delay }` is exposed on `term_block` (only `.staggered(bool)`); labeled as such in-page |
+| 12 | Card switcher (`frust_glyph::card_switcher`: live page, 3 peer faces, fab trigger, action bar, page dots, back) | ✓ |
 | — | Duration/easing token table (5 durations, 3 easings) | ✓ |
 | — | Reduced-motion note | ✓ |
+
+### Card switcher demo
+
+The last Motion block is an app-switcher stage inside a fixed 300 px phone-ratio
+frame (not a scroll child, not a route: the shell wraps each page in a vertical
+`scroll_view`, and the strip's horizontal drags must reach the stage). The live
+page is a fake "devbox" app (app bar, 3-row list, stack fab); the peers are a
+cached face, a never-connected face and a failed face. Its state lives on
+`CatalogState` (`switcher_open`, `switcher_expanding`, `switcher_live`, plus the
+once-built `SwitcherBack`). Tapping a peer runs the pattern's handshake: step 2
+(`.expanding(Some(i))`) in the tap handler, step 4 (that face live,
+`.expanding(None)`, `open = false`) 450 ms later on the UI-thread local task
+queue, standing in for muxr's "dial completed". The frame is narrower than 840 px,
+so the tablet `card_scale(0.58)` rule is wired but only reachable once the stage
+widens.
+
+Device-gate command (from this directory): `cargo run` on desktop, or
+`frust run -d <device-id>` on a device; open Motion and scroll to
+"12 Card switcher". Checklist:
+
+- [ ] open: the fab cross-fades to the action bar, the page shrinks to a card, dots appear
+- [ ] swipe: the strip pages and snaps, dots follow, edges overscroll and spring back
+- [ ] tap-select: a peer centres, then grows to full screen and becomes the live page
+- [ ] tap-centre-close: tapping the centred card, the scrim or the close chip closes
+- [ ] back: Android back closes the open stage (and only while it is open)
+- [ ] reduce-motion: with the header toggle on, scale jumps and only the fades run
+- [ ] rotate / resize while open: the stage stays open and re-lays out
 
 ### Components the reference inventory listed as "no direct Frust widget"
 
