@@ -4,7 +4,7 @@ The Glyph design-system catalog for [Frust](https://frust.dev): a terminal-nativ
 dark-first, monospace-led design language. The crate holds the Glyph tokens
 (color schemes, type, shape, elevation, motion and glass scales), the assembled
 theme, two motion patterns, and the widget catalog (badges, alerts, loaders,
-toast, navigation chrome, cards, terminal block, command palette, a floating
+toast, navigation chrome, page dots (`page_dots`), cards, terminal block, command palette, a floating
 action button (`fab`), and its own `toggle` switch). The bundled monospace fonts are behind the default-on
 `bundled-fonts` feature.
 
