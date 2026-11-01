@@ -41,8 +41,6 @@ use frust_glyph::{
     skeleton, switcher_bar, switcher_chip, tag,
 };
 
-use std::sync::PoisonError;
-
 use crate::CatalogState;
 
 /// Glyph accent amber — the reference build's `--accent-amber`.
@@ -510,18 +508,35 @@ fn peer_face(live: usize, peer: usize) -> usize {
     if peer >= live { peer + 1 } else { peer }
 }
 
+/// One tapped selection: the peer, the face that becomes live, and the
+/// generation it was started under (see [`CatalogState::switcher_generation`]).
+#[derive(Clone, Copy, Debug)]
+struct Selection {
+    peer: usize,
+    face: usize,
+    generation: u64,
+}
+
 /// Handshake step 2: record the tapped peer and grow it (the build reads
-/// `switcher_expanding`). Returns the face id that will become live.
-fn begin_select(state: &CatalogState, peer: usize) -> usize {
+/// `switcher_expanding`). Bumps the selection generation and returns the
+/// selection, whose `face` will become live.
+fn begin_select(state: &CatalogState, peer: usize) -> Selection {
     let face = peer_face(state.switcher_live.get_untracked(), peer);
+    state.switcher_generation.update(|g| *g += 1);
     state.switcher_expanding.set(Some(peer));
-    face
+    Selection {
+        peer,
+        face,
+        generation: state.switcher_generation.get_untracked(),
+    }
 }
 
 /// Withdraw a pending selection and close the stage (the scrim, the close
 /// chip, Exit demo and back all end here), so a delayed step 4 scheduled
-/// earlier finds nothing pending and does not swap the live face.
+/// earlier finds nothing pending and does not swap the live face. Bumps the
+/// generation so an earlier selection stays stale across a reopen.
 fn close_stage(state: &CatalogState) {
+    state.switcher_generation.update(|g| *g += 1);
     state.switcher_expanding.set(None);
     state.switcher_open.set(false);
 }
@@ -529,14 +544,15 @@ fn close_stage(state: &CatalogState) {
 /// Handshake step 4: the chosen face becomes the live page (strip order is
 /// kept: its position is its id), the expansion request is dropped and the
 /// stage closes, finishing the grow. It applies only while the selection it
-/// was scheduled for is still pending (the stage open and `switcher_expanding`
-/// still `Some(peer)`); a close or a newer selection makes it a no-op.
-/// Returns whether it applied.
-fn finish_select(state: &CatalogState, peer: usize, face: usize) -> bool {
-    let pending = state.switcher_open.get_untracked()
-        && state.switcher_expanding.get_untracked() == Some(peer);
+/// was scheduled for is still the current one (same generation, stage open,
+/// `switcher_expanding` still its peer); a close or any newer selection,
+/// even of the same peer, makes it a no-op. Returns whether it applied.
+fn finish_select(state: &CatalogState, sel: Selection) -> bool {
+    let pending = state.switcher_generation.get_untracked() == sel.generation
+        && state.switcher_open.get_untracked()
+        && state.switcher_expanding.get_untracked() == Some(sel.peer);
     if pending {
-        state.switcher_live.set(face);
+        state.switcher_live.set(sel.face);
         state.switcher_expanding.set(None);
         state.switcher_open.set(false);
     }
@@ -572,7 +588,10 @@ impl std::future::Future for Delay {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<()> {
         {
-            let mut guard = self.shared.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut guard = self
+                .shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if guard.0 {
                 return std::task::Poll::Ready(());
             }
@@ -585,7 +604,9 @@ impl std::future::Future for Delay {
             std::thread::spawn(move || {
                 std::thread::sleep(duration);
                 let waker = {
-                    let mut guard = shared.lock().unwrap_or_else(PoisonError::into_inner);
+                    let mut guard = shared
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     guard.0 = true;
                     guard.1.take()
                 };
@@ -632,9 +653,12 @@ fn live_page(face: usize) -> impl View<CatalogState> {
         )
         .small(),)),
     )
-    .fab(fab(frust::icons::PANE_MARK, |s: &mut CatalogState| {
-        s.switcher_open.set(true);
-    }))
+    .fab(
+        fab(frust::icons::PANE_MARK, |s: &mut CatalogState| {
+            s.switcher_open.set(true);
+        })
+        .label("Switch server"),
+    )
 }
 
 /// A peer card's face, built from Glyph widgets only: cached (skeleton rows
@@ -705,11 +729,11 @@ pub(crate) fn switcher_stage(state: &CatalogState) -> impl View<CatalogState> + 
         .live_label(face_label(live))
         .expanding(expanding)
         .on_select(|s: &mut CatalogState, peer| {
-            let face = begin_select(s, peer);
+            let sel = begin_select(s, peer);
             let state = s.clone();
             frust::spawn_local(async move {
                 Delay::new(SWAP_DELAY).await;
-                finish_select(&state, peer, face);
+                finish_select(&state, sel);
             });
         })
         .on_close(|s: &mut CatalogState| close_stage(s))
@@ -717,12 +741,13 @@ pub(crate) fn switcher_stage(state: &CatalogState) -> impl View<CatalogState> + 
             switcher_chip(frust::icons::LOCK, |s: &mut CatalogState| {
                 s.toasts
                     .update(|v| v.push("Lock is a demo no-op".to_string()));
-            }),
+            })
+            .semantic_label("Lock"),
             switcher_chip(frust::icons::ADD, |s: &mut CatalogState| {
                 s.toasts
                     .update(|v| v.push("Add server is a demo no-op".to_string()));
             })
-            .label("+ add server"),
+            .label("add server"),
             switcher_chip(frust::icons::CLOSE, |s: &mut CatalogState| close_stage(s))
                 .semantic_label("close"),
         )))
@@ -813,14 +838,17 @@ mod tests {
         state.switcher_open.set(true);
 
         // Step 2: the tapped peer grows; the live face and the open flag stay.
-        let face = begin_select(&state, 1);
-        assert_eq!(face, 2, "peer 1 of [staging, new-host, prod-eu] is face 2");
+        let sel = begin_select(&state, 1);
+        assert_eq!(
+            sel.face, 2,
+            "peer 1 of [staging, new-host, prod-eu] is face 2"
+        );
         assert_eq!(state.switcher_expanding.get_untracked(), Some(1));
         assert_eq!(state.switcher_live.get_untracked(), 0);
         assert!(state.switcher_open.get_untracked());
 
         // Step 4: the face is live, the request dropped, the stage closed.
-        assert!(finish_select(&state, 1, face));
+        assert!(finish_select(&state, sel));
         assert_eq!(state.switcher_live.get_untracked(), 2);
         assert_eq!(state.switcher_expanding.get_untracked(), None);
         assert!(!state.switcher_open.get_untracked());
@@ -835,17 +863,17 @@ mod tests {
     fn closing_withdraws_the_pending_swap() {
         let (_owner, state) = setup();
         state.switcher_open.set(true);
-        let face = begin_select(&state, 2);
+        let sel = begin_select(&state, 2);
 
         // Back / scrim / close chip during the delay.
         close_stage(&state);
-        assert!(!finish_select(&state, 2, face));
+        assert!(!finish_select(&state, sel));
         assert_eq!(state.switcher_live.get_untracked(), 0, "live is unchanged");
         assert_eq!(state.switcher_expanding.get_untracked(), None);
 
         // Reopening inside the old window does not resurrect the request.
         state.switcher_open.set(true);
-        assert!(!finish_select(&state, 2, face));
+        assert!(!finish_select(&state, sel));
         assert_eq!(state.switcher_live.get_untracked(), 0);
         assert!(state.switcher_open.get_untracked());
     }
@@ -857,15 +885,31 @@ mod tests {
         let stale = begin_select(&state, 1);
         let fresh = begin_select(&state, 2);
 
-        assert!(
-            !finish_select(&state, 1, stale),
-            "peer 1 is no longer pending"
-        );
+        assert!(!finish_select(&state, stale), "peer 1 is no longer pending");
         assert_eq!(state.switcher_live.get_untracked(), 0);
         assert_eq!(state.switcher_expanding.get_untracked(), Some(2));
 
-        assert!(finish_select(&state, 2, fresh));
-        assert_eq!(state.switcher_live.get_untracked(), fresh);
+        assert!(finish_select(&state, fresh));
+        assert_eq!(state.switcher_live.get_untracked(), fresh.face);
+    }
+
+    #[test]
+    fn stale_finish_does_not_apply_over_a_repeat_of_the_same_peer() {
+        let (_owner, state) = setup();
+        state.switcher_open.set(true);
+        let first = begin_select(&state, 1);
+        close_stage(&state);
+        state.switcher_open.set(true);
+        let second = begin_select(&state, 1);
+
+        assert!(
+            !finish_select(&state, first),
+            "the first finish must not cut the second grow short"
+        );
+        assert_eq!(state.switcher_expanding.get_untracked(), Some(1));
+        assert!(state.switcher_open.get_untracked());
+        assert!(finish_select(&state, second));
+        assert_eq!(state.switcher_live.get_untracked(), second.face);
     }
 
     #[test]
@@ -917,33 +961,40 @@ mod tests {
         let closed = mount_nodes(&mut state, stage);
         assert!(has(&closed, "Button", "Exit demo"), "live page app bar");
         assert!(has(&closed, "TitleBar", "devbox"), "live face is devbox");
+        assert!(has(&closed, "Button", "Switch server"), "labelled fab");
         assert!(
             !has(&closed, "Button", "close"),
             "no switcher bar when closed"
         );
-        assert!(!has(&closed, "Button", "+ add server"));
+        assert!(!has(&closed, "Button", "add server"));
 
         state.switcher_open.set(true);
         let open = mount_nodes(&mut state, stage);
         assert!(has(&open, "Button", "close"), "close chip");
-        assert!(has(&open, "Button", "+ add server"), "add-server chip");
+        assert!(has(&open, "Button", "Lock"), "labelled lock chip");
+        assert!(has(&open, "Button", "add server"), "add-server chip");
         assert!(has(&open, "Status", "page 1 of 4"), "strip position");
 
         // Expanding keeps the bar; the page still mounts and shows its peer.
         state.switcher_expanding.set(Some(1));
         let expanding = mount_nodes(&mut state, stage);
         assert!(has(&expanding, "Button", "close"));
+        assert!(has(&expanding, "Button", "add server"));
+        assert!(has(&expanding, "Button", "Lock"));
     }
 
     #[test]
     fn page_mounts_with_the_launch_button_in_each_state() {
         let (_owner, mut state) = setup();
         let page_view = |s: &CatalogState| frust::any(page(s));
+        let launch = "Open full-screen switcher demo";
         let closed = mount_nodes(&mut state, page_view);
-        assert!(!closed.is_empty(), "the page produces semantics");
+        assert!(has(&closed, "Button", launch), "launch button when closed");
         state.switcher_open.set(true);
-        assert!(!mount_nodes(&mut state, page_view).is_empty());
+        let open = mount_nodes(&mut state, page_view);
+        assert!(has(&open, "Button", launch), "launch button when open");
         state.switcher_expanding.set(Some(1));
-        assert!(!mount_nodes(&mut state, page_view).is_empty());
+        let expanding = mount_nodes(&mut state, page_view);
+        assert!(has(&expanding, "Button", launch), "launch button expanding");
     }
 }

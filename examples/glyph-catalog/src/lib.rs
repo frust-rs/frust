@@ -196,6 +196,10 @@ pub struct CatalogState {
     /// Handshake step 2 of the card-switcher demo: the peer index growing into
     /// the live page, `None` outside a selection. See `pages::motion`.
     pub switcher_expanding: RwSignal<Option<usize>>,
+    /// Selection generation of the card-switcher demo: bumped by every new
+    /// selection and by every close or back, so a delayed step 4 only applies
+    /// to the selection that scheduled it (even a repeat of the same peer).
+    pub switcher_generation: RwSignal<u64>,
     /// Which fake server face (index into the demo's four faces) is currently
     /// the live page of the card-switcher demo.
     pub switcher_live: RwSignal<usize>,
@@ -220,6 +224,7 @@ impl CatalogState {
     pub fn new() -> Self {
         let switcher_open = RwSignal::new(false);
         let switcher_expanding = RwSignal::new(None);
+        let switcher_generation = RwSignal::new(0u64);
         CatalogState {
             brightness: RwSignal::new(Brightness::Dark),
             reduce_motion: RwSignal::new(false),
@@ -231,12 +236,14 @@ impl CatalogState {
             animations_enabled: RwSignal::new(true),
             switcher_open,
             switcher_expanding,
+            switcher_generation,
             switcher_live: RwSignal::new(0),
             switcher_fullscreen: RwSignal::new(false),
             window_width: RwSignal::new(0.0),
             // Back withdraws a pending selection too, so the delayed swap
             // does not switch to a server the user backed out of.
             switcher_back: frust_glyph::SwitcherBack::new(move || {
+                switcher_generation.set(switcher_generation.get_untracked() + 1);
                 switcher_expanding.set(None);
                 switcher_open.set(false);
             }),
