@@ -173,6 +173,7 @@ with reason (see each page's own module docs for the full rationale).
 | Tabs (sliding indicator) | ✓ |
 | Segmented control | ✓ |
 | Breadcrumb | ✓ |
+| Page dots (decorative + tappable) | ✓ — `page_dots`, the tappable row bound to a page-local signal |
 | Bottom nav | ✓ — mapped to `glyph_nav_bar` (no dedicated bottom-nav widget; captioned char-vs-icon item faces, the iOS tofu-risk story) |
 | Avatar (3 sizes/accents) | ✓ |
 

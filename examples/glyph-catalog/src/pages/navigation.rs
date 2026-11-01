@@ -1,13 +1,14 @@
 //! Navigation section — **filled by `c05`**: a standalone tabs demo with a
 //! sliding indicator, a controlled segmented control, a breadcrumb whose taps
-//! update a caption, two `glyph_nav_bar` strips (CHAR items vs VECTOR items —
+//! update a caption, a page-dots row, two `glyph_nav_bar` strips (CHAR items vs VECTOR items —
 //! the box-drawing/tofu coverage story), and three avatar size/accent
 //! variants.
 //!
 //! # Local demo state (deliberately not `CatalogState`)
 //!
 //! Every controlled demo below (the tab index, the segment index, the
-//! breadcrumb caption, the two nav-bar selections) is genuinely page-local —
+//! breadcrumb caption, the page-dots selection, the two nav-bar selections) is
+//! genuinely page-local —
 //! nothing any other section needs to read or drive — so it is **not** added
 //! to [`crate::CatalogState`] (the page-fn contract fixes that struct;
 //! growing it per section would defeat the point of a shared bundle). Instead
@@ -90,6 +91,7 @@ thread_local! {
     static TABS_SEL: Cell<Option<RwSignal<usize>>> = const { Cell::new(None) };
     static SEG_SEL: Cell<Option<RwSignal<usize>>> = const { Cell::new(None) };
     static CRUMB_CAPTION: Cell<Option<RwSignal<String>>> = const { Cell::new(None) };
+    static PAGE_DOTS_SEL: Cell<Option<RwSignal<usize>>> = const { Cell::new(None) };
     static CHAR_NAV_SEL: Cell<Option<RwSignal<usize>>> = const { Cell::new(None) };
     static ICON_NAV_SEL: Cell<Option<RwSignal<usize>>> = const { Cell::new(None) };
 }
@@ -125,6 +127,9 @@ fn segmented_selected() -> RwSignal<usize> {
 }
 fn breadcrumb_caption() -> RwSignal<String> {
     demo_signal(&CRUMB_CAPTION, || DEFAULT_CRUMB_CAPTION.to_string())
+}
+fn page_dots_selected() -> RwSignal<usize> {
+    demo_signal(&PAGE_DOTS_SEL, || 0)
 }
 fn char_nav_selected() -> RwSignal<usize> {
     demo_signal(&CHAR_NAV_SEL, || 0)
@@ -221,6 +226,22 @@ fn breadcrumb_demo() -> impl View<CatalogState> {
         .child(text(caption).size(11.0))
 }
 
+/// A decorative 5-page indicator (page 3 current), then the same row made
+/// tappable: a tap moves the highlight and the caption beneath it.
+fn page_dots_demo() -> impl View<CatalogState> {
+    let sig = page_dots_selected();
+    let selected = sig.get();
+    column()
+        .child(frust_glyph::page_dots::<CatalogState>(5, 2))
+        .child(gap(8.0))
+        .child(
+            frust_glyph::page_dots::<CatalogState>(5, selected)
+                .on_tap(move |_state: &mut CatalogState, idx: usize| sig.set(idx)),
+        )
+        .child(gap(6.0))
+        .child(text(format!("page {} of 5", selected + 1)).size(11.0))
+}
+
 /// The CHAR-item nav bar: box-drawing glyphs the bundled fonts actually cover
 /// (see the module docs' coverage story).
 fn char_nav_bar_demo() -> impl View<CatalogState> {
@@ -283,6 +304,9 @@ pub fn page(_state: &CatalogState) -> impl View<CatalogState> {
             .child(gap(20.0))
             .child(heading("Breadcrumb"))
             .child(breadcrumb_demo())
+            .child(gap(20.0))
+            .child(heading("Page dots"))
+            .child(page_dots_demo())
             .child(gap(20.0))
             .child(heading("Nav Bar — chars vs. icons"))
             .child(
