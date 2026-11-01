@@ -22,7 +22,8 @@ transition:
 
 1. **Foundations** — live color/type/radius token specimens (every swatch
    re-resolves from the current theme, never a hardcoded hex).
-2. **Buttons + Forms** — every `ButtonStyle`, `.small()`, a loading demo, plus
+2. **Buttons + Forms** — every `ButtonStyle`, `.small()`, a loading demo, the
+   `frust_glyph::fab` floating action button (regular, mini, disabled), plus
    the baseline form controls (`text_input`, `checkbox`, `radio`, `slider`)
    rendered under the Glyph theme, alongside the Glyph catalog's own
    `frust_glyph::toggle`.
@@ -38,8 +39,8 @@ transition:
 7. **Motion** — all 11 reference motion demos (press feedback, toggle spring,
    tab indicator, accordion height, modal, bottom sheet, command palette,
    toast, staggered log reveal, a composable screen-transition picker, and a
-   boot sequence), plus a live `theme.motion` duration/easing token table and
-   a reduced-motion status note.
+   boot sequence), a **card switcher** stage (12), plus a live `theme.motion`
+   duration/easing token table and a reduced-motion status note.
 8. **Interactions** — eight moments tied to a simulated muxr event stream: a
    connection heartbeat, a session-attach card morph, a new-session boot
    sequence, a token-revoke character scramble, a long-press charge ring, a
@@ -138,6 +139,7 @@ with reason (see each page's own module docs for the full rationale).
 | Loading demo | ✓ (checkbox-driven, not a timed auto-reset — no async-sleep primitive available without an out-of-scope dependency) |
 | Disabled state | N/A as a dedicated builder — `ButtonView` has no `.enabled(false)` seam; a statically-`.loading(true)` button stands in, captioned honestly |
 | Press feedback (0.96 scale) | ✓ (captioned; built into `Button` itself) |
+| Floating action button | ✓ — `frust_glyph::fab`: regular (46 px), `.mini(true)` (40 px) and `.disabled(true)`, each labelled; no-op presses |
 
 ### §03 Form Controls (`pages/buttons_forms.rs`)
 
@@ -171,6 +173,7 @@ with reason (see each page's own module docs for the full rationale).
 | Tabs (sliding indicator) | ✓ |
 | Segmented control | ✓ |
 | Breadcrumb | ✓ |
+| Page dots (decorative + tappable) | ✓ — `page_dots`, the tappable row bound to a page-local signal |
 | Bottom nav | ✓ — mapped to `glyph_nav_bar` (no dedicated bottom-nav widget; captioned char-vs-icon item faces, the iOS tofu-risk story) |
 | Avatar (3 sizes/accents) | ✓ |
 
@@ -211,8 +214,48 @@ with reason (see each page's own module docs for the full rationale).
 | 09 | Staggered log reveal | ✓ |
 | 10 | Screen transition (+ composable pattern picker: FadeThrough / SharedAxis::X / FadeScale / GlyphSlide) | ✓ |
 | 11 | Boot sequence | ✓, at `term_block`'s standard ~90ms/line stagger — N/A for the reference's slower ~260ms/line cadence: no custom `GlyphStagger { per_item_delay }` is exposed on `term_block` (only `.staggered(bool)`); labeled as such in-page |
+| 12 | Card switcher (`frust_glyph::card_switcher`: live page, 3 peer faces, fab trigger, action bar, page dots, back) | ✓ |
 | — | Duration/easing token table (5 durations, 3 easings) | ✓ |
 | — | Reduced-motion note | ✓ |
+
+### Card switcher demo
+
+The last Motion block is a description plus an **Open full-screen switcher demo**
+button. It sets `CatalogState::switcher_fullscreen`, and the shell then renders
+the app-switcher stage as the whole window content (no tab strip, no page
+`scroll_view`), so the live page is real-size under the 1.0 -> 0.62 transform
+and the peers peek at the real screen edges. The old 300 px miniature is
+removed (it could not answer the frame-rate question or reach the tablet rule).
+The live page is a fake "devbox" app (app bar, 3-row list, stack fab); the peers
+are a cached face (dimmed with `animated_opacity(0.6, ..)`), a never-connected
+face and a failed face. State lives on `CatalogState` (`switcher_open`,
+`switcher_expanding`, `switcher_live`, `switcher_fullscreen`, the measured
+`window_width`, plus the once-built `SwitcherBack`). Tapping a peer runs the
+pattern's handshake: step 2 (`.expanding(Some(i))`) in the tap handler, step 4
+(that face live, `.expanding(None)`, `open = false`) 450 ms later on the
+UI-thread local task queue, standing in for muxr's "dial completed". Windows
+wider than 840 px use `card_scale(0.58)`; the width comes from a zero-size
+layout probe in the full-screen page. The live page's app bar carries an
+**Exit demo** action that returns to the tabbed shell.
+
+Device-gate command (the gate runs the FULL-SCREEN mode): from this directory,
+`frust run -d <device-id>` (or `cargo run` on desktop), then Motion ->
+"Open full-screen switcher demo". Checklist:
+
+- [ ] open: the fab cross-fades to the action bar, the page shrinks to a card, dots appear
+- [ ] swipe: the strip pages and snaps, dots follow, edges overscroll and spring back
+- [ ] tap-select: a peer centres, then grows to full screen and becomes the live page
+- [ ] tap-centre-close: tapping the centred card, the scrim or the close chip closes
+- [ ] back: Android back closes the open stage (and only while it is open)
+- [ ] reduce-motion: with the header toggle on, scale jumps and only the fades run
+- [ ] rotate / resize while open: the stage stays open and re-lays out (a tablet-size window switches to the 0.58 card scale)
+- [ ] Exit demo: the app-bar action returns to the tabbed shell
+
+Gate run 2026-11-02 (switcher follow-ups branch): Pixel 5 (Android 14, 90 Hz) over adb, iPhone 13 mini
+(iOS 27.2) via the XCUITest driver, and a 1280 px macOS window (0.58 card) — every item above passed;
+Android stops dead at the strip ends (platform clamping physics, no stretch drawn) and both phones draw
+the dots over the bar in landscape; ramps on the Pixel 5 held p95 under 16.7 ms (CPU 13.0–15.9 ms, GPU
+9.9–13.6 ms, no skipped frames).
 
 ### Components the reference inventory listed as "no direct Frust widget"
 

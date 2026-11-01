@@ -161,22 +161,22 @@ pub use frust_widgets::{
     KeepAliveView, ListView, ListViewWidget, MAX_FLING_VELOCITY, MIN_FLING_VELOCITY,
     MainAxisAlignment, NavigatorController, NavigatorId, NavigatorView, NeverScrollable,
     OverlayAlign, OverlayPlacement, OverlayPortalView, OverlaySide, OverscrollEffect, Padding,
-    PaddingView, PageBuilder, PageTransition, PageVisibility, PopResult, PushOptions, Radio,
-    RadioView, RadioWidget, ReorderableListView, RepaintBoundaryView, ResultCallback, Row,
-    RubberBand, SafeAreaView, ScaffoldView, ScrollAxis, ScrollController, ScrollInfo,
-    ScrollMetrics, ScrollPhysics, ScrollSubscription, ScrollView, ScrollbarShow, ScrollbarStyle,
-    ShortcutsView, Simulation, SizedBox, SizedBoxView, Slider, SliderView, SliverBoxView,
-    SliverFillRemainingView, SliverFixedExtentListView, SliverGridDelegate, SliverGridView,
-    SliverListView, SliverPaddingView, SliverPersistentHeaderDelegate, SliverPersistentHeaderView,
-    SourceFeedback, SpringDescription, Stack, StackView, TextInput, TextInputView, TextView,
-    Timing, Tolerance, TransitionSpec, TransitionState, VisibilityCallback, WindowDragRegionView,
-    auto_scroll_zone, button, checkbox, colored_box, column, container, custom_scroll_view,
-    divider, drag_target, draggable, flexible, hero, icon, icon_button, indexed_stack, inflexible,
-    keep_alive, keyed, list_view, overlay_portal, radio, reorderable_list, repaint_boundary, row,
-    safe_area, scaffold, scroll_view, shortcuts, slider, sliver_box, sliver_fill_remaining,
-    sliver_fixed_extent_list, sliver_fixed_extent_list_keyed, sliver_grid, sliver_grid_keyed,
-    sliver_list, sliver_padding, sliver_persistent_header, stack, text, text_input,
-    window_drag_region,
+    PaddingView, PageBuilder, PageController, PageSnap, PageTransition, PageView, PageVisibility,
+    PopResult, PushOptions, Radio, RadioView, RadioWidget, ReorderableListView,
+    RepaintBoundaryView, ResultCallback, Row, RubberBand, SafeAreaView, ScaffoldView, ScrollAxis,
+    ScrollController, ScrollInfo, ScrollMetrics, ScrollPhysics, ScrollSubscription, ScrollView,
+    ScrollbarShow, ScrollbarStyle, ShortcutsView, Simulation, SizedBox, SizedBoxView, Slider,
+    SliderView, SliverBoxView, SliverFillRemainingView, SliverFixedExtentListView,
+    SliverGridDelegate, SliverGridView, SliverListView, SliverPaddingView,
+    SliverPersistentHeaderDelegate, SliverPersistentHeaderView, SourceFeedback, SpringDescription,
+    Stack, StackView, TextInput, TextInputView, TextView, Timing, Tolerance, TransitionSpec,
+    TransitionState, VisibilityCallback, WindowDragRegionView, auto_scroll_zone, button, checkbox,
+    colored_box, column, container, custom_scroll_view, divider, drag_target, draggable, flexible,
+    hero, icon, icon_button, indexed_stack, inflexible, keep_alive, keyed, list_view,
+    overlay_portal, page_view, radio, reorderable_list, repaint_boundary, row, safe_area, scaffold,
+    scroll_view, shortcuts, slider, sliver_box, sliver_fill_remaining, sliver_fixed_extent_list,
+    sliver_fixed_extent_list_keyed, sliver_grid, sliver_grid_keyed, sliver_list, sliver_padding,
+    sliver_persistent_header, stack, text, text_input, window_drag_region,
 };
 // [`ItemAlignment`] (the alignment `ScrollController::scroll_to_item` lands a
 // row at) is not in `frust_widgets`'s own flat re-export list, so the block
@@ -3414,7 +3414,8 @@ mod native_typefaces_reexport {
 #[cfg(test)]
 mod scroll_physics_reexport {
     use crate::{
-        Bouncing, OverscrollEffect, RubberBand, ScrollPhysics, ScrollView, scroll_view, text,
+        Bouncing, OverscrollEffect, PageSnap, RubberBand, ScrollPhysics, ScrollView, scroll_view,
+        text,
     };
 
     // A build-time proof the types name-resolve through the facade.
@@ -3431,6 +3432,9 @@ mod scroll_physics_reexport {
         // platform's default — is directly constructible through the facade
         // too, which is the whole point of it staying reachable.
         let _: RubberBand = RubberBand::new();
+        // PageSnap — Flutter's PageScrollPhysics — resolves and chains too.
+        let _: PageSnap = PageSnap::fraction(0.62).chain(Bouncing::new());
+        let _: PageSnap = PageSnap::extent(100.0);
     }
 }
 
@@ -3572,6 +3576,42 @@ mod custom_scroll_view_reexport {
             .overscroll_effect(OverscrollEffect::None)
             .controller(ScrollController::new());
         let _ = view;
+    }
+}
+
+/// Facade-level check that the pager vocabulary ([`PageView`]/[`page_view`]
+/// and [`PageController`]) resolves through the `frust` facade.
+#[cfg(test)]
+mod page_view_reexport {
+    use crate::{PageController, PageView, ScrollAxis, page_view, text};
+
+    #[test]
+    fn page_view_resolves_through_facade() {
+        let controller = PageController::new().initial_page(1).viewport_fraction(0.8);
+        let view: PageView<()> = page_view((text("a"), text("b")))
+            .axis(ScrollAxis::Vertical)
+            .pad_ends(false)
+            .controller(controller)
+            .on_page_changed(|_: &mut (), _page: usize| {});
+        let _ = view;
+    }
+}
+
+/// Facade-level check that the app-switcher vocabulary ([`card_switcher`],
+/// [`CardSwitcher`], [`CardSwitcherView`], [`PeerCard`], [`peer_card`])
+/// resolves through `frust::motion`.
+#[cfg(test)]
+mod card_switcher_reexport {
+    use crate::motion::{CardSwitcher, CardSwitcherView, PeerCard, card_switcher, peer_card};
+    use crate::text;
+
+    #[test]
+    fn card_switcher_resolves_through_facade() {
+        let peer: PeerCard<()> = peer_card(text("peer"));
+        let view: CardSwitcherView<()> = card_switcher(false, text("live")).peers([peer]);
+        let _ = view;
+        let pascal: CardSwitcherView<()> = CardSwitcher(true, text("live"));
+        let _ = pascal;
     }
 }
 

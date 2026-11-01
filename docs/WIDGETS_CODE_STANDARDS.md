@@ -176,7 +176,10 @@ strings. The canonical example is `crates/frust-drive/templates/app/src/lib.rs.t
   `PatternSwitcher`/`AnimatedOpacity`/`AnimatedScale` resolve `MotionScheme`'s
   duration/easing/spring tokens by default (an explicit `.timing(...)` call always wins);
   every pattern substitutes a short linear crossfade under `reduce_motion` instead of a
-  bespoke variant.
+  bespoke variant. `reduce_motion` overrides an explicit `.timing(...)` too: `AnimatedOpacity` runs a
+  120 ms linear fade and `AnimatedScale` snaps to its target on the first paint with no frame request
+  (a mid-flight flip lands on the next paint); `card_switcher` follows the same shape. A new motion
+  pattern collapses its geometry, fades only alphas, and ignores an explicit timing while reduced.
 - **A perpetual decorative loop calls `PaintCtx::request_frame_paced`
   (`TickClass::CosmeticLoop`), never bare `request_frame`.** `request_frame` stays
   `TickClass::Transition` (unpaced) — correct for a spring or any transition with a

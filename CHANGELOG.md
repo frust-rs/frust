@@ -12,6 +12,30 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `PinchDetectorWidget`, `PinchRecognizer`, `PINCH_SLOP`) and the scale/contact event types
   (`ScaleEvent`, `ScalePhase`, `PointerId`, `PointerSource`), also under `frust::authoring`; closes
   the gap recorded against 0.6.3's `pan_zoom`/`canvas` additions.
+- `frust_glyph::fab`, a Glyph `FloatingActionButton`-shaped action button that fits
+  `scaffold(..).fab(..)`. It has `.mini(..)`, `.tooltip(..)` (the accessible name) and `.disabled(..)`
+  variants and rests on the new `floating()` elevation token, which sits between elevation levels
+  3 and 4; a standalone `card_stage()` token covers the switcher stage.
+- `frust_glyph::page_dots`, a page indicator for `page_view` that takes a page count and the
+  current index.
+- `frust_glyph::card_switcher` with `switcher_bar` and `switcher_chip`, the Glyph skin over the
+  live-card switcher pattern, including an Android back affordance (`SwitcherBack`).
+- `frust::motion::card_switcher` (`CardSwitcherView`, `peer_card` / `PeerCard`), a live-card
+  switcher pattern. The page shrinks to a card by scaling about the stage centre, with hit testing
+  following the transformed card, then takes a rounded clip, a shadow and a scrim, and blocks input
+  beneath it. A peer strip snaps
+  between cards, and an expanding phase returns to the full page. Under
+  `theme.motion.reduce_motion` the transitions collapse.
+- `frust::PageSnap`, a port of Flutter's `PageScrollPhysics` on the `ScrollPhysics` seam
+  (`PageSnap::fraction(..)` / `PageSnap::extent(..)`, chainable with `Bouncing` and the other
+  physics).
+- `frust::page_view` with `PageView` and `PageController`, a paged container.
+
+### Fixed
+
+- `frust::motion::AnimatedScale` and `AnimatedOpacity` now honour `theme.motion.reduce_motion`:
+  `AnimatedOpacity` fades over 120 ms linear and `AnimatedScale` snaps to its target on the first
+  paint, each overriding any explicit timing, matching the navigator and `PatternSwitcher`.
 
 ### Fixed
 

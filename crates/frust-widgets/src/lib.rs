@@ -49,6 +49,7 @@ pub mod motion;
 pub mod nav;
 mod overlay;
 mod padding;
+pub mod page_view;
 mod pan_zoom;
 pub mod physics;
 pub mod pinch;
@@ -129,11 +130,13 @@ pub use overlay::{
     OverlayPortalView, OverlayPortalWidget, OverlaySide, OverlaySlot, overlay_portal, place,
 };
 pub use padding::{EdgeInsets, Padding, PaddingView, PaddingWidget};
+pub use page_view::{PageController, PageView, page_view};
 pub use pan_zoom::{
     DEFAULT_MAX_SCALE, DEFAULT_MIN_SCALE, PanZoomController, PanZoomTransform, PanZoomView,
     PanZoomWidget, pan_zoom,
 };
 pub use physics::effect::OverscrollEffect;
+pub use physics::page_snap::PageSnap;
 pub use physics::parity::{
     AlwaysScrollable, Bouncing, Clamping, DecelerationRate, NeverScrollable,
 };

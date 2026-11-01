@@ -5987,30 +5987,6 @@ port is a materially larger render-path change than the physics seam this stretc
 
 ---
 
-### `scroll-physics-snap-not-shipped` — no snap physics (page/fixed-extent/carousel) ships yet
-
-**Observed**: `crate::physics` ships four platform-parity/utility physics (`Bouncing`, `Clamping`,
-`AlwaysScrollable`, `NeverScrollable`) plus `RubberBand`; nothing implementing Flutter's
-`PageScrollPhysics`/`FixedExtentScrollPhysics` family (a release that ballistically snaps to the
-nearest page/item boundary) exists in this crate. The `ScrollPhysics` trait's chaining contract
-(`.chain(parent)`) is designed to accommodate one — a snap physics overriding only
-`create_ballistic_simulation` and delegating everything else to a chained parent — but no such type
-is written.
-
-**Applies to**: any app wanting a paged/carousel-style scroll surface built on the baseline
-`ScrollView`/`ListView` rather than a hand-rolled widget — concretely, both catalog carousels
-(`frust-shadcn`'s `carousel()` and `frust_material`'s `carousel` family) hand-roll their own snap
-engines instead, precisely because this physics doesn't exist to compose over yet (see
-`scroll-physics-shadcn-carousel-unmigrated` for both).
-
-**Why accepted**: the seam was built parity-first (matching the platforms' own default feel); a snap
-physics is straightforward follow-up work on the same trait, not a design gap.
-
-**Evidence**: `crates/frust-widgets/src/physics/` (module inventory — `parity.rs`/`rubber_band.rs`
-are the only concrete `ScrollPhysics` impls); `mod.rs`'s `ScrollPhysics` trait docs, *Chaining*.
-
----
-
 ### `scroll-physics-shadcn-carousel-unmigrated` — two catalog carousels still hand-roll their own scroll engines, neither on `crate::physics`
 
 **Observed**: `plugins/shadcn/src/components/carousel.rs` (the shadcn/ui Carousel port) implements
@@ -6027,20 +6003,129 @@ independently rather than adopting shadcn's engine or waiting on a shared one.
 **Applies to**: `frust-shadcn`'s `carousel()` and `frust_material`'s `carousel`/`extended_carousel`;
 each one's feel (snap timing, flick threshold, settle curve) is tuned and tested independently of
 every other scroll surface in the framework — including each other — and neither can pick up a
-`ScrollPhysics` change (e.g. a future snap physics, `scroll-physics-snap-not-shipped`)
+`ScrollPhysics` change, including `PageSnap` (the snap physics they could now compose over),
 automatically.
 
-**Why accepted**: there is no page/fixed-extent snap physics to compose over yet (see
-`scroll-physics-snap-not-shipped`), and neither upstream's scroll engine (embla for shadcn, M3E's
+**Why accepted**: `PageSnap` (`crates/frust-widgets/src/physics/page_snap.rs`) now ships the page/
+fixed-extent snap on the `ScrollPhysics` chaining seam, but neither carousel has been moved onto it, and
+neither upstream's scroll engine (embla for shadcn, M3E's
 own weighted-carousel math for material) has a frust-side package to wrap — both ports' own module
 docs record the re-implementation as a deliberate v1 choice. Migrating either onto the physics seam
-is future work once a snap physics exists; the two hand-rolled engines are not required to converge
+is future work on top of `PageSnap`; the two hand-rolled engines are not required to converge
 with each other first.
 
 **Evidence**: `plugins/shadcn/src/components/carousel.rs` module docs (*Drag, and what ends it*,
 *Motion*); `plugins/material/src/carousel/mod.rs` module docs ("Snapping, and the velocity that
 picks the target") and `plugins/material/src/carousel/physics.rs` module docs ("Ramp shape: a
 duration, not a spring") — no `crate::physics`/`ScrollView`/`ListView` dependency in either carousel.
+
+---
+
+### `page-view-eager-children` — `page_view` builds and keeps every page alive; no builder, no `keepPage`
+
+**Observed**: `page_view` takes its pages up front: every page is built, laid out and kept alive
+(paint and semantics skip pages outside the viewport). There is no `PageView.builder`-style lazy
+constructor, no `keepPage`, no `PageView.custom`/`reverse`/`allowImplicitScrolling`, and an unbounded
+main axis lays pages out at zero extent. `on_page_changed` fires once the page has settled, not
+mid-drag as Flutter's does.
+
+**Applies to**: any app using `page_view` for many or heavy pages (a long feed, full-screen live
+screens that each keep their own state — those are a navigator or `IndexedStack` job).
+
+**Why accepted**: v1 targets small swipeable sets (onboarding, carousels); a lazy page sliver is
+additive follow-up work on the same crate-private page sliver.
+
+**Evidence**: `crates/frust-widgets/src/page_view.rs` module docs (*v1 limits*).
+
+---
+
+### `card-switcher-blocking-bounded` — the card switcher blocks input only within its own bounds
+
+**Observed**: while open (or animating), `card_switcher` swallows pointer input to the shrunken live
+child and the stage, but only inside the pattern's own bounds; chrome laid out outside it (an app bar,
+a bottom bar hosted around the pattern) stays interactive. Focus-routed input (Key, IME,
+EditCommand) is suspended while open: the open flip clears the live child's focus
+(`CardSwitcherWidget::suspend_child` saves and clears its focus link) and the close flip restores it,
+and focus-routed events reach only a pod that `holds_live_focus()`. `InputEvent::Shortcut` is a
+broadcast, though, and `CardSwitcherWidget::event` forwards every broadcast to the live child
+regardless of `engaged()`, so a shortcut registered by the live page still fires while the stage is
+open.
+
+**Applies to**: apps that place the pattern below app chrome rather than around the whole shell page.
+
+**Why accepted**: the pattern is a paint-and-input stage over one child, not a window-level modal;
+wrapping the whole shell page gives full blocking.
+
+**Evidence**: `crates/frust-widgets/src/motion/card_switcher.rs` module docs (*Input blocking*
+paragraph), `blocked_pointer`, `suspend_child` (open) / the close-flip restore, and the broadcast
+branch of `CardSwitcherWidget::event` in the same file; `InputEvent::is_broadcast` and
+`is_focus_routed` in `crates/frust-core/src/event/input.rs`; `holds_live_focus` in
+`crates/frust-core/src/widget.rs`.
+
+---
+
+### `card-switcher-peers-no-semantics` — the card switcher's peer cards are absent from the accessibility tree
+
+**Observed**: `CardSwitcherWidget::semantics` emits the live child and, while open, the live-label,
+dots and action-bar slots, but never the peer faces or their labels. Peer selection is therefore
+pointer-only, and the blocked live child's controls stay in the tree while the stage is open.
+
+**Applies to**: screen-reader and switch-access users of `card_switcher`.
+
+**Why accepted**: v1 scope; peer semantics and hiding the blocked child are tracked as follow-up
+act_000001a198a3432egzV55i1D.
+
+**Evidence**: `crates/frust-widgets/src/motion/card_switcher.rs` (`fn semantics`) and the dots
+`Role::Status` node in `plugins/glyph/src/page_dots.rs`.
+
+---
+
+### `card-switcher-tap-only-selection` — peer cards are selected by tap only; the strip has no wheel, vertical or nested-claim behaviour
+
+**Observed**: a fling on the peer strip never selects a card; selection is a tap that the strip did not
+take over, and taps during a centring tween are ignored (every pointer event is swallowed until the
+callback fires). Wheel input does not scroll the strip, the strip registers no nested scroll claim, and
+v1 has no vertical gesture (e.g. swipe-up to dismiss a card).
+
+**Applies to**: any app using `card_switcher` or the Glyph skin; desktop wheel users must tap or drag.
+
+**Why accepted**: tap-only selection keeps the centring tween and the `expanding` handshake
+single-writer; the missing gestures are v1 scope, not a design gap.
+
+**Evidence**: `crates/frust-widgets/src/motion/card_switcher.rs` module docs (tap rules, strip), the strip's
+`forward_wheel`, and the `CardSwitcherView::expanding` / `on_select` docs (the selection handshake).
+
+---
+
+### `card-switcher-android-strip-ends-clamp` — on Android the card strip's ends stop dead
+
+**Observed**: the peer strip runs `PageSnap::extent(stride)` over `default_physics()`, so on Android
+(`Clamping` + `Stretch`) the first and last card stop dead at the ends and no stretch is drawn on the
+strip, while iOS and desktop (`Bouncing` + `Translate`) rubber-band. Matches the platform default
+elsewhere in the framework; found at the Pixel 5 / iPhone 13 mini / desktop gate.
+
+**Applies to**: Android builds of `card_switcher` and the Glyph skin.
+
+**Why accepted**: it is the platform-adaptive default the scroll surfaces already ship; naming a
+physics on the strip would diverge from it.
+
+**Evidence**: `crates/frust-widgets/src/motion/card_switcher.rs` module docs (strip physics);
+`crates/frust-widgets/src/physics/mod.rs` `default_physics` / `default_overscroll_effect`;
+`PageSnap::extent` in `crates/frust-widgets/src/physics/page_snap.rs`.
+
+---
+
+### `glyph-fab-no-keyboard-activation` — the Glyph `fab` takes no keyboard focus and cannot be activated by key
+
+**Observed**: `frust_glyph::fab` is pointer- and semantics-activatable (`Role::Button`) but is not a Tab
+stop and does not answer Enter/Space; press feedback is an instant fill tint.
+
+**Applies to**: keyboard-only desktop users of `fab`.
+
+**Why accepted**: the fab shipped for the touch switcher flow; focus and key activation are a filed
+follow-up (act_000001a197874048qAwbVt2Y).
+
+**Evidence**: `plugins/glyph/src/fab.rs` (no focus or key handling in `FabWidget`).
 
 ---
 
