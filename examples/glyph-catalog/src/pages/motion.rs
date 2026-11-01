@@ -675,22 +675,17 @@ fn peer_face_view(face: usize) -> impl View<CatalogState> {
         )),
         _ => inflexible(Padding(
             EdgeInsets::all(16.0),
-            FlexView::new(
-                Axis::Vertical,
-                vec![
-                    inflexible(skeleton(200.0, 18.0)),
-                    gap(10.0),
-                    inflexible(skeleton(240.0, 18.0)),
-                    gap(10.0),
-                    inflexible(skeleton(160.0, 18.0)),
-                    gap(16.0),
-                    inflexible(tag("last seen 2 h ago")),
-                ],
-            ),
+            column()
+                .child(skeleton(200.0, 18.0))
+                .push(gap(10.0))
+                .child(skeleton(240.0, 18.0))
+                .push(gap(10.0))
+                .child(skeleton(160.0, 18.0))
+                .push(gap(16.0))
+                .child(tag("last seen 2 h ago")),
         )),
     };
-    scaffold(FlexView::new(Axis::Vertical, vec![body]))
-        .app_bar(app_bar::<CatalogState>(HOSTS[face]))
+    scaffold(column().push(body)).app_bar(app_bar::<CatalogState>(HOSTS[face]))
 }
 
 /// The card-switcher demo stage: `frust_glyph::card_switcher` over the fake
@@ -942,6 +937,7 @@ mod tests {
             .collect()
     }
 
+    // erasure: keep mount_nodes takes a fn pointer whose RenderRoot root type is AnyView
     fn stage(state: &CatalogState) -> frust::AnyView<CatalogState> {
         frust::any(switcher_stage(state))
     }
@@ -984,6 +980,7 @@ mod tests {
     fn page_mounts_with_the_launch_button_in_each_state() {
         let _back = crate::tests::back_press_lock();
         let (_owner, mut state) = setup();
+        // erasure: keep mount_nodes takes a fn pointer whose RenderRoot root type is AnyView
         let page_view = |s: &CatalogState| frust::any(page(s));
         let launch = "Open full-screen switcher demo";
         let closed = mount_nodes(&mut state, page_view);

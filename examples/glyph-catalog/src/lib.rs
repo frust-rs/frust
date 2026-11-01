@@ -38,10 +38,10 @@ use frust::authoring::{
 
 use frust::motion::switcher::pattern_switcher;
 use frust::{
-    AnyView, BackFallback, Brightness, Color, Component, Get, GetUntracked, MotionScheme,
-    NavigatorController, RwSignal, ScrollInfo, Set, Theme, TransitionSpec, View, any,
-    back_fallback, button, column, flexible, icon, icons, inflexible, navigator, safe_area,
-    scroll_view, set_app_theme, stack,
+    BackFallback, Brightness, Color, Component, Get, GetUntracked, MotionScheme,
+    NavigatorController, RwSignal, ScrollInfo, Set, Theme, TransitionSpec, View, back_fallback,
+    button, column, either, flexible, icon, icons, inflexible, navigator, safe_area, scroll_view,
+    set_app_theme, stack,
 };
 use frust_glyph::motion::{GlyphSlide, SlideDirection};
 
@@ -491,15 +491,12 @@ fn switcher_fullscreen_page(state: &CatalogState) -> impl View<CatalogState> + u
 /// [`CatalogState::switcher_fullscreen`] is set (wrapped in its
 /// [`switcher_exit_back`](CatalogState::switcher_exit_back) rule), the tabbed
 /// [`home_page`] otherwise.
-fn shell_page(state: &CatalogState) -> AnyView<CatalogState> {
-    if state.switcher_fullscreen.get() {
-        any(back_fallback(
-            &state.switcher_exit_back,
-            switcher_fullscreen_page(state),
-        ))
-    } else {
-        any(home_page(state))
-    }
+fn shell_page(state: &CatalogState) -> impl View<CatalogState> + use<> {
+    either(
+        state.switcher_fullscreen.get(),
+        || back_fallback(&state.switcher_exit_back, switcher_fullscreen_page(state)),
+        || home_page(state),
+    )
 }
 
 /// The root [`Component`]. This example's `frust::app!` call below installs
@@ -553,6 +550,7 @@ frust::app!(
 mod tests {
     use super::*;
     use frust::accesskit::Role;
+    use frust::{AnyView, any};
     use frust_core::RenderRoot;
     use frust_reactive::ReactiveRuntime;
     use frust_text::TextContext;
@@ -594,7 +592,8 @@ mod tests {
         /// Rebuild and lay out at `(w, h)` for two frames (the second sees the
         /// width the first layout published); the semantics as (role, label).
         fn frames(&mut self, state: &mut CatalogState, w: f64, h: f64) -> Vec<(Role, String)> {
-            let mut logic = |s: &mut CatalogState| shell_page(s);
+            // erasure: keep the RenderRoot root type is AnyView, shared by every shell test
+            let mut logic = |s: &mut CatalogState| any(shell_page(s));
             for _ in 0..2 {
                 self.root.rebuild(&mut logic, state);
                 let tcx_any: &mut dyn std::any::Any = &mut self.tcx;
