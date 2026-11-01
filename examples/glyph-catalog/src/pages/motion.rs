@@ -532,13 +532,9 @@ fn begin_select(state: &CatalogState, peer: usize) -> Selection {
 }
 
 /// Withdraw a pending selection and close the stage (the scrim, the close
-/// chip, Exit demo and back all end here), so a delayed step 4 scheduled
-/// earlier finds nothing pending and does not swap the live face. Bumps the
-/// generation so an earlier selection stays stale across a reopen.
+/// chip, Exit demo and back all end here); see [`CatalogState::close_switcher`].
 fn close_stage(state: &CatalogState) {
-    state.switcher_generation.update(|g| *g += 1);
-    state.switcher_expanding.set(None);
-    state.switcher_open.set(false);
+    state.close_switcher();
 }
 
 /// Handshake step 4: the chosen face becomes the live page (strip order is

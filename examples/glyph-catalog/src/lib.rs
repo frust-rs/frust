@@ -222,7 +222,32 @@ pub struct CatalogState {
     pub switcher_exit_back: BackFallback,
 }
 
+/// Withdraw a pending selection and close the stage: bump the generation (so
+/// an earlier selection stays stale across a reopen), clear the expansion
+/// request, clear open. The one place this three-step sequence lives; reach
+/// it through [`CatalogState::close_switcher`].
+fn close_switcher(
+    open: RwSignal<bool>,
+    expanding: RwSignal<Option<usize>>,
+    generation: RwSignal<u64>,
+) {
+    generation.set(generation.get_untracked() + 1);
+    expanding.set(None);
+    open.set(false);
+}
+
 impl CatalogState {
+    /// Withdraw a pending selection and close the card-switcher stage, so a
+    /// delayed step 4 scheduled earlier finds nothing pending. The scrim, the
+    /// close chip, Exit demo and back all end here.
+    pub(crate) fn close_switcher(&self) {
+        close_switcher(
+            self.switcher_open,
+            self.switcher_expanding,
+            self.switcher_generation,
+        );
+    }
+
     /// Construct the initial catalog state: section 0, dark (the Glyph
     /// dark-first default), motion on, an empty toast queue, and a fresh
     /// navigator controller.
@@ -233,11 +258,7 @@ impl CatalogState {
         let switcher_fullscreen = RwSignal::new(false);
         // Back withdraws a pending selection too, so the delayed swap
         // does not switch to a server the user backed out of.
-        let close = move || {
-            switcher_generation.set(switcher_generation.get_untracked() + 1);
-            switcher_expanding.set(None);
-            switcher_open.set(false);
-        };
+        let close = move || close_switcher(switcher_open, switcher_expanding, switcher_generation);
         CatalogState {
             brightness: RwSignal::new(Brightness::Dark),
             reduce_motion: RwSignal::new(false),
@@ -547,6 +568,14 @@ mod tests {
         BACK_PRESS_LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Drop any live can-pop provider and the polled flag, so a back test
+    /// starts with nothing claiming. Call under [`back_press_lock`] and a
+    /// runtime.
+    fn back_reset() {
+        frust_reactive::clear_can_pop_provider();
+        frust_reactive::set_handles_back(false);
+    }
+
     /// The shell kept mounted across frames, so a back press reaches the
     /// fallbacks the previous frames wired.
     struct Shell {
@@ -632,6 +661,7 @@ mod tests {
     fn back_in_the_demo_with_the_stage_closed_returns_to_the_tabbed_shell() {
         let _back = back_press_lock();
         let (_owner, mut state) = setup();
+        back_reset();
         let mut shell = Shell::new();
         state.switcher_fullscreen.set(true);
         let demo = shell.frames(&mut state, 390.0, 844.0);
@@ -655,6 +685,7 @@ mod tests {
     fn back_in_the_demo_with_the_stage_open_closes_it_and_stays() {
         let _back = back_press_lock();
         let (_owner, mut state) = setup();
+        back_reset();
         let mut shell = Shell::new();
         state.switcher_fullscreen.set(true);
         state.switcher_open.set(true);
