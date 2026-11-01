@@ -852,6 +852,61 @@ mod tests {
             .expect("page 1 button");
         root.perform_accessibility_action(&mut state, *id, Action::Click);
         assert_eq!(state.0, vec![0]);
+
+        // Slots 0..=3 start inside the 40 px row (slot 3 is clipped); slots
+        // 4..=6 collapse to zero width and are omitted, labels keeping the
+        // original index.
+        let mut labels: Vec<_> = buttons
+            .iter()
+            .filter_map(|(_, n)| n.label().map(str::to_owned))
+            .collect();
+        labels.sort();
+        assert!(buttons.len() < 7, "collapsed slots are omitted");
+        assert_eq!(labels, ["page 1", "page 2", "page 3", "page 4"]);
+
+        // The highest surviving button delivers its own index.
+        let (id, last) = buttons
+            .iter()
+            .find(|(_, n)| n.label() == Some("page 4"))
+            .expect("page 4 button");
+        let r = last.bounds().expect("bounds");
+        assert!(r.x1 > r.x0, "clipped slot keeps a non-empty rect");
+        root.perform_accessibility_action(&mut state, *id, Action::Click);
+        assert_eq!(state.0, vec![0, 3]);
+    }
+
+    #[test]
+    fn a_row_that_clips_the_real_last_slot_keeps_its_button_and_index() {
+        let mut root: frust_core::RenderRoot<Taps, PageDots<Taps>> = frust_core::RenderRoot::new();
+        let mut state = Taps::default();
+        let mut logic = |_s: &mut Taps| page_dots(7, 0).on_tap(|s: &mut Taps, i| s.0.push(i));
+        root.rebuild(&mut logic, &mut state);
+        let mut tcx = TextContext::new();
+        // Slot 6 spans x0 = 80 .. 90 unclamped; an 84 px row clips it to 80..84.
+        root.layout_with_text(Size::new(84.0, 200.0), &mut tcx as &mut dyn Any);
+        let update = root.semantics();
+        let row = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::Status)
+            .and_then(|(_, n)| n.bounds())
+            .expect("row bounds");
+        let buttons: Vec<_> = update
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.role() == Role::Button)
+            .collect();
+        assert_eq!(buttons.len(), 7, "every slot still starts inside the row");
+        let (id, last) = buttons
+            .iter()
+            .find(|(_, n)| n.label() == Some("page 7"))
+            .expect("page 7 button");
+        let r = last.bounds().expect("bounds");
+        assert!(r.x1 > r.x0, "partly inside: {r:?}");
+        assert!(row.x0 <= r.x0 && r.x1 <= row.x1, "{r:?} within {row:?}");
+        assert!(r.x1 - r.x0 < 10.0, "clipped narrower than a full pitch");
+        root.perform_accessibility_action(&mut state, *id, Action::Click);
+        assert_eq!(state.0, vec![6]);
     }
 
     #[test]

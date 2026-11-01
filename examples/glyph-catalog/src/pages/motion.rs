@@ -775,7 +775,7 @@ fn demo_card_switcher() -> FlexChild<CatalogState> {
         inflexible(button(
             "Open full-screen switcher demo",
             |s: &mut CatalogState| {
-                s.switcher_open.set(false);
+                close_stage(s);
                 s.switcher_fullscreen.set(true);
             },
         )),
