@@ -101,12 +101,12 @@ const STRIP_BORDER_H: f64 = 1.0;
 
 /// The indicator slide duration — the exact `MotionScheme::glyph()`
 /// `durations.base` (220ms). See the module docs for why this is hardcoded
-/// rather than theme-resolved.
-const INDICATOR_DURATION: Duration = Duration::from_millis(220);
+/// rather than theme-resolved. Shared by [`crate::page_dots`].
+pub(crate) const INDICATOR_DURATION: Duration = Duration::from_millis(220);
 /// The indicator slide easing — the exact `MotionScheme::glyph()`
 /// `easing.spatial` (`cubic-bezier(0.34, 1.35, 0.64, 1.0)`, an overshooting
-/// "spatial" curve). See the module docs.
-const INDICATOR_CURVE: Curve = Curve::Cubic(0.34, 1.35, 0.64, 1.0);
+/// "spatial" curve). See the module docs. Shared by [`crate::page_dots`].
+pub(crate) const INDICATOR_CURVE: Curve = Curve::Cubic(0.34, 1.35, 0.64, 1.0);
 
 // ---- Unthemed fallback constants (Glyph **dark** values) -------------------
 
