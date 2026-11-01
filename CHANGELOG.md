@@ -10,8 +10,8 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 - frust facade re-exports the pinch vocabulary (`pinch_detector`, `PinchDetectorView`,
   `PinchDetectorWidget`, `PinchRecognizer`, `PINCH_SLOP`) and the scale/contact event types
-  (`ScaleEvent`, `ScalePhase`, `PointerId`), also under `frust::authoring`; closes the gap recorded
-  against 0.6.3's `pan_zoom`/`canvas` additions.
+  (`ScaleEvent`, `ScalePhase`, `PointerId`, `PointerSource`), also under `frust::authoring`; closes
+  the gap recorded against 0.6.3's `pan_zoom`/`canvas` additions.
 
 ## 0.6.4 — 2026-10-28
 
