@@ -155,7 +155,7 @@ pub struct CardSwitcherView<State: 'static> {
     action_bar: Option<AnyView<State>>,
     expanding: Option<usize>,
     on_select: Option<TypedArgCallback<State, usize>>,
-    on_centre_changed: Option<TypedArgCallback<State, usize>>,
+    on_center_changed: Option<TypedArgCallback<State, usize>>,
     on_close: Option<CloseCallback<State>>,
     options: StageOptions,
 }
@@ -178,7 +178,7 @@ pub fn card_switcher<State: 'static>(
         action_bar: None,
         expanding: None,
         on_select: None,
-        on_centre_changed: None,
+        on_center_changed: None,
         on_close: None,
         options: StageOptions {
             card_scale: CARD_SCALE,
@@ -255,7 +255,7 @@ impl<State: 'static> CardSwitcherView<State> {
 
     /// A page indicator built from the strip: `build(count, current)` gets
     /// `count = peers + 1` and the current strip index (see
-    /// [`on_centre_changed`](Self::on_centre_changed) for its definition), and
+    /// [`on_center_changed`](Self::on_center_changed) for its definition), and
     /// is called again only when either changes, so the indicator follows a
     /// drag, a tap and an expansion. The stage positions and fades it like
     /// [`dots`](Self::dots), which `dots_for` overrides when both are set.
@@ -280,11 +280,11 @@ impl<State: 'static> CardSwitcherView<State> {
     /// index if several changed between two events. It does not fire for the
     /// initial open, where the live card is centred by construction, nor for
     /// the stage closing.
-    pub fn on_centre_changed(
+    pub fn on_center_changed(
         mut self,
-        on_centre_changed: impl Fn(&mut State, usize) + 'static,
+        on_center_changed: impl Fn(&mut State, usize) + 'static,
     ) -> Self {
-        self.on_centre_changed = Some(Rc::new(on_centre_changed));
+        self.on_center_changed = Some(Rc::new(on_center_changed));
         self
     }
 
@@ -296,11 +296,10 @@ impl<State: 'static> CardSwitcherView<State> {
     /// 3. the grow runs and holds;
     /// 4. the app rebuilds with `open = false`, the chosen page as the live
     ///    child, `.live_index` at that card's strip position (keep the strip
-    ///    order) and `.expanding(None)`.
-    ///
-    /// Step 4 may come any time after step 2: a mid-ramp close finishes the
-    /// grow from the current scale, and the new live child paints plainly where
-    /// the face was. `.expanding(None)` while still open reverses the ramp.
+    ///    order) and `.expanding(None)` — any time after step 2: a mid-ramp
+    ///    close finishes the grow from the current scale, and the new live child
+    ///    paints plainly where the face was. `.expanding(None)` while still open
+    ///    reverses the ramp.
     pub fn expanding(mut self, peer: Option<usize>) -> Self {
         self.expanding = peer;
         self
@@ -646,9 +645,9 @@ struct Strip {
     gap: f64,
     peer_alpha: f64,
     on_select: Option<ErasedArgCallback<usize>>,
-    on_centre_changed: Option<ErasedArgCallback<usize>>,
+    on_center_changed: Option<ErasedArgCallback<usize>>,
     /// The centred card's strip position as last observed (see
-    /// [`CardSwitcherView::on_centre_changed`]).
+    /// [`CardSwitcherView::on_center_changed`]).
     current: usize,
     /// A centre change observed during paint, owed to the next event.
     centre_owed: Option<usize>,
@@ -686,7 +685,7 @@ impl Strip {
             gap: view.options.gap,
             peer_alpha: view.options.peer_alpha,
             on_select: view.on_select.as_ref().map(erase_callback_arg),
-            on_centre_changed: view.on_centre_changed.as_ref().map(erase_callback_arg),
+            on_center_changed: view.on_center_changed.as_ref().map(erase_callback_arg),
             current: view.live_index.min(view.peers.len()),
             centre_owed: None,
             core: ScrollSurfaceCore::with_axis(ScrollAxis::Horizontal),
@@ -733,7 +732,7 @@ impl Strip {
         self.gap = next.options.gap;
         self.peer_alpha = next.options.peer_alpha;
         self.on_select = next.on_select.as_ref().map(erase_callback_arg);
-        self.on_centre_changed = next.on_centre_changed.as_ref().map(erase_callback_arg);
+        self.on_center_changed = next.on_center_changed.as_ref().map(erase_callback_arg);
         flags
     }
 
@@ -832,8 +831,9 @@ impl Strip {
     /// offset to the same fractional page, installs the snap at that stride and
     /// stops post-release motion (spring, fling); only a pending tap tween or
     /// an unopened expansion's centring restarts, and the next gesture end
-    /// re-settles. Then apply an owed recentre and, at rest, keep the position
-    /// in range. Runs at every layout and paint.
+    /// re-settles. Then apply an owed recentre and, at rest with no press live,
+    /// keep the position in range: a regrab mid-bounce continues from the
+    /// displacement on screen, like the viewport. Runs at every layout and paint.
     fn prepare(&mut self, stage: Size, card_scale: f64) {
         self.stage = stage;
         self.card_scale = card_scale;
@@ -876,7 +876,7 @@ impl Strip {
             self.offset = self.live() as f64 * stride;
             self.recentre = false;
         }
-        if !self.in_motion() {
+        if !self.in_motion() && !self.core.down_active {
             self.offset = self.offset.clamp(0.0, self.max_scroll_extent());
         }
     }
@@ -1269,7 +1269,7 @@ pub struct CardSwitcherWidget {
     /// The child held a focus link when the stage opened.
     saved_focus: bool,
     /// Whether a centre change needs a Housekeeping pass: an
-    /// `on_centre_changed` callback or a `dots_for` slot is set.
+    /// `on_center_changed` callback or a `dots_for` slot is set.
     watches_centre: bool,
 }
 
@@ -1300,7 +1300,7 @@ impl<State: 'static> View<State> for CardSwitcherView<State> {
             close_armed: false,
             strip_gesture: false,
             saved_focus: false,
-            watches_centre: self.on_centre_changed.is_some() || self.dots_for.is_some(),
+            watches_centre: self.on_center_changed.is_some() || self.dots_for.is_some(),
         }
     }
 
@@ -1349,7 +1349,7 @@ impl<State: 'static> View<State> for CardSwitcherView<State> {
         if !element.ramp.is_open() {
             element.strip.current = element.strip.live();
         }
-        element.watches_centre = self.on_centre_changed.is_some() || self.dots_for.is_some();
+        element.watches_centre = self.on_center_changed.is_some() || self.dots_for.is_some();
         flags |= self.rebuild_dots(prev, element, ctx);
         flags
     }
@@ -1569,7 +1569,7 @@ impl CardSwitcherWidget {
     }
 
     /// Compare the centred card with the last observed one; a change owes the
-    /// next event an `on_centre_changed` call and a rebuild of the `dots_for`
+    /// next event an `on_center_changed` call and a rebuild of the `dots_for`
     /// slot, and costs nothing when the index holds. Closed, it follows the
     /// live card silently.
     fn observe_centre(&mut self, ctx: &mut PaintCtx, open: bool) {
@@ -1602,8 +1602,8 @@ impl CardSwitcherWidget {
     /// Deliver a callback a paint owed (a centring tween that landed).
     fn deliver_owed(&mut self, ctx: &mut EventCtx) {
         if let Some(card) = self.strip.centre_owed.take() {
-            if let Some(on_centre) = &mut self.strip.on_centre_changed {
-                on_centre(ctx, card);
+            if let Some(on_center) = &mut self.strip.on_center_changed {
+                on_center(ctx, card);
             }
             ctx.request_redraw();
         }
@@ -2742,6 +2742,34 @@ mod tests {
     }
 
     #[test]
+    fn a_regrab_mid_bounce_keeps_the_overscroll_on_screen() {
+        let log = Log::default();
+        let mut rig = Rig::new(&strip_view(true, 2, 0, &log), PHONE);
+        rig.drag(201.0, 120.0, 4, 16.0);
+        rig.hold_and_release();
+        rig.frame(16.0);
+        assert!(rig.w.strip.in_motion(), "the spring-back runs");
+        let x = rig.finger();
+        rig.pointer(PointerPhase::Down, x);
+        let caught = rig.offset();
+        assert!(caught < 0.0, "caught past the first card: {caught}");
+        assert_eq!(
+            rig.w.strip.core.edge_pull, caught,
+            "the pull is the overscroll"
+        );
+
+        // The paint the press requested must not clamp the held position.
+        rig.frame(16.0);
+        assert_eq!(rig.offset(), caught, "the regrab holds the displacement");
+        assert_eq!(rig.w.strip.core.edge_pull, rig.w.strip.displacement());
+
+        rig.pointer(PointerPhase::Up, x);
+        rig.settle();
+        assert!(rig.offset().abs() < 1e-6, "sprang back to the first card");
+        assert!(log.borrow().is_empty(), "the catch is not a tap");
+    }
+
+    #[test]
     fn a_drag_past_either_end_rubber_bands_and_springs_back() {
         for (live, travel) in [(0, 120.0), (2, -120.0)] {
             let log = Log::default();
@@ -2931,12 +2959,12 @@ mod tests {
         assert!(near(scale, 0.81), "scale {scale}");
     }
 
-    // --- Centre tracking: `dots_for` and `on_centre_changed` ---
+    // --- Centre tracking: `dots_for` and `on_center_changed` ---
 
     type Calls = Rc<RefCell<Vec<(usize, usize)>>>;
 
     /// A 3-peer stage with live card 1 whose `dots_for` logs `(count, current)`
-    /// and whose `on_centre_changed` logs the strip index.
+    /// and whose `on_center_changed` logs the strip index.
     fn centre_view(
         peers: usize,
         expanding: Option<usize>,
@@ -2950,7 +2978,7 @@ mod tests {
                 calls.borrow_mut().push((count, current));
                 leaf(40.0, 10.0)
             })
-            .on_centre_changed(move |_: &mut (), card: usize| centres.borrow_mut().push(Some(card)))
+            .on_center_changed(move |_: &mut (), card: usize| centres.borrow_mut().push(Some(card)))
     }
 
     /// One app pass: the owed Housekeeping event, then the build closure's
@@ -3075,7 +3103,7 @@ mod tests {
     }
 
     #[test]
-    fn a_one_card_fling_fires_on_centre_changed_once() {
+    fn a_one_card_fling_fires_on_center_changed_once() {
         let (calls, centres) = (Calls::default(), Log::default());
         let view = centre_view(3, None, &calls, &centres);
         let mut rig = Rig::new(&view, PHONE);
@@ -3117,7 +3145,7 @@ mod tests {
                 calls.borrow_mut().push((count, current));
                 leaf(40.0, 10.0)
             })
-            .on_centre_changed(move |_: &mut (), card: usize| centres.borrow_mut().push(Some(card)))
+            .on_center_changed(move |_: &mut (), card: usize| centres.borrow_mut().push(Some(card)))
     }
 
     #[test]
