@@ -6,6 +6,13 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ## Unreleased
 
+### Added
+
+- frust facade re-exports the pinch vocabulary (`pinch_detector`, `PinchDetectorView`,
+  `PinchDetectorWidget`, `PinchRecognizer`, `PINCH_SLOP`) and the scale/contact event types
+  (`ScaleEvent`, `ScalePhase`, `PointerId`), also under `frust::authoring`; closes the gap recorded
+  against 0.6.3's `pan_zoom`/`canvas` additions.
+
 ## 0.6.4 — 2026-10-28
 
 A patch release (the 0.6.x line continues) whose source-affecting changes are three: Android `minSdk`
