@@ -37,6 +37,13 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `AnimatedOpacity` fades over 120 ms linear and `AnimatedScale` snaps to its target on the first
   paint, each overriding any explicit timing, matching the navigator and `PatternSwitcher`.
 
+### Fixed
+
+- `frust-camera`'s barcode decoder no longer drops a QR code whose payload is not UTF-8 (a
+  byte-mode code carrying binary data or Latin-1 text): it is reported with the exact bytes in
+  `Barcode::raw_bytes` and a lossy `raw_value`. `DetectionPolicy::NoDuplicates` tells such payloads
+  apart by their bytes.
+
 ## 0.6.4 — 2026-10-28
 
 A patch release (the 0.6.x line continues) whose source-affecting changes are three: Android `minSdk`
