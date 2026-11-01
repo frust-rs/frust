@@ -14,24 +14,10 @@
 //! live card's dot is `live_index`. The dots follow drags, taps and expansions,
 //! one `Housekeeping` pass behind the strip (the pattern's contract).
 //!
-//! **Back.** [`GlyphCardSwitcher::back`] wraps the stage in
-//! `frust::back_fallback` over a [`SwitcherBack`] the app creates once. The
-//! fallback claims a back press only while the mounted stage is open, and runs
-//! the app's stateless `on_back`. The app points `on_back` at the same close
-//! action as `on_close` (typically an `RwSignal` set): `BackFallback`'s
-//! callbacks see no `&mut State`, so `on_close` cannot be the back action
-//! itself.
-//!
-//! The claim flag is written by the skin's view lifecycle, not at view
-//! construction: `build` and `rebuild` set it from the view's `open`, and
-//! `teardown` (or a rebuild without `.back`) clears it. The stage also clears
-//! it the moment its `on_close` fires, before the app has rebuilt, so
-//! `on_close` must close the stage; a declined close leaves it open and
-//! unclaimed until the next rebuild. The residual window: a close that does
-//! not go through `on_close` (the app flipping `open` itself) is seen only at
-//! the app's next build, and a press landing before that is still claimed
-//! (running `on_back`, which is idempotent for a close). Likewise a press
-//! between `open` becoming true and the app's rebuild is not claimed.
+//! **Back.** [`GlyphCardSwitcher::back`] takes part in back arbitration while
+//! the mounted stage is open, through a [`SwitcherBack`] the app creates once;
+//! its claim rules are on that method. The Glyph component set is indexed in
+//! `docs/PLUGINS_ARCHITECTURE.md`.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -147,6 +133,8 @@ pub fn card_switcher<State: 'static>(
     live: impl View<State>,
 ) -> GlyphCardSwitcher<State> {
     let shadow = card_stage().shadow_dark;
+    // The Glyph token stores the blur as CSS px; the pattern takes the
+    // Gaussian std-dev, half of it.
     GlyphCardSwitcher {
         open,
         stage: stage(open, live)
@@ -156,7 +144,7 @@ pub fn card_switcher<State: 'static>(
             .shadow(
                 Color::BLACK.multiply_alpha(shadow.color_alpha),
                 shadow.y_offset,
-                shadow.blur_std_dev,
+                shadow.blur_std_dev / 2.0,
             )
             .dots_for(|count, current| page_dots::<State>(count, current)),
         back: None,
@@ -229,8 +217,16 @@ impl<State: 'static> GlyphCardSwitcher<State> {
         self
     }
 
-    /// Take part in back arbitration through `back` (see the module docs).
-    /// Call it from `Component::build` on every build, like `back_fallback`.
+    /// Take part in back arbitration through `back`: its `frust::back_fallback`
+    /// claims a press only while the mounted stage is open and runs the app's
+    /// stateless `on_back`, which should do what `on_close` does (typically an
+    /// `RwSignal` set; `BackFallback` callbacks see no `&mut State`). Call it
+    /// from `Component::build` on every build. `build`/`rebuild` publish the
+    /// view's `open` as the claim, `teardown` (or a rebuild without `.back`)
+    /// clears it, and a fired `on_close` clears it before the app rebuilds. A
+    /// close that bypasses `on_close` is seen at the next build: a press before
+    /// that still runs `on_back` (idempotent for a close), and a press between
+    /// `open` turning true and that build is not claimed.
     pub fn back(mut self, back: &SwitcherBack) -> Self {
         self.claim = Some(Rc::clone(&back.open));
         *self.close_slot.borrow_mut() = Some(Rc::clone(&back.open));
@@ -896,7 +892,9 @@ mod tests {
             near_rect(rect, card + Vec2::new(0.0, spec.y_offset)),
             "{rect:?}"
         );
-        assert_eq!((radius, std_dev), (CARD_RADIUS, spec.blur_std_dev));
+        // The 48 px CSS blur token is a std-dev of 24 in the pattern's unit.
+        assert_eq!((radius, std_dev), (CARD_RADIUS, 24.0));
+        assert_eq!(std_dev, spec.blur_std_dev / 2.0);
         let clipped = ops
             .iter()
             .any(|op| matches!(op, Op::Clip(rect, r) if near_rect(*rect, card) && *r == 24.0));
