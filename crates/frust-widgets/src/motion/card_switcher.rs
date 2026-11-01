@@ -122,7 +122,7 @@
 //! No direct analog; `OpenContainer` (the `animations` package) and `Hero` are
 //! the nearest.
 
-use std::cell::RefCell;
+use std::any::Any;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -251,9 +251,6 @@ pub struct CardSwitcherView<State: 'static> {
     live_label: Option<AnyView<State>>,
     dots: Option<AnyView<State>>,
     dots_for: Option<DotsBuilder<State>>,
-    /// What the last build or rebuild of `dots_for` produced, kept as the next
-    /// rebuild's `prev`: a builder yields no view until called.
-    dots_built: RefCell<Option<AnyView<State>>>,
     action_bar: Option<AnyView<State>>,
     expanding: Option<usize>,
     on_select: Option<TypedArgCallback<State, usize>>,
@@ -277,7 +274,6 @@ pub fn card_switcher<State: 'static>(
         live_label: None,
         dots: None,
         dots_for: None,
-        dots_built: RefCell::new(None),
         action_bar: None,
         expanding: None,
         on_select: None,
@@ -1316,6 +1312,24 @@ fn place_label(label: &mut ChildPod, card: Rect, gap: f64) {
     label.set_origin(Point::new(card.x0, card.y0 - gap - label.size().height));
 }
 
+/// A `dots_for` slot's last build: a builder yields no view until called, so
+/// the widget keeps the one it built to rebuild and tear the pod down from.
+struct BuiltDots {
+    /// The `(count, current)` it was built for.
+    key: (usize, usize),
+    /// The view, an `AnyView<State>` erased to [`Any`] because the widget is
+    /// not generic over the state.
+    view: Box<dyn Any>,
+}
+
+impl BuiltDots {
+    fn view<State: 'static>(&self) -> &AnyView<State> {
+        self.view
+            .downcast_ref::<AnyView<State>>()
+            .expect("the dots view is built for the stage's own state")
+    }
+}
+
 // --- Widget ----------------------------------------------------------------------
 
 /// The retained widget for a [`CardSwitcherView`]. See the [module docs](self).
@@ -1323,8 +1337,9 @@ pub struct CardSwitcherWidget {
     child: ChildPod,
     live_label: Option<ChildPod>,
     dots: Option<ChildPod>,
-    /// The `(count, current)` the `dots_for` slot was last built for.
-    dots_key: Option<(usize, usize)>,
+    /// What the `dots` pod was last built from when `dots_for` owns it; `None`
+    /// while the slot is static or empty.
+    dots_built: Option<BuiltDots>,
     action_bar: Option<ChildPod>,
     strip: Strip,
     on_close: Option<ErasedCallback>,
@@ -1348,12 +1363,12 @@ impl<State: 'static> View<State> for CardSwitcherView<State> {
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> CardSwitcherWidget {
         let key = (self.peers.len() + 1, self.live_index.min(self.peers.len()));
-        let (dots, dots_key) = match &self.dots_for {
+        let (dots, dots_built) = match &self.dots_for {
             Some(build) => {
                 let view = build(key.0, key.1);
                 let pod = build_child(&view, ctx);
-                *self.dots_built.borrow_mut() = Some(view);
-                (Some(pod), Some(key))
+                let view: Box<dyn Any> = Box::new(view);
+                (Some(pod), Some(BuiltDots { key, view }))
             }
             None => (self.dots.as_ref().map(|v| build_child(v, ctx)), None),
         };
@@ -1361,7 +1376,7 @@ impl<State: 'static> View<State> for CardSwitcherView<State> {
             child: build_child(&self.live, ctx),
             live_label: self.live_label.as_ref().map(|v| build_child(v, ctx)),
             dots,
-            dots_key,
+            dots_built,
             action_bar: self.action_bar.as_ref().map(|v| build_child(v, ctx)),
             strip: Strip::build(self, ctx),
             on_close: self.on_close.as_ref().map(erase_callback),
@@ -1380,7 +1395,9 @@ impl<State: 'static> View<State> for CardSwitcherView<State> {
         element: &mut CardSwitcherWidget,
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
-        let mut flags = ChangeFlags::NONE;
+        // The strip takes the new peers and live index first, so an open flip
+        // centres it on the new live card.
+        let mut flags = element.strip.rebuild(prev, self, ctx);
         if element.ramp.is_open() != self.open {
             element.strip_gesture = false;
             if self.open {
@@ -1414,7 +1431,6 @@ impl<State: 'static> View<State> for CardSwitcherView<State> {
             &mut element.action_bar,
             ctx,
         );
-        flags |= element.strip.rebuild(prev, self, ctx);
         if !element.ramp.is_open() {
             element.strip.current = element.strip.live();
         }
@@ -1426,12 +1442,10 @@ impl<State: 'static> View<State> for CardSwitcherView<State> {
     fn teardown(&self, element: &mut CardSwitcherWidget, ctx: &mut BuildCtx<'_>) {
         teardown_child(&self.live, &mut element.child, ctx);
         teardown_slot(&self.live_label, &mut element.live_label, ctx);
-        match &self.dots_for {
-            Some(_) => {
-                if let (Some(view), Some(pod)) =
-                    (self.dots_built.borrow_mut().take(), &mut element.dots)
-                {
-                    teardown_child(&view, pod, ctx);
+        match element.dots_built.take() {
+            Some(built) => {
+                if let Some(pod) = &mut element.dots {
+                    teardown_child(built.view::<State>(), pod, ctx);
                 }
             }
             None => teardown_slot(&self.dots, &mut element.dots, ctx),
@@ -1442,25 +1456,25 @@ impl<State: 'static> View<State> for CardSwitcherView<State> {
 }
 
 impl<State: 'static> CardSwitcherView<State> {
-    /// Reconcile the dots slot: the builder slot when `dots_for` is set (a
-    /// rebuild only when `(count, current)` changed), else the static one.
+    /// Reconcile the dots slot against the widget's own record of what it
+    /// built: the builder slot when `dots_for` is set (a rebuild only when
+    /// `(count, current)` changed), else the static one. A replaced pod is torn
+    /// down once, through the view it was built from.
     fn rebuild_dots(
         &self,
         prev: &Self,
         element: &mut CardSwitcherWidget,
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
-        let prev_built = prev
-            .dots_for
-            .as_ref()
-            .and_then(|_| prev.dots_built.borrow_mut().take());
+        let built = element.dots_built.take();
         let Some(build) = &self.dots_for else {
-            let (Some(old), Some(mut pod)) = (prev_built, element.dots.take()) else {
+            let Some(built) = built else {
                 return rebuild_slot(&prev.dots, &self.dots, &mut element.dots, ctx);
             };
             // The builder slot gave way to a static one (or to none).
-            teardown_child(&old, &mut pod, ctx);
-            element.dots_key = None;
+            if let Some(mut pod) = element.dots.take() {
+                teardown_child(built.view::<State>(), &mut pod, ctx);
+            }
             return ChangeFlags::LAYOUT
                 | ChangeFlags::PAINT
                 | rebuild_slot(&None, &self.dots, &mut element.dots, ctx);
@@ -1469,22 +1483,24 @@ impl<State: 'static> CardSwitcherView<State> {
             element.strip.card_count(),
             element.strip.current.min(element.strip.peers.len()),
         );
-        if prev_built.is_some() && element.dots_key == Some(key) {
-            *self.dots_built.borrow_mut() = prev_built;
+        if built.as_ref().is_some_and(|built| built.key == key) {
+            element.dots_built = built;
             return ChangeFlags::NONE;
         }
         let view = build(key.0, key.1);
-        let flags = match (&prev_built, element.dots.as_mut()) {
-            (Some(old), Some(pod)) => rebuild_child(old, &view, pod, ctx),
+        let flags = match (&built, element.dots.as_mut()) {
+            (Some(built), Some(pod)) => rebuild_child(built.view::<State>(), &view, pod, ctx),
             _ => {
                 // A static slot (or nothing) gave way to the builder.
-                teardown_slot(&prev.dots, &mut element.dots, ctx);
+                if let (Some(old), Some(mut pod)) = (&prev.dots, element.dots.take()) {
+                    teardown_child(old, &mut pod, ctx);
+                }
                 element.dots = Some(build_child(&view, ctx));
                 ChangeFlags::LAYOUT | ChangeFlags::PAINT
             }
         };
-        element.dots_key = Some(key);
-        *self.dots_built.borrow_mut() = Some(view);
+        let view: Box<dyn Any> = Box::new(view);
+        element.dots_built = Some(BuiltDots { key, view });
         flags
     }
 }
@@ -3170,5 +3186,185 @@ mod tests {
         rig.settle();
         assert_eq!(*centres.borrow(), vec![Some(2)], "no event for the close");
         assert_eq!(rig.w.strip.current, 1);
+    }
+
+    /// `centre_view`'s logging, at any open state, peer count and live index.
+    fn switch_view(
+        open: bool,
+        peers: usize,
+        live: usize,
+        calls: &Calls,
+        centres: &Log,
+    ) -> CardSwitcherView<()> {
+        let (calls, centres) = (Rc::clone(calls), Rc::clone(centres));
+        strip_view(open, peers, live, &Log::default())
+            .dots_for(move |count, current| {
+                calls.borrow_mut().push((count, current));
+                leaf(40.0, 10.0)
+            })
+            .on_centre_changed(move |_: &mut (), card: usize| centres.borrow_mut().push(Some(card)))
+    }
+
+    #[test]
+    fn opening_centres_on_the_new_live_card_without_a_centre_change() {
+        // (peers while closed, live index while closed, live index open)
+        for (closed_peers, closed_live, live) in [(3, 0, 2), (0, 2, 2), (3, 1, 1)] {
+            let case = format!("{closed_peers} peers at {closed_live}, opening at {live}");
+            let (calls, centres) = (Calls::default(), Log::default());
+            let closed = switch_view(false, closed_peers, closed_live, &calls, &centres);
+            let mut rig = Rig::new(&closed, PHONE);
+            let mounted = (closed_peers + 1, closed_live.min(closed_peers));
+            let make = || switch_view(true, 3, live, &calls, &centres);
+            let mut view = make();
+            rig.rebuild(&closed, &view);
+            let mut expected = vec![mounted];
+            if mounted != (4, live) {
+                expected.push((4, live));
+            }
+            assert_eq!(*calls.borrow(), expected, "{case}: built once on the flip");
+            rig.frame(0.0);
+            assert!(near(rig.offset(), live as f64 * rig.stride()), "{case}");
+            assert_eq!(rig.w.strip.current, live, "{case}");
+            assert_eq!(
+                rig.w.strip.centre_owed, None,
+                "{case}: nothing to re-centre"
+            );
+            for _ in 0..30 {
+                rig.frame(16.0);
+                view = pump(&mut rig, view, make);
+            }
+            assert!(
+                centres.borrow().is_empty(),
+                "{case}: the open is not a change"
+            );
+            assert_eq!(*calls.borrow(), expected, "{case}: the dots never move");
+            assert!(near(rig.offset(), live as f64 * rig.stride()), "{case}");
+        }
+    }
+
+    /// A [`Tracked`] view's lifecycle: `Built`, `Rebuilt` and `TornDown`, by id.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Life {
+        Built(usize),
+        Rebuilt(usize),
+        TornDown(usize),
+    }
+
+    type Lives = Rc<RefCell<Vec<Life>>>;
+
+    struct Tracked {
+        id: usize,
+        lives: Lives,
+    }
+
+    struct TrackedWidget;
+
+    impl View<()> for Tracked {
+        type Element = TrackedWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> TrackedWidget {
+            self.lives.borrow_mut().push(Life::Built(self.id));
+            TrackedWidget
+        }
+        fn rebuild(&self, _: &Self, _: &mut TrackedWidget, _: &mut BuildCtx<'_>) -> ChangeFlags {
+            self.lives.borrow_mut().push(Life::Rebuilt(self.id));
+            ChangeFlags::NONE
+        }
+        fn teardown(&self, _element: &mut TrackedWidget, _ctx: &mut BuildCtx<'_>) {
+            self.lives.borrow_mut().push(Life::TornDown(self.id));
+        }
+    }
+
+    impl Widget for TrackedWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(40.0, 10.0))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+    }
+
+    /// The dots slot of a closed 3-peer stage at `live`: a builder of tracked
+    /// views (id `1000 + 10 × count + current`), a static tracked view
+    /// (`Some(id)`), or nothing.
+    fn dots_view(live: usize, dots: Option<Option<usize>>, lives: &Lives) -> CardSwitcherView<()> {
+        let view = strip_view(false, 3, live, &Log::default());
+        let lives = Rc::clone(lives);
+        match dots {
+            None => view.dots_for(move |count, current| Tracked {
+                id: 1000 + 10 * count + current,
+                lives: Rc::clone(&lives),
+            }),
+            Some(Some(id)) => view.dots(Tracked { id, lives }),
+            Some(None) => view,
+        }
+    }
+
+    fn teardown_stage(view: &CardSwitcherView<()>, w: &mut CardSwitcherWidget) {
+        let mut counter = 0u64;
+        view.teardown(w, &mut BuildCtx::new(&mut counter));
+    }
+
+    fn assert_balanced(lives: &Lives) {
+        let count = |pick: fn(&Life) -> bool| lives.borrow().iter().filter(|l| pick(l)).count();
+        let built = count(|l| matches!(l, Life::Built(_)));
+        let torn = count(|l| matches!(l, Life::TornDown(_)));
+        assert_eq!(built, torn, "every dots pod is torn down once: {lives:?}");
+    }
+
+    #[test]
+    fn rebuilding_against_the_same_prev_never_orphans_the_dots_pod() {
+        use Life::*;
+        let lives = Lives::default();
+        let first = dots_view(1, None, &lives);
+        let mut w = build(&first);
+        rebuild(&first, &dots_view(2, None, &lives), &mut w);
+        rebuild(&first, &dots_view(3, None, &lives), &mut w);
+        let last = dots_view(3, Some(Some(7)), &lives);
+        rebuild(&first, &last, &mut w);
+        teardown_stage(&last, &mut w);
+        assert_eq!(
+            *lives.borrow(),
+            vec![
+                Built(1041),
+                Rebuilt(1042),
+                Rebuilt(1043),
+                TornDown(1043),
+                Built(7),
+                TornDown(7),
+            ]
+        );
+        assert_balanced(&lives);
+    }
+
+    #[test]
+    fn swapping_the_dots_slot_kind_tears_the_old_pod_down_and_builds_the_new() {
+        use Life::*;
+        let lives = Lives::default();
+        let steps = [
+            (Some(Some(5)), vec![Built(5)]),
+            (None, vec![TornDown(5), Built(1041)]),
+            (Some(Some(6)), vec![TornDown(1041), Built(6)]),
+            (None, vec![TornDown(6), Built(1041)]),
+            (Some(None), vec![TornDown(1041)]),
+            (None, vec![Built(1041)]),
+        ];
+        let mut prev: Option<CardSwitcherView<()>> = None;
+        let mut w = None;
+        for (dots, expected) in steps {
+            lives.borrow_mut().clear();
+            let next = dots_view(1, dots, &lives);
+            match (&prev, &mut w) {
+                (Some(prev), Some(w)) => {
+                    rebuild(prev, &next, w);
+                }
+                _ => w = Some(build(&next)),
+            }
+            assert_eq!(*lives.borrow(), expected, "{dots:?}");
+            let w = w.as_ref().expect("built");
+            assert_eq!(w.dots.is_some(), dots != Some(None), "{dots:?}");
+            assert_eq!(w.dots_built.is_some(), dots.is_none(), "{dots:?}");
+            prev = Some(next);
+        }
+        lives.borrow_mut().clear();
+        teardown_stage(&prev.expect("a view"), &mut w.expect("a stage"));
+        assert_eq!(*lives.borrow(), vec![TornDown(1041)], "the builder's pod");
     }
 }
