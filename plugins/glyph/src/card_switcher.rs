@@ -191,8 +191,8 @@ impl<State: 'static> GlyphCardSwitcher<State> {
     }
 
     /// Called with the **strip** index of the centred card when it changes.
-    pub fn on_centre_changed(mut self, on_change: impl Fn(&mut State, usize) + 'static) -> Self {
-        self.stage = self.stage.on_centre_changed(on_change);
+    pub fn on_center_changed(mut self, on_change: impl Fn(&mut State, usize) + 'static) -> Self {
+        self.stage = self.stage.on_center_changed(on_change);
         self
     }
 
