@@ -87,29 +87,26 @@ Contract*). `frust::authoring` is the toolkit both the baseline set and every pl
     both resolve to alpha 0 at the split itself. Never assume a dual-visible crossfade window:
     `IosPush` keeps both visible (parallax + dim, never reaching 0) and `ReducedCrossfade` is a
     genuine crossfade, but the presets above are not. A page resolving to alpha 0 still runs its
-    paint pass — hero-rect capture and other paint-time state — redirected into
-    `frust_core::DiscardScene` so no scene command is emitted, because the engine rasterizes a
-    layer in full before applying its alpha and an invisible page is otherwise wasted GPU work.
+    paint pass (hero-rect capture, paint-time state) redirected into `frust_core::DiscardScene`, so no
+    scene command is emitted for an otherwise wasted full-layer rasterization.
   - **Retained pages:** each page carries a `RetainedBoundary` (`PageEntry.boundary`; the switcher's
     `child_boundary`/`exiting_boundary`). A page **at rest paints plain**; only a programmatic
     transition's progress-0 seed frame records the leaving page and the transition frames draw it
     (`DrawRetained`), the entering page of a slide paints plain. A body that used a paint side channel
     (IME, platform view, shield, overlay, selection toolbar, hero) paints every frame, and hero pages
-    never draw a page. Fractional slides sit up to half a pixel off; a boundary cannot see a clip from a
-    clipping container above it, so it may record a body the engine then refuses to retain.
+    never draw a page. Fractional slides sit up to half a pixel off; a boundary cannot see a clip above
+    it, so it may record a body the engine then refuses to retain.
   - **Navigator observation seams:** `NavigatorController::transition()` publishes a `Copy` `TransitionState`
-    (active, progress, direction, depth pair, generation) on an `Rc<Cell<_>>` so chrome outside the
-    subtree can observe transitions; reads during paint from a widget painted *after* the navigator
-    are frame-exact, reads during `Component::build` are one frame stale. `PushOptions::on_visibility`
-    and `PageVisibility` (Current/Visible/Covered) provide page-level visibility observation; the opt-in
-    `cull_covered_builds` (default false) skips rebuilds for covered pages, but `on_cleanup` does **not**
-    fire under a covering push (retained-state guarantee).
+    (active, progress, direction, depth pair, generation) on an `Rc<Cell<_>>` for chrome outside the
+    subtree: reads during paint from a widget painted *after* the navigator are frame-exact, reads
+    during `Component::build` one frame stale. `PushOptions::on_visibility` and `PageVisibility`
+    (Current/Visible/Covered) observe page visibility; the opt-in `cull_covered_builds` (default false)
+    skips rebuilds for covered pages, but `on_cleanup` does **not** fire under a covering push.
   - **Pop-result delivery:** `push_for_result`'s `on_result` callback needs `&mut State`, which the
     state-free view diff doesn't carry, so a pop still queues it — but the queuing rebuild also
     raises CORE's pending-result-flush flag, which the same rebuild drains via a `Housekeeping`
-    broadcast (see CORE_ARCHITECTURE.md). An eager pop delivers its result within the rebuild that
-    applied it; an interactive edge-swipe pop delivers on its settle frame. No further input event
-    is required either way.
+    broadcast (see CORE_ARCHITECTURE.md). An eager pop delivers within the rebuild that applied it; an
+    edge-swipe pop on its settle frame. No further input event is required.
   - **RouteNavigator:** A thread-safe (`Arc<Mutex<Vec<NavRequest>>>`) navigation handle carrying no closures
     or reactive types, making it `Send + Sync` and usable via `provide_context` from any thread; off-thread
     requests wake the shell and apply in the next rebuild before the navigator reconciles.
@@ -117,9 +114,10 @@ Contract*). `frust::authoring` is the toolkit both the baseline set and every pl
     over query params of the same name, and named-route `path_for_name` round-trips unused params as query.
   - **Route-state observable (R-B1):** `NavigatorController::route_stack()`/`route_generation()` publish a
     `RouteStack` (route identities bottom→top, depth, generation) and a diffed `NavChange`
-    (Initial/Push/Pop/Replace/Reset) from every committed mutation inside `publish_state()`. An in-flight
-    edge-swipe pop is uncommitted, so it reports the pre-swipe stack until the settle-frame publish; frame-accurate
-    drag chrome wants `transition()` instead.
+    (Initial/Push/Pop/Replace/Reset) from every committed-mutation site inside `publish_state()`. Staleness
+    contract: an in-flight interactive edge-swipe pop is uncommitted, so the observable still reports the
+    pre-swipe stack until the settle-frame publish; a cancelled swipe publishes nothing (the pre-swipe stack
+    was already correct). Frame-accurate drag chrome wants `NavigatorController::transition()` instead.
   - **shell_route (nested navigators):** `shell_route(inner, builder, children)` is a pathless route binding
     a subtree to a second app-owned `NavigatorController` — the shell page stays retained on the enclosing
     stack while its children resolve onto `inner` (go_router's `ShellRoute`). A chain crossing the boundary
@@ -438,13 +436,13 @@ mapping, boundary rejection, ballistic simulation, fling thresholds, spring; com
 paints: `Translate`/`Stretch`/`None`) and to `Simulation` (Friction/Spring/Clamping/Bouncing ports).
 `default_physics()`/`default_overscroll_effect()` pick the pair per platform (Android `Clamping` +
 `Stretch`; elsewhere `Bouncing` + `Translate`) unless the app names its own. `RubberBand` is an
-explicit opt-in only, and the only physics still on the legacy hand-rolled fling/settle path
-(`create_ballistic_simulation` returns `None` by design). `PageSnap` (`physics/page_snap.rs`, Flutter's
-`PageScrollPhysics`; `fraction(f)` or `extent(px)`) chains over `default_physics()` or a named parent and
-overrides only `create_ballistic_simulation`, so an in-range release always ends on a page boundary. Wheel input is a physics-independent hard
-clamp, offered to the content under the pointer first — the innermost surface that can move takes
-the notch, one at its pushed edge passes it outward (`ScrollSurface::route_wheel`). A release carries
-interrupted momentum forward only when it plainly continues it, as in Flutter's `ScrollDragController.end`.
+explicit opt-in only, and the only physics still on the legacy fling/settle path (`create_ballistic_simulation`
+returns `None` by design). `PageSnap` (`physics/page_snap.rs`;
+`fraction(f)` or `extent(px)`) chains over `default_physics()` or a named parent, overriding only
+`create_ballistic_simulation` so an in-range release ends on a page boundary. Wheel input is a
+physics-independent hard clamp offered to the content under the pointer first — the innermost surface
+that can move takes the notch, one at its pushed edge passes it outward (`ScrollSurface::route_wheel`).
+A release carries interrupted momentum forward only when it plainly continues it (Flutter's `ScrollDragController.end`).
 
 Each drag `Move` hands the physics that move's raw delta against the live position (a
 path-dependent mapping). The core accumulates the boundary-rejected excess as its own edge-pull
@@ -496,14 +494,16 @@ a handler that requests no redraw waits for the next frame another input wakes (
 `motion/card_switcher.rs` (`card_switcher`, `CardSwitcherView`): an app-switcher stage over one live
 child. The child shrinks through `ChildPod::set_transform` about the centre under a parent-space
 rounded clip, with the shadow and scrim painted at the pattern's own scope; input to the shrunken
-child is blocked (a tap closes) but only within the pattern's bounds. It owns its ramp (a
+child is blocked (a tap closes) but only within the pattern's bounds (`blocked_pointer`). It owns its ramp (a
 `make_driver` + `Tween`; `reduce_motion` snaps geometry and cross-fades alphas over 120 ms whatever
 `open_timing`/`close_timing` say). Peers sit in a horizontal `ScrollSurfaceCore` strip on
-`PageSnap::extent(stride)` with tap-only selection: a fling never selects, taps during a centring
-tween are ignored, wheel input does not scroll the strip, and the strip registers no nested claim.
-`expanding(i)` fades the slots while a peer opens; `.dots_for(count, current)` fills the indicator
-slot and `.on_centre_changed` follows the strip with a one-Housekeeping-pass lag. Bounds in
-`card-switcher-blocking-bounded` and `card-switcher-tap-only-selection`.
+`PageSnap::extent(stride)` over `default_physics()`/`default_overscroll_effect()` (Android clamps the
+ends) with tap-only selection: a fling never selects, taps during a centring tween are ignored, the
+strip's `forward_wheel` does not scroll it, and it registers no nested claim. `CardSwitcherView::expanding(i)`
+fades the slots while a peer opens (the handshake with `on_select`, which fires the selection);
+`.dots_for(count, current)` fills the indicator slot and `.on_centre_changed` follows the strip with a
+one-Housekeeping-pass lag. Bounds in `card-switcher-blocking-bounded`, `card-switcher-tap-only-selection`
+and `card-switcher-android-strip-ends-clamp`.
 
 ### Virtualized ListView (baseline)
 `ListView`/`ListViewWidget`/`list_view()` live in `frust-widgets` proper (`list_view.rs`); the
