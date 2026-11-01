@@ -5,38 +5,19 @@
 //! a `TabController`, so it is not mirrored). The app passes the page `count`
 //! and the current `index`; the widget owns no selection state.
 //!
-//! # Geometry
+//! Every dot keeps a fixed slot (pitch `dot_size + gap`), so moving the
+//! highlight never shifts a neighbour. An `active_width` wider than `dot_size`
+//! reserves the difference once, split evenly across both ends, so the pill is
+//! never clipped: the row is `count × dot_size + (count − 1) × gap` plus that
+//! extra wide and `dot_size` tall. `count == 0` lays out to nothing; an `index`
+//! at or past `count` clamps to the last page.
 //!
-//! Every dot keeps a fixed slot, so moving the highlight never shifts a
-//! neighbour. The slot pitch is `dot_size + gap`. When `active_width` is wider
-//! than `dot_size`, the row reserves the difference (`active_width − dot_size`)
-//! once, split evenly across both ends, so the widest pill is never clipped.
-//! Intrinsic width is therefore `count × dot_size + (count − 1) × gap` plus that
-//! reserved extra; height is `dot_size`. An empty row (`count == 0`) lays out to
-//! nothing. An `index` at or past `count` clamps to the last page.
-//!
-//! # Tap targets
-//!
-//! With [`PageDots::on_tap`] set, the row is `max(dot_size, 24)` tall so each
-//! dot has a 24 px hit band. The paint stays `dot_size` and is centred within
-//! that band. Each tap maps to the nearest slot horizontally. A press fires
-//! `on_tap(state, index)` on release inside the same slot. Without `on_tap`
-//! the dots are decorative and ignore pointer input.
-//!
-//! # Motion
-//!
-//! An index change slides the highlight from its painted position to the new
-//! slot, using the same duration and overshoot easing as [`crate::tabs`]'s
-//! indicator. The frame gate is requested only while the slide runs. Under
-//! `theme.motion.reduce_motion` the highlight snaps to the target on the next
-//! paint and no frame is requested.
-//!
-//! # Semantics
-//!
-//! The row reports a `Role::Status` labelled `"page {index+1} of {count}"`. With
-//! `on_tap`, each dot is also a `Role::Button` child labelled `"page n"`,
-//! whose bounds are that dot's own hit slot (not the whole row), so an
-//! assistive Click activates `on_tap(n - 1)`.
+//! An index change slides the highlight from its painted position with
+//! [`crate::tabs`]'s indicator duration and overshoot easing, requesting frames
+//! only while the slide runs; under `theme.motion.reduce_motion` it snaps to
+//! the target on the next paint. The row reports a `Role::Status` labelled
+//! `"page {index+1} of {count}"`; tap targets are on [`PageDots::on_tap`]. The
+//! Glyph component set is indexed in `docs/PLUGINS_ARCHITECTURE.md`.
 
 use std::rc::Rc;
 
@@ -94,9 +75,13 @@ pub fn page_dots<State: 'static>(count: usize, index: usize) -> PageDots<State> 
 }
 
 impl<State: 'static> PageDots<State> {
-    /// Fire `on_tap(state, index)` when a dot is tapped (press and release
-    /// inside the same dot). Also makes the dots tappable and labels them as
-    /// buttons for assistive technology.
+    /// Fire `on_tap(state, index)` when a dot is tapped: press and release
+    /// inside the same slot, each tap mapped to the nearest slot horizontally.
+    /// The row grows to `max(dot_size, 24)` tall so each dot has a 24 px hit
+    /// band (the paint stays `dot_size`, centred in it). Each dot also becomes
+    /// a `Role::Button` labelled `"page n"`, bounded by its own hit slot, so an
+    /// assistive Click activates `on_tap(n - 1)`. Without it the dots are
+    /// decorative and ignore pointer input.
     pub fn on_tap<F: Fn(&mut State, usize) + 'static>(mut self, on_tap: F) -> Self {
         self.on_tap = Some(Rc::new(on_tap));
         self
