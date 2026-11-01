@@ -6043,7 +6043,10 @@ additive follow-up work on the same crate-private page sliver.
 
 **Observed**: while open (or animating), `card_switcher` swallows pointer input to the shrunken live
 child and the stage, but only inside the pattern's own bounds; chrome laid out outside it (an app bar,
-a bottom bar hosted around the pattern) stays interactive. Key and IME routing is untouched.
+a bottom bar hosted around the pattern) stays interactive. Key and IME input does not reach the page
+while open: the open flip suspends the live child's focus (`CardSwitcherWidget::suspend_child` saves
+and clears its focus link) and the close flip restores it, and focus-routed events reach only a pod
+that `holds_live_focus()`.
 
 **Applies to**: apps that place the pattern below app chrome rather than around the whole shell page.
 
@@ -6051,7 +6054,24 @@ a bottom bar hosted around the pattern) stays interactive. Key and IME routing i
 wrapping the whole shell page gives full blocking.
 
 **Evidence**: `crates/frust-widgets/src/motion/card_switcher.rs` module docs (*Blocking covers only the
-stage's own bounds*) and `blocked_pointer`.
+stage's own bounds*), `blocked_pointer`, and `suspend_child` (open) / the close-flip restore in the
+same file; `holds_live_focus` in `crates/frust-core/src/widget.rs`.
+
+---
+
+### `card-switcher-peers-no-semantics` — the card switcher's peer cards are absent from the accessibility tree
+
+**Observed**: `CardSwitcherWidget::semantics` emits the live child and, while open, the live-label,
+dots and action-bar slots, but never the peer faces or their labels. Peer selection is therefore
+pointer-only, and the blocked live child's controls stay in the tree while the stage is open.
+
+**Applies to**: screen-reader and switch-access users of `card_switcher`.
+
+**Why accepted**: v1 scope; peer semantics and hiding the blocked child are tracked as follow-up
+act_000001a198a3432egzV55i1D.
+
+**Evidence**: `crates/frust-widgets/src/motion/card_switcher.rs` (`fn semantics`) and the dots
+`Role::Status` node in `plugins/glyph/src/page_dots.rs`.
 
 ---
 
@@ -6098,7 +6118,7 @@ stop and does not answer Enter/Space; press feedback is an instant fill tint.
 **Applies to**: keyboard-only desktop users of `fab`.
 
 **Why accepted**: the fab shipped for the touch switcher flow; focus and key activation are a filed
-follow-up.
+follow-up (act_000001a197874048qAwbVt2Y).
 
 **Evidence**: `plugins/glyph/src/fab.rs` (no focus or key handling in `FabWidget`).
 

@@ -240,10 +240,10 @@ Contract*). `frust::authoring` is the toolkit both the baseline set and every pl
   contact to the child unchanged, and steals an in-progress child gesture with one synthesized
   `Cancel` once a pinch begins (`on_scale` never fires from a `Cancel`); a desktop `InputEvent::Scale`
   reaches `on_scale` only when the child ignores it first. Nesting two detectors is unsupported.
-  `pinch_detector` holds the ambient multi-contact veto cell (`scroll.rs`'s `ambient_scroll_veto`)
-  raised while it tracks a second contact, so a pinch over a single-finger press inside a
-  `ScrollView`/`ListView` survives the claimant's travel past slop; it never joins the Down-time
-  nested-scroll claim itself (see below), unlike `pan_zoom`.
+  `pinch_detector` captures the ambient multi-contact veto cell (`scroll.rs`'s `ambient_scroll_veto`)
+  on its claiming `Down` and holds it raised while it tracks a second contact, so a pinch over a
+  single-finger press inside a `ScrollView`/`ListView` survives the claimant's travel past slop; it
+  never joins the Down-time nested-scroll claim itself (see below), unlike `pan_zoom`.
 - Pan-zoom flow: `pan_zoom(child)` places its child in a `ChildPod` transformed by
   `Affine::translate(offset) * Affine::scale(scale)` (`PanZoomTransform`), so frust-core's
   transformed-pod seam (see CORE_ARCHITECTURE.md) inverse-maps the child's hit-testing and events. A
@@ -463,11 +463,10 @@ axis-aware: a viewport registers only into a same-axis host and drops a claim fr
 other axis.
 
 **Programmatic scroll (`scroll_controller.rs`).** `ScrollController` is a cloneable, reactive-free
-handle that `ScrollView`/`ListView`/`CustomScrollView::controller` attaches (facade:
-`ScrollController`, `ScrollSubscription`, `AnimateTo`, `ItemAlignment`). One surface holds a handle
-at a time (the latest attach wins) and dropping the widget detaches it. With `.scrollbar(..)` and no
-app handle, a surface binds an internal controller only while the bar is enabled; bar writes are
-plain `jump_to`s, so `on_scroll` hears them.
+handle that `ScrollView`/`ListView`/`CustomScrollView::controller` attaches. One surface holds a
+handle at a time (the latest attach wins) and dropping the widget detaches it. With `.scrollbar(..)`
+and no app handle, a surface binds an internal controller only while the bar is enabled; bar writes
+are plain `jump_to`s, so `on_scroll` hears them.
 Writes (`jump_to`/`animate_to`, plus `scroll_to_item` on a keyed list) are recorded, not applied;
 the surface drains them at its next layout or paint (a `ListView` also at rebuild), so the clamp
 lands against fresh extents. The queue is bounded by superseding within a segment (the offset
@@ -483,8 +482,9 @@ fling's ballistic pump; a user `Down` or wheel interrupts it, a later command re
 `reduce_motion` collapses it to a jump. A fling, a settle and a tween are never live together. Every
 frame a tween moves, and the frame it lands on, owes the next frame's Housekeeping flush, so
 `on_scroll` (and `ListView` near-start/near-end) arrive with no input event; release flings and
-settles stay one event late. An item request that moves nothing still ends a running controller tween
-and clears an earlier request's settle loop, but leaves a user fling, settle or drag alone.
+settles stay one event late. An item request that moves nothing (unknown key, or `Nearest` on a fully
+visible row) still ends a running controller tween where it stands and clears an earlier request's
+settle loop, but leaves a user fling, settle or drag alone.
 `is_animating` is true only while the attached surface has a live tween; `on_change` fires only when
 the published `ScrollInfo` changes. `scroll_to_item` is list-only (`CustomScrollView` and `ScrollView`
 ignore it with a debug log). A desktop shell ignores the pending-result-flush flag, so a command from
@@ -501,7 +501,7 @@ child is blocked (a tap closes) but only within the pattern's bounds (`blocked_p
 ends) with tap-only selection: a fling never selects, taps during a centring tween are ignored, the
 strip's `forward_wheel` does not scroll it, and it registers no nested claim. `CardSwitcherView::expanding(i)`
 fades the slots while a peer opens (the handshake with `on_select`, which fires the selection);
-`.dots_for(count, current)` fills the indicator slot and `.on_centre_changed` follows the strip with a
+`.dots_for(count, current)` fills the indicator slot and `.on_center_changed` follows the strip with a
 one-Housekeeping-pass lag. Bounds in `card-switcher-blocking-bounded`, `card-switcher-tap-only-selection`
 and `card-switcher-android-strip-ends-clamp`.
 
