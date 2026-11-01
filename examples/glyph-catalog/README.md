@@ -251,6 +251,12 @@ Device-gate command (the gate runs the FULL-SCREEN mode): from this directory,
 - [ ] rotate / resize while open: the stage stays open and re-lays out (a tablet-size window switches to the 0.58 card scale)
 - [ ] Exit demo: the app-bar action returns to the tabbed shell
 
+Gate run 2026-11-02 (switcher follow-ups branch): Pixel 5 (Android 14, 90 Hz) over adb, iPhone 13 mini
+(iOS 27.2) via the XCUITest driver, and a 1280 px macOS window (0.58 card) — every item above passed;
+Android stops dead at the strip ends (platform clamping physics, no stretch drawn) and both phones draw
+the dots over the bar in landscape; ramps on the Pixel 5 held p95 under 16.7 ms (CPU 13.0–15.9 ms, GPU
+9.9–13.6 ms, no skipped frames).
+
 ### Components the reference inventory listed as "no direct Frust widget"
 
 An earlier research pass (written before this catalog's pages were filled in)
