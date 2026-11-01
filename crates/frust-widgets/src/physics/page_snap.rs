@@ -20,35 +20,55 @@
 //! * [`PageSnap::extent`] — a fixed stride in px, the shape of Flutter's
 //!   `FixedExtentScrollPhysics`.
 //!
-//! A non-finite or non-positive extent has no page boundaries to snap to, so
-//! the release is left to the parent.
+//! A non-finite or non-positive extent is a misconfiguration: the constructors
+//! `debug_assert!` it, and in release builds the stride falls back to the
+//! viewport extent (one page per viewport) so the release still lands on a
+//! boundary. Only when the viewport itself has no usable extent is there nothing
+//! to snap to, and the release is then left to the parent.
+//!
+//! The pages start at `min_scroll_extent`. When the stride does not divide the
+//! range evenly, the last page's target is `max_scroll_extent` itself (the
+//! target is clamped), a shorter final step than the others.
 //!
 //! # Ported from Flutter
 //!
 //! `PageScrollPhysics._getTargetPixels`: `page = (pixels − min) / extent`; a
 //! release faster than `tolerance.velocity` toward the leading edge
-//! (`velocity < −tolerance.velocity`) targets `floor(page)`, faster toward the
-//! trailing edge (`velocity > tolerance.velocity`) targets `ceil(page)`, and
-//! anything slower targets `round(page)`. Flutter writes the first two as
-//! `page ∓ 0.5` followed by `round()`; the two agree everywhere except on
-//! exact half-page positions with a fling in the *other* direction, which
-//! never matters for a continuous drag. The target `min + page × extent` is
-//! clamped to `[min, max]`, and the settle is `SpringSimulation(spring, pixels,
-//! target, velocity, tolerance)` — here the snapping
-//! [`ScrollSpringSimulation`](super::simulation::ScrollSpringSimulation), which
-//! reports exactly the target once at rest.
+//! (`velocity < −tolerance.velocity`) targets `round(page − 0.5)`, faster toward
+//! the trailing edge (`velocity > tolerance.velocity`) targets
+//! `round(page + 0.5)`, and anything slower targets `round(page)`. The target
+//! `min + page × extent` is clamped to `[min, max]`, and the settle is
+//! `SpringSimulation(spring, pixels, target, velocity, tolerance)` — here the
+//! snapping [`ScrollSpringSimulation`](super::simulation::ScrollSpringSimulation),
+//! which reports exactly the target once at rest.
+//!
+//! The formula is Flutter's exactly (Rust's `f64::round` and Dart's `round`
+//! both round halves away from zero, and `page` is never negative in range),
+//! so a fling released exactly on a boundary moves one page in the fling
+//! direction (`round(k + 0.5) = k + 1`; a leading-edge fling stays on `k`,
+//! `round(k − 0.5) = k`, as in Flutter). Every in-range release therefore ends
+//! on a page boundary.
 //!
 //! # Deviations from the Dart source
 //!
 //! * **Out-of-range releases go to the parent.** Flutter delegates when
 //!   `velocity <= 0 && pixels <= min` or `velocity >= 0 && pixels >= max`; this
-//!   port delegates whenever `pixels` is outside `[min, max]` (and when the
-//!   release already rests on its target), so the parent's rubber-band or edge
-//!   settle always owns an overscrolled release.
+//!   port delegates whenever `pixels` is outside `[min, max]`
+//!   ([`ScrollMetrics::out_of_range`]), so the parent's rubber-band or edge
+//!   settle owns an overscrolled release. The parent never owns an in-range one.
+//! * **A settled release builds no motion.** Where Flutter returns `null` when
+//!   the target equals `pixels`, this port returns `None` when the target is
+//!   within `tolerance.distance` of `pixels` and the release is slower than
+//!   `tolerance.velocity`. A fling whose target is that close (a fling into the
+//!   range edge, or toward the leading edge from a boundary) still builds a
+//!   spring so the velocity is absorbed and the offset ends exactly on the
+//!   boundary, where Flutter would return `null` only on an exact match.
 //! * **The fling gate is the surface's.** Flutter returns `null` below
 //!   `tolerance.velocity` only after its own target check; the surfaces here
 //!   zero a release below [`ScrollPhysics::min_fling_velocity`] before asking,
 //!   and a zero velocity simply rounds to the nearest page.
+//! * **Invalid extents are asserted.** See *Page extent*; Flutter would
+//!   divide by zero.
 
 use super::simulation::ScrollSpringSimulation;
 use super::{ScrollMetrics, ScrollPhysics, Simulation, default_physics};
@@ -74,7 +94,14 @@ pub struct PageSnap {
 impl PageSnap {
     /// Pages sized `viewport_dimension × viewport_fraction`, parented on
     /// [`default_physics`].
+    ///
+    /// `viewport_fraction` must be finite and positive; this is a
+    /// `debug_assert!`, and release builds fall back to one page per viewport.
     pub fn fraction(viewport_fraction: f64) -> Self {
+        debug_assert!(
+            viewport_fraction.is_finite() && viewport_fraction > 0.0,
+            "PageSnap::fraction needs a finite positive fraction, got {viewport_fraction}"
+        );
         Self {
             page: PageExtent::Fraction(viewport_fraction),
             parent: Box::new(RcParent(default_physics())),
@@ -82,7 +109,14 @@ impl PageSnap {
     }
 
     /// Pages of a fixed `px` stride, parented on [`default_physics`].
+    ///
+    /// `px` must be finite and positive; this is a `debug_assert!`, and
+    /// release builds fall back to one page per viewport.
     pub fn extent(px: f64) -> Self {
+        debug_assert!(
+            px.is_finite() && px > 0.0,
+            "PageSnap::extent needs a finite positive stride, got {px}"
+        );
         Self {
             page: PageExtent::Fixed(px),
             parent: Box::new(RcParent(default_physics())),
@@ -108,6 +142,15 @@ impl PageSnap {
         (px.is_finite() && px > 0.0).then_some(px)
     }
 
+    /// The stride used for snapping: the configured one, else the viewport
+    /// extent (the misconfiguration fallback), else `None`.
+    fn effective_stride(&self, metrics: &ScrollMetrics) -> Option<f64> {
+        self.stride(metrics).or_else(|| {
+            let v = metrics.viewport_dimension;
+            (v.is_finite() && v > 0.0).then_some(v)
+        })
+    }
+
     /// Flutter's `_getTargetPixels`, clamped to the scroll range.
     fn target_pixels(
         &self,
@@ -115,13 +158,13 @@ impl PageSnap {
         velocity: f64,
         velocity_tolerance: f64,
     ) -> Option<f64> {
-        let extent = self.stride(metrics)?;
+        let extent = self.effective_stride(metrics)?;
         let min = metrics.min_scroll_extent;
         let page = (metrics.pixels - min) / extent;
         let page = if velocity < -velocity_tolerance {
-            page.floor()
+            (page - 0.5).round()
         } else if velocity > velocity_tolerance {
-            page.ceil()
+            (page + 0.5).round()
         } else {
             page.round()
         };
@@ -146,8 +189,9 @@ impl ScrollPhysics for PageSnap {
     }
 
     /// Flutter's `PageScrollPhysics.createBallisticSimulation`: a spring from
-    /// the release position onto the chosen page boundary, or the parent's
-    /// answer when out of range or already settled on the target.
+    /// the release position onto the chosen page boundary. Out-of-range
+    /// releases (and a viewport with no usable extent) are the parent's; an
+    /// in-range release never is, so it always ends on a boundary.
     fn create_ballistic_simulation(
         &self,
         metrics: &ScrollMetrics,
@@ -161,8 +205,10 @@ impl ScrollPhysics for PageSnap {
         let Some(target) = self.target_pixels(metrics, velocity, tolerance.velocity) else {
             return parent();
         };
-        if (target - metrics.pixels).abs() < tolerance.distance {
-            return parent();
+        if (target - metrics.pixels).abs() < tolerance.distance
+            && velocity.abs() < tolerance.velocity
+        {
+            return None;
         }
         Some(Box::new(ScrollSpringSimulation::new(
             self.spring(),
@@ -240,9 +286,34 @@ mod tests {
         };
         let stride = p.stride(&m).expect("positive stride");
         assert!((stride - 248.0).abs() < 1e-9, "stride {stride}");
-        assert_eq!(PageSnap::fraction(0.0).stride(&m), None);
-        assert_eq!(PageSnap::extent(f64::NAN).stride(&m), None);
-        assert_eq!(PageSnap::extent(-4.0).stride(&m), None);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "finite positive fraction")]
+    fn non_positive_fraction_is_asserted() {
+        let _ = PageSnap::fraction(0.0);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "finite positive stride")]
+    fn negative_extent_is_asserted() {
+        let _ = PageSnap::extent(-1.0);
+    }
+
+    #[test]
+    fn invalid_extent_falls_back_to_the_viewport() {
+        // Built directly: the constructors assert in debug builds.
+        for bad in [0.0, -4.0, f64::NAN, f64::INFINITY] {
+            let p = PageSnap {
+                page: PageExtent::Fixed(bad),
+                parent: Box::new(Bouncing::new()),
+            };
+            assert_eq!(p.stride(&metrics(0.0)), None);
+            assert_eq!(settle(&p, 40.0, 0.0), Some(0.0));
+            assert_eq!(settle(&p, 60.0, 0.0), Some(100.0));
+        }
     }
 
     #[test]
@@ -285,13 +356,66 @@ mod tests {
         );
     }
 
+    fn parents() -> [PageSnap; 2] {
+        [
+            PageSnap::extent(EXTENT).chain(Bouncing::new()),
+            PageSnap::extent(EXTENT).chain(Clamping::new()),
+        ]
+    }
+
     #[test]
-    fn resting_on_a_boundary_defers_to_the_parent() {
-        let p = snap();
-        assert!(
-            p.create_ballistic_simulation(&metrics(200.0), 0.0)
-                .is_none()
-        );
+    fn a_fling_on_a_boundary_moves_one_page_in_its_direction() {
+        for p in parents() {
+            // Flutter: round(k + 0.5) = k + 1 forward, round(k - 0.5) = k back.
+            assert_eq!(settle(&p, 200.0, 2000.0), Some(300.0));
+            assert_eq!(settle(&p, 200.0, -2000.0), Some(200.0));
+            // At the range edges the fling is absorbed on the boundary.
+            assert_eq!(settle(&p, 400.0, 2000.0), Some(400.0));
+            assert_eq!(settle(&p, 0.0, -2000.0), Some(0.0));
+        }
+    }
+
+    #[test]
+    fn a_fling_just_short_of_a_boundary_ends_on_it() {
+        for p in parents() {
+            assert_eq!(settle(&p, 199.5, 2000.0), Some(200.0));
+            assert_eq!(settle(&p, 200.4, -2000.0), Some(200.0));
+            assert_eq!(settle(&p, 199.9999, 2000.0), Some(200.0));
+        }
+    }
+
+    #[test]
+    fn a_slow_release_on_a_boundary_builds_no_motion() {
+        for p in parents() {
+            let tol = p.tolerance_for(&metrics(200.0)).velocity;
+            assert!(
+                p.create_ballistic_simulation(&metrics(200.0), 0.0)
+                    .is_none()
+            );
+            assert!(
+                p.create_ballistic_simulation(&metrics(200.0), tol * 0.5)
+                    .is_none()
+            );
+            assert!(
+                p.create_ballistic_simulation(&metrics(200.0), -tol * 0.5)
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn an_in_range_release_always_ends_on_a_boundary() {
+        for p in parents() {
+            for px in [
+                0.0, 0.3, 49.9, 50.0, 99.9, 100.0, 199.5, 200.4, 399.9, 400.0,
+            ] {
+                for v in [-3000.0, -500.0, 0.0, 500.0, 3000.0] {
+                    if let Some(x) = settle(&p, px, v) {
+                        assert_eq!(x % EXTENT, 0.0, "px {px} v {v} ended at {x}");
+                    }
+                }
+            }
+        }
     }
 
     // --- behaviour through the surface -----------------------------------
