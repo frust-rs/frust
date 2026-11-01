@@ -259,10 +259,11 @@ pub use frust_core::event::{FileDropEvent, FileDropPhase};
 /// [`pinch_detector`]'s `.on_scale` and [`pan_zoom`] consume it. The
 /// [`PointerId`] names the contact a multi-contact gesture's
 /// [`InputEvent::PointerContact`](authoring::InputEvent::PointerContact) rides
-/// beside a pointer event. Lifted flat for the same reason [`EditCommand`] is:
+/// beside a pointer event; its [`PointerSource`] half says whether the contact
+/// is the mouse or a touch. Lifted flat for the same reason [`EditCommand`] is:
 /// an app's scale handler names these types in its public API without being a
 /// widget author.
-pub use frust_core::event::{PointerId, ScaleEvent, ScalePhase};
+pub use frust_core::event::{PointerId, PointerSource, ScaleEvent, ScalePhase};
 
 /// The keyboard vocabulary app code names: a [`Chord`] bound with [`shortcuts`]
 /// in a [`ShortcutScope`], the [`ShortcutHint`] a palette lists
@@ -805,7 +806,7 @@ pub mod authoring {
     /// The scale-gesture and contact types: a widget author matches
     /// `InputEvent::Scale(ScaleEvent)` and `InputEvent::PointerContact {
     /// pointer_id, .. }` by name. Also flat at the crate root.
-    pub use frust_core::event::{PointerId, ScaleEvent, ScalePhase};
+    pub use frust_core::event::{PointerId, PointerSource, ScaleEvent, ScalePhase};
     pub use frust_core::{
         AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, DiscardScene, EventCtx,
         EventOutcome, EventResult, HeroDirective, HeroFrames, InputEvent, Key, KeyEvent, LayoutCtx,
@@ -3443,12 +3444,12 @@ mod scroll_physics_reexport {
 mod pinch_reexport {
     use crate::authoring::Point;
     use crate::{
-        PINCH_SLOP, PinchDetectorView, PinchDetectorWidget, PinchRecognizer, PointerId, ScaleEvent,
-        ScalePhase, pinch_detector, text,
+        PINCH_SLOP, PinchDetectorView, PinchDetectorWidget, PinchRecognizer, PointerId,
+        PointerSource, ScaleEvent, ScalePhase, pinch_detector, text,
     };
 
     // A build-time proof the types name-resolve through the facade.
-    #[allow(dead_code)]
+    #[allow(dead_code, clippy::too_many_arguments)]
     fn _uses_all(
         _w: &PinchDetectorWidget,
         _r: &PinchRecognizer,
@@ -3457,6 +3458,8 @@ mod pinch_reexport {
         _nested: crate::authoring::ScaleEvent,
         _p: crate::authoring::ScalePhase,
         _c: crate::authoring::PointerId,
+        _src: PointerSource,
+        _src2: crate::authoring::PointerSource,
     ) {
     }
 
@@ -3473,6 +3476,11 @@ mod pinch_reexport {
         assert_eq!(same.phase, ScalePhase::Begin);
         assert_eq!(PointerId::MOUSE, crate::authoring::PointerId::MOUSE);
         assert_eq!(PointerId::touch(1).slot, 1);
+        assert_eq!(PointerId::touch(1).source, PointerSource::Touch);
+        assert_eq!(
+            PointerId::MOUSE.source,
+            crate::authoring::PointerSource::Mouse
+        );
         assert!(std::hint::black_box(PINCH_SLOP) > 0.0);
         let view: PinchDetectorView<()> = pinch_detector(text("x")).on_scale(|_s: &mut (), _e| {});
         let _ = view;
