@@ -41,6 +41,8 @@ use frust_glyph::{
     skeleton, switcher_bar, switcher_chip, tag,
 };
 
+use std::sync::PoisonError;
+
 use crate::CatalogState;
 
 /// Glyph accent amber — the reference build's `--accent-amber`.
@@ -516,18 +518,36 @@ fn begin_select(state: &CatalogState, peer: usize) -> usize {
     face
 }
 
-/// Handshake step 4: the chosen face becomes the live page (strip order is
-/// kept: its position is its id), the expansion request is dropped and the
-/// stage closes, finishing the grow.
-fn finish_select(state: &CatalogState, face: usize) {
-    state.switcher_live.set(face);
+/// Withdraw a pending selection and close the stage (the scrim, the close
+/// chip, Exit demo and back all end here), so a delayed step 4 scheduled
+/// earlier finds nothing pending and does not swap the live face.
+fn close_stage(state: &CatalogState) {
     state.switcher_expanding.set(None);
     state.switcher_open.set(false);
 }
 
+/// Handshake step 4: the chosen face becomes the live page (strip order is
+/// kept: its position is its id), the expansion request is dropped and the
+/// stage closes, finishing the grow. It applies only while the selection it
+/// was scheduled for is still pending (the stage open and `switcher_expanding`
+/// still `Some(peer)`); a close or a newer selection makes it a no-op.
+/// Returns whether it applied.
+fn finish_select(state: &CatalogState, peer: usize, face: usize) -> bool {
+    let pending = state.switcher_open.get_untracked()
+        && state.switcher_expanding.get_untracked() == Some(peer);
+    if pending {
+        state.switcher_live.set(face);
+        state.switcher_expanding.set(None);
+        state.switcher_open.set(false);
+    }
+    pending
+}
+
 /// A one-shot sleep on std only (the example has no timer dependency): a
 /// helper thread flips the flag and wakes the local task, which therefore
-/// resumes in a later pump than the one that scheduled it.
+/// resumes in a later pump than the one that scheduled it. frust exposes no
+/// timer, and a thread per tap is acceptable for a demo (one short sleep per
+/// selection); locks tolerate poisoning because the state is a plain flag.
 struct Delay {
     shared: std::sync::Arc<std::sync::Mutex<(bool, Option<std::task::Waker>)>>,
     duration: std::time::Duration,
@@ -552,7 +572,7 @@ impl std::future::Future for Delay {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<()> {
         {
-            let mut guard = self.shared.lock().expect("delay mutex");
+            let mut guard = self.shared.lock().unwrap_or_else(PoisonError::into_inner);
             if guard.0 {
                 return std::task::Poll::Ready(());
             }
@@ -565,7 +585,7 @@ impl std::future::Future for Delay {
             std::thread::spawn(move || {
                 std::thread::sleep(duration);
                 let waker = {
-                    let mut guard = shared.lock().expect("delay mutex");
+                    let mut guard = shared.lock().unwrap_or_else(PoisonError::into_inner);
                     guard.0 = true;
                     guard.1.take()
                 };
@@ -606,8 +626,7 @@ fn live_page(face: usize) -> impl View<CatalogState> {
         app_bar::<CatalogState>(HOSTS[face]).actions((button(
             "Exit demo",
             |s: &mut CatalogState| {
-                s.switcher_open.set(false);
-                s.switcher_expanding.set(None);
+                close_stage(s);
                 s.switcher_fullscreen.set(false);
             },
         )
@@ -690,10 +709,10 @@ pub(crate) fn switcher_stage(state: &CatalogState) -> impl View<CatalogState> + 
             let state = s.clone();
             frust::spawn_local(async move {
                 Delay::new(SWAP_DELAY).await;
-                finish_select(&state, face);
+                finish_select(&state, peer, face);
             });
         })
-        .on_close(|s: &mut CatalogState| s.switcher_open.set(false))
+        .on_close(|s: &mut CatalogState| close_stage(s))
         .action_bar(switcher_bar((
             switcher_chip(frust::icons::LOCK, |s: &mut CatalogState| {
                 s.toasts
@@ -704,10 +723,8 @@ pub(crate) fn switcher_stage(state: &CatalogState) -> impl View<CatalogState> + 
                     .update(|v| v.push("Add server is a demo no-op".to_string()));
             })
             .label("+ add server"),
-            switcher_chip(frust::icons::CLOSE, |s: &mut CatalogState| {
-                s.switcher_open.set(false);
-            })
-            .semantic_label("close"),
+            switcher_chip(frust::icons::CLOSE, |s: &mut CatalogState| close_stage(s))
+                .semantic_label("close"),
         )))
         .back(&state.switcher_back);
     if let Some(scale) = card_scale_for(window_width) {
@@ -803,7 +820,7 @@ mod tests {
         assert!(state.switcher_open.get_untracked());
 
         // Step 4: the face is live, the request dropped, the stage closed.
-        finish_select(&state, face);
+        assert!(finish_select(&state, 1, face));
         assert_eq!(state.switcher_live.get_untracked(), 2);
         assert_eq!(state.switcher_expanding.get_untracked(), None);
         assert!(!state.switcher_open.get_untracked());
@@ -815,21 +832,118 @@ mod tests {
     }
 
     #[test]
+    fn closing_withdraws_the_pending_swap() {
+        let (_owner, state) = setup();
+        state.switcher_open.set(true);
+        let face = begin_select(&state, 2);
+
+        // Back / scrim / close chip during the delay.
+        close_stage(&state);
+        assert!(!finish_select(&state, 2, face));
+        assert_eq!(state.switcher_live.get_untracked(), 0, "live is unchanged");
+        assert_eq!(state.switcher_expanding.get_untracked(), None);
+
+        // Reopening inside the old window does not resurrect the request.
+        state.switcher_open.set(true);
+        assert!(!finish_select(&state, 2, face));
+        assert_eq!(state.switcher_live.get_untracked(), 0);
+        assert!(state.switcher_open.get_untracked());
+    }
+
+    #[test]
+    fn stale_finish_does_not_apply_over_a_newer_selection() {
+        let (_owner, state) = setup();
+        state.switcher_open.set(true);
+        let stale = begin_select(&state, 1);
+        let fresh = begin_select(&state, 2);
+
+        assert!(
+            !finish_select(&state, 1, stale),
+            "peer 1 is no longer pending"
+        );
+        assert_eq!(state.switcher_live.get_untracked(), 0);
+        assert_eq!(state.switcher_expanding.get_untracked(), Some(2));
+
+        assert!(finish_select(&state, 2, fresh));
+        assert_eq!(state.switcher_live.get_untracked(), fresh);
+    }
+
+    #[test]
     fn tablet_scale_only_past_840() {
         assert_eq!(card_scale_for(840.0), None);
         assert_eq!(card_scale_for(841.0), Some(0.58));
     }
 
+    /// Mount `build` at phone size for two frames and return the semantics
+    /// nodes as (role, label) pairs.
+    fn mount_nodes(
+        state: &mut CatalogState,
+        build: fn(&CatalogState) -> frust::AnyView<CatalogState>,
+    ) -> Vec<(String, String)> {
+        use frust_core::RenderRoot;
+        use frust_text::TextContext;
+        let mut tcx = TextContext::new();
+        let mut root: RenderRoot<CatalogState, frust::AnyView<CatalogState>> = RenderRoot::new();
+        let mut logic = |s: &mut CatalogState| build(s);
+        for _ in 0..2 {
+            root.rebuild(&mut logic, state);
+            let tcx_any: &mut dyn std::any::Any = &mut tcx;
+            root.layout_with_text(kurbo::Size::new(390.0, 844.0), tcx_any);
+        }
+        root.semantics()
+            .nodes
+            .iter()
+            .map(|(_, n)| {
+                (
+                    format!("{:?}", n.role()),
+                    n.label().unwrap_or_default().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    fn stage(state: &CatalogState) -> frust::AnyView<CatalogState> {
+        frust::any(switcher_stage(state))
+    }
+
+    fn has(nodes: &[(String, String)], role: &str, label: &str) -> bool {
+        nodes.iter().any(|(r, l)| r == role && l == label)
+    }
+
     #[test]
-    fn page_builds_closed_open_and_expanding() {
-        let (_owner, state) = setup();
-        let _ = page(&state);
-        let _ = switcher_stage(&state);
+    fn stage_shows_the_fab_closed_and_the_switcher_bar_open() {
+        let (_owner, mut state) = setup();
+
+        let closed = mount_nodes(&mut state, stage);
+        assert!(has(&closed, "Button", "Exit demo"), "live page app bar");
+        assert!(has(&closed, "TitleBar", "devbox"), "live face is devbox");
+        assert!(
+            !has(&closed, "Button", "close"),
+            "no switcher bar when closed"
+        );
+        assert!(!has(&closed, "Button", "+ add server"));
+
         state.switcher_open.set(true);
-        let _ = page(&state);
-        let _ = switcher_stage(&state);
+        let open = mount_nodes(&mut state, stage);
+        assert!(has(&open, "Button", "close"), "close chip");
+        assert!(has(&open, "Button", "+ add server"), "add-server chip");
+        assert!(has(&open, "Status", "page 1 of 4"), "strip position");
+
+        // Expanding keeps the bar; the page still mounts and shows its peer.
         state.switcher_expanding.set(Some(1));
-        let _ = page(&state);
-        let _ = switcher_stage(&state);
+        let expanding = mount_nodes(&mut state, stage);
+        assert!(has(&expanding, "Button", "close"));
+    }
+
+    #[test]
+    fn page_mounts_with_the_launch_button_in_each_state() {
+        let (_owner, mut state) = setup();
+        let page_view = |s: &CatalogState| frust::any(page(s));
+        let closed = mount_nodes(&mut state, page_view);
+        assert!(!closed.is_empty(), "the page produces semantics");
+        state.switcher_open.set(true);
+        assert!(!mount_nodes(&mut state, page_view).is_empty());
+        state.switcher_expanding.set(Some(1));
+        assert!(!mount_nodes(&mut state, page_view).is_empty());
     }
 }

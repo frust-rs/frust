@@ -219,6 +219,7 @@ impl CatalogState {
     /// navigator controller.
     pub fn new() -> Self {
         let switcher_open = RwSignal::new(false);
+        let switcher_expanding = RwSignal::new(None);
         CatalogState {
             brightness: RwSignal::new(Brightness::Dark),
             reduce_motion: RwSignal::new(false),
@@ -229,11 +230,16 @@ impl CatalogState {
             elevated: RwSignal::new(false),
             animations_enabled: RwSignal::new(true),
             switcher_open,
-            switcher_expanding: RwSignal::new(None),
+            switcher_expanding,
             switcher_live: RwSignal::new(0),
             switcher_fullscreen: RwSignal::new(false),
             window_width: RwSignal::new(0.0),
-            switcher_back: frust_glyph::SwitcherBack::new(move || switcher_open.set(false)),
+            // Back withdraws a pending selection too, so the delayed swap
+            // does not switch to a server the user backed out of.
+            switcher_back: frust_glyph::SwitcherBack::new(move || {
+                switcher_expanding.set(None);
+                switcher_open.set(false);
+            }),
         }
     }
 }
@@ -497,14 +503,16 @@ frust::app!(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use frust::accesskit::Role;
     use frust_core::RenderRoot;
     use frust_reactive::ReactiveRuntime;
     use frust_text::TextContext;
     use reactive_graph::owner::Owner;
 
     /// Mount the shell at `(w, h)` for two frames (the second sees the width
-    /// the first layout published) and return its semantics dump.
-    fn mount(state: &mut CatalogState, w: f64, h: f64) -> String {
+    /// the first layout published) and return its semantics nodes as
+    /// (role, label) pairs.
+    fn mount(state: &mut CatalogState, w: f64, h: f64) -> Vec<(Role, String)> {
         let mut tcx = TextContext::new();
         let mut root: RenderRoot<CatalogState, AnyView<CatalogState>> = RenderRoot::new();
         let mut logic = |s: &mut CatalogState| shell_page(s);
@@ -513,7 +521,15 @@ mod tests {
             let tcx_any: &mut dyn std::any::Any = &mut tcx;
             root.layout_with_text(kurbo::Size::new(w, h), tcx_any);
         }
-        format!("{:?}", root.semantics().nodes)
+        root.semantics()
+            .nodes
+            .iter()
+            .map(|(_, n)| (n.role(), n.label().unwrap_or_default().to_string()))
+            .collect()
+    }
+
+    fn has(nodes: &[(Role, String)], role: Role, label: &str) -> bool {
+        nodes.iter().any(|(r, l)| *r == role && l == label)
     }
 
     fn setup() -> (Owner, CatalogState) {
@@ -528,23 +544,29 @@ mod tests {
         for (w, h, tablet) in [(390.0, 844.0, false), (1194.0, 834.0, true)] {
             let (_owner, mut state) = setup();
             let tabbed = mount(&mut state, w, h);
-            assert!(tabbed.contains("Motion"), "tabbed shell has the tab strip");
-            assert!(!tabbed.contains("Exit demo"));
+            assert!(
+                has(&tabbed, Role::Tab, "Motion"),
+                "tabbed shell has the tab strip"
+            );
+            assert!(!has(&tabbed, Role::Button, "Exit demo"));
 
             state.switcher_fullscreen.set(true);
             let full = mount(&mut state, w, h);
             assert!(
-                full.contains("Exit demo"),
+                has(&full, Role::Button, "Exit demo"),
                 "full-screen stage has the exit action"
             );
-            assert!(!full.contains("Motion"), "no tab strip in full-screen mode");
+            assert!(
+                !has(&full, Role::Tab, "Motion"),
+                "no tab strip in full-screen mode"
+            );
 
             assert_eq!(state.window_width.get_untracked(), w);
             let scale = pages::motion::card_scale_for(state.window_width.get_untracked());
             assert_eq!(scale, tablet.then_some(0.58));
 
             state.switcher_fullscreen.set(false);
-            assert!(mount(&mut state, w, h).contains("Motion"));
+            assert!(has(&mount(&mut state, w, h), Role::Tab, "Motion"));
         }
     }
 }
