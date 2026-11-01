@@ -1710,6 +1710,10 @@ impl CardSwitcherWidget {
             && position.x < size.width
             && position.y < size.height;
         if self.strip.busy() {
+            // The Up this branch swallows would have ended a press the
+            // expansion cut short (its start already dropped `strip_gesture`);
+            // disarm the core so `down_active` cannot outlive it.
+            self.strip.end_gesture();
             self.strip_gesture = false;
             self.close_armed = false;
             return if inside {
@@ -2788,6 +2792,37 @@ mod tests {
             assert!((rig.offset() - rest).abs() < 1e-6, "sprang back to {rest}");
             assert!(log.borrow().is_empty());
         }
+    }
+
+    #[test]
+    fn a_swallowed_up_while_busy_does_not_leave_the_clamp_guard_stuck() {
+        let log = Log::default();
+        let open = strip_view(true, 4, 3, &log);
+        let mut rig = Rig::new(&open, PHONE);
+        let at_rest = rig.offset();
+        assert!(at_rest > 0.0, "the live card is deep in the strip");
+
+        // Hold a press on the strip, then the app starts an expansion.
+        rig.pointer(PointerPhase::Down, PHONE.width / 2.0);
+        assert!(rig.w.strip_gesture && rig.w.strip.core.down_active);
+        let expanding = strip_view(true, 4, 3, &log).expanding(Some(0));
+        rig.rebuild(&open, &expanding);
+        rig.frame(16.0);
+        assert!(rig.w.strip.busy());
+
+        // The Up is swallowed; the app drops the expansion and the peers.
+        let up = rig.pointer(PointerPhase::Up, PHONE.width / 2.0);
+        assert_eq!(up, EventResult::Handled);
+        assert!(!rig.w.strip.core.down_active, "the press is over");
+        let fewer = strip_view(true, 1, 0, &log);
+        rig.rebuild(&expanding, &fewer);
+        rig.settle();
+        let max = rig.w.strip.max_scroll_extent();
+        assert!(
+            rig.offset() <= max + 1e-6,
+            "offset {} past the extent {max}",
+            rig.offset()
+        );
     }
 
     #[test]
