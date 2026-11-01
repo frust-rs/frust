@@ -24,9 +24,9 @@
 //! # States
 //!
 //! - **Pressed** (primary button, captured while held): the fill takes a
-//!   `on_primary` tint. The change is instant, so there is no animation to
-//!   pace and nothing to special-case under `reduce_motion`: the widget never
-//!   requests a frame.
+//!   `on_primary` tint. Press feedback is an instant tint, so `reduce_motion`
+//!   has nothing to collapse: the widget has no animation and never requests a
+//!   frame.
 //! - **Disabled**: the shadow is dropped and fill/ink dim to `on_surface` at
 //!   `.12`/`.38`; the control ignores pointer input and reports disabled
 //!   semantics instead of a Click action.
@@ -65,9 +65,6 @@ const DISABLED_INK_ALPHA: f32 = 0.38;
 const FALLBACK_FILL: Color = Color::from_rgb8(0xff, 0xb6, 0x27); // amber accent
 const FALLBACK_INK: Color = Color::from_rgb8(0x24, 0x1a, 0x04); // on-amber
 const FALLBACK_ON_SURFACE: Color = Color::from_rgb8(0xf2, 0xea, 0xd9); // fg
-const FALLBACK_SHADOW_Y: f64 = 6.0;
-const FALLBACK_SHADOW_BLUR: f64 = 16.0;
-const FALLBACK_SHADOW_ALPHA: f32 = 0.35;
 
 /// A view-held, typed press callback (erased on build).
 type OnPress<State> = Rc<dyn Fn(&mut State)>;
@@ -121,11 +118,9 @@ impl<State: 'static> View<State> for FabView<State> {
     type Element = FabWidget;
 
     fn build(&self, _ctx: &mut BuildCtx<'_>) -> FabWidget {
-        let (path, design) = self.icon.resolve();
         FabWidget {
             icon: self.icon.clone(),
-            path,
-            design,
+            path: icon_path(&self.icon),
             mini: self.mini,
             label: self.label.clone(),
             disabled: self.disabled,
@@ -142,13 +137,16 @@ impl<State: 'static> View<State> for FabView<State> {
         _ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         element.on_press = frust::authoring::erase_callback(&self.on_press);
-        element.label = self.label.clone();
         let mut flags = ChangeFlags::NONE;
+        if prev.label != self.label {
+            element.label = self.label.clone();
+            // Semantics-only, but `PAINT` is what bumps the root's semantics
+            // dirty gate, and there is no narrower flag.
+            flags |= ChangeFlags::PAINT;
+        }
         if !prev.icon.same(&self.icon) {
-            let (path, design) = self.icon.resolve();
             element.icon = self.icon.clone();
-            element.path = path;
-            element.design = design;
+            element.path = icon_path(&self.icon);
             flags |= ChangeFlags::PAINT;
         }
         if element.mini != self.mini {
@@ -171,9 +169,9 @@ impl<State: 'static> View<State> for FabView<State> {
 pub struct FabWidget {
     /// Retained for `rebuild`'s cheap same-icon check.
     icon: IconData,
-    /// The parsed icon path in its design-box space.
+    /// The icon path pre-scaled to `ICON_SIZE`, built once per icon so paint
+    /// allocates nothing (`fill_path` takes no transform).
     path: BezPath,
-    design: f64,
     mini: bool,
     label: Option<String>,
     disabled: bool,
@@ -187,10 +185,12 @@ impl FabWidget {
         if self.mini { FAB_MINI_SIZE } else { FAB_SIZE }
     }
 
-    /// Whether `pos` (widget-local) is inside the circle.
-    fn hit(&self, pos: Point) -> bool {
-        let r = self.diameter() / 2.0;
-        let (dx, dy) = (pos.x - r, pos.y - r);
+    /// Whether `pos` (widget-local) is inside the circle painted in a box of
+    /// the laid-out `size` (centre `size / 2`, radius `min(w, h) / 2`), so the
+    /// hit area always agrees with the paint.
+    fn hit(pos: Point, size: Size) -> bool {
+        let r = size.width.min(size.height) / 2.0;
+        let (dx, dy) = (pos.x - size.width / 2.0, pos.y - size.height / 2.0);
         dx * dx + dy * dy <= r * r
     }
 
@@ -225,11 +225,16 @@ impl FabWidget {
                     with_alpha(t.scheme().shadow, spec.color_alpha),
                 )
             }
-            None => (
-                FALLBACK_SHADOW_Y,
-                FALLBACK_SHADOW_BLUR,
-                with_alpha(Color::from_rgb8(0, 0, 0), FALLBACK_SHADOW_ALPHA),
-            ),
+            None => {
+                // Unthemed is the dark brightness: same `floating()` token,
+                // black ink.
+                let spec = crate::tokens::scales::floating().shadow_dark;
+                (
+                    spec.y_offset,
+                    spec.blur_std_dev,
+                    with_alpha(Color::from_rgb8(0, 0, 0), spec.color_alpha),
+                )
+            }
         }
     }
 }
@@ -258,15 +263,13 @@ impl Widget for FabWidget {
         }
         scene.fill_rounded_rect(origin, size, radius, fill);
 
-        let scale = if self.design > 0.0 {
-            ICON_SIZE / self.design
-        } else {
-            1.0
-        };
         let dx = (size.width - ICON_SIZE) / 2.0;
         let dy = (size.height - ICON_SIZE) / 2.0;
-        let glyph = Affine::translate((dx, dy)) * Affine::scale(scale) * self.path.clone();
-        scene.fill_path(origin, &glyph, &Brush::Solid(ink));
+        scene.fill_path(
+            Point::new(origin.x + dx, origin.y + dy),
+            &self.path,
+            &Brush::Solid(ink),
+        );
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
@@ -278,7 +281,7 @@ impl Widget for FabWidget {
         };
         match p.phase {
             PointerPhase::Down => {
-                if !presses(p) || !self.hit(p.position) {
+                if !presses(p) || !Self::hit(p.position, ctx.size()) {
                     return EventResult::Ignored;
                 }
                 self.pressed = true;
@@ -291,7 +294,7 @@ impl Widget for FabWidget {
                 if !self.captured {
                     return EventResult::Ignored;
                 }
-                let inside = self.hit(p.position);
+                let inside = Self::hit(p.position, ctx.size());
                 if inside != self.pressed {
                     self.pressed = inside;
                     ctx.request_redraw();
@@ -302,7 +305,7 @@ impl Widget for FabWidget {
                 if !self.captured {
                     return EventResult::Ignored;
                 }
-                let fired = self.hit(p.position);
+                let fired = Self::hit(p.position, ctx.size());
                 self.pressed = false;
                 self.captured = false;
                 if fired {
@@ -335,6 +338,17 @@ impl Widget for FabWidget {
             }
         });
     }
+}
+
+/// The icon's path scaled from its design box to `ICON_SIZE`.
+fn icon_path(icon: &IconData) -> BezPath {
+    let (path, design) = icon.resolve();
+    let scale = if design > 0.0 {
+        ICON_SIZE / design
+    } else {
+        1.0
+    };
+    Affine::scale(scale) * path
 }
 
 /// `color` with its alpha replaced by `alpha`.
@@ -559,18 +573,91 @@ mod tests {
         assert!(node.supports_action(Action::Click));
     }
 
+    fn rebuild_flags(prev: &FabView<Taps>, next: &FabView<Taps>, w: &mut FabWidget) -> ChangeFlags {
+        let mut counter = 0u64;
+        View::<Taps>::rebuild(next, prev, w, &mut BuildCtx::new(&mut counter))
+    }
+
     #[test]
-    fn reduce_motion_press_requests_no_frame() {
-        let mut theme = crate::baseline();
-        theme.motion.reduce_motion = true;
-        let mut w = build(&view());
-        let size = layout(&mut w);
+    fn label_change_flags_paint_and_republishes_the_name() {
+        fn logic(_s: &mut Taps) -> FabView<Taps> {
+            fab(icon_data(), |_s: &mut Taps| {}).label("Add")
+        }
+        let (prev, next) = (view(), view().label("Create"));
+        let mut w = build(&prev);
+        assert_eq!(rebuild_flags(&prev, &next, &mut w), ChangeFlags::PAINT);
+        assert_eq!(w.label.as_deref(), Some("Create"));
+        // Identical label: nothing to flag.
+        assert_eq!(rebuild_flags(&next, &next, &mut w), ChangeFlags::NONE);
+        // The published semantics node carries the new name.
+        let mut root: frust_core::RenderRoot<Taps, FabView<Taps>> = frust_core::RenderRoot::new();
+        let mut state = Taps::default();
+        root.rebuild(&mut logic, &mut state);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(Size::new(200.0, 200.0), &mut tcx as &mut dyn Any);
+        let _ = root.semantics();
+        fn logic2(_s: &mut Taps) -> FabView<Taps> {
+            fab(icon_data(), |_s: &mut Taps| {}).label("Create")
+        }
+        root.rebuild(&mut logic2, &mut state);
+        let update = root.semantics();
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::Button)
+            .expect("fab contributes a Role::Button node");
+        assert_eq!(node.label(), Some("Create"));
+    }
+
+    #[test]
+    fn mini_flip_flags_layout() {
+        let (prev, next) = (view(), view().mini(true));
+        let mut w = build(&prev);
+        let flags = rebuild_flags(&prev, &next, &mut w);
+        assert!(flags.contains(ChangeFlags::LAYOUT));
+        assert_eq!(layout(&mut w), Size::new(40.0, 40.0));
+    }
+
+    #[test]
+    fn icon_swap_flags_paint_only() {
+        let prev = view();
+        let other = IconData::from_path(
+            kurbo::Shape::to_path(&Rect::new(2.0, 2.0, 10.0, 10.0), 0.1),
+            24.0,
+        );
+        let next = fab(other, |s: &mut Taps| s.count += 1).label("Add");
+        let mut w = build(&prev);
+        assert_eq!(rebuild_flags(&prev, &next, &mut w), ChangeFlags::PAINT);
+    }
+
+    #[test]
+    fn disabling_mid_press_clears_capture_and_the_next_up_fires_nothing() {
+        let prev = view();
+        let next = view().disabled(true);
+        let mut w = build(&prev);
+        layout(&mut w);
         let mut taps = Taps::default();
         dispatch(&mut w, &mut taps, &ev(PointerPhase::Down, 23.0, 23.0));
-        let (_, needs_frame) = paint(&mut w, size, Some(&theme));
-        assert!(!needs_frame);
+        assert!(w.captured && w.pressed);
+        let flags = rebuild_flags(&prev, &next, &mut w);
+        assert!(flags.contains(ChangeFlags::PAINT));
+        assert!(!w.captured && !w.pressed);
         dispatch(&mut w, &mut taps, &ev(PointerPhase::Up, 23.0, 23.0));
-        let (_, needs_frame) = paint(&mut w, size, Some(&theme));
-        assert!(!needs_frame);
+        assert_eq!(taps.count, 0);
+    }
+
+    #[test]
+    fn hit_test_follows_the_laid_out_size_under_a_tight_constraint() {
+        let mut w = build(&view());
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        let size = w.layout(&mut lctx, &BoxConstraints::tight(Size::new(56.0, 56.0)));
+        assert_eq!(size, Size::new(56.0, 56.0));
+        let mut taps = Taps::default();
+        let any: &mut dyn Any = &mut taps;
+        let mut ctx = EventCtx::new(any, Point::ZERO, size);
+        w.event(&mut ctx, &ev(PointerPhase::Down, 50.0, 28.0));
+        w.event(&mut ctx, &ev(PointerPhase::Up, 50.0, 28.0));
+        assert_eq!(taps.count, 1);
     }
 }
