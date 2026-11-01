@@ -70,14 +70,12 @@ pub struct BarcodePoint {
 /// A single decoded barcode.
 #[derive(Clone, Debug)]
 pub struct Barcode {
-    /// Decoded textual payload (lossy UTF-8 where the payload is binary —
-    /// v1's QR-only engine always decodes a valid UTF-8 string, so this is
-    /// never actually lossy today; the field is typed for a future
-    /// binary-payload format).
+    /// Decoded textual payload — lossy UTF-8 (invalid sequences become
+    /// U+FFFD) where the payload is not valid UTF-8, e.g. a byte-mode QR
+    /// code carrying binary data or Latin-1 text.
     pub raw_value: String,
-    /// Raw decoded bytes when they differ from `raw_value`'s UTF-8 (else
-    /// `None`). Always `None` in v1 — `rqrr` only ever hands back a
-    /// UTF-8-validated `String`.
+    /// Raw decoded bytes when they differ from `raw_value`'s UTF-8, i.e. when
+    /// the payload is not valid UTF-8 (else `None`).
     pub raw_bytes: Option<Vec<u8>>,
     /// Which [`BarcodeFormat`] this decode matched.
     pub format: BarcodeFormat,

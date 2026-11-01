@@ -43,11 +43,15 @@ impl BarcodeEngine for RqrrEngine {
             .filter_map(|grid| {
                 // A failed grid is "no detection", not an API error — the
                 // caller never sees the decode failure, only that this grid
-                // produced nothing.
-                let (_meta, raw_value) = grid.decode().ok()?;
+                // produced nothing. `decode_to` rather than `decode`: the
+                // latter fails the whole grid on a payload that isn't UTF-8,
+                // which would drop a valid byte-mode code.
+                let mut bytes = Vec::new();
+                grid.decode_to(&mut bytes).ok()?;
+                let (raw_value, raw_bytes) = split_payload(bytes);
                 Some(Barcode {
                     raw_value,
-                    raw_bytes: None,
+                    raw_bytes,
                     format: BarcodeFormat::QrCode,
                     // `grid.bounds` is documented `[top-left, top-right,
                     // bottom-right, bottom-left]` — already clockwise from
@@ -56,6 +60,19 @@ impl BarcodeEngine for RqrrEngine {
                 })
             })
             .collect()
+    }
+}
+
+/// A decoded payload as `(raw_value, raw_bytes)`: a UTF-8 payload is the
+/// string alone; anything else keeps its exact bytes in `raw_bytes` next to
+/// a lossy `raw_value`.
+fn split_payload(bytes: Vec<u8>) -> (String, Option<Vec<u8>>) {
+    match String::from_utf8(bytes) {
+        Ok(text) => (text, None),
+        Err(err) => {
+            let bytes = err.into_bytes();
+            (String::from_utf8_lossy(&bytes).into_owned(), Some(bytes))
+        }
     }
 }
 

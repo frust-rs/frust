@@ -365,6 +365,11 @@ matching the `mobile_scanner` package's own default):
 `formats: &[]` means "all supported" (empty = all, the same convention
 `decode_luma`/`decode_frame` use) — the v1 engine decodes QR only.
 
+A payload that is not valid UTF-8 (a byte-mode QR code carrying binary data
+or Latin-1 text) still decodes: `raw_bytes` holds its exact bytes and
+`raw_value` a lossy UTF-8 rendering. `raw_bytes` is `None` for a UTF-8
+payload.
+
 ---
 
 ## 5. Torch
