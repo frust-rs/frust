@@ -51,22 +51,6 @@
 //! its full laid-out bounds — the same v1 rule huddle's `PressPop` precedent
 //! established (see `push_transform`'s own doc). A future addition may add a
 //! scaled-hit-test opt-in; this module deliberately does not.
-//!
-//! # Reduced motion: a collapse that overrides explicit timing
-//!
-//! When `theme.motion.reduce_motion` is set, both wrappers collapse rather
-//! than animate, the same rule the navigator and `PatternSwitcher` follow,
-//! and an explicit [`.timing(...)`](AnimatedOpacityView::timing) does not
-//! override it. [`AnimatedOpacity`] runs a 120 ms linear fade to the target
-//! alpha. [`AnimatedScale`] snaps straight to the target scale and requests
-//! no frame. The flag is read at paint, so a flip takes effect on the next
-//! paint. An opacity fade handles a flip through the retarget driver: the
-//! in-flight value is re-driven from where it is under the new timing, which
-//! is value-continuous like any retarget. A flip re-drives only an in-flight
-//! value: a value already settled on its target stays settled and requests no
-//! frame, so a theme flip never animates a no-op. A scale snap bypasses the
-//! driver (`ImplicitAnim::snap` writes the target straight into the retained
-//! state), so an in-flight scale lands on its target at that same paint.
 
 use std::time::Duration;
 
@@ -134,8 +118,9 @@ fn resolve_scale_timing(theme: Option<&Theme>, explicit: Option<Timing>) -> Timi
     })
 }
 
-/// Whether the threaded theme asks for reduced motion. `false` when no theme
-/// is threaded, so an unthemed paint animates exactly as before.
+/// Whether the threaded theme asks for reduced motion — the collapse rule the
+/// navigator and `PatternSwitcher` follow, read at paint so a flip lands on the
+/// next paint. `false` unthemed, so an unthemed paint animates as before.
 fn reduce_motion(theme: Option<&Theme>) -> bool {
     theme.is_some_and(|theme| theme.motion.reduce_motion)
 }
@@ -158,9 +143,8 @@ fn scale_about(pivot: Point, scale: f64) -> Affine {
         * Affine::translate((-pivot.x, -pivot.y))
 }
 
-/// How close `value()` must sit to its target to count as landed when the
-/// driver is still formally running — far above f64 lerp residue (≈1e-16) and
-/// far below any visible opacity or scale step.
+/// How close `value()` must sit to its target to count as landed: far above
+/// f64 lerp residue (≈1e-16), far below any visible opacity or scale step.
 const SETTLED_EPS: f64 = 1e-9;
 
 // --- Shared retarget driver --------------------------------------------------
@@ -185,9 +169,8 @@ struct ImplicitAnim {
     /// The `0..1` progress driver (the page-transition driver, reused here —
     /// see the [module docs](self)).
     driver: TransitionDriver,
-    /// Whether the current `driver` was set under the reduced-motion collapse.
-    /// A `reduce_motion` flip re-drives an in-flight value under the other
-    /// timing; a settled one just records the flag.
+    /// Whether the current `driver` was set under the reduced-motion collapse
+    /// (a flip re-drives an in-flight value under the other timing).
     driving_reduced: bool,
 }
 
@@ -242,17 +225,12 @@ impl ImplicitAnim {
         )
     }
 
-    /// Whether the value has landed on the target with no retarget pending.
-    /// A settled value has nothing in flight: no re-drive and no frame.
-    ///
-    /// "Landed" means the driver has finished (an idle controller), or the
-    /// value sits within [`SETTLED_EPS`] of the target (a fresh or snapped
-    /// `(x, x)` tween whose zero-length driver has not ticked yet). Never
-    /// `==`: `value()` is `begin + (end − begin) × 1.0` once the driver reports
-    /// `1.0`, and that f64 round trip does not always return `end`
-    /// (`0.03 + (0.3 − 0.03)` is `0.30000000000000004`), so an exact
-    /// comparison would call a visually settled fade in flight and re-drive it
-    /// on a `reduce_motion` flip for 120 ms of no-op frames.
+    /// Whether the value has landed on the target with no retarget pending: the
+    /// driver finished, or the value sits within [`SETTLED_EPS`] of the target
+    /// (a fresh or snapped `(x, x)` tween not yet ticked). Never `==`: once the
+    /// driver reports `1.0`, `begin + (end − begin)` need not return `end`
+    /// (`0.03 + (0.3 − 0.03)` is `0.30000000000000004`), and an exact test would
+    /// re-drive a settled fade on a `reduce_motion` flip for 120 ms of no-ops.
     fn settled(&self) -> bool {
         if self.driving_target != self.target {
             return false;
@@ -264,13 +242,11 @@ impl ImplicitAnim {
         driver_idle || (self.value() - self.target).abs() <= SETTLED_EPS
     }
 
-    /// Settle straight at the target: no ramp, so `value()` reads the target
-    /// and the next `advance` reports settled. Used by [`AnimatedScaleWidget`]
-    /// under `reduce_motion`, which never runs a spatial ramp.
-    ///
-    /// Returns `false` without touching the driver when the value already sits
-    /// on the target under the reduced collapse, so a settled reduced paint
-    /// builds nothing. Returns `true` when it rebuilt the driver.
+    /// Settle straight at the target, bypassing the ramp so an in-flight scale
+    /// lands at this paint; [`AnimatedScaleWidget`] uses it under
+    /// `reduce_motion`, which never runs a spatial ramp. Returns whether it
+    /// rebuilt the driver: `false` when the value already sits on the target
+    /// under the reduced collapse, so a settled reduced paint builds nothing.
     fn snap(&mut self) -> bool {
         if self.driving_reduced && self.settled() {
             return false;
@@ -283,10 +259,9 @@ impl ImplicitAnim {
         true
     }
 
-    /// Shared body of [`Self::advance`] and [`Self::advance_collapsed`]. A
-    /// pending target change retargets from the current value. A flip of the
-    /// collapse flag re-drives only an in-flight value: a settled one stays
-    /// settled, records the new flag, and reports not animating.
+    /// Shared body of [`Self::advance`] and [`Self::advance_collapsed`]: a
+    /// pending target retargets from the current value; a collapse-flag flip
+    /// re-drives only an in-flight value (a settled one reports not animating).
     fn drive(&mut self, now: FrameTime, timing: Timing, reduced: bool) -> bool {
         let retargeted = self.target != self.driving_target;
         let flipped = reduced != self.driving_reduced;
@@ -347,8 +322,7 @@ pub fn AnimatedOpacity<State: 'static, V: View<State>>(
 }
 
 impl<State: 'static> AnimatedOpacityView<State> {
-    /// Override the default (theme-resolved) fade timing. Ignored under
-    /// `reduce_motion`, which collapses to a 120 ms linear fade.
+    /// Override the default (theme-resolved) fade timing.
     pub fn timing(mut self, timing: Timing) -> Self {
         self.timing = Some(timing);
         self
@@ -366,8 +340,7 @@ impl<State: 'static> AnimatedOpacityView<State> {
     }
 }
 
-/// The retained widget for an [`AnimatedOpacityView`]. Under `reduce_motion`
-/// it fades linearly over 120 ms, ignoring any explicit timing.
+/// The retained widget for an [`AnimatedOpacityView`].
 ///
 /// Keyboard input (`Shortcut`, `Key`, `Ime`, `EditCommand`) reaches the child
 /// and the child is a Tab stop only while the fade is above opacity 0; an
@@ -535,16 +508,14 @@ impl<State: 'static> AnimatedScaleView<State> {
         self
     }
 
-    /// Override the default (theme-resolved) scale timing. Ignored under
-    /// `reduce_motion`, which snaps to the target.
+    /// Override the default (theme-resolved) scale timing.
     pub fn timing(mut self, timing: Timing) -> Self {
         self.timing = Some(timing);
         self
     }
 }
 
-/// The retained widget for an [`AnimatedScaleView`]. Under `reduce_motion`
-/// it snaps to the target scale with no ramp and requests no frame.
+/// The retained widget for an [`AnimatedScaleView`].
 pub struct AnimatedScaleWidget {
     child: ChildPod,
     alignment: Alignment,
@@ -604,8 +575,7 @@ impl Widget for AnimatedScaleWidget {
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         let theme = Theme::from_paint_ctx(ctx);
         if reduce_motion(theme) {
-            // Reduced motion snaps to the target: no spatial ramp, no frame
-            // request. A settled reduced paint builds no driver (`snap` no-ops).
+            // Reduced motion snaps: no spatial ramp, no frame request.
             self.anim.snap();
         } else {
             let timing = resolve_scale_timing(theme, self.explicit_timing);
