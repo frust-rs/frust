@@ -7,8 +7,8 @@
 //! the theme's `scrim` role at 55 %, which the pattern resolves) and wires
 //! [`page_dots`] into the pattern's `dots_for` slot. Reach for the raw pattern
 //! when the stage needs another design system's look. The live-content swap
-//! handshake (tap, `on_select`, `expanding`, swap) is the pattern's; see its
-//! module docs.
+//! handshake (tap, `on_select`, `expanding`, swap) is the pattern's; see
+//! [`CardSwitcherView::expanding`].
 //!
 //! **Dots.** The dots index is the strip index: `count` is peers + 1, and the
 //! live card's dot is `live_index`. The dots follow drags, taps and expansions,
