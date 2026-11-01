@@ -253,6 +253,18 @@ pub use frust_core::EditCommand;
 /// a widget author.
 pub use frust_core::event::{FileDropEvent, FileDropPhase};
 
+/// The scale-gesture vocabulary. [`InputEvent::Scale`](authoring::InputEvent::Scale)
+/// carries a [`ScaleEvent`] (a multiplicative `scale_delta`, the `focal` point
+/// in local space, and a `velocity`) in one of three [`ScalePhase`]s;
+/// [`pinch_detector`]'s `.on_scale` and [`pan_zoom`] consume it. The
+/// [`PointerId`] names the contact a multi-contact gesture's
+/// [`InputEvent::PointerContact`](authoring::InputEvent::PointerContact) rides
+/// beside a pointer event; its [`PointerSource`] half says whether the contact
+/// is the mouse or a touch. Lifted flat for the same reason [`EditCommand`] is:
+/// an app's scale handler names these types in its public API without being a
+/// widget author.
+pub use frust_core::event::{PointerId, PointerSource, ScaleEvent, ScalePhase};
+
 /// The keyboard vocabulary app code names: a [`Chord`] bound with [`shortcuts`]
 /// in a [`ShortcutScope`], the [`ShortcutHint`] a palette lists
 /// (`RenderRoot::shortcut_hints`, labels rendered with [`Chord::display`]), the
@@ -488,6 +500,63 @@ pub use frust_widgets::{TextureFit, TextureView, TextureWidget, texture_view};
 /// ```
 pub use frust_widgets::{
     PanZoomController, PanZoomTransform, PanZoomView, PanZoomWidget, pan_zoom,
+};
+
+/// A transparent two-contact pinch wrapper over one child. [`pinch_detector`]
+/// hands the child the gesture's first contact unchanged, so a single-finger
+/// drag or scroll inside it behaves as if the wrapper were absent; once a pinch
+/// begins (`Begin`) the child's gesture is stolen with one synthesized
+/// `Cancel`. `.on_scale` sees the same [`ScaleEvent`]/[`ScalePhase`] stream a
+/// desktop ctrl/⌘+wheel or trackpad pinch produces (a desktop `Scale` reaches
+/// it only when the child ignores it), so a consumer reacts to every scale
+/// source through one type. [`PinchRecognizer`] is the pure state machine
+/// underneath, usable on its own, and [`PINCH_SLOP`] its recognition threshold.
+/// Flat-re-exported from `frust-widgets` so app code never names that crate
+/// directly; see [`frust_widgets::pinch`] for the full contract (recognition,
+/// velocity, the steal).
+///
+/// ```no_run
+/// use frust::{Component, ScaleEvent, ScalePhase, View, canvas, pinch_detector};
+/// use frust::authoring::{PaintCtx, PaintScene};
+/// use kurbo::{Point, Size};
+/// use peniko::Color;
+///
+/// #[derive(Default)]
+/// struct Zoomer;
+///
+/// struct ZoomState {
+///     scale: f64,
+/// }
+///
+/// impl Component for Zoomer {
+///     type State = ZoomState;
+///
+///     fn init(&self) -> Self::State {
+///         ZoomState { scale: 1.0 }
+///     }
+///
+///     fn build(&self, _state: &mut Self::State) -> impl View<Self::State> {
+///         pinch_detector(Self::surface()).on_scale(|state: &mut ZoomState, e: ScaleEvent| {
+///             if e.phase == ScalePhase::Update {
+///                 state.scale *= e.scale_delta;
+///             }
+///         })
+///     }
+/// }
+///
+/// impl Zoomer {
+///     fn surface() -> impl View<ZoomState> {
+///         canvas(|scene: &mut dyn PaintScene, size: Size, _ctx: &PaintCtx| {
+///             scene.fill_rect(Point::ZERO, size, Color::from_rgb8(0x20, 0x20, 0x20));
+///         })
+///     }
+/// }
+///
+/// frust::app!(Zoomer);
+/// # fn main() {}
+/// ```
+pub use frust_widgets::{
+    PINCH_SLOP, PinchDetectorView, PinchDetectorWidget, PinchRecognizer, pinch_detector,
 };
 
 /// The vendored Material Symbols starter icon set,
@@ -734,6 +803,10 @@ pub mod authoring {
     /// `frust-core` dependency. Also re-exported flat as
     /// [`frust::CursorIcon`](crate::CursorIcon).
     pub use frust_core::CursorIcon;
+    /// The scale-gesture and contact types: a widget author matches
+    /// `InputEvent::Scale(ScaleEvent)` and `InputEvent::PointerContact {
+    /// pointer_id, .. }` by name. Also flat at the crate root.
+    pub use frust_core::event::{PointerId, PointerSource, ScaleEvent, ScalePhase};
     pub use frust_core::{
         AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, DiscardScene, EventCtx,
         EventOutcome, EventResult, HeroDirective, HeroFrames, InputEvent, Key, KeyEvent, LayoutCtx,
@@ -3358,6 +3431,55 @@ mod scroll_physics_reexport {
         // platform's default — is directly constructible through the facade
         // too, which is the whole point of it staying reachable.
         let _: RubberBand = RubberBand::new();
+    }
+}
+
+/// Facade-level check that the pinch vocabulary and the scale/contact event
+/// types resolve flat and under [`authoring`], as the same types.
+#[cfg(test)]
+mod pinch_reexport {
+    use crate::authoring::Point;
+    use crate::{
+        PINCH_SLOP, PinchDetectorView, PinchDetectorWidget, PinchRecognizer, PointerId,
+        PointerSource, ScaleEvent, ScalePhase, pinch_detector, text,
+    };
+
+    // A build-time proof the types name-resolve through the facade.
+    #[allow(dead_code, clippy::too_many_arguments)]
+    fn _uses_all(
+        _w: &PinchDetectorWidget,
+        _r: &PinchRecognizer,
+        _id: PointerId,
+        _flat: ScaleEvent,
+        _nested: crate::authoring::ScaleEvent,
+        _p: crate::authoring::ScalePhase,
+        _c: crate::authoring::PointerId,
+        _src: PointerSource,
+        _src2: crate::authoring::PointerSource,
+    ) {
+    }
+
+    #[test]
+    fn pinch_vocabulary_resolves_through_the_facade() {
+        let focal = Point::new(1.0, 2.0);
+        let event = ScaleEvent {
+            phase: ScalePhase::Begin,
+            scale_delta: 1.0,
+            focal,
+            velocity: 0.0,
+        };
+        let same: crate::authoring::ScaleEvent = event;
+        assert_eq!(same.phase, ScalePhase::Begin);
+        assert_eq!(PointerId::MOUSE, crate::authoring::PointerId::MOUSE);
+        assert_eq!(PointerId::touch(1).slot, 1);
+        assert_eq!(PointerId::touch(1).source, PointerSource::Touch);
+        assert_eq!(
+            PointerId::MOUSE.source,
+            crate::authoring::PointerSource::Mouse
+        );
+        assert!(std::hint::black_box(PINCH_SLOP) > 0.0);
+        let view: PinchDetectorView<()> = pinch_detector(text("x")).on_scale(|_s: &mut (), _e| {});
+        let _ = view;
     }
 }
 

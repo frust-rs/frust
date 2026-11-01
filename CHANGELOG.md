@@ -6,6 +6,13 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ## Unreleased
 
+### Added
+
+- frust facade re-exports the pinch vocabulary (`pinch_detector`, `PinchDetectorView`,
+  `PinchDetectorWidget`, `PinchRecognizer`, `PINCH_SLOP`) and the scale/contact event types
+  (`ScaleEvent`, `ScalePhase`, `PointerId`, `PointerSource`), also under `frust::authoring`; closes
+  the gap recorded against 0.6.3's `pan_zoom`/`canvas` additions.
+
 ### Fixed
 
 - `frust-camera`'s barcode decoder no longer drops a QR code whose payload is not UTF-8 (a
