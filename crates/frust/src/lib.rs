@@ -161,8 +161,8 @@ pub use frust_widgets::{
     KeepAliveView, ListView, ListViewWidget, MAX_FLING_VELOCITY, MIN_FLING_VELOCITY,
     MainAxisAlignment, NavigatorController, NavigatorId, NavigatorView, NeverScrollable,
     OverlayAlign, OverlayPlacement, OverlayPortalView, OverlaySide, OverscrollEffect, Padding,
-    PaddingView, PageBuilder, PageTransition, PageVisibility, PopResult, PushOptions, Radio,
-    RadioView, RadioWidget, ReorderableListView, RepaintBoundaryView, ResultCallback, Row,
+    PaddingView, PageBuilder, PageSnap, PageTransition, PageVisibility, PopResult, PushOptions,
+    Radio, RadioView, RadioWidget, ReorderableListView, RepaintBoundaryView, ResultCallback, Row,
     RubberBand, SafeAreaView, ScaffoldView, ScrollAxis, ScrollController, ScrollInfo,
     ScrollMetrics, ScrollPhysics, ScrollSubscription, ScrollView, ScrollbarShow, ScrollbarStyle,
     ShortcutsView, Simulation, SizedBox, SizedBoxView, Slider, SliderView, SliverBoxView,
@@ -3341,7 +3341,8 @@ mod native_typefaces_reexport {
 #[cfg(test)]
 mod scroll_physics_reexport {
     use crate::{
-        Bouncing, OverscrollEffect, RubberBand, ScrollPhysics, ScrollView, scroll_view, text,
+        Bouncing, OverscrollEffect, PageSnap, RubberBand, ScrollPhysics, ScrollView, scroll_view,
+        text,
     };
 
     // A build-time proof the types name-resolve through the facade.
@@ -3358,6 +3359,9 @@ mod scroll_physics_reexport {
         // platform's default — is directly constructible through the facade
         // too, which is the whole point of it staying reachable.
         let _: RubberBand = RubberBand::new();
+        // PageSnap — Flutter's PageScrollPhysics — resolves and chains too.
+        let _: PageSnap = PageSnap::fraction(0.62).chain(Bouncing::new());
+        let _: PageSnap = PageSnap::extent(100.0);
     }
 }
 

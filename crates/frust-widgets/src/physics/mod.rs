@@ -40,6 +40,7 @@
 //! both features, it just never lets `edge_pull` show up as a position change.
 
 pub mod effect;
+pub mod page_snap;
 pub mod parity;
 pub mod rubber_band;
 pub mod simulation;
