@@ -221,8 +221,12 @@ impl<State: 'static> CardSwitcherView<State> {
     }
 
     /// Called with the **peer** index of a tapped peer card, once the strip
-    /// has centred it (the [module docs](self)' *Input*). A drag never
-    /// selects.
+    /// has centred it. A drag never selects.
+    ///
+    /// Steps 1-2 of the expansion handshake (steps 3-4 are on
+    /// [`CardSwitcherView::expanding`]): the user taps peer `i`, the strip
+    /// centres it and calls `on_select(i)`; the app records the choice and
+    /// rebuilds with `.expanding(Some(i))`.
     pub fn on_select(mut self, on_select: impl Fn(&mut State, usize) + 'static) -> Self {
         self.on_select = Some(Rc::new(on_select));
         self
@@ -285,8 +289,18 @@ impl<State: 'static> CardSwitcherView<State> {
     }
 
     /// The peer card expanding into the live page, if any: the strip centres
-    /// it and grows it to full screen, then holds for the app's swap (the
-    /// [module docs](self)' *Expanding a card*).
+    /// it, then the `close_timing` ramp (320 ms) grows it to full screen while
+    /// labels, dots and bar fade; pointer input is swallowed until it ends.
+    ///
+    /// Handshake, after [`CardSwitcherView::on_select`] (steps 1-2):
+    /// 3. the grow runs and holds;
+    /// 4. the app rebuilds with `open = false`, the chosen page as the live
+    ///    child, `.live_index` at that card's strip position (keep the strip
+    ///    order) and `.expanding(None)`.
+    ///
+    /// Step 4 may come any time after step 2: a mid-ramp close finishes the
+    /// grow from the current scale, and the new live child paints plainly where
+    /// the face was. `.expanding(None)` while still open reverses the ramp.
     pub fn expanding(mut self, peer: Option<usize>) -> Self {
         self.expanding = peer;
         self
@@ -603,8 +617,7 @@ enum Owed {
     Close,
 }
 
-/// A peer card growing into the page (see the module docs' *Expanding a
-/// card*).
+/// A peer card growing into the page (see [`CardSwitcherView::expanding`]).
 struct Expansion {
     peer: usize,
     /// Its strip position.
@@ -1644,7 +1657,7 @@ impl CardSwitcherWidget {
         if press {
             strip.tap_eligible = !strip.in_motion();
         }
-        // The strip is not nested (module docs): keep its registration out of
+        // The strip is not nested (see the header): keep its registration out of
         // any enclosing surface's claim cell, as a cross-axis viewport does.
         let host = if press && presses(pointer) {
             ambient_scroll_claim().map(|host| (host.get(), host))

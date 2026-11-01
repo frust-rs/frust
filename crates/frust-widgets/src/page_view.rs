@@ -70,8 +70,12 @@ struct PageShared {
     commands: Vec<PageCommand>,
 }
 
-/// A cloneable handle onto a [`PageView`] — Flutter's `PageController`. See
-/// the [module docs](self)' *Controller*.
+/// A cloneable handle onto a [`PageView`] — Flutter's `PageController`.
+///
+/// Clones share one state. The controller's offset, `is_animating` and
+/// `on_change` are the viewport's own ([`PageController::scroll_controller`]).
+/// A drag that springs back to its page fires nothing, and a change seen
+/// during an event is reported in the same event.
 ///
 /// ```
 /// use frust_widgets::{PageController, PageView, page_view, text};
@@ -316,8 +320,11 @@ impl<State: 'static> PageView<State> {
         self
     }
 
-    /// Call `callback` with the page index once per settled page change (the
-    /// [module docs](self)' *`on_page_changed` fires on settle*).
+    /// Call `callback` with the page index once per settled page change.
+    ///
+    /// Unlike Flutter this fires on settle, not mid-drag. The initial page is
+    /// recorded, not reported; a drag that springs back fires nothing; a change
+    /// seen at layout or paint is reported by the next `Housekeeping`.
     pub fn on_page_changed<F: Fn(&mut State, usize) + 'static>(mut self, callback: F) -> Self {
         self.on_page_changed = Some(Rc::new(callback));
         self
