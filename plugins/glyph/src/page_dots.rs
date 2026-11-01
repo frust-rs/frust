@@ -34,21 +34,23 @@
 //! # Semantics
 //!
 //! The row reports a `Role::Status` labelled `"page {index+1} of {count}"`. With
-//! `on_tap`, each dot is also a `Role::Button` child labelled `"page n"`.
+//! `on_tap`, each dot is also a `Role::Button` child labelled `"page n"`,
+//! whose bounds are that dot's own hit slot (not the whole row), so an
+//! assistive Click activates `on_tap(n - 1)`.
 
 use std::rc::Rc;
-use std::time::Duration;
 
 use frust::Theme;
 use frust::authoring::{
     Action, BoxConstraints, BuildCtx, ChangeFlags, EventCtx, EventResult, InputEvent, LayoutCtx,
     PaintCtx, PaintScene, PointerPhase, Role, SemanticsCtx, View, Widget,
 };
-use frust::{AnimationController, Curve, FrameTime};
+use frust::{AnimationController, FrameTime};
 use kurbo::{Point, Size};
 use peniko::Color;
 
 use crate::press::presses;
+use crate::tabs::{INDICATOR_CURVE, INDICATOR_DURATION};
 
 /// Default dot diameter, in logical px.
 const DEFAULT_DOT_SIZE: f64 = 6.0;
@@ -56,13 +58,6 @@ const DEFAULT_DOT_SIZE: f64 = 6.0;
 const DEFAULT_GAP: f64 = 8.0;
 /// Minimum tap-target height when `on_tap` is set, in logical px.
 const MIN_HIT_HEIGHT: f64 = 24.0;
-
-/// The highlight slide duration — the same `MotionScheme::glyph()`
-/// `durations.base` (220ms) that [`crate::tabs`] uses for its indicator.
-const INDICATOR_DURATION: Duration = Duration::from_millis(220);
-/// The highlight slide easing — the same overshooting spatial curve as
-/// [`crate::tabs`]'s indicator.
-const INDICATOR_CURVE: Curve = Curve::Cubic(0.34, 1.35, 0.64, 1.0);
 
 /// Unthemed active-dot fallback — the Glyph dark accent (`#ffb627`).
 const FALLBACK_ACTIVE: Color = Color::from_rgb8(0xff, 0xb6, 0x27);
@@ -288,6 +283,17 @@ impl PageDotsWidget {
         Some(i as usize)
     }
 
+    /// Widget-local `(x0, x1)` of slot `i`'s hit span: one pitch wide, centred
+    /// on the slot and clamped to the row, so neighbours abut without overlap
+    /// (the span `slot_at` maps back to `i`).
+    fn slot_span(&self, i: usize, width: f64) -> (f64, f64) {
+        let half = (self.dot_size + self.gap) / 2.0;
+        let c = self.slot_centre(i);
+        let x0 = if i == 0 { 0.0 } else { c - half };
+        let x1 = if i + 1 == self.count { width } else { c + half };
+        (x0.max(0.0), x1.min(width))
+    }
+
     /// `(active, inactive)` for the current theme.
     fn resolve_colors(theme: Option<&Theme>) -> (Color, Color) {
         match theme {
@@ -432,11 +438,23 @@ impl Widget for PageDotsWidget {
                     node.set_label(status.as_str());
                 },
                 |ctx| {
+                    // `push_node` stamps the whole row; narrow each button to its
+                    // own slot (absolute bounds) so a synthesised Click lands
+                    // on that slot's centre.
+                    let origin = ctx.origin();
+                    let size = ctx.size();
                     for i in 0..self.count {
                         let name = format!("page {}", i + 1);
+                        let (x0, x1) = self.slot_span(i, size.width);
                         ctx.push_node(Role::Button, |node| {
                             node.set_label(name.as_str());
                             node.add_action(Action::Click);
+                            node.set_bounds(frust::accesskit::Rect {
+                                x0: origin.x + x0,
+                                y0: origin.y,
+                                x1: origin.x + x1,
+                                y1: origin.y + size.height,
+                            });
                         });
                     }
                 },
@@ -725,5 +743,88 @@ mod tests {
                 .iter()
                 .any(|(_, n)| n.label() == Some("page 4"))
         );
+    }
+
+    #[derive(Default)]
+    struct Taps(Vec<usize>);
+
+    fn tap_logic(_s: &mut Taps) -> PageDots<Taps> {
+        page_dots(5, 2).on_tap(|s: &mut Taps, i| s.0.push(i))
+    }
+
+    fn tap_root() -> (frust_core::RenderRoot<Taps, PageDots<Taps>>, Taps) {
+        let mut root: frust_core::RenderRoot<Taps, PageDots<Taps>> = frust_core::RenderRoot::new();
+        let mut state = Taps::default();
+        root.rebuild(&mut tap_logic, &mut state);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(Size::new(200.0, 200.0), &mut tcx as &mut dyn Any);
+        (root, state)
+    }
+
+    #[test]
+    fn accessibility_click_on_each_page_button_delivers_its_own_index() {
+        let (mut root, mut state) = tap_root();
+        let update = root.semantics();
+        for n in 1..=5usize {
+            let label = format!("page {n}");
+            let id = update
+                .nodes
+                .iter()
+                .find(|(_, node)| node.label() == Some(label.as_str()))
+                .map(|(id, _)| *id)
+                .expect("button exists");
+            root.perform_accessibility_action(&mut state, id, Action::Click);
+            assert_eq!(state.0.last(), Some(&(n - 1)), "{label}");
+        }
+        assert_eq!(state.0, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn button_bounds_are_disjoint_slots_within_the_row() {
+        let (root, _state) = tap_root();
+        let update = root.semantics();
+        let status = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::Status)
+            .map(|(_, n)| n)
+            .expect("status container");
+        assert_eq!(status.label(), Some("page 3 of 5"));
+        let row = status.bounds().expect("row bounds");
+        let mut rects: Vec<_> = update
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.role() == Role::Button)
+            .map(|(_, n)| {
+                assert!(n.supports_action(Action::Click));
+                n.bounds().expect("button bounds")
+            })
+            .collect();
+        assert_eq!(rects.len(), 5);
+        rects.sort_by(|a, b| a.x0.total_cmp(&b.x0));
+        for r in &rects {
+            assert!(r.x0 >= row.x0 && r.x1 <= row.x1, "{r:?} within {row:?}");
+            assert!(r.x1 > r.x0);
+        }
+        for pair in rects.windows(2) {
+            assert!(pair[0].x1 <= pair[1].x0, "slots must not overlap");
+        }
+    }
+
+    #[test]
+    fn decorative_row_exposes_a_single_status_node() {
+        let mut root: frust_core::RenderRoot<(), PageDots<()>> = frust_core::RenderRoot::new();
+        let mut state = ();
+        root.rebuild(&mut logic_five, &mut state);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(Size::new(200.0, 200.0), &mut tcx as &mut dyn Any);
+        let update = root.semantics();
+        let roles: Vec<_> = update
+            .nodes
+            .iter()
+            .map(|(_, n)| n.role())
+            .filter(|r| matches!(r, Role::Status | Role::Button))
+            .collect();
+        assert_eq!(roles, vec![Role::Status]);
     }
 }
