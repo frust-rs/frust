@@ -11,11 +11,16 @@
 //! `examples/huddle`'s page functions use. `build` only ever *reads* those
 //! signals (subscribing); every *write* happens in an event handler.
 //!
+//! The last section, "Card switcher", is the app-switcher stage
+//! ([`demo_card_switcher`]); its state lives on [`CatalogState`] because the
+//! Android back handler and the handshake both need it from outside a build.
+//!
 //! Originally a stub scaffold placeholder honoring the page-fn contract in
 //! `pages/mod.rs`.
 
 use frust::motion::patterns::{FadeScale, FadeThrough, SharedAxis};
 use frust::motion::switcher::pattern_switcher;
+use frust::scaffold;
 use frust::{
     Align, Alignment, Axis, ButtonStyle, Color, EdgeInsets, EitherOf4, FlexChild, FlexView, Get,
     GetUntracked, MotionScheme, Padding, PageTransition, RwSignal, Set, SizedBox, Theme,
@@ -24,8 +29,12 @@ use frust::{
 use frust_glyph::TermLine;
 use frust_glyph::motion::{GlyphSlide, SlideDirection};
 use frust_glyph::{
-    PaletteItem, accordion, command_palette, glyph_dialog, show_command_palette, show_glyph_dialog,
-    tabs, term_block, toggle,
+    AlertVariant, PaletteItem, accordion, alert, app_bar, command_palette, glyph_dialog,
+    show_command_palette, show_glyph_dialog, tabs, term_block, toggle,
+};
+use frust_glyph::{
+    BadgeVariant, badge, card_switcher, empty_state, fab, glyph_list, glyph_list_item, peer_card,
+    skeleton, switcher_bar, switcher_chip, tag,
 };
 
 use crate::CatalogState;
@@ -466,6 +475,243 @@ fn demo_boot() -> FlexChild<CatalogState> {
     ])
 }
 
+// --- 12 Card switcher ---------------------------------------------------------
+
+/// The demo's four fake servers; the strip order is this order, so a face's
+/// strip position is its index here (the live face's position is
+/// `switcher_live`, the peers are the other three in order).
+const HOSTS: [&str; 4] = ["devbox", "staging", "new-host", "prod-eu"];
+/// The stage frame. A fixed-size frame (not a route, not a scroll child): the
+/// shell wraps this page in a vertical `scroll_view`, and the strip's
+/// horizontal drags must reach the stage. The strip reads the horizontal axis
+/// only and registers nothing with an enclosing scroll surface (nested claims
+/// are a Down-time snapshot, LIMITATIONS `scroll-physics-claim-down-snapshot`),
+/// so a stage sized to a phone screen, with a horizontal-only gesture, sits
+/// inside the page without fighting it. 402:874 is the reference phone.
+const STAGE_W: f64 = 300.0;
+const STAGE_H: f64 = STAGE_W * 874.0 / 402.0;
+/// Past this stage width the design uses the tablet card scale.
+const TABLET_WIDTH: f64 = 840.0;
+const TABLET_CARD_SCALE: f64 = 0.58;
+/// How long after a tap the demo performs handshake step 4. The pattern has no
+/// completion callback by design; muxr performs step 4 when its server dial
+/// completes. The demo uses a fixed delay: it lets the centring tween finish
+/// and the grow reach (near) full screen, then closes the stage.
+const SWAP_DELAY: std::time::Duration = std::time::Duration::from_millis(450);
+
+/// The card scale for a stage of `stage_width`: `Some(0.58)` on a tablet-wide
+/// stage, `None` (the pattern's default) otherwise.
+fn card_scale_for(stage_width: f64) -> Option<f64> {
+    (stage_width > TABLET_WIDTH).then_some(TABLET_CARD_SCALE)
+}
+
+/// The face id of peer `peer` when `live` is the live face (peers are every
+/// face but the live one, in strip order).
+fn peer_face(live: usize, peer: usize) -> usize {
+    if peer >= live { peer + 1 } else { peer }
+}
+
+/// Handshake step 2: record the tapped peer and grow it (the build reads
+/// `switcher_expanding`). Returns the face id that will become live.
+fn begin_select(state: &CatalogState, peer: usize) -> usize {
+    let face = peer_face(state.switcher_live.get_untracked(), peer);
+    state.switcher_expanding.set(Some(peer));
+    face
+}
+
+/// Handshake step 4: the chosen face becomes the live page (strip order is
+/// kept: its position is its id), the expansion request is dropped and the
+/// stage closes, finishing the grow.
+fn finish_select(state: &CatalogState, face: usize) {
+    state.switcher_live.set(face);
+    state.switcher_expanding.set(None);
+    state.switcher_open.set(false);
+}
+
+/// A one-shot sleep on std only (the example has no timer dependency): a
+/// helper thread flips the flag and wakes the local task, which therefore
+/// resumes in a later pump than the one that scheduled it.
+struct Delay {
+    shared: std::sync::Arc<std::sync::Mutex<(bool, Option<std::task::Waker>)>>,
+    duration: std::time::Duration,
+    started: bool,
+}
+
+impl Delay {
+    fn new(duration: std::time::Duration) -> Self {
+        Delay {
+            shared: Default::default(),
+            duration,
+            started: false,
+        }
+    }
+}
+
+impl std::future::Future for Delay {
+    type Output = ();
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        {
+            let mut guard = self.shared.lock().expect("delay mutex");
+            if guard.0 {
+                return std::task::Poll::Ready(());
+            }
+            guard.1 = Some(cx.waker().clone());
+        }
+        if !self.started {
+            self.started = true;
+            let shared = std::sync::Arc::clone(&self.shared);
+            let duration = self.duration;
+            std::thread::spawn(move || {
+                std::thread::sleep(duration);
+                let waker = {
+                    let mut guard = shared.lock().expect("delay mutex");
+                    guard.0 = true;
+                    guard.1.take()
+                };
+                if let Some(waker) = waker {
+                    waker.wake();
+                }
+            });
+        }
+        std::task::Poll::Pending
+    }
+}
+
+/// The label row above a card: a status badge, the host and a tag.
+fn face_label(face: usize) -> impl View<CatalogState> {
+    let (variant, status, note) = match face {
+        2 => (BadgeVariant::Neutral, "new", "never connected"),
+        3 => (BadgeVariant::Error, "down", "refused"),
+        _ => (BadgeVariant::Success, "ssh", "last seen 2 h ago"),
+    };
+    row()
+        .child(badge(status, variant))
+        .child(SizedBox(Some(8.0), None))
+        .child(text(HOSTS[face]).size(13.0).color(amber()))
+        .child(SizedBox(Some(8.0), None))
+        .child(tag(note))
+}
+
+/// The fake app page shown live: an app bar titled with the host, a list of
+/// three rows, and the Glyph fab that opens the switcher.
+fn live_page(face: usize) -> impl View<CatalogState> {
+    scaffold(glyph_list::<CatalogState>(vec![
+        glyph_list_item("$", "deploy").sub("main").meta("2m ago"),
+        glyph_list_item("#", "logs").sub("tail -f").meta("live"),
+        glyph_list_item("~", "shell").sub("zsh").meta("idle"),
+    ]))
+    .app_bar(app_bar::<CatalogState>(HOSTS[face]))
+    .fab(fab(frust::icons::PANE_MARK, |s: &mut CatalogState| {
+        s.switcher_open.set(true);
+    }))
+}
+
+/// A peer card's face, built from Glyph widgets only: cached (skeleton rows
+/// and a "last seen" tag), never connected (empty state), or failed (alert).
+fn peer_face_view(face: usize) -> impl View<CatalogState> {
+    let body: FlexChild<CatalogState> = match face {
+        2 => inflexible(Padding(
+            EdgeInsets::all(16.0),
+            empty_state::<CatalogState>("not connected yet", "Add this server to start a session."),
+        )),
+        3 => inflexible(Padding(
+            EdgeInsets::all(16.0),
+            alert(
+                AlertVariant::Error,
+                "connection refused",
+                "connection refused \u{b7} tap to retry",
+            ),
+        )),
+        _ => inflexible(Padding(
+            EdgeInsets::all(16.0),
+            FlexView::new(
+                Axis::Vertical,
+                vec![
+                    inflexible(skeleton(200.0, 18.0)),
+                    gap(10.0),
+                    inflexible(skeleton(240.0, 18.0)),
+                    gap(10.0),
+                    inflexible(skeleton(160.0, 18.0)),
+                    gap(16.0),
+                    inflexible(tag("last seen 2 h ago")),
+                ],
+            ),
+        )),
+    };
+    scaffold(FlexView::new(Axis::Vertical, vec![body]))
+        .app_bar(app_bar::<CatalogState>(HOSTS[face]))
+}
+
+/// 12 card switcher: a fixed-size stage holding `frust_glyph::card_switcher`.
+///
+/// Tap the stack fab to open the strip; swipe between cards; tapping a peer
+/// centres it, calls `on_select` (handshake step 2: `.expanding(Some(i))`) and
+/// the demo schedules step 4 ([`SWAP_DELAY`] later, on the local task queue:
+/// that face becomes live, `.expanding(None)`, `open = false`). Tapping the
+/// centred card, the scrim, the close chip or Android back closes the stage.
+fn demo_card_switcher(state: &CatalogState) -> FlexChild<CatalogState> {
+    let open = state.switcher_open.get();
+    let expanding = state.switcher_expanding.get();
+    let live = state.switcher_live.get().min(HOSTS.len() - 1);
+
+    let peers: Vec<_> = (0..HOSTS.len() - 1)
+        .map(|i| {
+            let face = peer_face(live, i);
+            peer_card(peer_face_view(face)).label(face_label(face))
+        })
+        .collect();
+
+    let mut stage = card_switcher(open, live_page(live))
+        .peers(peers)
+        .live_index(live)
+        .live_label(face_label(live))
+        .expanding(expanding)
+        .on_select(|s: &mut CatalogState, peer| {
+            let face = begin_select(s, peer);
+            let state = s.clone();
+            frust::spawn_local(async move {
+                Delay::new(SWAP_DELAY).await;
+                finish_select(&state, face);
+            });
+        })
+        .on_close(|s: &mut CatalogState| s.switcher_open.set(false))
+        .action_bar(switcher_bar((
+            switcher_chip(frust::icons::LOCK, |s: &mut CatalogState| {
+                s.toasts
+                    .update(|v| v.push("Lock is a demo no-op".to_string()));
+            }),
+            switcher_chip(frust::icons::ADD, |s: &mut CatalogState| {
+                s.toasts
+                    .update(|v| v.push("Add server is a demo no-op".to_string()));
+            })
+            .label("+ add server"),
+            switcher_chip(frust::icons::CLOSE, |s: &mut CatalogState| {
+                s.switcher_open.set(false);
+            })
+            .semantic_label("close"),
+        )))
+        .back(&state.switcher_back);
+    if let Some(scale) = card_scale_for(STAGE_W) {
+        stage = stage.card_scale(scale);
+    }
+
+    block(vec![
+        inflexible(label("12 Card switcher")),
+        inflexible(caption(
+            "Tap the stack fab: swipe, tap a peer to expand it into the live page, tap the centred card, the scrim or close to dismiss.",
+        )),
+        inflexible(caption(
+            "Fixed 300 px frame (not a scroll child): horizontal drags reach the strip. Step 4 of the handshake runs 450 ms after the tap.",
+        )),
+        gap(6.0),
+        inflexible(SizedBox(Some(STAGE_W), Some(STAGE_H)).child(stage)),
+    ])
+}
+
 /// See the page-fn contract in [`crate::pages`].
 pub fn page(state: &CatalogState) -> impl View<CatalogState> {
     // Durations/easings come from the canonical Glyph motion scheme (the app
@@ -499,4 +745,60 @@ pub fn page(state: &CatalogState) -> impl View<CatalogState> {
         .push(demo_screen())
         .push(gap(8.0))
         .push(demo_boot())
+        .push(gap(8.0))
+        .push(demo_card_switcher(state))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use frust_reactive::ReactiveRuntime;
+    use reactive_graph::owner::Owner;
+
+    fn setup() -> (Owner, CatalogState) {
+        let _ = ReactiveRuntime::init(std::sync::Arc::new(|| {}));
+        let owner = Owner::new();
+        owner.set();
+        (owner, CatalogState::new())
+    }
+
+    #[test]
+    fn select_expands_then_goes_live() {
+        let (_owner, state) = setup();
+        state.switcher_open.set(true);
+
+        // Step 2: the tapped peer grows; the live face and the open flag stay.
+        let face = begin_select(&state, 1);
+        assert_eq!(face, 2, "peer 1 of [staging, new-host, prod-eu] is face 2");
+        assert_eq!(state.switcher_expanding.get_untracked(), Some(1));
+        assert_eq!(state.switcher_live.get_untracked(), 0);
+        assert!(state.switcher_open.get_untracked());
+
+        // Step 4: the face is live, the request dropped, the stage closed.
+        finish_select(&state, face);
+        assert_eq!(state.switcher_live.get_untracked(), 2);
+        assert_eq!(state.switcher_expanding.get_untracked(), None);
+        assert!(!state.switcher_open.get_untracked());
+
+        // Strip order is kept: devbox (face 0) is now the first peer.
+        assert_eq!(peer_face(2, 0), 0);
+        assert_eq!(peer_face(2, 1), 1);
+        assert_eq!(peer_face(2, 2), 3);
+    }
+
+    #[test]
+    fn tablet_scale_only_past_840() {
+        assert_eq!(card_scale_for(840.0), None);
+        assert_eq!(card_scale_for(841.0), Some(0.58));
+    }
+
+    #[test]
+    fn page_builds_closed_open_and_expanding() {
+        let (_owner, state) = setup();
+        let _ = page(&state);
+        state.switcher_open.set(true);
+        let _ = page(&state);
+        state.switcher_expanding.set(Some(1));
+        let _ = page(&state);
+    }
 }
