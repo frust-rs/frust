@@ -22,7 +22,8 @@ transition:
 
 1. **Foundations** — live color/type/radius token specimens (every swatch
    re-resolves from the current theme, never a hardcoded hex).
-2. **Buttons + Forms** — every `ButtonStyle`, `.small()`, a loading demo, plus
+2. **Buttons + Forms** — every `ButtonStyle`, `.small()`, a loading demo, the
+   `frust_glyph::fab` floating action button (regular, mini, disabled), plus
    the baseline form controls (`text_input`, `checkbox`, `radio`, `slider`)
    rendered under the Glyph theme, alongside the Glyph catalog's own
    `frust_glyph::toggle`.
@@ -138,6 +139,7 @@ with reason (see each page's own module docs for the full rationale).
 | Loading demo | ✓ (checkbox-driven, not a timed auto-reset — no async-sleep primitive available without an out-of-scope dependency) |
 | Disabled state | N/A as a dedicated builder — `ButtonView` has no `.enabled(false)` seam; a statically-`.loading(true)` button stands in, captioned honestly |
 | Press feedback (0.96 scale) | ✓ (captioned; built into `Button` itself) |
+| Floating action button | ✓ — `frust_glyph::fab`: regular (46 px), `.mini(true)` (40 px) and `.disabled(true)`, each labelled; no-op presses |
 
 ### §03 Form Controls (`pages/buttons_forms.rs`)
 
