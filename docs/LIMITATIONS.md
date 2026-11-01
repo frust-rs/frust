@@ -6051,7 +6051,7 @@ a bottom bar hosted around the pattern) stays interactive. Key and IME routing i
 wrapping the whole shell page gives full blocking.
 
 **Evidence**: `crates/frust-widgets/src/motion/card_switcher.rs` module docs (*Blocking covers only the
-stage's own bounds*).
+stage's own bounds*) and `blocked_pointer`.
 
 ---
 
@@ -6067,7 +6067,8 @@ v1 has no vertical gesture (e.g. swipe-up to dismiss a card).
 **Why accepted**: tap-only selection keeps the centring tween and the `expanding` handshake
 single-writer; the missing gestures are v1 scope, not a design gap.
 
-**Evidence**: `crates/frust-widgets/src/motion/card_switcher.rs` module docs (tap rules, strip).
+**Evidence**: `crates/frust-widgets/src/motion/card_switcher.rs` module docs (tap rules, strip), the strip's
+`forward_wheel`, and the `CardSwitcherView::expanding` / `on_select` docs (the selection handshake).
 
 ---
 
@@ -6084,7 +6085,8 @@ elsewhere in the framework; found at the Pixel 5 / iPhone 13 mini / desktop gate
 physics on the strip would diverge from it.
 
 **Evidence**: `crates/frust-widgets/src/motion/card_switcher.rs` module docs (strip physics);
-`crates/frust-widgets/src/physics/mod.rs` `default_physics`.
+`crates/frust-widgets/src/physics/mod.rs` `default_physics` / `default_overscroll_effect`;
+`PageSnap::extent` in `crates/frust-widgets/src/physics/page_snap.rs`.
 
 ---
 
