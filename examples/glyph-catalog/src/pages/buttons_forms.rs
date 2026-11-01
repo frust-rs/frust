@@ -78,7 +78,7 @@ use frust::{
 };
 // The Glyph catalog's own authored toggle — not a baseline `frust`/
 // `frust-widgets` item, and not a themed stand-in for one either.
-use frust_glyph::toggle;
+use frust_glyph::{fab, toggle};
 
 use crate::CatalogState;
 
@@ -191,6 +191,12 @@ impl Component for ButtonsFormsScreen {
             ))
             .child(spacer(4.0))
             .child(vertical_alignment_row())
+            .child(spacer(16.0))
+            .child(caption(
+                "Floating action button (frust_glyph::fab — 46 px regular, .mini(true) 40 px, .disabled(true) dimmed; each carries a .label() accessible name; presses are no-ops here):",
+            ))
+            .child(spacer(4.0))
+            .child(fab_row())
             .child(spacer(24.0))
             .child(heading("Form Controls"))
             .child(caption(
@@ -285,6 +291,26 @@ fn button_styles_row() -> impl View<ButtonsFormsState> {
         .child(button("Danger", |_: &mut ButtonsFormsState| {}).style(ButtonStyle::Danger))
         .child(hspacer(8.0))
         .child(button("+", |_: &mut ButtonsFormsState| {}).style(ButtonStyle::Icon))
+        .cross_axis(CrossAxisAlignment::Center)
+}
+
+/// The FAB demo: regular, mini and disabled side by side (display-only,
+/// no-op presses).
+fn fab_row() -> impl View<ButtonsFormsState> {
+    row()
+        .child(fab(frust::icons::ADD, |_: &mut ButtonsFormsState| {}).label("Add"))
+        .child(hspacer(16.0))
+        .child(
+            fab(frust::icons::ADD, |_: &mut ButtonsFormsState| {})
+                .mini(true)
+                .label("Add (mini)"),
+        )
+        .child(hspacer(16.0))
+        .child(
+            fab(frust::icons::ADD, |_: &mut ButtonsFormsState| {})
+                .disabled(true)
+                .label("Add (disabled)"),
+        )
         .cross_axis(CrossAxisAlignment::Center)
 }
 
