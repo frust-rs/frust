@@ -31,7 +31,7 @@
 //!   `.12`/`.38`; the control ignores pointer input and reports disabled
 //!   semantics instead of a Click action.
 //!
-//! A press fires on pointer-up inside the circle; releasing outside, or a
+//! A press fires on pointer-up inside the painted shape; releasing outside, or a
 //! cancel, fires nothing (see `docs/CODE_STANDARDS.md`'s Interaction
 //! Semantics).
 
@@ -185,12 +185,17 @@ impl FabWidget {
         if self.mini { FAB_MINI_SIZE } else { FAB_SIZE }
     }
 
-    /// Whether `pos` (widget-local) is inside the circle painted in a box of
-    /// the laid-out `size` (centre `size / 2`, radius `min(w, h) / 2`), so the
-    /// hit area always agrees with the paint.
+    /// Whether `pos` (widget-local) is inside the shape painted in a box of
+    /// the laid-out `size`: the rounded rect of radius `min(w, h) / 2` that
+    /// `paint` fills — a circle at the nominal square size, a stadium when a
+    /// tight non-square constraint stretches the box — so the hit area always
+    /// agrees with the paint. A point is inside when it is within `r` of the
+    /// rect inset by `r` (the rounded-rect distance test).
     fn hit(pos: Point, size: Size) -> bool {
         let r = size.width.min(size.height) / 2.0;
-        let (dx, dy) = (pos.x - size.width / 2.0, pos.y - size.height / 2.0);
+        let cx = pos.x.clamp(r, (size.width - r).max(r));
+        let cy = pos.y.clamp(r, (size.height - r).max(r));
+        let (dx, dy) = (pos.x - cx, pos.y - cy);
         dx * dx + dy * dy <= r * r
     }
 
@@ -644,6 +649,33 @@ mod tests {
         assert!(!w.captured && !w.pressed);
         dispatch(&mut w, &mut taps, &ev(PointerPhase::Up, 23.0, 23.0));
         assert_eq!(taps.count, 0);
+    }
+
+    #[test]
+    fn hit_test_covers_the_painted_stadium_under_a_non_square_constraint() {
+        let mut w = build(&view());
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        let size = w.layout(&mut lctx, &BoxConstraints::tight(Size::new(80.0, 56.0)));
+        assert_eq!(size, Size::new(80.0, 56.0));
+        let mut taps = Taps::default();
+        // On the painted left end (inside the 28 px end cap, outside a
+        // centred 28 px circle): a press.
+        {
+            let any: &mut dyn Any = &mut taps;
+            let mut ctx = EventCtx::new(any, Point::ZERO, size);
+            w.event(&mut ctx, &ev(PointerPhase::Down, 10.0, 28.0));
+            w.event(&mut ctx, &ev(PointerPhase::Up, 10.0, 28.0));
+        }
+        assert_eq!(taps.count, 1, "the stadium's end cap is pressable");
+        // The box corner, outside the rounded end: not a press.
+        {
+            let any: &mut dyn Any = &mut taps;
+            let mut ctx = EventCtx::new(any, Point::ZERO, size);
+            w.event(&mut ctx, &ev(PointerPhase::Down, 2.0, 2.0));
+            w.event(&mut ctx, &ev(PointerPhase::Up, 2.0, 2.0));
+        }
+        assert_eq!(taps.count, 1, "the unpainted corner is not pressable");
     }
 
     #[test]
