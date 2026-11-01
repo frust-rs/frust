@@ -69,11 +69,11 @@ fn dark_at_rotated(
 /// task notes) — visible to `barcode` and its descendant modules, which
 /// covers the sibling `stream` module.
 pub(super) fn render_qr_luma(
-    payload: &str,
+    payload: impl AsRef<[u8]>,
     module_px: usize,
     quarter_turns: u8,
 ) -> (Vec<u8>, usize) {
-    let code = qrcode::QrCode::new(payload.as_bytes()).expect("payload encodes to a valid QR code");
+    let code = qrcode::QrCode::new(payload).expect("payload encodes to a valid QR code");
     let modules = code.width();
     let colors = code.to_colors();
 
@@ -126,6 +126,18 @@ fn decodes_dense_and_short_payloads_at_multiple_module_scales() {
             );
         }
     }
+}
+
+#[test]
+fn keeps_a_non_utf8_payload_as_raw_bytes() {
+    // Latin-1 "café" plus a stray binary byte: a byte-mode payload that is
+    // not UTF-8 still decodes, with the exact bytes alongside a lossy string.
+    let payload: &[u8] = b"caf\xe9 \x00\xff";
+    let (buf, side) = render_qr_luma(payload, 4, 0);
+    let found = decode_tight(&buf, side, &[]);
+    assert_eq!(found.len(), 1, "a binary payload is still a detection");
+    assert_eq!(found[0].raw_bytes.as_deref(), Some(payload));
+    assert_eq!(found[0].raw_value, String::from_utf8_lossy(payload));
 }
 
 #[test]

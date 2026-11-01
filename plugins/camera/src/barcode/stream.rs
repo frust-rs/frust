@@ -38,7 +38,8 @@ use crate::ImageFrame;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DetectionPolicy {
-    /// Emit each distinct `(format, raw_value)` once; a seen value re-arms
+    /// Emit each distinct `(format, raw_value, raw_bytes)` once (two binary
+    /// payloads with the same lossy `raw_value` stay distinct); a seen value re-arms
     /// — may emit again — only once it has been absent for
     /// `ABSENCE_FRAMES` (30) consecutive *processed* frames.
     /// `mobile_scanner` parity is "until it leaves view"; this crate has no
@@ -82,6 +83,10 @@ const DEFAULT_THROTTLE_INTERVAL: Duration = Duration::from_millis(250);
 /// gone.
 const ABSENCE_FRAMES: u32 = 30;
 
+/// [`DetectionFilter::seen`]'s key: a detection's `(format, raw_value,
+/// raw_bytes)`.
+type SeenKey = (BarcodeFormat, String, Option<Vec<u8>>);
+
 /// The running state machine behind one [`DetectionPolicy`] — pure, no I/O,
 /// which is what makes it directly unit-testable below with no camera
 /// involved. [`Self::should_decode`] is the cheap-path gate a composition
@@ -90,9 +95,9 @@ const ABSENCE_FRAMES: u32 = 30;
 struct DetectionFilter {
     policy: DetectionPolicy,
     /// [`DetectionPolicy::NoDuplicates`]'s bookkeeping: `(format,
-    /// raw_value) -> frames since last seen`. Untouched by the other two
-    /// policies, which need no memory.
-    seen: HashMap<(BarcodeFormat, String), u32>,
+    /// raw_value, raw_bytes) -> frames since last seen`. Untouched by the
+    /// other two policies, which need no memory.
+    seen: HashMap<SeenKey, u32>,
     /// [`DetectionPolicy::Throttled`]'s bookkeeping: the last decode
     /// attempt's timestamp. `None` until the first attempt, so the very
     /// first frame always decodes.
@@ -171,7 +176,11 @@ impl DetectionFilter {
 
         let mut to_emit = Vec::new();
         for barcode in detections {
-            let key = (barcode.format, barcode.raw_value.clone());
+            let key = (
+                barcode.format,
+                barcode.raw_value.clone(),
+                barcode.raw_bytes.clone(),
+            );
             match self.seen.get_mut(&key) {
                 Some(counter) => *counter = 0,
                 None => {
@@ -336,6 +345,24 @@ mod tests {
             filter.push(t0, vec![sample_barcode("QR-A")]).is_some(),
             "re-armed after ABSENCE_FRAMES consecutive absent frames"
         );
+    }
+
+    #[test]
+    fn no_duplicates_keeps_binary_payloads_with_the_same_lossy_value_apart() {
+        let binary = |bytes: &[u8]| Barcode {
+            raw_value: String::from_utf8_lossy(bytes).into_owned(),
+            raw_bytes: Some(bytes.to_vec()),
+            ..sample_barcode("")
+        };
+        let mut filter = DetectionFilter::new(DetectionPolicy::NoDuplicates);
+        let t0 = Instant::now();
+
+        assert!(filter.push(t0, vec![binary(&[0xff])]).is_some());
+        assert!(
+            filter.push(t0, vec![binary(&[0xfe])]).is_some(),
+            "a different payload emits although both read as U+FFFD"
+        );
+        assert!(filter.push(t0, vec![binary(&[0xff])]).is_none());
     }
 
     // --- Composition tests: hand-built `ImageFrame`s over fixture luma
