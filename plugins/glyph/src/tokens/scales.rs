@@ -223,6 +223,25 @@ pub const fn elevation() -> Elevation {
     }
 }
 
+/// The Glyph **floating** elevation level — the resting lift of a floating
+/// action button (`0 6px 16px`), dark black `.35` / light warm-ink `.11`.
+///
+/// `frust_theme::Elevation` is a fixed six-level table owned by the theme crate,
+/// so this level is a standalone token beside [`elevation`] rather than a field
+/// on it. Its light alpha sits between level 3 (`.09`) and level 4 (`.12`),
+/// matching how the neighbours scale; the dark alpha sits between their `.30`
+/// and `.40`.
+pub const fn floating() -> ElevationLevel {
+    glyph_level(
+        6.0,
+        6.0,
+        16.0,
+        0.35,
+        0.11,
+        SurfaceRole::SurfaceContainerHigh,
+    )
+}
+
 // ---- Motion ---------------------------------------------------------------
 
 /// The Glyph motion scheme (retrieved 2026-07-21).
@@ -330,6 +349,20 @@ pub fn glass() -> GlassScale {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn floating_level_sits_between_level3_and_level4() {
+        let f = floating();
+        let e = elevation();
+        assert_eq!(f.shadow_dark.y_offset, 6.0);
+        assert_eq!(f.shadow_dark.blur_std_dev, 16.0);
+        assert_eq!(f.shadow_dark.color_alpha, 0.35);
+        assert_eq!(f.shadow_light.color_alpha, 0.11);
+        assert!(f.shadow_dark.color_alpha > e.level3.shadow_dark.color_alpha);
+        assert!(f.shadow_dark.color_alpha < e.level4.shadow_dark.color_alpha);
+        assert!(f.shadow_light.color_alpha > e.level3.shadow_light.color_alpha);
+        assert!(f.shadow_light.color_alpha < e.level4.shadow_light.color_alpha);
+    }
+
     use super::*;
     use frust::Color;
 
