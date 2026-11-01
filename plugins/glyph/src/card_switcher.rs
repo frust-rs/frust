@@ -16,13 +16,24 @@
 //!
 //! **Back.** [`GlyphCardSwitcher::back`] wraps the stage in
 //! `frust::back_fallback` over a [`SwitcherBack`] the app creates once. The
-//! fallback claims a back press only while the stage is built open, and runs
+//! fallback claims a back press only while the mounted stage is open, and runs
 //! the app's stateless `on_back`. The app points `on_back` at the same close
 //! action as `on_close` (typically an `RwSignal` set): `BackFallback`'s
 //! callbacks see no `&mut State`, so `on_close` cannot be the back action
 //! itself.
+//!
+//! The claim flag is written by the skin's view lifecycle, not at view
+//! construction: `build` and `rebuild` set it from the view's `open`, and
+//! `teardown` (or a rebuild without `.back`) clears it. The stage also clears
+//! it the moment its `on_close` fires, before the app has rebuilt. The
+//! pattern's widget exposes no open or ramp state, so that is the whole of
+//! what the skin can observe. The residual window: a close that does not go
+//! through `on_close` (the app closing the stage itself) is seen only when the
+//! app's next build runs, and a press landing before that is still claimed
+//! (running `on_back`, which is idempotent for a close action). Likewise a
+//! press between `open` becoming true and the app's rebuild is not claimed.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use frust::authoring::text::{
@@ -90,12 +101,16 @@ const FALLBACK_OUTLINE: Color = Color::from_rgb8(0x3e, 0x3f, 0x44); // border-br
 
 /// The back-press handle for [`GlyphCardSwitcher::back`]: create it once (in
 /// `Component::init`, under the reactive runtime) and pass it on every build.
-/// Its `BackFallback` claims a press only while the stage was last built open.
+/// Its `BackFallback` claims a press only while the mounted stage is open.
 #[derive(Clone)]
 pub struct SwitcherBack {
     fallback: BackFallback,
     open: Rc<Cell<bool>>,
 }
+
+/// The claim flag a stage's `on_close` clears, filled in by
+/// [`GlyphCardSwitcher::back`] (which may run after `on_close` was set).
+type ClaimSlot = Rc<RefCell<Option<Rc<Cell<bool>>>>>;
 
 impl SwitcherBack {
     /// A handle whose back press runs `on_back`; it should close the stage.
@@ -108,7 +123,7 @@ impl SwitcherBack {
     }
 }
 
-/// The fallback's interest: the `open` the stage was last built with.
+/// The fallback's interest: whether the mounted stage is open.
 fn claims_while(open: &Rc<Cell<bool>>) -> impl Fn() -> bool + 'static {
     let open = Rc::clone(open);
     move || open.get()
@@ -119,6 +134,10 @@ pub struct GlyphCardSwitcher<State: 'static> {
     open: bool,
     stage: CardSwitcherView<State>,
     back: Option<BackFallbackView<BackMount>>,
+    /// The handle's claim flag, written by `build`/`rebuild`/`teardown`.
+    claim: Option<Rc<Cell<bool>>>,
+    /// Shared with the `on_close` wrapper so a close clears the claim at once.
+    close_slot: ClaimSlot,
 }
 
 /// Show `live` as a full-size page, or (`open`) shrunk into a card on the Glyph
@@ -141,6 +160,8 @@ pub fn card_switcher<State: 'static>(
             )
             .dots_for(|count, current| page_dots::<State>(count, current)),
         back: None,
+        claim: None,
+        close_slot: Rc::default(),
     }
 }
 
@@ -177,7 +198,13 @@ impl<State: 'static> GlyphCardSwitcher<State> {
 
     /// Called when the open stage asks to close; the app sets `open` false.
     pub fn on_close(mut self, on_close: impl Fn(&mut State) + 'static) -> Self {
-        self.stage = self.stage.on_close(on_close);
+        let slot = Rc::clone(&self.close_slot);
+        self.stage = self.stage.on_close(move |state| {
+            if let Some(claim) = slot.borrow().as_ref() {
+                claim.set(false);
+            }
+            on_close(state);
+        });
         self
     }
 
@@ -203,9 +230,19 @@ impl<State: 'static> GlyphCardSwitcher<State> {
     /// Take part in back arbitration through `back` (see the module docs).
     /// Call it from `Component::build` on every build, like `back_fallback`.
     pub fn back(mut self, back: &SwitcherBack) -> Self {
-        back.open.set(self.open);
+        self.claim = Some(Rc::clone(&back.open));
+        *self.close_slot.borrow_mut() = Some(Rc::clone(&back.open));
         self.back = Some(back_fallback(&back.fallback, BackMount));
         self
+    }
+}
+
+impl<State: 'static> GlyphCardSwitcher<State> {
+    /// Publish this view's `open` as the handle's claim (a no-op without `.back`).
+    fn write_claim(&self) {
+        if let Some(claim) = &self.claim {
+            claim.set(self.open);
+        }
     }
 }
 
@@ -216,6 +253,7 @@ impl<State: 'static> View<State> for GlyphCardSwitcher<State> {
         if let Some(back) = &self.back {
             View::<State>::build(back, ctx);
         }
+        self.write_claim();
         self.stage.build(ctx)
     }
 
@@ -235,11 +273,18 @@ impl<State: 'static> View<State> for GlyphCardSwitcher<State> {
             (None, Some(old)) => View::<State>::teardown(old, &mut BackMountWidget, ctx),
             (None, None) => {}
         }
+        match &prev.claim {
+            Some(old) if self.claim.is_none() => old.set(false),
+            _ => self.write_claim(),
+        }
         self.stage.rebuild(&prev.stage, element, ctx)
     }
 
     fn teardown(&self, element: &mut CardSwitcherWidget, ctx: &mut BuildCtx<'_>) {
         self.stage.teardown(element, ctx);
+        if let Some(claim) = &self.claim {
+            claim.set(false);
+        }
         if let Some(back) = &self.back {
             View::<State>::teardown(back, &mut BackMountWidget, ctx);
         }
@@ -248,10 +293,10 @@ impl<State: 'static> View<State> for GlyphCardSwitcher<State> {
 
 /// The empty child a [`SwitcherBack`]'s `back_fallback` wrapper counts its
 /// mounts over; the stage itself stays the element.
-pub struct BackMount;
+pub(crate) struct BackMount;
 
 /// The stateless widget behind [`BackMount`].
-pub struct BackMountWidget;
+pub(crate) struct BackMountWidget;
 
 impl<State: 'static> View<State> for BackMount {
     type Element = BackMountWidget;
@@ -955,6 +1000,77 @@ mod tests {
         push_back_press();
         let _next = stage_view(false, 3).back(&handle);
         assert_eq!(fired.get(), 0, "a press while closed is not claimed");
+    }
+
+    #[test]
+    fn a_press_after_a_closed_rebuild_and_before_any_build_is_not_claimed() {
+        let _guard = BACK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        back_reset();
+
+        let fired = Rc::new(Cell::new(0u32));
+        let handle = {
+            let fired = Rc::clone(&fired);
+            SwitcherBack::new(move || fired.set(fired.get() + 1))
+        };
+        let open = stage_view(true, 3).back(&handle);
+        let mut rig = Rig::new(&open, PHONE);
+        let closed = stage_view(false, 3).back(&handle);
+        let mut counter = 0u64;
+        View::<()>::rebuild(&closed, &open, &mut rig.w, &mut BuildCtx::new(&mut counter));
+
+        // The press arrives with no app build in between: it must not be
+        // claimed, so `handles_back` stays false and nothing runs.
+        push_back_press();
+        assert!(!handles_back(), "closed: the press is not claimed");
+        assert_eq!(fired.get(), 0, "on_back never ran");
+    }
+
+    #[test]
+    fn on_close_clears_the_claim_before_the_app_rebuilds() {
+        let _guard = BACK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        back_reset();
+
+        let handle = SwitcherBack::new(|| {});
+        let open = stage_view(true, 3).back(&handle);
+        let mut rig = Rig::new(&open, PHONE);
+        assert!(handles_back(), "built open: the stage claims back");
+
+        // A press on the scrim (outside the card row) asks the stage to close.
+        rig.send(&ev(PointerPhase::Down, 5.0, 5.0));
+        assert!(!handles_back(), "closing released the claim at once");
+    }
+
+    #[test]
+    fn tearing_the_stage_down_clears_the_claim() {
+        let _guard = BACK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        back_reset();
+
+        let handle = SwitcherBack::new(|| {});
+        let open = stage_view(true, 3).back(&handle);
+        let mut rig = Rig::new(&open, PHONE);
+        assert!(handles_back(), "built open: the stage claims back");
+
+        let mut counter = 0u64;
+        View::<()>::teardown(&open, &mut rig.w, &mut BuildCtx::new(&mut counter));
+        assert!(!handles_back(), "torn down: nothing claims back");
+    }
+
+    #[test]
+    fn dropping_back_on_a_rebuild_clears_the_claim() {
+        let _guard = BACK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        back_reset();
+
+        let handle = SwitcherBack::new(|| {});
+        let open = stage_view(true, 3).back(&handle);
+        let mut rig = Rig::new(&open, PHONE);
+        let plain = stage_view(true, 3);
+        let mut counter = 0u64;
+        View::<()>::rebuild(&plain, &open, &mut rig.w, &mut BuildCtx::new(&mut counter));
+        assert!(!handles_back(), "rebuilt without .back: no claim");
     }
 
     #[test]
