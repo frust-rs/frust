@@ -220,22 +220,27 @@ with reason (see each page's own module docs for the full rationale).
 
 ### Card switcher demo
 
-The last Motion block is an app-switcher stage inside a fixed 300 px phone-ratio
-frame (not a scroll child, not a route: the shell wraps each page in a vertical
-`scroll_view`, and the strip's horizontal drags must reach the stage). The live
-page is a fake "devbox" app (app bar, 3-row list, stack fab); the peers are a
-cached face, a never-connected face and a failed face. Its state lives on
-`CatalogState` (`switcher_open`, `switcher_expanding`, `switcher_live`, plus the
-once-built `SwitcherBack`). Tapping a peer runs the pattern's handshake: step 2
-(`.expanding(Some(i))`) in the tap handler, step 4 (that face live,
-`.expanding(None)`, `open = false`) 450 ms later on the UI-thread local task
-queue, standing in for muxr's "dial completed". The frame is narrower than 840 px,
-so the tablet `card_scale(0.58)` rule is wired but only reachable once the stage
-widens.
+The last Motion block is a description plus an **Open full-screen switcher demo**
+button. It sets `CatalogState::switcher_fullscreen`, and the shell then renders
+the app-switcher stage as the whole window content (no tab strip, no page
+`scroll_view`), so the live page is real-size under the 1.0 -> 0.62 transform
+and the peers peek at the real screen edges. The old 300 px miniature is
+removed (it could not answer the frame-rate question or reach the tablet rule).
+The live page is a fake "devbox" app (app bar, 3-row list, stack fab); the peers
+are a cached face (dimmed with `animated_opacity(0.6, ..)`), a never-connected
+face and a failed face. State lives on `CatalogState` (`switcher_open`,
+`switcher_expanding`, `switcher_live`, `switcher_fullscreen`, the measured
+`window_width`, plus the once-built `SwitcherBack`). Tapping a peer runs the
+pattern's handshake: step 2 (`.expanding(Some(i))`) in the tap handler, step 4
+(that face live, `.expanding(None)`, `open = false`) 450 ms later on the
+UI-thread local task queue, standing in for muxr's "dial completed". Windows
+wider than 840 px use `card_scale(0.58)`; the width comes from a zero-size
+layout probe in the full-screen page. The live page's app bar carries an
+**Exit demo** action that returns to the tabbed shell.
 
-Device-gate command (from this directory): `cargo run` on desktop, or
-`frust run -d <device-id>` on a device; open Motion and scroll to
-"12 Card switcher". Checklist:
+Device-gate command (the gate runs the FULL-SCREEN mode): from this directory,
+`frust run -d <device-id>` (or `cargo run` on desktop), then Motion ->
+"Open full-screen switcher demo". Checklist:
 
 - [ ] open: the fab cross-fades to the action bar, the page shrinks to a card, dots appear
 - [ ] swipe: the strip pages and snaps, dots follow, edges overscroll and spring back
@@ -243,7 +248,8 @@ Device-gate command (from this directory): `cargo run` on desktop, or
 - [ ] tap-centre-close: tapping the centred card, the scrim or the close chip closes
 - [ ] back: Android back closes the open stage (and only while it is open)
 - [ ] reduce-motion: with the header toggle on, scale jumps and only the fades run
-- [ ] rotate / resize while open: the stage stays open and re-lays out
+- [ ] rotate / resize while open: the stage stays open and re-lays out (a tablet-size window switches to the 0.58 card scale)
+- [ ] Exit demo: the app-bar action returns to the tabbed shell
 
 ### Components the reference inventory listed as "no direct Frust widget"
 

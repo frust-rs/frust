@@ -38,9 +38,9 @@ use frust::authoring::{
 
 use frust::motion::switcher::pattern_switcher;
 use frust::{
-    Brightness, Color, Component, Get, GetUntracked, MotionScheme, NavigatorController, RwSignal,
-    ScrollInfo, Set, Theme, TransitionSpec, View, button, column, flexible, icon, icons,
-    inflexible, navigator, safe_area, scroll_view, set_app_theme, stack,
+    AnyView, Brightness, Color, Component, Get, GetUntracked, MotionScheme, NavigatorController,
+    RwSignal, ScrollInfo, Set, Theme, TransitionSpec, View, any, button, column, flexible, icon,
+    icons, inflexible, navigator, safe_area, scroll_view, set_app_theme, stack,
 };
 use frust_glyph::motion::{GlyphSlide, SlideDirection};
 
@@ -97,6 +97,46 @@ impl Widget for AppBackgroundWidget {
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         scene.fill_rect(ctx.origin(), ctx.size(), self.0);
     }
+}
+
+/// A zero-size probe that publishes the window's logical width into a signal
+/// from its layout pass (`LayoutCtx::window_size`), writing only on change so
+/// the shell rebuilds once per resize, never per frame. The shell has no other
+/// size signal; the full-screen switcher demo needs the width to choose
+/// between the phone and tablet card scales.
+struct WindowWidthProbe(RwSignal<f64>);
+
+/// The retained widget for a [`WindowWidthProbe`].
+struct WindowWidthProbeWidget(RwSignal<f64>);
+
+impl<State: 'static> View<State> for WindowWidthProbe {
+    type Element = WindowWidthProbeWidget;
+
+    fn build(&self, _ctx: &mut BuildCtx<'_>) -> WindowWidthProbeWidget {
+        WindowWidthProbeWidget(self.0)
+    }
+
+    fn rebuild(
+        &self,
+        _prev: &Self,
+        element: &mut WindowWidthProbeWidget,
+        _ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        element.0 = self.0;
+        ChangeFlags::NONE
+    }
+}
+
+impl Widget for WindowWidthProbeWidget {
+    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        let width = ctx.window_size().width;
+        if width > 0.0 && self.0.get_untracked() != width {
+            self.0.set(width);
+        }
+        bc.constrain(Size::ZERO)
+    }
+
+    fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
 }
 
 /// The catalog's whole reactive surface, bundled so it can be cloned into the
@@ -159,6 +199,14 @@ pub struct CatalogState {
     /// Which fake server face (index into the demo's four faces) is currently
     /// the live page of the card-switcher demo.
     pub switcher_live: RwSignal<usize>,
+    /// Whether the full-screen card-switcher demo has taken over the window
+    /// (no tab strip, no page `scroll_view`). Set by the Motion page's launch
+    /// button, cleared by the demo's "Exit demo" app-bar action.
+    pub switcher_fullscreen: RwSignal<bool>,
+    /// The window's logical width, published by [`WindowWidthProbe`] during
+    /// layout (0 until the first layout); the demo reads it to pick the
+    /// phone or tablet card scale via `pages::motion::card_scale_for`.
+    pub window_width: RwSignal<f64>,
     /// The card-switcher demo's back handle, created once here (it needs the
     /// reactive runtime, so never inside a `View::build`); its `on_back`
     /// closes the stage through [`switcher_open`](Self::switcher_open).
@@ -183,6 +231,8 @@ impl CatalogState {
             switcher_open,
             switcher_expanding: RwSignal::new(None),
             switcher_live: RwSignal::new(0),
+            switcher_fullscreen: RwSignal::new(false),
+            window_width: RwSignal::new(0.0),
             switcher_back: frust_glyph::SwitcherBack::new(move || switcher_open.set(false)),
         }
     }
@@ -369,6 +419,34 @@ fn home_page(state: &CatalogState) -> impl View<CatalogState> + use<> {
         .child(frust_glyph::toast_host(pending))
 }
 
+/// The full-screen card-switcher demo: the stage fills the whole window
+/// (below the opaque background, above no tab strip or scroll view) with the
+/// width probe and the toast overlay alongside. The exit affordance is the
+/// live page's "Exit demo" app-bar action (see `pages::motion`).
+fn switcher_fullscreen_page(state: &CatalogState) -> impl View<CatalogState> + use<> {
+    let pending = state.toasts.get();
+    let background_color = frust::use_context::<Theme>()
+        .unwrap_or_else(frust_glyph::baseline)
+        .scheme()
+        .surface;
+    stack()
+        .child(AppBackground(background_color))
+        .child(WindowWidthProbe(state.window_width))
+        .child(column().flex(1, pages::motion::switcher_stage(state)))
+        .child(frust_glyph::toast_host(pending))
+}
+
+/// The shell's root page: the full-screen switcher demo when
+/// [`CatalogState::switcher_fullscreen`] is set, the tabbed [`home_page`]
+/// otherwise.
+fn shell_page(state: &CatalogState) -> AnyView<CatalogState> {
+    if state.switcher_fullscreen.get() {
+        any(switcher_fullscreen_page(state))
+    } else {
+        any(home_page(state))
+    }
+}
+
 /// The root [`Component`]. This example's `frust::app!` call below installs
 /// Glyph as the seeded default theme via its `setup = { .. }` block
 /// (`frust_glyph::install()`, run before any shell construction) — a
@@ -396,7 +474,7 @@ impl Component for CatalogApp {
         // so back-dismiss (overlay → pop → app
         // exit at the root) works with zero catalog-side back code.
         let handles = state.clone();
-        navigator(&state.nav, move || home_page(&handles)).transition(TransitionSpec::glyph())
+        navigator(&state.nav, move || shell_page(&handles)).transition(TransitionSpec::glyph())
     }
 }
 
@@ -415,3 +493,58 @@ frust::app!(
         frust_glyph::install();
     }
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use frust_core::RenderRoot;
+    use frust_reactive::ReactiveRuntime;
+    use frust_text::TextContext;
+    use reactive_graph::owner::Owner;
+
+    /// Mount the shell at `(w, h)` for two frames (the second sees the width
+    /// the first layout published) and return its semantics dump.
+    fn mount(state: &mut CatalogState, w: f64, h: f64) -> String {
+        let mut tcx = TextContext::new();
+        let mut root: RenderRoot<CatalogState, AnyView<CatalogState>> = RenderRoot::new();
+        let mut logic = |s: &mut CatalogState| shell_page(s);
+        for _ in 0..2 {
+            root.rebuild(&mut logic, state);
+            let tcx_any: &mut dyn std::any::Any = &mut tcx;
+            root.layout_with_text(kurbo::Size::new(w, h), tcx_any);
+        }
+        format!("{:?}", root.semantics().nodes)
+    }
+
+    fn setup() -> (Owner, CatalogState) {
+        let _ = ReactiveRuntime::init(std::sync::Arc::new(|| {}));
+        let owner = Owner::new();
+        owner.set();
+        (owner, CatalogState::new())
+    }
+
+    #[test]
+    fn shell_switches_between_tabbed_and_fullscreen_stage() {
+        for (w, h, tablet) in [(390.0, 844.0, false), (1194.0, 834.0, true)] {
+            let (_owner, mut state) = setup();
+            let tabbed = mount(&mut state, w, h);
+            assert!(tabbed.contains("Motion"), "tabbed shell has the tab strip");
+            assert!(!tabbed.contains("Exit demo"));
+
+            state.switcher_fullscreen.set(true);
+            let full = mount(&mut state, w, h);
+            assert!(
+                full.contains("Exit demo"),
+                "full-screen stage has the exit action"
+            );
+            assert!(!full.contains("Motion"), "no tab strip in full-screen mode");
+
+            assert_eq!(state.window_width.get_untracked(), w);
+            let scale = pages::motion::card_scale_for(state.window_width.get_untracked());
+            assert_eq!(scale, tablet.then_some(0.58));
+
+            state.switcher_fullscreen.set(false);
+            assert!(mount(&mut state, w, h).contains("Motion"));
+        }
+    }
+}
