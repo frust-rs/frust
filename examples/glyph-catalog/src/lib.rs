@@ -38,9 +38,10 @@ use frust::authoring::{
 
 use frust::motion::switcher::pattern_switcher;
 use frust::{
-    AnyView, Brightness, Color, Component, Get, GetUntracked, MotionScheme, NavigatorController,
-    RwSignal, ScrollInfo, Set, Theme, TransitionSpec, View, any, button, column, flexible, icon,
-    icons, inflexible, navigator, safe_area, scroll_view, set_app_theme, stack,
+    AnyView, BackFallback, Brightness, Color, Component, Get, GetUntracked, MotionScheme,
+    NavigatorController, RwSignal, ScrollInfo, Set, Theme, TransitionSpec, View, any,
+    back_fallback, button, column, flexible, icon, icons, inflexible, navigator, safe_area,
+    scroll_view, set_app_theme, stack,
 };
 use frust_glyph::motion::{GlyphSlide, SlideDirection};
 
@@ -215,6 +216,10 @@ pub struct CatalogState {
     /// reactive runtime, so never inside a `View::build`); its `on_back`
     /// closes the stage through [`switcher_open`](Self::switcher_open).
     pub switcher_back: frust_glyph::SwitcherBack,
+    /// The full-screen demo's back rule, claiming while the stage is open or
+    /// the demo is full screen: back closes an open stage, else it returns to
+    /// the tabbed shell instead of falling through to an app exit.
+    pub switcher_exit_back: BackFallback,
 }
 
 impl CatalogState {
@@ -225,6 +230,14 @@ impl CatalogState {
         let switcher_open = RwSignal::new(false);
         let switcher_expanding = RwSignal::new(None);
         let switcher_generation = RwSignal::new(0u64);
+        let switcher_fullscreen = RwSignal::new(false);
+        // Back withdraws a pending selection too, so the delayed swap
+        // does not switch to a server the user backed out of.
+        let close = move || {
+            switcher_generation.set(switcher_generation.get_untracked() + 1);
+            switcher_expanding.set(None);
+            switcher_open.set(false);
+        };
         CatalogState {
             brightness: RwSignal::new(Brightness::Dark),
             reduce_motion: RwSignal::new(false),
@@ -238,15 +251,19 @@ impl CatalogState {
             switcher_expanding,
             switcher_generation,
             switcher_live: RwSignal::new(0),
-            switcher_fullscreen: RwSignal::new(false),
+            switcher_fullscreen,
             window_width: RwSignal::new(0.0),
-            // Back withdraws a pending selection too, so the delayed swap
-            // does not switch to a server the user backed out of.
-            switcher_back: frust_glyph::SwitcherBack::new(move || {
-                switcher_generation.set(switcher_generation.get_untracked() + 1);
-                switcher_expanding.set(None);
-                switcher_open.set(false);
-            }),
+            switcher_back: frust_glyph::SwitcherBack::new(close),
+            switcher_exit_back: BackFallback::new(
+                move || switcher_open.get_untracked() || switcher_fullscreen.get_untracked(),
+                move || {
+                    if switcher_open.get_untracked() {
+                        close();
+                    } else {
+                        switcher_fullscreen.set(false);
+                    }
+                },
+            ),
         }
     }
 }
@@ -450,11 +467,15 @@ fn switcher_fullscreen_page(state: &CatalogState) -> impl View<CatalogState> + u
 }
 
 /// The shell's root page: the full-screen switcher demo when
-/// [`CatalogState::switcher_fullscreen`] is set, the tabbed [`home_page`]
-/// otherwise.
+/// [`CatalogState::switcher_fullscreen`] is set (wrapped in its
+/// [`switcher_exit_back`](CatalogState::switcher_exit_back) rule), the tabbed
+/// [`home_page`] otherwise.
 fn shell_page(state: &CatalogState) -> AnyView<CatalogState> {
     if state.switcher_fullscreen.get() {
-        any(switcher_fullscreen_page(state))
+        any(back_fallback(
+            &state.switcher_exit_back,
+            switcher_fullscreen_page(state),
+        ))
     } else {
         any(home_page(state))
     }
@@ -515,24 +536,53 @@ mod tests {
     use frust_reactive::ReactiveRuntime;
     use frust_text::TextContext;
     use reactive_graph::owner::Owner;
+    use std::sync::{Mutex, MutexGuard};
 
-    /// Mount the shell at `(w, h)` for two frames (the second sees the width
-    /// the first layout published) and return its semantics nodes as
-    /// (role, label) pairs.
-    fn mount(state: &mut CatalogState, w: f64, h: f64) -> Vec<(Role, String)> {
-        let mut tcx = TextContext::new();
-        let mut root: RenderRoot<CatalogState, AnyView<CatalogState>> = RenderRoot::new();
-        let mut logic = |s: &mut CatalogState| shell_page(s);
-        for _ in 0..2 {
-            root.rebuild(&mut logic, state);
-            let tcx_any: &mut dyn std::any::Any = &mut tcx;
-            root.layout_with_text(kurbo::Size::new(w, h), tcx_any);
+    /// Serializes the tests that mount a back-wired view: a back press bumps
+    /// `frust-reactive`'s process-wide counter, which any other test thread's
+    /// next back wire would consume.
+    pub(crate) static BACK_PRESS_LOCK: Mutex<()> = Mutex::new(());
+
+    pub(crate) fn back_press_lock() -> MutexGuard<'static, ()> {
+        BACK_PRESS_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The shell kept mounted across frames, so a back press reaches the
+    /// fallbacks the previous frames wired.
+    struct Shell {
+        root: RenderRoot<CatalogState, AnyView<CatalogState>>,
+        tcx: TextContext,
+    }
+
+    impl Shell {
+        fn new() -> Self {
+            Self {
+                root: RenderRoot::new(),
+                tcx: TextContext::new(),
+            }
         }
-        root.semantics()
-            .nodes
-            .iter()
-            .map(|(_, n)| (n.role(), n.label().unwrap_or_default().to_string()))
-            .collect()
+
+        /// Rebuild and lay out at `(w, h)` for two frames (the second sees the
+        /// width the first layout published); the semantics as (role, label).
+        fn frames(&mut self, state: &mut CatalogState, w: f64, h: f64) -> Vec<(Role, String)> {
+            let mut logic = |s: &mut CatalogState| shell_page(s);
+            for _ in 0..2 {
+                self.root.rebuild(&mut logic, state);
+                let tcx_any: &mut dyn std::any::Any = &mut self.tcx;
+                self.root.layout_with_text(kurbo::Size::new(w, h), tcx_any);
+            }
+            self.root
+                .semantics()
+                .nodes
+                .iter()
+                .map(|(_, n)| (n.role(), n.label().unwrap_or_default().to_string()))
+                .collect()
+        }
+    }
+
+    /// Mount a fresh shell at `(w, h)`; see [`Shell::frames`].
+    fn mount(state: &mut CatalogState, w: f64, h: f64) -> Vec<(Role, String)> {
+        Shell::new().frames(state, w, h)
     }
 
     fn has(nodes: &[(Role, String)], role: Role, label: &str) -> bool {
@@ -548,6 +598,7 @@ mod tests {
 
     #[test]
     fn shell_switches_between_tabbed_and_fullscreen_stage() {
+        let _back = back_press_lock();
         for (w, h, tablet) in [(390.0, 844.0, false), (1194.0, 834.0, true)] {
             let (_owner, mut state) = setup();
             let tabbed = mount(&mut state, w, h);
@@ -575,5 +626,50 @@ mod tests {
             state.switcher_fullscreen.set(false);
             assert!(has(&mount(&mut state, w, h), Role::Tab, "Motion"));
         }
+    }
+
+    #[test]
+    fn back_in_the_demo_with_the_stage_closed_returns_to_the_tabbed_shell() {
+        let _back = back_press_lock();
+        let (_owner, mut state) = setup();
+        let mut shell = Shell::new();
+        state.switcher_fullscreen.set(true);
+        let demo = shell.frames(&mut state, 390.0, 844.0);
+        assert!(has(&demo, Role::Button, "Exit demo"), "in the demo");
+        assert!(
+            frust_reactive::handles_back(),
+            "the closed demo claims back"
+        );
+
+        frust_reactive::push_back_press();
+        let after = shell.frames(&mut state, 390.0, 844.0);
+        assert!(!state.switcher_fullscreen.get_untracked(), "demo left");
+        assert!(has(&after, Role::Tab, "Motion"), "back on the tabbed shell");
+        assert!(
+            !frust_reactive::handles_back(),
+            "the tabs leave back to the OS"
+        );
+    }
+
+    #[test]
+    fn back_in_the_demo_with_the_stage_open_closes_it_and_stays() {
+        let _back = back_press_lock();
+        let (_owner, mut state) = setup();
+        let mut shell = Shell::new();
+        state.switcher_fullscreen.set(true);
+        state.switcher_open.set(true);
+        shell.frames(&mut state, 390.0, 844.0);
+        let generation = state.switcher_generation.get_untracked();
+
+        frust_reactive::push_back_press();
+        let after = shell.frames(&mut state, 390.0, 844.0);
+        assert!(!state.switcher_open.get_untracked(), "the stage closed");
+        assert_eq!(state.switcher_generation.get_untracked(), generation + 1);
+        assert!(
+            state.switcher_fullscreen.get_untracked(),
+            "still in the demo"
+        );
+        assert!(has(&after, Role::Button, "Exit demo"));
+        assert!(!has(&after, Role::Tab, "Motion"));
     }
 }

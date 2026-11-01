@@ -956,6 +956,7 @@ mod tests {
 
     #[test]
     fn stage_shows_the_fab_closed_and_the_switcher_bar_open() {
+        let _back = crate::tests::back_press_lock();
         let (_owner, mut state) = setup();
 
         let closed = mount_nodes(&mut state, stage);
@@ -985,6 +986,7 @@ mod tests {
 
     #[test]
     fn page_mounts_with_the_launch_button_in_each_state() {
+        let _back = crate::tests::back_press_lock();
         let (_owner, mut state) = setup();
         let page_view = |s: &CatalogState| frust::any(page(s));
         let launch = "Open full-screen switcher demo";
