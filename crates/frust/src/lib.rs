@@ -3475,6 +3475,24 @@ mod page_view_reexport {
     }
 }
 
+/// Facade-level check that the app-switcher vocabulary ([`card_switcher`],
+/// [`CardSwitcher`], [`CardSwitcherView`], [`PeerCard`], [`peer_card`])
+/// resolves through `frust::motion`.
+#[cfg(test)]
+mod card_switcher_reexport {
+    use crate::motion::{CardSwitcher, CardSwitcherView, PeerCard, card_switcher, peer_card};
+    use crate::text;
+
+    #[test]
+    fn card_switcher_resolves_through_facade() {
+        let peer: PeerCard<()> = peer_card(text("peer"));
+        let view: CardSwitcherView<()> = card_switcher(false, text("live")).peers([peer]);
+        let _ = view;
+        let pascal: CardSwitcherView<()> = CardSwitcher(true, text("live"));
+        let _ = pascal;
+    }
+}
+
 /// Facade-level check that the opt-in scrollbar vocabulary
 /// ([`ScrollbarStyle`]/[`ScrollbarShow`]) resolves through the `frust` facade
 /// for both [`ScrollView::scrollbar`] and [`ListView::scrollbar`].
