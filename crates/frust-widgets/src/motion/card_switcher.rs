@@ -122,6 +122,7 @@
 //! No direct analog; `OpenContainer` (the `animations` package) and `Hero` are
 //! the nearest.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -216,6 +217,9 @@ struct StageOptions {
 
 type CloseCallback<State> = Rc<dyn Fn(&mut State)>;
 
+/// A [`CardSwitcherView::dots_for`] builder, erased at the one boundary.
+type DotsBuilder<State> = Rc<dyn Fn(usize, usize) -> AnyView<State>>;
+
 /// A peer card for [`CardSwitcherView::peers`]: a face and an optional label.
 pub struct PeerCard<State: 'static> {
     face: AnyView<State>,
@@ -246,9 +250,14 @@ pub struct CardSwitcherView<State: 'static> {
     live_index: usize,
     live_label: Option<AnyView<State>>,
     dots: Option<AnyView<State>>,
+    dots_for: Option<DotsBuilder<State>>,
+    /// What the last build or rebuild of `dots_for` produced, kept as the next
+    /// rebuild's `prev`: a builder yields no view until called.
+    dots_built: RefCell<Option<AnyView<State>>>,
     action_bar: Option<AnyView<State>>,
     expanding: Option<usize>,
     on_select: Option<TypedArgCallback<State, usize>>,
+    on_centre_changed: Option<TypedArgCallback<State, usize>>,
     on_close: Option<CloseCallback<State>>,
     options: StageOptions,
 }
@@ -267,9 +276,12 @@ pub fn card_switcher<State: 'static>(
         live_index: 0,
         live_label: None,
         dots: None,
+        dots_for: None,
+        dots_built: RefCell::new(None),
         action_bar: None,
         expanding: None,
         on_select: None,
+        on_centre_changed: None,
         on_close: None,
         options: StageOptions {
             card_scale: CARD_SCALE,
@@ -337,6 +349,41 @@ impl<State: 'static> CardSwitcherView<State> {
     /// positions and fades it.
     pub fn dots(mut self, dots: impl View<State>) -> Self {
         self.dots = Some(any(dots));
+        self
+    }
+
+    /// A page indicator built from the strip: `build(count, current)` gets
+    /// `count = peers + 1` and the current strip index (see
+    /// [`on_centre_changed`](Self::on_centre_changed) for its definition), and
+    /// is called again only when either changes, so the indicator follows a
+    /// drag, a tap and an expansion. The stage positions and fades it like
+    /// [`dots`](Self::dots), which `dots_for` overrides when both are set.
+    ///
+    /// A change is seen during paint and applied by the next
+    /// `Housekeeping` pass, which re-runs the app's build closure: the
+    /// indicator trails the strip by that one pass. A rebuild with an
+    /// unchanged `(count, current)` keeps the previous view without calling
+    /// `build`, so the closure's captures are read at the change only.
+    pub fn dots_for<V: View<State>>(mut self, build: impl Fn(usize, usize) -> V + 'static) -> Self {
+        self.dots_for = Some(Rc::new(move |count, current| any(build(count, current))));
+        self
+    }
+
+    /// Called with the **strip** index of the centred card when it changes
+    /// (the live card's is [`live_index`](Self::live_index); peer indices are
+    /// not used here). The current index is the card whose centre is nearest
+    /// the stage centre, `round(offset / stride)`, followed continuously
+    /// through a drag or fling; once a tap's centring or an expansion starts
+    /// it is that card's index. It is delivered like `on_select`: observed in
+    /// paint, fired by the next `Housekeeping` event, with only the latest
+    /// index if several changed between two events. It does not fire for the
+    /// initial open, where the live card is centred by construction, nor for
+    /// the stage closing.
+    pub fn on_centre_changed(
+        mut self,
+        on_centre_changed: impl Fn(&mut State, usize) + 'static,
+    ) -> Self {
+        self.on_centre_changed = Some(Rc::new(on_centre_changed));
         self
     }
 
@@ -689,6 +736,12 @@ struct Strip {
     gap: f64,
     peer_alpha: f64,
     on_select: Option<ErasedArgCallback<usize>>,
+    on_centre_changed: Option<ErasedArgCallback<usize>>,
+    /// The centred card's strip position as last observed (see
+    /// [`CardSwitcherView::on_centre_changed`]).
+    current: usize,
+    /// A centre change observed during paint, owed to the next event.
+    centre_owed: Option<usize>,
     core: ScrollSurfaceCore,
     /// The strip position in strip px: card `k` is centred at `k × stride`.
     offset: f64,
@@ -723,6 +776,9 @@ impl Strip {
             gap: view.options.gap,
             peer_alpha: view.options.peer_alpha,
             on_select: view.on_select.as_ref().map(erase_callback_arg),
+            on_centre_changed: view.on_centre_changed.as_ref().map(erase_callback_arg),
+            current: view.live_index.min(view.peers.len()),
+            centre_owed: None,
             core: ScrollSurfaceCore::with_axis(ScrollAxis::Horizontal),
             offset: 0.0,
             stride: 0.0,
@@ -767,6 +823,7 @@ impl Strip {
         self.gap = next.options.gap;
         self.peer_alpha = next.options.peer_alpha;
         self.on_select = next.on_select.as_ref().map(erase_callback_arg);
+        self.on_centre_changed = next.on_centre_changed.as_ref().map(erase_callback_arg);
         flags
     }
 
@@ -913,6 +970,27 @@ impl Strip {
         }
     }
 
+    /// The centred card's strip position now: the tap or expansion target
+    /// once one is under way, else the card nearest the centre. Closed (or
+    /// closing) it is the live card.
+    fn centre_index(&self, open: bool) -> usize {
+        let last = self.peers.len();
+        if !open {
+            return self.live();
+        }
+        if let Some(pending) = &self.pending {
+            return pending.card.min(last);
+        }
+        if let Some(expansion) = self.expansion.as_ref().filter(|e| e.requested) {
+            return expansion.card.min(last);
+        }
+        if self.stride > 0.0 {
+            (self.offset / self.stride).round().clamp(0.0, last as f64) as usize
+        } else {
+            self.live()
+        }
+    }
+
     /// The open flip: the strip starts centred on the live card, at rest, with
     /// nothing in flight.
     fn reset_for_open(&mut self) {
@@ -926,6 +1004,8 @@ impl Strip {
         self.tap_outcome = None;
         self.pending = None;
         self.owed = None;
+        self.centre_owed = None;
+        self.current = self.live();
         self.expansion = None;
     }
 
@@ -937,6 +1017,7 @@ impl Strip {
         self.tap_outcome = None;
         self.pending = None;
         self.owed = None;
+        self.centre_owed = None;
         self.expansion
             .take()
             .map(|expansion| expansion.ramp.value().clamp(0.0, 1.0))
@@ -1242,6 +1323,8 @@ pub struct CardSwitcherWidget {
     child: ChildPod,
     live_label: Option<ChildPod>,
     dots: Option<ChildPod>,
+    /// The `(count, current)` the `dots_for` slot was last built for.
+    dots_key: Option<(usize, usize)>,
     action_bar: Option<ChildPod>,
     strip: Strip,
     on_close: Option<ErasedCallback>,
@@ -1255,16 +1338,30 @@ pub struct CardSwitcherWidget {
     strip_gesture: bool,
     /// The child held a focus link when the stage opened.
     saved_focus: bool,
+    /// Whether a centre change needs a Housekeeping pass: an
+    /// `on_centre_changed` callback or a `dots_for` slot is set.
+    watches_centre: bool,
 }
 
 impl<State: 'static> View<State> for CardSwitcherView<State> {
     type Element = CardSwitcherWidget;
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> CardSwitcherWidget {
+        let key = (self.peers.len() + 1, self.live_index.min(self.peers.len()));
+        let (dots, dots_key) = match &self.dots_for {
+            Some(build) => {
+                let view = build(key.0, key.1);
+                let pod = build_child(&view, ctx);
+                *self.dots_built.borrow_mut() = Some(view);
+                (Some(pod), Some(key))
+            }
+            None => (self.dots.as_ref().map(|v| build_child(v, ctx)), None),
+        };
         CardSwitcherWidget {
             child: build_child(&self.live, ctx),
             live_label: self.live_label.as_ref().map(|v| build_child(v, ctx)),
-            dots: self.dots.as_ref().map(|v| build_child(v, ctx)),
+            dots,
+            dots_key,
             action_bar: self.action_bar.as_ref().map(|v| build_child(v, ctx)),
             strip: Strip::build(self, ctx),
             on_close: self.on_close.as_ref().map(erase_callback),
@@ -1273,6 +1370,7 @@ impl<State: 'static> View<State> for CardSwitcherView<State> {
             close_armed: false,
             strip_gesture: false,
             saved_focus: false,
+            watches_centre: self.on_centre_changed.is_some() || self.dots_for.is_some(),
         }
     }
 
@@ -1310,7 +1408,6 @@ impl<State: 'static> View<State> for CardSwitcherView<State> {
             &mut element.live_label,
             ctx,
         );
-        flags |= rebuild_slot(&prev.dots, &self.dots, &mut element.dots, ctx);
         flags |= rebuild_slot(
             &prev.action_bar,
             &self.action_bar,
@@ -1318,15 +1415,77 @@ impl<State: 'static> View<State> for CardSwitcherView<State> {
             ctx,
         );
         flags |= element.strip.rebuild(prev, self, ctx);
+        if !element.ramp.is_open() {
+            element.strip.current = element.strip.live();
+        }
+        element.watches_centre = self.on_centre_changed.is_some() || self.dots_for.is_some();
+        flags |= self.rebuild_dots(prev, element, ctx);
         flags
     }
 
     fn teardown(&self, element: &mut CardSwitcherWidget, ctx: &mut BuildCtx<'_>) {
         teardown_child(&self.live, &mut element.child, ctx);
         teardown_slot(&self.live_label, &mut element.live_label, ctx);
-        teardown_slot(&self.dots, &mut element.dots, ctx);
+        match &self.dots_for {
+            Some(_) => {
+                if let (Some(view), Some(pod)) =
+                    (self.dots_built.borrow_mut().take(), &mut element.dots)
+                {
+                    teardown_child(&view, pod, ctx);
+                }
+            }
+            None => teardown_slot(&self.dots, &mut element.dots, ctx),
+        }
         teardown_slot(&self.action_bar, &mut element.action_bar, ctx);
         element.strip.teardown(self, ctx);
+    }
+}
+
+impl<State: 'static> CardSwitcherView<State> {
+    /// Reconcile the dots slot: the builder slot when `dots_for` is set (a
+    /// rebuild only when `(count, current)` changed), else the static one.
+    fn rebuild_dots(
+        &self,
+        prev: &Self,
+        element: &mut CardSwitcherWidget,
+        ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        let prev_built = prev
+            .dots_for
+            .as_ref()
+            .and_then(|_| prev.dots_built.borrow_mut().take());
+        let Some(build) = &self.dots_for else {
+            let (Some(old), Some(mut pod)) = (prev_built, element.dots.take()) else {
+                return rebuild_slot(&prev.dots, &self.dots, &mut element.dots, ctx);
+            };
+            // The builder slot gave way to a static one (or to none).
+            teardown_child(&old, &mut pod, ctx);
+            element.dots_key = None;
+            return ChangeFlags::LAYOUT
+                | ChangeFlags::PAINT
+                | rebuild_slot(&None, &self.dots, &mut element.dots, ctx);
+        };
+        let key = (
+            element.strip.card_count(),
+            element.strip.current.min(element.strip.peers.len()),
+        );
+        if prev_built.is_some() && element.dots_key == Some(key) {
+            *self.dots_built.borrow_mut() = prev_built;
+            return ChangeFlags::NONE;
+        }
+        let view = build(key.0, key.1);
+        let flags = match (&prev_built, element.dots.as_mut()) {
+            (Some(old), Some(pod)) => rebuild_child(old, &view, pod, ctx),
+            _ => {
+                // A static slot (or nothing) gave way to the builder.
+                teardown_slot(&prev.dots, &mut element.dots, ctx);
+                element.dots = Some(build_child(&view, ctx));
+                ChangeFlags::LAYOUT | ChangeFlags::PAINT
+            }
+        };
+        element.dots_key = Some(key);
+        *self.dots_built.borrow_mut() = Some(view);
+        flags
     }
 }
 
@@ -1478,6 +1637,23 @@ impl CardSwitcherWidget {
         }
     }
 
+    /// Compare the centred card with the last observed one; a change owes the
+    /// next event an `on_centre_changed` call and a rebuild of the `dots_for`
+    /// slot, and costs nothing when the index holds. Closed, it follows the
+    /// live card silently.
+    fn observe_centre(&mut self, ctx: &mut PaintCtx, open: bool) {
+        let now = self.strip.centre_index(open);
+        if now == self.strip.current {
+            return;
+        }
+        self.strip.current = now;
+        if open && self.watches_centre {
+            self.strip.centre_owed = Some(now);
+            frust_core::mark_pending_result_flush();
+            ctx.request_frame();
+        }
+    }
+
     fn fire_close(&mut self, ctx: &mut EventCtx) {
         if let Some(on_close) = &mut self.on_close {
             on_close(ctx);
@@ -1494,6 +1670,12 @@ impl CardSwitcherWidget {
 
     /// Deliver a callback a paint owed (a centring tween that landed).
     fn deliver_owed(&mut self, ctx: &mut EventCtx) {
+        if let Some(card) = self.strip.centre_owed.take() {
+            if let Some(on_centre) = &mut self.strip.on_centre_changed {
+                on_centre(ctx, card);
+            }
+            ctx.request_redraw();
+        }
         match self.strip.owed.take() {
             Some(Owed::Select(peer)) => self.fire_select(ctx, peer),
             Some(Owed::Close) => self.fire_close(ctx),
@@ -1745,6 +1927,7 @@ impl Widget for CardSwitcherWidget {
         if self.strip.advance(ctx, reduced, expand_timing, open) {
             self.cancel_slot_gestures();
         }
+        self.observe_centre(ctx, open);
         let frame = self.frame();
         self.apply_frame(&frame);
         if !self.engaged() {
@@ -2815,5 +2998,177 @@ mod tests {
         );
         let (scale, _) = scale_and_pivot(w.child.transform().expect("closing"));
         assert!(near(scale, 0.81), "scale {scale}");
+    }
+
+    // --- Centre tracking: `dots_for` and `on_centre_changed` ---
+
+    type Calls = Rc<RefCell<Vec<(usize, usize)>>>;
+
+    /// A 3-peer stage with live card 1 whose `dots_for` logs `(count, current)`
+    /// and whose `on_centre_changed` logs the strip index.
+    fn centre_view(
+        peers: usize,
+        expanding: Option<usize>,
+        calls: &Calls,
+        centres: &Log,
+    ) -> CardSwitcherView<()> {
+        let (calls, centres) = (Rc::clone(calls), Rc::clone(centres));
+        strip_view(true, peers, 1, &Log::default())
+            .expanding(expanding)
+            .dots_for(move |count, current| {
+                calls.borrow_mut().push((count, current));
+                leaf(40.0, 10.0)
+            })
+            .on_centre_changed(move |_: &mut (), card: usize| centres.borrow_mut().push(Some(card)))
+    }
+
+    /// One app pass: the owed Housekeeping event, then the build closure's
+    /// view diffed against the last. Returns the new view.
+    fn pump(
+        rig: &mut Rig,
+        prev: CardSwitcherView<()>,
+        make: impl Fn() -> CardSwitcherView<()>,
+    ) -> CardSwitcherView<()> {
+        rig.send(&InputEvent::Housekeeping);
+        let next = make();
+        rig.rebuild(&prev, &next);
+        next
+    }
+
+    #[test]
+    fn dots_for_is_built_for_the_count_and_live_index_and_sits_below_the_card() {
+        let (calls, centres) = (Calls::default(), Log::default());
+        let view = centre_view(3, None, &calls, &centres);
+        let mut rig = Rig::new(&view, PHONE);
+        assert_eq!(*calls.borrow(), vec![(4, 1)]);
+        let dots = rig.w.dots.as_ref().expect("the builder's slot");
+        let card = card_at(PHONE, CARD_SCALE);
+        assert!(
+            near(dots.origin().y, card.y1 + DOTS_GAP),
+            "{:?}",
+            dots.origin()
+        );
+        assert!(near(dots.origin().x, (PHONE.width - 40.0) / 2.0));
+        rig.frame(16.0);
+        pump(&mut rig, view, || centre_view(3, None, &calls, &centres));
+        assert_eq!(
+            calls.borrow().len(),
+            1,
+            "an unchanged index does not rebuild"
+        );
+        assert!(
+            centres.borrow().is_empty(),
+            "the initial open is not a change"
+        );
+    }
+
+    #[test]
+    fn dots_for_wins_over_a_static_dots_slot() {
+        let (calls, centres) = (Calls::default(), Log::default());
+        let view = centre_view(2, None, &calls, &centres).dots(leaf(99.0, 10.0));
+        let rig = Rig::new(&view, PHONE);
+        assert_eq!(rig.w.dots.as_ref().unwrap().size().width, 40.0);
+    }
+
+    #[test]
+    fn a_drag_rebuilds_the_dots_once_per_index_change() {
+        let (calls, centres) = (Calls::default(), Log::default());
+        let make = || centre_view(3, None, &calls, &centres);
+        let mut view = make();
+        let mut rig = Rig::new(&view, PHONE);
+        let stride = rig.stride();
+
+        rig.drag(201.0, -0.4 * stride, 2, 16.0);
+        view = pump(&mut rig, view, make);
+        assert_eq!(calls.borrow().len(), 1, "short of half a stride");
+
+        rig.pointer(PointerPhase::Move, rig.finger() - 0.2 * stride);
+        rig.frame(16.0);
+        view = pump(&mut rig, view, make);
+        assert_eq!(*calls.borrow(), vec![(4, 1), (4, 2)], "past half a stride");
+        assert_eq!(*centres.borrow(), vec![Some(2)]);
+
+        rig.frame(16.0);
+        view = pump(&mut rig, view, make);
+        rig.frame(16.0);
+        view = pump(&mut rig, view, make);
+        assert_eq!(
+            calls.borrow().len(),
+            2,
+            "frames at the same index do not rebuild"
+        );
+
+        rig.pointer(PointerPhase::Move, rig.finger() + 0.7 * stride);
+        rig.frame(16.0);
+        pump(&mut rig, view, make);
+        assert_eq!(*calls.borrow(), vec![(4, 1), (4, 2), (4, 1)], "back again");
+        assert_eq!(*centres.borrow(), vec![Some(2), Some(1)]);
+    }
+
+    #[test]
+    fn tapping_a_peek_card_moves_the_dots_as_the_centring_starts() {
+        let (calls, centres) = (Calls::default(), Log::default());
+        let make = || centre_view(3, None, &calls, &centres);
+        let mut view = make();
+        let mut rig = Rig::new(&view, PHONE);
+        rig.tap(370.0);
+        rig.frame(16.0);
+        assert!(rig.offset() < 2.0 * rig.stride(), "still tweening");
+        view = pump(&mut rig, view, make);
+        assert_eq!(*calls.borrow(), vec![(4, 1), (4, 2)]);
+        for _ in 0..40 {
+            rig.frame(16.0);
+            view = pump(&mut rig, view, make);
+        }
+        pump(&mut rig, view, make);
+        assert_eq!(*centres.borrow(), vec![Some(2)], "fired once");
+        assert_eq!(calls.borrow().len(), 2, "the landing changes nothing");
+    }
+
+    #[test]
+    fn expanding_sets_the_current_index_to_the_peers_strip_position() {
+        let (calls, centres) = (Calls::default(), Log::default());
+        let make = || centre_view(3, Some(2), &calls, &centres);
+        let first = centre_view(3, None, &calls, &centres);
+        let mut rig = Rig::new(&first, PHONE);
+        let view = make();
+        rig.rebuild(&first, &view);
+        rig.frame(16.0);
+        pump(&mut rig, view, make);
+        assert_eq!(
+            calls.borrow().last(),
+            Some(&(4, 3)),
+            "peer 2 sits at card 3"
+        );
+        assert_eq!(*centres.borrow(), vec![Some(3)]);
+    }
+
+    #[test]
+    fn a_one_card_fling_fires_on_centre_changed_once() {
+        let (calls, centres) = (Calls::default(), Log::default());
+        let view = centre_view(3, None, &calls, &centres);
+        let mut rig = Rig::new(&view, PHONE);
+        rig.send(&InputEvent::Housekeeping);
+        assert!(centres.borrow().is_empty(), "not on open");
+        rig.drag(201.0, -120.0, 3, 16.0);
+        rig.pointer(PointerPhase::Up, rig.finger());
+        rig.settle();
+        assert!(near(rig.offset(), 2.0 * rig.stride()));
+        assert_eq!(*centres.borrow(), vec![Some(2)]);
+    }
+
+    #[test]
+    fn closing_follows_the_live_card_without_firing() {
+        let (calls, centres) = (Calls::default(), Log::default());
+        let view = centre_view(3, None, &calls, &centres);
+        let mut rig = Rig::new(&view, PHONE);
+        rig.drag(201.0, -120.0, 3, 16.0);
+        rig.pointer(PointerPhase::Up, rig.finger());
+        rig.settle();
+        let closed = strip_view(false, 3, 1, &Log::default());
+        rig.rebuild(&view, &closed);
+        rig.settle();
+        assert_eq!(*centres.borrow(), vec![Some(2)], "no event for the close");
+        assert_eq!(rig.w.strip.current, 1);
     }
 }
