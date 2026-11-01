@@ -16,6 +16,8 @@
 //!   retargets smoothly (no jump), timed from the theme's
 //!   [`frust_theme::MotionScheme`] by default, or an explicit
 //!   [`crate::Timing`] override.
+//! * [`card_switcher`] — [`CardSwitcherView`], an app-switcher stage: the live
+//!   page shrinks into a rounded card over a scrim, with peer cards and slots.
 //! * [`switcher`] — [`switcher::PatternSwitcher`], a cross-fading
 //!   child-switch wrapper (Flutter's `AnimatedSwitcher`).
 //! * [`patterns`] — higher-level motion patterns (e.g. staggered reveals)
@@ -32,10 +34,14 @@
 //! edits required.
 
 pub mod animated;
+pub mod card_switcher;
 pub mod patterns;
 pub mod switcher;
 
 pub use animated::{
     AnimatedOpacity, AnimatedOpacityView, AnimatedOpacityWidget, AnimatedScale, AnimatedScaleView,
     AnimatedScaleWidget, animated_opacity, animated_scale,
+};
+pub use card_switcher::{
+    CardSwitcher, CardSwitcherView, CardSwitcherWidget, PeerCard, card_switcher, peer_card,
 };
