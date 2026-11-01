@@ -51,17 +51,31 @@
 //! its full laid-out bounds — the same v1 rule huddle's `PressPop` precedent
 //! established (see `push_transform`'s own doc). A future addition may add a
 //! scaled-hit-test opt-in; this module deliberately does not.
+//!
+//! # Reduced motion: a collapse that overrides explicit timing
+//!
+//! When `theme.motion.reduce_motion` is set, both wrappers collapse rather
+//! than animate, the same rule the navigator and `PatternSwitcher` follow,
+//! and an explicit [`.timing(...)`](AnimatedOpacityView::timing) does not
+//! override it. [`AnimatedOpacity`] runs a 120 ms linear fade to the target
+//! alpha. [`AnimatedScale`] snaps straight to the target scale and requests
+//! no frame. The flag is read at paint, so a flip takes effect on the next
+//! paint. An opacity fade handles a flip through the retarget driver: the
+//! in-flight value is re-driven from where it is under the new timing, which
+//! is value-continuous like any retarget. A scale snap bypasses the driver
+//! (`ImplicitAnim::snap` writes the target straight into the retained state),
+//! so an in-flight scale lands on its target at that same paint.
 
 use std::time::Duration;
 
 use frust_core::{
-    AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, FrameTime,
-    InputEvent, LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, Tween, View, Widget, any,
+    AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Curve, EventCtx, EventResult,
+    FrameTime, InputEvent, LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, Tween, View, Widget, any,
 };
 use frust_theme::{MotionSpring, Theme};
 use kurbo::{Affine, Point, Size};
 
-use crate::nav::transition::{TransitionDriver, make_driver};
+use crate::nav::transition::{REDUCE_MOTION_DURATION, TransitionDriver, make_driver};
 use crate::repaint_boundary::RetainedBoundary;
 use crate::{Alignment, Timing};
 
@@ -118,6 +132,12 @@ fn resolve_scale_timing(theme: Option<&Theme>, explicit: Option<Timing>) -> Timi
     })
 }
 
+/// Whether the threaded theme asks for reduced motion. `false` when no theme
+/// is threaded, so an unthemed paint animates exactly as before.
+fn reduce_motion(theme: Option<&Theme>) -> bool {
+    theme.is_some_and(|theme| theme.motion.reduce_motion)
+}
+
 /// Map an [`Alignment`] component in `-1.0..=1.0` to a `0.0..=1.0` fraction —
 /// duplicated from `align.rs`'s private `Alignment::fraction` (same math,
 /// kept local since that helper isn't `pub`) so [`AnimatedScaleWidget`] can
@@ -158,6 +178,10 @@ struct ImplicitAnim {
     /// The `0..1` progress driver (the page-transition driver, reused here —
     /// see the [module docs](self)).
     driver: TransitionDriver,
+    /// Whether `driver` was built under the reduced-motion collapse, so a
+    /// `reduce_motion` flip re-drives the in-flight value under the other
+    /// timing.
+    driving_reduced: bool,
 }
 
 impl ImplicitAnim {
@@ -175,6 +199,7 @@ impl ImplicitAnim {
             driving_target: initial,
             tween: Tween::new(initial, initial),
             driver,
+            driving_reduced: false,
         }
     }
 
@@ -197,10 +222,39 @@ impl ImplicitAnim {
     /// `timing`. Returns whether still animating (the caller should
     /// [`PaintCtx::request_frame`]).
     fn advance(&mut self, now: FrameTime, timing: Timing) -> bool {
-        if self.target != self.driving_target {
+        self.drive(now, timing, false)
+    }
+
+    /// Advance one frame under the reduced-motion collapse: a 120 ms linear
+    /// ramp, regardless of any explicit timing.
+    fn advance_collapsed(&mut self, now: FrameTime) -> bool {
+        self.drive(
+            now,
+            Timing::Duration(REDUCE_MOTION_DURATION, Curve::Linear),
+            true,
+        )
+    }
+
+    /// Settle straight at the target: no ramp, so `value()` reads the target
+    /// and the next `advance` reports settled. Used by [`AnimatedScaleWidget`]
+    /// under `reduce_motion`, which never runs a spatial ramp.
+    fn snap(&mut self) {
+        self.tween = Tween::new(self.target, self.target);
+        self.driving_target = self.target;
+        self.driving_reduced = false;
+        let (driver, _) = make_driver(Timing::Duration(Duration::ZERO, Curve::Linear));
+        self.driver = driver;
+    }
+
+    /// Shared body of [`Self::advance`] and [`Self::advance_collapsed`]. A
+    /// pending target change, or a flip of the collapse flag, retargets from
+    /// the current value.
+    fn drive(&mut self, now: FrameTime, timing: Timing, reduced: bool) -> bool {
+        if self.target != self.driving_target || reduced != self.driving_reduced {
             let from = self.value();
             self.tween = Tween::new(from, self.target);
             self.driving_target = self.target;
+            self.driving_reduced = reduced;
             let (driver, _) = make_driver(timing);
             self.driver = driver;
         }
@@ -210,7 +264,9 @@ impl ImplicitAnim {
 
 // --- AnimatedOpacity ---------------------------------------------------------
 
-/// A declarative opacity wrapper. See the [module docs](self).
+/// A declarative opacity wrapper. See the [module docs](self). Under
+/// `reduce_motion` the fade is a 120 ms linear collapse, whatever `.timing(...)`
+/// is set.
 pub struct AnimatedOpacityView<State: 'static> {
     target: f64,
     timing: Option<Timing>,
@@ -245,7 +301,8 @@ pub fn AnimatedOpacity<State: 'static, V: View<State>>(
 }
 
 impl<State: 'static> AnimatedOpacityView<State> {
-    /// Override the default (theme-resolved) fade timing.
+    /// Override the default (theme-resolved) fade timing. Ignored under
+    /// `reduce_motion`, which collapses to a 120 ms linear fade.
     pub fn timing(mut self, timing: Timing) -> Self {
         self.timing = Some(timing);
         self
@@ -263,7 +320,8 @@ impl<State: 'static> AnimatedOpacityView<State> {
     }
 }
 
-/// The retained widget for an [`AnimatedOpacityView`].
+/// The retained widget for an [`AnimatedOpacityView`]. Under `reduce_motion`
+/// it fades linearly over 120 ms, ignoring any explicit timing.
 ///
 /// Keyboard input (`Shortcut`, `Key`, `Ime`, `EditCommand`) reaches the child
 /// and the child is a Tab stop only while the fade is above opacity 0; an
@@ -327,8 +385,13 @@ impl Widget for AnimatedOpacityWidget {
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         let theme = Theme::from_paint_ctx(ctx);
-        let timing = resolve_opacity_timing(theme, self.explicit_timing);
-        if self.anim.advance(ctx.frame_time(), timing) {
+        let animating = if reduce_motion(theme) {
+            self.anim.advance_collapsed(ctx.frame_time())
+        } else {
+            let timing = resolve_opacity_timing(theme, self.explicit_timing);
+            self.anim.advance(ctx.frame_time(), timing)
+        };
+        if animating {
             ctx.request_frame();
         }
         // Clamped: alpha is never meaningful outside [0, 1], even if a spring
@@ -380,7 +443,9 @@ impl Widget for AnimatedOpacityWidget {
 
 // --- AnimatedScale ------------------------------------------------------------
 
-/// A declarative scale wrapper. See the [module docs](self).
+/// A declarative scale wrapper. See the [module docs](self). Under
+/// `reduce_motion` the scale snaps to the target on the first paint, whatever
+/// `.timing(...)` is set.
 pub struct AnimatedScaleView<State: 'static> {
     target: f64,
     alignment: Alignment,
@@ -424,14 +489,16 @@ impl<State: 'static> AnimatedScaleView<State> {
         self
     }
 
-    /// Override the default (theme-resolved) scale timing.
+    /// Override the default (theme-resolved) scale timing. Ignored under
+    /// `reduce_motion`, which snaps to the target.
     pub fn timing(mut self, timing: Timing) -> Self {
         self.timing = Some(timing);
         self
     }
 }
 
-/// The retained widget for an [`AnimatedScaleView`].
+/// The retained widget for an [`AnimatedScaleView`]. Under `reduce_motion`
+/// it snaps to the target scale with no ramp and requests no frame.
 pub struct AnimatedScaleWidget {
     child: ChildPod,
     alignment: Alignment,
@@ -490,9 +557,15 @@ impl Widget for AnimatedScaleWidget {
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         let theme = Theme::from_paint_ctx(ctx);
-        let timing = resolve_scale_timing(theme, self.explicit_timing);
-        if self.anim.advance(ctx.frame_time(), timing) {
-            ctx.request_frame();
+        if reduce_motion(theme) {
+            // Reduced motion snaps to the target: no spatial ramp, no frame
+            // request.
+            self.anim.snap();
+        } else {
+            let timing = resolve_scale_timing(theme, self.explicit_timing);
+            if self.anim.advance(ctx.frame_time(), timing) {
+                ctx.request_frame();
+            }
         }
         // Unclamped: a spatial spring's overshoot past the target is real,
         // intended motion (see the module docs' Retargeting section and
@@ -529,7 +602,6 @@ impl Widget for AnimatedScaleWidget {
 mod tests {
     use super::*;
     use crate::test_support::{RecordingScene, leaf_any};
-    use frust_core::Curve;
 
     fn ft_ms(ms: f64) -> FrameTime {
         FrameTime::from_nanos((ms * 1_000_000.0) as u64)
@@ -779,5 +851,135 @@ mod tests {
 
         assert_eq!(flags, ChangeFlags::PAINT);
         assert_eq!(w.anim.target, 1.0, "rebuild must forward the new target");
+    }
+
+    // --- Reduced motion ---
+
+    /// A paint context at `ms`, themed with `theme`.
+    fn themed_ctx(theme: &Theme, size: Size, ms: f64) -> PaintCtx<'_> {
+        PaintCtx::for_test(Point::ZERO, size, ft_ms(ms)).with_theme(theme)
+    }
+
+    #[test]
+    fn reduced_opacity_ignores_an_explicit_spring_and_fades_linearly_in_120ms() {
+        let mut reduced = Theme::neutral();
+        reduced.motion.reduce_motion = true;
+        let spring = Timing::Spring(MotionSpring {
+            damping_ratio: 1.0,
+            stiffness: 1600.0,
+        });
+        let view: AnimatedOpacityView<()> =
+            animated_opacity(1.0, leaf_any(10.0, 10.0)).timing(spring);
+        let mut w = build(&view);
+        let size = w.layout(
+            &mut LayoutCtx::new(),
+            &BoxConstraints::loose(Size::new(50.0, 50.0)),
+        );
+        w.anim.set_target(0.0);
+
+        // The first paint seeds the clock: the collapsed fade is now in flight.
+        let mut scene = RecordingScene::default();
+        let mut ctx = themed_ctx(&reduced, size, 0.0);
+        w.paint(&mut ctx, &mut scene);
+        assert!(ctx.needs_frame(), "the collapsed fade must be in flight");
+
+        // Halfway through the 120 ms linear fade the alpha reads 0.5; the
+        // explicit critically damped spring would read about 0.31 at this
+        // point, so this also proves the spring was not used.
+        let mut scene = RecordingScene::default();
+        let mut ctx = themed_ctx(&reduced, size, 60.0);
+        w.paint(&mut ctx, &mut scene);
+        let (_, _, alpha) = scene.layers[0];
+        assert!(
+            (alpha - 0.5).abs() < 1e-3,
+            "expected 0.5 halfway through the linear collapse, got {alpha}"
+        );
+        assert!(ctx.needs_frame());
+
+        // Past 120 ms: settled at the target, with no further frame.
+        let mut scene = RecordingScene::default();
+        let mut ctx = themed_ctx(&reduced, size, 130.0);
+        w.paint(&mut ctx, &mut scene);
+        let (_, _, alpha) = scene.layers[0];
+        assert!(
+            alpha.abs() < 1e-6,
+            "expected the target alpha 0, got {alpha}"
+        );
+        assert!(
+            !ctx.needs_frame(),
+            "a settled collapse must not request a frame"
+        );
+    }
+
+    #[test]
+    fn reduced_scale_snaps_to_target_on_the_first_paint_with_no_frame() {
+        let mut reduced = Theme::neutral();
+        reduced.motion.reduce_motion = true;
+        let view: AnimatedScaleView<()> = animated_scale(1.0, leaf_any(20.0, 20.0));
+        let mut w = build(&view);
+        let size = w.layout(
+            &mut LayoutCtx::new(),
+            &BoxConstraints::loose(Size::new(50.0, 50.0)),
+        );
+        w.anim.set_target(0.62);
+
+        let mut scene = RecordingScene::default();
+        let mut ctx = themed_ctx(&reduced, size, 0.0);
+        w.paint(&mut ctx, &mut scene);
+
+        assert_eq!(
+            scene.transforms.len(),
+            1,
+            "expected one push_transform call"
+        );
+        assert!(!ctx.needs_frame(), "the snap must not request a frame");
+        let pivot_x = size.width / 2.0;
+        let painted = scene.transforms[0] * Point::new(1.0, 0.0);
+        let expected_x = pivot_x + (1.0 - pivot_x) * 0.62;
+        assert!(
+            (painted.x - expected_x).abs() < 1e-9,
+            "expected the target scale 0.62 about the centre, got x {}",
+            painted.x
+        );
+    }
+
+    #[test]
+    fn reduced_flip_mid_flight_lands_the_scale_on_its_target() {
+        let normal = Theme::neutral();
+        let mut reduced = Theme::neutral();
+        reduced.motion.reduce_motion = true;
+        let view: AnimatedScaleView<()> = animated_scale(1.0, leaf_any(20.0, 20.0));
+        let mut w = build(&view);
+        let size = w.layout(
+            &mut LayoutCtx::new(),
+            &BoxConstraints::loose(Size::new(50.0, 50.0)),
+        );
+        w.anim.set_target(2.0);
+
+        // Normal spring ramp: seed the clock, then step into flight.
+        let mut scene = RecordingScene::default();
+        let mut ctx = themed_ctx(&normal, size, 0.0);
+        w.paint(&mut ctx, &mut scene);
+        let mut scene = RecordingScene::default();
+        let mut ctx = themed_ctx(&normal, size, 50.0);
+        w.paint(&mut ctx, &mut scene);
+        assert!(ctx.needs_frame(), "the spring ramp must still be in flight");
+
+        // Flip reduce_motion on: the very next paint lands on the target.
+        let mut scene = RecordingScene::default();
+        let mut ctx = themed_ctx(&reduced, size, 60.0);
+        w.paint(&mut ctx, &mut scene);
+        let pivot_x = size.width / 2.0;
+        let painted = scene.transforms[0] * Point::new(1.0, 0.0);
+        let expected_x = pivot_x + (1.0 - pivot_x) * 2.0;
+        assert!(
+            (painted.x - expected_x).abs() < 1e-9,
+            "a mid-flight flip must land on the target 2.0, got x {}",
+            painted.x
+        );
+        assert!(
+            !ctx.needs_frame(),
+            "the snapped scale must not request a frame"
+        );
     }
 }
