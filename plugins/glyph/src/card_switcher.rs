@@ -25,13 +25,13 @@
 //! The claim flag is written by the skin's view lifecycle, not at view
 //! construction: `build` and `rebuild` set it from the view's `open`, and
 //! `teardown` (or a rebuild without `.back`) clears it. The stage also clears
-//! it the moment its `on_close` fires, before the app has rebuilt. The
-//! pattern's widget exposes no open or ramp state, so that is the whole of
-//! what the skin can observe. The residual window: a close that does not go
-//! through `on_close` (the app closing the stage itself) is seen only when the
-//! app's next build runs, and a press landing before that is still claimed
-//! (running `on_back`, which is idempotent for a close action). Likewise a
-//! press between `open` becoming true and the app's rebuild is not claimed.
+//! it the moment its `on_close` fires, before the app has rebuilt, so
+//! `on_close` must close the stage; a declined close leaves it open and
+//! unclaimed until the next rebuild. The residual window: a close that does
+//! not go through `on_close` (the app flipping `open` itself) is seen only at
+//! the app's next build, and a press landing before that is still claimed
+//! (running `on_back`, which is idempotent for a close). Likewise a press
+//! between `open` becoming true and the app's rebuild is not claimed.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -196,7 +196,9 @@ impl<State: 'static> GlyphCardSwitcher<State> {
         self
     }
 
-    /// Called when the open stage asks to close; the app sets `open` false.
+    /// Called when the open stage asks to close; the app must set `open` false.
+    /// The back claim is released before this runs, so declining to close
+    /// leaves the stage open and unclaimed until the next rebuild.
     pub fn on_close(mut self, on_close: impl Fn(&mut State) + 'static) -> Self {
         let slot = Rc::clone(&self.close_slot);
         self.stage = self.stage.on_close(move |state| {
@@ -978,7 +980,7 @@ mod tests {
     }
 
     #[test]
-    fn a_closed_rebuild_stops_claiming_and_a_press_does_not_run_on_back() {
+    fn a_closed_rebuild_releases_the_claim() {
         let _guard = BACK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _rt = ReactiveRuntime::init(Arc::new(|| {}));
         back_reset();
@@ -1003,7 +1005,7 @@ mod tests {
     }
 
     #[test]
-    fn a_press_after_a_closed_rebuild_and_before_any_build_is_not_claimed() {
+    fn a_press_after_a_closed_rebuild_with_no_further_build_is_not_claimed() {
         let _guard = BACK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _rt = ReactiveRuntime::init(Arc::new(|| {}));
         back_reset();
@@ -1024,6 +1026,29 @@ mod tests {
         push_back_press();
         assert!(!handles_back(), "closed: the press is not claimed");
         assert_eq!(fired.get(), 0, "on_back never ran");
+    }
+
+    #[test]
+    fn a_press_after_open_flips_false_without_a_rebuild_is_still_claimed() {
+        let _guard = BACK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        back_reset();
+
+        let fired = Rc::new(Cell::new(0u32));
+        let handle = {
+            let fired = Rc::clone(&fired);
+            SwitcherBack::new(move || fired.set(fired.get() + 1))
+        };
+        let open = stage_view(true, 3).back(&handle);
+        let _rig = Rig::new(&open, PHONE);
+        assert!(handles_back(), "built open: the stage claims back");
+
+        // The app closes the stage itself (its `open` is now false) but no
+        // build has run: the documented residual window, so the press is
+        // still claimed and `on_back` runs once.
+        push_back_press();
+        let _next = stage_view(true, 3).back(&handle);
+        assert_eq!(fired.get(), 1, "the stale claim ran on_back exactly once");
     }
 
     #[test]

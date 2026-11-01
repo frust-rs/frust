@@ -291,7 +291,11 @@ impl PageDotsWidget {
         let c = self.slot_centre(i);
         let x0 = if i == 0 { 0.0 } else { c - half };
         let x1 = if i + 1 == self.count { width } else { c + half };
-        (x0.max(0.0), x1.min(width))
+        // Clamp both ends so `0 <= x0 <= x1 <= width`; a slot pushed past a
+        // row the parent narrowed below its intrinsic width collapses to
+        // `x0 == x1`, and the caller omits it.
+        let x0 = x0.clamp(0.0, width);
+        (x0, x1.clamp(x0, width))
     }
 
     /// `(active, inactive)` for the current theme.
@@ -446,6 +450,9 @@ impl Widget for PageDotsWidget {
                     for i in 0..self.count {
                         let name = format!("page {}", i + 1);
                         let (x0, x1) = self.slot_span(i, size.width);
+                        if x1 <= x0 {
+                            continue;
+                        }
                         ctx.push_node(Role::Button, |node| {
                             node.set_label(name.as_str());
                             node.add_action(Action::Click);
@@ -809,6 +816,42 @@ mod tests {
         for pair in rects.windows(2) {
             assert!(pair[0].x1 <= pair[1].x0, "slots must not overlap");
         }
+    }
+
+    #[test]
+    fn a_constrained_row_keeps_every_button_rect_well_formed_and_inside() {
+        let mut root: frust_core::RenderRoot<Taps, PageDots<Taps>> = frust_core::RenderRoot::new();
+        let mut state = Taps::default();
+        let mut logic = |_s: &mut Taps| page_dots(7, 0).on_tap(|s: &mut Taps, i| s.0.push(i));
+        root.rebuild(&mut logic, &mut state);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(Size::new(40.0, 200.0), &mut tcx as &mut dyn Any);
+        let update = root.semantics();
+        let row = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::Status)
+            .and_then(|(_, n)| n.bounds())
+            .expect("row bounds");
+        let buttons: Vec<_> = update
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.role() == Role::Button)
+            .collect();
+        assert!(!buttons.is_empty(), "in-range dots keep their buttons");
+        for (_, n) in &buttons {
+            let r = n.bounds().expect("button bounds");
+            assert!(
+                row.x0 <= r.x0 && r.x0 <= r.x1 && r.x1 <= row.x1,
+                "{r:?} well-formed within {row:?}"
+            );
+        }
+        let (id, _) = buttons
+            .iter()
+            .find(|(_, n)| n.label() == Some("page 1"))
+            .expect("page 1 button");
+        root.perform_accessibility_action(&mut state, *id, Action::Click);
+        assert_eq!(state.0, vec![0]);
     }
 
     #[test]
