@@ -71,17 +71,14 @@ struct PageShared {
 }
 
 /// A cloneable handle onto a [`PageView`] — Flutter's `PageController`.
-///
-/// Clones share one state. The controller's offset, `is_animating` and
-/// `on_change` are the viewport's own ([`PageController::scroll_controller`]).
-/// A drag that springs back to its page fires nothing, and a change seen
-/// during an event is reported in the same event.
+/// Clones share one state; offset, `is_animating` and `on_change` are the
+/// viewport's ([`PageController::scroll_controller`]). A drag that springs
+/// back fires nothing; a change seen in an event is reported in that event.
 ///
 /// ```
 /// use frust_widgets::{PageController, PageView, page_view, text};
 /// let controller = PageController::new().initial_page(1).viewport_fraction(0.8);
-/// let view: PageView<()> =
-///     page_view((text("a"), text("b"), text("c"))).controller(controller.clone());
+/// let view: PageView<()> = page_view((text("a"), text("b"), text("c"))).controller(controller.clone());
 /// controller.jump_to_page(2); // applied at the view's next layout or paint
 /// # let _ = view;
 /// ```
