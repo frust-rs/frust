@@ -6043,19 +6043,24 @@ additive follow-up work on the same crate-private page sliver.
 
 **Observed**: while open (or animating), `card_switcher` swallows pointer input to the shrunken live
 child and the stage, but only inside the pattern's own bounds; chrome laid out outside it (an app bar,
-a bottom bar hosted around the pattern) stays interactive. Key and IME input does not reach the page
-while open: the open flip suspends the live child's focus (`CardSwitcherWidget::suspend_child` saves
-and clears its focus link) and the close flip restores it, and focus-routed events reach only a pod
-that `holds_live_focus()`.
+a bottom bar hosted around the pattern) stays interactive. Focus-routed input (Key, IME,
+EditCommand) is suspended while open: the open flip clears the live child's focus
+(`CardSwitcherWidget::suspend_child` saves and clears its focus link) and the close flip restores it,
+and focus-routed events reach only a pod that `holds_live_focus()`. `InputEvent::Shortcut` is a
+broadcast, though, and `CardSwitcherWidget::event` forwards every broadcast to the live child
+regardless of `engaged()`, so a shortcut registered by the live page still fires while the stage is
+open.
 
 **Applies to**: apps that place the pattern below app chrome rather than around the whole shell page.
 
 **Why accepted**: the pattern is a paint-and-input stage over one child, not a window-level modal;
 wrapping the whole shell page gives full blocking.
 
-**Evidence**: `crates/frust-widgets/src/motion/card_switcher.rs` module docs (*Blocking covers only the
-stage's own bounds*), `blocked_pointer`, and `suspend_child` (open) / the close-flip restore in the
-same file; `holds_live_focus` in `crates/frust-core/src/widget.rs`.
+**Evidence**: `crates/frust-widgets/src/motion/card_switcher.rs` module docs (*Input blocking*
+paragraph), `blocked_pointer`, `suspend_child` (open) / the close-flip restore, and the broadcast
+branch of `CardSwitcherWidget::event` in the same file; `InputEvent::is_broadcast` and
+`is_focus_routed` in `crates/frust-core/src/event/input.rs`; `holds_live_focus` in
+`crates/frust-core/src/widget.rs`.
 
 ---
 
