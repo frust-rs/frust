@@ -2,38 +2,23 @@
 //! control carrying one vector icon, lifted off the page by the `floating`
 //! elevation token ([`crate::tokens::scales::floating`]).
 //!
-//! The shape follows Flutter's `FloatingActionButton` and mirrors
-//! `frust-material`'s `fab(icon, on_press)` signature: a required icon and
-//! press callback, with [`FabView::mini`] for the compact size,
-//! [`FabView::label`] as the accessible name (Flutter's `tooltip`; strongly
-//! recommended, since an icon alone says nothing to a screen reader) and
-//! [`FabView::disabled`]. It composes with `frust::scaffold`'s fab slot, which
-//! accepts any view and owns placement and margin.
+//! Shaped after Flutter's `FloatingActionButton` and `frust-material`'s
+//! `fab(icon, on_press)`: a required icon and press callback, plus
+//! [`FabView::mini`], [`FabView::tooltip`] (the accessible name) and
+//! [`FabView::disabled`]. It fits `frust::scaffold`'s fab slot, which owns
+//! placement and margin. Regular 46 px, mini 40 px, a 24 px icon centred.
 //!
-//! # Sizes
+//! Fill is the theme's `primary`, ink `on_primary`, the shadow the `shadow`
+//! role at the `floating` level's per-brightness alpha; unthemed, each falls
+//! back to the literal Glyph **dark** constant. Pressed (primary button,
+//! captured while held) tints the fill with `on_primary` instantly, so there
+//! is no animation for `reduce_motion` to collapse. Disabled drops the shadow,
+//! dims fill/ink to `on_surface` at `.12`/`.38`, ignores pointer input and
+//! reports disabled semantics instead of a Click action.
 //!
-//! Regular **46 px**, mini **40 px** (the Glyph design's sizes), with a 24 px
-//! icon centred in the circle.
-//!
-//! # Color resolution
-//!
-//! Fill is the theme's `primary`, the icon ink `on_primary`, the shadow the
-//! `shadow` role at the `floating` level's per-brightness alpha. Unthemed, each
-//! falls back to the literal Glyph **dark** constant.
-//!
-//! # States
-//!
-//! - **Pressed** (primary button, captured while held): the fill takes a
-//!   `on_primary` tint. Press feedback is an instant tint, so `reduce_motion`
-//!   has nothing to collapse: the widget has no animation and never requests a
-//!   frame.
-//! - **Disabled**: the shadow is dropped and fill/ink dim to `on_surface` at
-//!   `.12`/`.38`; the control ignores pointer input and reports disabled
-//!   semantics instead of a Click action.
-//!
-//! A press fires on pointer-up inside the painted shape; releasing outside, or a
-//! cancel, fires nothing (see `docs/CODE_STANDARDS.md`'s Interaction
-//! Semantics).
+//! A press fires on pointer-up inside the painted shape; releasing outside, or
+//! a cancel, fires nothing (`docs/CODE_STANDARDS.md` § Interaction Semantics).
+//! The Glyph component set is indexed in `docs/PLUGINS_ARCHITECTURE.md`.
 
 use std::rc::Rc;
 
@@ -74,7 +59,7 @@ pub struct FabView<State: 'static> {
     icon: IconData,
     on_press: OnPress<State>,
     mini: bool,
-    label: Option<String>,
+    tooltip: Option<String>,
     disabled: bool,
 }
 
@@ -88,7 +73,7 @@ pub fn fab<State: 'static, F: Fn(&mut State) + 'static>(
         icon: icon.into(),
         on_press: Rc::new(on_press),
         mini: false,
-        label: None,
+        tooltip: None,
         disabled: false,
     }
 }
@@ -100,10 +85,10 @@ impl<State: 'static> FabView<State> {
         self
     }
 
-    /// Set the accessible name (Flutter's `tooltip`). Recommended: the icon
-    /// alone carries no name for assistive technology.
-    pub fn label(mut self, label: impl Into<String>) -> Self {
-        self.label = Some(label.into());
+    /// Set the accessible name, as Flutter's `tooltip` does. Recommended: the
+    /// icon alone carries no name for assistive technology.
+    pub fn tooltip(mut self, tooltip: impl Into<String>) -> Self {
+        self.tooltip = Some(tooltip.into());
         self
     }
 
@@ -122,7 +107,7 @@ impl<State: 'static> View<State> for FabView<State> {
             icon: self.icon.clone(),
             path: icon_path(&self.icon),
             mini: self.mini,
-            label: self.label.clone(),
+            label: self.tooltip.clone(),
             disabled: self.disabled,
             pressed: false,
             captured: false,
@@ -138,8 +123,8 @@ impl<State: 'static> View<State> for FabView<State> {
     ) -> ChangeFlags {
         element.on_press = frust::authoring::erase_callback(&self.on_press);
         let mut flags = ChangeFlags::NONE;
-        if prev.label != self.label {
-            element.label = self.label.clone();
+        if prev.tooltip != self.tooltip {
+            element.label = self.tooltip.clone();
             // Semantics-only, but `PAINT` is what bumps the root's semantics
             // dirty gate, and there is no narrower flag.
             flags |= ChangeFlags::PAINT;
@@ -422,7 +407,7 @@ mod tests {
     }
 
     fn view() -> FabView<Taps> {
-        fab(icon_data(), |s: &mut Taps| s.count += 1).label("Add")
+        fab(icon_data(), |s: &mut Taps| s.count += 1).tooltip("Add")
     }
 
     fn build(view: &FabView<Taps>) -> FabWidget {
@@ -561,7 +546,7 @@ mod tests {
     #[test]
     fn semantics_reports_button_label_and_click() {
         fn logic(_s: &mut Taps) -> FabView<Taps> {
-            fab(icon_data(), |_s: &mut Taps| {}).label("Add")
+            fab(icon_data(), |_s: &mut Taps| {}).tooltip("Add")
         }
         let mut root: frust_core::RenderRoot<Taps, FabView<Taps>> = frust_core::RenderRoot::new();
         let mut state = Taps::default();
@@ -584,15 +569,15 @@ mod tests {
     }
 
     #[test]
-    fn label_change_flags_paint_and_republishes_the_name() {
+    fn tooltip_change_flags_paint_and_republishes_the_name() {
         fn logic(_s: &mut Taps) -> FabView<Taps> {
-            fab(icon_data(), |_s: &mut Taps| {}).label("Add")
+            fab(icon_data(), |_s: &mut Taps| {}).tooltip("Add")
         }
-        let (prev, next) = (view(), view().label("Create"));
+        let (prev, next) = (view(), view().tooltip("Create"));
         let mut w = build(&prev);
         assert_eq!(rebuild_flags(&prev, &next, &mut w), ChangeFlags::PAINT);
         assert_eq!(w.label.as_deref(), Some("Create"));
-        // Identical label: nothing to flag.
+        // Identical tooltip: nothing to flag.
         assert_eq!(rebuild_flags(&next, &next, &mut w), ChangeFlags::NONE);
         // The published semantics node carries the new name.
         let mut root: frust_core::RenderRoot<Taps, FabView<Taps>> = frust_core::RenderRoot::new();
@@ -602,7 +587,7 @@ mod tests {
         root.layout_with_text(Size::new(200.0, 200.0), &mut tcx as &mut dyn Any);
         let _ = root.semantics();
         fn logic2(_s: &mut Taps) -> FabView<Taps> {
-            fab(icon_data(), |_s: &mut Taps| {}).label("Create")
+            fab(icon_data(), |_s: &mut Taps| {}).tooltip("Create")
         }
         root.rebuild(&mut logic2, &mut state);
         let update = root.semantics();
@@ -630,7 +615,7 @@ mod tests {
             kurbo::Shape::to_path(&Rect::new(2.0, 2.0, 10.0, 10.0), 0.1),
             24.0,
         );
-        let next = fab(other, |s: &mut Taps| s.count += 1).label("Add");
+        let next = fab(other, |s: &mut Taps| s.count += 1).tooltip("Add");
         let mut w = build(&prev);
         assert_eq!(rebuild_flags(&prev, &next, &mut w), ChangeFlags::PAINT);
     }
