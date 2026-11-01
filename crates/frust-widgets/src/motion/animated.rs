@@ -158,6 +158,11 @@ fn scale_about(pivot: Point, scale: f64) -> Affine {
         * Affine::translate((-pivot.x, -pivot.y))
 }
 
+/// How close `value()` must sit to its target to count as landed when the
+/// driver is still formally running — far above f64 lerp residue (≈1e-16) and
+/// far below any visible opacity or scale step.
+const SETTLED_EPS: f64 = 1e-9;
+
 // --- Shared retarget driver --------------------------------------------------
 
 /// Shared implicit-animation driver for [`AnimatedOpacityWidget`]/
@@ -239,8 +244,24 @@ impl ImplicitAnim {
 
     /// Whether the value has landed on the target with no retarget pending.
     /// A settled value has nothing in flight: no re-drive and no frame.
+    ///
+    /// "Landed" means the driver has finished (an idle controller), or the
+    /// value sits within [`SETTLED_EPS`] of the target (a fresh or snapped
+    /// `(x, x)` tween whose zero-length driver has not ticked yet). Never
+    /// `==`: `value()` is `begin + (end − begin) × 1.0` once the driver reports
+    /// `1.0`, and that f64 round trip does not always return `end`
+    /// (`0.03 + (0.3 − 0.03)` is `0.30000000000000004`), so an exact
+    /// comparison would call a visually settled fade in flight and re-drive it
+    /// on a `reduce_motion` flip for 120 ms of no-op frames.
     fn settled(&self) -> bool {
-        self.driving_target == self.target && self.value() == self.target
+        if self.driving_target != self.target {
+            return false;
+        }
+        let driver_idle = match &self.driver {
+            TransitionDriver::Auto(controller) => !controller.is_animating(),
+            _ => false,
+        };
+        driver_idle || (self.value() - self.target).abs() <= SETTLED_EPS
     }
 
     /// Settle straight at the target: no ramp, so `value()` reads the target
@@ -1048,6 +1069,57 @@ mod tests {
         assert!(
             !ctx.needs_frame(),
             "a settled reduced opacity must stay idle"
+        );
+    }
+
+    #[test]
+    fn a_fade_settled_with_lerp_residue_stays_idle_across_a_reduce_flip() {
+        let normal = Theme::neutral();
+        let mut reduced = Theme::neutral();
+        reduced.motion.reduce_motion = true;
+        // 0.03 → 0.3: `0.03 + (0.3 − 0.03) × 1.0` is 0.30000000000000004, so
+        // the landed value never `==` its target.
+        let view: AnimatedOpacityView<()> = animated_opacity(0.03, leaf_any(10.0, 10.0));
+        let mut w = build(&view);
+        let size = w.layout(
+            &mut LayoutCtx::new(),
+            &BoxConstraints::loose(Size::new(50.0, 50.0)),
+        );
+        let mut scene = RecordingScene::default();
+        w.paint(&mut themed_ctx(&normal, size, 0.0), &mut scene);
+        w.anim.set_target(0.3);
+        let mut ms = 0.0;
+        let mut rested = false;
+        for _ in 0..600 {
+            ms += 16.0;
+            let mut scene = RecordingScene::default();
+            let mut ctx = themed_ctx(&normal, size, ms);
+            w.paint(&mut ctx, &mut scene);
+            if !ctx.needs_frame() {
+                rested = true;
+                break;
+            }
+        }
+        assert!(rested, "the fade must come to rest");
+        assert_ne!(
+            w.anim.value().to_bits(),
+            0.3f64.to_bits(),
+            "premise: the landed value carries lerp residue"
+        );
+        assert!(w.anim.settled(), "lerp residue must not count as in flight");
+
+        // Flip reduce_motion on: nothing is in flight, so nothing re-drives.
+        let mut scene = RecordingScene::default();
+        let mut ctx = themed_ctx(&reduced, size, ms + 10.0);
+        w.paint(&mut ctx, &mut scene);
+        assert!(
+            !ctx.needs_frame(),
+            "a flip on a fade settled with lerp residue must not request a frame"
+        );
+        let (_, _, alpha) = scene.layers[0];
+        assert!(
+            (alpha - 0.3).abs() < 1e-6,
+            "the landed alpha holds, got {alpha}"
         );
     }
 
