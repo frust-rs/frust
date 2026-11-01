@@ -134,6 +134,7 @@ pub use pan_zoom::{
     PanZoomWidget, pan_zoom,
 };
 pub use physics::effect::OverscrollEffect;
+pub use physics::page_snap::PageSnap;
 pub use physics::parity::{
     AlwaysScrollable, Bouncing, Clamping, DecelerationRate, NeverScrollable,
 };
