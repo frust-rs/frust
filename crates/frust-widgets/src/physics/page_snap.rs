@@ -56,13 +56,18 @@
 //!   port delegates whenever `pixels` is outside `[min, max]`
 //!   ([`ScrollMetrics::out_of_range`]), so the parent's rubber-band or edge
 //!   settle owns an overscrolled release. The parent never owns an in-range one.
-//! * **A settled release builds no motion.** Where Flutter returns `null` when
-//!   the target equals `pixels`, this port returns `None` when the target is
-//!   within `tolerance.distance` of `pixels` and the release is slower than
-//!   `tolerance.velocity`. A fling whose target is that close (a fling into the
-//!   range edge, or toward the leading edge from a boundary) still builds a
-//!   spring so the velocity is absorbed and the offset ends exactly on the
-//!   boundary, where Flutter would return `null` only on an exact match.
+//! * **No in-range release is left to the surface.** Where Flutter returns
+//!   `null` when the target equals `pixels` (and its surface then does
+//!   nothing), this port always answers with a spring. The surfaces here read
+//!   `None` as "this physics does not own the release" and fall through to
+//!   their legacy fling, whose own 30 px/s threshold sits below the
+//!   [`ScrollPhysics::min_fling_velocity`] gate that zeroed the release, so a
+//!   creeping release on a boundary would coast a partial page. A spring onto
+//!   a target already within `tolerance.distance` is done on its first tick
+//!   and reports exactly the target
+//!   ([`ScrollSpringSimulation`](super::simulation::ScrollSpringSimulation)
+//!   snaps onto its end), so a settled release costs one settled tick and the
+//!   offset sits exactly on the boundary.
 //! * **The fling gate is the surface's.** Flutter returns `null` below
 //!   `tolerance.velocity` only after its own target check; the surfaces here
 //!   zero a release below [`ScrollPhysics::min_fling_velocity`] before asking,
@@ -205,11 +210,12 @@ impl ScrollPhysics for PageSnap {
         let Some(target) = self.target_pixels(metrics, velocity, tolerance.velocity) else {
             return parent();
         };
-        if (target - metrics.pixels).abs() < tolerance.distance
-            && velocity.abs() < tolerance.velocity
-        {
-            return None;
-        }
+        // Never `None` for an in-range release: the surfaces read `None` as
+        // "not owned" and run their legacy fling from the raw finger velocity
+        // (its `FLING_STOP` threshold is below the `min_fling_velocity` gate
+        // that zeroed `velocity`), which would rest a partial page off. A
+        // spring onto a target already within tolerance is done on its first
+        // tick and reports exactly `target`.
         Some(Box::new(ScrollSpringSimulation::new(
             self.spring(),
             metrics.pixels,
@@ -385,21 +391,23 @@ mod tests {
     }
 
     #[test]
-    fn a_slow_release_on_a_boundary_builds_no_motion() {
+    fn a_slow_release_on_a_boundary_is_owned_and_rests_exactly_there() {
         for p in parents() {
             let tol = p.tolerance_for(&metrics(200.0)).velocity;
-            assert!(
-                p.create_ballistic_simulation(&metrics(200.0), 0.0)
-                    .is_none()
-            );
-            assert!(
-                p.create_ballistic_simulation(&metrics(200.0), tol * 0.5)
-                    .is_none()
-            );
-            assert!(
-                p.create_ballistic_simulation(&metrics(200.0), -tol * 0.5)
-                    .is_none()
-            );
+            for v in [0.0, tol * 0.5, -tol * 0.5] {
+                let sim = p
+                    .create_ballistic_simulation(&metrics(200.0), v)
+                    .expect("an in-range release is never left to the surface");
+                assert!(sim.is_done(0.0), "v {v}: settled on its first tick");
+                assert_eq!(sim.x(0.0), 200.0, "v {v}");
+                assert_eq!(sim.x(100.0), 200.0, "v {v}");
+            }
+            // Within `tolerance.distance` of the boundary, not exactly on it:
+            // still owned, and the spring reports the boundary itself.
+            let sim = p
+                .create_ballistic_simulation(&metrics(199.9999), 0.0)
+                .expect("owned");
+            assert_eq!(sim.x(100.0), 200.0);
         }
     }
 
@@ -410,9 +418,10 @@ mod tests {
                 0.0, 0.3, 49.9, 50.0, 99.9, 100.0, 199.5, 200.4, 399.9, 400.0,
             ] {
                 for v in [-3000.0, -500.0, 0.0, 500.0, 3000.0] {
-                    if let Some(x) = settle(&p, px, v) {
-                        assert_eq!(x % EXTENT, 0.0, "px {px} v {v} ended at {x}");
-                    }
+                    let x = settle(&p, px, v).unwrap_or_else(|| {
+                        panic!("px {px} v {v}: an in-range release must be owned")
+                    });
+                    assert_eq!(x % EXTENT, 0.0, "px {px} v {v} ended at {x}");
                 }
             }
         }
@@ -483,5 +492,56 @@ mod tests {
     #[test]
     fn strong_release_settles_on_the_next_page() {
         assert_eq!(drag_and_settle(8.0), 100.0);
+    }
+
+    /// Drag onto a page boundary and release with the finger still creeping:
+    /// faster than the legacy fling's `FLING_STOP` (30 px/s) but slower than
+    /// the physics' `min_fling_velocity`, which zeroes the release before the
+    /// physics sees it. The physics must own that release (a settled spring),
+    /// or the surface falls through to its legacy fling and coasts off the
+    /// boundary.
+    #[test]
+    fn a_creeping_release_on_a_boundary_stays_on_it() {
+        let mut logic = |_: &mut ()| {
+            custom_scroll_view(leaf(500.0, 100.0))
+                .axis(ScrollAxis::Horizontal)
+                .physics(PageSnap::extent(EXTENT))
+        };
+        let mut root: RenderRoot<(), CustomScrollView<()>> = RenderRoot::new();
+        let mut state = ();
+        root.rebuild(&mut logic, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        let mut sink = RecordingScene::default();
+        let mut t = 0.0;
+        root.paint(&mut sink, ft(t));
+        root.event(&mut state, &ev(PointerPhase::Down, 90.0));
+        // Take the gesture over, then two fast pulls that park the offset
+        // 9 px short of the second page boundary ...
+        for x in [70.0, 20.0, -21.0] {
+            t += 20.0;
+            root.paint(&mut sink, ft(t));
+            root.event(&mut state, &ev(PointerPhase::Move, x));
+        }
+        // ... pause long enough for those samples to age out of the velocity
+        // window, then creep onto the boundary at 3 px per 40 ms (75 px/s).
+        t += 200.0;
+        root.paint(&mut sink, ft(t));
+        for x in [-24.0, -27.0, -30.0] {
+            t += 40.0;
+            root.paint(&mut sink, ft(t));
+            root.event(&mut state, &ev(PointerPhase::Move, x));
+        }
+        let parked = offset(&root);
+        assert!(
+            (parked - EXTENT).abs() < 1.0,
+            "the setup must park within tolerance of a boundary, got {parked}"
+        );
+        root.event(&mut state, &ev(PointerPhase::Up, -30.0));
+        for _ in 0..600 {
+            t += 16.0;
+            root.paint(&mut sink, ft(t));
+        }
+        let rested = offset(&root);
+        assert_eq!(rested % EXTENT, 0.0, "rested at {rested}");
     }
 }
