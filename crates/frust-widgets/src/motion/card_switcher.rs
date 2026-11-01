@@ -296,11 +296,10 @@ impl<State: 'static> CardSwitcherView<State> {
     /// 3. the grow runs and holds;
     /// 4. the app rebuilds with `open = false`, the chosen page as the live
     ///    child, `.live_index` at that card's strip position (keep the strip
-    ///    order) and `.expanding(None)`.
-    ///
-    /// Step 4 may come any time after step 2: a mid-ramp close finishes the
-    /// grow from the current scale, and the new live child paints plainly where
-    /// the face was. `.expanding(None)` while still open reverses the ramp.
+    ///    order) and `.expanding(None)` — any time after step 2: a mid-ramp
+    ///    close finishes the grow from the current scale, and the new live child
+    ///    paints plainly where the face was. `.expanding(None)` while still open
+    ///    reverses the ramp.
     pub fn expanding(mut self, peer: Option<usize>) -> Self {
         self.expanding = peer;
         self
@@ -832,8 +831,9 @@ impl Strip {
     /// offset to the same fractional page, installs the snap at that stride and
     /// stops post-release motion (spring, fling); only a pending tap tween or
     /// an unopened expansion's centring restarts, and the next gesture end
-    /// re-settles. Then apply an owed recentre and, at rest, keep the position
-    /// in range. Runs at every layout and paint.
+    /// re-settles. Then apply an owed recentre and, at rest with no press live,
+    /// keep the position in range: a regrab mid-bounce continues from the
+    /// displacement on screen, like the viewport. Runs at every layout and paint.
     fn prepare(&mut self, stage: Size, card_scale: f64) {
         self.stage = stage;
         self.card_scale = card_scale;
@@ -876,7 +876,7 @@ impl Strip {
             self.offset = self.live() as f64 * stride;
             self.recentre = false;
         }
-        if !self.in_motion() {
+        if !self.in_motion() && !self.core.down_active {
             self.offset = self.offset.clamp(0.0, self.max_scroll_extent());
         }
     }
@@ -2739,6 +2739,34 @@ mod tests {
         assert!(log.borrow().is_empty());
         let page = rig.offset() / stride;
         assert!(near(page, page.round()), "re-settled on a card, at {page}");
+    }
+
+    #[test]
+    fn a_regrab_mid_bounce_keeps_the_overscroll_on_screen() {
+        let log = Log::default();
+        let mut rig = Rig::new(&strip_view(true, 2, 0, &log), PHONE);
+        rig.drag(201.0, 120.0, 4, 16.0);
+        rig.hold_and_release();
+        rig.frame(16.0);
+        assert!(rig.w.strip.in_motion(), "the spring-back runs");
+        let x = rig.finger();
+        rig.pointer(PointerPhase::Down, x);
+        let caught = rig.offset();
+        assert!(caught < 0.0, "caught past the first card: {caught}");
+        assert_eq!(
+            rig.w.strip.core.edge_pull, caught,
+            "the pull is the overscroll"
+        );
+
+        // The paint the press requested must not clamp the held position.
+        rig.frame(16.0);
+        assert_eq!(rig.offset(), caught, "the regrab holds the displacement");
+        assert_eq!(rig.w.strip.core.edge_pull, rig.w.strip.displacement());
+
+        rig.pointer(PointerPhase::Up, x);
+        rig.settle();
+        assert!(rig.offset().abs() < 1e-6, "sprang back to the first card");
+        assert!(log.borrow().is_empty(), "the catch is not a tap");
     }
 
     #[test]
