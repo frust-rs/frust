@@ -118,7 +118,7 @@ const GLYPH_FADE_SPLIT: f64 = 0.44;
 /// Reduced-motion collapse duration: the Glyph design system's hard rule that
 /// `prefers-reduced-motion` collapses *every* pattern to a `≤120ms` linear
 /// crossfade. See [`resolve_spec`].
-const REDUCE_MOTION_DURATION: Duration = Duration::from_millis(120);
+pub(crate) const REDUCE_MOTION_DURATION: Duration = Duration::from_millis(120);
 
 /// iOS push parallax fraction: the outgoing (below) page slides out by one third
 /// of the incoming page's travel while the incoming page slides fully across.
