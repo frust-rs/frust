@@ -2390,6 +2390,7 @@ name = "frust-glyph"
 version = "0.6.4"
 dependencies = [
  "frust-core",
+ "frust-reactive",
  "frust-ui",
  "frust-widgets",
  "kurbo",

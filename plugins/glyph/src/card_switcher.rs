@@ -17,9 +17,10 @@
 //! **Back.** [`GlyphCardSwitcher::back`] wraps the stage in
 //! `frust::back_fallback` over a [`SwitcherBack`] the app creates once. The
 //! fallback claims a back press only while the stage is built open, and runs
-//! the app's stateless `on_back`, which closes the stage the way `on_close`
-//! would (typically an `RwSignal` set): `BackFallback`'s callbacks see no
-//! `&mut State`, so `on_close` cannot be the back action itself.
+//! the app's stateless `on_back`. The app points `on_back` at the same close
+//! action as `on_close` (typically an `RwSignal` set): `BackFallback`'s
+//! callbacks see no `&mut State`, so `on_close` cannot be the back action
+//! itself.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -670,8 +671,12 @@ mod tests {
     use super::*;
     use frust::FrameTime;
     use frust::authoring::{PointerButton, PointerEvent, WindowEdgeInsets, WindowInsets};
+    use frust_reactive::{
+        ReactiveRuntime, clear_can_pop_provider, handles_back, push_back_press, set_handles_back,
+    };
     use frust_widgets::test_support::leaf;
     use std::any::Any;
+    use std::sync::{Arc, Mutex};
 
     const PHONE: Size = Size::new(402.0, 874.0);
     const TABLET: Size = Size::new(1194.0, 834.0);
@@ -890,6 +895,87 @@ mod tests {
         assert!(!claims(), "closed: the fallback does not claim");
         open.set(true);
         assert!(claims(), "open: a back press is claimed");
+    }
+
+    /// Serializes the back tests: they share `frust-reactive`'s process-wide
+    /// back-press counter and `handles_back` flag (the facade's `back_glue`
+    /// tests use the same discipline).
+    static BACK_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Drop any live can-pop provider and the polled flag, so each back test
+    /// starts with nothing claiming. Call under [`BACK_LOCK`] and a runtime.
+    fn back_reset() {
+        clear_can_pop_provider();
+        set_handles_back(false);
+    }
+
+    #[test]
+    fn an_open_stage_claims_back_and_a_press_runs_on_back_once() {
+        let _guard = BACK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        back_reset();
+
+        let fired = Rc::new(Cell::new(0u32));
+        let handle = {
+            let fired = Rc::clone(&fired);
+            SwitcherBack::new(move || fired.set(fired.get() + 1))
+        };
+        let open = stage_view(true, 3).back(&handle);
+        let _rig = Rig::new(&open, PHONE);
+        assert!(handles_back(), "built open: the stage claims back");
+        assert_eq!(fired.get(), 0, "building alone runs nothing");
+
+        // A press delivered before the next build is consumed by that build's
+        // `back`, which routes it to the claiming fallback.
+        push_back_press();
+        let _next = stage_view(true, 3).back(&handle);
+        assert_eq!(fired.get(), 1, "the press ran on_back exactly once");
+    }
+
+    #[test]
+    fn a_closed_rebuild_stops_claiming_and_a_press_does_not_run_on_back() {
+        let _guard = BACK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        back_reset();
+
+        let fired = Rc::new(Cell::new(0u32));
+        let handle = {
+            let fired = Rc::clone(&fired);
+            SwitcherBack::new(move || fired.set(fired.get() + 1))
+        };
+        let open = stage_view(true, 3).back(&handle);
+        let mut rig = Rig::new(&open, PHONE);
+        assert!(handles_back(), "built open: the stage claims back");
+
+        let closed = stage_view(false, 3).back(&handle);
+        let mut counter = 0u64;
+        View::<()>::rebuild(&closed, &open, &mut rig.w, &mut BuildCtx::new(&mut counter));
+        assert!(!handles_back(), "rebuilt closed: nothing claims back");
+
+        push_back_press();
+        let _next = stage_view(false, 3).back(&handle);
+        assert_eq!(fired.get(), 0, "a press while closed is not claimed");
+    }
+
+    #[test]
+    fn a_stage_built_without_back_never_claims() {
+        let _guard = BACK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        back_reset();
+
+        let fired = Rc::new(Cell::new(0u32));
+        // Alive but never passed to `.back`, so it is never wired.
+        let _handle = {
+            let fired = Rc::clone(&fired);
+            SwitcherBack::new(move || fired.set(fired.get() + 1))
+        };
+        let _rig = Rig::new(&stage_view(true, 3), PHONE);
+        assert!(!handles_back(), "open but without .back: no claim");
+
+        // The handle was never wired, so no fallback exists to route a press.
+        push_back_press();
+        assert!(!handles_back(), "still nothing claims after a press");
+        assert_eq!(fired.get(), 0, "the unwired handle's on_back never runs");
     }
 
     #[test]
