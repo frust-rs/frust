@@ -1430,6 +1430,35 @@ impl EngineRenderer {
         self.compiler.glyph_quads_enabled()
     }
 
+    /// Sets whether a glyph run drawn as glyph quads may be drawn out of the
+    /// resident-run cache (see [`SceneCompiler::set_glyph_run_cache`]).
+    ///
+    /// The programmatic counterpart of `FRUST_ENGINE_NO_GLYPH_RUN_CACHE`, which
+    /// only sets the value a renderer starts with. Takes effect from the next
+    /// frame.
+    pub fn set_glyph_run_cache(&mut self, enabled: bool) {
+        self.compiler.set_glyph_run_cache(enabled);
+    }
+
+    /// Whether glyph runs may be drawn out of the resident-run cache.
+    #[must_use]
+    pub fn glyph_run_cache(&self) -> bool {
+        self.compiler.glyph_run_cache_enabled()
+    }
+
+    /// Sets whether a face with an oblique angle is drawn leaned by a skewing
+    /// glyph transform (see [`SceneCompiler::set_synthetic_oblique`]). Off by
+    /// default; takes effect from the next frame.
+    pub fn set_synthetic_oblique(&mut self, enabled: bool) {
+        self.compiler.set_synthetic_oblique(enabled);
+    }
+
+    /// Whether faces with an oblique angle are drawn leaned.
+    #[must_use]
+    pub fn synthetic_oblique(&self) -> bool {
+        self.compiler.synthetic_oblique_enabled()
+    }
+
     /// Sets the shortest paint-class run worth a pipeline switch of its own
     /// (see [`merge_class_runs`]); shorter runs are merged and drawn with the
     /// Uber program. `FRUST_ENGINE_RUN_SPLIT_MIN` only sets the value a
