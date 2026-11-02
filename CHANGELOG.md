@@ -6,6 +6,8 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ## Unreleased
 
+## 0.6.5 — 2026-11-02
+
 A patch release (the 0.6.x line continues) whose one source-affecting change is the removal of the
 public fn `frust_engine::gpu::targets::atlas_page_fits` (the Changed list gives the migration).
 Everything else is additive, a fix, or a deprecation.
