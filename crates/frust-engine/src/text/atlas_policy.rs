@@ -655,6 +655,19 @@ pub(crate) fn drawn_font_size(size: f32, transform: Affine) -> f32 {
 /// `upem` is the face's units-per-em ([`FaceFacts::upem`](super::FaceFacts)),
 /// read once per face. One function for the lowering, the route key and the
 /// resident plan, so the embolden bits each derives are the same.
+///
+/// # Assumption: a hinting instance exists
+///
+/// The hinted basis assumes `glifo` obtained a `skrifa` hinting instance for the
+/// run (`HintCache::get` returned `Some`). When it returns `None`
+/// (`HintingInstance::new` or `reconfigure` failed) `glifo` draws at `upem`
+/// instead, and a device-pixel stroke is then read in font units, far too small.
+/// This does NOT hold for every face: `tests/hint_instance_probe.rs` shows every
+/// bundled face and every size 8..=96 px succeeds, but some macOS system faces
+/// (`Brush Script.ttf`: `fpgm` FDEF overflow; `Courier.ttc` member 2: `prep`
+/// stack overflow) fail at every size, so a run of such a face is under-emboldened
+/// when hinted. The engine cannot pre-probe because `skrifa` is a dev-dependency
+/// only; the tracked fix is a face-level fallback to `upem` once that is decided.
 #[must_use]
 pub(crate) fn embolden_basis(size: f32, transform: Affine, hinted: bool, upem: f32) -> f32 {
     match hinted.then(|| hinted_absorbed_scale(transform)).flatten() {
