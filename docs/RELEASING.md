@@ -141,8 +141,9 @@ number can never be reused. A yanked release gets a note in its GitHub release e
 
 The root gate does not cover the standalone workspaces (`examples/huddle`, `examples/playground`,
 `examples/native-widgets-demo`, `examples/design-system-sample`, `examples/material3-demo`,
-`plugins/clean-signals-frust`, and the other excluded examples). Their gates must pass, run from
-their own directories, before tagging; [DEVELOPMENT.md](DEVELOPMENT.md) § Test is canonical and the
+`plugins/clean-signals-frust`, `benchmarks/frust_bench`, `testing/hotpatch-canary`, and the other
+excluded examples). Their gates must pass, run from their own directories, before tagging;
+[DEVELOPMENT.md](DEVELOPMENT.md) § Test is canonical for the full list and the
 `standalone` job of [ci.yml](../.github/workflows/ci.yml) runs the same set. Refresh their lock
 files as described under "What a bump touches" first, so they are tested against the bumped
 versions.
