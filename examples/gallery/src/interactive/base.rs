@@ -18,11 +18,13 @@
 //! and no poster moves.
 
 use frust_core::{AnyView, Component, View, any, component};
+use frust_widgets::motion::{card_switcher, peer_card};
 use frust_widgets::{
-    Align, Alignment, CrossAxisAlignment, EdgeInsets, GestureDetector, Padding, PlatformViewView,
-    SizedBox, button, checkbox, column, container, platform_view, radio, row, shield, slider,
-    stack, text, text_input,
+    Align, Alignment, CrossAxisAlignment, EdgeInsets, GestureDetector, Padding, PageController,
+    PlatformViewView, SizedBox, button, checkbox, column, container, page_view, platform_view,
+    radio, row, shield, slider, stack, text, text_input,
 };
+use kurbo::Size;
 use peniko::Color;
 
 use super::{Entry, framed};
@@ -30,10 +32,11 @@ use crate::case::Case;
 
 /// This catalog's slice of the side table [`super::entries`] concatenates.
 ///
-/// The other 29 `Base` cases are deliberately absent: they are static layout,
+/// The other `Base` cases are deliberately absent: they are static layout,
 /// styling, text and colour primitives that retained state adds nothing to,
 /// and `scroll-view`/`list-view`/`physics` already respond live because a
-/// scroll offset is widget-owned rather than app-owned.
+/// scroll offset is widget-owned rather than app-owned. `page-view` is the
+/// exception among the scrolling cases, for the reason its entry gives.
 pub const INTERACTIVE: &[Entry] = &[
     ("checkbox", checkbox_case),
     ("radio", radio_case),
@@ -41,6 +44,8 @@ pub const INTERACTIVE: &[Entry] = &[
     ("text-input", text_input_case),
     ("gesture-detector", gesture_detector_case),
     ("shield", shield_case),
+    ("page-view", page_view_case),
+    ("card-switcher", card_switcher_case),
 ];
 
 /// The gesture detector's visible target fill. Repeated from
@@ -422,4 +427,201 @@ impl Component for ShieldCase {
 // erasure: keep stored as an `interactive::Build` fn pointer (`Entry`)
 fn shield_case() -> AnyView<()> {
     any(component(ShieldCase))
+}
+
+// ---- page-view --------------------------------------------------------------
+
+/// The `page-view` geometry and pages, repeated from `crate::base::scrolling`
+/// (private to it) for the reason [`ACCENT`] gives: the viewport box, the
+/// viewport fraction, the page it opens on, and each page's label and swatch.
+const PAGE_VIEWPORT: (f64, f64) = (320.0, 180.0);
+const PAGE_FRACTION: f64 = 0.85;
+const PAGE_INITIAL: usize = 1;
+const PAGES: [(&str, Color); 4] = [
+    ("Page 1", Color::from_rgb8(0xBF, 0xDB, 0xFE)),
+    ("Page 2", Color::from_rgb8(0xBB, 0xF7, 0xD0)),
+    ("Page 3", Color::from_rgb8(0xFE, 0xF3, 0xC7)),
+    ("Page 4", Color::from_rgb8(0xE9, 0xD5, 0xFF)),
+];
+
+/// The `page-view` caption ink, repeated from `crate::base::scrolling`'s
+/// private `CAPTION`.
+const PAGE_INK: Color = Color::from_rgb8(0x33, 0x33, 0x37);
+
+/// One `page-view` page, as the recorded case draws it.
+fn page_tile(index: usize) -> impl View<PageViewState> {
+    let (label, swatch) = PAGES[index];
+    Padding(
+        EdgeInsets::symmetric(6.0, 0.0),
+        container(Align(
+            Alignment::CENTER,
+            text(label).size(16.0).color(PAGE_INK),
+        ))
+        .fill(swatch)
+        .radius(12.0),
+    )
+}
+
+/// Retained state for the interactive `page-view` case: the pager's
+/// controller, seeded to the poster's opening page and viewport fraction.
+struct PageViewState {
+    controller: PageController,
+}
+
+/// The `page-view` case with a controller that survives a rebuild.
+///
+/// Paging itself is widget-owned, so the recorded twin already swipes in a
+/// browser — but only until the next rebuild. Its `Case::build` constructs a
+/// fresh `PageController` on every pass, and a `page_view` rebuilt with a
+/// different controller treats it as a new scroll position and jumps back to
+/// that controller's initial page (`PageView::rebuild`'s `same` check), so the
+/// page a reader swiped to snaps back to page 2. Holding the one controller in
+/// retained state is the whole conversion: the same handle every pass, so the
+/// view keeps its offset.
+struct PageViewCase;
+
+impl Component for PageViewCase {
+    type State = PageViewState;
+
+    fn init(&self) -> Self::State {
+        PageViewState {
+            controller: PageController::new()
+                .initial_page(PAGE_INITIAL)
+                .viewport_fraction(PAGE_FRACTION),
+        }
+    }
+
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
+        framed(
+            SizedBox(Some(PAGE_VIEWPORT.0), Some(PAGE_VIEWPORT.1)).child(
+                page_view((page_tile(0), page_tile(1), page_tile(2), page_tile(3)))
+                    .controller(state.controller.clone()),
+            ),
+        )
+    }
+}
+
+// erasure: keep stored as an `interactive::Build` fn pointer (`Entry`)
+fn page_view_case() -> AnyView<()> {
+    any(component(PageViewCase))
+}
+
+// ---- card-switcher ----------------------------------------------------------
+
+/// The `card-switcher` frame and pages, repeated from
+/// `crate::base::animation` (private to it) for the reason [`ACCENT`] gives:
+/// `(title, subtitle, swatch)` per page, in strip order.
+const SWITCHER_FRAME: Size = Size::new(360.0, 320.0);
+const FACE_INK: Color = Color::from_rgb8(0x1F, 0x29, 0x37);
+const FACES: [(&str, &str, Color); 3] = [
+    ("Inbox", "3 unread", Color::from_rgb8(0xBF, 0xDB, 0xFE)),
+    (
+        "Calendar",
+        "Stand-up at 10:00",
+        Color::from_rgb8(0xBB, 0xF7, 0xD0),
+    ),
+    (
+        "Notes",
+        "Last edited today",
+        Color::from_rgb8(0xFE, 0xF3, 0xC7),
+    ),
+];
+
+/// Retained state for the interactive `card-switcher` case: whether the stage
+/// is open and which page is live (its strip position — the strip keeps
+/// [`FACES`] order). Seeded to the poster: open, the middle page live.
+struct SwitcherState {
+    open: bool,
+    live: usize,
+}
+
+/// The page peer card `peer` shows when `live` is the live page: the peers
+/// are every page but the live one, in strip order.
+fn peer_face(live: usize, peer: usize) -> usize {
+    if peer >= live { peer + 1 } else { peer }
+}
+
+/// One peer page face, as the recorded case draws it.
+fn face(index: usize) -> impl View<SwitcherState> {
+    let (title, subtitle, swatch) = FACES[index];
+    container(Align(
+        Alignment::CENTER,
+        column()
+            .child(text(title).size(22.0).color(FACE_INK))
+            .child(SizedBox(None, Some(6.0)))
+            .child(text(subtitle).size(14.0).color(FACE_INK))
+            .cross_axis(CrossAxisAlignment::Center),
+    ))
+    .fill(swatch)
+}
+
+/// The live page, as the recorded case draws it, with its button wired to
+/// open the stage.
+fn live_page(index: usize) -> impl View<SwitcherState> {
+    let (title, subtitle, swatch) = FACES[index];
+    container(Align(
+        Alignment::CENTER,
+        column()
+            .child(text(title).size(22.0).color(FACE_INK))
+            .child(SizedBox(None, Some(6.0)))
+            .child(text(subtitle).size(14.0).color(FACE_INK))
+            .child(SizedBox(None, Some(16.0)))
+            .child(button("Switch page", |state: &mut SwitcherState| {
+                state.open = true
+            }))
+            .cross_axis(CrossAxisAlignment::Center),
+    ))
+    .fill(swatch)
+}
+
+/// The `card-switcher` case as a working page switcher.
+///
+/// The stage never opens, closes or selects by itself — `on_close` and
+/// `on_select` only report — so the conversion is two fields and their
+/// writers. Closed, the live page fills the frame and its **Switch page**
+/// button opens the stage; open, a tap on the centred card or the scrim
+/// closes it, and a tap on a peer centres it and makes that page live.
+///
+/// A selection closes in the same handler rather than through the pattern's
+/// `expanding` handshake: its step 4 needs a later write, which a pure-`View`
+/// case has no clock to schedule, and closing at once with the chosen page
+/// live is the handshake's documented shortcut (step 4 "any time after step
+/// 2"). The strip already sits centred on that card, so the close ramp grows
+/// it into the page.
+struct CardSwitcherCase;
+
+impl Component for CardSwitcherCase {
+    type State = SwitcherState;
+
+    fn init(&self) -> Self::State {
+        SwitcherState {
+            open: true,
+            live: 1,
+        }
+    }
+
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
+        let live = state.live;
+        let peers = (0..FACES.len())
+            .filter(|&index| index != live)
+            .map(|index| peer_card(face(index)));
+        super::framed_in(
+            SWITCHER_FRAME,
+            SizedBox(Some(SWITCHER_FRAME.width), Some(SWITCHER_FRAME.height)).child(
+                card_switcher(state.open, live_page(live))
+                    .peers(peers)
+                    .live_index(live)
+                    .on_select(|state: &mut SwitcherState, peer: usize| {
+                        state.live = peer_face(state.live, peer);
+                        state.open = false;
+                    })
+                    .on_close(|state: &mut SwitcherState| state.open = false),
+            ),
+        )
+    }
+}
+
+// erasure: keep stored as an `interactive::Build` fn pointer (`Entry`)
+fn card_switcher_case() -> AnyView<()> {
+    any(component(CardSwitcherCase))
 }

@@ -1,15 +1,18 @@
 //! `Base`-design cases for the website's `widgets/base/scrolling` catalog
-//! page set: `list-view`, `scroll-view`, `custom-scroll-view`, `slivers`. See the crate docs and
-//! `crate::base` for the pure-`View`/slug-rule contract every case in this
-//! registry follows, and [`super::framed`] for why none of the four cases fills
-//! its own backdrop. `custom-scroll-view` and `slivers` hold lazy sliver lists
-//! whose rows materialise at rebuild, so both opt into the recorder's warm pass.
+//! page set: `list-view`, `scroll-view`, `custom-scroll-view`, `slivers`,
+//! `page-view`. See the crate docs and `crate::base` for the pure-`View`/
+//! slug-rule contract every case in this registry follows, and
+//! [`super::framed`] for why none of the cases fills its own backdrop.
+//! `custom-scroll-view` and `slivers` hold lazy sliver lists whose rows
+//! materialise at rebuild, so both opt into the recorder's warm pass;
+//! `page-view` builds its pages eagerly and needs none.
 
 use frust_core::View;
 use frust_widgets::{
-    Axis, ChildKey, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, SizedBox, container,
-    custom_scroll_view, inflexible, list_view, scroll_view, sliver_box, sliver_fill_remaining,
-    sliver_fixed_extent_list, sliver_list, sliver_padding, text,
+    Align, Alignment, Axis, ChildKey, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, Padding,
+    PageController, SizedBox, container, custom_scroll_view, inflexible, list_view, page_view,
+    scroll_view, sliver_box, sliver_fill_remaining, sliver_fixed_extent_list, sliver_list,
+    sliver_padding, text,
 };
 use peniko::Color;
 
@@ -169,6 +172,63 @@ fn slivers_case() -> impl View<()> {
     )
 }
 
+/// The viewport `page-view` is boxed into: a bounded main axis is a
+/// `page_view` v1 requirement, and the box leaves the variant's surface
+/// visible above and below the pages.
+const PAGE_VIEWPORT: (f64, f64) = (320.0, 180.0);
+
+/// The fraction of [`PAGE_VIEWPORT`]'s width each page takes, so the
+/// neighbours on both sides peek in.
+const PAGE_FRACTION: f64 = 0.85;
+
+/// The page `page-view` opens on: the second of four, so a neighbour peeks
+/// on each side.
+const PAGE_INITIAL: usize = 1;
+
+/// The `page-view` page labels, in strip order.
+const PAGE_LABELS: [&str; 4] = ["Page 1", "Page 2", "Page 3", "Page 4"];
+
+/// One `page-view` page: a labelled swatch inset from the page edges, so
+/// neighbouring pages read as separate cards rather than one band.
+fn page_tile(index: usize) -> impl View<()> {
+    Padding(
+        EdgeInsets::symmetric(6.0, 0.0),
+        container(Align(
+            Alignment::CENTER,
+            text(PAGE_LABELS[index]).size(16.0).color(CAPTION),
+        ))
+        .fill(page_color(index))
+        .radius(12.0),
+    )
+}
+
+/// The `page-view` swatch colors, one per page.
+fn page_color(index: usize) -> Color {
+    match index {
+        0 => Color::from_rgb8(0xBF, 0xDB, 0xFE),
+        1 => Color::from_rgb8(0xBB, 0xF7, 0xD0),
+        2 => Color::from_rgb8(0xFE, 0xF3, 0xC7),
+        _ => Color::from_rgb8(0xE9, 0xD5, 0xFF),
+    }
+}
+
+/// `page_view`: four labelled pages at a `0.85` viewport fraction, opened on
+/// the second so both neighbours peek in. The controller is built fresh here,
+/// which is all a single recorded build needs; the live twin in
+/// `crate::interactive::base` retains it, because a rebuild with a different
+/// controller re-applies its initial page.
+fn page_view_case() -> impl View<()> {
+    let controller = PageController::new()
+        .initial_page(PAGE_INITIAL)
+        .viewport_fraction(PAGE_FRACTION);
+    framed(
+        SizedBox(Some(PAGE_VIEWPORT.0), Some(PAGE_VIEWPORT.1)).child(
+            page_view((page_tile(0), page_tile(1), page_tile(2), page_tile(3)))
+                .controller(controller),
+        ),
+    )
+}
+
 /// This module's slice of the registry [`crate::cases`] concatenates.
 pub const CASES: &[Case] = &[
     Case {
@@ -206,5 +266,14 @@ pub const CASES: &[Case] = &[
         time_ms: 400,
         design: Design::Base,
         build: case_build!(slivers_case),
+    },
+    Case {
+        slug: "page-view",
+        title: "page_view",
+        size: Case::DEFAULT_SIZE,
+        scale: Case::DEFAULT_SCALE,
+        time_ms: Case::DEFAULT_TIME_MS,
+        design: Design::Base,
+        build: case_build!(page_view_case),
     },
 ];

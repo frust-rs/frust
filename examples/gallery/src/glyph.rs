@@ -1,8 +1,9 @@
 //! `Glyph`-design cases (see [`crate::case::Design::Glyph`]) — one case per
 //! non-index page under `apps/website/widgets/design-systems/glyph/`, slug
 //! `glyph/<file-stem>`: `accordion`, `alert`, `app-bar`, `badge-and-tag`,
-//! `card`, `command-palette`, `dialog`, `list`, `loaders`, `nav-bar`,
-//! `tabs`, `term-block`, `toast`, `toggle`.
+//! `card`, `card-switcher`, `command-palette`, `dialog`, `fab`, `list`,
+//! `loaders`, `nav-bar`, `page-dots`, `tabs`, `term-block`, `toast`,
+//! `toggle`.
 //!
 //! Every case is a static composition of the real `plugins/glyph` widgets,
 //! built directly (never through `frust_glyph::install`/`show_glyph_dialog`/
@@ -37,11 +38,15 @@ use kurbo::Size;
 use frust_core::View;
 use frust_glyph::{
     AlertVariant, BadgeVariant, PaletteItem, StatDelta, TermLine, ToastVariant, accordion, alert,
-    app_bar, badge, command_palette, dots_loader, empty_state, glyph_card, glyph_dialog,
-    glyph_list, glyph_list_item, glyph_nav_bar, glyph_nav_item, progress, segmented_control,
-    skeleton, stat_card, tabs, tag, term_block, toast, toggle,
+    app_bar, badge, card_switcher, command_palette, dots_loader, empty_state, fab, glyph_card,
+    glyph_dialog, glyph_list, glyph_list_item, glyph_nav_bar, glyph_nav_item, page_dots, peer_card,
+    progress, segmented_control, skeleton, stat_card, switcher_bar, switcher_chip, tabs, tag,
+    term_block, toast, toggle,
 };
-use frust_widgets::{ButtonStyle, CrossAxisAlignment, SizedBox, button, column, row, text};
+use frust_widgets::{
+    ButtonStyle, CrossAxisAlignment, EdgeInsets, Padding, SizedBox, button, column, icons, row,
+    scaffold, text,
+};
 
 use crate::base::{framed, framed_in};
 use crate::case::{Case, Design, case_build};
@@ -150,6 +155,154 @@ fn card_case() -> impl View<()> {
                 1,
                 stat_card("Uptime", "99.98%").delta(StatDelta::Up, "0.4%"),
             )),
+    )
+}
+
+/// The `glyph/fab` frame: a short phone screen, so the scaffold's
+/// bottom-right fab slot sits where it would on a device.
+const FAB_FRAME: Size = Size::new(360.0, 320.0);
+
+/// `glyph/fab` — the regular fab in a scaffold's fab slot (with its
+/// `.tooltip` accessible name), over a body that also shows the `.mini`
+/// variant inline. The scaffold is the root: the recorder's bounded root
+/// constraints give it the whole frame, as `scaffold` in `crate::base` does.
+fn fab_case() -> impl View<()> {
+    scaffold(Padding(
+        EdgeInsets::all(16.0),
+        column()
+            .child(glyph_list::<()>(vec![
+                glyph_list_item("$", "deploy")
+                    .sub("main → production")
+                    .meta("2m ago"),
+                glyph_list_item("#", "rollback")
+                    .sub("v0.44.0 → v0.43.2")
+                    .meta("1h ago"),
+            ]))
+            .child(SizedBox(None, Some(16.0)))
+            .child(
+                row()
+                    .child(
+                        fab(icons::ADD, |_: &mut ()| {})
+                            .mini(true)
+                            .tooltip("Add (mini)"),
+                    )
+                    .child(SizedBox(Some(12.0), None))
+                    .child(text("mini").size(12.0))
+                    .cross_axis(CrossAxisAlignment::Center),
+            ),
+    ))
+    .app_bar(app_bar::<()>("Deploys"))
+    .fab(fab(icons::ADD, |_: &mut ()| {}).tooltip("New deploy"))
+}
+
+/// `glyph/page-dots` — four pages with the second current, above the
+/// `Role::Status` wording the indicator reports.
+fn page_dots_case() -> impl View<()> {
+    framed(
+        column()
+            .child(page_dots::<()>(4, 1))
+            .child(SizedBox(None, Some(14.0)))
+            .child(text("page 2 of 4").size(12.0))
+            .cross_axis(CrossAxisAlignment::Center),
+    )
+}
+
+/// The `glyph/card-switcher` frame: tall enough for the label row above the
+/// card, the page dots below it and the action bar along the bottom edge.
+/// Shared with the live twin in `crate::interactive::glyph`.
+pub(crate) const SWITCHER_FRAME: Size = Size::new(360.0, 560.0);
+
+/// The `glyph/card-switcher` servers, `(host, status, badge)`, in strip order.
+/// The poster shows the first [`POSTER_HOSTS`]; the live twin's `add server`
+/// chip adds the rest one at a time. Shared with that twin so its seed cannot
+/// drift from the poster.
+pub(crate) const HOSTS: [(&str, &str, BadgeVariant); 5] = [
+    ("devbox", "ssh", BadgeVariant::Success),
+    ("staging", "ssh", BadgeVariant::Success),
+    ("prod-eu", "down", BadgeVariant::Error),
+    ("new-host", "new", BadgeVariant::Neutral),
+    ("prod-us", "ssh", BadgeVariant::Success),
+];
+
+/// How many of [`HOSTS`] the poster's strip holds.
+pub(crate) const POSTER_HOSTS: usize = 3;
+
+/// The strip position of the poster's live page: the middle server, so a peer
+/// peeks in on each side.
+pub(crate) const LIVE_HOST: usize = 1;
+
+/// Each server's session rows, `(glyph, title, sub, meta)`, indexed like
+/// [`HOSTS`].
+pub(crate) const SESSIONS: [[(&str, &str, &str, &str); 3]; 5] = [
+    [
+        ("$", "build", "cargo check", "1m ago"),
+        ("#", "logs", "journalctl", "live"),
+        ("~", "shell", "bash", "idle"),
+    ],
+    [
+        ("$", "deploy", "main", "2m ago"),
+        ("#", "logs", "tail -f", "live"),
+        ("~", "shell", "zsh", "idle"),
+    ],
+    [
+        ("!", "pager", "disk full", "5m ago"),
+        ("#", "logs", "stalled", "6m ago"),
+        ("~", "shell", "refused", "down"),
+    ],
+    [
+        ("+", "setup", "never connected", "new"),
+        ("#", "logs", "empty", "-"),
+        ("~", "shell", "not started", "-"),
+    ],
+    [
+        ("$", "deploy", "release", "1h ago"),
+        ("#", "logs", "tail -f", "live"),
+        ("~", "shell", "fish", "idle"),
+    ],
+];
+
+/// The label row above a card: a status badge and the host name.
+fn host_label(host: usize) -> impl View<()> {
+    let (name, status, variant) = HOSTS[host];
+    row()
+        .child(badge(status, variant))
+        .child(SizedBox(Some(8.0), None))
+        .child(text(name).size(13.0))
+        .cross_axis(CrossAxisAlignment::Center)
+}
+
+/// One server's page: an app bar titled with the host, its session rows (the
+/// list paints its own surface across the whole body, so a card shows an
+/// opaque page) and the fab that opens the switcher.
+fn host_page(host: usize) -> impl View<()> {
+    let rows = SESSIONS[host]
+        .iter()
+        .map(|&(glyph, title, sub, meta)| glyph_list_item(glyph, title).sub(sub).meta(meta))
+        .collect();
+    scaffold(glyph_list::<()>(rows))
+        .app_bar(app_bar::<()>(HOSTS[host].0))
+        .fab(fab(icons::PANE_MARK, |_: &mut ()| {}).tooltip("Switch server"))
+}
+
+/// `glyph/card-switcher` — the Glyph skin open: the live page shrunk into the
+/// centred card with its label row, a peer on each side, the page dots the
+/// skin wires below the strip, and a [`switcher_bar`] of [`switcher_chip`]s.
+/// Mounted open, the stage does not animate in, so the frame at rest is the
+/// settled open stage. The stage fills the frame (its scrim is the backdrop),
+/// so it is sized directly rather than through [`framed_in`].
+fn card_switcher_case() -> impl View<()> {
+    let peers = (0..POSTER_HOSTS)
+        .filter(|&host| host != LIVE_HOST)
+        .map(|host| peer_card(host_page(host)).label(host_label(host)));
+    SizedBox(Some(SWITCHER_FRAME.width), Some(SWITCHER_FRAME.height)).child(
+        card_switcher(true, host_page(LIVE_HOST))
+            .peers(peers)
+            .live_index(LIVE_HOST)
+            .live_label(host_label(LIVE_HOST))
+            .action_bar(switcher_bar((
+                switcher_chip(icons::ADD, |_: &mut ()| {}).label("add server"),
+                switcher_chip(icons::CLOSE, |_: &mut ()| {}).semantic_label("close"),
+            ))),
     )
 }
 
@@ -379,6 +532,15 @@ pub const CASES: &[Case] = &[
         build: case_build!(card_case),
     },
     Case {
+        slug: "glyph/card-switcher",
+        title: "Card switcher",
+        size: SWITCHER_FRAME,
+        scale: Case::DEFAULT_SCALE,
+        time_ms: Case::DEFAULT_TIME_MS,
+        design: Design::Glyph,
+        build: case_build!(card_switcher_case),
+    },
+    Case {
         slug: "glyph/command-palette",
         title: "Command palette",
         size: Case::DEFAULT_SIZE,
@@ -395,6 +557,15 @@ pub const CASES: &[Case] = &[
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Glyph,
         build: case_build!(dialog_case),
+    },
+    Case {
+        slug: "glyph/fab",
+        title: "Floating action button",
+        size: FAB_FRAME,
+        scale: Case::DEFAULT_SCALE,
+        time_ms: Case::DEFAULT_TIME_MS,
+        design: Design::Glyph,
+        build: case_build!(fab_case),
     },
     Case {
         slug: "glyph/list",
@@ -422,6 +593,15 @@ pub const CASES: &[Case] = &[
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Glyph,
         build: case_build!(navbar_case),
+    },
+    Case {
+        slug: "glyph/page-dots",
+        title: "Page dots",
+        size: Case::DEFAULT_SIZE,
+        scale: Case::DEFAULT_SCALE,
+        time_ms: Case::DEFAULT_TIME_MS,
+        design: Design::Glyph,
+        build: case_build!(page_dots_case),
     },
     Case {
         slug: "glyph/tabs",
