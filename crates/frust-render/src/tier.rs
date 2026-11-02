@@ -40,7 +40,7 @@ pub struct EngineCaps {
 /// Renamed because `frust_gpu::TierCaps` is a different, adapter-probed type
 /// with the same name, and the two were being confused at call sites.
 #[deprecated(
-    since = "0.6.4",
+    since = "0.6.5",
     note = "renamed to `EngineCaps` (`frust_gpu::TierCaps` is a different type); removed in 0.7"
 )]
 pub type TierCaps = EngineCaps;
