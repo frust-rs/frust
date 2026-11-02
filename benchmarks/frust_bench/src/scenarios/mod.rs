@@ -15,13 +15,18 @@
 //! is an opaque string to every mechanism below (deep link, env var, HUD
 //! button row), so nothing here special-cases the `d`-prefix.
 //!
+//! A third, outside the PROTOCOL tables: `weight_probe`, a device probe for
+//! the faux-bold path (a static font drawn at 400/700, plain and italic). It
+//! is the last registry entry in both configurations, so `s1..=s8` and
+//! `d1`/`d2` keep their indices.
+//!
 //! The `d*` namespace rides the crate's default-ON `db` cargo feature: it
 //! carries the `frust-database` dependency and its bundled SQLite, which
 //! only those two scenarios call. A `--no-default-features` build compiles
 //! the S1–S8 frame-class app alone (the app-size matrix arm — see the
 //! feature's own comment in `Cargo.toml`). Nothing below reads the registry
 //! length as a constant, so both shapes drive identically; [`SCENARIOS`] is
-//! simply eight entries instead of ten.
+//! simply nine entries instead of eleven.
 //!
 //! If a scenario id is not found in the registry (e.g., a `d1` deep link on a
 //! `--no-default-features` build, or `FRUST_BENCH_SCENARIO=d1` where the id is
@@ -66,6 +71,7 @@ pub mod s5_image;
 pub mod s6_text;
 pub mod s7_startup;
 pub mod s8_prefs;
+pub mod weight_probe;
 
 /// The deep-link scheme registered in the generated Android manifest / iOS
 /// Info.plist (`frust create --deeplink-scheme frustbench`); a link's host is
@@ -107,8 +113,8 @@ pub trait Scenario: Sync {
     }
 }
 
-/// All ten scenarios (the eight `s*` frame-class scenarios plus the two
-/// `d*` DB op-latency scenarios), in id order. Index into this from
+/// All eleven scenarios (the eight `s*` frame-class scenarios, the two
+/// `d*` DB op-latency scenarios, and the `weight_probe` device probe), in id order. Index into this from
 /// [`BenchState::active`] / [`BenchState::selected`].
 ///
 /// The `db`-off arm below drops the two `d*` entries; the `s1`..=`s8`
@@ -118,7 +124,7 @@ pub trait Scenario: Sync {
 /// scenario — the `s*` prefix is deliberately duplicated rather than
 /// spliced, so that the registry stays one flat `static` per configuration.
 #[cfg(feature = "db")]
-pub static SCENARIOS: [&dyn Scenario; 10] = [
+pub static SCENARIOS: [&dyn Scenario; 11] = [
     &s1_animation::S1,
     &s2_list::S2,
     &s3_table::S3,
@@ -129,12 +135,13 @@ pub static SCENARIOS: [&dyn Scenario; 10] = [
     &s8_prefs::S8,
     &d1_db_write::D1,
     &d2_db_read::D2,
+    &weight_probe::WeightProbe,
 ];
 
-/// The eight `s*` frame-class scenarios, in id order — the registry a
+/// The eight `s*` frame-class scenarios plus the probe, in id order — the registry a
 /// `--no-default-features` (no `db`) build sees. See the `db`-on arm above.
 #[cfg(not(feature = "db"))]
-pub static SCENARIOS: [&dyn Scenario; 8] = [
+pub static SCENARIOS: [&dyn Scenario; 9] = [
     &s1_animation::S1,
     &s2_list::S2,
     &s3_table::S3,
@@ -143,6 +150,7 @@ pub static SCENARIOS: [&dyn Scenario; 8] = [
     &s6_text::S6,
     &s7_startup::S7,
     &s8_prefs::S8,
+    &weight_probe::WeightProbe,
 ];
 
 /// The single application state every scenario builds over.
