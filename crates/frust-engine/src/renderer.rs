@@ -529,8 +529,15 @@ const ENCODE_TRACE_COLUMNS: [&str; 17] = [
 /// `staging_too_large` are frames the ring refused, `staging_buffers` is slot
 /// buffers it created, and `bind_groups` is bind groups the frame path created.
 /// A ring that is off reports zero for all three staging counts.
+///
+/// The last two, `hvgl_atlas_draws` and `hvgl_outline_fallbacks`, are the
+/// `hvgl`-only (Apple PingFang) route's per-frame counts. They are medians like
+/// `atlas_glyphs`, which they sit beside in meaning: a level per frame, not an
+/// event. Both read zero off Apple and on any run with no `hvgl`-only face.
+/// They are appended after `bind_groups` so every earlier column keeps its
+/// position.
 #[cfg(feature = "perf-trace")]
-const ENCODE_TRACE_COUNTS: [&str; 16] = [
+const ENCODE_TRACE_COUNTS: [&str; 18] = [
     "draws",
     "strips",
     "alphas",
@@ -547,6 +554,8 @@ const ENCODE_TRACE_COUNTS: [&str; 16] = [
     "staging_too_large",
     "staging_buffers",
     "bind_groups",
+    "hvgl_atlas_draws",
+    "hvgl_outline_fallbacks",
 ];
 
 /// Index into [`ENCODE_TRACE_COUNTS`] of the first count reported as a sum over
@@ -563,10 +572,16 @@ const ENCODE_TRACE_FIRST_SUMMED: usize = 5;
 const ENCODE_TRACE_MEDIAN_AGAIN: usize = 10;
 
 /// Index into [`ENCODE_TRACE_COUNTS`] of the first count summed over the window
-/// again, through the end of the line: the staging refusals, buffer creations
-/// and bind-group creations. `staged_bytes`, just before it, is a median.
+/// again: the staging refusals, buffer creations and bind-group creations.
+/// `staged_bytes`, just before it, is a median.
 #[cfg(feature = "perf-trace")]
 const ENCODE_TRACE_SUMMED_AGAIN: usize = 12;
+
+/// Index into [`ENCODE_TRACE_COUNTS`] of the first count after the summed run
+/// that is a median again, through the end of the line: the `hvgl` route's
+/// per-frame counts, appended after `bind_groups`.
+#[cfg(feature = "perf-trace")]
+const ENCODE_TRACE_MEDIAN_LAST: usize = 16;
 
 /// Width of one window row: every phase column followed by every count.
 #[cfg(feature = "perf-trace")]
@@ -635,6 +650,13 @@ struct EncodeCounts {
     /// Bind groups the frame path created this frame. Filled by
     /// [`EncodeTrace::record`].
     bind_groups: u32,
+    /// Glyphs of `hvgl`-only faces this frame drew from the atlas: the frame's
+    /// [`CompiledFrame::hvgl_atlas_draws`]. A per-frame level, reported as a
+    /// window median like `atlas_glyphs`.
+    hvgl_atlas_draws: u32,
+    /// Glyphs of `hvgl`-only faces this frame filled as outlines instead: the
+    /// frame's [`CompiledFrame::hvgl_outline_fallbacks`]. A window median.
+    hvgl_outline_fallbacks: u32,
 }
 
 #[cfg(feature = "perf-trace")]
@@ -669,6 +691,8 @@ impl EncodeCounts {
             staging_too_large: 0,
             staging_buffers: 0,
             bind_groups: 0,
+            hvgl_atlas_draws: frame.hvgl_atlas_draws,
+            hvgl_outline_fallbacks: frame.hvgl_outline_fallbacks,
         }
     }
 }
@@ -752,6 +776,8 @@ impl EncodeSpans {
             self.counts.staging_too_large,
             self.counts.staging_buffers,
             self.counts.bind_groups,
+            self.counts.hvgl_atlas_draws,
+            self.counts.hvgl_outline_fallbacks,
         ]
     }
 }
@@ -849,7 +875,7 @@ impl EncodeTrace {
         for (offset, name) in ENCODE_TRACE_COUNTS.iter().enumerate() {
             let column = ENCODE_TRACE_COLUMNS.len() + offset;
             let summed = (ENCODE_TRACE_FIRST_SUMMED..ENCODE_TRACE_MEDIAN_AGAIN).contains(&offset)
-                || offset >= ENCODE_TRACE_SUMMED_AGAIN;
+                || (ENCODE_TRACE_SUMMED_AGAIN..ENCODE_TRACE_MEDIAN_LAST).contains(&offset);
             let value = if summed {
                 self.window
                     .iter()
@@ -8108,7 +8134,59 @@ mod tests {
             "draws=11 strips=0 alphas=0 glyph_draws=0 atlas_glyphs=0 replays=3 \
              dirty_pages=6 atlas_refused=0 glyph_misses=3 glyph_evicted=0 run_keys=5 \
              staged_bytes=101 staging_busy=3 staging_too_large=0 staging_buffers=0 \
-             bind_groups=6"
+             bind_groups=6 hvgl_atlas_draws=0 hvgl_outline_fallbacks=0"
+        );
+    }
+
+    /// The `hvgl` route's two counts are read off the frame's own compile and
+    /// reach the line as window medians, appended after `bind_groups` so every
+    /// earlier field keeps its place. A plain scene reads zero for both.
+    #[cfg(feature = "perf-trace")]
+    #[test]
+    fn an_encode_trace_line_reports_the_hvgl_route_as_medians_after_bind_groups() {
+        let scene = plan_scene(|builder| {
+            builder.fill_rect(PLAN_SOFT, Brush::Solid(BLUE));
+        });
+        let mut compiler = SceneCompiler::new(PLAN_VIEWPORT.0, PLAN_VIEWPORT.1);
+        let mut frame = compiler
+            .compile(&scene, Affine::IDENTITY, PLAN_VIEWPORT)
+            .expect("an in-range scene compiles");
+        let plain = EncodeCounts::of(
+            &frame,
+            false,
+            &AtlasRenderReport::default(),
+            compiler.glyph_atlas_trace(),
+            0,
+        );
+        assert_eq!(
+            (plain.hvgl_atlas_draws, plain.hvgl_outline_fallbacks),
+            (0, 0)
+        );
+
+        // Three frames whose atlas counts are 3, 5 and 7 and whose fallbacks
+        // are all 2: the median of the first is 5 (a sum would be 15), and of
+        // the second 2 (a sum would be 6).
+        let mut trace = EncodeTrace::default();
+        for atlas in [3_u32, 5, 7] {
+            frame.hvgl_atlas_draws = atlas;
+            frame.hvgl_outline_fallbacks = 2;
+            let counts = EncodeCounts::of(
+                &frame,
+                false,
+                &AtlasRenderReport::default(),
+                compiler.glyph_atlas_trace(),
+                0,
+            );
+            let spans = EncodeSpans {
+                counts,
+                ..EncodeSpans::default()
+            };
+            trace.window.push(spans.row());
+        }
+        let line = trace.line();
+        assert!(
+            line.ends_with(" bind_groups=0 hvgl_atlas_draws=5 hvgl_outline_fallbacks=2"),
+            "{line}"
         );
     }
 
