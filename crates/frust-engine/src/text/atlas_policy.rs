@@ -216,6 +216,24 @@
 //! there is no way to enable it for a run's outlines and not for its COLR
 //! glyphs.
 //!
+//! # A glyph `glifo` cannot read is inserted here
+//!
+//! A face whose outlines live only in an `hvgl` table never reaches `glifo`
+//! (see `crate::text::hvgl`), so nothing inserts its glyphs while the run is
+//! drawn. Such a run is classified like any other and then collected whole
+//! ([`collect_run`](AtlasPolicy::collect_run)): every glyph it misses is
+//! claimed under the key `glifo` itself would file an unhinted outline glyph
+//! under ([`outline_key`]), measured and placed by [`build`](AtlasPolicy::build)
+//! ahead of the draw walk, rasterized by the caller into the page recorder,
+//! and resolved in the draw phase through
+//! [`keyed_slot`](AtlasPolicy::keyed_slot) or the resident-run cache, which
+//! serve both kinds of entry alike. Its entries are charged to the same texel
+//! budget, and its claims are reserved against it while the collect walk is
+//! still classifying the runs behind it, so the bound holds within a frame as
+//! [`admit_run`](AtlasPolicy::admit_run) makes it hold for `glifo`'s runs. A
+//! glyph with no ink takes no slot; it is remembered as inkless so it is
+//! neither claimed nor missed again (see `AtlasPolicy::inkless`).
+//!
 //! # What is not cached
 //!
 //! Everything in [`OutlineReason`] routes to outline strips instead, each for
@@ -234,17 +252,16 @@
 #![allow(
     dead_code,
     reason = "the run-routing half is consumed by `super::glyph_atlas_policy`'s \
-              caller; the per-glyph half — `collect_glyph`, `slot`, \
-              `GlyphUpload` and `AtlasPass::uploads` — is host-tested but \
-              unreachable while `glifo` owns the allocation, since it keys and \
-              rasterizes every cached glyph itself (see `atlas_mut`). It is \
-              reserved, not abandoned, for the planned frust-side hvgl atlas \
-              insert, where frust rasterizes a glyph `glifo` cannot and must \
-              therefore collect, measure and place it itself; the reservation \
-              is tracked in docs/LIMITATIONS.md under \
-              `engine-glifo-atlas-experimental`, and the half retires with \
-              that entry if the insert is dropped. The readings of the budget \
-              — `entry_ceiling_at`, `max_entries`, `texel_budget`, \
+              caller, and the keyed per-glyph half — `collect_run`, `build`'s \
+              measuring callback, `GlyphUpload`, `AtlasPass::uploads` and \
+              `keyed_slot` — by the frust-side hvgl insert (`super::hvgl_atlas`). \
+              What production never reaches is `collect_glyph` and \
+              `AtlasRun::key`, which key a glyph at the run's quantized size and \
+              context colour rather than as `glifo` keys an outline glyph \
+              (`outline_key`); they stay host-tested by `tests/atlas_churn.rs`, \
+              which includes this module by path and so compiles every item \
+              here while using a few. The readings of the budget — \
+              `entry_ceiling_at`, `max_entries`, `texel_budget`, \
               `resident_texels` — are reporting rather than routing, so only \
               the cases read them"
 )]
@@ -259,6 +276,7 @@ use glifo::{
 use kurbo::{Affine, Diagonal2};
 use peniko::color::palette::css::BLACK;
 use peniko::color::{AlphaColor, Srgb};
+use vello_common::paint::ImageId;
 
 /// Grid a font size is snapped to before it reaches a cache key, in pixels.
 ///
@@ -823,8 +841,16 @@ pub(crate) enum OutlineReason {
     /// The run's face carries a `COLR` table, so `glifo` would cache its colour
     /// glyphs as a clip-bracketed command stream this tier cannot replay — and
     /// would take the page's ordinary glyphs down with it (see this module's
-    /// doc).
+    /// doc). `COLR` only: an `hvgl`-only face is [`Self::Hvgl`]'s, or takes the
+    /// atlas through the frust-side insert.
     ColorFont,
+    /// The run's face keeps its outlines only in an `hvgl` table and the
+    /// frust-side insert does not take it: the hvgl atlas is off
+    /// (`SceneCompiler::set_hvgl_atlas`), the provider cannot open the face,
+    /// or the run's brush is not one solid colour (an atlas glyph is a
+    /// coverage mask tinted with one). Decided by the caller ahead of
+    /// classification, like the face facts it reads.
+    Hvgl,
     /// Admitting this run would take glyph residency past
     /// [`glyph_texel_budget`], so its entries would be taken out of the images'
     /// share of the shared allocator — and at least one of its glyphs is not
@@ -869,6 +895,18 @@ pub(crate) struct AtlasRun {
     /// re-test such a run against the budget, and [`AtlasRun::key`] never
     /// reads it.
     resident_only: bool,
+    /// Whether the collect walk claimed the run's missing glyphs itself
+    /// ([`AtlasPolicy::collect_run`]), so [`AtlasPolicy::build`] inserts them
+    /// ahead of the draw walk and the budget has already been charged for
+    /// them. Routing only, like `resident_only`: [`AtlasPolicy::admit_run`]
+    /// does not re-test such a run, since testing it against a total that
+    /// already holds its own entries would charge it twice.
+    collected: bool,
+    /// Whether [`AtlasPolicy::collect_run`] found a glyph of the run missing
+    /// from the atlas, so it draws entries inserted this very frame — and,
+    /// as a `glifo` run that missed does, is drawn the general way rather
+    /// than as quads (see `crate::text::backend`'s module doc).
+    missed: bool,
     /// Whether the run's outlines are hinted.
     hinted: bool,
     /// The variation coordinates and faux-bold stroke the run is drawn with.
@@ -898,6 +936,13 @@ impl AtlasRun {
     #[must_use]
     pub(crate) fn resident_only(&self) -> bool {
         self.resident_only
+    }
+
+    /// Whether [`AtlasPolicy::collect_run`] found one of this run's glyphs
+    /// missing, so the run draws entries inserted this frame.
+    #[must_use]
+    pub(crate) fn missed_at_collect(&self) -> bool {
+        self.missed
     }
 
     /// The cache key for `glyph_id` drawn at horizontal fraction
@@ -1058,7 +1103,10 @@ pub(crate) struct RunKey<'g> {
     /// Whether the run's outlines are hinted.
     pub(crate) hinted: bool,
     /// Whether the run's face carries a `COLR` table, and so could produce a
-    /// colour glyph this tier's replay cannot lower.
+    /// colour glyph this tier's replay cannot lower. `COLR` only: an
+    /// `hvgl`-only face is routed by the caller ([`OutlineReason::Hvgl`]) or
+    /// classified on its own merits and collected
+    /// ([`AtlasPolicy::collect_run`]).
     pub(crate) color_font: bool,
     /// The context colour a COLR glyph resolves against.
     pub(crate) context_color: AlphaColor<Srgb>,
@@ -1359,6 +1407,20 @@ pub(crate) struct AtlasPolicy {
     /// [`begin_frame`](Self::begin_frame); see
     /// [`over_budget_runs`](Self::over_budget_runs).
     over_budget_runs: u32,
+    /// Texels the collect walk has claimed for [`collect_run`](Self::collect_run)'s
+    /// runs this frame and [`build`](Self::build) has not yet inserted: what
+    /// [`would_overspend`](Self::would_overspend) adds to the resident total,
+    /// so a run classified behind a collected one is asked against the
+    /// population the draw walk will really see. Zero outside the collect
+    /// phase.
+    reserved_texels: u64,
+    /// Keys [`collect_run`](Self::collect_run) claimed whose glyph had no ink
+    /// to rasterize, remembered so they are neither claimed nor probed again:
+    /// such a glyph takes no slot, and without this every frame drawing it
+    /// would miss the atlas, re-measure it, and keep its run off the resident
+    /// path. A glyph's ink never changes under its key, so nothing goes stale;
+    /// the set is bounded by [`MAX_INKLESS_KEYS`] and emptied when full.
+    inkless: HashSet<GlyphCacheKey>,
     /// This frame's counters for the `frust-perf enc` line.
     #[cfg(feature = "perf-trace")]
     trace: AtlasTrace,
@@ -1432,6 +1494,8 @@ impl AtlasPolicy {
             resident: ResidentRuns::default(),
             placed: Vec::new(),
             over_budget_runs: 0,
+            reserved_texels: 0,
+            inkless: HashSet::new(),
             #[cfg(feature = "perf-trace")]
             trace: AtlasTrace::default(),
         }
@@ -1617,6 +1681,7 @@ impl AtlasPolicy {
         self.misses_at_frame_start = self.atlas.cache_misses();
         self.probe_misses = 0;
         self.over_budget_runs = 0;
+        self.reserved_texels = 0;
         #[cfg(feature = "perf-trace")]
         {
             self.trace.run_keys.clear();
@@ -1730,6 +1795,8 @@ impl AtlasPolicy {
             size,
             distinct_glyphs: run.distinct_glyphs,
             resident_only,
+            collected: false,
+            missed: false,
             hinted: run.hinted,
             synthesis,
             context_color: run.context_color,
@@ -1775,13 +1842,16 @@ impl AtlasPolicy {
     /// frame's own insertions have since pushed over is narrowed like any
     /// other, resident or not — its glyphs were never asked about — and is
     /// served resident-only from the next frame, when the collect phase opens
-    /// over the budget and asks.
+    /// over the budget and asks. A run [`collect_run`](Self::collect_run)
+    /// collected passes through untested too: [`build`](Self::build) inserted
+    /// and charged its entries before the draw walk began.
     #[must_use]
     pub(crate) fn admit_run(&mut self, route: RunRoute) -> RunRoute {
         self.charge_admissions();
         match route {
             RunRoute::Atlas(run)
-                if !run.resident_only()
+                if !run.resident_only
+                    && !run.collected
                     && self.would_overspend(run.size(), run.distinct_glyphs()) =>
             {
                 RunRoute::Outline(OutlineReason::ResidencyFull)
@@ -1877,9 +1947,14 @@ impl AtlasPolicy {
                 continue;
             }
             let key = outline_key(&identity, glyph.id, glyph.bucket, black);
-            let Some(slot) = self.atlas.get(&key) else {
-                self.probe_misses = self.probe_misses.saturating_add(1);
-                return false;
+            let slot = if !self.inkless.is_empty() && self.inkless.contains(&key) {
+                inkless_slot()
+            } else {
+                let Some(slot) = self.atlas.get(&key) else {
+                    self.probe_misses = self.probe_misses.saturating_add(1);
+                    return false;
+                };
+                slot
             };
             if let Some(known) = record
                 .as_mut()
@@ -1911,7 +1986,10 @@ impl AtlasPolicy {
         // and charging it nothing would let an unbounded number of them
         // through at a full budget.
         let demand = glyph_texels_at(size).saturating_mul(u64::from(entries.max(1)));
-        self.resident_texels.saturating_add(demand) > self.texel_budget
+        self.resident_texels
+            .saturating_add(self.reserved_texels)
+            .saturating_add(demand)
+            > self.texel_budget
     }
 
     /// Charge whatever `glifo` has inserted since the last time the accounting
@@ -2050,6 +2128,9 @@ impl AtlasPolicy {
         }
         self.pending = pending;
         self.claimed.clear();
+        // Every reservation is now an entry charged above, or a glyph the pass
+        // refused.
+        self.reserved_texels = 0;
         self.phase = Phase::Draw;
 
         pass
@@ -2067,6 +2148,102 @@ impl AtlasPolicy {
             return None;
         }
         self.atlas.get(key)
+    }
+
+    /// Claim every glyph of `run` the atlas lacks, for the frust-side hvgl
+    /// insert (see this module's doc); `route` is
+    /// [`classify_run`](Self::classify_run)'s answer, returned unchanged
+    /// unless it is an atlas route.
+    ///
+    /// Keys are `glifo`'s own for an outline glyph ([`outline_key`]), so the
+    /// resident-run cache and the over-budget probe find these entries as they
+    /// find `glifo`'s. A resident run claims nothing; otherwise each glyph
+    /// neither resident nor inkless is claimed once per frame, its texels
+    /// reserved until [`build`](Self::build) inserts it. The route comes back
+    /// collected (so [`admit_run`](Self::admit_run) passes it through) and
+    /// [missed](AtlasRun::missed_at_collect) when any glyph was.
+    pub(crate) fn collect_run(&mut self, route: RunRoute, run: &RunKey<'_>) -> RunRoute {
+        let RunRoute::Atlas(mut atlas_run) = route else {
+            return route;
+        };
+        if self.phase != Phase::Collect {
+            return RunRoute::Outline(OutlineReason::NotCollecting);
+        }
+        let identity = ResidentIdentity {
+            font_id: run.font_id,
+            font_index: run.font_index,
+            size: drawn_font_size(run.font_size, run.transform),
+            hinted: run.hinted,
+            synthesis: atlas_run.synthesis,
+        };
+        let mut placed = std::mem::take(&mut self.placed);
+        placed.clear();
+        placed.extend(run.glyphs.iter().map(|glyph| PlacedGlyph {
+            id: glyph.id,
+            bucket: glyph_bucket(run.transform, glyph),
+        }));
+        // A resident-only run was found resident by `classify_run` a moment ago.
+        if !atlas_run.resident_only && !self.placed_glyphs_resident(identity, &placed) {
+            let black = self.resident.black;
+            let texels = glyph_texels_at(identity.size);
+            for glyph in &placed {
+                let key = outline_key(&identity, glyph.id, glyph.bucket, black);
+                if self.is_inkless(&key) || self.atlas.get(&key).is_some() {
+                    continue;
+                }
+                atlas_run.missed = true;
+                if self.claimed.insert(key.clone()) {
+                    self.reserved_texels = self.reserved_texels.saturating_add(texels);
+                    self.pending.push(key);
+                }
+            }
+        }
+        self.placed = placed;
+        atlas_run.collected = true;
+        RunRoute::Atlas(atlas_run)
+    }
+
+    /// The key [`collect_run`](Self::collect_run) files glyph `glyph_id` of
+    /// `identity`'s run under in subpixel bucket `bucket` — the one the draw
+    /// phase resolves it by ([`keyed_slot`](Self::keyed_slot)).
+    #[must_use]
+    pub(crate) fn glyph_key(
+        &self,
+        identity: &ResidentIdentity,
+        glyph_id: u32,
+        bucket: u8,
+    ) -> GlyphCacheKey {
+        outline_key(identity, glyph_id, bucket, self.resident.black)
+    }
+
+    /// What the atlas holds for `key` in the draw phase: its slot, the
+    /// knowledge that the glyph has no ink, or nothing (outside the draw
+    /// phase too, on [`slot`](Self::slot)'s terms).
+    pub(crate) fn keyed_slot(&mut self, key: &GlyphCacheKey) -> KeyedSlot {
+        if self.phase != Phase::Draw {
+            return KeyedSlot::Absent;
+        }
+        if self.is_inkless(key) {
+            return KeyedSlot::Inkless;
+        }
+        self.atlas
+            .get(key)
+            .map_or(KeyedSlot::Absent, KeyedSlot::Resident)
+    }
+
+    /// Remember that `key`'s glyph has no ink: the measuring callback of
+    /// [`build`](Self::build) found nothing to rasterize for it (see
+    /// `AtlasPolicy::inkless`).
+    pub(crate) fn remember_inkless(&mut self, key: GlyphCacheKey) {
+        if self.inkless.len() >= MAX_INKLESS_KEYS {
+            self.inkless.clear();
+        }
+        self.inkless.insert(key);
+    }
+
+    /// Whether `key`'s glyph is remembered inkless.
+    fn is_inkless(&self, key: &GlyphCacheKey) -> bool {
+        !self.inkless.is_empty() && self.inkless.contains(key)
     }
 
     /// Close the frame: age the cache, take the eviction's clear rects, and
@@ -2170,8 +2347,10 @@ impl AtlasPolicy {
     /// The hazard is narrower than that, and its bound is arithmetic. `glifo`
     /// records page commands in exactly one place — `GlyphAtlas::insert`, which
     /// creates the entry in the same call, stamped with the current LRU serial
-    /// — so every unreplayed command belongs to an entry whose serial is at
-    /// least the serial the recording was made at. Eviction reaps an entry only
+    /// — and the frust-side insert records only for entries [`build`](Self::build)
+    /// created on the same frame, before `maintain` ticks the serial — so every
+    /// unreplayed command belongs to an entry whose serial is at least the
+    /// serial the recording was made at. Eviction reaps an entry only
     /// once `serial - entry.serial` exceeds [`MAX_ENTRY_AGE`], and a hit only
     /// pushes an entry's serial *up*. So while the oldest unreplayed recording
     /// is no more than [`MAX_ENTRY_AGE`] serials old, no entry a recording names
@@ -2239,9 +2418,16 @@ impl AtlasPolicy {
                 Some(slot) => slot,
                 None => {
                     let key = outline_key(&identity, glyph.id, glyph.bucket, black);
-                    let Some(slot) = self.atlas.get(&key) else {
-                        self.probe_misses = self.probe_misses.saturating_add(1);
-                        return ResidentAnswer::Missed(hash);
+                    // A glyph remembered inkless resolves to the empty slot,
+                    // which draws nothing, rather than missing every frame.
+                    let slot = if !self.inkless.is_empty() && self.inkless.contains(&key) {
+                        inkless_slot()
+                    } else {
+                        let Some(slot) = self.atlas.get(&key) else {
+                            self.probe_misses = self.probe_misses.saturating_add(1);
+                            return ResidentAnswer::Missed(hash);
+                        };
+                        slot
                     };
                     record.slots[bucket] = Some(slot);
                     slot
@@ -2433,6 +2619,11 @@ pub(crate) const MAX_RESIDENT_RUN_BYTES: usize = 2 * 1024 * 1024;
 /// The serial a bucket nothing has been drawn from is stamped with.
 const NEVER: u64 = u64::MAX;
 
+/// The most inkless keys the policy remembers (see `AtlasPolicy::inkless`).
+/// Spaces are a handful of glyphs per face, size and bucket; a set this full
+/// is emptied and refilled rather than grown.
+pub(crate) const MAX_INKLESS_KEYS: usize = 1024;
+
 /// What a resident run is identified by besides its glyph ids: everything
 /// `glifo` builds an outline glyph's key from except the glyph and its
 /// subpixel bucket.
@@ -2479,6 +2670,39 @@ pub(crate) enum ResidentAnswer {
     /// The run is not offered the resident path at all: refused earlier, too
     /// large to remember, or asked outside the draw phase.
     Bypassed,
+}
+
+/// What [`AtlasPolicy::keyed_slot`] found for one key.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum KeyedSlot {
+    /// The glyph is resident in this slot.
+    Resident(AtlasSlot),
+    /// The glyph has no ink: nothing to draw, and nothing missing.
+    Inkless,
+    /// The atlas holds nothing for the key; the glyph is drawn as an outline.
+    Absent,
+}
+
+/// The slot an inkless glyph resolves to on the resident path: an empty
+/// rectangle naming no allocation, which every atlas draw skips as it skips a
+/// glyph whose slot has no extent.
+fn inkless_slot() -> AtlasSlot {
+    AtlasSlot {
+        image_id: ImageId::new(u32::MAX),
+        page_index: 0,
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
+        bearing_x: 0,
+        bearing_y: 0,
+    }
+}
+
+/// Whether `slot` is [`inkless_slot`]'s. `glifo` never hands out a slot of
+/// zero width (its raster extent always carries a pixel of subpixel room).
+fn is_inkless_slot(slot: &AtlasSlot) -> bool {
+    slot.width == 0 && slot.height == 0 && slot.image_id.as_u32() == u32::MAX
 }
 
 /// One glyph position of a remembered run: the slot it resolved to in each
@@ -2831,6 +3055,10 @@ impl ResidentRuns {
                 for bucket in 0..SUBPIXEL_BUCKETS {
                     let index = usize::from(bucket);
                     if !in_use && glyph.slots[index].is_none() {
+                        continue;
+                    }
+                    // An inkless glyph has no entry to age and stays inkless.
+                    if glyph.slots[index].as_ref().is_some_and(is_inkless_slot) {
                         continue;
                     }
                     // A probe stamps the entry with the serial a per-frame

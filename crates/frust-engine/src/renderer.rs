@@ -1448,7 +1448,9 @@ impl EngineRenderer {
 
     /// Sets whether a face with an oblique angle is drawn leaned by a skewing
     /// glyph transform (see [`SceneCompiler::set_synthetic_oblique`]). Off by
-    /// default; takes effect from the next frame.
+    /// default; takes effect from the next frame. Performance: a leaned run
+    /// is drawn as outlines every frame, never from the atlas (see the
+    /// LIMITATIONS entry `text-faux-oblique-off`).
     pub fn set_synthetic_oblique(&mut self, enabled: bool) {
         self.compiler.set_synthetic_oblique(enabled);
     }
@@ -1457,6 +1459,20 @@ impl EngineRenderer {
     #[must_use]
     pub fn synthetic_oblique(&self) -> bool {
         self.compiler.synthetic_oblique_enabled()
+    }
+
+    /// Sets whether a run of an `hvgl`-only face (Apple's PingFang) may take
+    /// the glyph atlas through the frust-side insert (see
+    /// [`SceneCompiler::set_hvgl_atlas`]). On by default; takes effect from
+    /// the next frame.
+    pub fn set_hvgl_atlas(&mut self, enabled: bool) {
+        self.compiler.set_hvgl_atlas(enabled);
+    }
+
+    /// Whether runs of `hvgl`-only faces may take the glyph atlas.
+    #[must_use]
+    pub fn hvgl_atlas(&self) -> bool {
+        self.compiler.hvgl_atlas_enabled()
     }
 
     /// Sets the shortest paint-class run worth a pipeline switch of its own
