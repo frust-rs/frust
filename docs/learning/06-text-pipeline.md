@@ -20,9 +20,9 @@ and only the cheap half re-runs when your window resizes.
 | Line breaking over the shaped atoms (greedy), then `reorder`, `align`, truncation | `layout/break.rs` ≈87; `layout/reorder.rs`, `layout/align.rs`, `layout/truncate.rs` | |
 | `TextLayout::to_scene_runs()` — conversion to `GlyphRun`s + origin translate | `layout/mod.rs` | ≈503 |
 | Layout → `frust_scene::GlyphRun` coordinate contract | `convert.rs` | |
-| `GlyphRun` → `glifo` lowering inside the engine | `crates/frust-engine/src/text/mod.rs` | `lower_glyph_run` ≈277 |
+| `GlyphRun` → `glifo` lowering inside the engine | `crates/frust-engine/src/text/mod.rs` | `lower_glyph_run` ≈287 |
 | `TextEditor` (frust's own editing engine for `TextInput`/IME, over the same layout; no `PlainEditor`) | `editor/mod.rs` (+ `cursor.rs`, `selection.rs`, `compose.rs`) | ≈191 |
-| Where render meets text: GlyphRun compilation into strips + glyph atlas | `crates/frust-engine/src/compile/mod.rs` | `compile_glyph_run` ≈1874 |
+| Where render meets text: GlyphRun compilation into strips + glyph atlas | `crates/frust-engine/src/compile/mod.rs` | `compile_glyph_run` ≈2020 |
 | A widget using all of it: `Text`  | `crates/frust-widgets/src/text.rs` | |
 
 The purity rule holds here too: no `parley_engine` or `fontique` type escapes
@@ -62,15 +62,15 @@ cache boundary made visible in two counters.
 ### 6.3 — From glyphs to pixels
 
 Read `crates/frust-engine/src/compile/mod.rs`'s `compile_glyph_run` function
-(≈1874): the route for each run is one `route: Option<RunRoute>` —
+(≈2020): the route for each run is one `route: Option<RunRoute>` —
 exactly two variants (`crates/frust-engine/src/text/atlas_policy.rs`
-≈855–859): `RunRoute::Atlas(AtlasRun)` or `RunRoute::Outline(OutlineReason)`.
+≈979–985): `RunRoute::Atlas(AtlasRun)` or `RunRoute::Outline(OutlineReason)`.
 This route is decided once per run, per frame, by `classify_runs` in the
-collect phase (≈1765 in `compile/mod.rs`) and re-tested by `admit_run` when the
-run is drawn (`atlas_policy.rs` ≈1649, called from `take_run_route`, `compile/mod.rs` ≈1849); it can only narrow an Atlas
+collect phase (`classify_runs`, ≈1813 in `compile/mod.rs`) and re-tested by `admit_run` when the
+run is drawn (`atlas_policy.rs` ≈1849, called from `take_run_route`, `compile/mod.rs` ≈1995); it can only narrow an Atlas
 route to Outline, never the reverse. On an Atlas route, glyphs sample the glyph
 atlas, but a glyph the atlas had no room for still draws as an outline — so the
-pixel path differs per glyph (see `atlas_policy.rs` ≈683–686 and ≈713–715), not
+pixel path differs per glyph (see `AtlasPass::build`'s `unrasterizable` and `no_room` counts, `atlas_policy.rs` ≈2111 and ≈2126), not
 one route per run for every glyph. See [`15-engine-text.md`](15-engine-text.md)
 idea 1 for the route narrowing at draw time. An outline run does not leave the
 CPU as bare outlines and positions for the GPU to rasterize — glifo drives

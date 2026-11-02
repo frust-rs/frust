@@ -23,16 +23,16 @@ off this index — read this plus the one that covers what you are touching:
     `ANativeWindow*`/`CAMetalLayer*` into a `wgpu::Surface`; `frust-render` only forwards it.
   - `frust-shell-android`'s `jni_glue` and `frust-shell-ios`'s `ffi_glue` modules — the FFI boundary
     (`extern "system"`/`extern "C"` exports, `Box::into_raw`/`from_raw`, the surface hand-off,
-    `nativeInitPlatform`'s `JavaVM` stash), the `android_app!`/`ios_app!` generated exports, and the
+    `nativeInitPlatform`'s `JavaVM` stash), the `android_app!`/`ios_app!` exports, and the
     render-thread split's `unsafe impl Send` for `SendableWindowPtr`/`SendableMetalLayer` plus the
-    bare `libc` priority/QoS call kept for the `FRUST_NO_THREAD_TUNING` arm. Android's zone also
-    holds `prepare_overlays`'s one `OverlaySurface::new` call; iOS's holds `take_frame_overlays`'s
-    plus the `ios_app!`-emitted `frust_overlay_*` exports (`frust_overlay_take_released` writes
-    `count <= capacity` layer pointers into Swift's buffer). Every overlay `OverlaySurface::new`
-    site argues SAFETY from the shared `OverlayTable` order: a surface drops before its layer or
-    window is handed back. That is ordering and leak-freedom, not memory safety — wgpu-hal retains
-    the `CAMetalLayer` itself on Apple; on Android the table's held `ANativeWindow` reference keeps
-    the object valid past `surfaceDestroyed` (a late present fails, it does not touch freed memory).
+    bare `libc` priority/QoS call (`FRUST_NO_THREAD_TUNING` arm) and `sysctlbyname("hw.memsize")`.
+    Android's zone also holds `prepare_overlays`'s one `OverlaySurface::new` call; iOS's holds
+    `take_frame_overlays`'s plus the `ios_app!`-emitted `frust_overlay_*` exports
+    (`frust_overlay_take_released` writes `count <= capacity` layer pointers into Swift's buffer).
+    Each overlay `OverlaySurface::new` site argues SAFETY from the `OverlayTable` order: a surface
+    drops before its layer or window is returned. That is ordering and leak-freedom, not memory
+    safety — wgpu-hal retains the `CAMetalLayer` on Apple; on Android the table's `ANativeWindow`
+    reference keeps it valid past `surfaceDestroyed` (a late present fails safely).
     Android's `adpf::platform` holds the opt-in performance-hint `dlsym` binding (`libandroid.so`).
   - `frust-shell-desktop`'s `render.rs` (macOS only) — `build_overlay_surface`, one
     `OverlaySurface::new(.., OverlayTarget::CoreAnimationLayer(ptr), ..)` block under the same
