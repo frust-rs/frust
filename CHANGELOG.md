@@ -6,6 +6,31 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ## Unreleased
 
+### Added
+
+- `EngineRenderer::set_synthetic_oblique` / `synthetic_oblique` and `set_glyph_run_cache` /
+  `glyph_run_cache` forward the faux-oblique and resident-glyph-run-cache switches on the renderer,
+  matching `SceneCompiler`.
+- `frust_bench` gains the `weight_probe` scenario (faux-bold and faux-oblique rows on a static Noto
+  Sans subset). On a Pixel 5 (unhinted tier) weight 400 draws 15955 ink px and weight 700 draws 22300
+  (+39.8%); the italic rows stay upright with faux oblique off.
+- `skrifa` is a dev-dependency of `frust-engine` (test-only, from the root `[workspace.dependencies]`),
+  used by a probe of whether `glifo`'s hinting instance can be built per face.
+
+### Changed
+
+- `FontHandle::with_synthesis` clamps skew to +/-30 degrees and embolden to at most 0.5 em.
+- Faux-bold embolden is computed per side from the size-quantized basis at the route key, the
+  lowering and the resident plan, so the amount keyed and the amount drawn are the same bits.
+  Sub-quantum scale jitter can still mint `glifo` cache entries, because the size `glifo` keys is not
+  quantized.
+- Engine tests: `variable_route` uses calibrated magnitude bands, and the italic paragraph compile-cost
+  test counts draws instead of reading a wall clock.
+- Probe result: every bundled face yields a `skrifa` hinting instance at every engine size; two macOS
+  system faces do not, so a hinted faux-bold request on them is nearly invisible
+  (`text-hinted-faux-bold-unhintable-face`). Faux bold and faux oblique are not applied on the hvgl
+  route (`text-hvgl-synthesis-not-applied`). See [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
+
 ## 0.6.5 — 2026-11-02
 
 A patch release (the 0.6.x line continues) whose one source-affecting change is the removal of the

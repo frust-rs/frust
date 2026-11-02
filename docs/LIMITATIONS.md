@@ -8613,8 +8613,8 @@ result), and the cut is part of that pass.
 **Observed**: an italic request on a face with no italic or slant axis draws upright.
 `SceneCompiler::set_synthetic_oblique(true)` opts in, and skewed runs then never enter the glyph atlas or the
 resident-run cache: they draw as outlines every frame. Measured on scene S6 with an all-italic corpus
-(Apple M4), submit time rose from 0.38 ms to 1.88 ms per frame. `EngineRenderer` does not yet forward
-the switch, so the opt-in is engine-level only.
+(Apple M4), submit time rose from 0.38 ms to 1.88 ms per frame. ``EngineRenderer::set_synthetic_oblique`
+forwards the same switch on the renderer.
 
 **Applies to**: any target drawing italic text from a face without a real italic or slant axis.
 
@@ -8623,6 +8623,39 @@ the switch, so the opt-in is engine-level only.
 
 **Evidence**: Apple M4 S6 all-italic measurement; Pixel 5 faux-oblique probe rows leaned with the switch
 on; `crates/frust-engine/src/compile/mod.rs`.
+
+---
+
+### `text-hvgl-synthesis-not-applied` — faux bold and faux oblique are not drawn on the hvgl (CoreText) route
+
+**Observed**: embolden and skew synthesis are not applied on the `hvgl` route (Apple targets, faces such as
+PingFang whose outlines live only in an `hvgl` table). Weight on a variable hvgl face is carried by the handle's
+variation coordinates, so it does change. Only a non-variable hvgl face requested heavier than it is draws at
+its real weight.
+
+**Applies to**: Apple targets, `hvgl`-only faces without a weight axis.
+
+**Workaround**: use a face with a weight axis (the variable PingFang faces) or a real bold face; on the
+`glifo` route the synthesis is applied.
+
+**Evidence**: `crates/frust-engine/src/text/hvgl.rs` (`glyph_transform`, :248-255, is size / `unitsPerEm` only;
+the outline key in `HvglOutlines::outline`, :361-380, carries face, glyph id and variation instance, no synthesis).
+
+---
+
+### `text-hinted-faux-bold-unhintable-face` — a faux-bold request on a face skrifa cannot hint is almost invisible on the hinted tier
+
+**Observed**: on the hinted (desktop) tier a face whose hinting program `skrifa` rejects is drawn by `glifo` at
+`unitsPerEm`, while the faux-bold stroke is computed in device pixels, so the stroke comes out about 1/64 of the
+intended width. Every bundled face hints at every engine size; the unhintable set is two macOS system faces.
+
+**Applies to**: `/System/Library/Fonts/Supplemental/Brush Script.ttf` and `/System/Library/Fonts/Courier.ttc`
+member 2, when drawn hinted with a synthetic bold; the probe's `#[ignore]` macOS test pins the set.
+
+**Workaround**: use a real bold face or a variable weight axis.
+
+**Evidence**: `crates/frust-engine/tests/hint_instance_probe.rs`; the `embolden_basis` rustdoc in
+`crates/frust-engine/src/text/atlas_policy.rs`; follow-up act_000001a19c2219a9PDJpfDuS.
 
 ---
 
