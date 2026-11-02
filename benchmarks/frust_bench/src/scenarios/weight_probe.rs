@@ -8,8 +8,9 @@
 //! variation-coordinate weight axis. A device run counts ink per row band: the
 //! 700 rows must carry clearly more ink than the 400 rows.
 //!
-//! The sample is `Hello, hello`; the subset's cmap covers exactly space, `,`,
-//! `H`, `e`, `l`, `o` and `é`, so every glyph is real (no `.notdef` boxes).
+//! The sample is `Hello, Hello`; the subset's cmap covers exactly space, `,`,
+//! `H`, `e`, `l`, `o`, `é` and the combining circumflex U+0302, so every glyph in
+//! the sample is real (no `.notdef` boxes). No lowercase `h` is mapped.
 //!
 //! The font is compiled in and registered by [`register_font`], which
 //! `BenchState::new` calls from `BenchApp::init`: that runs before the shell's
@@ -31,7 +32,7 @@ const FONT: &[u8] = include_bytes!("../../../../testing/fonts/NotoSans-Subset.tt
 const FAMILY: &str = "Noto Sans";
 
 /// The sample string; every character is in the subset's cmap.
-const SAMPLE: &str = "Hello, hello";
+const SAMPLE: &str = "Hello, Hello";
 
 /// Glyph size in logical pixels.
 const SIZE: f32 = 44.0;
