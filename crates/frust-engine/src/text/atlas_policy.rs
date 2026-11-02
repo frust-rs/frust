@@ -114,9 +114,10 @@
 //! rather than making room. `glifo`'s LRU bounds residency only over its own 64-frame
 //! horizon, which a fast enough churn outruns. So the policy rations the
 //! quantity the two classes actually compete for — *texels* — and stops
-//! offering the atlas route once glyph residency would spend more than
-//! [`glyph_texel_budget`] of them ([`OutlineReason::ResidencyFull`]). Text keeps
-//! drawing; it draws as outlines until the LRU gives space back.
+//! offering the atlas route to a run that would *insert* once glyph residency
+//! would spend more than [`glyph_texel_budget`] of them
+//! ([`OutlineReason::ResidencyFull`]). Text keeps drawing; a run that would add
+//! entries draws as outlines until the LRU gives space back.
 //!
 //! The bound has to be *additive*, and that is the whole design constraint. A
 //! rule comparing the population's size to a per-size-class allowance is not:
@@ -170,6 +171,28 @@
 //! a paragraph repeating a letter two hundred times is two hundred draws and
 //! one entry, and charging it its draws would refuse steady-state text that is
 //! already entirely resident.
+//!
+//! # The budget refuses insertions, not service
+//!
+//! A run whose every glyph is already resident inserts nothing, so the budget
+//! has nothing to refuse it: it is served from the atlas whatever the running
+//! total says ([`AtlasRun::resident_only`]), and only a run that would add
+//! entries is refused. That hysteresis is what keeps a population larger than
+//! the share from thrashing. Charged a run's *distinct* ids, a paragraph whose
+//! glyphs land in several subpixel buckets can be admitted whole on its first
+//! frame and leave the population over the budget; refusing every run from
+//! there — resident ones included — would leave its entries unprobed, the LRU
+//! would reap them, and the next frame would admit and rasterize the whole
+//! paragraph again, every eviction period, for as long as it stays on screen.
+//!
+//! The question is asked only once the budget has refused, so a population
+//! under its share never pays for it, and it is asked of the keys `glifo`
+//! itself probes first, so a run answered resident cannot insert (see
+//! `AtlasPolicy::every_glyph_resident`). A population over the budget still
+//! shrinks: eviction is untouched, so whatever stops being drawn is reaped on
+//! the next pass and discharged from the total, and the space it frees is what
+//! re-admits the runs the budget refused meanwhile.
+//! [`AtlasPolicy::over_budget_runs`] counts the runs a frame served this way.
 //!
 //! # A page this tier cannot replay must never have been cached
 //!
@@ -601,18 +624,24 @@ pub(crate) fn embolden_per_side(fraction: f32, basis: f32) -> f32 {
 /// `basis` (see [`embolden_basis`]) snapped to the [`SIZE_QUANTUM`] grid first.
 ///
 /// The one place the per-side amount is computed: the route key
-/// ([`RunIdentity::for_run_with`]), the lowering and the resident plan all call
-/// it, so the amount in the key, the amount `glifo` keys on and the amount
-/// drawn are the same bits. Quantizing only the key would desynchronize it from
-/// the stroke, so all three move together.
+/// ([`RunKey::for_run_with`]), the lowering and the resident plan all call it,
+/// so the amount in the route key, the amount `glifo` keys on and draws, and
+/// the amount the resident identity carries are the same bits. That agreement
+/// is what the quantization guarantees: the frust-side keys and the drawn
+/// stroke cannot drift apart, and the over-budget residency probe
+/// ([`AtlasPolicy::classify_run`]) and the resident-run cache both find the
+/// entries `glifo` inserted. Quantizing only one site would desynchronize it
+/// from the others, so all three move together.
 ///
-/// This deliberately deviates from `glifo` 0.3.0, whose cache key carries the
-/// raw size (`key.rs`): sub-quantum scale jitter would otherwise mint a new
-/// embolden value, and a new cache entry, for an unchanged quantized size. The
-/// price is a stroke off by at most half a quantum of basis times
-/// `fraction / 2` per side (`0.125 * fraction / 2`, about 0.003 px for the
-/// usual 0.05 em bold). An unhinted basis is the face's `upem`, already on the
-/// grid. A basis that cannot be quantized yields no embolden.
+/// It does *not* stop `glifo` minting entries under sub-quantum scale jitter:
+/// `glifo` 0.3.0 keys the raw size (`key.rs`, `size_bits`), which moves with
+/// the hinted basis anyway, so a jittered frame keys fresh entries whether the
+/// stroke is quantized or not. Quantizing the size `glifo` keys is a separate,
+/// pixel-changing decision. The price of quantizing the stroke is a stroke off
+/// by at most half a quantum of basis times `fraction / 2` per side
+/// (`0.125 * fraction / 2`, about 0.003 px for the usual 0.05 em bold). An
+/// unhinted basis is the face's `upem`, already on the grid. A basis that
+/// cannot be quantized yields no embolden.
 #[must_use]
 pub(crate) fn synthesis_embolden(fraction: f32, basis: f32) -> f32 {
     quantize_font_size(basis).map_or(0.0, |basis| embolden_per_side(fraction, basis))
@@ -798,7 +827,9 @@ pub(crate) enum OutlineReason {
     ColorFont,
     /// Admitting this run would take glyph residency past
     /// [`glyph_texel_budget`], so its entries would be taken out of the images'
-    /// share of the shared allocator.
+    /// share of the shared allocator — and at least one of its glyphs is not
+    /// resident yet, so drawing it would insert. A run whose every glyph is
+    /// already resident is never refused for this (see this module's doc).
     ResidencyFull,
     /// Asked outside the frame's collect phase, so there was nothing to collect
     /// into (see this module's doc).
@@ -831,6 +862,13 @@ pub(crate) struct AtlasRun {
     /// same question the collect phase asked. A *routing* quantity, not part of
     /// the identity: [`AtlasRun::key`] never reads it.
     distinct_glyphs: u32,
+    /// Whether the run was admitted *over* the budget because every one of its
+    /// glyphs was already resident when it was classified, so drawing it
+    /// inserts nothing (see [`AtlasPolicy::classify_run`]). A *routing*
+    /// quantity like `distinct_glyphs`: [`AtlasPolicy::admit_run`] does not
+    /// re-test such a run against the budget, and [`AtlasRun::key`] never
+    /// reads it.
+    resident_only: bool,
     /// Whether the run's outlines are hinted.
     hinted: bool,
     /// The variation coordinates and faux-bold stroke the run is drawn with.
@@ -853,6 +891,13 @@ impl AtlasRun {
     #[must_use]
     pub(crate) fn distinct_glyphs(&self) -> u32 {
         self.distinct_glyphs
+    }
+
+    /// Whether this run was admitted over the budget on the strength of every
+    /// glyph already being resident.
+    #[must_use]
+    pub(crate) fn resident_only(&self) -> bool {
+        self.resident_only
     }
 
     /// The cache key for `glyph_id` drawn at horizontal fraction
@@ -976,14 +1021,15 @@ impl AtlasPass {
 /// The run identity a caller hands [`AtlasPolicy::classify_run`], before
 /// quantization.
 ///
-/// Three of its fields are *routing* inputs rather than parts of the identity —
-/// [`transform`](Self::transform), [`color_font`](Self::color_font) and
-/// [`distinct_glyphs`](Self::distinct_glyphs). They live here because the route
-/// is decided in one call from one value, and none of them reaches a cache key:
-/// an [`AtlasRun`] carries only what [`AtlasRun::key`] hashes, plus the demand
-/// [`AtlasPolicy::admit_run`] has to re-ask with.
+/// Four of its fields are *routing* inputs rather than parts of the identity —
+/// [`transform`](Self::transform), [`color_font`](Self::color_font),
+/// [`distinct_glyphs`](Self::distinct_glyphs) and [`glyphs`](Self::glyphs).
+/// They live here because the route is decided in one call from one value, and
+/// none of them reaches a cache key: an [`AtlasRun`] carries only what
+/// [`AtlasRun::key`] hashes, plus the demand [`AtlasPolicy::admit_run`] has to
+/// re-ask with.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct RunKey {
+pub(crate) struct RunKey<'g> {
     /// The font blob's process-unique id (`peniko::Blob::id`).
     pub(crate) font_id: u64,
     /// Index within a font collection.
@@ -1022,9 +1068,15 @@ pub(crate) struct RunKey {
     /// Whether the run is synthetically obliqued: a *routing* input, which
     /// sends it to outlines.
     pub(crate) oblique: bool,
+    /// The run's glyphs, as the display list placed them: a *routing* input,
+    /// read only once glyph residency has spent its budget, to ask whether
+    /// every glyph of the run is already resident and the run would insert
+    /// nothing (see [`AtlasPolicy::classify_run`]). Empty proves nothing, so a
+    /// run carrying none is never served over the budget.
+    pub(crate) glyphs: &'g [frust_scene::Glyph],
 }
 
-impl RunKey {
+impl<'g> RunKey<'g> {
     /// The identity a display-list run is cached under.
     ///
     /// The font identity is the blob's own process-unique id and its collection
@@ -1058,7 +1110,7 @@ impl RunKey {
     /// [`DistinctGlyphs`]).
     #[must_use]
     pub(crate) fn for_run_with(
-        run: &frust_scene::GlyphRun,
+        run: &'g frust_scene::GlyphRun,
         transform: Affine,
         hinted: bool,
         color_font: bool,
@@ -1084,6 +1136,7 @@ impl RunKey {
             context_color,
             synthesis: Synthesis::new(run.font.normalized_coords(), embolden),
             oblique,
+            glyphs: &run.glyphs,
         }
     }
 
@@ -1091,7 +1144,7 @@ impl RunKey {
     /// oblique, which needs neither the face's units-per-em nor the switch.
     #[cfg(test)]
     pub(crate) fn for_run(
-        run: &frust_scene::GlyphRun,
+        run: &'g frust_scene::GlyphRun,
         transform: Affine,
         hinted: bool,
         color_font: bool,
@@ -1297,6 +1350,15 @@ pub(crate) struct AtlasPolicy {
     /// Glyph runs whose every glyph is resident, remembered with their slots so
     /// a later frame can draw them without handing the run to `glifo`.
     resident: ResidentRuns,
+    /// Scratch for the placed glyphs of a run whose residency is being asked
+    /// over the budget (see [`classify_run`](Self::classify_run)), reused
+    /// across runs so the question allocates nothing of its own.
+    placed: Vec<PlacedGlyph>,
+    /// Runs this frame admitted over the budget because every glyph was
+    /// already resident — the hysteresis at work. Reset by
+    /// [`begin_frame`](Self::begin_frame); see
+    /// [`over_budget_runs`](Self::over_budget_runs).
+    over_budget_runs: u32,
     /// This frame's counters for the `frust-perf enc` line.
     #[cfg(feature = "perf-trace")]
     trace: AtlasTrace,
@@ -1368,6 +1430,8 @@ impl AtlasPolicy {
             phase: Phase::Idle,
             last_eviction_serial: 0,
             resident: ResidentRuns::default(),
+            placed: Vec::new(),
+            over_budget_runs: 0,
             #[cfg(feature = "perf-trace")]
             trace: AtlasTrace::default(),
         }
@@ -1472,6 +1536,20 @@ impl AtlasPolicy {
         self.resident_texels
     }
 
+    /// How many runs the frame in progress (or the one most recently compiled)
+    /// was served from the atlas *over* the budget, because every one of
+    /// their glyphs was already resident.
+    ///
+    /// Beside [`AtlasPass::no_room`] and [`AtlasPass::unrasterizable`] rather
+    /// than folded into either: those count glyphs the atlas could not take,
+    /// this counts runs it kept serving while the population sat above its
+    /// share. Non-zero is a resident population larger than the budget —
+    /// draining by LRU, never thrashing (see this module's doc).
+    #[must_use]
+    pub(crate) fn over_budget_runs(&self) -> u32 {
+        self.over_budget_runs
+    }
+
     /// Whether page commands are still waiting to be replayed into the atlas.
     ///
     /// The gate a caller drives its render-to-atlas pass from. Deliberately not
@@ -1538,6 +1616,7 @@ impl AtlasPolicy {
         // this frame's own count rather than the process's.
         self.misses_at_frame_start = self.atlas.cache_misses();
         self.probe_misses = 0;
+        self.over_budget_runs = 0;
         #[cfg(feature = "perf-trace")]
         {
             self.trace.run_keys.clear();
@@ -1634,7 +1713,14 @@ impl AtlasPolicy {
         // only one this walk cannot answer conclusively, since nothing is
         // inserted until the run is drawn. [`admit_run`](Self::admit_run) asks
         // it again against the population as it really stands.
-        if self.would_overspend(size, run.distinct_glyphs) {
+        //
+        // The budget refuses *insertions*, not service: a run whose every
+        // glyph is already resident inserts nothing, so it is served from the
+        // atlas whatever the running total says (see this module's doc), and
+        // the residency question is asked only once the budget has refused —
+        // a population under its share never pays for it.
+        let resident_only = self.would_overspend(size, run.distinct_glyphs);
+        if resident_only && !self.every_glyph_resident(run, synthesis) {
             return RunRoute::Outline(OutlineReason::ResidencyFull);
         }
 
@@ -1643,6 +1729,7 @@ impl AtlasPolicy {
             font_index: run.font_index,
             size,
             distinct_glyphs: run.distinct_glyphs,
+            resident_only,
             hinted: run.hinted,
             synthesis,
             context_color: run.context_color,
@@ -1679,19 +1766,130 @@ impl AtlasPolicy {
     /// inserts a run's glyphs as it draws them, so every entry appearing
     /// between two of these calls belongs to the run the previous one let
     /// through.
+    ///
+    /// A run the collect phase admitted [`resident_only`](AtlasRun::resident_only)
+    /// is passed through untested: every glyph it draws was resident when it
+    /// was classified, and nothing between the two walks evicts (only
+    /// [`end_frame`](Self::end_frame) does), so it inserts nothing however the
+    /// total stands. One the collect phase admitted *under* the budget and the
+    /// frame's own insertions have since pushed over is narrowed like any
+    /// other, resident or not — its glyphs were never asked about — and is
+    /// served resident-only from the next frame, when the collect phase opens
+    /// over the budget and asks.
     #[must_use]
     pub(crate) fn admit_run(&mut self, route: RunRoute) -> RunRoute {
         self.charge_admissions();
         match route {
-            RunRoute::Atlas(run) if self.would_overspend(run.size(), run.distinct_glyphs()) => {
+            RunRoute::Atlas(run)
+                if !run.resident_only()
+                    && self.would_overspend(run.size(), run.distinct_glyphs()) =>
+            {
                 RunRoute::Outline(OutlineReason::ResidencyFull)
             }
             RunRoute::Atlas(run) => {
+                // Latched for a resident-only run too: it is expected to insert
+                // nothing, and anything it did insert belongs to it.
                 self.admitting_size = run.size();
+                if run.resident_only() {
+                    self.over_budget_runs = self.over_budget_runs.saturating_add(1);
+                }
                 RunRoute::Atlas(run)
             }
             route => route,
         }
+    }
+
+    /// Whether every glyph `run` draws is resident in the bucket it lands in
+    /// this frame, so drawing it through `glifo` — or out of the resident-run
+    /// cache — inserts nothing.
+    ///
+    /// Asked of the keys `glifo` probes first for an outline glyph
+    /// ([`outline_key`]): the run's absorbed size exactly as `glifo` computes
+    /// it ([`drawn_font_size`]), its hinting and `synthesis`, the subpixel
+    /// bucket of each glyph's device origin ([`glyph_bucket`]), black as the
+    /// context colour. A glyph whose key misses is one `glifo` would insert, so
+    /// a single miss answers `false`. An answer of `true` is therefore never
+    /// optimistic: every key `glifo` will look up hit a moment ago, and nothing
+    /// is evicted before the run is drawn. The other direction is allowed to
+    /// err — a run `glifo` resolves through keys this does not build (a face it
+    /// cannot hint) reads as not resident and stays on outlines, the route it
+    /// had before this question existed.
+    ///
+    /// The run's resident-run record answers first where it can: a slot it
+    /// already holds for a glyph's bucket is the glyph's for as long as the
+    /// record exists (see [`ResidentRuns`]), so a run on screen frame after
+    /// frame is answered with one array read per glyph and no probe at all. A
+    /// glyph the record has no slot for is probed in `glifo`'s map, and the
+    /// slot found is kept in the record exactly as the draw phase's own probe
+    /// would keep it. A run with no record — the cache off, or the run too
+    /// large to remember — is probed glyph by glyph. A refused record is a run
+    /// `glifo` was seen resolving through other keys, so it is not probed.
+    ///
+    /// A probe that misses is counted with the resident cache's own
+    /// ([`probe_misses`](Self::probe_misses)): it is a lookup and nothing else,
+    /// and leaves no work in `glifo`'s queues.
+    fn every_glyph_resident(&mut self, run: &RunKey<'_>, synthesis: Synthesis) -> bool {
+        if run.glyphs.is_empty() {
+            return false;
+        }
+        let identity = ResidentIdentity {
+            font_id: run.font_id,
+            font_index: run.font_index,
+            size: drawn_font_size(run.font_size, run.transform),
+            hinted: run.hinted,
+            synthesis,
+        };
+        let mut placed = std::mem::take(&mut self.placed);
+        placed.clear();
+        placed.extend(run.glyphs.iter().map(|glyph| PlacedGlyph {
+            id: glyph.id,
+            bucket: glyph_bucket(run.transform, glyph),
+        }));
+        let resident = self.placed_glyphs_resident(identity, &placed);
+        self.placed = placed;
+        resident
+    }
+
+    /// [`every_glyph_resident`](Self::every_glyph_resident)'s probe, over the
+    /// run's glyphs already placed into their buckets.
+    fn placed_glyphs_resident(
+        &mut self,
+        identity: ResidentIdentity,
+        placed: &[PlacedGlyph],
+    ) -> bool {
+        let black = self.resident.black;
+        let hash = run_hash(&identity, placed);
+        let mut record = self
+            .resident
+            .runs
+            .get_mut(&hash)
+            .filter(|record| record.matches(&identity, placed));
+        if record.as_ref().is_some_and(|record| record.refused) {
+            return false;
+        }
+        for (index, glyph) in placed.iter().enumerate() {
+            let bucket = usize::from(glyph.bucket);
+            let known = record
+                .as_ref()
+                .and_then(|record| record.glyphs.get(index))
+                .and_then(|known| known.slots.get(bucket).copied().flatten());
+            if known.is_some() {
+                continue;
+            }
+            let key = outline_key(&identity, glyph.id, glyph.bucket, black);
+            let Some(slot) = self.atlas.get(&key) else {
+                self.probe_misses = self.probe_misses.saturating_add(1);
+                return false;
+            };
+            if let Some(known) = record
+                .as_mut()
+                .and_then(|record| record.glyphs.get_mut(index))
+                .and_then(|known| known.slots.get_mut(bucket))
+            {
+                *known = Some(slot);
+            }
+        }
+        true
     }
 
     /// Whether admitting `entries` further glyphs of device size `size` would
@@ -2196,6 +2394,24 @@ pub(crate) fn subpixel_bucket(fractional_x: f32) -> u8 {
     // In `0.0..=4.0` (or NaN, which converts to zero) by construction.
     let bucket = (normalized * f32::from(SUBPIXEL_BUCKETS)).round() as u8;
     bucket.min(SUBPIXEL_BUCKETS - 1)
+}
+
+/// The subpixel bucket `glifo` keys `glyph` under when its run is drawn under
+/// the device transform `transform` — the [`subpixel_bucket`] of the
+/// horizontal fraction of the glyph's device origin.
+///
+/// For a transform `glifo` absorbs ([`absorbed_scale`], the only kind a cached
+/// run has), that origin's horizontal coordinate is `transform` applied to the
+/// glyph's position: `glifo` (and `crate::text`'s `ResidentPlan::origin`,
+/// which restates it) maps the position through the transform's linear part
+/// and then adds the transform's translation, which is the same two products
+/// and two sums in an order IEEE addition cannot tell apart. Pinned against
+/// that restatement by `the_bucket_of_a_placed_glyph_is_the_resident_plans`.
+#[must_use]
+pub(crate) fn glyph_bucket(transform: Affine, glyph: &frust_scene::Glyph) -> u8 {
+    let origin = transform * kurbo::Point::new(f64::from(glyph.x), f64::from(glyph.y));
+    // `glifo` keys the fraction of the f64 origin, narrowed.
+    subpixel_bucket(origin.x.fract() as f32)
 }
 
 /// The most glyph runs the resident-run cache remembers at once.
@@ -2708,6 +2924,63 @@ mod resident_run_tests {
         }
     }
 
+    /// The bucket the over-budget residency probe places a glyph in is the
+    /// one the resident plan (`crate::text::ResidentPlan::origin`) places it
+    /// in, which restates `glifo`'s own origin arithmetic. The plan's chain is
+    /// written out here operation for operation — this module is also compiled
+    /// into an integration test, where `crate::text` cannot be named — over
+    /// absorbable transforms with fractional translations and scales, hinted
+    /// and not, and the origins must agree bit for bit, not merely in bucket.
+    #[test]
+    fn the_bucket_of_a_placed_glyph_is_the_resident_plans() {
+        use kurbo::{Point, Vec2};
+
+        let transforms = [
+            Affine::IDENTITY,
+            Affine::translate((3.25, 40.0)),
+            Affine::translate((0.1, -7.3)) * Affine::scale(2.0),
+            Affine::scale(3.0) * Affine::translate((2.0, 20.0)),
+            Affine::translate((8.0, 44.0)) * Affine::scale(2.001),
+            Affine::scale(2.75) * Affine::translate((-1.37, 5.5)),
+            // A skew inside `glifo`'s tolerance is still absorbed.
+            Affine::new([2.0, 0.0, 1.0 / 8192.0, 2.0, 0.3, 0.7]),
+        ];
+        for transform in transforms {
+            assert!(absorbed_scale(transform).is_some(), "{transform:?}");
+            let [_, _, t_c, t_d, t_e, t_f] = (transform * Affine::IDENTITY).as_coeffs();
+            for hinted in [false, true] {
+                let effective = if hinted {
+                    Affine::new([1.0, 0.0, t_c / t_d, 1.0, t_e, t_f])
+                } else {
+                    Affine::new([1.0, 0.0, 0.0, 1.0, t_e, t_f])
+                };
+                let positioning = transform.with_translation(Vec2::ZERO);
+                for step in -300_i32..300 {
+                    let glyph = frust_scene::Glyph {
+                        id: 3,
+                        x: step as f32 * 1.37 + 0.11,
+                        y: (step % 7) as f32 * 0.5,
+                    };
+                    let translation =
+                        positioning * Point::new(f64::from(glyph.x), f64::from(glyph.y));
+                    let planned = (Affine::translate(translation.to_vec2()) * effective)
+                        .pre_scale_non_uniform(1.0, -1.0)
+                        .as_coeffs()[4];
+                    let ours = transform * Point::new(f64::from(glyph.x), f64::from(glyph.y));
+                    assert_eq!(
+                        ours.x.to_bits(),
+                        planned.to_bits(),
+                        "{transform:?} hinted={hinted} glyph {glyph:?}"
+                    );
+                    assert_eq!(
+                        glyph_bucket(transform, &glyph),
+                        subpixel_bucket(planned.fract() as f32)
+                    );
+                }
+            }
+        }
+    }
+
     /// A resident-run probe that misses is a lookup and nothing more: it is
     /// not one of the frame's misses, which stand for work `glifo` left
     /// recorded — the lookup `glifo` then makes for the same glyph is.
@@ -2828,8 +3101,7 @@ mod resident_run_tests {
         assert!(Synthesis::new(&[0; MAX_KEYED_AXES + 1], 0.0).is_none());
     }
 
-    /// A hinted run's stroke is measured in drawn pixels, an unhinted one's
-    /// in font units, oblique or not.
+    /// Two device sizes inside one quantum give the same embolden bits.
     #[test]
     fn embolden_is_identical_for_device_sizes_inside_one_quantum() {
         let a = synthesis_embolden(0.05, 32.01);
@@ -2848,6 +3120,8 @@ mod resident_run_tests {
         );
     }
 
+    /// A hinted run's stroke is measured in drawn pixels, an unhinted one's
+    /// in font units, oblique or not.
     #[test]
     fn the_embolden_basis_is_the_drawn_size_hinted_and_upem_unhinted() {
         let twice = Affine::scale(2.0);
@@ -2894,7 +3168,7 @@ mod trace_tests {
         })
     }
 
-    fn run_key() -> RunKey {
+    fn run_key() -> RunKey<'static> {
         RunKey {
             font_id: 0x7ace_0001,
             font_index: 0,
@@ -2904,6 +3178,9 @@ mod trace_tests {
             hinted: false,
             color_font: false,
             context_color: AlphaColor::<Srgb>::new([0.0, 0.0, 0.0, 1.0]),
+            synthesis: Some(Synthesis::NONE),
+            oblique: false,
+            glyphs: &[],
         }
     }
 
@@ -2959,7 +3236,7 @@ mod settle_tests {
     use super::*;
     use vello_common::multi_atlas::AllocationStrategy;
 
-    fn run_key(size: f32) -> RunKey {
+    fn run_key(size: f32) -> RunKey<'static> {
         RunKey {
             font_id: 0x5e77_1e01,
             font_index: 0,
@@ -2971,6 +3248,7 @@ mod settle_tests {
             context_color: AlphaColor::<Srgb>::new([0.0, 0.0, 0.0, 1.0]),
             synthesis: Some(Synthesis::NONE),
             oblique: false,
+            glyphs: &[],
         }
     }
 
