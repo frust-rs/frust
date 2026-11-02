@@ -1,6 +1,7 @@
 //! `Base`-design animation cases — one per
 //! `apps/website/widgets/base/animation/*.mdx` page:
-//! `animated-opacity`, `animated-scale`, `pattern-switcher`, `physics`.
+//! `animated-opacity`, `animated-scale`, `pattern-switcher`, `physics`,
+//! `card-switcher`.
 //!
 //! # Why every frame here is a settled/steady-state frame
 //!
@@ -54,6 +55,12 @@
 //! overflowing content to show the surface it governs, rather than the
 //! (nonexistent) physics itself.
 //!
+//! `card-switcher` is the one case here whose single build *is* its settled
+//! frame for a reason of its own: [`card_switcher`] mounted already `open`
+//! does not animate in (its stage ramp is seeded at the mount state), so the
+//! recorded frame at [`Case::DEFAULT_TIME_MS`] is the settled open stage, with
+//! no warm pass and no entry in `WARM_PASS_OPT_INS`.
+//!
 //! Every case takes its frame from [`super::framed`], which sizes without
 //! filling, and keeps its animated card smaller than that frame — so the
 //! recorder's per-variant `surface` clear stays visible around it (see
@@ -62,11 +69,15 @@
 use frust_core::View;
 use frust_widgets::motion::patterns::FadeThrough;
 use frust_widgets::motion::switcher::pattern_switcher;
-use frust_widgets::motion::{animated_opacity, animated_scale};
-use frust_widgets::{Bouncing, Column, SizedBox, container, scroll_view, text};
+use frust_widgets::motion::{animated_opacity, animated_scale, card_switcher, peer_card};
+use frust_widgets::{
+    Align, Alignment, Bouncing, Column, CrossAxisAlignment, SizedBox, button, column, container,
+    scroll_view, text,
+};
+use kurbo::Size;
 use peniko::Color;
 
-use super::framed;
+use super::{framed, framed_in};
 use crate::case::{Case, Design, case_build};
 
 /// The viewport the `physics` case's `scroll_view` is boxed into. A
@@ -143,6 +154,78 @@ fn physics_case() -> impl View<()> {
     )
 }
 
+/// The `card-switcher` frame: taller than [`Case::DEFAULT_SIZE`] so the live
+/// page reads as a phone screen and its shrunk card keeps a page's
+/// proportions.
+const SWITCHER_FRAME: Size = Size::new(360.0, 320.0);
+
+/// Ink for the `card-switcher` page faces, painted on their fixed swatches.
+const FACE_INK: Color = Color::from_rgb8(0x1F, 0x29, 0x37);
+
+/// The `card-switcher` pages, `(title, subtitle, swatch)`, in strip order.
+const FACES: [(&str, &str, Color); 3] = [
+    ("Inbox", "3 unread", Color::from_rgb8(0xBF, 0xDB, 0xFE)),
+    (
+        "Calendar",
+        "Stand-up at 10:00",
+        Color::from_rgb8(0xBB, 0xF7, 0xD0),
+    ),
+    (
+        "Notes",
+        "Last edited today",
+        Color::from_rgb8(0xFE, 0xF3, 0xC7),
+    ),
+];
+
+/// The strip position of the live page: the middle one, so a peer peeks in on
+/// each side.
+const LIVE_FACE: usize = 1;
+
+/// One page face: its title and subtitle centred on its swatch. Faces fill
+/// whatever they are given, which for the stage is the full frame.
+fn face(index: usize) -> impl View<()> {
+    let (title, subtitle, swatch) = FACES[index];
+    container(Align(
+        Alignment::CENTER,
+        column()
+            .child(text(title).size(22.0).color(FACE_INK))
+            .child(SizedBox(None, Some(6.0)))
+            .child(text(subtitle).size(14.0).color(FACE_INK))
+            .cross_axis(CrossAxisAlignment::Center),
+    ))
+    .fill(swatch)
+}
+
+/// The live page: the middle face plus the button that would open the
+/// switcher (the live twin in `crate::interactive::base` wires it).
+fn live_page() -> impl View<()> {
+    let (title, subtitle, swatch) = FACES[LIVE_FACE];
+    container(Align(
+        Alignment::CENTER,
+        column()
+            .child(text(title).size(22.0).color(FACE_INK))
+            .child(SizedBox(None, Some(6.0)))
+            .child(text(subtitle).size(14.0).color(FACE_INK))
+            .child(SizedBox(None, Some(16.0)))
+            .child(button("Switch page", |_: &mut ()| {}))
+            .cross_axis(CrossAxisAlignment::Center),
+    ))
+    .fill(swatch)
+}
+
+/// `card_switcher`, open: the live page shrunk into the centred card over the
+/// scrim, with a peer card peeking in on each side.
+fn card_switcher_case() -> impl View<()> {
+    framed_in(
+        SWITCHER_FRAME,
+        SizedBox(Some(SWITCHER_FRAME.width), Some(SWITCHER_FRAME.height)).child(
+            card_switcher(true, live_page())
+                .peers([peer_card(face(0)), peer_card(face(2))])
+                .live_index(LIVE_FACE),
+        ),
+    )
+}
+
 /// This module's slice of the registry [`crate::cases`] concatenates.
 pub const CASES: &[Case] = &[
     Case {
@@ -180,5 +263,14 @@ pub const CASES: &[Case] = &[
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Base,
         build: case_build!(physics_case),
+    },
+    Case {
+        slug: "card-switcher",
+        title: "card_switcher",
+        size: SWITCHER_FRAME,
+        scale: Case::DEFAULT_SCALE,
+        time_ms: Case::DEFAULT_TIME_MS,
+        design: Design::Base,
+        build: case_build!(card_switcher_case),
     },
 ];

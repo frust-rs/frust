@@ -790,6 +790,10 @@ mod tests {
                 && lib_rs.contains("\"My App\""),
             "{lib_rs}"
         );
+        assert!(lib_rs.contains("struct AppState"), "{lib_rs}");
+        assert!(lib_rs.contains("type State = AppState"), "{lib_rs}");
+        assert!(lib_rs.contains("state.count += 1"), "{lib_rs}");
+        assert!(!lib_rs.contains("app_bar::<"), "{lib_rs}");
         assert!(!lib_rs.contains("mod home_page"), "{lib_rs}");
         assert!(!dest.join("src/home_page.rs").exists());
         assert!(!lib_rs.contains("app_logic"), "{lib_rs}");

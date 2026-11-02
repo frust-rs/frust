@@ -1,7 +1,8 @@
 # Lab 6 — Text: String → Glyphs (`frust-text`)
 
 **Concept:** Text is the pipeline's side road: a string is *shaped* (font
-matching, ligatures, bidi — Parley's job), *line-broken* to a width, then
+matching through frust's own font oracle, ligatures and bidi through
+`parley_engine`), *line-broken* to a width by frust's own line layout, then
 flattened into the positioned `GlyphRun`s you met in chapter 1. Frust's one
 big trick here is a cache boundary: shaping is width-independent and
 expensive; line-breaking is width-dependent and cheap — so they're split,
@@ -11,24 +12,27 @@ and only the cheap half re-runs when your window resizes.
 
 | Thing | File | Anchor |
 |---|---|---|
-| `TextContext::layout(text, style, max_width)` — the entry | `context.rs` | ≈356 |
-| The Parley shaping call (`ranged_builder` → `builder.build(text)`) | `context.rs` | ≈372 |
-| Shape cache — 128-entry LRU, keyed `(text, style)` — **no width in the key** | `shape_cache.rs` | ≈10–226 |
-| `ShapeCacheStats { shapes, line_breaks, hits, evictions }` | `shape_cache.rs` ≈33; exposed at `context.rs` ≈672 |
-| `TextLayout::to_scene_runs()` — memoized conversion + origin re-translate | `layout.rs` | ≈89 |
-| Parley layout → `frust_scene::GlyphRun` lowering | `crates/frust-engine/src/text/mod.rs` | `lower_glyph_run` ≈188 |
-| `TextEditor` (Parley `PlainEditor` wrapper for `TextInput`/IME) | `editor.rs` | ≈160–287 |
-| Where render meets text: GlyphRun compilation into strips + glyph atlas | `crates/frust-engine/src/compile/mod.rs` | `compile_glyph_run` ≈1514 |
+| `TextContext::layout(text, style, max_width)` — the entry | `context.rs` | ≈378 |
+| Font oracle — per-cluster OS fallback, one backend per OS (`apple.rs`, `fontconfig.rs`, …) | `oracle/mod.rs` | |
+| The shaping call: `ShapeContext::shape(oracle, text, style)` → width-independent `Shaped`, via `parley_engine` | `shape/mod.rs` | ≈303 |
+| Shape cache — 128-entry LRU (`DEFAULT_CAPACITY`), keyed `ShapeKey` (text + style) — **no width in the key** | `shape_cache.rs` | ≈31, ≈68, ≈241 |
+| `ShapeCacheStats { shapes, line_breaks, hits, evictions }` | `shape_cache.rs` ≈39; exposed by `shape_cache_stats` at `context.rs` ≈489 |
+| Line breaking over the shaped atoms (greedy), then `reorder`, `align`, truncation | `layout/break.rs` ≈87; `layout/reorder.rs`, `layout/align.rs`, `layout/truncate.rs` | |
+| `TextLayout::to_scene_runs()` — conversion to `GlyphRun`s + origin translate | `layout/mod.rs` | ≈503 |
+| Layout → `frust_scene::GlyphRun` coordinate contract | `convert.rs` | |
+| `GlyphRun` → `glifo` lowering inside the engine | `crates/frust-engine/src/text/mod.rs` | `lower_glyph_run` ≈277 |
+| `TextEditor` (frust's own editing engine for `TextInput`/IME, over the same layout; no `PlainEditor`) | `editor/mod.rs` (+ `cursor.rs`, `selection.rs`, `compose.rs`) | ≈191 |
+| Where render meets text: GlyphRun compilation into strips + glyph atlas | `crates/frust-engine/src/compile/mod.rs` | `compile_glyph_run` ≈1874 |
 | A widget using all of it: `Text`  | `crates/frust-widgets/src/text.rs` | |
 
-The purity rule holds here too: no Parley type escapes `frust-text`
-(`lib.rs` module doc). Widgets see `TextStyle` in, `GlyphRun` out.
+The purity rule holds here too: no `parley_engine` or `fontique` type escapes
+`frust-text` (`lib.rs` exports and module doc; only `shape/` names the engine). Widgets see `TextStyle` in, `GlyphRun` out.
 
 ## Experiments
 
 ### 6.1 — Shape text with no GPU, no window
 
-`crates/frust-text/tests/emoji.rs` (≈54–116) is a complete standalone
+`crates/frust-text/tests/emoji.rs` (≈56–128) is a complete standalone
 pipeline run: `TextContext::new()` → `layout(..)` → `to_scene_runs()` →
 assertions on glyph IDs and advances.
 
@@ -58,12 +62,12 @@ cache boundary made visible in two counters.
 ### 6.3 — From glyphs to pixels
 
 Read `crates/frust-engine/src/compile/mod.rs`'s `compile_glyph_run` function
-(≈1514–1591): the route for each run is one `route: Option<RunRoute>` —
+(≈1874): the route for each run is one `route: Option<RunRoute>` —
 exactly two variants (`crates/frust-engine/src/text/atlas_policy.rs`
-≈650–655): `RunRoute::Atlas(AtlasRun)` or `RunRoute::Outline(OutlineReason)`.
+≈855–859): `RunRoute::Atlas(AtlasRun)` or `RunRoute::Outline(OutlineReason)`.
 This route is decided once per run, per frame, by `classify_runs` in the
-collect phase (≈1413 in `compile/mod.rs`) and re-tested by `admit_run` when the
-run is drawn (≈1492, called from `take_run_route`); it can only narrow an Atlas
+collect phase (≈1765 in `compile/mod.rs`) and re-tested by `admit_run` when the
+run is drawn (`atlas_policy.rs` ≈1649, called from `take_run_route`, `compile/mod.rs` ≈1849); it can only narrow an Atlas
 route to Outline, never the reverse. On an Atlas route, glyphs sample the glyph
 atlas, but a glyph the atlas had no room for still draws as an outline — so the
 pixel path differs per glyph (see `atlas_policy.rs` ≈683–686 and ≈713–715), not
@@ -90,7 +94,7 @@ context where this contract earns its keep.)
 
 ## What to notice before moving on
 
-- `TextEditor` (≈160–287) is the same shaping pipeline plus edit ops and
+- `TextEditor` (`editor/mod.rs` ≈191) is the same shaping and line-layout pipeline plus edit ops and
   IME state-sync — read it when you touch `TextInput`, not before.
 - Shaping cost is why S6 ("text shaping stress") exists in the benchmark
   suite — chapter 8 lets you measure what you just learned.

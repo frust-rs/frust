@@ -203,11 +203,15 @@ pub enum TextOverflow {
     /// and a no-op when `max_lines` is unset (today's behavior).
     #[default]
     Clip,
-    /// Same line-dropping as [`Self::Clip`], plus: the last visible line is
-    /// character-truncated (UTF-8/char-boundary safe) and has `'…'`
-    /// appended so it fits the layout's `max_width`. With an unbounded
-    /// `max_width`, there is no width to truncate against, so the last
-    /// visible line's full text is kept with `'…'` simply appended.
+    /// Same line-dropping as [`Self::Clip`], plus an ellipsis on the last
+    /// visible line. That line is refilled from the text after its
+    /// soft-wrap point, up to the next mandatory break (or the end of the
+    /// text), then cut at the longest grapheme-boundary prefix whose
+    /// advance plus `'…'` fits the layout's `max_width`. A cut never ends
+    /// on whitespace, and may fall inside a word wider than the line. If
+    /// not even the bare `'…'` fits, it is drawn alone. With an unbounded
+    /// `max_width` there is nothing to fit against, so the whole refilled
+    /// extent is kept (minus trailing whitespace) with `'…'` appended.
     Ellipsis,
 }
 

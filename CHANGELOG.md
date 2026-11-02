@@ -6,12 +6,22 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ## Unreleased
 
+A patch release (the 0.6.x line continues) whose one source-affecting change is the removal of the
+public fn `frust_engine::gpu::targets::atlas_page_fits` (the Changed list gives the migration).
+Everything else is additive, a fix, or a deprecation.
+
+It adds the paged container `page_view` with `PageController` and `PageSnap` physics, the live-card
+switcher pattern `motion::card_switcher` with its Glyph skin plus Glyph `fab` and `page_dots`, the
+pinch vocabulary through the facade, and reduce-motion handling in `AnimatedScale` and
+`AnimatedOpacity`. The render-side `TierCaps` name is now `EngineCaps`; the old name is a deprecated
+alias that is removed in 0.7.
+
 ### Added
 
 - frust facade re-exports the pinch vocabulary (`pinch_detector`, `PinchDetectorView`,
-  `PinchDetectorWidget`, `PinchRecognizer`, `PINCH_SLOP`) and the scale/contact event types
-  (`ScaleEvent`, `ScalePhase`, `PointerId`, `PointerSource`), also under `frust::authoring`; closes
-  the gap recorded against 0.6.3's `pan_zoom`/`canvas` additions.
+  `PinchDetectorWidget`, `PinchRecognizer`, `PINCH_SLOP`) at the crate root, and the scale/contact
+  event types (`ScaleEvent`, `ScalePhase`, `PointerId`, `PointerSource`) both at the crate root and
+  under `frust::authoring`. The pinch names are not re-exported under `frust::authoring`.
 - `frust_glyph::fab`, a Glyph `FloatingActionButton`-shaped action button that fits
   `scaffold(..).fab(..)`. It has `.mini(..)`, `.tooltip(..)` (the accessible name) and `.disabled(..)`
   variants and rests on the new `floating()` elevation token, which sits between elevation levels
@@ -30,6 +40,22 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   (`PageSnap::fraction(..)` / `PageSnap::extent(..)`, chainable with `Bouncing` and the other
   physics).
 - `frust::page_view` with `PageView` and `PageController`, a paged container.
+- `frust-shell-common`'s `build_tree_update` and `tree_update_from_parts`: the one AccessKit tree
+  assembly the desktop, iOS and Android shells share.
+
+### Changed
+
+- **Breaking (narrow):** `frust_engine::gpu::targets::atlas_page_fits` is removed, because
+  frust-engine no longer calls it. Migration: compare the page size with the adapter limit
+  yourself, `page.0 > 0 && page.1 > 0 && page.0 <= caps.max_texture_dimension_2d && page.1 <=
+  caps.max_texture_dimension_2d` (`caps: &frust_gpu::TierCaps`); `max_texture_size(caps)` in the same
+  module gives the engine's own bound.
+
+### Deprecated
+
+- `frust_render::TierCaps` is renamed `EngineCaps`. The old name stays as a deprecated type alias
+  through 0.6 and is removed in 0.7. Migration: `use frust_render::EngineCaps;`.
+  `frust_gpu::TierCaps`, the adapter-probed type, is unchanged.
 
 ### Fixed
 
@@ -37,12 +63,18 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `AnimatedOpacity` fades over 120 ms linear and `AnimatedScale` snaps to its target on the first
   paint, each overriding any explicit timing, matching the navigator and `PatternSwitcher`.
 
-### Fixed
-
 - `frust-camera`'s barcode decoder no longer drops a QR code whose payload is not UTF-8 (a
   byte-mode code carrying binary data or Latin-1 text): it is reported with the exact bytes in
   `Barcode::raw_bytes` and a lossy `raw_value`. `DetectionPolicy::NoDuplicates` tells such payloads
   apart by their bytes.
+- frust-engine: a dashed stroke whose dash count is unbounded (a tiny period over a huge path) now
+  compiles in bounded time. Only the stretch near the viewport is dashed, with the phase carried
+  across the skipped length. Runs whose device dash period is below half a pixel, or that pass the
+  per-element budget of 65,536 periods, are stroked solid. Oversize strokes keep their outline
+  within 0.25 px under rotated and anisotropic transforms (#141).
+- Android accessibility: the TalkBack focus rectangles now come from the shared AccessKit tree
+  assembly, whose root carries the frame density so node bounds are published in physical pixels,
+  and the tree is re-published when the density changes (#142).
 
 ## 0.6.4 — 2026-10-28
 
