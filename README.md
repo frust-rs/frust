@@ -185,23 +185,27 @@ use frust_material::{AppBarContainer, app_bar, fab, icons};
 #[derive(Default)]
 pub struct CounterApp;
 
-impl Component for CounterApp {
-    type State = u32;
+pub struct AppState {
+    pub count: u32,
+}
 
-    fn init(&self) -> u32 {
-        0
+impl Component for CounterApp {
+    type State = AppState;
+
+    fn init(&self) -> AppState {
+        AppState { count: 0 }
     }
 
-    fn build(&self, count: &mut u32) -> impl View<u32> {
+    fn build(&self, state: &mut AppState) -> impl View<AppState> {
         scaffold(Align(
             Alignment::CENTER,
             column()
                 .child(text("You have pushed the button this many times:"))
-                .child(text(count.to_string()).size(48.0))
+                .child(text(state.count.to_string()).size(48.0))
                 .cross_axis(CrossAxisAlignment::Center),
         ))
         .app_bar(
-            app_bar::<u32>("Counter")
+            app_bar("Counter")
                 .container(AppBarContainer::InversePrimary)
                 .elevation(2),
         )
@@ -210,8 +214,8 @@ impl Component for CounterApp {
 }
 
 impl CounterApp {
-    fn increment_fab() -> impl View<u32> {
-        fab(icon(icons::ADD), |count: &mut u32| *count += 1).label("Increment")
+    fn increment_fab() -> impl View<AppState> {
+        fab(icon(icons::ADD), |state: &mut AppState| state.count += 1).label("Increment")
     }
 }
 
