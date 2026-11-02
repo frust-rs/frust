@@ -21,7 +21,9 @@
 //! `FRUST_NO_THREAD_TUNING` off-arm only, the render-thread QoS self-boost
 //! `libc::pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0)` in
 //! [`schedule_render_thread`] (a bare libc call operating on the calling thread
-//! only, best-effort and non-fatal). The default path applies the same class
+//! only, best-effort and non-fatal), and the one `libc::sysctlbyname("hw.memsize")`
+//! read in [`report_device_memory`] (a NUL-terminated name and a `u64` out-buffer,
+//! both owned by the call's frame). The default path applies the same class
 //! through `frust_reactive::thread_policy`'s safe API, whose own `unsafe` lives
 //! in that crate. Under the default-off
 //! overlay switch (`FRUST_OVERLAYS`) it also holds the one
@@ -295,6 +297,37 @@ unsafe fn handle_mut<'a>(handle: *mut c_void) -> Option<&'a mut IosAppHandle> {
     Some(unsafe { &mut *(handle as *mut IosAppHandle) })
 }
 
+/// Report the device's physical memory (`sysctl hw.memsize`) to the render
+/// tiers, once, before the first renderer is created: iOS has no
+/// `/proc/meminfo`, and without the figure a 4 GB-class iPhone could never take
+/// the large glyph-atlas tier. Logs `frust-render device_memory_bytes=<n>`
+/// (`unknown` when the read fails, which leaves the plain tier).
+fn report_device_memory() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let mut bytes: u64 = 0;
+        let mut len = std::mem::size_of::<u64>();
+        // SAFETY: `c"hw.memsize"` is NUL-terminated; `bytes` is a valid,
+        // writable `u64` and `len` holds its size, so the kernel writes at most
+        // 8 bytes into it; the new-value pointer is null with length 0 (a read).
+        let status = unsafe {
+            libc::sysctlbyname(
+                c"hw.memsize".as_ptr(),
+                (&raw mut bytes).cast::<c_void>(),
+                &raw mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if status == 0 && len == std::mem::size_of::<u64>() && bytes > 0 {
+            log::info!("frust-render device_memory_bytes={bytes}");
+            frust_render::set_reported_device_memory(bytes);
+        } else {
+            log::info!("frust-render device_memory_bytes=unknown");
+        }
+    });
+}
+
 /// `frust_init`: build the native handle for the app's `CAMetalLayer` and
 /// return it to Swift as an opaque pointer.
 ///
@@ -309,6 +342,7 @@ pub fn init(
     make_app: impl FnOnce() -> Box<dyn AppTree>,
 ) -> *mut c_void {
     init_logger_once();
+    report_device_memory();
     // App first, devtools second. `make_app` (run inside `create_handle`) is the
     // `app!` init closure, which registers the hot-patch anchor; the CLI attaches
     // as soon as the discovery line below appears and reads the anchor once, so

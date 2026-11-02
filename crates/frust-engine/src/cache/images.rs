@@ -707,12 +707,39 @@ pub struct TierChoice {
     pub device_memory: Option<u64>,
 }
 
-/// The device memory from which a mobile family part takes the large budget:
-/// 4 GiB.
+/// The device memory from which a mobile family part takes the large budget
+/// on Linux and Android: 4 GiB.
 ///
-/// The large budget is 64 MiB of atlas, a sixteenth of that; below it the
-/// plain 16 MiB budget stays.
+/// The large budget is 64 MiB of atlas — four 2048x2048 `Rgba8Unorm` layers,
+/// 16,777,216 texels, four times the plain budget's 4,194,304 texels (16 MiB)
+/// — a sixteenth of that memory; below it the plain 16 MiB budget stays. The
+/// retained-page tier follows the same choice (32 MiB to 64 MiB). Apple
+/// devices use [`MOBILE_LARGE_MIN_MEMORY_APPLE`] instead.
 pub const MOBILE_LARGE_MIN_MEMORY: u64 = 4 << 30;
+
+/// The device memory from which an Apple (iOS) device takes the large budget:
+/// 3 GiB.
+///
+/// `hw.memsize` reports the memory the system leaves the kernel, not the
+/// marketing figure: a 4 GB-class iPhone reports below 4 GiB, so the Linux
+/// threshold would lock every one of them out of the large tier, and a 3
+/// GB-class one reports around 2.8 GiB. 3 GiB sits between the two classes:
+/// 4 GB-class and larger devices take the large tier (64 MiB of atlas, 64 MiB
+/// of retained pages; the iPhone 13 mini's S6 paragraph at 3x needs it), 3
+/// GB-class and smaller keep the plain one. Chosen by `target_os = "ios"`
+/// (see [`mobile_large_min_memory`]); macOS builds keep the 4 GiB figure.
+pub const MOBILE_LARGE_MIN_MEMORY_APPLE: u64 = 3 << 30;
+
+/// The memory threshold for the large tier on this target: the Apple rule on
+/// iOS, the 4 GiB rule elsewhere.
+#[must_use]
+pub const fn mobile_large_min_memory() -> u64 {
+    if cfg!(target_os = "ios") {
+        MOBILE_LARGE_MIN_MEMORY_APPLE
+    } else {
+        MOBILE_LARGE_MIN_MEMORY
+    }
+}
 
 /// The atlas tier for `caps`' adapter on a device with `device_memory` bytes
 /// of memory (`None` when unknown).
@@ -724,20 +751,31 @@ pub const MOBILE_LARGE_MIN_MEMORY: u64 = 4 << 30;
 /// 2. An adapter [`ADAPTER_FAMILIES`] names takes its family's tier — a
 ///    desktop family [`AtlasTier::Desktop`]; a mobile family
 ///    [`AtlasTier::MobileLarge`] when the device reports at least
-///    [`MOBILE_LARGE_MIN_MEMORY`] and the adapter can create a large shape
+///    [`mobile_large_min_memory`] and the adapter can create a large shape
 ///    unclamped ([`AtlasBudget::mobile_large`]), else [`AtlasTier::Mobile`].
 ///    Unknown memory is the small tier: the large one is earned, not assumed.
 /// 3. Any other adapter keeps [`is_mobile_tier`]'s capability read, mobile or
 ///    desktop, exactly as before the table existed.
 #[must_use]
 pub fn choose_tier(caps: &TierCaps, device_memory: Option<u64>) -> TierChoice {
+    choose_tier_with_threshold(caps, device_memory, mobile_large_min_memory())
+}
+
+/// [`choose_tier`] against an explicit large-tier memory `threshold`, so the
+/// per-platform rule is testable on any host.
+#[must_use]
+pub fn choose_tier_with_threshold(
+    caps: &TierCaps,
+    device_memory: Option<u64>,
+    threshold: u64,
+) -> TierChoice {
     let (tier, rule) = if caps.downlevel_profile != DownlevelProfile::Full {
         (AtlasTier::Mobile, TierRule::Downlevel)
     } else {
         match adapter_family(&caps.adapter_name) {
             Some(AdapterFamily::Desktop) => (AtlasTier::Desktop, TierRule::Table),
             Some(AdapterFamily::Mobile) => {
-                let large = device_memory.is_some_and(|bytes| bytes >= MOBILE_LARGE_MIN_MEMORY)
+                let large = device_memory.is_some_and(|bytes| bytes >= threshold)
                     && AtlasBudget::mobile_large(caps).is_some();
                 let tier = if large {
                     AtlasTier::MobileLarge
@@ -757,12 +795,27 @@ pub fn choose_tier(caps: &TierCaps, device_memory: Option<u64>) -> TierChoice {
     }
 }
 
+/// The memory a shell reported through [`set_reported_device_memory`].
+static REPORTED_MEMORY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
+/// Report the device's physical memory, for platforms with no `/proc/meminfo`
+/// (iOS: `sysctl hw.memsize`).
+///
+/// Process-wide and first write wins: later calls are ignored. A shell calls
+/// it before the first renderer is created, since the tier is chosen (and
+/// logged) when the renderer builds its caches. Linux and Android read
+/// `/proc/meminfo` instead and ignore it.
+pub fn set_reported_device_memory(bytes: u64) {
+    let _ = REPORTED_MEMORY.set(bytes);
+}
+
 /// The device's total memory in bytes, when this platform reports it.
 ///
 /// Read once per process from `/proc/meminfo`'s `MemTotal` on Linux and
 /// Android — the kernel's own figure, readable without a permission on both —
-/// and `None` everywhere else, which keeps every other platform on the tier
-/// it took before the large one existed.
+/// and elsewhere the figure a shell gave [`set_reported_device_memory`], or
+/// `None` when none did, which keeps the platform on the tier it took before
+/// the large one existed.
 #[must_use]
 pub fn device_memory_bytes() -> Option<u64> {
     #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -777,7 +830,7 @@ pub fn device_memory_bytes() -> Option<u64> {
     }
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
     {
-        None
+        REPORTED_MEMORY.get().copied()
     }
 }
 
@@ -2208,6 +2261,58 @@ mod tests {
             (desktop.tier, desktop.rule),
             (AtlasTier::Desktop, TierRule::Table)
         );
+    }
+
+    #[test]
+    fn the_apple_threshold_admits_a_4_gb_class_iphone_and_not_a_3_gb_class_one() {
+        let mut apple = named("Apple A15 GPU");
+        apple.transient_saves_memory = true;
+        let tier = |bytes: u64, threshold: u64| {
+            choose_tier_with_threshold(&apple, Some(bytes), threshold).tier
+        };
+        // hw.memsize on a 4 GB-class iPhone reads below 4 GiB, on a 3
+        // GB-class one around 2.8 GiB.
+        let four_class = 3_900 << 20;
+        let three_class = 2_900 << 20;
+        assert!(four_class < MOBILE_LARGE_MIN_MEMORY);
+        assert_eq!(
+            tier(four_class, MOBILE_LARGE_MIN_MEMORY_APPLE),
+            AtlasTier::MobileLarge
+        );
+        assert_eq!(
+            tier(three_class, MOBILE_LARGE_MIN_MEMORY_APPLE),
+            AtlasTier::Mobile
+        );
+        assert_eq!(
+            tier(MOBILE_LARGE_MIN_MEMORY_APPLE, MOBILE_LARGE_MIN_MEMORY_APPLE),
+            AtlasTier::MobileLarge,
+            "the threshold is inclusive"
+        );
+        // The Linux/Android rule is unchanged: the same 4 GB-class figure
+        // stays on the plain tier.
+        assert_eq!(tier(four_class, MOBILE_LARGE_MIN_MEMORY), AtlasTier::Mobile);
+        assert_eq!(
+            tier(MOBILE_LARGE_MIN_MEMORY, MOBILE_LARGE_MIN_MEMORY),
+            AtlasTier::MobileLarge
+        );
+        assert_eq!(
+            mobile_large_min_memory(),
+            if cfg!(target_os = "ios") {
+                MOBILE_LARGE_MIN_MEMORY_APPLE
+            } else {
+                MOBILE_LARGE_MIN_MEMORY
+            }
+        );
+    }
+
+    #[test]
+    fn the_reported_device_memory_is_first_write_wins() {
+        set_reported_device_memory(5 << 30);
+        set_reported_device_memory(1 << 30);
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        assert_eq!(device_memory_bytes(), Some(5 << 30));
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let _ = device_memory_bytes();
     }
 
     #[test]

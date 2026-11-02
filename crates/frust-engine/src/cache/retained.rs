@@ -130,7 +130,8 @@ impl RetainedBudget {
     /// one to spare.
     pub const MOBILE: Self = Self { bytes: 32 << 20 };
 
-    /// A phone with at least 4 GiB of memory: 64 MiB.
+    /// A phone on the large tier (4 GiB of memory, 3 GiB on Apple's
+    /// `hw.memsize` reading — `cache::images::mobile_large_min_memory`): 64 MiB.
     pub const MOBILE_LARGE: Self = Self { bytes: 64 << 20 };
 
     /// A desktop-class adapter: 256 MiB, several 4K-window pages.

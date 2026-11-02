@@ -93,6 +93,10 @@ pub use frust_gpu::DeviceHandle;
 pub use external_pass::{
     ExternalFrame, ExternalPass, register_external_pass, unregister_external_pass,
 };
+// A shell with no `/proc/meminfo` (iOS) reports its physical memory here before
+// the first renderer is created, so the glyph-atlas and retained-page tiers can
+// take the large budget — `frust-engine` owns the rule.
+pub use frust_engine::cache::images::set_reported_device_memory;
 pub use headless::{
     GOLDEN_EXPECT_ADAPTER_ENV_VAR, GOLDEN_EXPECT_BACKEND_ENV_VAR, HeadlessImage, HeadlessMeta,
     HeadlessOptions, HeadlessRenderer, HeadlessSpec,
