@@ -28,11 +28,11 @@ off this index — read this plus the one that covers what you are touching:
     bare `libc` priority/QoS call (`FRUST_NO_THREAD_TUNING` arm) and `sysctlbyname("hw.memsize")`.
     Android's zone also holds `prepare_overlays`'s one `OverlaySurface::new` call; iOS's holds
     `take_frame_overlays`'s plus the `ios_app!`-emitted `frust_overlay_*` exports
-    (`frust_overlay_take_released` writes `count <= capacity` layer pointers into Swift's buffer).
-    Each overlay `OverlaySurface::new` site argues SAFETY from the `OverlayTable` order: a surface
-    drops before its layer or window is returned. That is ordering and leak-freedom, not memory
-    safety — wgpu-hal retains the `CAMetalLayer` on Apple; on Android the table's `ANativeWindow`
-    reference keeps it valid past `surfaceDestroyed` (a late present fails safely).
+    (`frust_overlay_take_released` writes `count <= capacity` layer pointers). Each overlay
+    `OverlaySurface::new` site argues SAFETY from the `OverlayTable` order: a surface drops before
+    its layer or window is handed back. That is ordering and leak-freedom, not memory safety —
+    wgpu-hal retains the `CAMetalLayer` on Apple; on Android the table's `ANativeWindow` reference
+    keeps it valid past `surfaceDestroyed` (a late present fails, it does not touch freed memory).
     Android's `adpf::platform` holds the opt-in performance-hint `dlsym` binding (`libandroid.so`).
   - `frust-shell-desktop`'s `render.rs` (macOS only) — `build_overlay_surface`, one
     `OverlaySurface::new(.., OverlayTarget::CoreAnimationLayer(ptr), ..)` block under the same
