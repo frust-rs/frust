@@ -52,26 +52,39 @@
 //! is a wider change than handing a `None` callback a destination; it is
 //! recorded here so a reader deciding what is left to do sees it.
 //!
+//! `glyph/fab` and `glyph/page-dots` are absent too. The fab case's whole
+//! content is the two sizes and the press feedback, which is widget-owned and
+//! already plays; a press has no destination in a single-case frame (the
+//! fab that *does* lead somewhere is the one on `glyph/card-switcher`'s live
+//! page, below). The page-dots case is the decorative indicator — no
+//! `on_tap`, so there is no press for state to answer — and the dots that
+//! follow real paging are the ones the card switcher's skin wires below its
+//! strip.
+//!
 //! Nothing here is a `Case::build`, so none of it reaches the snapshot oracle
 //! and no poster moves.
 
 use frust_core::{Component, View, component};
 use frust_glyph::{
-    BadgeVariant, PaletteItem, accordion, badge, command_palette, dots_loader, glyph_dialog,
-    glyph_nav_bar, glyph_nav_item, progress, segmented_control, skeleton, tabs, tag, toggle,
+    BadgeVariant, PaletteItem, accordion, app_bar, badge, card_switcher, command_palette,
+    dots_loader, fab, glyph_dialog, glyph_list, glyph_list_item, glyph_nav_bar, glyph_nav_item,
+    peer_card, progress, segmented_control, skeleton, switcher_bar, switcher_chip, tabs, tag,
+    toggle,
 };
 use frust_widgets::{
     Axis, ButtonStyle, CrossAxisAlignment, FlexView, GestureDetector, SizedBox, button, column,
-    either, inflexible, row, text,
+    either, icons, inflexible, row, scaffold, text,
 };
 
 use super::{Entry, framed};
 use crate::case::case_build;
+use crate::glyph::{HOSTS, LIVE_HOST, POSTER_HOSTS, SESSIONS, SWITCHER_FRAME};
 
 /// This catalog's slice of the side table [`super::entries`] concatenates.
 pub const INTERACTIVE: &[Entry] = &[
     ("glyph/accordion", case_build!(accordion_case)),
     ("glyph/badge-and-tag", case_build!(badge_and_tag_case)),
+    ("glyph/card-switcher", case_build!(card_switcher_case)),
     ("glyph/command-palette", case_build!(command_palette_case)),
     ("glyph/dialog", case_build!(dialog_case)),
     ("glyph/loaders", case_build!(loaders_case)),
@@ -602,4 +615,114 @@ impl Component for ToggleCase {
 
 fn toggle_case() -> impl View<()> {
     component(ToggleCase)
+}
+
+// ---- card-switcher ----------------------------------------------------------
+
+/// Retained state for the interactive `card-switcher` case: whether the stage
+/// is open, which server is live (its strip position, since the strip keeps
+/// [`HOSTS`] order) and how many servers the strip holds. Seeded to the
+/// poster: open, the middle server live, [`POSTER_HOSTS`] servers.
+struct SwitcherState {
+    open: bool,
+    live: usize,
+    hosts: usize,
+}
+
+/// The server peer card `peer` shows when `live` is the live server: the
+/// peers are every server but the live one, in strip order.
+fn peer_host(live: usize, peer: usize) -> usize {
+    if peer >= live { peer + 1 } else { peer }
+}
+
+/// The label row above a card, as the recorded case draws it.
+fn host_label(host: usize) -> impl View<SwitcherState> {
+    let (name, status, variant) = HOSTS[host];
+    row()
+        .child(badge(status, variant))
+        .child(SizedBox(Some(8.0), None))
+        .child(text(name).size(13.0))
+        .cross_axis(CrossAxisAlignment::Center)
+}
+
+/// One server's page, as the recorded case draws it, with a fab that opens
+/// the stage.
+fn host_page(host: usize) -> impl View<SwitcherState> {
+    let rows = SESSIONS[host]
+        .iter()
+        .map(|&(glyph, title, sub, meta)| glyph_list_item(glyph, title).sub(sub).meta(meta))
+        .collect();
+    scaffold(glyph_list::<SwitcherState>(rows))
+        .app_bar(app_bar::<SwitcherState>(HOSTS[host].0))
+        .fab(
+            fab(icons::PANE_MARK, |state: &mut SwitcherState| {
+                state.open = true
+            })
+            .tooltip("Switch server"),
+        )
+}
+
+/// The `card-switcher` case as a working app switcher.
+///
+/// The stage never closes or selects by itself: `on_close` and `on_select`
+/// only report, and the app rebuilds with a new `open` and live page. So the
+/// whole conversion is three fields and their writers. Closed, the live page
+/// fills the frame and its fab opens the stage again; open, a tap on the
+/// centred card, the scrim or the `close` chip closes it, and a tap on a peer
+/// centres it and makes that server live.
+///
+/// A selection closes in the same handler rather than through the pattern's
+/// `expanding` handshake. Step 4 of that handshake needs a later write (the
+/// glyph catalog schedules it on a timer) and a pure-`View` case has no clock
+/// to schedule on; closing at once with the chosen server live is the
+/// handshake's own documented shortcut (step 4 "any time after step 2"), and
+/// the strip already sits centred on that card, so the close ramp grows it
+/// into the page.
+///
+/// `add server` adds the next of [`HOSTS`] to the strip, so the skin's page
+/// dots visibly follow the strip's count, and disables itself once every
+/// server is on it rather than becoming a chip that does nothing.
+struct CardSwitcherCase;
+
+impl Component for CardSwitcherCase {
+    type State = SwitcherState;
+
+    fn init(&self) -> Self::State {
+        SwitcherState {
+            open: true,
+            live: LIVE_HOST,
+            hosts: POSTER_HOSTS,
+        }
+    }
+
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
+        let live = state.live;
+        let peers = (0..state.hosts)
+            .filter(|&host| host != live)
+            .map(|host| peer_card(host_page(host)).label(host_label(host)));
+        SizedBox(Some(SWITCHER_FRAME.width), Some(SWITCHER_FRAME.height)).child(
+            card_switcher(state.open, host_page(live))
+                .peers(peers)
+                .live_index(live)
+                .live_label(host_label(live))
+                .on_select(|state: &mut SwitcherState, peer: usize| {
+                    state.live = peer_host(state.live, peer);
+                    state.open = false;
+                })
+                .on_close(|state: &mut SwitcherState| state.open = false)
+                .action_bar(switcher_bar((
+                    switcher_chip(icons::ADD, |state: &mut SwitcherState| {
+                        state.hosts = (state.hosts + 1).min(HOSTS.len());
+                    })
+                    .label("add server")
+                    .disabled(state.hosts >= HOSTS.len()),
+                    switcher_chip(icons::CLOSE, |state: &mut SwitcherState| state.open = false)
+                        .semantic_label("close"),
+                ))),
+        )
+    }
+}
+
+fn card_switcher_case() -> impl View<()> {
+    component(CardSwitcherCase)
 }
