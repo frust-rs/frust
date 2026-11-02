@@ -215,7 +215,12 @@ fn draw_new_run(builder: &mut SceneBuilder<'_>, root_scale: f64) {
 /// A compiler with glyph quads and the resident-run cache on, as a phone
 /// renderer runs them.
 fn compiler(extent: u16, hint: bool) -> SceneCompiler {
-    let mut compiler = SceneCompiler::with_atlas_budget(extent, extent, AtlasBudget::MOBILE);
+    compiler_with(extent, hint, AtlasBudget::MOBILE)
+}
+
+/// [`compiler`] on an explicit atlas budget.
+fn compiler_with(extent: u16, hint: bool, budget: AtlasBudget) -> SceneCompiler {
+    let mut compiler = SceneCompiler::with_atlas_budget(extent, extent, budget);
     compiler.set_hint_text(hint);
     compiler.set_glyph_quads(true);
     compiler.set_glyph_run_cache(true);
@@ -530,4 +535,48 @@ fn costs_of_resident_strips() -> usize {
     compile(&mut compiler, &scene, Affine::scale(3.0), PHONE)
         .strips
         .max(1)
+}
+
+/// The large-mobile budget (`AtlasBudget::MOBILE_LARGE_WIDE`, four 2048-square
+/// layers, 64 MiB — what a 4 GB-class iPhone takes once iOS reports its memory)
+/// holds the S6-sized paragraph at 3x *and* the new run on top of it: the
+/// glyph budget is half the atlas's texels, 8,388,608, room for ~2,273 entries
+/// at 54 px against the ~700 the two together need. On the plain mobile budget
+/// the same new run is refused (the case above).
+#[test]
+fn the_s6_sized_paragraph_and_a_new_run_fit_the_mobile_large_glyph_budget_at_3x() {
+    let root = Affine::scale(3.0);
+    let scene = scene_of(extent_at(3.0), |builder| {
+        draw_paragraph(builder, OVER_BUDGET_FACES, 3.0);
+        draw_new_run(builder, 3.0);
+    });
+    let mut large = compiler_with(PHONE, false, AtlasBudget::MOBILE_LARGE_WIDE);
+    let costs: Vec<TextCost> = (0..PAST_TWO_EVICTIONS)
+        .map(|_| compile(&mut large, &scene, root, PHONE))
+        .collect();
+    let first = costs[0];
+    assert!(first.rasterized, "frame 1 rasterizes");
+    assert_eq!(
+        first.atlas_draws, first.glyph_draws,
+        "frame 1: every glyph, the new run's included, is admitted to the atlas"
+    );
+    let entries = u64::try_from(first.entries).expect("a few hundred");
+    let large_glyph_budget = 2048_u64 * 2048 * 4 / 2;
+    assert!(
+        entries * TEXELS_AT_54_PX > MOBILE_GLYPH_BUDGET,
+        "fixture precondition: over the plain mobile glyph budget"
+    );
+    assert!(
+        entries * TEXELS_AT_54_PX <= large_glyph_budget,
+        "{entries} entries at 54 px fit the {large_glyph_budget}-texel large budget"
+    );
+    for (index, cost) in costs.iter().enumerate().skip(1) {
+        let frame = index + 1;
+        assert_eq!(
+            cost.atlas_draws, cost.glyph_draws,
+            "frame {frame}: all atlas"
+        );
+        assert!(!cost.rasterized, "frame {frame}: nothing rasterized again");
+        assert_eq!(cost.entries, first.entries, "frame {frame}");
+    }
 }
