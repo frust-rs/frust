@@ -29,7 +29,6 @@ use frust_scene::{FontHandle, GlyphRun, Scene, SceneBuilder};
 use frust_text::{FontFamily, FontStyle, FontWeight, TextContext, TextStyle};
 use kurbo::{Affine, Point};
 use peniko::Color;
-use std::time::Instant;
 
 const VIEWPORT: (u16, u16) = (160, 64);
 const FONT_SIZE: f32 = 24.0;
@@ -92,6 +91,68 @@ fn ink(frame: &CompiledFrame) -> u64 {
     frame.alphas().iter().map(|a| u64::from(*a)).sum()
 }
 
+/// The frame's whole coverage, in 1/255 pixels: [`ink`] plus the solid spans
+/// between strips. A strip carries alpha only along an edge; the interior of a
+/// stem wider than a strip is a fill gap with no alpha, so [`ink`] grows with
+/// a glyph's perimeter and under-counts it more the larger it is drawn. Share
+/// comparisons across scales need the area.
+fn area(frame: &CompiledFrame) -> u64 {
+    let strips = frame.strip_buf();
+    let mut total = ink(frame);
+    for pair in strips.windows(2) {
+        let (strip, next) = (&pair[0], &pair[1]);
+        if strip.x == u16::MAX || next.alpha_idx() < strip.alpha_idx() {
+            continue;
+        }
+        let end = u32::from(strip.x) + (next.alpha_idx() - strip.alpha_idx()) / 4;
+        if next.fill_gap() && next.y == strip.y && u32::from(next.x) > end {
+            total += u64::from(u32::from(next.x) - end) * 4 * 255;
+        }
+    }
+    total
+}
+
+/// How far right the ink of the frame's top half sits of its bottom half, in
+/// pixels: the centroid of the edge coverage in the rows above the ink's
+/// vertical middle minus the centroid below it. Upright text reads a small
+/// negative number (the glyph shapes), a forward lean pushes it up.
+fn lean(frame: &CompiledFrame) -> f64 {
+    let (strips, alphas) = (frame.strip_buf(), frame.alphas());
+    // (y, x, coverage) of every covered pixel the strips carry.
+    let mut samples = Vec::new();
+    for pair in strips.windows(2) {
+        let (strip, next) = (&pair[0], &pair[1]);
+        if strip.x == u16::MAX || next.alpha_idx() < strip.alpha_idx() {
+            continue;
+        }
+        let columns = (next.alpha_idx() - strip.alpha_idx()) as usize / 4;
+        for column in 0..columns {
+            for row in 0..4 {
+                let coverage = alphas[strip.alpha_idx() as usize + column * 4 + row];
+                if coverage != 0 {
+                    samples.push((
+                        f64::from(strip.y) + row as f64,
+                        f64::from(strip.x) + column as f64,
+                        f64::from(coverage),
+                    ));
+                }
+            }
+        }
+    }
+    assert!(!samples.is_empty(), "the frame carries no coverage");
+    let (min, max) = samples.iter().fold((f64::MAX, f64::MIN), |(lo, hi), s| {
+        (lo.min(s.0), hi.max(s.0))
+    });
+    let middle = (min + max) / 2.0;
+    let (mut top, mut bottom) = ((0.0, 0.0), (0.0, 0.0));
+    for (y, x, weight) in samples {
+        let half = if y < middle { &mut top } else { &mut bottom };
+        half.0 += weight * x;
+        half.1 += weight;
+    }
+    top.0 / top.1 - bottom.0 / bottom.1
+}
+
 fn ink_of(runs: &[GlyphRun]) -> u64 {
     let frame = compile(&mut strip_compiler(), runs);
     assert!(frame.glyph_draws > 0, "the run drew nothing");
@@ -108,7 +169,12 @@ fn a_variable_face_at_700_inks_more_than_at_400() {
     assert_eq!(bold[0].font.embolden(), 0.0, "a variable face is not faux");
     let (light_ink, bold_ink) = (ink_of(&regular), ink_of(&bold));
     println!("variable 400: {light_ink}, 700: {bold_ink}");
-    assert!(bold_ink > light_ink, "700 inks {bold_ink}, 400 {light_ink}");
+    // Measured on the strip path: 133888 at 400, 213160 at 700 (+0.592).
+    let gain = bold_ink as f64 / light_ink as f64 - 1.0;
+    assert!(
+        (0.40..=0.80).contains(&gain),
+        "700 inks {bold_ink}, 400 {light_ink}: gain {gain:.3}, measured 0.592, band 0.40..0.80"
+    );
 }
 
 #[test]
@@ -120,7 +186,12 @@ fn a_faux_bold_static_face_inks_more_than_its_regular_run() {
     assert!(bold[0].font.embolden() > 0.0, "the run is synthetic bold");
     let (regular_ink, bold_ink) = (ink_of(&regular), ink_of(&bold));
     println!("static regular: {regular_ink}, faux bold: {bold_ink}");
-    assert!(bold_ink > regular_ink, "{bold_ink} vs {regular_ink}");
+    // Measured on the strip path: 156101 regular, 227905 faux bold (+0.460).
+    let gain = bold_ink as f64 / regular_ink as f64 - 1.0;
+    assert!(
+        (0.30..=0.65).contains(&gain),
+        "faux bold {bold_ink} vs regular {regular_ink}: gain {gain:.3}, measured 0.460, band 0.30..0.65"
+    );
 }
 
 /// The handle `laid_out` gives a 700 request on this face, applied to `runs`.
@@ -239,9 +310,14 @@ fn weights_of_one_blob_have_distinct_resident_records() {
     for _ in 0..6 {
         resident_regular = compile(&mut compiler, &regular).resident_glyph_runs;
     }
-    assert!(
-        resident_regular > 0,
-        "the regular run never became resident"
+    eprintln!(
+        "resident regular runs {resident_regular} of {}",
+        regular.len()
+    );
+    assert_eq!(
+        resident_regular as usize,
+        regular.len(),
+        "every regular run settles resident (measured: all of them)"
     );
     // The bold run's first frame cannot be a resident hit.
     let first_bold = compile(&mut compiler, &bold);
@@ -251,7 +327,22 @@ fn weights_of_one_blob_have_distinct_resident_records() {
     for _ in 0..3 {
         back = compile(&mut compiler, &regular).resident_glyph_runs;
     }
-    assert!(back > 0);
+    eprintln!("regular runs resident again after the bold frame: {back}");
+    assert_eq!(
+        back as usize,
+        regular.len(),
+        "the regular record survived the bold frame (measured: all runs resident)"
+    );
+    // The bold run then settles into a record of its own.
+    let mut settled_bold = 0;
+    for _ in 0..6 {
+        settled_bold = compile(&mut compiler, &bold).resident_glyph_runs;
+    }
+    assert_eq!(
+        settled_bold as usize,
+        bold.len(),
+        "the bold run settles with its own record"
+    );
 }
 
 /// Faux oblique is its own code path: the run draws, differs from the upright
@@ -273,6 +364,16 @@ fn a_faux_oblique_run_is_drawn_as_skewed_outlines_and_never_resident() {
     );
     assert!(skewed_frame.glyph_draws > 0);
     assert_ne!(upright_frame.alphas(), skewed_frame.alphas());
+    // A 14 degree skew about the baseline moves the top of the ink right of
+    // its bottom: the lean grows by roughly tan(14 deg) times half the ink's
+    // height. Measured on the strip path (upright, skewed, growth) below.
+    let (flat, leaning) = (lean(&upright_frame), lean(&skewed_frame));
+    let growth = leaning - flat;
+    eprintln!("lean upright {flat:.3}, 14 degree oblique {leaning:.3}, growth {growth:.3}");
+    assert!(
+        (1.0..=4.0).contains(&growth),
+        "oblique lean {leaning:.3} vs upright {flat:.3}: growth {growth:.3}, measured 1.800 (upright -8.433, oblique -6.632), band 1.0..4.0 px"
+    );
 
     let mut compiler = SceneCompiler::new(VIEWPORT.0, VIEWPORT.1);
     compiler.set_glyph_quads(true);
@@ -349,11 +450,6 @@ fn compile_screen(compiler: &mut SceneCompiler, runs: &[GlyphRun]) -> CompiledFr
         .expect("an in-range scene compiles")
 }
 
-fn median(mut samples: Vec<f64>) -> f64 {
-    samples.sort_by(f64::total_cmp);
-    samples[samples.len() / 2]
-}
-
 /// The cost of faux-italic text is observable and bounded: every skewed run
 /// is counted as an outline run on every frame and none reaches the atlas,
 /// while the same paragraph upright settles into it.
@@ -392,39 +488,58 @@ fn an_italic_paragraph_is_counted_as_outline_runs_every_frame() {
     assert!(settled.atlas_glyph_draws > 0, "upright text never settled");
 }
 
-/// Prints the per-frame CPU compile cost of italic against upright text, and
-/// asserts only a generous ceiling. The deterministic counter assertions live in the sibling
-/// tests above; this wall-clock ratio depends on machine load, so the default run skips it.
+/// The cost of faux-italic text, in counters rather than clock time: on every
+/// frame the italic paragraph draws all of its glyphs as outlines, where the
+/// same paragraph upright, once settled, draws none of them as outlines and
+/// all of them out of the atlas. This replaces a wall-clock ratio (a
+/// machine-load-dependent bound that needed a TESTING.md quarantine record).
 #[test]
-#[ignore = "wall-clock ratio; run by hand on a quiet machine"]
 fn an_italic_paragraph_compile_cost_is_bounded() {
     let (mut ctx, family) = context_with(STATIC_FONT);
     let italic = paragraph(&mut ctx, &family, FontStyle::Italic);
     let upright = paragraph(&mut ctx, &family, FontStyle::Normal);
-    let measure = |runs: &[GlyphRun]| {
-        let mut compiler = screen_compiler();
-        compiler.set_synthetic_oblique(true);
-        // Settle first, so upright is timed on its steady-state path.
-        for _ in 0..4 {
-            compile_screen(&mut compiler, runs);
-        }
-        let samples = (0..24)
-            .map(|_| {
-                let start = Instant::now();
-                compile_screen(&mut compiler, runs);
-                start.elapsed().as_secs_f64() * 1000.0
-            })
-            .collect::<Vec<_>>();
-        median(samples)
-    };
-    let (italic_ms, upright_ms) = (measure(&italic), measure(&upright));
+
+    let mut compiler = screen_compiler();
+    compiler.set_synthetic_oblique(true);
+    let italic_frames: Vec<CompiledFrame> = (0..4)
+        .map(|_| compile_screen(&mut compiler, &italic))
+        .collect();
+    let mut compiler = screen_compiler();
+    let upright_frames: Vec<CompiledFrame> = (0..4)
+        .map(|_| compile_screen(&mut compiler, &upright))
+        .collect();
+    let (italic_last, upright_last) = (&italic_frames[3], &upright_frames[3]);
     eprintln!(
-        "per-frame compile median over 24 frames: italic {italic_ms:.3} ms, upright {upright_ms:.3} ms ({:.1}x)",
-        italic_ms / upright_ms
+        "italic: glyph_draws {} atlas {} oblique runs {} ; upright settled: glyph_draws {} atlas {} resident {}",
+        italic_last.glyph_draws,
+        italic_last.atlas_glyph_draws,
+        italic_last.synthetic_oblique_runs,
+        upright_last.glyph_draws,
+        upright_last.atlas_glyph_draws,
+        upright_last.resident_glyph_runs,
     );
+    // `glyph_draws` counts every glyph drawn, atlas or outline; what is not an
+    // atlas draw is an outline draw. Measured: 1215 glyphs in both paragraphs.
+    let outline_draws = |frame: &CompiledFrame| frame.glyph_draws - frame.atlas_glyph_draws;
+    // The outline cost is the same on every frame: it never amortises.
+    for (index, frame) in italic_frames.iter().enumerate() {
+        assert_eq!(
+            outline_draws(frame),
+            1215,
+            "italic frame {index} outline draws (measured: all 1215 glyphs)"
+        );
+        assert_eq!(frame.atlas_glyph_draws, 0, "italic frame {index}");
+    }
+    assert_eq!(italic_last.synthetic_oblique_runs as usize, italic.len());
+    // Upright text settles: outline draws fall to the atlas.
     assert!(
-        italic_ms < upright_ms * 20.0,
-        "italic {italic_ms} ms vs upright {upright_ms} ms"
+        upright_last.atlas_glyph_draws > 0,
+        "upright text never settled"
+    );
+    assert_eq!(
+        outline_draws(upright_last),
+        0,
+        "settled upright text still outline-draws (measured: 0 of 1215, all 1215 from the atlas)"
     );
 }
 
@@ -437,12 +552,35 @@ fn hello(ctx: &mut TextContext, family: &str) -> Vec<GlyphRun> {
         .to_scene_runs(Point::new(8.0, 8.0))
 }
 
+/// `runs` redrawn at twice the font size, twice the offsets and the same
+/// transform: the 48 px run a 24 px run under a 2x transform stands for.
+fn doubled_runs(runs: &[GlyphRun]) -> Vec<GlyphRun> {
+    runs.iter()
+        .map(|run| {
+            let [a, b, c, d, e, f] = run.transform.as_coeffs();
+            GlyphRun {
+                font_size: run.font_size * 2.0,
+                transform: Affine::new([a, b, c, d, e * 2.0, f * 2.0]),
+                glyphs: run
+                    .glyphs
+                    .iter()
+                    .map(|glyph| frust_scene::Glyph {
+                        id: glyph.id,
+                        x: glyph.x * 2.0,
+                        y: glyph.y * 2.0,
+                    })
+                    .collect(),
+                ..run.clone()
+            }
+        })
+        .collect()
+}
+
 /// A run that is both faux bold and faux oblique, drawn under a 2x uniform
 /// transform, is emboldened by the amount of the size it is drawn at.
 ///
-/// Hinted, the stroke is a fixed fraction of the drawn size, so the share of
-/// ink it adds holds as the scale doubles. Unhinted, the stroke is asserted
-/// only to be present here; its weight is `faux_bold_weight_is_comparable_*`.
+/// Hinted and unhinted alike the stroke is a fixed fraction of the drawn size,
+/// so the share of area it adds holds as the scale doubles.
 #[test]
 fn faux_bold_and_oblique_under_a_2x_transform_is_emboldened() {
     let (mut ctx, family) = context_with(STATIC_FONT);
@@ -459,7 +597,7 @@ fn faux_bold_and_oblique_under_a_2x_transform_is_emboldened() {
     };
     let (plain, bold) = (with(0.0), with(0.04));
     for hint in [false, true] {
-        let ink_at = |runs: &[GlyphRun], scale: f64| {
+        let area_at = |runs: &[GlyphRun], scale: f64| {
             let mut compiler = SceneCompiler::new(VIEWPORT.0 * 2, VIEWPORT.1 * 2);
             compiler.set_synthetic_oblique(true);
             compiler.set_image_residency(ImageResidency::disabled(AtlasBudget::MOBILE));
@@ -472,44 +610,81 @@ fn faux_bold_and_oblique_under_a_2x_transform_is_emboldened() {
                 )
                 .expect("compiles");
             assert!(frame.glyph_draws > 0);
-            ink(&frame)
+            area(&frame)
         };
         let share = |scale: f64| {
-            let (plain, bold) = (ink_at(&plain, scale), ink_at(&bold, scale));
+            let (plain, bold) = (area_at(&plain, scale), area_at(&bold, scale));
             assert!(bold > plain, "hint {hint}: no embolden at {scale}x");
             (bold - plain) as f64 / plain as f64
         };
         let (share_1x, share_2x) = (share(1.0), share(2.0));
-        eprintln!("hint {hint}: embolden adds {share_1x:.4} of the ink at 1x, {share_2x:.4} at 2x");
+        eprintln!(
+            "hint {hint}: embolden adds {share_1x:.4} of the area at 1x, {share_2x:.4} at 2x"
+        );
+        // Measured (oblique route, embolden 0.04, whole-area coverage):
+        // hinted 0.5014 at 1x and 0.5242 at 2x; unhinted 0.5150 and 0.5100.
+        // (Edge-only `ink` would read 0.3507 and 0.3168 at 2x: interior fill
+        // gaps carry no alpha, which is why shares use `area`.)
+        let ratio = share_2x / share_1x;
+        for (share, scale) in [(share_1x, 1), (share_2x, 2)] {
+            assert!(
+                (0.40..=0.62).contains(&share),
+                "hint {hint}: embolden share {share:.4} at {scale}x, band 0.40..0.62"
+            );
+        }
+        assert!(
+            (0.85..=1.15).contains(&ratio),
+            "hint {hint}: share {share_1x:.4} at 1x, {share_2x:.4} at 2x, ratio {ratio:.3}, measured 0.5150/0.5100 unhinted and 0.5014/0.5242 hinted, band 0.85..1.15"
+        );
         if hint {
             // The scale is absorbed into the font size, so the 24 px run under
             // 2x is the 48 px run under 1x: same stroke, same ink.
-            let doubled: Vec<GlyphRun> = bold
-                .iter()
-                .map(|run| {
-                    let [a, b, c, d, e, f] = run.transform.as_coeffs();
-                    GlyphRun {
-                        font_size: run.font_size * 2.0,
-                        transform: Affine::new([a, b, c, d, e * 2.0, f * 2.0]),
-                        glyphs: run
-                            .glyphs
-                            .iter()
-                            .map(|glyph| frust_scene::Glyph {
-                                id: glyph.id,
-                                x: glyph.x * 2.0,
-                                y: glyph.y * 2.0,
-                            })
-                            .collect(),
-                        ..run.clone()
-                    }
-                })
-                .collect();
-            let (at_2x, at_48) = (ink_at(&bold, 2.0), ink_at(&doubled, 1.0));
+            let doubled = doubled_runs(&bold);
+            let (at_2x, at_48) = (area_at(&bold, 2.0), area_at(&doubled, 1.0));
             eprintln!("hint {hint}: 24 px under 2x inks {at_2x}, 48 px under 1x {at_48}");
             let gap = at_2x.abs_diff(at_48) as f64 / at_48 as f64;
             assert!(gap < 0.02, "embolden did not follow the drawn size: {gap}");
         }
     }
+}
+
+/// Unhinted, `glifo` sizes the stroke in font units, so the engine's basis is
+/// the face's `unitsPerEm`, which the transform scales with the outline: the
+/// share of ink the stroke adds at 2x is comparable to the share at 1x. A
+/// basis that ignored the scale would add the same absolute stroke to a
+/// doubled outline and the share would fall by half or more.
+#[test]
+fn an_unhinted_embolden_share_holds_from_1x_to_2x() {
+    let (mut ctx, family) = context_with(STATIC_FONT);
+    let regular = hello(&mut ctx, &family);
+    let bold = faux_bold(&regular);
+    let ink_at = |runs: &[GlyphRun], scale: f64| {
+        let size = (VIEWPORT.0 * 2, VIEWPORT.1 * 2);
+        let mut compiler = SceneCompiler::new(size.0, size.1);
+        compiler.set_image_residency(ImageResidency::disabled(AtlasBudget::MOBILE));
+        compiler.set_hint_text(false);
+        let frame = compiler
+            .compile(&scene_of(runs), Affine::scale(scale), size)
+            .expect("an in-range scene compiles");
+        assert!(frame.glyph_draws > 0, "the run drew nothing");
+        area(&frame)
+    };
+    let share = |scale: f64| {
+        let (plain, bold) = (ink_at(&regular, scale), ink_at(&bold, scale));
+        eprintln!("unhinted {scale}x: plain {plain}, bold {bold}");
+        (bold - plain) as f64 / plain as f64
+    };
+    let (share_1x, share_2x) = (share(1.0), share(2.0));
+    let ratio = share_2x / share_1x;
+    eprintln!("unhinted share 1x {share_1x:.4}, 2x {share_2x:.4}, ratio {ratio:.3}");
+    assert!(
+        (0.35..=0.60).contains(&share_1x),
+        "unhinted share at 1x {share_1x:.4}, measured 0.4600, band 0.35..0.60"
+    );
+    assert!(
+        (0.85..=1.15).contains(&ratio),
+        "unhinted share 1x {share_1x:.4}, 2x {share_2x:.4}, ratio {ratio:.3}, measured 0.4600 at 1x, 0.4525 at 2x (ratio 0.984), band 0.85..1.15"
+    );
 }
 
 /// A faux-bold run under a 2x transform computes the same stroke in the route
@@ -518,11 +693,12 @@ fn faux_bold_and_oblique_under_a_2x_transform_is_emboldened() {
 #[test]
 fn a_faux_bold_run_under_a_2x_transform_becomes_resident() {
     let (mut ctx, family) = context_with(STATIC_FONT);
-    let bold = hello(&mut ctx, &family)
-        .into_iter()
+    let plain = hello(&mut ctx, &family);
+    let bold = plain
+        .iter()
         .map(|run| GlyphRun {
             font: FontHandle::clone(&run.font).with_synthesis(0.04, 0.0),
-            ..run
+            ..run.clone()
         })
         .collect::<Vec<_>>();
     for hint in [false, true] {
@@ -530,14 +706,39 @@ fn a_faux_bold_run_under_a_2x_transform_becomes_resident() {
         compiler.set_glyph_quads(true);
         compiler.set_glyph_run_cache(true);
         compiler.set_hint_text(hint);
+        let mut at_2x = |runs: &[GlyphRun]| {
+            compiler
+                .compile(&scene_of(runs), Affine::scale(2.0), VIEWPORT)
+                .expect("compiles")
+                .resident_glyph_runs
+        };
+        // The run without the stroke settles first, so the bold run's key is
+        // tested against a resident record that differs from it only in the
+        // stroke.
+        let mut plain_resident = 0;
+        for _ in 0..6 {
+            plain_resident = at_2x(&plain);
+        }
+        assert_eq!(
+            plain_resident as usize,
+            plain.len(),
+            "hint {hint}: plain run"
+        );
+        let first_bold = at_2x(&bold);
+        assert_eq!(
+            first_bold, 0,
+            "hint {hint}: the embolden run was served the unembolden record"
+        );
         let mut resident = 0;
         for _ in 0..6 {
-            resident = compiler
-                .compile(&scene_of(&bold), Affine::scale(2.0), VIEWPORT)
-                .expect("compiles")
-                .resident_glyph_runs;
+            resident = at_2x(&bold);
         }
-        assert!(resident > 0, "hint {hint}: never resident at 2x");
+        eprintln!("hint {hint}: plain resident {plain_resident}, bold resident {resident}");
+        assert_eq!(
+            resident as usize,
+            bold.len(),
+            "hint {hint}: never resident at 2x (measured: every run)"
+        );
     }
 }
 
@@ -595,6 +796,11 @@ mod gpu {
 
     /// The headless target's pixels (RGBA8) for `runs`, rendered through Metal.
     fn pixels(runs: &[GlyphRun]) -> Vec<u8> {
+        pixels_under(runs, Affine::IDENTITY, false)
+    }
+
+    /// [`pixels`] under `transform`, with synthetic oblique switched on or off.
+    fn pixels_under(runs: &[GlyphRun], transform: Affine, oblique: bool) -> Vec<u8> {
         let _guard = lock();
         let (device, queue, caps) = block_on(async {
             let instance = wgpu::Instance::new(
@@ -619,6 +825,7 @@ mod gpu {
         let scene = scene_of(runs);
         let mut renderer = EngineRenderer::with_image_sampler(&device, &caps, FORMAT, None, true)
             .expect("the engine builds on this device");
+        renderer.set_synthetic_oblique(oblique);
         renderer.finish_warm_up(&device);
         let (width, height) = (u32::from(VIEWPORT.0), u32::from(VIEWPORT.1));
         let target = HeadlessTarget::new(&device, width, height, FORMAT);
@@ -640,7 +847,7 @@ mod gpu {
                     output: OutputAlpha::Premultiplied,
                 },
                 Color::TRANSPARENT,
-                Affine::IDENTITY,
+                transform,
             )
             .expect("a well-formed frame encodes");
         queue.submit([encoder.finish()]);
@@ -664,7 +871,12 @@ mod gpu {
         let regular = inked(&pixels(&laid_out(&mut ctx, &family, FontWeight::REGULAR)));
         let bold = inked(&pixels(&laid_out(&mut ctx, &family, FontWeight::BOLD)));
         println!("gpu variable 400: {regular}, 700: {bold}");
-        assert!(bold > regular, "700 inks {bold} pixels, 400 {regular}");
+        // Measured on Metal: 816 pixels at 400, 1115 at 700 (+0.366).
+        let gain = bold as f64 / regular as f64 - 1.0;
+        assert!(
+            (0.20..=0.60).contains(&gain),
+            "700 inks {bold} pixels, 400 {regular}: gain {gain:.3}, measured 0.366, band 0.20..0.60"
+        );
     }
 
     #[test]
@@ -675,10 +887,35 @@ mod gpu {
         let regular = inked(&pixels(&regular_runs));
         let bold = inked(&pixels(&faux_bold(&regular_runs)));
         println!("gpu static regular: {regular}, faux bold: {bold}");
+        // Measured on Metal: 933 pixels regular, 1274 faux bold (+0.365).
+        let gain = bold as f64 / regular as f64 - 1.0;
         assert!(
-            bold > regular,
-            "faux bold inks {bold} pixels, regular {regular}"
+            (0.20..=0.60).contains(&gain),
+            "faux bold inks {bold} pixels, regular {regular}: gain {gain:.3}, measured 0.365, band 0.20..0.60"
         );
+    }
+
+    /// The faux-bold size, not just its presence: the ink gain is in a band
+    /// both for a hinted run (the desktop default, an upright transform) and
+    /// for an unhinted one (`glifo` cannot absorb a vertical shear, so it draws
+    /// the outline at `unitsPerEm`).
+    #[test]
+    #[ignore = "requires a GPU (Metal); run with `cargo test -p frust-engine --test variable_route -- --ignored`"]
+    fn faux_bold_inks_a_calibrated_share_hinted_and_unhinted_through_the_gpu() {
+        let (mut ctx, family) = context_with(STATIC_FONT);
+        let regular = hello(&mut ctx, &family);
+        let bold = faux_bold(&regular);
+        let vertical_shear = Affine::new([1.0, 0.05, 0.0, 1.0, 0.0, 0.0]);
+        for (label, transform) in [("hinted", Affine::IDENTITY), ("unhinted", vertical_shear)] {
+            let plain = inked(&pixels_under(&regular, transform, false));
+            let heavy = inked(&pixels_under(&bold, transform, false));
+            let gain = heavy as f64 / plain as f64 - 1.0;
+            println!("gpu {label}: regular {plain}, faux bold {heavy}, gain {gain:.3}");
+            assert!(
+                (0.25..=0.50).contains(&gain),
+                "{label}: faux bold {heavy} pixels, regular {plain}: gain {gain:.3}, measured hinted 0.365, unhinted 0.309, band 0.25..0.50"
+            );
+        }
     }
 
     /// Synthetic oblique is off by default, and the renderer exposes no switch
@@ -713,9 +950,18 @@ mod gpu {
         };
         let (flat, leaning) = (lean(&pixels(&upright)), lean(&pixels(&skewed)));
         println!("gpu lean upright: {flat:.3}, oblique: {leaning:.3}");
+        // Measured on Metal: -7.183 for both (identical pixels).
         assert!(
             (leaning - flat).abs() < 0.25,
-            "oblique {leaning}, upright {flat}"
+            "oblique {leaning}, upright {flat}: measured -7.183 for both, bound 0.25 px"
+        );
+        // Switched on, the same run leans.
+        let leaning_on = lean(&pixels_under(&skewed, Affine::IDENTITY, true));
+        let growth = leaning_on - flat;
+        println!("gpu lean with the switch on: {leaning_on:.3}, growth {growth:.3}");
+        assert!(
+            (1.0..=5.0).contains(&growth),
+            "switch on: lean {leaning_on:.3} vs upright {flat:.3}: growth {growth:.3}, measured upright -7.183, switch on -5.398, growth 1.785, band 1.0..5.0 px"
         );
     }
 }

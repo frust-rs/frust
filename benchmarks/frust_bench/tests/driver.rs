@@ -112,24 +112,27 @@ fn gated_frame<S: 'static, V: View<S>>(
 
 #[test]
 #[cfg(feature = "db")]
-fn registry_has_ten_scenarios_in_id_order() {
+fn registry_has_eleven_scenarios_in_id_order() {
     // s1..=s8 (the frame-class table) stay in their original order and
     // indices unchanged, with d1/d2 (the DB op-latency class, PROTOCOL §9)
-    // appended after — the registry widened from eight to ten entries, but
-    // nothing about the s1..=s8 slice moved.
+    // and the `weight_probe` device probe appended after — the registry
+    // widened to eleven entries, but nothing about the s1..=s8 slice moved.
     let ids: Vec<&str> = SCENARIOS.iter().map(|s| s.id()).collect();
     let mut expected = FRAME_CLASS_IDS.to_vec();
-    expected.extend(["d1", "d2"]);
+    expected.extend(["d1", "d2", "weight_probe"]);
     assert_eq!(ids, expected);
 }
 
 #[test]
 #[cfg(not(feature = "db"))]
-fn registry_has_eight_scenarios_in_id_order() {
-    // On a db-off build, the registry has only the eight frame-class scenarios
-    // (s1..=s8), in the same order as the db-on SCENARIOS prefix.
+fn registry_has_nine_scenarios_in_id_order() {
+    // On a db-off build, the registry has the eight frame-class scenarios
+    // (s1..=s8), in the same order as the db-on SCENARIOS prefix, then the
+    // `weight_probe` device probe.
     let ids: Vec<&str> = SCENARIOS.iter().map(|s| s.id()).collect();
-    assert_eq!(ids, FRAME_CLASS_IDS);
+    let mut expected = FRAME_CLASS_IDS.to_vec();
+    expected.push("weight_probe");
+    assert_eq!(ids, expected);
 }
 
 #[test]
@@ -146,6 +149,7 @@ fn deep_link_and_id_parsing() {
     // the `d`-prefix.
     assert_eq!(scenarios::index_from_id("d1"), Some(8));
     assert_eq!(scenarios::index_from_id("d2"), Some(9));
+    assert_eq!(scenarios::index_from_id("weight_probe"), Some(10));
     assert_eq!(scenarios::index_from_id("d3"), None);
     assert_eq!(scenarios::index_from_url("frustbench://d1"), Some(8));
     assert_eq!(scenarios::index_from_url("frustbench://d2"), Some(9));
@@ -178,6 +182,7 @@ fn deep_link_and_id_parsing() {
     assert_eq!(scenarios::index_from_id("d1"), None);
     assert_eq!(scenarios::index_from_id("d2"), None);
     assert_eq!(scenarios::index_from_id("d3"), None);
+    assert_eq!(scenarios::index_from_id("weight_probe"), Some(8));
 
     // URL parsing: frame-class ids work the same way.
     assert_eq!(scenarios::index_from_url("frustbench://s1"), Some(0));
@@ -241,11 +246,11 @@ fn s7_is_static_and_paints_text() {
 
 #[test]
 fn every_registered_scenario_mounts_and_paints() {
-    // All of S1-S8 are implemented (tasks 02/03/04) — no stubs remain.
+    // All of S1-S8, d1/d2 and the weight probe are implemented — no stubs remain.
     // Each must mount from the registry and paint something on frame 0;
     // per-scenario behavior (animation liveness, scroll, decode) is covered
     // by the dedicated tests in this file and the scenario modules.
-    for idx in 0..8 {
+    for idx in 0..SCENARIOS.len() {
         let _owner = setup();
         let mut root: RenderRoot<BenchState, AnyView<BenchState>> = RenderRoot::new();
         let mut state = BenchState::new();
@@ -469,8 +474,8 @@ fn full_app_mounts_with_scenario_switcher() {
 
     let (scene, live) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
     assert!(live, "the mounted app starts on S1 (animating)");
-    // S1's own HUD paints two buttons (Pause/Reset) plus the eight-scenario
-    // switcher row: at least ten rounded-rect buttons in total.
+    // S1's own HUD paints two buttons (Pause/Reset) plus the per-scenario
+    // switcher row: at least SCENARIOS.len() + 2 rounded-rect buttons.
     assert!(
         scene.rounded.len() >= SCENARIOS.len() + 2,
         "the switcher paints one button per scenario plus S1's HUD (got {})",

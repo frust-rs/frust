@@ -597,6 +597,27 @@ pub(crate) fn embolden_per_side(fraction: f32, basis: f32) -> f32 {
     }
 }
 
+/// The faux-bold stroke, per side, a run of `fraction` em is drawn with, its
+/// `basis` (see [`embolden_basis`]) snapped to the [`SIZE_QUANTUM`] grid first.
+///
+/// The one place the per-side amount is computed: the route key
+/// ([`RunIdentity::for_run_with`]), the lowering and the resident plan all call
+/// it, so the amount in the key, the amount `glifo` keys on and the amount
+/// drawn are the same bits. Quantizing only the key would desynchronize it from
+/// the stroke, so all three move together.
+///
+/// This deliberately deviates from `glifo` 0.3.0, whose cache key carries the
+/// raw size (`key.rs`): sub-quantum scale jitter would otherwise mint a new
+/// embolden value, and a new cache entry, for an unchanged quantized size. The
+/// price is a stroke off by at most half a quantum of basis times
+/// `fraction / 2` per side (`0.125 * fraction / 2`, about 0.003 px for the
+/// usual 0.05 em bold). An unhinted basis is the face's `upem`, already on the
+/// grid. A basis that cannot be quantized yields no embolden.
+#[must_use]
+pub(crate) fn synthesis_embolden(fraction: f32, basis: f32) -> f32 {
+    quantize_font_size(basis).map_or(0.0, |basis| embolden_per_side(fraction, basis))
+}
+
 /// The size `glifo` draws a run's outlines at: `size` with the run
 /// transform's absorbed scale multiplied in, in `f32` exactly as `glifo`
 /// multiplies it, or `size` itself when the transform is not absorbed and the
@@ -634,6 +655,19 @@ pub(crate) fn drawn_font_size(size: f32, transform: Affine) -> f32 {
 /// `upem` is the face's units-per-em ([`FaceFacts::upem`](super::FaceFacts)),
 /// read once per face. One function for the lowering, the route key and the
 /// resident plan, so the embolden bits each derives are the same.
+///
+/// # Assumption: a hinting instance exists
+///
+/// The hinted basis assumes `glifo` obtained a `skrifa` hinting instance for the
+/// run (`HintCache::get` returned `Some`). When it returns `None`
+/// (`HintingInstance::new` or `reconfigure` failed) `glifo` draws at `upem`
+/// instead, and a device-pixel stroke is then read in font units, far too small.
+/// This does NOT hold for every face: `tests/hint_instance_probe.rs` shows every
+/// bundled face and every size 8..=96 px succeeds, but some macOS system faces
+/// (`Brush Script.ttf`: `fpgm` FDEF overflow; `Courier.ttc` member 2: `prep`
+/// stack overflow) fail at every size, so a run of such a face is under-emboldened
+/// when hinted. The engine cannot pre-probe because `skrifa` is a dev-dependency
+/// only; the tracked fix is a face-level fallback to `upem` once that is decided.
 #[must_use]
 pub(crate) fn embolden_basis(size: f32, transform: Affine, hinted: bool, upem: f32) -> f32 {
     match hinted.then(|| hinted_absorbed_scale(transform)).flatten() {
@@ -1035,7 +1069,7 @@ impl RunKey {
         let font = run.font.font();
         let distinct = seen.count_distinct(run.glyphs.iter().map(|glyph| glyph.id));
         let oblique = oblique_synthesis(run, basis.synthetic_oblique);
-        let embolden = embolden_per_side(
+        let embolden = synthesis_embolden(
             run.font.embolden(),
             embolden_basis(run.font_size, transform, hinted, basis.upem),
         );
@@ -2062,6 +2096,12 @@ impl AtlasPolicy {
     /// forever. Eviction past [`MAX_SETTLED_SIZES`] drops the least recently
     /// settled size, the smallest size first among those settled on the same
     /// frame, so the choice does not depend on hash order.
+    ///
+    /// The memory never ENDS an open window, it only stops a returning size
+    /// from opening one: a sweep passing through a settled size is already
+    /// inside the window the previous step opened, so that size is not cached
+    /// mid-sweep either (pinned by
+    /// `a_sweep_through_a_settled_size_does_not_cache_it_mid_sweep`).
     fn observe_size(&mut self, font: FontKey, size: f32) -> bool {
         let frame = self.frame;
         let bits = size.to_bits();
@@ -2791,6 +2831,24 @@ mod resident_run_tests {
     /// A hinted run's stroke is measured in drawn pixels, an unhinted one's
     /// in font units, oblique or not.
     #[test]
+    fn embolden_is_identical_for_device_sizes_inside_one_quantum() {
+        let a = synthesis_embolden(0.05, 32.01);
+        let b = synthesis_embolden(0.05, 32.09);
+        assert_eq!(a.to_bits(), b.to_bits());
+        assert!(
+            Synthesis::new(&[], a)
+                .unwrap()
+                .same(&Synthesis::new(&[], b).unwrap())
+        );
+        assert_ne!(a.to_bits(), synthesis_embolden(0.05, 32.25).to_bits());
+        assert_eq!(synthesis_embolden(0.05, f32::NAN), 0.0);
+        assert_eq!(
+            synthesis_embolden(0.05, 1000.0),
+            embolden_per_side(0.05, 1000.0)
+        );
+    }
+
+    #[test]
     fn the_embolden_basis_is_the_drawn_size_hinted_and_upem_unhinted() {
         let twice = Affine::scale(2.0);
         assert_eq!(embolden_basis(16.0, twice, true, 1000.0), 32.0);
@@ -3001,6 +3059,62 @@ mod settle_tests {
                 .values()
                 .all(|font| font.settled.len() <= MAX_SETTLED_SIZES)
         );
+    }
+
+    fn test_images() -> ImageCache {
+        ImageCache::new_with_config(AtlasConfig {
+            initial_atlas_count: 0,
+            max_atlases: 4,
+            atlas_size: (1024, 1024),
+            auto_grow: true,
+            allocation_strategy: AllocationStrategy::FirstFit,
+        })
+    }
+
+    /// A sweep that passes through a size that already settled: the previous
+    /// step's window still covers the frame the sweep reaches that size, so it
+    /// stays off the atlas. Measured, not assumed: the settled memory only
+    /// stops a size from OPENING a window, and the sweep's own window is open.
+    #[test]
+    fn a_sweep_through_a_settled_size_does_not_cache_it_mid_sweep() {
+        let mut images = test_images();
+        let mut policy = AtlasPolicy::new(&images, false);
+        for _ in 0..(SETTLE_FRAMES + 4) {
+            cached(&mut policy, &mut images, 16.0);
+        }
+        assert!(cached(&mut policy, &mut images, 16.0), "16 px has settled");
+        let mut mid_sweep = None;
+        for step in 0..=32_u32 {
+            let size = 12.0 + step as f32 * SIZE_QUANTUM;
+            let routed = cached(&mut policy, &mut images, size);
+            if size == 16.0 {
+                mid_sweep = Some(routed);
+            } else {
+                assert!(!routed, "{size} px is mid-sweep and must not cache");
+            }
+        }
+        assert_eq!(mid_sweep, Some(false), "the settled size inside the sweep");
+    }
+
+    /// A session cycling more sizes than the memory holds, in blocks longer
+    /// than the settle window, keeps the per-font bookkeeping within its bound
+    /// however many cycles it runs.
+    #[test]
+    fn cycling_more_sizes_than_the_memory_keeps_the_bookkeeping_bounded() {
+        let mut images = test_images();
+        let mut policy = AtlasPolicy::new(&images, false);
+        let count = (MAX_SETTLED_SIZES + 8) as u32;
+        for _cycle in 0..4 {
+            for step in 0..count {
+                let size = 12.0 + step as f32 * 2.0;
+                for _ in 0..(SETTLE_FRAMES + 3) {
+                    cached(&mut policy, &mut images, size);
+                }
+                assert!(policy.fonts.values().all(|font| {
+                    font.settled.len() <= MAX_SETTLED_SIZES && font.sizes.len() <= count as usize
+                }));
+            }
+        }
     }
 
     /// The boundary the docs state: a block exactly as long as the settle

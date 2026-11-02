@@ -52,6 +52,8 @@ criterion.workspace = true
 proptest.workspace = true
 # Shapes the S1/S6-like bench scenes once (benches/scenes.rs); bench-only, not a runtime dependency.
 frust-text.workspace = true
+# Hinting-instance probe (tests/hint_instance_probe.rs); test-only, never a runtime dependency.
+skrifa.workspace = true
 
 [features]
 default = []

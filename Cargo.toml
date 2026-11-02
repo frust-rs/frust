@@ -132,6 +132,9 @@ accesskit_ios = "=0.1.2"
 # guarded by crates/frust-testing/tests/dup_identities.rs.
 vello_common = { version = "=0.2.0", default-features = false, features = ["std"] }
 glifo = { version = "=0.3.0", default-features = false, features = ["std"] }
+# Dev-only hinting-instance probe (crates/frust-engine/tests/hint_instance_probe.rs): never a runtime
+# dependency. Must move with glifo's skrifa pin; same version and features glifo enables.
+skrifa = { version = "0.44.0", default-features = false, features = ["std", "autohint_shaping"] }
 # Dev-only CPU oracle for frust-testing, on the same core as the engine (moves in lockstep with the two
 # rows above). `u8_pipeline` is mandatory: vello_cpu 0.2.0 fails to compile without a pipeline, and u8 is
 # what the engine rasterizes with. Keep `png`/`multithreading` off.
