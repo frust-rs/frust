@@ -11,20 +11,24 @@
 //! the `.notdef` glyph is not the cause: a run carrying it becomes resident
 //! from its second frame exactly as a run of real glyphs does.
 //!
-//! The second case characterizes the cause the device numbers *do* match. The
-//! glyph-atlas policy rations glyph residency to half of the mobile atlas —
+//! The second case pins the cure for the cause the device numbers *do* match.
+//! The glyph-atlas policy rations glyph residency to half of the mobile atlas —
 //! `1024 x 1024 x 4` texels, so a 2,097,152-texel budget — and prices each
 //! entry at its device size's em square: `18 * 18 * (size / 16)^2`, or about
 //! 3,690 texels at the 54 px an 18 px run is drawn at under a 3x root. That is
 //! room for ~568 entries. A paragraph whose glyphs need more than that is
 //! admitted whole on its first frame (each run is charged its distinct glyph
 //! ids, not ids times the subpixel buckets they land in), and from then on the
-//! resident population alone is over the budget, so every run is routed to
-//! outlines — including runs whose every glyph is already resident. Nothing
-//! probes the unused entries, the LRU reaps them, and the next frame admits and
-//! rasterizes the whole paragraph again. The same scene at 2x (the iPhone SE)
-//! fits and stays resident. The case pins that behaviour as measured; a change
-//! to the policy's budget accounting is expected to invert it.
+//! resident population alone is over the budget. The policy used to route every
+//! run to outlines from there — including runs whose every glyph was already
+//! resident — so nothing probed the unused entries, the LRU reaped them, and
+//! the next frame admitted and rasterized the whole paragraph again: a thrash
+//! cycle, `glyph_misses` and `glyph_evicted` matching each other window after
+//! window. Admission is now hysteretic: the budget refuses only runs that would
+//! *insert*, so the over-budget paragraph stays resident across eviction passes,
+//! while a new run arriving on top of it is refused until the paragraph leaves
+//! and the LRU gives its space back. The same scene at 2x (the iPhone SE) fits
+//! outright and stays resident, as it always did.
 
 #![cfg(not(target_arch = "wasm32"))]
 
@@ -74,6 +78,22 @@ const PARAGRAPH_SIZE: f32 = 18.0;
 const OVER_BUDGET_FACES: usize = 8;
 const UNDER_BUDGET_FACES: usize = 7;
 
+/// The face the new run on top of the over-budget paragraph is drawn in: one
+/// past the paragraph's, so none of its glyphs is resident when it arrives.
+const NEW_RUN_FACE: usize = OVER_BUDGET_FACES;
+
+/// Glyphs in the new run drawn on top of the over-budget paragraph.
+const NEW_RUN_GLYPHS: u32 = 100;
+
+/// The mobile glyph budget: half of the `1024 x 1024 x 4` atlas array's texels
+/// (the policy's `glyph_texel_budget` over `AtlasBudget::MOBILE`).
+const MOBILE_GLYPH_BUDGET: u64 = 1024 * 1024 * 4 / 2;
+
+/// What the policy charges one entry at the 54 px device size the paragraph is
+/// keyed at under a 3x root: `18 * 18 * (54 / 16)^2`, truncated (the policy's
+/// `glyph_texels_at(54.0)`).
+const TEXELS_AT_54_PX: u64 = 3_690;
+
 /// Frames past two of `glifo`'s eviction passes (one every 64 frames), so a
 /// reap and the re-admission after it both fall inside the window.
 const PAST_TWO_EVICTIONS: usize = 140;
@@ -91,7 +111,7 @@ fn latin_font() -> FontHandle {
 fn face(index: usize) -> FontHandle {
     static FACES: OnceLock<Vec<FontHandle>> = OnceLock::new();
     FACES.get_or_init(|| {
-        (0..OVER_BUDGET_FACES)
+        (0..=NEW_RUN_FACE)
             .map(|_| FontHandle::new(FontData::new(Blob::new(Arc::new(LATIN_FONT.to_vec())), 0)))
             .collect()
     })[index]
@@ -139,31 +159,57 @@ fn line(ids: &[u32]) -> Scene {
 /// of `glifo`'s subpixel buckets, so each face asks for up to
 /// `4 * GLYPHS_IN_FONT` atlas entries.
 fn paragraph(faces: usize, root_scale: f64) -> Scene {
-    let extent = (f64::from(PHONE) / root_scale) as u16;
-    scene_of(extent, |builder| {
-        for index in 0..faces {
-            let mut glyphs = Vec::new();
-            for id in 0..GLYPHS_IN_FONT {
-                for bucket in 0..4_u32 {
-                    let slot = f64::from(id * 4 + bucket);
-                    // Ten device pixels apart, offset by the bucket's quarter.
-                    let device_x = 10.0 * slot + f64::from(bucket) / 4.0;
-                    glyphs.push(Glyph {
-                        id,
-                        x: (device_x / root_scale) as f32,
-                        y: 0.0,
-                    });
-                }
-            }
-            builder.draw_glyph_run(GlyphRun {
-                font: face(index),
-                font_size: PARAGRAPH_SIZE,
-                brush: Brush::Solid(Color::BLACK),
-                transform: Affine::translate((2.0, 20.0 + 18.0 * index as f64)),
-                glyphs,
-            });
-        }
+    scene_of(extent_at(root_scale), |builder| {
+        draw_paragraph(builder, faces, root_scale);
     })
+}
+
+/// The host extent a [`PHONE`]-wide device covers under a `root_scale` root.
+fn extent_at(root_scale: f64) -> u16 {
+    (f64::from(PHONE) / root_scale) as u16
+}
+
+/// One run of `glyphs` glyphs of [`face`] `index` at [`PARAGRAPH_SIZE`] on line
+/// `line`: every glyph id of the face in turn, each at all four subpixel
+/// buckets before the next, ten device pixels apart and offset by the bucket's
+/// quarter — wrapping back to the first id past `4 * GLYPHS_IN_FONT`.
+fn face_run(index: usize, line: usize, glyphs: u32, root_scale: f64) -> GlyphRun {
+    GlyphRun {
+        font: face(index),
+        font_size: PARAGRAPH_SIZE,
+        brush: Brush::Solid(Color::BLACK),
+        transform: Affine::translate((2.0, 20.0 + 18.0 * line as f64)),
+        glyphs: (0..glyphs)
+            .map(|slot| {
+                let id = (slot / 4) % GLYPHS_IN_FONT;
+                let bucket = slot % 4;
+                let device_x = 10.0 * f64::from(slot) + f64::from(bucket) / 4.0;
+                Glyph {
+                    id,
+                    x: (device_x / root_scale) as f32,
+                    y: 0.0,
+                }
+            })
+            .collect(),
+    }
+}
+
+/// [`paragraph`]'s runs, recorded into `builder`.
+fn draw_paragraph(builder: &mut SceneBuilder<'_>, faces: usize, root_scale: f64) {
+    for index in 0..faces {
+        builder.draw_glyph_run(face_run(index, index, 4 * GLYPHS_IN_FONT, root_scale));
+    }
+}
+
+/// The [`NEW_RUN_GLYPHS`]-glyph run of [`NEW_RUN_FACE`], on the line below the
+/// over-budget paragraph.
+fn draw_new_run(builder: &mut SceneBuilder<'_>, root_scale: f64) {
+    builder.draw_glyph_run(face_run(
+        NEW_RUN_FACE,
+        OVER_BUDGET_FACES,
+        NEW_RUN_GLYPHS,
+        root_scale,
+    ));
 }
 
 /// A compiler with glyph quads and the resident-run cache on, as a phone
@@ -335,9 +381,9 @@ fn assert_resident_after_first(label: &str, faces: usize, costs: &[TextCost]) {
 }
 
 #[test]
-fn a_paragraph_over_the_mobile_glyph_budget_at_3x_is_drawn_as_outlines_after_its_first_frame() {
-    // The cliff, both sides of it: seven faces fit the budget at 3x and stay
-    // resident; the same paragraph at 2x fits with eight.
+fn a_paragraph_over_the_mobile_glyph_budget_at_3x_stays_resident_and_refuses_only_new_glyphs() {
+    // The old cliff's two sides, which fit the budget outright and were always
+    // resident: seven faces at 3x, and the same paragraph at 2x with eight.
     assert_resident_after_first(
         "seven faces at 3x",
         UNDER_BUDGET_FACES,
@@ -349,65 +395,131 @@ fn a_paragraph_over_the_mobile_glyph_budget_at_3x_is_drawn_as_outlines_after_its
         &paragraph_frames(OVER_BUDGET_FACES, 2.0),
     );
 
-    // Eight faces at 3x: admitted and rasterized whole on frame one...
-    let costs = paragraph_frames(OVER_BUDGET_FACES, 3.0);
+    // Eight faces at 3x: admitted and rasterized whole on frame one, which
+    // leaves the resident population over the budget.
+    let mut compiler = compiler(PHONE, false);
+    let root = Affine::scale(3.0);
+    let paragraph = paragraph(OVER_BUDGET_FACES, 3.0);
+    let costs: Vec<TextCost> = (0..PAST_TWO_EVICTIONS)
+        .map(|_| compile(&mut compiler, &paragraph, root, PHONE))
+        .collect();
     let first = costs[0];
     assert!(first.rasterized, "frame 1 rasterizes the paragraph");
     assert_eq!(first.atlas_draws, first.glyph_draws, "frame 1 is all atlas");
-    assert!(first.entries > 0, "frame 1 inserts entries");
+    let entries = u64::try_from(first.entries).expect("a few hundred");
+    assert!(
+        entries * TEXELS_AT_54_PX > MOBILE_GLYPH_BUDGET,
+        "fixture precondition: {entries} entries at 54 px charge {} texels, over \
+         the {MOBILE_GLYPH_BUDGET}-texel mobile budget",
+        entries * TEXELS_AT_54_PX
+    );
 
-    // ...then every run is refused the atlas while its entries sit resident
-    // and unused: no atlas draw, no resident run, and the whole paragraph's
-    // outlines generated again as strips, frame after frame.
-    let second = costs[1];
-    assert_eq!(
-        second.atlas_draws, 0,
-        "frame 2 samples nothing from the atlas"
-    );
-    assert_eq!(second.resident_runs, 0, "frame 2 draws no resident run");
-    assert_eq!(second.glyph_draws, first.glyph_draws, "frame 2 still draws");
-    assert_eq!(
-        second.entries, first.entries,
-        "frame 2 keeps frame 1's entries"
-    );
-    assert_eq!(
-        second.atlas_misses, 0,
-        "an outline-routed run probes nothing"
+    // Every later frame — across both eviction passes inside the window — is
+    // served from the atlas out of the resident-run cache: nothing rasterized,
+    // nothing reaped and re-inserted. The cycle the device line showed
+    // (`atlas_glyphs=0`, misses matching evictions) is gone.
+    for (index, cost) in costs.iter().enumerate().skip(1) {
+        let frame = index + 1;
+        let runs = u32::try_from(OVER_BUDGET_FACES).expect("a handful");
+        assert_eq!(
+            cost.resident_runs, runs,
+            "frame {frame}: every run resident"
+        );
+        assert_eq!(
+            cost.atlas_draws, cost.glyph_draws,
+            "frame {frame}: every glyph sampled from the atlas"
+        );
+        assert!(!cost.rasterized, "frame {frame}: nothing rasterized again");
+        assert_eq!(
+            cost.entries, first.entries,
+            "frame {frame}: the over-budget population is kept, not reaped"
+        );
+    }
+    // And it costs, frame for frame, exactly what the same paragraph costs on
+    // the desktop budget it fits outright: the same hits and misses — the only
+    // misses after frame one are the eviction pass's sibling-bucket probes,
+    // which look up and insert nothing, on both budgets alike — the same
+    // entries and the same strips. Over the budget is no longer a different
+    // regime for text that is already resident.
+    let mut fits = SceneCompiler::with_atlas_budget(PHONE, PHONE, AtlasBudget::DESKTOP);
+    fits.set_hint_text(false);
+    fits.set_glyph_quads(true);
+    fits.set_glyph_run_cache(true);
+    for (index, cost) in costs.iter().enumerate() {
+        let control = compile(&mut fits, &paragraph, root, PHONE);
+        assert_eq!(
+            *cost,
+            control,
+            "frame {}: the over-budget paragraph costs what it costs where it fits",
+            index + 1
+        );
+    }
+    // Frame two is where the population is first over the budget as a frame
+    // opens: the residency question is answered by atlas hits, one per glyph
+    // drawn, and the resident-run cache keeps the slots it found so no later
+    // frame reaches `glifo` at all.
+    assert!(
+        costs[1].atlas_hits >= u64::from(costs[1].glyph_draws),
+        "frame 2 proves the paragraph resident by hits ({} hits, {} glyphs)",
+        costs[1].atlas_hits,
+        costs[1].glyph_draws
     );
     assert!(
-        second.strips > 10 * costs_of_resident_strips(),
-        "frame 2 generates the paragraph's outlines as strips ({} strips)",
-        second.strips
+        costs[1].strips <= costs_of_resident_strips(),
+        "frame 2 generates no outline strips ({} strips)",
+        costs[1].strips
     );
 
-    // The LRU reaps the unused entries, and the frame after the reap admits
-    // the paragraph and rasterizes all of it again — the device line's
-    // `glyph_misses` and `glyph_evicted` that match each other window after
-    // window.
-    let reap = costs
+    // A new run arriving on top would insert, so it is refused — drawn as
+    // outlines — while the paragraph holds the budget, and the paragraph stays
+    // served the whole time.
+    let with_new_run = scene_of(extent_at(3.0), |builder| {
+        draw_paragraph(builder, OVER_BUDGET_FACES, 3.0);
+        draw_new_run(builder, 3.0);
+    });
+    for frame in 0..8 {
+        let cost = compile(&mut compiler, &with_new_run, root, PHONE);
+        assert_eq!(
+            cost.atlas_draws, first.atlas_draws,
+            "new-run frame {frame}: only the paragraph samples the atlas"
+        );
+        assert!(
+            cost.glyph_draws > cost.atlas_draws,
+            "new-run frame {frame}: the new run still draws, as outlines"
+        );
+        assert!(!cost.rasterized, "new-run frame {frame}: nothing inserted");
+        assert_eq!(cost.entries, first.entries, "new-run frame {frame}");
+    }
+
+    // The paragraph leaves. The new run stays refused until the LRU has reaped
+    // the paragraph's entries — space is freed by eviction, never by refusing a
+    // run that is still on screen — and is admitted on the frame after.
+    let new_run_alone = scene_of(extent_at(3.0), |builder| draw_new_run(builder, 3.0));
+    let alone: Vec<TextCost> = (0..PAST_TWO_EVICTIONS)
+        .map(|_| compile(&mut compiler, &new_run_alone, root, PHONE))
+        .collect();
+    let reap = alone
         .iter()
         .position(|cost| cost.entries == 0)
-        .expect("the eviction pass reaps the unused entries inside two passes");
-    let readmitted = costs
-        .get(reap + 1)
-        .expect("a frame follows the reap inside the window");
+        .expect("the eviction pass reaps the departed paragraph inside two passes");
+    for (frame, cost) in alone.iter().enumerate().take(reap + 1) {
+        assert_eq!(
+            cost.atlas_draws, 0,
+            "alone frame {frame}: refused while the paragraph's entries hold the budget"
+        );
+    }
+    let admitted = alone[reap + 1];
     assert!(
-        readmitted.rasterized,
-        "the frame after the reap rasterizes again"
+        admitted.rasterized,
+        "the frame after the reap rasterizes the new run"
     );
     assert_eq!(
-        readmitted.entries, first.entries,
-        "the frame after the reap re-inserts the whole paragraph"
+        admitted.atlas_draws, admitted.glyph_draws,
+        "and draws it from the atlas"
     );
-    assert!(
-        readmitted.atlas_misses >= u64::try_from(first.entries).expect("a few hundred"),
-        "every entry misses again"
-    );
-    for (index, cost) in costs.iter().enumerate().skip(1) {
-        if index != reap + 1 {
-            assert_eq!(cost.atlas_draws, 0, "frame {}: outlines only", index + 1);
-        }
-    }
+    let resident = alone[reap + 2];
+    assert_eq!(resident.resident_runs, 1, "from then on it is resident");
+    assert_eq!(resident.atlas_misses, 0);
 }
 
 /// The strips a frame of fully resident runs generates: the backdrop's, since
