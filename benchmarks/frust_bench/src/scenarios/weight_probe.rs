@@ -11,9 +11,11 @@
 //! The sample is `Hello, hello`; the subset's cmap covers exactly space, `,`,
 //! `H`, `e`, `l`, `o` and `é`, so every glyph is real (no `.notdef` boxes).
 //!
-//! The font is compiled in and pushed through [`frust::register_app_fonts`]
-//! once; the shell drains it at construction and once per frame, and the
-//! family name is the font's own (`Noto Sans`).
+//! The font is compiled in and registered by [`register_font`], which
+//! `BenchState::new` calls from `BenchApp::init`: that runs before the shell's
+//! construction-time drain, whereas a registration made in `build` lands after
+//! it and a static scene requests no later frame to apply it. The family name
+//! is the font's own (`Noto Sans`); no other scenario names it.
 
 use std::sync::Once;
 
@@ -42,6 +44,13 @@ pub const ROWS: [(FontWeight, bool); 4] = [
     (FontWeight::BOLD, true),
 ];
 
+/// Register the subset font process-wide, once. Called from `BenchState::new`
+/// so the shell's construction-time font drain applies it.
+pub(crate) fn register_font() {
+    static REGISTER: Once = Once::new();
+    REGISTER.call_once(|| frust::register_app_fonts(FONT.to_vec()));
+}
+
 /// The weight probe scenario.
 pub struct WeightProbe;
 
@@ -56,9 +65,6 @@ impl Scenario for WeightProbe {
 
     // erasure: keep Scenario::build feeds the dyn SCENARIOS table
     fn build(&self, _state: &mut BenchState) -> AnyView<BenchState> {
-        static REGISTER: Once = Once::new();
-        REGISTER.call_once(|| frust::register_app_fonts(FONT.to_vec()));
-
         let mut col = column();
         for (weight, italic) in ROWS {
             let mut row = text(SAMPLE)

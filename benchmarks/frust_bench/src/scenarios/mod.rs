@@ -184,6 +184,9 @@ impl BenchState {
     /// Construct the initial state with `active`/`selected` resolved from the
     /// launch deep link or [`SCENARIO_ENV`] (defaulting to S1).
     pub fn new() -> Self {
+        // Process-wide font registration must precede the shell's
+        // construction-time drain (see `weight_probe`'s module doc).
+        weight_probe::register_font();
         let (initial, pending_unknown_env_id) = resolve_initial();
         Self {
             active: initial,
