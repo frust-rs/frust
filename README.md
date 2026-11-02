@@ -31,7 +31,7 @@ no imperative view mutation. Design systems ship as sibling plugin crates built 
 public `frust::authoring` toolkit, the same seam a third-party design system uses:
 `frust-glyph`, `frust-material` (Material 3), `frust-cupertino`, `frust-shadcn`, and `frust-beui`.
 
-**Built with Frust: muxr** — a mobile client for remote zellij/herdr terminal sessions, built
+**Built with Frust: [muxr](https://muxr.app/)** — a mobile client for remote zellij/herdr terminal sessions, built
 entirely with Frust.
 
 <p align="center">
