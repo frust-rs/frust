@@ -2354,6 +2354,7 @@ dependencies = [
  "objc2-core-text",
  "peniko",
  "proptest",
+ "skrifa",
  "thiserror 2.0.20",
  "vello_common",
  "web-time",
