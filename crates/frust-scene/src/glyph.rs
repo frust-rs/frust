@@ -87,15 +87,23 @@ impl FontHandle {
     /// as a fraction of the em, `skew_degrees` the faux-oblique angle. Zero
     /// (or a non-finite or negative `embolden`) means none. Both take part in
     /// equality, so differently synthesized handles are different faces.
+    ///
+    /// Both values are clamped so an out-of-range request cannot distort the
+    /// glyphs. The faux-oblique angle is held to `MAX_SKEW_DEGREES` in either
+    /// direction: the shear is `tan(angle)`, which grows without bound near 90
+    /// degrees, and no real oblique face is slanted that far. The faux-bold
+    /// fraction is held to `MAX_EMBOLDEN_EM`. A non-finite skew means none.
+    /// The text tier already clamps the bold fraction to 1/32..1/24 em, so the
+    /// upper bound here is defence in depth for other producers.
     #[must_use]
     pub fn with_synthesis(mut self, embolden: f32, skew_degrees: f32) -> Self {
         self.embolden = if embolden.is_finite() && embolden > 0.0 {
-            embolden
+            embolden.min(MAX_EMBOLDEN_EM)
         } else {
             0.0
         };
         self.skew_degrees = if skew_degrees.is_finite() {
-            skew_degrees
+            skew_degrees.clamp(-MAX_SKEW_DEGREES, MAX_SKEW_DEGREES)
         } else {
             0.0
         };
@@ -168,6 +176,17 @@ pub struct GlyphRun {
     pub glyphs: Vec<Glyph>,
 }
 
+/// Largest faux-oblique angle, in degrees, a handle keeps (either sign). The
+/// shear is `tan(angle)`, which diverges near 90 degrees, so an unbounded
+/// request would stretch glyphs across the whole line. 30 degrees is steeper
+/// than any designed italic.
+const MAX_SKEW_DEGREES: f32 = 30.0;
+
+/// Largest faux-bold stroke, as a fraction of the em, a handle keeps. The text
+/// tier produces 1/32..1/24 em; half an em would swallow the counters of any
+/// glyph, so anything above it is a caller error and is clamped.
+const MAX_EMBOLDEN_EM: f32 = 0.5;
+
 #[cfg(test)]
 mod tests {
     use peniko::Blob;
@@ -232,5 +251,28 @@ mod tests {
         assert_eq!(renamed.postscript_name(), None);
         assert!(!renamed.is_hidden());
         assert_eq!(renamed.normalized_coords(), &[0, 8192]);
+    }
+
+    #[test]
+    fn skew_is_clamped_to_the_documented_range() {
+        let plain = FontHandle::new(font());
+        assert_eq!(plain.clone().with_synthesis(0.0, 45.0).skew_degrees(), 30.0);
+        assert_eq!(
+            plain.clone().with_synthesis(0.0, -45.0).skew_degrees(),
+            -30.0
+        );
+        assert_eq!(plain.clone().with_synthesis(0.0, 14.0).skew_degrees(), 14.0);
+        assert_eq!(
+            plain.clone().with_synthesis(0.0, f32::NAN).skew_degrees(),
+            0.0
+        );
+    }
+
+    #[test]
+    fn embolden_is_clamped_to_the_documented_range() {
+        let plain = FontHandle::new(font());
+        assert_eq!(plain.clone().with_synthesis(2.0, 0.0).embolden(), 0.5);
+        assert_eq!(plain.clone().with_synthesis(f32::NAN, 0.0).embolden(), 0.0);
+        assert_eq!(plain.clone().with_synthesis(0.03, 0.0).embolden(), 0.03);
     }
 }
