@@ -358,7 +358,7 @@ pub(crate) fn lower_glyph_run(
     // Computed from the same helpers the route key and the resident plan use,
     // so the amount `glifo` keys on is the amount they key on.
     let oblique = atlas_policy::oblique_transform(run, synthetic_oblique);
-    let embolden = atlas_policy::embolden_for(atlas_policy::embolden_per_side(
+    let embolden = atlas_policy::embolden_for(atlas_policy::synthesis_embolden(
         run.font.embolden(),
         atlas_policy::embolden_basis(run.font_size, transform, hint, upem),
     ));
@@ -467,7 +467,7 @@ impl<'r> ResidentPlan<'r> {
         }
         let [_, _, t_c, t_d, t_e, t_f] = full.as_coeffs();
         let size = atlas_policy::drawn_font_size(run.font_size, full);
-        let embolden = atlas_policy::embolden_per_side(
+        let embolden = atlas_policy::synthesis_embolden(
             run.font.embolden(),
             atlas_policy::embolden_basis(run.font_size, full, hint, upem),
         );

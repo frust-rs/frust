@@ -3177,3 +3177,47 @@ fn a_colour_glyph_beside_latin_text_leaves_neither_of_them_transparent() {
         "a page held still must render identically once it has settled"
     );
 }
+
+/// Entries after drawing `font` at scale 2.0 and then 2.001, hinting on, and
+/// whether the second frame was served entirely by the atlas.
+fn entries_after_scale_jitter(font: FontHandle) -> (usize, bool) {
+    let mut compiler = SceneCompiler::new(VIEWPORT.0, VIEWPORT.1);
+    compiler.set_hint_text(true);
+    let scene_at = |scale: f64| {
+        text_scene_at(
+            font.clone(),
+            &HELLO,
+            WIRED_SIZE,
+            Brush::Solid(BLACK),
+            Affine::translate((8.0, 44.0)) * Affine::scale(scale),
+        )
+    };
+    let first = compile_serviced(&mut compiler, &scene_at(2.0));
+    assert_eq!(
+        first.atlas_glyph_draws, first.glyph_draws,
+        "fixture precondition: the run reaches the atlas"
+    );
+    let second = compile_serviced(&mut compiler, &scene_at(2.001));
+    (
+        compiler.glyph_atlas_entries(),
+        second.atlas_glyph_draws == second.glyph_draws,
+    )
+}
+
+/// A faux-bold run under a transform whose scale jitters inside one size
+/// quantum stays on the atlas and costs no more entries than the same run
+/// without synthesis: the stroke is derived from the quantized basis, so the
+/// embolden is never what mints a key. (`glifo` 0.3.0 keys the size itself
+/// exactly, `GlyphCacheKey::size_bits`, so the entry count of a jittered
+/// scale is the plain run's; the embolden adds nothing to it.)
+#[test]
+fn a_faux_bold_run_under_sub_quantum_scale_jitter_stays_resident() {
+    let (plain_entries, _) = entries_after_scale_jitter(latin_font());
+    let (bold_entries, bold_on_atlas) =
+        entries_after_scale_jitter(latin_font().with_synthesis(0.05, 0.0));
+    assert!(bold_on_atlas, "the jittered frame is a resident atlas hit");
+    assert_eq!(
+        bold_entries, plain_entries,
+        "faux bold minted entries a plain run under the same jitter did not"
+    );
+}
