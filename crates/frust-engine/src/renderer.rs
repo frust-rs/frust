@@ -536,8 +536,18 @@ const ENCODE_TRACE_COLUMNS: [&str; 17] = [
 /// event. Both read zero off Apple and on any run with no `hvgl`-only face.
 /// They are appended after `bind_groups` so every earlier column keeps its
 /// position.
+///
+/// Three more follow, appended after `hvgl_outline_fallbacks` for the same
+/// reason. `hvgl_variation_mismatches` and `hvgl_variation_unverified` are
+/// **cumulative** over the compiler's life (the
+/// [`SceneCompiler::hvgl_variation_mismatches`] and
+/// [`SceneCompiler::hvgl_variation_unverified`] getters), not per frame: the
+/// line reports the newest row's reading, so a rise between two lines is the
+/// change in that span. `hvgl_unavailable` is the frame's
+/// [`CompiledFrame::hvgl_unavailable_glyphs`], a per-frame level reported as a
+/// window median.
 #[cfg(feature = "perf-trace")]
-const ENCODE_TRACE_COUNTS: [&str; 18] = [
+const ENCODE_TRACE_COUNTS: [&str; 21] = [
     "draws",
     "strips",
     "alphas",
@@ -556,6 +566,9 @@ const ENCODE_TRACE_COUNTS: [&str; 18] = [
     "bind_groups",
     "hvgl_atlas_draws",
     "hvgl_outline_fallbacks",
+    "hvgl_variation_mismatches",
+    "hvgl_variation_unverified",
+    "hvgl_unavailable",
 ];
 
 /// Index into [`ENCODE_TRACE_COUNTS`] of the first count reported as a sum over
@@ -582,6 +595,17 @@ const ENCODE_TRACE_SUMMED_AGAIN: usize = 12;
 /// per-frame counts, appended after `bind_groups`.
 #[cfg(feature = "perf-trace")]
 const ENCODE_TRACE_MEDIAN_LAST: usize = 16;
+
+/// Index into [`ENCODE_TRACE_COUNTS`] of the first count reported as the newest
+/// row's reading (the cumulative `hvgl_variation_*` counters), up to and
+/// excluding [`ENCODE_TRACE_MEDIAN_FINAL`].
+#[cfg(feature = "perf-trace")]
+const ENCODE_TRACE_FIRST_LATEST: usize = 18;
+
+/// Index into [`ENCODE_TRACE_COUNTS`] of the first count after the cumulative
+/// pair: `hvgl_unavailable`, a window median, through the end of the line.
+#[cfg(feature = "perf-trace")]
+const ENCODE_TRACE_MEDIAN_FINAL: usize = 20;
 
 /// Width of one window row: every phase column followed by every count.
 #[cfg(feature = "perf-trace")]
@@ -657,6 +681,14 @@ struct EncodeCounts {
     /// Glyphs of `hvgl`-only faces this frame filled as outlines instead: the
     /// frame's [`CompiledFrame::hvgl_outline_fallbacks`]. A window median.
     hvgl_outline_fallbacks: u32,
+    /// The compiler's cumulative `hvgl` variation-mismatch count when the frame
+    /// was recorded. Reported as the newest row's value, not a median.
+    hvgl_variation_mismatches: u32,
+    /// The compiler's cumulative count of `hvgl` draws whose variation could
+    /// not be verified. Reported as the newest row's value.
+    hvgl_variation_unverified: u32,
+    /// The frame's [`CompiledFrame::hvgl_unavailable_glyphs`]. A window median.
+    hvgl_unavailable: u32,
 }
 
 #[cfg(feature = "perf-trace")]
@@ -670,6 +702,7 @@ impl EncodeCounts {
         report: &AtlasRenderReport,
         policy: &crate::text::atlas_policy::AtlasTrace,
         staged: u64,
+        compiler: &SceneCompiler,
     ) -> Self {
         fn count(len: usize) -> u32 {
             u32::try_from(len).unwrap_or(u32::MAX)
@@ -693,6 +726,9 @@ impl EncodeCounts {
             bind_groups: 0,
             hvgl_atlas_draws: frame.hvgl_atlas_draws,
             hvgl_outline_fallbacks: frame.hvgl_outline_fallbacks,
+            hvgl_variation_mismatches: compiler.hvgl_variation_mismatches(),
+            hvgl_variation_unverified: compiler.hvgl_variation_unverified(),
+            hvgl_unavailable: frame.hvgl_unavailable_glyphs,
         }
     }
 }
@@ -778,6 +814,9 @@ impl EncodeSpans {
             self.counts.bind_groups,
             self.counts.hvgl_atlas_draws,
             self.counts.hvgl_outline_fallbacks,
+            self.counts.hvgl_variation_mismatches,
+            self.counts.hvgl_variation_unverified,
+            self.counts.hvgl_unavailable,
         ]
     }
 }
@@ -876,7 +915,13 @@ impl EncodeTrace {
             let column = ENCODE_TRACE_COLUMNS.len() + offset;
             let summed = (ENCODE_TRACE_FIRST_SUMMED..ENCODE_TRACE_MEDIAN_AGAIN).contains(&offset)
                 || (ENCODE_TRACE_SUMMED_AGAIN..ENCODE_TRACE_MEDIAN_LAST).contains(&offset);
-            let value = if summed {
+            let value = if (ENCODE_TRACE_FIRST_LATEST..ENCODE_TRACE_MEDIAN_FINAL).contains(&offset)
+            {
+                self.window
+                    .last()
+                    .and_then(|row| row.get(column))
+                    .map_or(0, |v| u64::from(*v))
+            } else if summed {
                 self.window
                     .iter()
                     .filter_map(|row| row.get(column))
@@ -2327,6 +2372,7 @@ impl EngineRenderer {
                     &self.atlas_report,
                     self.compiler.glyph_atlas_trace(),
                     self.last_staged,
+                    &self.compiler,
                 ),
             },
             now,
@@ -8268,6 +8314,9 @@ mod tests {
             row[base + 11] = 100 + frame; // staged_bytes: median 101
             row[base + 12] = 1; // staging_busy: sum 3
             row[base + 15] = 2; // bind_groups: sum 6
+            row[base + 18] = 7 + frame; // hvgl_variation_mismatches: newest 9
+            row[base + 19] = 20 + frame; // hvgl_variation_unverified: newest 22
+            row[base + 20] = 3 + frame; // hvgl_unavailable: median 4
             trace.window.push(row);
         }
         let line = trace.line();
@@ -8278,7 +8327,8 @@ mod tests {
             "draws=11 strips=0 alphas=0 glyph_draws=0 atlas_glyphs=0 replays=3 \
              dirty_pages=6 atlas_refused=0 glyph_misses=3 glyph_evicted=0 run_keys=5 \
              staged_bytes=101 staging_busy=3 staging_too_large=0 staging_buffers=0 \
-             bind_groups=6 hvgl_atlas_draws=0 hvgl_outline_fallbacks=0"
+             bind_groups=6 hvgl_atlas_draws=0 hvgl_outline_fallbacks=0 \
+             hvgl_variation_mismatches=9 hvgl_variation_unverified=22 hvgl_unavailable=4"
         );
     }
 
@@ -8301,10 +8351,17 @@ mod tests {
             &AtlasRenderReport::default(),
             compiler.glyph_atlas_trace(),
             0,
+            &compiler,
         );
         assert_eq!(
-            (plain.hvgl_atlas_draws, plain.hvgl_outline_fallbacks),
-            (0, 0)
+            (
+                plain.hvgl_atlas_draws,
+                plain.hvgl_outline_fallbacks,
+                plain.hvgl_variation_mismatches,
+                plain.hvgl_variation_unverified,
+                plain.hvgl_unavailable
+            ),
+            (0, 0, 0, 0, 0)
         );
 
         // Three frames whose atlas counts are 3, 5 and 7 and whose fallbacks
@@ -8320,6 +8377,7 @@ mod tests {
                 &AtlasRenderReport::default(),
                 compiler.glyph_atlas_trace(),
                 0,
+                &compiler,
             );
             let spans = EncodeSpans {
                 counts,
@@ -8329,7 +8387,7 @@ mod tests {
         }
         let line = trace.line();
         assert!(
-            line.ends_with(" bind_groups=0 hvgl_atlas_draws=5 hvgl_outline_fallbacks=2"),
+            line.contains(" bind_groups=0 hvgl_atlas_draws=5 hvgl_outline_fallbacks=2 "),
             "{line}"
         );
     }
