@@ -1049,6 +1049,27 @@ mod macos {
         assert_eq!(compiler.hvgl_identity_mismatches(), 0);
     }
 
+    /// A compiler that fills `hvgl` glyphs as outlines, for [`inked`].
+    fn compiler_on_the_outline_route() -> frust_engine::compile::SceneCompiler {
+        let mut probe = compiler();
+        probe.set_hvgl_atlas(false);
+        probe
+    }
+
+    /// How many of `ids` carry ink in `font`: each drawn alone, on screen,
+    /// through the outline route, which draws nothing for an inkless glyph.
+    fn inked(
+        probe: &mut frust_engine::compile::SceneCompiler,
+        font: &FontHandle,
+        ids: &[u32],
+    ) -> u32 {
+        let inked = ids
+            .iter()
+            .filter(|id| compile(probe, vec![run(font.clone(), &[**id])]).glyph_draws > 0)
+            .count();
+        u32::try_from(inked).expect("a chunk is small")
+    }
+
     #[test]
     fn the_hvgl_outline_cache_evicts_at_its_cap() {
         let Some(data) = pingfang() else { return };
@@ -1062,6 +1083,7 @@ mod macos {
             // Glyph ids 1.. are all inside PingFang (tens of thousands of
             // glyphs), drawn 32 distinct ones a frame until the cap is passed.
             let ids: Vec<u32> = (1..=u32::try_from(capacity + 64).expect("small")).collect();
+            let mut ink_probe = compiler_on_the_outline_route();
             for (chunk_index, chunk) in ids.chunks(32).enumerate() {
                 let frame = compile(&mut compiler, vec![run(font.clone(), chunk)]);
                 let drawn = (chunk_index + 1) * 32;
@@ -1071,12 +1093,13 @@ mod macos {
                 // rasterize), a hit. Per fetch call, not per glyph.
                 assert_eq!(frame.hvgl_outline_misses, 32, "atlas {atlas}: {drawn}");
                 if atlas {
-                    // PingFang's glyph ids 1-4 carry no ink: measured, never
-                    // rasterized, so the first chunk has four fewer hits.
-                    let inkless = if chunk_index == 0 { 4 } else { 0 };
+                    // An inkless glyph is measured but never rasterized, so
+                    // only the inked ones are fetched a second time. Which
+                    // low ids carry no ink depends on the installed PingFang
+                    // build, so count them here rather than assume.
                     assert_eq!(
                         frame.hvgl_outline_hits,
-                        32 - inkless,
+                        inked(&mut ink_probe, &font, chunk),
                         "atlas {atlas}: {drawn}"
                     );
                 } else {
