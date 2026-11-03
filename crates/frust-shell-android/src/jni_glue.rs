@@ -2270,28 +2270,42 @@ pub fn native_on_touch(handle: jlong, action: jint, pointer_id: jint, x: jfloat,
     });
 }
 
-/// Once per background transition, however many lifecycle callbacks report it.
+/// The font-cache flush at the `Hidden` edge (`onStop`), once per background transition: the
+/// latch keeps a repeated `onStop` from writing twice before the next shown edge.
 static BACKGROUND_FLUSH: frust_shell_common::BackgroundFlush =
     frust_shell_common::BackgroundFlush::new();
 
-/// `nativeOnStart`: activity started. Updates the lifecycle facts and pushes the
+/// `nativeOnStart`: activity started — the shown edge. Re-arms the font-cache
+/// flush [`native_on_stop`] runs, then updates the lifecycle facts and pushes the
 /// derived [`AppLifecycleState`](frust_reactive::AppLifecycleState).
 pub fn native_on_start(handle: jlong) {
     guard("nativeOnStart", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if unsafe { handle_mut(handle) }.is_some() {
+            BACKGROUND_FLUSH.came_to_foreground();
             crate::lifecycle::apply(|f| f.started = true, |_| true);
         }
     });
 }
 
 /// `nativeOnStop`: activity stopped. Updates the lifecycle facts and pushes the
-/// derived state (`Paused`; the state machine synthesizes `Hidden` on the way).
+/// derived state (`Paused`; the state machine synthesizes `Hidden` on the way),
+/// then flushes the font cache at that `Hidden` edge: a process killed in the
+/// background loses the session's unwritten font answers. The flush runs on the
+/// UI thread, which owns the text context; nothing is flushed at `onPause`.
 pub fn native_on_stop(handle: jlong) {
     guard("nativeOnStop", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
-        if unsafe { handle_mut(handle) }.is_some() {
+        if let Some(app) = unsafe { handle_mut(handle) } {
             crate::lifecycle::apply(|f| f.started = false, |_| true);
+            let started = std::time::Instant::now();
+            let outcome = BACKGROUND_FLUSH.went_to_background_outcome(&mut [&mut app.text_ctx]);
+            if !outcome.is_repeat() {
+                log::info!(
+                    "frust-shell-android: onStop font cache flush took {:.1} ms",
+                    started.elapsed().as_secs_f64() * 1e3
+                );
+            }
         }
     });
 }
@@ -2320,6 +2334,8 @@ pub fn native_on_resume(handle: jlong) {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if unsafe { handle_mut(handle) }.is_some() {
             log::debug!("frust-shell-android: onResume");
+            // Also re-armed at `onStart`; this covers an `onStart` that ran before the
+            // handle existed. Re-arming flushes nothing.
             BACKGROUND_FLUSH.came_to_foreground();
             crate::adpf::resume();
             crate::lifecycle::apply(
@@ -2338,7 +2354,8 @@ pub fn native_on_resume(handle: jlong) {
 /// backgrounded app's native sibling views should disappear with it rather than
 /// linger on top of whatever now shows behind the (possibly composited-away)
 /// frust surface. It also closes the performance-hint session: a paused activity
-/// runs no frame loop to hint for.
+/// runs no frame loop to hint for. An inactive-only pause flushes no font cache:
+/// that waits for the `Hidden` edge in [`native_on_stop`].
 pub fn native_on_pause(handle: jlong) {
     guard("nativeOnPause", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
@@ -2347,8 +2364,6 @@ pub fn native_on_pause(handle: jlong) {
             crate::lifecycle::apply(|f| f.resumed = false, |_| true);
             app.suspend_platform_views();
             crate::adpf::suspend();
-            // A process killed in the background loses the session's unwritten font answers.
-            BACKGROUND_FLUSH.went_to_background(&mut [&mut app.text_ctx]);
         }
     });
 }
@@ -2357,8 +2372,11 @@ pub fn native_on_pause(handle: jlong) {
 /// facts onto a handle created after those callbacks ran. A cold start runs
 /// `onStart`/`onResume`/focus before `surfaceCreated` makes the handle, so the
 /// hooks were dropped and the state would stay `Detached`. This runs no ADPF,
-/// background-flush or platform-view work: it sets the facts and pushes the
-/// derived lifecycle state once.
+/// flush or platform-view work: it sets the facts and pushes the derived
+/// lifecycle state once, and re-arms the font-cache flush when the replayed
+/// facts say the activity is started (shown). That re-arm matters after an
+/// activity recreate: the old activity's `onStop` armed the process-wide latch,
+/// and the new activity's `onStart`/`onResume` ran before its handle existed.
 pub fn native_sync_lifecycle(
     handle: jlong,
     started: jboolean,
@@ -2369,6 +2387,9 @@ pub fn native_sync_lifecycle(
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if unsafe { handle_mut(handle) }.is_some() {
             log::debug!("frust-shell-android: syncLifecycle");
+            if started {
+                BACKGROUND_FLUSH.came_to_foreground();
+            }
             crate::lifecycle::sync(started, resumed, focused);
         }
     });
