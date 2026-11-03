@@ -1256,22 +1256,22 @@ fn draw(recorder: &mut CommandRecorder<EngineDraw>, x: u16, y: u16, width: u16) 
     );
 }
 
-/// The fan-inside-a-fan `tests/schedule.rs` shows needing a fourth live page
-/// (`a_sibling_pair_nested_inside_a_sibling_pair_escalates`): an outer layer
-/// holding a flat child and a child carrying two children of its own.
-fn nested_fan_inside_a_fan() -> CommandRecorder<EngineDraw> {
+/// The four-wide fan `tests/schedule.rs` shows the pool cannot serve
+/// (`a_four_wide_fan_inside_a_dimmed_page_beside_a_sibling_escalates`): an
+/// outer layer holding a flat child and a child carrying four children of its
+/// own.
+fn four_wide_fan_inside_a_dimmed_page() -> CommandRecorder<EngineDraw> {
     let mut recorder = CommandRecorder::new(256, 192);
     recorder.push_layer(layer(0.5), None);
     recorder.push_layer(layer(0.5), None);
     draw(&mut recorder, 0, 16, 32);
     recorder.pop_layer();
     recorder.push_layer(layer(0.5), None);
-    recorder.push_layer(layer(0.5), None);
-    draw(&mut recorder, 48, 16, 32);
-    recorder.pop_layer();
-    recorder.push_layer(layer(0.5), None);
-    draw(&mut recorder, 96, 16, 32);
-    recorder.pop_layer();
+    for i in 0..4 {
+        recorder.push_layer(layer(0.5), None);
+        draw(&mut recorder, 48 + 40 * i, 16, 32);
+        recorder.pop_layer();
+    }
     recorder.pop_layer();
     recorder.pop_layer();
     recorder
@@ -1293,14 +1293,14 @@ fn assert_pooled_pages_within_the_bound(rounds: &[Round]) {
 
 #[test]
 fn a_retained_page_does_not_count_toward_the_live_page_bound() {
-    let recorder = nested_fan_inside_a_fan();
+    let recorder = four_wide_fan_inside_a_dimmed_page();
     let config = PageConfig::default();
     assert!(
         matches!(
             Schedule::build(&recorder, &caps(), &config),
             Err(EngineError::SchedulerEscalation { .. })
         ),
-        "precondition: pooled throughout, the shape needs a fourth live page"
+        "precondition: pooled throughout, the shape needs more than MAX_LIVE_PAGES live pages"
     );
 
     // The outer layer retained: it holds no page group, so the shape fits.
@@ -1341,7 +1341,7 @@ fn a_retained_page_does_not_count_toward_the_live_page_bound() {
         .map(|c| c.layer)
         .collect();
     composited.sort_unstable();
-    assert_eq!(composited, vec![0, 1, 2, 3, 4]);
+    assert_eq!(composited, vec![0, 1, 2, 3, 4, 5, 6]);
 }
 
 #[test]
