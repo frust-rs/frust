@@ -372,6 +372,14 @@ open class FrustViewController: UIViewController {
             name: UIApplication.willEnterForegroundNotification,
             object: nil
         )
+        // Memory pressure: trim the renderer's caches (delivered in the
+        // background too). Removed with the rest in deinit.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(appDidReceiveMemoryWarning),
+            name: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil
+        )
 
         // Insets: the keyboard's occlusion isn't part of `UIView.safeAreaInsets`, so
         // it's tracked separately via these notifications and recombined
@@ -1353,6 +1361,10 @@ open class FrustViewController: UIViewController {
 
     @objc private func appWillEnterForeground() {
         if let handle { frust_will_enter_foreground(handle) }
+    }
+
+    @objc private func appDidReceiveMemoryWarning() {
+        if let handle { frust_memory_warning(handle) }
     }
 
     @objc private func appDidBecomeActive() {

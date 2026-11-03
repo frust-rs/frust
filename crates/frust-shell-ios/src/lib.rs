@@ -350,6 +350,14 @@ macro_rules! ios_app {
             $crate::ffi_glue::did_enter_background(handle)
         }
 
+        /// `frust_memory_warning`: `didReceiveMemoryWarningNotification` — trim
+        /// the renderer's caches to the plain mobile tier's ceilings, one-way.
+        #[cfg(target_os = "ios")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn frust_memory_warning(handle: *mut ::core::ffi::c_void) {
+            $crate::ffi_glue::memory_warning(handle)
+        }
+
         /// `frust_will_enter_foreground`: `willEnterForeground` — push the
         /// `Inactive` lifecycle state (`Hidden` is synthesized, so `on_restart`
         /// then `on_show` fire). `didBecomeActive` follows with `frust_resume`.

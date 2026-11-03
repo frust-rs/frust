@@ -414,6 +414,22 @@ impl IosAppHandle {
         self.frame_gate.note_resumed();
     }
 
+    /// Trim the renderer's caches on a memory warning (`frust_memory_warning`):
+    /// inline trims the renderer directly and publishes the ledger its
+    /// evictions changed; the split sends a fire-and-forget
+    /// [`RenderCommand::TrimMemory`](frust_shell_common::RenderCommand::TrimMemory),
+    /// which the render thread services even while `Paused`. Neither submits
+    /// GPU work, so either is safe while backgrounded.
+    pub(crate) fn trim_memory(&mut self) {
+        match &mut self.executor {
+            FrameExecutor::Inline(inline) => {
+                inline.renderer.trim_memory();
+                publish_ledger(&mut inline.renderer);
+            }
+            FrameExecutor::Split(split) => split.trim_memory(),
+        }
+    }
+
     /// Whether the app is paused. `pub(crate)` so [`crate::ffi_glue`] can gate
     /// surface recreation on it — recreation is real Metal work and must obey the
     /// same backgrounded-no-GPU rule as frame submission.

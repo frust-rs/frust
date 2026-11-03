@@ -725,6 +725,8 @@ fn render_loop(
                     ack.acknowledge();
                 }
                 RenderCommand::Resume => {}
+                // Desktop sends no trim: there is no platform memory warning.
+                RenderCommand::TrimMemory => {}
             }
         }
 
