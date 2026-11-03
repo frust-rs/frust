@@ -6,9 +6,13 @@
 //! The knob is `plan:N` or `record:N` (`N >= 1`): every `N`th frame reaching
 //! that stage is refused. `plan` is the encode-stage refusal, decided before
 //! the swapchain is acquired; `record` is the stage after acquire, which the
-//! renderer queries through [`RefusalInjector::refuses`]. Read once per
-//! process, from the compile-time define or the runtime environment, a
-//! non-empty runtime value winning. Unset, empty or unparsable means off.
+//! renderer queries through [`RefusalInjector::refuses`] in place of the
+//! engine's recording — so an injected `record:` refusal takes exactly the
+//! path a real one does: counted and logged like every refusal, and the
+//! acquired swapchain texture still presented with the surface's backstop
+//! (its base colour, or its last frame re-converted), never dropped. Read
+//! once per process, from the compile-time define or the runtime environment,
+//! a non-empty runtime value winning. Unset, empty or unparsable means off.
 
 use std::fmt;
 use std::num::NonZeroU32;
@@ -68,7 +72,8 @@ impl fmt::Display for Refusal {
 pub(crate) enum RefusalStage {
     /// The encode-stage plan, before the swapchain is acquired.
     Plan,
-    /// The engine's recording, after the swapchain is acquired.
+    /// The engine's recording, after the swapchain is acquired — refused
+    /// there, the frame still presents its backstop.
     Record,
 }
 

@@ -165,6 +165,9 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use frust_engine::renderer::{RangeCut, open_retained_bracket};
+use frust_gpu::lifecycle::{
+    AcquireAction, AcquireStatus, decide_acquire_streaks, next_transient_streak,
+};
 use frust_gpu::{RenderContext, SurfaceAlphaRequest};
 use frust_scene::Command;
 use kurbo::Affine;
@@ -479,6 +482,18 @@ pub struct OverlaySurface {
     recorded: Option<wgpu::SurfaceTexture>,
     /// The submitted frame waiting for [`Self::present`].
     pending: Option<wgpu::SurfaceTexture>,
+    /// A frame [`Self::record`] acquired but the engine refused to draw: kept
+    /// un-presented — so the previous overlay frame stays on screen — and
+    /// drawn into by the next record instead of acquiring another. Never
+    /// dropped while its swapchain lives: on `wgpu-hal`'s Vulkan backend a
+    /// dropped `SurfaceTexture` is never handed back (its discard is a no-op,
+    /// upstream gfx-rs/wgpu#5723), and two or three such leaks wedge acquire.
+    reserved: Option<wgpu::SurfaceTexture>,
+    /// Consecutive `Timeout`/`Occluded`/`Lost` acquires skipped — at
+    /// [`frust_gpu::lifecycle::MAX_TRANSIENT_SKIPS`] the swapchain is
+    /// reconfigured instead, reclaiming any image a leak took
+    /// ([`overlay_acquire_step`]).
+    consecutive_transient: u8,
 }
 
 impl OverlaySurface {
@@ -578,6 +593,8 @@ impl OverlaySurface {
             queue: handle.queue.clone(),
             recorded: None,
             pending: None,
+            reserved: None,
+            consecutive_transient: 0,
         })
     }
 
@@ -592,11 +609,40 @@ impl OverlaySurface {
         if width == 0 || height == 0 || (width, height) == self.size() {
             return;
         }
+        // Every frame still held is dropped un-presented — the one place that
+        // is safe on Vulkan, where a dropped frame is otherwise never given
+        // back: `wgpu` will not configure a surface with a frame still out,
+        // and the reconfigure right below recreates the swapchain, which
+        // reclaims every image the old one held.
         self.pending = None;
+        self.reserved = None;
         if self.recorded.take().is_some() {
             self.renderer.end_frame(&self.queue, false);
         }
         self.surface.resize(&self.device, width, height);
+    }
+
+    /// The frame an earlier call left held, for [`Self::record`] to draw into
+    /// instead of acquiring a new one: a frame the engine refused (the normal
+    /// case), or — when the record/end-frame/present pairing was broken — a
+    /// recorded frame never closed (closed here as unsubmitted) or a
+    /// submitted frame never presented. Re-drawing a held frame is always
+    /// safe: the record clears it first. Taking it, rather than dropping it
+    /// for a fresh acquire, is what keeps a Vulkan swapchain from leaking it.
+    fn take_held_frame(&mut self) -> Option<wgpu::SurfaceTexture> {
+        debug_assert!(
+            self.pending.is_none(),
+            "frust-render overlay: a submitted frame was never presented"
+        );
+        debug_assert!(
+            self.recorded.is_none(),
+            "frust-render overlay: a recorded frame's encoder never reported back"
+        );
+        if let Some(texture) = self.recorded.take() {
+            self.renderer.end_frame(&self.queue, false);
+            return Some(texture);
+        }
+        self.reserved.take().or_else(|| self.pending.take())
     }
 
     /// Acquires the overlay's next frame and records the commands of `scene`
@@ -608,9 +654,14 @@ impl OverlaySurface {
     /// Nothing is submitted and nothing is presentable yet: the acquired
     /// frame waits, recorded, until [`Self::end_frame`] is told whether the
     /// encoder was submitted — then (and only then) it becomes the frame
-    /// [`Self::present`]/[`Self::take_deferred_present`] hand out. A frame
-    /// still waiting from an earlier call (presentable or merely recorded) is
-    /// dropped un-presented first (latest wins).
+    /// [`Self::present`]/[`Self::take_deferred_present`] hand out. A frame an
+    /// earlier call left held — refused, or (a broken pairing) still
+    /// presentable or merely recorded — is drawn into again instead of
+    /// acquiring a new one (latest wins, and nothing acquired is dropped).
+    ///
+    /// The acquire skips a `Timeout`/`Occluded`/`Lost` frame, until
+    /// [`frust_gpu::lifecycle::MAX_TRANSIENT_SKIPS`] of them in a row, when
+    /// the swapchain is reconfigured instead ([`OverlayFrame::Reconfigured`]).
     ///
     /// [`OverlayFrame::Reconfigured`]/[`OverlayFrame::Skipped`] recorded
     /// nothing and leave nothing for [`Self::end_frame`] to close.
@@ -618,31 +669,24 @@ impl OverlaySurface {
     /// # Errors
     ///
     /// [`OverlayError::Engine`] when the engine refuses the frame: the
-    /// acquired frame is dropped and the renderer's frame already closed, so
-    /// there is nothing for [`Self::end_frame`] to do (the previous overlay
-    /// frame stays on screen). Shader-quad pre-passes the overlay recorded
-    /// ahead of the refusal stay in `encoder`, harmlessly — their targets are
-    /// the overlay's own.
+    /// acquired frame is kept un-presented for the next record to draw into
+    /// (never dropped — see the `reserved` field) and the renderer's frame
+    /// already closed, so there is nothing for [`Self::end_frame`] to do (the
+    /// previous overlay frame stays on screen). Shader-quad pre-passes the
+    /// overlay recorded ahead of the refusal stay in `encoder`, harmlessly —
+    /// their targets are the overlay's own.
     pub fn record(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         scene: &frust_scene::Scene,
         range: Range<usize>,
     ) -> Result<OverlayFrame, OverlayError> {
-        self.pending = None;
-        if self.recorded.take().is_some() {
-            // Recorded by an earlier call whose encoder never reported back:
-            // close that frame as unsubmitted before opening this one.
-            self.renderer.end_frame(&self.queue, false);
-        }
-        use wgpu::CurrentSurfaceTexture as Cst;
-        let texture = match self.surface.gpu.surface().get_current_texture() {
-            Cst::Success(texture) | Cst::Suboptimal(texture) => texture,
-            Cst::Outdated | Cst::Validation => {
-                self.surface.reconfigure(&self.device);
-                return Ok(OverlayFrame::Reconfigured);
-            }
-            Cst::Lost | Cst::Timeout | Cst::Occluded => return Ok(OverlayFrame::Skipped),
+        let texture = match self.take_held_frame() {
+            Some(texture) => texture,
+            None => match self.acquire() {
+                Ok(texture) => texture,
+                Err(frame) => return Ok(frame),
+            },
         };
         let view = texture
             .texture
@@ -675,8 +719,38 @@ impl OverlaySurface {
             }
             Err(error) => {
                 self.renderer.end_frame(&self.queue, false);
+                // Kept, not dropped: on Vulkan a dropped frame's image is
+                // never given back (the discard no-op), so the next record
+                // draws into this one instead of acquiring another.
+                self.reserved = Some(texture);
                 Err(error)
             }
+        }
+    }
+
+    /// Acquires the swapchain's next frame, or answers the
+    /// [`OverlayFrame`] the record reports instead: reconfigured for a stale
+    /// or invalid swapchain, and for a `Timeout`/`Occluded`/`Lost` run that
+    /// reached the cap; skipped under it ([`overlay_acquire_step`]).
+    fn acquire(&mut self) -> Result<wgpu::SurfaceTexture, OverlayFrame> {
+        use wgpu::CurrentSurfaceTexture as Cst;
+        let acquired = self.surface.gpu.surface().get_current_texture();
+        let (action, streak) = overlay_acquire_step(
+            overlay_acquire_status(&acquired),
+            self.consecutive_transient,
+        );
+        self.consecutive_transient = streak;
+        match (action, acquired) {
+            (AcquireAction::Present, Cst::Success(texture) | Cst::Suboptimal(texture)) => {
+                Ok(texture)
+            }
+            (AcquireAction::Reconfigure, _) => {
+                self.surface.reconfigure(&self.device);
+                Err(OverlayFrame::Reconfigured)
+            }
+            // `Skip`, and the unreachable rest (`Present` is decided for a
+            // texture only; `Lose` never, the overlay's `Lost` being a skip).
+            _ => Err(OverlayFrame::Skipped),
         }
     }
 
@@ -708,12 +782,14 @@ impl OverlaySurface {
     /// Leaves the frame un-presented until [`Self::present`] (or
     /// [`Self::take_deferred_present`]), so the host can land it right beside
     /// the main frame's present. A frame still waiting from the last call is
-    /// dropped un-presented first (latest wins).
+    /// drawn into again rather than presented (latest wins; see
+    /// [`Self::record`]).
     ///
     /// # Errors
     ///
     /// [`OverlayError::Engine`] when the engine refuses the frame (nothing is
-    /// presented; the previous overlay frame stays on screen).
+    /// presented; the previous overlay frame stays on screen, and the
+    /// acquired one is kept for the next call).
     pub fn render(
         &mut self,
         scene: &frust_scene::Scene,
@@ -961,11 +1037,13 @@ pub struct SegmentedOutcome {
     /// One entry per [`OverlayCut`], in the order given.
     pub overlays: Vec<OverlayCutOutcome>,
     /// Command encoders the frame created: `1` whenever it reached the GPU
-    /// encode — the main segment and every overlay share it (an engine
-    /// refusal drops it un-submitted) — `0` when it never got that far.
+    /// encode — the main segment and every overlay share it — `0` when it
+    /// never got that far.
     pub encoders: u32,
     /// Queue submits the frame issued: `1` for a rendered frame, however many
-    /// overlays it carried, `0` otherwise. The segmented frame's invariant.
+    /// overlays it carried, and for a main frame the engine refused after
+    /// acquire (the encoder carries the backstop the acquired texture is
+    /// presented with); `0` otherwise. The segmented frame's invariant.
     pub submits: u32,
 }
 
@@ -1154,6 +1232,35 @@ pub(crate) fn end_cuts(cuts: &mut [OverlayCut<'_>], submitted: bool) {
     }
 }
 
+/// The overlay's classification of an acquire: the main surface's
+/// ([`AcquireStatus`]), except that `Lost` counts as one more transient
+/// failure — an overlay never drops its own surface; the host recreates it
+/// through its own lifecycle.
+fn overlay_acquire_status(acquired: &wgpu::CurrentSurfaceTexture) -> AcquireStatus {
+    use wgpu::CurrentSurfaceTexture as Cst;
+    match acquired {
+        Cst::Success(_) | Cst::Suboptimal(_) => AcquireStatus::Usable,
+        Cst::Outdated => AcquireStatus::Outdated,
+        Cst::Validation => AcquireStatus::Invalid,
+        Cst::Lost | Cst::Timeout | Cst::Occluded => AcquireStatus::Transient,
+    }
+}
+
+/// The overlay's acquire policy: what to do with an acquire of `status`
+/// after `consecutive_transient` skipped ones, and the streak to store next.
+/// The main surface's policy ([`decide_acquire_streaks`],
+/// [`next_transient_streak`]) with no `Invalid` cap — an overlay reconfigures
+/// on every `Invalid`, as it always has — so a `Timeout`/`Occluded`/`Lost`
+/// run reconfigures at [`frust_gpu::lifecycle::MAX_TRANSIENT_SKIPS`] instead
+/// of skipping forever.
+fn overlay_acquire_step(status: AcquireStatus, consecutive_transient: u8) -> (AcquireAction, u8) {
+    let action = decide_acquire_streaks(status, 0, consecutive_transient);
+    (
+        action,
+        next_transient_streak(status, action, consecutive_transient),
+    )
+}
+
 /// Drives `future` to completion on the calling thread. Surface configuration
 /// is `async` only because device creation can be; the overlay never creates a
 /// device (it refused above when there was none), so this resolves without an
@@ -1195,6 +1302,58 @@ mod tests {
         builder.clear_rect(kurbo::Rect::ZERO);
         builder.clear_rect(kurbo::Rect::ZERO);
         assert_eq!(spike_cut(&scene), Some(2));
+    }
+
+    #[test]
+    fn every_failed_overlay_acquire_but_a_stale_or_invalid_one_is_transient() {
+        use wgpu::CurrentSurfaceTexture as Cst;
+        for acquired in [Cst::Lost, Cst::Timeout, Cst::Occluded] {
+            assert_eq!(overlay_acquire_status(&acquired), AcquireStatus::Transient);
+        }
+        assert_eq!(
+            overlay_acquire_status(&Cst::Outdated),
+            AcquireStatus::Outdated
+        );
+        assert_eq!(
+            overlay_acquire_status(&Cst::Validation),
+            AcquireStatus::Invalid
+        );
+    }
+
+    #[test]
+    fn an_overlay_timeout_run_reconfigures_at_the_cap() {
+        use frust_gpu::lifecycle::MAX_TRANSIENT_SKIPS;
+        let mut streak = 0;
+        let mut actions = Vec::new();
+        for _ in 0..=MAX_TRANSIENT_SKIPS {
+            let (action, next) = overlay_acquire_step(AcquireStatus::Transient, streak);
+            actions.push(action);
+            streak = next;
+        }
+        let mut expected = vec![AcquireAction::Skip; usize::from(MAX_TRANSIENT_SKIPS)];
+        expected.push(AcquireAction::Reconfigure);
+        assert_eq!(actions, expected);
+        assert_eq!(streak, 0, "the reconfigure starts a fresh run");
+    }
+
+    #[test]
+    fn an_overlay_timeout_run_is_broken_by_any_other_acquire() {
+        for status in [
+            AcquireStatus::Usable,
+            AcquireStatus::Outdated,
+            AcquireStatus::Invalid,
+        ] {
+            assert_eq!(overlay_acquire_step(status, 2).1, 0, "{status:?}");
+        }
+        // An overlay reconfigures on every Invalid: no cap of its own.
+        assert_eq!(
+            overlay_acquire_step(AcquireStatus::Invalid, 0).0,
+            AcquireAction::Reconfigure
+        );
+        assert_eq!(
+            overlay_acquire_step(AcquireStatus::Usable, 0).0,
+            AcquireAction::Present
+        );
     }
 
     #[test]
