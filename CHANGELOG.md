@@ -58,8 +58,6 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   its bytes with CoreText; a mismatch counts in `hvgl_bytes_mismatches` and the warning names the
   codepoint as `U+XXXX`. `objc2-core-foundation` gains the `CFArray`/`CFDictionary`/`CFNumber`
   features, no version change (265aaa068).
-- The `CtFace` `Send` and `Sync` SAFETY note names every CoreText call it covers; `Sync` is kept,
-  since dropping it would remove it from the published renderers (baa9b1ffc).
 
 ### Changed
 
