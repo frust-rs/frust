@@ -8,6 +8,14 @@
 //! variation-coordinate weight axis. A device run counts ink per row band: the
 //! 700 rows must carry clearly more ink than the 400 rows.
 //!
+//! Below those four Noto rows sit three PingFang Han rows ([`HAN_ROWS`]): the
+//! system family `PingFang SC` (on iOS and macOS; not bundled) at weights 300,
+//! 400 and 600, the same size and colour. PingFang is `hvgl`-only, so these rows
+//! exercise the variation-weight route rather than faux-bold: a device run
+//! reads ink per row band (300 < 400 < 600) and the `frust-perf enc`
+//! `hvgl_variation_*` / `hvgl_unavailable` columns. The Noto rows keep their
+//! order and position so the existing ink bands still line up.
+//!
 //! The sample is `Hello, Hello`; the subset's cmap covers exactly space, `,`,
 //! `H`, `e`, `l`, `o`, `é` and the combining circumflex U+0302, so every glyph in
 //! the sample is real (no `.notdef` boxes). No lowercase `h` is mapped.
@@ -45,6 +53,19 @@ pub const ROWS: [(FontWeight, bool); 4] = [
     (FontWeight::BOLD, true),
 ];
 
+/// The system Han family; present on iOS and macOS, never bundled.
+const HAN_FAMILY: &str = "PingFang SC";
+
+/// The Han sample drawn in [`HAN_FAMILY`].
+const HAN_SAMPLE: &str = "请注意中文字重";
+
+/// The three PingFang rows, below the Noto rows: Light, Regular, Semibold.
+pub const HAN_ROWS: [FontWeight; 3] = [
+    FontWeight::LIGHT,
+    FontWeight::REGULAR,
+    FontWeight::SEMI_BOLD,
+];
+
 /// Register the subset font process-wide, once. Called from `BenchState::new`
 /// so the shell's construction-time font drain applies it.
 pub(crate) fn register_font() {
@@ -61,7 +82,7 @@ impl Scenario for WeightProbe {
     }
 
     fn title(&self) -> &'static str {
-        "Faux-bold weight probe (static Noto Sans subset)"
+        "Weight probe (static Noto Sans faux-bold rows, PingFang Han weight rows)"
     }
 
     // erasure: keep Scenario::build feeds the dyn SCENARIOS table
@@ -77,6 +98,15 @@ impl Scenario for WeightProbe {
                 row = row.italic();
             }
             col = col.child(row);
+        }
+        for weight in HAN_ROWS {
+            col = col.child(
+                text(HAN_SAMPLE)
+                    .size(SIZE)
+                    .family(FontFamily::named(HAN_FAMILY))
+                    .weight(weight)
+                    .color(Color::from_rgba8(0xFF, 0xFF, 0xFF, 0xFF)),
+            );
         }
         any(col)
     }
