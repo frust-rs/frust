@@ -925,12 +925,16 @@ mod macos {
                 let drawn = (chunk_index + 1) * 32;
                 assert_eq!(frame.hvgl_unavailable_glyphs, 0, "atlas {atlas}");
                 // Every new glyph is one miss; the atlas route fetches it
-                // again to draw it (measure, then draw_glyph), a hit. Per
-                // fetch call, not per glyph.
+                // again to rasterize it into the atlas (measure, then
+                // rasterize), a hit. Per fetch call, not per glyph.
                 assert_eq!(frame.hvgl_outline_misses, 32, "atlas {atlas}: {drawn}");
                 if atlas {
-                    assert!(
-                        frame.hvgl_outline_hits >= frame.hvgl_atlas_draws.min(1),
+                    // PingFang's glyph ids 1-4 carry no ink: measured, never
+                    // rasterized, so the first chunk has four fewer hits.
+                    let inkless = if chunk_index == 0 { 4 } else { 0 };
+                    assert_eq!(
+                        frame.hvgl_outline_hits,
+                        32 - inkless,
                         "atlas {atlas}: {drawn}"
                     );
                 } else {

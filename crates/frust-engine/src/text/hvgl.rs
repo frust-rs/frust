@@ -385,9 +385,10 @@ impl HvglOutlines {
     /// since the provider was built (saturating).
     ///
     /// Counted per fetch call, not per distinct glyph: on the atlas route an
-    /// absent glyph is fetched twice (measured, then drawn), so one new glyph
-    /// reads as one miss and one hit, and a glyph resident in the atlas never
-    /// fetches at all.
+    /// absent glyph is fetched twice (measured, then rasterized into the
+    /// atlas), so one new inked glyph reads as one miss and one hit while the
+    /// frame's new glyphs fit the cache; an inkless glyph is only measured,
+    /// and a glyph resident in the atlas never fetches at all.
     pub(crate) fn outline_hits(&self) -> u64 {
         self.outlines.hits
     }

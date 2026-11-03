@@ -493,9 +493,10 @@ pub struct CompiledFrame {
     /// asking CoreText.
     ///
     /// Counted per fetch call, not per glyph: on the atlas route an absent
-    /// glyph is fetched twice (measured at collect, then drawn), so a new
-    /// glyph reads as one miss and one hit, and a glyph resident in the atlas
-    /// never fetches. Saturating; the frame's share of
+    /// glyph is fetched twice (measured, then rasterized into the atlas), so
+    /// a new inked glyph reads as one miss and one hit while the frame's new
+    /// glyphs fit the cache; an inkless glyph is only measured, and a glyph
+    /// resident in the atlas never fetches. Saturating; the frame's share of
     /// [`SceneCompiler::hvgl_outline_hits`].
     pub hvgl_outline_hits: u32,
     /// How many `hvgl` outline fetches this frame asked CoreText (a cache
@@ -948,9 +949,11 @@ impl SceneCompiler {
     /// CoreText, since the compiler was built (saturating).
     ///
     /// Counted per fetch call, not per glyph: with the atlas route an absent
-    /// glyph is fetched twice (measured, then drawn), so one new glyph reads
-    /// as one miss and one hit, and a glyph resident in the atlas never
-    /// fetches. Always zero on a target without CoreText.
+    /// glyph is fetched twice (measured, then rasterized into the atlas), so
+    /// one new inked glyph reads as one miss and one hit while the frame's new
+    /// glyphs fit the cache; an inkless glyph is only measured, and a glyph
+    /// resident in the atlas never fetches. Always zero on a target without
+    /// CoreText.
     #[must_use]
     pub fn hvgl_outline_hits(&self) -> u64 {
         self.hvgl_outlines.outline_hits()
