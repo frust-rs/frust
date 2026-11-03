@@ -8702,7 +8702,12 @@ on the atlas route `classify_hvgl_run` (`crates/frust-engine/src/compile/mod.rs`
 `fvar` axis tags and a sample of 16 `cmap` ranges (format 12, else 4). A copy that differs from the installed
 face only outside the sampled ranges passes; `GSUB`/`GPOS` and `cmap` format 14 differences are not compared.
 The variation read-back proves CoreText recorded the requested instance on the copy, not that its outline code
-applied it.
+applied it, and an axis CoreText does not report (and that is not at its default) is drawn unverified: counted in
+`SceneCompiler::hvgl_variation_unverified`, warned once per open face, not refused. A copy that silently ignores an
+axis without reporting it therefore draws the wrong instance, counted. Only a reported value that contradicts the
+request is refused. The read-back is exercised on macOS 27 and iOS 27 only: on an iPhone 13 mini (iOS 27.2, tier
+`mobile_large`, 358764edc) PingFang SC drew at three weights, ink 300/400/600 = 24,812 / 34,416 / 48,085, with no
+refused, unverified or unavailable warning, so iOS 27's CoreText reports the `wght` axis as applied.
 
 **Applies to**: Apple targets, `hvgl`-only faces (PingFang).
 
@@ -8714,7 +8719,7 @@ sample plus the glyph-count, `unitsPerEm` and axis checks catch the realistic su
 test (`PingFangSC` Light and Semibold drawn at their coordinates) pins that the instance reaches the outline.
 
 **Evidence**: `crates/frust-engine/src/text/hvgl/face.rs` (`cmap_disagreement`, `CMAP_SAMPLES`);
-`crates/frust-engine/src/text/hvgl/outline.rs` (`unapplied_axis`); `crates/frust-engine/tests/hvgl_provider.rs`;
+`crates/frust-engine/src/text/hvgl/outline.rs` (`read_back`, `classify_axis`); `crates/frust-engine/tests/hvgl_provider.rs`;
 265aaa068.
 
 ---

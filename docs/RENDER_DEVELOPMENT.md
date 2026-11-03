@@ -98,7 +98,7 @@ see [PERFORMANCE_BASELINES.md](PERFORMANCE_BASELINES.md) § Engine close-out per
 glyph_misses glyph_evicted` (window sums), `run_keys` (median), `staged_bytes` (median, zero on the
 queue-write route) and `staging_busy staging_too_large staging_buffers bind_groups` (window sums of
 per-frame deltas; a steady frame adds nothing to any of the four), then `hvgl_atlas_draws hvgl_outline_fallbacks`
-(medians: the PingFang route's atlas-drawn and outline-filled glyphs per frame; zero off Apple). A non-zero `staging_busy` or
+(medians: the PingFang route's atlas-drawn and outline-filled glyphs per frame; zero off Apple), then `hvgl_variation_mismatches hvgl_variation_unverified` (cumulative `SceneCompiler` counters, the newest row's value, so a rise between lines is the span's change) and `hvgl_unavailable` (the frame's `CompiledFrame::hvgl_unavailable_glyphs`, a window median). A non-zero `staging_busy` or
 `staging_too_large` counts frames the ring refused, which then took queue writes. The first frame's
 `submit` is split on the startup line into `first_submit_pipeline_wait`, `first_submit_encode` and
 `first_submit_queue` durations (`frust-shell-common::perf`).
