@@ -6362,11 +6362,14 @@ reason. Every plan-stage refusal is decided in `SurfaceRenderer::encode`
 (`EngineRenderer::prepare`) before the swapchain is acquired, so
 `encode` returns `Skipped` and no texture is held: the last presented frame
 persists on every backend. Only a capacity refusal found while recording
-(`AlphaCapacity`, `PaintCapacity`), or a re-plan forced by a texture binding
-whose extent changed after `encode`, lands after acquire; that frame presents
-the acquired image anyway (`RefusalBackstop`): the previous frame re-converted
-on the straight-alpha arm, a base-colour clear on the direct arm and on
-overlays, on every backend.
+(`AlphaCapacity`, `PaintCapacity`, when the held plan matches), or a re-plan
+(missing or stale plan: a texture binding that changed an id's extent, a resize,
+the retained-store or atlas setters, a different target; any `prepare` error can
+then surface), lands after acquire. The main surface presents the acquired image
+(`RefusalBackstop`): the previous frame re-converted on the straight-alpha arm, a
+base-colour clear on the direct arm; no overlay is recorded that frame. An
+overlay whose record is refused keeps its acquired texture un-presented in
+`reserved`, so its previous frame stays and its next record draws into it.
 A post-acquire refusal therefore costs at most one frame, but on the direct arm
 that frame is the clear, so a sustained capacity refusal flashes the base
 colour every frame (accepted; the alternative, dropping the texture, leaks a
@@ -6419,14 +6422,18 @@ of them freeze the swapchain (the Android symptom was an app frozen on its last 
 **Applies to**: the Vulkan backend (Android and Linux), any path that acquires and then abandons
 a frame.
 
-**Why accepted**: the defect is upstream; frust works around it instead. Every acquired
-texture is presented: a post-acquire refusal presents a backstop frame
-(`FrameOutcome::Skipped` with the texture still presented), and refusals the plan can foresee are
+**Why accepted**: the defect is upstream; frust works around it instead. No acquired
+texture is dropped while its swapchain lives: a post-acquire refusal presents a
+backstop frame on the main surface (`FrameOutcome::Skipped` with the texture still
+presented) or keeps the texture un-presented on an overlay, and refusals the plan can foresee are
 decided before acquire so nothing is held. An acquire `Timeout`/`Occluded` run reconfigures the
 swapchain after `MAX_TRANSIENT_SKIPS` (3) consecutive skips (`decide_acquire_streaks`,
 `next_transient_streak`; the main surface and overlays alike) so a wedged swapchain is rebuilt
-rather than skipped forever; whether a rebuild reclaims an already-leaked image is
-driver-dependent and is not relied on, since frust no longer leaks one. The
+rather than skipped forever. frust relies on a reconfigure or resize recreating the
+swapchain to release the images it still holds (that reconfigure, and
+`OverlaySurface::resize`, which drops pending/reserved/recorded first); whether a
+rebuild also reclaims an image leaked before this fix is driver-dependent
+(unverified on Adreno), and no normal path leaks one now. The
 cost is at most one backstop frame per post-acquire refusal (see
 `engine-scheduler-skip-on-escalation`), and an occluded window reconfigures on every fourth
 acquire attempt.
