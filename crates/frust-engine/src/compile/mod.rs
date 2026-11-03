@@ -513,6 +513,11 @@ pub struct CompiledFrame {
     /// failure, so it is counted once). A share of
     /// [`skipped_glyphs`](Self::skipped_glyphs). The first non-zero frame of a
     /// process also logs one warning.
+    ///
+    /// A target without CoreText (anything not Apple) opens no `hvgl` face,
+    /// so there every glyph of an `hvgl`-classified run is unavailable and
+    /// counted here and in `skipped_glyphs`; a host test pins it with a
+    /// synthetic `hvgl`-only face.
     pub hvgl_unavailable_glyphs: u32,
     /// Where each of this frame's atlas-sampled glyphs lives, one entry per
     /// atlas draw (see [`GlyphSlot`]).
@@ -1007,7 +1012,8 @@ impl SceneCompiler {
     /// How many glyphs of `hvgl` runs could not be drawn, since the compiler
     /// was built (saturating): the outline route's unavailable glyphs plus the
     /// atlas route's, which are counted at the draw (a glyph the provider
-    /// could not measure is the same glyph that then fails to draw).
+    /// could not measure is the same glyph that then fails to draw). On a
+    /// target without CoreText every glyph of an `hvgl`-classified run counts.
     #[must_use]
     pub fn hvgl_unavailable_glyphs(&self) -> u64 {
         self.hvgl_outlines.unavailable_glyphs()

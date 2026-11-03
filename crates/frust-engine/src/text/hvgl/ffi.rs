@@ -277,7 +277,7 @@ mod platform {
     /// `element` must be a valid element whose `points` hold as many points as
     /// its type carries — which `CGPathApply` guarantees for the call.
     unsafe extern "C-unwind" fn push_element(info: *mut c_void, element: NonNull<CGPathElement>) {
-        // SAFETY: `info` is the `&mut Vec<PathEl>` `outline` passed in.
+        // SAFETY: `info` is the `&mut Vec<PathEl>` `CtFace::path` passed in.
         let out = unsafe { &mut *info.cast::<Vec<PathEl>>() };
         // SAFETY: CoreGraphics hands a valid element for the call's duration.
         let element = unsafe { element.as_ref() };

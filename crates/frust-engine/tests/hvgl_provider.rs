@@ -21,11 +21,14 @@
 //!   `PingFangSC-Medium` whose glyph count differs from the installed face's
 //!   (a copy with `maxp` patched) is refused and counted once as a bytes
 //!   mismatch, whether the handle is built by hand or laid out from a
-//!   registered font, and so is a copy whose `cmap` maps the sampled
-//!   codepoints to other glyphs. A registered, unpatched copy of the installed face draws
-//!   from CoreText under its own registered identity (the PostScript name the
-//!   text tier's registry reads from its `name` table) with no refusal of any
-//!   kind. Off macOS these cases print why and pass.
+//!   registered font. Off macOS these cases print why and pass.
+//! - **So is a copy whose `cmap` disagrees.** A blob whose `cmap` maps the
+//!   sampled codepoints to other glyphs than the installed face does is
+//!   refused and counted as a bytes mismatch the same way.
+//! - **A registered, unpatched copy draws.** A copy of the installed face
+//!   draws from CoreText under its own registered identity (the PostScript
+//!   name the text tier's registry reads from its `name` table) with no
+//!   refusal of any kind.
 //! - **On macOS the system PingFang draws.** A run of 中文爱 in
 //!   `PingFangUI.ttc`'s `PingFangSC-Medium` face, glyph ids taken from
 //!   CoreText's own character map, produces one draw per glyph with real
@@ -269,10 +272,12 @@ fn an_hvgl_handle_without_an_identity_is_skipped_whole_and_draws_nothing() {
         assert_eq!(frame.glyph_draws, 0, "frame {frame_index}");
         assert!(frame.draws().is_empty(), "frame {frame_index}");
         assert_eq!(frame.atlas_glyph_draws, 0, "frame {frame_index}");
+        // A refused face is unavailable glyph by glyph, per frame, on every
+        // target: a target without CoreText opens no face, so there every
+        // glyph of an `hvgl`-classified run is unavailable.
+        assert_eq!(frame.hvgl_unavailable_glyphs, 3, "frame {frame_index}");
         if cfg!(target_vendor = "apple") {
-            // A refused face is unavailable glyph by glyph, per frame, and
-            // never reaches the outline cache.
-            assert_eq!(frame.hvgl_unavailable_glyphs, 3, "frame {frame_index}");
+            // ... and never reaches the outline cache.
             assert_eq!(
                 (frame.hvgl_outline_hits, frame.hvgl_outline_misses),
                 (0, 0),
@@ -280,8 +285,8 @@ fn an_hvgl_handle_without_an_identity_is_skipped_whole_and_draws_nothing() {
             );
         }
     }
+    assert_eq!(compiler.hvgl_unavailable_glyphs(), 6, "summed over frames");
     if cfg!(target_vendor = "apple") {
-        assert_eq!(compiler.hvgl_unavailable_glyphs(), 6, "summed over frames");
         assert_eq!(
             (compiler.hvgl_outline_hits(), compiler.hvgl_outline_misses()),
             (0, 0)
@@ -321,6 +326,9 @@ fn a_hidden_named_hvgl_handle_is_refused_when_coretext_substitutes() {
         );
     } else {
         assert_eq!(compiler.hvgl_identity_mismatches(), 0);
+        // No CoreText to open the face: its glyphs are unavailable all the same.
+        assert_eq!(frame.hvgl_unavailable_glyphs, 2);
+        assert_eq!(compiler.hvgl_unavailable_glyphs(), 2);
     }
     assert_eq!(frame.skipped_glyphs, 2, "never drawn from a substitute");
     assert_eq!(frame.glyph_draws, 0);
