@@ -542,6 +542,31 @@ pub(crate) struct CacheStats {
     pub(crate) expired_substitutes: usize,
 }
 
+/// A read-only view of a text context's persistent font cache, for a shell or
+/// an app that wants to observe its writes ([`crate::TextContext::font_cache_stats`]).
+///
+/// A snapshot: nothing here changes after it is taken. Every field reads as
+/// zero or `false` for a context built without a font cache.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FontCacheStats {
+    /// Persistent writes of this context's cache that failed: write-behind
+    /// ones and the final write a dropped context hands off. An explicit
+    /// [`crate::TextContext::flush_font_cache`] returns its error instead and
+    /// is not counted here.
+    pub write_failures: usize,
+    /// The newest generation of the attached file's in-process copy that the
+    /// disk holds or supersedes; it only rises, so two reads that differ saw a
+    /// write land. Zero while no file is attached.
+    pub written_generation: u64,
+    /// Whether a flush through this context would write: it holds answers not
+    /// yet on disk, or the shared copy it is attached to does.
+    pub dirty: bool,
+    /// Whether the persistent file is attached (its path resolved and its copy
+    /// loaded or joined).
+    pub attached: bool,
+}
+
 /// Resolves the persistent file's path on first use; `None` means "not yet"
 /// (e.g. Android before the shell installed its directories) and is asked
 /// again at the next miss or flush.
@@ -1050,6 +1075,20 @@ impl FallbackCache {
     /// Whether the persistent copy is behind memory.
     pub(crate) fn is_dirty(&self) -> bool {
         self.dirty
+    }
+
+    /// The public view of this cache's persistence ([`FontCacheStats`]).
+    pub(crate) fn font_cache_stats(&self) -> FontCacheStats {
+        let (written_generation, behind) = match &self.persist {
+            Persist::Attached(shared) => (shared.written.load(Ordering::Acquire), shared.behind()),
+            Persist::Off | Persist::Pending { .. } => (0, false),
+        };
+        FontCacheStats {
+            write_failures: self.stats().write_failures,
+            written_generation,
+            dirty: self.dirty || behind,
+            attached: matches!(self.persist, Persist::Attached(_)),
+        }
     }
 
     /// Whether a persistent copy is bound or pending (not opted out).
@@ -2552,6 +2591,45 @@ mod tests {
         assert_eq!(cache.stats().writes, 0);
         assert_eq!(cache.stats().write_failures, 1);
         assert!(cache.persist().is_err(), "the synchronous flush reports it");
+    }
+
+    #[test]
+    fn font_cache_stats_report_an_injected_write_failure() {
+        let dir = TempDir::new("stats-write-failure");
+        // The cache file's parent is a regular file: every write fails.
+        let blocker = dir.write("blocker", b"x");
+        let mut cache = FallbackCache::new(64);
+        assert_eq!(cache.font_cache_stats(), FontCacheStats::default());
+        cache.attach_persistent(blocker.join(PERSIST_FILE_NAME), stamp("b"));
+        let attached = cache.font_cache_stats();
+        assert!(attached.attached);
+        assert_eq!(attached.write_failures, 0);
+        cache.set_write_behind(1, Duration::from_secs(3600));
+        cache.insert(key("a"), CachedAnswer::Miss);
+        cache.join_writer();
+        let failed = cache.font_cache_stats();
+        assert_eq!(failed.write_failures, 1, "the failed write-behind");
+        assert!(failed.dirty, "still behind the disk");
+        assert_eq!(failed.written_generation, attached.written_generation);
+        // The explicit flush reports its error rather than counting it.
+        assert!(cache.persist().is_err());
+        assert_eq!(cache.font_cache_stats().write_failures, 1);
+    }
+
+    #[test]
+    fn font_cache_stats_track_a_write_that_lands() {
+        let dir = TempDir::new("stats-written");
+        let file = dir.path().join(PERSIST_FILE_NAME);
+        let mut cache = FallbackCache::new(64);
+        cache.attach_persistent(file, stamp("b"));
+        let before = cache.font_cache_stats();
+        cache.insert(key("a"), CachedAnswer::Miss);
+        assert!(cache.font_cache_stats().dirty);
+        cache.persist().expect("written");
+        let after = cache.font_cache_stats();
+        assert!(!after.dirty && after.attached);
+        assert!(after.written_generation > before.written_generation);
+        assert_eq!(after.write_failures, 0);
     }
 
     #[test]

@@ -34,6 +34,7 @@ pub use editor::{
 pub use layout::TextLayout;
 pub use locale::{default_locale, default_locale_generation, set_default_locale};
 pub use oracle::RenderCapabilities;
+pub use oracle::cache::FontCacheStats;
 pub use shape_cache::ShapeCacheStats;
 pub use style::{
     FamilyName, FontFamily, FontStyle, FontWeight, GenericSlot, LineHeight, TextAlign,
