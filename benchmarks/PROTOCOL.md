@@ -709,7 +709,7 @@ surprising tier is explained by the line itself rather than re-derived from the
 adapter. `adapter` is last because it is the one value that can contain spaces.
 
 ```
-frust-perf enc n=<u64> w=<frames> <phase>_us=<f.1> … total_p95_us=<f.1> draws=<u32> strips=<u32> alphas=<u32> glyph_draws=<u32> atlas_glyphs=<u32>
+frust-perf enc n=<u64> w=<frames> <phase>_us=<f.1> … total_p95_us=<f.1> draws=<u32> strips=<u32> alphas=<u32> glyph_draws=<u32> atlas_glyphs=<u32> … hvgl_atlas_draws=<u32> hvgl_outline_fallbacks=<u32> hvgl_variation_mismatches=<u32> hvgl_variation_unverified=<u32> hvgl_unavailable=<u32>
 ```
 
 Emitted by `frust_engine::renderer` once per **60 encoded frames** — about one
@@ -722,6 +722,18 @@ window's frame count. The phase columns are the compile's own six plus its
 upload/replay/pipelines/record and the total — the same order the formatter
 pins by test, which is what a capture greps by. Like the two lines above it is
 `perf-trace`-only and not `FRUST_TRACE`-gated.
+
+The counts after `atlas_glyphs` are append-only (the `…` above elides the
+staging and replay columns, which `RENDER_DEVELOPMENT.md` lists). The last five
+are the `hvgl`-only (Apple PingFang) route's: `hvgl_atlas_draws` and
+`hvgl_outline_fallbacks` are per-frame medians (atlas-drawn and outline-filled
+glyphs), `hvgl_variation_mismatches` and `hvgl_variation_unverified` are
+**cumulative** `SceneCompiler` counters reported as the newest row's value
+(refused variation instances, and instances drawn from CoreText's copy with an
+axis it did not report), and `hvgl_unavailable` is the frame's unavailable
+glyph count as a window median. All read zero off Apple. A static scene
+renders fewer than one 60-frame window, so no line prints; the `weight_probe`
+PingFang rows are read by ink per row band instead.
 
 > **The OnePlus 9 S5 row of the 2026-09-05 pass predates both lines and the
 > engine fix they report on.** That capture was taken while a full atlas
