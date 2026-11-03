@@ -37,6 +37,20 @@
 //! own*). The caller's encoder is still never submitted by the engine, and the
 //! frame's own passes still reach the queue only when the caller submits it.
 //!
+//! # Planning ahead of acquire
+//!
+//! [`EngineRenderer::encode`] is two halves a host may also call apart.
+//! [`EngineRenderer::prepare`] is everything that can refuse a frame for its
+//! *shape* — the compile, the retained store's decisions, the schedule and
+//! the page ceiling — and needs no target, only the extent and usage the
+//! target will have; [`EngineRenderer::encode_prepared`] records the plan it
+//! kept, and can refuse only on capacity (or re-plan, when the target it is
+//! handed is not the one the plan was made for). A host that acquires a
+//! swapchain image per frame prepares first, so a refused frame is skipped
+//! before any image is acquired — an acquired image cannot always be given
+//! back unpresented. The retained store is committed by the encode alone, so
+//! a plan that is never encoded leaves nothing behind.
+//!
 //! # Sharing the depth attachment
 //!
 //! A caller recording its own depth-writing passes into that encoder hands the
@@ -1128,6 +1142,11 @@ pub struct EngineRenderer {
     /// Bytes the last encoded frame placed in its staging slot — zero when it
     /// took the queue-write route.
     last_staged: u64,
+    /// The plan [`Self::prepare`] made, held for the
+    /// [`Self::encode_prepared`] that records it; `None` once consumed, after
+    /// a refused prepare, and after anything that changes what a plan was
+    /// made against.
+    prepared: Option<PreparedFrame>,
     /// The rolling CPU-phase window `frust-perf enc` lines are emitted from.
     ///
     /// Absent entirely from a build without `perf-trace`, along with the type
@@ -1360,6 +1379,7 @@ impl EngineRenderer {
             range_scene: Scene::new(),
             staging: (!config::staging_ring_disabled()).then(StagingRing::new),
             last_staged: 0,
+            prepared: None,
             #[cfg(feature = "perf-trace")]
             encode_trace: EncodeTrace::default(),
         };
@@ -1431,6 +1451,8 @@ impl EngineRenderer {
     /// re-uploads on the next frame that draws it. A start-up or adapter-change
     /// operation, never a per-frame one.
     pub fn set_atlas_budget(&mut self, budget: AtlasBudget) {
+        // A held plan names atlas regions of the geometry going away.
+        self.prepared = None;
         self.compiler.set_atlas_budget(budget);
         self.resources.reset_atlas();
     }
@@ -1444,6 +1466,8 @@ impl EngineRenderer {
     /// strips — without a process-global environment variable, which is what a
     /// caller comparing the two paths on one device needs.
     pub fn set_image_residency(&mut self, images: crate::cache::images::ImageResidency) {
+        // A held plan names atlas regions of the residency going away.
+        self.prepared = None;
         self.compiler.set_image_residency(images);
         self.resources.reset_atlas();
     }
@@ -1765,15 +1789,36 @@ impl EngineRenderer {
         size: (u32, u32),
         view: wgpu::TextureView,
     ) -> Option<wgpu::TextureView> {
+        // The plan reads an external texture only through the compiler's
+        // extent entry for `id` (bound or not, and its `u16` extent): the view
+        // and the bind groups naming it are resolved at encode time, past the
+        // plan. So a held plan is stale only when that entry changes. A host
+        // that binds after it acquired its target (frust-render rebinds each
+        // new camera/video frame inside submit) would otherwise force a
+        // second compile and schedule after acquire on every frame, and land
+        // its plan-stage refusals post-acquire.
+        let before = self.compiler.externals().get(id.get());
         self.resources.forget_external(id.get());
-        if !self.compiler.bind_external_texture(id.get(), size) {
+        let usable = self.compiler.bind_external_texture(id.get(), size);
+        let after = self.compiler.externals().get(id.get());
+        if before != after {
+            self.prepared = None;
+        }
+        if !usable {
             return self.textures.unbind(id);
         }
         self.textures.bind(id, view)
     }
 
     /// Removes the texture registered under `id`, returning its view.
+    ///
+    /// A held plan is dropped only when `id` was bound in the compiler: the
+    /// plan reads nothing but that extent entry, so unbinding an id the
+    /// compiler never knew cannot change it.
     pub fn unbind_texture(&mut self, id: SceneTextureId) -> Option<wgpu::TextureView> {
+        if self.compiler.externals().get(id.get()).is_some() {
+            self.prepared = None;
+        }
         self.compiler.unbind_external_texture(id.get());
         self.resources.forget_external(id.get());
         self.textures.unbind(id)
@@ -1807,6 +1852,9 @@ impl EngineRenderer {
     /// next frame reports the empty store, so every body is painted (and
     /// re-recorded) at the new one.
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        // A held plan was made at the old extent, against the pages cleared
+        // below.
+        self.prepared = None;
         self.targets.drop_parked();
         // A cached group would otherwise keep a dropped page's texture alive.
         self.resources.source_groups.clear();
@@ -1847,6 +1895,8 @@ impl EngineRenderer {
     /// Drop every retained page — what a surface recreate or a device-scale
     /// change calls for. The next ledger read reports the empty store.
     pub fn clear_retained(&mut self) {
+        // A held plan's retained decisions name pages that are about to go.
+        self.prepared = None;
         // A cached group would otherwise keep a dropped page's texture alive.
         self.resources.source_groups.clear();
         self.retained.clear();
@@ -1861,6 +1911,8 @@ impl EngineRenderer {
     /// Re-budget the retained store, evicting least recently used pages until
     /// what it holds fits.
     pub fn set_retained_budget(&mut self, budget: RetainedBudget) {
+        // A held plan's retained decisions were made against the old budget.
+        self.prepared = None;
         // A cached group would otherwise keep an evicted page's texture alive.
         self.resources.source_groups.clear();
         self.retained.set_budget(budget);
@@ -1881,6 +1933,8 @@ impl EngineRenderer {
     /// restores the large budgets short of building a new renderer, and a
     /// second trim changes nothing.
     pub fn trim_memory(&mut self) -> MemoryTrim {
+        // A held plan was made against the budgets and ceilings cut below.
+        self.prepared = None;
         let retained_bytes_before = self.retained.used_bytes();
         let (retained_budget, ceiling) =
             trimmed_budgets(self.retained.budget(), self.atlas_budget());
@@ -1906,6 +1960,8 @@ impl EngineRenderer {
     /// [`SceneCompiler::set_retained_layers`]). Turning it off clears the
     /// store, since nothing would ever draw from it again.
     pub fn set_retained_layers(&mut self, enabled: bool) {
+        // A held plan was compiled with the old setting.
+        self.prepared = None;
         self.compiler.set_retained_layers(enabled);
         if !enabled {
             self.retained.clear();
@@ -1962,6 +2018,10 @@ impl EngineRenderer {
     /// `base_color` is what the target is cleared to before anything is drawn.
     /// Neither the encoder nor the queue is submitted — see the module header.
     ///
+    /// Exactly [`Self::prepare`] for `target` followed by
+    /// [`Self::encode_prepared`]: a caller that has to know whether a frame is
+    /// refused before it acquires its target calls the two halves itself.
+    ///
     /// # Errors
     ///
     /// [`EngineError::TargetTooLarge`] for a target outside the `u16` device
@@ -1973,7 +2033,9 @@ impl EngineRenderer {
     /// [`EngineError::IntermediateTextureTooLarge`] for a layer no page can be
     /// sized to, [`EngineError::AlphaCapacity`] when a frame's coverage
     /// outgrows the alpha texture, and [`EngineError::PaintCapacity`] when its
-    /// encoded paints or colour ramps outgrow theirs. Every one of them is
+    /// encoded paints or colour ramps outgrow theirs — the whole list, split by
+    /// the half that returns each, is [`Self::prepare`]'s and
+    /// [`Self::encode_prepared`]'s. Every one of them is
     /// returned before anything is recorded, uploaded, allocated or submitted,
     /// so a refused frame leaves `encoder` exactly as it was found and the
     /// renderer's own resources — the atlas array included — exactly as they
@@ -2021,6 +2083,11 @@ impl EngineRenderer {
     /// frame's spans back out of it some frames later (see
     /// [`frust_gpu::diag::TimestampRing`]).
     ///
+    /// The frame is planned for `target` itself — its own region-copy mode
+    /// ([`RegionCopyMode::of`]) rather than the one [`Self::prepare`] infers
+    /// from a usage alone — so the [`Self::encode_prepared_traced`] it hands
+    /// the plan to always consumes it and never plans a second time.
+    ///
     /// # Errors
     ///
     /// Exactly [`Self::encode`]'s, on exactly its terms — a refused frame has
@@ -2042,9 +2109,120 @@ impl EngineRenderer {
         root: Affine,
         timestamps: FrameTimestamps<'_>,
     ) -> Result<(), EngineError> {
+        let (key, copy_mode) = PreparedKey::of(&target, root);
+        self.prepare_planned(scene, key, copy_mode)?;
+        self.encode_prepared_traced(
+            device, queue, encoder, scene, target, base_color, root, timestamps,
+        )
+    }
+
+    /// Plans `scene` for a `width` x `height` target created with
+    /// `target_usage`, with `root` applied ahead of every command's own
+    /// transform — everything [`Self::encode`] decides before it records,
+    /// allocates or uploads anything — and keeps the plan for the
+    /// [`Self::encode_prepared`] that records it.
+    ///
+    /// This is the half a host calls *before* it acquires the texture it will
+    /// render into: every refusal the plan can make is made here, so a refused
+    /// frame never holds an acquired swapchain image it then has to give back
+    /// unpresented. The plan is: the scene compiled onto the device grid, the
+    /// retained store's decisions for the frame's retained brackets (see
+    /// [`crate::cache::retained`]), whether the frame's backdrop blurs can be
+    /// served at all, the frame's rounds ([`Schedule::build_frame`]) and every
+    /// round's page checked against the adapter's texture ceiling.
+    ///
+    /// Whether backdrops are served is decided from `target_usage` the way
+    /// [`RegionCopyMode::of_usage`] states it, taking the target to be
+    /// single-sampled and in this renderer's own [`Self::format`] — which a
+    /// host's swapchain and readable intermediate both are. The usage is the
+    /// one fact that is known before acquire (it is the surface's
+    /// configuration); a target that turns out to disagree is re-planned by
+    /// [`Self::encode_prepared`] rather than recorded wrong.
+    ///
+    /// A plan is held until the next [`Self::encode_prepared`] consumes it.
+    /// A prepare whose frame is never encoded — a host that decides to skip
+    /// it after all — is simply replaced by the next one: the plan changed
+    /// nothing a later frame reads. Whatever the frame's retained brackets
+    /// decided is applied only by the encode, past its last fallible step, so
+    /// an abandoned plan leaves no page allocated, evicted or re-keyed and no
+    /// ledger entry changed; it costs the store one tick of its frame clock,
+    /// exactly as a frame refused at the scheduler does. The compile it ran
+    /// is the same compile a refused frame runs (image and glyph residency
+    /// are re-offered to the next frame that is encoded). Anything that
+    /// re-sizes, re-budgets or clears what a plan was made against —
+    /// [`Self::resize`], the retained-store and atlas setters, a texture
+    /// (un)binding that changes the compiler-visible extent of its id — drops
+    /// a held plan too, so an encode after it re-plans. Re-binding an id at
+    /// the extent it already has keeps the plan: the plan reads only the
+    /// extent, so a host binding after it acquired its target costs no
+    /// re-plan.
+    ///
+    /// # Errors
+    ///
+    /// The plan-stage refusals, every one of them returned before anything is
+    /// recorded, uploaded or allocated, with no plan kept (and any earlier one
+    /// dropped):
+    ///
+    /// - [`EngineError::TargetTooLarge`] for a target outside the `u16` device
+    ///   grid the strip pipeline addresses, or one that cannot be rounded up
+    ///   to whole tiles inside it;
+    /// - [`EngineError::InvalidTransform`] for a non-finite transform and
+    ///   [`EngineError::InvalidGeometry`] for non-finite command geometry;
+    /// - [`EngineError::TooManyBackdrops`] for a scene recording more backdrop
+    ///   blurs than one frame serves;
+    /// - [`EngineError::RetainedKeyMissing`] for a `DrawRetained` the store
+    ///   cannot serve (or any `DrawRetained` with retention off) — the store
+    ///   is cleared on the way out, as [`crate::cache::retained`] documents;
+    /// - [`EngineError::SchedulerEscalation`] for a layer shape the scheduler
+    ///   does not serve; and
+    /// - [`EngineError::IntermediateTextureTooLarge`] /
+    ///   [`EngineError::IntermediateTextureLimitReached`] for a layer no page
+    ///   can be sized to, past the adapter's ceiling or the pool's own budget.
+    pub fn prepare(
+        &mut self,
+        scene: &Scene,
+        width: u32,
+        height: u32,
+        target_usage: wgpu::TextureUsages,
+        root: Affine,
+    ) -> Result<(), EngineError> {
+        let key = PreparedKey {
+            width,
+            height,
+            usage: target_usage,
+            root,
+        };
+        let copy_mode = RegionCopyMode::of_usage(target_usage, self.format);
+        self.prepare_planned(scene, key, copy_mode)
+    }
+
+    /// [`Self::prepare`] with the region-copy mode already decided: drops any
+    /// held plan, plans `scene` for `key`, and keeps the plan only when it
+    /// was made.
+    fn prepare_planned(
+        &mut self,
+        scene: &Scene,
+        key: PreparedKey,
+        copy_mode: RegionCopyMode,
+    ) -> Result<(), EngineError> {
+        self.prepared = None;
+        let prepared = self.plan(scene, key, copy_mode)?;
+        self.prepared = Some(prepared);
+        Ok(())
+    }
+
+    /// The plan stage itself: everything [`Self::prepare`] documents, returned
+    /// rather than kept. Its errors are [`Self::prepare`]'s.
+    fn plan(
+        &mut self,
+        scene: &Scene,
+        key: PreparedKey,
+        copy_mode: RegionCopyMode,
+    ) -> Result<PreparedFrame, EngineError> {
         // The CPU half of the frame's accounting, lapped phase by phase
-        // through to the end of the call (see [`EncodeSpans`]). Free without
-        // `perf-trace` — no clock is read at all.
+        // through to the end of the encode (see [`EncodeSpans`]); the plan's
+        // two laps travel with it. Free without `perf-trace` — no clock is
+        // read at all.
         let mut clock = PhaseClock::start();
         // Emptied first, so a frame refused below reports the nothing it
         // recorded rather than the last frame's passes. The atlas report is
@@ -2052,8 +2230,8 @@ impl EngineRenderer {
         // would otherwise carry the last replay's numbers forward.
         self.frame_passes.clear();
         self.atlas_report = AtlasRenderReport::default();
-        let size = grid_size(target.width, target.height)?;
-        let mut frame = self.compiler.compile(scene, root, size)?;
+        let size = grid_size(key.width, key.height)?;
+        let mut frame = self.compiler.compile(scene, key.root, size)?;
         let compile_total = clock.lap();
 
         // The frame's pass plan, settled before anything is allocated or
@@ -2066,35 +2244,23 @@ impl EngineRenderer {
         // `DrawRetained` composites — or that one cannot be served, which
         // refuses the frame here and empties the store (see
         // `crate::cache::retained`). Nothing it decides is applied until the
-        // frame is past its last fallible step.
+        // frame is past its last fallible step, in the encode.
         let retained_plan = self
             .retained
             .plan(&frame.retained, &mut frame.recorder.layers)?;
         retained_roles(&frame, &retained_plan, &mut self.retained_layers);
         // Whether the frame's backdrop blurs can be served at all: each one
-        // reads its region of this very target back (see `RegionCopyMode`).
-        // A target that can be neither copied nor sampled serves none — every
-        // backdrop's rectangle is then the transparent draw the compiler
-        // recorded, drawing nothing, and is scheduled as the ordinary layer it
-        // is — rather than refusing a frame it can otherwise draw whole.
-        let copy_mode = RegionCopyMode::of(target.view.texture());
-        let serve_backdrops = copy_mode != RegionCopyMode::Unavailable;
-        if !frame.backdrops.is_empty() && !serve_backdrops {
-            note_backdrop_unreadable(target.view.texture());
-        }
-        let backdrops: &[Backdrop] = if serve_backdrops {
-            &frame.backdrops
-        } else {
+        // reads its region of the frame's own target back (see
+        // `RegionCopyMode`). A target that can be neither copied nor sampled
+        // serves none — every backdrop's rectangle is then the transparent
+        // draw the compiler recorded, drawing nothing, and is scheduled as the
+        // ordinary layer it is — rather than refusing a frame it can
+        // otherwise draw whole.
+        let backdrops: &[Backdrop] = if copy_mode == RegionCopyMode::Unavailable {
             &[]
+        } else {
+            &frame.backdrops
         };
-        // The largest region a texture-mode frame transfers, which the
-        // staging texture is grown to before the first pass is recorded.
-        let staging_extent = backdrops.iter().fold((0_u32, 0_u32), |(w, h), backdrop| {
-            (
-                w.max(u32::from(backdrop.region.width())),
-                h.max(u32::from(backdrop.region.height())),
-            )
-        });
         let rounds = Schedule::build_frame(
             &frame.recorder,
             &self.caps,
@@ -2110,7 +2276,133 @@ impl EngineRenderer {
                 return Err(EngineError::IntermediateTextureTooLarge);
             }
         }
+        let schedule = clock.lap();
 
+        Ok(PreparedFrame {
+            key,
+            size,
+            copy_mode,
+            frame,
+            rounds,
+            retained_plan,
+            compile_total,
+            schedule,
+        })
+    }
+
+    /// Records the frame [`Self::prepare`] planned into `encoder` — the second
+    /// half of [`Self::encode`], taking the same arguments.
+    ///
+    /// **`scene` must be the scene that was prepared.** The held plan is used
+    /// when it was made for `target`'s extent, `target`'s texture usage and
+    /// region-copy mode, and `root`; otherwise — no plan held, or a resize (or
+    /// a target of another kind) between the two calls — `scene` is planned
+    /// here first, exactly as [`Self::prepare`] would, so a mismatch costs a
+    /// re-plan rather than a wrong frame. The held plan is consumed either
+    /// way: a second encode without a prepare between plans again.
+    ///
+    /// Everything past the plan runs exactly as [`Self::encode`] runs it, and
+    /// the retained store's decisions are committed only here, past the last
+    /// fallible step — so a refusal below leaves every page and ledger entry
+    /// as it was.
+    ///
+    /// # Errors
+    ///
+    /// The post-plan refusals, each returned before anything is recorded,
+    /// uploaded, allocated or submitted, on [`Self::encode`]'s terms:
+    /// [`EngineError::AlphaCapacity`] when the frame's coverage outgrows the
+    /// alpha texture, and [`EngineError::PaintCapacity`] when its encoded
+    /// paints or colour ramps outgrow theirs. When the held plan could not be
+    /// used, every one of [`Self::prepare`]'s errors as well — a refusal the
+    /// caller meets only after it acquired its target, which is what a
+    /// mismatched prepare costs.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "[`Self::encode`]'s own argument list, each still supplied \
+                  by a different owner"
+    )]
+    pub fn encode_prepared(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        scene: &Scene,
+        target: EngineTarget<'_>,
+        base_color: Color,
+        root: Affine,
+    ) -> Result<(), EngineError> {
+        self.encode_prepared_traced(
+            device,
+            queue,
+            encoder,
+            scene,
+            target,
+            base_color,
+            root,
+            FrameTimestamps::inert(),
+        )
+    }
+
+    /// [`Self::encode_prepared`], with each pass's GPU time stamped into
+    /// `timestamps` on [`Self::encode_traced`]'s terms.
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::encode_prepared`]'s.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "[`Self::encode_prepared`]'s argument list plus the timestamp \
+                  sink, each still supplied by a different owner"
+    )]
+    pub fn encode_prepared_traced(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        scene: &Scene,
+        target: EngineTarget<'_>,
+        base_color: Color,
+        root: Affine,
+        timestamps: FrameTimestamps<'_>,
+    ) -> Result<(), EngineError> {
+        let (key, copy_mode) = PreparedKey::of(&target, root);
+        let prepared = match self.prepared.take() {
+            Some(prepared) if prepared.key == key && prepared.copy_mode == copy_mode => prepared,
+            _ => self.plan(scene, key, copy_mode)?,
+        };
+        let PreparedFrame {
+            key: _,
+            size,
+            copy_mode,
+            mut frame,
+            rounds,
+            retained_plan,
+            compile_total,
+            schedule: planned,
+        } = prepared;
+        // The rest of the frame's CPU accounting, from here to the end of the
+        // call; the plan's own laps arrived with it.
+        let mut clock = PhaseClock::start();
+
+        let serve_backdrops = copy_mode != RegionCopyMode::Unavailable;
+        if !frame.backdrops.is_empty() && !serve_backdrops {
+            note_backdrop_unreadable(target.view.texture());
+        }
+        // The largest region a texture-mode frame transfers, which the
+        // staging texture is grown to before the first pass is recorded.
+        let staging_extent = if serve_backdrops {
+            frame
+                .backdrops
+                .iter()
+                .fold((0_u32, 0_u32), |(w, h), backdrop| {
+                    (
+                        w.max(u32::from(backdrop.region.width())),
+                        h.max(u32::from(backdrop.region.height())),
+                    )
+                })
+        } else {
+            (0, 0)
+        };
         // Depth is available only when there is an attachment to use and the
         // kill switch is off. Settling that before a single instance is built
         // is what keeps the opaque/alpha split and the pass shape in agreement.
@@ -2136,7 +2428,7 @@ impl EngineRenderer {
         // the only such statement `encode` is handed, so it is what the skip
         // `compile::clear`'s contract calls for is decided on.
         let punches = !frame.clears.is_empty() && !is_opaque(base_color);
-        let schedule_span = clock.lap();
+        let schedule_span = planned.saturating_add(clock.lap());
 
         // Paints are resolved before instances are built: an instance names
         // its paint by the texel its record starts at, which only exists once
@@ -2997,9 +3289,10 @@ impl EngineRenderer {
         });
         let punch_drawn = punch_pass.is_some();
 
-        // The frame's live pages — the two ping-pong groups and the one spill
-        // page beside them — each holding the finished page a later round
-        // composites (see [`crate::schedule`]).
+        // The frame's live pages — the two ping-pong groups and every slot of
+        // the spill pool beside them, indexed by `PageParity::index` — each
+        // holding the finished page a later round composites (see
+        // [`crate::schedule`]).
         let mut live: [Option<PooledTexture>; MAX_LIVE_PAGES] = [const { None }; MAX_LIVE_PAGES];
         let mut page_slot = 0_usize;
         // The fragment region copies' own instance slots, one per copy round.
@@ -4491,8 +4784,9 @@ struct RoundPlan {
     retained: Option<RetainedRound>,
     /// This round's slice of [`Scratch::segments`], in execution order.
     segments: Range<usize>,
-    /// Page groups this round consumed, indexed by
-    /// [`PageParity::index`]; each returns to the pool once the pass ends.
+    /// Page groups this round consumed — the pair and every spill slot —
+    /// indexed by [`PageParity::index`]; each returns to the pool once the
+    /// pass ends.
     released: [bool; MAX_LIVE_PAGES],
     /// The filter pass this round runs, on a filter round — which draws no
     /// strip and composites nothing, so its `segments` range is empty.
@@ -7138,6 +7432,60 @@ fn released_groups(released: &[PageParity]) -> [bool; MAX_LIVE_PAGES] {
     groups
 }
 
+/// What a frame was planned for: the target's extent and usage and the root
+/// transform — the facts [`EngineRenderer::encode_prepared`] checks a held
+/// plan against before it records one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PreparedKey {
+    width: u32,
+    height: u32,
+    usage: wgpu::TextureUsages,
+    root: Affine,
+}
+
+impl PreparedKey {
+    /// The key a frame rendering into `target` under `root` is planned for,
+    /// with the region-copy mode `target` itself reads back with.
+    fn of(target: &EngineTarget<'_>, root: Affine) -> (Self, RegionCopyMode) {
+        let texture = target.view.texture();
+        let key = Self {
+            width: target.width,
+            height: target.height,
+            usage: texture.usage(),
+            root,
+        };
+        (key, RegionCopyMode::of(texture))
+    }
+}
+
+/// One frame's plan — what [`EngineRenderer::prepare`] settles before
+/// anything is recorded — held until [`EngineRenderer::encode_prepared`]
+/// records it.
+///
+/// Holds no renderer resource: the retained store's decisions are a plan
+/// over plain values until the encode commits them, so dropping one changes
+/// nothing.
+#[derive(Debug)]
+struct PreparedFrame {
+    /// What the frame was planned for.
+    key: PreparedKey,
+    /// The target extent on the device grid.
+    size: (u16, u16),
+    /// How the frame's backdrops read their regions back —
+    /// [`RegionCopyMode::Unavailable`] when they were scheduled as nothing.
+    copy_mode: RegionCopyMode,
+    /// The compiled scene.
+    frame: CompiledFrame,
+    /// The frame's rounds, in execution order.
+    rounds: Vec<Round>,
+    /// The retained store's decisions, applied by the encode.
+    retained_plan: RetainedPlan,
+    /// The compile's CPU time (zero without `perf-trace`).
+    compile_total: Duration,
+    /// The plan's CPU time past the compile (zero without `perf-trace`).
+    schedule: Duration,
+}
+
 /// How a region of a frame's own target is read back into a pooled page —
 /// the mechanism every effect sampling what the frame has already painted
 /// shares (a backdrop blur today; see [`crate::filters`]' *The backdrop
@@ -7176,6 +7524,15 @@ impl RegionCopyMode {
     #[must_use]
     pub fn of(target: &wgpu::Texture) -> Self {
         Self::for_usage(target.usage(), target.format(), target.sample_count())
+    }
+
+    /// The mode a single-sampled target in `format`, created with `usage`,
+    /// reads regions back with — [`Self::of`] for a target that does not exist
+    /// yet, which is what [`EngineRenderer::prepare`] decides a frame's
+    /// backdrops against before the host acquires it.
+    #[must_use]
+    pub fn of_usage(usage: wgpu::TextureUsages, format: wgpu::TextureFormat) -> Self {
+        Self::for_usage(usage, format, 1)
     }
 
     /// [`Self::of`] over the three facts it reads, so the decision is

@@ -36,8 +36,8 @@
 //! and a retained page's whole point is to survive across frames. For the same
 //! reason it is **not** one of the scheduler's live pages: a round rendering a
 //! body into its retained page, and the composite that later samples it, take
-//! nothing from the two ping-pong groups or the spill page
-//! ([`MAX_LIVE_PAGES`](crate::schedule::MAX_LIVE_PAGES)) — the body's own nested
+//! nothing from the two ping-pong groups or the spill pool
+//! (`MAX_SPILL_PAGES` slots, [`MAX_LIVE_PAGES`](crate::schedule::MAX_LIVE_PAGES)) — the body's own nested
 //! translucent layers still do, exactly as they would inside any layer.
 //!
 //! ## Budget, eviction and refusals

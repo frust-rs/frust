@@ -6352,41 +6352,94 @@ measures the filter rather than this edge rule. Shader: `sampled_bilinear` in `s
 ### `engine-scheduler-skip-on-escalation` — a layer shape the engine's scheduler cannot serve skips the frame rather than falling back
 
 **Observed** (evidence: `crates/frust-engine/src/schedule/mod.rs`'s module
-contract and the `RenderPath::EngineDirect` submit arm in
-`crates/frust-render/src/renderer.rs`): the engine tier carries no second
-renderer — a frame whose layer shape the scheduler cannot serve returns
-`EngineError::SchedulerEscalation` and the surface presents nothing for that
-frame: the previously presented content persists, a refusal counter
-increments, and a rate-limited log names the reason — and since the shape is
-a property of the layer tree, a shape that refuses once refuses every frame,
-freezing the surface on its last presented image while the app keeps running.
+contract, `EngineRenderer::prepare`, and `SurfaceRenderer::encode` /
+`TierBackend::present_refused_frame` in `crates/frust-render/src/renderer.rs`):
+the engine tier carries no second renderer — a frame whose layer shape the
+scheduler cannot serve is refused with `EngineError::SchedulerEscalation` and
+the surface shows nothing new for that frame, a refusal counter increments
+(`SurfaceRenderer::engine_refusals()`), and a rate-limited log names the
+reason. Every plan-stage refusal is decided in `SurfaceRenderer::encode`
+(`EngineRenderer::prepare`) before the swapchain is acquired, so
+`encode` returns `Skipped` and no texture is held: the last presented frame
+persists on every backend. Only a capacity refusal found while recording
+(`AlphaCapacity`, `PaintCapacity`, when the held plan matches), or a re-plan
+(missing or stale plan: a texture binding that changed an id's extent, a resize,
+the retained-store or atlas setters, a different target; any `prepare` error can
+then surface), lands after acquire. The main surface presents the acquired image
+(`RefusalBackstop`): the previous frame re-converted on the straight-alpha arm, a
+base-colour clear on the direct arm; no overlay is recorded that frame. An
+overlay whose record is refused keeps its acquired texture un-presented in
+`reserved`, so its previous frame stays and its next record draws into it.
+A post-acquire refusal therefore costs at most one frame, but on the direct arm
+that frame is the clear, so a sustained capacity refusal flashes the base
+colour every frame (accepted; the alternative, dropping the texture, leaks a
+swapchain image — `wgpu-vulkan-discard-texture-noop`). Since the shape is a
+property of the layer tree, a shape that refuses once refuses every frame: the
+surface holds its last presented image while the app keeps running.
 
-The served set is wider still since the bounded third (spill) page landed
-(p7-f2): isolated sibling fans of any width, a nested isolated chain of any
-depth up to the chain bound, same-parity sequential page reuse, and — the one
-shape the spill page exists for — a chain hanging off an isolated ancestor's
-later child (a full-screen layer at fractional opacity holding a chip that
-itself carries a nested chip, the navigation-scrub shape) are all served
-within `MAX_LIVE_PAGES` (3) live pages; a single-primitive Gaussian blur or a
+The served set is wider still since the spill pool landed (p7-f2, widened to
+`MAX_SPILL_PAGES` = 3 slots): isolated sibling fans of any width, a nested
+isolated chain of any depth up to the chain bound, same-parity sequential page
+reuse, a chain hanging off an isolated ancestor's later child (a full-screen
+layer at fractional opacity holding a chip that itself carries a nested chip,
+the navigation-scrub shape), and every tree whose isolated layers hold at most
+two isolated children each (inlined (opacity-one) layers are transparent to the
+count: an isolated layer's children include the isolated layers recorded inside
+its inlined descendants; the nested translucent fan `P[Q, L[C1, C2]]` of a card
+switcher's dimmed peers included) are all served within `MAX_LIVE_PAGES` (2 + `MAX_SPILL_PAGES` = 5)
+live pages; a single-primitive Gaussian blur or a
 shadow-only drop shadow is planned and executed as a filter-round sequence,
 sized by `filter_page_size` (coverage plus the filter padding, quantized,
 refusing with `IntermediateTextureTooLarge` past the adapter ceiling and
 `IntermediateTextureLimitReached` past the pool's own budget). What still
-refuses: a chain deeper than the chain bound; a layer whose own round would
-need to sample two live pages while a third is still owed to a round above it
-— a fourth live page, past what the one bounded spill page extends to; a
+refuses: a chain deeper than the chain bound; a wider fan under an ancestor
+already holding a page, once its pending children outnumber the spill slots
+(the smallest refused shapes have seven layers, `root[A, B[C1..C5]]` and
+`P[Q, L[C1..C4]]`), which needs more than the 5 live pages; a
 filter that is not one of the two served kinds (flood and the
 composite-original drop shadow are reserved — the latter needs a third live
 page); a filter layer recorded inside another layer; and non-default blend or
 mask layers.
 
 **Accepted because**: the engine carries no second renderer to fall back to on
-one surface; skipping loudly beats rendering the shape wrong.
+one surface; skipping loudly beats rendering the shape wrong, and a refusal
+decided before acquire leaves the previous frame on screen.
 
 **Trigger for removal**: the served set must eventually cover the widget
-tree's real shapes — the opaque-pass hoist and the bounded spill page have
+tree's real shapes — the opaque-pass hoist and the bounded spill pool have
 each narrowed the refused class in turn rather than closed it; the general
 algorithm this narrows from is a stub behind the `full-scheduler` feature.
+
+### `wgpu-vulkan-discard-texture-noop` — a dropped un-presented swapchain texture leaks its image on Vulkan
+
+**Observed** (evidence: wgpu-hal 30.0.1's Vulkan `discard_texture`, a no-op; upstream
+[gfx-rs/wgpu#5723](https://github.com/gfx-rs/wgpu/issues/5723); the frust-side backstops in
+`crates/frust-render/src/renderer.rs` and `crates/frust-gpu/src/lifecycle.rs`): dropping an acquired
+`wgpu::SurfaceTexture` without presenting it never returns the swapchain image to the
+presentation engine on Vulkan, so each such drop permanently consumes one image and a few
+of them freeze the swapchain (the Android symptom was an app frozen on its last frame).
+
+**Applies to**: the Vulkan backend (Android and Linux), any path that acquires and then abandons
+a frame.
+
+**Why accepted**: the defect is upstream; frust works around it instead. No acquired
+texture is dropped while its swapchain lives: a post-acquire refusal presents a
+backstop frame on the main surface (`FrameOutcome::Skipped` with the texture still
+presented) or keeps the texture un-presented on an overlay, and refusals the plan can foresee are
+decided before acquire so nothing is held. An acquire `Timeout`/`Occluded` run reconfigures the
+swapchain after `MAX_TRANSIENT_SKIPS` (3) consecutive skips (`decide_acquire_streaks`,
+`next_transient_streak`; the main surface and overlays alike) so a wedged swapchain is rebuilt
+rather than skipped forever. frust relies on a reconfigure or resize recreating the
+swapchain to release the images it still holds (that reconfigure, and
+`OverlaySurface::resize`, which drops pending/reserved/recorded first); whether a
+rebuild also reclaims an image leaked before this fix is driver-dependent
+(unverified on Adreno), and no normal path leaks one now. The
+cost is at most one backstop frame per post-acquire refusal (see
+`engine-scheduler-skip-on-escalation`), and an occluded window reconfigures on every fourth
+acquire attempt.
+
+**Trigger for removal**: a wgpu release whose Vulkan discard returns the image (for example via
+`VK_EXT_swapchain_maintenance1`); then the present-anyway backstop can be revisited.
 
 ### `engine-glifo-atlas-experimental` — the engine's glyph atlas is built on a cache upstream labels experimental, wrapped in frust-owned policy
 
