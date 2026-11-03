@@ -8,6 +8,13 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Added
 
+- `EngineRenderer::prepare` (every plan-stage refusal) and `encode_prepared` / `encode_prepared_traced`
+  (record a prepared frame; can refuse only `AlphaCapacity` / `PaintCapacity`), plus the public helper
+  `RegionCopyMode::of_usage`. `SurfaceRenderer::engine_refusals()` returns the `#[non_exhaustive]`
+  `EngineRefusalReport { count, first_reason }`. The `FRUST_RENDER_INJECT_REFUSAL` fault-injection knob
+  (`plan:N` / `record:N`, compile-time or runtime, honoured in release builds) refuses every Nth frame
+  at that stage. `frust_gpu::lifecycle::MAX_TRANSIENT_SKIPS` (3) bounds a run of acquire
+  `Timeout`/`Occluded` skips before the swapchain is reconfigured.
 - `EngineRenderer::set_synthetic_oblique` / `synthetic_oblique` and `set_glyph_run_cache` /
   `glyph_run_cache` forward the faux-oblique and resident-glyph-run-cache switches on the renderer,
   matching `SceneCompiler`.
@@ -69,6 +76,17 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Changed
 
+- Scheduler: `MAX_SPILL_PAGES` (3) spill slots serve a fan nested inside a fan under a held ancestor
+  and every tree whose isolated layers hold at most two isolated children; `MAX_LIVE_PAGES` goes
+  from 3 to 5, costing up to +128 MiB of intermediates, only on frames that use the extra slots.
+  Migration: `frust_engine::schedule::PageParity` gains the pub variant `SpillPool(SpillSlot)` (a
+  patch-release source break), so an exhaustive downstream `match` needs a wildcard arm or the new
+  `PageParity::is_spill()` / `spill_slot()` (`PageParity::spill(n)` builds one).
+- `SurfaceRenderer::encode` now does the engine's planning, so a frame the engine refuses is skipped
+  before the swapchain is acquired and `encode_us` carries the plan CPU time that `submit_us` used to.
+  Frames refused after acquire present the acquired image (the previous frame re-converted on the
+  straight-alpha arm, a base-colour clear on the direct arm and overlays), at most one frame
+  (`engine-scheduler-skip-on-escalation`, `wgpu-vulkan-discard-texture-noop`).
 - `FontHandle::with_synthesis` clamps skew to +/-30 degrees and embolden to at most 0.5 em.
 - Glyph admission is sticky: a run whose every glyph is already resident is served over the texel
   budget, only a run that would insert is refused, and LRU eviction still drains the excess. iPhone
@@ -92,6 +110,13 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   call, which is now the only `unsafe` in the module. One generic bounded LRU bounds the open faces,
   each face's instances and the outline cache; refusal sets stay first-in-first-out (c0002cfab,
   1d1418e9b).
+
+### Fixed
+
+- A frame the engine refuses no longer freezes Android/Vulkan apps: a dropped un-presented swapchain
+  texture leaks its image on wgpu-hal 30.0.1 ([gfx-rs/wgpu#5723](https://github.com/gfx-rs/wgpu/issues/5723)),
+  so frust now presents every texture it acquires and reconfigures after `MAX_TRANSIENT_SKIPS`
+  consecutive acquire timeouts.
 
 ## 0.6.5 — 2026-11-02
 
