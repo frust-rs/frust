@@ -55,12 +55,16 @@
 //! outlines under the wrong ids. So before a face opened by name is used, the
 //! handle's bytes and the CoreText face must agree on their glyph count
 //! (`maxp.numGlyphs` against `CTFontGetGlyphCount`), their `unitsPerEm` and
-//! their `fvar` axis tags, in order ([`FaceShape`]). A disagreement is a
-//! refusal like the others, warned once with the name escaped and counted
-//! ([`HvglOutlines::bytes_mismatches`]). The handle does not say whether its
-//! bytes are a registered copy or the installed file the oracle mapped the
-//! name to, so every face is checked when it is first opened: two getters and
-//! one copy of the installed face's `fvar` table, once per open.
+//! their `fvar` axis tags, in order ([`FaceShape`]), and on the glyph each of
+//! a sample of the bytes' `cmap` codepoints maps to (the middle codepoint of
+//! `CMAP_SAMPLES` ranges spread over the best Unicode subtable, against
+//! `CTFontGetGlyphsForCharacters`; [`cmap_disagreement`]). A disagreement is a
+//! refusal like the others, warned once with the name escaped (a codepoint as
+//! `U+XXXX`) and counted ([`HvglOutlines::bytes_mismatches`]). The handle does
+//! not say whether its bytes are a registered copy or the installed file the
+//! oracle mapped the name to, so every face is checked when it is first
+//! opened: two getters, one copy of the installed face's `fvar` table and one
+//! character-map lookup, once per open.
 //!
 //! Refusals are remembered apart from the open faces, in a set of at most
 //! `MAX_REFUSED_FACES` (oldest out), so no refusal evicts a live face. One
@@ -77,10 +81,17 @@
 //! through the inverse of the axis's `avar` segment map, then denormalized
 //! against the axis's `fvar` minimum, default and maximum ([`user_value`]),
 //! and the face is copied with a `kCTFontVariationAttribute` dictionary naming
-//! every axis (axis tag to user value). Each face keeps its few most recently
-//! used instances open ([`MAX_INSTANCES_PER_FACE`]). A run with no coordinates
-//! — every non-variable face, and a variable one at its default — draws from
-//! the face as opened, exactly as before.
+//! every axis (axis tag to user value). The copy carries no failure signal, so
+//! the instance is read back from it (`CTFontCopyVariationAxes`,
+//! `CTFontCopyVariation`) and kept only when every axis holds the value asked
+//! for within the axis's precision ([`unapplied_axis`]). Otherwise the
+//! instance is refused — warned once, counted
+//! ([`HvglOutlines::variation_mismatches`]), its glyphs unavailable and
+//! nothing cached under its key — never drawn from another instance. Each
+//! face keeps its few most recently used instances open
+//! ([`MAX_INSTANCES_PER_FACE`]). A run with no coordinates — every
+//! non-variable face, and a variable one at its default — draws from the face
+//! as opened, exactly as before.
 //!
 //! # The cache
 //!
@@ -121,6 +132,11 @@ const FVAR_HEADER_LEN: usize = 16;
 const FVAR_AXIS_MIN_LEN: usize = 20;
 /// An `avar` header's fixed length, ahead of its segment maps.
 const AVAR_HEADER_LEN: usize = 8;
+/// `cmap`, the face's character map.
+const CMAP_TAG: [u8; 4] = *b"cmap";
+/// How many codepoints of the bytes' `cmap` are compared with CoreText's
+/// character map when a face is opened.
+const CMAP_SAMPLES: usize = 16;
 /// One F2Dot14 unit: a normalized coordinate of 1.0.
 const F2DOT14_ONE: f64 = 16384.0;
 /// One 16.16 `Fixed` unit.
@@ -315,6 +331,9 @@ pub(crate) struct HvglOutlines {
     outlines: OutlineCache,
     /// Glyphs the draw routes could not supply.
     unavailable: u64,
+    /// Variation instances refused because CoreText's copy did not carry the
+    /// user values asked for.
+    variation_mismatches: u32,
 }
 
 impl Default for HvglOutlines {
@@ -342,6 +361,7 @@ impl HvglOutlines {
             faces: FaceTable::default(),
             outlines: OutlineCache::new(capacity),
             unavailable: 0,
+            variation_mismatches: 0,
         }
     }
 
@@ -379,6 +399,15 @@ impl HvglOutlines {
     /// since the provider was built.
     pub(crate) fn bytes_mismatches(&self) -> u32 {
         self.faces.bytes_mismatches
+    }
+
+    /// How many variation instances were refused because the copy CoreText
+    /// made of a face did not carry the user values asked for (read back from
+    /// the copy), since the provider was built. Each instance counts once per
+    /// open face; its glyphs are unavailable rather than drawn from another
+    /// instance.
+    pub(crate) fn variation_mismatches(&self) -> u32 {
+        self.variation_mismatches
     }
 
     /// How many outline fetches the cache answered without asking CoreText,
@@ -419,10 +448,14 @@ impl HvglOutlines {
     /// for the default instance), fetched from CoreText on a cache miss.
     ///
     /// Coordinates on a face with no `fvar` axes name nothing to vary, and
-    /// draw from the face as opened.
+    /// draw from the face as opened. A refused instance answers
+    /// [`GlyphOutline::Unavailable`] and caches nothing under its key.
     pub(crate) fn outline(&mut self, handle: &FontHandle, glyph_id: u32) -> GlyphOutline<'_> {
         let Self {
-            faces, outlines, ..
+            faces,
+            outlines,
+            variation_mismatches,
+            ..
         } = self;
         let coords = handle.normalized_coords();
         let Some(face) = faces.open(handle) else {
@@ -439,7 +472,12 @@ impl HvglOutlines {
             glyph_id,
             variation,
         };
-        match outlines.get_or_fetch(key, || fetch(face.instance(variation, coords), glyph_id)) {
+        let fetched = outlines.get_or_fetch(key, || {
+            let name = handle.postscript_name().unwrap_or_default();
+            face.instance(variation, coords, name, variation_mismatches)
+                .map(|instance| fetch(instance, glyph_id))
+        });
+        match fetched {
             Some(Fetched::Path(path)) => GlyphOutline::Path { path, units_per_em },
             Some(Fetched::Empty) => GlyphOutline::Empty,
             Some(Fetched::Missing) | None => GlyphOutline::Unavailable,
@@ -481,13 +519,15 @@ impl OutlineCache {
     }
 
     /// `key`'s entry, marked most recently used, or `fetch`'s answer inserted
-    /// in its place — evicting the least recently used entry when full.
+    /// in its place — evicting the least recently used entry when full. A
+    /// `fetch` answering `None` (a refused instance) inserts and evicts
+    /// nothing.
     ///
     /// Counts one hit or one miss per call.
     fn get_or_fetch(
         &mut self,
         key: OutlineKey,
-        fetch: impl FnOnce() -> Fetched,
+        fetch: impl FnOnce() -> Option<Fetched>,
     ) -> Option<&Fetched> {
         self.tick = self.tick.wrapping_add(1);
         let tick = self.tick;
@@ -497,12 +537,13 @@ impl OutlineCache {
             self.hits = self.hits.saturating_add(1);
         } else {
             self.misses = self.misses.saturating_add(1);
+            let fetched = fetch()?;
             if self.entries.len() >= self.capacity
                 && let Some((_, oldest)) = self.order.pop_first()
             {
                 self.entries.remove(&oldest);
             }
-            self.entries.insert(key, (fetch(), tick));
+            self.entries.insert(key, (fetched, tick));
         }
         self.order.insert(tick, key);
         self.entries.get(&key).map(|(fetched, _)| fetched)
@@ -524,6 +565,12 @@ struct Face {
     axes: Vec<Axis>,
     /// The variation instances copied from `ct`, with their last use.
     instances: Vec<(VariationKey, platform::CtFace, u64)>,
+    /// The instances refused (CoreText's copy did not carry them), oldest
+    /// first, at most [`MAX_INSTANCES_PER_FACE`].
+    refused: VecDeque<VariationKey>,
+    /// CoreText's own axis defaults for `ct`, read on the first instance
+    /// copied (an instance's read-back fills in the axes it leaves out).
+    coretext_defaults: Option<Vec<(u32, f64)>>,
     /// A use counter, for the least-recently-used replacement of `instances`.
     uses: u64,
 }
@@ -531,10 +578,23 @@ struct Face {
 impl Face {
     /// The CoreText face to read `variation`'s outlines from: the face as
     /// opened for the default instance, else a copy at the user values
-    /// `coords` maps to, copied on first use.
-    fn instance(&mut self, variation: VariationKey, coords: &[i16]) -> &platform::CtFace {
+    /// `coords` maps to, copied on first use — or `None` when that copy is
+    /// refused.
+    ///
+    /// A copy is kept only when the instance CoreText reads back from it
+    /// carries every user value asked for ([`unapplied_axis`]); else drawing
+    /// from it would cache another instance's outlines under this one's key.
+    /// A refusal is counted in `refusals` and warned once (the face's `name`
+    /// escaped), and remembered while the face stays open.
+    fn instance(
+        &mut self,
+        variation: VariationKey,
+        coords: &[i16],
+        name: &str,
+        refusals: &mut u32,
+    ) -> Option<&platform::CtFace> {
         if variation == VariationKey::DEFAULT {
-            return &self.ct;
+            return Some(&self.ct);
         }
         self.uses = self.uses.wrapping_add(1);
         let position = match self
@@ -544,6 +604,30 @@ impl Face {
         {
             Some(position) => position,
             None => {
+                if self.refused.contains(&variation) {
+                    return None;
+                }
+                let values = user_values(&self.axes, coords);
+                let defaults = self
+                    .coretext_defaults
+                    .get_or_insert_with(|| self.ct.axis_defaults());
+                let checked = match self.ct.varied(&values, self.units_per_em) {
+                    Some(varied) => {
+                        let applied = applied_variation(defaults, &varied);
+                        match unapplied_axis(&self.axes, &values, &applied) {
+                            None => Ok(varied),
+                            Some(unapplied) => Err(unapplied.to_string()),
+                        }
+                    }
+                    None => Err("CoreText made no copy".to_owned()),
+                };
+                let varied = match checked {
+                    Ok(varied) => varied,
+                    Err(why) => {
+                        self.refuse(variation, name, &values, &why, refusals);
+                        return None;
+                    }
+                };
                 if self.instances.len() >= MAX_INSTANCES_PER_FACE
                     && let Some(oldest) = self
                         .instances
@@ -554,20 +638,125 @@ impl Face {
                 {
                     self.instances.swap_remove(oldest);
                 }
-                let values = user_values(&self.axes, coords);
-                let Some(varied) = self.ct.varied(&values, self.units_per_em) else {
-                    return &self.ct;
-                };
                 self.instances.push((variation, varied, 0));
                 self.instances.len() - 1
             }
         };
-        let Some(entry) = self.instances.get_mut(position) else {
-            return &self.ct;
-        };
+        let entry = self.instances.get_mut(position)?;
         entry.2 = self.uses;
-        &entry.1
+        Some(&entry.1)
     }
+
+    /// Remembers `variation` as refused (oldest refusal out at the cap),
+    /// counting it in `refusals` and warning once.
+    fn refuse(
+        &mut self,
+        variation: VariationKey,
+        name: &str,
+        values: &[(u32, f64)],
+        why: &str,
+        refusals: &mut u32,
+    ) {
+        if self.refused.len() >= MAX_INSTANCES_PER_FACE {
+            self.refused.pop_front();
+        }
+        self.refused.push_back(variation);
+        *refusals = refusals.saturating_add(1);
+        log::warn!(
+            "frust-engine: hvgl face {:?} at [{}] refused: CoreText's copy is another instance \
+             ({why}); its glyphs at that instance are counted as skipped",
+            truncated(name),
+            instance_list(values),
+        );
+    }
+}
+
+/// The instance CoreText reads back from `varied`, as `(axis tag, user
+/// value)`: every axis of `defaults` (CoreText's own, from the face it was
+/// copied from) at the value the copy reports, else at its default.
+fn applied_variation(defaults: &[(u32, f64)], varied: &platform::CtFace) -> Vec<(u32, f64)> {
+    let reported = varied.variation_values();
+    let applied = defaults
+        .iter()
+        .map(|(tag, default)| {
+            let value = reported
+                .iter()
+                .find(|(reported, _)| reported == tag)
+                .map_or(*default, |(_, value)| *value);
+            (*tag, value)
+        })
+        .collect();
+    #[cfg(test)]
+    let applied = tests::skewed(applied);
+    applied
+}
+
+/// One axis CoreText's copy does not carry as asked.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct UnappliedAxis {
+    /// The axis tag.
+    tag: u32,
+    /// The user value asked for.
+    asked: f64,
+    /// The value read back; `None` when CoreText reports no such axis.
+    applied: Option<f64>,
+}
+
+impl core::fmt::Display for UnappliedAxis {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let tag = tag_list(&[self.tag]);
+        match self.applied {
+            Some(applied) => write!(f, "{tag} read back as {applied}, asked {}", self.asked),
+            None => write!(f, "{tag} is not an axis of CoreText's copy"),
+        }
+    }
+}
+
+/// The first axis of `asked` (`(axis tag, user value)`, every axis of
+/// `axes`) that `applied` — the instance CoreText reads back from its copy —
+/// does not carry within the axis's precision ([`axis_precision`]), or `None`
+/// when every axis was applied.
+fn unapplied_axis(
+    axes: &[Axis],
+    asked: &[(u32, f64)],
+    applied: &[(u32, f64)],
+) -> Option<UnappliedAxis> {
+    asked.iter().zip(axes).find_map(|((tag, asked), axis)| {
+        let applied = applied
+            .iter()
+            .find(|(applied_tag, _)| applied_tag == tag)
+            .map(|(_, value)| *value);
+        let within = applied.is_some_and(|value| {
+            (value - asked).abs() <= axis_precision(axis, *asked) + f64::EPSILON
+        });
+        (!within).then_some(UnappliedAxis {
+            tag: *tag,
+            asked: *asked,
+            applied,
+        })
+    })
+}
+
+/// The finest user-value distinction `axis` makes at `value`: one F2Dot14
+/// step of the normalized range on that side of the default (the resolution
+/// of a run's coordinates), and no finer than one 16.16 `Fixed` unit (the
+/// resolution of `fvar` itself).
+fn axis_precision(axis: &Axis, value: f64) -> f64 {
+    let side = if value < axis.default {
+        axis.default - axis.min
+    } else {
+        axis.max - axis.default
+    };
+    (side.abs() / F2DOT14_ONE).max(1.0 / FIXED_ONE)
+}
+
+/// `values` as `tag=value` pairs, for a log line.
+fn instance_list(values: &[(u32, f64)]) -> String {
+    values
+        .iter()
+        .map(|(tag, value)| format!("{}={value}", tag_list(&[*tag])))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// One `fvar` axis, with its `avar` segment map.
@@ -794,6 +983,194 @@ impl FaceShape {
     }
 }
 
+/// How one range of a Unicode `cmap` subtable maps its codepoints to glyphs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RangeMap {
+    /// Format 12: the first codepoint's glyph, the rest following in order.
+    Sequential(u32),
+    /// Format 4 without an `idRangeOffset`: the codepoint plus a delta,
+    /// modulo 65536.
+    Delta(u16),
+    /// Format 4 through its `glyphIdArray`: where the range's first entry
+    /// sits in the blob, and the delta added to a non-zero entry.
+    Indexed {
+        /// The blob offset of the first codepoint's entry.
+        at: usize,
+        /// Added to a non-zero entry, modulo 65536.
+        delta: u16,
+    },
+}
+
+/// One run of consecutive codepoints of a Unicode `cmap` subtable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CmapRange {
+    /// The first codepoint.
+    first: u32,
+    /// The last codepoint, inclusive.
+    last: u32,
+    /// How the range's codepoints map to glyphs.
+    map: RangeMap,
+}
+
+impl CmapRange {
+    /// `codepoint`'s glyph in `data`, or `None` when it falls outside the
+    /// range or its entry does not fit the blob.
+    fn glyph(&self, data: &[u8], codepoint: u32) -> Option<u16> {
+        let offset = codepoint.checked_sub(self.first)?;
+        match self.map {
+            RangeMap::Sequential(first) => u16::try_from(first.checked_add(offset)?).ok(),
+            RangeMap::Delta(delta) => Some(u16::try_from(codepoint).ok()?.wrapping_add(delta)),
+            RangeMap::Indexed { at, delta } => {
+                let entry = read_u16(data, at.checked_add(usize::try_from(offset).ok()? * 2)?)?;
+                Some(if entry == 0 {
+                    0
+                } else {
+                    entry.wrapping_add(delta)
+                })
+            }
+        }
+    }
+}
+
+/// A face's best Unicode `cmap` subtable: format 12 (full repertoire) over
+/// format 4 (BMP), as a shaper prefers them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UnicodeCmap {
+    /// Where the subtable starts in the blob.
+    at: usize,
+    /// Its format, 4 or 12.
+    format: u16,
+    /// How many ranges (format 4 segments, format 12 groups) it declares.
+    ranges: usize,
+}
+
+impl UnicodeCmap {
+    /// The best Unicode subtable of the `cmap` table starting at `table`, or
+    /// `None` when it has none this module reads.
+    fn find(data: &[u8], table: usize) -> Option<Self> {
+        let count = usize::from(read_u16(data, table.checked_add(2)?)?);
+        let mut best: Option<(u8, usize, u16)> = None;
+        for index in 0..count {
+            let record = table.checked_add(4)?.checked_add(index.checked_mul(8)?)?;
+            let platform = read_u16(data, record)?;
+            let encoding = read_u16(data, record.checked_add(2)?)?;
+            let offset = usize::try_from(read_u32(data, record.checked_add(4)?)?).ok()?;
+            let at = table.checked_add(offset)?;
+            let format = read_u16(data, at)?;
+            let rank = match (platform, encoding, format) {
+                (3, 10, 12) | (0, 4 | 6, 12) => 2,
+                (3, 1, 4) | (0, 0..=3, 4) => 1,
+                _ => continue,
+            };
+            if best.is_none_or(|(best_rank, ..)| rank > best_rank) {
+                best = Some((rank, at, format));
+            }
+        }
+        let (_, at, format) = best?;
+        let ranges = if format == 12 {
+            usize::try_from(read_u32(data, at.checked_add(12)?)?).ok()?
+        } else {
+            usize::from(read_u16(data, at.checked_add(6)?)? / 2)
+        };
+        Some(Self { at, format, ranges })
+    }
+
+    /// Range `index` (`< self.ranges`), or `None` when it does not fit the
+    /// blob, is inverted, or is format 4's terminating `0xFFFF` segment.
+    fn range(&self, data: &[u8], index: usize) -> Option<CmapRange> {
+        if self.format == 12 {
+            let group = self
+                .at
+                .checked_add(16)?
+                .checked_add(index.checked_mul(12)?)?;
+            let first = read_u32(data, group)?;
+            let last = read_u32(data, group.checked_add(4)?)?;
+            let map = RangeMap::Sequential(read_u32(data, group.checked_add(8)?)?);
+            return (first <= last).then_some(CmapRange { first, last, map });
+        }
+        let segments_x2 = self.ranges.checked_mul(2)?;
+        let segment = index.checked_mul(2)?;
+        let ends = self.at.checked_add(14)?;
+        let starts = ends.checked_add(segments_x2)?.checked_add(2)?;
+        let deltas = starts.checked_add(segments_x2)?;
+        let offsets = deltas.checked_add(segments_x2)?.checked_add(segment)?;
+        let last = read_u16(data, ends.checked_add(segment)?)?;
+        let first = read_u16(data, starts.checked_add(segment)?)?;
+        let delta = read_u16(data, deltas.checked_add(segment)?)?;
+        let range_offset = usize::from(read_u16(data, offsets)?);
+        if first > last || first == 0xFFFF {
+            return None;
+        }
+        let map = if range_offset == 0 {
+            RangeMap::Delta(delta)
+        } else {
+            RangeMap::Indexed {
+                at: offsets.checked_add(range_offset)?,
+                delta,
+            }
+        };
+        Some(CmapRange {
+            first: u32::from(first),
+            last: u32::from(last),
+            map,
+        })
+    }
+}
+
+/// Up to `count` `(codepoint, glyph)` pairs of the face's Unicode `cmap`:
+/// the middle codepoint of `count` ranges spread evenly over the subtable
+/// (each the middle of an equal share of its ranges), so the cost is
+/// `count` range reads however large the `cmap`. A pick that maps to glyph 0,
+/// is not a scalar value or does not fit the blob is left out; none at all
+/// when the face has no Unicode subtable.
+fn cmap_sample(data: &[u8], directory: usize, count: usize) -> Vec<(char, u16)> {
+    let Some(cmap) =
+        table_start(data, directory, CMAP_TAG).and_then(|table| UnicodeCmap::find(data, table))
+    else {
+        return Vec::new();
+    };
+    let picks = count.min(cmap.ranges);
+    (0..picks)
+        .filter_map(|pick| {
+            let index = (2 * pick + 1).checked_mul(cmap.ranges)? / (2 * picks);
+            let range = cmap.range(data, index)?;
+            let codepoint = range.first + (range.last - range.first) / 2;
+            let glyph = range.glyph(data, codepoint).filter(|glyph| *glyph != 0)?;
+            Some((char::from_u32(codepoint)?, glyph))
+        })
+        .collect()
+}
+
+/// Where CoreText's character map disagrees with `font`'s bytes on a sample
+/// of their `cmap` ([`cmap_sample`], [`CMAP_SAMPLES`] codepoints), for the
+/// warning; `None` when every sampled codepoint maps to the same glyph in
+/// both. Bytes with no mapped Unicode codepoint never agree. Glyph
+/// substitutions (`GSUB`) are not compared.
+fn cmap_disagreement(font: &FontData, face: &platform::CtFace) -> Option<String> {
+    let data = font.data.data();
+    let sample = table_directory(data, font.index)
+        .map(|directory| cmap_sample(data, directory, CMAP_SAMPLES))
+        .unwrap_or_default();
+    if sample.is_empty() {
+        return Some("no mapped Unicode codepoint in the bytes' cmap".to_owned());
+    }
+    let characters: Vec<char> = sample.iter().map(|(character, _)| *character).collect();
+    let installed = face.glyphs_for(&characters);
+    if installed.len() != sample.len() {
+        return Some("CoreText mapped none of the sampled codepoints".to_owned());
+    }
+    sample
+        .iter()
+        .zip(installed)
+        .find(|((_, bytes), installed)| bytes != installed)
+        .map(|((character, bytes), installed)| {
+            format!(
+                "U+{:04X} is glyph {bytes} in the bytes, {installed} in CoreText's face",
+                u32::from(*character),
+            )
+        })
+}
+
 /// `value` for a log line, `none` when absent.
 fn or_none(value: Option<impl core::fmt::Display>) -> String {
     value.map_or_else(|| "none".to_owned(), |value| value.to_string())
@@ -970,7 +1347,10 @@ impl FaceTable {
             }
             Ok((face, _)) => {
                 let installed = FaceShape::of_installed(&face.ct);
-                match FaceShape::of_bytes(handle.font()).disagreement(&installed) {
+                let disagreement = FaceShape::of_bytes(handle.font())
+                    .disagreement(&installed)
+                    .or_else(|| cmap_disagreement(handle.font(), &face.ct));
+                match disagreement {
                     None => Some(face),
                     Some(disagreement) => {
                         self.bytes_mismatches = self.bytes_mismatches.saturating_add(1);
@@ -1012,6 +1392,8 @@ fn try_open_face(font: &FontData, name: &str, id: u64) -> Result<(Face, String),
             units_per_em,
             axes: variation_axes(data, directory),
             instances: Vec::new(),
+            refused: VecDeque::new(),
+            coretext_defaults: None,
             uses: 0,
         },
         resolved,
@@ -1053,10 +1435,13 @@ mod platform {
     use core::ptr::NonNull;
 
     use kurbo::{PathEl, Point};
-    use objc2_core_foundation::{CFDictionary, CFNumber, CFRetained, CFString, CFType};
+    use objc2_core_foundation::{
+        CFArray, CFDictionary, CFIndex, CFNumber, CFRetained, CFString, CFType,
+    };
     use objc2_core_graphics::{CGPath, CGPathElement, CGPathElementType};
     use objc2_core_text::{
         CTFont, CTFontDescriptor, CTFontOrientation, CTFontTableOptions, kCTFontVariationAttribute,
+        kCTFontVariationAxisDefaultValueKey, kCTFontVariationAxisIdentifierKey,
     };
 
     /// Why [`CtFace::open`] refuses a face here.
@@ -1103,9 +1488,10 @@ mod platform {
         /// `(axis tag, user value)` — at `units_per_em` points.
         ///
         /// Built from a `kCTFontVariationAttribute` dictionary (axis
-        /// identifier to value, both `CFNumber`s), which CoreText honours on
-        /// an `hvgl` face as on any variable one. Always `Some` here; the
-        /// `Option` is the shape the target without CoreText shares.
+        /// identifier to value, both `CFNumber`s). The copy carries no failure
+        /// signal of its own, so this is always `Some`: whether CoreText
+        /// applied the instance is read back from the copy
+        /// ([`Self::variation_values`]).
         pub(super) fn varied(&self, axes: &[(u32, f64)], units_per_em: f64) -> Option<Self> {
             let tags: Vec<CFRetained<CFNumber>> = axes
                 .iter()
@@ -1139,6 +1525,82 @@ mod platform {
         /// Whether `glyph_id` names a glyph of the face.
         pub(super) fn contains(&self, glyph_id: u32) -> bool {
             u16::try_from(glyph_id).is_ok_and(|glyph| usize::from(glyph) < self.glyph_count)
+        }
+
+        /// Every axis `CTFontCopyVariationAxes` lists, as `(axis identifier,
+        /// default user value)`; empty for a face that does not vary. Costly
+        /// (about 130 us on macOS 27: CoreText localizes every axis name), so
+        /// read once per face.
+        pub(super) fn axis_defaults(&self) -> Vec<(u32, f64)> {
+            // SAFETY: a copy from a live font; `CFRetained` releases it.
+            let Some(axes) = (unsafe { self.font.variation_axes() }) else {
+                return Vec::new();
+            };
+            // SAFETY: every element is a CF object, which `CFType` stands for;
+            // each is downcast checked before it is read as anything narrower.
+            let axes: &CFArray<CFType> = unsafe { axes.cast_unchecked() };
+            // SAFETY: reading immutable CoreText constants.
+            let (identifier_key, default_key): (&CFType, &CFType) = unsafe {
+                (
+                    kCTFontVariationAxisIdentifierKey,
+                    kCTFontVariationAxisDefaultValueKey,
+                )
+            };
+            axes.iter()
+                .filter_map(|axis| {
+                    // SAFETY: as above, a dictionary of CF objects.
+                    let axis: &CFDictionary<CFType, CFType> =
+                        unsafe { axis.downcast_ref::<CFDictionary>()?.cast_unchecked() };
+                    let tag = axis_tag(&*number(axis, identifier_key)?)?;
+                    Some((tag, number(axis, default_key)?.as_f64()?))
+                })
+                .collect()
+        }
+
+        /// The values `CTFontCopyVariation` reports for the face, as `(axis
+        /// identifier, user value)`: only those off the axis default.
+        pub(super) fn variation_values(&self) -> Vec<(u32, f64)> {
+            // SAFETY: a copy from a live font; `CFRetained` releases it.
+            let Some(applied) = (unsafe { self.font.variation() }) else {
+                return Vec::new();
+            };
+            // SAFETY: every key and value is a CF object, which `CFType`
+            // stands for; each is downcast checked before it is read.
+            let applied: &CFDictionary<CFType, CFType> = unsafe { applied.cast_unchecked() };
+            let (keys, values) = applied.to_vecs();
+            keys.iter()
+                .zip(&values)
+                .filter_map(|(key, value)| {
+                    Some((
+                        axis_tag(key.downcast_ref::<CFNumber>()?)?,
+                        value.downcast_ref::<CFNumber>()?.as_f64()?,
+                    ))
+                })
+                .collect()
+        }
+
+        /// CoreText's nominal glyph for each of `characters`
+        /// (`CTFontGetGlyphsForCharacters`, the face's own character map), 0
+        /// for one the face does not map.
+        pub(super) fn glyphs_for(&self, characters: &[char]) -> Vec<u16> {
+            let mut units: Vec<u16> = Vec::with_capacity(characters.len() * 2);
+            let mut firsts = Vec::with_capacity(characters.len());
+            for character in characters {
+                firsts.push(units.len());
+                units.extend_from_slice(character.encode_utf16(&mut [0; 2]));
+            }
+            let mut glyphs = vec![0_u16; units.len()];
+            let (Some(units_at), Some(glyphs_at), Ok(count)) = (
+                NonNull::new(units.as_mut_ptr()),
+                NonNull::new(glyphs.as_mut_ptr()),
+                CFIndex::try_from(units.len()),
+            ) else {
+                return Vec::new();
+            };
+            // SAFETY: both buffers hold `count` elements. A non-BMP character
+            // takes two units, its glyph in the first slot.
+            unsafe { self.font.glyphs_for_characters(units_at, glyphs_at, count) };
+            firsts.into_iter().map(|first| glyphs[first]).collect()
         }
 
         /// How many glyphs the face holds (`CTFontGetGlyphCount`).
@@ -1204,6 +1666,19 @@ mod platform {
         }
     }
 
+    /// The axis tag a `CFNumber` axis identifier carries.
+    fn axis_tag(identifier: &CFNumber) -> Option<u32> {
+        u32::try_from(identifier.as_i64()?).ok()
+    }
+
+    /// `dictionary`'s value for `key`, when it is a `CFNumber`.
+    fn number(
+        dictionary: &CFDictionary<CFType, CFType>,
+        key: &CFType,
+    ) -> Option<CFRetained<CFNumber>> {
+        dictionary.get(key)?.downcast::<CFNumber>().ok()
+    }
+
     /// `CGPathApply`'s callback: append one element to the `Vec<PathEl>`
     /// `info` points at.
     ///
@@ -1259,6 +1734,21 @@ mod platform {
 
         /// Unreachable — no `CtFace` exists on this target.
         pub(super) fn contains(&self, _glyph_id: u32) -> bool {
+            match *self {}
+        }
+
+        /// Unreachable — no `CtFace` exists on this target.
+        pub(super) fn axis_defaults(&self) -> Vec<(u32, f64)> {
+            match *self {}
+        }
+
+        /// Unreachable — no `CtFace` exists on this target.
+        pub(super) fn variation_values(&self) -> Vec<(u32, f64)> {
+            match *self {}
+        }
+
+        /// Unreachable — no `CtFace` exists on this target.
+        pub(super) fn glyphs_for(&self, _characters: &[char]) -> Vec<u16> {
             match *self {}
         }
 
@@ -1327,6 +1817,21 @@ mod tests {
 
     fn font(bytes: Vec<u8>) -> FontData {
         FontData::new(Blob::new(Arc::new(bytes)), 0)
+    }
+
+    thread_local! {
+        /// Added to every user value CoreText reads back on this thread, so a
+        /// case can force a read-back mismatch.
+        static READ_BACK_SKEW: core::cell::Cell<f64> = const { core::cell::Cell::new(0.0) };
+    }
+
+    /// The read-back hook: `applied` with this thread's skew added.
+    pub(super) fn skewed(applied: Vec<(u32, f64)>) -> Vec<(u32, f64)> {
+        let skew = READ_BACK_SKEW.get();
+        applied
+            .into_iter()
+            .map(|(tag, value)| (tag, value + skew))
+            .collect()
     }
 
     fn key(glyph_id: u32) -> OutlineKey {
@@ -1506,18 +2011,18 @@ mod tests {
     fn the_outline_cache_evicts_the_least_recently_used_entry_at_its_cap() {
         let mut cache = OutlineCache::new(3);
         for glyph in 0..3 {
-            cache.get_or_fetch(key(glyph), || Fetched::Empty);
+            cache.get_or_fetch(key(glyph), || Some(Fetched::Empty));
         }
         assert_eq!((cache.hits, cache.misses), (0, 3));
         // Touch glyph 0, so glyph 1 is now the oldest.
         let mut fetched = false;
         cache.get_or_fetch(key(0), || {
             fetched = true;
-            Fetched::Missing
+            Some(Fetched::Missing)
         });
         assert!(!fetched, "a cached glyph is not fetched again");
         assert_eq!((cache.hits, cache.misses), (1, 3));
-        cache.get_or_fetch(key(3), || Fetched::Empty);
+        cache.get_or_fetch(key(3), || Some(Fetched::Empty));
         assert_eq!((cache.hits, cache.misses), (1, 4));
         assert_eq!(cache.entries.len(), 3);
         assert_eq!(cache.order.len(), 3);
@@ -1536,7 +2041,7 @@ mod tests {
         let mut cache = OutlineCache::new(3);
         for _ in 0..5 {
             for glyph in 0..4 {
-                cache.get_or_fetch(key(glyph), || Fetched::Empty);
+                cache.get_or_fetch(key(glyph), || Some(Fetched::Empty));
             }
         }
         assert_eq!((cache.hits, cache.misses), (0, 20), "every fetch thrashes");
@@ -1544,7 +2049,7 @@ mod tests {
         let mut cache = OutlineCache::new(3);
         for _ in 0..5 {
             for glyph in 0..3 {
-                cache.get_or_fetch(key(glyph), || Fetched::Empty);
+                cache.get_or_fetch(key(glyph), || Some(Fetched::Empty));
             }
         }
         assert_eq!((cache.hits, cache.misses), (12, 3));
@@ -1555,8 +2060,8 @@ mod tests {
         let mut cache = OutlineCache::new(2);
         cache.hits = u64::MAX;
         cache.misses = u64::MAX;
-        cache.get_or_fetch(key(0), || Fetched::Empty);
-        cache.get_or_fetch(key(0), || Fetched::Empty);
+        cache.get_or_fetch(key(0), || Some(Fetched::Empty));
+        cache.get_or_fetch(key(0), || Some(Fetched::Empty));
         assert_eq!((cache.hits, cache.misses), (u64::MAX, u64::MAX));
     }
 
@@ -1991,6 +2496,429 @@ mod tests {
         assert!(bytes.disagreement(&flat).is_some(), "axis counts differ");
         // An unprintable tag is escaped, not written raw.
         assert_eq!(tag_list(&[0x0a00_6869]), "\\n\\x00hi");
+    }
+
+    /// A `cmap` table of `(platform, encoding, subtable)` records.
+    fn cmap(subtables: &[(u16, u16, Vec<u8>)]) -> Vec<u8> {
+        let count = u16::try_from(subtables.len()).unwrap();
+        let mut out = vec![0, 0];
+        out.extend(count.to_be_bytes());
+        let mut offset = 4 + 8 * subtables.len();
+        for (platform, encoding, subtable) in subtables {
+            out.extend(platform.to_be_bytes());
+            out.extend(encoding.to_be_bytes());
+            out.extend(u32::try_from(offset).unwrap().to_be_bytes());
+            offset += subtable.len();
+        }
+        for (.., subtable) in subtables {
+            out.extend(subtable);
+        }
+        out
+    }
+
+    /// A format 12 subtable of `(first, last, first glyph)` groups.
+    fn cmap12(groups: &[(u32, u32, u32)]) -> Vec<u8> {
+        let mut out = vec![0, 12, 0, 0];
+        out.extend(u32::try_from(16 + 12 * groups.len()).unwrap().to_be_bytes());
+        out.extend([0; 4]);
+        out.extend(u32::try_from(groups.len()).unwrap().to_be_bytes());
+        for (first, last, glyph) in groups {
+            for field in [first, last, glyph] {
+                out.extend(field.to_be_bytes());
+            }
+        }
+        out
+    }
+
+    /// One format 4 segment: first and last codepoint, delta, and the
+    /// `glyphIdArray` entries (none for a delta-only segment).
+    type Segment = (u16, u16, u16, Vec<u16>);
+
+    /// A format 4 subtable of `(first, last, delta, glyphs)` segments, the
+    /// terminating `0xFFFF` segment appended; a segment with `glyphs` maps
+    /// through the `glyphIdArray`.
+    fn cmap4(segments: &[Segment]) -> Vec<u8> {
+        let count = segments.len() + 1;
+        let x2 = u16::try_from(count * 2).unwrap();
+        let mut out = vec![0, 4, 0, 0, 0, 0];
+        out.extend(x2.to_be_bytes());
+        out.extend([0; 6]);
+        let field = |pick: &dyn Fn(&Segment) -> u16, last: u16| {
+            segments
+                .iter()
+                .map(pick)
+                .chain([last])
+                .flat_map(u16::to_be_bytes)
+                .collect::<Vec<u8>>()
+        };
+        out.extend(field(&|segment| segment.1, 0xFFFF));
+        out.extend([0; 2]);
+        out.extend(field(&|segment| segment.0, 0xFFFF));
+        out.extend(field(&|segment| segment.2, 1));
+        // Each indexed segment's entries follow every earlier segment's.
+        let mut array: Vec<u16> = Vec::new();
+        let mut offsets: Vec<u16> = Vec::new();
+        for (index, (.., glyphs)) in segments.iter().enumerate() {
+            if glyphs.is_empty() {
+                offsets.push(0);
+            } else {
+                let to_array = (count - index) * 2 + array.len() * 2;
+                offsets.push(u16::try_from(to_array).unwrap());
+                array.extend(glyphs);
+            }
+        }
+        offsets.push(0);
+        out.extend(offsets.iter().flat_map(|offset| offset.to_be_bytes()));
+        out.extend(array.iter().flat_map(|glyph| glyph.to_be_bytes()));
+        out
+    }
+
+    fn sample_of(tables: &[([u8; 4], Vec<u8>)], count: usize) -> Vec<(char, u16)> {
+        let data = sfnt(tables);
+        cmap_sample(&data, table_directory(&data, 0).unwrap(), count)
+    }
+
+    #[test]
+    fn a_cmap_sample_reads_format_12_ahead_of_format_4() {
+        let groups = cmap12(&[
+            (0x41, 0x43, 10),
+            (0x4E2D, 0x4E2D, 289),
+            (0x20000, 0x20002, 500),
+        ]);
+        let bmp = cmap4(&[(0x41, 0x43, 100, Vec::new())]);
+        let both = [(CMAP_TAG, cmap(&[(3, 1, bmp.clone()), (3, 10, groups)]))];
+        assert_eq!(
+            sample_of(&both, 16),
+            vec![('B', 11), ('中', 289), ('\u{20001}', 501)],
+            "one pick per range at most, each its middle codepoint"
+        );
+        // Format 4 alone: a delta segment, an indexed one (whose zero entry
+        // is no glyph), and the terminating segment never picked.
+        let indexed = cmap4(&[
+            (0x41, 0x43, 100, Vec::new()),
+            (0x61, 0x63, 5, vec![7, 0, 9]),
+            (0x30, 0x30, 0xFFF0, Vec::new()),
+        ]);
+        let data = sfnt(&[(CMAP_TAG, cmap(&[(3, 1, indexed.clone())]))]);
+        let table = table_start(&data, table_directory(&data, 0).unwrap(), CMAP_TAG).unwrap();
+        let subtable = UnicodeCmap::find(&data, table).unwrap();
+        assert_eq!((subtable.format, subtable.ranges), (4, 4));
+        let glyphs: Vec<Option<u16>> = (0x61..=0x63)
+            .map(|codepoint| subtable.range(&data, 1)?.glyph(&data, codepoint))
+            .collect();
+        assert_eq!(glyphs, vec![Some(12), Some(0), Some(14)]);
+        assert_eq!(
+            subtable.range(&data, 2).unwrap().glyph(&data, 0x30),
+            Some(0x30_u16.wrapping_add(0xFFF0)),
+            "a delta wraps modulo 65536"
+        );
+        assert_eq!(subtable.range(&data, 3), None, "the terminating segment");
+        assert_eq!(
+            sample_of(&[(CMAP_TAG, cmap(&[(3, 1, indexed)]))], 16),
+            vec![('B', 166), ('0', 32)],
+            "an unmapped middle codepoint is left out"
+        );
+        // A symbol subtable alone, or no cmap at all, samples nothing.
+        assert!(sample_of(&[(CMAP_TAG, cmap(&[(3, 0, bmp)]))], 16).is_empty());
+        assert!(sample_of(&[(*b"head", head(1000))], 16).is_empty());
+    }
+
+    #[test]
+    fn a_cmap_sample_spreads_its_picks_over_the_ranges() {
+        let groups: Vec<(u32, u32, u32)> = (0..64)
+            .map(|index| (index * 4, index * 4, index + 1))
+            .collect();
+        let sample = sample_of(&[(CMAP_TAG, cmap(&[(3, 10, cmap12(&groups))]))], 4);
+        assert_eq!(
+            sample
+                .iter()
+                .map(|(character, _)| u32::from(*character))
+                .collect::<Vec<_>>(),
+            vec![32, 96, 160, 224],
+            "the middle of each quarter"
+        );
+    }
+
+    #[test]
+    fn an_instance_is_applied_only_within_each_axis_precision() {
+        let axes = [
+            axis(b"wght", 100.0, 500.0, 600.0),
+            axis(b"WDTH", 1.0, 500.0, 1000.0),
+        ];
+        let [wght, wdth] = [axes[0].tag, axes[1].tag];
+        let asked = [(wght, 300.0), (wdth, 500.0)];
+        assert_eq!(unapplied_axis(&axes, &asked, &asked), None);
+        // One F2Dot14 step below the default is 400 / 16384 user units.
+        let step = 400.0 / F2DOT14_ONE;
+        assert_eq!(axis_precision(&axes[0], 300.0), step);
+        assert_eq!(axis_precision(&axes[0], 550.0), 100.0 / F2DOT14_ONE);
+        let close = [(wght, 300.0 + step), (wdth, 500.0)];
+        assert_eq!(unapplied_axis(&axes, &asked, &close), None, "within a step");
+        let off = [(wdth, 500.0), (wght, 300.0 + 2.0 * step)];
+        assert_eq!(
+            unapplied_axis(&axes, &asked, &off),
+            Some(UnappliedAxis {
+                tag: wght,
+                asked: 300.0,
+                applied: Some(300.0 + 2.0 * step)
+            }),
+            "matched by tag, not by position"
+        );
+        let missing = unapplied_axis(&axes, &asked, &[(wght, 300.0)]).unwrap();
+        assert_eq!(missing.applied, None);
+        assert_eq!(
+            missing.to_string(),
+            "WDTH is not an axis of CoreText's copy"
+        );
+        assert_eq!(
+            unapplied_axis(&axes, &asked, &[(wght, 500.0), (wdth, 500.0)])
+                .unwrap()
+                .to_string(),
+            "wght read back as 500, asked 300"
+        );
+        // A degenerate axis still allows one `Fixed` unit.
+        assert_eq!(
+            axis_precision(&axis(b"flat", 5.0, 5.0, 5.0), 5.0),
+            1.0 / FIXED_ONE
+        );
+        assert_eq!(instance_list(&asked), "wght=300 WDTH=500");
+    }
+
+    #[test]
+    fn a_refused_fetch_caches_nothing_and_evicts_nothing() {
+        let mut cache = OutlineCache::new(1);
+        cache.get_or_fetch(key(0), || Some(Fetched::Empty));
+        assert!(cache.get_or_fetch(key(1), || None).is_none());
+        assert_eq!(cache.entries.len(), 1);
+        assert!(cache.entries.contains_key(&key(0)), "nothing evicted");
+        assert!(!cache.entries.contains_key(&key(1)), "nothing cached");
+        assert_eq!(cache.order.len(), 1);
+        assert_eq!((cache.hits, cache.misses), (0, 2));
+    }
+
+    /// The F2Dot14 coordinate a shaper hands a run of `axis` at the user
+    /// value `user`: normalized against the axis range, then through its
+    /// `avar` map (the first segment holding the value, as a shaper reads it).
+    #[cfg(target_os = "macos")]
+    fn normalized(axis: &Axis, user: f64) -> i16 {
+        let user = user.clamp(axis.min, axis.max);
+        let mut normalized = if user < axis.default {
+            (user - axis.default) / (axis.default - axis.min)
+        } else if axis.max > axis.default {
+            (user - axis.default) / (axis.max - axis.default)
+        } else {
+            0.0
+        };
+        if let Some(pair) = axis
+            .avar
+            .windows(2)
+            .find(|pair| normalized >= pair[0].0 && normalized <= pair[1].0)
+        {
+            let [(from0, to0), (from1, to1)] = [pair[0], pair[1]];
+            normalized = to0 + (normalized - from0) * (to1 - to0) / (from1 - from0);
+        }
+        (normalized * F2DOT14_ONE).round() as i16
+    }
+
+    /// A known answer from CoreText itself: PingFang SC's named instances
+    /// (`PingFangSC-Light`, `-Semibold`) report their user values through
+    /// `CTFontCopyVariation`. Those values, turned into the coordinates a
+    /// shaper hands a run, map back to the same user values, and the outline
+    /// drawn at them from `PingFangSC-Medium` is the named instance's own.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pingfang_coordinates_draw_coretexts_named_instance() {
+        let Some(font) = system_pingfang_sc() else {
+            println!("skipped: PingFangUI.ttc is not installed");
+            return;
+        };
+        let data = font.data.data();
+        let axes = variation_axes(data, table_directory(data, font.index).unwrap());
+        let glyph = 289;
+        let mut outlines = HvglOutlines::default();
+        for named in ["PingFangSC-Light", "PingFangSC-Semibold"] {
+            let (instance, resolved) = platform::CtFace::open(named, 1000.0).expect("installed");
+            assert_eq!(resolved, named);
+            let reported = applied_variation(&instance.axis_defaults(), &instance);
+            let user = |tag: u32| {
+                reported
+                    .iter()
+                    .find(|(reported, _)| *reported == tag)
+                    .map(|(_, value)| *value)
+                    .expect("CoreText reports every axis")
+            };
+            let coords: Vec<i16> = axes
+                .iter()
+                .map(|axis| normalized(axis, user(axis.tag)))
+                .collect();
+            assert!(
+                coords.iter().any(|coord| *coord != 0),
+                "{named} is not the default"
+            );
+            for (axis, (tag, value)) in axes.iter().zip(user_values(&axes, &coords)) {
+                let expected = user(tag);
+                assert!(
+                    (value - expected).abs() <= axis_precision(axis, expected),
+                    "{named}: {value} for {expected}"
+                );
+            }
+            let handle = FontHandle::new(font.clone())
+                .with_normalized_coords(&coords)
+                .with_identity(Some(Arc::from("PingFangSC-Medium")), false);
+            let GlyphOutline::Path { path, .. } = outlines.outline(&handle, glyph) else {
+                panic!("{named}: no outline");
+            };
+            let expected = instance.path(glyph).expect("the named instance's outline");
+            assert_eq!(path.elements().len(), expected.len(), "{named}");
+            let farthest = path
+                .elements()
+                .iter()
+                .zip(&expected)
+                .flat_map(|(drawn, named)| {
+                    let points = |el: &PathEl| match *el {
+                        PathEl::MoveTo(p) | PathEl::LineTo(p) => vec![p],
+                        PathEl::QuadTo(a, b) => vec![a, b],
+                        PathEl::CurveTo(a, b, c) => vec![a, b, c],
+                        PathEl::ClosePath => Vec::new(),
+                    };
+                    assert_eq!(points(drawn).len(), points(named).len());
+                    points(drawn)
+                        .into_iter()
+                        .zip(points(named))
+                        .map(|(a, b)| (a - b).hypot())
+                        .collect::<Vec<_>>()
+                })
+                .fold(0.0_f64, f64::max);
+            assert!(
+                farthest < 0.01,
+                "{named}: a point {farthest} font units off"
+            );
+        }
+        assert_eq!(outlines.variation_mismatches(), 0);
+    }
+
+    /// A read-back that disagrees with the values asked for refuses the
+    /// instance: counted once, its glyphs unavailable, nothing cached under
+    /// its key, and the default instance still drawn.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_forced_read_back_mismatch_refuses_the_instance_without_caching() {
+        let Some(font) = system_pingfang_sc() else {
+            println!("skipped: PingFangUI.ttc is not installed");
+            return;
+        };
+        let name = Some(Arc::from("PingFangSC-Medium"));
+        let data = font.data.data();
+        let wght = variation_axes(data, table_directory(data, font.index).unwrap())
+            .iter()
+            .position(|axis| axis.tag == u32::from_be_bytes(*b"wght"))
+            .expect("PingFang SC varies its weight");
+        let mut coords = vec![0_i16; wght + 1];
+        coords[wght] = 3276;
+        let heavy = FontHandle::new(font.clone())
+            .with_normalized_coords(&coords)
+            .with_identity(name.clone(), false);
+        let mut outlines = HvglOutlines::default();
+        READ_BACK_SKEW.set(1.0);
+        for _ in 0..3 {
+            assert!(matches!(
+                outlines.outline(&heavy, 289),
+                GlyphOutline::Unavailable
+            ));
+        }
+        READ_BACK_SKEW.set(0.0);
+        assert_eq!(outlines.variation_mismatches(), 1, "counted once");
+        assert_eq!(outlines.cached_outlines(), 0, "nothing cached");
+        let face = &outlines.faces.open[0].1;
+        assert!(face.instances.is_empty(), "no instance kept");
+        assert_eq!(face.refused.len(), 1);
+        assert_eq!(
+            outlines.bytes_mismatches() + outlines.identity_mismatches(),
+            0
+        );
+        let default = FontHandle::new(font.clone()).with_identity(name, false);
+        assert!(matches!(
+            outlines.outline(&default, 289),
+            GlyphOutline::Path { .. }
+        ));
+        assert!(
+            matches!(outlines.outline(&heavy, 289), GlyphOutline::Unavailable),
+            "the refusal is remembered while the face is open"
+        );
+        assert_eq!(outlines.variation_mismatches(), 1);
+        assert_eq!(outlines.cached_outlines(), 1, "the default instance only");
+        // Without the skew the same instance draws on a fresh provider.
+        let mut fresh = HvglOutlines::default();
+        assert!(matches!(
+            fresh.outline(&heavy, 289),
+            GlyphOutline::Path { .. }
+        ));
+        assert_eq!(fresh.variation_mismatches(), 0);
+    }
+
+    /// `font`'s blob with every format 12 group of its Unicode `cmap` mapped
+    /// one glyph further on (wrapping inside the face): the glyph count, units
+    /// and axes still agree with the installed face; the character map does
+    /// not.
+    #[cfg(target_os = "macos")]
+    fn with_shifted_cmap(font: &FontData) -> FontData {
+        let mut data = font.data.data().to_vec();
+        let directory = table_directory(&data, font.index).expect("a directory");
+        let glyphs = u32::try_from(maxp_num_glyphs(&data, directory).expect("a maxp")).unwrap();
+        let table = table_start(&data, directory, CMAP_TAG).expect("a cmap");
+        let cmap = UnicodeCmap::find(&data, table).expect("a Unicode cmap");
+        assert_eq!(cmap.format, 12);
+        for group in 0..cmap.ranges {
+            let at = cmap.at + 16 + 12 * group + 8;
+            let shifted = (read_u32(&data, at).unwrap() + 1) % glyphs;
+            data[at..at + 4].copy_from_slice(&shifted.to_be_bytes());
+        }
+        FontData::new(Blob::new(Arc::new(data)), font.index)
+    }
+
+    /// The installed bytes agree with CoreText's character map on every
+    /// sampled codepoint; bytes whose `cmap` maps elsewhere are refused as a
+    /// bytes mismatch naming the first differing codepoint.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_face_whose_cmap_disagrees_with_coretext_is_refused() {
+        let Some(font) = system_pingfang_sc() else {
+            println!("skipped: PingFangUI.ttc is not installed");
+            return;
+        };
+        let (installed, _) =
+            platform::CtFace::open("PingFangSC-Medium", 1000.0).expect("installed");
+        let data = font.data.data();
+        let sample = cmap_sample(
+            data,
+            table_directory(data, font.index).unwrap(),
+            CMAP_SAMPLES,
+        );
+        assert_eq!(sample.len(), CMAP_SAMPLES);
+        assert_eq!(cmap_disagreement(&font, &installed), None);
+        let shifted = with_shifted_cmap(&font);
+        assert_eq!(
+            FaceShape::of_bytes(&shifted).disagreement(&FaceShape::of_installed(&installed)),
+            None,
+            "only the character map differs"
+        );
+        let why = cmap_disagreement(&shifted, &installed).expect("refused");
+        let first = u32::from(sample[0].0);
+        assert!(
+            why.starts_with(&format!("U+{first:04X} is glyph ")),
+            "{why}"
+        );
+        let mut outlines = HvglOutlines::default();
+        let handle =
+            FontHandle::new(shifted).with_identity(Some(Arc::from("PingFangSC-Medium")), false);
+        for _ in 0..2 {
+            assert!(matches!(
+                outlines.outline(&handle, 289),
+                GlyphOutline::Unavailable
+            ));
+        }
+        assert_eq!(outlines.bytes_mismatches(), 1);
+        assert_eq!(outlines.identity_mismatches(), 0);
     }
 
     #[test]
