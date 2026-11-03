@@ -323,20 +323,22 @@ impl TextContext {
     ///
     /// The cache writes behind on its own (after a burst of new answers, or
     /// once idle) and on drop, but a mobile app can be killed in the
-    /// background with neither: a shell calls this from its pause/background
-    /// hook. A no-op for a context built without a font cache. The flush writes
-    /// when this cache, or the shared copy it is attached to, holds answers not
-    /// yet on disk; a dirty flush is synchronous. A context still in
-    /// `Persist::Pending` does not join the shared copy on a clean flush (it
-    /// joins on its first in-memory miss, or on a dirty flush).
+    /// background with neither: a shell calls this at the lifecycle `Hidden`
+    /// edge (the desktop shell on exit too). A no-op for a context built
+    /// without a font cache. The flush writes when this cache, or the shared
+    /// copy it is attached to, holds answers not yet on disk; a dirty flush is
+    /// synchronous. A clean context whose file is not attached yet joins the
+    /// live shared copy another context holds for the same file under the
+    /// same stamp and font-directory state, and writes it if the disk is
+    /// behind; with no such copy it reads nothing.
     pub fn flush_font_cache(&mut self) -> std::io::Result<()> {
         self.oracle.flush()
     }
 
     /// A snapshot of the persistent font cache's state ([`FontCacheStats`]):
     /// how many of its writes failed, the generation on disk, and whether it
-    /// is dirty or attached. Memory only, no disk access; all zero or `false`
-    /// for a context built without a font cache.
+    /// is dirty, attached, or persistent at all. Memory only, no disk access;
+    /// all zero or `false` for a context built without a font cache.
     ///
     /// A shell that flushes on background reads it to see whether the cache
     /// is still behind the disk after [`Self::flush_font_cache`] failed.
@@ -686,6 +688,22 @@ mod tests {
     }
 
     #[test]
+    fn font_cache_stats_report_whether_the_context_persists() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+        let off = test_cx().font_cache_stats();
+        assert!(!off.persistent, "a disabled cache location never persists");
+        assert_eq!(off, FontCacheStats::default());
+        let dir = oracle::synthetic::TempDir::new("context-cache-persistent");
+        let on = TextContext::builder()
+            .font_cache_dir(dir.path().join("fonts"))
+            .build();
+        assert!(
+            on.font_cache_stats().persistent,
+            "before anything is attached"
+        );
+    }
+
+    #[test]
     fn font_cache_stats_surface_a_failed_write_behind() {
         let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let dir = oracle::synthetic::TempDir::new("context-cache-stats");
@@ -693,7 +711,13 @@ mod tests {
         let blocker = dir.path().join("blocker");
         std::fs::write(&blocker, b"x").expect("blocker");
         let mut cx = TextContext::builder().font_cache_dir(&blocker).build();
-        assert_eq!(cx.font_cache_stats(), FontCacheStats::default());
+        assert_eq!(
+            cx.font_cache_stats(),
+            FontCacheStats {
+                persistent: true,
+                ..FontCacheStats::default()
+            }
+        );
         cx.oracle
             .cache_mut()
             .set_write_behind(1, std::time::Duration::from_secs(3600));

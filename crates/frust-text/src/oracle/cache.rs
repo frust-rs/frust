@@ -38,9 +38,13 @@
 //! of a path is serialised through one writer per canonical path, shared by
 //! every live copy of that path (a copy replaced after a stamp change may
 //! still be writing beside its successor), and carries a generation from that
-//! path's clock: a write never overlaps another, the generation on disk only
-//! grows (it is the max of the disk's and the copy's), and a snapshot not
-//! newer than the disk is skipped rather than landing over it.
+//! path's clock: a write never overlaps another and the generation on disk
+//! only grows. A snapshot is skipped only when its own copy already wrote one
+//! at least as new; a snapshot of one copy that finds a newer write of
+//! another copy on disk lands anyway, under a fresh generation from the
+//! path's clock, so a copy reads clean only after a write of its own landed
+//! (between copies the last writer wins: a later write of the other copy
+//! may still replace it).
 //!
 //! The two write-behind triggers fire inside a font lookup, so they never
 //! touch the disk there: the lookup snapshots the entries in memory and hands
@@ -565,6 +569,10 @@ pub struct FontCacheStats {
     /// Whether the persistent file is attached (its path resolved and its copy
     /// loaded or joined).
     pub attached: bool,
+    /// Whether the context keeps a persistent font cache at all (attached or
+    /// still pending): `false` only when its cache location is disabled, so a
+    /// flush through it can never write.
+    pub persistent: bool,
 }
 
 /// Resolves the persistent file's path on first use; `None` means "not yet"
@@ -599,6 +607,8 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// every cache attached to it, and the point its writes are ordered through.
 #[derive(Debug)]
 struct SharedFile {
+    /// This copy's identity among every copy of any path in the process.
+    id: CopyId,
     path: PathBuf,
     stamp: VersionStamp,
     /// The font directories as they were at load time: the conservative
@@ -609,8 +619,9 @@ struct SharedFile {
     /// canonical path: held across a whole write, so writes of the path never
     /// overlap, and the source of every generation this copy records.
     writer: Arc<PathWriter>,
-    /// The newest of this copy's generations the disk holds or supersedes
-    /// (written, skipped as superseded, or loaded clean).
+    /// The newest of this copy's generations the disk holds or supersedes:
+    /// written by this copy, skipped because this copy already wrote one as
+    /// new, or loaded clean. A write of another copy never raises it.
     written: AtomicU64,
     /// Whether a failed final write of this file already warned.
     final_warned: AtomicBool,
@@ -625,13 +636,34 @@ impl SharedFile {
     }
 }
 
+/// A loaded copy's identity ([`SharedFile::id`]), unique in the process.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CopyId(u64);
+
+impl CopyId {
+    /// A new identity (never [`CopyId::default`], which no copy holds).
+    fn next() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+/// The last write of a path this process made.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct OnDisk {
+    /// The generation on disk: the newest this process wrote to the path.
+    generation: u64,
+    /// The copy whose snapshot it is.
+    copy: CopyId,
+}
+
 /// One canonical path's write serialisation and generation order, shared by
 /// every live copy of the path (shared or private).
 #[derive(Debug, Default)]
 struct PathWriter {
-    /// Held across a whole write of any copy of the path. Holds the newest
-    /// generation this process wrote to the path: the generation on disk.
-    disk: Mutex<u64>,
+    /// Held across a whole write of any copy of the path; the last write
+    /// that landed.
+    disk: Mutex<OnDisk>,
     /// The path's generation clock: every change to any copy takes its next
     /// value, so generations of two copies are ordered by when they changed.
     clock: AtomicU64,
@@ -646,7 +678,13 @@ impl PathWriter {
     /// The generation now on disk (tests).
     #[cfg(test)]
     fn on_disk(&self) -> u64 {
-        *lock(&self.disk)
+        lock(&self.disk).generation
+    }
+
+    /// The copy whose write is on disk (tests).
+    #[cfg(test)]
+    fn on_disk_by(&self) -> CopyId {
+        lock(&self.disk).copy
     }
 }
 
@@ -735,6 +773,7 @@ impl SharedFile {
         let base = writer.clock.load(Ordering::Acquire);
         entries.generation = if behind { writer.advance() } else { base };
         let shared = Self {
+            id: CopyId::next(),
             path,
             stamp,
             dirs,
@@ -909,20 +948,32 @@ struct Snapshot {
 impl Snapshot {
     /// Stamps every font file the entries name (an entry whose file cannot be
     /// stamped is left out), serialises and writes atomically. Serialised with
-    /// every other write of the same path, from any copy; `Ok(false)` when a
-    /// write at least as new (of this copy, or of another copy of the path)
-    /// already reached the disk, so this one is skipped. The disk's generation
-    /// becomes max(on-disk, this snapshot's): it never goes backwards.
+    /// every other write of the same path, from any copy; `Ok(false)` when
+    /// this copy already wrote a snapshot at least as new, so this one is
+    /// skipped. A newer write of *another* copy does not skip it: the copies'
+    /// entry sets differ (two copies are only both live under different
+    /// stamps or font-directory states), so this one lands, under a fresh
+    /// generation from the path's clock when the disk's is not older than the
+    /// snapshot's. The disk's generation never goes backwards, and this
+    /// copy's `written` rises to the snapshot's generation (what it holds),
+    /// never to the fresh one.
     fn write(self) -> io::Result<bool> {
         let mut disk = lock(&self.shared.writer.disk);
-        if self.shared.written.load(Ordering::Acquire) >= self.generation
-            || *disk >= self.generation
-        {
-            self.shared
-                .written
-                .fetch_max(self.generation, Ordering::AcqRel);
+        if self.shared.written.load(Ordering::Acquire) >= self.generation {
             return Ok(false);
         }
+        let landing = if disk.generation < self.generation {
+            self.generation
+        } else {
+            if disk.copy != self.shared.id {
+                log::debug!(
+                    "frust-text: font fallback cache {}: replacing a newer write of another live \
+                     copy (between copies the last writer wins)",
+                    self.shared.path.display(),
+                );
+            }
+            self.shared.writer.advance()
+        };
         let mut files: Vec<FileStamp> = Vec::new();
         let mut stamped: HashSet<PathBuf> = HashSet::new();
         let mut unstampable: HashSet<PathBuf> = HashSet::new();
@@ -961,7 +1012,10 @@ impl Snapshot {
         };
         let json = serde_json::to_vec(&persisted).map_err(io::Error::other)?;
         write_atomically(&self.shared.path, &json)?;
-        *disk = (*disk).max(self.generation);
+        *disk = OnDisk {
+            generation: landing,
+            copy: self.shared.id,
+        };
         self.shared
             .written
             .fetch_max(self.generation, Ordering::AcqRel);
@@ -1088,6 +1142,7 @@ impl FallbackCache {
             written_generation,
             dirty: self.dirty || behind,
             attached: matches!(self.persist, Persist::Attached(_)),
+            persistent: self.is_persistent(),
         }
     }
 
@@ -2617,6 +2672,26 @@ mod tests {
     }
 
     #[test]
+    fn font_cache_stats_report_whether_the_cache_persists() {
+        let off = FallbackCache::new(64);
+        assert!(
+            !off.font_cache_stats().persistent,
+            "no location: memory only"
+        );
+        let dir = TempDir::new("stats-persistent");
+        let mut pending = FallbackCache::new(64);
+        pending.attach_lazy(
+            PathResolver::fixed(dir.path().join(PERSIST_FILE_NAME)),
+            stamp("b"),
+        );
+        let stats = pending.font_cache_stats();
+        assert!(stats.persistent && !stats.attached, "pending persists too");
+        let mut bound = FallbackCache::new(64);
+        bound.attach_persistent(dir.path().join(PERSIST_FILE_NAME), stamp("b"));
+        assert!(bound.font_cache_stats().persistent);
+    }
+
+    #[test]
     fn font_cache_stats_track_a_write_that_lands() {
         let dir = TempDir::new("stats-written");
         let file = dir.path().join(PERSIST_FILE_NAME);
@@ -3239,10 +3314,13 @@ mod tests {
         one.insert(key("a"), CachedAnswer::Miss);
         two.insert(key("b"), CachedAnswer::Miss);
         two.persist().unwrap();
-        // The held write's snapshot predates `b`: released now, it is skipped.
+        // The held write's snapshot predates `b`, of the same copy (both caches
+        // share it): released now, it is skipped.
+        let written = attached(&one).writer.on_disk();
         release.send(()).unwrap();
         one.join_writer();
         assert_eq!(one.stats().writes, 0, "superseded, not written");
+        assert_eq!(attached(&one).writer.on_disk(), written);
         assert_eq!(one.stats().write_failures, 0);
         let mut disk = FallbackCache::new(64);
         assert_eq!(
@@ -3299,24 +3377,32 @@ mod tests {
         assert!(landed(&mut new, "new again"));
         assert!(!landed(&mut old, "old, nothing newer"));
 
-        // An old-copy snapshot taken before a new-copy change never lands over it.
+        // An old-copy snapshot taken before a new-copy change still lands after
+        // it: the new copy's write holds none of `o3`, so it supersedes nothing
+        // of the old copy's, and the old one takes a fresh generation (between
+        // copies the last writer wins).
         old.set_write_behind(1, Duration::from_secs(3600));
         let release = old.hold_next_background_write();
         let old_writes = old.stats().writes;
         old.insert(key("o3"), CachedAnswer::Miss);
         new.insert(key("n3"), CachedAnswer::Miss);
         assert!(landed(&mut new, "new, over a held old snapshot"));
+        assert!(
+            old.font_cache_stats().dirty,
+            "the new copy's write holds no o3"
+        );
         release.send(()).unwrap();
         old.join_writer();
-        assert_eq!(old.stats().writes, old_writes, "superseded, not written");
+        assert_eq!(old.stats().writes, old_writes + 1, "landed, not skipped");
         assert_eq!(old.stats().write_failures, 0);
-        assert_eq!(
-            writer.on_disk(),
-            seen,
-            "the skipped write left the disk as it was"
+        assert!(
+            writer.on_disk() > seen,
+            "a fresh generation: the disk generation still only grows"
         );
+        assert_eq!(writer.on_disk_by(), attached(&old).id);
+        assert!(!old.font_cache_stats().dirty);
 
-        // Both copies stay readable, and the disk holds the newest write whole.
+        // Both copies stay readable, and the disk holds the last write whole.
         for c in ["o1", "o2", "o3"] {
             assert_eq!(old.get(&key(c)), Some(CachedAnswer::Miss), "{c}");
         }
@@ -3325,13 +3411,53 @@ mod tests {
         }
         let mut disk = FallbackCache::new(64);
         assert_eq!(
-            disk.attach_persistent(file.clone(), stamp("after")),
+            disk.attach_persistent(file.clone(), stamp("before")),
             LoadOutcome::Loaded(3)
         );
         assert!(
             Arc::ptr_eq(&attached(&disk).writer, &writer),
             "a private copy too"
         );
+    }
+
+    #[test]
+    fn a_newer_write_of_another_copy_never_marks_a_copy_written() {
+        let dir = TempDir::new("cross-copy-skip");
+        let file = dir.path().join(PERSIST_FILE_NAME);
+        let mut a = FallbackCache::new(64);
+        a.attach_shared(file.clone(), stamp("before"));
+        // A newer stamp: a second live copy of the path, with its own entries.
+        let mut b = FallbackCache::new(64);
+        b.attach_shared(file.clone(), stamp("after"));
+        let writer = Arc::clone(&attached(&a).writer);
+        assert!(Arc::ptr_eq(&writer, &attached(&b).writer));
+
+        // B records first, A after it, and A writes first.
+        b.insert(key("b"), CachedAnswer::Miss);
+        a.insert(key("a"), CachedAnswer::Miss);
+        let generation = |cache: &FallbackCache| lock(&attached(cache).entries).generation;
+        assert!(generation(&b) < generation(&a));
+        a.persist().unwrap();
+        assert_eq!(writer.on_disk_by(), attached(&a).id);
+        let after_a = writer.on_disk();
+        assert!(
+            b.font_cache_stats().dirty,
+            "A's write holds none of B's answers"
+        );
+
+        // B's older snapshot is not superseded by A's newer one: it lands.
+        b.persist().unwrap();
+        assert_eq!(b.stats().writes, 1, "written, not skipped as superseded");
+        assert!(!b.font_cache_stats().dirty, "clean after its own write");
+        assert!(writer.on_disk() > after_a, "under a fresh generation");
+        assert_eq!(writer.on_disk_by(), attached(&b).id);
+        let mut disk = FallbackCache::new(64);
+        assert_eq!(
+            disk.attach_persistent(file, stamp("after")),
+            LoadOutcome::Loaded(1)
+        );
+        assert_eq!(disk.get(&key("b")), Some(CachedAnswer::Miss));
+        drop(a);
     }
 
     #[test]
