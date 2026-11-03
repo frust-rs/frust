@@ -117,7 +117,7 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 - A frame the engine refuses no longer freezes Android/Vulkan apps: a dropped un-presented swapchain
   texture leaks its image on wgpu-hal 30.0.1 ([gfx-rs/wgpu#5723](https://github.com/gfx-rs/wgpu/issues/5723)),
   so frust no longer drops an acquired texture while its swapchain lives (the main surface presents a
-  backstop frame, a refused overlay keeps the texture) and reconfigures after `MAX_TRANSIENT_SKIPS`
+  backstop frame, a refused overlay keeps the texture un-presented for its next frame, so its previous frame stays on screen) and reconfigures after `MAX_TRANSIENT_SKIPS`
   consecutive acquire timeouts.
 
 ## 0.6.5 — 2026-11-02
