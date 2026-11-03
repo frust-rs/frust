@@ -34,8 +34,11 @@ thiserror.workspace = true
 [target.'cfg(target_vendor = "apple")'.dependencies]
 objc2-core-foundation = { version = "0.3", default-features = false, features = [
     "std",
-    "CFString",
+    "CFArray",
     "CFCGTypes",
+    "CFDictionary",
+    "CFNumber",
+    "CFString",
 ] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGPath"] }
 # `CTFontDescriptor` gates `CTFontOrientation` (the bounding-box read); `objc2-core-graphics` gates

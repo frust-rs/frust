@@ -21,7 +21,8 @@
 //!   `PingFangSC-Medium` whose glyph count differs from the installed face's
 //!   (a copy with `maxp` patched) is refused and counted once as a bytes
 //!   mismatch, whether the handle is built by hand or laid out from a
-//!   registered font. A registered, unpatched copy of the installed face draws
+//!   registered font, and so is a copy whose `cmap` maps the sampled
+//!   codepoints to other glyphs. A registered, unpatched copy of the installed face draws
 //!   from CoreText under its own registered identity (the PostScript name the
 //!   text tier's registry reads from its `name` table) with no refusal of any
 //!   kind. Off macOS these cases print why and pass.
@@ -46,6 +47,11 @@
 //!   coordinates come from `TextContext` when its oracle resolves the `hvgl`
 //!   face itself; otherwise the case prints so and names the face and derives
 //!   the coordinates from its `fvar`/`avar`.
+//! - **On macOS the weight is CoreText's own.** 中 drawn from
+//!   `PingFangSC-Medium` at the coordinates of the user values CoreText reports
+//!   for its `PingFangSC-Semibold` named instance (`CTFontCopyVariation`)
+//!   compiles to exactly the coverage of that named instance, with no
+//!   variation refusal.
 
 use std::sync::Arc;
 
@@ -166,6 +172,11 @@ fn assert_identity_clean(runs: &[GlyphRun]) {
         compiler.hvgl_bytes_mismatches(),
         0,
         "a run's bytes disagree with the face CoreText opened by its name"
+    );
+    assert_eq!(
+        compiler.hvgl_variation_mismatches(),
+        0,
+        "CoreText's copy at a run's coordinates read back as another instance"
     );
 }
 
@@ -347,6 +358,17 @@ fn bytes_whose_glyph_count_differs_from_the_named_face_are_refused_once() {
     println!("skipped: needs macOS's PingFang and CoreText");
 }
 
+/// Bytes carrying the installed face's name, glyph count, units and axes but
+/// another character map are refused and counted once as a bytes mismatch
+/// (macOS; a printed skip elsewhere).
+#[test]
+fn bytes_whose_cmap_differs_from_the_named_face_are_refused_once() {
+    #[cfg(target_os = "macos")]
+    macos::bytes_whose_cmap_differs_from_the_named_face_are_refused_once();
+    #[cfg(not(target_os = "macos"))]
+    println!("skipped: needs macOS's PingFang and CoreText");
+}
+
 /// An unknown name CoreText substitutes for is refused: the mismatch is
 /// counted once however many frames ask, and every glyph is skipped.
 #[cfg(target_vendor = "apple")]
@@ -395,7 +417,7 @@ mod macos {
     use frust_scene::{FontHandle, GlyphRun};
     use frust_text::{FontWeight, TextContext};
     use kurbo::Affine;
-    use objc2_core_foundation::CFString;
+    use objc2_core_foundation::{CFDictionary, CFNumber, CFString, CFType};
     use objc2_core_text::CTFont;
     use peniko::{Blob, Color, FontData};
 
@@ -639,6 +661,112 @@ mod macos {
         }
         assert_eq!(registered.hvgl_bytes_mismatches(), 1, "counted once");
         assert_eq!(registered.hvgl_identity_mismatches(), 0);
+    }
+
+    /// `face` (a single-face file) with every group of its format 12 `cmap`
+    /// subtable mapped one glyph further on, wrapping inside the face: glyph
+    /// count, units and axes unchanged, the character map not.
+    fn with_shifted_cmap(mut face: Vec<u8>) -> Vec<u8> {
+        let (maxp, _) = table(&face, 0, b"maxp").expect("a maxp table");
+        let glyphs = u32::from(be_u16(&face, maxp + 4));
+        let (cmap, _) = table(&face, 0, b"cmap").expect("a cmap table");
+        let mut shifted = 0;
+        for record in (0..be_u16(&face, cmap + 2) as usize).map(|record| cmap + 4 + 8 * record) {
+            let subtable = cmap + be_u32(&face, record + 4) as usize;
+            if be_u16(&face, subtable) != 12 {
+                continue;
+            }
+            for group in 0..be_u32(&face, subtable + 12) as usize {
+                let at = subtable + 16 + 12 * group + 8;
+                let glyph = (be_u32(&face, at) + 1) % glyphs;
+                face[at..at + 4].copy_from_slice(&glyph.to_be_bytes());
+            }
+            shifted += 1;
+        }
+        assert!(shifted > 0, "PingFang carries a format 12 cmap");
+        face
+    }
+
+    pub(super) fn bytes_whose_cmap_differs_from_the_named_face_are_refused_once() {
+        let Some(data) = pingfang() else { return };
+        let shifted = with_shifted_cmap(single_face(&data, face_index(&data)));
+        let by_hand = FontHandle::new(FontData::new(Blob::new(Arc::new(shifted.clone())), 0))
+            .with_identity(Some(Arc::from(FACE)), false);
+        let glyphs = coretext_glyphs(FACE, TEXT);
+        let mut hand = compiler();
+        for _ in 0..3 {
+            let frame = compile(&mut hand, vec![run(by_hand.clone(), &glyphs)]);
+            assert_eq!(frame.skipped_glyphs, glyphs.len() as u32);
+            assert_eq!(frame.glyph_draws, 0);
+        }
+        assert_eq!(hand.hvgl_bytes_mismatches(), 1, "counted once");
+        assert_eq!(hand.hvgl_identity_mismatches(), 0);
+
+        let runs = registered_runs(renamed(shifted, *b"Zx"));
+        let glyphs: u32 = runs.iter().map(|run| run.glyphs.len() as u32).sum();
+        let mut registered = compiler();
+        for _ in 0..3 {
+            let frame = compile(&mut registered, runs.clone());
+            assert_eq!(frame.skipped_glyphs, glyphs);
+            assert_eq!(frame.glyph_draws, 0);
+        }
+        assert_eq!(registered.hvgl_bytes_mismatches(), 1, "counted once");
+        assert_eq!(registered.hvgl_identity_mismatches(), 0);
+    }
+
+    /// The user value CoreText reports for the `wght` axis of its face `name`
+    /// (`CTFontCopyVariation`, which lists only values off the default).
+    fn coretext_weight(name: &str) -> f64 {
+        // SAFETY: a null matrix is the documented identity argument.
+        let font = unsafe { CTFont::with_name(&CFString::from_str(name), 24.0, std::ptr::null()) };
+        // SAFETY: a copy from a live font.
+        let variation = unsafe { font.variation() }.expect("a variable face");
+        // SAFETY: a variation dictionary maps `CFNumber` axis identifiers to
+        // `CFNumber` values, CF objects both.
+        let variation: &CFDictionary<CFType, CFType> = unsafe { variation.cast_unchecked() };
+        let wght = CFNumber::new_i64(i64::from(u32::from_be_bytes(*b"wght")));
+        variation
+            .get(&wght)
+            .and_then(|value| value.downcast::<CFNumber>().ok())
+            .and_then(|value| value.as_f64())
+            .expect("the named instance sets its weight")
+    }
+
+    /// The frame of 中 drawn from `handle` on the outline route, checked to
+    /// draw with no refusal of any kind.
+    fn han_frame(handle: FontHandle) -> CompiledFrame {
+        let runs = vec![run(handle, &coretext_glyphs(FACE, "中"))];
+        assert_identity_clean(&runs);
+        let mut outlines = compiler();
+        outlines.set_hvgl_atlas(false);
+        let frame = compile(&mut outlines, runs);
+        assert_eq!(outlines.hvgl_variation_mismatches(), 0);
+        assert_eq!(frame.skipped_glyphs, 0);
+        assert_eq!(frame.glyph_draws, 1);
+        frame
+    }
+
+    /// A known answer from CoreText: the run's coordinates for the weight
+    /// CoreText reports for `PingFangSC-Semibold` draw exactly that named
+    /// instance, and not the default one.
+    #[test]
+    fn pingfang_coordinates_draw_coretexts_named_semibold() {
+        let Some(data) = pingfang() else { return };
+        const SEMIBOLD: &str = "PingFangSC-Semibold";
+        let weight = coretext_weight(SEMIBOLD);
+        let medium = face(&data, FACE);
+        let coords = coords_at_weight(medium.font(), weight);
+        assert!(coords.iter().any(|coord| *coord != 0), "weight {weight}");
+        let varied = han_frame(medium.clone().with_normalized_coords(&coords));
+        let named = han_frame(face(&data, SEMIBOLD));
+        let default = han_frame(medium);
+        assert!(varied.alphas().iter().any(|alpha| *alpha != 0));
+        assert_eq!(
+            varied.alphas(),
+            named.alphas(),
+            "weight {weight} through the run's coordinates is CoreText's {SEMIBOLD}"
+        );
+        assert_ne!(varied.alphas(), default.alphas());
     }
 
     /// The public `PingFangSC-Medium` face of `data`.

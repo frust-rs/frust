@@ -939,10 +939,22 @@ impl SceneCompiler {
 
     /// How many `hvgl` faces were refused because the run's font bytes and
     /// the CoreText face its PostScript name opened disagree (glyph count,
-    /// `unitsPerEm` or `fvar` axes), since the compiler was built.
+    /// `unitsPerEm`, `fvar` axes, or the glyph a sample of the bytes' `cmap`
+    /// codepoints maps to), since the compiler was built.
     #[must_use]
     pub fn hvgl_bytes_mismatches(&self) -> u32 {
         self.hvgl_outlines.bytes_mismatches()
+    }
+
+    /// How many variation instances of `hvgl` faces were refused because the
+    /// copy CoreText made at the run's coordinates reads back as another
+    /// instance, since the compiler was built: counted and warned once per
+    /// instance of an open face. The glyphs of such a run are unavailable
+    /// (counted in [`CompiledFrame::hvgl_unavailable_glyphs`]), never drawn
+    /// from the default instance. Always zero on a target without CoreText.
+    #[must_use]
+    pub fn hvgl_variation_mismatches(&self) -> u32 {
+        self.hvgl_outlines.variation_mismatches()
     }
 
     /// How many `hvgl` outline fetches the cache answered without asking
