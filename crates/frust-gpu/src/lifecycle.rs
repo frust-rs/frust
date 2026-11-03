@@ -36,8 +36,9 @@
 //!   panicking and never queueing.
 //!
 //! The pure decision logic ([`next_phase`], [`SurfacePhase::can_render`],
-//! [`decide_acquire`], [`next_invalid_streak`]) is separated from the `wgpu`
-//! calls so it is unit-testable without a GPU.
+//! [`decide_acquire`], [`decide_acquire_streaks`], [`next_invalid_streak`],
+//! [`next_transient_streak`]) is separated from the `wgpu` calls so it is
+//! unit-testable without a GPU.
 
 use core::ffi::c_void;
 use core::ptr::NonNull;
@@ -110,7 +111,9 @@ pub enum AcquireStatus {
     Outdated,
     /// `Lost`: the surface is gone; drop it and move to `SurfaceLost`.
     Lost,
-    /// `Timeout`/`Occluded`: transient; skip this frame.
+    /// `Timeout`/`Occluded`: transient; skip this frame — until
+    /// [`MAX_TRANSIENT_SKIPS`] of them in a row, when the swapchain is
+    /// reconfigured instead ([`decide_acquire_streaks`]).
     Transient,
     /// `Validation`: the swapchain raised a validation error on acquire (observed
     /// under the Android emulator's SwiftShader driver as a one-off hiccup).
@@ -149,18 +152,59 @@ pub enum AcquireAction {
 /// — so no shell code needs to change for this to be honoured.
 pub const MAX_INVALID_RECONFIGURES: u8 = 3;
 
+/// Cap on consecutive `Transient` (`Timeout`/`Occluded`) acquires skipped
+/// before the machine stops skipping and reconfigures the swapchain instead.
+///
+/// A `Timeout` is normally a one-off: the compositor held every image for a
+/// frame. But on `wgpu-hal`'s Vulkan backend dropping an acquired
+/// `wgpu::SurfaceTexture` without presenting it is a no-op (upstream
+/// gfx-rs/wgpu#5723), so every such drop leaks one swapchain image for good;
+/// after about two, every later acquire times out and skipping forever wedges
+/// the surface. Reconfiguring recreates the swapchain, which reclaims every
+/// image the old one held, so a timeout streak that reaches the cap recovers
+/// instead of spinning. Frust presents every image it acquires, so the cap is
+/// the backstop for a leak it did not cause — a driver, or a path not yet
+/// found — and costs a healthy surface nothing: three timeouts in a row are
+/// already a stalled surface.
+pub const MAX_TRANSIENT_SKIPS: u8 = 3;
+
 /// Pure acquire-error policy.
 ///
 /// `consecutive_invalid` is the number of `Invalid` acquires already retried
 /// (via `Reconfigure`) since the last successful acquire; only the `Invalid`
 /// arm consults it. Host-testable: no `wgpu` state is touched here, only the
 /// counter the renderer tracks and resets on a successful acquire.
+///
+/// Equivalent to [`decide_acquire_streaks`] with no `Transient` streak — every
+/// `Transient` is skipped. A caller tracking that streak too calls
+/// [`decide_acquire_streaks`] directly.
 pub fn decide_acquire(status: AcquireStatus, consecutive_invalid: u8) -> AcquireAction {
+    decide_acquire_streaks(status, consecutive_invalid, 0)
+}
+
+/// Pure acquire-error policy over both streaks the renderer tracks.
+///
+/// `consecutive_invalid` is [`decide_acquire`]'s; `consecutive_transient` is
+/// the number of `Transient` acquires already skipped in a row
+/// ([`next_transient_streak`]), and only the `Transient` arm consults it: under
+/// [`MAX_TRANSIENT_SKIPS`] the frame is skipped, at the cap the swapchain is
+/// reconfigured — the recovery a leaked-image wedge needs (see the constant).
+pub fn decide_acquire_streaks(
+    status: AcquireStatus,
+    consecutive_invalid: u8,
+    consecutive_transient: u8,
+) -> AcquireAction {
     match status {
         AcquireStatus::Usable => AcquireAction::Present,
         AcquireStatus::Outdated => AcquireAction::Reconfigure,
         AcquireStatus::Lost => AcquireAction::Lose,
-        AcquireStatus::Transient => AcquireAction::Skip,
+        AcquireStatus::Transient => {
+            if consecutive_transient < MAX_TRANSIENT_SKIPS {
+                AcquireAction::Skip
+            } else {
+                AcquireAction::Reconfigure
+            }
+        }
         // A validation error on acquire is treated like `Outdated`: rebuild the
         // swapchain and ask for a redraw. Recovering (rather than failing)
         // keeps a transient driver hiccup from permanently freezing the surface.
@@ -198,6 +242,22 @@ pub fn next_invalid_streak(status: AcquireStatus, action: AcquireAction, current
         (AcquireStatus::Invalid, AcquireAction::Reconfigure) => current.saturating_add(1),
         (AcquireStatus::Invalid, AcquireAction::Lose) => 0,
         _ => current,
+    }
+}
+
+/// Given the just-observed acquire `status` and the [`AcquireAction`]
+/// [`decide_acquire_streaks`] chose for it, returns the next
+/// consecutive-`Transient` streak count the renderer should store — the
+/// sibling of [`next_invalid_streak`].
+///
+/// - a skipped `Transient` (`Skip`) increments the streak;
+/// - a `Transient` that hit the cap (`Reconfigure`) resets it — the
+///   reconfigure ends the episode, and the next timeout starts a fresh one;
+/// - every other status resets it: only an unbroken run of timeouts counts.
+pub fn next_transient_streak(status: AcquireStatus, action: AcquireAction, current: u8) -> u8 {
+    match (status, action) {
+        (AcquireStatus::Transient, AcquireAction::Skip) => current.saturating_add(1),
+        _ => 0,
     }
 }
 
@@ -505,6 +565,128 @@ mod tests {
         assert_eq!(
             next_invalid_streak(AcquireStatus::Transient, AcquireAction::Skip, 2),
             2
+        );
+    }
+
+    #[test]
+    fn decide_acquire_is_the_streaks_policy_with_no_transient_streak() {
+        for status in [
+            AcquireStatus::Usable,
+            AcquireStatus::Outdated,
+            AcquireStatus::Lost,
+            AcquireStatus::Transient,
+            AcquireStatus::Invalid,
+        ] {
+            for consecutive_invalid in [0, 1, MAX_INVALID_RECONFIGURES, u8::MAX] {
+                assert_eq!(
+                    decide_acquire(status, consecutive_invalid),
+                    decide_acquire_streaks(status, consecutive_invalid, 0),
+                    "{status:?} at consecutive_invalid={consecutive_invalid}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn transient_skips_under_the_cap() {
+        for consecutive_transient in 0..MAX_TRANSIENT_SKIPS {
+            assert_eq!(
+                decide_acquire_streaks(AcquireStatus::Transient, 0, consecutive_transient),
+                AcquireAction::Skip,
+                "expected Skip at consecutive_transient={consecutive_transient}"
+            );
+        }
+    }
+
+    #[test]
+    fn transient_reconfigures_at_the_cap() {
+        assert_eq!(
+            decide_acquire_streaks(AcquireStatus::Transient, 0, MAX_TRANSIENT_SKIPS),
+            AcquireAction::Reconfigure,
+            "a timeout streak at the cap recreates the swapchain instead of skipping"
+        );
+        assert_eq!(
+            decide_acquire_streaks(AcquireStatus::Transient, 0, u8::MAX),
+            AcquireAction::Reconfigure
+        );
+    }
+
+    #[test]
+    fn a_timeout_run_skips_the_cap_then_reconfigures_then_starts_over() {
+        // The renderer's own loop: decide, then store the next streak.
+        let mut streak = 0;
+        let mut actions = Vec::new();
+        for _ in 0..(2 * (usize::from(MAX_TRANSIENT_SKIPS) + 1)) {
+            let action = decide_acquire_streaks(AcquireStatus::Transient, 0, streak);
+            streak = next_transient_streak(AcquireStatus::Transient, action, streak);
+            actions.push(action);
+        }
+        let mut episode = vec![AcquireAction::Skip; usize::from(MAX_TRANSIENT_SKIPS)];
+        episode.push(AcquireAction::Reconfigure);
+        assert_eq!(actions, [episode.clone(), episode].concat());
+        assert_eq!(streak, 0, "the reconfigure ended the episode");
+    }
+
+    #[test]
+    fn transient_streak_resets_on_every_other_status() {
+        for status in [
+            AcquireStatus::Usable,
+            AcquireStatus::Outdated,
+            AcquireStatus::Lost,
+            AcquireStatus::Invalid,
+        ] {
+            let action = decide_acquire_streaks(status, 0, MAX_TRANSIENT_SKIPS - 1);
+            assert_eq!(
+                next_transient_streak(status, action, MAX_TRANSIENT_SKIPS - 1),
+                0,
+                "{status:?} breaks the timeout run"
+            );
+        }
+        assert_eq!(
+            next_transient_streak(AcquireStatus::Transient, AcquireAction::Skip, u8::MAX),
+            u8::MAX,
+            "saturates rather than overflowing"
+        );
+    }
+
+    #[test]
+    fn the_two_streaks_do_not_interfere() {
+        // An Invalid episode at its cap still gives up whatever the timeout
+        // streak, and a timeout streak at its cap still reconfigures whatever
+        // the Invalid one.
+        for consecutive_transient in [0, MAX_TRANSIENT_SKIPS, u8::MAX] {
+            assert_eq!(
+                decide_acquire_streaks(
+                    AcquireStatus::Invalid,
+                    MAX_INVALID_RECONFIGURES,
+                    consecutive_transient
+                ),
+                AcquireAction::Lose
+            );
+            assert_eq!(
+                decide_acquire_streaks(AcquireStatus::Invalid, 0, consecutive_transient),
+                AcquireAction::Reconfigure
+            );
+        }
+        for consecutive_invalid in [0, MAX_INVALID_RECONFIGURES, u8::MAX] {
+            assert_eq!(
+                decide_acquire_streaks(
+                    AcquireStatus::Transient,
+                    consecutive_invalid,
+                    MAX_TRANSIENT_SKIPS
+                ),
+                AcquireAction::Reconfigure
+            );
+        }
+        // A timeout reconfigure leaves an Invalid streak where it was, and a
+        // retried Invalid breaks the timeout run.
+        assert_eq!(
+            next_invalid_streak(AcquireStatus::Transient, AcquireAction::Reconfigure, 2),
+            2
+        );
+        assert_eq!(
+            next_transient_streak(AcquireStatus::Invalid, AcquireAction::Reconfigure, 2),
+            0
         );
     }
 
