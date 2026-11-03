@@ -21,6 +21,14 @@
 //!   the one prepared for is planned again from the scene handed to the
 //!   encode, and renders exactly as a plain `encode` at that extent does.
 //!
+//! - **A same-extent rebind keeps the plan.** A host that binds a camera or
+//!   video frame after it acquired its target changes only the view; the plan
+//!   reads an external texture through its extent alone, so `encode_prepared`
+//!   still consumes it (no second compile, no second tick of the retained
+//!   store's frame clock) and samples the new view. A rebind at another
+//!   extent, or an unbind of a bound id, re-plans; an unbind of an id never
+//!   bound keeps the plan.
+//!
 //! The whole file runs under a validation error scope, so a wrong bind group
 //! or an out-of-range draw surfaces as a named error rather than as a
 //! plausible-looking image.
@@ -31,7 +39,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use frust_engine::renderer::{FramePass, RegionCopyMode};
 use frust_engine::{EngineError, EngineRenderer, EngineTarget, OutputAlpha};
-use frust_gpu::{HeadlessTarget, TierCaps};
+use frust_gpu::{HeadlessTarget, SceneTextureId, Texture, TextureDesc, TierCaps};
 use frust_scene::{Scene, SceneBuilder};
 use kurbo::{Affine, Rect};
 use peniko::color::palette::css::{BLACK, BLUE, GREEN, RED, WHITE};
@@ -665,6 +673,227 @@ fn encode_prepared_at_another_extent_re_plans_and_renders_that_extent() {
     // The last row and column are inside the target, and the backdrop reached
     // them: nothing was clipped to the extent the plan was first made at.
     assert_eq!(pixel(&pixels, width, width - 1, height - 1), [0, 0, 0, 255]);
+
+    let error = drain_error_scope(&device, scope);
+    assert!(error.is_none(), "the frames raised {error:?}");
+}
+
+/// Where the external-texture cases draw their texture.
+const EXTERNAL_DEST: Rect = Rect::new(32.0, 32.0, 160.0, 160.0);
+
+/// A caller-owned solid-`color` texture of `width` x `height` texels, the way
+/// a host's camera or video source owns one.
+fn solid_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    width: u32,
+    height: u32,
+    color: Color,
+) -> Texture {
+    let desc = TextureDesc {
+        width,
+        height,
+        format: FORMAT,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        label: Some("prepare split external source".to_string()),
+    };
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: desc.label.as_deref(),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: FORMAT,
+        usage: desc.usage,
+        view_formats: &[],
+    });
+    let texel = color.to_rgba8().to_u8_array();
+    let pixels: Vec<u8> = (0..width * height).flat_map(|_| texel).collect();
+    queue.write_texture(
+        texture.as_image_copy(),
+        &pixels,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(width * 4),
+            rows_per_image: Some(height),
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    Texture::new(texture, view, desc)
+}
+
+/// A frame filling the target black, then drawing the texture `id` names.
+fn external_scene(id: SceneTextureId) -> Scene {
+    let mut scene = Scene::new();
+    let mut builder = SceneBuilder::new(&mut scene);
+    backdrop(&mut builder, SIZE, SIZE);
+    builder.scene_texture(id.get(), EXTERNAL_DEST);
+    scene
+}
+
+/// The pixel inside [`EXTERNAL_DEST`] every case reads.
+fn external_pixel(target: &HeadlessTarget, device: &wgpu::Device, queue: &wgpu::Queue) -> [u8; 4] {
+    pixel(&target.read_back(device, queue), SIZE, 96, 96)
+}
+
+fn rgba(color: Color) -> [u8; 4] {
+    color.to_rgba8().to_u8_array()
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test prepare_split -- --ignored --test-threads=1`"]
+fn a_same_extent_rebind_between_prepare_and_encode_prepared_keeps_the_plan() {
+    let _serialized = render_lock();
+    let (device, queue, caps) = gpu();
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let target = HeadlessTarget::new(&device, SIZE, SIZE, FORMAT);
+    let mut renderer = renderer(&device, &caps);
+
+    let first = solid_texture(&device, &queue, 32, 32, RED);
+    let id = first.as_scene_texture();
+    renderer.bind_texture(id, (32, 32), first.view().clone());
+    let scene = external_scene(id);
+
+    renderer
+        .prepare(&scene, SIZE, SIZE, usage(&target), Affine::IDENTITY)
+        .expect("the frame plans");
+    let planned_at = renderer.retained_frame();
+
+    // The host's post-acquire bind of a new source frame: another view, the
+    // same extent.
+    let second = solid_texture(&device, &queue, 32, 32, GREEN);
+    let previous = renderer.bind_texture(id, (32, 32), second.view().clone());
+    assert!(previous.is_some(), "the old view is handed back");
+
+    let _ = encode_prepared_frame(&device, &queue, &mut renderer, &scene, &target);
+    assert_eq!(
+        renderer.retained_frame(),
+        planned_at,
+        "the held plan was consumed, not remade"
+    );
+    assert_eq!(
+        external_pixel(&target, &device, &queue),
+        rgba(GREEN),
+        "the new view's pixels are drawn"
+    );
+
+    let error = drain_error_scope(&device, scope);
+    assert!(error.is_none(), "the frames raised {error:?}");
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test prepare_split -- --ignored --test-threads=1`"]
+fn a_rebind_at_another_extent_between_prepare_and_encode_prepared_re_plans() {
+    let _serialized = render_lock();
+    let (device, queue, caps) = gpu();
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let target = HeadlessTarget::new(&device, SIZE, SIZE, FORMAT);
+    let mut renderer = renderer(&device, &caps);
+
+    let first = solid_texture(&device, &queue, 32, 32, RED);
+    let id = first.as_scene_texture();
+    renderer.bind_texture(id, (32, 32), first.view().clone());
+    let scene = external_scene(id);
+
+    renderer
+        .prepare(&scene, SIZE, SIZE, usage(&target), Affine::IDENTITY)
+        .expect("the frame plans");
+    let planned_at = renderer.retained_frame();
+
+    let larger = solid_texture(&device, &queue, 64, 48, BLUE);
+    renderer.bind_texture(id, (64, 48), larger.view().clone());
+
+    let _ = encode_prepared_frame(&device, &queue, &mut renderer, &scene, &target);
+    assert_eq!(
+        renderer.retained_frame(),
+        planned_at + 1,
+        "the stale plan was dropped and the frame planned again"
+    );
+    assert_eq!(
+        external_pixel(&target, &device, &queue),
+        rgba(BLUE),
+        "the frame draws the texture at its new extent"
+    );
+
+    let error = drain_error_scope(&device, scope);
+    assert!(error.is_none(), "the frames raised {error:?}");
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test prepare_split -- --ignored --test-threads=1`"]
+fn unbinding_a_bound_id_between_prepare_and_encode_prepared_re_plans_and_draws_nothing() {
+    let _serialized = render_lock();
+    let (device, queue, caps) = gpu();
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let target = HeadlessTarget::new(&device, SIZE, SIZE, FORMAT);
+    let mut renderer = renderer(&device, &caps);
+
+    let source = solid_texture(&device, &queue, 32, 32, RED);
+    let id = source.as_scene_texture();
+    renderer.bind_texture(id, (32, 32), source.view().clone());
+    let scene = external_scene(id);
+
+    renderer
+        .prepare(&scene, SIZE, SIZE, usage(&target), Affine::IDENTITY)
+        .expect("the frame plans");
+    let planned_at = renderer.retained_frame();
+
+    assert!(renderer.unbind_texture(id).is_some());
+
+    let _ = encode_prepared_frame(&device, &queue, &mut renderer, &scene, &target);
+    assert_eq!(
+        renderer.retained_frame(),
+        planned_at + 1,
+        "the stale plan was dropped and the frame planned again"
+    );
+    assert_eq!(
+        external_pixel(&target, &device, &queue),
+        rgba(BLACK),
+        "an unbound id draws nothing over the backdrop"
+    );
+
+    let error = drain_error_scope(&device, scope);
+    assert!(error.is_none(), "the frames raised {error:?}");
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test prepare_split -- --ignored --test-threads=1`"]
+fn unbinding_an_id_that_was_never_bound_keeps_the_plan() {
+    let _serialized = render_lock();
+    let (device, queue, caps) = gpu();
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let target = HeadlessTarget::new(&device, SIZE, SIZE, FORMAT);
+    let mut renderer = renderer(&device, &caps);
+
+    let source = solid_texture(&device, &queue, 32, 32, RED);
+    let id = source.as_scene_texture();
+    renderer.bind_texture(id, (32, 32), source.view().clone());
+    let scene = external_scene(id);
+    let stranger = solid_texture(&device, &queue, 32, 32, BLUE).as_scene_texture();
+
+    renderer
+        .prepare(&scene, SIZE, SIZE, usage(&target), Affine::IDENTITY)
+        .expect("the frame plans");
+    let planned_at = renderer.retained_frame();
+
+    assert!(renderer.unbind_texture(stranger).is_none());
+
+    let _ = encode_prepared_frame(&device, &queue, &mut renderer, &scene, &target);
+    assert_eq!(
+        renderer.retained_frame(),
+        planned_at,
+        "the held plan was consumed, not remade"
+    );
+    assert_eq!(external_pixel(&target, &device, &queue), rgba(RED));
 
     let error = drain_error_scope(&device, scope);
     assert!(error.is_none(), "the frames raised {error:?}");
