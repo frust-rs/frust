@@ -1258,22 +1258,33 @@ pub(crate) fn render_scene(
     })
 }
 
-/// The backgrounding font-cache flush: once per background transition, however many UIKit
-/// callbacks report it.
+/// The backgrounding font-cache flush: once per `Hidden` edge (`didEnterBackground`), re-armed at
+/// `willEnterForeground`/`didBecomeActive`. The latch keeps a repeated `didEnterBackground` from
+/// writing twice before the next foreground.
 static BACKGROUND_FLUSH: frust_shell_common::BackgroundFlush =
     frust_shell_common::BackgroundFlush::new();
 
 impl super::IosAppHandle {
-    /// Lands the font oracle's unwritten answers before the app suspends. Called by `frust_pause`
-    /// *after* the render barrier, so it spends only what is left of the system's
-    /// background-transition grace (see [`PAUSE_BARRIER_DEADLINE`]); a clean cache is a no-op and a
-    /// dirty one is one small file write. Lives here, a descendant of the module that owns the
-    /// private `text_ctx`.
+    /// Lands the font oracle's unwritten answers before the app suspends. Called by
+    /// `frust_did_enter_background` on the main thread, after the `Paused` push; the render
+    /// barrier already ran in `frust_pause` (`willResignActive` always precedes it), so no GPU work
+    /// is in flight. It spends part of UIKit's ~5 s background-transition grace (see
+    /// [`PAUSE_BARRIER_DEADLINE`]); a clean cache is a no-op and a dirty one is one small file
+    /// write, whose duration is logged at info. Lives here, a descendant of the module that owns
+    /// the private `text_ctx`.
     pub(crate) fn flush_font_cache_on_background(&mut self) {
-        BACKGROUND_FLUSH.went_to_background(&mut [&mut self.text_ctx]);
+        let started = Instant::now();
+        let outcome = BACKGROUND_FLUSH.went_to_background_outcome(&mut [&mut self.text_ctx]);
+        if !outcome.is_repeat() {
+            log::info!(
+                "frust-shell-ios: didEnterBackground font cache flush took {:.1} ms",
+                started.elapsed().as_secs_f64() * 1e3
+            );
+        }
     }
 
     /// Re-arms [`Self::flush_font_cache_on_background`] for the next background transition.
+    /// Flushes nothing.
     pub(crate) fn font_cache_foregrounded(&mut self) {
         BACKGROUND_FLUSH.came_to_foreground();
     }
