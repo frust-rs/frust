@@ -14,9 +14,11 @@
 //! sibling layers beside each other take the two groups one apiece and a fan
 //! wider than that is served by cutting its parent's round short rather than by
 //! a third group, a layer whose own round samples a live page while an isolated
-//! ancestor holds another is served on the one spill page beside the pair, and a
-//! shape that still finds no page after a cut and the spill is refused with a
-//! reason a log can be read from rather than rendered incorrectly.
+//! ancestor holds another is served on the spill pool beside the pair — every
+//! tree whose isolated layers hold at most two isolated children each, checked
+//! exhaustively inside the depth cap — and a shape that still finds no page
+//! after a cut and every spill slot is refused with a reason a log can be read
+//! from rather than rendered incorrectly.
 //!
 //! A round is one render pass, and the counts pinned here are the frame's whole
 //! pass count, punches aside: the renderer draws the surface's clear and the
@@ -25,8 +27,8 @@
 //! passes*; the recorded list itself is pinned by `tests/encode_contract.rs`).
 
 use frust_engine::schedule::{
-    Composite, MAX_CHAIN_DEPTH, MAX_LIVE_PAGES, PING_PONG_GROUPS, PageConfig, PageParity, Round,
-    RoundOp, Schedule, pages,
+    Composite, MAX_CHAIN_DEPTH, MAX_LIVE_PAGES, MAX_SPILL_PAGES, PING_PONG_GROUPS, PageConfig,
+    PageParity, Round, RoundOp, Schedule, pages,
 };
 use frust_engine::{EngineDraw, EngineError};
 use frust_gpu::{DownlevelProfile, TierCaps};
@@ -170,13 +172,15 @@ fn branching_chain_at_the_root() -> CommandRecorder<EngineDraw> {
     recorder
 }
 
-/// A recording of a sibling pair nested inside a sibling pair — the smallest
-/// shape three live pages cannot serve either.
+/// A recording of a sibling pair nested inside a sibling pair — `P[Q, L[C1,
+/// C2]]`, the smallest shape three live pages cannot serve.
 ///
 /// The outer parent takes a group at the cut its first child forces, the inner
-/// parent's own two children take the other group and the spill page between
-/// them, and the inner parent — whose round composites *both* of them — would
-/// need a fourth live page to render into.
+/// parent's own two children take the other group and the first spill slot
+/// between them, and the inner parent — whose round composites *both* of them —
+/// needs a fourth live page to render into, which is the second spill slot.
+/// This is what a card switcher's dimmed peer records around a page carrying a
+/// translucent sibling beside a translucent two-child fan.
 fn nested_fan_inside_a_fan() -> CommandRecorder<EngineDraw> {
     let mut recorder = recorder();
     recorder.push_layer(layer(HALF), None);
@@ -198,13 +202,13 @@ fn nested_fan_inside_a_fan() -> CommandRecorder<EngineDraw> {
 /// Walks `rounds` the way the renderer executes them and fails if any round
 /// would sample a page an earlier round had already overwritten.
 ///
-/// One slot per live page — the two ping-pong groups and the spill page — which
-/// is the bound itself: the scheduler hands out a group, and a group *is* a page
-/// identity for the shapes it serves, so a schedule that put two live pages in
-/// one group shows up here as a round rendering over a page still owed to a
-/// later composite. The spill page is checked by exactly the same rules as the
-/// pair, which is the claim that it is released like any other page rather than
-/// held for the frame. A continuation round
+/// One slot per live page — the two ping-pong groups and every slot of the
+/// spill pool — which is the bound itself: the scheduler hands out a group, and
+/// a group *is* a page identity for the shapes it serves, so a schedule that put
+/// two live pages in one group shows up here as a round rendering over a page
+/// still owed to a later composite. Every spill slot is checked by exactly the
+/// same rules as the pair, which is the claim that it is released like any
+/// other page rather than held for the frame. A continuation round
 /// is the one round allowed to render into an occupied group, and only into its
 /// own layer's page — the whole point of the `continued` flag is that the
 /// renderer loads that page instead of clearing it.
@@ -212,6 +216,19 @@ fn assert_pages_survive_until_composited(rounds: &[Round]) {
     let mut live: [Option<u32>; MAX_LIVE_PAGES] = [None; MAX_LIVE_PAGES];
 
     for round in rounds {
+        let named = round
+            .page()
+            .map(|page| page.parity)
+            .into_iter()
+            .chain(round.composites().map(|composite| composite.parity))
+            .chain(round.released.iter().copied());
+        for parity in named {
+            assert!(
+                parity.index() < MAX_LIVE_PAGES,
+                "a round names {parity:?}, past the {MAX_LIVE_PAGES} live-page slots: {round:?}"
+            );
+        }
+
         for composite in round.composites() {
             assert_eq!(
                 live[composite.parity.index()],
@@ -251,6 +268,41 @@ fn assert_pages_survive_until_composited(rounds: &[Round]) {
             live[page.parity.index()] = Some(page.layer);
         }
     }
+}
+
+/// The most pages `rounds` has live during any one pass: every page an earlier
+/// round left for a later composite, plus the one the pass renders into.
+fn peak_live_pages(rounds: &[Round]) -> usize {
+    let mut live = [false; MAX_LIVE_PAGES];
+    let mut peak = 0;
+    for round in rounds {
+        let own = round.page().map(|page| page.parity.index());
+        let during = live
+            .iter()
+            .enumerate()
+            .filter(|(index, held)| **held || Some(*index) == own)
+            .count();
+        peak = peak.max(during);
+        for parity in &round.released {
+            live[parity.index()] = false;
+        }
+        if let Some(index) = own {
+            live[index] = true;
+        }
+    }
+    peak
+}
+
+/// The distinct spill slots `rounds` renders into, in ascending order.
+fn spill_slots_used(rounds: &[Round]) -> Vec<usize> {
+    let mut slots: Vec<usize> = rounds
+        .iter()
+        .filter_map(Round::page)
+        .filter_map(|page| page.parity.spill_slot())
+        .collect();
+    slots.sort_unstable();
+    slots.dedup();
+    slots
 }
 
 /// The layers `rounds` composites, in execution order, paired with the round
@@ -422,10 +474,8 @@ fn a_chain_never_holds_more_than_two_pages_live_at_once() {
                 "depth {depth} holds {live} pages live in {round:?}"
             );
             assert!(
-                !round
-                    .page()
-                    .is_some_and(|page| page.parity == PageParity::Spill),
-                "a chain alternates between the pair and never reaches for the spill page: \
+                !round.page().is_some_and(|page| page.parity.is_spill()),
+                "a chain alternates between the pair and never reaches for a spill page: \
                  {round:?}"
             );
             if let Some(page) = round.page() {
@@ -899,7 +949,7 @@ fn a_cut_round_still_draws_every_range_once_and_in_recording_order() {
 }
 
 // ---------------------------------------------------------------------
-// The one spill page beside the pair
+// The spill pool beside the pair
 // ---------------------------------------------------------------------
 
 #[test]
@@ -956,6 +1006,18 @@ fn a_branch_whose_second_subtree_nests_is_served_on_the_spill_page() {
         1,
         "one layer needed the third page, so one round writes it: {rounds:?}"
     );
+    // Re-pinned for the pool: one layer short of the pair takes the pool's
+    // first slot — the page the pool started as — and nothing past it.
+    assert_eq!(
+        spill_slots_used(&rounds),
+        vec![0],
+        "a single spill is always the pool's first slot: {rounds:?}"
+    );
+    assert_eq!(
+        peak_live_pages(&rounds),
+        PING_PONG_GROUPS + 1,
+        "three pages live at the peak, as before the pool: {rounds:?}"
+    );
 }
 
 #[test]
@@ -972,9 +1034,15 @@ fn the_same_branch_recorded_at_the_root_still_needs_no_spill_page() {
         rounds
             .iter()
             .filter_map(Round::page)
-            .all(|page| page.parity != PageParity::Spill),
+            .all(|page| !page.parity.is_spill()),
         "the root-level shape is served on the pair alone: {rounds:?}"
     );
+    assert_eq!(
+        spill_slots_used(&rounds),
+        Vec::<usize>::new(),
+        "no spill slot of any number: {rounds:?}"
+    );
+    assert_eq!(peak_live_pages(&rounds), PING_PONG_GROUPS);
     let composited: Vec<u32> = rounds
         .iter()
         .flat_map(Round::composites)
@@ -1023,13 +1091,23 @@ fn a_fan_of_nesting_siblings_reuses_the_one_spill_page_rather_than_stacking_them
         spilled, 3,
         "each nesting sibling takes the one spill page in turn: {rounds:?}"
     );
+    // Re-pinned for the pool, deliberately tighter than `MAX_LIVE_PAGES`: the
+    // three spills reuse the pool's first slot in turn rather than stacking
+    // into the later ones, so this shape still peaks at the three live pages
+    // it did when the pool was one page deep.
+    assert_eq!(
+        spill_slots_used(&rounds),
+        vec![0],
+        "every nesting sibling takes the first slot, never a later one: {rounds:?}"
+    );
     for round in &rounds {
         let live = usize::from(round.page().is_some()) + round.released.len();
         assert!(
-            live <= MAX_LIVE_PAGES,
-            "no round holds more than the bound live: {round:?}"
+            live <= PING_PONG_GROUPS + 1,
+            "no round holds more than the pair and one spill page live: {round:?}"
         );
     }
+    assert_eq!(peak_live_pages(&rounds), PING_PONG_GROUPS + 1);
 
     // Every layer still reaches exactly one composite, and the recording's own
     // order survives being cut across that many rounds.
@@ -1046,32 +1124,359 @@ fn a_fan_of_nesting_siblings_reuses_the_one_spill_page_rather_than_stacking_them
     );
 }
 
+#[test]
+fn a_sibling_pair_nested_inside_a_sibling_pair_is_served_on_two_spill_slots() {
+    // GRADUATED: this shape used to escalate. A fan inside a layer costs that
+    // layer its group for the rest of the frame, and a fan two levels deep
+    // wants the same of its own parent: the outer parent takes a group at the
+    // cut its first child forces, the inner fan's first child takes the other,
+    // and the second child takes the pool's first slot. The inner parent's own
+    // round then has to composite *both* of its children while its parent's
+    // page is still owed upwards — four pages live — and the pool's second
+    // slot is the fourth. It is what a card switcher's dimmed peer records
+    // around a page holding a translucent sibling beside a translucent pair, so
+    // refusing it froze the switcher for as long as the peer was dimmed.
+    let rounds = schedule(&nested_fan_inside_a_fan());
+    assert_pages_survive_until_composited(&rounds);
+
+    let second = PageParity::spill(1).expect("the pool has a second slot");
+    let pages: Vec<(u32, usize, PageParity, bool)> = rounds
+        .iter()
+        .filter_map(|round| {
+            round
+                .page()
+                .map(|page| (page.layer, page.depth, page.parity, page.continued))
+        })
+        .collect();
+    assert_eq!(
+        pages,
+        vec![
+            (1, 2, PageParity::Even, false),
+            (0, 1, PageParity::Odd, false),
+            (3, 3, PageParity::Even, false),
+            (4, 3, PageParity::Spill, false),
+            (2, 2, second, false),
+            (0, 1, PageParity::Odd, true),
+        ],
+        "the outer parent opens its page at the cut and continues it after the inner fan, \
+         whose second child and parent take the pool's first two slots: {rounds:?}"
+    );
+    assert_eq!(
+        rounds.len(),
+        7,
+        "six page rounds and the surface: {rounds:?}"
+    );
+
+    // Every layer reaches its parent exactly once, in recording order, and each
+    // spill slot goes back to the pool in the very round that samples it.
+    assert_eq!(
+        composite_order(&rounds),
+        vec![(1, 1), (4, 3), (4, 4), (5, 2), (6, 0)]
+    );
+    assert_eq!(
+        rounds[4].released,
+        vec![PageParity::Even, PageParity::Spill]
+    );
+    assert_eq!(rounds[5].released, vec![second]);
+    assert_eq!(
+        spill_slots_used(&rounds),
+        vec![0, 1],
+        "two spill slots, the pool's first two: {rounds:?}"
+    );
+    assert_eq!(
+        peak_live_pages(&rounds),
+        PING_PONG_GROUPS + 2,
+        "four pages live while the inner parent renders: {rounds:?}"
+    );
+}
+
+#[test]
+fn one_further_nesting_level_below_the_nested_fan_fills_the_whole_pool() {
+    // `P[Q, L[C1, M[D1, D2]]]`: the nested fan with its second child carrying
+    // a fan of its own. The inner-most parent has its parent's page, its
+    // grandparent's, and both of its children's live while it renders — the
+    // walk's worst case for any tree whose isolated layers hold at most two
+    // isolated children (see `MAX_SPILL_PAGES`), and what the pool is sized
+    // for.
+    let rounds = schedule(&record_forest(&[tree(vec![
+        leaf(),
+        tree(vec![leaf(), tree(vec![leaf(), leaf()])]),
+    ])]));
+    assert_pages_survive_until_composited(&rounds);
+
+    assert_eq!(
+        spill_slots_used(&rounds),
+        (0..MAX_SPILL_PAGES).collect::<Vec<_>>(),
+        "every slot of the pool, and none past it: {rounds:?}"
+    );
+    assert_eq!(
+        peak_live_pages(&rounds),
+        MAX_LIVE_PAGES,
+        "the bound is reached exactly: {rounds:?}"
+    );
+    let mut composited: Vec<u32> = rounds
+        .iter()
+        .flat_map(Round::composites)
+        .map(|c| c.layer)
+        .collect();
+    composited.sort_unstable();
+    assert_eq!(composited, (0..7).collect::<Vec<u32>>());
+}
+
+#[test]
+fn a_four_wide_fan_beside_a_finished_sibling_is_served_on_the_whole_pool() {
+    // The other way a fan reaches the pool: a finished layer pending in the
+    // surface round beside one whose children all fade. The fanning parent has
+    // no page and cannot take one while its first child and the finished
+    // sibling hold both groups, so nothing can hand its children's pages back
+    // until it renders — every child past the second spills, and four children
+    // are what the three slots carry.
+    let rounds = schedule(&record_forest(&[
+        leaf(),
+        tree(vec![leaf(), leaf(), leaf(), leaf()]),
+    ]));
+    assert_pages_survive_until_composited(&rounds);
+
+    assert_eq!(
+        spill_slots_used(&rounds),
+        (0..MAX_SPILL_PAGES).collect::<Vec<_>>()
+    );
+    assert_eq!(peak_live_pages(&rounds), MAX_LIVE_PAGES);
+}
+
+// ---------------------------------------------------------------------
+// The pool's bound, checked over every tree it claims to serve
+// ---------------------------------------------------------------------
+
+/// One isolated layer and the isolated layers recorded inside it, in order.
+#[derive(Debug, Clone)]
+struct Tree(Vec<Tree>);
+
+fn leaf() -> Tree {
+    Tree(Vec::new())
+}
+
+fn tree(children: Vec<Tree>) -> Tree {
+    Tree(children)
+}
+
+/// Records `forest` under the root: every layer at half opacity, each holding
+/// one draw of its own ahead of its children so none covers nothing.
+fn record_forest(forest: &[Tree]) -> CommandRecorder<EngineDraw> {
+    fn record(recorder: &mut CommandRecorder<EngineDraw>, forest: &[Tree]) {
+        for tree in forest {
+            recorder.push_layer(layer(HALF), None);
+            draw(recorder, 0, 16, 32);
+            record(recorder, &tree.0);
+            recorder.pop_layer();
+        }
+    }
+    let mut recorder = recorder();
+    record(&mut recorder, forest);
+    recorder
+}
+
+/// Every ordered forest at most `height` levels deep whose roots, and every
+/// layer's children, number at most `width`.
+fn every_forest(height: usize, width: usize) -> Vec<Vec<Tree>> {
+    if height == 0 {
+        return vec![Vec::new()];
+    }
+    let trees: Vec<Tree> = every_forest(height - 1, width)
+        .into_iter()
+        .map(Tree)
+        .collect();
+    let mut forests: Vec<Vec<Tree>> = vec![Vec::new()];
+    let mut longest: Vec<Vec<Tree>> = vec![Vec::new()];
+    for _ in 0..width {
+        let mut next = Vec::new();
+        for forest in &longest {
+            for tree in &trees {
+                let mut grown = forest.clone();
+                grown.push(tree.clone());
+                next.push(grown);
+            }
+        }
+        forests.extend(next.iter().cloned());
+        longest = next;
+    }
+    forests
+}
+
+/// Every ordered forest of exactly `layers` layers at most `height` levels
+/// deep, of any width.
+fn every_forest_of(layers: usize, height: usize) -> Vec<Vec<Tree>> {
+    if layers == 0 {
+        return vec![Vec::new()];
+    }
+    if height == 0 {
+        return Vec::new();
+    }
+    let mut forests = Vec::new();
+    for first in 1..=layers {
+        let rest = every_forest_of(layers - first, height);
+        for children in every_forest_of(first - 1, height - 1) {
+            for tail in &rest {
+                let mut forest = vec![Tree(children.clone())];
+                forest.extend(tail.iter().cloned());
+                forests.push(forest);
+            }
+        }
+    }
+    forests
+}
+
+fn layer_count(forest: &[Tree]) -> usize {
+    forest.iter().map(|tree| 1 + layer_count(&tree.0)).sum()
+}
+
+/// The most isolated children any one layer of `forest` holds — the root's own
+/// layers not counted, since the surface holds no page of its own.
+fn widest_layer(forest: &[Tree]) -> usize {
+    forest
+        .iter()
+        .map(|tree| tree.0.len().max(widest_layer(&tree.0)))
+        .max()
+        .unwrap_or(0)
+}
+
+/// Schedules `forest` and checks what every served frame must hold: no page
+/// overwritten before it is composited, no more than the bound live, and every
+/// layer composited exactly once. Answers the frame's peak, or the refusal.
+fn served_peak(forest: &[Tree]) -> Result<usize, EngineError> {
+    let recorder = record_forest(forest);
+    let rounds = Schedule::build(&recorder, &caps(), &PageConfig::default())?;
+    assert_pages_survive_until_composited(&rounds);
+    let peak = peak_live_pages(&rounds);
+    assert!(
+        peak <= MAX_LIVE_PAGES,
+        "{forest:?} holds {peak} pages live: {rounds:?}"
+    );
+    assert_eq!(
+        rounds.iter().flat_map(Round::composites).count(),
+        layer_count(forest),
+        "{forest:?} composites every layer exactly once: {rounds:?}"
+    );
+    Ok(peak)
+}
+
+#[test]
+fn a_regular_tree_of_fan_width_two_never_escalates() {
+    // The claim `MAX_SPILL_PAGES` is sized from, exhaustively: every ordered
+    // tree of regular isolated layers inside the depth cap, with at most two
+    // layers at the root and at most two children under every layer — all
+    // 33,673 of them — schedules, passes the round walk, and stays inside
+    // `MAX_LIVE_PAGES`. The deepest of them reach the bound exactly, which is
+    // the claim that the pool is no larger than the walk needs.
+    let forests = every_forest(MAX_CHAIN_DEPTH, 2);
+    assert_eq!(
+        forests.len(),
+        33_673,
+        "the enumeration covers what it claims"
+    );
+
+    let mut worst = 0;
+    for forest in &forests {
+        match served_peak(forest) {
+            Ok(peak) => worst = worst.max(peak),
+            Err(error) => panic!("{forest:?} is refused: {error}"),
+        }
+    }
+    assert_eq!(
+        worst, MAX_LIVE_PAGES,
+        "the worst fan-width-two tree needs exactly the pool"
+    );
+}
+
+#[test]
+fn every_small_tree_is_served_inside_the_bound_or_refused_for_a_fan_wider_than_two() {
+    // The other side of the bound, over every tree of up to ten layers of any
+    // width inside the depth cap: each one is either served inside
+    // `MAX_LIVE_PAGES` or refused for running out of pages — never for another
+    // reason, never by a panic — and every one refused has a layer holding
+    // more than two isolated children, which is the fan the pool's bound is
+    // not sized for. The root's own fan width is free: the surface holds no
+    // page, and its pending composites are always handed back before a spill.
+    let mut refused = 0_usize;
+    let mut total = 0_usize;
+    for layers in 1..=10 {
+        for forest in every_forest_of(layers, MAX_CHAIN_DEPTH) {
+            total += 1;
+            match served_peak(&forest) {
+                Ok(_) => {}
+                Err(EngineError::SchedulerEscalation { reason }) => {
+                    refused += 1;
+                    assert!(
+                        reason.contains("live intermediate pages") && reason.contains("spill"),
+                        "{forest:?} is refused for running out of pages: {reason}"
+                    );
+                    assert!(
+                        widest_layer(&forest) > 2,
+                        "{forest:?} is refused with no layer holding more than two children: \
+                         {reason}"
+                    );
+                }
+                Err(other) => panic!("{forest:?} fails with {other:?}"),
+            }
+        }
+    }
+    assert_eq!(total, 14_767, "the enumeration covers what it claims");
+    assert!(
+        refused > 0,
+        "a fan wider than two under a held ancestor still finds the pool's bound"
+    );
+}
+
 // ---------------------------------------------------------------------
 // Shapes the scheduler refuses
 // ---------------------------------------------------------------------
 
 #[test]
-fn a_sibling_pair_nested_inside_a_sibling_pair_escalates() {
-    // A fan inside a layer costs that layer its group for the rest of the
-    // frame, and a fan two levels deep wants the same of its own parent. The
-    // spill page carries the inner fan's second child — but the inner parent's
-    // own round then has to composite *both* of its children, so it needs a
-    // page while three are already live: its parent's, and one per child. A
-    // cut cannot pay for this one either, so the frame is refused rather than
+fn a_five_wide_fan_beside_a_finished_sibling_escalates() {
+    // Past the pool: the four-wide fan above with one more child. The fanning
+    // parent still cannot be cut — it has no page and none is free — so its
+    // children pile up in its own round, the fifth takes the pool's last slot,
+    // and the parent itself would need a sixth live page to render into. A
+    // cut cannot pay for this one, so the frame is refused rather than
     // rendered wrong.
-    let reason = escalation(&nested_fan_inside_a_fan());
+    let reason = escalation(&record_forest(&[
+        leaf(),
+        tree(vec![leaf(), leaf(), leaf(), leaf(), leaf()]),
+    ]));
 
     assert!(
-        reason.contains("layer 2"),
+        reason.contains("layer 1 "),
         "the reason names the layer that found no page: {reason}"
     );
     assert!(
-        reason.contains("fourth live intermediate page"),
+        reason.contains(&format!("{MAX_LIVE_PAGES} live intermediate pages")),
         "the reason says what ran out: {reason}"
     );
     assert!(
-        reason.contains("spill page"),
-        "the reason says the spill page was tried too: {reason}"
+        reason.contains(&format!("{MAX_SPILL_PAGES} spill pages")),
+        "the reason says the spill pool was tried too: {reason}"
+    );
+}
+
+#[test]
+fn a_four_wide_fan_inside_a_dimmed_page_beside_a_sibling_escalates() {
+    // The card-switcher shape one fan wider: a dimmed page holding a
+    // translucent sibling beside a translucent fan of four. The page takes a
+    // group at the cut its first child forces, the fan's first child takes the
+    // other, and the three after it fill the pool — leaving no page for the
+    // fan's own round.
+    let reason = escalation(&record_forest(&[tree(vec![
+        leaf(),
+        tree(vec![leaf(), leaf(), leaf(), leaf()]),
+    ])]));
+
+    assert!(
+        reason.contains("layer 2 "),
+        "the reason names the fan that found no page: {reason}"
+    );
+    assert!(
+        reason.contains("spill pages"),
+        "the reason says the spill pool was tried too: {reason}"
     );
 }
 
@@ -1348,9 +1753,12 @@ fn a_refused_frame_never_reports_a_target_it_would_have_rendered() {
     // a caller that took a `Vec<Round>` from a refused frame would render a
     // layer graph it had already been told the scheduler cannot serve. The
     // second recorder is the one that matters here — its escalation happens
-    // after several rounds have already been pushed, cut rounds and a spill
-    // page among them.
-    let recorders = [nested_chain(MAX_CHAIN_DEPTH + 1), nested_fan_inside_a_fan()];
+    // after several rounds have already been pushed, a cut round and every
+    // spill slot among them.
+    let recorders = [
+        nested_chain(MAX_CHAIN_DEPTH + 1),
+        record_forest(&[leaf(), tree(vec![leaf(), leaf(), leaf(), leaf(), leaf()])]),
+    ];
 
     for recorder in &recorders {
         assert!(Schedule::build(recorder, &caps(), &PageConfig::default()).is_err());

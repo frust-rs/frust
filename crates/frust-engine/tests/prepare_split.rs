@@ -231,13 +231,13 @@ fn backdrop(builder: &mut SceneBuilder<'_>, width: u32, height: u32) {
     );
 }
 
-/// The fan-inside-a-fan the scheduler refuses
-/// (`tests/schedule.rs`'s `a_sibling_pair_nested_inside_a_sibling_pair_escalates`),
+/// The four-wide fan the scheduler refuses
+/// (`tests/schedule.rs`'s `a_four_wide_fan_inside_a_dimmed_page_beside_a_sibling_escalates`),
 /// recorded through the scene builder: an outer translucent layer holding a
-/// flat translucent child and a translucent child carrying two translucent
-/// children of its own. The inner parent's round has to composite both of its
-/// children while its own parent's page and theirs are live — a fourth page.
-fn nested_fan_inside_a_fan() -> Scene {
+/// flat translucent child and a translucent child carrying four translucent
+/// children of its own. The fan's children fill the spill pool, leaving none
+/// of the `MAX_LIVE_PAGES` live pages for the fan parent's own round.
+fn four_wide_fan_inside_a_dimmed_page() -> Scene {
     let mut scene = Scene::new();
     let mut builder = SceneBuilder::new(&mut scene);
     backdrop(&mut builder, SIZE, SIZE);
@@ -252,15 +252,13 @@ fn nested_fan_inside_a_fan() -> Scene {
         let parent = Rect::new(80.0, 16.0, 208.0, 176.0);
         builder.push_layer(parent, 0.5);
         {
-            let first = Rect::new(96.0, 32.0, 144.0, 96.0);
-            builder.push_layer(first, 0.5);
-            builder.fill_rect(first, Brush::Solid(GREEN));
-            builder.pop_layer();
-
-            let second = Rect::new(144.0, 96.0, 192.0, 160.0);
-            builder.push_layer(second, 0.5);
-            builder.fill_rect(second, Brush::Solid(BLUE));
-            builder.pop_layer();
+            for (i, color) in [GREEN, BLUE, RED, GREEN].into_iter().enumerate() {
+                let x = 88.0 + 28.0 * i as f64;
+                let child = Rect::new(x, 32.0, x + 24.0, 160.0);
+                builder.push_layer(child, 0.5);
+                builder.fill_rect(child, Brush::Solid(color));
+                builder.pop_layer();
+            }
         }
         builder.pop_layer();
     }
@@ -364,13 +362,13 @@ fn of_usage_is_the_single_sampled_answer_for_every_usage_and_format() {
 
 #[test]
 #[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test prepare_split -- --ignored --test-threads=1`"]
-fn prepare_refuses_a_sibling_pair_nested_inside_a_sibling_pair_and_leaves_the_encoder_untouched() {
+fn prepare_refuses_a_four_wide_fan_inside_a_dimmed_page_and_leaves_the_encoder_untouched() {
     let _serialized = render_lock();
     let (device, queue, caps) = gpu();
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let mut renderer = renderer(&device, &caps);
     let target = HeadlessTarget::new(&device, SIZE, SIZE, FORMAT);
-    let scene = nested_fan_inside_a_fan();
+    let scene = four_wide_fan_inside_a_dimmed_page();
 
     // A frame that drew before it, so a refusal that kept the last frame's
     // record would be visible.
