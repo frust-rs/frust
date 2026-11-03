@@ -70,6 +70,9 @@ pub mod texture_bus;
 // unlike the effects module below, because those tests live outside it — and
 // still leaking no `wgpu` type (see its module docs).
 mod headless;
+// Engine frame refusals: the report `SurfaceRenderer::engine_refusals` hands
+// out and the `FRUST_RENDER_INJECT_REFUSAL` knob that forces one.
+mod refusal;
 mod renderer;
 mod tier;
 
@@ -104,6 +107,7 @@ pub use headless::{
 // `DeferredPresent` stays here: it wraps a frame this crate's renderer
 // acquired, submitted and handed back un-presented, which is a renderer
 // concern, not a foundation one.
+pub use refusal::EngineRefusalReport;
 pub use renderer::{DeferredPresent, InstallTimings, ResidentPage, ResidentPages, SurfaceRenderer};
 // The adapter-capability gate is all that is left of the tier seam: the
 // renderer itself is no longer a choice, so the tier enum, its selection
