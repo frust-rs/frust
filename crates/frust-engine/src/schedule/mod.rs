@@ -54,7 +54,9 @@
 //!   page — and one further nesting level below it: every regular layer tree
 //!   whose isolated layers hold at most two isolated children each, within
 //!   the [`MAX_CHAIN_DEPTH`] cap, fits the spill pool (see
-//!   [`MAX_SPILL_PAGES`]);
+//!   [`MAX_SPILL_PAGES`]). Inlined (opacity-one) layers are transparent to the
+//!   count: an isolated layer's children include the isolated layers recorded
+//!   inside its inlined descendants;
 //! - any mixture of the above that stays inside [`MAX_LIVE_PAGES`] live pages;
 //! - a Gaussian-blur or shadow-only drop-shadow [filter](crate::filters) layer
 //!   recorded directly under the frame's own surface, which takes *both*
@@ -73,7 +75,9 @@
 //! Everything else — a layer that finds no page even after a cut and every
 //! spill slot, which a fan wider than two under an ancestor already holding a
 //! page reaches once its pending children outnumber the pool (`[A, B[C1..C5]]`
-//! at the root is the smallest; see [`MAX_SPILL_PAGES`]), a deeper chain, a
+//! at the root is among the smallest: the smallest refused shapes have seven
+//! layers, e.g. `root[A, B[C1..C5]]` and `P[Q, L[C1..C4]]`; see
+//! [`MAX_SPILL_PAGES`]), a deeper chain, a
 //! filter this engine does not render, a filter layer nested
 //! inside another recorded layer, a non-default blend mode, a layer mask or
 //! layer clip path — is refused with [`EngineError::SchedulerEscalation`]
@@ -321,10 +325,19 @@ pub const PING_PONG_GROUPS: usize = 2;
 /// `k + 1` pages are live when `B` renders. No pool size empties the refused
 /// set; the bound is a choice.
 ///
-/// **Five live pages for every fan at most two wide.** Under the depth cap a
-/// layer finishing at depth `d` ([`MAX_CHAIN_DEPTH`] at most) has the surface
-/// and `d - 1` isolated ancestors open above it, and with no isolated layer
-/// holding more than two isolated children (the surface may hold any number):
+/// **Fan width.** Inlined (opacity-one) layers are transparent: an isolated
+/// layer's children are the isolated layers recorded directly inside it or
+/// inside its inlined descendants, because an inlined layer takes no page and
+/// the walk treats its content as its host's. `M[I[D1, D2, D3]]` with `I`
+/// inlined is a three-wide fan under `M`, the same as `M[D1, D2, D3]`.
+///
+/// **Five live pages for every fan at most two wide.** The argument holds under
+/// that definition, since inlined layers add no rounds, pages or open scopes of
+/// their own. Under the depth cap a layer finishing at depth `d`
+/// ([`MAX_CHAIN_DEPTH`] at most) has the surface and `d - 1` isolated ancestors
+/// open above it, and with no isolated layer holding more than two isolated
+/// children, counted through inlined descendants (the surface may hold any
+/// number):
 ///
 /// - an open isolated ancestor holds at most one page owed upwards — its own
 ///   page once a cut has named it (the cut released what it had composited) or
@@ -345,7 +358,9 @@ pub const PING_PONG_GROUPS: usize = 2;
 /// level — and three spill slots serve every such tree of regular layers, each
 /// fitting one page, within the depth cap. Past that, a fan under an ancestor
 /// holding a page is served while its pending children fit the pool
-/// (`[A, B[C1..C4]]` is, `[A, B[C1..C5]]` is not) and refused after.
+/// (`[A, B[C1..C4]]` is, `[A, B[C1..C5]]` is not) and refused after. The
+/// smallest refused shapes have seven layers, e.g. `root[A, B[C1..C5]]` and
+/// `P[Q, L[C1..C4]]`; every six-layer variant is served.
 ///
 /// What the pool costs: a spill page is sized like any regular layer's page, so
 /// at most [`pages::DEFAULT_MAX_PAGE_SIZE`] square in `Rgba8Unorm` — 64 MiB at
@@ -2144,7 +2159,8 @@ fn out_of_pages(id: u32, spills: bool) -> String {
              round composites, and no open round could be cut to hand one back. A nested chain \
              of any depth fits, a fan of siblings of any width fits, a chain hanging off an \
              isolated ancestor's later child fits, and so does every tree whose isolated layers \
-             hold at most two isolated children each; what does not is a wider fan under an \
+             hold at most two isolated children each, counting the isolated layers inside \
+             an inlined (opacity-one) descendant as the host's own; what does not is a wider fan under an \
              ancestor already holding a page, whose pending children outnumber the spill pages"
         )
     } else {
