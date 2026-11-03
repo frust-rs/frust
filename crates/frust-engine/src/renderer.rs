@@ -1789,18 +1789,36 @@ impl EngineRenderer {
         size: (u32, u32),
         view: wgpu::TextureView,
     ) -> Option<wgpu::TextureView> {
-        // A held plan composed its paint transforms against the old extent.
-        self.prepared = None;
+        // The plan reads an external texture only through the compiler's
+        // extent entry for `id` (bound or not, and its `u16` extent): the view
+        // and the bind groups naming it are resolved at encode time, past the
+        // plan. So a held plan is stale only when that entry changes. A host
+        // that binds after it acquired its target (frust-render rebinds each
+        // new camera/video frame inside submit) would otherwise force a
+        // second compile and schedule after acquire on every frame, and land
+        // its plan-stage refusals post-acquire.
+        let before = self.compiler.externals().get(id.get());
         self.resources.forget_external(id.get());
-        if !self.compiler.bind_external_texture(id.get(), size) {
+        let usable = self.compiler.bind_external_texture(id.get(), size);
+        let after = self.compiler.externals().get(id.get());
+        if before != after {
+            self.prepared = None;
+        }
+        if !usable {
             return self.textures.unbind(id);
         }
         self.textures.bind(id, view)
     }
 
     /// Removes the texture registered under `id`, returning its view.
+    ///
+    /// A held plan is dropped only when `id` was bound in the compiler: the
+    /// plan reads nothing but that extent entry, so unbinding an id the
+    /// compiler never knew cannot change it.
     pub fn unbind_texture(&mut self, id: SceneTextureId) -> Option<wgpu::TextureView> {
-        self.prepared = None;
+        if self.compiler.externals().get(id.get()).is_some() {
+            self.prepared = None;
+        }
         self.compiler.unbind_external_texture(id.get());
         self.resources.forget_external(id.get());
         self.textures.unbind(id)
@@ -2132,8 +2150,12 @@ impl EngineRenderer {
     /// is the same compile a refused frame runs (image and glyph residency
     /// are re-offered to the next frame that is encoded). Anything that
     /// re-sizes, re-budgets or clears what a plan was made against —
-    /// [`Self::resize`], the retained-store and atlas setters, texture
-    /// (un)binding — drops a held plan too, so an encode after it re-plans.
+    /// [`Self::resize`], the retained-store and atlas setters, a texture
+    /// (un)binding that changes the compiler-visible extent of its id — drops
+    /// a held plan too, so an encode after it re-plans. Re-binding an id at
+    /// the extent it already has keeps the plan: the plan reads only the
+    /// extent, so a host binding after it acquired its target costs no
+    /// re-plan.
     ///
     /// # Errors
     ///
