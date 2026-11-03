@@ -313,6 +313,8 @@ pub(crate) struct HvglOutlines {
     faces: FaceTable,
     /// The outlines fetched, least recently used evicted first.
     outlines: OutlineCache,
+    /// Glyphs the draw routes could not supply.
+    unavailable: u64,
 }
 
 impl Default for HvglOutlines {
@@ -339,6 +341,7 @@ impl HvglOutlines {
         Self {
             faces: FaceTable::default(),
             outlines: OutlineCache::new(capacity),
+            unavailable: 0,
         }
     }
 
@@ -378,6 +381,39 @@ impl HvglOutlines {
         self.faces.bytes_mismatches
     }
 
+    /// How many outline fetches the cache answered without asking CoreText,
+    /// since the provider was built (saturating).
+    ///
+    /// Counted per fetch call, not per distinct glyph: on the atlas route an
+    /// absent glyph is fetched twice (measured, then rasterized into the
+    /// atlas), so one new inked glyph reads as one miss and one hit while the
+    /// frame's new glyphs fit the cache; an inkless glyph is only measured,
+    /// and a glyph resident in the atlas never fetches at all.
+    pub(crate) fn outline_hits(&self) -> u64 {
+        self.outlines.hits
+    }
+
+    /// How many outline fetches asked CoreText (a cache miss), since the
+    /// provider was built (saturating). A miss costs a path read and build,
+    /// plus a font copy for each new variation instance. Counted per fetch
+    /// call, as [`Self::outline_hits`] explains.
+    pub(crate) fn outline_misses(&self) -> u64 {
+        self.outlines.misses
+    }
+
+    /// How many glyphs of `hvgl` runs could not be drawn, since the provider
+    /// was built (saturating): the face refused, or CoreText had no path.
+    /// Added by the draw routes through [`Self::note_unavailable`].
+    pub(crate) fn unavailable_glyphs(&self) -> u64 {
+        self.unavailable
+    }
+
+    /// Add `count` glyphs a draw route could not supply to
+    /// [`Self::unavailable_glyphs`].
+    pub(crate) fn note_unavailable(&mut self, count: u32) {
+        self.unavailable = self.unavailable.saturating_add(u64::from(count));
+    }
+
     /// `glyph_id`'s outline in `handle`'s face at the variation instance its
     /// coordinates name (normalized F2Dot14 values in `fvar` axis order; empty
     /// for the default instance), fetched from CoreText on a cache miss.
@@ -385,7 +421,9 @@ impl HvglOutlines {
     /// Coordinates on a face with no `fvar` axes name nothing to vary, and
     /// draw from the face as opened.
     pub(crate) fn outline(&mut self, handle: &FontHandle, glyph_id: u32) -> GlyphOutline<'_> {
-        let Self { faces, outlines } = self;
+        let Self {
+            faces, outlines, ..
+        } = self;
         let coords = handle.normalized_coords();
         let Some(face) = faces.open(handle) else {
             return GlyphOutline::Unavailable;
@@ -424,6 +462,10 @@ struct OutlineCache {
     order: BTreeMap<u64, OutlineKey>,
     /// The use counter ticks are drawn from.
     tick: u64,
+    /// Fetch calls answered from the cache, saturating.
+    hits: u64,
+    /// Fetch calls that had to ask CoreText, saturating.
+    misses: u64,
 }
 
 impl OutlineCache {
@@ -433,11 +475,15 @@ impl OutlineCache {
             entries: HashMap::new(),
             order: BTreeMap::new(),
             tick: 0,
+            hits: 0,
+            misses: 0,
         }
     }
 
     /// `key`'s entry, marked most recently used, or `fetch`'s answer inserted
     /// in its place — evicting the least recently used entry when full.
+    ///
+    /// Counts one hit or one miss per call.
     fn get_or_fetch(
         &mut self,
         key: OutlineKey,
@@ -448,7 +494,9 @@ impl OutlineCache {
         if let Some((_, used)) = self.entries.get_mut(&key) {
             self.order.remove(used);
             *used = tick;
+            self.hits = self.hits.saturating_add(1);
         } else {
+            self.misses = self.misses.saturating_add(1);
             if self.entries.len() >= self.capacity
                 && let Some((_, oldest)) = self.order.pop_first()
             {
@@ -811,6 +859,11 @@ fn truncated(name: &str) -> &str {
         end -= 1;
     }
     &name[..end]
+}
+
+/// [`truncated`] for the compiler's log lines.
+pub(crate) fn truncated_name(name: &str) -> &str {
+    truncated(name)
 }
 
 /// The longest name a log line carries.
@@ -1455,6 +1508,7 @@ mod tests {
         for glyph in 0..3 {
             cache.get_or_fetch(key(glyph), || Fetched::Empty);
         }
+        assert_eq!((cache.hits, cache.misses), (0, 3));
         // Touch glyph 0, so glyph 1 is now the oldest.
         let mut fetched = false;
         cache.get_or_fetch(key(0), || {
@@ -1462,7 +1516,9 @@ mod tests {
             Fetched::Missing
         });
         assert!(!fetched, "a cached glyph is not fetched again");
+        assert_eq!((cache.hits, cache.misses), (1, 3));
         cache.get_or_fetch(key(3), || Fetched::Empty);
+        assert_eq!((cache.hits, cache.misses), (1, 4));
         assert_eq!(cache.entries.len(), 3);
         assert_eq!(cache.order.len(), 3);
         assert!(cache.entries.contains_key(&key(0)));
@@ -1473,6 +1529,46 @@ mod tests {
         assert!(cache.entries.contains_key(&key(2)));
         assert!(cache.entries.contains_key(&key(3)));
         assert!(matches!(OutlineCache::new(0).capacity, 1));
+    }
+
+    #[test]
+    fn cycling_one_more_glyph_than_the_capacity_never_hits() {
+        let mut cache = OutlineCache::new(3);
+        for _ in 0..5 {
+            for glyph in 0..4 {
+                cache.get_or_fetch(key(glyph), || Fetched::Empty);
+            }
+        }
+        assert_eq!((cache.hits, cache.misses), (0, 20), "every fetch thrashes");
+        // A working set within the capacity settles to hits.
+        let mut cache = OutlineCache::new(3);
+        for _ in 0..5 {
+            for glyph in 0..3 {
+                cache.get_or_fetch(key(glyph), || Fetched::Empty);
+            }
+        }
+        assert_eq!((cache.hits, cache.misses), (12, 3));
+    }
+
+    #[test]
+    fn the_outline_counters_saturate() {
+        let mut cache = OutlineCache::new(2);
+        cache.hits = u64::MAX;
+        cache.misses = u64::MAX;
+        cache.get_or_fetch(key(0), || Fetched::Empty);
+        cache.get_or_fetch(key(0), || Fetched::Empty);
+        assert_eq!((cache.hits, cache.misses), (u64::MAX, u64::MAX));
+    }
+
+    #[test]
+    fn unavailable_glyphs_accumulate_and_saturate() {
+        let mut outlines = HvglOutlines::with_capacity(2);
+        outlines.note_unavailable(3);
+        outlines.note_unavailable(4);
+        assert_eq!(outlines.unavailable_glyphs(), 7);
+        outlines.unavailable = u64::MAX;
+        outlines.note_unavailable(1);
+        assert_eq!(outlines.unavailable_glyphs(), u64::MAX);
     }
 
     #[test]

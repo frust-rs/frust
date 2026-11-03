@@ -334,6 +334,7 @@ pub(crate) fn lower_glyph_run(
             }
             let mut outcome = sink.outcome();
             outcome.skipped = outcome.skipped.saturating_add(unavailable);
+            hvgl.note_unavailable(unavailable);
             return outcome;
         }
         // Never quads and never the resident-run cache: the run was routed to
@@ -350,6 +351,7 @@ pub(crate) fn lower_glyph_run(
         let unavailable = hvgl::draw_run(run, transform, &mut sink, hvgl);
         let mut outcome = sink.outcome();
         outcome.skipped = outcome.skipped.saturating_add(unavailable);
+        hvgl.note_unavailable(unavailable);
         return outcome;
     }
 
