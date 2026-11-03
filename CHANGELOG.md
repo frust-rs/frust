@@ -81,7 +81,7 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   system faces do not, so a hinted faux-bold request on them is nearly invisible
   (`text-hinted-faux-bold-unhintable-face`). Faux bold and faux oblique are not applied on the hvgl
   route (`text-hvgl-synthesis-not-applied`). See [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
-- `text/hvgl.rs` is split into `text/hvgl/{mod,face,outline,ffi}.rs` (internal): the public surface,
+- The single-file hvgl provider is now `text/hvgl/{mod,face,outline,ffi}.rs` (internal): the public surface,
   the open-face checks and refusals, the outline and variation-instance caches, and every CoreText
   call, which is now the only `unsafe` in the module. One generic bounded LRU bounds the open faces,
   each face's instances and the outline cache; refusal sets stay first-in-first-out (c0002cfab,
