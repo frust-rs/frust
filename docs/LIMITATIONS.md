@@ -6367,9 +6367,10 @@ isolated chain of any depth up to the chain bound, same-parity sequential page
 reuse, a chain hanging off an isolated ancestor's later child (a full-screen
 layer at fractional opacity holding a chip that itself carries a nested chip,
 the navigation-scrub shape), and every tree whose isolated layers hold at most
-two isolated children each (counting children reached through inlined layers;
-the nested translucent fan `P[Q, L[C1, C2]]` of a card switcher's dimmed peers
-included) are all served within `MAX_LIVE_PAGES` (2 + `MAX_SPILL_PAGES` = 5)
+two isolated children each (inlined (opacity-one) layers are transparent to the
+count: an isolated layer's children include the isolated layers recorded inside
+its inlined descendants; the nested translucent fan `P[Q, L[C1, C2]]` of a card
+switcher's dimmed peers included) are all served within `MAX_LIVE_PAGES` (2 + `MAX_SPILL_PAGES` = 5)
 live pages; a single-primitive Gaussian blur or a
 shadow-only drop shadow is planned and executed as a filter-round sequence,
 sized by `filter_page_size` (coverage plus the filter padding, quantized,
