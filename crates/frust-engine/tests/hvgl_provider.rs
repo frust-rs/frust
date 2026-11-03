@@ -253,6 +253,23 @@ fn an_hvgl_handle_without_an_identity_is_skipped_whole_and_draws_nothing() {
         assert_eq!(frame.glyph_draws, 0, "frame {frame_index}");
         assert!(frame.draws().is_empty(), "frame {frame_index}");
         assert_eq!(frame.atlas_glyph_draws, 0, "frame {frame_index}");
+        if cfg!(target_vendor = "apple") {
+            // A refused face is unavailable glyph by glyph, per frame, and
+            // never reaches the outline cache.
+            assert_eq!(frame.hvgl_unavailable_glyphs, 3, "frame {frame_index}");
+            assert_eq!(
+                (frame.hvgl_outline_hits, frame.hvgl_outline_misses),
+                (0, 0),
+                "frame {frame_index}"
+            );
+        }
+    }
+    if cfg!(target_vendor = "apple") {
+        assert_eq!(compiler.hvgl_unavailable_glyphs(), 6, "summed over frames");
+        assert_eq!(
+            (compiler.hvgl_outline_hits(), compiler.hvgl_outline_misses()),
+            (0, 0)
+        );
     }
     assert_eq!(compiler.hvgl_cached_outlines(), 0);
     assert_eq!(compiler.hvgl_identity_mismatches(), 0);
@@ -279,6 +296,13 @@ fn a_hidden_named_hvgl_handle_is_refused_when_coretext_substitutes() {
     );
     if cfg!(target_vendor = "apple") {
         assert_eq!(compiler.hvgl_identity_mismatches(), 1);
+        assert_eq!(frame.hvgl_unavailable_glyphs, 2);
+        assert_eq!(compiler.hvgl_unavailable_glyphs(), 2);
+        assert_eq!(
+            (frame.hvgl_outline_hits, frame.hvgl_outline_misses),
+            (0, 0),
+            "a refused face never fetches"
+        );
     } else {
         assert_eq!(compiler.hvgl_identity_mismatches(), 0);
     }
@@ -899,6 +923,19 @@ mod macos {
             for (chunk_index, chunk) in ids.chunks(32).enumerate() {
                 let frame = compile(&mut compiler, vec![run(font.clone(), chunk)]);
                 let drawn = (chunk_index + 1) * 32;
+                assert_eq!(frame.hvgl_unavailable_glyphs, 0, "atlas {atlas}");
+                // Every new glyph is one miss; the atlas route fetches it
+                // again to draw it (measure, then draw_glyph), a hit. Per
+                // fetch call, not per glyph.
+                assert_eq!(frame.hvgl_outline_misses, 32, "atlas {atlas}: {drawn}");
+                if atlas {
+                    assert!(
+                        frame.hvgl_outline_hits >= frame.hvgl_atlas_draws.min(1),
+                        "atlas {atlas}: {drawn}"
+                    );
+                } else {
+                    assert_eq!(frame.hvgl_outline_hits, 0, "{drawn}: one fetch per glyph");
+                }
                 assert_eq!(
                     compiler.hvgl_cached_outlines(),
                     drawn.min(capacity),
@@ -925,8 +962,29 @@ mod macos {
             assert_eq!(compiler.hvgl_cached_outlines(), capacity, "atlas {atlas}");
             // Drawing the newest glyphs again fetches nothing new and keeps
             // the population at the cap.
-            compile(&mut compiler, vec![run(font, &ids[ids.len() - 32..])]);
+            let again = compile(
+                &mut compiler,
+                vec![run(font.clone(), &ids[ids.len() - 32..])],
+            );
             assert_eq!(compiler.hvgl_cached_outlines(), capacity, "atlas {atlas}");
+            assert_eq!(again.hvgl_outline_misses, 0, "atlas {atlas}: all cached");
+            if !atlas {
+                assert_eq!(again.hvgl_outline_hits, 32, "atlas {atlas}: all cached");
+            }
+            // The oldest outlines were evicted. The outline route fetches
+            // them again (misses); the atlas route finds them resident and
+            // never fetches at all.
+            let first = compile(&mut compiler, vec![run(font, &ids[..32])]);
+            if atlas {
+                assert_eq!(
+                    (first.hvgl_outline_hits, first.hvgl_outline_misses),
+                    (0, 0),
+                    "resident atlas glyphs do not fetch"
+                );
+            } else {
+                assert_eq!(first.hvgl_outline_misses, 32, "evicted: fetched again");
+            }
+            assert!(compiler.hvgl_outline_misses() >= u64::from(first.hvgl_outline_misses));
         }
     }
 

@@ -489,6 +489,28 @@ pub struct CompiledFrame {
     /// [`glyph_draws`](Self::glyph_draws), of which it and
     /// [`hvgl_atlas_draws`](Self::hvgl_atlas_draws) are the `hvgl` share.
     pub hvgl_outline_fallbacks: u32,
+    /// How many `hvgl` outline fetches this frame the cache answered without
+    /// asking CoreText.
+    ///
+    /// Counted per fetch call, not per glyph: on the atlas route an absent
+    /// glyph is fetched twice (measured at collect, then drawn), so a new
+    /// glyph reads as one miss and one hit, and a glyph resident in the atlas
+    /// never fetches. Saturating; the frame's share of
+    /// [`SceneCompiler::hvgl_outline_hits`].
+    pub hvgl_outline_hits: u32,
+    /// How many `hvgl` outline fetches this frame asked CoreText (a cache
+    /// miss), counted per fetch as [`hvgl_outline_hits`](Self::hvgl_outline_hits)
+    /// is. A frame cycling more distinct glyphs than
+    /// [`SceneCompiler::hvgl_outline_capacity`] reads all misses.
+    pub hvgl_outline_misses: u32,
+    /// How many glyphs of `hvgl` runs could not be drawn this frame — the
+    /// face was refused or CoreText had no path — on both routes: the outline
+    /// route's unavailable glyphs, and the atlas route's glyphs that were
+    /// neither resident nor fillable (a measure failure surfaces as the draw
+    /// failure, so it is counted once). A share of
+    /// [`skipped_glyphs`](Self::skipped_glyphs). The first non-zero frame of a
+    /// process also logs one warning.
+    pub hvgl_unavailable_glyphs: u32,
     /// Where each of this frame's atlas-sampled glyphs lives, one entry per
     /// atlas draw (see [`GlyphSlot`]).
     pub glyph_slots: Vec<GlyphSlot>,
@@ -922,6 +944,36 @@ impl SceneCompiler {
         self.hvgl_outlines.bytes_mismatches()
     }
 
+    /// How many `hvgl` outline fetches the cache answered without asking
+    /// CoreText, since the compiler was built (saturating).
+    ///
+    /// Counted per fetch call, not per glyph: with the atlas route an absent
+    /// glyph is fetched twice (measured, then drawn), so one new glyph reads
+    /// as one miss and one hit, and a glyph resident in the atlas never
+    /// fetches. Always zero on a target without CoreText.
+    #[must_use]
+    pub fn hvgl_outline_hits(&self) -> u64 {
+        self.hvgl_outlines.outline_hits()
+    }
+
+    /// How many `hvgl` outline fetches asked CoreText (a cache miss), since
+    /// the compiler was built (saturating); per fetch call, as
+    /// [`Self::hvgl_outline_hits`] explains. A working set larger than
+    /// [`Self::hvgl_outline_capacity`] misses on every fetch.
+    #[must_use]
+    pub fn hvgl_outline_misses(&self) -> u64 {
+        self.hvgl_outlines.outline_misses()
+    }
+
+    /// How many glyphs of `hvgl` runs could not be drawn, since the compiler
+    /// was built (saturating): the outline route's unavailable glyphs plus the
+    /// atlas route's, which are counted at the draw (a glyph the provider
+    /// could not measure is the same glyph that then fails to draw).
+    #[must_use]
+    pub fn hvgl_unavailable_glyphs(&self) -> u64 {
+        self.hvgl_outlines.unavailable_glyphs()
+    }
+
     /// Set how many threads generate a frame's strips, the calling thread
     /// included (see the `parallel` module). One — or zero, read as one — is the
     /// sequential walk: no planning pass, no helper thread.
@@ -1260,6 +1312,12 @@ impl SceneCompiler {
         // frame's eviction freed, to be zeroed ahead of anything this frame
         // writes (see [`CompiledFrame::glyph_clears`]).
         self.glyph_atlas.begin_frame();
+        // The collect pass below fetches outlines too (the atlas route
+        // measures there), so the frame's share starts before it.
+        let fetches_before = (
+            self.hvgl_outlines.outline_hits(),
+            self.hvgl_outlines.outline_misses(),
+        );
         self.hvgl_faces.clear();
         self.classify_runs(scene, root);
         let classify = clock.lap();
@@ -1292,6 +1350,9 @@ impl SceneCompiler {
             variation_axes_outline_runs: 0,
             hvgl_atlas_draws: 0,
             hvgl_outline_fallbacks: 0,
+            hvgl_outline_hits: 0,
+            hvgl_outline_misses: 0,
+            hvgl_unavailable_glyphs: 0,
             glyph_slots: Vec::new(),
             glyph_quads: Vec::new(),
             glyph_run_paints: Vec::new(),
@@ -1352,6 +1413,17 @@ impl SceneCompiler {
         // rects that eviction produced — which belong to the *next* frame's
         // pass, not this one's.
         self.glyph_atlas.end_frame(self.images.allocator_mut());
+
+        frame.hvgl_outline_hits = saturating_u32(
+            self.hvgl_outlines
+                .outline_hits()
+                .saturating_sub(fetches_before.0),
+        );
+        frame.hvgl_outline_misses = saturating_u32(
+            self.hvgl_outlines
+                .outline_misses()
+                .saturating_sub(fetches_before.1),
+        );
 
         frame.scissor_clips = self.clips.scissor_clips();
         frame.mask_clips = self.clips.mask_clips();
@@ -2108,6 +2180,7 @@ impl SceneCompiler {
                 }
             });
         let atlas_draws_before = frame.atlas_glyph_draws;
+        let unavailable_before = hvgl_outlines.unavailable_glyphs();
         let outcome = lower_glyph_run(
             run,
             transform,
@@ -2140,6 +2213,20 @@ impl SceneCompiler {
             frame.hvgl_outline_fallbacks = frame
                 .hvgl_outline_fallbacks
                 .saturating_add(outcome.drawn.saturating_sub(atlas_draws));
+            let unavailable = saturating_u32(
+                hvgl_outlines
+                    .unavailable_glyphs()
+                    .saturating_sub(unavailable_before),
+            );
+            if unavailable > 0 {
+                frame.hvgl_unavailable_glyphs =
+                    frame.hvgl_unavailable_glyphs.saturating_add(unavailable);
+                note_hvgl_unavailable(
+                    run.font.postscript_name(),
+                    unavailable,
+                    frame.skipped_glyphs,
+                );
+            }
         }
         if outcome.resident {
             frame.resident_glyph_runs = frame.resident_glyph_runs.saturating_add(1);
@@ -2710,6 +2797,53 @@ fn note_font_skip() {
     log::debug!("glyph run skipped: its font blob is not a readable face");
 }
 
+/// Raised the first time an `hvgl` run has glyphs it could not draw, on the
+/// same once-per-process terms as [`FONT_SKIP_WARNING`].
+static HVGL_UNAVAILABLE_WARNING: Once = Once::new();
+
+/// `u64` narrowed to `u32`, saturating.
+fn saturating_u32(value: u64) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+/// Report `hvgl` glyphs that could not be drawn: warned once per process,
+/// then debug. Names the face (escaped and cut, as the refusal warns do), the
+/// run's count and the frame's skipped total so far — never text content.
+fn note_hvgl_unavailable(face: Option<&str>, unavailable: u32, skipped: u32) {
+    warn_hvgl_unavailable_once(&HVGL_UNAVAILABLE_WARNING, face, unavailable, skipped);
+}
+
+/// [`note_hvgl_unavailable`] over `once`, answering whether it was the warn.
+fn warn_hvgl_unavailable_once(
+    once: &Once,
+    face: Option<&str>,
+    unavailable: u32,
+    skipped: u32,
+) -> bool {
+    let line = hvgl_unavailable_line(face, unavailable, skipped);
+    let mut warned = false;
+    once.call_once(|| {
+        warned = true;
+        log::warn!("{line} (further reports are logged at debug level)");
+    });
+    if !warned {
+        log::debug!("{line}");
+    }
+    warned
+}
+
+/// The report line for [`note_hvgl_unavailable`].
+fn hvgl_unavailable_line(face: Option<&str>, unavailable: u32, skipped: u32) -> String {
+    let face = face.map_or_else(
+        || "<nameless>".to_owned(),
+        |name| format!("{:?}", crate::text::hvgl::truncated_name(name)),
+    );
+    format!(
+        "frust-engine: hvgl glyphs could not be drawn: face {face}, {unavailable} unavailable \
+         in the run, {skipped} skipped so far this frame"
+    )
+}
+
 /// The id the offscreen target of fragment program `program_id` is registered
 /// under — the compiler's half of the agreement
 /// [`crate::effects::shader_quad`] makes with the pre-pass that renders it.
@@ -3278,6 +3412,45 @@ fn rounded_rect_radii(radii: CornerRadii) -> RoundedRectRadii {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_hvgl_unavailable_warning_fires_once_and_names_no_text() {
+        let once = Once::new();
+        assert!(warn_hvgl_unavailable_once(&once, Some("PingFangSC"), 3, 5));
+        assert!(!warn_hvgl_unavailable_once(&once, Some("PingFangSC"), 2, 7));
+        let line = hvgl_unavailable_line(Some("Ping\u{1b}Fang"), 3, 5);
+        assert!(line.contains("3 unavailable"), "{line}");
+        assert!(line.contains("5 skipped"), "{line}");
+        assert!(
+            !line.contains('\u{1b}'),
+            "the face name is escaped: {line:?}"
+        );
+        assert!(hvgl_unavailable_line(None, 1, 1).contains("<nameless>"));
+    }
+
+    #[test]
+    fn a_compiler_without_hvgl_faces_reports_zero_hvgl_diagnostics() {
+        let mut compiler = SceneCompiler::new(64, 64);
+        let frame = compiler
+            .compile(&Scene::new(), Affine::IDENTITY, (64, 64))
+            .expect("an empty scene compiles");
+        assert_eq!(
+            (
+                frame.hvgl_outline_hits,
+                frame.hvgl_outline_misses,
+                frame.hvgl_unavailable_glyphs
+            ),
+            (0, 0, 0)
+        );
+        assert_eq!(
+            (
+                compiler.hvgl_outline_hits(),
+                compiler.hvgl_outline_misses(),
+                compiler.hvgl_unavailable_glyphs()
+            ),
+            (0, 0, 0)
+        );
+    }
 
     #[test]
     fn a_viewport_within_three_pixels_of_the_u16_ceiling_is_refused() {
