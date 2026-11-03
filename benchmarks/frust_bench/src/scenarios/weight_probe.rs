@@ -60,7 +60,11 @@ const HAN_FAMILY: &str = "PingFang SC";
 const HAN_SAMPLE: &str = "请注意中文字重";
 
 /// The three PingFang rows, below the Noto rows: Light, Regular, Semibold.
-pub const HAN_ROWS: [FontWeight; 3] = [FontWeight::LIGHT, FontWeight::REGULAR, FontWeight::SEMI_BOLD];
+pub const HAN_ROWS: [FontWeight; 3] = [
+    FontWeight::LIGHT,
+    FontWeight::REGULAR,
+    FontWeight::SEMI_BOLD,
+];
 
 /// Register the subset font process-wide, once. Called from `BenchState::new`
 /// so the shell's construction-time font drain applies it.
