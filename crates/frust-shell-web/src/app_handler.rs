@@ -1333,8 +1333,9 @@ mod browser_loop {
         SignalsDirty,
         /// The page went away or hid (`pagehide`, `visibilitychange` to hidden): the font cache
         /// flush point. A browser keeps no font cache file today (the web tier's cache is
-        /// disabled), so the flush call is gated off by `has_persistent_font_cache`; the lifecycle
-        /// event itself still feeds `AppLifecycle`.
+        /// disabled), so the flush call is gated off by `has_persistent_font_cache` (the
+        /// context's `FontCacheStats::persistent`); the lifecycle event itself still feeds
+        /// `AppLifecycle`.
         PageHidden,
         /// The page is visible again (`visibilitychange` to visible, `pageshow`): re-arms the flush.
         PageShown,
@@ -2177,7 +2178,7 @@ mod browser_loop {
                 ShellUserEvent::PageHidden => {
                     self.page_hidden = true;
                     self.sync_app_lifecycle();
-                    if super::has_persistent_font_cache() {
+                    if super::has_persistent_font_cache(&self.text_ctx) {
                         self.background_flush
                             .went_to_background(&mut [&mut self.text_ctx]);
                     }
@@ -2563,12 +2564,13 @@ mod browser_loop {
     }
 }
 
-/// Whether the web tier keeps a font cache file worth flushing on hide. It does not today
-/// (`TextContext::new` uses `CacheLocation::Disabled` on wasm), so the `BackgroundFlush` call
-/// is skipped; a future persistent web cache flips this to `true` and re-enables the flush.
+/// Whether `cx` keeps a font cache file worth flushing on hide, as its
+/// `FontCacheStats::persistent` reports. The web tier's does not today (`TextContext::new` uses
+/// `CacheLocation::Disabled` on wasm), so the `BackgroundFlush` call is skipped; a context with a
+/// persistent web cache re-enables the flush with no shell change.
 #[cfg(any(target_arch = "wasm32", test))]
-const fn has_persistent_font_cache() -> bool {
-    false
+fn has_persistent_font_cache(cx: &frust_text::TextContext) -> bool {
+    cx.font_cache_stats().persistent
 }
 
 /// Flutter's web mapping: `Hidden` when the document is hidden, else `Resumed` with window
@@ -2594,8 +2596,17 @@ pub use browser_loop::{ShellUserEvent, run_app, spawn_app};
 #[cfg(test)]
 mod tests {
     #[test]
-    fn web_tier_has_no_persistent_font_cache() {
-        assert!(!super::has_persistent_font_cache());
+    fn the_hide_flush_gate_follows_the_context_font_cache() {
+        let off = frust_text::TextContext::builder()
+            .without_font_cache()
+            .build();
+        assert!(!super::has_persistent_font_cache(&off));
+        // Resolved lazily: building it writes nothing to this directory.
+        let dir = std::env::temp_dir().join(format!("frust-shell-web-gate-{}", std::process::id()));
+        let on = frust_text::TextContext::builder()
+            .font_cache_dir(dir)
+            .build();
+        assert!(super::has_persistent_font_cache(&on));
     }
 
     #[test]
