@@ -28,7 +28,7 @@ peniko.workspace = true
 log.workspace = true
 thiserror.workspace = true
 
-# CoreText outlines for `hvgl`-only faces (`src/text/hvgl.rs`), which `glifo`'s `skrifa` cannot read.
+# CoreText outlines for `hvgl`-only faces (`src/text/hvgl/ffi.rs`), which `glifo`'s `skrifa` cannot read.
 # Direct `version` rows with minimal features: Cargo refuses `default-features = false` on a
 # workspace-inherited objc2* row (same pins as plugins/native-widgets, PLUGINS_DEVELOPMENT.md).
 [target.'cfg(target_vendor = "apple")'.dependencies]
