@@ -492,16 +492,18 @@ pub struct CompiledFrame {
     /// How many `hvgl` outline fetches this frame the cache answered without
     /// asking CoreText.
     ///
-    /// Counted per fetch call, not per glyph: on the atlas route an absent
+    /// Counted per fetch call, not per glyph, and a fetch at a refused
+    /// variation instance is neither a hit nor a miss: on the atlas route an absent
     /// glyph is fetched twice (measured, then rasterized into the atlas), so
     /// a new inked glyph reads as one miss and one hit while the frame's new
     /// glyphs fit the cache; an inkless glyph is only measured, and a glyph
     /// resident in the atlas never fetches. Saturating; the frame's share of
     /// [`SceneCompiler::hvgl_outline_hits`].
     pub hvgl_outline_hits: u32,
-    /// How many `hvgl` outline fetches this frame asked CoreText (a cache
-    /// miss), counted per fetch as [`hvgl_outline_hits`](Self::hvgl_outline_hits)
-    /// is. A frame cycling more distinct glyphs than
+    /// How many `hvgl` outline fetches this frame asked CoreText for the glyph
+    /// (a cache miss), counted per fetch as
+    /// [`hvgl_outline_hits`](Self::hvgl_outline_hits) is; a fetch at a refused
+    /// variation instance asks for no glyph. A frame cycling more distinct glyphs than
     /// [`SceneCompiler::hvgl_outline_capacity`] reads all misses.
     pub hvgl_outline_misses: u32,
     /// How many glyphs of `hvgl` runs could not be drawn this frame — the
@@ -946,21 +948,42 @@ impl SceneCompiler {
         self.hvgl_outlines.bytes_mismatches()
     }
 
-    /// How many variation instances of `hvgl` faces were refused because the
-    /// copy CoreText made at the run's coordinates reads back as another
-    /// instance, since the compiler was built: counted and warned once per
-    /// instance of an open face. The glyphs of such a run are unavailable
-    /// (counted in [`CompiledFrame::hvgl_unavailable_glyphs`]), never drawn
-    /// from the default instance. Always zero on a target without CoreText.
+    /// How many variation instances of `hvgl` faces were refused because
+    /// CoreText made no copy at the run's coordinates, or its copy reports an
+    /// axis at another value than asked (a request it clamped included),
+    /// since the compiler was built (saturating). The glyphs of such a run are
+    /// unavailable (counted in [`CompiledFrame::hvgl_unavailable_glyphs`]),
+    /// never drawn from another instance. Always zero on a target without
+    /// CoreText.
+    ///
+    /// Counts refusal events, not distinct instances: a face remembers its
+    /// last few refusals, so an instance refused again after it left that
+    /// set, or after its face was closed and reopened, counts again. Warned
+    /// about once per open face.
     #[must_use]
     pub fn hvgl_variation_mismatches(&self) -> u32 {
         self.hvgl_outlines.variation_mismatches()
     }
 
+    /// How many variation instances of `hvgl` faces were drawn unverified,
+    /// since the compiler was built (saturating): CoreText's copy at the run's
+    /// coordinates contradicts no value asked for, but does not report an
+    /// axis asked off its default, so whether the copy carries it is unknown.
+    /// The glyphs are drawn from the copy as made. Always zero on a target
+    /// without CoreText.
+    ///
+    /// Counts copies, not distinct instances: an instance copied again after
+    /// its face let it go counts again. Warned about once per open face.
+    #[must_use]
+    pub fn hvgl_variation_unverified(&self) -> u32 {
+        self.hvgl_outlines.variation_unverified()
+    }
+
     /// How many `hvgl` outline fetches the cache answered without asking
     /// CoreText, since the compiler was built (saturating).
     ///
-    /// Counted per fetch call, not per glyph: with the atlas route an absent
+    /// Counted per fetch call, not per glyph, and a fetch at a refused
+    /// variation instance is neither a hit nor a miss: with the atlas route an absent
     /// glyph is fetched twice (measured, then rasterized into the atlas), so
     /// one new inked glyph reads as one miss and one hit while the frame's new
     /// glyphs fit the cache; an inkless glyph is only measured, and a glyph
@@ -971,9 +994,10 @@ impl SceneCompiler {
         self.hvgl_outlines.outline_hits()
     }
 
-    /// How many `hvgl` outline fetches asked CoreText (a cache miss), since
-    /// the compiler was built (saturating); per fetch call, as
-    /// [`Self::hvgl_outline_hits`] explains. A working set larger than
+    /// How many `hvgl` outline fetches asked CoreText for the glyph (a cache
+    /// miss), since the compiler was built (saturating); per fetch call, as
+    /// [`Self::hvgl_outline_hits`] explains. A fetch at a refused variation
+    /// instance asks for no glyph and is not a miss. A working set larger than
     /// [`Self::hvgl_outline_capacity`] misses on every fetch.
     #[must_use]
     pub fn hvgl_outline_misses(&self) -> u64 {

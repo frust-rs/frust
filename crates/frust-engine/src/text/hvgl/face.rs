@@ -616,6 +616,8 @@ fn try_open_face(font: &FontData, name: &str, id: u64) -> Result<(Face, String),
             instances: Lru::new(MAX_INSTANCES_PER_FACE),
             refused: VecDeque::new(),
             coretext_defaults: None,
+            refusal_warned: false,
+            unverified_warned: false,
         },
         resolved,
     ))
