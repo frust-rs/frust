@@ -193,6 +193,16 @@ pub(crate) fn raster_metrics(bounds: &Rect) -> RasterMetrics {
     }
 }
 
+/// The transform [`record_outline`] sets (glifo 0.3.0 renderer.rs:342): font
+/// units scaled by `scale` and flipped to y down, then translated to the slot's
+/// atlas corner `atlas` less its `bearing`, plus the bucket's `subpixel` in x.
+fn outline_transform(scale: f64, atlas: (u16, u16), bearing: (i16, i16), subpixel: f32) -> Affine {
+    Affine::scale_non_uniform(scale, -scale).then_translate(Vec2::new(
+        f64::from(atlas.0) - f64::from(bearing.0) + f64::from(subpixel),
+        f64::from(atlas.1) - f64::from(bearing.1),
+    ))
+}
+
 /// `glifo`'s `render_outline_to_atlas` (glifo 0.3.0 renderer.rs:342): the
 /// outline (font units, y up) scaled and flipped into `slot`, shifted by the
 /// bucket's `subpixel` offset, filled black.
@@ -203,14 +213,24 @@ fn record_outline(
     subpixel: f32,
     slot: AtlasSlot,
 ) {
-    recorder.set_transform(
-        Affine::scale_non_uniform(scale, -scale).then_translate(Vec2::new(
-            f64::from(slot.x) - f64::from(slot.bearing_x) + f64::from(subpixel),
-            f64::from(slot.y) - f64::from(slot.bearing_y),
-        )),
-    );
+    recorder.set_transform(outline_transform(
+        scale,
+        (slot.x, slot.y),
+        (slot.bearing_x, slot.bearing_y),
+        subpixel,
+    ));
     recorder.set_paint(BLACK.into());
     recorder.fill_path(path);
+}
+
+/// The placement [`draw_from_atlas`] sets (glifo 0.3.0 renderer.rs:521): the
+/// origin's whole-pixel floor plus the slot's `bearing`, so a negative origin
+/// rounds toward minus infinity rather than toward zero.
+fn glyph_rect_transform(origin: (f64, f64), bearing: (i16, i16)) -> Affine {
+    Affine::translate((
+        origin.0.floor() + f64::from(bearing.0),
+        origin.1.floor() + f64::from(bearing.1),
+    ))
 }
 
 /// `glifo`'s `render_outline_glyph_from_atlas` over `render_from_atlas`
@@ -223,10 +243,7 @@ fn draw_from_atlas(
     origin: (f64, f64),
     color: AlphaColor<Srgb>,
 ) {
-    let rect_transform = Affine::translate((
-        origin.0.floor() + f64::from(slot.bearing_x),
-        origin.1.floor() + f64::from(slot.bearing_y),
-    ));
+    let rect_transform = glyph_rect_transform(origin, (slot.bearing_x, slot.bearing_y));
     let area = Rect::new(0.0, 0.0, f64::from(slot.width), f64::from(slot.height));
     let paint_transform = sink.atlas_paint_transform(&slot);
     let image = Image {
@@ -319,5 +336,146 @@ mod tests {
         assert_ne!(medium, regular);
         assert_eq!(medium, face_id(&face("PingFangSC-Medium")));
         assert!(medium >> 63 == 1 && regular >> 63 == 1);
+    }
+
+    /// `(width, height, bearing_x, bearing_y)` of a [`raster_metrics`] answer.
+    fn extent(bounds: &Rect) -> (u16, u16, i16, i16) {
+        let metrics = raster_metrics(bounds);
+        (
+            metrics.width,
+            metrics.height,
+            metrics.bearing_x,
+            metrics.bearing_y,
+        )
+    }
+
+    /// `glifo`'s `calculate_raster_metrics` (glifo 0.3.0 renderer.rs:591),
+    /// worked by hand: x is `floor(x0)` to `ceil(x1) + 1`; y is `floor(-y1)`
+    /// to `ceil(-y0)`, the flipped extent.
+    #[test]
+    fn raster_metrics_golden_negative_origin() {
+        // x: floor(-3.5) = -4, ceil(-0.5) + 1 = 1, width 5.
+        // y: floor(-2.0) = -2, ceil(4.25) = 5, height 7.
+        assert_eq!(extent(&Rect::new(-3.5, -4.25, -0.5, 2.0)), (5, 7, -4, -2));
+        // Entirely below the baseline and left of the origin: bearing_y > 0.
+        // x: floor(-2) = -2, ceil(-1) + 1 = 0, width 2.
+        // y: floor(1) = 1, ceil(2) = 2, height 1.
+        assert_eq!(extent(&Rect::new(-2.0, -2.0, -1.0, -1.0)), (2, 1, -2, 1));
+    }
+
+    /// Fractional extents round outward on every side, straddling the origin.
+    #[test]
+    fn raster_metrics_golden_fractional_extent() {
+        // x: floor(0.9) = 0, ceil(1.1) + 1 = 3, width 3.
+        // y: floor(-0.9) = -1, ceil(0.1) = 1, height 2.
+        assert_eq!(extent(&Rect::new(0.9, -0.1, 1.1, 0.9)), (3, 2, 0, -1));
+        // A quarter-pixel glyph still takes the subpixel column and one row.
+        // x: floor(0.25) = 0, ceil(0.75) + 1 = 2, width 2.
+        // y: floor(-0.5) = -1, ceil(0) = 0, height 1.
+        assert_eq!(extent(&Rect::new(0.25, 0.0, 0.75, 0.5)), (2, 1, 0, -1));
+    }
+
+    /// Whole-pixel bounds: no rounding, but the extra subpixel column stays.
+    #[test]
+    fn raster_metrics_golden_integer_bounds() {
+        // x: floor(1) = 1, ceil(4) + 1 = 5, width 4.
+        // y: floor(-6) = -6, ceil(-2) = -2, height 4.
+        assert_eq!(extent(&Rect::new(1.0, 2.0, 4.0, 6.0)), (4, 4, 1, -6));
+    }
+
+    /// Zero-area bounds: a point keeps the one subpixel column and no rows;
+    /// the empty rectangle at the origin is the same shape at zero.
+    #[test]
+    fn raster_metrics_golden_zero_area() {
+        // x: floor(5) = 5, ceil(5) + 1 = 6, width 1.
+        // y: floor(-5) = -5, ceil(-5) = -5, height 0.
+        assert_eq!(extent(&Rect::new(5.0, 5.0, 5.0, 5.0)), (1, 0, 5, -5));
+        assert_eq!(extent(&Rect::ZERO), (1, 0, 0, 0));
+    }
+
+    /// A 30000 px square still fits `u16` extents and `i16` bearings.
+    #[test]
+    fn raster_metrics_golden_very_large() {
+        // x: floor(0) = 0, ceil(30000) + 1 = 30001, width 30001 (< 65535).
+        // y: floor(-30000) = -30000, ceil(0) = 0, height 30000; -30000 > i16::MIN.
+        assert_eq!(
+            extent(&Rect::new(0.0, 0.0, 30000.0, 30000.0)),
+            (30001, 30000, 0, -30000)
+        );
+    }
+
+    /// `glifo`'s `quantize_subpixel` (glifo 0.3.0 key.rs:196-203) with its
+    /// 4 buckets (key.rs:24), worked by hand: the fraction is wrapped into
+    /// `[0, 1)`, scaled by 4, rounded, and clamped to bucket 3.
+    #[test]
+    fn subpixel_bucket_golden_matches_glifo_quantization() {
+        let cases: [(f32, u8); 11] = [
+            (0.0, 0),
+            (0.1, 0),   // 0.4 -> 0
+            (0.2, 1),   // 0.8 -> 1
+            (0.4, 2),   // 1.6 -> 2
+            (0.5, 2),   // 2.0 -> 2
+            (0.7, 3),   // 2.8 -> 3
+            (0.9, 3),   // 3.6 -> 4, clamped to 3
+            (1.0, 0),   // fract 0.0
+            (1.5, 2),   // fract 0.5 -> 2
+            (-0.25, 3), // wraps to 0.75 -> 3
+            (-0.9, 0),  // wraps to 0.1 -> 0.4 -> 0
+        ];
+        for (fraction, bucket) in cases {
+            assert_eq!(subpixel_bucket(fraction), bucket, "fraction {fraction}");
+        }
+    }
+
+    /// The bucket's offset, as `glifo`'s `subpixel_offset` (key.rs:208-210)
+    /// returns it: `bucket / 4`. A 0.9 fraction lands on the 0.75 offset.
+    #[test]
+    fn subpixel_offset_golden_for_a_bucketed_fraction() {
+        assert_eq!(
+            glifo::atlas::key::subpixel_offset(subpixel_bucket(0.9)),
+            0.75
+        );
+        assert_eq!(
+            glifo::atlas::key::subpixel_offset(subpixel_bucket(0.5)),
+            0.5
+        );
+    }
+
+    /// The transform `record_outline` sets (glifo 0.3.0 renderer.rs:342), by
+    /// hand: x' = x * s + (slot.x - bearing_x + subpixel), y' = -y * s + (slot.y - bearing_y).
+    #[test]
+    fn outline_transform_golden_placement() {
+        // scale 0.5, slot (10, 20), bearing (-3, -7), subpixel 0.25:
+        // tx = 10 + 3 + 0.25 = 13.25; ty = 20 + 7 = 27.
+        assert_eq!(
+            outline_transform(0.5, (10, 20), (-3, -7), 0.25).as_coeffs(),
+            [0.5, 0.0, 0.0, -0.5, 13.25, 27.0]
+        );
+        // The point (100, 200) font units: x' = 50 + 13.25 = 63.25, y' = -100 + 27 = -73.
+        let point =
+            outline_transform(0.5, (10, 20), (-3, -7), 0.25) * kurbo::Point::new(100.0, 200.0);
+        assert_eq!((point.x, point.y), (63.25, -73.0));
+        // Unit scale at the atlas origin, positive bearing, half-pixel subpixel:
+        // tx = 0 - 2 + 0.5 = -1.5; ty = 0 - 4 = -4.
+        assert_eq!(
+            outline_transform(1.0, (0, 0), (2, 4), 0.5).as_coeffs(),
+            [1.0, 0.0, 0.0, -1.0, -1.5, -4.0]
+        );
+    }
+
+    /// The placement `draw_from_atlas` sets (glifo 0.3.0 renderer.rs:521):
+    /// tx = floor(origin.x) + bearing_x, ty = floor(origin.y) + bearing_y.
+    #[test]
+    fn glyph_rect_transform_golden_floors_the_origin() {
+        // floor(10.7) + 2 = 12; floor(-3.2) + -4 = -8.
+        assert_eq!(
+            glyph_rect_transform((10.7, -3.2), (2, -4)).as_coeffs(),
+            [1.0, 0.0, 0.0, 1.0, 12.0, -8.0]
+        );
+        // A negative fraction floors toward minus infinity: floor(-0.5) = -1.
+        assert_eq!(
+            glyph_rect_transform((-0.5, 0.0), (0, 0)).as_coeffs(),
+            [1.0, 0.0, 0.0, 1.0, -1.0, 0.0]
+        );
     }
 }
