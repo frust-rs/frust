@@ -25,7 +25,7 @@ off this index — read this plus the one that covers what you are touching:
     (`extern "system"`/`extern "C"` exports, `Box::into_raw`/`from_raw`, the surface hand-off,
     `nativeInitPlatform`'s `JavaVM` stash), the `android_app!`/`ios_app!` exports, and the
     render-thread split's `unsafe impl Send` for `SendableWindowPtr`/`SendableMetalLayer` plus the
-    bare `libc` priority/QoS call (`FRUST_NO_THREAD_TUNING` arm) and `sysctlbyname("hw.memsize")`.
+    bare `libc` priority/QoS call (`FRUST_NO_THREAD_TUNING` arm) and the `sysctlbyname("hw.memsize")`/`task_info(TASK_VM_INFO)` reads.
     Android's zone also holds `prepare_overlays`'s one `OverlaySurface::new` call; iOS's holds
     `take_frame_overlays`'s plus the `ios_app!`-emitted `frust_overlay_*` exports
     (`frust_overlay_take_released` writes `count <= capacity` layer pointers). Each overlay
