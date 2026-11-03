@@ -58,6 +58,9 @@ void  frust_resume(void *handle);
 // willEnterForeground -> Inactive. Pause/resume above push Inactive/Resumed.
 void  frust_did_enter_background(void *handle);
 void  frust_will_enter_foreground(void *handle);
+// didReceiveMemoryWarningNotification: trims the renderer's caches to the plain
+// mobile tier's ceilings, one-way. Safe in the background and the foreground.
+void  frust_memory_warning(void *handle);
 // Seeds the lifecycle state after frust_init from UIApplication.applicationState:
 // state 0 = active (Resumed), 1 = inactive (Inactive), 2 = background (Paused).
 // Other values are ignored.

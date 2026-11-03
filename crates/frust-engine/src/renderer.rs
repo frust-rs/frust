@@ -942,6 +942,52 @@ pub struct ConstructionTimings {
     pub rest: Duration,
 }
 
+/// What one [`EngineRenderer::trim_memory`] did: the retained store's bytes
+/// either side of it, the budget it now keeps, and the atlas array's layers
+/// against the ceiling its growth is clamped to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryTrim {
+    /// Bytes of retained page texture resident before the trim.
+    pub retained_bytes_before: u64,
+    /// Bytes of retained page texture resident after it.
+    pub retained_bytes_after: u64,
+    /// The budget the retained store is held to from now on.
+    pub retained_budget: RetainedBudget,
+    /// Atlas layers the array holds — a trim releases none.
+    pub atlas_layers: u32,
+    /// The layer count the array's growth is clamped to.
+    pub atlas_layer_ceiling: usize,
+}
+
+impl MemoryTrim {
+    /// The one info line a trim logs.
+    #[must_use]
+    pub fn line(&self) -> String {
+        format!(
+            "frust-engine trim_memory retained_bytes={}->{} retained_budget_bytes={} \
+             atlas_layers={} atlas_layer_ceiling={}",
+            self.retained_bytes_before,
+            self.retained_bytes_after,
+            self.retained_budget.bytes,
+            self.atlas_layers,
+            self.atlas_layer_ceiling
+        )
+    }
+}
+
+/// The budgets a memory trim holds `retained` and `atlas` to: the plain mobile
+/// tier's retained budget and atlas bytes (in `atlas`' own layers), never
+/// above what either already has — so a trim only ever lowers, and trimming a
+/// trimmed renderer changes nothing.
+#[must_use]
+pub fn trimmed_budgets(retained: RetainedBudget, atlas: AtlasBudget) -> (RetainedBudget, usize) {
+    let retained = RetainedBudget {
+        bytes: retained.bytes.min(RetainedBudget::MOBILE.bytes),
+    };
+    let layers = atlas.layers_within(AtlasBudget::MOBILE.total_bytes());
+    (retained, layers)
+}
+
 /// One surface's 2D render engine: a scene in, recorded passes out.
 ///
 /// Create one per surface and keep it across frames — the retained scene
@@ -1773,6 +1819,38 @@ impl EngineRenderer {
         // A cached group would otherwise keep an evicted page's texture alive.
         self.resources.source_groups.clear();
         self.retained.set_budget(budget);
+    }
+
+    /// Answer platform memory pressure: hold both large-tier caches to the
+    /// plain mobile tier's ceilings ([`trimmed_budgets`]), and log one line.
+    ///
+    /// The retained store is re-budgeted ([`Self::set_retained_budget`]),
+    /// evicting least recently used pages and releasing their textures now.
+    /// The glyph/image atlas cannot give a layer back — `vello_common`'s packer
+    /// only appends — so its growth is clamped instead
+    /// ([`crate::cache::images::ImageResidency::request_growth_ceiling`]):
+    /// resident glyphs and images keep serving and the LRU keeps draining,
+    /// but the array takes no layer past the ceiling. One-way: nothing
+    /// restores the large budgets short of building a new renderer, and a
+    /// second trim changes nothing.
+    pub fn trim_memory(&mut self) -> MemoryTrim {
+        let retained_bytes_before = self.retained.used_bytes();
+        let (retained_budget, ceiling) =
+            trimmed_budgets(self.retained.budget(), self.atlas_budget());
+        if retained_budget != self.retained.budget() {
+            self.set_retained_budget(retained_budget);
+        }
+        let images = self.compiler.images();
+        images.request_growth_ceiling(ceiling);
+        let trim = MemoryTrim {
+            retained_bytes_before,
+            retained_bytes_after: self.retained.used_bytes(),
+            retained_budget: self.retained.budget(),
+            atlas_layers: images.layers(),
+            atlas_layer_ceiling: images.growth_ceiling().unwrap_or(ceiling),
+        };
+        log::info!("{}", trim.line());
+        trim
     }
 
     /// Set whether this renderer records retained brackets at all — the
@@ -7875,6 +7953,69 @@ mod tests {
                 Poll::Pending => std::thread::yield_now(),
             }
         }
+    }
+
+    /// A trim holds the large tier to the plain one's ceilings — in the atlas
+    /// shape's own layers — never raises a smaller budget, and is a fixed
+    /// point, which is what makes a second `trim_memory` change nothing.
+    #[test]
+    fn trimmed_budgets_are_the_plain_tier_and_a_fixed_point() {
+        let deep = trimmed_budgets(RetainedBudget::MOBILE_LARGE, AtlasBudget::MOBILE_LARGE_DEEP);
+        assert_eq!(
+            deep,
+            (RetainedBudget::MOBILE, AtlasBudget::MOBILE.max_atlases)
+        );
+        let wide = trimmed_budgets(RetainedBudget::MOBILE_LARGE, AtlasBudget::MOBILE_LARGE_WIDE);
+        assert_eq!(
+            wide.1, 1,
+            "one 2048-square layer is the plain tier's 16 MiB"
+        );
+        assert_eq!(
+            trimmed_budgets(RetainedBudget::MOBILE, AtlasBudget::MOBILE),
+            (RetainedBudget::MOBILE, AtlasBudget::MOBILE.max_atlases),
+            "the plain tier is already trimmed"
+        );
+        let small = RetainedBudget { bytes: 1 << 20 };
+        assert_eq!(
+            trimmed_budgets(small, AtlasBudget::MOBILE).0,
+            small,
+            "never raised"
+        );
+        let again = trimmed_budgets(deep.0, AtlasBudget::MOBILE_LARGE_DEEP);
+        assert_eq!(again, deep);
+    }
+
+    /// `trim_memory` on a live renderer: the budgets fall to the plain tier's,
+    /// the atlas is clamped, and a second call reports the same state.
+    #[test]
+    #[ignore = "needs a real GPU adapter; run with `cargo test -p frust-engine --lib -- --ignored \
+                --test-threads=1` (pin the adapter with WGPU_BACKEND / WGPU_ADAPTER_NAME)"]
+    fn trim_memory_is_idempotent() {
+        let mut context = frust_gpu::RenderContext::new();
+        let handle = block_on(context.device()).expect("device creation");
+        let mut renderer = EngineRenderer::new(
+            &handle.device,
+            &handle.caps,
+            wgpu::TextureFormat::Rgba8Unorm,
+            None,
+        )
+        .expect("the engine builds on this device");
+        renderer.set_retained_budget(RetainedBudget::MOBILE_LARGE);
+        renderer.set_atlas_budget(AtlasBudget::MOBILE_LARGE_DEEP);
+
+        let first = renderer.trim_memory();
+        assert_eq!(first.retained_budget, RetainedBudget::MOBILE);
+        assert_eq!(renderer.retained_budget(), RetainedBudget::MOBILE);
+        assert_eq!(first.atlas_layer_ceiling, AtlasBudget::MOBILE.max_atlases);
+        assert_eq!(
+            renderer.atlas_budget().total_bytes(),
+            AtlasBudget::MOBILE_LARGE_DEEP.total_bytes(),
+            "the geometry is untouched; only growth is clamped"
+        );
+        let generation = renderer.retained_generation();
+        let second = renderer.trim_memory();
+        assert_eq!(second, first);
+        assert_eq!(renderer.retained_generation(), generation);
     }
 
     /// Finishing the warm-up builds the whole (de-duplicated) list exactly

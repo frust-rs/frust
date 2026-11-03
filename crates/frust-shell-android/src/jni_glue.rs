@@ -1465,6 +1465,8 @@ pub(crate) fn render_loop(
                     }
                 }
                 RenderCommand::Resume => {}
+                // Android sends no trim yet (`onTrimMemory` is unwired).
+                RenderCommand::TrimMemory => {}
             }
         }
 

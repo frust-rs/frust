@@ -475,6 +475,10 @@ pub struct SurfaceRenderer {
     /// begins so [`Self::pipeline_cache_data`] can still be read once the
     /// surface is gone — the moment a backgrounding app persists it.
     retired_pipeline_cache: Option<(wgpu::PipelineCache, String)>,
+    /// Whether [`Self::trim_memory`] has been called. Outlives surface
+    /// episodes, so an engine a later install builds is trimmed too: the trim
+    /// is one-way for this renderer's life.
+    memory_trimmed: bool,
 }
 
 /// One retained page the renderer holds resident: the key it was recorded
@@ -682,6 +686,7 @@ impl SurfaceRenderer {
             segment_service: Vec::new(),
             first_frame_warm_up: FirstFrameWarmUp::from_config(),
             retired_pipeline_cache: None,
+            memory_trimmed: false,
         }
     }
 
@@ -908,6 +913,28 @@ impl SurfaceRenderer {
             }
             SurfaceState::NoSurface | SurfaceState::Lost => false,
         }
+    }
+
+    /// Answer platform memory pressure (iOS `didReceiveMemoryWarning`): the
+    /// engine holds its retained pages and glyph atlas to the plain mobile
+    /// tier's ceilings (`frust_engine::EngineRenderer::trim_memory`, which
+    /// logs what it did). One-way: every engine a later surface install builds
+    /// is trimmed as it is built. With no surface, only that is recorded.
+    ///
+    /// Evicted retained pages advance the store's generation, so the next
+    /// [`Self::take_retained_ledger`] publishes the smaller ledger.
+    pub fn trim_memory(&mut self) {
+        self.memory_trimmed = true;
+        if let SurfaceState::Ready(ready) = &mut self.state {
+            let TierBackend::Engine { engine, .. } = &mut ready.backend;
+            engine.trim_memory();
+        }
+    }
+
+    /// Whether [`Self::trim_memory`] has been called on this renderer.
+    #[must_use]
+    pub fn memory_trimmed(&self) -> bool {
+        self.memory_trimmed
     }
 
     /// Drop every retained page the engine holds — what a device-scale change
@@ -1265,13 +1292,16 @@ impl SurfaceRenderer {
             let caps = frust_gpu::TierCaps::probe(&ctx.device_handle().adapter);
             let caps_probe = probe_started.elapsed();
             let engine_format = engine_target_format(&surface.path, surface.config().format);
-            let engine = frust_engine::EngineRenderer::new(
+            let mut engine = frust_engine::EngineRenderer::new(
                 device,
                 &caps,
                 engine_format,
                 pipeline_cache.as_ref(),
             )
             .map_err(|e| anyhow!("frust-render: failed to create engine renderer: {e}"))?;
+            if self.memory_trimmed {
+                engine.trim_memory();
+            }
             let engine_timings = engine.construction_timings();
             // One line per process naming the renderer, next to the
             // `render-path`/`aa-mode` lines, so a capture proves which
@@ -2823,6 +2853,31 @@ mod tests {
                 "{format:?}: the target still holds its clear colour ({centre:?})"
             );
         }
+    }
+
+    /// A trim with no surface trims no engine but is remembered, so the engine
+    /// the next install builds is trimmed as it is built; the ledger it leaves
+    /// unpublished stays unpublished, and a second trim is the same as one.
+    #[test]
+    fn a_memory_trim_without_a_surface_is_remembered_for_the_next_engine() {
+        let mut renderer = SurfaceRenderer::new();
+        assert!(!renderer.memory_trimmed());
+        assert_eq!(
+            renderer.take_retained_ledger(),
+            Some(ResidentPages::default())
+        );
+
+        renderer.trim_memory();
+        assert!(renderer.memory_trimmed());
+        assert_eq!(renderer.phase(), SurfacePhase::NoSurface);
+        assert_eq!(
+            renderer.take_retained_ledger(),
+            None,
+            "no engine, so nothing to evict and nothing to republish"
+        );
+
+        renderer.trim_memory();
+        assert!(renderer.memory_trimmed(), "one-way, and idempotent");
     }
 
     /// The ledger a shell publishes, without a surface: empty, handed out once

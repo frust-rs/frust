@@ -175,7 +175,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 #[cfg(feature = "perf-trace")]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use frust_gpu::{DownlevelProfile, TierCaps};
 use peniko::color::PremulRgba8;
@@ -545,7 +546,24 @@ impl AtlasBudget {
         self.layer_bytes()
             .saturating_mul(self.max_atlases.try_into().unwrap_or(u64::MAX))
     }
+
+    /// How many of this budget's layers fit in `total_bytes`: at least one, at
+    /// most [`max_atlases`](Self::max_atlases).
+    ///
+    /// What a memory trim clamps growth to — [`MOBILE`](Self::MOBILE)'s 16 MiB
+    /// is four layers of the deep large shape but one of the wide one, so the
+    /// plain tier's ceiling is a byte figure, not its layer count.
+    #[must_use]
+    pub fn layers_within(self, total_bytes: u64) -> usize {
+        let layers = total_bytes / self.layer_bytes().max(1);
+        usize::try_from(layers)
+            .unwrap_or(usize::MAX)
+            .clamp(1, self.max_atlases.max(1))
+    }
 }
+
+/// [`ImageResidency::request_growth_ceiling`]'s "no ceiling requested".
+const NO_GROWTH_CEILING: usize = usize::MAX;
 
 /// Bytes per texel of the atlas array (`Rgba8Unorm`).
 pub const ATLAS_FORMAT_BYTES: u64 = 4;
@@ -1130,6 +1148,15 @@ pub struct ImageResidency {
     pressure_layers: Vec<u32>,
     /// Scratch for the keys an accepted plan releases.
     pressure_plan: Vec<u64>,
+    /// The layer count growth is clamped to once reached
+    /// ([`request_growth_ceiling`](Self::request_growth_ceiling)), or
+    /// [`NO_GROWTH_CEILING`]. Atomic only so the request can be made through a
+    /// shared borrow; it only ever falls.
+    growth_request: AtomicUsize,
+    /// The layer count the array was sealed at once the ceiling was reached —
+    /// what [`layers`](Self::layers) reports from then on (see
+    /// [`enforce_growth_ceiling`](Self::enforce_growth_ceiling)).
+    sealed_layers: Option<u32>,
 }
 
 impl ImageResidency {
@@ -1176,6 +1203,8 @@ impl ImageResidency {
             pressure_free_area: Vec::new(),
             pressure_layers: Vec::new(),
             pressure_plan: Vec::new(),
+            growth_request: AtomicUsize::new(NO_GROWTH_CEILING),
+            sealed_layers: None,
         }
     }
 
@@ -1221,7 +1250,86 @@ impl ImageResidency {
     /// in its own entry map.
     #[must_use]
     pub fn allocator_mut(&mut self) -> &mut ImageCache {
+        // A layer the borrower's last allocations created is sealed before its
+        // next ones can add another.
+        self.enforce_growth_ceiling();
         &mut self.cache
+    }
+
+    /// Clamp the atlas array's growth to `layers` layers (at least one),
+    /// one-way: a larger request later is ignored, and nothing lifts it.
+    ///
+    /// What a memory trim asks for. `vello_common`'s packer can neither release
+    /// a layer nor lower its fixed `max_atlases`, so this stops the array taking
+    /// more rather than giving memory back; resident images and glyphs keep
+    /// serving and the LRU keeps re-letting rectangles in the existing layers.
+    /// A shared borrow, so a renderer can ask through the compiler's read
+    /// accessor; it takes hold at the next mutable touch ([`begin_frame`](Self::begin_frame),
+    /// [`resolve`](Self::resolve), [`allocator_mut`](Self::allocator_mut)),
+    /// which every new layer needs. An array already past `layers` is sealed
+    /// at its size.
+    pub fn request_growth_ceiling(&self, layers: usize) {
+        self.growth_request
+            .fetch_min(layers.max(1), Ordering::Relaxed);
+    }
+
+    /// The layer count growth is clamped to, once
+    /// [requested](Self::request_growth_ceiling).
+    #[must_use]
+    pub fn growth_ceiling(&self) -> Option<usize> {
+        let ceiling = self.growth_request.load(Ordering::Relaxed);
+        (ceiling != NO_GROWTH_CEILING).then_some(ceiling)
+    }
+
+    /// Whether the array has been sealed against growth — the requested
+    /// ceiling was reached and the packer can create no further layer.
+    #[must_use]
+    pub fn is_growth_sealed(&self) -> bool {
+        self.sealed_layers.is_some()
+    }
+
+    /// Seal the array once a requested ceiling is reached.
+    ///
+    /// The packer grows whenever no layer has room, up to its own
+    /// `max_atlases`, with no switch to stop it — so the seal fills every layer
+    /// it has left to create with one full-layer placeholder. The packer is
+    /// then as full as a plain-tier array at its maximum: an image takes the
+    /// pressure-eviction path, and `glifo` draws a glyph it cannot place as
+    /// outlines. Placeholders are bookkeeping, never drawn or uploaded, and
+    /// [`layers`](Self::layers) reports the sealed count, so the texture array
+    /// never grows to hold them. One the packer put into an empty *real* layer
+    /// is given back once the tail is full, so that layer stays usable.
+    fn enforce_growth_ceiling(&mut self) {
+        if self.sealed_layers.is_some() {
+            return;
+        }
+        let ceiling = self.growth_request.load(Ordering::Relaxed);
+        let count = self.cache.atlas_count();
+        if ceiling == NO_GROWTH_CEILING || count < ceiling {
+            return;
+        }
+        let sealed = u32::try_from(count).unwrap_or(u32::MAX);
+        let (width, height) = self.budget.atlas_size;
+        let mut borrowed = Vec::new();
+        // Each pass places one placeholder, either in an empty real layer or in
+        // a new tail layer, so the packer's own maximum bounds the walk.
+        let bound = self.cache.atlas_manager().config().max_atlases;
+        for _ in 0..=bound.saturating_add(count) {
+            let Ok(id) = self.cache.allocate(width, height, 0) else {
+                break;
+            };
+            let in_real_layer = self
+                .cache
+                .get(id)
+                .is_some_and(|resource| resource.atlas_id.as_u32() < sealed);
+            if in_real_layer {
+                borrowed.push(id);
+            }
+        }
+        for id in borrowed {
+            self.cache.deallocate(id);
+        }
+        self.sealed_layers = Some(sealed);
     }
 
     /// Whether this residency refuses every image.
@@ -1253,9 +1361,13 @@ impl ImageResidency {
     /// the image half alone would refuse to hold the glyph half's pages. The
     /// count only ever grows — `MultiAtlasManager` appends layers and never
     /// drops one — so a depth reported on an earlier frame stays valid.
+    ///
+    /// Once [sealed](Self::is_growth_sealed), the sealed count: the layers the
+    /// seal's placeholders fill are never drawn from, so the array stops there.
     #[must_use]
     pub fn layers(&self) -> u32 {
-        u32::try_from(self.cache.atlas_count()).unwrap_or(u32::MAX)
+        self.sealed_layers
+            .unwrap_or_else(|| u32::try_from(self.cache.atlas_count()).unwrap_or(u32::MAX))
     }
 
     /// How many resolutions have been refused over this residency's lifetime.
@@ -1383,6 +1495,7 @@ impl ImageResidency {
         self.frame = self.frame.saturating_add(1);
         self.frame_pressure_evictions = 0;
         self.reap();
+        self.enforce_growth_ceiling();
     }
 
     /// The atlas rectangle for `data`'s pixels, allocating and scheduling an
@@ -1396,6 +1509,7 @@ impl ImageResidency {
     /// rather than a panicked frame (E17).
     pub fn resolve(&mut self, data: &ImageData) -> Result<ResidentImage, ImageSkip> {
         let result = self.resolve_inner(data);
+        self.enforce_growth_ceiling();
         if result.is_err() {
             self.skipped = self.skipped.saturating_add(1);
         }
@@ -2155,6 +2269,50 @@ mod tests {
             atlas_size: (64, 64),
             max_atlases: 2,
         })
+    }
+
+    #[test]
+    fn the_plain_tiers_bytes_are_four_deep_layers_or_one_wide_one() {
+        let plain = AtlasBudget::MOBILE.total_bytes();
+        assert_eq!(AtlasBudget::MOBILE_LARGE_DEEP.layers_within(plain), 4);
+        assert_eq!(AtlasBudget::MOBILE_LARGE_WIDE.layers_within(plain), 1);
+        assert_eq!(AtlasBudget::MOBILE.layers_within(plain), 4);
+        assert_eq!(
+            AtlasBudget::MOBILE.layers_within(0),
+            1,
+            "never below one layer"
+        );
+        assert_eq!(
+            AtlasBudget::MOBILE.layers_within(u64::MAX),
+            4,
+            "never past the budget"
+        );
+    }
+
+    /// Sealing an array that has not grown yet waits for the ceiling, and a
+    /// sealed array reports its sealed depth however full its packer is.
+    #[test]
+    fn a_growth_ceiling_seals_the_array_only_once_it_is_reached() {
+        let mut residency = ImageResidency::new(AtlasBudget {
+            atlas_size: (64, 64),
+            max_atlases: 8,
+        });
+        residency.request_growth_ceiling(1);
+        residency.begin_frame();
+        assert!(!residency.is_growth_sealed(), "no layer exists yet");
+        assert_eq!(residency.layers(), 0);
+
+        residency
+            .resolve(&image(32, 32))
+            .expect("the first layer is created");
+        assert!(residency.is_growth_sealed());
+        assert_eq!(residency.layers(), 1);
+        assert_eq!(residency.allocator().atlas_count(), 8, "the packer is full");
+        assert!(
+            residency.resolve(&image(48, 48)).is_err(),
+            "no second layer"
+        );
+        assert_eq!(residency.layers(), 1);
     }
 
     #[test]

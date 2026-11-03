@@ -887,6 +887,128 @@ fn sustained_large_text_leaves_the_images_their_share_of_the_allocator() {
     assert_eq!(residency.skipped(), 0);
 }
 
+/// A memory trim clamps the shared atlas's growth one-way
+/// (`ImageResidency::request_growth_ceiling`, what `EngineRenderer::trim_memory`
+/// asks for): an insertion that would add a layer past the ceiling is refused —
+/// an image is skipped, a glyph falls back to outlines — while every resident
+/// run keeps serving from the atlas, and the LRU still re-lets space inside the
+/// layers that exist.
+#[test]
+fn after_a_memory_trim_no_insertion_grows_the_atlas_and_resident_runs_keep_serving() {
+    // The deep large shape in miniature: many small layers, grown on demand.
+    let budget = AtlasBudget {
+        atlas_size: (256, 256),
+        max_atlases: 16,
+    };
+    let mut trimmed = ImageResidency::new(budget);
+    let mut control = ImageResidency::new(budget);
+    let mut engine = AtlasPolicy::new(trimmed.allocator(), false);
+    let font = next_font();
+    // Two of these cannot share a layer, so each takes one.
+    let big = [image(200, 200, 0x31), image(200, 200, 0x32)];
+    let third = image(200, 200, 0x33);
+
+    trimmed.begin_frame();
+    let pass = frame(&mut engine, trimmed.allocator_mut(), &[(font, 16.0)]);
+    assert_eq!(pass.uploads.len(), 4, "fixture: `Hello` is resident");
+    control.begin_frame();
+    for big in &big {
+        trimmed.resolve(big).expect("fixture: room to grow");
+        control.resolve(big).expect("fixture: room to grow");
+    }
+    assert_eq!(
+        trimmed.layers(),
+        2,
+        "fixture: text and two images span two layers"
+    );
+
+    trimmed.request_growth_ceiling(2);
+    trimmed.request_growth_ceiling(8);
+    assert_eq!(
+        trimmed.growth_ceiling(),
+        Some(2),
+        "a ceiling only ever falls"
+    );
+
+    // The next frame seals the array at its ceiling.
+    trimmed.begin_frame();
+    assert!(trimmed.is_growth_sealed());
+    assert_eq!(trimmed.layers(), 2);
+    for big in &big {
+        trimmed
+            .resolve(big)
+            .expect("a resident image keeps serving");
+    }
+    assert!(
+        trimmed.resolve(&third).is_err(),
+        "every rectangle belongs to this frame and the array may not grow"
+    );
+    assert_eq!(trimmed.layers(), 2);
+    control.begin_frame();
+    for image in big.iter().chain([&third]) {
+        control.resolve(image).expect("the untrimmed array grows");
+    }
+    assert_eq!(
+        control.layers(),
+        3,
+        "the same frame grows an untrimmed array"
+    );
+
+    // The resident run is served from the atlas, inserting nothing.
+    engine.begin_frame();
+    let route = engine.classify_run(&run_key(font, 16.0));
+    let run = *route.atlas().expect("a resident run keeps the atlas route");
+    for (index, glyph) in HELLO.iter().enumerate() {
+        assert_eq!(
+            engine.collect_glyph(&run, *glyph, index as f32 * 8.0),
+            GlyphRoute::Cached
+        );
+    }
+    assert!(engine.build(trimmed.allocator_mut(), raster).is_empty());
+    engine.acknowledge_clears();
+    engine.end_frame(trimmed.allocator_mut());
+    engine.acknowledge_replay();
+
+    // New glyphs fill what the two layers have left, then fall back.
+    let fresh = next_font();
+    engine.begin_frame();
+    let classified = engine.classify_run(&run_key_demanding(fresh, 48.0, 64));
+    let route = engine.admit_run(classified);
+    let run = *route
+        .atlas()
+        .expect("fixture: the run is under the glyph budget");
+    for glyph in 0..64 {
+        engine.collect_glyph(&run, glyph, 0.0);
+    }
+    let pass = engine.build(trimmed.allocator_mut(), raster);
+    assert!(
+        pass.no_room > 0,
+        "the glyphs that need a third layer are refused"
+    );
+    assert!(
+        !pass.uploads.is_empty(),
+        "the space the layers had left is used"
+    );
+    assert!(
+        pass.uploads.iter().all(|upload| upload.slot.page_index < 2),
+        "no glyph is placed past the sealed layers"
+    );
+    engine.acknowledge_clears();
+    engine.end_frame(trimmed.allocator_mut());
+    engine.acknowledge_replay();
+    assert_eq!(trimmed.layers(), 2);
+
+    // An image left undrawn is reaped as ever, and its rectangle re-let.
+    for _ in 0..=MAX_UNSEEN_FRAMES + 1 {
+        trimmed.begin_frame();
+        trimmed.resolve(&big[1]).expect("still resident");
+    }
+    trimmed
+        .resolve(&third)
+        .expect("the reaped rectangle is re-let");
+    assert_eq!(trimmed.layers(), 2);
+}
+
 /// Images keep their share under *mixed* sustained text, not merely under one
 /// size class of it.
 ///

@@ -360,6 +360,9 @@ pub enum RenderEvent {
     Pause,
     /// The app returned to the foreground with its surface intact.
     Resume,
+    /// The platform reported memory pressure: shrink the renderer's caches.
+    /// Never changes whether the render thread may submit.
+    TrimMemory,
 }
 
 /// The render thread's view of surface lifecycle state,
@@ -402,12 +405,14 @@ impl RenderPhase {
 ///   cannot pause what was never created),
 /// - `Resume` → [`Active`](RenderPhase::Active) unless there is no surface (you
 ///   cannot resume onto a surface that is gone; the shell must recreate it
-///   first via `SurfaceCreated`).
+///   first via `SurfaceCreated`),
+/// - `TrimMemory` → the current phase unchanged (a cache trim is not a
+///   surface-lifecycle step).
 pub fn next_render_phase(current: RenderPhase, event: RenderEvent) -> RenderPhase {
     match event {
         RenderEvent::SurfaceCreated => RenderPhase::Active,
         RenderEvent::SurfaceDestroyed => RenderPhase::NoSurface,
-        RenderEvent::SurfaceChanged => current,
+        RenderEvent::SurfaceChanged | RenderEvent::TrimMemory => current,
         RenderEvent::Pause => match current {
             RenderPhase::NoSurface => RenderPhase::NoSurface,
             _ => RenderPhase::Paused,
@@ -583,6 +588,14 @@ pub enum RenderCommand<W> {
     /// The app returned to the foreground with its surface intact: resume
     /// submitting. Fire-and-forget.
     Resume,
+    /// The platform reported memory pressure (iOS
+    /// `didReceiveMemoryWarningNotification`): the render thread trims the
+    /// renderer's caches (`SurfaceRenderer::trim_memory`). Fire-and-forget,
+    /// and serviced in every [`RenderPhase`] — `Paused` included, since iOS
+    /// delivers the warning to a backgrounded app — because commands drain
+    /// ahead of the phase gate, which only withholds scenes. Submits no GPU
+    /// work, so it is safe after a `Pause` barrier.
+    TrimMemory,
 }
 
 impl<W> RenderCommand<W> {
@@ -596,6 +609,7 @@ impl<W> RenderCommand<W> {
             RenderCommand::SurfaceDestroyed { .. } => RenderEvent::SurfaceDestroyed,
             RenderCommand::Pause { .. } => RenderEvent::Pause,
             RenderCommand::Resume => RenderEvent::Resume,
+            RenderCommand::TrimMemory => RenderEvent::TrimMemory,
         }
     }
 
@@ -1137,6 +1151,17 @@ mod tests {
     }
 
     #[test]
+    fn a_memory_trim_keeps_the_current_phase() {
+        for phase in ALL_PHASES {
+            assert_eq!(
+                next_render_phase(phase, RenderEvent::TrimMemory),
+                phase,
+                "a cache trim must not change whether we can render, from {phase:?}"
+            );
+        }
+    }
+
+    #[test]
     fn pause_barriers_from_active_but_not_from_no_surface() {
         assert_eq!(
             next_render_phase(RenderPhase::Active, RenderEvent::Pause),
@@ -1198,6 +1223,10 @@ mod tests {
         let resume: RenderCommand<()> = RenderCommand::Resume;
         assert_eq!(resume.event(), RenderEvent::Resume);
         assert!(!resume.requires_ack());
+
+        let trim: RenderCommand<()> = RenderCommand::TrimMemory;
+        assert_eq!(trim.event(), RenderEvent::TrimMemory);
+        assert!(!trim.requires_ack(), "a trim is fire-and-forget");
 
         let (_w, ack) = ack_pair();
         let paused: RenderCommand<()> = RenderCommand::Pause { ack };
