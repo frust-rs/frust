@@ -3919,16 +3919,14 @@ fn desktop_lifecycle_target(focused: bool, hidden: bool, suspended: bool) -> App
 /// Drives the font-cache flush hook from a derived lifecycle target: `Hidden` flushes once for the
 /// transition (a repeat before the next shown target is ignored, since every focus, occlusion and
 /// suspend event re-derives and may report the same `Hidden` again), a shown target (`Inactive`,
-/// `Resumed`) only re-arms. Returns how many contexts flushed.
+/// `Resumed`) only re-arms. [`desktop_lifecycle_target`] never derives `Paused` or `Detached`, so
+/// only `Hidden` flushes. Returns how many contexts flushed.
 fn font_cache_transition(
     hook: &frust_shell_common::BackgroundFlush,
     cx: &mut dyn frust_shell_common::FontCacheFlush,
     target: AppLifecycleState,
 ) -> usize {
-    if matches!(
-        target,
-        AppLifecycleState::Hidden | AppLifecycleState::Paused
-    ) {
+    if target == AppLifecycleState::Hidden {
         let started = Instant::now();
         let outcome = hook.went_to_background_outcome(&mut [cx]);
         if !outcome.is_repeat() {
