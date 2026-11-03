@@ -44,6 +44,20 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `glifo` bump fails on ubuntu CI until `HVGL_PARITY_VERIFIED_GLIFO` acknowledges the macOS parity
   re-run (an attestation, not a run). `hvgl_atlas.rs` factors its outline and glyph-rect transforms
   into pure helpers with 11 golden vectors.
+- hvgl diagnostics: per-fetch outline-cache counters `SceneCompiler::hvgl_outline_hits` /
+  `hvgl_outline_misses` and the `CompiledFrame` fields of the same names (an atlas-route glyph absent
+  from the cache is fetched twice, measured then rasterized, so it reads one miss and one hit; an
+  inkless glyph is only measured; an atlas-resident glyph never fetches), and a per-frame
+  `CompiledFrame::hvgl_unavailable_glyphs` on both draw routes with the cumulative
+  `SceneCompiler::hvgl_unavailable_glyphs`. The first report in a process is a `log::warn` naming the
+  face (escaped), the count and `skipped_glyphs`; later ones log at debug (5736ac67a, bc67cdb0b).
+- hvgl faces are checked against CoreText rather than trusted. Each variation copy is read back
+  (`CTFontCopyVariation` over the axis defaults) and one that disagrees beyond a single F2Dot14 step of
+  the axis range is refused: counted by the new `SceneCompiler::hvgl_variation_mismatches`, warned
+  once, never cached, its glyphs unavailable. Opening a face also compares a 16-range `cmap` sample of
+  its bytes with CoreText; a mismatch counts in `hvgl_bytes_mismatches` and the warning names the
+  codepoint as `U+XXXX`. `objc2-core-foundation` gains the `CFArray`/`CFDictionary`/`CFNumber`
+  features, no version change (265aaa068).
 
 ### Changed
 
@@ -65,6 +79,11 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   system faces do not, so a hinted faux-bold request on them is nearly invisible
   (`text-hinted-faux-bold-unhintable-face`). Faux bold and faux oblique are not applied on the hvgl
   route (`text-hvgl-synthesis-not-applied`). See [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
+- The single-file hvgl provider is now `text/hvgl/{mod,face,outline,ffi}.rs` (internal): the public surface,
+  the open-face checks and refusals, the outline and variation-instance caches, and every CoreText
+  call, which is now the only `unsafe` in the module. One generic bounded LRU bounds the open faces,
+  each face's instances and the outline cache; refusal sets stay first-in-first-out (c0002cfab,
+  1d1418e9b).
 
 ## 0.6.5 — 2026-11-02
 

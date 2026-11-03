@@ -73,10 +73,10 @@ off this index — read this plus the one that covers what you are touching:
     the split and the renderer-twin `NativeHandle::new`; Apple producers own a +1 reference
     released in a single-call callback. `frust-video-player`'s Android backend: its constructor, the
     `AHardwareBuffer_*` NDK calls and a direct-buffer plane read.
-  - `frust-engine`'s Apple-only `text/hvgl.rs` — the CoreText calls (font by the oracle's
-    PostScript name, glyph count and paths, bounds, the variation-instance descriptor pair),
-    `CGPath::apply` with the `extern "C-unwind"` `push_element` callback, and `unsafe impl Send +
-    Sync for CtFace` (read-only; its SAFETY note cites Apple's Core Text thread-safety statement).
+  - `frust-engine`'s `text/hvgl/ffi.rs` (Apple-gated; uninhabited stub elsewhere) — the CoreText calls
+    (paths, bounds, variation copy and read-back, cmap lookup), CF casts each followed by a checked
+    downcast, `CGPath::apply`'s `extern "C-unwind"` callback, and `unsafe impl Send + Sync for CtFace`
+    (read-only; SAFETY names every call, cites Apple's Core Text thread-safety statement; `Sync` stays).
   - `frust-gpu`'s `RenderContext::create_pipeline_cache` — one call building a `wgpu::PipelineCache`
     from a shell-persisted, fingerprint-validated blob.
   - `frust-reactive`'s private `thread_policy::sys` — `gettid`/`getpriority`/`setpriority` (Linux)
