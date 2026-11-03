@@ -154,7 +154,9 @@ pub(super) struct OutlineCache {
     entries: Lru<OutlineKey, Fetched>,
     /// Fetch calls answered from the cache, saturating.
     pub(super) hits: u64,
-    /// Fetch calls that had to ask CoreText, saturating.
+    /// Fetch calls that asked CoreText and got an answer for the glyph — an
+    /// outline, no ink, or none — saturating. A fetch at a refused instance
+    /// is neither a hit nor a miss.
     pub(super) misses: u64,
 }
 
@@ -182,7 +184,9 @@ impl OutlineCache {
     /// `fetch` answering `None` (a refused instance) inserts and evicts
     /// nothing.
     ///
-    /// Counts one hit or one miss per call.
+    /// Counts a hit when the entry was cached, a miss when `fetch` answered
+    /// (CoreText was asked for the glyph), and neither when `fetch` answered
+    /// `None`: a remembered refusal asks CoreText nothing.
     pub(super) fn get_or_fetch(
         &mut self,
         key: OutlineKey,
@@ -192,8 +196,8 @@ impl OutlineCache {
             self.hits = self.hits.saturating_add(1);
             return self.entries.newest_mut().map(|fetched| &*fetched);
         }
-        self.misses = self.misses.saturating_add(1);
         let fetched = fetch()?;
+        self.misses = self.misses.saturating_add(1);
         Some(&*self.entries.insert(key, fetched))
     }
 }
@@ -218,12 +222,32 @@ pub(super) struct Face {
     /// The variation instances copied from `ct`, least recently used evicted
     /// first, at most [`MAX_INSTANCES_PER_FACE`].
     pub(super) instances: Lru<VariationKey, CtFace>,
-    /// The instances refused (CoreText's copy did not carry them), oldest
-    /// first, at most [`MAX_INSTANCES_PER_FACE`].
+    /// The instances refused (CoreText made no copy, or its copy contradicts
+    /// a value asked for), oldest first, at most [`MAX_INSTANCES_PER_FACE`].
     pub(super) refused: VecDeque<VariationKey>,
     /// CoreText's own axis defaults for `ct`, read on the first instance
-    /// copied (an instance's read-back fills in the axes it leaves out).
+    /// copied: an axis a copy does not report is applied when it was asked
+    /// at its default ([`read_back`]).
     pub(super) coretext_defaults: Option<Vec<(u32, f64)>>,
+    /// Whether a refused instance of this face has been warned about: one
+    /// warning per open face, however many instances are refused.
+    pub(super) refusal_warned: bool,
+    /// Whether an unverified instance of this face has been warned about: one
+    /// warning per open face, however many instances draw unverified.
+    pub(super) unverified_warned: bool,
+}
+
+/// What the read-back of variation instances has counted, since the provider
+/// was built (saturating). Each counts events: an instance copied or refused
+/// again after it left a face's remembered set counts again.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct VariationCounts {
+    /// Instances refused: CoreText made no copy, or its copy reports an axis
+    /// at another value than asked ([`ReadBack::Contradicted`]).
+    pub(super) mismatches: u32,
+    /// Instances drawn from a copy that contradicts nothing but does not
+    /// report an axis asked off its default ([`ReadBack::Unverified`]).
+    pub(super) unverified: u32,
 }
 
 impl Face {
@@ -232,17 +256,21 @@ impl Face {
     /// `coords` maps to, copied on first use — or `None` when that copy is
     /// refused.
     ///
-    /// A copy is kept only when the instance CoreText reads back from it
-    /// carries every user value asked for ([`unapplied_axis`]); else drawing
-    /// from it would cache another instance's outlines under this one's key.
-    /// A refusal is counted in `refusals` and warned once (the face's `name`
-    /// escaped), and remembered while the face stays open.
+    /// A copy is checked against the instance CoreText reads back from it
+    /// ([`read_back`]). One that reports an axis at another value than asked
+    /// is refused — drawing from it would cache another instance's outlines
+    /// under this one's key — as is a copy CoreText does not make: counted in
+    /// `counts.mismatches`, remembered while the face stays open, and warned
+    /// about once per open face (the face's `name` escaped). One that
+    /// contradicts nothing but leaves an axis asked off its default
+    /// unreported is drawn as copied, unverified: counted in
+    /// `counts.unverified` and warned about once per open face.
     pub(super) fn instance(
         &mut self,
         variation: VariationKey,
         coords: &[i16],
         name: &str,
-        refusals: &mut u32,
+        counts: &mut VariationCounts,
     ) -> Option<&CtFace> {
         if variation == VariationKey::DEFAULT {
             return Some(&self.ct);
@@ -254,117 +282,189 @@ impl Face {
             return None;
         }
         let values = user_values(&self.axes, coords);
+        let Some(varied) = self.ct.varied(&values, self.units_per_em) else {
+            self.refuse(variation, name, &values, "CoreText made no copy", counts);
+            return None;
+        };
         let defaults = self
             .coretext_defaults
             .get_or_insert_with(|| self.ct.axis_defaults());
-        let checked = match self.ct.varied(&values, self.units_per_em) {
-            Some(varied) => {
-                let applied = applied_variation(defaults, &varied);
-                match unapplied_axis(&self.axes, &values, &applied) {
-                    None => Ok(varied),
-                    Some(unapplied) => Err(unapplied.to_string()),
-                }
+        match read_back(&self.axes, &values, defaults, &reported_variation(&varied)) {
+            ReadBack::Applied => {}
+            ReadBack::Unverified(unreported) => {
+                self.draw_unverified(name, &values, &unreported, counts);
             }
-            None => Err("CoreText made no copy".to_owned()),
-        };
-        let varied = match checked {
-            Ok(varied) => varied,
-            Err(why) => {
-                self.refuse(variation, name, &values, &why, refusals);
+            ReadBack::Contradicted(axis) => {
+                self.refuse(variation, name, &values, &axis.to_string(), counts);
                 return None;
             }
-        };
+        }
         Some(&*self.instances.insert(variation, varied))
     }
 
     /// Remembers `variation` as refused (oldest refusal out at the cap),
-    /// counting it in `refusals` and warning once.
+    /// counting it in `counts.mismatches` and warning once per open face.
     fn refuse(
         &mut self,
         variation: VariationKey,
         name: &str,
         values: &[(u32, f64)],
         why: &str,
-        refusals: &mut u32,
+        counts: &mut VariationCounts,
     ) {
         if self.refused.len() >= MAX_INSTANCES_PER_FACE {
             self.refused.pop_front();
         }
         self.refused.push_back(variation);
-        *refusals = refusals.saturating_add(1);
+        counts.mismatches = counts.mismatches.saturating_add(1);
+        if core::mem::replace(&mut self.refusal_warned, true) {
+            return;
+        }
+        #[cfg(test)]
+        tests::REFUSAL_WARNINGS.set(tests::REFUSAL_WARNINGS.get() + 1);
         log::warn!(
             "frust-engine: hvgl face {:?} at [{}] refused: CoreText's copy is another instance \
-             ({why}); its glyphs at that instance are counted as skipped",
+             ({why}); its glyphs at that instance are counted as skipped (warned once per open \
+             face)",
             truncated(name),
             instance_list(values),
         );
     }
+
+    /// Counts an instance drawn from a copy whose read-back leaves the axes
+    /// `unreported` (`(axis tag, user value asked)`) unconfirmed, warning once
+    /// per open face.
+    fn draw_unverified(
+        &mut self,
+        name: &str,
+        values: &[(u32, f64)],
+        unreported: &[(u32, f64)],
+        counts: &mut VariationCounts,
+    ) {
+        counts.unverified = counts.unverified.saturating_add(1);
+        if core::mem::replace(&mut self.unverified_warned, true) {
+            return;
+        }
+        #[cfg(test)]
+        tests::UNVERIFIED_WARNINGS.set(tests::UNVERIFIED_WARNINGS.get() + 1);
+        let tags: Vec<u32> = unreported.iter().map(|(tag, _)| *tag).collect();
+        log::warn!(
+            "frust-engine: hvgl face {:?} at [{}] drawn unverified: CoreText's copy does not \
+             report {}; its glyphs at that instance are drawn from the copy as made (warned \
+             once per open face)",
+            truncated(name),
+            instance_list(values),
+            tag_list(&tags),
+        );
+    }
 }
 
-/// The instance CoreText reads back from `varied`, as `(axis tag, user
-/// value)`: every axis of `defaults` (CoreText's own, from the face it was
-/// copied from) at the value the copy reports, else at its default.
-fn applied_variation(defaults: &[(u32, f64)], varied: &CtFace) -> Vec<(u32, f64)> {
+/// The axes CoreText reports for `varied` (`CTFontCopyVariation`), as `(axis
+/// tag, user value)`. CoreText may leave out an axis it holds at its default.
+fn reported_variation(varied: &CtFace) -> Vec<(u32, f64)> {
     let reported = varied.variation_values();
-    let applied = defaults
-        .iter()
-        .map(|(tag, default)| {
-            let value = reported
-                .iter()
-                .find(|(reported, _)| reported == tag)
-                .map_or(*default, |(_, value)| *value);
-            (*tag, value)
-        })
-        .collect();
     #[cfg(test)]
-    let applied = tests::skewed(applied);
-    applied
+    let reported = tests::read_back_hook(reported);
+    reported
 }
 
-/// One axis CoreText's copy does not carry as asked.
+/// How CoreText's copy carries one axis asked for, read back from it.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct UnappliedAxis {
+enum AxisReadBack {
+    /// Reported within the axis's precision of the value asked for, or not
+    /// reported and asked at its default.
+    Applied,
+    /// Reported at the value held, outside the axis's precision of the one
+    /// asked for — CoreText clamping an out-of-range request included.
+    Contradicted(f64),
+    /// Not reported, and asked off its default: the copy may carry it or not.
+    Unreported,
+}
+
+/// How the copy carries `asked` on `axis`: `reported` is the value CoreText
+/// reports for the axis, if any, and `default` the axis's default — both
+/// compared with `asked` within the axis's precision ([`axis_precision`]).
+fn classify_axis(axis: &Axis, asked: f64, reported: Option<f64>, default: f64) -> AxisReadBack {
+    let within = |value: f64| (value - asked).abs() <= axis_precision(axis, asked) + f64::EPSILON;
+    match reported {
+        Some(value) if within(value) => AxisReadBack::Applied,
+        Some(value) => AxisReadBack::Contradicted(value),
+        None if within(default) => AxisReadBack::Applied,
+        None => AxisReadBack::Unreported,
+    }
+}
+
+/// One axis CoreText's copy reports at another value than asked.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ContradictedAxis {
     /// The axis tag.
     tag: u32,
     /// The user value asked for.
     asked: f64,
-    /// The value read back; `None` when CoreText reports no such axis.
-    applied: Option<f64>,
+    /// The user value CoreText reports.
+    reported: f64,
 }
 
-impl core::fmt::Display for UnappliedAxis {
+impl core::fmt::Display for ContradictedAxis {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let tag = tag_list(&[self.tag]);
-        match self.applied {
-            Some(applied) => write!(f, "{tag} read back as {applied}, asked {}", self.asked),
-            None => write!(f, "{tag} is not an axis of CoreText's copy"),
-        }
+        write!(
+            f,
+            "{} read back as {}, asked {}",
+            tag_list(&[self.tag]),
+            self.reported,
+            self.asked
+        )
     }
 }
 
-/// The first axis of `asked` (`(axis tag, user value)`, every axis of
-/// `axes`) that `applied` — the instance CoreText reads back from its copy —
-/// does not carry within the axis's precision ([`axis_precision`]), or `None`
-/// when every axis was applied.
-fn unapplied_axis(
+/// What the read-back of a copy says of the whole instance asked for.
+#[derive(Debug, Clone, PartialEq)]
+enum ReadBack {
+    /// Every axis applied ([`AxisReadBack::Applied`]).
+    Applied,
+    /// No axis contradicted, but these (`(axis tag, user value asked)`) are
+    /// unreported ([`AxisReadBack::Unreported`]).
+    Unverified(Vec<(u32, f64)>),
+    /// The first axis CoreText reports at another value than asked.
+    Contradicted(ContradictedAxis),
+}
+
+/// How the copy whose read-back is `reported` carries `asked` (`(axis tag,
+/// user value)`, every axis of `axes`). An axis's default is CoreText's own
+/// (`defaults`, read from the face the copy was made from) when it lists the
+/// axis, else the bytes' `fvar` default. Only what CoreText reports is
+/// compared with the value asked: an axis it leaves out is never filled in.
+fn read_back(
     axes: &[Axis],
     asked: &[(u32, f64)],
-    applied: &[(u32, f64)],
-) -> Option<UnappliedAxis> {
-    asked.iter().zip(axes).find_map(|((tag, asked), axis)| {
-        let applied = applied
-            .iter()
-            .find(|(applied_tag, _)| applied_tag == tag)
-            .map(|(_, value)| *value);
-        let within = applied.is_some_and(|value| {
-            (value - asked).abs() <= axis_precision(axis, *asked) + f64::EPSILON
-        });
-        (!within).then_some(UnappliedAxis {
-            tag: *tag,
-            asked: *asked,
-            applied,
-        })
-    })
+    defaults: &[(u32, f64)],
+    reported: &[(u32, f64)],
+) -> ReadBack {
+    let value_of = |list: &[(u32, f64)], tag: u32| {
+        list.iter()
+            .find(|(listed, _)| *listed == tag)
+            .map(|(_, value)| *value)
+    };
+    let mut unreported = Vec::new();
+    for ((tag, asked), axis) in asked.iter().zip(axes) {
+        let default = value_of(defaults, *tag).unwrap_or(axis.default);
+        match classify_axis(axis, *asked, value_of(reported, *tag), default) {
+            AxisReadBack::Applied => {}
+            AxisReadBack::Contradicted(reported) => {
+                return ReadBack::Contradicted(ContradictedAxis {
+                    tag: *tag,
+                    asked: *asked,
+                    reported,
+                });
+            }
+            AxisReadBack::Unreported => unreported.push((*tag, *asked)),
+        }
+    }
+    if unreported.is_empty() {
+        ReadBack::Applied
+    } else {
+        ReadBack::Unverified(unreported)
+    }
 }
 
 /// The finest user-value distinction `axis` makes at `value`: one F2Dot14
@@ -483,15 +583,28 @@ mod tests {
     use crate::text::table_directory;
 
     thread_local! {
-        /// Added to every user value CoreText reads back on this thread, so a
-        /// case can force a read-back mismatch.
+        /// Added to every user value CoreText reports on this thread, so a
+        /// case can force a contradicted read-back.
         static READ_BACK_SKEW: core::cell::Cell<f64> = const { core::cell::Cell::new(0.0) };
+        /// Whether every axis CoreText reports on this thread is dropped, so a
+        /// case can force an unreported read-back.
+        static READ_BACK_DROPPED: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+        /// How many refusal warnings were logged on this thread.
+        pub(super) static REFUSAL_WARNINGS: core::cell::Cell<u32> =
+            const { core::cell::Cell::new(0) };
+        /// How many unverified-instance warnings were logged on this thread.
+        pub(super) static UNVERIFIED_WARNINGS: core::cell::Cell<u32> =
+            const { core::cell::Cell::new(0) };
     }
 
-    /// The read-back hook: `applied` with this thread's skew added.
-    pub(super) fn skewed(applied: Vec<(u32, f64)>) -> Vec<(u32, f64)> {
+    /// The read-back hook: `reported` with this thread's skew added, or
+    /// nothing when this thread drops it.
+    pub(super) fn read_back_hook(reported: Vec<(u32, f64)>) -> Vec<(u32, f64)> {
+        if READ_BACK_DROPPED.get() {
+            return Vec::new();
+        }
         let skew = READ_BACK_SKEW.get();
-        applied
+        reported
             .into_iter()
             .map(|(tag, value)| (tag, value + skew))
             .collect()
@@ -686,41 +799,118 @@ mod tests {
         ];
         let [wght, wdth] = [axes[0].tag, axes[1].tag];
         let asked = [(wght, 300.0), (wdth, 500.0)];
-        assert_eq!(unapplied_axis(&axes, &asked, &asked), None);
+        let defaults = [(wght, 500.0), (wdth, 500.0)];
+        assert_eq!(
+            read_back(&axes, &asked, &defaults, &asked),
+            ReadBack::Applied
+        );
         // One F2Dot14 step below the default is 400 / 16384 user units.
         let step = 400.0 / F2DOT14_ONE;
         assert_eq!(axis_precision(&axes[0], 300.0), step);
         assert_eq!(axis_precision(&axes[0], 550.0), 100.0 / F2DOT14_ONE);
         let close = [(wght, 300.0 + step), (wdth, 500.0)];
-        assert_eq!(unapplied_axis(&axes, &asked, &close), None, "within a step");
+        assert_eq!(
+            read_back(&axes, &asked, &defaults, &close),
+            ReadBack::Applied,
+            "within a step"
+        );
         let off = [(wdth, 500.0), (wght, 300.0 + 2.0 * step)];
         assert_eq!(
-            unapplied_axis(&axes, &asked, &off),
-            Some(UnappliedAxis {
+            read_back(&axes, &asked, &defaults, &off),
+            ReadBack::Contradicted(ContradictedAxis {
                 tag: wght,
                 asked: 300.0,
-                applied: Some(300.0 + 2.0 * step)
+                reported: 300.0 + 2.0 * step
             }),
             "matched by tag, not by position"
         );
-        let missing = unapplied_axis(&axes, &asked, &[(wght, 300.0)]).unwrap();
-        assert_eq!(missing.applied, None);
-        assert_eq!(
-            missing.to_string(),
-            "WDTH is not an axis of CoreText's copy"
-        );
-        assert_eq!(
-            unapplied_axis(&axes, &asked, &[(wght, 500.0), (wdth, 500.0)])
-                .unwrap()
-                .to_string(),
-            "wght read back as 500, asked 300"
-        );
+        let ReadBack::Contradicted(contradicted) =
+            read_back(&axes, &asked, &defaults, &[(wght, 500.0), (wdth, 500.0)])
+        else {
+            panic!("the default weight contradicts 300");
+        };
+        assert_eq!(contradicted.to_string(), "wght read back as 500, asked 300");
         // A degenerate axis still allows one `Fixed` unit.
         assert_eq!(
             axis_precision(&axis(b"flat", 5.0, 5.0, 5.0), 5.0),
             1.0 / FIXED_ONE
         );
         assert_eq!(instance_list(&asked), "wght=300 WDTH=500");
+    }
+
+    #[test]
+    fn each_axis_reads_back_applied_contradicted_or_unreported() {
+        let wght = axis(b"wght", 100.0, 500.0, 600.0);
+        let step = 400.0 / F2DOT14_ONE;
+        let classify = |reported, default| classify_axis(&wght, 300.0, reported, default);
+        assert_eq!(classify(Some(300.0), 500.0), AxisReadBack::Applied);
+        assert_eq!(classify(Some(300.0 + step), 500.0), AxisReadBack::Applied);
+        assert_eq!(
+            classify(Some(300.0 + 2.0 * step), 500.0),
+            AxisReadBack::Contradicted(300.0 + 2.0 * step)
+        );
+        assert_eq!(classify(None, 500.0), AxisReadBack::Unreported);
+        assert_eq!(
+            classify(None, 300.0),
+            AxisReadBack::Applied,
+            "not reported, asked at the default"
+        );
+        // CoreText clamping a request past the axis is a contradiction.
+        assert_eq!(
+            classify_axis(&wght, 700.0, Some(600.0), 500.0),
+            AxisReadBack::Contradicted(600.0)
+        );
+    }
+
+    #[test]
+    fn an_axis_coretext_leaves_out_is_compared_with_nothing_but_its_default() {
+        let axes = [
+            axis(b"wght", 100.0, 500.0, 600.0),
+            axis(b"WDTH", 1.0, 500.0, 1000.0),
+            axis(b"HGHT", 1.0, 500.0, 1000.0),
+        ];
+        let [wght, wdth, hght] = [axes[0].tag, axes[1].tag, axes[2].tag];
+        let defaults = [(wght, 500.0), (wdth, 500.0), (hght, 500.0)];
+        let asked = [(wght, 300.0), (wdth, 500.0), (hght, 500.0)];
+        // CoreText reports only the axis off its default.
+        assert_eq!(
+            read_back(&axes, &asked, &defaults, &[(wght, 300.0)]),
+            ReadBack::Applied,
+            "an omitted default-valued axis is applied"
+        );
+        assert_eq!(
+            read_back(&axes, &asked, &defaults, &[]),
+            ReadBack::Unverified(vec![(wght, 300.0)]),
+            "an omitted axis asked off its default is unreported, not a mismatch"
+        );
+        // With no CoreText defaults, the bytes' `fvar` default stands in.
+        assert_eq!(
+            read_back(&axes, &asked, &[], &[(wght, 300.0)]),
+            ReadBack::Applied
+        );
+        assert_eq!(
+            read_back(&axes, &asked, &[], &[]),
+            ReadBack::Unverified(vec![(wght, 300.0)])
+        );
+        // CoreText's own default wins over the bytes' where it lists the axis.
+        assert_eq!(
+            read_back(&axes, &asked, &[(wdth, 400.0)], &[(wght, 300.0)]),
+            ReadBack::Unverified(vec![(wdth, 500.0)])
+        );
+        // One contradicted axis refuses, whatever else is unreported.
+        let wide = [(wght, 300.0), (wdth, 800.0), (hght, 500.0)];
+        assert_eq!(
+            read_back(&axes, &wide, &defaults, &[(wdth, 800.0)]),
+            ReadBack::Unverified(vec![(wght, 300.0)])
+        );
+        assert_eq!(
+            read_back(&axes, &wide, &defaults, &[(wdth, 700.0)]),
+            ReadBack::Contradicted(ContradictedAxis {
+                tag: wdth,
+                asked: 800.0,
+                reported: 700.0
+            })
+        );
     }
 
     #[test]
@@ -732,7 +922,24 @@ mod tests {
         assert!(cache.entries.contains_key(&key(0)), "nothing evicted");
         assert!(!cache.entries.contains_key(&key(1)), "nothing cached");
         assert_eq!(cache.entries.order.len(), 1);
-        assert_eq!((cache.hits, cache.misses), (0, 2));
+        assert_eq!(
+            (cache.hits, cache.misses),
+            (0, 1),
+            "a refused fetch is neither a hit nor a miss"
+        );
+        let mut asked = false;
+        assert!(
+            cache
+                .get_or_fetch(key(1), || {
+                    asked = true;
+                    None
+                })
+                .is_none()
+        );
+        assert!(asked, "an uncached key is fetched again");
+        assert_eq!((cache.hits, cache.misses), (0, 1));
+        cache.get_or_fetch(key(0), || Some(Fetched::Missing));
+        assert_eq!((cache.hits, cache.misses), (1, 1));
     }
 
     /// The F2Dot14 coordinate a shaper hands a run of `axis` at the user
@@ -778,13 +985,17 @@ mod tests {
         for named in ["PingFangSC-Light", "PingFangSC-Semibold"] {
             let (instance, resolved) = CtFace::open(named, 1000.0).expect("installed");
             assert_eq!(resolved, named);
-            let reported = applied_variation(&instance.axis_defaults(), &instance);
+            // CoreText lists the axes off their defaults; the rest are at
+            // CoreText's own defaults.
+            let reported = instance.variation_values();
+            let defaults = instance.axis_defaults();
             let user = |tag: u32| {
                 reported
                     .iter()
+                    .chain(&defaults)
                     .find(|(reported, _)| *reported == tag)
                     .map(|(_, value)| *value)
-                    .expect("CoreText reports every axis")
+                    .expect("CoreText knows every axis")
             };
             let coords: Vec<i16> = axes
                 .iter()
@@ -836,9 +1047,25 @@ mod tests {
         assert_eq!(outlines.variation_mismatches(), 0);
     }
 
-    /// A read-back that disagrees with the values asked for refuses the
-    /// instance: counted once, its glyphs unavailable, nothing cached under
-    /// its key, and the default instance still drawn.
+    /// PingFang SC's `wght` axis index, and a handle on its `PingFangSC-Medium`
+    /// face at `wght`'s normalized coordinate `normalized`.
+    #[cfg(target_os = "macos")]
+    fn pingfang_at(font: &peniko::FontData, normalized: i16) -> FontHandle {
+        let data = font.data.data();
+        let wght = variation_axes(data, table_directory(data, font.index).unwrap())
+            .iter()
+            .position(|axis| axis.tag == u32::from_be_bytes(*b"wght"))
+            .expect("PingFang SC varies its weight");
+        let mut coords = vec![0_i16; wght + 1];
+        coords[wght] = normalized;
+        FontHandle::new(font.clone())
+            .with_normalized_coords(&coords)
+            .with_identity(Some(Arc::from("PingFangSC-Medium")), false)
+    }
+
+    /// A read-back that contradicts the values asked for refuses the
+    /// instance: counted once, warned once, its glyphs unavailable, nothing
+    /// cached under its key, and the default instance still drawn.
     #[cfg(target_os = "macos")]
     #[test]
     fn a_forced_read_back_mismatch_refuses_the_instance_without_caching() {
@@ -847,17 +1074,9 @@ mod tests {
             return;
         };
         let name = Some(Arc::from("PingFangSC-Medium"));
-        let data = font.data.data();
-        let wght = variation_axes(data, table_directory(data, font.index).unwrap())
-            .iter()
-            .position(|axis| axis.tag == u32::from_be_bytes(*b"wght"))
-            .expect("PingFang SC varies its weight");
-        let mut coords = vec![0_i16; wght + 1];
-        coords[wght] = 3276;
-        let heavy = FontHandle::new(font.clone())
-            .with_normalized_coords(&coords)
-            .with_identity(name.clone(), false);
+        let heavy = pingfang_at(&font, 3276);
         let mut outlines = HvglOutlines::default();
+        let warned = REFUSAL_WARNINGS.get();
         READ_BACK_SKEW.set(1.0);
         for _ in 0..3 {
             assert!(matches!(
@@ -867,6 +1086,13 @@ mod tests {
         }
         READ_BACK_SKEW.set(0.0);
         assert_eq!(outlines.variation_mismatches(), 1, "counted once");
+        assert_eq!(REFUSAL_WARNINGS.get() - warned, 1, "warned once");
+        assert_eq!(outlines.variation_unverified(), 0);
+        assert_eq!(
+            (outlines.outline_hits(), outlines.outline_misses()),
+            (0, 0),
+            "a refused fetch is neither a hit nor a miss"
+        );
         assert_eq!(outlines.cached_outlines(), 0, "nothing cached");
         let face = outlines.faces.open.newest_mut().expect("the face is open");
         assert!(face.instances.is_empty(), "no instance kept");
@@ -893,5 +1119,84 @@ mod tests {
             GlyphOutline::Path { .. }
         ));
         assert_eq!(fresh.variation_mismatches(), 0);
+    }
+
+    /// A copy whose read-back reports none of its axes contradicts nothing:
+    /// the instance is drawn from it as before the read-back existed, counted
+    /// once as unverified and warned about once, not refused.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_read_back_reporting_no_axis_draws_the_instance_unverified() {
+        let Some(font) = system_pingfang_sc() else {
+            println!("skipped: PingFangUI.ttc is not installed");
+            return;
+        };
+        let heavy = pingfang_at(&font, 3276);
+        let semibold = pingfang_at(&font, 2000);
+        let mut outlines = HvglOutlines::default();
+        let warned = UNVERIFIED_WARNINGS.get();
+        READ_BACK_DROPPED.set(true);
+        let drawn = (0..3)
+            .map(|_| matches!(outlines.outline(&heavy, 289), GlyphOutline::Path { .. }))
+            .collect::<Vec<_>>();
+        let other = matches!(outlines.outline(&semibold, 289), GlyphOutline::Path { .. });
+        READ_BACK_DROPPED.set(false);
+        assert_eq!(drawn, [true; 3], "drawn from the copy");
+        assert!(other, "a second unverified instance draws too");
+        assert_eq!(
+            outlines.variation_unverified(),
+            2,
+            "counted once per instance copied"
+        );
+        assert_eq!(
+            UNVERIFIED_WARNINGS.get() - warned,
+            1,
+            "warned once per open face"
+        );
+        assert_eq!(outlines.variation_mismatches(), 0, "nothing refused");
+        assert_eq!(outlines.cached_outlines(), 2, "one outline per instance");
+        assert_eq!((outlines.outline_hits(), outlines.outline_misses()), (2, 2));
+        let face = outlines.faces.open.newest_mut().expect("the face is open");
+        assert_eq!(face.instances.len(), 2, "both copies kept");
+        assert!(face.refused.is_empty());
+    }
+
+    /// More refused instances of one face than the face remembers warn once:
+    /// a refusal the remembered set evicted is counted again when it is asked
+    /// for again, but not warned about again.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn many_refused_instances_of_one_face_warn_once() {
+        let Some(font) = system_pingfang_sc() else {
+            println!("skipped: PingFangUI.ttc is not installed");
+            return;
+        };
+        let refused = MAX_INSTANCES_PER_FACE as u32 + 2;
+        let instances: Vec<FontHandle> = (1..=refused)
+            .map(|step| pingfang_at(&font, (step * 1000) as i16))
+            .collect();
+        let mut outlines = HvglOutlines::default();
+        let warned = REFUSAL_WARNINGS.get();
+        READ_BACK_SKEW.set(1.0);
+        let unavailable = instances
+            .iter()
+            .chain(instances.first())
+            .filter(|handle| matches!(outlines.outline(handle, 289), GlyphOutline::Unavailable))
+            .count();
+        READ_BACK_SKEW.set(0.0);
+        assert_eq!(unavailable, instances.len() + 1);
+        assert_eq!(
+            outlines.variation_mismatches(),
+            refused + 1,
+            "the evicted first refusal counts again"
+        );
+        assert_eq!(
+            REFUSAL_WARNINGS.get() - warned,
+            1,
+            "warned once per open face"
+        );
+        let face = outlines.faces.open.newest_mut().expect("the face is open");
+        assert_eq!(face.refused.len(), MAX_INSTANCES_PER_FACE);
+        assert!(face.refusal_warned);
     }
 }

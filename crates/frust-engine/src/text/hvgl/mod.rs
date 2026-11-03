@@ -82,16 +82,23 @@
 //! against the axis's `fvar` minimum, default and maximum (`user_value`),
 //! and the face is copied with a `kCTFontVariationAttribute` dictionary naming
 //! every axis (axis tag to user value). The copy carries no failure signal, so
-//! the instance is read back from it (`CTFontCopyVariationAxes`,
-//! `CTFontCopyVariation`) and kept only when every axis holds the value asked
-//! for within the axis's precision (`unapplied_axis`). Otherwise the
-//! instance is refused — warned once, counted
+//! the instance is read back from it (`CTFontCopyVariation`, which may leave
+//! out an axis CoreText holds at its default) and each axis asked for is
+//! classified (`read_back`), within the axis's precision: *applied* when
+//! CoreText reports the value asked, or reports nothing for an axis asked at
+//! its default (CoreText's own, `CTFontCopyVariationAxes`, else the bytes'
+//! `fvar` default); *contradicted* when CoreText reports another value — a
+//! request it clamped included; *unreported* otherwise. A contradicted axis,
+//! or a copy CoreText does not make, refuses the instance — counted
 //! ([`HvglOutlines::variation_mismatches`]), its glyphs unavailable and
-//! nothing cached under its key — never drawn from another instance. Each
-//! face keeps its few most recently used instances open
-//! ([`MAX_INSTANCES_PER_FACE`]). A run with no coordinates — every
-//! non-variable face, and a variable one at its default — draws from the face
-//! as opened, exactly as before.
+//! nothing cached under its key — never drawn from another instance. An
+//! instance with an unreported axis and no contradicted one is drawn from the
+//! copy as made, and counted ([`HvglOutlines::variation_unverified`]). Each
+//! kind is warned about once per open face, the name escaped and the axes as
+//! escaped tags with their values. Each face keeps its few most recently used
+//! instances open ([`MAX_INSTANCES_PER_FACE`]) and remembers as many refused
+//! ones. A run with no coordinates — every non-variable face, and a variable
+//! one at its default — draws from the face as opened, exactly as before.
 //!
 //! # The cache
 //!
@@ -127,7 +134,7 @@ use kurbo::{Affine, BezPath};
 use peniko::FontData;
 
 use self::face::FaceTable;
-use self::outline::{Fetched, OutlineCache, OutlineKey, fetch};
+use self::outline::{Fetched, OutlineCache, OutlineKey, VariationCounts, fetch};
 use super::backend::EngineGlyphSink;
 use super::{table_directory, table_record};
 
@@ -298,7 +305,17 @@ pub(crate) fn draw_glyph(
 }
 
 /// The compiler's retained `hvgl` state: the faces open in CoreText and the
-/// bounded outline cache.
+/// bounded outline cache, with what they have refused.
+///
+/// A face is refused when CoreText opens another face for its name
+/// ([`Self::identity_mismatches`]), when its handle carries no name
+/// ([`Self::nameless_faces`]), or when its bytes disagree with the face the
+/// name opens — glyph count, `unitsPerEm`, `fvar` axis tags, or the glyphs a
+/// sample of its `cmap` codepoints map to ([`Self::bytes_mismatches`]). A
+/// variation instance of an open face is refused when CoreText makes no copy
+/// at it or its copy contradicts a value asked for
+/// ([`Self::variation_mismatches`]); one whose copy leaves an axis
+/// unreported is drawn, and counted apart ([`Self::variation_unverified`]).
 pub(crate) struct HvglOutlines {
     /// The faces opened (or refused) most recently.
     faces: FaceTable,
@@ -306,9 +323,8 @@ pub(crate) struct HvglOutlines {
     outlines: OutlineCache,
     /// Glyphs the draw routes could not supply.
     unavailable: u64,
-    /// Variation instances refused because CoreText's copy did not carry the
-    /// user values asked for.
-    variation_mismatches: u32,
+    /// Variation instances refused, and drawn unverified.
+    variations: VariationCounts,
 }
 
 impl Default for HvglOutlines {
@@ -336,7 +352,7 @@ impl HvglOutlines {
             faces: FaceTable::default(),
             outlines: OutlineCache::new(capacity),
             unavailable: 0,
-            variation_mismatches: 0,
+            variations: VariationCounts::default(),
         }
     }
 
@@ -370,25 +386,44 @@ impl HvglOutlines {
     }
 
     /// How many faces were refused because their bytes and the CoreText face
-    /// their name opened disagree (glyph count, `unitsPerEm` or `fvar` axes),
+    /// their name opened disagree (glyph count, `unitsPerEm`, `fvar` axis
+    /// tags, or the glyph a sample of the bytes' `cmap` codepoints maps to),
     /// since the provider was built.
     pub(crate) fn bytes_mismatches(&self) -> u32 {
         self.faces.bytes_mismatches
     }
 
-    /// How many variation instances were refused because the copy CoreText
-    /// made of a face did not carry the user values asked for (read back from
-    /// the copy), since the provider was built. Each instance counts once per
-    /// open face; its glyphs are unavailable rather than drawn from another
-    /// instance.
+    /// How many variation instances were refused because CoreText made no
+    /// copy of a face at them, or the copy reports an axis at another value
+    /// than asked (read back from the copy), since the provider was built
+    /// (saturating). Their glyphs are unavailable rather than drawn from
+    /// another instance.
+    ///
+    /// Counts refusal events: a face remembers its last
+    /// [`MAX_INSTANCES_PER_FACE`] refusals, so an instance refused again after
+    /// it left that set — or after its face was closed and opened again —
+    /// counts again. Warned about once per open face.
     pub(crate) fn variation_mismatches(&self) -> u32 {
-        self.variation_mismatches
+        self.variations.mismatches
+    }
+
+    /// How many variation instances were drawn unverified, since the provider
+    /// was built (saturating): CoreText's copy contradicts no value asked for
+    /// but does not report an axis asked off its default, so whether it
+    /// carries that value is unknown. Drawn from the copy as made.
+    ///
+    /// Counts copies: an instance copied again after it left its face's
+    /// [`MAX_INSTANCES_PER_FACE`] open instances counts again. Warned about
+    /// once per open face.
+    pub(crate) fn variation_unverified(&self) -> u32 {
+        self.variations.unverified
     }
 
     /// How many outline fetches the cache answered without asking CoreText,
     /// since the provider was built (saturating).
     ///
-    /// Counted per fetch call, not per distinct glyph: on the atlas route an
+    /// Counted per fetch call, not per distinct glyph — and a fetch at a
+    /// refused instance is neither a hit nor a miss: on the atlas route an
     /// absent glyph is fetched twice (measured, then rasterized into the
     /// atlas), so one new inked glyph reads as one miss and one hit while the
     /// frame's new glyphs fit the cache; an inkless glyph is only measured,
@@ -397,10 +432,12 @@ impl HvglOutlines {
         self.outlines.hits
     }
 
-    /// How many outline fetches asked CoreText (a cache miss), since the
-    /// provider was built (saturating). A miss costs a path read and build,
-    /// plus a font copy for each new variation instance. Counted per fetch
-    /// call, as [`Self::outline_hits`] explains.
+    /// How many outline fetches asked CoreText for the glyph (a cache miss),
+    /// since the provider was built (saturating). A miss costs a path read
+    /// and build, plus a font copy for each new variation instance. A fetch
+    /// at a refused instance asks for no glyph and is not a miss, though a
+    /// first refusal did ask CoreText for the copy it refused. Counted per
+    /// fetch call, as [`Self::outline_hits`] explains.
     pub(crate) fn outline_misses(&self) -> u64 {
         self.outlines.misses
     }
@@ -429,7 +466,7 @@ impl HvglOutlines {
         let Self {
             faces,
             outlines,
-            variation_mismatches,
+            variations,
             ..
         } = self;
         let coords = handle.normalized_coords();
@@ -449,7 +486,7 @@ impl HvglOutlines {
         };
         let fetched = outlines.get_or_fetch(key, || {
             let name = handle.postscript_name().unwrap_or_default();
-            face.instance(variation, coords, name, variation_mismatches)
+            face.instance(variation, coords, name, variations)
                 .map(|instance| fetch(instance, glyph_id))
         });
         match fetched {

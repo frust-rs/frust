@@ -51,7 +51,7 @@
 //!   `PingFangSC-Medium` at the coordinates of the user values CoreText reports
 //!   for its `PingFangSC-Semibold` named instance (`CTFontCopyVariation`)
 //!   compiles to exactly the coverage of that named instance, with no
-//!   variation refusal.
+//!   variation refusal and no instance drawn unverified.
 
 use std::sync::Arc;
 
@@ -177,6 +177,11 @@ fn assert_identity_clean(runs: &[GlyphRun]) {
         compiler.hvgl_variation_mismatches(),
         0,
         "CoreText's copy at a run's coordinates read back as another instance"
+    );
+    assert_eq!(
+        compiler.hvgl_variation_unverified(),
+        0,
+        "CoreText's copy at a run's coordinates left an axis asked for unreported"
     );
 }
 
@@ -741,6 +746,7 @@ mod macos {
         outlines.set_hvgl_atlas(false);
         let frame = compile(&mut outlines, runs);
         assert_eq!(outlines.hvgl_variation_mismatches(), 0);
+        assert_eq!(outlines.hvgl_variation_unverified(), 0);
         assert_eq!(frame.skipped_glyphs, 0);
         assert_eq!(frame.glyph_draws, 1);
         frame
