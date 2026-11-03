@@ -8796,12 +8796,14 @@ member 2, when drawn hinted with a synthetic bold; the probe's `#[ignore]` macOS
 ### `text-font-cache-flush-edges` — the font cache is flushed only at the Hidden edge and on exit
 
 **Observed**: the persisted font-oracle cache is written once per lifecycle `Hidden` edge (iOS `didEnterBackground`,
-Android `onStop`, desktop every window minimized or occluded, or suspended) and once at desktop exit. Four edges are
-not covered. A crashed writer's temp file from another process lingers up to 24 hours, because the sweep does no PID
+Android `onStop`, desktop every window minimized or occluded, or suspended) and once at desktop exit. Five edges are not
+covered. A crashed writer's temp file from another process lingers up to 24 hours, because the sweep does no PID
 liveness check (this process's own are swept after 10 minutes). A desktop window that is merely behind another is
-neither minimized nor occluded, so winit reports no hide and nothing flushes until it is. iOS flushes inside
-UIKit's background grace with no `UIBackgroundTask`: a first write measured 14.3 ms on an iPhone 13 mini (iOS 27.2),
-then 0.1 ms. The web tier has no persistent font cache, so nothing persists across page loads.
+neither minimized nor occluded, so winit reports no hide and nothing flushes until it is. On Wayland the compositor
+reports no occlusion and no minimized state, so the desktop hide flush fires only on suspend (the exit flush still
+covers quit). iOS flushes inside UIKit's background grace with no `UIBackgroundTask`: a first write measured 14.3 ms on
+an iPhone 13 mini (iOS 27.2), then 0.1 ms. The web tier has no persistent font cache, so nothing persists across page
+loads.
 
 **Applies to**: the temp-file linger, every platform that persists the cache; the hide edge, desktop; the grace window,
 iOS; the web cache, web.
