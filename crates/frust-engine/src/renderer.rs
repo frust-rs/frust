@@ -3289,9 +3289,10 @@ impl EngineRenderer {
         });
         let punch_drawn = punch_pass.is_some();
 
-        // The frame's live pages — the two ping-pong groups and the one spill
-        // page beside them — each holding the finished page a later round
-        // composites (see [`crate::schedule`]).
+        // The frame's live pages — the two ping-pong groups and every slot of
+        // the spill pool beside them, indexed by `PageParity::index` — each
+        // holding the finished page a later round composites (see
+        // [`crate::schedule`]).
         let mut live: [Option<PooledTexture>; MAX_LIVE_PAGES] = [const { None }; MAX_LIVE_PAGES];
         let mut page_slot = 0_usize;
         // The fragment region copies' own instance slots, one per copy round.
@@ -4783,8 +4784,9 @@ struct RoundPlan {
     retained: Option<RetainedRound>,
     /// This round's slice of [`Scratch::segments`], in execution order.
     segments: Range<usize>,
-    /// Page groups this round consumed, indexed by
-    /// [`PageParity::index`]; each returns to the pool once the pass ends.
+    /// Page groups this round consumed — the pair and every spill slot —
+    /// indexed by [`PageParity::index`]; each returns to the pool once the
+    /// pass ends.
     released: [bool; MAX_LIVE_PAGES],
     /// The filter pass this round runs, on a filter round — which draws no
     /// strip and composites nothing, so its `segments` range is empty.

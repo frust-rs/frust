@@ -17,7 +17,11 @@
 //! carries a depth that orders it against opaque coverage and nothing else.
 //!
 //! Pixel comparison against the CPU reference renderer is a separate, GPU-bound
-//! concern and lives with the phase's golden corpus, not here.
+//! concern and lives with the phase's golden corpus, not here. The one device
+//! case in this file is the exception that proves the spill pool: a fan nested
+//! inside a fan, rendered offscreen and checked against the composite colours
+//! source-over at half opacity per level computes analytically, `#[ignore]`d
+//! like every GPU case and skipped where no adapter is found.
 
 use core::ops::Range;
 
@@ -1154,4 +1158,204 @@ fn a_backdrop_never_lands_in_a_page_round() {
         builder.pop_retained();
     }));
     assert_eq!(backdrop_placement(&inlined), (true, false, true));
+}
+
+// ---------------------------------------------------------------------
+// A fan nested inside a fan, on a device: the spill pool's pixels
+// ---------------------------------------------------------------------
+
+/// The surface the nested-fan case renders — larger than [`VIEWPORT`], so each
+/// layer's page holds a clear interior to sample.
+const FAN_SURFACE: (u32, u32) = (128, 96);
+
+/// The one target format: `Rgba8Unorm` reads back R, G, B, A in that order.
+const FAN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
+/// Per-channel bar: three composites deep, each rounding an `Rgba8Unorm`
+/// intermediate, against colours a hundred levels or more apart.
+const FAN_TOLERANCE: u8 = 4;
+
+/// The opaque surface the frame is cleared to; nothing in the scene paints it.
+const FAN_BACKDROP: peniko::Color = peniko::Color::from_rgba8(0, 0, 255, 255);
+/// The dimmed page's own fill — the outer layer `P`.
+const FAN_PAGE: peniko::Color = peniko::Color::from_rgba8(240, 240, 240, 255);
+/// The translucent sibling `Q`.
+const FAN_SIBLING: peniko::Color = peniko::Color::from_rgba8(220, 20, 20, 255);
+/// The translucent fan `L`.
+const FAN_HOST: peniko::Color = peniko::Color::from_rgba8(20, 200, 40, 255);
+/// The fan's first child `C1`.
+const FAN_FIRST: peniko::Color = peniko::Color::from_rgba8(250, 210, 0, 255);
+/// The fan's second child `C2` — the layer the pool's first slot holds.
+const FAN_SECOND: peniko::Color = peniko::Color::from_rgba8(160, 0, 220, 255);
+
+const FAN_PAGE_RECT: Rect = Rect::new(0.0, 0.0, 128.0, 96.0);
+const FAN_SIBLING_RECT: Rect = Rect::new(8.0, 8.0, 48.0, 40.0);
+const FAN_HOST_RECT: Rect = Rect::new(56.0, 8.0, 120.0, 88.0);
+const FAN_FIRST_RECT: Rect = Rect::new(64.0, 16.0, 84.0, 48.0);
+const FAN_SECOND_RECT: Rect = Rect::new(92.0, 16.0, 112.0, 48.0);
+
+/// `P[Q, L[C1, C2]]`, every level a solid fill inside a layer at half opacity:
+/// the shape a card switcher's dimmed peer records around a page holding a
+/// translucent sibling beside a translucent two-child fan.
+fn nested_fan_scene() -> Scene {
+    let level = |builder: &mut SceneBuilder<'_>, rect: Rect, color: peniko::Color| {
+        builder.push_layer(rect, HALF);
+        builder.fill_rect(rect, Brush::Solid(color));
+    };
+    scene_of(|builder| {
+        level(builder, FAN_PAGE_RECT, FAN_PAGE);
+        level(builder, FAN_SIBLING_RECT, FAN_SIBLING);
+        builder.pop_layer();
+        level(builder, FAN_HOST_RECT, FAN_HOST);
+        level(builder, FAN_FIRST_RECT, FAN_FIRST);
+        builder.pop_layer();
+        level(builder, FAN_SECOND_RECT, FAN_SECOND);
+        builder.pop_layer();
+        builder.pop_layer();
+        builder.pop_layer();
+    })
+}
+
+/// `source` composited over `dest` at `alpha`, both opaque — chained in float
+/// and rounded once, the tolerance covering the 8-bit intermediates.
+fn over(source: peniko::Color, dest: peniko::Color, alpha: f32) -> peniko::Color {
+    let (src, dst) = (source.components, dest.components);
+    peniko::Color::new([
+        alpha * src[0] + (1.0 - alpha) * dst[0],
+        alpha * src[1] + (1.0 - alpha) * dst[1],
+        alpha * src[2] + (1.0 - alpha) * dst[2],
+        1.0,
+    ])
+}
+
+/// The analytically expected colour at a sample point inside each level, with
+/// the point and what it names.
+fn nested_fan_samples() -> Vec<((u32, u32), peniko::Color, &'static str)> {
+    let page = |inside: peniko::Color| over(inside, FAN_BACKDROP, HALF);
+    let host = |inside: peniko::Color| page(over(inside, FAN_PAGE, HALF));
+    let child = |color: peniko::Color| host(over(color, FAN_HOST, HALF));
+    vec![
+        ((24, 72), page(FAN_PAGE), "the dimmed page's own fill"),
+        (
+            (28, 24),
+            host(FAN_SIBLING),
+            "the translucent sibling inside the page",
+        ),
+        (
+            (88, 72),
+            host(FAN_HOST),
+            "the fan's own fill inside the page",
+        ),
+        (
+            (74, 32),
+            child(FAN_FIRST),
+            "the fan's first child, on a ping-pong page",
+        ),
+        (
+            (102, 32),
+            child(FAN_SECOND),
+            "the fan's second child, on the pool's first spill slot",
+        ),
+    ]
+}
+
+#[test]
+fn the_nested_fan_scene_really_takes_two_spill_slots() {
+    // The device case below is only about the spill pool if the scene it
+    // renders schedules onto it: the fan's second child on the pool's first
+    // slot and the fan itself on the second.
+    let size = (
+        u16::try_from(FAN_SURFACE.0).expect("inside the device grid"),
+        u16::try_from(FAN_SURFACE.1).expect("inside the device grid"),
+    );
+    let frame = SceneCompiler::new(size.0, size.1)
+        .compile(&nested_fan_scene(), Affine::IDENTITY, size)
+        .expect("an in-range scene compiles");
+    let rounds = rounds(&frame);
+    let mut slots: Vec<usize> = rounds
+        .iter()
+        .filter_map(Round::page)
+        .filter_map(|page| page.parity.spill_slot())
+        .collect();
+    slots.sort_unstable();
+    assert_eq!(
+        slots,
+        vec![0, 1],
+        "two spill slots, one round each: {rounds:?}"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test layers -- --ignored`"]
+fn a_fan_nested_inside_a_fan_paints_the_analytic_composite_on_a_device() {
+    use frust_engine::{EngineRenderer, EngineTarget, OutputAlpha};
+    use frust_gpu::{ContextOptions, HeadlessTarget, RenderContext};
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        use std::task::{Context, Poll, Waker};
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut future = std::pin::pin!(future);
+        loop {
+            match future.as_mut().poll(&mut cx) {
+                Poll::Ready(value) => return value,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
+
+    let mut context = RenderContext::with_options(ContextOptions {
+        device_label: "frust-engine nested-fan device".to_string(),
+        backends: None,
+    });
+    let Ok(handle) = block_on(context.device()) else {
+        println!("frust-engine nested fan: no compatible GPU adapter, skipped");
+        return;
+    };
+    println!(
+        "frust-engine nested fan adapter: {:?}",
+        handle.adapter.get_info()
+    );
+    let (device, queue, caps) = (&handle.device, &handle.queue, &handle.caps);
+    let (width, height) = FAN_SURFACE;
+
+    let target = HeadlessTarget::new(device, width, height, FAN_FORMAT);
+    let mut renderer =
+        EngineRenderer::new(device, caps, FAN_FORMAT, None).expect("the engine builds here");
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("frust-engine nested-fan frame"),
+    });
+    renderer
+        .encode(
+            device,
+            queue,
+            &mut encoder,
+            &nested_fan_scene(),
+            EngineTarget {
+                view: target.view(),
+                format: FAN_FORMAT,
+                width,
+                height,
+                depth: None,
+                output: OutputAlpha::Premultiplied,
+            },
+            FAN_BACKDROP,
+            Affine::IDENTITY,
+        )
+        .expect("a fan nested inside a fan is served, not refused");
+    queue.submit([encoder.finish()]);
+    renderer.end_frame(queue);
+
+    let pixels = target.read_back(device, queue);
+    for ((x, y), expected, what) in nested_fan_samples() {
+        let index = ((y * width + x) * 4) as usize;
+        let actual = &pixels[index..index + 4];
+        let expected = expected
+            .components
+            .map(|channel| (channel * 255.0).round().clamp(0.0, 255.0) as u8);
+        assert!(
+            (0..4).all(|channel| actual[channel].abs_diff(expected[channel]) <= FAN_TOLERANCE),
+            "{what}: pixel ({x}, {y}) is {actual:?}, expected {expected:?} +/- {FAN_TOLERANCE}"
+        );
+    }
 }
