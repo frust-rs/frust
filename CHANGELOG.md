@@ -85,7 +85,7 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 - `SurfaceRenderer::encode` now does the engine's planning, so a frame the engine refuses is skipped
   before the swapchain is acquired and `encode_us` carries the plan CPU time that `submit_us` used to.
   Frames refused after acquire present the acquired image (the previous frame re-converted on the
-  straight-alpha arm, a base-colour clear on the direct arm and overlays), at most one frame
+  straight-alpha arm, a base-colour clear on the direct arm and overlays, on every backend), at most one frame
   (`engine-scheduler-skip-on-escalation`, `wgpu-vulkan-discard-texture-noop`).
 - `FontHandle::with_synthesis` clamps skew to +/-30 degrees and embolden to at most 0.5 em.
 - Glyph admission is sticky: a run whose every glyph is already resident is served over the texel

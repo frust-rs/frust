@@ -6362,9 +6362,11 @@ reason. Every plan-stage refusal is decided in `SurfaceRenderer::encode`
 (`EngineRenderer::prepare`) before the swapchain is acquired, so
 `encode` returns `Skipped` and no texture is held: the last presented frame
 persists on every backend. Only a capacity refusal found while recording
-(`AlphaCapacity`, `PaintCapacity`) lands after acquire; that frame presents the
-acquired image anyway (`RefusalBackstop`): the previous frame re-converted on
-the straight-alpha arm, a base-colour clear on the direct arm and on overlays.
+(`AlphaCapacity`, `PaintCapacity`), or a re-plan forced by a texture binding
+whose extent changed after `encode`, lands after acquire; that frame presents
+the acquired image anyway (`RefusalBackstop`): the previous frame re-converted
+on the straight-alpha arm, a base-colour clear on the direct arm and on
+overlays, on every backend.
 A post-acquire refusal therefore costs at most one frame, but on the direct arm
 that frame is the clear, so a sustained capacity refusal flashes the base
 colour every frame (accepted; the alternative, dropping the texture, leaks a
