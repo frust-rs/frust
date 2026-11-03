@@ -16,8 +16,12 @@
 //! [`font_needs_hvgl_provider`] answers per face, from its table directory: an
 //! `hvgl` table and none of the three outline tables `skrifa` reads. A face
 //! carrying both keeps the ordinary route, since `glifo` can draw it. Such a
-//! run is routed to outlines by the collect walk — treated there like a
-//! colour face — so it reserves no atlas slot.
+//! run is classified like any other and, when the atlas takes it, inserted
+//! frust-side ([`super::hvgl_atlas`]): this module then supplies the outline
+//! each new glyph is rasterized from, and the outline a glyph the atlas
+//! refused is filled from. Off that route (`SceneCompiler::set_hvgl_atlas`,
+//! or a face or brush the insert cannot take) every glyph is filled per frame
+//! as below.
 //!
 //! # Opening the face in CoreText
 //!
@@ -266,25 +270,40 @@ pub(crate) fn draw_run(
     sink: &mut EngineGlyphSink<'_>,
     outlines: &mut HvglOutlines,
 ) -> u32 {
-    let handle = &run.font;
     let mut unavailable = 0_u32;
     for glyph in &run.glyphs {
-        match outlines.outline(handle, glyph.id) {
-            GlyphOutline::Path { path, units_per_em } => {
-                sink.set_transform(glyph_transform(
-                    transform,
-                    glyph.x,
-                    glyph.y,
-                    run.font_size,
-                    units_per_em,
-                ));
-                sink.fill_path(path);
-            }
-            GlyphOutline::Empty => {}
-            GlyphOutline::Unavailable => unavailable = unavailable.saturating_add(1),
+        if !draw_glyph(run, transform, glyph, sink, outlines) {
+            unavailable = unavailable.saturating_add(1);
         }
     }
     unavailable
+}
+
+/// Fill one glyph of `run` from `outlines` into `sink` under the run's device
+/// `transform`, answering `false` when it could not be drawn (a glyph with no
+/// ink draws nothing and answers `true`).
+pub(crate) fn draw_glyph(
+    run: &GlyphRun,
+    transform: Affine,
+    glyph: &frust_scene::Glyph,
+    sink: &mut EngineGlyphSink<'_>,
+    outlines: &mut HvglOutlines,
+) -> bool {
+    match outlines.outline(&run.font, glyph.id) {
+        GlyphOutline::Path { path, units_per_em } => {
+            sink.set_transform(glyph_transform(
+                transform,
+                glyph.x,
+                glyph.y,
+                run.font_size,
+                units_per_em,
+            ));
+            sink.fill_path(path);
+            true
+        }
+        GlyphOutline::Empty => true,
+        GlyphOutline::Unavailable => false,
+    }
 }
 
 /// The compiler's retained `hvgl` state: the faces open in CoreText and the
@@ -321,6 +340,13 @@ impl HvglOutlines {
             faces: FaceTable::default(),
             outlines: OutlineCache::new(capacity),
         }
+    }
+
+    /// Whether `handle`'s face can be drawn from CoreText: opened (or opened
+    /// now) by its PostScript name with no refusal. Never on a target without
+    /// CoreText. A refusal is counted and warned once, as on a first draw.
+    pub(crate) fn face_drawable(&mut self, handle: &FontHandle) -> bool {
+        self.faces.open(handle).is_some()
     }
 
     /// How many glyph outlines are cached.

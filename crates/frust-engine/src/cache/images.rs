@@ -175,7 +175,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 #[cfg(feature = "perf-trace")]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use frust_gpu::{DownlevelProfile, TierCaps};
 use peniko::color::PremulRgba8;
@@ -545,7 +546,24 @@ impl AtlasBudget {
         self.layer_bytes()
             .saturating_mul(self.max_atlases.try_into().unwrap_or(u64::MAX))
     }
+
+    /// How many of this budget's layers fit in `total_bytes`: at least one, at
+    /// most [`max_atlases`](Self::max_atlases).
+    ///
+    /// What a memory trim clamps growth to — [`MOBILE`](Self::MOBILE)'s 16 MiB
+    /// is four layers of the deep large shape but one of the wide one, so the
+    /// plain tier's ceiling is a byte figure, not its layer count.
+    #[must_use]
+    pub fn layers_within(self, total_bytes: u64) -> usize {
+        let layers = total_bytes / self.layer_bytes().max(1);
+        usize::try_from(layers)
+            .unwrap_or(usize::MAX)
+            .clamp(1, self.max_atlases.max(1))
+    }
 }
+
+/// [`ImageResidency::request_growth_ceiling`]'s "no ceiling requested".
+const NO_GROWTH_CEILING: usize = usize::MAX;
 
 /// Bytes per texel of the atlas array (`Rgba8Unorm`).
 pub const ATLAS_FORMAT_BYTES: u64 = 4;
@@ -707,12 +725,39 @@ pub struct TierChoice {
     pub device_memory: Option<u64>,
 }
 
-/// The device memory from which a mobile family part takes the large budget:
-/// 4 GiB.
+/// The device memory from which a mobile family part takes the large budget
+/// on Linux and Android: 4 GiB.
 ///
-/// The large budget is 64 MiB of atlas, a sixteenth of that; below it the
-/// plain 16 MiB budget stays.
+/// The large budget is 64 MiB of atlas — four 2048x2048 `Rgba8Unorm` layers,
+/// 16,777,216 texels, four times the plain budget's 4,194,304 texels (16 MiB)
+/// — a sixteenth of that memory; below it the plain 16 MiB budget stays. The
+/// retained-page tier follows the same choice (32 MiB to 64 MiB). Apple
+/// devices use [`MOBILE_LARGE_MIN_MEMORY_APPLE`] instead.
 pub const MOBILE_LARGE_MIN_MEMORY: u64 = 4 << 30;
+
+/// The device memory from which an Apple (iOS) device takes the large budget:
+/// 3 GiB.
+///
+/// `hw.memsize` reports the memory the system leaves the kernel, not the
+/// marketing figure: a 4 GB-class iPhone reports below 4 GiB, so the Linux
+/// threshold would lock every one of them out of the large tier, and a 3
+/// GB-class one reports around 2.8 GiB. 3 GiB sits between the two classes:
+/// 4 GB-class and larger devices take the large tier (64 MiB of atlas, 64 MiB
+/// of retained pages; the iPhone 13 mini's S6 paragraph at 3x needs it), 3
+/// GB-class and smaller keep the plain one. Chosen by `target_os = "ios"`
+/// (see [`mobile_large_min_memory`]); macOS builds keep the 4 GiB figure.
+pub const MOBILE_LARGE_MIN_MEMORY_APPLE: u64 = 3 << 30;
+
+/// The memory threshold for the large tier on this target: the Apple rule on
+/// iOS, the 4 GiB rule elsewhere.
+#[must_use]
+pub const fn mobile_large_min_memory() -> u64 {
+    if cfg!(target_os = "ios") {
+        MOBILE_LARGE_MIN_MEMORY_APPLE
+    } else {
+        MOBILE_LARGE_MIN_MEMORY
+    }
+}
 
 /// The atlas tier for `caps`' adapter on a device with `device_memory` bytes
 /// of memory (`None` when unknown).
@@ -724,20 +769,31 @@ pub const MOBILE_LARGE_MIN_MEMORY: u64 = 4 << 30;
 /// 2. An adapter [`ADAPTER_FAMILIES`] names takes its family's tier — a
 ///    desktop family [`AtlasTier::Desktop`]; a mobile family
 ///    [`AtlasTier::MobileLarge`] when the device reports at least
-///    [`MOBILE_LARGE_MIN_MEMORY`] and the adapter can create a large shape
+///    [`mobile_large_min_memory`] and the adapter can create a large shape
 ///    unclamped ([`AtlasBudget::mobile_large`]), else [`AtlasTier::Mobile`].
 ///    Unknown memory is the small tier: the large one is earned, not assumed.
 /// 3. Any other adapter keeps [`is_mobile_tier`]'s capability read, mobile or
 ///    desktop, exactly as before the table existed.
 #[must_use]
 pub fn choose_tier(caps: &TierCaps, device_memory: Option<u64>) -> TierChoice {
+    choose_tier_with_threshold(caps, device_memory, mobile_large_min_memory())
+}
+
+/// [`choose_tier`] against an explicit large-tier memory `threshold`, so the
+/// per-platform rule is testable on any host.
+#[must_use]
+pub fn choose_tier_with_threshold(
+    caps: &TierCaps,
+    device_memory: Option<u64>,
+    threshold: u64,
+) -> TierChoice {
     let (tier, rule) = if caps.downlevel_profile != DownlevelProfile::Full {
         (AtlasTier::Mobile, TierRule::Downlevel)
     } else {
         match adapter_family(&caps.adapter_name) {
             Some(AdapterFamily::Desktop) => (AtlasTier::Desktop, TierRule::Table),
             Some(AdapterFamily::Mobile) => {
-                let large = device_memory.is_some_and(|bytes| bytes >= MOBILE_LARGE_MIN_MEMORY)
+                let large = device_memory.is_some_and(|bytes| bytes >= threshold)
                     && AtlasBudget::mobile_large(caps).is_some();
                 let tier = if large {
                     AtlasTier::MobileLarge
@@ -757,12 +813,27 @@ pub fn choose_tier(caps: &TierCaps, device_memory: Option<u64>) -> TierChoice {
     }
 }
 
+/// The memory a shell reported through [`set_reported_device_memory`].
+static REPORTED_MEMORY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
+/// Report the device's physical memory, for platforms with no `/proc/meminfo`
+/// (iOS: `sysctl hw.memsize`).
+///
+/// Process-wide and first write wins: later calls are ignored. A shell calls
+/// it before the first renderer is created, since the tier is chosen (and
+/// logged) when the renderer builds its caches. Linux and Android read
+/// `/proc/meminfo` instead and ignore it.
+pub fn set_reported_device_memory(bytes: u64) {
+    let _ = REPORTED_MEMORY.set(bytes);
+}
+
 /// The device's total memory in bytes, when this platform reports it.
 ///
 /// Read once per process from `/proc/meminfo`'s `MemTotal` on Linux and
 /// Android — the kernel's own figure, readable without a permission on both —
-/// and `None` everywhere else, which keeps every other platform on the tier
-/// it took before the large one existed.
+/// and elsewhere the figure a shell gave [`set_reported_device_memory`], or
+/// `None` when none did, which keeps the platform on the tier it took before
+/// the large one existed.
 #[must_use]
 pub fn device_memory_bytes() -> Option<u64> {
     #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -777,7 +848,7 @@ pub fn device_memory_bytes() -> Option<u64> {
     }
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
     {
-        None
+        REPORTED_MEMORY.get().copied()
     }
 }
 
@@ -1077,6 +1148,15 @@ pub struct ImageResidency {
     pressure_layers: Vec<u32>,
     /// Scratch for the keys an accepted plan releases.
     pressure_plan: Vec<u64>,
+    /// The layer count growth is clamped to once reached
+    /// ([`request_growth_ceiling`](Self::request_growth_ceiling)), or
+    /// [`NO_GROWTH_CEILING`]. Atomic only so the request can be made through a
+    /// shared borrow; it only ever falls.
+    growth_request: AtomicUsize,
+    /// The layer count the array was sealed at once the ceiling was reached —
+    /// what [`layers`](Self::layers) reports from then on (see
+    /// [`enforce_growth_ceiling`](Self::enforce_growth_ceiling)).
+    sealed_layers: Option<u32>,
 }
 
 impl ImageResidency {
@@ -1123,6 +1203,8 @@ impl ImageResidency {
             pressure_free_area: Vec::new(),
             pressure_layers: Vec::new(),
             pressure_plan: Vec::new(),
+            growth_request: AtomicUsize::new(NO_GROWTH_CEILING),
+            sealed_layers: None,
         }
     }
 
@@ -1168,7 +1250,86 @@ impl ImageResidency {
     /// in its own entry map.
     #[must_use]
     pub fn allocator_mut(&mut self) -> &mut ImageCache {
+        // A layer the borrower's last allocations created is sealed before its
+        // next ones can add another.
+        self.enforce_growth_ceiling();
         &mut self.cache
+    }
+
+    /// Clamp the atlas array's growth to `layers` layers (at least one),
+    /// one-way: a larger request later is ignored, and nothing lifts it.
+    ///
+    /// What a memory trim asks for. `vello_common`'s packer can neither release
+    /// a layer nor lower its fixed `max_atlases`, so this stops the array taking
+    /// more rather than giving memory back; resident images and glyphs keep
+    /// serving and the LRU keeps re-letting rectangles in the existing layers.
+    /// A shared borrow, so a renderer can ask through the compiler's read
+    /// accessor; it takes hold at the next mutable touch ([`begin_frame`](Self::begin_frame),
+    /// [`resolve`](Self::resolve), [`allocator_mut`](Self::allocator_mut)),
+    /// which every new layer needs. An array already past `layers` is sealed
+    /// at its size.
+    pub fn request_growth_ceiling(&self, layers: usize) {
+        self.growth_request
+            .fetch_min(layers.max(1), Ordering::Relaxed);
+    }
+
+    /// The layer count growth is clamped to, once
+    /// [requested](Self::request_growth_ceiling).
+    #[must_use]
+    pub fn growth_ceiling(&self) -> Option<usize> {
+        let ceiling = self.growth_request.load(Ordering::Relaxed);
+        (ceiling != NO_GROWTH_CEILING).then_some(ceiling)
+    }
+
+    /// Whether the array has been sealed against growth — the requested
+    /// ceiling was reached and the packer can create no further layer.
+    #[must_use]
+    pub fn is_growth_sealed(&self) -> bool {
+        self.sealed_layers.is_some()
+    }
+
+    /// Seal the array once a requested ceiling is reached.
+    ///
+    /// The packer grows whenever no layer has room, up to its own
+    /// `max_atlases`, with no switch to stop it — so the seal fills every layer
+    /// it has left to create with one full-layer placeholder. The packer is
+    /// then as full as a plain-tier array at its maximum: an image takes the
+    /// pressure-eviction path, and `glifo` draws a glyph it cannot place as
+    /// outlines. Placeholders are bookkeeping, never drawn or uploaded, and
+    /// [`layers`](Self::layers) reports the sealed count, so the texture array
+    /// never grows to hold them. One the packer put into an empty *real* layer
+    /// is given back once the tail is full, so that layer stays usable.
+    fn enforce_growth_ceiling(&mut self) {
+        if self.sealed_layers.is_some() {
+            return;
+        }
+        let ceiling = self.growth_request.load(Ordering::Relaxed);
+        let count = self.cache.atlas_count();
+        if ceiling == NO_GROWTH_CEILING || count < ceiling {
+            return;
+        }
+        let sealed = u32::try_from(count).unwrap_or(u32::MAX);
+        let (width, height) = self.budget.atlas_size;
+        let mut borrowed = Vec::new();
+        // Each pass places one placeholder, either in an empty real layer or in
+        // a new tail layer, so the packer's own maximum bounds the walk.
+        let bound = self.cache.atlas_manager().config().max_atlases;
+        for _ in 0..=bound.saturating_add(count) {
+            let Ok(id) = self.cache.allocate(width, height, 0) else {
+                break;
+            };
+            let in_real_layer = self
+                .cache
+                .get(id)
+                .is_some_and(|resource| resource.atlas_id.as_u32() < sealed);
+            if in_real_layer {
+                borrowed.push(id);
+            }
+        }
+        for id in borrowed {
+            self.cache.deallocate(id);
+        }
+        self.sealed_layers = Some(sealed);
     }
 
     /// Whether this residency refuses every image.
@@ -1200,9 +1361,13 @@ impl ImageResidency {
     /// the image half alone would refuse to hold the glyph half's pages. The
     /// count only ever grows — `MultiAtlasManager` appends layers and never
     /// drops one — so a depth reported on an earlier frame stays valid.
+    ///
+    /// Once [sealed](Self::is_growth_sealed), the sealed count: the layers the
+    /// seal's placeholders fill are never drawn from, so the array stops there.
     #[must_use]
     pub fn layers(&self) -> u32 {
-        u32::try_from(self.cache.atlas_count()).unwrap_or(u32::MAX)
+        self.sealed_layers
+            .unwrap_or_else(|| u32::try_from(self.cache.atlas_count()).unwrap_or(u32::MAX))
     }
 
     /// How many resolutions have been refused over this residency's lifetime.
@@ -1330,6 +1495,7 @@ impl ImageResidency {
         self.frame = self.frame.saturating_add(1);
         self.frame_pressure_evictions = 0;
         self.reap();
+        self.enforce_growth_ceiling();
     }
 
     /// The atlas rectangle for `data`'s pixels, allocating and scheduling an
@@ -1343,6 +1509,7 @@ impl ImageResidency {
     /// rather than a panicked frame (E17).
     pub fn resolve(&mut self, data: &ImageData) -> Result<ResidentImage, ImageSkip> {
         let result = self.resolve_inner(data);
+        self.enforce_growth_ceiling();
         if result.is_err() {
             self.skipped = self.skipped.saturating_add(1);
         }
@@ -2105,6 +2272,50 @@ mod tests {
     }
 
     #[test]
+    fn the_plain_tiers_bytes_are_four_deep_layers_or_one_wide_one() {
+        let plain = AtlasBudget::MOBILE.total_bytes();
+        assert_eq!(AtlasBudget::MOBILE_LARGE_DEEP.layers_within(plain), 4);
+        assert_eq!(AtlasBudget::MOBILE_LARGE_WIDE.layers_within(plain), 1);
+        assert_eq!(AtlasBudget::MOBILE.layers_within(plain), 4);
+        assert_eq!(
+            AtlasBudget::MOBILE.layers_within(0),
+            1,
+            "never below one layer"
+        );
+        assert_eq!(
+            AtlasBudget::MOBILE.layers_within(u64::MAX),
+            4,
+            "never past the budget"
+        );
+    }
+
+    /// Sealing an array that has not grown yet waits for the ceiling, and a
+    /// sealed array reports its sealed depth however full its packer is.
+    #[test]
+    fn a_growth_ceiling_seals_the_array_only_once_it_is_reached() {
+        let mut residency = ImageResidency::new(AtlasBudget {
+            atlas_size: (64, 64),
+            max_atlases: 8,
+        });
+        residency.request_growth_ceiling(1);
+        residency.begin_frame();
+        assert!(!residency.is_growth_sealed(), "no layer exists yet");
+        assert_eq!(residency.layers(), 0);
+
+        residency
+            .resolve(&image(32, 32))
+            .expect("the first layer is created");
+        assert!(residency.is_growth_sealed());
+        assert_eq!(residency.layers(), 1);
+        assert_eq!(residency.allocator().atlas_count(), 8, "the packer is full");
+        assert!(
+            residency.resolve(&image(48, 48)).is_err(),
+            "no second layer"
+        );
+        assert_eq!(residency.layers(), 1);
+    }
+
+    #[test]
     fn a_mobile_budget_is_never_the_vello_default() {
         let default = AtlasConfig::default();
         for budget in [AtlasBudget::MOBILE, AtlasBudget::DESKTOP] {
@@ -2208,6 +2419,58 @@ mod tests {
             (desktop.tier, desktop.rule),
             (AtlasTier::Desktop, TierRule::Table)
         );
+    }
+
+    #[test]
+    fn the_apple_threshold_admits_a_4_gb_class_iphone_and_not_a_3_gb_class_one() {
+        let mut apple = named("Apple A15 GPU");
+        apple.transient_saves_memory = true;
+        let tier = |bytes: u64, threshold: u64| {
+            choose_tier_with_threshold(&apple, Some(bytes), threshold).tier
+        };
+        // hw.memsize on a 4 GB-class iPhone reads below 4 GiB, on a 3
+        // GB-class one around 2.8 GiB.
+        let four_class = 3_900 << 20;
+        let three_class = 2_900 << 20;
+        assert!(four_class < MOBILE_LARGE_MIN_MEMORY);
+        assert_eq!(
+            tier(four_class, MOBILE_LARGE_MIN_MEMORY_APPLE),
+            AtlasTier::MobileLarge
+        );
+        assert_eq!(
+            tier(three_class, MOBILE_LARGE_MIN_MEMORY_APPLE),
+            AtlasTier::Mobile
+        );
+        assert_eq!(
+            tier(MOBILE_LARGE_MIN_MEMORY_APPLE, MOBILE_LARGE_MIN_MEMORY_APPLE),
+            AtlasTier::MobileLarge,
+            "the threshold is inclusive"
+        );
+        // The Linux/Android rule is unchanged: the same 4 GB-class figure
+        // stays on the plain tier.
+        assert_eq!(tier(four_class, MOBILE_LARGE_MIN_MEMORY), AtlasTier::Mobile);
+        assert_eq!(
+            tier(MOBILE_LARGE_MIN_MEMORY, MOBILE_LARGE_MIN_MEMORY),
+            AtlasTier::MobileLarge
+        );
+        assert_eq!(
+            mobile_large_min_memory(),
+            if cfg!(target_os = "ios") {
+                MOBILE_LARGE_MIN_MEMORY_APPLE
+            } else {
+                MOBILE_LARGE_MIN_MEMORY
+            }
+        );
+    }
+
+    #[test]
+    fn the_reported_device_memory_is_first_write_wins() {
+        set_reported_device_memory(5 << 30);
+        set_reported_device_memory(1 << 30);
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        assert_eq!(device_memory_bytes(), Some(5 << 30));
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let _ = device_memory_bytes();
     }
 
     #[test]

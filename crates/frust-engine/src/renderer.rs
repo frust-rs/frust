@@ -529,8 +529,15 @@ const ENCODE_TRACE_COLUMNS: [&str; 17] = [
 /// `staging_too_large` are frames the ring refused, `staging_buffers` is slot
 /// buffers it created, and `bind_groups` is bind groups the frame path created.
 /// A ring that is off reports zero for all three staging counts.
+///
+/// The last two, `hvgl_atlas_draws` and `hvgl_outline_fallbacks`, are the
+/// `hvgl`-only (Apple PingFang) route's per-frame counts. They are medians like
+/// `atlas_glyphs`, which they sit beside in meaning: a level per frame, not an
+/// event. Both read zero off Apple and on any run with no `hvgl`-only face.
+/// They are appended after `bind_groups` so every earlier column keeps its
+/// position.
 #[cfg(feature = "perf-trace")]
-const ENCODE_TRACE_COUNTS: [&str; 16] = [
+const ENCODE_TRACE_COUNTS: [&str; 18] = [
     "draws",
     "strips",
     "alphas",
@@ -547,6 +554,8 @@ const ENCODE_TRACE_COUNTS: [&str; 16] = [
     "staging_too_large",
     "staging_buffers",
     "bind_groups",
+    "hvgl_atlas_draws",
+    "hvgl_outline_fallbacks",
 ];
 
 /// Index into [`ENCODE_TRACE_COUNTS`] of the first count reported as a sum over
@@ -563,10 +572,16 @@ const ENCODE_TRACE_FIRST_SUMMED: usize = 5;
 const ENCODE_TRACE_MEDIAN_AGAIN: usize = 10;
 
 /// Index into [`ENCODE_TRACE_COUNTS`] of the first count summed over the window
-/// again, through the end of the line: the staging refusals, buffer creations
-/// and bind-group creations. `staged_bytes`, just before it, is a median.
+/// again: the staging refusals, buffer creations and bind-group creations.
+/// `staged_bytes`, just before it, is a median.
 #[cfg(feature = "perf-trace")]
 const ENCODE_TRACE_SUMMED_AGAIN: usize = 12;
+
+/// Index into [`ENCODE_TRACE_COUNTS`] of the first count after the summed run
+/// that is a median again, through the end of the line: the `hvgl` route's
+/// per-frame counts, appended after `bind_groups`.
+#[cfg(feature = "perf-trace")]
+const ENCODE_TRACE_MEDIAN_LAST: usize = 16;
 
 /// Width of one window row: every phase column followed by every count.
 #[cfg(feature = "perf-trace")]
@@ -635,6 +650,13 @@ struct EncodeCounts {
     /// Bind groups the frame path created this frame. Filled by
     /// [`EncodeTrace::record`].
     bind_groups: u32,
+    /// Glyphs of `hvgl`-only faces this frame drew from the atlas: the frame's
+    /// [`CompiledFrame::hvgl_atlas_draws`]. A per-frame level, reported as a
+    /// window median like `atlas_glyphs`.
+    hvgl_atlas_draws: u32,
+    /// Glyphs of `hvgl`-only faces this frame filled as outlines instead: the
+    /// frame's [`CompiledFrame::hvgl_outline_fallbacks`]. A window median.
+    hvgl_outline_fallbacks: u32,
 }
 
 #[cfg(feature = "perf-trace")]
@@ -669,6 +691,8 @@ impl EncodeCounts {
             staging_too_large: 0,
             staging_buffers: 0,
             bind_groups: 0,
+            hvgl_atlas_draws: frame.hvgl_atlas_draws,
+            hvgl_outline_fallbacks: frame.hvgl_outline_fallbacks,
         }
     }
 }
@@ -752,6 +776,8 @@ impl EncodeSpans {
             self.counts.staging_too_large,
             self.counts.staging_buffers,
             self.counts.bind_groups,
+            self.counts.hvgl_atlas_draws,
+            self.counts.hvgl_outline_fallbacks,
         ]
     }
 }
@@ -849,7 +875,7 @@ impl EncodeTrace {
         for (offset, name) in ENCODE_TRACE_COUNTS.iter().enumerate() {
             let column = ENCODE_TRACE_COLUMNS.len() + offset;
             let summed = (ENCODE_TRACE_FIRST_SUMMED..ENCODE_TRACE_MEDIAN_AGAIN).contains(&offset)
-                || offset >= ENCODE_TRACE_SUMMED_AGAIN;
+                || (ENCODE_TRACE_SUMMED_AGAIN..ENCODE_TRACE_MEDIAN_LAST).contains(&offset);
             let value = if summed {
                 self.window
                     .iter()
@@ -914,6 +940,52 @@ pub struct ConstructionTimings {
     pub warm_up_start: Duration,
     /// Everything else in construction (routing, gradients, atlas, resources).
     pub rest: Duration,
+}
+
+/// What one [`EngineRenderer::trim_memory`] did: the retained store's bytes
+/// either side of it, the budget it now keeps, and the atlas array's layers
+/// against the ceiling its growth is clamped to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryTrim {
+    /// Bytes of retained page texture resident before the trim.
+    pub retained_bytes_before: u64,
+    /// Bytes of retained page texture resident after it.
+    pub retained_bytes_after: u64,
+    /// The budget the retained store is held to from now on.
+    pub retained_budget: RetainedBudget,
+    /// Atlas layers the array holds — a trim releases none.
+    pub atlas_layers: u32,
+    /// The layer count the array's growth is clamped to.
+    pub atlas_layer_ceiling: usize,
+}
+
+impl MemoryTrim {
+    /// The one info line a trim logs.
+    #[must_use]
+    pub fn line(&self) -> String {
+        format!(
+            "frust-engine trim_memory retained_bytes={}->{} retained_budget_bytes={} \
+             atlas_layers={} atlas_layer_ceiling={}",
+            self.retained_bytes_before,
+            self.retained_bytes_after,
+            self.retained_budget.bytes,
+            self.atlas_layers,
+            self.atlas_layer_ceiling
+        )
+    }
+}
+
+/// The budgets a memory trim holds `retained` and `atlas` to: the plain mobile
+/// tier's retained budget and atlas bytes (in `atlas`' own layers), never
+/// above what either already has — so a trim only ever lowers, and trimming a
+/// trimmed renderer changes nothing.
+#[must_use]
+pub fn trimmed_budgets(retained: RetainedBudget, atlas: AtlasBudget) -> (RetainedBudget, usize) {
+    let retained = RetainedBudget {
+        bytes: retained.bytes.min(RetainedBudget::MOBILE.bytes),
+    };
+    let layers = atlas.layers_within(AtlasBudget::MOBILE.total_bytes());
+    (retained, layers)
 }
 
 /// One surface's 2D render engine: a scene in, recorded passes out.
@@ -1448,7 +1520,9 @@ impl EngineRenderer {
 
     /// Sets whether a face with an oblique angle is drawn leaned by a skewing
     /// glyph transform (see [`SceneCompiler::set_synthetic_oblique`]). Off by
-    /// default; takes effect from the next frame.
+    /// default; takes effect from the next frame. Performance: a leaned run
+    /// is drawn as outlines every frame, never from the atlas (see the
+    /// LIMITATIONS entry `text-faux-oblique-off`).
     pub fn set_synthetic_oblique(&mut self, enabled: bool) {
         self.compiler.set_synthetic_oblique(enabled);
     }
@@ -1457,6 +1531,20 @@ impl EngineRenderer {
     #[must_use]
     pub fn synthetic_oblique(&self) -> bool {
         self.compiler.synthetic_oblique_enabled()
+    }
+
+    /// Sets whether a run of an `hvgl`-only face (Apple's PingFang) may take
+    /// the glyph atlas through the frust-side insert (see
+    /// [`SceneCompiler::set_hvgl_atlas`]). On by default; takes effect from
+    /// the next frame.
+    pub fn set_hvgl_atlas(&mut self, enabled: bool) {
+        self.compiler.set_hvgl_atlas(enabled);
+    }
+
+    /// Whether runs of `hvgl`-only faces may take the glyph atlas.
+    #[must_use]
+    pub fn hvgl_atlas(&self) -> bool {
+        self.compiler.hvgl_atlas_enabled()
     }
 
     /// Sets the shortest paint-class run worth a pipeline switch of its own
@@ -1731,6 +1819,41 @@ impl EngineRenderer {
         // A cached group would otherwise keep an evicted page's texture alive.
         self.resources.source_groups.clear();
         self.retained.set_budget(budget);
+    }
+
+    /// Answer platform memory pressure: hold both large-tier caches to the
+    /// plain mobile tier's ceilings ([`trimmed_budgets`]), and log one line.
+    ///
+    /// The retained store is re-budgeted ([`Self::set_retained_budget`]),
+    /// evicting least recently used pages and releasing their textures now.
+    /// The glyph/image atlas cannot give a layer back — `vello_common`'s packer
+    /// only appends — so its growth is clamped instead
+    /// ([`crate::cache::images::ImageResidency::request_growth_ceiling`]):
+    /// resident glyphs and images keep serving and the LRU keeps draining,
+    /// but the array takes no layer past the ceiling. The glyph texel budget
+    /// is cut to its share of the ceiling's layers as well, so glyphs cannot
+    /// take every layer the seal keeps and leave images none. One-way: nothing
+    /// restores the large budgets short of building a new renderer, and a
+    /// second trim changes nothing.
+    pub fn trim_memory(&mut self) -> MemoryTrim {
+        let retained_bytes_before = self.retained.used_bytes();
+        let (retained_budget, ceiling) =
+            trimmed_budgets(self.retained.budget(), self.atlas_budget());
+        if retained_budget != self.retained.budget() {
+            self.set_retained_budget(retained_budget);
+        }
+        self.compiler.cap_glyph_atlas_layers(ceiling);
+        let images = self.compiler.images();
+        images.request_growth_ceiling(ceiling);
+        let trim = MemoryTrim {
+            retained_bytes_before,
+            retained_bytes_after: self.retained.used_bytes(),
+            retained_budget: self.retained.budget(),
+            atlas_layers: images.layers(),
+            atlas_layer_ceiling: images.growth_ceiling().unwrap_or(ceiling),
+        };
+        log::info!("{}", trim.line());
+        trim
     }
 
     /// Set whether this renderer records retained brackets at all — the
@@ -7835,6 +7958,69 @@ mod tests {
         }
     }
 
+    /// A trim holds the large tier to the plain one's ceilings — in the atlas
+    /// shape's own layers — never raises a smaller budget, and is a fixed
+    /// point, which is what makes a second `trim_memory` change nothing.
+    #[test]
+    fn trimmed_budgets_are_the_plain_tier_and_a_fixed_point() {
+        let deep = trimmed_budgets(RetainedBudget::MOBILE_LARGE, AtlasBudget::MOBILE_LARGE_DEEP);
+        assert_eq!(
+            deep,
+            (RetainedBudget::MOBILE, AtlasBudget::MOBILE.max_atlases)
+        );
+        let wide = trimmed_budgets(RetainedBudget::MOBILE_LARGE, AtlasBudget::MOBILE_LARGE_WIDE);
+        assert_eq!(
+            wide.1, 1,
+            "one 2048-square layer is the plain tier's 16 MiB"
+        );
+        assert_eq!(
+            trimmed_budgets(RetainedBudget::MOBILE, AtlasBudget::MOBILE),
+            (RetainedBudget::MOBILE, AtlasBudget::MOBILE.max_atlases),
+            "the plain tier is already trimmed"
+        );
+        let small = RetainedBudget { bytes: 1 << 20 };
+        assert_eq!(
+            trimmed_budgets(small, AtlasBudget::MOBILE).0,
+            small,
+            "never raised"
+        );
+        let again = trimmed_budgets(deep.0, AtlasBudget::MOBILE_LARGE_DEEP);
+        assert_eq!(again, deep);
+    }
+
+    /// `trim_memory` on a live renderer: the budgets fall to the plain tier's,
+    /// the atlas is clamped, and a second call reports the same state.
+    #[test]
+    #[ignore = "needs a real GPU adapter; run with `cargo test -p frust-engine --lib -- --ignored \
+                --test-threads=1` (pin the adapter with WGPU_BACKEND / WGPU_ADAPTER_NAME)"]
+    fn trim_memory_is_idempotent() {
+        let mut context = frust_gpu::RenderContext::new();
+        let handle = block_on(context.device()).expect("device creation");
+        let mut renderer = EngineRenderer::new(
+            &handle.device,
+            &handle.caps,
+            wgpu::TextureFormat::Rgba8Unorm,
+            None,
+        )
+        .expect("the engine builds on this device");
+        renderer.set_retained_budget(RetainedBudget::MOBILE_LARGE);
+        renderer.set_atlas_budget(AtlasBudget::MOBILE_LARGE_DEEP);
+
+        let first = renderer.trim_memory();
+        assert_eq!(first.retained_budget, RetainedBudget::MOBILE);
+        assert_eq!(renderer.retained_budget(), RetainedBudget::MOBILE);
+        assert_eq!(first.atlas_layer_ceiling, AtlasBudget::MOBILE.max_atlases);
+        assert_eq!(
+            renderer.atlas_budget().total_bytes(),
+            AtlasBudget::MOBILE_LARGE_DEEP.total_bytes(),
+            "the geometry is untouched; only growth is clamped"
+        );
+        let generation = renderer.retained_generation();
+        let second = renderer.trim_memory();
+        assert_eq!(second, first);
+        assert_eq!(renderer.retained_generation(), generation);
+    }
+
     /// Finishing the warm-up builds the whole (de-duplicated) list exactly
     /// once however often it is called, waiting on a finished warm-up returns
     /// at once, and neither encodes a frame: the staging ring hands out no
@@ -8092,7 +8278,59 @@ mod tests {
             "draws=11 strips=0 alphas=0 glyph_draws=0 atlas_glyphs=0 replays=3 \
              dirty_pages=6 atlas_refused=0 glyph_misses=3 glyph_evicted=0 run_keys=5 \
              staged_bytes=101 staging_busy=3 staging_too_large=0 staging_buffers=0 \
-             bind_groups=6"
+             bind_groups=6 hvgl_atlas_draws=0 hvgl_outline_fallbacks=0"
+        );
+    }
+
+    /// The `hvgl` route's two counts are read off the frame's own compile and
+    /// reach the line as window medians, appended after `bind_groups` so every
+    /// earlier field keeps its place. A plain scene reads zero for both.
+    #[cfg(feature = "perf-trace")]
+    #[test]
+    fn an_encode_trace_line_reports_the_hvgl_route_as_medians_after_bind_groups() {
+        let scene = plan_scene(|builder| {
+            builder.fill_rect(PLAN_SOFT, Brush::Solid(BLUE));
+        });
+        let mut compiler = SceneCompiler::new(PLAN_VIEWPORT.0, PLAN_VIEWPORT.1);
+        let mut frame = compiler
+            .compile(&scene, Affine::IDENTITY, PLAN_VIEWPORT)
+            .expect("an in-range scene compiles");
+        let plain = EncodeCounts::of(
+            &frame,
+            false,
+            &AtlasRenderReport::default(),
+            compiler.glyph_atlas_trace(),
+            0,
+        );
+        assert_eq!(
+            (plain.hvgl_atlas_draws, plain.hvgl_outline_fallbacks),
+            (0, 0)
+        );
+
+        // Three frames whose atlas counts are 3, 5 and 7 and whose fallbacks
+        // are all 2: the median of the first is 5 (a sum would be 15), and of
+        // the second 2 (a sum would be 6).
+        let mut trace = EncodeTrace::default();
+        for atlas in [3_u32, 5, 7] {
+            frame.hvgl_atlas_draws = atlas;
+            frame.hvgl_outline_fallbacks = 2;
+            let counts = EncodeCounts::of(
+                &frame,
+                false,
+                &AtlasRenderReport::default(),
+                compiler.glyph_atlas_trace(),
+                0,
+            );
+            let spans = EncodeSpans {
+                counts,
+                ..EncodeSpans::default()
+            };
+            trace.window.push(spans.row());
+        }
+        let line = trace.line();
+        assert!(
+            line.ends_with(" bind_groups=0 hvgl_atlas_draws=5 hvgl_outline_fallbacks=2"),
+            "{line}"
         );
     }
 

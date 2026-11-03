@@ -21,7 +21,11 @@
 //! `FRUST_NO_THREAD_TUNING` off-arm only, the render-thread QoS self-boost
 //! `libc::pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0)` in
 //! [`schedule_render_thread`] (a bare libc call operating on the calling thread
-//! only, best-effort and non-fatal). The default path applies the same class
+//! only, best-effort and non-fatal), the one `libc::sysctlbyname("hw.memsize")`
+//! read in [`report_device_memory`] (a NUL-terminated name and a `u64` out-buffer,
+//! both owned by the call's frame), and the `task_info(TASK_VM_INFO)` read in
+//! [`phys_footprint_bytes`] (this task's own port and a frame-owned out-buffer
+//! with its length in `natural_t`s). The default path applies the same class
 //! through `frust_reactive::thread_policy`'s safe API, whose own `unsafe` lives
 //! in that crate. Under the default-off
 //! overlay switch (`FRUST_OVERLAYS`) it also holds the one
@@ -295,6 +299,47 @@ unsafe fn handle_mut<'a>(handle: *mut c_void) -> Option<&'a mut IosAppHandle> {
     Some(unsafe { &mut *(handle as *mut IosAppHandle) })
 }
 
+/// Report the device's physical memory (`sysctl hw.memsize`) to the render
+/// tiers, once, before the first renderer is created: iOS has no
+/// `/proc/meminfo`, and without the figure a 4 GB-class iPhone could never take
+/// the large glyph-atlas tier. Logs `frust-render device_memory_bytes=<n>`
+/// (`unknown` when the read fails, which leaves the plain tier).
+///
+/// The compile-time `FRUST_FORCE_MOBILE_TIER` define (`frust build ios --define
+/// FRUST_FORCE_MOBILE_TIER=1`, any value but `"0"`) skips the report, so the
+/// plain tier is chosen on any device — the A/B build a plain-versus-large
+/// memory measurement compares against. Logs
+/// `frust-render device_memory_bytes=forced-plain`.
+fn report_device_memory() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        if matches!(option_env!("FRUST_FORCE_MOBILE_TIER"), Some(v) if !v.is_empty() && v != "0") {
+            log::info!("frust-render device_memory_bytes=forced-plain");
+            return;
+        }
+        let mut bytes: u64 = 0;
+        let mut len = std::mem::size_of::<u64>();
+        // SAFETY: `c"hw.memsize"` is NUL-terminated; `bytes` is a valid,
+        // writable `u64` and `len` holds its size, so the kernel writes at most
+        // 8 bytes into it; the new-value pointer is null with length 0 (a read).
+        let status = unsafe {
+            libc::sysctlbyname(
+                c"hw.memsize".as_ptr(),
+                (&raw mut bytes).cast::<c_void>(),
+                &raw mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if status == 0 && len == std::mem::size_of::<u64>() && bytes > 0 {
+            log::info!("frust-render device_memory_bytes={bytes}");
+            frust_render::set_reported_device_memory(bytes);
+        } else {
+            log::info!("frust-render device_memory_bytes=unknown");
+        }
+    });
+}
+
 /// `frust_init`: build the native handle for the app's `CAMetalLayer` and
 /// return it to Swift as an opaque pointer.
 ///
@@ -309,6 +354,7 @@ pub fn init(
     make_app: impl FnOnce() -> Box<dyn AppTree>,
 ) -> *mut c_void {
     init_logger_once();
+    report_device_memory();
     // App first, devtools second. `make_app` (run inside `create_handle`) is the
     // `app!` init closure, which registers the hot-patch anchor; the CLI attaches
     // as soon as the discovery line below appears and reads the anchor once, so
@@ -753,6 +799,12 @@ pub(crate) fn render_loop(
                     ack.acknowledge();
                 }
                 RenderCommand::Resume => {}
+                RenderCommand::TrimMemory => {
+                    // CPU bookkeeping plus texture drops, no submission — safe
+                    // while `Paused`. Its evictions republish the ledger.
+                    renderer.trim_memory();
+                    publish_ledger(&mut renderer);
+                }
             }
         }
 
@@ -1904,6 +1956,65 @@ pub fn did_enter_background(handle: *mut c_void) {
             pump_reactive();
         }
     });
+}
+
+/// `frust_memory_warning`: `didReceiveMemoryWarningNotification` — trim the
+/// renderer's caches to the plain mobile tier's ceilings (see
+/// [`IosAppHandle::trim_memory`]). One-way for the renderer's life; delivered
+/// in the background as well as the foreground, and safe in both. A missing
+/// handle is a no-op.
+pub fn memory_warning(handle: *mut c_void) {
+    guard("frust_memory_warning", (), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        if let Some(app) = unsafe { handle_mut(handle) } {
+            app.trim_memory();
+        }
+    });
+}
+
+/// The first two revisions of Mach's `task_vm_info` (`<mach/task_info.h>`),
+/// through `phys_footprint` — what `TASK_VM_INFO_REV1_COUNT` names. `libc`
+/// declares `task_info` but not this structure.
+#[repr(C)]
+#[derive(Default)]
+struct TaskVmInfoRev1 {
+    virtual_size: u64,
+    region_count: i32,
+    page_size: i32,
+    /// `resident_size` through `compressed_lifetime`, sixteen `mach_vm_size_t`s.
+    sizes: [u64; 16],
+    phys_footprint: u64,
+}
+
+// `TASK_VM_INFO_REV1_COUNT` is 38 `natural_t`s.
+const _: () = assert!(std::mem::size_of::<TaskVmInfoRev1>() == 38 * 4);
+
+/// `TASK_VM_INFO` from `<mach/task_info.h>`.
+const TASK_VM_INFO: libc::task_flavor_t = 22;
+
+/// This process's physical footprint (`task_vm_info.phys_footprint`, the
+/// figure the iOS memory limit is enforced against and Xcode's memory gauge
+/// shows), or `None` when the kernel refuses the read.
+pub(crate) fn phys_footprint_bytes() -> Option<u64> {
+    let mut info = TaskVmInfoRev1::default();
+    let words = std::mem::size_of::<TaskVmInfoRev1>() / std::mem::size_of::<libc::natural_t>();
+    let mut count = libc::mach_msg_type_number_t::try_from(words).ok()?;
+    // SAFETY: `mach_task_self()` reads this process's own task port (a static
+    // the runtime initialised before `main`). `info` is a frame-owned,
+    // writable `repr(C)` prefix of `task_vm_info` and `count` holds its length
+    // in `natural_t`s, so the kernel writes at most that many words and
+    // reports how many it wrote; nothing outlives the call.
+    #[allow(deprecated)] // `libc` points at `mach2` for these; no new dependency.
+    let status = unsafe {
+        libc::task_info(
+            libc::mach_task_self(),
+            TASK_VM_INFO,
+            (&raw mut info).cast::<libc::integer_t>(),
+            &raw mut count,
+        )
+    };
+    (status == libc::KERN_SUCCESS && usize::try_from(count).is_ok_and(|n| n >= words))
+        .then_some(info.phys_footprint)
 }
 
 /// `frust_will_enter_foreground`: `willEnterForeground` — push `Inactive`

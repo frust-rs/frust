@@ -35,6 +35,23 @@ use std::path::{Path, PathBuf};
 /// both mean the graph moved.
 const SANCTIONED_IDENTITIES: &[(&str, &str)] = &[("vello_common", "0.2.0"), ("glifo", "0.3.0")];
 
+/// The `glifo` version the hvgl atlas route's restated raster maths was last
+/// checked against.
+///
+/// This is an attested acknowledgement, not a measurement: it proves the
+/// bumper saw the instruction in the `glifo` failure message, not that the
+/// Metal parity test ran. The parity re-run is `cargo test -p frust-engine
+/// --test hvgl_atlas_parity -- --ignored --test-threads=1` on macOS Metal, and
+/// it is the real evidence. Update this constant only after that run passes.
+const HVGL_PARITY_VERIFIED_GLIFO: &str = "0.3.0";
+
+/// Where the hvgl route's restatements of `glifo` live, and what to re-check.
+const HVGL_RESTATEMENT_NOTE: &str = "crates/frust-engine/src/text/hvgl_atlas.rs restates glifo's \
+     private raster maths (renderer.rs:591 calculate_raster_metrics, :342 render_outline_to_atlas, \
+     :521 render_outline_glyph_from_atlas, :311 render_from_atlas). Re-diff those against the new \
+     glifo, run `cargo test -p frust-engine --test hvgl_atlas_parity -- --ignored --test-threads=1` \
+     on macOS Metal, then update HVGL_PARITY_VERIFIED_GLIFO and the docs/RENDER_DEVELOPMENT.md pin row.";
+
 /// The repository root, resolved from this crate's manifest dir
 /// (`crates/frust-testing`) so the scan is working-directory-independent —
 /// the same resolution `tests/deps.rs` uses.
@@ -94,13 +111,19 @@ fn sanctioned_identities_are_exactly_as_declared() {
     for (name, expected) in SANCTIONED_IDENTITIES {
         let found = versions_of(&packages, name);
         let expected: BTreeSet<String> = BTreeSet::from([(*expected).to_string()]);
+        let glifo_note = if *name == "glifo" {
+            " A glifo move also needs the hvgl parity re-run: see \
+             `hvgl_restatement_is_attested_for_the_locked_glifo` for the steps."
+        } else {
+            ""
+        };
         assert_eq!(
             found, expected,
             "`{name}` identities in Cargo.lock drifted: expected {expected:?}, found {found:?}. \
              Exactly one identity of the render core is sanctioned now that the legacy cpu-tier \
              fallback is retired — if this change is intentional, update SANCTIONED_IDENTITIES \
              and say why in the commit message; if it is not, a pin was bumped or a route was \
-             added that forks the graph."
+             added that forks the graph.{glifo_note}"
         );
     }
 }
@@ -118,5 +141,20 @@ fn the_oracle_pin_is_the_engine_side_identity() {
         BTreeSet::from(["0.2.0".to_string()]),
         "exactly one `vello_cpu` identity (0.2.0, the CPU oracle's pin) is sanctioned now that \
          the legacy cpu-tier fallback's `vello_cpu =0.0.9` pin is retired, found {vello_cpu:?}"
+    );
+}
+
+#[test]
+fn hvgl_restatement_is_attested_for_the_locked_glifo() {
+    // The hvgl route restates glifo's private raster maths, which is only
+    // correct for the glifo it was checked against. A glifo move must come with
+    // a re-diff and the Metal parity run (see HVGL_RESTATEMENT_NOTE), and then
+    // this constant is bumped to acknowledge it.
+    let packages = locked_packages(&repo_root());
+    let found = versions_of(&packages, "glifo");
+    let attested: BTreeSet<String> = BTreeSet::from([HVGL_PARITY_VERIFIED_GLIFO.to_string()]);
+    assert_eq!(
+        found, attested,
+        "glifo moved from {attested:?} to {found:?} in Cargo.lock. {HVGL_RESTATEMENT_NOTE}"
     );
 }

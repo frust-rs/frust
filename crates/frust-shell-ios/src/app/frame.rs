@@ -108,6 +108,12 @@ impl IosAppHandle {
             return;
         }
 
+        // About once a second, ahead of the frame gate so a resting screen
+        // still reports: the process's physical footprint (`ios-mem`).
+        if perf::enabled() {
+            mem_trace::tick(Instant::now());
+        }
+
         // Resolved-translucency sync, before the gate
         // inputs are gathered below: a render-thread fallback-to-opaque (or a
         // self-healed recreate that resolved differently) flips
@@ -615,6 +621,60 @@ impl IosAppHandle {
                     self.deadline_overruns,
                 );
             }
+        }
+    }
+}
+
+/// The `frust-perf ios-mem phys_footprint_kib=<n>` line: this process's
+/// physical footprint — the figure the iOS memory limit is enforced against —
+/// about once a second from the UI thread, behind [`perf::enabled`]. Its own
+/// series rather than a field of the graded `ios-pace` line; `unknown` when
+/// the kernel refuses the read. Off, it costs one cached `bool` per tick.
+mod mem_trace {
+    use std::cell::Cell;
+    use std::time::{Duration, Instant};
+
+    /// How often a line is written.
+    const PERIOD: Duration = Duration::from_secs(1);
+
+    thread_local! {
+        /// When the last line was written; UI thread only.
+        static LAST: Cell<Option<Instant>> = const { Cell::new(None) };
+    }
+
+    /// Write a line when [`PERIOD`] has passed since the last one.
+    pub(super) fn tick(now: Instant) {
+        LAST.with(|last| {
+            if last
+                .get()
+                .is_some_and(|at| now.saturating_duration_since(at) < PERIOD)
+            {
+                return;
+            }
+            last.set(Some(now));
+            log::info!("{}", line(crate::ffi_glue::phys_footprint_bytes()));
+        });
+    }
+
+    /// The line for a footprint of `bytes`, rounded down to KiB.
+    pub(super) fn line(bytes: Option<u64>) -> String {
+        match bytes {
+            Some(bytes) => format!("frust-perf ios-mem phys_footprint_kib={}", bytes / 1024),
+            None => "frust-perf ios-mem phys_footprint_kib=unknown".to_owned(),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::line;
+
+        #[test]
+        fn the_ios_mem_line_reports_kib_or_unknown() {
+            assert_eq!(
+                line(Some(300 * 1024 * 1024 + 1023)),
+                "frust-perf ios-mem phys_footprint_kib=307200"
+            );
+            assert_eq!(line(None), "frust-perf ios-mem phys_footprint_kib=unknown");
         }
     }
 }

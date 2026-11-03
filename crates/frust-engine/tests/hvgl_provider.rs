@@ -1,8 +1,10 @@
 //! Glyph runs in an `hvgl`-only face: Apple's PingFang, whose outlines live
 //! in an `hvgl` table `glifo`'s `skrifa` cannot read.
 //!
-//! On Apple targets the engine fills such a run's glyphs from CoreText's own
-//! outlines; everywhere else, and for a face CoreText cannot open faithfully,
+//! On Apple targets the engine draws such a run's glyphs from CoreText's own
+//! outlines — filled every frame on the outline route pinned here
+//! (`set_hvgl_atlas(false)`), or rasterized once into atlas entries on the
+//! default route pinned in `hvgl_atlas.rs`; everywhere else, and for a face CoreText cannot open faithfully,
 //! every glyph is counted as skipped and nothing is drawn. What is pinned:
 //!
 //! - **A run is skipped whole when it cannot be opened.** A synthetic
@@ -762,7 +764,13 @@ mod macos {
                 .all(|run| !run.font.normalized_coords().is_empty()),
             "weight {user} is not PingFang SC's default instance"
         );
-        compile(&mut compiler(), runs)
+        // The outline route: its strips carry the glyph's own coverage, which
+        // is what the comparison below reads. The atlas route's weights are
+        // pinned in `hvgl_atlas.rs`, where the weight is a variation
+        // coordinate of the entry's key.
+        let mut outlines = compiler();
+        outlines.set_hvgl_atlas(false);
+        compile(&mut outlines, runs)
     }
 
     #[test]
@@ -811,14 +819,22 @@ mod macos {
         // One handle for every frame: the cache is keyed on the blob's
         // identity, as a shaped run's font is from frame to frame.
         let font = face(&data, FACE);
+        // The outline leg: the atlas route (the default) is pinned in
+        // `hvgl_atlas.rs`.
         let mut compiler = compiler();
+        compiler.set_hvgl_atlas(false);
         for frame_index in 0..2 {
             let frame = compile(&mut compiler, vec![run(font.clone(), &glyphs)]);
             assert_eq!(frame.skipped_glyphs, 0, "frame {frame_index}");
             assert_eq!(frame.glyph_draws, 3, "frame {frame_index}");
             assert_eq!(
                 frame.atlas_glyph_draws, 0,
-                "an hvgl run never samples the atlas"
+                "with the hvgl atlas off an hvgl run never samples the atlas"
+            );
+            assert_eq!(frame.hvgl_atlas_draws, 0, "frame {frame_index}");
+            assert_eq!(
+                frame.hvgl_outline_fallbacks, 3,
+                "frame {frame_index}: every glyph is an outline fallback"
             );
             assert!(
                 frame.alphas().iter().any(|alpha| *alpha != 0),
@@ -870,26 +886,48 @@ mod macos {
     #[test]
     fn the_hvgl_outline_cache_evicts_at_its_cap() {
         let Some(data) = pingfang() else { return };
-        let mut compiler = compiler();
-        let capacity = compiler.hvgl_outline_capacity();
-        let font = face(&data, FACE);
-        // Glyph ids 1.. are all inside PingFang (tens of thousands of glyphs),
-        // drawn 32 distinct ones a frame until the cap is passed.
-        let ids: Vec<u32> = (1..=u32::try_from(capacity + 64).expect("small")).collect();
-        for (chunk_index, chunk) in ids.chunks(32).enumerate() {
-            compile(&mut compiler, vec![run(font.clone(), chunk)]);
-            let drawn = (chunk_index + 1) * 32;
-            assert_eq!(
-                compiler.hvgl_cached_outlines(),
-                drawn.min(capacity),
-                "after {drawn} distinct glyphs"
-            );
+        // Both routes fetch outlines through the one cache: the outline route
+        // to fill them, the atlas route to measure and rasterize its entries.
+        for atlas in [false, true] {
+            let mut compiler = compiler();
+            compiler.set_hvgl_atlas(atlas);
+            let capacity = compiler.hvgl_outline_capacity();
+            let font = face(&data, FACE);
+            // Glyph ids 1.. are all inside PingFang (tens of thousands of
+            // glyphs), drawn 32 distinct ones a frame until the cap is passed.
+            let ids: Vec<u32> = (1..=u32::try_from(capacity + 64).expect("small")).collect();
+            for (chunk_index, chunk) in ids.chunks(32).enumerate() {
+                let frame = compile(&mut compiler, vec![run(font.clone(), chunk)]);
+                let drawn = (chunk_index + 1) * 32;
+                assert_eq!(
+                    compiler.hvgl_cached_outlines(),
+                    drawn.min(capacity),
+                    "atlas {atlas}: after {drawn} distinct glyphs"
+                );
+                // The route's counters: the outline route counts every drawn
+                // glyph a fallback, the atlas route none of the glyphs it
+                // placed, and never skips a glyph either way.
+                assert_eq!(frame.skipped_glyphs, 0, "atlas {atlas}: {drawn}");
+                if atlas {
+                    assert_eq!(
+                        frame.hvgl_atlas_draws + frame.hvgl_outline_fallbacks,
+                        frame.glyph_draws,
+                        "atlas {atlas}: after {drawn} distinct glyphs"
+                    );
+                } else {
+                    assert_eq!(frame.hvgl_atlas_draws, 0, "after {drawn} distinct glyphs");
+                    assert_eq!(
+                        frame.hvgl_outline_fallbacks, frame.glyph_draws,
+                        "after {drawn} distinct glyphs"
+                    );
+                }
+            }
+            assert_eq!(compiler.hvgl_cached_outlines(), capacity, "atlas {atlas}");
+            // Drawing the newest glyphs again fetches nothing new and keeps
+            // the population at the cap.
+            compile(&mut compiler, vec![run(font, &ids[ids.len() - 32..])]);
+            assert_eq!(compiler.hvgl_cached_outlines(), capacity, "atlas {atlas}");
         }
-        assert_eq!(compiler.hvgl_cached_outlines(), capacity);
-        // Drawing the newest glyphs again fetches nothing new and keeps the
-        // population at the cap.
-        compile(&mut compiler, vec![run(font, &ids[ids.len() - 32..])]);
-        assert_eq!(compiler.hvgl_cached_outlines(), capacity);
     }
 
     static RENDER_LOCK: Mutex<()> = Mutex::new(());

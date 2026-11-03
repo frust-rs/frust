@@ -16,10 +16,45 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   (+39.8%); the italic rows stay upright with faux oblique off.
 - `skrifa` is a dev-dependency of `frust-engine` (test-only, from the root `[workspace.dependencies]`),
   used by a probe of whether `glifo`'s hinting instance can be built per face.
+- hvgl-only faces (Apple's PingFang) now draw from the glyph atlas: `text/hvgl_atlas.rs` inserts
+  them frust-side, `OutlineReason::Hvgl` is the fallback, `SceneCompiler::set_hvgl_atlas` /
+  `EngineRenderer::set_hvgl_atlas` switch the route (default on), and `CompiledFrame` gains
+  `hvgl_atlas_draws` and `hvgl_outline_fallbacks`. The `frust-perf enc` line appends both counts.
+  The route restates `glifo` 0.3.0 `renderer.rs:591`/`:342`/`:521`/`:311`, so
+  `tests/hvgl_atlas_parity.rs` is the tripwire on a `glifo` bump (`engine-hvgl-atlas-pin-bound`).
+  iPhone 13 mini, S6 at 3x: PingFang 61 atlas draws and 0 outline fallbacks per window, `glyphs_us`
+  5,377 -> 183, CPU work per frame 6,146 -> 1,437 us, presented cadence unchanged
+  (p2p 16.68 ms; gates ha04-13mini-s6-phase-head, gr02-13mini-presented-cadence); Apple M4
+  Metal, a 300-glyph PingFang paragraph compiles in 9.7 us, was 613 (ha04-m4-metal). Merged in f5f360e70,
+  a3b5ebd5b.
+- `frust_render::set_reported_device_memory`: a shell reports device memory where there is no
+  `/proc/meminfo`. `frust-shell-ios` reads `sysctl hw.memsize` and calls it before the first renderer (3bab21765).
+- iOS answers `didReceiveMemoryWarning`: `frust_memory_warning` sends `RenderCommand::TrimMemory`
+  (fire-and-forget, serviced in every phase), `SurfaceRenderer::trim_memory` and
+  `EngineRenderer::trim_memory` hold the retained pages to the plain 32 MiB budget and clamp atlas
+  growth to the plain tier's bytes (`ImageResidency::request_growth_ceiling`; the atlas has no
+  layer-release primitive), one-way until the renderer is rebuilt. Android and desktop ignore the
+  command. Host-tested; on-device delivery was not exercised (rf01-13mini-memory-warning, skipped).
+- `frust-perf ios-mem phys_footprint_kib=<n>|unknown`, about 1 Hz on iOS under `perf-trace`, and the
+  compile-time `FRUST_FORCE_MOBILE_TIER` define (`frust build ios --define FRUST_FORCE_MOBILE_TIER=1`)
+  that forces the plain tier. iPhone 13 mini, S6, one session: `phys_footprint` p50 229.9 MiB plain vs
+  252.0 MiB `mobile_large` (+22 MiB), 527/527 vs 137/527 resident glyphs (rf01-13mini-footprint-ab,
+  p2-round1-integration-root).
+- `frust-testing`'s `dup_identities` gains `hvgl_restatement_is_attested_for_the_locked_glifo`: a
+  `glifo` bump fails on ubuntu CI until `HVGL_PARITY_VERIFIED_GLIFO` acknowledges the macOS parity
+  re-run (an attestation, not a run). `hvgl_atlas.rs` factors its outline and glyph-rect transforms
+  into pure helpers with 11 golden vectors.
 
 ### Changed
 
 - `FontHandle::with_synthesis` clamps skew to +/-30 degrees and embolden to at most 0.5 em.
+- Glyph admission is sticky: a run whose every glyph is already resident is served over the texel
+  budget, only a run that would insert is refused, and LRU eviction still drains the excess. iPhone
+  13 mini, S6 at 3x: the atlas held 0 of 527 glyphs and thrashed (24,051 evictions per three runs);
+  with sticky admission alone it holds 231, and 527 of 527 with the tier change below (5c4fcad87; gate gr02-13mini-residency).
+- On iOS the `mobile_large` tier starts at 3 GiB of `hw.memsize` (4 GiB elsewhere): a 4 GB iPhone
+  13 mini reports 3674 MiB and previously stayed on the plain tier. The tier raises the glyph atlas
+  from 16 to 64 MiB and the retained-page budget from 32 to 64 MiB.
 - Faux-bold embolden is computed per side from the size-quantized basis at the route key, the
   lowering and the resident plan, so the amount keyed and the amount drawn are the same bits.
   Sub-quantum scale jitter can still mint `glifo` cache entries, because the size `glifo` keys is not

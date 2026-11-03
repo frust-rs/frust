@@ -1147,6 +1147,70 @@ fn clearing_and_rebudgeting_change_what_the_ledger_lists() {
     );
 }
 
+/// A memory trim on the large tier (`EngineRenderer::trim_memory`) re-budgets
+/// the store to the plain one: least recently used pages go until it fits,
+/// the ledger's generation moves so the shell republishes it, and trimming
+/// again changes nothing.
+#[test]
+fn a_memory_trim_evicts_a_large_tier_store_down_to_the_plain_budget() {
+    const EDGE: u16 = 1024;
+    const PAGE: Rect = Rect::new(0.0, 0.0, EDGE as f64, EDGE as f64);
+    const PAGE_BYTES: u64 = EDGE as u64 * EDGE as u64 * 4;
+    const PAGES: u64 = 15;
+    const { assert!(PAGES * PAGE_BYTES <= RetainedBudget::MOBILE_LARGE.bytes) };
+    const { assert!(PAGES * PAGE_BYTES > RetainedBudget::MOBILE.bytes) };
+
+    let allocator = FakeAllocator::default();
+    let mut pages: FakePages = RetainedPages::new(RetainedBudget::MOBILE_LARGE, 8192);
+    for key in 1..=PAGES {
+        let mut compiler = SceneCompiler::new(EDGE, EDGE);
+        compiler.set_retained_layers(true);
+        let scene = scene_of(|builder| {
+            builder.push_retained(key, PAGE, HALF, 1.0);
+            builder.fill_rect(PAGE, Brush::Solid(RED));
+            builder.pop_retained();
+        });
+        let frame = compiler
+            .compile(&scene, Affine::IDENTITY, (EDGE, EDGE))
+            .expect("an in-range scene compiles");
+        run(&mut pages, &allocator, frame);
+    }
+    assert_eq!(
+        pages.len(),
+        PAGES as usize,
+        "fixture: the large store holds them all"
+    );
+    assert_eq!(pages.used_bytes(), PAGES * PAGE_BYTES);
+
+    let generation = pages.generation();
+    pages.set_budget(RetainedBudget::MOBILE);
+    assert!(pages.used_bytes() <= RetainedBudget::MOBILE.bytes);
+    assert_eq!(
+        pages.len(),
+        (RetainedBudget::MOBILE.bytes / PAGE_BYTES) as usize
+    );
+    assert_ne!(
+        pages.generation(),
+        generation,
+        "the shell republishes the ledger"
+    );
+    let survivors: Vec<u64> = (PAGES - pages.len() as u64 + 1..=PAGES).collect();
+    assert_eq!(
+        keys(&pages),
+        survivors,
+        "the least recently used went first"
+    );
+
+    let generation = pages.generation();
+    pages.set_budget(RetainedBudget::MOBILE);
+    assert_eq!(
+        pages.generation(),
+        generation,
+        "a second trim evicts nothing"
+    );
+    assert_eq!(keys(&pages), survivors);
+}
+
 #[test]
 fn the_budget_follows_the_atlas_tier() {
     assert_eq!(

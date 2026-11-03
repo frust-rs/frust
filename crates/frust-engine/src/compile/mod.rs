@@ -31,7 +31,10 @@
 //! run is resolved through the glyph atlas and each glyph drawn as one image
 //! paint over its slot, while an animating, oversized or refused one has its
 //! outlines fetched and scaled by `glifo` and rasterized as any other filled
-//! path would be, painted by the run's own brush (see [`crate::text`]).
+//! path would be, painted by the run's own brush (see [`crate::text`]); a run
+//! of a face `glifo` cannot read (`hvgl`-only, Apple's PingFang) takes the same
+//! two routes, its atlas glyphs inserted frust-side between the two walks
+//! (see [`crate::text::hvgl_atlas`]).
 //! Shader quads are recognised
 //! and skipped — the engine grows them in a later pass, and skipping is the
 //! conservative behaviour (a frame draws less, never wrong). A backdrop blur
@@ -82,7 +85,7 @@ use peniko::{Brush, Color, Fill, ImageData};
 use frust_gpu::{SceneTextureId, TierCaps};
 use frust_scene::{Command, CornerRadii, DashPattern, GlyphRun, PathStyle, Scene};
 
-use glifo::{GlyphAtlas, GlyphPrepCache, PendingClearRect};
+use glifo::{GlyphAtlas, GlyphCacheKey, GlyphPrepCache, PendingClearRect};
 
 use vello_common::encode::EncodedPaint;
 use vello_common::fearless_simd::Level;
@@ -104,7 +107,9 @@ use crate::compile::parallel::{Claim, Geometry, Merge, Pool};
 use crate::config;
 use crate::error::EngineError;
 use crate::filters::{Backdrop, MAX_BACKDROPS_PER_FRAME, backdrop_region, backdrop_sigma};
+use crate::text::atlas_policy::Synthesis;
 use crate::text::hvgl::HvglOutlines;
+use crate::text::hvgl_atlas::{self, CollectedFaces, Measured};
 use crate::text::{
     AtlasPolicy, FontFacts, GlyphQuadScratch, GlyphQuadTargets, GlyphRunRouting, GlyphRunTargets,
     OutlineReason, RunBasis, RunKey, RunRoute, context_paint, glyph_atlas_policy, lower_glyph_run,
@@ -467,6 +472,23 @@ pub struct CompiledFrame {
     ///
     /// Observational, like [`synthetic_oblique_runs`](Self::synthetic_oblique_runs).
     pub variation_axes_outline_runs: u32,
+    /// How many of [`atlas_glyph_draws`](Self::atlas_glyph_draws) drew a glyph
+    /// of an `hvgl`-only face (Apple's PingFang, whose outlines `glifo` cannot
+    /// read) from the entries the frust-side insert made for it (see
+    /// [`crate::text::hvgl_atlas`]).
+    ///
+    /// Observational: a page of settled PingFang text reads every inked glyph
+    /// here, and zero with [`SceneCompiler::set_hvgl_atlas`] off.
+    pub hvgl_atlas_draws: u32,
+    /// How many glyphs of `hvgl`-only faces were filled as outlines this frame
+    /// instead of drawn from the atlas: every one whose run the policy routed
+    /// to outlines (an animating or oversized size, a spent budget, a brush
+    /// that is not one solid colour, the route off through
+    /// [`SceneCompiler::set_hvgl_atlas`]), and every one the atlas had no room
+    /// for. Counted per recorded draw, like
+    /// [`glyph_draws`](Self::glyph_draws), of which it and
+    /// [`hvgl_atlas_draws`](Self::hvgl_atlas_draws) are the `hvgl` share.
+    pub hvgl_outline_fallbacks: u32,
     /// Where each of this frame's atlas-sampled glyphs lives, one entry per
     /// atlas draw (see [`GlyphSlot`]).
     pub glyph_slots: Vec<GlyphSlot>,
@@ -661,6 +683,16 @@ pub struct SceneCompiler {
     /// the faces it opened in CoreText and its bounded outline cache (see
     /// [`crate::text::hvgl`]).
     hvgl_outlines: HvglOutlines,
+    /// Whether a run of an `hvgl`-only face may take the glyph atlas through
+    /// the frust-side insert (see [`Self::set_hvgl_atlas`]). On by default.
+    hvgl_atlas: bool,
+    /// The `hvgl` faces this frame's collect walk sent to the insert, so the
+    /// atlas pass can find the handle behind each key it measures and
+    /// rasterizes. Per-frame; retained for its allocation.
+    hvgl_faces: CollectedFaces,
+    /// Scratch for the keys the atlas pass measured inkless, handed to the
+    /// policy once the pass is built. Per-frame; retained for its allocation.
+    hvgl_inkless: Vec<GlyphCacheKey>,
     /// Whether a glyph run's outline is hinted before it is rasterized (see
     /// [`crate::text`]'s module doc for the split this half of the policy
     /// answers). Mobile-safe by default — `false`, the same "known nothing
@@ -795,6 +827,26 @@ impl SceneCompiler {
     #[must_use]
     pub fn glyph_run_cache_enabled(&self) -> bool {
         self.glyph_run_cache
+    }
+
+    /// Set whether a run of an `hvgl`-only face (Apple's PingFang, whose
+    /// outlines `glifo` cannot read) may take the glyph atlas, its glyphs
+    /// rasterized from CoreText's outlines into atlas entries of their own
+    /// (see [`crate::text::hvgl_atlas`]). Takes effect from the next frame.
+    ///
+    /// On by default: off, every such glyph is filled from its outline on
+    /// every frame, which costs several hundred microseconds of compile for a
+    /// paragraph of Han text the atlas serves in about ten. The switch is the
+    /// comparison and bisection arm; runs it refuses count in
+    /// [`CompiledFrame::hvgl_outline_fallbacks`].
+    pub fn set_hvgl_atlas(&mut self, enabled: bool) {
+        self.hvgl_atlas = enabled;
+    }
+
+    /// Whether runs of `hvgl`-only faces may take the glyph atlas.
+    #[must_use]
+    pub fn hvgl_atlas_enabled(&self) -> bool {
+        self.hvgl_atlas
     }
 
     /// Set whether retained brackets are recorded for a retained-page store.
@@ -943,6 +995,9 @@ impl SceneCompiler {
             synthetic_oblique: false,
             font_facts: FontFacts::default(),
             hvgl_outlines: HvglOutlines::default(),
+            hvgl_atlas: true,
+            hvgl_faces: CollectedFaces::default(),
+            hvgl_inkless: Vec::new(),
             hint_text: false,
             externals: ExternalExtents::new(),
             frame_extent: (width, height),
@@ -1012,6 +1067,13 @@ impl SceneCompiler {
     /// The images this compiler currently holds resident.
     pub fn images(&self) -> &ImageResidency {
         &self.images
+    }
+
+    /// Hold glyph residency to its share of `layers` atlas layers — the memory
+    /// trim's companion to [`ImageResidency::request_growth_ceiling`], so the
+    /// layers a sealed array keeps are not all spent on glyphs.
+    pub(crate) fn cap_glyph_atlas_layers(&mut self, layers: usize) {
+        self.glyph_atlas.cap_texel_budget(layers);
     }
 
     /// Record that a compiled frame's
@@ -1198,20 +1260,11 @@ impl SceneCompiler {
         // frame's eviction freed, to be zeroed ahead of anything this frame
         // writes (see [`CompiledFrame::glyph_clears`]).
         self.glyph_atlas.begin_frame();
+        self.hvgl_faces.clear();
         self.classify_runs(scene, root);
         let classify = clock.lap();
 
-        let glyph_clears = self
-            .glyph_atlas
-            .build(self.images.allocator_mut(), |_| {
-                // Unreachable: the collect walk claims no glyph, because the
-                // allocation and the rasterization of a cached glyph are
-                // `glifo`'s own — it keys, packs and records every one of them
-                // itself once a run reaches it with the cacher enabled. So the
-                // pass this closes carries clears and nothing else.
-                None
-            })
-            .clears;
+        let glyph_clears = self.build_glyph_pass();
         let admit = clock.lap();
 
         let mut frame = CompiledFrame {
@@ -1237,6 +1290,8 @@ impl SceneCompiler {
             atlas_glyph_draws: 0,
             synthetic_oblique_runs: 0,
             variation_axes_outline_runs: 0,
+            hvgl_atlas_draws: 0,
+            hvgl_outline_fallbacks: 0,
             glyph_slots: Vec::new(),
             glyph_quads: Vec::new(),
             glyph_run_paints: Vec::new(),
@@ -1799,32 +1854,130 @@ impl SceneCompiler {
                     // against — the run's own brush when it is solid, black
                     // otherwise, which is the same answer
                     // `EngineGlyphSink::get_context_color` gives it.
-                    let context_color = match context_paint(&run.brush) {
-                        vello_common::paint::PaintType::Solid(color) => color,
-                        _ => peniko::color::palette::css::BLACK,
+                    let solid = match context_paint(&run.brush) {
+                        vello_common::paint::PaintType::Solid(color) => Some(color),
+                        _ => None,
                     };
-                    // An `hvgl`-only face is routed to outlines exactly as a
-                    // colour face is: its glyphs are drawn by the `hvgl`
-                    // provider, never cached by `glifo`.
+                    let context_color = solid.unwrap_or(peniko::color::palette::css::BLACK);
+                    let transform = root * retained_stack.correction() * run.transform;
                     let facts = self.font_facts.of(run.font.font());
-                    let key = RunKey::for_run_with(
-                        run,
-                        root * retained_stack.correction() * run.transform,
-                        self.hint_text,
-                        facts.color || facts.hvgl,
-                        context_color,
-                        &mut self.run_glyph_ids,
-                        RunBasis {
-                            upem: f32::from(facts.upem),
-                            synthetic_oblique: self.synthetic_oblique,
-                        },
-                    );
-                    let route = self.glyph_atlas.classify_run(&key);
+                    // An `hvgl`-only face never reaches `glifo`: its run is
+                    // routed here and, on the atlas route, collected for the
+                    // frust-side insert. A face that is also a colour face is
+                    // refused as one.
+                    let route = if facts.hvgl && !facts.color {
+                        self.classify_hvgl_run(run, transform, solid.is_some(), facts.upem)
+                    } else {
+                        let key = RunKey::for_run_with(
+                            run,
+                            transform,
+                            self.hint_text,
+                            facts.color,
+                            context_color,
+                            &mut self.run_glyph_ids,
+                            RunBasis {
+                                upem: f32::from(facts.upem),
+                                synthetic_oblique: self.synthetic_oblique,
+                            },
+                        );
+                        self.glyph_atlas.classify_run(&key)
+                    };
                     self.run_routes.push(route);
                 }
                 _ => {}
             }
         }
+    }
+
+    /// The route of a run of an `hvgl`-only face under the device
+    /// `transform`, decided in the collect walk.
+    ///
+    /// [`OutlineReason::Hvgl`] when the frust-side insert cannot take it — the
+    /// switch off ([`Self::set_hvgl_atlas`]), a brush that is not `solid` (an
+    /// atlas glyph is a coverage mask tinted with one colour), or a face the
+    /// provider cannot open. Otherwise the policy classifies it keyed as the
+    /// insert keys it — unhinted, at its variation coordinates, with no
+    /// embolden or skew, under [`hvgl_atlas::face_id`] — and an atlas route
+    /// comes back with the run's missing glyphs collected for
+    /// [`Self::build_glyph_pass`] (see [`crate::text::hvgl_atlas`]).
+    fn classify_hvgl_run(
+        &mut self,
+        run: &GlyphRun,
+        transform: Affine,
+        solid: bool,
+        upem: u16,
+    ) -> RunRoute {
+        if !self.hvgl_atlas || !solid || !self.hvgl_outlines.face_drawable(&run.font) {
+            return RunRoute::Outline(OutlineReason::Hvgl);
+        }
+        let face = hvgl_atlas::face_id(&run.font);
+        let mut key = RunKey::for_run_with(
+            run,
+            transform,
+            false,
+            false,
+            peniko::color::palette::css::BLACK,
+            &mut self.run_glyph_ids,
+            RunBasis {
+                upem: f32::from(upem),
+                synthetic_oblique: false,
+            },
+        );
+        key.font_id = face;
+        key.synthesis = Synthesis::new(run.font.normalized_coords(), 0.0);
+        let route = self.glyph_atlas.classify_run(&key);
+        let route = self.glyph_atlas.collect_run(route, &key);
+        if route.atlas().is_some() {
+            self.hvgl_faces.note(face, &run.font);
+        }
+        route
+    }
+
+    /// Close the collect phase: place every glyph the collect walk claimed
+    /// for the frust-side `hvgl` insert, record its outline into its page, and
+    /// answer the rectangles last frame's eviction freed (see
+    /// [`CompiledFrame::glyph_clears`]).
+    ///
+    /// Only `hvgl` runs claim glyphs here: a `glifo` run's glyphs are keyed,
+    /// placed and recorded by `glifo` itself as the draw walk reaches it. A
+    /// claimed glyph is measured from the provider's outline; one with no ink
+    /// is remembered inkless, one the provider cannot supply is left to the
+    /// outline route, and one the atlas has no room for is drawn as an
+    /// outline in the draw walk.
+    fn build_glyph_pass(&mut self) -> Vec<PendingClearRect> {
+        let Self {
+            glyph_atlas,
+            images,
+            hvgl_faces,
+            hvgl_outlines,
+            hvgl_inkless,
+            ..
+        } = self;
+        hvgl_inkless.clear();
+        let pass = glyph_atlas.build(images.allocator_mut(), |key| {
+            match hvgl_atlas::measure(key, hvgl_faces, hvgl_outlines) {
+                Measured::Ink(metrics) => Some(metrics),
+                Measured::Inkless => {
+                    hvgl_inkless.push(key.clone());
+                    None
+                }
+                Measured::Unavailable => None,
+            }
+        });
+        for key in hvgl_inkless.drain(..) {
+            glyph_atlas.remember_inkless(key);
+        }
+        if !pass.uploads.is_empty() {
+            let pages = glyph_atlas.pages();
+            hvgl_atlas::rasterize(
+                &pass.uploads,
+                hvgl_faces,
+                hvgl_outlines,
+                glyph_atlas.atlas_mut(),
+                pages,
+            );
+        }
+        pass.clears
     }
 
     /// The next run's route, or `None` once the collect walk's answers are
@@ -1943,12 +2096,18 @@ impl SceneCompiler {
         };
         // Quads only for a run the atlas serves, and never under a coverage
         // mask: a quad's rectangle can be trimmed to the scissor but cannot
-        // carry a mask (see [`crate::text`]'s backend).
+        // carry a mask (see [`crate::text`]'s backend). Nor for a collected
+        // `hvgl` run whose glyphs were inserted this frame: like a `glifo` run
+        // that missed, it draws the general way on the frame that fills them.
+        let fresh = matches!(&route, Some(RunRoute::Atlas(run)) if run.missed_at_collect());
         let quads =
-            (*glyph_quads && atlas.is_some() && clips.mask().is_none()).then(|| GlyphQuadTargets {
-                scratch: glyph_quad_scratch,
-                window: quad_window(generator, groups),
+            (*glyph_quads && atlas.is_some() && clips.mask().is_none() && !fresh).then(|| {
+                GlyphQuadTargets {
+                    scratch: glyph_quad_scratch,
+                    window: quad_window(generator, groups),
+                }
             });
+        let atlas_draws_before = frame.atlas_glyph_draws;
         let outcome = lower_glyph_run(
             run,
             transform,
@@ -1975,6 +2134,13 @@ impl SceneCompiler {
 
         frame.glyph_draws = frame.glyph_draws.saturating_add(outcome.drawn);
         frame.skipped_glyphs = frame.skipped_glyphs.saturating_add(outcome.skipped);
+        if hvgl_face {
+            let atlas_draws = frame.atlas_glyph_draws.saturating_sub(atlas_draws_before);
+            frame.hvgl_atlas_draws = frame.hvgl_atlas_draws.saturating_add(atlas_draws);
+            frame.hvgl_outline_fallbacks = frame
+                .hvgl_outline_fallbacks
+                .saturating_add(outcome.drawn.saturating_sub(atlas_draws));
+        }
         if outcome.resident {
             frame.resident_glyph_runs = frame.resident_glyph_runs.saturating_add(1);
         }

@@ -77,6 +77,9 @@ use atlas_policy::{
 /// the rest of the crate's text cases name glyph ids against.
 const LATIN_FONT: &[u8] = include_bytes!("../../../testing/fonts/NotoSans-Subset.ttf");
 
+/// How many glyph ids [`LATIN_FONT`] carries (`maxp`), `.notdef` included.
+const GLYPHS_IN_LATIN_FONT: u32 = 22;
+
 /// Glyph ids of `Hello` in [`LATIN_FONT`]: `H`, `e`, `l`, `l`, `o`.
 const HELLO: [u32; 5] = [5, 6, 7, 7, 8];
 
@@ -112,7 +115,7 @@ fn next_font() -> u64 {
 /// [`collect_hello`] goes on to collect. A case sizing that demand deliberately
 /// — the budget is charged against it — asks for it by name through
 /// [`run_key_demanding`].
-fn run_key(font_id: u64, size: f32) -> RunKey {
+fn run_key(font_id: u64, size: f32) -> RunKey<'static> {
     scaled_run_key(font_id, size, Affine::IDENTITY)
 }
 
@@ -121,7 +124,7 @@ fn run_key(font_id: u64, size: f32) -> RunKey {
 /// The quantity a run's admission is charged at: `glifo` owns the per-glyph
 /// loop once a run is admitted, so the policy prices the whole run up front
 /// against what its entries can grow to.
-fn run_key_demanding(font_id: u64, size: f32, distinct_glyphs: u32) -> RunKey {
+fn run_key_demanding(font_id: u64, size: f32, distinct_glyphs: u32) -> RunKey<'static> {
     RunKey {
         distinct_glyphs,
         ..run_key(font_id, size)
@@ -129,7 +132,7 @@ fn run_key_demanding(font_id: u64, size: f32, distinct_glyphs: u32) -> RunKey {
 }
 
 /// A run identity at `size` drawn under `transform`, on its own private font.
-fn scaled_run_key(font_id: u64, size: f32, transform: Affine) -> RunKey {
+fn scaled_run_key(font_id: u64, size: f32, transform: Affine) -> RunKey<'static> {
     RunKey {
         font_id,
         font_index: 0,
@@ -141,6 +144,7 @@ fn scaled_run_key(font_id: u64, size: f32, transform: Affine) -> RunKey {
         context_color: BLACK,
         synthesis: Some(atlas_policy::Synthesis::NONE),
         oblique: false,
+        glyphs: &[],
     }
 }
 
@@ -883,6 +887,195 @@ fn sustained_large_text_leaves_the_images_their_share_of_the_allocator() {
     assert_eq!(residency.skipped(), 0);
 }
 
+/// A memory trim clamps the shared atlas's growth one-way
+/// (`ImageResidency::request_growth_ceiling`, what `EngineRenderer::trim_memory`
+/// asks for): an insertion that would add a layer past the ceiling is refused —
+/// an image is skipped, a glyph falls back to outlines — while every resident
+/// run keeps serving from the atlas, and the LRU still re-lets space inside the
+/// layers that exist.
+#[test]
+fn after_a_memory_trim_no_insertion_grows_the_atlas_and_resident_runs_keep_serving() {
+    // The deep large shape in miniature: many small layers, grown on demand.
+    let budget = AtlasBudget {
+        atlas_size: (256, 256),
+        max_atlases: 16,
+    };
+    let mut trimmed = ImageResidency::new(budget);
+    let mut control = ImageResidency::new(budget);
+    let mut engine = AtlasPolicy::new(trimmed.allocator(), false);
+    let font = next_font();
+    // Two of these cannot share a layer, so each takes one.
+    let big = [image(200, 200, 0x31), image(200, 200, 0x32)];
+    let third = image(200, 200, 0x33);
+
+    trimmed.begin_frame();
+    let pass = frame(&mut engine, trimmed.allocator_mut(), &[(font, 16.0)]);
+    assert_eq!(pass.uploads.len(), 4, "fixture: `Hello` is resident");
+    control.begin_frame();
+    for big in &big {
+        trimmed.resolve(big).expect("fixture: room to grow");
+        control.resolve(big).expect("fixture: room to grow");
+    }
+    assert_eq!(
+        trimmed.layers(),
+        2,
+        "fixture: text and two images span two layers"
+    );
+
+    trimmed.request_growth_ceiling(2);
+    trimmed.request_growth_ceiling(8);
+    assert_eq!(
+        trimmed.growth_ceiling(),
+        Some(2),
+        "a ceiling only ever falls"
+    );
+
+    // The next frame seals the array at its ceiling.
+    trimmed.begin_frame();
+    assert!(trimmed.is_growth_sealed());
+    assert_eq!(trimmed.layers(), 2);
+    for big in &big {
+        trimmed
+            .resolve(big)
+            .expect("a resident image keeps serving");
+    }
+    assert!(
+        trimmed.resolve(&third).is_err(),
+        "every rectangle belongs to this frame and the array may not grow"
+    );
+    assert_eq!(trimmed.layers(), 2);
+    control.begin_frame();
+    for image in big.iter().chain([&third]) {
+        control.resolve(image).expect("the untrimmed array grows");
+    }
+    assert_eq!(
+        control.layers(),
+        3,
+        "the same frame grows an untrimmed array"
+    );
+
+    // The resident run is served from the atlas, inserting nothing.
+    engine.begin_frame();
+    let route = engine.classify_run(&run_key(font, 16.0));
+    let run = *route.atlas().expect("a resident run keeps the atlas route");
+    for (index, glyph) in HELLO.iter().enumerate() {
+        assert_eq!(
+            engine.collect_glyph(&run, *glyph, index as f32 * 8.0),
+            GlyphRoute::Cached
+        );
+    }
+    assert!(engine.build(trimmed.allocator_mut(), raster).is_empty());
+    engine.acknowledge_clears();
+    engine.end_frame(trimmed.allocator_mut());
+    engine.acknowledge_replay();
+
+    // New glyphs fill what the two layers have left, then fall back.
+    let fresh = next_font();
+    engine.begin_frame();
+    let classified = engine.classify_run(&run_key_demanding(fresh, 48.0, 64));
+    let route = engine.admit_run(classified);
+    let run = *route
+        .atlas()
+        .expect("fixture: the run is under the glyph budget");
+    for glyph in 0..64 {
+        engine.collect_glyph(&run, glyph, 0.0);
+    }
+    let pass = engine.build(trimmed.allocator_mut(), raster);
+    assert!(
+        pass.no_room > 0,
+        "the glyphs that need a third layer are refused"
+    );
+    assert!(
+        !pass.uploads.is_empty(),
+        "the space the layers had left is used"
+    );
+    assert!(
+        pass.uploads.iter().all(|upload| upload.slot.page_index < 2),
+        "no glyph is placed past the sealed layers"
+    );
+    engine.acknowledge_clears();
+    engine.end_frame(trimmed.allocator_mut());
+    engine.acknowledge_replay();
+    assert_eq!(trimmed.layers(), 2);
+
+    // An image left undrawn is reaped as ever, and its rectangle re-let.
+    for _ in 0..=MAX_UNSEEN_FRAMES + 1 {
+        trimmed.begin_frame();
+        trimmed.resolve(&big[1]).expect("still resident");
+    }
+    trimmed
+        .resolve(&third)
+        .expect("the reaped rectangle is re-let");
+    assert_eq!(trimmed.layers(), 2);
+}
+
+/// Sustained large text in a trimmed atlas: the array sealed at one layer
+/// and minting fresh glyphs every frame. Returns whether an image asking
+/// afterwards still finds room, and the policy's texel budget.
+fn image_room_after_text_in_a_sealed_atlas(cap_glyph_budget: bool) -> (bool, u64) {
+    // The wide large shape in miniature: few big layers, sealed at one.
+    let budget = AtlasBudget {
+        atlas_size: (512, 512),
+        max_atlases: 4,
+    };
+    let mut residency = ImageResidency::new(budget);
+    let mut engine = AtlasPolicy::new(residency.allocator(), false);
+    residency.request_growth_ceiling(1);
+    if cap_glyph_budget {
+        engine.cap_texel_budget(1);
+    }
+    let font = next_font();
+
+    let mut next_glyph = 0_u32;
+    for _ in 0..40 {
+        residency.begin_frame();
+        engine.begin_frame();
+        let classified = engine.classify_run(&run_key(font, MAX_CACHED_FONT_SIZE));
+        let route = engine.admit_run(classified);
+        if let Some(run) = route.atlas() {
+            let run = *run;
+            for _ in 0..4 {
+                engine.collect_glyph(&run, next_glyph, 0.0);
+                next_glyph += 1;
+            }
+        }
+        engine.build(residency.allocator_mut(), raster);
+        engine.acknowledge_clears();
+        engine.end_frame(residency.allocator_mut());
+        engine.acknowledge_replay();
+    }
+    assert_eq!(residency.layers(), 1, "fixture: the seal held at one layer");
+
+    residency.begin_frame();
+    (
+        residency.resolve(&image(256, 256, 0x41)).is_ok(),
+        engine.texel_budget(),
+    )
+}
+
+/// A memory trim cuts the glyph texel budget to its share of the sealed
+/// layers (`EngineRenderer::trim_memory` via `AtlasPolicy::cap_texel_budget`),
+/// so images keep the half of a sealed array the plain tier gives them. The
+/// uncapped control shows the hole the cut prevents: a budget sized for the
+/// whole large array lets glyphs take every layer the seal keeps.
+#[test]
+fn after_a_memory_trim_sustained_large_text_still_leaves_the_images_their_share() {
+    let (uncapped_room, uncapped_budget) = image_room_after_text_in_a_sealed_atlas(false);
+    let (capped_room, capped_budget) = image_room_after_text_in_a_sealed_atlas(true);
+    assert!(
+        capped_budget < uncapped_budget,
+        "the cap lowers the budget: {capped_budget} vs {uncapped_budget}"
+    );
+    assert!(
+        !uncapped_room,
+        "fixture: without the cap, text sized for four layers fills the one sealed layer"
+    );
+    assert!(
+        capped_room,
+        "an image arriving after sustained large text finds room in the sealed array"
+    );
+}
+
 /// Images keep their share under *mixed* sustained text, not merely under one
 /// size class of it.
 ///
@@ -991,6 +1184,218 @@ fn a_route_is_re_tested_against_the_residency_the_frame_itself_created() {
         "a route consumed after the ceiling was reached is narrowed to outlines \
          rather than honoured because the frame happened to start below it"
     );
+}
+
+/// Device size of the over-budget population below: large enough that a few
+/// hundred entries spend the whole mobile share, small enough that the packer
+/// itself never refuses one.
+const OVER_BUDGET_PX: f32 = 64.0;
+
+/// Distinct glyph ids of the run that over-fills the mobile budget. Charged at
+/// classification for its distinct ids (150 at 5,184 texels apiece fits an
+/// empty share), it inserts each id in all four subpixel buckets — 600 entries,
+/// about one and a half times the share.
+const OVER_BUDGET_IDS: u32 = 150;
+
+/// Glyphs `ids`, each placed once in every one of the four subpixel buckets: a
+/// quarter pixel apart within one whole-pixel cell per bucket, so the run keys
+/// four entries per id while being charged one.
+fn every_bucket(ids: std::ops::Range<u32>) -> Vec<Glyph> {
+    ids.flat_map(|id| {
+        (0..4_u8).map(move |bucket| Glyph {
+            id,
+            x: id as f32 * 100.0 + f32::from(bucket) / 4.0,
+            y: 0.0,
+        })
+    })
+    .collect()
+}
+
+/// The run identity for `glyphs` of `font` at `size`, carrying the glyphs so
+/// the policy can ask whether they are resident, and charged their distinct ids.
+fn placed_run_key(font: u64, size: f32, glyphs: &[Glyph]) -> RunKey<'_> {
+    let distinct: HashSet<u32> = glyphs.iter().map(|glyph| glyph.id).collect();
+    RunKey {
+        glyphs,
+        ..run_key_demanding(font, size, distinct.len() as u32)
+    }
+}
+
+/// One serviced frame drawing `runs` the way the engine does: every run
+/// classified first, then each admitted and — when the atlas serves it — its
+/// glyphs looked up or claimed, as `glifo` does while drawing it. Answers each
+/// run's consumed route and the frame's pass.
+fn placed_frame(
+    engine: &mut AtlasPolicy,
+    images: &mut ImageCache,
+    runs: &[RunKey<'_>],
+) -> (Vec<RunRoute>, AtlasPass) {
+    engine.begin_frame();
+    let classified: Vec<RunRoute> = runs.iter().map(|run| engine.classify_run(run)).collect();
+    let mut routes = Vec::new();
+    for (key, route) in runs.iter().zip(classified) {
+        let route = engine.admit_run(route);
+        if let Some(run) = route.atlas().copied() {
+            for glyph in key.glyphs {
+                engine.collect_glyph(&run, glyph.id, glyph.x.fract());
+            }
+        }
+        routes.push(route);
+    }
+    let pass = engine.build(images, raster);
+    engine.acknowledge_clears();
+    engine.end_frame(images);
+    engine.acknowledge_replay();
+    (routes, pass)
+}
+
+/// A population over the budget whose runs are all still drawn keeps being
+/// served from the atlas, across eviction passes, while a run that would add
+/// entries to it is refused.
+///
+/// The thrash this replaced: once the resident population alone was over the
+/// budget, *every* run was routed to outlines — including runs whose every
+/// glyph was resident — so nothing touched those entries, the LRU reaped them,
+/// and the next frame admitted and rasterized the whole text again. The budget
+/// is a bound on insertions; a run that inserts nothing is not what it guards.
+#[test]
+fn a_resident_population_over_the_budget_keeps_being_served_and_refuses_only_insertions() {
+    let mut images = ImageCache::new_with_config(AtlasBudget::MOBILE.config());
+    let mut engine = policy(&images, false);
+    let (font, newcomer) = (next_font(), next_font());
+    let paragraph = every_bucket(0..OVER_BUDGET_IDS);
+    let fresh = every_bucket(0..5);
+
+    // Frame one: admitted whole against an empty share, then over it.
+    let (routes, pass) = placed_frame(
+        &mut engine,
+        &mut images,
+        &[placed_run_key(font, OVER_BUDGET_PX, &paragraph)],
+    );
+    assert!(routes[0].atlas().is_some_and(|run| !run.resident_only()));
+    assert_eq!(pass.uploads.len(), paragraph.len());
+    assert!(
+        engine.resident_texels() > engine.texel_budget(),
+        "fixture precondition: {} entries charge {} of a {} texel budget",
+        engine.entry_count(),
+        engine.resident_texels(),
+        engine.texel_budget()
+    );
+    let entries = engine.entry_count();
+    let charged = engine.resident_texels();
+
+    // Three eviction passes of the paragraph with a new run on top.
+    for frame in 0..(3 * EVICTION_FREQUENCY) {
+        let (routes, pass) = placed_frame(
+            &mut engine,
+            &mut images,
+            &[
+                placed_run_key(font, OVER_BUDGET_PX, &paragraph),
+                placed_run_key(newcomer, OVER_BUDGET_PX, &fresh),
+            ],
+        );
+        let served = routes[0]
+            .atlas()
+            .unwrap_or_else(|| panic!("frame {frame}: the resident paragraph was refused"));
+        assert!(
+            served.resident_only(),
+            "frame {frame}: served on the strength of its residency"
+        );
+        assert_eq!(
+            routes[1].outline_reason(),
+            Some(OutlineReason::ResidencyFull),
+            "frame {frame}: the run that would insert is refused"
+        );
+        assert_eq!(engine.over_budget_runs(), 1, "frame {frame}");
+        assert!(pass.uploads.is_empty(), "frame {frame}: nothing inserted");
+        assert_eq!(pass.no_room, 0, "frame {frame}");
+        assert_eq!(
+            engine.entry_count(),
+            entries,
+            "frame {frame}: nothing reaped and nothing re-inserted"
+        );
+        assert_eq!(engine.resident_texels(), charged, "frame {frame}");
+    }
+}
+
+/// A population over the budget still drains by LRU: what stops being drawn is
+/// reaped on the next eviction pass however far over the budget the rest is,
+/// the charge falls with it, and the space it frees admits runs the budget
+/// refused while it was held.
+#[test]
+fn an_over_budget_population_drains_by_lru_and_frees_space_for_new_runs() {
+    let mut images = ImageCache::new_with_config(AtlasBudget::MOBILE.config());
+    let mut engine = policy(&images, false);
+    let (font, newcomer) = (next_font(), next_font());
+    let paragraph = every_bucket(0..OVER_BUDGET_IDS);
+    let kept = every_bucket(0..OVER_BUDGET_IDS / 2);
+    let fresh = every_bucket(0..5);
+
+    placed_frame(
+        &mut engine,
+        &mut images,
+        &[placed_run_key(font, OVER_BUDGET_PX, &paragraph)],
+    );
+    assert!(
+        engine.resident_texels() > engine.texel_budget(),
+        "fixture precondition: the paragraph is over the budget"
+    );
+    let full = engine.entry_count();
+
+    // Half the paragraph leaves the screen. The half still drawn is served the
+    // whole time — the population is drained, not refused — and the newcomer
+    // is refused until the eviction pass has given the departed half back.
+    let mut drained_after = None;
+    for frame in 0..(2 * EVICTION_FREQUENCY + 8) {
+        let over = engine.resident_texels() > engine.texel_budget();
+        let (routes, pass) = placed_frame(
+            &mut engine,
+            &mut images,
+            &[
+                placed_run_key(font, OVER_BUDGET_PX, &kept),
+                placed_run_key(newcomer, OVER_BUDGET_PX, &fresh),
+            ],
+        );
+        let served = routes[0]
+            .atlas()
+            .unwrap_or_else(|| panic!("frame {frame}: the drawn half was refused"));
+        assert_eq!(
+            served.resident_only(),
+            over,
+            "frame {frame}: served resident-only exactly while over the budget"
+        );
+        if over {
+            assert_eq!(
+                routes[1].outline_reason(),
+                Some(OutlineReason::ResidencyFull),
+                "frame {frame}: refused while the departed half still holds its space"
+            );
+            assert!(pass.uploads.is_empty(), "frame {frame}");
+        } else {
+            assert!(
+                routes[1].atlas().is_some(),
+                "frame {frame}: admitted once the space was freed: {:?}",
+                routes[1].outline_reason()
+            );
+            drained_after.get_or_insert(frame);
+        }
+    }
+    let drained_after = drained_after.expect("the departed half is reaped inside two passes");
+    assert!(
+        drained_after <= EVICTION_FREQUENCY + MAX_ENTRY_AGE + 1,
+        "drained after {drained_after} frames"
+    );
+    assert_eq!(
+        engine.entry_count(),
+        kept.len() + fresh.len(),
+        "the departed half is gone, the kept half and the newcomer are resident"
+    );
+    assert!(
+        engine.entry_count() < full,
+        "the population shrank from {full}"
+    );
+    assert!(engine.resident_texels() <= engine.texel_budget());
+    assert_eq!(engine.over_budget_runs(), 0);
 }
 
 /// A colour face is refused the atlas route outright, whatever it is drawn at.
@@ -3205,11 +3610,18 @@ fn entries_after_scale_jitter(font: FontHandle) -> (usize, bool) {
 }
 
 /// A faux-bold run under a transform whose scale jitters inside one size
-/// quantum stays on the atlas and costs no more entries than the same run
-/// without synthesis: the stroke is derived from the quantized basis, so the
-/// embolden is never what mints a key. (`glifo` 0.3.0 keys the size itself
-/// exactly, `GlyphCacheKey::size_bits`, so the entry count of a jittered
-/// scale is the plain run's; the embolden adds nothing to it.)
+/// quantum stays on the atlas and costs exactly the entries the same run
+/// without synthesis costs.
+///
+/// What this does *not* pin is the embolden quantization: `glifo` 0.3.0 keys
+/// the raw size (`GlyphCacheKey::size_bits`), which moves with the jitter, so
+/// the jittered frame mints a fresh set of entries for the plain and the bold
+/// run alike, and the case reads the same whether the stroke is derived from
+/// the quantized basis or the raw one. The quantization guarantees agreement —
+/// the route key, the resident identity and the stroke `glifo` keys and draws
+/// carry the same embolden bits — and
+/// `a_faux_bold_paragraph_over_budget_under_scale_jitter_needs_every_site_to_agree`
+/// is the case that fails when any one of those sites stops using it.
 #[test]
 fn a_faux_bold_run_under_sub_quantum_scale_jitter_stays_resident() {
     let (plain_entries, _) = entries_after_scale_jitter(latin_font());
@@ -3220,4 +3632,115 @@ fn a_faux_bold_run_under_sub_quantum_scale_jitter_stays_resident() {
         bold_entries, plain_entries,
         "faux bold minted entries a plain run under the same jitter did not"
     );
+}
+
+/// Font size of the faux-bold paragraph below, drawn under a root scale of 2
+/// (then 2.001): 116 device px, where a glyph is charged 17,030 texels.
+const BOLD_PARAGRAPH_SIZE: f32 = 58.0;
+
+/// A faux-bold paragraph over the mobile budget, after a sub-quantum scale
+/// jitter, is served out of the resident-run cache — and only because all
+/// three sites that derive its embolden agree on the bits.
+///
+/// Hinted, so the stroke basis is the drawn device size, which the jitter
+/// moves off the quarter-pixel grid (116 px to 116.058 px): the raw basis and
+/// the quantized one give different embolden bits there. The paragraph is sized
+/// so its first frame (scale 2) fits the budget and the jittered frame's fresh
+/// entries — `glifo` keys the raw size — take the population over it; from
+/// then on the run is served only because every glyph is already resident.
+/// Each site is load-bearing:
+///
+/// - the route key (`RunKey::for_run_with`) builds the keys the over-budget
+///   residency probe asks `glifo`'s map for, so a raw embolden there misses
+///   every entry and the run is refused to outlines;
+/// - the lowering (`text::lower_glyph_run`) is what `glifo` keys the entries
+///   under, so a raw embolden there leaves both other sites probing for keys
+///   that were never inserted;
+/// - the resident plan (`text::ResidentPlan`) builds the resident-run cache's
+///   probes, so a raw embolden there never resolves the run, which then reaches
+///   `glifo` every frame instead of being drawn resident.
+#[test]
+fn a_faux_bold_paragraph_over_budget_under_scale_jitter_needs_every_site_to_agree() {
+    let (width, height) = (1024, 256);
+    let mut compiler = SceneCompiler::with_atlas_budget(width, height, AtlasBudget::MOBILE);
+    compiler.set_hint_text(true);
+    compiler.set_glyph_quads(true);
+    compiler.set_glyph_run_cache(true);
+    let font = latin_font().with_synthesis(0.05, 0.0);
+    // Every glyph id of the face at each of the four subpixel buckets, placed
+    // in device space so the buckets hold through the jitter.
+    let scene_at = |scale: f64| {
+        let glyphs = (0..4 * GLYPHS_IN_LATIN_FONT)
+            .map(|slot| {
+                let device_x = 10.0 * f64::from(slot) + f64::from(slot % 4) / 4.0;
+                Glyph {
+                    id: slot / 4,
+                    x: (device_x / scale) as f32,
+                    y: 0.0,
+                }
+            })
+            .collect();
+        let mut scene = Scene::new();
+        SceneBuilder::new(&mut scene).draw_glyph_run(GlyphRun {
+            font: font.clone(),
+            font_size: BOLD_PARAGRAPH_SIZE,
+            brush: Brush::Solid(BLACK),
+            transform: Affine::translate((4.0, 100.0)) * Affine::scale(scale),
+            glyphs,
+        });
+        scene
+    };
+    let frame_at = |compiler: &mut SceneCompiler, scale: f64| {
+        let frame = compiler
+            .compile(&scene_at(scale), Affine::IDENTITY, (width, height))
+            .expect("an in-range scene compiles");
+        compiler.acknowledge_glyph_clears();
+        compiler.acknowledge_glyph_replay();
+        compiler.acknowledge_image_plan();
+        frame
+    };
+    let budget = atlas_policy::glyph_texel_budget(AtlasBudget::MOBILE.config());
+    let price = glyph_texels_at(2.0 * BOLD_PARAGRAPH_SIZE);
+
+    let first = frame_at(&mut compiler, 2.0);
+    assert_eq!(
+        first.atlas_glyph_draws, first.glyph_draws,
+        "fixture precondition: the paragraph reaches the atlas"
+    );
+    let one_set = compiler.glyph_atlas_entries();
+    assert!(
+        one_set as u64 * price <= budget,
+        "fixture precondition: one set of entries fits the budget"
+    );
+
+    let jittered = frame_at(&mut compiler, 2.001);
+    assert_eq!(
+        jittered.atlas_glyph_draws, jittered.glyph_draws,
+        "fixture precondition: the jittered frame is admitted under the budget"
+    );
+    let entries = compiler.glyph_atlas_entries();
+    assert!(
+        entries as u64 * price > budget,
+        "fixture precondition: the jitter's fresh entries ({entries}) take the \
+         population over the {budget}-texel budget"
+    );
+
+    for frame in 0..8 {
+        let cost = frame_at(&mut compiler, 2.001);
+        assert_eq!(
+            cost.atlas_glyph_draws, cost.glyph_draws,
+            "frame {frame}: over the budget, the run is served only if the route \
+             key's embolden finds the entries the lowering inserted"
+        );
+        assert_eq!(
+            cost.resident_glyph_runs, 1,
+            "frame {frame}: drawn resident only if the resident plan's embolden \
+             finds them too"
+        );
+        assert_eq!(
+            compiler.glyph_atlas_entries(),
+            entries,
+            "frame {frame}: nothing inserted"
+        );
+    }
 }

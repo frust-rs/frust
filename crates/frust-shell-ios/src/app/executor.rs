@@ -699,6 +699,14 @@ impl SplitExecutor {
         }
     }
 
+    /// Send a fire-and-forget [`RenderCommand::TrimMemory`]: the render thread
+    /// trims the renderer's caches on its next wakeup, whatever its phase.
+    pub(super) fn trim_memory(&mut self) {
+        if let Some(sender) = self.sender.as_ref() {
+            sender.send_command(RenderCommand::TrimMemory);
+        }
+    }
+
     /// The **iOS backgrounding barrier**: send a
     /// barriered [`RenderCommand::Pause`] and **block** until the render thread
     /// has acknowledged it. The render loop processes the `Pause` only after any

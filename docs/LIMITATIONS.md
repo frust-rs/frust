@@ -6406,7 +6406,26 @@ keeps animating), any run above the size ceiling, any COLR-carrying face (the
 tier cannot replay glifo's recorded COLR command stream and glifo offers no
 way to withdraw entries afterwards), any transform glifo will not absorb as a
 positive uniform scale, and any run whose demand would push the resident
-population past the glyph texel budget. That budget is one running total —
+population past the glyph texel budget. Admission is sticky: a run whose
+every glyph is already resident keeps being served whatever the total says,
+only a run that would insert is refused, and LRU eviction still drains the
+excess, so a population over its share does not thrash (iPhone 13 mini, S6
+at 3x: 0/527 glyphs resident with glyph_evicted 24,051 per three runs before,
+231/527 with sticky admission alone, 527/527 on the `mobile_large` tier;
+gates gr02-13mini-residency, ha04-13mini-s6-phase-head). The `mobile_large`
+tier that holds the population costs memory: glyph atlas 16 -> 64 MiB and
+retained pages 32 -> 64 MiB, taken on iOS from 3 GiB of `hw.memsize` (a 4 GB
+iPhone 13 mini reports `memory_mib=3674`), from 4 GiB elsewhere. Measured on that
+iPhone 13 mini (S6, one session), `phys_footprint` p50 is 229.9 MiB on the plain tier
+(max 233.4) and 252.0 MiB on `mobile_large` (max 256.5): +22 MiB resident on this
+workload, the +80 MiB being a lazy ceiling (gates rf01-13mini-footprint-ab,
+p2-round1-integration-root). A memory warning (`RenderCommand::TrimMemory` ->
+`EngineRenderer::trim_memory`) drops the retained pages to the plain 32 MiB budget
+and clamps atlas growth to the plain tier's bytes, one-way until the renderer is
+rebuilt. The atlas has no layer-release primitive (`vello_common` 0.2.0's packer
+only appends), so a trim cannot give a layer back: it only stops the array growing,
+and resident glyphs keep serving. The trim is host-tested; on-device delivery was
+not exercised (gate rf01-13mini-memory-warning, skipped). That budget is one running total —
 every resident entry charged a per-entry texel cost at its own size, rationed
 against the glyph share of the array (so no size class's refusal depends on
 another's counts, and mixed sizes bound additively) — and it is a deliberate
@@ -6416,9 +6435,10 @@ population, a glyph wider than its em is under-charged (the packer still
 refuses independently), and a run is charged its distinct glyph ids at
 admission, so subpixel-bucket variants can overshoot by that factor. The atlas
 pass reports a glyph it could not place as `unrasterizable` (no raster) or
-`no_room` (the insert was refused) separately; its own per-glyph insert half
-stays host-tested but unreachable while glifo allocates, reserved for the
-planned frust-side hvgl insert. glifo's `PendingClearRect`s and recorded page
+`no_room` (the insert was refused) separately; the pass's per-glyph insert half
+is live for `hvgl`-only faces (the frust-side insert in `text/hvgl_atlas.rs`,
+see `engine-hvgl-atlas-pin-bound`), and only `collect_glyph` and
+`AtlasRun::key` stay unreachable in production. glifo's `PendingClearRect`s and recorded page
 replays are re-offered every frame until the renderer acknowledges they were
 serviced, and glifo's eviction pass is deferred only while an unreplayed
 recording has outlived the entry-age window (a serial-based check — younger
@@ -6444,6 +6464,38 @@ and the policy layer pins every behaviour upstream leaves open.
 
 **Trigger for removal**: glifo stabilising its atlas surface, or the swap
 phase absorbing the vendored core.
+
+### `engine-hvgl-atlas-pin-bound` — hvgl glyphs reach the atlas through code that restates private glifo 0.3.0 internals
+
+**Observed** (evidence: `crates/frust-engine/src/text/hvgl_atlas.rs`, merged in f5f360e70; gates
+ha04-13mini-s6-phase-head, ha04-m4-metal): glifo cannot read the outlines of an `hvgl`-only face
+(Apple's PingFang), so the engine inserts those glyphs into the glyph atlas itself. `hvgl_atlas.rs`
+restates, over glifo's public API, the private steps glifo runs for an outline it caches: the raster
+extent (`raster_metrics`, glifo 0.3.0 `renderer.rs:591`), recording the black outline fill into the slot
+(`record_outline`, `renderer.rs:342`) and drawing the slot as a tinted coverage mask (`draw_from_atlas`,
+`renderer.rs:521` and `:311`). The restatements are correct for the exact-pinned `=0.3.0` only: a glifo
+bump that moves one would put these glyphs on other pixels than glifo's own without failing to compile.
+The tripwire is `crates/frust-engine/tests/hvgl_atlas_parity.rs` (PingFang atlas against outlines at
+whole-pixel and subpixel origins, and a CFF Hiragino control glifo inserts itself); it needs macOS Metal and
+is `#[ignore]`d, so CI on ubuntu does not run it: re-run it by hand with
+`cargo test -p frust-engine --test hvgl_atlas_parity -- --ignored --test-threads=1` on every glifo bump.
+`crates/frust-testing/tests/dup_identities.rs` (`hvgl_restatement_is_attested_for_the_locked_glifo`) fails on
+ubuntu CI when Cargo.lock's glifo differs from `HVGL_PARITY_VERIFIED_GLIFO`, forcing the re-diff to be
+acknowledged; it is an attestation, not proof the Metal run happened.
+`SceneCompiler::set_hvgl_atlas(false)` routes the glyphs back to outlines
+(`OutlineReason::Hvgl`). Measured: PingFang 61 atlas draws and 0 outline fallbacks per window on an iPhone
+13 mini (S6, 3x), glyphs_us 5,377 -> 183, CPU work per frame 6,146 -> 1,437 us, presented cadence
+unchanged (gr02-13mini-presented-cadence); a 300-glyph PingFang paragraph compiles in 9.7 us instead of
+613 on an M4.
+
+**Applies to**: Apple targets drawing `hvgl`-only faces; any glifo version change.
+
+**Accepted because**: the alternative is the outline route, which re-fills every glyph every frame; the restated code is small, each function names its
+source line, and the parity test pins it.
+
+**Trigger for removal**: glifo exposing an outline-provider seam for its atlas cache (so the insert can
+use glifo's own), or an automated macOS run of the parity test on every glifo bump (the CI check above
+acknowledges a bump; it does not run the test).
 
 ### `engine-bitmap-glyphs-gap` — bitmap-strike (PNG/BGRA/Mask) emoji do not render on the engine tier; COLR emoji do
 
@@ -8613,7 +8665,7 @@ result), and the cut is part of that pass.
 **Observed**: an italic request on a face with no italic or slant axis draws upright.
 `SceneCompiler::set_synthetic_oblique(true)` opts in, and skewed runs then never enter the glyph atlas or the
 resident-run cache: they draw as outlines every frame. Measured on scene S6 with an all-italic corpus
-(Apple M4), submit time rose from 0.38 ms to 1.88 ms per frame. ``EngineRenderer::set_synthetic_oblique`
+(Apple M4), submit time rose from 0.38 ms to 1.88 ms per frame. `EngineRenderer::set_synthetic_oblique`
 forwards the same switch on the renderer.
 
 **Applies to**: any target drawing italic text from a face without a real italic or slant axis.
@@ -8638,8 +8690,9 @@ its real weight.
 **Workaround**: use a face with a weight axis (the variable PingFang faces) or a real bold face; on the
 `glifo` route the synthesis is applied.
 
-**Evidence**: `crates/frust-engine/src/text/hvgl.rs` (`glyph_transform`, :248-255, is size / `unitsPerEm` only;
-the outline key in `HvglOutlines::outline`, :361-380, carries face, glyph id and variation instance, no synthesis).
+**Evidence**: `crates/frust-engine/src/text/hvgl.rs` (`glyph_transform`, :252-261, is size / `unitsPerEm` only;
+the outline key in `HvglOutlines::outline`, :387-407, carries face, glyph id and variation instance, no synthesis);
+on the atlas route `classify_hvgl_run` (`crates/frust-engine/src/compile/mod.rs`) keys with embolden 0 and no skew.
 
 ---
 

@@ -136,11 +136,16 @@
 //!
 //! A face that keeps its outlines only in an `hvgl` table — Apple's PingFang,
 //! the iOS Han fallback — gives `skrifa` nothing to read, and `glifo` would
-//! skip every one of its glyphs without counting them. Such a run is routed to
-//! outlines like a colour face and drawn by [`hvgl`] instead, from CoreText's
-//! own outlines on Apple targets, opening the face by the PostScript name the
-//! run's handle carries (the text tier's oracle decided the face; this module
-//! only draws it); a glyph it cannot supply is counted as skipped.
+//! skip every one of its glyphs without counting them. Such a run never
+//! reaches `glifo`: its outlines come from CoreText through [`hvgl`] on Apple
+//! targets, opening the face by the PostScript name the run's handle carries
+//! (the text tier's oracle decided the face; this module only draws it), and a
+//! glyph it cannot supply is counted as skipped. A run the policy routes to
+//! the atlas is inserted frust-side ([`hvgl_atlas`]) and then drawn exactly as
+//! a cached `glifo` run is, resident-run cache and quads included; one it
+//! routes to outlines — or every one, with
+//! [`SceneCompiler::set_hvgl_atlas`](crate::compile::SceneCompiler::set_hvgl_atlas)
+//! off — is filled from the provider's outlines every frame.
 //!
 //! # The font gate
 //!
@@ -161,6 +166,7 @@ pub(crate) mod atlas_policy;
 pub(crate) mod backend;
 pub(crate) mod color;
 pub(crate) mod hvgl;
+pub(crate) mod hvgl_atlas;
 
 use glifo::{AtlasCacher, Glyph, GlyphPrepCache, GlyphRunBuilder, ImageCache};
 use kurbo::{Affine, Point, Vec2};
@@ -226,8 +232,9 @@ pub(crate) struct GlyphRunRouting<'a> {
     /// quads at all (see [`backend`]'s module doc).
     pub(crate) quads: Option<GlyphQuadTargets<'a>>,
     /// Whether the run's face keeps its outlines only in an `hvgl` table
-    /// ([`hvgl::font_needs_hvgl_provider`]), so its glyphs are filled from
-    /// [`hvgl`] rather than handed to `glifo`.
+    /// ([`hvgl::font_needs_hvgl_provider`]), so its glyphs are drawn from the
+    /// frust-side insert ([`hvgl_atlas`]) or filled from [`hvgl`] rather than
+    /// handed to `glifo`.
     pub(crate) hvgl_face: bool,
     /// Whether a face with an oblique angle is drawn leaned
     /// ([`SceneCompiler::set_synthetic_oblique`](crate::compile::SceneCompiler::set_synthetic_oblique)).
@@ -261,9 +268,12 @@ pub(crate) struct GlyphRunRouting<'a> {
 /// glyph quads as quads, one that missed draws them the general way (see
 /// [`backend`]'s module doc).
 ///
-/// `routing.hvgl_face` sends the run to [`hvgl`] instead of `glifo`: every
-/// glyph is filled from the provider's outline, and every one it cannot
-/// supply is counted as skipped (see that module's doc).
+/// `routing.hvgl_face` keeps the run away from `glifo`. Routed to the atlas,
+/// it is drawn out of the resident-run cache when it can be and glyph by glyph
+/// through the frust-side insert's entries otherwise ([`hvgl_atlas::draw_run`]);
+/// routed to outlines, every glyph is filled from the provider's outline. A
+/// glyph the provider cannot supply is counted as skipped either way (see
+/// [`hvgl`]'s doc).
 ///
 /// `routing.resident` lets a run the atlas serves be drawn out of the policy's
 /// resident-run cache instead of through `glifo` — see [`ResidentPlan`] for
@@ -301,6 +311,31 @@ pub(crate) fn lower_glyph_run(
     } = targets;
 
     if hvgl_face {
+        if let Some((policy, _)) = atlas
+            && let context = context_paint(context_brush)
+            && let Some(plan) = ResidentPlan::for_hvgl(run, transform, &context)
+        {
+            let mut sink =
+                EngineGlyphSink::new(generator, clips, frame, depth, paint, context, quads);
+            let mut missed = None;
+            if resident {
+                match sink.draw_resident(policy, &plan) {
+                    ResidentAnswer::Resolved => return sink.outcome(),
+                    ResidentAnswer::Missed(handle) => missed = Some(handle),
+                    ResidentAnswer::Bypassed => {}
+                }
+            }
+            let misses_before = policy.atlas().cache_misses();
+            let unavailable = hvgl_atlas::draw_run(run, transform, &plan, &mut sink, policy, hvgl);
+            let all_resident = policy.atlas().cache_misses() == misses_before;
+            sink.finish_quads(all_resident);
+            if let (Some(handle), true) = (missed, all_resident) {
+                policy.refuse_resident_run(handle);
+            }
+            let mut outcome = sink.outcome();
+            outcome.skipped = outcome.skipped.saturating_add(unavailable);
+            return outcome;
+        }
         // Never quads and never the resident-run cache: the run was routed to
         // outlines, and its glyphs are not `glifo`'s to place.
         let mut sink = EngineGlyphSink::new(
@@ -465,13 +500,60 @@ impl<'r> ResidentPlan<'r> {
         if atlas_policy::oblique_synthesis(run, synthetic_oblique) {
             return None;
         }
-        let [_, _, t_c, t_d, t_e, t_f] = full.as_coeffs();
-        let size = atlas_policy::drawn_font_size(run.font_size, full);
         let embolden = atlas_policy::synthesis_embolden(
             run.font.embolden(),
             atlas_policy::embolden_basis(run.font_size, full, hint, upem),
         );
         let synthesis = atlas_policy::Synthesis::new(run.font.normalized_coords(), embolden)?;
+        Self::placed(
+            run,
+            transform,
+            hint,
+            *color,
+            run.font.font().data.id(),
+            synthesis,
+        )
+    }
+
+    /// The plan for drawing `run` of an `hvgl`-only face out of the entries
+    /// the frust-side insert made for it ([`hvgl_atlas`]), or `None` when the
+    /// atlas cannot serve it: a run `glifo` would cache, keyed the way that
+    /// insert keys it — unhinted, at the run's variation coordinates with no
+    /// embolden and no skew, under the face identity [`hvgl_atlas::face_id`].
+    pub(crate) fn for_hvgl(
+        run: &'r GlyphRun,
+        transform: Affine,
+        context: &PaintType,
+    ) -> Option<Self> {
+        let PaintType::Solid(color) = context else {
+            return None;
+        };
+        atlas_policy::absorbed_scale(transform)?;
+        let synthesis = atlas_policy::Synthesis::new(run.font.normalized_coords(), 0.0)?;
+        Self::placed(
+            run,
+            transform,
+            false,
+            *color,
+            hvgl_atlas::face_id(&run.font),
+            synthesis,
+        )
+    }
+
+    /// The plan's placement half, shared by both constructors: `glifo`'s
+    /// absorbed size and glyph placement under `transform` (already known
+    /// absorbable), keyed as `font_id` with `synthesis`.
+    fn placed(
+        run: &'r GlyphRun,
+        transform: Affine,
+        hint: bool,
+        color: AlphaColor<Srgb>,
+        font_id: u64,
+        synthesis: atlas_policy::Synthesis,
+    ) -> Option<Self> {
+        let full = transform * Affine::IDENTITY;
+        let [_, _, t_c, t_d, t_e, t_f] = full.as_coeffs();
+        let size = atlas_policy::drawn_font_size(run.font_size, full);
         // `glifo` caches only at or under its ceiling, which a NaN size is
         // not.
         if size.is_nan() || size > atlas_policy::MAX_CACHED_FONT_SIZE {
@@ -482,20 +564,19 @@ impl<'r> ResidentPlan<'r> {
         } else {
             Affine::new([1.0, 0.0, 0.0, 1.0, t_e, t_f])
         };
-        let font = run.font.font();
         Some(Self {
             glyphs: &run.glyphs,
             positioning: transform.with_translation(Vec2::ZERO),
             effective,
             hinted: hint,
             identity: ResidentIdentity {
-                font_id: font.data.id(),
-                font_index: font.index,
+                font_id,
+                font_index: run.font.font().index,
                 size,
                 hinted: hint,
                 synthesis,
             },
-            color: *color,
+            color,
         })
     }
 
