@@ -323,7 +323,11 @@ impl TextContext {
     /// The cache writes behind on its own (after a burst of new answers, or
     /// once idle) and on drop, but a mobile app can be killed in the
     /// background with neither: a shell calls this from its pause/background
-    /// hook. A no-op for a context built without a font cache.
+    /// hook. A no-op for a context built without a font cache. The flush writes
+    /// when this cache, or the shared copy it is attached to, holds answers not
+    /// yet on disk; a dirty flush is synchronous. A context still in
+    /// `Persist::Pending` does not join the shared copy on a clean flush (it
+    /// joins on its first in-memory miss, or on a dirty flush).
     pub fn flush_font_cache(&mut self) -> std::io::Result<()> {
         self.oracle.flush()
     }
@@ -733,14 +737,13 @@ mod tests {
         assert!(!a.oracle.cache().is_dirty());
 
         // Nothing behind: A's flush writes nothing.
-        let before = std::fs::metadata(&file)
-            .and_then(|m| m.modified())
-            .expect("mtime");
+        let before = std::fs::read(&file).expect("cache file bytes");
         a.flush_font_cache().expect("no-op");
-        let after = std::fs::metadata(&file)
-            .and_then(|m| m.modified())
-            .expect("mtime");
-        assert_eq!(before, after, "a flush with nothing behind writes nothing");
+        let after = std::fs::read(&file).expect("cache file bytes");
+        assert!(
+            before == after,
+            "a flush with nothing behind leaves the file byte-identical"
+        );
 
         // B records a second answer and never flushes; A's flush writes it.
         let _ = b.oracle.resolve(&y);

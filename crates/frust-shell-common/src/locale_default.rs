@@ -66,8 +66,8 @@ impl FontCacheFlush for TextContext {
 /// its pause/background point and [`Self::came_to_foreground`] from the matching resume. Platforms
 /// that report a background in several steps (Android `onPause` then `onStop`, iOS resign then
 /// enter-background, a desktop focus loss then `suspended`) flush once: a repeat before the
-/// foreground is ignored. The flush is the existing contract (a clean cache is a no-op; a dirty one
-/// writes synchronously), and all contexts of a process share one cache copy, so one call per
+/// foreground is ignored. The flush is the existing contract (it writes when this cache, or the shared
+/// copy it is attached to, holds answers not yet on disk, and synchronously), and all contexts of a process share one cache copy, so one call per
 /// context is bounded by one small file write. A flush through any one context writes every
 /// answer the process holds that is not yet on disk, whichever context recorded it.
 ///
