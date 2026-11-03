@@ -38,8 +38,9 @@ pub enum EngineError {
 
     /// A frame's layer shape is outside what the engine's scheduler serves.
     ///
-    /// `reason` names what was found — a layer graph needing a third live
-    /// intermediate page at one pass, a chain deeper than the two-page
+    /// `reason` names what was found — a layer graph needing more live
+    /// intermediate pages at one pass than the two ping-pong groups and the
+    /// spill pool hold between them (`MAX_LIVE_PAGES`), a chain deeper than the two-page
     /// ping-pong serves, a filter layer, a non-default blend mode — because the
     /// caller's own log is where a frame that produced no pixels has to be
     /// explainable from.

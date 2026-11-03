@@ -11,8 +11,8 @@ the caller's encoder. Learn both and every pass label in a GPU capture has a lin
 |---|---|---|
 | `Schedule::build` — recording → `Vec<Round>`; `make_room`, `cut_at` serve wide fans | `crates/frust-engine/src/schedule/mod.rs` | ≈458, ≈1022, ≈1069 |
 | `Round`, `RoundTarget`, `RoundOp`, `Composite`, `FilterPass`, `PageTarget` | `crates/frust-engine/src/schedule/mod.rs` | ≈250–400 |
-| `MAX_CHAIN_DEPTH`, `PING_PONG_GROUPS`, `MAX_LIVE_PAGES` | `crates/frust-engine/src/schedule/mod.rs` | ≈218–234 |
-| `PageParity` (`Even`, `Odd`, `Spill`) | `crates/frust-engine/src/schedule/pages.rs` | ≈180–195 |
+| `MAX_CHAIN_DEPTH`, `PING_PONG_GROUPS`, `MAX_SPILL_PAGES`, `MAX_LIVE_PAGES` | `crates/frust-engine/src/schedule/mod.rs` | ≈218–234 |
+| `PageParity` (`Even`, `Odd`, `Spill`, `SpillPool(SpillSlot)`) | `crates/frust-engine/src/schedule/pages.rs` | ≈180–195 |
 | `EngineRenderer::encode` → `encode_traced` → `record_frame` | `crates/frust-engine/src/renderer.rs` | ≈993, ≈1036, ≈1542 |
 | `depth_disabled` — the `FRUST_ENGINE_NO_DEPTH` switch | `crates/frust-engine/src/config.rs` | ≈59 |
 | `DEPTH_FORMAT`, `depth_state`, `EnginePipeline::ALL` (nine) | `crates/frust-engine/src/gpu/pipelines.rs` | ≈137, ≈452, ≈244 |
@@ -33,8 +33,8 @@ the caller's encoder. Learn both and every pass label in a GPU capture has a lin
    A filter round carries no ops at all; its work is `Round::filter: Option<FilterPass>`. One
    target can take several rounds, each after the first loading what the previous one left
    (`PageTarget::continued`). Layers render deepest-first into pages that ping-pong between
-   `PageParity::Even` and `PageParity::Odd`; a third, `PageParity::Spill`, exists for exactly one
-   shape — the navigation transition. A layer at opacity 1.0 with no blend, mask or clip is
+   `PageParity::Even` and `PageParity::Odd`; a spill pool of `MAX_SPILL_PAGES` slots (`PageParity::Spill`, then
+   `PageParity::SpillPool`) exists for the shapes a cut cannot serve — the navigation transition first. A layer at opacity 1.0 with no blend, mask or clip is
    *inlined* (spliced into its parent, no page); opacity 0 is *dropped*. So most frames contain no
    isolated layer and schedule to **one** round. The module doc's section *What this scheduler
    serves, and what it refuses* is the contract, and worth quoting:
@@ -43,7 +43,7 @@ the caller's encoder. Learn both and every pass label in a GPU capture has a lin
    > isolated layers nested at most [`MAX_CHAIN_DEPTH`] deep; isolated layers *beside* each other
    > under one parent, a fan of any width […]; a chain hanging off an isolated ancestor's later
    > child, which is what a navigation transition records […]. Everything else — a layer that finds
-   > no page even after a cut and the spill, a deeper chain, a filter this engine does not render,
+   > no page even after a cut and every spill slot, a deeper chain, a filter this engine does not render,
    > a filter layer nested inside another recorded layer, a non-default blend mode, a layer mask or
    > layer clip path — is refused with [`EngineError::SchedulerEscalation`].
 
@@ -54,13 +54,13 @@ the caller's encoder. Learn both and every pass label in a GPU capture has a lin
    pooled page (`FramePass::Copy` in the renderer; the opaque pass stops at the first backdrop), run the
    blur's passes — the same rounds a filter layer uses — and draw the result in the next root round.
 
-   `MAX_CHAIN_DEPTH` is 4; `MAX_LIVE_PAGES` is `PING_PONG_GROUPS + 1` = 3. A refused shape does
+   `MAX_CHAIN_DEPTH` is 4; `MAX_LIVE_PAGES` is `PING_PONG_GROUPS + MAX_SPILL_PAGES` = 2 + 3 = 5. A refused shape does
    **not** degrade to a simpler render: the next section of the same doc, *A refusal is a skipped
    frame, not a fallback*, says there is no second renderer. `frust-render` drops the frame,
    counts it, and logs it rate-limited (`log_engine_refusal` in
    `crates/frust-render/src/renderer.rs`), so the surface keeps its last presented image — which
    is why a shape that refuses *every* frame of a gesture reads as a frozen scrub, and why the
-   spill page was added (`docs/LIMITATIONS.md`, `engine-scheduler-skip-on-escalation`).
+   spill pool was added (`docs/LIMITATIONS.md`, `engine-scheduler-skip-on-escalation`).
 
 2. **The real pass order is `record_frame`'s, not a diagram's.** `encode` delegates to
    `encode_traced`, which compiles, runs `Schedule::build`, checks every page against the pool
@@ -156,7 +156,7 @@ rounds (four pages, innermost first, `Even, Odd, Even, Odd`, then the root);
 `a_three_wide_sibling_fan_cuts_the_root_round_and_reuses_the_first_page` — three siblings are
 **5** (the root round is cut after the first pair). The general rule is in
 `a_sibling_fan_of_any_width_costs_one_page_round_each_and_a_root_round_per_pair`: *n* page rounds
-plus ⌈*n*÷2⌉ root rounds, never the spill page.
+plus ⌈*n*÷2⌉ root rounds, never a spill slot.
 
 ### 13.2 — Schedule your own recordings
 
@@ -199,7 +199,7 @@ cargo test -p frust-engine --test scrub_served  # 2 passed, 1 ignored (needs a G
 ```
 
 `every_frame_of_the_scrub_schedules_without_refusing` sweeps forty transition opacities over the
-shape the spill page exists for and asserts every frame is served *on* the spill;
+shape the spill pool exists for and asserts every frame is served *on* the spill;
 `a_scrubbed_frame_never_holds_more_pages_live_than_the_bound` checks `MAX_LIVE_PAGES`. The file
 header says why forty frames and not one: a refusal is a skipped frame with no fallback, so a
 shape that refuses at fractional opacity freezes the surface for the whole gesture. The depth-5

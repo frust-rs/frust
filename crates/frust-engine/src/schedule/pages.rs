@@ -1,5 +1,5 @@
-//! Intermediate pages: which of the two ping-pong groups one comes from, and
-//! how large it is asked for.
+//! Intermediate pages: which of the two ping-pong groups (or which spill slot)
+//! one comes from, and how large it is asked for.
 //!
 //! A page is one pooled off-screen texture an isolated layer is rendered into
 //! before its parent samples it. The scheduler never allocates one — it only
@@ -15,10 +15,12 @@
 //!   the parent's pass and freed the moment that pass ends, and the grandchild
 //!   reuses it. Depth here is counted over *isolated* layers only, because an
 //!   inlined layer never occupies a page and so never consumes a level (see the
-//!   [`schedule`](super) module header). [`PageParity::Spill`] is the one group
-//!   this rule does not name: it is the single bounded page a regular layer
-//!   falls back on when both parity groups are held and no round could be cut
-//!   to hand one back, and the [`schedule`](super) header's *The spill page*
+//!   [`schedule`](super) module header). The spill pool — [`PageParity::Spill`]
+//!   and the [`PageParity::SpillPool`] slots after it — is what this rule does
+//!   not name: it is the bounded run of
+//!   [`MAX_SPILL_PAGES`](super::MAX_SPILL_PAGES) pages a regular layer falls
+//!   back on when both parity groups are held and no round could be cut to
+//!   hand one back, and the [`schedule`](super) header's *The spill pool*
 //!   section is where the shapes that need it live.
 //! - **Coverage-sized, quantized, capped.** A page is sized to the layer's own
 //!   tile-aligned bounds rather than to the viewport, floored at
@@ -163,7 +165,7 @@ pub const DEFAULT_MAX_PAGE_SIZE: u32 = 4096;
 pub const MAX_PAGE_BANDS: usize = 8;
 
 /// Which texture group a page comes from: one of the two ping-pong groups, or
-/// the single spill page beside them.
+/// one slot of the bounded spill pool beside them.
 ///
 /// The scheduler keeps at most one page live per group, so a group *is* a page
 /// identity for the shapes it serves; a schedule that would need two pages of
@@ -171,27 +173,61 @@ pub const MAX_PAGE_BANDS: usize = 8;
 ///
 /// The name is the pair's: [`Even`](Self::Even) and [`Odd`](Self::Odd) are what
 /// a layer's own depth parity names, and they carry every page of every chain
-/// and every fan. [`Spill`](Self::Spill) is not a parity and is never derived
-/// from a depth — it is the bounded third page the scheduler falls back on for
-/// the one shape the pair cannot hold, kept in this enum rather than beside it
-/// because what the renderer needs from all three is the same thing: an index
-/// naming which live page a round writes, samples and hands back.
+/// and every fan. The spill pool — [`Spill`](Self::Spill), its first slot, and
+/// [`SpillPool`](Self::SpillPool), each slot after it — is not a parity and is
+/// never derived from a depth: it is the bounded run of pages the scheduler
+/// falls back on for the shapes the pair cannot hold, kept in this enum rather
+/// than beside it because what the renderer needs from every one of them is
+/// the same thing: an index naming which live page a round writes, samples and
+/// hands back.
+///
+/// The pool's first slot keeps the unit variant it was introduced with, so
+/// every caller that names [`Spill`](Self::Spill) reads exactly what it read
+/// when the pool was one page deep; a later slot's number rides in
+/// [`SpillSlot`], whose field is private, so nothing outside this crate can name
+/// a slot the pool does not have.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PageParity {
     /// The group even-depth layers render into.
     Even,
     /// The group odd-depth layers render into.
     Odd,
-    /// The one spill page, taken only when both parity groups are held and no
-    /// open round could be cut to hand one back.
+    /// The spill pool's first slot, taken only when both parity groups are held
+    /// and no open round could be cut to hand one back.
     ///
-    /// One page, never a group of its own: a second layer wanting it while it
-    /// is held is refused, which is what keeps a frame's live intermediates at
-    /// [`MAX_LIVE_PAGES`](super::MAX_LIVE_PAGES). It is released exactly as a
-    /// parity page is — by the round whose composite sampled it — and only a
-    /// regular layer is ever handed one (see [`schedule`](super)'s *The spill
-    /// page*).
+    /// One page, never a group of its own: a second layer falling back while
+    /// it is held takes the next slot ([`SpillPool`](Self::SpillPool)), and a
+    /// layer finding every slot held is refused, which is what keeps a frame's
+    /// live intermediates at [`MAX_LIVE_PAGES`](super::MAX_LIVE_PAGES). It is
+    /// released exactly as a parity page is — by the round whose composite
+    /// sampled it — and only a regular layer is ever handed one (see
+    /// [`schedule`](super)'s *The spill pool*).
     Spill,
+    /// A spill-pool slot after the first, on exactly [`Spill`](Self::Spill)'s
+    /// terms: taken by a regular layer that found the pair and every earlier
+    /// slot held, released by the round whose composite sampled it.
+    SpillPool(SpillSlot),
+}
+
+/// The number of a spill-pool slot past the first, carried by
+/// [`PageParity::SpillPool`].
+///
+/// Opaque on purpose: only the scheduler hands one out, so a value of this type
+/// always names a slot in `1..`[`MAX_SPILL_PAGES`](super::MAX_SPILL_PAGES) —
+/// the first slot is [`PageParity::Spill`] itself, never this — and
+/// [`PageParity::index`] stays inside [`MAX_LIVE_PAGES`](super::MAX_LIVE_PAGES).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SpillSlot {
+    slot: usize,
+}
+
+impl SpillSlot {
+    /// The slot's number in the spill pool, counting
+    /// [`PageParity::Spill`] as slot `0` — so always at least `1`.
+    #[must_use]
+    pub const fn slot(self) -> usize {
+        self.slot
+    }
 }
 
 impl PageParity {
@@ -200,8 +236,8 @@ impl PageParity {
     /// Depths are one-based (the outermost isolated layer is depth 1), matching
     /// the recorder's own numbering, so the outermost layer takes the odd group
     /// and the surface it composites onto is not a page at all. Never answers
-    /// [`Spill`](Self::Spill): the spill page is a fallback the scheduler
-    /// reaches for explicitly, not a group any depth prefers.
+    /// a spill slot: the spill pool is a fallback the scheduler reaches for
+    /// explicitly, not a group any depth prefers.
     #[must_use]
     pub const fn from_depth(depth: usize) -> Self {
         if depth.is_multiple_of(2) {
@@ -211,23 +247,57 @@ impl PageParity {
         }
     }
 
+    /// Slot `slot` of the spill pool — [`Spill`](Self::Spill) for `0`, a
+    /// [`SpillPool`](Self::SpillPool) slot after it — or `None` past
+    /// [`MAX_SPILL_PAGES`](super::MAX_SPILL_PAGES).
+    #[must_use]
+    pub const fn spill(slot: usize) -> Option<Self> {
+        if slot >= super::MAX_SPILL_PAGES {
+            None
+        } else if slot == 0 {
+            Some(Self::Spill)
+        } else {
+            Some(Self::SpillPool(SpillSlot { slot }))
+        }
+    }
+
+    /// This page's slot in the spill pool, or `None` for one of the ping-pong
+    /// pair.
+    #[must_use]
+    pub const fn spill_slot(self) -> Option<usize> {
+        match self {
+            Self::Even | Self::Odd => None,
+            Self::Spill => Some(0),
+            Self::SpillPool(slot) => Some(slot.slot()),
+        }
+    }
+
+    /// Whether this page is one of the spill pool's rather than one of the
+    /// ping-pong pair.
+    #[must_use]
+    pub const fn is_spill(self) -> bool {
+        self.spill_slot().is_some()
+    }
+
     /// The other of the ping-pong pair.
     ///
-    /// [`Spill`](Self::Spill) is not one of the pair and so has no other: it
-    /// answers itself, which keeps this total without inventing a third
-    /// ping-pong partner. Nothing asks: the one caller that ping-pongs between
-    /// two groups of its own is a filter layer's pass sequence, and a filter
-    /// layer is never handed the spill page.
+    /// A spill slot is not one of the pair and so has no other: it answers
+    /// itself, which keeps this total without inventing a third ping-pong
+    /// partner. Nothing asks: the one caller that ping-pongs between two groups
+    /// of its own is a filter layer's pass sequence, and a filter layer is
+    /// never handed a spill page.
     #[must_use]
     pub const fn opposite(self) -> Self {
         match self {
             Self::Even => Self::Odd,
             Self::Odd => Self::Even,
-            Self::Spill => Self::Spill,
+            spill => spill,
         }
     }
 
-    /// The group's index: `0` for even, `1` for odd, `2` for the spill page.
+    /// The group's index: `0` for even, `1` for odd, and
+    /// [`PING_PONG_GROUPS`](super::PING_PONG_GROUPS) plus the slot number for
+    /// a spill page — `2` for [`Spill`](Self::Spill), as it always was.
     ///
     /// This is what indexes the renderer's live-page slots, so the values are
     /// dense and stay inside [`MAX_LIVE_PAGES`](super::MAX_LIVE_PAGES).
@@ -236,7 +306,8 @@ impl PageParity {
         match self {
             Self::Even => 0,
             Self::Odd => 1,
-            Self::Spill => 2,
+            Self::Spill => super::PING_PONG_GROUPS,
+            Self::SpillPool(slot) => super::PING_PONG_GROUPS + slot.slot(),
         }
     }
 }
@@ -512,6 +583,7 @@ mod tests {
         // what keeps the renderer's own array indexable by this value alone.
         for depth in 0..=16 {
             assert_ne!(PageParity::from_depth(depth), PageParity::Spill);
+            assert!(!PageParity::from_depth(depth).is_spill());
         }
         assert_eq!(PageParity::Spill.index(), 2);
         assert!(PageParity::Spill.index() < crate::schedule::MAX_LIVE_PAGES);
@@ -519,6 +591,41 @@ mod tests {
             PageParity::Spill.opposite(),
             PageParity::Spill,
             "the spill page is not one of the ping-pong pair, so it has no other"
+        );
+    }
+
+    #[test]
+    fn every_spill_slot_indexes_densely_past_the_pair_and_inside_the_bound() {
+        use crate::schedule::{MAX_LIVE_PAGES, MAX_SPILL_PAGES, PING_PONG_GROUPS};
+
+        // Slot 0 is the unit variant the pool started as, so a caller naming
+        // `Spill` reads the first slot exactly as it always did.
+        assert_eq!(PageParity::spill(0), Some(PageParity::Spill));
+        assert_eq!(PageParity::Spill.spill_slot(), Some(0));
+        assert_eq!(PageParity::Even.spill_slot(), None);
+        assert_eq!(PageParity::Odd.spill_slot(), None);
+        assert_eq!(MAX_LIVE_PAGES, PING_PONG_GROUPS + MAX_SPILL_PAGES);
+
+        let mut indices = vec![PageParity::Even.index(), PageParity::Odd.index()];
+        for slot in 0..MAX_SPILL_PAGES {
+            let parity = PageParity::spill(slot).expect("a slot inside the pool");
+            assert!(parity.is_spill());
+            assert_eq!(parity.spill_slot(), Some(slot));
+            assert_eq!(parity.opposite(), parity, "a spill slot has no partner");
+            if slot > 0 {
+                assert!(matches!(parity, PageParity::SpillPool(at) if at.slot() == slot));
+            }
+            indices.push(parity.index());
+        }
+        assert_eq!(
+            indices,
+            (0..MAX_LIVE_PAGES).collect::<Vec<_>>(),
+            "the pair and every spill slot index the renderer's live pages densely"
+        );
+        assert_eq!(
+            PageParity::spill(MAX_SPILL_PAGES),
+            None,
+            "no slot past the pool"
         );
     }
 

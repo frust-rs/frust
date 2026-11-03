@@ -185,18 +185,22 @@ fn caps() -> TierCaps {
 }
 
 /// A half-opacity layer holding a flat isolated child and then a nesting one
-/// that holds an isolated *pair*, over a scene that also draws `data`.
+/// that holds a fan of four isolated children, over a scene that also draws
+/// `data`.
 ///
-/// The smallest shape three live pages cannot serve — the outer parent takes a
-/// group of its own once its round is cut after the first child, the inner
-/// parent's two children take the other group and the spill page between them,
-/// and the inner parent's own round, which composites both of them, would need
-/// a fourth live page — so `Schedule::build` refuses it. Recorded around a real
-/// image draw, so the refusal lands on a frame that made an image resident.
+/// One of the smallest regular shapes the spill pool cannot serve: the smallest
+/// refused shapes have seven layers, `root[A, B[C1..C5]]` and this
+/// `P[Q, L[C1..C4]]`, and every six-layer variant is served. The outer parent
+/// takes a group of its own once its round is cut after the first child, the
+/// fan's first child takes the other group, and the three after it fill the
+/// pool's `MAX_SPILL_PAGES` slots — leaving none of the `MAX_LIVE_PAGES` live
+/// pages for the fan's own round — so `Schedule::build` refuses it. Recorded
+/// around a real image draw, so the refusal lands on a frame that made an image
+/// resident.
 ///
-/// Neither a plain sibling fan nor a single nesting child is a counterexample
-/// any more: the scheduler serves a fan of any width by cutting the parent's
-/// round, and a chain hanging off a later child on its one spill page.
+/// Neither a plain sibling fan nor a nested pair is a counterexample any more:
+/// the scheduler serves a fan of any width by cutting the parent's round, and a
+/// fan nested under a page that holds one from the spill pool.
 fn branching_layers_with_an_image(data: &ImageData) -> Scene {
     scene_of(|b| {
         b.draw_image(data, DEST);
@@ -205,12 +209,12 @@ fn branching_layers_with_an_image(data: &ImageData) -> Scene {
         b.fill_rect(Rect::new(2.0, 2.0, 20.0, 20.0), Brush::Solid(RED));
         b.pop_layer();
         b.push_layer(Rect::new(28.0, 0.0, 52.0, 24.0), 0.5);
-        b.push_layer(Rect::new(30.0, 2.0, 38.0, 22.0), 0.5);
-        b.fill_rect(Rect::new(31.0, 4.0, 37.0, 20.0), Brush::Solid(RED));
-        b.pop_layer();
-        b.push_layer(Rect::new(40.0, 2.0, 50.0, 22.0), 0.5);
-        b.fill_rect(Rect::new(41.0, 4.0, 49.0, 20.0), Brush::Solid(RED));
-        b.pop_layer();
+        for i in 0..4u32 {
+            let x = 29.0 + f64::from(i) * 6.0;
+            b.push_layer(Rect::new(x, 2.0, x + 5.0, 22.0), 0.5);
+            b.fill_rect(Rect::new(x, 4.0, x + 4.0, 20.0), Brush::Solid(RED));
+            b.pop_layer();
+        }
         b.pop_layer();
         b.pop_layer();
     })
