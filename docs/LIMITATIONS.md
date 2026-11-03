@@ -6361,20 +6361,24 @@ increments, and a rate-limited log names the reason — and since the shape is
 a property of the layer tree, a shape that refuses once refuses every frame,
 freezing the surface on its last presented image while the app keeps running.
 
-The served set is wider still since the bounded third (spill) page landed
-(p7-f2): isolated sibling fans of any width, a nested isolated chain of any
-depth up to the chain bound, same-parity sequential page reuse, and — the one
-shape the spill page exists for — a chain hanging off an isolated ancestor's
-later child (a full-screen layer at fractional opacity holding a chip that
-itself carries a nested chip, the navigation-scrub shape) are all served
-within `MAX_LIVE_PAGES` (3) live pages; a single-primitive Gaussian blur or a
+The served set is wider still since the spill pool landed (p7-f2, widened to
+`MAX_SPILL_PAGES` = 3 slots): isolated sibling fans of any width, a nested
+isolated chain of any depth up to the chain bound, same-parity sequential page
+reuse, a chain hanging off an isolated ancestor's later child (a full-screen
+layer at fractional opacity holding a chip that itself carries a nested chip,
+the navigation-scrub shape), and every tree whose isolated layers hold at most
+two isolated children each (counting children reached through inlined layers;
+the nested translucent fan `P[Q, L[C1, C2]]` of a card switcher's dimmed peers
+included) are all served within `MAX_LIVE_PAGES` (2 + `MAX_SPILL_PAGES` = 5)
+live pages; a single-primitive Gaussian blur or a
 shadow-only drop shadow is planned and executed as a filter-round sequence,
 sized by `filter_page_size` (coverage plus the filter padding, quantized,
 refusing with `IntermediateTextureTooLarge` past the adapter ceiling and
 `IntermediateTextureLimitReached` past the pool's own budget). What still
-refuses: a chain deeper than the chain bound; a layer whose own round would
-need to sample two live pages while a third is still owed to a round above it
-— a fourth live page, past what the one bounded spill page extends to; a
+refuses: a chain deeper than the chain bound; a wider fan under an ancestor
+already holding a page, once its pending children outnumber the spill slots
+(the smallest refused shapes have seven layers, `root[A, B[C1..C5]]` and
+`P[Q, L[C1..C4]]`), which needs more than the 5 live pages; a
 filter that is not one of the two served kinds (flood and the
 composite-original drop shadow are reserved — the latter needs a third live
 page); a filter layer recorded inside another layer; and non-default blend or
@@ -6384,7 +6388,7 @@ mask layers.
 one surface; skipping loudly beats rendering the shape wrong.
 
 **Trigger for removal**: the served set must eventually cover the widget
-tree's real shapes — the opaque-pass hoist and the bounded spill page have
+tree's real shapes — the opaque-pass hoist and the bounded spill pool have
 each narrowed the refused class in turn rather than closed it; the general
 algorithm this narrows from is a stub behind the `full-scheduler` feature.
 
