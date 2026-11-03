@@ -6424,7 +6424,9 @@ texture is presented: a post-acquire refusal presents a backstop frame
 (`FrameOutcome::Skipped` with the texture still presented), and refusals the plan can foresee are
 decided before acquire so nothing is held. An acquire `Timeout`/`Occluded` run reconfigures the
 swapchain after `MAX_TRANSIENT_SKIPS` (3) consecutive skips (`decide_acquire_streaks`,
-`next_transient_streak`; the main surface and overlays alike), which recovers the images. The
+`next_transient_streak`; the main surface and overlays alike) so a wedged swapchain is rebuilt
+rather than skipped forever; whether a rebuild reclaims an already-leaked image is
+driver-dependent and is not relied on, since frust no longer leaks one. The
 cost is at most one backstop frame per post-acquire refusal (see
 `engine-scheduler-skip-on-escalation`), and an occluded window reconfigures on every fourth
 acquire attempt.
