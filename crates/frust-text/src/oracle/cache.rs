@@ -27,16 +27,20 @@
 //! copy on an in-memory miss, so one context's answers serve another and no
 //! write drops another context's answers. [`FallbackCache::attach_persistent`]
 //! binds a private copy instead (an independent reader: another process, a
-//! test). Loading sweeps abandoned temp files (see [`STALE_TEMP_AFTER`]).
+//! test). Loading sweeps abandoned temp files under the registry lock, on both
+//! paths (see [`STALE_TEMP_AFTER`] and [`FOREIGN_STALE_TEMP_AFTER`]).
 //!
 //! Writes are write-behind ([`WRITE_BEHIND_ENTRIES`] new answers, or the first
 //! lookup after [`IDLE_FLUSH_AFTER`] without one), explicit
 //! ([`FallbackCache::persist`]) and final (the owner's `Drop`, through
 //! [`FallbackCache::persist_in_background`]), each through a per-call temp file
 //! (PID + random nonce, mode `0600` on unix), fsync and rename. Every write
-//! of one shared copy is serialised through it and carries the copy's
-//! generation: a write never overlaps another, and one older than the last
-//! written is skipped rather than landing over it.
+//! of a path is serialised through one writer per canonical path, shared by
+//! every live copy of that path (a copy replaced after a stamp change may
+//! still be writing beside its successor), and carries a generation from that
+//! path's clock: a write never overlaps another, the generation on disk only
+//! grows (it is the max of the disk's and the copy's), and a snapshot not
+//! newer than the disk is skipped rather than landing over it.
 //!
 //! The two write-behind triggers fire inside a font lookup, so they never
 //! touch the disk there: the lookup snapshots the entries in memory and hands
@@ -98,10 +102,20 @@ pub(crate) const PERSIST_FILE_NAME: &str = "font-fallback.json";
 /// fills a language-less question from, so the answers persisted without it must expire.
 const FORMAT_VERSION: u32 = 7;
 
-/// How old a `.<file>.<pid>.<nonce>.tmp` sibling must be before a load removes
-/// it as abandoned (a writer killed between create and rename). A write takes
-/// milliseconds, so a younger one may be another process's write in progress.
+/// How old a `.<file>.<pid>.<nonce>.tmp` sibling carrying *this* process's PID
+/// must be before a load removes it as abandoned (a writer thread that failed
+/// between create and rename, or an earlier process that had the same PID). A
+/// write takes milliseconds, so a younger one may be a write in progress.
 pub(crate) const STALE_TEMP_AFTER: Duration = Duration::from_secs(10 * 60);
+
+/// How old a temp sibling carrying *another* process's PID must be before a
+/// load removes it. Whether that writer is alive is not asked: frust-text
+/// depends on no process API (`libc` reaches it only through `memmap2`, and its
+/// `windows-sys` row lacks `Win32_System_Threading`), and a liveness probe is
+/// not worth a dependency. The window is long instead: no write of this file
+/// takes a day, so a temp file that old was abandoned by a killed writer, and
+/// the cost of waiting is one stale file of at most a few hundred kilobytes.
+pub(crate) const FOREIGN_STALE_TEMP_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Consecutive failed background writes after which write-behind stops (an explicit flush
 /// still writes, and its success resumes it).
@@ -566,10 +580,12 @@ struct SharedFile {
     /// stamp for every miss the attached caches record.
     dirs: Vec<DirStamp>,
     entries: Mutex<SharedEntries>,
-    /// Held across a whole write, so writes of this copy never overlap and an
-    /// older snapshot never lands over a newer one.
-    write_lock: Mutex<()>,
-    /// The generation on disk (written, or loaded clean).
+    /// The path's writer, shared with every other live copy of the same
+    /// canonical path: held across a whole write, so writes of the path never
+    /// overlap, and the source of every generation this copy records.
+    writer: Arc<PathWriter>,
+    /// The newest of this copy's generations the disk holds or supersedes
+    /// (written, skipped as superseded, or loaded clean).
     written: AtomicU64,
     /// Whether a failed final write of this file already warned.
     final_warned: AtomicBool,
@@ -584,6 +600,31 @@ impl SharedFile {
     }
 }
 
+/// One canonical path's write serialisation and generation order, shared by
+/// every live copy of the path (shared or private).
+#[derive(Debug, Default)]
+struct PathWriter {
+    /// Held across a whole write of any copy of the path. Holds the newest
+    /// generation this process wrote to the path: the generation on disk.
+    disk: Mutex<u64>,
+    /// The path's generation clock: every change to any copy takes its next
+    /// value, so generations of two copies are ordered by when they changed.
+    clock: AtomicU64,
+}
+
+impl PathWriter {
+    /// The next generation of the path.
+    fn advance(&self) -> u64 {
+        self.clock.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    /// The generation now on disk (tests).
+    #[cfg(test)]
+    fn on_disk(&self) -> u64 {
+        *lock(&self.disk)
+    }
+}
+
 /// The shared copy's entries: a bounded LRU like a cache's own, over the
 /// on-disk form.
 #[derive(Debug, Default)]
@@ -593,13 +634,22 @@ struct SharedEntries {
     /// Recency order: tick → digest, oldest first.
     order: BTreeMap<u64, u64>,
     tick: u64,
-    /// Advances with every change; a snapshot carries the one it saw.
+    /// Advances with every change, from the path's clock; a snapshot carries
+    /// the one it saw.
     generation: u64,
 }
 
 impl SharedEntries {
-    /// Records `answer` as the newest entry for `digest`.
-    fn put(&mut self, digest: u64, answer: PersistedAnswer) {
+    /// Records `answer` as the newest entry for `digest`: a change, which takes
+    /// the path's next generation (inside this copy's lock, so a copy's own
+    /// generations never go backwards).
+    fn put(&mut self, digest: u64, answer: PersistedAnswer, writer: &PathWriter) {
+        self.insert(digest, answer);
+        self.generation = writer.advance();
+    }
+
+    /// [`Self::put`] without a generation (loading what the disk holds).
+    fn insert(&mut self, digest: u64, answer: PersistedAnswer) {
         self.tick += 1;
         if let Some((_, old)) = self.map.insert(digest, (answer, self.tick)) {
             self.order.remove(&old);
@@ -611,7 +661,6 @@ impl SharedEntries {
             };
             self.map.remove(&oldest);
         }
-        self.generation += 1;
     }
 
     /// The answer for `digest`, marking it most recently used (recency alone
@@ -637,8 +686,11 @@ impl SharedEntries {
 }
 
 impl SharedFile {
-    /// Reads `path` (sweeping its abandoned temp files first) into a new copy.
+    /// Reads `path` (sweeping its abandoned temp files first) into a new copy
+    /// bound to the path's writer. Takes the registry under its lock, so every
+    /// load (shared or private) sweeps and reads under it.
     fn load(
+        registry: &mut Registry,
         path: PathBuf,
         stamp: VersionStamp,
         dirs: Vec<DirStamp>,
@@ -646,34 +698,95 @@ impl SharedFile {
     ) -> (Arc<Self>, LoadOutcome) {
         // `SystemTime::now` panics on wasm32-unknown-unknown, where persistence is off anyway.
         #[cfg(not(target_family = "wasm"))]
-        sweep_stale_temp_files(&path, STALE_TEMP_AFTER);
+        sweep_stale_temp_files(&path, STALE_TEMP_AFTER, FOREIGN_STALE_TEMP_AFTER);
+        let writer = registry.writer_for(&path);
         let (outcome, loaded, behind) = read_file(&path, &stamp, &dirs, stats);
         let mut entries = SharedEntries::default();
         for (digest, answer) in loaded {
-            entries.put(digest, answer);
+            entries.insert(digest, answer);
         }
-        // A discarded or expired file must be rewritten even if nothing new is added.
-        entries.generation = u64::from(behind);
+        // Clean, the copy is as new as the path; a discarded or expired file
+        // must be rewritten even if nothing new is added, so it is one ahead.
+        let base = writer.clock.load(Ordering::Acquire);
+        entries.generation = if behind { writer.advance() } else { base };
         let shared = Self {
             path,
             stamp,
             dirs,
             entries: Mutex::new(entries),
-            write_lock: Mutex::new(()),
-            written: AtomicU64::new(0),
+            writer,
+            written: AtomicU64::new(base),
             final_warned: AtomicBool::new(false),
         };
         (Arc::new(shared), outcome)
     }
 }
 
-/// The process-wide copies, by path. Weak: a copy lives while a cache (or its
-/// final write) holds it, and the next attach after that reads the file again.
-type Registry = Mutex<HashMap<PathBuf, Weak<SharedFile>>>;
+/// The process-wide copies and path writers. Weak: a copy lives while a cache
+/// (or its final write) holds it, and the next attach after that reads the
+/// file again; a writer lives while any copy of its path does.
+#[derive(Debug, Default)]
+struct Registry {
+    /// The copies [`FallbackCache::attach_shared`] joins, by path.
+    copies: HashMap<PathBuf, Weak<SharedFile>>,
+    /// Every live copy's writer (shared and private copies alike), by
+    /// [`canonical_path`]: two spellings of one file share one writer.
+    writers: HashMap<PathBuf, Weak<PathWriter>>,
+}
 
-fn registry() -> &'static Registry {
-    static REGISTRY: OnceLock<Registry> = OnceLock::new();
-    REGISTRY.get_or_init(Registry::default)
+impl Registry {
+    /// The live shared copy of `path`, if one was loaded under `stamp` and the
+    /// font directories' current `dirs`.
+    fn live_copy(
+        &mut self,
+        path: &Path,
+        stamp: &VersionStamp,
+        dirs: &[DirStamp],
+    ) -> Option<Arc<SharedFile>> {
+        self.copies.retain(|_, copy| copy.strong_count() > 0);
+        self.copies
+            .get(path)
+            .and_then(Weak::upgrade)
+            .filter(|copy| copy.stamp == *stamp && copy.dirs == dirs)
+    }
+
+    /// The writer of `path`'s canonical form: the live one, else a new one.
+    fn writer_for(&mut self, path: &Path) -> Arc<PathWriter> {
+        self.writers.retain(|_, writer| writer.strong_count() > 0);
+        let key = canonical_path(path);
+        if let Some(writer) = self.writers.get(&key).and_then(Weak::upgrade) {
+            return writer;
+        }
+        let writer = Arc::new(PathWriter::default());
+        self.writers.insert(key, Arc::downgrade(&writer));
+        writer
+    }
+}
+
+fn registry() -> &'static Mutex<Registry> {
+    static REGISTRY: OnceLock<Mutex<Registry>> = OnceLock::new();
+    REGISTRY.get_or_init(Mutex::default)
+}
+
+/// `path` with its deepest existing ancestor canonicalised (symlinks resolved)
+/// and the not-yet-created rest appended, so a file whose directory appears
+/// later keeps one key; `path` made absolute where nothing canonicalises.
+fn canonical_path(path: &Path) -> PathBuf {
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut base = absolute.as_path();
+    let mut rest: Vec<&std::ffi::OsStr> = Vec::new();
+    loop {
+        if let Ok(real) = std::fs::canonicalize(base) {
+            return rest.iter().rev().fold(real, |acc, part| acc.join(part));
+        }
+        match (base.parent(), base.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name);
+                base = parent;
+            }
+            _ => return absolute,
+        }
+    }
 }
 
 /// Reads and validates the file at `path` against `stamp` and the font
@@ -771,11 +884,18 @@ struct Snapshot {
 impl Snapshot {
     /// Stamps every font file the entries name (an entry whose file cannot be
     /// stamped is left out), serialises and writes atomically. Serialised with
-    /// every other write of the same copy; `Ok(false)` when a write at least
-    /// as new already reached the disk, so this one is skipped.
+    /// every other write of the same path, from any copy; `Ok(false)` when a
+    /// write at least as new (of this copy, or of another copy of the path)
+    /// already reached the disk, so this one is skipped. The disk's generation
+    /// becomes max(on-disk, this snapshot's): it never goes backwards.
     fn write(self) -> io::Result<bool> {
-        let _serialised = lock(&self.shared.write_lock);
-        if self.shared.written.load(Ordering::Acquire) >= self.generation {
+        let mut disk = lock(&self.shared.writer.disk);
+        if self.shared.written.load(Ordering::Acquire) >= self.generation
+            || *disk >= self.generation
+        {
+            self.shared
+                .written
+                .fetch_max(self.generation, Ordering::AcqRel);
             return Ok(false);
         }
         let mut files: Vec<FileStamp> = Vec::new();
@@ -816,9 +936,10 @@ impl Snapshot {
         };
         let json = serde_json::to_vec(&persisted).map_err(io::Error::other)?;
         write_atomically(&self.shared.path, &json)?;
+        *disk = (*disk).max(self.generation);
         self.shared
             .written
-            .store(self.generation, Ordering::Release);
+            .fetch_max(self.generation, Ordering::AcqRel);
         Ok(true)
     }
 }
@@ -1041,7 +1162,7 @@ impl FallbackCache {
         if let Persist::Attached(shared) = &self.persist
             && let Some(persisted) = PersistedAnswer::of(&answer, substitute)
         {
-            lock(&shared.entries).put(digest, persisted);
+            lock(&shared.entries).put(digest, persisted, &shared.writer);
         }
         let slot = Slot {
             key: Some(key),
@@ -1112,10 +1233,14 @@ impl FallbackCache {
     /// [`Self::persist`]). Private: shared with no other cache — an independent
     /// reader, as another process is (tests read the disk through it). The
     /// production binding, [`Self::attach_lazy`], shares the process-wide copy.
+    /// It still loads (and sweeps) under the registry lock, and writes through
+    /// the path's one writer.
     pub(crate) fn attach_persistent(&mut self, path: PathBuf, stamp: VersionStamp) -> LoadOutcome {
         let started = Instant::now();
         let dirs = DirStamp::all(&stamp.font_dirs);
-        let (shared, outcome) = SharedFile::load(path, stamp, dirs, &mut self.stats);
+        let mut registry = lock(registry());
+        let (shared, outcome) = SharedFile::load(&mut registry, path, stamp, dirs, &mut self.stats);
+        drop(registry);
         self.bind(shared, &outcome, started);
         outcome
     }
@@ -1129,20 +1254,17 @@ impl FallbackCache {
         let dirs = DirStamp::all(&stamp.font_dirs);
         // Held across the load, so two caches attaching at once read the file once.
         let mut registry = lock(registry());
-        registry.retain(|_, copy| copy.strong_count() > 0);
-        let live = registry
-            .get(&path)
-            .and_then(Weak::upgrade)
-            .filter(|copy| copy.stamp == stamp && copy.dirs == dirs);
-        let (shared, outcome) = match live {
+        let (shared, outcome) = match registry.live_copy(&path, &stamp, &dirs) {
             Some(shared) => {
                 let count = lock(&shared.entries).map.len();
                 (shared, LoadOutcome::Shared(count))
             }
             None => {
                 let (shared, outcome) =
-                    SharedFile::load(path.clone(), stamp, dirs, &mut self.stats);
-                registry.insert(path, Arc::downgrade(&shared));
+                    SharedFile::load(&mut registry, path.clone(), stamp, dirs, &mut self.stats);
+                // A copy under another stamp is replaced here but may live on
+                // in the caches holding it; the path's writer orders the two.
+                registry.copies.insert(path, Arc::downgrade(&shared));
                 (shared, outcome)
             }
         };
@@ -1161,7 +1283,7 @@ impl FallbackCache {
                 if let Some(slot) = self.entries.get(digest)
                     && let Some(persisted) = PersistedAnswer::of(&slot.answer, slot.substitute)
                 {
-                    entries.put(*digest, persisted);
+                    entries.put(*digest, persisted, &shared.writer);
                 }
             }
             let loaded: Vec<(u64, CachedAnswer, bool)> = entries
@@ -1197,6 +1319,27 @@ impl FallbackCache {
     /// process-wide ([`Self::attach_shared`]).
     pub(crate) fn attach_lazy(&mut self, resolve: PathResolver, stamp: VersionStamp) {
         self.persist = Persist::Pending { resolve, stamp };
+    }
+
+    /// Joins the shared copy another cache already holds for a pending path
+    /// (resolved now) under the same stamp and font-directory state; nothing
+    /// is read from disk, and with no such copy the cache stays pending.
+    /// Whether this call joined one.
+    fn join_live_copy(&mut self) -> bool {
+        let Persist::Pending { resolve, stamp } = &mut self.persist else {
+            return false;
+        };
+        let Some(path) = (resolve.0)() else {
+            return false;
+        };
+        let started = Instant::now();
+        let dirs = DirStamp::all(&stamp.font_dirs);
+        let Some(shared) = lock(registry()).live_copy(&path, stamp, &dirs) else {
+            return false;
+        };
+        let count = lock(&shared.entries).map.len();
+        self.bind(shared, &LoadOutcome::Shared(count), started);
+        true
     }
 
     /// Attaches a pending persistent copy if its path now resolves; whether
@@ -1400,8 +1543,15 @@ impl FallbackCache {
     ///
     /// Synchronous: a background write in flight is joined first (so it can
     /// never land after, and over, this one), then the write runs here.
+    ///
+    /// A clean pending cache joins the shared copy another cache holds for its
+    /// path ([`Self::join_live_copy`]) and writes it if the disk is behind;
+    /// with none it resolves the path but reads nothing.
     pub(crate) fn persist(&mut self) -> io::Result<()> {
         self.join_writer();
+        if !self.dirty {
+            self.join_live_copy();
+        }
         if !self.dirty {
             // Nothing of this cache's own is unwritten, but another cache
             // attached to the same file may have merged answers the disk
@@ -1506,10 +1656,12 @@ impl Drop for FallbackCache {
 }
 
 /// Removes the abandoned temp files beside `path`: [`temp_name`]s of its file
-/// (any PID — a writer of this process or another, killed between create and
-/// rename) not modified for `stale_after`. A younger one may be a write in
-/// progress and is kept. Best effort; how many were removed.
-fn sweep_stale_temp_files(path: &Path, stale_after: Duration) -> usize {
+/// (a writer killed or failed between create and rename) not modified for
+/// `own_after` when they carry this process's PID, or for `foreign_after`
+/// when they carry another's (that writer's liveness is unknown, see
+/// [`FOREIGN_STALE_TEMP_AFTER`]). A younger one may be a write in progress
+/// and is kept. Best effort; how many were removed.
+fn sweep_stale_temp_files(path: &Path, own_after: Duration, foreign_after: Duration) -> usize {
     let (Some(parent), Some(file)) = (path.parent(), path.file_name()) else {
         return 0;
     };
@@ -1523,9 +1675,11 @@ fn sweep_stale_temp_files(path: &Path, stale_after: Duration) -> usize {
     };
     let mut removed = 0;
     for entry in dir.flatten() {
-        if !is_temp_name_of(&entry.file_name(), file) {
-            continue;
-        }
+        let stale_after = match temp_writer_of(&entry.file_name(), file) {
+            Some(TempWriter::Own) => own_after,
+            Some(TempWriter::Foreign) => foreign_after,
+            None => continue,
+        };
         let stale = entry
             .metadata()
             .and_then(|meta| meta.modified())
@@ -1539,27 +1693,38 @@ fn sweep_stale_temp_files(path: &Path, stale_after: Duration) -> usize {
     removed
 }
 
-/// Whether `name` is a [`temp_name`] for the file named `file`:
-/// `.<file>.<decimal pid>.<16 hex digits>.tmp`.
-fn is_temp_name_of(name: &std::ffi::OsStr, file: &std::ffi::OsStr) -> bool {
-    let (Some(name), Some(file)) = (name.to_str(), file.to_str()) else {
-        return false;
-    };
-    let Some(rest) = name
+/// Whose temp file a [`temp_name`] is, by the PID it carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TempWriter {
+    /// This process's PID.
+    Own,
+    /// Any other.
+    Foreign,
+}
+
+/// Whose temp file `name` is when it is a [`temp_name`] for the file named
+/// `file` (`.<file>.<decimal pid>.<16 hex digits>.tmp`); `None` otherwise.
+fn temp_writer_of(name: &std::ffi::OsStr, file: &std::ffi::OsStr) -> Option<TempWriter> {
+    let (name, file) = (name.to_str()?, file.to_str()?);
+    let rest = name
         .strip_prefix('.')
         .and_then(|n| n.strip_prefix(file))
         .and_then(|n| n.strip_prefix('.'))
-        .and_then(|n| n.strip_suffix(".tmp"))
-    else {
-        return false;
-    };
-    let Some((pid, nonce)) = rest.split_once('.') else {
-        return false;
-    };
-    !pid.is_empty()
+        .and_then(|n| n.strip_suffix(".tmp"))?;
+    let (pid, nonce) = rest.split_once('.')?;
+    let shaped = !pid.is_empty()
         && pid.bytes().all(|b| b.is_ascii_digit())
         && nonce.len() == 16
-        && nonce.bytes().all(|b| b.is_ascii_hexdigit())
+        && nonce.bytes().all(|b| b.is_ascii_hexdigit());
+    if !shaped {
+        return None;
+    }
+    // `temp_name` writes the PID in plain decimal, so a string compare is exact.
+    if pid == std::process::id().to_string() {
+        Some(TempWriter::Own)
+    } else {
+        Some(TempWriter::Foreign)
+    }
 }
 
 /// Tests: waits up to `timeout` for `path` to exist (a detached write landing).
@@ -2775,36 +2940,72 @@ mod tests {
         file.with_file_name(name)
     }
 
+    /// Sets `path`'s mtime `age` in the past.
+    fn age_file(path: &Path, age: Duration) {
+        File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - age)
+            .unwrap();
+    }
+
     #[test]
     fn loading_sweeps_stale_temp_files_and_keeps_fresh_ones() {
         let dir = TempDir::new("temp-sweep");
         let (file, _) = write_cache(&dir, stamp("b"));
-        let stale = planted_temp(&file, std::process::id());
-        let foreign_stale = planted_temp(&file, 1);
-        let foreign_fresh = planted_temp(&file, u32::MAX);
+        let own_pid = std::process::id();
+        let other_pid = |n: u32| if n == own_pid { n + 1 } else { n };
+        let own_stale = planted_temp(&file, own_pid);
+        let own_fresh = file.with_file_name(format!(
+            ".{PERSIST_FILE_NAME}.{own_pid}.fedcba9876543210.tmp"
+        ));
+        // Another process's PID: whether it is alive is not known, so only a
+        // day-old file of it is swept.
+        let foreign_maybe_alive = planted_temp(&file, other_pid(1));
+        let foreign_dead = planted_temp(&file, other_pid(2));
+        let foreign_fresh = planted_temp(&file, other_pid(u32::MAX));
         let unrelated = file.with_file_name(".font-fallback.json.backup.tmp");
-        for path in [&stale, &foreign_stale, &foreign_fresh, &unrelated] {
+        for path in [
+            &own_stale,
+            &own_fresh,
+            &foreign_maybe_alive,
+            &foreign_dead,
+            &foreign_fresh,
+            &unrelated,
+        ] {
             std::fs::write(path, b"{partial").unwrap();
         }
-        let old = std::time::SystemTime::now() - STALE_TEMP_AFTER - Duration::from_secs(60);
-        for path in [&stale, &foreign_stale, &unrelated] {
-            File::options()
-                .write(true)
-                .open(path)
-                .unwrap()
-                .set_modified(old)
-                .unwrap();
+        let past_own = STALE_TEMP_AFTER + Duration::from_secs(60);
+        for path in [&own_stale, &foreign_maybe_alive, &unrelated] {
+            age_file(path, past_own);
         }
+        age_file(
+            &foreign_dead,
+            FOREIGN_STALE_TEMP_AFTER + Duration::from_secs(60),
+        );
+        assert!(past_own < FOREIGN_STALE_TEMP_AFTER);
         let mut cache = FallbackCache::new(16);
         assert_eq!(
             cache.attach_persistent(file.clone(), stamp("b")),
             LoadOutcome::Loaded(2)
         );
         assert!(
-            !stale.exists(),
+            !own_stale.exists(),
             "an abandoned temp file of this process is swept"
         );
-        assert!(!foreign_stale.exists(), "an abandoned foreign one too");
+        assert!(
+            own_fresh.exists(),
+            "a fresh one of this process may be a write in progress"
+        );
+        assert!(
+            foreign_maybe_alive.exists(),
+            "a foreign one past the own-PID window may belong to a live writer"
+        );
+        assert!(
+            !foreign_dead.exists(),
+            "a foreign one past the foreign window is abandoned"
+        );
         assert!(
             foreign_fresh.exists(),
             "a fresh foreign one may be a write in progress"
@@ -2817,10 +3018,63 @@ mod tests {
     }
 
     #[test]
+    fn the_foreign_window_is_a_day_and_the_own_window_ten_minutes() {
+        assert_eq!(STALE_TEMP_AFTER, Duration::from_secs(600));
+        assert_eq!(FOREIGN_STALE_TEMP_AFTER, Duration::from_secs(86_400));
+        let dir = TempDir::new("temp-sweep-direct");
+        let file = dir.path().join(PERSIST_FILE_NAME);
+        let own = planted_temp(&file, std::process::id());
+        let foreign = planted_temp(&file, std::process::id().wrapping_add(1));
+        for path in [&own, &foreign] {
+            std::fs::write(path, b"{partial").unwrap();
+            age_file(path, Duration::from_secs(120));
+        }
+        let minute = Duration::from_secs(60);
+        assert_eq!(
+            sweep_stale_temp_files(&file, Duration::from_secs(3600), Duration::from_secs(3600)),
+            0
+        );
+        assert_eq!(
+            sweep_stale_temp_files(&file, minute, Duration::from_secs(3600)),
+            1
+        );
+        assert!(
+            !own.exists() && foreign.exists(),
+            "the own window applied to the own PID only"
+        );
+        assert_eq!(
+            sweep_stale_temp_files(&file, Duration::from_secs(3600), minute),
+            1
+        );
+        assert!(!foreign.exists());
+    }
+
+    #[test]
     fn temp_names_are_recognised_by_shape() {
         let file = std::ffi::OsStr::new("font-fallback.json");
         let name = temp_name(Path::new("/x/font-fallback.json"));
-        assert!(is_temp_name_of(&name, file), "{name:?}");
+        assert_eq!(
+            temp_writer_of(&name, file),
+            Some(TempWriter::Own),
+            "{name:?}"
+        );
+        let foreign = format!(
+            ".font-fallback.json.{}.0123456789abcdef.tmp",
+            u64::from(std::process::id()) + 1
+        );
+        assert_eq!(
+            temp_writer_of(std::ffi::OsStr::new(&foreign), file),
+            Some(TempWriter::Foreign)
+        );
+        let padded = format!(
+            ".font-fallback.json.0{}.0123456789abcdef.tmp",
+            std::process::id()
+        );
+        assert_eq!(
+            temp_writer_of(std::ffi::OsStr::new(&padded), file),
+            Some(TempWriter::Foreign),
+            "temp_name never pads the PID"
+        );
         for other in [
             ".font-fallback.json.tmp",
             ".font-fallback.json.12.0123.tmp",
@@ -2830,8 +3084,9 @@ mod tests {
             "font-fallback.json.12.0123456789abcdef.tmp",
             "font-fallback.json",
         ] {
-            assert!(
-                !is_temp_name_of(std::ffi::OsStr::new(other), file),
+            assert_eq!(
+                temp_writer_of(std::ffi::OsStr::new(other), file),
+                None,
                 "{other}"
             );
         }
@@ -2915,6 +3170,181 @@ mod tests {
         assert_eq!(
             disk.attach_persistent(file, stamp("b")),
             LoadOutcome::Loaded(2)
+        );
+    }
+
+    fn attached(cache: &FallbackCache) -> &Arc<SharedFile> {
+        let Persist::Attached(shared) = &cache.persist else {
+            panic!("attached");
+        };
+        shared
+    }
+
+    #[test]
+    fn two_live_copies_after_a_stamp_change_share_one_writer_and_order_generations() {
+        let dir = TempDir::new("stamp-change-copies");
+        let file = dir.path().join(PERSIST_FILE_NAME);
+        let mut old = FallbackCache::new(64);
+        old.attach_shared(file.clone(), stamp("before"));
+        old.insert(key("o1"), CachedAnswer::Miss);
+        old.persist().unwrap();
+        // A stamp change: the next attach replaces the registry's copy while
+        // the old one lives on in the cache that holds it.
+        let mut new = FallbackCache::new(64);
+        assert_eq!(
+            new.attach_shared(file.clone(), stamp("after")),
+            LoadOutcome::Invalidated("os build id")
+        );
+        let (a, b) = (attached(&old), attached(&new));
+        assert!(!Arc::ptr_eq(a, b), "two live copies of one path");
+        assert!(Arc::ptr_eq(&a.writer, &b.writer), "one writer for both");
+        let writer = Arc::clone(&a.writer);
+
+        let mut seen = writer.on_disk();
+        let mut landed = |cache: &mut FallbackCache, what: &str| {
+            let writes = cache.stats().writes;
+            cache.persist().unwrap();
+            let now = writer.on_disk();
+            assert!(now >= seen, "{what}: the disk generation went backwards");
+            let wrote = cache.stats().writes > writes;
+            assert_eq!(wrote, now > seen, "{what}: a landed write raises it");
+            seen = now;
+            wrote
+        };
+        // Interleaved changes and writes: each write that lands is the newest
+        // change of either copy.
+        new.insert(key("n1"), CachedAnswer::Miss);
+        old.insert(key("o2"), CachedAnswer::Miss);
+        assert!(landed(&mut new, "new"));
+        assert!(landed(&mut old, "old, changed after new"));
+        new.insert(key("n2"), CachedAnswer::Miss);
+        assert!(landed(&mut new, "new again"));
+        assert!(!landed(&mut old, "old, nothing newer"));
+
+        // An old-copy snapshot taken before a new-copy change never lands over it.
+        old.set_write_behind(1, Duration::from_secs(3600));
+        let release = old.hold_next_background_write();
+        let old_writes = old.stats().writes;
+        old.insert(key("o3"), CachedAnswer::Miss);
+        new.insert(key("n3"), CachedAnswer::Miss);
+        assert!(landed(&mut new, "new, over a held old snapshot"));
+        release.send(()).unwrap();
+        old.join_writer();
+        assert_eq!(old.stats().writes, old_writes, "superseded, not written");
+        assert_eq!(old.stats().write_failures, 0);
+        assert_eq!(
+            writer.on_disk(),
+            seen,
+            "the skipped write left the disk as it was"
+        );
+
+        // Both copies stay readable, and the disk holds the newest write whole.
+        for c in ["o1", "o2", "o3"] {
+            assert_eq!(old.get(&key(c)), Some(CachedAnswer::Miss), "{c}");
+        }
+        for c in ["n1", "n2", "n3"] {
+            assert_eq!(new.get(&key(c)), Some(CachedAnswer::Miss), "{c}");
+        }
+        let mut disk = FallbackCache::new(64);
+        assert_eq!(
+            disk.attach_persistent(file.clone(), stamp("after")),
+            LoadOutcome::Loaded(3)
+        );
+        assert!(
+            Arc::ptr_eq(&attached(&disk).writer, &writer),
+            "a private copy too"
+        );
+    }
+
+    #[test]
+    fn a_write_of_one_copy_waits_for_the_path_writer_another_copy_holds() {
+        let dir = TempDir::new("path-writer-serialises");
+        let file = dir.path().join(PERSIST_FILE_NAME);
+        let mut old = FallbackCache::new(64);
+        old.attach_shared(file.clone(), stamp("before"));
+        let mut new = FallbackCache::new(64);
+        new.attach_shared(file.clone(), stamp("after"));
+        let writer = Arc::clone(&attached(&old).writer);
+        new.insert(key("n"), CachedAnswer::Miss);
+
+        // Held as a write of the old copy holds it, from create to rename.
+        let held = lock(&writer.disk);
+        let done = Arc::new(AtomicBool::new(false));
+        let handle = {
+            let done = Arc::clone(&done);
+            std::thread::spawn(move || {
+                new.persist().unwrap();
+                done.store(true, Ordering::Release);
+                new
+            })
+        };
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            !done.load(Ordering::Acquire),
+            "the write waits for the path"
+        );
+        assert!(!file.exists(), "nothing renamed while another write runs");
+        drop(held);
+        let new = handle.join().unwrap();
+        assert!(file.exists());
+        assert_eq!(new.stats().writes, 1);
+        assert_eq!(
+            writer.on_disk(),
+            attached(&new).written.load(Ordering::Acquire)
+        );
+        drop(old);
+    }
+
+    #[test]
+    fn two_spellings_of_one_path_share_one_writer() {
+        let dir = TempDir::new("canonical-writer");
+        let plain = dir.path().join("cache").join(PERSIST_FILE_NAME);
+        let dotted = dir.path().join(".").join("cache").join(PERSIST_FILE_NAME);
+        // The directory does not exist yet: the key still matches once it does.
+        assert_eq!(canonical_path(&plain), canonical_path(&dotted));
+        let mut one = FallbackCache::new(16);
+        one.attach_persistent(plain.clone(), stamp("b"));
+        std::fs::create_dir_all(plain.parent().unwrap()).unwrap();
+        let mut two = FallbackCache::new(16);
+        two.attach_persistent(dotted, stamp("b"));
+        assert!(Arc::ptr_eq(&attached(&one).writer, &attached(&two).writer));
+    }
+
+    #[test]
+    fn a_clean_pending_flush_joins_the_live_shared_copy() {
+        let dir = TempDir::new("pending-join");
+        let file = dir.path().join(PERSIST_FILE_NAME);
+        let lazy = |build: &str| {
+            let mut cache = FallbackCache::new(64);
+            cache.attach_lazy(PathResolver::fixed(file.clone()), stamp(build));
+            cache
+        };
+        let mut one = lazy("b");
+        assert_eq!(one.get(&key("a")), None, "attached at the miss");
+        one.insert(key("a"), CachedAnswer::Miss);
+        assert!(!file.exists(), "nothing written yet");
+
+        // A pending cache under another stamp has no copy to join: it stays pending.
+        let mut other = lazy("other");
+        other.persist().unwrap();
+        assert!(other.attached_path().is_none());
+        assert!(!file.exists());
+
+        let mut two = lazy("b");
+        assert!(!two.is_dirty());
+        two.persist().unwrap();
+        assert_eq!(
+            two.attached_path(),
+            Some(file.as_path()),
+            "joined on a clean flush"
+        );
+        assert!(Arc::ptr_eq(attached(&one), attached(&two)));
+        assert_eq!(two.stats().writes, 1, "the joined copy was behind the disk");
+        assert_eq!(two.get(&key("a")), Some(CachedAnswer::Miss));
+        let mut disk = FallbackCache::new(64);
+        assert_eq!(
+            disk.attach_persistent(file, stamp("b")),
+            LoadOutcome::Loaded(1)
         );
     }
 }
