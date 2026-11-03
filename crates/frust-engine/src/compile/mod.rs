@@ -1069,6 +1069,13 @@ impl SceneCompiler {
         &self.images
     }
 
+    /// Hold glyph residency to its share of `layers` atlas layers — the memory
+    /// trim's companion to [`ImageResidency::request_growth_ceiling`], so the
+    /// layers a sealed array keeps are not all spent on glyphs.
+    pub(crate) fn cap_glyph_atlas_layers(&mut self, layers: usize) {
+        self.glyph_atlas.cap_texel_budget(layers);
+    }
+
     /// Record that a compiled frame's
     /// [`image_evictions`](CompiledFrame::image_evictions) and
     /// [`image_uploads`](CompiledFrame::image_uploads) have been serviced

@@ -1009,6 +1009,73 @@ fn after_a_memory_trim_no_insertion_grows_the_atlas_and_resident_runs_keep_servi
     assert_eq!(trimmed.layers(), 2);
 }
 
+/// Sustained large text in a trimmed atlas: the array sealed at one layer
+/// and minting fresh glyphs every frame. Returns whether an image asking
+/// afterwards still finds room, and the policy's texel budget.
+fn image_room_after_text_in_a_sealed_atlas(cap_glyph_budget: bool) -> (bool, u64) {
+    // The wide large shape in miniature: few big layers, sealed at one.
+    let budget = AtlasBudget {
+        atlas_size: (512, 512),
+        max_atlases: 4,
+    };
+    let mut residency = ImageResidency::new(budget);
+    let mut engine = AtlasPolicy::new(residency.allocator(), false);
+    residency.request_growth_ceiling(1);
+    if cap_glyph_budget {
+        engine.cap_texel_budget(1);
+    }
+    let font = next_font();
+
+    let mut next_glyph = 0_u32;
+    for _ in 0..40 {
+        residency.begin_frame();
+        engine.begin_frame();
+        let classified = engine.classify_run(&run_key(font, MAX_CACHED_FONT_SIZE));
+        let route = engine.admit_run(classified);
+        if let Some(run) = route.atlas() {
+            let run = *run;
+            for _ in 0..4 {
+                engine.collect_glyph(&run, next_glyph, 0.0);
+                next_glyph += 1;
+            }
+        }
+        engine.build(residency.allocator_mut(), raster);
+        engine.acknowledge_clears();
+        engine.end_frame(residency.allocator_mut());
+        engine.acknowledge_replay();
+    }
+    assert_eq!(residency.layers(), 1, "fixture: the seal held at one layer");
+
+    residency.begin_frame();
+    (
+        residency.resolve(&image(256, 256, 0x41)).is_ok(),
+        engine.texel_budget(),
+    )
+}
+
+/// A memory trim cuts the glyph texel budget to its share of the sealed
+/// layers (`EngineRenderer::trim_memory` via `AtlasPolicy::cap_texel_budget`),
+/// so images keep the half of a sealed array the plain tier gives them. The
+/// uncapped control shows the hole the cut prevents: a budget sized for the
+/// whole large array lets glyphs take every layer the seal keeps.
+#[test]
+fn after_a_memory_trim_sustained_large_text_still_leaves_the_images_their_share() {
+    let (uncapped_room, uncapped_budget) = image_room_after_text_in_a_sealed_atlas(false);
+    let (capped_room, capped_budget) = image_room_after_text_in_a_sealed_atlas(true);
+    assert!(
+        capped_budget < uncapped_budget,
+        "the cap lowers the budget: {capped_budget} vs {uncapped_budget}"
+    );
+    assert!(
+        !uncapped_room,
+        "fixture: without the cap, text sized for four layers fills the one sealed layer"
+    );
+    assert!(
+        capped_room,
+        "an image arriving after sustained large text finds room in the sealed array"
+    );
+}
+
 /// Images keep their share under *mixed* sustained text, not merely under one
 /// size class of it.
 ///

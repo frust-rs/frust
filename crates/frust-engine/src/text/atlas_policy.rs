@@ -1591,6 +1591,24 @@ impl AtlasPolicy {
         self.texel_budget
     }
 
+    /// Hold glyph residency to its share of `layers` layers of this cache's
+    /// page shape, what a memory trim does once the shared packer is sealed at
+    /// that many: the budget was sized for the whole array, and left alone it
+    /// would let glyphs take every layer the seal keeps, leaving images none.
+    ///
+    /// One-way: a larger `layers` leaves the budget as it is.
+    pub(crate) fn cap_texel_budget(&mut self, layers: usize) {
+        let pages = AtlasConfig {
+            max_atlases: layers,
+            ..self.pages
+        };
+        let capped = glyph_texel_budget(pages);
+        if capped < self.texel_budget {
+            self.texel_budget = capped;
+            self.max_entries = self.max_entries.min(glyph_entry_ceiling(pages));
+        }
+    }
+
     /// What the resident population is estimated to occupy, in texels.
     ///
     /// The running total the budget is spent against; see this type's field doc

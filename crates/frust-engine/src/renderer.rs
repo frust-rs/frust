@@ -1830,7 +1830,9 @@ impl EngineRenderer {
     /// only appends — so its growth is clamped instead
     /// ([`crate::cache::images::ImageResidency::request_growth_ceiling`]):
     /// resident glyphs and images keep serving and the LRU keeps draining,
-    /// but the array takes no layer past the ceiling. One-way: nothing
+    /// but the array takes no layer past the ceiling. The glyph texel budget
+    /// is cut to its share of the ceiling's layers as well, so glyphs cannot
+    /// take every layer the seal keeps and leave images none. One-way: nothing
     /// restores the large budgets short of building a new renderer, and a
     /// second trim changes nothing.
     pub fn trim_memory(&mut self) -> MemoryTrim {
@@ -1840,6 +1842,7 @@ impl EngineRenderer {
         if retained_budget != self.retained.budget() {
             self.set_retained_budget(retained_budget);
         }
+        self.compiler.cap_glyph_atlas_layers(ceiling);
         let images = self.compiler.images();
         images.request_growth_ceiling(ceiling);
         let trim = MemoryTrim {
