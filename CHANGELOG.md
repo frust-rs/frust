@@ -13,13 +13,17 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   matching `SceneCompiler`.
 - `frust_bench` gains the `weight_probe` scenario (faux-bold and faux-oblique rows on a static Noto
   Sans subset). On a Pixel 5 (unhinted tier) weight 400 draws 15955 ink px and weight 700 draws 22300
-  (+39.8%); the italic rows stay upright with faux oblique off.
+  (+39.8%); the italic rows stay upright with faux oblique off. Three PingFang SC Han rows
+  (weights 300/400/600) sit below them: on an iPhone 13 mini (iOS 27.2, `mobile_large`) they draw
+  24,812 / 34,416 / 48,085 ink px with no refused, unverified or unavailable warning.
 - `skrifa` is a dev-dependency of `frust-engine` (test-only, from the root `[workspace.dependencies]`),
   used by a probe of whether `glifo`'s hinting instance can be built per face.
 - hvgl-only faces (Apple's PingFang) now draw from the glyph atlas: `text/hvgl_atlas.rs` inserts
   them frust-side, `OutlineReason::Hvgl` is the fallback, `SceneCompiler::set_hvgl_atlas` /
   `EngineRenderer::set_hvgl_atlas` switch the route (default on), and `CompiledFrame` gains
-  `hvgl_atlas_draws` and `hvgl_outline_fallbacks`. The `frust-perf enc` line appends both counts.
+  `hvgl_atlas_draws` and `hvgl_outline_fallbacks`. The `frust-perf enc` line appends both counts, then
+  `hvgl_variation_mismatches` and `hvgl_variation_unverified` (cumulative) and `hvgl_unavailable`
+  (per-frame median).
   The route restates `glifo` 0.3.0 `renderer.rs:591`/`:342`/`:521`/`:311`, so
   `tests/hvgl_atlas_parity.rs` is the tripwire on a `glifo` bump (`engine-hvgl-atlas-pin-bound`).
   iPhone 13 mini, S6 at 3x: PingFang 61 atlas draws and 0 outline fallbacks per window, `glyphs_us`
@@ -44,6 +48,24 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `glifo` bump fails on ubuntu CI until `HVGL_PARITY_VERIFIED_GLIFO` acknowledges the macOS parity
   re-run (an attestation, not a run). `hvgl_atlas.rs` factors its outline and glyph-rect transforms
   into pure helpers with 11 golden vectors.
+- hvgl diagnostics: per-fetch outline-cache counters `SceneCompiler::hvgl_outline_hits` /
+  `hvgl_outline_misses` and the `CompiledFrame` fields of the same names (an atlas-route glyph absent
+  from the cache is fetched twice, measured then rasterized, so it reads one miss and one hit; an
+  inkless glyph is only measured; an atlas-resident glyph never fetches; a fetch at a refused
+  variation instance asks CoreText for nothing and counts as neither), and a per-frame
+  `CompiledFrame::hvgl_unavailable_glyphs` on both draw routes with the cumulative
+  `SceneCompiler::hvgl_unavailable_glyphs`. The first report in a process is a `log::warn` naming the
+  face (escaped), the count and `skipped_glyphs`; later ones log at debug (5736ac67a, bc67cdb0b).
+- hvgl faces are checked against CoreText rather than trusted. Each variation copy is read back
+  (`CTFontCopyVariation`) and each axis asked is classified: applied, contradicted (reported beyond a
+  single F2Dot14 step of the axis range, a clamp included) or unreported. Only a contradicted axis
+  refuses the instance: counted by the new `SceneCompiler::hvgl_variation_mismatches`, never cached,
+  its glyphs unavailable. Unreported axes draw CoreText's copy, unverified, counted by the new public
+  `SceneCompiler::hvgl_variation_unverified()`. Each kind warns once per open face. Off Apple every
+  glyph of an hvgl-classified run counts in `hvgl_unavailable_glyphs`. Opening a face also compares a 16-range `cmap` sample of
+  its bytes with CoreText; a mismatch counts in `hvgl_bytes_mismatches` and the warning names the
+  codepoint as `U+XXXX`. `objc2-core-foundation` gains the `CFArray`/`CFDictionary`/`CFNumber`
+  features, no version change (265aaa068).
 
 ### Changed
 
@@ -65,6 +87,11 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   system faces do not, so a hinted faux-bold request on them is nearly invisible
   (`text-hinted-faux-bold-unhintable-face`). Faux bold and faux oblique are not applied on the hvgl
   route (`text-hvgl-synthesis-not-applied`). See [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
+- The single-file hvgl provider is now `text/hvgl/{mod,face,outline,ffi}.rs` (internal): the public surface,
+  the open-face checks and refusals, the outline and variation-instance caches, and every CoreText
+  call, which is now the only `unsafe` in the module. One generic bounded LRU bounds the open faces,
+  each face's instances and the outline cache; refusal sets stay first-in-first-out (c0002cfab,
+  1d1418e9b).
 
 ## 0.6.5 — 2026-11-02
 

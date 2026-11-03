@@ -8690,9 +8690,37 @@ its real weight.
 **Workaround**: use a face with a weight axis (the variable PingFang faces) or a real bold face; on the
 `glifo` route the synthesis is applied.
 
-**Evidence**: `crates/frust-engine/src/text/hvgl.rs` (`glyph_transform`, :252-261, is size / `unitsPerEm` only;
-the outline key in `HvglOutlines::outline`, :387-407, carries face, glyph id and variation instance, no synthesis);
+**Evidence**: `crates/frust-engine/src/text/hvgl/mod.rs` (`glyph_transform`, :243-252, is size / `unitsPerEm` only;
+the outline key in `HvglOutlines::outline`, :428-460, carries face, glyph id and variation instance, no synthesis);
 on the atlas route `classify_hvgl_run` (`crates/frust-engine/src/compile/mod.rs`) keys with embolden 0 and no skew.
+
+---
+
+### `text-hvgl-identity-checks-are-samples` — the hvgl face checks prove less than they look like
+
+**Observed**: a face opened by PostScript name is checked against the handle's bytes by glyph count, `unitsPerEm`,
+`fvar` axis tags and a sample of 16 `cmap` ranges (format 12, else 4). A copy that differs from the installed
+face only outside the sampled ranges passes; `GSUB`/`GPOS` and `cmap` format 14 differences are not compared.
+The variation read-back proves CoreText recorded the requested instance on the copy, not that its outline code
+applied it, and an axis CoreText does not report (and that is not at its default) is drawn unverified: counted in
+`SceneCompiler::hvgl_variation_unverified`, warned once per open face, not refused. A copy that silently ignores an
+axis without reporting it therefore draws the wrong instance, counted. Only a reported value that contradicts the
+request is refused. The read-back is exercised on macOS 27 and iOS 27 only: on an iPhone 13 mini (iOS 27.2, tier
+`mobile_large`, 358764edc) PingFang SC drew at three weights, ink 300/400/600 = 24,812 / 34,416 / 48,085, with no
+refused, unverified or unavailable warning, so iOS 27's CoreText reports the `wght` axis as applied.
+
+**Applies to**: Apple targets, `hvgl`-only faces (PingFang).
+
+**Workaround**: none needed for the installed system faces; an app that registers its own copy under a system
+face's PostScript name should keep glyph ids and `cmap` identical to the installed face.
+
+**Why accepted**: a full `cmap` walk per open is the cost the sample avoids (0.83 us per open in release); the
+sample plus the glyph-count, `unitsPerEm` and axis checks catch the realistic substitution, and the known-answer
+test (`PingFangSC` Light and Semibold drawn at their coordinates) pins that the instance reaches the outline.
+
+**Evidence**: `crates/frust-engine/src/text/hvgl/face.rs` (`cmap_disagreement`, `CMAP_SAMPLES`);
+`crates/frust-engine/src/text/hvgl/outline.rs` (`read_back`, `classify_axis`); `crates/frust-engine/tests/hvgl_provider.rs`;
+265aaa068.
 
 ---
 
