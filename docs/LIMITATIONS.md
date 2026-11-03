@@ -6415,7 +6415,17 @@ at 3x: 0/527 glyphs resident with glyph_evicted 24,051 per three runs before,
 gates gr02-13mini-residency, ha04-13mini-s6-phase-head). The `mobile_large`
 tier that holds the population costs memory: glyph atlas 16 -> 64 MiB and
 retained pages 32 -> 64 MiB, taken on iOS from 3 GiB of `hw.memsize` (a 4 GB
-iPhone 13 mini reports `memory_mib=3674`), from 4 GiB elsewhere. That budget is one running total —
+iPhone 13 mini reports `memory_mib=3674`), from 4 GiB elsewhere. Measured on that
+iPhone 13 mini (S6, one session), `phys_footprint` p50 is 229.9 MiB on the plain tier
+(max 233.4) and 252.0 MiB on `mobile_large` (max 256.5): +22 MiB resident on this
+workload, the +80 MiB being a lazy ceiling (gates rf01-13mini-footprint-ab,
+p2-round1-integration-root). A memory warning (`RenderCommand::TrimMemory` ->
+`EngineRenderer::trim_memory`) drops the retained pages to the plain 32 MiB budget
+and clamps atlas growth to the plain tier's bytes, one-way until the renderer is
+rebuilt. The atlas has no layer-release primitive (`vello_common` 0.2.0's packer
+only appends), so a trim cannot give a layer back: it only stops the array growing,
+and resident glyphs keep serving. The trim is host-tested; on-device delivery was
+not exercised (gate rf01-13mini-memory-warning, skipped). That budget is one running total —
 every resident entry charged a per-entry texel cost at its own size, rationed
 against the glyph share of the array (so no size class's refusal depends on
 another's counts, and mixed sizes bound additively) — and it is a deliberate
@@ -6469,6 +6479,9 @@ The tripwire is `crates/frust-engine/tests/hvgl_atlas_parity.rs` (PingFang atlas
 whole-pixel and subpixel origins, and a CFF Hiragino control glifo inserts itself); it needs macOS Metal and
 is `#[ignore]`d, so CI on ubuntu does not run it: re-run it by hand with
 `cargo test -p frust-engine --test hvgl_atlas_parity -- --ignored --test-threads=1` on every glifo bump.
+`crates/frust-testing/tests/dup_identities.rs` (`hvgl_restatement_is_attested_for_the_locked_glifo`) fails on
+ubuntu CI when Cargo.lock's glifo differs from `HVGL_PARITY_VERIFIED_GLIFO`, forcing the re-diff to be
+acknowledged; it is an attestation, not proof the Metal run happened.
 `SceneCompiler::set_hvgl_atlas(false)` routes the glyphs back to outlines
 (`OutlineReason::Hvgl`). Measured: PingFang 61 atlas draws and 0 outline fallbacks per window on an iPhone
 13 mini (S6, 3x), glyphs_us 5,377 -> 183, CPU work per frame 6,146 -> 1,437 us, presented cadence
@@ -6481,7 +6494,8 @@ unchanged (gr02-13mini-presented-cadence); a 300-glyph PingFang paragraph compil
 source line, and the parity test pins it.
 
 **Trigger for removal**: glifo exposing an outline-provider seam for its atlas cache (so the insert can
-use glifo's own), or an automated macOS run of the parity test on every glifo bump.
+use glifo's own), or an automated macOS run of the parity test on every glifo bump (the CI check above
+acknowledges a bump; it does not run the test).
 
 ### `engine-bitmap-glyphs-gap` — bitmap-strike (PNG/BGRA/Mask) emoji do not render on the engine tier; COLR emoji do
 

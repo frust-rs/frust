@@ -29,6 +29,21 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   a3b5ebd5b.
 - `frust_render::set_reported_device_memory`: a shell reports device memory where there is no
   `/proc/meminfo`. `frust-shell-ios` reads `sysctl hw.memsize` and calls it before the first renderer (3bab21765).
+- iOS answers `didReceiveMemoryWarning`: `frust_memory_warning` sends `RenderCommand::TrimMemory`
+  (fire-and-forget, serviced in every phase), `SurfaceRenderer::trim_memory` and
+  `EngineRenderer::trim_memory` hold the retained pages to the plain 32 MiB budget and clamp atlas
+  growth to the plain tier's bytes (`ImageResidency::request_growth_ceiling`; the atlas has no
+  layer-release primitive), one-way until the renderer is rebuilt. Android and desktop ignore the
+  command. Host-tested; on-device delivery was not exercised (rf01-13mini-memory-warning, skipped).
+- `frust-perf ios-mem phys_footprint_kib=<n>|unknown`, about 1 Hz on iOS under `perf-trace`, and the
+  compile-time `FRUST_FORCE_MOBILE_TIER` define (`frust build ios --define FRUST_FORCE_MOBILE_TIER=1`)
+  that forces the plain tier. iPhone 13 mini, S6, one session: `phys_footprint` p50 229.9 MiB plain vs
+  252.0 MiB `mobile_large` (+22 MiB), 527/527 vs 137/527 resident glyphs (rf01-13mini-footprint-ab,
+  p2-round1-integration-root).
+- `frust-testing`'s `dup_identities` gains `hvgl_restatement_is_attested_for_the_locked_glifo`: a
+  `glifo` bump fails on ubuntu CI until `HVGL_PARITY_VERIFIED_GLIFO` acknowledges the macOS parity
+  re-run (an attestation, not a run). `hvgl_atlas.rs` factors its outline and glyph-rect transforms
+  into pure helpers with 11 golden vectors.
 
 ### Changed
 

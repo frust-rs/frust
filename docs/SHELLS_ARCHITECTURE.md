@@ -453,7 +453,7 @@ hidden slot) are in [LIMITATIONS.md](LIMITATIONS.md) § `apple-overlay-limits`.
   | Shell | Push site | Mapping |
   |---|---|---|
   | Android | `lifecycle.rs` `LifecycleFlags::target`, driven by `jni_glue` `native_on_start/stop/resume/pause/window_focus_changed` | `native_on_destroy`→Detached; !started→Paused; started+resumed+focused→Resumed; else Inactive |
-  | iOS | `ffi_glue` pause/resume plus `frust_did_enter_background`/`frust_will_enter_foreground` | willResignActive→Inactive; didEnterBackground→Paused; willEnterForeground→Inactive; didBecomeActive→Resumed; never Detached |
+  | iOS | `ffi_glue` pause/resume plus `frust_did_enter_background`/`frust_will_enter_foreground` | willResignActive→Inactive; didEnterBackground→Paused; willEnterForeground→Inactive; didBecomeActive→Resumed; never Detached; `didReceiveMemoryWarning`→`frust_memory_warning`→`RenderCommand::TrimMemory` (any phase; Android/desktop arms no-op) |
   | Desktop | `app_handler.rs` `sync_app_lifecycle` | any window focused→Resumed; all occluded/minimized or `suspended`→Hidden; else Inactive; never Paused/Detached |
   | Web | `frust-shell-web` `app_handler.rs` | document hidden→Hidden; window focused→Resumed; else Inactive |
 
