@@ -1459,14 +1459,21 @@ mod platform {
     // functions in Core Text are thread-safe. Font objects (CTFont,
     // CTFontDescriptor, and associated objects) can be used simultaneously by
     // multiple operations, work queues, or threads." (Core Text Programming
-    // Guide, "Core Text Objects Are C-Language Opaque Types"). A `CtFace` is
-    // never mutated after `open`: it only ever reads through the font
-    // (`CTFontCreatePathForGlyph`, `CTFontGetBoundingRectsForGlyphs`), and the
-    // `CFRetained` release on drop is `CFRelease`, which is thread-safe too.
-    // `SceneCompiler`, which holds these, has to be `Send + Sync`.
+    // Guide, "Core Text Objects Are C-Language Opaque Types"). A `CtFace` owns
+    // its `CFRetained<CTFont>` and never mutates it after `open`: every method
+    // only reads through the font (`CTFontCreatePathForGlyph`,
+    // `CTFontGetBoundingRectsForGlyphs`, `CTFontCopyTable`, `varied`'s
+    // `CTFontCreateCopyWithAttributes`, `axis_defaults`'
+    // `CTFontCopyVariationAxes`, `variation_values`' `CTFontCopyVariation`,
+    // `glyphs_for`'s `CTFontGetGlyphsForCharacters` into buffers the call
+    // owns, and the getters), and the `CFRetained` release on drop is
+    // `CFRelease`, which is thread-safe too. `SceneCompiler`, which holds
+    // these, is `Send + Sync`, and the published renderer types that hold it
+    // keep both.
     unsafe impl Send for CtFace {}
     // SAFETY: as above — shared access is only ever the immutable reads named
-    // there.
+    // there, on a font object Apple documents as usable from several threads
+    // at once.
     unsafe impl Sync for CtFace {}
 
     impl CtFace {
