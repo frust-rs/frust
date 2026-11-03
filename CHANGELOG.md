@@ -74,7 +74,7 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   codepoint as `U+XXXX`. `objc2-core-foundation` gains the `CFArray`/`CFDictionary`/`CFNumber`
   features, no version change (265aaa068).
 - `TextContext::font_cache_stats()` returns `FontCacheStats { write_failures, written_generation, dirty,
-  attached }`, and `BackgroundFlush::went_to_background_outcome()` returns a `BackgroundFlushOutcome`
+  attached, persistent }`, and `BackgroundFlush::went_to_background_outcome()` returns a `BackgroundFlushOutcome`
   (per-context results; `went_to_background` still returns the flushed count). Both types are
   re-exported (`frust_text`, `frust_shell_common`, `frust::authoring::text`). A report whose every flush
   failed leaves the once-per-transition latch unarmed so the next hide retries; the first failed flush a
