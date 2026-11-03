@@ -8,11 +8,12 @@
 //! when the swapchain reports `Lost` mid-frame.
 //!
 //! The frame — there is one renderer and one path family — is:
-//! encode copies the frame's scene, then acquire → the scene's fragment-shader
-//! quads rendered into their own offscreen targets
-//! (`frust_engine::ShaderQuadPass`, a no-op for a scene drawing none) → one
-//! `EngineRenderer::encode` into the acquired swapchain view and its
-//! surface-owned depth attachment
+//! encode copies the frame's scene and plans it (`EngineRenderer::prepare`,
+//! so a frame the engine refuses is skipped before anything is acquired),
+//! then acquire → the scene's fragment-shader quads rendered into their own
+//! offscreen targets (`frust_engine::ShaderQuadPass`, a no-op for a scene
+//! drawing none) → one `EngineRenderer::encode_prepared` into the acquired
+//! swapchain view and its surface-owned depth attachment
 //! ([`RenderPath::EngineDirect`](crate::context::RenderPath::EngineDirect)) → submit → present →
 //! `end_frame`. Every one of those passes goes into a single encoder, which is
 //! what puts a shader quad's own pass ahead of the frame that samples it. No
@@ -47,9 +48,10 @@ use crate::context::{EngineSurface, RenderPath};
 use crate::overlay::{
     CutServiceability, OverlayCut, OverlayCutOutcome, SegmentedOutcome, SegmentedPresents,
 };
+use crate::refusal::{EngineRefusalReport, Refusal, RefusalInjector, RefusalStage};
 use frust_gpu::lifecycle::{
     AcquireAction, AcquireOutcome, AcquireStatus, EncodeOutcome, FrameOutcome, SurfaceEvent,
-    SurfacePhase, decide_acquire, next_invalid_streak, next_phase,
+    SurfacePhase, decide_acquire_streaks, next_invalid_streak, next_phase, next_transient_streak,
 };
 use frust_gpu::{DetachedSurface, RenderContext, SurfaceAlphaRequest};
 
@@ -373,6 +375,13 @@ pub struct SurfaceRenderer {
     /// Reset on a successful acquire, on giving up (transitioning to
     /// `SurfaceLost`), and on installing a fresh surface.
     consecutive_invalid: u8,
+    /// Consecutive `AcquireStatus::Transient` (`Timeout`/`Occluded`) acquires
+    /// skipped since the last other acquire status or surface (re)install —
+    /// see `frust_gpu::lifecycle`'s `decide_acquire_streaks`/
+    /// `MAX_TRANSIENT_SKIPS`: at the cap the swapchain is reconfigured instead
+    /// of skipped, which reclaims any image a dropped, un-presented texture
+    /// leaked on Vulkan.
+    consecutive_transient: u8,
     /// Persisted, framed `wgpu::PipelineCache` blob (see
     /// [`frust_gpu::pipeline_cache`]) a prior run wrote and the shell restored from
     /// disk via [`set_initial_pipeline_cache_data`](Self::set_initial_pipeline_cache_data),
@@ -392,6 +401,14 @@ pub struct SurfaceRenderer {
     /// stashing it here between the two clock-separated calls keeps the wgpu type
     /// confined to `frust-render` while letting a shell time each span with its
     /// own clock (timing stays shell-owned — see `frust-shell-common::perf`).
+    ///
+    /// Never dropped un-presented while its swapchain lives: on `wgpu-hal`'s
+    /// Vulkan backend a dropped `SurfaceTexture` is never returned to the
+    /// swapchain (its discard is a no-op, upstream gfx-rs/wgpu#5723), so each
+    /// such drop leaks an image until acquire times out for good. The only
+    /// drops are the ones that destroy or recreate the swapchain in the same
+    /// step — [`Self::adopt_surface_state`] and [`Self::on_surface_changed`] —
+    /// which reclaims every image it held.
     pending_present: Option<wgpu::SurfaceTexture>,
     /// The `base_color` [`Self::encode`] was called with, stashed since the
     /// render that consumes `base_color` runs in [`Self::submit`] (it targets
@@ -402,18 +419,26 @@ pub struct SurfaceRenderer {
     /// The engine tier's owned copy of the frame's scene — its counterpart to
     /// [`Self::scene`], and reused across frames for the same reason.
     ///
-    /// `frust_engine::EngineRenderer::encode` needs the GPU resources only
-    /// [`Self::submit`] has (the acquired swapchain view), so the borrowed
-    /// `&Scene` [`Self::encode`] is handed has to survive the gap between the
-    /// two calls. `clone_from` reuses this buffer's capacity, so a
-    /// steady-state frame allocates nothing.
+    /// [`Self::encode`] plans it (`EngineRenderer::prepare`), but recording
+    /// it needs the GPU resources only [`Self::submit`] has (the acquired
+    /// swapchain view), and `encode_prepared` takes the planned scene again,
+    /// so the borrowed `&Scene` has to survive the gap between the two calls.
+    /// `clone_from` reuses this buffer's capacity, so a steady-state frame
+    /// allocates nothing.
     ///
-    /// **Measurement note.** The same span caveat applies: on this tier
-    /// `encode_us` holds a memcpy and nothing else — the whole scene compile
-    /// (strip building, paint encoding) plus command recording lands in
-    /// `submit_us`. Compare whole frames across tiers, never `encode_us`
-    /// against `encode_us`.
+    /// **Measurement note.** `encode_us` holds the copy plus the plan — the
+    /// scene compile and the frame's schedule — and `submit_us` the paint
+    /// resolution and command recording.
     engine_scene: frust_scene::Scene,
+    /// The attachment the in-flight frame was planned against, from the
+    /// [`Self::encode`] that planned it until the `submit` that records it
+    /// (see [`check_plan_target`]). Dropped wherever the plan itself is.
+    planned_target: Option<PlanTarget>,
+    /// Every frame this renderer's engine refused ([`Self::engine_refusals`]).
+    refusals: EngineRefusalReport,
+    /// The `FRUST_RENDER_INJECT_REFUSAL` clock, read from the process
+    /// configuration once, here.
+    injector: RefusalInjector,
     /// The first rendered frame's submit decomposition, until the shell takes
     /// it (see [`Self::take_first_submit_breakdown`]).
     #[cfg(feature = "perf-trace")]
@@ -664,12 +689,16 @@ impl SurfaceRenderer {
         Self {
             state: SurfaceState::NoSurface,
             consecutive_invalid: 0,
+            consecutive_transient: 0,
             initial_cache_data: None,
             install_timings: None,
             install_timings_seen: false,
             pending_present: None,
             pending_base_color: None,
             engine_scene: frust_scene::Scene::default(),
+            planned_target: None,
+            refusals: EngineRefusalReport::default(),
+            injector: RefusalInjector::from_config(),
             #[cfg(feature = "perf-trace")]
             first_submit: None,
             #[cfg(feature = "perf-trace")]
@@ -700,7 +729,7 @@ impl SurfaceRenderer {
     }
 
     /// Drops the in-flight frame's cross-call stash: the engine arm's
-    /// `base_color` and the encoded scene's serial.
+    /// `base_color`, the encoded scene's serial and its plan's target.
     ///
     /// It describes one frame of one surface, so any event that ends a
     /// surface's life (`on_surface_destroyed`) or replaces it
@@ -710,10 +739,22 @@ impl SurfaceRenderer {
         self.pending_base_color = None;
         self.pending_serial = None;
         self.segment_pending = false;
+        self.planned_target = None;
+    }
+
+    /// Every frame this renderer's engine has refused so far, across every
+    /// surface it held: refused at the encode-stage plan (skipped before
+    /// anything was acquired) or while recording after acquire. The count is
+    /// the sum of the per-surface counts the refusal log reports; the first
+    /// reason is latched.
+    #[must_use]
+    pub fn engine_refusals(&self) -> EngineRefusalReport {
+        self.refusals.clone()
     }
 
     /// Adopt `state` and reset everything else scoped to ONE surface: the
-    /// `Invalid`-reconfigure streak and the in-flight frame's stash.
+    /// `Invalid`-reconfigure and `Transient`-skip streaks, the in-flight
+    /// frame's stash and any swapchain texture still stashed for it.
     ///
     /// The one place a surface episode begins or ends. `install_surface`
     /// enters through it with the freshly built [`SurfaceState::Ready`];
@@ -730,6 +771,12 @@ impl SurfaceRenderer {
     /// next [`Self::take_retained_ledger`] publishes (the empty ledger, either
     /// way) whatever generation the old engine had reached.
     ///
+    /// A swapchain texture still stashed by an `acquire` no `submit` consumed
+    /// is dropped here, deliberately and before the surface it came from: it
+    /// belongs to the swapchain this episode change destroys, which takes the
+    /// image with it, and presenting it would show a frame nothing was drawn
+    /// into on a surface that is going away.
+    ///
     /// An episode that ends hands its driver pipeline cache to
     /// [`Self::retired_pipeline_cache`]; the rest of the episode is dropped when
     /// this method's block for the old surface ends, which joins the engine's
@@ -737,6 +784,7 @@ impl SurfaceRenderer {
     /// method returns. That is safe because nothing reads the retired cache
     /// before then. An episode that begins drops whatever was retired there.
     fn adopt_surface_state(&mut self, state: SurfaceState) {
+        self.pending_present = None;
         let previous = std::mem::replace(&mut self.state, SurfaceState::NoSurface);
         if let SurfaceState::Ready(ready) = previous {
             let ReadySurface { pipeline_cache, .. } = *ready;
@@ -749,6 +797,7 @@ impl SurfaceRenderer {
         }
         self.state = state;
         self.consecutive_invalid = 0;
+        self.consecutive_transient = 0;
         self.clear_pending_frame();
         self.retained_published = None;
     }
@@ -1409,6 +1458,20 @@ impl SurfaceRenderer {
         if width == 0 || height == 0 {
             return;
         }
+        // `engine.resize` below drops the engine's held plan, so the next
+        // submit re-plans against the new extent; its target goes with it.
+        self.planned_target = None;
+        // A resize between `acquire` and `submit` breaks their pairing — every
+        // shell runs the two back to back. Should one arrive anyway, the
+        // stashed texture is dropped HERE, ahead of the reconfigure: `wgpu`
+        // will not configure a surface with a frame still out, and the
+        // reconfigure that follows recreates the swapchain, reclaiming the
+        // image a dropped texture would otherwise leak on Vulkan.
+        debug_assert!(
+            self.pending_present.is_none(),
+            "frust-render: a resize arrived between acquire and submit"
+        );
+        self.pending_present = None;
         if let SurfaceState::Ready(ready) = &mut self.state {
             ready
                 .surface
@@ -1517,21 +1580,22 @@ impl SurfaceRenderer {
         }
     }
 
-    /// Phase 1 of the frame — the **encode** span: take the frame's scene. It
-    /// does **not** touch the swapchain, so a caller timing this call in
-    /// isolation measures encode cost with no vsync wait folded in. This copies
-    /// the display list and stashes `base_color`; the GPU render moves to
-    /// [`Self::submit`] (it needs the acquired swapchain texture), so
-    /// `encode_us` is a memcpy and nothing else.
+    /// Phase 1 of the frame — the **encode** span: take the frame's scene and
+    /// plan it. It does **not** touch the swapchain, so a caller timing this
+    /// call in isolation measures encode cost with no vsync wait folded in.
+    /// This copies the display list, stashes `base_color`, and runs the
+    /// engine's CPU plan for the texture the frame will really render into
+    /// (`EngineRenderer::prepare`: the scene compile, the frame's schedule
+    /// and its texture-ceiling checks), so `encode_us` is no longer a memcpy.
+    /// The recording moves to [`Self::submit`] (it needs the acquired
+    /// swapchain texture).
     ///
     /// Returns [`EncodeOutcome::Skipped`] (no work done, nothing queued) in any
-    /// phase but [`SurfacePhase::SurfaceReady`]; otherwise
-    /// [`EncodeOutcome::Encoded`], after which [`Self::present`] finishes the
-    /// frame. Nothing accumulates across frames.
-    // `ctx` is unused on this tier — all of its GPU work happens in `submit`
-    // — but the parameter stays in the public signature so a shell's call
-    // site does not have to special-case it.
-    #[allow(unused_variables)]
+    /// phase but [`SurfacePhase::SurfaceReady`], and for a frame the engine
+    /// refuses to plan — counted in [`Self::engine_refusals`] and logged under
+    /// the same latch as every refusal — so a refused plan never acquires a
+    /// swapchain image; otherwise [`EncodeOutcome::Encoded`], after which
+    /// [`Self::present`] finishes the frame. Nothing accumulates across frames.
     pub fn encode(
         &mut self,
         ctx: &RenderContext,
@@ -1542,11 +1606,10 @@ impl SurfaceRenderer {
         if !self.phase().can_render() {
             return Ok(EncodeOutcome::Skipped);
         }
-        // Disjoint field borrows: the live surface and the engine arms' colour
-        // stash; `consecutive_invalid` belongs to `present`.
+        // Disjoint field borrows: the live surface and the engine's scene copy;
+        // `consecutive_invalid` belongs to `present`.
         let Self {
             state,
-            pending_base_color,
             engine_scene,
             ..
         } = self;
@@ -1596,14 +1659,81 @@ impl SurfaceRenderer {
             }
             None => engine_scene.clone_from(scene),
         }
+        if self.plan_engine_frame(ctx) == EncodeOutcome::Skipped {
+            return Ok(EncodeOutcome::Skipped);
+        }
         // Carried to `submit`, where the render that consumes it runs.
-        *pending_base_color = Some(base_color);
+        self.pending_base_color = Some(base_color);
         // The scene's serial, committed by the `submit` that renders it.
         self.pending_serial = Some((self.scene_serial, scene_records_retained(scene)));
         // A whole-frame encode: no overlay draws any of it.
         self.segment_pending = false;
 
         Ok(EncodeOutcome::Encoded)
+    }
+
+    /// Plans the in-flight frame — `engine_scene`, the main segment of a
+    /// segmented frame — for the texture this surface's arm will render it
+    /// into ([`plan_target`]), keeping the plan for `submit`'s
+    /// `encode_prepared`. A refused plan (or an injected `plan:` refusal)
+    /// skips the frame through [`Self::refuse_planned_frame`].
+    fn plan_engine_frame(&mut self, ctx: &RenderContext) -> EncodeOutcome {
+        let refusal = {
+            let Self {
+                state,
+                engine_scene,
+                injector,
+                planned_target,
+                ..
+            } = self;
+            let SurfaceState::Ready(ready) = state else {
+                return EncodeOutcome::Skipped;
+            };
+            let ReadySurface {
+                surface, backend, ..
+            } = &mut **ready;
+            let TierBackend::Engine { engine, .. } = backend;
+            let config = surface.config();
+            let (format, usage) = (config.format, config.usage);
+            let extent = (config.width, config.height);
+            let target = plan_target(
+                &mut surface.path,
+                &ctx.device_handle().device,
+                format,
+                usage,
+                extent,
+                engine_scene,
+            );
+            match plan_frame(engine, injector, engine_scene, target) {
+                Ok(()) => {
+                    *planned_target = Some(target);
+                    return EncodeOutcome::Encoded;
+                }
+                Err(refusal) => refusal,
+            }
+        };
+        self.refuse_planned_frame(ctx, &refusal)
+    }
+
+    /// Skips a frame refused at the encode-stage plan exactly as a refusal
+    /// after acquire is handled — the surface's counter, the latched log, the
+    /// renderer's report and the engine's end of frame — and drops the
+    /// in-flight frame's stash as a skipped frame does. Nothing was acquired,
+    /// so there is no swapchain image to give back.
+    fn refuse_planned_frame(&mut self, ctx: &RenderContext, refusal: &Refusal) -> EncodeOutcome {
+        if let SurfaceState::Ready(ready) = &mut self.state {
+            let TierBackend::Engine {
+                engine,
+                refused_frames,
+                ..
+            } = &mut ready.backend;
+            *refused_frames = refused_frames.saturating_add(1);
+            log_engine_refusal(*refused_frames, refusal);
+            engine.end_frame(&ctx.device_handle().queue);
+        }
+        self.refusals.note(refusal);
+        self.clear_pending_frame();
+        EncodeOutcome::Skipped
     }
 
     /// [`Self::encode`] for a **segmented** frame (render-model Phase 4,
@@ -1631,10 +1761,12 @@ impl SurfaceRenderer {
     /// empty range. [`Self::submit_segmented`] reports the classification per
     /// cut ([`OverlayCutOutcome::serviceability`]).
     ///
-    /// The whole scene is copied once more, for [`Self::submit_segmented`] to
-    /// cut each overlay's range from — `ctx` stays unused, as in `encode`.
-    /// With no cut this is exactly [`Self::encode`] (the whole frame, copied
-    /// whole), and so is a frame the overlay spike's split
+    /// The main segment is planned exactly as [`Self::encode`] plans the
+    /// whole frame — the command range the engine will record — and a refused
+    /// plan skips the frame before acquire in the same way. The whole scene is
+    /// copied once more, for [`Self::submit_segmented`] to cut each overlay's
+    /// range from. With no cut this is exactly [`Self::encode`] (the whole
+    /// frame, copied whole), and so is a frame the overlay spike's split
     /// ([`Self::set_overlay_split`]) is armed on: explicit cuts replace the
     /// spike's fixed one here, never combine with it.
     ///
@@ -1657,9 +1789,7 @@ impl SurfaceRenderer {
         }
         let Self {
             state,
-            pending_base_color,
             engine_scene,
-            segment_scene,
             segment_service,
             ..
         } = self;
@@ -1687,8 +1817,11 @@ impl SurfaceRenderer {
             },
             engine_scene,
         );
-        segment_scene.clone_from(scene);
-        *pending_base_color = Some(base_color);
+        if self.plan_engine_frame(ctx) == EncodeOutcome::Skipped {
+            return Ok(EncodeOutcome::Skipped);
+        }
+        self.segment_scene.clone_from(scene);
+        self.pending_base_color = Some(base_color);
         self.pending_serial = Some((self.scene_serial, scene_records_retained(scene)));
         self.segment_pending = true;
         Ok(EncodeOutcome::Encoded)
@@ -1708,7 +1841,9 @@ impl SurfaceRenderer {
     /// `frust-shell-common::perf`'s layering note). `present`'s combined span
     /// equals `acquire` + `submit` by construction.
     ///
-    /// Assumes [`Self::encode`] has already copied this frame's display list.
+    /// Assumes [`Self::encode`] has already copied and planned this frame's
+    /// display list; a frame it refused returned
+    /// [`EncodeOutcome::Skipped`] and never reaches this call.
     /// In any phase but [`SurfacePhase::SurfaceReady`] the call is a
     /// no-op returning [`FrameOutcome::Skipped`]. On an `Outdated`
     /// acquire the surface is reconfigured and [`FrameOutcome::Redraw`] asks the
@@ -1744,11 +1879,25 @@ impl SurfaceRenderer {
         if !self.phase().can_render() {
             return Ok(AcquireOutcome::Skipped);
         }
-        // Disjoint field borrows: the live surface, the consecutive-Invalid
-        // counter, and the stash slot (the reusable scene belongs to `encode`).
+        // A texture is still stashed: an earlier `acquire` no `submit`
+        // consumed, which breaks the two calls' pairing. Its frame is handed
+        // out again instead of acquiring a second one — overwriting the stash
+        // would drop the first un-presented, which leaks its image on Vulkan
+        // (see `pending_present`), and `wgpu` refuses a second acquire while
+        // one is out anyway.
+        debug_assert!(
+            self.pending_present.is_none(),
+            "frust-render: acquire called twice without a submit between"
+        );
+        if self.pending_present.is_some() {
+            return Ok(AcquireOutcome::Acquired);
+        }
+        // Disjoint field borrows: the live surface, the two acquire streaks,
+        // and the stash slot (the reusable scene belongs to `encode`).
         let Self {
             state,
             consecutive_invalid,
+            consecutive_transient,
             pending_present,
             ..
         } = self;
@@ -1768,7 +1917,7 @@ impl SurfaceRenderer {
             Cst::Validation => AcquireStatus::Invalid,
         };
 
-        let action = decide_acquire(status, *consecutive_invalid);
+        let action = decide_acquire_streaks(status, *consecutive_invalid, *consecutive_transient);
         // Reset-on-success / increment-on-retry / reset-on-give-up (the same
         // discipline mirrored from iOS's `recreate_failures`) — pure and
         // unit-tested in `next_invalid_streak` itself.
@@ -1780,7 +1929,25 @@ impl SurfaceRenderer {
                  {consecutive_invalid} consecutive attempts; surface lost"
             );
         }
+        if status == AcquireStatus::Transient && action == AcquireAction::Reconfigure {
+            // A run of timeouts long enough to be a wedge rather than a slow
+            // compositor: the swapchain is recreated, reclaiming any image a
+            // dropped texture leaked. Warned once per process, then debug.
+            static TRANSIENT_CAP_LOGGED: OnceLock<()> = OnceLock::new();
+            if TRANSIENT_CAP_LOGGED.set(()).is_ok() {
+                log::warn!(
+                    "frust-render: {consecutive_transient} consecutive timed-out or occluded \
+                     acquires; reconfiguring the swapchain"
+                );
+            } else {
+                log::debug!(
+                    "frust-render: {consecutive_transient} consecutive timed-out or occluded \
+                     acquires; reconfiguring the swapchain"
+                );
+            }
+        }
         *consecutive_invalid = next_invalid_streak(status, action, *consecutive_invalid);
+        *consecutive_transient = next_transient_streak(status, action, *consecutive_transient);
 
         let outcome = match action {
             AcquireAction::Present => {
@@ -1818,10 +1985,15 @@ impl SurfaceRenderer {
             // `install_surface` and `on_surface_destroyed` use, once the field
             // borrows above have ended. That also drops the in-flight frame's
             // stash: no `submit` will ever consume it now, and a stale
-            // `base_color` describes a surface that no longer exists. The
-            // streak was already reset above (`next_invalid_streak`,
-            // reset-on-give-up); the door zeroing it again is a no-op. The
-            // shell's own recovery path (recreate on
+            // `base_color` describes a surface that no longer exists. No
+            // swapchain texture is stashed on this path — a `Lose` acquire
+            // stashes nothing, and a stash left by an earlier acquire returned
+            // above before acquiring — but the door drops `pending_present`
+            // with the surface regardless (see `adopt_surface_state`). The
+            // streaks were already reset above (`next_invalid_streak`,
+            // reset-on-give-up; `next_transient_streak`, reset on any
+            // non-`Transient` status); the door zeroing them again is a no-op.
+            // The shell's own recovery path (recreate on
             // resize/redraw/surfaceChanged) then starts a fresh episode.
             self.adopt_surface_state(SurfaceState::Lost);
         }
@@ -1833,10 +2005,14 @@ impl SurfaceRenderer {
     /// Timing this call in isolation attributes the submit work separately from
     /// [`Self::acquire`]'s blocking vsync wait.
     ///
-    /// What the submit span contains: the whole GPU render runs HERE,
-    /// targeting the acquired swapchain texture (which does not exist until
-    /// [`Self::acquire`]) or the surface's intermediate, then present. So the
-    /// frame's GPU cost lands in `submit_us`; `encode_us` is a memcpy.
+    /// What the submit span contains: the frame [`Self::encode`] planned is
+    /// recorded HERE (`EngineRenderer::encode_prepared`), targeting the
+    /// acquired swapchain texture (which does not exist until
+    /// [`Self::acquire`]) or the surface's intermediate, then submitted and
+    /// presented. So the frame's GPU work lands in `submit_us`, while its
+    /// compile and schedule land in `encode_us`. A frame whose target changed
+    /// since it was planned is re-planned here, so a refusal can still arrive
+    /// after acquire.
     ///
     /// **v3 wire mapping.** The `acquire_us`/`submit_us` field names and the
     /// wire format are unchanged (`perf.rs` is untouched). The swapchain
@@ -1848,7 +2024,13 @@ impl SurfaceRenderer {
     /// on the same frame — it consumes the stashed texture. With nothing stashed
     /// (no prior `Acquired`, or the surface vanished between the two calls) it is
     /// a no-op returning [`FrameOutcome::Skipped`]; otherwise
-    /// [`FrameOutcome::Rendered`].
+    /// [`FrameOutcome::Rendered`] — or, for a frame the engine refused after
+    /// acquire, [`FrameOutcome::Skipped`] with the acquired texture still
+    /// presented: cleared to the frame's base colour on the direct arm, the
+    /// last frame re-converted on the straight-alpha arm. A texture acquired
+    /// on Vulkan must be presented — dropping one leaks its swapchain image
+    /// (`wgpu-hal`'s discard is a no-op) — so a refusal costs at most that
+    /// one frame.
     ///
     /// A caller that must issue the present itself, on another thread, calls
     /// [`Self::submit_deferred`] instead.
@@ -1881,10 +2063,12 @@ impl SurfaceRenderer {
     /// The iOS `presentsWithTransaction` contract is why this exists — see
     /// [`DeferredPresent`]'s docs for the full mechanism. Everything else is
     /// unchanged: same outcomes, same stash discipline, and
-    /// `Some(DeferredPresent)` accompanies exactly the
-    /// [`FrameOutcome::Rendered`] case (every other outcome carries `None`).
-    /// Dropping the returned handle instead of presenting it skips that frame's
-    /// present without error.
+    /// `Some(DeferredPresent)` accompanies every frame that acquired a texture:
+    /// the [`FrameOutcome::Rendered`] case, and a frame the engine refused
+    /// after acquire ([`FrameOutcome::Skipped`] with its backstop drawn — see
+    /// [`Self::submit`]). Every other outcome carries `None`. Present whatever
+    /// is returned: dropping the handle instead skips that frame's present
+    /// without error, but on Vulkan it also leaks the swapchain image.
     pub fn submit_deferred(
         &mut self,
         ctx: &RenderContext,
@@ -1931,12 +2115,15 @@ impl SurfaceRenderer {
     ///
     /// When the main frame does not render (nothing acquired, a surface gone,
     /// or an engine refusal) no overlay records either: every
-    /// [`OverlayCutOutcome`] is [`OverlayFrame::Skipped`](crate::overlay::OverlayFrame::Skipped),
-    /// nothing is submitted, and every overlay keeps its previous frame on
-    /// screen. An overlay the engine refuses on its own is reported in its
-    /// outcome and presents nothing, while the main frame and the other
-    /// overlays still land. After a plain [`Self::encode`] the overlays are
-    /// skipped the same way — there is no cut scene to draw them from.
+    /// [`OverlayCutOutcome`] is [`OverlayFrame::Skipped`](crate::overlay::OverlayFrame::Skipped)
+    /// and every overlay keeps its previous frame on screen. A main frame
+    /// refused after acquire still submits and presents its backstop (see
+    /// [`Self::submit`]); otherwise nothing is submitted. An overlay the
+    /// engine refuses on its own is reported in its outcome and presents
+    /// nothing (its acquired frame is kept for its next record), while the
+    /// main frame and the other overlays still land. After a plain
+    /// [`Self::encode`] the overlays are skipped the same way — there is no
+    /// cut scene to draw them from.
     pub fn submit_segmented(
         &mut self,
         ctx: &RenderContext,
@@ -2022,10 +2209,6 @@ impl SurfaceRenderer {
                 frame_service(segmented, &self.segment_service),
             ));
         };
-        // The stashed texture is owned, but the encoded frame (the engine's
-        // copied scene) lives on `self` — if the surface vanished between
-        // `acquire` and `submit`, drop the texture and skip rather than
-        // present a stale frame.
         // Only the first rendered frame is measured; a refused or skipped one
         // leaves the probe armed for the next.
         #[cfg(feature = "perf-trace")]
@@ -2039,9 +2222,24 @@ impl SurfaceRenderer {
             segment_scene,
             segment_service,
             first_frame_warm_up,
+            planned_target,
+            refusals,
+            injector,
             ..
         } = self;
+        // Taken whatever happens: a plan is recorded by one submit at most.
+        let planned_target = planned_target.take();
         let service = frame_service(segmented, segment_service);
+        // A texture in hand means a ready surface: `pending_present` is set
+        // only by an acquire on one, and every way out of `Ready` goes through
+        // `adopt_surface_state`, which drops the stash with the swapchain it
+        // came from. Asserted rather than handled — a release build that got
+        // here anyway drops the texture with the surface it no longer has,
+        // which destroyed its swapchain and so leaks nothing.
+        debug_assert!(
+            matches!(state, SurfaceState::Ready(_)),
+            "frust-render: a swapchain texture outlived its surface"
+        );
         let SurfaceState::Ready(ready) = state else {
             return Ok(SubmitParts::skipped(cuts, service));
         };
@@ -2067,8 +2265,8 @@ impl SurfaceRenderer {
 
         match &mut surface.path {
             // The engine tier's whole frame: one encoder, one
-            // `EngineRenderer::encode` into the acquired swapchain view and
-            // the surface's own depth attachment, one submit, then the
+            // `EngineRenderer::encode_prepared` into the acquired swapchain
+            // view and the surface's own depth attachment, one submit, then the
             // engine's end-of-frame maintenance. The renderer records into the
             // encoder and never submits, so every pass of the frame lands in
             // this one command buffer, in order, against the texture about to
@@ -2083,11 +2281,12 @@ impl SurfaceRenderer {
             // extra pass, paid on exactly the frames that blur
             // (`context::frame_renders_via_intermediate`).
             RenderPath::EngineDirect { depth, backdrop } => {
+                // `refused_frames` is counted by `present_refused_frame`.
                 let TierBackend::Engine {
                     engine,
-                    refused_frames,
                     shader_quads,
                     timestamps,
+                    ..
                 } = backend;
                 let root = crate::context::frame_renders_via_intermediate(
                     crate::context::RenderPathKind::EngineDirect,
@@ -2151,39 +2350,53 @@ impl SurfaceRenderer {
                     engine,
                     &device_handle.device,
                 );
-                let result = engine.encode_traced(
-                    &device_handle.device,
-                    &device_handle.queue,
-                    &mut encoder,
-                    engine_scene,
-                    frust_engine::EngineTarget {
-                        view: engine_view,
-                        format: surface_format,
-                        width: surface_width,
-                        height: surface_height,
-                        // The surface's own attachment, recreated with the
-                        // swapchain (`context::RenderPath::EngineDirect`).
-                        // Nothing else writes it, so it is not pre-cleared:
-                        // the frame's first depth-using pass clears it.
-                        depth: Some(depth.view()),
-                        // The engine's strip pipelines write premultiplied
-                        // alpha, which is what this surface's swapchain
-                        // expects — an opaque one ignores alpha, and a
-                        // premultiplied-expecting translucent one takes it
-                        // as-is. A swapchain whose compositor genuinely
-                        // stores STRAIGHT alpha is the other arm below
-                        // (`context::choose_engine_render_path`); a Metal
-                        // `PostMultiplied` swapchain (iOS included) lands
-                        // HERE despite its name, because Metal's own
-                        // compositor reads that mode premultiplied regardless
-                        // (`context::compositor_expects_premultiplied`).
-                        output: frust_engine::OutputAlpha::Premultiplied,
-                    },
-                    base_color,
-                    // The engine arm renders at the surface's own resolution.
-                    Affine::IDENTITY,
-                    frust_engine::FrameTimestamps::new(timestamps),
+                check_plan_target(
+                    planned_target,
+                    engine.format(),
+                    engine_view.texture(),
+                    (surface_width, surface_height),
                 );
+                // Records the frame `encode` planned. A resize, reconfigure or
+                // texture (un)binding since then needs no invalidation here:
+                // `encode_prepared` re-plans whenever the held plan no longer
+                // matches the target it is handed (or was dropped), so a stale
+                // plan costs a re-plan, never a wrong frame. An injected
+                // `record:` refusal stands in for the engine's own here.
+                let result = record_frame(injector, || {
+                    engine.encode_prepared_traced(
+                        &device_handle.device,
+                        &device_handle.queue,
+                        &mut encoder,
+                        engine_scene,
+                        frust_engine::EngineTarget {
+                            view: engine_view,
+                            format: surface_format,
+                            width: surface_width,
+                            height: surface_height,
+                            // The surface's own attachment, recreated with the
+                            // swapchain (`context::RenderPath::EngineDirect`).
+                            // Nothing else writes it, so it is not pre-cleared:
+                            // the frame's first depth-using pass clears it.
+                            depth: Some(depth.view()),
+                            // The engine's strip pipelines write premultiplied
+                            // alpha, which is what this surface's swapchain
+                            // expects — an opaque one ignores alpha, and a
+                            // premultiplied-expecting translucent one takes it
+                            // as-is. A swapchain whose compositor genuinely
+                            // stores STRAIGHT alpha is the other arm below
+                            // (`context::choose_engine_render_path`); a Metal
+                            // `PostMultiplied` swapchain (iOS included) lands
+                            // HERE despite its name, because Metal's own
+                            // compositor reads that mode premultiplied regardless
+                            // (`context::compositor_expects_premultiplied`).
+                            output: frust_engine::OutputAlpha::Premultiplied,
+                        },
+                        base_color,
+                        // The engine arm renders at the surface's own resolution.
+                        Affine::IDENTITY,
+                        frust_engine::FrameTimestamps::new(timestamps),
+                    )
+                });
                 probe.encode_end(engine);
                 match result {
                     Ok(()) => {
@@ -2223,29 +2436,37 @@ impl SurfaceRenderer {
                         engine.end_frame(&device_handle.queue);
                         crate::overlay::end_cuts(cuts, true);
                     }
-                    Err(error) => {
-                        // A refused frame left the encoder exactly as it was
-                        // found, so there is nothing to submit and the
-                        // acquired texture holds no frame — presenting it
-                        // would show undefined content. The frame is dropped
-                        // instead (the texture goes with this `None`), and the
-                        // refusal is counted rather than logged per vsync.
-                        // The ring's slot is abandoned for the same reason
-                        // nothing is presented: no pass ran, so there is no
-                        // measurement to map.
-                        timestamps.abandon_frame();
-                        *refused_frames = refused_frames.saturating_add(1);
-                        log_engine_refusal(*refused_frames, &error);
-                        engine.end_frame(&device_handle.queue);
-                        return Ok(SubmitParts {
-                            encoders,
-                            ..SubmitParts::skipped(cuts, service)
-                        });
+                    Err(refusal) => {
+                        // A refused frame recorded nothing of its own, so the
+                        // acquired texture holds no frame — but it is
+                        // presented anyway, never dropped: `wgpu-hal`'s
+                        // Vulkan discard is a no-op (upstream
+                        // gfx-rs/wgpu#5723), so a dropped texture leaks its
+                        // swapchain image and two or three of them wedge
+                        // acquire for good. One clear to the frame's base
+                        // colour fills it instead (the refusal costs at most
+                        // that one frame), recorded and submitted in this
+                        // same encoder.
+                        return Ok(SubmitParts::refused(
+                            backend.present_refused_frame(
+                                (&device_handle.device, &device_handle.queue),
+                                encoder,
+                                refusals,
+                                &refusal,
+                                RefusalBackstop::Clear {
+                                    target: &swapchain_view,
+                                    base_color,
+                                },
+                            ),
+                            surface_texture,
+                            cuts,
+                            service,
+                        ));
                     }
                 }
             }
             // The engine tier's straight-alpha arm: the same one-encoder frame
-            // as above with one pass appended — `engine.encode` into the
+            // as above with one pass appended — `encode_prepared` into the
             // surface's own intermediate, then the un-premultiplying fragment
             // pass from that intermediate into the acquired swapchain texture,
             // recorded into the SAME encoder so the conversion can never
@@ -2266,11 +2487,12 @@ impl SurfaceRenderer {
                 intermediate_view,
                 present,
             } => {
+                // `refused_frames` is counted by `present_refused_frame`.
                 let TierBackend::Engine {
                     engine,
-                    refused_frames,
                     shader_quads,
                     timestamps,
+                    ..
                 } = backend;
                 let base_color = pending_base_color.take().unwrap_or(peniko::Color::BLACK);
                 let mut encoder =
@@ -2313,40 +2535,51 @@ impl SurfaceRenderer {
                     engine,
                     &device_handle.device,
                 );
-                let result = engine.encode_traced(
-                    &device_handle.device,
-                    &device_handle.queue,
-                    &mut encoder,
-                    engine_scene,
-                    frust_engine::EngineTarget {
-                        // The frame lands in the intermediate, never in the
-                        // swapchain: what the swapchain receives is the
-                        // conversion's output.
-                        view: intermediate_view,
-                        format: engine_format,
-                        width: surface_width,
-                        height: surface_height,
-                        depth: Some(depth.view()),
-                        // The INTERMEDIATE's own convention, which is
-                        // premultiplied like every other engine target — the
-                        // strip pipelines are fixed premultiplied, so this is
-                        // what keeps the frame's base colour in the same space
-                        // as everything drawn over it. The SURFACE's straight
-                        // alpha is what selected this arm
-                        // (`UnpremultiplyPass::selected_by`) and is served by
-                        // the pass below, not by relabelling this target.
-                        output: frust_engine::OutputAlpha::Premultiplied,
-                    },
-                    base_color,
-                    Affine::IDENTITY,
-                    frust_engine::FrameTimestamps::new(timestamps),
+                check_plan_target(
+                    planned_target,
+                    engine.format(),
+                    intermediate_view.texture(),
+                    (surface_width, surface_height),
                 );
+                // The direct arm's `encode_prepared` contract: a stale plan is
+                // re-planned, never recorded wrong; and its `record:`
+                // injection.
+                let result = record_frame(injector, || {
+                    engine.encode_prepared_traced(
+                        &device_handle.device,
+                        &device_handle.queue,
+                        &mut encoder,
+                        engine_scene,
+                        frust_engine::EngineTarget {
+                            // The frame lands in the intermediate, never in the
+                            // swapchain: what the swapchain receives is the
+                            // conversion's output.
+                            view: intermediate_view,
+                            format: engine_format,
+                            width: surface_width,
+                            height: surface_height,
+                            depth: Some(depth.view()),
+                            // The INTERMEDIATE's own convention, which is
+                            // premultiplied like every other engine target — the
+                            // strip pipelines are fixed premultiplied, so this is
+                            // what keeps the frame's base colour in the same space
+                            // as everything drawn over it. The SURFACE's straight
+                            // alpha is what selected this arm
+                            // (`UnpremultiplyPass::selected_by`) and is served by
+                            // the pass below, not by relabelling this target.
+                            output: frust_engine::OutputAlpha::Premultiplied,
+                        },
+                        base_color,
+                        Affine::IDENTITY,
+                        frust_engine::FrameTimestamps::new(timestamps),
+                    )
+                });
                 probe.encode_end(engine);
                 match result {
                     Ok(()) => {
                         // The conversion pass itself: charged to `blit` with a
-                        // fresh pair from the same ring `encode_traced` just
-                        // recorded the frame's other spans into — `None` on an
+                        // fresh pair from the same ring the frame's encode just
+                        // recorded its other spans into — `None` on an
                         // inert ring (no `perf-trace`, or the device never got
                         // `TIMESTAMP_QUERY`), exactly like every other pass.
                         present.record(
@@ -2370,22 +2603,34 @@ impl SurfaceRenderer {
                         engine.end_frame(&device_handle.queue);
                         crate::overlay::end_cuts(cuts, true);
                     }
-                    Err(error) => {
-                        // Identical to the direct arm's refusal, and for the
-                        // same reason — with one extra consequence worth
-                        // stating: the conversion pass is NOT recorded either,
-                        // so the intermediate's stale contents are never
-                        // converted onto the acquired texture. Nothing is
-                        // submitted, the frame is dropped, and the previously
-                        // presented content persists.
-                        timestamps.abandon_frame();
-                        *refused_frames = refused_frames.saturating_add(1);
-                        log_engine_refusal(*refused_frames, &error);
-                        engine.end_frame(&device_handle.queue);
-                        return Ok(SubmitParts {
-                            encoders,
-                            ..SubmitParts::skipped(cuts, service)
-                        });
+                    Err(refusal) => {
+                        // Presented anyway, for the direct arm's reason (the
+                        // Vulkan discard no-op). Here the backstop is the
+                        // conversion pass itself, re-run from the
+                        // intermediate: `encode_prepared` returns every
+                        // refusal "before anything is recorded, uploaded,
+                        // allocated or submitted" (its `# Errors` contract),
+                        // so the intermediate still holds the last frame this
+                        // surface drew, and the swapchain receives that frame
+                        // again rather than a blank one. (An intermediate
+                        // recreated by a resize and not yet drawn holds the
+                        // transparent black `wgpu` initialises it to.)
+                        return Ok(SubmitParts::refused(
+                            backend.present_refused_frame(
+                                (&device_handle.device, &device_handle.queue),
+                                encoder,
+                                refusals,
+                                &refusal,
+                                RefusalBackstop::Reconvert {
+                                    present,
+                                    intermediate: intermediate_view,
+                                    target: &swapchain_view,
+                                },
+                            ),
+                            surface_texture,
+                            cuts,
+                            service,
+                        ));
                     }
                 }
             }
@@ -2414,6 +2659,11 @@ impl SurfaceRenderer {
 /// What [`SurfaceRenderer::submit_impl`] hands its wrappers: the main frame's
 /// outcome and un-presented texture, the overlays' outcomes, and the frame's
 /// encoder and submit counts ([`SegmentedOutcome`]'s).
+///
+/// `texture` is `Some` for every frame that acquired one — a rendered frame,
+/// and a frame the engine refused after acquire ([`Self::refused`]), whose
+/// backstop must be presented like any other frame — and every wrapper
+/// presents (or hands out) whatever it holds.
 struct SubmitParts {
     outcome: FrameOutcome,
     texture: Option<wgpu::SurfaceTexture>,
@@ -2434,6 +2684,133 @@ impl SubmitParts {
             encoders: 0,
             submits: 0,
         }
+    }
+
+    /// A frame the engine refused after acquire: [`FrameOutcome::Skipped`] —
+    /// the scene was not drawn — with the acquired `texture` still handed back
+    /// for the present its backstop needs, its one encoder and `submits`
+    /// ([`TierBackend::present_refused_frame`]'s), and every overlay skipped.
+    fn refused(
+        submits: u32,
+        texture: wgpu::SurfaceTexture,
+        cuts: &[OverlayCut<'_>],
+        service: &[CutServiceability],
+    ) -> Self {
+        Self {
+            texture: Some(texture),
+            encoders: 1,
+            submits,
+            ..Self::skipped(cuts, service)
+        }
+    }
+}
+
+/// The frame's recording after acquire: an injected `record:` refusal
+/// ([`RefusalStage::Record`]) first, standing in for the engine's own, then
+/// `record` — the arm's `encode_prepared` call — whose refusal is the
+/// engine's. Either way the refusal arrives before anything was recorded, so
+/// both take exactly the same path from here.
+fn record_frame(
+    injector: &mut RefusalInjector,
+    record: impl FnOnce() -> Result<(), frust_engine::EngineError>,
+) -> Result<(), Refusal> {
+    if injector.refuses(RefusalStage::Record) {
+        return Err(Refusal::Injected);
+    }
+    record().map_err(Refusal::Engine)
+}
+
+/// What a frame refused after acquire records into the acquired swapchain
+/// texture `target` instead of the frame, so the texture can still be
+/// presented ([`TierBackend::present_refused_frame`]).
+enum RefusalBackstop<'a> {
+    /// The direct arm's: one clear to the frame's `base_color` (premultiplied,
+    /// the convention the engine clears this target in).
+    Clear {
+        target: &'a wgpu::TextureView,
+        base_color: peniko::Color,
+    },
+    /// The straight-alpha arm's: its un-premultiplying conversion re-run from
+    /// `intermediate`, which still holds the last frame the surface drew.
+    Reconvert {
+        present: &'a frust_engine::gpu::present::UnpremultiplyPass,
+        intermediate: &'a wgpu::TextureView,
+        target: &'a wgpu::TextureView,
+    },
+}
+
+impl RefusalBackstop<'_> {
+    /// Records the backstop's one pass into `encoder`, untimed.
+    fn record(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder) {
+        match self {
+            Self::Clear { target, base_color } => {
+                let [r, g, b, a] = base_color.premultiply().components;
+                let _clear = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("frust-render refused-frame clear"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: target,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: f64::from(r),
+                                g: f64::from(g),
+                                b: f64::from(b),
+                                a: f64::from(a),
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+            }
+            Self::Reconvert {
+                present,
+                intermediate,
+                target,
+            } => present.record(device, encoder, intermediate, target, None),
+        }
+    }
+}
+
+impl TierBackend {
+    /// Finishes a frame refused after acquire — `refusal`, the engine's own or
+    /// an injected `record:` one — so its acquired swapchain texture can still
+    /// be presented, answering the submits it issued (one).
+    ///
+    /// Exactly the handling a refused plan gets ([`Refusal`] counted on this
+    /// surface, logged under the latch, noted in `refusals`), plus the
+    /// timestamp ring's slot abandoned — no pass of the frame ran, so there is
+    /// nothing to measure — and then `backstop` recorded into the frame's own
+    /// `encoder` (whatever external and shader-quad passes it already holds
+    /// run with it, into their own targets) and submitted, before the
+    /// engine's end of frame. The caller presents the texture: on Vulkan a
+    /// dropped one is never given back (see [`RefusalBackstop`]'s callers).
+    fn present_refused_frame(
+        &mut self,
+        (device, queue): (&wgpu::Device, &wgpu::Queue),
+        mut encoder: wgpu::CommandEncoder,
+        refusals: &mut EngineRefusalReport,
+        refusal: &Refusal,
+        backstop: RefusalBackstop<'_>,
+    ) -> u32 {
+        let TierBackend::Engine {
+            engine,
+            refused_frames,
+            timestamps,
+            ..
+        } = self;
+        timestamps.abandon_frame();
+        *refused_frames = refused_frames.saturating_add(1);
+        log_engine_refusal(*refused_frames, refusal);
+        refusals.note(refusal);
+        backstop.record(device, &mut encoder);
+        queue.submit([encoder.finish()]);
+        engine.end_frame(queue);
+        1
     }
 }
 
@@ -2489,6 +2866,122 @@ fn engine_target_format(
     }
 }
 
+/// The texture a frame's engine pass will render into, as far as its plan
+/// depends on it: the extent and the usage (`EngineRenderer::prepare` takes
+/// the target to be single-sampled and in the renderer's own format, which
+/// every attachment [`plan_target`] names is).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PlanTarget {
+    width: u32,
+    height: u32,
+    usage: wgpu::TextureUsages,
+}
+
+/// The attachment `submit_impl` will hand the engine for a frame of `scene`
+/// on `path`, sized `extent` with a swapchain of `format` and `usage`: the
+/// swapchain itself on the direct arm, its backdrop root for a direct frame
+/// carrying a backdrop blur — created here, ahead of acquire, so the plan
+/// reads the root's real usage; `submit_impl` reuses it — and the
+/// intermediate on the un-premultiplying arm.
+fn plan_target(
+    path: &mut RenderPath,
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    usage: wgpu::TextureUsages,
+    extent: (u32, u32),
+    scene: &frust_scene::Scene,
+) -> PlanTarget {
+    let (width, height) = extent;
+    let usage = match path {
+        RenderPath::EngineDirect { backdrop, .. } => {
+            if crate::context::frame_renders_via_intermediate(
+                crate::context::RenderPathKind::EngineDirect,
+                crate::context::scene_carries_backdrop(scene),
+            ) {
+                let (view, _) = backdrop.prepare(device, format, width, height);
+                view.texture().usage()
+            } else {
+                usage
+            }
+        }
+        RenderPath::EngineDirectUnpremultiply {
+            intermediate_view, ..
+        } => intermediate_view.texture().usage(),
+    };
+    PlanTarget {
+        width,
+        height,
+        usage,
+    }
+}
+
+/// The encode-stage plan of one frame: `plan:` injection first, then
+/// `EngineRenderer::prepare` for `target` at the identity root every engine
+/// arm renders at.
+fn plan_frame(
+    engine: &mut frust_engine::EngineRenderer,
+    injector: &mut RefusalInjector,
+    scene: &frust_scene::Scene,
+    target: PlanTarget,
+) -> Result<(), Refusal> {
+    if injector.refuses(RefusalStage::Plan) {
+        return Err(Refusal::Injected);
+    }
+    engine
+        .prepare(
+            scene,
+            target.width,
+            target.height,
+            target.usage,
+            Affine::IDENTITY,
+        )
+        .map_err(Refusal::Engine)
+}
+
+/// Whether a plan made for `planned` by a renderer in `engine_format` is the
+/// one `encode_prepared` keeps for `actual` at `extent` — its own matching
+/// rule: extent, usage and region-copy mode.
+fn plan_is_consumable(
+    planned: PlanTarget,
+    engine_format: wgpu::TextureFormat,
+    actual: &wgpu::Texture,
+    extent: (u32, u32),
+) -> bool {
+    use frust_engine::renderer::RegionCopyMode;
+    (planned.width, planned.height) == extent
+        && planned.usage == actual.usage()
+        && RegionCopyMode::of_usage(planned.usage, engine_format) == RegionCopyMode::of(actual)
+}
+
+/// Reports, once per process, a frame planned against a target other than
+/// the one it is recorded into: `encode_prepared` would re-plan it after
+/// acquire, so every such frame's refusal could land after acquire again.
+/// `None` — no plan held, or dropped by a resize — is the expected re-plan.
+fn check_plan_target(
+    planned: Option<PlanTarget>,
+    engine_format: wgpu::TextureFormat,
+    actual: &wgpu::Texture,
+    extent: (u32, u32),
+) {
+    let Some(planned) = planned else {
+        return;
+    };
+    if plan_is_consumable(planned, engine_format, actual, extent) {
+        return;
+    }
+    static MISMATCH_LOGGED: OnceLock<()> = OnceLock::new();
+    MISMATCH_LOGGED.get_or_init(|| {
+        log::warn!(
+            "frust-render: frame planned for {planned:?} but recorded into a {}x{} {:?} \
+             {:?} target — the engine re-plans it after acquire",
+            actual.width(),
+            actual.height(),
+            actual.usage(),
+            actual.format()
+        );
+    });
+}
+
 /// Reports the `count`-th frame this surface's engine renderer refused, under
 /// [`frust_gpu::context::decide_log_action`]'s latch.
 ///
@@ -2501,7 +2994,7 @@ fn engine_target_format(
 /// total, and the periodic debug bump keeps the counter visible afterwards.
 /// Every line carries the count, so a capture read later says how many frames
 /// were lost, not merely that some were.
-fn log_engine_refusal(count: u32, error: &frust_engine::EngineError) {
+fn log_engine_refusal(count: u32, error: &dyn std::fmt::Display) {
     match frust_gpu::context::decide_log_action(count) {
         frust_gpu::context::LogAction::Log => {
             log::warn!(
@@ -2624,11 +3117,14 @@ mod tests {
         let mut renderer = SurfaceRenderer::new();
         renderer.pending_base_color = Some(peniko::Color::WHITE);
         renderer.consecutive_invalid = 3;
+        renderer.consecutive_transient = 2;
 
         renderer.adopt_surface_state(SurfaceState::NoSurface);
 
         assert!(renderer.pending_base_color.is_none());
         assert_eq!(renderer.consecutive_invalid, 0);
+        assert_eq!(renderer.consecutive_transient, 0);
+        assert!(renderer.pending_present.is_none());
         assert_eq!(renderer.phase(), SurfacePhase::NoSurface);
         // Idempotent, as the repeated-`Destroyed` contract needs.
         renderer.adopt_surface_state(SurfaceState::NoSurface);
@@ -2851,6 +3347,613 @@ mod tests {
             assert!(
                 centre[0] != 0 || centre[1] != 0 || centre[2] != 0,
                 "{format:?}: the target still holds its clear colour ({centre:?})"
+            );
+        }
+    }
+
+    /// A frame refused at the encode-stage plan is skipped, counted in the
+    /// report (first reason latched) and drops the in-flight stash — driven
+    /// through the one door both encodes refuse by, since a test cannot build
+    /// a live surface.
+    #[test]
+    fn a_refused_plan_skips_the_frame_counts_it_and_drops_the_stash() {
+        let mut renderer = SurfaceRenderer::new();
+        let ctx = RenderContext::new();
+        assert_eq!(renderer.engine_refusals(), EngineRefusalReport::default());
+
+        renderer.pending_base_color = Some(peniko::Color::WHITE);
+        renderer.pending_serial = Some((3, false));
+        renderer.segment_pending = true;
+        renderer.planned_target = Some(PlanTarget {
+            width: 4,
+            height: 4,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        });
+        assert_eq!(
+            renderer.refuse_planned_frame(&ctx, &Refusal::Injected),
+            EncodeOutcome::Skipped
+        );
+        assert!(renderer.pending_base_color.is_none());
+        assert_eq!(renderer.pending_serial, None);
+        assert!(!renderer.segment_pending);
+        assert_eq!(renderer.planned_target, None);
+
+        renderer.refuse_planned_frame(
+            &ctx,
+            &Refusal::Engine(frust_engine::EngineError::TargetTooLarge),
+        );
+        let report = renderer.engine_refusals();
+        assert_eq!(report.count, 2);
+        assert_eq!(
+            report.first_reason.as_deref(),
+            Some(crate::refusal::INJECTED_REASON),
+            "the first reason is latched"
+        );
+    }
+
+    /// With no surface the phase gate skips the frame before any plan, so an
+    /// armed injection refuses nothing and nothing is counted.
+    #[test]
+    fn a_frame_without_a_surface_is_skipped_not_refused() {
+        let mut renderer = SurfaceRenderer::new();
+        renderer.injector = RefusalInjector::new(crate::refusal::parse_injection(Some("plan:1")));
+        let ctx = RenderContext::new();
+        let scene = frust_scene::Scene::new();
+        assert_eq!(
+            renderer.encode(&ctx, &scene, peniko::Color::BLACK).ok(),
+            Some(EncodeOutcome::Skipped)
+        );
+        assert_eq!(
+            renderer
+                .encode_segmented(&ctx, &scene, peniko::Color::BLACK, &[0..0, 1..1])
+                .ok(),
+            Some(EncodeOutcome::Skipped)
+        );
+        assert_eq!(renderer.engine_refusals().count, 0);
+    }
+
+    /// The encode-stage plan on a real engine: an injected `plan:` refusal
+    /// lands on exactly the configured frames and carries the injected
+    /// reason, and a real plan-stage refusal arrives through the same result.
+    #[test]
+    #[ignore = "requires a GPU; run locally with `cargo test -p frust-render -- --ignored`"]
+    fn the_encode_stage_plan_refuses_injected_and_real_frames_alike() {
+        let _serialized = RENDER_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let (device, _queue, caps) = test_device();
+        let format = wgpu::TextureFormat::Bgra8Unorm;
+        let mut engine = frust_engine::EngineRenderer::new(&device, &caps, format, None)
+            .expect("failed to create the engine renderer");
+        let mut scene = frust_scene::Scene::new();
+        {
+            let mut builder = frust_scene::SceneBuilder::new(&mut scene);
+            builder.fill_rect(
+                kurbo::Rect::new(0.0, 0.0, 8.0, 8.0),
+                peniko::Brush::Solid(peniko::color::palette::css::RED),
+            );
+        }
+        let target = PlanTarget {
+            width: 32,
+            height: 32,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        };
+
+        let mut injector = RefusalInjector::new(crate::refusal::parse_injection(Some("plan:2")));
+        let outcomes: Vec<Option<String>> = (0..4)
+            .map(|_| {
+                plan_frame(&mut engine, &mut injector, &scene, target)
+                    .err()
+                    .map(|refusal| refusal.to_string())
+            })
+            .collect();
+        let injected = Some(crate::refusal::INJECTED_REASON.to_string());
+        assert_eq!(outcomes, [None, injected.clone(), None, injected]);
+
+        let too_large = PlanTarget {
+            width: 70_000,
+            ..target
+        };
+        let refusal = plan_frame(
+            &mut engine,
+            &mut RefusalInjector::default(),
+            &scene,
+            too_large,
+        );
+        assert!(
+            matches!(
+                refusal,
+                Err(Refusal::Engine(frust_engine::EngineError::TargetTooLarge))
+            ),
+            "a real plan refusal is reported as the engine's own: {refusal:?}"
+        );
+    }
+
+    /// The recording after acquire refuses an injected `record:` frame
+    /// without calling the engine, and hands the engine's own refusal through
+    /// the same result; a `plan:` injection never touches this stage.
+    #[test]
+    fn the_recording_after_acquire_refuses_injected_and_real_frames_alike() {
+        let mut injector = RefusalInjector::new(crate::refusal::parse_injection(Some("record:2")));
+        let mut recorded = 0;
+        let outcomes: Vec<Option<String>> = (0..4)
+            .map(|_| {
+                record_frame(&mut injector, || {
+                    recorded += 1;
+                    Ok(())
+                })
+                .err()
+                .map(|refusal| refusal.to_string())
+            })
+            .collect();
+        let injected = Some(crate::refusal::INJECTED_REASON.to_string());
+        assert_eq!(outcomes, [None, injected.clone(), None, injected]);
+        assert_eq!(recorded, 2, "an injected refusal never reaches the engine");
+
+        let refusal = record_frame(&mut RefusalInjector::default(), || {
+            Err(frust_engine::EngineError::PaintCapacity)
+        });
+        assert!(
+            matches!(
+                refusal,
+                Err(Refusal::Engine(frust_engine::EngineError::PaintCapacity))
+            ),
+            "the engine's own refusal is reported as its own: {refusal:?}"
+        );
+
+        let mut plan_only = RefusalInjector::new(crate::refusal::parse_injection(Some("plan:1")));
+        assert!(record_frame(&mut plan_only, || Ok(())).is_ok());
+    }
+
+    /// Pops `scope` by pumping `device` — the shape every GPU suite in this
+    /// workspace uses: the pop resolves only once the queue has been polled.
+    fn pop_scope(device: &wgpu::Device, scope: wgpu::ErrorScopeGuard) -> Option<wgpu::Error> {
+        use std::task::{Context, Poll, Waker};
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut pop = std::pin::pin!(scope.pop());
+        loop {
+            match pop.as_mut().poll(&mut cx) {
+                Poll::Ready(error) => break error,
+                Poll::Pending => {
+                    let _ = device.poll(wgpu::PollType::wait_indefinitely());
+                }
+            }
+        }
+    }
+
+    /// An engine surface backend on `device`, as `install_surface` builds
+    /// one, warmed for `format`.
+    fn engine_backend(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        caps: &frust_gpu::TierCaps,
+        format: wgpu::TextureFormat,
+    ) -> TierBackend {
+        TierBackend::Engine {
+            engine: Box::new(
+                frust_engine::EngineRenderer::new(device, caps, format, None)
+                    .expect("failed to create the engine renderer"),
+            ),
+            refused_frames: 0,
+            shader_quads: Box::new(frust_engine::ShaderQuadPass::new(None)),
+            timestamps: frust_gpu::diag::TimestampRing::new(
+                device,
+                queue,
+                frust_engine::EngineSpan::COUNT,
+                "frust-render refused-frame test timestamps",
+            ),
+        }
+    }
+
+    /// The centre pixel of a `size` x `size` read-back.
+    fn centre_pixel(pixels: &[u8], size: u32) -> [u8; 4] {
+        let index = (((size / 2) * size + (size / 2)) * 4) as usize;
+        pixels[index..index + 4]
+            .try_into()
+            .expect("a read-back row holds four bytes per pixel")
+    }
+
+    fn assert_near(actual: [u8; 4], expected: [u8; 4], what: &str) {
+        assert!(
+            actual.iter().zip(expected).all(|(a, e)| a.abs_diff(e) <= 2),
+            "{what}: {actual:?}, expected about {expected:?}"
+        );
+    }
+
+    /// A frame the direct arm refuses after acquire — injected through the
+    /// `record:` knob, and a real engine refusal — is counted, logged and
+    /// noted exactly as before, and its swapchain texture (a headless
+    /// stand-in) is cleared to the frame's base colour and submitted rather
+    /// than left blank to be dropped: a presentable frame, not a leaked
+    /// image.
+    #[test]
+    #[ignore = "requires a GPU; run locally with `cargo test -p frust-render -- --ignored`"]
+    fn a_frame_refused_after_acquire_presents_its_base_colour() {
+        let _serialized = RENDER_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        const SIZE: u32 = 32;
+        let format = wgpu::TextureFormat::Bgra8Unorm;
+        let (device, queue, caps) = test_device();
+        let mut backend = engine_backend(&device, &queue, &caps, format);
+        let mut refusals = EngineRefusalReport::default();
+        let mut injector = RefusalInjector::new(crate::refusal::parse_injection(Some("record:1")));
+        let swapchain = frust_gpu::HeadlessTarget::new(&device, SIZE, SIZE, format);
+        let depth = frust_engine::DepthTexture::new(&device, SIZE, SIZE);
+        let scene = frust_scene::Scene::new();
+        // Half-transparent red: the clear is premultiplied, as the engine's is.
+        let base_color = peniko::Color::new([1.0, 0.0, 0.0, 0.5]);
+
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        for (round, injector) in [&mut injector, &mut RefusalInjector::default()]
+            .into_iter()
+            .enumerate()
+        {
+            let mut encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            let TierBackend::Engine { engine, .. } = &mut backend;
+            // A real refusal: a target past the device grid, refused by the
+            // re-plan `encode_prepared` makes for it before anything is
+            // recorded.
+            let refusal = record_frame(injector, || {
+                engine.encode_prepared(
+                    &device,
+                    &queue,
+                    &mut encoder,
+                    &scene,
+                    frust_engine::EngineTarget {
+                        view: swapchain.view(),
+                        format,
+                        width: 70_000,
+                        height: SIZE,
+                        depth: Some(depth.view()),
+                        output: frust_engine::OutputAlpha::Premultiplied,
+                    },
+                    base_color,
+                    Affine::IDENTITY,
+                )
+            })
+            .expect_err("both rounds refuse the frame");
+            if round == 0 {
+                assert!(matches!(refusal, Refusal::Injected), "{refusal:?}");
+            } else {
+                assert!(
+                    matches!(
+                        refusal,
+                        Refusal::Engine(frust_engine::EngineError::TargetTooLarge)
+                    ),
+                    "{refusal:?}"
+                );
+            }
+            let submits = backend.present_refused_frame(
+                (&device, &queue),
+                encoder,
+                &mut refusals,
+                &refusal,
+                RefusalBackstop::Clear {
+                    target: swapchain.view(),
+                    base_color,
+                },
+            );
+            assert_eq!(submits, 1, "the backstop is submitted");
+        }
+        assert!(
+            pop_scope(&device, scope).is_none(),
+            "the backstop raised a validation error"
+        );
+
+        let TierBackend::Engine { refused_frames, .. } = &backend;
+        assert_eq!(*refused_frames, 2, "the surface's counter counts both");
+        assert_eq!(refusals.count, 2);
+        assert_eq!(
+            refusals.first_reason.as_deref(),
+            Some(crate::refusal::INJECTED_REASON),
+            "the injected refusal's reason is latched first"
+        );
+        // Bgra8Unorm: premultiplied (0.5, 0, 0, 0.5) is B=0, G=0, R=128, A=128.
+        assert_near(
+            centre_pixel(&swapchain.read_back(&device, &queue), SIZE),
+            [0, 0, 128, 128],
+            "the refused frame's swapchain texture holds the base colour",
+        );
+    }
+
+    /// The straight-alpha arm's backstop re-runs its conversion from the
+    /// intermediate, which a refused frame left holding the last frame drawn:
+    /// the swapchain stand-in receives that frame un-premultiplied again, not
+    /// a blank image.
+    #[test]
+    #[ignore = "requires a GPU; run locally with `cargo test -p frust-render -- --ignored`"]
+    fn a_straight_alpha_frame_refused_after_acquire_presents_the_last_frame_again() {
+        let _serialized = RENDER_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        const SIZE: u32 = 32;
+        let format = wgpu::TextureFormat::Bgra8Unorm;
+        let intermediate_format = frust_engine::gpu::pipelines::INTERMEDIATE_FORMAT;
+        let (device, queue, caps) = test_device();
+        let mut backend = engine_backend(&device, &queue, &caps, intermediate_format);
+        let mut refusals = EngineRefusalReport::default();
+        let intermediate = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("frust-render intermediate stand-in"),
+            size: wgpu::Extent3d {
+                width: SIZE,
+                height: SIZE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            format: intermediate_format,
+            view_formats: &[],
+        });
+        let intermediate_view = intermediate.create_view(&wgpu::TextureViewDescriptor::default());
+        let present = frust_engine::gpu::present::UnpremultiplyPass::new(&device, format, None);
+        let swapchain = frust_gpu::HeadlessTarget::new(&device, SIZE, SIZE, format);
+
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        // The last good frame: premultiplied half-transparent red.
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        RefusalBackstop::Clear {
+            target: &intermediate_view,
+            base_color: peniko::Color::new([1.0, 0.0, 0.0, 0.5]),
+        }
+        .record(&device, &mut encoder);
+        queue.submit([encoder.finish()]);
+
+        let encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let refusal = record_frame(
+            &mut RefusalInjector::new(crate::refusal::parse_injection(Some("record:1"))),
+            || unreachable!("an injected refusal never reaches the engine"),
+        )
+        .expect_err("record:1 refuses the first frame");
+        let submits = backend.present_refused_frame(
+            (&device, &queue),
+            encoder,
+            &mut refusals,
+            &refusal,
+            RefusalBackstop::Reconvert {
+                present: &present,
+                intermediate: &intermediate_view,
+                target: swapchain.view(),
+            },
+        );
+        assert_eq!(submits, 1);
+        assert!(
+            pop_scope(&device, scope).is_none(),
+            "the re-conversion raised a validation error"
+        );
+        assert_eq!(refusals.count, 1);
+        // Un-premultiplied: straight red at half alpha, B=0, G=0, R=255, A=128.
+        assert_near(
+            centre_pixel(&swapchain.read_back(&device, &queue), SIZE),
+            [0, 0, 255, 128],
+            "the last frame is converted onto the refused frame's texture again",
+        );
+    }
+
+    /// Plans a frame of `scene` for `target`, then records it into `view`,
+    /// answering how many plans the engine's retained clock counted for the
+    /// recording alone — `0` when the plan was consumed, `1` when
+    /// `encode_prepared` had to re-plan.
+    fn plans_made_by_the_recording(
+        (device, queue): (&wgpu::Device, &wgpu::Queue),
+        engine: &mut frust_engine::EngineRenderer,
+        scene: &frust_scene::Scene,
+        target: PlanTarget,
+        (view, format): (&wgpu::TextureView, wgpu::TextureFormat),
+        depth: &frust_engine::DepthTexture,
+    ) -> u64 {
+        plan_frame(engine, &mut RefusalInjector::default(), scene, target)
+            .expect("the engine refused to plan a plain frame");
+        let planned = engine.retained_frame();
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        engine
+            .encode_prepared(
+                device,
+                queue,
+                &mut encoder,
+                scene,
+                frust_engine::EngineTarget {
+                    view,
+                    format,
+                    width: target.width,
+                    height: target.height,
+                    depth: Some(depth.view()),
+                    output: frust_engine::OutputAlpha::Premultiplied,
+                },
+                peniko::Color::BLACK,
+                Affine::IDENTITY,
+            )
+            .expect("the engine refused to record a plain frame");
+        queue.submit([encoder.finish()]);
+        engine.end_frame(queue);
+        engine.retained_frame() - planned
+    }
+
+    /// Each arm plans against the attachment `submit_impl` really records
+    /// into — the swapchain, the direct arm's backdrop root, the
+    /// un-premultiplying arm's intermediate — so `encode_prepared` consumes
+    /// the plan instead of re-planning after acquire. The engine's retained
+    /// clock, which ticks once per plan, is the witness; a plan made against
+    /// the swapchain's usage for a backdrop frame is the negative control.
+    #[test]
+    #[ignore = "requires a GPU; run locally with `cargo test -p frust-render -- --ignored`"]
+    fn the_plan_is_made_for_the_attachment_the_frame_records_into() {
+        let _serialized = RENDER_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        const SIZE: u32 = 64;
+        let extent = (SIZE, SIZE);
+        let swapchain_usage = wgpu::TextureUsages::RENDER_ATTACHMENT;
+        let (device, queue, caps) = test_device();
+        let gpu = (&device, &queue);
+        let depth = frust_engine::DepthTexture::new(&device, SIZE, SIZE);
+
+        let mut plain = frust_scene::Scene::new();
+        {
+            let mut builder = frust_scene::SceneBuilder::new(&mut plain);
+            builder.fill_rect(
+                kurbo::Rect::new(0.0, 0.0, 32.0, 32.0),
+                peniko::Brush::Solid(peniko::color::palette::css::RED),
+            );
+        }
+        let mut blurred = plain.clone();
+        {
+            let mut builder = frust_scene::SceneBuilder::new(&mut blurred);
+            builder.backdrop_blur(kurbo::Rect::new(8.0, 8.0, 40.0, 40.0), 4.0);
+        }
+
+        // The direct arm, over a stand-in for the swapchain texture.
+        let format = wgpu::TextureFormat::Bgra8Unorm;
+        let mut engine = frust_engine::EngineRenderer::new(&device, &caps, format, None)
+            .expect("failed to create the engine renderer");
+        let mut path = RenderPath::EngineDirect {
+            depth: frust_engine::DepthTexture::new(&device, SIZE, SIZE),
+            backdrop: crate::context::BackdropRoot::default(),
+        };
+        let swapchain = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("frust-render swapchain stand-in"),
+            size: wgpu::Extent3d {
+                width: SIZE,
+                height: SIZE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            usage: swapchain_usage,
+            format,
+            view_formats: &[],
+        });
+        let swapchain_view = swapchain.create_view(&wgpu::TextureViewDescriptor::default());
+        let target = plan_target(&mut path, &device, format, swapchain_usage, extent, &plain);
+        assert_eq!(target.usage, swapchain_usage);
+        assert!(plan_is_consumable(target, format, &swapchain, extent));
+        assert_eq!(
+            plans_made_by_the_recording(
+                gpu,
+                &mut engine,
+                &plain,
+                target,
+                (&swapchain_view, format),
+                &depth
+            ),
+            0,
+            "a direct frame's plan is consumed"
+        );
+
+        let target = plan_target(
+            &mut path,
+            &device,
+            format,
+            swapchain_usage,
+            extent,
+            &blurred,
+        );
+        let RenderPath::EngineDirect { backdrop, .. } = &mut path else {
+            unreachable!("built as the direct arm");
+        };
+        let root = backdrop.prepare(&device, format, SIZE, SIZE).0.clone();
+        assert_eq!(
+            target.usage,
+            root.texture().usage(),
+            "the root, not the swapchain"
+        );
+        assert!(plan_is_consumable(target, format, root.texture(), extent));
+        assert_eq!(
+            plans_made_by_the_recording(
+                gpu,
+                &mut engine,
+                &blurred,
+                target,
+                (&root, format),
+                &depth
+            ),
+            0,
+            "a backdrop frame's plan is consumed by the root it records into"
+        );
+        let wrong = PlanTarget {
+            usage: swapchain_usage,
+            ..target
+        };
+        assert!(!plan_is_consumable(wrong, format, root.texture(), extent));
+        assert_eq!(
+            plans_made_by_the_recording(gpu, &mut engine, &blurred, wrong, (&root, format), &depth),
+            1,
+            "a plan for the wrong usage is re-made after acquire"
+        );
+
+        // The un-premultiplying arm, whose frames land in its intermediate.
+        let format = frust_engine::gpu::pipelines::INTERMEDIATE_FORMAT;
+        let mut engine = frust_engine::EngineRenderer::new(&device, &caps, format, None)
+            .expect("failed to create the engine renderer");
+        let intermediate = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("frust-render intermediate stand-in"),
+            size: wgpu::Extent3d {
+                width: SIZE,
+                height: SIZE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            format,
+            view_formats: &[],
+        });
+        let mut path = RenderPath::EngineDirectUnpremultiply {
+            depth: frust_engine::DepthTexture::new(&device, SIZE, SIZE),
+            intermediate_view: intermediate.create_view(&wgpu::TextureViewDescriptor::default()),
+            present: frust_engine::gpu::present::UnpremultiplyPass::new(
+                &device,
+                wgpu::TextureFormat::Bgra8Unorm,
+                None,
+            ),
+        };
+        for scene in [&plain, &blurred] {
+            let target = plan_target(
+                &mut path,
+                &device,
+                wgpu::TextureFormat::Bgra8Unorm,
+                swapchain_usage,
+                extent,
+                scene,
+            );
+            assert_eq!(
+                target.usage,
+                intermediate.usage(),
+                "the intermediate's usage"
+            );
+            let RenderPath::EngineDirectUnpremultiply {
+                intermediate_view, ..
+            } = &path
+            else {
+                unreachable!("built as the un-premultiplying arm");
+            };
+            let view = intermediate_view.clone();
+            assert!(plan_is_consumable(target, format, view.texture(), extent));
+            assert_eq!(
+                plans_made_by_the_recording(
+                    gpu,
+                    &mut engine,
+                    scene,
+                    target,
+                    (&view, format),
+                    &depth
+                ),
+                0,
+                "an un-premultiplying frame's plan is consumed"
             );
         }
     }
