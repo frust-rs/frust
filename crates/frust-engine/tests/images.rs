@@ -188,8 +188,9 @@ fn caps() -> TierCaps {
 /// that holds a fan of four isolated children, over a scene that also draws
 /// `data`.
 ///
-/// One of the smallest regular shapes the spill pool cannot serve (seven
-/// layers, like `root[A, B[C1..C5]]`; every six-layer variant is served): the outer parent
+/// One of the smallest regular shapes the spill pool cannot serve: the smallest
+/// refused shapes have seven layers, `root[A, B[C1..C5]]` and this
+/// `P[Q, L[C1..C4]]`, and every six-layer variant is served. The outer parent
 /// takes a group of its own once its round is cut after the first child, the
 /// fan's first child takes the other group, and the three after it fill the
 /// pool's `MAX_SPILL_PAGES` slots — leaving none of the `MAX_LIVE_PAGES` live

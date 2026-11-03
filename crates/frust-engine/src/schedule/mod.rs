@@ -161,7 +161,9 @@
 //! `P[Q, L[C1, C2]]` — needs a fourth live page while it is dimmed, and one
 //! further nesting level below it a fifth. Three slots serve every regular
 //! tree whose isolated layers hold at most two isolated children each, inside
-//! the depth cap; [`MAX_SPILL_PAGES`] carries the argument.
+//! the depth cap. Inlined (opacity-one) layers are transparent to the count: an
+//! isolated layer's children include the isolated layers recorded inside its
+//! inlined descendants. [`MAX_SPILL_PAGES`] carries the argument.
 //!
 //! Bounded, deliberately. A layer wanting a spill slot while every one is held
 //! is refused exactly as before, which is what keeps a frame's live
@@ -325,10 +327,10 @@ pub const PING_PONG_GROUPS: usize = 2;
 /// `k + 1` pages are live when `B` renders. No pool size empties the refused
 /// set; the bound is a choice.
 ///
-/// **Fan width.** Inlined (opacity-one) layers are transparent: an isolated
-/// layer's children are the isolated layers recorded directly inside it or
-/// inside its inlined descendants, because an inlined layer takes no page and
-/// the walk treats its content as its host's. `M[I[D1, D2, D3]]` with `I`
+/// **Fan width.** Inlined (opacity-one) layers are transparent to the count: an
+/// isolated layer's children include the isolated layers recorded inside its
+/// inlined descendants, because an inlined layer takes no page and the walk
+/// treats its content as its host's. `M[I[D1, D2, D3]]` with `I`
 /// inlined is a three-wide fan under `M`, the same as `M[D1, D2, D3]`.
 ///
 /// **Five live pages for every fan at most two wide.** The argument holds under
@@ -2159,8 +2161,9 @@ fn out_of_pages(id: u32, spills: bool) -> String {
              round composites, and no open round could be cut to hand one back. A nested chain \
              of any depth fits, a fan of siblings of any width fits, a chain hanging off an \
              isolated ancestor's later child fits, and so does every tree whose isolated layers \
-             hold at most two isolated children each, counting the isolated layers inside \
-             an inlined (opacity-one) descendant as the host's own; what does not is a wider fan under an \
+             hold at most two isolated children each (inlined (opacity-one) layers are \
+             transparent to the count: an isolated layer's children include the isolated layers \
+             recorded inside its inlined descendants); what does not is a wider fan under an \
              ancestor already holding a page, whose pending children outnumber the spill pages"
         )
     } else {
