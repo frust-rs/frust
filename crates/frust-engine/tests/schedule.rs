@@ -1276,6 +1276,57 @@ fn record_forest(forest: &[Tree]) -> CommandRecorder<EngineDraw> {
     recorder
 }
 
+/// A layer recorded by the shape tests that need an inlined wrapper: either an
+/// isolated layer (half opacity, so it takes a page) or an inlined one (opacity
+/// one, so its contents land in its host's round and it takes none).
+#[derive(Debug, Clone)]
+enum Node {
+    Isolated(Vec<Node>),
+    Inlined(Vec<Node>),
+}
+
+fn iso(children: Vec<Node>) -> Node {
+    Node::Isolated(children)
+}
+
+fn inl(children: Vec<Node>) -> Node {
+    Node::Inlined(children)
+}
+
+/// Records `nodes` under the root, each layer holding one draw of its own ahead
+/// of its children.
+fn record_nodes(nodes: &[Node]) -> CommandRecorder<EngineDraw> {
+    fn record(recorder: &mut CommandRecorder<EngineDraw>, nodes: &[Node]) {
+        for node in nodes {
+            let (opacity, children) = match node {
+                Node::Isolated(children) => (HALF, children),
+                Node::Inlined(children) => (1.0, children),
+            };
+            recorder.push_layer(layer(opacity), None);
+            draw(recorder, 0, 16, 32);
+            record(recorder, children);
+            recorder.pop_layer();
+        }
+    }
+    let mut recorder = recorder();
+    record(&mut recorder, nodes);
+    recorder
+}
+
+/// `forest` with every layer's children wrapped in one inlined layer.
+fn wrapped(forest: &[Tree]) -> Vec<Node> {
+    forest
+        .iter()
+        .map(|tree| {
+            if tree.0.is_empty() {
+                iso(Vec::new())
+            } else {
+                iso(vec![inl(wrapped(&tree.0))])
+            }
+        })
+        .collect()
+}
+
 /// Every ordered forest at most `height` levels deep whose roots, and every
 /// layer's children, number at most `width`.
 fn every_forest(height: usize, width: usize) -> Vec<Vec<Tree>> {
@@ -1425,6 +1476,111 @@ fn every_small_tree_is_served_inside_the_bound_or_refused_for_a_fan_wider_than_t
         refused > 0,
         "a fan wider than two under a held ancestor still finds the pool's bound"
     );
+}
+
+#[test]
+fn isolated_children_reached_through_an_inlined_layer_count_against_the_host() {
+    // `P[Q, L[C1, M[I[D1, D2, D3]]]]` with `I` at opacity one and the rest
+    // translucent. `I` takes no page, so `D1..D3` are `M`'s isolated children
+    // as far as the walk is concerned: a three-wide fan under an ancestor that
+    // already holds a page, which is refused exactly like `M[D1, D2, D3]`.
+    let shape = [iso(vec![
+        iso(Vec::new()),
+        iso(vec![
+            iso(Vec::new()),
+            iso(vec![inl(vec![
+                iso(Vec::new()),
+                iso(Vec::new()),
+                iso(Vec::new()),
+            ])]),
+        ]),
+    ])];
+    let reason = escalation(&record_nodes(&shape));
+    assert!(
+        reason.contains("live intermediate pages") && reason.contains("spill"),
+        "refused for running out of pages: {reason}"
+    );
+
+    // The same tree with the wrapper removed is refused the same way.
+    let bare = [iso(vec![
+        iso(Vec::new()),
+        iso(vec![
+            iso(Vec::new()),
+            iso(vec![iso(Vec::new()), iso(Vec::new()), iso(Vec::new())]),
+        ]),
+    ])];
+    escalation(&record_nodes(&bare));
+
+    // Two children through the wrapper are served: the fan is two wide.
+    let two = [iso(vec![
+        iso(Vec::new()),
+        iso(vec![
+            iso(Vec::new()),
+            iso(vec![inl(vec![iso(Vec::new()), iso(Vec::new())])]),
+        ]),
+    ])];
+    Schedule::build(&record_nodes(&two), &caps(), &PageConfig::default())
+        .expect("a two-wide fan through an inlined wrapper is served");
+}
+
+#[test]
+fn an_inlined_wrapper_holding_two_isolated_children_is_served_under_a_held_ancestor() {
+    // `P[Q, L[C1, I[D1, D2]]]` with `I` at opacity one: `L` has `C1` and `D1`,
+    // `D2` as isolated children through the wrapper. Counted through the
+    // wrapper it is the same shape as `P[Q, L[C1, D1, D2]]`, and it is served.
+    let shape = [iso(vec![
+        iso(Vec::new()),
+        iso(vec![
+            iso(Vec::new()),
+            inl(vec![iso(Vec::new()), iso(Vec::new())]),
+        ]),
+    ])];
+    let rounds =
+        Schedule::build(&record_nodes(&shape), &caps(), &PageConfig::default()).expect("served");
+    assert_pages_survive_until_composited(&rounds);
+
+    let bare = [iso(vec![
+        iso(Vec::new()),
+        iso(vec![iso(Vec::new()), iso(Vec::new()), iso(Vec::new())]),
+    ])];
+    let bare_rounds =
+        Schedule::build(&record_nodes(&bare), &caps(), &PageConfig::default()).expect("served");
+
+    assert_eq!(
+        peak_live_pages(&rounds),
+        peak_live_pages(&bare_rounds),
+        "the inlined wrapper is transparent to the page walk: {rounds:?}"
+    );
+    assert_eq!(spill_slots_used(&rounds), spill_slots_used(&bare_rounds));
+    assert_eq!(peak_live_pages(&rounds), MAX_LIVE_PAGES);
+    assert_eq!(
+        spill_slots_used(&rounds),
+        (0..MAX_SPILL_PAGES).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        rounds.iter().flat_map(Round::composites).count(),
+        6,
+        "every isolated layer is composited once, the inlined one never: {rounds:?}"
+    );
+}
+
+#[test]
+fn inlining_every_layers_children_changes_neither_what_is_served_nor_its_peak() {
+    // Every tree of fan width at most two inside the depth cap, with each
+    // layer's children moved inside one opacity-one wrapper, schedules inside
+    // `MAX_LIVE_PAGES` at the same peak as the bare tree.
+    for forest in every_forest(MAX_CHAIN_DEPTH, 2) {
+        let bare = served_peak(&forest).expect("fan width two is served");
+        let recorder = record_nodes(&wrapped(&forest));
+        let rounds = Schedule::build(&recorder, &caps(), &PageConfig::default())
+            .unwrap_or_else(|error| panic!("{forest:?} wrapped is refused: {error}"));
+        assert_pages_survive_until_composited(&rounds);
+        assert_eq!(
+            peak_live_pages(&rounds),
+            bare,
+            "{forest:?} wrapped peaks as the bare tree does: {rounds:?}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------
