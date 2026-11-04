@@ -139,6 +139,9 @@ impl<State: 'static> NavigatorWidget<State> {
             // The swipe drives a held progress, not a theme-timed driver, so
             // there is no deferred timing to resolve at paint.
             pending_spec: None,
+            // The event pass carries no theme, so `reduce_motion` is read on the
+            // first paint, where the preset collapses to a crossfade.
+            pending_interactive_reduce: true,
         });
         // Publication point: an interactive pop starts at whatever progress the
         // drag has already reached, and is flagged `interactive` until release.

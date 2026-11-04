@@ -291,6 +291,15 @@ pub(super) struct ActiveTransition<State: 'static> {
     /// `start_transition` (M3 defaults) stands — the unthemed behavior
     /// `docs/CODE_STANDARDS.md` mandates.
     pub(super) pending_spec: Option<TransitionSpec>,
+    /// Set by an interactive edge-swipe pop, which stages its preset in the
+    /// event pass where no theme is reachable. The first
+    /// [`paint_transition`](NavigatorWidget::paint_transition) reads the active
+    /// `reduce_motion` flag and, when set, collapses an animated `preset` to
+    /// [`PageTransition::ReducedCrossfade`] before any layer is resolved, then
+    /// clears the flag. The drag keeps driving progress, so the crossfade alpha
+    /// tracks the finger. Always `false` for a programmatic transition, which
+    /// resolves through `pending_spec`.
+    pub(super) pending_interactive_reduce: bool,
 }
 
 impl<State: 'static> crate::authoring::VisitPods for PageEntry<State> {
@@ -779,6 +788,7 @@ impl<State: 'static> NavigatorWidget<State> {
             hero_leaving: HashMap::new(),
             hero_entering: HashMap::new(),
             pending_spec: Some(spec),
+            pending_interactive_reduce: false,
         });
         // Publication point: a programmatic transition starts at progress 0, not
         // interactive, with a fresh generation. This runs in a `BuildCtx` pass,
@@ -1360,6 +1370,24 @@ impl<State: 'static> NavigatorWidget<State> {
             }
             if let Some(t) = self.transition.as_mut() {
                 t.pending_spec = None;
+            }
+        }
+        // An interactive edge-swipe pop resolves `reduce_motion` once, here on its
+        // first paint and before `resolve_layers` runs, so a `Custom` function is
+        // never called for a reduced-motion user. Without a theme the preset
+        // stands. Hero flights are untouched, exactly as on the programmatic
+        // collapse.
+        if self
+            .transition
+            .as_ref()
+            .is_some_and(|t| t.pending_interactive_reduce)
+        {
+            let reduce = Theme::from_paint_ctx(ctx).is_some_and(|th| th.motion.reduce_motion);
+            if let Some(t) = self.transition.as_mut() {
+                if reduce && t.preset != PageTransition::None {
+                    t.preset = PageTransition::ReducedCrossfade;
+                }
+                t.pending_interactive_reduce = false;
             }
         }
         let (adv, is_pop, preset, has_stashed) = {

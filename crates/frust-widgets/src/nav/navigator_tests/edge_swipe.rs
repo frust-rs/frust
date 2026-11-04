@@ -231,19 +231,23 @@ fn release_past_half_completes_pop() {
     );
 }
 
-// --- An interactive edge-swipe pop drives the popped page's own
-//     `Custom` preset RAW, bypassing `resolve_spec`'s `reduce_motion`
-//     collapse — unlike a programmatic push/pop. This lives here (not in
-//     `transition.rs`'s test module) because driving an interactive pop
-//     needs this module's private test harness (`NavigatorController`,
-//     `down`/`move_to`, `full_frame`, `nav_widget`) — the interactive-pop
-//     path is not reachable from `transition.rs` at all. See
-//     `PageTransition::Custom`'s doc comment and
+// --- An interactive edge-swipe pop honours `reduce_motion`: on its first
+//     paint the popped page's preset collapses to `ReducedCrossfade`, so a
+//     `Custom` fn is never called, while without `reduce_motion` the page's
+//     own preset still runs. These live here (not in `transition.rs`'s test
+//     module) because driving an interactive pop needs this module's
+//     private test harness. See `PageTransition::Custom`'s doc comment and
 //     `transition.rs`'s `custom_preset_collapses_under_reduce_motion_on_the_resolve_spec_path`
-//     for the contrasting programmatic-path case. ---
+//     for the programmatic-path case. ---
+
+fn reduced_theme() -> Box<Theme> {
+    let mut reduced = Theme::neutral();
+    reduced.motion.reduce_motion = true;
+    Box::new(reduced)
+}
 
 #[test]
-fn interactive_pop_calls_custom_fn_under_reduce_motion() {
+fn interactive_pop_collapses_to_crossfade_under_reduce_motion() {
     // A plain `fn` pointer can't capture, so invocation is recorded
     // through a process-static flag — fine here since this exact
     // function is only ever installed/read by this one test.
@@ -255,9 +259,7 @@ fn interactive_pop_calls_custom_fn_under_reduce_motion() {
 
     let controller: NavigatorController<()> = NavigatorController::new();
     let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
-    let mut reduced = Theme::neutral();
-    reduced.motion.reduce_motion = true;
-    root.set_theme(Box::new(reduced));
+    root.set_theme(reduced_theme());
     let mut app = {
         let ctrl = controller.clone();
         move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0)).pop_swipe(true)
@@ -267,11 +269,8 @@ fn interactive_pop_calls_custom_fn_under_reduce_motion() {
     root.layout(Size::new(100.0, 100.0));
 
     // Push B with a `Custom` transition (explicit duration, so the
-    // collapse below is attributable to `reduce_motion` alone). This
-    // push's own animation still resolves through `resolve_spec` at its
-    // first paint (the `pending_spec` seam `paint_transition` drains)
-    // and collapses to `ReducedCrossfade` as documented — the caller's
-    // fn must NOT run for the push itself.
+    // collapse is attributable to `reduce_motion` alone). The push itself
+    // collapses through `resolve_spec`, so the fn must not run for it.
     controller.push_with(
         || sized_page(100.0, 80.0),
         TransitionSpec::new(
@@ -289,11 +288,6 @@ fn interactive_pop_calls_custom_fn_under_reduce_motion() {
         "the push transition finalized before the swipe begins"
     );
 
-    // Drive an interactive edge-swipe pop of B. `begin_interactive_pop`
-    // takes `spec.preset` (`Custom`) RAW and sets `pending_spec: None`,
-    // so `resolve_spec`'s `reduce_motion` collapse never runs on this
-    // path — `paint_transition` calls `resolve_layers` with the
-    // unresolved `Custom` preset directly.
     let mut scene = TransitionScene::default();
     root.event(&mut state, &down(5.0, 50.0));
     root.paint(&mut scene, ft(1000));
@@ -305,10 +299,168 @@ fn interactive_pop_calls_custom_fn_under_reduce_motion() {
 
     full_frame(&mut root, &mut app, &mut state, ft(1016));
     assert!(
-        CALLED.load(std::sync::atomic::Ordering::SeqCst),
-        "an interactive edge-swipe pop drives the popped page's own Custom \
-         preset directly under reduce_motion — the caller's fn IS called"
+        !CALLED.load(std::sync::atomic::Ordering::SeqCst),
+        "the interactive pop collapsed to ReducedCrossfade — Custom's fn must not run"
     );
+    assert_eq!(
+        nav_widget(&root).transition.as_ref().map(|t| t.preset),
+        Some(PageTransition::ReducedCrossfade),
+        "the popped page's preset collapsed on the first paint"
+    );
+}
+
+#[test]
+fn interactive_pop_runs_custom_fn_without_reduce_motion() {
+    static CALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    fn recording_custom(_p: f64, _is_pop: bool, _size: Size) -> (Layer, Layer) {
+        CALLED.store(true, std::sync::atomic::Ordering::SeqCst);
+        (Layer::IDENTITY, Layer::IDENTITY)
+    }
+
+    let controller: NavigatorController<()> = NavigatorController::new();
+    let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+    root.set_theme(Box::new(Theme::neutral()));
+    let mut app = {
+        let ctrl = controller.clone();
+        move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0)).pop_swipe(true)
+    };
+    let mut state = ();
+    root.rebuild(&mut app, &mut state);
+    root.layout(Size::new(100.0, 100.0));
+
+    controller.push_with(
+        || sized_page(100.0, 80.0),
+        TransitionSpec::new(
+            PageTransition::Custom(recording_custom),
+            Timing::Duration(Duration::from_millis(80), Curve::Linear),
+        ),
+    );
+    run_until_settled(&mut root, &mut app, &mut state, 0);
+    // The push ran the fn too; reset so only the swipe is observed.
+    CALLED.store(false, std::sync::atomic::Ordering::SeqCst);
+
+    let mut scene = TransitionScene::default();
+    root.event(&mut state, &down(5.0, 50.0));
+    root.paint(&mut scene, ft(1000));
+    root.event(&mut state, &move_to(40.0, 50.0));
+    full_frame(&mut root, &mut app, &mut state, ft(1016));
+    assert!(
+        CALLED.load(std::sync::atomic::Ordering::SeqCst),
+        "without reduce_motion the interactive pop drives the page's own Custom preset"
+    );
+    assert_eq!(
+        nav_widget(&root).transition.as_ref().map(|t| t.preset),
+        Some(PageTransition::Custom(recording_custom)),
+        "the preset is left unchanged"
+    );
+}
+
+/// Push a plain page B (height 80) over A (height 100) with the swipe armed,
+/// under `reduce_motion`, and return the pieces a swipe test drives.
+#[allow(clippy::type_complexity)]
+fn reduced_swipe_rig() -> (
+    NavigatorController<SwipeResultState>,
+    RenderRoot<SwipeResultState, NavigatorView<SwipeResultState>>,
+    impl FnMut(&mut SwipeResultState) -> NavigatorView<SwipeResultState>,
+    SwipeResultState,
+) {
+    let controller: NavigatorController<SwipeResultState> = NavigatorController::new();
+    let mut root: RenderRoot<SwipeResultState, NavigatorView<SwipeResultState>> = RenderRoot::new();
+    root.set_theme(reduced_theme());
+    let mut app = {
+        let ctrl = controller.clone();
+        move |_: &mut SwipeResultState| {
+            navigator(&ctrl, || sized_page(100.0, 100.0)).pop_swipe(true)
+        }
+    };
+    let mut state = SwipeResultState::default();
+    controller.push_for_result(
+        || sized_page(100.0, 80.0),
+        |state: &mut SwipeResultState, _result: PopResult| {
+            state.popped = true;
+        },
+    );
+    root.rebuild(&mut app, &mut state);
+    root.layout(Size::new(100.0, 100.0));
+    let mut sink = TransitionScene::default();
+    root.paint(&mut sink, ft(0));
+    (controller, root, app, state)
+}
+
+#[test]
+fn reduced_interactive_pop_crossfade_tracks_drag() {
+    let (_controller, mut root, mut app, mut state) = reduced_swipe_rig();
+    let mut scene = TransitionScene::default();
+    root.event(&mut state, &down(5.0, 50.0));
+    root.paint(&mut scene, ft(100));
+
+    let mut frame_at = |x: f64, t: u64| {
+        root.event(&mut state, &move_to(x, 50.0));
+        let mut scene = TransitionScene::default();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        root.paint(&mut scene, ft(t));
+        scene.fills
+    };
+    let early = frame_at(30.0, 116);
+    let late = frame_at(70.0, 132);
+
+    for fills in [&early, &late] {
+        for h in [100.0, 80.0] {
+            let (origin, _, _) = fill_h(fills, h);
+            assert!(
+                origin.x.abs() < 1e-9 && origin.y.abs() < 1e-9,
+                "a crossfade moves no page (height {h} at {origin:?})"
+            );
+        }
+    }
+    let (_, _, leaving_early) = fill_h(&early, 80.0);
+    let (_, _, leaving_late) = fill_h(&late, 80.0);
+    assert!(
+        (leaving_early - leaving_late).abs() > 1e-3,
+        "the popped page's alpha follows the drag ({leaving_early} vs {leaving_late})"
+    );
+}
+
+#[test]
+fn reduced_interactive_pop_commit_and_cancel_still_finalize() {
+    // Commit: release past the threshold completes the pop and delivers its result.
+    {
+        let (_controller, mut root, mut app, mut state) = reduced_swipe_rig();
+        let mut scene = TransitionScene::default();
+        root.event(&mut state, &down(5.0, 50.0));
+        root.paint(&mut scene, ft(100));
+        root.event(&mut state, &move_to(80.0, 50.0));
+        root.paint(&mut scene, ft(200));
+        root.event(&mut state, &up(80.0, 50.0));
+        assert!(!state.popped, "not delivered before the swipe settles");
+        for t in [300u64, 316, 332, 348, 400, 500, 800, 1200, 2000] {
+            root.rebuild(&mut app, &mut state);
+            root.layout(Size::new(100.0, 100.0));
+            root.paint(&mut scene, ft(t));
+        }
+        assert!(state.popped, "the committed pop delivered its result");
+        assert_eq!(nav_widget(&root).pages.len(), 1, "the stack shrank");
+        assert!(nav_widget(&root).transition.is_none());
+    }
+    // Cancel: release below the threshold restores the page; no result.
+    {
+        let (_controller, mut root, mut app, mut state) = reduced_swipe_rig();
+        let mut scene = TransitionScene::default();
+        root.event(&mut state, &down(5.0, 50.0));
+        root.paint(&mut scene, ft(200));
+        root.event(&mut state, &move_to(30.0, 50.0));
+        root.paint(&mut scene, ft(400));
+        root.event(&mut state, &up(30.0, 50.0));
+        for t in [500u64, 516, 532, 548, 600, 800, 1200, 2000] {
+            root.rebuild(&mut app, &mut state);
+            root.layout(Size::new(100.0, 100.0));
+            root.paint(&mut scene, ft(t));
+        }
+        assert!(!state.popped, "a cancelled pop delivers no result");
+        assert_eq!(nav_widget(&root).pages.len(), 2, "the page was restored");
+        assert!(nav_widget(&root).transition.is_none());
+    }
 }
 
 // --- A completed swipe delivers the pop result. ---
