@@ -106,9 +106,11 @@ impl Motion {
 
     /// A ramp from `from` (moving at `velocity`) to `target` under a resolved
     /// `timing`. A duration ramp keeps the value continuous; a spring keeps the
-    /// velocity continuous too. With no distance and no velocity it is at rest.
+    /// velocity continuous too. With no distance it is at rest, unless a spring
+    /// carries a velocity (a duration ramp ignores velocity).
     fn start(from: f64, velocity: f64, target: f64, timing: Timing) -> Self {
-        if from == target && velocity == 0.0 {
+        let carries_velocity = velocity != 0.0 && matches!(timing, Timing::Spring(_));
+        if from == target && !carries_velocity {
             return Self::rest(target);
         }
         match timing {
@@ -876,6 +878,21 @@ mod tests {
         );
         assert!(!driver.is_animating(), "no frame owed for a 0 -> 0 ramp");
         assert!(driver.take_exited(), "the accepted close still reports");
+    }
+
+    #[test]
+    fn a_painted_open_then_close_settles_absent_immediately() {
+        let mut driver = timed();
+        assert!(driver.set_open(true));
+        // One paint seeds the entrance, which reports a velocity at elapsed 0.
+        driver.advance(at(0.0), None);
+        assert!(driver.set_open(false));
+        let sample = driver.advance(at(16.0), None);
+        assert_eq!(sample.phase, PresencePhase::Absent);
+        assert!(
+            !driver.is_animating(),
+            "a 0 -> 0 duration ramp owes no frame"
+        );
     }
 
     #[test]

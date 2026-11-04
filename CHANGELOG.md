@@ -213,15 +213,15 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Fixed
 
-- A theme motion token no longer panics paint: every milliseconds-to-`Duration` conversion uses
-  `Duration::try_from_secs_f64` and falls back on a negative, non-finite or too-large value
-  (`MotionExtras::reduced_fade_duration` 120 ms, navigation transitions 340 ms enter / 150 ms exit, the
-  switcher base 220 ms, presence timing the neutral token).
+- The motion-token conversions behind reduce-motion, navigation transitions, the switcher and presence
+  no longer panic paint: each uses `Duration::try_from_secs_f64` and falls back on a negative,
+  non-finite or too-large value (`MotionExtras::reduced_fade_duration` 120 ms, navigation transitions
+  340 ms enter / 150 ms exit, the switcher base 220 ms, presence timing the neutral token).
 - `AnimationController::forward()` always settles `Completed` and `reverse()` always `Dismissed`, whatever
   the start value (it can lie outside 0..=1 after `spring_to`); `animate_to` settles by direction of
   travel. Behaviour change: `reverse()` at exactly 0.0 now settles `Dismissed`, where it settled `Completed`.
-- `presence`: a callback attached after an exit settled never fires for that exit, a zero-distance ramp
-  settles immediately with no frame, open-then-close before any paint fires `on_exited` once, and a
+- `presence`: a callback attached after an exit settled never fires for that exit, a zero-distance duration
+  ramp settles immediately with no frame, open-then-close before any paint fires `on_exited` once, and a
   settled child paints without an alpha layer. An exit settles only when painted, so `on_exited` is a
   cleanup cue, not a correctness gate.
 - An interactive edge-swipe pop honours `reduce_motion`: it collapses to `ReducedCrossfade` on its
