@@ -94,6 +94,7 @@ use crate::icons;
 use crate::interaction::InteractionState;
 use crate::overlay::{OverlayElevation, shadow};
 use crate::press::presses;
+use frust::authoring::text::LocaleStamp;
 
 /// The ink every run is *shaped* with; never painted — a run is re-brushed with
 /// its resolved per-kind/per-state color at paint time, and holding the shaping
@@ -109,9 +110,9 @@ struct Run {
     content: String,
     layout: Option<TextLayout>,
     /// The `(style, max_width)` the cached `layout` was shaped for.
-    shaped_for: Option<(TextStyle, Option<f64>, u64)>,
+    shaped_for: Option<(TextStyle, Option<f64>, LocaleStamp)>,
     /// The `(style, width)` of the last natural (unconstrained) measurement.
-    natural: Option<(TextStyle, f64, u64)>,
+    natural: Option<(TextStyle, f64, LocaleStamp)>,
 }
 
 impl Run {

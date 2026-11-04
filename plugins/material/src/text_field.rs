@@ -141,6 +141,7 @@ use peniko::{Brush, Color};
 use super::interaction::{DISABLED_CONTAINER_OPACITY, DISABLED_CONTENT_OPACITY};
 use crate::badge::locale_stamp;
 use crate::tokens::{MaterialDimensions, MaterialMotion};
+use frust::authoring::text::LocaleStamp;
 
 /// Decoration-box height, in logical px (`M3ETextFieldTheme.minHeight`). The
 /// box is a fixed height here rather than a minimum: the wrapped field is
@@ -403,7 +404,7 @@ impl<State: 'static> TextFieldView<State> {
 struct Run {
     content: String,
     layout: Option<TextLayout>,
-    shaped_style: Option<(TextStyle, u64)>,
+    shaped_style: Option<(TextStyle, LocaleStamp)>,
 }
 
 impl Run {
@@ -1027,27 +1028,27 @@ mod tests {
     /// Shape a fresh run with `style` twice around `change`, returning how many layout requests
     /// the text context served after the first shape and after the second.
     fn passes_around(style: &TextStyle, change: impl FnOnce()) -> (u64, u64) {
-        use crate::badge::locale_slot_test::passes;
+        use crate::badge::layout_passes;
         let mut tcx = TextContext::new();
         let mut run = Run::new("Label");
         let mut ctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
         run.layout(&mut ctx, style);
-        let first = passes(ctx.text_context::<TextContext>());
+        let first = layout_passes(ctx.text_context::<TextContext>());
         change();
         run.layout(&mut ctx, style);
-        (first, passes(ctx.text_context::<TextContext>()))
+        (first, layout_passes(ctx.text_context::<TextContext>()))
     }
 
     #[test]
     fn label_layout_is_reused_at_an_unchanged_locale_generation() {
-        let _slot = crate::badge::locale_slot_test::writer();
+        let _slot = frust_widgets::test_support::LocaleSlotGuard::hold();
         let (first, second) = passes_around(&TextStyle::new(14.0, Color::BLACK), || {});
         assert_eq!(first, second);
     }
 
     #[test]
     fn label_layout_rebuilds_after_the_default_locale_changes() {
-        let _slot = crate::badge::locale_slot_test::writer();
+        let _slot = frust_widgets::test_support::LocaleSlotGuard::hold();
         let (first, second) = passes_around(&TextStyle::new(14.0, Color::BLACK), || {
             frust::authoring::text::set_default_locale(Some("ja"));
         });
@@ -1056,7 +1057,7 @@ mod tests {
 
     #[test]
     fn label_layout_with_an_explicit_locale_is_not_rebuilt() {
-        let _slot = crate::badge::locale_slot_test::writer();
+        let _slot = frust_widgets::test_support::LocaleSlotGuard::hold();
         let style = TextStyle::new(14.0, Color::BLACK).with_locale(Some("en"));
         let (first, second) = passes_around(&style, || {
             frust::authoring::text::set_default_locale(Some("ja"));

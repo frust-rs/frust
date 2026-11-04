@@ -184,6 +184,7 @@ use crate::overlay::{
 };
 use crate::strings::MaterialStrings;
 use crate::tokens::{MaterialDimensions, MaterialSpacing, MaterialSpring};
+use frust::authoring::text::LocaleStamp;
 
 // ---- Metrics --------------------------------------------------------------
 //
@@ -553,9 +554,9 @@ pub(crate) struct Run {
     pub(crate) content: String,
     layout: Option<TextLayout>,
     /// The `(style, max_width)` the cached `layout` was shaped for.
-    shaped_for: Option<(TextStyle, Option<f64>, u64)>,
+    shaped_for: Option<(TextStyle, Option<f64>, LocaleStamp)>,
     /// The `(style, width)` of the last natural (unconstrained) measurement.
-    natural: Option<(TextStyle, f64, u64)>,
+    natural: Option<(TextStyle, f64, LocaleStamp)>,
 }
 
 impl Run {

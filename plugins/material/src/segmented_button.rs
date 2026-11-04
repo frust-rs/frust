@@ -180,6 +180,7 @@ use peniko::{Brush, Color};
 use crate::badge::locale_stamp;
 use crate::interaction::{HapticSignal, InteractionState, MaterialHaptics};
 use crate::press::presses;
+use frust::authoring::text::LocaleStamp;
 
 /// Fewest segments a group may carry — the reference's own `assert`
 /// (`m3e_segmented_buttons.dart:26`).
@@ -378,7 +379,7 @@ fn label_style(theme: Option<&Theme>) -> TextStyle {
 struct LabelRun {
     content: String,
     layout: Option<TextLayout>,
-    shaped_for: Option<(TextStyle, u64)>,
+    shaped_for: Option<(TextStyle, LocaleStamp)>,
 }
 
 impl LabelRun {

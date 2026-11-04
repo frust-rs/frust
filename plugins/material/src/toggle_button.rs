@@ -234,6 +234,7 @@ use crate::interaction::{
     MaterialHaptics,
 };
 use crate::press::presses;
+use frust::authoring::text::LocaleStamp;
 
 // ---- Metric tables (m3e_button_theme.dart, sm/md/lg rows only) ------------
 
@@ -873,7 +874,7 @@ impl ShapeMotion {
 struct LabelRun {
     content: String,
     layout: Option<TextLayout>,
-    shaped_for: Option<(TextStyle, u64)>,
+    shaped_for: Option<(TextStyle, LocaleStamp)>,
 }
 
 impl LabelRun {

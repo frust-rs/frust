@@ -202,6 +202,7 @@ use crate::overlay::OverlayAnchor;
 use crate::press::presses;
 use crate::sheet::{BottomSheetView, bottom_sheet};
 use crate::strings::MaterialStrings;
+use frust::authoring::text::LocaleStamp;
 
 // ---- Theme defaults (m3e_split_button_theme.dart's constructor) ------------
 
@@ -1043,8 +1044,8 @@ fn focus_ring_rrect(size: Size, radii: CornerRadii) -> RoundedRect {
 struct LabelRun {
     content: String,
     layout: Option<TextLayout>,
-    shaped_for: Option<(TextStyle, Option<f64>, u64)>,
-    natural: Option<(TextStyle, f64, u64)>,
+    shaped_for: Option<(TextStyle, Option<f64>, LocaleStamp)>,
+    natural: Option<(TextStyle, f64, LocaleStamp)>,
 }
 
 impl LabelRun {
