@@ -38,6 +38,9 @@ whose **only** dependency is `frust`:
   system can still implement `TransitionPattern` (`reveal::SampleReveal`) and
   feed it to `pattern_switcher`. This was an open question before the sample;
   the fact that `reveal.rs` compiles at all is the answer.
+- **Haptic feedback** — the chip fires `HapticFeedback::Selection` through
+  `frust::authoring::perform_haptic` on a confirmed press, so a catalog buzzes
+  via the app's framework sink without depending on any platform plugin.
 - **Composing over the baseline set** — the chip's label is the framework's own
   `text` widget under `ThemeTextColor::OnPrimaryContainer`; the baseline widget
   set survives `default-features = false` and is meant to be built on.

@@ -77,6 +77,7 @@ const CAPS: &[(&str, f32)] = &[
     ("crates/frust-core/src/event/tests.rs", 10.7), // measured 7.7
     ("crates/frust-core/src/hotpatch.rs", 24.6), // measured 21.6
     ("crates/frust-core/src/input.rs", 22.8), // measured 19.8
+    ("crates/frust-core/src/feedback.rs", 25.0), // head under 80 lines, exempt
     ("crates/frust-core/src/insets.rs", 25.0), // measured 23.0
     ("crates/frust-core/src/layout.rs", 19.0), // measured 16.0
     ("crates/frust-core/src/lib.rs", 20.9),  // measured 17.9

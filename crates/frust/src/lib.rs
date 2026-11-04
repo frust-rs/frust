@@ -319,6 +319,26 @@ pub use frust_core::{
     lock_selection_toolbar_policy, set_selection_toolbar_builder, set_selection_toolbar_policy,
 };
 
+/// The haptic-feedback seam: a control fires a [`HapticFeedback`] through
+/// [`perform_haptic`], and the app installs one process-wide [`HapticSink`]
+/// with [`set_haptic_sink`] (last wins; `None` uninstalls) that forwards to
+/// its platform plugin. With no sink installed, firing is a silent no-op.
+/// [`haptic_sink_installed`] reports whether one is set.
+///
+/// ```
+/// use frust::{HapticFeedback, haptic_sink_installed, perform_haptic, set_haptic_sink};
+///
+/// // No sink: nothing happens.
+/// perform_haptic(HapticFeedback::Selection);
+///
+/// set_haptic_sink(Some(|_feedback| {}));
+/// assert!(haptic_sink_installed());
+/// set_haptic_sink(None);
+/// ```
+pub use frust_core::{
+    HapticFeedback, HapticSink, haptic_sink_installed, perform_haptic, set_haptic_sink,
+};
+
 /// Platform-view embedding (platform-views feature): reserve
 /// layout space for a native view (a map, a video player, ...) composited
 /// alongside the frust surface. [`platform_view`] takes the
@@ -836,6 +856,13 @@ pub mod authoring {
     /// hand it to `PaintScene::push_retained`/`draw_retained`, asking
     /// `PaintCtx::retained_available` whether the renderer still holds the page.
     pub use frust_core::RetainedKey;
+
+    /// The haptic-feedback seam a catalog fires through: [`perform_haptic`]
+    /// with a [`HapticFeedback`], delivered to the sink the app installed with
+    /// [`set_haptic_sink`]. Also flat at the crate root.
+    pub use frust_core::{
+        HapticFeedback, HapticSink, haptic_sink_installed, perform_haptic, set_haptic_sink,
+    };
 
     /// The clipboard/selection vocabulary an editable widget matches on —
     /// [`InputEvent::EditCommand`] carries one of these four verbs, already

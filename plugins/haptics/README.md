@@ -106,6 +106,31 @@ worst case a no-op single tick on hardware that lacks it, never a crash.
   inside the call) — this backend calls it directly from the caller's thread,
   no `frust::spawn_blocking` needed.
 
+### Wire as the framework haptic sink
+
+The framework fires feedback through a process-wide sink that the app sets
+once, so every design system's controls buzz through one place. `frust-haptics`
+does not depend on `frust`; the app owns the mapping:
+
+```rust,ignore
+use frust::{HapticFeedback, set_haptic_sink};
+use frust_haptics::{HapticEffect, Haptics};
+
+set_haptic_sink(Some(|feedback| {
+    let effect = match feedback {
+        HapticFeedback::Selection => HapticEffect::SelectionClick,
+        HapticFeedback::Light => HapticEffect::ImpactLight,
+        HapticFeedback::Medium => HapticEffect::ImpactMedium,
+        HapticFeedback::Heavy => HapticEffect::ImpactHeavy,
+        HapticFeedback::Success => HapticEffect::Success,
+        HapticFeedback::Warning => HapticEffect::Warning,
+        HapticFeedback::Error => HapticEffect::Error,
+        _ => return,
+    };
+    let _ = Haptics::perform(effect);
+}));
+```
+
 ---
 
 ## 4. Fire-and-forget contract
