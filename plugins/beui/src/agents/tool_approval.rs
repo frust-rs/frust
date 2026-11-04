@@ -97,6 +97,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use frust::Theme;
+use frust::authoring::text::LocaleStamp;
 use frust::authoring::{
     Action, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, Color, ErasedArgCallback,
     EventCtx, EventResult, InputEvent, Key, LayoutCtx, NamedKey, PaintCtx, PaintScene, Point,
@@ -296,7 +297,7 @@ pub fn tool_approval_parameter(
 pub(crate) struct WrappedRun {
     content: String,
     layout: Option<TextLayout>,
-    shaped: Option<(TextStyle, u32, u64)>,
+    shaped: Option<(TextStyle, u32, LocaleStamp)>,
     /// Whether the last [`layout`](Self::layout) pass produced a line wider
     /// than the `max_width` it was given — an unbreakable single token (no
     /// space to wrap on) that a caller's clip cuts off rather than fully
@@ -328,7 +329,8 @@ impl WrappedRun {
         let key = (
             style.clone(),
             width.to_bits(),
-            crate::text::locale_generation(style),
+            // Read before shaping (see `LocaleStamp`).
+            LocaleStamp::for_style(style.locale.as_deref()),
         );
         if let Some(cached) = &self.layout
             && self.shaped.as_ref() == Some(&key)

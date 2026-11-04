@@ -74,7 +74,7 @@
 
 use std::time::Duration;
 
-use frust::authoring::text::{FontWeight, TextContext, TextLayout, TextStyle};
+use frust::authoring::text::{FontWeight, LocaleStamp, TextContext, TextLayout, TextStyle};
 use frust::authoring::{
     BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Role, SemanticsCtx,
     Size, TickClass, View, Widget,
@@ -431,11 +431,11 @@ pub struct LoadingStatesWidget {
     display: String,
     /// The shaped status run, plus what it was shaped from.
     run: Option<TextLayout>,
-    shaped: Option<(String, TextStyle, u64)>,
+    shaped: Option<(String, TextStyle, LocaleStamp)>,
     /// The shaped elapsed timer, plus what it was shaped from
     /// ([`Progress`](LoadingStatesVariant::Progress) only).
     timer: Option<TextLayout>,
-    timer_shaped: Option<(String, TextStyle, u64)>,
+    timer_shaped: Option<(String, TextStyle, LocaleStamp)>,
     /// The timer text `paint` last computed and `layout` owes a shape for.
     timer_text: String,
     /// The width the widest phrase reserves, so cycling never resizes the row.
@@ -733,7 +733,8 @@ impl Widget for LoadingStatesWidget {
         let mut text_size = Size::ZERO;
         if self.variant.has_text() {
             let wanted = self.display.clone();
-            let generation = crate::text::locale_generation(&style);
+            // Read before shaping, so a locale write landing mid-shape leaves the stamp stale.
+            let generation = LocaleStamp::for_style(style.locale.as_deref());
             if self.shaped.as_ref() != Some(&(wanted.clone(), style.clone(), generation)) {
                 let text_ctx = ctx.text_context::<TextContext>();
                 self.run = Some(text_ctx.layout(&wanted, &style, None));
@@ -762,7 +763,8 @@ impl Widget for LoadingStatesWidget {
         let mut timer_size = Size::ZERO;
         if self.variant == LoadingStatesVariant::Progress {
             let wanted = self.timer_text.clone();
-            let generation = crate::text::locale_generation(&timer_style);
+            // Read before shaping (see `LocaleStamp`).
+            let generation = LocaleStamp::for_style(timer_style.locale.as_deref());
             if self.timer_shaped.as_ref()
                 != Some(&(wanted.clone(), timer_style.clone(), generation))
             {

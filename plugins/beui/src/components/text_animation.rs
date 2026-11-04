@@ -65,7 +65,7 @@
 
 use std::time::Duration;
 
-use frust::authoring::text::{TextContext, TextLayout, TextStyle};
+use frust::authoring::text::{LocaleStamp, TextContext, TextLayout, TextStyle};
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
     LayoutCtx, PaintCtx, PaintScene, Role, SemanticsCtx, TickClass, View, Widget, any, build_child,
@@ -355,7 +355,7 @@ pub struct TextAnimationWidget {
     /// The shaped run the whole-run variants paint, plus what it was shaped
     /// from. `None` until the first `layout` with a text context.
     run: Option<TextLayout>,
-    shaped: Option<(String, TextStyle, u64)>,
+    shaped: Option<(String, TextStyle, LocaleStamp)>,
     /// The string the scramble wants shaped next — written by `paint`, consumed
     /// by `layout`.
     display: String,
@@ -543,7 +543,8 @@ impl Widget for TextAnimationWidget {
         } else {
             self.content.clone()
         };
-        let generation = crate::text::locale_generation(&style);
+        // Read before shaping, so a locale write landing mid-shape leaves the stamp stale.
+        let generation = LocaleStamp::for_style(style.locale.as_deref());
         if self.shaped.as_ref() != Some(&(wanted.clone(), style.clone(), generation)) {
             let text_ctx = ctx.text_context::<TextContext>();
             self.run = Some(text_ctx.layout(&wanted, &style, None));
