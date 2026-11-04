@@ -275,20 +275,21 @@
 //! core for the same rule stated at length, which this one mirrors).
 //! [`OverlayModalView::snap_points`] is the one place caller input enters
 //! this module, and it drops any non-finite point right there — the rest of
-//! the module (`normalize_snap`, `snap_targets`, `open_progress`) trusts
+//! the module (the shared [`Detents`] math, `open_progress`) trusts
 //! [`OverlayModalWidget::snap_points`] to already be all-finite rather than
 //! re-checking. That leaves two clamp shapes in the module tree:
 //!
-//! - **Bounds are literal `0.0`/`1.0`** (`normalize_snap`'s two clamps,
+//! - **Bounds are literal `0.0`/`1.0`** (`Detents::normalize`'s two clamps,
 //!   [`begin_ramp`](OverlayModalWidget::begin_ramp)'s fraction clamp) —
 //!   trivially ordered, never a hazard.
 //! - **A computed bound clamped with the ordering-visible `.max()`/`.min()`
 //!   shape instead of `.clamp()`** —
 //!   [`drag_move`](OverlayModalWidget::drag_move)'s scrub target against the
-//!   live `open` snap-target bound: `f64::max`/`f64::min` can't panic even if
-//!   a NaN somehow reached one side (IEEE `minNum`/`maxNum` semantics return
-//!   the other, non-NaN operand), which `clamp`'s internal
-//!   `assert!(min <= max)` would.
+//!   live `open` snap-target bound (now `Detents::drag_to` in
+//!   `frust::motion::detent`, which keeps this shape):
+//!   `f64::max`/`f64::min` can't panic even if a NaN somehow reached one side
+//!   (IEEE `minNum`/`maxNum` semantics return the other, non-NaN operand),
+//!   which `clamp`'s internal `assert!(min <= max)` would.
 //!
 //! A new clamp against a computed bound must fit one of these two shapes, not
 //! introduce a third.
@@ -305,6 +306,7 @@ use frust::authoring::{
     visit_children,
 };
 use frust::input::{TOUCH_SLOP, VelocityTracker};
+use frust::motion::detent::{self, DetentRelease, Detents, DismissPolicy};
 use frust::{
     AnimationController, BackPolicy, Curve, FrameTime, IconData, NavigatorController, PopResult,
     PushOptions, Theme, TransitionSpec,
@@ -336,7 +338,7 @@ pub const OVERLAY_SHEET_MAX_HEIGHT_FRACTION: f64 = 0.8;
 /// [`super::ANCHORED_ENTER_SCALE`] carries for the anchored host).
 pub const SCALE_FROM: f64 = 0.95;
 /// Progress difference below which a ramp counts as settled.
-const PROGRESS_EPSILON: f64 = 1e-4;
+const PROGRESS_EPSILON: f64 = detent::PROGRESS_EPSILON;
 
 /// Release speed, in logical px/s along the drag axis, at or above which a drag
 /// commits in the direction it was flung rather than to whichever resting point
@@ -346,7 +348,7 @@ const PROGRESS_EPSILON: f64 = 1e-4;
 /// dismiss. 400 px/s (0.4 px/ms) is a deliberate flick — an order of magnitude
 /// above `frust::input::FLING_STOP`'s 30 px/s "this fling is over" floor, and
 /// well under the speed of a full-screen swipe.
-pub const OVERLAY_FLING_VELOCITY: f64 = 400.0;
+pub const OVERLAY_FLING_VELOCITY: f64 = detent::DEFAULT_FLING_VELOCITY;
 
 /// The close affordance's inset from the panel's top/trailing edges —
 /// [`MaterialSpacing::LG`] (16dp).
@@ -1102,7 +1104,7 @@ impl<State: 'static> OverlayModalView<State> {
     /// A non-finite point (NaN or infinite — never a meaningful fraction or
     /// px extent) is dropped here, at the boundary, rather than stored: this
     /// is the one place caller input enters the widget, and every downstream
-    /// consumer (`normalize_snap`, `snap_targets`, `open_progress`) trusts
+    /// consumer (the shared [`Detents`] math, `open_progress`) trusts
     /// [`OverlayModalWidget::snap_points`] to already be all-finite rather
     /// than re-checking (see the [module docs](self)'s Clamp Discipline
     /// section). A caller-authored NaN/∞ behaves as if that point were never
@@ -1444,40 +1446,14 @@ impl OverlayModalWidget {
     /// unreachable configuration silently falls back to fully open instead of
     /// panicking.
     pub fn open_progress(&self) -> f64 {
-        self.snap_points
-            .first()
-            .map(|p| self.normalize_snap(*p))
-            .filter(|p| *p > PROGRESS_EPSILON)
-            .unwrap_or(1.0)
+        self.detents().open_progress(self.extent())
     }
 
-    /// A snap point in progress space: `0..=1` is already a fraction of the
-    /// panel's extent, anything larger is logical px against that extent.
-    /// Clamped into `0..=1`, and treated as fully open while no extent has been
-    /// laid out yet.
-    fn normalize_snap(&self, point: f64) -> f64 {
-        if point <= 1.0 {
-            return point.clamp(0.0, 1.0);
-        }
-        let extent = self.extent();
-        if extent <= 0.0 {
-            return 1.0;
-        }
-        (point / extent).clamp(0.0, 1.0)
-    }
-
-    /// The resting points a release snaps to, ascending: every snap point plus
-    /// `0.0` (closed). With none authored the set is `{0.0, 1.0}`, so "nearest"
-    /// is the drag-past-the-midpoint commit.
-    fn snap_targets(&self) -> Vec<f64> {
-        let mut targets: Vec<f64> = std::iter::once(0.0)
-            .chain(self.snap_points.iter().map(|p| self.normalize_snap(*p)))
-            .collect();
-        if targets.len() == 1 {
-            targets.push(1.0);
-        }
-        targets.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        targets
+    /// The authored snap points as the shared [`Detents`] math, which owns
+    /// normalization, the resting-point set, the drag bound, the release
+    /// choice and the closed-landing decision.
+    fn detents(&self) -> Detents {
+        Detents::new(&self.snap_points)
     }
 
     /// The panel's extent along its own slide axis (its thickness).
@@ -1856,52 +1832,26 @@ impl OverlayModalWidget {
         if !self.drag_moved {
             return;
         }
-        let extent = self.extent();
-        if extent <= 0.0 {
-            return;
-        }
         // Dragging toward the closing edge lowers progress; the panel can be
         // pushed no further open than its own furthest resting point.
-        let open = self.snap_targets().last().copied().unwrap_or(1.0);
-        let target = self.drag_from - self.close_sign() * delta / extent;
-        // Ordered explicitly rather than `clamp`: `open` is computed from the
-        // live snap targets, and clamp bounds must be provably ordered and
-        // finite (see the [module docs](self)'s Clamp Discipline section).
-        // `f64::max`/`f64::min` also can't panic the way `clamp`'s internal
-        // `assert!(min <= max)` would if a NaN ever reached `open`.
-        self.scrub(ctx, target.max(0.0).min(open));
+        if let Some(target) =
+            self.detents()
+                .drag_to(self.drag_from, delta, self.close_sign(), self.extent())
+        {
+            self.scrub(ctx, target);
+        }
     }
 
     /// The resting point a release settles to: the nearest one, or — past
     /// [`OVERLAY_FLING_VELOCITY`] — the next one along the direction of travel.
     fn release_target(&self, velocity: f64) -> f64 {
-        let targets = self.snap_targets();
-        let nearest = |p: f64| {
-            targets
-                .iter()
-                .copied()
-                .min_by(|a, b| {
-                    (a - p)
-                        .abs()
-                        .partial_cmp(&(b - p).abs())
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .unwrap_or(0.0)
-        };
-        if velocity.abs() >= OVERLAY_FLING_VELOCITY {
-            // A flick toward the closing edge takes the next point down, one
-            // away from it the next point up.
-            let opening = velocity * self.close_sign() < 0.0;
-            let next = if opening {
-                targets.iter().copied().find(|t| *t > self.progress)
-            } else {
-                targets.iter().rev().copied().find(|t| *t < self.progress)
-            };
-            if let Some(next) = next {
-                return next;
-            }
-        }
-        nearest(self.progress)
+        self.detents().release_target(
+            self.progress,
+            velocity,
+            self.close_sign(),
+            self.extent(),
+            OVERLAY_FLING_VELOCITY,
+        )
     }
 
     /// Settle a released drag: continue into the exit ramp when it landed
@@ -1915,16 +1865,17 @@ impl OverlayModalWidget {
     /// panel resting there, an invisible full-window input barrier with nothing
     /// to recover it.
     fn settle_drag(&mut self, ctx: &mut EventCtx, target: f64) {
-        if target <= PROGRESS_EPSILON {
-            if self.can_dismiss() {
-                self.request_dismiss(ctx);
-            } else {
-                self.begin_ramp(self.open_progress(), false);
+        let policy = if self.can_dismiss() {
+            DismissPolicy::Dismissable
+        } else {
+            DismissPolicy::SpringBackTo
+        };
+        match self.detents().settle(target, policy, self.extent()) {
+            DetentRelease::Dismiss => self.request_dismiss(ctx),
+            DetentRelease::SnapTo(progress) => {
+                self.begin_ramp(progress, false);
                 ctx.request_redraw();
             }
-        } else {
-            self.begin_ramp(target, false);
-            ctx.request_redraw();
         }
     }
 }
@@ -4797,6 +4748,34 @@ mod tests {
             "the panel surface is a barrier, not a button"
         );
         assert!((w.progress() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn overlay_modal_detents_route_through_the_shared_math() {
+        let (view, _closed) = staged(sheet_config());
+        let points = [0.5, 120.0, 1.0];
+        let mut w = build(&view.snap_points(&points));
+        layout(&mut w);
+        run_ramp(&mut w, 0.0);
+        let extent = w.extent();
+        let close_sign = w.close_sign();
+        let detents = Detents::new(&points);
+
+        assert_eq!(OVERLAY_FLING_VELOCITY, detent::DEFAULT_FLING_VELOCITY);
+        assert_eq!(w.open_progress(), detents.open_progress(extent));
+        for velocity in [-900.0, -50.0, 0.0, 50.0, 900.0] {
+            assert_eq!(
+                w.release_target(velocity),
+                detents.release_target(
+                    w.progress(),
+                    velocity,
+                    close_sign,
+                    extent,
+                    OVERLAY_FLING_VELOCITY
+                ),
+                "release at {velocity} px/s"
+            );
+        }
     }
 
     #[test]
