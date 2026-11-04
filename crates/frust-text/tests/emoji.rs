@@ -36,8 +36,13 @@ fn skips() -> usize {
     SKIPS.load(Ordering::SeqCst)
 }
 
+/// The mixed text and emoji string the system-fallback test shapes, and the
+/// precondition probe shapes the same one.
+const MIXED: &str = "hi \u{1F44D}\u{1F3FD} \u{1F389}";
+
 /// The missing precondition of the system-fallback test, else `None`: a host emoji
-/// font resolves U+1F600 to a face other than the plain-text one. Probed once.
+/// font resolves the emoji in [`MIXED`] to a face other than the plain-text one.
+/// A missing baseline text run is itself a missing precondition. Probed once.
 fn missing_precondition() -> Option<String> {
     static CHECK: OnceLock<Option<String>> = OnceLock::new();
     CHECK
@@ -46,12 +51,17 @@ fn missing_precondition() -> Option<String> {
             let text_runs = cx
                 .layout("hi", &style(24.0), None)
                 .to_scene_runs(Point::ORIGIN);
-            let text_font = text_runs.first()?.font.font().clone();
+            let Some(first) = text_runs.first() else {
+                return Some("no glyph run for the plain-text baseline \"hi\"".to_string());
+            };
+            let text_font = first.font.font().clone();
             let runs = cx
-                .layout("hi \u{1F600}", &style(24.0), None)
+                .layout(MIXED, &style(24.0), None)
                 .to_scene_runs(Point::ORIGIN);
             let found = runs.iter().any(|run| *run.font.font() != text_font);
-            (!found).then(|| "no host emoji font resolves U+1F600".to_string())
+            (!found).then(|| {
+                "no host emoji font resolves the emoji in the mixed test string".to_string()
+            })
         })
         .clone()
 }
@@ -119,7 +129,7 @@ fn emoji_cluster_engages_fallback_font_with_real_glyphs() {
     // "hi " + thumbs-up-medium-skin-tone (a modifier-sequence emoji cluster)
     // + a plain emoji — exercises both a modified and unmodified color-emoji
     // cluster in the same shaped string.
-    let mixed = cx.layout("hi \u{1F44D}\u{1F3FD} \u{1F389}", &style(24.0), None);
+    let mixed = cx.layout(MIXED, &style(24.0), None);
     let runs = mixed.to_scene_runs(Point::ORIGIN);
     assert!(!runs.is_empty(), "expected glyph runs for mixed text+emoji");
 
