@@ -652,11 +652,26 @@ pub fn resolve_timing(
 ///   ([`PageTransition::None`]) spec is left untouched.
 /// - otherwise a [`Timing::ThemeDefault`] is resolved to the preset's theme
 ///   timing ([`resolve_timing`]); the preset is unchanged.
+///
+/// The collapse always runs for [`REDUCE_MOTION_DURATION`]; use
+/// [`resolve_spec_with`] to honour a theme's `MotionExtras::reduced_fade`.
 pub fn resolve_spec(spec: TransitionSpec, scheme: Option<&MotionScheme>) -> TransitionSpec {
+    resolve_spec_with(spec, scheme, REDUCE_MOTION_DURATION)
+}
+
+/// [`resolve_spec`] with the reduced-motion collapse running for `reduced_fade`
+/// instead of the [`REDUCE_MOTION_DURATION`] default — the theme's
+/// `MotionExtras::reduced_fade_duration`. A zero `reduced_fade` lands the
+/// target on the first paint.
+pub fn resolve_spec_with(
+    spec: TransitionSpec,
+    scheme: Option<&MotionScheme>,
+    reduced_fade: Duration,
+) -> TransitionSpec {
     if spec.is_animated() && scheme.map(|s| s.reduce_motion).unwrap_or(false) {
         return TransitionSpec {
             preset: PageTransition::ReducedCrossfade,
-            timing: Timing::Duration(REDUCE_MOTION_DURATION, Curve::Linear),
+            timing: Timing::Duration(reduced_fade, Curve::Linear),
         };
     }
     TransitionSpec {

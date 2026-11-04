@@ -702,7 +702,7 @@ pub use frust_widgets::{
 /// assert!(matches!(driver, TransitionDriver::Auto(_)));
 /// ```
 pub use frust_widgets::nav::transition::{
-    Layer, TransitionDriver, make_driver, resolve_layers, resolve_spec,
+    Layer, TransitionDriver, make_driver, resolve_layers, resolve_spec, resolve_spec_with,
 };
 
 /// The `drag` module: drop targets, draggable sources, auto-scroll zones,
@@ -1692,9 +1692,9 @@ pub use route_state::RouteObserver;
 /// app (or a design-system plugin) authors a theme against `frust::*` alone.
 pub use frust_theme::{
     Brightness, ColorScheme, CosmeticLoopRate, DesignLanguage, EasingSet, Elevation,
-    ElevationLevel, FontFace, GlassFill, GlassMaterial, GlassScale, MotionDurations, MotionScheme,
-    MotionSpring, NativeTypefaces, ShadowSpec, ShapeScale, StatusColors, StatusPalette,
-    SurfaceRole, Theme, ThemeBuilder, ThemeExtensions, TypeScale,
+    ElevationLevel, FontFace, GlassFill, GlassMaterial, GlassScale, MotionDurations, MotionExtras,
+    MotionScheme, MotionSpring, NativeTypefaces, ShadowSpec, ShapeScale, StatusColors,
+    StatusPalette, SurfaceRole, Theme, ThemeBuilder, ThemeExtensions, TypeScale,
 };
 
 /// The color type every [`ColorScheme`] role is expressed in

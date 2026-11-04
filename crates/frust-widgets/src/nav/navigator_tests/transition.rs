@@ -912,6 +912,61 @@ fn reduce_motion_collapses_glyph_push_to_crossfade() {
     }
 }
 
+// --- The reduced-motion collapse runs for the theme's `MotionExtras`
+//     reduced fade, not the 120 ms default. ---
+
+/// Push under a reduce-motion theme with `reduced_fade` ms and return the first
+/// 4 ms-grid time at which the transition has finalized, or `None` by 400 ms.
+fn reduced_push_finalize_ms(reduced_fade: f64) -> Option<u64> {
+    let controller: NavigatorController<()> = NavigatorController::new();
+    let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+    let theme = Theme::builder(Theme::neutral())
+        .map_motion(|motion| frust_theme::MotionScheme {
+            reduce_motion: true,
+            ..motion
+        })
+        .extension(frust_theme::MotionExtras {
+            reduced_fade,
+            ..frust_theme::MotionExtras::neutral()
+        })
+        .build();
+    root.set_theme(Box::new(theme));
+    let mut app = {
+        let ctrl = controller.clone();
+        move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0))
+    };
+    let mut state = ();
+    root.rebuild(&mut app, &mut state);
+    root.layout(Size::new(100.0, 100.0));
+    controller.push_with(|| sized_page(100.0, 80.0), TransitionSpec::glyph());
+    for step in 0..100u64 {
+        let now = step * 4;
+        let (_, needs_frame) = full_frame(&mut root, &mut app, &mut state, ft(now));
+        root.rebuild(&mut app, &mut state);
+        if !needs_frame && nav_widget(&root).transition.is_none() {
+            return Some(now);
+        }
+    }
+    None
+}
+
+#[test]
+fn reduced_crossfade_uses_the_theme_reduced_fade() {
+    let tuned = reduced_push_finalize_ms(40.0).expect("a 40 ms collapse finalizes");
+    assert!(
+        (40..=60).contains(&tuned),
+        "finished at {tuned} ms, expected about 40 ms"
+    );
+    let default = reduced_push_finalize_ms(120.0).expect("the default collapse finalizes");
+    assert!(default >= 120, "the default collapse takes {default} ms");
+}
+
+#[test]
+fn zero_reduced_fade_snaps_without_requesting_a_frame() {
+    let snapped = reduced_push_finalize_ms(0.0).expect("a zero collapse finalizes");
+    assert!(snapped <= 8, "a zero fade finished at {snapped} ms");
+}
+
 // --- A mid-transition M3 fade-through paint scales the incoming page (the
 //     0.92 → 1.0 scale-up) inline under a `push_transform` and a `push_layer`
 //     — a scale step never goes through a retained bracket, since a page is

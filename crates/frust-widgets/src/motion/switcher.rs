@@ -92,7 +92,7 @@ use frust_core::{
     EventCtx, EventResult, ImeState, InputEvent, LayoutCtx, PaintCtx, PaintScene, RetainedKey,
     SemanticsCtx, View, Widget, any,
 };
-use frust_theme::Theme;
+use frust_theme::{MotionExtras, Theme};
 use kurbo::{Affine, Point, Size, Vec2};
 
 use crate::ChildKey;
@@ -472,7 +472,10 @@ impl<P: TransitionPattern + Clone + 'static> Widget for PatternSwitcherWidget<P>
             let theme = Theme::from_paint_ctx(ctx);
             let reduce = theme.map(|t| t.motion.reduce_motion).unwrap_or(false);
             let timing = if reduce {
-                Timing::Duration(REDUCE_MOTION_DURATION, Curve::Linear)
+                Timing::Duration(
+                    MotionExtras::of(theme).reduced_fade_duration(),
+                    Curve::Linear,
+                )
             } else {
                 resolve_switch_timing(theme, self.explicit_timing)
             };
@@ -1404,6 +1407,41 @@ mod tests {
             w.child.origin(),
             Point::ZERO,
             "reduce_motion collapses to a non-directional crossfade (no slide)"
+        );
+    }
+
+    #[test]
+    fn switcher_collapse_uses_the_theme_reduced_fade() {
+        let theme = Theme::builder(Theme::neutral())
+            .map_motion(|motion| frust_theme::MotionScheme {
+                reduce_motion: true,
+                ..motion
+            })
+            .extension(MotionExtras {
+                reduced_fade: 40.0,
+                ..MotionExtras::neutral()
+            })
+            .build();
+        let v1: PatternSwitcherView<(), _> =
+            pattern_switcher(1u32, SharedAxis::X, leaf_any(10.0, 10.0));
+        let mut w = build(&v1);
+        let size = w.layout(&mut LayoutCtx::new(), &loose());
+        let v2: PatternSwitcherView<(), _> =
+            pattern_switcher(2u32, SharedAxis::X, leaf_any(10.0, 10.0));
+        let mut counter = 0u64;
+        v2.rebuild(&v1, &mut w, &mut BuildCtx::new(&mut counter));
+
+        let mut pctx = PaintCtx::new(Point::ZERO, size).with_theme(&theme);
+        w.paint(&mut pctx, &mut RecordingScene::default());
+
+        let driver = w.driver.as_mut().expect("driver created on first paint");
+        assert!(
+            !driver.advance(ft_ms(20.0)).done,
+            "still fading at 20 ms of a 40 ms collapse"
+        );
+        assert!(
+            driver.advance(ft_ms(45.0)).done,
+            "done past the theme's 40 ms (the default 120 ms would not be)"
         );
     }
 
