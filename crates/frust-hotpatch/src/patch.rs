@@ -809,7 +809,7 @@ mod tests {
             Err(PatchError::AnchorMismatch {
                 image: "base",
                 expected: base_slide as u64,
-                got: base_slide as u64 - 0x10,
+                got: (base_slide as u64).wrapping_sub(0x10),
             })
         );
         // SAFETY: as above.
@@ -819,7 +819,7 @@ mod tests {
             Err(PatchError::AnchorMismatch {
                 image: "patch",
                 expected: patch_slide as u64,
-                got: patch_slide as u64 - 0x10,
+                got: (patch_slide as u64).wrapping_sub(0x10),
             })
         );
         // SAFETY: only checked for presence.

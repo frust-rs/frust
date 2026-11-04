@@ -964,6 +964,17 @@ fn dwrite_style(style: FontStyle) -> i32 {
     }
 }
 
+/// The Windows family a generic slot maps to — the one table behind both the
+/// `MapCharacters` base for a generic-only request and `default_family`.
+fn generic_family_name(slot: GenericSlot) -> &'static str {
+    match slot {
+        GenericSlot::SansSerif | GenericSlot::SystemUi => "Segoe UI",
+        GenericSlot::Monospace => "Consolas",
+        GenericSlot::Serif => "Times New Roman",
+        GenericSlot::Emoji => "Segoe UI Emoji",
+    }
+}
+
 /// A mapped face plus what the tests need to check it.
 struct Resolved {
     source: FaceSource,
@@ -974,10 +985,23 @@ struct Resolved {
 impl System {
     fn resolve(&self, req: &FallbackRequest) -> Option<Resolved> {
         let locale = super::language_for(req.script, req.locale.as_deref()).unwrap_or("en-US");
-        let base: Option<Vec<u16>> = req.families.iter().find_map(|f| match f {
-            crate::style::FamilyName::Named(name) => Some(utf16z(name)),
-            crate::style::FamilyName::Generic(_) => None,
-        });
+        // A named family leads; failing that, the first generic's family
+        // (so `Monospace` maps to Consolas, not the system Latin fallback).
+        let base: Option<Vec<u16>> = req
+            .families
+            .iter()
+            .find_map(|f| match f {
+                crate::style::FamilyName::Named(name) => Some(utf16z(name)),
+                crate::style::FamilyName::Generic(_) => None,
+            })
+            .or_else(|| {
+                req.families.iter().find_map(|f| match f {
+                    crate::style::FamilyName::Generic(slot) => {
+                        Some(utf16z(generic_family_name(*slot)))
+                    }
+                    crate::style::FamilyName::Named(_) => None,
+                })
+            });
         let base_ptr = base.as_ref().map_or(ptr::null(), |b| b.as_ptr());
         let attrs = (
             dwrite_weight(req.weight.value()),
@@ -1013,12 +1037,7 @@ impl System {
     }
 
     fn default_family(&self, generic: GenericSlot) -> Option<FaceSource> {
-        let name = match generic {
-            GenericSlot::SansSerif | GenericSlot::SystemUi => "Segoe UI",
-            GenericSlot::Monospace => "Consolas",
-            GenericSlot::Serif => "Times New Roman",
-            GenericSlot::Emoji => "Segoe UI Emoji",
-        };
+        let name = generic_family_name(generic);
         let index = self.collection.find_family(name)?;
         let font = self
             .collection
@@ -1173,6 +1192,16 @@ mod tests {
         );
         assert_eq!(face.index(), 0);
         assert_eq!(font.location(), Some((path, 0)));
+    }
+
+    #[test]
+    fn a_monospace_only_request_resolves_to_consolas() {
+        let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let sys = system().expect("DirectWrite is available");
+        let mut req = request("Hello, world", "en-US");
+        req.families = vec![crate::style::FamilyName::Generic(GenericSlot::Monospace)];
+        let mono = sys.resolve(&req).expect("monospace");
+        assert_eq!(mono.family, "Consolas");
     }
 
     #[test]

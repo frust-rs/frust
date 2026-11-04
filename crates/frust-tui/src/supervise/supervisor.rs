@@ -3056,8 +3056,11 @@ mod tests {
             runner.calls(),
             vec![
                 format!(
-                    "stream {RESOLVE_KEY} --manifest-path /tmp/frust-tui-preflight-app/Cargo.toml \
-                     --features frust/perf-trace --features frust/devtools"
+                    "stream {RESOLVE_KEY} --manifest-path {} \
+                     --features frust/perf-trace --features frust/devtools",
+                    std::path::Path::new("/tmp/frust-tui-preflight-app")
+                        .join("Cargo.toml")
+                        .display()
                 ),
                 format!("spawn {DEBUG_DESKTOP_RUN}"),
             ]

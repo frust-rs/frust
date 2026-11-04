@@ -364,6 +364,7 @@ mod tests {
     /// `FRUST_FEATURES` and `build`, each one argument: the project's link
     /// flags kept through `$(inherited)`, the force-load response file, the
     /// anchor exported, dead-code stripping and the debug-dylib split off.
+    #[cfg(target_os = "macos")]
     #[test]
     fn build_hot_appends_the_fat_link_settings_before_the_action() {
         let mut settings = hot_link_settings(Path::new("/t/fat/force-load.rsp"));

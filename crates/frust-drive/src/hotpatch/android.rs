@@ -852,10 +852,13 @@ fn build_and_stage(
 mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     use super::super::fat_link::{self, FatLinkRequest, linker_program};
     use super::super::symbols::fixtures::{Def, object};
     use super::super::symbols::{ANCHOR_SYMBOL, SymbolCache};
-    use super::super::thin_link::{self, ThinLinkRequest};
+    use super::super::thin_link;
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    use super::super::thin_link::ThinLinkRequest;
     use super::*;
     use crate::doctor::FakeEnv;
     use crate::process::{FakeProcessRunner, Output};
@@ -956,6 +959,8 @@ mod tests {
     /// The upload copy is `llvm-strip --strip-unneeded -o
     /// patch-<n>.upload.so patch-<n>.so`, left owner-only; the linked patch
     /// is untouched. A failed strip is refused, never skipped.
+    // The fake NDK tools are `#!/bin/sh` scripts and `host_tag` refuses Windows.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn the_upload_copy_is_strip_unneeded_beside_the_patch_and_owner_only() {
         let dir = temp_dir("strip");
@@ -1147,6 +1152,7 @@ mod tests {
     /// doc's probe): rustc's own temp objects, the tip's `.rcgu.o`, a
     /// workspace rlib under the target dir, a toolchain rlib, the NDK libs,
     /// the Android rustflags' link args.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn captured_cdylib_link(target_dir: &Path, workspace_rlib: &Path) -> Vec<String> {
         let deps = target_dir.join("aarch64-linux-android/debug/deps");
         let path = |p: PathBuf| p.to_string_lossy().into_owned();
@@ -1178,6 +1184,7 @@ mod tests {
     }
 
     /// A workspace rlib whose one member is a `.rcgu.o`.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn workspace_rlib(target_dir: &Path) -> PathBuf {
         let deps = target_dir.join("aarch64-linux-android/debug/deps");
         std::fs::create_dir_all(&deps).unwrap();
@@ -1202,6 +1209,8 @@ mod tests {
     /// object, the toolchain rlib kept, folding off, the anchor exported,
     /// the output under the target dir. The runner answers only that exact
     /// argv.
+    // The fake NDK tools are `#!/bin/sh` scripts and `host_tag` refuses Windows.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn the_fat_cdylib_force_loads_the_archive_and_exports_the_anchor_through_ndk_clang() {
         let dir = temp_dir("fat-link");
@@ -1292,6 +1301,8 @@ mod tests {
 
     /// A thin patch for Android links through NDK clang with the Gnu thin
     /// arguments (`-shared`, the forwarded NDK libs) and exports the anchor.
+    // The fake NDK tools are `#!/bin/sh` scripts and `host_tag` refuses Windows.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn thin_links_use_ndk_clang_and_gnu_args_and_export_the_anchor() {
         let dir = temp_dir("thin-link");

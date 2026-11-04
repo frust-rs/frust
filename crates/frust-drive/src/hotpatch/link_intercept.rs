@@ -456,11 +456,14 @@ mod tests {
     fn link_indicators_are_found_inside_a_response_file() {
         let dir = temp_dir("rsp");
         let rsp = dir.join("linker-arguments");
-        fs::write(
-            &rsp,
-            "-arch\narm64\n/t/with\\ space/app.0.rcgu.o\n-o\n/t/app\n",
-        )
-        .unwrap();
+        // The response-file dialect follows the host (MSVC quoting on
+        // Windows, GNU backslash escapes elsewhere), so the fixture does too.
+        let fixture = if cfg!(windows) {
+            "\"-arch\"\n\"arm64\"\n\"/t/with space/app.0.rcgu.o\"\n\"-o\"\n\"/t/app\"\n"
+        } else {
+            "-arch\narm64\n/t/with\\ space/app.0.rcgu.o\n-o\n/t/app\n"
+        };
+        fs::write(&rsp, fixture).unwrap();
         let args = vec![format!("@{}", rsp.display())];
         assert!(has_link_indicators(&args).unwrap());
         let expanded = expand_response_files(&args).unwrap();
