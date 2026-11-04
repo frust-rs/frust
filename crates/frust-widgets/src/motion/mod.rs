@@ -22,6 +22,9 @@
 //!   child-switch wrapper (Flutter's `AnimatedSwitcher`).
 //! * [`patterns`] — higher-level motion patterns (e.g. staggered reveals)
 //!   composed over [`animated`]/[`switcher`].
+//! * [`presence`](mod@presence) — [`Presence`], a kept-mounted enter/exit
+//!   driver, and [`presence()`](fn@presence), the owner-controlled view that
+//!   fades a child in and out and reports `on_exited` once an exit settles.
 //!
 //! # Wholesale facade re-export
 //!
@@ -36,6 +39,7 @@
 pub mod animated;
 pub mod card_switcher;
 pub mod patterns;
+pub mod presence;
 pub mod switcher;
 
 pub use animated::{
@@ -44,4 +48,7 @@ pub use animated::{
 };
 pub use card_switcher::{
     CardSwitcher, CardSwitcherView, CardSwitcherWidget, PeerCard, card_switcher, peer_card,
+};
+pub use presence::{
+    Presence, PresencePhase, PresenceSample, PresenceView, PresenceWidget, presence,
 };
