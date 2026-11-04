@@ -351,11 +351,21 @@ jobs:
         env:
           BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
         run: |
-          # An unusable base (a new branch's all-zero `before`) runs the leg.
-          if changed="$(git diff --name-only "$BASE" HEAD -- crates/frust-text crates/frust-engine crates/frust-scene 2>/dev/null)" && [ -z "$changed" ]; then
+          # The oracle's own code plus what it builds against: the lockfile, the
+          # manifests, the toolchain pin, the crates it links, the test fonts, and
+          # this workflow.
+          paths=(Cargo.lock Cargo.toml rust-toolchain.toml crates/frust-text crates/frust-engine crates/frust-scene crates/frust-paths crates/frust-gpu testing/fonts crates/frust-text/tests/fonts .github/workflows/ci.yml)
+          # A manual run, or an unusable base (a new branch's all-zero `before`),
+          # runs the leg.
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "reason=manual run" >> "$GITHUB_OUTPUT"
+          elif changed="$(git diff --name-only "$BASE" HEAD -- "${paths[@]}" 2>/dev/null)" && [ -z "$changed" ]; then
             echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "reason=no oracle paths changed" >> "$GITHUB_OUTPUT"
           else
             echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "reason=oracle paths changed or base unusable" >> "$GITHUB_OUTPUT"
           fi
       - name: Install the pinned toolchain
         if: steps.scope.outputs.run == 'true'
@@ -368,6 +378,12 @@ jobs:
       - name: frust-engine hvgl provider
         if: steps.scope.outputs.run == 'true'
         run: cargo test -p frust-engine --test hvgl_provider --locked
+      - name: Report a skipped leg
+        if: steps.scope.outputs.run != 'true'
+        env:
+          REASON: ${{ steps.scope.outputs.reason }}
+        run: |
+          echo "SKIPPED (scope: $REASON)" >> "$GITHUB_STEP_SUMMARY"
 
   text-oracle-windows:
     # The DirectWrite text-oracle backend (`oracle/dwrite.rs`), which no other job
@@ -384,11 +400,21 @@ jobs:
         env:
           BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
         run: |
-          # An unusable base (a new branch's all-zero `before`) runs the leg.
-          if changed="$(git diff --name-only "$BASE" HEAD -- crates/frust-text crates/frust-engine crates/frust-scene 2>/dev/null)" && [ -z "$changed" ]; then
+          # The oracle's own code plus what it builds against: the lockfile, the
+          # manifests, the toolchain pin, the crates it links, the test fonts, and
+          # this workflow.
+          paths=(Cargo.lock Cargo.toml rust-toolchain.toml crates/frust-text crates/frust-engine crates/frust-scene crates/frust-paths crates/frust-gpu testing/fonts crates/frust-text/tests/fonts .github/workflows/ci.yml)
+          # A manual run, or an unusable base (a new branch's all-zero `before`),
+          # runs the leg.
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "reason=manual run" >> "$GITHUB_OUTPUT"
+          elif changed="$(git diff --name-only "$BASE" HEAD -- "${paths[@]}" 2>/dev/null)" && [ -z "$changed" ]; then
             echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "reason=no oracle paths changed" >> "$GITHUB_OUTPUT"
           else
             echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "reason=oracle paths changed or base unusable" >> "$GITHUB_OUTPUT"
           fi
       - name: Install the pinned toolchain
         if: steps.scope.outputs.run == 'true'
@@ -398,6 +424,13 @@ jobs:
       - name: frust-text (DirectWrite oracle)
         if: steps.scope.outputs.run == 'true'
         run: cargo test -p frust-text --locked
+      - name: Report a skipped leg
+        if: steps.scope.outputs.run != 'true'
+        env:
+          REASON: ${{ steps.scope.outputs.reason }}
+        shell: bash
+        run: |
+          echo "SKIPPED (scope: $REASON)" >> "$GITHUB_STEP_SUMMARY"
 
   android-relr-guard:
     # No other job links an Android shared object, so this one builds the
