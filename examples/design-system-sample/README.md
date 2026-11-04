@@ -34,6 +34,12 @@ whose **only** dependency is `frust`:
   `visit_children!`, `semantics` forwarding via `ChildPod::semantics_child`),
   and an **interactive control** (`chip` — `erase_callback`/`ErasedCallback`,
   pointer capture, fire-on-up-inside, `PRESSED_OPACITY`).
+- **Glass** — the sample theme carries a small translucent `GlassScale`
+  (`map_glass`, blur sigma 6/10/16 logical px, design-authored values), and
+  `sample_panel(..).glass(GlassTier::Chrome)` wraps its content in
+  `frust::glass_surface`, so an out-of-tree catalog paints a real backdrop blur
+  with only `frust` as a dependency. Asserted with a `RecordingScene` that
+  records `backdrop_blur`.
 - **Presence** — `notice` wraps a panel in `frust::motion::presence`, so an
   out-of-tree catalog gets a kept-mounted fade in/out with an `on_exited` hook.
   While closed its semantics vanish (asserted with `frust::testing::semantics_of`)
@@ -76,7 +82,7 @@ unspecified. See the manifests' own comments.
 **Verify it:**
 
 ```bash
-cargo tree -e features -i frust -p sample-app
+cargo tree -e features -i frust-ui -p sample-app
 ```
 
 The output must contain **no `frust feature "..."` line at all** — only the two
