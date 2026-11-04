@@ -17,9 +17,9 @@
 //! 2. A rounded clip at [`GlassSurfaceView::corner_radius`].
 //! 3. Translucent material: [`PaintScene::backdrop_blur`] with the tier's
 //!    `blur_radius_intent`, then the brightness-selected fill stack
-//!    (`fills_light` or `fills_dark`) bottom-to-top. Opaque material, or no
-//!    theme: a single fill of the tier's surface-container role instead (no
-//!    blur).
+//!    (`fills_light` or `fills_dark`) bottom-to-top. Opaque material: a single
+//!    fill of the tier's elevation surface role instead (no blur). No theme
+//!    and no explicit material: a single opaque fill of `#EFEFEF` (no blur).
 //! 4. The child.
 //! 5. The clip is popped.
 //! 6. The specular hairline (white at `hairline_alpha`, 1 logical px, inset
@@ -29,14 +29,19 @@
 //! fallback: [`GlassSurfaceView::material`] wins over the theme's tier, and
 //! without either the surface paints an opaque neutral fill.
 //!
+//! The material's `blur_radius_intent` is a Gaussian standard deviation in
+//! logical px, passed to the engine unconverted: a CSS `backdrop-filter:
+//! blur(Npx)` is a sigma of `N`. The engine clamps it to its maximum sigma.
+//!
 //! # Backdrop limits
 //!
 //! The blur is not free and the engine bounds it; read these before placing
 //! many surfaces.
 //!
 //! - **Per-frame cap.** The engine allows 4 backdrop blurs per frame by
-//!   default (configurable once the app-level cap setting lands). The
-//!   (cap + 1)th backdrop **refuses the whole frame**: the engine's refusal
+//!   default; an app changes it (clamped to 1..=16) with
+//!   `set_max_backdrops_per_frame`. The (cap + 1)th backdrop **refuses the
+//!   whole frame**: the engine's refusal
 //!   contract never degrades a frame silently, so a screen with too many
 //!   glass surfaces shows nothing new rather than a partly blurred picture.
 //! - **Dropped inside some layers.** Inside an opacity layer, a retained body

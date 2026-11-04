@@ -529,7 +529,8 @@ pub enum Command {
     /// sample and draws nothing, and a [`Command::PushRetained`] body that
     /// carries one is never retained — a page rasterized offscreen cannot
     /// sample what is painted beneath it. A renderer bounds how many it serves
-    /// per frame (`frust-engine` refuses a frame recording more than four).
+    /// per frame (`frust-engine` refuses a frame recording more than its
+    /// configured cap, four by default).
     BackdropBlur {
         rect: Rect,
         /// The blur's standard deviation, in the pre-transform coordinate
