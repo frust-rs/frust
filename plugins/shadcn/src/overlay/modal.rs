@@ -619,7 +619,7 @@ impl<State: 'static> ModalView<State> {
     /// A non-finite point (NaN or infinite) is dropped by the shared detent
     /// math, as if it were never passed: `&[f64::NAN, 0.5]` opens at `0.5`.
     pub fn snap_points(mut self, points: &[f64]) -> Self {
-        self.snap_points = points.to_vec();
+        self.snap_points = points.iter().copied().filter(|p| p.is_finite()).collect();
         self
     }
 }
