@@ -142,6 +142,10 @@ strings. The canonical example is `crates/frust-drive/templates/app/src/lib.rs.t
   from a shell, as the `FrameTime` passed into `RenderRoot::paint`/`PaintCtx::frame_time` —
   desktop reads its own `Instant` epoch; Android/iOS pass through the platform's frame
   clock. Widget code only *differences* two `FrameTime`s, never reads a wall clock directly.
+  Two clocks: `frame_time()` is the scaled animation clock (`animation_time_scale`) and drives
+  animation controllers; `input_time()` is the raw shell clock for gesture timers (long-press,
+  double-tap windows, caret blink), velocity timestamps and auto-scroll, so a time scale never
+  stretches input timing.
 - **An animation controller advances during paint, not on a timer.** A widget holds an
   `anim::AnimationController`, calls `advance(ctx.frame_time())` once per paint and, while
   it returns `true`, calls `PaintCtx::request_frame()`. **A layout-affecting animation calls
@@ -202,8 +206,9 @@ strings. The canonical example is `crates/frust-drive/templates/app/src/lib.rs.t
   `authoring` doesn't re-export); `PRESSED_OPACITY`'s `frust_material::state_layer` re-export is
   compatibility-only. `PageTransition::Custom` needs an
   explicit `Timing::Duration`/`Timing::Spring` (`Timing::ThemeDefault` falls back to the M3
-  default, 300ms + `Curve::Emphasized`); `reduce_motion` collapses it only programmatically,
-  and an interactive edge-swipe pop calls it like every preset.
+  default, 300ms + `Curve::Emphasized`); `reduce_motion` collapses it to `ReducedCrossfade`
+  on both a programmatic pop and an interactive edge-swipe pop (the drag drives the alpha), and
+  the `Custom` fn is called on neither path.
 - **A new container implements `Widget::visit_children` via `authoring::visit_children!`,
   never by hand-writing an empty override.** The default (`Widget::visit_children`'s no-op) makes
   a container that skips this invisible to `WidgetTree::inspect`/devtools — its children exist in
