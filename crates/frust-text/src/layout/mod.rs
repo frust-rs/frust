@@ -24,15 +24,15 @@ mod metrics;
 mod reorder;
 mod truncate;
 
-use std::cell::RefCell;
 use std::ops::Range;
 use std::sync::Arc;
 
-use kurbo::{Affine, Point, Size};
+use kurbo::{Point, Size};
 
 use frust_scene::GlyphRun;
 
 use crate::context::shape::{Shaped, ShapedCluster, ShapedRun};
+use crate::convert::RunMemo;
 use crate::style::TextStyle;
 use r#break::{BreakReason, BrokenLine, OverflowWrap, break_lines};
 pub(crate) use metrics::LineMetrics;
@@ -403,21 +403,27 @@ pub struct TextLayout {
     /// frame. Retaining the [`TextLayout`] across frames — which the
     /// [`Text`](../../frust_widgets/struct.TextWidget.html) widget now does when
     /// content/style/width are unchanged — is what makes this reuse effective.
-    base_runs: RefCell<Option<Vec<GlyphRun>>>,
+    /// A layout served from a shape-cache hit shares the cache entry's memo,
+    /// so one rebuilt every paint reuses it too. The memo carries the
+    /// context's `.notdef` counter, which only the filling walk adds to.
+    base_runs: RunMemo,
 }
 
 impl TextLayout {
     /// Wraps a finished line table over `shaped` (`text` styled by `styles`,
-    /// broken at `max_width`), caching its measured size. An empty `text` is
-    /// shaped as a single space that sizes its one line and never draws.
+    /// broken at `max_width`), caching its measured size; `base_runs` is the
+    /// memo of `lines`' glyph runs (shared with the shape-cache entry that
+    /// holds `lines`, or fresh). An empty `text` is shaped as a single space
+    /// that sizes its one line and never draws.
     pub(crate) fn new(
         text: Arc<str>,
         shaped: Arc<Shaped>,
         styles: Arc<[TextStyle]>,
         max_width: Option<f32>,
         lines: Arc<LineTable>,
+        base_runs: RunMemo,
     ) -> Self {
-        Self::with_ellipsis(text, shaped, styles, max_width, lines, None)
+        Self::with_ellipsis(text, shaped, styles, max_width, lines, None, base_runs)
     }
 
     fn with_ellipsis(
@@ -427,6 +433,7 @@ impl TextLayout {
         max_width: Option<f32>,
         lines: Arc<LineTable>,
         ellipsis: Option<Ellipsis>,
+        base_runs: RunMemo,
     ) -> Self {
         let size = Size::new(f64::from(lines.width), f64::from(lines.height));
         Self {
@@ -437,7 +444,7 @@ impl TextLayout {
             lines,
             ellipsis,
             size,
-            base_runs: RefCell::new(None),
+            base_runs,
         }
     }
 
@@ -462,6 +469,7 @@ impl TextLayout {
             self.max_width,
             Arc::new(lines),
             ellipsis,
+            self.base_runs.fresh(),
         )
     }
 
@@ -501,22 +509,14 @@ impl TextLayout {
     /// `PaintScene` doc note) — this contract is specific to
     /// [`frust_scene::Command::GlyphRun`].
     pub fn to_scene_runs(&self, origin: Point) -> Vec<GlyphRun> {
-        let mut memo = self.base_runs.borrow_mut();
-        let base = memo.get_or_insert_with(|| {
+        self.base_runs.placed(origin, |notdef| {
             if self.text.is_empty() {
                 // Only the sizing space of an empty text is shaped: nothing draws.
                 return Vec::new();
             }
             let paragraph = Paragraph::new(&self.shaped, &self.styles, self.ellipsis.as_ref());
-            crate::convert::lines_to_scene_runs(&paragraph, &self.text, &self.lines)
-        });
-        let transform = Affine::translate((origin.x, origin.y));
-        base.iter()
-            .map(|run| GlyphRun {
-                transform,
-                ..run.clone()
-            })
-            .collect()
+            crate::convert::lines_to_scene_runs(&paragraph, &self.text, &self.lines, notdef)
+        })
     }
 
     /// The number of lines in this layout — at least `1` (an empty text is
@@ -573,7 +573,14 @@ mod tests {
         let shaped = Arc::new(ShapeContext::default().shape(&mut oracle, text, style));
         let styles: Arc<[TextStyle]> = Arc::from([style.clone()]);
         let lines = lay_out(&Paragraph::new(&shaped, &styles, None), max_width, None);
-        TextLayout::new(Arc::from(text), shaped, styles, max_width, Arc::new(lines))
+        TextLayout::new(
+            Arc::from(text),
+            shaped,
+            styles,
+            max_width,
+            Arc::new(lines),
+            RunMemo::default(),
+        )
     }
 
     /// The first character of every cluster, in the order the glyph emitter
