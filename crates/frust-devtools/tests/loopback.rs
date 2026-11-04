@@ -1066,6 +1066,65 @@ fn set_animation_time_scale_reaches_the_backend_and_acks() {
     );
 }
 
+/// Drops `client`, waits until the service has logged that connection's
+/// disconnect (its per-connection state is dropped just before that line),
+/// then round-trips a call from `witness` so the single FIFO backend thread
+/// has run anything the dropped connection queued.
+fn drop_and_settle(harness: &Harness, client: Client) {
+    let peer = client.writer.local_addr().expect("client address");
+    drop(client);
+    let needle = format!("client {peer} disconnected");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !captured_lines().iter().any(|l| l.contains(&needle)) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the service never logged the disconnect"
+        );
+        std::thread::yield_now();
+    }
+    let mut witness = harness.client();
+    expect_result(witness.call(1, Method::MetricsSnapshot, Value::Null));
+}
+
+#[test]
+fn the_time_scale_resets_when_the_setting_client_disconnects() {
+    let harness = default_harness();
+    let mut client = harness.client();
+    expect_result(client.call(
+        1,
+        Method::SetAnimationTimeScale,
+        params!(AnimationTimeScaleParams { scale: 0.5 }),
+    ));
+
+    drop_and_settle(&harness, client);
+
+    assert_eq!(
+        harness.recorded.lock().expect("recorded mutex").scales,
+        vec![0.5, 1.0]
+    );
+}
+
+#[test]
+fn a_client_that_never_set_the_scale_does_not_reset_it() {
+    let harness = default_harness();
+    let mut setter = harness.client();
+    expect_result(setter.call(
+        1,
+        Method::SetAnimationTimeScale,
+        params!(AnimationTimeScaleParams { scale: 0.5 }),
+    ));
+    let mut bystander = harness.client();
+    expect_result(bystander.call(1, Method::MetricsSnapshot, Value::Null));
+
+    drop_and_settle(&harness, bystander);
+
+    assert_eq!(
+        harness.recorded.lock().expect("recorded mutex").scales,
+        vec![0.5],
+        "only the connection that set the scale resets it"
+    );
+}
+
 #[test]
 fn set_animation_time_scale_with_malformed_params_is_invalid_params() {
     let harness = default_harness();

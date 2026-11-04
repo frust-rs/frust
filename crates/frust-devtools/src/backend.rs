@@ -173,6 +173,10 @@ pub trait DevtoolsBackend: Send + 'static {
     /// on the wire): a backend that overrides this should declare
     /// [`Capability::AnimationTimeScale`] in [`Self::handshake_info`]. A value
     /// the backend cannot apply is [`BackendError::InvalidRequest`].
+    ///
+    /// The service calls this again with `1.0` when the client that set a
+    /// scale disconnects (last disconnect wins if several clients set one), on
+    /// the same backend thread as the original call.
     fn set_animation_time_scale(&self, scale: f64) -> Result<(), BackendError> {
         let _ = scale;
         Err(BackendError::not_supported(
