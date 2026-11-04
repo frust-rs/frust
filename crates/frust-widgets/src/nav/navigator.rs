@@ -408,15 +408,6 @@ pub struct NavigatorWidget<State: 'static> {
     route_change: Option<RouteChangeCallback>,
 }
 
-/// Whether the navigator's **own stack** wants a back press ahead-of-time: it is
-/// poppable (`depth > 1`) **or** the top page's [`BackPolicy`] is not
-/// [`Pop`](BackPolicy::Pop). Pure so it is unit-testable directly, including the
-/// depth-1-with-overlay case a raw `can_pop` cannot express.
-///
-/// This is only half the answer [`NavigatorController::back_interest`] gives:
-/// the R23 reach gate (is the page hosting this navigator input-routed at all?)
-/// is ANDed on at *read* time, deliberately not baked in here — see
-/// [`NavigatorController::host_reach`].
 /// The rest threshold [`TransitionDriver::Settle`] applies to position and
 /// velocity.
 const SETTLE_REST_EPSILON: f64 = 1e-3;
@@ -450,6 +441,15 @@ fn settle_spring_within(timing: Timing) -> SpringDesc {
     critical(stiff)
 }
 
+/// Whether the navigator's **own stack** wants a back press ahead-of-time: it is
+/// poppable (`depth > 1`) **or** the top page's [`BackPolicy`] is not
+/// [`Pop`](BackPolicy::Pop). Pure so it is unit-testable directly, including the
+/// depth-1-with-overlay case a raw `can_pop` cannot express.
+///
+/// This is only half the answer [`NavigatorController::back_interest`] gives:
+/// the R23 reach gate (is the page hosting this navigator input-routed at all?)
+/// is ANDed on at *read* time, deliberately not baked in here — see
+/// [`NavigatorController::host_reach`].
 fn compute_back_interest(depth: usize, top_policy: BackPolicy) -> bool {
     depth > 1 || top_policy != BackPolicy::Pop
 }
