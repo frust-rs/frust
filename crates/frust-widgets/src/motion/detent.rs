@@ -38,7 +38,7 @@ pub enum DismissPolicy {
     /// A closed landing dismisses.
     Dismissable,
     /// A closed landing springs back to [`Detents::open_progress`].
-    SpringBackTo,
+    SpringBack,
 }
 
 /// A panel's authored snap points.
@@ -87,6 +87,18 @@ impl Detents {
         targets
     }
 
+    /// The furthest target: the last of [`targets`](Self::targets), computed
+    /// without building the list.
+    fn furthest(&self, extent: f64) -> f64 {
+        if self.points.is_empty() {
+            return 1.0;
+        }
+        self.points
+            .iter()
+            .map(|p| Self::normalize(*p, extent))
+            .fold(0.0, f64::max)
+    }
+
     /// Where an open panel rests: the first point normalized, or `1.0` with
     /// none or when that is at most [`PROGRESS_EPSILON`].
     pub fn open_progress(&self, extent: f64) -> f64 {
@@ -104,7 +116,7 @@ impl Detents {
         if extent.is_nan() || extent <= 0.0 {
             return None;
         }
-        let open = self.targets(extent).last().copied().unwrap_or(1.0);
+        let open = self.furthest(extent);
         let target = from - close_sign * delta_px / extent;
         Some(target.max(0.0).min(open))
     }
@@ -157,7 +169,7 @@ impl Detents {
         }
         match policy {
             DismissPolicy::Dismissable => DetentRelease::Dismiss,
-            DismissPolicy::SpringBackTo => DetentRelease::SnapTo(self.open_progress(extent)),
+            DismissPolicy::SpringBack => DetentRelease::SnapTo(self.open_progress(extent)),
         }
     }
 }
@@ -166,18 +178,28 @@ impl Detents {
 /// through [`Detents`] and springs to the target from the release velocity
 /// (unclamped, so an under-damped [`SpringDesc`] overshoots before landing).
 ///
+/// A grab mid-settle is continuous for any spring:
+/// [`begin_drag`](Self::begin_drag) clamps an overshoot into `0.0..=` the
+/// furthest target and places the controller there in the same step, so the
+/// drag that follows starts from the progress the grab left showing, with no
+/// dead zone.
+///
 /// [`release`](Self::release) takes px/s along the axis (positive toward
 /// growing coordinates) on the raw input clock (`PaintCtx::input_time`) and
 /// converts it to progress/s as `-close_sign * velocity_px_s / extent`: a flick
 /// toward the closing edge lowers progress. [`advance`](Self::advance) takes
 /// the animation clock (`PaintCtx::frame_time`); the two agree at time scale
 /// `1.0` (see [`AnimationController::spring_to_with_velocity`]).
+///
+/// **Provisional**: these clock and sign conventions stand until the first
+/// in-tree consumer drives this controller, and may change with it.
 #[derive(Clone, Debug)]
 pub struct DetentController {
     detents: Detents,
     extent: f64,
     anim: AnimationController,
     drag_from: f64,
+    fling_velocity: f64,
 }
 
 impl DetentController {
@@ -189,7 +211,21 @@ impl DetentController {
             // Zero duration: `animate_to` is then an instant placement.
             anim: AnimationController::new(Duration::ZERO),
             drag_from: 0.0,
+            fling_velocity: DEFAULT_FLING_VELOCITY,
         }
+    }
+
+    /// Use `fling_velocity` (px/s along the axis) as the release speed from
+    /// which [`release`](Self::release) takes the next detent in its direction
+    /// of travel ([`DEFAULT_FLING_VELOCITY`] otherwise). A NaN never flings.
+    pub fn with_fling_velocity(mut self, fling_velocity: f64) -> Self {
+        self.fling_velocity = fling_velocity;
+        self
+    }
+
+    /// The release speed from which a release flings to the next detent.
+    pub fn fling_velocity(&self) -> f64 {
+        self.fling_velocity
     }
 
     /// The detents this controller resolves against.
@@ -231,8 +267,19 @@ impl DetentController {
     }
 
     /// Start a drag: halt any settle where it is and record the start progress.
+    ///
+    /// A progress outside `0.0..=` the furthest target (an under-damped
+    /// spring's overshoot) is clamped into it, and the controller is placed
+    /// there in the same step: the drag then starts from what
+    /// [`progress`](Self::progress) shows, so its first move is not swallowed
+    /// by the gap [`Detents::drag_to`]'s bound would otherwise open up.
     pub fn begin_drag(&mut self) {
         self.anim.stop();
+        let progress = self.progress();
+        let from = progress.max(0.0).min(self.detents.furthest(self.extent));
+        if from != progress {
+            self.jump_to(from);
+        }
         self.drag_from = self.progress();
     }
 
@@ -247,9 +294,13 @@ impl DetentController {
         }
     }
 
-    /// Release at `velocity_px_s` ([`DEFAULT_FLING_VELOCITY`]). `SnapTo` starts
-    /// `spring` at the converted velocity; `Dismiss` holds progress for the
-    /// caller's own exit.
+    /// Release at `velocity_px_s`, flinging from
+    /// [`fling_velocity`](Self::fling_velocity). `SnapTo` starts `spring` at
+    /// the converted velocity.
+    ///
+    /// `Dismiss` stops the controller and holds progress where the release
+    /// left it: the caller owns the dismiss exit animation, and should stop
+    /// reading [`progress`](Self::progress) for it.
     pub fn release(
         &mut self,
         velocity_px_s: f64,
@@ -262,7 +313,7 @@ impl DetentController {
             velocity_px_s,
             close_sign,
             self.extent,
-            DEFAULT_FLING_VELOCITY,
+            self.fling_velocity,
         );
         let release = self.detents.settle(target, policy, self.extent);
         match release {
@@ -457,7 +508,7 @@ mod tests {
             &[],
             400.0,
             0.0,
-            DismissPolicy::SpringBackTo,
+            DismissPolicy::SpringBack,
             DetentRelease::SnapTo(1.0),
         ),
         (
@@ -471,7 +522,7 @@ mod tests {
             &[0.25, 0.75],
             400.0,
             1e-4,
-            DismissPolicy::SpringBackTo,
+            DismissPolicy::SpringBack,
             DetentRelease::SnapTo(0.25),
         ),
         (
@@ -485,14 +536,14 @@ mod tests {
             &[0.25, 0.75],
             400.0,
             0.75,
-            DismissPolicy::SpringBackTo,
+            DismissPolicy::SpringBack,
             DetentRelease::SnapTo(0.75),
         ),
         (
             &[0.0, 0.6],
             400.0,
             0.0,
-            DismissPolicy::SpringBackTo,
+            DismissPolicy::SpringBack,
             DetentRelease::SnapTo(1.0),
         ),
     ];
@@ -572,7 +623,7 @@ mod tests {
     #[test]
     fn settle_below_epsilon_dismisses_or_springs_back() {
         let d = Detents::new(&[0.5, 1.0]);
-        let (dismiss, spring_back) = (DismissPolicy::Dismissable, DismissPolicy::SpringBackTo);
+        let (dismiss, spring_back) = (DismissPolicy::Dismissable, DismissPolicy::SpringBack);
         for target in [0.0, PROGRESS_EPSILON / 2.0, PROGRESS_EPSILON, -0.3] {
             assert_eq!(d.settle(target, dismiss, 400.0), DetentRelease::Dismiss);
             assert_eq!(
@@ -681,8 +732,88 @@ mod tests {
         assert_eq!(c.progress(), 0.1875);
         c.begin_drag();
         c.drag_by(25.0, 1.0);
-        let release = c.release(400.0, 1.0, DismissPolicy::SpringBackTo, SPRING);
+        let release = c.release(400.0, 1.0, DismissPolicy::SpringBack, SPRING);
         assert_eq!(release, DetentRelease::SnapTo(0.25));
         assert!(c.is_settling());
+    }
+
+    #[test]
+    fn begin_drag_interrupts_an_underdamped_overshoot_without_a_jump() {
+        let bouncy = SpringDesc {
+            mass: 1.0,
+            stiffness: 400.0,
+            damping_ratio: 0.3,
+        };
+        let mut c = sheet();
+        c.jump_to(0.75);
+        c.begin_drag();
+        c.drag_by(-25.0, 1.0);
+        assert_eq!(c.progress(), 0.8125);
+        // An opening flick to the fully open detent, at 5 progress/s.
+        let release = c.release(-2000.0, 1.0, DismissPolicy::Dismissable, bouncy);
+        assert_eq!(release, DetentRelease::SnapTo(1.0));
+        let overshot = (0..100).any(|i| {
+            c.advance(at(i * 4));
+            c.progress() > 1.0
+        });
+        assert!(overshot, "the under-damped spring overshoots 1.0");
+        assert!(c.is_settling());
+
+        // The grab lands on the furthest target in the same step.
+        c.begin_drag();
+        assert!(!c.is_settling());
+        assert_eq!(c.progress(), 1.0);
+        // Every closing pixel moves progress from there: no dead zone.
+        let mut last = c.progress();
+        for px in 1..=20 {
+            let delta = f64::from(px);
+            c.drag_by(delta, 1.0);
+            let progress = c.progress();
+            assert!(progress < last, "{delta} px: {progress} vs {last}");
+            assert!((progress - (1.0 - delta / 400.0)).abs() < 1e-12);
+            last = progress;
+        }
+    }
+
+    #[test]
+    fn begin_drag_clamps_an_undershoot_below_closed() {
+        let mut c = DetentController::new(Detents::default(), 400.0);
+        // A spring cannot rest below closed here, so place it there directly.
+        c.anim.spring_to_with_velocity(-0.05, 0.0, SPRING);
+        settle_from(&mut c, 0);
+        assert_eq!(c.progress(), -0.05);
+        c.begin_drag();
+        assert_eq!(c.progress(), 0.0);
+        c.drag_by(-4.0, 1.0);
+        assert_eq!(c.progress(), 0.01);
+    }
+
+    #[test]
+    fn with_fling_velocity_sets_the_release_threshold() {
+        let flick = |c: DetentController| {
+            let mut c = c;
+            c.jump_to(0.75);
+            c.begin_drag();
+            c.drag_by(-25.0, 1.0);
+            c.release(-800.0, 1.0, DismissPolicy::Dismissable, SPRING)
+        };
+        assert_eq!(sheet().fling_velocity(), DEFAULT_FLING_VELOCITY);
+        assert_eq!(flick(sheet()), DetentRelease::SnapTo(1.0));
+        let slow = sheet().with_fling_velocity(1000.0);
+        assert_eq!(slow.fling_velocity(), 1000.0);
+        assert_eq!(flick(slow), DetentRelease::SnapTo(0.75));
+        assert_eq!(
+            flick(sheet().with_fling_velocity(NAN)),
+            DetentRelease::SnapTo(0.75)
+        );
+    }
+
+    #[test]
+    fn drag_bound_matches_the_last_target() {
+        for row in ROWS {
+            let d = Detents::new(row.points);
+            let last = d.targets(row.extent).last().copied();
+            assert_eq!(Some(d.furthest(row.extent)), last, "{:?}", row.points);
+        }
     }
 }
