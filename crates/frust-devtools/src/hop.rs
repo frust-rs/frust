@@ -89,6 +89,7 @@ pub(crate) enum CallOutcome {
     Failed(RpcError),
 }
 
+#[derive(Debug)]
 struct BackendCall {
     call: Call,
     reply: oneshot::Sender<CallOutcome>,
@@ -101,7 +102,33 @@ pub(crate) struct BackendClient {
     timeout: Duration,
 }
 
+/// A handle that can queue one [`Call`] without waiting for its answer, from
+/// synchronous code such as a `Drop`. Obtained from
+/// [`BackendClient::detached`].
+#[derive(Clone, Debug)]
+pub(crate) struct DetachedClient {
+    tx: mpsc::Sender<BackendCall>,
+}
+
+impl DetachedClient {
+    /// Queues `call` behind everything already queued and returns at once.
+    /// The call still runs on the backend thread, in arrival order; nobody
+    /// awaits its answer. Returns `false` when the queue is full or the
+    /// backend thread is gone (the call is then dropped).
+    pub(crate) fn submit(&self, call: Call) -> bool {
+        let (reply, _answer) = oneshot::channel();
+        self.tx.try_send(BackendCall { call, reply }).is_ok()
+    }
+}
+
 impl BackendClient {
+    /// A handle for queueing a call without awaiting it.
+    pub(crate) fn detached(&self) -> DetachedClient {
+        DetachedClient {
+            tx: self.tx.clone(),
+        }
+    }
+
     /// Runs `call` on the backend thread and awaits its answer.
     ///
     /// Never fails in a way the caller has to handle: a timeout, a full queue,

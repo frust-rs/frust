@@ -11,11 +11,11 @@ use std::sync::Arc;
 use frust_devtools_protocol::{
     AckResult, AnimationTimeScaleParams, FrameStats, HandshakeInfo, HandshakeParams, Incoming,
     InputScrollParams, InputTapParams, InputTextParams, Method, Notification, Request, Response,
-    RpcError, WidgetPropsParams, decode_line, serde_json, serde_json::Value,
+    ResponseOutcome, RpcError, WidgetPropsParams, decode_line, serde_json, serde_json::Value,
 };
 
 use crate::frame_stats::FrameStatsBus;
-use crate::hop::{BackendClient, Call, CallOutcome};
+use crate::hop::{BackendClient, Call, CallOutcome, DetachedClient};
 use crate::service::HotPatchUnavailable;
 use crate::token;
 
@@ -55,6 +55,10 @@ pub(crate) enum HotPatch {
 #[derive(Debug)]
 pub(crate) struct ConnState {
     authenticated: bool,
+    /// Set once this connection has successfully applied an animation time
+    /// scale. Dropping the connection state then restores real time, so the
+    /// scale never outlives the client that set it.
+    scale_reset: Option<ScaleReset>,
     #[cfg(feature = "hotpatch")]
     patches: PatchAssembly,
     /// The `table_chunk` stream: a patch's encoded jump table, reassembled
@@ -70,10 +74,30 @@ impl ConnState {
     pub(crate) fn new(ctx: &SessionCtx) -> Self {
         Self {
             authenticated: ctx.token.is_none(),
+            scale_reset: None,
             #[cfg(feature = "hotpatch")]
             patches: PatchAssembly::patches(),
             #[cfg(feature = "hotpatch")]
             tables: PatchAssembly::tables(),
+        }
+    }
+}
+
+/// Restores the animation time scale to real time (`1.0`) when dropped.
+///
+/// Held by a [`ConnState`] whose connection set a scale: the connection that
+/// set it owns it. The drop runs on the connection task whenever the
+/// connection ends (clean disconnect, I/O error, service shutdown, or the
+/// task being aborted), and queues the reset onto the backend thread, so the
+/// backend sees it on the same thread as the original set. If two clients both
+/// set a scale, each resets on its own disconnect and the last disconnect wins.
+#[derive(Debug)]
+struct ScaleReset(DetachedClient);
+
+impl Drop for ScaleReset {
+    fn drop(&mut self) {
+        if !self.0.submit(Call::SetAnimationTimeScale(1.0)) {
+            log::debug!("frust-devtools: could not queue the animation time scale reset");
         }
     }
 }
@@ -313,7 +337,14 @@ pub(crate) async fn handle_request(
         Method::SetAnimationTimeScale => {
             match serde_json::from_value::<AnimationTimeScaleParams>(req.params.clone()) {
                 Ok(p) => {
-                    no_effect(backend_response(ctx, id, Call::SetAnimationTimeScale(p.scale)).await)
+                    let response =
+                        backend_response(ctx, id, Call::SetAnimationTimeScale(p.scale)).await;
+                    if matches!(response.outcome, ResponseOutcome::Success { .. })
+                        && conn.scale_reset.is_none()
+                    {
+                        conn.scale_reset = Some(ScaleReset(ctx.backend.detached()));
+                    }
+                    no_effect(response)
                 }
                 Err(e) => no_effect(Response::error(id, invalid_params(req, &e))),
             }

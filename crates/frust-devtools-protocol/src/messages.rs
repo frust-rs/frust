@@ -204,7 +204,8 @@ pub struct InputTextParams {
 pub struct AnimationTimeScaleParams {
     /// The multiplier applied to animation time: `1.0` is real time, larger
     /// is faster, smaller is slower. The server rejects a non-finite or
-    /// out-of-range value with `RpcError::INVALID_PARAMS`.
+    /// out-of-range value with `RpcError::INVALID_PARAMS`. The scale is reset
+    /// to `1.0` when the client that set it disconnects.
     pub scale: f64,
 }
 
