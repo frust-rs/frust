@@ -642,6 +642,46 @@ pub use frust_widgets::{
 /// via `frust_widgets::nav::transition`, a `pub mod` two levels down) — this
 /// is the facade's job precisely so app code never has to know that.
 ///
+/// [`Layer`] and [`resolve_layers`] complete the authoring side of
+/// [`PageTransition::Custom`]: the custom function returns the (entering,
+/// leaving) `Layer` pair, and `resolve_layers` lets it compose with a preset's
+/// layers instead of re-deriving them.
+///
+/// ```
+/// use frust::kurbo::Size;
+/// use frust::{Layer, PageTransition, TransitionSpec};
+///
+/// // A 24 px slide plus fade, reversed on pop.
+/// fn step_slide(progress: f64, is_pop: bool, size: Size) -> (Layer, Layer) {
+///     let dir = if is_pop { -1.0 } else { 1.0 };
+///     let entering = Layer {
+///         dx: dir * 24.0 * (1.0 - progress),
+///         alpha: progress as f32,
+///         ..Layer::IDENTITY
+///     };
+///     if is_pop {
+///         // Compose with a preset: borrow the cross-fade's leaving layer.
+///         let (_, leaving) =
+///             frust::resolve_layers(PageTransition::ReducedCrossfade, progress, true, size);
+///         (entering, leaving)
+///     } else {
+///         let leaving = Layer {
+///             dx: -dir * 24.0 * progress,
+///             alpha: (1.0 - progress) as f32,
+///             ..Layer::IDENTITY
+///         };
+///         (entering, leaving)
+///     }
+/// }
+///
+/// let spec = TransitionSpec::duration(PageTransition::Custom(step_slide));
+/// let PageTransition::Custom(f) = spec.preset else { unreachable!() };
+/// let (entering, _) = f(0.0, false, Size::new(100.0, 100.0));
+/// assert_eq!(entering.dx, 24.0);
+/// ```
+///
+/// A second example shows the reduce-motion collapse:
+///
 /// ```
 /// use frust::{Curve, PageTransition, Theme, Timing, TransitionDriver, TransitionSpec};
 ///
@@ -661,7 +701,9 @@ pub use frust_widgets::{
 /// let (driver, _settle_spring) = frust::make_driver(resolved.timing);
 /// assert!(matches!(driver, TransitionDriver::Auto(_)));
 /// ```
-pub use frust_widgets::nav::transition::{TransitionDriver, make_driver, resolve_spec};
+pub use frust_widgets::nav::transition::{
+    Layer, TransitionDriver, make_driver, resolve_layers, resolve_spec,
+};
 
 /// The `drag` module: drop targets, draggable sources, auto-scroll zones,
 /// and reorderable lists, all coordinated through a single ambient
