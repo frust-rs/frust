@@ -151,7 +151,7 @@ the facade/plugin boundary described in the index; CORE itself never depends on 
   (analytic for fling and spring drives, an eased-curve central difference for duration and repeat drives, 0 idle,
   never NaN). `spring_to(target, SpringDesc)` and `spring_to_with_velocity(target, velocity, SpringDesc)` retarget
   from the current value carrying velocity (unclamped target, a non-finite input is a no-op, status
-  Forward/Reverse while moving, Completed/Dismissed on settle); a gesture's release velocity is measured on the raw
+  Forward/Reverse while moving, Completed/Dismissed on settle; `forward()` always settles Completed and `reverse()` Dismissed, even from an out-of-range start); a gesture's release velocity is measured on the raw
   input clock, equal to the animation clock at scale 1.0.
 - The `feedback` module is the haptic seam: a `#[non_exhaustive]` `HapticFeedback` vocabulary (`Selection`,
   `Light`, `Medium`, `Heavy`, `Success`, `Warning`, `Error`), a `HapticSink` fn pointer installed with the

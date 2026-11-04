@@ -182,10 +182,10 @@ strings. The canonical example is `crates/frust-drive/templates/app/src/lib.rs.t
   duration/easing/spring tokens by default (an explicit `.timing(...)` call always wins);
   every pattern substitutes a short linear crossfade under `reduce_motion` instead of a
   bespoke variant. `reduce_motion` overrides an explicit `.timing(...)` too: `AnimatedOpacity` runs a
-  linear fade of `MotionExtras::reduced_fade` (default 120 ms; 0 skips it) and `AnimatedScale` snaps to its target on the first paint with no frame request
+  linear fade of `MotionExtras::reduced_fade` (default 120 ms; 0 snaps; no enforced upper bound, the theme picks it) and `AnimatedScale` snaps to its target on the first paint with no frame request
   (a mid-flight flip lands on the next paint); `card_switcher` follows the same shape. A new motion
   pattern collapses its geometry, fades only alphas over `MotionExtras::of(theme).reduced_fade_duration()`
-  (never a literal 120 ms) and ignores an explicit timing while reduced.
+  (never a literal 120 ms) and ignores an explicit timing while reduced. A short linear reduced fade satisfies reduce-motion: widgets, `network_image` included, collapse to it rather than skipping.
 - **A perpetual decorative loop calls `PaintCtx::request_frame_paced`
   (`TickClass::CosmeticLoop`), never bare `request_frame`.** `request_frame` stays
   `TickClass::Transition` (unpaced) — correct for a spring or any transition with a

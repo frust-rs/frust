@@ -283,8 +283,8 @@ impl ImplicitAnim {
 // --- AnimatedOpacity ---------------------------------------------------------
 
 /// A declarative opacity wrapper. See the [module docs](self). Under
-/// `reduce_motion` the fade is a 120 ms linear collapse, whatever `.timing(...)`
-/// is set.
+/// `reduce_motion` the fade is a linear collapse running for the theme's
+/// `MotionExtras::reduced_fade` (120 ms by default), whatever `.timing(...)` is set.
 pub struct AnimatedOpacityView<State: 'static> {
     target: f64,
     timing: Option<Timing>,
