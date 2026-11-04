@@ -754,6 +754,39 @@ mod tests {
         assert!((alpha - 1.0).abs() < 1e-6);
     }
 
+    /// The fade's alpha after `raw_ms` of shell time under `scale`, driven
+    /// through a real `RenderRoot` (whose clock applies the scale).
+    fn fade_alpha_after(raw_ms: f64, scale: f64) -> f32 {
+        frust_core::anim::with_thread_animation_time_scale(scale, || {
+            let timing = Timing::Duration(Duration::from_millis(100), Curve::Linear);
+            let fade =
+                move |target: f64| animated_opacity(target, leaf_any(10.0, 10.0)).timing(timing);
+            let mut root = frust_core::RenderRoot::new();
+            root.rebuild(&mut |_: &mut ()| fade(0.0), &mut ());
+            root.layout(Size::new(50.0, 50.0));
+            root.paint(&mut RecordingScene::default(), ft_ms(1000.0));
+            root.rebuild(&mut |_: &mut ()| fade(1.0), &mut ());
+            root.paint(&mut RecordingScene::default(), ft_ms(1000.0));
+            let mut scene = RecordingScene::default();
+            root.paint(&mut scene, ft_ms(1000.0 + raw_ms));
+            scene.layers[0].2
+        })
+    }
+
+    #[test]
+    fn animated_opacity_runs_four_times_slower_at_quarter_scale() {
+        let quarter = fade_alpha_after(200.0, 0.25);
+        assert!(
+            (quarter - 0.5).abs() < 1e-4,
+            "200 ms raw at 0.25 is the midpoint: {quarter}"
+        );
+        assert!((fade_alpha_after(50.0, 1.0) - quarter).abs() < 1e-4);
+        assert!(
+            (fade_alpha_after(200.0, 1.0) - 1.0).abs() < 1e-6,
+            "unscaled, 200 ms is done"
+        );
+    }
+
     // --- AnimatedScale ---
 
     #[test]

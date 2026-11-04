@@ -41,7 +41,7 @@
 //! exponential moving average over roughly the last [`PINCH_VELOCITY_SAMPLES`]
 //! samples. A consumer extrapolating with inertia scales by `exp(velocity · t)`.
 //! Several events sharing one timestamp (the event pass carries no clock; the
-//! wrapper stamps events with the last painted frame time) accumulate into the
+//! wrapper stamps events with the last painted input time) accumulate into the
 //! next sample rather than dividing by zero.
 //!
 //! # The wrapper
@@ -394,8 +394,8 @@ pub struct PinchDetectorWidget {
     /// The contact whose `Down` this widget captured on, while its gesture lives.
     claimant: Option<PointerId>,
     route: ChildRoute,
-    /// The last painted frame time in ms — the event pass's timestamp source.
-    last_frame_ms: f64,
+    /// The last painted raw input time in ms — the event pass's timestamp source.
+    last_input_ms: f64,
     /// The enclosing scroll surface's live multi-contact veto, captured from
     /// [`ambient_scroll_veto`] on the claiming `Down` while it is still
     /// reachable — `None` outside a scroll surface, which simply has nothing
@@ -416,7 +416,7 @@ impl<State: 'static> View<State> for PinchDetectorView<State> {
                 .map(crate::authoring::erase_callback_arg),
             claimant: None,
             route: ChildRoute::Forwarding,
-            last_frame_ms: 0.0,
+            last_input_ms: 0.0,
             scroll_veto: None,
         }
     }
@@ -451,7 +451,7 @@ impl PinchDetectorWidget {
     /// Feed one contact to the recogniser, firing what it produces (except from
     /// a `Cancel`) and marking the child for a steal when a pinch begins.
     fn recognize(&mut self, ctx: &mut EventCtx, id: PointerId, p: &PointerEvent) {
-        let Some(scale) = self.recognizer.handle(id, p, self.last_frame_ms) else {
+        let Some(scale) = self.recognizer.handle(id, p, self.last_input_ms) else {
             return;
         };
         if scale.phase == ScalePhase::Begin && self.route == ChildRoute::Forwarding {
@@ -513,8 +513,8 @@ impl Widget for PinchDetectorWidget {
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         // The event pass carries no clock; stamp velocity samples with the last
-        // painted frame instead (the `ScrollView` precedent).
-        self.last_frame_ms = ctx.frame_time().as_secs_f64() * 1000.0;
+        // painted raw input time instead (the `ScrollView` precedent).
+        self.last_input_ms = ctx.input_time().as_secs_f64() * 1000.0;
         self.child.paint_child(ctx, scene);
     }
 

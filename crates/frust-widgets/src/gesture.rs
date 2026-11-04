@@ -14,9 +14,10 @@
 //! # Long-press firing semantics
 //!
 //! Timing is measured across **paints**, not events: only the paint pass carries
-//! a clock ([`PaintCtx::frame_time`]). A press records `press_start` on its first
+//! a clock. The hold reads the raw [`PaintCtx::input_time`], so an animation
+//! time scale never stretches it. A press records `press_start` on its first
 //! paint and marks itself *elapsed* on a later paint once
-//! `frame_time - press_start >= LONG_PRESS_MS`.
+//! `input_time - press_start >= LONG_PRESS_MS`.
 //!
 //! **The callback never fires during paint itself** (there is no `&mut
 //! State`/`EventCtx` there). Instead, the paint that observes the threshold
@@ -73,7 +74,7 @@
 //! [`on_hold_progress`](GestureDetectorView::on_hold_progress) reuses the same
 //! paint-clock timer as `on_long_press` to let a widget render charge-up feedback
 //! (e.g. a charge ring) for a held press. Paint computes progress —
-//! `(frame_time - press_start) / threshold`, clamped `0.0..=1.0` — every frame
+//! `(input_time - press_start) / threshold`, clamped `0.0..=1.0` — every frame
 //! while a press is pending, but (the same callback-from-paint caveat as above)
 //! can only *record* it; the observation is delivered on the next pointer event
 //! that already carries a mutable `EventCtx` (an in-slop `Move`, matching
@@ -151,8 +152,9 @@ pub(crate) const DOUBLE_TAP_MS: f64 = 300.0;
 /// the threshold it is measured against, and the two reads every hold consumer
 /// makes of them.
 ///
-/// Time only enters a widget through [`PaintCtx::frame_time`], so the epoch is
-/// not the `Down` itself but the **first observation after it** — the first
+/// Time only enters a widget through paint, and a hold reads the raw
+/// [`PaintCtx::input_time`], so the epoch is not the `Down` itself but the
+/// **first observation after it** — the first
 /// paint that asks [`progress`](Self::progress) or [`fired`](Self::fired)
 /// records it, and every later read differences against it (see the [module
 /// docs](self#long-press-firing-semantics)). [`cancel`](Self::cancel) forgets
@@ -421,7 +423,7 @@ impl Widget for GestureDetectorWidget {
                 elapsed, progress, ..
             } = &mut self.state
         {
-            let now = ctx.frame_time();
+            let now = ctx.input_time();
             *progress = self.hold.progress(now);
             if !*elapsed {
                 if self.hold.fired(now) {
@@ -866,6 +868,25 @@ mod tests {
             "and surfaces as `needs_frame` for the desktop `Wait` loop — the \
              widget itself stops requesting frames once it has fired"
         );
+    }
+
+    #[test]
+    fn long_press_fires_on_wall_time_under_slow_motion() {
+        // At quarter speed 510 ms of raw time is ~128 ms of animation time: a
+        // hold read off the animation clock would still be pending.
+        frust_core::anim::with_thread_animation_time_scale(0.25, || {
+            let mut root = root();
+            let mut state = TapState::default();
+            let mut sink = NullScene;
+            root.event(&mut state, &ev(PointerPhase::Down, 10.0, 10.0));
+            root.paint(&mut sink, ft(1000.0));
+            root.paint(&mut sink, ft(1490.0));
+            root.rebuild(&mut long_press_logic, &mut state);
+            assert_eq!(state.long_presses, 0, "490 ms raw is under the threshold");
+            root.paint(&mut sink, ft(1510.0));
+            root.rebuild(&mut long_press_logic, &mut state);
+            assert_eq!(state.long_presses, 1, "500 ms of raw hold fires");
+        });
     }
 
     #[test]

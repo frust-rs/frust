@@ -2,7 +2,7 @@
 //! and the rebuild/layout/paint pass skeleton. Modelled on xilem/Masonry, depending on neither,
 //! with no `unsafe`.
 //!
-//! * [`anim`] — the frame clock, curves, tweens, springs and animation controllers.
+//! * [`anim`] — the frame clock and its time scale, curves, tweens, springs and controllers.
 //! * [`app`] — the [`RenderRoot`] each platform shell drives through rebuild, layout and paint.
 //! * [`mod@component`] — [`Component`], a subtree with retained local state and its own `Owner`.
 //! * [`event`] — input events and the [`EventCtx`] handlers mutate state through.
@@ -165,7 +165,9 @@ pub mod hit {
 /// the platform `accesskit_*` adapters live in the shells.
 pub use accesskit;
 pub use anim::{
-    AnimationController, AnimationStatus, Curve, FrameTime, Lerp, Spring, SpringDesc, Tween,
+    AnimationController, AnimationStatus, Curve, FrameTime, Lerp, MAX_ANIMATION_TIME_SCALE,
+    MIN_ANIMATION_TIME_SCALE, Spring, SpringDesc, Tween, animation_time_scale,
+    set_animation_time_scale,
 };
 pub use app::{FocusRingPolicy, Orientation, RenderRoot, WindowMetrics};
 pub use component::{Component, ComponentView, ComponentWidget, component};

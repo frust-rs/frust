@@ -4,7 +4,7 @@
 use std::rc::Rc;
 
 use super::RenderRoot;
-use crate::anim::FrameTime;
+use crate::anim::{FrameTime, animation_time_scale};
 use crate::event::ImeState;
 use crate::overlay::{
     OverlayEntry, OverlayHit, OverlayKey, OverlayPaintPass, sort_into_paint_order,
@@ -16,12 +16,26 @@ use crate::shortcuts::{OverlayStamp, ShortcutPaintPass, ShortcutTable};
 use crate::view::{ChangeFlags, View};
 use crate::widget::{PaintCtx, PaintOutcome, PaintScene};
 
+/// One paint's two clocks: scaled for animation, raw for input timers.
+#[derive(Clone, Copy)]
+struct Clocks {
+    animation: FrameTime,
+    input: FrameTime,
+}
+
+impl Clocks {
+    fn seed(self, ctx: &mut PaintCtx) {
+        ctx.set_frame_time(self.animation);
+        ctx.set_input_time(self.input);
+    }
+}
+
 impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// Paint the root widget into `scene`. The outcome reports a continuation
     /// frame ([`PaintCtx::request_frame`] → [`PaintOutcome::needs_frame`]) and a
     /// paint-time [`PaintCtx::request_layout`], which is also folded into the
-    /// pending [`ChangeFlags`] as `LAYOUT`. `frame_time` is the shell's clock for
-    /// the frame, threaded unchanged to every widget ([`PaintCtx::frame_time`]).
+    /// pending [`ChangeFlags`] as `LAYOUT`. Widgets read the shell's `frame_time` raw as
+    /// [`PaintCtx::input_time`] and scaled by [`animation_time_scale`] as [`PaintCtx::frame_time`].
     ///
     /// # The overlay post-pass
     ///
@@ -45,7 +59,13 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             self.paint_epoch = self.paint_epoch.wrapping_add(1);
         }
 
-        let (mut outcome, main_tree_ime) = self.paint_main_tree(scene, frame_time);
+        let clocks = Clocks {
+            animation: self
+                .animation_clock
+                .advance(frame_time, animation_time_scale()),
+            input: frame_time,
+        };
+        let (mut outcome, main_tree_ime) = self.paint_main_tree(scene, clocks);
         outcome.paint_serial = self.paint_serial;
 
         // Stable sort: the band decides, registration order breaks ties.
@@ -57,7 +77,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             .iter()
             .map(|entry| Rc::downgrade(&entry.pod))
             .collect();
-        let (holder, holder_ime) = self.paint_overlays(&entries, scene, frame_time, &mut outcome);
+        let (holder, holder_ime) = self.paint_overlays(&entries, scene, clocks, &mut outcome);
         // The root holds no overlay pod at rest.
         drop(entries);
         // After the pods, so their (stamped) declarations are in the snapshot too.
@@ -113,7 +133,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     fn paint_main_tree(
         &mut self,
         scene: &mut dyn PaintScene,
-        frame_time: FrameTime,
+        clocks: Clocks,
     ) -> (PaintOutcome, Option<ImeState>) {
         let Some(root_id) = self.root_id else {
             return (PaintOutcome::default(), None);
@@ -133,7 +153,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         };
         let mut ctx = PaintCtx::new(pod.origin(), pod.size()).with_shortcut_hints(hints);
         // The pass's global inputs (clock, theme, insets, frame count, translucency, retain).
-        ctx.set_frame_time(frame_time);
+        clocks.seed(&mut ctx);
         ctx.set_theme(theme);
         ctx.set_window_insets(insets);
         ctx.set_presented_frames(presented_frames);
@@ -183,7 +203,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         &mut self,
         entries: &[OverlayEntry],
         scene: &mut dyn PaintScene,
-        frame_time: FrameTime,
+        clocks: Clocks,
         outcome: &mut PaintOutcome,
     ) -> (Option<OverlayKey>, Option<ImeState>) {
         if entries.is_empty() {
@@ -208,7 +228,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         for entry in entries {
             let mut ctx = PaintCtx::new(entry.window_rect.origin(), entry.window_rect.size())
                 .with_shortcut_hints(Rc::clone(&self.last_hints));
-            ctx.set_frame_time(frame_time);
+            clocks.seed(&mut ctx);
             ctx.set_theme(theme);
             ctx.set_window_insets(entry.insets);
             ctx.set_presented_frames(presented_frames);
