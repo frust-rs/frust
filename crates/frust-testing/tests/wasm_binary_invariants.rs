@@ -183,6 +183,8 @@ fn inlined_baseline_bytes() -> usize {
         include_bytes!("../../../testing/goldens/cpu/unit-path-fill.png"),
         include_bytes!("../../../testing/goldens/cpu/unit-path-stroke.png"),
         include_bytes!("../../../testing/goldens/cpu/unit-path-dashed.png"),
+        include_bytes!("../../../testing/goldens/cpu/unit-stroke-caps-joins.png"),
+        include_bytes!("../../../testing/goldens/cpu/unit-fill-even-odd.png"),
         include_bytes!("../../../testing/goldens/cpu/unit-snapshot-bracket.png"),
         include_bytes!("../../../testing/goldens/cpu/unit-snapshot-balance.png"),
     ];

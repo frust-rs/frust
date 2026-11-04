@@ -245,6 +245,14 @@ const GOLDENS: &[(&str, &[u8])] = &[
         include_bytes!("../../../testing/goldens/cpu/unit-path-dashed.png"),
     ),
     (
+        "unit-stroke-caps-joins",
+        include_bytes!("../../../testing/goldens/cpu/unit-stroke-caps-joins.png"),
+    ),
+    (
+        "unit-fill-even-odd",
+        include_bytes!("../../../testing/goldens/cpu/unit-fill-even-odd.png"),
+    ),
+    (
         "unit-snapshot-bracket",
         include_bytes!("../../../testing/goldens/cpu/unit-snapshot-bracket.png"),
     ),
