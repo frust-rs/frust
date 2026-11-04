@@ -247,7 +247,6 @@ pub enum PageTransition {
     /// it is consulted, and the drag keeps driving the crossfade's alpha.
     /// Under `reduce_motion` the supplied function is therefore not called
     /// on either path.
-    ///
     Custom(fn(progress: f64, is_pop: bool, size: Size) -> (Layer, Layer)),
 }
 
