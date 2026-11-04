@@ -66,7 +66,13 @@ protocol's `input_*` methods also drive real UI, a shell additionally gates star
 a debug/profile build via the `devtools` cargo feature (never a `debug_assertions` runtime check
 alone) — a release build compiles the listener out entirely, and the `FRUST_DEVTOOLS=0` env var is
 a runtime kill switch for the compiled-in case. `PROTOCOL_VERSION` deliberately stays `1` — token
-auth is a transport-level addition to the v1 wire contract, not a new protocol version. See
+auth is a transport-level addition to the v1 wire contract, not a new protocol version. The
+authenticated `set_animation_time_scale` method (`AnimationTimeScaleParams { scale }`, answered by
+`AckResult`; malformed params `INVALID_PARAMS`, an out-of-range scale `InvalidRequest` naming the
+range, a backend without support `NOT_SUPPORTED`) and its `animation_time_scale` capability, which
+the shell backend advertises with or without `hotpatch`, are likewise additive: an older client
+decodes the capability as `Unknown`. `DevtoolsClient::set_animation_time_scale` is the typed call;
+`frust-mcp` only maps the capability name. See
 [DEVELOPMENT.md](DEVELOPMENT.md) for the feature/build-mode funnel and
 [CODE_STANDARDS.md](CODE_STANDARDS.md) for the frame-stats publish-ordering convention.
 

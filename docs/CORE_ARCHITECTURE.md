@@ -29,7 +29,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how CORE relates to the other units.
 | `frust-reactive::tracked` | `TrackedScope` — dependency tracking that wakes the shell when a tracked signal it read later changes |
 | `frust-reactive::task` / `deep_link` / `back` / `app_lifecycle` | `AsyncValue`/`use_task` heavy-work idiom, plus process-wide deep-link, back-press and app-lifecycle sources (`app_lifecycle` is a Flutter-parity state machine, see App Lifecycle) — each delivered `DeepLink` carries a monotonic per-process `sequence`; consumers dedupe a delivery by comparing `sequence`, not the URL text |
 | `frust-paths::lib` | Per-platform data/cache-dir resolution (including a macOS legacy-XDG read-through fallback and an Android install slot the Android shell fills from `Context.getFilesDir()`/`getCacheDir()` at `nativeInitPlatform`) and an atomic-write helper for desktop and mobile shells |
-| `frust::lib` (facade) | Curates core/widgets/theme/reactive/shells into one flat API via `app!`/`run`/`Component`, plus `frust::authoring` — the widget-authoring vocabulary (trait lifecycle, child/event plumbing, geometry) an app needs to implement its own `View`/`Widget` pair without a direct dependency on `frust-core`/`frust-scene`/`frust-text`/`kurbo`/`peniko` |
+| `frust::lib` (facade) | Curates core/widgets/theme/reactive/shells into one flat API via `app!`/`run`/`Component`, plus `frust::authoring` — the widget-authoring vocabulary (trait lifecycle, child/event plumbing, geometry) an app needs to implement its own `View`/`Widget` pair without a direct dependency on `frust-core`/`frust-scene`/`frust-text`/`kurbo`/`peniko`. The facade-only `test-support` feature (enabled from `[dev-dependencies]`) exposes `frust::testing::semantics_of(build, size) -> SemanticsUpdate`, a semantics pass over a real text context, so an out-of-tree crate can test `Widget::semantics` |
 
 ## Layer Dependencies
 
@@ -139,6 +139,16 @@ the facade/plugin boundary described in the index; CORE itself never depends on 
   the serial the page was recorded under. A hover-link change (claimant pod) or focus-epoch advance bumps
   the paint epoch at the start of paint, so every boundary re-records once per transition (same-claimant
   moves cost nothing).
+- `RenderRoot` keeps a **scaled animation clock**: `PaintCtx::frame_time()` is that clock and
+  `PaintCtx::input_time()` the raw shell clock (gesture timers, velocity stamps, caret blink). The scale is a
+  process-wide slot, `set_animation_time_scale(f64) -> bool` / `animation_time_scale()`, accepting
+  `MIN_ANIMATION_TIME_SCALE` (0.01) ..= `MAX_ANIMATION_TIME_SCALE` (100.0) and refusing anything else; tests
+  override it per thread (`anim::with_thread_animation_time_scale`) behind `cfg(test)`/`test-support`.
+- The `feedback` module is the haptic seam: a `#[non_exhaustive]` `HapticFeedback` vocabulary (`Selection`,
+  `Light`, `Medium`, `Heavy`, `Success`, `Warning`, `Error`), a `HapticSink` fn pointer installed with the
+  last-wins `set_haptic_sink`, and `perform_haptic()` (a no-op without a sink; `haptic_sink_installed()`
+  probes). Core never links a platform plugin: the app wires one (see
+  [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md)). Re-exported flat from the facade and `frust::authoring`.
 - A paint pass also carries a frame-request contract: `PaintCtx::request_frame` (`TickClass::Transition`,
   unpaced) marks the pass every-vsync (a max-lattice — any `Transition` request wins over a concurrent
   `CosmeticLoop` one); `request_frame_paced`/`request_frame_paced_at(interval)` (`TickClass::CosmeticLoop`)
