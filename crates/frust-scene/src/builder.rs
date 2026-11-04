@@ -4,7 +4,7 @@ use kurbo::{Affine, BezPath, Point, Rect};
 use peniko::{Brush, Color, ImageData};
 
 use crate::glyph::GlyphRun;
-use crate::scene::{Command, CornerRadii, DashPattern, PathStyle, Scene};
+use crate::scene::{Command, CornerRadii, DashPattern, FillRule, PathStyle, Scene, StrokeStyle};
 use crate::shader::ShaderProgram;
 
 /// Records paint commands into a [`Scene`], maintaining a transform stack.
@@ -283,6 +283,44 @@ impl<'a> SceneBuilder<'a> {
                 width,
                 dash: Some(dash),
             },
+            brush,
+            transform,
+        });
+    }
+
+    /// Records a filled path under the current transform using `rule`: a
+    /// [`PathStyle::Fill`] for [`FillRule::NonZero`] — the command
+    /// [`SceneBuilder::fill_path`] records — and a [`PathStyle::FillEvenOdd`]
+    /// for [`FillRule::EvenOdd`].
+    pub fn fill_path_with_rule(&mut self, path: BezPath, rule: FillRule, brush: Brush) {
+        let transform = self.current_transform();
+        let style = match rule {
+            FillRule::NonZero => PathStyle::Fill,
+            FillRule::EvenOdd => PathStyle::FillEvenOdd,
+        };
+        self.scene.push(Command::Path {
+            path,
+            style,
+            brush,
+            transform,
+        });
+    }
+
+    /// Records a stroked path under the current transform with explicit caps,
+    /// joins and miter limit, dashed by `dash` when it is `Some` — always a
+    /// [`PathStyle::StrokeStyled`], whatever `style` holds.
+    pub fn stroke_path_styled(
+        &mut self,
+        path: BezPath,
+        width: f64,
+        dash: Option<DashPattern>,
+        style: StrokeStyle,
+        brush: Brush,
+    ) {
+        let transform = self.current_transform();
+        self.scene.push(Command::Path {
+            path,
+            style: PathStyle::StrokeStyled { width, dash, style },
             brush,
             transform,
         });
@@ -1117,6 +1155,83 @@ mod tests {
             }
             other => panic!("expected Path, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn fill_path_with_rule_records_each_rule_under_the_current_transform() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let path = triangle_path();
+        let translate = Affine::translate((3.0, 4.0));
+        builder.push_transform(translate);
+        builder.fill_path_with_rule(path.clone(), FillRule::EvenOdd, red_brush());
+        builder.fill_path_with_rule(path.clone(), FillRule::NonZero, red_brush());
+        builder.pop_transform();
+
+        let recorded: Vec<_> = scene
+            .commands()
+            .iter()
+            .map(|command| match command {
+                Command::Path {
+                    path: got_path,
+                    style,
+                    transform,
+                    ..
+                } => {
+                    assert_eq!(*got_path, path);
+                    assert_eq!(*transform, translate);
+                    *style
+                }
+                other => panic!("expected Path, got {other:?}"),
+            })
+            .collect();
+        // Nonzero records the original fill, so it lowers as `fill_path` does.
+        assert_eq!(recorded, [PathStyle::FillEvenOdd, PathStyle::Fill]);
+    }
+
+    #[test]
+    fn stroke_path_styled_round_trips_width_dash_and_style() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let path = triangle_path();
+        let dash = DashPattern::new(4.0, 2.0).with_phase(1.0);
+        let style = StrokeStyle::new(crate::StrokeCap::Square, crate::StrokeJoin::Miter)
+            .with_miter_limit(1.5);
+        builder.stroke_path_styled(path.clone(), 2.5, Some(dash), style, red_brush());
+        // The round style still records the styled variant: the builder keeps
+        // what the caller asked for, and lowering treats the two alike.
+        builder.stroke_path_styled(path.clone(), 1.0, None, StrokeStyle::ROUND, red_brush());
+
+        let recorded: Vec<_> = scene
+            .commands()
+            .iter()
+            .map(|command| match command {
+                Command::Path {
+                    path: got_path,
+                    style,
+                    ..
+                } => {
+                    assert_eq!(*got_path, path);
+                    *style
+                }
+                other => panic!("expected Path, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            recorded,
+            [
+                PathStyle::StrokeStyled {
+                    width: 2.5,
+                    dash: Some(dash),
+                    style,
+                },
+                PathStyle::StrokeStyled {
+                    width: 1.0,
+                    dash: None,
+                    style: StrokeStyle::ROUND,
+                },
+            ]
+        );
     }
 
     #[test]

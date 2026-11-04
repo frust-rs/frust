@@ -15,7 +15,10 @@ mod shader;
 pub use arc::arc_path;
 pub use builder::SceneBuilder;
 pub use glyph::{FontHandle, Glyph, GlyphRun};
-pub use scene::{Command, CornerRadii, DashPattern, PathStyle, Scene};
+pub use scene::{
+    Command, CornerRadii, DashPattern, FillRule, PathStyle, Scene, StrokeCap, StrokeJoin,
+    StrokeStyle,
+};
 pub use shader::ShaderProgram;
 
 /// Compile-time assertion that [`Scene`] is [`Send`].

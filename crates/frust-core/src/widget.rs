@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 /// Re-exported so widgets can name [`PaintScene`]'s argument types.
-pub use frust_scene::{CornerRadii, DashPattern};
+pub use frust_scene::{CornerRadii, DashPattern, FillRule, StrokeCap, StrokeJoin, StrokeStyle};
 use frust_scene::{GlyphRun, SceneBuilder, ShaderProgram};
 use kurbo::{Affine, BezPath, Point, Rect, Size};
 use peniko::{Brush, Color};
@@ -150,6 +150,36 @@ pub trait PaintScene {
         brush: &Brush,
     ) {
         self.stroke_path(origin, path, width, brush);
+    }
+
+    /// Fill `path` by `rule`; defaults to [`PaintScene::fill_path`], so a
+    /// scene without the even-odd rule approximates it with nonzero.
+    fn fill_path_with_rule(
+        &mut self,
+        origin: Point,
+        path: &BezPath,
+        _rule: FillRule,
+        brush: &Brush,
+    ) {
+        self.fill_path(origin, path, brush);
+    }
+
+    /// Stroke `path` with explicit caps, joins and miter limit, dashed by
+    /// `dash`; defaults to the round-capped [`PaintScene::stroke_path`] or
+    /// [`PaintScene::stroke_path_dashed`].
+    fn stroke_path_styled(
+        &mut self,
+        origin: Point,
+        path: &BezPath,
+        width: f64,
+        dash: Option<DashPattern>,
+        _style: StrokeStyle,
+        brush: &Brush,
+    ) {
+        match dash {
+            Some(dash) => self.stroke_path_dashed(origin, path, width, dash, brush),
+            None => self.stroke_path(origin, path, width, brush),
+        }
     }
 
     /// Push an affine `transform` (the one seam carrying scale/rotation) until
@@ -319,6 +349,35 @@ impl PaintScene for SceneBuilder<'_> {
         brush: &Brush,
     ) {
         SceneBuilder::stroke_path_dashed(self, path_at(origin, path), width, dash, brush.clone());
+    }
+
+    fn fill_path_with_rule(
+        &mut self,
+        origin: Point,
+        path: &BezPath,
+        rule: FillRule,
+        brush: &Brush,
+    ) {
+        SceneBuilder::fill_path_with_rule(self, path_at(origin, path), rule, brush.clone());
+    }
+
+    fn stroke_path_styled(
+        &mut self,
+        origin: Point,
+        path: &BezPath,
+        width: f64,
+        dash: Option<DashPattern>,
+        style: StrokeStyle,
+        brush: &Brush,
+    ) {
+        SceneBuilder::stroke_path_styled(
+            self,
+            path_at(origin, path),
+            width,
+            dash,
+            style,
+            brush.clone(),
+        );
     }
 
     fn push_transform(&mut self, transform: Affine) {
@@ -4145,6 +4204,119 @@ mod tests {
     }
 
     #[test]
+    fn scene_builder_records_a_styled_stroke_and_an_even_odd_fill_translated_by_origin() {
+        let mut scene = frust_scene::Scene::new();
+        let dash = DashPattern::new(4.0, 2.0);
+        let style = StrokeStyle::new(StrokeCap::Square, StrokeJoin::Bevel).with_miter_limit(2.0);
+        {
+            let mut builder = frust_scene::SceneBuilder::new(&mut scene);
+            let paint: &mut dyn PaintScene = &mut builder;
+            paint.stroke_path_styled(
+                Point::new(5.0, 0.0),
+                &corner_probe_path(),
+                2.0,
+                Some(dash),
+                style,
+                &Brush::Solid(Color::BLACK),
+            );
+            paint.fill_path_with_rule(
+                Point::new(5.0, 0.0),
+                &corner_probe_path(),
+                FillRule::EvenOdd,
+                &Brush::Solid(Color::BLACK),
+            );
+        }
+
+        let styles: Vec<_> = scene
+            .commands()
+            .iter()
+            .map(|command| match command {
+                frust_scene::Command::Path { path, style, .. } => {
+                    // The origin translation every path method applies.
+                    assert!(matches!(
+                        path.elements()[0],
+                        kurbo::PathEl::MoveTo(p) if p == Point::new(5.0, 0.0)
+                    ));
+                    *style
+                }
+                other => panic!("expected Path, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            styles,
+            [
+                frust_scene::PathStyle::StrokeStyled {
+                    width: 2.0,
+                    dash: Some(dash),
+                    style,
+                },
+                frust_scene::PathStyle::FillEvenOdd,
+            ]
+        );
+    }
+
+    /// The calls a scene that predates stroke styles and fill rules receives.
+    #[derive(Debug, PartialEq)]
+    enum PathCall {
+        Fill(Point),
+        Stroke(Point, f64),
+        Dashed(Point, f64, DashPattern),
+    }
+
+    /// A recorder overriding only the original path methods, as every
+    /// recorder that predates the styled ones does.
+    #[derive(Default)]
+    struct PrestyleRecorder {
+        calls: Vec<PathCall>,
+    }
+
+    impl PaintScene for PrestyleRecorder {
+        fn fill_rect(&mut self, _origin: Point, _size: Size, _color: Color) {}
+        fn draw_text(&mut self, _origin: Point, _text: &str) {}
+
+        fn fill_path(&mut self, origin: Point, _path: &BezPath, _brush: &Brush) {
+            self.calls.push(PathCall::Fill(origin));
+        }
+
+        fn stroke_path(&mut self, origin: Point, _path: &BezPath, width: f64, _brush: &Brush) {
+            self.calls.push(PathCall::Stroke(origin, width));
+        }
+
+        fn stroke_path_dashed(
+            &mut self,
+            origin: Point,
+            _path: &BezPath,
+            width: f64,
+            dash: DashPattern,
+            _brush: &Brush,
+        ) {
+            self.calls.push(PathCall::Dashed(origin, width, dash));
+        }
+    }
+
+    #[test]
+    fn the_styled_path_defaults_fall_back_to_the_original_methods() {
+        let mut scene = PrestyleRecorder::default();
+        let path = corner_probe_path();
+        let brush = Brush::Solid(Color::BLACK);
+        let miter = StrokeStyle::new(StrokeCap::Butt, StrokeJoin::Miter);
+        let dash = DashPattern::new(3.0, 1.0);
+
+        scene.fill_path_with_rule(Point::new(1.0, 0.0), &path, FillRule::EvenOdd, &brush);
+        scene.stroke_path_styled(Point::new(2.0, 0.0), &path, 1.5, None, miter, &brush);
+        scene.stroke_path_styled(Point::new(3.0, 0.0), &path, 2.5, Some(dash), miter, &brush);
+
+        assert_eq!(
+            scene.calls,
+            [
+                PathCall::Fill(Point::new(1.0, 0.0)),
+                PathCall::Stroke(Point::new(2.0, 0.0), 1.5),
+                PathCall::Dashed(Point::new(3.0, 0.0), 2.5, dash),
+            ]
+        );
+    }
+
+    #[test]
     fn uniform_paint_calls_still_encode_the_commands_they_always_did() {
         // The additive contract: the uniform methods every existing call site
         // uses keep producing the same commands, now spelled as four equal
@@ -4268,6 +4440,15 @@ mod tests {
         scene.fill_path(origin, &path, &brush);
         scene.stroke_path(origin, &path, 1.0, &brush);
         scene.stroke_path_dashed(origin, &path, 1.0, DashPattern::new(4.0, 2.0), &brush);
+        scene.fill_path_with_rule(origin, &path, FillRule::EvenOdd, &brush);
+        scene.stroke_path_styled(
+            origin,
+            &path,
+            1.0,
+            Some(DashPattern::new(4.0, 2.0)),
+            StrokeStyle::new(StrokeCap::Butt, StrokeJoin::Miter),
+            &brush,
+        );
         scene.push_transform(Affine::translate((1.0, 2.0)));
         scene.pop_transform();
     }

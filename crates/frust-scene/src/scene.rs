@@ -128,13 +128,104 @@ impl DashPattern {
     }
 }
 
+/// How a fill decides which regions of a self-overlapping or nested path are
+/// inside it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FillRule {
+    /// A point is inside when the path winds around it a non-zero number of
+    /// times — what [`PathStyle::Fill`] has always meant.
+    NonZero,
+    /// A point is inside when a ray from it crosses the path an odd number of
+    /// times, so nested or overlapping regions alternate in and out — the
+    /// rule a ring cut from a disc, or a mask with holes, needs.
+    EvenOdd,
+}
+
+/// How a stroke ends an open subpath.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum StrokeCap {
+    /// Ends flush with the endpoint.
+    Butt,
+    /// Ends in a half-disc of the stroke's width around the endpoint.
+    Round,
+    /// Ends in a half-square of the stroke's width past the endpoint.
+    Square,
+}
+
+/// How a stroke connects two segments meeting at a vertex.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum StrokeJoin {
+    /// Extends both outer edges to their meeting point, bevelled instead once
+    /// the tip would stand past [`StrokeStyle::miter_limit`].
+    Miter,
+    /// Rounds the outer corner with an arc of the stroke's width.
+    Round,
+    /// Cuts the outer corner straight across.
+    Bevel,
+}
+
+/// A stroke's caps, joins and miter limit.
+///
+/// `miter_limit` is the farthest a miter tip may stand from its vertex, in
+/// half-widths, before that join is bevelled instead. It must be finite and at
+/// least 1: the render crate refuses a frame carrying any other value, as it
+/// refuses a non-finite stroke width. It is checked whatever the join, so one
+/// contract covers every number a stroke records.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StrokeStyle {
+    /// The cap at both ends of every open subpath.
+    pub cap: StrokeCap,
+    /// The join at every interior vertex.
+    pub join: StrokeJoin,
+    /// The miter limit, in half-widths; finite and `>= 1`.
+    pub miter_limit: f64,
+}
+
+impl StrokeStyle {
+    /// Round caps and joins — the style every [`PathStyle::Stroke`] draws
+    /// with. Its miter limit (4, the conventional default) plays no part
+    /// under a round join.
+    pub const ROUND: StrokeStyle = StrokeStyle {
+        cap: StrokeCap::Round,
+        join: StrokeJoin::Round,
+        miter_limit: 4.0,
+    };
+
+    /// `cap` and `join` with the conventional miter limit of 4.
+    pub const fn new(cap: StrokeCap, join: StrokeJoin) -> Self {
+        Self {
+            cap,
+            join,
+            miter_limit: 4.0,
+        }
+    }
+
+    /// The same style with `miter_limit` in place of its own.
+    pub const fn with_miter_limit(mut self, miter_limit: f64) -> Self {
+        self.miter_limit = miter_limit;
+        self
+    }
+}
+
+impl Default for StrokeStyle {
+    /// [`StrokeStyle::ROUND`].
+    fn default() -> Self {
+        Self::ROUND
+    }
+}
+
 /// How a [`Command::Path`] is rendered: filled or stroked.
 ///
-/// Kept intentionally minimal: the fill/stroke shape
-/// widgets need for arcs (circular progress, activity indicators) — a
-/// nonzero-fill, or a stroke with a fixed width, round caps/joins, and an
-/// optional [`DashPattern`]. No miter limit or even-odd fill rule yet; extend
-/// here (and in `frust-render::convert`) if a later widget needs one.
+/// [`PathStyle::Fill`] and [`PathStyle::Stroke`] are the original pair: a
+/// nonzero fill, and a stroke with round caps/joins and an optional
+/// [`DashPattern`]. [`PathStyle::FillEvenOdd`] and [`PathStyle::StrokeStyled`]
+/// add the even-odd rule and explicit caps, joins and miter limit.
+///
+/// A consumer lowers a style through [`PathStyle::fill_rule`] and
+/// [`PathStyle::stroke`] rather than matching variants, so each original
+/// variant shares its general form's code path: exactly one of the two
+/// answers `Some` for every style, and a `Stroke` answers exactly what a
+/// `StrokeStyled` carrying [`StrokeStyle::ROUND`] does.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PathStyle {
     /// Fill using the nonzero winding rule.
@@ -149,6 +240,40 @@ pub enum PathStyle {
         /// for a degenerate pattern (see [`DashPattern::is_effective`]).
         dash: Option<DashPattern>,
     },
+    /// Fill using the even-odd rule (see [`FillRule::EvenOdd`]).
+    FillEvenOdd,
+    /// Stroke with the given width, an optional dash pattern, and explicit
+    /// caps, joins and miter limit.
+    StrokeStyled {
+        /// Stroke width, in the pre-transform coordinate space.
+        width: f64,
+        /// Dash pattern, or `None` for a solid stroke; a degenerate pattern
+        /// strokes solid, as for [`PathStyle::Stroke`].
+        dash: Option<DashPattern>,
+        /// Caps, joins and miter limit.
+        style: StrokeStyle,
+    },
+}
+
+impl PathStyle {
+    /// The fill rule of a fill, or `None` for a stroke.
+    pub fn fill_rule(&self) -> Option<FillRule> {
+        match self {
+            Self::Fill => Some(FillRule::NonZero),
+            Self::FillEvenOdd => Some(FillRule::EvenOdd),
+            Self::Stroke { .. } | Self::StrokeStyled { .. } => None,
+        }
+    }
+
+    /// The width, dash pattern and style of a stroke, or `None` for a fill;
+    /// a [`PathStyle::Stroke`] answers [`StrokeStyle::ROUND`].
+    pub fn stroke(&self) -> Option<(f64, Option<DashPattern>, StrokeStyle)> {
+        match *self {
+            Self::Stroke { width, dash } => Some((width, dash, StrokeStyle::ROUND)),
+            Self::StrokeStyled { width, dash, style } => Some((width, dash, style)),
+            Self::Fill | Self::FillEvenOdd => None,
+        }
+    }
 }
 
 /// A single paint operation recorded into a [`Scene`].
@@ -753,5 +878,60 @@ mod tests {
         assert!(DashPattern::new(1.0, 0.5).is_effective());
         assert!(DashPattern::new(4.0, 2.0).is_effective());
         assert!(DashPattern::new(10.0, 10.0).is_effective());
+    }
+
+    #[test]
+    fn a_round_stroke_lowers_as_a_styled_stroke_with_the_round_style() {
+        let dash = Some(DashPattern::new(3.0, 1.0));
+        let plain = PathStyle::Stroke { width: 2.5, dash };
+        let styled = PathStyle::StrokeStyled {
+            width: 2.5,
+            dash,
+            style: StrokeStyle::ROUND,
+        };
+        assert_eq!(plain.stroke(), Some((2.5, dash, StrokeStyle::ROUND)));
+        assert_eq!(plain.stroke(), styled.stroke());
+        assert_eq!(plain.fill_rule(), None);
+        assert_eq!(styled.fill_rule(), None);
+    }
+
+    #[test]
+    fn the_style_helpers_answer_exactly_one_of_fill_or_stroke() {
+        let miter = StrokeStyle::new(StrokeCap::Butt, StrokeJoin::Miter).with_miter_limit(2.0);
+        let styles = [
+            PathStyle::Fill,
+            PathStyle::FillEvenOdd,
+            PathStyle::Stroke {
+                width: 1.0,
+                dash: None,
+            },
+            PathStyle::StrokeStyled {
+                width: 1.0,
+                dash: None,
+                style: miter,
+            },
+        ];
+        for style in styles {
+            assert_ne!(
+                style.fill_rule().is_some(),
+                style.stroke().is_some(),
+                "{style:?}"
+            );
+        }
+        assert_eq!(PathStyle::Fill.fill_rule(), Some(FillRule::NonZero));
+        assert_eq!(PathStyle::FillEvenOdd.fill_rule(), Some(FillRule::EvenOdd));
+        assert_eq!(styles[3].stroke(), Some((1.0, None, miter)));
+    }
+
+    #[test]
+    fn the_round_style_is_round_capped_and_joined_and_the_default() {
+        assert_eq!(StrokeStyle::ROUND.cap, StrokeCap::Round);
+        assert_eq!(StrokeStyle::ROUND.join, StrokeJoin::Round);
+        assert_eq!(StrokeStyle::ROUND.miter_limit, 4.0);
+        assert_eq!(StrokeStyle::default(), StrokeStyle::ROUND);
+        assert_eq!(
+            StrokeStyle::new(StrokeCap::Round, StrokeJoin::Round),
+            StrokeStyle::ROUND
+        );
     }
 }
