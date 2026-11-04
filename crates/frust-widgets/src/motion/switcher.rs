@@ -74,9 +74,10 @@
 //! (`durations.base` + `easing.effects`), overridable with
 //! [`.timing(...)`](PatternSwitcherView::timing); with no theme threaded it
 //! falls back to [`FALLBACK_DURATION`] + [`Curve::Emphasized`]. A
-//! `reduce_motion` theme collapses *every* pattern to a fast
-//! ([`REDUCE_MOTION_DURATION`]) linear [`FadeThrough`] crossfade — the same hard
-//! accessibility rule `nav::transition::resolve_spec` enforces.
+//! `reduce_motion` theme collapses *every* pattern to a linear [`FadeThrough`]
+//! crossfade that runs for the theme's `MotionExtras::reduced_fade` (120 ms by
+//! default; `0` snaps; no upper bound is enforced). With no theme threaded the
+//! collapse uses [`REDUCE_MOTION_DURATION`].
 //!
 //! # Scaffold contract
 //!
@@ -98,7 +99,7 @@ use kurbo::{Affine, Point, Size, Vec2};
 use crate::ChildKey;
 use crate::Timing;
 use crate::motion::patterns::{FadeThrough, PatternLayer, TransitionPattern};
-use crate::nav::transition::{TransitionDriver, make_driver};
+use crate::nav::transition::{TransitionDriver, make_driver, token_duration};
 use crate::repaint_boundary::{RetainedBoundary, within};
 
 /// The unthemed fallback transition duration (the Glyph `base` token, 220ms) —
@@ -106,10 +107,10 @@ use crate::repaint_boundary::{RetainedBoundary, within};
 /// tests, pre-theme apps). See the [module docs](self)'s timing section.
 pub const FALLBACK_DURATION: Duration = Duration::from_millis(220);
 
-/// The reduced-motion collapse duration: `reduce_motion` flattens every pattern
-/// to a `≤120ms` linear [`FadeThrough`] crossfade — the Glyph design system's
-/// hard accessibility rule, matching `nav::transition`'s
-/// [`REDUCE_MOTION_DURATION`](crate::nav::transition) collapse.
+/// The default reduced-motion collapse duration, and the value used when no
+/// theme is threaded: `reduce_motion` flattens every pattern to a linear
+/// [`FadeThrough`] crossfade. A themed collapse runs for
+/// `MotionExtras::reduced_fade` instead (`0` snaps; no upper bound is enforced).
 pub const REDUCE_MOTION_DURATION: Duration = Duration::from_millis(120);
 
 /// Resolve the effective [`Timing`] for a switch: an explicit builder value
@@ -119,7 +120,7 @@ pub const REDUCE_MOTION_DURATION: Duration = Duration::from_millis(120);
 fn resolve_switch_timing(theme: Option<&Theme>, explicit: Option<Timing>) -> Timing {
     explicit.unwrap_or_else(|| match theme {
         Some(theme) => Timing::Duration(
-            Duration::from_secs_f64(theme.motion.durations.base / 1000.0),
+            token_duration(theme.motion.durations.base, FALLBACK_DURATION),
             theme.motion.easing.effects,
         ),
         None => Timing::Duration(FALLBACK_DURATION, Curve::Emphasized),
@@ -715,6 +716,17 @@ mod tests {
     }
 
     // --- Identity change transitions; same identity doesn't ---
+
+    #[test]
+    fn switch_timing_falls_back_on_an_unrepresentable_base_duration() {
+        let mut scheme = frust_theme::MotionScheme::neutral();
+        scheme.durations.base = 1e300;
+        let theme = Theme::builder(Theme::neutral()).motion(scheme).build();
+        assert_eq!(
+            resolve_switch_timing(Some(&theme), None),
+            Timing::Duration(FALLBACK_DURATION, theme.motion.easing.effects)
+        );
+    }
 
     #[test]
     fn same_identity_rebuild_does_not_transition_but_changed_identity_does() {

@@ -624,7 +624,8 @@ pub use frust_widgets::{
 ///
 /// [`resolve_spec`] applies `Theme.motion.reduce_motion`'s hard accessibility
 /// rule to a [`TransitionSpec`] — collapsing any animated preset to a
-/// `≤120ms` linear cross-fade — and resolves a bare [`Timing::ThemeDefault`]
+/// linear cross-fade (120 ms by default; a themed caller runs it for
+/// `MotionExtras::reduced_fade`) — and resolves a bare [`Timing::ThemeDefault`]
 /// against the active [`MotionScheme`]. [`make_driver`] then turns the
 /// resolved [`Timing`] into a running [`TransitionDriver`] (advanced each
 /// frame via `TransitionDriver::advance`) plus the [`SpringDesc`] to settle it
@@ -634,7 +635,7 @@ pub use frust_widgets::{
 /// drive their transitions through — before this re-export, an app widget
 /// implementing its own page/dialog animation had to hand-roll the
 /// reduce-motion collapse (read `Theme.motion.reduce_motion`, apply the
-/// `120ms` + linear + zero-motion rule) instead of calling the framework's one
+/// linear collapse + zero-motion rule) instead of calling the framework's one
 /// implementation, so the two would silently drift the next time the
 /// framework's rule changes.
 ///
@@ -3895,7 +3896,7 @@ mod motion_resolve_reuse {
     };
 
     /// Under `Theme.motion.reduce_motion`, the framework's own collapse policy
-    /// (`≤120ms` linear cross-fade) applies via a single [`resolve_spec`] call
+    /// (linear cross-fade, 120 ms by default) applies via a single [`resolve_spec`] call
     /// — the app never re-derives it.
     #[test]
     fn resolve_spec_collapses_under_reduce_motion_without_app_derivation() {

@@ -116,15 +116,16 @@ impl MotionExtras {
             .unwrap_or_default()
     }
 
-    /// [`Self::reduced_fade`] as a [`Duration`]. A non-finite or negative value
-    /// falls back to 120 ms; `0` is allowed and means skip the fade.
+    /// [`Self::reduced_fade`] as a [`Duration`]. A non-finite, negative or
+    /// unrepresentably large value falls back to 120 ms; `0` is allowed and means skip the fade.
     pub fn reduced_fade_duration(&self) -> Duration {
         let ms = self.reduced_fade;
-        if ms.is_finite() && ms >= 0.0 {
-            Duration::from_secs_f64(ms / 1000.0)
+        let parsed = if ms.is_finite() && ms >= 0.0 {
+            Duration::try_from_secs_f64(ms / 1000.0).ok()
         } else {
-            Duration::from_millis(Self::FALLBACK_REDUCED_FADE_MS as u64)
-        }
+            None
+        };
+        parsed.unwrap_or(Duration::from_millis(Self::FALLBACK_REDUCED_FADE_MS as u64))
     }
 }
 
@@ -317,6 +318,17 @@ mod tests {
         let got = MotionExtras::of(Some(&tuned));
         assert_eq!(got.reduced_fade_duration(), Duration::from_millis(40));
         assert_eq!(got.extended, 900.0);
+    }
+
+    #[test]
+    fn reduced_fade_duration_falls_back_on_an_unrepresentable_value() {
+        for huge in [1e300, f64::MAX] {
+            let extras = MotionExtras {
+                reduced_fade: huge,
+                ..MotionExtras::neutral()
+            };
+            assert_eq!(extras.reduced_fade_duration(), Duration::from_millis(120));
+        }
     }
 
     #[test]

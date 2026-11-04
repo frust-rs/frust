@@ -547,18 +547,18 @@ pub enum AnimationStatus {
 /// Value/velocity threshold below which a fling snaps to its target and settles.
 const SPRING_REST_EPSILON: f64 = 1e-3;
 
-/// A `0.0..=1.0` value driven by a duration + [`Curve`] or a [`Spring`] fling.
+/// A mostly `0.0..=1.0` value driven by a duration + [`Curve`] or a [`Spring`] fling.
 ///
-/// Plain data + math (see the module contract): a widget advances it during
-/// paint and re-requests a frame while [`advance`](Self::advance) returns `true`.
+/// Plain data + math: a widget advances it during paint and re-requests a frame
+/// while [`advance`](Self::advance) returns `true`.
 /// `forward`/`reverse`/`animate_to` settle as `Completed`/`Dismissed`; `repeat`
 /// never completes; a `fling` settles at `1.0` (non-negative velocity) or `0.0`.
 ///
 /// # Overshoot (spring-driven only)
 ///
-/// A fling is not clamped in flight: an under-damped [`SpringDesc`] (M3's spatial
-/// presets use `damping_ratio: 0.9`) overshoots on purpose, then lands exactly on
-/// the target. Use [`value_clamped`](Self::value_clamped) for a bounded read.
+/// An under-damped [`SpringDesc`] overshoots on purpose, then lands on the
+/// target. A [`spring_to`](Self::spring_to) target is unclamped, so the value may
+/// rest outside `0.0..=1.0`; see [`value_clamped`](Self::value_clamped).
 #[derive(Clone, Copy, Debug)]
 pub struct AnimationController {
     value: f64,
@@ -580,6 +580,8 @@ enum Drive {
         target: f64,
         elapsed: f64,
         duration: f64,
+        /// The status to settle with: fixed by the entry point, not by the values.
+        settle: AnimationStatus,
     },
     /// Looping `0.0→1.0` (eased) with period `period` seconds.
     Repeat { elapsed: f64, period: f64 },
@@ -619,13 +621,14 @@ impl AnimationController {
 
     /// The current value: within `0.0..=1.0` for duration motion, but a spring
     /// [`fling`](Self::fling) may transiently leave that range (see the type docs'
-    /// Overshoot section); see [`value_clamped`](Self::value_clamped).
+    /// Overshoot section), and a [`spring_to`](Self::spring_to) target may leave
+    /// it at rest; see [`value_clamped`](Self::value_clamped).
     pub fn value(&self) -> f64 {
         self.value
     }
 
     /// [`value`](Self::value) clamped to `0.0..=1.0`; differs from it only while a
-    /// fling overshoots.
+    /// fling overshoots or after a `spring_to` to an out-of-range target.
     pub fn value_clamped(&self) -> f64 {
         self.value.clamp(0.0, 1.0)
     }
@@ -641,25 +644,45 @@ impl AnimationController {
     }
 
     /// Animate forward to `1.0` over the controller's duration.
+    ///
+    /// Always settles [`Completed`](AnimationStatus::Completed), even when the
+    /// start value is already past `1.0` after an out-of-range
+    /// [`spring_to`](Self::spring_to).
     pub fn forward(&mut self) {
-        self.start_duration(self.value, 1.0, AnimationStatus::Forward);
+        self.start_duration(
+            self.value,
+            1.0,
+            AnimationStatus::Forward,
+            AnimationStatus::Completed,
+        );
     }
 
     /// Animate reverse to `0.0` over the controller's duration.
+    ///
+    /// Always settles [`Dismissed`](AnimationStatus::Dismissed), even when the
+    /// start value is below `0.0` after an out-of-range
+    /// [`spring_to`](Self::spring_to).
     pub fn reverse(&mut self) {
-        self.start_duration(self.value, 0.0, AnimationStatus::Reverse);
+        self.start_duration(
+            self.value,
+            0.0,
+            AnimationStatus::Reverse,
+            AnimationStatus::Dismissed,
+        );
     }
 
     /// Animate from the current value to `target` (clamped to `0.0..=1.0`) over
-    /// the controller's duration.
+    /// the controller's duration. Settles by direction of travel:
+    /// [`Completed`](AnimationStatus::Completed) when `target` is at or above
+    /// the start value, else [`Dismissed`](AnimationStatus::Dismissed).
     pub fn animate_to(&mut self, target: f64) {
         let target = target.clamp(0.0, 1.0);
-        let status = if target >= self.value {
-            AnimationStatus::Forward
+        let (status, settle) = if target >= self.value {
+            (AnimationStatus::Forward, AnimationStatus::Completed)
         } else {
-            AnimationStatus::Reverse
+            (AnimationStatus::Reverse, AnimationStatus::Dismissed)
         };
-        self.start_duration(self.value, target, status);
+        self.start_duration(self.value, target, status, settle);
     }
 
     /// Loop `0.0→1.0` (eased) indefinitely with a period of the controller's
@@ -718,6 +741,7 @@ impl AnimationController {
                 target,
                 elapsed,
                 duration,
+                ..
             } => {
                 if duration > 0.0 {
                     (target - start) * self.curve_slope(elapsed / duration) / duration
@@ -822,17 +846,14 @@ impl AnimationController {
                 target,
                 elapsed,
                 duration,
+                settle,
             } => {
-                let (start, target, duration) = (*start, *target, *duration);
+                let (start, target, duration, settle) = (*start, *target, *duration, *settle);
                 *elapsed += dt;
                 let elapsed = *elapsed;
                 if duration <= 0.0 || elapsed >= duration {
                     self.value = target;
-                    self.status = if target >= start {
-                        AnimationStatus::Completed
-                    } else {
-                        AnimationStatus::Dismissed
-                    };
+                    self.status = settle;
                     self.drive = Drive::Idle;
                     false
                 } else {
@@ -904,18 +925,20 @@ impl AnimationController {
     }
 
     /// Shared entry for the duration-driven motions.
-    fn start_duration(&mut self, start: f64, target: f64, status: AnimationStatus) {
+    fn start_duration(
+        &mut self,
+        start: f64,
+        target: f64,
+        status: AnimationStatus,
+        settle: AnimationStatus,
+    ) {
         let duration = self.duration.as_secs_f64();
         self.status = status;
         self.last_time = None;
         if duration <= 0.0 || (target - start).abs() < f64::EPSILON {
             // Nothing to animate: snap and settle immediately.
             self.value = target;
-            self.status = if target >= start {
-                AnimationStatus::Completed
-            } else {
-                AnimationStatus::Dismissed
-            };
+            self.status = settle;
             self.drive = Drive::Idle;
         } else {
             self.drive = Drive::Duration {
@@ -923,6 +946,7 @@ impl AnimationController {
                 target,
                 elapsed: 0.0,
                 duration,
+                settle,
             };
         }
     }
@@ -1235,6 +1259,38 @@ mod tests {
         assert_eq!(c.status(), AnimationStatus::Reverse);
         c.advance(ft_secs(1.0));
         assert!(!c.advance(ft_secs(1.2)));
+        assert_eq!(c.value(), 0.0);
+        assert_eq!(c.status(), AnimationStatus::Dismissed);
+    }
+
+    #[test]
+    fn forward_after_an_out_of_range_spring_settles_completed() {
+        let mut c = AnimationController::new(Duration::from_millis(100));
+        c.spring_to(1.4, test_spring());
+        let mut t = 0.0;
+        while c.advance(ft_secs(t)) {
+            t += 1.0 / 120.0;
+        }
+        assert_eq!(c.value(), 1.4);
+        c.forward();
+        c.advance(ft_secs(100.0));
+        assert!(!c.advance(ft_secs(101.0)));
+        assert_eq!(c.value(), 1.0);
+        assert_eq!(c.status(), AnimationStatus::Completed);
+    }
+
+    #[test]
+    fn reverse_after_a_negative_spring_settles_dismissed() {
+        let mut c = AnimationController::new(Duration::from_millis(100));
+        c.spring_to(-0.2, test_spring());
+        let mut t = 0.0;
+        while c.advance(ft_secs(t)) {
+            t += 1.0 / 120.0;
+        }
+        assert_eq!(c.value(), -0.2);
+        c.reverse();
+        c.advance(ft_secs(100.0));
+        assert!(!c.advance(ft_secs(101.0)));
         assert_eq!(c.value(), 0.0);
         assert_eq!(c.status(), AnimationStatus::Dismissed);
     }
