@@ -12,9 +12,9 @@
 //! # Capitalisation
 //!
 //! The string is ICU's, returned as-is. CLDR capitalises per width in some
-//! languages (Vietnamese is "hôm nay" short but "Hôm nay" long), and the
-//! word is lower case in most languages mid-sentence. Sentence-casing for a
-//! standalone label is the caller's concern.
+//! languages (Vietnamese is "hôm nay" at both widths, but others differ), and
+//! the word is lower case in most languages mid-sentence. Sentence-casing for
+//! a standalone label is the caller's concern.
 
 use std::sync::LazyLock;
 
@@ -32,7 +32,7 @@ const SECONDS_PER_DAY: i64 = 86_400;
 /// Which CLDR width of relative-day wording to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RelativeDayStyle {
-    /// The long form ("Hôm nay" in Vietnamese).
+    /// The long form ("hôm nay" in Vietnamese).
     Long,
     /// The short form ("hôm nay" in Vietnamese).
     Short,
