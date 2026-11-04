@@ -257,6 +257,14 @@ hand when the source list changes:
   alongside any font or vendored-module change (see
   [PLUGINS_CODE_STANDARDS.md](PLUGINS_CODE_STANDARDS.md)'s attribution-header convention).
 
+## Locale test lock
+
+A plugin test that sets or depends on the default locale holds the shared
+`frust_widgets::test_support::LocaleSlotGuard` (`set(Some("ja"))`, or `hold()` to read), behind
+`frust-widgets`' `test-support` feature; a crate without `frust-widgets` uses
+`frust_text::locale::test_support::LocaleSlotGuard` via `frust-text`'s. One lock serves every crate
+in a test binary, so no plugin keeps a private locale lock.
+
 ## Version Pins
 
 The pins this unit owns, under [DEVELOPMENT.md](DEVELOPMENT.md)'s Version-Pin Policy (pins are
