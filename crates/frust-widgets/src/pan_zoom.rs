@@ -379,8 +379,8 @@ pub struct PanZoomWidget {
     notify_owed: bool,
     /// A Housekeeping flush was already requested for the owed notification.
     notify_requested: bool,
-    /// The last painted frame time in ms — the event pass's timestamp source.
-    last_frame_ms: f64,
+    /// The last painted raw input time in ms — the event pass's timestamp source.
+    last_input_ms: f64,
     /// The enclosing scroll surface's live multi-contact veto, captured from
     /// [`ambient_scroll_veto`] on the claiming `Down` while it is still
     /// reachable — `None` outside a scroll surface. See the
@@ -415,7 +415,7 @@ impl<State: 'static> View<State> for PanZoomView<State> {
             glide: None,
             notify_owed: false,
             notify_requested: false,
-            last_frame_ms: 0.0,
+            last_input_ms: 0.0,
             scroll_veto: None,
         }
     }
@@ -694,7 +694,7 @@ impl PanZoomWidget {
         // ambient cell is visible from (`crate::scroll`'s module docs'
         // *Multi-contact veto*).
         self.scroll_veto = ambient_scroll_veto();
-        self.recognizer.handle(id, p, self.last_frame_ms);
+        self.recognizer.handle(id, p, self.last_input_ms);
         self.sync_scroll_veto();
         let inside = self.child.contains(p.position);
         let result = if inside {
@@ -716,8 +716,8 @@ impl PanZoomWidget {
             // untouched is the correct report.
         } else {
             self.drag = Drag::Pan { last: p.position };
-            self.tracker_x.record(self.last_frame_ms, p.position.x);
-            self.tracker_y.record(self.last_frame_ms, p.position.y);
+            self.tracker_x.record(self.last_input_ms, p.position.x);
+            self.tracker_y.record(self.last_input_ms, p.position.y);
             // Innermost-wins nested-scroll arbitration (`scroll.rs` owns the
             // seam; `ListView` is the other consumer): the child ignored the
             // `Down`, so this view is about to pan it, and reports that into
@@ -766,7 +766,7 @@ impl PanZoomWidget {
         id: PointerId,
         p: &PointerEvent,
     ) {
-        if let Some(scale) = self.recognizer.handle(id, p, self.last_frame_ms) {
+        if let Some(scale) = self.recognizer.handle(id, p, self.last_input_ms) {
             self.on_pinch(ctx, scale, p);
         }
         self.sync_scroll_veto();
@@ -795,13 +795,13 @@ impl PanZoomWidget {
                         if self.set(next) {
                             self.changed(ctx);
                         }
-                        self.tracker_x.record(self.last_frame_ms, p.position.x);
-                        self.tracker_y.record(self.last_frame_ms, p.position.y);
+                        self.tracker_x.record(self.last_input_ms, p.position.x);
+                        self.tracker_y.record(self.last_input_ms, p.position.y);
                     }
                     self.drag = Drag::Pan { last: p.position };
                 } else if p.phase == PointerPhase::Up {
-                    self.tracker_x.record(self.last_frame_ms, p.position.x);
-                    self.tracker_y.record(self.last_frame_ms, p.position.y);
+                    self.tracker_x.record(self.last_input_ms, p.position.x);
+                    self.tracker_y.record(self.last_input_ms, p.position.y);
                     self.maybe_glide();
                     if self.glide.is_some() {
                         ctx.request_redraw();
@@ -855,8 +855,8 @@ impl Widget for PanZoomWidget {
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         // The event pass carries no clock; stamp velocity samples with the last
-        // painted frame instead (the `ScrollView` precedent).
-        self.last_frame_ms = ctx.frame_time().as_secs_f64() * 1000.0;
+        // painted raw input time instead (the `ScrollView` precedent).
+        self.last_input_ms = ctx.input_time().as_secs_f64() * 1000.0;
         self.apply_pending();
         self.pump_glide(ctx);
         if self.on_transform.is_none() {
@@ -899,7 +899,7 @@ impl Widget for PanZoomWidget {
                 if self.claimant == Some(id) {
                     self.claimant_event(ctx, event, id, p);
                 } else {
-                    let scale = self.recognizer.handle(id, p, self.last_frame_ms);
+                    let scale = self.recognizer.handle(id, p, self.last_input_ms);
                     self.sync_scroll_veto();
                     if let Some(scale) = scale {
                         // Another contact of the gesture is the recogniser's alone.

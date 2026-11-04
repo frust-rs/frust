@@ -540,7 +540,10 @@ pub struct PaintCtx<'a> {
     hover_epoch: u64,
     /// The live focus session epoch (see [`set_live_focus_session`]).
     focus_epoch: u64,
+    /// The animation clock: the shell clock under the process time scale.
     frame_time: FrameTime,
+    /// The shell's raw clock, never scaled.
+    input_time: FrameTime,
     theme: Option<&'a dyn Any>,
     window_insets: WindowInsets,
     /// The presented-frame count, stored without dirtying change flags.
@@ -587,6 +590,7 @@ impl<'a> PaintCtx<'a> {
             hover_epoch: 0,
             focus_epoch: 0,
             frame_time: FrameTime::ZERO,
+            input_time: FrameTime::ZERO,
             theme: None,
             window_insets: WindowInsets::default(),
             presented_frames: None,
@@ -631,12 +635,14 @@ impl<'a> PaintCtx<'a> {
         self
     }
 
-    /// Build a paint context seeded with `frame_time`, for clock-dependent tests
-    /// outside this crate (`cfg(test)` / `test-support` only).
+    /// Build a paint context with both clocks ([`PaintCtx::frame_time`],
+    /// [`PaintCtx::input_time`]) seeded with `frame_time`, for clock-dependent
+    /// tests outside this crate (`cfg(test)` / `test-support` only).
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_test(origin: Point, size: Size, frame_time: FrameTime) -> Self {
         let mut ctx = Self::new(origin, size);
         ctx.frame_time = frame_time;
+        ctx.input_time = frame_time;
         ctx
     }
 
@@ -766,15 +772,28 @@ impl<'a> PaintCtx<'a> {
         self.focus_epoch
     }
 
-    /// The shell clock for this frame; only ever difference it against a
-    /// stored earlier value.
+    /// The animation clock for this frame: the shell clock under the process
+    /// time scale ([`crate::anim::set_animation_time_scale`]). Animation drivers
+    /// read it; only ever difference it against a stored earlier value.
     pub fn frame_time(&self) -> FrameTime {
         self.frame_time
     }
 
-    /// Seed the shell-provided frame time.
+    /// Seed the animation clock.
     pub(crate) fn set_frame_time(&mut self, frame_time: FrameTime) {
         self.frame_time = frame_time;
+    }
+
+    /// The shell's raw clock for this frame, never scaled: gesture timers,
+    /// velocity timestamps and caret blink read it. Only difference it against
+    /// an earlier `input_time`, never against a [`PaintCtx::frame_time`].
+    pub fn input_time(&self) -> FrameTime {
+        self.input_time
+    }
+
+    /// Seed the raw input clock.
+    pub(crate) fn set_input_time(&mut self, input_time: FrameTime) {
+        self.input_time = input_time;
     }
 
     /// Request another frame because paint advanced animation state
@@ -982,6 +1001,7 @@ impl<'a> PaintCtx<'a> {
             hover_epoch: self.hover_epoch,
             focus_epoch: self.focus_epoch,
             frame_time: self.frame_time,
+            input_time: self.input_time,
             theme: self.theme,
             window_insets: self.window_insets,
             presented_frames: self.presented_frames,
@@ -1831,6 +1851,7 @@ impl ChildPod {
         let mut child_ctx = PaintCtx::new(child_origin, self.size);
         // Copy the root-threaded globals down unchanged.
         child_ctx.set_frame_time(ctx.frame_time());
+        child_ctx.set_input_time(ctx.input_time());
         child_ctx.set_theme(ctx.theme_ref());
         child_ctx.set_window_insets(ctx.window_insets_ref());
         child_ctx.set_presented_frames(ctx.presented_frames());
@@ -3767,6 +3788,49 @@ mod tests {
     fn for_test_seeds_the_requested_frame_time() {
         let ctx = PaintCtx::for_test(Point::ZERO, Size::new(1.0, 1.0), FrameTime::from_nanos(42));
         assert_eq!(ctx.frame_time(), FrameTime::from_nanos(42));
+    }
+
+    /// A widget recording both clocks it was painted with.
+    struct ClockProbe(std::rc::Rc<std::cell::Cell<(FrameTime, FrameTime)>>);
+
+    impl Widget for ClockProbe {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(4.0, 4.0))
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            self.0.set((ctx.frame_time(), ctx.input_time()));
+        }
+    }
+
+    #[test]
+    fn child_and_hero_contexts_copy_both_clocks() {
+        let seen = std::rc::Rc::new(std::cell::Cell::new((FrameTime::ZERO, FrameTime::ZERO)));
+        let mut pod = ChildPod::new(Box::new(ClockProbe(seen.clone())));
+        let mut lctx = LayoutCtx::new();
+        pod.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+        let mut parent = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        parent.set_frame_time(FrameTime::from_nanos(25));
+        parent.set_input_time(FrameTime::from_nanos(100));
+        let mut scene = RecordingScene::default();
+        pod.paint_child(&mut parent, &mut scene);
+        assert_eq!(
+            seen.get(),
+            (FrameTime::from_nanos(25), FrameTime::from_nanos(100))
+        );
+
+        let registry = RefCell::new(HeroFrames::default());
+        seen.set((FrameTime::ZERO, FrameTime::ZERO));
+        parent.with_hero_registry(&registry, |hero| pod.paint_child(hero, &mut scene));
+        assert_eq!(
+            seen.get(),
+            (FrameTime::from_nanos(25), FrameTime::from_nanos(100))
+        );
+    }
+
+    #[test]
+    fn for_test_seeds_both_clocks_alike() {
+        let ctx = PaintCtx::for_test(Point::ZERO, Size::new(1.0, 1.0), FrameTime::from_nanos(7));
+        assert_eq!(ctx.input_time(), ctx.frame_time());
     }
 
     /// End-to-end proof the seam actually drives a clock-dependent widget:

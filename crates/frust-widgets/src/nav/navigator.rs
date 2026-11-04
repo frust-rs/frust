@@ -346,11 +346,11 @@ pub struct NavigatorWidget<State: 'static> {
     pub(super) pop_swipe_enabled: bool,
     /// The in-progress edge-swipe gesture state.
     pub(super) edge: EdgeSwipe,
-    /// The most recent frame time seen during [`paint`](NavigatorWidget::paint),
-    /// reused as the event-pass timestamp for velocity tracking — the event pass
-    /// carries no clock of its own (time is provided only at paint). The
-    /// same seam [`ScrollWidget`](crate::ScrollWidget) uses.
-    last_frame_time: FrameTime,
+    /// The most recent raw input time ([`PaintCtx::input_time`]) seen during
+    /// [`paint`](NavigatorWidget::paint), reused as the event-pass timestamp for
+    /// velocity tracking — the event pass carries no clock of its own (time is
+    /// provided only at paint). The same seam [`ScrollWidget`](crate::ScrollWidget) uses.
+    last_input_time: FrameTime,
     /// The shared depth slot published to the [`NavigatorController`] every
     /// `build`/`rebuild`. A clone of the controller's
     /// `Rc<Cell<usize>>`, updated by [`publish_state`](Self::publish_state)
@@ -886,11 +886,11 @@ impl<State: 'static> NavigatorWidget<State> {
         self.publish_transition_progress(from, Some(false));
     }
 
-    /// The event-pass timestamp (ms) for velocity tracking — the last frame time
+    /// The event-pass timestamp (ms) for velocity tracking — the last input time
     /// seen at paint, since the event pass carries no clock (see
-    /// [`last_frame_time`](NavigatorWidget::last_frame_time)).
+    /// [`last_input_time`](NavigatorWidget::last_input_time)).
     fn event_time_ms(&self) -> f64 {
-        self.last_frame_time.as_secs_f64() * 1000.0
+        self.last_input_time.as_secs_f64() * 1000.0
     }
 
     /// The set of pages an input event can reach, as an index range into
@@ -1778,7 +1778,7 @@ impl<State: 'static> View<State> for NavigatorView<State> {
             transition: None,
             pop_swipe_enabled: self.resolve_pop_swipe(),
             edge: EdgeSwipe::new(),
-            last_frame_time: FrameTime::ZERO,
+            last_input_time: FrameTime::ZERO,
             depth: Rc::clone(&self.controller.depth),
             back_interest: Rc::clone(&self.controller.back_interest),
             transition_state: Rc::clone(&self.controller.transition),
@@ -1999,9 +1999,9 @@ impl<State: 'static> Widget for NavigatorWidget<State> {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
-        // Record the shared frame clock so the between-frames event pass (which
+        // Record the raw input clock so the between-frames event pass (which
         // carries no clock) has a timestamp for edge-swipe velocity tracking.
-        self.last_frame_time = ctx.frame_time();
+        self.last_input_time = ctx.input_time();
         if self.transition.is_some() {
             // Animated page switch: paint both involved pages with per-frame
             // offsets/opacity and drive the transition off the frame clock.

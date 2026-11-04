@@ -1806,8 +1806,22 @@ pub use frust_shell_common::{ResolvedSurfaceMode, resolved_surface_mode};
 /// plus the pure easing/interpolation/spring math a widget or app advances it
 /// through, flat-re-exported from `frust-core::anim`. Time enters from the
 /// shell during paint (`PaintCtx::frame_time`); nothing here reads a clock.
+///
+/// [`set_animation_time_scale`] slows or speeds every animation process-wide
+/// for designing and debugging motion (`0.25` = quarter speed, within
+/// [`MIN_ANIMATION_TIME_SCALE`]`..=`[`MAX_ANIMATION_TIME_SCALE`]); gesture
+/// timers keep the raw clock (`PaintCtx::input_time`).
+///
+/// ```
+/// use frust::{animation_time_scale, set_animation_time_scale};
+///
+/// assert!(!set_animation_time_scale(0.0));
+/// assert_eq!(animation_time_scale(), 1.0);
+/// ```
 pub use frust_core::anim::{
-    AnimationController, AnimationStatus, Curve, FrameTime, Lerp, Spring, SpringDesc, Tween,
+    AnimationController, AnimationStatus, Curve, FrameTime, Lerp, MAX_ANIMATION_TIME_SCALE,
+    MIN_ANIMATION_TIME_SCALE, Spring, SpringDesc, Tween, animation_time_scale,
+    set_animation_time_scale,
 };
 
 /// The window's shape, flat-re-exported from `frust-core::app` so app code

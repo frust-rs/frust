@@ -25,6 +25,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use kurbo::{Rect, Size};
 
+use crate::anim::AnimationClock;
 use crate::event::{CursorIcon, EventOutcome, ImeState, PointerId};
 use crate::insets::WindowInsets;
 use crate::overlay::{OverlayHit, OverlayKey};
@@ -142,6 +143,7 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     paint_epoch: u64,
     /// Serial of the most recent paint (`0` before the first).
     paint_serial: u64,
+    animation_clock: AnimationClock,
     /// The hover claimant's `inspect_id` (`0` for the root widget); `None` while nothing hovers.
     hover_link: Option<u64>,
     /// `(hover_link, focus_epoch)` as the last paint saw them; a change bumps `paint_epoch`.
@@ -205,6 +207,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             layout_epoch: 1,
             paint_epoch: 1,
             paint_serial: 0,
+            animation_clock: AnimationClock::default(),
             hover_link: None,
             painted_links: (None, 1),
             retained_layers: true,

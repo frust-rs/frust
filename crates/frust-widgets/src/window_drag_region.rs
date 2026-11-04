@@ -92,13 +92,13 @@ pub struct WindowDragRegionWidget {
     /// The last unhandled press: where it landed and the paint-clock time of
     /// the first paint after it (`None` until that paint).
     last_press: Option<(Point, Option<FrameTime>)>,
-    /// The latest paint-pass clock, the only one available to the event pass.
-    last_frame_time: FrameTime,
+    /// The latest paint-pass raw input clock, the only one the event pass has.
+    last_input_time: FrameTime,
 }
 
 impl WindowDragRegionWidget {
     fn elapsed_ms(&self, since: FrameTime) -> f64 {
-        self.last_frame_time.saturating_sub(since).as_secs_f64() * 1000.0
+        self.last_input_time.saturating_sub(since).as_secs_f64() * 1000.0
     }
 
     fn is_double_press(&self, pos: Point) -> bool {
@@ -117,7 +117,7 @@ impl<State: 'static> View<State> for WindowDragRegionView<State> {
             child: crate::authoring::build_child(&self.child, ctx),
             mode: self.mode,
             last_press: None,
-            last_frame_time: FrameTime::default(),
+            last_input_time: FrameTime::default(),
         }
     }
 
@@ -147,11 +147,11 @@ impl Widget for WindowDragRegionWidget {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
-        self.last_frame_time = ctx.frame_time();
+        self.last_input_time = ctx.input_time();
         // Keep the clock moving while a press is inside its window, so an idle
         // window cannot make a much later press look like a double-press.
         if let Some((_, at)) = self.last_press {
-            let at = at.unwrap_or(self.last_frame_time);
+            let at = at.unwrap_or(self.last_input_time);
             if let Some((_, stamp)) = &mut self.last_press {
                 *stamp = Some(at);
             }
