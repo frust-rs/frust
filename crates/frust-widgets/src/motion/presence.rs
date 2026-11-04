@@ -12,31 +12,12 @@
 //! owner may then stop returning it. The owner always owns `open`; nothing
 //! here flips it.
 //!
-//! # Timing
+//! Timing, reversal and completion are documented on [`Presence::set_open`]
+//! and [`Presence::advance`]. An exit settles only when painted: one that is
+//! never painted (culled offscreen or occluded) never reports, so treat
+//! `on_exited` as a cleanup cue, not a correctness gate.
 //!
-//! [`Timing::ThemeDefault`] (the default) resolves on the first paint after a
-//! change: the entrance runs the theme's `durations.base` with
-//! `easing.effects`, the exit `durations.fast` with `easing.exit`. Under
-//! `reduce_motion` both become the theme's reduced fade
-//! ([`MotionExtras::reduced_fade_duration`]), linear, whatever timing was set;
-//! geometry is pinned at `1.0` while visible and only opacity fades.
-//!
-//! # Reversal
-//!
-//! Flipping `open` mid-ramp starts the opposite ramp from the value painted
-//! last. A duration timing is value-continuous (an `animate_to` from there);
-//! a spring timing is also velocity-continuous (a `spring_to` carrying the
-//! current velocity), so a quick open-close-open reads as one motion.
-//!
-//! # Completion
-//!
-//! The exit settles during paint, which has no `&mut State`. The settling
-//! paint raises a drain-once latch and [`frust_core::mark_pending_result_flush`];
-//! the widget's next event (that frame's `Housekeeping` flush, with no input
-//! required) drains it and fires `on_exited`.
-//!
-//! `frust_beui::motion::Presence` is the catalog-local predecessor of this
-//! driver; it keeps its own ramp vocabulary and is not replaced by this one.
+//! `frust_beui::motion::Presence` is a catalog-local predecessor, kept as is.
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -98,7 +79,8 @@ pub struct PresenceSample {
     pub phase: PresencePhase,
 }
 
-/// The value one ramp drives: `from + span * controller.value()`.
+/// The value one ramp drives: `from + span * controller.value()`, exactly
+/// `target` once the controller is idle.
 ///
 /// A duration ramp runs its controller `0 → 1` over a tween of `span = target -
 /// from`; a spring ramp runs it from `0` to `target - from` with `span = 1`, so
@@ -107,6 +89,7 @@ pub struct PresenceSample {
 struct Motion {
     from: f64,
     span: f64,
+    target: f64,
     controller: AnimationController,
 }
 
@@ -116,14 +99,18 @@ impl Motion {
         Motion {
             from: value,
             span: 0.0,
+            target: value,
             controller: AnimationController::new(Duration::ZERO),
         }
     }
 
     /// A ramp from `from` (moving at `velocity`) to `target` under a resolved
     /// `timing`. A duration ramp keeps the value continuous; a spring keeps the
-    /// velocity continuous too.
+    /// velocity continuous too. With no distance and no velocity it is at rest.
     fn start(from: f64, velocity: f64, target: f64, timing: Timing) -> Self {
+        if from == target && velocity == 0.0 {
+            return Self::rest(target);
+        }
         match timing {
             Timing::Spring(spring) => {
                 let mut controller = AnimationController::new(Duration::ZERO);
@@ -135,6 +122,7 @@ impl Motion {
                 Motion {
                     from,
                     span: 1.0,
+                    target,
                     controller,
                 }
             }
@@ -152,12 +140,17 @@ impl Motion {
         Motion {
             from,
             span: target - from,
+            target,
             controller,
         }
     }
 
     fn value(&self) -> f64 {
-        self.from + self.span * self.controller.value()
+        if self.controller.is_animating() {
+            self.from + self.span * self.controller.value()
+        } else {
+            self.target
+        }
     }
 
     fn velocity(&self) -> f64 {
@@ -244,8 +237,13 @@ impl Presence {
     ///
     /// Re-applying the flag already followed is a no-op, so a rebuild may pass
     /// the same value every frame. Opening from `Absent`/`Exiting` enters;
-    /// closing from `Entering`/`Present` exits. The ramp itself starts on the
-    /// next [`advance`](Self::advance), from the value painted last.
+    /// closing from `Entering`/`Present` exits. The ramp starts on the next
+    /// [`advance`](Self::advance) from the value painted last: a reversal
+    /// mid-ramp is value-continuous, and under a spring also velocity-continuous,
+    /// so a quick open-close-open reads as one motion. A flip that ends where
+    /// the value already rests (close then reopen, or open then close, before
+    /// a paint) settles in that `advance` with no frame owed; an accepted close
+    /// still reports its exit, since the owner did ask for one.
     pub fn set_open(&mut self, open: bool) -> bool {
         if open == self.phase.is_open() {
             return false;
@@ -266,10 +264,14 @@ impl Presence {
     /// Step to `now` (the scaled animation clock), resolving theme timings and
     /// `reduce_motion` against `theme`.
     ///
-    /// A settling entrance becomes [`Present`](PresencePhase::Present); a
-    /// settling exit becomes [`Absent`](PresencePhase::Absent) and raises the
-    /// latch [`take_exited`](Self::take_exited) drains. A `reduce_motion` flip
-    /// re-drives an in-flight ramp under the other timing.
+    /// [`Timing::ThemeDefault`] enters over the theme's `durations.base` with
+    /// `easing.effects` and exits over `durations.fast` with `easing.exit`.
+    /// Under `reduce_motion` every ramp is the theme's linear
+    /// [`MotionExtras::reduced_fade_duration`] with geometry pinned at `1.0`
+    /// while visible, and a flip re-drives an in-flight ramp. A settling
+    /// entrance becomes [`Present`](PresencePhase::Present); a settling exit
+    /// becomes [`Absent`](PresencePhase::Absent) and raises the latch
+    /// [`take_exited`](Self::take_exited) drains.
     pub fn advance(&mut self, now: FrameTime, theme: Option<&Theme>) -> PresenceSample {
         let reduced = theme.is_some_and(|theme| theme.motion.reduce_motion);
         if reduced != self.reduced && self.motion.is_moving() {
@@ -339,7 +341,8 @@ impl Presence {
 }
 
 /// The theme's entrance (`base` + `effects`) or exit (`fast` + `exit`) timing,
-/// falling back to [`MotionScheme::neutral`] unthemed or for an unusable value.
+/// falling back to [`MotionScheme::neutral`] unthemed or for a value no
+/// [`Duration`] holds (negative, non-finite or too large).
 fn theme_timing(theme: Option<&Theme>, entering: bool) -> Timing {
     let neutral = MotionScheme::neutral();
     let scheme = theme.map_or(&neutral, |theme| &theme.motion);
@@ -356,12 +359,10 @@ fn theme_timing(theme: Option<&Theme>, entering: bool) -> Timing {
             scheme.easing.exit,
         )
     };
-    let ms = if ms.is_finite() && ms >= 0.0 {
-        ms
-    } else {
-        fallback_ms
-    };
-    Timing::Duration(Duration::from_secs_f64(ms / 1000.0), curve)
+    let duration = Duration::try_from_secs_f64(ms / 1000.0)
+        .or_else(|_| Duration::try_from_secs_f64(fallback_ms / 1000.0))
+        .unwrap_or(Duration::ZERO);
+    Timing::Duration(duration, curve)
 }
 
 /// The inactive IME surface published when a close severs a focused child
@@ -432,7 +433,9 @@ impl<State: 'static> PresenceView<State> {
     }
 
     /// Run `f` once each exit has settled — the owner's cue to stop returning
-    /// this view. Delivered on the next event pass after the settling paint.
+    /// this view. Delivered on the next event pass after the settling paint,
+    /// so it needs the widget painted; an exit that settled while no callback
+    /// was set is never reported to one attached later.
     pub fn on_exited(mut self, f: impl Fn(&mut State) + 'static) -> Self {
         self.on_exited = Some(Rc::new(f));
         self
@@ -492,6 +495,9 @@ impl<State: 'static> View<State> for PresenceView<State> {
             .on_exited
             .as_ref()
             .map(crate::authoring::erase_callback);
+        if element.on_exited.is_none() {
+            element.driver.take_exited();
+        }
         flags |= crate::authoring::rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
         flags
     }
@@ -534,9 +540,12 @@ impl Widget for PresenceWidget {
         if sample.phase.is_animating() {
             ctx.request_frame();
         }
-        if !latched && self.driver.has_exited() && self.on_exited.is_some() {
+        if self.driver.has_exited() && self.on_exited.is_none() {
+            // No callback to report to: a later one must not see this exit.
+            self.driver.take_exited();
+        } else if !latched && self.driver.has_exited() {
             // Paint has no `&mut State`: owe `on_exited` to the next frame's
-            // Housekeeping flush.
+            // Housekeeping flush, whose event pass drains the latch.
             frust_core::mark_pending_result_flush();
             ctx.request_frame();
         }
@@ -855,12 +864,45 @@ mod tests {
         assert!(!driver.is_animating());
     }
 
+    #[test]
+    fn open_then_close_before_paint_settles_absent_immediately() {
+        let mut driver = timed();
+        assert!(driver.set_open(true));
+        assert!(driver.set_open(false));
+        let sample = driver.advance(at(0.0), None);
+        assert_eq!(
+            (sample.phase, sample.opacity, sample.geometry),
+            (PresencePhase::Absent, 0.0, 0.0)
+        );
+        assert!(!driver.is_animating(), "no frame owed for a 0 -> 0 ramp");
+        assert!(driver.take_exited(), "the accepted close still reports");
+    }
+
+    #[test]
+    fn theme_timing_falls_back_on_an_unrepresentable_duration() {
+        let mut theme = Theme::neutral();
+        theme.motion.durations.base = 1e300;
+        theme.motion.durations.fast = f64::MAX;
+        let neutral = MotionScheme::neutral();
+        let expect = |ms: f64, curve| Timing::Duration(Duration::from_secs_f64(ms / 1000.0), curve);
+        assert_eq!(
+            theme_timing(Some(&theme), true),
+            expect(neutral.durations.base, theme.motion.easing.effects)
+        );
+        assert_eq!(
+            theme_timing(Some(&theme), false),
+            expect(neutral.durations.fast, theme.motion.easing.exit)
+        );
+    }
+
     // --- View ---
 
     #[derive(Default)]
     struct Owner {
         open: bool,
         exits: u32,
+        /// Build the view without an `on_exited` callback.
+        silent: bool,
     }
 
     /// A full-box child that counts the pointer `Down`s reaching it and
@@ -919,28 +961,42 @@ mod tests {
         owner: Owner,
         hits: Rc<Cell<u32>>,
         now: f64,
+        /// Whether the last frame's paint asked for another frame.
+        needs_frame: bool,
     }
 
     impl Harness {
         fn new(open: bool) -> Self {
+            Self::with_timing(open, linear(64))
+        }
+
+        fn with_timing(open: bool, timing: Timing) -> Self {
             let hits = Rc::new(Cell::new(0));
             let child_hits = hits.clone();
             let logic = Box::new(move |owner: &mut Owner| {
-                presence(
+                let view = presence(
                     owner.open,
                     Target {
                         hits: child_hits.clone(),
                     },
                 )
-                .timing(linear(64), linear(64))
-                .on_exited(|owner: &mut Owner| owner.exits += 1)
+                .timing(timing, timing);
+                if owner.silent {
+                    view
+                } else {
+                    view.on_exited(|owner: &mut Owner| owner.exits += 1)
+                }
             });
             let mut harness = Harness {
                 root: RenderRoot::new(),
                 logic,
-                owner: Owner { open, exits: 0 },
+                owner: Owner {
+                    open,
+                    ..Owner::default()
+                },
                 hits,
                 now: 0.0,
+                needs_frame: false,
             };
             harness.frame();
             harness
@@ -948,12 +1004,18 @@ mod tests {
 
         /// One shell frame — rebuild, layout, paint — 16 ms after the last.
         fn frame(&mut self) -> RecordingScene {
-            self.root.rebuild(&mut self.logic, &mut self.owner);
+            self.rebuild();
             self.root.layout(BOX);
             self.now += 16.0;
             let mut scene = RecordingScene::default();
-            self.root.paint(&mut scene, at(self.now));
+            self.needs_frame = self.root.paint(&mut scene, at(self.now)).needs_frame;
             scene
+        }
+
+        /// A rebuild with no paint after it, as when two flag flips land
+        /// between frames.
+        fn rebuild(&mut self) {
+            self.root.rebuild(&mut self.logic, &mut self.owner);
         }
 
         fn frames(&mut self, n: usize) -> RecordingScene {
@@ -1043,5 +1105,91 @@ mod tests {
         );
         h.frames(10);
         assert!(h.labels().is_empty(), "absent again: {:?}", h.labels());
+    }
+
+    #[test]
+    fn a_callback_attached_after_the_exit_settled_does_not_fire() {
+        let mut h = Harness::new(true);
+        h.owner.silent = true;
+        h.frames(8);
+        h.owner.open = false;
+        h.frames(10);
+        assert_eq!(h.owner.exits, 0, "no callback was set");
+
+        h.owner.silent = false;
+        h.frames(3);
+        h.tap();
+        h.root.event(&mut h.owner, &InputEvent::Housekeeping);
+        h.frames(3);
+        assert_eq!(h.owner.exits, 0, "a past exit is not reported late");
+
+        h.owner.open = true;
+        h.frames(8);
+        h.owner.open = false;
+        h.frames(10);
+        assert_eq!(h.owner.exits, 1, "an exit settled with the callback set is");
+    }
+
+    #[test]
+    fn a_zero_distance_reopen_settles_without_a_frame() {
+        let mut h = Harness::new(true);
+        h.frames(8);
+        assert!(!h.needs_frame, "settled present");
+        h.owner.open = false;
+        h.rebuild();
+        h.owner.open = true;
+        let scene = h.frame();
+        assert!(!h.needs_frame, "a 1 -> 1 ramp owes no frame");
+        assert_eq!(scene.rects.len(), 1);
+        assert!(scene.layers.is_empty(), "painted at full presence");
+        h.frames(3);
+        assert_eq!(h.owner.exits, 0, "the reopen cancelled the exit");
+    }
+
+    #[test]
+    fn open_then_close_before_paint_reports_one_exit_through_the_view() {
+        let mut h = Harness::new(false);
+        h.frames(2);
+        h.owner.open = true;
+        h.rebuild();
+        h.owner.open = false;
+        let scene = h.frame();
+        assert!(scene.rects.is_empty(), "never painted");
+        h.frames(2);
+        assert!(!h.needs_frame);
+        assert_eq!(h.owner.exits, 1);
+    }
+
+    #[test]
+    fn a_settled_spring_presence_paints_without_a_layer() {
+        // Reverse mid-entrance, then reopen while the underdamped exit is
+        // below zero: there `from + (1 - from)` can round one ulp under one.
+        let spring = Timing::Spring(MotionSpring {
+            damping_ratio: 0.5,
+            stiffness: 300.0,
+        });
+        for enter_frames in 3..=7 {
+            for exit_frames in 8..=24 {
+                let mut h = Harness::with_timing(true, spring);
+                h.frames(enter_frames);
+                h.owner.open = false;
+                h.frames(exit_frames);
+                h.owner.open = true;
+                h.frame();
+                for _ in 0..400 {
+                    if !h.needs_frame {
+                        break;
+                    }
+                    h.frame();
+                }
+                let scene = h.frame();
+                assert_eq!(scene.rects.len(), 1);
+                assert!(
+                    scene.layers.is_empty(),
+                    "reopened after {enter_frames}+{exit_frames} frames: {:?}",
+                    scene.layers
+                );
+            }
+        }
     }
 }
