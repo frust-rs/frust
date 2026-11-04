@@ -2385,8 +2385,8 @@ currency").
 
 **Observed**: `fmt::units` at `Width::Long` renders English `km` and `m` as `2 km` and `2 m`,
 not `2 kilometers` / `2 meters`. ICU4X 2.4 / `icu_experimental` 0.7.0 itself returns the short
-form for these units at Long width (checked through its typed `CategorizedFormatter<Length>`),
-so frust's width and locale mapping is correct and passes it through.
+form at Long width, so frust's mapping passes it through. Metres are checked through ICU's typed
+`CategorizedFormatter<Length>`, kilometres through the baked `long-kilometer` data attribute.
 
 **Applies to**: `en` (and locales inheriting it) for the length units `km` and `m`; other
 locales and units are not known to be affected.
@@ -2398,7 +2398,7 @@ append the localized unit name.
 duplicate ICU data. The `formatting_matrix` `2 km` Long pin records the current output and is
 revisited on an ICU4X bump.
 
-**Evidence**: `plugins/i18n/tests/units_width.rs`; `plugins/i18n/tests/formatting_matrix.rs`.
+**Evidence**: `plugins/i18n/tests/units_width.rs` (typed metres, attribute kilometres); `plugins/i18n/tests/formatting_matrix.rs` (`2 km` pin).
 
 ---
 
