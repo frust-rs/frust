@@ -47,8 +47,8 @@ use peniko::{Brush, FontData};
 
 use frust_scene::{FontHandle, Glyph, GlyphRun};
 
-use crate::context::shape::{Shaped, ShapedFace, faux_bold_em_fraction};
 use crate::layout::{ELLIPSIS, LineTable, Paragraph, Source};
+use crate::shape::{Shaped, ShapedFace, faux_bold_em_fraction};
 
 /// Walks `table`'s lines over `paragraph` (whose text is `text`), emitting
 /// glyph runs at the layout origin (an identity transform) and adding the

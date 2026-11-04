@@ -31,8 +31,8 @@ use kurbo::{Point, Size};
 
 use frust_scene::GlyphRun;
 
-use crate::context::shape::{Shaped, ShapedCluster, ShapedRun};
 use crate::convert::RunMemo;
+use crate::shape::{Shaped, ShapedCluster, ShapedRun};
 use crate::style::TextStyle;
 use r#break::{BreakReason, BrokenLine, OverflowWrap, break_lines};
 pub(crate) use metrics::LineMetrics;
@@ -223,7 +223,7 @@ impl<'a> Paragraph<'a> {
 fn newline_only(shaped: &Shaped, run: &ShapedRun) -> bool {
     shaped.clusters[run.clusters.start as usize..run.clusters.end as usize]
         .iter()
-        .all(|c| c.whitespace == crate::context::shape::Whitespace::Newline)
+        .all(|c| c.whitespace == crate::shape::Whitespace::Newline)
 }
 
 /// A line cap: lay out at most `max_lines` lines, the last one ending the
@@ -542,9 +542,9 @@ impl TextLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::shape::ShapeContext;
     use crate::oracle::synthetic::SyntheticBackend;
     use crate::oracle::{Oracle, RenderCapabilities};
+    use crate::shape::ShapeContext;
     use crate::style::{GenericSlot, LineHeight, TextAlign};
     use peniko::{Blob, Color};
 

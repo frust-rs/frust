@@ -5,7 +5,7 @@
 //! Every type here is Frust-owned, not a re-export of a text engine's type
 //! (scene-layer purity, see `docs/ARCHITECTURE.md`). [`FontFamily`]/
 //! [`FontWeight`]/[`FontStyle`]/[`LineHeight`] keep parley 0.11's semantics;
-//! the frust shaping driver (`crate::context::shape`) reads these types
+//! the frust shaping driver (`crate::shape`) reads these types
 //! directly and resolves [`LineHeight`] through [`LineHeight::resolve`], so no
 //! shaping-engine type appears here. Rich per-range styling is deferred.
 
