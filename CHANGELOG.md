@@ -11,8 +11,9 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 - Stroked icons: `IconShape` (`Path`/`Circle`/`Rect`), `IconPaint` (`Stroke` default, `Fill`),
   `IconElement` (const `stroke`/`fill`) and `StrokedIconSource { elements, design, stroke_width }`,
   converted to `IconData` by `From<StrokedIconSource>` or `IconData::from_elements`;
-  `IconData::is_stroked()` reports one and `IconData::resolve()` panics on it, so fill-only slots
-  (plugin icons) do not take stroked icons. `IconView::stroke_width(f64)` overrides the width;
+  `IconData::is_stroked()` reports one and `IconData::resolve()` returns one fillable outline (each stroke
+  expanded with round caps and joins), so fill-only slots (plugin icons) render a stroked icon filled and
+  ignore `stroke_width` overrides. `IconView::stroke_width(f64)` overrides the width;
   strokes use round caps and joins, scale with the icon and take the resolved icon colour.
 - Framework haptic feedback in `frust-core` (flat from `frust` and in `frust::authoring`):
   `#[non_exhaustive] HapticFeedback` (`Selection`, `Light`, `Medium`, `Heavy`, `Success`,
@@ -27,7 +28,8 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 - Devtools: the `set_animation_time_scale` method (params `AnimationTimeScaleParams { scale }`,
   authenticated), the `animation_time_scale` capability and
   `DevtoolsClient::set_animation_time_scale`. The protocol stays v1: the change is additive and an
-  older client decodes the capability as `Unknown`.
+  older client decodes the capability as `Unknown`. A scale a client set is reset to 1.0 when that
+  client disconnects.
 - `frust-ui` `test-support` feature (enable from `[dev-dependencies]`) and
   `frust::testing::semantics_of(build, size) -> SemanticsUpdate`, so an out-of-tree design system
   can test `Widget::semantics`.
@@ -120,6 +122,9 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Changed
 
+- Catalog tooltips (material, glyph, shadcn), the material selection and toggle-button long-press latches
+  and the shadcn OTP caret blink time input on the raw clock (`input_time()`), so they ignore the
+  animation time scale.
 - `MaterialHaptics` forwards to the framework haptic sink when no Material hook is set
   (`SliderTick` maps to `Selection`, `None` to nothing).
 - The `.notdef` warning names only the face, the script and the cluster count, never user text,
@@ -194,7 +199,8 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 ### Fixed
 
 - An interactive edge-swipe pop honours `reduce_motion`: it collapses to `ReducedCrossfade` on its
-  first paint, the drag drives the alpha, and a `PageTransition::Custom` fn is not called.
+  first paint, the drag drives the alpha, the release settles on the reduced timing, and a
+  `PageTransition::Custom` fn is not called.
 - A frame the engine refuses no longer freezes Android/Vulkan apps: a dropped un-presented swapchain
   texture leaks its image on wgpu-hal 30.0.1 ([gfx-rs/wgpu#5723](https://github.com/gfx-rs/wgpu/issues/5723)),
   so frust no longer drops an acquired texture while its swapchain lives (the main surface presents a

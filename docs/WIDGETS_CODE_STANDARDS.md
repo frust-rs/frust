@@ -145,7 +145,8 @@ strings. The canonical example is `crates/frust-drive/templates/app/src/lib.rs.t
   Two clocks: `frame_time()` is the scaled animation clock (`animation_time_scale`) and drives
   animation controllers; `input_time()` is the raw shell clock for gesture timers (long-press,
   double-tap windows, caret blink), velocity timestamps and auto-scroll, so a time scale never
-  stretches input timing.
+  stretches input timing; `DragCoordinator::report_target_bounds` is stamped with `input_time()`, one clock
+  for every reporter on a coordinator.
 - **An animation controller advances during paint, not on a timer.** A widget holds an
   `anim::AnimationController`, calls `advance(ctx.frame_time())` once per paint and, while
   it returns `true`, calls `PaintCtx::request_frame()`. **A layout-affecting animation calls
@@ -207,8 +208,9 @@ strings. The canonical example is `crates/frust-drive/templates/app/src/lib.rs.t
   compatibility-only. `PageTransition::Custom` needs an
   explicit `Timing::Duration`/`Timing::Spring` (`Timing::ThemeDefault` falls back to the M3
   default, 300ms + `Curve::Emphasized`); `reduce_motion` collapses it to `ReducedCrossfade`
-  on both a programmatic pop and an interactive edge-swipe pop (the drag drives the alpha), and
-  the `Custom` fn is called on neither path.
+  on both a programmatic pop and an interactive edge-swipe pop (the drag drives the alpha, and the
+  release settles on a spring derived from the resolved 120 ms reduce-motion duration), and the `Custom` fn
+  is called on neither path.
 - **A new container implements `Widget::visit_children` via `authoring::visit_children!`,
   never by hand-writing an empty override.** The default (`Widget::visit_children`'s no-op) makes
   a container that skips this invisible to `WidgetTree::inspect`/devtools — its children exist in

@@ -3411,11 +3411,11 @@ A mid-interactive-dismissal race is accepted rather than closed: a successor req
 
 ### `catalog-input-timers-follow-time-scale` — some catalog input timers slow under a non-1.0 animation time scale
 
-**Observed**: `frust-widgets` times input on `PaintCtx::input_time()`, the raw shell clock, so long-press, double-tap windows, caret blink, velocity stamps and auto-scroll ignore `set_animation_time_scale`. Several catalog widgets still time input on `frame_time()`, the scaled animation clock, so under a scale other than 1.0 their gesture and dwell timing stretches or shrinks with the animation.
+**Observed**: `frust-widgets` times input on `PaintCtx::input_time()`, the raw shell clock, so long-press, double-tap windows, caret blink, velocity stamps and auto-scroll ignore `set_animation_time_scale`. Some catalog widgets still time input on `frame_time()`, the scaled animation clock, so under a scale other than 1.0 their gesture and dwell timing stretches or shrinks with the animation.
 
-**Applies to**: material dismissible, carousel, sheet and overlay/modal; glyph sheet; shadcn message scroller and overlay/modal; beui message scroller — only while the time scale is not 1.0 (a devtools `set_animation_time_scale` call or an app's own `set_animation_time_scale`).
+**Applies to**: (a) input timers still on `frame_time()`: beui components/tooltip hover open delay, beui blocks/otp_input caret blink, glyph toast auto-dismiss hold, material snackbar auto-dismiss hold, and the material slider and range-slider haptic scheduler (borderline); (b) velocity and fling machinery that stores `last_frame_time`: material dismissible, carousel, sheet and overlay/modal; glyph sheet; shadcn message_scroller and overlay/modal; beui agents/message_scroller — only while the time scale is not 1.0 (a devtools `set_animation_time_scale` call or an app's own `set_animation_time_scale`).
 
-**Why accepted**: the scale is a debugging and test lever, default 1.0, and the affected timers behave correctly at 1.0; moving each catalog widget's input timers is a per-widget change that is not a framework gap.
+**Why accepted**: the scale is a debugging and test lever, default 1.0, and the affected timers behave correctly at 1.0; moving each remaining widget's input timers is a per-widget change that is not a framework gap.
 
 **Trigger for removal**: the listed catalogs read `input_time()` for their input timers and `frame_time()` only for animation drivers.
 
