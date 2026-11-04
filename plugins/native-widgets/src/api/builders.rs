@@ -2716,7 +2716,7 @@ mod tests {
     use super::*;
     use frust_core::{BoxConstraints, LayoutCtx, PaintCtx, PaintScene, Widget};
     use frust_text::TextContext;
-    use frust_text::locale::test_support::LocaleSlotGuard;
+    use frust_text::test_support::LocaleSlotGuard;
     use kurbo::{Point, Rect, Shape, Size};
     use peniko::{Brush, Color};
     use std::any::Any;

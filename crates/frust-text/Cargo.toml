@@ -56,6 +56,6 @@ windows-link.workspace = true
 yeslogic-fontconfig-sys = { workspace = true, features = ["dlopen"] }
 
 [features]
-# Exposes `locale::test_support::LocaleSlotGuard`, the shared lock over the default-locale slot, to
+# Exposes `test_support::LocaleSlotGuard`, the shared lock over the default-locale slot, to
 # downstream tests; enabled from dev-dependencies only.
 test-support = []

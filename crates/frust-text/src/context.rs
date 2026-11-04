@@ -525,6 +525,11 @@ impl TextContext {
     /// and zero-width format characters are not counted. The first such glyph
     /// for a (face, script) pair also logs one warning per process naming the
     /// face, the script and the cluster count, never the text.
+    ///
+    /// A `frust-widgets` `TextInput` builds its own private context, so its
+    /// editor and placeholder `.notdef` glyphs count there, out of the app's
+    /// reach: the app sees them only in the deprecated process-wide
+    /// [`crate::notdef_glyph_count`] total.
     pub fn notdef_glyph_count(&self) -> u64 {
         self.notdef.get()
     }

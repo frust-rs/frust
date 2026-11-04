@@ -556,32 +556,6 @@ impl Widget for TextWidget {
     }
 }
 
-/// Serialises the tests that read the shape counters or write the process-global default-locale
-/// slot: every layout reads the slot, so a writer would otherwise skew a sibling's counts.
-///
-/// The rule: any test that asserts shape counts, generations or rebuild counts, or that registers
-/// fonts (every registration lands in the process-global app-font record and makes every
-/// `TextInput`'s `sync_app_fonts` report a change), takes [`reader`]; a test that writes the
-/// default-locale slot takes [`writer`].
-///
-/// Both take the shared [`LocaleSlotGuard`](crate::test_support::LocaleSlotGuard) — the lock a
-/// design-system plugin's tests take too.
-#[cfg(test)]
-pub(crate) mod locale_slot_test {
-    use crate::test_support::LocaleSlotGuard;
-
-    /// Holds the lock for a test that asserts shape counts and never writes the slot.
-    pub(crate) fn reader() -> LocaleSlotGuard {
-        LocaleSlotGuard::hold()
-    }
-
-    /// Holds the lock for a test that writes the slot; restores the value found at the lock on
-    /// drop, panic included.
-    pub(crate) fn writer() -> LocaleSlotGuard {
-        LocaleSlotGuard::hold()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -786,7 +760,7 @@ mod tests {
 
     #[test]
     fn unchanged_layout_pass_skips_reshaping_entirely() {
-        let _slot = locale_slot_test::reader();
+        let _slot = crate::test_support::LocaleSlotGuard::hold();
         // The verified defect: `TextWidget::layout` re-shaped on every pass. Now
         // an unchanged pass reuses the cached `TextLayout` WITHOUT touching the
         // text context at all — observable as the shape cache seeing exactly one
@@ -815,7 +789,7 @@ mod tests {
 
     #[test]
     fn width_change_rebreaks_without_reshaping() {
-        let _slot = locale_slot_test::reader();
+        let _slot = crate::test_support::LocaleSlotGuard::hold();
         // A width change breaks the widget-level skip (the cached width differs),
         // so it re-lays-out through the context — but the frust-text shape cache
         // reuses the shaping and re-runs line-breaking only.
@@ -993,7 +967,7 @@ mod tests {
     fn a_default_locale_change_invalidates_the_cached_shape() {
         // The slot is process-global: the guard serialises this writer against the
         // shape-count tests and restores the prior default even if an assertion panics.
-        let _slot = locale_slot_test::writer();
+        let _slot = crate::test_support::LocaleSlotGuard::hold();
         let bc = BoxConstraints::loose(Size::new(200.0, 200.0));
         let view = text("\u{76f4}");
         let mut widget = View::<()>::build(&view, &mut frust_core::BuildCtx::new(&mut 0u64));
@@ -1107,9 +1081,9 @@ mod tests {
     /// A text context with the Tuffy test face registered, and the slot lock
     /// held for as long as the caller keeps the guard: the registration lands
     /// in the process-global app-font record, which every `TextInput`'s
-    /// `sync_app_fonts` reads (see [`locale_slot_test`]).
+    /// `sync_app_fonts` reads.
     fn tuffy_context() -> (TextContext, crate::test_support::LocaleSlotGuard) {
-        let slot = locale_slot_test::reader();
+        let slot = crate::test_support::LocaleSlotGuard::hold();
         let mut tcx = TextContext::new();
         tcx.register_fonts(TUFFY.to_vec())
             .expect("the Tuffy test face registers");

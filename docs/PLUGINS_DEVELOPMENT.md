@@ -262,8 +262,9 @@ hand when the source list changes:
 A plugin test that sets or depends on the default locale holds the shared
 `frust_widgets::test_support::LocaleSlotGuard` (`set(Some("ja"))`, or `hold()` to read), behind
 `frust-widgets`' `test-support` feature; a crate without `frust-widgets` uses
-`frust_text::locale::test_support::LocaleSlotGuard` via `frust-text`'s. One lock serves every crate
-in a test binary, so no plugin keeps a private locale lock.
+`frust_text::test_support::LocaleSlotGuard` via `frust-text`'s. One lock serves every crate
+in a test binary, so no plugin keeps a private locale lock. Every test that reads or writes the
+default-locale slot must hold the guard: an unguarded writer still races the guarded tests.
 
 ## Version Pins
 

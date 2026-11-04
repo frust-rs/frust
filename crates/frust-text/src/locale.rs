@@ -44,8 +44,10 @@ pub fn default_locale_generation() -> u64 {
 }
 
 /// A cached layout's dependency on the default locale: the current [`default_locale_generation`]
-/// for an untagged style, a constant for one carrying its own locale (the default never touches
-/// it). Store it beside the style key; reuse the layout while [`is_current`](Self::is_current).
+/// for an untagged style, a sentinel no generation reaches for one carrying its own locale (the
+/// default never touches it). Store it beside the style key; reuse the layout while
+/// [`is_current`](Self::is_current). The stamp records only whether the style was tagged, not
+/// which locale: the caller still keys the style itself, so a changed tag is a key miss.
 ///
 /// **Read the stamp before shaping** and store that value: a read after shaping can postdate a
 /// locale write that landed mid-shape, pairing the old locale's layout with the new generation.
@@ -53,19 +55,34 @@ pub fn default_locale_generation() -> u64 {
 pub struct LocaleStamp(u64);
 
 impl LocaleStamp {
-    /// The stamp for a style whose [`crate::TextStyle::locale`] is `explicit_locale`: a constant
-    /// when it names one, the current generation otherwise.
+    /// The tagged-style stamp: `set_default_locale` advances the generation one step per change
+    /// from 0, so no generation ever equals it.
+    const TAGGED: u64 = u64::MAX;
+
+    /// The stamp for a style whose [`crate::TextStyle::locale`] is `explicit_locale`: the tagged
+    /// sentinel when it names one, the current generation otherwise.
     pub fn for_style(explicit_locale: Option<&str>) -> Self {
         if explicit_locale.is_some() {
-            Self(0)
+            Self(Self::TAGGED)
         } else {
             Self(default_locale_generation())
         }
     }
 
-    /// Whether a layout stamped `self` is valid: always if tagged, else at the same generation.
+    /// Whether a layout stamped `self` is valid for a style whose locale is `explicit_locale`: a
+    /// tagged style accepts only the tagged sentinel, an untagged one only the current generation
+    /// (never the sentinel), so a layout shaped tagged never passes for untagged, or vice versa.
     pub fn is_current(self, explicit_locale: Option<&str>) -> bool {
-        explicit_locale.is_some() || self.0 == default_locale_generation()
+        self.is_current_at(explicit_locale, default_locale_generation())
+    }
+
+    /// [`is_current`](Self::is_current) against a given `generation` rather than the slot's.
+    fn is_current_at(self, explicit_locale: Option<&str>, generation: u64) -> bool {
+        if explicit_locale.is_some() {
+            self.0 == Self::TAGGED
+        } else {
+            self.0 != Self::TAGGED && self.0 == generation
+        }
     }
 }
 
@@ -156,12 +173,46 @@ mod tests {
     fn an_explicit_locale_stamps_a_constant_that_is_always_current() {
         let _guard = DefaultLocale::set(None);
         let stamp = LocaleStamp::for_style(Some("ja"));
+        assert_eq!(
+            stamp,
+            LocaleStamp(u64::MAX),
+            "the tagged sentinel, not a generation"
+        );
         set_default_locale(Some("ko"));
         assert_eq!(LocaleStamp::for_style(Some("ja")), stamp);
         assert_eq!(LocaleStamp::for_style(Some("zh-Hant")), stamp);
         assert!(stamp.is_current(Some("ja")));
         set_default_locale(None);
         assert!(stamp.is_current(Some("ja")), "the default never touches it");
+    }
+
+    #[test]
+    fn a_tagged_stamp_is_never_current_for_an_untagged_style() {
+        let _guard = DefaultLocale::set(None);
+        let tagged = LocaleStamp::for_style(Some("ja"));
+        // Generation 0 is the slot before any `set_default_locale`.
+        assert!(!tagged.is_current_at(None, 0), "at generation 0");
+        assert!(!tagged.is_current(None), "at the current generation");
+        set_default_locale(Some("ko"));
+        assert!(!tagged.is_current(None), "after a change");
+        assert!(
+            !tagged.is_current_at(None, u64::MAX),
+            "not even at the sentinel's value"
+        );
+    }
+
+    #[test]
+    fn an_untagged_stamp_is_never_current_for_a_tagged_style() {
+        let _guard = DefaultLocale::set(None);
+        let at_zero = LocaleStamp::default();
+        assert!(at_zero.is_current_at(None, 0));
+        assert!(!at_zero.is_current_at(Some("ja"), 0), "at generation 0");
+        let untagged = LocaleStamp::for_style(None);
+        assert!(untagged.is_current(None));
+        assert!(
+            !untagged.is_current(Some("ja")),
+            "at the current generation"
+        );
     }
 
     #[test]
