@@ -3839,6 +3839,33 @@ mod tests {
         );
     }
 
+    /// A large but finite miter limit is not refused: `1e300` and `f64::MAX`
+    /// lower, solid and dashed, to the same strips — the cull caps the reach
+    /// either limit implies at the same ceiling — on one worker and on three.
+    #[test]
+    fn a_huge_finite_miter_limit_lowers() {
+        for dash in [None, Some(DashPattern::new(5.0, 3.0).with_phase(1.5))] {
+            let lowered = [1e300, f64::MAX].map(|limit| {
+                let style =
+                    StrokeStyle::new(StrokeCap::Butt, StrokeJoin::Miter).with_miter_limit(limit);
+                let scene = path_scene(
+                    &chevron(),
+                    PathStyle::StrokeStyled {
+                        width: 3.0,
+                        dash,
+                        style,
+                    },
+                );
+                let one = strips_with(&scene, 1).expect("a huge finite limit lowers");
+                let three = strips_with(&scene, 3).expect("a huge finite limit lowers");
+                assert_eq!(one, three, "limit {limit:e}, dash {dash:?}");
+                one
+            });
+            assert!(!lowered[0].0.is_empty(), "the stroke draws");
+            assert_eq!(lowered[0], lowered[1], "dash {dash:?}");
+        }
+    }
+
     #[test]
     fn a_styled_stroke_under_the_round_style_lowers_byte_identically_to_a_stroke() {
         for dash in [None, Some(DashPattern::new(5.0, 3.0).with_phase(1.5))] {
