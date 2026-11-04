@@ -7,6 +7,18 @@
 //! single filled path via [`PaintScene::fill_path`]. Material Symbols outlines
 //! are pre-flattened fills, so no stroking is involved.
 //!
+//! # Stroked, multi-element icons
+//!
+//! A line-art icon set (a stroke on a fixed grid, several elements per icon,
+//! circles and rects alongside paths) is expressed as a [`StrokedIconSource`]:
+//! a `const`-constructible list of [`IconElement`]s, each an [`IconShape`]
+//! painted as a stroke or a fill ([`IconPaint`]), plus the design box and the
+//! stroke width in design units. Strokes use round caps and joins via
+//! [`PaintScene::stroke_path`], scale with the icon (a 1.6-wide stroke on a 24
+//! grid draws 3.2 px at size 48), and every element is inked with the same
+//! resolved icon color as a filled icon. Runtime-built shapes go through
+//! [`IconData::from_elements`]. [`IconSource`] is unchanged.
+//!
 //! # Color resolution
 //!
 //! An icon's color follows the framework's **explicit builder value > theme >
@@ -31,7 +43,7 @@ use frust_core::{
     Widget,
 };
 use frust_theme::Theme;
-use kurbo::{Affine, BezPath, Size};
+use kurbo::{Affine, BezPath, Circle, Rect as KRect, RoundedRect, Shape, Size};
 use peniko::{Brush, Color};
 
 /// Default icon side length, in logical px (Material Symbols' 24×24 design box
@@ -59,6 +71,123 @@ pub struct IconSource {
     pub design: f64,
 }
 
+/// One geometric primitive of a stroked icon, in design-box coordinates.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum IconShape {
+    /// An SVG path `d` string.
+    Path(&'static str),
+    /// A circle centred on `(cx, cy)` with radius `r`.
+    Circle {
+        /// Centre x.
+        cx: f64,
+        /// Centre y.
+        cy: f64,
+        /// Radius.
+        r: f64,
+    },
+    /// An axis-aligned rectangle at `(x, y)` of size `w`×`h`, with corner
+    /// radius `rx` (`0.0` for square corners).
+    Rect {
+        /// Left edge.
+        x: f64,
+        /// Top edge.
+        y: f64,
+        /// Width.
+        w: f64,
+        /// Height.
+        h: f64,
+        /// Corner radius.
+        rx: f64,
+    },
+}
+
+/// How an [`IconElement`] is painted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum IconPaint {
+    /// Stroked with the icon's stroke width, round caps and joins.
+    #[default]
+    Stroke,
+    /// Filled (nonzero).
+    Fill,
+}
+
+/// A shape plus how it is painted; one entry of a [`StrokedIconSource`].
+#[derive(Clone, Copy, Debug)]
+pub struct IconElement {
+    /// The geometry.
+    pub shape: IconShape,
+    /// Stroke or fill.
+    pub paint: IconPaint,
+}
+
+impl IconElement {
+    /// A stroked element.
+    pub const fn stroke(shape: IconShape) -> Self {
+        Self {
+            shape,
+            paint: IconPaint::Stroke,
+        }
+    }
+
+    /// A filled element.
+    pub const fn fill(shape: IconShape) -> Self {
+        Self {
+            shape,
+            paint: IconPaint::Fill,
+        }
+    }
+}
+
+/// A stroked, multi-element icon: `const`-constructible, so a line-art set can
+/// live in `pub const` tables. Convert it into an [`IconData`] (via `From`, or
+/// by passing it to [`icon`]) to paint it.
+///
+/// Stroked icons are not resolvable to a single filled path: see
+/// [`IconData::resolve`].
+#[derive(Clone, Copy, Debug)]
+pub struct StrokedIconSource {
+    /// The elements, painted in order.
+    pub elements: &'static [IconElement],
+    /// The side length of the square design box the elements are authored against.
+    pub design: f64,
+    /// The stroke width, in design units (scaled with the icon at paint time).
+    pub stroke_width: f64,
+}
+
+/// Flattening tolerance, in design units, for circle and rect elements.
+const SHAPE_TOLERANCE: f64 = 0.1;
+
+impl IconShape {
+    /// Convert to a design-space path. A malformed `Path` string is a wiring
+    /// bug and panics.
+    fn to_bez_path(self) -> BezPath {
+        match self {
+            IconShape::Path(d) => BezPath::from_svg(d).unwrap_or_else(|e| {
+                panic!(
+                    "stroked icon SVG path failed to parse (wiring bug — a malformed \
+                     StrokedIconSource element): {e}"
+                )
+            }),
+            IconShape::Circle { cx, cy, r } => Circle::new((cx, cy), r).to_path(SHAPE_TOLERANCE),
+            IconShape::Rect { x, y, w, h, rx } => {
+                if rx > 0.0 {
+                    RoundedRect::new(x, y, x + w, y + h, rx).to_path(SHAPE_TOLERANCE)
+                } else {
+                    KRect::new(x, y, x + w, y + h).to_path(SHAPE_TOLERANCE)
+                }
+            }
+        }
+    }
+}
+
+/// Parsed multi-element geometry, shared behind an `Arc`.
+#[derive(Debug)]
+struct ElementsGeom {
+    elements: Vec<(BezPath, IconPaint)>,
+    design: f64,
+    stroke_width: f64,
+}
+
 /// A user-supplied path plus its design box, shared behind an `Arc` so an
 /// [`IconData`] clone is cheap.
 #[derive(Debug)]
@@ -67,13 +196,28 @@ struct PathGeom {
     design: f64,
 }
 
-/// The two shapes an [`IconData`] can hold.
+/// The shapes an [`IconData`] can hold.
 #[derive(Clone, Debug)]
 enum IconRepr {
     /// A generated static source: parse its `d` lazily at build/rebuild.
     Svg { d: &'static str, design: f64 },
     /// A user-built path + design box, already in `kurbo` form.
     Path(Arc<PathGeom>),
+    /// A generated static stroked source: parsed lazily at build/rebuild.
+    Stroked(StrokedIconSource),
+    /// Runtime-built multi-element geometry.
+    Elements(Arc<ElementsGeom>),
+}
+
+/// The resolved geometry an [`IconWidget`] paints.
+enum Geometry {
+    /// One filled path.
+    Fill(BezPath),
+    /// Several elements, each stroked or filled, at `stroke_width` design units.
+    Elements {
+        elements: Vec<(BezPath, IconPaint)>,
+        stroke_width: f64,
+    },
 }
 
 /// A cheap-clone handle around an icon's path data and its design box.
@@ -104,6 +248,57 @@ impl IconData {
         }
     }
 
+    /// Build a stroked, multi-element icon from already-built paths, each
+    /// stroked or filled, a design box and a stroke width in design units.
+    /// Shared behind an `Arc` like [`IconData::from_path`].
+    pub fn from_elements(
+        elements: Vec<(BezPath, IconPaint)>,
+        design_size: f64,
+        stroke_width: f64,
+    ) -> Self {
+        Self {
+            repr: IconRepr::Elements(Arc::new(ElementsGeom {
+                elements,
+                design: design_size,
+                stroke_width,
+            })),
+        }
+    }
+
+    /// Whether this is a stroked, multi-element icon (which [`IconData::resolve`]
+    /// cannot represent).
+    pub fn is_stroked(&self) -> bool {
+        matches!(self.repr, IconRepr::Stroked(_) | IconRepr::Elements(_))
+    }
+
+    /// Resolve into the geometry the widget paints, plus the design box.
+    fn geometry(&self) -> (Geometry, f64) {
+        match &self.repr {
+            IconRepr::Stroked(src) => (
+                Geometry::Elements {
+                    elements: src
+                        .elements
+                        .iter()
+                        .map(|e| (e.shape.to_bez_path(), e.paint))
+                        .collect(),
+                    stroke_width: src.stroke_width,
+                },
+                src.design,
+            ),
+            IconRepr::Elements(geom) => (
+                Geometry::Elements {
+                    elements: geom.elements.clone(),
+                    stroke_width: geom.stroke_width,
+                },
+                geom.design,
+            ),
+            _ => {
+                let (path, design) = self.resolve();
+                (Geometry::Fill(path), design)
+            }
+        }
+    }
+
     /// Resolve this handle into a concrete `(design-space path, design box)`
     /// pair.
     ///
@@ -111,6 +306,14 @@ impl IconData {
     /// [`BezPath::from_svg`](kurbo::BezPath::from_svg); a parse failure is a
     /// wiring bug (a malformed generated entry) and panics. For a user path it
     /// clones the shared `BezPath` (cheap for the small paths icons are).
+    ///
+    /// # Panics
+    ///
+    /// On a stroked or multi-element icon ([`StrokedIconSource`],
+    /// [`IconData::from_elements`]): those are not resolvable to one filled
+    /// path, so asking is a wiring bug. Fill-only consumers (a plugin's icon
+    /// slot) do not support stroked icons; check [`IconData::is_stroked`]
+    /// first if the source is not known.
     ///
     /// Public because out-of-tree design systems (the design-system plugin
     /// tier) paint icons through it — `IconData` without `resolve` has no
@@ -127,6 +330,10 @@ impl IconData {
                 (path, *design)
             }
             IconRepr::Path(geom) => (geom.path.clone(), geom.design),
+            IconRepr::Stroked(_) | IconRepr::Elements(_) => panic!(
+                "stroked icons are not resolvable to one filled path (wiring bug — \
+                 a fill-only consumer was given a stroked icon)"
+            ),
         }
     }
 
@@ -149,6 +356,17 @@ impl IconData {
                 },
             ) => a == b && design_a == design_b,
             (IconRepr::Path(a), IconRepr::Path(b)) => Arc::ptr_eq(a, b),
+            (IconRepr::Stroked(a), IconRepr::Stroked(b)) => {
+                a.design == b.design
+                    && a.stroke_width == b.stroke_width
+                    && (std::ptr::eq(a.elements, b.elements)
+                        || a.elements
+                            .iter()
+                            .zip(b.elements)
+                            .all(|(x, y)| x.paint == y.paint && x.shape == y.shape)
+                            && a.elements.len() == b.elements.len())
+            }
+            (IconRepr::Elements(a), IconRepr::Elements(b)) => Arc::ptr_eq(a, b),
             _ => false,
         }
     }
@@ -162,6 +380,20 @@ impl From<IconSource> for IconData {
                 design: source.design,
             },
         }
+    }
+}
+
+impl From<StrokedIconSource> for IconData {
+    fn from(source: StrokedIconSource) -> Self {
+        IconData {
+            repr: IconRepr::Stroked(source),
+        }
+    }
+}
+
+impl From<&StrokedIconSource> for IconData {
+    fn from(source: &StrokedIconSource) -> Self {
+        IconData::from(*source)
     }
 }
 
@@ -189,6 +421,7 @@ pub struct IconView {
     data: IconData,
     size: f64,
     color: Option<Color>,
+    stroke_width: Option<f64>,
     label: Option<String>,
 }
 
@@ -200,6 +433,7 @@ pub fn icon(data: impl Into<IconData>) -> IconView {
         data: data.into(),
         size: DEFAULT_SIZE,
         color: None,
+        stroke_width: None,
         label: None,
     }
 }
@@ -225,6 +459,13 @@ impl IconView {
         self
     }
 
+    /// Override a stroked icon's stroke width, in design units (scaled with
+    /// the icon). Ignored by filled icons.
+    pub fn stroke_width(mut self, width: f64) -> Self {
+        self.stroke_width = Some(width);
+        self
+    }
+
     /// Attach an accessible label, contributing a [`Role::Image`] semantics node
     /// (an unlabelled icon is decorative and reports nothing).
     pub fn label(mut self, label: impl Into<String>) -> Self {
@@ -237,10 +478,10 @@ impl<State: 'static> View<State> for IconView {
     type Element = IconWidget;
 
     fn build(&self, _ctx: &mut BuildCtx<'_>) -> IconWidget {
-        let (base_path, design) = self.data.resolve();
+        let (geometry, design) = self.data.geometry();
         IconWidget {
             data: self.data.clone(),
-            base_path,
+            geometry,
             design,
             size: self.size,
             // Natural-size default until `layout` runs — a widget painted
@@ -249,6 +490,7 @@ impl<State: 'static> View<State> for IconView {
             // the unconstrained `size×size` box, matching pre-fix behavior.
             laid_out_size: Size::new(self.size, self.size),
             color: self.color,
+            stroke_width: self.stroke_width,
             label: self.label.clone(),
         }
     }
@@ -263,9 +505,9 @@ impl<State: 'static> View<State> for IconView {
         if !prev.data.same(&self.data) {
             // Only a genuine icon change re-parses; an every-frame rebuild that
             // re-supplies the same source keeps the cached path.
-            let (base_path, design) = self.data.resolve();
+            let (geometry, design) = self.data.geometry();
             element.data = self.data.clone();
-            element.base_path = base_path;
+            element.geometry = geometry;
             element.design = design;
             flags |= ChangeFlags::PAINT;
         }
@@ -282,6 +524,10 @@ impl<State: 'static> View<State> for IconView {
             element.color = self.color;
             flags |= ChangeFlags::PAINT;
         }
+        if prev.stroke_width != self.stroke_width {
+            element.stroke_width = self.stroke_width;
+            flags |= ChangeFlags::PAINT;
+        }
         if prev.label != self.label {
             // Semantics are recomputed each frame from the widget, so the label
             // just needs to be adopted — no layout/paint dirtiness.
@@ -295,9 +541,9 @@ impl<State: 'static> View<State> for IconView {
 pub struct IconWidget {
     /// Retained for `rebuild`'s cheap same-icon check (avoids re-parsing).
     data: IconData,
-    /// The parsed path, in its design-box coordinate space (`0..design`).
-    base_path: BezPath,
-    /// The side length of `base_path`'s square design box.
+    /// The parsed geometry, in its design-box coordinate space (`0..design`).
+    geometry: Geometry,
+    /// The side length of the geometry's square design box.
     design: f64,
     size: f64,
     /// The box `layout` last resolved (`bc.constrain(size×size)`) — what
@@ -306,6 +552,8 @@ pub struct IconWidget {
     /// tight constraint the requested `size` doesn't satisfy.
     laid_out_size: Size,
     color: Option<Color>,
+    /// Explicit stroke-width override, in design units.
+    stroke_width: Option<f64>,
     label: Option<String>,
 }
 
@@ -337,8 +585,28 @@ impl Widget for IconWidget {
         let glyph_side = self.design * scale;
         let dx = (self.laid_out_size.width - glyph_side) / 2.0;
         let dy = (self.laid_out_size.height - glyph_side) / 2.0;
-        let scaled = Affine::translate((dx, dy)) * Affine::scale(scale) * self.base_path.clone();
-        scene.fill_path(ctx.origin(), &scaled, &Brush::Solid(color));
+        let transform = Affine::translate((dx, dy)) * Affine::scale(scale);
+        let brush = Brush::Solid(color);
+        match &self.geometry {
+            Geometry::Fill(path) => {
+                scene.fill_path(ctx.origin(), &(transform * path.clone()), &brush);
+            }
+            Geometry::Elements {
+                elements,
+                stroke_width,
+            } => {
+                let width = self.stroke_width.unwrap_or(*stroke_width) * scale;
+                for (path, paint) in elements {
+                    let scaled = transform * path.clone();
+                    match paint {
+                        IconPaint::Stroke => {
+                            scene.stroke_path(ctx.origin(), &scaled, width, &brush)
+                        }
+                        IconPaint::Fill => scene.fill_path(ctx.origin(), &scaled, &brush),
+                    }
+                }
+            }
+        }
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
@@ -380,6 +648,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingScene {
         fills: Vec<(Point, Rect, Color)>,
+        strokes: Vec<(Point, Rect, f64, Color)>,
     }
 
     impl PaintScene for RecordingScene {
@@ -391,6 +660,14 @@ mod tests {
                 _ => Color::TRANSPARENT,
             };
             self.fills.push((origin, path.bounding_box(), color));
+        }
+        fn stroke_path(&mut self, origin: Point, path: &BezPath, width: f64, brush: &Brush) {
+            let color = match brush {
+                Brush::Solid(c) => *c,
+                _ => Color::TRANSPARENT,
+            };
+            self.strokes
+                .push((origin, path.bounding_box(), width, color));
         }
     }
 
@@ -618,6 +895,188 @@ mod tests {
         let rec = paint_rec(&mut w, Point::ZERO, None);
         assert_eq!(rec.fills.len(), 1);
         assert_eq!(rec.fills[0].2, DEFAULT_COLOR);
+    }
+
+    // -- stroked icons ------------------------------------------------------
+
+    const LINE_ICON: StrokedIconSource = StrokedIconSource {
+        elements: &[
+            IconElement::stroke(IconShape::Path("M4 4 L20 4")),
+            IconElement::stroke(IconShape::Circle {
+                cx: 12.0,
+                cy: 12.0,
+                r: 3.0,
+            }),
+        ],
+        design: 24.0,
+        stroke_width: 1.6,
+    };
+
+    #[test]
+    fn stroked_icon_strokes_each_element_with_scaled_width() {
+        let view = icon(LINE_ICON).size(48.0);
+        let mut w = build(&view);
+        let theme = Theme::neutral();
+        let rec = paint_rec(&mut w, Point::ZERO, Some(&theme));
+        assert!(rec.fills.is_empty());
+        assert_eq!(rec.strokes.len(), 2);
+        for (_, _, width, color) in &rec.strokes {
+            assert!((width - 3.2).abs() < 1e-9);
+            assert_eq!(*color, theme.scheme().on_surface);
+        }
+    }
+
+    #[test]
+    fn stroke_width_override_replaces_the_source_width() {
+        let view = icon(LINE_ICON).size(48.0).stroke_width(1.0);
+        let mut w = build(&view);
+        let rec = paint_rec(&mut w, Point::ZERO, None);
+        assert!((rec.strokes[0].2 - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn circle_and_rect_elements_become_paths() {
+        let data = IconData::from(
+            const {
+                StrokedIconSource {
+                    elements: &[
+                        IconElement::stroke(IconShape::Circle {
+                            cx: 12.0,
+                            cy: 12.0,
+                            r: 3.0,
+                        }),
+                        IconElement::stroke(IconShape::Rect {
+                            x: 2.0,
+                            y: 4.0,
+                            w: 10.0,
+                            h: 6.0,
+                            rx: 0.0,
+                        }),
+                        IconElement::stroke(IconShape::Rect {
+                            x: 2.0,
+                            y: 4.0,
+                            w: 10.0,
+                            h: 6.0,
+                            rx: 2.0,
+                        }),
+                    ],
+                    design: 24.0,
+                    stroke_width: 1.0,
+                }
+            },
+        );
+        let view = icon(data).size(48.0);
+        let mut w = build(&view);
+        let rec = paint_rec(&mut w, Point::ZERO, None);
+        assert_eq!(rec.strokes.len(), 3);
+        let near = |a: f64, b: f64| (a - b).abs() < 0.2;
+        let c = rec.strokes[0].1;
+        assert!(near(c.x0, 18.0) && near(c.x1, 30.0) && near(c.y0, 18.0) && near(c.y1, 30.0));
+        for i in [1, 2] {
+            let r = rec.strokes[i].1;
+            assert!(near(r.x0, 4.0) && near(r.x1, 24.0) && near(r.y0, 8.0) && near(r.y1, 20.0));
+        }
+    }
+
+    #[test]
+    fn fill_elements_in_a_stroked_icon_use_fill_path() {
+        let data = IconData::from(
+            const {
+                StrokedIconSource {
+                    elements: &[
+                        IconElement::stroke(IconShape::Path("M0 0 L24 24")),
+                        IconElement::fill(IconShape::Circle {
+                            cx: 12.0,
+                            cy: 12.0,
+                            r: 2.0,
+                        }),
+                    ],
+                    design: 24.0,
+                    stroke_width: 1.6,
+                }
+            },
+        );
+        let mut w = build(&icon(data));
+        let rec = paint_rec(&mut w, Point::ZERO, None);
+        assert_eq!(rec.strokes.len(), 1);
+        assert_eq!(rec.fills.len(), 1);
+    }
+
+    #[test]
+    fn explicit_color_wins_for_stroked_icons() {
+        let explicit = Color::from_rgb8(0xAB, 0xCD, 0xEF);
+        let mut w = build(&icon(LINE_ICON).color(explicit));
+        let theme = Theme::neutral();
+        let rec = paint_rec(&mut w, Point::ZERO, Some(&theme));
+        assert!(rec.strokes.iter().all(|s| s.3 == explicit));
+    }
+
+    #[test]
+    fn no_theme_uses_default_color() {
+        let mut w = build(&icon(LINE_ICON));
+        let rec = paint_rec(&mut w, Point::ZERO, None);
+        assert!(rec.strokes.iter().all(|s| s.3 == DEFAULT_COLOR));
+    }
+
+    #[test]
+    fn stroked_source_is_const_usable() {
+        const T: StrokedIconSource = StrokedIconSource {
+            elements: &[IconElement::stroke(IconShape::Circle {
+                cx: 12.0,
+                cy: 12.0,
+                r: 3.0,
+            })],
+            design: 24.0,
+            stroke_width: 1.6,
+        };
+        let mut w = build(&icon(T));
+        assert_eq!(paint_rec(&mut w, Point::ZERO, None).strokes.len(), 1);
+    }
+
+    #[test]
+    fn from_elements_paints_runtime_shapes() {
+        let mut p = BezPath::new();
+        p.move_to((0.0, 0.0));
+        p.line_to((10.0, 10.0));
+        let data = IconData::from_elements(vec![(p, IconPaint::Stroke)], 10.0, 1.0);
+        let mut w = build(&icon(data).size(20.0));
+        let rec = paint_rec(&mut w, Point::ZERO, None);
+        assert_eq!(rec.strokes.len(), 1);
+        assert!((rec.strokes[0].2 - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn same_distinguishes_stroked_icons() {
+        let a = IconData::from(LINE_ICON);
+        assert!(a.same(&IconData::from(LINE_ICON)));
+        let other = StrokedIconSource {
+            stroke_width: 2.0,
+            ..LINE_ICON
+        };
+        assert!(!a.same(&IconData::from(other)));
+        assert!(!a.same(&square_data()));
+        assert!(a.is_stroked() && !square_data().is_stroked());
+    }
+
+    #[test]
+    #[should_panic(expected = "not resolvable to one filled path")]
+    fn resolve_on_a_stroked_icon_panics() {
+        let _ = IconData::from(LINE_ICON).resolve();
+    }
+
+    #[test]
+    #[should_panic(expected = "wiring bug")]
+    fn malformed_stroked_path_panics_as_wiring_bug() {
+        let data = IconData::from(
+            const {
+                StrokedIconSource {
+                    elements: &[IconElement::stroke(IconShape::Path("not a path"))],
+                    design: 24.0,
+                    stroke_width: 1.6,
+                }
+            },
+        );
+        let _ = build(&icon(data));
     }
 
     // -- semantics ----------------------------------------------------------
