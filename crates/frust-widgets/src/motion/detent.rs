@@ -124,7 +124,8 @@ impl Detents {
     /// The target a release settles to: the nearest (a tie takes the lower), or
     /// from `|velocity| >= fling_velocity` the next one in the direction of
     /// travel. Always one of [`targets`](Self::targets): a NaN `progress` takes
-    /// the lowest; a NaN `velocity` or `fling_velocity` never flings.
+    /// the lowest; a zero or NaN `velocity` and a NaN `fling_velocity` never
+    /// fling.
     pub fn release_target(
         &self,
         progress: f64,
@@ -134,7 +135,7 @@ impl Detents {
         fling_velocity: f64,
     ) -> f64 {
         let targets = self.targets(extent);
-        if velocity.abs() >= fling_velocity {
+        if velocity != 0.0 && velocity.abs() >= fling_velocity {
             let opening = velocity * close_sign < 0.0;
             let next = if opening {
                 targets.iter().copied().find(|t| *t > progress)
@@ -178,11 +179,11 @@ impl Detents {
 /// through [`Detents`] and springs to the target from the release velocity
 /// (unclamped, so an under-damped [`SpringDesc`] overshoots before landing).
 ///
-/// A grab mid-settle is continuous for any spring:
+/// A grab mid-settle leaves no dead zone for any spring:
 /// [`begin_drag`](Self::begin_drag) clamps an overshoot into `0.0..=` the
-/// furthest target and places the controller there in the same step, so the
-/// drag that follows starts from the progress the grab left showing, with no
-/// dead zone.
+/// furthest target and places the controller there in the same step, so a grab
+/// during an overshoot snaps by the overshoot at grab time and the drag that
+/// follows moves from there.
 ///
 /// [`release`](Self::release) takes px/s along the axis (positive toward
 /// growing coordinates) on the raw input clock (`PaintCtx::input_time`) and
@@ -217,7 +218,9 @@ impl DetentController {
 
     /// Use `fling_velocity` (px/s along the axis) as the release speed from
     /// which [`release`](Self::release) takes the next detent in its direction
-    /// of travel ([`DEFAULT_FLING_VELOCITY`] otherwise). A NaN never flings.
+    /// of travel ([`DEFAULT_FLING_VELOCITY`] otherwise). A NaN never flings; a
+    /// threshold at or below zero flings on any moving release, and a release
+    /// with no velocity always takes the nearest detent.
     pub fn with_fling_velocity(mut self, fling_velocity: f64) -> Self {
         self.fling_velocity = fling_velocity;
         self
@@ -738,7 +741,7 @@ mod tests {
     }
 
     #[test]
-    fn begin_drag_interrupts_an_underdamped_overshoot_without_a_jump() {
+    fn begin_drag_interrupts_an_underdamped_overshoot_without_a_dead_zone() {
         let bouncy = SpringDesc {
             mass: 1.0,
             stiffness: 400.0,
@@ -786,6 +789,19 @@ mod tests {
         assert_eq!(c.progress(), 0.0);
         c.drag_by(-4.0, 1.0);
         assert_eq!(c.progress(), 0.01);
+    }
+
+    #[test]
+    fn a_motionless_release_never_flings_even_with_a_zero_threshold() {
+        for threshold in [0.0, -10.0] {
+            let mut c = sheet().with_fling_velocity(threshold);
+            c.jump_to(1.0);
+            c.begin_drag();
+            assert_eq!(
+                c.release(0.0, 1.0, DismissPolicy::Dismissable, SPRING),
+                DetentRelease::SnapTo(1.0)
+            );
+        }
     }
 
     #[test]
