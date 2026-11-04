@@ -1867,6 +1867,39 @@ mod tests {
     }
 
     #[test]
+    fn an_even_odd_pentagram_has_an_empty_centre_where_nonzero_fills_it() {
+        let mut star = BezPath::new();
+        for i in 0..5 {
+            let angle =
+                -std::f64::consts::FRAC_PI_2 + f64::from(i) * 4.0 * std::f64::consts::PI / 5.0;
+            let point = (16.0 + 14.0 * angle.cos(), 17.0 + 14.0 * angle.sin());
+            if i == 0 {
+                star.move_to(point);
+            } else {
+                star.line_to(point);
+            }
+        }
+        star.close_path();
+        let render = |rule| {
+            let mut scene = Scene::new();
+            SceneBuilder::new(&mut scene).fill_path_with_rule(
+                star.clone(),
+                rule,
+                Brush::Solid(RED),
+            );
+            CpuOracle::new()
+                .render(&scene, &spec(32, Color::WHITE))
+                .expect("scene renders")
+        };
+        assert_eq!(pixel(&render(FillRule::NonZero), 16, 17), [255, 0, 0, 255]);
+        assert_eq!(
+            pixel(&render(FillRule::EvenOdd), 16, 17),
+            [255, 255, 255, 255]
+        );
+        assert_eq!(pixel(&render(FillRule::EvenOdd), 16, 7), [255, 0, 0, 255]);
+    }
+
+    #[test]
     fn a_styled_stroke_renders_its_caps_and_the_round_style_as_a_stroke() {
         let mut line = BezPath::new();
         line.move_to((6.0, 10.0));
