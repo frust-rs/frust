@@ -72,7 +72,10 @@ authenticated `set_animation_time_scale` method (`AnimationTimeScaleParams { sca
 range, a backend without support `NOT_SUPPORTED`) and its `animation_time_scale` capability, which
 the shell backend advertises with or without `hotpatch`, are likewise additive: an older client
 decodes the capability as `Unknown`. `DevtoolsClient::set_animation_time_scale` is the typed call;
-`frust-mcp` only maps the capability name. See
+`frust-mcp` only maps the capability name. A connection that set the scale resets it to 1.0 when it ends
+(disconnect, I/O error, service shutdown or task abort) through a drop guard on the per-connection state,
+run on the backend thread; with two setters the last disconnect wins. The whole service compiles out unless
+the opt-in `devtools` feature is on. See
 [DEVELOPMENT.md](DEVELOPMENT.md) for the feature/build-mode funnel and
 [CODE_STANDARDS.md](CODE_STANDARDS.md) for the frame-stats publish-ordering convention.
 

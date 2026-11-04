@@ -143,7 +143,10 @@ the facade/plugin boundary described in the index; CORE itself never depends on 
   `PaintCtx::input_time()` the raw shell clock (gesture timers, velocity stamps, caret blink). The scale is a
   process-wide slot, `set_animation_time_scale(f64) -> bool` / `animation_time_scale()`, accepting
   `MIN_ANIMATION_TIME_SCALE` (0.01) ..= `MAX_ANIMATION_TIME_SCALE` (100.0) and refusing anything else; tests
-  override it per thread (`anim::with_thread_animation_time_scale`) behind `cfg(test)`/`test-support`.
+  override it per thread (`anim::with_thread_animation_time_scale`) behind `cfg(test)`/`test-support`, or
+  hold a lock and restore 1.0. The scale is global by design (one value for every `RenderRoot`): after any run
+  at another scale the scaled clock keeps a permanent offset from raw time; back at 1.0 it adds raw deltas
+  1:1 and a backward raw step adds zero.
 - The `feedback` module is the haptic seam: a `#[non_exhaustive]` `HapticFeedback` vocabulary (`Selection`,
   `Light`, `Medium`, `Heavy`, `Success`, `Warning`, `Error`), a `HapticSink` fn pointer installed with the
   last-wins `set_haptic_sink`, and `perform_haptic()` (a no-op without a sink; `haptic_sink_installed()`
