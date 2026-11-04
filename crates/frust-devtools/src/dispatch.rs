@@ -9,9 +9,9 @@
 use std::sync::Arc;
 
 use frust_devtools_protocol::{
-    AckResult, FrameStats, HandshakeInfo, HandshakeParams, Incoming, InputScrollParams,
-    InputTapParams, InputTextParams, Method, Notification, Request, Response, RpcError,
-    WidgetPropsParams, decode_line, serde_json, serde_json::Value,
+    AckResult, AnimationTimeScaleParams, FrameStats, HandshakeInfo, HandshakeParams, Incoming,
+    InputScrollParams, InputTapParams, InputTextParams, Method, Notification, Request, Response,
+    RpcError, WidgetPropsParams, decode_line, serde_json, serde_json::Value,
 };
 
 use crate::frame_stats::FrameStatsBus;
@@ -309,6 +309,15 @@ pub(crate) async fn handle_request(
             Ok(p) => no_effect(backend_response(ctx, id, Call::InputText(p.text)).await),
             Err(e) => no_effect(Response::error(id, invalid_params(req, &e))),
         },
+
+        Method::SetAnimationTimeScale => {
+            match serde_json::from_value::<AnimationTimeScaleParams>(req.params.clone()) {
+                Ok(p) => {
+                    no_effect(backend_response(ctx, id, Call::SetAnimationTimeScale(p.scale)).await)
+                }
+                Err(e) => no_effect(Response::error(id, invalid_params(req, &e))),
+            }
+        }
 
         // Capability-gated (`Capability::HotPatch`): see `hot_patch_request`.
         Method::HotpatchInfo | Method::PatchChunk | Method::TableChunk | Method::ApplyPatch => {
@@ -1180,6 +1189,7 @@ mod tests {
             Method::InputTap,
             Method::InputScroll,
             Method::InputText,
+            Method::SetAnimationTimeScale,
             Method::Screenshot,
             Method::FrameStats,
             Method::HotpatchInfo,

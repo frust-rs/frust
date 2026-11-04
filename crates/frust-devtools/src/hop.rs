@@ -55,6 +55,7 @@ pub(crate) enum Call {
     InputTap(InputTapParams),
     InputScroll(InputScrollParams),
     InputText(String),
+    SetAnimationTimeScale(f64),
     Screenshot,
 }
 
@@ -68,6 +69,7 @@ impl Call {
             Call::InputTap(_) => "input_tap",
             Call::InputScroll(_) => "input_scroll",
             Call::InputText(_) => "input_text",
+            Call::SetAnimationTimeScale(_) => "set_animation_time_scale",
             Call::Screenshot => "screenshot",
         }
     }
@@ -187,6 +189,7 @@ fn execute<B: DevtoolsBackend>(backend: &B, call: Call) -> CallOutcome {
         Call::InputTap(params) => ack(backend.inject_tap(params)),
         Call::InputScroll(params) => ack(backend.inject_scroll(params)),
         Call::InputText(text) => ack(backend.inject_text(&text)),
+        Call::SetAnimationTimeScale(scale) => ack(backend.set_animation_time_scale(scale)),
         Call::Screenshot => match backend.screenshot() {
             Ok(shot) => CallOutcome::Screenshot(shot),
             Err(e) => CallOutcome::Failed(e.to_rpc_error()),

@@ -167,6 +167,19 @@ pub trait DevtoolsBackend: Send + 'static {
     /// Synthesize text input against the focused widget.
     fn inject_text(&self, text: &str) -> Result<(), BackendError>;
 
+    /// Set the running app's animation time scale (`1.0` is real time).
+    ///
+    /// Defaults to [`BackendError::NotSupported`] (`RpcError::NOT_SUPPORTED`
+    /// on the wire): a backend that overrides this should declare
+    /// [`Capability::AnimationTimeScale`] in [`Self::handshake_info`]. A value
+    /// the backend cannot apply is [`BackendError::InvalidRequest`].
+    fn set_animation_time_scale(&self, scale: f64) -> Result<(), BackendError> {
+        let _ = scale;
+        Err(BackendError::not_supported(
+            "this backend does not implement set_animation_time_scale",
+        ))
+    }
+
     /// Capture the current frame as a PNG.
     ///
     /// Defaults to [`BackendError::NotSupported`]: a screenshot needs a

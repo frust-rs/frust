@@ -23,6 +23,14 @@
 //! `frust` that drives it), and the change is additive on the app side — a
 //! pre-chunk host's inline `table.map` (with no `table_len`, which defaults to
 //! 0) still decodes and is applied as sent. This crate never writes one.
+//!
+//! # `set_animation_time_scale` is additive
+//!
+//! [`crate::PROTOCOL_VERSION`] also stays 1 across the `set_animation_time_scale`
+//! method ([`AnimationTimeScaleParams`]) and its [`Capability::AnimationTimeScale`]
+//! capability: a client sends the method only after the handshake lists the
+//! capability, and an older client decodes the new capability name as
+//! [`Capability::Unknown`].
 
 use serde::{Deserialize, Serialize};
 
@@ -80,6 +88,9 @@ pub enum Capability {
     ///    chunks arrived on the same connection, their length equals `len`,
     ///    and `pid` and `anchor_runtime` match.
     HotPatch,
+    /// The server accepts `set_animation_time_scale`
+    /// ([`AnimationTimeScaleParams`]).
+    AnimationTimeScale,
     /// A capability name introduced by a newer protocol version than this
     /// crate knows about. Deserializing an unrecognized capability must not
     /// fail the whole handshake — forward compatibility, at the cost of not
@@ -188,8 +199,17 @@ pub struct InputTextParams {
     pub text: String,
 }
 
+/// `set_animation_time_scale` request params.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct AnimationTimeScaleParams {
+    /// The multiplier applied to animation time: `1.0` is real time, larger
+    /// is faster, smaller is slower. The server rejects a non-finite or
+    /// out-of-range value with `RpcError::INVALID_PARAMS`.
+    pub scale: f64,
+}
+
 /// The ack result `input_tap`/`input_scroll`/`input_text`/
-/// `frame_stats_subscribe` all reply with.
+/// `set_animation_time_scale`/`frame_stats_subscribe` all reply with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AckResult {
     #[serde(default = "default_true")]
@@ -652,6 +672,18 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Capability>("\"hot_patch\"").unwrap(),
             Capability::HotPatch
+        );
+    }
+
+    #[test]
+    fn animation_time_scale_capability_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&Capability::AnimationTimeScale).unwrap(),
+            "\"animation_time_scale\""
+        );
+        assert_eq!(
+            serde_json::from_str::<Capability>("\"animation_time_scale\"").unwrap(),
+            Capability::AnimationTimeScale
         );
     }
 
