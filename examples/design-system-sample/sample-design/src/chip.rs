@@ -394,20 +394,19 @@ mod tests {
         assert!(!w.captured);
     }
 
-    static SINK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    static RECORDED: std::sync::Mutex<Vec<HapticFeedback>> = std::sync::Mutex::new(Vec::new());
+    // The sink is process-wide and other tests press chips concurrently, so
+    // record per thread: the sink runs on the thread that dispatched the press.
+    thread_local! {
+        static RECORDED: std::cell::RefCell<Vec<HapticFeedback>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
 
     fn record(feedback: HapticFeedback) {
-        RECORDED
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(feedback);
+        RECORDED.with(|recorded| recorded.borrow_mut().push(feedback));
     }
 
     #[test]
     fn pressing_the_chip_fires_selection_feedback() {
-        let _guard = SINK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        RECORDED.lock().unwrap_or_else(|e| e.into_inner()).clear();
         frust::set_haptic_sink(Some(record));
 
         let mut w = build();
@@ -419,7 +418,7 @@ mod tests {
         }
 
         frust::set_haptic_sink(None);
-        let recorded = RECORDED.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let recorded = RECORDED.with(|recorded| recorded.borrow().clone());
         assert_eq!(recorded, vec![HapticFeedback::Selection]);
         assert_eq!(state.count, 1);
     }
