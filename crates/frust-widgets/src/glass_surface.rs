@@ -13,7 +13,9 @@
 //! # Paint order
 //!
 //! 1. The tier's drop shadow ([`PaintScene::draw_shadow`]), when its alpha is
-//!    above zero.
+//!    above zero, inside a clip that excludes the surface's own rounded
+//!    rectangle (an outer rect with the surface as a hole), so the shadow is
+//!    cast outside the surface and never reaches the lens or the washes.
 //! 2. A rounded clip at [`GlassSurfaceView::corner_radius`].
 //! 3. Translucent material: [`PaintScene::backdrop_blur`] with the tier's
 //!    `blur_radius_intent`, then the brightness-selected fill stack
@@ -38,10 +40,10 @@
 //! The blur is not free and the engine bounds it; read these before placing
 //! many surfaces.
 //!
-//! - **Per-frame cap.** The engine allows 4 backdrop blurs per frame by
-//!   default; an app changes it (clamped to 1..=16) with
-//!   `set_max_backdrops_per_frame`. The (cap + 1)th backdrop **refuses the
-//!   whole frame**: the engine's refusal
+//! - **Per-frame cap.** The engine allows `MAX_BACKDROPS_PER_FRAME` backdrop
+//!   blurs per frame by default; an app changes it (clamped to
+//!   `BACKDROP_CAP_CEILING`) with `set_max_backdrops_per_frame`. The
+//!   (cap + 1)th backdrop **refuses the whole frame**: the engine's refusal
 //!   contract never degrades a frame silently, so a screen with too many
 //!   glass surfaces shows nothing new rather than a partly blurred picture.
 //! - **Dropped inside some layers.** Inside an opacity layer, a retained body
@@ -59,7 +61,7 @@ use frust_core::{
 use frust_theme::{
     Brightness, ColorScheme, GlassMaterial, GlassTier, ShadowSpec, SurfaceRole, Theme,
 };
-use kurbo::{Point, RoundedRect, Shape, Size};
+use kurbo::{BezPath, Point, Rect, RoundedRect, Shape, Size};
 use peniko::{Brush, Color};
 
 /// Flattening tolerance for the hairline's rounded-rect path.
@@ -175,6 +177,30 @@ fn surface_color(scheme: &ColorScheme, role: SurfaceRole) -> Color {
     }
 }
 
+/// The clip the shadow draws under, in the surface's local space: an outer
+/// rect covering the shadow's full extent with the surface's rounded rect as
+/// a hole. The hole's winding is reversed so the nonzero clip excludes it.
+fn shadow_clip_path(size: Size, radius: f64, y_offset: f64, blur_std_dev: f64) -> BezPath {
+    let blur = if blur_std_dev.is_finite() {
+        blur_std_dev.max(0.0)
+    } else {
+        0.0
+    };
+    let offset = if y_offset.is_finite() {
+        y_offset.abs()
+    } else {
+        0.0
+    };
+    let margin = 3.0 * blur + offset + 1.0;
+    let mut path = Rect::new(-margin, -margin, size.width + margin, size.height + margin)
+        .to_path(HAIRLINE_TOLERANCE);
+    let hole =
+        RoundedRect::new(0.0, 0.0, size.width, size.height, radius).to_path(HAIRLINE_TOLERANCE);
+    let hole = hole.reverse_subpaths();
+    path.extend(hole);
+    path
+}
+
 impl GlassSurfaceWidget {
     /// The material to paint, or `None` when there is neither an explicit one
     /// nor a theme.
@@ -226,6 +252,12 @@ impl Widget for GlassSurfaceWidget {
             } = material.shadow;
             if color_alpha > 0.0 {
                 let base = theme.map_or(Color::BLACK, |t| t.scheme().shadow);
+                // Clip the shadow to everything outside the surface so it
+                // does not darken the backdrop the lens samples.
+                scene.push_clip_path(
+                    origin,
+                    &shadow_clip_path(size, radius, y_offset, blur_std_dev),
+                );
                 scene.draw_shadow(
                     Point::new(origin.x, origin.y + y_offset),
                     size,
@@ -233,6 +265,7 @@ impl Widget for GlassSurfaceWidget {
                     blur_std_dev,
                     with_alpha(base, color_alpha),
                 );
+                scene.pop_clip();
             }
         }
 
@@ -289,10 +322,10 @@ mod tests {
     use super::*;
     use crate::test_support::leaf;
     use frust_theme::{DesignLanguage, GlassFill};
-    use kurbo::BezPath;
 
     #[derive(Debug, PartialEq)]
     enum Op {
+        ShadowClip(Point, BezPath),
         Shadow(Point, Size, f64, f64, Color),
         Clip(Point, Size, f64),
         Blur(Point, Size, f64),
@@ -320,6 +353,9 @@ mod tests {
         }
         fn push_clip_rounded(&mut self, o: Point, s: Size, r: f64) {
             self.ops.push(Op::Clip(o, s, r));
+        }
+        fn push_clip_path(&mut self, o: Point, p: &BezPath) {
+            self.ops.push(Op::ShadowClip(o, p.clone()));
         }
         fn pop_clip(&mut self) {
             self.ops.push(Op::PopClip);
@@ -381,25 +417,30 @@ mod tests {
     }
 
     #[test]
-    fn translucent_tier_records_shadow_clip_blur_fills_child_hairline_in_order() {
+    fn translucent_tier_records_clipped_shadow_clip_blur_fills_child_hairline_in_order() {
         let theme = glass_theme();
         let ops = paint_with(&surface().corner_radius(8.0), Some(&theme));
         let o = Point::new(10.0, 20.0);
         let s = Size::new(40.0, 30.0);
         let shadow_color = with_alpha(theme.scheme().shadow, 0.12);
-        assert_eq!(ops.len(), 8, "{ops:?}");
+        assert_eq!(ops.len(), 10, "{ops:?}");
         assert_eq!(
             ops[0],
+            Op::ShadowClip(o, shadow_clip_path(s, 8.0, 2.0, 4.0))
+        );
+        assert_eq!(
+            ops[1],
             Op::Shadow(Point::new(10.0, 22.0), s, 8.0, 4.0, shadow_color)
         );
-        assert_eq!(ops[1], Op::Clip(o, s, 8.0));
-        assert_eq!(ops[2], Op::Blur(o, s, 45.0));
-        assert_eq!(ops[3], Op::Fill(8.0, Color::new([1.0, 1.0, 1.0, 0.3])));
-        assert_eq!(ops[4], Op::Fill(8.0, Color::new([0.9, 0.9, 0.9, 0.1])));
-        assert_eq!(ops[5], Op::Child(s));
-        assert_eq!(ops[6], Op::PopClip);
+        assert_eq!(ops[2], Op::PopClip);
+        assert_eq!(ops[3], Op::Clip(o, s, 8.0));
+        assert_eq!(ops[4], Op::Blur(o, s, 45.0));
+        assert_eq!(ops[5], Op::Fill(8.0, Color::new([1.0, 1.0, 1.0, 0.3])));
+        assert_eq!(ops[6], Op::Fill(8.0, Color::new([0.9, 0.9, 0.9, 0.1])));
+        assert_eq!(ops[7], Op::Child(s));
+        assert_eq!(ops[8], Op::PopClip);
         assert_eq!(
-            ops[7],
+            ops[9],
             Op::Hairline(o, 1.0, Brush::Solid(Color::new([1.0, 1.0, 1.0, 0.3])))
         );
     }
@@ -459,6 +500,32 @@ mod tests {
         let expected = surface_color(theme.scheme(), role);
         assert!(ops.contains(&Op::Fill(0.0, expected)));
         assert!(!ops.iter().any(|op| matches!(op, Op::Hairline(..))));
+    }
+
+    #[test]
+    fn shadow_clip_excludes_the_surface_interior() {
+        let s = Size::new(40.0, 30.0);
+        let path = shadow_clip_path(s, 8.0, 2.0, 4.0);
+        // Nonzero winding: the outer rect wraps +1, the reversed hole cancels.
+        let inside = Point::new(20.0, 15.0);
+        let ring = Point::new(-5.0, 15.0);
+        let outer = Point::new(-100.0, 15.0);
+        assert_eq!(kurbo::Shape::winding(&path, inside), 0);
+        assert_ne!(kurbo::Shape::winding(&path, ring), 0);
+        assert_eq!(kurbo::Shape::winding(&path, outer), 0);
+        // The outer rect covers the whole shadow extent (3 sigma plus offset).
+        assert!(kurbo::Shape::bounding_box(&path).contains(Point::new(-14.0, 36.0)));
+    }
+
+    #[test]
+    fn non_finite_or_non_positive_intent_paints_opaque_with_no_backdrop() {
+        let theme = glass_theme();
+        for blur in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, 0.0] {
+            let ops = paint_with(&surface().material(material(blur)), Some(&theme));
+            assert!(!ops.iter().any(|op| matches!(op, Op::Blur(..))), "{blur}");
+            let expected = surface_color(theme.scheme(), theme.elevation.level2.surface_role);
+            assert!(ops.contains(&Op::Fill(0.0, expected)), "{blur}");
+        }
     }
 
     #[test]

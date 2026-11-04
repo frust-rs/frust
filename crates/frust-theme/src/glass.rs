@@ -73,12 +73,14 @@ pub struct GlassMaterial {
 }
 
 impl GlassMaterial {
-    /// `true` when this material carries no background-blur intent — the
+    /// `true` when this material carries no usable background-blur intent: a
+    /// non-finite or non-positive `blur_radius_intent` counts as opaque, so
+    /// a widget paints its opaque fill with no backdrop and no cap slot. The
     /// opaque-material path a widget takes on the Material design language,
     /// where it paints its surface-container role instead of a lens. The
     /// single-API branch that lets one widget read either design language.
     pub fn is_opaque(&self) -> bool {
-        self.blur_radius_intent == 0.0
+        !(self.blur_radius_intent.is_finite() && self.blur_radius_intent > 0.0)
     }
 }
 
@@ -151,6 +153,17 @@ impl GlassScale {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn non_finite_or_non_positive_intent_is_opaque() {
+        let mut m = GlassScale::opaque_material().chrome;
+        for v in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, 0.0] {
+            m.blur_radius_intent = v;
+            assert!(m.is_opaque(), "{v}");
+        }
+        m.blur_radius_intent = 0.5;
+        assert!(!m.is_opaque());
+    }
 
     #[test]
     fn opaque_material_is_opaque_in_every_tier() {
