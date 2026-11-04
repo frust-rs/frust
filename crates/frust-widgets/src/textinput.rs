@@ -985,10 +985,10 @@ pub struct TextInputWidget {
     ///
     /// [`apply_style`]: Self::apply_style
     applied_style: TextStyle,
-    /// [`frust_text::default_locale_generation`] when `editor` was last built:
+    /// The [`frust_text::LocaleStamp`] read before `editor` was last built:
     /// a change re-shapes untagged text under the new default, so `layout`
     /// rebuilds the editor (like a late font registration).
-    applied_locale_generation: u64,
+    applied_locale_stamp: frust_text::LocaleStamp,
     /// A late font registration `layout` has seen but not yet rebuilt for
     /// (deferred while an editor-owned preedit is live).
     fonts_pending: bool,
@@ -2182,6 +2182,8 @@ impl<State: 'static> View<State> for TextInputView<State> {
 
     fn build(&self, _ctx: &mut BuildCtx<'_>) -> TextInputWidget {
         let style = self.text_style.clone();
+        // Read before the editor shapes its first layout (see `LocaleStamp`).
+        let locale_stamp = frust_text::LocaleStamp::for_style(None);
         let mut text_ctx = TextContext::new();
         let mut editor = TextEditor::new(&style);
         // Seed the initial controlled value (and refresh the layout metrics).
@@ -2201,7 +2203,7 @@ impl<State: 'static> View<State> for TextInputView<State> {
             style: style.clone(),
             text_style_explicit: self.text_style_explicit,
             applied_style: style,
-            applied_locale_generation: frust_text::default_locale_generation(),
+            applied_locale_stamp: locale_stamp,
             fonts_pending: false,
             rebuild_deferred: false,
             #[cfg(test)]
@@ -2396,10 +2398,12 @@ impl Widget for TextInputWidget {
         // what's currently installed (a theme swap, or a rebuild-invalidated
         // `style`/`text_style_explicit` — see `effective_style`/`apply_style`).
         let effective = self.effective_style(Theme::from_layout_ctx(ctx));
-        let locale_generation = frust_text::default_locale_generation();
+        // Read before the rebuild shapes (see `LocaleStamp`). `None`: the editor keys on the
+        // current generation even for a tagged style, as it always has.
+        let locale_stamp = frust_text::LocaleStamp::for_style(None);
         let rebuild_due = self.fonts_pending
             || effective != self.applied_style
-            || locale_generation != self.applied_locale_generation;
+            || locale_stamp != self.applied_locale_stamp;
         // Every rebuild trigger waits out an editor-owned preedit: the rebuild
         // would re-seed it as a platform range and the IME's next `Compose`
         // would duplicate its text. The trigger stays pending (the font flag,
@@ -2412,7 +2416,7 @@ impl Widget for TextInputWidget {
             } else {
                 self.fonts_pending = false;
                 self.rebuild_deferred = false;
-                self.applied_locale_generation = locale_generation;
+                self.applied_locale_stamp = locale_stamp;
                 self.apply_style(effective);
             }
         }
@@ -3262,16 +3266,12 @@ mod tests {
         drag_select_all(&mut state, &mut root);
         let before = widget(&root).editor.editing_state_bytes();
         assert_ne!(before.base, before.extent, "a selection exists");
-        let generation = widget(&root).applied_locale_generation;
+        let generation = widget(&root).applied_locale_stamp;
 
         frust_text::set_default_locale(Some("ja"));
         root.layout(Size::new(300.0, 200.0));
 
-        assert_ne!(
-            widget(&root).applied_locale_generation,
-            generation,
-            "rebuilt"
-        );
+        assert_ne!(widget(&root).applied_locale_stamp, generation, "rebuilt");
         let after = widget(&root).editor.editing_state_bytes();
         assert_eq!(after.text, "hello");
         assert_eq!((after.base, after.extent), (before.base, before.extent));
@@ -3284,12 +3284,12 @@ mod tests {
         let mut root = harness(&mut state);
         root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
         compose(&mut root, &mut state, "ni");
-        let generation = widget(&root).applied_locale_generation;
+        let generation = widget(&root).applied_locale_stamp;
 
         frust_text::set_default_locale(Some("ja"));
         root.layout(Size::new(300.0, 200.0));
         assert_eq!(
-            widget(&root).applied_locale_generation,
+            widget(&root).applied_locale_stamp,
             generation,
             "no rebuild while the preedit is live"
         );
@@ -3306,7 +3306,7 @@ mod tests {
         root.event(&mut state, &InputEvent::Ime(ImeEvent::Commit("nih".into())));
         assert_eq!(widget(&root).editor.text(), "nih");
         root.layout(Size::new(300.0, 200.0));
-        let rebuilt = widget(&root).applied_locale_generation;
+        let rebuilt = widget(&root).applied_locale_stamp;
         assert_ne!(rebuilt, generation, "rebuilt once the composition ended");
         assert_eq!(
             widget(&root).editor_rebuilds,
@@ -3314,7 +3314,7 @@ mod tests {
             "exactly one rebuild"
         );
         root.layout(Size::new(300.0, 200.0));
-        assert_eq!(widget(&root).applied_locale_generation, rebuilt);
+        assert_eq!(widget(&root).applied_locale_stamp, rebuilt);
         assert_eq!(widget(&root).editor_rebuilds, rebuilds + 1, "and no more");
         assert_eq!(widget(&root).editor.text(), "nih");
     }
