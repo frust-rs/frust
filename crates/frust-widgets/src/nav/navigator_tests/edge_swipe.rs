@@ -463,6 +463,68 @@ fn reduced_interactive_pop_commit_and_cancel_still_finalize() {
     }
 }
 
+// --- The release settle of a reduced-motion interactive pop runs on the
+//     reduce-motion duration, like the programmatic collapse. The default
+//     settle is unchanged: `release_past_half_completes_pop` and
+//     `low_progress_high_velocity_release_completes` drive it without a theme,
+//     and the contrast below shows it outlasting the reduced bound. ---
+
+/// Swipe a plain page B (height 80) to mid progress under `theme`, release,
+/// and return how many ms after the first post-release frame the transition
+/// finalized.
+fn mid_release_finalize_ms(theme: Theme) -> u64 {
+    let controller: NavigatorController<()> = NavigatorController::new();
+    let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+    root.set_theme(Box::new(theme));
+    let mut app = {
+        let ctrl = controller.clone();
+        move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0)).pop_swipe(true)
+    };
+    let mut state = ();
+    controller.push(|| sized_page(100.0, 80.0));
+    let _ = full_frame(&mut root, &mut app, &mut state, ft(0));
+    let mut scene = TransitionScene::default();
+    root.event(&mut state, &down(5.0, 50.0));
+    root.paint(&mut scene, ft(100));
+    root.event(&mut state, &move_to(60.0, 50.0));
+    root.paint(&mut scene, ft(200));
+    root.event(&mut state, &up(60.0, 50.0));
+    let released = 216u64;
+    for frame in 0..200u64 {
+        let now = released + frame * 16;
+        let _ = full_frame(&mut root, &mut app, &mut state, ft(now));
+        let settled = nav_widget(&root)
+            .transition
+            .as_ref()
+            .is_none_or(|t| t.settled);
+        if settled {
+            root.rebuild(&mut app, &mut state);
+            assert!(
+                nav_widget(&root).transition.is_none(),
+                "a settled transition finalizes"
+            );
+            return now - released;
+        }
+    }
+    panic!("the released swipe never settled");
+}
+
+#[test]
+fn reduced_interactive_pop_settles_within_the_reduce_motion_duration() {
+    let frame_ms = 16;
+    let bound = crate::nav::transition::REDUCE_MOTION_DURATION.as_millis() as u64 + frame_ms;
+    let reduced = mid_release_finalize_ms(*reduced_theme());
+    assert!(
+        reduced <= bound,
+        "a reduced-motion release took {reduced} ms, over {bound} ms"
+    );
+    let animated = mid_release_finalize_ms(Theme::neutral());
+    assert!(
+        animated > bound,
+        "the default settle spring is unchanged ({animated} ms)"
+    );
+}
+
 // --- A completed swipe delivers the pop result. ---
 
 #[test]

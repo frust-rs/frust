@@ -1051,6 +1051,13 @@ impl DragCoordinator {
     /// [`set_target_bounds`](Self::set_target_bounds)'s unclocked stamping.
     /// See the [module docs](super) for the pass contract and its limit.
     /// Ignored (with a debug-build log) if the target is not registered.
+    ///
+    /// Stamp `frame` with [`PaintCtx::input_time`](frust_core::PaintCtx::input_time),
+    /// the raw shell clock, as [`DragTargetWidget`](super::DragTargetWidget)
+    /// does. Every reporter on one coordinator must use that same clock: a pass
+    /// is identified by equality on the stamp, so a reporter stamping with the
+    /// scaled [`PaintCtx::frame_time`](frust_core::PaintCtx::frame_time) splits
+    /// each paint into several passes.
     pub fn report_target_bounds(&self, id: DragTargetId, bounds: Option<Rect>, frame: FrameTime) {
         let frame = (frame != FrameTime::ZERO).then_some(frame);
         if !self.shared.borrow_mut().record_bounds(id, bounds, frame) {

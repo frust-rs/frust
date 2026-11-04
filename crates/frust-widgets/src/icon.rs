@@ -142,7 +142,7 @@ impl IconElement {
 /// live in `pub const` tables. Convert it into an [`IconData`] (via `From`, or
 /// by passing it to [`icon`]) to paint it.
 ///
-/// Stroked icons are not resolvable to a single filled path: see
+/// A fill-only consumer gets an outline approximation: see
 /// [`IconData::resolve`].
 #[derive(Clone, Copy, Debug)]
 pub struct StrokedIconSource {
@@ -156,6 +156,32 @@ pub struct StrokedIconSource {
 
 /// Flattening tolerance, in design units, for circle and rect elements.
 const SHAPE_TOLERANCE: f64 = 0.1;
+
+/// Fitting tolerance, in design units, for the outline [`IconData::resolve`]
+/// builds from a stroke: finer than [`SHAPE_TOLERANCE`] so a 24-grid icon
+/// filled at 48 px or more shows no facets on its stroke edges.
+const STROKE_OUTLINE_TOLERANCE: f64 = 0.02;
+
+/// One nonzero-fillable path covering `elements`: fills appended as-is, each
+/// stroke expanded to its round-capped, round-joined outline at `stroke_width`.
+fn fill_outline<'a>(
+    elements: impl IntoIterator<Item = (&'a BezPath, IconPaint)>,
+    stroke_width: f64,
+) -> BezPath {
+    let style = kurbo::Stroke::new(stroke_width)
+        .with_caps(kurbo::Cap::Round)
+        .with_join(kurbo::Join::Round);
+    let opts = kurbo::StrokeOpts::default();
+    let mut out = BezPath::new();
+    for (path, paint) in elements {
+        let piece = match paint {
+            IconPaint::Fill => path.clone(),
+            IconPaint::Stroke => kurbo::stroke(path, &style, &opts, STROKE_OUTLINE_TOLERANCE),
+        };
+        out.extend(piece);
+    }
+    out
+}
 
 impl IconShape {
     /// Convert to a design-space path. A malformed `Path` string is a wiring
@@ -266,7 +292,7 @@ impl IconData {
     }
 
     /// Whether this is a stroked, multi-element icon (which [`IconData::resolve`]
-    /// cannot represent).
+    /// returns as an outline approximation).
     pub fn is_stroked(&self) -> bool {
         matches!(self.repr, IconRepr::Stroked(_) | IconRepr::Elements(_))
     }
@@ -307,13 +333,13 @@ impl IconData {
     /// wiring bug (a malformed generated entry) and panics. For a user path it
     /// clones the shared `BezPath` (cheap for the small paths icons are).
     ///
-    /// # Panics
-    ///
-    /// On a stroked or multi-element icon ([`StrokedIconSource`],
-    /// [`IconData::from_elements`]): those are not resolvable to one filled
-    /// path, so asking is a wiring bug. Fill-only consumers (a plugin's icon
-    /// slot) do not support stroked icons; check [`IconData::is_stroked`]
-    /// first if the source is not known.
+    /// A stroked or multi-element icon ([`StrokedIconSource`],
+    /// [`IconData::from_elements`]) resolves to an outline approximation: its
+    /// fill elements as-is plus each stroke expanded to a round-capped outline
+    /// at the source stroke width, one path for the nonzero fill. A fill-only
+    /// consumer (a plugin's icon slot) therefore renders it filled and ignores
+    /// [`IconView::stroke_width`] overrides; [`IconData::is_stroked`] tells the
+    /// two kinds apart. Only [`IconView`] strokes natively.
     ///
     /// Public because out-of-tree design systems (the design-system plugin
     /// tier) paint icons through it — `IconData` without `resolve` has no
@@ -330,9 +356,21 @@ impl IconData {
                 (path, *design)
             }
             IconRepr::Path(geom) => (geom.path.clone(), geom.design),
-            IconRepr::Stroked(_) | IconRepr::Elements(_) => panic!(
-                "stroked icons are not resolvable to one filled path (wiring bug — \
-                 a fill-only consumer was given a stroked icon)"
+            IconRepr::Stroked(src) => {
+                let paths: Vec<(BezPath, IconPaint)> = src
+                    .elements
+                    .iter()
+                    .map(|e| (e.shape.to_bez_path(), e.paint))
+                    .collect();
+                let outline = fill_outline(paths.iter().map(|(p, k)| (p, *k)), src.stroke_width);
+                (outline, src.design)
+            }
+            IconRepr::Elements(geom) => (
+                fill_outline(
+                    geom.elements.iter().map(|(p, k)| (p, *k)),
+                    geom.stroke_width,
+                ),
+                geom.design,
             ),
         }
     }
@@ -1059,9 +1097,57 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "not resolvable to one filled path")]
-    fn resolve_on_a_stroked_icon_panics() {
-        let _ = IconData::from(LINE_ICON).resolve();
+    fn resolve_turns_a_stroked_icon_into_a_fill_outline() {
+        const RING: StrokedIconSource = StrokedIconSource {
+            elements: &[IconElement::stroke(IconShape::Circle {
+                cx: 12.0,
+                cy: 12.0,
+                r: 3.0,
+            })],
+            design: 24.0,
+            stroke_width: 1.6,
+        };
+        let (outline, design) = IconData::from(RING).resolve();
+        assert_eq!(design, 24.0);
+        let bounds = outline.bounding_box();
+        for (got, want) in [
+            (bounds.x0, 8.2),
+            (bounds.y0, 8.2),
+            (bounds.x1, 15.8),
+            (bounds.y1, 15.8),
+        ] {
+            assert!((got - want).abs() < 0.05, "outline edge {got}, want {want}");
+        }
+        assert!(
+            !outline.contains(Point::new(12.0, 12.0)),
+            "the ring is hollow"
+        );
+        assert!(
+            outline.contains(Point::new(15.0, 12.0)),
+            "the ring band is inked"
+        );
+        let (line, _) = IconData::from(LINE_ICON).resolve();
+        assert!(line.contains(Point::new(12.0, 4.0)));
+        let mut runtime = BezPath::new();
+        runtime.move_to((0.0, 5.0));
+        runtime.line_to((10.0, 5.0));
+        let data = IconData::from_elements(vec![(runtime, IconPaint::Stroke)], 10.0, 2.0);
+        let (path, design) = data.resolve();
+        assert_eq!(design, 10.0);
+        assert!((path.bounding_box().y1 - 6.0).abs() < 0.05);
+    }
+
+    #[test]
+    fn resolve_keeps_fill_elements() {
+        let mut dot = BezPath::new();
+        dot.move_to((2.0, 2.0));
+        dot.line_to((6.0, 2.0));
+        dot.line_to((6.0, 6.0));
+        dot.close_path();
+        let data = IconData::from_elements(vec![(dot.clone(), IconPaint::Fill)], 8.0, 1.0);
+        let (path, design) = data.resolve();
+        assert_eq!(design, 8.0);
+        assert_eq!(path, dot);
     }
 
     #[test]
