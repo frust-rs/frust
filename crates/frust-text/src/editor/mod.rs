@@ -68,11 +68,12 @@ use std::borrow::Cow;
 use std::ops::Range;
 use std::sync::Arc;
 
-use kurbo::{Affine, Point, Rect, Size};
+use kurbo::{Point, Rect, Size};
 
 use frust_scene::GlyphRun;
 
 use crate::context::TextContext;
+use crate::convert::RunMemo;
 use crate::layout::{LineTable, Paragraph, lay_out};
 use crate::shape::Shaped;
 use crate::style::TextStyle;
@@ -174,12 +175,17 @@ pub struct EditingState {
     pub composing_extent: i32,
 }
 
-/// The editor's current layout: the shaping, its line table, and the caret
-/// units over both.
+/// The editor's current layout: the shaping, its line table, the caret
+/// units over both, and the line table's glyph-run memo.
 struct View {
     shaped: Arc<Shaped>,
     lines: LineTable,
     layout: EditLayout,
+    /// The glyph runs of `lines`, filled by the first
+    /// [`TextEditor::to_scene_runs`] after a relayout and served to every
+    /// later paint, so the `.notdef` scan runs once per layout. It counts
+    /// into the context the view was laid out through.
+    base_runs: RunMemo,
 }
 
 /// The editing engine: a text buffer, its selection and IME composition, and
@@ -461,22 +467,25 @@ impl TextEditor {
     /// Converts the current layout into [`frust_scene::GlyphRun`]s at
     /// `origin` (reusing [`crate::TextLayout`]'s converter).
     ///
+    /// The line-table walk is memoized until the next relayout (an edit that
+    /// changes the text, or a wrap-width change), as
+    /// [`crate::TextLayout::to_scene_runs`] memoizes it: a repaint between
+    /// edits only re-translates the runs and adds nothing to
+    /// [`TextContext::notdef_glyph_count`].
+    ///
     /// Empty before the first [`apply`](Self::apply).
     pub fn to_scene_runs(&self, origin: Point) -> Vec<GlyphRun> {
         let Some(view) = &self.view else {
             return Vec::new();
         };
-        if self.text.is_empty() {
-            // Only the sizing space of an empty text is shaped: nothing draws.
-            return Vec::new();
-        }
-        let paragraph = Paragraph::new(&view.shaped, &self.styles, None);
-        let mut runs = crate::convert::lines_to_scene_runs(&paragraph, &self.text, &view.lines);
-        let transform = Affine::translate((origin.x, origin.y));
-        for run in &mut runs {
-            run.transform = transform;
-        }
-        runs
+        view.base_runs.placed(origin, |notdef| {
+            if self.text.is_empty() {
+                // Only the sizing space of an empty text is shaped: nothing draws.
+                return Vec::new();
+            }
+            let paragraph = Paragraph::new(&view.shaped, &self.styles, None);
+            crate::convert::lines_to_scene_runs(&paragraph, &self.text, &view.lines, notdef)
+        })
     }
 
     /// The current caret layout (empty before the first refresh).
@@ -526,6 +535,7 @@ impl TextEditor {
             shaped,
             lines,
             layout,
+            base_runs: RunMemo::new(ctx.notdef_counter()),
         });
     }
 

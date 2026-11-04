@@ -41,6 +41,7 @@ use web_time::Instant;
 
 use peniko::Blob;
 
+use crate::convert::NotdefCounter;
 use crate::layout::{ELLIPSIS, Ellipsis, TextLayout};
 use crate::oracle::cache::FontCacheStats;
 use crate::oracle::registry::{FamilySummary, RegistryMirror};
@@ -141,6 +142,10 @@ pub struct TextContext {
     /// context's app-font registry (with its watermarks into the process-wide
     /// app-font and generic-fallback records).
     oracle: Oracle,
+    /// The `.notdef` glyphs drawn by this context's layouts and editors
+    /// ([`Self::notdef_glyph_count`]); each [`TextLayout`] and editor view
+    /// carries a handle to it.
+    notdef: NotdefCounter,
 }
 
 /// The number of lines a layout actually puts content on, discounting the
@@ -365,6 +370,7 @@ impl TextContext {
             shape_cx: shape::ShapeContext::default(),
             shaped_cache: ShapedCache::new(DEFAULT_CAPACITY),
             oracle,
+            notdef: NotdefCounter::default(),
         };
         let sync_started = Instant::now();
         cx.sync_app_fonts();
@@ -402,7 +408,7 @@ impl TextContext {
         // an empty label still occupies one line of its style's height.
         let shaped_text = if text.is_empty() { " " } else { text };
         let shaped = Arc::new(self.shape_cx.shape(&mut self.oracle, shaped_text, style));
-        let laid_out = LaidOut::new(text, shaped, style, max_width);
+        let laid_out = LaidOut::new(text, shaped, style, max_width, &self.notdef);
         let layout = laid_out.layout();
         self.shape_cache.insert(key, laid_out);
         layout
@@ -506,6 +512,27 @@ impl TextContext {
     /// type leaks through (scene-layer purity).
     pub fn shape_cache_stats(&self) -> ShapeCacheStats {
         self.shape_cache.stats()
+    }
+
+    /// How many visible-text glyphs this context's layouts and editors drew
+    /// as glyph 0 (`.notdef`: no face covered the character).
+    ///
+    /// Counted when a [`TextLayout`] or [`crate::TextEditor`] first converts
+    /// a line table to glyph runs; later paints of the same table add
+    /// nothing. That holds for a retained layout, for layouts rebuilt from a
+    /// shape-cache hit (they share the entry's runs until a width change
+    /// re-breaks it) and for an editor between edits. Whitespace, controls
+    /// and zero-width format characters are not counted. The first such glyph
+    /// for a (face, script) pair also logs one warning per process naming the
+    /// face, the script and the cluster count, never the text.
+    pub fn notdef_glyph_count(&self) -> u64 {
+        self.notdef.get()
+    }
+
+    /// The counter this context's layouts and editor views add `.notdef`
+    /// glyphs to.
+    pub(crate) fn notdef_counter(&self) -> &NotdefCounter {
+        &self.notdef
     }
 
     /// Shapes `text` with `style` through the frust shaping driver (fonts from
@@ -2178,66 +2205,225 @@ mod tests {
         (cx, families[0].name.clone())
     }
 
-    fn walk(cx: &mut TextContext, family: &str, text: &str) {
-        let style = TextStyle {
+    const NOTO_SANS: &[u8] = include_bytes!("../../../testing/fonts/NotoSans-Subset.ttf");
+
+    /// The Latin subset (" ,Helo\u{e9}") with its PostScript name
+    /// `NotoSans-Regular` renamed to `{tag}-Regular` (`tag` is eight ASCII
+    /// characters), so the process-wide warn-once set never sees this
+    /// test's face from another test.
+    fn renamed_noto(tag: &str) -> Vec<u8> {
+        assert_eq!(tag.len(), 8);
+        let utf16 = |s: &str| -> Vec<u8> { s.encode_utf16().flat_map(u16::to_be_bytes).collect() };
+        let (from, to) = (utf16("NotoSans-Regular"), utf16(&format!("{tag}-Regular")));
+        let mut bytes = NOTO_SANS.to_vec();
+        let mut renamed = 0;
+        let mut at = 0;
+        while let Some(i) = bytes[at..].windows(from.len()).position(|w| w == from) {
+            bytes[at + i..at + i + to.len()].copy_from_slice(&to);
+            at += i + to.len();
+            renamed += 1;
+        }
+        assert!(renamed > 0, "the subset names itself NotoSans-Regular");
+        bytes
+    }
+
+    fn noto_style(family: &str) -> TextStyle {
+        TextStyle {
             family: crate::FontFamily::named(family),
             ..style(16.0)
-        };
+        }
+    }
+
+    fn walk(cx: &mut TextContext, family: &str, text: &str) {
         let _ = cx
-            .layout(text, &style, None)
+            .layout(text, &noto_style(family), None)
             .to_scene_runs(kurbo::Point::ORIGIN);
     }
 
-    fn warns_naming(family: &str) -> Vec<String> {
-        let quoted = format!("'{family}");
+    /// Every captured warning naming the face `name` (as the warning
+    /// quotes it).
+    fn warns_naming(name: &str) -> Vec<String> {
+        let quoted = format!("\"{name}\"");
         WARNS
             .lock()
             .unwrap()
             .iter()
-            .filter(|w| w.contains(&quoted) || w.contains(family))
+            .filter(|w| w.contains(&quoted))
             .cloned()
             .collect()
     }
 
-    // One sequential test on purpose: every leg asserts an exact delta of the
-    // process-wide `notdef_glyph_count()`, so splitting them into parallel tests
-    // lets one leg's increments land inside another's window.
-    #[test]
-    fn notdef_counts_and_warns_once() {
-        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+    fn capture_warnings() {
         let _ = log::set_logger(&WarnCapture);
         log::set_max_level(log::LevelFilter::Warn);
+    }
 
-        // Latin-only subset (" ,Helo\u{e9}"): two Han characters are .notdef.
-        let noto = include_bytes!("../../../testing/fonts/NotoSans-Subset.ttf");
-        let (mut cx, family) = systemless_cx(noto);
-        let before = crate::notdef_glyph_count();
+    #[test]
+    fn notdef_counts_per_context_and_warns_without_text() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+        capture_warnings();
+        let (mut cx, family) = systemless_cx(&renamed_noto("NotdefCt"));
+        let face = "NotdefCt-Regular";
+
+        // Two Han characters are .notdef: two glyphs, two clusters.
         walk(&mut cx, &family, "He中文 lo");
-        assert_eq!(crate::notdef_glyph_count() - before, 2);
-        let first = warns_naming(&family);
-        assert_eq!(first.len(), 1, "first layout warns: {first:?}");
+        assert_eq!(cx.notdef_glyph_count(), 2);
+        let first = warns_naming(face);
+        assert_eq!(
+            first,
+            [format!(
+                "frust-text: font \"{face}\" drew 2 visible cluster(s) of script Hani as .notdef \
+                 in one layout; register a font covering this script (warned once per font and \
+                 script)"
+            )],
+            "one warning, naming the face, the script and the cluster count"
+        );
         assert!(
-            first[0].contains("中文"),
-            "names affected chars: {}",
+            !first[0].contains('中') && !first[0].contains('文') && !first[0].contains("He"),
+            "no user text in the warning: {:?}",
             first[0]
         );
 
-        // Counted again, but warned only once per font.
-        walk(&mut cx, &family, "He中文 lo");
-        assert_eq!(crate::notdef_glyph_count() - before, 4);
-        assert_eq!(warns_naming(&family).len(), 1, "warn fires once per font");
-
         // Whitespace is not .notdef.
-        let mid = crate::notdef_glyph_count();
         walk(&mut cx, &family, "He llo");
-        assert_eq!(crate::notdef_glyph_count() - mid, 0);
+        assert_eq!(cx.notdef_glyph_count(), 2);
+
+        // Another context counts on its own. (A text with no covered
+        // character resolves no face at all, so each sample leads with Latin.)
+        let (mut other, other_family) = systemless_cx(&renamed_noto("NotdefCu"));
+        walk(&mut other, &other_family, "He中");
+        assert_eq!(other.notdef_glyph_count(), 1);
+        assert_eq!(cx.notdef_glyph_count(), 2, "untouched by the other context");
 
         // Han the face covers is not .notdef.
-        let (mut cx, family) = systemless_cx(include_bytes!(
+        let (mut jp, jp_family) = systemless_cx(include_bytes!(
             "../../../testing/fonts/NotoSansJP-Subset.otf"
         ));
-        let mid = crate::notdef_glyph_count();
-        walk(&mut cx, &family, "日本語");
-        assert_eq!(crate::notdef_glyph_count() - mid, 0);
+        walk(&mut jp, &jp_family, "日本語");
+        assert_eq!(jp.notdef_glyph_count(), 0);
+    }
+
+    #[test]
+    fn notdef_warns_once_per_face_and_script() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+        capture_warnings();
+        let (mut cx, family) = systemless_cx(&renamed_noto("NotdefWo"));
+        let face = "NotdefWo-Regular";
+
+        walk(&mut cx, &family, "He中文");
+        walk(&mut cx, &family, "He日本人");
+        assert_eq!(cx.notdef_glyph_count(), 5, "every layout counts");
+        let han: Vec<_> = warns_naming(face)
+            .into_iter()
+            .filter(|w| w.contains("script Hani"))
+            .collect();
+        assert_eq!(han.len(), 1, "one warning per (face, script): {han:?}");
+        assert!(han[0].contains("drew 2 visible cluster(s)"), "{}", han[0]);
+
+        // A new script on the same face warns again, once.
+        walk(&mut cx, &family, "He سلام");
+        walk(&mut cx, &family, "He مرحبا");
+        let arabic: Vec<_> = warns_naming(face)
+            .into_iter()
+            .filter(|w| !w.contains("script Hani"))
+            .collect();
+        assert_eq!(arabic.len(), 1, "{arabic:?}");
+        assert!(arabic[0].contains("script Arab"), "{}", arabic[0]);
+        assert!(
+            !arabic[0]
+                .chars()
+                .any(|c| ('\u{0600}'..='\u{06FF}').contains(&c))
+        );
+    }
+
+    #[test]
+    fn notdef_counts_once_per_line_table_on_the_layout_paths() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+        let (mut cx, family) = systemless_cx(&renamed_noto("NotdefLt"));
+        let style = noto_style(&family);
+
+        // A retained layout: the first paint counts, repaints do not.
+        let retained = cx.layout("He中文 lo", &style, None);
+        for _ in 0..3 {
+            let _ = retained.to_scene_runs(kurbo::Point::new(4.0, 8.0));
+        }
+        assert_eq!(cx.notdef_glyph_count(), 2);
+
+        // The placeholder path: a layout rebuilt from a cache hit every paint
+        // shares the cache entry's runs, so it counts nothing more.
+        for _ in 0..3 {
+            let rebuilt = cx.layout("He中文 lo", &style, None);
+            let _ = rebuilt.to_scene_runs(kurbo::Point::ORIGIN);
+        }
+        assert_eq!(cx.notdef_glyph_count(), 2);
+        assert!(cx.shape_cache_stats().hits >= 3);
+
+        // A width change re-breaks the entry: a new line table counts once.
+        for _ in 0..2 {
+            let _ = cx
+                .layout("He中文 lo", &style, Some(30.0))
+                .to_scene_runs(kurbo::Point::ORIGIN);
+        }
+        assert_eq!(cx.notdef_glyph_count(), 4);
+
+        // A truncated layout is its own line table.
+        let bounded = cx.layout_bounded(
+            "He中文 lo He中文 lo",
+            &style,
+            Some(40.0),
+            Some(1),
+            TextOverflow::Ellipsis,
+        );
+        let before = cx.notdef_glyph_count();
+        let _ = bounded.to_scene_runs(kurbo::Point::ORIGIN);
+        let once = cx.notdef_glyph_count() - before;
+        let _ = bounded.to_scene_runs(kurbo::Point::ORIGIN);
+        assert_eq!(
+            cx.notdef_glyph_count() - before,
+            once,
+            "repaint adds nothing"
+        );
+
+        // The deprecated process-wide total sums every context.
+        #[allow(deprecated)]
+        let total = crate::notdef_glyph_count();
+        assert!(total >= cx.notdef_glyph_count());
+    }
+
+    #[test]
+    fn notdef_counts_once_per_relayout_on_the_editor_path() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+        let (mut cx, family) = systemless_cx(&renamed_noto("NotdefEd"));
+        let mut editor = crate::TextEditor::new(&noto_style(&family));
+        editor.apply(crate::EditOp::Insert("He中文".into()), &mut cx);
+        for _ in 0..3 {
+            let _ = editor.to_scene_runs(kurbo::Point::new(2.0, 2.0));
+        }
+        assert_eq!(
+            cx.notdef_glyph_count(),
+            2,
+            "repaints between edits add nothing"
+        );
+
+        // A caret move keeps the layout: still nothing.
+        editor.apply(crate::EditOp::MoveLeft { select: false }, &mut cx);
+        let _ = editor.to_scene_runs(kurbo::Point::ORIGIN);
+        assert_eq!(cx.notdef_glyph_count(), 2);
+
+        // An edit relays out: the next paint counts the new table once.
+        editor.apply(crate::EditOp::Insert("语".into()), &mut cx);
+        let _ = editor.to_scene_runs(kurbo::Point::ORIGIN);
+        let _ = editor.to_scene_runs(kurbo::Point::ORIGIN);
+        assert_eq!(cx.notdef_glyph_count(), 5);
+
+        // The memo re-translates the runs per paint.
+        let a = editor.to_scene_runs(kurbo::Point::ORIGIN);
+        let b = editor.to_scene_runs(kurbo::Point::new(10.0, 0.0));
+        assert_eq!(a.len(), b.len());
+        assert!(
+            a.iter()
+                .zip(&b)
+                .all(|(a, b)| a.glyphs == b.glyphs && a.transform != b.transform)
+        );
     }
 }

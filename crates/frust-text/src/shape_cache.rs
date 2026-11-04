@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::context::shape::Shaped;
+use crate::convert::{NotdefCounter, RunMemo};
 use crate::layout::{LineTable, Paragraph, TextLayout, lay_out};
 use crate::style::{
     FamilyName, FontFamily, FontStyle, GenericSlot, LineHeight, TextAlign, TextStyle,
@@ -184,7 +185,8 @@ impl From<LineHeight> for LineHeightBits {
 }
 
 /// The layout path's cached value: a shaped paragraph, its styles, and the
-/// line table it was last broken into, at `broken_width`.
+/// line table it was last broken into, at `broken_width`, with that table's
+/// glyph-run memo.
 pub(crate) struct LaidOut {
     text: Arc<str>,
     shaped: Arc<Shaped>,
@@ -193,15 +195,22 @@ pub(crate) struct LaidOut {
     /// The `max_width` `lines` was broken at — a differing request re-breaks
     /// (line layout only).
     broken_width: Option<f32>,
+    /// `lines`' glyph runs, shared by every [`TextLayout`] this entry serves:
+    /// a layout rebuilt from a hit every paint (a text field's placeholder)
+    /// walks, and scans for `.notdef`, once per line table. A re-break
+    /// replaces it.
+    base_runs: RunMemo,
 }
 
 impl LaidOut {
-    /// Lays `shaped` (`text` in `style`) out at `max_width`.
+    /// Lays `shaped` (`text` in `style`) out at `max_width`; its layouts'
+    /// `.notdef` glyphs count into `notdef`.
     pub(crate) fn new(
         text: &str,
         shaped: Arc<Shaped>,
         style: &TextStyle,
         max_width: Option<f32>,
+        notdef: &NotdefCounter,
     ) -> Self {
         let styles: Arc<[TextStyle]> = Arc::from([style.clone()]);
         let lines = Arc::new(lay_out(
@@ -215,10 +224,12 @@ impl LaidOut {
             styles,
             lines,
             broken_width: max_width,
+            base_runs: RunMemo::new(notdef),
         }
     }
 
-    /// A [`TextLayout`] sharing this value's shaping and line table.
+    /// A [`TextLayout`] sharing this value's shaping, line table and glyph-run
+    /// memo.
     pub(crate) fn layout(&self) -> TextLayout {
         TextLayout::new(
             Arc::clone(&self.text),
@@ -226,6 +237,7 @@ impl LaidOut {
             Arc::clone(&self.styles),
             self.broken_width,
             Arc::clone(&self.lines),
+            self.base_runs.clone(),
         )
     }
 }
@@ -318,6 +330,8 @@ impl LayoutCache {
             let paragraph = Paragraph::new(&entry.shaped, &entry.styles, None);
             entry.lines = Arc::new(lay_out(&paragraph, max_width, None));
             entry.broken_width = max_width;
+            // A layout still holding the old table keeps the old memo.
+            entry.base_runs = entry.base_runs.fresh();
         }
         let layout = entry.layout();
         if rebroken {
