@@ -513,19 +513,30 @@ mod tests {
                 "[\u{2713}] android".to_string(),
                 format!(
                     "    {}",
-                    root.join("frust-shell-android")
-                        .join(platform_wiring::ANDROID_EMBEDDING_REL)
-                        .display()
+                    frust_drive::host_path::canonicalize_simplified(
+                        &root
+                            .join("frust-shell-android")
+                            .join(platform_wiring::ANDROID_EMBEDDING_REL)
+                    )
+                    .unwrap()
+                    .display()
                 ),
                 "[\u{2713}] ios".to_string(),
                 format!(
                     "    {}",
-                    root.join("frust-shell-ios")
-                        .join(platform_wiring::IOS_EMBEDDING_REL)
-                        .display()
+                    frust_drive::host_path::canonicalize_simplified(
+                        &root
+                            .join("frust-shell-ios")
+                            .join(platform_wiring::IOS_EMBEDDING_REL)
+                    )
+                    .unwrap()
+                    .display()
                 ),
                 "[\u{2713}] web".to_string(),
-                format!("    {}", web_dir.display()),
+                format!(
+                    "    {}",
+                    root.join("frust-shell-web").join("platform/web").display()
+                ),
             ]
         );
 

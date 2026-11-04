@@ -838,13 +838,20 @@ mod tests {
         assert_eq!(installed.map.len(), 1);
         let (key, value) = installed.map.iter().next().expect("one entry");
         assert_eq!(*key, (0x1100usize.wrapping_add(old_offset)) as u64);
-        assert_ne!(
-            *value, 0x2100,
-            "the target was rebased onto the loaded image"
-        );
         // The patch is image 1, the executable image 0.
         assert_eq!(crate::anchor::classify(test_anchor() as u64).0, 0);
-        assert_eq!(crate::anchor::classify(*value).0, 1);
+        if cfg!(windows) {
+            // A Windows image's slide always reads 0 (LIMITATIONS
+            // `hotpatch-windows-fixed-base-no-aslr`), so the target stays at its
+            // link-time address: a synthetic 0x2100 is not inside the patch image.
+            assert_eq!(*value, 0x2100usize.wrapping_add(patch_slide) as u64);
+        } else {
+            assert_ne!(
+                *value, 0x2100,
+                "the target was rebased onto the loaded image"
+            );
+            assert_eq!(crate::anchor::classify(*value).0, 1);
+        }
 
         test_support::reset();
         let _ = std::fs::remove_dir_all(&dir);
