@@ -75,7 +75,7 @@ standalone workspaces keep their own gates). CI covers Windows only through `hot
 and `text-oracle-windows`, so this run is manual. It surfaced 18 failures in 8 suites, fixed in
 2f2832c1c and 651d30a1d:
 
-- 13 tests carried Unix assumptions: path separators, the `\\?\` verbatim prefix, Java-properties
+- 11 tests carried Unix assumptions: path separators, the `\\?\` verbatim prefix, Java-properties
   colon escaping, JSON-escaped paths in fake `cargo metadata`, case-insensitive environment names,
   the response-file dialect. Expectations are built from the product's own encoders, not literals.
 - Tests that need a Unix toolchain are `cfg`-gated: the Android hot-patch tests that fake an NDK

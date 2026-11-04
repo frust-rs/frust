@@ -155,7 +155,7 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `frust-paths`, `frust-gpu`, `testing/fonts`, `crates/frust-text/tests/fonts` and `ci.yml`; a leg
   that does not run writes `SKIPPED (scope: <reason>)` to the job summary (05b812682).
 - A full `cargo test --workspace` on a Windows x64 MSVC host passes: 18 tests in 8 suites were
-  fixed. Thirteen assumed Unix (path separators, `\\?\` verbatim prefixes, Java-properties colon
+  fixed. Eleven assumed Unix (path separators, `\\?\` verbatim prefixes, Java-properties colon
   escaping, JSON-escaped paths, case-insensitive environment names, response-file dialect) and now
   build expectations from the product encoders; the Android hot-patch tests that fake an NDK with
   shell scripts and the `xcodebuild` test are `cfg`-gated to the hosts that support them; the
