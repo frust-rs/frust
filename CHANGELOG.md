@@ -141,6 +141,26 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   for the share sheet, and the cache survives `am force-stop`; macOS M4: minimize 1 (11.2 ms), occlusion 1,
   Quit 1, focus loss 0 (p4-ios-flush-hidden, p4-android-flush-hidden, p4-desktop-flush-hidden,
   p4-web-no-flush; 64281d470).
+- `frust-i18n`: `fraction_fallbacks()` is a test seam, not observability; the 0.6.4 note calling it
+  observability is superseded. The language-id cache is bounded (256 entries) and the currency
+  fraction cache has a bound test (64); both documented as approximate LRU. Vietnamese relative
+  day `hôm nay` is lowercase (f1956dd44).
+- The system emoji-fallback test in `crates/frust-text/tests/emoji.rs` now uses the counted-skip
+  precondition (`SKIPPED (n)` plus a `SKIP SUMMARY`): a Linux host with no emoji font reports one
+  skip, macOS reports none, and the registered-subset test checks the served face by font-data
+  identity. The 0.6.4 note claiming a counted emoji skip was not true until now; the macOS CoreText
+  han oracle test also holds `LocaleSlotGuard` (4bddadbd8).
+- The advisory `text-oracle-macos` / `text-oracle-windows` CI legs (still outside `ci-ok`) now scope
+  on `Cargo.lock`, `Cargo.toml`, `rust-toolchain.toml`, `frust-text`, `frust-engine`, `frust-scene`,
+  `frust-paths`, `frust-gpu`, `testing/fonts`, `crates/frust-text/tests/fonts` and `ci.yml`; a leg
+  that does not run writes `SKIPPED (scope: <reason>)` to the job summary (05b812682).
+- A full `cargo test --workspace` on a Windows x64 MSVC host passes: 18 tests in 8 suites were
+  fixed. Thirteen assumed Unix (path separators, `\\?\` verbatim prefixes, Java-properties colon
+  escaping, JSON-escaped paths, case-insensitive environment names, response-file dialect) and now
+  build expectations from the product encoders; the Android hot-patch tests that fake an NDK with
+  shell scripts and the `xcodebuild` test are `cfg`-gated to the hosts that support them; the
+  `frust-hotpatch` `real_patch_library` test expects the by-design zero slide on Windows
+  (2f2832c1c, 651d30a1d).
 
 ### Fixed
 
@@ -156,6 +176,12 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   copy (734411802, 2791c5134, f69fccfc0).
 - The web shell's page-lifecycle listeners are owned by a guard that removes them on drop (no leaked
   closures), and the hide flush is skipped while the web tier has no persistent font cache (74e0f87dc).
+- DirectWrite resolution honours generic families for a generic-only request: `Monospace` resolves
+  to Consolas and `Serif` to Times New Roman, where every generic used to resolve to the Segoe UI
+  fallback (2f2832c1c).
+- A `Checkbox` / `Radio` with an empty label is exactly the control size tall (20 px) instead of
+  taking the host UI font's line height; this was a golden mismatch on Windows and on the Linux
+  T400 host, and the golden is unchanged (2f2832c1c).
 
 ## 0.6.5 — 2026-11-02
 
