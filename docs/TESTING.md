@@ -65,7 +65,7 @@ The advisory `text-oracle-macos` and `text-oracle-windows` CI legs (`.github/wor
 in `ci-ok`) run `cargo test -p frust-text --locked` (macOS adds the engine `hvgl_provider` test) only
 when a change touches `Cargo.lock`, `Cargo.toml`, `rust-toolchain.toml`, `frust-text`,
 `frust-engine`, `frust-scene`, `frust-paths`, `frust-gpu`, `testing/fonts`,
-`crates/frust-text/tests/fonts` or `ci.yml`, or on a manual run. A leg that does not run writes
+`crates/frust-text/tests/fonts` or `ci.yml`. A leg that does not run writes
 `SKIPPED (scope: <reason>)` to the job summary.
 
 ### Windows x64 host

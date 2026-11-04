@@ -11,9 +11,8 @@
 //!
 //! # Capitalisation
 //!
-//! The string is ICU's, returned as-is. CLDR capitalises per width in some
-//! languages (Vietnamese is "hôm nay" at both widths, but others differ), and
-//! the word is lower case in most languages mid-sentence. Sentence-casing for
+//! The string is ICU's, returned as-is. Vietnamese reads "hôm nay" at both
+//! widths, and the word is lower case in most languages mid-sentence. Sentence-casing for
 //! a standalone label is the caller's concern.
 
 use std::sync::LazyLock;

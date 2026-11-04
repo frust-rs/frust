@@ -355,12 +355,8 @@ jobs:
           # manifests, the toolchain pin, the crates it links, the test fonts, and
           # this workflow.
           paths=(Cargo.lock Cargo.toml rust-toolchain.toml crates/frust-text crates/frust-engine crates/frust-scene crates/frust-paths crates/frust-gpu testing/fonts crates/frust-text/tests/fonts .github/workflows/ci.yml)
-          # A manual run, or an unusable base (a new branch's all-zero `before`),
-          # runs the leg.
-          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-            echo "reason=manual run" >> "$GITHUB_OUTPUT"
-          elif changed="$(git diff --name-only "$BASE" HEAD -- "${paths[@]}" 2>/dev/null)" && [ -z "$changed" ]; then
+          # An unusable base (a new branch's all-zero `before`) runs the leg.
+          if changed="$(git diff --name-only "$BASE" HEAD -- "${paths[@]}" 2>/dev/null)" && [ -z "$changed" ]; then
             echo "run=false" >> "$GITHUB_OUTPUT"
             echo "reason=no oracle paths changed" >> "$GITHUB_OUTPUT"
           else
@@ -404,12 +400,8 @@ jobs:
           # manifests, the toolchain pin, the crates it links, the test fonts, and
           # this workflow.
           paths=(Cargo.lock Cargo.toml rust-toolchain.toml crates/frust-text crates/frust-engine crates/frust-scene crates/frust-paths crates/frust-gpu testing/fonts crates/frust-text/tests/fonts .github/workflows/ci.yml)
-          # A manual run, or an unusable base (a new branch's all-zero `before`),
-          # runs the leg.
-          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-            echo "reason=manual run" >> "$GITHUB_OUTPUT"
-          elif changed="$(git diff --name-only "$BASE" HEAD -- "${paths[@]}" 2>/dev/null)" && [ -z "$changed" ]; then
+          # An unusable base (a new branch's all-zero `before`) runs the leg.
+          if changed="$(git diff --name-only "$BASE" HEAD -- "${paths[@]}" 2>/dev/null)" && [ -z "$changed" ]; then
             echo "run=false" >> "$GITHUB_OUTPUT"
             echo "reason=no oracle paths changed" >> "$GITHUB_OUTPUT"
           else

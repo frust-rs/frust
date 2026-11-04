@@ -142,8 +142,8 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   Quit 1, focus loss 0 (p4-ios-flush-hidden, p4-android-flush-hidden, p4-desktop-flush-hidden,
   p4-web-no-flush; 64281d470).
 - `frust-i18n`: `fraction_fallbacks()` is a test seam, not observability; the 0.6.4 note calling it
-  observability is superseded. The language-id cache is bounded (256 entries) and the currency
-  fraction cache has a bound test (64); both documented as approximate LRU. Vietnamese relative
+  observability is superseded. The language-id cache is bounded (256 entries) and the per-locale currency
+  formatter cache has a bound test (64); both documented as approximate LRU. Vietnamese relative
   day `hôm nay` is lowercase (f1956dd44).
 - The system emoji-fallback test in `crates/frust-text/tests/emoji.rs` now uses the counted-skip
   precondition (`SKIPPED (n)` plus a `SKIP SUMMARY`): a Linux host with no emoji font reports one
