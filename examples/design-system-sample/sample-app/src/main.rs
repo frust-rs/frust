@@ -1,5 +1,5 @@
 //! The app half of the out-of-tree design-system proof: a minimal desktop app
-//! that installs [`sample_design`] and renders its three widgets plus its
+//! that installs [`sample_design`] and renders its four widgets plus its
 //! transition pattern.
 //!
 //! Two things this file is deliberately proving, beyond "it renders":
@@ -18,15 +18,17 @@
 
 use frust::motion::switcher::pattern_switcher;
 use frust::{Component, SizedBox, View, column, text};
-use sample_design::{SampleReveal, sample_badge, sample_chip, sample_panel};
+use sample_design::{SampleReveal, sample_badge, sample_chip, sample_notice, sample_panel};
 
 /// Vertical rhythm between the panel's rows, in logical px.
 const GAP: f64 = 12.0;
 
-/// The app's retained state: how many times the chip has been pressed.
+/// The app's retained state: how many times the chip has been pressed, and whether the
+/// notice is showing.
 #[derive(Default)]
 struct State {
     presses: u32,
+    notice_open: bool,
 }
 
 #[derive(Default)]
@@ -54,9 +56,15 @@ impl Component for SampleApp {
                 .child(SizedBox(None, Some(GAP)))
                 .child(sample_chip("press me", |state: &mut State| {
                     state.presses += 1;
+                    state.notice_open = !state.notice_open;
                 }))
                 .child(SizedBox(None, Some(GAP)))
-                .child(status),
+                .child(status)
+                .child(SizedBox(None, Some(GAP)))
+                .child(
+                    sample_notice(state.notice_open, "chip pressed")
+                        .on_exited(|state: &mut State| state.notice_open = false),
+                ),
         )
     }
 }
