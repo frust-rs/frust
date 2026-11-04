@@ -29,11 +29,12 @@
 //! build is wasted work, never a wrong answer, which is why this is not
 //! serialized behind a write lock for the whole build.
 //!
-//! The cache is bounded ([`DEFAULT_CAPACITY`], least recently used evicted
-//! first) so a caller cycling through arbitrary key combinations cannot grow
-//! it without limit; an evicted formatter is rebuilt on its next use. The
-//! locale memo above holds one small identifier per distinct locale an app
-//! ever formats with, which is bounded by the locales it ships and negotiates.
+//! The cache is bounded ([`DEFAULT_CAPACITY`]) so a caller cycling through
+//! arbitrary key combinations cannot grow it without limit; an evicted
+//! formatter is rebuilt on its next use. Eviction is an approximate LRU:
+//! Relaxed recency ticks, O(n) eviction under the write lock. The locale memo
+//! above is a [`Cache`] too, so a caller feeding it arbitrary locales cannot
+//! grow it without limit either; an evicted identifier is simply re-parsed.
 //!
 //! Both locks recover from poisoning (`PoisonError::into_inner`) instead of
 //! unwrapping: a panic elsewhere must not turn every later formatting call
@@ -49,26 +50,17 @@ use icu_locale_core::LanguageIdentifier;
 
 use crate::Locale;
 
-/// Memoized [`Locale`] → ICU4X identifier crossings.
-static LANG_IDS: LazyLock<RwLock<HashMap<Locale, LanguageIdentifier>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
+/// Memoized [`Locale`] → ICU4X identifier crossings, bounded like every other
+/// cache here ([`DEFAULT_CAPACITY`]).
+static LANG_IDS: LazyLock<Cache<Locale, LanguageIdentifier>> = LazyLock::new(Cache::new);
 
 /// The ICU4X language identifier for `locale`, parsed once per locale.
 pub(super) fn lang_id(locale: &Locale) -> LanguageIdentifier {
-    if let Some(found) = LANG_IDS
-        .read()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(locale)
-    {
-        return found.clone();
+    let built = LANG_IDS.get_or_build(locale, || Ok::<_, std::convert::Infallible>(parse(locale)));
+    match built {
+        Ok(id) => (*id).clone(),
+        Err(never) => match never {},
     }
-
-    let parsed = parse(locale);
-    LANG_IDS
-        .write()
-        .unwrap_or_else(PoisonError::into_inner)
-        .insert(locale.clone(), parsed.clone());
-    parsed
 }
 
 /// Parses `locale`'s canonical BCP-47 tag into ICU4X's identifier, degrading
@@ -94,15 +86,17 @@ fn parse(locale: &Locale) -> LanguageIdentifier {
 /// keys cannot grow a cache without limit.
 pub(super) const DEFAULT_CAPACITY: usize = 256;
 
-/// A bounded, build-once map of constructed ICU4X formatters.
+/// A bounded, build-once map of constructed ICU4X values.
 ///
 /// `K` is whatever fully determines a formatter — a locale, or a locale
 /// paired with a length — and `V` the formatter itself. See this module's
 /// header for the locking contract.
 ///
 /// At most `capacity` entries are kept; inserting past that evicts the least
-/// recently used one, which is simply rebuilt on its next use. Recency is an
-/// atomic tick stamped on every hit, so a hit still takes only the read lock.
+/// recently used one, which is simply rebuilt on its next use. The LRU is
+/// approximate: recency is an atomic tick stamped (Relaxed) on every hit, so a
+/// hit still takes only the read lock, and eviction scans every entry (O(n))
+/// under the write lock.
 pub(super) struct Cache<K, V> {
     capacity: usize,
     clock: AtomicU64,
@@ -132,6 +126,8 @@ impl<K: Clone + Eq + Hash, V> Cache<K, V> {
         }
     }
 
+    /// The next recency stamp. Relaxed: ties and slightly stale orderings
+    /// only make the LRU approximate, never wrong, so no ordering is paid for.
     fn tick(&self) -> u64 {
         self.clock.fetch_add(1, Ordering::Relaxed)
     }
@@ -201,6 +197,21 @@ mod tests {
 
         assert_eq!(first, second);
         assert_eq!(first.to_string(), "de-CH");
+    }
+
+    #[test]
+    fn the_locale_memo_is_bounded() {
+        let letter = |n: usize| char::from(b'a' + (n % 26) as u8);
+        for n in 0..(DEFAULT_CAPACITY + 50) {
+            let tag: String = [letter(n), letter(n / 26), 'q'].iter().collect();
+            let _ = lang_id(&locale(&tag));
+        }
+
+        assert!(
+            LANG_IDS.len() <= DEFAULT_CAPACITY,
+            "held {}",
+            LANG_IDS.len()
+        );
     }
 
     #[test]

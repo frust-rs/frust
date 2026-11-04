@@ -486,7 +486,7 @@ through ICU4X's relative-time formatter (`Numeric::Auto`: en `today`/`tomorrow`/
 `วันนี้`/`พรุ่งนี้`/`เมื่อวาน`, ja `今日`/`明日`/`昨日`, es `hoy`/`mañana`/`ayer`); two or more days away
 it returns a medium date (`Nov 17, 2023`). `relative_day_civil(&locale, day, today, style)` takes
 dates you already hold. The string is ICU's, returned as-is: CLDR capitalises per width in some
-languages (vi short `hôm nay`, vi long `Hôm nay`) and the words are lower case in most, so
+languages (vi is `hôm nay` at both widths) and the words are lower case in most, so
 sentence-casing a standalone label is the caller's job. In FTL:
 `{ RELATIVE_DAY($t, $now, timeZone: "Asia/Makassar", style: "short") }`. Fluent allows only
 literals as named-argument values, so a variable `now` is the second positional (a literal

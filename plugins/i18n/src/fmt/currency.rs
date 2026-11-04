@@ -36,11 +36,11 @@
 //!
 //! # The formatter cache is bounded
 //!
-//! Formatters are cached per `(locale, currency)` in a [`Cache`] (the shared bounded
-//! formatter cache) of at most [`CACHE_CAPACITY`] entries, least-recently-used
-//! evicted first, so a
-//! caller cycling through arbitrary locale/currency pairs cannot grow it
-//! without limit. An evicted pair is simply rebuilt on its next use.
+//! Formatters are cached per `(locale, currency)` in a [`Cache`] (the shared
+//! bounded formatter cache) of at most [`CACHE_CAPACITY`] entries, evicted
+//! approximately least-recently-used first, so a caller cycling through
+//! arbitrary locale/currency pairs cannot grow it without limit. An evicted
+//! pair is simply rebuilt on its next use.
 //!
 //! # What "unknown currency code" means
 //!
@@ -75,7 +75,8 @@ const CODE_LEN: usize = 3;
 
 /// CLDR's default when the data cannot be loaded at all (it is baked in, so
 /// this is unreachable in practice). Using it is never silent: the failed load
-/// logs a warning once and every fallback is counted ([`fraction_fallbacks`]).
+/// logs a warning once and every fallback is counted (the count backs a test
+/// seam, `fraction_fallbacks`, that is not part of the public API).
 const DEFAULT_DIGITS: i16 = 2;
 
 /// The most `(locale, currency)` formatters kept alive at once.
@@ -103,6 +104,9 @@ static FRACTIONS: LazyLock<Option<DataPayload<CurrencyFractionsV1>>> = LazyLock:
 static FRACTION_FALLBACKS: AtomicU64 = AtomicU64::new(0);
 
 /// The count of digit lookups that fell back to [`DEFAULT_DIGITS`].
+///
+/// A test seam: only the tests read it, so outside them it is allowed to be
+/// dead code.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn fraction_fallbacks() -> u64 {
     FRACTION_FALLBACKS.load(Ordering::Relaxed)
@@ -332,6 +336,19 @@ mod tests {
             "currency rounding beyond R1 is not modelled, but CLDR now lists: {}",
             offenders.join(", ")
         );
+    }
+
+    #[test]
+    fn the_formatter_cache_holds_at_most_its_capacity() {
+        let en = locale("en-US");
+        let letter = |n: usize| char::from(b'A' + n as u8);
+
+        for n in 0..100 {
+            let code = format!("Q{}{}", letter(n / 10), letter(n % 10));
+            currency(&en, 1.0, &code).expect("a well-formed code formats");
+        }
+
+        assert_eq!(CURRENCIES.len(), CACHE_CAPACITY);
     }
 
     #[test]
