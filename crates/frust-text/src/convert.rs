@@ -31,14 +31,18 @@
 //!
 //! # `.notdef` scan
 //!
-//! Every walk counts the visible-character glyphs that shaped to glyph 0 and
-//! warns once per font ([`notdef_glyph_count`]).
+//! The walk that fills a [`RunMemo`] counts the visible-character glyphs that
+//! shaped to glyph 0 into the owning context's [`NotdefCounter`]
+//! (`TextContext::notdef_glyph_count`) and warns once per (face, script); a
+//! paint served from the memo scans nothing. The warning names the face
+//! identity, the script and the affected cluster count, never the text.
 
 use std::collections::HashSet;
+use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use kurbo::Affine;
+use kurbo::{Affine, Point};
 use peniko::{Brush, FontData};
 
 use frust_scene::{FontHandle, Glyph, GlyphRun};
@@ -47,17 +51,21 @@ use crate::context::shape::{Shaped, ShapedFace, faux_bold_em_fraction};
 use crate::layout::{ELLIPSIS, LineTable, Paragraph, Source};
 
 /// Walks `table`'s lines over `paragraph` (whose text is `text`), emitting
-/// glyph runs at the layout origin (an identity transform).
+/// glyph runs at the layout origin (an identity transform) and adding the
+/// walk's `.notdef` glyphs to `notdef`.
+///
+/// Called only to fill a [`RunMemo`], so each memoized walk scans once.
 pub(crate) fn lines_to_scene_runs(
     paragraph: &Paragraph<'_>,
     text: &str,
     table: &LineTable,
+    notdef: &NotdefCounter,
 ) -> Vec<GlyphRun> {
     let transform = Affine::IDENTITY;
     let mut ellipsis_text = [0u8; 4];
     let ellipsis_text: &str = ELLIPSIS.encode_utf8(&mut ellipsis_text);
     let mut runs = Vec::new();
-    let mut notdef = NotdefScan::default();
+    let mut scan = NotdefScan::default();
 
     for line in &table.lines {
         let baseline = line.metrics.baseline;
@@ -76,7 +84,7 @@ pub(crate) fn lines_to_scene_runs(
             // The face identity the oracle resolved (PostScript name, hidden
             // flag), so the renderer opens the face the oracle chose rather
             // than re-deriving who it is from the blob.
-            let font = font_handle(data.clone(), &run.coords, face, run.font_size);
+            let font = font_handle(data, &run.coords, face, run.font_size);
             let mut current: Option<(u16, Vec<Glyph>)> = None;
             let flush = |current: &mut Option<(u16, Vec<Glyph>)>, runs: &mut Vec<GlyphRun>| {
                 let Some((style, glyphs)) = current.take() else {
@@ -110,6 +118,7 @@ pub(crate) fn lines_to_scene_runs(
                 let glyphs = &mut current.get_or_insert_with(|| (style, Vec::new())).1;
                 let ids =
                     &shaped.glyphs[cluster.glyphs.start as usize..cluster.glyphs.end as usize];
+                let mut missing = 0u64;
                 for g in ids {
                     glyphs.push(Glyph {
                         id: g.id,
@@ -117,6 +126,7 @@ pub(crate) fn lines_to_scene_runs(
                         y: baseline + g.y,
                     });
                     pen += g.advance;
+                    missing += u64::from(g.id == 0);
                 }
                 if ids.is_empty() {
                     pen += cluster.advance;
@@ -125,23 +135,33 @@ pub(crate) fn lines_to_scene_runs(
                 {
                     pen += line.justify;
                 }
-                let ch = first
-                    .and_then(|c| source_text.get(c.byte_start as usize..))
-                    .and_then(|rest| rest.chars().next());
-                if let Some(ch) = ch {
-                    notdef.scan_cluster(&data, ch, ids.iter().map(|g| g.id));
+                if missing > 0 {
+                    // Only a cluster holding glyph 0 decodes its first char,
+                    // and only to classify it: nothing of the text is kept.
+                    let visible = first
+                        .and_then(|c| source_text.get(c.byte_start as usize..))
+                        .and_then(|rest| rest.chars().next())
+                        .is_some_and(is_visible);
+                    if visible {
+                        scan.record(item.source, run.face, run.script, missing);
+                    }
                 }
             }
             flush(&mut current, &mut runs);
         }
     }
 
-    notdef.report();
+    scan.report(paragraph, notdef);
     runs
 }
 
+/// The process-wide total behind the deprecated `crate::notdef_glyph_count`:
+/// every [`NotdefCounter::add`] adds here too.
 static NOTDEF_TOTAL: AtomicU64 = AtomicU64::new(0);
-static NOTDEF_WARNED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+/// A warn-once key: the face and the run's ISO 15924 script tag.
+type WarnKey = (FaceIdentity, [u8; 4]);
+/// The (face, script) pairs already warned about, process-wide.
+static NOTDEF_WARNED: OnceLock<Mutex<HashSet<WarnKey>>> = OnceLock::new();
 
 /// The handle a run draws with: the font, the variation instance the shaper
 /// chose (all-zero coords name the default and are dropped), the oracle's face
@@ -166,72 +186,213 @@ pub(crate) fn font_handle(
         .with_synthesis(embolden, face.skew.unwrap_or(0.0))
 }
 
-/// Process-wide count of visible-text glyphs that shaped to glyph 0
-/// (`.notdef`) in layouts walked into scene runs. Each memoized layout walk
-/// adds once; repaint of a retained layout adds nothing.
-pub fn notdef_glyph_count() -> u64 {
+/// One context's count of visible-text glyphs that shaped to glyph 0
+/// (`.notdef`), shared by every [`crate::TextLayout`] and
+/// [`crate::TextEditor`] view the context builds.
+///
+/// Only the walk filling a [`RunMemo`] adds to it, so a memoized walk adds
+/// once and a paint served from the memo adds nothing.
+#[derive(Clone, Default)]
+pub(crate) struct NotdefCounter(Arc<AtomicU64>);
+
+impl NotdefCounter {
+    /// The glyphs counted so far.
+    pub(crate) fn get(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    /// Adds `glyphs` here and to the process-wide total.
+    fn add(&self, glyphs: u64) {
+        self.0.fetch_add(glyphs, Ordering::Relaxed);
+        NOTDEF_TOTAL.fetch_add(glyphs, Ordering::Relaxed);
+    }
+}
+
+/// The process-wide sum of every [`NotdefCounter`], kept for the deprecated
+/// `crate::notdef_glyph_count`.
+pub(crate) fn process_notdef_total() -> u64 {
     NOTDEF_TOTAL.load(Ordering::Relaxed)
 }
 
-/// Per-walk accumulator of `.notdef` glyphs on visible clusters.
+/// The memo of one line table's origin-independent glyph runs, and the
+/// counter its walk adds to.
+///
+/// Clones share the memo: a [`crate::TextLayout`] served from a shape-cache
+/// hit shares its entry's, so a layout rebuilt every paint from the cache (a
+/// text field's placeholder) walks and scans once per line table, like a
+/// retained one. A new line table takes [`Self::fresh`].
+#[derive(Clone, Default)]
+pub(crate) struct RunMemo {
+    runs: Arc<OnceLock<Vec<GlyphRun>>>,
+    notdef: NotdefCounter,
+}
+
+impl RunMemo {
+    /// An empty memo whose walk adds to `notdef`.
+    pub(crate) fn new(notdef: &NotdefCounter) -> Self {
+        Self {
+            runs: Arc::default(),
+            notdef: notdef.clone(),
+        }
+    }
+
+    /// An empty memo over the same counter, for a new line table.
+    pub(crate) fn fresh(&self) -> Self {
+        Self::new(&self.notdef)
+    }
+
+    /// The memoized runs translated to `origin`, filled by `walk` (handed the
+    /// counter) on the first call.
+    ///
+    /// The only origin-dependent field of a [`GlyphRun`] is its `transform`,
+    /// so a paint at any origin clones the base runs and re-translates them.
+    pub(crate) fn placed(
+        &self,
+        origin: Point,
+        walk: impl FnOnce(&NotdefCounter) -> Vec<GlyphRun>,
+    ) -> Vec<GlyphRun> {
+        let base = self.runs.get_or_init(|| walk(&self.notdef));
+        let transform = Affine::translate((origin.x, origin.y));
+        base.iter()
+            .map(|run| GlyphRun {
+                transform,
+                ..run.clone()
+            })
+            .collect()
+    }
+
+    /// Whether the memo is filled.
+    #[cfg(test)]
+    pub(crate) fn is_filled(&self) -> bool {
+        self.runs.get().is_some()
+    }
+}
+
+/// What a `.notdef` warning names a face by: the PostScript name the oracle
+/// resolved, else its blob (id, collection index, byte length). Never read
+/// from the text being drawn.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum FaceIdentity {
+    PostScript(String),
+    Blob { id: u64, index: u32, len: usize },
+}
+
+/// The longest PostScript name a warning shows (the `name` table's own limit
+/// is 63 characters; the bytes come from a font and are not trusted).
+const MAX_SHOWN_NAME: usize = 63;
+
+impl FaceIdentity {
+    fn of(face: &ShapedFace) -> Self {
+        match &face.postscript_name {
+            Some(name) => Self::PostScript(name.chars().take(MAX_SHOWN_NAME).collect()),
+            None => Self::Blob {
+                id: face.blob.id(),
+                index: face.index,
+                len: face.blob.len(),
+            },
+        }
+    }
+}
+
+impl fmt::Display for FaceIdentity {
+    /// The name `Debug`-escaped (quotes, control characters), or the blob.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PostScript(name) => write!(f, "{name:?}"),
+            Self::Blob { id, index, len } => {
+                write!(f, "blob #{id} face {index} ({len} bytes)")
+            }
+        }
+    }
+}
+
+/// One walk's `.notdef` hits on visible clusters, grouped by where the face
+/// lives and the run's script; the face identity is read only at report time.
 #[derive(Default)]
 struct NotdefScan {
-    /// Font identity -> (glyph count, up to 8 distinct affected characters).
-    hits: Vec<(String, u64, Vec<char>)>,
-    /// The last font a hit was recorded for, and its identity: a run's
-    /// clusters share one font, so the name is read once per run.
-    last: Option<(FontData, String)>,
+    hits: Vec<Hit>,
+}
+
+struct Hit {
+    source: Source,
+    /// Index into the source's [`Shaped::faces`].
+    face: usize,
+    /// ISO 15924 tag of the run's script.
+    script: [u8; 4],
+    clusters: u64,
+    glyphs: u64,
 }
 
 impl NotdefScan {
-    /// Records the `.notdef` glyphs (`glyphs` holding id 0) of one cluster
-    /// whose first character is `ch`, drawn with `font`.
-    fn scan_cluster(&mut self, font: &FontData, ch: char, glyphs: impl Iterator<Item = u32>) {
-        if ch.is_whitespace() || ch.is_control() || is_format_char(ch) {
-            return;
-        }
-        let count = glyphs.filter(|&id| id == 0).count() as u64;
-        if count == 0 {
-            return;
-        }
-        let name = match &self.last {
-            Some((last, name)) if last.data.id() == font.data.id() && last.index == font.index => {
-                name.clone()
-            }
-            _ => {
-                let name = font_identity(font);
-                self.last = Some((font.clone(), name.clone()));
-                name
-            }
-        };
-        match self.hits.iter_mut().find(|h| h.0 == name) {
+    /// Records one visible cluster of a run (`source`'s face `face`, script
+    /// `script`) holding `glyphs` `.notdef` glyphs.
+    fn record(&mut self, source: Source, face: usize, script: [u8; 4], glyphs: u64) {
+        let hit = self
+            .hits
+            .iter_mut()
+            .find(|h| h.source == source && h.face == face && h.script == script);
+        match hit {
             Some(h) => {
-                h.1 += count;
-                if h.2.len() < 8 && !h.2.contains(&ch) {
-                    h.2.push(ch);
-                }
+                h.clusters += 1;
+                h.glyphs += glyphs;
             }
-            None => self.hits.push((name, count, vec![ch])),
+            None => self.hits.push(Hit {
+                source,
+                face,
+                script,
+                clusters: 1,
+                glyphs,
+            }),
         }
     }
 
-    fn report(self) {
-        for (name, count, chars) in self.hits {
-            NOTDEF_TOTAL.fetch_add(count, Ordering::Relaxed);
+    /// Adds the walk's glyphs to `notdef` and warns once per (face, script)
+    /// per process.
+    fn report(self, paragraph: &Paragraph<'_>, notdef: &NotdefCounter) {
+        if self.hits.is_empty() {
+            return;
+        }
+        let mut grouped: Vec<(FaceIdentity, [u8; 4], u64)> = Vec::new();
+        let mut glyphs = 0;
+        for hit in self.hits {
+            glyphs += hit.glyphs;
+            let face = FaceIdentity::of(&paragraph.source(hit.source).faces[hit.face]);
+            match grouped
+                .iter_mut()
+                .find(|(f, s, _)| *f == face && *s == hit.script)
+            {
+                Some(group) => group.2 += hit.clusters,
+                None => grouped.push((face, hit.script, hit.clusters)),
+            }
+        }
+        notdef.add(glyphs);
+        for (face, script, clusters) in grouped {
             let first = NOTDEF_WARNED
                 .get_or_init(Default::default)
                 .lock()
-                .map(|mut set| set.insert(name.clone()))
+                .map(|mut set| set.insert((face.clone(), script)))
                 .unwrap_or(false);
             if first {
-                let shown: String = chars.iter().collect();
-                log::warn!(
-                    "font '{name}' has no glyph for {count} visible character(s) in this layout \
-                     (drawn as .notdef); affected: '{shown}'. Register a font covering this script."
-                );
+                log::warn!("{}", notdef_warning(&face, script, clusters));
             }
         }
     }
+}
+
+/// The once-per-(face, script) warning: the cluster count, the face identity
+/// and the script tag (escaped), and nothing of the text.
+fn notdef_warning(face: &FaceIdentity, script: [u8; 4], clusters: u64) -> String {
+    format!(
+        "frust-text: font {face} drew {clusters} visible cluster(s) of script {} as .notdef \
+         in one layout; register a font covering this script (warned once per font and script)",
+        script.escape_ascii()
+    )
+}
+
+/// Whether a cluster starting with `ch` should have drawn something: not
+/// whitespace, a control, or a zero-width / bidi format character.
+fn is_visible(ch: char) -> bool {
+    !(ch.is_whitespace() || ch.is_control() || is_format_char(ch))
 }
 
 /// Zero-width and bidi/format characters that legitimately map to no glyph.
@@ -242,221 +403,123 @@ fn is_format_char(c: char) -> bool {
         | '\u{FE00}'..='\u{FE0F}' | '\u{FEFF}' | '\u{E0100}'..='\u{E01EF}')
 }
 
-/// Best-effort human name for a font: its `name` table full name (ID 4) or
-/// family (ID 1), else a size-based placeholder.
-fn font_identity(font: &FontData) -> String {
-    let data = font.data.as_ref();
-    name_table_string(data, font.index)
-        .unwrap_or_else(|| format!("unnamed font ({} bytes)", data.len()))
-}
-
-/// Reads the full name (ID 4), else family (ID 1), from a font's `name` table.
-///
-/// Hand-rolled over untrusted bytes, so every offset and length is combined
-/// with checked arithmetic and every read goes through `slice::get`: any
-/// overflow, out-of-range or malformed field yields `None`, never a panic.
-/// `ttcf` collections select the face by `index` (out of range -> `None`).
-///
-/// Platform 0 and 3 records are UTF-16BE. Every other platform (notably
-/// platform 1, Macintosh Roman) is decoded as its ASCII subset; bytes at or
-/// above 0x80 become U+FFFD, which is enough for a log identity.
-fn name_table_string(data: &[u8], index: u32) -> Option<String> {
-    let u16_at = |o: usize| -> Option<usize> {
-        let bytes = data.get(o..o.checked_add(2)?)?;
-        Some(u16::from_be_bytes(bytes.try_into().ok()?) as usize)
-    };
-    let u32_at = |o: usize| -> Option<usize> {
-        let bytes = data.get(o..o.checked_add(4)?)?;
-        usize::try_from(u32::from_be_bytes(bytes.try_into().ok()?)).ok()
-    };
-    let mut base = 0usize;
-    if data.get(0..4)? == b"ttcf" {
-        if index as usize >= u32_at(8)? {
-            return None;
-        }
-        let slot = 12usize.checked_add(4usize.checked_mul(index as usize)?)?;
-        base = u32_at(slot)?;
-    }
-    let num_tables = u16_at(base.checked_add(4)?)?;
-    let name_off = (0..num_tables).find_map(|i| {
-        let rec = base.checked_add(12)?.checked_add(16usize.checked_mul(i)?)?;
-        (data.get(rec..rec.checked_add(4)?)? == b"name").then(|| u32_at(rec.checked_add(8)?))?
-    })?;
-    let count = u16_at(name_off.checked_add(2)?)?;
-    let strings = name_off.checked_add(u16_at(name_off.checked_add(4)?)?)?;
-    for want in [4usize, 1] {
-        for i in 0..count {
-            let r = name_off
-                .checked_add(6)?
-                .checked_add(12usize.checked_mul(i)?)?;
-            let (platform, id) = (u16_at(r)?, u16_at(r.checked_add(6)?)?);
-            if id != want {
-                continue;
-            }
-            let (len, off) = (u16_at(r.checked_add(8)?)?, u16_at(r.checked_add(10)?)?);
-            let start = strings.checked_add(off)?;
-            let raw = data.get(start..start.checked_add(len)?)?;
-            let s = if platform == 0 || platform == 3 {
-                let units: Vec<u16> = raw
-                    .as_chunks::<2>()
-                    .0
-                    .iter()
-                    .map(|c| u16::from_be_bytes(*c))
-                    .collect();
-                String::from_utf16_lossy(&units)
-            } else {
-                raw.iter()
-                    .map(|&b| if b < 0x80 { b as char } else { '\u{FFFD}' })
-                    .collect()
-            };
-            if !s.is_empty() {
-                return Some(s);
-            }
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use peniko::Blob;
 
-    /// A `name` table from `(platform, name_id, raw bytes)` records.
-    fn name_table(records: &[(u16, u16, Vec<u8>)]) -> Vec<u8> {
-        let storage_off = 6 + 12 * records.len();
-        let mut out = Vec::new();
-        for v in [0u16, records.len() as u16, storage_off as u16] {
-            out.extend(v.to_be_bytes());
+    fn face(blob: &Blob<u8>, postscript_name: Option<&str>) -> ShapedFace {
+        ShapedFace {
+            blob: blob.clone(),
+            index: 0,
+            embolden: false,
+            skew: None,
+            postscript_name: postscript_name.map(str::to_owned),
+            hidden: false,
+            units_per_em: 1000,
         }
-        let mut strings: Vec<u8> = Vec::new();
-        for (platform, id, raw) in records {
-            for v in [*platform, 0, 0, *id, raw.len() as u16, strings.len() as u16] {
-                out.extend(v.to_be_bytes());
-            }
-            strings.extend(raw);
+    }
+
+    #[test]
+    fn a_named_face_is_identified_by_its_postscript_name() {
+        let blob = Blob::from(vec![0u8; 7]);
+        let named = FaceIdentity::of(&face(&blob, Some("NotoSans-Regular")));
+        assert_eq!(named, FaceIdentity::PostScript("NotoSans-Regular".into()));
+        assert_eq!(named.to_string(), "\"NotoSans-Regular\"");
+    }
+
+    #[test]
+    fn nameless_faces_of_equal_size_are_told_apart_by_blob() {
+        // Two nameless faces of one byte length used to share the
+        // "unnamed font (N bytes)" key, so the second never warned.
+        let (a, b) = (Blob::from(vec![1u8; 9]), Blob::from(vec![2u8; 9]));
+        let (fa, fb) = (
+            FaceIdentity::of(&face(&a, None)),
+            FaceIdentity::of(&face(&b, None)),
+        );
+        assert_ne!(fa, fb);
+        assert_eq!(
+            fa.to_string(),
+            format!("blob #{} face 0 (9 bytes)", a.id()),
+            "blob id, collection index and byte length"
+        );
+    }
+
+    #[test]
+    fn a_hostile_postscript_name_is_escaped_and_capped() {
+        let blob = Blob::from(vec![0u8; 4]);
+        let long = format!("Evil\n\u{1b}[31m\"{}", "x".repeat(200));
+        let shown = FaceIdentity::of(&face(&blob, Some(&long))).to_string();
+        assert!(
+            !shown.contains('\n') && !shown.contains('\u{1b}'),
+            "{shown}"
+        );
+        assert!(
+            shown.contains("\\n") && shown.contains("\\u{1b}"),
+            "{shown}"
+        );
+        assert!(shown.chars().count() <= MAX_SHOWN_NAME + 16, "{shown}");
+    }
+
+    #[test]
+    fn the_warning_names_count_face_and_script_only() {
+        let face = FaceIdentity::PostScript("NotoSans-Regular".into());
+        let line = notdef_warning(&face, *b"Hani", 2);
+        assert_eq!(
+            line,
+            "frust-text: font \"NotoSans-Regular\" drew 2 visible cluster(s) of script Hani as \
+             .notdef in one layout; register a font covering this script (warned once per font \
+             and script)"
+        );
+        // A script tag is font/engine data too: non-printable bytes are escaped.
+        let odd = notdef_warning(&face, [b'H', 0, 0x1b, 0xff], 1);
+        assert!(odd.contains("H\\x00\\x1b\\xff"), "{odd}");
+    }
+
+    #[test]
+    fn whitespace_controls_and_format_chars_are_not_visible() {
+        for ch in [
+            ' ', '\u{3000}', '\n', '\t', '\u{200B}', '\u{200D}', '\u{FE0F}',
+        ] {
+            assert!(!is_visible(ch), "{ch:?}");
         }
-        out.extend(strings);
-        out
-    }
-
-    /// An sfnt starting at file offset `base`, with absolute table offsets.
-    fn sfnt_at(base: usize, tables: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
-        let dir_len = 12 + 16 * tables.len();
-        let mut out = vec![0, 1, 0, 0];
-        out.extend((tables.len() as u16).to_be_bytes());
-        out.extend([0u8; 6]);
-        let mut body: Vec<u8> = Vec::new();
-        for (tag, table) in tables {
-            out.extend(*tag);
-            out.extend([0u8; 4]);
-            out.extend(((base + dir_len + body.len()) as u32).to_be_bytes());
-            out.extend((table.len() as u32).to_be_bytes());
-            body.extend(table);
+        for ch in ['a', '中', '\u{0627}'] {
+            assert!(is_visible(ch), "{ch:?}");
         }
-        out.extend(body);
-        out
-    }
-
-    fn utf16(s: &str) -> Vec<u8> {
-        s.encode_utf16().flat_map(u16::to_be_bytes).collect()
-    }
-
-    fn font(records: &[(u16, u16, Vec<u8>)]) -> Vec<u8> {
-        sfnt_at(0, &[(b"name", name_table(records))])
-    }
-
-    fn ttc(a: &[(u16, u16, Vec<u8>)], b: &[(u16, u16, Vec<u8>)]) -> Vec<u8> {
-        let first = 20;
-        let face_a = sfnt_at(first, &[(b"name", name_table(a))]);
-        let second = first + face_a.len();
-        let face_b = sfnt_at(second, &[(b"name", name_table(b))]);
-        let mut out = b"ttcf".to_vec();
-        out.extend([0, 1, 0, 0]);
-        out.extend(2u32.to_be_bytes());
-        out.extend((first as u32).to_be_bytes());
-        out.extend((second as u32).to_be_bytes());
-        out.extend(face_a);
-        out.extend(face_b);
-        out
     }
 
     #[test]
-    fn plain_sfnt_prefers_full_name() {
-        let data = font(&[(3, 1, utf16("Family")), (3, 4, utf16("Family Bold"))]);
-        assert_eq!(name_table_string(&data, 0).as_deref(), Some("Family Bold"));
+    fn a_memo_walks_once_and_its_clones_share_it() {
+        let counter = NotdefCounter::default();
+        let memo = RunMemo::new(&counter);
+        let shared = memo.clone();
+        let walks = std::cell::Cell::new(0);
+        let walk = |notdef: &NotdefCounter| {
+            walks.set(walks.get() + 1);
+            notdef.add(3);
+            Vec::new()
+        };
+        let _ = memo.placed(Point::ORIGIN, walk);
+        let _ = shared.placed(Point::new(5.0, 5.0), walk);
+        assert_eq!(walks.get(), 1, "a clone reads the filled memo");
+        assert_eq!(counter.get(), 3);
+        assert!(shared.is_filled());
+
+        let fresh = memo.fresh();
+        assert!(!fresh.is_filled(), "a new line table starts empty");
+        let _ = fresh.placed(Point::ORIGIN, walk);
+        assert_eq!(walks.get(), 2);
+        assert_eq!(counter.get(), 6, "the fresh memo adds to the same counter");
     }
 
     #[test]
-    fn falls_back_to_family_without_full_name() {
-        let data = font(&[(3, 2, utf16("Sub")), (0, 1, utf16("Only Family"))]);
-        assert_eq!(name_table_string(&data, 0).as_deref(), Some("Only Family"));
-    }
-
-    #[test]
-    fn mac_roman_record_decodes_ascii() {
-        let data = font(&[(1, 4, b"Mac Name".to_vec())]);
-        assert_eq!(name_table_string(&data, 0).as_deref(), Some("Mac Name"));
-        let high = font(&[(1, 4, vec![b'A', 0x8A, b'B'])]);
-        assert_eq!(name_table_string(&high, 0).as_deref(), Some("A\u{FFFD}B"));
-    }
-
-    #[test]
-    fn ttc_selects_face_by_index() {
-        let data = ttc(&[(3, 4, utf16("First"))], &[(3, 4, utf16("Second"))]);
-        assert_eq!(name_table_string(&data, 0).as_deref(), Some("First"));
-        assert_eq!(name_table_string(&data, 1).as_deref(), Some("Second"));
-        assert_eq!(name_table_string(&data, 2), None);
-        assert_eq!(name_table_string(&data, u32::MAX), None);
-    }
-
-    #[test]
-    fn missing_name_table_is_none() {
-        let data = sfnt_at(0, &[(b"head", vec![0; 8])]);
-        assert_eq!(name_table_string(&data, 0), None);
-    }
-
-    #[test]
-    fn truncation_at_every_length_never_panics() {
-        let plain = font(&[(3, 1, utf16("Family")), (3, 4, utf16("Family Bold"))]);
-        let coll = ttc(&[(3, 4, utf16("First"))], &[(1, 1, b"Second".to_vec())]);
-        for data in [&plain, &coll] {
-            for len in 0..=data.len() {
-                for index in 0..3 {
-                    let _ = name_table_string(&data[..len], index);
-                }
-            }
-        }
-        assert!(name_table_string(&plain, 0).is_some());
-    }
-
-    #[test]
-    fn huge_offsets_are_none_not_panics() {
-        // `name` directory entry pointing at u32::MAX.
-        let mut data = font(&[(3, 4, utf16("X"))]);
-        data[12 + 8..12 + 12].copy_from_slice(&u32::MAX.to_be_bytes());
-        assert_eq!(name_table_string(&data, 0), None);
-
-        // Storage offset and record length/offset near their maxima.
-        let mut data = font(&[(3, 4, utf16("X"))]);
-        let name_off = 12 + 16;
-        data[name_off + 4..name_off + 6].copy_from_slice(&u16::MAX.to_be_bytes());
-        assert_eq!(name_table_string(&data, 0), None);
-        let mut data = font(&[(3, 4, utf16("X"))]);
-        let rec = name_off + 6;
-        data[rec + 8..rec + 12].copy_from_slice(&[0xFF; 4]);
-        assert_eq!(name_table_string(&data, 0), None);
-
-        // `ttcf` face offset at u32::MAX.
-        let mut data = ttc(&[(3, 4, utf16("A"))], &[(3, 4, utf16("B"))]);
-        data[12..16].copy_from_slice(&u32::MAX.to_be_bytes());
-        assert_eq!(name_table_string(&data, 0), None);
-    }
-
-    #[test]
-    fn font_identity_falls_back_to_size_placeholder() {
-        let junk = FontData::new(peniko::Blob::from(vec![1u8, 2, 3, 4, 5]), 0);
-        assert_eq!(font_identity(&junk), "unnamed font (5 bytes)");
-        let named = FontData::new(peniko::Blob::from(font(&[(3, 4, utf16("Real"))])), 0);
-        assert_eq!(font_identity(&named), "Real");
+    fn counters_are_per_context_and_sum_process_wide() {
+        let (a, b) = (NotdefCounter::default(), NotdefCounter::default());
+        let before = process_notdef_total();
+        a.add(2);
+        b.add(5);
+        assert_eq!((a.get(), b.get()), (2, 5));
+        // Other tests add concurrently: the total only grows by at least ours.
+        assert!(process_notdef_total() - before >= 7);
     }
 }

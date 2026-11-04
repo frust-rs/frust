@@ -191,6 +191,7 @@ use crate::icons;
 use crate::press::presses;
 use crate::strings::MaterialStrings;
 use crate::tokens::MaterialMotion;
+use frust::authoring::text::LocaleStamp;
 
 // ---- Theme-token constants (m3e_snackbar_theme.dart's `M3ESnackbarTheme.defaults`) --
 
@@ -329,7 +330,7 @@ struct TextRun {
     /// The style the cached layout was shaped with.
     style: TextStyle,
     /// The locale generation `layout` was shaped under ([`locale_stamp`]).
-    stamp: u64,
+    stamp: LocaleStamp,
     layout: Option<TextLayout>,
 }
 
@@ -338,7 +339,7 @@ impl TextRun {
         Self {
             content: String::new(),
             style: TextStyle::default(),
-            stamp: 0,
+            stamp: LocaleStamp::default(),
             layout: None,
         }
     }
@@ -1893,7 +1894,7 @@ mod tests {
 
     #[test]
     fn a_theme_swap_reshapes_the_cached_runs() {
-        let _slot = crate::badge::locale_slot_test::reader();
+        let _slot = frust_widgets::test_support::LocaleSlotGuard::hold();
         let mut w = host_with_action();
         let mut tcx = TextContext::new();
         let probe_a = || FontFamily::named("Snackbar Swap Probe A");

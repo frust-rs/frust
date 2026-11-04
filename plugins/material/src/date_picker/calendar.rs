@@ -1663,7 +1663,7 @@ mod tests {
 
     #[test]
     fn a_theme_swap_reshapes_exactly_the_runs_whose_role_changed() {
-        let _slot = crate::badge::locale_slot_test::reader();
+        let _slot = frust_widgets::test_support::LocaleSlotGuard::hold();
         let mut widget = build(&view(DatePickerState::new(None, d(2026, 8, 20))));
         let mut tcx = TextContext::new();
         let first = theme_with("Swap A", "Swap A", "Swap A", "Swap A");

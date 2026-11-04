@@ -199,6 +199,7 @@ use crate::overlay::{
     reduce_motion, shadow as overlay_shadow,
 };
 use crate::tokens::{MaterialDimensions, MaterialMotion, MaterialSpacing};
+use frust::authoring::text::LocaleStamp;
 
 // The framework's own overlay vocabulary, kept in its own block and aliased
 // apart from `crate::overlay`'s identically-named (and identically-shaped)
@@ -574,7 +575,7 @@ struct TooltipTextRun {
     /// The style the cached layout was shaped with.
     style: TextStyle,
     /// The locale generation `layout` was shaped under ([`locale_stamp`]).
-    stamp: u64,
+    stamp: LocaleStamp,
     layout: Option<TextLayout>,
 }
 
@@ -583,7 +584,7 @@ impl TooltipTextRun {
         Self {
             content: String::new(),
             style: TextStyle::default(),
-            stamp: 0,
+            stamp: LocaleStamp::default(),
             layout: None,
         }
     }
@@ -1817,7 +1818,7 @@ mod tests {
 
     #[test]
     fn a_theme_swap_reshapes_the_cached_panel_runs() {
-        let _slot = crate::badge::locale_slot_test::reader();
+        let _slot = frust_widgets::test_support::LocaleSlotGuard::hold();
         let probe_a = || FontFamily::named("Tooltip Swap Probe A");
         let probe_b = || FontFamily::named("Tooltip Swap Probe B");
         let first = theme_with(probe_a(), probe_a(), probe_a());

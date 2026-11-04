@@ -593,12 +593,13 @@ impl Widget for SwitcherChipWidget {
         let theme = Theme::from_layout_ctx(ctx);
         let style = Self::label_style(theme, self.colors(theme).0);
         if self.text.is_none() || !self.guard.matches(&style, None) {
+            let stamp = LayoutGuard::stamp(&style);
             let laid = ctx
                 .text_context::<TextContext>()
                 .layout(label, &style, None);
             self.text_size = laid.size();
             self.text = Some(laid);
-            self.guard.record(&style, None);
+            self.guard.record(&style, None, stamp);
         }
         let content = CHIP_PAD_X * 2.0 + CHIP_ICON + CHIP_ICON_GAP + self.text_size.width;
         bc.constrain(Size::new(content.max(LABELLED_MIN_WIDTH), CHIP_SIZE))

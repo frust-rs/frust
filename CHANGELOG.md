@@ -8,6 +8,17 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Added
 
+- `frust::authoring::text::LocaleStamp` (new public API, also `frust_text::LocaleStamp`):
+  `for_style(explicit_locale)` / `is_current(explicit_locale)` stamp a cached layout with the
+  default-locale generation (constant for a style with its own locale); read it before shaping and
+  store it with the layout (464fe55aa). `frust-widgets` `Text`/`TextInput` and the glyph, material,
+  beui, shadcn and native-widgets layout caches follow that rule (4c1f2b8ee, d86d95ff1, 0d39ac7a1,
+  f897dd659, b0fec455f).
+- `test-support` features on `frust-text` and `frust-widgets` expose the shared
+  `LocaleSlotGuard` (`frust_text::test_support`, `frust_widgets::test_support`) over the
+  default-locale slot; it replaces the plugins' private locale test locks.
+- `TextContext::notdef_glyph_count()`: `.notdef` glyphs counted per context across retained
+  layouts, the shape-cache path and the editor (17e18cd45). `TextLayout` is now `Sync`.
 - `EngineRenderer::prepare` (every plan-stage refusal) and `encode_prepared` / `encode_prepared_traced`
   (record a prepared frame; refuse only `AlphaCapacity` / `PaintCapacity` when the held plan matches, otherwise re-plan and can surface any `prepare` error), plus the public helper
   `RegionCopyMode::of_usage`. `SurfaceRenderer::engine_refusals()` returns the `#[non_exhaustive]`
@@ -82,6 +93,10 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Changed
 
+- The `.notdef` warning names only the face, the script and the cluster count, never user text,
+  and fires once per (face, script). `frust_text::notdef_glyph_count()` is deprecated in favour of
+  `TextContext::notdef_glyph_count()` (it still returns the process-wide total, now counted once per
+  line table when its memo is filled rather than once per paint) (17e18cd45).
 - Scheduler: `MAX_SPILL_PAGES` (3) spill slots serve a fan nested inside a fan under a held ancestor
   and every tree whose isolated layers hold at most two isolated children; `MAX_LIVE_PAGES` goes
   from 3 to 5, costing up to +128 MiB of intermediates, only on frames that use the extra slots.

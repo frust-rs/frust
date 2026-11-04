@@ -353,8 +353,8 @@ facade (`router_glue.rs`, `back_glue.rs`), and nav state sits in plain `Rc<Cell<
 ### Text Widget Alignment
 `TextInput` honours `TextStyle::align` within the wrap width on a multi-line field; a single-line
 field has no wrap width and draws as Start. `TextView` honors `align`, `.max_lines` and
-`.overflow(TextOverflow)`. Any cached `TextLayout` (`Text`, `TextInput`, and the plugin widgets' private ones) stores the
-`default_locale_generation` it was laid out under and is reused only while it is unchanged, so a locale switch re-faces untagged text; a style with an explicit locale is exempt. `TextInput` defers editor rebuilds (locale,
+`.overflow(TextOverflow)`. Any cached `TextLayout` (`Text`, `TextInput`, and the plugin widgets' private ones) stores a
+`LocaleStamp` (`frust::authoring::text`) read before shaping and is reused only while `is_current`, so a locale switch re-faces untagged text; the plugin caches exempt a style with an explicit locale, but `Text` and `TextInput` stamp `for_style(None)` and reshape even a tagged style on a default-locale change. `TextInput` defers editor rebuilds (locale,
 font, theme) while an editor-owned preedit is live, firing them on the first layout after it ends.
 
 ### Text Selection and the Clipboard

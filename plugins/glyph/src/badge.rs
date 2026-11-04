@@ -63,7 +63,7 @@
 
 use frust::authoring::Role;
 use frust::authoring::text::{
-    FontFamily, FontWeight, GenericSlot, TextContext, TextLayout, TextStyle,
+    FontFamily, FontWeight, GenericSlot, LocaleStamp, TextContext, TextLayout, TextStyle,
 };
 use frust::authoring::{
     BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View,
@@ -170,58 +170,39 @@ impl BadgeView {
 }
 
 /// The cache key behind every glyph label's retained [`TextLayout`]: the style
-/// and wrap width it was shaped at, plus the app default-locale generation
-/// (`frust::authoring::text::default_locale_generation`) current when it was shaped. A
-/// runtime locale switch advances the generation, so untagged text re-shapes
-/// on the next layout pass; a style carrying an explicit locale is exempt
-/// because the shape cache keys it by that locale.
+/// and wrap width it was shaped at, plus the [`LocaleStamp`] read before it was
+/// shaped. A runtime locale switch makes an untagged style's stamp stale, so the
+/// text re-shapes on the next layout pass; a style carrying an explicit locale
+/// is exempt because the shape cache keys it by that locale.
 #[derive(Default)]
 pub(crate) struct LayoutGuard {
     style: Option<TextStyle>,
     max_width: Option<f32>,
-    generation: u64,
+    stamp: LocaleStamp,
 }
 
 impl LayoutGuard {
     /// Whether a layout recorded under this guard is still valid for
-    /// `style` / `max_width` at the current locale generation.
+    /// `style` / `max_width` at the current default locale.
     pub(crate) fn matches(&self, style: &TextStyle, max_width: Option<f32>) -> bool {
         self.max_width == max_width
             && self.style.as_ref() == Some(style)
-            && (style.locale.is_some()
-                || self.generation == frust::authoring::text::default_locale_generation())
+            && self.stamp.is_current(style.locale.as_deref())
     }
 
-    /// Record the inputs a fresh layout was produced from.
-    pub(crate) fn record(&mut self, style: &TextStyle, max_width: Option<f32>) {
+    /// The stamp for a layout about to be shaped at `style`: read it **before**
+    /// shaping and pass it to [`record`](Self::record), so a locale write that
+    /// lands mid-shape leaves the stored layout stale rather than current.
+    pub(crate) fn stamp(style: &TextStyle) -> LocaleStamp {
+        LocaleStamp::for_style(style.locale.as_deref())
+    }
+
+    /// Record the inputs a fresh layout was produced from, with the `stamp`
+    /// read before it was shaped.
+    pub(crate) fn record(&mut self, style: &TextStyle, max_width: Option<f32>, stamp: LocaleStamp) {
         self.style = Some(style.clone());
         self.max_width = max_width;
-        self.generation = frust::authoring::text::default_locale_generation();
-    }
-}
-
-/// Serialises the glyph tests that write the process-global default locale.
-#[cfg(test)]
-pub(crate) mod locale_test {
-    use std::sync::{Mutex, MutexGuard};
-
-    static LOCK: Mutex<()> = Mutex::new(());
-
-    /// Holds the lock and restores `None` on drop.
-    pub(crate) struct DefaultLocale(#[allow(dead_code)] MutexGuard<'static, ()>);
-
-    impl DefaultLocale {
-        pub(crate) fn set(locale: Option<&str>) -> Self {
-            let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            frust::authoring::text::set_default_locale(locale);
-            Self(guard)
-        }
-    }
-
-    impl Drop for DefaultLocale {
-        fn drop(&mut self) {
-            frust::authoring::text::set_default_locale(None);
-        }
+        self.stamp = stamp;
     }
 }
 
@@ -264,11 +245,12 @@ impl GlyphLabel {
         {
             return cached.size();
         }
+        let stamp = LayoutGuard::stamp(style);
         let text_ctx = ctx.text_context::<TextContext>();
         let laid = text_ctx.layout(&self.content, style, max_width);
         let size = laid.size();
         self.layout = Some(laid);
-        self.guard.record(style, max_width);
+        self.guard.record(style, max_width, stamp);
         size
     }
 
@@ -508,6 +490,9 @@ impl Widget for BadgeWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use frust::Brightness;
+    use frust_widgets::test_support::LocaleSlotGuard;
+    use std::any::Any;
 
     /// Total shaping-cache lookups so far: unchanged while a cached layout is
     /// reused, advanced by every rebuild.
@@ -518,8 +503,7 @@ mod tests {
 
     #[test]
     fn cached_layout_follows_the_app_locale_generation() {
-        use crate::badge::locale_test::DefaultLocale;
-        let _locale = DefaultLocale::set(None);
+        let _locale = LocaleSlotGuard::set(None);
         let mut tcx = TextContext::new();
         let mut run = GlyphLabel::new("Connected");
         let style = TextStyle::default();
@@ -556,8 +540,33 @@ mod tests {
         pass(&mut run, &tagged, &mut tcx);
         assert_eq!(lookups(&tcx), tagged_built);
     }
-    use frust::Brightness;
-    use std::any::Any;
+
+    #[test]
+    fn a_locale_write_during_shaping_leaves_the_stored_layout_stale() {
+        let _locale = LocaleSlotGuard::set(None);
+        let mut tcx = TextContext::new();
+        let mut run = GlyphLabel::new("Connected");
+        let style = TextStyle::default();
+        let width = Some(200.0);
+
+        // `GlyphLabel::layout`'s order, with a locale write landing after the
+        // stamp read and before the layout is stored.
+        let stamp = LayoutGuard::stamp(&style);
+        let laid = tcx.layout(&run.content, &style, width);
+        frust::authoring::text::set_default_locale(Some("ja"));
+        run.layout = Some(laid);
+        run.guard.record(&style, width, stamp);
+        assert!(
+            !run.guard.matches(&style, width),
+            "the old-locale layout is stale"
+        );
+
+        let before = lookups(&tcx);
+        let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        run.layout(&mut lctx, &style, width);
+        assert!(lookups(&tcx) > before, "the next pass re-shapes");
+        assert!(run.guard.matches(&style, width));
+    }
 
     /// Records fills/borders/glyph-run brushes, mirroring
     /// `crate::material::chips`'s `RRectRecorder` plus a glyph-run capture.

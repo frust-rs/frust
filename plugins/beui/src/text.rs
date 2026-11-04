@@ -66,7 +66,9 @@
 //! stays explicit). A site that keeps an explicit family says why in a comment.
 
 use frust::Theme;
-use frust::authoring::text::{FontFamily, FontWeight, TextContext, TextLayout, TextStyle};
+use frust::authoring::text::{
+    FontFamily, FontWeight, LocaleStamp, TextContext, TextLayout, TextStyle,
+};
 use frust::authoring::{Brush, Color, LayoutCtx, PaintScene, Point, Size};
 
 /// The type-scale role a catalog text takes its font family from. The
@@ -101,20 +103,6 @@ pub(crate) fn themed_style(
 /// the shape cache from missing when only the color changes.
 pub(crate) const SHAPING_INK: Color = Color::BLACK;
 
-/// The app-locale generation a layout shaped in `style` depends on: the live
-/// [`default_locale_generation`](frust::authoring::text::default_locale_generation)
-/// for an untagged style (the default locale picks its face), and a constant
-/// for a style carrying its own locale, which the default never touches. A
-/// cache stores this beside its style key and reuses only on equality; the
-/// read is one lock-guarded load, cheap enough for a per-frame guard.
-pub(crate) fn locale_generation(style: &TextStyle) -> u64 {
-    if style.locale.is_some() {
-        0
-    } else {
-        frust::authoring::text::default_locale_generation()
-    }
-}
-
 /// A cached, lazily-shaped text run whose color is baked into the shaped
 /// layout.
 ///
@@ -126,7 +114,7 @@ pub(crate) struct Label {
     content: String,
     layout: Option<TextLayout>,
     laid_out_style: Option<TextStyle>,
-    laid_out_locale: u64,
+    laid_out_locale: LocaleStamp,
 }
 
 impl Label {
@@ -136,7 +124,7 @@ impl Label {
             content: content.into(),
             layout: None,
             laid_out_style: None,
-            laid_out_locale: 0,
+            laid_out_locale: LocaleStamp::default(),
         }
     }
 
@@ -156,16 +144,19 @@ impl Label {
     pub(crate) fn layout(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> Size {
         if let Some(cached) = &self.layout
             && self.laid_out_style.as_ref() == Some(style)
-            && self.laid_out_locale == locale_generation(style)
+            && self.laid_out_locale.is_current(style.locale.as_deref())
         {
             return cached.size();
         }
+        // Read before shaping: a locale write landing mid-shape then leaves the
+        // stamp stale and the next layout reshapes (see `LocaleStamp`).
+        let stamp = LocaleStamp::for_style(style.locale.as_deref());
         let text_ctx = ctx.text_context::<TextContext>();
         let laid = text_ctx.layout(&self.content, style, None);
         let size = laid.size();
         self.layout = Some(laid);
         self.laid_out_style = Some(style.clone());
-        self.laid_out_locale = locale_generation(style);
+        self.laid_out_locale = stamp;
         size
     }
 
@@ -210,7 +201,7 @@ pub(crate) struct LabelRun {
     content: String,
     layout: Option<TextLayout>,
     shaped_style: Option<TextStyle>,
-    shaped_locale: u64,
+    shaped_locale: LocaleStamp,
 }
 
 impl LabelRun {
@@ -220,7 +211,7 @@ impl LabelRun {
             content: content.into(),
             layout: None,
             shaped_style: None,
-            shaped_locale: 0,
+            shaped_locale: LocaleStamp::default(),
         }
     }
 
@@ -245,16 +236,19 @@ impl LabelRun {
     pub(crate) fn layout(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> Size {
         if let Some(cached) = &self.layout
             && self.shaped_style.as_ref() == Some(style)
-            && self.shaped_locale == locale_generation(style)
+            && self.shaped_locale.is_current(style.locale.as_deref())
         {
             return cached.size();
         }
+        // Read before shaping: a locale write landing mid-shape then leaves the
+        // stamp stale and the next layout reshapes (see `LocaleStamp`).
+        let stamp = LocaleStamp::for_style(style.locale.as_deref());
         let text_ctx = ctx.text_context::<TextContext>();
         let laid = text_ctx.layout(&self.content, style, None);
         let size = laid.size();
         self.layout = Some(laid);
         self.shaped_style = Some(style.clone());
-        self.shaped_locale = locale_generation(style);
+        self.shaped_locale = stamp;
         size
     }
 
@@ -324,6 +318,7 @@ pub(crate) fn label_style(size: f64) -> TextStyle {
 mod tests {
     use super::*;
     use frust::authoring::scene::GlyphRun;
+    use frust_widgets::test_support::LocaleSlotGuard;
     use std::any::Any;
 
     /// Records the ink every glyph run is drawn with.
@@ -348,63 +343,81 @@ mod tests {
         f(&mut ctx)
     }
 
-    /// Serialises the tests that write the process-global default-locale slot.
-    static LOCALE_SLOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Holds the slot lock and restores `None` on drop, panic included.
-    struct LocaleWriter(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
-
-    fn locale_writer() -> LocaleWriter {
-        LocaleWriter(LOCALE_SLOT.lock().unwrap_or_else(|e| e.into_inner()))
-    }
-
-    impl Drop for LocaleWriter {
-        fn drop(&mut self) {
-            frust::authoring::text::set_default_locale(None);
-        }
+    /// Shape counts of `ctx`'s text context after each step of `f`.
+    fn shapes_of(ctx: &mut LayoutCtx, f: impl FnOnce(&mut LayoutCtx)) -> u64 {
+        let before = shape_count(ctx);
+        f(ctx);
+        shape_count(ctx) - before
     }
 
     #[test]
-    fn cached_runs_follow_the_app_locale_generation() {
-        let _slot = locale_writer();
+    fn a_label_reshapes_exactly_once_per_locale_generation() {
+        let _slot = LocaleSlotGuard::set(None);
         let style = label_style(14.0);
         let mut label = Label::new("Ship");
-        let mut run = LabelRun::new("Ship");
         let mut tcx = TextContext::new();
         let mut ctx = LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), None);
-        label.layout(&mut ctx, &style);
-        run.layout(&mut ctx, &style);
-        let settled = tcx_stats(&mut ctx);
-        label.layout(&mut ctx, &style);
-        run.layout(&mut ctx, &style);
+        assert_eq!(shapes_of(&mut ctx, |c| _ = label.layout(c, &style)), 1);
         assert_eq!(
-            tcx_stats(&mut ctx),
-            settled,
-            "an unchanged generation reuses both runs"
+            shapes_of(&mut ctx, |c| _ = label.layout(c, &style)),
+            0,
+            "an unchanged generation reuses the run"
         );
 
         frust::authoring::text::set_default_locale(Some("ja"));
-        label.layout(&mut ctx, &style);
-        run.layout(&mut ctx, &style);
-        let (shapes, hits) = tcx_stats(&mut ctx);
-        assert!(
-            shapes + hits >= settled.0 + settled.1 + 2,
-            "a locale change rebuilds both runs"
+        assert_eq!(
+            shapes_of(&mut ctx, |c| _ = label.layout(c, &style)),
+            1,
+            "a locale change reshapes once"
         );
+        assert_eq!(shapes_of(&mut ctx, |c| _ = label.layout(c, &style)), 0);
 
         // A style with its own locale ignores the app default.
         let tagged = style.clone().with_locale(Some("fr"));
-        label.layout(&mut ctx, &tagged);
-        let before = tcx_stats(&mut ctx);
+        assert_eq!(shapes_of(&mut ctx, |c| _ = label.layout(c, &tagged)), 1);
         frust::authoring::text::set_default_locale(Some("ko"));
-        label.layout(&mut ctx, &tagged);
-        assert_eq!(tcx_stats(&mut ctx), before, "explicit locale stays cached");
+        assert_eq!(
+            shapes_of(&mut ctx, |c| _ = label.layout(c, &tagged)),
+            0,
+            "explicit locale stays cached"
+        );
     }
 
-    /// `(shapes, hits)` of the text context behind `ctx`.
-    fn tcx_stats(ctx: &mut LayoutCtx) -> (u64, u64) {
-        let stats = ctx.text_context::<TextContext>().shape_cache_stats();
-        (stats.shapes, stats.hits)
+    #[test]
+    fn a_label_run_reshapes_exactly_once_per_locale_generation() {
+        let _slot = LocaleSlotGuard::set(None);
+        let style = label_style(14.0);
+        let mut run = LabelRun::new("Ship");
+        let mut tcx = TextContext::new();
+        let mut ctx = LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), None);
+        assert_eq!(shapes_of(&mut ctx, |c| _ = run.layout(c, &style)), 1);
+        assert_eq!(
+            shapes_of(&mut ctx, |c| _ = run.layout(c, &style)),
+            0,
+            "an unchanged generation reuses the run"
+        );
+
+        frust::authoring::text::set_default_locale(Some("ja"));
+        assert_eq!(
+            shapes_of(&mut ctx, |c| _ = run.layout(c, &style)),
+            1,
+            "a locale change reshapes once"
+        );
+        assert_eq!(shapes_of(&mut ctx, |c| _ = run.layout(c, &style)), 0);
+
+        let tagged = style.clone().with_locale(Some("fr"));
+        assert_eq!(shapes_of(&mut ctx, |c| _ = run.layout(c, &tagged)), 1);
+        frust::authoring::text::set_default_locale(Some("ko"));
+        assert_eq!(
+            shapes_of(&mut ctx, |c| _ = run.layout(c, &tagged)),
+            0,
+            "explicit locale stays cached"
+        );
+    }
+
+    /// Total shapes of the text context behind `ctx`.
+    fn shape_count(ctx: &mut LayoutCtx) -> u64 {
+        ctx.text_context::<TextContext>().shape_cache_stats().shapes
     }
 
     #[test]
@@ -547,7 +560,7 @@ mod tests {
     #[test]
     fn a_theme_swap_reshapes_a_themed_run_in_the_new_face() {
         // Reader of the locale slot: a concurrent locale flip would add a reshape to the counts below.
-        let _slot = LOCALE_SLOT.lock().unwrap_or_else(|e| e.into_inner());
+        let _slot = LocaleSlotGuard::hold();
         let mut tcx = typeface_probe::text_context();
         let mut run = LabelRun::new("Ship");
         let mut label = Label::new("Email");

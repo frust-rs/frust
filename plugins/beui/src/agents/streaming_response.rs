@@ -66,7 +66,7 @@
 use std::time::Duration;
 
 use frust::authoring::scene::GlyphRun;
-use frust::authoring::text::{TextContext, TextLayout, TextStyle};
+use frust::authoring::text::{LocaleStamp, TextContext, TextLayout, TextStyle};
 use frust::authoring::{
     BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Role, SemanticsCtx,
     Size, TickClass, View, Widget,
@@ -221,7 +221,7 @@ pub struct StreamingResponseWidget {
     color: Option<Color>,
     /// The wrapped body run, plus what it was shaped from (text, style, width).
     run: Option<TextLayout>,
-    shaped: Option<(String, TextStyle, f64, u64)>,
+    shaped: Option<(String, TextStyle, f64, LocaleStamp)>,
     /// How many glyphs of the shaped run have finished revealing. Everything
     /// past this is the run currently fading in.
     settled_glyphs: usize,
@@ -456,7 +456,8 @@ impl Widget for StreamingResponseWidget {
             self.content.clone(),
             style.clone(),
             width,
-            crate::text::locale_generation(&style),
+            // Read before shaping (see `LocaleStamp`).
+            LocaleStamp::for_style(style.locale.as_deref()),
         );
         if self.shaped.as_ref() != Some(&key) {
             let max_width = width.is_finite().then_some(width as f32);

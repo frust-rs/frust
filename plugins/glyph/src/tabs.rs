@@ -192,11 +192,12 @@ impl GlyphLabel {
         {
             return cached.size();
         }
+        let stamp = LayoutGuard::stamp(style);
         let text_ctx = ctx.text_context::<TextContext>();
         let laid = text_ctx.layout(&self.content, style, max_width);
         let size = laid.size();
         self.layout = Some(laid);
-        self.guard.record(style, max_width);
+        self.guard.record(style, max_width, stamp);
         size
     }
 
@@ -680,6 +681,9 @@ impl Widget for TabsWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use frust::authoring::PointerButton;
+    use frust_widgets::test_support::LocaleSlotGuard;
+    use std::any::Any;
 
     /// Total shaping-cache lookups so far: unchanged while a cached layout is
     /// reused, advanced by every rebuild.
@@ -690,8 +694,7 @@ mod tests {
 
     #[test]
     fn cached_layout_follows_the_app_locale_generation() {
-        use crate::badge::locale_test::DefaultLocale;
-        let _locale = DefaultLocale::set(None);
+        let _locale = LocaleSlotGuard::set(None);
         let mut tcx = TextContext::new();
         let mut run = GlyphLabel::new("Overview");
         let style = TextStyle::default();
@@ -728,8 +731,6 @@ mod tests {
         pass(&mut run, &tagged, &mut tcx);
         assert_eq!(lookups(&tcx), tagged_built);
     }
-    use frust::authoring::PointerButton;
-    use std::any::Any;
 
     #[derive(Default)]
     struct Recorder {

@@ -26,8 +26,10 @@ image = { workspace = true }
 # Turns on frust-core's clock seam (`PaintCtx::for_test`) for this crate's own
 # widget tests — the only sanctioned way to paint at a chosen FrameTime.
 frust-core = { workspace = true, features = ["test-support"] }
+# The shared default-locale slot lock (`frust_text::test_support`) for this crate's tests.
+frust-text = { workspace = true, features = ["test-support"] }
 
 [features]
-# Compiles the GPU-free container fixtures (`test_support`) so an out-of-tree design system can
-# test its containers. Off by default; always on in this crate's own `cfg(test)` build.
-test-support = []
+# Compiles the GPU-free container fixtures and the shared locale-slot lock (`test_support`) so an
+# out-of-tree design system can test against them. Off by default; on in this crate's own tests.
+test-support = ["frust-text/test-support"]

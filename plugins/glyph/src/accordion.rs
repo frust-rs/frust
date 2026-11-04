@@ -219,11 +219,12 @@ impl GlyphLabel {
         {
             return cached.size();
         }
+        let stamp = LayoutGuard::stamp(style);
         let text_ctx = ctx.text_context::<TextContext>();
         let laid = text_ctx.layout(&self.content, style, max_width);
         let size = laid.size();
         self.layout = Some(laid);
-        self.guard.record(style, max_width);
+        self.guard.record(style, max_width, stamp);
         size
     }
 
@@ -612,6 +613,9 @@ mod tests {
 
     #[test]
     fn closed_reports_only_header_height() {
+        // Measurements compared across layouts: hold the shared locale slot so a
+        // test writing the default locale cannot reshape the header in between.
+        let _slot = frust_widgets::test_support::LocaleSlotGuard::hold();
         let view: AccordionView<()> = accordion("Details", body()).open(false);
         let mut w = build(&view);
         let size = layout(&mut w, None);
@@ -621,6 +625,9 @@ mod tests {
 
     #[test]
     fn open_reports_header_plus_full_body() {
+        // Measurements compared across layouts: hold the shared locale slot so a
+        // test writing the default locale cannot reshape the header in between.
+        let _slot = frust_widgets::test_support::LocaleSlotGuard::hold();
         let view: AccordionView<()> = accordion("Details", body()).open(true);
         let mut w = build(&view);
         let size = layout(&mut w, None);
@@ -651,6 +658,9 @@ mod tests {
 
     #[test]
     fn height_is_between_closed_and_open_at_mid_reveal() {
+        // Measurements compared across layouts: hold the shared locale slot so a
+        // test writing the default locale cannot reshape the header in between.
+        let _slot = frust_widgets::test_support::LocaleSlotGuard::hold();
         let view: AccordionView<()> = accordion("Details", body()).open(true);
         let mut w = build(&view);
         layout(&mut w, None); // measures header + full body at reveal 1.0
@@ -672,6 +682,9 @@ mod tests {
 
     #[test]
     fn chevron_rotates_toward_down_as_it_opens() {
+        // Measurements compared across layouts: hold the shared locale slot so a
+        // test writing the default locale cannot reshape the header in between.
+        let _slot = frust_widgets::test_support::LocaleSlotGuard::hold();
         // Closed: chevron points right (tip at max x).
         let closed: AccordionView<()> = accordion("Details", body()).open(false);
         let mut w = build(&closed);

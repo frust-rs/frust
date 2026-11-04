@@ -219,6 +219,7 @@ use crate::badge::locale_stamp;
 use crate::button::motion::{ContentPadding, RadiusPaddingMotion};
 use crate::interaction::{HapticSignal, InteractionState, MaterialHaptics};
 use crate::press::presses;
+use frust::authoring::text::LocaleStamp;
 
 // ---- Icon glyph size (m3e_icon_button_theme.dart:39-45) --------------------
 
@@ -603,7 +604,7 @@ struct BadgeRun {
     /// The style the cached layout was shaped with.
     style: TextStyle,
     /// The locale generation `layout` was shaped under ([`locale_stamp`]).
-    stamp: u64,
+    stamp: LocaleStamp,
     layout: Option<TextLayout>,
 }
 
@@ -625,7 +626,7 @@ impl BadgeRun {
         Self {
             content: String::new(),
             style: badge_style(None),
-            stamp: 0,
+            stamp: LocaleStamp::default(),
             layout: None,
         }
     }
@@ -1873,7 +1874,7 @@ mod tests {
 
     #[test]
     fn a_theme_swap_reshapes_the_cached_badge_label() {
-        let _slot = crate::badge::locale_slot_test::reader();
+        let _slot = frust_widgets::test_support::LocaleSlotGuard::hold();
         let view = icon_button::<(), _>(leaf_any(24.0, 24.0), |_| {}).badge(BadgeValue::Count(7));
         let mut widget = build(&view);
         let mut tcx = TextContext::new();

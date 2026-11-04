@@ -233,6 +233,7 @@ use crate::icon_button::icon_button;
 use crate::overlay::{OVERLAY_SCRIM_ALPHA, finite_or_zero};
 use crate::press::presses;
 use crate::strings::MaterialStrings;
+use frust::authoring::text::LocaleStamp;
 
 // ---- Layout tokens ---------------------------------------------------------
 
@@ -693,7 +694,7 @@ impl<State: 'static> RailFab<State> {
 struct TextRun {
     content: String,
     layout: Option<TextLayout>,
-    shaped_for: Option<(TextStyle, Option<f64>, u64)>,
+    shaped_for: Option<(TextStyle, Option<f64>, LocaleStamp)>,
 }
 
 impl TextRun {

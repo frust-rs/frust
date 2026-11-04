@@ -561,7 +561,7 @@ design-system installation are the WIDGETS unit's rules — [WIDGETS_CODE_STANDA
   must say how to run it (`cargo test -p ... --ignored`) and why it's excluded by default
   (needs a real GPU; compiles a full generated dependency graph; etc.).
 - **Process-global text state in `frust-widgets` tests**: ones asserting shape counts, generations
-  or rebuild counts, or registering fonts, take `locale_slot_test::reader()`; slot writers `writer()`.
+  or rebuild counts, or registering fonts, hold `test_support::LocaleSlotGuard::hold()`; slot writers `set(..)`.
 - **Recording fakes for paint assertions**: a minimal `PaintScene` impl pushing `(origin,
   size)`/`(origin, text)` tuples into `Vec`s lets widget `layout`/`paint` behavior be
   asserted without any GPU dependency.

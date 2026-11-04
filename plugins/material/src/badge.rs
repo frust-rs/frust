@@ -54,7 +54,7 @@
 //! `ColorScheme` roles a themed `Theme` always carries.
 
 use frust::Theme;
-use frust::authoring::text::{FontWeight, TextContext, TextLayout, TextStyle};
+use frust::authoring::text::{FontWeight, LocaleStamp, TextContext, TextLayout, TextStyle};
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
     LayoutCtx, PaintCtx, PaintScene, Role, SemanticsCtx, View, Widget, any,
@@ -164,51 +164,19 @@ fn label_style(theme: Option<&Theme>) -> TextStyle {
 
 /// The locale generation a cached layout of `style` was shaped under.
 ///
-/// Untagged text follows the app default locale (`frust_text::set_default_locale`), so a cached
-/// layout is only valid at the generation it was shaped in. A style that names its own locale does
-/// not read the slot, so its stamp is a constant and a default-locale change never invalidates it.
-/// Shared by every cached text layout in this crate (a private copy of the idiom in
-/// `frust-widgets`' `TextView`).
-pub(crate) fn locale_stamp(style: &TextStyle) -> u64 {
-    if style.locale.is_some() {
-        0
-    } else {
-        frust::authoring::text::default_locale_generation()
-    }
+/// A thin wrapper over [`LocaleStamp::for_style`]: untagged text follows the app default locale,
+/// so a cached layout is only valid at the generation it was shaped in, while a style naming its
+/// own locale gets a constant stamp. Read it BEFORE shaping and store that value.
+pub(crate) fn locale_stamp(style: &TextStyle) -> LocaleStamp {
+    LocaleStamp::for_style(style.locale.as_deref())
 }
 
-/// Serialises the tests that write the process-global default-locale slot against each other.
+/// How many layout requests `tcx` has served (shapes, re-breaks and cache hits): it advances by
+/// one every time a widget rebuilds a layout, and stays put when a cache is reused.
 #[cfg(test)]
-pub(crate) mod locale_slot_test {
-    use std::sync::{Mutex, MutexGuard};
-
-    static LOCK: Mutex<()> = Mutex::new(());
-
-    /// Holds the lock and restores `None` on drop, panic included.
-    pub(crate) struct Writer(#[allow(dead_code)] MutexGuard<'static, ()>);
-
-    pub(crate) fn writer() -> Writer {
-        Writer(reader())
-    }
-
-    /// Holds the lock for a test that asserts shape counts and never writes the slot: a writer
-    /// elsewhere would otherwise advance the generation and skew its counters.
-    pub(crate) fn reader() -> MutexGuard<'static, ()> {
-        LOCK.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// How many layout requests `tcx` has served (shapes, re-breaks and cache hits): it advances
-    /// by one for every time a widget rebuilds a layout, and stays put when a cache is reused.
-    pub(crate) fn passes(tcx: &frust::authoring::text::TextContext) -> u64 {
-        let stats = tcx.shape_cache_stats();
-        stats.shapes + stats.line_breaks + stats.hits
-    }
-
-    impl Drop for Writer {
-        fn drop(&mut self) {
-            frust::authoring::text::set_default_locale(None);
-        }
-    }
+pub(crate) fn layout_passes(tcx: &frust::authoring::text::TextContext) -> u64 {
+    let stats = tcx.shape_cache_stats();
+    stats.shapes + stats.line_breaks + stats.hits
 }
 
 /// A small, paint-time-rebrushed text run for the numeric label — mirrors
@@ -224,7 +192,7 @@ struct LabelRun {
     /// The style the cached layout was shaped with.
     style: TextStyle,
     /// The locale generation `layout` was shaped under ([`locale_stamp`]).
-    stamp: u64,
+    stamp: LocaleStamp,
     layout: Option<TextLayout>,
 }
 
@@ -233,7 +201,7 @@ impl LabelRun {
         Self {
             content: String::new(),
             style: label_style(None),
-            stamp: 0,
+            stamp: LocaleStamp::default(),
             layout: None,
         }
     }
@@ -629,7 +597,7 @@ fn resolve_label(theme: Option<&Theme>) -> Color {
 mod tests {
     use super::*;
     use frust::authoring::text::FontFamily;
-    use frust_widgets::test_support::leaf_any;
+    use frust_widgets::test_support::{LocaleSlotGuard, leaf_any};
     use std::any::Any;
 
     fn build<S: 'static>(view: &BadgeView<S>) -> BadgeWidget {
@@ -787,43 +755,43 @@ mod tests {
 
     #[test]
     fn label_layout_follows_the_default_locale_generation() {
-        let _slot = locale_slot_test::writer();
+        let _slot = LocaleSlotGuard::hold();
         let view: BadgeView<()> = badge(leaf_any(40.0, 40.0)).count(3);
         let mut w = build(&view);
         let mut tcx = TextContext::new();
         layout_themed(&mut w, &mut tcx, None);
-        let first = locale_slot_test::passes(&tcx);
+        let first = layout_passes(&tcx);
         layout_themed(&mut w, &mut tcx, None);
         assert_eq!(
-            locale_slot_test::passes(&tcx),
+            layout_passes(&tcx),
             first,
             "an unchanged generation reuses the cached layout"
         );
         frust::authoring::text::set_default_locale(Some("ja"));
         layout_themed(&mut w, &mut tcx, None);
         assert_eq!(
-            locale_slot_test::passes(&tcx),
+            layout_passes(&tcx),
             first + 1,
             "a new generation rebuilds the layout"
         );
         layout_themed(&mut w, &mut tcx, None);
-        assert_eq!(locale_slot_test::passes(&tcx), first + 1);
+        assert_eq!(layout_passes(&tcx), first + 1);
     }
 
     #[test]
     fn an_explicit_locale_style_ignores_the_default_locale_generation() {
-        let _slot = locale_slot_test::writer();
+        let _slot = LocaleSlotGuard::hold();
         let mut tcx = TextContext::new();
         let mut run = LabelRun::new();
         run.set_content("3");
         let style = label_style(None).with_locale(Some("en"));
         let mut ctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
         run.shape(&mut ctx, &style);
-        let first = locale_slot_test::passes(ctx.text_context::<TextContext>());
+        let first = layout_passes(ctx.text_context::<TextContext>());
         frust::authoring::text::set_default_locale(Some("ja"));
         run.shape(&mut ctx, &style);
         assert_eq!(
-            locale_slot_test::passes(ctx.text_context::<TextContext>()),
+            layout_passes(ctx.text_context::<TextContext>()),
             first,
             "a style naming its own locale never reads the slot"
         );
@@ -925,7 +893,7 @@ mod tests {
 
     #[test]
     fn a_theme_swap_reshapes_the_cached_label() {
-        let _slot = locale_slot_test::reader();
+        let _slot = LocaleSlotGuard::hold();
         let view: BadgeView<()> = badge(leaf_any(40.0, 40.0)).count(3);
         let mut w = build(&view);
         let mut tcx = TextContext::new();

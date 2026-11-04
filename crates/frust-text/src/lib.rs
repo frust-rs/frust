@@ -26,13 +26,15 @@ mod shape_cache;
 mod style;
 
 pub use context::{FontError, RegisteredFamily, TextContext, register_generic_fallback};
-pub use convert::notdef_glyph_count;
 pub use editor::{
     EditOp, EditingState, EditingStateBytes, TextEditor, byte_to_utf16, sanitize_paste,
     utf16_to_byte,
 };
 pub use layout::TextLayout;
-pub use locale::{default_locale, default_locale_generation, set_default_locale};
+/// The shared lock over the default-locale slot for tests (`test-support` feature).
+#[cfg(any(test, feature = "test-support"))]
+pub use locale::test_support;
+pub use locale::{LocaleStamp, default_locale, default_locale_generation, set_default_locale};
 pub use oracle::RenderCapabilities;
 pub use oracle::cache::FontCacheStats;
 pub use shape_cache::ShapeCacheStats;
@@ -40,6 +42,17 @@ pub use style::{
     FamilyName, FontFamily, FontStyle, FontWeight, GenericSlot, LineHeight, TextAlign,
     TextOverflow, TextStyle,
 };
+
+/// The process-wide count of visible-text glyphs that shaped to glyph 0
+/// (`.notdef`): the sum of every [`TextContext::notdef_glyph_count`] in this
+/// process, contexts already dropped included.
+///
+/// Each context's counter adds here as it counts, under the same rule: a line
+/// table's first conversion to glyph runs counts, its later paints do not.
+#[deprecated(note = "use TextContext::notdef_glyph_count")]
+pub fn notdef_glyph_count() -> u64 {
+    convert::process_notdef_total()
+}
 
 #[cfg(test)]
 mod tests {
