@@ -62,9 +62,9 @@ pub use discovery::{
     parse_discovery_line, parse_failure_line, redact_discovery_token,
 };
 pub use messages::{
-    AckResult, ApplyPatchParams, Capability, FrameStats, HandshakeInfo, HandshakeParams,
-    HotpatchInfo, InputScrollParams, InputTapParams, InputTextParams, JumpTableWire,
-    MetricsSnapshot, MissedKey, PatchChunkParams, PatchFile, PatchOutcome, RectPx,
+    AckResult, AnimationTimeScaleParams, ApplyPatchParams, Capability, FrameStats, HandshakeInfo,
+    HandshakeParams, HotpatchInfo, InputScrollParams, InputTapParams, InputTextParams,
+    JumpTableWire, MetricsSnapshot, MissedKey, PatchChunkParams, PatchFile, PatchOutcome, RectPx,
     ScreenshotResult, WidgetNode, WidgetProps, WidgetPropsParams, WidgetTreeDump,
 };
 pub use method::Method;

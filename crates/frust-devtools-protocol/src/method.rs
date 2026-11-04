@@ -59,6 +59,11 @@ pub enum Method {
     /// host-written file named by [`crate::ApplyPatchParams::file`] instead,
     /// with the jump table its `table_chunk` uploads carried.
     ApplyPatch,
+    /// Client→server request; params: [`crate::AnimationTimeScaleParams`];
+    /// result: [`crate::AckResult`]. Advertised by
+    /// [`crate::Capability::AnimationTimeScale`]. Sets the running app's
+    /// animation time scale.
+    SetAnimationTimeScale,
 }
 
 impl Method {
@@ -79,6 +84,7 @@ impl Method {
             Method::PatchChunk => "patch_chunk",
             Method::TableChunk => "table_chunk",
             Method::ApplyPatch => "apply_patch",
+            Method::SetAnimationTimeScale => "set_animation_time_scale",
         }
     }
 
@@ -110,6 +116,7 @@ impl Method {
             "patch_chunk" => Method::PatchChunk,
             "table_chunk" => Method::TableChunk,
             "apply_patch" => Method::ApplyPatch,
+            "set_animation_time_scale" => Method::SetAnimationTimeScale,
             _ => return None,
         })
     }
@@ -125,7 +132,7 @@ impl std::fmt::Display for Method {
 mod tests {
     use super::*;
 
-    const ALL: [Method; 14] = [
+    const ALL: [Method; 15] = [
         Method::Handshake,
         Method::WidgetTree,
         Method::WidgetProps,
@@ -140,6 +147,7 @@ mod tests {
         Method::PatchChunk,
         Method::TableChunk,
         Method::ApplyPatch,
+        Method::SetAnimationTimeScale,
     ];
 
     #[test]
