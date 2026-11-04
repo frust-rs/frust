@@ -137,6 +137,7 @@ use frust::authoring::{
     rebuild_child, route_event_single, teardown_child, text::FontWeight, visit_children,
 };
 use frust::input::{TOUCH_SLOP, VelocityTracker};
+use frust::motion::detent::{self, DetentRelease, Detents, DismissPolicy};
 use frust::{
     AnimationController, CrossAxisAlignment, Curve, EdgeInsets, FlexChild, FlexView, FrameTime,
     NavigatorController, Padding, PopResult, SizedBox, Theme, TransitionSpec, flexible, inflexible,
@@ -172,7 +173,7 @@ const SLIDE_MS: u64 = 500;
 /// `zoom-in-95`: the scale a fade-zoom entrance starts from.
 const ZOOM_FROM: f64 = 0.95;
 /// Progress difference below which a ramp counts as settled.
-const PROGRESS_EPSILON: f64 = 1e-4;
+const PROGRESS_EPSILON: f64 = detent::PROGRESS_EPSILON;
 
 /// Release speed, in logical px/s along the drag axis, at or above which a
 /// drawer drag commits in the direction it was flung rather than to whichever
@@ -183,7 +184,7 @@ const PROGRESS_EPSILON: f64 = 1e-4;
 /// (0.4 px/ms) is a deliberate flick — an order of magnitude above
 /// `frust::input::FLING_STOP`'s 30 px/s "this fling is over" floor, and well
 /// under the speed of a full-screen swipe.
-pub const FLING_VELOCITY: f64 = 400.0;
+pub const FLING_VELOCITY: f64 = detent::DEFAULT_FLING_VELOCITY;
 
 /// `top-4 right-4` — the close button's inset from the panel's top/right edges.
 const CLOSE_INSET: f64 = 16.0;
@@ -929,40 +930,12 @@ impl ModalWidget {
     /// unreachable configuration silently falls back to fully open instead
     /// of panicking.
     pub fn open_progress(&self) -> f64 {
-        self.snap_points
-            .first()
-            .map(|p| self.normalize_snap(*p))
-            .filter(|p| *p > PROGRESS_EPSILON)
-            .unwrap_or(1.0)
+        self.detents().open_progress(self.extent())
     }
 
-    /// A snap point in progress space: `0..=1` is already a fraction of the
-    /// panel's extent, anything larger is logical px against that extent
-    /// (Base UI's contract). Clamped into `0..=1`, and treated as fully open
-    /// while no extent has been laid out yet.
-    fn normalize_snap(&self, point: f64) -> f64 {
-        if point <= 1.0 {
-            return point.clamp(0.0, 1.0);
-        }
-        let extent = self.extent();
-        if extent <= 0.0 {
-            return 1.0;
-        }
-        (point / extent).clamp(0.0, 1.0)
-    }
-
-    /// The resting points a release snaps to, ascending: every snap point plus
-    /// `0.0` (closed). With none authored the set is `{0.0, 1.0}`, so "nearest"
-    /// is the drag-past-the-midpoint commit.
-    fn snap_targets(&self) -> Vec<f64> {
-        let mut targets: Vec<f64> = std::iter::once(0.0)
-            .chain(self.snap_points.iter().map(|p| self.normalize_snap(*p)))
-            .collect();
-        if targets.len() == 1 {
-            targets.push(1.0);
-        }
-        targets.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        targets
+    /// The authored snap points as the shared detent math.
+    fn detents(&self) -> Detents {
+        Detents::new(&self.snap_points)
     }
 
     /// The panel's extent along its own slide axis (its thickness).
@@ -1127,47 +1100,27 @@ impl ModalWidget {
         if !self.drag_moved {
             return;
         }
-        let extent = self.extent();
-        if extent <= 0.0 {
-            return;
-        }
         // Dragging toward the closing edge lowers progress; the panel can be
         // pushed no further open than its own furthest resting point.
-        let open = self.snap_targets().last().copied().unwrap_or(1.0);
-        let target = self.drag_from - self.close_sign() * delta / extent;
-        self.scrub(ctx, target.clamp(0.0, open));
+        let Some(target) =
+            self.detents()
+                .drag_to(self.drag_from, delta, self.close_sign(), self.extent())
+        else {
+            return;
+        };
+        self.scrub(ctx, target);
     }
 
     /// The resting point a release settles to: the nearest one, or — past
     /// [`FLING_VELOCITY`] — the next one along the direction of travel.
     fn release_target(&self, velocity: f64) -> f64 {
-        let targets = self.snap_targets();
-        let nearest = |p: f64| {
-            targets
-                .iter()
-                .copied()
-                .min_by(|a, b| {
-                    (a - p)
-                        .abs()
-                        .partial_cmp(&(b - p).abs())
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .unwrap_or(0.0)
-        };
-        if velocity.abs() >= FLING_VELOCITY {
-            // A flick toward the closing edge takes the next point down, one
-            // away from it the next point up.
-            let opening = velocity * self.close_sign() < 0.0;
-            let next = if opening {
-                targets.iter().copied().find(|t| *t > self.progress)
-            } else {
-                targets.iter().rev().copied().find(|t| *t < self.progress)
-            };
-            if let Some(next) = next {
-                return next;
-            }
-        }
-        nearest(self.progress)
+        self.detents().release_target(
+            self.progress,
+            velocity,
+            self.close_sign(),
+            self.extent(),
+            FLING_VELOCITY,
+        )
     }
 
     /// Settle a released drag: continue into the exit ramp when it landed
@@ -1181,16 +1134,17 @@ impl ModalWidget {
     /// it) — a bare no-op would leave the panel resting there, an invisible
     /// full-window input barrier with nothing to recover it.
     fn settle_drag(&mut self, ctx: &mut EventCtx, target: f64) {
-        if target <= PROGRESS_EPSILON {
-            if self.dismissable() {
-                self.request_dismiss(ctx);
-            } else {
-                self.begin_ramp(self.open_progress(), false);
+        let policy = if self.dismissable() {
+            DismissPolicy::Dismissable
+        } else {
+            DismissPolicy::SpringBackTo
+        };
+        match self.detents().settle(target, policy, self.extent()) {
+            DetentRelease::Dismiss => self.request_dismiss(ctx),
+            DetentRelease::SnapTo(point) => {
+                self.begin_ramp(point, false);
                 ctx.request_redraw();
             }
-        } else {
-            self.begin_ramp(target, false);
-            ctx.request_redraw();
         }
     }
 
@@ -2914,6 +2868,29 @@ pub(crate) mod tests {
             (w.panel_rect().y0 - (WINDOW.height - 60.0)).abs() < 1e-9,
             "60 logical px of the drawer are on screen"
         );
+    }
+
+    #[test]
+    fn modal_detents_route_through_the_shared_math() {
+        let (view, _closed) = staged(drawer_config());
+        let mut w = build(&view.snap_points(&[0.5, 1.0]));
+        layout(&mut w);
+        run_ramp(&mut w, 0.0);
+        let detents = Detents::new(&[0.5, 1.0]);
+        for velocity in [0.0, 900.0, -900.0] {
+            assert_eq!(
+                w.release_target(velocity),
+                detents.release_target(
+                    w.progress(),
+                    velocity,
+                    w.close_sign(),
+                    w.extent(),
+                    FLING_VELOCITY,
+                ),
+                "velocity {velocity}"
+            );
+        }
+        assert_eq!(w.open_progress(), detents.open_progress(w.extent()));
     }
 
     #[test]
