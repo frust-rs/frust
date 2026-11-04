@@ -73,6 +73,12 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   its bytes with CoreText; a mismatch counts in `hvgl_bytes_mismatches` and the warning names the
   codepoint as `U+XXXX`. `objc2-core-foundation` gains the `CFArray`/`CFDictionary`/`CFNumber`
   features, no version change (265aaa068).
+- `TextContext::font_cache_stats()` returns `FontCacheStats { write_failures, written_generation, dirty,
+  attached, persistent }`, and `BackgroundFlush::went_to_background_outcome()` returns a `BackgroundFlushOutcome`
+  (per-context results; `went_to_background` still returns the flushed count). Both types are
+  re-exported (`frust_text`, `frust_shell_common`, `frust::authoring::text`). A report whose every flush
+  failed leaves the once-per-transition latch unarmed so the next hide retries; the first failed flush a
+  hook sees logs at warn, later ones at debug (1f7cf69bf, d4adce3f3).
 
 ### Changed
 
@@ -111,6 +117,15 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   call, which is now the only `unsafe` in the module. One generic bounded LRU bounds the open faces,
   each face's instances and the outline cache; refusal sets stay first-in-first-out (c0002cfab,
   1d1418e9b).
+- The font-cache flush runs at the lifecycle `Hidden` edge instead of on pause or focus loss. iOS
+  flushes in `frust_did_enter_background` (no longer at `willResignActive`), Android in `native_on_stop`
+  (no longer at `onPause`), desktop when every window is minimized or occluded, or suspended (no longer
+  on focus loss), and desktop gains a flush at exit, once per exit, including menu Quit. Web flushes
+  nothing: it has no persistent cache. iPhone 13 mini: one flush per background (14.3 ms first write,
+  then 0.1 ms), none for a Control Center pull; Pixel 5: one per `onStop` (12.1 ms, then 0.1 ms), none
+  for the share sheet, and the cache survives `am force-stop`; macOS M4: minimize 1 (11.2 ms), occlusion 1,
+  Quit 1, focus loss 0 (p4-ios-flush-hidden, p4-android-flush-hidden, p4-desktop-flush-hidden,
+  p4-web-no-flush; 64281d470).
 
 ### Fixed
 
@@ -119,6 +134,13 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   so frust no longer drops an acquired texture while its swapchain lives (the main surface presents a
   backstop frame, a refused overlay keeps the texture un-presented for its next frame, so its previous frame stays on screen) and reconfigures after `MAX_TRANSIENT_SKIPS`
   consecutive acquire timeouts.
+- Font-cache file hygiene: stale temp files are swept under the registry lock on both load paths (this
+  process's after 10 minutes, another process's after 24 hours, with no PID liveness check), every live copy
+  of a path writes through one writer with a monotonic generation so an older snapshot never overwrites a
+  newer one (file format v7 unchanged), and a clean flush of a deferred-path context joins a live shared
+  copy (734411802, 2791c5134, f69fccfc0).
+- The web shell's page-lifecycle listeners are owned by a guard that removes them on drop (no leaked
+  closures), and the hide flush is skipped while the web tier has no persistent font cache (74e0f87dc).
 
 ## 0.6.5 — 2026-11-02
 

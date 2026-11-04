@@ -51,8 +51,9 @@ fn a_widget_can_contribute_semantics_through_the_facade_alone() {
 }
 
 /// The `TextContext` accessors' return types must themselves be nameable —
-/// `register_fonts() -> Result<Vec<RegisteredFamily>, FontError>` and
-/// `shape_cache_stats() -> ShapeCacheStats` — as must the UTF-16/byte index
+/// `register_fonts() -> Result<Vec<RegisteredFamily>, FontError>`,
+/// `shape_cache_stats() -> ShapeCacheStats` and
+/// `font_cache_stats() -> FontCacheStats` — as must the UTF-16/byte index
 /// bridge between the two `EditingState` types the seam exposes.
 #[test]
 fn text_surface_is_closed_over_its_own_signatures() {
@@ -62,6 +63,7 @@ fn text_surface_is_closed_over_its_own_signatures() {
             frust::authoring::text::FontError,
         > = ctx.register_fonts(data);
         let _: frust::authoring::text::ShapeCacheStats = ctx.shape_cache_stats();
+        let _: frust::authoring::text::FontCacheStats = ctx.font_cache_stats();
     }
     let _bridge: fn(&str, usize) -> usize = frust::authoring::text::utf16_to_byte;
     let _back: fn(&str, usize) -> usize = frust::authoring::text::byte_to_utf16;

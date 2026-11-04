@@ -42,6 +42,7 @@ use web_time::Instant;
 use peniko::Blob;
 
 use crate::layout::{ELLIPSIS, Ellipsis, TextLayout};
+use crate::oracle::cache::FontCacheStats;
 use crate::oracle::registry::{FamilySummary, RegistryMirror};
 use crate::oracle::{self, CacheLocation, Oracle, RenderCapabilities};
 use crate::shape_cache::{
@@ -322,10 +323,27 @@ impl TextContext {
     ///
     /// The cache writes behind on its own (after a burst of new answers, or
     /// once idle) and on drop, but a mobile app can be killed in the
-    /// background with neither: a shell calls this from its pause/background
-    /// hook. A no-op for a context built without a font cache.
+    /// background with neither: a shell calls this at the lifecycle `Hidden`
+    /// edge (the desktop shell on exit too). A no-op for a context built
+    /// without a font cache. The flush writes when this cache, or the shared
+    /// copy it is attached to, holds answers not yet on disk; a dirty flush is
+    /// synchronous. A clean context whose file is not attached yet joins the
+    /// live shared copy another context holds for the same file under the
+    /// same stamp and font-directory state, and writes it if the disk is
+    /// behind; with no such copy it reads nothing.
     pub fn flush_font_cache(&mut self) -> std::io::Result<()> {
         self.oracle.flush()
+    }
+
+    /// A snapshot of the persistent font cache's state ([`FontCacheStats`]):
+    /// how many of its writes failed, the generation on disk, and whether it
+    /// is dirty, attached, or persistent at all. Memory only, no disk access;
+    /// all zero or `false` for a context built without a font cache.
+    ///
+    /// A shell that flushes on background reads it to see whether the cache
+    /// is still behind the disk after [`Self::flush_font_cache`] failed.
+    pub fn font_cache_stats(&self) -> FontCacheStats {
+        self.oracle.font_cache_stats()
     }
 
     /// What frust-engine can draw, as this context's font oracle assumes.
@@ -670,6 +688,49 @@ mod tests {
     }
 
     #[test]
+    fn font_cache_stats_report_whether_the_context_persists() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+        let off = test_cx().font_cache_stats();
+        assert!(!off.persistent, "a disabled cache location never persists");
+        assert_eq!(off, FontCacheStats::default());
+        let dir = oracle::synthetic::TempDir::new("context-cache-persistent");
+        let on = TextContext::builder()
+            .font_cache_dir(dir.path().join("fonts"))
+            .build();
+        assert!(
+            on.font_cache_stats().persistent,
+            "before anything is attached"
+        );
+    }
+
+    #[test]
+    fn font_cache_stats_surface_a_failed_write_behind() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+        let dir = oracle::synthetic::TempDir::new("context-cache-stats");
+        // The cache directory is a regular file: every write fails.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"x").expect("blocker");
+        let mut cx = TextContext::builder().font_cache_dir(&blocker).build();
+        assert_eq!(
+            cx.font_cache_stats(),
+            FontCacheStats {
+                persistent: true,
+                ..FontCacheStats::default()
+            }
+        );
+        cx.oracle
+            .cache_mut()
+            .set_write_behind(1, std::time::Duration::from_secs(3600));
+        let _ = cx.oracle.resolve(&oracle_request("a"));
+        cx.oracle.cache_mut().join_writer();
+        let stats = cx.font_cache_stats();
+        assert!(stats.attached && stats.dirty);
+        assert_eq!(stats.write_failures, 1);
+        assert!(cx.flush_font_cache().is_err(), "the flush reports it too");
+        assert!(cx.font_cache_stats().dirty, "still behind the disk");
+    }
+
+    #[test]
     fn two_contexts_over_one_cache_dir_share_their_answers() {
         let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let dir = oracle::synthetic::TempDir::new("context-shared-cache");
@@ -733,14 +794,13 @@ mod tests {
         assert!(!a.oracle.cache().is_dirty());
 
         // Nothing behind: A's flush writes nothing.
-        let before = std::fs::metadata(&file)
-            .and_then(|m| m.modified())
-            .expect("mtime");
+        let before = std::fs::read(&file).expect("cache file bytes");
         a.flush_font_cache().expect("no-op");
-        let after = std::fs::metadata(&file)
-            .and_then(|m| m.modified())
-            .expect("mtime");
-        assert_eq!(before, after, "a flush with nothing behind writes nothing");
+        let after = std::fs::read(&file).expect("cache file bytes");
+        assert!(
+            before == after,
+            "a flush with nothing behind leaves the file byte-identical"
+        );
 
         // B records a second answer and never flushes; A's flush writes it.
         let _ = b.oracle.resolve(&y);

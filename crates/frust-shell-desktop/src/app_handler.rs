@@ -1035,6 +1035,7 @@ where
         laid_out_for: None,
         text_ctx: TextContext::new(),
         background_flush: frust_shell_common::BackgroundFlush::new(),
+        exit_flush: frust_shell_common::BackgroundFlush::new(),
         executor,
         scene: Scene::new(),
         platform_views: DesktopPlatformViews::new(),
@@ -2032,10 +2033,17 @@ struct ShellHandler<State: 'static, Build, V: View<State>, E> {
     /// first); a mismatch (resize or scale change) forces layout despite clean flags.
     laid_out_for: Option<Size>,
     text_ctx: TextContext,
-    /// The once-per-transition font-cache flush ([`font_cache_transition`]): written on `suspended`
-    /// and on losing focus (winit rarely emits `suspended` on a desktop, so focus loss is the point
-    /// that fires in practice), re-armed on `resumed` and on regaining focus.
+    /// The once-per-transition font-cache flush ([`font_cache_transition`]), driven from
+    /// [`ShellHandler::sync_app_lifecycle`]: written when the derived lifecycle is `Hidden` (every
+    /// window minimized or occluded, or `suspended`), re-armed when it is shown again (`Inactive`
+    /// or `Resumed`). A focus loss alone is `Inactive` and writes nothing. The latch matters here:
+    /// the lifecycle is re-derived on every focus, occlusion and suspend event, so one hide can
+    /// report `Hidden` several times.
     background_flush: frust_shell_common::BackgroundFlush,
+    /// The exit-path flush ([`font_cache_exit`]): once, on an exiting close and in `exiting`, so a
+    /// quit lands the cache synchronously rather than relying on the oracle's drop write, which
+    /// only starts a background write and does not wait for it.
+    exit_flush: frust_shell_common::BackgroundFlush,
     /// The frame executor: either the render-thread split or
     /// the single-thread fallback, chosen once at startup from the
     /// `FRUST_NO_RENDER_THREAD` kill switch. Owns the `RenderContext` +
@@ -2644,18 +2652,22 @@ where
         self.runtime.with_owner(move || provide_context(metrics));
     }
 
-    /// Derive the Flutter lifecycle target from the tracked flags and push it. UI thread only.
+    /// Derive the Flutter lifecycle target from the tracked flags and push it, then drive the
+    /// font-cache flush from the same target: a `Hidden` edge flushes, a shown one re-arms
+    /// ([`font_cache_transition`]). UI thread only.
     fn sync_app_lifecycle(&mut self) {
         let minimized = self
             .window
             .as_deref()
             .and_then(|w| w.is_minimized())
             .unwrap_or(false);
-        push_app_lifecycle(desktop_lifecycle_target(
+        let target = desktop_lifecycle_target(
             self.window_focused,
             self.window_occluded || minimized,
             self.suspended,
-        ));
+        );
+        push_app_lifecycle(target);
+        font_cache_transition(&self.background_flush, &mut self.text_ctx, target);
     }
 
     /// Re-provide [`WindowState`](frust_core::WindowState) under the root owner, but only
@@ -2715,6 +2727,7 @@ where
                 // its hosted views out of a hierarchy that still exists,
                 // rather than leaving them to be dropped with it.
                 self.platform_views.suspend(&mut self.extensions);
+                font_cache_exit(&self.exit_flush, &mut self.text_ctx);
                 event_loop.exit();
             }
             // Not a teardown — a macOS shell is only hiding its retained
@@ -3032,7 +3045,6 @@ where
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        font_cache_transition(&self.background_flush, &mut self.text_ctx, false);
         // The window is created once and reused; the surface, by contrast, is
         // (re)created here every time we resume — `suspended()` tears it down,
         // mirroring Android's surfaceDestroyed/surfaceCreated so the §8.1
@@ -3156,8 +3168,6 @@ where
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
-        // The app is going away without a quit hook: land the font cache's unwritten answers.
-        font_cache_transition(&self.background_flush, &mut self.text_ctx, true);
         // Hosted native views go before the surface they were composited with,
         // while the window is still intact for the host to detach them from. The
         // matching replay is queued in `resumed`, which is the only way back.
@@ -3167,7 +3177,8 @@ where
         // the split path this is a barriered `SurfaceDestroyed` — the shell
         // blocks until the render thread has released its surface resources.
         self.executor.destroy_surface();
-        // Suspension counts as all-hidden; `resumed` re-derives.
+        // Suspension counts as all-hidden; `resumed` re-derives. The `Hidden` this derives
+        // flushes the font cache, after the barriered surface teardown above.
         self.suspended = true;
         self.sync_app_lifecycle();
     }
@@ -3236,6 +3247,8 @@ where
         // Covers an exit that bypassed `CloseRequested` (a menu Quit, an
         // extension-owned exit); a no-op when nothing changed since that save.
         self.save_window_state(None);
+        // The same bypass for the font cache; after an exiting close it already ran.
+        font_cache_exit(&self.exit_flush, &mut self.text_ctx);
     }
 
     fn window_event(
@@ -3864,8 +3877,9 @@ where
             // change produces no frame of its own.
             WindowEvent::Focused(focused) => {
                 self.window_focused = focused;
+                // A focus change flushes nothing by itself: losing focus is `Inactive`, and
+                // only a `Hidden` target (an already-minimized window) reaches the flush.
                 self.sync_app_lifecycle();
-                font_cache_transition(&self.background_flush, &mut self.text_ctx, !focused);
                 if self.publish_window_state() {
                     window.request_redraw();
                 }
@@ -3902,20 +3916,49 @@ fn desktop_lifecycle_target(focused: bool, hidden: bool, suspended: bool) -> App
     }
 }
 
-/// Drives the font-cache flush hook for one lifecycle edge: `backgrounded` flushes once for the
-/// transition (a repeat before the foreground is ignored), `false` only re-arms. Returns how many
-/// contexts flushed.
+/// Drives the font-cache flush hook from a derived lifecycle target: `Hidden` flushes once for the
+/// transition (a repeat before the next shown target is ignored, since every focus, occlusion and
+/// suspend event re-derives and may report the same `Hidden` again), a shown target (`Inactive`,
+/// `Resumed`) only re-arms. [`desktop_lifecycle_target`] never derives `Paused` or `Detached`, so
+/// only `Hidden` flushes. Returns how many contexts flushed.
 fn font_cache_transition(
     hook: &frust_shell_common::BackgroundFlush,
     cx: &mut dyn frust_shell_common::FontCacheFlush,
-    backgrounded: bool,
+    target: AppLifecycleState,
 ) -> usize {
-    if backgrounded {
-        hook.went_to_background(&mut [cx])
+    if target == AppLifecycleState::Hidden {
+        let started = Instant::now();
+        let outcome = hook.went_to_background_outcome(&mut [cx]);
+        if !outcome.is_repeat() {
+            log::info!(
+                "frust-shell-desktop: hidden font cache flush took {:.1} ms",
+                started.elapsed().as_secs_f64() * 1e3
+            );
+        }
+        outcome.flushed()
     } else {
         hook.came_to_foreground();
         0
     }
+}
+
+/// The exit-path font-cache flush: synchronous, once per process exit however many exit points
+/// report it (an exiting close, then `exiting`), and retried by the next exit point when every
+/// write failed. Independent of the hide latch, so an app quit while hidden still lands what it
+/// recorded since. Returns how many contexts flushed.
+fn font_cache_exit(
+    hook: &frust_shell_common::BackgroundFlush,
+    cx: &mut dyn frust_shell_common::FontCacheFlush,
+) -> usize {
+    let started = Instant::now();
+    let outcome = hook.went_to_background_outcome(&mut [cx]);
+    if !outcome.is_repeat() {
+        log::info!(
+            "frust-shell-desktop: exit font cache flush took {:.1} ms",
+            started.elapsed().as_secs_f64() * 1e3
+        );
+    }
+    outcome.flushed()
 }
 
 /// Whether a running frame must call `layout`: the drained change flags need
@@ -3990,26 +4033,66 @@ mod tests {
         assert_eq!(target(true, false, true), S::Hidden);
     }
 
-    #[test]
-    fn font_cache_flushes_once_per_background_edge_and_not_on_foreground() {
-        use frust_shell_common::{BackgroundFlush, FontCacheFlush};
-        struct Count(usize);
-        impl FontCacheFlush for Count {
-            fn flush_font_cache(&mut self) -> std::io::Result<()> {
-                self.0 += 1;
-                Ok(())
-            }
+    struct FlushCount(usize);
+
+    impl frust_shell_common::FontCacheFlush for FlushCount {
+        fn flush_font_cache(&mut self) -> std::io::Result<()> {
+            self.0 += 1;
+            Ok(())
         }
-        let hook = BackgroundFlush::new();
-        let mut cx = Count(0);
-        // `suspended` and a focus loss both report the same background.
-        assert_eq!(super::font_cache_transition(&hook, &mut cx, true), 1);
-        assert_eq!(super::font_cache_transition(&hook, &mut cx, true), 0);
+    }
+
+    /// The flush the shell runs for the lifecycle it derives from (focused, hidden, suspended).
+    fn derive_and_flush(
+        hook: &frust_shell_common::BackgroundFlush,
+        cx: &mut FlushCount,
+        focused: bool,
+        hidden: bool,
+        suspended: bool,
+    ) -> usize {
+        super::font_cache_transition(hook, cx, target(focused, hidden, suspended))
+    }
+
+    #[test]
+    fn font_cache_flushes_once_per_hide_and_not_on_show() {
+        let hook = frust_shell_common::BackgroundFlush::new();
+        let mut cx = FlushCount(0);
+        // Minimized: the window loses focus and reports occlusion; both derive `Hidden`.
+        assert_eq!(derive_and_flush(&hook, &mut cx, false, true, false), 1);
+        assert_eq!(derive_and_flush(&hook, &mut cx, false, true, false), 0);
+        // A `suspended` on top is the same hide.
+        assert_eq!(derive_and_flush(&hook, &mut cx, false, true, true), 0);
         assert_eq!(cx.0, 1);
-        // `resumed` / regained focus flush nothing.
-        assert_eq!(super::font_cache_transition(&hook, &mut cx, false), 0);
+        // Restored (shown, then focused) flushes nothing and re-arms.
+        assert_eq!(derive_and_flush(&hook, &mut cx, false, false, false), 0);
+        assert_eq!(derive_and_flush(&hook, &mut cx, true, false, false), 0);
         assert_eq!(cx.0, 1);
-        assert_eq!(super::font_cache_transition(&hook, &mut cx, true), 1);
+        // `suspended` alone is a hide too.
+        assert_eq!(derive_and_flush(&hook, &mut cx, true, false, true), 1);
+        assert_eq!(cx.0, 2);
+    }
+
+    #[test]
+    fn focus_loss_alone_never_flushes() {
+        let hook = frust_shell_common::BackgroundFlush::new();
+        let mut cx = FlushCount(0);
+        for _ in 0..3 {
+            // Focus lost to another app with the window still visible: `Inactive`.
+            assert_eq!(derive_and_flush(&hook, &mut cx, false, false, false), 0);
+            assert_eq!(derive_and_flush(&hook, &mut cx, true, false, false), 0);
+        }
+        assert_eq!(cx.0, 0);
+    }
+
+    #[test]
+    fn exit_flushes_once_even_after_a_hide() {
+        let hide = frust_shell_common::BackgroundFlush::new();
+        let exit = frust_shell_common::BackgroundFlush::new();
+        let mut cx = FlushCount(0);
+        assert_eq!(derive_and_flush(&hide, &mut cx, false, true, false), 1);
+        // A quit while hidden still writes, once across the close and `exiting` points.
+        assert_eq!(super::font_cache_exit(&exit, &mut cx), 1);
+        assert_eq!(super::font_cache_exit(&exit, &mut cx), 0);
         assert_eq!(cx.0, 2);
     }
 

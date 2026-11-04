@@ -8793,6 +8793,43 @@ member 2, when drawn hinted with a synthetic bold; the probe's `#[ignore]` macOS
 
 ---
 
+### `text-font-cache-flush-edges` — the font cache is flushed only at the Hidden edge and on exit
+
+**Observed**: the persisted font-oracle cache is written once per lifecycle `Hidden` edge (iOS `didEnterBackground`,
+Android `onStop`, desktop every window minimized or occluded, or suspended) and once at desktop exit. Six edges are not
+covered. A crashed writer's temp file from another process lingers up to 24 hours, because the sweep does no PID
+liveness check (this process's own are swept after 10 minutes). A desktop window that is merely behind another is
+neither minimized nor occluded, so winit reports no hide and nothing flushes until it is. On Wayland the compositor
+reports no occlusion and no minimized state, so the desktop hide flush fires only on suspend (the exit flush still
+covers quit). iOS flushes inside UIKit's background grace with no `UIBackgroundTask`: a first write measured 14.3 ms on
+an iPhone 13 mini (iOS 27.2), then 0.1 ms. The web tier has no persistent font cache, so nothing persists across page
+loads. Two live copies of one cache file exist only after a stamp or font-directory change mid-process; between them
+the last writer wins, so a copy whose write was replaced still reports clean and its answers miss the disk until it
+records a new one.
+
+**Applies to**: the temp-file linger and the two-copy case, every platform that persists the cache; the hide edge,
+desktop; the grace window, iOS; the web cache, web.
+
+**Workaround**: none needed. A flush that fails leaves the latch unarmed, so the next hide retries, and the drop write
+remains; `TextContext::font_cache_stats()` reports `write_failures` and `dirty` for an app that wants to watch.
+
+**Why accepted**: the cache is a warm start only (a load expires answers whose font directories or face files changed,
+so no wrong answer is served), and merging two copies' entry sets is not worth the code for a mid-process font install;
+a liveness check would add a dependency to reclaim only crashed-writer temp files; flushing on every focus
+loss or pause that stays visible costs a write per app switch for no durability gain; the iOS write fits the grace
+window with a wide margin; the browser offers no file to persist to.
+
+**Evidence**: `crates/frust-text/src/oracle/cache.rs` (`STALE_TEMP_AFTER`, `FOREIGN_STALE_TEMP_AFTER`);
+`crates/frust-shell-desktop/src/app_handler.rs` (`font_cache_transition`, `font_cache_exit`);
+`crates/frust-shell-ios/src/ffi_glue.rs` (`frust_did_enter_background`); `crates/frust-shell-web/src/app_handler.rs`
+(`has_persistent_font_cache`). Gates: p4-ios-flush-hidden (one flush per background, none on foreground or for a
+top-right Control Center pull; a Notification Center pull does report a background, by iOS design),
+p4-android-flush-hidden (Pixel 5: one flush per `onStop`, 12.1 ms then 0.1 ms, none for the share sheet, cache
+survives `am force-stop`), p4-desktop-flush-hidden (macOS M4: minimize 1 flush at 11.2 ms, occlusion 1, Quit 1 exit
+flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
+
+---
+
 ### `connectivity-background-delivery` — no connectivity events arrive while the app is suspended
 
 **Observed**: while the app is suspended (iOS) or frozen or cached (Android), the OS delivers no network callbacks, so a network change made then produces no `ConnectivityEvent`. A loss followed by a regain while suspended can produce no event at all, and the first event after the app returns may already describe a newer network than the last one the app saw.

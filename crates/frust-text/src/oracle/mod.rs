@@ -889,6 +889,12 @@ impl Oracle {
         self.stats
     }
 
+    /// The persistent fallback cache's public view: its write failures,
+    /// written generation, dirty and attached state.
+    pub(crate) fn font_cache_stats(&self) -> cache::FontCacheStats {
+        self.cache.font_cache_stats()
+    }
+
     /// The fallback cache (tests read its counters and bound).
     pub(crate) fn cache(&self) -> &cache::FallbackCache {
         &self.cache

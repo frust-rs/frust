@@ -1333,8 +1333,9 @@ mod browser_loop {
         SignalsDirty,
         /// The page went away or hid (`pagehide`, `visibilitychange` to hidden): the font cache
         /// flush point. A browser keeps no font cache file today (the web tier's cache is
-        /// disabled), so this lands as a no-op flush, but the hook is wired so the answer cannot
-        /// silently regress when a persistent web cache arrives.
+        /// disabled), so the flush call is gated off by `has_persistent_font_cache` (the
+        /// context's `FontCacheStats::persistent`); the lifecycle event itself still feeds
+        /// `AppLifecycle`.
         PageHidden,
         /// The page is visible again (`visibilitychange` to visible, `pageshow`): re-arms the flush.
         PageShown,
@@ -1388,16 +1389,52 @@ mod browser_loop {
         })
     }
 
+    /// The page-lifecycle listeners and the closures behind them. Dropping the guard removes
+    /// every listener it added, so the closures die with the handler instead of being leaked.
+    struct PageLifecycleListeners {
+        window: web_sys::Window,
+        document: Option<web_sys::Document>,
+        hide: wasm_bindgen::closure::Closure<dyn FnMut(web_sys::Event)>,
+        show: wasm_bindgen::closure::Closure<dyn FnMut(web_sys::Event)>,
+        visibility: wasm_bindgen::closure::Closure<dyn FnMut(web_sys::Event)>,
+        focus: wasm_bindgen::closure::Closure<dyn FnMut(web_sys::Event)>,
+        blur: wasm_bindgen::closure::Closure<dyn FnMut(web_sys::Event)>,
+    }
+
+    impl Drop for PageLifecycleListeners {
+        fn drop(&mut self) {
+            use wasm_bindgen::JsCast;
+            let w = &self.window;
+            let _ = w.remove_event_listener_with_callback(
+                "pagehide",
+                self.hide.as_ref().unchecked_ref(),
+            );
+            let _ = w.remove_event_listener_with_callback(
+                "pageshow",
+                self.show.as_ref().unchecked_ref(),
+            );
+            let _ =
+                w.remove_event_listener_with_callback("focus", self.focus.as_ref().unchecked_ref());
+            let _ =
+                w.remove_event_listener_with_callback("blur", self.blur.as_ref().unchecked_ref());
+            if let Some(document) = self.document.as_ref() {
+                let _ = document.remove_event_listener_with_callback(
+                    "visibilitychange",
+                    self.visibility.as_ref().unchecked_ref(),
+                );
+            }
+        }
+    }
+
     /// Forwards the page lifecycle edges to the loop as [`ShellUserEvent`]s: `pagehide` and
     /// `visibilitychange` (to hidden) are the last reliable points to run code before a tab is
-    /// discarded. The closures live as long as the page, so they are leaked once, here.
-    fn install_page_lifecycle_listeners() {
+    /// discarded. The returned guard owns the closures and removes the listeners when dropped;
+    /// the handler keeps it for its whole life.
+    fn install_page_lifecycle_listeners() -> Option<PageLifecycleListeners> {
         use wasm_bindgen::JsCast;
         use wasm_bindgen::closure::Closure;
 
-        let Some(window) = web_sys::window() else {
-            return;
-        };
+        let window = web_sys::window()?;
         let send = |event: ShellUserEvent| {
             WAKE_PROXY.with(|slot| {
                 if let Some(proxy) = slot.borrow().as_ref() {
@@ -1409,8 +1446,9 @@ mod browser_loop {
             Closure::<dyn FnMut(web_sys::Event)>::new(move |_| send(ShellUserEvent::PageHidden));
         let show =
             Closure::<dyn FnMut(web_sys::Event)>::new(move |_| send(ShellUserEvent::PageShown));
+        let document = window.document();
         let visibility = {
-            let document = window.document();
+            let document = document.clone();
             Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
                 let hidden = document.as_ref().is_some_and(|d| d.hidden());
                 send(if hidden {
@@ -1420,25 +1458,29 @@ mod browser_loop {
                 });
             })
         };
+        let focus =
+            Closure::<dyn FnMut(web_sys::Event)>::new(move |_| send(ShellUserEvent::WindowFocused));
+        let blur =
+            Closure::<dyn FnMut(web_sys::Event)>::new(move |_| send(ShellUserEvent::WindowBlurred));
         let _ = window.add_event_listener_with_callback("pagehide", hide.as_ref().unchecked_ref());
         let _ = window.add_event_listener_with_callback("pageshow", show.as_ref().unchecked_ref());
-        if let Some(document) = window.document() {
+        if let Some(document) = document.as_ref() {
             let _ = document.add_event_listener_with_callback(
                 "visibilitychange",
                 visibility.as_ref().unchecked_ref(),
             );
         }
-        let focus =
-            Closure::<dyn FnMut(web_sys::Event)>::new(move |_| send(ShellUserEvent::WindowFocused));
-        let blur =
-            Closure::<dyn FnMut(web_sys::Event)>::new(move |_| send(ShellUserEvent::WindowBlurred));
         let _ = window.add_event_listener_with_callback("focus", focus.as_ref().unchecked_ref());
         let _ = window.add_event_listener_with_callback("blur", blur.as_ref().unchecked_ref());
-        hide.forget();
-        show.forget();
-        visibility.forget();
-        focus.forget();
-        blur.forget();
+        Some(PageLifecycleListeners {
+            window,
+            document,
+            hide,
+            show,
+            visibility,
+            focus,
+            blur,
+        })
     }
 
     /// The shared home of the frame executor, which does not exist until an
@@ -1645,6 +1687,8 @@ mod browser_loop {
         text_ctx: TextContext,
         /// Once-per-transition font-cache flush on `pagehide` / hidden (see [`ShellUserEvent::PageHidden`]).
         background_flush: frust_shell_common::BackgroundFlush,
+        /// Owns the page-lifecycle closures; dropping the handler removes the listeners.
+        _page_listeners: Option<PageLifecycleListeners>,
         /// Whether the page is hidden (tracked from `PageHidden`/`PageShown`); feeds the lifecycle target.
         page_hidden: bool,
         /// Whether the window has focus (tracked from `focus`/`blur`); feeds the lifecycle target.
@@ -2134,8 +2178,10 @@ mod browser_loop {
                 ShellUserEvent::PageHidden => {
                     self.page_hidden = true;
                     self.sync_app_lifecycle();
-                    self.background_flush
-                        .went_to_background(&mut [&mut self.text_ctx]);
+                    if super::has_persistent_font_cache(&self.text_ctx) {
+                        self.background_flush
+                            .went_to_background(&mut [&mut self.text_ctx]);
+                    }
                 }
                 ShellUserEvent::PageShown => {
                     self.page_hidden = false;
@@ -2428,7 +2474,7 @@ mod browser_loop {
 
         let waker = install_wake_proxy(event_loop.create_proxy());
         let runtime = ReactiveRuntime::init(waker);
-        install_page_lifecycle_listeners();
+        let page_listeners = install_page_lifecycle_listeners();
         // Initial lifecycle target from the document's current visibility and focus.
         let (page_hidden, window_focused) = web_sys::window()
             .and_then(|w| w.document())
@@ -2462,6 +2508,7 @@ mod browser_loop {
             laid_out_for: None,
             text_ctx: TextContext::new(),
             background_flush: frust_shell_common::BackgroundFlush::new(),
+            _page_listeners: page_listeners,
             page_hidden,
             window_focused,
             surface: Rc::new(SurfaceSlot::default()),
@@ -2517,6 +2564,15 @@ mod browser_loop {
     }
 }
 
+/// Whether `cx` keeps a font cache file worth flushing on hide, as its
+/// `FontCacheStats::persistent` reports. The web tier's does not today (`TextContext::new` uses
+/// `CacheLocation::Disabled` on wasm), so the `BackgroundFlush` call is skipped; a context with a
+/// persistent web cache re-enables the flush with no shell change.
+#[cfg(any(target_arch = "wasm32", test))]
+fn has_persistent_font_cache(cx: &frust_text::TextContext) -> bool {
+    cx.font_cache_stats().persistent
+}
+
 /// Flutter's web mapping: `Hidden` when the document is hidden, else `Resumed` with window
 /// focus, else `Inactive`. Web never reports `Paused` or `Detached`.
 #[cfg(any(target_arch = "wasm32", test))]
@@ -2539,6 +2595,20 @@ pub use browser_loop::{ShellUserEvent, run_app, spawn_app};
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_hide_flush_gate_follows_the_context_font_cache() {
+        let off = frust_text::TextContext::builder()
+            .without_font_cache()
+            .build();
+        assert!(!super::has_persistent_font_cache(&off));
+        // Resolved lazily: building it writes nothing to this directory.
+        let dir = std::env::temp_dir().join(format!("frust-shell-web-gate-{}", std::process::id()));
+        let on = frust_text::TextContext::builder()
+            .font_cache_dir(dir)
+            .build();
+        assert!(super::has_persistent_font_cache(&on));
+    }
+
     #[test]
     fn web_lifecycle_mapping() {
         use frust_reactive::AppLifecycleState as S;

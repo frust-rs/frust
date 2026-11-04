@@ -942,10 +942,11 @@ pub mod authoring {
             TextContext, TextLayout, TextOverflow, TextStyle,
         };
         /// Types named in [`TextContext`]'s own public signatures —
-        /// `register_fonts() -> Result<Vec<RegisteredFamily>, FontError>` and
-        /// `shape_cache_stats() -> ShapeCacheStats`. Without these an app could
+        /// `register_fonts() -> Result<Vec<RegisteredFamily>, FontError>`,
+        /// `shape_cache_stats() -> ShapeCacheStats` and
+        /// `font_cache_stats() -> FontCacheStats`. Without these an app could
         /// call the methods but never name what they return.
-        pub use frust_text::{FontError, RegisteredFamily, ShapeCacheStats};
+        pub use frust_text::{FontCacheStats, FontError, RegisteredFamily, ShapeCacheStats};
         /// The index bridge between the two `EditingState`s this seam exposes:
         /// [`super::EditingState`] (core/IME) counts UTF-16 code units, while
         /// [`EditingStateBytes`] counts bytes. A widget driving its own

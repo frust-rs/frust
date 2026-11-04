@@ -1904,6 +1904,8 @@ fn ime_state_to_json(state: Option<ImeState>) -> String {
 /// app switcher, call banner, or the first half of going to the background) —
 /// push the Flutter-parity `Inactive` lifecycle state, then stop submitting
 /// frames (see [`IosAppHandle::pause`]). The render semantics are unchanged.
+/// An inactive-only transition flushes no font cache: that waits for the
+/// `Hidden` edge in [`did_enter_background`].
 ///
 /// iOS lifecycle mapping (Flutter's): `willResignActive` → `Inactive` (this),
 /// `didEnterBackground` → `Paused` ([`did_enter_background`]; `Hidden` is
@@ -1918,8 +1920,6 @@ pub fn pause(handle: *mut c_void) {
         if let Some(app) = unsafe { handle_mut(handle) } {
             push_app_lifecycle(AppLifecycleState::Inactive);
             app.pause();
-            // After the render barrier, so no GPU work is in flight while the write runs.
-            app.flush_font_cache_on_background();
         }
     });
 }
@@ -1932,6 +1932,8 @@ pub fn resume(handle: *mut c_void) {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
             app.resume();
+            // Also re-armed at `willEnterForeground`; this covers a host that reports
+            // `didBecomeActive` alone. Re-arming flushes nothing.
             app.font_cache_foregrounded();
             push_app_lifecycle(AppLifecycleState::Resumed);
         }
@@ -1945,14 +1947,16 @@ pub fn resume(handle: *mut c_void) {
 }
 
 /// `frust_did_enter_background`: `didEnterBackground` — push `Paused`
-/// (`Hidden` is synthesized on the way), then pump so listener-queued work
-/// runs. Render pause already happened on `willResignActive`. A missing
-/// handle is a no-op.
+/// (`Hidden` is synthesized on the way), flush the font cache at that `Hidden`
+/// edge, then pump so listener-queued work runs. Render pause already happened
+/// on `willResignActive` (`frust_pause` always precedes this), so no GPU work
+/// is in flight while the write runs. A missing handle is a no-op.
 pub fn did_enter_background(handle: *mut c_void) {
     guard("frust_did_enter_background", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
-        if unsafe { handle_mut(handle) }.is_some() {
+        if let Some(app) = unsafe { handle_mut(handle) } {
             push_app_lifecycle(AppLifecycleState::Paused);
+            app.flush_font_cache_on_background();
             pump_reactive();
         }
     });
@@ -2018,12 +2022,14 @@ pub(crate) fn phys_footprint_bytes() -> Option<u64> {
 }
 
 /// `frust_will_enter_foreground`: `willEnterForeground` — push `Inactive`
-/// (`Hidden` is synthesized, so `on_restart` then `on_show` fire), then pump.
-/// `didBecomeActive` follows with `Resumed`. A missing handle is a no-op.
+/// (`Hidden` is synthesized, so `on_restart` then `on_show` fire), re-arm the
+/// font-cache flush at that shown edge, then pump. `didBecomeActive` follows
+/// with `Resumed`. A missing handle is a no-op.
 pub fn will_enter_foreground(handle: *mut c_void) {
     guard("frust_will_enter_foreground", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
-        if unsafe { handle_mut(handle) }.is_some() {
+        if let Some(app) = unsafe { handle_mut(handle) } {
+            app.font_cache_foregrounded();
             push_app_lifecycle(AppLifecycleState::Inactive);
             pump_reactive();
         }
