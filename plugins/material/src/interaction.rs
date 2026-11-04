@@ -46,9 +46,14 @@
 //! reaches no `frust-haptics` dependency itself — the design-system
 //! charter forbids a plugin-tier crate depending on a sibling plugin (see
 //! `docs/PLUGINS_ARCHITECTURE.md`'s Layer Dependencies). Firing a
-//! [`HapticSignal`] before an app installs a hook is a silent no-op.
-//! [`MaterialHaptics::set`]'s doc has the exact install-once timing
-//! contract and a worked `frust-haptics` wiring example.
+//! [`HapticSignal`] with neither a Material hook nor a framework sink
+//! installed is a silent no-op. With no Material hook set, a signal
+//! forwards to the framework sink (`frust::set_haptic_sink`) as a
+//! `frust::HapticFeedback`, which is the recommended wiring: one sink
+//! serves every catalog. [`MaterialHaptics::set`] remains for
+//! Material-specific routing and always wins when set; its doc has the
+//! exact install-once timing contract and a worked `frust-haptics`
+//! example.
 //!
 //! # Press-scale: shared spec, no animation runtime
 //!
@@ -65,7 +70,7 @@
 
 use std::sync::OnceLock;
 
-use frust::SpringDesc;
+use frust::{HapticFeedback, SpringDesc};
 
 pub use frust::authoring::PRESSED_OPACITY;
 
@@ -281,11 +286,6 @@ pub enum HapticSignal {
 /// goes through [`MaterialHaptics::set`]/[`MaterialHaptics::fire`].
 static HAPTIC_HOOK: OnceLock<fn(HapticSignal)> = OnceLock::new();
 
-/// The default hook: does nothing. In effect whenever
-/// [`MaterialHaptics::fire`] runs before any [`MaterialHaptics::set`] call
-/// has won.
-fn noop_hook(_signal: HapticSignal) {}
-
 /// The design system's pluggable, process-global haptics seam. Carries no
 /// state of its own — every method is a plain associated function over one
 /// process-wide hook cell. See the [module docs](self) for why this crate
@@ -294,6 +294,11 @@ pub struct MaterialHaptics;
 
 impl MaterialHaptics {
     /// Install the process-wide haptics hook.
+    ///
+    /// Prefer the framework sink (`frust::set_haptic_sink`): with no hook
+    /// installed here, [`Self::fire`] forwards to it. A hook installed here
+    /// takes precedence over the sink for every Material signal, so reach for
+    /// `set` only when Material needs routing of its own.
     ///
     /// **Timing contract:** intended to be called once, from an app's own
     /// `install()`-era setup (mirroring how [`crate::install`] seeds the
@@ -338,17 +343,92 @@ impl MaterialHaptics {
         HAPTIC_HOOK.set(hook).is_ok()
     }
 
-    /// Fire `signal` through the installed hook — a silent no-op if none
-    /// has been installed yet (the default; see the [module docs](self)).
+    /// Fire `signal` through the installed hook, or else through the
+    /// framework sink — a silent no-op if neither is installed (the default;
+    /// see the [module docs](self)).
     pub fn fire(signal: HapticSignal) {
-        let hook = HAPTIC_HOOK.get().copied().unwrap_or(noop_hook);
-        hook(signal);
+        match route(HAPTIC_HOOK.get().copied(), signal) {
+            Routed::Hook(hook) => hook(signal),
+            Routed::Framework(feedback) => frust::perform_haptic(feedback),
+            Routed::Nothing => {}
+        }
+    }
+}
+
+/// Where a fired signal goes.
+enum Routed {
+    /// The Material hook, which wins whenever one is set.
+    Hook(fn(HapticSignal)),
+    /// The framework sink, with the feedback to deliver.
+    Framework(HapticFeedback),
+    /// Nowhere: the signal carries no feedback.
+    Nothing,
+}
+
+/// The framework feedback a signal stands for, if any.
+fn to_feedback(signal: HapticSignal) -> Option<HapticFeedback> {
+    match signal {
+        HapticSignal::None => None,
+        HapticSignal::Light => Some(HapticFeedback::Light),
+        HapticSignal::Medium => Some(HapticFeedback::Medium),
+        HapticSignal::Heavy => Some(HapticFeedback::Heavy),
+        HapticSignal::SliderTick => Some(HapticFeedback::Selection),
+    }
+}
+
+/// Pure routing: a set hook wins, otherwise the mapped framework feedback.
+fn route(hook: Option<fn(HapticSignal)>, signal: HapticSignal) -> Routed {
+    match (hook, to_feedback(signal)) {
+        (Some(hook), _) => Routed::Hook(hook),
+        (None, Some(feedback)) => Routed::Framework(feedback),
+        (None, None) => Routed::Nothing,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn marker_hook(_signal: HapticSignal) {}
+
+    #[test]
+    fn signals_map_to_framework_feedback() {
+        assert_eq!(to_feedback(HapticSignal::None), None);
+        assert_eq!(
+            to_feedback(HapticSignal::Light),
+            Some(HapticFeedback::Light)
+        );
+        assert_eq!(
+            to_feedback(HapticSignal::Medium),
+            Some(HapticFeedback::Medium)
+        );
+        assert_eq!(
+            to_feedback(HapticSignal::Heavy),
+            Some(HapticFeedback::Heavy)
+        );
+        assert_eq!(
+            to_feedback(HapticSignal::SliderTick),
+            Some(HapticFeedback::Selection)
+        );
+    }
+
+    #[test]
+    fn a_material_hook_wins_over_the_framework_sink() {
+        let hook: fn(HapticSignal) = marker_hook;
+        assert!(matches!(
+            route(Some(hook), HapticSignal::Light),
+            Routed::Hook(_)
+        ));
+        assert!(matches!(
+            route(Some(hook), HapticSignal::None),
+            Routed::Hook(_)
+        ));
+        assert!(matches!(
+            route(None, HapticSignal::SliderTick),
+            Routed::Framework(HapticFeedback::Selection)
+        ));
+        assert!(matches!(route(None, HapticSignal::None), Routed::Nothing));
+    }
 
     #[test]
     fn precedence_resolver_covers_all_sixteen_combinations() {

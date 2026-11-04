@@ -15,7 +15,10 @@
 //!   pressed state, `Move` only tracks the pressed visual, the callback fires
 //!   on `Up` **and only if the release lands inside**, and `Cancel` (a platform
 //!   gesture steal) clears the state without firing. A `Cancel` arm never
-//!   touches app state.
+//!   touches app state. A confirmed press also fires
+//!   [`HapticFeedback::Selection`](frust::authoring::HapticFeedback) through the
+//!   framework sink (`perform_haptic`) before the callback, so a catalog buzzes
+//!   without depending on any platform plugin.
 //! - **routing to the child first**: the chip owns a label child, so every
 //!   event goes through
 //!   [`route_event_single`](frust::authoring::route_event_single) before the
@@ -39,10 +42,10 @@ use std::rc::Rc;
 
 use frust::authoring::{
     Action, AnyView, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color, ErasedCallback,
-    EventCtx, EventResult, InputEvent, LayoutCtx, PRESSED_OPACITY, PaintCtx, PaintScene, Point,
-    PointerPhase, Rect, Role, RoundedRect, SemanticsCtx, Shape, Size, ThemeTextColor, View, Widget,
-    any, build_child, erase_callback, rebuild_child, route_event_single, teardown_child,
-    visit_children,
+    EventCtx, EventResult, HapticFeedback, InputEvent, LayoutCtx, PRESSED_OPACITY, PaintCtx,
+    PaintScene, Point, PointerPhase, Rect, Role, RoundedRect, SemanticsCtx, Shape, Size,
+    ThemeTextColor, View, Widget, any, build_child, erase_callback, perform_haptic, rebuild_child,
+    route_event_single, teardown_child, visit_children,
 };
 use frust::{Theme, text};
 
@@ -252,6 +255,7 @@ impl Widget for SampleChipWidget {
                 // Fire on up-INSIDE only; a release that drifted out is a
                 // deliberate cancel by the user.
                 if inside(p.position, size) {
+                    perform_haptic(HapticFeedback::Selection);
                     (self.on_press)(ctx);
                 }
                 self.pressed = false;
@@ -388,6 +392,36 @@ mod tests {
         assert_eq!(state.count, 1);
         assert!(!w.pressed);
         assert!(!w.captured);
+    }
+
+    static SINK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static RECORDED: std::sync::Mutex<Vec<HapticFeedback>> = std::sync::Mutex::new(Vec::new());
+
+    fn record(feedback: HapticFeedback) {
+        RECORDED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(feedback);
+    }
+
+    #[test]
+    fn pressing_the_chip_fires_selection_feedback() {
+        let _guard = SINK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        RECORDED.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        frust::set_haptic_sink(Some(record));
+
+        let mut w = build();
+        let (size, _) = render(&mut w, None);
+        let hit = center(size);
+        let mut state = Presses::default();
+        for phase in [PointerPhase::Down, PointerPhase::Up] {
+            dispatch(&mut w, &mut state, size, &pointer(phase, hit.x, hit.y));
+        }
+
+        frust::set_haptic_sink(None);
+        let recorded = RECORDED.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert_eq!(recorded, vec![HapticFeedback::Selection]);
+        assert_eq!(state.count, 1);
     }
 
     #[test]
