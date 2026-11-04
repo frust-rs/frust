@@ -8375,20 +8375,6 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 ---
 
-### `network-image-fade-ignores-reduce-motion` — the network image fade-in ignores the OS reduce-motion setting
-
-**Observed**: the 200 ms fade (`AnimatedOpacity`) runs even when the platform asks for reduced motion. An app opts out per view with `.fade(Duration::ZERO)`.
-
-**Applies to**: `network_image` views left on the default fade, with reduce-motion enabled in the OS.
-
-**Why accepted**: the fade is a short, opacity-only effect, and the view does not yet consult the theme's reduce-motion flag (`theme.motion.reduce_motion`).
-
-**Trigger for removal**: the view reading the theme's reduce-motion flag and skipping the fade when it is set.
-
-**Evidence**: `plugins/network-image/src/view.rs` (fade handling).
-
----
-
 ### `network-image-no-reinstall-recheck` — a network image view that found no loader does not re-check when one is installed
 
 **Observed**: a view built before `NetworkImages::install()` (or without a context loader) shows its error slot and logs once; it looks for a loader again only when its url, headers or target change, not when a loader appears later.

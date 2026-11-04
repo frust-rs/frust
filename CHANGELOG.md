@@ -119,6 +119,17 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   re-exported (`frust_text`, `frust_shell_common`, `frust::authoring::text`). A report whose every flush
   failed leaves the once-per-transition latch unarmed so the next hide retries; the first failed flush a
   hook sees logs at warn, later ones at debug (1f7cf69bf, d4adce3f3).
+- `AnimationController::velocity()` and the velocity-carrying retarget `spring_to(target, SpringDesc)` /
+  `spring_to_with_velocity(target, velocity, SpringDesc)` in `frust-core`, so any controller user gets
+  velocity continuity (a fling or release velocity carries into the spring).
+- `frust-theme` `MotionExtras { extended: 800.0, reduced_fade: 120.0 }` (milliseconds; read with
+  `MotionExtras::of(theme)` / `reduced_fade_duration()`; flat as `frust::MotionExtras`) and
+  `resolve_spec_with(spec, scheme, reduced_fade)`. `MotionDurations` and `MotionScheme` are unchanged.
+- `frust::motion::presence`: `Presence` and `presence(open, child)` with `.timing(enter, exit)` and
+  `.on_exited`. The child stays mounted: always built and laid out, painted only while visible,
+  input only while open, semantics only while visible. Reversing a duration ramp is value-continuous
+  and a spring value- and velocity-continuous; `on_exited` is delivered on the next frame's
+  Housekeeping event. Under `reduce_motion` it runs a linear reduced fade.
 
 ### Changed
 
@@ -195,6 +206,10 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   shell scripts and the `xcodebuild` test are `cfg`-gated to the hosts that support them; the
   `frust-hotpatch` `real_patch_library` test expects the by-design zero slide on Windows
   (2f2832c1c, 651d30a1d).
+- Every reduce-motion collapse (navigator, including the interactive edge-swipe settle, switcher,
+  `AnimatedOpacity` and `card_switcher`) runs for `MotionExtras::reduced_fade` (120 ms by default; 0
+  snaps with no frame request) instead of a fixed 120 ms. The `network_image` fade-in therefore
+  collapses to that reduced fade under reduce-motion.
 
 ### Fixed
 
