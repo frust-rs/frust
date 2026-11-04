@@ -1041,11 +1041,14 @@ pub mod authoring {
     /// [`authoring::CornerRadii`](super::CornerRadii)/[`authoring::DashPattern`](super::DashPattern)
     /// re-exports name — listed here too because they are named by
     /// `Command::RoundedRect`/`PathStyle`, which a widget recording commands
-    /// directly has to match on.
+    /// directly has to match on. `FillRule` and `StrokeStyle` (with its
+    /// `StrokeCap`/`StrokeJoin`) are what `PaintScene::fill_path_with_rule`
+    /// and `PaintScene::stroke_path_styled` take, and what `PathStyle`'s
+    /// even-odd and styled-stroke variants carry.
     pub mod scene {
         pub use frust_scene::{
-            Command, CornerRadii, DashPattern, FontHandle, Glyph, GlyphRun, PathStyle, Scene,
-            SceneBuilder, ShaderProgram, arc_path,
+            Command, CornerRadii, DashPattern, FillRule, FontHandle, Glyph, GlyphRun, PathStyle,
+            Scene, SceneBuilder, ShaderProgram, StrokeCap, StrokeJoin, StrokeStyle, arc_path,
         };
     }
 }

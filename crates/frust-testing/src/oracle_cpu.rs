@@ -107,9 +107,10 @@
 //! genuinely wants straight alpha should divide it out itself, or take
 //! `Pixmap::take_unpremultiplied`'s route.
 
-use frust_scene::{Command, GlyphRun, PathStyle, Scene};
+use frust_scene::{Command, FillRule, GlyphRun, Scene, StrokeCap, StrokeJoin, StrokeStyle};
 use kurbo::{
-    Affine, BezPath, Line, PathEl, Point, Rect, RoundedRect, RoundedRectRadii, Shape, Stroke,
+    Affine, BezPath, Cap, Join, Line, PathEl, Point, Rect, RoundedRect, RoundedRectRadii, Shape,
+    Stroke,
 };
 use std::sync::Arc;
 
@@ -350,16 +351,11 @@ impl SceneRenderer for CpuOracle {
         // disagree about a scene one of them hangs on rather than one of them
         // rejects.
         for command in scene.commands() {
-            if let Command::Path {
-                style:
-                    PathStyle::Stroke {
-                        dash: Some(dash), ..
-                    },
-                ..
-            } = command
+            if let Command::Path { style, .. } = command
+                && let Some((_, Some(dash), _)) = style.stroke()
             {
                 anyhow::ensure!(
-                    dash_cycle_is_normalizable(dash),
+                    dash_cycle_is_normalizable(&dash),
                     "dash pattern (on={}, off={}, phase={}) has a derived period kurbo::dash \
                      cannot normalize — its catch-up loop would spin rather than terminate",
                     dash.on,
@@ -680,17 +676,17 @@ impl Painter<'_> {
         self.ctx.reset_paint_transform();
     }
 
-    fn fill_path(&mut self, transform: Affine, brush: &Brush, path: &BezPath) {
+    fn fill_path(&mut self, transform: Affine, brush: &Brush, path: &BezPath, rule: Fill) {
         self.ctx.set_transform(transform);
-        self.ctx.set_fill_rule(Fill::NonZero);
+        self.ctx.set_fill_rule(rule);
         self.set_brush(brush);
         self.ctx.fill_path(path);
     }
 
-    fn stroke_path(&mut self, transform: Affine, brush: &Brush, path: &BezPath, width: f64) {
+    fn stroke_path(&mut self, transform: Affine, brush: &Brush, path: &BezPath, stroke: Stroke) {
         self.ctx.set_transform(transform);
         self.set_brush(brush);
-        self.ctx.set_stroke(Stroke::new(width));
+        self.ctx.set_stroke(stroke);
         self.ctx.stroke_path(path);
     }
 }
@@ -928,9 +924,18 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
                 transform,
             } => {
                 let transform = combined * *transform;
-                match style {
-                    PathStyle::Fill => painter.fill_path(transform, brush, path),
-                    PathStyle::Stroke { width, dash } => match dash {
+                // Read through the style's helpers, as the engine reads it: a
+                // round stroke is a styled one under `StrokeStyle::ROUND`, and
+                // a style that is not a stroke is a fill.
+                match style.stroke() {
+                    None => {
+                        let rule = match style.fill_rule() {
+                            Some(FillRule::EvenOdd) => Fill::EvenOdd,
+                            Some(FillRule::NonZero) | None => Fill::NonZero,
+                        };
+                        painter.fill_path(transform, brush, path, rule);
+                    }
+                    Some((width, dash, stroke_style)) => match dash {
                         Some(dash) if dash.is_effective() => {
                             // Dashes are pre-flattened into sub-paths with
                             // kurbo's own iterator, the same lowering
@@ -940,12 +945,26 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
                             // `dash_path_lowers_identically_across_both_copies`):
                             // `vello_cpu`'s `set_stroke` ignores a `Stroke`'s
                             // dash fields, so flattening at the decode site is
-                            // what keeps the two comparable.
-                            let dashed = dash_path(path, *dash);
-                            painter.stroke_path(transform, brush, &dashed, *width);
+                            // what keeps the two comparable. A styled
+                            // stroke's dashes take that same lowering, so
+                            // this copy stays in step with the engine's for
+                            // every stroke style, and the fuzz test keeps
+                            // pinning the two.
+                            let dashed = dash_path(path, dash);
+                            painter.stroke_path(
+                                transform,
+                                brush,
+                                &dashed,
+                                oracle_stroke(width, stroke_style),
+                            );
                         }
                         // No pattern, or a degenerate one: a solid stroke.
-                        _ => painter.stroke_path(transform, brush, path, *width),
+                        _ => painter.stroke_path(
+                            transform,
+                            brush,
+                            path,
+                            oracle_stroke(width, stroke_style),
+                        ),
                     },
                 }
             }
@@ -1130,6 +1149,27 @@ pub fn backdrop_geometry(
     let x0 = (x0 / 4.0).floor() * 4.0;
     let y0 = (y0 / 4.0).floor() * 4.0;
     Some((sigma, Rect::new(x0, y0, x1, y1)))
+}
+
+/// A stroke of `width` with `style`'s caps, joins and miter limit — the
+/// oracle's own copy of the engine's mapping. [`StrokeStyle::ROUND`] is
+/// `Stroke::new(width)` exactly (kurbo's default is round caps and joins under
+/// a miter limit of 4), so every round-capped stroke renders as it always has.
+fn oracle_stroke(width: f64, style: StrokeStyle) -> Stroke {
+    let cap = match style.cap {
+        StrokeCap::Butt => Cap::Butt,
+        StrokeCap::Round => Cap::Round,
+        StrokeCap::Square => Cap::Square,
+    };
+    let join = match style.join {
+        StrokeJoin::Miter => Join::Miter,
+        StrokeJoin::Round => Join::Round,
+        StrokeJoin::Bevel => Join::Bevel,
+    };
+    Stroke::new(width)
+        .with_caps(cap)
+        .with_join(join)
+        .with_miter_limit(style.miter_limit)
 }
 
 /// `path` expanded into the sub-paths `dash` breaks it into.
@@ -1790,5 +1830,85 @@ mod tests {
             meta.driver
         );
         assert!(meta.driver.contains("threads=0"));
+    }
+
+    /// Two nested squares wound the same way: the inner one winds twice.
+    fn nested_squares() -> BezPath {
+        let mut path = BezPath::new();
+        for (lo, hi) in [(2.0, 18.0), (7.0, 13.0)] {
+            path.move_to((lo, lo));
+            path.line_to((hi, lo));
+            path.line_to((hi, hi));
+            path.line_to((lo, hi));
+            path.close_path();
+        }
+        path
+    }
+
+    #[test]
+    fn an_even_odd_fill_leaves_a_doubly_wound_region_unpainted() {
+        let render = |rule| {
+            let mut scene = Scene::new();
+            SceneBuilder::new(&mut scene).fill_path_with_rule(
+                nested_squares(),
+                rule,
+                Brush::Solid(RED),
+            );
+            CpuOracle::new()
+                .render(&scene, &spec(20, Color::WHITE))
+                .expect("scene renders")
+        };
+        let nonzero = render(FillRule::NonZero);
+        let even_odd = render(FillRule::EvenOdd);
+        assert_eq!(pixel(&nonzero, 10, 10), [255, 0, 0, 255]);
+        assert_eq!(pixel(&even_odd, 10, 10), [255, 255, 255, 255]);
+        assert_eq!(pixel(&nonzero, 4, 10), pixel(&even_odd, 4, 10));
+        assert_eq!(pixel(&even_odd, 4, 10), [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn a_styled_stroke_renders_its_caps_and_the_round_style_as_a_stroke() {
+        let mut line = BezPath::new();
+        line.move_to((6.0, 10.0));
+        line.line_to((14.0, 10.0));
+        let render = |style: Option<StrokeStyle>| {
+            let mut scene = Scene::new();
+            let mut builder = SceneBuilder::new(&mut scene);
+            match style {
+                Some(style) => {
+                    builder.stroke_path_styled(line.clone(), 6.0, None, style, Brush::Solid(RED));
+                }
+                None => builder.stroke_path(line.clone(), 6.0, Brush::Solid(RED)),
+            }
+            CpuOracle::new()
+                .render(&scene, &spec(20, Color::WHITE))
+                .expect("scene renders")
+        };
+        let plain = render(None);
+        assert_eq!(render(Some(StrokeStyle::ROUND)).rgba8, plain.rgba8);
+
+        // Two pixels past the end, inside a round or square cap's reach but
+        // beyond a butt cap's.
+        let butt = render(Some(StrokeStyle::new(StrokeCap::Butt, StrokeJoin::Miter)));
+        let square = render(Some(StrokeStyle::new(StrokeCap::Square, StrokeJoin::Miter)));
+        assert_eq!(pixel(&butt, 15, 10), [255, 255, 255, 255]);
+        assert_eq!(pixel(&square, 15, 10), [255, 0, 0, 255]);
+        assert_eq!(pixel(&butt, 10, 10), [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn a_styled_stroke_with_a_non_normalizable_dash_is_refused() {
+        let mut scene = Scene::new();
+        SceneBuilder::new(&mut scene).stroke_path_styled(
+            triangle(),
+            1.0,
+            Some(DashPattern::new(f64::MAX, f64::MAX).with_phase(-1.0)),
+            StrokeStyle::new(StrokeCap::Butt, StrokeJoin::Bevel),
+            Brush::Solid(RED),
+        );
+        let error = CpuOracle::new()
+            .render(&scene, &spec(20, Color::WHITE))
+            .expect_err("the engine refuses this scene, so the oracle does too");
+        assert!(error.to_string().contains("cannot normalize"), "{error}");
     }
 }

@@ -511,10 +511,25 @@ pub(crate) fn generate_fill(
     storage: &mut StripStorage,
     clip: Option<PathDataRef<'_>>,
 ) {
+    generate_fill_with_rule(generator, path, Fill::NonZero, transform, storage, clip);
+}
+
+/// [`generate_fill`] under `rule` rather than non-zero, through the same
+/// pre-pass. The pre-pass keeps every winding number inside the viewport — a
+/// piece it replaces by its chord lies wholly beyond an edge together with
+/// that chord — so it changes no coverage under either rule.
+pub(crate) fn generate_fill_with_rule(
+    generator: &mut StripGenerator,
+    path: impl IntoIterator<Item = PathEl>,
+    rule: Fill,
+    transform: Affine,
+    storage: &mut StripStorage,
+    clip: Option<PathDataRef<'_>>,
+) {
     let viewport = cull_viewport(generator, clip.as_ref());
     generator.generate_filled_path(
         ViewportSplit::new(path, transform, viewport),
-        Fill::NonZero,
+        rule,
         Affine::IDENTITY,
         None,
         storage,

@@ -7968,7 +7968,7 @@ impl OpenBracket {
 /// command's transform, records, and pops, so the recorded transform is
 /// exactly `prefix * transform`.
 fn replay(builder: &mut SceneBuilder<'_>, prefix: Affine, command: &frust_scene::Command) {
-    use frust_scene::{Command, PathStyle};
+    use frust_scene::{Command, FillRule, PathStyle};
     fn under(
         builder: &mut SceneBuilder<'_>,
         transform: Affine,
@@ -8060,6 +8060,14 @@ fn replay(builder: &mut SceneBuilder<'_>, prefix: Affine, command: &frust_scene:
                 width,
                 dash: Some(dash),
             } => b.stroke_path_dashed(path.clone(), *width, *dash, brush.clone()),
+            // Re-recorded as the variant it was recorded as, not through the
+            // style helpers: a replay must hand back the command it was given.
+            PathStyle::FillEvenOdd => {
+                b.fill_path_with_rule(path.clone(), FillRule::EvenOdd, brush.clone());
+            }
+            PathStyle::StrokeStyled { width, dash, style } => {
+                b.stroke_path_styled(path.clone(), *width, *dash, *style, brush.clone());
+            }
         }),
         Command::ShaderQuad {
             program,
@@ -10053,5 +10061,55 @@ mod tests {
             RegionCopyMode::Unavailable,
             "a multisampled target is neither"
         );
+    }
+
+    /// A projected range re-records every path style as the variant it was
+    /// recorded as, the even-odd fill and the styled stroke included.
+    #[test]
+    fn a_projected_range_carries_every_path_style_verbatim() {
+        use frust_scene::{
+            Command, DashPattern, FillRule, PathStyle, Scene, SceneBuilder, StrokeCap, StrokeJoin,
+            StrokeStyle,
+        };
+
+        let mut path = kurbo::BezPath::new();
+        path.move_to((0.0, 0.0));
+        path.line_to((10.0, 0.0));
+        path.line_to((5.0, 8.0));
+        path.close_path();
+        let brush = peniko::Brush::Solid(RED);
+        let dash = DashPattern::new(3.0, 1.0);
+        let style = StrokeStyle::new(StrokeCap::Butt, StrokeJoin::Miter).with_miter_limit(2.0);
+
+        let mut scene = Scene::new();
+        {
+            let mut builder = SceneBuilder::new(&mut scene);
+            builder.push_transform(Affine::translate((4.0, 6.0)));
+            builder.fill_path(path.clone(), brush.clone());
+            builder.fill_path_with_rule(path.clone(), FillRule::EvenOdd, brush.clone());
+            builder.stroke_path(path.clone(), 2.0, brush.clone());
+            builder.stroke_path_dashed(path.clone(), 2.0, dash, brush.clone());
+            builder.stroke_path_styled(path.clone(), 2.0, Some(dash), style, brush.clone());
+            builder.pop_transform();
+        }
+        let styles = |scene: &Scene| -> Vec<(PathStyle, Affine)> {
+            scene
+                .commands()
+                .iter()
+                .map(|command| match command {
+                    Command::Path {
+                        style, transform, ..
+                    } => (*style, *transform),
+                    other => panic!("expected Path, got {other:?}"),
+                })
+                .collect()
+        };
+
+        let mut out = Scene::new();
+        let options = RangeOptions {
+            keep_draw_retained: true,
+        };
+        project_command_range(&scene, 0..scene.commands().len(), options, &mut out);
+        assert_eq!(styles(&out), styles(&scene));
     }
 }
