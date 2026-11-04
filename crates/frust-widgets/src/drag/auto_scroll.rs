@@ -21,7 +21,9 @@
 //! Each paint that finds the pointer in a zone advances the controller by
 //! `velocity × dt` with [`ScrollController::jump_to`], clamped to
 //! `[0, max_offset]`, and calls [`PaintCtx::request_frame`] for the next step.
-//! `dt` is the difference of two [`PaintCtx::frame_time`]s; the first frame in
+//! `dt` is the difference of two [`PaintCtx::input_time`]s — the raw clock, as
+//! the step follows a live pointer rather than playing an animation, so an
+//! animation time scale never slows it; the first frame in
 //! a zone only seeds the clock (a zero-delta frame, the convention the scroll
 //! surface's own ballistic pump uses), so time spent outside a zone is never
 //! paid back as one large jump. The cadence stops — no further frame request,
@@ -189,7 +191,7 @@ pub struct AutoScrollZoneWidget {
     coordinator: DragCoordinator,
     controller: ScrollController,
     config: AutoScroll,
-    /// The frame time of the last auto-scroll step, or `None` while not
+    /// The input time of the last auto-scroll step, or `None` while not
     /// scrolling — the next step then only seeds it.
     last_step: Option<FrameTime>,
 }
@@ -243,7 +245,7 @@ impl AutoScrollZoneWidget {
             self.last_step = None;
             return false;
         }
-        let now = ctx.frame_time();
+        let now = ctx.input_time();
         let dt = self
             .last_step
             .map_or(0.0, |last| now.saturating_sub(last).as_secs_f64());

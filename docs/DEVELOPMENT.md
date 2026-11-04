@@ -272,7 +272,7 @@ READMEs (the latter two against the wasm32 target). `huddle` and `clean-signals-
 additionally needs `cargo tree -e features -i frust-ui -p sample-app` (from its own directory) to print
 **no** `frust-ui feature "..."` line — the out-of-tree-realism check that this workspace resolves
 `frust` exactly as a real third-party design-system crate would, with nothing re-enabled by feature
-unification. Separate from `frust build apk`/`run`'s pipeline gate (*Run*).
+unification (its dev-dependency `test-support` feature is absent from that normal graph). Separate from `frust build apk`/`run`'s pipeline gate (*Run*).
 
 **Non-default features are not compiled by the chain above.** `frust-gpu` and `frust-engine` are
 plain (non-feature-gated) dependencies of `frust-render`, so their host-only tests already ride

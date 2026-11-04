@@ -218,9 +218,13 @@ pub struct ScrollSurfaceCore {
     pub(crate) last_drag: Point,
     /// The release-velocity estimator, fed along [`ScrollSurfaceCore::axis`].
     pub(crate) tracker: VelocityTracker,
-    /// The most recent paint's frame time, reused as the event-pass timestamp
-    /// for velocity tracking (the event pass carries no clock of its own).
+    /// The most recent paint's animation clock ([`PaintCtx::frame_time`]), the
+    /// clock a [`BallisticState`] is started and sampled on.
     pub(crate) last_frame_time: FrameTime,
+    /// The most recent paint's raw clock ([`PaintCtx::input_time`]), reused as
+    /// the event-pass timestamp for velocity tracking (the event pass carries
+    /// no clock of its own). Never differenced against `last_frame_time`.
+    pub(crate) last_input_time: FrameTime,
     /// Last animation frame time for the paint-time pump; `None` seeds the
     /// clock (zero-delta) on the first paint after a release.
     pub(crate) last_anim: Option<FrameTime>,
@@ -280,6 +284,7 @@ impl Default for ScrollSurfaceCore {
             last_drag: Point::ZERO,
             tracker: VelocityTracker::new(),
             last_frame_time: FrameTime::ZERO,
+            last_input_time: FrameTime::ZERO,
             last_anim: None,
             on_scroll: None,
             pending_scroll_notify: false,
@@ -410,10 +415,10 @@ impl ScrollSurfaceCore {
         }
     }
 
-    /// The last painted frame time as milliseconds — the event-pass timestamp
-    /// source for velocity tracking (see [`ScrollSurfaceCore::last_frame_time`]).
+    /// The last painted raw clock as milliseconds — the event-pass timestamp
+    /// source for velocity tracking (see [`ScrollSurfaceCore::last_input_time`]).
     pub(crate) fn event_time_ms(&self) -> f64 {
-        self.last_frame_time.as_secs_f64() * 1000.0
+        self.last_input_time.as_secs_f64() * 1000.0
     }
 
     /// End any live [`ScrollSurfaceCore::ballistic`] simulation — a release
@@ -1098,13 +1103,15 @@ pub(crate) trait ScrollSurface {
     }
 
     /// The motion half of a paint pass, run before the owner paints anything:
-    /// record the frame clock, apply any command recorded since layout (so a
+    /// record both clocks, apply any command recorded since layout (so a
     /// jump ends a fling before it advances), pump post-release motion,
     /// publish, raise the owed `on_scroll` flush, and ask for the frame that
     /// applies a command recorded during this paint (a listener reacting to
     /// the publish).
     fn paint_motion(&mut self, ctx: &mut PaintCtx, reduce_motion: bool) {
-        self.core_mut().last_frame_time = ctx.frame_time();
+        let core = self.core_mut();
+        core.last_frame_time = ctx.frame_time();
+        core.last_input_time = ctx.input_time();
         self.drain_controller(reduce_motion);
         self.pump_fling(ctx);
         self.publish_to_controller();

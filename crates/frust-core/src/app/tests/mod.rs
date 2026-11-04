@@ -22,6 +22,7 @@ mod scale;
 mod selection_toolbar;
 mod semantics;
 mod shortcuts;
+mod time_scale;
 
 use super::*;
 use std::cell::{Cell, RefCell};

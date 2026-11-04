@@ -3409,30 +3409,17 @@ A mid-interactive-dismissal race is accepted rather than closed: a successor req
 
 ---
 
-### `semantics-untestable-out-of-tree` — an out-of-tree design system can implement `Widget::semantics` but cannot test it
+### `catalog-input-timers-follow-time-scale` — some catalog input timers slow under a non-1.0 animation time scale
 
-**Observed**: `examples/design-system-sample`'s widgets each carry a `semantics` impl, and the
-vocabulary to write one is fully public (`SemanticsCtx::push_node`/`push_container`, `Role`,
-`Node`, `Action`, `ChildPod::semantics_child`) — but nothing can *drive* a semantics pass from
-outside the framework: `SemanticsCtx::new` is `pub(crate)` in `frust-core`, and the only public
-producer, `frust_core::RenderRoot::semantics()`, is not re-exported by the `frust` facade. The
-three built-in design-system plugins (`frust-glyph`/`frust-material`/`frust-cupertino`) are
-unaffected despite living outside `frust-widgets` now — each reaches `RenderRoot` through a
-sanctioned `frust-core` test-only dev-dependency, the same plugin-tier exemption
-`docs/PLUGINS_CODE_STANDARDS.md` records for the app-tier "no direct `frust-core` dependency" rule
-(`docs/CODE_STANDARDS.md`), not available to a genuinely external crate like `design-system-sample`.
+**Observed**: `frust-widgets` times input on `PaintCtx::input_time()`, the raw shell clock, so long-press, double-tap windows, caret blink, velocity stamps and auto-scroll ignore `set_animation_time_scale`. Some catalog widgets still time input on `frame_time()`, the scaled animation clock, so under a scale other than 1.0 their gesture and dwell timing stretches or shrinks with the animation.
 
-**Applies to**: any external design-system crate wanting to unit-test its `Widget::semantics`
-output.
+**Applies to**: (a) input timers still on `frame_time()`: beui components/tooltip hover open delay, beui blocks/otp_input caret blink, glyph toast auto-dismiss hold, material snackbar auto-dismiss hold, and the material slider and range-slider haptic scheduler (borderline); (b) velocity and fling machinery that stores `last_frame_time`: material dismissible, carousel, sheet and overlay/modal; glyph sheet; shadcn message_scroller and overlay/modal; beui agents/message_scroller — only while the time scale is not 1.0 (a devtools `set_animation_time_scale` call or an app's own `set_animation_time_scale`).
 
-**Why accepted**: closing it means either re-exporting a semantics-pass entry point from the
-facade or loosening `SemanticsCtx::new`'s visibility — a deliberate facade-API decision deferred
-to the feature owner, not a gap this task's scope covers.
+**Why accepted**: the scale is a debugging and test lever, default 1.0, and the affected timers behave correctly at 1.0; moving each remaining widget's input timers is a per-widget change that is not a framework gap.
 
-**Evidence**: `examples/design-system-sample/sample-design/src/testing.rs`'s module doc ("Known
-gap: `Widget::semantics` cannot be driven from out of tree") and the workspace README's "What it
-found" section; `crates/frust-widgets/tests/semantics_tree.rs` as the in-tree contrast that does
-reach `RenderRoot::semantics()`.
+**Trigger for removal**: the listed catalogs read `input_time()` for their input timers and `frame_time()` only for animation drivers.
+
+**Evidence**: `crates/frust-core/src/widget.rs` (`PaintCtx::frame_time` / `input_time` docs); the `frame_time()` reads in the listed catalog widgets' input paths.
 
 ---
 

@@ -2,11 +2,12 @@
 //! and the rebuild/layout/paint pass skeleton. Modelled on xilem/Masonry, depending on neither,
 //! with no `unsafe`.
 //!
-//! * [`anim`] — the frame clock, curves, tweens, springs and animation controllers.
+//! * [`anim`] — the frame clock and its time scale, curves, tweens, springs and controllers.
 //! * [`app`] — the [`RenderRoot`] each platform shell drives through rebuild, layout and paint.
 //! * [`mod@component`] — [`Component`], a subtree with retained local state and its own `Owner`.
 //! * [`event`] — input events and the [`EventCtx`] handlers mutate state through.
 //! * `hotpatch` (feature `hotpatch`) — the hot-patch seam every `Component::build` runs through.
+//! * [`feedback`] — the haptic-feedback vocabulary and its process-wide sink.
 //! * [`hit`] — hit tests for content drawn under an arbitrary [`kurbo::Affine`].
 //! * [`input`] — slop/wheel constants, [`VelocityTracker`] and fling-decay math.
 //! * [`insets`] — the [`WindowInsets`] safe-area and keyboard inset model.
@@ -25,6 +26,7 @@ pub mod anim;
 pub mod app;
 pub mod component;
 pub mod event;
+pub mod feedback;
 #[cfg(feature = "hotpatch")]
 pub mod hotpatch;
 pub mod input;
@@ -163,7 +165,9 @@ pub mod hit {
 /// the platform `accesskit_*` adapters live in the shells.
 pub use accesskit;
 pub use anim::{
-    AnimationController, AnimationStatus, Curve, FrameTime, Lerp, Spring, SpringDesc, Tween,
+    AnimationController, AnimationStatus, Curve, FrameTime, Lerp, MAX_ANIMATION_TIME_SCALE,
+    MIN_ANIMATION_TIME_SCALE, Spring, SpringDesc, Tween, animation_time_scale,
+    set_animation_time_scale,
 };
 pub use app::{FocusRingPolicy, Orientation, RenderRoot, WindowMetrics};
 pub use component::{Component, ComponentView, ComponentWidget, component};
@@ -173,6 +177,9 @@ pub use event::{
     OverlayEventKind, PointerButton, PointerEvent, PointerPhase, ScrollDelta,
     has_pending_result_flush, mark_focus_orphaned, mark_pending_result_flush, take_focus_orphaned,
     take_pending_result_flush,
+};
+pub use feedback::{
+    HapticFeedback, HapticSink, haptic_sink_installed, perform_haptic, set_haptic_sink,
 };
 #[cfg(feature = "hotpatch")]
 pub use hotpatch::{LayoutMismatch, SeamWitness, build_erased, set_patch_listener};

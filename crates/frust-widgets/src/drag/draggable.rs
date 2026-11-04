@@ -26,7 +26,7 @@
 //! report for a finger) the long-press — a finger dragging a list item would
 //! otherwise steal every scroll.
 //!
-//! The hold is timed on the paint clock by the same timer the gesture detector
+//! The hold is timed on the raw paint clock by the same timer the gesture detector
 //! uses (`crate::gesture`'s `HoldTracker`), so it fires the way a long-press
 //! does: the paint that sees the threshold crossed raises the pending-result
 //! flush, and the `Housekeeping` broadcast the next rebuild dispatches carries
@@ -1143,7 +1143,7 @@ impl<State: 'static, T: 'static> Widget for DraggableWidget<State, T> {
         } = &mut self.gesture
             && !*elapsed
         {
-            if self.hold.fired(ctx.frame_time()) {
+            if self.hold.fired(ctx.input_time()) {
                 *elapsed = true;
                 frust_core::mark_pending_result_flush();
             }

@@ -8,6 +8,35 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Added
 
+- Stroked icons: `IconShape` (`Path`/`Circle`/`Rect`), `IconPaint` (`Stroke` default, `Fill`),
+  `IconElement` (const `stroke`/`fill`) and `StrokedIconSource { elements, design, stroke_width }`,
+  converted to `IconData` by `From<StrokedIconSource>` or `IconData::from_elements`;
+  `IconData::is_stroked()` reports one and `IconData::resolve()` returns one fillable outline (each stroke
+  expanded with round caps and joins), so fill-only slots (plugin icons) render a stroked icon filled and
+  ignore `stroke_width` overrides. `IconView::stroke_width(f64)` overrides the width;
+  strokes use round caps and joins, scale with the icon and take the resolved icon colour.
+- Framework haptic feedback in `frust-core` (flat from `frust` and in `frust::authoring`):
+  `#[non_exhaustive] HapticFeedback` (`Selection`, `Light`, `Medium`, `Heavy`, `Success`,
+  `Warning`, `Error`), `HapticSink`, the last-wins `set_haptic_sink`, `haptic_sink_installed()`
+  and `perform_haptic()` (a no-op without a sink). The `frust-haptics` README shows wiring it as
+  the sink.
+- Animation time scale: `set_animation_time_scale(f64) -> bool` (accepts
+  `MIN_ANIMATION_TIME_SCALE` 0.01 ..= `MAX_ANIMATION_TIME_SCALE` 100.0, rejects anything else) and
+  `animation_time_scale()`. `PaintCtx::frame_time()` returns the scaled animation clock and the new
+  `PaintCtx::input_time()` the raw shell clock; `frust-widgets` long-press, hold, caret blink,
+  double-tap windows, velocity timestamps, drag hold and auto-scroll read `input_time()`.
+- Devtools: the `set_animation_time_scale` method (params `AnimationTimeScaleParams { scale }`,
+  authenticated), the `animation_time_scale` capability and
+  `DevtoolsClient::set_animation_time_scale`. The protocol stays v1: the change is additive and an
+  older client decodes the capability as `Unknown`. A scale a client set is reset to 1.0 when that
+  client disconnects.
+- `frust-ui` `test-support` feature (enable from `[dev-dependencies]`) and
+  `frust::testing::semantics_of(build, size) -> SemanticsUpdate`, so an out-of-tree design system
+  can test `Widget::semantics`.
+- `SharedPreferences::in_memory()`: a public, infallible, process-local store that is never
+  persisted; clones share the map.
+- `frust::Layer` (with `Layer::IDENTITY`) and `frust::resolve_layers`, beside `TransitionDriver`,
+  `make_driver` and `resolve_spec`, so `PageTransition::Custom` is authorable out of tree.
 - `frust::authoring::text::LocaleStamp` (new public API, also `frust_text::LocaleStamp`):
   `for_style(explicit_locale)` / `is_current(explicit_locale)` stamp a cached layout with the
   default-locale generation (constant for a style with its own locale); read it before shaping and
@@ -93,6 +122,11 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Changed
 
+- Catalog tooltips (material, glyph, shadcn), the material selection and toggle-button long-press latches
+  and the shadcn OTP caret blink time input on the raw clock (`input_time()`), so they ignore the
+  animation time scale.
+- `MaterialHaptics` forwards to the framework haptic sink when no Material hook is set
+  (`SliderTick` maps to `Selection`, `None` to nothing).
 - The `.notdef` warning names only the face, the script and the cluster count, never user text,
   and fires once per (face, script). `frust_text::notdef_glyph_count()` is deprecated in favour of
   `TextContext::notdef_glyph_count()` (it still returns the process-wide total, now counted once per
@@ -164,6 +198,9 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Fixed
 
+- An interactive edge-swipe pop honours `reduce_motion`: it collapses to `ReducedCrossfade` on its
+  first paint, the drag drives the alpha, the release settles on the reduced timing, and a
+  `PageTransition::Custom` fn is not called.
 - A frame the engine refuses no longer freezes Android/Vulkan apps: a dropped un-presented swapchain
   texture leaks its image on wgpu-hal 30.0.1 ([gfx-rs/wgpu#5723](https://github.com/gfx-rs/wgpu/issues/5723)),
   so frust no longer drops an acquired texture while its swapchain lives (the main surface presents a

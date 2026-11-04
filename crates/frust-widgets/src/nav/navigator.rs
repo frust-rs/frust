@@ -134,7 +134,7 @@ use std::rc::Rc;
 use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, DiscardScene, EditingState, EventCtx,
     EventResult, FrameTime, HeroDirective, HeroFrames, ImeState, InputEvent, LayoutCtx, PaintCtx,
-    PaintScene, PointerPhase, SemanticsCtx, SpringDesc, TOUCH_SLOP, View, Widget,
+    PaintScene, PointerPhase, SemanticsCtx, Spring, SpringDesc, TOUCH_SLOP, View, Widget,
 };
 use frust_theme::Theme;
 use kurbo::{Affine, Point, Rect, Size, Vec2};
@@ -149,7 +149,7 @@ use super::options::NavOp;
 use super::path::Location;
 use super::route_state::RouteStack;
 use super::transition::{
-    Layer, PageTransition, TransitionDriver, TransitionSpec, TransitionState, lerp_rect,
+    Layer, PageTransition, Timing, TransitionDriver, TransitionSpec, TransitionState, lerp_rect,
     make_driver, resolve_layers, resolve_spec, settle_driver,
 };
 
@@ -291,6 +291,15 @@ pub(super) struct ActiveTransition<State: 'static> {
     /// `start_transition` (M3 defaults) stands — the unthemed behavior
     /// `docs/CODE_STANDARDS.md` mandates.
     pub(super) pending_spec: Option<TransitionSpec>,
+    /// Set by an interactive edge-swipe pop, which stages its preset in the
+    /// event pass where no theme is reachable. The first
+    /// [`paint_transition`](NavigatorWidget::paint_transition) reads the active
+    /// `reduce_motion` flag and, when set, collapses an animated `preset` to
+    /// [`PageTransition::ReducedCrossfade`] before any layer is resolved, then
+    /// clears the flag. The drag keeps driving progress, so the crossfade alpha
+    /// tracks the finger. Always `false` for a programmatic transition, which
+    /// resolves through `pending_spec`.
+    pub(super) pending_interactive_reduce: bool,
 }
 
 impl<State: 'static> crate::authoring::VisitPods for PageEntry<State> {
@@ -337,11 +346,11 @@ pub struct NavigatorWidget<State: 'static> {
     pub(super) pop_swipe_enabled: bool,
     /// The in-progress edge-swipe gesture state.
     pub(super) edge: EdgeSwipe,
-    /// The most recent frame time seen during [`paint`](NavigatorWidget::paint),
-    /// reused as the event-pass timestamp for velocity tracking — the event pass
-    /// carries no clock of its own (time is provided only at paint). The
-    /// same seam [`ScrollWidget`](crate::ScrollWidget) uses.
-    last_frame_time: FrameTime,
+    /// The most recent raw input time ([`PaintCtx::input_time`]) seen during
+    /// [`paint`](NavigatorWidget::paint), reused as the event-pass timestamp for
+    /// velocity tracking — the event pass carries no clock of its own (time is
+    /// provided only at paint). The same seam [`ScrollWidget`](crate::ScrollWidget) uses.
+    last_input_time: FrameTime,
     /// The shared depth slot published to the [`NavigatorController`] every
     /// `build`/`rebuild`. A clone of the controller's
     /// `Rc<Cell<usize>>`, updated by [`publish_state`](Self::publish_state)
@@ -397,6 +406,39 @@ pub struct NavigatorWidget<State: 'static> {
     /// (unlike per-page `on_visibility`, since this observes the whole
     /// navigator).
     route_change: Option<RouteChangeCallback>,
+}
+
+/// The rest threshold [`TransitionDriver::Settle`] applies to position and
+/// velocity.
+const SETTLE_REST_EPSILON: f64 = 1e-3;
+
+/// The settle spring that honours a resolved duration `timing`: the softest
+/// critically damped spring at rest (within [`SETTLE_REST_EPSILON`]) from full
+/// travel by the end of the duration. [`make_driver`] pairs every duration with
+/// one fixed spring, which outlasts the reduce-motion duration, so a
+/// reduced-motion pop derives its own. A spring `timing` keeps `make_driver`'s.
+fn settle_spring_within(timing: Timing) -> SpringDesc {
+    let Timing::Duration(duration, _) = timing else {
+        return make_driver(timing).1;
+    };
+    let secs = duration.as_secs_f64().max(1e-3);
+    let critical = |omega: f64| SpringDesc {
+        mass: 1.0,
+        stiffness: omega * omega,
+        damping_ratio: 1.0,
+    };
+    let rests =
+        |omega: f64| Spring::new(critical(omega), 1.0, 0.0).is_at_rest(secs, SETTLE_REST_EPSILON);
+    let (mut soft, mut stiff) = (1.0_f64, 1.0e5_f64);
+    for _ in 0..64 {
+        let mid = 0.5 * (soft + stiff);
+        if rests(mid) {
+            stiff = mid;
+        } else {
+            soft = mid;
+        }
+    }
+    critical(stiff)
 }
 
 /// Whether the navigator's **own stack** wants a back press ahead-of-time: it is
@@ -779,6 +821,7 @@ impl<State: 'static> NavigatorWidget<State> {
             hero_leaving: HashMap::new(),
             hero_entering: HashMap::new(),
             pending_spec: Some(spec),
+            pending_interactive_reduce: false,
         });
         // Publication point: a programmatic transition starts at progress 0, not
         // interactive, with a fresh generation. This runs in a `BuildCtx` pass,
@@ -876,11 +919,11 @@ impl<State: 'static> NavigatorWidget<State> {
         self.publish_transition_progress(from, Some(false));
     }
 
-    /// The event-pass timestamp (ms) for velocity tracking — the last frame time
+    /// The event-pass timestamp (ms) for velocity tracking — the last input time
     /// seen at paint, since the event pass carries no clock (see
-    /// [`last_frame_time`](NavigatorWidget::last_frame_time)).
+    /// [`last_input_time`](NavigatorWidget::last_input_time)).
     fn event_time_ms(&self) -> f64 {
-        self.last_frame_time.as_secs_f64() * 1000.0
+        self.last_input_time.as_secs_f64() * 1000.0
     }
 
     /// The set of pages an input event can reach, as an index range into
@@ -1362,6 +1405,35 @@ impl<State: 'static> NavigatorWidget<State> {
                 t.pending_spec = None;
             }
         }
+        // An interactive edge-swipe pop resolves `reduce_motion` once, here on its
+        // first paint and before `resolve_layers` runs, so a `Custom` function is
+        // never called for a reduced-motion user. Without a theme the preset
+        // stands. The release settle takes the reduced timing `resolve_spec`
+        // gives a programmatic collapse. Hero flights are untouched, exactly as
+        // on the programmatic collapse.
+        if self
+            .transition
+            .as_ref()
+            .is_some_and(|t| t.pending_interactive_reduce)
+        {
+            let motion = Theme::from_paint_ctx(ctx)
+                .map(|th| th.motion)
+                .filter(|m| m.reduce_motion);
+            if let Some(t) = self.transition.as_mut() {
+                if let Some(motion) = motion
+                    && t.preset != PageTransition::None
+                {
+                    let spec = TransitionSpec {
+                        preset: t.preset,
+                        timing: Timing::ThemeDefault,
+                    };
+                    let resolved = resolve_spec(spec, Some(&motion));
+                    t.preset = resolved.preset;
+                    t.settle_spring = settle_spring_within(resolved.timing);
+                }
+                t.pending_interactive_reduce = false;
+            }
+        }
         let (adv, is_pop, preset, has_stashed) = {
             let t = self.transition.as_mut().expect("transition present");
             let adv = t.driver.advance(ctx.frame_time());
@@ -1750,7 +1822,7 @@ impl<State: 'static> View<State> for NavigatorView<State> {
             transition: None,
             pop_swipe_enabled: self.resolve_pop_swipe(),
             edge: EdgeSwipe::new(),
-            last_frame_time: FrameTime::ZERO,
+            last_input_time: FrameTime::ZERO,
             depth: Rc::clone(&self.controller.depth),
             back_interest: Rc::clone(&self.controller.back_interest),
             transition_state: Rc::clone(&self.controller.transition),
@@ -1971,9 +2043,9 @@ impl<State: 'static> Widget for NavigatorWidget<State> {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
-        // Record the shared frame clock so the between-frames event pass (which
+        // Record the raw input clock so the between-frames event pass (which
         // carries no clock) has a timestamp for edge-swipe velocity tracking.
-        self.last_frame_time = ctx.frame_time();
+        self.last_input_time = ctx.input_time();
         if self.transition.is_some() {
             // Animated page switch: paint both involved pages with per-frame
             // offsets/opacity and drive the transition off the frame clock.

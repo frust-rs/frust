@@ -19,11 +19,11 @@ use frust_devtools::{
     AppInfo, BackendError, DevtoolsBackend, Service, ServiceConfig, ServiceHandle,
 };
 use frust_devtools_protocol::{
-    AckResult, Capability, DISCOVERY_PREFIX, FrameStats, HandshakeInfo, HandshakeParams, Incoming,
-    InputScrollParams, InputTapParams, InputTextParams, Method, Notification, PROTOCOL_VERSION,
-    RectPx, Request, Response, ResponseOutcome, RpcError, WidgetNode, WidgetProps,
-    WidgetPropsParams, WidgetTreeDump, decode_line, encode_line, parse_discovery_line, serde_json,
-    serde_json::Value,
+    AckResult, AnimationTimeScaleParams, Capability, DISCOVERY_PREFIX, FrameStats, HandshakeInfo,
+    HandshakeParams, Incoming, InputScrollParams, InputTapParams, InputTextParams, Method,
+    Notification, PROTOCOL_VERSION, RectPx, Request, Response, ResponseOutcome, RpcError,
+    WidgetNode, WidgetProps, WidgetPropsParams, WidgetTreeDump, decode_line, encode_line,
+    parse_discovery_line, serde_json, serde_json::Value,
 };
 
 // ───────────────────────────── fake backend ──────────────────────────────
@@ -33,6 +33,7 @@ struct Recorded {
     taps: Vec<(f64, f64)>,
     scrolls: Vec<(f64, f64, f64, f64)>,
     texts: Vec<String>,
+    scales: Vec<f64>,
 }
 
 /// A one-shot release gate: `wait` parks until some other thread `release`s.
@@ -164,6 +165,15 @@ impl DevtoolsBackend for FakeBackend {
             .expect("recorded mutex")
             .texts
             .push(text.to_string());
+        Ok(())
+    }
+
+    fn set_animation_time_scale(&self, scale: f64) -> Result<(), BackendError> {
+        self.recorded
+            .lock()
+            .expect("recorded mutex")
+            .scales
+            .push(scale);
         Ok(())
     }
 
@@ -447,6 +457,11 @@ fn an_unauthenticated_client_is_refused_every_method_but_handshake() {
             }),
         ),
         (6, Method::Screenshot, Value::Null),
+        (
+            7,
+            Method::SetAnimationTimeScale,
+            params!(AnimationTimeScaleParams { scale: 2.0 }),
+        ),
     ] {
         let error = expect_error(client.call(id, method, params));
         assert_eq!(
@@ -1031,4 +1046,151 @@ fn requests_pipelined_on_one_connection_are_answered_in_order() {
     for id in 1..=5 {
         assert_eq!(client.next_response().id, id);
     }
+}
+
+#[test]
+fn set_animation_time_scale_reaches_the_backend_and_acks() {
+    let harness = default_harness();
+    let mut client = harness.client();
+
+    let result = expect_result(client.call(
+        1,
+        Method::SetAnimationTimeScale,
+        params!(AnimationTimeScaleParams { scale: 0.5 }),
+    ));
+    let ack: AckResult = serde_json::from_value(result).expect("an AckResult");
+    assert_eq!(ack, AckResult { ok: true });
+    assert_eq!(
+        harness.recorded.lock().expect("recorded mutex").scales,
+        vec![0.5]
+    );
+}
+
+/// Drops `client`, waits until the service has logged that connection's
+/// disconnect (its per-connection state is dropped just before that line),
+/// then round-trips a call from `witness` so the single FIFO backend thread
+/// has run anything the dropped connection queued.
+fn drop_and_settle(harness: &Harness, client: Client) {
+    let peer = client.writer.local_addr().expect("client address");
+    drop(client);
+    let needle = format!("client {peer} disconnected");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !captured_lines().iter().any(|l| l.contains(&needle)) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the service never logged the disconnect"
+        );
+        std::thread::yield_now();
+    }
+    let mut witness = harness.client();
+    expect_result(witness.call(1, Method::MetricsSnapshot, Value::Null));
+}
+
+#[test]
+fn the_time_scale_resets_when_the_setting_client_disconnects() {
+    let harness = default_harness();
+    let mut client = harness.client();
+    expect_result(client.call(
+        1,
+        Method::SetAnimationTimeScale,
+        params!(AnimationTimeScaleParams { scale: 0.5 }),
+    ));
+
+    drop_and_settle(&harness, client);
+
+    assert_eq!(
+        harness.recorded.lock().expect("recorded mutex").scales,
+        vec![0.5, 1.0]
+    );
+}
+
+#[test]
+fn a_client_that_never_set_the_scale_does_not_reset_it() {
+    let harness = default_harness();
+    let mut setter = harness.client();
+    expect_result(setter.call(
+        1,
+        Method::SetAnimationTimeScale,
+        params!(AnimationTimeScaleParams { scale: 0.5 }),
+    ));
+    let mut bystander = harness.client();
+    expect_result(bystander.call(1, Method::MetricsSnapshot, Value::Null));
+
+    drop_and_settle(&harness, bystander);
+
+    assert_eq!(
+        harness.recorded.lock().expect("recorded mutex").scales,
+        vec![0.5],
+        "only the connection that set the scale resets it"
+    );
+}
+
+#[test]
+fn set_animation_time_scale_with_malformed_params_is_invalid_params() {
+    let harness = default_harness();
+    let mut client = harness.client();
+
+    let error = expect_error(client.call(
+        1,
+        Method::SetAnimationTimeScale,
+        serde_json::json!({"scale": "fast"}),
+    ));
+    assert_eq!(error.code, RpcError::INVALID_PARAMS);
+    assert!(
+        harness
+            .recorded
+            .lock()
+            .expect("recorded mutex")
+            .scales
+            .is_empty()
+    );
+}
+
+/// A backend that implements only the required methods.
+struct MinimalBackend;
+
+impl DevtoolsBackend for MinimalBackend {
+    fn widget_tree(&self) -> WidgetTreeDump {
+        WidgetTreeDump { roots: Vec::new() }
+    }
+    fn widget_props(&self, _id: u64) -> Option<WidgetProps> {
+        None
+    }
+    fn metrics_snapshot(&self) -> frust_devtools_protocol::MetricsSnapshot {
+        frust_devtools_protocol::MetricsSnapshot {
+            rss_bytes: None,
+            uptime_ms: 0,
+        }
+    }
+    fn inject_tap(&self, _params: InputTapParams) -> Result<(), BackendError> {
+        Ok(())
+    }
+    fn inject_scroll(&self, _params: InputScrollParams) -> Result<(), BackendError> {
+        Ok(())
+    }
+    fn inject_text(&self, _text: &str) -> Result<(), BackendError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn set_animation_time_scale_on_a_default_backend_is_not_supported() {
+    install_logger();
+    let handle = Service::start_with_config(
+        MinimalBackend,
+        AppInfo::new("minimal-app", "0.1.0-test"),
+        ServiceConfig::default(),
+    )
+    .expect("service starts on loopback");
+    let mut client = Client::connect(handle.port());
+    if let Some(token) = handle.token() {
+        client.authenticate(token);
+    }
+
+    let error = expect_error(client.call(
+        1,
+        Method::SetAnimationTimeScale,
+        params!(AnimationTimeScaleParams { scale: 1.0 }),
+    ));
+    assert_eq!(error.code, RpcError::NOT_SUPPORTED);
 }

@@ -11,6 +11,7 @@
 //! [`crate::widget::PaintCtx::request_frame`]. A controller never `advance`d
 //! never moves.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use kurbo::{Point, Rect, Size};
@@ -48,6 +49,104 @@ impl FrameTime {
     /// never-negative delta).
     pub fn saturating_sub(self, earlier: FrameTime) -> Duration {
         Duration::from_nanos(self.0.saturating_sub(earlier.0))
+    }
+}
+
+/// The smallest scale [`set_animation_time_scale`] accepts (100x slow motion).
+pub const MIN_ANIMATION_TIME_SCALE: f64 = 0.01;
+/// The largest scale [`set_animation_time_scale`] accepts (100x speed-up).
+pub const MAX_ANIMATION_TIME_SCALE: f64 = 100.0;
+
+/// The process-wide scale as `f64` bits; `1.0` until set.
+static TIME_SCALE: AtomicU64 = AtomicU64::new(0x3FF0_0000_0000_0000);
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static THREAD_TIME_SCALE: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
+}
+
+pub(crate) fn is_valid_time_scale(scale: f64) -> bool {
+    (MIN_ANIMATION_TIME_SCALE..=MAX_ANIMATION_TIME_SCALE).contains(&scale)
+}
+
+/// Multiply elapsed animation time process-wide: `0.25` runs every animation at
+/// quarter speed, `2.0` at double. Input timers (long-press, double-tap, caret
+/// blink, velocity sampling) keep the shell's raw clock. Returns `false`, leaving
+/// the scale unchanged, for a value that is not finite or lies outside
+/// [`MIN_ANIMATION_TIME_SCALE`]`..=`[`MAX_ANIMATION_TIME_SCALE`].
+///
+/// The scale is global by design: one value for every render root in the
+/// process. After a run at any other scale, a root's animation clock keeps a
+/// fixed offset from raw time even once the scale is back at `1.0`. A test uses
+/// [`with_thread_animation_time_scale`], or holds a lock and restores `1.0`.
+pub fn set_animation_time_scale(scale: f64) -> bool {
+    if !is_valid_time_scale(scale) {
+        return false;
+    }
+    TIME_SCALE.store(scale.to_bits(), Ordering::Relaxed);
+    true
+}
+
+/// The process-wide animation time scale; `1.0` until set.
+pub fn animation_time_scale() -> f64 {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(scale) = THREAD_TIME_SCALE.with(std::cell::Cell::get) {
+        return scale;
+    }
+    f64::from_bits(TIME_SCALE.load(Ordering::Relaxed))
+}
+
+/// Run `f` with [`animation_time_scale`] reading `scale` on this thread only, so a
+/// test can paint under a scale without racing tests on other threads
+/// (`cfg(test)` / `test-support` only). Panics on a scale the setter would reject.
+#[cfg(any(test, feature = "test-support"))]
+pub fn with_thread_animation_time_scale<R>(scale: f64, f: impl FnOnce() -> R) -> R {
+    assert!(
+        is_valid_time_scale(scale),
+        "time scale {scale} out of range"
+    );
+    struct Restore(Option<f64>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            THREAD_TIME_SCALE.with(|slot| slot.set(self.0));
+        }
+    }
+    let _restore = Restore(THREAD_TIME_SCALE.with(|slot| slot.replace(Some(scale))));
+    f()
+}
+
+/// The scaled animation clock a render root derives from the shell's raw clock.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct AnimationClock {
+    last_raw: Option<FrameTime>,
+    scaled: FrameTime,
+}
+
+impl AnimationClock {
+    /// Advance by `scale` times the raw delta since the last call and return the
+    /// scaled time. The first call adopts `raw`; while the clock still equals the
+    /// raw one, scale `1.0` passes `raw` through unchanged, a backward step
+    /// included. A scaled delta is rounded to whole nanoseconds per call.
+    ///
+    /// After any frame at another scale the offset from raw time persists: scale
+    /// `1.0` then adds raw deltas one to one and a backward step adds zero, so the
+    /// clock never jumps back to raw.
+    pub(crate) fn advance(&mut self, raw: FrameTime, scale: f64) -> FrameTime {
+        self.scaled = match self.last_raw {
+            None => raw,
+            Some(last) if scale == 1.0 && self.scaled == last => raw,
+            Some(last) => {
+                let delta = raw.0.saturating_sub(last.0);
+                let step = if scale == 1.0 {
+                    delta
+                } else {
+                    (delta as f64 * scale).round() as u64
+                };
+                FrameTime(self.scaled.0.saturating_add(step))
+            }
+        };
+        self.last_raw = Some(raw);
+        self.scaled
     }
 }
 

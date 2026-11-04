@@ -533,6 +533,7 @@ fn capability_name(capability: Capability) -> &'static str {
         Capability::Metrics => "metrics",
         Capability::Screenshot => "screenshot",
         Capability::HotPatch => "hot_patch",
+        Capability::AnimationTimeScale => "animation_time_scale",
         Capability::Unknown => "unknown",
     }
 }

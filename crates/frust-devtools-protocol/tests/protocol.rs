@@ -4,11 +4,11 @@
 //! path (envelope → NDJSON line → envelope) preserves every field.
 
 use frust_devtools_protocol::{
-    AckResult, Capability, DecodeError, Discovery, FrameStats, HandshakeInfo, HandshakeParams,
-    Incoming, InputScrollParams, InputTapParams, InputTextParams, Method, MetricsSnapshot,
-    Notification, PROTOCOL_VERSION, RectPx, Request, Response, ResponseOutcome, RpcError,
-    ScreenshotResult, WidgetNode, WidgetProps, WidgetPropsParams, WidgetTreeDump, decode_line,
-    encode_line, format_discovery_line, parse_discovery_line,
+    AckResult, AnimationTimeScaleParams, Capability, DecodeError, Discovery, FrameStats,
+    HandshakeInfo, HandshakeParams, Incoming, InputScrollParams, InputTapParams, InputTextParams,
+    Method, MetricsSnapshot, Notification, PROTOCOL_VERSION, RectPx, Request, Response,
+    ResponseOutcome, RpcError, ScreenshotResult, WidgetNode, WidgetProps, WidgetPropsParams,
+    WidgetTreeDump, decode_line, encode_line, format_discovery_line, parse_discovery_line,
 };
 
 fn round_trip_request<T: serde::Serialize>(method: Method, params: &T) -> Request {
@@ -181,6 +181,33 @@ fn input_text_round_trips() {
         },
     );
     round_trip_success(AckResult { ok: true });
+}
+
+#[test]
+fn set_animation_time_scale_round_trips() {
+    assert_eq!(
+        Method::from_str("set_animation_time_scale"),
+        Some(Method::SetAnimationTimeScale)
+    );
+    round_trip_request(
+        Method::SetAnimationTimeScale,
+        &AnimationTimeScaleParams { scale: 0.25 },
+    );
+    round_trip_success(AckResult { ok: true });
+}
+
+#[test]
+fn animation_time_scale_capability_round_trips_and_unknown_still_decodes() {
+    let line = serde_json::to_string(&Capability::AnimationTimeScale).unwrap();
+    assert_eq!(line, "\"animation_time_scale\"");
+    assert_eq!(
+        serde_json::from_str::<Capability>(&line).unwrap(),
+        Capability::AnimationTimeScale
+    );
+    assert_eq!(
+        serde_json::from_str::<Capability>("\"some_future_capability\"").unwrap(),
+        Capability::Unknown
+    );
 }
 
 #[test]

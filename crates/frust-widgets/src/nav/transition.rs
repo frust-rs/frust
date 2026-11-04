@@ -237,24 +237,16 @@ pub enum PageTransition {
     /// [`preset_enter_exit`]'s fallback arm, matching [`make_driver`]'s
     /// unthemed `ThemeDefault` fallback).
     ///
-    /// **Reduce-motion — programmatic path only.** [`resolve_spec`]'s
-    /// collapse to [`PageTransition::ReducedCrossfade`] applies to `Custom`
-    /// like every other preset when a transition is staged
-    /// **programmatically** (a push/pop/replace carrying a
-    /// [`TransitionSpec`]): the navigator resolves it against the active
-    /// `reduce_motion` flag on the transition's first paint, before the
-    /// preset is ever consulted, so a `Custom` fn staged that way is not
-    /// called.
-    ///
-    /// A **user-driven interactive edge-swipe pop** is a different path:
-    /// it is not routed through that collapse at all — the navigator drives
-    /// the popped page's own preset directly, raw, with no
-    /// [`resolve_spec`] step — so under `reduce_motion` the supplied
-    /// function **is** still called there. This is not specific to
-    /// `Custom`: every built-in preset behaves identically on an
-    /// interactive pop (a pre-existing accessibility gap, unrelated to
-    /// `Custom` and tracked separately — this doc narrows the claim to what
-    /// the code does, it does not fix the gap).
+    /// **Reduce-motion.** [`resolve_spec`]'s collapse to
+    /// [`PageTransition::ReducedCrossfade`] applies to `Custom` like every
+    /// other preset, on both paths. A transition staged **programmatically**
+    /// (a push/pop/replace carrying a [`TransitionSpec`]) resolves against
+    /// the active `reduce_motion` flag on its first paint, and a
+    /// **user-driven interactive edge-swipe pop** does the same on its first
+    /// paint: the popped page's preset is replaced by the crossfade before
+    /// it is consulted, and the drag keeps driving the crossfade's alpha.
+    /// Under `reduce_motion` the supplied function is therefore not called
+    /// on either path.
     Custom(fn(progress: f64, is_pop: bool, size: Size) -> (Layer, Layer)),
 }
 

@@ -97,11 +97,11 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use frust_devtools_protocol::{
-    AckResult, ApplyPatchParams, Capability, FrameStats, HandshakeInfo, HandshakeParams,
-    HotpatchInfo, Incoming, InputScrollParams, InputTapParams, InputTextParams, JumpTableWire,
-    Method, MetricsSnapshot, PatchChunkParams, PatchOutcome, Request, Response, ResponseOutcome,
-    RpcError, ScreenshotResult, WidgetProps, WidgetPropsParams, WidgetTreeDump, decode_line,
-    encode_line,
+    AckResult, AnimationTimeScaleParams, ApplyPatchParams, Capability, FrameStats, HandshakeInfo,
+    HandshakeParams, HotpatchInfo, Incoming, InputScrollParams, InputTapParams, InputTextParams,
+    JumpTableWire, Method, MetricsSnapshot, PatchChunkParams, PatchOutcome, Request, Response,
+    ResponseOutcome, RpcError, ScreenshotResult, WidgetProps, WidgetPropsParams, WidgetTreeDump,
+    decode_line, encode_line,
 };
 use serde_json::Value;
 
@@ -419,6 +419,16 @@ impl DevtoolsClient {
         let params = serde_json::to_value(InputTextParams { text: text.into() })
             .context("encoding `input_text` params")?;
         self.typed_call(Method::InputText, params)
+    }
+
+    /// `set_animation_time_scale` — sets the app's animation time scale
+    /// (`1.0` is real time). A server without
+    /// [`Capability::AnimationTimeScale`] answers [`is_not_supported`]; a
+    /// non-finite or out-of-range `scale` is an `INVALID_PARAMS` rejection.
+    pub fn set_animation_time_scale(&self, scale: f64) -> Result<AckResult> {
+        let params = serde_json::to_value(AnimationTimeScaleParams { scale })
+            .context("encoding `set_animation_time_scale` params")?;
+        self.typed_call(Method::SetAnimationTimeScale, params)
     }
 
     /// `hotpatch_info` — what a patch builder needs to target this process
@@ -1526,6 +1536,24 @@ mod tests {
                 .unwrap()
                 .contains(&Capability::Screenshot)
         );
+    }
+
+    #[test]
+    fn set_animation_time_scale_sends_the_scale_and_acks() {
+        let (addr, server) =
+            spawn_fake_server_with_capabilities(vec![Capability::AnimationTimeScale]);
+        let client =
+            DevtoolsClient::connect(addr, Duration::from_secs(2), Some(FAKE_TOKEN)).unwrap();
+        client.handshake().unwrap();
+
+        let ack = client.set_animation_time_scale(0.25).unwrap();
+        assert!(ack.ok);
+        let sent = server
+            .requests()
+            .into_iter()
+            .find(|r| r.method == "set_animation_time_scale")
+            .expect("the method reached the server");
+        assert_eq!(sent.params, serde_json::json!({"scale": 0.25}));
     }
 
     #[test]

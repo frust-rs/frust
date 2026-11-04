@@ -25,6 +25,14 @@ every key is prefixed with `frust.`, so `clear()` never removes entries that
 belong to another library sharing the store. `keys()` returns the keys with
 the prefix stripped.
 
+## Testing
+
+`SharedPreferences::in_memory()` returns a fresh, empty, process-local store
+that is never persisted, on every target. Use it in tests and previews instead
+of `standard()`, which on an unbundled macOS binary resolves to the host's real
+`NSUserDefaults` domain. Clones of one handle share the map; separate calls do
+not.
+
 The API is synchronous and not reactive. See the crate documentation for the
 full API and per-backend storage details.
 

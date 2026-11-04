@@ -156,27 +156,28 @@ pub use frust_widgets::{
     DragPhase, DragPolicy, DragSession, DragSourceId, DragState, DragStateChange, DragSubscription,
     DragTargetId, DragTargetView, DragTargetWidget, DraggableView, DraggableWidget, EdgeInsets,
     FlexChild, FlexView, GHOST_OPACITY, GestureDetector, GestureDetectorView, HIGHLIGHT_FALLBACK,
-    HeroView, Icon, IconButton, IconButtonView, IconData, IconSource, IconView, IconWidget, Image,
-    ImageError, ImageFit, ImageSource, ImageView, IndexedStack, IndexedStackView, KeepAliveHandle,
-    KeepAliveView, ListView, ListViewWidget, MAX_FLING_VELOCITY, MIN_FLING_VELOCITY,
-    MainAxisAlignment, NavigatorController, NavigatorId, NavigatorView, NeverScrollable,
-    OverlayAlign, OverlayPlacement, OverlayPortalView, OverlaySide, OverscrollEffect, Padding,
-    PaddingView, PageBuilder, PageController, PageSnap, PageTransition, PageView, PageVisibility,
-    PopResult, PushOptions, Radio, RadioView, RadioWidget, ReorderableListView,
-    RepaintBoundaryView, ResultCallback, Row, RubberBand, SafeAreaView, ScaffoldView, ScrollAxis,
-    ScrollController, ScrollInfo, ScrollMetrics, ScrollPhysics, ScrollSubscription, ScrollView,
-    ScrollbarShow, ScrollbarStyle, ShortcutsView, Simulation, SizedBox, SizedBoxView, Slider,
-    SliderView, SliverBoxView, SliverFillRemainingView, SliverFixedExtentListView,
-    SliverGridDelegate, SliverGridView, SliverListView, SliverPaddingView,
-    SliverPersistentHeaderDelegate, SliverPersistentHeaderView, SourceFeedback, SpringDescription,
-    Stack, StackView, TextInput, TextInputView, TextView, Timing, Tolerance, TransitionSpec,
-    TransitionState, VisibilityCallback, WindowDragRegionView, auto_scroll_zone, button, checkbox,
-    colored_box, column, container, custom_scroll_view, divider, drag_target, draggable, flexible,
-    hero, icon, icon_button, indexed_stack, inflexible, keep_alive, keyed, list_view,
-    overlay_portal, page_view, radio, reorderable_list, repaint_boundary, row, safe_area, scaffold,
-    scroll_view, shortcuts, slider, sliver_box, sliver_fill_remaining, sliver_fixed_extent_list,
-    sliver_fixed_extent_list_keyed, sliver_grid, sliver_grid_keyed, sliver_list, sliver_padding,
-    sliver_persistent_header, stack, text, text_input, window_drag_region,
+    HeroView, Icon, IconButton, IconButtonView, IconData, IconElement, IconPaint, IconShape,
+    IconSource, IconView, IconWidget, Image, ImageError, ImageFit, ImageSource, ImageView,
+    IndexedStack, IndexedStackView, KeepAliveHandle, KeepAliveView, ListView, ListViewWidget,
+    MAX_FLING_VELOCITY, MIN_FLING_VELOCITY, MainAxisAlignment, NavigatorController, NavigatorId,
+    NavigatorView, NeverScrollable, OverlayAlign, OverlayPlacement, OverlayPortalView, OverlaySide,
+    OverscrollEffect, Padding, PaddingView, PageBuilder, PageController, PageSnap, PageTransition,
+    PageView, PageVisibility, PopResult, PushOptions, Radio, RadioView, RadioWidget,
+    ReorderableListView, RepaintBoundaryView, ResultCallback, Row, RubberBand, SafeAreaView,
+    ScaffoldView, ScrollAxis, ScrollController, ScrollInfo, ScrollMetrics, ScrollPhysics,
+    ScrollSubscription, ScrollView, ScrollbarShow, ScrollbarStyle, ShortcutsView, Simulation,
+    SizedBox, SizedBoxView, Slider, SliderView, SliverBoxView, SliverFillRemainingView,
+    SliverFixedExtentListView, SliverGridDelegate, SliverGridView, SliverListView,
+    SliverPaddingView, SliverPersistentHeaderDelegate, SliverPersistentHeaderView, SourceFeedback,
+    SpringDescription, Stack, StackView, StrokedIconSource, TextInput, TextInputView, TextView,
+    Timing, Tolerance, TransitionSpec, TransitionState, VisibilityCallback, WindowDragRegionView,
+    auto_scroll_zone, button, checkbox, colored_box, column, container, custom_scroll_view,
+    divider, drag_target, draggable, flexible, hero, icon, icon_button, indexed_stack, inflexible,
+    keep_alive, keyed, list_view, overlay_portal, page_view, radio, reorderable_list,
+    repaint_boundary, row, safe_area, scaffold, scroll_view, shortcuts, slider, sliver_box,
+    sliver_fill_remaining, sliver_fixed_extent_list, sliver_fixed_extent_list_keyed, sliver_grid,
+    sliver_grid_keyed, sliver_list, sliver_padding, sliver_persistent_header, stack, text,
+    text_input, window_drag_region,
 };
 // [`ItemAlignment`] (the alignment `ScrollController::scroll_to_item` lands a
 // row at) is not in `frust_widgets`'s own flat re-export list, so the block
@@ -316,6 +317,26 @@ pub use frust_core::{Chord, FocusRingPolicy, OverlayKeys, ShortcutHint, Shortcut
 pub use frust_core::{
     SelectionToolbarActions, SelectionToolbarPolicy, SelectionToolbarRequest,
     lock_selection_toolbar_policy, set_selection_toolbar_builder, set_selection_toolbar_policy,
+};
+
+/// The haptic-feedback seam: a control fires a [`HapticFeedback`] through
+/// [`perform_haptic`], and the app installs one process-wide [`HapticSink`]
+/// with [`set_haptic_sink`] (last wins; `None` uninstalls) that forwards to
+/// its platform plugin. With no sink installed, firing is a silent no-op.
+/// [`haptic_sink_installed`] reports whether one is set.
+///
+/// ```
+/// use frust::{HapticFeedback, haptic_sink_installed, perform_haptic, set_haptic_sink};
+///
+/// // No sink: nothing happens.
+/// perform_haptic(HapticFeedback::Selection);
+///
+/// set_haptic_sink(Some(|_feedback| {}));
+/// assert!(haptic_sink_installed());
+/// set_haptic_sink(None);
+/// ```
+pub use frust_core::{
+    HapticFeedback, HapticSink, haptic_sink_installed, perform_haptic, set_haptic_sink,
 };
 
 /// Platform-view embedding (platform-views feature): reserve
@@ -621,6 +642,46 @@ pub use frust_widgets::{
 /// via `frust_widgets::nav::transition`, a `pub mod` two levels down) — this
 /// is the facade's job precisely so app code never has to know that.
 ///
+/// [`Layer`] and [`resolve_layers`] complete the authoring side of
+/// [`PageTransition::Custom`]: the custom function returns the (entering,
+/// leaving) `Layer` pair, and `resolve_layers` lets it compose with a preset's
+/// layers instead of re-deriving them.
+///
+/// ```
+/// use frust::kurbo::Size;
+/// use frust::{Layer, PageTransition, TransitionSpec};
+///
+/// // A 24 px slide plus fade, reversed on pop.
+/// fn step_slide(progress: f64, is_pop: bool, size: Size) -> (Layer, Layer) {
+///     let dir = if is_pop { -1.0 } else { 1.0 };
+///     let entering = Layer {
+///         dx: dir * 24.0 * (1.0 - progress),
+///         alpha: progress as f32,
+///         ..Layer::IDENTITY
+///     };
+///     if is_pop {
+///         // Compose with a preset: borrow the cross-fade's leaving layer.
+///         let (_, leaving) =
+///             frust::resolve_layers(PageTransition::ReducedCrossfade, progress, true, size);
+///         (entering, leaving)
+///     } else {
+///         let leaving = Layer {
+///             dx: -dir * 24.0 * progress,
+///             alpha: (1.0 - progress) as f32,
+///             ..Layer::IDENTITY
+///         };
+///         (entering, leaving)
+///     }
+/// }
+///
+/// let spec = TransitionSpec::duration(PageTransition::Custom(step_slide));
+/// let PageTransition::Custom(f) = spec.preset else { unreachable!() };
+/// let (entering, _) = f(0.0, false, Size::new(100.0, 100.0));
+/// assert_eq!(entering.dx, 24.0);
+/// ```
+///
+/// A second example shows the reduce-motion collapse:
+///
 /// ```
 /// use frust::{Curve, PageTransition, Theme, Timing, TransitionDriver, TransitionSpec};
 ///
@@ -640,7 +701,9 @@ pub use frust_widgets::{
 /// let (driver, _settle_spring) = frust::make_driver(resolved.timing);
 /// assert!(matches!(driver, TransitionDriver::Auto(_)));
 /// ```
-pub use frust_widgets::nav::transition::{TransitionDriver, make_driver, resolve_spec};
+pub use frust_widgets::nav::transition::{
+    Layer, TransitionDriver, make_driver, resolve_layers, resolve_spec,
+};
 
 /// The `drag` module: drop targets, draggable sources, auto-scroll zones,
 /// and reorderable lists, all coordinated through a single ambient
@@ -835,6 +898,13 @@ pub mod authoring {
     /// hand it to `PaintScene::push_retained`/`draw_retained`, asking
     /// `PaintCtx::retained_available` whether the renderer still holds the page.
     pub use frust_core::RetainedKey;
+
+    /// The haptic-feedback seam a catalog fires through: [`perform_haptic`]
+    /// with a [`HapticFeedback`], delivered to the sink the app installed with
+    /// [`set_haptic_sink`]. Also flat at the crate root.
+    pub use frust_core::{
+        HapticFeedback, HapticSink, haptic_sink_installed, perform_haptic, set_haptic_sink,
+    };
 
     /// The clipboard/selection vocabulary an editable widget matches on —
     /// [`InputEvent::EditCommand`] carries one of these four verbs, already
@@ -1275,6 +1345,58 @@ pub use kurbo;
 /// (e.g. `peniko::Blob`, `peniko::color::DynamicColor`) — the long-tail escape
 /// valve alongside [`Color`]/the by-name list above.
 pub use peniko;
+
+/// Test helpers for out-of-tree widgets, behind the opt-in `test-support` feature.
+///
+/// Enable it from a `[dev-dependencies]` entry only: features are additive, so enabling it on a
+/// normal dependency would switch the module on in every app that depends on that crate.
+/// [`semantics_of`] builds a view, lays it out against a real text context and returns the
+/// accessibility tree the window would hand its adapter, so a widget's `Widget::semantics` can be
+/// asserted on from a plain `#[test]`.
+#[cfg(feature = "test-support")]
+pub mod testing {
+    use kurbo::Size;
+
+    use crate::View;
+    use frust_core::SemanticsUpdate;
+
+    /// Build the view `build` returns, lay it out in a `size` window and return its semantics tree.
+    ///
+    /// The tree always holds the window root node; a widget contributes its own nodes through
+    /// `Widget::semantics`. The layout pass threads a real text context, so text-measuring widgets
+    /// lay out as they do in an app.
+    pub fn semantics_of<V, F>(mut build: F, size: Size) -> SemanticsUpdate
+    where
+        F: FnMut(&mut ()) -> V,
+        V: View<()>,
+    {
+        let mut root: frust_core::RenderRoot<(), V> = frust_core::RenderRoot::new();
+        root.rebuild(&mut build, &mut ());
+        let mut text_ctx = frust_text::TextContext::new();
+        root.layout_with_text(size, &mut text_ctx as &mut dyn std::any::Any);
+        root.semantics()
+    }
+}
+
+#[cfg(all(test, feature = "test-support"))]
+mod testing_semantics_of {
+    use kurbo::Size;
+
+    #[test]
+    fn semantics_of_a_text_view_finds_the_text_node() {
+        let update = crate::testing::semantics_of(
+            |_: &mut ()| crate::text("hello"),
+            Size::new(200.0, 100.0),
+        );
+        assert!(update.nodes.len() >= 2, "window root plus the text node");
+        assert!(
+            update
+                .nodes
+                .iter()
+                .any(|(_, node)| node.value() == Some("hello") || node.label() == Some("hello"))
+        );
+    }
+}
 
 mod back_glue;
 mod route_state;
@@ -1726,8 +1848,22 @@ pub use frust_shell_common::{ResolvedSurfaceMode, resolved_surface_mode};
 /// plus the pure easing/interpolation/spring math a widget or app advances it
 /// through, flat-re-exported from `frust-core::anim`. Time enters from the
 /// shell during paint (`PaintCtx::frame_time`); nothing here reads a clock.
+///
+/// [`set_animation_time_scale`] slows or speeds every animation process-wide
+/// for designing and debugging motion (`0.25` = quarter speed, within
+/// [`MIN_ANIMATION_TIME_SCALE`]`..=`[`MAX_ANIMATION_TIME_SCALE`]); gesture
+/// timers keep the raw clock (`PaintCtx::input_time`).
+///
+/// ```
+/// use frust::{animation_time_scale, set_animation_time_scale};
+///
+/// assert!(!set_animation_time_scale(0.0));
+/// assert_eq!(animation_time_scale(), 1.0);
+/// ```
 pub use frust_core::anim::{
-    AnimationController, AnimationStatus, Curve, FrameTime, Lerp, Spring, SpringDesc, Tween,
+    AnimationController, AnimationStatus, Curve, FrameTime, Lerp, MAX_ANIMATION_TIME_SCALE,
+    MIN_ANIMATION_TIME_SCALE, Spring, SpringDesc, Tween, animation_time_scale,
+    set_animation_time_scale,
 };
 
 /// The window's shape, flat-re-exported from `frust-core::app` so app code

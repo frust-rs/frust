@@ -14,7 +14,7 @@
 //! other payload type; [`DragTargetView::teardown`] unregisters it. Every
 //! paint reports the widget's window-space bounds
 //! ([`DragCoordinator::report_target_bounds`], stamped with the paint's
-//! [`frust_core::PaintCtx::frame_time`]) so cross-container resolution can
+//! raw [`frust_core::PaintCtx::input_time`]) so cross-container resolution can
 //! find this target under the ghost point without hit-testing through the
 //! ghost's own `Transparent` pod — `paint`, not layout, because
 //! [`frust_core::LayoutCtx`] carries no window-space origin (only
@@ -681,7 +681,7 @@ impl<State: 'static, T: 'static> Widget for DragTargetWidget<State, T> {
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         self.window_origin = ctx.origin();
         self.coordinator
-            .report_target_bounds(self.id, visible_bounds(ctx), ctx.frame_time());
+            .report_target_bounds(self.id, visible_bounds(ctx), ctx.input_time());
         self.child.paint_child(ctx, scene);
         if let Some(state) = self.current_highlight() {
             self.paint_highlight(ctx, scene, state);

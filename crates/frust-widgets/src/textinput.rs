@@ -49,18 +49,19 @@
 //! An enabled field (read-only included) is also a Tab stop: root traversal can
 //! focus it, and it declines Tab so traversal can move on.
 //!
-//! The caret blinks while focused, its phase measured in `paint` from the shell
-//! frame clock ([`PaintCtx::frame_time`] — no wall-clock reads in widget code).
+//! The caret blinks while focused, its phase measured in `paint` from the raw
+//! shell clock ([`PaintCtx::input_time`], which an animation time scale never
+//! stretches — no wall-clock reads in widget code).
 //! Its continuation frame is a paced (`CosmeticLoop`) request at the blink's own
 //! [`BLINK_MS`] half-period ([`PaintCtx::request_frame_paced_at`]) — its own
 //! slower cadence rather than the theme's cap rate, one paint per visibility
 //! toggle being all a 500ms blink needs. A concurrent cap-rate request repaints it
 //! more often through the MIN-lattice with no visible effect, safe at any cadence
-//! because the phase is `frame_time - blink_epoch`
+//! because the phase is `input_time - blink_epoch`
 //! ([`caret_visible_at`](TextInputWidget::caret_visible_at)) — a pure function of
 //! this frame's own timestamp, not of a delta between painted frames. An
 //! edit/focus during the (clockless) event pass flags the blink for reset, the
-//! next paint recording the epoch from `frame_time`.
+//! next paint recording the epoch from `input_time`.
 //!
 //! `reduce_motion` freezes the caret **visible** (lit, not hidden) rather than
 //! mid-blink, and stops requesting blink frames while focused: unlike a purely
@@ -133,7 +134,7 @@
 //!
 //! **The long-press timer is measured across paints**, exactly as
 //! [`crate::gesture`]'s is and for the same reason: only the paint pass carries
-//! a clock ([`PaintCtx::frame_time`]). A press records its epoch on the first
+//! a clock ([`PaintCtx::input_time`]). A press records its epoch on the first
 //! paint after the `Down`, and the paint that observes the threshold crossed
 //! marks the hold elapsed, latches
 //! [`frust_core::mark_pending_result_flush`] and requests a plain
@@ -181,7 +182,7 @@
 //!
 //! **The double-tap window keeps its own clock alive under `reduce_motion`.**
 //! Both halves of that window are dated from the paint clock
-//! ([`PaintCtx::frame_time`], cached as the event pass's only clock), which
+//! ([`PaintCtx::input_time`], cached as the event pass's only clock), which
 //! advances only while something is painting — normally the caret blink's own
 //! paced request. `reduce_motion` stops those requests, so an idle focused
 //! field would leave the clock frozen at the moment the tap completed and the
@@ -890,11 +891,11 @@ const A11Y_SELECT_ALL_ID: i32 = 4;
 /// state does.
 #[derive(Clone, Copy)]
 struct HoldState {
-    /// The frame time the press was first painted at, seeded by that paint
+    /// The input time the press was first painted at, seeded by that paint
     /// because the event pass that armed the hold carries no clock. `None`
     /// until the press has been painted once.
     started_at: Option<FrameTime>,
-    /// Set by the paint that observes `frame_time - started_at` reaching
+    /// Set by the paint that observes `input_time - started_at` reaching
     /// [`LONG_PRESS_MS`]; the word is selected on the next pass that carries an
     /// [`EventCtx`].
     elapsed: bool,
@@ -1048,12 +1049,12 @@ pub struct TextInputWidget {
     /// Armed by a `Down` inside (alongside `capture_pointer`) to drive
     /// drag-selection; cleared on `Up`/`Cancel`.
     captured: bool,
-    /// The frame time the caret was last reset to visible (the blink phase's
-    /// epoch). Recorded from the paint-pass [`PaintCtx::frame_time`], since the
+    /// The input time the caret was last reset to visible (the blink phase's
+    /// epoch). Recorded from the paint-pass [`PaintCtx::input_time`], since the
     /// event pass carries no clock — see `blink_reset_pending`.
     blink_epoch: FrameTime,
     /// Set when an edit/focus during the (clockless) event pass requests a blink
-    /// reset; the next paint records `blink_epoch` from `frame_time` and clears
+    /// reset; the next paint records `blink_epoch` from `input_time` and clears
     /// this. `true` initially so the first painted frame seeds the epoch.
     blink_reset_pending: bool,
     /// Resolved horizontal inner padding — see [`TextInputView::padding`].
@@ -1133,13 +1134,13 @@ pub struct TextInputWidget {
     /// Taken by that arm, and cleared by any blur, so it cannot go stale across
     /// a press that landed on a sibling and never reached this field at all.
     outside_press_dismissed: bool,
-    /// The last completed in-slop tap: where it was, and the frame time of the
+    /// The last completed in-slop tap: where it was, and the input time of the
     /// last paint before it (the event pass has no clock of its own). A press
     /// within [`DOUBLE_TAP_MS`] and [`TOUCH_SLOP`] of it is a double-tap.
     last_tap: Option<(Point, FrameTime)>,
-    /// The frame time of the most recent paint — the event pass's only clock,
+    /// The input time of the most recent paint — the event pass's only clock,
     /// and what both halves of `last_tap` are measured with.
-    last_frame_time: FrameTime,
+    last_input_time: FrameTime,
     on_change: crate::authoring::ErasedArgCallback<String>,
     on_submit: Option<crate::authoring::ErasedArgCallback<String>>,
 }
@@ -1436,12 +1437,12 @@ impl TextInputWidget {
 
     /// Reset the blink so the caret is visible from the next painted frame
     /// (called on any edit / focus, during the clockless event pass). The actual
-    /// epoch is recorded from `frame_time` on the next paint.
+    /// epoch is recorded from `input_time` on the next paint.
     fn reset_blink(&mut self) {
         self.blink_reset_pending = true;
     }
 
-    /// Whether the caret is in its visible half-cycle at frame time `now`, phase
+    /// Whether the caret is in its visible half-cycle at input time `now`, phase
     /// measured from `blink_epoch`.
     fn caret_visible_at(&self, now: FrameTime) -> bool {
         let elapsed_ms = now.saturating_sub(self.blink_epoch).as_secs_f64() * 1000.0;
@@ -1635,12 +1636,12 @@ impl TextInputWidget {
 
     /// Whether a press at `pos` continues the last tap into a double-tap:
     /// within [`TOUCH_SLOP`] of it and within [`DOUBLE_TAP_MS`] of when it
-    /// landed, both measured against the paint clock (`last_frame_time`),
+    /// landed, both measured against the paint clock (`last_input_time`),
     /// since the event pass carries none.
     fn is_double_tap(&self, pos: Point) -> bool {
         self.last_tap.is_some_and(|(prev, at)| {
             (pos - prev).hypot() <= TOUCH_SLOP
-                && self.last_frame_time.saturating_sub(at).as_secs_f64() * 1000.0 <= DOUBLE_TAP_MS
+                && self.last_input_time.saturating_sub(at).as_secs_f64() * 1000.0 <= DOUBLE_TAP_MS
         })
     }
 
@@ -2237,7 +2238,7 @@ impl<State: 'static> View<State> for TextInputView<State> {
             tap_in_selection: None,
             outside_press_dismissed: false,
             last_tap: None,
-            last_frame_time: FrameTime::ZERO,
+            last_input_time: FrameTime::ZERO,
             on_change: crate::authoring::erase_callback_arg(&self.on_change),
             on_submit: self
                 .on_submit
@@ -2478,9 +2479,9 @@ impl Widget for TextInputWidget {
         let reduce_motion = theme.map(|t| t.motion.reduce_motion).unwrap_or(false);
         let chrome = Chrome::resolve(theme, self.enabled);
 
-        // Record the blink epoch from the shared frame clock once per pending
+        // Record the blink epoch from the raw input clock once per pending
         // reset (a focus/edit flagged it during the clockless event pass).
-        let now = ctx.frame_time();
+        let now = ctx.input_time();
         if self.blink_reset_pending {
             self.blink_epoch = now;
             self.blink_reset_pending = false;
@@ -2488,7 +2489,7 @@ impl Widget for TextInputWidget {
         // The event pass has no clock of its own, so it reads the last painted
         // frame's — that is what dates a completed tap for the double-tap
         // window (see the module docs' "Selection gestures and the toolbar").
-        self.last_frame_time = now;
+        self.last_input_time = now;
 
         // The long-press timer, measured across paints exactly as
         // `crate::gesture`'s is: seed the epoch on the press's first painted
@@ -2521,7 +2522,7 @@ impl Widget for TextInputWidget {
         // that clock only advances while something is painting. While focused
         // the caret blink normally keeps it moving on its own — but
         // `reduce_motion` freezes the caret and drops its frame requests
-        // entirely, and an otherwise idle field then leaves `last_frame_time`
+        // entirely, and an otherwise idle field then leaves `last_input_time`
         // standing exactly where the completed tap dated itself. The window
         // would never elapse: a press arriving any amount of wall time later
         // would still measure zero and resolve as a double-tap.
@@ -2973,7 +2974,7 @@ impl Widget for TextInputWidget {
                         // a long-press resolved, are no longer taps
                         // (`Gesture::tap_point`) and seed nothing.
                         if let Some(down) = self.gesture.tap_point() {
-                            self.last_tap = Some((down, self.last_frame_time));
+                            self.last_tap = Some((down, self.last_input_time));
                         }
                     }
                     self.clear_gesture();
@@ -4127,6 +4128,34 @@ mod tests {
             None,
             "past DOUBLE_TAP_MS the press is just a press"
         );
+    }
+
+    #[test]
+    fn a_raw_double_tap_is_recognised_under_slow_motion() {
+        frust_core::anim::with_thread_animation_time_scale(0.25, || {
+            let mut state = AppState {
+                value: "hello world".to_string(),
+                ..Default::default()
+            };
+            let mut root = harness(&mut state);
+            root.paint(&mut NullScene, ft_ms(0.0));
+            tap(&mut root, &mut state, 20.0, 10.0);
+
+            // 1000 ms of raw time is 250 ms of animation time: dated off the
+            // animation clock, this late press would still read as a double tap.
+            root.paint(&mut NullScene, ft_ms(1000.0));
+            root.event(&mut state, &pointer(PointerPhase::Down, 21.0, 10.0));
+            assert_eq!(selection(&root), None, "a 1000 ms raw gap is two taps");
+            root.event(&mut state, &pointer(PointerPhase::Up, 21.0, 10.0));
+
+            root.paint(&mut NullScene, ft_ms(1250.0));
+            root.event(&mut state, &pointer(PointerPhase::Down, 21.0, 10.0));
+            assert_eq!(
+                selection(&root).as_deref(),
+                Some("hello"),
+                "a 250 ms raw double tap selects the word at any time scale"
+            );
+        });
     }
 
     #[test]

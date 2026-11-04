@@ -129,8 +129,7 @@ Contract*). `frust::authoring` is the toolkit both the baseline set and every pl
     `BackPolicy` — a `DismissAnimated` or `Veto` top page refuses to arm outright (arm-refusal, not a
     dismiss-signal bump) — and resolves the navigator-wide default by rank: page override
     (`PushOptions::pop_swipe`) > navigator explicit (`NavigatorView::pop_swipe`) > platform slot
-    (`platform_pop_swipe`) > preset default (on for `PageTransition::IosPush`, off otherwise); the facade
-    sets the platform slot from `cfg!(target_os = "ios")`. **R-B3-inner:** a left-edge `Down` does not
+    (`platform_pop_swipe`) > preset default (on for `PageTransition::IosPush`, off otherwise); under `reduce_motion` an armed swipe collapses to `ReducedCrossfade` on its first paint; the facade sets the platform slot from `cfg!(target_os = "ios")`. **R-B3-inner:** a left-edge `Down` does not
     capture, so a nested navigator underneath can arm too; the outer navigator only defers at the `Move`
     steal, after reading back the inner's claim — both navigators legitimately arm on `Down`.
   - **overlay_host() constructor:** A `NavigatorView` with pop_swipe disabled and no-op transition
@@ -274,8 +273,8 @@ Contract*). `frust::authoring` is the toolkit both the baseline set and every pl
 | `ColorScheme`, `TypeScale`, `ShapeScale`, `Elevation`, `MotionScheme`, `GlassScale`, `StatusPalette` | Individual token-group types composed into `Theme`; `frust-theme` ships only each one's `neutral()` floor — a design system assembles its own values via `ThemeBuilder`'s per-group editors |
 | `NativeTypefaces` / `FontFace` | A `ThemeExtensions` payload carrying a design system's own native-control font bytes (button/body face pair); no baseline `frust-theme` value attaches it — `frust-glyph::baseline()`, `frust-material::baseline()`, `frust-shadcn::theme()`, and `frust-beui::theme()` all do — see NATIVE_WIDGETS_ARCHITECTURE.md's theme ladder |
 | authoring module (`build_child`/`rebuild_child`/`teardown_child` generic over the child view, `rebuild_children`, `route_event`, `VisitPods`/`visit_children!`) | The sanctioned seam for authoring any widget against `frust-core`, including child-introspection |
-| `Navigator` / `Router` / `hero()` | Page-stack and declarative routing plus shared-element transitions |
-| `ButtonStyle`, `ScrollInfo`, `ScrollbarStyle`/`ScrollbarShow`, `IconData`/`IconSource`, `ImageSource`/`ImageFit` | Small per-widget config/state types shared across the baseline widget set (`ScrollbarShow`: `Never`, `WhileScrolling` — the default — `Hover`, `Always`) |
+| `Navigator` / `Router` / `hero()` | Page-stack and declarative routing plus shared-element transitions; a custom transition is authored through the facade's `Layer` + `resolve_layers` |
+| `ButtonStyle`, `ScrollInfo`, `ScrollbarStyle`/`ScrollbarShow`, `IconData`/`IconSource`/`StrokedIconSource`, `ImageSource`/`ImageFit` | Small per-widget config/state types shared across the baseline widget set (`ScrollbarShow`: `Never`, `WhileScrolling` — the default — `Hover`, `Always`); an icon is a filled `IconSource` or a stroked, multi-element `StrokedIconSource` (round caps/joins, scaled with the icon, inked in the resolved icon colour; `IconData::resolve` returns one fillable outline, each stroke expanded at 0.02 design units, which fill-only slots ink filled and ignore `stroke_width` overrides for) |
 | `ScrollController` / `ScrollSubscription` / `AnimateTo` / `ItemAlignment` | Programmatic-scroll handle for `ScrollView`/`ListView`, its `on_change` guard, the animate-to duration/curve, and the keyed-row landing alignment — see *Scroll Physics* and *Virtualized ListView* |
 | `ListView` / `ListViewWidget` | Baseline virtualized list: windowed rebuild-time materialization, positional or keyed (`ChildKey`) row identity, optional variable extents, refresh/overscroll parity with `ScrollView` |
 | `CustomScrollView` / `ViewportWidget` / `SliverBoxView` / `ScrollAxis` | Sliver viewport and its box adapter (`ViewportWidget`, `SliverBoxWidget` are frust-widgets-only); `ScrollAxis` is re-exported flat from frust-widgets and the facade |

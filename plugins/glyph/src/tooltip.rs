@@ -366,7 +366,20 @@ impl TooltipWidget {
     /// `Hidden`). Factored out of `paint` so the full press -> enter -> exit
     /// timeline is drivable with synthetic `FrameTime`s in a unit test
     /// (mirrors `ToastHostWidget::advance`'s rationale).
+    #[cfg(test)]
     fn advance(&mut self, now: FrameTime, enter: Timing, exit: Timing) -> f64 {
+        self.advance_at(now, now, enter, exit)
+    }
+
+    /// [`Self::advance`] with the long-press hold timed on `input_now` (the raw
+    /// shell clock) and the enter/exit fade on `now` (the animation clock).
+    fn advance_at(
+        &mut self,
+        input_now: FrameTime,
+        now: FrameTime,
+        enter: Timing,
+        exit: Timing,
+    ) -> f64 {
         if let PressState::Pressed {
             press_start,
             elapsed,
@@ -374,8 +387,8 @@ impl TooltipWidget {
         } = &mut self.press
             && !*elapsed
         {
-            let start = *press_start.get_or_insert(now);
-            if now.saturating_sub(start).as_secs_f64() * 1000.0 >= LONG_PRESS_MS {
+            let start = *press_start.get_or_insert(input_now);
+            if input_now.saturating_sub(start).as_secs_f64() * 1000.0 >= LONG_PRESS_MS {
                 *elapsed = true;
                 if self.phase == TooltipPhase::Hidden {
                     self.phase = TooltipPhase::Entering;
@@ -476,7 +489,7 @@ impl Widget for TooltipWidget {
         let radius = theme.map(|t| t.shape.small).unwrap_or(FALLBACK_RADIUS);
         let now = ctx.frame_time();
 
-        let alpha = self.advance(now, enter, exit);
+        let alpha = self.advance_at(ctx.input_time(), now, enter, exit);
         self.paint_bubble(ctx, scene, alpha as f32, &ink, radius);
 
         let waiting_on_timer = matches!(self.press, PressState::Pressed { elapsed: false, .. });

@@ -336,6 +336,9 @@ impl<B: DevtoolsBackend> DevtoolsBackend for SharedBackend<B> {
     fn inject_text(&self, text: &str) -> Result<(), crate::BackendError> {
         self.lock().inject_text(text)
     }
+    fn set_animation_time_scale(&self, scale: f64) -> Result<(), crate::BackendError> {
+        self.lock().set_animation_time_scale(scale)
+    }
     fn screenshot(&self) -> Result<frust_devtools_protocol::ScreenshotResult, crate::BackendError> {
         self.lock().screenshot()
     }
@@ -579,6 +582,55 @@ mod tests {
         fn inject_text(&self, _t: &str) -> Result<(), crate::BackendError> {
             Ok(())
         }
+    }
+
+    /// A backend that records the animation time scale it was asked to set.
+    #[cfg(feature = "hotpatch")]
+    struct RecordsScale(Arc<std::sync::Mutex<Vec<f64>>>);
+
+    #[cfg(feature = "hotpatch")]
+    impl DevtoolsBackend for RecordsScale {
+        fn widget_tree(&self) -> WidgetTreeDump {
+            WidgetTreeDump { roots: Vec::new() }
+        }
+        fn widget_props(&self, _id: u64) -> Option<WidgetProps> {
+            None
+        }
+        fn metrics_snapshot(&self) -> MetricsSnapshot {
+            MetricsSnapshot {
+                rss_bytes: None,
+                uptime_ms: 0,
+            }
+        }
+        fn inject_tap(&self, _p: InputTapParams) -> Result<(), crate::BackendError> {
+            Ok(())
+        }
+        fn inject_scroll(&self, _p: InputScrollParams) -> Result<(), crate::BackendError> {
+            Ok(())
+        }
+        fn inject_text(&self, _t: &str) -> Result<(), crate::BackendError> {
+            Ok(())
+        }
+        fn set_animation_time_scale(&self, scale: f64) -> Result<(), crate::BackendError> {
+            self.0.lock().unwrap().push(scale);
+            Ok(())
+        }
+    }
+
+    #[cfg(feature = "hotpatch")]
+    #[test]
+    fn a_shared_backend_forwards_set_animation_time_scale_to_the_wrapped_backend() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let shared = SharedBackend::new(RecordsScale(seen.clone()));
+        assert_eq!(shared.set_animation_time_scale(0.5), Ok(()));
+        assert_eq!(*seen.lock().unwrap(), vec![0.5]);
+        // A backend that does not override it still answers NotSupported
+        // through the wrapper rather than the wrapper swallowing the default.
+        let plain = SharedBackend::new(OffersHotPatch);
+        assert!(matches!(
+            plain.set_animation_time_scale(1.0),
+            Err(crate::BackendError::NotSupported(_))
+        ));
     }
 
     /// The capability set a real client reads at handshake from a service over

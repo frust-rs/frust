@@ -105,13 +105,10 @@ use frust_devtools::{AppInfo, BackendError, DevtoolsBackend, Service, ServiceHan
 #[cfg(all(feature = "hotpatch", unix))]
 use frust_devtools_protocol::PatchFile;
 #[cfg(feature = "hotpatch")]
+use frust_devtools_protocol::{ApplyPatchParams, HotpatchInfo, PatchChunkParams, PatchOutcome};
 use frust_devtools_protocol::{
-    ApplyPatchParams, Capability, HandshakeInfo, HotpatchInfo, PROTOCOL_VERSION, PatchChunkParams,
-    PatchOutcome,
-};
-use frust_devtools_protocol::{
-    FrameStats, InputScrollParams, InputTapParams, MetricsSnapshot, RectPx, WidgetNode,
-    WidgetProps, WidgetTreeDump,
+    Capability, FrameStats, HandshakeInfo, InputScrollParams, InputTapParams, MetricsSnapshot,
+    PROTOCOL_VERSION, RectPx, WidgetNode, WidgetProps, WidgetTreeDump,
 };
 use kurbo::Point;
 
@@ -519,21 +516,25 @@ impl ShellBackend {
 }
 
 impl DevtoolsBackend for ShellBackend {
-    /// The default capability set plus [`Capability::HotPatch`]; the service
-    /// strips it again unless every precondition holds.
-    #[cfg(feature = "hotpatch")]
+    /// The default capability set plus [`Capability::AnimationTimeScale`],
+    /// and under the `hotpatch` feature [`Capability::HotPatch`]; the service
+    /// strips the latter again unless every precondition holds.
     fn handshake_info(&self, app: &AppInfo) -> HandshakeInfo {
+        #[cfg_attr(not(feature = "hotpatch"), allow(unused_mut))]
+        let mut capabilities = vec![
+            Capability::WidgetTree,
+            Capability::FrameStats,
+            Capability::Input,
+            Capability::Metrics,
+            Capability::AnimationTimeScale,
+        ];
+        #[cfg(feature = "hotpatch")]
+        capabilities.push(Capability::HotPatch);
         HandshakeInfo {
             app_name: app.app_name.clone(),
             frust_version: app.frust_version.clone(),
             protocol_version: PROTOCOL_VERSION,
-            capabilities: vec![
-                Capability::WidgetTree,
-                Capability::FrameStats,
-                Capability::Input,
-                Capability::Metrics,
-                Capability::HotPatch,
-            ],
+            capabilities,
         }
     }
 
@@ -699,6 +700,19 @@ impl DevtoolsBackend for ShellBackend {
             position,
             delta: ScrollDelta::Pixels(params.dx, params.dy),
         }])
+    }
+
+    /// An atomic store in `frust-core`, so no UI-thread hop is needed.
+    fn set_animation_time_scale(&self, scale: f64) -> Result<(), BackendError> {
+        if frust_core::set_animation_time_scale(scale) {
+            Ok(())
+        } else {
+            Err(BackendError::invalid_request(format!(
+                "animation time scale must be finite and within {}..={}, got {scale}",
+                frust_core::MIN_ANIMATION_TIME_SCALE,
+                frust_core::MAX_ANIMATION_TIME_SCALE,
+            )))
+        }
     }
 
     fn inject_text(&self, text: &str) -> Result<(), BackendError> {
@@ -1498,6 +1512,65 @@ mod tests {
         pump(&mut NoUi);
     }
 
+    /// The animation time scale is process-wide: a test that changes it holds
+    /// this lock and restores 1.0 (via [`RestoreScale`]) before releasing it.
+    static SCALE_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Restores the neutral scale on drop, so a failing assertion still does.
+    struct RestoreScale;
+
+    impl Drop for RestoreScale {
+        fn drop(&mut self) {
+            assert!(frust_core::set_animation_time_scale(1.0));
+        }
+    }
+
+    fn plain_backend() -> ShellBackend {
+        ShellBackend {
+            bridge: Arc::new(Bridge {
+                queue: Mutex::new(VecDeque::new()),
+                wake: None,
+            }),
+            started: Instant::now(),
+            #[cfg(feature = "hotpatch")]
+            hot: HotState::default(),
+        }
+    }
+
+    #[test]
+    fn set_animation_time_scale_updates_the_core_scale() {
+        let _lock = SCALE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _restore = RestoreScale;
+        let backend = plain_backend();
+
+        assert_eq!(backend.set_animation_time_scale(0.5), Ok(()));
+        assert_eq!(frust_core::animation_time_scale(), 0.5);
+
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY, 1.0e6] {
+            assert!(
+                matches!(
+                    backend.set_animation_time_scale(bad),
+                    Err(BackendError::InvalidRequest(_))
+                ),
+                "{bad} must be rejected"
+            );
+            assert_eq!(frust_core::animation_time_scale(), 0.5, "{bad} left it");
+        }
+    }
+
+    #[test]
+    fn the_handshake_advertises_the_animation_time_scale_capability() {
+        let info = plain_backend().handshake_info(&AppInfo::new("a", "0"));
+        assert!(info.capabilities.contains(&Capability::AnimationTimeScale));
+        assert!(info.capabilities.contains(&Capability::WidgetTree));
+        assert_eq!(
+            info.capabilities.contains(&Capability::HotPatch),
+            cfg!(feature = "hotpatch")
+        );
+    }
+
     #[cfg(feature = "hotpatch")]
     mod hot {
         use super::*;
@@ -1612,6 +1685,7 @@ mod tests {
         fn the_shell_backend_offers_hot_patch() {
             let info = backend(&scratch("offer")).handshake_info(&AppInfo::new("a", "0"));
             assert!(info.capabilities.contains(&Capability::HotPatch));
+            assert!(info.capabilities.contains(&Capability::AnimationTimeScale));
             assert!(info.capabilities.contains(&Capability::WidgetTree));
         }
 
