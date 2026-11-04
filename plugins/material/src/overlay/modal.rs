@@ -1318,6 +1318,9 @@ pub struct OverlayModalWidget {
     /// The drag's resting points, as authored (see
     /// [`OverlayModalView::snap_points`]).
     snap_points: Vec<f64>,
+    /// `snap_points` as the shared detent math, rebuilt only where
+    /// `snap_points` changes (build and rebuild), never per pointer move.
+    detents: Detents,
     /// The panel rect in the widget's own coordinate space (computed at layout,
     /// hit-tested at event time).
     panel: Rect,
@@ -1452,8 +1455,8 @@ impl OverlayModalWidget {
     /// The authored snap points as the shared [`Detents`] math, which owns
     /// normalization, the resting-point set, the drag bound, the release
     /// choice and the closed-landing decision.
-    fn detents(&self) -> Detents {
-        Detents::new(&self.snap_points)
+    fn detents(&self) -> &Detents {
+        &self.detents
     }
 
     /// The panel's extent along its own slide axis (its thickness).
@@ -1868,7 +1871,7 @@ impl OverlayModalWidget {
         let policy = if self.can_dismiss() {
             DismissPolicy::Dismissable
         } else {
-            DismissPolicy::SpringBackTo
+            DismissPolicy::SpringBack
         };
         match self.detents().settle(target, policy, self.extent()) {
             DetentRelease::Dismiss => self.request_dismiss(ctx),
@@ -1904,6 +1907,7 @@ impl<State: 'static> View<State> for OverlayModalView<State> {
             dismiss_handle: self.dismiss_handle.clone(),
             pending_result: None,
             snap_points: self.snap_points.clone(),
+            detents: Detents::new(&self.snap_points),
             panel: Rect::ZERO,
             anim: AnimationController::new(self.config.entrance.duration())
                 .with_curve(self.config.entrance.curve(false)),
@@ -1952,6 +1956,7 @@ impl<State: 'static> View<State> for OverlayModalView<State> {
         }
         if element.snap_points != self.snap_points {
             element.snap_points = self.snap_points.clone();
+            element.detents = Detents::new(&self.snap_points);
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
         // The app's dismiss handle follows the view whenever the view still
@@ -4952,6 +4957,107 @@ mod tests {
             1,
             "the barrier settled and fired on_close, not left stuck open"
         );
+    }
+
+    /// Press, then move `travel` px along the slide axis, through the widget's
+    /// own drag hooks rather than a hit test (an unmeasured panel has no rect).
+    fn drag_directly(w: &mut OverlayModalWidget, state: &mut Flags, travel: f64) {
+        let state_any: &mut dyn Any = state;
+        let mut ctx = EventCtx::new(state_any, Point::ZERO, WINDOW);
+        w.begin_drag(&mut ctx, Point::new(10.0, 10.0), true);
+        w.drag_move(&mut ctx, Point::new(10.0 + travel, 10.0 + travel));
+    }
+
+    #[test]
+    fn a_non_dismissable_sheet_released_near_closed_springs_back_to_its_first_detent() {
+        let mut w = build(
+            &overlay_modal(Block(Size::new(200.0, 120.0)), sheet_config()).snap_points(&[0.5, 1.0]),
+        );
+        layout(&mut w);
+        run_ramp(&mut w, 0.0);
+        assert!((w.progress() - 0.5).abs() < 1e-9, "{}", w.progress());
+        let extent = w.panel_rect().height();
+        let start = w.handle_rect().unwrap().center();
+        let mut state = Flags::default();
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Down, start.x, start.y),
+        );
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Move, start.x, start.y + extent * 0.45),
+        );
+        assert!((w.progress() - 0.05).abs() < 1e-9, "{}", w.progress());
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Up, start.x, start.y + extent * 0.45),
+        );
+        run_ramp(&mut w, 3000.0);
+        assert!(
+            (w.progress() - 0.5).abs() < 1e-9,
+            "back to the first detent, 0.5: {}",
+            w.progress()
+        );
+        assert!(!w.is_exiting());
+        assert_eq!(state.dismissed, 0);
+    }
+
+    #[test]
+    fn a_dismissable_sheet_released_closed_dismisses() {
+        let (view, closed) = staged(sheet_config());
+        let mut w = build(&view.snap_points(&[0.5, 1.0]));
+        layout(&mut w);
+        run_ramp(&mut w, 0.0);
+        let extent = w.panel_rect().height();
+        let start = w.handle_rect().unwrap().center();
+        let mut state = Flags::default();
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Down, start.x, start.y),
+        );
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Move, start.x, start.y + extent * 0.8),
+        );
+        assert_eq!(w.progress(), 0.0, "the drag is bounded at closed");
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Up, start.x, start.y + extent * 0.8),
+        );
+        run_ramp(&mut w, 3000.0);
+        assert_eq!(closed.get(), 1, "a closed landing dismisses");
+        assert_eq!(w.progress(), 0.0);
+    }
+
+    #[test]
+    fn drag_move_with_a_zero_or_unmeasured_extent_is_a_no_op() {
+        let mut state = Flags::default();
+        // Unmeasured: never laid out, so the panel and its extent are zero.
+        let mut w = build(&view(settled(sheet_config())));
+        assert_eq!(w.extent(), 0.0);
+        drag_directly(&mut w, &mut state, 100.0);
+        assert!(w.drag_moved, "the move passed the slop");
+        assert_eq!(w.progress(), 1.0);
+        assert_eq!(w.panel_rect(), Rect::ZERO);
+
+        // Zero: a centred panel has no slide axis.
+        let mut w = build(&view(settled(
+            OverlayModalConfig::centered(OVERLAY_DIALOG_MAX_WIDTH).drag(true),
+        )));
+        layout(&mut w);
+        let panel = w.panel_rect();
+        assert_eq!(w.extent(), 0.0);
+        drag_directly(&mut w, &mut state, 100.0);
+        assert!(w.drag_moved);
+        assert_eq!(w.progress(), 1.0);
+        assert_eq!(w.panel_rect(), panel);
+        assert_eq!(state.dismissed, 0);
     }
 
     // ---- semantics ----------------------------------------------------------

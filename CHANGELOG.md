@@ -11,7 +11,9 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 - `frust::motion::detent` (flat in `frust::motion`): `Detents`, pure NaN-safe snap-point math
   (`open_progress`, `drag_to`, `release_target`, `settle` returning `DetentRelease` under a
   `DismissPolicy`), and the headless `DetentController` (interruptible drag; a release hands the
-  fling velocity to `spring_to_with_velocity`).
+  fling velocity to `spring_to_with_velocity`; `with_fling_velocity(f64)` sets the fling speed,
+  defaulting to `DEFAULT_FLING_VELOCITY`). `DismissPolicy::SpringBack` snaps back to open; on
+  `Dismiss` the controller stops and holds progress, and the caller owns the exit animation.
 - Stroked icons: `IconShape` (`Path`/`Circle`/`Rect`), `IconPaint` (`Stroke` default, `Fill`),
   `IconElement` (const `stroke`/`fill`) and `StrokedIconSource { elements, design, stroke_width }`,
   converted to `IconData` by `From<StrokedIconSource>` or `IconData::from_elements`;
@@ -138,8 +140,10 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 ### Changed
 
 - The Material and shadcn overlay modals compute open progress, the drag clamp, the release target
-  and the settle decision through `Detents`; behaviour is unchanged, and their public fling-velocity
-  constants now equal `DEFAULT_FLING_VELOCITY`.
+  and the settle decision through `Detents`; behaviour is unchanged for finite snap points, and their
+  public fling-velocity constants now equal `DEFAULT_FLING_VELOCITY`. The shadcn modal now drops
+  non-finite snap points, as Material already did, which fixes a possible drag panic, and a
+  non-finite settle target snaps to the open detent.
 - Catalog tooltips (material, glyph, shadcn), the material selection and toggle-button long-press latches
   and the shadcn OTP caret blink time input on the raw clock (`input_time()`), so they ignore the
   animation time scale.

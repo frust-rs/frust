@@ -615,6 +615,9 @@ impl<State: 'static> ModalView<State> {
     /// a first point of `0.0` itself, which [`ModalWidget::open_progress`]
     /// treats as absent (fully open) rather than authoring a panel that
     /// opens already closed.
+    ///
+    /// A non-finite point (NaN or infinite) is dropped by the shared detent
+    /// math, as if it were never passed: `&[f64::NAN, 0.5]` opens at `0.5`.
     pub fn snap_points(mut self, points: &[f64]) -> Self {
         self.snap_points = points.to_vec();
         self
@@ -830,6 +833,9 @@ pub struct ModalWidget {
     on_close: Option<OnClose>,
     /// The drawer's resting points, as authored (see [`ModalView::snap_points`]).
     snap_points: Vec<f64>,
+    /// `snap_points` as the shared detent math, rebuilt only where
+    /// `snap_points` changes (build and rebuild), never per pointer move.
+    detents: Detents,
     /// The panel rect in the widget's own coordinate space (computed at layout,
     /// hit-tested at event time).
     panel: Rect,
@@ -928,14 +934,15 @@ impl ModalWidget {
     /// non-dismissable panel. There is no fallible surface here
     /// ([`ModalView::snap_points`] is a plain builder call), so an
     /// unreachable configuration silently falls back to fully open instead
-    /// of panicking.
+    /// of panicking. A non-finite authored point is dropped first, so it is
+    /// never the first point.
     pub fn open_progress(&self) -> f64 {
         self.detents().open_progress(self.extent())
     }
 
     /// The authored snap points as the shared detent math.
-    fn detents(&self) -> Detents {
-        Detents::new(&self.snap_points)
+    fn detents(&self) -> &Detents {
+        &self.detents
     }
 
     /// The panel's extent along its own slide axis (its thickness).
@@ -1137,7 +1144,7 @@ impl ModalWidget {
         let policy = if self.dismissable() {
             DismissPolicy::Dismissable
         } else {
-            DismissPolicy::SpringBackTo
+            DismissPolicy::SpringBack
         };
         match self.detents().settle(target, policy, self.extent()) {
             DetentRelease::Dismiss => self.request_dismiss(ctx),
@@ -1172,6 +1179,7 @@ impl<State: 'static> View<State> for ModalView<State> {
             on_dismiss: self.on_dismiss.as_ref().map(erase_callback),
             on_close: self.on_close.clone(),
             snap_points: self.snap_points.clone(),
+            detents: Detents::new(&self.snap_points),
             panel: Rect::ZERO,
             anim: AnimationController::new(self.config.entrance.duration())
                 .with_curve(self.config.entrance.curve()),
@@ -1216,6 +1224,7 @@ impl<State: 'static> View<State> for ModalView<State> {
         }
         if element.snap_points != self.snap_points {
             element.snap_points = self.snap_points.clone();
+            element.detents = Detents::new(&self.snap_points);
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
         // `on_dismiss` is reinstalled unconditionally (cheap — closures
@@ -2891,6 +2900,140 @@ pub(crate) mod tests {
             );
         }
         assert_eq!(w.open_progress(), detents.open_progress(w.extent()));
+    }
+
+    /// Press, then move `travel` px along the slide axis, through the widget's
+    /// own drag hooks rather than a hit test (an unmeasured panel has no rect).
+    fn drag_directly(w: &mut ModalWidget, state: &mut Flags, travel: f64) {
+        let state_any: &mut dyn Any = state;
+        let mut ctx = EventCtx::new(state_any, Point::ZERO, WINDOW);
+        w.begin_drag(&mut ctx, Point::new(10.0, 10.0), true);
+        w.drag_move(&mut ctx, Point::new(10.0 + travel, 10.0 + travel));
+    }
+
+    #[test]
+    fn a_non_dismissable_drawer_released_near_closed_springs_back_to_its_first_detent() {
+        let mut w =
+            build(&modal(Block(Size::new(200.0, 120.0)), drawer_config()).snap_points(&[0.5, 1.0]));
+        layout(&mut w);
+        run_ramp(&mut w, 0.0);
+        assert!((w.progress() - 0.5).abs() < 1e-9, "{}", w.progress());
+        let extent = w.panel_rect().height();
+        let start = w.handle_rect().unwrap().center();
+        let mut state = Flags::default();
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Down, start.x, start.y),
+        );
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Move, start.x, start.y + extent * 0.45),
+        );
+        assert!((w.progress() - 0.05).abs() < 1e-9, "{}", w.progress());
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Up, start.x, start.y + extent * 0.45),
+        );
+        run_ramp(&mut w, 3000.0);
+        assert!(
+            (w.progress() - 0.5).abs() < 1e-9,
+            "back to the first detent, 0.5: {}",
+            w.progress()
+        );
+        assert!(!w.is_exiting());
+        assert_eq!(state.dismissed, 0);
+    }
+
+    #[test]
+    fn a_dismissable_drawer_released_closed_dismisses() {
+        let (view, closed) = staged(drawer_config());
+        let mut w = build(&view.snap_points(&[0.5, 1.0]));
+        layout(&mut w);
+        run_ramp(&mut w, 0.0);
+        let extent = w.panel_rect().height();
+        let start = w.handle_rect().unwrap().center();
+        let mut state = Flags::default();
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Down, start.x, start.y),
+        );
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Move, start.x, start.y + extent * 0.8),
+        );
+        assert_eq!(w.progress(), 0.0, "the drag is bounded at closed");
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Up, start.x, start.y + extent * 0.8),
+        );
+        run_ramp(&mut w, 3000.0);
+        assert_eq!(closed.get(), 1, "a closed landing dismisses");
+        assert_eq!(w.progress(), 0.0);
+    }
+
+    #[test]
+    fn drag_move_with_a_zero_or_unmeasured_extent_is_a_no_op() {
+        let mut state = Flags::default();
+        // Unmeasured: never laid out, so the panel and its extent are zero.
+        let mut w = build(&view(settled(drawer_config())));
+        assert_eq!(w.extent(), 0.0);
+        drag_directly(&mut w, &mut state, 100.0);
+        assert!(w.drag_moved, "the move passed the slop");
+        assert_eq!(w.progress(), 1.0);
+        assert_eq!(w.panel_rect(), Rect::ZERO);
+
+        // Zero: a centred panel has no slide axis.
+        let mut w = build(&view(settled(
+            ModalConfig::centered(MAX_WIDTH_LG).drag(true),
+        )));
+        layout(&mut w);
+        let panel = w.panel_rect();
+        assert_eq!(w.extent(), 0.0);
+        drag_directly(&mut w, &mut state, 100.0);
+        assert!(w.drag_moved);
+        assert_eq!(w.progress(), 1.0);
+        assert_eq!(w.panel_rect(), panel);
+        assert_eq!(state.dismissed, 0);
+    }
+
+    #[test]
+    fn non_finite_snap_points_are_dropped_and_do_not_panic() {
+        let (view, closed) = staged(drawer_config());
+        let mut w = build(&view.snap_points(&[f64::NAN, 0.5]));
+        assert_eq!(w.detents().points(), &[0.5]);
+        layout(&mut w);
+        run_ramp(&mut w, 0.0);
+        assert_eq!(w.open_progress(), 0.5);
+        assert!((w.progress() - 0.5).abs() < 1e-9, "{}", w.progress());
+
+        let extent = w.panel_rect().height();
+        let start = w.handle_rect().unwrap().center();
+        let mut state = Flags::default();
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Down, start.x, start.y),
+        );
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Move, start.x, start.y + extent * 0.2),
+        );
+        assert!((w.progress() - 0.3).abs() < 1e-9, "{}", w.progress());
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Up, start.x, start.y + extent * 0.2),
+        );
+        run_ramp(&mut w, 3000.0);
+        assert!((w.progress() - 0.5).abs() < 1e-9, "{}", w.progress());
+        assert_eq!(closed.get(), 0);
     }
 
     #[test]
