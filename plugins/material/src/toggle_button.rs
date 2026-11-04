@@ -1624,8 +1624,9 @@ impl Widget for ToggleButtonWidget {
         // clock. See the [module docs](self)' Long-press section.
         if self.enabled && self.captured && self.on_long_press.is_some() && !self.long_press.elapsed
         {
-            let start = *self.long_press.press_start.get_or_insert(ctx.frame_time());
-            let elapsed_ms = ctx.frame_time().saturating_sub(start).as_secs_f64() * 1000.0;
+            let now = ctx.input_time();
+            let start = *self.long_press.press_start.get_or_insert(now);
+            let elapsed_ms = now.saturating_sub(start).as_secs_f64() * 1000.0;
             if elapsed_ms >= LONG_PRESS_MS {
                 self.long_press.elapsed = true;
             } else {

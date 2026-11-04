@@ -405,7 +405,8 @@ impl Widget for TooltipTriggerWidget {
             // Focus opens a tooltip too (Radix's `focus` trigger), and the panel
             // keeps it open while the pointer is over it.
             let active = self.hovered || ctx.has_focus() || self.hover.over_panel();
-            let now = ctx.frame_time();
+            // Open and close delays time input, so they read the raw clock.
+            let now = ctx.input_time();
             let previous = self.phase;
             self.phase = match (self.phase, active) {
                 (HoverPhase::Idle, true) => HoverPhase::Opening(now),

@@ -589,7 +589,9 @@ impl Widget for InputOtpWidget {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
-        let now = ctx.frame_time();
+        // The blink is an input timer: raw clock, so it keeps wall-time pace
+        // under a slowed animation clock.
+        let now = ctx.input_time();
         if self.blink_reset_pending {
             self.blink_epoch = now;
             self.blink_reset_pending = false;
@@ -1735,6 +1737,27 @@ mod tests {
         let mut disabled = Harness::themed(true, "12", crate::theme());
         disabled.focus();
         assert!(disabled.frame(0.0).caret().is_none());
+    }
+
+    #[test]
+    fn input_otp_caret_blinks_on_wall_time_under_slow_motion() {
+        // At quarter speed the half period of raw time is an eighth of the
+        // period on the animation clock: a blink read off that clock would
+        // still be lit.
+        frust_core::anim::with_thread_animation_time_scale(0.25, || {
+            let mut h = Harness::themed(false, "12", crate::theme());
+            h.focus();
+            assert!(h.frame(0.0).caret().is_some());
+            let half = INPUT_OTP_BLINK_MS as f64 / 2.0;
+            assert!(
+                h.frame(half + 1.0).caret().is_none(),
+                "the caret goes dark on raw time"
+            );
+            assert!(
+                h.frame(INPUT_OTP_BLINK_MS as f64 + 1.0).caret().is_some(),
+                "and lit again a raw period later"
+            );
+        });
     }
 
     #[test]
