@@ -18,6 +18,8 @@
 //!   [`crate::Timing`] override.
 //! * [`card_switcher`] — [`CardSwitcherView`], an app-switcher stage: the live
 //!   page shrinks into a rounded card over a scrim, with peer cards and slots.
+//! * [`detent`] — [`Detents`], snap-point math for draggable sheets and
+//!   drawers, and [`DetentController`], a headless drag-and-settle driver.
 //! * [`switcher`] — [`switcher::PatternSwitcher`], a cross-fading
 //!   child-switch wrapper (Flutter's `AnimatedSwitcher`).
 //! * [`patterns`] — higher-level motion patterns (e.g. staggered reveals)
@@ -38,6 +40,7 @@
 
 pub mod animated;
 pub mod card_switcher;
+pub mod detent;
 pub mod patterns;
 pub mod presence;
 pub mod switcher;
@@ -49,6 +52,7 @@ pub use animated::{
 pub use card_switcher::{
     CardSwitcher, CardSwitcherView, CardSwitcherWidget, PeerCard, card_switcher, peer_card,
 };
+pub use detent::{DetentController, DetentRelease, Detents, DismissPolicy};
 pub use presence::{
     Presence, PresencePhase, PresenceSample, PresenceView, PresenceWidget, presence,
 };
