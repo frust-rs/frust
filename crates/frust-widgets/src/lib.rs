@@ -244,7 +244,7 @@ pub mod test_support {
     /// `frust-text`'s one lock over the process-global default-locale slot, so every crate in a
     /// test binary serialises on the same lock: a test that writes the slot, or asserts the
     /// shape/rebuild counts it steers, holds it (`set`/`hold`); its drop restores the prior value.
-    pub use frust_text::locale::test_support::LocaleSlotGuard;
+    pub use frust_text::test_support::LocaleSlotGuard;
 
     /// A leaf view of fixed intrinsic size that fills a rect on paint.
     pub struct Leaf {

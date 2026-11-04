@@ -19,7 +19,7 @@ mod context;
 mod convert;
 mod editor;
 mod layout;
-pub mod locale;
+mod locale;
 mod oracle;
 mod shape;
 mod shape_cache;
@@ -31,6 +31,9 @@ pub use editor::{
     utf16_to_byte,
 };
 pub use layout::TextLayout;
+/// The shared lock over the default-locale slot for tests (`test-support` feature).
+#[cfg(any(test, feature = "test-support"))]
+pub use locale::test_support;
 pub use locale::{LocaleStamp, default_locale, default_locale_generation, set_default_locale};
 pub use oracle::RenderCapabilities;
 pub use oracle::cache::FontCacheStats;
