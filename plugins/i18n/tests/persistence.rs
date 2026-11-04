@@ -101,15 +101,39 @@ mod enabled {
         again.clear_persisted_locale();
     }
 
+    /// A plain handle is built next to a persistence-backed one over a store
+    /// that already holds a choice. Driving the plain handle (both
+    /// constructors, switch and clear) must leave that store exactly as it
+    /// was, and must not disturb the backed handle's own saves.
     #[test]
-    fn a_plain_handle_never_touches_the_store() {
+    fn a_plain_handle_leaves_a_store_a_persisted_handle_uses_untouched() {
         let owner = Owner::new();
         owner.set();
-        let prefs = prefs();
+        let shared = prefs();
+
+        let backed =
+            I18n::with_persistence(set(), &[locale("en")], shared.clone()).expect("builds");
+        backed.set_locale(locale("de"));
+        assert_eq!(persisted_locale(&shared), Some(locale("de")));
 
         let plain = I18n::new(set(), &[locale("en")]).expect("builds");
-        plain.set_locale(locale("de"));
-        plain.clear_persisted_locale();
-        assert_eq!(persisted_locale(&prefs), None);
+        let from_engine = I18n::from_engine(
+            frust_i18n::Engine::new(set()).expect("engine"),
+            &[locale("en")],
+        );
+        for handle in [&plain, &from_engine] {
+            handle.set_locale(locale("en"));
+            assert_eq!(handle.locale().to_string(), "en");
+            handle.clear_persisted_locale();
+            assert_eq!(
+                persisted_locale(&shared),
+                Some(locale("de")),
+                "a plain handle must not write or clear the saved locale"
+            );
+        }
+
+        // The backed handle still owns the store.
+        backed.set_locale(locale("en"));
+        assert_eq!(persisted_locale(&shared), Some(locale("en")));
     }
 }
