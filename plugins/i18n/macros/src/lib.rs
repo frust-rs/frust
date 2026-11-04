@@ -358,8 +358,11 @@ mod tests {
         // Rebuild tracking: two locales, one `.ftl` file each, so editing
         // either re-triggers compilation and re-runs the syntax check.
         assert_eq!(output.matches("include_str !").count(), 2, "{output}");
+        // The rendered literal escapes a Windows backslash; compare on `/`.
         assert!(
-            output.contains("tests/fixtures/valid/en/app.ftl"),
+            output
+                .replace("\\\\", "/")
+                .contains("tests/fixtures/valid/en/app.ftl"),
             "{output}"
         );
     }

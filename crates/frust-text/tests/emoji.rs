@@ -21,9 +21,65 @@
 //! emoji table format Android system fonts typically use) has **not** been
 //! verified on-device — that remains a device-truth item.
 
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use frust_text::{FontFamily, TextContext, TextStyle};
 use kurbo::Point;
 use peniko::Color;
+
+/// Skips announced so far; a test that cannot run bumps it instead of passing silently.
+static SKIPS: AtomicUsize = AtomicUsize::new(0);
+
+/// How many tests skipped for a missing host precondition.
+fn skips() -> usize {
+    SKIPS.load(Ordering::SeqCst)
+}
+
+/// The mixed text and emoji string the system-fallback test shapes, and the
+/// precondition probe shapes the same one.
+const MIXED: &str = "hi \u{1F44D}\u{1F3FD} \u{1F389}";
+
+/// The missing precondition of the system-fallback test, else `None`: a host emoji
+/// font resolves the emoji in [`MIXED`] to a face other than the plain-text one.
+/// A missing baseline text run is itself a missing precondition. Probed once.
+fn missing_precondition() -> Option<String> {
+    static CHECK: OnceLock<Option<String>> = OnceLock::new();
+    CHECK
+        .get_or_init(|| {
+            let mut cx = TextContext::new();
+            let text_runs = cx
+                .layout("hi", &style(24.0), None)
+                .to_scene_runs(Point::ORIGIN);
+            let Some(first) = text_runs.first() else {
+                return Some("no glyph run for the plain-text baseline \"hi\"".to_string());
+            };
+            let text_font = first.font.font().clone();
+            let runs = cx
+                .layout(MIXED, &style(24.0), None)
+                .to_scene_runs(Point::ORIGIN);
+            let found = runs.iter().any(|run| *run.font.font() != text_font);
+            (!found).then(|| {
+                "no host emoji font resolves the emoji in the mixed test string".to_string()
+            })
+        })
+        .clone()
+}
+
+/// True when the host has what `test` needs; otherwise prints one counted
+/// `SKIPPED (n)` line naming the missing precondition and returns false.
+/// macOS always ships Apple Color Emoji, so a missing precondition there fails.
+fn host_ready(test: &str) -> bool {
+    let Some(missing) = missing_precondition() else {
+        return true;
+    };
+    if cfg!(target_os = "macos") {
+        panic!("{test}: macOS must resolve a host emoji font, but: {missing}");
+    }
+    let n = SKIPS.fetch_add(1, Ordering::SeqCst) + 1;
+    println!("SKIPPED ({n}): {test}: {missing}");
+    false
+}
 
 fn style(size: f32) -> TextStyle {
     TextStyle::new(size, Color::BLACK)
@@ -55,6 +111,9 @@ const NOTDEF_GLYPH_ID: u32 = 0;
 /// codepoint.
 #[test]
 fn emoji_cluster_engages_fallback_font_with_real_glyphs() {
+    if !host_ready("emoji_cluster_engages_fallback_font_with_real_glyphs") {
+        return;
+    }
     let mut cx = TextContext::new();
 
     // Baseline: the font resolved for plain ASCII text, no emoji involved.
@@ -70,24 +129,18 @@ fn emoji_cluster_engages_fallback_font_with_real_glyphs() {
     // "hi " + thumbs-up-medium-skin-tone (a modifier-sequence emoji cluster)
     // + a plain emoji — exercises both a modified and unmodified color-emoji
     // cluster in the same shaped string.
-    let mixed = cx.layout("hi \u{1F44D}\u{1F3FD} \u{1F389}", &style(24.0), None);
+    let mixed = cx.layout(MIXED, &style(24.0), None);
     let runs = mixed.to_scene_runs(Point::ORIGIN);
     assert!(!runs.is_empty(), "expected glyph runs for mixed text+emoji");
 
-    let Some(emoji_run) = runs.iter().find(|run| *run.font.font() != text_font) else {
-        // macOS always ships Apple Color Emoji: no fallback there is a failure.
-        // Elsewhere the host may carry no emoji font at all (the bundled
-        // subset test above covers registered fallback on every host).
-        if cfg!(target_os = "macos") {
-            panic!(
-                "expected at least one run in the mixed string to resolve to a \
-                 font different from the plain-text font -- fallback did not \
-                 engage for the emoji cluster"
-            );
-        }
-        println!("SKIPPED (1): no host emoji font resolves; system emoji fallback not exercised");
-        return;
-    };
+    let emoji_run = runs
+        .iter()
+        .find(|run| *run.font.font() != text_font)
+        .expect(
+            "expected at least one run in the mixed string to resolve to a \
+             font different from the plain-text font -- fallback did not \
+             engage for the emoji cluster",
+        );
 
     assert!(
         !emoji_run.glyphs.is_empty(),
@@ -158,9 +211,32 @@ fn registered_subset_serves_emoji_cluster_with_real_glyphs() {
         .iter()
         .find(|run| *run.font.font() != text_font)
         .expect("the registered emoji subset did not serve the emoji cluster");
+    // The served face is the registered subset itself, not a host emoji font.
+    assert_eq!(
+        emoji_run.font.font().data.data(),
+        SUBSET,
+        "the emoji cluster was served by a face other than the registered subset"
+    );
     assert!(!emoji_run.glyphs.is_empty(), "the emoji run has no glyphs");
     for glyph in &emoji_run.glyphs {
         assert_ne!(glyph.id, NOTDEF_GLYPH_ID, "emoji glyph resolved to .notdef");
+    }
+}
+
+/// Reports the skip counter so a skipped run is visible in captured output. Tests run in
+/// parallel, so the count is what had been announced by now; when the host is ready no
+/// test can have skipped, which is asserted.
+#[test]
+fn zz_skip_summary() {
+    match missing_precondition() {
+        None => {
+            println!("SKIP SUMMARY: 0 skipped, the host has every precondition");
+            assert_eq!(skips(), 0, "a ready host never skips");
+        }
+        Some(why) => println!(
+            "SKIP SUMMARY: {} skipped so far; the system-fallback test skips here: {why}",
+            skips()
+        ),
     }
 }
 

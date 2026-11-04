@@ -962,7 +962,10 @@ mod tests {
             fs::read_to_string(project.join(GRADLE_PROPERTIES)).unwrap(),
             legacy.replace(
                 "frust.embedding.dir=placeholder",
-                &format!("frust.embedding.dir={}", target.display())
+                &format!(
+                    "frust.embedding.dir={}",
+                    local_properties::escape_value(&host_path::to_portable_string(&target))
+                )
             )
         );
         assert!(report.android.changed());

@@ -351,7 +351,38 @@ mod plugin_package_location {
     fn local_property(app: &Path, key: &str) -> Option<String> {
         read(&app.join(platform_wiring::LOCAL_PROPERTIES))
             .lines()
-            .find_map(|line| line.strip_prefix(&format!("{key}=")).map(str::to_string))
+            .find_map(|line| {
+                line.strip_prefix(&format!("{key}="))
+                    .map(unescape_property_value)
+            })
+    }
+
+    /// `value` with its Java-properties backslash escapes decoded, the way
+    /// `Properties.load` reads what the wiring wrote.
+    fn unescape_property_value(value: &str) -> String {
+        let mut out = String::new();
+        let mut chars = value.chars();
+        while let Some(c) = chars.next() {
+            if c != '\\' {
+                out.push(c);
+                continue;
+            }
+            match chars.next() {
+                Some('t') => out.push('\t'),
+                Some('n') => out.push('\n'),
+                Some('r') => out.push('\r'),
+                Some('f') => out.push('\u{c}'),
+                Some('u') => {
+                    let hex: String = chars.by_ref().take(4).collect();
+                    if let Some(c) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                        out.push(c);
+                    }
+                }
+                Some(other) => out.push(other),
+                None => {}
+            }
+        }
+        out
     }
 
     /// Every file under `dir` (symlinks not followed, `local.properties`

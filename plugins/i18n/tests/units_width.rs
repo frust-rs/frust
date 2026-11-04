@@ -83,8 +83,10 @@ fn two_kilometers_agree_with_icu_at_every_width() {
     for (style, width, _) in STYLES {
         let frust = fmt::units(&en, 2.0, Unit::Kilometer, style).expect("frust formats");
         let icu = icu_by_attribute(&icu_locale, &format!("{width}-kilometer"), &two);
-        println!("en {width:>6} 2 km: frust={frust:?} icu={icu:?}");
-        assert_eq!(frust, icu, "{width}-kilometer");
+        assert_eq!(
+            frust, icu,
+            "en {width:>6} 2 km: {width}-kilometer: frust={frust:?} icu={icu:?}"
+        );
     }
 }
 
@@ -102,7 +104,9 @@ fn meters_agree_with_icus_typed_formatter_at_every_width() {
         )
         .expect("typed formatter");
         let icu = typed.format_fixed_decimal(&two).to_string();
-        println!("en {width:>6} 2 m: frust={frust:?} typed-icu={icu:?}");
-        assert_eq!(frust, icu, "{width}-meter");
+        assert_eq!(
+            frust, icu,
+            "en {width:>6} 2 m: {width}-meter: frust={frust:?} typed-icu={icu:?}"
+        );
     }
 }

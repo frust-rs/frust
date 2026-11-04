@@ -2442,7 +2442,11 @@ mod tests {
                 success: true,
                 stdout: format!(
                     r#"{{"packages":[{{"name":"frust-shell-android","manifest_path":"{}"}}]}}"#,
-                    shell.join("Cargo.toml").display()
+                    shell
+                        .join("Cargo.toml")
+                        .display()
+                        .to_string()
+                        .replace('\\', "\\\\")
                 ),
                 stderr: String::new(),
             },

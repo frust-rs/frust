@@ -30,7 +30,7 @@
 //! face whenever it covers the character, as the text's fallback would.
 
 use super::r#break::{BreakReason, BrokenLine};
-use crate::context::shape::{Shaped, Whitespace};
+use crate::shape::{Shaped, Whitespace};
 
 /// The character [`crate::TextOverflow::Ellipsis`] draws: U+2026 HORIZONTAL
 /// ELLIPSIS, one glyph rather than three periods.
@@ -123,7 +123,7 @@ fn refill_end(shaped: &Shaped, start: usize, end: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::shape::{AtomFlags, ShapedAtom, ShapedChar, ShapedCluster};
+    use crate::shape::{AtomFlags, ShapedAtom, ShapedChar, ShapedCluster};
 
     /// One char, cluster and grapheme per letter (`W` is 20 wide, the rest
     /// 10); `|` ends an atom, otherwise every letter is its own atom. An atom
@@ -311,9 +311,9 @@ mod tests {
     /// prefix whose advance plus the ellipsis fits, found by brute force.
     #[test]
     fn the_cut_is_the_longest_fitting_prefix_on_driver_shaped_text() {
-        use crate::context::shape::ShapeContext;
         use crate::oracle::synthetic::SyntheticBackend;
         use crate::oracle::{Oracle, RenderCapabilities};
+        use crate::shape::ShapeContext;
         use crate::style::{GenericSlot, TextStyle};
         use peniko::{Blob, Color};
 

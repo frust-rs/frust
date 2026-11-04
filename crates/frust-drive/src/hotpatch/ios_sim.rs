@@ -965,8 +965,13 @@ mod tests {
         };
         let err = captured_record(&dir, &key).unwrap_err();
         assert!(err.to_string().contains("did not see the capture"), "{err}");
-        let sdk = "/X.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/SDKs/\
-                   iPhoneSimulator27.0.sdk";
+        // Absolute on the host: a bare `/X.app` has no drive on Windows.
+        let sdk = format!(
+            "{}/X.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/SDKs/\
+             iPhoneSimulator27.0.sdk",
+            if cfg!(windows) { "C:" } else { "" }
+        );
+        let sdk = sdk.as_str();
         let record = RustcRecord {
             args: ["rustc", "--crate-name", "hotapp", "-Clink-dead-code"]
                 .map(str::to_string)

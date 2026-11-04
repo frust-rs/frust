@@ -16,7 +16,7 @@
 //!   rounded separately, the leading's floor half above, the line top rounded.
 
 use super::{LineItem, Paragraph, Source};
-use crate::context::shape::Whitespace;
+use crate::shape::Whitespace;
 
 /// One line's vertical and horizontal metrics, in logical pixels.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -128,12 +128,11 @@ fn hanging(paragraph: &Paragraph<'_>, item: &LineItem) -> (f32, bool) {
         return (0.0, false);
     }
     let clusters = paragraph.clusters(item);
-    let walk: Box<dyn Iterator<Item = &crate::context::shape::ShapedCluster>> =
-        if item.bidi_level % 2 == 1 {
-            Box::new(clusters.iter())
-        } else {
-            Box::new(clusters.iter().rev())
-        };
+    let walk: Box<dyn Iterator<Item = &crate::shape::ShapedCluster>> = if item.bidi_level % 2 == 1 {
+        Box::new(clusters.iter())
+    } else {
+        Box::new(clusters.iter().rev())
+    };
     let mut advance = 0.0;
     let mut count = 0;
     for cluster in walk.take_while(|c| c.whitespace != Whitespace::None) {

@@ -8,7 +8,7 @@
 //!   driver's [`Shaped`] paragraph plus the line table it was last broken
 //!   into. A width change re-runs the line layout (break, metrics, align) on
 //!   the cached [`Shaped`] — never re-shaping — and keeps the new table.
-//! - the driver's bare [`Shaped`] (`crate::context::shape`): width-free by
+//! - the driver's bare [`Shaped`] (`crate::shape`): width-free by
 //!   construction, so a hit is the whole answer and analysis/shaping are
 //!   skipped.
 //!
@@ -20,9 +20,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::context::shape::Shaped;
 use crate::convert::{NotdefCounter, RunMemo};
 use crate::layout::{LineTable, Paragraph, TextLayout, lay_out};
+use crate::shape::Shaped;
 use crate::style::{
     FamilyName, FontFamily, FontStyle, GenericSlot, LineHeight, TextAlign, TextStyle,
 };

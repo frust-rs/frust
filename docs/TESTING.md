@@ -52,11 +52,45 @@ real precondition, not just the OS, and when it is missing prints one `SKIPPED (
 precondition>` line and passes. The macOS oracle tests in `crates/frust-text/src/oracle/apple.rs`
 check that the PingFang collection is present and that CoreText resolves the named face, and a
 summary test reads the `skips()` counter so a fully skipped run is visible. The system-fallback
-test in `crates/frust-text/tests/emoji.rs` skips this way on hosts with no emoji font, while a
-host-independent test registers the bundled `testing/fonts/NotoEmoji-COLRv1-Subset.ttf` through
-`TextContext::register_fonts` so the emoji path is always exercised. This differs from
-`#[ignore]`, which marks GPU or slow tests that never run by default and are opted into with
+test in `crates/frust-text/tests/emoji.rs` uses the same counted-skip precondition (`host_ready`,
+a `SKIPS` counter and a `zz_skip_summary` test that prints `SKIP SUMMARY`): it skips with
+`SKIPPED (1)` on a host with no emoji font (e.g. a bare Linux install) and panics on macOS, which
+must resolve one. A host-independent test registers the bundled
+`testing/fonts/NotoEmoji-COLRv1-Subset.ttf` through `TextContext::register_fonts`, so the emoji
+path is always exercised, and checks that the served face is that subset by font-data identity.
+This differs from `#[ignore]`, which marks GPU or slow tests that never run by default and are opted into with
 `--ignored`; a counted skip runs everywhere and reports what it did not cover.
+
+The advisory `text-oracle-macos` and `text-oracle-windows` CI legs (`.github/workflows/ci.yml`; not
+in `ci-ok`) run `cargo test -p frust-text --locked` (macOS adds the engine `hvgl_provider` test) only
+when a change touches `Cargo.lock`, `Cargo.toml`, `rust-toolchain.toml`, `frust-text`,
+`frust-engine`, `frust-scene`, `frust-paths`, `frust-gpu`, `testing/fonts`,
+`crates/frust-text/tests/fonts` or `ci.yml`. A leg that does not run writes
+`SKIPPED (scope: <reason>)` to the job summary.
+
+### Windows x64 host
+
+A full `cargo test --workspace` on a Windows x64 MSVC host passes (the root workspace; the
+standalone workspaces keep their own gates). CI covers Windows only through `hotpatch-windows`
+and `text-oracle-windows`, so this run is manual. It surfaced 18 failures in 8 suites, fixed in
+2f2832c1c and 651d30a1d:
+
+- 11 tests carried Unix assumptions: path separators, the `\\?\` verbatim prefix, Java-properties
+  colon escaping, JSON-escaped paths in fake `cargo metadata`, case-insensitive environment names,
+  the response-file dialect. Expectations are built from the product's own encoders, not literals.
+- Tests that need a Unix toolchain are `cfg`-gated: the Android hot-patch tests that fake an NDK
+  with `#!/bin/sh` scripts (Android hot patch is refused on a Windows host) to macOS/Linux, and
+  the `xcodebuild` test to macOS.
+- `frust-hotpatch`'s `real_patch_library` expects a slide of 0 on Windows (fixed-base, no ASLR, by
+  design) and uses wrapping arithmetic.
+- The run also exposed two product bugs, fixed in the same change: DirectWrite generic families, and
+  the height of an empty-label checkbox/radio.
+
+Run it with `cargo test --workspace --no-fail-fast`. Setting `CARGO_PROFILE_DEV_DEBUG=line-tables-only`
+and `CARGO_PROFILE_TEST_DEBUG=line-tables-only` keeps the target directory small. When filtering,
+use one `cargo test` per suite: `--lib` cannot be repeated in a single invocation. The persistent
+font cache is per test-executable stem and invalidated only by crate version, so after a resolver
+change move `%LOCALAPPDATA%\<test-exe-stem>` aside before rerunning.
 
 ---
 

@@ -1508,6 +1508,7 @@ mod tests {
         if !host_ready("han_without_a_locale_resolves_to_a_cjk_face") {
             return;
         }
+        let _slot = crate::test_support::LocaleSlotGuard::hold();
         let mut backend = CoreTextBackend::new();
         let han = backend
             .resolve(&scripted("\u{65e5}\u{672c}\u{8a9e}", b"Hani"))

@@ -5137,10 +5137,15 @@ mod tests {
         assert_eq!(ambient.0, "FRUST_HOTPATCH_AMBIENT");
         let ambient_names: Vec<&str> = ambient.1.lines().collect();
         for name in env.iter().map(|(name, _)| name.as_str()).chain(["PATH"]) {
-            assert!(
-                ambient_names.contains(&name),
-                "{name} missing from {ambient_names:?}"
-            );
+            // Windows environment names are case-insensitive (`PATH` vs `Path`).
+            let listed = ambient_names.iter().any(|listed| {
+                if cfg!(windows) {
+                    listed.eq_ignore_ascii_case(name)
+                } else {
+                    *listed == name
+                }
+            });
+            assert!(listed, "{name} missing from {ambient_names:?}");
         }
         assert_eq!(
             env,

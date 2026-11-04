@@ -51,9 +51,7 @@ use crate::shape_cache::{
 };
 use crate::style::{GenericSlot, TextOverflow, TextStyle};
 
-// The module itself is declared from `lib.rs`; this re-export keeps the
-// `crate::context::shape` paths other modules already name.
-pub(crate) use crate::shape;
+use crate::shape;
 
 /// A font family registered via [`TextContext::register_fonts`], reported back
 /// to the caller so it can resolve widget styles against the exact name(s)

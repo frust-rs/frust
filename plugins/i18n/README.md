@@ -485,8 +485,8 @@ RelativeDayStyle::Long)?` reads both instants in the zone, and a distance of at 
 through ICU4X's relative-time formatter (`Numeric::Auto`: en `today`/`tomorrow`/`yesterday`, th
 `วันนี้`/`พรุ่งนี้`/`เมื่อวาน`, ja `今日`/`明日`/`昨日`, es `hoy`/`mañana`/`ayer`); two or more days away
 it returns a medium date (`Nov 17, 2023`). `relative_day_civil(&locale, day, today, style)` takes
-dates you already hold. The string is ICU's, returned as-is: CLDR capitalises per width in some
-languages (vi short `hôm nay`, vi long `Hôm nay`) and the words are lower case in most, so
+dates you already hold. The string is ICU's, returned as-is: vi reads `hôm nay` at both widths
+and the words are lower case in most languages, so
 sentence-casing a standalone label is the caller's job. In FTL:
 `{ RELATIVE_DAY($t, $now, timeZone: "Asia/Makassar", style: "short") }`. Fluent allows only
 literals as named-argument values, so a variable `now` is the second positional (a literal
