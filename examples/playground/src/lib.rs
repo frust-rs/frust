@@ -11,7 +11,7 @@
 //! mark, the "playground" title, and the brightness/reduce-motion/animations
 //! toggles folded into its trailing actions — over a
 //! [`pattern_switcher`](frust::motion::switcher::pattern_switcher) hosting one
-//! of nineteen section pages in a [`scroll_view`], the whole column inside one
+//! of twenty section pages in a [`scroll_view`], the whole column inside one
 //! [`safe_area`] and under a toast overlay), and the [`frust::app!`] entry
 //! binding all three platforms. The section pages themselves live in
 //! [`pages`] — each a `page(&PlaygroundState) -> impl View<PlaygroundState>`
@@ -19,7 +19,7 @@
 //!
 //! # Responsive navigation
 //!
-//! [`pages::SECTION_LABELS`] carries nineteen destinations now — too many for a
+//! [`pages::SECTION_LABELS`] carries twenty destinations now — too many for a
 //! single bottom nav bar to divide evenly without its labels wrapping (see
 //! that constant's own doc). [`home_page`] picks between two shapes, the same
 //! `use_context::<WindowMetrics>()` / named-breakpoint idiom
@@ -39,11 +39,11 @@
 //!
 //! [`bottom_nav_bar`] still rides the existing
 //! [`navigation_bar`](frust_material::navigation_bar)/[`nav_item`](frust_material::nav_item)
-//! chrome (neither needs an icon, so growing to 19 labels costs nothing
+//! chrome (neither needs an icon, so growing to 20 labels costs nothing
 //! there); [`side_rail`] and [`more_overlay`] are hand-rolled from baseline
 //! [`button`]s instead of `frust_material::navigation_rail`/
 //! `navigation_drawer` — those destinations carry a *mandatory* icon per
-//! entry, and playground names no icon set for its nineteen sections (the
+//! entry, and playground names no icon set for its twenty sections (the
 //! module docs' design-neutral charter: "Nothing in this app demonstrates a
 //! design language"). [`pages::SECTION_LABELS`] stays the single source of
 //! truth every shape reads from.
@@ -96,11 +96,11 @@ use frust::motion::patterns::SharedAxis;
 use frust::motion::switcher::pattern_switcher;
 use frust::{
     Align, Alignment, Axis, Brightness, ButtonStyle, Color, Component, DeepLink, DragCoordinator,
-    EdgeInsets, Either, FlexView, Get, GetUntracked, MotionScheme, NavigatorController, Padding,
-    PageTransition, PanZoomController, PanZoomTransform, RwSignal, ScrollController, ScrollInfo,
-    ScrollSubscription, Set, SizedBox, Theme, TransitionSpec, Update, View, WindowMetrics, button,
-    column, container, deep_links, icon, icons, inflexible, navigator, row, safe_area, scroll_view,
-    set_app_theme, stack, text, use_context,
+    EdgeInsets, Either, FlexView, Get, GetUntracked, GlassTier, MotionScheme, NavigatorController,
+    Padding, PageTransition, PanZoomController, PanZoomTransform, RwSignal, ScrollController,
+    ScrollInfo, ScrollSubscription, Set, SizedBox, Theme, TransitionSpec, Update, View,
+    WindowMetrics, button, column, container, deep_links, icon, icons, inflexible, navigator, row,
+    safe_area, scroll_view, set_app_theme, stack, text, use_context,
 };
 use frust_material::{app_bar, nav_item, navigation_bar};
 
@@ -353,6 +353,13 @@ pub struct PlaygroundState {
     /// additions that section's own state needed — see
     /// [`PlaygroundState::graph_transform`]'s doc for the other.
     pub graph_selected: RwSignal<Option<usize>>,
+    /// The "Glass" section's surface count (1..=8, `pages::glass`).
+    pub glass_count: RwSignal<usize>,
+    /// The "Glass" section's selected per-frame backdrop cap, as applied by
+    /// `set_max_backdrops_per_frame`.
+    pub glass_cap: RwSignal<usize>,
+    /// The "Glass" section's selected glass tier.
+    pub glass_tier: RwSignal<GlassTier>,
     /// The "Graph" section's live pan/zoom transform, published by its
     /// `PanZoomView::on_transform` callback and read back by the page's own
     /// scale/offset readout — the second of the two minimal state additions
@@ -445,6 +452,9 @@ impl PlaygroundState {
             auto_run_db_smoke: Rc::new(Cell::new(false)),
             more_open: RwSignal::new(false),
             graph_selected: RwSignal::new(None),
+            glass_count: RwSignal::new(4),
+            glass_cap: RwSignal::new(frust::max_backdrops_per_frame()),
+            glass_tier: RwSignal::new(GlassTier::Bar),
             graph_transform: RwSignal::new(PanZoomTransform::IDENTITY),
             graph_controller: PanZoomController::new(),
             scroll_controller,
