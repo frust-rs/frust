@@ -27,16 +27,27 @@
 //! and the top rule from the
 //! [`SampleAccents`](crate::tokens::SampleAccents) extension — all with an
 //! unthemed fallback constant apiece, re-resolved every paint.
+//!
+//! # Glass
+//!
+//! [`SamplePanelView::glass`] swaps the opaque fill for a translucent one: the
+//! content is wrapped in [`frust::glass_surface`] at the chosen
+//! [`GlassTier`](frust::GlassTier), with the sample radius, painting the theme's
+//! [`GlassScale`](frust::GlassScale) (a backdrop blur plus washes). The wrap is
+//! built in `build`, which has no theme, so the radius is the
+//! [`SAMPLE_RADIUS`] constant rather than a theme lookup. The glass covers the
+//! inset child rect only; the highlight rule and border are still painted by
+//! the panel around it, and the opaque `fill_rounded_rect` is skipped.
 
-use frust::Theme;
 use frust::authoring::{
     AnyView, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx, EventResult,
     InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, Rect, Role, RoundedRect, SemanticsCtx,
     Shape, Size, Vec2, View, Widget, any, build_child, rebuild_child, route_event_single,
     teardown_child, visit_children,
 };
+use frust::{GlassTier, Theme, glass_surface};
 
-use crate::tokens::SampleAccents;
+use crate::tokens::{SAMPLE_RADIUS, SampleAccents};
 
 /// Padding around the child, in logical px (no `Theme` spacing token exists to
 /// resolve a padding from — see [`crate::badge`]'s `PAD_X`).
@@ -58,17 +69,39 @@ const FALLBACK_RADIUS: f64 = 3.0;
 /// A declarative Sample panel wrapping one child. See the [module docs](self).
 pub struct SamplePanelView<State: 'static> {
     child: AnyView<State>,
+    glass: bool,
 }
 
 /// Wrap `child` in a Sample panel.
 pub fn sample_panel<State: 'static, V: View<State>>(child: V) -> SamplePanelView<State> {
     // erasure: keep stored in the view's non-generic AnyView child field
-    SamplePanelView { child: any(child) }
+    let child = any(child);
+    SamplePanelView {
+        child,
+        glass: false,
+    }
+}
+
+impl<State: 'static> SamplePanelView<State> {
+    /// Paint the content on a glass surface of `tier` instead of the opaque
+    /// fill. See the [module docs](self#glass).
+    #[must_use]
+    pub fn glass(mut self, tier: GlassTier) -> Self {
+        let glass = glass_surface(self.child)
+            .tier(tier)
+            .corner_radius(SAMPLE_RADIUS);
+        // erasure: keep the wrapped child in the non-generic AnyView field
+        self.child = any(glass);
+        self.glass = true;
+        self
+    }
 }
 
 /// The retained widget for a [`SamplePanelView`].
 pub struct SamplePanelWidget {
     child: ChildPod,
+    /// Glass mode: the child pod is a glass surface, so no opaque fill.
+    glass: bool,
 }
 
 impl<State: 'static> View<State> for SamplePanelView<State> {
@@ -77,6 +110,7 @@ impl<State: 'static> View<State> for SamplePanelView<State> {
     fn build(&self, ctx: &mut BuildCtx<'_>) -> SamplePanelWidget {
         SamplePanelWidget {
             child: build_child(&self.child, ctx),
+            glass: self.glass,
         }
     }
 
@@ -86,7 +120,12 @@ impl<State: 'static> View<State> for SamplePanelView<State> {
         element: &mut SamplePanelWidget,
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
-        rebuild_child(&prev.child, &self.child, &mut element.child, ctx)
+        let mut flags = rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
+        if element.glass != self.glass {
+            element.glass = self.glass;
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
+        flags
     }
 
     fn teardown(&self, element: &mut SamplePanelWidget, ctx: &mut BuildCtx<'_>) {
@@ -141,7 +180,9 @@ impl Widget for SamplePanelWidget {
         let radius = resolve_radius(theme);
         let highlight = SampleAccents::resolve_highlight(None, theme);
 
-        scene.fill_rounded_rect(ctx.origin(), ctx.size(), radius, fill);
+        if !self.glass {
+            scene.fill_rounded_rect(ctx.origin(), ctx.size(), radius, fill);
+        }
         // The highlight rule, inset by the radius so it reads as a rule rather
         // than a clipped band poking out of the rounded corners.
         scene.fill_rect(
@@ -248,6 +289,43 @@ mod tests {
             rec.rounded_rects.len()
         );
         assert!(!rec.glyph_colors.is_empty(), "the child's label was shaped");
+    }
+
+    #[test]
+    fn glass_panel_records_a_backdrop_blur_at_the_tier_intent() {
+        let theme = sample_theme();
+        let view: SamplePanelView<()> =
+            sample_panel(sample_badge("ready")).glass(GlassTier::Chrome);
+        let mut counter = 0u64;
+        let mut w = View::<()>::build(&view, &mut BuildCtx::new(&mut counter));
+        let (size, rec) = render(&mut w, Some(&theme));
+
+        assert_eq!(rec.backdrops.len(), 1, "one lens for the panel's glass");
+        let (origin, lens, sigma) = rec.backdrops[0];
+        assert_eq!(
+            sigma,
+            theme.glass.tier(GlassTier::Chrome).blur_radius_intent
+        );
+        assert!(sigma > 0.0);
+        // The glass covers the inset child rect, not the whole panel.
+        assert_eq!(origin, child_offset().to_point());
+        assert_eq!(lens.width, size.width - PAD * 2.0);
+        // The opaque panel fill is skipped; the rule and border remain.
+        assert!(
+            rec.rounded_rects
+                .iter()
+                .all(|r| r.3 != theme.scheme().surface_container_low)
+        );
+        assert_eq!(rec.rects[0].1.height, RULE_HEIGHT);
+        assert_eq!(rec.strokes[0], theme.scheme().outline);
+    }
+
+    #[test]
+    fn the_opaque_panel_records_no_backdrop_blur() {
+        let theme = sample_theme();
+        let mut w = build();
+        let (_, rec) = render(&mut w, Some(&theme));
+        assert!(rec.backdrops.is_empty());
     }
 
     #[test]

@@ -36,7 +36,8 @@
 //! written down for this system.
 
 use frust::{
-    Brightness, Color, ColorScheme, DesignLanguage, MotionScheme, ShapeScale, Theme, ThemeBuilder,
+    Brightness, Color, ColorScheme, DesignLanguage, GlassFill, GlassMaterial, GlassScale,
+    MotionScheme, ShadowSpec, ShapeScale, Theme, ThemeBuilder,
 };
 
 /// This design system's stable identity tag, carried on
@@ -91,7 +92,7 @@ const OUTLINE_DARK: Color = Color::from_rgb8(0x33, 0x38, 0x38);
 /// whole scale (a "flat, squared-off" look), in logical px. `full` is left at
 /// its baseline `f64::INFINITY` — it is the pill sentinel every consumer
 /// resolves against a box, not a radius.
-const SAMPLE_RADIUS: f64 = 3.0;
+pub(crate) const SAMPLE_RADIUS: f64 = 3.0;
 
 // ---- The typed extension --------------------------------------------------
 
@@ -194,6 +195,47 @@ fn sample_dark() -> ColorScheme {
     }
 }
 
+/// One sample glass tier: a blur of `sigma` logical px (a Gaussian standard
+/// deviation) and one wash per brightness.
+fn sample_glass_tier(sigma: f64, light: GlassFill, dark: GlassFill) -> GlassMaterial {
+    GlassMaterial {
+        blur_radius_intent: sigma,
+        fills_light: vec![light],
+        fills_dark: vec![dark],
+        hairline_alpha: 0.0,
+        shadow: ShadowSpec {
+            y_offset: 0.0,
+            blur_std_dev: 0.0,
+            color_alpha: 0.0,
+        },
+    }
+}
+
+/// The sample's glass scale: control 6 / bar 10 / chrome 16 logical px of blur.
+///
+/// Design-authored for this sample, not mined from a platform recipe: the
+/// values are community-approximate, picked to read clearly in a demo. A real
+/// system would install its own measured numbers the same way.
+fn sample_glass() -> GlassScale {
+    GlassScale {
+        control: sample_glass_tier(
+            6.0,
+            GlassFill::new(1.0, 1.0, 1.0, 0.12),
+            GlassFill::new(0.0, 0.0, 0.0, 0.12),
+        ),
+        bar: sample_glass_tier(
+            10.0,
+            GlassFill::new(0.98, 0.97, 0.95, 0.40),
+            GlassFill::new(0.07, 0.10, 0.10, 0.40),
+        ),
+        chrome: sample_glass_tier(
+            16.0,
+            GlassFill::new(0.98, 0.97, 0.95, 0.70),
+            GlassFill::new(0.07, 0.10, 0.10, 0.70),
+        ),
+    }
+}
+
 /// Build the Sample design system's [`Theme`].
 ///
 /// Composed the way a third-party system is meant to compose one — a
@@ -206,6 +248,7 @@ fn sample_dark() -> ColorScheme {
 /// 4. `map_motion`: a slightly quicker-than-baseline duration set.
 /// 5. `design_language`: the [`DesignLanguage::Custom`] identity tag.
 /// 6. `extension`: [`SampleAccents`].
+/// 7. `map_glass`: [`sample_glass`], a small translucent scale.
 ///
 /// Brightness is left at the baseline's own value on purpose: the shell
 /// re-derives light/dark from the platform against whatever base
@@ -235,6 +278,7 @@ pub fn sample_theme() -> Theme {
             },
             ..m
         })
+        .map_glass(|_| sample_glass())
         .design_language(DesignLanguage::Custom(SAMPLE_DESIGN_LANGUAGE))
         .extension(SampleAccents::sample())
         .build()
@@ -254,6 +298,20 @@ mod tests {
         // Never mistakeable for a built-in language.
         assert_ne!(theme.design_language, DesignLanguage::Material3);
         assert_ne!(theme.design_language, DesignLanguage::Cupertino);
+    }
+
+    #[test]
+    fn theme_carries_a_translucent_glass_scale() {
+        let theme = sample_theme();
+        let sigmas = [
+            theme.glass.control.blur_radius_intent,
+            theme.glass.bar.blur_radius_intent,
+            theme.glass.chrome.blur_radius_intent,
+        ];
+        assert_eq!(sigmas, [6.0, 10.0, 16.0]);
+        assert!(!theme.glass.bar.is_opaque());
+        assert_eq!(theme.glass.bar.fills_light.len(), 1);
+        assert_eq!(theme.glass.bar.fills_dark.len(), 1);
     }
 
     #[test]
