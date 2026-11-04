@@ -106,6 +106,7 @@ use crate::overlay::{
     overlay_modal, show_overlay_modal,
 };
 use crate::strings::MaterialStrings;
+use frust::authoring::text::LocaleStamp;
 
 /// The panel's inset on all four edges, in logical px (`M3EDialogTheme.padding`,
 /// which the reference's header/actions/input body all read).
@@ -597,7 +598,7 @@ struct HeaderRun {
     /// The family the cached layout was shaped in.
     family: FontFamily,
     /// The locale generation `layout` was shaped under ([`locale_stamp`]).
-    stamp: u64,
+    stamp: LocaleStamp,
     layout: Option<TextLayout>,
 }
 
@@ -608,7 +609,7 @@ impl HeaderRun {
             size,
             weight,
             family: FontFamily::default(),
-            stamp: 0,
+            stamp: LocaleStamp::default(),
             layout: None,
         }
     }
@@ -1392,7 +1393,7 @@ mod tests {
 
     #[test]
     fn a_theme_swap_reshapes_the_cached_header_runs() {
-        let _slot = crate::badge::locale_slot_test::reader();
+        let _slot = frust_widgets::test_support::LocaleSlotGuard::hold();
         let mut w = build_header_panel();
         let mut tcx = TextContext::new();
         let first = theme_with_header(

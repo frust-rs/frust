@@ -196,6 +196,7 @@ use crate::overlay::{
 use crate::press::presses;
 use crate::strings::MaterialStrings;
 use crate::tokens::MaterialSpacing;
+use frust::authoring::text::LocaleStamp;
 
 /// This module's fixed panel width, in logical px — `M3ENavigationDrawerTheme`'s
 /// own `width` default. See the [module docs](self)' Geometry section.
@@ -496,7 +497,7 @@ fn type_style(themed: Option<&TextStyle>, token: TypeToken) -> TextStyle {
 struct Run {
     content: String,
     layout: Option<TextLayout>,
-    shaped_for: Option<(TextStyle, Option<f64>, u64)>,
+    shaped_for: Option<(TextStyle, Option<f64>, LocaleStamp)>,
 }
 
 impl Run {

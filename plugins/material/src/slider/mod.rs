@@ -119,6 +119,7 @@ use peniko::{Brush, Color};
 use crate::badge::locale_stamp;
 use crate::interaction::{HapticSignal, InteractionState, MaterialHaptics};
 use crate::press::presses;
+use frust::authoring::text::LocaleStamp;
 
 use self::core::{
     DEFAULT_EXTENT, DISABLED_ACTIVE_OPACITY, DISABLED_INACTIVE_OPACITY, Drag, DragCtx, DragOutcome,
@@ -373,7 +374,7 @@ impl Overrides {
 struct Run {
     content: String,
     layout: Option<TextLayout>,
-    shaped_style: Option<(TextStyle, u64)>,
+    shaped_style: Option<(TextStyle, LocaleStamp)>,
 }
 
 impl Run {

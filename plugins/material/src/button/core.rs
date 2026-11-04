@@ -38,6 +38,7 @@ use crate::interaction::{
     MaterialHaptics,
 };
 use crate::press::presses;
+use frust::authoring::text::LocaleStamp;
 
 // ---- Metric tables (m3e_button_theme.dart) ---------------------------------
 
@@ -605,9 +606,9 @@ pub(super) struct LabelRun {
     /// The `(style, width)` of the last natural (unconstrained) measurement.
     natural: Option<(TextStyle, f64)>,
     /// The locale generation `layout` was shaped under.
-    stamp: u64,
+    stamp: LocaleStamp,
     /// The locale generation `natural` was measured under.
-    natural_stamp: u64,
+    natural_stamp: LocaleStamp,
 }
 
 impl LabelRun {
@@ -618,8 +619,8 @@ impl LabelRun {
             layout: None,
             shaped_for: None,
             natural: None,
-            stamp: 0,
-            natural_stamp: 0,
+            stamp: LocaleStamp::default(),
+            natural_stamp: LocaleStamp::default(),
         }
     }
 
