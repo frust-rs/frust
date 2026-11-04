@@ -4208,11 +4208,11 @@ that shipped.
 
 ### `beui-backdrop-blur-degraded` — no blur filter anywhere in the port, catalog-wide
 
-**Observed**: `PaintScene` publishes no blur filter a widget can reach (`frust-engine` renders
-Gaussian blur/drop-shadow filter passes internally — `docs/RENDER_ARCHITECTURE.md`'s GPU Substrate,
-`frust-engine::filters` — but there is no `frust_scene::Command` exposing one to a plugin-tier
-widget yet). Every one of upstream's `backdrop-filter`/`filter: blur(...)` effects therefore
-degrades the same way catalog-wide: a frosted backdrop (drawer, bottom sheet, popover, morphing
+**Observed**: `PaintScene::backdrop_blur` and the baseline `glass_surface` widget now give a plugin
+a real backdrop blur (see `backdrop-blur-bound` for its limits), but `frust-beui` has not adopted
+them, and no layer-filter blur exists (`filter: blur(...)` on a widget's own content; the engine's
+internal filter passes are not exposed as a `frust_scene::Command`). Every one of upstream's
+`backdrop-filter`/`filter: blur(...)` effects therefore still degrades the same way catalog-wide: a frosted backdrop (drawer, bottom sheet, popover, morphing
 modal, center-morph modal, command palette, expandable action bar, project folder, wallet card,
 morphing search) becomes a flat wash with no blur behind it; a text/badge/number roll's blur half
 (animated badge, number ticker, action-swap's `Blur` variant, checkbox exit, tooltip, select item
@@ -4228,11 +4228,12 @@ rounded-rect morph path is not a degradation of anything upstream actually did.
 `backdrop-filter` CSS property — dozens across `components`, `agents`, and `blocks`; see each
 component's own "Degradations" section for its specific blur.
 
-**Why accepted**: this is the same framework gap `frust-shadcn`'s and `frust-material`'s drawer/
-sheet/dialog/popover scrims already accept (no LIMITATIONS entry exists for those catalogs' own
-instances yet, since no gate has needed one); a filter layer's scene-level `Command` is a later
-render-tier plan (`frust-engine::filters` already builds and schedules the passes internally), not
-something a facade-only plugin can add.
+**Why accepted**: adopting `glass_surface` for the frosted backdrops is a port-side change not yet
+made, and `frust-shadcn`'s and `frust-material`'s drawer/sheet/dialog/popover scrims accept the same
+flat wash (no LIMITATIONS entry exists for those catalogs' own instances yet, since no gate has
+needed one); a layer-filter blur's scene-level `Command` is a later render-tier plan
+(`frust-engine::filters` already builds and schedules the passes internally), not something a
+facade-only plugin can add.
 
 **Evidence**: `plugins/beui/src/components/adaptive_stepper.rs`, `drawer.rs`, `bottom_sheet.rs`,
 `popover.rs`, `morphing_modal.rs`, `center_morph_modal.rs`, `theme_toggle.rs`,
@@ -5249,23 +5250,57 @@ same frame, which keeps the drawn page; hover and focus transitions re-record ev
 ### `backdrop-blur-bound` — `BackdropBlur` has five limits
 
 **Observed**: (1) no backdrop inside a translucent (isolated) layer, a retained body or a suppressed
-layer — it is dropped, not blurred; (2) at most `MAX_BACKDROPS_PER_FRAME` (4) per frame, more
-refuses the frame (`EngineError::TooManyBackdrops`); (3) pixels beyond the frame border read as
+layer — it is dropped, not blurred; (2) at most the per-frame cap, more refuses the whole frame
+(`EngineError::TooManyBackdrops`, never a degraded render): `MAX_BACKDROPS_PER_FRAME` (4) by
+default, an app sets it with `set_max_backdrops_per_frame` (process-wide, clamped to
+`1..=BACKDROP_CAP_CEILING`, 16); (3) pixels beyond the frame border read as
 transparent, so a blur at the edge fades; (4) a region past the page ceiling is refused; (5) a
 fragment-sampled copy of an sRGB target loses precision. The CPU oracle blurs its own canvas and is
 exact only for device σ <= 2; the `unit-backdrop-blur` golden compares with the clip rim eroded.
 On the direct present arm a frame carrying a backdrop renders via an intermediate and pays one
 present copy (T400: ≈0.239 ms/frame at 1080x2400, ≈0.189 ms at 1920x1080).
 
+**Cost of raising the cap** (delivered fps, 600 frames per cell, N sigma-12 `glass_surface`s at cap N
+over animated stripes; GPU timestamps do not capture blur work on these devices, so fps is the
+signal): Pixel 5 (Adreno 620, 90 Hz, split thread) 0 surfaces 89.8, 4: 83.3, 6: 57.2, 8: 44.7, 4 at
+sigma 24: 67.4 — about +2.6 ms of frame interval per backdrop past 4, linear, and sigma 24 costs about
+one extra sigma-12 backdrop; iPhone 13 mini (60 Hz, single thread) 60 through 6, 53.5 at 8 (its
+split arm is pacing-capped at 40 fps even with no surfaces, so it is not cited); Mac M4 (120 Hz)
+120 through 8. A frame over the cap is refused, never slow. Cost scales with sigma as well as count,
+so the default stays 4 and an app targeting stronger hardware raises it.
+
 **Applies to**: frosted-glass style chrome.
 
 **Why accepted**: the schedule serves one blurred copy per backdrop at the frame's root; nesting inside
 layers needs the general scheduler.
 
-**Trigger for removal**: the general scheduler, or a measured need for more than four backdrops.
+**Trigger for removal**: the general scheduler, or a measured need above the 16 ceiling.
 
 **Evidence**: `docs/RENDER_ARCHITECTURE.md` (`schedule::build_frame`); golden `unit-backdrop-blur`
-(cpu and engine-vulkan-nvidia-t400; engine-metal-macos owed).
+(cpu, engine-metal-macos and engine-vulkan-nvidia-t400); backdrop-cap device gate, 2026-11-05,
+commit aea75586e (Pixel 5, iPhone 13 mini, Mac M4).
+
+---
+
+### `cupertino-glass-intent-not-sigma` — the iOS-27 glass scale carries radius-family blur values, not sigma
+
+**Observed**: `frust_cupertino::glass::ios27()` sets `blur_radius_intent` to 75 (chrome), 45 (bar)
+and 15 (control), the mined kit's radius-family numbers. `glass_surface` reads the field as a Gaussian
+sigma in logical px (CSS `blur(Npx)` is sigma N), so under Cupertino it blurs far more heavily than
+the design intends and the engine clamps the largest values to its maximum sigma. Cost also scales
+with sigma (see `backdrop-blur-bound`).
+
+**Applies to**: `glass_surface` (and any widget passing the intent to `PaintScene::backdrop_blur`)
+under the Cupertino theme; other design systems author their own sigma.
+
+**Why accepted**: the correct sigmas have not been re-derived from the kit; rewriting the numbers
+without that source would swap one guess for another.
+
+**Trigger for removal**: re-derive the three tiers as sigma in `plugins/cupertino/src/glass.rs`
+and compare against the kit.
+
+**Evidence**: `plugins/cupertino/src/glass.rs` (`ios27`), `crates/frust-theme/src/glass.rs`
+(`GlassMaterial::blur_radius_intent`), `crates/frust-widgets/src/glass_surface.rs`.
 
 ---
 

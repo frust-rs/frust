@@ -8,6 +8,27 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Added
 
+- `glass_surface(child)` (`GlassSurfaceView`, flat from `frust`): a baseline widget that paints one
+  tier of the theme's glass scale behind its child (shadow, rounded clip, backdrop blur and washes,
+  child, specular hairline). `.tier(GlassTier)` picks `Control`, `Bar` (default) or `Chrome` from the
+  new `GlassScale::tier(GlassTier) -> &GlassMaterial`; `.corner_radius(f64)` and `.material(..)`
+  (wins over the theme's tier) refine it, and with neither a theme nor a material it paints an
+  opaque `#EFEFEF` fill. A material's blur intent is a Gaussian sigma in logical px (CSS
+  `backdrop-filter: blur(Npx)` is sigma N), clamped by the engine.
+- `set_max_backdrops_per_frame(n) -> usize` and `max_backdrops_per_frame()` (flat from `frust` and
+  `frust-render`; defined in `frust-engine`, with `MAX_BACKDROPS_PER_FRAME` 4 as the default and
+  `BACKDROP_CAP_CEILING` 16): the per-frame backdrop-blur cap is app-configurable, process-wide and
+  clamped to `1..=16`. A frame recording more backdrops than the cap is still refused whole
+  (`EngineError::TooManyBackdrops`), and `SceneCompiler::compile_with_backdrop_cap` compiles against
+  an explicit cap.
+- Stroke caps, joins and miter limit, and the even-odd fill rule, in `frust-scene` (also in
+  `frust::authoring::scene`): `StrokeCap` (`Butt`, `Round`, `Square`), `StrokeJoin` (`Miter`,
+  `Round`, `Bevel`), `StrokeStyle { cap, join, miter_limit }` (`ROUND`, `new`, `with_miter_limit`)
+  and `FillRule` (`NonZero`, `EvenOdd`), carried by `PathStyle::FillEvenOdd` and
+  `PathStyle::StrokeStyled { width, dash, style }` (helpers `PathStyle::fill_rule()` / `stroke()`).
+  `SceneBuilder` and `PaintScene` gain `fill_path_with_rule` and `stroke_path_styled`; the
+  `PaintScene` defaults fall back to `fill_path` / `stroke_path(_dashed)`. The engine and the CPU
+  oracle render both, and a non-finite or below-1 miter limit is refused as `InvalidGeometry`.
 - `frust::motion::detent` (flat in `frust::motion`): `Detents`, pure NaN-safe snap-point math
   (`open_progress`, `drag_to`, `release_target`, `settle` returning `DetentRelease` under a
   `DismissPolicy`), and the headless `DetentController` (interruptible drag; a release hands the
@@ -139,6 +160,9 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Changed
 
+- `PathStyle` gained `FillEvenOdd` and `StrokeStyled` (a narrow source break): an exhaustive `match`
+  over `PathStyle` outside frust must add the two arms, or read through `PathStyle::fill_rule()` /
+  `stroke()` instead of matching.
 - The Material and shadcn overlay modals compute open progress, the drag clamp, the release target
   and the settle decision through `Detents`; behaviour is unchanged for finite snap points, and their
   public fling-velocity constants now equal `DEFAULT_FLING_VELOCITY`. The shadcn modal now drops

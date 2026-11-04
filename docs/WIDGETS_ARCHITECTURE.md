@@ -21,6 +21,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how WIDGETS relates to the other unit
 | `frust-widgets` (baseline) | Baseline layout containers and interactive leaf widgets (text, forms, gestures, scrolling, a virtualized `ListView`, a four-slot `Scaffold`, `IndexedStack`, `container`/`colored_box`, `divider`, `icon_button`), plus the `shortcuts` chord-binding wrapper and the baseline Tab stops — see WIDGETS_CODE_STANDARDS.md's Keyboard Focus and Shortcuts |
 | `frust-widgets::canvas` | `CanvasView`/`CanvasWidget` — declarative custom painting over `PaintScene`, local-space, no semantics node |
 | `frust-widgets::repaint_boundary` | `repaint_boundary(child)` (`.alpha(f32)`) and the shared `RetainedBoundary`: per frame `DrawRetained` when the subtree is clean, its transform's linear part unchanged, nothing inside published a paint and the ledger holds (key, extent, scale from `PaintScene::current_transform()`) and covers the serial it recorded under (runs of consecutive recordings at one origin, size and linear part; the first draw confirms; it must have recorded on the immediately previous paint; serial 0 = bare ctx skips the check); else `PushRetained`+body+`PopRetained` when recording is allowed and the body is visible, else direct paint (kill switch `FRUST_NO_RETAINED_LAYERS` → plain bodies). `motion::AnimatedOpacity::cached(bool)` opts an opacity animation in (`AnimatedScale` unchanged) |
+| `frust-widgets::glass_surface` | `glass_surface(child)` (`.tier(GlassTier)`, `.corner_radius`, `.material`) paints one `GlassScale` tier behind its child: shadow, rounded clip, `backdrop_blur` + fills, child, hairline; an explicit material beats the theme tier, and with neither it paints an opaque fill. Each surface spends one of the per-frame backdrops (RENDER unit); blur intent is sigma in logical px |
 | `frust-widgets::pinch` | `PinchRecognizer` (a pure two-contact state machine) and `pinch_detector`, the wrapper feeding it from a gesture's contacts |
 | `frust-widgets::pan_zoom` | `PanZoomView`/`PanZoomWidget` — one child under a pan/pinch-or-wheel-zoom transform, with inertia and a `PanZoomController` handle |
 | `frust-widgets::motion` | Implicit-animation and transition vocabulary, `card_switcher` (see *Card Switcher*), `detent` (pure `Detents` snap-point math + headless `DetentController`) and `presence(open, child)` (`.timing`, `.on_exited`): kept-mounted and owner-controlled — always built and laid out, painted only while visible, input only while open, semantics only while visible; `on_exited` rides the next Housekeeping flush and fires only once an exit is painted (a cleanup cue); core retains no absent view. `MotionExtras` (`extended` 800, `reduced_fade` 120 ms; 0 snaps) sets every reduce-motion collapse |
@@ -36,9 +37,8 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how WIDGETS relates to the other unit
 | `frust-widgets::window_drag_region` | `window_drag_region(child)` (`.resize(edge)`, `.double_click_toggles_maximize(bool)`) — offers a primary press to the child first and pushes `BeginMove`/`BeginResize` only for one the child ignores; never captures the pointer |
 | `frust-theme` | `Theme` aggregate and its token tables (color, type, shape, elevation, motion, glass); carries no design-language token module of its own — only the neutral/language-free floor (`Theme::neutral()` and friends) |
 
-`nav/`'s files are private and re-exported through `navigator.rs`, so the public path is unchanged:
-the widget/stack core, ambient-context idioms, option/callback vocabulary, controller, view
-constructors and edge-swipe driver, with tests in `navigator_tests/` (one file per concern).
+`nav/`'s files are private, re-exported through `navigator.rs` (stack core, ambient-context idioms,
+options/callbacks, controller, view constructors, edge-swipe driver); tests in `navigator_tests/`.
 
 ## Layer Dependencies
 

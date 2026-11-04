@@ -51,11 +51,11 @@ impl GlassFill {
 ///
 /// `blur_radius_intent` is a Gaussian **standard deviation in logical px** —
 /// exactly what `PaintScene::backdrop_blur` takes — so a widget passes it
-/// through unconverted. A design source that quotes a CSS `blur()` radius
-/// halves it first (CSS blur radius = 2 x standard deviation). `0.0` means
-/// "no lens": the opaque-material path (see [`GlassMaterial::is_opaque`]).
-/// The engine clamps the value to its own maximum sigma, and caps how many
-/// backdrop blurs one frame may carry; see the `glass_surface` widget docs.
+/// through unconverted. A CSS `backdrop-filter: blur(Npx)` maps to a sigma of
+/// `N` with no conversion. `0.0` means "no lens": the opaque-material path
+/// (see [`GlassMaterial::is_opaque`]). The engine clamps the value to its own
+/// maximum sigma, and caps how many backdrop blurs one frame may carry (four
+/// by default, configurable); see the `glass_surface` widget docs.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GlassMaterial {
     /// Background-blur Gaussian standard deviation in logical px; `0.0` is
