@@ -56,7 +56,9 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Once};
 
-use frust::authoring::text::{FontWeight, LineHeight, TextContext, TextLayout, TextStyle};
+use frust::authoring::text::{
+    FontWeight, LineHeight, LocaleStamp, TextContext, TextLayout, TextStyle,
+};
 use frust::{
     Color, PlatformViewView, ResolvedSurfaceMode, SizedBox, Theme, on_cleanup, platform_view,
     resolved_surface_mode, use_context,
@@ -273,19 +275,7 @@ struct BannerText {
     layout: Option<TextLayout>,
     laid_out_style: Option<TextStyle>,
     laid_out_max_width: Option<f32>,
-    laid_out_locale: u64,
-}
-
-/// The app-locale generation a layout shaped in `style` depends on: the live
-/// default-locale generation for an untagged style, a constant for a style
-/// carrying its own locale (the default never touches it). Caches store it
-/// beside the style key and reuse only on equality.
-fn locale_generation(style: &TextStyle) -> u64 {
-    if style.locale.is_some() {
-        0
-    } else {
-        frust::authoring::text::default_locale_generation()
-    }
+    laid_out_locale: LocaleStamp,
 }
 
 impl BannerText {
@@ -295,7 +285,7 @@ impl BannerText {
             layout: None,
             laid_out_style: None,
             laid_out_max_width: None,
-            laid_out_locale: 0,
+            laid_out_locale: LocaleStamp::default(),
         }
     }
 
@@ -311,10 +301,13 @@ impl BannerText {
         if let Some(cached) = &self.layout
             && self.laid_out_max_width == max_width
             && self.laid_out_style.as_ref() == Some(style)
-            && self.laid_out_locale == locale_generation(style)
+            && self.laid_out_locale.is_current(style.locale.as_deref())
         {
             return cached.size();
         }
+        // Read the stamp BEFORE shaping: a locale write landing mid-shape then leaves the
+        // stored stamp stale, so the next pass re-shapes instead of trusting the old layout.
+        let stamp = LocaleStamp::for_style(style.locale.as_deref());
         let laid = ctx
             .text_context::<TextContext>()
             .layout(&self.content, style, max_width);
@@ -322,7 +315,7 @@ impl BannerText {
         self.layout = Some(laid);
         self.laid_out_style = Some(style.clone());
         self.laid_out_max_width = max_width;
-        self.laid_out_locale = locale_generation(style);
+        self.laid_out_locale = stamp;
         size
     }
 
@@ -2723,6 +2716,7 @@ mod tests {
     use super::*;
     use frust_core::{BoxConstraints, LayoutCtx, PaintCtx, PaintScene, Widget};
     use frust_text::TextContext;
+    use frust_text::locale::test_support::LocaleSlotGuard;
     use kurbo::{Point, Rect, Shape, Size};
     use peniko::{Brush, Color};
     use std::any::Any;
@@ -2743,22 +2737,6 @@ mod tests {
         view.build(&mut BuildCtx::new(&mut counter))
     }
 
-    /// Serialises the tests that write the process-global default-locale slot.
-    static LOCALE_SLOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Holds the slot lock and restores `None` on drop, panic included.
-    struct LocaleWriter(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
-
-    fn locale_writer() -> LocaleWriter {
-        LocaleWriter(LOCALE_SLOT.lock().unwrap_or_else(|e| e.into_inner()))
-    }
-
-    impl Drop for LocaleWriter {
-        fn drop(&mut self) {
-            frust::authoring::text::set_default_locale(None);
-        }
-    }
-
     /// `(shapes, hits)` the text context has seen so far.
     fn shape_counts(tcx: &TextContext) -> (u64, u64) {
         let stats = tcx.shape_cache_stats();
@@ -2767,7 +2745,7 @@ mod tests {
 
     #[test]
     fn banner_text_follows_the_app_locale_generation() {
-        let _slot = locale_writer();
+        let _slot = LocaleSlotGuard::set(None);
         let style = TextStyle::new(14.0, Color::BLACK);
         let mut banner = BannerText::new("Refused");
         let mut tcx = TextContext::new();
@@ -2805,6 +2783,28 @@ mod tests {
             shape_counts(&tcx),
             before,
             "an explicit locale stays cached"
+        );
+    }
+
+    #[test]
+    fn banner_text_stamps_the_locale_it_read_before_shaping() {
+        let _slot = LocaleSlotGuard::set(Some("ja"));
+        let style = TextStyle::new(14.0, Color::BLACK);
+        let mut banner = BannerText::new("Refused");
+        let mut tcx = TextContext::new();
+        let before = LocaleStamp::for_style(None);
+        {
+            let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+            banner.layout(&mut lctx, &style, Some(200.0));
+        }
+        assert_eq!(
+            banner.laid_out_locale, before,
+            "the stored stamp is the pre-shape read"
+        );
+        frust::authoring::text::set_default_locale(Some("ko"));
+        assert!(
+            !banner.laid_out_locale.is_current(None),
+            "a later write leaves the stored stamp stale"
         );
     }
 
