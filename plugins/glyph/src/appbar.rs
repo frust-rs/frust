@@ -484,11 +484,12 @@ impl ShapedRun {
         {
             return cached.size();
         }
+        let stamp = LayoutGuard::stamp(style);
         let text_ctx = ctx.text_context::<TextContext>();
         let laid = text_ctx.layout(&self.content, style, max_width);
         let size = laid.size();
         self.layout = Some(laid);
-        self.guard.record(style, max_width);
+        self.guard.record(style, max_width, stamp);
         size
     }
 
@@ -1832,6 +1833,13 @@ impl AppBarWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use frust::authoring::text::TextContext;
+    use frust::authoring::{BuildCtx, PointerButton, PointerEvent, WindowEdgeInsets, WindowInsets};
+    use frust_core::RenderRoot;
+    use frust_widgets::test_support::LocaleSlotGuard;
+    use frust_widgets::test_support::leaf_any;
+    use std::any::Any;
+    use std::cell::Cell;
 
     /// Total shaping-cache lookups so far: unchanged while a cached layout is
     /// reused, advanced by every rebuild.
@@ -1842,8 +1850,7 @@ mod tests {
 
     #[test]
     fn cached_layout_follows_the_app_locale_generation() {
-        use crate::badge::locale_test::DefaultLocale;
-        let _locale = DefaultLocale::set(None);
+        let _locale = LocaleSlotGuard::set(None);
         let mut tcx = TextContext::new();
         let mut run = ShapedRun::new("Title");
         let style = TextStyle::default();
@@ -1880,12 +1887,6 @@ mod tests {
         pass(&mut run, &tagged, &mut tcx);
         assert_eq!(lookups(&tcx), tagged_built);
     }
-    use frust::authoring::text::TextContext;
-    use frust::authoring::{BuildCtx, PointerButton, PointerEvent, WindowEdgeInsets, WindowInsets};
-    use frust_core::RenderRoot;
-    use frust_widgets::test_support::leaf_any;
-    use std::any::Any;
-    use std::cell::Cell;
 
     fn ft_ms(ms: f64) -> FrameTime {
         FrameTime::from_nanos((ms * 1_000_000.0) as u64)

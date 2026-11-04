@@ -499,11 +499,12 @@ impl GlyphLabel {
         {
             return cached.size();
         }
+        let stamp = LayoutGuard::stamp(style);
         let text_ctx = ctx.text_context::<TextContext>();
         let laid = text_ctx.layout(&self.content, style, None);
         let size = laid.size();
         self.layout = Some(laid);
-        self.guard.record(style, None);
+        self.guard.record(style, None, stamp);
         size
     }
 
