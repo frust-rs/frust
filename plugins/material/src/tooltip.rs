@@ -1111,8 +1111,9 @@ impl Widget for PlainPanelWidget {
         // `TooltipHover` cell, not an app-state mutation, so no
         // `mark_pending_result_flush`/`EventCtx` round trip is needed.
         if self.dismiss_via_long_press && !self.dismissed {
-            let start = *self.timer_start.get_or_insert(ctx.frame_time());
-            let elapsed_ms = ctx.frame_time().saturating_sub(start).as_secs_f64() * 1000.0;
+            let now = ctx.input_time();
+            let start = *self.timer_start.get_or_insert(now);
+            let elapsed_ms = now.saturating_sub(start).as_secs_f64() * 1000.0;
             if elapsed_ms >= PLAIN_DISMISS_MS {
                 self.dismissed = true;
                 self.hover.set_open(false);
@@ -1726,6 +1727,27 @@ mod tests {
             "fires via Housekeeping, no further pointer event"
         );
         assert_eq!(h.hover.via(), TooltipOpenVia::LongPress);
+    }
+
+    #[test]
+    fn long_press_opens_on_wall_time_under_slow_motion() {
+        // At quarter speed the threshold of raw time is a quarter of the
+        // threshold on the animation clock: a hold read off that clock would
+        // not have crossed it yet.
+        frust_core::anim::with_thread_animation_time_scale(0.25, || {
+            let mut h = Harness::new();
+            h.event(down(10.0, 10.0));
+            h.paint(0.0);
+            let flags = h
+                .root
+                .paint(&mut NullScene, ft(LONG_PRESS_MS as f64 + 20.0));
+            assert!(
+                flags.needs_frame,
+                "the raw hold crossed the threshold and latched the fire"
+            );
+            h.pass();
+            assert!(h.hover.is_open(), "opens on the raw hold");
+        });
     }
 
     #[test]
