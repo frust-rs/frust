@@ -124,6 +124,46 @@ fn a_backward_raw_step_never_rewinds_a_scaled_clock() {
 }
 
 #[test]
+fn returning_to_scale_one_continues_one_to_one_after_a_scaled_run() {
+    let mut probe = Probe::new();
+    let mut raw = 40 * MS;
+    probe.paint(raw, 1.0);
+    for _ in 0..8 {
+        raw += 16 * MS + 7;
+        probe.paint(raw, 0.5);
+    }
+    raw += 16 * MS;
+    let (mut prev_frame, mut prev_input) = probe.paint(raw, 1.0);
+    assert_ne!(prev_frame, prev_input, "the scaled offset must persist");
+    for step in 1..=20u64 {
+        raw += 9 * MS + step * 113;
+        let (frame, input) = probe.paint(raw, 1.0);
+        assert_eq!(
+            frame.saturating_sub(prev_frame),
+            input.saturating_sub(prev_input),
+            "a scale-1.0 frame after a scaled run must advance one to one"
+        );
+        (prev_frame, prev_input) = (frame, input);
+    }
+}
+
+#[test]
+fn a_backward_raw_step_after_a_scaled_run_never_rewinds() {
+    let mut probe = Probe::new();
+    probe.paint(100 * MS, 1.0);
+    probe.paint(200 * MS, 0.5);
+    let (forward, _) = probe.paint(300 * MS, 1.0);
+    let (after_rewind, input) = probe.paint(120 * MS, 1.0);
+    assert_eq!(input, FrameTime::from_nanos(120 * MS));
+    assert_eq!(after_rewind, forward, "the clock rewound to raw time");
+    let (resumed, _) = probe.paint(135 * MS, 1.0);
+    assert_eq!(
+        resumed.saturating_sub(forward).as_nanos(),
+        (15 * MS) as u128
+    );
+}
+
+#[test]
 fn out_of_range_scale_is_rejected() {
     for bad in [
         0.0,

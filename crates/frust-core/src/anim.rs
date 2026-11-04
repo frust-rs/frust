@@ -74,6 +74,11 @@ pub(crate) fn is_valid_time_scale(scale: f64) -> bool {
 /// blink, velocity sampling) keep the shell's raw clock. Returns `false`, leaving
 /// the scale unchanged, for a value that is not finite or lies outside
 /// [`MIN_ANIMATION_TIME_SCALE`]`..=`[`MAX_ANIMATION_TIME_SCALE`].
+///
+/// The scale is global by design: one value for every render root in the
+/// process. After a run at any other scale, a root's animation clock keeps a
+/// fixed offset from raw time even once the scale is back at `1.0`. A test uses
+/// [`with_thread_animation_time_scale`], or holds a lock and restores `1.0`.
 pub fn set_animation_time_scale(scale: f64) -> bool {
     if !is_valid_time_scale(scale) {
         return false;
@@ -122,6 +127,10 @@ impl AnimationClock {
     /// scaled time. The first call adopts `raw`; while the clock still equals the
     /// raw one, scale `1.0` passes `raw` through unchanged, a backward step
     /// included. A scaled delta is rounded to whole nanoseconds per call.
+    ///
+    /// After any frame at another scale the offset from raw time persists: scale
+    /// `1.0` then adds raw deltas one to one and a backward step adds zero, so the
+    /// clock never jumps back to raw.
     pub(crate) fn advance(&mut self, raw: FrameTime, scale: f64) -> FrameTime {
         self.scaled = match self.last_raw {
             None => raw,
