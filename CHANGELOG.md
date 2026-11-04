@@ -9,7 +9,7 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 ### Added
 
 - `glass_surface(child)` (`GlassSurfaceView`, flat from `frust`): a baseline widget that paints one
-  tier of the theme's glass scale behind its child (shadow, rounded clip, backdrop blur and washes,
+  tier of the theme's glass scale behind its child (shadow cast outside the surface, rounded clip, backdrop blur and washes,
   child, specular hairline). `.tier(GlassTier)` picks `Control`, `Bar` (default) or `Chrome` from the
   new `GlassScale::tier(GlassTier) -> &GlassMaterial`; `.corner_radius(f64)` and `.material(..)`
   (wins over the theme's tier) refine it, and with neither a theme nor a material it paints an
