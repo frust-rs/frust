@@ -12,7 +12,7 @@ use frust_core::{
     Widget,
 };
 use frust_text::{
-    FontFamily, FontStyle, FontWeight, LineHeight, TextAlign, TextContext, TextLayout,
+    FontFamily, FontStyle, FontWeight, LineHeight, LocaleStamp, TextAlign, TextContext, TextLayout,
     TextOverflow, TextStyle,
 };
 use frust_theme::{Theme, TypeScale};
@@ -365,7 +365,7 @@ impl<State: 'static> View<State> for TextView {
             layout: None,
             laid_out_max_width: None,
             laid_out_style: None,
-            laid_out_locale_generation: 0,
+            laid_out_locale_stamp: LocaleStamp::default(),
         }
     }
 
@@ -449,10 +449,10 @@ pub struct TextWidget {
     /// change — still forces a re-shape (the layout-time-baked contract, see
     /// `docs/CODE_STANDARDS.md` Theming).
     laid_out_style: Option<TextStyle>,
-    /// [`frust_text::default_locale_generation`] when `layout` was shaped: the
-    /// app's default locale picks the face for untagged text, so a change
-    /// re-shapes without a view change.
-    laid_out_locale_generation: u64,
+    /// The [`LocaleStamp`] read just before `layout` was shaped: the app's
+    /// default locale picks the face for untagged text, so a change re-shapes
+    /// without a view change.
+    laid_out_locale_stamp: LocaleStamp,
 }
 
 impl TextWidget {
@@ -511,11 +511,13 @@ impl Widget for TextWidget {
         // changes `style.color` (and a type-scale family swap changes an
         // opted-in `style.family`), which mismatches `laid_out_style` and
         // forces a re-shape even without a view change.
-        let locale_generation = frust_text::default_locale_generation();
+        // Read before shaping (see `LocaleStamp`). `None`: this cache keys on
+        // the current generation even for a tagged style, as it always has.
+        let locale_stamp = LocaleStamp::for_style(None);
         if let Some(cached) = &self.layout
             && self.laid_out_max_width == max_width
             && self.laid_out_style.as_ref() == Some(&style)
-            && self.laid_out_locale_generation == locale_generation
+            && self.laid_out_locale_stamp == locale_stamp
         {
             return bc.constrain(cached.size());
         }
@@ -532,7 +534,7 @@ impl Widget for TextWidget {
         self.layout = Some(layout);
         self.laid_out_max_width = max_width;
         self.laid_out_style = Some(style);
-        self.laid_out_locale_generation = locale_generation;
+        self.laid_out_locale_stamp = locale_stamp;
         size
     }
 
@@ -561,28 +563,22 @@ impl Widget for TextWidget {
 /// fonts (every registration lands in the process-global app-font record and makes every
 /// `TextInput`'s `sync_app_fonts` report a change), takes [`reader`]; a test that writes the
 /// default-locale slot takes [`writer`].
+///
+/// Both take the shared [`LocaleSlotGuard`](crate::test_support::LocaleSlotGuard) — the lock a
+/// design-system plugin's tests take too.
 #[cfg(test)]
 pub(crate) mod locale_slot_test {
-    use std::sync::{Mutex, MutexGuard};
-
-    static LOCK: Mutex<()> = Mutex::new(());
+    use crate::test_support::LocaleSlotGuard;
 
     /// Holds the lock for a test that asserts shape counts and never writes the slot.
-    pub(crate) fn reader() -> MutexGuard<'static, ()> {
-        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    pub(crate) fn reader() -> LocaleSlotGuard {
+        LocaleSlotGuard::hold()
     }
 
-    /// Holds the lock for a test that writes the slot; restores `None` on drop, panic included.
-    pub(crate) struct Writer(#[allow(dead_code)] MutexGuard<'static, ()>);
-
-    pub(crate) fn writer() -> Writer {
-        Writer(reader())
-    }
-
-    impl Drop for Writer {
-        fn drop(&mut self) {
-            frust_text::set_default_locale(None);
-        }
+    /// Holds the lock for a test that writes the slot; restores the value found at the lock on
+    /// drop, panic included.
+    pub(crate) fn writer() -> LocaleSlotGuard {
+        LocaleSlotGuard::hold()
     }
 }
 
@@ -996,7 +992,7 @@ mod tests {
     #[test]
     fn a_default_locale_change_invalidates_the_cached_shape() {
         // The slot is process-global: the guard serialises this writer against the
-        // shape-count tests and restores `None` even if an assertion panics.
+        // shape-count tests and restores the prior default even if an assertion panics.
         let _slot = locale_slot_test::writer();
         let bc = BoxConstraints::loose(Size::new(200.0, 200.0));
         let view = text("\u{76f4}");
@@ -1008,9 +1004,18 @@ mod tests {
         frust_text::set_default_locale(Some("ja"));
         let after = frust_text::default_locale_generation();
         assert_ne!(before, after);
+        let stale = widget.laid_out_locale_stamp;
+        assert!(
+            !stale.is_current(None),
+            "the change stales the stored stamp"
+        );
         widget.layout(&mut lctx, &bc);
-        let laid_out = widget.laid_out_locale_generation;
-        assert_eq!(laid_out, after, "the layout re-ran under the new default");
+        let laid_out = widget.laid_out_locale_stamp;
+        assert_eq!(
+            laid_out,
+            LocaleStamp::for_style(None),
+            "the layout re-ran under the new default"
+        );
     }
 
     // --- Theme-swap regression ---
@@ -1103,7 +1108,7 @@ mod tests {
     /// held for as long as the caller keeps the guard: the registration lands
     /// in the process-global app-font record, which every `TextInput`'s
     /// `sync_app_fonts` reads (see [`locale_slot_test`]).
-    fn tuffy_context() -> (TextContext, std::sync::MutexGuard<'static, ()>) {
+    fn tuffy_context() -> (TextContext, crate::test_support::LocaleSlotGuard) {
         let slot = locale_slot_test::reader();
         let mut tcx = TextContext::new();
         tcx.register_fonts(TUFFY.to_vec())

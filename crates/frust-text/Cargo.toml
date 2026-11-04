@@ -54,3 +54,8 @@ windows-link.workspace = true
 # `dlopen`: no link-time libfontconfig requirement (a system without it simply gets no answers).
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 yeslogic-fontconfig-sys = { workspace = true, features = ["dlopen"] }
+
+[features]
+# Exposes `locale::test_support::LocaleSlotGuard`, the shared lock over the default-locale slot, to
+# downstream tests; enabled from dev-dependencies only.
+test-support = []

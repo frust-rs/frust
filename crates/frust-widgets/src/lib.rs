@@ -223,7 +223,8 @@ child_key_from!(
 
 /// Shared, GPU-free fixtures for the container layout/paint/event tests: a
 /// fixed-size [`Leaf`], a distinctive swap partner, an event-recording
-/// [`Probe`], and a recording [`RecordingScene`].
+/// [`Probe`], a recording [`RecordingScene`], and the default-locale slot lock
+/// [`LocaleSlotGuard`](test_support::LocaleSlotGuard).
 ///
 /// Compiled into this crate's own test build, and — behind the non-default
 /// `test-support` feature — into the library itself, so a design system authored
@@ -239,6 +240,11 @@ pub mod test_support {
     };
     use kurbo::{Affine, Point, Size};
     use peniko::Color;
+
+    /// `frust-text`'s one lock over the process-global default-locale slot, so every crate in a
+    /// test binary serialises on the same lock: a test that writes the slot, or asserts the
+    /// shape/rebuild counts it steers, holds it (`set`/`hold`); its drop restores the prior value.
+    pub use frust_text::locale::test_support::LocaleSlotGuard;
 
     /// A leaf view of fixed intrinsic size that fills a rect on paint.
     pub struct Leaf {

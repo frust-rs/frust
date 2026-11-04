@@ -947,6 +947,11 @@ pub mod authoring {
         /// `font_cache_stats() -> FontCacheStats`. Without these an app could
         /// call the methods but never name what they return.
         pub use frust_text::{FontCacheStats, FontError, RegisteredFamily, ShapeCacheStats};
+        /// The app's default locale for untagged text (the Han language, the cache keys), and
+        /// the [`LocaleStamp`] a cached layout reads before shaping to know when it went stale.
+        pub use frust_text::{
+            LocaleStamp, default_locale, default_locale_generation, set_default_locale,
+        };
         /// The index bridge between the two `EditingState`s this seam exposes:
         /// [`super::EditingState`] (core/IME) counts UTF-16 code units, while
         /// [`EditingStateBytes`] counts bytes. A widget driving its own
@@ -956,8 +961,6 @@ pub mod authoring {
         /// is the return direction, used inside `frust-text` itself to build
         /// an `EditingState` back out of editor state.
         pub use frust_text::{byte_to_utf16, utf16_to_byte};
-        /// The app's default locale for untagged text (the Han language, the cache keys).
-        pub use frust_text::{default_locale, default_locale_generation, set_default_locale};
     }
 
     /// The renderer-agnostic display list, for widgets painting below `PaintScene`.
