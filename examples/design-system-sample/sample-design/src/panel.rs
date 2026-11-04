@@ -75,8 +75,9 @@ pub struct SamplePanelView<State: 'static> {
 /// Wrap `child` in a Sample panel.
 pub fn sample_panel<State: 'static, V: View<State>>(child: V) -> SamplePanelView<State> {
     // erasure: keep stored in the view's non-generic AnyView child field
+    let child = any(child);
     SamplePanelView {
-        child: any(child),
+        child,
         glass: false,
     }
 }
@@ -89,7 +90,7 @@ impl<State: 'static> SamplePanelView<State> {
         let glass = glass_surface(self.child)
             .tier(tier)
             .corner_radius(SAMPLE_RADIUS);
-        // erasure: the wrapped child stays in the non-generic AnyView field
+        // erasure: keep the wrapped child in the non-generic AnyView field
         self.child = any(glass);
         self.glass = true;
         self
