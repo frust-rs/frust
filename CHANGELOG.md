@@ -119,6 +119,17 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   re-exported (`frust_text`, `frust_shell_common`, `frust::authoring::text`). A report whose every flush
   failed leaves the once-per-transition latch unarmed so the next hide retries; the first failed flush a
   hook sees logs at warn, later ones at debug (1f7cf69bf, d4adce3f3).
+- `AnimationController::velocity()` and the velocity-carrying retarget `spring_to(target, SpringDesc)` /
+  `spring_to_with_velocity(target, velocity, SpringDesc)` in `frust-core`, so any controller user gets
+  velocity continuity (a fling or release velocity carries into the spring).
+- `frust-theme` `MotionExtras { extended: 800.0, reduced_fade: 120.0 }` (milliseconds; read with
+  `MotionExtras::of(theme)` / `reduced_fade_duration()`; flat as `frust::MotionExtras`) and
+  `resolve_spec_with(spec, scheme, reduced_fade)`. `MotionDurations` and `MotionScheme` are unchanged.
+- `frust::motion::presence`: `Presence` and `presence(open, child)` with `.timing(enter, exit)` and
+  `.on_exited`. The child stays mounted: always built and laid out, painted only while visible,
+  input only while open, semantics only while visible. Reversing a duration ramp is value-continuous
+  and a spring value- and velocity-continuous; `on_exited` is delivered on the next frame's
+  Housekeeping event, and only once an exit has painted. Under `reduce_motion` it runs a linear reduced fade.
 
 ### Changed
 
@@ -195,9 +206,24 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   shell scripts and the `xcodebuild` test are `cfg`-gated to the hosts that support them; the
   `frust-hotpatch` `real_patch_library` test expects the by-design zero slide on Windows
   (2f2832c1c, 651d30a1d).
+- Every reduce-motion collapse (navigator, including the interactive edge-swipe settle, switcher,
+  `AnimatedOpacity` and `card_switcher`) runs for `MotionExtras::reduced_fade` (120 ms by default; 0
+  snaps with no frame request) instead of a fixed 120 ms. The `network_image` fade-in therefore
+  collapses to that reduced fade under reduce-motion.
 
 ### Fixed
 
+- The motion-token conversions behind reduce-motion, navigation transitions, the switcher and presence
+  no longer panic paint: each uses `Duration::try_from_secs_f64` and falls back on a negative,
+  non-finite or too-large value (`MotionExtras::reduced_fade_duration` 120 ms, navigation transitions
+  340 ms enter / 150 ms exit, the switcher base 220 ms, presence timing the neutral token).
+- `AnimationController::forward()` always settles `Completed` and `reverse()` always `Dismissed`, whatever
+  the start value (it can lie outside 0..=1 after `spring_to`); `animate_to` settles by direction of
+  travel. Behaviour change: `reverse()` at exactly 0.0 now settles `Dismissed`, where it settled `Completed`.
+- `presence`: a callback attached after an exit settled never fires for that exit, a zero-distance duration
+  ramp settles immediately with no frame, open-then-close before any paint fires `on_exited` once, and a
+  settled child paints without an alpha layer. An exit settles only when painted, so `on_exited` is a
+  cleanup cue, not a correctness gate.
 - An interactive edge-swipe pop honours `reduce_motion`: it collapses to `ReducedCrossfade` on its
   first paint, the drag drives the alpha, the release settles on the reduced timing, and a
   `PageTransition::Custom` fn is not called.

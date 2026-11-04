@@ -312,7 +312,7 @@ Design-System Contract for the toolkit they all build against). Their shared cha
   `overlay/anchored.rs`; see `shadcn-anchored-exit-needs-kept-mounted` in
   [LIMITATIONS.md](LIMITATIONS.md)).
 - **`frust-beui` carries a third, independently-shaped `overlay` seam** — its own `anchored`/`modal`
-  hosts (not ported from `frust-shadcn`'s), staged by the catalog's own `motion::Presence` driver,
+  hosts (not ported from `frust-shadcn`'s), staged by the catalog's own `motion::Presence` driver (the framework now ships `frust::motion::presence`; beUI keeps its own until it migrates),
   with the same *which-component-mounts-through-which-host* table discipline (`overlay/mod.rs`'s own
   doc table) and the same bounded-constraints/no-scroll-view mounting contract as shadcn/material's.
   Its `anchored` host takes the identical kept-mounted `.open(bool)` shape — a third

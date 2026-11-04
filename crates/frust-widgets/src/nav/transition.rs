@@ -115,10 +115,17 @@ const GLYPH_EXIT_CURVE: Curve = Curve::Cubic(0.4, 0.0, 1.0, 1.0);
 /// faster than entrances" rule in the single-progress geometry.
 const GLYPH_FADE_SPLIT: f64 = 0.44;
 
-/// Reduced-motion collapse duration: the Glyph design system's hard rule that
-/// `prefers-reduced-motion` collapses *every* pattern to a `≤120ms` linear
-/// crossfade. See [`resolve_spec`].
+/// The default reduced-motion collapse duration, used when no theme is threaded
+/// (a theme's `MotionExtras::reduced_fade` overrides it where the collapse is
+/// themed; `0` snaps and no upper bound is enforced). `prefers-reduced-motion`
+/// collapses *every* pattern to a linear crossfade. See [`resolve_spec`].
 pub(crate) const REDUCE_MOTION_DURATION: Duration = Duration::from_millis(120);
+
+/// A theme duration token in milliseconds as a [`Duration`], or `fallback` when
+/// the token is negative, non-finite or too large to represent.
+pub(crate) fn token_duration(ms: f64, fallback: Duration) -> Duration {
+    Duration::try_from_secs_f64(ms / 1000.0).unwrap_or(fallback)
+}
 
 /// iOS push parallax fraction: the outgoing (below) page slides out by one third
 /// of the incoming page's travel while the incoming page slides fully across.
@@ -598,13 +605,10 @@ pub fn preset_enter_exit(
         PageTransition::Glyph => match scheme {
             Some(s) => (
                 Timing::Duration(
-                    Duration::from_secs_f64(s.durations.slow / 1000.0),
+                    token_duration(s.durations.slow, GLYPH_ENTER),
                     s.easing.spatial,
                 ),
-                Timing::Duration(
-                    Duration::from_secs_f64(s.durations.fast / 1000.0),
-                    s.easing.exit,
-                ),
+                Timing::Duration(token_duration(s.durations.fast, GLYPH_EXIT), s.easing.exit),
             ),
             None => (
                 Timing::Duration(GLYPH_ENTER, GLYPH_SPATIAL_CURVE),
@@ -652,11 +656,26 @@ pub fn resolve_timing(
 ///   ([`PageTransition::None`]) spec is left untouched.
 /// - otherwise a [`Timing::ThemeDefault`] is resolved to the preset's theme
 ///   timing ([`resolve_timing`]); the preset is unchanged.
+///
+/// The collapse always runs for [`REDUCE_MOTION_DURATION`]; use
+/// [`resolve_spec_with`] to honour a theme's `MotionExtras::reduced_fade`.
 pub fn resolve_spec(spec: TransitionSpec, scheme: Option<&MotionScheme>) -> TransitionSpec {
+    resolve_spec_with(spec, scheme, REDUCE_MOTION_DURATION)
+}
+
+/// [`resolve_spec`] with the reduced-motion collapse running for `reduced_fade`
+/// instead of the [`REDUCE_MOTION_DURATION`] default — the theme's
+/// `MotionExtras::reduced_fade_duration`. A zero `reduced_fade` lands the
+/// target on the first paint.
+pub fn resolve_spec_with(
+    spec: TransitionSpec,
+    scheme: Option<&MotionScheme>,
+    reduced_fade: Duration,
+) -> TransitionSpec {
     if spec.is_animated() && scheme.map(|s| s.reduce_motion).unwrap_or(false) {
         return TransitionSpec {
             preset: PageTransition::ReducedCrossfade,
-            timing: Timing::Duration(REDUCE_MOTION_DURATION, Curve::Linear),
+            timing: Timing::Duration(reduced_fade, Curve::Linear),
         };
     }
     TransitionSpec {
@@ -1163,6 +1182,18 @@ mod tests {
                 m.easing.exit
             )
         );
+    }
+
+    #[test]
+    fn glyph_enter_exit_fall_back_on_unrepresentable_duration_tokens() {
+        for huge in [1e300, f64::MAX, f64::NAN, -5.0] {
+            let mut m = MotionScheme::neutral();
+            m.durations.slow = huge;
+            m.durations.fast = huge;
+            let (enter, exit) = preset_enter_exit(PageTransition::Glyph, Some(&m));
+            assert_eq!(enter, Timing::Duration(GLYPH_ENTER, m.easing.spatial));
+            assert_eq!(exit, Timing::Duration(GLYPH_EXIT, m.easing.exit));
+        }
     }
 
     #[test]

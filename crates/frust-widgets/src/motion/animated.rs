@@ -58,10 +58,10 @@ use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Curve, EventCtx, EventResult,
     FrameTime, InputEvent, LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, Tween, View, Widget, any,
 };
-use frust_theme::{MotionSpring, Theme};
+use frust_theme::{MotionExtras, MotionSpring, Theme};
 use kurbo::{Affine, Point, Size};
 
-use crate::nav::transition::{REDUCE_MOTION_DURATION, TransitionDriver, make_driver};
+use crate::nav::transition::{TransitionDriver, make_driver};
 use crate::repaint_boundary::RetainedBoundary;
 use crate::{Alignment, Timing};
 
@@ -215,14 +215,11 @@ impl ImplicitAnim {
         self.drive(now, timing, false)
     }
 
-    /// Advance one frame under the reduced-motion collapse: a 120 ms linear
-    /// ramp, regardless of any explicit timing.
-    fn advance_collapsed(&mut self, now: FrameTime) -> bool {
-        self.drive(
-            now,
-            Timing::Duration(REDUCE_MOTION_DURATION, Curve::Linear),
-            true,
-        )
+    /// Advance one frame under the reduced-motion collapse: a linear ramp of
+    /// `fade` (the theme's reduced fade; 120 ms by default), regardless of any
+    /// explicit timing. A zero `fade` lands on the target this paint.
+    fn advance_collapsed(&mut self, now: FrameTime, fade: Duration) -> bool {
+        self.drive(now, Timing::Duration(fade, Curve::Linear), true)
     }
 
     /// Whether the value has landed on the target with no retarget pending: the
@@ -286,8 +283,8 @@ impl ImplicitAnim {
 // --- AnimatedOpacity ---------------------------------------------------------
 
 /// A declarative opacity wrapper. See the [module docs](self). Under
-/// `reduce_motion` the fade is a 120 ms linear collapse, whatever `.timing(...)`
-/// is set.
+/// `reduce_motion` the fade is a linear collapse running for the theme's
+/// `MotionExtras::reduced_fade` (120 ms by default), whatever `.timing(...)` is set.
 pub struct AnimatedOpacityView<State: 'static> {
     target: f64,
     timing: Option<Timing>,
@@ -405,7 +402,8 @@ impl Widget for AnimatedOpacityWidget {
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         let theme = Theme::from_paint_ctx(ctx);
         let animating = if reduce_motion(theme) {
-            self.anim.advance_collapsed(ctx.frame_time())
+            let fade = MotionExtras::of(theme).reduced_fade_duration();
+            self.anim.advance_collapsed(ctx.frame_time(), fade)
         } else {
             let timing = resolve_opacity_timing(theme, self.explicit_timing);
             self.anim.advance(ctx.frame_time(), timing)
@@ -958,6 +956,73 @@ mod tests {
             !ctx.needs_frame(),
             "a settled collapse must not request a frame"
         );
+    }
+
+    /// A reduce-motion theme carrying `reduced_fade` milliseconds.
+    fn reduced_theme_with_fade(reduced_fade: f64) -> Theme {
+        Theme::builder(Theme::neutral())
+            .map_motion(|motion| frust_theme::MotionScheme {
+                reduce_motion: true,
+                ..motion
+            })
+            .extension(MotionExtras {
+                reduced_fade,
+                ..MotionExtras::neutral()
+            })
+            .build()
+    }
+
+    #[test]
+    fn animated_opacity_collapse_uses_the_theme_reduced_fade() {
+        let theme = reduced_theme_with_fade(40.0);
+        let view: AnimatedOpacityView<()> = animated_opacity(1.0, leaf_any(10.0, 10.0));
+        let mut w = build(&view);
+        let size = w.layout(
+            &mut LayoutCtx::new(),
+            &BoxConstraints::loose(Size::new(50.0, 50.0)),
+        );
+        w.anim.set_target(0.0);
+
+        let mut ctx = themed_ctx(&theme, size, 0.0);
+        w.paint(&mut ctx, &mut RecordingScene::default());
+        assert!(ctx.needs_frame());
+
+        let mut scene = RecordingScene::default();
+        let mut ctx = themed_ctx(&theme, size, 20.0);
+        w.paint(&mut ctx, &mut scene);
+        let (_, _, alpha) = scene.layers[0];
+        assert!(
+            (alpha - 0.5).abs() < 1e-3,
+            "halfway through a 40 ms fade the alpha reads 0.5, got {alpha}"
+        );
+
+        let mut scene = RecordingScene::default();
+        let mut ctx = themed_ctx(&theme, size, 45.0);
+        w.paint(&mut ctx, &mut scene);
+        assert!(scene.layers[0].2.abs() < 1e-6, "settled past 40 ms");
+        assert!(!ctx.needs_frame());
+    }
+
+    #[test]
+    fn zero_reduced_fade_snaps_without_requesting_a_frame() {
+        let theme = reduced_theme_with_fade(0.0);
+        let view: AnimatedOpacityView<()> = animated_opacity(1.0, leaf_any(10.0, 10.0));
+        let mut w = build(&view);
+        let size = w.layout(
+            &mut LayoutCtx::new(),
+            &BoxConstraints::loose(Size::new(50.0, 50.0)),
+        );
+        w.anim.set_target(0.0);
+
+        let mut scene = RecordingScene::default();
+        let mut ctx = themed_ctx(&theme, size, 0.0);
+        w.paint(&mut ctx, &mut scene);
+        assert!(
+            scene.layers[0].2.abs() < 1e-6,
+            "one paint lands on the target, got {}",
+            scene.layers[0].2
+        );
+        assert!(!ctx.needs_frame(), "a zero fade must not request a frame");
     }
 
     #[test]

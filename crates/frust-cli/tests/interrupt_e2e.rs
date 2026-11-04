@@ -152,13 +152,15 @@ fn spawn_release_build(project: &Path) -> Child {
     command.spawn().expect("failed to spawn `frust build`")
 }
 
-/// Blocks until `path` exists, i.e. until the CLI has written the plaintext
-/// signing file and handed control to `gradlew`. Fails loudly rather than
-/// signalling a process that never reached the window under test.
+/// Blocks until `path` holds the signing properties, i.e. until the CLI has
+/// written the plaintext signing file and handed control to `gradlew`. Waiting
+/// on existence alone races the write: the file is created before its contents
+/// land. Fails loudly rather than signalling a process that never reached the
+/// window under test.
 fn wait_for(path: &Path, child: &mut Child) {
     let deadline = Instant::now() + FILE_APPEARS_TIMEOUT;
     while Instant::now() < deadline {
-        if path.exists() {
+        if std::fs::read_to_string(path).is_ok_and(|contents| contents.contains("storePassword=")) {
             return;
         }
         if let Some(status) = child.try_wait().expect("polling the build") {

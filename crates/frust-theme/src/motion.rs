@@ -18,7 +18,11 @@
 //! [`impl From<MotionSpring> for SpringDesc`](struct.MotionSpring.html)
 //! below lives right here rather than in a separate facade conversion.
 
+use std::time::Duration;
+
 use frust_core::anim::{Curve, SpringDesc};
+
+use crate::theme::Theme;
 
 /// A physics spring's damping ratio and stiffness (mass is implicitly `1.0`
 /// for every preset; see module docs).
@@ -69,6 +73,66 @@ pub struct MotionDurations {
     pub base: f64,
     pub slow: f64,
     pub deliberate: f64,
+}
+
+/// Framework-owned motion tokens carried as a theme extension.
+///
+/// These live beside [`MotionDurations`]/[`MotionScheme`] rather than inside
+/// them so every existing struct literal of those two types keeps compiling.
+/// Attach a customised set with
+/// [`ThemeBuilder::extension`](crate::builder::ThemeBuilder::extension)
+/// (`MotionExtras { .. }`); a theme that attaches nothing gets
+/// [`MotionExtras::neutral`] through [`MotionExtras::of`]. Values are in
+/// milliseconds, like [`MotionDurations`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MotionExtras {
+    /// A sixth, longer-than-`deliberate` duration slot for large or
+    /// choreographed moves.
+    pub extended: f64,
+    /// The linear crossfade every reduced-motion collapse (navigator,
+    /// switchers, animated opacity) runs for when
+    /// [`MotionScheme::reduce_motion`] is on. `0` skips the fade: the target
+    /// lands on the first paint.
+    pub reduced_fade: f64,
+}
+
+impl MotionExtras {
+    /// The fallback used when a reduced fade is non-finite or negative.
+    const FALLBACK_REDUCED_FADE_MS: f64 = 120.0;
+
+    /// The neutral values: `extended` 800 ms, `reduced_fade` 120 ms.
+    pub const fn neutral() -> Self {
+        Self {
+            extended: 800.0,
+            reduced_fade: Self::FALLBACK_REDUCED_FADE_MS,
+        }
+    }
+
+    /// The extras attached to `theme`, else [`MotionExtras::neutral`].
+    pub fn of(theme: Option<&Theme>) -> MotionExtras {
+        theme
+            .and_then(|theme| theme.extension::<MotionExtras>())
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// [`Self::reduced_fade`] as a [`Duration`]. A non-finite, negative or
+    /// unrepresentably large value falls back to 120 ms; `0` is allowed and means skip the fade.
+    pub fn reduced_fade_duration(&self) -> Duration {
+        let ms = self.reduced_fade;
+        let parsed = if ms.is_finite() && ms >= 0.0 {
+            Duration::try_from_secs_f64(ms / 1000.0).ok()
+        } else {
+            None
+        };
+        parsed.unwrap_or(Duration::from_millis(Self::FALLBACK_REDUCED_FADE_MS as u64))
+    }
+}
+
+impl Default for MotionExtras {
+    fn default() -> Self {
+        Self::neutral()
+    }
 }
 
 /// The `CosmeticLoop` tick-rate cap (Hz) — an app-tunable pacing token
@@ -231,6 +295,57 @@ impl MotionScheme {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn motion_extras_default_matches_the_legacy_constants() {
+        let extras = MotionExtras::default();
+        assert_eq!(extras, MotionExtras::neutral());
+        assert_eq!(extras.extended, 800.0);
+        assert_eq!(extras.reduced_fade_duration(), Duration::from_millis(120));
+    }
+
+    #[test]
+    fn of_falls_back_to_default_without_the_extension() {
+        assert_eq!(MotionExtras::of(None), MotionExtras::neutral());
+        let bare = Theme::neutral();
+        assert_eq!(MotionExtras::of(Some(&bare)), MotionExtras::neutral());
+        let tuned = Theme::builder(Theme::neutral())
+            .extension(MotionExtras {
+                extended: 900.0,
+                reduced_fade: 40.0,
+            })
+            .build();
+        let got = MotionExtras::of(Some(&tuned));
+        assert_eq!(got.reduced_fade_duration(), Duration::from_millis(40));
+        assert_eq!(got.extended, 900.0);
+    }
+
+    #[test]
+    fn reduced_fade_duration_falls_back_on_an_unrepresentable_value() {
+        for huge in [1e300, f64::MAX] {
+            let extras = MotionExtras {
+                reduced_fade: huge,
+                ..MotionExtras::neutral()
+            };
+            assert_eq!(extras.reduced_fade_duration(), Duration::from_millis(120));
+        }
+    }
+
+    #[test]
+    fn reduced_fade_duration_rejects_non_finite_and_negative() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
+            let extras = MotionExtras {
+                reduced_fade: bad,
+                ..MotionExtras::neutral()
+            };
+            assert_eq!(extras.reduced_fade_duration(), Duration::from_millis(120));
+        }
+        let zero = MotionExtras {
+            reduced_fade: 0.0,
+            ..MotionExtras::neutral()
+        };
+        assert_eq!(zero.reduced_fade_duration(), Duration::ZERO);
+    }
 
     #[test]
     fn spring_desc_round_trips_neutral_presets() {

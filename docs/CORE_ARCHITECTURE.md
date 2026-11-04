@@ -147,6 +147,12 @@ the facade/plugin boundary described in the index; CORE itself never depends on 
   hold a lock and restore 1.0. The scale is global by design (one value for every `RenderRoot`): after any run
   at another scale the scaled clock keeps a permanent offset from raw time; back at 1.0 it adds raw deltas
   1:1 and a backward raw step adds zero.
+- `AnimationController::velocity()` reports value units per second of scaled animation time at the last advance
+  (analytic for fling and spring drives, an eased-curve central difference for duration and repeat drives, 0 idle,
+  never NaN). `spring_to(target, SpringDesc)` and `spring_to_with_velocity(target, velocity, SpringDesc)` retarget
+  from the current value carrying velocity (unclamped target, a non-finite input is a no-op, status
+  Forward/Reverse while moving, Completed/Dismissed on settle; `forward()` always settles Completed and `reverse()` Dismissed, even from an out-of-range start); a gesture's release velocity is measured on the raw
+  input clock, equal to the animation clock at scale 1.0.
 - The `feedback` module is the haptic seam: a `#[non_exhaustive]` `HapticFeedback` vocabulary (`Selection`,
   `Light`, `Medium`, `Heavy`, `Success`, `Warning`, `Error`), a `HapticSink` fn pointer installed with the
   last-wins `set_haptic_sink`, and `perform_haptic()` (a no-op without a sink; `haptic_sink_installed()`

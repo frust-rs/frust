@@ -4,7 +4,7 @@
 //! demonstrating end to end — that a third party can ship a themed widget
 //! catalog with **every built-in catalog compiled off**, depending on nothing
 //! but the `frust` facade. It is a proof of existence, not a design system
-//! worth shipping: three widgets, one transition pattern, one typed theme
+//! worth shipping: four widgets, one transition pattern, one typed theme
 //! extension. See this workspace's README for what it proves and what it
 //! found.
 //!
@@ -16,6 +16,7 @@
 //! | [`badge`] | the **leaf** authoring shape — paint-only, no children |
 //! | [`panel`] | the **single-child container** shape |
 //! | [`chip`] | the **interactive control** shape |
+//! | [`notice`] | the **kept-mounted overlay** shape, over `frust::motion::presence` |
 //! | [`reveal`] | a [`TransitionPattern`](frust::motion::patterns::TransitionPattern) impl for `pattern_switcher` |
 //!
 //! # Installing
@@ -40,6 +41,7 @@
 
 pub mod badge;
 pub mod chip;
+pub mod notice;
 pub mod panel;
 pub mod reveal;
 pub mod tokens;
@@ -49,6 +51,7 @@ mod testing;
 
 pub use badge::{SampleBadgeView, SampleBadgeWidget, sample_badge};
 pub use chip::{SampleChipView, SampleChipWidget, sample_chip};
+pub use notice::sample_notice;
 pub use panel::{SamplePanelView, SamplePanelWidget, sample_panel};
 pub use reveal::SampleReveal;
 pub use tokens::{SAMPLE_DESIGN_LANGUAGE, SampleAccents, sample_theme};

@@ -182,9 +182,10 @@ strings. The canonical example is `crates/frust-drive/templates/app/src/lib.rs.t
   duration/easing/spring tokens by default (an explicit `.timing(...)` call always wins);
   every pattern substitutes a short linear crossfade under `reduce_motion` instead of a
   bespoke variant. `reduce_motion` overrides an explicit `.timing(...)` too: `AnimatedOpacity` runs a
-  120 ms linear fade and `AnimatedScale` snaps to its target on the first paint with no frame request
+  linear fade of `MotionExtras::reduced_fade` (default 120 ms; 0 snaps; no enforced upper bound, the theme picks it) and `AnimatedScale` snaps to its target on the first paint with no frame request
   (a mid-flight flip lands on the next paint); `card_switcher` follows the same shape. A new motion
-  pattern collapses its geometry, fades only alphas, and ignores an explicit timing while reduced.
+  pattern collapses its geometry, fades only alphas over `MotionExtras::of(theme).reduced_fade_duration()`
+  (never a literal 120 ms) and ignores an explicit timing while reduced. A short linear reduced fade satisfies reduce-motion: widgets, `network_image` included, collapse to it rather than skipping.
 - **A perpetual decorative loop calls `PaintCtx::request_frame_paced`
   (`TickClass::CosmeticLoop`), never bare `request_frame`.** `request_frame` stays
   `TickClass::Transition` (unpaced) — correct for a spring or any transition with a
@@ -209,7 +210,7 @@ strings. The canonical example is `crates/frust-drive/templates/app/src/lib.rs.t
   explicit `Timing::Duration`/`Timing::Spring` (`Timing::ThemeDefault` falls back to the M3
   default, 300ms + `Curve::Emphasized`); `reduce_motion` collapses it to `ReducedCrossfade`
   on both a programmatic pop and an interactive edge-swipe pop (the drag drives the alpha, and the
-  release settles on a spring derived from the resolved 120 ms reduce-motion duration), and the `Custom` fn
+  release settles on a spring derived from the resolved reduced fade), and the `Custom` fn
   is called on neither path.
 - **A new container implements `Widget::visit_children` via `authoring::visit_children!`,
   never by hand-writing an empty override.** The default (`Widget::visit_children`'s no-op) makes

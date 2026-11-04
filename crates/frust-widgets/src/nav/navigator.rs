@@ -136,7 +136,7 @@ use frust_core::{
     EventResult, FrameTime, HeroDirective, HeroFrames, ImeState, InputEvent, LayoutCtx, PaintCtx,
     PaintScene, PointerPhase, SemanticsCtx, Spring, SpringDesc, TOUCH_SLOP, View, Widget,
 };
-use frust_theme::Theme;
+use frust_theme::{MotionExtras, Theme};
 use kurbo::{Affine, Point, Rect, Size, Vec2};
 
 use crate::repaint_boundary::{RetainedBoundary, within};
@@ -150,7 +150,7 @@ use super::path::Location;
 use super::route_state::RouteStack;
 use super::transition::{
     Layer, PageTransition, Timing, TransitionDriver, TransitionSpec, TransitionState, lerp_rect,
-    make_driver, resolve_layers, resolve_spec, settle_driver,
+    make_driver, resolve_layers, resolve_spec_with, settle_driver,
 };
 
 pub use super::controller::NavigatorController;
@@ -1393,7 +1393,8 @@ impl<State: 'static> NavigatorWidget<State> {
         // `start_transition` (M3 defaults) stands (docs/CODE_STANDARDS.md).
         if let Some(spec) = self.transition.as_ref().and_then(|t| t.pending_spec) {
             if let Some(theme) = Theme::from_paint_ctx(ctx) {
-                let resolved = resolve_spec(spec, Some(&theme.motion));
+                let reduced_fade = MotionExtras::of(Some(theme)).reduced_fade_duration();
+                let resolved = resolve_spec_with(spec, Some(&theme.motion), reduced_fade);
                 let (driver, settle_spring) = make_driver(resolved.timing);
                 if let Some(t) = self.transition.as_mut() {
                     t.driver = driver;
@@ -1416,9 +1417,9 @@ impl<State: 'static> NavigatorWidget<State> {
             .as_ref()
             .is_some_and(|t| t.pending_interactive_reduce)
         {
-            let motion = Theme::from_paint_ctx(ctx)
-                .map(|th| th.motion)
-                .filter(|m| m.reduce_motion);
+            let themed = Theme::from_paint_ctx(ctx).filter(|th| th.motion.reduce_motion);
+            let reduced_fade = MotionExtras::of(themed).reduced_fade_duration();
+            let motion = themed.map(|th| th.motion);
             if let Some(t) = self.transition.as_mut() {
                 if let Some(motion) = motion
                     && t.preset != PageTransition::None
@@ -1427,7 +1428,7 @@ impl<State: 'static> NavigatorWidget<State> {
                         preset: t.preset,
                         timing: Timing::ThemeDefault,
                     };
-                    let resolved = resolve_spec(spec, Some(&motion));
+                    let resolved = resolve_spec_with(spec, Some(&motion), reduced_fade);
                     t.preset = resolved.preset;
                     t.settle_spring = settle_spring_within(resolved.timing);
                 }

@@ -547,18 +547,18 @@ pub enum AnimationStatus {
 /// Value/velocity threshold below which a fling snaps to its target and settles.
 const SPRING_REST_EPSILON: f64 = 1e-3;
 
-/// A `0.0..=1.0` value driven by a duration + [`Curve`] or a [`Spring`] fling.
+/// A mostly `0.0..=1.0` value driven by a duration + [`Curve`] or a [`Spring`] fling.
 ///
-/// Plain data + math (see the module contract): a widget advances it during
-/// paint and re-requests a frame while [`advance`](Self::advance) returns `true`.
+/// Plain data + math: a widget advances it during paint and re-requests a frame
+/// while [`advance`](Self::advance) returns `true`.
 /// `forward`/`reverse`/`animate_to` settle as `Completed`/`Dismissed`; `repeat`
 /// never completes; a `fling` settles at `1.0` (non-negative velocity) or `0.0`.
 ///
 /// # Overshoot (spring-driven only)
 ///
-/// A fling is not clamped in flight: an under-damped [`SpringDesc`] (M3's spatial
-/// presets use `damping_ratio: 0.9`) overshoots on purpose, then lands exactly on
-/// the target. Use [`value_clamped`](Self::value_clamped) for a bounded read.
+/// An under-damped [`SpringDesc`] overshoots on purpose, then lands on the
+/// target. A [`spring_to`](Self::spring_to) target is unclamped, so the value may
+/// rest outside `0.0..=1.0`; see [`value_clamped`](Self::value_clamped).
 #[derive(Clone, Copy, Debug)]
 pub struct AnimationController {
     value: f64,
@@ -580,6 +580,8 @@ enum Drive {
         target: f64,
         elapsed: f64,
         duration: f64,
+        /// The status to settle with: fixed by the entry point, not by the values.
+        settle: AnimationStatus,
     },
     /// Looping `0.0→1.0` (eased) with period `period` seconds.
     Repeat { elapsed: f64, period: f64 },
@@ -587,6 +589,13 @@ enum Drive {
     Fling {
         spring: Spring,
         target: f64,
+        elapsed: f64,
+    },
+    /// Spring retarget toward an unclamped `target`; `start` is the value at retarget (it picks the settled status).
+    Spring {
+        spring: Spring,
+        target: f64,
+        start: f64,
         elapsed: f64,
     },
 }
@@ -612,13 +621,14 @@ impl AnimationController {
 
     /// The current value: within `0.0..=1.0` for duration motion, but a spring
     /// [`fling`](Self::fling) may transiently leave that range (see the type docs'
-    /// Overshoot section); see [`value_clamped`](Self::value_clamped).
+    /// Overshoot section), and a [`spring_to`](Self::spring_to) target may leave
+    /// it at rest; see [`value_clamped`](Self::value_clamped).
     pub fn value(&self) -> f64 {
         self.value
     }
 
     /// [`value`](Self::value) clamped to `0.0..=1.0`; differs from it only while a
-    /// fling overshoots.
+    /// fling overshoots or after a `spring_to` to an out-of-range target.
     pub fn value_clamped(&self) -> f64 {
         self.value.clamp(0.0, 1.0)
     }
@@ -634,25 +644,45 @@ impl AnimationController {
     }
 
     /// Animate forward to `1.0` over the controller's duration.
+    ///
+    /// Always settles [`Completed`](AnimationStatus::Completed), even when the
+    /// start value is already past `1.0` after an out-of-range
+    /// [`spring_to`](Self::spring_to).
     pub fn forward(&mut self) {
-        self.start_duration(self.value, 1.0, AnimationStatus::Forward);
+        self.start_duration(
+            self.value,
+            1.0,
+            AnimationStatus::Forward,
+            AnimationStatus::Completed,
+        );
     }
 
     /// Animate reverse to `0.0` over the controller's duration.
+    ///
+    /// Always settles [`Dismissed`](AnimationStatus::Dismissed), even when the
+    /// start value is below `0.0` after an out-of-range
+    /// [`spring_to`](Self::spring_to).
     pub fn reverse(&mut self) {
-        self.start_duration(self.value, 0.0, AnimationStatus::Reverse);
+        self.start_duration(
+            self.value,
+            0.0,
+            AnimationStatus::Reverse,
+            AnimationStatus::Dismissed,
+        );
     }
 
     /// Animate from the current value to `target` (clamped to `0.0..=1.0`) over
-    /// the controller's duration.
+    /// the controller's duration. Settles by direction of travel:
+    /// [`Completed`](AnimationStatus::Completed) when `target` is at or above
+    /// the start value, else [`Dismissed`](AnimationStatus::Dismissed).
     pub fn animate_to(&mut self, target: f64) {
         let target = target.clamp(0.0, 1.0);
-        let status = if target >= self.value {
-            AnimationStatus::Forward
+        let (status, settle) = if target >= self.value {
+            (AnimationStatus::Forward, AnimationStatus::Completed)
         } else {
-            AnimationStatus::Reverse
+            (AnimationStatus::Reverse, AnimationStatus::Dismissed)
         };
-        self.start_duration(self.value, target, status);
+        self.start_duration(self.value, target, status, settle);
     }
 
     /// Loop `0.0→1.0` (eased) indefinitely with a period of the controller's
@@ -692,6 +722,100 @@ impl AnimationController {
         };
     }
 
+    /// The rate of change of [`value`](Self::value), in value units per second, as
+    /// of the last [`advance`](Self::advance); `0.0` when idle or settled.
+    ///
+    /// A fling or spring reports the exact analytic spring velocity. A duration
+    /// motion reports `(target - start) / duration` times the eased curve's
+    /// slope, taken as a central difference over a small window of the curve
+    /// (one-sided at the ends); a repeat does the same over its period. The
+    /// result is never `NaN`.
+    ///
+    /// The unit is per second of animation time as fed to `advance`: that is
+    /// scaled time when the process-wide animation time scale is not `1.0`.
+    pub fn velocity(&self) -> f64 {
+        let v = match self.drive {
+            Drive::Idle => 0.0,
+            Drive::Duration {
+                start,
+                target,
+                elapsed,
+                duration,
+                ..
+            } => {
+                if duration > 0.0 {
+                    (target - start) * self.curve_slope(elapsed / duration) / duration
+                } else {
+                    0.0
+                }
+            }
+            Drive::Repeat { elapsed, period } => {
+                if period > 0.0 {
+                    self.curve_slope((elapsed / period).rem_euclid(1.0)) / period
+                } else {
+                    0.0
+                }
+            }
+            Drive::Fling {
+                spring, elapsed, ..
+            }
+            | Drive::Spring {
+                spring, elapsed, ..
+            } => spring.velocity(elapsed),
+        };
+        if v.is_finite() { v } else { 0.0 }
+    }
+
+    /// Slope of the eased curve at `frac`, by central difference with window `h`.
+    fn curve_slope(&self, frac: f64) -> f64 {
+        const H: f64 = 1e-4;
+        let frac = frac.clamp(0.0, 1.0);
+        let lo = (frac - H).max(0.0);
+        let hi = (frac + H).min(1.0);
+        if hi > lo {
+            (self.curve.transform(hi) - self.curve.transform(lo)) / (hi - lo)
+        } else {
+            0.0
+        }
+    }
+
+    /// Retarget a spring from the current value toward `target`, carrying the
+    /// current [`velocity`](Self::velocity) so the motion has no velocity jump.
+    ///
+    /// `target` is not clamped. Status is `Forward` when `target` is at or above
+    /// the current value, else `Reverse`; on settling the value lands exactly on
+    /// `target` with `Completed` (target at or above the value at retarget) or
+    /// `Dismissed`. A non-finite `target` leaves the controller unchanged.
+    pub fn spring_to(&mut self, target: f64, spring: SpringDesc) {
+        self.spring_to_with_velocity(target, self.velocity(), spring);
+    }
+
+    /// Like [`spring_to`](Self::spring_to) but starting from an explicit
+    /// `velocity` (value units per second), e.g. a gesture's release velocity.
+    ///
+    /// A non-finite `target` or `velocity` leaves the controller unchanged. A
+    /// gesture velocity is measured on the raw input clock, which equals the
+    /// animation clock at time scale `1.0`; under slow motion the caller
+    /// converts it if it matters.
+    pub fn spring_to_with_velocity(&mut self, target: f64, velocity: f64, spring: SpringDesc) {
+        if !target.is_finite() || !velocity.is_finite() {
+            return;
+        }
+        let start = self.value;
+        self.status = if target >= start {
+            AnimationStatus::Forward
+        } else {
+            AnimationStatus::Reverse
+        };
+        self.last_time = None;
+        self.drive = Drive::Spring {
+            spring: Spring::new(spring, start - target, velocity),
+            target,
+            start,
+            elapsed: 0.0,
+        };
+    }
+
     /// Halt any in-progress motion, leaving the value where it is and the status
     /// [`AnimationStatus::Idle`].
     pub fn stop(&mut self) {
@@ -722,17 +846,14 @@ impl AnimationController {
                 target,
                 elapsed,
                 duration,
+                settle,
             } => {
-                let (start, target, duration) = (*start, *target, *duration);
+                let (start, target, duration, settle) = (*start, *target, *duration, *settle);
                 *elapsed += dt;
                 let elapsed = *elapsed;
                 if duration <= 0.0 || elapsed >= duration {
                     self.value = target;
-                    self.status = if target >= start {
-                        AnimationStatus::Completed
-                    } else {
-                        AnimationStatus::Dismissed
-                    };
+                    self.status = settle;
                     self.drive = Drive::Idle;
                     false
                 } else {
@@ -777,22 +898,47 @@ impl AnimationController {
                     true
                 }
             }
+            Drive::Spring {
+                spring,
+                target,
+                start,
+                elapsed,
+            } => {
+                let (spring, target, start) = (*spring, *target, *start);
+                *elapsed += dt;
+                let elapsed = *elapsed;
+                if spring.is_at_rest(elapsed, SPRING_REST_EPSILON) {
+                    self.value = target;
+                    self.status = if target >= start {
+                        AnimationStatus::Completed
+                    } else {
+                        AnimationStatus::Dismissed
+                    };
+                    self.drive = Drive::Idle;
+                    false
+                } else {
+                    self.value = target + spring.position(elapsed);
+                    true
+                }
+            }
         }
     }
 
     /// Shared entry for the duration-driven motions.
-    fn start_duration(&mut self, start: f64, target: f64, status: AnimationStatus) {
+    fn start_duration(
+        &mut self,
+        start: f64,
+        target: f64,
+        status: AnimationStatus,
+        settle: AnimationStatus,
+    ) {
         let duration = self.duration.as_secs_f64();
         self.status = status;
         self.last_time = None;
         if duration <= 0.0 || (target - start).abs() < f64::EPSILON {
             // Nothing to animate: snap and settle immediately.
             self.value = target;
-            self.status = if target >= start {
-                AnimationStatus::Completed
-            } else {
-                AnimationStatus::Dismissed
-            };
+            self.status = settle;
             self.drive = Drive::Idle;
         } else {
             self.drive = Drive::Duration {
@@ -800,6 +946,7 @@ impl AnimationController {
                 target,
                 elapsed: 0.0,
                 duration,
+                settle,
             };
         }
     }
@@ -1117,6 +1264,38 @@ mod tests {
     }
 
     #[test]
+    fn forward_after_an_out_of_range_spring_settles_completed() {
+        let mut c = AnimationController::new(Duration::from_millis(100));
+        c.spring_to(1.4, test_spring());
+        let mut t = 0.0;
+        while c.advance(ft_secs(t)) {
+            t += 1.0 / 120.0;
+        }
+        assert_eq!(c.value(), 1.4);
+        c.forward();
+        c.advance(ft_secs(100.0));
+        assert!(!c.advance(ft_secs(101.0)));
+        assert_eq!(c.value(), 1.0);
+        assert_eq!(c.status(), AnimationStatus::Completed);
+    }
+
+    #[test]
+    fn reverse_after_a_negative_spring_settles_dismissed() {
+        let mut c = AnimationController::new(Duration::from_millis(100));
+        c.spring_to(-0.2, test_spring());
+        let mut t = 0.0;
+        while c.advance(ft_secs(t)) {
+            t += 1.0 / 120.0;
+        }
+        assert_eq!(c.value(), -0.2);
+        c.reverse();
+        c.advance(ft_secs(100.0));
+        assert!(!c.advance(ft_secs(101.0)));
+        assert_eq!(c.value(), 0.0);
+        assert_eq!(c.status(), AnimationStatus::Dismissed);
+    }
+
+    #[test]
     fn repeat_wraps_and_never_completes() {
         let mut c = AnimationController::new(Duration::from_secs(1));
         c.repeat();
@@ -1141,6 +1320,120 @@ mod tests {
         assert!(!c.advance(ft_secs(0.2)));
         assert!((c.value() - 0.3).abs() < 1e-6);
         assert_eq!(c.status(), AnimationStatus::Completed);
+    }
+
+    fn test_spring() -> SpringDesc {
+        SpringDesc {
+            mass: 1.0,
+            stiffness: 700.0,
+            damping_ratio: 0.9,
+        }
+    }
+
+    #[test]
+    fn velocity_is_zero_when_idle() {
+        let c = AnimationController::new(Duration::from_millis(100));
+        assert_eq!(c.velocity(), 0.0);
+    }
+
+    #[test]
+    fn velocity_matches_the_spring_during_a_fling() {
+        let mut c = AnimationController::new(Duration::from_millis(100));
+        c.fling(3.0, test_spring());
+        assert!((c.velocity() - 3.0).abs() < 1e-9);
+        c.advance(ft_secs(0.0));
+        c.advance(ft_secs(0.05));
+        let spring = Spring::new(test_spring(), -1.0, 3.0);
+        assert!((c.velocity() - spring.velocity(0.05)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn velocity_of_a_linear_duration_is_distance_over_duration() {
+        let mut c = AnimationController::new(Duration::from_millis(500));
+        c.forward();
+        c.advance(ft_secs(0.0));
+        c.advance(ft_secs(0.2));
+        assert!((c.velocity() - 2.0).abs() < 2.0 * 1e-6);
+        c.reverse();
+        c.advance(ft_secs(1.0));
+        c.advance(ft_secs(1.1));
+        assert!(c.velocity() < 0.0);
+    }
+
+    #[test]
+    fn velocity_is_finite_at_duration_end() {
+        let mut c =
+            AnimationController::new(Duration::from_millis(100)).with_curve(Curve::EaseInOut);
+        c.forward();
+        c.advance(ft_secs(0.0));
+        assert!(c.velocity().is_finite());
+        c.advance(ft_secs(0.0999999));
+        assert!(c.velocity().is_finite());
+        c.advance(ft_secs(0.2));
+        assert_eq!(c.velocity(), 0.0);
+        let mut r = AnimationController::new(Duration::ZERO);
+        r.repeat();
+        assert_eq!(r.velocity(), 0.0);
+    }
+
+    #[test]
+    fn spring_to_preserves_velocity_on_retarget() {
+        let mut c = AnimationController::new(Duration::from_millis(100));
+        c.fling(2.0, test_spring());
+        c.advance(ft_secs(0.0));
+        c.advance(ft_secs(0.03));
+        let before = c.velocity();
+        c.spring_to(0.25, test_spring());
+        assert!((c.velocity() - before).abs() < 1e-9);
+        // First advance seeds the clock; the next one is one frame in.
+        c.advance(ft_secs(0.03));
+        c.advance(ft_secs(0.03 + 1.0 / 120.0));
+        // One frame of spring acceleration bounds the change (k * |x| * dt).
+        assert!((c.velocity() - before).abs() < 700.0 * 1.5 / 120.0 + 1.0);
+    }
+
+    #[test]
+    fn spring_to_with_velocity_settles_exactly_on_an_out_of_range_target() {
+        for (target, status) in [
+            (1.4, AnimationStatus::Completed),
+            (-0.2, AnimationStatus::Dismissed),
+        ] {
+            let mut c = AnimationController::new(Duration::from_millis(100));
+            c.spring_to_with_velocity(target, 0.0, test_spring());
+            let expected_running = if target >= 0.0 {
+                AnimationStatus::Forward
+            } else {
+                AnimationStatus::Reverse
+            };
+            assert_eq!(c.status(), expected_running);
+            let (mut t, mut running) = (0.0, true);
+            for _ in 0..100_000 {
+                running = c.advance(ft_secs(t));
+                if !running {
+                    break;
+                }
+                t += 1.0 / 120.0;
+            }
+            assert!(!running);
+            assert_eq!(c.value(), target);
+            assert_eq!(c.status(), status);
+            assert_eq!(c.velocity(), 0.0);
+        }
+    }
+
+    #[test]
+    fn non_finite_spring_to_is_a_no_op() {
+        let mut c = AnimationController::new(Duration::from_millis(100));
+        c.forward();
+        c.advance(ft_secs(0.0));
+        c.advance(ft_secs(0.02));
+        let (value, status, vel) = (c.value(), c.status(), c.velocity());
+        c.spring_to(f64::NAN, test_spring());
+        c.spring_to(f64::INFINITY, test_spring());
+        c.spring_to_with_velocity(1.0, f64::NAN, test_spring());
+        c.spring_to_with_velocity(1.0, f64::NEG_INFINITY, test_spring());
+        assert_eq!((c.value(), c.status(), c.velocity()), (value, status, vel));
+        assert!(c.is_animating());
     }
 
     #[test]

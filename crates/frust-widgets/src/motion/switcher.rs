@@ -74,9 +74,10 @@
 //! (`durations.base` + `easing.effects`), overridable with
 //! [`.timing(...)`](PatternSwitcherView::timing); with no theme threaded it
 //! falls back to [`FALLBACK_DURATION`] + [`Curve::Emphasized`]. A
-//! `reduce_motion` theme collapses *every* pattern to a fast
-//! ([`REDUCE_MOTION_DURATION`]) linear [`FadeThrough`] crossfade — the same hard
-//! accessibility rule `nav::transition::resolve_spec` enforces.
+//! `reduce_motion` theme collapses *every* pattern to a linear [`FadeThrough`]
+//! crossfade that runs for the theme's `MotionExtras::reduced_fade` (120 ms by
+//! default; `0` snaps; no upper bound is enforced). With no theme threaded the
+//! collapse uses [`REDUCE_MOTION_DURATION`].
 //!
 //! # Scaffold contract
 //!
@@ -92,13 +93,13 @@ use frust_core::{
     EventCtx, EventResult, ImeState, InputEvent, LayoutCtx, PaintCtx, PaintScene, RetainedKey,
     SemanticsCtx, View, Widget, any,
 };
-use frust_theme::Theme;
+use frust_theme::{MotionExtras, Theme};
 use kurbo::{Affine, Point, Size, Vec2};
 
 use crate::ChildKey;
 use crate::Timing;
 use crate::motion::patterns::{FadeThrough, PatternLayer, TransitionPattern};
-use crate::nav::transition::{TransitionDriver, make_driver};
+use crate::nav::transition::{TransitionDriver, make_driver, token_duration};
 use crate::repaint_boundary::{RetainedBoundary, within};
 
 /// The unthemed fallback transition duration (the Glyph `base` token, 220ms) —
@@ -106,10 +107,10 @@ use crate::repaint_boundary::{RetainedBoundary, within};
 /// tests, pre-theme apps). See the [module docs](self)'s timing section.
 pub const FALLBACK_DURATION: Duration = Duration::from_millis(220);
 
-/// The reduced-motion collapse duration: `reduce_motion` flattens every pattern
-/// to a `≤120ms` linear [`FadeThrough`] crossfade — the Glyph design system's
-/// hard accessibility rule, matching `nav::transition`'s
-/// [`REDUCE_MOTION_DURATION`](crate::nav::transition) collapse.
+/// The default reduced-motion collapse duration, and the value used when no
+/// theme is threaded: `reduce_motion` flattens every pattern to a linear
+/// [`FadeThrough`] crossfade. A themed collapse runs for
+/// `MotionExtras::reduced_fade` instead (`0` snaps; no upper bound is enforced).
 pub const REDUCE_MOTION_DURATION: Duration = Duration::from_millis(120);
 
 /// Resolve the effective [`Timing`] for a switch: an explicit builder value
@@ -119,7 +120,7 @@ pub const REDUCE_MOTION_DURATION: Duration = Duration::from_millis(120);
 fn resolve_switch_timing(theme: Option<&Theme>, explicit: Option<Timing>) -> Timing {
     explicit.unwrap_or_else(|| match theme {
         Some(theme) => Timing::Duration(
-            Duration::from_secs_f64(theme.motion.durations.base / 1000.0),
+            token_duration(theme.motion.durations.base, FALLBACK_DURATION),
             theme.motion.easing.effects,
         ),
         None => Timing::Duration(FALLBACK_DURATION, Curve::Emphasized),
@@ -472,7 +473,10 @@ impl<P: TransitionPattern + Clone + 'static> Widget for PatternSwitcherWidget<P>
             let theme = Theme::from_paint_ctx(ctx);
             let reduce = theme.map(|t| t.motion.reduce_motion).unwrap_or(false);
             let timing = if reduce {
-                Timing::Duration(REDUCE_MOTION_DURATION, Curve::Linear)
+                Timing::Duration(
+                    MotionExtras::of(theme).reduced_fade_duration(),
+                    Curve::Linear,
+                )
             } else {
                 resolve_switch_timing(theme, self.explicit_timing)
             };
@@ -712,6 +716,17 @@ mod tests {
     }
 
     // --- Identity change transitions; same identity doesn't ---
+
+    #[test]
+    fn switch_timing_falls_back_on_an_unrepresentable_base_duration() {
+        let mut scheme = frust_theme::MotionScheme::neutral();
+        scheme.durations.base = 1e300;
+        let theme = Theme::builder(Theme::neutral()).motion(scheme).build();
+        assert_eq!(
+            resolve_switch_timing(Some(&theme), None),
+            Timing::Duration(FALLBACK_DURATION, theme.motion.easing.effects)
+        );
+    }
 
     #[test]
     fn same_identity_rebuild_does_not_transition_but_changed_identity_does() {
@@ -1404,6 +1419,41 @@ mod tests {
             w.child.origin(),
             Point::ZERO,
             "reduce_motion collapses to a non-directional crossfade (no slide)"
+        );
+    }
+
+    #[test]
+    fn switcher_collapse_uses_the_theme_reduced_fade() {
+        let theme = Theme::builder(Theme::neutral())
+            .map_motion(|motion| frust_theme::MotionScheme {
+                reduce_motion: true,
+                ..motion
+            })
+            .extension(MotionExtras {
+                reduced_fade: 40.0,
+                ..MotionExtras::neutral()
+            })
+            .build();
+        let v1: PatternSwitcherView<(), _> =
+            pattern_switcher(1u32, SharedAxis::X, leaf_any(10.0, 10.0));
+        let mut w = build(&v1);
+        let size = w.layout(&mut LayoutCtx::new(), &loose());
+        let v2: PatternSwitcherView<(), _> =
+            pattern_switcher(2u32, SharedAxis::X, leaf_any(10.0, 10.0));
+        let mut counter = 0u64;
+        v2.rebuild(&v1, &mut w, &mut BuildCtx::new(&mut counter));
+
+        let mut pctx = PaintCtx::new(Point::ZERO, size).with_theme(&theme);
+        w.paint(&mut pctx, &mut RecordingScene::default());
+
+        let driver = w.driver.as_mut().expect("driver created on first paint");
+        assert!(
+            !driver.advance(ft_ms(20.0)).done,
+            "still fading at 20 ms of a 40 ms collapse"
+        );
+        assert!(
+            driver.advance(ft_ms(45.0)).done,
+            "done past the theme's 40 ms (the default 120 ms would not be)"
         );
     }
 

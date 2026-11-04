@@ -32,7 +32,7 @@ use frust_core::{
     FrameTime, InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerEvent, PointerPhase, ScrollAxis,
     SemanticsCtx, Tween, View, Widget, any,
 };
-use frust_theme::Theme;
+use frust_theme::{MotionExtras, Theme};
 use kurbo::{Affine, Point, Rect, Size, Vec2};
 use peniko::Color;
 
@@ -41,7 +41,7 @@ use crate::authoring::{
     ErasedArgCallback, ErasedCallback, TypedArgCallback, VisitPods, build_child, erase_callback,
     erase_callback_arg, presses, rebuild_child, route_event_single, teardown_child,
 };
-use crate::nav::transition::{REDUCE_MOTION_DURATION, TransitionDriver, make_driver};
+use crate::nav::transition::{TransitionDriver, make_driver};
 use crate::physics::page_snap::PageSnap;
 use crate::physics::{ScrollPhysics, default_overscroll_effect};
 use crate::scroll::{ScrollInfo, ambient_scroll_claim};
@@ -1838,7 +1838,10 @@ impl Widget for CardSwitcherWidget {
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         let theme = Theme::from_paint_ctx(ctx);
         let reduced = theme.is_some_and(|theme| theme.motion.reduce_motion);
-        let reduced_timing = Timing::Duration(REDUCE_MOTION_DURATION, Curve::Linear);
+        let reduced_timing = Timing::Duration(
+            MotionExtras::of(theme).reduced_fade_duration(),
+            Curve::Linear,
+        );
         let timing = if reduced {
             reduced_timing
         } else if self.ramp.is_open() {

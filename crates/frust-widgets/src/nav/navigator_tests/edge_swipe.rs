@@ -525,6 +525,38 @@ fn reduced_interactive_pop_settles_within_the_reduce_motion_duration() {
     );
 }
 
+/// A reduce-motion theme whose collapse runs for `reduced_fade` ms.
+fn reduced_theme_with_fade(reduced_fade: f64) -> Theme {
+    Theme::builder(*reduced_theme())
+        .extension(frust_theme::MotionExtras {
+            reduced_fade,
+            ..frust_theme::MotionExtras::neutral()
+        })
+        .build()
+}
+
+#[test]
+fn reduced_interactive_pop_settles_within_the_theme_reduced_fade() {
+    let frame_ms = 16;
+    let bound = 40 + frame_ms;
+    let tuned = mid_release_finalize_ms(reduced_theme_with_fade(40.0));
+    assert!(
+        tuned <= bound,
+        "a release under a 40 ms reduced fade took {tuned} ms, over {bound} ms"
+    );
+    let default = mid_release_finalize_ms(*reduced_theme());
+    assert!(
+        default > bound,
+        "the default reduced fade is slower than the tuned one ({default} ms)"
+    );
+}
+
+#[test]
+fn zero_reduced_fade_settles_the_interactive_pop_without_dividing_by_zero() {
+    let snapped = mid_release_finalize_ms(reduced_theme_with_fade(0.0));
+    assert!(snapped <= 32, "a zero reduced fade took {snapped} ms");
+}
+
 // --- A completed swipe delivers the pop result. ---
 
 #[test]
