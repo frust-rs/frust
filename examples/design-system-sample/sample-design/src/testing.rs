@@ -15,16 +15,10 @@
 //! the dependency this sample exists to prove unnecessary. Twelve lines of
 //! recorder is the cheaper trade.
 //!
-//! # Known gap: `Widget::semantics` cannot be driven from out of tree
+//! # Semantics
 //!
-//! There is deliberately no `semantics_of(widget)` helper here. Constructing a
-//! [`SemanticsCtx`](frust::authoring::SemanticsCtx) needs `SemanticsCtx::new`,
-//! which is `pub(crate)` in `frust-core`, and the only public producer of a
-//! semantics pass is `frust_core::RenderRoot::semantics()` — and `RenderRoot`
-//! is not re-exported by the `frust` facade. So an external design system can
-//! *write* a `semantics` impl (the trait, `push_node`/`push_container`, `Role`,
-//! `Node` and `Action` are all public and every widget here has one) but cannot
-//! *assert* on its output. See this workspace's README for the finding.
+//! A widget's `Widget::semantics` output is asserted through `frust::testing::semantics_of`, the
+//! facade's opt-in `test-support` helper, enabled from this crate's `[dev-dependencies]` only.
 
 use std::any::Any;
 

@@ -6,6 +6,10 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-# `frust` is the ONLY dependency (the proof this crate carries); enable no feature on it here:
+# `frust` is the ONLY dependency (the proof this crate carries); it enables no feature here:
 # features are additive, so one would switch on in every app that depends on this crate.
 frust = { workspace = true }
+
+[dev-dependencies]
+# Test builds only: `frust::testing::semantics_of` drives a widget's `semantics` pass.
+frust = { workspace = true, features = ["test-support"] }

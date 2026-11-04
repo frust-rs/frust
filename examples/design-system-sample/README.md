@@ -48,19 +48,15 @@ whose **only** dependency is `frust`:
 
 ### What it found
 
-**`Widget::semantics` cannot be exercised from out of tree.** Every widget here
-carries a semantics impl and the vocabulary to write one is fully public
-(`SemanticsCtx::push_node`/`push_container`, `Role`, `Node`, `Action`,
-`ChildPod::semantics_child`), but **nothing can drive a semantics pass**:
-`SemanticsCtx::new` is `pub(crate)` in `frust-core`, and the only public
-producer — `frust_core::RenderRoot::semantics()` — is not re-exported by the
-`frust` facade. The framework's own catalogs are unaffected (they reach
-`RenderRoot` through a `frust-core` dev-dependency, which
-`crates/frust-widgets/tests/semantics_tree.rs` does). An external author's only
-options today are to depend on `frust-core` directly — exactly the dependency
-`docs/CODE_STANDARDS.md` tells app/design-system code not to declare — or to
-ship semantics impls untested. Recorded here rather than worked around; closing
-it is a facade change, not a sample change.
+**`Widget::semantics` was untestable from out of tree; the gap is closed.**
+`SemanticsCtx::new` is `pub(crate)` and `RenderRoot` is not part of the facade,
+so a semantics pass had no public driver. The facade now ships an opt-in
+`test-support` feature exposing `frust::testing::semantics_of`, which builds a
+view, lays it out and returns the `SemanticsUpdate`. `sample-design` enables it
+under `[dev-dependencies]` only (the chip's `semantics_of_chip_reports_a_button_with_its_label`
+test uses it), so `cargo tree -e features -i frust-ui -p sample-app` still shows
+no `test-support` line. A workspace-wide `cargo test` unifies the feature into
+the test build only.
 
 ## The catalogs-off contract
 

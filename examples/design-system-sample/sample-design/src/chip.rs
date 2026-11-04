@@ -311,6 +311,21 @@ mod tests {
     }
 
     #[test]
+    fn semantics_of_chip_reports_a_button_with_its_label() {
+        let update = frust::testing::semantics_of(
+            |_: &mut ()| sample_chip("run", |_: &mut ()| {}),
+            Size::new(400.0, 100.0),
+        );
+        let button = update
+            .nodes
+            .iter()
+            .map(|(_, node)| node)
+            .find(|node| node.role() == Role::Button)
+            .expect("the chip contributes a button node");
+        assert_eq!(button.label(), Some("run"));
+    }
+
+    #[test]
     fn unthemed_resting_paint_uses_the_fallback_constants() {
         let mut w = build();
         let (_, rec) = render(&mut w, None);
