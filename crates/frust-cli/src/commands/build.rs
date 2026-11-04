@@ -617,7 +617,11 @@ mod tests {
         fs::create_dir_all(&module).unwrap();
         let metadata = format!(
             r#"{{"packages":[{{"name":"frust-shell-android","manifest_path":"{}"}}]}}"#,
-            shell.join("Cargo.toml").display()
+            shell
+                .join("Cargo.toml")
+                .display()
+                .to_string()
+                .replace('\\', "\\\\")
         );
         let runner = FakeProcessRunner::new().with(
             format!(
@@ -641,7 +645,10 @@ mod tests {
             fs::read_to_string(dir.join("android/gradle.properties")).unwrap(),
             format!(
                 "android.useAndroidX=true\nfrust.embedding.dir={}\n",
-                module.canonicalize().unwrap().display()
+                frust_drive::host_path::to_portable_string(
+                    &frust_drive::host_path::canonicalize_simplified(&module).unwrap()
+                )
+                .replace(':', "\\:")
             )
         );
         let _ = fs::remove_dir_all(&dir);

@@ -199,12 +199,17 @@ impl Widget for RadioWidget {
         let label_size = self
             .label
             .layout_child(ctx, &BoxConstraints::loose(label_max));
-        let height = label_size.height.max(DIAMETER);
+        // An empty label contributes no height: its line height comes from
+        // the host's UI font, which would otherwise grow the row per platform.
+        let label_height = if self.label_text.is_empty() {
+            0.0
+        } else {
+            label_size.height
+        };
+        let height = label_height.max(DIAMETER);
         // Vertically centre the label against the ring.
-        self.label.set_origin(Point::new(
-            DIAMETER + GAP,
-            (height - label_size.height) / 2.0,
-        ));
+        self.label
+            .set_origin(Point::new(DIAMETER + GAP, (height - label_height) / 2.0));
         bc.constrain(Size::new(DIAMETER + GAP + label_size.width, height))
     }
 
@@ -336,6 +341,17 @@ mod tests {
         let state_any: &mut dyn Any = state;
         let mut ctx = EventCtx::new(state_any, Point::ZERO, Size::new(120.0, 24.0));
         w.event(&mut ctx, event);
+    }
+
+    #[test]
+    fn an_empty_label_radio_is_exactly_diameter_tall() {
+        let view = radio::<SelectState>(false, "");
+        let mut counter = 0u64;
+        let mut w = View::<SelectState>::build(&view, &mut BuildCtx::new(&mut counter));
+        let mut text_ctx = frust_text::TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut text_ctx);
+        let size = w.layout(&mut lctx, &BoxConstraints::loose(Size::new(200.0, 200.0)));
+        assert_eq!(size.height, DIAMETER);
     }
 
     #[test]
