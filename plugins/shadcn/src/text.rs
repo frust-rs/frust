@@ -43,7 +43,7 @@
 use frust::Theme;
 use frust::authoring::{
     Brush, Color, LayoutCtx, PaintScene, Point, Size, ThemeTextType,
-    text::{TextContext, TextLayout, TextStyle},
+    text::{LocaleStamp, TextContext, TextLayout, TextStyle},
 };
 
 /// `style` with its font family replaced by the live theme's `role` family,
@@ -72,16 +72,15 @@ pub(crate) fn themed_family(
 /// constant keeps the shape cache from missing on a color change.
 pub(crate) const SHAPING_INK: Color = Color::BLACK;
 
-/// The app-locale generation a layout shaped in `style` depends on: the live
-/// default-locale generation for an untagged style, a constant for a style
-/// carrying its own locale (the default never touches it). Caches store it
-/// beside the style key and reuse only on equality.
-fn locale_generation(style: &TextStyle) -> u64 {
-    if style.locale.is_some() {
-        0
-    } else {
-        frust::authoring::text::default_locale_generation()
-    }
+/// Shape through `shape` and pair the result with the [`LocaleStamp`] read
+/// BEFORE it ran: a locale write landing mid-shape then leaves the stored stamp
+/// stale, so the next layout reshapes instead of trusting a mixed layout.
+fn shape_stamped(
+    style: &TextStyle,
+    shape: impl FnOnce() -> TextLayout,
+) -> (TextLayout, LocaleStamp) {
+    let stamp = LocaleStamp::for_style(style.locale.as_deref());
+    (shape(), stamp)
 }
 
 /// A cached, lazily-shaped text run whose color is baked into the shaped
@@ -90,7 +89,7 @@ pub(crate) struct Label {
     content: String,
     layout: Option<TextLayout>,
     shaped_style: Option<TextStyle>,
-    shaped_locale: u64,
+    shaped_locale: LocaleStamp,
 }
 
 impl Label {
@@ -100,7 +99,7 @@ impl Label {
             content: content.into(),
             layout: None,
             shaped_style: None,
-            shaped_locale: 0,
+            shaped_locale: LocaleStamp::default(),
         }
     }
 
@@ -129,16 +128,16 @@ impl Label {
     pub(crate) fn layout(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> Size {
         if let Some(cached) = &self.layout
             && self.shaped_style.as_ref() == Some(style)
-            && self.shaped_locale == locale_generation(style)
+            && self.shaped_locale.is_current(style.locale.as_deref())
         {
             return cached.size();
         }
         let text_ctx = ctx.text_context::<TextContext>();
-        let laid = text_ctx.layout(&self.content, style, None);
+        let (laid, stamp) = shape_stamped(style, || text_ctx.layout(&self.content, style, None));
         let size = laid.size();
         self.layout = Some(laid);
         self.shaped_style = Some(style.clone());
-        self.shaped_locale = locale_generation(style);
+        self.shaped_locale = stamp;
         size
     }
 
@@ -164,7 +163,7 @@ pub(crate) struct LabelRun {
     content: String,
     layout: Option<TextLayout>,
     laid_out_style: Option<TextStyle>,
-    laid_out_locale: u64,
+    laid_out_locale: LocaleStamp,
 }
 
 impl LabelRun {
@@ -174,7 +173,7 @@ impl LabelRun {
             content: content.into(),
             layout: None,
             laid_out_style: None,
-            laid_out_locale: 0,
+            laid_out_locale: LocaleStamp::default(),
         }
     }
 
@@ -191,16 +190,16 @@ impl LabelRun {
     pub(crate) fn layout(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> Size {
         if let Some(cached) = &self.layout
             && self.laid_out_style.as_ref() == Some(style)
-            && self.laid_out_locale == locale_generation(style)
+            && self.laid_out_locale.is_current(style.locale.as_deref())
         {
             return cached.size();
         }
         let text_ctx = ctx.text_context::<TextContext>();
-        let laid = text_ctx.layout(&self.content, style, None);
+        let (laid, stamp) = shape_stamped(style, || text_ctx.layout(&self.content, style, None));
         let size = laid.size();
         self.layout = Some(laid);
         self.laid_out_style = Some(style.clone());
-        self.laid_out_locale = locale_generation(style);
+        self.laid_out_locale = stamp;
         size
     }
 
@@ -233,6 +232,7 @@ mod tests {
     use super::*;
     use frust::authoring::text::{FontFamily, FontWeight};
     use frust::authoring::{BoxConstraints, scene::GlyphRun};
+    use frust_widgets::test_support::LocaleSlotGuard;
     use std::any::Any;
 
     #[test]
@@ -286,22 +286,6 @@ mod tests {
         TextStyle::new(size, ink)
     }
 
-    /// Serialises the tests that write the process-global default-locale slot.
-    static LOCALE_SLOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Holds the slot lock and restores `None` on drop, panic included.
-    struct LocaleWriter(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
-
-    fn locale_writer() -> LocaleWriter {
-        LocaleWriter(LOCALE_SLOT.lock().unwrap_or_else(|e| e.into_inner()))
-    }
-
-    impl Drop for LocaleWriter {
-        fn drop(&mut self) {
-            frust::authoring::text::set_default_locale(None);
-        }
-    }
-
     /// `(shapes, hits)` the text context has seen so far.
     fn shape_counts(tcx: &TextContext) -> (u64, u64) {
         let stats = tcx.shape_cache_stats();
@@ -310,7 +294,7 @@ mod tests {
 
     #[test]
     fn cached_runs_follow_the_app_locale_generation() {
-        let _slot = locale_writer();
+        let _slot = LocaleSlotGuard::set(None);
         let style = style(14.0, SHAPING_INK);
         let mut label = Label::new("Save");
         let mut run = LabelRun::new("Save");
@@ -360,6 +344,31 @@ mod tests {
             shape_counts(&tcx),
             before,
             "an explicit locale stays cached"
+        );
+    }
+
+    /// The stamp is read before shaping: a locale write landing mid-shape
+    /// leaves it stale, so the layout is not trusted at the new generation.
+    #[test]
+    fn the_stamp_is_read_before_shaping() {
+        let _slot = LocaleSlotGuard::set(None);
+        let s = style(14.0, SHAPING_INK);
+        let mut tcx = TextContext::new();
+        let (_, stamp) = shape_stamped(&s, || {
+            frust::authoring::text::set_default_locale(Some("ja"));
+            tcx.layout("Save", &s, None)
+        });
+        assert!(
+            !stamp.is_current(None),
+            "a mid-shape locale write must leave the stamp stale"
+        );
+        let (_, tagged) = shape_stamped(&s.clone().with_locale(Some("fr")), || {
+            frust::authoring::text::set_default_locale(Some("ko"));
+            tcx.layout("Save", &s, None)
+        });
+        assert!(
+            tagged.is_current(Some("fr")),
+            "an explicit locale is constant"
         );
     }
 
