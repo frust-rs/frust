@@ -38,7 +38,7 @@ pub use builder::ThemeBuilder;
 pub use color::{Brightness, ColorScheme};
 pub use elevation::{Elevation, ElevationLevel, ShadowSpec, SurfaceRole};
 pub use extensions::ThemeExtensions;
-pub use glass::{GlassFill, GlassMaterial, GlassScale};
+pub use glass::{GlassFill, GlassMaterial, GlassScale, GlassTier};
 pub use motion::{
     CosmeticLoopRate, EasingSet, MotionDurations, MotionExtras, MotionScheme, MotionSpring,
 };
