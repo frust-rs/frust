@@ -79,21 +79,25 @@ pub enum EngineError {
 
     /// A frame records more
     /// [`Command::BackdropBlur`](frust_scene::Command::BackdropBlur)s than the
-    /// engine serves in one frame
-    /// ([`MAX_BACKDROPS_PER_FRAME`](crate::filters::MAX_BACKDROPS_PER_FRAME)).
+    /// configurable per-frame cap in force
+    /// ([`max_backdrops_per_frame`](crate::filters::max_backdrops_per_frame):
+    /// [`MAX_BACKDROPS_PER_FRAME`](crate::filters::MAX_BACKDROPS_PER_FRAME) by
+    /// default, set process-wide by
+    /// [`set_max_backdrops_per_frame`](crate::filters::set_max_backdrops_per_frame)).
     ///
     /// Each backdrop costs the frame a cut of its surface pass, a region copy
     /// and a blur's whole pass sequence, so the count is bounded rather than
-    /// left to grow with a widget tree; a frame past the bound is refused up
+    /// left to grow with a widget tree; a frame past the cap is refused up
     /// front, before anything is recorded, exactly like a scheduler
-    /// escalation — never rendered with some of its backdrops missing.
+    /// escalation — never rendered with some of its backdrops missing. Every
+    /// recorded command counts, including one the frame would later drop.
     #[error(
         "{recorded} backdrop blurs in one frame, more than the {max} the engine serves per frame"
     )]
     TooManyBackdrops {
         /// How many backdrop blurs the frame recorded.
         recorded: usize,
-        /// The per-frame bound.
+        /// The per-frame cap the frame was judged against.
         max: usize,
     },
 

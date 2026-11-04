@@ -1868,6 +1868,24 @@ pub use frust_core::anim::{
     set_animation_time_scale,
 };
 
+/// The per-frame backdrop-blur cap: how many backdrop blurs (a
+/// [`glass_surface`](crate::glass_surface), or any `PaintScene::backdrop_blur`)
+/// one frame is drawn with. Four by default; [`set_max_backdrops_per_frame`]
+/// sets it process-wide, clamped to `1..=16`, and answers the cap applied.
+///
+/// Call it from `app!` setup or at runtime — it takes effect on the next
+/// frame. Every backdrop costs the frame a surface cut, a region copy and a
+/// blur pass sequence, so raise the cap only as far as a screen needs. Past
+/// the cap the frame is refused, never rendered with backdrops missing.
+///
+/// ```no_run
+/// use frust::{max_backdrops_per_frame, set_max_backdrops_per_frame};
+///
+/// assert_eq!(set_max_backdrops_per_frame(8), 8);
+/// assert_eq!(max_backdrops_per_frame(), 8);
+/// ```
+pub use frust_render::{max_backdrops_per_frame, set_max_backdrops_per_frame};
+
 /// The window's shape, flat-re-exported from `frust-core::app` so app code
 /// (not just widget authors, see [`authoring::WindowMetrics`]) can recover it
 /// via `use_context::<`[`WindowMetrics`]`>()` inside `Component::build` — a

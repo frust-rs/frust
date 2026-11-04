@@ -100,6 +100,13 @@ pub use external_pass::{
 // the first renderer is created, so the glyph-atlas and retained-page tiers can
 // take the large budget — `frust-engine` owns the rule.
 pub use frust_engine::cache::images::set_reported_device_memory;
+// The per-frame backdrop-blur cap, process-wide like the memory report above:
+// `frust-engine` owns the bound and the refusal past it, an app only picks the
+// number (the facade re-exports the setter and reader flat).
+pub use frust_engine::filters::{
+    BACKDROP_CAP_CEILING, MAX_BACKDROPS_PER_FRAME, max_backdrops_per_frame,
+    set_max_backdrops_per_frame,
+};
 pub use headless::{
     GOLDEN_EXPECT_ADAPTER_ENV_VAR, GOLDEN_EXPECT_BACKEND_ENV_VAR, HeadlessImage, HeadlessMeta,
     HeadlessOptions, HeadlessRenderer, HeadlessSpec,
