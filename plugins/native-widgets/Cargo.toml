@@ -250,7 +250,7 @@ dispatch2 = { version = "0.3", default-features = false, features = [
 # counted against `--no-default-features`.
 kurbo = { workspace = true }
 peniko = { workspace = true }
-frust-text = { workspace = true }
+frust-text = { workspace = true, features = ["test-support"] }
 frust-scene = { workspace = true }
 
 [features]
