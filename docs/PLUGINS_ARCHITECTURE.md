@@ -281,7 +281,8 @@ Design-System Contract for the toolkit they all build against). Their shared cha
   place either catalog reaches through a full-area top-layer widget pattern standing in for the
   DOM portal shadcn/ui itself relies on. `frust-material`'s is a sibling port of `frust-shadcn`'s
   (ported, never depended on — the charter above forbids one design-system plugin depending on
-  another), not a shared module. Both give an `anchored` host (trigger-relative placement in
+  another), not a shared module — except the snap-point math, which both route through the framework
+  `frust::motion::Detents` while keeping their own hosts, ramps and dismiss staging. Both give an `anchored` host (trigger-relative placement in
   window space, light-dismiss, no scrim — popover, the menu/dropdown/select/combobox family, and
   material's tooltip/rich tooltip) and a `modal` host (scrim + centered/edge-pinned panel —
   dialog, alert-dialog, sheet, side/drawer sheet, full-screen search, picker). Every other
