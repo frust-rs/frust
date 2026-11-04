@@ -15,7 +15,12 @@
 //! 1. The tier's drop shadow ([`PaintScene::draw_shadow`]), when its alpha is
 //!    above zero, inside a clip that excludes the surface's own rounded
 //!    rectangle (an outer rect with the surface as a hole), so the shadow is
-//!    cast outside the surface and never reaches the lens or the washes.
+//!    cast outside the surface and is never painted under the lens or the
+//!    washes. The lens's blur footprint reaches past the surface edge, so it
+//!    still samples the shadow ring just outside it. The exclusion needs a
+//!    scene that clips to a path ([`PaintScene::push_clip_path`]'s default
+//!    clips to the path's bounding box); a shadow margin too large to
+//!    represent skips the clip and draws the shadow as the engine accepts it.
 //! 2. A rounded clip at [`GlassSurfaceView::corner_radius`].
 //! 3. Translucent material: [`PaintScene::backdrop_blur`] with the tier's
 //!    `blur_radius_intent`, then the brightness-selected fill stack
@@ -180,7 +185,9 @@ fn surface_color(scheme: &ColorScheme, role: SurfaceRole) -> Color {
 /// The clip the shadow draws under, in the surface's local space: an outer
 /// rect covering the shadow's full extent with the surface's rounded rect as
 /// a hole. The hole's winding is reversed so the nonzero clip excludes it.
-fn shadow_clip_path(size: Size, radius: f64, y_offset: f64, blur_std_dev: f64) -> BezPath {
+/// `None` when the outer rect is not finite (a finite but huge blur or
+/// offset), since a non-finite clip path would refuse the whole frame.
+fn shadow_clip_path(size: Size, radius: f64, y_offset: f64, blur_std_dev: f64) -> Option<BezPath> {
     let blur = if blur_std_dev.is_finite() {
         blur_std_dev.max(0.0)
     } else {
@@ -192,13 +199,19 @@ fn shadow_clip_path(size: Size, radius: f64, y_offset: f64, blur_std_dev: f64) -
         0.0
     };
     let margin = 3.0 * blur + offset + 1.0;
-    let mut path = Rect::new(-margin, -margin, size.width + margin, size.height + margin)
-        .to_path(HAIRLINE_TOLERANCE);
+    let outer = Rect::new(-margin, -margin, size.width + margin, size.height + margin);
+    if ![outer.x0, outer.y0, outer.x1, outer.y1]
+        .iter()
+        .all(|v| v.is_finite())
+    {
+        return None;
+    }
+    let mut path = outer.to_path(HAIRLINE_TOLERANCE);
     let hole =
         RoundedRect::new(0.0, 0.0, size.width, size.height, radius).to_path(HAIRLINE_TOLERANCE);
     let hole = hole.reverse_subpaths();
     path.extend(hole);
-    path
+    Some(path)
 }
 
 impl GlassSurfaceWidget {
@@ -252,12 +265,12 @@ impl Widget for GlassSurfaceWidget {
             } = material.shadow;
             if color_alpha > 0.0 {
                 let base = theme.map_or(Color::BLACK, |t| t.scheme().shadow);
-                // Clip the shadow to everything outside the surface so it
-                // does not darken the backdrop the lens samples.
-                scene.push_clip_path(
-                    origin,
-                    &shadow_clip_path(size, radius, y_offset, blur_std_dev),
-                );
+                // Clip the shadow to everything outside the surface so it is
+                // not painted under the lens or the washes.
+                let clip = shadow_clip_path(size, radius, y_offset, blur_std_dev);
+                if let Some(path) = &clip {
+                    scene.push_clip_path(origin, path);
+                }
                 scene.draw_shadow(
                     Point::new(origin.x, origin.y + y_offset),
                     size,
@@ -265,7 +278,9 @@ impl Widget for GlassSurfaceWidget {
                     blur_std_dev,
                     with_alpha(base, color_alpha),
                 );
-                scene.pop_clip();
+                if clip.is_some() {
+                    scene.pop_clip();
+                }
             }
         }
 
@@ -426,7 +441,7 @@ mod tests {
         assert_eq!(ops.len(), 10, "{ops:?}");
         assert_eq!(
             ops[0],
-            Op::ShadowClip(o, shadow_clip_path(s, 8.0, 2.0, 4.0))
+            Op::ShadowClip(o, shadow_clip_path(s, 8.0, 2.0, 4.0).unwrap())
         );
         assert_eq!(
             ops[1],
@@ -505,7 +520,7 @@ mod tests {
     #[test]
     fn shadow_clip_excludes_the_surface_interior() {
         let s = Size::new(40.0, 30.0);
-        let path = shadow_clip_path(s, 8.0, 2.0, 4.0);
+        let path = shadow_clip_path(s, 8.0, 2.0, 4.0).unwrap();
         // Nonzero winding: the outer rect wraps +1, the reversed hole cancels.
         let inside = Point::new(20.0, 15.0);
         let ring = Point::new(-5.0, 15.0);
@@ -515,6 +530,29 @@ mod tests {
         assert_eq!(kurbo::Shape::winding(&path, outer), 0);
         // The outer rect covers the whole shadow extent (3 sigma plus offset).
         assert!(kurbo::Shape::bounding_box(&path).contains(Point::new(-14.0, 36.0)));
+    }
+
+    #[test]
+    fn a_shadow_margin_too_large_to_represent_draws_the_shadow_unclipped() {
+        let theme = glass_theme();
+        // 3 x 1e308 and MAX + MAX/2 both overflow the margin.
+        for (y_offset, blur_std_dev) in [(2.0, 1e308), (f64::MAX, f64::MAX / 2.0)] {
+            assert!(shadow_clip_path(Size::new(40.0, 30.0), 8.0, y_offset, blur_std_dev).is_none());
+            let mut m = material(12.0);
+            m.shadow = ShadowSpec {
+                y_offset,
+                blur_std_dev,
+                color_alpha: 0.12,
+            };
+            let ops = paint_with(&surface().material(m), Some(&theme));
+            assert!(
+                !ops.iter().any(|op| matches!(op, Op::ShadowClip(..))),
+                "{ops:?}"
+            );
+            assert!(matches!(ops[0], Op::Shadow(..)), "{ops:?}");
+            // The shadow's push/pop stays balanced: only the surface clip pops.
+            assert_eq!(ops.iter().filter(|op| **op == Op::PopClip).count(), 1);
+        }
     }
 
     #[test]
