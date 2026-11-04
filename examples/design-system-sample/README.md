@@ -7,8 +7,8 @@ the `frust` facade's public API alone, with every built-in catalog
 
 | Crate | Is |
 |-------|-----|
-| `sample-design` | the design system — tokens, three widgets, one transition pattern, an `install()` |
-| `sample-app` | a minimal desktop app that installs it and renders all three widgets |
+| `sample-design` | the design system — tokens, four widgets, one transition pattern, an `install()` |
+| `sample-app` | a minimal desktop app that installs it and renders all four widgets |
 
 ## What this proves
 
@@ -27,13 +27,17 @@ whose **only** dependency is `frust`:
   per-group editors, `DesignLanguage::Custom("sample")` as an identity tag, and
   `ThemeBuilder::extension` for a typed, no-lock-in token attachment
   (`SampleAccents`) resolved back out with `Theme::extension::<T>()`.
-- **All three widget-authoring shapes**, each against `frust::authoring`:
+- **All three core widget-authoring shapes**, each against `frust::authoring`:
   a **leaf** (`badge`, paint-only, shapes its own glyph run through
   `frust::authoring::text`), a **single-child container** (`panel` —
   `build_child`/`rebuild_child`/`teardown_child`, `route_event_single`,
   `visit_children!`, `semantics` forwarding via `ChildPod::semantics_child`),
   and an **interactive control** (`chip` — `erase_callback`/`ErasedCallback`,
   pointer capture, fire-on-up-inside, `PRESSED_OPACITY`).
+- **Presence** — `notice` wraps a panel in `frust::motion::presence`, so an
+  out-of-tree catalog gets a kept-mounted fade in/out with an `on_exited` hook.
+  While closed its semantics vanish (asserted with `frust::testing::semantics_of`)
+  and it records no draw.
 - **Motion** — `frust::motion` is *not* catalog-gated, so a catalogs-off design
   system can still implement `TransitionPattern` (`reveal::SampleReveal`) and
   feed it to `pattern_switcher`. This was an open question before the sample;
@@ -162,6 +166,6 @@ has no automated pixel-diff counterpart.
 
 ## Not a design system worth shipping
 
-Three widgets, two hues, one pattern. It is scoped to be the smallest thing
+Four widgets, two hues, one pattern. It is scoped to be the smallest thing
 that exercises every authoring shape — deliberately, so that a `frust create`
 design-system template distilled from it stays small enough to read.
