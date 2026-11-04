@@ -73,6 +73,8 @@ mod android;
 #[cfg(any(target_os = "ios", target_os = "macos"))]
 mod apple;
 
+mod memory;
+
 #[cfg(test)]
 mod conformance;
 
@@ -184,6 +186,32 @@ impl SharedPreferences {
         let backend: Arc<dyn Backend> = Arc::new(file::FileStore::standard()?);
 
         Ok(Self { backend })
+    }
+
+    /// A fresh, empty, process-local store that is never persisted.
+    ///
+    /// Available on every target and infallible. Each call returns an
+    /// independent store: two `in_memory()` handles never see each other's
+    /// keys, while clones of one handle share its map. Nothing is written to
+    /// disk or to the platform store, so tests and previews can hand it to
+    /// anything that takes a `SharedPreferences` without touching real user
+    /// data.
+    ///
+    /// ```
+    /// use frust_shared_preferences::SharedPreferences;
+    ///
+    /// let prefs = SharedPreferences::in_memory();
+    /// prefs.set_string("locale", "de").unwrap();
+    /// // A clone (for example the one given to `I18n::with_persistence`)
+    /// // sees the same keys.
+    /// assert_eq!(prefs.clone().get_string("locale").as_deref(), Some("de"));
+    /// // A separate in-memory store starts empty.
+    /// assert_eq!(SharedPreferences::in_memory().get_string("locale"), None);
+    /// ```
+    pub fn in_memory() -> Self {
+        Self {
+            backend: Arc::new(memory::MemoryStore::new()),
+        }
     }
 
     /// The stored `bool` at `key`, or `None` if absent or stored as a
