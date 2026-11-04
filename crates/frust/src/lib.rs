@@ -1277,6 +1277,58 @@ pub use kurbo;
 /// valve alongside [`Color`]/the by-name list above.
 pub use peniko;
 
+/// Test helpers for out-of-tree widgets, behind the opt-in `test-support` feature.
+///
+/// Enable it from a `[dev-dependencies]` entry only: features are additive, so enabling it on a
+/// normal dependency would switch the module on in every app that depends on that crate.
+/// [`semantics_of`] builds a view, lays it out against a real text context and returns the
+/// accessibility tree the window would hand its adapter, so a widget's `Widget::semantics` can be
+/// asserted on from a plain `#[test]`.
+#[cfg(feature = "test-support")]
+pub mod testing {
+    use kurbo::Size;
+
+    use crate::View;
+    use frust_core::SemanticsUpdate;
+
+    /// Build the view `build` returns, lay it out in a `size` window and return its semantics tree.
+    ///
+    /// The tree always holds the window root node; a widget contributes its own nodes through
+    /// `Widget::semantics`. The layout pass threads a real text context, so text-measuring widgets
+    /// lay out as they do in an app.
+    pub fn semantics_of<V, F>(mut build: F, size: Size) -> SemanticsUpdate
+    where
+        F: FnMut(&mut ()) -> V,
+        V: View<()>,
+    {
+        let mut root: frust_core::RenderRoot<(), V> = frust_core::RenderRoot::new();
+        root.rebuild(&mut build, &mut ());
+        let mut text_ctx = frust_text::TextContext::new();
+        root.layout_with_text(size, &mut text_ctx as &mut dyn std::any::Any);
+        root.semantics()
+    }
+}
+
+#[cfg(all(test, feature = "test-support"))]
+mod testing_semantics_of {
+    use kurbo::Size;
+
+    #[test]
+    fn semantics_of_a_text_view_finds_the_text_node() {
+        let update = crate::testing::semantics_of(
+            |_: &mut ()| crate::text("hello"),
+            Size::new(200.0, 100.0),
+        );
+        assert!(update.nodes.len() >= 2, "window root plus the text node");
+        assert!(
+            update
+                .nodes
+                .iter()
+                .any(|(_, node)| node.value() == Some("hello") || node.label() == Some("hello"))
+        );
+    }
+}
+
 mod back_glue;
 mod route_state;
 mod router_glue;
