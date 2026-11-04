@@ -65,9 +65,12 @@
 //! every backdrop as nothing (logged once), the "draw less, never wrong"
 //! answer.
 //!
-//! Bounded at [`MAX_BACKDROPS_PER_FRAME`]: each costs a surface cut, a copy and
-//! a blur's whole sequence, and a frame recording more is refused with
-//! [`EngineError::TooManyBackdrops`].
+//! Bounded by a per-frame cap — [`MAX_BACKDROPS_PER_FRAME`] by default, set
+//! process-wide by [`set_max_backdrops_per_frame`] up to
+//! [`BACKDROP_CAP_CEILING`]: each backdrop costs a surface cut, a copy and a
+//! blur's whole sequence, and a frame recording more than the cap is refused
+//! whole with [`EngineError::TooManyBackdrops`], never drawn with some of its
+//! backdrops missing.
 //!
 //! ## What is pure, and what is not
 //!
@@ -90,6 +93,8 @@
 pub mod blur;
 pub mod drop_shadow;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use kurbo::Affine;
 use peniko::color::{AlphaColor, Srgb};
 use vello_common::filter::drop_shadow::DropShadow;
@@ -102,14 +107,61 @@ use vello_common::util::extract_scales;
 
 use crate::error::EngineError;
 
-/// The most `Command::BackdropBlur`s one frame is served with; a frame
-/// recording more is refused with [`EngineError::TooManyBackdrops`].
+/// The default cap: the most `Command::BackdropBlur`s one frame is served
+/// with until an app sets another through [`set_max_backdrops_per_frame`]; a
+/// frame recording more than the cap in force is refused with
+/// [`EngineError::TooManyBackdrops`].
 ///
 /// Four covers the glass surfaces a screen layers at once (an app bar, a tab
 /// bar, a sheet and a dialog over it) with room to spare, while keeping a
 /// frame's worst case to four surface cuts, four region copies and four blur
 /// sequences.
 pub const MAX_BACKDROPS_PER_FRAME: usize = 4;
+
+/// The highest cap [`set_max_backdrops_per_frame`] accepts; a larger request is
+/// clamped to it.
+///
+/// Every backdrop past the default adds its own surface cut, region copy and
+/// blur sequence to the frame, so the cap stays a bound a frame's cost can be
+/// reasoned about rather than a number a widget tree can grow without limit.
+pub const BACKDROP_CAP_CEILING: usize = 16;
+
+/// The cap in force, process-wide (see [`max_backdrops_per_frame`]).
+static BACKDROP_CAP: AtomicUsize = AtomicUsize::new(MAX_BACKDROPS_PER_FRAME);
+
+/// Sets the per-frame backdrop cap for every renderer in the process and
+/// answers the cap actually applied: `cap` clamped to
+/// `1..=`[`BACKDROP_CAP_CEILING`].
+///
+/// Read once per compiled frame, at the top of the compiler's up-front
+/// validation, so a change lands on the next frame compiled and never splits
+/// one. The refusal contract is unchanged at any cap: a frame recording more
+/// `Command::BackdropBlur`s than the cap is refused whole with
+/// [`EngineError::TooManyBackdrops`] (carrying the cap as its `max`), never
+/// rendered with some of its backdrops missing.
+pub fn set_max_backdrops_per_frame(cap: usize) -> usize {
+    let applied = clamp_backdrop_cap(cap);
+    BACKDROP_CAP.store(applied, Ordering::Relaxed);
+    applied
+}
+
+/// The per-frame backdrop cap in force: [`MAX_BACKDROPS_PER_FRAME`] until
+/// [`set_max_backdrops_per_frame`] sets another.
+#[must_use]
+pub fn max_backdrops_per_frame() -> usize {
+    BACKDROP_CAP.load(Ordering::Relaxed)
+}
+
+/// `cap` held to the range a cap is served at, `1..=`[`BACKDROP_CAP_CEILING`].
+pub(crate) const fn clamp_backdrop_cap(cap: usize) -> usize {
+    if cap == 0 {
+        1
+    } else if cap > BACKDROP_CAP_CEILING {
+        BACKDROP_CAP_CEILING
+    } else {
+        cap
+    }
+}
 
 /// One `Command::BackdropBlur` the compiler recorded, as the scheduler and the
 /// renderer read it (see this module's *The backdrop blur*).

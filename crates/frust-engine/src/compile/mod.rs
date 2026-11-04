@@ -106,7 +106,9 @@ use crate::compile::paint::{LutRequest, encode_brush, encode_image_brush, encode
 use crate::compile::parallel::{Claim, Geometry, Merge, Pool};
 use crate::config;
 use crate::error::EngineError;
-use crate::filters::{Backdrop, MAX_BACKDROPS_PER_FRAME, backdrop_region, backdrop_sigma};
+use crate::filters::{
+    Backdrop, backdrop_region, backdrop_sigma, clamp_backdrop_cap, max_backdrops_per_frame,
+};
 use crate::text::atlas_policy::Synthesis;
 use crate::text::hvgl::HvglOutlines;
 use crate::text::hvgl_atlas::{self, CollectedFaces, Measured};
@@ -1277,13 +1279,41 @@ impl SceneCompiler {
     /// composed transform is non-finite and so maps geometry to coordinates no
     /// `u16` pixel can hold; and [`EngineError::InvalidGeometry`] when a
     /// command the compiler lowers carries non-finite geometry of its own (see
-    /// [`check_geometry`]). All three are refused before any strip is
-    /// generated — the frame path returns errors and never panics.
+    /// [`check_geometry`]); and [`EngineError::TooManyBackdrops`] when the
+    /// scene records more `Command::BackdropBlur`s than the process-wide cap
+    /// ([`max_backdrops_per_frame`]), read once here. All four are refused
+    /// before any strip is generated — the frame path returns errors and never
+    /// panics.
     pub fn compile(
         &mut self,
         scene: &Scene,
         root: Affine,
         size: (u16, u16),
+    ) -> Result<CompiledFrame, EngineError> {
+        self.compile_with_backdrop_cap(scene, root, size, max_backdrops_per_frame())
+    }
+
+    /// [`Self::compile`] against an explicit per-frame backdrop cap rather than
+    /// the process-wide one, held to the same `1..=`
+    /// [`BACKDROP_CAP_CEILING`](crate::filters::BACKDROP_CAP_CEILING) range
+    /// [`set_max_backdrops_per_frame`](crate::filters::set_max_backdrops_per_frame)
+    /// applies.
+    ///
+    /// The seam a caller that must not observe another thread's change to the
+    /// process-wide cap compiles through (a test asserting the bound at a
+    /// given cap, beside others compiling concurrently); an app sets the cap
+    /// once and calls [`Self::compile`].
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::compile`]'s, with [`EngineError::TooManyBackdrops`]
+    /// judged against `backdrop_cap` (clamped) and naming it as its `max`.
+    pub fn compile_with_backdrop_cap(
+        &mut self,
+        scene: &Scene,
+        root: Affine,
+        size: (u16, u16),
+        backdrop_cap: usize,
     ) -> Result<CompiledFrame, EngineError> {
         // The compiler's half of the encode's CPU accounting; the renderer
         // laps the rest of the call around it (see [`CompileSpans`]). Free
@@ -1317,12 +1347,15 @@ impl SceneCompiler {
             check_geometry(command)?;
         }
         // Counted over the commands the scene records, not over the ones that
-        // end up drawing: the bound is a statement about the display list a
-        // widget tree produced, refused whole before a strip is generated.
-        if backdrops > MAX_BACKDROPS_PER_FRAME {
+        // end up drawing: the cap is a statement about the display list a
+        // widget tree produced, refused whole before a strip is generated —
+        // whatever cap the app chose, a backdrop dropped later (inside an
+        // isolated layer, off the target) still counts against it.
+        let cap = clamp_backdrop_cap(backdrop_cap);
+        if backdrops > cap {
             return Err(EngineError::TooManyBackdrops {
                 recorded: backdrops,
-                max: MAX_BACKDROPS_PER_FRAME,
+                max: cap,
             });
         }
 

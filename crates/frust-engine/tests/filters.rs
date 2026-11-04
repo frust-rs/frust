@@ -3213,7 +3213,8 @@ mod backdrop {
 
     use frust_engine::compile::CompiledFrame;
     use frust_engine::filters::{
-        Backdrop, MAX_BACKDROPS_PER_FRAME, SERVED_EDGE_MODE, backdrop_region, backdrop_sigma,
+        BACKDROP_CAP_CEILING, Backdrop, MAX_BACKDROPS_PER_FRAME, SERVED_EDGE_MODE, backdrop_region,
+        backdrop_sigma, max_backdrops_per_frame, set_max_backdrops_per_frame,
     };
     use frust_engine::gpu::pipelines::INTERMEDIATE_FORMAT;
     use frust_engine::gpu::present::CopyPresentPass;
@@ -3243,8 +3244,51 @@ mod backdrop {
         scene
     }
 
+    /// Compiles at the default cap, explicitly: the process-wide cap is
+    /// changed by [`the_process_wide_cap_is_clamped_and_read_back`] while the
+    /// rest of this binary runs, and a host case must not observe that.
     fn compile(scene: &Scene) -> Result<CompiledFrame, EngineError> {
-        SceneCompiler::new(VIEW.0, VIEW.1).compile(scene, Affine::IDENTITY, VIEW)
+        compile_at(scene, MAX_BACKDROPS_PER_FRAME)
+    }
+
+    /// Compiles against an explicit per-frame backdrop cap.
+    fn compile_at(scene: &Scene, cap: usize) -> Result<CompiledFrame, EngineError> {
+        SceneCompiler::new(VIEW.0, VIEW.1).compile_with_backdrop_cap(
+            scene,
+            Affine::IDENTITY,
+            VIEW,
+            cap,
+        )
+    }
+
+    /// The field with `count` small panels blurred behind, laid out in a grid
+    /// that keeps every one of up to eighteen on the viewport.
+    fn grid_of(count: usize) -> Scene {
+        scene_of(|builder| {
+            field(builder);
+            for index in 0..count {
+                let x = 2.0 + 16.0 * (index % 6) as f64;
+                let y = 2.0 + 22.0 * (index / 6) as f64;
+                builder.backdrop_blur(Rect::new(x, y, x + 12.0, y + 14.0), 1.5);
+            }
+        })
+    }
+
+    /// Restores the default process-wide cap when dropped, so a failing case
+    /// leaves the next one the cap it expects.
+    struct DefaultCapOnDrop;
+
+    impl Drop for DefaultCapOnDrop {
+        fn drop(&mut self) {
+            set_max_backdrops_per_frame(MAX_BACKDROPS_PER_FRAME);
+        }
+    }
+
+    fn copy_rounds(rounds: &[Round]) -> usize {
+        rounds
+            .iter()
+            .filter(|round| round.region_copy().is_some())
+            .count()
     }
 
     fn rounds(frame: &CompiledFrame) -> Vec<Round> {
@@ -3414,35 +3458,149 @@ mod backdrop {
     }
 
     #[test]
-    fn a_frame_past_the_backdrop_bound_is_refused_and_one_at_it_is_not() {
-        let with = |count: usize| {
-            compile(&scene_of(|builder| {
-                field(builder);
-                for index in 0..count {
-                    let x = 4.0 + 18.0 * index as f64;
-                    builder.backdrop_blur(Rect::new(x, 8.0, x + 14.0, 30.0), 1.5);
-                }
-            }))
-        };
-        let at_bound = with(MAX_BACKDROPS_PER_FRAME).expect("the bound itself is served");
-        assert_eq!(at_bound.backdrops.len(), MAX_BACKDROPS_PER_FRAME);
-        assert_eq!(
-            rounds(&at_bound)
-                .iter()
-                .filter(|round| round.region_copy().is_some())
-                .count(),
-            MAX_BACKDROPS_PER_FRAME
-        );
+    fn a_frame_past_the_backdrop_cap_is_refused_and_one_at_it_is_not() {
+        for cap in [1, MAX_BACKDROPS_PER_FRAME, 8, BACKDROP_CAP_CEILING] {
+            let at_cap = compile_at(&grid_of(cap), cap)
+                .unwrap_or_else(|error| panic!("cap {cap}: the cap itself is served: {error}"));
+            assert_eq!(at_cap.backdrops.len(), cap);
+            assert_eq!(
+                copy_rounds(&rounds(&at_cap)),
+                cap,
+                "cap {cap}: one region copy per backdrop"
+            );
 
-        let refused = with(MAX_BACKDROPS_PER_FRAME + 1);
+            let refused = compile_at(&grid_of(cap + 1), cap);
+            assert!(
+                matches!(
+                    refused,
+                    Err(EngineError::TooManyBackdrops { recorded, max })
+                        if recorded == cap + 1 && max == cap
+                ),
+                "cap {cap}: refused up front, never drawn with a backdrop missing: {refused:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_explicit_cap_is_held_to_the_served_range() {
         assert!(
             matches!(
-                refused,
-                Err(EngineError::TooManyBackdrops { recorded, max })
-                    if recorded == MAX_BACKDROPS_PER_FRAME + 1 && max == MAX_BACKDROPS_PER_FRAME
+                compile_at(&grid_of(2), 0),
+                Err(EngineError::TooManyBackdrops {
+                    recorded: 2,
+                    max: 1
+                })
             ),
-            "refused up front, never drawn with a backdrop missing: {refused:?}"
+            "a cap of zero is served as one"
         );
+        let ceiling = compile_at(&grid_of(BACKDROP_CAP_CEILING), 1000)
+            .expect("a cap past the ceiling serves the ceiling");
+        assert_eq!(ceiling.backdrops.len(), BACKDROP_CAP_CEILING);
+        assert!(matches!(
+            compile_at(&grid_of(BACKDROP_CAP_CEILING + 1), 1000),
+            Err(EngineError::TooManyBackdrops { max, .. }) if max == BACKDROP_CAP_CEILING
+        ));
+    }
+
+    #[test]
+    fn a_backdrop_dropped_off_the_target_still_counts_against_the_cap() {
+        // Every recorded command counts: the cap is a statement about the
+        // display list, not about what ends up drawing.
+        let scene = scene_of(|builder| {
+            field(builder);
+            builder.backdrop_blur(PANEL, 2.0);
+            builder.backdrop_blur(Rect::new(400.0, 400.0, 440.0, 440.0), 2.0);
+        });
+        assert_eq!(
+            compile_at(&scene, 2).expect("compiles").backdrops.len(),
+            1,
+            "the one off the target is dropped"
+        );
+        assert!(matches!(
+            compile_at(&scene, 1),
+            Err(EngineError::TooManyBackdrops {
+                recorded: 2,
+                max: 1
+            })
+        ));
+    }
+
+    #[test]
+    fn the_process_wide_cap_is_clamped_and_read_back() {
+        // Serialised with the device cases, the only others in this binary that
+        // compile through the process-wide cap.
+        let _serialized = render_lock();
+        let _restore = DefaultCapOnDrop;
+        assert_eq!(max_backdrops_per_frame(), MAX_BACKDROPS_PER_FRAME);
+
+        assert_eq!(set_max_backdrops_per_frame(0), 1, "zero is clamped up");
+        assert_eq!(max_backdrops_per_frame(), 1);
+        assert_eq!(
+            set_max_backdrops_per_frame(1000),
+            BACKDROP_CAP_CEILING,
+            "past the ceiling is clamped down"
+        );
+        assert_eq!(max_backdrops_per_frame(), BACKDROP_CAP_CEILING);
+
+        assert_eq!(set_max_backdrops_per_frame(8), 8);
+        let mut compiler = SceneCompiler::new(VIEW.0, VIEW.1);
+        let served = compiler
+            .compile(&grid_of(8), Affine::IDENTITY, VIEW)
+            .expect("compile reads the cap in force");
+        assert_eq!(served.backdrops.len(), 8);
+        assert!(matches!(
+            compiler.compile(&grid_of(9), Affine::IDENTITY, VIEW),
+            Err(EngineError::TooManyBackdrops {
+                recorded: 9,
+                max: 8
+            })
+        ));
+
+        assert_eq!(
+            set_max_backdrops_per_frame(MAX_BACKDROPS_PER_FRAME),
+            MAX_BACKDROPS_PER_FRAME
+        );
+    }
+
+    #[test]
+    fn eight_backdrops_compile_and_schedule_at_a_cap_of_eight() {
+        let frame = compile_at(&grid_of(8), 8).expect("eight are served at a cap of eight");
+        assert_eq!(frame.backdrops.len(), 8);
+        let rounds = rounds(&frame);
+        assert_eq!(copy_rounds(&rounds), 8);
+
+        // Each panel is copied, blurred and drawn — its page handed back —
+        // before the next one's copy reads the surface.
+        let copies: Vec<usize> = rounds
+            .iter()
+            .enumerate()
+            .filter(|(_, round)| round.region_copy().is_some())
+            .map(|(index, _)| index)
+            .collect();
+        for (index, backdrop) in frame.backdrops.iter().enumerate() {
+            let sampled: Vec<usize> = rounds
+                .iter()
+                .enumerate()
+                .filter(|(_, round)| {
+                    round
+                        .samples
+                        .iter()
+                        .any(|sample| sample.layer == backdrop.layer)
+                })
+                .map(|(at, _)| at)
+                .collect();
+            let [at] = sampled[..] else {
+                panic!("backdrop {index} is drawn exactly once: {sampled:?}");
+            };
+            assert!(rounds[at].is_root());
+            assert!(copies[index] < at);
+            if let Some(next) = copies.get(index + 1) {
+                assert!(
+                    at < *next,
+                    "backdrop {index} lands before the next copy: {rounds:#?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -3622,6 +3780,17 @@ mod backdrop {
         usage: Option<wgpu::TextureUsages>,
         merge: bool,
     ) -> Vec<u8> {
+        render_scene(&device_scene(), format, usage, merge).0
+    }
+
+    /// [`render_merged`] for any `scene`, also answering the passes the frame
+    /// recorded.
+    fn render_scene(
+        scene: &Scene,
+        format: wgpu::TextureFormat,
+        usage: Option<wgpu::TextureUsages>,
+        merge: bool,
+    ) -> (Vec<u8>, Vec<frust_engine::renderer::FramePass>) {
         let (device, queue, caps) = super::gpu();
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let readback = HeadlessTarget::new(&device, SIZE, SIZE, INTERMEDIATE_FORMAT);
@@ -3644,7 +3813,7 @@ mod backdrop {
                 &device,
                 &queue,
                 &mut encoder,
-                &device_scene(),
+                scene,
                 EngineTarget {
                     view,
                     format,
@@ -3656,7 +3825,7 @@ mod backdrop {
                 Color::BLACK,
                 Affine::IDENTITY,
             )
-            .expect("a frame with one backdrop encodes");
+            .expect("a frame with backdrops under the cap encodes");
         let passes = renderer.last_frame_passes().to_vec();
         assert!(
             passes.contains(&frust_engine::renderer::FramePass::Copy),
@@ -3677,7 +3846,7 @@ mod backdrop {
         renderer.end_frame(&queue);
         let error = drain_error_scope(&device, scope);
         assert!(error.is_none(), "the frame raised {error:?}");
-        readback.read_back(&device, &queue)
+        (readback.read_back(&device, &queue), passes)
     }
 
     fn pixel(pixels: &[u8], x: u32, y: u32) -> [u8; 4] {
@@ -3741,6 +3910,106 @@ mod backdrop {
                 "the {name} route differs from the texture copy by up to {worst}"
             );
         }
+    }
+
+    /// `count` panels blurred over the stripes, four to a row: eight is twice
+    /// the default cap.
+    fn panels_scene(count: usize) -> Scene {
+        scene_of(|builder| {
+            for stripe in 0..SIZE / 4 {
+                let x = f64::from(stripe * 4);
+                let colour = if stripe % 2 == 0 { RED } else { BLUE };
+                builder.fill_rect(
+                    Rect::new(x, 0.0, x + 4.0, f64::from(SIZE)),
+                    Brush::Solid(colour),
+                );
+            }
+            for index in 0..count {
+                let x = 4.0 + 23.0 * (index % 4) as f64;
+                let y = 8.0 + 44.0 * (index / 4) as f64;
+                builder.backdrop_blur(Rect::new(x, y, x + 18.0, y + 36.0), 3.0);
+            }
+        })
+    }
+
+    #[test]
+    #[ignore = "needs a real GPU: cargo test -p frust-engine --test filters -- --ignored"]
+    fn eight_backdrops_render_on_a_real_adapter_at_a_cap_of_eight() {
+        let _serialized = render_lock();
+        let _restore = DefaultCapOnDrop;
+        assert_eq!(set_max_backdrops_per_frame(8), 8);
+
+        let routes = [
+            None,
+            Some(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING),
+        ];
+        let mut rendered = Vec::new();
+        for usage in routes {
+            let (pixels, passes) = render_scene(&panels_scene(8), INTERMEDIATE_FORMAT, usage, true);
+            assert_eq!(
+                passes
+                    .iter()
+                    .filter(|pass| **pass == frust_engine::renderer::FramePass::Copy)
+                    .count(),
+                8,
+                "one region copy per backdrop past the default cap: {passes:?}"
+            );
+            for index in 0..8_u32 {
+                let x = 4 + 23 * (index % 4) + 9;
+                let y = 8 + 44 * (index / 4) + 18;
+                let mixed = pixel(&pixels, x, y);
+                assert!(
+                    mixed[0] > 60 && mixed[2] > 60 && mixed[3] == 255,
+                    "panel {index} blurs the stripes beneath it: {mixed:?}"
+                );
+            }
+            // Untouched between the panels.
+            assert_eq!(pixel(&pixels, 1, 48), [255, 0, 0, 255]);
+            rendered.push(pixels);
+        }
+        let worst = rendered[0]
+            .iter()
+            .zip(rendered[1].iter())
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap_or(0);
+        assert!(worst <= 1, "the two copy routes differ by up to {worst}");
+
+        // One past the cap is refused whole by the renderer too.
+        let (device, queue, caps) = super::gpu();
+        let readback = HeadlessTarget::new(&device, SIZE, SIZE, INTERMEDIATE_FORMAT);
+        let mut renderer =
+            EngineRenderer::new(&device, &caps, INTERMEDIATE_FORMAT, None).expect("builds");
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("frust-engine backdrop cap frame"),
+        });
+        let refused = renderer.encode(
+            &device,
+            &queue,
+            &mut encoder,
+            &panels_scene(9),
+            EngineTarget {
+                view: readback.view(),
+                format: INTERMEDIATE_FORMAT,
+                width: SIZE,
+                height: SIZE,
+                depth: None,
+                output: OutputAlpha::Premultiplied,
+            },
+            Color::BLACK,
+            Affine::IDENTITY,
+        );
+        assert!(
+            matches!(
+                refused,
+                Err(EngineError::TooManyBackdrops {
+                    recorded: 9,
+                    max: 8
+                })
+            ),
+            "{refused:?}"
+        );
+        assert!(renderer.last_frame_passes().is_empty());
     }
 
     /// The cost of the one extra pass a swapchain frame carrying a backdrop

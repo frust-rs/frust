@@ -2169,7 +2169,8 @@ impl EngineRenderer {
     /// - [`EngineError::InvalidTransform`] for a non-finite transform and
     ///   [`EngineError::InvalidGeometry`] for non-finite command geometry;
     /// - [`EngineError::TooManyBackdrops`] for a scene recording more backdrop
-    ///   blurs than one frame serves;
+    ///   blurs than the per-frame cap in force
+    ///   ([`crate::filters::max_backdrops_per_frame`]);
     /// - [`EngineError::RetainedKeyMissing`] for a `DrawRetained` the store
     ///   cannot serve (or any `DrawRetained` with retention off) — the store
     ///   is cleared on the way out, as [`crate::cache::retained`] documents;
@@ -2579,6 +2580,13 @@ impl EngineRenderer {
             let copies = self
                 .region_copies
                 .get_or_insert_with(|| RegionCopyResources::new(device));
+            // One instance slot per copy round the plan holds, so a frame
+            // under a raised backdrop cap grows the buffer here, ahead of the
+            // first copy's write, rather than dropping the copies past it.
+            copies.ensure_instances(
+                device,
+                usize::try_from(self.scratch.copies).unwrap_or(usize::MAX),
+            );
             if copy_mode == RegionCopyMode::Texture {
                 copies.ensure_staging(device, staging_extent.0, staging_extent.1);
             }
@@ -7573,10 +7581,15 @@ fn note_backdrop_unreadable(target: &wgpu::Texture) {
 }
 
 /// What a frame's region copies are recorded with beyond the copy pipeline:
-/// the instance buffer — one 16-byte slot per copy a frame can run
-/// ([`crate::filters::MAX_BACKDROPS_PER_FRAME`]), written as each copy is
-/// recorded — and, for a [`RegionCopyMode::Texture`] frame, the staging
-/// texture a region is transferred into before the copy pass reads it.
+/// the instance buffer — one 16-byte slot per copy the frame runs, written as
+/// each copy is recorded — and, for a [`RegionCopyMode::Texture`] frame, the
+/// staging texture a region is transferred into before the copy pass reads it.
+///
+/// The buffer starts with room for the default cap
+/// ([`crate::filters::MAX_BACKDROPS_PER_FRAME`]) and is grown, never shrunk,
+/// by [`Self::ensure_instances`] when a frame under a raised cap
+/// ([`crate::filters::set_max_backdrops_per_frame`]) copies more regions: a
+/// frame whose copies fit allocates nothing.
 #[derive(Debug)]
 struct RegionCopyResources {
     instances: wgpu::Buffer,
@@ -7592,16 +7605,19 @@ struct RegionCopyResources {
 
 impl RegionCopyResources {
     fn new(device: &wgpu::Device) -> Self {
-        let slots = crate::filters::MAX_BACKDROPS_PER_FRAME as u64;
         Self {
-            instances: device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("frust-engine region copy instances"),
-                size: slots.saturating_mul(COPY_INSTANCE_BYTES),
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }),
+            instances: region_copy_instances(device, crate::filters::MAX_BACKDROPS_PER_FRAME),
             staging: None,
             staging_group: None,
+        }
+    }
+
+    /// Grows the instance buffer to hold `copies` slots, if it does not
+    /// already. Called ahead of the frame's first copy, so no copy of the
+    /// frame was written into the buffer it replaces.
+    fn ensure_instances(&mut self, device: &wgpu::Device, copies: usize) {
+        if region_copy_buffer_outgrown(self.instances.size(), copies) {
+            self.instances = region_copy_instances(device, copies);
         }
     }
 
@@ -7637,6 +7653,30 @@ impl RegionCopyResources {
             },
         ));
     }
+}
+
+/// A region-copy instance buffer with room for `slots` copies.
+fn region_copy_instances(device: &wgpu::Device, slots: usize) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("frust-engine region copy instances"),
+        size: region_copy_bytes(slots),
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+/// The bytes `slots` region-copy instances take.
+fn region_copy_bytes(slots: usize) -> u64 {
+    u64::try_from(slots)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(COPY_INSTANCE_BYTES)
+}
+
+/// Whether a region-copy instance buffer of `held` bytes is too small for
+/// `copies` copies and must be recreated — the grow-only rule
+/// [`RegionCopyResources::ensure_instances`] applies.
+fn region_copy_buffer_outgrown(held: u64, copies: usize) -> bool {
+    region_copy_bytes(copies) > held
 }
 
 /// One region copy's full recording state: a region of the frame's own
@@ -8774,8 +8814,9 @@ mod tests {
         for now in readings {
             trace.record(&EncodeSpans::default(), now);
         }
-        assert_eq!(&trace.window[0][base + 12..], &[2, 0, 1, 4]);
-        assert_eq!(&trace.window[1][base + 12..], &[3, 1, 0, 0]);
+        // The four staging and bind-group counts, ahead of the later keys.
+        assert_eq!(&trace.window[0][base + 12..base + 16], &[2, 0, 1, 4]);
+        assert_eq!(&trace.window[1][base + 12..base + 16], &[3, 1, 0, 0]);
     }
 
     /// A window's percentile is nearest-rank over the column it names, so the
@@ -9953,6 +9994,28 @@ mod tests {
         let (merged, _) = pass_lists(&scratch);
         assert_eq!(merged, [FramePass::Opening]);
         assert_eq!(scratch.copies, 0);
+    }
+
+    #[test]
+    fn the_region_copy_instance_buffer_grows_past_the_default_cap_and_never_shrinks() {
+        let default = region_copy_bytes(crate::filters::MAX_BACKDROPS_PER_FRAME);
+        assert_eq!(default, 64, "four 16-byte slots to start with");
+        for copies in 0..=crate::filters::MAX_BACKDROPS_PER_FRAME {
+            assert!(
+                !region_copy_buffer_outgrown(default, copies),
+                "{copies} copies fit the default buffer, so the frame allocates nothing"
+            );
+        }
+        assert!(region_copy_buffer_outgrown(default, 5));
+        let ceiling = region_copy_bytes(crate::filters::BACKDROP_CAP_CEILING);
+        assert!(region_copy_buffer_outgrown(
+            default,
+            crate::filters::BACKDROP_CAP_CEILING
+        ));
+        assert!(
+            !region_copy_buffer_outgrown(ceiling, 2),
+            "a grown buffer is kept for a later frame that copies fewer regions"
+        );
     }
 
     #[test]
