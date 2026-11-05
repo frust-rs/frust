@@ -292,6 +292,35 @@ mod tests {
     }
 
     #[test]
+    fn glass_panel_counts_one_backdrop_through_the_facade_scene_helper() {
+        use frust::authoring::scene::Command;
+        use frust::testing::{SceneOptions, scene_of_with};
+
+        let backdrops = |glass: bool| {
+            let options = SceneOptions::default().theme(sample_theme());
+            let scene = scene_of_with(
+                move |_: &mut ()| {
+                    let panel: SamplePanelView<()> = sample_panel(sample_badge("ready"));
+                    if glass {
+                        panel.glass(GlassTier::Chrome)
+                    } else {
+                        panel
+                    }
+                },
+                Size::new(400.0, 300.0),
+                &options,
+            );
+            scene
+                .commands()
+                .iter()
+                .filter(|c| matches!(c, Command::BackdropBlur { .. }))
+                .count()
+        };
+        assert_eq!(backdrops(true), 1, "the glass panel records one lens");
+        assert_eq!(backdrops(false), 0, "the plain panel records none");
+    }
+
+    #[test]
     fn glass_panel_records_a_backdrop_blur_at_the_tier_intent() {
         let theme = sample_theme();
         let view: SamplePanelView<()> =

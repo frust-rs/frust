@@ -90,9 +90,10 @@ image = { workspace = true }
 # No default features and no design-system catalog: catalogs are sibling plugin crates, each
 # installed with its own `install()`.
 default = []
-# Opt-in, dev-dependency use only: exposes `frust::testing::semantics_of`. Features are additive,
-# so never enable it on a normal dependency.
-test-support = []
+# Opt-in, dev-dependency use only: exposes `frust::testing::{semantics_of, scene_of, scene_of_with}`
+# and, through `frust-core/test-support`, `frust::authoring::PaintCtx::for_test`. Features are
+# additive, so never enable it on a normal dependency.
+test-support = ["frust-core/test-support"]
 # Opt-in, never default (opt-in survives additive unification; the CLI is the sole enabler). Each
 # shell's forward activates only on that shell's own targets.
 perf-trace = [

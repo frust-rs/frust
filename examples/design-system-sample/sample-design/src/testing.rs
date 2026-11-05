@@ -19,6 +19,10 @@
 //!
 //! A widget's `Widget::semantics` output is asserted through `frust::testing::semantics_of`, the
 //! facade's opt-in `test-support` helper, enabled from this crate's `[dev-dependencies]` only.
+//!
+//! A whole painted frame is inspected through `frust::testing::scene_of` and `scene_of_with`, which
+//! record the view's commands (with an optional theme, clock and warm frames) so a test can count,
+//! for example, its backdrop blurs.
 
 use std::any::Any;
 
