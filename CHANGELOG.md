@@ -11,10 +11,12 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 - `glass_surface(child)` (`GlassSurfaceView`, flat from `frust`): a baseline widget that paints one
   tier of the theme's glass scale behind its child (shadow cast outside the surface, rounded clip, backdrop blur and washes,
   child, specular hairline). `.tier(GlassTier)` picks `Control`, `Bar` (default) or `Chrome` from the
-  new `GlassScale::tier(GlassTier) -> &GlassMaterial`; `.corner_radius(f64)` and `.material(..)`
+  new `GlassScale::tier(GlassTier) -> &GlassMaterial`; `.corner_radius(f64)` (clamped to a capsule, half the shorter side, like `ShapeScale::resolve`:
+  an infinite radius is a capsule, a NaN or negative one square) and `.material(..)`
   (wins over the theme's tier) refine it, and with neither a theme nor a material it paints an
   opaque `#EFEFEF` fill. A material's blur intent is a Gaussian sigma in logical px (CSS
-  `backdrop-filter: blur(Npx)` is sigma N), clamped by the engine.
+  `backdrop-filter: blur(Npx)` is sigma N), clamped by the engine. Under a scale the sigma follows
+  the transform's mean scale; a rotation or skew samples the rotated rectangle's device bounding box.
 - `set_max_backdrops_per_frame(n) -> usize` and `max_backdrops_per_frame()` (flat from `frust` and
   `frust-render`; defined in `frust-engine`, with `MAX_BACKDROPS_PER_FRAME` 4 as the default and
   `BACKDROP_CAP_CEILING` 16): the per-frame backdrop-blur cap is app-configurable, process-wide and
@@ -36,12 +38,17 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   defaulting to `DEFAULT_FLING_VELOCITY`). `DismissPolicy::SpringBack` snaps back to open; on
   `Dismiss` the controller stops and holds progress, and the caller owns the exit animation.
 - Stroked icons: `IconShape` (`Path`/`Circle`/`Rect`), `IconPaint` (`Stroke` default, `Fill`),
-  `IconElement` (const `stroke`/`fill`) and `StrokedIconSource { elements, design, stroke_width }`,
+  `IconElement` (const `stroke`/`fill`, with `opacity`, a single `dash` pattern and its own
+  `stroke_width` through `with_opacity` / `with_dash` / `with_stroke_width`) and
+  `StrokedIconSource { elements, design, stroke_width }`,
   converted to `IconData` by `From<StrokedIconSource>` or `IconData::from_elements`;
   `IconData::is_stroked()` reports one and `IconData::resolve()` returns one fillable outline (each stroke
   expanded with round caps and joins), so fill-only slots (plugin icons) render a stroked icon filled and
   ignore `stroke_width` overrides. `IconView::stroke_width(f64)` overrides the width;
   strokes use round caps and joins, scale with the icon and take the resolved icon colour.
+  `IconElementStyle` carries an element's paint and those attributes for runtime-built icons
+  (`IconData::from_styled_elements`); `resolve()` bakes an element's dash and width into the
+  outline and drops opacity.
 - Framework haptic feedback in `frust-core` (flat from `frust` and in `frust::authoring`):
   `#[non_exhaustive] HapticFeedback` (`Selection`, `Light`, `Medium`, `Heavy`, `Success`,
   `Warning`, `Error`), `HapticSink`, the last-wins `set_haptic_sink`, `haptic_sink_installed()`
@@ -59,7 +66,29 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   client disconnects.
 - `frust-ui` `test-support` feature (enable from `[dev-dependencies]`) and
   `frust::testing::semantics_of(build, size) -> SemanticsUpdate`, so an out-of-tree design system
-  can test `Widget::semantics`.
+  can test `Widget::semantics`. `scene_of(build, size)` and `scene_of_with(build, size, &SceneOptions)`
+  (`SceneOptions::theme` / `frame_time` / `warm_frames`) paint a view into a `Scene` a test can
+  inspect; a recorded `BackdropBlur` count is an upper bound on what counts toward the backdrop cap.
+  The facade's `test-support` now forwards `frust-core/test-support`, so `PaintCtx::for_test` is
+  available too.
+- `column()` / `row()` gain `.gap(f64)`, a fixed space between consecutive children (negative or
+  NaN is `0`), and `MainAxisAlignment` gains `Center`, `End`, `SpaceBetween`, `SpaceAround` and
+  `SpaceEvenly`; they distribute leftover space only on a bounded main axis with no flexible child.
+- `Route::transition(TransitionSpec)` gives a route's pages their own transition, and
+  `Router::push_with(location, PushOptions)` pushes with per-push options. Precedence: the push
+  options, then the route, then the navigator default; all collapse under reduce motion.
+  `push_with` stamps the resolved location over any `.route(..)` on the options, and on a resolution
+  error pushes the error page and ignores them.
+- `PushOptions::barrier(Color)` and `barrier_dismissible(bool)`: a route-owned modal scrim painted
+  under the page. Only its alpha animates, following the route's eased progress (instant under
+  `TransitionSpec::NONE`); a press and release the page leaves unhandled dismisses through the
+  page's `BackPolicy`, and taps are ignored while a transition is in flight.
+- `GestureDetector` drag callbacks: `on_{vertical_drag,horizontal_drag,pan}_{start,update,end,cancel}`
+  with the `#[non_exhaustive]`, local-only `DragStartDetails` / `DragUpdateDetails` /
+  `DragEndDetails`. Axis recognizers start after 18 px along their axis, pan after 36 px; the
+  first to cross wins, and a same-axis scroll view takes the drag first. Release velocity is
+  measured on the raw input clock. `cancel` is delivered on the next state-bearing pass (normally
+  the next rebuild's housekeeping), not inside the `Cancel` event.
 - `SharedPreferences::in_memory()`: a public, infallible, process-local store that is never
   persisted; clones share the map.
 - `frust::Layer` (with `Layer::IDENTITY`) and `frust::resolve_layers`, beside `TransitionDriver`,
@@ -160,6 +189,13 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Changed
 
+- `MainAxisAlignment` gained `Center`, `End`, `SpaceBetween`, `SpaceAround` and `SpaceEvenly` (a
+  narrow source break): an exhaustive `match` over it must add the arms or a wildcard.
+- The per-frame backdrop cap counts only backdrops whose blur region reaches the frame target, so a
+  backdrop scrolled or translated clear of the frame (a `ScrollView`'s warm paint margin) no longer
+  counts. The cap, its clamp and the whole-frame refusal are unchanged; the up-front count ignores
+  retained corrections and clip coverage, so it can still over-count inside clipped or retained
+  regions.
 - `PathStyle` gained `FillEvenOdd` and `StrokeStyled` (a narrow source break): an exhaustive `match`
   over `PathStyle` outside frust must add the two arms, or read through `PathStyle::fill_rule()` /
   `stroke()` instead of matching.
