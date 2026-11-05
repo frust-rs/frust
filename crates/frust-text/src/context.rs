@@ -728,44 +728,70 @@ mod tests {
         })
     }
 
+    /// The widths [`wrapped_line_starts`] is swept over: every 5px from 10px to 200px, so the
+    /// assertions hold whatever advance the host's kana face gives (no bundled face covers kana).
+    fn sweep_widths() -> impl Iterator<Item = f32> {
+        (2..=40).map(|n| n as f32 * 5.0)
+    }
+
     #[test]
     fn default_locale_feeds_line_break_config() {
         let guard = crate::locale::test_support::DefaultLocale::set(None);
         let mut cx = jp_cx();
-        // Five 20px kana fit at 100px. The fifth is followed by a small kana, which Strict
-        // keeps off a line start (the line ends after four kana, byte 12) and the ja
-        // tailoring allows (the line ends after five, so the next line starts at the
-        // small kana at byte 15).
-        let width = 100.0;
-        let cleared = wrapped_line_starts(&mut cx, SMALL_KANA, &untagged(), width);
-        let tagged = wrapped_line_starts(
-            &mut cx,
-            SMALL_KANA,
-            &untagged().with_locale(Some("ja")),
-            width,
+        // Strict keeps a small kana off a line start; the ja tailoring lets one start a line.
+        // Some width in the sweep puts a small kana right after a full line, so the two
+        // rules must disagree there.
+        let ja = untagged().with_locale(Some("ja"));
+        let mut differs = false;
+        for width in sweep_widths() {
+            crate::locale::set_default_locale(None);
+            let cleared = wrapped_line_starts(&mut cx, SMALL_KANA, &untagged(), width);
+            let tagged = wrapped_line_starts(&mut cx, SMALL_KANA, &ja, width);
+            let explicit_en = wrapped_line_starts(
+                &mut cx,
+                SMALL_KANA,
+                &untagged().with_locale(Some("en")),
+                width,
+            );
+            crate::locale::set_default_locale(Some("ja"));
+            let by_default = wrapped_line_starts(&mut cx, SMALL_KANA, &untagged(), width);
+            crate::locale::set_default_locale(Some("ja-JP"));
+            let by_region = wrapped_line_starts(&mut cx, SMALL_KANA, &untagged(), width);
+            // An explicit locale beats the default.
+            let explicit_under_ja = wrapped_line_starts(
+                &mut cx,
+                SMALL_KANA,
+                &untagged().with_locale(Some("en")),
+                width,
+            );
+            assert_eq!(
+                by_default, tagged,
+                "default ja == style locale ja at {width}px"
+            );
+            assert_eq!(
+                by_region, by_default,
+                "region subtags do not matter at {width}px"
+            );
+            assert_eq!(
+                explicit_under_ja, explicit_en,
+                "an explicit en beats the default at {width}px"
+            );
+            assert!(
+                !starts_with_small_kana(SMALL_KANA, &cleared),
+                "Strict at {width}px"
+            );
+            if by_default != cleared {
+                assert!(
+                    starts_with_small_kana(SMALL_KANA, &by_default),
+                    "ja at {width}px"
+                );
+                differs = true;
+            }
+        }
+        assert!(
+            differs,
+            "the default ja reaches the line breaker at some width"
         );
-        crate::locale::set_default_locale(Some("ja"));
-        let by_default = wrapped_line_starts(&mut cx, SMALL_KANA, &untagged(), width);
-        assert_eq!(by_default, tagged, "default ja == style locale ja");
-        assert_ne!(by_default, cleared, "the default reaches the line breaker");
-        assert_eq!(cleared, vec![0, 12, 24]);
-        assert!(!starts_with_small_kana(SMALL_KANA, &cleared));
-        assert_eq!(by_default, vec![0, 15]);
-        assert!(starts_with_small_kana(SMALL_KANA, &by_default));
-        // Region and script subtags do not matter.
-        crate::locale::set_default_locale(Some("ja-JP"));
-        assert_eq!(
-            wrapped_line_starts(&mut cx, SMALL_KANA, &untagged(), width),
-            by_default
-        );
-        // An explicit locale beats the default.
-        let explicit = wrapped_line_starts(
-            &mut cx,
-            SMALL_KANA,
-            &untagged().with_locale(Some("en")),
-            width,
-        );
-        assert_eq!(explicit, cleared);
         drop(guard);
     }
 
@@ -773,13 +799,15 @@ mod tests {
     fn an_untagged_non_cjk_span_keeps_strict_line_breaking() {
         let guard = crate::locale::test_support::DefaultLocale::set(None);
         let mut cx = jp_cx();
-        let width = 100.0;
-        let cleared = wrapped_line_starts(&mut cx, SMALL_KANA, &untagged(), width);
-        for default in ["en", "th", "ko-KR"] {
-            crate::locale::set_default_locale(Some(default));
-            let starts = wrapped_line_starts(&mut cx, SMALL_KANA, &untagged(), width);
-            assert_eq!(starts, cleared, "default {default}");
-            assert!(!starts_with_small_kana(SMALL_KANA, &starts));
+        for width in sweep_widths() {
+            crate::locale::set_default_locale(None);
+            let cleared = wrapped_line_starts(&mut cx, SMALL_KANA, &untagged(), width);
+            for default in ["en", "th", "ko-KR"] {
+                crate::locale::set_default_locale(Some(default));
+                let starts = wrapped_line_starts(&mut cx, SMALL_KANA, &untagged(), width);
+                assert_eq!(starts, cleared, "default {default} at {width}px");
+                assert!(!starts_with_small_kana(SMALL_KANA, &starts));
+            }
         }
         drop(guard);
     }
