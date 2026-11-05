@@ -89,7 +89,11 @@ image = { workspace = true }
 [features]
 # No default features and no design-system catalog: catalogs are sibling plugin crates, each
 # installed with its own `install()`.
-default = []
+default = ["complex-scripts"]
+# Dictionary word and line segmentation (forwarded to `frust-text`, a direct dependency). Opt out
+# with `default-features = false`: unspaced Thai/Lao/Khmer/Myanmar text then overflows a line and
+# Chinese/Japanese word motion falls back to per-character stops.
+complex-scripts = ["frust-text/complex-scripts"]
 # Opt-in, dev-dependency use only: exposes `frust::testing::{semantics_of, scene_of, scene_of_with}`
 # and, through `frust-core/test-support`, `frust::authoring::PaintCtx::for_test`. Features are
 # additive, so never enable it on a normal dependency.
