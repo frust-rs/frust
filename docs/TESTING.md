@@ -494,7 +494,7 @@ A golden case must fix all inputs that can affect pixels:
 - Base color and texture format.
 
 Text golden portability is enforced, not assumed: `testing/fonts/` bundles
-four subsetted OFL/Apache faces (Latin, Arabic, CJK, COLR emoji — provenance,
+five subsetted OFL/Apache faces (Latin, Arabic, Thai, CJK, COLR emoji — provenance,
 subset commands, and checksums in `testing/fonts/LICENSES.md`),
 `frust_testing::fonts::register_test_fonts` registers only those,
 `frame::pin_type_scale` rewrites the theme's type scale onto the bundled
