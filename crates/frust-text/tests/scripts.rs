@@ -171,6 +171,25 @@ fn thai_word_motion_stops_inside_the_run() {
     }
 }
 
+#[cfg(not(feature = "complex-scripts"))]
+#[test]
+fn thai_unspaced_text_overflows_without_complex_scripts() {
+    let mut cx = context();
+    let text = "ภาษาไทยไม่มีการเว้นวรรคระหว่างคำ";
+    let st = style(None);
+    let natural = cx.layout(text, &st, None).size().width as f32;
+    let max = natural / 3.0;
+
+    let bounded = cx.layout(text, &st, Some(max));
+    assert!(
+        bounded.size().width > f64::from(max),
+        "without dictionary segmentation the run overflows {max}, got {}",
+        bounded.size().width
+    );
+    let ed = editor(&mut cx, text, &st, Some(max));
+    assert_eq!(ed.line_count(), 1, "the unbreakable run stays on one line");
+}
+
 #[test]
 fn vietnamese_breaks_only_at_spaces() {
     let mut cx = context();

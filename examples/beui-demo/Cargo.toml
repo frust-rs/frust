@@ -8,7 +8,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-frust = { workspace = true }
+frust = { workspace = true, features = ["complex-scripts"] }
 frust-beui = { path = "../../plugins/beui" }
 
 [features]

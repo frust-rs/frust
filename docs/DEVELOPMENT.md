@@ -236,10 +236,10 @@ cargo build --workspace --locked \
 `frust-drive`/`frust-tui` ride this gate automatically (root workspace members); so do the five
 design-system plugin crates (`plugins/{glyph,material,cupertino,shadcn,beui}`); `cargo fmt --check`
 is rustfmt's defaults (no `rustfmt.toml`). The root command builds default features only, so the
-`bundled-fonts`-off arm (frust-glyph/frust-material/frust-shadcn default it on) is covered by:
+`bundled-fonts`-off arm (frust-glyph/frust-material/frust-shadcn) and `complex-scripts`-off arm (frust-text; a per-crate `-p` run outside frust-text/frust-ui builds it without) are covered by:
 
 ```bash
-cargo test -p frust-glyph -p frust-material -p frust-shadcn --no-default-features
+cargo test -p frust-text --no-default-features && cargo test -p frust-glyph -p frust-material -p frust-shadcn --no-default-features
 cargo clippy -p frust-glyph -p frust-material -p frust-shadcn --no-default-features --all-targets -- -D warnings
 ```
 
