@@ -689,6 +689,28 @@ mod tests {
     }
 
     #[test]
+    fn a_default_locale_change_reshapes_untagged_text_but_not_tagged_text() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+        let mut cx = test_cx();
+        let untagged = TextStyle::new(16.0, Color::BLACK);
+        let tagged = TextStyle::new(16.0, Color::BLACK).with_locale(Some("ja"));
+        let text = "漢字かな";
+        let _ = cx.layout(text, &untagged, None);
+        let _ = cx.layout(text, &tagged, None);
+        let after_first = cx.shape_cache_stats();
+        assert_eq!(after_first.shapes, 2);
+
+        crate::locale::set_default_locale(Some("ja"));
+        let _ = cx.layout(text, &untagged, None);
+        let after_untagged = cx.shape_cache_stats();
+        assert_eq!(after_untagged.shapes, after_first.shapes + 1);
+        let _ = cx.layout(text, &tagged, None);
+        let after_tagged = cx.shape_cache_stats();
+        assert_eq!(after_tagged.shapes, after_untagged.shapes);
+        assert_eq!(after_tagged.hits, after_untagged.hits + 1);
+    }
+
+    #[test]
     fn the_builder_opt_out_keeps_the_font_cache_in_memory() {
         let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let mut cx = test_cx();

@@ -321,10 +321,14 @@ impl ShapeContext {
                 ..Shaped::default()
             };
         }
+        // One snapshot of the app's default locale per call: the line-break language and the
+        // item shaping language of an untagged style both come from it, so they agree.
+        let default = crate::locale::default_locale();
+        let default = default.as_deref();
         let line_break: Vec<(Range<usize>, LineBreakConfig)> = spans
             .iter()
             .filter_map(|(range, style)| {
-                let language = Language::parse(style.locale.as_deref()?).ok()?;
+                let language = Language::parse(style.locale.as_deref().or(default)?).ok()?;
                 let config = LineBreakConfig {
                     language: Some(language),
                     ..LineBreakConfig::default()
@@ -352,12 +356,12 @@ impl ShapeContext {
             })
             .collect();
         self.selector.begin_shape();
-        self.run_pass(oracle, text, &itemized, &queries, &pass);
+        self.run_pass(oracle, text, &itemized, &queries, &pass, default);
         let char_count = self.analysis.char_info().len();
         if self.shaped.characters().len() == char_count && self.selector.any_coords() {
             let pass = self.coordinate_items(&itemized);
             self.selector.begin_replay();
-            self.run_pass(oracle, text, &itemized, &queries, &pass);
+            self.run_pass(oracle, text, &itemized, &queries, &pass, default);
         }
         let complete = self.shaped.characters().len() == char_count;
         self.convert(text, &itemized, complete)
@@ -382,6 +386,7 @@ impl ShapeContext {
         itemized: &Itemized,
         queries: &[StyleQuery],
         pass: &[PassItem],
+        default_locale: Option<&str>,
     ) {
         let variations: Vec<Vec<FontVariation>> = pass
             .iter()
@@ -398,7 +403,11 @@ impl ShapeContext {
                 char_end: p.char_end,
                 options: ShapeOptions {
                     font_size: spec.font_size,
-                    language: spec.locale.as_deref().and_then(|l| Language::parse(l).ok()),
+                    language: spec
+                        .locale
+                        .as_deref()
+                        .or(default_locale)
+                        .and_then(|l| Language::parse(l).ok()),
                     features: &[],
                     variations,
                 },
@@ -663,6 +672,7 @@ fn push_graphemes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::locale::test_support::DefaultLocale;
     use crate::oracle::synthetic::{FaceSpec, SyntheticBackend};
     use crate::oracle::{FaceSource, RenderCapabilities};
     use crate::style::{FontFamily, FontWeight, GenericSlot};
@@ -717,6 +727,7 @@ mod tests {
 
     #[test]
     fn a_latin_paragraph_shapes_to_the_expected_glyph_ids() {
+        let _locale = DefaultLocale::set(None);
         let (mut oracle, blob) = oracle_with(NOTO_SANS);
         let mut cx = ShapeContext::default();
         let text = "Hello, Hello Hello";
@@ -749,6 +760,7 @@ mod tests {
 
     #[test]
     fn mixed_latin_and_han_yields_two_runs_with_the_right_faces() {
+        let _locale = DefaultLocale::set(None);
         let latin = Blob::from(NOTO_SANS.to_vec());
         let han = Blob::from(FaceSpec::new("Synthetic Han").chars("中文").build());
         let mut backend = SyntheticBackend::new("hello-chinese");
@@ -780,6 +792,7 @@ mod tests {
 
     #[test]
     fn an_unresolvable_cluster_still_gets_a_face() {
+        let _locale = DefaultLocale::set(None);
         let (mut oracle, blob) = oracle_with(NOTO_SANS);
         let mut cx = ShapeContext::default();
         let text = "He中lo";
@@ -799,6 +812,7 @@ mod tests {
 
     #[test]
     fn weight_synthesis_reaches_the_coordinates() {
+        let _locale = DefaultLocale::set(None);
         let mut oracle = geist_oracle();
         let mut cx = ShapeContext::default();
         let mut coords = |weight| {
@@ -824,6 +838,7 @@ mod tests {
 
     #[test]
     fn style_variations_change_the_coordinates() {
+        let _locale = DefaultLocale::set(None);
         let mut oracle = geist_oracle();
         let mut cx = ShapeContext::default();
         let base = TextStyle {
@@ -844,6 +859,7 @@ mod tests {
 
     #[test]
     fn letter_spacing_changes_atom_cluster_and_glyph_advances() {
+        let _locale = DefaultLocale::set(None);
         let (mut oracle, _) = oracle_with(NOTO_SANS);
         let mut cx = ShapeContext::default();
         let text = "Hello hello";
@@ -871,6 +887,7 @@ mod tests {
 
     #[test]
     fn repeated_clusters_ask_the_oracle_once_per_shaping_call() {
+        let _locale = DefaultLocale::set(None);
         let (mut oracle, _) = oracle_with(NOTO_SANS);
         let mut cx = ShapeContext::default();
         let _ = cx.shape(&mut oracle, "lll lll", &style(16.0));
@@ -879,6 +896,7 @@ mod tests {
 
     #[test]
     fn a_style_change_mid_text_tiles_and_keeps_both_sizes() {
+        let _locale = DefaultLocale::set(None);
         let (mut oracle, _) = oracle_with(NOTO_SANS);
         let mut cx = ShapeContext::default();
         let text = "Hello hello";
@@ -893,6 +911,7 @@ mod tests {
 
     #[test]
     fn newlines_mark_mandatory_breaks_and_rtl_sets_levels() {
+        let _locale = DefaultLocale::set(None);
         let (mut oracle, _) = oracle_with(NOTO_SANS);
         let mut cx = ShapeContext::default();
         let shaped = cx.shape(&mut oracle, "Hello\nhello", &style(16.0));
@@ -915,6 +934,7 @@ mod tests {
 
     #[test]
     fn an_empty_text_shapes_to_nothing() {
+        let _locale = DefaultLocale::set(None);
         let (mut oracle, _) = oracle_with(NOTO_SANS);
         let mut cx = ShapeContext::default();
         let shaped = cx.shape(&mut oracle, "", &style(16.0));
@@ -936,6 +956,7 @@ mod tests {
 
     #[test]
     fn faux_bold_amount_follows_skia_interpolation() {
+        let _locale = DefaultLocale::set(None);
         assert_eq!(faux_bold_em_fraction(9.0), 1.0 / 24.0);
         assert_eq!(faux_bold_em_fraction(2.0), 1.0 / 24.0);
         assert_eq!(faux_bold_em_fraction(36.0), 1.0 / 32.0);
@@ -946,6 +967,7 @@ mod tests {
 
     #[test]
     fn handle_carries_embolden_for_a_static_face_asked_for_bold() {
+        let _locale = DefaultLocale::set(None);
         let (mut oracle, _) = oracle_with(NOTO_SANS);
         let bold = TextStyle {
             weight: FontWeight::BOLD,
@@ -961,6 +983,7 @@ mod tests {
 
     #[test]
     fn handle_on_a_variable_face_has_coords_and_no_embolden() {
+        let _locale = DefaultLocale::set(None);
         let mut oracle = geist_oracle();
         let bold = TextStyle {
             family: FontFamily::named("Geist"),
@@ -974,6 +997,7 @@ mod tests {
 
     #[test]
     fn handle_skews_an_italic_ask_on_an_upright_face() {
+        let _locale = DefaultLocale::set(None);
         let (mut oracle, _) = oracle_with(NOTO_SANS);
         let italic = TextStyle {
             style: crate::style::FontStyle::Italic,
@@ -986,6 +1010,7 @@ mod tests {
 
     #[test]
     fn hidden_and_synthesis_flags_pass_through() {
+        let _locale = DefaultLocale::set(None);
         let face = Blob::from(FaceSpec::new("Hidden UI").chars("a").build());
         let mut source = FaceSource::blob(face.clone(), 0);
         source.hidden = true;
@@ -1039,5 +1064,37 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The languages the runs of `text` were shaped with.
+    fn run_languages(text: &str, style: &TextStyle) -> Vec<Option<String>> {
+        let (mut oracle, _blob) = oracle_with(NOTO_SANS);
+        let shaped = ShapeContext::default().shape(&mut oracle, text, style);
+        shaped.runs.iter().map(|r| r.language.clone()).collect()
+    }
+
+    fn tagged(size: f32, locale: &str) -> TextStyle {
+        TextStyle {
+            locale: Some(locale.to_owned()),
+            ..style(size)
+        }
+    }
+
+    #[test]
+    fn default_locale_feeds_item_language() {
+        let guard = DefaultLocale::set(None);
+        let text = "漢字";
+        // Observed through `ShapedRun::language`, the language handed to the shaper for the item.
+        assert_eq!(run_languages(text, &style(16.0)), vec![None]);
+        crate::locale::set_default_locale(Some("ja"));
+        let by_default = run_languages(text, &style(16.0));
+        assert_eq!(by_default, vec![Some("ja".to_owned())]);
+        assert_eq!(by_default, run_languages(text, &tagged(16.0, "ja")));
+        // An explicit style locale overrides the default.
+        assert_eq!(
+            run_languages(text, &tagged(16.0, "zh-Hans")),
+            vec![Some("zh-Hans".to_owned())]
+        );
+        drop(guard);
     }
 }
