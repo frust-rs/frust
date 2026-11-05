@@ -415,20 +415,15 @@ const PARAM_LABEL_ROLE: ThemeTextType = ThemeTextType::BodySmall;
 /// family is the unthemed base; a `layout_themed` call replaces it with its
 /// role's.
 pub(crate) fn prose_style(size: f64) -> TextStyle {
-    TextStyle {
-        family: crate::tokens::sans_family(),
-        ..TextStyle::new(size as f32, SHAPING_INK)
-    }
+    TextStyle::new(size as f32, SHAPING_INK).with_family(crate::tokens::sans_family())
 }
 
 /// The style a title or a control label is shaped with. The family is the
 /// unthemed base; a `layout_themed` call replaces it with its role's.
 pub(crate) fn strong_style(size: f64) -> TextStyle {
-    TextStyle {
-        family: crate::tokens::sans_family(),
-        weight: FontWeight::MEDIUM,
-        ..TextStyle::new(size as f32, SHAPING_INK)
-    }
+    TextStyle::new(size as f32, SHAPING_INK)
+        .with_family(crate::tokens::sans_family())
+        .with_weight(FontWeight::MEDIUM)
 }
 
 /// A view-held one-argument callback, erased on build.

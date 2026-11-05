@@ -591,11 +591,9 @@ const ROW_ROLE: ThemeTextType = ThemeTextType::LabelLarge;
 /// A row's text style: `text-sm`. The family here is the unthemed base;
 /// `layout` shapes in [`ROW_ROLE`]'s family.
 fn row_style() -> TextStyle {
-    TextStyle {
-        family: sans_family(),
-        size: style::TEXT_SM as f32,
-        ..TextStyle::default()
-    }
+    TextStyle::default()
+        .with_family(sans_family())
+        .with_size(style::TEXT_SM as f32)
 }
 
 /// One retained row.

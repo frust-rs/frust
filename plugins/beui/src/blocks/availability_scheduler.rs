@@ -1147,24 +1147,20 @@ const BODY_ROLE: ThemeTextType = ThemeTextType::BodyMedium;
 /// `font-medium` at `size`. The family here is the unthemed base; `layout`
 /// shapes in [`DAY_ROLE`]'s family.
 fn medium(size: f64, color: Color) -> TextStyle {
-    TextStyle {
-        family: sans_family(),
-        weight: FontWeight::MEDIUM,
-        size: size as f32,
-        color,
-        ..TextStyle::default()
-    }
+    TextStyle::default()
+        .with_family(sans_family())
+        .with_weight(FontWeight::MEDIUM)
+        .with_size(size as f32)
+        .with_color(color)
 }
 
 /// A plain run at `size`. The family here is the unthemed base; `layout`
 /// shapes in [`BODY_ROLE`]'s family.
 fn plain(size: f64, color: Color) -> TextStyle {
-    TextStyle {
-        family: sans_family(),
-        size: size as f32,
-        color,
-        ..TextStyle::default()
-    }
+    TextStyle::default()
+        .with_family(sans_family())
+        .with_size(size as f32)
+        .with_color(color)
 }
 
 impl Widget for AvailabilitySchedulerWidget {

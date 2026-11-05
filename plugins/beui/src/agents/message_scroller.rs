@@ -1072,13 +1072,11 @@ const JUMP_ROLE: ThemeTextType = ThemeTextType::LabelMedium;
 /// The jump button's label style: `text-xs font-medium`. The family here is
 /// the unthemed base; `layout` shapes in [`JUMP_ROLE`]'s family.
 fn jump_style(ink: Color) -> frust::authoring::text::TextStyle {
-    frust::authoring::text::TextStyle {
-        family: sans_family(),
-        weight: frust::authoring::text::FontWeight::MEDIUM,
-        size: style::TEXT_XS as f32,
-        color: ink,
-        ..frust::authoring::text::TextStyle::default()
-    }
+    frust::authoring::text::TextStyle::default()
+        .with_family(sans_family())
+        .with_weight(frust::authoring::text::FontWeight::MEDIUM)
+        .with_size(style::TEXT_XS as f32)
+        .with_color(ink)
 }
 
 /// Lucide's `arrow-down` on a 24-unit grid, scaled to `size`.

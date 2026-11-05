@@ -725,11 +725,9 @@ fn page_style(theme: Option<&Theme>, size: f64) -> TextStyle {
 
 /// The mono style the terminal and the glitch both set.
 fn mono_style(size: f64) -> TextStyle {
-    TextStyle {
+    crate::text::label_style(size)
         // Explicit: `TypeScale` has no monospace role to take this from.
-        family: crate::tokens::mono_family(),
-        ..crate::text::label_style(size)
-    }
+        .with_family(crate::tokens::mono_family())
 }
 
 impl Widget for NotFoundWidget {

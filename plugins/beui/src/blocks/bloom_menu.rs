@@ -606,10 +606,8 @@ impl<State: 'static> View<State> for BloomMenuView<State> {
 /// A label's style (`text-sm font-medium`), in the theme's `label_large`
 /// family.
 fn label_style(theme: Option<&Theme>) -> TextStyle {
-    let style = TextStyle {
-        weight: FontWeight::MEDIUM,
-        ..TextStyle::new(style::TEXT_SM as f32, crate::text::SHAPING_INK)
-    };
+    let style = TextStyle::new(style::TEXT_SM as f32, crate::text::SHAPING_INK)
+        .with_weight(FontWeight::MEDIUM);
     themed_style(style, ThemeTextType::LabelLarge, theme)
 }
 

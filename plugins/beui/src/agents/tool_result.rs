@@ -337,10 +337,8 @@ pub struct ToolResultWidget {
 /// The title style (`text-sm font-medium`), in the theme's `label_large`
 /// family.
 fn title_style(theme: Option<&Theme>) -> TextStyle {
-    let style = TextStyle {
-        weight: FontWeight::MEDIUM,
-        ..TextStyle::new(TOOL_RESULT_TITLE_SIZE as f32, SHAPING_INK)
-    };
+    let style =
+        TextStyle::new(TOOL_RESULT_TITLE_SIZE as f32, SHAPING_INK).with_weight(FontWeight::MEDIUM);
     themed_style(style, ThemeTextType::LabelLarge, theme)
 }
 

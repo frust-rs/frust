@@ -506,34 +506,28 @@ const PROMPT_ROLE: ThemeTextType = ThemeTextType::BodySmall;
 /// The family here is the unthemed base; `layout` shapes in
 /// [`STATUS_ROLE`]'s family.
 fn status_style() -> TextStyle {
-    TextStyle {
-        family: sans_family(),
-        size: style::TEXT_SM as f32,
-        weight: FontWeight::MEDIUM,
-        ..TextStyle::default()
-    }
+    TextStyle::default()
+        .with_family(sans_family())
+        .with_size(style::TEXT_SM as f32)
+        .with_weight(FontWeight::MEDIUM)
 }
 
 /// The prompt caption's style: `text-xs text-muted-foreground`. The family
 /// here is the unthemed base; `layout` shapes in [`PROMPT_ROLE`]'s family.
 fn prompt_style(color: Color) -> TextStyle {
-    TextStyle {
-        family: sans_family(),
-        size: style::TEXT_XS as f32,
-        color,
-        ..TextStyle::default()
-    }
+    TextStyle::default()
+        .with_family(sans_family())
+        .with_size(style::TEXT_XS as f32)
+        .with_color(color)
 }
 
 /// The badge's style: `font-mono text-[10px] tabular-nums`.
 fn badge_style(color: Color) -> TextStyle {
-    TextStyle {
+    TextStyle::default()
         // Explicit: `TypeScale` has no monospace role to take this from.
-        family: mono_family(),
-        size: IMAGE_BADGE_TEXT as f32,
-        color,
-        ..TextStyle::default()
-    }
+        .with_family(mono_family())
+        .with_size(IMAGE_BADGE_TEXT as f32)
+        .with_color(color)
 }
 
 /// The smoothstep-weighted influence a dot at `distance` feels from an
