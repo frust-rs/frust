@@ -355,6 +355,54 @@ impl TextStyle {
         self.locale = locale.map(Into::into);
         self
     }
+
+    /// This style with the given font `family` (or fallback stack).
+    pub fn with_family(mut self, family: FontFamily) -> Self {
+        self.family = family;
+        self
+    }
+
+    /// This style with the given font `weight`.
+    pub fn with_weight(mut self, weight: FontWeight) -> Self {
+        self.weight = weight;
+        self
+    }
+
+    /// This style with the given font `style` (upright, italic or oblique).
+    pub fn with_style(mut self, style: FontStyle) -> Self {
+        self.style = style;
+        self
+    }
+
+    /// This style at font size `size`, in logical pixels.
+    pub fn with_size(mut self, size: f32) -> Self {
+        self.size = size;
+        self
+    }
+
+    /// This style with the given glyph fill `color`.
+    pub fn with_color(mut self, color: Color) -> Self {
+        self.color = color;
+        self
+    }
+
+    /// This style with extra letter spacing `letter_spacing`, in logical pixels.
+    pub fn with_letter_spacing(mut self, letter_spacing: f32) -> Self {
+        self.letter_spacing = letter_spacing;
+        self
+    }
+
+    /// This style with the given [`LineHeight`].
+    pub fn with_line_height(mut self, line_height: LineHeight) -> Self {
+        self.line_height = line_height;
+        self
+    }
+
+    /// This style with the given paragraph [`TextAlign`].
+    pub fn with_align(mut self, align: TextAlign) -> Self {
+        self.align = align;
+        self
+    }
 }
 
 impl Default for TextStyle {
@@ -414,6 +462,69 @@ mod tests {
             .with_locale(None::<String>);
         assert_eq!(style.variations, vec![(*b"ROND", 100.0)]);
         assert_eq!(style.locale, None);
+    }
+
+    #[test]
+    fn every_field_has_a_builder() {
+        let color = Color::from_rgb8(0x12, 0x34, 0x56);
+        let style = TextStyle::default()
+            .with_family(FontFamily::named("Inter"))
+            .with_weight(FontWeight::BOLD)
+            .with_style(FontStyle::Italic)
+            .with_width(0.5)
+            .with_variation(*b"GRAD", 50.0)
+            .with_locale(Some("ja"))
+            .with_size(20.0)
+            .with_color(color)
+            .with_letter_spacing(1.5)
+            .with_line_height(LineHeight::Absolute(24.0))
+            .with_align(TextAlign::Center)
+            .with_overflow_wrap(OverflowWrap::Anywhere);
+        assert_eq!(style.family, FontFamily::Named(vec!["Inter".to_string()]));
+        assert_eq!(style.weight, FontWeight::BOLD);
+        assert_eq!(style.style, FontStyle::Italic);
+        assert_eq!(style.width, 0.5);
+        assert_eq!(style.variations, vec![(*b"GRAD", 50.0)]);
+        assert_eq!(style.locale.as_deref(), Some("ja"));
+        assert_eq!(style.size, 20.0);
+        assert_eq!(style.color, color);
+        assert_eq!(style.letter_spacing, 1.5);
+        assert_eq!(style.line_height, LineHeight::Absolute(24.0));
+        assert_eq!(style.align, TextAlign::Center);
+        assert_eq!(style.overflow_wrap, OverflowWrap::Anywhere);
+    }
+
+    #[test]
+    fn builder_chain_equals_struct_literal() {
+        let color = Color::from_rgb8(0x12, 0x34, 0x56);
+        let literal = TextStyle {
+            family: FontFamily::Named(vec!["Inter".to_string()]),
+            weight: FontWeight::BOLD,
+            style: FontStyle::Oblique(Some(12.0)),
+            width: 0.75,
+            variations: vec![(*b"wght", 650.0)],
+            locale: Some("zh-Hant".to_string()),
+            size: 14.0,
+            color,
+            letter_spacing: 0.25,
+            line_height: LineHeight::FontSizeRelative(1.5),
+            align: TextAlign::Justify,
+            overflow_wrap: OverflowWrap::Anywhere,
+        };
+        let built = TextStyle::default()
+            .with_family(FontFamily::named("Inter"))
+            .with_weight(FontWeight::BOLD)
+            .with_style(FontStyle::Oblique(Some(12.0)))
+            .with_width(0.75)
+            .with_variations([(*b"wght", 650.0)])
+            .with_locale(Some("zh-Hant"))
+            .with_size(14.0)
+            .with_color(color)
+            .with_letter_spacing(0.25)
+            .with_line_height(LineHeight::FontSizeRelative(1.5))
+            .with_align(TextAlign::Justify)
+            .with_overflow_wrap(OverflowWrap::Anywhere);
+        assert_eq!(built, literal);
     }
 
     #[test]
