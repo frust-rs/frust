@@ -263,6 +263,22 @@ impl LineHeight {
     }
 }
 
+/// What a line does with a word wider than itself (CSS `overflow-wrap`).
+///
+/// A paragraph-level knob, like [`TextAlign`]: the first span's style decides
+/// for the whole layout.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum OverflowWrap {
+    /// A word with no break opportunity wider than the line overflows it (the
+    /// default: a clipped or ellipsized long token).
+    #[default]
+    Normal,
+    /// Such a word breaks before its first character that does not fit, so
+    /// a URL, an identifier or a Thai word wider than a narrow column wraps
+    /// instead of overflowing.
+    Anywhere,
+}
+
 /// Styling applied uniformly to a laid-out string.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextStyle {
@@ -292,6 +308,9 @@ pub struct TextStyle {
     pub line_height: LineHeight,
     /// Paragraph alignment. Defaults to [`TextAlign::Start`].
     pub align: TextAlign,
+    /// What a word wider than the line does. Defaults to
+    /// [`OverflowWrap::Normal`].
+    pub overflow_wrap: OverflowWrap,
 }
 
 impl TextStyle {
@@ -323,6 +342,12 @@ impl TextStyle {
         self
     }
 
+    /// This style with the given [`OverflowWrap`] behavior.
+    pub fn with_overflow_wrap(mut self, overflow_wrap: OverflowWrap) -> Self {
+        self.overflow_wrap = overflow_wrap;
+        self
+    }
+
     /// This style with the BCP 47 `locale` (`None` clears it).
     pub fn with_locale(mut self, locale: Option<impl Into<String>>) -> Self {
         self.locale = locale.map(Into::into);
@@ -347,6 +372,7 @@ impl Default for TextStyle {
             letter_spacing: 0.0,
             line_height: LineHeight::default(),
             align: TextAlign::default(),
+            overflow_wrap: OverflowWrap::default(),
         }
     }
 }

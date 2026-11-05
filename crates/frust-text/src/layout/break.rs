@@ -12,10 +12,10 @@
 //!   trailing whitespace, see `super::metrics`);
 //! - otherwise the line reverts to the last soft wrap opportunity;
 //! - with no soft wrap opportunity on the line, [`OverflowWrap`] decides: under
-//!   `Normal` (the default, and the only mode a [`crate::TextStyle`] can ask
-//!   for today) the word overflows the line; under `Anywhere` the line reverts
-//!   to the last atom marked safe to break before (never set by the shaping
-//!   driver today, so a dead branch kept for when the engine reports it), else
+//!   `Normal` (the default) the word overflows the line; under `Anywhere`
+//!   (selected by [`crate::TextStyle::overflow_wrap`]) the line reverts to the
+//!   last atom marked safe to break before (never set by the shaping driver
+//!   today, so a dead branch kept for when the engine reports it), else
 //!   breaks before the overflowing atom (an emergency break), and only an atom
 //!   wider than an empty line overflows it;
 //! - an atom ending in a newline ends the line (its advance is not counted).
@@ -26,21 +26,7 @@
 use std::ops::Range;
 
 use crate::shape::Shaped;
-
-/// What a line does with a word wider than itself (CSS `overflow-wrap`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum OverflowWrap {
-    /// The word overflows the line (the default, which apps lay
-    /// out against: a clipped or ellipsized long token).
-    #[default]
-    Normal,
-    /// The word breaks before its first atom that does not fit.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "no TextStyle knob selects it yet")
-    )]
-    Anywhere,
-}
+use crate::style::OverflowWrap;
 
 /// Why a line ended.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

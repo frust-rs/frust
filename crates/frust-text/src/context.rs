@@ -393,7 +393,9 @@ impl TextContext {
     /// `style.align` positions every line within the layout's width (the
     /// widest line's when `max_width` is unbounded). A run with no break
     /// opportunity wider than `max_width` (one long word, a URL) overflows its
-    /// line rather than breaking (parley's default). Thai, Lao, Khmer and
+    /// line rather than breaking, unless `style.overflow_wrap` is
+    /// [`OverflowWrap::Anywhere`](crate::OverflowWrap::Anywhere), which breaks
+    /// it between characters. Thai, Lao, Khmer and
     /// Myanmar text without spaces is not such a run: dictionary segmentation
     /// supplies its break opportunities, so it wraps between words.
     ///
@@ -436,7 +438,7 @@ impl TextContext {
     /// - **an overrun**: exactly `max_lines` lines came out, but the last
     ///   visible one is itself wider than `max_width` — a run with no break
     ///   opportunity under the dictionaries (one long word, a URL) overflows
-    ///   rather than breaking.
+    ///   rather than breaking (under [`OverflowWrap::Normal`](crate::OverflowWrap::Normal)).
     ///
     /// Neither condition holds → the text already fits (this is also why an
     /// exact-fit line, width `== max_width`, never gets truncated: the
@@ -1277,6 +1279,32 @@ mod tests {
         assert_eq!(stats.shapes, 1, "shaping must run exactly once");
         assert_eq!(stats.line_breaks, 1, "the differing width re-breaks once");
         assert_eq!(stats.hits, 1, "the repeated width is a full reuse");
+    }
+
+    #[test]
+    fn overflow_wrap_anywhere_breaks_an_overlong_token_that_normal_overflows() {
+        let mut cx = test_cx();
+        let url = "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0";
+        assert_eq!(url.len(), 40);
+        let normal = style(16.0);
+        let anywhere = normal
+            .clone()
+            .with_overflow_wrap(crate::OverflowWrap::Anywhere);
+
+        let overflowing = cx.layout(url, &normal, Some(100.0));
+        assert_eq!(overflowing.line_count(), 1, "Normal keeps the token whole");
+        assert!(overflowing.size().width > 100.0);
+
+        let broken = cx.layout(url, &anywhere, Some(100.0));
+        assert!(broken.line_count() > 1, "Anywhere breaks inside the token");
+        for i in 0..broken.line_count() {
+            let info = broken.line_info(i).expect("line");
+            assert!(
+                info.width <= 100.0 + 0.01,
+                "line {i} is {} wide, past the 100px box",
+                info.width
+            );
+        }
     }
 
     /// A context holding the bundled Latin subset as an app font, and its family.
