@@ -109,8 +109,8 @@ pub use frust_core::ScrollAxis;
 pub use gesture::{GestureDetector, GestureDetectorView, GestureDetectorWidget};
 pub use glass_surface::{GlassSurfaceView, GlassSurfaceWidget, glass_surface};
 pub use icon::{
-    Icon, IconData, IconElement, IconPaint, IconShape, IconSource, IconView, IconWidget,
-    StrokedIconSource, icon,
+    Icon, IconData, IconElement, IconElementStyle, IconPaint, IconShape, IconSource, IconView,
+    IconWidget, StrokedIconSource, icon,
 };
 pub use icon_button::{IconButton, IconButtonView, IconButtonWidget, icon_button};
 pub use image::{Image, ImageError, ImageFit, ImageSource, ImageView, ImageWidget};
