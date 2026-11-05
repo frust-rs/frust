@@ -713,8 +713,8 @@ impl<State: 'static, V: View<State, Element = ModalWidget>> View<State> for Stag
 
 /// Interleave `children` with `gap`-sized spacers, as inflexible flex children.
 ///
-/// `FlexView` v1 has no `gap` property (only `MainAxisAlignment::Start`), so
-/// every gap in the catalog is an explicit [`SizedBox`] spacer — the same
+/// `FlexView` now has a `gap` property, but this spacer code predates it, so
+/// every gap in the catalog is still an explicit [`SizedBox`] spacer — the same
 /// stand-in `crate::card` documents.
 fn with_gaps<State: 'static, M>(
     children: impl ViewSeq<State, M>,
@@ -760,8 +760,8 @@ pub fn stack_slots<State: 'static, M>(
 /// A trailing-aligned row, `gap` apart — the dialog/alert-dialog footer's
 /// `sm:flex-row sm:justify-end`.
 ///
-/// `justify-end` is a flexible *leading* spacer here: `MainAxisAlignment` v1
-/// packs at the start only, so the free space is given to a zero-size first
+/// `justify-end` is a flexible *leading* spacer here: this code predates
+/// `MainAxisAlignment::End`, so the free space is given to a zero-size first
 /// child instead.
 ///
 /// # Breakpoint arm
