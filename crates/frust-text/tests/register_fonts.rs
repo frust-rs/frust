@@ -24,10 +24,7 @@ const TUFFY: &[u8] = include_bytes!("fonts/Tuffy-Subset.ttf");
 const TUFFY_AS_HELVETICA: &[u8] = include_bytes!("fonts/Tuffy-As-Helvetica.ttf");
 
 fn style(size: f32, family: FontFamily) -> TextStyle {
-    TextStyle {
-        family,
-        ..TextStyle::new(size, Color::BLACK)
-    }
+    TextStyle::new(size, Color::BLACK).with_family(family)
 }
 
 /// Extracts the raw font-file bytes a shaped `GlyphRun` resolved against, so

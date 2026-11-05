@@ -280,7 +280,37 @@ pub enum OverflowWrap {
 }
 
 /// Styling applied uniformly to a laid-out string.
+///
+/// `TextStyle` is `#[non_exhaustive]`: a struct literal from outside this
+/// crate does not compile, so build one with [`TextStyle::new`] or
+/// [`TextStyle::default`] and chain the `with_*` builders. The fields stay
+/// public and readable, and assignable on a mutable binding
+/// (`style.size = 14.0`).
+///
+/// ```compile_fail,E0639
+/// use frust_text::TextStyle;
+/// use peniko::Color;
+///
+/// // Rejected: a struct literal of a non-exhaustive type from another crate.
+/// let style = TextStyle {
+///     size: 14.0,
+///     color: Color::BLACK,
+///     ..TextStyle::default()
+/// };
+/// ```
+///
+/// ```
+/// use frust_text::{FontWeight, TextStyle};
+/// use peniko::Color;
+///
+/// let style = TextStyle::new(14.0, Color::BLACK)
+///     .with_weight(FontWeight::BOLD)
+///     .with_letter_spacing(0.5);
+/// assert_eq!(style.size, 14.0);
+/// assert_eq!(style.weight, FontWeight::BOLD);
+/// ```
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct TextStyle {
     /// Font family (or fallback stack).
     pub family: FontFamily,
