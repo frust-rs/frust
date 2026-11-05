@@ -78,7 +78,8 @@ pub enum EngineError {
     },
 
     /// A frame records more
-    /// [`Command::BackdropBlur`](frust_scene::Command::BackdropBlur)s than the
+    /// [`Command::BackdropBlur`](frust_scene::Command::BackdropBlur)s whose
+    /// blur region reaches the frame target than the
     /// configurable per-frame cap in force
     /// ([`max_backdrops_per_frame`](crate::filters::max_backdrops_per_frame):
     /// [`MAX_BACKDROPS_PER_FRAME`](crate::filters::MAX_BACKDROPS_PER_FRAME) by
@@ -89,8 +90,12 @@ pub enum EngineError {
     /// and a blur's whole pass sequence, so the count is bounded rather than
     /// left to grow with a widget tree; a frame past the cap is refused up
     /// front, before anything is recorded, exactly like a scheduler
-    /// escalation — never rendered with some of its backdrops missing. Every
-    /// recorded command counts, including one the frame would later drop.
+    /// escalation — never rendered with some of its backdrops missing. Only a
+    /// backdrop whose blur region reaches the target counts: one scrolled or
+    /// translated clear of the frame draws nothing and is not counted. The
+    /// count is made before the walk and ignores a retained bracket's
+    /// correction and clip coverage, so it can include a backdrop the walk
+    /// later drops, never omit one it draws.
     #[error(
         "{recorded} backdrop blurs in one frame, more than the {max} the engine serves per frame"
     )]
