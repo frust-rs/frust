@@ -432,11 +432,9 @@ const VALUE_ROLE: ThemeTextType = ThemeTextType::TitleMedium;
 /// The value's text style: `text-lg font-semibold`. The family here is the
 /// unthemed base; `layout` shapes in [`VALUE_ROLE`]'s family.
 fn value_style() -> TextStyle {
-    TextStyle {
-        family: sans_family(),
-        weight: FontWeight::SEMI_BOLD,
-        ..TextStyle::new(VALUE_TEXT_SIZE as f32, crate::text::SHAPING_INK)
-    }
+    TextStyle::new(VALUE_TEXT_SIZE as f32, crate::text::SHAPING_INK)
+        .with_family(sans_family())
+        .with_weight(FontWeight::SEMI_BOLD)
 }
 
 impl AdaptiveStepperWidget {

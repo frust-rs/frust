@@ -351,11 +351,9 @@ impl LoaderWidget {
     /// which is what upstream's `font-mono` resolves to.
     fn glyph_style(&self, theme: Option<&Theme>, ink: Color) -> TextStyle {
         let _ = theme;
-        TextStyle {
-            // Explicit: `TypeScale` has no monospace role to take this from.
-            family: crate::tokens::mono_family(),
-            ..TextStyle::new(self.variant.glyph_size(self.size) as f32, ink)
-        }
+        // Explicit: `TypeScale` has no monospace role to take this from.
+        TextStyle::new(self.variant.glyph_size(self.size) as f32, ink)
+            .with_family(crate::tokens::mono_family())
     }
 
     /// Which ascii frame is showing at `elapsed`.

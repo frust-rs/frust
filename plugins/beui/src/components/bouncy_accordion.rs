@@ -278,10 +278,8 @@ fn resolve_colors(theme: Option<&Theme>) -> AccordionColors {
 /// The header title style (`text-[15px] font-medium`), in the theme's
 /// `title_small` family.
 fn title_style(theme: Option<&Theme>) -> TextStyle {
-    let style = TextStyle {
-        weight: FontWeight::MEDIUM,
-        ..TextStyle::new(ACCORDION_TITLE_SIZE as f32, Color::BLACK)
-    };
+    let style =
+        TextStyle::new(ACCORDION_TITLE_SIZE as f32, Color::BLACK).with_weight(FontWeight::MEDIUM);
     themed_style(style, ThemeTextType::TitleSmall, theme)
 }
 

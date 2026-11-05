@@ -93,10 +93,7 @@ pub(crate) fn themed_style(
     role: ThemeTextType,
     theme: Option<&Theme>,
 ) -> TextStyle {
-    TextStyle {
-        family: role_family(role, theme),
-        ..style
-    }
+    style.with_family(role_family(role, theme))
 }
 
 /// The ink [`LabelRun`] shapes with. Never painted — keeping it constant keeps
@@ -307,11 +304,9 @@ pub(crate) fn paint_glyph_run(
 /// Shared by `button` and its three siblings (`expanding_arrow_button`,
 /// `expandable_control`, `action_swap`).
 pub(crate) fn label_style(size: f64) -> TextStyle {
-    TextStyle {
-        family: crate::tokens::sans_family(),
-        weight: FontWeight::MEDIUM,
-        ..TextStyle::new(size as f32, SHAPING_INK)
-    }
+    TextStyle::new(size as f32, SHAPING_INK)
+        .with_family(crate::tokens::sans_family())
+        .with_weight(FontWeight::MEDIUM)
 }
 
 #[cfg(test)]
@@ -473,11 +468,9 @@ mod tests {
     /// A style for [`Label`], which bakes color into the shape (unlike
     /// [`label_style`], whose color is always [`SHAPING_INK`]).
     fn label_style_at(size: f32, color: Color) -> TextStyle {
-        TextStyle {
-            family: crate::tokens::sans_family(),
-            weight: FontWeight::MEDIUM,
-            ..TextStyle::new(size, color)
-        }
+        TextStyle::new(size, color)
+            .with_family(crate::tokens::sans_family())
+            .with_weight(FontWeight::MEDIUM)
     }
 
     // ---- The family opt-in ------------------------------------------------
@@ -523,10 +516,7 @@ mod tests {
         let themed = themed_style(base.clone(), ThemeTextType::LabelLarge, Some(&theme));
         assert_eq!(themed.family, probe);
         assert_eq!(
-            TextStyle {
-                family: base.family.clone(),
-                ..themed
-            },
+            themed.with_family(base.family.clone()),
             base,
             "size, weight, ink and tracking stay the caller's"
         );
@@ -600,10 +590,7 @@ mod tests {
         // redirected by the theme.
         let mut tcx = typeface_probe::text_context();
         let mut run = LabelRun::new("0x1f");
-        let style = TextStyle {
-            family: crate::tokens::mono_family(),
-            ..TextStyle::new(14.0, SHAPING_INK)
-        };
+        let style = TextStyle::new(14.0, SHAPING_INK).with_family(crate::tokens::mono_family());
         let mut sans_roles = crate::theme();
         for role in ALL_ROLES {
             typeface_probe::set_role_family(&mut sans_roles, role, crate::tokens::sans_family());

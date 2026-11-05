@@ -311,12 +311,10 @@ impl AnimatedBadgeWidget {
     /// The style the label is shaped with — `font-medium` at the size rung,
     /// in the theme's `label_small` family.
     fn label_style(&self, theme: Option<&Theme>) -> TextStyle {
-        let style = TextStyle {
-            weight: FontWeight::MEDIUM,
-            // Shaped with an ink the paint pass overrides; keeping it constant
-            // keeps the shape cache off the colour.
-            ..TextStyle::new(self.size.text_size() as f32, Color::BLACK)
-        };
+        // Shaped with an ink the paint pass overrides; keeping it constant
+        // keeps the shape cache off the colour.
+        let style = TextStyle::new(self.size.text_size() as f32, Color::BLACK)
+            .with_weight(FontWeight::MEDIUM);
         themed_style(style, ThemeTextType::LabelSmall, theme)
     }
 

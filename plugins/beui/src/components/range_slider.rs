@@ -915,48 +915,40 @@ const TICK_LABEL_ROLE: ThemeTextType = ThemeTextType::LabelSmall;
 /// family here is the unthemed base; `layout` shapes in [`READOUT_ROLE`]'s
 /// family.
 fn readout_style(color: Color) -> TextStyle {
-    TextStyle {
-        family: sans_family(),
-        weight: FontWeight::SEMI_BOLD,
-        size: RULER_READOUT_SIZE as f32,
-        color,
-        ..TextStyle::default()
-    }
+    TextStyle::default()
+        .with_family(sans_family())
+        .with_weight(FontWeight::SEMI_BOLD)
+        .with_size(RULER_READOUT_SIZE as f32)
+        .with_color(color)
 }
 
 /// The bubble readout's style: `text-sm font-medium tabular-nums`. The family
 /// here is the unthemed base; `layout` shapes in [`BUBBLE_ROLE`]'s family.
 fn bubble_style(color: Color) -> TextStyle {
-    TextStyle {
-        family: sans_family(),
-        weight: FontWeight::MEDIUM,
-        size: style::TEXT_SM as f32,
-        color,
-        ..TextStyle::default()
-    }
+    TextStyle::default()
+        .with_family(sans_family())
+        .with_weight(FontWeight::MEDIUM)
+        .with_size(style::TEXT_SM as f32)
+        .with_color(color)
 }
 
 /// The ruler unit's style: `text-sm text-muted-foreground`. The family here
 /// is the unthemed base; `layout` shapes in [`UNIT_ROLE`]'s family.
 fn unit_style(color: Color) -> TextStyle {
-    TextStyle {
-        family: sans_family(),
-        size: style::TEXT_SM as f32,
-        color,
-        ..TextStyle::default()
-    }
+    TextStyle::default()
+        .with_family(sans_family())
+        .with_size(style::TEXT_SM as f32)
+        .with_color(color)
 }
 
 /// A ruler tick label's style: `text-[10px] tabular-nums text-muted-foreground`.
 /// The family here is the unthemed base; `layout` shapes in
 /// [`TICK_LABEL_ROLE`]'s family.
 fn tick_label_style(color: Color) -> TextStyle {
-    TextStyle {
-        family: sans_family(),
-        size: RULER_LABEL_SIZE as f32,
-        color,
-        ..TextStyle::default()
-    }
+    TextStyle::default()
+        .with_family(sans_family())
+        .with_size(RULER_LABEL_SIZE as f32)
+        .with_color(color)
 }
 
 impl RangeSliderWidget {

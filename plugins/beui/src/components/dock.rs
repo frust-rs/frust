@@ -314,10 +314,7 @@ fn resolve_colors(theme: Option<&Theme>) -> DockColors {
 /// The caption style: `text-xs`/`font-medium` in the theme's `label_small`
 /// family.
 fn label_style(theme: Option<&Theme>) -> TextStyle {
-    let style = TextStyle {
-        weight: FontWeight::MEDIUM,
-        ..TextStyle::new(style::TEXT_XS as f32, Color::BLACK)
-    };
+    let style = TextStyle::new(style::TEXT_XS as f32, Color::BLACK).with_weight(FontWeight::MEDIUM);
     themed_style(style, ThemeTextType::LabelSmall, theme)
 }
 
