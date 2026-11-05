@@ -326,38 +326,32 @@ fn display_face() -> FontFamily {
 
 /// The title's style; family from the theme's `titleSmall` role.
 fn title_style(theme: Option<&Theme>, color: Color) -> TextStyle {
-    TextStyle {
-        family: theme.map_or_else(ui_face, |t| t.type_scale.title_small.family.clone()),
-        weight: FontWeight::MEDIUM,
-        ..TextStyle::new(TITLE_SIZE, color)
-    }
+    TextStyle::new(TITLE_SIZE, color)
+        .with_family(theme.map_or_else(ui_face, |t| t.type_scale.title_small.family.clone()))
+        .with_weight(FontWeight::MEDIUM)
 }
 
 /// The sub line's style; family from the theme's `bodySmall` role.
 fn sub_style(theme: Option<&Theme>, color: Color) -> TextStyle {
-    TextStyle {
-        family: theme.map_or_else(ui_face, |t| t.type_scale.body_small.family.clone()),
-        weight: FontWeight::REGULAR,
-        ..TextStyle::new(SUB_SIZE, color)
-    }
+    TextStyle::new(SUB_SIZE, color)
+        .with_family(theme.map_or_else(ui_face, |t| t.type_scale.body_small.family.clone()))
+        .with_weight(FontWeight::REGULAR)
 }
 
 /// The meta's style; family from the theme's `bodySmall` role.
 fn meta_style(theme: Option<&Theme>, color: Color) -> TextStyle {
-    TextStyle {
-        family: theme.map_or_else(ui_face, |t| t.type_scale.body_small.family.clone()),
-        weight: FontWeight::REGULAR,
-        ..TextStyle::new(META_SIZE, color)
-    }
+    TextStyle::new(META_SIZE, color)
+        .with_family(theme.map_or_else(ui_face, |t| t.type_scale.body_small.family.clone()))
+        .with_weight(FontWeight::REGULAR)
 }
 
 /// The glyph char's style; family from the theme's `headlineSmall` role.
 fn glyph_style(theme: Option<&Theme>, color: Color) -> TextStyle {
-    TextStyle {
-        family: theme.map_or_else(display_face, |t| t.type_scale.headline_small.family.clone()),
-        weight: FontWeight::BOLD,
-        ..TextStyle::new(GLYPH_SIZE, color)
-    }
+    TextStyle::new(GLYPH_SIZE, color)
+        .with_family(
+            theme.map_or_else(display_face, |t| t.type_scale.headline_small.family.clone()),
+        )
+        .with_weight(FontWeight::BOLD)
 }
 
 /// Resolve `(bg, border, divider, box_bg, glyph, title, muted)`.

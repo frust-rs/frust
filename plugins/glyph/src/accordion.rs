@@ -317,11 +317,9 @@ fn ui_face() -> FontFamily {
 
 /// The title's style; family from the theme's `titleSmall` role.
 fn title_style(theme: Option<&Theme>, color: Color) -> TextStyle {
-    TextStyle {
-        family: theme.map_or_else(ui_face, |t| t.type_scale.title_small.family.clone()),
-        weight: FontWeight::MEDIUM,
-        ..TextStyle::new(TITLE_SIZE, color)
-    }
+    TextStyle::new(TITLE_SIZE, color)
+        .with_family(theme.map_or_else(ui_face, |t| t.type_scale.title_small.family.clone()))
+        .with_weight(FontWeight::MEDIUM)
 }
 
 /// Resolve `(bg, border, divider, title, chevron)`.

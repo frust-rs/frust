@@ -283,13 +283,14 @@ pub struct TermBlockWidget {
 }
 
 fn mono_style(color: Color) -> TextStyle {
-    TextStyle {
-        // Kept explicit: terminal output needs a fixed-width face; no type-scale role is one.
-        family: FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace),
-        weight: FontWeight::REGULAR,
-        line_height: LineHeight::FontSizeRelative(LINE_HEIGHT),
-        ..TextStyle::new(FONT_SIZE, color)
-    }
+    // Kept explicit: terminal output needs a fixed-width face; no type-scale role is one.
+    TextStyle::new(FONT_SIZE, color)
+        .with_family(FontFamily::stack_with_generic(
+            ["IBM Plex Mono"],
+            GenericSlot::Monospace,
+        ))
+        .with_weight(FontWeight::REGULAR)
+        .with_line_height(LineHeight::FontSizeRelative(LINE_HEIGHT))
 }
 
 /// `GlyphInk`, themed (`theme.extension::<GlyphInk>()`) or the unthemed

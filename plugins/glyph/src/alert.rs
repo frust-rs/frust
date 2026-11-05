@@ -281,32 +281,28 @@ fn ui_face() -> FontFamily {
 
 /// The icon's style; family from the theme's `headlineSmall` role.
 fn icon_style(theme: Option<&Theme>, color: Color) -> TextStyle {
-    TextStyle {
-        family: theme.map_or_else(display_face, |t| t.type_scale.headline_small.family.clone()),
-        weight: FontWeight::BOLD,
-        line_height: LineHeight::FontSizeRelative(ALERT_LINE_HEIGHT),
-        ..TextStyle::new(ALERT_FONT_SIZE, color)
-    }
+    TextStyle::new(ALERT_FONT_SIZE, color)
+        .with_family(
+            theme.map_or_else(display_face, |t| t.type_scale.headline_small.family.clone()),
+        )
+        .with_weight(FontWeight::BOLD)
+        .with_line_height(LineHeight::FontSizeRelative(ALERT_LINE_HEIGHT))
 }
 
 /// The title's style; family from the theme's `titleSmall` role.
 fn title_style(theme: Option<&Theme>, color: Color) -> TextStyle {
-    TextStyle {
-        family: theme.map_or_else(ui_face, |t| t.type_scale.title_small.family.clone()),
-        weight: FontWeight::SEMI_BOLD,
-        line_height: LineHeight::FontSizeRelative(ALERT_LINE_HEIGHT),
-        ..TextStyle::new(ALERT_FONT_SIZE, color)
-    }
+    TextStyle::new(ALERT_FONT_SIZE, color)
+        .with_family(theme.map_or_else(ui_face, |t| t.type_scale.title_small.family.clone()))
+        .with_weight(FontWeight::SEMI_BOLD)
+        .with_line_height(LineHeight::FontSizeRelative(ALERT_LINE_HEIGHT))
 }
 
 /// The body's style; family from the theme's `bodyMedium` role.
 fn body_style(theme: Option<&Theme>, color: Color) -> TextStyle {
-    TextStyle {
-        family: theme.map_or_else(ui_face, |t| t.type_scale.body_medium.family.clone()),
-        weight: FontWeight::REGULAR,
-        line_height: LineHeight::FontSizeRelative(ALERT_LINE_HEIGHT),
-        ..TextStyle::new(ALERT_FONT_SIZE, color)
-    }
+    TextStyle::new(ALERT_FONT_SIZE, color)
+        .with_family(theme.map_or_else(ui_face, |t| t.type_scale.body_medium.family.clone()))
+        .with_weight(FontWeight::REGULAR)
+        .with_line_height(LineHeight::FontSizeRelative(ALERT_LINE_HEIGHT))
 }
 
 /// Resolve `(accent, container-bg)` for `variant` — see the module docs.

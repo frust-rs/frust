@@ -284,12 +284,10 @@ fn display_face() -> FontFamily {
 
 /// A palette text style in `family`.
 fn palette_style(family: FontFamily, size: f32, weight: FontWeight, color: Color) -> TextStyle {
-    TextStyle {
-        family,
-        weight,
-        line_height: LineHeight::FontSizeRelative(LINE_HEIGHT),
-        ..TextStyle::new(size, color)
-    }
+    TextStyle::new(size, color)
+        .with_family(family)
+        .with_weight(weight)
+        .with_line_height(LineHeight::FontSizeRelative(LINE_HEIGHT))
 }
 
 /// One row of the palette: a label plus an optional trailing hint (a kbd

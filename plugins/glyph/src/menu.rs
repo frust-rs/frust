@@ -373,12 +373,10 @@ fn ui_face() -> FontFamily {
 
 /// An item label's style; family from the theme's `labelLarge` role.
 fn item_style(theme: Option<&Theme>, color: Color) -> TextStyle {
-    TextStyle {
-        family: theme.map_or_else(ui_face, |t| t.type_scale.label_large.family.clone()),
-        weight: FontWeight::REGULAR,
-        line_height: LineHeight::FontSizeRelative(ITEM_LINE_HEIGHT),
-        ..TextStyle::new(ITEM_FONT_SIZE, color)
-    }
+    TextStyle::new(ITEM_FONT_SIZE, color)
+        .with_family(theme.map_or_else(ui_face, |t| t.type_scale.label_large.family.clone()))
+        .with_weight(FontWeight::REGULAR)
+        .with_line_height(LineHeight::FontSizeRelative(ITEM_LINE_HEIGHT))
 }
 
 /// The horizontal space an item's leading icon slot reserves before its

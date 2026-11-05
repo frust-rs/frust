@@ -378,44 +378,34 @@ fn resolve_families(theme: Option<&Theme>) -> BarFamilies {
 
 /// The big-title style at the collapse-interpolated `size` (bold).
 fn big_title_style(family: &FontFamily, size: f32, color: Color) -> TextStyle {
-    TextStyle {
-        family: family.clone(),
-        weight: FontWeight::BOLD,
-        ..TextStyle::new(size, color)
-    }
+    TextStyle::new(size, color)
+        .with_family(family.clone())
+        .with_weight(FontWeight::BOLD)
 }
 
 /// The connection-banner text style (11px).
 fn banner_style(family: &FontFamily, color: Color) -> TextStyle {
-    TextStyle {
-        family: family.clone(),
-        weight: FontWeight::REGULAR,
-        ..TextStyle::new(BANNER_FONT_SIZE, color)
-    }
+    TextStyle::new(BANNER_FONT_SIZE, color)
+        .with_family(family.clone())
+        .with_weight(FontWeight::REGULAR)
 }
 
 fn title_style(family: &FontFamily, color: Color) -> TextStyle {
-    TextStyle {
-        family: family.clone(),
-        weight: FontWeight::MEDIUM,
-        ..TextStyle::new(TITLE_SIZE, color)
-    }
+    TextStyle::new(TITLE_SIZE, color)
+        .with_family(family.clone())
+        .with_weight(FontWeight::MEDIUM)
 }
 
 fn subtitle_style(family: &FontFamily, color: Color) -> TextStyle {
-    TextStyle {
-        family: family.clone(),
-        weight: FontWeight::REGULAR,
-        ..TextStyle::new(SUBTITLE_SIZE, color)
-    }
+    TextStyle::new(SUBTITLE_SIZE, color)
+        .with_family(family.clone())
+        .with_weight(FontWeight::REGULAR)
 }
 
 fn count_style(family: &FontFamily, color: Color) -> TextStyle {
-    TextStyle {
-        family: family.clone(),
-        weight: FontWeight::SEMI_BOLD,
-        ..TextStyle::new(COUNT_SIZE, color)
-    }
+    TextStyle::new(COUNT_SIZE, color)
+        .with_family(family.clone())
+        .with_weight(FontWeight::SEMI_BOLD)
 }
 
 /// The `(enter, _)` [`Timing`] for the title crossfade, honoring

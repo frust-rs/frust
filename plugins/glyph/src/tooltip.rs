@@ -192,12 +192,10 @@ fn ui_face() -> FontFamily {
 
 /// The bubble text's style; family from the theme's `bodySmall` role.
 fn bubble_style(theme: Option<&Theme>, color: Color) -> TextStyle {
-    TextStyle {
-        family: theme.map_or_else(ui_face, |t| t.type_scale.body_small.family.clone()),
-        weight: FontWeight::REGULAR,
-        line_height: LineHeight::FontSizeRelative(LINE_HEIGHT),
-        ..TextStyle::new(FONT_SIZE, color)
-    }
+    TextStyle::new(FONT_SIZE, color)
+        .with_family(theme.map_or_else(ui_face, |t| t.type_scale.body_small.family.clone()))
+        .with_weight(FontWeight::REGULAR)
+        .with_line_height(LineHeight::FontSizeRelative(LINE_HEIGHT))
 }
 
 /// A minimal retained text run — see `crate::badge`'s `GlyphLabel` for

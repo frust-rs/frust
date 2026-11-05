@@ -563,15 +563,13 @@ impl SwitcherChipWidget {
     /// The label's style: the theme's `label_large` role (Glyph's button label).
     fn label_style(theme: Option<&Theme>, color: Color) -> TextStyle {
         match theme {
-            Some(t) => TextStyle {
-                color,
-                ..t.type_scale.label_large.clone()
-            },
-            None => TextStyle {
-                family: FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace),
-                weight: FontWeight::MEDIUM,
-                ..TextStyle::new(CHIP_LABEL_SIZE, color)
-            },
+            Some(t) => t.type_scale.label_large.clone().with_color(color),
+            None => TextStyle::new(CHIP_LABEL_SIZE, color)
+                .with_family(FontFamily::stack_with_generic(
+                    ["IBM Plex Mono"],
+                    GenericSlot::Monospace,
+                ))
+                .with_weight(FontWeight::MEDIUM),
         }
     }
 
