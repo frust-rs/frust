@@ -749,34 +749,28 @@ const MESSAGE_ROLE: ThemeTextType = ThemeTextType::BodyMedium;
 /// re-brushed at paint so a status recolor costs no reshape. The family here
 /// is the unthemed base; `layout` shapes in [`DIGIT_ROLE`]'s family.
 fn digit_style() -> TextStyle {
-    TextStyle {
-        family: sans_family(),
-        weight: FontWeight::SEMI_BOLD,
-        ..TextStyle::new(OTP_DIGIT_SIZE as f32, SHAPING_INK)
-    }
+    TextStyle::new(OTP_DIGIT_SIZE as f32, SHAPING_INK)
+        .with_family(sans_family())
+        .with_weight(FontWeight::SEMI_BOLD)
 }
 
 /// The label style: `text-sm font-medium text-foreground`. The family here is
 /// the unthemed base; `layout` shapes in [`LABEL_ROLE`]'s family.
 fn label_style(color: Color) -> TextStyle {
-    TextStyle {
-        family: sans_family(),
-        weight: FontWeight::MEDIUM,
-        size: style::TEXT_SM as f32,
-        color,
-        ..TextStyle::default()
-    }
+    TextStyle::default()
+        .with_family(sans_family())
+        .with_weight(FontWeight::MEDIUM)
+        .with_size(style::TEXT_SM as f32)
+        .with_color(color)
 }
 
 /// The message style: `text-sm` in the status's own ink. The family here is
 /// the unthemed base; `layout` shapes in [`MESSAGE_ROLE`]'s family.
 fn message_style(color: Color) -> TextStyle {
-    TextStyle {
-        family: sans_family(),
-        size: style::TEXT_SM as f32,
-        color,
-        ..TextStyle::default()
-    }
+    TextStyle::default()
+        .with_family(sans_family())
+        .with_size(style::TEXT_SM as f32)
+        .with_color(color)
 }
 
 /// The palette a slot row paints from.

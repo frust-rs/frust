@@ -954,20 +954,15 @@ fn row_style(theme: Option<&Theme>) -> TextStyle {
 /// A hint's / key cap's style (`text-[10px] font-medium`), in the theme's
 /// `label_small` family.
 fn small_style(theme: Option<&Theme>) -> TextStyle {
-    let style = TextStyle {
-        weight: FontWeight::MEDIUM,
-        ..TextStyle::new(PALETTE_SMALL_TEXT as f32, crate::text::SHAPING_INK)
-    };
+    let style = TextStyle::new(PALETTE_SMALL_TEXT as f32, crate::text::SHAPING_INK)
+        .with_weight(FontWeight::MEDIUM);
     themed_style(style, ThemeTextType::LabelSmall, theme)
 }
 
 /// A group heading's style (`text-[10px] font-semibold`), in
 /// [`small_style`]'s family.
 fn heading_style(theme: Option<&Theme>) -> TextStyle {
-    TextStyle {
-        weight: FontWeight::SEMI_BOLD,
-        ..small_style(theme)
-    }
+    small_style(theme).with_weight(FontWeight::SEMI_BOLD)
 }
 
 /// Paint lucide's `search` mark — a ring plus its handle — centred on `centre`,

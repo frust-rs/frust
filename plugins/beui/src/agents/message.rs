@@ -203,25 +203,21 @@ const MARKER_ROLE: ThemeTextType = ThemeTextType::LabelMedium;
 /// The family here is the unthemed base; `layout` shapes in [`META_ROLE`]'s
 /// family.
 fn meta_style(color: Color) -> TextStyle {
-    TextStyle {
-        family: sans_family(),
-        size: MESSAGE_META_TEXT as f32,
-        color,
-        ..TextStyle::default()
-    }
+    TextStyle::default()
+        .with_family(sans_family())
+        .with_size(MESSAGE_META_TEXT as f32)
+        .with_color(color)
 }
 
 /// The avatar's initials style: `text-xs font-medium text-muted-foreground`.
 /// The family here is the unthemed base; `layout` shapes in [`AVATAR_ROLE`]'s
 /// family.
 fn avatar_style(color: Color) -> TextStyle {
-    TextStyle {
-        family: sans_family(),
-        weight: FontWeight::MEDIUM,
-        size: style::TEXT_XS as f32,
-        color,
-        ..TextStyle::default()
-    }
+    TextStyle::default()
+        .with_family(sans_family())
+        .with_weight(FontWeight::MEDIUM)
+        .with_size(style::TEXT_XS as f32)
+        .with_color(color)
 }
 
 /// A declarative beUI message row. See the [module docs](self).
@@ -760,10 +756,7 @@ impl Widget for MessageMarkerWidget {
         let ink = MessagePaint::resolve(Theme::from_layout_ctx(ctx)).meta;
         let text = self.label.layout_themed(
             ctx,
-            &TextStyle {
-                size: style::TEXT_XS as f32,
-                ..meta_style(ink)
-            },
+            &meta_style(ink).with_size(style::TEXT_XS as f32),
             MARKER_ROLE,
         );
         let cap = row_width * MESSAGE_MARKER_MAX_WIDTH_FRACTION;

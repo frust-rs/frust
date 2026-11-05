@@ -407,20 +407,15 @@ fn title_style(theme: Option<&Theme>) -> TextStyle {
 /// The description/trailing style (`text-xs`, regular weight), in
 /// [`title_style`]'s family.
 fn body_style(theme: Option<&Theme>) -> TextStyle {
-    TextStyle {
-        size: style::TEXT_XS as f32,
-        weight: FontWeight::REGULAR,
-        ..title_style(theme)
-    }
+    title_style(theme)
+        .with_size(style::TEXT_XS as f32)
+        .with_weight(FontWeight::REGULAR)
 }
 
 /// The count badge's style (`text-xs font-medium`), in [`title_style`]'s
 /// family.
 fn count_style(theme: Option<&Theme>) -> TextStyle {
-    TextStyle {
-        size: style::TEXT_XS as f32,
-        ..title_style(theme)
-    }
+    title_style(theme).with_size(style::TEXT_XS as f32)
 }
 
 /// One retained card.

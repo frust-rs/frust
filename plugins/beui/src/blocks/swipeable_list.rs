@@ -523,19 +523,14 @@ fn title_style(theme: Option<&Theme>) -> TextStyle {
 
 /// The description style (`text-xs`, regular), in [`title_style`]'s family.
 fn body_style(theme: Option<&Theme>) -> TextStyle {
-    TextStyle {
-        size: style::TEXT_XS as f32,
-        weight: frust::authoring::text::FontWeight::REGULAR,
-        ..title_style(theme)
-    }
+    title_style(theme)
+        .with_size(style::TEXT_XS as f32)
+        .with_weight(frust::authoring::text::FontWeight::REGULAR)
 }
 
 /// The meta style (`text-xs font-medium`), in [`title_style`]'s family.
 fn meta_style(theme: Option<&Theme>) -> TextStyle {
-    TextStyle {
-        size: style::TEXT_XS as f32,
-        ..title_style(theme)
-    }
+    title_style(theme).with_size(style::TEXT_XS as f32)
 }
 
 /// One retained action.
