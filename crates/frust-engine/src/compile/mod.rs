@@ -1330,6 +1330,11 @@ impl SceneCompiler {
         // The whole scene is refused up front rather than mid-walk, so a
         // rejected frame never leaves half its draws recorded.
         let mut backdrops = 0_usize;
+        // The open retained brackets, and whether the outermost one presents
+        // its body at a scale other than 1: the one correction the walk
+        // composes ahead of a command that this loop does not.
+        let mut bracket_depth = 0_usize;
+        let mut bracket_rescales = false;
         for command in scene.commands() {
             if let Some(transform) = command_transform(command) {
                 check_finite(root * transform)?;
@@ -1346,15 +1351,24 @@ impl SceneCompiler {
                 return Err(EngineError::RetainedKeyMissing { key: *key });
             }
             check_geometry(command)?;
-            if let Command::BackdropBlur {
-                rect,
-                radius,
-                transform,
-                ..
-            } = command
-                && backdrop_reaches_target(*rect, *radius, root * *transform, size)
-            {
-                backdrops = backdrops.saturating_add(1);
+            match command {
+                Command::PushRetained { scale, .. } => {
+                    if bracket_depth == 0 {
+                        bracket_rescales = *scale != 1.0;
+                    }
+                    bracket_depth = bracket_depth.saturating_add(1);
+                }
+                Command::PopRetained => bracket_depth = bracket_depth.saturating_sub(1),
+                Command::BackdropBlur {
+                    rect,
+                    radius,
+                    transform,
+                } if (bracket_depth > 0 && bracket_rescales)
+                    || backdrop_reaches_target(*rect, *radius, root * *transform, size) =>
+                {
+                    backdrops = backdrops.saturating_add(1);
+                }
+                _ => {}
             }
         }
         // Counted over the backdrops whose blur region reaches the target, the
@@ -1362,11 +1376,15 @@ impl SceneCompiler {
         // backdrop scrolled or translated clear of the frame (a scroll view's
         // warm paint margin, say) draws nothing and does not count. The test
         // is made here, ahead of the walk, from the rectangle's device
-        // transform and the target alone, so it ignores a retained bracket's
-        // correction and any clip's coverage: it can count a backdrop the
-        // walk later drops, never miss one it draws. For an ordinary frame it
-        // is the walk's own test. Refused whole before a strip is generated,
-        // whatever cap the app chose.
+        // transform and the target alone, so it ignores any clip's coverage:
+        // it can count a backdrop the walk later drops, never miss one it
+        // draws. Inside a retained bracket whose outermost presentation scale
+        // is not exactly 1 the walk composes a correction that can pull an
+        // off-target rectangle onto the target, so every backdrop there is
+        // counted without the target test; a bracket at scale 1 corrects
+        // nothing and is tested like any other backdrop. For an ordinary
+        // frame this is the walk's own test. Refused whole before a strip is
+        // generated, whatever cap the app chose.
         let cap = clamp_backdrop_cap(backdrop_cap);
         if backdrops > cap {
             return Err(EngineError::TooManyBackdrops {
@@ -3039,8 +3057,10 @@ fn note_shader_effects_disabled() {
 /// Whether a backdrop blur over `rect` at `device` (the root composed with the
 /// command's own transform) has a blur region on a `size` target — the same
 /// sigma and region tests [`SceneCompiler::record_backdrop`] makes, minus the
-/// walk's retained correction and clip coverage, so it is a superset of the
-/// backdrops the walk records. Only these count toward the per-frame cap.
+/// clip coverage and the retained correction, so on its own it is a superset
+/// of the backdrops the walk records only outside a rescaling bracket; the
+/// up-front count counts every backdrop inside one. Only these count toward
+/// the per-frame cap.
 fn backdrop_reaches_target(rect: Rect, radius: f64, device: Affine, size: (u16, u16)) -> bool {
     backdrop_sigma(radius, device)
         .and_then(|sigma| backdrop_region(device.transform_rect_bbox(rect), sigma, size))

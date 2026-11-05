@@ -3567,6 +3567,45 @@ mod backdrop {
         assert!(frame.backdrops.is_empty());
     }
 
+    /// A scene with one backdrop on the target and one at x 160..200, clear of
+    /// the 98-wide target, the second recorded inside a retained bracket
+    /// presented at `scale` about the origin.
+    fn bracketed_off_target(scale: f64) -> Scene {
+        scene_of(|builder| {
+            field(builder);
+            builder.backdrop_blur(PANEL, 2.0);
+            builder.push_retained(1, Rect::new(-50.0, -50.0, 50.0, 50.0), 1.0, scale);
+            builder.backdrop_blur(Rect::new(160.0, 16.0, 200.0, 44.0), 2.0);
+            builder.pop_retained();
+        })
+    }
+
+    #[test]
+    fn a_rescaled_bracket_that_pulls_a_backdrop_onto_the_target_is_counted() {
+        // At scale 0.5 about the origin the walk draws the second backdrop at
+        // x 80..100, on the target, so it is counted and the frame is refused.
+        let scene = bracketed_off_target(0.5);
+        assert!(matches!(
+            compile_at(&scene, 1),
+            Err(EngineError::TooManyBackdrops {
+                recorded: 2,
+                max: 1
+            })
+        ));
+        assert_eq!(
+            compile_at(&scene, 2).expect("served at 2").backdrops.len(),
+            2,
+            "the walk does draw the corrected backdrop"
+        );
+    }
+
+    #[test]
+    fn a_bracket_at_scale_one_leaves_an_off_target_backdrop_uncounted() {
+        let frame = compile_at(&bracketed_off_target(1.0), 1)
+            .expect("an unscaled bracket corrects nothing, so the off-target backdrop is free");
+        assert_eq!(frame.backdrops.len(), 1);
+    }
+
     #[test]
     fn the_process_wide_cap_is_clamped_and_read_back() {
         // Serialised with the device cases, the only others in this binary that
