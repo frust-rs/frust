@@ -185,10 +185,8 @@ fn nan_transform() -> CorpusCase {
     fn record(scene: &mut Scene) {
         let mut cx = TextContext::new();
         let registered = register_test_fonts(&mut cx);
-        let style = TextStyle {
-            family: FontFamily::stack(registered.iter().map(|f| f.name.clone())),
-            ..TextStyle::new(16.0, BLACK)
-        };
+        let style = TextStyle::new(16.0, BLACK)
+            .with_family(FontFamily::stack(registered.iter().map(|f| f.name.clone())));
         // "H" rather than an arbitrary letter: it is in the bundled Latin
         // face's subset (`testing/fonts/LICENSES.md`), so this shapes against
         // the registered test font instead of falling back to a HOST font —
@@ -340,10 +338,8 @@ fn ten_thousand_glyphs() -> CorpusCase {
 
         let mut cx = TextContext::new();
         let registered = register_test_fonts(&mut cx);
-        let style = TextStyle {
-            family: FontFamily::stack(registered.iter().map(|f| f.name.clone())),
-            ..TextStyle::new(8.0, WHITE)
-        };
+        let style = TextStyle::new(8.0, WHITE)
+            .with_family(FontFamily::stack(registered.iter().map(|f| f.name.clone())));
         // "l" rather than an arbitrary letter: it is in the bundled Latin
         // face's subset (`testing/fonts/LICENSES.md`), so this shapes against
         // the registered test font instead of falling back to a HOST font —

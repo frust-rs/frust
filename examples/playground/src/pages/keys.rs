@@ -1383,11 +1383,9 @@ impl KeyProbeWidget {
     /// Re-shape the two zone labels (the toggle's carries the `active` flag).
     fn reshape(&mut self, ctx: &mut LayoutCtx, size: Size) {
         let active = self.probe.borrow().active;
-        let style = TextStyle {
-            family: mono(),
-            line_height: LineHeight::FontSizeRelative(1.25),
-            ..TextStyle::new(LABEL_SIZE, LABEL_INK)
-        };
+        let style = TextStyle::new(LABEL_SIZE, LABEL_INK)
+            .with_family(mono())
+            .with_line_height(LineHeight::FontSizeRelative(1.25));
         let toggle = if active {
             TOGGLE_LABEL_ON
         } else {

@@ -196,17 +196,13 @@ impl BubbleChartWidget {
                 let base_color = Self::bubble_color(b.performance);
                 let font_size = Self::scaled_font_size(b.radius);
 
-                let symbol_style = TextStyle {
-                    weight: FontWeight::BOLD,
-                    ..TextStyle::new(font_size, Color::WHITE)
-                };
+                let symbol_style =
+                    TextStyle::new(font_size, Color::WHITE).with_weight(FontWeight::BOLD);
                 let symbol = text_ctx.layout(b.symbol, &symbol_style, None);
                 let symbol_size = symbol.size();
 
-                let percent_style = TextStyle {
-                    weight: FontWeight::SEMI_BOLD,
-                    ..TextStyle::new(font_size * 0.7, base_color)
-                };
+                let percent_style =
+                    TextStyle::new(font_size * 0.7, base_color).with_weight(FontWeight::SEMI_BOLD);
                 let percent_text = format!("{:+.1}%", b.performance);
                 let percent = text_ctx.layout(&percent_text, &percent_style, None);
                 let percent_size = percent.size();

@@ -138,10 +138,7 @@ mod tests {
         let registered = register_test_fonts(&mut cx);
         let family_stack = FontFamily::stack(registered.iter().map(|f| f.name.clone()));
 
-        let style = TextStyle {
-            family: family_stack,
-            ..TextStyle::new(32.0, Color::BLACK)
-        };
+        let style = TextStyle::new(32.0, Color::BLACK).with_family(family_stack);
         let layout = cx.layout(SAMPLE, &style, None);
         let runs = layout.to_scene_runs(Point::ORIGIN);
 
@@ -188,10 +185,7 @@ mod tests {
         let registered = register_test_fonts(&mut cx);
         let family_stack = FontFamily::stack(registered.iter().map(|f| f.name.clone()));
 
-        let style = TextStyle {
-            family: family_stack,
-            ..TextStyle::new(32.0, Color::BLACK)
-        };
+        let style = TextStyle::new(32.0, Color::BLACK).with_family(family_stack);
         let layout = cx.layout(THAI_SAMPLE, &style, None);
         let runs = layout.to_scene_runs(Point::ORIGIN);
 

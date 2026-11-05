@@ -5544,13 +5544,11 @@ mod tests {
 
         // Build with a custom font family style.
         let custom_family = FontFamily::named("Monospace");
-        let custom_style = TextStyle {
-            family: custom_family.clone(),
-            weight: FontWeight::BOLD,
-            size: 18.0,
-            letter_spacing: 1.5,
-            ..TextStyle::default()
-        };
+        let custom_style = TextStyle::default()
+            .with_family(custom_family.clone())
+            .with_weight(FontWeight::BOLD)
+            .with_size(18.0)
+            .with_letter_spacing(1.5);
 
         root.rebuild(
             &mut |s: &mut AppState| {
@@ -5615,10 +5613,10 @@ mod tests {
         // Second TextInput: explicit monospace family using stack_with_generic.
         // Monospace is a generic family available on all platforms; it will
         // resolve to a different system font than SystemUi on any test host.
-        let monospace_style = TextStyle {
-            family: FontFamily::stack_with_generic(Vec::<String>::new(), GenericSlot::Monospace),
-            ..TextStyle::default()
-        };
+        let monospace_style = TextStyle::default().with_family(FontFamily::stack_with_generic(
+            Vec::<String>::new(),
+            GenericSlot::Monospace,
+        ));
         let mut state_monospace = AppState::default();
         let mut root_monospace = RenderRoot::new();
         root_monospace.rebuild(
@@ -5720,10 +5718,7 @@ mod tests {
 
     /// A 24px style in `family`.
     fn family_style(family: frust_text::FontFamily) -> TextStyle {
-        TextStyle {
-            family,
-            ..TextStyle::new(24.0, Color::BLACK)
-        }
+        TextStyle::new(24.0, Color::BLACK).with_family(family)
     }
 
     /// A laid-out field carrying `value` (empty = the placeholder path) in

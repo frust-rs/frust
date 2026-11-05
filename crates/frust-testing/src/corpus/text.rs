@@ -105,10 +105,7 @@ fn latin_mixed_sizes() -> CorpusCase {
         let mut builder = SceneBuilder::new(scene);
         backdrop(&mut builder, WIDTH, HEIGHT, WHITE);
         for (size, top_y) in SIZES {
-            let style = TextStyle {
-                family: family.clone(),
-                ..TextStyle::new(size, BLACK)
-            };
+            let style = TextStyle::new(size, BLACK).with_family(family.clone());
             let layout = cx.layout("Hello", &style, None);
             for run in layout.to_scene_runs(Point::new(8.0, top_y)) {
                 builder.draw_glyph_run(run);
@@ -144,10 +141,7 @@ fn rtl_arabic() -> CorpusCase {
         let (mut cx, family) = bundled_context();
         let mut builder = SceneBuilder::new(scene);
         backdrop(&mut builder, WIDTH, HEIGHT, WHITE);
-        let style = TextStyle {
-            family,
-            ..TextStyle::new(32.0, BLACK)
-        };
+        let style = TextStyle::new(32.0, BLACK).with_family(family);
         // "مرحبا" ("Hello") — every codepoint is in the bundled Arabic
         // subset (`testing/fonts/LICENSES.md`), including the joining forms
         // its letters take next to one another.
@@ -181,10 +175,7 @@ fn cjk() -> CorpusCase {
         let (mut cx, family) = bundled_context();
         let mut builder = SceneBuilder::new(scene);
         backdrop(&mut builder, WIDTH, HEIGHT, WHITE);
-        let style = TextStyle {
-            family,
-            ..TextStyle::new(32.0, BLACK)
-        };
+        let style = TextStyle::new(32.0, BLACK).with_family(family);
         // "日本語" ("Japanese language") — every codepoint is in the bundled
         // CJK subset.
         let layout = cx.layout("日本語", &style, None);
@@ -221,10 +212,7 @@ fn combining_marks() -> CorpusCase {
         let (mut cx, family) = bundled_context();
         let mut builder = SceneBuilder::new(scene);
         backdrop(&mut builder, WIDTH, HEIGHT, WHITE);
-        let style = TextStyle {
-            family,
-            ..TextStyle::new(48.0, BLACK)
-        };
+        let style = TextStyle::new(48.0, BLACK).with_family(family);
         let layout = cx.layout("é\u{0302}", &style, None);
         for run in layout.to_scene_runs(Point::new(20.0, 20.0)) {
             builder.draw_glyph_run(run);
@@ -257,10 +245,7 @@ fn colr_emoji() -> CorpusCase {
         let (mut cx, family) = bundled_context();
         let mut builder = SceneBuilder::new(scene);
         backdrop(&mut builder, WIDTH, HEIGHT, WHITE);
-        let style = TextStyle {
-            family,
-            ..TextStyle::new(48.0, BLACK)
-        };
+        let style = TextStyle::new(48.0, BLACK).with_family(family);
         // U+1F600, the one codepoint the bundled emoji subset carries. This
         // face's glyph sits almost entirely BELOW its own baseline (measured
         // ~2..51px down from it, unlike a Latin glyph's mostly-above
@@ -304,10 +289,7 @@ fn gradient_brush() -> CorpusCase {
         let (mut cx, family) = bundled_context();
         let mut builder = SceneBuilder::new(scene);
         backdrop(&mut builder, WIDTH, HEIGHT, WHITE);
-        let style = TextStyle {
-            family,
-            ..TextStyle::new(40.0, BLACK)
-        };
+        let style = TextStyle::new(40.0, BLACK).with_family(family);
         let layout = cx.layout("Hello", &style, None);
         let width = layout.size().width;
         let brush = Brush::Gradient(Gradient {
@@ -366,10 +348,7 @@ fn clipped() -> CorpusCase {
         let mut builder = SceneBuilder::new(scene);
         backdrop(&mut builder, WIDTH, HEIGHT, WHITE);
         builder.push_clip_rounded(Rect::new(8.0, 8.0, 148.0, 92.0), 16.0);
-        let style = TextStyle {
-            family,
-            ..TextStyle::new(40.0, BLACK)
-        };
+        let style = TextStyle::new(40.0, BLACK).with_family(family);
         // "Hello, Hello" is wide enough at 40px that its second word runs
         // past the clip's right edge.
         let layout = cx.layout("Hello, Hello", &style, None);
@@ -420,10 +399,7 @@ fn ten_thousand_shaped_glyphs() -> CorpusCase {
         let (mut cx, family) = bundled_context();
         let mut builder = SceneBuilder::new(scene);
         backdrop(&mut builder, WIDTH, HEIGHT, BLACK);
-        let style = TextStyle {
-            family,
-            ..TextStyle::new(14.0, WHITE)
-        };
+        let style = TextStyle::new(14.0, WHITE).with_family(family);
         let text = "Hello, ".repeat(REPEATS);
         let layout = cx.layout(&text, &style, Some(WIDTH as f32));
         for run in layout.to_scene_runs(Point::new(4.0, 16.0)) {

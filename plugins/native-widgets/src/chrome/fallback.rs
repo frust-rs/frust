@@ -91,10 +91,7 @@ fn theme_or_neutral(theme: Option<&Theme>) -> &Theme {
 }
 
 fn styled(base: &TextStyle, color: Color) -> TextStyle {
-    TextStyle {
-        color,
-        ..base.clone()
-    }
+    base.clone().with_color(color)
 }
 
 fn with_alpha(color: Color, alpha: f32) -> Color {
@@ -606,13 +603,11 @@ impl TopStyles {
 }
 
 fn letters_style(theme: &Theme) -> TextStyle {
-    TextStyle {
-        weight: FontWeight::SEMI_BOLD,
-        ..styled(
-            &theme.type_scale.label_small,
-            theme.scheme().on_secondary_container,
-        )
-    }
+    styled(
+        &theme.type_scale.label_small,
+        theme.scheme().on_secondary_container,
+    )
+    .with_weight(FontWeight::SEMI_BOLD)
 }
 
 impl Widget for TopBarWidget {
