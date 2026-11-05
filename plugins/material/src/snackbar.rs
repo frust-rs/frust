@@ -291,12 +291,10 @@ fn with_alpha(color: Color, alpha: f32) -> Color {
 /// the live theme's `bodyMedium` family when a theme reaches layout (unthemed:
 /// the platform system UI family).
 fn message_style(theme: Option<&Theme>) -> TextStyle {
-    let mut style = TextStyle {
-        weight: FontWeight::REGULAR,
-        letter_spacing: MESSAGE_LETTER_SPACING,
-        line_height: LineHeight::Absolute(MESSAGE_LINE_HEIGHT),
-        ..TextStyle::new(MESSAGE_SIZE, Color::BLACK)
-    };
+    let mut style = TextStyle::new(MESSAGE_SIZE, Color::BLACK)
+        .with_weight(FontWeight::REGULAR)
+        .with_letter_spacing(MESSAGE_LETTER_SPACING)
+        .with_line_height(LineHeight::Absolute(MESSAGE_LINE_HEIGHT));
     if let Some(theme) = theme {
         style.family = theme.type_scale.body_medium.family.clone();
     }
@@ -306,12 +304,10 @@ fn message_style(theme: Option<&Theme>) -> TextStyle {
 /// The action label's resolved style: the `labelLarge` token literals above,
 /// in the live theme's `labelLarge` family when a theme reaches layout.
 fn action_style(theme: Option<&Theme>) -> TextStyle {
-    let mut style = TextStyle {
-        weight: FontWeight::MEDIUM,
-        letter_spacing: ACTION_LETTER_SPACING,
-        line_height: LineHeight::Absolute(ACTION_LINE_HEIGHT),
-        ..TextStyle::new(ACTION_SIZE, Color::BLACK)
-    };
+    let mut style = TextStyle::new(ACTION_SIZE, Color::BLACK)
+        .with_weight(FontWeight::MEDIUM)
+        .with_letter_spacing(ACTION_LETTER_SPACING)
+        .with_line_height(LineHeight::Absolute(ACTION_LINE_HEIGHT));
     if let Some(theme) = theme {
         style.family = theme.type_scale.label_large.family.clone();
     }
@@ -1866,21 +1862,17 @@ mod tests {
     fn without_a_theme_the_runs_keep_the_unthemed_styles() {
         assert_eq!(
             message_style(None),
-            TextStyle {
-                weight: FontWeight::REGULAR,
-                letter_spacing: MESSAGE_LETTER_SPACING,
-                line_height: LineHeight::Absolute(MESSAGE_LINE_HEIGHT),
-                ..TextStyle::new(MESSAGE_SIZE, Color::BLACK)
-            }
+            TextStyle::new(MESSAGE_SIZE, Color::BLACK)
+                .with_weight(FontWeight::REGULAR)
+                .with_letter_spacing(MESSAGE_LETTER_SPACING)
+                .with_line_height(LineHeight::Absolute(MESSAGE_LINE_HEIGHT))
         );
         assert_eq!(
             action_style(None),
-            TextStyle {
-                weight: FontWeight::MEDIUM,
-                letter_spacing: ACTION_LETTER_SPACING,
-                line_height: LineHeight::Absolute(ACTION_LINE_HEIGHT),
-                ..TextStyle::new(ACTION_SIZE, Color::BLACK)
-            }
+            TextStyle::new(ACTION_SIZE, Color::BLACK)
+                .with_weight(FontWeight::MEDIUM)
+                .with_letter_spacing(ACTION_LETTER_SPACING)
+                .with_line_height(LineHeight::Absolute(ACTION_LINE_HEIGHT))
         );
 
         let mut w = host_with_action();

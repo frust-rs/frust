@@ -1445,10 +1445,7 @@ impl Widget for SidebarGroupLabelWidget {
             return Size::ZERO;
         }
         let style = themed_family(
-            TextStyle {
-                weight: FontWeight::MEDIUM,
-                ..TextStyle::new(TEXT_XS as f32, SHAPING_INK)
-            },
+            TextStyle::new(TEXT_XS as f32, SHAPING_INK).with_weight(FontWeight::MEDIUM),
             Theme::from_layout_ctx(ctx),
             ThemeTextType::LabelMedium,
         );
@@ -1535,10 +1532,7 @@ impl Widget for SidebarMenuBadgeWidget {
             return Size::ZERO;
         }
         let style = themed_family(
-            TextStyle {
-                weight: FontWeight::MEDIUM,
-                ..TextStyle::new(TEXT_XS as f32, SHAPING_INK)
-            },
+            TextStyle::new(TEXT_XS as f32, SHAPING_INK).with_weight(FontWeight::MEDIUM),
             Theme::from_layout_ctx(ctx),
             ThemeTextType::LabelMedium,
         );
@@ -2227,10 +2221,7 @@ impl Widget for SidebarMenuButtonWidget {
             FontWeight::REGULAR
         };
         let style = themed_family(
-            TextStyle {
-                weight,
-                ..TextStyle::new(self.metrics.text as f32, SHAPING_INK)
-            },
+            TextStyle::new(self.metrics.text as f32, SHAPING_INK).with_weight(weight),
             Theme::from_layout_ctx(ctx),
             ThemeTextType::LabelLarge,
         );

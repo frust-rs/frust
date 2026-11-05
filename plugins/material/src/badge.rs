@@ -152,10 +152,8 @@ fn resolve(show_dot: bool, count: Option<u32>, max_count: u32) -> ResolvedBadge 
 /// family), so a theme swap or a font picker restyles the label along with
 /// the rest of the catalog.
 fn label_style(theme: Option<&Theme>) -> TextStyle {
-    let mut style = TextStyle {
-        weight: FontWeight::SEMI_BOLD,
-        ..TextStyle::new(LABEL_FONT_SIZE, Color::BLACK)
-    };
+    let mut style =
+        TextStyle::new(LABEL_FONT_SIZE, Color::BLACK).with_weight(FontWeight::SEMI_BOLD);
     if let Some(theme) = theme {
         style.family = theme.type_scale.label_small.family.clone();
     }
@@ -877,10 +875,8 @@ mod tests {
 
     #[test]
     fn without_a_theme_the_label_keeps_the_unthemed_style() {
-        let unthemed = TextStyle {
-            weight: FontWeight::SEMI_BOLD,
-            ..TextStyle::new(LABEL_FONT_SIZE, Color::BLACK)
-        };
+        let unthemed =
+            TextStyle::new(LABEL_FONT_SIZE, Color::BLACK).with_weight(FontWeight::SEMI_BOLD);
         assert_eq!(label_style(None), unthemed);
         assert_eq!(unthemed.family, FontFamily::SystemUi);
 

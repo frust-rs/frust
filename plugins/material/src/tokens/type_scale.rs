@@ -198,14 +198,12 @@ const LABEL_SMALL_EMPHASIZED: TypeToken = (11.0, 16.0, 0.5, FontWeight::BOLD);
 /// doc section); `style`/`color`/`align` are preserved from `base`.
 fn apply_type(base: &TextStyle, token: TypeToken) -> TextStyle {
     let (size, line_height_px, letter_spacing, weight) = token;
-    TextStyle {
-        family: material_family(),
-        size,
-        weight,
-        letter_spacing,
-        line_height: LineHeight::Absolute(line_height_px),
-        ..base.clone()
-    }
+    base.clone()
+        .with_family(material_family())
+        .with_size(size)
+        .with_weight(weight)
+        .with_letter_spacing(letter_spacing)
+        .with_line_height(LineHeight::Absolute(line_height_px))
 }
 
 /// Builds the Material 3 baseline type scale from `base` (its
@@ -265,10 +263,8 @@ mod tests {
 
     #[test]
     fn type_scale_preserves_base_style_and_color_but_overrides_family() {
-        let base = TextStyle {
-            family: FontFamily::named("Roboto"),
-            ..TextStyle::new(16.0, Color::from_rgb8(1, 2, 3))
-        };
+        let base = TextStyle::new(16.0, Color::from_rgb8(1, 2, 3))
+            .with_family(FontFamily::named("Roboto"));
         let scale = type_scale(&base);
         assert_ne!(scale.body_large.family, base.family);
         assert_eq!(scale.body_large.family, material_family());

@@ -410,14 +410,9 @@ impl RunStyles {
         let mut styles = Self {
             day: TextStyle::new(DAY_TEXT_SIZE, SHAPING_INK),
             weekday: TextStyle::new(WEEKDAY_TEXT_SIZE, SHAPING_INK),
-            header: TextStyle {
-                weight: FontWeight::MEDIUM,
-                ..TextStyle::new(SUB_HEADER_TEXT_SIZE, SHAPING_INK)
-            },
-            year: TextStyle {
-                weight: FontWeight::MEDIUM,
-                ..TextStyle::new(YEAR_TEXT_SIZE, SHAPING_INK)
-            },
+            header: TextStyle::new(SUB_HEADER_TEXT_SIZE, SHAPING_INK)
+                .with_weight(FontWeight::MEDIUM),
+            year: TextStyle::new(YEAR_TEXT_SIZE, SHAPING_INK).with_weight(FontWeight::MEDIUM),
         };
         if let Some(theme) = theme {
             let scale = &theme.type_scale;
@@ -1644,14 +1639,9 @@ mod tests {
         let unthemed = RunStyles {
             day: TextStyle::new(DAY_TEXT_SIZE, SHAPING_INK),
             weekday: TextStyle::new(WEEKDAY_TEXT_SIZE, SHAPING_INK),
-            header: TextStyle {
-                weight: FontWeight::MEDIUM,
-                ..TextStyle::new(SUB_HEADER_TEXT_SIZE, SHAPING_INK)
-            },
-            year: TextStyle {
-                weight: FontWeight::MEDIUM,
-                ..TextStyle::new(YEAR_TEXT_SIZE, SHAPING_INK)
-            },
+            header: TextStyle::new(SUB_HEADER_TEXT_SIZE, SHAPING_INK)
+                .with_weight(FontWeight::MEDIUM),
+            year: TextStyle::new(YEAR_TEXT_SIZE, SHAPING_INK).with_weight(FontWeight::MEDIUM),
         };
         assert_eq!(RunStyles::resolve(None), unthemed);
 

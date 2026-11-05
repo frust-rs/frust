@@ -537,10 +537,7 @@ fn check_path(origin: Point, size: f64) -> BezPath {
 /// `LabelMedium` family.
 fn progress_style(theme: Option<&Theme>) -> TextStyle {
     themed_family(
-        TextStyle {
-            weight: FontWeight::MEDIUM,
-            ..TextStyle::new(style::TEXT_XS as f32, SHAPING_INK)
-        },
+        TextStyle::new(style::TEXT_XS as f32, SHAPING_INK).with_weight(FontWeight::MEDIUM),
         theme,
         ThemeTextType::LabelMedium,
     )
@@ -550,10 +547,7 @@ fn progress_style(theme: Option<&Theme>) -> TextStyle {
 /// the live theme's `LabelLarge` family.
 fn nav_style(theme: Option<&Theme>) -> TextStyle {
     themed_family(
-        TextStyle {
-            weight: FontWeight::MEDIUM,
-            ..TextStyle::new(style::TEXT_SM as f32, SHAPING_INK)
-        },
+        TextStyle::new(style::TEXT_SM as f32, SHAPING_INK).with_weight(FontWeight::MEDIUM),
         theme,
         ThemeTextType::LabelLarge,
     )
@@ -570,12 +564,10 @@ fn error_style(theme: Option<&Theme>) -> TextStyle {
 
 /// A shortcut badge's style (`font-mono text-[0.625rem] font-medium`).
 fn shortcut_style() -> TextStyle {
-    TextStyle {
-        // Explicit, not themed: `TypeScale` has no monospace role to resolve from.
-        family: mono_family(),
-        weight: FontWeight::MEDIUM,
-        ..TextStyle::new(SHORTCUT_TEXT as f32, SHAPING_INK)
-    }
+    // Explicit, not themed: `TypeScale` has no monospace role to resolve from.
+    TextStyle::new(SHORTCUT_TEXT as f32, SHAPING_INK)
+        .with_family(mono_family())
+        .with_weight(FontWeight::MEDIUM)
 }
 
 // ---- View ------------------------------------------------------------------

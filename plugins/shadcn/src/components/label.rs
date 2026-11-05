@@ -102,10 +102,7 @@ fn resolve_ink(theme: Option<&Theme>) -> Color {
 /// family, at the resolved (possibly disabled-dimmed) ink.
 fn label_style(theme: Option<&Theme>, ink: Color) -> TextStyle {
     themed_family(
-        TextStyle {
-            weight: FontWeight::MEDIUM,
-            ..TextStyle::new(TEXT_SM as f32, ink)
-        },
+        TextStyle::new(TEXT_SM as f32, ink).with_weight(FontWeight::MEDIUM),
         theme,
         ThemeTextType::LabelLarge,
     )

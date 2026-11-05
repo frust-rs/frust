@@ -237,10 +237,8 @@ mod tests {
 
     #[test]
     fn themed_family_takes_only_the_roles_family_and_only_under_a_theme() {
-        let base = TextStyle {
-            weight: FontWeight::MEDIUM,
-            ..TextStyle::new(13.0, Color::from_rgb8(0x11, 0x22, 0x33))
-        };
+        let base = TextStyle::new(13.0, Color::from_rgb8(0x11, 0x22, 0x33))
+            .with_weight(FontWeight::MEDIUM);
         assert_eq!(
             themed_family(base.clone(), None, ThemeTextType::BodyMedium),
             base,
@@ -252,10 +250,7 @@ mod tests {
         theme.type_scale.body_medium.family = probe.clone();
         assert_eq!(
             themed_family(base.clone(), Some(&theme), ThemeTextType::BodyMedium),
-            TextStyle {
-                family: probe,
-                ..base
-            },
+            base.with_family(probe),
             "themed, only the family changes: size, weight and color stay the style's own"
         );
     }

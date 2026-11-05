@@ -399,14 +399,12 @@ fn sf_family_for_size(size_pt: f32) -> FontFamily {
 
 fn apply_type(base: &TextStyle, token: TypeToken) -> TextStyle {
     let (size, line_height_pt, weight) = token;
-    TextStyle {
-        family: sf_family_for_size(size),
-        size,
-        weight,
-        letter_spacing: 0.0,
-        line_height: LineHeight::Absolute(line_height_pt),
-        ..base.clone()
-    }
+    base.clone()
+        .with_family(sf_family_for_size(size))
+        .with_size(size)
+        .with_weight(weight)
+        .with_letter_spacing(0.0)
+        .with_line_height(LineHeight::Absolute(line_height_pt))
 }
 
 /// Builds an emphasized token from its baseline `token`'s size/line-height
@@ -726,10 +724,8 @@ mod tests {
 
     #[test]
     fn type_scale_preserves_base_style_and_color_but_overrides_family() {
-        let base = TextStyle {
-            family: FontFamily::named("Roboto"),
-            ..TextStyle::new(16.0, Color::from_rgb8(1, 2, 3))
-        };
+        let base = TextStyle::new(16.0, Color::from_rgb8(1, 2, 3))
+            .with_family(FontFamily::named("Roboto"));
         let scale = type_scale(&base);
         assert_ne!(scale.body_large.family, base.family);
         assert_eq!(scale.body_large.color, base.color);
