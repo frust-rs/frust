@@ -274,17 +274,21 @@ impl<State: 'static> FlexView<State> {
 
     /// Set the fixed space between consecutive children along the main axis
     /// (CSS `gap`). It is never added before the first or after the last child.
-    /// A negative or NaN value is treated as `0`.
+    /// A negative, NaN or infinite value is treated as `0`.
     pub fn gap(mut self, gap: f64) -> Self {
         self.gap = sanitize_gap(gap);
         self
     }
 }
 
-/// Clamp a gap to a finite-or-infinite non-negative value; NaN and negatives
-/// become `0`.
+/// Keep a gap only when it is finite and positive; NaN, negatives and
+/// infinities become `0`, so the summed gap never turns a main size non-finite.
 fn sanitize_gap(gap: f64) -> f64 {
-    if gap > 0.0 { gap } else { 0.0 }
+    if gap.is_finite() && gap > 0.0 {
+        gap
+    } else {
+        0.0
+    }
 }
 
 /// An empty vertical flex, ready for fluent children (no `any(..)` wrapping).
@@ -834,10 +838,21 @@ mod tests {
 
     #[test]
     fn invalid_gap_is_zero() {
-        for bad in [-3.0, f64::NAN] {
+        for bad in [-3.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             let view = three(Axis::Horizontal).gap(bad);
             let (origins, _) = main_origins(&view, Size::new(300.0, 100.0));
             assert_eq!(origins, vec![0.0, 20.0, 40.0]);
+        }
+    }
+
+    #[test]
+    fn infinite_gap_keeps_main_size_finite_for_any_child_count() {
+        for count in [0usize, 1, 3] {
+            let children = (0..count).map(|_| inflexible(leaf(20.0, 10.0))).collect();
+            let view = FlexView::new(Axis::Horizontal, children).gap(f64::INFINITY);
+            let (_, size) = main_origins(&view, Size::new(300.0, 100.0));
+            assert!(size.width.is_finite() && size.height.is_finite());
+            assert_eq!(size.width, 20.0 * count as f64);
         }
     }
 

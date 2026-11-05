@@ -107,9 +107,10 @@ use super::route::{NavRequest, RouteNavigator};
 use super::transition::TransitionSpec;
 
 /// Report an ignored caller option in debug builds; a no-op in release.
-fn log_ignored(_call: &str, _why: &str) {
+#[cfg_attr(not(debug_assertions), allow(unused_variables))]
+fn log_ignored(call: &str, why: &str) {
     #[cfg(debug_assertions)]
-    eprintln!("frust-widgets: Router::{_call} options ignored: {_why}");
+    eprintln!("frust-widgets: Router::{call} options ignored: {why}");
 }
 
 /// A page builder for a route: maps the captured [`RouteParams`] to the page's
@@ -280,7 +281,9 @@ impl<State: 'static> Route<State> {
 /// [`push_with`](Router::push_with) is the exception: its caller's options
 /// (result callback, back policy, barrier, transition) can only ride on a pushed
 /// page, so a leaf placed with a fresh shell is pushed on top of the inner
-/// navigator's root page instead, and popping it returns to that root.
+/// navigator's root page instead, and popping it returns to that root. So back
+/// from that leaf lands on the shell's root page before leaving the shell,
+/// where `push(…)` to the same location places the leaf as the root.
 ///
 /// # Matched state reaching the shell page
 ///
@@ -692,6 +695,10 @@ impl<State: 'static> Router<State> {
     ///   itself, the options apply to the shell page. When the shell page is
     ///   already on the stack and the shell route is the leaf, no page is
     ///   pushed and the options are ignored.
+    /// - Back from a leaf pushed into a freshly placed shell lands on the
+    ///   shell navigator's root page before leaving the shell, whereas
+    ///   [`push`](Self::push) to the same location (no options) places the
+    ///   leaf as the root, so one back press leaves the shell.
     /// - A location that resolves to the error page pushes it exactly as
     ///   `push` does and ignores `options`.
     /// - This is a `Router` method only: a [`RouteNavigator`] queues plain
@@ -856,7 +863,17 @@ impl<State: 'static> Router<State> {
         pages: Vec<ResolvedPage<State>>,
         leaf_options: Option<PushOptions<State>>,
     ) {
-        let mut pages = pages.into_iter().peekable();
+        Self::push_chain(controller, pages.into_iter(), leaf_options);
+    }
+
+    /// Push `pages` in order onto `controller`: earlier pages with their own
+    /// route's options, the last with the caller's (when given) over its own.
+    fn push_chain(
+        controller: &NavigatorController<State>,
+        pages: impl Iterator<Item = ResolvedPage<State>>,
+        leaf_options: Option<PushOptions<State>>,
+    ) {
+        let mut pages = pages.peekable();
         let mut leaf_options = leaf_options;
         while let Some(page) = pages.next() {
             let options = if pages.peek().is_none() {
@@ -930,20 +947,12 @@ impl<State: 'static> Router<State> {
     ) {
         match verb {
             Verb::Go => {
-                let mut pages = pages.into_iter().peekable();
+                let mut pages = pages.into_iter();
                 if let Some(first) = pages.next() {
                     let options = first.replace_options();
                     controller.replace_with_options(first.into_page_builder(), options);
                 }
-                let mut leaf_options = leaf_options;
-                while let Some(page) = pages.next() {
-                    let options = if pages.peek().is_none() {
-                        Self::leaf_push_options(&page, leaf_options.take())
-                    } else {
-                        page.push_options()
-                    };
-                    controller.push_with_options(page.into_page_builder(), options);
-                }
+                Self::push_chain(controller, pages, leaf_options);
             }
             Verb::Push => {
                 if let Some(leaf) = pages.into_iter().next_back() {
@@ -966,7 +975,7 @@ impl<State: 'static> Router<State> {
     /// rule (replace the top, push the rest).
     ///
     /// `shell_options` are the caller's options when the shell page is itself
-    /// the matched leaf; only a `push` carries them, onto the shell page.
+    /// the matched leaf; they are applied to the shell page, never dropped.
     fn place_segment(
         controller: &NavigatorController<State>,
         pages: Vec<ResolvedPage<State>>,
@@ -974,19 +983,15 @@ impl<State: 'static> Router<State> {
         shell_options: Option<PushOptions<State>>,
     ) {
         match verb {
-            Verb::Push => {
-                let mut pages = pages.into_iter().peekable();
-                let mut shell_options = shell_options;
-                while let Some(page) = pages.next() {
-                    let options = if pages.peek().is_none() {
-                        Self::leaf_push_options(&page, shell_options.take())
-                    } else {
-                        page.push_options()
-                    };
-                    controller.push_with_options(page.into_page_builder(), options);
-                }
-            }
-            Verb::Go | Verb::Replace => Self::apply_flat(controller, pages, Verb::Go, None),
+            Verb::Push => Self::push_chain(controller, pages.into_iter(), shell_options),
+            // An enclosing fresh placement reset the verb to go. The caller's
+            // options (if any) still belong to the shell page, which lands on
+            // this controller's root by the same push-over-root rule an
+            // ordinary leaf gets.
+            Verb::Go | Verb::Replace => match shell_options {
+                Some(_) => Self::push_onto_shell_root(controller, pages, shell_options),
+                None => Self::apply_flat(controller, pages, Verb::Go, None),
+            },
         }
     }
 
@@ -2149,7 +2154,8 @@ mod tests {
         assert_eq!(
             h.stacks().1,
             vec!["-".to_string(), "/sessions".to_string()],
-            "the leaf is pushed over the shell's root page so its options apply"
+            "the leaf is pushed over the shell's root page so its options apply \
+             (a back press lands on that root page before leaving the shell)"
         );
 
         h.inner.pop();
@@ -2161,6 +2167,69 @@ mod tests {
             "on_result fires when the pushed leaf pops"
         );
         assert_eq!(h.inner.depth(), 1);
+    }
+
+    #[test]
+    fn push_with_to_a_nested_shell_route_under_a_fresh_shell_applies_the_options() {
+        // Shell B is a pathless child of shell A, so `push_with` to its path
+        // matches B as the leaf under a freshly placed A: the chain splits into
+        // [A page], [B page], [empty].
+        let outer: NavigatorController<()> = NavigatorController::new();
+        let inner_a: NavigatorController<()> = NavigatorController::new();
+        let inner_b: NavigatorController<()> = NavigatorController::new();
+        let page_a = {
+            let inner_a = inner_a.clone();
+            move |_: &RouteParams| any(navigator(&inner_a, || sized(11.0, 11.0)))
+        };
+        let page_b = {
+            let inner_b = inner_b.clone();
+            move |_: &RouteParams| any(navigator(&inner_b, || sized(12.0, 12.0)))
+        };
+        // Shell B owns the path `/b`, so it is the chain's leaf.
+        let mut shell_b = shell_route(
+            &inner_b,
+            page_b,
+            vec![Route::new("/leaf", |_| sized(20.0, 20.0))],
+        );
+        shell_b.path = "/b".to_string();
+        let routes = vec![shell_route(&inner_a, page_a, vec![shell_b])];
+        let router = Router::with_controller(&outer, routes);
+        let mut app = {
+            let c = outer.clone();
+            move |_: &mut ()| navigator(&c, || sized(10.0, 10.0))
+        };
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        root.rebuild(&mut app, &mut ());
+        let results = Rc::new(RefCell::new(Vec::new()));
+
+        router.push_with("/b", recording_options(&results).transition(slide()));
+        root.rebuild(&mut app, &mut ());
+        // The inner ops drain when the freshly placed navigators first build.
+        root.rebuild(&mut app, &mut ());
+        assert_eq!(
+            paths(&outer),
+            vec!["-".to_string(), "/b".to_string()],
+            "the fresh outer shell page stacked over the seed page"
+        );
+        assert_eq!(
+            paths(&inner_a),
+            vec!["-".to_string(), "/b".to_string()],
+            "the nested shell page is pushed over the outer shell's root page"
+        );
+        assert!(
+            inner_a.transition().active,
+            "the caller's transition runs on the nested shell page"
+        );
+
+        inner_a.pop();
+        root.rebuild(&mut app, &mut ());
+        root.rebuild(&mut app, &mut ());
+        assert_eq!(
+            results.borrow().len(),
+            1,
+            "the caller's on_result is attached to the nested shell page"
+        );
+        assert_eq!(inner_a.depth(), 1);
     }
 
     #[test]
