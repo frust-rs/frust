@@ -686,3 +686,183 @@ fn an_overlays_scrim_rect_equals_the_window_rect() {
         scene.rects
     );
 }
+
+// ---------------------------------------------------------------------
+// Barrier taps (`PushOptions::barrier_dismissible`).
+// ---------------------------------------------------------------------
+
+/// A half-alpha blue barrier; these tests only tap it.
+const TAP_BARRIER: peniko::Color = peniko::Color::new([0.0, 0.0, 1.0, 0.5]);
+
+/// A barrier test's controller, render root and app closure.
+type BarrierFixture = (
+    NavigatorController<()>,
+    RenderRoot<(), NavigatorView<()>>,
+    AppLogic,
+);
+
+/// A navigator over a 100x100 root page with one page pushed by `options`
+/// (built by `page`), rebuilt and laid out so it takes input.
+fn barrier_tap_fixture(
+    page: impl Fn() -> AnyView<()> + 'static,
+    options: PushOptions<()>,
+) -> BarrierFixture {
+    let controller: NavigatorController<()> = NavigatorController::new();
+    let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+    let mut app: AppLogic = {
+        let ctrl = controller.clone();
+        Box::new(move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0)))
+    };
+    root.rebuild(&mut app, &mut ());
+    root.layout(Size::new(100.0, 100.0));
+    controller.push_with_options(page, options);
+    root.rebuild(&mut app, &mut ());
+    root.layout(Size::new(100.0, 100.0));
+    assert_eq!(controller.depth(), 2);
+    (controller, root, app)
+}
+
+/// A 100x40 sheet that handles no pointer event at all.
+// erasure: keep the fixture takes every page as one erased builder type
+fn ignoring_sheet() -> AnyView<()> {
+    any(sized_page(100.0, 40.0))
+}
+
+fn dismissible(options: PushOptions<()>) -> PushOptions<()> {
+    options.barrier(TAP_BARRIER).barrier_dismissible(true)
+}
+
+/// Press and release at `(50, 80)`, below the sheet, then rebuild.
+fn tap_barrier(
+    root: &mut RenderRoot<(), NavigatorView<()>>,
+    app: &mut impl FnMut(&mut ()) -> NavigatorView<()>,
+) {
+    root.event(&mut (), &down(50.0, 80.0));
+    root.event(&mut (), &up(50.0, 80.0));
+    root.rebuild(app, &mut ());
+    root.layout(Size::new(100.0, 100.0));
+}
+
+#[test]
+fn a_barrier_tap_the_page_ignores_pops_a_pop_policy_page() {
+    let (controller, mut root, mut app) =
+        barrier_tap_fixture(ignoring_sheet, dismissible(PushOptions::transparent()));
+    tap_barrier(&mut root, &mut app);
+    assert_eq!(controller.depth(), 1, "the tap popped the barrier page");
+}
+
+#[test]
+fn a_barrier_tap_pops_with_the_pages_transition_reversed() {
+    let spec = TransitionSpec::new(
+        PageTransition::SlideUp,
+        Timing::Duration(Duration::from_millis(100), Curve::Linear),
+    );
+    let (controller, mut root, mut app) = barrier_tap_fixture(
+        ignoring_sheet,
+        dismissible(PushOptions::transparent().transition(spec)),
+    );
+    run_until_settled(&mut root, &mut app, &mut (), 0);
+    assert!(!controller.transition().active, "the push has settled");
+
+    tap_barrier(&mut root, &mut app);
+    let pop = controller.transition();
+    assert_eq!(controller.depth(), 1);
+    assert!(pop.active && pop.is_pop, "an animated pop is running");
+    assert_eq!((pop.from_depth, pop.to_depth), (2, 1));
+}
+
+#[test]
+fn a_barrier_tap_bumps_a_dismiss_animated_pages_signal() {
+    let signal = Rc::new(Cell::new(0u64));
+    let (controller, mut root, mut app) = barrier_tap_fixture(
+        ignoring_sheet,
+        dismissible(
+            PushOptions::transparent()
+                .back(BackPolicy::DismissAnimated)
+                .dismiss_signal(signal.clone()),
+        ),
+    );
+    tap_barrier(&mut root, &mut app);
+    assert_eq!(signal.get(), 1, "the tap fired the dismiss signal once");
+    assert_eq!(controller.depth(), 2, "the page pops itself, not the tap");
+}
+
+#[test]
+fn a_barrier_tap_on_a_veto_page_does_nothing() {
+    let signal = Rc::new(Cell::new(0u64));
+    let (controller, mut root, mut app) = barrier_tap_fixture(
+        ignoring_sheet,
+        dismissible(
+            PushOptions::transparent()
+                .back(BackPolicy::Veto)
+                .dismiss_signal(signal.clone()),
+        ),
+    );
+    tap_barrier(&mut root, &mut app);
+    assert_eq!(controller.depth(), 2, "Veto keeps the page");
+    assert_eq!(signal.get(), 0, "and fires no signal");
+}
+
+#[test]
+fn a_press_the_page_handles_never_dismisses() {
+    let hits = Rc::new(Cell::new(0u32));
+    let page = {
+        let hits = hits.clone();
+        move || host_probe("sheet", &hits)
+    };
+    let (controller, mut root, mut app) =
+        barrier_tap_fixture(page, dismissible(PushOptions::transparent()));
+    tap_barrier(&mut root, &mut app);
+    assert_eq!(hits.get(), 1, "the page handled the press");
+    assert_eq!(controller.depth(), 2, "so the barrier did not dismiss");
+}
+
+#[test]
+fn a_non_dismissible_barrier_never_dismisses() {
+    let (controller, mut root, mut app) = barrier_tap_fixture(
+        ignoring_sheet,
+        PushOptions::transparent()
+            .barrier(TAP_BARRIER)
+            .barrier_dismissible(false),
+    );
+    tap_barrier(&mut root, &mut app);
+    assert_eq!(controller.depth(), 2);
+    // Without a barrier the flag alone does nothing either.
+    let (controller, mut root, mut app) = barrier_tap_fixture(
+        ignoring_sheet,
+        PushOptions::transparent().barrier_dismissible(true),
+    );
+    tap_barrier(&mut root, &mut app);
+    assert_eq!(controller.depth(), 2);
+}
+
+#[test]
+fn a_drag_over_the_barrier_is_not_a_tap() {
+    let (controller, mut root, mut app) =
+        barrier_tap_fixture(ignoring_sheet, dismissible(PushOptions::transparent()));
+    root.event(&mut (), &down(50.0, 80.0));
+    root.event(&mut (), &move_to(50.0, 50.0));
+    root.event(&mut (), &up(50.0, 50.0));
+    root.rebuild(&mut app, &mut ());
+    assert_eq!(
+        controller.depth(),
+        2,
+        "a drag past the slop never dismisses"
+    );
+}
+
+#[test]
+fn a_barrier_tap_is_dropped_when_an_op_covers_the_page_first() {
+    let (controller, mut root, mut app) =
+        barrier_tap_fixture(ignoring_sheet, dismissible(PushOptions::transparent()));
+    root.event(&mut (), &down(50.0, 80.0));
+    root.event(&mut (), &up(50.0, 80.0));
+    // An op queued before the rebuild covers the tapped page.
+    controller.push(|| sized_page(100.0, 100.0));
+    root.rebuild(&mut app, &mut ());
+    assert_eq!(
+        controller.depth(),
+        3,
+        "the tap no longer names the top page"
+    );
+}
