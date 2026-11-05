@@ -560,5 +560,11 @@ impl Widget for ContainerWidget {
         }
     }
 
+    /// Content only when the box paints something of its own (a glow, fill
+    /// or border); an undecorated container is a layout wrapper.
+    fn hit_test_self(&self) -> bool {
+        self.fill.is_some() || self.border.is_some() || self.glow.is_some()
+    }
+
     crate::authoring::visit_children!(child);
 }

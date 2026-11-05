@@ -156,6 +156,11 @@ impl Widget for SizedBoxWidget {
         }
     }
 
+    // Sizes its child and paints nothing of its own.
+    fn hit_test_self(&self) -> bool {
+        false
+    }
+
     crate::authoring::visit_children!(child);
 }
 
