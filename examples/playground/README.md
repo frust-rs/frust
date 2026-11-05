@@ -14,7 +14,7 @@ neutral backdrop for the capabilities under test.
 
 A Material `app_bar` (a plug brand mark, the title, and the
 brightness / reduce-motion / animations toggles) sits above the
-`pattern_switcher`-hosted section body, selecting between nineteen sections
+`pattern_switcher`-hosted section body, selecting between twenty sections
 through one of two responsive navigation shapes (`use_context::<WindowMetrics>()`
 against a 600px width breakpoint — `pages::responsive`'s own named-breakpoint
 convention, applied to the shell itself):
@@ -22,7 +22,7 @@ convention, applied to the shell itself):
 - **Narrow** (< 600px, e.g. a phone): a bottom `navigation_bar` shows the
   first five sections directly, plus a trailing "More" destination that opens
   an overlay listing every section.
-- **Wide** (≥ 600px, e.g. a desktop window): a side rail lists all nineteen
+- **Wide** (≥ 600px, e.g. a desktop window): a side rail lists all twenty
   sections directly, in a column beside the page body — nothing is ever
   behind an overflow menu at this width.
 
@@ -184,6 +184,17 @@ The sections, in order:
     Each row is also written once to the platform log with the prefix
     `frust-gate network:`, so `adb logcat`, the iOS unified log or the macOS
     console can be grepped.
+20. **Glass** — `glass_surface` tiles over continuously moving high-contrast
+    stripes, the on-device page for judging backdrop-blur frame cost. A `-`/`+`
+    stepper picks 1 to 8 surfaces (each records one backdrop blur), a segmented
+    control picks the per-frame backdrop cap (4 / 6 / 8, applied through
+    `frust::set_max_backdrops_per_frame`, with the applied value shown), and
+    another picks the glass tier. The tiles carry an explicit material override
+    (the seeded Material theme is opaque, which would record no blur). A frame
+    with more surfaces than the cap is refused whole, so a blank or last frame
+    there is expected. Gate recipe: open Glass, step the surfaces 1 to 8 at cap 4
+    and at cap 8, and compare frame cost with the blur visible and the refusal
+    past the cap.
 
 The Terminal fixtures live in [`fixtures/terminal/`](fixtures/terminal/README.md)
 (bytes + the deterministic generator that produced them, embedded with

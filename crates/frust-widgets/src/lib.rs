@@ -39,6 +39,7 @@ pub mod drag;
 pub mod either;
 mod flex;
 mod gesture;
+mod glass_surface;
 mod icon;
 mod icon_button;
 pub mod icons;
@@ -106,6 +107,7 @@ pub use frust_core::OverlayKeys;
 /// [`axis`](CustomScrollView::axis) builder needs no direct `frust-core` import.
 pub use frust_core::ScrollAxis;
 pub use gesture::{GestureDetector, GestureDetectorView, GestureDetectorWidget};
+pub use glass_surface::{GlassSurfaceView, GlassSurfaceWidget, glass_surface};
 pub use icon::{
     Icon, IconData, IconElement, IconPaint, IconShape, IconSource, IconView, IconWidget,
     StrokedIconSource, icon,

@@ -45,6 +45,9 @@ pub struct RecordingScene {
     pub layer_alphas: Vec<f32>,
     /// Each [`PaintScene::push_transform`].
     pub transforms: Vec<Affine>,
+    /// `(origin, size, sigma)` per [`PaintScene::backdrop_blur`]; sigma is a
+    /// Gaussian standard deviation in logical px.
+    pub backdrops: Vec<(Point, Size, f64)>,
 }
 
 impl PaintScene for RecordingScene {
@@ -76,6 +79,10 @@ impl PaintScene for RecordingScene {
 
     fn push_transform(&mut self, transform: Affine) {
         self.transforms.push(transform);
+    }
+
+    fn backdrop_blur(&mut self, origin: Point, size: Size, radius: f64) {
+        self.backdrops.push((origin, size, radius));
     }
 }
 

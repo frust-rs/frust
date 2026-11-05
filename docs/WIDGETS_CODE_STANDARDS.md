@@ -232,6 +232,16 @@ strings. The canonical example is `crates/frust-drive/templates/app/src/lib.rs.t
   [NATIVE_WIDGETS_ARCHITECTURE.md](NATIVE_WIDGETS_ARCHITECTURE.md)'s typeface ladder for the
   shipped instance.
 
+- **Paint glass through `glass_surface` (or its recipe order), never a hand-rolled blur.** A
+  material's `blur_radius_intent` is a Gaussian sigma in logical px, passed through unconverted:
+  CSS `blur(Npx)` is sigma N, so a design source's radius-family number is converted before it
+  lands in a `GlassMaterial`. Keep glass out of opacity layers (`AnimatedOpacity`, a fading
+  ancestor): the blur is dropped there and only the washes paint.
+  Each surface spends one of the per-frame backdrops, and a frame past the cap
+  (`set_max_backdrops_per_frame`, default 4) is refused whole. Cost scales with sigma as well as
+  count; budget both, and see `backdrop-blur-bound` in [LIMITATIONS.md](LIMITATIONS.md) for
+  measured numbers.
+
 ## Keyboard Focus and Shortcuts
 
 The routing (declined-key chain, traversal, focus ring) is CORE's — see

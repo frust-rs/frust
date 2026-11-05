@@ -31,9 +31,12 @@
 //! were written to catch, and [`super::Probe`] for why the assertions travel
 //! with the case instead of being replaced by a baseline.
 
-use frust_scene::{CornerRadii, DashPattern, Scene, SceneBuilder, ShaderProgram};
+use frust_scene::{
+    CornerRadii, DashPattern, FillRule, Scene, SceneBuilder, ShaderProgram, StrokeCap, StrokeJoin,
+    StrokeStyle,
+};
 use frust_text::{FontFamily, TextStyle};
-use kurbo::{Affine, BezPath, Point, Rect, Shape};
+use kurbo::{Affine, BezPath, Circle, Point, Rect, Shape};
 use peniko::color::DynamicColor;
 use peniko::color::palette::css::{BLACK, BLUE, GREEN, RED, WHITE, YELLOW};
 use peniko::{Blob, Brush, Color, ColorStop, Gradient, ImageAlphaType, ImageData, ImageFormat};
@@ -96,6 +99,8 @@ pub fn unit_cases() -> Vec<CorpusCase> {
         path_fill(),
         path_stroke(),
         path_dashed(),
+        stroke_caps_joins(),
+        fill_even_odd(),
         shader_quad(),
         retained_bracket(),
         retained_balance(),
@@ -1341,6 +1346,197 @@ fn path_dashed() -> CorpusCase {
         }],
         eroded_interior: false,
         about: "the same path, dashed 6-on/4-off at phase 2",
+    }
+}
+
+/// One row of [`stroke_caps_joins`]: an open three-point polyline whose middle
+/// point is a sharp angle pointing right, its two ends at `x = 8` and ten
+/// pixels apart vertically, the first at `top`.
+fn sharp_chevron(top: f64) -> BezPath {
+    let mut path = BezPath::new();
+    path.move_to((8.0, top));
+    path.line_to((40.0, top + 5.0));
+    path.line_to((8.0, top + 10.0));
+    path
+}
+
+/// `PathStyle::StrokeStyled`: four open polylines with a sharp angle, each
+/// stroked 5 px wide with a different cap/join pair.
+///
+/// Rows, top to bottom: butt caps with a miter join (limit 10); square caps
+/// with a bevel join; round caps with a round join; and butt caps with a miter
+/// join under a limit of 2, which the angle exceeds, so the join falls back to
+/// a bevel. The angle's miter would reach about 16 px past its vertex, so the
+/// first row's tip and the other rows' absence of one tell the joins apart.
+fn stroke_caps_joins() -> CorpusCase {
+    fn record(scene: &mut Scene) {
+        let mut builder = SceneBuilder::new(scene);
+        let rows = [
+            (
+                3.0,
+                StrokeStyle::new(StrokeCap::Butt, StrokeJoin::Miter).with_miter_limit(10.0),
+                RED,
+            ),
+            (
+                19.0,
+                StrokeStyle::new(StrokeCap::Square, StrokeJoin::Bevel),
+                GREEN,
+            ),
+            (
+                35.0,
+                StrokeStyle::new(StrokeCap::Round, StrokeJoin::Round),
+                BLUE,
+            ),
+            (
+                51.0,
+                StrokeStyle::new(StrokeCap::Butt, StrokeJoin::Miter).with_miter_limit(2.0),
+                YELLOW,
+            ),
+        ];
+        for (top, style, color) in rows {
+            builder.stroke_path_styled(sharp_chevron(top), 5.0, None, style, Brush::Solid(color));
+        }
+    }
+    CorpusCase {
+        spec: case("unit-stroke-caps-joins"),
+        record,
+        probes: &[
+            Probe {
+                x: 6,
+                y: 3,
+                expect: Expect::Exact([0, 0, 0, 0]),
+                why: "a butt cap ends at the endpoint — nothing paints past it",
+            },
+            Probe {
+                x: 6,
+                y: 19,
+                expect: Expect::Exact([0, 128, 0, 255]),
+                why: "a square cap extends half the width past the endpoint",
+            },
+            Probe {
+                x: 6,
+                y: 35,
+                expect: Expect::Exact([0, 0, 255, 255]),
+                why: "a round cap extends past the endpoint, well inside its radius here",
+            },
+            Probe {
+                x: 50,
+                y: 8,
+                expect: Expect::AtLeast {
+                    channel: 3,
+                    min: 150,
+                },
+                why: "the miter join's tip reaches past the vertex under a limit of 10",
+            },
+            Probe {
+                x: 52,
+                y: 24,
+                expect: Expect::Exact([0, 0, 0, 0]),
+                why: "a bevel join cuts the corner at the vertex — no tip",
+            },
+            Probe {
+                x: 52,
+                y: 40,
+                expect: Expect::Exact([0, 0, 0, 0]),
+                why: "a round join stays within half a width of the vertex",
+            },
+            Probe {
+                x: 52,
+                y: 56,
+                expect: Expect::Exact([0, 0, 0, 0]),
+                why: "a miter longer than the limit falls back to a bevel — no tip",
+            },
+        ],
+        eroded_interior: false,
+        about: "four sharp-angle polylines: butt/miter, square/bevel, round/round, and a \
+                miter past its limit",
+    }
+}
+
+/// A pentagram (five points joined by skipping one), whose centre is wound
+/// twice: `centre`, radius `radius`, first point straight up.
+fn pentagram(cx: f64, cy: f64, radius: f64) -> BezPath {
+    let mut path = BezPath::new();
+    for i in 0..5 {
+        let angle = -std::f64::consts::FRAC_PI_2 + f64::from(i) * 4.0 * std::f64::consts::PI / 5.0;
+        let point = (cx + radius * angle.cos(), cy + radius * angle.sin());
+        if i == 0 {
+            path.move_to(point);
+        } else {
+            path.line_to(point);
+        }
+    }
+    path.close_path();
+    path
+}
+
+/// `PathStyle::FillEvenOdd`: a pentagram filled even-odd beside the same
+/// pentagram filled nonzero, and a ring made of two same-direction concentric
+/// circles filled even-odd.
+///
+/// The pentagram's centre pentagon is wound twice, so even-odd leaves it empty
+/// and nonzero fills it; the ring's inner circle is wound the same way as the
+/// outer one, so even-odd punches it out where a nonzero fill would not.
+fn fill_even_odd() -> CorpusCase {
+    fn record(scene: &mut Scene) {
+        let mut builder = SceneBuilder::new(scene);
+        builder.fill_path_with_rule(
+            pentagram(16.0, 17.0, 14.0),
+            FillRule::EvenOdd,
+            Brush::Solid(RED),
+        );
+        builder.fill_path_with_rule(
+            pentagram(48.0, 17.0, 14.0),
+            FillRule::NonZero,
+            Brush::Solid(RED),
+        );
+        let mut ring = Circle::new((32.0, 46.0), 14.0).to_path(0.1);
+        ring.extend(Circle::new((32.0, 46.0), 6.0).to_path(0.1));
+        builder.fill_path_with_rule(ring, FillRule::EvenOdd, Brush::Solid(BLUE));
+    }
+    CorpusCase {
+        spec: case("unit-fill-even-odd"),
+        record,
+        probes: &[
+            Probe {
+                x: 16,
+                y: 17,
+                expect: Expect::Exact([0, 0, 0, 0]),
+                why: "the doubly wound centre of the even-odd star is a hole",
+            },
+            Probe {
+                x: 48,
+                y: 17,
+                expect: Expect::Exact([255, 0, 0, 255]),
+                why: "the same centre under the nonzero rule is filled",
+            },
+            Probe {
+                x: 16,
+                y: 7,
+                expect: Expect::Exact([255, 0, 0, 255]),
+                why: "a singly wound arm of the even-odd star is filled",
+            },
+            Probe {
+                x: 32,
+                y: 46,
+                expect: Expect::Exact([0, 0, 0, 0]),
+                why: "the ring's inner circle is punched out by the even-odd rule",
+            },
+            Probe {
+                x: 42,
+                y: 46,
+                expect: Expect::Exact([0, 0, 255, 255]),
+                why: "the ring's body, between the two circles, is filled",
+            },
+            Probe {
+                x: 48,
+                y: 46,
+                expect: Expect::Exact([0, 0, 0, 0]),
+                why: "outside the ring's outer circle stays empty",
+            },
+        ],
+        eroded_interior: false,
+        about: "a pentagram filled even-odd and nonzero, and an even-odd ring",
     }
 }
 

@@ -61,6 +61,7 @@
 //! `docs/RENDER_ARCHITECTURE.md` places this pass in the frame path.
 
 use std::f64::consts::SQRT_2;
+use std::ops::Range;
 
 use kurbo::{
     Affine, BezPath, Cap, CubicBez, Join, ParamCurveArclen, PathEl, Point, QuadBez, Rect,
@@ -116,6 +117,19 @@ const STROKE_RELATIVE_TOLERANCE: f64 = 1.0 / (1_u64 << 40) as f64;
 /// stroke many orders of magnitude larger in user space than anything it
 /// shows reaches the ceiling.
 const STROKER_EXTENT_CEILING: f64 = (1_u64 << 32) as f64;
+
+/// Most half-widths a mitred tip of kurbo's stroker stands from its vertex,
+/// whatever the miter limit: `2^29`, the factor [`stroke_reach`] caps a larger
+/// limit at. kurbo mitres a join only while `2h < (h + dot)·limit²`, `h` the
+/// hypot of the tangents' cross and dot products, so a turn too sharp for
+/// `h + dot` to stay above zero in `f64` is bevelled at any limit. A nonzero
+/// sum of two nearly opposite floats is at least about `2^-54·h`, so a
+/// mitred cross product is at least about `2^-27.5·h` and the tip, under
+/// `h / |cross|` widths past the vertex, within about `2^28.5` half-widths.
+/// Capping there keeps the cull conservative for every limit while keeping
+/// the reach, and the tolerance floor it sets, finite and meaningful; the
+/// sweep in this module's tests pins the bound against kurbo itself.
+const MITER_REACH_CEILING: f64 = (1_u64 << 29) as f64;
 
 /// Smallest tolerance a rounded rectangle's corner arcs are approximated at,
 /// as a fraction of its largest radius: `2^-64`.
@@ -511,10 +525,25 @@ pub(crate) fn generate_fill(
     storage: &mut StripStorage,
     clip: Option<PathDataRef<'_>>,
 ) {
+    generate_fill_with_rule(generator, path, Fill::NonZero, transform, storage, clip);
+}
+
+/// [`generate_fill`] under `rule` rather than non-zero, through the same
+/// pre-pass. The pre-pass keeps every winding number inside the viewport — a
+/// piece it replaces by its chord lies wholly beyond an edge together with
+/// that chord — so it changes no coverage under either rule.
+pub(crate) fn generate_fill_with_rule(
+    generator: &mut StripGenerator,
+    path: impl IntoIterator<Item = PathEl>,
+    rule: Fill,
+    transform: Affine,
+    storage: &mut StripStorage,
+    clip: Option<PathDataRef<'_>>,
+) {
     let viewport = cull_viewport(generator, clip.as_ref());
     generator.generate_filled_path(
         ViewportSplit::new(path, transform, viewport),
-        Fill::NonZero,
+        rule,
         Affine::IDENTITY,
         None,
         storage,
@@ -606,6 +635,10 @@ fn fits_the_stroker(
     let Some(bounds) = stroke_bounds(path, stroke) else {
         return true;
     };
+    if !bounds.is_finite() {
+        // A reach past `f64`'s range has no device extent to measure.
+        return false;
+    }
     device_extent(bounds, transform) <= region.split_extent
         && bounds.width().max(bounds.height())
             <= STROKER_EXTENT_CEILING * stroker_tolerance(transform)
@@ -709,12 +742,16 @@ fn expansion_tolerance(
 
 /// How far a stroke's outline can stand from its centerline, in user units:
 /// half the width, times the miter limit when joins are mitred (a miter tip
-/// stands at most that many half-widths from its vertex) and times √2 when a
-/// cap is square (a square cap's far corners).
+/// stands at most that many half-widths from its vertex), the limit capped at
+/// [`MITER_REACH_CEILING`], and times √2 when a cap is square (a square cap's
+/// far corners). The cap keeps it finite for every limit below a width of
+/// about `2^-28` of `f64::MAX`; past that the stroker is given up and the
+/// region it inflates is unbounded along the overflowing axis, culling
+/// nothing there.
 fn stroke_reach(stroke: &Stroke) -> f64 {
     let mut factor: f64 = 1.0;
     if matches!(stroke.join, Join::Miter) {
-        factor = factor.max(stroke.miter_limit);
+        factor = factor.max(stroke.miter_limit.min(MITER_REACH_CEILING));
     }
     if matches!(stroke.start_cap, Cap::Square) || matches!(stroke.end_cap, Cap::Square) {
         factor = factor.max(SQRT_2);
@@ -871,9 +908,12 @@ fn within_dash_budget(path: &BezPath, period: f64) -> bool {
 ///
 /// A subpath nothing was skipped from is one run and keeps its closing
 /// segment, so it dashes as [`dash_path`] dashes it. A closed subpath with a
-/// skip is dashed open at its start: where kurbo joins its last dash to its
-/// first, the two meet there with a cap each, the same coverage under the
-/// round caps and joins every display-list stroke has.
+/// skip is dashed as runs, the last ending where the first starts; where
+/// [`dash_path`] would join a dash through that vertex, round caps on both
+/// sides cover what a round join covers, so an all-round stroke keeps the
+/// two caps. Any other style has the seam spliced as kurbo splices it, the
+/// last run's final dash continuing into the first run's opening one, so the
+/// vertex takes the stroke's join.
 fn dash_visible_stretch(
     path: &BezPath,
     dash: DashPattern,
@@ -884,7 +924,10 @@ fn dash_visible_stretch(
     let reach = stroke_reach(stroke);
     let [a, b, c, d, _, _] = transform.as_coeffs();
     let region = region.inflate(reach * (a.abs() + c.abs()), reach * (b.abs() + d.abs()));
-    let mut lowering = DashLowering::new(dash, transform, region);
+    let round = matches!(stroke.join, Join::Round)
+        && matches!(stroke.start_cap, Cap::Round)
+        && matches!(stroke.end_cap, Cap::Round);
+    let mut lowering = DashLowering::new(dash, transform, region, !round);
 
     let source = well_formed(path.iter());
     let mut start = Point::ZERO;
@@ -1029,11 +1072,35 @@ struct DashLowering {
     run_offset: f64,
     travelled: f64,
     skipped: bool,
+    /// Whether a closed subpath's seam is spliced into a join rather than
+    /// left as two caps: false only under round caps and joins.
+    splice_seam: bool,
+    /// Whether the current run started at its subpath's start vertex.
+    run_is_head: bool,
+    /// The current subpath's first run, once emitted.
+    head: Option<Head>,
     out: BezPath,
 }
 
+/// A subpath's first run, when it starts at the subpath's start vertex: the
+/// elements of `out` it emitted and that vertex.
+#[derive(Clone, Copy, Debug)]
+struct Head {
+    first: usize,
+    end: usize,
+    start: Point,
+}
+
+/// How near the end of a closed subpath's last dash must come to its start
+/// vertex, as a fraction of the largest coordinate of the run's last element,
+/// to count as reaching it: `2^-40`. kurbo ends a dash that runs through a
+/// segment's end at that segment evaluated at 1, within a few units in the
+/// last place of the end point; a dash ending this close short of the vertex
+/// is indistinguishable from one reaching it.
+const SEAM_RELATIVE_TOLERANCE: f64 = 1.0 / (1_u64 << 40) as f64;
+
 impl DashLowering {
-    fn new(dash: DashPattern, transform: Affine, region: SplitRegion) -> Self {
+    fn new(dash: DashPattern, transform: Affine, region: SplitRegion, splice_seam: bool) -> Self {
         let period = dash.on + dash.off;
         let device_period = period * largest_stretch(transform);
         Self {
@@ -1048,6 +1115,9 @@ impl DashLowering {
             run_offset: 0.0,
             travelled: 0.0,
             skipped: false,
+            splice_seam,
+            run_is_head: false,
+            head: None,
             out: BezPath::new(),
         }
     }
@@ -1200,6 +1270,7 @@ impl DashLowering {
         if self.run.elements().is_empty() {
             self.run.move_to(span.piece.pts[0]);
             self.run_offset = self.travelled;
+            self.run_is_head = !self.skipped;
         }
         self.run.push(span.to_el());
         let dashes = span.polygon_length() / self.period;
@@ -1221,11 +1292,86 @@ impl DashLowering {
         self.travelled += length;
     }
 
-    /// Ends the current subpath; `closed` when it ended in a `ClosePath`.
+    /// Ends the current subpath; `closed` when it ended in a `ClosePath`. A
+    /// closed subpath with a skip whose last run ends at its start vertex has
+    /// that seam spliced when [`Self::splice_seam`] is set.
     fn end_subpath(&mut self, closed: bool) {
+        let seam = closed && self.skipped && self.splice_seam;
+        let tail = self.out.elements().len();
+        let scale = seam.then(|| self.run_scale()).flatten();
         self.flush_run(closed && !self.skipped);
+        if let (Some(head), Some(scale)) = (self.head, scale) {
+            self.splice(head, tail, scale);
+        }
         self.travelled = 0.0;
         self.skipped = false;
+        self.head = None;
+    }
+
+    /// The largest coordinate of the current run's last element, start point
+    /// included; `None` for an empty run.
+    fn run_scale(&self) -> Option<f64> {
+        let elements = self.run.elements();
+        let last = elements.last()?;
+        let before = elements.len().checked_sub(2).and_then(|i| elements.get(i));
+        let start = before.and_then(|el| el.end_point());
+        let points = match *last {
+            PathEl::MoveTo(p) | PathEl::LineTo(p) => [Some(p), None, None],
+            PathEl::QuadTo(p1, p2) => [Some(p1), Some(p2), None],
+            PathEl::CurveTo(p1, p2, p3) => [Some(p1), Some(p2), Some(p3)],
+            PathEl::ClosePath => [None, None, None],
+        };
+        let scale = points
+            .into_iter()
+            .chain([start])
+            .flatten()
+            .map(|p| p.x.abs().max(p.y.abs()))
+            .fold(0.0, f64::max);
+        Some(scale)
+    }
+
+    /// Splices the seam of a closed subpath: when a subpath emitted from
+    /// `tail` on — the last run's output — ends within
+    /// [`SEAM_RELATIVE_TOLERANCE`] of `scale` of the head's start vertex, and
+    /// the head's output has a subpath leaving exactly that vertex, the
+    /// latter's elements past its `MoveTo` continue the former, as kurbo
+    /// continues a closed subpath's last dash into its first.
+    fn splice(&mut self, head: Head, tail: usize, scale: f64) {
+        let elements = self.out.elements();
+        let leaves_start = |r: &Range<usize>| {
+            let first = elements.get(r.start);
+            first.is_some_and(|el| *el == PathEl::MoveTo(head.start))
+        };
+        let reaches_start = |r: &Range<usize>| {
+            let last = r.end.checked_sub(1).and_then(|i| elements.get(i));
+            last.and_then(|el| el.end_point())
+                .is_some_and(|p| (p - head.start).hypot() <= SEAM_RELATIVE_TOLERANCE * scale)
+        };
+        let (Some(head_dash), Some(tail_dash)) = (
+            subpath_ranges(elements, head.first, head.end)
+                .filter(leaves_start)
+                .last(),
+            subpath_ranges(elements, tail, elements.len()).find(reaches_start),
+        ) else {
+            return;
+        };
+        // Everything from the head's opening dash on: that dash, the runs
+        // between, and the last run's output.
+        let (Some(between), Some(opening), Some(after)) = (
+            elements.get(head_dash.end..tail_dash.end),
+            elements.get(head_dash.start + 1..head_dash.end),
+            elements.get(tail_dash.end..),
+        ) else {
+            return;
+        };
+        let spliced: Vec<PathEl> = between
+            .iter()
+            .chain(opening)
+            .chain(after)
+            .copied()
+            .collect();
+        self.out.truncate(head_dash.start);
+        self.out.extend(spliced);
     }
 
     /// Emits the gathered run, dashed from its offset or solid past the caps,
@@ -1234,6 +1380,11 @@ impl DashLowering {
         if self.run.elements().is_empty() {
             return;
         }
+        let first = self.out.elements().len();
+        let start = match self.run.elements().first() {
+            Some(PathEl::MoveTo(p)) => *p,
+            _ => Point::ZERO,
+        };
         if close {
             self.run.close_path();
         }
@@ -1248,9 +1399,29 @@ impl DashLowering {
             self.out
                 .extend(kurbo::dash(self.run.iter(), offset, &self.pattern));
         }
+        if std::mem::take(&mut self.run_is_head) {
+            let end = self.out.elements().len();
+            self.head = Some(Head { first, end, start });
+        }
         self.run.truncate(0);
         self.over_budget = false;
     }
+}
+
+/// The index ranges of the subpaths of `elements[first..end]`, each from a
+/// `MoveTo` up to the next one or `end`.
+fn subpath_ranges(
+    elements: &[PathEl],
+    first: usize,
+    end: usize,
+) -> impl Iterator<Item = Range<usize>> + '_ {
+    let starts = (first..end).filter(move |&i| matches!(elements.get(i), Some(PathEl::MoveTo(_))));
+    starts.map(move |start| {
+        let next = (start + 1..end)
+            .find(|&i| matches!(elements.get(i), Some(PathEl::MoveTo(_))))
+            .unwrap_or(end);
+        start..next
+    })
 }
 
 /// The elements of `shape`, its corner arcs approximated at
@@ -1749,6 +1920,75 @@ mod tests {
         assert!((extent(&square) - (100.0 + 4.0 * SQRT_2)).abs() < 1e-9);
     }
 
+    /// The farthest any outline point of a stroke of the polyline `points`
+    /// stands from the polyline, in half-widths, expanded by kurbo at
+    /// `tolerance`.
+    fn outline_reach(points: &[Point], stroke: &Stroke, tolerance: f64) -> f64 {
+        let mut path = BezPath::new();
+        path.move_to(points[0]);
+        for &p in &points[1..] {
+            path.line_to(p);
+        }
+        let outline = kurbo::stroke(path.iter(), stroke, &StrokeOpts::default(), tolerance);
+        let half = 0.5 * stroke.width;
+        let distance = |p: Point| {
+            points
+                .windows(2)
+                .map(|pair| {
+                    let line = kurbo::Line::new(pair[0], pair[1]);
+                    line.nearest(p, 0.0).distance_sq.sqrt()
+                })
+                .fold(f64::INFINITY, f64::min)
+        };
+        outline
+            .elements()
+            .iter()
+            .filter_map(|el| el.end_point())
+            .map(|p| distance(p) / half)
+            .fold(0.0, f64::max)
+    }
+
+    /// No mitred tip kurbo draws, at the largest finite limit, stands past
+    /// [`MITER_REACH_CEILING`] half-widths from its centerline. The sweep
+    /// turns a line back on itself by every power-of-two angle down to the
+    /// smallest subnormal, and two between each, either way, at tangent
+    /// lengths from a thousandth to a million and widths from a thousandth to
+    /// a thousand; the sharpest turn it mitres comes within a factor of 4 of
+    /// the ceiling, so the bound is neither violated nor loose.
+    #[test]
+    fn a_mitred_tip_never_stands_past_the_reach_ceiling() {
+        let mut sharpest: f64 = 0.0;
+        for width in [1e-3, 1.0, 1e3] {
+            let stroke = Stroke::new(width)
+                .with_join(Join::Miter)
+                .with_miter_limit(f64::MAX)
+                .with_caps(Cap::Butt);
+            for incoming in [1e-3, 1.0, 1e6] {
+                for outgoing in [1e-3, 1.0, 1e6] {
+                    let turns = (0..1080).flat_map(|k| [(k, 1.0), (k, 1.4143), (k, 1.9999)]);
+                    for (k, mantissa) in turns {
+                        let lean = mantissa * 2_f64.powi(-k);
+                        for side in [1.0, -1.0] {
+                            let vertex = Point::new(incoming, 0.0);
+                            let turn = vertex + outgoing * Vec2::new(-1.0, side * lean);
+                            let points = [Point::ZERO, vertex, turn];
+                            let reach = outline_reach(&points, &stroke, 1e-3 * width);
+                            assert!(
+                                reach <= MITER_REACH_CEILING,
+                                "a turn of 2^-{k} at width {width}: {reach:e} half-widths"
+                            );
+                            sharpest = sharpest.max(reach);
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            sharpest * 4.0 >= MITER_REACH_CEILING,
+            "sharpest {sharpest:e}"
+        );
+    }
+
     /// Every style over every centerline, thin and as wide as the geometry
     /// itself, expands to a bounded outline in bounded time and generates its
     /// strips in bounded time, at magnitudes up to 1e300.
@@ -2099,6 +2339,120 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// A miter limit far past [`MITER_REACH_CEILING`] — `1e300`, `f64::MAX` —
+    /// leaves the reach, the stroke's bounds and its device extent finite,
+    /// and the stroke draws what `vello_common`'s stroker, culling nothing,
+    /// draws: an on-screen curve, whose outline needs the expansion tolerance
+    /// the reach floors, and a hairpin turned just off screen whose miter tip
+    /// reaches across the viewport, which the cull must keep.
+    #[test]
+    fn a_huge_finite_miter_limit_keeps_the_reach_finite_and_draws_as_the_stroker() {
+        let mut path = BezPath::new();
+        path.move_to((8.0, 40.0));
+        path.curve_to((8.0, -10.0), (60.0, 70.0), (56.0, 14.0));
+        path.quad_to((40.0, 60.0), (20.0, 20.0));
+        path.move_to((-2000.0, 30.0));
+        path.line_to((-200.0, 32.0));
+        path.line_to((-2000.0, 34.0));
+        let region = stroke_region();
+        for limit in [1e300, f64::MAX] {
+            let stroke = Stroke::new(4.0)
+                .with_join(Join::Miter)
+                .with_miter_limit(limit)
+                .with_caps(Cap::Butt);
+            assert_eq!(stroke_reach(&stroke), 2.0 * MITER_REACH_CEILING);
+            let bounds = stroke_bounds(path.iter(), &stroke);
+            assert!(
+                bounds.is_some_and(|b| b.is_finite()),
+                "{limit:e}: {bounds:?}"
+            );
+            assert!(stroke_device_extent(path.iter(), &stroke, Affine::IDENTITY).is_finite());
+            assert!(!fits_the_stroker(
+                path.iter(),
+                &stroke,
+                Affine::IDENTITY,
+                region
+            ));
+
+            let stroker = coverage(&strips_of(|generator, storage| {
+                generator.generate_stroked_path(
+                    path.iter(),
+                    &stroke,
+                    Affine::IDENTITY,
+                    None,
+                    storage,
+                    None,
+                );
+            }));
+            let width = STROKE_VIEWPORT.0 as usize;
+            assert!(
+                (0..width).all(|x| stroker[32 * width + x] > 0),
+                "{limit:e}: the miter tip crosses the viewport"
+            );
+            let culled = stroke_coverage(&path, &stroke);
+            let pixel = stroker
+                .iter()
+                .zip(&culled)
+                .map(|(a, b)| a.abs_diff(*b))
+                .max()
+                .unwrap_or(0);
+            let area = stroker
+                .iter()
+                .zip(&culled)
+                .map(|(a, b)| f64::from(a.abs_diff(*b)))
+                .sum::<f64>()
+                / 255.0;
+            assert!(
+                pixel <= PARITY_PIXEL_TOLERANCE && area <= PARITY_AREA_TOLERANCE,
+                "{limit:e}: {pixel}/255, {area:.3} px"
+            );
+        }
+    }
+
+    /// A reach past `f64`'s range — a width near `f64::MAX`, mitred at the
+    /// largest limit — gives the stroker up without measuring an infinite
+    /// box, and the stroke, solid and dashed, generates in bounded time
+    /// without a panic.
+    #[test]
+    fn a_reach_past_the_f64_range_is_drawn_in_bounded_time() {
+        let region = stroke_region();
+        let stroke = Stroke::new(0.5 * f64::MAX)
+            .with_join(Join::Miter)
+            .with_miter_limit(f64::MAX)
+            .with_caps(Cap::Butt);
+        assert!(!stroke_reach(&stroke).is_finite());
+        for (_, path) in stroke_centerlines(1e20) {
+            assert!(!fits_the_stroker(
+                path.iter(),
+                &stroke,
+                Affine::IDENTITY,
+                region
+            ));
+            let started = Instant::now();
+            strips_of(|generator, storage| {
+                generate_stroke(
+                    generator,
+                    path.iter(),
+                    &stroke,
+                    Affine::IDENTITY,
+                    storage,
+                    None,
+                );
+                generate_dashed_stroke(
+                    generator,
+                    &path,
+                    DashPattern::new(4.0, 4.0),
+                    &stroke,
+                    Affine::IDENTITY,
+                    storage,
+                    None,
+                );
+            });
+            let elapsed = started.elapsed();
+            assert!(elapsed < STROKE_TIME_LIMIT, "took {elapsed:?}");
         }
     }
 
@@ -2539,6 +2893,122 @@ mod tests {
                 assert_eq!(el_bits(a), el_bits(e), "{a:?} vs {e:?}");
             }
         }
+    }
+
+    /// A closed rectangle from an on-screen start vertex, too large for the
+    /// whole-path lowering, whose far sides the clip skips.
+    fn seam_rectangle() -> (BezPath, Point) {
+        let (start, side) = (Point::new(16.0, 16.0), 100_000.0);
+        let mut rect = BezPath::new();
+        rect.move_to(start);
+        rect.line_to((start.x + side, start.y));
+        rect.line_to((start.x + side, start.y + side));
+        rect.line_to((start.x, start.y + side));
+        rect.close_path();
+        (rect, start)
+    }
+
+    /// The coverage of the stroke of `path` under the identity.
+    fn stroke_coverage(path: &BezPath, stroke: &Stroke) -> Vec<u8> {
+        coverage(&strips_of(|generator, storage| {
+            generate_stroke(
+                generator,
+                path.iter(),
+                stroke,
+                Affine::IDENTITY,
+                storage,
+                None,
+            );
+        }))
+    }
+
+    /// A closed dashed rectangle too large for the whole-path lowering, its
+    /// start vertex on screen and its far sides skipped, covers under every
+    /// cap and join what the whole-path lowering covers — in particular,
+    /// butt-capped and mitred with a dash running through the start vertex,
+    /// the corner there takes the miter. The rectangle's perimeter is a whole
+    /// number of periods, so each phase reaches the start in the state it
+    /// leaves it. The negative control strokes the seam left open the round
+    /// way and finds the corner notched.
+    #[test]
+    fn a_closed_dashed_subpath_with_a_skip_keeps_its_seam_join_under_any_style() {
+        let region = stroke_region();
+        let (rect, start) = seam_rectangle();
+        let width = STROKE_VIEWPORT.0 as usize;
+        let corner = |cover: &[u8]| cover[13 * width + 13];
+        let styles = [
+            (Cap::Butt, Join::Miter),
+            (Cap::Butt, Join::Bevel),
+            (Cap::Square, Join::Miter),
+            (Cap::Round, Join::Miter),
+            (Cap::Butt, Join::Round),
+        ];
+        for (cap, join) in styles {
+            let stroke = Stroke::new(8.0)
+                .with_caps(cap)
+                .with_join(join)
+                .with_miter_limit(4.0);
+            assert!(!fits_the_stroker(
+                rect.iter(),
+                &stroke,
+                Affine::IDENTITY,
+                region
+            ));
+            for phase in [0.0, 4.0, 8.0, 12.0] {
+                let dash = DashPattern::new(8.0, 8.0).with_phase(phase);
+                let case = format!("{cap:?} caps, {join:?} joins, phase {phase}");
+                let whole = stroke_coverage(&dash_path(&rect, dash), &stroke);
+                let bounded = stroke_coverage(
+                    &dash_within(&rect, dash, &stroke, Affine::IDENTITY, region),
+                    &stroke,
+                );
+                let pixel = whole
+                    .iter()
+                    .zip(&bounded)
+                    .map(|(a, b)| a.abs_diff(*b))
+                    .max()
+                    .unwrap_or(0);
+                assert!(pixel <= PARITY_PIXEL_TOLERANCE, "{case}: {pixel}/255 apart");
+                if phase == 4.0 && cap == Cap::Butt && join == Join::Miter {
+                    assert_eq!(corner(&whole), 255, "{case}: the whole lowering mitres");
+                    assert_eq!(corner(&bounded), 255, "{case}: the seam mitres");
+                    let open =
+                        dash_visible_stretch(&rect, dash, &round(8.0), Affine::IDENTITY, region);
+                    let ends = subpath_ends(&open);
+                    assert!(ends.iter().any(|&(a, _)| a == start), "{ends:?}");
+                    assert!(ends.iter().any(|&(_, b)| b == start), "{ends:?}");
+                    assert_eq!(corner(&stroke_coverage(&open, &stroke)), 0, "{case}: notch");
+                }
+            }
+        }
+    }
+
+    /// Under round caps and joins the seam of a closed subpath with a skip
+    /// stays open, one dash ending and one starting at the start vertex: the
+    /// two round caps cover what the join would, and the lowering of every
+    /// round stroke is unchanged by the splice other styles take.
+    #[test]
+    fn a_round_stroke_keeps_the_open_seam() {
+        let region = stroke_region();
+        let (rect, start) = seam_rectangle();
+        let dash = DashPattern::new(8.0, 8.0).with_phase(4.0);
+        let stroke = round(8.0);
+        let ends = subpath_ends(&dash_within(&rect, dash, &stroke, Affine::IDENTITY, region));
+        assert!(
+            ends.iter().any(|&(a, b)| a == start && b != start),
+            "{ends:?}"
+        );
+        assert!(
+            ends.iter().any(|&(a, b)| b == start && a != start),
+            "{ends:?}"
+        );
+        let mitred = Stroke::new(8.0).with_caps(Cap::Butt).with_join(Join::Miter);
+        let spliced = dash_within(&rect, dash, &mitred, Affine::IDENTITY, region);
+        let ends = subpath_ends(&spliced);
+        assert!(
+            !ends.iter().any(|&(a, b)| a == start || b == start),
+            "{ends:?}"
+        );
     }
 
     /// A pattern whose device period is under [`MIN_DEVICE_DASH_PERIOD`] —

@@ -83,7 +83,10 @@ use kurbo::{Affine, BezPath, Cap, Join, PathEl, Rect, RoundedRectRadii, Shape, S
 use peniko::{Brush, Color, Fill, ImageData};
 
 use frust_gpu::{SceneTextureId, TierCaps};
-use frust_scene::{Command, CornerRadii, DashPattern, GlyphRun, PathStyle, Scene};
+use frust_scene::{
+    Command, CornerRadii, DashPattern, GlyphRun, PathStyle, Scene, StrokeCap, StrokeJoin,
+    StrokeStyle,
+};
 
 use glifo::{GlyphAtlas, GlyphCacheKey, GlyphPrepCache, PendingClearRect};
 
@@ -106,7 +109,9 @@ use crate::compile::paint::{LutRequest, encode_brush, encode_image_brush, encode
 use crate::compile::parallel::{Claim, Geometry, Merge, Pool};
 use crate::config;
 use crate::error::EngineError;
-use crate::filters::{Backdrop, MAX_BACKDROPS_PER_FRAME, backdrop_region, backdrop_sigma};
+use crate::filters::{
+    Backdrop, backdrop_region, backdrop_sigma, clamp_backdrop_cap, max_backdrops_per_frame,
+};
 use crate::text::atlas_policy::Synthesis;
 use crate::text::hvgl::HvglOutlines;
 use crate::text::hvgl_atlas::{self, CollectedFaces, Measured};
@@ -1277,13 +1282,41 @@ impl SceneCompiler {
     /// composed transform is non-finite and so maps geometry to coordinates no
     /// `u16` pixel can hold; and [`EngineError::InvalidGeometry`] when a
     /// command the compiler lowers carries non-finite geometry of its own (see
-    /// [`check_geometry`]). All three are refused before any strip is
-    /// generated — the frame path returns errors and never panics.
+    /// [`check_geometry`]); and [`EngineError::TooManyBackdrops`] when the
+    /// scene records more `Command::BackdropBlur`s than the process-wide cap
+    /// ([`max_backdrops_per_frame`]), read once here. All four are refused
+    /// before any strip is generated — the frame path returns errors and never
+    /// panics.
     pub fn compile(
         &mut self,
         scene: &Scene,
         root: Affine,
         size: (u16, u16),
+    ) -> Result<CompiledFrame, EngineError> {
+        self.compile_with_backdrop_cap(scene, root, size, max_backdrops_per_frame())
+    }
+
+    /// [`Self::compile`] against an explicit per-frame backdrop cap rather than
+    /// the process-wide one, held to the same `1..=`
+    /// [`BACKDROP_CAP_CEILING`](crate::filters::BACKDROP_CAP_CEILING) range
+    /// [`set_max_backdrops_per_frame`](crate::filters::set_max_backdrops_per_frame)
+    /// applies.
+    ///
+    /// The seam a caller that must not observe another thread's change to the
+    /// process-wide cap compiles through (a test asserting the bound at a
+    /// given cap, beside others compiling concurrently); an app sets the cap
+    /// once and calls [`Self::compile`].
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::compile`]'s, with [`EngineError::TooManyBackdrops`]
+    /// judged against `backdrop_cap` (clamped) and naming it as its `max`.
+    pub fn compile_with_backdrop_cap(
+        &mut self,
+        scene: &Scene,
+        root: Affine,
+        size: (u16, u16),
+        backdrop_cap: usize,
     ) -> Result<CompiledFrame, EngineError> {
         // The compiler's half of the encode's CPU accounting; the renderer
         // laps the rest of the call around it (see [`CompileSpans`]). Free
@@ -1317,12 +1350,15 @@ impl SceneCompiler {
             check_geometry(command)?;
         }
         // Counted over the commands the scene records, not over the ones that
-        // end up drawing: the bound is a statement about the display list a
-        // widget tree produced, refused whole before a strip is generated.
-        if backdrops > MAX_BACKDROPS_PER_FRAME {
+        // end up drawing: the cap is a statement about the display list a
+        // widget tree produced, refused whole before a strip is generated —
+        // whatever cap the app chose, a backdrop dropped later (inside an
+        // isolated layer, off the target) still counts against it.
+        let cap = clamp_backdrop_cap(backdrop_cap);
+        if backdrops > cap {
             return Err(EngineError::TooManyBackdrops {
                 recorded: backdrops,
-                max: MAX_BACKDROPS_PER_FRAME,
+                max: cap,
             });
         }
 
@@ -3216,23 +3252,26 @@ fn radii_are_finite(radii: CornerRadii) -> bool {
 /// lowers, whose numbers this function never sees.
 ///
 /// An effective dash pattern is checked further, past its own fields: see
-/// [`dash_cycle_is_normalizable`].
+/// [`dash_cycle_is_normalizable`]. A stroke's miter limit must be finite and at
+/// least 1 whatever its join (see [`StrokeStyle`]): below 1 a miter is not a
+/// length the stroker can measure a join against, and one rule for every
+/// recorded limit keeps the contract independent of which join reads it.
 fn style_is_finite(style: &PathStyle) -> bool {
-    match style {
-        PathStyle::Fill => true,
-        PathStyle::Stroke { width, dash } => {
-            let dash_finite = match dash {
-                Some(dash) => {
-                    dash.on.is_finite()
-                        && dash.off.is_finite()
-                        && dash.phase.is_finite()
-                        && dash_cycle_is_normalizable(dash)
-                }
-                None => true,
-            };
-            width.is_finite() && dash_finite
+    let Some((width, dash, stroke)) = style.stroke() else {
+        // A fill carries no numbers of its own.
+        return true;
+    };
+    let dash_finite = match dash {
+        Some(dash) => {
+            dash.on.is_finite()
+                && dash.off.is_finite()
+                && dash.phase.is_finite()
+                && dash_cycle_is_normalizable(&dash)
         }
-    }
+        None => true,
+    };
+    let miter_limit_valid = stroke.miter_limit.is_finite() && stroke.miter_limit >= 1.0;
+    width.is_finite() && dash_finite && miter_limit_valid
 }
 
 /// Whether a dash pattern's derived cycle survives kurbo's own normalization
@@ -3366,12 +3405,29 @@ fn is_pixel_aligned(rect: Rect) -> bool {
         .all(|v| v.is_finite() && v.fract() == 0.0)
 }
 
-/// A stroke of `width` with round caps and joins — the only stroke style the
-/// display list can express.
-fn round_stroke(width: f64) -> Stroke {
+/// A stroke of `width` drawn with `style`'s caps, joins and miter limit.
+///
+/// [`StrokeStyle::ROUND`] builds exactly the stroke every round-capped command
+/// has always lowered to — round caps and joins under kurbo's own default
+/// miter limit of 4 — so a [`PathStyle::Stroke`] and a [`Command::Line`] lower
+/// byte-identically through it. The limit is applied as recorded: by the time
+/// a command reaches here, [`style_is_finite`] has refused one that is not
+/// finite or is below 1.
+fn kurbo_stroke(width: f64, style: StrokeStyle) -> Stroke {
+    let cap = match style.cap {
+        StrokeCap::Butt => Cap::Butt,
+        StrokeCap::Round => Cap::Round,
+        StrokeCap::Square => Cap::Square,
+    };
+    let join = match style.join {
+        StrokeJoin::Miter => Join::Miter,
+        StrokeJoin::Round => Join::Round,
+        StrokeJoin::Bevel => Join::Bevel,
+    };
     Stroke::new(width)
-        .with_caps(Cap::Round)
-        .with_join(Join::Round)
+        .with_caps(cap)
+        .with_join(join)
+        .with_miter_limit(style.miter_limit)
 }
 
 /// `path` expanded into the sub-paths `dash` breaks it into.
@@ -3457,6 +3513,8 @@ fn rounded_rect_radii(radii: CornerRadii) -> RoundedRectRadii {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use frust_scene::{FillRule, SceneBuilder};
 
     #[test]
     fn the_hvgl_unavailable_warning_fires_once_and_names_no_text() {
@@ -3673,5 +3731,241 @@ mod tests {
             Affine::IDENTITY,
             frame_extent
         ));
+    }
+
+    /// A five-pointed star drawn in one stroke: its centre pentagon is wound
+    /// twice, so the two fill rules disagree exactly there.
+    fn pentagram() -> BezPath {
+        let mut path = BezPath::new();
+        for step in 0..5 {
+            let angle =
+                std::f64::consts::FRAC_PI_2 + f64::from(step * 2) * std::f64::consts::TAU / 5.0;
+            let point = (32.0 + 26.0 * angle.cos(), 32.0 - 26.0 * angle.sin());
+            if step == 0 {
+                path.move_to(point);
+            } else {
+                path.line_to(point);
+            }
+        }
+        path.close_path();
+        path
+    }
+
+    /// An open polyline with a sharp interior vertex, where caps and joins
+    /// both show.
+    fn chevron() -> BezPath {
+        let mut path = BezPath::new();
+        path.move_to((8.0, 12.0));
+        path.line_to((32.0, 50.0));
+        path.line_to((56.0, 12.0));
+        path
+    }
+
+    /// `path` recorded with `style`, through the builder method that records
+    /// exactly that variant.
+    fn path_scene(path: &BezPath, style: PathStyle) -> Scene {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let (path, brush) = (path.clone(), Brush::Solid(Color::BLACK));
+        match style {
+            PathStyle::Fill => builder.fill_path(path, brush),
+            PathStyle::FillEvenOdd => builder.fill_path_with_rule(path, FillRule::EvenOdd, brush),
+            PathStyle::Stroke { width, dash: None } => builder.stroke_path(path, width, brush),
+            PathStyle::Stroke {
+                width,
+                dash: Some(dash),
+            } => builder.stroke_path_dashed(path, width, dash, brush),
+            PathStyle::StrokeStyled { width, dash, style } => {
+                builder.stroke_path_styled(path, width, dash, style, brush);
+            }
+        }
+        // Compared as text: a NaN miter limit is never equal to itself.
+        assert!(
+            matches!(&scene.commands()[0], Command::Path { style: got, .. }
+                if format!("{got:?}") == format!("{style:?}")),
+            "recorded {style:?}"
+        );
+        scene
+    }
+
+    /// The strips and alphas `scene` compiles to on a 64-pixel target with
+    /// `workers` strip-generation threads.
+    fn strips_with(
+        scene: &Scene,
+        workers: usize,
+    ) -> Result<(Vec<vello_common::strip::Strip>, Vec<u8>), EngineError> {
+        let mut compiler = SceneCompiler::new(64, 64);
+        compiler.set_parallel_workers(workers);
+        compiler.set_parallel_min_cost(0);
+        let frame = compiler.compile(scene, Affine::IDENTITY, (64, 64))?;
+        Ok((frame.strips.strips, frame.strips.alphas))
+    }
+
+    fn strips(scene: &Scene) -> (Vec<vello_common::strip::Strip>, Vec<u8>) {
+        strips_with(scene, 1).expect("a finite scene compiles")
+    }
+
+    #[test]
+    fn a_miter_limit_that_is_not_finite_or_is_below_one_is_refused() {
+        for limit in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.999, 0.0, -2.0] {
+            for join in [StrokeJoin::Miter, StrokeJoin::Round, StrokeJoin::Bevel] {
+                let style = StrokeStyle::new(StrokeCap::Butt, join).with_miter_limit(limit);
+                let scene = path_scene(
+                    &chevron(),
+                    PathStyle::StrokeStyled {
+                        width: 3.0,
+                        dash: None,
+                        style,
+                    },
+                );
+                assert!(
+                    matches!(strips_with(&scene, 1), Err(EngineError::InvalidGeometry)),
+                    "miter limit {limit} under {join:?} is refused"
+                );
+            }
+        }
+        let at_one = StrokeStyle::new(StrokeCap::Butt, StrokeJoin::Miter).with_miter_limit(1.0);
+        let scene = path_scene(
+            &chevron(),
+            PathStyle::StrokeStyled {
+                width: 3.0,
+                dash: None,
+                style: at_one,
+            },
+        );
+        assert!(
+            strips_with(&scene, 1).is_ok(),
+            "a limit of exactly 1 lowers"
+        );
+    }
+
+    /// A large but finite miter limit is not refused: `1e300` and `f64::MAX`
+    /// lower, solid and dashed, to the same strips — the cull caps the reach
+    /// either limit implies at the same ceiling — on one worker and on three.
+    #[test]
+    fn a_huge_finite_miter_limit_lowers() {
+        for dash in [None, Some(DashPattern::new(5.0, 3.0).with_phase(1.5))] {
+            let lowered = [1e300, f64::MAX].map(|limit| {
+                let style =
+                    StrokeStyle::new(StrokeCap::Butt, StrokeJoin::Miter).with_miter_limit(limit);
+                let scene = path_scene(
+                    &chevron(),
+                    PathStyle::StrokeStyled {
+                        width: 3.0,
+                        dash,
+                        style,
+                    },
+                );
+                let one = strips_with(&scene, 1).expect("a huge finite limit lowers");
+                let three = strips_with(&scene, 3).expect("a huge finite limit lowers");
+                assert_eq!(one, three, "limit {limit:e}, dash {dash:?}");
+                one
+            });
+            assert!(!lowered[0].0.is_empty(), "the stroke draws");
+            assert_eq!(lowered[0], lowered[1], "dash {dash:?}");
+        }
+    }
+
+    #[test]
+    fn a_styled_stroke_under_the_round_style_lowers_byte_identically_to_a_stroke() {
+        for dash in [None, Some(DashPattern::new(5.0, 3.0).with_phase(1.5))] {
+            let plain = path_scene(&chevron(), PathStyle::Stroke { width: 4.0, dash });
+            let styled = path_scene(
+                &chevron(),
+                PathStyle::StrokeStyled {
+                    width: 4.0,
+                    dash,
+                    style: StrokeStyle::ROUND,
+                },
+            );
+            let expected = strips(&plain);
+            assert!(!expected.0.is_empty(), "the stroke draws");
+            assert_eq!(strips(&styled), expected, "dash {dash:?}");
+        }
+    }
+
+    #[test]
+    fn caps_and_joins_reach_the_stroker() {
+        let round = strips(&path_scene(
+            &chevron(),
+            PathStyle::Stroke {
+                width: 6.0,
+                dash: None,
+            },
+        ));
+        let styled = |cap, join| {
+            strips(&path_scene(
+                &chevron(),
+                PathStyle::StrokeStyled {
+                    width: 6.0,
+                    dash: None,
+                    style: StrokeStyle::new(cap, join).with_miter_limit(10.0),
+                },
+            ))
+        };
+        let butt_miter = styled(StrokeCap::Butt, StrokeJoin::Miter);
+        let square_bevel = styled(StrokeCap::Square, StrokeJoin::Bevel);
+        assert_ne!(butt_miter, round);
+        assert_ne!(square_bevel, round);
+        assert_ne!(butt_miter, square_bevel);
+    }
+
+    #[test]
+    fn even_odd_and_nonzero_fills_differ_on_a_self_overlapping_path() {
+        let nonzero = strips(&path_scene(&pentagram(), PathStyle::Fill));
+        let even_odd = strips(&path_scene(&pentagram(), PathStyle::FillEvenOdd));
+        assert_ne!(nonzero, even_odd);
+
+        // On a path that never overlaps itself the rules agree byte for byte.
+        let mut triangle = BezPath::new();
+        triangle.move_to((4.0, 4.0));
+        triangle.line_to((60.0, 10.0));
+        triangle.line_to((20.0, 58.0));
+        triangle.close_path();
+        assert_eq!(
+            strips(&path_scene(&triangle, PathStyle::Fill)),
+            strips(&path_scene(&triangle, PathStyle::FillEvenOdd))
+        );
+    }
+
+    #[test]
+    fn the_new_path_styles_compile_identically_with_helpers() {
+        let mut scene = Scene::new();
+        {
+            let mut builder = SceneBuilder::new(&mut scene);
+            let brush = Brush::Solid(Color::BLACK);
+            let miter =
+                StrokeStyle::new(StrokeCap::Square, StrokeJoin::Miter).with_miter_limit(3.0);
+            for step in 0..12 {
+                builder.push_transform(Affine::translate((
+                    f64::from(step % 4) * 3.0,
+                    f64::from(step),
+                )));
+                builder.fill_path_with_rule(pentagram(), FillRule::EvenOdd, brush.clone());
+                builder.stroke_path_styled(
+                    chevron(),
+                    2.0 + f64::from(step),
+                    None,
+                    miter,
+                    brush.clone(),
+                );
+                builder.stroke_path_styled(
+                    chevron(),
+                    3.0,
+                    Some(DashPattern::new(4.0, 2.0)),
+                    StrokeStyle::new(StrokeCap::Butt, StrokeJoin::Bevel),
+                    brush.clone(),
+                );
+                builder.pop_transform();
+            }
+        }
+        let expected = strips(&scene);
+        for workers in [2, 3] {
+            assert_eq!(
+                strips_with(&scene, workers).expect("compiles"),
+                expected,
+                "{workers} workers"
+            );
+        }
     }
 }

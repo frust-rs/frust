@@ -244,6 +244,13 @@ pub enum PageTransition {
     /// [`preset_enter_exit`]'s fallback arm, matching [`make_driver`]'s
     /// unthemed `ThemeDefault` fallback).
     ///
+    /// **Progress the function receives.** Under [`Timing::Duration`] it is
+    /// already eased by the spec's curve, so a function that applies its own
+    /// per-layer easing pairs it with [`Curve::Linear`] to avoid easing twice.
+    /// Under [`Timing::Spring`] it is the spring position and can transiently
+    /// overshoot `1.0`. During an interactive edge-swipe pop it is the raw
+    /// drag progress ([`TransitionDriver::Held`]).
+    ///
     /// **Reduce-motion.** [`resolve_spec`]'s collapse to
     /// [`PageTransition::ReducedCrossfade`] applies to `Custom` like every
     /// other preset, on both paths. A transition staged **programmatically**

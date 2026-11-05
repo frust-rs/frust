@@ -155,24 +155,25 @@ pub use frust_widgets::{
     DecelerationRate, DividerView, DividerWidget, DragCoordinator, DragHighlight, DragKind,
     DragPhase, DragPolicy, DragSession, DragSourceId, DragState, DragStateChange, DragSubscription,
     DragTargetId, DragTargetView, DragTargetWidget, DraggableView, DraggableWidget, EdgeInsets,
-    FlexChild, FlexView, GHOST_OPACITY, GestureDetector, GestureDetectorView, HIGHLIGHT_FALLBACK,
-    HeroView, Icon, IconButton, IconButtonView, IconData, IconElement, IconPaint, IconShape,
-    IconSource, IconView, IconWidget, Image, ImageError, ImageFit, ImageSource, ImageView,
-    IndexedStack, IndexedStackView, KeepAliveHandle, KeepAliveView, ListView, ListViewWidget,
-    MAX_FLING_VELOCITY, MIN_FLING_VELOCITY, MainAxisAlignment, NavigatorController, NavigatorId,
-    NavigatorView, NeverScrollable, OverlayAlign, OverlayPlacement, OverlayPortalView, OverlaySide,
-    OverscrollEffect, Padding, PaddingView, PageBuilder, PageController, PageSnap, PageTransition,
-    PageView, PageVisibility, PopResult, PushOptions, Radio, RadioView, RadioWidget,
-    ReorderableListView, RepaintBoundaryView, ResultCallback, Row, RubberBand, SafeAreaView,
-    ScaffoldView, ScrollAxis, ScrollController, ScrollInfo, ScrollMetrics, ScrollPhysics,
-    ScrollSubscription, ScrollView, ScrollbarShow, ScrollbarStyle, ShortcutsView, Simulation,
-    SizedBox, SizedBoxView, Slider, SliderView, SliverBoxView, SliverFillRemainingView,
-    SliverFixedExtentListView, SliverGridDelegate, SliverGridView, SliverListView,
-    SliverPaddingView, SliverPersistentHeaderDelegate, SliverPersistentHeaderView, SourceFeedback,
-    SpringDescription, Stack, StackView, StrokedIconSource, TextInput, TextInputView, TextView,
-    Timing, Tolerance, TransitionSpec, TransitionState, VisibilityCallback, WindowDragRegionView,
-    auto_scroll_zone, button, checkbox, colored_box, column, container, custom_scroll_view,
-    divider, drag_target, draggable, flexible, hero, icon, icon_button, indexed_stack, inflexible,
+    FlexChild, FlexView, GHOST_OPACITY, GestureDetector, GestureDetectorView, GlassSurfaceView,
+    GlassSurfaceWidget, HIGHLIGHT_FALLBACK, HeroView, Icon, IconButton, IconButtonView, IconData,
+    IconElement, IconPaint, IconShape, IconSource, IconView, IconWidget, Image, ImageError,
+    ImageFit, ImageSource, ImageView, IndexedStack, IndexedStackView, KeepAliveHandle,
+    KeepAliveView, ListView, ListViewWidget, MAX_FLING_VELOCITY, MIN_FLING_VELOCITY,
+    MainAxisAlignment, NavigatorController, NavigatorId, NavigatorView, NeverScrollable,
+    OverlayAlign, OverlayPlacement, OverlayPortalView, OverlaySide, OverscrollEffect, Padding,
+    PaddingView, PageBuilder, PageController, PageSnap, PageTransition, PageView, PageVisibility,
+    PopResult, PushOptions, Radio, RadioView, RadioWidget, ReorderableListView,
+    RepaintBoundaryView, ResultCallback, Row, RubberBand, SafeAreaView, ScaffoldView, ScrollAxis,
+    ScrollController, ScrollInfo, ScrollMetrics, ScrollPhysics, ScrollSubscription, ScrollView,
+    ScrollbarShow, ScrollbarStyle, ShortcutsView, Simulation, SizedBox, SizedBoxView, Slider,
+    SliderView, SliverBoxView, SliverFillRemainingView, SliverFixedExtentListView,
+    SliverGridDelegate, SliverGridView, SliverListView, SliverPaddingView,
+    SliverPersistentHeaderDelegate, SliverPersistentHeaderView, SourceFeedback, SpringDescription,
+    Stack, StackView, StrokedIconSource, TextInput, TextInputView, TextView, Timing, Tolerance,
+    TransitionSpec, TransitionState, VisibilityCallback, WindowDragRegionView, auto_scroll_zone,
+    button, checkbox, colored_box, column, container, custom_scroll_view, divider, drag_target,
+    draggable, flexible, glass_surface, hero, icon, icon_button, indexed_stack, inflexible,
     keep_alive, keyed, list_view, overlay_portal, page_view, radio, reorderable_list,
     repaint_boundary, row, safe_area, scaffold, scroll_view, shortcuts, slider, sliver_box,
     sliver_fill_remaining, sliver_fixed_extent_list, sliver_fixed_extent_list_keyed, sliver_grid,
@@ -1040,11 +1041,14 @@ pub mod authoring {
     /// [`authoring::CornerRadii`](super::CornerRadii)/[`authoring::DashPattern`](super::DashPattern)
     /// re-exports name — listed here too because they are named by
     /// `Command::RoundedRect`/`PathStyle`, which a widget recording commands
-    /// directly has to match on.
+    /// directly has to match on. `FillRule` and `StrokeStyle` (with its
+    /// `StrokeCap`/`StrokeJoin`) are what `PaintScene::fill_path_with_rule`
+    /// and `PaintScene::stroke_path_styled` take, and what `PathStyle`'s
+    /// even-odd and styled-stroke variants carry.
     pub mod scene {
         pub use frust_scene::{
-            Command, CornerRadii, DashPattern, FontHandle, Glyph, GlyphRun, PathStyle, Scene,
-            SceneBuilder, ShaderProgram, arc_path,
+            Command, CornerRadii, DashPattern, FillRule, FontHandle, Glyph, GlyphRun, PathStyle,
+            Scene, SceneBuilder, ShaderProgram, StrokeCap, StrokeJoin, StrokeStyle, arc_path,
         };
     }
 }
@@ -1693,9 +1697,9 @@ pub use route_state::RouteObserver;
 /// app (or a design-system plugin) authors a theme against `frust::*` alone.
 pub use frust_theme::{
     Brightness, ColorScheme, CosmeticLoopRate, DesignLanguage, EasingSet, Elevation,
-    ElevationLevel, FontFace, GlassFill, GlassMaterial, GlassScale, MotionDurations, MotionExtras,
-    MotionScheme, MotionSpring, NativeTypefaces, ShadowSpec, ShapeScale, StatusColors,
-    StatusPalette, SurfaceRole, Theme, ThemeBuilder, ThemeExtensions, TypeScale,
+    ElevationLevel, FontFace, GlassFill, GlassMaterial, GlassScale, GlassTier, MotionDurations,
+    MotionExtras, MotionScheme, MotionSpring, NativeTypefaces, ShadowSpec, ShapeScale,
+    StatusColors, StatusPalette, SurfaceRole, Theme, ThemeBuilder, ThemeExtensions, TypeScale,
 };
 
 /// The color type every [`ColorScheme`] role is expressed in
@@ -1866,6 +1870,24 @@ pub use frust_core::anim::{
     MIN_ANIMATION_TIME_SCALE, Spring, SpringDesc, Tween, animation_time_scale,
     set_animation_time_scale,
 };
+
+/// The per-frame backdrop-blur cap: how many backdrop blurs (a
+/// [`glass_surface`](crate::glass_surface), or any `PaintScene::backdrop_blur`)
+/// one frame is drawn with. Four by default; [`set_max_backdrops_per_frame`]
+/// sets it process-wide, clamped to `1..=16`, and answers the cap applied.
+///
+/// Call it from `app!` setup or at runtime — it takes effect on the next
+/// frame. Every backdrop costs the frame a surface cut, a region copy and a
+/// blur pass sequence, so raise the cap only as far as a screen needs. Past
+/// the cap the frame is refused, never rendered with backdrops missing.
+///
+/// ```no_run
+/// use frust::{max_backdrops_per_frame, set_max_backdrops_per_frame};
+///
+/// assert_eq!(set_max_backdrops_per_frame(8), 8);
+/// assert_eq!(max_backdrops_per_frame(), 8);
+/// ```
+pub use frust_render::{max_backdrops_per_frame, set_max_backdrops_per_frame};
 
 /// The window's shape, flat-re-exported from `frust-core::app` so app code
 /// (not just widget authors, see [`authoring::WindowMetrics`]) can recover it

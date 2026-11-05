@@ -115,6 +115,8 @@ const PHASE_CASES: &[&str] = &[
     "unit-path-fill",
     "unit-path-stroke",
     "unit-path-dashed",
+    "unit-stroke-caps-joins",
+    "unit-fill-even-odd",
     "unit-snapshot-bracket",
     "unit-snapshot-balance",
     // Paint-class — one frame per class mix, held to the CPU arm like every unit case.

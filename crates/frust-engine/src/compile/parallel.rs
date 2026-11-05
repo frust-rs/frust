@@ -57,7 +57,7 @@ use std::sync::{Mutex, OnceLock, PoisonError, TryLockError};
 use kurbo::{Affine, BezPath, PathEl, Rect, RoundedRect, Shape};
 use peniko::Fill;
 
-use frust_scene::{Command, DashPattern, PathStyle, Scene};
+use frust_scene::{Command, DashPattern, FillRule, Scene, StrokeStyle};
 
 use vello_common::clip::PathDataRef;
 use vello_common::fearless_simd::Level;
@@ -65,10 +65,13 @@ use vello_common::strip::Strip;
 use vello_common::strip_generator::{GenerationMode, StripGenerator, StripStorage};
 
 use super::blur_rrect::inflated_bounds;
-use super::cull::{generate_dashed_stroke, generate_fill, generate_stroke, rounded_rect_elements};
+use super::cull::{
+    generate_dashed_stroke, generate_fill, generate_fill_with_rule, generate_stroke,
+    rounded_rect_elements,
+};
 use super::layers::RetainedStack;
 use super::{
-    FLATTEN_TOLERANCE, check_finite, command_on_grid, fast_rect, retained_entry, round_stroke,
+    FLATTEN_TOLERANCE, check_finite, command_on_grid, fast_rect, kurbo_stroke, retained_entry,
     rounded_rect_radii,
 };
 
@@ -191,11 +194,13 @@ pub(crate) enum Geometry<'a> {
     Fill {
         /// The path in the command's own space.
         path: &'a BezPath,
+        /// The fill rule.
+        rule: Fill,
         /// The composed transform.
         transform: Affine,
     },
-    /// A stroked path, round-capped and round-joined, dashed when `dash` is
-    /// an effective pattern.
+    /// A stroked path with `style`'s caps, joins and miter limit, dashed when
+    /// `dash` is an effective pattern.
     Stroke {
         /// The path in the command's own space.
         path: &'a BezPath,
@@ -203,6 +208,8 @@ pub(crate) enum Geometry<'a> {
         width: f64,
         /// The dash pattern, present only when it is effective.
         dash: Option<DashPattern>,
+        /// The caps, joins and miter limit.
+        style: StrokeStyle,
         /// The composed transform.
         transform: Affine,
     },
@@ -248,20 +255,29 @@ impl<'a> Geometry<'a> {
                 width: *width,
                 transform: combined * *transform,
             },
+            // Lowered through the style's own helpers, never its variants, so
+            // an original style and its general form share this one arm: a
+            // round stroke is a styled one under `StrokeStyle::ROUND`, and a
+            // style that is not a stroke is a fill.
             Command::Path {
                 path,
                 style,
                 transform,
                 ..
-            } => match style {
-                PathStyle::Fill => Self::Fill {
+            } => match style.stroke() {
+                Some((width, dash, style)) => Self::Stroke {
                     path,
+                    width,
+                    dash: dash.filter(DashPattern::is_effective),
+                    style,
                     transform: combined * *transform,
                 },
-                PathStyle::Stroke { width, dash } => Self::Stroke {
+                None => Self::Fill {
                     path,
-                    width: *width,
-                    dash: dash.filter(DashPattern::is_effective),
+                    rule: match style.fill_rule() {
+                        Some(FillRule::EvenOdd) => Fill::EvenOdd,
+                        Some(FillRule::NonZero) | None => Fill::NonZero,
+                    },
                     transform: combined * *transform,
                 },
             },
@@ -327,22 +343,27 @@ impl<'a> Geometry<'a> {
                 generate_stroke(
                     generator,
                     line,
-                    &round_stroke(width),
+                    &kurbo_stroke(width, StrokeStyle::ROUND),
                     transform,
                     storage,
                     clip,
                 );
             }
-            Self::Fill { path, transform } => {
-                generate_fill(generator, path.iter(), transform, storage, clip);
+            Self::Fill {
+                path,
+                rule,
+                transform,
+            } => {
+                generate_fill_with_rule(generator, path.iter(), rule, transform, storage, clip);
             }
             Self::Stroke {
                 path,
                 width,
                 dash,
+                style,
                 transform,
             } => {
-                let stroke = round_stroke(width);
+                let stroke = kurbo_stroke(width, style);
                 // A dash pattern is expanded into its own sub-paths before the
                 // stroker runs and never reaches a backend's own dash support.
                 // A stroke that fits the split extent is expanded by the same
@@ -379,7 +400,9 @@ impl<'a> Geometry<'a> {
                 width,
                 transform,
             } => (control_box(line.iter().copied()), transform, width),
-            Self::Fill { path, transform } => (control_box(path.iter()), transform, 0.0),
+            Self::Fill {
+                path, transform, ..
+            } => (control_box(path.iter()), transform, 0.0),
             Self::Stroke {
                 path,
                 width,
@@ -1028,6 +1051,7 @@ mod tests {
         let second = Circle::new((130.0, 90.0), 55.5).to_path(0.1);
         let fill = |path| Geometry::Fill {
             path,
+            rule: Fill::NonZero,
             transform: Affine::IDENTITY,
         };
 
@@ -1048,23 +1072,60 @@ mod tests {
 
     /// With the walk held back until the helper has finished, every planned
     /// command's run comes from the helper, and the merged storage is the one
-    /// the walk would have generated on its own.
+    /// the walk would have generated on its own — for every path style, the
+    /// even-odd fill and the styled strokes included.
     #[test]
     fn a_helper_generates_every_run_the_walk_lets_it() {
+        use frust_scene::{StrokeCap, StrokeJoin};
+
         let mut scene = Scene::new();
         {
             let mut builder = frust_scene::SceneBuilder::new(&mut scene);
+            let miter =
+                StrokeStyle::new(StrokeCap::Square, StrokeJoin::Miter).with_miter_limit(2.5);
+            let bevel = StrokeStyle::new(StrokeCap::Butt, StrokeJoin::Bevel);
             for i in 0..40 {
                 let center =
                     kurbo::Point::new(20.0 + f64::from(i) * 5.5, 30.0 + f64::from(i % 7) * 25.0);
                 let path = Circle::new(center, 9.0 + f64::from(i % 5)).to_path(0.1);
                 builder.fill_path(path.clone(), peniko::Brush::Solid(peniko::Color::BLACK));
                 builder.stroke_path(path, 1.5, peniko::Brush::Solid(peniko::Color::WHITE));
+
+                // Two overlapping triangles in one path, so the even-odd rule
+                // leaves a hole the nonzero one would fill, and an open
+                // polyline whose caps and joins show.
+                let mut star = BezPath::new();
+                star.move_to((center.x - 10.0, center.y + 6.0));
+                star.line_to((center.x + 10.0, center.y + 6.0));
+                star.line_to((center.x, center.y - 11.0));
+                star.close_path();
+                star.move_to((center.x - 10.0, center.y - 5.0));
+                star.line_to((center.x + 10.0, center.y - 5.0));
+                star.line_to((center.x, center.y + 12.0));
+                star.close_path();
+                builder.fill_path_with_rule(
+                    star,
+                    FillRule::EvenOdd,
+                    peniko::Brush::Solid(peniko::Color::BLACK),
+                );
+                let mut polyline = BezPath::new();
+                polyline.move_to((center.x - 8.0, center.y));
+                polyline.line_to((center.x, center.y + 9.0));
+                polyline.line_to((center.x + 8.0, center.y - 2.0));
+                let dash = (i % 2 == 0).then(|| DashPattern::new(3.0, 1.5));
+                let style = if i % 3 == 0 { bevel } else { miter };
+                builder.stroke_path_styled(
+                    polyline,
+                    2.0,
+                    dash,
+                    style,
+                    peniko::Brush::Solid(peniko::Color::WHITE),
+                );
             }
         }
         let viewport = Rect::new(0.0, 0.0, 256.0, 256.0);
         let plan = plan(&scene, Affine::IDENTITY, viewport);
-        assert_eq!(plan.jobs.len(), 80);
+        assert_eq!(plan.jobs.len(), 160);
 
         let level = Level::try_detect().unwrap_or(Level::baseline());
         let mut expected = StripStorage::new(GenerationMode::Append);
@@ -1160,6 +1221,7 @@ mod tests {
                 combined: Affine::IDENTITY,
                 geometry: Geometry::Fill {
                     path: &path,
+                    rule: Fill::NonZero,
                     transform: Affine::IDENTITY,
                 },
                 cost: 1 + (index as u64 % 5) * 100,
