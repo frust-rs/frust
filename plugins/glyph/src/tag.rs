@@ -230,21 +230,17 @@ fn ui_face() -> FontFamily {
 /// The label's style: weight/size are Glyph-authored constants, the family is
 /// the theme's `labelMedium` role; `color` varies.
 fn tag_label_style(theme: Option<&Theme>, color: Color) -> TextStyle {
-    TextStyle {
-        family: theme.map_or_else(ui_face, |t| t.type_scale.label_medium.family.clone()),
-        weight: FontWeight::REGULAR,
-        ..TextStyle::new(TAG_FONT_SIZE, color)
-    }
+    TextStyle::new(TAG_FONT_SIZE, color)
+        .with_family(theme.map_or_else(ui_face, |t| t.type_scale.label_medium.family.clone()))
+        .with_weight(FontWeight::REGULAR)
 }
 
 /// The remove glyph's style (`.tag button{font-family:var(--font-mono);
 /// font-size:11px}`), family from the same `labelMedium` role as the label.
 fn remove_glyph_style(theme: Option<&Theme>, color: Color) -> TextStyle {
-    TextStyle {
-        family: theme.map_or_else(ui_face, |t| t.type_scale.label_medium.family.clone()),
-        weight: FontWeight::REGULAR,
-        ..TextStyle::new(TAG_FONT_SIZE, color)
-    }
+    TextStyle::new(TAG_FONT_SIZE, color)
+        .with_family(theme.map_or_else(ui_face, |t| t.type_scale.label_medium.family.clone()))
+        .with_weight(FontWeight::REGULAR)
 }
 
 /// Resolve `(background, label fg, border, remove-glyph fg)` — see the

@@ -130,11 +130,9 @@ fn ui_face() -> FontFamily {
 /// family is the theme's `bodyLarge` role, or [`ui_face`] unthemed (see the
 /// module docs); `color` is the resolved ink.
 fn label_style(theme: Option<&Theme>, color: Color) -> TextStyle {
-    TextStyle {
-        family: theme.map_or_else(ui_face, |t| t.type_scale.body_large.family.clone()),
-        weight: FontWeight::REGULAR,
-        ..TextStyle::new(LABEL_SIZE, color)
-    }
+    TextStyle::new(LABEL_SIZE, color)
+        .with_family(theme.map_or_else(ui_face, |t| t.type_scale.body_large.family.clone()))
+        .with_weight(FontWeight::REGULAR)
 }
 
 /// The resolved radio palette: ring stroke, inset-dot fill, label ink.

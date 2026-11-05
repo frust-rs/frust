@@ -360,30 +360,24 @@ fn ui_face() -> FontFamily {
 
 /// The glyph char's style; family from the theme's `displaySmall` role.
 fn glyph_style(theme: Option<&Theme>, color: Color) -> TextStyle {
-    TextStyle {
-        family: theme.map_or_else(display_face, |t| t.type_scale.display_small.family.clone()),
-        weight: FontWeight::BOLD,
-        ..TextStyle::new(EMPTY_GLYPH_SIZE, color)
-    }
+    TextStyle::new(EMPTY_GLYPH_SIZE, color)
+        .with_family(theme.map_or_else(display_face, |t| t.type_scale.display_small.family.clone()))
+        .with_weight(FontWeight::BOLD)
 }
 
 /// The title's style; family from the theme's `titleMedium` role.
 fn title_style(theme: Option<&Theme>, color: Color) -> TextStyle {
-    TextStyle {
-        family: theme.map_or_else(ui_face, |t| t.type_scale.title_medium.family.clone()),
-        weight: FontWeight::MEDIUM,
-        ..TextStyle::new(EMPTY_TITLE_SIZE, color)
-    }
+    TextStyle::new(EMPTY_TITLE_SIZE, color)
+        .with_family(theme.map_or_else(ui_face, |t| t.type_scale.title_medium.family.clone()))
+        .with_weight(FontWeight::MEDIUM)
 }
 
 /// The description's style; family from the theme's `bodyMedium` role.
 fn desc_style(theme: Option<&Theme>, color: Color) -> TextStyle {
-    TextStyle {
-        family: theme.map_or_else(ui_face, |t| t.type_scale.body_medium.family.clone()),
-        weight: FontWeight::REGULAR,
-        line_height: LineHeight::FontSizeRelative(EMPTY_DESC_LINE_HEIGHT),
-        ..TextStyle::new(EMPTY_DESC_SIZE, color)
-    }
+    TextStyle::new(EMPTY_DESC_SIZE, color)
+        .with_family(theme.map_or_else(ui_face, |t| t.type_scale.body_medium.family.clone()))
+        .with_weight(FontWeight::REGULAR)
+        .with_line_height(LineHeight::FontSizeRelative(EMPTY_DESC_LINE_HEIGHT))
 }
 
 /// Resolve `(border, glyph, title, desc)` colors.

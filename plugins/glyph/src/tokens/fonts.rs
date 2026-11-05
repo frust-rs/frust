@@ -202,11 +202,9 @@ mod tests {
         }
 
         let resolved_bytes = |cx: &mut TextContext, style: FontStyle| -> Vec<u8> {
-            let text_style = TextStyle {
-                family: FontFamily::named("Space Mono"),
-                style,
-                ..TextStyle::new(16.0, peniko::Color::BLACK)
-            };
+            let text_style = TextStyle::new(16.0, peniko::Color::BLACK)
+                .with_family(FontFamily::named("Space Mono"))
+                .with_style(style);
             let layout = cx.layout("frust", &text_style, None);
             let runs = layout.to_scene_runs(kurbo::Point::ORIGIN);
             runs.first()

@@ -286,11 +286,9 @@ fn ui_face() -> FontFamily {
 /// The initials' style for a `size`-px box; family from the theme's
 /// `labelLarge` role.
 fn initials_style(theme: Option<&Theme>, size: f64, color: Color) -> TextStyle {
-    TextStyle {
-        family: theme.map_or_else(ui_face, |t| t.type_scale.label_large.family.clone()),
-        weight: FontWeight::MEDIUM,
-        ..TextStyle::new((size as f32 * AVATAR_FONT_FRACTION).max(1.0), color)
-    }
+    TextStyle::new((size as f32 * AVATAR_FONT_FRACTION).max(1.0), color)
+        .with_family(theme.map_or_else(ui_face, |t| t.type_scale.label_large.family.clone()))
+        .with_weight(FontWeight::MEDIUM)
 }
 
 impl AvatarWidget {
