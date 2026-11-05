@@ -688,6 +688,134 @@ mod tests {
         )
     }
 
+    const JP_FACE: &[u8] = include_bytes!("../../../testing/fonts/NotoSansJP-Subset.otf");
+
+    /// Byte offsets at which each wrapped line of `text` starts, at `width`.
+    fn wrapped_line_starts(
+        cx: &mut TextContext,
+        text: &str,
+        style: &TextStyle,
+        width: f32,
+    ) -> Vec<usize> {
+        let layout = cx.layout(text, style, Some(width));
+        (0..layout.line_count())
+            .map(|i| layout.line_info(i).expect("line").range.start)
+            .collect()
+    }
+
+    /// Small kana: the class `ja` line-break tailoring lets start a line and `Strict` does not.
+    const SMALL_KANA: &str = "あぁいぃうぅえぇおぉ";
+
+    fn jp_cx() -> TextContext {
+        let mut cx = test_cx();
+        cx.register_fonts(JP_FACE.to_vec())
+            .expect("bundled face registers");
+        cx
+    }
+
+    fn untagged() -> TextStyle {
+        TextStyle::new(20.0, Color::BLACK)
+    }
+
+    fn starts_with_small_kana(text: &str, starts: &[usize]) -> bool {
+        starts[1..].iter().any(|&s| {
+            matches!(
+                text[s..].chars().next(),
+                Some('ぁ' | 'ぃ' | 'ぅ' | 'ぇ' | 'ぉ')
+            )
+        })
+    }
+
+    #[test]
+    fn default_locale_feeds_line_break_config() {
+        let guard = crate::locale::test_support::DefaultLocale::set(None);
+        let mut cx = jp_cx();
+        // Five 20px kana fit at 100px. The fifth is followed by a small kana, which Strict
+        // keeps off a line start (the line ends after four kana, byte 12) and the ja
+        // tailoring allows (the line ends after five, so the next line starts at the
+        // small kana at byte 15).
+        let width = 100.0;
+        let cleared = wrapped_line_starts(&mut cx, SMALL_KANA, &untagged(), width);
+        let tagged = wrapped_line_starts(
+            &mut cx,
+            SMALL_KANA,
+            &untagged().with_locale(Some("ja")),
+            width,
+        );
+        crate::locale::set_default_locale(Some("ja"));
+        let by_default = wrapped_line_starts(&mut cx, SMALL_KANA, &untagged(), width);
+        assert_eq!(by_default, tagged, "default ja == style locale ja");
+        assert_ne!(by_default, cleared, "the default reaches the line breaker");
+        assert_eq!(cleared, vec![0, 12, 24]);
+        assert!(!starts_with_small_kana(SMALL_KANA, &cleared));
+        assert_eq!(by_default, vec![0, 15]);
+        assert!(starts_with_small_kana(SMALL_KANA, &by_default));
+        // Region and script subtags do not matter.
+        crate::locale::set_default_locale(Some("ja-JP"));
+        assert_eq!(
+            wrapped_line_starts(&mut cx, SMALL_KANA, &untagged(), width),
+            by_default
+        );
+        // An explicit locale beats the default.
+        let explicit = wrapped_line_starts(
+            &mut cx,
+            SMALL_KANA,
+            &untagged().with_locale(Some("en")),
+            width,
+        );
+        assert_eq!(explicit, cleared);
+        drop(guard);
+    }
+
+    #[test]
+    fn an_untagged_non_cjk_span_keeps_strict_line_breaking() {
+        let guard = crate::locale::test_support::DefaultLocale::set(None);
+        let mut cx = jp_cx();
+        let width = 100.0;
+        let cleared = wrapped_line_starts(&mut cx, SMALL_KANA, &untagged(), width);
+        for default in ["en", "th", "ko-KR"] {
+            crate::locale::set_default_locale(Some(default));
+            let starts = wrapped_line_starts(&mut cx, SMALL_KANA, &untagged(), width);
+            assert_eq!(starts, cleared, "default {default}");
+            assert!(!starts_with_small_kana(SMALL_KANA, &starts));
+        }
+        drop(guard);
+    }
+
+    #[test]
+    fn kinsoku_still_holds_under_the_cjk_line_break_rule() {
+        let guard = crate::locale::test_support::DefaultLocale::set(None);
+        let mut cx = jp_cx();
+        for (default, text, closers) in [
+            (
+                "ja",
+                "今日は、天気がいい。明日も、晴れ。",
+                ['、', '。', '、', '。'],
+            ),
+            (
+                "zh-Hant-TW",
+                "我们是朋友，欢迎来到这里。今天天气很好。",
+                ['，', '。', '，', '。'],
+            ),
+        ] {
+            crate::locale::set_default_locale(Some(default));
+            let mut wrapped = false;
+            for n in 1..=12 {
+                let starts = wrapped_line_starts(&mut cx, text, &untagged(), n as f32 * 10.0);
+                wrapped |= starts.len() > 1;
+                for &s in &starts[1..] {
+                    let c = text[s..].chars().next().expect("a char");
+                    assert!(
+                        !closers.contains(&c),
+                        "{default} width {n}0: line starts with {c}"
+                    );
+                }
+            }
+            assert!(wrapped, "{default}: the sweep never wrapped");
+        }
+        drop(guard);
+    }
+
     #[test]
     fn a_default_locale_change_reshapes_untagged_text_but_not_tagged_text() {
         let _guard = crate::locale::test_support::DefaultLocale::set(None);

@@ -29,7 +29,7 @@ mod selector;
 use std::ops::Range;
 
 use fontique::Language;
-use parlance::{FontVariation, Tag};
+use parlance::{FontVariation, LineBreak, Tag};
 use parley_engine::itemize::Item;
 use parley_engine::shape::Whitespace as EngineWhitespace;
 use parley_engine::{
@@ -329,8 +329,17 @@ impl ShapeContext {
             .iter()
             .filter_map(|(range, style)| {
                 let language = Language::parse(style.locale.as_deref().or(default)?).ok()?;
+                // Only `Normal` and `Loose` apply the ja / zh tailoring (small kana, the
+                // prolonged sound mark); the default `Strict` ignores the language. Every other
+                // language keeps `Strict`.
+                let line_break = if matches!(language.language(), "ja" | "zh") {
+                    LineBreak::Normal
+                } else {
+                    LineBreak::Strict
+                };
                 let config = LineBreakConfig {
                     language: Some(language),
+                    line_break,
                     ..LineBreakConfig::default()
                 };
                 Some((range.clone(), config))
