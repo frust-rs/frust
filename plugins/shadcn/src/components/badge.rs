@@ -227,10 +227,7 @@ impl Widget for BadgeWidget {
         let theme = Theme::from_layout_ctx(ctx);
         let paint = self.variant.resolve(theme);
         let style = themed_family(
-            TextStyle {
-                weight: FontWeight::MEDIUM,
-                ..TextStyle::new(TEXT_XS as f32, paint.ink)
-            },
+            TextStyle::new(TEXT_XS as f32, paint.ink).with_weight(FontWeight::MEDIUM),
             theme,
             ThemeTextType::LabelMedium,
         );

@@ -286,32 +286,26 @@ fn in_role_family(
 }
 
 fn plain_message_style(theme: Option<&Theme>) -> TextStyle {
-    let style = TextStyle {
-        weight: FontWeight::REGULAR,
-        letter_spacing: 0.4,
-        line_height: LineHeight::Absolute(16.0),
-        ..TextStyle::new(12.0, Color::BLACK)
-    };
+    let style = TextStyle::new(12.0, Color::BLACK)
+        .with_weight(FontWeight::REGULAR)
+        .with_letter_spacing(0.4)
+        .with_line_height(LineHeight::Absolute(16.0));
     in_role_family(style, theme, |scale| &scale.body_small)
 }
 
 fn rich_title_style(theme: Option<&Theme>) -> TextStyle {
-    let style = TextStyle {
-        weight: FontWeight::MEDIUM,
-        letter_spacing: 0.1,
-        line_height: LineHeight::Absolute(20.0),
-        ..TextStyle::new(14.0, Color::BLACK)
-    };
+    let style = TextStyle::new(14.0, Color::BLACK)
+        .with_weight(FontWeight::MEDIUM)
+        .with_letter_spacing(0.1)
+        .with_line_height(LineHeight::Absolute(20.0));
     in_role_family(style, theme, |scale| &scale.title_small)
 }
 
 fn rich_body_style(theme: Option<&Theme>) -> TextStyle {
-    let style = TextStyle {
-        weight: FontWeight::REGULAR,
-        letter_spacing: 0.25,
-        line_height: LineHeight::Absolute(20.0),
-        ..TextStyle::new(14.0, Color::BLACK)
-    };
+    let style = TextStyle::new(14.0, Color::BLACK)
+        .with_weight(FontWeight::REGULAR)
+        .with_letter_spacing(0.25)
+        .with_line_height(LineHeight::Absolute(20.0));
     in_role_family(style, theme, |scale| &scale.body_medium)
 }
 
@@ -1816,12 +1810,10 @@ mod tests {
 
     #[test]
     fn without_a_theme_the_panel_runs_keep_the_unthemed_styles() {
-        let plain_unthemed = TextStyle {
-            weight: FontWeight::REGULAR,
-            letter_spacing: 0.4,
-            line_height: LineHeight::Absolute(16.0),
-            ..TextStyle::new(12.0, Color::BLACK)
-        };
+        let plain_unthemed = TextStyle::new(12.0, Color::BLACK)
+            .with_weight(FontWeight::REGULAR)
+            .with_letter_spacing(0.4)
+            .with_line_height(LineHeight::Absolute(16.0));
         assert_eq!(plain_message_style(None), plain_unthemed);
         assert_eq!(rich_title_style(None).family, FontFamily::SystemUi);
         assert_eq!(rich_body_style(None).family, FontFamily::SystemUi);

@@ -274,11 +274,9 @@ fn resolve_colors(theme: Option<&Theme>) -> TabsColors {
 /// family, or the bundled sans stack unthemed.
 fn label_style(theme: Option<&Theme>) -> TextStyle {
     themed_family(
-        TextStyle {
-            family: crate::tokens::sans_family(),
-            weight: FontWeight::MEDIUM,
-            ..TextStyle::new(style::TEXT_SM as f32, SHAPING_INK)
-        },
+        TextStyle::new(style::TEXT_SM as f32, SHAPING_INK)
+            .with_family(crate::tokens::sans_family())
+            .with_weight(FontWeight::MEDIUM),
         theme,
         ThemeTextType::LabelLarge,
     )

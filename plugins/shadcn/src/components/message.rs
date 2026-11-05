@@ -671,10 +671,8 @@ impl Widget for MessageMetaWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let theme = Theme::from_layout_ctx(ctx);
         let style = themed_family(
-            TextStyle {
-                weight: FontWeight::MEDIUM,
-                ..TextStyle::new(style::TEXT_XS as f32, muted_foreground(theme))
-            },
+            TextStyle::new(style::TEXT_XS as f32, muted_foreground(theme))
+                .with_weight(FontWeight::MEDIUM),
             theme,
             ThemeTextType::LabelMedium,
         );

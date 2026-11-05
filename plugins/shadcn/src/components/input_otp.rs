@@ -291,10 +291,8 @@ fn resolve_colors(theme: Option<&Theme>) -> OtpColors {
 /// with [`SHAPING_INK`] and re-brushed at paint.
 fn slot_style(theme: Option<&Theme>) -> TextStyle {
     themed_family(
-        TextStyle {
-            family: crate::tokens::sans_family(),
-            ..TextStyle::new(style::TEXT_SM as f32, SHAPING_INK)
-        },
+        TextStyle::new(style::TEXT_SM as f32, SHAPING_INK)
+            .with_family(crate::tokens::sans_family()),
         theme,
         ThemeTextType::BodyMedium,
     )
