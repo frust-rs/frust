@@ -292,6 +292,23 @@ const SHAPE_TOLERANCE: f64 = 0.1;
 /// filled at 48 px or more shows no facets on its stroke edges.
 const STROKE_OUTLINE_TOLERANCE: f64 = 0.02;
 
+/// The stroke width of one stroked element, in design units (before scale).
+///
+/// - No view override: the element's own width, else the source width.
+/// - Override with a positive source width: the element's width (else the
+///   source width) rescaled by `override / source`, so per-element ratios
+///   survive.
+/// - Override with a non-positive source width: no ratio exists, so the
+///   override replaces the source width and an element's own width keeps its
+///   absolute value (`element.unwrap_or(override)`).
+fn element_stroke_width(element: Option<f64>, source: f64, view_override: Option<f64>) -> f64 {
+    match view_override {
+        None => element.unwrap_or(source),
+        Some(over) if source > 0.0 => element.unwrap_or(source) * over / source,
+        Some(over) => element.unwrap_or(over),
+    }
+}
+
 /// One nonzero-fillable path covering `elements`: fills appended as-is, each
 /// stroke expanded to its round-capped, round-joined outline at its own width
 /// (or `stroke_width`), with an effective dash baked in first.
@@ -305,9 +322,13 @@ fn fill_outline<'a>(
         let piece = match style.paint {
             IconPaint::Fill => path.clone(),
             IconPaint::Stroke => {
-                let stroke = kurbo::Stroke::new(style.stroke_width.unwrap_or(stroke_width))
-                    .with_caps(kurbo::Cap::Round)
-                    .with_join(kurbo::Join::Round);
+                let stroke = kurbo::Stroke::new(element_stroke_width(
+                    style.stroke_width,
+                    stroke_width,
+                    None,
+                ))
+                .with_caps(kurbo::Cap::Round)
+                .with_join(kurbo::Join::Round);
                 match style.effective_dash() {
                     Some(d) => {
                         let dashed: BezPath =
@@ -790,26 +811,16 @@ impl Widget for IconWidget {
                 elements,
                 stroke_width,
             } => {
-                // An `IconView::stroke_width` override rescales every element's
-                // width by override/source, so per-element ratios survive.
-                let ratio = match self.stroke_width {
-                    Some(over) if *stroke_width > 0.0 => over / *stroke_width,
-                    _ => 1.0,
-                };
                 for (path, style) in elements {
                     let scaled = transform * path.clone();
                     let brush = Brush::Solid(color.multiply_alpha(style.alpha()));
                     match style.paint {
                         IconPaint::Stroke => {
-                            let base = style.stroke_width.unwrap_or(*stroke_width);
-                            let width = match self.stroke_width {
-                                Some(over)
-                                    if *stroke_width <= 0.0 && style.stroke_width.is_none() =>
-                                {
-                                    over * scale
-                                }
-                                _ => base * ratio * scale,
-                            };
+                            let width = element_stroke_width(
+                                style.stroke_width,
+                                *stroke_width,
+                                self.stroke_width,
+                            ) * scale;
                             match style.effective_dash() {
                                 Some(d) => {
                                     let dash = DashPattern {
@@ -1152,6 +1163,22 @@ mod tests {
         design: 24.0,
         stroke_width: 1.6,
     };
+
+    #[test]
+    fn element_stroke_width_covers_every_combination() {
+        // No override: element, else source.
+        assert_eq!(element_stroke_width(None, 2.0, None), 2.0);
+        assert_eq!(element_stroke_width(Some(3.0), 2.0, None), 3.0);
+        assert_eq!(element_stroke_width(None, 0.0, None), 0.0);
+        assert_eq!(element_stroke_width(Some(3.0), 0.0, None), 3.0);
+        // Override with a positive source: rescaled by override / source.
+        assert_eq!(element_stroke_width(None, 2.0, Some(4.0)), 4.0);
+        assert_eq!(element_stroke_width(Some(3.0), 2.0, Some(4.0)), 6.0);
+        // Override with a non-positive source: override replaces the source,
+        // an element width keeps its absolute value.
+        assert_eq!(element_stroke_width(None, 0.0, Some(4.0)), 4.0);
+        assert_eq!(element_stroke_width(Some(3.0), 0.0, Some(4.0)), 3.0);
+    }
 
     #[test]
     fn stroked_icon_strokes_each_element_with_scaled_width() {
