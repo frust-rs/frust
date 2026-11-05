@@ -87,8 +87,8 @@ frust-core = { workspace = true }
 image = { workspace = true }
 
 [features]
-# No default features and no design-system catalog: catalogs are sibling plugin crates, each
-# installed with its own `install()`.
+# The only default feature is `complex-scripts`. No design-system catalog: catalogs are sibling
+# plugin crates, each installed with its own `install()`.
 default = ["complex-scripts"]
 # Dictionary word and line segmentation (forwarded to `frust-text`, a direct dependency). Opt out
 # with `default-features = false`: unspaced Thai/Lao/Khmer/Myanmar text then overflows a line and
