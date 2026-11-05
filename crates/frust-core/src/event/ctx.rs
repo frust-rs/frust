@@ -16,10 +16,12 @@ use super::pointer::{CursorIcon, PointerId};
 use crate::overlay::OverlayKey;
 
 thread_local! {
-    /// The smallest area of any pod a pointer event landed inside during the open
-    /// [`EventCtx::track_pointer_hits`] scope (`INFINITY` until one does); `None` while no scope
-    /// is open, so a pass nobody tracks records nothing. A pass-scoped slot rather than a context
-    /// field, so it crosses a component boundary's inner context with no threading.
+    /// The smallest area of any hit-testing pod
+    /// ([`Widget::hit_test_self`](crate::widget::Widget::hit_test_self)) a pointer event landed
+    /// inside during the open [`EventCtx::track_pointer_hits`] scope (`INFINITY` until one does);
+    /// `None` while no scope is open, so a pass nobody tracks records nothing. A pass-scoped slot
+    /// rather than a context field, so it crosses a component boundary's inner context with no
+    /// threading.
     static POINTER_HIT_AREA: Cell<Option<f64>> = const { Cell::new(None) };
 }
 
@@ -403,11 +405,13 @@ impl<'a> EventCtx<'a> {
         self.hover_epoch.wrapping_add(1)
     }
 
-    /// Run `f` and report the smallest area of any pod a pointer event landed inside while it ran:
-    /// a pod counts when its own bounds contain the event's position, whether or not its widget
-    /// handled the event. `None` when no pod did. A container uses it to tell a press on a
-    /// child's content (a small pod) from one on a full-size wrapper; scopes nest, an inner
-    /// scope's hits also counting for the enclosing one.
+    /// Run `f` and report the smallest area of any hit-testing pod
+    /// ([`Widget::hit_test_self`](crate::widget::Widget::hit_test_self)) a pointer event landed
+    /// inside while it ran: a pod counts when its widget hit-tests itself and its own bounds
+    /// contain the event's position, whether or not the widget handled the event. `None` when no
+    /// pod did. A container uses it to tell a press on a child's content from one that only
+    /// crossed layout wrappers; scopes nest, an inner scope's hits also counting for the
+    /// enclosing one.
     pub fn track_pointer_hits<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> (R, Option<f64>) {
         let scope = PointerHitScope::open();
         let result = f(self);
@@ -416,7 +420,7 @@ impl<'a> EventCtx<'a> {
         (result, smallest)
     }
 
-    /// Record that a pointer event landed inside a pod of `area`; a no-op outside a
+    /// Record that a pointer event landed inside a hit-testing pod of `area`; a no-op outside a
     /// [`EventCtx::track_pointer_hits`] scope. Called by `ChildPod`'s dispatch.
     pub(crate) fn note_pointer_hit(&mut self, area: f64) {
         POINTER_HIT_AREA.with(|slot| {
