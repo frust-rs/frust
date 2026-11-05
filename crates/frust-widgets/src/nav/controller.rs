@@ -447,14 +447,16 @@ impl<State: 'static> NavigatorController<State> {
             on_visibility: options.on_visibility,
             route: options.route,
             pop_swipe: options.pop_swipe,
+            barrier: options.barrier,
+            barrier_dismissible: options.barrier_dismissible,
         });
     }
 
     /// Shared push-op construction every `push*` method above funnels through —
     /// the five public variants differ only in which of `opaque`/`on_result`/
-    /// `transition` they fix vs. expose. All push with [`BackPolicy::Pop`] and
-    /// no dismiss signal, and no visibility observer; a page wanting any of those
-    /// uses [`push_with_options`](Self::push_with_options).
+    /// `transition` they fix vs. expose. All push with [`BackPolicy::Pop`], no
+    /// dismiss signal, no visibility observer and no barrier; a page wanting any
+    /// of those uses [`push_with_options`](Self::push_with_options).
     fn push_impl(
         &self,
         builder: PageBuilder<State>,
@@ -472,6 +474,8 @@ impl<State: 'static> NavigatorController<State> {
             on_visibility: None,
             route: None,
             pop_swipe: None,
+            barrier: None,
+            barrier_dismissible: false,
         });
     }
 

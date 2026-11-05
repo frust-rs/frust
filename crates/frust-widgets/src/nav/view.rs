@@ -231,20 +231,28 @@ pub fn navigator<State: 'static, V: View<State>>(
 /// # let _ = root;
 /// ```
 ///
-/// # The host owns no scrim
+/// # The host draws a scrim only when a page asks for one
 ///
-/// The per-page-paints-its-own-scrim convention is preserved verbatim: the host
-/// is purely structural and paints nothing of its own. An overlay page already
+/// By default the per-page-paints-its-own-scrim convention holds: the host is
+/// purely structural and paints nothing of its own. An overlay page already
 /// fills `ctx.origin()..ctx.size()` with its scrim, and at the root that rect
 /// *is* the window — so the catalogs' dialogs and sheets need no change to dim
 /// the whole app.
+///
+/// A page pushed with [`PushOptions::barrier`] asks the host for a route-owned
+/// barrier instead: a full-area fill under that page, faded by the route's own
+/// transition progress rather than moved with the page. Under the host's
+/// [`TransitionSpec::NONE`] default it appears and disappears at once, so an
+/// overlay that animates its own scrim keeps painting it itself.
 ///
 /// # Chrome inertness is not new code
 ///
 /// [`NavigatorWidget::event`](Widget::event) routes to
 /// [`input_routed_pages`](NavigatorWidget::input_routed_pages) — the top page
 /// only — so with an overlay up the entire app root, chrome included, receives
-/// nothing. The accessibility tree says the same thing through the same
+/// nothing. A [`dismissible`](PushOptions::barrier_dismissible) barrier only
+/// adds a fallthrough: a primary tap the overlay page leaves unhandled
+/// dismisses it through its [`BackPolicy`]; nothing below it receives the tap. The accessibility tree says the same thing through the same
 /// function under rule R23 (see [`semantics`](Widget::semantics)), so there is
 /// no second reachability path to keep in sync.
 ///

@@ -10,6 +10,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use frust_core::AnyView;
+use peniko::Color;
 
 use super::path::Location;
 use super::route_state::RouteStack;
@@ -149,9 +150,10 @@ pub enum BackPolicy {
 
 /// Options for [`NavigatorController::push_with_options`], carrying a pushed
 /// page's opacity, back-press [`BackPolicy`], optional per-op transition
-/// override, optional result callback, and (for a
+/// override, optional result callback, (for a
 /// [`DismissAnimated`](BackPolicy::DismissAnimated) overlay) the shared
-/// dismiss-signal cell the navigator bumps on a back request.
+/// dismiss-signal cell the navigator bumps on a back request, and an optional
+/// route-owned modal [`barrier`](Self::barrier).
 ///
 /// Construct with [`opaque`](Self::opaque)/[`transparent`](Self::transparent),
 /// then chain the builder setters. The existing `push*` methods are unchanged —
@@ -165,12 +167,14 @@ pub struct PushOptions<State: 'static> {
     pub(super) on_visibility: Option<VisibilityCallback>,
     pub(super) route: Option<Location>,
     pub(super) pop_swipe: Option<bool>,
+    pub(super) barrier: Option<Color>,
+    pub(super) barrier_dismissible: bool,
 }
 
 impl<State: 'static> PushOptions<State> {
     /// Options for an **opaque** page (the page below is culled while covered).
     /// Defaults: [`BackPolicy::Pop`], navigator-default transition, no result
-    /// callback, no dismiss signal.
+    /// callback, no dismiss signal, no barrier.
     pub fn opaque() -> Self {
         Self {
             opaque: true,
@@ -181,6 +185,8 @@ impl<State: 'static> PushOptions<State> {
             on_visibility: None,
             route: None,
             pop_swipe: None,
+            barrier: None,
+            barrier_dismissible: false,
         }
     }
 
@@ -290,6 +296,68 @@ impl<State: 'static> PushOptions<State> {
         self.pop_swipe = Some(enabled);
         self
     }
+
+    /// Give this page a modal **barrier**: a fill of `color` over the whole
+    /// navigator area, painted immediately under the page and over every page
+    /// below it. Default: no barrier.
+    ///
+    /// The barrier belongs to the route, not to the page's content. It is
+    /// never moved or scaled by the page's transition [`Layer`] — a
+    /// [`SlideUp`](super::transition::PageTransition::SlideUp) sheet slides while its barrier
+    /// fades in place — and only its alpha animates, following the route's own
+    /// transition progress:
+    ///
+    /// - while this page is pushed, `color`'s alpha is scaled by the push's
+    ///   clamped progress (its timing curve already applied);
+    /// - while it is popped, the scale runs back down to `0`;
+    /// - at rest (including while a transparent page sits above it) it paints
+    ///   at `color`'s full alpha;
+    /// - under `reduce_motion` the push collapses to the reduced crossfade,
+    ///   and the barrier fades with it, exactly as the page's alpha does;
+    /// - with [`TransitionSpec::NONE`] (the [`overlay_host`] default) there is
+    ///   no route animation, so the barrier appears and disappears at once. A
+    ///   page that stages its own enter/exit and wants a fading scrim keeps
+    ///   painting that scrim itself.
+    ///
+    /// Pages without a barrier paint exactly as before. See
+    /// [`barrier_dismissible`](Self::barrier_dismissible) for tapping it.
+    ///
+    /// [`Layer`]: super::transition::Layer
+    /// [`overlay_host`]: super::view::overlay_host
+    pub fn barrier(mut self, color: Color) -> Self {
+        self.barrier = Some(color);
+        self
+    }
+
+    /// Whether a tap on this page's [`barrier`](Self::barrier) dismisses the
+    /// page (default `false`; ignored without a barrier).
+    ///
+    /// Input still reaches the page first. A primary press **and** its release
+    /// that the page leaves unhandled ([`EventResult::Ignored`] on both) count
+    /// as a barrier tap, provided the pointer stayed within the touch slop in
+    /// between; the navigator then routes the tap through this page's
+    /// [`BackPolicy`] at the next rebuild, exactly as a back press:
+    /// [`Pop`](BackPolicy::Pop) pops it with its transition reversed,
+    /// [`DismissAnimated`](BackPolicy::DismissAnimated) bumps its
+    /// [`dismiss_signal`](Self::dismiss_signal), and [`Veto`](BackPolicy::Veto)
+    /// does nothing.
+    ///
+    /// Consequences of input-first routing:
+    ///
+    /// - a page that fills the area and handles every pointer event leaves no
+    ///   part of its barrier tappable;
+    /// - a press the page handles never dismisses;
+    /// - every page input is suppressed while a transition is in flight, so a
+    ///   tap during the page's own enter or exit is ignored.
+    ///
+    /// A non-dismissible barrier never dismisses and blocks nothing beyond
+    /// what the page already receives.
+    ///
+    /// [`EventResult::Ignored`]: frust_core::EventResult::Ignored
+    pub fn barrier_dismissible(mut self, dismissible: bool) -> Self {
+        self.barrier_dismissible = dismissible;
+        self
+    }
 }
 
 /// Options for [`NavigatorController::replace_with_options`] — opacity, an
@@ -362,6 +430,13 @@ pub(super) enum NavOp<State: 'static> {
         /// `None` for every `push*` method other than
         /// [`push_with_options`](NavigatorController::push_with_options).
         pop_swipe: Option<bool>,
+        /// The route-owned barrier colour from [`PushOptions::barrier`],
+        /// `None` for every `push*` method other than
+        /// [`push_with_options`](NavigatorController::push_with_options).
+        barrier: Option<Color>,
+        /// Whether a tap on that barrier dismisses the page
+        /// ([`PushOptions::barrier_dismissible`]).
+        barrier_dismissible: bool,
     },
     /// Pop the top page (never the last/root page), delivering `result` to the
     /// popped page's pusher-registered callback. A pop *reverses* the popped
