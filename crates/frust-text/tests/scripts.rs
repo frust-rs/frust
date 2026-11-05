@@ -23,11 +23,7 @@ fn context() -> TextContext {
 }
 
 fn style(locale: Option<&str>) -> TextStyle {
-    TextStyle {
-        size: 20.0,
-        locale: locale.map(str::to_owned),
-        ..TextStyle::default()
-    }
+    TextStyle::default().with_size(20.0).with_locale(locale)
 }
 
 /// An editor over `text` wrapped at `width`, caret at 0.
