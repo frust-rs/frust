@@ -2075,8 +2075,12 @@ pub use frust_core::anim::{
 ///
 /// Call it from `app!` setup or at runtime — it takes effect on the next
 /// frame. Every backdrop costs the frame a surface cut, a region copy and a
-/// blur pass sequence, so raise the cap only as far as a screen needs. Past
-/// the cap the frame is refused, never rendered with backdrops missing.
+/// blur pass sequence, so raise the cap only as far as a screen needs. Only a
+/// backdrop whose blur region reaches the frame counts: one scrolled or
+/// translated clear of it draws nothing and is not counted. The count is made
+/// up front, so it can include a backdrop the frame later drops (inside a
+/// clipped or retained region), never omit one it draws. Past the cap the
+/// frame is refused, never rendered with backdrops missing.
 ///
 /// ```no_run
 /// use frust::{max_backdrops_per_frame, set_max_backdrops_per_frame};

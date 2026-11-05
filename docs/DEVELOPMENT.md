@@ -60,12 +60,12 @@ slow enough on mobile CPUs to trip the iOS launch watchdog. They stay hand-synce
 `frust-cupertino`) are ordinary sibling plugin crates an app depends on beside `frust`, each
 installed via its own `install()` call (see *Run*'s design-system-install gate below). Those crates
 do carry one feature of their own: `frust-glyph`, `frust-material` and `frust-shadcn` each have
-`bundled-fonts`, default on — an app that sets `default-features = false` on that dependency
-compiles in no font bytes and its `install()` registers none, so text falls back to the platform's
-system faces through the font oracle (Roboto on Android). `frust-beui` and `frust-cupertino` are
-unaffected. **Widget-authoring test fixtures.** `frust-widgets`' non-default `test-support` feature
-compiles in GPU-free container-widget fixtures (`frust_widgets::test_support`) so an out-of-tree
-design system can test its own containers too; off by default in a normal app build.
+`bundled-fonts`, default on — with `default-features = false` no font bytes are compiled in and
+`install()` registers none, so text falls back to the platform's system faces through the font
+oracle (Roboto on Android). `frust-beui` and `frust-cupertino` are unaffected. **Widget-authoring test fixtures.** `frust-widgets`' non-default `test-support` feature
+compiles in GPU-free container fixtures (`frust_widgets::test_support`) so an out-of-tree design
+system can test its own containers; the facade's `test-support` forwards `frust-core`'s
+(`PaintCtx::for_test`) and exposes `frust::testing`. Both are off in a normal app build.
 
 ### Build Output Layout
 

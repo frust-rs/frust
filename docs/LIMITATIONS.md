@@ -5253,7 +5253,10 @@ same frame, which keeps the drawn page; hover and focus transitions re-record ev
 layer — it is dropped, not blurred; (2) at most the per-frame cap, more refuses the whole frame
 (`EngineError::TooManyBackdrops`, never a degraded render): `MAX_BACKDROPS_PER_FRAME` (4) by
 default, an app sets it with `set_max_backdrops_per_frame` (process-wide, clamped to
-`1..=BACKDROP_CAP_CEILING`, 16); (3) pixels beyond the frame border read as
+`1..=BACKDROP_CAP_CEILING`, 16); only a backdrop whose blur region reaches the frame target counts,
+so glass in the warm band a `Flex` inside a `ScrollView` paints one viewport beyond the visible
+area does not count, but the up-front test ignores retained corrections and clip coverage and can
+over-count a backdrop the frame later drops inside a clipped or retained region; (3) pixels beyond the frame border read as
 transparent, so a blur at the edge fades; (4) a region past the page ceiling is refused; (5) a
 fragment-sampled copy of an sRGB target loses precision. The CPU oracle blurs its own canvas and is
 exact only for device σ <= 2; the `unit-backdrop-blur` golden compares with the clip rim eroded.
@@ -8947,3 +8950,17 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 **Why accepted**: iOS gives the shell no notice before a process is ended, so there is no event to derive `Detached` from.
 
 **Evidence**: `crates/frust-shell-ios/src/ffi_glue.rs` (the `pause` lifecycle mapping doc); `crates/frust-shell-android/src/lifecycle.rs` (`LifecycleFlags::target`); `crates/frust-shell-android/src/jni_glue.rs` (`destroyed` set in the `onDestroy` path).
+
+---
+
+### `gesture-drag-no-cancel-on-removal` — a `GestureDetector` removed mid-drag fires no `cancel`
+
+**Observed**: a started vertical, horizontal or pan drag owes its `cancel` callback to the next pass that carries application state after a platform `Cancel`. A detector removed from the tree while its drag is in flight (its subtree changing shape, or its page torn down) never reaches that pass, so its `start` and `update` callbacks are not followed by `end` or `cancel`.
+
+**Applies to**: apps that pair `on_*_drag_start` with state that `on_*_drag_cancel` or `on_*_drag_end` must release.
+
+**Workaround**: reset the drag's state from the code path that removes the detector, or treat a drag with no `end` or `cancel` as abandoned when the next one starts.
+
+**Why accepted**: a torn-down detector has no `&mut State` to call back into, and the teardown path never carries one.
+
+**Evidence**: `crates/frust-widgets/src/gesture.rs` (module docs, *Drag recognition* / Cancel).
