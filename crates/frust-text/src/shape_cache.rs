@@ -101,8 +101,11 @@ impl ShapeKey {
                 .map(|&(tag, value)| (tag, value.to_bits()))
                 .collect(),
             locale: style.locale.clone(),
-            // The app default locale decides untagged Han fallback, so a style without a
-            // locale carries it; a style with one is independent of it.
+            // For untagged text the app default locale decides three things: the Han fallback
+            // face, the shaping language (`locl`) together with the line-break language, and
+            // the line-break strictness (`ja`/`zh` use `LineBreak::Normal`, see
+            // `shape::ShapeContext::shape_spans`). So every untagged style carries it in the
+            // key and a tagged style never does: a tag fixes all three itself.
             app_locale: match style.locale {
                 Some(_) => None,
                 None => crate::default_locale(),

@@ -42,7 +42,9 @@ const THAI: &[u8] = include_bytes!("../../../testing/fonts/NotoSansThai-Subset.t
 /// emoji, Thai) is a no-op for the disjoint scripts these five subsets
 /// actually carry — see `testing/fonts/LICENSES.md` for the exact codepoint
 /// sets. The Thai face is appended last so the earlier entries and their
-/// goldens are unchanged by its addition.
+/// goldens are unchanged by its addition, so the order is load-bearing. A space
+/// in Thai sample text resolves to the Latin face, which comes first in the
+/// stack, so Thai-only assertions use unspaced text.
 pub fn test_fonts() -> Vec<(&'static str, &'static [u8])> {
     vec![
         ("Noto Sans (Latin + combining marks)", LATIN),

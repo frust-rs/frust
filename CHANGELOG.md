@@ -303,7 +303,6 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   line). Release size grows by about 3 MB per app with the segmentation dictionaries (see
   `docs/PERFORMANCE_BASELINES.md`).
 
-
 ### Fixed
 
 - The motion-token conversions behind reduce-motion, navigation transitions, the switcher and presence
