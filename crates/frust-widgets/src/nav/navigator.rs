@@ -138,6 +138,7 @@ use frust_core::{
 };
 use frust_theme::{MotionExtras, Theme};
 use kurbo::{Affine, Point, Rect, Size, Vec2};
+use peniko::Color;
 
 use crate::repaint_boundary::{RetainedBoundary, within};
 
@@ -233,6 +234,26 @@ pub(super) struct PageEntry<State: 'static> {
     /// rather than being rebuilt. A key that changed frame to frame (or page to
     /// page) would give the renderer nothing to hit.
     pub(super) boundary: RetainedBoundary,
+    /// The route-owned barrier colour from [`PushOptions::barrier`], painted
+    /// over the whole navigator area immediately under this page (see
+    /// [`paint_barrier`]). `None` for the root page, a replaced page, and any
+    /// page pushed without one.
+    pub(super) barrier: Option<Color>,
+    /// Whether an unhandled tap on [`barrier`](Self::barrier) dismisses this
+    /// page through its [`back`](Self::back) policy
+    /// ([`PushOptions::barrier_dismissible`]).
+    pub(super) barrier_dismissible: bool,
+}
+
+/// A primary press the top page left unhandled over its dismissible barrier,
+/// waiting for its release (see [`NavigatorWidget::event_at`]).
+pub(super) struct BarrierPress {
+    /// The pressed page's [`PageEntry::reach`] cell, compared by identity
+    /// only: the release dismisses only if the same page is still on top.
+    page: Rc<Cell<bool>>,
+    /// Where the press landed; a move past [`TOUCH_SLOP`] from here is a drag,
+    /// not a tap.
+    down: Point,
 }
 
 /// The single in-flight page transition a [`NavigatorWidget`] owns (Flutter
@@ -324,6 +345,11 @@ impl<State: 'static> crate::authoring::VisitPods for ActiveTransition<State> {
 /// shortcuts, but never answers one, so the root falls through past it.
 /// [`InputEvent::Key`] routes to the input-routed page(s) only, and nothing is
 /// routed while a transition runs.
+///
+/// A page pushed with [`PushOptions::barrier`] gets a route-owned barrier fill
+/// painted under it; with [`PushOptions::barrier_dismissible`] a primary tap
+/// the top page leaves unhandled, landing outside its smaller-than-the-area
+/// content, dismisses it through its [`BackPolicy`].
 pub struct NavigatorWidget<State: 'static> {
     pub(super) pages: Vec<PageEntry<State>>,
     /// Pop-result callbacks awaiting `&mut State` — flushed at the start of the
@@ -406,11 +432,36 @@ pub struct NavigatorWidget<State: 'static> {
     /// (unlike per-page `on_visibility`, since this observes the whole
     /// navigator).
     route_change: Option<RouteChangeCallback>,
+    /// The in-progress barrier tap, if the top page left a primary press over
+    /// its dismissible barrier unhandled. Cleared by the release, a cancel, a
+    /// move past [`TOUCH_SLOP`], or any later press.
+    pub(super) barrier_press: Option<BarrierPress>,
+    /// A completed barrier tap waiting for the next rebuild, which routes it
+    /// through the top page's [`BackPolicy`] (a pop needs a `BuildCtx`). Holds
+    /// the tapped page's [`PageEntry::reach`] cell, so a tap whose page is no
+    /// longer on top by then (an op popped or covered it) is dropped.
+    pub(super) pending_barrier_dismiss: Option<Rc<Cell<bool>>>,
 }
 
 /// The rest threshold [`TransitionDriver::Settle`] applies to position and
 /// velocity.
 const SETTLE_REST_EPSILON: f64 = 1e-3;
+
+/// The relative shortfall from the navigator's area a hit-testing pod may have
+/// and still count as the barrier for a press: a full-size hit-testing pod (a
+/// page layer, a full-area scrim with a fill) reports exactly the navigator's
+/// area up to float rounding, while any painted content smaller than the
+/// navigator falls short by far more than this. Layout wrappers record nothing
+/// at any size (see [`Widget::hit_test_self`]).
+const BARRIER_FULL_AREA_EPSILON: f64 = 1e-6;
+
+/// Whether a primary press whose smallest receiving hit-testing pod had
+/// `smallest_hit` area (see [`EventCtx::track_pointer_hits`]) landed on the
+/// barrier rather than on page content: no hit-testing pod smaller than the
+/// navigator's `area` received it.
+fn lands_on_barrier(smallest_hit: Option<f64>, area: f64) -> bool {
+    smallest_hit.is_none_or(|hit| hit >= area * (1.0 - BARRIER_FULL_AREA_EPSILON))
+}
 
 /// The settle spring that honours a resolved duration `timing`: the softest
 /// critically damped spring at rest (within [`SETTLE_REST_EPSILON`]) from full
@@ -967,6 +1018,21 @@ impl<State: 'static> NavigatorWidget<State> {
     /// mid-transition input block); otherwise a running transition suppresses all
     /// page routing; otherwise pointer events run the edge-swipe arm/steal
     /// machinery before falling through to normal top-page routing.
+    ///
+    /// # Barrier taps
+    ///
+    /// The top page always sees a pointer event first. When it leaves a
+    /// primary `Down` unhandled, no hit-testing pod smaller than the navigator
+    /// received the press (it crossed only layout wrappers or full-area pods,
+    /// see [`lands_on_barrier`]), and the page has a dismissible
+    /// [`barrier`](PushOptions::barrier), the navigator claims the press
+    /// (capturing the pointer so the release comes back here) and records a
+    /// [`BarrierPress`]. A release the page also leaves unhandled, with the
+    /// same page still on top, completes the tap: it is queued in
+    /// [`pending_barrier_dismiss`](Self::pending_barrier_dismiss) for the next
+    /// rebuild, which routes it through the page's [`BackPolicy`]. A move past
+    /// [`TOUCH_SLOP`], a `Cancel`, or a press the page handles clears it. Taps
+    /// are subject to the mid-transition block like every other input.
     fn event_at(&mut self, ctx: &mut EventCtx<'_>, event: &InputEvent, t_ms: f64) -> EventResult {
         // An in-progress interactive swipe owns the pointer stream.
         if self.edge.active {
@@ -1011,14 +1077,46 @@ impl<State: 'static> NavigatorWidget<State> {
                 // ambient — this navigator's own host, if any — so a third
                 // nesting level defers too.
                 let claim = Rc::new(Cell::new(false));
-                let routed = with_swipe_claim(&claim, || self.route_top(ctx, event));
+                let (routed, smallest_hit) = ctx.track_pointer_hits(|ctx| {
+                    with_swipe_claim(&claim, || self.route_top(ctx, event))
+                });
                 self.edge.inner_claimed = claim.get();
                 if let Some(host) = ambient_swipe_claim() {
                     host.set(self.edge.inner_claimed || self.edge.armed);
                 }
+                // Barrier tap: the page left a primary press unhandled over its
+                // dismissible barrier. Claim it so the release returns here. A
+                // press a smaller-than-the-navigator hit-testing pod received
+                // landed on the page's content (a card, its text), however
+                // inert that content is, so it is not a barrier press. Layout
+                // wrappers (padding, alignment, safe areas) record nothing, so
+                // a press beside a wrapped sheet still reaches the barrier.
+                self.barrier_press = None;
+                if routed == EventResult::Ignored
+                    && crate::authoring::presses(p)
+                    && lands_on_barrier(smallest_hit, ctx.size().area())
+                    && let Some(top) = self.pages.last()
+                    && top.barrier.is_some()
+                    && top.barrier_dismissible
+                {
+                    self.barrier_press = Some(BarrierPress {
+                        page: Rc::clone(&top.reach),
+                        down: p.position,
+                    });
+                    ctx.capture_pointer();
+                    return EventResult::Handled;
+                }
                 routed
             }
             PointerPhase::Move => {
+                // A drag past the slop is not a barrier tap.
+                if self
+                    .barrier_press
+                    .as_ref()
+                    .is_some_and(|press| (p.position - press.down).hypot() > TOUCH_SLOP)
+                {
+                    self.barrier_press = None;
+                }
                 if !self.edge.armed {
                     return self.route_top(ctx, event);
                 }
@@ -1081,9 +1179,49 @@ impl<State: 'static> NavigatorWidget<State> {
                 // stale record from this one.
                 self.edge.armed = false;
                 self.edge.inner_claimed = false;
-                self.route_top(ctx, event)
+                let press = self.barrier_press.take();
+                let routed = self.route_top(ctx, event);
+                // Barrier tap completes: the page left the release unhandled too,
+                // and the pressed page is still the top. The dismissal itself
+                // waits for the next rebuild (a pop needs a `BuildCtx`); the
+                // mark makes a mobile frame gate run that rebuild.
+                if p.phase == PointerPhase::Up
+                    && routed == EventResult::Ignored
+                    && let Some(press) = press
+                    && self.pages.last().is_some_and(|top| {
+                        Rc::ptr_eq(&top.reach, &press.page)
+                            && top.barrier.is_some()
+                            && top.barrier_dismissible
+                    })
+                {
+                    self.pending_barrier_dismiss = Some(press.page);
+                    frust_core::mark_pending_result_flush();
+                    ctx.request_redraw();
+                    return EventResult::Handled;
+                }
+                routed
             }
         }
+    }
+
+    /// Route a completed barrier tap (see [`event_at`](Self::event_at)'s
+    /// barrier taps) through the top page's [`BackPolicy`], exactly as a back
+    /// press: only if the tapped page is still the top, so an op applied in
+    /// between that popped, replaced or covered it drops the tap.
+    fn apply_barrier_dismiss(&mut self, ctx: &mut BuildCtx<'_>) -> ChangeFlags {
+        let Some(page) = self.pending_barrier_dismiss.take() else {
+            return ChangeFlags::NONE;
+        };
+        if !self
+            .pages
+            .last()
+            .is_some_and(|top| Rc::ptr_eq(&top.reach, &page))
+        {
+            return ChangeFlags::NONE;
+        }
+        let flags = self.apply_request_back(ctx);
+        self.publish_state();
+        flags
     }
 
     /// Pop the top page (the shared body of [`NavOp::Pop`] and a
@@ -1182,6 +1320,8 @@ impl<State: 'static> NavigatorWidget<State> {
                     on_visibility,
                     route,
                     pop_swipe,
+                    barrier,
+                    barrier_dismissible,
                 } => {
                     let spec = self.effective_spec(transition);
                     // A push severs nothing, but it does *cover* the current top
@@ -1227,6 +1367,8 @@ impl<State: 'static> NavigatorWidget<State> {
                         pop_swipe,
                         reach,
                         boundary: RetainedBoundary::new(),
+                        barrier,
+                        barrier_dismissible,
                     });
                     // Full gate (`top_pod_focused`): the covered page's own link
                     // ANDed with the rebuild-pass chain down to this navigator.
@@ -1297,6 +1439,10 @@ impl<State: 'static> NavigatorWidget<State> {
                             pop_swipe: None,
                             reach: Rc::clone(&reach),
                             boundary: RetainedBoundary::new(),
+                            // A replace carries no barrier either: a barrier is
+                            // a pushed modal's, and replace has no options for it.
+                            barrier: None,
+                            barrier_dismissible: false,
                         };
                         if spec.is_animated() {
                             // Stash the old top and animate the new one in over it
@@ -1326,6 +1472,8 @@ impl<State: 'static> NavigatorWidget<State> {
                             pop_swipe: None,
                             reach,
                             boundary: RetainedBoundary::new(),
+                            barrier: None,
+                            barrier_dismissible: false,
                         });
                     }
                     // Full gate (`top_pod_focused`): the replaced page's own link
@@ -1448,6 +1596,8 @@ impl<State: 'static> NavigatorWidget<State> {
         let area = ctx.size();
         let nav_origin = ctx.origin();
         let (enter_layer, leave_layer) = resolve_layers(preset, adv.value, is_pop, area);
+        let (enter_barrier, leave_barrier) =
+            self.transition_barriers(adv.value.clamp(0.0, 1.0), is_pop, has_stashed);
 
         // Shared-element ("hero") directives for this frame, derived from the
         // rects the *previous* frame captured (page layout is static during a
@@ -1465,11 +1615,15 @@ impl<State: 'static> NavigatorWidget<State> {
         // page paints with a hero reporter installed so its tagged descendants
         // report their rects and the matched endpoint paints (or suppresses) the
         // morph. The overlay is painted by the hero on the page drawn LAST, so it
-        // always lands above both page layers.
+        // always lands above both page layers. A page's barrier, if it has one,
+        // paints immediately before the page itself, at the navigator's own
+        // origin: it never takes the page layer's offset or scale.
         let (new_entering, new_leaving);
         if is_pop {
+            paint_barrier(ctx, scene, enter_barrier);
             new_entering =
                 self.paint_entering_heroes(ctx, scene, enter_layer, area, nav_origin, enter_dirs);
+            paint_barrier(ctx, scene, leave_barrier);
             new_leaving = self.paint_leaving_heroes(
                 ctx,
                 scene,
@@ -1480,6 +1634,7 @@ impl<State: 'static> NavigatorWidget<State> {
                 leave_dirs,
             );
         } else {
+            paint_barrier(ctx, scene, leave_barrier);
             new_leaving = self.paint_leaving_heroes(
                 ctx,
                 scene,
@@ -1489,6 +1644,7 @@ impl<State: 'static> NavigatorWidget<State> {
                 has_stashed,
                 leave_dirs,
             );
+            paint_barrier(ctx, scene, enter_barrier);
             new_entering =
                 self.paint_entering_heroes(ctx, scene, enter_layer, area, nav_origin, enter_dirs);
         }
@@ -1511,6 +1667,45 @@ impl<State: 'static> NavigatorWidget<State> {
             }
             ctx.request_frame();
         }
+    }
+
+    /// The barriers of the two pages a transition paints, as `(entering,
+    /// leaving)`, each paired with its presence: the factor its colour's alpha
+    /// is scaled by at clamped progress `pc`.
+    ///
+    /// The entering page (the stack top) fades its barrier in with the push or
+    /// replace that brings it on, and keeps it at full presence on a pop, where
+    /// it is the revealed page and has been at rest all along. A stashed
+    /// leaving page (pop, replace, interactive pop) fades its barrier out with
+    /// the same progress; a push's leaving page stays in the stack, so its
+    /// barrier stays at full presence while it is covered. Progress is the
+    /// driver's eased value, so a reduce-motion collapse (a linear crossfade)
+    /// fades the barrier exactly as it fades the page.
+    fn transition_barriers(
+        &self,
+        pc: f64,
+        is_pop: bool,
+        has_stashed: bool,
+    ) -> (PageBarrier, PageBarrier) {
+        let entering = self
+            .pages
+            .last()
+            .and_then(|page| page.barrier)
+            .map(|color| (color, if is_pop { 1.0 } else { pc }));
+        let leaving = if has_stashed {
+            self.transition
+                .as_ref()
+                .and_then(|t| t.stashed.as_ref())
+                .and_then(|page| page.barrier)
+                .map(|color| (color, 1.0 - pc))
+        } else {
+            let n = self.pages.len();
+            (n >= 2)
+                .then(|| self.pages[n - 2].barrier)
+                .flatten()
+                .map(|color| (color, 1.0))
+        };
+        (entering, leaving)
     }
 
     /// Compute this frame's per-page hero [`HeroDirective`]s from the rects the
@@ -1658,6 +1853,26 @@ impl<State: 'static> NavigatorWidget<State> {
         let programmatic = self.transition.as_ref().is_some_and(|t| !t.interactive);
         programmatic && directives.is_empty()
     }
+}
+
+/// A page's barrier colour paired with its presence this frame (the factor its
+/// alpha is scaled by), or `None` for a page without a barrier.
+type PageBarrier = Option<(Color, f64)>;
+
+/// Paint a page's route-owned barrier: `color` over the whole navigator area
+/// (`ctx.origin()`, `ctx.size()`), its alpha scaled by `presence`. Never offset
+/// or scaled by the page's transition layer; a presence of `0` paints nothing.
+fn paint_barrier(ctx: &PaintCtx, scene: &mut dyn PaintScene, barrier: PageBarrier) {
+    let Some((color, presence)) = barrier else {
+        return;
+    };
+    let presence = presence.clamp(0.0, 1.0) as f32;
+    if presence <= 0.0 {
+        return;
+    }
+    let c = color.components;
+    let faded = Color::new([c[0], c[1], c[2], c[3] * presence]);
+    scene.fill_rect(ctx.origin(), ctx.size(), faded);
 }
 
 /// Paint one transition page with a hero reporter installed over its subtree,
@@ -1816,6 +2031,9 @@ impl<State: 'static> View<State> for NavigatorView<State> {
                 pop_swipe: None,
                 reach: root_reach,
                 boundary: RetainedBoundary::new(),
+                // The root page is never a modal: no barrier.
+                barrier: None,
+                barrier_dismissible: false,
             }],
             pending_results: Vec::new(),
             needs_ime_clear: false,
@@ -1832,6 +2050,8 @@ impl<State: 'static> View<State> for NavigatorView<State> {
             host_reach,
             route_stack: Rc::clone(&self.controller.route_stack),
             route_change: self.route_change.clone(),
+            barrier_press: None,
+            pending_barrier_dismiss: None,
         };
         // Apply any ops the app queued before the first frame.
         let ops = self.controller.drain();
@@ -1940,6 +2160,10 @@ impl<State: 'static> View<State> for NavigatorView<State> {
         if !ops.is_empty() {
             flags |= element.apply_ops(ops, ctx);
         }
+        // 1a. A barrier tap the event pass completed: dismiss through the top
+        //     page's `BackPolicy`. After the ops, so a queued op that already
+        //     removed or covered the tapped page wins and the tap is dropped.
+        flags |= element.apply_barrier_dismiss(ctx);
         // 1b. Finalize a transition that settled during the previous paint: tear
         //     down its retained (leaving) page and resume normal culling.
         if element
@@ -2058,8 +2282,11 @@ impl<State: 'static> Widget for NavigatorWidget<State> {
             // recorded by the first frame of the transition that moves it,
             // which runs at progress 0), but still through its boundary, which
             // forgets a recorded page the moment the body changes.
+            // A page with a barrier paints it first, at full presence, over
+            // everything below.
             let start = self.base_visible_index();
             for entry in &mut self.pages[start..] {
+                paint_barrier(ctx, scene, entry.barrier.map(|color| (color, 1.0)));
                 entry.boundary.paint_plain(&mut entry.pod, ctx, scene);
             }
         }

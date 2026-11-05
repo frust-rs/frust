@@ -18,14 +18,14 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how WIDGETS relates to the other unit
 | Module | Responsibility |
 |--------|-----------------|
 | `frust-widgets::authoring` | Public container/callback toolkit every widget in the crate builds from, instead of touching `frust-core` primitives directly — reachable by app code as `frust::authoring` (the facade's re-export, CORE unit); also carries the `VisitPods` trait / `visit_children!` macro, the crate's introspection seam (see *Data Flow*) |
-| `frust-widgets` (baseline) | Baseline layout containers and interactive leaf widgets (text, forms, gestures, scrolling, a virtualized `ListView`, a four-slot `Scaffold`, `IndexedStack`, `container`/`colored_box`, `divider`, `icon_button`), plus the `shortcuts` chord-binding wrapper and the baseline Tab stops — see WIDGETS_CODE_STANDARDS.md's Keyboard Focus and Shortcuts |
+| `frust-widgets` (baseline) | Baseline layout containers and interactive leaf widgets (text, forms, gestures incl. vertical/horizontal/pan drag callbacks (18 px axis slop, 36 px pan, first to cross wins; release velocity on the raw input clock; a same-axis scroll view takes the drag first; `cancel` runs on the next state-bearing pass), scrolling, a virtualized `ListView`, a four-slot `Scaffold`, `IndexedStack`, `container`/`colored_box`, `divider`, `icon_button`), plus the `shortcuts` chord-binding wrapper and the baseline Tab stops — see WIDGETS_CODE_STANDARDS.md's Keyboard Focus and Shortcuts |
 | `frust-widgets::canvas` | `CanvasView`/`CanvasWidget` — declarative custom painting over `PaintScene`, local-space, no semantics node |
 | `frust-widgets::repaint_boundary` | `repaint_boundary(child)` (`.alpha(f32)`) and the shared `RetainedBoundary`: per frame `DrawRetained` when the subtree is clean, its transform's linear part unchanged, nothing inside published a paint and the ledger holds (key, extent, scale from `PaintScene::current_transform()`) and covers the serial it recorded under (runs of consecutive recordings at one origin, size and linear part; the first draw confirms; it must have recorded on the immediately previous paint; serial 0 = bare ctx skips the check); else `PushRetained`+body+`PopRetained` when recording is allowed and the body is visible, else direct paint (kill switch `FRUST_NO_RETAINED_LAYERS` → plain bodies). `motion::AnimatedOpacity::cached(bool)` opts an opacity animation in (`AnimatedScale` unchanged) |
-| `frust-widgets::glass_surface` | `glass_surface(child)` (`.tier(GlassTier)`, `.corner_radius`, `.material`) paints one `GlassScale` tier behind its child: shadow (clipped outside the surface), rounded clip, `backdrop_blur` + fills, child, hairline; an explicit material beats the theme tier, and with neither it paints an opaque fill. Each surface spends one of the per-frame backdrops (RENDER unit); blur intent is sigma in logical px |
+| `frust-widgets::glass_surface` | `glass_surface(child)` (`.tier(GlassTier)`, `.corner_radius`, `.material`) paints one `GlassScale` tier behind its child: shadow (clipped outside the surface), rounded clip, `backdrop_blur` + fills, child, hairline; an explicit material beats the theme tier, and with neither it paints an opaque fill. Each surface spends one of the per-frame backdrops (RENDER unit); blur intent is sigma in logical px; the corner radius clamps like `ShapeScale::resolve` (infinite is a capsule, NaN or negative square), and under a transform the sigma follows its mean scale while the lens samples the rotated rectangle's device bounding box |
 | `frust-widgets::pinch` | `PinchRecognizer` (a pure two-contact state machine) and `pinch_detector`, the wrapper feeding it from a gesture's contacts |
 | `frust-widgets::pan_zoom` | `PanZoomView`/`PanZoomWidget` — one child under a pan/pinch-or-wheel-zoom transform, with inertia and a `PanZoomController` handle |
 | `frust-widgets::motion` | Implicit-animation and transition vocabulary, `card_switcher` (see *Card Switcher*), `detent` (pure `Detents` snap-point math + headless `DetentController`) and `presence(open, child)` (`.timing`, `.on_exited`): kept-mounted and owner-controlled — always built and laid out, painted only while visible, input only while open, semantics only while visible; `on_exited` rides the next Housekeeping flush and fires only once an exit is painted (a cleanup cue); core retains no absent view. `MotionExtras` (`extended` 800, `reduced_fade` 120 ms; 0 snaps) sets every reduce-motion collapse |
-| `frust-widgets::nav` | Imperative page-stack navigator, declarative router, and shared-element hero transitions — internally split across six `nav/*.rs` files (see below); single public path via `navigator.rs`'s re-exports |
+| `frust-widgets::nav` | Imperative page-stack navigator, declarative router, and shared-element hero transitions — internally split across six `nav/*.rs` files (see below); single public path via `navigator.rs`'s re-exports. A page's transition resolves `Router::push_with` options, then `Route::transition`, then the navigator default (all collapse under reduce motion). `PushOptions::barrier`/`barrier_dismissible` give a page a route-owned scrim painted under it: never moved by the page's transition, alpha following the route's eased progress (instant under `TransitionSpec::NONE`); an unhandled press and release that lands on no content (layout wrappers are transparent) dismisses through the page's `BackPolicy`, and taps are ignored while a transition is in flight |
 | `frust-widgets::physics` | Pluggable scroll-motion strategy (`ScrollPhysics`, `OverscrollEffect`, `Simulation` ports, platform-adaptive defaults) the scroll surfaces consult — see *Scroll Physics* |
 | `frust-widgets::page_view` | `page_view` + `PageController` (Flutter `PageView` parity: `viewport_fraction`, `pad_ends`, `on_page_changed`, `animate_to_page`/`jump_to_page`, live fractional `page()`, both axes) over `custom_scroll_view` with a crate-private page sliver; `on_page_changed` fires once the page has settled, not mid-drag; eager children only (`page-view-eager-children`) |
 | `frust-widgets::viewport` / `slivers` | `CustomScrollView`/`ViewportWidget` (the sliver viewport) and the sliver family (`slivers::adapter` holds `sliver_box`); `scroll_core` holds the shared `ScrollSurfaceCore` — see *Slivers and the viewport* |
@@ -38,7 +38,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how WIDGETS relates to the other unit
 | `frust-theme` | `Theme` aggregate and its token tables (color, type, shape, elevation, motion, glass); carries no design-language token module of its own — only the neutral/language-free floor (`Theme::neutral()` and friends) |
 
 `nav/`'s files are private, re-exported through `navigator.rs` (stack core, ambient-context idioms,
-options/callbacks, controller, view constructors, edge-swipe driver); tests in `navigator_tests/`.
+options/callbacks, controller, view constructors, edge-swipe driver).
 
 ## Layer Dependencies
 
@@ -102,29 +102,27 @@ Contract*). `frust::authoring` is the toolkit both the baseline set and every pl
     during `Component::build` one frame stale. `PushOptions::on_visibility` and `PageVisibility`
     (Current/Visible/Covered) observe page visibility; the opt-in `cull_covered_builds` (default false)
     skips rebuilds for covered pages, but `on_cleanup` does **not** fire under a covering push.
-  - **Pop-result delivery:** `push_for_result`'s `on_result` callback needs `&mut State`, which the
-    state-free view diff doesn't carry, so a pop still queues it — but the queuing rebuild also
-    raises CORE's pending-result-flush flag, which the same rebuild drains via a `Housekeeping`
-    broadcast (see CORE_ARCHITECTURE.md). An eager pop delivers within the rebuild that applied it; an
-    edge-swipe pop on its settle frame. No further input event is required.
+  - **Pop-result delivery:** `push_for_result`'s `on_result` needs `&mut State`, which the state-free
+    view diff doesn't carry, so a pop queues it and raises CORE's pending-result-flush flag, drained by
+    the same rebuild's `Housekeeping` broadcast (see CORE_ARCHITECTURE.md): an eager pop delivers within
+    that rebuild, an edge-swipe pop on its settle frame.
   - **RouteNavigator:** A thread-safe (`Arc<Mutex<Vec<NavRequest>>>`) navigation handle carrying no closures
     or reactive types, making it `Send + Sync` and usable via `provide_context` from any thread; off-thread
     requests wake the shell and apply in the next rebuild before the navigator reconciles.
-  - **Route params:** Query parameters merge **under** path segment captures; path captures take precedence
-    over query params of the same name, and named-route `path_for_name` round-trips unused params as query.
+  - **Route params:** Query parameters merge **under** path captures (a path capture wins a name clash);
+    named-route `path_for_name` round-trips unused params as query.
   - **Route-state observable (R-B1):** `NavigatorController::route_stack()`/`route_generation()` publish a
     `RouteStack` (route identities bottom→top, depth, generation) and a diffed `NavChange`
-    (Initial/Push/Pop/Replace/Reset) from every committed-mutation site inside `publish_state()`. Staleness
-    contract: an in-flight interactive edge-swipe pop is uncommitted, so the observable still reports the
-    pre-swipe stack until the settle-frame publish; a cancelled swipe publishes nothing (the pre-swipe stack
-    was already correct). Frame-accurate drag chrome wants `NavigatorController::transition()` instead.
+    (Initial/Push/Pop/Replace/Reset) from every committed mutation in `publish_state()`. An uncommitted
+    in-flight edge-swipe pop reports the pre-swipe stack until its settle-frame publish; frame-accurate
+    drag chrome wants `NavigatorController::transition()`.
   - **shell_route (nested navigators):** `shell_route(inner, builder, children)` is a pathless route binding
     a subtree to a second app-owned `NavigatorController` — the shell page stays retained on the enclosing
     stack while its children resolve onto `inner` (go_router's `ShellRoute`). A chain crossing the boundary
     splits there, one structural op per controller; the **keep rule** issues zero ops on the enclosing
     controller once the shell page is placed. A deep link resolved before the shell page exists pre-queues
-    its inner segment and drains on `inner`'s first `build`. Chrome inside the shell page reads the
-    **inner** navigator's `route_stack()` (or the facade's `RouteObserver`), never the enclosing stack.
+    its inner segment, drained on `inner`'s first `build`. Chrome inside the shell reads the **inner**
+    navigator's `route_stack()` (or the facade's `RouteObserver`).
   - **Gesture policy (interactive edge-swipe):** `NavigatorWidget::swipe_armable` gates arming on
     `BackPolicy` — a `DismissAnimated` or `Veto` top page refuses to arm outright (arm-refusal, not a
     dismiss-signal bump) — and resolves the navigator-wide default by rank: page override
@@ -274,7 +272,7 @@ Contract*). `frust::authoring` is the toolkit both the baseline set and every pl
 | `NativeTypefaces` / `FontFace` | A `ThemeExtensions` payload carrying a design system's own native-control font bytes (button/body face pair); no baseline `frust-theme` value attaches it — `frust-glyph::baseline()`, `frust-material::baseline()`, `frust-shadcn::theme()`, and `frust-beui::theme()` all do — see NATIVE_WIDGETS_ARCHITECTURE.md's theme ladder |
 | authoring module (`build_child`/`rebuild_child`/`teardown_child` generic over the child view, `rebuild_children`, `route_event`, `VisitPods`/`visit_children!`) | The sanctioned seam for authoring any widget against `frust-core`, including child-introspection |
 | `Navigator` / `Router` / `hero()` | Page-stack and declarative routing plus shared-element transitions; a custom transition is authored through the facade's `Layer` + `resolve_layers` |
-| `ButtonStyle`, `ScrollInfo`, `ScrollbarStyle`/`ScrollbarShow`, `IconData`/`IconSource`/`StrokedIconSource`, `ImageSource`/`ImageFit` | Small per-widget config/state types shared across the baseline widget set (`ScrollbarShow`: `Never`, `WhileScrolling` — the default — `Hover`, `Always`); an icon is a filled `IconSource` or a stroked, multi-element `StrokedIconSource` (round caps/joins, scaled with the icon, inked in the resolved icon colour; `IconData::resolve` returns one fillable outline, each stroke expanded at 0.02 design units, which fill-only slots ink filled and ignore `stroke_width` overrides for) |
+| `ButtonStyle`, `ScrollInfo`, `ScrollbarStyle`/`ScrollbarShow`, `IconData`/`IconSource`/`StrokedIconSource`/`IconElement`, `ImageSource`/`ImageFit` | Small per-widget config/state types shared across the baseline widget set (`ScrollbarShow`: `Never`, `WhileScrolling` — the default — `Hover`, `Always`); an icon is a filled `IconSource` or a stroked, multi-element `StrokedIconSource` (round caps/joins, scaled with the icon, inked in the resolved icon colour; an `IconElement` may carry opacity, one dash pattern and its own stroke width, runtime-built through `IconData::from_styled_elements`; `IconData::resolve` returns one fillable outline, each stroke expanded at 0.02 design units, which fill-only slots ink filled, baking the dash and dropping opacity, and ignore `stroke_width` overrides for) |
 | `ScrollController` / `ScrollSubscription` / `AnimateTo` / `ItemAlignment` | Programmatic-scroll handle for `ScrollView`/`ListView`, its `on_change` guard, the animate-to duration/curve, and the keyed-row landing alignment — see *Scroll Physics* and *Virtualized ListView* |
 | `ListView` / `ListViewWidget` | Baseline virtualized list: windowed rebuild-time materialization, positional or keyed (`ChildKey`) row identity, optional variable extents, refresh/overscroll parity with `ScrollView` |
 | `CustomScrollView` / `ViewportWidget` / `SliverBoxView` / `ScrollAxis` | Sliver viewport and its box adapter (`ViewportWidget`, `SliverBoxWidget` are frust-widgets-only); `ScrollAxis` is re-exported flat from frust-widgets and the facade |
@@ -328,7 +326,9 @@ an `AnyView<State>` is returned unchanged), so erasure happens once, inside the 
 the child; `build_child`/`rebuild_child`/`teardown_child` are generic over `V: View<State>`, and
 only `rebuild_children`'s `view_of` (mixed/keyed lists) and `OverlaySlot` stay `&AnyView` seams.
 - **Fluent builders:** `column()`/`row()` (`FlexView`: `child`/`flex`/`keyed`/`children`/`push`/
-  `when`/`when_some`) and `stack()` (`StackView`: `child`/`children`/`when`/`when_some`), flat
+  `when`/`when_some`, `gap` between children, and `MainAxisAlignment` `Start`/`Center`/`End`/
+  `SpaceBetween`/`SpaceAround`/`SpaceEvenly`, which distribute leftover space only on a bounded main
+  axis with no flexible child) and `stack()` (`StackView`: `child`/`children`/`when`/`when_some`), flat
   re-exported through `frust_widgets` and `frust`. The `Column`/`Row`/`Stack` sugar remains,
   taking `Vec<V>` with `V: View<State>` (a `Vec`, not an iterator, so `Column(iter.collect())` still infers).
 - **Parameter contract** (widgets, facade, plugins): a single slot is `impl View<State>`

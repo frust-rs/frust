@@ -6,10 +6,67 @@
 //! `on_long_press` closure (a press held past [`LONG_PRESS_MS`] without moving
 //! past the slop). Moving past the slop disarms both (it became a drag). The
 //! wrapper is transparent — every event is still forwarded to the child, so
-//! interactive descendants keep working. v1 recognises **tap + long-press**;
-//! double-tap is deferred, and lacking an input-kind flag on events the slop is
+//! interactive descendants keep working. It recognises **tap + long-press**
+//! and, when a drag callback is attached, **vertical, horizontal and pan
+//! drags** (see [Drag recognition](self#drag-recognition)); double-tap is
+//! deferred, and lacking an input-kind flag on events the slop is
 //! [`TOUCH_SLOP`] uniformly.
 //! Two-finger pinch lives in [`crate::pinch`] ([`crate::pinch::pinch_detector`]).
+//!
+//! # Drag recognition
+//!
+//! Three single-pointer drag recognizers sit beside tap and long-press, each
+//! with `start`/`update`/`end`/`cancel` builders
+//! ([`on_vertical_drag_start`](GestureDetectorView::on_vertical_drag_start),
+//! [`on_horizontal_drag_start`](GestureDetectorView::on_horizontal_drag_start),
+//! [`on_pan_start`](GestureDetectorView::on_pan_start), …). A recognizer takes
+//! part in a press when any of its four callbacks is wired; with none wired the
+//! detector behaves exactly as a tap/long-press detector.
+//!
+//! - **Slops.** A primary `Down` arms and captures as for a tap. The vertical
+//!   recognizer starts once the travel from the `Down` along **its own axis**
+//!   exceeds [`TOUCH_SLOP`] (18 px) — horizontal travel alone never starts it,
+//!   and the horizontal recognizer mirrors that. Pan starts once the straight-line
+//!   travel exceeds twice that (36 px).
+//! - **First to cross wins.** With several recognizers wired, the first whose
+//!   slop is crossed starts and locks the gesture; the others stay silent until
+//!   the next press. When one `Move` crosses several slops at once, the one with
+//!   the largest travel-to-slop ratio wins — the one a straight move from the
+//!   `Down` would have crossed first (ties: vertical, horizontal, pan).
+//! - **Start point and deltas.** The start reports the position where the slop
+//!   was crossed, and the first update's delta is measured from there, so the
+//!   slop travel is never replayed. Each update carries that `Move`'s delta; the
+//!   axis recognizers zero the cross-axis component and also report the signed
+//!   [`primary_delta`](DragUpdateDetails::primary_delta). Positions are local to
+//!   the detector.
+//! - **End and velocity.** An `Up` after the start fires `end` with the release
+//!   velocity in logical px/s, from two [`frust_core::VelocityTracker`]s (x and y)
+//!   fed on every `Move` of the press. The event pass carries no clock, so each
+//!   sample is stamped with the last paint's raw [`PaintCtx::input_time`] —
+//!   the scroll view's approach — never the animation-scaled
+//!   [`PaintCtx::frame_time`], so an animation time scale leaves the velocity
+//!   unchanged.
+//! - **Exclusivity.** Moving past [`TOUCH_SLOP`] disarms tap, long-press and
+//!   hold-progress exactly as before, even when no drag slop has been crossed
+//!   yet; a drag recognizer can still start later in the same press. A
+//!   long-press that already fired keeps the press: no drag starts after it.
+//! - **Cancel.** A platform `Cancel` before any drag started stays silent, as
+//!   for a tap. A `Cancel` after a drag started owes that recognizer's `cancel`
+//!   callback, but the `Cancel` arm itself never reaches application state (a
+//!   structural rebuild delivers its `Cancel` over a throwaway state; see
+//!   `docs/CODE_STANDARDS.md`). It only records the debt and raises
+//!   [`frust_core::mark_pending_result_flush`], and the callback runs from the
+//!   next pass that carries real state — the `Housekeeping` broadcast of the
+//!   next `RenderRoot::rebuild` (the same rebuild, for a structural cancel), or
+//!   an earlier `Down`. A detector torn down mid-drag fires no `cancel`.
+//!
+//! **Inside a scroll view** the scroll sees each `Move` before its child and
+//! claims a drag along its own axis at the same [`TOUCH_SLOP`], sending the
+//! child a `Cancel`: wherever the scroll accepts the drag, a same-axis drag
+//! recognizer never starts (the press is cancelled silently), while a
+//! cross-axis one starts normally.
+//! A started cross-axis drag that later travels past the scroll's slop on the
+//! scroll axis is taken over too, and receives its `cancel`.
 //!
 //! # Long-press firing semantics
 //!
@@ -112,11 +169,134 @@ use std::rc::Rc;
 use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, FrameTime,
     InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, SliverConstraints,
-    SliverGeometry, SliverWidget, TOUCH_SLOP, View, Widget, any,
+    SliverGeometry, SliverWidget, TOUCH_SLOP, VelocityTracker, View, Widget, any,
 };
-use kurbo::{Point, Size};
+use kurbo::{Point, Size, Vec2};
 
-use crate::authoring::presses;
+use crate::authoring::{
+    ErasedArgCallback, ErasedCallback, TypedArgCallback, erase_callback, erase_callback_arg,
+    presses,
+};
+
+/// The straight-line travel a pan must exceed before it starts: twice
+/// [`TOUCH_SLOP`], so an axis drag wired beside it wins a near-straight move.
+const PAN_SLOP: f64 = 2.0 * TOUCH_SLOP;
+
+/// What a drag `start` callback receives: where the drag began.
+///
+/// `#[non_exhaustive]` so fields can be added later; read the public fields.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct DragStartDetails {
+    /// The pointer position, local to the detector, at the `Move` that crossed
+    /// the recognizer's slop (not the `Down`).
+    pub position: Point,
+}
+
+/// What a drag `update` callback receives for one `Move`.
+///
+/// `#[non_exhaustive]` so fields can be added later; read the public fields.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct DragUpdateDetails {
+    /// The pointer position, local to the detector.
+    pub position: Point,
+    /// The movement since the previous update (or since the start point, for
+    /// the first update), in logical px. An axis drag zeroes the cross-axis
+    /// component.
+    pub delta: Vec2,
+    /// The signed movement along the drag's axis — `delta.y` for a vertical
+    /// drag, `delta.x` for a horizontal one; `None` for a pan.
+    pub primary_delta: Option<f64>,
+}
+
+/// What a drag `end` callback receives on release.
+///
+/// `#[non_exhaustive]` so fields can be added later; read the public fields.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct DragEndDetails {
+    /// The release velocity in logical px/s, measured on the raw input clock.
+    /// An axis drag zeroes the cross-axis component.
+    pub velocity: Vec2,
+    /// The signed velocity along the drag's axis; `None` for a pan.
+    pub primary_velocity: Option<f64>,
+}
+
+/// Which drag recognizer a press is tracking.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DragAxis {
+    Vertical,
+    Horizontal,
+    Pan,
+}
+
+impl DragAxis {
+    /// Project a 2D quantity onto this recognizer's axis: the zeroed-cross-axis
+    /// vector and the signed primary component (`None` for a pan).
+    fn project(self, v: Vec2) -> (Vec2, Option<f64>) {
+        match self {
+            DragAxis::Vertical => (Vec2::new(0.0, v.y), Some(v.y)),
+            DragAxis::Horizontal => (Vec2::new(v.x, 0.0), Some(v.x)),
+            DragAxis::Pan => (v, None),
+        }
+    }
+
+    /// How far past its slop `travel` (from the `Down`) has carried this
+    /// recognizer, as `travel / slop`; above `1.0` means crossed. Along a
+    /// straight move from the `Down`, the larger ratio was crossed first.
+    fn slop_ratio(self, travel: Vec2) -> f64 {
+        match self {
+            DragAxis::Vertical => travel.y.abs() / TOUCH_SLOP,
+            DragAxis::Horizontal => travel.x.abs() / TOUCH_SLOP,
+            DragAxis::Pan => travel.hypot() / PAN_SLOP,
+        }
+    }
+}
+
+/// One drag recognizer's view-held, typed callbacks (erased on build).
+struct DragCallbacks<State: 'static> {
+    start: Option<TypedArgCallback<State, DragStartDetails>>,
+    update: Option<TypedArgCallback<State, DragUpdateDetails>>,
+    end: Option<TypedArgCallback<State, DragEndDetails>>,
+    cancel: Option<GestureCallback<State>>,
+}
+
+impl<State: 'static> DragCallbacks<State> {
+    const fn new() -> Self {
+        Self {
+            start: None,
+            update: None,
+            end: None,
+            cancel: None,
+        }
+    }
+
+    fn erase(&self) -> ErasedDragCallbacks {
+        ErasedDragCallbacks {
+            start: self.start.as_ref().map(erase_callback_arg),
+            update: self.update.as_ref().map(erase_callback_arg),
+            end: self.end.as_ref().map(erase_callback_arg),
+            cancel: self.cancel.as_ref().map(erase_callback),
+        }
+    }
+}
+
+/// One drag recognizer's widget-held, `State`-erased callbacks.
+#[derive(Default)]
+struct ErasedDragCallbacks {
+    start: Option<ErasedArgCallback<DragStartDetails>>,
+    update: Option<ErasedArgCallback<DragUpdateDetails>>,
+    end: Option<ErasedArgCallback<DragEndDetails>>,
+    cancel: Option<ErasedCallback>,
+}
+
+impl ErasedDragCallbacks {
+    /// Whether this recognizer takes part in a press: any callback wired.
+    fn is_wired(&self) -> bool {
+        self.start.is_some() || self.update.is_some() || self.end.is_some() || self.cancel.is_some()
+    }
+}
 
 /// The press duration after which a held press becomes a long-press.
 ///
@@ -224,6 +404,9 @@ pub struct GestureDetectorView<State: 'static> {
     on_long_press: Option<GestureCallback<State>>,
     on_hold_progress: Option<crate::authoring::TypedArgCallback<State, f64>>,
     hold_threshold_ms: Option<u64>,
+    vertical_drag: DragCallbacks<State>,
+    horizontal_drag: DragCallbacks<State>,
+    pan: DragCallbacks<State>,
 }
 
 /// Wrap `child` in a gesture detector (no recognisers until one is attached,
@@ -237,7 +420,91 @@ pub fn GestureDetector<State: 'static, V: View<State>>(child: V) -> GestureDetec
         on_long_press: None,
         on_hold_progress: None,
         hold_threshold_ms: None,
+        vertical_drag: DragCallbacks::new(),
+        horizontal_drag: DragCallbacks::new(),
+        pan: DragCallbacks::new(),
     }
+}
+
+/// The builders for one drag recognizer's four callbacks: `$field` names the
+/// view's [`DragCallbacks`], `$label` the recognizer and `$slop` its start
+/// threshold in rustdoc.
+macro_rules! drag_builders {
+    (
+        $field:ident,
+        $label:literal,
+        $slop:literal,
+        $start:ident,
+        $update:ident,
+        $end:ident,
+        $cancel:ident
+    ) => {
+        #[doc = concat!("Call `f` when a ", $label, " starts: once the press has travelled ")]
+        #[doc = concat!($slop, " from the `Down`, before any other wired drag recognizer")]
+        #[doc = "crossed its own slop. The details carry the local position where the slop"]
+        #[doc = "was crossed; a press that starts a drag never taps, long-presses or reports"]
+        #[doc = "hold progress afterwards."]
+        pub fn $start<F: Fn(&mut State, DragStartDetails) + 'static>(mut self, f: F) -> Self {
+            self.$field.start = Some(Rc::new(f));
+            self
+        }
+
+        #[doc = concat!("Call `f` on every `Move` of a started ", $label, " with that move's")]
+        #[doc = "local position and delta. The first delta is measured from the start point,"]
+        #[doc = "so the slop travel is never replayed."]
+        pub fn $update<F: Fn(&mut State, DragUpdateDetails) + 'static>(mut self, f: F) -> Self {
+            self.$field.update = Some(Rc::new(f));
+            self
+        }
+
+        #[doc = concat!("Call `f` when a started ", $label, " is released, with the release")]
+        #[doc = "velocity in logical px/s, measured on the raw input clock (an animation time"]
+        #[doc = "scale does not change it)."]
+        pub fn $end<F: Fn(&mut State, DragEndDetails) + 'static>(mut self, f: F) -> Self {
+            self.$field.end = Some(Rc::new(f));
+            self
+        }
+
+        #[doc = concat!("Call `f` when a started ", $label, " is cancelled: a gesture steal")]
+        #[doc = "(such as a scroll view taking the press over) or a structural rebuild. It"]
+        #[doc = "runs from the next pass that carries application state (normally the next"]
+        #[doc = "rebuild), never from the `Cancel` event itself; a `Cancel` before the drag"]
+        #[doc = "started calls nothing."]
+        pub fn $cancel<F: Fn(&mut State) + 'static>(mut self, f: F) -> Self {
+            self.$field.cancel = Some(Rc::new(f));
+            self
+        }
+    };
+}
+
+impl<State: 'static> GestureDetectorView<State> {
+    drag_builders!(
+        vertical_drag,
+        "vertical drag",
+        "more than 18 px vertically",
+        on_vertical_drag_start,
+        on_vertical_drag_update,
+        on_vertical_drag_end,
+        on_vertical_drag_cancel
+    );
+    drag_builders!(
+        horizontal_drag,
+        "horizontal drag",
+        "more than 18 px horizontally",
+        on_horizontal_drag_start,
+        on_horizontal_drag_update,
+        on_horizontal_drag_end,
+        on_horizontal_drag_cancel
+    );
+    drag_builders!(
+        pan,
+        "pan",
+        "more than 36 px in any direction",
+        on_pan_start,
+        on_pan_update,
+        on_pan_end,
+        on_pan_cancel
+    );
 }
 
 impl<State: 'static> GestureDetectorView<State> {
@@ -316,7 +583,15 @@ enum Recognizer {
         progress: f64,
     },
     /// The press moved past the slop — became a drag; neither recogniser fires.
+    /// Reached only when no drag recognizer is wired.
     Dragged,
+    /// The press moved past the tap slop (tap, long-press and hold are
+    /// disarmed) and a drag recognizer is wired, but none has crossed its own
+    /// slop yet. `down_pos` is where every drag slop is measured from.
+    DragArmed { down_pos: Point },
+    /// A drag recognizer won the press; `last_pos` is the position the next
+    /// update's delta is measured from.
+    Dragging { axis: DragAxis, last_pos: Point },
     /// A long-press already fired for this press — via the threshold-time
     /// Housekeeping broadcast (the common case; see the [module
     /// docs](self#long-press-firing-semantics)) or a post-threshold `Move`/`Up`
@@ -337,6 +612,86 @@ pub struct GestureDetectorWidget {
     /// [`LONG_PRESS_MS`]. Shared by the long-press timer and the hold-progress
     /// computation; reset on every arming `Down`.
     hold: HoldTracker,
+    vertical_drag: ErasedDragCallbacks,
+    horizontal_drag: ErasedDragCallbacks,
+    pan: ErasedDragCallbacks,
+    /// The release-velocity estimators, x and y, cleared on every arming
+    /// `Down` and fed on every `Move` while a drag recognizer is wired.
+    velocity_x: VelocityTracker,
+    velocity_y: VelocityTracker,
+    /// The most recent paint's raw clock ([`PaintCtx::input_time`]), the
+    /// event-pass timestamp for the velocity samples (the event pass carries
+    /// no clock). Stashed only while a drag recognizer is wired and a press is
+    /// in flight.
+    last_input_time: FrameTime,
+    /// A started drag a `Cancel` ended, whose `cancel` callback is owed to the
+    /// next state-bearing pass (see the [module docs](self#drag-recognition)).
+    owed_cancel: Option<DragAxis>,
+}
+
+impl GestureDetectorWidget {
+    /// Whether any drag recognizer takes part in a press.
+    fn drags_wired(&self) -> bool {
+        self.vertical_drag.is_wired() || self.horizontal_drag.is_wired() || self.pan.is_wired()
+    }
+
+    fn drag_callbacks(&mut self, axis: DragAxis) -> &mut ErasedDragCallbacks {
+        match axis {
+            DragAxis::Vertical => &mut self.vertical_drag,
+            DragAxis::Horizontal => &mut self.horizontal_drag,
+            DragAxis::Pan => &mut self.pan,
+        }
+    }
+
+    /// The wired recognizer `travel` (from the `Down`) has carried past its
+    /// slop first, if any: the largest travel-to-slop ratio above `1.0`, ties
+    /// going to vertical, then horizontal, then pan.
+    fn drag_winner(&self, travel: Vec2) -> Option<DragAxis> {
+        let mut winner: Option<(DragAxis, f64)> = None;
+        for (axis, callbacks) in [
+            (DragAxis::Vertical, &self.vertical_drag),
+            (DragAxis::Horizontal, &self.horizontal_drag),
+            (DragAxis::Pan, &self.pan),
+        ] {
+            if !callbacks.is_wired() {
+                continue;
+            }
+            let ratio = axis.slop_ratio(travel);
+            if ratio > 1.0 && winner.is_none_or(|(_, best)| ratio > best) {
+                winner = Some((axis, ratio));
+            }
+        }
+        winner.map(|(axis, _)| axis)
+    }
+
+    /// Whether the press is one whose `Move`s feed the velocity trackers.
+    fn tracks_velocity(&self) -> bool {
+        self.drags_wired()
+            && matches!(
+                self.state,
+                Recognizer::Pressed { .. }
+                    | Recognizer::DragArmed { .. }
+                    | Recognizer::Dragging { .. }
+            )
+    }
+
+    /// Record `position` in both velocity trackers at the stashed raw clock.
+    fn record_velocity(&mut self, position: Point) {
+        let t_ms = self.last_input_time.as_secs_f64() * 1000.0;
+        self.velocity_x.record(t_ms, position.x);
+        self.velocity_y.record(t_ms, position.y);
+    }
+
+    /// Run an owed drag `cancel` callback. Called only from passes that carry
+    /// real application state — never from the `Cancel` arm.
+    fn flush_owed_cancel(&mut self, ctx: &mut EventCtx) {
+        if let Some(axis) = self.owed_cancel.take()
+            && let Some(cb) = self.drag_callbacks(axis).cancel.as_mut()
+        {
+            cb(ctx);
+            ctx.request_redraw();
+        }
+    }
 }
 
 impl<State: 'static> View<State> for GestureDetectorView<State> {
@@ -364,6 +719,13 @@ impl<State: 'static> View<State> for GestureDetectorView<State> {
                     .map(|ms| ms.max(1) as f64)
                     .unwrap_or(LONG_PRESS_MS),
             ),
+            vertical_drag: self.vertical_drag.erase(),
+            horizontal_drag: self.horizontal_drag.erase(),
+            pan: self.pan.erase(),
+            velocity_x: VelocityTracker::new(),
+            velocity_y: VelocityTracker::new(),
+            last_input_time: FrameTime::ZERO,
+            owed_cancel: None,
         }
     }
 
@@ -388,6 +750,9 @@ impl<State: 'static> View<State> for GestureDetectorView<State> {
                 .map(|ms| ms.max(1) as f64)
                 .unwrap_or(LONG_PRESS_MS),
         );
+        element.vertical_drag = self.vertical_drag.erase();
+        element.horizontal_drag = self.horizontal_drag.erase();
+        element.pan = self.pan.erase();
         crate::authoring::rebuild_child(&prev.child, &self.child, &mut element.child, ctx)
     }
 
@@ -450,11 +815,22 @@ impl Widget for GestureDetectorWidget {
                 }
             }
         }
+        // Stash the raw clock for the drag velocity samples: the event pass has
+        // none, and the animation-scaled `frame_time` would stretch the
+        // velocity under a time scale.
+        if self.tracks_velocity() {
+            self.last_input_time = ctx.input_time();
+        }
         self.child.paint_child(ctx, scene);
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         if let InputEvent::Pointer(p) = event {
+            // A `Cancel` that ended a started drag owes its `cancel` callback;
+            // any other pointer phase carries real state, so pay it first.
+            if p.phase != PointerPhase::Cancel {
+                self.flush_owed_cancel(ctx);
+            }
             match p.phase {
                 PointerPhase::Down => {
                     // Only a primary press arms a recognizer. A secondary press
@@ -470,6 +846,8 @@ impl Widget for GestureDetectorWidget {
                         progress: 0.0,
                     };
                     self.hold.cancel();
+                    self.velocity_x.clear();
+                    self.velocity_y.clear();
                     ctx.capture_pointer();
                     // Prompt a paint so the long-press/progress timer starts promptly.
                     ctx.request_redraw();
@@ -477,6 +855,12 @@ impl Widget for GestureDetectorWidget {
                     return EventResult::Handled;
                 }
                 PointerPhase::Move => {
+                    // Feed the release-velocity trackers on every `Move` of a
+                    // press a drag recognizer takes part in.
+                    let tracking = self.tracks_velocity();
+                    if tracking {
+                        self.record_velocity(p.position);
+                    }
                     if let Recognizer::Pressed {
                         down_pos,
                         elapsed,
@@ -488,8 +872,14 @@ impl Widget for GestureDetectorWidget {
                             // Became a drag — disarms both. A mid-hold progress
                             // observation resets to exactly 0.0 (never a stale
                             // >0 value left behind); this is the Move arm, not
-                            // Cancel, so it's allowed to touch state.
-                            self.state = Recognizer::Dragged;
+                            // Cancel, so it's allowed to touch state. With a drag
+                            // recognizer wired the press stays armed for it (its
+                            // own slop is checked below, on this same `Move`).
+                            self.state = if tracking {
+                                Recognizer::DragArmed { down_pos }
+                            } else {
+                                Recognizer::Dragged
+                            };
                             if let Some(cb) = self.on_hold_progress.as_mut() {
                                 cb(ctx, 0.0);
                                 ctx.request_redraw();
@@ -522,6 +912,57 @@ impl Widget for GestureDetectorWidget {
                             }
                         }
                     }
+                    match self.state {
+                        Recognizer::DragArmed { down_pos } => {
+                            if let Some(axis) = self.drag_winner(p.position - down_pos) {
+                                // The start point is where the slop was crossed,
+                                // and the first update measures from here, so the
+                                // slop travel is never replayed.
+                                self.state = Recognizer::Dragging {
+                                    axis,
+                                    last_pos: p.position,
+                                };
+                                self.child.event_child(ctx, event);
+                                if let Some(cb) = self.drag_callbacks(axis).start.as_mut() {
+                                    cb(
+                                        ctx,
+                                        DragStartDetails {
+                                            position: p.position,
+                                        },
+                                    );
+                                }
+                                ctx.request_redraw();
+                                return EventResult::Handled;
+                            }
+                        }
+                        Recognizer::Dragging { axis, last_pos } => {
+                            self.state = Recognizer::Dragging {
+                                axis,
+                                last_pos: p.position,
+                            };
+                            let (delta, primary_delta) = axis.project(p.position - last_pos);
+                            self.child.event_child(ctx, event);
+                            if let Some(cb) = self.drag_callbacks(axis).update.as_mut() {
+                                cb(
+                                    ctx,
+                                    DragUpdateDetails {
+                                        position: p.position,
+                                        delta,
+                                        primary_delta,
+                                    },
+                                );
+                            }
+                            ctx.request_redraw();
+                            return EventResult::Handled;
+                        }
+                        _ => {}
+                    }
+                    if tracking {
+                        // Keep painting through the press so the next sample's
+                        // stashed raw clock is fresh, even on a dirty-driven
+                        // desktop shell.
+                        ctx.request_redraw();
+                    }
                     self.child.event_child(ctx, event);
                     return EventResult::Handled;
                 }
@@ -538,6 +979,11 @@ impl Widget for GestureDetectorWidget {
                     let final_progress = match self.state {
                         Recognizer::Pressed { elapsed: true, .. } => Some(1.0),
                         Recognizer::Pressed { elapsed: false, .. } => Some(0.0),
+                        _ => None,
+                    };
+                    // A started drag ends here; nothing else fires for it.
+                    let drag_end = match self.state {
+                        Recognizer::Dragging { axis, .. } => Some(axis),
                         _ => None,
                     };
                     self.state = Recognizer::Idle;
@@ -563,11 +1009,36 @@ impl Widget for GestureDetectorWidget {
                         cb(ctx);
                         ctx.request_redraw();
                     }
+                    if let Some(axis) = drag_end {
+                        let velocity =
+                            Vec2::new(self.velocity_x.velocity(), self.velocity_y.velocity());
+                        let (velocity, primary_velocity) = axis.project(velocity);
+                        if let Some(cb) = self.drag_callbacks(axis).end.as_mut() {
+                            cb(
+                                ctx,
+                                DragEndDetails {
+                                    velocity,
+                                    primary_velocity,
+                                },
+                            );
+                        }
+                        ctx.request_redraw();
+                    }
                     return EventResult::Handled;
                 }
                 PointerPhase::Cancel => {
                     // Cancel only clears internal flags — never touches app state
-                    // (no callback), per the interaction-semantics contract.
+                    // (no callback), per the interaction-semantics contract. A
+                    // started drag's `cancel` is owed instead: latch the
+                    // deferred-callback flush so the next rebuild's Housekeeping
+                    // broadcast (real state in scope) pays it.
+                    if let Recognizer::Dragging { axis, .. } = self.state
+                        && self.drag_callbacks(axis).cancel.is_some()
+                    {
+                        self.owed_cancel = Some(axis);
+                        frust_core::mark_pending_result_flush();
+                        ctx.request_redraw();
+                    }
                     self.state = Recognizer::Idle;
                     self.child.event_child(ctx, event);
                     self.child.set_active(false);
@@ -576,6 +1047,9 @@ impl Widget for GestureDetectorWidget {
             }
         }
         if event.is_broadcast() {
+            // An owed drag `cancel` (see the Cancel arm) rides the first
+            // broadcast after it: the Housekeeping pass carries real state.
+            self.flush_owed_cancel(ctx);
             // `InputEvent::Housekeeping` today: the delivery vehicle for a
             // threshold-time long-press latched during an earlier paint (see
             // the module docs' "Long-press firing semantics") — the soonest
@@ -635,6 +1109,12 @@ impl Widget for GestureDetectorWidget {
         } else {
             None
         }
+    }
+
+    // Paints nothing of its own: the child is the content, and a press a
+    // handler takes is already `Handled`.
+    fn hit_test_self(&self) -> bool {
+        false
     }
 
     crate::authoring::visit_children!(child);
@@ -1471,5 +1951,392 @@ mod tests {
         assert!(!hold.fired(ft(0.0)));
         hold.set_threshold_ms(200.0);
         assert!(hold.fired(ft(250.0)));
+    }
+
+    // --- Drag recognition ------------------------------------------------------
+    //
+    // The velocity tests drive the real paint path through `RenderRoot`, the
+    // only place a clock is threaded in: each paint stashes the raw input clock
+    // that stamps the following `Move`.
+
+    #[derive(Default)]
+    struct DragLog {
+        taps: u32,
+        starts: Vec<(&'static str, DragStartDetails)>,
+        updates: Vec<(&'static str, DragUpdateDetails)>,
+        ends: Vec<(&'static str, DragEndDetails)>,
+        cancels: Vec<&'static str>,
+    }
+
+    type DragView = GestureDetectorView<DragLog>;
+
+    fn tap_detector() -> DragView {
+        GestureDetector::<DragLog, _>(Blank).on_tap(|s: &mut DragLog| s.taps += 1)
+    }
+
+    fn wire_vertical(view: DragView) -> DragView {
+        view.on_vertical_drag_start(|s: &mut DragLog, d| s.starts.push(("v", d)))
+            .on_vertical_drag_update(|s: &mut DragLog, d| s.updates.push(("v", d)))
+            .on_vertical_drag_end(|s: &mut DragLog, d| s.ends.push(("v", d)))
+            .on_vertical_drag_cancel(|s: &mut DragLog| s.cancels.push("v"))
+    }
+
+    fn wire_horizontal(view: DragView) -> DragView {
+        view.on_horizontal_drag_start(|s: &mut DragLog, d| s.starts.push(("h", d)))
+            .on_horizontal_drag_update(|s: &mut DragLog, d| s.updates.push(("h", d)))
+            .on_horizontal_drag_end(|s: &mut DragLog, d| s.ends.push(("h", d)))
+            .on_horizontal_drag_cancel(|s: &mut DragLog| s.cancels.push("h"))
+    }
+
+    fn wire_pan(view: DragView) -> DragView {
+        view.on_pan_start(|s: &mut DragLog, d| s.starts.push(("pan", d)))
+            .on_pan_update(|s: &mut DragLog, d| s.updates.push(("pan", d)))
+            .on_pan_end(|s: &mut DragLog, d| s.ends.push(("pan", d)))
+            .on_pan_cancel(|s: &mut DragLog| s.cancels.push("pan"))
+    }
+
+    fn vertical_logic(_: &mut DragLog) -> DragView {
+        wire_vertical(tap_detector())
+    }
+
+    fn both_axes_logic(_: &mut DragLog) -> DragView {
+        wire_horizontal(wire_vertical(tap_detector()))
+    }
+
+    fn pan_logic(_: &mut DragLog) -> DragView {
+        wire_pan(tap_detector())
+    }
+
+    fn drag_root(logic: fn(&mut DragLog) -> DragView) -> RenderRoot<DragLog, DragView> {
+        let mut root = RenderRoot::new();
+        let mut log = DragLog::default();
+        root.rebuild(&mut { logic }, &mut log);
+        root.layout(Size::new(100.0, 100.0));
+        root
+    }
+
+    fn assert_close(actual: f64, expected: f64, what: &str) {
+        assert!(
+            (actual - expected).abs() < 1e-6,
+            "{what}: expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn vertical_drag_starts_only_past_its_own_axis_slop() {
+        let mut root = drag_root(vertical_logic);
+        let mut log = DragLog::default();
+        root.event(&mut log, &ev(PointerPhase::Down, 50.0, 40.0));
+        // 30 px of horizontal travel alone never starts a vertical drag.
+        root.event(&mut log, &ev(PointerPhase::Move, 80.0, 40.0));
+        assert!(log.starts.is_empty(), "horizontal travel does not start it");
+        // Exactly the slop is not past it.
+        root.event(&mut log, &ev(PointerPhase::Move, 80.0, 58.0));
+        assert!(log.starts.is_empty(), "18 px is not past the slop");
+        root.event(&mut log, &ev(PointerPhase::Move, 80.0, 59.0));
+        assert_eq!(log.starts.len(), 1, "19 px of vertical travel starts it");
+        assert_eq!(log.starts[0].0, "v");
+        assert_eq!(
+            log.starts[0].1.position,
+            Point::new(80.0, 59.0),
+            "the start point is where the slop was crossed"
+        );
+        assert!(log.updates.is_empty(), "the crossing move is not an update");
+    }
+
+    #[test]
+    fn vertical_drag_update_deltas_sum_to_the_travel_after_the_start_point() {
+        let mut root = drag_root(vertical_logic);
+        let mut log = DragLog::default();
+        root.event(&mut log, &ev(PointerPhase::Down, 50.0, 10.0));
+        root.event(&mut log, &ev(PointerPhase::Move, 50.0, 30.0)); // starts at y = 30
+        root.event(&mut log, &ev(PointerPhase::Move, 52.0, 40.0));
+        root.event(&mut log, &ev(PointerPhase::Move, 47.0, 55.0));
+        root.event(&mut log, &ev(PointerPhase::Move, 49.0, 70.0));
+        assert_eq!(log.starts.len(), 1);
+        assert_eq!(log.updates.len(), 3);
+        let primary: f64 = log
+            .updates
+            .iter()
+            .map(|(_, d)| d.primary_delta.unwrap())
+            .sum();
+        let dy: f64 = log.updates.iter().map(|(_, d)| d.delta.y).sum();
+        assert_close(
+            primary,
+            40.0,
+            "primary deltas sum to the travel past the start",
+        );
+        assert_close(dy, 40.0, "delta.y sums to the same travel");
+        assert!(
+            log.updates.iter().all(|(_, d)| d.delta.x == 0.0),
+            "a vertical drag zeroes the cross-axis delta"
+        );
+        assert_eq!(log.updates[2].1.position, Point::new(49.0, 70.0));
+    }
+
+    /// Down at the top, then ten moves at 8 px per 16 ms of raw clock
+    /// (500 px/s), each preceded by the paint that stamps it, then `Up`.
+    fn scripted_constant_speed_drag(root: &mut RenderRoot<DragLog, DragView>, log: &mut DragLog) {
+        let mut sink = NullScene;
+        root.event(log, &ev(PointerPhase::Down, 50.0, 0.0));
+        root.paint(&mut sink, ft(1_000.0));
+        for i in 1..=10 {
+            root.paint(&mut sink, ft(1_000.0 + 16.0 * f64::from(i)));
+            root.event(log, &ev(PointerPhase::Move, 50.0, 8.0 * f64::from(i)));
+        }
+        root.event(log, &ev(PointerPhase::Up, 50.0, 80.0));
+    }
+
+    #[test]
+    fn vertical_drag_end_reports_the_scripted_release_velocity() {
+        let mut root = drag_root(vertical_logic);
+        let mut log = DragLog::default();
+        scripted_constant_speed_drag(&mut root, &mut log);
+        assert_eq!(log.ends.len(), 1, "the release ends the drag");
+        let end = log.ends[0].1;
+        assert!(
+            (end.velocity.y - 500.0).abs() < 1.0,
+            "velocity.y matches the scripted 500 px/s, got {}",
+            end.velocity.y
+        );
+        assert_eq!(end.velocity.x, 0.0, "a vertical drag zeroes the cross axis");
+        let primary = end
+            .primary_velocity
+            .expect("an axis drag reports a primary velocity");
+        assert!(
+            (primary - 500.0).abs() < 1.0,
+            "primary velocity, got {primary}"
+        );
+        assert_eq!(log.taps, 0);
+    }
+
+    #[test]
+    fn drag_velocity_uses_the_raw_input_clock_under_an_animation_time_scale() {
+        // At quarter speed the animation clock advances 4 ms per 16 ms of raw
+        // time: a velocity read off it would come out at 2000 px/s.
+        frust_core::anim::with_thread_animation_time_scale(0.25, || {
+            let mut root = drag_root(vertical_logic);
+            let mut log = DragLog::default();
+            scripted_constant_speed_drag(&mut root, &mut log);
+            let primary = log.ends[0].1.primary_velocity.unwrap();
+            assert!(
+                (primary - 500.0).abs() < 1.0,
+                "the time scale leaves the velocity at 500 px/s, got {primary}"
+            );
+        });
+    }
+
+    #[test]
+    fn pan_starts_only_past_twice_the_touch_slop() {
+        let mut root = drag_root(pan_logic);
+        let mut log = DragLog::default();
+        root.event(&mut log, &ev(PointerPhase::Down, 10.0, 10.0));
+        // hypot(25, 25) ≈ 35.4: past the tap slop, short of the pan slop.
+        root.event(&mut log, &ev(PointerPhase::Move, 35.0, 35.0));
+        assert!(log.starts.is_empty(), "a pan needs 36 px");
+        // hypot(26, 26) ≈ 36.8.
+        root.event(&mut log, &ev(PointerPhase::Move, 36.0, 36.0));
+        assert_eq!(log.starts.len(), 1, "past 36 px the pan starts");
+        assert_eq!(log.starts[0].0, "pan");
+        root.event(&mut log, &ev(PointerPhase::Move, 40.0, 33.0));
+        let update = log.updates[0].1;
+        assert_eq!(update.delta, Vec2::new(4.0, -3.0), "a pan keeps both axes");
+        assert_eq!(update.primary_delta, None, "a pan has no primary axis");
+        root.event(&mut log, &ev(PointerPhase::Up, 40.0, 33.0));
+        assert_eq!(log.ends[0].1.primary_velocity, None);
+        assert_eq!(log.taps, 0, "the press past the tap slop is no tap");
+    }
+
+    #[test]
+    fn with_both_axes_wired_the_first_axis_to_cross_wins() {
+        let mut root = drag_root(both_axes_logic);
+        let mut log = DragLog::default();
+        root.event(&mut log, &ev(PointerPhase::Down, 50.0, 50.0));
+        root.event(&mut log, &ev(PointerPhase::Move, 60.0, 69.0)); // vertical crosses first
+        // A later horizontal sweep stays a vertical drag: the winner locks.
+        root.event(&mut log, &ev(PointerPhase::Move, 95.0, 70.0));
+        root.event(&mut log, &ev(PointerPhase::Up, 95.0, 70.0));
+        assert_eq!(log.starts.len(), 1);
+        assert_eq!(log.starts[0].0, "v");
+        assert_eq!(log.updates.len(), 1);
+        assert_eq!(log.updates[0].0, "v");
+        assert_eq!(log.updates[0].1.delta, Vec2::new(0.0, 1.0));
+        assert_eq!(log.ends.len(), 1);
+        assert_eq!(log.ends[0].0, "v");
+
+        // Both slops crossed by one move: the larger travel-to-slop ratio wins.
+        let mut log = DragLog::default();
+        root.event(&mut log, &ev(PointerPhase::Down, 50.0, 50.0));
+        root.event(&mut log, &ev(PointerPhase::Move, 75.0, 70.0));
+        assert_eq!(log.starts.len(), 1);
+        assert_eq!(log.starts[0].0, "h", "25 px across beats 20 px down");
+    }
+
+    #[test]
+    fn a_started_drag_suppresses_the_tap() {
+        let mut root = drag_root(vertical_logic);
+        let mut log = DragLog::default();
+        root.event(&mut log, &ev(PointerPhase::Down, 50.0, 10.0));
+        root.event(&mut log, &ev(PointerPhase::Move, 50.0, 40.0));
+        root.event(&mut log, &ev(PointerPhase::Up, 50.0, 40.0));
+        assert_eq!(log.taps, 0, "a drag never also taps");
+        assert_eq!(log.ends.len(), 1);
+
+        // A press that stays inside the slop is still a tap with drags wired.
+        let mut log = DragLog::default();
+        root.event(&mut log, &ev(PointerPhase::Down, 50.0, 10.0));
+        root.event(&mut log, &ev(PointerPhase::Move, 52.0, 20.0));
+        root.event(&mut log, &ev(PointerPhase::Up, 52.0, 20.0));
+        assert_eq!(log.taps, 1);
+        assert!(log.starts.is_empty() && log.ends.is_empty());
+    }
+
+    #[test]
+    fn cancel_after_the_start_fires_cancel_and_before_it_fires_nothing() {
+        let mut root = drag_root(vertical_logic);
+        let mut log = DragLog::default();
+        root.event(&mut log, &ev(PointerPhase::Down, 50.0, 10.0));
+        root.event(&mut log, &ev(PointerPhase::Move, 50.0, 40.0));
+        root.event(&mut log, &ev(PointerPhase::Cancel, 50.0, 40.0));
+        assert!(
+            log.cancels.is_empty(),
+            "the Cancel arm itself touches no state"
+        );
+        // The next rebuild's Housekeeping broadcast pays the owed cancel.
+        root.rebuild(&mut vertical_logic, &mut log);
+        assert_eq!(log.cancels, vec!["v"], "a cancelled drag fires its cancel");
+        assert!(log.ends.is_empty(), "a cancelled drag never ends");
+        root.rebuild(&mut vertical_logic, &mut log);
+        assert_eq!(log.cancels.len(), 1, "the cancel fires once");
+
+        // Before the start — inside the tap slop, then past it but short of the
+        // vertical slop — a Cancel stays silent.
+        for (x, y) in [(55.0, 15.0), (80.0, 15.0)] {
+            let mut log = DragLog::default();
+            root.event(&mut log, &ev(PointerPhase::Down, 50.0, 10.0));
+            root.event(&mut log, &ev(PointerPhase::Move, x, y));
+            root.event(&mut log, &ev(PointerPhase::Cancel, x, y));
+            root.rebuild(&mut vertical_logic, &mut log);
+            assert!(log.cancels.is_empty(), "no drag started, no cancel");
+            assert!(log.starts.is_empty());
+            assert_eq!(log.taps, 0);
+        }
+    }
+
+    #[test]
+    fn a_cancel_over_throwaway_state_defers_the_drag_cancel_to_housekeeping() {
+        // A structural rebuild cancels a captured child over `()` state; the
+        // Cancel arm must not reach for application state there.
+        let view = vertical_logic(&mut DragLog::default());
+        let mut counter = 0u64;
+        let mut w: GestureDetectorWidget =
+            View::<DragLog>::build(&view, &mut BuildCtx::new(&mut counter));
+        let mut log = DragLog::default();
+        let send = |w: &mut GestureDetectorWidget, log: &mut DragLog, event: &InputEvent| {
+            let state_any: &mut dyn Any = log;
+            let mut ctx = EventCtx::new(state_any, Point::ZERO, Size::new(100.0, 100.0));
+            w.event(&mut ctx, event);
+        };
+        send(&mut w, &mut log, &ev(PointerPhase::Down, 50.0, 10.0));
+        send(&mut w, &mut log, &ev(PointerPhase::Move, 50.0, 40.0));
+        assert_eq!(log.starts.len(), 1);
+        let mut unit = ();
+        let mut ctx = EventCtx::new(&mut unit, Point::ZERO, Size::new(100.0, 100.0));
+        w.event(&mut ctx, &ev(PointerPhase::Cancel, 50.0, 40.0));
+        assert!(
+            frust_core::take_pending_result_flush(),
+            "the owed cancel latches the deferred-callback flush"
+        );
+        send(&mut w, &mut log, &InputEvent::Housekeeping);
+        assert_eq!(log.cancels, vec!["v"], "Housekeeping pays the owed cancel");
+    }
+
+    #[test]
+    fn a_detector_without_drag_callbacks_keeps_its_unarmed_drag_state() {
+        // No drag recognizer wired: past the slop the press is plain `Dragged`,
+        // tracks no velocity and stashes no clock.
+        let mut w = widget(true);
+        let mut state = TapState::default();
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 10.0, 10.0));
+        assert!(!w.tracks_velocity());
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Move, 10.0, 60.0));
+        assert!(matches!(w.state, Recognizer::Dragged));
+        assert!(w.velocity_y.is_empty());
+    }
+
+    /// A fixed 100×400 child, tall enough to scroll in a 100×100 viewport.
+    struct Tall;
+    struct TallWidget;
+    impl<State: 'static> View<State> for Tall {
+        type Element = TallWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> TallWidget {
+            TallWidget
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut TallWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+    impl Widget for TallWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(100.0, 400.0))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+    }
+
+    type ScrolledDrag = crate::scroll::ScrollView<DragLog>;
+
+    fn scrolled_root(logic: fn(&mut DragLog) -> ScrolledDrag) -> RenderRoot<DragLog, ScrolledDrag> {
+        let mut root = RenderRoot::new();
+        let mut log = DragLog::default();
+        root.rebuild(&mut { logic }, &mut log);
+        root.layout(Size::new(100.0, 100.0));
+        root
+    }
+
+    #[test]
+    fn inside_a_vertical_scroll_view_a_cross_axis_drag_starts_and_a_same_axis_one_does_not() {
+        fn horizontal_in_scroll(_: &mut DragLog) -> ScrolledDrag {
+            crate::scroll::scroll_view(wire_horizontal(GestureDetector::<DragLog, _>(Tall)))
+        }
+        fn vertical_in_scroll(_: &mut DragLog) -> ScrolledDrag {
+            crate::scroll::scroll_view(wire_vertical(GestureDetector::<DragLog, _>(Tall)))
+        }
+
+        let mut root = scrolled_root(horizontal_in_scroll);
+        let mut log = DragLog::default();
+        root.event(&mut log, &ev(PointerPhase::Down, 20.0, 50.0));
+        root.event(&mut log, &ev(PointerPhase::Move, 50.0, 52.0));
+        root.event(&mut log, &ev(PointerPhase::Move, 60.0, 53.0));
+        root.event(&mut log, &ev(PointerPhase::Up, 60.0, 53.0));
+        assert_eq!(
+            log.starts.len(),
+            1,
+            "a cross-axis drag starts inside the scroll"
+        );
+        assert_eq!(log.starts[0].0, "h");
+        assert_eq!(log.updates[0].1.primary_delta, Some(10.0));
+        assert_eq!(log.ends.len(), 1);
+
+        let mut root = scrolled_root(vertical_in_scroll);
+        let mut log = DragLog::default();
+        root.event(&mut log, &ev(PointerPhase::Down, 50.0, 80.0));
+        root.event(&mut log, &ev(PointerPhase::Move, 50.0, 50.0));
+        root.event(&mut log, &ev(PointerPhase::Move, 50.0, 30.0));
+        root.event(&mut log, &ev(PointerPhase::Up, 50.0, 30.0));
+        root.rebuild(&mut vertical_in_scroll, &mut log);
+        assert!(
+            log.starts.is_empty(),
+            "the scroll claims the same-axis drag first"
+        );
+        assert!(
+            log.cancels.is_empty(),
+            "a press cancelled before its start is silent"
+        );
+        assert!(log.ends.is_empty());
     }
 }

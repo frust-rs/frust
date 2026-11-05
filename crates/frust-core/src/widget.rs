@@ -1370,6 +1370,14 @@ pub trait Widget: Any {
         false
     }
 
+    /// Whether a pointer event inside this widget's own bounds lands on the widget itself, rather
+    /// than only on whichever child contains the point. A widget that only positions, sizes or
+    /// insets its children and paints nothing of its own returns `false`. The default `true` is
+    /// the conservative answer: an unknown widget counts as content.
+    fn hit_test_self(&self) -> bool {
+        true
+    }
+
     /// Visit the children traversal may enter, in focus order; defaults to
     /// [`Widget::visit_children`]. A container showing only some children narrows it.
     fn visit_focus_children(&self, visitor: &mut dyn FnMut(&ChildPod)) {
@@ -1416,6 +1424,10 @@ impl Widget for Box<dyn Widget> {
 
     fn is_focusable(&self) -> bool {
         (**self).is_focusable()
+    }
+
+    fn hit_test_self(&self) -> bool {
+        (**self).hit_test_self()
     }
 
     fn visit_focus_children(&self, visitor: &mut dyn FnMut(&ChildPod)) {
@@ -2070,6 +2082,17 @@ impl ChildPod {
 
     /// Dispatch `local` to the child widget and fold what it bubbled into `ctx`.
     fn dispatch_local(&mut self, ctx: &mut EventCtx, local: &InputEvent) -> EventResult {
+        // The geometric record `EventCtx::track_pointer_hits` reports: a pointer
+        // event that lands inside this pod's own bounds, handled or not, when its
+        // widget hit-tests itself (`Widget::hit_test_self`). A hit-transparent
+        // wrapper records nothing; its children still record their own hits. A
+        // capture path delivering a point outside the bounds records nothing.
+        if let InputEvent::Pointer(p) = local
+            && self.size.to_rect().contains(p.position)
+            && self.widget.hit_test_self()
+        {
+            ctx.note_pointer_hit(self.size.area());
+        }
         let hovered = self.hover_epoch == ctx.hover_epoch() && ctx.is_hovered();
         // A capturing pod never lets a hover claim through, and the first
         // claim recorded (the topmost claimant's) closes the pass.
@@ -5179,5 +5202,151 @@ mod contact_release_tests {
         let _pass = ContactPass::enter(PointerId::touch(1), true);
         assert!(!released(&mut pod, PointerPhase::Move));
         assert!(inner_active(&mut pod), "the claimant's link stands");
+    }
+}
+
+#[cfg(test)]
+mod pointer_hit_tests {
+    use super::*;
+    use crate::event::{PointerButton, PointerEvent, PointerPhase};
+
+    /// A leaf that fills a fixed size and ignores every event.
+    struct Inert(Size);
+    impl Widget for Inert {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(self.0)
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+    }
+
+    /// A full-size wrapper that places its child at (10, 10) and routes a
+    /// pointer to it only when the child's bounds contain it; the flag is its
+    /// [`Widget::hit_test_self`] answer.
+    struct Wrap(ChildPod, bool);
+    impl Widget for Wrap {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            self.0.set_origin(Point::new(10.0, 10.0));
+            self.0.layout_child(ctx, &bc.loosen());
+            bc.max()
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if self.0.contains(event.position()) {
+                return self.0.event_child(ctx, event);
+            }
+            EventResult::Ignored
+        }
+        fn hit_test_self(&self) -> bool {
+            self.1
+        }
+    }
+
+    /// A 100x100 wrapper over a 20x10 inert child, laid out.
+    fn wrapped() -> ChildPod {
+        laid_out(Box::new(Wrap(inert_child(), true)))
+    }
+
+    /// The same shape, its wrapper hit-transparent.
+    fn wrapped_transparent() -> ChildPod {
+        laid_out(Box::new(Wrap(inert_child(), false)))
+    }
+
+    fn inert_child() -> ChildPod {
+        ChildPod::new(Box::new(Inert(Size::new(20.0, 10.0))))
+    }
+
+    fn laid_out(widget: Box<dyn Widget>) -> ChildPod {
+        let mut pod = ChildPod::new(widget);
+        let mut lctx = LayoutCtx::new();
+        pod.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(100.0, 100.0)));
+        pod
+    }
+
+    fn down(x: f64, y: f64) -> InputEvent {
+        InputEvent::Pointer(PointerEvent {
+            phase: PointerPhase::Down,
+            position: Point::new(x, y),
+            button: PointerButton::Primary,
+        })
+    }
+
+    /// The smallest pod area `event` landed in, dispatched into `pod`.
+    fn smallest_hit(pod: &mut ChildPod, event: &InputEvent) -> Option<f64> {
+        let mut unit = ();
+        let mut ctx = EventCtx::new(&mut unit, Point::ZERO, Size::new(100.0, 100.0));
+        ctx.track_pointer_hits(|ctx| pod.event_child(ctx, event)).1
+    }
+
+    #[test]
+    fn a_press_on_the_inner_box_reports_its_area() {
+        let mut pod = wrapped();
+        assert_eq!(smallest_hit(&mut pod, &down(15.0, 15.0)), Some(200.0));
+    }
+
+    #[test]
+    fn a_press_beside_the_inner_box_reports_only_the_wrapper() {
+        let mut pod = wrapped();
+        assert_eq!(smallest_hit(&mut pod, &down(50.0, 50.0)), Some(10_000.0));
+    }
+
+    #[test]
+    fn a_press_beside_the_child_of_a_hit_transparent_wrapper_reports_none() {
+        let mut pod = wrapped_transparent();
+        assert_eq!(smallest_hit(&mut pod, &down(50.0, 50.0)), None);
+    }
+
+    #[test]
+    fn the_child_of_a_hit_transparent_wrapper_still_reports_its_area() {
+        let mut pod = wrapped_transparent();
+        assert_eq!(smallest_hit(&mut pod, &down(15.0, 15.0)), Some(200.0));
+    }
+
+    #[test]
+    fn a_boxed_widget_keeps_its_hit_transparency() {
+        let boxed: Box<dyn Widget> = Box::new(Wrap(inert_child(), false));
+        assert!(!<Box<dyn Widget> as Widget>::hit_test_self(&boxed));
+        let mut pod = laid_out(Box::new(boxed));
+        assert_eq!(smallest_hit(&mut pod, &down(50.0, 50.0)), None);
+    }
+
+    #[test]
+    fn a_press_outside_every_pod_reports_none() {
+        let mut pod = wrapped();
+        assert_eq!(smallest_hit(&mut pod, &down(150.0, 50.0)), None);
+    }
+
+    #[test]
+    fn a_non_pointer_event_records_nothing() {
+        let mut pod = wrapped();
+        let key = InputEvent::Key(crate::event::KeyEvent {
+            key: crate::event::Key::Named(crate::event::NamedKey::Enter),
+            modifiers: crate::event::Modifiers::default(),
+            repeat: false,
+        });
+        assert_eq!(smallest_hit(&mut pod, &key), None);
+    }
+
+    #[test]
+    fn a_nested_scope_reports_its_own_hits_and_folds_them_outward() {
+        let mut pod = wrapped();
+        let mut unit = ();
+        let mut ctx = EventCtx::new(&mut unit, Point::ZERO, Size::new(100.0, 100.0));
+        let (inner, outer) = ctx.track_pointer_hits(|ctx| {
+            pod.event_child(ctx, &down(50.0, 50.0));
+            ctx.track_pointer_hits(|ctx| pod.event_child(ctx, &down(15.0, 15.0)))
+                .1
+        });
+        assert_eq!(inner, Some(200.0), "the inner scope sees only its press");
+        assert_eq!(outer, Some(200.0), "the outer scope also sees the inner's");
+    }
+
+    #[test]
+    fn hits_outside_a_scope_never_reach_a_later_one() {
+        let mut pod = wrapped();
+        let mut unit = ();
+        let mut ctx = EventCtx::new(&mut unit, Point::ZERO, Size::new(100.0, 100.0));
+        pod.event_child(&mut ctx, &down(15.0, 15.0));
+        let (_, smallest) = ctx.track_pointer_hits(|ctx| pod.event_child(ctx, &down(50.0, 50.0)));
+        assert_eq!(smallest, Some(10_000.0));
     }
 }

@@ -509,10 +509,11 @@ fn scaffold_chrome() -> CorpusCase {
 /// [`frust_widgets::test_support`] leaves and plain filled boxes so nothing
 /// but the CONTAINER's arithmetic is under test.
 ///
-/// Main-axis alignment is not varied: the baseline flex ships only
-/// [`frust_widgets::MainAxisAlignment::Start`] today, so the share split
+/// Main-axis alignment and gap are not varied here: the flex now offers `gap`
+/// and the non-Start [`frust_widgets::MainAxisAlignment`] variants, but this
+/// case predates them and stays on `Start`, so the share split
 /// (`flex: 0` / `1` / `2` over the same free space) is what carries the
-/// distribution coverage.
+/// distribution coverage. The new properties are unit-tested in `frust-widgets`.
 fn flex_layout() -> CorpusCase {
     fn record(scene: &mut Scene) {
         record_still(scene, |_| {

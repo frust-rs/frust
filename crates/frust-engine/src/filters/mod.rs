@@ -70,7 +70,9 @@
 //! [`BACKDROP_CAP_CEILING`]: each backdrop costs a surface cut, a copy and a
 //! blur's whole sequence, and a frame recording more than the cap is refused
 //! whole with [`EngineError::TooManyBackdrops`], never drawn with some of its
-//! backdrops missing.
+//! backdrops missing. Only a backdrop whose blur region reaches the frame
+//! target counts ([`backdrop_region`] answering `Some`), so one scrolled clear
+//! of the frame does not.
 //!
 //! ## What is pure, and what is not
 //!
@@ -107,10 +109,15 @@ use vello_common::util::extract_scales;
 
 use crate::error::EngineError;
 
-/// The default cap: the most `Command::BackdropBlur`s one frame is served
-/// with until an app sets another through [`set_max_backdrops_per_frame`]; a
-/// frame recording more than the cap in force is refused with
-/// [`EngineError::TooManyBackdrops`].
+/// The default cap: the most `Command::BackdropBlur`s (those whose blur region
+/// reaches the target) one frame is served with until an app sets another
+/// through [`set_max_backdrops_per_frame`]; a frame recording more than the cap
+/// in force is refused with [`EngineError::TooManyBackdrops`].
+///
+/// The count is a superset of the backdrops the frame draws: it ignores clip
+/// coverage, and inside a retained bracket whose presentation scale is not
+/// exactly 1 it counts every backdrop, because that scale can move a rectangle
+/// onto the target.
 ///
 /// Four covers the glass surfaces a screen layers at once (an app bar, a tab
 /// bar, a sheet and a dialog over it) with room to spare, while keeping a
@@ -136,9 +143,9 @@ static BACKDROP_CAP: AtomicUsize = AtomicUsize::new(MAX_BACKDROPS_PER_FRAME);
 /// Read once per compiled frame, at the top of the compiler's up-front
 /// validation, so a change lands on the next frame compiled and never splits
 /// one. The refusal contract is unchanged at any cap: a frame recording more
-/// `Command::BackdropBlur`s than the cap is refused whole with
-/// [`EngineError::TooManyBackdrops`] (carrying the cap as its `max`), never
-/// rendered with some of its backdrops missing.
+/// `Command::BackdropBlur`s reaching the target than the cap is refused whole
+/// with [`EngineError::TooManyBackdrops`] (carrying the cap as its `max`),
+/// never rendered with some of its backdrops missing.
 pub fn set_max_backdrops_per_frame(cap: usize) -> usize {
     let applied = clamp_backdrop_cap(cap);
     BACKDROP_CAP.store(applied, Ordering::Relaxed);

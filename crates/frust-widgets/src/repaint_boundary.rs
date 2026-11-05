@@ -450,5 +450,10 @@ impl Widget for RepaintBoundaryWidget {
         self.child.semantics_child(ctx);
     }
 
+    // Retains its child's paint and paints nothing of its own.
+    fn hit_test_self(&self) -> bool {
+        false
+    }
+
     crate::authoring::visit_children!(child);
 }

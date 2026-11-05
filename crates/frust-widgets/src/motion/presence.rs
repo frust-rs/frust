@@ -588,6 +588,11 @@ impl Widget for PresenceWidget {
         }
     }
 
+    // Stages its child's entry and exit and paints nothing of its own.
+    fn hit_test_self(&self) -> bool {
+        false
+    }
+
     crate::authoring::visit_children!(child);
 }
 

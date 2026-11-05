@@ -1980,3 +1980,290 @@ fn transition_state_tracks_the_interactive_edge_swipe() {
     assert!(released.active, "the settle is still a live transition");
     assert!(!released.interactive, "the finger let go");
 }
+
+// ---------------------------------------------------------------------
+// Route-owned barrier (`PushOptions::barrier`).
+// ---------------------------------------------------------------------
+
+/// The barrier colour these tests push with: blue at half alpha, so a barrier
+/// fill is told apart from the pages' black fills by its colour, and its
+/// presence is its recorded alpha over `0.5`.
+const BARRIER: peniko::Color = peniko::Color::new([0.0, 0.0, 1.0, 0.5]);
+
+/// A recording scene that keeps each fill's colour, in paint order, with the
+/// alpha of the enclosing layer. The shared `TransitionScene` drops the
+/// colour, which is all that tells a barrier fill from a page fill.
+#[derive(Default)]
+struct BarrierScene {
+    fills: Vec<(Point, Size, peniko::Color, f32)>,
+    layer_alpha: Vec<f32>,
+}
+impl PaintScene for BarrierScene {
+    fn fill_rect(&mut self, origin: Point, size: Size, color: peniko::Color) {
+        let alpha = self.layer_alpha.last().copied().unwrap_or(1.0);
+        self.fills.push((origin, size, color, alpha));
+    }
+    fn draw_text(&mut self, _origin: Point, _text: &str) {}
+    fn push_layer(&mut self, _origin: Point, _size: Size, alpha: f32) {
+        self.layer_alpha.push(alpha);
+    }
+    fn pop_layer(&mut self) {
+        self.layer_alpha.pop();
+    }
+}
+
+impl BarrierScene {
+    /// The index and fill of the barrier, if one painted this frame.
+    fn barrier(&self) -> Option<(usize, Point, Size, f32)> {
+        self.fills
+            .iter()
+            .enumerate()
+            .find(|(_, (_, _, color, _))| color.components[2] == 1.0)
+            .map(|(i, (origin, size, color, _))| (i, *origin, *size, color.components[3]))
+    }
+
+    /// The index and fill of the page of height `h`.
+    fn page(&self, h: f64) -> (usize, Point, f32) {
+        self.fills
+            .iter()
+            .enumerate()
+            .find(|(_, (_, size, color, _))| {
+                color.components[2] == 0.0 && (size.height - h).abs() < 1e-9
+            })
+            .map(|(i, (origin, _, _, alpha))| (i, *origin, *alpha))
+            .unwrap_or_else(|| panic!("no page of height {h} in {:?}", self.fills))
+    }
+}
+
+/// One shell-style frame recorded into a [`BarrierScene`].
+fn barrier_frame(
+    root: &mut RenderRoot<(), NavigatorView<()>>,
+    app: &mut impl FnMut(&mut ()) -> NavigatorView<()>,
+    time: FrameTime,
+) -> (BarrierScene, bool) {
+    root.rebuild(app, &mut ());
+    root.layout(Size::new(100.0, 100.0));
+    let mut scene = BarrierScene::default();
+    let out = root.paint(&mut scene, time);
+    (scene, out.needs_frame)
+}
+
+/// A transparent 100x40 sheet with the test barrier, pushed with `spec`.
+fn push_barrier_sheet(controller: &NavigatorController<()>, spec: TransitionSpec) {
+    controller.push_with_options(
+        || sized_page(100.0, 40.0),
+        PushOptions::transparent().barrier(BARRIER).transition(spec),
+    );
+}
+
+fn linear_slide_up() -> TransitionSpec {
+    TransitionSpec::new(
+        PageTransition::SlideUp,
+        Timing::Duration(Duration::from_millis(100), Curve::Linear),
+    )
+}
+
+/// A barrier test's controller, render root and app closure.
+type BarrierFixture = (
+    NavigatorController<()>,
+    RenderRoot<(), NavigatorView<()>>,
+    AppLogic,
+);
+
+/// A navigator over a 100x100 root page, built and laid out.
+fn barrier_fixture(theme: Option<Theme>) -> BarrierFixture {
+    let controller: NavigatorController<()> = NavigatorController::new();
+    let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+    if let Some(theme) = theme {
+        root.set_theme(Box::new(theme));
+    }
+    let mut app: AppLogic = {
+        let ctrl = controller.clone();
+        Box::new(move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0)))
+    };
+    root.rebuild(&mut app, &mut ());
+    root.layout(Size::new(100.0, 100.0));
+    (controller, root, app)
+}
+
+// --- The barrier fades in with the push's progress, under the sheet and
+//     over the page below, while the sheet's own layer slides it up; the
+//     barrier itself never takes the sheet's offset. ---
+
+#[test]
+fn barrier_fades_in_under_a_sliding_push_without_taking_its_offset() {
+    let (controller, mut root, mut app) = barrier_fixture(None);
+    push_barrier_sheet(&controller, linear_slide_up());
+
+    let (seed, _) = barrier_frame(&mut root, &mut app, ft(0));
+    assert!(
+        seed.barrier().is_none(),
+        "progress 0: the barrier has no presence yet"
+    );
+
+    let (quarter, _) = barrier_frame(&mut root, &mut app, ft(25));
+    let (half, _) = barrier_frame(&mut root, &mut app, ft(50));
+    let mut last_alpha = 0.0;
+    for (scene, progress) in [(&quarter, 0.25), (&half, 0.5)] {
+        let (bi, origin, size, alpha) = scene.barrier().expect("the barrier paints mid-push");
+        let (ai, a_origin, _) = scene.page(100.0);
+        let (si, s_origin, _) = scene.page(40.0);
+        assert!(
+            (alpha - 0.5 * progress as f32).abs() < 1e-4,
+            "barrier alpha follows the progress: {alpha} at {progress}"
+        );
+        assert!(alpha > last_alpha, "the barrier alpha increases");
+        last_alpha = alpha;
+        assert_eq!(
+            (origin, size),
+            (Point::ZERO, Size::new(100.0, 100.0)),
+            "the barrier covers the whole area and is never offset"
+        );
+        assert_eq!(a_origin, Point::ZERO, "the page below never moves");
+        assert!(
+            (s_origin.y - (1.0 - progress) * 100.0).abs() < 1e-6,
+            "the sheet's own layer slides it up (y = {})",
+            s_origin.y
+        );
+        assert!(ai < bi && bi < si, "order: page below, barrier, sheet");
+    }
+
+    // Settle, then finalize: at rest the barrier stays at full alpha, still
+    // between the (transparent sheet's) page below and the sheet.
+    barrier_frame(&mut root, &mut app, ft(150));
+    let (rest, needs_frame) = barrier_frame(&mut root, &mut app, ft(300));
+    assert!(!needs_frame, "the transition has finalized");
+    let (bi, origin, _, alpha) = rest.barrier().expect("the barrier paints at rest");
+    assert_eq!(alpha, 0.5, "at rest the barrier is at full alpha");
+    assert_eq!(origin, Point::ZERO);
+    let (ai, _, _) = rest.page(100.0);
+    let (si, s_origin, _) = rest.page(40.0);
+    assert_eq!(s_origin, Point::ZERO, "the sheet rests at the origin");
+    assert!(ai < bi && bi < si, "at rest: page below, barrier, sheet");
+}
+
+// --- A pop reverses the barrier's progress toward 0 while the sheet slides
+//     back down; once the pop finalizes no barrier paints at all. ---
+
+#[test]
+fn barrier_fades_out_with_the_pop() {
+    let (controller, mut root, mut app) = barrier_fixture(None);
+    push_barrier_sheet(&controller, linear_slide_up());
+    for t in [0u64, 50, 150, 300] {
+        barrier_frame(&mut root, &mut app, ft(t));
+    }
+
+    controller.pop();
+    let (seed, _) = barrier_frame(&mut root, &mut app, ft(1000));
+    assert_eq!(
+        seed.barrier().map(|(_, _, _, alpha)| alpha),
+        Some(0.5),
+        "the pop's seed frame: barrier still at full alpha"
+    );
+    let (mid, _) = barrier_frame(&mut root, &mut app, ft(1050));
+    let (bi, origin, _, alpha) = mid.barrier().expect("the barrier paints mid-pop");
+    assert!(
+        (alpha - 0.25).abs() < 1e-4,
+        "halfway through the pop the barrier is at half presence ({alpha})"
+    );
+    assert_eq!(
+        origin,
+        Point::ZERO,
+        "the barrier never takes the sheet's dy"
+    );
+    let (ai, _, _) = mid.page(100.0);
+    let (si, s_origin, _) = mid.page(40.0);
+    assert!((s_origin.y - 50.0).abs() < 1e-6, "the sheet slides down");
+    assert!(
+        ai < bi && bi < si,
+        "pop order: revealed page, barrier, sheet"
+    );
+
+    barrier_frame(&mut root, &mut app, ft(1150));
+    let (done, _) = barrier_frame(&mut root, &mut app, ft(1300));
+    assert!(
+        done.barrier().is_none(),
+        "the popped page's barrier is gone"
+    );
+    assert_eq!(done.fills.len(), 1, "only the revealed page paints");
+}
+
+// --- With `TransitionSpec::NONE` there is no route animation: the barrier is
+//     at full alpha on the push's first frame and gone on the pop's. ---
+
+#[test]
+fn barrier_with_no_transition_appears_and_disappears_at_once() {
+    let (controller, mut root, mut app) = barrier_fixture(None);
+    push_barrier_sheet(&controller, TransitionSpec::NONE);
+    let (first, needs_frame) = barrier_frame(&mut root, &mut app, ft(0));
+    assert!(!needs_frame, "no transition runs");
+    assert_eq!(
+        first.barrier().map(|(_, _, _, alpha)| alpha),
+        Some(0.5),
+        "the barrier is at full alpha immediately"
+    );
+
+    controller.pop();
+    let (popped, _) = barrier_frame(&mut root, &mut app, ft(16));
+    assert!(
+        popped.barrier().is_none(),
+        "and gone immediately on the pop"
+    );
+}
+
+// --- Under `reduce_motion` the push collapses to the reduced crossfade, and
+//     the barrier fades with it: its presence equals the entering page's
+//     crossfade alpha, with no slide. ---
+
+#[test]
+fn barrier_follows_the_reduced_motion_crossfade() {
+    let mut reduced = Theme::neutral();
+    reduced.motion.reduce_motion = true;
+    let (controller, mut root, mut app) = barrier_fixture(Some(reduced));
+    push_barrier_sheet(&controller, linear_slide_up());
+
+    barrier_frame(&mut root, &mut app, ft(0)); // seed + resolve
+    let (mid, _) = barrier_frame(&mut root, &mut app, ft(60));
+    let (_, _, _, alpha) = mid.barrier().expect("the barrier paints mid-crossfade");
+    let (_, s_origin, s_alpha) = mid.page(40.0);
+    assert_eq!(
+        s_origin,
+        Point::ZERO,
+        "reduced motion: the sheet never slides"
+    );
+    assert!(
+        s_alpha > 0.0 && s_alpha < 1.0,
+        "the sheet is mid-crossfade ({s_alpha})"
+    );
+    assert!(
+        (alpha / 0.5 - s_alpha).abs() < 1e-4,
+        "the barrier's presence ({}) is the crossfade alpha ({s_alpha})",
+        alpha / 0.5
+    );
+}
+
+// --- Pages without a barrier paint exactly as before: no extra fill at rest
+//     or mid-transition. ---
+
+#[test]
+fn a_page_without_a_barrier_paints_no_barrier_fill() {
+    let (controller, mut root, mut app) = barrier_fixture(None);
+    controller.push_with_options(
+        || sized_page(100.0, 40.0),
+        PushOptions::transparent().transition(linear_slide_up()),
+    );
+    barrier_frame(&mut root, &mut app, ft(0));
+    let (mid, _) = barrier_frame(&mut root, &mut app, ft(50));
+    assert!(mid.barrier().is_none());
+    assert_eq!(mid.fills.len(), 2, "just the two pages");
+    for t in [150u64, 300] {
+        barrier_frame(&mut root, &mut app, ft(t));
+    }
+    let (rest, _) = barrier_frame(&mut root, &mut app, ft(400));
+    assert!(rest.barrier().is_none());
+    assert_eq!(
+        rest.fills.len(),
+        2,
+        "the transparent page and the page below"
+    );
+}

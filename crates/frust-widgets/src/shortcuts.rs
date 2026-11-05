@@ -217,6 +217,10 @@ impl<W: Widget> Widget for ShortcutsWidget<W> {
         self.child.is_focusable()
     }
 
+    fn hit_test_self(&self) -> bool {
+        self.child.hit_test_self()
+    }
+
     fn visit_focus_children(&self, visitor: &mut dyn FnMut(&ChildPod)) {
         self.child.visit_focus_children(visitor);
     }

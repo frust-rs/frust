@@ -3503,19 +3503,29 @@ mod backdrop {
     }
 
     #[test]
-    fn a_backdrop_dropped_off_the_target_still_counts_against_the_cap() {
-        // Every recorded command counts: the cap is a statement about the
-        // display list, not about what ends up drawing.
+    fn a_backdrop_clear_of_the_target_does_not_count_against_the_cap() {
+        // Sigma 2 reaches 6 device pixels, and the rectangle sits 300 pixels
+        // past the target, far beyond 3 sigma: it draws nothing and costs
+        // nothing, so it does not take a place under the cap.
         let scene = scene_of(|builder| {
             field(builder);
             builder.backdrop_blur(PANEL, 2.0);
             builder.backdrop_blur(Rect::new(400.0, 400.0, 440.0, 440.0), 2.0);
         });
         assert_eq!(
-            compile_at(&scene, 2).expect("compiles").backdrops.len(),
+            compile_at(&scene, 1).expect("compiles").backdrops.len(),
             1,
-            "the one off the target is dropped"
+            "the one on the target is served at a cap of one"
         );
+    }
+
+    #[test]
+    fn two_backdrops_on_the_target_are_refused_at_a_cap_of_one() {
+        let scene = scene_of(|builder| {
+            field(builder);
+            builder.backdrop_blur(PANEL, 2.0);
+            builder.backdrop_blur(Rect::new(60.0, 46.0, 90.0, 66.0), 2.0);
+        });
         assert!(matches!(
             compile_at(&scene, 1),
             Err(EngineError::TooManyBackdrops {
@@ -3523,6 +3533,77 @@ mod backdrop {
                 max: 1
             })
         ));
+    }
+
+    #[test]
+    fn a_backdrop_within_three_sigma_of_the_target_counts() {
+        // The region is the rectangle grown by 3 sigma (6 pixels here), so a
+        // rectangle starting 3 pixels past the right edge still reaches it.
+        let scene = scene_of(|builder| {
+            field(builder);
+            builder.backdrop_blur(PANEL, 2.0);
+            builder.backdrop_blur(Rect::new(101.0, 16.0, 120.0, 44.0), 2.0);
+        });
+        assert!(matches!(
+            compile_at(&scene, 1),
+            Err(EngineError::TooManyBackdrops {
+                recorded: 2,
+                max: 1
+            })
+        ));
+    }
+
+    #[test]
+    fn a_backdrop_translated_off_the_target_does_not_count() {
+        let scene = scene_of(|builder| {
+            field(builder);
+            builder.backdrop_blur(PANEL, 2.0);
+        });
+        let mut compiler = SceneCompiler::new(VIEW.0, VIEW.1);
+        let moved = Affine::translate((0.0, 300.0));
+        let frame = compiler
+            .compile_with_backdrop_cap(&scene, moved, VIEW, 1)
+            .expect("a backdrop translated clear of the target is not counted");
+        assert!(frame.backdrops.is_empty());
+    }
+
+    /// A scene with one backdrop on the target and one at x 160..200, clear of
+    /// the 98-wide target, the second recorded inside a retained bracket
+    /// presented at `scale` about the origin.
+    fn bracketed_off_target(scale: f64) -> Scene {
+        scene_of(|builder| {
+            field(builder);
+            builder.backdrop_blur(PANEL, 2.0);
+            builder.push_retained(1, Rect::new(-50.0, -50.0, 50.0, 50.0), 1.0, scale);
+            builder.backdrop_blur(Rect::new(160.0, 16.0, 200.0, 44.0), 2.0);
+            builder.pop_retained();
+        })
+    }
+
+    #[test]
+    fn a_rescaled_bracket_that_pulls_a_backdrop_onto_the_target_is_counted() {
+        // At scale 0.5 about the origin the walk draws the second backdrop at
+        // x 80..100, on the target, so it is counted and the frame is refused.
+        let scene = bracketed_off_target(0.5);
+        assert!(matches!(
+            compile_at(&scene, 1),
+            Err(EngineError::TooManyBackdrops {
+                recorded: 2,
+                max: 1
+            })
+        ));
+        assert_eq!(
+            compile_at(&scene, 2).expect("served at 2").backdrops.len(),
+            2,
+            "the walk does draw the corrected backdrop"
+        );
+    }
+
+    #[test]
+    fn a_bracket_at_scale_one_leaves_an_off_target_backdrop_uncounted() {
+        let frame = compile_at(&bracketed_off_target(1.0), 1)
+            .expect("an unscaled bracket corrects nothing, so the off-target backdrop is free");
+        assert_eq!(frame.backdrops.len(), 1);
     }
 
     #[test]

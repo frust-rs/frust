@@ -29,7 +29,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how CORE relates to the other units.
 | `frust-reactive::tracked` | `TrackedScope` — dependency tracking that wakes the shell when a tracked signal it read later changes |
 | `frust-reactive::task` / `deep_link` / `back` / `app_lifecycle` | `AsyncValue`/`use_task` heavy-work idiom, plus process-wide deep-link, back-press and app-lifecycle sources (`app_lifecycle` is a Flutter-parity state machine, see App Lifecycle) — each delivered `DeepLink` carries a monotonic per-process `sequence`; consumers dedupe a delivery by comparing `sequence`, not the URL text |
 | `frust-paths::lib` | Per-platform data/cache-dir resolution (including a macOS legacy-XDG read-through fallback and an Android install slot the Android shell fills from `Context.getFilesDir()`/`getCacheDir()` at `nativeInitPlatform`) and an atomic-write helper for desktop and mobile shells |
-| `frust::lib` (facade) | Curates core/widgets/theme/reactive/shells into one flat API via `app!`/`run`/`Component`, plus `frust::authoring` — the widget-authoring vocabulary (trait lifecycle, child/event plumbing, geometry) an app needs to implement its own `View`/`Widget` pair without a direct dependency on `frust-core`/`frust-scene`/`frust-text`/`kurbo`/`peniko`. The facade-only `test-support` feature (enabled from `[dev-dependencies]`) exposes `frust::testing::semantics_of(build, size) -> SemanticsUpdate`, a semantics pass over a real text context, so an out-of-tree crate can test `Widget::semantics` |
+| `frust::lib` (facade) | Curates core/widgets/theme/reactive/shells into one flat API via `app!`/`run`/`Component`, plus `frust::authoring` — the widget-authoring vocabulary (trait lifecycle, child/event plumbing, geometry) an app needs to implement its own `View`/`Widget` pair without a direct dependency on `frust-core`/`frust-scene`/`frust-text`/`kurbo`/`peniko`. The facade-only `test-support` feature (enabled from `[dev-dependencies]`) exposes `frust::testing::semantics_of(build, size) -> SemanticsUpdate`, a semantics pass over a real text context, and `scene_of(build, size)` / `scene_of_with(build, size, &SceneOptions)` (theme, final-paint clock, warm frames), which return the painted `Scene`; a recorded `BackdropBlur` count is an upper bound on what counts toward the backdrop cap. The feature also forwards `frust-core/test-support` (`PaintCtx::for_test`), so an out-of-tree crate can test `Widget::semantics` and `paint` |
 
 ## Layer Dependencies
 
@@ -176,7 +176,9 @@ the facade/plugin boundary described in the index; CORE itself never depends on 
   A broadcast reaches every child except `Shortcut`, which a container narrows to the children that
   take input (a navigator's Current page, an `IndexedStack`'s selected child) so a hidden declarer
   never answers. A `Key` the focus path leaves unhandled goes on to the declined-key chain (see
-  Keyboard Shortcuts and Traversal).
+  Keyboard Shortcuts and Traversal). Per pointer event, `ChildPod` records the smallest hit-testing
+  pod (`Widget::hit_test_self`; layout wrappers opt out) for `EventCtx::track_pointer_hits`, a
+  pass-scoped side channel.
 - `RenderRoot::rebuild` dispatches a `Housekeeping` broadcast when a thread-local flag
   (`mark_pending_result_flush`/`take_pending_result_flush`) is set — the seam a widget uses to run
   a deferred callback that needs `&mut State` but was queued during the state-free view diff (a

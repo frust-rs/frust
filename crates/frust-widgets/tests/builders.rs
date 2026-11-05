@@ -7,7 +7,8 @@ use frust_core::{
     views,
 };
 use frust_widgets::{
-    Axis, Column, FlexView, Stack, column, flexible, inflexible, keyed, row, stack,
+    Axis, Column, FlexView, MainAxisAlignment, Stack, column, flexible, inflexible, keyed, row,
+    stack,
 };
 use kurbo::{Point, Size};
 use peniko::Color;
@@ -86,6 +87,31 @@ fn builder_chain_matches_explicit_flex_children() {
         vec![inflexible(leaf(30.0, 10.0)), flexible(1, leaf(5.0, 5.0))],
     );
     assert_eq!(rects(&built_row), rects(&legacy_row));
+}
+
+#[test]
+fn builder_gap_and_main_axis_apply_to_row_and_column() {
+    let (_, r) = rects(
+        &row::<()>()
+            .child(leaf(30.0, 10.0))
+            .child(leaf(30.0, 10.0))
+            .gap(10.0),
+    );
+    assert_eq!(r[1].0.x, 40.0);
+    let (_, c) = rects(
+        &column::<()>()
+            .child(leaf(30.0, 10.0))
+            .child(leaf(30.0, 10.0))
+            .gap(6.0),
+    );
+    assert_eq!(c[1].0.y, 16.0);
+    // Tight 300x200: End packs the row against the right edge.
+    let (_, e) = rects(
+        &row::<()>()
+            .child(leaf(30.0, 10.0))
+            .main_axis(MainAxisAlignment::End),
+    );
+    assert_eq!(e[0].0.x, 270.0);
 }
 
 #[test]

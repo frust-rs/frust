@@ -39,8 +39,8 @@ use std::sync::Arc;
 
 use frust_core::accesskit::Role;
 use frust_core::{
-    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View,
-    Widget,
+    BoxConstraints, BuildCtx, ChangeFlags, DashPattern, LayoutCtx, PaintCtx, PaintScene,
+    SemanticsCtx, View, Widget,
 };
 use frust_theme::Theme;
 use kurbo::{Affine, BezPath, Circle, Rect as KRect, RoundedRect, Shape, Size};
@@ -111,6 +111,95 @@ pub enum IconPaint {
     Fill,
 }
 
+/// How one element of a multi-element icon is painted: the paint kind plus the
+/// optional per-element SVG attributes. This is the style half of an
+/// [`IconElement`], for runtime-built icons
+/// ([`IconData::from_styled_elements`]).
+///
+/// Dash and width are in design units and scale with the icon.
+#[derive(Clone, Copy, Debug)]
+pub struct IconElementStyle {
+    /// Stroke or fill.
+    pub paint: IconPaint,
+    /// Ink alpha multiplier; clamped to `0..=1`, non-finite counts as `1.0`.
+    pub opacity: f32,
+    /// A single on/off dash pattern for a stroke; ignored by a fill.
+    pub dash: Option<DashPattern>,
+    /// The stroke width, in design units; `None` uses the icon's stroke width.
+    /// Ignored by a fill.
+    pub stroke_width: Option<f64>,
+}
+
+impl IconElementStyle {
+    /// A stroked element with the default attributes.
+    pub const fn stroke() -> Self {
+        Self::new(IconPaint::Stroke)
+    }
+
+    /// A filled element with the default attributes.
+    pub const fn fill() -> Self {
+        Self::new(IconPaint::Fill)
+    }
+
+    /// A style with `paint` and the default attributes.
+    pub const fn new(paint: IconPaint) -> Self {
+        Self {
+            paint,
+            opacity: 1.0,
+            dash: None,
+            stroke_width: None,
+        }
+    }
+
+    /// The same style with an ink alpha multiplier.
+    pub const fn with_opacity(mut self, opacity: f32) -> Self {
+        self.opacity = opacity;
+        self
+    }
+
+    /// The same style with a dash pattern, in design units.
+    pub const fn with_dash(mut self, dash: DashPattern) -> Self {
+        self.dash = Some(dash);
+        self
+    }
+
+    /// The same style with its own stroke width, in design units.
+    pub const fn with_stroke_width(mut self, width: f64) -> Self {
+        self.stroke_width = Some(width);
+        self
+    }
+
+    /// The opacity as a usable alpha multiplier.
+    fn alpha(&self) -> f32 {
+        if self.opacity.is_finite() {
+            self.opacity.clamp(0.0, 1.0)
+        } else {
+            1.0
+        }
+    }
+
+    /// The dash, when it actually breaks a stroke into dashes.
+    fn effective_dash(&self) -> Option<DashPattern> {
+        self.dash.filter(DashPattern::is_effective)
+    }
+
+    /// Whether two styles paint identically (floats compared bitwise).
+    fn same(&self, other: &Self) -> bool {
+        self.paint == other.paint
+            && self.opacity.to_bits() == other.opacity.to_bits()
+            && self.stroke_width.map(f64::to_bits) == other.stroke_width.map(f64::to_bits)
+            && match (self.dash, other.dash) {
+                (None, None) => true,
+                (Some(a), Some(b)) => {
+                    a.on.to_bits() == b.on.to_bits()
+                        && a.off.to_bits() == b.off.to_bits()
+                        && a.phase.to_bits() == b.phase.to_bits()
+                }
+                _ => false,
+            }
+    }
+}
+
 /// A shape plus how it is painted; one entry of a [`StrokedIconSource`].
 #[derive(Clone, Copy, Debug)]
 pub struct IconElement {
@@ -118,22 +207,63 @@ pub struct IconElement {
     pub shape: IconShape,
     /// Stroke or fill.
     pub paint: IconPaint,
+    /// Ink alpha multiplier (default `1.0`); clamped to `0..=1`, non-finite
+    /// counts as `1.0`.
+    pub opacity: f32,
+    /// A single on/off dash pattern, in design units, for a stroke (default
+    /// none). A fill ignores it.
+    pub dash: Option<DashPattern>,
+    /// The stroke width, in design units (default `None`: the source width). A
+    /// fill ignores it.
+    pub stroke_width: Option<f64>,
 }
 
 impl IconElement {
     /// A stroked element.
     pub const fn stroke(shape: IconShape) -> Self {
-        Self {
-            shape,
-            paint: IconPaint::Stroke,
-        }
+        Self::new(shape, IconPaint::Stroke)
     }
 
     /// A filled element.
     pub const fn fill(shape: IconShape) -> Self {
+        Self::new(shape, IconPaint::Fill)
+    }
+
+    const fn new(shape: IconShape, paint: IconPaint) -> Self {
         Self {
             shape,
-            paint: IconPaint::Fill,
+            paint,
+            opacity: 1.0,
+            dash: None,
+            stroke_width: None,
+        }
+    }
+
+    /// The same element with an ink alpha multiplier.
+    pub const fn with_opacity(mut self, opacity: f32) -> Self {
+        self.opacity = opacity;
+        self
+    }
+
+    /// The same element with a dash pattern, in design units.
+    pub const fn with_dash(mut self, dash: DashPattern) -> Self {
+        self.dash = Some(dash);
+        self
+    }
+
+    /// The same element with its own stroke width, in design units.
+    pub const fn with_stroke_width(mut self, width: f64) -> Self {
+        self.stroke_width = Some(width);
+        self
+    }
+
+    /// The style half of this element.
+    pub const fn style(&self) -> IconElementStyle {
+        IconElementStyle {
+            paint: self.paint,
+            opacity: self.opacity,
+            dash: self.dash,
+            stroke_width: self.stroke_width,
         }
     }
 }
@@ -162,21 +292,52 @@ const SHAPE_TOLERANCE: f64 = 0.1;
 /// filled at 48 px or more shows no facets on its stroke edges.
 const STROKE_OUTLINE_TOLERANCE: f64 = 0.02;
 
+/// The stroke width of one stroked element, in design units (before scale).
+///
+/// - No view override: the element's own width, else the source width.
+/// - Override with a positive source width: the element's width (else the
+///   source width) rescaled by `override / source`, so per-element ratios
+///   survive.
+/// - Override with a non-positive source width: no ratio exists, so the
+///   override replaces the source width and an element's own width keeps its
+///   absolute value (`element.unwrap_or(override)`).
+fn element_stroke_width(element: Option<f64>, source: f64, view_override: Option<f64>) -> f64 {
+    match view_override {
+        None => element.unwrap_or(source),
+        Some(over) if source > 0.0 => element.unwrap_or(source) * over / source,
+        Some(over) => element.unwrap_or(over),
+    }
+}
+
 /// One nonzero-fillable path covering `elements`: fills appended as-is, each
-/// stroke expanded to its round-capped, round-joined outline at `stroke_width`.
+/// stroke expanded to its round-capped, round-joined outline at its own width
+/// (or `stroke_width`), with an effective dash baked in first.
 fn fill_outline<'a>(
-    elements: impl IntoIterator<Item = (&'a BezPath, IconPaint)>,
+    elements: impl IntoIterator<Item = (&'a BezPath, &'a IconElementStyle)>,
     stroke_width: f64,
 ) -> BezPath {
-    let style = kurbo::Stroke::new(stroke_width)
-        .with_caps(kurbo::Cap::Round)
-        .with_join(kurbo::Join::Round);
     let opts = kurbo::StrokeOpts::default();
     let mut out = BezPath::new();
-    for (path, paint) in elements {
-        let piece = match paint {
+    for (path, style) in elements {
+        let piece = match style.paint {
             IconPaint::Fill => path.clone(),
-            IconPaint::Stroke => kurbo::stroke(path, &style, &opts, STROKE_OUTLINE_TOLERANCE),
+            IconPaint::Stroke => {
+                let stroke = kurbo::Stroke::new(element_stroke_width(
+                    style.stroke_width,
+                    stroke_width,
+                    None,
+                ))
+                .with_caps(kurbo::Cap::Round)
+                .with_join(kurbo::Join::Round);
+                match style.effective_dash() {
+                    Some(d) => {
+                        let dashed: BezPath =
+                            kurbo::dash(path.iter(), d.phase, &[d.on, d.off]).collect();
+                        kurbo::stroke(&dashed, &stroke, &opts, STROKE_OUTLINE_TOLERANCE)
+                    }
+                    None => kurbo::stroke(path, &stroke, &opts, STROKE_OUTLINE_TOLERANCE),
+                }
+            }
         };
         out.extend(piece);
     }
@@ -209,7 +370,7 @@ impl IconShape {
 /// Parsed multi-element geometry, shared behind an `Arc`.
 #[derive(Debug)]
 struct ElementsGeom {
-    elements: Vec<(BezPath, IconPaint)>,
+    elements: Vec<(BezPath, IconElementStyle)>,
     design: f64,
     stroke_width: f64,
 }
@@ -241,7 +402,7 @@ enum Geometry {
     Fill(BezPath),
     /// Several elements, each stroked or filled, at `stroke_width` design units.
     Elements {
-        elements: Vec<(BezPath, IconPaint)>,
+        elements: Vec<(BezPath, IconElementStyle)>,
         stroke_width: f64,
     },
 }
@@ -282,6 +443,23 @@ impl IconData {
         design_size: f64,
         stroke_width: f64,
     ) -> Self {
+        Self::from_styled_elements(
+            elements
+                .into_iter()
+                .map(|(path, paint)| (path, IconElementStyle::new(paint)))
+                .collect(),
+            design_size,
+            stroke_width,
+        )
+    }
+
+    /// Like [`IconData::from_elements`], with per-element opacity, dash and
+    /// stroke width carried by an [`IconElementStyle`].
+    pub fn from_styled_elements(
+        elements: Vec<(BezPath, IconElementStyle)>,
+        design_size: f64,
+        stroke_width: f64,
+    ) -> Self {
         Self {
             repr: IconRepr::Elements(Arc::new(ElementsGeom {
                 elements,
@@ -305,7 +483,7 @@ impl IconData {
                     elements: src
                         .elements
                         .iter()
-                        .map(|e| (e.shape.to_bez_path(), e.paint))
+                        .map(|e| (e.shape.to_bez_path(), e.style()))
                         .collect(),
                     stroke_width: src.stroke_width,
                 },
@@ -339,7 +517,10 @@ impl IconData {
     /// at the source stroke width, one path for the nonzero fill. A fill-only
     /// consumer (a plugin's icon slot) therefore renders it filled and ignores
     /// [`IconView::stroke_width`] overrides; [`IconData::is_stroked`] tells the
-    /// two kinds apart. Only [`IconView`] strokes natively.
+    /// two kinds apart. Only [`IconView`] strokes natively. An element's own
+    /// width is honoured, an effective dash is baked into the outline before
+    /// stroking, and opacity is dropped (the outline is a single path painted
+    /// in one color).
     ///
     /// Public because out-of-tree design systems (the design-system plugin
     /// tier) paint icons through it — `IconData` without `resolve` has no
@@ -357,19 +538,16 @@ impl IconData {
             }
             IconRepr::Path(geom) => (geom.path.clone(), geom.design),
             IconRepr::Stroked(src) => {
-                let paths: Vec<(BezPath, IconPaint)> = src
+                let paths: Vec<(BezPath, IconElementStyle)> = src
                     .elements
                     .iter()
-                    .map(|e| (e.shape.to_bez_path(), e.paint))
+                    .map(|e| (e.shape.to_bez_path(), e.style()))
                     .collect();
-                let outline = fill_outline(paths.iter().map(|(p, k)| (p, *k)), src.stroke_width);
+                let outline = fill_outline(paths.iter().map(|(p, k)| (p, k)), src.stroke_width);
                 (outline, src.design)
             }
             IconRepr::Elements(geom) => (
-                fill_outline(
-                    geom.elements.iter().map(|(p, k)| (p, *k)),
-                    geom.stroke_width,
-                ),
+                fill_outline(geom.elements.iter().map(|(p, k)| (p, k)), geom.stroke_width),
                 geom.design,
             ),
         }
@@ -401,7 +579,7 @@ impl IconData {
                         || a.elements
                             .iter()
                             .zip(b.elements)
-                            .all(|(x, y)| x.paint == y.paint && x.shape == y.shape)
+                            .all(|(x, y)| x.style().same(&y.style()) && x.shape == y.shape)
                             && a.elements.len() == b.elements.len())
             }
             (IconRepr::Elements(a), IconRepr::Elements(b)) => Arc::ptr_eq(a, b),
@@ -633,12 +811,33 @@ impl Widget for IconWidget {
                 elements,
                 stroke_width,
             } => {
-                let width = self.stroke_width.unwrap_or(*stroke_width) * scale;
-                for (path, paint) in elements {
+                for (path, style) in elements {
                     let scaled = transform * path.clone();
-                    match paint {
+                    let brush = Brush::Solid(color.multiply_alpha(style.alpha()));
+                    match style.paint {
                         IconPaint::Stroke => {
-                            scene.stroke_path(ctx.origin(), &scaled, width, &brush)
+                            let width = element_stroke_width(
+                                style.stroke_width,
+                                *stroke_width,
+                                self.stroke_width,
+                            ) * scale;
+                            match style.effective_dash() {
+                                Some(d) => {
+                                    let dash = DashPattern {
+                                        on: d.on * scale,
+                                        off: d.off * scale,
+                                        phase: d.phase * scale,
+                                    };
+                                    scene.stroke_path_dashed(
+                                        ctx.origin(),
+                                        &scaled,
+                                        width,
+                                        dash,
+                                        &brush,
+                                    );
+                                }
+                                None => scene.stroke_path(ctx.origin(), &scaled, width, &brush),
+                            }
                         }
                         IconPaint::Fill => scene.fill_path(ctx.origin(), &scaled, &brush),
                     }
@@ -687,6 +886,7 @@ mod tests {
     struct RecordingScene {
         fills: Vec<(Point, Rect, Color)>,
         strokes: Vec<(Point, Rect, f64, Color)>,
+        dashed: Vec<(f64, DashPattern, Color)>,
     }
 
     impl PaintScene for RecordingScene {
@@ -706,6 +906,20 @@ mod tests {
             };
             self.strokes
                 .push((origin, path.bounding_box(), width, color));
+        }
+        fn stroke_path_dashed(
+            &mut self,
+            _origin: Point,
+            _path: &BezPath,
+            width: f64,
+            dash: DashPattern,
+            brush: &Brush,
+        ) {
+            let color = match brush {
+                Brush::Solid(c) => *c,
+                _ => Color::TRANSPARENT,
+            };
+            self.dashed.push((width, dash, color));
         }
     }
 
@@ -949,6 +1163,22 @@ mod tests {
         design: 24.0,
         stroke_width: 1.6,
     };
+
+    #[test]
+    fn element_stroke_width_covers_every_combination() {
+        // No override: element, else source.
+        assert_eq!(element_stroke_width(None, 2.0, None), 2.0);
+        assert_eq!(element_stroke_width(Some(3.0), 2.0, None), 3.0);
+        assert_eq!(element_stroke_width(None, 0.0, None), 0.0);
+        assert_eq!(element_stroke_width(Some(3.0), 0.0, None), 3.0);
+        // Override with a positive source: rescaled by override / source.
+        assert_eq!(element_stroke_width(None, 2.0, Some(4.0)), 4.0);
+        assert_eq!(element_stroke_width(Some(3.0), 2.0, Some(4.0)), 6.0);
+        // Override with a non-positive source: override replaces the source,
+        // an element width keeps its absolute value.
+        assert_eq!(element_stroke_width(None, 0.0, Some(4.0)), 4.0);
+        assert_eq!(element_stroke_width(Some(3.0), 0.0, Some(4.0)), 3.0);
+    }
 
     #[test]
     fn stroked_icon_strokes_each_element_with_scaled_width() {
@@ -1252,5 +1482,158 @@ mod tests {
         assert_eq!(w.size, 32.0);
         assert!(flags.needs_layout());
         assert!(flags.needs_paint());
+    }
+
+    // -- per-element style --------------------------------------------------
+
+    const STYLED: StrokedIconSource = StrokedIconSource {
+        elements: &[
+            IconElement::stroke(IconShape::Path("M4 4 L20 4")).with_opacity(0.5),
+            IconElement::stroke(IconShape::Path("M4 12 L20 12"))
+                .with_dash(DashPattern::new(2.0, 1.0).with_phase(0.5))
+                .with_stroke_width(0.8),
+            IconElement::fill(IconShape::Circle {
+                cx: 12.0,
+                cy: 18.0,
+                r: 2.0,
+            })
+            .with_opacity(0.25)
+            .with_dash(DashPattern::new(1.0, 1.0))
+            .with_stroke_width(5.0),
+        ],
+        design: 24.0,
+        stroke_width: 1.6,
+    };
+
+    #[test]
+    fn element_opacity_multiplies_the_brush_alpha() {
+        let ink = Color::from_rgb8(0x10, 0x20, 0x30);
+        let mut w = build(&icon(STYLED).size(48.0).color(ink));
+        let rec = paint_rec(&mut w, Point::ZERO, None);
+        assert_eq!(rec.strokes.len(), 1);
+        assert!((rec.strokes[0].3.components[3] - 0.5).abs() < 1e-6);
+        assert!((rec.dashed[0].2.components[3] - 1.0).abs() < 1e-6);
+        assert!((rec.fills[0].2.components[3] - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn non_finite_opacity_counts_as_opaque() {
+        let el = IconElement::stroke(IconShape::Path("M0 0 L1 1")).with_opacity(f32::NAN);
+        assert_eq!(el.style().alpha(), 1.0);
+        assert_eq!(el.with_opacity(7.0).style().alpha(), 1.0);
+        assert_eq!(el.with_opacity(-1.0).style().alpha(), 0.0);
+    }
+
+    #[test]
+    fn dashed_element_records_a_scaled_dash() {
+        let mut w = build(&icon(STYLED).size(48.0));
+        let rec = paint_rec(&mut w, Point::ZERO, None);
+        assert_eq!(rec.dashed.len(), 1);
+        let (width, dash, _) = rec.dashed[0];
+        assert!((width - 1.6).abs() < 1e-9);
+        assert!((dash.on - 4.0).abs() < 1e-9);
+        assert!((dash.off - 2.0).abs() < 1e-9);
+        assert!((dash.phase - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn element_width_wins_over_the_source_width() {
+        let mut w = build(&icon(STYLED).size(48.0));
+        let rec = paint_rec(&mut w, Point::ZERO, None);
+        assert!((rec.strokes[0].2 - 3.2).abs() < 1e-9);
+        assert!((rec.dashed[0].0 - 1.6).abs() < 1e-9);
+        assert_eq!(rec.fills.len(), 1, "a fill ignores dash and width");
+    }
+
+    #[test]
+    fn width_override_keeps_the_element_to_source_ratio() {
+        // Source 1.6, element 0.8: an override of 3.2 doubles both.
+        let mut w = build(&icon(STYLED).size(24.0).stroke_width(3.2));
+        let rec = paint_rec(&mut w, Point::ZERO, None);
+        assert!((rec.strokes[0].2 - 3.2).abs() < 1e-9);
+        assert!((rec.dashed[0].0 - 1.6).abs() < 1e-9);
+    }
+
+    #[test]
+    fn same_distinguishes_a_style_change() {
+        const A: StrokedIconSource = StrokedIconSource {
+            elements: &[IconElement::stroke(IconShape::Path("M0 0 L1 1"))],
+            design: 24.0,
+            stroke_width: 1.0,
+        };
+        const B: StrokedIconSource = StrokedIconSource {
+            elements: &[IconElement::stroke(IconShape::Path("M0 0 L1 1")).with_opacity(0.5)],
+            design: 24.0,
+            stroke_width: 1.0,
+        };
+        const C: StrokedIconSource = StrokedIconSource {
+            elements: &[IconElement::stroke(IconShape::Path("M0 0 L1 1"))
+                .with_dash(DashPattern::new(1.0, 1.0))],
+            design: 24.0,
+            stroke_width: 1.0,
+        };
+        const D: StrokedIconSource = StrokedIconSource {
+            elements: &[IconElement::stroke(IconShape::Path("M0 0 L1 1")).with_stroke_width(2.0)],
+            design: 24.0,
+            stroke_width: 1.0,
+        };
+        let a = IconData::from(A);
+        assert!(a.same(&IconData::from(A)));
+        for other in [B, C, D] {
+            assert!(!a.same(&IconData::from(other)));
+        }
+    }
+
+    #[test]
+    fn styled_runtime_elements_paint_their_style() {
+        let mut line = BezPath::new();
+        line.move_to((0.0, 5.0));
+        line.line_to((10.0, 5.0));
+        let data = IconData::from_styled_elements(
+            vec![(
+                line,
+                IconElementStyle::stroke()
+                    .with_opacity(0.5)
+                    .with_dash(DashPattern::new(1.0, 1.0)),
+            )],
+            10.0,
+            2.0,
+        );
+        let mut w = build(&icon(data).size(10.0));
+        let rec = paint_rec(&mut w, Point::ZERO, None);
+        assert_eq!(rec.dashed.len(), 1);
+        assert!((rec.dashed[0].2.components[3] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn resolve_bakes_the_dash_and_drops_opacity() {
+        const SOLID: StrokedIconSource = StrokedIconSource {
+            elements: &[IconElement::stroke(IconShape::Path("M0 5 L20 5"))],
+            design: 24.0,
+            stroke_width: 2.0,
+        };
+        const DASHED: StrokedIconSource = StrokedIconSource {
+            elements: &[IconElement::stroke(IconShape::Path("M0 5 L20 5"))
+                .with_dash(DashPattern::new(2.0, 4.0))
+                .with_opacity(0.3)],
+            design: 24.0,
+            stroke_width: 2.0,
+        };
+        let (solid, _) = IconData::from(SOLID).resolve();
+        let (dashed, _) = IconData::from(DASHED).resolve();
+        assert!(solid.contains(Point::new(3.0, 5.0)));
+        assert!(dashed.contains(Point::new(1.0, 5.0)), "inside a dash");
+        assert!(!dashed.contains(Point::new(4.0, 5.0)), "inside a gap");
+        assert_ne!(solid.elements().len(), dashed.elements().len());
+    }
+
+    #[test]
+    fn style_builders_are_const_usable() {
+        const S: IconElementStyle = IconElementStyle::stroke()
+            .with_opacity(0.5)
+            .with_dash(DashPattern::new(1.0, 2.0))
+            .with_stroke_width(0.5);
+        assert_eq!(S.paint, IconPaint::Stroke);
+        assert_eq!(S.stroke_width, Some(0.5));
     }
 }

@@ -1283,7 +1283,8 @@ impl SceneCompiler {
     /// `u16` pixel can hold; and [`EngineError::InvalidGeometry`] when a
     /// command the compiler lowers carries non-finite geometry of its own (see
     /// [`check_geometry`]); and [`EngineError::TooManyBackdrops`] when the
-    /// scene records more `Command::BackdropBlur`s than the process-wide cap
+    /// scene records more `Command::BackdropBlur`s whose blur region reaches
+    /// the target than the process-wide cap
     /// ([`max_backdrops_per_frame`]), read once here. All four are refused
     /// before any strip is generated — the frame path returns errors and never
     /// panics.
@@ -1329,10 +1330,12 @@ impl SceneCompiler {
         // The whole scene is refused up front rather than mid-walk, so a
         // rejected frame never leaves half its draws recorded.
         let mut backdrops = 0_usize;
+        // The open retained brackets, and whether the outermost one presents
+        // its body at a scale other than 1: the one correction the walk
+        // composes ahead of a command that this loop does not.
+        let mut bracket_depth = 0_usize;
+        let mut bracket_rescales = false;
         for command in scene.commands() {
-            if matches!(command, Command::BackdropBlur { .. }) {
-                backdrops = backdrops.saturating_add(1);
-            }
             if let Some(transform) = command_transform(command) {
                 check_finite(root * transform)?;
             }
@@ -1348,12 +1351,40 @@ impl SceneCompiler {
                 return Err(EngineError::RetainedKeyMissing { key: *key });
             }
             check_geometry(command)?;
+            match command {
+                Command::PushRetained { scale, .. } => {
+                    if bracket_depth == 0 {
+                        bracket_rescales = *scale != 1.0;
+                    }
+                    bracket_depth = bracket_depth.saturating_add(1);
+                }
+                Command::PopRetained => bracket_depth = bracket_depth.saturating_sub(1),
+                Command::BackdropBlur {
+                    rect,
+                    radius,
+                    transform,
+                } if (bracket_depth > 0 && bracket_rescales)
+                    || backdrop_reaches_target(*rect, *radius, root * *transform, size) =>
+                {
+                    backdrops = backdrops.saturating_add(1);
+                }
+                _ => {}
+            }
         }
-        // Counted over the commands the scene records, not over the ones that
-        // end up drawing: the cap is a statement about the display list a
-        // widget tree produced, refused whole before a strip is generated —
-        // whatever cap the app chose, a backdrop dropped later (inside an
-        // isolated layer, off the target) still counts against it.
+        // Counted over the backdrops whose blur region reaches the target, the
+        // ones that cost a surface cut, a region copy and a blur sequence: a
+        // backdrop scrolled or translated clear of the frame (a scroll view's
+        // warm paint margin, say) draws nothing and does not count. The test
+        // is made here, ahead of the walk, from the rectangle's device
+        // transform and the target alone, so it ignores any clip's coverage:
+        // it can count a backdrop the walk later drops, never miss one it
+        // draws. Inside a retained bracket whose outermost presentation scale
+        // is not exactly 1 the walk composes a correction that can pull an
+        // off-target rectangle onto the target, so every backdrop there is
+        // counted without the target test; a bracket at scale 1 corrects
+        // nothing and is tested like any other backdrop. For an ordinary
+        // frame this is the walk's own test. Refused whole before a strip is
+        // generated, whatever cap the app chose.
         let cap = clamp_backdrop_cap(backdrop_cap);
         if backdrops > cap {
             return Err(EngineError::TooManyBackdrops {
@@ -3021,6 +3052,19 @@ fn note_shader_effects_disabled() {
              (logged once per process)"
         );
     });
+}
+
+/// Whether a backdrop blur over `rect` at `device` (the root composed with the
+/// command's own transform) has a blur region on a `size` target — the same
+/// sigma and region tests [`SceneCompiler::record_backdrop`] makes, minus the
+/// clip coverage and the retained correction, so on its own it is a superset
+/// of the backdrops the walk records only outside a rescaling bracket; the
+/// up-front count counts every backdrop inside one. Only these count toward
+/// the per-frame cap.
+fn backdrop_reaches_target(rect: Rect, radius: f64, device: Affine, size: (u16, u16)) -> bool {
+    backdrop_sigma(radius, device)
+        .and_then(|sigma| backdrop_region(device.transform_rect_bbox(rect), sigma, size))
+        .is_some()
 }
 
 /// The transform a command carries, or `None` for one that carries none.

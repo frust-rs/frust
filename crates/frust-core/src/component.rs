@@ -314,6 +314,11 @@ impl<C: Component> Widget for ComponentWidget<C> {
         visitor(&self.child);
     }
 
+    /// A component paints nothing of its own; its built child hit-tests for it.
+    fn hit_test_self(&self) -> bool {
+        false
+    }
+
     /// A component is a sliver exactly when its child is. The sliver face is the
     /// component itself, so layout runs through the child pod and leaves it sized
     /// for this component's paint, hit test and semantics.

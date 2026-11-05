@@ -46,9 +46,10 @@
 //! many surfaces.
 //!
 //! - **Per-frame cap.** The engine allows `MAX_BACKDROPS_PER_FRAME` backdrop
-//!   blurs per frame by default; an app changes it (clamped to
-//!   `BACKDROP_CAP_CEILING`) with `set_max_backdrops_per_frame`. The
-//!   (cap + 1)th backdrop **refuses the whole frame**: the engine's refusal
+//!   blurs per frame by default, counting only those whose blur region reaches
+//!   the frame (a surface scrolled out of view does not count); an app changes
+//!   it (clamped to `BACKDROP_CAP_CEILING`) with `set_max_backdrops_per_frame`.
+//!   The (cap + 1)th backdrop **refuses the whole frame**: the engine's refusal
 //!   contract never degrades a frame silently, so a screen with too many
 //!   glass surfaces shows nothing new rather than a partly blurred picture.
 //! - **Dropped inside some layers.** Inside an opacity layer, a retained body
@@ -58,13 +59,24 @@
 //! - **Sigma clamp.** The engine clamps the blur to its maximum sigma.
 //!
 //! Keep glass surfaces outside fading or animated-opacity ancestors.
+//!
+//! # Transforms
+//!
+//! The scene records the full composed transform, so a scale or translate (a
+//! press-scale animation, a slide) is supported: the blur sigma scales with
+//! the transform's mean singular value (a 0.96 scale gives sigma x0.96), and
+//! translation or rotation leave it unchanged. The surface's coverage is the
+//! true transformed rectangle. A rotation or skew is not refused, but the
+//! backdrop region is the transformed rectangle's device bounding box (grown
+//! by the blur reach), so the lens samples that box rather than the rotated
+//! shape. Only a non-finite transform is refused.
 
 use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
     LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, Widget, any,
 };
 use frust_theme::{
-    Brightness, ColorScheme, GlassMaterial, GlassTier, ShadowSpec, SurfaceRole, Theme,
+    Brightness, ColorScheme, GlassMaterial, GlassTier, ShadowSpec, ShapeScale, SurfaceRole, Theme,
 };
 use kurbo::{BezPath, Point, Rect, RoundedRect, Shape, Size};
 use peniko::{Brush, Color};
@@ -104,7 +116,9 @@ impl<State: 'static> GlassSurfaceView<State> {
     }
 
     /// Corner radius of the clip, fills, shadow and hairline, in logical px.
-    /// Square corners by default.
+    /// Square corners by default. The radius is clamped to a capsule (half
+    /// the shorter side), like `ShapeScale::resolve`, and an infinite radius
+    /// is a capsule. A NaN or negative radius is square.
     pub fn corner_radius(mut self, radius: f64) -> Self {
         self.corner_radius = radius;
         self
@@ -238,6 +252,17 @@ impl GlassSurfaceWidget {
     }
 }
 
+/// The corner radius actually painted: NaN and negative are square, anything
+/// else resolves like `ShapeScale::resolve` (infinite is a capsule, oversized
+/// is clamped to half the shorter side).
+fn resolved_radius(radius: f64, size: Size) -> f64 {
+    if radius.is_nan() || radius < 0.0 {
+        0.0
+    } else {
+        ShapeScale::resolve(radius, size.width, size.height).max(0.0)
+    }
+}
+
 impl Widget for GlassSurfaceWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let size = self.child.layout_child(ctx, bc);
@@ -249,11 +274,7 @@ impl Widget for GlassSurfaceWidget {
         let theme = Theme::from_paint_ctx(ctx);
         let origin = ctx.origin();
         let size = ctx.size();
-        let radius = if self.corner_radius.is_finite() {
-            self.corner_radius.max(0.0)
-        } else {
-            0.0
-        };
+        let radius = resolved_radius(self.corner_radius, size);
         let material = self.resolved_material(theme);
         let hairline_alpha = material.map_or(0.0, |m| m.hairline_alpha);
 
@@ -347,7 +368,7 @@ mod tests {
         Fill(f64, Color),
         Child(Size),
         PopClip,
-        Hairline(Point, f64, Brush),
+        Hairline(Point, f64, Brush, f64),
     }
 
     #[derive(Default)]
@@ -378,8 +399,16 @@ mod tests {
         fn backdrop_blur(&mut self, o: Point, s: Size, r: f64) {
             self.ops.push(Op::Blur(o, s, r));
         }
-        fn stroke_path(&mut self, o: Point, _p: &BezPath, w: f64, b: &Brush) {
-            self.ops.push(Op::Hairline(o, w, b.clone()));
+        fn stroke_path(&mut self, o: Point, p: &BezPath, w: f64, b: &Brush) {
+            // A rounded rectangle's path starts at (x0, y0 + r): the larger
+            // offset of the start point from the bounds is the radius.
+            let bb = p.bounding_box();
+            let start = match p.elements().first() {
+                Some(kurbo::PathEl::MoveTo(pt)) => *pt,
+                _ => bb.origin(),
+            };
+            let r = (start.x - bb.x0).max(start.y - bb.y0);
+            self.ops.push(Op::Hairline(o, w, b.clone(), r));
         }
     }
 
@@ -456,8 +485,68 @@ mod tests {
         assert_eq!(ops[8], Op::PopClip);
         assert_eq!(
             ops[9],
-            Op::Hairline(o, 1.0, Brush::Solid(Color::new([1.0, 1.0, 1.0, 0.3])))
+            Op::Hairline(o, 1.0, Brush::Solid(Color::new([1.0, 1.0, 1.0, 0.3])), 7.5)
         );
+    }
+
+    fn radii(ops: &[Op]) -> (f64, f64, f64, f64) {
+        let shadow = ops.iter().find_map(|op| match op {
+            Op::Shadow(_, _, r, _, _) => Some(*r),
+            _ => None,
+        });
+        let clip = ops.iter().find_map(|op| match op {
+            Op::Clip(_, _, r) => Some(*r),
+            _ => None,
+        });
+        let fill = ops.iter().find_map(|op| match op {
+            Op::Fill(r, _) => Some(*r),
+            _ => None,
+        });
+        let hairline = ops.iter().find_map(|op| match op {
+            Op::Hairline(_, _, _, r) => Some(*r),
+            _ => None,
+        });
+        (
+            shadow.unwrap(),
+            clip.unwrap(),
+            fill.unwrap(),
+            hairline.unwrap(),
+        )
+    }
+
+    #[test]
+    fn an_infinite_radius_is_a_capsule() {
+        let theme = glass_theme();
+        let big = Size::new(80.0, 34.0);
+        let view = glass_surface(leaf(80.0, 34.0)).corner_radius(f64::INFINITY);
+        let ops = paint_with(&view, Some(&theme));
+        assert_eq!(radii(&ops), (17.0, 17.0, 17.0, 16.5));
+        assert_eq!(
+            ops[0],
+            Op::ShadowClip(
+                Point::new(10.0, 20.0),
+                shadow_clip_path(big, 17.0, 2.0, 4.0).unwrap()
+            )
+        );
+    }
+
+    #[test]
+    fn an_oversized_radius_is_clamped_to_the_capsule() {
+        let theme = glass_theme();
+        let view = glass_surface(leaf(80.0, 34.0)).corner_radius(500.0);
+        assert_eq!(
+            radii(&paint_with(&view, Some(&theme))),
+            (17.0, 17.0, 17.0, 16.5)
+        );
+    }
+
+    #[test]
+    fn nan_and_negative_radii_are_square() {
+        let theme = glass_theme();
+        for r in [f64::NAN, -4.0, f64::NEG_INFINITY] {
+            let ops = paint_with(&surface().corner_radius(r), Some(&theme));
+            assert_eq!(radii(&ops), (0.0, 0.0, 0.0, 0.0), "{r}");
+        }
     }
 
     #[test]

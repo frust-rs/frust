@@ -2169,7 +2169,7 @@ impl EngineRenderer {
     /// - [`EngineError::InvalidTransform`] for a non-finite transform and
     ///   [`EngineError::InvalidGeometry`] for non-finite command geometry;
     /// - [`EngineError::TooManyBackdrops`] for a scene recording more backdrop
-    ///   blurs than the per-frame cap in force
+    ///   blurs reaching the target than the per-frame cap in force
     ///   ([`crate::filters::max_backdrops_per_frame`]);
     /// - [`EngineError::RetainedKeyMissing`] for a `DrawRetained` the store
     ///   cannot serve (or any `DrawRetained` with retention off) — the store

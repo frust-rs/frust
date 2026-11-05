@@ -74,12 +74,31 @@ pub enum CrossAxisAlignment {
 
 /// How children are distributed along the main axis.
 ///
-/// v1 ships only [`MainAxisAlignment::Start`] (leading-packed); the
-/// space-between/around/center variants are deferred to a later phase.
+/// Directions are physical (no RTL mirroring): the start of a Row is its left
+/// edge and the start of a Column its top edge.
+///
+/// Every variant other than [`MainAxisAlignment::Start`] distributes the leftover
+/// main-axis space (the bounded extent minus the children and the
+/// [`gap`](FlexView::gap)s) and is a no-op when the main axis is unbounded
+/// (the flex shrink-wraps) or when any child is flexible (the flexible children
+/// consume the free space). The distributed space is added to the gap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MainAxisAlignment {
-    /// Pack children at the main-axis start with no leading gap.
+    /// Pack children at the main-axis start with no leading space.
     Start,
+    /// Pack children together in the middle: leading space is half the leftover.
+    Center,
+    /// Pack children at the main-axis end: leading space is the whole leftover.
+    End,
+    /// Spread the leftover evenly between children, none before the first or
+    /// after the last. A single child behaves as [`MainAxisAlignment::Start`].
+    SpaceBetween,
+    /// Give each child an equal share of space on both sides: `leftover / n`
+    /// between children and half of that at each end.
+    SpaceAround,
+    /// Equal space before the first child, between children and after the
+    /// last: `leftover / (n + 1)` each.
+    SpaceEvenly,
 }
 
 /// One child of a [`FlexView`]: an erased child view, its `flex` factor
@@ -163,6 +182,7 @@ pub struct FlexView<State: 'static> {
     direction: Axis,
     cross: CrossAxisAlignment,
     main: MainAxisAlignment,
+    gap: f64,
     children: Vec<FlexChild<State>>,
 }
 
@@ -174,6 +194,7 @@ impl<State: 'static> FlexView<State> {
             direction,
             cross: CrossAxisAlignment::Start,
             main: MainAxisAlignment::Start,
+            gap: 0.0,
             children,
         }
     }
@@ -249,6 +270,24 @@ impl<State: 'static> FlexView<State> {
     pub fn main_axis(mut self, main: MainAxisAlignment) -> Self {
         self.main = main;
         self
+    }
+
+    /// Set the fixed space between consecutive children along the main axis
+    /// (CSS `gap`). It is never added before the first or after the last child.
+    /// A negative, NaN or infinite value is treated as `0`.
+    pub fn gap(mut self, gap: f64) -> Self {
+        self.gap = sanitize_gap(gap);
+        self
+    }
+}
+
+/// Keep a gap only when it is finite and positive; NaN, negatives and
+/// infinities become `0`, so the summed gap never turns a main size non-finite.
+fn sanitize_gap(gap: f64) -> f64 {
+    if gap.is_finite() && gap > 0.0 {
+        gap
+    } else {
+        0.0
     }
 }
 
@@ -327,6 +366,7 @@ pub struct FlexWidget {
     direction: Axis,
     cross: CrossAxisAlignment,
     main: MainAxisAlignment,
+    gap: f64,
     children: Vec<ChildPod>,
     flex: Vec<u32>,
 }
@@ -366,6 +406,7 @@ impl<State: 'static> View<State> for FlexView<State> {
             direction: self.direction,
             cross: self.cross,
             main: self.main,
+            gap: self.gap,
             children,
             flex,
         }
@@ -378,10 +419,15 @@ impl<State: 'static> View<State> for FlexView<State> {
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         let mut flags = ChangeFlags::NONE;
-        if prev.direction != self.direction || prev.cross != self.cross || prev.main != self.main {
+        if prev.direction != self.direction
+            || prev.cross != self.cross
+            || prev.main != self.main
+            || prev.gap != self.gap
+        {
             element.direction = self.direction;
             element.cross = self.cross;
             element.main = self.main;
+            element.gap = self.gap;
             flags |= ChangeFlags::LAYOUT;
         }
 
@@ -435,7 +481,9 @@ impl Widget for FlexWidget {
 
         // Pass 1: lay out inflexible children under an unbounded main axis,
         // accumulating the space they consume and the total flex weight.
-        let mut allocated_main = 0.0f64;
+        let count = self.children.len();
+        let total_gap = self.gap * count.saturating_sub(1) as f64;
+        let mut allocated_main = total_gap;
         let mut total_flex = 0u32;
         let mut max_child_cross = 0.0f64;
         for (i, pod) in self.children.iter_mut().enumerate() {
@@ -472,10 +520,20 @@ impl Widget for FlexWidget {
 
         // Main extent fills the constraint when flexible children are present (and
         // bounded); otherwise it shrink-wraps to the sum of the children.
-        let main_size = if total_flex > 0 && max_main.is_finite() {
+        let bounded = max_main.is_finite();
+        let main_size = if total_flex > 0 && bounded {
             max_main
         } else {
             allocated_main
+        };
+        // Alignment distributes leftover space only on a bounded main axis with no
+        // flexible children (those consume the free space); it fills the bound.
+        let distribute = self.main != MainAxisAlignment::Start && total_flex == 0 && bounded;
+        let main_size = if distribute { max_main } else { main_size };
+        let leftover = if distribute {
+            (max_main - allocated_main).max(0.0)
+        } else {
+            0.0
         };
         // Cross extent fills under stretch, else shrink-wraps to the widest child.
         let cross_size = if stretch && max_cross.is_finite() {
@@ -484,11 +542,20 @@ impl Widget for FlexWidget {
             max_child_cross
         };
 
-        // Position children sequentially along the main axis (MainAxisAlignment
-        // v1 = Start → no leading gap), cross-aligned per CrossAxisAlignment.
-        let leading = match self.main {
-            MainAxisAlignment::Start => 0.0,
+        // Position children sequentially along the main axis: `leading` before the
+        // first child, `gap + between` after each, cross-aligned per
+        // CrossAxisAlignment.
+        let n = count as f64;
+        let (leading, between) = match self.main {
+            MainAxisAlignment::Start => (0.0, 0.0),
+            MainAxisAlignment::Center => (leftover / 2.0, 0.0),
+            MainAxisAlignment::End => (leftover, 0.0),
+            MainAxisAlignment::SpaceBetween if count > 1 => (0.0, leftover / (n - 1.0)),
+            MainAxisAlignment::SpaceBetween => (0.0, 0.0),
+            MainAxisAlignment::SpaceAround => (leftover / (2.0 * n), leftover / n),
+            MainAxisAlignment::SpaceEvenly => (leftover / (n + 1.0), leftover / (n + 1.0)),
         };
+        let step = self.gap + between;
         let mut main_pos = leading;
         for pod in &mut self.children {
             let child_cross = axis.cross_of(pod.size());
@@ -497,7 +564,7 @@ impl Widget for FlexWidget {
                 CrossAxisAlignment::Center => (cross_size - child_cross) / 2.0,
             };
             pod.set_origin(axis.point(main_pos, cross_pos));
-            main_pos += axis.main_of(pod.size());
+            main_pos += axis.main_of(pod.size()) + step;
         }
 
         bc.constrain(axis.size(main_size, cross_size))
@@ -577,6 +644,11 @@ impl Widget for FlexWidget {
         for pod in &self.children {
             pod.semantics_child(ctx);
         }
+    }
+
+    // Lays out its children and paints nothing of its own.
+    fn hit_test_self(&self) -> bool {
+        false
     }
 
     crate::authoring::visit_children!(children);
@@ -694,6 +766,214 @@ mod tests {
         let mut lctx = LayoutCtx::new();
         w.layout(&mut lctx, &BoxConstraints::loose(Size::new(200.0, 100.0)));
         assert_eq!(w.children[1].origin().y, 10.0);
+    }
+
+    /// Lay `view` out under a loose bound and return child main-axis origins plus size.
+    fn main_origins(view: &FlexView<()>, bound: Size) -> (Vec<f64>, Size) {
+        let mut w = build(view);
+        let size = w.layout(&mut LayoutCtx::new(), &BoxConstraints::loose(bound));
+        let axis = w.direction;
+        let origins = w
+            .children
+            .iter()
+            .map(|c| axis.main_of(Size::new(c.origin().x, c.origin().y)))
+            .collect();
+        (origins, size)
+    }
+
+    fn three(direction: Axis) -> FlexView<()> {
+        FlexView::new(
+            direction,
+            vec![
+                inflexible(leaf(20.0, 10.0)),
+                inflexible(leaf(20.0, 10.0)),
+                inflexible(leaf(20.0, 10.0)),
+            ],
+        )
+    }
+
+    #[test]
+    fn gap_separates_fixed_children_in_a_row() {
+        let view = three(Axis::Horizontal).gap(5.0);
+        let (origins, size) = main_origins(&view, Size::new(300.0, 100.0));
+        assert_eq!(origins, vec![0.0, 25.0, 50.0]);
+        // Shrink-wrap includes the (n-1) gaps and no trailing gap.
+        assert_eq!(size.width, 70.0);
+    }
+
+    #[test]
+    fn gap_separates_fixed_children_in_a_column() {
+        let view = FlexView::new(
+            Axis::Vertical,
+            vec![
+                inflexible(leaf(10.0, 20.0)),
+                inflexible(leaf(10.0, 20.0)),
+                inflexible(leaf(10.0, 20.0)),
+            ],
+        )
+        .gap(4.0);
+        let (origins, size) = main_origins(&view, Size::new(100.0, 300.0));
+        assert_eq!(origins, vec![0.0, 24.0, 48.0]);
+        assert_eq!(size.height, 68.0);
+    }
+
+    #[test]
+    fn gap_reduces_flexible_shares() {
+        // 200 bound, one 50px child, two gaps of 10 -> free = 200 - 50 - 20 = 130.
+        let view: FlexView<()> = FlexView::new(
+            Axis::Horizontal,
+            vec![
+                inflexible(leaf(50.0, 10.0)),
+                flexible(1, leaf(1000.0, 10.0)),
+                flexible(1, leaf(1000.0, 10.0)),
+            ],
+        )
+        .gap(10.0);
+        let mut w = build(&view);
+        let size = w.layout(
+            &mut LayoutCtx::new(),
+            &BoxConstraints::loose(Size::new(200.0, 100.0)),
+        );
+        assert_eq!(w.children[1].size().width, 65.0);
+        assert_eq!(w.children[2].size().width, 65.0);
+        assert_eq!(w.children[1].origin().x, 60.0);
+        assert_eq!(w.children[2].origin().x, 135.0);
+        assert_eq!(size.width, 200.0);
+    }
+
+    #[test]
+    fn invalid_gap_is_zero() {
+        for bad in [-3.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let view = three(Axis::Horizontal).gap(bad);
+            let (origins, _) = main_origins(&view, Size::new(300.0, 100.0));
+            assert_eq!(origins, vec![0.0, 20.0, 40.0]);
+        }
+    }
+
+    #[test]
+    fn infinite_gap_keeps_main_size_finite_for_any_child_count() {
+        for count in [0usize, 1, 3] {
+            let children = (0..count).map(|_| inflexible(leaf(20.0, 10.0))).collect();
+            let view = FlexView::new(Axis::Horizontal, children).gap(f64::INFINITY);
+            let (_, size) = main_origins(&view, Size::new(300.0, 100.0));
+            assert!(size.width.is_finite() && size.height.is_finite());
+            assert_eq!(size.width, 20.0 * count as f64);
+        }
+    }
+
+    #[test]
+    fn main_axis_alignments_distribute_leftover() {
+        // 3 x 20px in a 120px row: leftover 60.
+        let cases = [
+            (MainAxisAlignment::Start, vec![0.0, 20.0, 40.0]),
+            (MainAxisAlignment::Center, vec![30.0, 50.0, 70.0]),
+            (MainAxisAlignment::End, vec![60.0, 80.0, 100.0]),
+            (MainAxisAlignment::SpaceBetween, vec![0.0, 50.0, 100.0]),
+            // leading 60/6 = 10, between 60/3 = 20.
+            (MainAxisAlignment::SpaceAround, vec![10.0, 50.0, 90.0]),
+            // 60/4 = 15 everywhere.
+            (MainAxisAlignment::SpaceEvenly, vec![15.0, 50.0, 85.0]),
+        ];
+        for (alignment, expected) in cases {
+            let view = three(Axis::Horizontal).main_axis(alignment);
+            let (origins, size) = main_origins(&view, Size::new(120.0, 100.0));
+            assert_eq!(origins, expected, "{alignment:?}");
+            let want = if alignment == MainAxisAlignment::Start {
+                60.0
+            } else {
+                120.0
+            };
+            assert_eq!(size.width, want, "{alignment:?}");
+        }
+    }
+
+    #[test]
+    fn alignment_spaces_add_to_gap() {
+        // 3 x 20 + 2 x 5 gap = 70 in 130: leftover 60, SpaceBetween adds 30.
+        let view = three(Axis::Horizontal)
+            .gap(5.0)
+            .main_axis(MainAxisAlignment::SpaceBetween);
+        let (origins, _) = main_origins(&view, Size::new(130.0, 100.0));
+        assert_eq!(origins, vec![0.0, 55.0, 110.0]);
+    }
+
+    #[test]
+    fn column_alignment_uses_the_vertical_axis() {
+        let view = FlexView::new(
+            Axis::Vertical,
+            vec![inflexible(leaf(10.0, 20.0)), inflexible(leaf(10.0, 20.0))],
+        )
+        .main_axis(MainAxisAlignment::End);
+        let (origins, size) = main_origins(&view, Size::new(50.0, 100.0));
+        assert_eq!(origins, vec![60.0, 80.0]);
+        assert_eq!(size.height, 100.0);
+    }
+
+    #[test]
+    fn space_between_with_one_child_acts_as_start() {
+        let view: FlexView<()> =
+            FlexView::new(Axis::Horizontal, vec![inflexible(leaf(20.0, 10.0))])
+                .main_axis(MainAxisAlignment::SpaceBetween);
+        let (origins, size) = main_origins(&view, Size::new(100.0, 100.0));
+        assert_eq!(origins, vec![0.0]);
+        assert_eq!(size.width, 100.0);
+    }
+
+    #[test]
+    fn unbounded_main_axis_ignores_alignment() {
+        for alignment in [
+            MainAxisAlignment::Center,
+            MainAxisAlignment::End,
+            MainAxisAlignment::SpaceBetween,
+            MainAxisAlignment::SpaceAround,
+            MainAxisAlignment::SpaceEvenly,
+        ] {
+            let view = three(Axis::Horizontal).main_axis(alignment);
+            let (origins, size) = main_origins(&view, Size::new(f64::INFINITY, 100.0));
+            assert_eq!(origins, vec![0.0, 20.0, 40.0], "{alignment:?}");
+            assert_eq!(size.width, 60.0, "{alignment:?}");
+        }
+    }
+
+    #[test]
+    fn flexible_children_make_alignment_a_no_op() {
+        let view: FlexView<()> = FlexView::new(
+            Axis::Horizontal,
+            vec![inflexible(leaf(20.0, 10.0)), flexible(1, leaf(5.0, 10.0))],
+        )
+        .main_axis(MainAxisAlignment::Center);
+        let (origins, size) = main_origins(&view, Size::new(100.0, 100.0));
+        assert_eq!(origins, vec![0.0, 20.0]);
+        assert_eq!(size.width, 100.0);
+    }
+
+    #[test]
+    fn rebuild_flags_layout_on_gap_and_alignment_change() {
+        let mut counter = 0u64;
+        let prev = three(Axis::Horizontal);
+        let mut w = prev.build(&mut ctx(&mut counter));
+        let same = three(Axis::Horizontal);
+        assert!(
+            !same
+                .rebuild(&prev, &mut w, &mut ctx(&mut counter))
+                .needs_layout()
+        );
+        let gapped = three(Axis::Horizontal).gap(8.0);
+        assert!(
+            gapped
+                .rebuild(&same, &mut w, &mut ctx(&mut counter))
+                .needs_layout()
+        );
+        assert_eq!(w.gap, 8.0);
+        let centered = three(Axis::Horizontal)
+            .gap(8.0)
+            .main_axis(MainAxisAlignment::Center);
+        assert!(
+            centered
+                .rebuild(&gapped, &mut w, &mut ctx(&mut counter))
+                .needs_layout()
+        );
+        assert_eq!(w.main, MainAxisAlignment::Center);
     }
 
     #[test]

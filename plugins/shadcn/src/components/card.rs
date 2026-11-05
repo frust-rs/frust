@@ -14,10 +14,10 @@
 //! (`Row`/`Column`/`Padding`/`SizedBox`/`flexible`/`inflexible`) — the same
 //! facade-only contract this catalog's charter documents, since those
 //! primitives are `frust::` surface, not a second design-system crate.
-//! [`FlexView`](frust::FlexView) v1 has no `gap` primitive of its own (only
-//! `MainAxisAlignment::Start`, leading-packed — see that type's own docs), so
-//! every gap in this file is an explicit [`SizedBox`](frust::SizedBox)
-//! spacer between children rather than a flex property.
+//! [`FlexView`](frust::FlexView) now has a `gap` property, but this spacer code
+//! predates it, so every gap in this file is still an explicit
+//! [`SizedBox`](frust::SizedBox) spacer between children rather than a flex
+//! property.
 //!
 //! # Inert by design
 //!
