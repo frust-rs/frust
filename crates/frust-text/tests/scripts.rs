@@ -108,10 +108,12 @@ fn char_at(text: &str, at: usize) -> char {
     text[at..].chars().next().expect("offset inside the text")
 }
 
+#[cfg(feature = "complex-scripts")]
 fn is_thai_mark(c: char) -> bool {
     matches!(c, '\u{0E31}' | '\u{0E34}'..='\u{0E3A}' | '\u{0E47}'..='\u{0E4E}')
 }
 
+#[cfg(feature = "complex-scripts")]
 #[test]
 fn thai_unspaced_text_wraps_between_words() {
     let mut cx = context();
@@ -153,6 +155,7 @@ fn thai_unspaced_text_wraps_between_words() {
     assert_eq!(cx.notdef_glyph_count(), 0);
 }
 
+#[cfg(feature = "complex-scripts")]
 #[test]
 fn thai_word_motion_stops_inside_the_run() {
     let mut cx = context();

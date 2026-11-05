@@ -8,6 +8,11 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Added
 
+- `complex-scripts` cargo feature on `frust-text` and `frust-ui`, default on: it carries the
+  dictionary line and word segmentation (about 3 MB per app). An app opts out with
+  `frust-ui = { version = "...", default-features = false }` (or `frust-text` likewise); unspaced
+  Thai/Lao/Khmer/Myanmar text then overflows a line instead of wrapping, and Chinese/Japanese word
+  motion falls back to per-character stops.
 - `glass_surface(child)` (`GlassSurfaceView`, flat from `frust`): a baseline widget that paints one
   tier of the theme's glass scale behind its child (shadow cast outside the surface, rounded clip, backdrop blur and washes,
   child, specular hairline). `.tier(GlassTier)` picks `Control`, `Bar` (default) or `Chrome` from the

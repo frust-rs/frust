@@ -15,10 +15,9 @@ readme = "README.md"
 # `std::time::Instant::now()` panics on wasm32; `web-time` is the drop-in winit 0.30 itself uses (std's `Instant` elsewhere).
 web-time = { workspace = true }
 parlance.workspace = true
-# The font oracle's shaping engine and font-data types (`src/oracle/` names neither). `complex-scripts`
-# adds dictionary word/line breaks for Thai, Lao, Khmer and Myanmar (unspaced text there otherwise
-# has no break opportunity and overflows its line) plus the Chinese/Japanese word dictionary.
-parley_engine = { workspace = true, features = ["std", "complex-scripts"] }
+# The font oracle's shaping engine and font-data types (`src/oracle/` names neither). Dictionary
+# segmentation (Thai/Lao/Khmer/Myanmar breaks, CJ word dictionary) is the opt-out `complex-scripts` feature.
+parley_engine = { workspace = true, features = ["std"] }
 fontique = { workspace = true, features = ["std"] }
 read-fonts.workspace = true
 peniko.workspace = true
@@ -57,6 +56,10 @@ windows-link.workspace = true
 yeslogic-fontconfig-sys = { workspace = true, features = ["dlopen"] }
 
 [features]
+default = ["complex-scripts"]
+# Dictionary word/line breaks for Thai, Lao, Khmer and Myanmar plus the Chinese/Japanese word
+# dictionary (about 3 MB per app). Off: unspaced text in those scripts overflows its line.
+complex-scripts = ["parley_engine/complex-scripts"]
 # Exposes `test_support::LocaleSlotGuard`, the shared lock over the default-locale slot, to
 # downstream tests; enabled from dev-dependencies only.
 test-support = []
