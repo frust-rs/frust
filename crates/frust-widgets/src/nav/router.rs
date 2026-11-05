@@ -104,6 +104,7 @@ use frust_core::{AnyView, View, any};
 use super::navigator::{NavigatorController, NavigatorId, PushOptions, ReplaceOptions};
 use super::path::{Location, PathPattern, RouteParams, encode_segment};
 use super::route::{NavRequest, RouteNavigator};
+use super::transition::TransitionSpec;
 
 /// A page builder for a route: maps the captured [`RouteParams`] to the page's
 /// view. Re-run each time the page rebuilds (via the closure the router hands the
@@ -135,6 +136,8 @@ pub struct Route<State: 'static> {
     builder: RouteBuilder<State>,
     redirect: Option<Redirect>,
     children: Vec<Route<State>>,
+    /// This route's own page transition (see [`Route::transition`]).
+    transition: Option<TransitionSpec>,
     /// Set only by [`shell_route`]: the controller this route's **children**
     /// resolve onto. `None` (every route built with [`Route::new`]) means the
     /// children resolve onto the same controller this route's own page does,
@@ -164,6 +167,7 @@ impl<State: 'static> Route<State> {
             builder: Rc::new(move |params: &RouteParams| any(builder(params))),
             redirect: None,
             children: Vec::new(),
+            transition: None,
             shell: None,
         }
     }
@@ -179,6 +183,22 @@ impl<State: 'static> Route<State> {
     /// whenever this route is part of a matched chain.
     pub fn redirect(mut self, redirect: impl Fn(&Location) -> Option<String> + 'static) -> Self {
         self.redirect = Some(Rc::new(redirect));
+        self
+    }
+
+    /// Give this route's page its own transition. Whenever the router pushes
+    /// or replaces a page for this route (`go`, `push`, `replace`, named
+    /// variants, deep links, and requests queued through a
+    /// [`RouteNavigator`]), the page carries `spec` instead of the navigator's
+    /// default transition. In a nested chain each pushed page uses its own
+    /// route's spec. A route without one keeps the navigator default.
+    ///
+    /// Precedence, highest first: the options given to
+    /// [`push_with`](Router::push_with), this route-level spec, the
+    /// navigator's default. Reduce motion collapses it like any other
+    /// transition.
+    pub fn transition(mut self, spec: TransitionSpec) -> Self {
+        self.transition = Some(spec);
         self
     }
 
@@ -292,6 +312,7 @@ pub fn shell_route<State: 'static, V: View<State>>(
         builder: Rc::new(move |params: &RouteParams| any(builder(params))),
         redirect: None,
         children,
+        transition: None,
         shell: Some(inner.clone()),
     }
 }
@@ -305,6 +326,8 @@ pub struct ResolvedPage<State: 'static> {
     builder: RouteBuilder<State>,
     params: RouteParams,
     location: Location,
+    /// The route's own [`Route::transition`], if it set one.
+    transition: Option<TransitionSpec>,
     /// The [`shell_route`] binding of the route this page came from: the
     /// controller every page *below* it in the chain applies to. `None` for
     /// every ordinary route, which is what keeps a non-shell chain flattening
@@ -328,6 +351,25 @@ impl<State: 'static> ResolvedPage<State> {
     /// path/query split rather than the merged map.
     pub fn location(&self) -> &Location {
         &self.location
+    }
+
+    /// The push options for this page: opaque, stamped with its location, and
+    /// carrying the route's own transition when it set one.
+    fn push_options(&self) -> PushOptions<State> {
+        let options = PushOptions::opaque().route(self.location.clone());
+        match self.transition {
+            Some(spec) => options.transition(spec),
+            None => options,
+        }
+    }
+
+    /// The replace options for this page (see [`push_options`](Self::push_options)).
+    fn replace_options(&self) -> ReplaceOptions {
+        let options = ReplaceOptions::opaque().route(self.location.clone());
+        match self.transition {
+            Some(spec) => options.transition(spec),
+            None => options,
+        }
     }
 
     /// Turn this page into the `Fn() -> AnyView` closure a
@@ -536,6 +578,7 @@ impl<State: 'static> Router<State> {
                     builder: route.builder.clone(),
                     params: merged.clone(),
                     location: loc.clone(),
+                    transition: route.transition,
                     shell: route.shell.clone(),
                 })
                 .collect();
@@ -608,7 +651,7 @@ impl<State: 'static> Router<State> {
     /// A chain crossing a [`shell_route`] boundary is split across the two
     /// controllers instead, under the keep rule — see [`shell_route`]'s table.
     pub fn go(&self, location: &str) {
-        self.apply(self.resolved(location), Verb::Go);
+        self.apply(self.resolved(location), Verb::Go, None);
     }
 
     /// Push the matched leaf page onto the stack (the page below is retained).
@@ -617,7 +660,26 @@ impl<State: 'static> Router<State> {
     /// Across a [`shell_route`] boundary the leaf lands on the shell's inner
     /// controller — see [`shell_route`]'s table.
     pub fn push(&self, location: &str) {
-        self.apply(self.resolved(location), Verb::Push);
+        self.apply(self.resolved(location), Verb::Push, None);
+    }
+
+    /// [`push`](Self::push) with caller-supplied [`PushOptions`] for the
+    /// pushed leaf page: a per-push transition, back policy, result callback,
+    /// and so on. Resolution and redirects are exactly `push`'s.
+    ///
+    /// - The router still stamps the page's location, replacing any
+    ///   `.route(..)` on `options`.
+    /// - Transition precedence, highest first: `options`' transition, the
+    ///   route's [`Route::transition`], the navigator's default.
+    /// - `options` apply to the leaf page only; shell or parent pages pushed
+    ///   by the same request use their own route's spec.
+    /// - A location that resolves to the error page pushes it exactly as
+    ///   `push` does and ignores `options`.
+    /// - This is a `Router` method only: a [`RouteNavigator`] queues plain
+    ///   data requests that cannot carry `PushOptions` (closures), so its
+    ///   pushes get the route-level transition but no per-push options.
+    pub fn push_with(&self, location: &str, options: PushOptions<State>) {
+        self.apply(self.resolved(location), Verb::Push, Some(options));
     }
 
     /// Replace the top page with the matched leaf (the top's state is dropped;
@@ -628,7 +690,7 @@ impl<State: 'static> Router<State> {
     /// Across a [`shell_route`] boundary the replaced top is the shell's inner
     /// one — see [`shell_route`]'s table.
     pub fn replace(&self, location: &str) {
-        self.apply(self.resolved(location), Verb::Replace);
+        self.apply(self.resolved(location), Verb::Replace, None);
     }
 
     /// Pop the top page of the router's **own** controller (a no-op on the root
@@ -648,15 +710,15 @@ impl<State: 'static> Router<State> {
     /// boundary is one segment and takes [`apply_flat`](Self::apply_flat) — the
     /// flatten-onto-one-controller behaviour, unchanged. A chain that *does*
     /// cross one takes [`apply_shell_chain`](Self::apply_shell_chain).
-    fn apply(&self, resolution: Resolution<State>, verb: Verb) {
+    fn apply(&self, resolution: Resolution<State>, verb: Verb, leaf: Option<PushOptions<State>>) {
         match resolution {
             Resolution::Matched { pages, .. } => {
                 let mut segments = self.split_chain(pages);
                 if segments.len() == 1 {
                     let segment = segments.pop().expect("a chain has at least one segment");
-                    Self::apply_flat(&segment.controller, segment.pages, verb);
+                    Self::apply_flat(&segment.controller, segment.pages, verb, leaf);
                 } else {
-                    self.apply_shell_chain(segments, verb);
+                    self.apply_shell_chain(segments, verb, leaf);
                 }
             }
             Resolution::Error { location } => match verb {
@@ -701,7 +763,12 @@ impl<State: 'static> Router<State> {
 
     /// Apply a chain that crosses at least one shell boundary: each segment to
     /// its own controller, under the keep rule (see [`shell_route`]'s table).
-    fn apply_shell_chain(&self, segments: Vec<Segment<State>>, verb: Verb) {
+    fn apply_shell_chain(
+        &self,
+        segments: Vec<Segment<State>>,
+        verb: Verb,
+        leaf: Option<PushOptions<State>>,
+    ) {
         // The inner controller each boundary opens, indexed by boundary — the
         // identity the keep rule compares an already-placed shell page against.
         let shells: Vec<NavigatorId> = segments
@@ -716,11 +783,12 @@ impl<State: 'static> Router<State> {
         // onto, so it resets (see `shell_route`'s "a placement resets the verb
         // below it").
         let mut enclosing_kept = true;
+        let mut leaf = leaf;
 
         for (index, segment) in segments.into_iter().enumerate() {
             let effective = if enclosing_kept { verb } else { Verb::Go };
             if index == last {
-                Self::apply_flat(&segment.controller, segment.pages, effective);
+                Self::apply_flat(&segment.controller, segment.pages, effective, leaf.take());
                 continue;
             }
 
@@ -794,41 +862,35 @@ impl<State: 'static> Router<State> {
         controller: &NavigatorController<State>,
         pages: Vec<ResolvedPage<State>>,
         verb: Verb,
+        leaf_options: Option<PushOptions<State>>,
     ) {
         match verb {
             Verb::Go => {
-                let mut pages = pages.into_iter();
+                let mut pages = pages.into_iter().peekable();
                 if let Some(first) = pages.next() {
-                    let route = first.location().clone();
-                    controller.replace_with_options(
-                        first.into_page_builder(),
-                        ReplaceOptions::opaque().route(route),
-                    );
+                    let options = first.replace_options();
+                    controller.replace_with_options(first.into_page_builder(), options);
                 }
-                for page in pages {
-                    let route = page.location().clone();
-                    controller.push_with_options(
-                        page.into_page_builder(),
-                        PushOptions::opaque().route(route),
-                    );
+                let mut leaf_options = leaf_options;
+                while let Some(page) = pages.next() {
+                    let options = if pages.peek().is_none() {
+                        Self::leaf_push_options(&page, leaf_options.take())
+                    } else {
+                        page.push_options()
+                    };
+                    controller.push_with_options(page.into_page_builder(), options);
                 }
             }
             Verb::Push => {
                 if let Some(leaf) = pages.into_iter().next_back() {
-                    let route = leaf.location().clone();
-                    controller.push_with_options(
-                        leaf.into_page_builder(),
-                        PushOptions::opaque().route(route),
-                    );
+                    let options = Self::leaf_push_options(&leaf, leaf_options);
+                    controller.push_with_options(leaf.into_page_builder(), options);
                 }
             }
             Verb::Replace => {
                 if let Some(leaf) = pages.into_iter().next_back() {
-                    let route = leaf.location().clone();
-                    controller.replace_with_options(
-                        leaf.into_page_builder(),
-                        ReplaceOptions::opaque().route(route),
-                    );
+                    let options = leaf.replace_options();
+                    controller.replace_with_options(leaf.into_page_builder(), options);
                 }
             }
         }
@@ -846,14 +908,30 @@ impl<State: 'static> Router<State> {
         match verb {
             Verb::Push => {
                 for page in pages {
-                    let route = page.location().clone();
-                    controller.push_with_options(
-                        page.into_page_builder(),
-                        PushOptions::opaque().route(route),
-                    );
+                    let options = page.push_options();
+                    controller.push_with_options(page.into_page_builder(), options);
                 }
             }
-            Verb::Go | Verb::Replace => Self::apply_flat(controller, pages, Verb::Go),
+            Verb::Go | Verb::Replace => Self::apply_flat(controller, pages, Verb::Go, None),
+        }
+    }
+
+    /// The options for the pushed leaf: the caller's, when given, with the
+    /// page's location stamped and the route's transition filled in if the
+    /// caller set none; otherwise the page's own.
+    fn leaf_push_options(
+        page: &ResolvedPage<State>,
+        caller: Option<PushOptions<State>>,
+    ) -> PushOptions<State> {
+        match caller {
+            None => page.push_options(),
+            Some(mut options) => {
+                options = options.route(page.location().clone());
+                if options.transition.is_none() {
+                    options.transition = page.transition;
+                }
+                options
+            }
         }
     }
 
@@ -1052,6 +1130,7 @@ mod tests {
 
     use super::super::navigator::{NavigatorView, navigator};
     use super::super::route_state::NavChange;
+    use frust_theme::Theme;
 
     fn params(pairs: &[(&str, &str)]) -> RouteParams {
         pairs
@@ -2111,5 +2190,213 @@ mod tests {
             "replace swapped the top alone, unchanged"
         );
         assert_eq!(controller.depth(), 3);
+    }
+
+    // ================= Per-route and per-push transitions =================
+
+    use super::super::transition::{PageTransition, REDUCE_MOTION_DURATION, Timing, resolve_spec};
+
+    fn slide() -> TransitionSpec {
+        TransitionSpec::duration(PageTransition::IosPush)
+    }
+
+    /// Seed a navigator with one page, build a router over `routes`, run `op`
+    /// against it, rebuild once, and report whether a page transition started.
+    fn transition_started(
+        routes: Vec<Route<()>>,
+        navigator_default: TransitionSpec,
+        theme: Option<Theme>,
+        op: impl FnOnce(&Router<()>),
+    ) -> bool {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let router: Router<()> = Router::with_controller(&controller, routes);
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        if let Some(theme) = theme {
+            root.set_theme(Box::new(theme));
+        }
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized(10.0, 10.0)).transition(navigator_default)
+        };
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+        assert!(
+            !controller.transition().active,
+            "seeding starts no transition"
+        );
+        op(&router);
+        root.rebuild(&mut app, &mut state);
+        controller.transition().active
+    }
+
+    fn plain_routes() -> Vec<Route<()>> {
+        vec![
+            Route::new("/a", |_| sized(10.0, 10.0)),
+            Route::new("/b", |_| sized(20.0, 20.0)),
+        ]
+    }
+
+    #[test]
+    fn route_transition_applies_to_push_and_replace() {
+        let routes = || {
+            vec![
+                Route::new("/a", |_| sized(10.0, 10.0)).transition(slide()),
+                Route::new("/b", |_| sized(20.0, 20.0)),
+            ]
+        };
+        assert!(transition_started(
+            routes(),
+            TransitionSpec::NONE,
+            None,
+            |r| r.push("/a")
+        ));
+        assert!(transition_started(
+            routes(),
+            TransitionSpec::NONE,
+            None,
+            |r| r.replace("/a")
+        ));
+        assert!(!transition_started(
+            routes(),
+            TransitionSpec::NONE,
+            None,
+            |r| r.push("/b")
+        ));
+    }
+
+    #[test]
+    fn route_without_transition_uses_the_navigator_default() {
+        assert!(!transition_started(
+            plain_routes(),
+            TransitionSpec::NONE,
+            None,
+            |r| r.push("/a")
+        ));
+        assert!(transition_started(plain_routes(), slide(), None, |r| r.push("/a")));
+    }
+
+    #[test]
+    fn route_transition_beats_the_navigator_default() {
+        let routes = vec![Route::new("/a", |_| sized(10.0, 10.0)).transition(TransitionSpec::NONE)];
+        assert!(!transition_started(routes, slide(), None, |r| r.push("/a")));
+    }
+
+    #[test]
+    fn push_with_transition_overrides_the_route_transition() {
+        let routes = vec![Route::new("/a", |_| sized(10.0, 10.0)).transition(TransitionSpec::NONE)];
+        assert!(transition_started(
+            routes,
+            TransitionSpec::NONE,
+            None,
+            |r| r.push_with("/a", PushOptions::opaque().transition(slide()))
+        ));
+    }
+
+    #[test]
+    fn push_with_no_transition_falls_back_to_the_route_transition() {
+        let routes = vec![Route::new("/a", |_| sized(10.0, 10.0)).transition(slide())];
+        assert!(transition_started(
+            routes,
+            TransitionSpec::NONE,
+            None,
+            |r| r.push_with("/a", PushOptions::opaque())
+        ));
+        assert!(!transition_started(
+            plain_routes(),
+            TransitionSpec::NONE,
+            None,
+            |r| r.push_with("/a", PushOptions::opaque())
+        ));
+    }
+
+    #[test]
+    fn go_builds_the_chain_with_each_routes_own_transition() {
+        // The parent page is placed by a replace and the child pushed on top,
+        // each with its own route's spec; either one animating starts a transition.
+        let chain = |parent: TransitionSpec, child: TransitionSpec| {
+            vec![
+                Route::new("/p", |_| sized(10.0, 10.0))
+                    .transition(parent)
+                    .child(Route::new("c", |_| sized(20.0, 20.0)).transition(child)),
+            ]
+        };
+        assert!(transition_started(
+            chain(TransitionSpec::NONE, slide()),
+            TransitionSpec::NONE,
+            None,
+            |r| r.go("/p/c")
+        ));
+        assert!(transition_started(
+            chain(slide(), TransitionSpec::NONE),
+            TransitionSpec::NONE,
+            None,
+            |r| r.go("/p/c")
+        ));
+        assert!(!transition_started(
+            chain(TransitionSpec::NONE, TransitionSpec::NONE),
+            TransitionSpec::NONE,
+            None,
+            |r| r.go("/p/c")
+        ));
+    }
+
+    #[test]
+    fn push_with_options_apply_to_the_leaf_only() {
+        let routes = vec![
+            Route::new("/p", |_| sized(10.0, 10.0))
+                .child(Route::new("c", |_| sized(20.0, 20.0)).transition(TransitionSpec::NONE)),
+        ];
+        // The leaf's own route spec is NONE, but the caller's slide wins on it.
+        assert!(transition_started(
+            routes,
+            TransitionSpec::NONE,
+            None,
+            |r| r.push_with("/p/c", PushOptions::opaque().transition(slide()))
+        ));
+    }
+
+    #[test]
+    fn push_with_still_stamps_the_location() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let router: Router<()> = Router::with_controller(&controller, plain_routes());
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized(10.0, 10.0))
+        };
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+        router.push_with(
+            "/b",
+            PushOptions::opaque()
+                .route(Location::parse("/ignored"))
+                .transition(slide()),
+        );
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(
+            controller.route_stack().entries().last(),
+            Some(&Some(Location::parse("/b")))
+        );
+        assert_eq!(controller.route_stack().change(), NavChange::Push);
+    }
+
+    #[test]
+    fn route_transition_reaches_the_op_under_reduce_motion_and_collapses() {
+        let mut reduced = Theme::neutral();
+        reduced.motion.reduce_motion = true;
+        let motion = reduced.motion;
+        let routes = vec![Route::new("/a", |_| sized(10.0, 10.0)).transition(slide())];
+        assert!(transition_started(
+            routes,
+            TransitionSpec::NONE,
+            Some(reduced),
+            |r| r.push("/a")
+        ));
+        let resolved = resolve_spec(slide(), Some(&motion));
+        assert_eq!(resolved.preset, PageTransition::ReducedCrossfade);
+        assert_eq!(
+            resolved.timing,
+            Timing::Duration(REDUCE_MOTION_DURATION, frust_core::Curve::Linear)
+        );
     }
 }
