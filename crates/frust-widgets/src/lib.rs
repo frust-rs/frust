@@ -106,7 +106,10 @@ pub use frust_core::OverlayKeys;
 /// The axis a [`CustomScrollView`] scrolls along, re-exported so its
 /// [`axis`](CustomScrollView::axis) builder needs no direct `frust-core` import.
 pub use frust_core::ScrollAxis;
-pub use gesture::{GestureDetector, GestureDetectorView, GestureDetectorWidget};
+pub use gesture::{
+    DragEndDetails, DragStartDetails, DragUpdateDetails, GestureDetector, GestureDetectorView,
+    GestureDetectorWidget,
+};
 pub use glass_surface::{GlassSurfaceView, GlassSurfaceWidget, glass_surface};
 pub use icon::{
     Icon, IconData, IconElement, IconElementStyle, IconPaint, IconShape, IconSource, IconView,
