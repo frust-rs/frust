@@ -47,9 +47,9 @@
 //!
 //! - **Per-frame cap.** The engine allows `MAX_BACKDROPS_PER_FRAME` backdrop
 //!   blurs per frame by default, counting only those whose blur region reaches
-//!   the frame (a surface scrolled out of view does not count); an app changes it (clamped to
-//!   `BACKDROP_CAP_CEILING`) with `set_max_backdrops_per_frame`. The
-//!   (cap + 1)th backdrop **refuses the whole frame**: the engine's refusal
+//!   the frame (a surface scrolled out of view does not count); an app changes
+//!   it (clamped to `BACKDROP_CAP_CEILING`) with `set_max_backdrops_per_frame`.
+//!   The (cap + 1)th backdrop **refuses the whole frame**: the engine's refusal
 //!   contract never degrades a frame silently, so a screen with too many
 //!   glass surfaces shows nothing new rather than a partly blurred picture.
 //! - **Dropped inside some layers.** Inside an opacity layer, a retained body
