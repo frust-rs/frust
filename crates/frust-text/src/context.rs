@@ -391,8 +391,11 @@ impl TextContext {
     /// with no glyph runs, zero width and one line of the style's height.
     ///
     /// `style.align` positions every line within the layout's width (the
-    /// widest line's when `max_width` is unbounded). A word wider than
-    /// `max_width` overflows its line rather than breaking (parley's default).
+    /// widest line's when `max_width` is unbounded). A run with no break
+    /// opportunity wider than `max_width` (one long word, a URL) overflows its
+    /// line rather than breaking (parley's default). Thai, Lao, Khmer and
+    /// Myanmar text without spaces is not such a run: dictionary segmentation
+    /// supplies its break opportunities, so it wraps between words.
     ///
     /// Shaping goes through the shape cache: the same (text, style) shapes
     /// once, and a width change re-runs only the line layout on the cached
@@ -432,7 +435,8 @@ impl TextContext {
     ///   not that number when the text ends in `\n`.
     /// - **an overrun**: exactly `max_lines` lines came out, but the last
     ///   visible one is itself wider than `max_width` — a run with no break
-    ///   opportunity (one long unspaced word) overflows rather than breaking.
+    ///   opportunity under the dictionaries (one long word, a URL) overflows
+    ///   rather than breaking.
     ///
     /// Neither condition holds → the text already fits (this is also why an
     /// exact-fit line, width `== max_width`, never gets truncated: the

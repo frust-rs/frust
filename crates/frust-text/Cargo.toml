@@ -16,8 +16,10 @@ readme = "README.md"
 web-time = { workspace = true }
 parlance.workspace = true
 # The font oracle's shaping engine and its font-data types (`src/oracle/` names neither: the
-# adapter over the oracle lives outside it). `std` only — `complex-scripts` stays off.
-parley_engine = { workspace = true, features = ["std"] }
+# adapter over the oracle lives outside it). `complex-scripts` turns on dictionary segmentation:
+# word and line breaks for Thai, Lao, Khmer and Myanmar (otherwise unspaced text in those scripts
+# has no break opportunity and overflows its line) and the Chinese/Japanese word dictionary.
+parley_engine = { workspace = true, features = ["std", "complex-scripts"] }
 fontique = { workspace = true, features = ["std"] }
 read-fonts.workspace = true
 peniko.workspace = true
