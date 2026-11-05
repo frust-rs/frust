@@ -1335,6 +1335,128 @@ mod tests {
         }
     }
 
+    /// Lays `text` out at `width` with `spans` (byte ranges tiling it) as its styles.
+    fn layout_spans(
+        cx: &mut TextContext,
+        text: &str,
+        spans: &[(std::ops::Range<usize>, &TextStyle)],
+        width: f32,
+    ) -> TextLayout {
+        use crate::layout::{Paragraph, lay_out};
+        let shaped = Arc::new(cx.shape_cx.shape_spans(&mut cx.oracle, text, spans));
+        let styles: Arc<[TextStyle]> = spans.iter().map(|(_, s)| (*s).clone()).collect();
+        let lines = lay_out(&Paragraph::new(&shaped, &styles, None), Some(width), None);
+        TextLayout::new(
+            Arc::from(text),
+            shaped,
+            styles,
+            Some(width),
+            Arc::new(lines),
+            crate::convert::RunMemo::default(),
+        )
+    }
+
+    fn line_starts(layout: &TextLayout) -> Vec<usize> {
+        (0..layout.line_count())
+            .map(|i| layout.line_info(i).expect("line").range.start)
+            .collect()
+    }
+
+    #[test]
+    fn overflow_wrap_is_decided_by_the_first_span_only() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+        let (mut cx, normal) = noto_cx();
+        let anywhere = normal
+            .clone()
+            .with_overflow_wrap(crate::OverflowWrap::Anywhere);
+        let text = "ab a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0";
+        let width = 100.0;
+
+        let single = layout_spans(&mut cx, text, &[(0..text.len(), &normal)], width);
+        let mixed = layout_spans(
+            &mut cx,
+            text,
+            &[(0..3, &normal), (3..text.len(), &anywhere)],
+            width,
+        );
+        assert_eq!(
+            single.line_count(),
+            2,
+            "the token sits whole on its own line"
+        );
+        assert!(mixed.size().width > f64::from(width), "the token overflows");
+        assert_eq!(line_starts(&mixed), line_starts(&single));
+
+        let flipped = layout_spans(
+            &mut cx,
+            text,
+            &[(0..3, &anywhere), (3..text.len(), &normal)],
+            width,
+        );
+        assert!(
+            flipped.line_count() > single.line_count(),
+            "the first span's Anywhere breaks the token"
+        );
+    }
+
+    /// Byte offsets at which a grapheme cluster starts in `text`, plus its length.
+    fn grapheme_starts(cx: &mut TextContext, text: &str, style: &TextStyle) -> Vec<usize> {
+        let shaped = cx.shape(text, style);
+        let mut starts: Vec<usize> = shaped
+            .chars
+            .iter()
+            .filter(|c| c.grapheme_start)
+            .map(|c| c.byte_start as usize)
+            .collect();
+        starts.push(text.len());
+        starts
+    }
+
+    /// Under `Anywhere` at a width no cluster fits, every line still starts on a grapheme boundary.
+    fn assert_lines_start_on_graphemes(cx: &mut TextContext, text: &str, style: &TextStyle) {
+        let anywhere = style
+            .clone()
+            .with_overflow_wrap(crate::OverflowWrap::Anywhere);
+        let boundaries = grapheme_starts(cx, text, &anywhere);
+        let layout = cx.layout(text, &anywhere, Some(1.0));
+        let starts = line_starts(&layout);
+        assert!(starts.len() > 1, "the narrow width breaks {text:?}");
+        for start in starts {
+            assert!(
+                boundaries.contains(&start),
+                "a line of {text:?} starts inside a grapheme at byte {start}"
+            );
+        }
+    }
+
+    #[test]
+    fn anywhere_never_starts_a_line_inside_a_grapheme_cluster() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+        let (mut cx, latin) = noto_cx();
+        assert_lines_start_on_graphemes(&mut cx, &"e\u{0302}\u{0301}".repeat(4), &latin);
+
+        let families = cx
+            .register_fonts(
+                include_bytes!("../../../testing/fonts/NotoSansThai-Subset.ttf").to_vec(),
+            )
+            .expect("the Thai subset registers");
+        let thai = TextStyle {
+            family: crate::FontFamily::named(families[0].name.clone()),
+            ..style(18.0)
+        };
+        assert_lines_start_on_graphemes(&mut cx, "สวัสดีครับไก่ต้มยำ", &thai);
+
+        // Shaped against whatever emoji face the host has: only the boundary property is asserted.
+        let host = style(18.0);
+        let zwj = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}";
+        assert_lines_start_on_graphemes(&mut cx, &format!("{zwj}{zwj}{zwj}"), &host);
+        assert_lines_start_on_graphemes(
+            &mut cx,
+            "\u{1F1EF}\u{1F1F5}\u{1F1FA}\u{1F1F8}\u{1F1EB}\u{1F1F7}",
+            &host,
+        );
+    }
+
     /// A context holding the bundled Latin subset as an app font, and its family.
     fn noto_cx() -> (TextContext, TextStyle) {
         let mut cx = test_cx();

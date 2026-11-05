@@ -692,12 +692,40 @@ mod tests {
     const GEIST_VARIABLE: &[u8] =
         include_bytes!("../../../../plugins/beui/fonts/geist/Geist-Variable.ttf");
 
-    fn oracle_over(backend: SyntheticBackend) -> Oracle {
+    /// An oracle that also holds the default-locale slot at `None` for as long as it lives, so a
+    /// test that shapes through it never sees a locale another test left behind.
+    struct FixtureOracle {
+        oracle: Oracle,
+        _locale: DefaultLocale,
+    }
+
+    impl std::ops::Deref for FixtureOracle {
+        type Target = Oracle;
+        fn deref(&self) -> &Oracle {
+            &self.oracle
+        }
+    }
+
+    impl std::ops::DerefMut for FixtureOracle {
+        fn deref_mut(&mut self) -> &mut Oracle {
+            &mut self.oracle
+        }
+    }
+
+    fn bare_oracle(backend: SyntheticBackend) -> Oracle {
         Oracle::new(Box::new(backend), RenderCapabilities::default(), None)
     }
 
-    /// An oracle whose only system font is `bytes`, the default for every slot.
-    fn oracle_with(bytes: &[u8]) -> (Oracle, Blob<u8>) {
+    fn oracle_over(backend: SyntheticBackend) -> FixtureOracle {
+        let _locale = DefaultLocale::set(None);
+        FixtureOracle {
+            oracle: bare_oracle(backend),
+            _locale,
+        }
+    }
+
+    /// A backend whose only system font is `bytes`, the default for every slot.
+    fn backend_with(bytes: &[u8]) -> (SyntheticBackend, Blob<u8>) {
         let blob = Blob::from(bytes.to_vec());
         let mut backend = SyntheticBackend::new("shape-tests");
         for slot in [GenericSlot::SystemUi, GenericSlot::SansSerif] {
@@ -705,6 +733,12 @@ mod tests {
         }
         let all: String = (' '..='\u{FFFF}').collect();
         backend.cover(&blob, &all);
+        (backend, blob)
+    }
+
+    /// A fixture oracle over `backend_with(bytes)`.
+    fn oracle_with(bytes: &[u8]) -> (FixtureOracle, Blob<u8>) {
+        let (backend, blob) = backend_with(bytes);
         (oracle_over(backend), blob)
     }
 
@@ -736,7 +770,6 @@ mod tests {
 
     #[test]
     fn a_latin_paragraph_shapes_to_the_expected_glyph_ids() {
-        let _locale = DefaultLocale::set(None);
         let (mut oracle, blob) = oracle_with(NOTO_SANS);
         let mut cx = ShapeContext::default();
         let text = "Hello, Hello Hello";
@@ -769,7 +802,6 @@ mod tests {
 
     #[test]
     fn mixed_latin_and_han_yields_two_runs_with_the_right_faces() {
-        let _locale = DefaultLocale::set(None);
         let latin = Blob::from(NOTO_SANS.to_vec());
         let han = Blob::from(FaceSpec::new("Synthetic Han").chars("中文").build());
         let mut backend = SyntheticBackend::new("hello-chinese");
@@ -801,7 +833,6 @@ mod tests {
 
     #[test]
     fn an_unresolvable_cluster_still_gets_a_face() {
-        let _locale = DefaultLocale::set(None);
         let (mut oracle, blob) = oracle_with(NOTO_SANS);
         let mut cx = ShapeContext::default();
         let text = "He中lo";
@@ -811,7 +842,7 @@ mod tests {
         assert!(shaped.glyphs.iter().any(|g| g.id == 0), "中 is .notdef");
     }
 
-    fn geist_oracle() -> Oracle {
+    fn geist_oracle() -> FixtureOracle {
         let mut oracle = oracle_over(SyntheticBackend::new("geist"));
         oracle
             .registry_mut()
@@ -821,7 +852,6 @@ mod tests {
 
     #[test]
     fn weight_synthesis_reaches_the_coordinates() {
-        let _locale = DefaultLocale::set(None);
         let mut oracle = geist_oracle();
         let mut cx = ShapeContext::default();
         let mut coords = |weight| {
@@ -847,7 +877,6 @@ mod tests {
 
     #[test]
     fn style_variations_change_the_coordinates() {
-        let _locale = DefaultLocale::set(None);
         let mut oracle = geist_oracle();
         let mut cx = ShapeContext::default();
         let base = TextStyle {
@@ -868,7 +897,6 @@ mod tests {
 
     #[test]
     fn letter_spacing_changes_atom_cluster_and_glyph_advances() {
-        let _locale = DefaultLocale::set(None);
         let (mut oracle, _) = oracle_with(NOTO_SANS);
         let mut cx = ShapeContext::default();
         let text = "Hello hello";
@@ -896,7 +924,6 @@ mod tests {
 
     #[test]
     fn repeated_clusters_ask_the_oracle_once_per_shaping_call() {
-        let _locale = DefaultLocale::set(None);
         let (mut oracle, _) = oracle_with(NOTO_SANS);
         let mut cx = ShapeContext::default();
         let _ = cx.shape(&mut oracle, "lll lll", &style(16.0));
@@ -905,7 +932,6 @@ mod tests {
 
     #[test]
     fn a_style_change_mid_text_tiles_and_keeps_both_sizes() {
-        let _locale = DefaultLocale::set(None);
         let (mut oracle, _) = oracle_with(NOTO_SANS);
         let mut cx = ShapeContext::default();
         let text = "Hello hello";
@@ -920,7 +946,6 @@ mod tests {
 
     #[test]
     fn newlines_mark_mandatory_breaks_and_rtl_sets_levels() {
-        let _locale = DefaultLocale::set(None);
         let (mut oracle, _) = oracle_with(NOTO_SANS);
         let mut cx = ShapeContext::default();
         let shaped = cx.shape(&mut oracle, "Hello\nhello", &style(16.0));
@@ -943,7 +968,6 @@ mod tests {
 
     #[test]
     fn an_empty_text_shapes_to_nothing() {
-        let _locale = DefaultLocale::set(None);
         let (mut oracle, _) = oracle_with(NOTO_SANS);
         let mut cx = ShapeContext::default();
         let shaped = cx.shape(&mut oracle, "", &style(16.0));
@@ -965,7 +989,6 @@ mod tests {
 
     #[test]
     fn faux_bold_amount_follows_skia_interpolation() {
-        let _locale = DefaultLocale::set(None);
         assert_eq!(faux_bold_em_fraction(9.0), 1.0 / 24.0);
         assert_eq!(faux_bold_em_fraction(2.0), 1.0 / 24.0);
         assert_eq!(faux_bold_em_fraction(36.0), 1.0 / 32.0);
@@ -976,7 +999,6 @@ mod tests {
 
     #[test]
     fn handle_carries_embolden_for_a_static_face_asked_for_bold() {
-        let _locale = DefaultLocale::set(None);
         let (mut oracle, _) = oracle_with(NOTO_SANS);
         let bold = TextStyle {
             weight: FontWeight::BOLD,
@@ -992,7 +1014,6 @@ mod tests {
 
     #[test]
     fn handle_on_a_variable_face_has_coords_and_no_embolden() {
-        let _locale = DefaultLocale::set(None);
         let mut oracle = geist_oracle();
         let bold = TextStyle {
             family: FontFamily::named("Geist"),
@@ -1006,7 +1027,6 @@ mod tests {
 
     #[test]
     fn handle_skews_an_italic_ask_on_an_upright_face() {
-        let _locale = DefaultLocale::set(None);
         let (mut oracle, _) = oracle_with(NOTO_SANS);
         let italic = TextStyle {
             style: crate::style::FontStyle::Italic,
@@ -1019,7 +1039,6 @@ mod tests {
 
     #[test]
     fn hidden_and_synthesis_flags_pass_through() {
-        let _locale = DefaultLocale::set(None);
         let face = Blob::from(FaceSpec::new("Hidden UI").chars("a").build());
         let mut source = FaceSource::blob(face.clone(), 0);
         source.hidden = true;
@@ -1077,7 +1096,7 @@ mod tests {
 
     /// The languages the runs of `text` were shaped with.
     fn run_languages(text: &str, style: &TextStyle) -> Vec<Option<String>> {
-        let (mut oracle, _blob) = oracle_with(NOTO_SANS);
+        let mut oracle = bare_oracle(backend_with(NOTO_SANS).0);
         let shaped = ShapeContext::default().shape(&mut oracle, text, style);
         shaped.runs.iter().map(|r| r.language.clone()).collect()
     }

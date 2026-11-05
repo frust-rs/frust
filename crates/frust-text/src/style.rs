@@ -343,6 +343,8 @@ impl TextStyle {
     }
 
     /// This style with the given [`OverflowWrap`] behavior.
+    ///
+    /// Paragraph-level: the first style decides; later spans' values are ignored.
     pub fn with_overflow_wrap(mut self, overflow_wrap: OverflowWrap) -> Self {
         self.overflow_wrap = overflow_wrap;
         self
