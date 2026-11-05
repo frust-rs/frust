@@ -332,19 +332,15 @@ impl BannerText {
 }
 
 fn refusal_label_style(color: Color) -> TextStyle {
-    TextStyle {
-        weight: FontWeight::SEMI_BOLD,
-        line_height: LineHeight::FontSizeRelative(REFUSAL_LINE_HEIGHT),
-        ..TextStyle::new(REFUSAL_LABEL_SIZE, color)
-    }
+    TextStyle::new(REFUSAL_LABEL_SIZE, color)
+        .with_weight(FontWeight::SEMI_BOLD)
+        .with_line_height(LineHeight::FontSizeRelative(REFUSAL_LINE_HEIGHT))
 }
 
 fn refusal_description_style(color: Color) -> TextStyle {
-    TextStyle {
-        weight: FontWeight::REGULAR,
-        line_height: LineHeight::FontSizeRelative(REFUSAL_LINE_HEIGHT),
-        ..TextStyle::new(REFUSAL_DESC_SIZE, color)
-    }
+    TextStyle::new(REFUSAL_DESC_SIZE, color)
+        .with_weight(FontWeight::REGULAR)
+        .with_line_height(LineHeight::FontSizeRelative(REFUSAL_LINE_HEIGHT))
 }
 
 /// Explicit builder value > theme > fallback constant

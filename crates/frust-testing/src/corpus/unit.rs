@@ -257,10 +257,8 @@ fn glyph_run() -> CorpusCase {
     fn record(scene: &mut Scene) {
         let mut cx = frust_text::TextContext::new();
         let registered = register_test_fonts(&mut cx);
-        let style = TextStyle {
-            family: FontFamily::stack(registered.iter().map(|f| f.name.clone())),
-            ..TextStyle::new(24.0, BLACK)
-        };
+        let style = TextStyle::new(24.0, BLACK)
+            .with_family(FontFamily::stack(registered.iter().map(|f| f.name.clone())));
         let layout = cx.layout(SAMPLE_TEXT, &style, None);
         let mut builder = SceneBuilder::new(scene);
         // An opaque white backdrop: black-on-transparent text would store its
@@ -730,10 +728,7 @@ fn glyph_mixed_run() -> CorpusCase {
         let mut cx = frust_text::TextContext::new();
         let registered = register_test_fonts(&mut cx);
         let family = FontFamily::stack(registered.iter().map(|f| f.name.clone()));
-        let style = |size: f32| TextStyle {
-            family: family.clone(),
-            ..TextStyle::new(size, BLACK)
-        };
+        let style = |size: f32| TextStyle::new(size, BLACK).with_family(family.clone());
         let mut builder = SceneBuilder::new(scene);
         builder.fill_rect(Rect::new(0.0, 0.0, EDGE, EDGE), Brush::Solid(WHITE));
         // Cached: one size, so the atlas takes the run on its first frame.

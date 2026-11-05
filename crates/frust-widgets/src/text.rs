@@ -615,10 +615,7 @@ mod tests {
 
     #[test]
     fn bulk_style_setter_replaces_whole_style() {
-        let custom = TextStyle {
-            size: 40.0,
-            ..TextStyle::default()
-        };
+        let custom = TextStyle::default().with_size(40.0);
         let view = text("x").style(custom.clone());
         assert_eq!(view.style, custom);
     }
@@ -1239,10 +1236,7 @@ mod tests {
                 .family(tuffy.clone())
                 .themed_family(ThemeTextType::BodyLarge),
             text("Hello")
-                .style(TextStyle {
-                    family: tuffy.clone(),
-                    ..TextStyle::default()
-                })
+                .style(TextStyle::default().with_family(tuffy.clone()))
                 .themed_family(ThemeTextType::BodyLarge),
         ];
         for (i, view) in views.iter().enumerate() {

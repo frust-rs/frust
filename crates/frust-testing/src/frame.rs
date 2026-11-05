@@ -273,10 +273,7 @@ pub fn test_text_context() -> (TextContext, FontFamily) {
 /// corpus-authored text is allowed to take.
 #[must_use]
 pub fn pinned_text_style(family: &FontFamily, size: f32, color: Color) -> TextStyle {
-    TextStyle {
-        family: family.clone(),
-        ..TextStyle::new(size, color)
-    }
+    TextStyle::new(size, color).with_family(family.clone())
 }
 
 /// Rewrites EVERY slot of `theme`'s type scale onto `family`.
@@ -997,10 +994,8 @@ mod tests {
     fn a_scene_shaped_against_a_host_font_fails_the_gate() {
         let mut cx = TextContext::new();
         let registered = register_test_fonts(&mut cx);
-        let style = TextStyle {
-            family: FontFamily::stack(registered.iter().map(|f| f.name.clone())),
-            ..TextStyle::new(24.0, Color::BLACK)
-        };
+        let style = TextStyle::new(24.0, Color::BLACK)
+            .with_family(FontFamily::stack(registered.iter().map(|f| f.name.clone())));
         // Deliberately outside the bundled Latin subset (`H`, `e`, `l`, `o`,
         // `,`, space, `é`, U+0302) — the exact word this corpus used to
         // record before the fix.
