@@ -369,6 +369,11 @@ impl Widget for IndexedStackWidget {
         }
     }
 
+    // Shows one child and paints nothing of its own.
+    fn hit_test_self(&self) -> bool {
+        false
+    }
+
     // Every retained child, selected or not: inspection shows what the tree
     // holds, not what input reaches.
     crate::authoring::visit_children!(children);

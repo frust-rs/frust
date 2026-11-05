@@ -154,6 +154,14 @@ impl<L: Widget, R: Widget> Widget for EitherWidget<L, R> {
         }
     }
 
+    /// The live arm's answer: the enum's pod is the arm's pod.
+    fn hit_test_self(&self) -> bool {
+        match self {
+            Self::Left(w) => w.hit_test_self(),
+            Self::Right(w) => w.hit_test_self(),
+        }
+    }
+
     /// The live arm's traversal children, so a narrowing arm (a navigator, an
     /// `IndexedStack`) stays narrowed through the enum.
     fn visit_focus_children(&self, visitor: &mut dyn FnMut(&ChildPod)) {
@@ -277,6 +285,11 @@ macro_rules! either_of {
             /// The live arm's answer, forwarded as for [`EitherWidget`].
             fn is_focusable(&self) -> bool {
                 match self { $(Self::$V(w) => w.is_focusable(),)+ }
+            }
+
+            /// The live arm's answer, forwarded as for [`EitherWidget`].
+            fn hit_test_self(&self) -> bool {
+                match self { $(Self::$V(w) => w.hit_test_self(),)+ }
             }
 
             /// The live arm's traversal children, forwarded as for [`EitherWidget`].

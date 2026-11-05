@@ -550,6 +550,11 @@ impl<P: TransitionPattern + Clone + 'static> Widget for PatternSwitcherWidget<P>
         self.child.semantics_child(ctx);
     }
 
+    // Stages its children's switch and paints nothing of its own.
+    fn hit_test_self(&self) -> bool {
+        false
+    }
+
     crate::authoring::visit_children!(exiting, child);
 }
 

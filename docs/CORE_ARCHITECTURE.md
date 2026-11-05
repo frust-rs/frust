@@ -176,7 +176,9 @@ the facade/plugin boundary described in the index; CORE itself never depends on 
   A broadcast reaches every child except `Shortcut`, which a container narrows to the children that
   take input (a navigator's Current page, an `IndexedStack`'s selected child) so a hidden declarer
   never answers. A `Key` the focus path leaves unhandled goes on to the declined-key chain (see
-  Keyboard Shortcuts and Traversal).
+  Keyboard Shortcuts and Traversal). Per pointer event, `ChildPod` records the smallest hit-testing
+  pod (`Widget::hit_test_self`; layout wrappers opt out) for `EventCtx::track_pointer_hits`, a
+  pass-scoped side channel.
 - `RenderRoot::rebuild` dispatches a `Housekeeping` broadcast when a thread-local flag
   (`mark_pending_result_flush`/`take_pending_result_flush`) is set — the seam a widget uses to run
   a deferred callback that needs `&mut State` but was queued during the state-free view diff (a

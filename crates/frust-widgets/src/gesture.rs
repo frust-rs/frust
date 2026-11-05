@@ -1111,6 +1111,12 @@ impl Widget for GestureDetectorWidget {
         }
     }
 
+    // Paints nothing of its own: the child is the content, and a press a
+    // handler takes is already `Handled`.
+    fn hit_test_self(&self) -> bool {
+        false
+    }
+
     crate::authoring::visit_children!(child);
 }
 

@@ -334,12 +334,18 @@ impl<State: 'static> PushOptions<State> {
     ///
     /// Input still reaches the page first. A primary press **and** its release
     /// that the page leaves unhandled ([`EventResult::Ignored`] on both) count
-    /// as a barrier tap, provided the press landed outside every content box
-    /// smaller than the navigator and the pointer stayed within the touch slop
-    /// in between. Only full-area boxes (the page root, a full-size `Stack` or
-    /// scrim, a `Center` filling the area) may lie under a barrier press: a
-    /// press on any smaller box, such as a dialog's card or its text, lands on
-    /// content and never dismisses, even though that content handles nothing.
+    /// as a barrier tap, provided the press landed on no content and the
+    /// pointer stayed within the touch slop in between. Content is any widget
+    /// that hit-tests itself: text, images, controls, a `Container` with a
+    /// fill, border or glow, and any custom widget by default. A press on
+    /// content, such as a dialog's card or its text, never dismisses, even
+    /// though that content handles nothing. Pure layout wrappers (`Padding`,
+    /// `SafeArea`, `Align`/`Center`, `SizedBox`, `Row`/`Column`/`Flex`,
+    /// `Stack`, gesture detectors) are transparent at any size, so a press
+    /// beside a wrapped sheet or dialog dismisses. A painted box that fills
+    /// the whole navigator counts as the barrier. A custom wrapper opts out
+    /// of hit-testing by returning `false` from
+    /// [`Widget::hit_test_self`](frust_core::Widget::hit_test_self).
     /// The navigator then routes the tap through this page's
     /// [`BackPolicy`] at the next rebuild, exactly as a back press:
     /// [`Pop`](BackPolicy::Pop) pops it with its transition reversed,

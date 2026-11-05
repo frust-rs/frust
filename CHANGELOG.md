@@ -82,7 +82,10 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 - `PushOptions::barrier(Color)` and `barrier_dismissible(bool)`: a route-owned modal scrim painted
   under the page. Only its alpha animates, following the route's eased progress (instant under
   `TransitionSpec::NONE`); a press and release the page leaves unhandled dismisses through the
-  page's `BackPolicy`, and taps are ignored while a transition is in flight.
+  page's `BackPolicy` unless the press lands on content (layout wrappers such as `Padding`,
+  `SafeArea` and `Align` are transparent), and taps are ignored while a transition is in flight.
+- `Widget::hit_test_self` (provided, default `true`): `false` makes a widget transparent to pointer
+  hits beside its children; layout wrappers, and a `Container` that paints nothing, return `false`.
 - `GestureDetector` drag callbacks: `on_{vertical_drag,horizontal_drag,pan}_{start,update,end,cancel}`
   with the `#[non_exhaustive]`, local-only `DragStartDetails` / `DragUpdateDetails` /
   `DragEndDetails`. Axis recognizers start after 18 px along their axis, pan after 36 px; the

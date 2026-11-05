@@ -152,6 +152,11 @@ impl Widget for PaddingWidget {
         self.child.semantics_child(ctx);
     }
 
+    // Insets its child and paints nothing of its own.
+    fn hit_test_self(&self) -> bool {
+        false
+    }
+
     crate::authoring::visit_children!(child);
 }
 

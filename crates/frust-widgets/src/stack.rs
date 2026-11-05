@@ -152,6 +152,11 @@ impl Widget for StackWidget {
         }
     }
 
+    // Overlays its children and paints nothing of its own.
+    fn hit_test_self(&self) -> bool {
+        false
+    }
+
     crate::authoring::visit_children!(children);
 }
 

@@ -929,6 +929,118 @@ fn a_tap_on_the_panel_over_a_full_area_scrim_does_not_dismiss() {
     );
 }
 
+/// A painted color for the content boxes below.
+const SHEET_FILL: peniko::Color = peniko::Color::new([1.0, 1.0, 1.0, 1.0]);
+
+/// A 100x30 sheet with a fill, aligned to the bottom of a safe area.
+// erasure: keep the fixture takes every page as one erased builder type
+fn safe_area_bottom_sheet_page() -> AnyView<()> {
+    any(crate::safe_area(crate::Align(
+        crate::Alignment::new(0.0, 1.0),
+        crate::colored_box().size(100.0, 30.0).fill(SHEET_FILL),
+    )))
+}
+
+#[test]
+fn a_tap_beside_a_bottom_sheet_inside_a_safe_area_dismisses() {
+    let (controller, mut root, mut app) = barrier_tap_fixture(
+        safe_area_bottom_sheet_page,
+        dismissible(PushOptions::transparent()),
+    );
+    // Top and bottom insets of 10 leave the safe area's child 100x80, so the
+    // sheet sits at y 60..90 and the wrappers above it are smaller than the
+    // navigator.
+    root.set_insets(frust_core::WindowInsets::new(
+        frust_core::WindowEdgeInsets::new(0.0, 10.0, 0.0, 10.0),
+        frust_core::WindowEdgeInsets::ZERO,
+    ));
+    root.layout(Size::new(100.0, 100.0));
+    tap_at(&mut root, &mut app, 50.0, 75.0);
+    assert_eq!(controller.depth(), 2, "a tap on the sheet does not dismiss");
+    tap_at(&mut root, &mut app, 50.0, 30.0);
+    assert_eq!(
+        controller.depth(),
+        1,
+        "a tap on the scrim above the sheet dismisses"
+    );
+}
+
+/// A 20x20 card with a fill, centered inside a 24-point padding.
+// erasure: keep the fixture takes every page as one erased builder type
+fn padded_card_page() -> AnyView<()> {
+    any(crate::Padding(
+        crate::EdgeInsets::all(24.0),
+        crate::Align(
+            crate::Alignment::CENTER,
+            crate::colored_box().size(20.0, 20.0).fill(SHEET_FILL),
+        ),
+    ))
+}
+
+#[test]
+fn a_tap_inside_the_padding_but_off_a_centered_card_dismisses() {
+    let (controller, mut root, mut app) =
+        barrier_tap_fixture(padded_card_page, dismissible(PushOptions::transparent()));
+    tap_at(&mut root, &mut app, 50.0, 50.0);
+    assert_eq!(controller.depth(), 2, "a tap on the card does not dismiss");
+    tap_at(&mut root, &mut app, 30.0, 30.0);
+    assert_eq!(
+        controller.depth(),
+        1,
+        "a tap in the padded area off the card dismisses"
+    );
+}
+
+/// An undecorated 80x80 container centered on the page, holding a 60x20
+/// sheet with a fill at its center.
+// erasure: keep the fixture takes every page as one erased builder type
+fn undecorated_container_page() -> AnyView<()> {
+    any(crate::Align(
+        crate::Alignment::CENTER,
+        crate::container(crate::colored_box().size(60.0, 20.0).fill(SHEET_FILL))
+            .size_centered(80.0, 80.0),
+    ))
+}
+
+#[test]
+fn a_tap_inside_an_undecorated_container_but_off_its_sheet_dismisses() {
+    let (controller, mut root, mut app) = barrier_tap_fixture(
+        undecorated_container_page,
+        dismissible(PushOptions::transparent()),
+    );
+    tap_at(&mut root, &mut app, 50.0, 50.0);
+    assert_eq!(controller.depth(), 2, "a tap on the sheet does not dismiss");
+    tap_at(&mut root, &mut app, 50.0, 20.0);
+    assert_eq!(
+        controller.depth(),
+        1,
+        "the container paints nothing, so a tap beside the sheet dismisses"
+    );
+}
+
+/// A painted page root inset by one point inside the navigator.
+// erasure: keep the fixture takes every page as one erased builder type
+fn near_full_painted_page() -> AnyView<()> {
+    any(crate::Padding(
+        crate::EdgeInsets::all(1.0),
+        crate::colored_box().expand().fill(SHEET_FILL),
+    ))
+}
+
+#[test]
+fn a_tap_on_a_near_full_painted_page_does_not_dismiss() {
+    let (controller, mut root, mut app) = barrier_tap_fixture(
+        near_full_painted_page,
+        dismissible(PushOptions::transparent()),
+    );
+    tap_at(&mut root, &mut app, 50.0, 50.0);
+    assert_eq!(
+        controller.depth(),
+        2,
+        "painted content smaller than the navigator is content at any size"
+    );
+}
+
 #[test]
 fn a_cancel_after_a_barrier_press_releases_the_capture_without_dismissing() {
     let (controller, mut root, mut app) =
