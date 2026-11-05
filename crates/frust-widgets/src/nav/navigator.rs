@@ -348,7 +348,8 @@ impl<State: 'static> crate::authoring::VisitPods for ActiveTransition<State> {
 ///
 /// A page pushed with [`PushOptions::barrier`] gets a route-owned barrier fill
 /// painted under it; with [`PushOptions::barrier_dismissible`] a primary tap
-/// the top page leaves unhandled dismisses it through its [`BackPolicy`].
+/// the top page leaves unhandled, landing outside its smaller-than-the-area
+/// content, dismisses it through its [`BackPolicy`].
 pub struct NavigatorWidget<State: 'static> {
     pub(super) pages: Vec<PageEntry<State>>,
     /// Pop-result callbacks awaiting `&mut State` — flushed at the start of the
@@ -445,6 +446,21 @@ pub struct NavigatorWidget<State: 'static> {
 /// The rest threshold [`TransitionDriver::Settle`] applies to position and
 /// velocity.
 const SETTLE_REST_EPSILON: f64 = 1e-3;
+
+/// The relative shortfall from the navigator's area a pod may have and still
+/// count as covering it for a barrier press: a full-size wrapper (the page
+/// root, a `Center`, a full-area `Stack` or scrim) reports exactly the
+/// navigator's area up to float rounding, while any real content box falls
+/// short by far more than this.
+const BARRIER_FULL_AREA_EPSILON: f64 = 1e-6;
+
+/// Whether a primary press whose smallest receiving pod had `smallest_hit`
+/// area (see [`EventCtx::track_pointer_hits`]) landed on the barrier rather
+/// than on page content: no pod received it, or every one that did covers the
+/// navigator's `area`.
+fn lands_on_barrier(smallest_hit: Option<f64>, area: f64) -> bool {
+    smallest_hit.is_none_or(|hit| hit >= area * (1.0 - BARRIER_FULL_AREA_EPSILON))
+}
 
 /// The settle spring that honours a resolved duration `timing`: the softest
 /// critically damped spring at rest (within [`SETTLE_REST_EPSILON`]) from full
@@ -1005,7 +1021,9 @@ impl<State: 'static> NavigatorWidget<State> {
     /// # Barrier taps
     ///
     /// The top page always sees a pointer event first. When it leaves a
-    /// primary `Down` unhandled and it has a dismissible
+    /// primary `Down` unhandled, the press landed outside every pod smaller
+    /// than the navigator (only full-area wrappers received it, see
+    /// [`lands_on_barrier`]), and the page has a dismissible
     /// [`barrier`](PushOptions::barrier), the navigator claims the press
     /// (capturing the pointer so the release comes back here) and records a
     /// [`BarrierPress`]. A release the page also leaves unhandled, with the
@@ -1058,16 +1076,22 @@ impl<State: 'static> NavigatorWidget<State> {
                 // ambient — this navigator's own host, if any — so a third
                 // nesting level defers too.
                 let claim = Rc::new(Cell::new(false));
-                let routed = with_swipe_claim(&claim, || self.route_top(ctx, event));
+                let (routed, smallest_hit) = ctx.track_pointer_hits(|ctx| {
+                    with_swipe_claim(&claim, || self.route_top(ctx, event))
+                });
                 self.edge.inner_claimed = claim.get();
                 if let Some(host) = ambient_swipe_claim() {
                     host.set(self.edge.inner_claimed || self.edge.armed);
                 }
                 // Barrier tap: the page left a primary press unhandled over its
-                // dismissible barrier. Claim it so the release returns here.
+                // dismissible barrier. Claim it so the release returns here. A
+                // press any smaller-than-the-navigator pod received landed on
+                // the page's content (a card, its text), however inert that
+                // content is, so it is not a barrier press.
                 self.barrier_press = None;
                 if routed == EventResult::Ignored
                     && crate::authoring::presses(p)
+                    && lands_on_barrier(smallest_hit, ctx.size().area())
                     && let Some(top) = self.pages.last()
                     && top.barrier.is_some()
                     && top.barrier_dismissible

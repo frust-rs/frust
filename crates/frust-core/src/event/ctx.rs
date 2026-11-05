@@ -2,6 +2,7 @@
 //! [`EventOutcome`] a dispatch reports.
 
 use std::any::Any;
+use std::cell::Cell;
 
 use kurbo::{Point, Size};
 
@@ -13,6 +14,43 @@ use super::key::EditCommand;
 use super::pass::{CLIPBOARD_WRITE, CURSOR_REQUEST, EDIT_COMMAND_QUEUE, PASTE_REQUEST};
 use super::pointer::{CursorIcon, PointerId};
 use crate::overlay::OverlayKey;
+
+thread_local! {
+    /// The smallest area of any pod a pointer event landed inside during the open
+    /// [`EventCtx::track_pointer_hits`] scope (`INFINITY` until one does); `None` while no scope
+    /// is open, so a pass nobody tracks records nothing. A pass-scoped slot rather than a context
+    /// field, so it crosses a component boundary's inner context with no threading.
+    static POINTER_HIT_AREA: Cell<Option<f64>> = const { Cell::new(None) };
+}
+
+/// Restores the enclosing [`EventCtx::track_pointer_hits`] scope on drop, folding the inner
+/// scope's smallest hit into it, so an unwinding handler cannot leave a scope open.
+struct PointerHitScope {
+    outer: Option<f64>,
+}
+
+impl PointerHitScope {
+    fn open() -> Self {
+        let outer = POINTER_HIT_AREA.with(|slot| slot.replace(Some(f64::INFINITY)));
+        Self { outer }
+    }
+
+    /// The smallest area recorded since [`PointerHitScope::open`], if any.
+    fn smallest(&self) -> Option<f64> {
+        POINTER_HIT_AREA
+            .with(Cell::get)
+            .filter(|area| area.is_finite())
+    }
+}
+
+impl Drop for PointerHitScope {
+    fn drop(&mut self) {
+        POINTER_HIT_AREA.with(|slot| {
+            let inner = slot.get().unwrap_or(f64::INFINITY);
+            slot.set(self.outer.map(|outer| outer.min(inner)));
+        });
+    }
+}
 
 /// What a widget did with an event: `Handled` stops the container offering it to further
 /// siblings and marks the frame dirty; `Ignored` lets routing continue.
@@ -363,6 +401,29 @@ impl<'a> EventCtx<'a> {
     /// end. Wrapping is harmless; stamps are only compared for equality.
     pub(crate) fn hover_claim_epoch(&self) -> u64 {
         self.hover_epoch.wrapping_add(1)
+    }
+
+    /// Run `f` and report the smallest area of any pod a pointer event landed inside while it ran:
+    /// a pod counts when its own bounds contain the event's position, whether or not its widget
+    /// handled the event. `None` when no pod did. A container uses it to tell a press on a
+    /// child's content (a small pod) from one on a full-size wrapper; scopes nest, an inner
+    /// scope's hits also counting for the enclosing one.
+    pub fn track_pointer_hits<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> (R, Option<f64>) {
+        let scope = PointerHitScope::open();
+        let result = f(self);
+        let smallest = scope.smallest();
+        drop(scope);
+        (result, smallest)
+    }
+
+    /// Record that a pointer event landed inside a pod of `area`; a no-op outside a
+    /// [`EventCtx::track_pointer_hits`] scope. Called by `ChildPod`'s dispatch.
+    pub(crate) fn note_pointer_hit(&mut self, area: f64) {
+        POINTER_HIT_AREA.with(|slot| {
+            if let Some(smallest) = slot.get() {
+                slot.set(Some(smallest.min(area)));
+            }
+        });
     }
 
     /// The widget's origin in its **parent's** space, not window space (unlike `PaintCtx::origin`).

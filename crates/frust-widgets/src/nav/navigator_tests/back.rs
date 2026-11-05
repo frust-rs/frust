@@ -737,8 +737,18 @@ fn tap_barrier(
     root: &mut RenderRoot<(), NavigatorView<()>>,
     app: &mut impl FnMut(&mut ()) -> NavigatorView<()>,
 ) {
-    root.event(&mut (), &down(50.0, 80.0));
-    root.event(&mut (), &up(50.0, 80.0));
+    tap_at(root, app, 50.0, 80.0);
+}
+
+/// Press and release at `(x, y)`, then rebuild.
+fn tap_at(
+    root: &mut RenderRoot<(), NavigatorView<()>>,
+    app: &mut impl FnMut(&mut ()) -> NavigatorView<()>,
+    x: f64,
+    y: f64,
+) {
+    root.event(&mut (), &down(x, y));
+    root.event(&mut (), &up(x, y));
     root.rebuild(app, &mut ());
     root.layout(Size::new(100.0, 100.0));
 }
@@ -865,4 +875,69 @@ fn a_barrier_tap_is_dropped_when_an_op_covers_the_page_first() {
         3,
         "the tap no longer names the top page"
     );
+}
+
+#[test]
+fn a_tap_on_an_inert_sheets_body_does_not_dismiss() {
+    let (controller, mut root, mut app) =
+        barrier_tap_fixture(ignoring_sheet, dismissible(PushOptions::transparent()));
+    tap_at(&mut root, &mut app, 50.0, 20.0);
+    assert_eq!(
+        controller.depth(),
+        2,
+        "the press landed on the sheet's own box, which ignores it"
+    );
+    // The same page still dismisses from outside the sheet.
+    tap_barrier(&mut root, &mut app);
+    assert_eq!(controller.depth(), 1, "a tap below the sheet still pops it");
+}
+
+/// A full-area page: a full-size inert scrim under a 60x30 inert panel at
+/// the top-left corner.
+// erasure: keep the fixture takes every page as one erased builder type
+fn scrim_and_panel_page() -> AnyView<()> {
+    any(crate::stack()
+        .child(sized_page(1e4, 1e4))
+        .child(sized_page(60.0, 30.0)))
+}
+
+#[test]
+fn a_tap_on_a_full_area_scrim_dismisses() {
+    let (controller, mut root, mut app) = barrier_tap_fixture(
+        scrim_and_panel_page,
+        dismissible(PushOptions::transparent()),
+    );
+    tap_at(&mut root, &mut app, 50.0, 80.0);
+    assert_eq!(
+        controller.depth(),
+        1,
+        "only full-area boxes received the press, so it is a barrier tap"
+    );
+}
+
+#[test]
+fn a_tap_on_the_panel_over_a_full_area_scrim_does_not_dismiss() {
+    let (controller, mut root, mut app) = barrier_tap_fixture(
+        scrim_and_panel_page,
+        dismissible(PushOptions::transparent()),
+    );
+    tap_at(&mut root, &mut app, 30.0, 15.0);
+    assert_eq!(
+        controller.depth(),
+        2,
+        "the panel is smaller than the navigator, so the press hit content"
+    );
+}
+
+#[test]
+fn a_cancel_after_a_barrier_press_releases_the_capture_without_dismissing() {
+    let (controller, mut root, mut app) =
+        barrier_tap_fixture(ignoring_sheet, dismissible(PushOptions::transparent()));
+    root.event(&mut (), &down(50.0, 80.0));
+    assert!(root.is_pointer_captured(), "the barrier press captured");
+    root.event(&mut (), &cancel_ev(50.0, 80.0));
+    assert!(!root.is_pointer_captured(), "the cancel released it");
+    root.event(&mut (), &up(50.0, 80.0));
+    root.rebuild(&mut app, &mut ());
+    assert_eq!(controller.depth(), 2, "a cancelled press never dismisses");
 }

@@ -334,8 +334,13 @@ impl<State: 'static> PushOptions<State> {
     ///
     /// Input still reaches the page first. A primary press **and** its release
     /// that the page leaves unhandled ([`EventResult::Ignored`] on both) count
-    /// as a barrier tap, provided the pointer stayed within the touch slop in
-    /// between; the navigator then routes the tap through this page's
+    /// as a barrier tap, provided the press landed outside every content box
+    /// smaller than the navigator and the pointer stayed within the touch slop
+    /// in between. Only full-area boxes (the page root, a full-size `Stack` or
+    /// scrim, a `Center` filling the area) may lie under a barrier press: a
+    /// press on any smaller box, such as a dialog's card or its text, lands on
+    /// content and never dismisses, even though that content handles nothing.
+    /// The navigator then routes the tap through this page's
     /// [`BackPolicy`] at the next rebuild, exactly as a back press:
     /// [`Pop`](BackPolicy::Pop) pops it with its transition reversed,
     /// [`DismissAnimated`](BackPolicy::DismissAnimated) bumps its
